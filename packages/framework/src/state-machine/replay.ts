@@ -150,12 +150,20 @@ export const replayEventSlice = <S, E, C>(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-function isRecordedEvent(v: unknown): v is RecordedEvent<unknown> {
-  // Envelope discrimination by shape: `RecordedEvent` is exactly
-  // `{ recordedAtMs, event, synthetic? }`. A raw event payload carrying the
-  // same keys cannot be distinguished structurally — the typed overloads
-  // keep envelope vs. raw-event callers apart at compile time; this runtime
-  // check only needs to agree with the envelope the readers construct.
+/**
+ * ONE encoding of RecordedEvent envelope discrimination, owned beside the
+ * `RecordedEvent` type it recognizes and shared by every reader seam — the
+ * file-backed replay fold (this module) and the BullMQ stream reader
+ * (queue-bullmq/event-log.ts) must agree on what "is an envelope", or the
+ * two encodings drift (round-22 atl-2).
+ *
+ * Envelope discrimination by shape: `RecordedEvent` is exactly
+ * `{ recordedAtMs, event, synthetic? }`. A raw event payload carrying the
+ * same keys cannot be distinguished structurally — the typed overloads
+ * keep envelope vs. raw-event callers apart at compile time; this runtime
+ * check only needs to agree with the envelope the readers construct.
+ */
+export function isRecordedEvent(v: unknown): v is RecordedEvent<unknown> {
   return (
     typeof v === "object" &&
     v !== null &&

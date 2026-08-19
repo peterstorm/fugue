@@ -527,8 +527,11 @@ describe("FoundryRunSummaryObserver — throwing sink is swallowed AND logged", 
 // ---------------------------------------------------------------------------
 // Round-21 atl-2 — the observer bounds its OWN buffer (TTL orphan sweep,
 // BufferedObserver parity): a run that never emits `run-end` must not leak.
+// Round-22 cr-1 — eviction is INACTIVITY-based: a run that is still emitting
+// events is alive and must never be dropped mid-run (SC-008); only buffers
+// idle past the TTL are evicted.
 // ---------------------------------------------------------------------------
-describe("FoundryRunSummaryObserver — orphan-buffer eviction (round-21 atl-2)", () => {
+describe("FoundryRunSummaryObserver — orphan-buffer eviction (round-21 atl-2 / round-22 cr-1)", () => {
   test("a run whose run-end never arrives is evicted after the TTL", () => {
     const { warns } = recordingFrameworkLogger();
     const { sink, events } = recordingSink();
@@ -543,7 +546,8 @@ describe("FoundryRunSummaryObserver — orphan-buffer eviction (round-21 atl-2)"
     obs.observe(nodeSkippedCheckpoint("rOrphan", "d1", "n2"));
     expect(obs.evicted).toBe(0);
 
-    // Advance past the TTL and sweep: the orphaned buffer is dropped and
+    // Advance past the TTL (inactivity-based: last activity at t=1_000,
+    // cutoff at t=1_500) and sweep: the orphaned buffer is dropped and
     // counted — the class is memory-safe standalone, not only under the
     // production wrapper.
     t = 1_600;
@@ -556,6 +560,67 @@ describe("FoundryRunSummaryObserver — orphan-buffer eviction (round-21 atl-2)"
     obs.observe(runEnd("rOrphan", "d1", "ok", 10));
     const summaries = events.filter((e) => e.name === FOUNDRY_EVENT_RUN_SUMMARY);
     expect(summaries).toHaveLength(1);
+  });
+
+  test("an ACTIVE run spanning the TTL is never evicted mid-run (round-22 cr-1)", () => {
+    const { sink, events } = recordingSink();
+    let t = 0;
+    const obs = new FoundryRunSummaryObserver(sink, {
+      ttlMs: 500,
+      sweepIntervalMs: 0,
+      now: () => t,
+    });
+
+    // Events keep arriving, far past the TTL (a long-running DAG /
+    // awaiting-human run): each event refreshes lastActivityAt, so every
+    // sweep sees the run alive.
+    obs.observe(nodeStart("rActive", "d1", "n1"));     // lastActivityAt = 0 (opened)
+    t = 400;
+    obs.observe(nodeSkippedCheckpoint("rActive", "d1", "n2")); // lastActivityAt = 400
+    t = 800;
+    obs.evictStale(); // cutoff 300 — 400 ≥ 300: alive (activity refresh won)
+    expect(obs.evicted).toBe(0);
+    obs.observe(nodeSkippedCheckpoint("rActive", "d1", "n3")); // lastActivityAt = 800
+    t = 1_200;
+    obs.evictStale(); // cutoff 700 — 800 ≥ 700: still alive
+    expect(obs.evicted).toBe(0);
+
+    // The run-end finally arrives: the full summary is emitted — the buffer
+    // was NEVER dropped, so nodeCount reflects the real run.
+    t = 1_300;
+    obs.observe(runEnd("rActive", "d1", "ok", 10));
+    const summaries = events.filter((e) => e.name === FOUNDRY_EVENT_RUN_SUMMARY);
+    expect(summaries).toHaveLength(1);
+    const summary = summaries[0] as { measurements?: { nodeCount?: number } };
+    expect(summary.measurements?.nodeCount).toBe(3);
+  });
+
+  test("an already-open buffer absorbs events even when the clock misbehaves (round-22 cr-2)", () => {
+    const { sink, events } = recordingSink();
+    let t = 1_000;
+    let broken = false;
+    const obs = new FoundryRunSummaryObserver(sink, {
+      ttlMs: 500,
+      sweepIntervalMs: 0,
+      now: () => {
+        if (broken) throw new Error("clock boom");
+        return t;
+      },
+    });
+    obs.observe(nodeStart("rHostile", "d1", "n1")); // opens the buffer
+    // The clock breaks for subsequent events of the SAME run: the open buffer
+    // must still absorb them (no stamp needed) — events are only dropped when
+    // a NEW buffer would have to be opened unstampable.
+    broken = true;
+    obs.observe(nodeSkippedCheckpoint("rHostile", "d1", "n2"));
+    obs.observe(nodeSkippedCheckpoint("rHostile", "d1", "n3"));
+    expect(obs.droppedEvents).toBe(0);
+    broken = false;
+    obs.observe(runEnd("rHostile", "d1", "ok", 10));
+    const summaries = events.filter((e) => e.name === FOUNDRY_EVENT_RUN_SUMMARY);
+    expect(summaries).toHaveLength(1);
+    const summary = summaries[0] as { measurements?: { nodeCount?: number } };
+    expect(summary.measurements?.nodeCount).toBe(3);
   });
 
   test("a run that emits run-end on time is never touched by the sweep", () => {

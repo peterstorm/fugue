@@ -7,7 +7,7 @@
  */
 export type { WitnessKind, ResourceName, Witness, WitnessValue } from "./witness.js";
 export { resourceName, __brandResourceName, witnessValue, witness, stampWitness, __brandWitness, isWitnessKind } from "./witness.js";
-import type { ResourceName, Witness } from "./witness.js";
+import type { ResourceName, Witness, WitnessKind } from "./witness.js";
 // ---------------------------------------------------------------------------
 // FreshnessIndex port + supporting types
 //
@@ -84,7 +84,11 @@ export type { WitnessCapturedEvent, WriteAttemptedEvent };
 export const freshnessMemberKey = (
   runId: RunId,
   nodeId: NodeId,
-  witnessKind: string,
+  // The CLOSED `WitnessKind` union, not `string`: a misspelled kind would
+  // otherwise compile into member bytes that can never match a real member,
+  // silently skewing the equal-score winner comparison (ONE encoding of the
+  // tie-break grammar — round-22 tda-2).
+  witnessKind: WitnessKind,
   witnessValue: string,
 ): string => JSON.stringify([runId, nodeId, witnessKind, witnessValue]);
 

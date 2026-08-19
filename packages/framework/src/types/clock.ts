@@ -58,7 +58,8 @@ export const fixedClock = (at: Date): ClockCapability => {
 
 /**
  * ONE encoding of the ms→Date clock domain's representability check
- * (deepening round, simp-5): a raw millisecond timestamp is representable
+ * (the shared guard for every ms→Date clock site): a raw millisecond
+ * timestamp is representable
  * when it is a `number` that is finite AND `new Date` accepts — the
  * ±100,000-year Time Value range. A finite number OUTSIDE that range
  * (e.g. `1e300`) yields an invalid `Date`, so `toISOString()` throws and

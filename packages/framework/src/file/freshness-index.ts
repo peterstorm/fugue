@@ -527,7 +527,7 @@ const createFileFreshnessIndexUnchecked = (
 
         return await withFileLock(lockPath, () => {
           const clocked = readClock("freshness:recordWrite", resourceDigest, "stamping the write");
-          if (!clocked.ok) return clocked;
+          if (!clocked.ok) throw clocked.error;
           const nowMs = clocked.value;
 
           let current: StoredFreshnessEntry | null = null;
@@ -538,22 +538,31 @@ const createFileFreshnessIndexUnchecked = (
             if (!parsed.ok) {
               // Deterministic fail-closed (ADR-0079): the corrupted bytes
               // reproduce the same rejection on every retry — retrying can
-              // neither clear them nor make the write safe.
-              return err(
-                cacheFailure(
-                  "freshness:recordWrite",
-                  resourceDigest,
-                  `stored freshness record is corrupt ${corruptRecordContext(directory, recordPath, resourceDigest, parsed.error)}`,
-                  undefined,
-                  "permanent",
-                ),
+              // neither clear them nor make the write safe. Thrown, not
+              // returned: the lock body signals failure by throwing so
+              // `withFileLock`'s release-failure arbitration preserves this
+              // PERMANENT verdict as primary (journal appendEvent parity).
+              throw cacheFailure(
+                "freshness:recordWrite",
+                resourceDigest,
+                `stored freshness record is corrupt ${corruptRecordContext(directory, recordPath, resourceDigest, parsed.error)}`,
+                undefined,
+                "permanent",
               );
             }
             current = parsed.value;
           } catch (error) {
+            // A TYPED rejection thrown above (the deterministic corrupt-record
+            // verdict) rides through unchanged — only raw fs throws get the
+            // ENOENT probe + class inference. Re-wrapping the typed verdict
+            // would drop its pinned permanent class (journal parity).
+            if (isFrameworkError(error)) throw error;
             const codeProbe = probeErrorCode(error);
             if (!isMissingPathProbe(codeProbe)) {
-              return err(cacheFailure("freshness:recordWrite", resourceDigest, error, codeProbe));
+              // Thrown, not returned: arbitrary non-ENOENT read failures also
+              // signal by throwing so the primary failure (with its inferred
+              // failureClass) survives a simultaneous release failure.
+              throw cacheFailure("freshness:recordWrite", resourceDigest, error, codeProbe);
             }
           }
 
@@ -662,5 +671,4 @@ export const createFileFreshnessIndex = (
 // Exported only for equal-score parity tests; omitted from the file barrel.
 export {
   serializeRedisFreshnessMember as __testSerializeRedisFreshnessMember,
-  compareFreshnessMemberKeys as __testCompareRedisMemberSerialization,
 };

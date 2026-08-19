@@ -13,6 +13,7 @@
  */
 
 import type { ReviewNotification } from "../../types.js";
+import { safeErrorMessage } from "@fuguejs/framework";
 
 /** The `verb` tagging our card actions, so the bot endpoint ignores foreign cards. */
 export const REVIEW_VERB = "fugue.review" as const;
@@ -25,12 +26,22 @@ interface ReviewActionData {
   readonly decision: "approve" | "reject";
 }
 
-const outputPreview = (output: unknown): string => {
+/**
+ * TOTAL preview renderer for the output under review (shared by the bot and
+ * webhook transports — ONE encoding). `JSON.stringify` fails on cyclic
+ * values; the catch fallback must itself be total: `String(output)` can THROW
+ * again on a null-prototype object or a hostile `toString`/`Symbol.toPrimitive`
+ * (a second throw would escape the notify surface as a raw rejection and the
+ * review hook would escalate a parked run to a retriable node-failed).
+ * `safeErrorMessage` is the framework's never-throwing renderer — constant
+ * fallback, diagnostics safe for arbitrary thrown values (FR-040).
+ */
+export const outputPreview = (output: unknown): string => {
   let s: string;
   try {
     s = JSON.stringify(output, null, 2) ?? String(output);
   } catch {
-    s = String(output);
+    s = safeErrorMessage(output);
   }
   return s.length > 4000 ? `${s.slice(0, 4000)}\n… (truncated)` : s;
 };

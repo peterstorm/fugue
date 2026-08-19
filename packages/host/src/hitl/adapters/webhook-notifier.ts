@@ -22,6 +22,7 @@ import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import type { HumanReviewNotifierPort } from "../ports.js";
 import type { ReviewNotification } from "../types.js";
+import { outputPreview } from "./bot/card.js";
 
 /** A minimal JSON POST transport — injected so the notifier is fakeable. */
 export interface WebhookHttp {
@@ -54,15 +55,13 @@ export const buildAdaptiveCardPayload = (
   approvalBaseUrl: string,
 ): unknown => {
   const link = approvalUrl(approvalBaseUrl, notification.runId);
-  // A compact, valid preview of the output under review (best-effort stringify).
-  let outputPreview: string;
-  try {
-    outputPreview = JSON.stringify(notification.output, null, 2) ?? String(notification.output);
-  } catch {
-    outputPreview = String(notification.output);
-  }
-  // Bound the preview so a large output doesn't bloat the card.
-  if (outputPreview.length > 4000) outputPreview = `${outputPreview.slice(0, 4000)}\n… (truncated)`;
+  // A compact, valid preview of the output under review — the SHARED total
+  // renderer (bot/card.ts `outputPreview`): a catch fallback that calls
+  // `String()` itself can throw on a null-prototype output or a hostile
+  // toString/Symbol.toPrimitive, escaping `notify`'s Result boundary as a raw
+  // rejection and escalating a parked run to a retriable node-failed. The
+  // helper also bounds the preview so a large output can't bloat the card.
+  const preview = outputPreview(notification.output);
 
   return {
     type: "message",
@@ -83,7 +82,7 @@ export const buildAdaptiveCardPayload = (
             },
             { type: "TextBlock", wrap: true, text: notification.prompt },
             { type: "TextBlock", weight: "Bolder", text: "Output under review:" },
-            { type: "TextBlock", wrap: true, fontType: "Monospace", text: outputPreview },
+            { type: "TextBlock", wrap: true, fontType: "Monospace", text: preview },
           ],
           actions: [{ type: "Action.OpenUrl", title: "Review", url: link }],
         },
@@ -103,7 +102,19 @@ export const createWebhookNotifier = (
   http: WebhookHttp,
 ): HumanReviewNotifierPort => ({
   async notify(notification): Promise<Result<void, HostError>> {
-    const body = JSON.stringify(buildAdaptiveCardPayload(notification, config.approvalBaseUrl));
+    // The whole card build runs INSIDE the try so any residual throw (a
+    // hostile output that defeats both JSON.stringify and the total fallback)
+    // maps to `notification-failed` instead of escaping as a raw rejection
+    // (the review hook would escalate a PARKED run to a retriable node-failed).
+    let body: string;
+    try {
+      body = JSON.stringify(buildAdaptiveCardPayload(notification, config.approvalBaseUrl));
+    } catch (e) {
+      return err({
+        kind: "notification-failed",
+        operation: `Teams webhook card build: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
     let res: { status: number };
     try {
       res = await http.post(config.webhookUrl, body);

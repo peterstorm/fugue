@@ -59,8 +59,8 @@ export const stringOf = (value: unknown): string => {
 };
 
 /**
- * THE ONE `checkpoint-write-failed` construction path (the deepening-round
- * consolidation of the manually-mirrored policy that used to live in the file
+ * THE ONE `checkpoint-write-failed` construction path (the consolidation
+ * of the manually-mirrored policy that used to live in the file
  * codec's `writeFailed` and the public factory below): valid raw identifiers
  * retain their own brands. Invalid raw identifiers are never branded as
  * themselves — the required legacy fields receive the documented, grammar-

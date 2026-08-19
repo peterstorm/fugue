@@ -844,67 +844,88 @@ const serializeFileEventRecordUnchecked = (
   // symbol/function event stringifies to JSON `undefined`). Both cases are
   // contextualized here per FR-009. (The pre-scan rejects BigInt, symbols,
   // functions and cycles up front; this is the defense-in-depth backstop.)
-  const serialized = tryCatch(() =>
-    toJson({
+  // The toJson → parse-back → deep-equal verdict pipeline is the SHARED
+  // codec core (`losslessRoundTrip`, ONE encoding with the checkpoint codec
+  // — round-22 cs-4); the message tails below are this codec's byte-pinned
+  // inventory.
+  return losslessRoundTrip(
+    {
       schemaVersion: JOURNAL_SCHEMA_VERSION,
       sequence,
       dedupKey,
       recordedAtMs,
       event,
-    }),
-  );
-  if (!serialized.ok) {
-    throw new Error(
-      `serializeFileEventRecord: event is not toJson-serializable — ${serialized.error.message} (FR-009)`,
-    );
-  }
-  const json = serialized.value;
-  if (typeof json !== "string") {
-    throw new Error(
-      `serializeFileEventRecord: event serialized to no JSON (${String(json)}) — a top-level symbol/function value has no JSON representation (FR-009)`,
-    );
-  }
+    },
+    {
+      unserializable: (inner) =>
+        `serializeFileEventRecord: event is not toJson-serializable — ${inner} (FR-009)`,
+      notAString: (rendered) =>
+        `serializeFileEventRecord: event serialized to no JSON (${rendered}) — a top-level symbol/function value has no JSON representation (FR-009)`,
+      parseBackFailed: (inner) =>
+        `serializeFileEventRecord: serialized record failed to parse back — ${inner} (FR-009)`,
+      verdictExcepted: (inner) =>
+        `serializeFileEventRecord: event value failed the losslessness round-trip verification — ${inner} (FR-009)`,
+      verdictFailed:
+        "serializeFileEventRecord: event value is not lossless through toJson — JSON.stringify silently drops or mutates non-JSON values (symbol/function properties, non-finite numbers) or the event deserializes to a missing event; refusing to persist a record that diverges from the caller's event (FR-009)",
+    },
+    undefined,
+    (parsed) => {
+      const parsedEvent = (parsed as Record<string, unknown>).event;
+      const canonicalEvent = serializeValue(event);
+      return (
+        parsedEvent !== undefined &&
+        deepJsonEqual(serializeValue(parsedEvent), canonicalEvent)
+      );
+    },
+  ).json;
+};
 
-  // Round-trip verification (FR-009): parse the produced JSON back and
-  // require the parsed `event` to deep-equal the canonicalized input event
-  // (both sides through the same `serializeValue` identity). Any divergence
-  // means JSON silently dropped or mutated part of the caller's event — the
-  // persisted record would not be the event the caller appended, and the
-  // digest recompute (built on the same lossy `toJson`) could never detect
-  // it. Fail closed instead of mutating the authoritative journal.
+/**
+ * The shared FR-009 round-trip pipeline core used by BOTH file codecs
+ * (event records and checkpoints) — ONE encoding of the step order so the
+ * two codecs can never drift (round-22 cs-4): pre-scan (each caller runs its
+ * own) → serialization under tryCatch → parse-back under tryCatch → verdict.
+ * Every MESSAGE byte-tail stays a parameter: the per-codec rejection
+ * inventories are pinned by the hostile-corpus tests, and this helper must
+ * not reword them. The optional `validate` hook runs between parse-back and
+ * the verdict and may throw its own untranslated message (the checkpoint
+ * codec's data-envelope shape gate). Returns the verified json AND the
+ * fully RESTORED parsed value (`tryFromJson` restores Map/Set/Date tags —
+ * the event codec compares against it and the checkpoint codec detaches its
+ * snapshot from it).
+ */
+const losslessRoundTrip = (
+  payload: unknown,
+  tails: {
+    readonly unserializable: (inner: string) => string;
+    readonly notAString: (rendered: string) => string;
+    readonly parseBackFailed: (inner: string) => string;
+    readonly verdictExcepted: (inner: string) => string;
+    readonly verdictFailed: string;
+  },
+  validate: ((parsed: unknown) => void) | undefined,
+  compare: (parsed: unknown) => boolean,
+): { readonly json: string; readonly parsed: unknown } => {
+  const serialized = tryCatch(() => toJson(payload));
+  if (!serialized.ok) throw new Error(tails.unserializable(serialized.error.message));
+  const json = serialized.value;
+  if (typeof json !== "string") throw new Error(tails.notAString(String(json)));
   const roundTrip = tryFromJson(json);
-  if (!roundTrip.ok) {
-    throw new Error(
-      `serializeFileEventRecord: serialized record failed to parse back — ${roundTrip.error.message} (FR-009)`,
-    );
-  }
+  if (!roundTrip.ok) throw new Error(tails.parseBackFailed(roundTrip.error.message));
+  if (validate !== undefined) validate(roundTrip.value);
   // The verdict itself (serializeValue canonicalization + deepJsonEqual)
   // runs inside tryCatch so an unexpected engine error — e.g. a RangeError
   // on pathological depth, if the pre-scan ceiling were ever bypassed —
-  // still surfaces as THIS module's contextual FR-009 error, never a raw
+  // still surfaces as THIS codec's contextual FR-009 error, never a raw
   // escape. (The pre-scan's depth ceiling keeps the recursion far below
   // the stack-overflow threshold; this is defense in depth.)
-  const lossless = tryCatch(() => {
-    const parsedEvent = (roundTrip.value as Record<string, unknown>).event;
-    const canonicalEvent = serializeValue(event);
-    return (
-      parsedEvent !== undefined &&
-      deepJsonEqual(serializeValue(parsedEvent), canonicalEvent)
-    );
-  });
-  if (!lossless.ok) {
-    throw new Error(
-      `serializeFileEventRecord: event value failed the losslessness round-trip verification — ${lossless.error.message} (FR-009)`,
-    );
-  }
-  if (!lossless.value) {
-    throw new Error(
-      `serializeFileEventRecord: event value is not lossless through toJson — JSON.stringify silently drops or mutates non-JSON values (symbol/function properties, non-finite numbers) or the event deserializes to a missing event; refusing to persist a record that diverges from the caller's event (FR-009)`,
-    );
-  }
-
-  return json;
+  const lossless = tryCatch(() => compare(roundTrip.value));
+  if (!lossless.ok) throw new Error(tails.verdictExcepted(lossless.error.message));
+  if (!lossless.value) throw new Error(tails.verdictFailed);
+  return { json, parsed: roundTrip.value };
 };
+
+export { losslessRoundTrip };
 
 /**
  * Public typed throwing shell for event-record construction. Every invalid

@@ -75,6 +75,19 @@ type StrictReadFailure = Readonly<{
 type StrictResult = Result<readonly FileEventRecord[], StrictReadFailure>;
 
 /**
+ * ONE encoding of the durable event listing: list `*.json` entry names in
+ * `dir`, sorted. Raw-throwing by design — each call site maps errors for its
+ * own surface (the journal's `appendEvent` wraps in `fsFailure`, the strict
+ * reader maps ENOENT to `ok([])`) — so the writer's dedup listing and the
+ * reader's replay listing can never drift apart on what "the listing" is
+ * (round-22 cs-6). Name-contract / entry-type validation is NOT this
+ * helper's job: the strict reader and the writer's `listEventFiles` both
+ * verify the listed names against `parseEventFileName` afterwards.
+ */
+export const listJsonFileNames = (dir: string): string[] =>
+  readdirSync(dir).filter((name) => name.endsWith(".json")).sort();
+
+/**
  * The single strict read path shared by both public readers. List `*.json`
  * in the events directory (sorted), then verify every record and its
  * filename. A missing events directory is an empty log — `ok([])`; the
@@ -84,7 +97,7 @@ const readStrict = (directory: string): StrictResult => {
   const eventsDir = join(directory, EVENTS_DIR);
   let names: string[];
   try {
-    names = readdirSync(eventsDir).filter((name) => name.endsWith(".json")).sort();
+    names = listJsonFileNames(eventsDir);
   } catch (error) {
     // ENOENT = no events dir yet = empty journal; anything else is a real
     // read failure (fail closed with the directory named). A hostile errno
@@ -184,7 +197,8 @@ const failure = (operation: FileOperation, reason: StrictReadFailure): Framework
  * other read failure throws a typed `cache-error` named `readCheckpoint`
  * (location `run directory <D>` — the journal's store-shaped `readCheckpoint`
  * delegates here, so write side and resume side share ONE reader with ONE
- * transport, round-21 atl-1). Decoding is the proof's job, never this seam's.
+ * transport — the shared reader, FR-009/ADR-0080). Decoding is the proof's
+ * job, never this seam's.
  */
 export const readCheckpointFile = (directory: string): string | null => {
   try {

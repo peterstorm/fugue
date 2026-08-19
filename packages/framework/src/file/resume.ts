@@ -3,16 +3,15 @@
 //
 // The event log is the single authoritative record of a run's history; the
 // checkpoint is a projection that a crash may legitimately leave behind. The
-// agreement proof itself — full pure replay, checkpoint envelope decode, and
-// the full-agreement / strict-prefix-lag / disagreement verdicts — is a
-// coherent PURE algorithm (no I/O, no executor, no side effects,
-// FR-011/NFR-002) and lives in `resume-proof.ts` (`proveResumeAgreement`):
-// it takes the acquired log + raw checkpoint JSON + machine + genesis + the
-// caller's strict decoder and returns a `Result`. THIS module is the thin
-// filesystem shell: it acquires the two durable representations, applies the
-// FR-014 recoverable-state gate, and delegates. See `resume-proof.ts` for
-// the proof's algorithm (ADR-0077) and totality discipline; this header keeps
-// the shell's own contract.
+// agreement proof — full pure replay, checkpoint envelope decode, and the
+// full-agreement / strict-prefix-lag / disagreement verdicts — is a coherent
+// PURE algorithm (FR-011/NFR-002) detailed in `resume-proof.ts`
+// (`proveResumeAgreement`); THIS module is the thin filesystem shell that
+// acquires the two durable representations, applies the FR-014
+// recoverable-state gate, and delegates. This header keeps the SHELL's own
+// contract — acquisition order, FR-014, the ADR-0080 failure mapping — and
+// points at `resume-proof.ts` for the proof's algorithm and totality
+// discipline (its header enumerates the ADR-0077 steps; copies drift).
 //
 // The shell's job, exactly:
 //
@@ -64,17 +63,11 @@
 //      silent fresh start. (A checkpoint alone, or events alone, IS
 //      recoverable state — the proof proceeds.)
 //   4. Delegate the agreement proof to `proveResumeAgreement`
-//      (`resume-proof.ts`): full replay through the pure machine; raw-JSON +
-//      complete canonical serializer-grammar + closed-field-set +
-//      schemaVersion envelope decode; the caller's strict `parseCheckpoint`;
-//      state-key agreement ⇒ resume from the replay; otherwise a single-pass
-//      strict-prefix scan ⇒ benign lag ⇒ resume from the replay; otherwise
-//      `checkpoint-corrupt` naming `checkpoint <key> vs replay <key>`.
-//
-// The returned state is ALWAYS the pure replay of the authoritative event
-// log (`replayed`) whenever the run is resumable: the checkpoint is a
-// projection that may lag or be absent, and even when it agrees, the log is
-// the source of the resumed state (FR-010). Terminal-failed states are
+//      (`resume-proof.ts`, which owns the ADR-0077 steps: full replay,
+//      checkpoint envelope decode, state-key agreement, strict-prefix lag,
+//      `checkpoint-corrupt` — see its header, copies drift). The only
+//      shell-owned consequence: the resumed state is ALWAYS the pure replay
+//      of the authoritative event log (FR-010). Terminal-failed states are
 // never checkpointed (kernel FR-005 discipline, preserved unchanged: a
 // failed transition appends nothing and checkpoints nothing), so the
 // fingerprint of the failed state appears in no prefix replay — the proof
@@ -149,7 +142,8 @@ export interface ResumeFileJobArgs<S, E, C> {
   /**
    * Same contract as `ResumeProofArgs.parseCheckpoint` — the full decoder
    * contract (and the FR-040 throw guard) lives with the proof, which owns
-   * it; this shell must not carry a drifted copy (round-21 cs-1).
+   * it; this shell must not carry a drifted copy (pointer policy — copies
+   * drift, the journal twin's discipline, ADR-0080).
    */
   readonly parseCheckpoint: (data: unknown) => Result<{ state: S; context: C }, string>;
 }

@@ -558,10 +558,13 @@ describe("Wave 6.7 — BufferedObserver.evictStale", () => {
     const buf = new BufferedObserver(inner, policy, { sweepIntervalMs: 0, ttlMs: 1 });
 
     buf.observe({ type: "run-start", runId: "orphan" as RunId, dagId: "d" as DagId, timestamp: new Date() });
-    // Force the buffer to look stale by hand-stamping the createdAt — avoids
-    // relying on real sleep timing.
+    // Force the buffer to look stale by hand-stamping the activity trackers —
+    // avoids relying on real sleep timing. Eviction is INACTIVITY-based
+    // (round-22 cr-1): the sweep compares `lastActivityAt`, the per-event
+    // refresh, not the open time.
     const entry = (buf as any).buffers.get("orphan");
     entry.createdAt = Date.now() - 5_000;
+    entry.lastActivityAt = Date.now() - 5_000;
 
     (buf as any).evictStale();
 

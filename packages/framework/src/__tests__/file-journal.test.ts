@@ -236,6 +236,51 @@ describe("createFileJournal.appendEvent — layout", () => {
     expect(records.value.map((record) => String(record.dedupKey))).toEqual(["", ""]);
     expect(records.value.map((record) => record.event)).toEqual([event, event]);
   });
+
+  it("derives the keyless filename digest from the PERSISTED canonical bytes, not a second walk of caller state (round-22 tda-1)", async () => {
+    // A stateful Proxy whose `get` trap returns a DIFFERENT value per read:
+    // the write-side losslessness gate makes all its own walks agree (the
+    // round-trip verdict compares canonicalized values), but a subsequent
+    // digest walk could observe a divergent value — emitting a record whose
+    // filename digest disagrees with its persisted content, which the strict
+    // reader then rejects at resume (FR-009). The digest must be computed
+    // from the round-trip-verified json (ONE observation), exactly as the
+    // reader recomputes it from the parsed record.
+    const dir = tempDir();
+    const journal = createFileJournal(dir);
+    let reads = 0;
+    // Each read of `value` returns a fresh object; the serializer's own
+    // canonicalization sees a stable `{ v: read % 2 }` shape only if it reads
+    // consistently. To make the divergence DETERMINISTIC and confined to a
+    // post-serialization walk, flip the returned value on a high read count
+    // (well past any serializer walk): the digest must not depend on which
+    // value the LAST walk saw.
+    const statefulEvent = new Proxy(
+      { type: "PROXY", value: { v: 0 } },
+      {
+        get(target, prop, receiver) {
+          if (prop === "value") {
+            reads += 1;
+            // Stable for all serializer walks (well below this floor), then
+            // divergent for any LATER walk.
+            return { v: reads <= 20 ? 1 : 2 };
+          }
+          return Reflect.get(target, prop, receiver);
+        },
+      },
+    );
+
+    await journal.appendEvent(statefulEvent as never);
+
+    // The strict reader recomputes the digest from the PARSED persisted
+    // bytes and requires it to equal the filename — if the writer had hashed
+    // a divergent later walk, readFileEventRecords would fail closed here.
+    const records = readFileEventRecords(dir);
+    expect(records.ok).toBe(true);
+    if (!records.ok) return;
+    expect(records.value).toHaveLength(1);
+    expect(records.value[0]!.event).toEqual({ type: "PROXY", value: { v: 1 } });
+  });
 });
 
 // ---------------------------------------------------------------------------

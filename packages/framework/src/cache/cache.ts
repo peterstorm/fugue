@@ -39,7 +39,16 @@ export class InMemoryCache implements Cache {
   async get<T>(key: string, schema: z.ZodType<T>): Promise<Result<T | null, FrameworkError>> {
     const entry = this.store.get(key);
     if (!entry) return ok(null);
-    if (this.now() > entry.expiresAt) {
+    // The clock is a hostile seam: a throwing clock must surface as a typed
+    // cache-error, never a raw rejection, and a non-finite now must not make
+    // the TTL comparison silently meaningless.
+    let nowMs: number;
+    try {
+      nowMs = this.now();
+    } catch (e) {
+      return err({ kind: "cache-error", operation: "get", message: `key="${key}": clock failed: ${e instanceof Error ? e.message : String(e)}` });
+    }
+    if (!Number.isFinite(nowMs) || nowMs > entry.expiresAt) {
       this.store.delete(key);
       return ok(null);
     }
@@ -56,9 +65,27 @@ export class InMemoryCache implements Cache {
   }
 
   async set<T>(key: string, value: T, ttlSec: number): Promise<Result<void, FrameworkError>> {
+    // Mirror `get`'s guard: serialization and the clock are hostile seams and
+    // `set` documents `Result<void, FrameworkError>` — a cyclic value or a
+    // throwing clock must be a typed cache-error, never a raw rejection.
+    let json: string;
+    try {
+      json = JSON.stringify(value);
+    } catch (e) {
+      return err({ kind: "cache-error", operation: "set", message: `key="${key}": JSON.stringify failed: ${e instanceof Error ? e.message : String(e)}` });
+    }
+    let nowMs: number;
+    try {
+      nowMs = this.now();
+    } catch (e) {
+      return err({ kind: "cache-error", operation: "set", message: `key="${key}": clock failed: ${e instanceof Error ? e.message : String(e)}` });
+    }
+    if (!Number.isFinite(nowMs)) {
+      return err({ kind: "cache-error", operation: "set", message: `key="${key}": clock returned a non-finite timestamp` });
+    }
     this.store.set(key, {
-      value: JSON.stringify(value),
-      expiresAt: this.now() + ttlSec * 1000,
+      value: json,
+      expiresAt: nowMs + ttlSec * 1000,
     });
     return ok(undefined);
   }

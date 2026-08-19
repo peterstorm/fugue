@@ -5,6 +5,7 @@
 import type Redis from "ioredis";
 import type { EventLogOpts, EventLogReader } from "../queue/types.js";
 import type { RecordedEvent } from "../state-machine/types.js";
+import { isRecordedEvent } from "../state-machine/replay.js";
 import { defaultStreamKey } from "./job.js";
 import { deserializeValue } from "../state-machine/serialize.js";
 import { fwLogger } from "../logger.js";
@@ -128,7 +129,7 @@ function parseEnvelope(
     );
   }
 
-  if (isEnvelope(parsed)) return parsed;
+  if (isRecordedEvent(parsed)) return parsed;
   // Legacy bare payload: synthesize the envelope from the entry ID timestamp.
   const { recordedAtMs, synthetic } = parseEntryIdTimestamp(entryId);
   return synthetic
@@ -136,20 +137,12 @@ function parseEnvelope(
     : { recordedAtMs, event: parsed };
 }
 
-/**
- * Type guard for the new envelope shape. Forward-compatible: extra fields are
- * allowed (we only check the required keys), so adding `workerId` /
- * `correlationId` later does not break this check.
- */
-function isEnvelope(v: unknown): v is RecordedEvent<unknown> {
-  return (
-    typeof v === "object" &&
-    v !== null &&
-    "recordedAtMs" in v &&
-    typeof (v as { recordedAtMs: unknown }).recordedAtMs === "number" &&
-    "event" in v
-  );
-}
+// Envelope-vs-bare-payload discrimination is the SHARED guard owned beside
+// the `RecordedEvent` type (state-machine/replay.ts `isRecordedEvent` — ONE
+// encoding, round-22 atl-2): a stored envelope whose `synthetic` field is
+// present-but-non-boolean fails the guard and is treated as a legacy bare
+// payload (re-enveloped from the entry ID) instead of silently passing as
+// envelope-shaped.
 
 /**
  * Total count of malformed entry IDs seen this process. Used to log at

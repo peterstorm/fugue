@@ -47,7 +47,8 @@ import {
 } from "../file.js";
 import { META_FILE, NODES_DIR, keyDigest } from "../file/layout.js";
 import { FRAMEWORK_VERSION } from "../checkpoint/fingerprint.js";
-import { TTL_SECONDS } from "../checkpoint/checkpointer.js";
+import { TTL_SECONDS, evaluateCheckpointLoadGates } from "../checkpoint/checkpointer.js";
+import { ok, err } from "../types/result.js";
 import type { Checkpointer, NodeState, RunMeta } from "../checkpoint/checkpointer.js";
 import { checkpointerSuite } from "./_checkpointer-suite.js";
 import { D, N, R } from "./_id-helpers.js";
@@ -267,6 +268,82 @@ checkpointerSuite(
     },
   },
 );
+
+// ---------------------------------------------------------------------------
+// Pure load-gate decision — the ONE shared encoding (round-22 atl-1). Direct
+// unit tests on `evaluateCheckpointLoadGates`: gate ORDER (framework →
+// fingerprint → TTL), precedence (a hostile clock never masks a version
+// mismatch), and verdict construction — no storage, no adapter.
+// ---------------------------------------------------------------------------
+
+describe("evaluateCheckpointLoadGates — the one shared load-gate encoding", () => {
+  const fresh = { frameworkVersion: FRAMEWORK_VERSION, dagFingerprint: "fp-1", createdAt: new Date(1_000) };
+  const healthyClock = () => ok(1_000 + TTL_SECONDS * 1000 - 1); // inside TTL
+
+  it("order: framework-version mismatch wins over fingerprint and TTL", () => {
+    const gates = evaluateCheckpointLoadGates(
+      { ...fresh, frameworkVersion: "0.0.0-old", dagFingerprint: "fp-1", expectedDagFingerprint: "fp-1", createdAt: new Date(1_000) },
+      healthyClock,
+    );
+    expect(gates.ok).toBe(false);
+    if (gates.ok) return;
+    expect(gates.error.kind).toBe("checkpoint-version-mismatch");
+    if (gates.error.kind === "checkpoint-version-mismatch") {
+      expect(gates.error.expected).toBe(FRAMEWORK_VERSION);
+      expect(gates.error.actual).toBe("0.0.0-old");
+    }
+  });
+
+  it("order: fingerprint mismatch wins over TTL even when expired", () => {
+    const gates = evaluateCheckpointLoadGates(
+      { ...fresh, expectedDagFingerprint: "fp-2", createdAt: new Date(1_000) },
+      () => ok(1_000 + TTL_SECONDS * 1000 + 1), // past TTL
+    );
+    expect(gates.ok).toBe(false);
+    if (gates.ok) return;
+    expect(gates.error.kind).toBe("checkpoint-version-mismatch");
+    if (gates.error.kind === "checkpoint-version-mismatch") {
+      expect(gates.error.expected).toBe("fp-2");
+      expect(gates.error.actual).toBe("fp-1");
+    }
+  });
+
+  it("the version gates evaluate BEFORE the clock read (hostile clock never masks a version mismatch)", () => {
+    let clockReads = 0;
+    const gates = evaluateCheckpointLoadGates(
+      { ...fresh, frameworkVersion: "0.0.0-old" },
+      () => { clockReads++; throw new Error("clock boom"); },
+    );
+    expect(gates.ok).toBe(false);
+    if (gates.ok) return;
+    expect(gates.error.kind).toBe("checkpoint-version-mismatch");
+    expect(clockReads).toBe(0); // the clock thunk was never called
+  });
+
+  it("matches fingerprint and TTL: ok when gates pass; expired past TTL", () => {
+    const fresh = { frameworkVersion: FRAMEWORK_VERSION, dagFingerprint: "fp-1", createdAt: new Date(1_000) };
+    expect(evaluateCheckpointLoadGates({ ...fresh, expectedDagFingerprint: "fp-1" }, healthyClock)).toEqual(ok("ok"));
+    expect(evaluateCheckpointLoadGates({ ...fresh, expectedDagFingerprint: undefined }, healthyClock)).toEqual(ok("ok"));
+    const expired = evaluateCheckpointLoadGates(
+      { ...fresh, expectedDagFingerprint: undefined },
+      () => ok(1_000 + TTL_SECONDS * 1000 + 1),
+    );
+    expect(expired.ok).toBe(false);
+    if (expired.ok) return;
+    expect(expired.error.kind).toBe("checkpoint-expired");
+  });
+
+  it("propagates a typed clock rejection unchanged (hostile-clock seam)", () => {
+    const gates = evaluateCheckpointLoadGates(
+      { ...fresh, expectedDagFingerprint: undefined },
+      () => err({ kind: "cache-error", operation: "load", message: "clock failed" }),
+    );
+    expect(gates.ok).toBe(false);
+    if (gates.ok) return;
+    expect(gates.error.kind).toBe("cache-error");
+    expect(gates.error.operation).toBe("load");
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Barrel surface (FR-042)

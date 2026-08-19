@@ -67,6 +67,24 @@ describe("bot card", () => {
     expect(act.type).toBe("message");
     expect(act.attachments[0]!.contentType).toBe("application/vnd.microsoft.card.adaptive");
   });
+
+  it("renders hostile outputs through the TOTAL preview fallback (SFH-2): a null-prototype output cannot throw a second time", () => {
+    // `JSON.stringify` throws on circular structures; the old catch fallback
+    // `String(output)` threw AGAIN on a null-prototype object (TypeError:
+    // cannot convert object to primitive value), escaping the notifier's
+    // Result boundary as a raw rejection. The shared total renderer must
+    // produce a preview string for every hostile output class.
+    const hostileOutput = Object.create(null) as unknown;
+    (hostileOutput as Record<string, unknown>).self = hostileOutput; // circular AND null-prototype
+    const card = buildReviewCard({ ...notification, output: hostileOutput }) as {
+      body: { text?: string }[];
+    };
+    const texts = card.body.map((b) => b.text ?? "").join("\n");
+    expect(texts).toContain("Output under review:");
+    // A text preview exists (never a throw, never an empty preview).
+    const preview = texts.split("Output under review:")[1] ?? "";
+    expect(preview.trim().length).toBeGreaterThan(0);
+  });
 });
 
 // ── notifier ─────────────────────────────────────────────────────────────────

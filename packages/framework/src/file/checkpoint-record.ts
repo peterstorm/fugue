@@ -11,11 +11,10 @@
 // installs after the bytes commit, so caller-owned references can never make
 // the in-memory snapshot diverge from checkpoint.json.
 
-import { deepJsonEqual, serializeValue, toJson, tryFromJson } from "../state-machine/serialize.js";
-import { tryCatch } from "../types/result.js";
+import { deepJsonEqual, serializeValue } from "../state-machine/serialize.js";
 import { safeDiagnosticRender } from "../types/safe-error.js";
 import { fileOperationError, fileThrownValueMessage } from "./boundary-error.js";
-import { assertLosslessEvent } from "./event-record.js";
+import { assertLosslessEvent, losslessRoundTrip } from "./event-record.js";
 import { JOURNAL_SCHEMA_VERSION } from "./layout.js";
 
 export interface FileCheckpointData<S, C> {
@@ -86,35 +85,46 @@ const serializeFileCheckpointUnchecked = <S, C>(
     );
   }
 
-  const serialized = tryCatch(() => toJson(payload));
-  if (!serialized.ok) {
-    throw new Error(
-      `checkpoint payload is not toJson-serializable — ${serialized.error.message} (FR-009)`,
-    );
-  }
-  const roundTrip = tryFromJson(serialized.value);
-  if (!roundTrip.ok) {
-    throw new Error(
-      `serialized checkpoint failed to parse back — ${roundTrip.error.message} (FR-009)`,
-    );
-  }
-  if (
-    typeof roundTrip.value !== "object" || roundTrip.value === null ||
-    Array.isArray(roundTrip.value) ||
-    !Object.prototype.hasOwnProperty.call(roundTrip.value, "data")
-  ) {
-    throw new Error("serialized checkpoint did not round-trip to the required data envelope (FR-009)");
-  }
+  // The toJson → parse-back → envelope-gate → deep-equal verdict pipeline is
+  // the SHARED codec core (`losslessRoundTrip`, ONE encoding with the event
+  // codec — round-22 cs-4); the message tails below are this codec's
+  // byte-pinned inventory, and the envelope shape gate is the `validate` hook.
+  const { json, parsed } = losslessRoundTrip(
+    payload,
+    {
+      unserializable: (inner) =>
+        `checkpoint payload is not toJson-serializable — ${inner} (FR-009)`,
+      notAString: (rendered) =>
+        `serialized checkpoint did not produce a JSON string (${rendered}) (FR-009)`,
+      parseBackFailed: (inner) =>
+        `serialized checkpoint failed to parse back — ${inner} (FR-009)`,
+      verdictExcepted: (inner) =>
+        `serialized checkpoint failed the losslessness round-trip verification — ${inner} (FR-009)`,
+      verdictFailed:
+        "checkpoint data is not lossless through toJson — JSON silently drops or mutates non-JSON values (for example, non-finite numbers become null); refusing to persist bytes that diverge from caller state (FR-009)",
+    },
+    (parsedValue) => {
+      if (
+        typeof parsedValue !== "object" || parsedValue === null ||
+        Array.isArray(parsedValue) ||
+        !Object.prototype.hasOwnProperty.call(parsedValue, "data")
+      ) {
+        throw new Error("serialized checkpoint did not round-trip to the required data envelope (FR-009)");
+      }
+    },
+    (parsedValue) => {
+      const detached = (parsedValue as { readonly data: FileCheckpointData<S, C> }).data;
+      return deepJsonEqual(serializeValue(detached), serializeValue(data));
+    },
+  );
 
-  const detached = (roundTrip.value as { readonly data: FileCheckpointData<S, C> }).data;
-  if (!deepJsonEqual(serializeValue(detached), serializeValue(data))) {
-    throw new Error(
-      "checkpoint data is not lossless through toJson — JSON silently drops or mutates non-JSON values (for example, non-finite numbers become null); refusing to persist bytes that diverge from caller state (FR-009)",
-    );
-  }
+  // `parsed` is the RESTORED round-trip value (Map/Set/Date tags decoded):
+  // the detached snapshot is what the caller's own parseCheckpoint would
+  // receive, so the commit's data and the persisted bytes can never diverge.
+  const detached = (parsed as { readonly data: FileCheckpointData<S, C> }).data;
 
   const commit = Object.freeze({
-    json: serialized.value,
+    json,
     data: detached,
     // The nominal brand is carried by the runtime object itself (the
     // interface says `[FILE_CHECKPOINT_COMMIT]: true`), so the type does not

@@ -78,7 +78,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { atomicWriteFile } from "./atomic.js";
 import { META_FILE, NODES_DIR, isBoundaryId, keyDigest } from "./layout.js";
-import { TTL_SECONDS } from "../checkpoint/checkpointer.js";
+import { evaluateCheckpointLoadGates } from "../checkpoint/checkpointer.js";
 import {
   isPlainObject,
   parseLoadOpts,
@@ -111,7 +111,6 @@ import type {
   SaveNodeOpts,
 } from "../checkpoint/checkpointer.js";
 import { compositeNodeKey } from "../checkpoint/composite-node-key.js";
-import { FRAMEWORK_VERSION } from "../checkpoint/fingerprint.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { RunId, NodeId } from "../types/ids.js";
 import { ID_PATTERN, __brandNodeId, __brandRunId } from "../types/ids.js";
@@ -524,39 +523,23 @@ const createFileCheckpointerUnchecked = (
       }
       const { meta, createdAt } = parsedMeta.value;
 
-      // ADR-0017 (FR-025): a checkpoint produced by a different framework
-      // release may encode validation/retry/coercion semantics this release no
-      // longer honours — replaying it would silently skip invariants.
-      if (meta.frameworkVersion !== FRAMEWORK_VERSION) {
-        return err(
-          frameworkError.checkpointVersionMismatch(run, FRAMEWORK_VERSION, meta.frameworkVersion),
-        );
-      }
-
-      // FR-026: opt-in structural gate. A re-shaped DAG would replay cached
-      // outputs into a graph whose nodes no longer validate them, so an ABSENT
-      // stored fingerprint is a mismatch too — not a pass.
-      if (
-        expectedDagFingerprint !== undefined &&
-        meta.dagFingerprint !== expectedDagFingerprint
-      ) {
-        return err(
-          frameworkError.checkpointVersionMismatch(
-            run,
-            expectedDagFingerprint,
-            meta.dagFingerprint,
-          ),
-        );
-      }
-
-      // FR-027: lazy expiry — evaluated here, at read time, against the
-      // injected clock. No sweeper, no physical GC in this pass.
-      const nowClock = readClock("load", runId);
-      if (!nowClock.ok) return err(nowClock.error);
-      const nowMs = nowClock.value;
-      if (nowMs - createdAt.getTime() > TTL_SECONDS * 1000) {
-        return err(frameworkError.checkpointExpired(run, createdAt));
-      }
+      // ADR-0017/FR-026/FR-027 gate decision — the ONE shared encoding
+      // (`evaluateCheckpointLoadGates`): gate ORDER and verdict construction
+      // cannot drift from the in-memory and Redis adapters (round-22 atl-1).
+      // The clock thunk is this adapter's own guarded readClock, so the
+      // version gates still evaluate BEFORE any clock read (failure-
+      // precedence parity).
+      const gates = evaluateCheckpointLoadGates(
+        {
+          runId: run,
+          frameworkVersion: meta.frameworkVersion,
+          dagFingerprint: meta.dagFingerprint,
+          expectedDagFingerprint,
+          createdAt,
+        },
+        () => readClock("load", runId),
+      );
+      if (!gates.ok) return gates;
 
       let nodesDirectory: VerifiedDirectory | null = null;
       let fileNames: readonly string[];

@@ -30,6 +30,79 @@ import { safeDiagnosticRender, safeErrorMessage } from "../types/safe-error.js";
  */
 export const TTL_SECONDS = 86_400;
 
+// ── Checkpoint load-gate decision (ADR-0017 / FR-025/26/27) ────────────────
+
+/**
+ * The checkpoint load-gate DECISION, one encoding shared by the in-memory,
+ * Redis, and file adapters (round-22 atl-1). A pure function owning the gate
+ * ORDER (framework version → DAG fingerprint → TTL expiry) and the verdict
+ * construction — the three adapters previously re-encoded this identical
+ * sequence interleaved with their storage reads; a change to gate order or
+ * verdict semantics used to require three coordinated edits, and the per-
+ * backend divergence was prevented only by the parity suite, not by
+ * structure.
+ *
+ * Each adapter keeps its own storage read, its hostile-seam `opts`
+ * snapshot-once guard, and its clock guard, then delegates here. The clock
+ * arrives as a THUNK (`readNowMs`) so the version gates evaluate BEFORE the
+ * clock read — the exact failure precedence every adapter already exhibits
+ * (a throwing clock must not mask a version mismatch).
+ */
+export const evaluateCheckpointLoadGates = (input: {
+  readonly runId: RunId;
+  /** `meta.frameworkVersion` (optional in `RunMeta` — absent means stale/unknown). */
+  readonly frameworkVersion: string | undefined;
+  /** `meta.dagFingerprint` (optional in `RunMeta`). */
+  readonly dagFingerprint: string | undefined;
+  /** Caller-supplied expected fingerprint from load opts (snapshot-once read by the adapter). */
+  readonly expectedDagFingerprint: string | undefined;
+  /** Checkpoint write time (the projection's `createdAt`). */
+  readonly createdAt: Date;
+}, readNowMs: () => Result<number, FrameworkError>): Result<"ok", FrameworkError> => {
+  // ADR-0017: reject checkpoints produced by a different framework version.
+  // A stored meta WITHOUT the field is a stale format and mismatches too.
+  if (input.frameworkVersion !== FRAMEWORK_VERSION) {
+    return err({
+      kind: "checkpoint-version-mismatch",
+      runId: input.runId,
+      expected: FRAMEWORK_VERSION,
+      actual: input.frameworkVersion,
+    });
+  }
+
+  // FR-026: opt-in structural gate. A re-shaped DAG would replay cached
+  // outputs into a graph whose nodes no longer validate them, so an ABSENT
+  // stored fingerprint is a mismatch too — not a pass.
+  if (
+    input.expectedDagFingerprint !== undefined &&
+    input.dagFingerprint !== input.expectedDagFingerprint
+  ) {
+    return err({
+      kind: "checkpoint-version-mismatch",
+      runId: input.runId,
+      expected: input.expectedDagFingerprint,
+      actual: input.dagFingerprint,
+    });
+  }
+
+  // FR-027: lazy expiry — evaluated here, at read time, against the
+  // injected clock. No sweeper, no physical GC in this pass. The clock is
+  // read only AFTER the version gates (adapter failure-precedence parity):
+  // a throwing/non-representable clock settles as a typed `cache-error` — a
+  // NaN timestamp would otherwise void the check (`NaN > TTL` is always
+  // false) — but never masks a version mismatch.
+  const nowClock = readNowMs();
+  if (!nowClock.ok) return nowClock;
+  if (nowClock.value - input.createdAt.getTime() > TTL_SECONDS * 1000) {
+    return err({
+      kind: "checkpoint-expired",
+      runId: input.runId,
+      expiredAt: input.createdAt.toISOString(),
+    });
+  }
+  return ok("ok");
+};
+
 // --- Domain types ---
 
 export interface RunMeta {
@@ -194,7 +267,7 @@ export interface Checkpointer {
 
 /**
  * Internal storage shape — exported as the in-memory backend's TEST-SURFACE
- * type (deepening-round seam redesign): the shared `checkpointerSuite` and the
+ * type (seam redesign): the shared `checkpointerSuite` and the
  * hostile-totality tests construct and seed these records directly through a
  * constructor-adopted store (below) instead of mutating the adapter's live
  * internals through a public accessor. The shape is exactly what `load`
@@ -312,44 +385,22 @@ export class InMemoryCheckpointer implements Checkpointer {
       );
     }
 
-    // ADR-0017 — reject checkpoints produced by a different framework
-    // version. The Redis path performs the same check; the in-memory variant
-    // used to skip it, hiding cross-version-replay bugs from unit tests that
-    // never reached Redis.
-    if (meta.frameworkVersion !== FRAMEWORK_VERSION) {
-      return err({
-        kind: "checkpoint-version-mismatch",
+    // ADR-0017/FR-026/FR-027 gate decision — delegated to the ONE shared
+    // encoding (`evaluateCheckpointLoadGates`): gate ORDER and verdict
+    // construction cannot drift from the Redis and file adapters (round-22
+    // atl-1). The clock thunk is this adapter's own guarded readClock, so a
+    // hostile clock settles exactly as before — AFTER the version gates.
+    const gates = evaluateCheckpointLoadGates(
+      {
         runId,
-        expected: FRAMEWORK_VERSION,
-        actual: meta.frameworkVersion,
-      });
-    }
-
-    if (expectedDagFingerprint !== undefined && meta.dagFingerprint !== expectedDagFingerprint) {
-      return err({
-        kind: "checkpoint-version-mismatch",
-        runId,
-        expected: expectedDagFingerprint,
-        actual: meta.dagFingerprint,
-      });
-    }
-
-    // Mirror the Redis TTL semantics — past-TTL meta is reported as
-    // `checkpoint-expired` so callers see the same surface across backends.
-    // The clock read is the shared hostile-seam guard above: a throwing or
-    // non-representable clock settles as a typed `cache-error` before any
-    // comparison runs.
-    const nowClock = this.readClock("load", runId);
-    if (!nowClock.ok) return nowClock;
-    const nowMs = nowClock.value;
-    const expired = nowMs - createdAt.getTime() > TTL_SECONDS * 1000;
-    if (expired) {
-      return err({
-        kind: "checkpoint-expired",
-        runId,
-        expiredAt: createdAt.toISOString(),
-      });
-    }
+        frameworkVersion: meta.frameworkVersion,
+        dagFingerprint: meta.dagFingerprint,
+        expectedDagFingerprint,
+        createdAt,
+      },
+      () => this.readClock("load", runId),
+    );
+    if (!gates.ok) return gates;
 
     try {
       return ok({

@@ -377,8 +377,10 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
     // policy instance — set by composeObservability above.
     observer,
     logger: log,
-    // Read the env-derived flag once at bootstrap; the framework no longer
-    // touches process.env. When LLM_TRACE_PROMPTS is true, content passes
+    // Read the env-derived flag once at bootstrap; the APP reads its config
+    // from process.env exactly here in config.ts (ConfigSchema.parse) — the
+    // framework's only env touch is the OBSERVER_STRICT test seam in
+    // observer/dispatch.ts. When LLM_TRACE_PROMPTS is true, content passes
     // through unchanged; otherwise the PII scrubber strips sensitive patterns
     // while keeping non-PII content visible for debugging.
     contentFilter: config.LLM_TRACE_PROMPTS ? IDENTITY_FILTER : piiScrubber,

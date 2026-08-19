@@ -74,11 +74,11 @@
 //
 // Import discipline (INV-1): `node:fs`, `node:path` only among node built-ins.
 
-import { mkdirSync, readdirSync, statSync } from "node:fs";
+import { mkdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 // Strict checkpoint-projection reader — ONE read seam for the resume shell
 // and this store-shaped surface (round-21 atl-1).
-import { readCheckpointFile } from "./event-log.js";
+import { readCheckpointFile, listJsonFileNames } from "./event-log.js";
 import { atomicWriteFile, withFileLock } from "./atomic.js";
 import {
   APPEND_LOCK,
@@ -260,7 +260,12 @@ export const createFileJournal = (
   const listEventFiles = (): readonly string[] => {
     let names: string[];
     try {
-      names = readdirSync(eventsDir).filter((name) => name.endsWith(".json")).sort();
+      // The shared listing encoding (event-log.ts `listJsonFileNames`):
+      // readdir + `*.json` filter + sort — ONE definition with the strict
+      // reader's listing so the two can never drift (round-22 cs-6). This
+      // call site keeps its own error mapping (`fsFailure`) and adds the
+      // name-contract/regular-file validation below.
+      names = listJsonFileNames(eventsDir);
     } catch (error) {
       throw fsFailure("appendEvent", directory, error);
     }
@@ -398,7 +403,7 @@ export const createFileJournal = (
         // catch re-tags the `withFileLock` boundary at the public journal
         // surface, so a PRE-LOCK failure carries exactly one `appendEvent
         // failed at run directory D:` layer, while a failure INSIDE the lock
-        // body carries two: the inner typed failure, the `withFileLock`
+        // body carries three: the inner typed failure, the `withFileLock`
         // boundary layer (which names the lock path — deliberately retained,
         // pinned by file-freshness-index.test.ts), and the outer `appendEvent`
         // layer. The lock inner catch wraps unconditionally, unlike its
@@ -410,8 +415,21 @@ export const createFileJournal = (
           record.recordedAtMs,
           record.event,
         );
+        // The keyless filename digest is derived from the ROUND-TRIP-VERIFIED
+        // canonical bytes just produced (ONE observation of the persisted
+        // content, recomputed from `json` exactly as the strict reader will)
+        // — never a fresh `toJson` walk over the CALLER-owned event. A
+        // stateful proxy event could otherwise serialize one value and digest
+        // another, emitting a record whose filename disagrees with its
+        // persisted content (the strict reader would fail closed at resume,
+        // FR-009). `serializeFileEventRecord` already accomplished the
+        // lossless round-trip, so parsing its output is deterministic.
+        const canonicalEvent = (JSON.parse(json) as { readonly event: unknown }).event;
         atomicWriteFile(
-          join(eventsDir, eventFileName(record.sequence, eventDigestOf(record))),
+          join(
+            eventsDir,
+            eventFileName(record.sequence, eventDigestOf({ dedupKey: key, sequence: parsedSequence.value, event: canonicalEvent })),
+          ),
           json,
         );
       });

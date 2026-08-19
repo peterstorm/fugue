@@ -15,6 +15,7 @@ import {
   readdirSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -22,7 +23,6 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { InMemoryFreshnessIndex } from "../dag-runtime/freshness-check.js";
 import {
-  __testCompareRedisMemberSerialization,
   __testSerializeRedisFreshnessMember,
   createFileFreshnessIndex,
 } from "../file/freshness-index.js";
@@ -30,7 +30,7 @@ import { createFileFreshnessIndex as barrelCreateFileFreshnessIndex } from "../f
 import { TTL_SECONDS } from "../checkpoint/checkpointer.js";
 import { keyDigest } from "../file/layout.js";
 import { __testEncodeMember as encodeRedisMember } from "../checkpoint/redis-freshness-index.js";
-import { __resetFrameworkLogger } from "../logger.js";
+import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
 import type { WriteAttemptedEvent } from "../types/events.js";
 import type {
   FreshnessIndex,
@@ -38,7 +38,7 @@ import type {
   WitnessKind,
   WriteEntry,
 } from "../types/freshness.js";
-import { resourceName, witness, FRESHNESS_TTL_SECONDS } from "../types/freshness.js";
+import { resourceName, witness, FRESHNESS_TTL_SECONDS, compareFreshnessMemberKeys } from "../types/freshness.js";
 import { D, N, R } from "./_id-helpers.js";
 import { isFrameworkError, retriabilityOf } from "../types/errors.js";
 
@@ -144,7 +144,7 @@ const redisMemberOf = (write: TieWrite): string =>
   encodeRedisMember(R(write.runId), N(write.nodeId), write.kind, write.value);
 
 const redisTieWinner = (left: TieWrite, right: TieWrite): TieWrite =>
-  __testCompareRedisMemberSerialization(redisMemberOf(left), redisMemberOf(right)) >= 0
+  compareFreshnessMemberKeys(redisMemberOf(left), redisMemberOf(right)) >= 0
     ? left
     : right;
 
@@ -933,6 +933,56 @@ describe("createFileFreshnessIndex — strict codec and typed failures", () => {
       expect(write.error.message).toContain("atomicWriteFile");
       expect(write.error.message).toContain(`${keyDigest(resource)}.json`);
     }
+  });
+  it("preserves the permanent corrupt-record verdict when owned-lock release also fails (journal appendEvent double-fault parity, ADR-0080)", async () => {
+    // The journal pins the same arbitration contract for ITS lock body:
+    // "a body failure remains primary if cleanup also fails". The freshness
+    // recordWrite body used to signal body failure by RETURNING a typed err,
+    // so withFileLock classified any resolved body as succeeded and a
+    // simultaneous release failure surfaced as primary — replacing the
+    // deterministic PERMANENT corrupt-record verdict with an unclassified
+    // release error. The body must THROW (not return) its typed failures so
+    // the arbitration preserves the primary verdict and its failureClass.
+    const warnings: string[] = [];
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: (message: string) => { warnings.push(message); },
+      error: () => {},
+    });
+    const directory = tempDirectory();
+    const resource = "corrupt:double-fault";
+    const path = join(directory, `${keyDigest(resource)}.json`);
+    const lockPath = join(directory, `${keyDigest(resource)}.lock`);
+    // A corrupt singleton, then a write whose clock read tears the owned
+    // lock's owner metadata mid-body: the body reaches its deterministic
+    // corrupt-record rejection AND release cannot prove its token.
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(path, "not-json");
+    const index = createFileFreshnessIndex(directory, {
+      now: () => {
+        unlinkSync(join(lockPath, "owner"));
+        return 1_000;
+      },
+    });
+    const write = await index.recordWrite(writeEvent(resource, "must-not-replace", 1_100));
+    expect(write.ok).toBe(false);
+    if (write.ok) throw new Error("expected typed rejection");
+    expect(write.error.kind).toBe("cache-error");
+    if (write.error.kind === "cache-error") {
+      expect(write.error.operation).toBe("freshness:recordWrite");
+      // The PERMANENT corrupt verdict stays primary — never the release error.
+      expect(write.error.failureClass).toBe("permanent");
+      expect(retriabilityOf(write.error)).toBe("non-retriable");
+      expect(write.error.message).toContain("stored freshness record is corrupt");
+      expect(write.error.message).not.toContain("releaseFileLock");
+    }
+    // The secondary release failure is observable (loudly) but not primary.
+    expect(warnings.some((w) => w.includes("secondary lock-release failure"))).toBe(true);
+    expect(warnings.some((w) => w.includes(lockPath))).toBe(true);
+    // The corrupt bytes were never replaced.
+    expect(readFileSync(path, "utf-8")).toBe("not-json");
+    rmSync(lockPath, { recursive: true, force: true });
   });
   it("explicitly rejects append/member-set and extra-field persisted shapes", async () => {
     const directory = tempDirectory();

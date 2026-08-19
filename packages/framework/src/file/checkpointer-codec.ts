@@ -65,7 +65,7 @@ import { safeDiagnosticRender, safeErrorMessage } from "../types/safe-error.js";
 // raw-value diagnostics, the meta-record case) has ONE encoding — the canonical
 // `buildCheckpointWriteFailed` builder in `types/error-factories.ts`, shared
 // with the public `frameworkError.checkpointWriteFailed` factory and the
-// in-memory adapter (deepening-round consolidation of the policy this module
+// in-memory adapter (consolidation of the policy this module
 // used to mirror locally; output for every input is byte-identical to the
 // former local `writeFailed` — pinned by the per-backend hostile corpora).
 // Re-exported under the historical name: the file-checkpointer shell and the

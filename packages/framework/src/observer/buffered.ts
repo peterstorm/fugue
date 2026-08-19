@@ -62,6 +62,11 @@ export function computeRunSummary(
 interface RunBuffer {
   events: ObserverEvent[];
   createdAt: number;
+  /** Last wall-clock time this run produced an event; refreshed per event so
+   * the orphan sweep evicts INACTIVE buffers only — an active long-running
+   * run must never be dropped mid-run (its run summary would be silently
+   * zeroed at a late run-end). */
+  lastActivityAt: number;
 }
 
 interface BufferedObserverOpts {
@@ -163,17 +168,20 @@ export class BufferedObserver implements Observer, Disposable {
     return nowMs;
   }
 
-  /** Drop run buffers that exceeded `ttlMs` without a run-end. */
+  /** Drop run buffers whose LAST ACTIVITY exceeded `ttlMs` without a run-end.
+   * Inactivity-based (not open-time-based): a run that kept emitting events
+   * is alive and must not be evicted mid-run. Orphaned runs (no events since
+   * open) still evict exactly as before. */
   evictStale(): void {
     const nowMs = this.readClock();
     if (nowMs === null) return;
     const cutoff = nowMs - this.ttlMs;
     for (const [runId, buf] of this.buffers) {
-      if (buf.createdAt < cutoff) {
+      if (buf.lastActivityAt < cutoff) {
         this.buffers.delete(runId);
         this.evicted++;
         fwLogger().warn(
-          `[BufferedObserver] Evicting orphaned run buffer ${runId} (age: ${nowMs - buf.createdAt}ms, events: ${buf.events.length})`,
+          `[BufferedObserver] Evicting orphaned run buffer ${runId} (last activity: ${nowMs - buf.lastActivityAt}ms ago, events: ${buf.events.length})`,
         );
       }
     }
@@ -196,9 +204,16 @@ export class BufferedObserver implements Observer, Disposable {
         );
         return;
       }
-      buf = { events: [], createdAt };
+      buf = { events: [], createdAt, lastActivityAt: createdAt };
       this.buffers.set(runId, buf);
     }
+    // An open buffer absorbs the event even when the clock misbehaves
+    // (hostile-clock parity): the activity refresh is best-effort — a null
+    // stamp leaves lastActivityAt stale, but the sweep is disabled that
+    // cycle anyway (readClock gate), so no active run is evicted on stale
+    // data while the clock is broken.
+    const activity = this.readClock();
+    if (activity !== null) buf.lastActivityAt = activity;
     buf.events.push(event);
   }
 

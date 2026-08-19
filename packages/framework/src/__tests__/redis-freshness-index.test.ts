@@ -154,7 +154,11 @@ describe("RedisFreshnessIndex findConflict — corrupt-member verdict (ADR-0025)
   });
 
   it("fails closed on an off-contract-kind member (closed-union gate at the verdict)", async () => {
-    const corruptMember = __testEncodeMember(R("run-9"), N("writer"), "bogus-kind", "v");
+    // The member string is the port grammar's raw bytes; an off-contract
+    // kind can only be INJECTED as bytes (the typed encoder refuses it —
+    // `freshnessMemberKey` takes the closed `WitnessKind` union, round-22
+    // tda-2), which is exactly what a corrupt/hostile store would hold.
+    const corruptMember = JSON.stringify(["run-9", "writer", "bogus-kind", "v"]);
     const { redis } = fakeFindConflictRedis([corruptMember, "900"]);
     const index = new RedisFreshnessIndex(redis);
 

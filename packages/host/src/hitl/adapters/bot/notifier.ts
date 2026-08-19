@@ -42,7 +42,21 @@ export const createBotFrameworkNotifier = (deps: {
   readonly resolveDagTeam: (dagId: DagId) => Team | undefined;
 }): HumanReviewNotifierPort => ({
   async notify(notification): Promise<Result<void, HostError>> {
-    const activity = buildReviewActivity(notification);
+    // The card build runs in the guarded body of notify: `buildReviewActivity`
+    // renders the output preview through the TOTAL shared renderer, so a
+    // hostile output (null-prototype, throwing toString) resolves to a preview
+    // string — but any residual throw still maps to `notification-failed`
+    // instead of escaping as a raw rejection (which the review hook would
+    // escalate to a retriable node-failed on a PARKED run).
+    let activity: unknown;
+    try {
+      activity = buildReviewActivity(notification);
+    } catch (e) {
+      return err({
+        kind: "notification-failed",
+        operation: `bot proactive send: card build failed: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
 
     // 1. Per-team routing (confidentiality): if the run's DAG resolves to a team
     //    that has its OWN stored reference, post there and NOT the default.

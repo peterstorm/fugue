@@ -454,6 +454,56 @@ describe("Wave 6.2 — InMemoryCache accepts an injectable now() seam", () => {
     const afterExpiry = await cache.get("k", z.string());
     expect(afterExpiry.ok && afterExpiry.value).toBe(null);
   });
+
+  it("a throwing injected clock is a typed cache-error on set and get, never a raw rejection (round-22 sfh-3)", async () => {
+    let broken = true;
+    const cache = new InMemoryCache({
+      now: () => {
+        if (broken) throw new Error("clock boom");
+        return 1_000;
+      },
+    });
+    const setRes = await cache.set("k", "v", 1);
+    expect(setRes.ok).toBe(false);
+    if (!setRes.ok) {
+      expect(setRes.error.kind).toBe("cache-error");
+      expect((setRes.error as { operation: string }).operation).toBe("set");
+    }
+    // A stored value read with a throwing clock must also fail typed — the
+    // TTL path reads `now()` too (never a raw rejection from the get call).
+    broken = false;
+    await cache.set("k", "v", 1); // healthy clock: value lands in the store
+    broken = true;
+    const getRes = await cache.get("k", z.string());
+    expect(getRes.ok).toBe(false);
+    if (!getRes.ok) {
+      expect(getRes.error.kind).toBe("cache-error");
+      expect((getRes.error as { operation: string }).operation).toBe("get");
+    }
+  });
+
+  it("a non-finite injected clock is a typed cache-error on set, never a raw rejection (round-22 sfh-3)", async () => {
+    const cache = new InMemoryCache({ now: () => Number.NaN });
+    const setRes = await cache.set("k", "v", 1);
+    expect(setRes.ok).toBe(false);
+    if (!setRes.ok) {
+      expect(setRes.error.kind).toBe("cache-error");
+      expect((setRes.error as { operation: string }).operation).toBe("set");
+    }
+  });
+
+  it("a cyclic value is a typed cache-error on set, never a raw rejection (round-22 sfh-3)", async () => {
+    const cache = new InMemoryCache({ now: () => 1_000 });
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    const setRes = await cache.set("k", cyclic, 1);
+    expect(setRes.ok).toBe(false);
+    if (!setRes.ok) {
+      expect(setRes.error.kind).toBe("cache-error");
+      expect((setRes.error as { operation: string }).operation).toBe("set");
+      expect((setRes.error as { message: string }).message).toContain("JSON.stringify");
+    }
+  });
 });
 
 // ===========================================================================

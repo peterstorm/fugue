@@ -122,6 +122,11 @@ interface FoundryRunSummaryObserverOpts {
 interface RunSummaryBuffer {
   events: ObserverEvent[];
   createdAt: number;
+  /** Last wall-clock time this run produced an event; refreshed per event so
+   * the orphan sweep evicts INACTIVE buffers only — an active long-running
+   * run is never dropped mid-run, or its summary would be silently zeroed at
+   * a late run-end (SC-008). */
+  lastActivityAt: number;
 }
 
 const SUMMARY_TTL_MS = 60 * 60 * 1000; // 1h
@@ -198,18 +203,22 @@ export class FoundryRunSummaryObserver implements Observer {
     return nowMs;
   }
 
-  /** Drop run buffers that exceeded `ttlMs` without a run-end. Public so tests
-   * can drive eviction deterministically (BufferedObserver parity). */
+  /** Drop run buffers whose LAST ACTIVITY exceeded `ttlMs` without a run-end.
+   * Eviction is inactivity-based (not open-time-based): a run that keeps
+   * emitting events is alive by definition and must not be evicted mid-run,
+   * or its summary would be silently zeroed at a late run-end (SC-008).
+   * Public so tests can drive eviction deterministically (BufferedObserver
+   * parity). */
   evictStale(): void {
     const nowMs = this.readClock();
     if (nowMs === null) return;
     const cutoff = nowMs - this.ttlMs;
     for (const [runId, buf] of this.buffered) {
-      if (buf.createdAt < cutoff) {
+      if (buf.lastActivityAt < cutoff) {
         this.buffered.delete(runId);
         this.evicted++;
         fwLogger().warn(
-          `[FoundryRunSummaryObserver] evicted stale run buffer for runId '${String(runId)}' — run-end never arrived within ${this.ttlMs}ms`,
+          `[FoundryRunSummaryObserver] evicted stale run buffer for runId '${String(runId)}' — no events within ${this.ttlMs}ms and run-end never arrived`,
         );
       }
     }
@@ -220,21 +229,33 @@ export class FoundryRunSummaryObserver implements Observer {
       this.emitRunSummary(event);
       return;
     }
-    // Record for the eventual summary, then forward to the per-event mapper.
-    // A run buffer cannot be opened without a trustworthy stamp (BufferedObserver
-    // parity): an unstampable buffer could never be evicted. Drop with a loud
-    // trail instead of persisting a NaN/Infinity stamp that orphans the run.
-    const nowMs = this.readClock();
-    if (nowMs === null) {
+    // The open-buffer branch absorbs the event even when the clock
+    // misbehaves (BufferedObserver parity): the activity refresh is
+    // best-effort — a null stamp leaves lastActivityAt stale, but the sweep
+    // is disabled that cycle anyway (readClock gate), so no active run is
+    // evicted on stale data while the clock is broken. Events are dropped
+    // ONLY when a NEW buffer would have to be opened unstampable.
+    const existing = this.buffered.get(event.runId);
+    const activity = this.readClock();
+    if (existing !== undefined) {
+      existing.events.push(event);
+      if (activity !== null) existing.lastActivityAt = activity;
+      this.inner.observe(event);
+      return;
+    }
+    if (activity === null) {
       this.droppedEvents++;
       fwLogger().warn(
         `[FoundryRunSummaryObserver] clock unavailable — run buffer not opened for runId '${String(event.runId)}'; event dropped (counted)`,
       );
       return this.inner.observe(event);
     }
-    const entry = this.buffered.get(event.runId) ?? { events: [], createdAt: nowMs };
-    entry.events.push(event);
-    this.buffered.set(event.runId, entry);
+    const opened: RunSummaryBuffer = {
+      events: [event],
+      createdAt: activity,
+      lastActivityAt: activity,
+    };
+    this.buffered.set(event.runId, opened);
     this.inner.observe(event);
   }
 

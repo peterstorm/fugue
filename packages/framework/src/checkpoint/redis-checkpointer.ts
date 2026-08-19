@@ -5,7 +5,7 @@ import type { RunId, NodeId } from "../types/ids.js";
 import { __brandDagIdUnchecked, __brandNodeIdUnchecked } from "../types/ids.js";
 import { ok, err } from "../types/result.js";
 import type { Checkpointer, CheckpointerLoadOpts, RunMeta, NodeState, RunState } from "./checkpointer.js";
-import { TTL_SECONDS } from "./checkpointer.js";
+import { TTL_SECONDS, evaluateCheckpointLoadGates } from "./checkpointer.js";
 import { FRAMEWORK_VERSION } from "./fingerprint.js";
 import { frameworkError } from "../types/error-factories.js";
 import { isRepresentableTimestampMs } from "../types/clock.js";
@@ -222,25 +222,6 @@ export class RedisCheckpointer implements Checkpointer {
       });
     }
 
-    // ADR-0017: reject checkpoints produced by a different framework version.
-    // Validation, retry, and output-coercion semantics may have changed across
-    // releases; resuming v1 state under v2 code can corrupt the run silently.
-    if (meta.frameworkVersion !== FRAMEWORK_VERSION) {
-      return err({
-        kind: "checkpoint-version-mismatch" as const,
-        runId,
-        expected: FRAMEWORK_VERSION,
-        actual: meta.frameworkVersion,
-      });
-    }
-
-    // Reject when caller supplied an expected DAG fingerprint and it does not
-    // match the stored one (or no fingerprint is stored). A re-shaped DAG —
-    // added nodes, changed edges, evolved output schemas — would otherwise
-    // replay cached outputs into the new graph and skip the validations they
-    // depend on. Opt-in: callers who omit `expectedDagFingerprint` keep the
-    // legacy no-check behaviour.
-    //
     // The caller-owned `opts` bag is a hostile seam (parity with the
     // in-memory adapter and the file backend's `parseLoadOpts` snapshot-once
     // discipline): read `expectedDagFingerprint` EXACTLY ONCE under a guard —
@@ -255,31 +236,24 @@ export class RedisCheckpointer implements Checkpointer {
         frameworkError.cacheError("checkpoint:load", `load could not inspect options: ${safeErrorMessage(error)}`),
       );
     }
-    if (expectedDagFingerprint !== undefined) {
-      if (meta.dagFingerprint !== expectedDagFingerprint) {
-        return err({
-          kind: "checkpoint-version-mismatch" as const,
-          runId,
-          expected: expectedDagFingerprint,
-          actual: meta.dagFingerprint,
-        });
-      }
-    }
 
-    // The clock read is the shared hostile-seam guard above: a throwing or
-    // non-representable clock settles as a typed `cache-error` before any
-    // comparison runs (a NaN timestamp would otherwise void the FR-027 TTL
-    // check — `NaN > TTL` is always false).
-    const nowClock = this.readClock("load", runId);
-    if (!nowClock.ok) return nowClock;
-    const nowMs = nowClock.value;
-    if (nowMs - createdAt.getTime() > TTL_SECONDS * 1000) {
-      return err({
-        kind: "checkpoint-expired" as const,
+    // ADR-0017/FR-026/FR-027 gate decision — the ONE shared encoding
+    // (evaluateCheckpointLoadGates): gate order + verdict construction are
+    // identical to the in-memory and file adapters (round-22 atl-1). The
+    // clock thunk is this adapter's own guarded readClock, so the version
+    // gates still evaluate BEFORE any clock read (failure-precedence
+    // parity).
+    const gates = evaluateCheckpointLoadGates(
+      {
         runId,
-        expiredAt: createdAt.toISOString(),
-      });
-    }
+        frameworkVersion: meta.frameworkVersion,
+        dagFingerprint: meta.dagFingerprint,
+        expectedDagFingerprint,
+        createdAt,
+      },
+      () => this.readClock("load", runId),
+    );
+    if (!gates.ok) return gates;
 
     let rawNodes: Record<string, string>;
     try {
@@ -303,8 +277,8 @@ export class RedisCheckpointer implements Checkpointer {
         // `__proto__` matches ID_PATTERN (`_` is in the charset), so it is a
         // LEGAL nodeId — plain bracket assignment would hit Object.prototype's
         // `__proto__` SETTER and re-parent the returned map instead of defining
-        // an own entry (round-17: the file backend's defineProperty choice,
-        // parity-pinned across all legs in the shared `checkpointerSuite`).
+        // an own entry (the file backend's defineProperty choice, parity-
+        // pinned across all legs in the shared `checkpointerSuite`).
         Object.defineProperty(nodes, nodeId, {
           value: deserializeNode(raw),
           enumerable: true,
