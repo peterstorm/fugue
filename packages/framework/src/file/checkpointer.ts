@@ -60,8 +60,8 @@
 // containment policy lives in `verified-directory.ts`; the pure stored-schema
 // codecs (meta/node serialization, options parsing, output canonicalization)
 // live in `checkpointer-codec.ts`. This module is the thin filesystem shell:
-// directory resolution, atomic writes, and typed error mapping only (2026-08-14
-// codec-separation remediation — see checkpointer-codec.ts header).
+// directory resolution, atomic writes, and typed error mapping only (see
+// checkpointer-codec.ts header).
 //
 // Failure surface (ADR-0080/FR-040): NOTHING throws across the port boundary.
 // Every failure returns `Result<_, FrameworkError>` using existing kinds —

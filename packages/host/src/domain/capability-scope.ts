@@ -104,7 +104,7 @@ export type OperationNarrowedHandle = MailSendHandle | SitesReadHandle | Dynamic
  * A mail to send through the `msgraph:mail.send` handle.
  *
  * `from` is the SENDER MAILBOX (an id or UPN, e.g. `agent@contoso.com`) the
- * message is sent AS — it is REQUIRED and load-bearing (review C2): the handle is
+ * message is sent AS — it is REQUIRED and load-bearing: the handle is
  * built over an APP-ONLY (client-credentials / WIF) token, and Microsoft Graph
  * rejects `/me/sendMail` unconditionally for application-permission tokens
  * ("/me request is only valid with delegated authentication flow"). An app-only

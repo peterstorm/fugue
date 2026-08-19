@@ -22,7 +22,7 @@ import type { MintingAuthority } from "../types/capability-broker.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeId, DagId } from "../types/ids.js";
 import { emit } from "./emit.js";
-import { applyJitter } from "../shared/jitter.js";
+import { applyJitter, DEFAULT_JITTER_RATIO } from "../shared/jitter.js";
 import { emitHumanIntervention } from "./human-emission.js";
 import { executeWave, type WaveConfig } from "./wave-execution.js";
 import { enrichHumanRespondedEvent, type UnenrichedDagEvent } from "./reroute.js";
@@ -33,8 +33,6 @@ import { type NodeSpanOutcome } from "./node-span.js";
 // ---------------------------------------------------------------------------
 // Backoff + jitter
 // ---------------------------------------------------------------------------
-
-const DEFAULT_JITTER_RATIO = 0.2;
 
 const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
   new Promise((resolve) => {

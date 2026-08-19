@@ -62,8 +62,7 @@ export type JwtVerifyError =
  * hardcoded); tests inject a fake. This port is the ONLY producer of
  * `SignatureVerifiedClaims` (it calls `markSignatureVerified` AFTER checking the
  * signature) — and `validateRealmJwtClaims` accepts only that brand, so the
- * "signature first" ordering is enforced by the type system, not convention
- * (review C5).
+ * "signature first" ordering is enforced by the type system, not convention.
  */
 export type VerifyRealmJwt = (token: string) => Promise<Result<SignatureVerifiedClaims, JwtVerifyError>>;
 

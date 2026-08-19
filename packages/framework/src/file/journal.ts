@@ -74,8 +74,11 @@
 //
 // Import discipline (INV-1): `node:fs`, `node:path` only among node built-ins.
 
-import { mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { mkdirSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+// Strict checkpoint-projection reader — ONE read seam for the resume shell
+// and this store-shaped surface (round-21 atl-1).
+import { readCheckpointFile } from "./event-log.js";
 import { atomicWriteFile, withFileLock } from "./atomic.js";
 import {
   APPEND_LOCK,
@@ -100,7 +103,7 @@ import { isFileCheckpointCommit } from "./checkpoint-record.js";
 import type { FileCheckpointCommit } from "./checkpoint-record.js";
 import { toJson } from "../state-machine/serialize.js";
 import type { FrameworkError } from "../types/errors.js";
-import { isMissingPathError, safeDiagnosticRender } from "../types/safe-error.js";
+import { safeDiagnosticRender } from "../types/safe-error.js";
 import { parseFileFactoryClock } from "./options.js";
 import {
   fileCacheError,
@@ -391,11 +394,16 @@ export const createFileJournal = (
 
         // Both callees throw ALREADY-TYPED failures (`serializeFileEventRecord`
         // and `atomicWriteFile` name their own operation, location, and
-        // inferred failureClass) — there are no inner catches here. The single
-        // outer catch below re-tags every `withFileLock`-boundary failure once,
-        // at the public journal surface (as its comment states), so the
-        // diagnostic carries exactly one `appendEvent failed at run directory
-        // D:` layer instead of a redundant nested pair.
+        // inferred failureClass) — there are no inner catches here. The outer
+        // catch re-tags the `withFileLock` boundary at the public journal
+        // surface, so a PRE-LOCK failure carries exactly one `appendEvent
+        // failed at run directory D:` layer, while a failure INSIDE the lock
+        // body carries two: the inner typed failure, the `withFileLock`
+        // boundary layer (which names the lock path — deliberately retained,
+        // pinned by file-freshness-index.test.ts), and the outer `appendEvent`
+        // layer. The lock inner catch wraps unconditionally, unlike its
+        // sibling `acquireFileLock` ride-through — a maintainer decision, not
+        // a comment to deny.
         const json = serializeFileEventRecord(
           record.sequence,
           record.dedupKey,
@@ -469,18 +477,7 @@ export const createFileJournal = (
     }
   };
 
-  const readCheckpoint = (): string | null => {
-    try {
-      return readFileSync(checkpointPath, "utf-8");
-    } catch (error) {
-      // Absence is ENOENT ONLY: `existsSync` swallows EACCES/ENOTDIR and
-      // would misreport a permission-broken directory as "no checkpoint".
-      // The sibling strict readers (event-log.ts, file/checkpointer.ts)
-      // probe the same way.
-      if (isMissingPathError(error)) return null;
-      throw fsFailure("readCheckpoint", directory, error);
-    }
-  };
+  const readCheckpoint = (): string | null => readCheckpointFile(directory);
 
   return { appendEvent, writeCheckpoint, writeProgress, readCheckpoint };
 };

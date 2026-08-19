@@ -807,6 +807,87 @@ describe("@fuguejs/oracle — createOracleAdapter() production query/close lifec
     expect(closed).toBe(1);
   });
 
+  it("a release failure after a SUCCESSFUL execute is warned, never masks the result (no double-execution on retry)", async () => {
+    // Before the round-21 fix, `finally { await conn.close() }` let a close
+    // rejection replace an already-succeeded statement: the caller saw Err,
+    // classified it retriable, and re-ran the statement — a double-execution
+    // hazard for write DML. The primary outcome must survive the release
+    // fault; the failure is reported alongside it (credential-stripped warn).
+    let closed = 0;
+    installOracledbMock(() => ({
+      execute: async () => ({ rows: [{ optionKey: "A", standardPrice: "199", discountPrice: "99" }] }),
+      close: async () => {
+        closed += 1;
+        throw new Error("ORA-12599: release fault with user/pass@dbhost");
+      },
+    }));
+
+    const handle = createOracleAdapter({
+      connectString: "dbhost:1521/PRICING",
+      user: "u",
+      password: "p",
+    });
+
+    const warns: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warns.push(args);
+    };
+    let result;
+    try {
+      result = await handle.client.query(PackageSchema, "SELECT * FROM packages");
+    } finally {
+      console.warn = originalWarn;
+    }
+    // The query result is delivered — the release fault did not mask it.
+    expect(isOk(result)).toBe(true);
+    if (result.ok) {
+      expect(result.value).toHaveLength(1);
+      expect(result.value[0]?.optionKey).toBe("A");
+    }
+    // The connection was still released exactly once (no leak).
+    expect(closed).toBe(1);
+    // The release fault is reported alongside the primary outcome, stripped.
+    expect(warns.length).toBe(1);
+    expect(String(warns[0]?.join(" "))).toContain("query succeeded but connection release failed");
+    expect(String(warns[0]?.join(" "))).not.toContain("user/pass@dbhost");
+    expect(String(warns[0]?.join(" "))).toContain("ORA-12599");
+  });
+
+  it("a release failure while execute THROWS keeps the statement error primary", async () => {
+    // Both faults at once: the caller must see the execute failure (the
+    // meaningful one), never the secondary release fault.
+    let closed = 0;
+    installOracledbMock(() => ({
+      execute: async () => {
+        throw new Error("ORA-00942: table or view does not exist");
+      },
+      close: async () => {
+        closed += 1;
+        throw new Error("ORA-12599: release fault");
+      },
+    }));
+
+    const handle = createOracleAdapter({
+      connectString: "dbhost:1521/PRICING",
+      user: "u",
+      password: "p",
+    });
+
+    const result = await handle.client.query(PackageSchema, "SELECT * FROM packages");
+    expect(isErr(result)).toBe(true);
+    if (!result.ok) {
+      const e = result.error;
+      if (e.kind === "node-crash" || e.kind === "transient") {
+        expect(e.message).toContain("ORA-00942");
+        expect(e.message).not.toContain("release fault");
+      } else {
+        throw new Error(`unexpected error kind ${e.kind}`);
+      }
+    }
+    expect(closed).toBe(1);
+  });
+
   it("close() drains the pool with pool.close(0) after a successful open", async () => {
     // Only close()-as-no-op-after-failed-open was covered. This asserts the happy
     // path: once the pool has been opened, close() calls pool.close(0) (zero-drain

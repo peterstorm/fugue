@@ -250,8 +250,7 @@ export type { NodeContextForDag };
  * per-node (the only place the real `nodeId` and that node's `requires` are
  * known), so resolving it once at context-construction with empty `requires`
  * (the rejected eager-resolution design) could never reach the minting machinery
- * and silently dropped every statically-configured client on the realm path
- * (review C1).
+ * and silently dropped every statically-configured client on the realm path.
  *
  * Pools stay boot-scoped (FR-W2-005): only authority resolution moved behind the
  * broker, and it now moves per node, in the framework.
@@ -352,9 +351,9 @@ export const createNodeContextForDag = async (
   // attributed (dagId, runId, nodeId), aggregated, and budget-checked in-process
   // (no network round trip). When `llmBudgetTokens` is unset the decorator meters
   // but never refuses (FR-W1-006). One decorator per NodeContext → run-scoped
-  // counter. @satisfies FR-W0-001 FR-W0-004 FR-W1-001..006 (FR-W2-009
-  // groundwork only — LLM authority is run-scoped here, not yet on the
-  // broker's mintFor seam; see keycloak-broker.ts)
+  // counter. @satisfies FR-W0-001 FR-W0-004 FR-W1-001..006 (FR-W2-009:
+  // LLM authority is deliberately run-scoped here — the metered decorator is
+  // the per-run budget authority; see keycloak-broker.ts)
   const llm = createMeteredLlm(shared.llm, {
     dagId,
     runId,

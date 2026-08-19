@@ -132,7 +132,7 @@ export interface CheckpointerLoadOpts {
 
 export interface Checkpointer {
   /**
-   * Identifier ownership (deepening-round adjudication, one encoding for the
+   * Identifier ownership (one encoding for the
    * whole checkpoint domain): the port parameters and the meta/node id fields
    * carry the branded ids — `RunId`, `NodeId`, `DagId` — the same brands the
    * engine's sibling `CheckpointWriter.write(runId: RunId, nodeId: NodeId, …)`

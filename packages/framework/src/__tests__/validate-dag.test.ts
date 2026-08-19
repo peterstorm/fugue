@@ -155,7 +155,7 @@ describe("validateDagShape", () => {
 
   it("rejects a retry.backoffMs entry that is NaN or negative", () => {
     for (const bad of [NaN, -1, Number.NEGATIVE_INFINITY]) {
-      const node = { ...mkNode("A"), retry: { backoffMs: [1000, bad] } };
+      const node = { ...mkNode("A"), retry: { backoffMs: [1000, bad] as [number, ...number[]] } };
       const r = validateDagShape({
         id: "bad-backoff",
         nodes: { A: node },
@@ -163,12 +163,74 @@ describe("validateDagShape", () => {
       });
       expect(r.ok).toBe(false);
       if (!r.ok && r.error.kind === "validation") {
-        expect(r.error.message).toContain("retry.backoffMs entries must all be finite non-negative numbers");
+        expect(r.error.message).toContain("retry.backoffMs must be a non-empty ladder of finite non-negative numbers");
         expect(r.error.nodeId).toBe(nodeId("A"));
       } else {
         throw new Error(`expected a validation error for backoffMs=${String(bad)}, got ${r.ok ? "ok" : r.error.kind}`);
       }
     }
+  });
+
+  it("rejects an EMPTY retry.backoffMs ladder (no attempt-0 delay; vacuous every)", () => {
+    // `[]` passes `every(...)` vacuously and the compiled `?? [1000, 2000, 4000]`
+    // default never fires for `[]` — round-21 tda-1 closed the hole at the gate.
+    // The tuple type makes `[]` unrepresentable for typed callers, so the
+    // runtime gate is exercised through the untyped-input path (a cast): a
+    // JS/JSON caller can still hand the gate `[]`.
+    const node = { ...mkNode("A"), retry: { backoffMs: [] as unknown as [number, ...number[]] } };
+    const r = validateDagShape({
+      id: "empty-backoff",
+      nodes: { A: node },
+      edges: [{ from: DAG_INPUT, to: "A" }],
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok && r.error.kind === "validation") {
+      expect(r.error.message).toContain("retry.backoffMs must be a non-empty ladder");
+      expect(r.error.nodeId).toBe(nodeId("A"));
+    } else {
+      throw new Error(`expected a validation error for the empty ladder, got ${r.ok ? "ok" : r.error.kind}`);
+    }
+  });
+
+  it("rejects retryLimits/defaultRetryLimit outside the non-negative-safe-integer domain", () => {
+    for (const bad of [NaN, -1, 1.5, Number.POSITIVE_INFINITY]) {
+      const withLimit = validateDagShape({
+        id: "bad-limits",
+        nodes: { A: mkNode("A") },
+        edges: [{ from: DAG_INPUT, to: "A" }],
+        retryLimits: { A: bad },
+      });
+      expect(withLimit.ok).toBe(false);
+      if (!withLimit.ok && withLimit.error.kind === "validation") {
+        expect(withLimit.error.message).toContain(`retryLimits['A'] must be a non-negative safe integer`);
+      } else {
+        throw new Error(`expected a validation error for retryLimits.A=${String(bad)}, got ${withLimit.ok ? "ok" : withLimit.error.kind}`);
+      }
+
+      const withDefault = validateDagShape({
+        id: "bad-limit-default",
+        nodes: { A: mkNode("A") },
+        edges: [{ from: DAG_INPUT, to: "A" }],
+        defaultRetryLimit: bad,
+      });
+      expect(withDefault.ok).toBe(false);
+      if (!withDefault.ok && withDefault.error.kind === "validation") {
+        expect(withDefault.error.message).toContain("defaultRetryLimit must be a non-negative safe integer");
+      } else {
+        throw new Error(`expected a validation error for defaultRetryLimit=${String(bad)}, got ${withDefault.ok ? "ok" : withDefault.error.kind}`);
+      }
+    }
+  });
+
+  it("accepts boundary-legal retryLimits/defaultRetryLimit and single-element ladders", () => {
+    const dag: DagDefInput = {
+      id: "ok-retry-budgets",
+      nodes: { A: { ...mkNode("A"), retry: { backoffMs: [0] } } },
+      edges: [{ from: DAG_INPUT, to: "A" }],
+      retryLimits: { A: 0 },
+      defaultRetryLimit: 3,
+    };
+    expect(validateDagShape(dag).ok).toBe(true);
   });
 
   it("rejects a retry.jitterRatio outside [0, 1] or non-finite", () => {
@@ -191,7 +253,7 @@ describe("validateDagShape", () => {
   it("accepts boundary-legal retry configs and bare defaults", () => {
     const node = {
       ...mkNode("A"),
-      retry: { backoffMs: [0, 1000], jitterRatio: 0 },
+      retry: { backoffMs: [0, 1000] as [number, ...number[]], jitterRatio: 0 },
     };
     const dag: DagDefInput = {
       id: "ok-retry",

@@ -1,6 +1,6 @@
 /**
  * CapabilityRegistry augmentation — registers the broker-resolvable downstream
- * scopes as first-class capabilities (ADR-0051 module augmentation; review C6).
+ * scopes as first-class capabilities (ADR-0051 module augmentation).
  *
  * A DAG node declares a downstream scope the same way it declares any other
  * capability: `requires: ["msgraph:mail.send"]`. For that to typecheck — and for

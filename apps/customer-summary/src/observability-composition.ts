@@ -109,21 +109,110 @@ interface ComposedObservability {
  * already guards). A throw in summary mapping is contained per the buffered
  * replay's try/catch.
  */
+interface FoundryRunSummaryObserverOpts {
+  /** Drop a run buffer if `run-end` never arrived within this many ms. Default 1h. */
+  readonly ttlMs?: number;
+  /** Sweep interval for dropping stale buffers. Default 5min. */
+  readonly sweepIntervalMs?: number;
+  /** Injectable clock; defaults to `Date.now`. Used by tests for deterministic eviction. */
+  readonly now?: () => number;
+}
+
+/** Per-run buffer entry — events plus the wall-clock time it was opened. */
+interface RunSummaryBuffer {
+  events: ObserverEvent[];
+  createdAt: number;
+}
+
+const SUMMARY_TTL_MS = 60 * 60 * 1000; // 1h
+const SUMMARY_SWEEP_MS = 5 * 60 * 1000; // 5min
+
 export class FoundryRunSummaryObserver implements Observer {
   private readonly inner: AiFoundryObserver;
-  // Inner buffer keyed by runId. Per-run entries are bounded ONLY by their own
-  // terminal `run-end` (`emitRunSummary` → `this.buffered.delete`); this class has
-  // NO TTL / orphan-eviction sweep of its own (unlike the framework
-  // `BufferedObserver`). The bounded-growth invariant is therefore enforced by the
-  // wrapping contract: in production (`composeObservability`) this always runs UNDER
-  // a `BufferedObserver`, which guarantees a terminal `run-end` per run, so entries
-  // cannot accumulate unbounded. Direct/standalone use is TEST-ONLY — a run that
-  // never emits `run-end` (crash, abandoned run) would leak its buffer, so do not
-  // wire this observer standalone in production.
-  private readonly buffered = new Map<string, ObserverEvent[]>();
+  // Inner buffer keyed by runId. Per-run entries are normally bounded by their
+  // own terminal `run-end` (`emitRunSummary` → `this.buffered.delete`); the
+  // TTL sweep mirrors the framework `BufferedObserver`'s orphan-eviction
+  // discipline so a run that never emits `run-end` (crash, abandoned run)
+  // cannot leak its buffer — the class is memory-safe STANDALONE, not only
+  // under the production wrapper contract (round-21 atl-2).
+  private readonly buffered = new Map<string, RunSummaryBuffer>();
+  /** Buffers dropped because `run-end` never arrived within TTL. Useful for monitoring. */
+  evicted = 0;
+  /** Buffering events dropped because the clock was untrustworthy when the
+   * run buffer would have been opened (a hostile clock must not orphan a
+   * buffer that could never be evicted — BufferedObserver parity). */
+  droppedEvents = 0;
+  private readonly ttlMs: number;
+  private readonly sweepHandle: ReturnType<typeof setInterval> | null;
+  private readonly now: () => number;
 
-  constructor(private readonly sink: FoundryTelemetrySink) {
+  constructor(
+    private readonly sink: FoundryTelemetrySink,
+    opts?: FoundryRunSummaryObserverOpts,
+  ) {
     this.inner = new AiFoundryObserver(sink);
+    this.ttlMs = opts?.ttlMs ?? SUMMARY_TTL_MS;
+    this.now = opts?.now ?? Date.now;
+    const sweepMs = opts?.sweepIntervalMs ?? SUMMARY_SWEEP_MS;
+    if (sweepMs > 0) {
+      this.sweepHandle = setInterval(() => this.evictStale(), sweepMs);
+      // Don't keep the event loop alive purely to sweep an idle observer.
+      this.sweepHandle.unref();
+    } else {
+      this.sweepHandle = null;
+    }
+  }
+
+  /** Stop the background sweep. Call when discarding the observer. */
+  close(): void {
+    if (this.sweepHandle) clearInterval(this.sweepHandle);
+  }
+
+  [Symbol.dispose](): void {
+    this.close();
+  }
+
+  /**
+   * Hostile-seam guard for the injected clock, parity with the framework
+   * BufferedObserver's readClock discipline (ADR-0080): a throwing clock must
+   * never escape as an uncaught timer exception, and a non-finite stamp must
+   * never silently disable eviction. Returns `null`, after a loud diagnostic,
+   * when the clock cannot be trusted this cycle.
+   */
+  private readClock(): number | null {
+    let nowMs: number;
+    try {
+      nowMs = this.now();
+    } catch (error) {
+      fwLogger().error(
+        `[FoundryRunSummaryObserver] clock threw — eviction disabled this cycle: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
+    if (!Number.isFinite(nowMs)) {
+      fwLogger().warn(
+        `[FoundryRunSummaryObserver] clock returned a non-finite stamp (${String(nowMs)}) — eviction disabled this cycle`,
+      );
+      return null;
+    }
+    return nowMs;
+  }
+
+  /** Drop run buffers that exceeded `ttlMs` without a run-end. Public so tests
+   * can drive eviction deterministically (BufferedObserver parity). */
+  evictStale(): void {
+    const nowMs = this.readClock();
+    if (nowMs === null) return;
+    const cutoff = nowMs - this.ttlMs;
+    for (const [runId, buf] of this.buffered) {
+      if (buf.createdAt < cutoff) {
+        this.buffered.delete(runId);
+        this.evicted++;
+        fwLogger().warn(
+          `[FoundryRunSummaryObserver] evicted stale run buffer for runId '${String(runId)}' — run-end never arrived within ${this.ttlMs}ms`,
+        );
+      }
+    }
   }
 
   observe(event: ObserverEvent): void {
@@ -132,14 +221,26 @@ export class FoundryRunSummaryObserver implements Observer {
       return;
     }
     // Record for the eventual summary, then forward to the per-event mapper.
-    const buf = this.buffered.get(event.runId) ?? [];
-    buf.push(event);
-    this.buffered.set(event.runId, buf);
+    // A run buffer cannot be opened without a trustworthy stamp (BufferedObserver
+    // parity): an unstampable buffer could never be evicted. Drop with a loud
+    // trail instead of persisting a NaN/Infinity stamp that orphans the run.
+    const nowMs = this.readClock();
+    if (nowMs === null) {
+      this.droppedEvents++;
+      fwLogger().warn(
+        `[FoundryRunSummaryObserver] clock unavailable — run buffer not opened for runId '${String(event.runId)}'; event dropped (counted)`,
+      );
+      return this.inner.observe(event);
+    }
+    const entry = this.buffered.get(event.runId) ?? { events: [], createdAt: nowMs };
+    entry.events.push(event);
+    this.buffered.set(event.runId, entry);
     this.inner.observe(event);
   }
 
   private emitRunSummary(runEnd: RunEndEvent): void {
-    const events = this.buffered.get(runEnd.runId) ?? [];
+    const entry = this.buffered.get(runEnd.runId);
+    const events = entry?.events ?? [];
     this.buffered.delete(runEnd.runId);
 
     const summary = computeRunSummary(events, runEnd);

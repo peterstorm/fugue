@@ -10,6 +10,7 @@ import { type Result, ok } from "../types/result.js";
 import type { DagPhase, DagEvent, DagMachineContext } from "./types.js";
 import { dagTransition } from "./transition.js";
 import { topoSort } from "../shared/topo.js";
+import { DEFAULT_JITTER_RATIO } from "../shared/jitter.js";
 import { computeIncomingByNode, computeOutgoingByNode, computeUnconditionalAdj, seedInitialActiveSet } from "./topology.js";
 import { match } from "ts-pattern";
 
@@ -83,7 +84,7 @@ export const compileDagToMachine = (
       n.retry
         ? [[n.id, {
             backoffMs: n.retry.backoffMs ?? [1000, 2000, 4000],
-            jitterRatio: n.retry.jitterRatio ?? 0.2,
+            jitterRatio: n.retry.jitterRatio ?? DEFAULT_JITTER_RATIO,
           }] as const]
         : [],
     ),

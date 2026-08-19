@@ -108,3 +108,87 @@ describe("RedisFreshnessIndex decodeMember — rejection", () => {
     expect(decode(JSON.stringify(["r", "n", 42, "v"]))).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// findConflict corrupt-member verdict (round-21 sfh-2) — an undecodable
+// LATEST member must fail CLOSED (ADR-0025): the caller aborts the wave
+// rather than proceeding without conflict detection. Only the methods the
+// class touches on this path are faked.
+// ---------------------------------------------------------------------------
+
+import { RedisFreshnessIndex } from "../checkpoint/redis-freshness-index.js";
+import { witness, resourceName } from "../types/freshness.js";
+
+const fakeFindConflictRedis = (members: readonly string[]): {
+  redis: ConstructorParameters<typeof RedisFreshnessIndex>[0];
+  state: { calls: number };
+} => {
+  const state = { calls: 0 };
+  const redis = {
+    zrevrangebyscore: async () => {
+      state.calls += 1;
+      return [...members];
+    },
+  };
+  return { redis: redis as unknown as ConstructorParameters<typeof RedisFreshnessIndex>[0], state };
+};
+
+describe("RedisFreshnessIndex findConflict — corrupt-member verdict (ADR-0025)", () => {
+  it("fails closed on an undecodable (non-JSON) latest member instead of returning ok(null)", async () => {
+    const { redis, state } = fakeFindConflictRedis(["not-json", "900"]);
+    const index = new RedisFreshnessIndex(redis);
+
+    const result = await index.findConflict(witness("version", resourceName("res:orders"), "1"), 0);
+    expect(state.calls).toBe(1);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a fail-closed rejection");
+    expect(result.error.kind).toBe("cache-error");
+    if (result.error.kind === "cache-error") {
+      expect(result.error.operation).toBe("freshness:findConflict");
+      expect(result.error.failureClass).toBe("permanent");
+      expect(result.error.message).toContain("res:orders");
+      expect(result.error.message).toContain("corrupt/undecodable");
+    }
+    // The failure is observable on the port's instrumentation surface.
+    expect(index.consecutiveFailures).toBe(1);
+  });
+
+  it("fails closed on an off-contract-kind member (closed-union gate at the verdict)", async () => {
+    const corruptMember = __testEncodeMember(R("run-9"), N("writer"), "bogus-kind", "v");
+    const { redis } = fakeFindConflictRedis([corruptMember, "900"]);
+    const index = new RedisFreshnessIndex(redis);
+
+    const result = await index.findConflict(witness("version", resourceName("res:a"), "1"), 0);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a fail-closed rejection");
+    expect(result.error.kind).toBe("cache-error");
+    if (result.error.kind === "cache-error") {
+      expect(result.error.operation).toBe("freshness:findConflict");
+      expect(result.error.message).toContain("res:a");
+    }
+  });
+
+  it("still returns ok(null) when the latest member decodes and does not conflict", async () => {
+    const member = __testEncodeMember(R("run-9"), N("writer"), "version", "1");
+    const { redis } = fakeFindConflictRedis([member, "900"]);
+    const index = new RedisFreshnessIndex(redis);
+
+    // Same witness value as conditioned-on → no conflict, verified verdict.
+    const result = await index.findConflict(witness("version", resourceName("res:b"), "1"), 0);
+    expect(result).toEqual({ ok: true, value: null });
+  });
+
+  it("returns the conflicting write when the latest member decodes to a different value", async () => {
+    const member = __testEncodeMember(R("run-9"), N("writer"), "version", "2");
+    const { redis } = fakeFindConflictRedis([member, "900"]);
+    const index = new RedisFreshnessIndex(redis);
+
+    const result = await index.findConflict(witness("version", resourceName("res:c"), "1"), 0);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).not.toBeNull();
+      expect(result.value?.runId).toBe(R("run-9"));
+      expect(result.value?.succeededAtMs).toBe(900);
+    }
+  });
+});

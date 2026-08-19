@@ -105,22 +105,26 @@ export const validateDagShape = (
     }
 
     // Retry-config numeric domains (NodeRetryConfig): backoff delays must be
-    // finite non-negative milliseconds and the jitter ratio a finite value in
-    // [0, 1]. A NaN/negative delay or out-of-range jitter would otherwise flow
-    // unvalidated into `applyJitter` retry scheduling (a NaN/negative delay
-    // collapses `setTimeout` to an immediate retry spin; jitter > 1 can invert
-    // the delay sign). Validation lives at the single mandatory soundness gate
-    // with the same `validation`-kind error naming the offending node.
+    // finite non-negative milliseconds, the ladder must NOT be empty (an
+    // empty ladder has no attempt-0 delay — `every` would pass it vacuously
+    // and the compiled `?? [1000, 2000, 4000]` default never fires for `[]`),
+    // and the jitter ratio a finite value in [0, 1]. A NaN/negative delay or
+    // out-of-range jitter would otherwise flow unvalidated into `applyJitter`
+    // retry scheduling (a NaN/negative delay collapses `setTimeout` to an
+    // immediate retry spin; jitter > 1 can invert the delay sign). Validation
+    // lives at the single mandatory soundness gate with the same
+    // `validation`-kind error naming the offending node.
     if (node.retry !== undefined) {
       const { backoffMs, jitterRatio } = node.retry;
       if (
         backoffMs !== undefined &&
-        !backoffMs.every((ms) => Number.isFinite(ms) && ms >= 0)
+        (backoffMs.length === 0 ||
+          !backoffMs.every((ms) => Number.isFinite(ms) && ms >= 0))
       ) {
         return err(
           validationErr(
             node.id,
-            `node '${node.id}' retry.backoffMs entries must all be finite non-negative numbers`,
+            `node '${node.id}' retry.backoffMs must be a non-empty ladder of finite non-negative numbers`,
           ),
         );
       }
@@ -136,6 +140,44 @@ export const validateDagShape = (
         );
       }
     }
+  }
+
+  // DAG-level retry budgets (retryLimits / defaultRetryLimit): per-node
+  // retry counts are compared against attempt counters, so the domain is the
+  // same non-negative-safe-integer class as the node-level numeric gates
+  // above. A bare `as Readonly<Record<string, number>>` pass-through (the
+  // pre-fix shape) let NaN/negative/infinite limits flow into `getRetryLimit`
+  // and corrupt the budget. Same single gate, same `validation`-kind error.
+  if (input.retryLimits !== undefined) {
+    for (const [key, limit] of Object.entries(input.retryLimits)) {
+      if (limit === undefined) {
+        return err(
+          validationErr(
+            nodeId("__dag__"),
+            `retryLimits['${key}'] must be a non-negative safe integer, got undefined`,
+          ),
+        );
+      }
+      if (!Number.isSafeInteger(limit) || limit < 0) {
+        return err(
+          validationErr(
+            nodeId("__dag__"),
+            `retryLimits['${key}'] must be a non-negative safe integer, got ${String(limit)}`,
+          ),
+        );
+      }
+    }
+  }
+  if (
+    input.defaultRetryLimit !== undefined &&
+    (!Number.isSafeInteger(input.defaultRetryLimit) || input.defaultRetryLimit < 0)
+  ) {
+    return err(
+      validationErr(
+        nodeId("__dag__"),
+        `defaultRetryLimit must be a non-negative safe integer, got ${String(input.defaultRetryLimit)}`,
+      ),
+    );
   }
 
   const nodeIds = new Set(entries.map(([id]) => nodeId(id)));

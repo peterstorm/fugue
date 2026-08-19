@@ -165,7 +165,7 @@ export interface HostInstance {
   readonly server: { port: number; stop: () => void } | null;
 }
 
-// ── Capability Broker selection (T8 / per-node minting, review C1) ─────────
+// ── Capability Broker selection (T8 / per-node minting) ───────────────────
 
 /**
  * The fail-safe default `resolveSubjectToken`: resolves NO token for any run, so
@@ -207,7 +207,7 @@ export const withSubjectTokenRelease = async <T>(
  * Select the capability broker for this boot — the per-invocation AUTHORITY
  * seam. Exported so the selection logic (config → broker, `AGENT_CLIENT_SCOPES`
  * → `assignedScopes` closure, unwired fail-closed endpoints) is testable
- * without booting a full host (review C7.5).
+ * without booting a full host.
  *
  * When the Keycloak realm config is present (`REALM_JWT_ISSUER` set) this
  * returns the live Keycloak-backed broker: it fails closed on an unassigned
@@ -449,7 +449,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     Array.from(registry.dags.values(), (d) => ({ dagId: d.id, max: d.config.maxConcurrency })),
   );
 
-  // ── Capability Broker selection (T8 / per-node minting, review C1) ──────────
+  // ── Capability Broker selection (T8 / per-node minting) ───────────────────
   // See `selectCapabilityBroker` above: a live Keycloak broker is returned when
   // `REALM_JWT_ISSUER` is set, `undefined` otherwise (no minting authority wired
   // — the zero-regression static path). When the broker IS selected, each

@@ -4,7 +4,7 @@
 import { describe, it, expect } from "bun:test";
 import { ok, err } from "@fuguejs/framework";
 import type { Result, RunId, NodeId, DagId, HumanAction } from "@fuguejs/framework";
-import type { RedisPort } from "../../../ports.js";
+import type { RedisPort, LogPort } from "../../../ports.js";
 import type { HostError } from "../../../domain/host-error.js";
 import { tenantId } from "../../../domain/tenant.js";
 import type { TenantId } from "../../../domain/tenant.js";
@@ -496,6 +496,35 @@ describe("RedisRunStore — active-run index (ADR-0074)", () => {
     await store.setStatus("r3" as RunId, { kind: "failed", error: { kind: "node-crash", retriability: "retriable", nodeId: "n" as NodeId, message: "x" } });
     const c = await store.countActiveRuns();
     expect(c.ok && c.value).toBe(1); // only the suspended r1 remains
+  });
+
+  it("an unparseable run-meta (corrupt JSON) is counted live with exactly one bounded warn (round-20 fix pin)", async () => {
+    const { redis, kv } = setBackedRedis();
+    const warns: Array<{ msg: string; fields: Record<string, unknown> }> = [];
+    const logger: LogPort = {
+      debug() {},
+      info() {},
+      warn(msg, fields) {
+        warns.push({ msg, fields: fields ?? {} });
+      },
+      error() {},
+    };
+    const store = createRedisRunStore(redis, TENANT, cfg, logger);
+    await store.create(record({ runId: "r1" as RunId }));
+    await store.create(record({ runId: "r2" as RunId }));
+    // Corrupt r1's meta bytes directly (torn write / out-of-band mutation).
+    kv.set("fugue:tenant-a:hitl:run:r1", "not-json{{{");
+
+    const c = await store.countActiveRuns();
+    // The corrupt entry is treated as LIVE — a conservative over-count,
+    // never an under-count that would free a slot on unreadable evidence.
+    expect(c.ok && c.value).toBe(2);
+    // Exactly one bounded warn naming the corrupt key + parse error.
+    expect(warns).toHaveLength(1);
+    expect(warns[0]?.msg).toContain("unparseable run meta treated as live");
+    expect(warns[0]?.fields.runId).toBe("r1");
+    // The corrupt key is NOT pruned — the corruption keeps a trail.
+    expect(kv.has("fugue:tenant-a:hitl:run:r1")).toBe(true);
   });
 
   it("re-settling a terminal run is idempotent — the count never goes negative or drifts", async () => {

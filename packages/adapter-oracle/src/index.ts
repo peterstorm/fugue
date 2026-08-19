@@ -457,17 +457,37 @@ export const createOracleAdapter = (config: OracleAdapterConfig): CapabilityHand
   };
 
   // Production queryable: acquire a pooled connection, execute with
-  // OUT_FORMAT_OBJECT, always release the connection.
+  // OUT_FORMAT_OBJECT, always release the connection. A release failure must
+  // never mask a SUCCEEDED statement (mirror the connect() path below): a
+  // completed query returning Err would read as a retriable failure and a
+  // write DML re-run becomes a double-execution hazard — the exact class the
+  // rest of the system works to prevent. The close failure is reported
+  // alongside the primary outcome (credential-stripped warn), never instead
+  // of it. A failing execute still releases, but the statement error stays
+  // primary.
   const queryable: OracleQueryable = {
     execute: async (sql, binds, opts) => {
       const pool = await getPool();
       const conn = await pool.getConnection();
       try {
-        return await conn.execute(sql, binds ?? {}, {
+        const result = await conn.execute(sql, binds ?? {}, {
           outFormat: opts?.outFormat ?? oracledb.OUT_FORMAT_OBJECT,
         });
-      } finally {
-        await conn.close();
+        try {
+          await conn.close();
+        } catch (closeError) {
+          console.warn(
+            `[oracle] query succeeded but connection release failed: ${stripCredentials(closeError instanceof Error ? closeError.message : String(closeError))}`,
+          );
+        }
+        return result;
+      } catch (e) {
+        try {
+          await conn.close();
+        } catch {
+          // ignore: the statement error is the one worth surfacing.
+        }
+        throw e;
       }
     },
   };

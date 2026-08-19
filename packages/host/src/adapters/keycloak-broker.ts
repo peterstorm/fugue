@@ -170,8 +170,8 @@ export const audienceForScope = (
 // wraps the app-only WIF token in exactly one operation-narrowed handle, selected
 // by the parsed scope. The token is closed over PRIVATELY — the returned handle
 // type exposes only the operation method, with no `client`/`token` field to
-// reach the raw authority through (SC-007). The broker no longer constructs a
-// placeholder handle (the T10 seam is now wired through WIF + graph-capability).
+// reach the raw authority through (SC-007). Handles are constructed by
+// `buildGraphHandle` over the WIF token; see `graph-capability.ts`.
 // ───────────────────────────────────────────────────────────────────────────
 // Broker dependencies
 // ───────────────────────────────────────────────────────────────────────────

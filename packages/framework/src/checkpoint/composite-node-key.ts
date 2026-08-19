@@ -19,7 +19,7 @@
 //     the encoder enforces, so `parse(encode(a)) = a` for every valid address
 //     and out-of-contract keys are rejected outright (parse, don't validate).
 //
-// Error-channel contract (deepening-round adjudication — the three channels
+// Error-channel contract (the three channels
 // are deliberate, not drift):
 //   - `parseCompositeNodeKey → … | null` is the read-side CLASSIFIER over
 //     untrusted stored bytes: it answers "is this a well-formed key?" and

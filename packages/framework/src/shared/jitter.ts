@@ -7,6 +7,12 @@
 //
 //   2. The RNG is an explicit argument. Production callers pass `Math.random`;
 //      tests pass a seeded deterministic source.
+//
+// The default ratio lives here too (ONE encoding — round-21 tda-3): the
+// machine's compiled `retryConfigs` and the executor's sleep-path direct read
+// both consume retry delays; two literals for one default would drift.
+
+export const DEFAULT_JITTER_RATIO = 0.2;
 
 export const applyJitter = (
   delayMs: number,

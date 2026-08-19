@@ -302,7 +302,7 @@ export interface RealmJwtClaims {
   readonly teams: readonly Team[];
 }
 
-// ── Signature-verified claims & authenticated user (branded — review C5) ────
+// ── Signature-verified claims & authenticated user (branded) ──────────────
 
 declare const __sigVerifiedBrand: unique symbol;
 declare const __authUserBrand: unique symbol;
@@ -408,7 +408,7 @@ const TOKEN_RANDOM_BYTES = 32;
  * Enforces the 32-byte input: the `TeamToken` brand encodes "carries full
  * entropy", so producing one from short input would forge the brand at its
  * origin. A wrong length throws (a wiring bug, not a runtime input) rather than
- * silently minting a weak token (review suggestion).
+ * silently minting a weak token.
  *
  * @param randomBytes - exactly 32 bytes of cryptographic randomness
  */

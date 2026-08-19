@@ -166,7 +166,7 @@ const runGraph = async (
  * unconditionally ("/me request is only valid with delegated authentication
  * flow"). The sender mailbox is the caller-supplied `message.from`; Graph gates
  * which mailboxes the agent app may send as (ApplicationAccessPolicy), so a
- * disallowed mailbox surfaces as `downstream-denied` (review C2).
+ * disallowed mailbox surfaces as `downstream-denied`.
  */
 export const buildMailSendHandle = (token: string, http: GraphHttp): MailSendHandle => ({
   sendMail: async (message: MailMessage): Promise<Result<MailSendReceipt, FrameworkError>> => {

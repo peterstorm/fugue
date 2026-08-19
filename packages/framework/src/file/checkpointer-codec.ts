@@ -1,7 +1,6 @@
 // Pure meta/node/options codecs for the file `Checkpointer` backend
 // (FR-016/FR-020..FR-029, ADR-0075/ADR-0076/ADR-0080), extracted from
-// `checkpointer.ts` during the 2026-08-14 codec-separation remediation
-// (pure core split from the I/O shell).
+// `checkpointer.ts` (pure core split from the I/O shell).
 //
 // This module is the PURE half of the adapter — the functional core:
 //
@@ -150,7 +149,7 @@ export const isPlainObject = (value: unknown): value is Record<string, unknown> 
   return prototype === Object.prototype || prototype === null;
 };
 
-export const isValidDate = (value: unknown): value is Date =>
+const isValidDate = (value: unknown): value is Date =>
   value instanceof Date && !Number.isNaN(value.getTime());
 
 /** Parse the exact timestamp grammar emitted on write. Date accepts many

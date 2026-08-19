@@ -30,7 +30,7 @@ import { createFileFreshnessIndex as barrelCreateFileFreshnessIndex } from "../f
 import { TTL_SECONDS } from "../checkpoint/checkpointer.js";
 import { keyDigest } from "../file/layout.js";
 import { __testEncodeMember as encodeRedisMember } from "../checkpoint/redis-freshness-index.js";
-import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
+import { __resetFrameworkLogger } from "../logger.js";
 import type { WriteAttemptedEvent } from "../types/events.js";
 import type {
   FreshnessIndex,
@@ -965,17 +965,18 @@ describe("createFileFreshnessIndex — strict codec and typed failures", () => {
       },
     ] as const;
 
-    const warnings: string[] = [];
-    setFrameworkLogger({
-      debug() {},
-      info() {},
-      warn(message) { warnings.push(message); },
-      error() {},
-    });
-
     for (const raw of rejected) {
       writeFileSync(path, JSON.stringify(raw));
-      expect(await index.findConflict(W(resource, "old"), 0)).toEqual({ ok: true, value: null });
+      // The same strict-codec rejection fails findConflict CLOSED (round-21
+      // sfh-2): an unreadable singleton is not a verified no-conflict verdict.
+      const conflict = await index.findConflict(W(resource, "old"), 0);
+      expect(conflict.ok).toBe(false);
+      if (conflict.ok) throw new Error("expected a fail-closed findConflict rejection");
+      expect(conflict.error.kind).toBe("cache-error");
+      if (conflict.error.kind === "cache-error") {
+        expect(conflict.error.operation).toBe("freshness:findConflict");
+        expect(conflict.error.failureClass).toBe("permanent");
+      }
       const bytes = readFileSync(path, "utf-8");
       const write = await index.recordWrite(writeEvent(resource, "must-not-replace", 1_100));
       expect(write.ok).toBe(false);
@@ -990,7 +991,6 @@ describe("createFileFreshnessIndex — strict codec and typed failures", () => {
       }
       expect(readFileSync(path, "utf-8")).toBe(bytes);
     }
-    expect(warnings).toHaveLength(rejected.length);
   });
 
   it("recordWrite over a non-JSON corrupt singleton fails closed with a permanent typed cache-error and leaves the corrupt bytes untouched (ADR-0079)", async () => {
@@ -1023,20 +1023,13 @@ describe("createFileFreshnessIndex — strict codec and typed failures", () => {
     expect(readFileSync(path, "utf-8")).toBe(corruptBytes);
   });
 
-  it("warns and treats malformed or digest/content-disagreeing singletons as absent", async () => {
+  it("fails findConflict closed on malformed or digest/content-disagreeing singletons (ADR-0025/0079)", async () => {
     const directory = tempDirectory();
     const resource = "corrupt:resource";
     const path = join(directory, `${keyDigest(resource)}.json`);
     const index = createFileFreshnessIndex(directory, { now: () => 1_000 });
     await index.recordWrite(writeEvent(resource, "2", 900));
 
-    const warnings: string[] = [];
-    setFrameworkLogger({
-      debug() {},
-      info() {},
-      warn(message) { warnings.push(message); },
-      error() {},
-    });
     const corruptRecords = [
       "not-json",
       JSON.stringify({}),
@@ -1065,36 +1058,35 @@ describe("createFileFreshnessIndex — strict codec and typed failures", () => {
 
     for (const raw of corruptRecords) {
       writeFileSync(path, raw);
-      expect(await index.findConflict(W(resource, "1"), 0)).toEqual({ ok: true, value: null });
+      const result = await index.findConflict(W(resource, "1"), 0);
+      // A corrupt singleton is NOT a verified no-conflict verdict: the
+      // caller's ADR-0025 fail-closed path (wave abort) must engage.
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error(`expected a fail-closed rejection, got ok(null) for ${raw}`);
+      expect(result.error.kind).toBe("cache-error");
+      if (result.error.kind === "cache-error") {
+        expect(result.error.operation).toBe("freshness:findConflict");
+        expect(result.error.failureClass).toBe("permanent");
+        expect(result.error.message).toContain(`digest=${keyDigest(resource)}`);
+        expect(result.error.message).toContain(`recordPath=${JSON.stringify(resolve(path))}`);
+      }
     }
-    expect(warnings).toHaveLength(corruptRecords.length);
-    expect(warnings.every((warning) => warning.includes(`digest=${keyDigest(resource)}`))).toBe(true);
-    expect(warnings.some((warning) => warning.includes("digest/content resource disagreement"))).toBe(true);
-  });
-
-  it("returns cache-error instead of absence when corrupt-record logging throws", async () => {
-    const directory = tempDirectory();
-    const resource = "corrupt:logger";
-    const path = join(directory, `${keyDigest(resource)}.json`);
-    const index = createFileFreshnessIndex(directory, { now: () => 1_000 });
-    await index.recordWrite(writeEvent(resource, "2", 900));
-    writeFileSync(path, "not-json");
-
-    setFrameworkLogger({
-      debug() {},
-      info() {},
-      warn() { throw new Error("warning transport unavailable"); },
-      error() {},
-    });
-    const result = await index.findConflict(W(resource, "1"), 0);
-    expect(result.ok).toBe(false);
-    if (result.ok) throw new Error("expected logger failure");
-    expect(result.error.kind).toBe("cache-error");
-    if (result.error.kind === "cache-error") {
-      expect(result.error.operation).toBe("freshness:findConflict");
-      expect(result.error.message).toContain("warning transport unavailable");
-      expect(result.error.message).toContain(`recordPath=${JSON.stringify(resolve(path))}`);
-    }
+    // The crossed-resource entry is the digest/content disagreement class;
+    // assert at least one rejection names it so the matrix is not vacuous.
+    const disagreement = await (async () => {
+      writeFileSync(path, JSON.stringify({
+        writtenAtMs: 900,
+        runId: "run-1",
+        nodeId: "writer",
+        newWitness: { kind: "version", resource: "crossed:resource", value: "2" },
+        succeededAtMs: 900,
+      }));
+      const r = await index.findConflict(W(resource, "1"), 0);
+      if (r.ok) return null;
+      if (r.error.kind !== "cache-error") return null;
+      return r.error.message;
+    })();
+    expect(disagreement).toContain("digest/content resource disagreement");
   });
 
   for (const invalid of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
@@ -1263,15 +1255,15 @@ describe("createFileFreshnessIndex — cross-process singleton convergence (ADR-
     // A fresh instance (real clock) sees the deterministic max-score winner —
     // the singleton's identity is independent of which process won the lock
     // in which order. The winner must be ASSERTED, not conditionally checked:
-    // ADR-0079's drop-with-warning path treats a corrupt singleton as absent
-    // (`ok(null)`), and an `if (found.value !== null)` guard would silently
-    // skip every assertion below in exactly the failure case this pin guards.
+    // a corrupt singleton now fails findConflict CLOSED (ADR-0025/0079), so
+    // `unwrap(found)` throws loudly on Err — the assertions below can never be
+    // silently skipped by a soft `ok(null)`.
     const reader = createFileFreshnessIndex(dir);
     const found = await reader.findConflict(W(resource, "never-written"), 0);
     const winner = unwrap(found);
     if (winner === null) {
       throw new Error(
-        "the committed singleton was dropped-with-warning (ok(null)) — exactly the corrupt-singleton case this pin must not skip",
+        "the committed singleton read as absent (ok(null)) — the fail-closed corrupt-singleton pin must not skip",
       );
     }
     expect(winner.succeededAtMs).toBe(204);

@@ -240,6 +240,114 @@ describe("GitPort interface", () => {
     });
   });
 
+  describe("BunGitAdapter timeout branches (round-21 pta-1 — error-first delivery + bounded termination)", () => {
+    // Bun resolves the `git` and `bun` binary NAMES itself (empirically: a
+    // PATH shim named `git`/`bun` is never consulted by Bun.spawn), so a
+    // TERM-ignoring stand-in cannot be injected under those names. Instead
+    // both branches are stalled with REAL binaries against a TCP listener
+    // that accepts and never responds: the child is genuinely stuck when the
+    // timeout fires, which is exactly the class the round-20 fix protects
+    // against (the pre-fix `await proc.exited`-before-error would make these
+    // tests hang forever instead of returning a bounded error). Error-first
+    // delivery is pinned by the elapsed bound; termination is pinned by the
+    // stalled transport socket closing after the child is killed.
+    const stallServer = async (): Promise<{
+      port: number;
+      listen: () => Promise<void>;
+      close: () => Promise<void>;
+      sockets: Set<import("node:net").Socket>;
+    }> => {
+      const { createServer } = await import("node:net");
+      const sockets = new Set<import("node:net").Socket>();
+      const server = createServer((sock) => {
+        sockets.add(sock);
+        sock.on("close", () => sockets.delete(sock));
+      });
+      const state = {
+        port: 0,
+        sockets,
+      } as {
+        port: number;
+        listen: () => Promise<void>;
+        close: () => Promise<void>;
+        sockets: Set<import("node:net").Socket>;
+      };
+      state.listen = async () => {
+        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+        state.port = (server.address() as import("node:net").AddressInfo).port;
+      };
+      state.close = () => {
+        // Force-destroy lingering connections (Bun lacks Node's
+        // closeAllConnections) so the close callback cannot hang on a
+        // transport helper that outlives the direct child.
+        for (const sock of [...sockets]) sock.destroy();
+        return new Promise<void>((resolve) => server.close(() => resolve()));
+      };
+      return state;
+    };
+
+    const waitFor = async (predicate: () => boolean, timeoutMs: number): Promise<boolean> => {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        if (predicate()) return true;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      return predicate();
+    };
+
+    it("delivers git-timeout promptly on a stalled clone (error-first, not gated on the child's exit)", async () => {
+      const server = await stallServer();
+      await server.listen();
+      const dir = await mkdtemp(join(tmpdir(), "fugue-git-stall-"));
+      try {
+        const adapter = createBunGitAdapter(400);
+        const started = Date.now();
+        const result = await adapter.clone(`http://127.0.0.1:${server.port}/repo.git`, join(dir, "target"));
+        const elapsed = Date.now() - started;
+
+        expect(result.ok).toBe(false);
+        if (result.ok) throw new Error("expected a timeout error");
+        expect(result.error.kind).toBe("git-timeout");
+        // Error-first: the result is bounded by the timeout budget + slack,
+        // NOT gated on the stuck child's exit (the pre-fix unbounded hang).
+        // Termination of the direct child is exercised implicitly: the child
+        // is killed before the error is delivered; git's internal transport
+        // helper may outlive the direct child briefly (git-owned lifecycle),
+        // so the socket is not used as a liveness probe here — the bun
+        // branch below proves whole-tree termination.
+        expect(elapsed).toBeLessThan(4_000);
+      } finally {
+        await server.close();
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("runBunInstall returns bun-install-failed on a stalled registry and terminates the stuck child", async () => {
+      const server = await stallServer();
+      await server.listen();
+      const dir = await mkdtemp(join(tmpdir(), "fugue-bun-stall-"));
+      try {
+        await writeFile(join(dir, "package.json"), JSON.stringify({ name: "stall", dependencies: { "slow-dep": "^1.0.0" } }));
+        await writeFile(join(dir, "bunfig.toml"), `[install]\nregistry = "http://127.0.0.1:${server.port}"\n`);
+
+        const started = Date.now();
+        const result = await runBunInstall(dir, 400);
+        const elapsed = Date.now() - started;
+
+        expect(result.ok).toBe(false);
+        if (result.ok) throw new Error("expected a timeout error");
+        expect(result.error.kind).toBe("bun-install-failed");
+        expect(result.error.message).toContain("timed out");
+        expect(elapsed).toBeLessThan(4_000);
+
+        expect(await waitFor(() => server.sockets.size === 0, 7_000)).toBe(true);
+      } finally {
+        await server.close();
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe("BunGitAdapter.hasLockfileChanged (integration — real git repo)", () => {
     const tempDirs: string[] = [];
     afterAll(async () => {

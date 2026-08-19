@@ -18,9 +18,11 @@
 // The resource is intentionally unbounded by the port and is never a path
 // component: only its sha256 digest reaches the filename. Persisted bytes pass
 // through a strict singleton codec and a digest/content resource check.
-// Malformed records are warned and treated as absent by findConflict; logger,
-// filesystem, clock, and hostile runtime-accessor failures become typed
-// freshness cache-errors. No raw exception crosses either port method.
+// Corrupt singletons fail BOTH port methods closed (typed cache-error naming
+// the corrupt record — parity with the Redis twin's undecodable-member
+// verdict, ADR-0025); logger, filesystem, clock, and hostile runtime-accessor
+// failures become typed freshness cache-errors. No raw exception crosses
+// either port method.
 //
 // Symlink policy — a DELIBERATE divergence from the file checkpointer: the
 // digest-addressed singletons are read with plain `readFileSync`, which
@@ -39,7 +41,6 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { atomicWriteFile, withFileLock } from "./atomic.js";
 import { isBoundaryIdString, isPlainRecord, keyDigest } from "./layout.js";
-import { fwLogger } from "../logger.js";
 import type { WriteAttemptedEvent } from "../types/events.js";
 import type {
   FreshnessIndex,
@@ -423,43 +424,18 @@ const corruptRecordContext = (
 ): string =>
   `directory=${JSON.stringify(resolve(directory))} recordPath=${JSON.stringify(resolve(recordPath))} digest=${digest} reason=${reason}`;
 
-const warnCorrupt = (
-  directory: string,
-  recordPath: string,
-  digest: string,
-  reason: string,
-): Result<void, FrameworkError> => {
-  const context = corruptRecordContext(directory, recordPath, digest, reason);
-  try {
-    fwLogger().warn(
-      `[FileFreshnessIndex] Dropping corrupt freshness entry ${context}`,
-    );
-    return ok(undefined);
-  } catch (error) {
-    return err(
-      cacheFailure(
-        "freshness:findConflict",
-        digest,
-        new Error(
-          `failed to warn about corrupt freshness entry ${context}: ${safeErrorMessage(error)}`,
-        ),
-      ),
-    );
-  }
-};
-
 /**
  * Freshness-index factory options (the port itself lives in
  * `types/freshness.ts`).
  *
- * Corrupt-singleton semantics (ADR-0079, caller observability): a stored
- * freshness entry that fails the strict codec is warned
- * (`[FileFreshnessIndex] Dropping corrupt freshness entry …`) and observed
- * as ABSENT by `findConflict` — Redis drop-with-warning parity, since the
- * event log, not this cache, is authoritative. `recordWrite` fails closed
- * on the same corruption class. Callers enforcing write-once/integrity
- * decisions off `findConflict` must treat an `ok(null)` as provisional
- * while corruption warnings are emitted; the corrupted file is never
+ * Corrupt-singleton semantics (ADR-0079/ADR-0025): a stored freshness entry
+ * that fails the strict codec fails `findConflict` CLOSED — a typed
+ * `cache-error` naming the corrupt record, exactly like `recordWrite`'s
+ * deterministic fail-closed branch. This is Redis twin parity (the Redis
+ * adapter withholds the conflict verdict on an undecodable latest member) and
+ * the caller's ADR-0025 contract: proceeding without conflict detection
+ * would allow undetectable stale writes, so "cannot read the latest write"
+ * must never read as "verified no conflict". The corrupted file is never
  * silently replaced by a stale write.
  */
 export interface FileFreshnessIndexOptions {
@@ -630,9 +606,21 @@ const createFileFreshnessIndexUnchecked = (
 
         const parsed = parseStoredFreshnessEntry(text, parsedWitness.value.resource);
         if (!parsed.ok) {
-          const warned = warnCorrupt(directory, recordPath, digest, parsed.error);
-          if (!warned.ok) return err(warned.error);
-          return ok(null);
+          // Deterministic fail-closed (ADR-0079/ADR-0025): a corrupt singleton
+          // reproduces the same rejection on every read, and an unreadable
+          // latest write is NOT a verified no-conflict verdict — the caller
+          // must abort the wave rather than proceed without conflict
+          // detection (parity with the Redis adapter's undecodable-member
+          // rejection and with recordWrite's corrupt branch above).
+          return err(
+            cacheFailure(
+              "freshness:findConflict",
+              digest,
+              `stored freshness record is corrupt ${corruptRecordContext(directory, recordPath, digest, parsed.error)} — conflict verdict withheld (fail closed)`,
+              undefined,
+              "permanent",
+            ),
+          );
         }
 
         const clocked = readClock("freshness:findConflict", digest, "evaluating the freshness TTL");

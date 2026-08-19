@@ -525,6 +525,83 @@ describe("FoundryRunSummaryObserver — throwing sink is swallowed AND logged", 
 });
 
 // ---------------------------------------------------------------------------
+// Round-21 atl-2 — the observer bounds its OWN buffer (TTL orphan sweep,
+// BufferedObserver parity): a run that never emits `run-end` must not leak.
+// ---------------------------------------------------------------------------
+describe("FoundryRunSummaryObserver — orphan-buffer eviction (round-21 atl-2)", () => {
+  test("a run whose run-end never arrives is evicted after the TTL", () => {
+    const { warns } = recordingFrameworkLogger();
+    const { sink, events } = recordingSink();
+    let t = 1_000;
+    const obs = new FoundryRunSummaryObserver(sink, {
+      ttlMs: 500,
+      sweepIntervalMs: 0, // no timer — eviction is driven explicitly
+      now: () => t,
+    });
+
+    obs.observe(nodeStart("rOrphan", "d1", "n1"));
+    obs.observe(nodeSkippedCheckpoint("rOrphan", "d1", "n2"));
+    expect(obs.evicted).toBe(0);
+
+    // Advance past the TTL and sweep: the orphaned buffer is dropped and
+    // counted — the class is memory-safe standalone, not only under the
+    // production wrapper.
+    t = 1_600;
+    obs.evictStale();
+    expect(obs.evicted).toBe(1);
+    expect(warns.some((w) => w.msg.includes("evicted stale run buffer for runId 'rOrphan'"))).toBe(true);
+
+    // A LATE run-end after eviction sees an empty buffer: the summary is the
+    // run-end-only baseline — no leak, no crash.
+    obs.observe(runEnd("rOrphan", "d1", "ok", 10));
+    const summaries = events.filter((e) => e.name === FOUNDRY_EVENT_RUN_SUMMARY);
+    expect(summaries).toHaveLength(1);
+  });
+
+  test("a run that emits run-end on time is never touched by the sweep", () => {
+    const { sink } = recordingSink();
+    let t = 1_000;
+    const obs = new FoundryRunSummaryObserver(sink, {
+      ttlMs: 500,
+      sweepIntervalMs: 0,
+      now: () => t,
+    });
+    obs.observe(nodeStart("rFresh", "d1", "n1"));
+    t = 1_400; // inside the TTL
+    obs.evictStale();
+    expect(obs.evicted).toBe(0);
+
+    t = 1_500; // still inside the TTL at run-end time
+    obs.observe(runEnd("rFresh", "d1", "ok", 5));
+    expect(obs.evicted).toBe(0);
+  });
+
+  test("a hostile injected clock cannot break observe() and disables eviction loudly for that cycle", () => {
+    const { warns } = recordingFrameworkLogger();
+    const { sink } = recordingSink();
+    let t: number | null = 1_000;
+    const obs = new FoundryRunSummaryObserver(sink, {
+      ttlMs: 500,
+      sweepIntervalMs: 0,
+      now: () => {
+        if (t === null) throw new Error("clock boom");
+        return t;
+      },
+    });
+    // observe() skips buffering when the clock is untrustworthy (never throws).
+    expect(() => obs.observe(nodeStart("rHostile", "d1", "n1"))).not.toThrow();
+    const obs2 = new FoundryRunSummaryObserver(sink, {
+      ttlMs: 500,
+      sweepIntervalMs: 0,
+      now: () => Number.NaN,
+    });
+    obs2.observe(nodeStart("rNaN", "d1", "n1"));
+    obs2.evictStale();
+    expect(warns.some((w) => w.msg.includes("clock returned a non-finite stamp"))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Fix 4 — Foundry construction failure must NOT disable MLflow tracing
 // (observability spec FR-026 / SC-006 / SC-009)
 // ---------------------------------------------------------------------------

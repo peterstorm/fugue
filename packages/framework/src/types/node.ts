@@ -33,8 +33,14 @@ export type NodeKind = "fetch" | "transform" | "llm" | "guardrail" | "eval-judge
 
 /** Retry configuration for a single node. */
 export interface NodeRetryConfig {
-  /** Backoff delays in ms for successive attempts [attempt0, attempt1, ...]. Defaults to [1000, 2000, 4000]. */
-  readonly backoffMs?: readonly number[];
+  /**
+   * Backoff delays in ms for successive attempts [attempt0, attempt1, ...].
+   * Defaults to [1000, 2000, 4000]. Non-empty by construction: an empty
+   * ladder has no attempt-0 delay (round-21 tda-1); `validateDagShape`
+   * rejects `[]` at runtime for untyped inputs, and the tuple type makes
+   * the empty state unrepresentable for typed ones.
+   */
+  readonly backoffMs?: readonly [number, ...number[]];
   /** Jitter ratio (0–1) multiplied by the backoff delay and added randomly. Defaults to 0.2. */
   readonly jitterRatio?: number;
 }

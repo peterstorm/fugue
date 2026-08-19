@@ -24,9 +24,10 @@
 //      field that would fail the pattern, never a path addressed outside
 //      `directory`, never a CWD-relative read for `directory: ""`.
 //   1. Read the checkpoint PROJECTION (raw JSON — decoding is the proof's
-//      job; a missing file is `null`). `readCheckpoint` THROWS a typed
-//      `FrameworkError` (`cache-error`) on genuine fs failure (the `JobLike`
-//      port contract, ADR-0080); that typed value is propagated unchanged — an
+//      job; a missing file is `null`). `readCheckpointFile` THROWS a typed
+//      `FrameworkError` (`cache-error`) on genuine fs failure (the shared
+//      event-log read seam, ADR-0080); that typed value is propagated
+//      unchanged — an
 //      unreadable checkpoint file is an environment failure, not a content
 //      verdict. The catch narrows before relabeling (FR-040): ONLY a value
 //      the runtime guard recognizes as a typed `FrameworkError` rides
@@ -110,8 +111,7 @@
 // Import discipline (INV-1): no node built-ins — every path join lives in
 // `resume-proof.ts` (which documents its own `node:path` dependency).
 
-import { readFileEvents } from "./event-log.js";
-import { createFileJournal } from "./journal.js";
+import { readFileEvents, readCheckpointFile } from "./event-log.js";
 import { proveResumeAgreement } from "./resume-proof.js";
 import { isBoundaryId } from "./layout.js";
 import type { Machine } from "../state-machine/types.js";
@@ -147,22 +147,9 @@ export interface ResumeFileJobArgs<S, E, C> {
    * step 7 includes the empty prefix = genesis as benign lag). */
   readonly genesis: { state: S; context: C };
   /**
-   * The caller's strict decoder for the checkpoint's `data` payload
-   * (`{ state, context }` — the envelope's schemaVersion gate is this
-   * module's job; the payload shape is the caller's domain). Returns
-   * `Err<string>` with a message that surfaces inside the typed
-   * `checkpoint-corrupt` (naming `checkpoint.json`), so a decoder that
-   * started rejecting a shape it used to accept fails resume loudly instead
-   * of silently resuming from a mistyped state.
-   *
-   * The decoder is ALSO not trusted to be throw-free (FR-040): validation
-   * must precede any destructuring/dereferencing, but a production decoder
-   * that forgets that discipline throws a raw `TypeError` on
-   * hostile-but-envelope-valid payloads (e.g. `data` deserialized from
-   * `{"__undefined__":true}` is a REAL `undefined`; `data: 42`; `[1,2,3]`;
-   * `null`). A THROW is caught in the proof too — re-tagged
-   * `checkpoint-corrupt` naming `checkpoint.json` and the decoder's error —
-   * never a raw untyped promise rejection.
+   * Same contract as `ResumeProofArgs.parseCheckpoint` — the full decoder
+   * contract (and the FR-040 throw guard) lives with the proof, which owns
+   * it; this shell must not carry a drifted copy (round-21 cs-1).
    */
   readonly parseCheckpoint: (data: unknown) => Result<{ state: S; context: C }, string>;
 }
@@ -230,7 +217,7 @@ const resumeFileJobUnchecked = async <S, E, C>(
   //    argument is in the module header): a log-first acquisition could
   //    observe a live writer's projection ahead of its own log snapshot, the
   //    one direction the proof's strict-prefix scan does not accept.
-  //    `readCheckpoint` throws a typed `FrameworkError` (`cache-error`) on
+  //    `readCheckpointFile` throws a typed `FrameworkError` (`cache-error`) on
   //    genuine fs failure — that typed value is propagated unchanged: an
   //    unreadable checkpoint file is an environment failure, not a corruption
   //    verdict. The catch narrows before relabeling (FR-040): ONLY a value
@@ -240,13 +227,13 @@ const resumeFileJobUnchecked = async <S, E, C>(
   //    future change makes the journal throw something untyped.
   let checkpointJson: string | null;
   try {
-    checkpointJson = createFileJournal(directory).readCheckpoint();
+    checkpointJson = readCheckpointFile(directory);
   } catch (error) {
     if (isFrameworkError(error)) return err(error);
     return err(
       frameworkError.checkpointCorrupt(
         runId,
-        `readCheckpoint threw a non-FrameworkError: ${safeErrorMessage(error)}`,
+        `readCheckpointFile threw a non-FrameworkError: ${safeErrorMessage(error)}`,
       ),
     );
   }

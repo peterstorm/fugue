@@ -201,7 +201,24 @@ export class RedisFreshnessIndex implements FreshnessIndex {
         const memberStr = members[0]!;
         const score = Number(members[1]!);
         const decoded = decodeMember(memberStr);
-        if (decoded && decoded.witnessValue !== conditionedOnValue) {
+        if (decoded === null) {
+          // Fail closed (ADR-0025): the LATEST write's member is undecodable
+          // (partial write, out-of-band mutation, format change). This index
+          // exists to detect stale writes; an unreadable latest member is not
+          // a verified no-conflict verdict — the caller must abort the wave
+          // rather than proceed without conflict detection. Deterministic:
+          // the same bytes reproduce the same rejection, so pin "permanent"
+          // like the sibling verdicts. onFailure keeps the failure surface
+          // observable to the port's instrumentation.
+          this.onFailure(new Error(`undecodable freshness member for resource '${resource}'`));
+          return err({
+            kind: "cache-error",
+            operation: "freshness:findConflict",
+            message: `resource '${resource}': latest write member is corrupt/undecodable — conflict verdict withheld (fail closed)`,
+            failureClass: "permanent",
+          });
+        }
+        if (decoded.witnessValue !== conditionedOnValue) {
           this.onSuccess();
           return ok({
             runId: decoded.runId,

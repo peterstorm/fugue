@@ -36,16 +36,11 @@
 // codec; this module only digests keys, and the digest path accepts the full
 // spec range without ever placing the raw key on disk.
 //
-// Keyed/keyless digest disjointness (load-bearing): keyless digest inputs are
-// `${sequence}|${toJson(event)}` — they ALWAYS contain the `|` separator —
-// while `|` is EXCLUDED from the FR-015 dedupKey charset, enforced by
-// `event-record.ts` (the one enforcement point; this module never re-checks
-// it). So keyed and keyless digest inputs are structurally disjoint: the
-// domains could only collide if a keyed key were allowed to contain `|` —
-// e.g. the keyed key `5|{"a":1}` would hash identically to the keyless
-// record `(5, {a:1})`, two genuinely different events fighting for one
-// filename and silently deduping one — which the charset exclusion makes
-// impossible.
+// Keyed/keyless digest disjointness is load-bearing and spelled out in full
+// ONCE, at the enforcement point — `dedupKeyError` in `event-record.ts` (the
+// `|`-exclusion plus the `5|{"a":1}` collision example). This header points
+// there instead of re-enumerating, because copies drift: this module only
+// digests keys and never re-checks the charset.
 
 import { createHash } from "node:crypto";
 import { ID_PATTERN } from "../types/ids.js";

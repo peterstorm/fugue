@@ -88,7 +88,7 @@ const stripCodeFences = (text: string): string =>
  * `FrameworkError`, so a mid-loop failure still attributes the tokens burned by
  * already-completed turns (FR-W0-001). Errors that do not carry a `usage` field
  * (e.g. `validation`) cannot hold the totals — rather than DROP them silently
- * (a budget under-count, review suggestion), the accumulated figure is emitted as
+ * (a budget under-count), the accumulated figure is emitted as
  * a structured `llm.usage-unattributed` warning so the burned tokens remain
  * observable even though they can't ride the typed error channel. The warning
  * carries the `nodeId`/`runId`/`dagId` correlation triple so the burned tokens

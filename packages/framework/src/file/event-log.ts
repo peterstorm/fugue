@@ -38,7 +38,7 @@
 
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { EVENTS_DIR, eventDigestOf, eventFileName, parseEventFileName } from "./layout.js";
+import { EVENTS_DIR, CHECKPOINT_FILE, eventDigestOf, eventFileName, parseEventFileName } from "./layout.js";
 import { parseStoredEventRecord } from "./event-record.js";
 import type { FileEventRecord } from "./event-record.js";
 import type { Result } from "../types/result.js";
@@ -54,6 +54,7 @@ import {
   safeErrorMessage,
   safeErrorMessageWithCodeProbe,
   isMissingPathProbe,
+  isMissingPathError,
 } from "../types/safe-error.js";
 import type { RecordedEvent } from "../state-machine/types.js";
 
@@ -176,6 +177,25 @@ const readStrict = (directory: string): StrictResult => {
  * (environment class — left unclassified, replay may clear it). */
 const failure = (operation: FileOperation, reason: StrictReadFailure): FrameworkError =>
   fileCacheError(operation, reason.message, reason.permanent === true ? "permanent" : undefined);
+
+/**
+ * Raw read of the checkpoint projection (`<directory>/checkpoint.json` — the
+ * `writeCheckpoint` shape). Returns `null` on ENOENT-only absence; every
+ * other read failure throws a typed `cache-error` named `readCheckpoint`
+ * (location `run directory <D>` — the journal's store-shaped `readCheckpoint`
+ * delegates here, so write side and resume side share ONE reader with ONE
+ * transport, round-21 atl-1). Decoding is the proof's job, never this seam's.
+ */
+export const readCheckpointFile = (directory: string): string | null => {
+  try {
+    return readFileSync(join(directory, CHECKPOINT_FILE), "utf-8");
+  } catch (error) {
+    // Absence is ENOENT ONLY: `existsSync` swallows EACCES/ENOTDIR and
+    // would misreport a permission-broken directory as "no checkpoint".
+    if (isMissingPathError(error)) return null;
+    throw fileOperationError("readCheckpoint", `run directory ${directory}`, error);
+  }
+};
 
 /**
  * Strictly read every validated `FileEventRecord` of the journal, in append

@@ -160,7 +160,7 @@ export const HostConfigSchema = z.object({
       // (`msgrpah:mail.send`) otherwise passes boot and then fail-closes EVERY
       // mint for that client at runtime — contradicting the "fails at boot, never
       // at runtime" contract. Reject unparseable scope names here so the defect
-      // surfaces at startup (review suggestion).
+      // surfaces at startup.
       const badScopes: string[] = [];
       for (const [clientId, scopes] of Object.entries(shape.data)) {
         for (const scope of scopes) {
