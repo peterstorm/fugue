@@ -12,7 +12,7 @@
  * eager-pinned re-adopted worker NOT being idle-evictable (AD-7).
  */
 
-import { describe, test, expect, mock } from "bun:test";
+import { describe, test, expect } from "bun:test";
 import * as lifecycleAdt from "../../../supervisor/lifecycle/worker-lifecycle.js";
 import { ok, err } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
@@ -1030,28 +1030,28 @@ describe("createWorkerLifecycle: failed kills surface via the logger (T9 Fix 1)"
 // beginDrain on a live state is total-success, so the rejection branch is defensive
 // — but if it EVER rejects (a true ADT invariant violation) it must surface loudly
 // and distinguishably, not collapse into the legitimate "nothing live" ok(undefined)
-// no-op. We force the rejection by module-mocking beginDrain.
+// no-op. We force the rejection by INJECTING an ADT whose beginDrain rejects — NOT
+// by `mock.module`: bun 1.3.x module mocks are not reliably restorable and leak
+// into other test files sharing the worker process (the pure-ADT suite
+// worker-lifecycle.test.ts would intermittently import the mocked beginDrain and
+// fail its deterministic tests with this fixture's "EPERM: kill denied").
 
 describe("createWorkerLifecycle: beginDrain invariant rejection surfaces (T9 Fix 2)", () => {
   test("a beginDrain rejection AFTER confirming the worker live is logged at ERROR and returns the error", async () => {
-    // Override ONLY beginDrain to reject; everything else stays the real ADT.
-    mock.module("../../../supervisor/lifecycle/worker-lifecycle.js", () => ({
-      ...lifecycleAdt,
-      beginDrain: () => err(signalErr),
-    }));
-    // Re-import the manager so it binds the mocked module.
-    const { createWorkerLifecycle: createWithMock } = await import(
-      "../../../supervisor/lifecycle/worker-lifecycle-manager.js"
-    );
-
+    // Inject an ADT whose ONLY beginDrain rejects; everything else stays the real
+    // ADT. The real `beginDrain` can never reject a live state, so the injected
+    // rejection is a forced contract violation — the cast is the test saying
+    // "this error type is impossible-by-construction", which is exactly the
+    // invariant violation this branch exists to surface.
     const fake = createInMemoryWorkerRedisFake();
     const reg = createWorkerRegistry(fake.redis, async () => true);
     const { spawn, proc } = makeSpawn();
     const log = recordingLog();
-    const lc = createWithMock({
+    const lc = createWorkerLifecycle({
       spawn, proc, registry: reg, probe: async () => true,
       tenants: tenantsView({ acme: { eagerPin: false } }),
       clock: fixedClock().clock, config: baseConfig(), logger: log,
+      lifecycle: { ...lifecycleAdt, beginDrain: () => err(signalErr) as never },
     });
     await lc.ensureWorker(tid("acme"));
 
@@ -1062,9 +1062,8 @@ describe("createWorkerLifecycle: beginDrain invariant rejection surfaces (T9 Fix
     const invariantLine = log.errors.find((l) => l.msg.includes("beginDrain rejected for a confirmed-live worker"));
     expect(invariantLine).toBeDefined();
     expect(invariantLine!.ctx).toMatchObject({ tenant: tid("acme") });
-
-    // Restore the real module so later test files are unaffected.
-    mock.module("../../../supervisor/lifecycle/worker-lifecycle.js", () => ({ ...lifecycleAdt }));
+    // No module mock was ever registered — nothing to restore; every other test
+    // file always binds the real ADT.
   });
 
   test("the legitimate 'nothing live to drain' path stays a quiet ok(undefined) no-op", async () => {

@@ -35,19 +35,7 @@ import type { HostError } from "../../domain/host-error.js";
 import type { TenantId, SecretsRef } from "../../domain/tenant.js";
 import type { LogPort } from "../../ports.js";
 import { workerSocketPath } from "../../domain/config.js";
-import {
-  requestWorker,
-  workerLive,
-  adoptLive,
-  adoptDraining,
-  touch,
-  idleEvict,
-  isIdleEvictable,
-  beginDrain,
-  drainComplete,
-  crash,
-  occupiesSlot,
-} from "./worker-lifecycle.js";
+import * as lifecycleAdt from "./worker-lifecycle.js";
 import type { WorkerState } from "./worker-lifecycle.js";
 import { initialRestartBudget, decideSupervisorRestart } from "./thin-init.js";
 import type { RestartBudget } from "./thin-init.js";
@@ -151,6 +139,16 @@ interface WorkerLifecycleDeps {
   /** Authoritative tenant spawn config (secretsRef + eagerPin). */
   readonly tenants: TenantSpawnConfigView;
   /**
+   * The pure worker-lifecycle ADT, injectable so tests can force an ADT
+   * invariant violation (e.g. a `beginDrain` rejection on a confirmed-live
+   * worker) WITHOUT a process-global `mock.module` — bun 1.3.x module mocks
+   * are not reliably restorable and leak into other test files sharing the
+   * worker process (worker-lifecycle.test.ts failed intermittently with the
+   * manager test's fixture error). Production callers omit it: the real ADT
+   * is bound.
+   */
+  readonly lifecycle?: WorkerLifecycleAdt;
+  /**
    * OPTIONAL per-tenant Redis-ACL provisioner (ADR-0067, AD-6). When wired (gated
    * by `SUPERVISOR_REDIS_ACL_ENABLED`), `lazySpawn` mints a FRESH scoped ACL
    * credential per spawn and injects it into the worker's env so the worker
@@ -168,12 +166,15 @@ interface WorkerLifecycleDeps {
   readonly logger: LogPort;
 }
 
+/** The pure worker-lifecycle ADT module shape (`worker-lifecycle.ts`). */
+export type WorkerLifecycleAdt = typeof import("./worker-lifecycle.js");
+
 // ── Manager ──────────────────────────────────────────────────────────────────
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecyclePort => {
-  const { spawn, proc, registry, probe, tenants, clock, config, logger, provisionRedisAcl } = deps;
+  const { spawn, proc, registry, probe, tenants, clock, config, logger, provisionRedisAcl, lifecycle = lifecycleAdt } = deps;
 
   // Per-tenant pure ADT state. The ONLY mutable state — every entry is an
   // immutable pure `WorkerState`; we replace (never mutate) entries.
@@ -220,7 +221,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
   /** Count of workers occupying a slot (spawning/live/draining) — T9 reads this. */
   const liveWorkerCount = (): number => {
     let n = 0;
-    for (const s of workers.values()) if (occupiesSlot(s)) n++;
+    for (const s of workers.values()) if (lifecycle.occupiesSlot(s)) n++;
     return n;
   };
 
@@ -331,7 +332,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     // all overshoot it (`liveWorkerCount()` is the SOLE multi-tenant spec FR-033 enforcer). Reserving
     // here closes that TOCTOU; every failure path below unwinds this entry
     // (`workers.delete`) so the slot is released fail-closed.
-    workers.set(tenant, requestWorker(tenant, spawnCfg.eagerPin, clock()));
+    workers.set(tenant, lifecycle.requestWorker(tenant, spawnCfg.eagerPin, clock()));
 
     // Per-tenant Redis ACL (ADR-0067): when provisioning is wired, mint a FRESH
     // scoped credential and inject it into the worker env so the worker connects
@@ -422,7 +423,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
       await signalWorker(tenant, handle.pid, "SIGKILL", false);
       return err(workerUnavailable(tenant));
     }
-    const liveResult = workerLive(current, handle.pid, udsPath, clock());
+    const liveResult = lifecycle.workerLive(current, handle.pid, udsPath, clock());
     if (!liveResult.ok) {
       logger.error("[worker-lifecycle] workerLive transition rejected (invariant)", { tenant });
       workers.delete(tenant);
@@ -452,7 +453,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
       if (cur.phase === "draining" && cur.pid === handle.pid) {
         // Graceful drain completed (multi-tenant spec FR-017): land the pure draining → evicted
         // transition, then drop the entry + record to release the slot. No respawn.
-        const done = drainComplete(cur, clock());
+        const done = lifecycle.drainComplete(cur, clock());
         if (!done.ok) {
           logger.error("[worker-lifecycle] drainComplete rejected on draining exit (invariant)", { tenant });
         }
@@ -504,7 +505,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     const existing = workers.get(tenant);
     if (existing !== undefined && existing.phase === "live") {
       // Touch (refresh idle clock) and route to the existing socket.
-      const touched = touch(existing, clock());
+      const touched = lifecycle.touch(existing, clock());
       if (touched.ok) workers.set(tenant, touched.value);
       return ok({ udsPath: existing.udsPath });
     }
@@ -520,7 +521,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
       return ok(undefined);
     }
     // Pure crash transition (valid from live/draining). Contained to THIS tenant.
-    const crashed = crash(current, exitCode, clock());
+    const crashed = lifecycle.crash(current, exitCode, clock());
     if (!crashed.ok) {
       // Not in a crashable phase (spawning/crashed/evicted) — drop the entry so a
       // fresh request lazy-spawns. Still contained to this tenant.
@@ -591,7 +592,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     // the legitimate "nothing live to drain" no-op above — so it must surface loudly
     // rather than masquerade as success (mirrors the `workerLive` "transition
     // rejected (invariant)" logging).
-    const draining = beginDrain(current, clock());
+    const draining = lifecycle.beginDrain(current, clock());
     if (!draining.ok) {
       logger.error("[worker-lifecycle] beginDrain rejected for a confirmed-live worker (invariant)", {
         tenant,
@@ -659,8 +660,8 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
       // for a draining record (see `persistRecord`).
       const state =
         record.health === "draining"
-          ? adoptDraining(record.tenant, eagerPin, record.pid, record.udsPath, record.startedAt)
-          : adoptLive(record.tenant, eagerPin, record.pid, record.udsPath, record.startedAt, clock());
+          ? lifecycle.adoptDraining(record.tenant, eagerPin, record.pid, record.udsPath, record.startedAt)
+          : lifecycle.adoptLive(record.tenant, eagerPin, record.pid, record.udsPath, record.startedAt, clock());
       workers.set(record.tenant, state);
       adoptedTenants.push(record.tenant);
     }
@@ -681,7 +682,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
   const idleEvictSweep = async (): Promise<readonly TenantId[]> => {
     const now = clock();
     const candidates = [...workers]
-      .filter(([, state]) => isIdleEvictable(state, config.idleEvictMs, now))
+      .filter(([, state]) => lifecycle.isIdleEvictable(state, config.idleEvictMs, now))
       .map(([tenant]) => tenant);
     const evicted: TenantId[] = [];
     for (const tenant of candidates) {
@@ -689,7 +690,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
       if (state === undefined || state.phase !== "live") continue;
       // Re-confirm via the pure transition (it re-checks eager-pin + TTL); a
       // pinned worker returns err here and is skipped (AD-7).
-      const result = idleEvict(state, config.idleEvictMs, clock());
+      const result = lifecycle.idleEvict(state, config.idleEvictMs, clock());
       if (!result.ok) continue;
       const pid = state.pid;
       // Remove the entry BEFORE signalling so the crash-exit watcher's guard sees
@@ -765,7 +766,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
           // terminal `evicted`), free the slot + record, and DO NOT restart it
           // (a worker SIGTERM'd to drain must not be resurrected).
           logger.info("[worker-lifecycle] re-adopted draining worker has exited — drain complete (no restart)", { tenant, pid });
-          const done = drainComplete(cur, clock());
+          const done = lifecycle.drainComplete(cur, clock());
           if (!done.ok) {
             logger.error("[worker-lifecycle] drainComplete rejected on draining liveness-death (invariant)", { tenant });
           }
