@@ -22,6 +22,7 @@ import type { RunId, NodeId } from "./ids.js";
 import type { Result } from "./result.js";
 import type { FrameworkError } from "./errors.js";
 import type { WitnessCapturedEvent, WriteAttemptedEvent } from "./events.js";
+import type { WriteEntry } from "./witness.js";
 
 export interface FreshnessConflict {
   /** The write node that is conditioned on a stale witness. */
@@ -31,25 +32,20 @@ export interface FreshnessConflict {
   readonly resource: ResourceName;
   readonly conditionedOnWitness: Witness;
   /** The conflicting write that superseded the conditioned-on witness. */
-  readonly conflictingWrite: {
-    readonly runId: RunId;
-    readonly nodeId: NodeId;
-    readonly newWitness: Witness;
-    readonly succeededAtMs: number;
-  };
+  readonly conflictingWrite: WriteEntry;
 }
 
 export interface FreshnessCheckResult {
   readonly conflicts: readonly FreshnessConflict[];
 }
 
-/** Write log entry, keyed by resource. Returned by freshness index lookups. */
-export interface WriteEntry {
-  readonly runId: RunId;
-  readonly nodeId: NodeId;
-  readonly newWitness: Witness;
-  readonly succeededAtMs: number;
-}
+/**
+ * One successful write to a resource — shared with
+ * `FreshnessViolationEvent.conflictingWrite` and defined in `types/witness.ts`
+ * (ONE encoding, round-23 tda-1). Re-exported here so existing importers of
+ * `WriteEntry` from this module keep resolving.
+ */
+export type { WriteEntry } from "./witness.js";
 
 export interface FreshnessIndex {
   /** Record a successful write for future conflict detection. */

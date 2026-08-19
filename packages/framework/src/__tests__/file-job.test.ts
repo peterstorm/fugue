@@ -40,6 +40,7 @@ import {
   type FileCheckpointData,
 } from "../file.js"; // the @fuguejs/framework/file barrel under test
 import { CHECKPOINT_FILE, EVENTS_DIR, PROGRESS_FILE } from "../file/layout.js";
+import { rawCheckpointJson } from "../file/journal.js";
 import { __testDeepFreeze } from "../file/job.js";
 import { retriabilityOf } from "../types/errors.js";
 import type { FrameworkError } from "../types/errors.js";
@@ -529,7 +530,7 @@ describe("createFileJob.data — deep-frozen clone snapshot contract", () => {
     // snapshot reproduces the seed commit bytes exactly.
     const expectedJson = serializeFileCheckpoint({ state: seed.state, context: seed.context }).json;
     await job.updateData(job.data);
-    expect(createFileJournal(dir).readCheckpoint()).toBe(expectedJson);
+    expect(createFileJournal(dir).readCheckpoint()).toBe(rawCheckpointJson(expectedJson));
   });
 
   it("rejects an unclonable initial snapshot at the typed factory boundary", () => {

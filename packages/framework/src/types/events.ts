@@ -3,7 +3,7 @@ import type { FrameworkError } from "./errors.js";
 import type { RunId, NodeId, DagId } from "./ids.js";
 import type { SideEffectProfile } from "./side-effects.js";
 import type { Confidence } from "./confidence.js";
-import type { Witness, ResourceName } from "./witness.js";
+import type { Witness, ResourceName, WriteEntry } from "./witness.js";
 import type { SideEffectKind } from "./side-effects.js";
 import type { JsonPatch } from "./json-patch.js";
 
@@ -170,12 +170,9 @@ export interface FreshnessViolationEvent {
   /** Branded — stamped from `conditionedOnWitness.resource`, cannot drift from it. */
   readonly resource: ResourceName;
   readonly conditionedOnWitness: Witness;
-  readonly conflictingWrite: {
-    readonly runId: RunId;
-    readonly nodeId: NodeId;
-    readonly newWitness: Witness;
-    readonly succeededAtMs: number;
-  };
+  /** The write that superseded the conditioned-on witness (ONE encoding with
+   * `FreshnessConflict.conflictingWrite` — round-23 tda-1). */
+  readonly conflictingWrite: WriteEntry;
   readonly detectedAtMs: number;
   readonly timestamp: Date;
 }

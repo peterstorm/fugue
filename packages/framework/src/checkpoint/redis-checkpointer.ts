@@ -2,13 +2,17 @@ import Redis from "ioredis";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { RunId, NodeId } from "../types/ids.js";
-import { __brandDagIdUnchecked, __brandNodeIdUnchecked } from "../types/ids.js";
 import { ok, err } from "../types/result.js";
 import type { Checkpointer, CheckpointerLoadOpts, RunMeta, NodeState, RunState } from "./checkpointer.js";
-import { TTL_SECONDS, evaluateCheckpointLoadGates } from "./checkpointer.js";
+import {
+  TTL_SECONDS,
+  evaluateCheckpointLoadGates,
+  guardedCheckpointClockRead,
+  parseNodeStateRecord,
+  parseRunMetaRecord,
+} from "./checkpointer.js";
 import { FRAMEWORK_VERSION } from "./fingerprint.js";
 import { frameworkError } from "../types/error-factories.js";
-import { isRepresentableTimestampMs } from "../types/clock.js";
 import { safeDiagnosticRender, safeErrorMessage } from "../types/safe-error.js";
 import { fwLogger } from "../logger.js";
 
@@ -47,60 +51,17 @@ const serializeMeta = (meta: RunMeta, createdAtMs: number): string =>
 
 const deserializeMeta = (raw: string): { meta: RunMeta; createdAt: Date } => {
   const stored: StoredMeta = JSON.parse(raw);
-  // Read-side sanity gates, mirroring the file codec's parseStoredMeta. The
-  // brand pass-through below is an honest re-typing of the ID domain only —
-  // it is never a license for corrupt bytes (a negative/Infinity/string
-  // nodeCount, a non-string dagId, non-string optional fields) to reach
-  // consumers as a "valid" checkpoint: the file twin rejects the identical
-  // bytes as `checkpoint-corrupt`, so this leg must fail the same way.
-  if (typeof stored.dagId !== "string") {
-    throw new Error(`Invalid dagId in checkpoint meta: ${safeDiagnosticRender(stored.dagId)}`);
-  }
-  if (typeof stored.startedAt !== "string") {
-    throw new Error(`Invalid startedAt in checkpoint meta: ${safeDiagnosticRender(stored.startedAt)}`);
-  }
-  if (typeof stored.createdAt !== "string") {
-    throw new Error(`Invalid createdAt in checkpoint meta: ${safeDiagnosticRender(stored.createdAt)}`);
-  }
-  if (
-    typeof stored.nodeCount !== "number" ||
-    !Number.isSafeInteger(stored.nodeCount) ||
-    stored.nodeCount < 0
-  ) {
-    throw new Error(`Invalid nodeCount in checkpoint meta: ${safeDiagnosticRender(stored.nodeCount)}`);
-  }
-  if (stored.subject !== undefined && typeof stored.subject !== "string") {
-    throw new Error(`Invalid subject in checkpoint meta: ${safeDiagnosticRender(stored.subject)}`);
-  }
-  if (stored.dagFingerprint !== undefined && typeof stored.dagFingerprint !== "string") {
-    throw new Error(`Invalid dagFingerprint in checkpoint meta: ${safeDiagnosticRender(stored.dagFingerprint)}`);
-  }
-  if (stored.frameworkVersion !== undefined && typeof stored.frameworkVersion !== "string") {
-    throw new Error(`Invalid frameworkVersion in checkpoint meta: ${safeDiagnosticRender(stored.frameworkVersion)}`);
-  }
-  const startedAt = new Date(stored.startedAt);
-  const createdAt = new Date(stored.createdAt);
-  if (isNaN(startedAt.getTime()) || isNaN(createdAt.getTime())) {
-    throw new Error(
-      `Invalid date in checkpoint meta: startedAt=${stored.startedAt}, createdAt=${stored.createdAt}`,
-    );
-  }
-  return {
-    meta: {
-      // Read-side parse boundary: the stored bytes were written by a consumer
-      // of the (now branded) port. The Redis backend's frozen domain is
-      // pass-through — it neither re-derives nor validates the id domain at
-      // read time, so the brand is applied unchecked (an honest re-typing of
-      // the deserialized value, not a new gate).
-      dagId: __brandDagIdUnchecked(stored.dagId),
-      startedAt,
-      nodeCount: stored.nodeCount,
-      ...(stored.subject !== undefined ? { subject: stored.subject } : {}),
-      ...(stored.dagFingerprint !== undefined ? { dagFingerprint: stored.dagFingerprint } : {}),
-      ...(stored.frameworkVersion !== undefined ? { frameworkVersion: stored.frameworkVersion } : {}),
-    },
-    createdAt,
-  };
+  // ONE encoding with the file codec (round-23 atl-1): the record grammar
+  // gates (type gates, canonical ISO dates, safe-integer nodeCount, ID
+  // domains) live in the checkpoint core's `parseRunMetaRecord`. The brand
+  // pass-through inside is an honest re-typing of the ID domain only — it is
+  // never a license for corrupt bytes (a negative/Infinity/string nodeCount,
+  // a non-string dagId, non-string optional fields) to reach consumers as a
+  // "valid" checkpoint: the file twin rejects the identical bytes as
+  // `checkpoint-corrupt`, so this leg must fail the same way.
+  const parsed = parseRunMetaRecord(stored);
+  if (!parsed.ok) throw new Error(parsed.error);
+  return { meta: parsed.value.meta, createdAt: parsed.value.createdAt };
 };
 
 const serializeNode = (state: NodeState): string =>
@@ -112,24 +73,20 @@ const serializeNode = (state: NodeState): string =>
 
 const deserializeNode = (raw: string): NodeState => {
   const stored: StoredNodeState = JSON.parse(raw);
-  // Read-side sanity gate (parity with the meta twin and the file codec's
-  // parseStoredNode): a non-string nodeId from corrupt/drifted bytes must
-  // fail as corrupt HERE — per-entry, dropping the row into `corruptNodeIds`
-  // — never flow a number/object into the node map and node dispatch.
-  if (typeof stored.nodeId !== "string") {
-    throw new Error(`Invalid nodeId in checkpoint node: ${safeDiagnosticRender(stored.nodeId)}`);
-  }
-  if (typeof stored.completedAt !== "string") {
-    throw new Error(`Invalid completedAt in checkpoint node: ${safeDiagnosticRender(stored.completedAt)}`);
-  }
-  const completedAt = new Date(stored.completedAt);
-  if (isNaN(completedAt.getTime())) {
-    throw new Error(`Invalid date in checkpoint node: completedAt=${stored.completedAt}`);
+  // ONE encoding with the file codec (round-23 atl-1): the record grammar
+  // gates live in the checkpoint core's `parseNodeStateRecord` — a non-string
+  // or `ID_PATTERN`-violating nodeId, or a non-canonical completedAt, from
+  // corrupt/drifted bytes must fail as corrupt HERE — per-entry, dropping the
+  // row into `corruptNodeIds` — never flow a number/object into the node map
+  // and node dispatch. (The `output` field stays adapter-side pass-through.)
+  const parsedNode = parseNodeStateRecord(stored);
+  if (!parsedNode.ok) {
+    throw new Error(parsedNode.error);
   }
   return {
-    nodeId: __brandNodeIdUnchecked(stored.nodeId), // read-side pass-through (see the meta twin above)
+    nodeId: parsedNode.value.nodeId,
     output: stored.output,
-    completedAt,
+    completedAt: parsedNode.value.completedAt,
   };
 };
 
@@ -168,30 +125,18 @@ export class RedisCheckpointer implements Checkpointer {
     operation: "setMeta" | "load",
     runId: RunId,
   ): Result<number, FrameworkError> {
-    try {
-      const ms = this.now();
-      if (!isRepresentableTimestampMs(ms)) {
-        return err(
-          frameworkError.cacheError(
-            `checkpoint:${operation}`,
-            `${operation} clock returned a non-representable timestamp for run ${safeDiagnosticRender(runId)}: ${safeDiagnosticRender(ms)}`,
-            "permanent",
-          ),
-        );
-      }
-      return ok(ms);
-    } catch (error) {
-      // A throwing clock is deterministic — retrying cannot clear it — so it
-      // settles permanent like the non-representable arm above (retriabilityOf
-      // fast-fails instead of burning the retry budget).
-      return err(
-        frameworkError.cacheError(
-          `checkpoint:${operation}`,
-          safeErrorMessage(error),
-          "permanent",
-        ),
-      );
-    }
+    // ONE encoding with the in-memory and file twins (round-23 cs-2): the
+    // guard structure, representability gate, and "permanent" classification
+    // live in the checkpoint core; the twin adapters' pins keep their
+    // byte-identical messages through this adapter's renderers below.
+    return guardedCheckpointClockRead({
+      operation,
+      runId,
+      now: () => this.now(),
+      render: safeDiagnosticRender,
+      cacheError: (op, message) => frameworkError.cacheError(`checkpoint:${op}`, message, "permanent"),
+      throwMessage: safeErrorMessage,
+    });
   }
 
   async load(
@@ -296,7 +241,10 @@ export class RedisCheckpointer implements Checkpointer {
     return ok({
       meta,
       nodes,
-      ...(corruptNodeIds.length > 0 ? { corruptNodeIds } : {}),
+      // Always present — empty when no entry was dropped — so the
+      // drop-and-surface contract is visible to exhaustive consumers
+      // (round-23 tda-3).
+      corruptNodeIds,
     });
   }
 

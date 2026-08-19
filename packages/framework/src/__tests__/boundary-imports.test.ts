@@ -74,6 +74,7 @@ describe("SC-006 gate integrity pins", () => {
     // Negative: whitelisted profiled deserialization / pinning test modules
     // are the exact sanctioned importers.
     for (const whitelisted of [
+      "checkpoint/checkpointer.ts",
       "checkpoint/redis-checkpointer.ts",
       "file/checkpointer-codec.ts",
       "__tests__/file-boundary.test.ts",

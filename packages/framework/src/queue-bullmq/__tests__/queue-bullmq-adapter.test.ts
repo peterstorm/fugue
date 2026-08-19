@@ -19,6 +19,7 @@ import {
   createRedisMarkerStore,
   createRedisStreamReader,
 } from "../index.js";
+import { __parseEnvelope, __resetEventLogState } from "../event-log.js";
 import { adaptBullMQJob } from "../job.js";
 
 // ---------------------------------------------------------------------------
@@ -282,6 +283,40 @@ describe("Redis Streams event log (XADD/XRANGE)", () => {
 
     await expect(reader.readEvents(queueName, jobId)).rejects.toThrow(/Corrupt event/);
     await r.del(streamKey);
+  });
+
+  // round-23 sfh-1 unit pins: the truncated-payload fail-closed branch is
+  // unreachable through ioredis XADD (Redis itself rejects odd field lists),
+  // but a stream restored from RDB or written by another writer can carry a
+  // `payload` key with no value — the entry type Redis accepts from every
+  // legitimate writer must keep parsing, the fabricated-event class must fail
+  // closed louder than the legacy path it used to share.
+  it("parseEnvelope: a genuine legacy entry (no payload field) still reconstructs", () => {
+    const ev = __parseEnvelope("events:q:j", "1715200000000-0", ["type", "legacy", "acked", "1"]);
+    expect(ev.recordedAtMs).toBe(1715200000000);
+    expect(ev.event).toEqual({ type: "legacy", acked: "1" });
+  });
+
+  it("parseEnvelope: payload key PRESENT but valueless fails closed as corrupt (never fabricates an event)", () => {
+    const warnings: string[] = [];
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: (message) => warnings.push(String(message)),
+      error: () => {},
+    });
+    try {
+      expect(() =>
+        // Odd field list: `payload` is the LAST field with no value.
+        __parseEnvelope("events:q:j", "1715200000000-0", ["type", "bad", "payload"]),
+      ).toThrow(/Corrupt event in stream "events:q:j" entry "1715200000000-0"/);
+      // …and the rejection is loud, not silent: a warning names the stream/entry.
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain("events:q:j");
+      expect(warnings[0]).toContain("refusing to fabricate");
+    } finally {
+      __resetFrameworkLogger();
+    }
   });
 });
 

@@ -80,6 +80,16 @@ import {
 
 const TTL_MS = FRESHNESS_TTL_SECONDS * 1000;
 
+/**
+ * THE expiry rule for freshness entries — "stale when age exceeds the
+ * 24-hour TTL" (FR-032) — in ONE place (round-23 cs-5). Both
+ * `selectLatestWrite` (lazy supersede on record) and `decideConflict`
+ * (lazy supersede on conflict check) previously re-encoded
+ * `age > TTL_MS`; any future change to the rule now has a single home.
+ */
+const isExpired = (writtenAtMs: number, nowMs: number): boolean =>
+  nowMs - writtenAtMs > TTL_MS;
+
 interface PreparedFreshnessWrite {
   readonly resource: string;
   readonly runId: WriteEntry["runId"];
@@ -373,8 +383,7 @@ const selectLatestWrite = (
   incoming: PreparedFreshnessWrite,
   writtenAtMs: number,
 ): StoredFreshnessEntry => {
-  const currentIsExpired =
-    current === null || writtenAtMs - current.writtenAtMs > TTL_MS;
+  const currentIsExpired = current === null || isExpired(current.writtenAtMs, writtenAtMs);
   if (currentIsExpired) return { writtenAtMs, ...incoming };
 
   const incomingWins =
@@ -401,7 +410,7 @@ const decideConflict = (
   sinceMs: number,
   nowMs: number,
 ): WriteEntry | null => {
-  if (nowMs - entry.writtenAtMs > TTL_MS) return null;
+  if (isExpired(entry.writtenAtMs, nowMs)) return null;
   if (
     entry.succeededAtMs < sinceMs ||
     entry.newWitness.value === conditionedOnValue
@@ -469,7 +478,8 @@ const createFileFreshnessIndexUnchecked = (
    * clock fails identically on every retry — so both are pinned
    * "permanent". The two checkpointer backends consolidated the same pair the
    * same way (file/checkpointer.ts `readClock`, checkpoint/checkpointer.ts
-   * `readClock`); this is the third of the five file-backend clock sites.
+   * `readClock`); this is the third clock-guard implementation, covering the
+   * last two of the five clock sites (`recordWrite`, `findConflict`).
    */
   const readClock = (
     operation: "freshness:recordWrite" | "freshness:findConflict",

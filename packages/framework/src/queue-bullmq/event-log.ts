@@ -102,14 +102,29 @@ function parseEnvelope(
   fields: string[],
 ): RecordedEvent<unknown> {
   const payloadIndex = fields.indexOf("payload");
-  if (payloadIndex === -1 || payloadIndex + 1 >= fields.length) {
-    // No payload field — fall back to reconstructing from all fields.
+  if (payloadIndex === -1) {
+    // Genuine legacy entry (no payload field at all) — reconstruct from the
+    // raw field pairs, as before. Kept silent on purpose: this is the legacy
+    // encoding, not corruption.
     const obj: Record<string, string> = {};
     for (let i = 0; i < fields.length; i += 2) obj[fields[i]] = fields[i + 1];
     const { recordedAtMs, synthetic } = parseEntryIdTimestamp(entryId);
     return synthetic
       ? { recordedAtMs, event: obj, synthetic }
       : { recordedAtMs, event: obj };
+  }
+  if (payloadIndex + 1 >= fields.length) {
+    // The `payload` KEY is present but has NO value — a truncated/partial
+    // stream entry. Same tampering class as corrupt JSON below: fail closed
+    // loudly instead of fabricating `{ payload: undefined }` events that
+    // would replay through the machine as if they were history (round-23
+    // sfh-1).
+    fwLogger().warn(
+      `[readEvents] stream "${streamKey}" entry "${entryId}" has a payload key with no value — refusing to fabricate an event`,
+    );
+    throw new Error(
+      `[readEvents] Corrupt event in stream "${streamKey}" entry "${entryId}": payload field is present but has no value`,
+    );
   }
 
   const raw = fields[payloadIndex + 1];
@@ -170,6 +185,19 @@ export function __resetEventLogState(): void {
 export const __parseEntryIdTimestamp = (
   entryId: string,
 ): { recordedAtMs: number; synthetic: boolean } => parseEntryIdTimestamp(entryId);
+
+/**
+ * Test-only re-export of the envelope parser (round-23 sfh-1). The
+ * truncated-payload fail-closed branch is unreachable through ioredis XADD
+ * (Redis itself rejects odd field lists), but real streams restored from
+ * RDB snapshots or written by other writers can violate the invariant — so
+ * the branch is pinned here, unit-level.
+ */
+export const __parseEnvelope = (
+  streamKey: string,
+  entryId: string,
+  fields: string[],
+): RecordedEvent<unknown> => parseEnvelope(streamKey, entryId, fields);
 
 /**
  * Parse the millisecond prefix from a Redis Stream entry ID

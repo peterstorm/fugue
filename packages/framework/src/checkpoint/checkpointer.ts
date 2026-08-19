@@ -4,7 +4,11 @@ import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { err, ok } from "../types/result.js";
 import { FRAMEWORK_VERSION } from "./fingerprint.js";
 import type { CompositeNodeKeyOpts } from "./composite-node-key.js";
-import { ID_PATTERN } from "../types/ids.js";
+import {
+  ID_PATTERN,
+  __brandDagIdUnchecked,
+  __brandNodeId,
+} from "../types/ids.js";
 import { isRepresentableTimestampMs } from "../types/clock.js";
 import {
   CHECKPOINT_INVALID_RUN_ID,
@@ -103,6 +107,196 @@ export const evaluateCheckpointLoadGates = (input: {
   return ok("ok");
 };
 
+// ── Shared record grammar (round-23 atl-1) ─────────────────────────────────
+
+/**
+ * Parse the exact timestamp grammar emitted on write. `Date` accepts many
+ * non-canonical spellings (`2025-01-01`, offsets, missing milliseconds); a
+ * persisted checkpoint timestamp is valid only when parsing and re-emitting
+ * it produces byte-identical text. The parse/re-emit pair is guarded so corrupt
+ * bytes can only become an `Err`, never a raw date exception.
+ *
+ * ONE encoding owned by the checkpoint core: the file codec and the Redis
+ * adapter's read gates delegate here, so the two backends cannot drift on the
+ * date grammar (round-23 atl-1 — Redis previously accepted any parseable
+ * string where the file codec required canonical ISO).
+ */
+export const parseCanonicalIsoDate = (
+  value: string,
+  field: "startedAt" | "createdAt" | "completedAt",
+): Result<Date, string> => {
+  try {
+    const parsed = new Date(value);
+    const canonical = Date.prototype.toISOString.call(parsed);
+    return canonical === value
+      ? ok(parsed)
+      : err(`${field} must be a canonical ISO timestamp, got ${safeDiagnosticRender(value)}`);
+  } catch {
+    return err(`${field} must be a canonical ISO timestamp, got ${safeDiagnosticRender(value)}`);
+  }
+};
+
+/**
+ * Strict parse of the checkpoint META record fields shared by every backend
+ * (round-23 atl-1): parse, don't validate — every field is checked before it
+ * becomes a `RunMeta`, so a half-readable meta can never be served as a
+ * usable checkpoint. The file codec and the Redis adapter previously
+ * re-encoded these gates separately and drifted (Redis accepted any
+ * `Date`-parseable timestamp where the file codec required canonical ISO);
+ * this is the ONE encoding, with the file codec's pinned message vocabulary.
+ * Each adapter keeps its own storage envelope (file: `meta.json` bytes +
+ * digest naming; Redis: flat JSON hash fields) and maps the `Err` into its
+ * local style. Unknown additive top-level fields are deliberately ignored so
+ * newer writers may extend metadata without older readers rejecting
+ * otherwise usable checkpoints.
+ */
+export const parseRunMetaRecord = (
+  raw: unknown,
+): Result<{ readonly meta: RunMeta; readonly createdAt: Date }, string> => {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return err(`meta must be a JSON object, got ${safeDiagnosticRender(raw)}`);
+  }
+  const {
+    dagId,
+    startedAt,
+    nodeCount,
+    createdAt,
+    subject,
+    dagFingerprint,
+    frameworkVersion,
+  } = raw as Record<string, unknown>;
+  if (typeof dagId !== "string") {
+    return err(`dagId must be a string, got ${safeDiagnosticRender(dagId)}`);
+  }
+  if (typeof startedAt !== "string") {
+    return err(`startedAt must be a string, got ${safeDiagnosticRender(startedAt)}`);
+  }
+  if (typeof createdAt !== "string") {
+    return err(`createdAt must be a string, got ${safeDiagnosticRender(createdAt)}`);
+  }
+  if (
+    typeof nodeCount !== "number" ||
+    !Number.isSafeInteger(nodeCount) ||
+    nodeCount < 0
+  ) {
+    return err(
+      `nodeCount must be a non-negative safe integer, got ${safeDiagnosticRender(nodeCount)}`,
+    );
+  }
+  if (subject !== undefined && typeof subject !== "string") {
+    return err(`subject must be a string when present, got ${safeDiagnosticRender(subject)}`);
+  }
+  if (dagFingerprint !== undefined && typeof dagFingerprint !== "string") {
+    return err(`dagFingerprint must be a string when present, got ${safeDiagnosticRender(dagFingerprint)}`);
+  }
+  if (frameworkVersion !== undefined && typeof frameworkVersion !== "string") {
+    return err(`frameworkVersion must be a string when present, got ${safeDiagnosticRender(frameworkVersion)}`);
+  }
+  const parsedStartedAt = parseCanonicalIsoDate(startedAt, "startedAt");
+  if (!parsedStartedAt.ok) return err(parsedStartedAt.error);
+  const parsedCreatedAt = parseCanonicalIsoDate(createdAt, "createdAt");
+  if (!parsedCreatedAt.ok) return err(parsedCreatedAt.error);
+  return ok({
+    meta: {
+      // Read-side parse boundary: the stored bytes were written by a consumer
+      // of the (now branded) port. The frozen acceptance domain is a
+      // `typeof`/grammar shape check (it does NOT re-derive the `DagId`
+      // pattern domain at read time — that would newly reject stored values,
+      // a behavior change to a frozen surface), so the brand is applied
+      // unchecked: an honest re-typing of the deserialized value.
+      dagId: __brandDagIdUnchecked(dagId),
+      startedAt: parsedStartedAt.value,
+      nodeCount,
+      ...(subject !== undefined ? { subject } : {}),
+      ...(dagFingerprint !== undefined ? { dagFingerprint } : {}),
+      ...(frameworkVersion !== undefined ? { frameworkVersion } : {}),
+    },
+    createdAt: parsedCreatedAt.value,
+  });
+};
+
+/**
+ * Strict parse of the checkpoint NODE record fields shared by every backend
+ * (round-23 atl-1): `nodeId` must match `ID_PATTERN` (the file backend's
+ * path-safety domain — Redis previously accepted any string, so bytes Redis
+ * served as valid were `checkpoint-corrupt` on the file backend) and
+ * `completedAt` must be canonical ISO. The file codec additionally verifies
+ * its envelope (`nodeKey`, digest filename) and serializer-tagged `output`
+ * around this gate; the Redis adapter passes `output` through.
+ */
+export const parseNodeStateRecord = (
+  raw: unknown,
+): Result<{ readonly nodeId: NodeId; readonly completedAt: Date }, string> => {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return err(`node entry must be a JSON object, got ${safeDiagnosticRender(raw)}`);
+  }
+  const { nodeId, completedAt } = raw as Record<string, unknown>;
+  if (typeof nodeId !== "string" || !ID_PATTERN.test(nodeId)) {
+    return err(`nodeId ${safeDiagnosticRender(nodeId)} does not match ${ID_PATTERN.source}`);
+  }
+  if (typeof completedAt !== "string") {
+    return err(`completedAt must be a string, got ${safeDiagnosticRender(completedAt)}`);
+  }
+  const parsedCompletedAt = parseCanonicalIsoDate(completedAt, "completedAt");
+  if (!parsedCompletedAt.ok) return err(parsedCompletedAt.error);
+  // ID_PATTERN was just verified — the validating brand cannot reject.
+  return ok({ nodeId: __brandNodeId(nodeId), completedAt: parsedCompletedAt.value });
+};
+
+// ── Guarded checkpoint-clock read (round-23 cs-2) ──────────────────────────
+
+export interface GuardedCheckpointClockReadInput {
+  readonly operation: "setMeta" | "load";
+  readonly runId: RunId;
+  readonly now: () => number;
+  /** Total diagnostics renderer (each adapter's `safeDiagnosticRender`). */
+  readonly render: (value: unknown) => string;
+  /**
+   * Adapter's `cache-error` constructor — must classify the verdict
+   * "permanent". Receives the RAW operation (`"setMeta"` / `"load"`); each
+   * adapter formats its own operation vocabulary (the in-memory and Redis
+   * twins stamp `checkpoint:<op>`, the file backend stamps the bare
+   * operation — pre-existing, pinned divergence preserved byte-for-byte).
+   */
+  readonly cacheError: (operation: "setMeta" | "load", message: string) => FrameworkError;
+  /** Adapter-specific total renderer for the throwing-clock arm (preserves each backend's pinned message bytes). */
+  readonly throwMessage: (error: unknown) => string;
+}
+
+/**
+ * ONE encoding for the guarded checkpoint-clock read (round-23 cs-2): throw
+ * guard + representability gate + "permanent" classification, previously
+ * triplicated near-verbatim across the in-memory, Redis, and file adapters.
+ * A throwing clock must become a typed error, never a raw rejection, and a
+ * non-representable clock output must fail closed too — a NaN TTL comparison
+ * is always `false`, which would silently void the FR-027 expiry (a finite
+ * timestamp outside the ±100,000-year Time Value range yields an Invalid
+ * `Date`). Both rejections are code-constructed and deterministic, so both
+ * settle "permanent" (retriabilityOf fast-fails instead of burning the retry
+ * budget). Message construction stays adapter-owned via
+ * `render`/`throwMessage`/`cacheError`, so every existing pin's bytes are
+ * preserved.
+ */
+export const guardedCheckpointClockRead = (
+  input: GuardedCheckpointClockReadInput,
+): Result<number, FrameworkError> => {
+  const { operation, runId, now, render, cacheError, throwMessage } = input;
+  try {
+    const ms = now();
+    if (!isRepresentableTimestampMs(ms)) {
+      return err(
+        cacheError(
+          operation,
+          `${operation} clock returned a non-representable timestamp for run ${render(runId)}: ${render(ms)}`,
+        ),
+      );
+    }
+    return ok(ms);
+  } catch (error) {
+    return err(cacheError(operation, throwMessage(error)));
+  }
+};
+
 // --- Domain types ---
 
 export interface RunMeta {
@@ -164,9 +358,11 @@ export interface RunState {
    * Backend-specific addresses of stored entries that could not be decoded and
    * were dropped from `nodes`. Redis reports hash-field node ids; the file
    * backend reports a recoverable stored nodeKey, or the digest filename when
-   * no address can be recovered. Empty / absent on a clean load.
+   * no address can be recovered. Always present — empty on a clean load — so
+   * the drop-and-surface contract is visible to exhaustive consumers
+   * (round-23 tda-3).
    */
-  readonly corruptNodeIds?: readonly string[];
+  readonly corruptNodeIds: readonly string[];
 }
 
 // --- Checkpointer interface ---
@@ -336,30 +532,18 @@ export class InMemoryCheckpointer implements Checkpointer {
     operation: "setMeta" | "load",
     runId: RunId,
   ): Result<number, FrameworkError> {
-    try {
-      const ms = this.now();
-      if (!isRepresentableTimestampMs(ms)) {
-        return err(
-          frameworkError.cacheError(
-            `checkpoint:${operation}`,
-            `${operation} clock returned a non-representable timestamp for run ${safeDiagnosticRender(runId)}: ${safeDiagnosticRender(ms)}`,
-            "permanent",
-          ),
-        );
-      }
-      return ok(ms);
-    } catch (error) {
-      // A throwing clock is deterministic — retrying cannot clear it — so it
-      // settles permanent like the non-representable arm above (retriabilityOf
-      // fast-fails instead of burning the retry budget).
-      return err(
-        frameworkError.cacheError(
-          `checkpoint:${operation}`,
-          safeErrorMessage(error),
-          "permanent",
-        ),
-      );
-    }
+    // ONE encoding with the Redis and file adapters (round-23 cs-2): the
+    // guard structure, representability gate, and "permanent" classification
+    // live in the checkpoint core; the twin adapters' pins keep their
+    // byte-identical messages through this adapter's renderers below.
+    return guardedCheckpointClockRead({
+      operation,
+      runId,
+      now: () => this.now(),
+      render: safeDiagnosticRender,
+      cacheError: (op, message) => frameworkError.cacheError(`checkpoint:${op}`, message, "permanent"),
+      throwMessage: safeErrorMessage,
+    });
   }
 
   async load(
@@ -406,6 +590,9 @@ export class InMemoryCheckpointer implements Checkpointer {
       return ok({
         meta: this.detachStored(meta, "checkpoint meta"),
         nodes: this.detachStored(this.nodes.get(runId) ?? {}, `checkpoint nodes for ${runId}`),
+        // In-memory state cannot carry undecodable entries — nothing is ever
+        // dropped, so the contract field is present and empty (round-23 tda-3).
+        corruptNodeIds: [],
       });
     } catch (error) {
       // Stored state that cannot be detached is stored-state corruption: the

@@ -4,6 +4,7 @@ import type { z } from "zod";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import { ok, err } from "../types/result.js";
+import { safeErrorMessage } from "../types/safe-error.js";
 
 const schemaMismatchError = (key: string, message: string): FrameworkError => ({
   kind: "cache-error",
@@ -46,7 +47,7 @@ export class InMemoryCache implements Cache {
     try {
       nowMs = this.now();
     } catch (e) {
-      return err({ kind: "cache-error", operation: "get", message: `key="${key}": clock failed: ${e instanceof Error ? e.message : String(e)}` });
+      return err({ kind: "cache-error", operation: "get", message: `key="${key}": clock failed: ${safeErrorMessage(e)}` });
     }
     if (!Number.isFinite(nowMs) || nowMs > entry.expiresAt) {
       this.store.delete(key);
@@ -56,7 +57,7 @@ export class InMemoryCache implements Cache {
     try {
       parsed = JSON.parse(entry.value);
     } catch (e) {
-      const message = `key="${key}": JSON.parse failed: ${e instanceof Error ? e.message : String(e)}`;
+      const message = `key="${key}": JSON.parse failed: ${safeErrorMessage(e)}`;
       return err({ kind: "cache-error", operation: "get", message });
     }
     const validated = schema.safeParse(parsed);
@@ -72,13 +73,13 @@ export class InMemoryCache implements Cache {
     try {
       json = JSON.stringify(value);
     } catch (e) {
-      return err({ kind: "cache-error", operation: "set", message: `key="${key}": JSON.stringify failed: ${e instanceof Error ? e.message : String(e)}` });
+      return err({ kind: "cache-error", operation: "set", message: `key="${key}": JSON.stringify failed: ${safeErrorMessage(e)}` });
     }
     let nowMs: number;
     try {
       nowMs = this.now();
     } catch (e) {
-      return err({ kind: "cache-error", operation: "set", message: `key="${key}": clock failed: ${e instanceof Error ? e.message : String(e)}` });
+      return err({ kind: "cache-error", operation: "set", message: `key="${key}": clock failed: ${safeErrorMessage(e)}` });
     }
     if (!Number.isFinite(nowMs)) {
       return err({ kind: "cache-error", operation: "set", message: `key="${key}": clock returned a non-finite timestamp` });

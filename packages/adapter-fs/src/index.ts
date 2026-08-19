@@ -41,7 +41,7 @@ import { basename, extname, isAbsolute, relative, resolve } from "node:path";
 import { readFile as nodeReadFile, stat as nodeStat } from "node:fs/promises";
 import { match } from "ts-pattern";
 import type { Result, FrameworkError, CapabilityHandle } from "@fuguejs/framework";
-import { ok, err, nodeId } from "@fuguejs/framework";
+import { ok, err, nodeId, safeErrorMessage, probeErrorCode } from "@fuguejs/framework";
 import type { DocumentSource, FileRef, FileMeta } from "@fuguejs/document-source";
 import { unsupportedRefError, isoUtcFromDate } from "@fuguejs/document-source";
 
@@ -84,8 +84,6 @@ interface FsAdapterConfig {
 
 const FS_NODE_ID = nodeId("fs-capability");
 
-const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
-
 const crashErr = (message: string): FrameworkError => ({
   kind: "node-crash",
   nodeId: FS_NODE_ID,
@@ -121,11 +119,17 @@ const MIME_BY_EXT: Readonly<Record<string, string>> = {
  * are retriable. Exported for testing.
  */
 export const mapFsError = (e: unknown, path: string): FrameworkError => {
-  const code = typeof e === "object" && e !== null && "code" in e ? String((e as { code: unknown }).code) : "";
+  // Total code probe from the framework (round-23 cs-3): a hostile thrown
+  // value (revoked proxy, throwing getter) can never throw across this
+  // boundary. `probeErrorCode` reports string codes — identical to the
+  // previous `"code" in e` read for `node:fs` errors, strictly more total
+  // otherwise.
+  const probe = probeErrorCode(e);
+  const code = probe.kind === "code" ? probe.code : "";
   if (code === "ENOENT") return crashErr(`file not found: ${path}`);
   if (code === "EACCES" || code === "EPERM") return crashErr(`permission denied: ${path}`);
   if (code === "EISDIR") return crashErr(`path is a directory: ${path}`);
-  return transientErr(`fs error reading ${path}: ${msg(e)}`);
+  return transientErr(`fs error reading ${path}: ${safeErrorMessage(e)}`);
 };
 
 /**
@@ -226,7 +230,7 @@ export const createFsAdapter = (config: FsAdapterConfig): CapabilityHandle<"docu
       try {
         await fs.stat(root);
       } catch (e) {
-        throw new Error(`fs: rootDir '${config.rootDir}' is not accessible at connect: ${msg(e)}`);
+        throw new Error(`fs: rootDir '${config.rootDir}' is not accessible at connect: ${safeErrorMessage(e)}`);
       }
     },
 
@@ -239,7 +243,7 @@ export const createFsAdapter = (config: FsAdapterConfig): CapabilityHandle<"docu
         await fs.stat(root);
         return ok(undefined);
       } catch (e) {
-        return err(`fs: rootDir '${config.rootDir}' inaccessible: ${msg(e)}`);
+        return err(`fs: rootDir '${config.rootDir}' inaccessible: ${safeErrorMessage(e)}`);
       }
     },
   };

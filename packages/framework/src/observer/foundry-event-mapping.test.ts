@@ -19,6 +19,7 @@ import type { RunSummary } from "./buffered.js";
 import { runId, nodeId, dagId } from "../types/ids.js";
 import { confidence } from "../types/confidence.js";
 import { witness, resourceName } from "../types/freshness.js";
+import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
 
 const RID = runId("run-1");
 const DID = dagId("dag-1");
@@ -130,6 +131,76 @@ describe("mapEventToFoundry", () => {
       output: {},
     };
     expect(mapEventToFoundry(ev)).toEqual([]);
+  });
+
+  it("dropped non-finite values are OBSERVABLE: a warning names the metric (round-23 sfh-3)", () => {
+    const warnings: string[] = [];
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: (message) => warnings.push(String(message)),
+      error: () => {},
+    });
+    try {
+      const ev: ObserverEvent = {
+        type: "node-end",
+        runId: RID,
+        dagId: DID,
+        nodeId: NID,
+        sideEffects: { kind: "none" },
+        timestamp: T,
+        duration: Number.POSITIVE_INFINITY,
+        output: {},
+      };
+      // The emission itself is unchanged — the drop is still a drop...
+      expect(mapEventToFoundry(ev)).toEqual([]);
+      // ...but it is no longer SILENT: one bounded warning names the metric.
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain("fugue.node.latency_ms");
+      expect(warnings[0]).toContain("non-finite");
+    } finally {
+      __resetFrameworkLogger();
+    }
+  });
+
+  it("dropped non-finite measurements warn per entry and keep the finite ones (round-23 sfh-3)", () => {
+    const warnings: string[] = [];
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: (message) => warnings.push(String(message)),
+      error: () => {},
+    });
+    try {
+      const summary: RunSummary = {
+        runId: "run-1",
+        status: "ok",
+        totalDuration: Number.NaN,
+        nodeCount: 1,
+        retryCount: 0,
+        totalCostUsd: 12.5,
+        freshnessViolationCount: 0,
+        humanInterventionCount: 0,
+        routeDecisionCount: 0,
+      };
+      const ev: RunEndEvent = {
+        type: "run-end",
+        runId: RID,
+        dagId: DID,
+        timestamp: T,
+        duration: 200,
+        status: "ok",
+      };
+      const out = mapRunSummaryToFoundry(summary, ev);
+      // The drop rule stands — finite entries survive (cost metric, summary
+      // bag minus the non-finite durationMs)...
+      expect(out.some((e) => e.kind === "metric" && e.name === FOUNDRY_METRIC_RUN_COST)).toBe(true);
+      // ...and the dropped entry left a breadcrumb naming it.
+      expect(warnings.length).toBeGreaterThan(0);
+      expect(warnings.some((w) => w.includes("durationMs"))).toBe(true);
+    } finally {
+      __resetFrameworkLogger();
+    }
   });
 
   it("node-skipped checkpoint → cache-hit metric (value 1) by nodeId", () => {

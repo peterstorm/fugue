@@ -53,12 +53,18 @@ const createFakeRedis = (opts?: {
   failDelOnKey?: string;
   failSAddOnKey?: string;
   failSMembersOnKey?: string;
+  failGetOnKey?: string;
 }): { redis: RedisPort; store: Map<string, string>; sets: Map<string, Set<string>> } => {
   const store = new Map<string, string>();
   const sets = new Map<string, Set<string>>();
 
   const redis: RedisPort = {
-    get: async (key) => ok(store.get(key) ?? null),
+    get: async (key) => {
+      if (opts?.failGetOnKey && key.includes(opts.failGetOnKey)) {
+        return err({ kind: "redis-unavailable", operation: `GET ${key}` } as HostError);
+      }
+      return ok(store.get(key) ?? null);
+    },
     set: async (key, value, _opts) => {
       if (opts?.failSetOnKey && key.includes(opts.failSetOnKey)) {
         return err({ kind: "redis-unavailable", operation: `SET ${key}` } as HostError);
@@ -340,6 +346,33 @@ describe("createRedisTokenStore", () => {
         const teams = result.value.map(g => g.team).sort();
         expect(teams).toEqual(["team-a", "team-b"]);
       }
+    });
+
+    it("logs a warning and skips a team whose key read FAILS (read failure ≠ absent key — round-23 sfh-2)", async () => {
+      const warnings: unknown[][] = [];
+      const logger: LogPort = {
+        info: () => {},
+        warn: (...args: unknown[]) => warnings.push(args),
+        error: () => {},
+      };
+      const { redis } = createFakeRedis({ failGetOnKey: "team-a" });
+      const tokenStore = createRedisTokenStore(redis, TENANT, logger);
+
+      await tokenStore.store("team-a", hash1, grant1);
+      await tokenStore.store("team-b", hash2, grant2);
+
+      const result = await tokenStore.listTeams();
+      // The failed read is skipped, the rest of the list stays intact...
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.value.map((g) => g.team)).toEqual(["team-b"]);
+      }
+      // ...but the skip is NOT silent: one warning names the team and the
+      // failure kind, so a "missing team" report has a breadcrumb.
+      expect(warnings).toHaveLength(1);
+      expect(String(warnings[0][0])).toContain("listTeams");
+      expect(String(warnings[0][0])).toContain("read failure");
+      expect(JSON.stringify(warnings[0])).toContain("team-a");
     });
 
     it("uses SMEMBERS on the index — never SCAN or KEYS (the ACL denies them)", async () => {

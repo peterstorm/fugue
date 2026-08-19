@@ -502,7 +502,6 @@ describe("RedisRunStore — active-run index (ADR-0074)", () => {
     const { redis, kv } = setBackedRedis();
     const warns: Array<{ msg: string; fields: Record<string, unknown> }> = [];
     const logger: LogPort = {
-      debug() {},
       info() {},
       warn(msg, fields) {
         warns.push({ msg, fields: fields ?? {} });

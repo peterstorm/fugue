@@ -277,7 +277,7 @@ checkpointerSuite(
 // ---------------------------------------------------------------------------
 
 describe("evaluateCheckpointLoadGates — the one shared load-gate encoding", () => {
-  const fresh = { frameworkVersion: FRAMEWORK_VERSION, dagFingerprint: "fp-1", createdAt: new Date(1_000) };
+  const fresh = { runId: R("gates-run"), frameworkVersion: FRAMEWORK_VERSION, dagFingerprint: "fp-1", createdAt: new Date(1_000) };
   const healthyClock = () => ok(1_000 + TTL_SECONDS * 1000 - 1); // inside TTL
 
   it("order: framework-version mismatch wins over fingerprint and TTL", () => {
@@ -311,7 +311,7 @@ describe("evaluateCheckpointLoadGates — the one shared load-gate encoding", ()
   it("the version gates evaluate BEFORE the clock read (hostile clock never masks a version mismatch)", () => {
     let clockReads = 0;
     const gates = evaluateCheckpointLoadGates(
-      { ...fresh, frameworkVersion: "0.0.0-old" },
+      { ...fresh, frameworkVersion: "0.0.0-old", expectedDagFingerprint: undefined },
       () => { clockReads++; throw new Error("clock boom"); },
     );
     expect(gates.ok).toBe(false);
@@ -321,7 +321,7 @@ describe("evaluateCheckpointLoadGates — the one shared load-gate encoding", ()
   });
 
   it("matches fingerprint and TTL: ok when gates pass; expired past TTL", () => {
-    const fresh = { frameworkVersion: FRAMEWORK_VERSION, dagFingerprint: "fp-1", createdAt: new Date(1_000) };
+    const fresh = { runId: R("gates-run"), frameworkVersion: FRAMEWORK_VERSION, dagFingerprint: "fp-1", createdAt: new Date(1_000) };
     expect(evaluateCheckpointLoadGates({ ...fresh, expectedDagFingerprint: "fp-1" }, healthyClock)).toEqual(ok("ok"));
     expect(evaluateCheckpointLoadGates({ ...fresh, expectedDagFingerprint: undefined }, healthyClock)).toEqual(ok("ok"));
     const expired = evaluateCheckpointLoadGates(
@@ -341,7 +341,9 @@ describe("evaluateCheckpointLoadGates — the one shared load-gate encoding", ()
     expect(gates.ok).toBe(false);
     if (gates.ok) return;
     expect(gates.error.kind).toBe("cache-error");
-    expect(gates.error.operation).toBe("load");
+    if (gates.error.kind === "cache-error") {
+      expect(gates.error.operation).toBe("load");
+    }
   });
 });
 
@@ -391,7 +393,8 @@ describe("FileCheckpointer — unknown run", () => {
     expect(result.ok).toBe(true);
     if (!result.ok || result.value === null) throw new Error("expected a loaded run state");
     expect(result.value.nodes).toEqual({});
-    expect(result.value.corruptNodeIds).toBeUndefined();
+    // Always present, empty when nothing was dropped (round-23 tda-3).
+    expect(result.value.corruptNodeIds).toEqual([]);
     expect(result.value.meta.nodeCount).toBe(4);
   });
 });
@@ -938,7 +941,8 @@ describe("FileCheckpointer — composite addressing (FR-022, ADR-0075)", () => {
       expect(result.value.nodes[expectedKey].output).toBe(expectedKey);
       expect(result.value.nodes[expectedKey].nodeId).toBe(N(nodeId));
     }
-    expect(result.value.corruptNodeIds).toBeUndefined();
+    // Always present, empty when nothing was dropped (round-23 tda-3).
+    expect(result.value.corruptNodeIds).toEqual([]);
   });
 
   it("rejects a namespace-only save with a typed checkpoint-write-failed (index and attempt both absent)", async () => {
@@ -1007,7 +1011,8 @@ describe("FileCheckpointer — composite addressing (FR-022, ADR-0075)", () => {
       expect(result.value.nodes[id].output).toBe(`out-${id}`);
       expect(result.value.nodes[id].nodeId).toBe(N(id));
     }
-    expect(result.value.corruptNodeIds).toBeUndefined();
+    // Always present, empty when nothing was dropped (round-23 tda-3).
+    expect(result.value.corruptNodeIds).toEqual([]);
     // The map itself was never re-parented by the `__proto__` entry.
     expect(Object.getPrototypeOf(result.value.nodes)).toBe(Object.prototype);
   });
@@ -1069,7 +1074,8 @@ describe("FileCheckpointer — output fidelity", () => {
     if (!result.ok || result.value === null) throw new Error("expected a loaded run state");
     expect(Object.keys(result.value.nodes)).toEqual(["n1"]);
     expect(result.value.nodes["n1"].output).toBeUndefined();
-    expect(result.value.corruptNodeIds).toBeUndefined();
+    // Always present, empty when nothing was dropped (round-23 tda-3).
+    expect(result.value.corruptNodeIds).toEqual([]);
   });
 
   it("preserves distinct object-key identities even when their serialized shapes match", async () => {
@@ -1523,7 +1529,8 @@ describe("FileCheckpointer — atomic writes (FR-029)", () => {
     const result = await cp.load(R("run-crash"));
     if (!result.ok || result.value === null) throw new Error("expected a loaded run state");
     expect(result.value.nodes["n1"].output).toBe("committed");
-    expect(result.value.corruptNodeIds).toBeUndefined();
+    // Always present, empty when nothing was dropped (round-23 tda-3).
+    expect(result.value.corruptNodeIds).toEqual([]);
   });
 
   it("a failed commit returns cache-error(saveNode) and leaves no partial entry", async () => {

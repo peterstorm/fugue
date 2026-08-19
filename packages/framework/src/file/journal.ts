@@ -194,10 +194,31 @@ export interface FileJournal {
    * An existing-but-unreadable file is an fs failure, not absence: every
    * other errno (EACCES, ENOTDIR, …) throws a typed `FrameworkError` —
    * reporting a permission-broken run directory as "no checkpoint" would
-   * be a silent fresh start. Parsing is the caller's business (the resume
-   * layer's strict `parseCheckpoint`). */
-  readCheckpoint(): string | null;
+   * be a silent fresh start. The RAW-JSON brand documents in the type that
+   * parsing is the caller's business (the resume layer's strict
+   * `parseCheckpoint`) — the capability-typed write twin's mirror
+   * (round-23 tda-5). */
+  readCheckpoint(): RawCheckpointJson | null;
 }
+
+/**
+ * The unvalidated `checkpoint.json` bytes, branded so the "must strict-parse
+ * before trusting" obligation is visible in the type instead of only the doc
+ * comment (round-23 tda-5): `RawCheckpointJson` cannot be produced from
+ * arbitrary strings by accident — it is minted only at the file read site.
+ */
+export type RawCheckpointJson = string & {
+  readonly __rawCheckpointJson: unique symbol;
+};
+
+/**
+ * Mint the raw-checkpoint brand at the byte-read boundary (and in tests that
+ * compare read bytes against written bytes). Not a validation gate — the
+ * strict parse is the consumer's job, and that obligation is exactly what the
+ * brand makes visible.
+ */
+export const rawCheckpointJson = (value: string): RawCheckpointJson =>
+  value as RawCheckpointJson;
 
 // ---------------------------------------------------------------------------
 // createFileJournal
@@ -495,7 +516,10 @@ export const createFileJournal = (
     }
   };
 
-  const readCheckpoint = (): string | null => readCheckpointFile(directory);
+  const readCheckpoint = (): RawCheckpointJson | null => {
+    const bytes = readCheckpointFile(directory);
+    return bytes === null ? null : rawCheckpointJson(bytes);
+  };
 
   return { appendEvent, writeCheckpoint, writeProgress, readCheckpoint };
 };

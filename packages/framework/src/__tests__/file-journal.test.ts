@@ -47,7 +47,7 @@ import {
   serializeFileCheckpoint,
   serializeFileEventRecord,
 } from "../file.js";
-import { journalCapacityError } from "../file/journal.js";
+import { journalCapacityError, rawCheckpointJson } from "../file/journal.js";
 import { asCacheError } from "./_cache-error-helpers.js";
 import {
   CHECKPOINT_FILE,
@@ -414,11 +414,11 @@ describe("createFileJournal — checkpoint/progress projections", () => {
 
     const first = serializeFileCheckpoint({ state: "s1", context: null });
     await journal.writeCheckpoint(first);
-    expect(journal.readCheckpoint()).toBe(first.json);
+    expect(journal.readCheckpoint()).toBe(rawCheckpointJson(first.json));
 
     const second = serializeFileCheckpoint({ state: "s2", context: null });
     await journal.writeCheckpoint(second);
-    expect(journal.readCheckpoint()).toBe(second.json);
+    expect(journal.readCheckpoint()).toBe(rawCheckpointJson(second.json));
   });
 
   it("writeCheckpoint creates a nonexistent nested run directory on the first write", async () => {
@@ -460,7 +460,7 @@ describe("createFileJournal — checkpoint/progress projections", () => {
     const commit = serializeFileCheckpoint({ state: "s", context: null });
     let failure: unknown = null;
     return journal.writeCheckpoint(commit).then(() => {
-      expect(createFileJournal(blocked).readCheckpoint()).toBe(commit.json);
+      expect(createFileJournal(blocked).readCheckpoint()).toBe(rawCheckpointJson(commit.json));
       chmodSync(join(blocked, CHECKPOINT_FILE), 0o000);
       try {
         createFileJournal(blocked).readCheckpoint();
@@ -520,7 +520,7 @@ describe("createFileJournal — checkpoint/progress projections", () => {
     const litter = readdirSync(dir).filter((name) => name.includes(".tmp."));
     expect(litter).toEqual([]);
     // The final committed checkpoint is the last write.
-    expect(journal.readCheckpoint()).toBe(b.json);
+    expect(journal.readCheckpoint()).toBe(rawCheckpointJson(b.json));
   });
 });
 

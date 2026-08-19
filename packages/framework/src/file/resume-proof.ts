@@ -11,7 +11,7 @@
 //
 // The proof (ADR-0077). Step numbers cited as `ADR-0077 step N` in this module and
 // its tests follow ADR-0077's shipped-implementation enumeration (1 read
-// events → 8 checkpoint-corrupt; agreement = 6, strict-prefix/genesis lag = 7):
+// checkpoint → 8 checkpoint-corrupt; agreement = 6, strict-prefix/genesis lag = 7):
 //
 //   1. Full replay through the PURE machine (`replayEvents` — the executor
 //      is never re-invoked, FR-011/NFR-002) ⇒ `replayed`. No checkpoint.json

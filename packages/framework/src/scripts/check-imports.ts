@@ -512,8 +512,19 @@ const UNCHECKED_BRAND_NAMES: ReadonlySet<string> = new Set([
  * The exact importers that hold the trusted-caller privilege today. Any other
  * module importing an unchecked cast is a violation, so a new importer must
  * justify itself here (with the provenance argument) before the gate passes.
+ *
+ * `checkpoint/checkpointer.ts` joined in round-23 (atl-1): the shared record
+ * grammar — the checkpointer family's profiled deserialization path — moved
+ * into the checkpoint core; it performs the SAME read-side parse the two
+ * adapters performed, now one encoding, so it inherits their trusted
+ * provenance for the deliberately unchecked `__brandDagIdUnchecked` re-typing
+ * (the `DagId` pattern domain is NOT re-derived at read time — that would
+ * newly reject stored values, a behavior change to a frozen surface; the
+ * nodeId gate instead takes the validating `__brandNodeId` after an
+ * `ID_PATTERN` check).
  */
 const UNCHECKED_BRAND_WHITELIST: ReadonlySet<string> = new Set([
+  "checkpoint/checkpointer.ts",
   "checkpoint/redis-checkpointer.ts",
   "file/checkpointer-codec.ts",
   "__tests__/file-boundary.test.ts",

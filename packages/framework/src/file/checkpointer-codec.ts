@@ -32,12 +32,18 @@
 // testable without a temp directory.
 
 import { isBoundaryId, isBoundaryIdString, isPlainRecord, keyDigest } from "./layout.js";
-import type {
-  CheckpointerLoadOpts,
-  NodeState,
-  RunMeta,
-  SaveNodeOpts,
+import {
+  parseNodeStateRecord,
+  parseRunMetaRecord,
+  type CheckpointerLoadOpts,
+  type NodeState,
+  type RunMeta,
+  type SaveNodeOpts,
 } from "../checkpoint/checkpointer.js";
+// Re-exported for back-compat: `file-checkpointer-codec.test.ts` imports the
+// canonical-ISO grammar from this codec; the definition now lives in the
+// checkpoint core (round-23 atl-1 — one encoding with the Redis twin).
+export { parseCanonicalIsoDate } from "../checkpoint/checkpointer.js";
 import {
   isNonNegativeSafeInteger,
   parseCompositeNodeKey,
@@ -51,7 +57,7 @@ import {
   serializedPath as outputPath,
   MAX_SAFE_RECORD_DEPTH,
 } from "../state-machine/serialize.js";
-import { ID_PATTERN, __brandDagIdUnchecked, __brandNodeId } from "../types/ids.js";
+import { ID_PATTERN } from "../types/ids.js";
 import { isRepresentableTimestampMs } from "../types/clock.js";
 import type { Result } from "../types/result.js";
 import { err, ok } from "../types/result.js";
@@ -151,26 +157,6 @@ export const isPlainObject = (value: unknown): value is Record<string, unknown> 
 
 const isValidDate = (value: unknown): value is Date =>
   value instanceof Date && !Number.isNaN(value.getTime());
-
-/** Parse the exact timestamp grammar emitted on write. Date accepts many
- * non-canonical spellings (`2025-01-01`, offsets, missing milliseconds); a
- * persisted checkpoint timestamp is valid only when parsing and re-emitting
- * it produces byte-identical text. The parse/re-emit pair is guarded so corrupt
- * bytes can only become an `Err`, never a raw date exception. */
-export const parseCanonicalIsoDate = (
-  value: string,
-  field: "startedAt" | "createdAt" | "completedAt",
-): Result<Date, string> => {
-  try {
-    const parsed = new Date(value);
-    const canonical = Date.prototype.toISOString.call(parsed);
-    return canonical === value
-      ? ok(parsed)
-      : err(`${field} must be a canonical ISO timestamp, got ${render(value)}`);
-  } catch {
-    return err(`${field} must be a canonical ISO timestamp, got ${render(value)}`);
-  }
-};
 
 /** Snapshot every public `RunMeta` field with exactly one property read.
  * The frozen value is the sole input to metadata validation and serialization,
@@ -279,43 +265,15 @@ export const parseStoredMeta = (
   if (!isPlainRecord(raw)) {
     return err(`meta must be a JSON object, got ${render(raw)}`);
   }
-  const { dagId, startedAt, nodeCount, createdAt, subject, dagFingerprint, frameworkVersion } = raw;
-  if (typeof dagId !== "string") return err(`dagId must be a string, got ${render(dagId)}`);
-  if (typeof startedAt !== "string") return err(`startedAt must be a string, got ${render(startedAt)}`);
-  if (typeof createdAt !== "string") return err(`createdAt must be a string, got ${render(createdAt)}`);
-  if (!isNonNegativeSafeInteger(nodeCount)) {
-    return err(`nodeCount must be a non-negative safe integer, got ${render(nodeCount)}`);
-  }
-  if (subject !== undefined && typeof subject !== "string") {
-    return err(`subject must be a string when present, got ${render(subject)}`);
-  }
-  if (dagFingerprint !== undefined && typeof dagFingerprint !== "string") {
-    return err(`dagFingerprint must be a string when present, got ${render(dagFingerprint)}`);
-  }
-  if (frameworkVersion !== undefined && typeof frameworkVersion !== "string") {
-    return err(`frameworkVersion must be a string when present, got ${render(frameworkVersion)}`);
-  }
-  const parsedStartedAt = parseCanonicalIsoDate(startedAt, "startedAt");
-  if (!parsedStartedAt.ok) return err(parsedStartedAt.error);
-  const parsedCreatedAt = parseCanonicalIsoDate(createdAt, "createdAt");
-  if (!parsedCreatedAt.ok) return err(parsedCreatedAt.error);
-  return ok({
-    meta: {
-      // Read-side parse boundary: the meta bytes were written by a consumer
-      // of the (now branded) port. The file codec's frozen acceptance domain
-      // is a `typeof` shape check (it does NOT re-derive the `DagId` pattern
-      // domain at read time — that would newly reject stored values, a
-      // behavior change to a frozen surface), so the brand is applied
-      // unchecked: an honest re-typing of the deserialized value.
-      dagId: __brandDagIdUnchecked(dagId),
-      startedAt: parsedStartedAt.value,
-      nodeCount,
-      ...(subject !== undefined ? { subject } : {}),
-      ...(dagFingerprint !== undefined ? { dagFingerprint } : {}),
-      ...(frameworkVersion !== undefined ? { frameworkVersion } : {}),
-    },
-    createdAt: parsedCreatedAt.value,
-  });
+  // Field-level grammar delegated to the checkpoint core's ONE encoding
+  // (round-23 atl-1): type gates, canonical ISO dates, safe-integer
+  // nodeCount, optional-field gates — byte-identical messages, now shared
+  // with the Redis twin so the two backends cannot drift again. Unknown
+  // additive top-level fields remain ignored by the shared validator (newer
+  // writers stay readable).
+  const parsed = parseRunMetaRecord(raw);
+  if (!parsed.ok) return err(parsed.error);
+  return ok(parsed.value);
 };
 
 type CanonicalSerializedValue =
@@ -680,34 +638,20 @@ export const parseNodeFile = (fileName: string, text: string): NodeEntryVerdict 
     };
   }
 
-  const { nodeId, completedAt } = raw;
-  if (!isBoundaryIdString(nodeId)) {
+  const parsedNodeFields = parseNodeStateRecord(raw);
+  if (!parsedNodeFields.ok) {
     return {
       kind: "corrupt",
       address: nodeKey,
-      message: `nodeId ${render(nodeId)} does not match ${ID_PATTERN.source}`,
+      message: parsedNodeFields.error,
     };
   }
+  const { nodeId, completedAt } = parsedNodeFields.value;
   if (parsedNodeKey.nodeId !== nodeId) {
     return {
       kind: "corrupt",
       address: nodeKey,
       message: `nodeKey names nodeId ${render(parsedNodeKey.nodeId)} but entry contains ${render(nodeId)}`,
-    };
-  }
-  if (typeof completedAt !== "string") {
-    return {
-      kind: "corrupt",
-      address: nodeKey,
-      message: `completedAt must be a string, got ${render(completedAt)}`,
-    };
-  }
-  const parsedCompletedAt = parseCanonicalIsoDate(completedAt, "completedAt");
-  if (!parsedCompletedAt.ok) {
-    return {
-      kind: "corrupt",
-      address: nodeKey,
-      message: parsedCompletedAt.error,
     };
   }
 
@@ -729,10 +673,9 @@ export const parseNodeFile = (fileName: string, text: string): NodeEntryVerdict 
   return {
     kind: "entry",
     nodeKey,
-    // The `isBoundaryIdString(nodeId)` gate above already proved the
-    // `ID_PATTERN` domain — brand it with the VALIDATING constructor (no
-    // bypass; one cheap re-test on a value that was just tested).
-    state: { nodeId: __brandNodeId(nodeId), output, completedAt: parsedCompletedAt.value },
+    // `ID_PATTERN` and the canonical-ISO grammar were just proven by the
+    // shared record validator (round-23 atl-1).
+    state: { nodeId, output, completedAt },
   };
 };
 

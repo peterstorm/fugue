@@ -33,6 +33,8 @@
 import { match } from "ts-pattern";
 import type { NodeSkippedEvent, ObserverEvent, RunEndEvent } from "../types/events.js";
 import type { RunSummary } from "./buffered.js";
+import { fwLogger } from "../logger.js";
+import { safeDiagnosticRender } from "../types/safe-error.js";
 
 // Stable event/metric names. Centralised so the sink contract and tests share
 // one source of truth.
@@ -109,7 +111,16 @@ const metricEmission = (
   properties?: Record<string, string>,
 ): Extract<FoundryEmission, { kind: "metric" }> | undefined => {
   const v = asFinite(value);
-  if (v === undefined) return undefined;
+  if (v === undefined) {
+    // The drop is deliberate (Application Insights rejects non-finite values)
+    // but must stay OBSERVABLE: a NaN/Infinity duration silently erasing the
+    // node-latency metric would be a monitoring false negative with no path
+    // to discovery (round-23 sfh-3).
+    fwLogger().warn(
+      `[foundry] dropping non-finite metric '${name}' (${safeDiagnosticRender(value)}) — Application Insights rejects non-finite values`,
+    );
+    return undefined;
+  }
   return properties !== undefined
     ? { kind: "metric", name, value: v, properties }
     : { kind: "metric", name, value: v };
@@ -132,6 +143,12 @@ const finiteMeasurements = (
     if (finite !== undefined) {
       out[k] = finite;
       any = true;
+    } else {
+      // Same observability rule as `metricEmission`: dropped data must leave a
+      // breadcrumb, never vanish silently (round-23 sfh-3).
+      fwLogger().warn(
+        `[foundry] dropping non-finite measurement '${k}' (${safeDiagnosticRender(v)}) — Application Insights rejects non-finite values`,
+      );
     }
   }
   return any ? out : undefined;

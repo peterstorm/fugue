@@ -191,8 +191,19 @@ export const createRedisTokenStore = (
       const grants: TokenGrant[] = [];
       for (const team of indexResult.value) {
         const valueResult = await redis.get(teamKey(tenant, team));
-        if (!valueResult.ok || valueResult.value === null || valueResult.value === "") {
-          // Index names a team whose key is gone/unreadable — best-effort skip.
+        if (!valueResult.ok) {
+          // A FAILED read is not an absent key: skipping silently would present
+          // a truncated team list as the complete answer during a Redis blip.
+          // Name the team and error kind so "missing team" reports have a
+          // breadcrumb (round-23 sfh-2).
+          logger?.warn?.(
+            "[token-store] listTeams: skipping team due to read failure",
+            { team, error: valueResult.error.kind },
+          );
+          continue;
+        }
+        if (valueResult.value === null || valueResult.value === "") {
+          // Index names a team whose key is gone — best-effort skip.
           // (Self-heals on next revoke, which SREMs the stale member.)
           continue;
         }

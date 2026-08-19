@@ -23,8 +23,9 @@
 // whose canonical folding makes a save with no `index`, `attempt`, OR
 // `namespace` byte-identical to a pre-extension save (stored key = the bare
 // `nodeId`); a `namespace` alone is rejected as ambiguous (ADR-0075
-// amendment), so the byte-identity clause covers exactly the no-options and
-// index/attempt forms. Because `@` is
+// amendment), so byte-identity covers exactly the no-options form — any
+// `index`/`attempt` (with or without `namespace`) emits the composite key
+// `namespace@nodeId@index@attempt` instead (round-23 ca-1). Because `@` is
 // outside `ID_PATTERN`, a composite key can never collide with a canonical one,
 // and distinct addresses digest to distinct filenames — so any two distinct
 // addresses resolve to distinct durable entries and `load` returns them all,
@@ -78,7 +79,10 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { atomicWriteFile } from "./atomic.js";
 import { META_FILE, NODES_DIR, isBoundaryId, keyDigest } from "./layout.js";
-import { evaluateCheckpointLoadGates } from "../checkpoint/checkpointer.js";
+import {
+  evaluateCheckpointLoadGates,
+  guardedCheckpointClockRead,
+} from "../checkpoint/checkpointer.js";
 import {
   isPlainObject,
   parseLoadOpts,
@@ -114,7 +118,6 @@ import { compositeNodeKey } from "../checkpoint/composite-node-key.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { RunId, NodeId } from "../types/ids.js";
 import { ID_PATTERN, __brandNodeId, __brandRunId } from "../types/ids.js";
-import { isRepresentableTimestampMs } from "../types/clock.js";
 import type { Result } from "../types/result.js";
 import { err, ok } from "../types/result.js";
 import { frameworkError } from "../types/error-factories.js";
@@ -310,34 +313,24 @@ const createFileCheckpointerUnchecked = (
    * Clock read + representability gate, shared by `setMeta` (write stamp) and
    * `load` (FR-027 lazy expiry). Both rejections are code-constructed and
    * deterministic — a throwing or non-representable injected clock fails
-   * identically on every retry — so both are pinned "permanent".
+   * identically on every retry — so both are pinned "permanent". ONE encoding
+   * with the in-memory and Redis twins (round-23 cs-2): the guard structure
+   * lives in the checkpoint core; this adapter's renderers keep its pinned
+   * message bytes (including the directory-qualified throwing-clock arm).
    */
   const readClock = (
     operation: "setMeta" | "load",
     runId: RunId,
-  ): Result<number, FrameworkError> => {
-    try {
-      const ms = now();
-      if (!isRepresentableTimestampMs(ms)) {
-        return err(
-          checkpointerCacheError(
-            operation,
-            `${operation} clock returned a non-representable timestamp for run ${render(runId)}: ${render(ms)}`,
-            "permanent",
-          ),
-        );
-      }
-      return ok(ms);
-    } catch (error) {
-      return err(
-        checkpointerCacheError(
-          operation,
-          `${operation} clock failed for run ${render(runId)} under ${render(directory)}: ${messageOf(error)}`,
-          "permanent",
-        ),
-      );
-    }
-  };
+  ): Result<number, FrameworkError> =>
+    guardedCheckpointClockRead({
+      operation,
+      runId,
+      now,
+      render,
+      cacheError: (op, message) => checkpointerCacheError(op, message, "permanent"),
+      throwMessage: (error) =>
+        `${operation} clock failed for run ${render(runId)} under ${render(directory)}: ${messageOf(error)}`,
+    });
 
   return {
     async setMeta(runId: RunId, meta: RunMeta): Promise<Result<void, FrameworkError>> {
@@ -650,7 +643,10 @@ const createFileCheckpointerUnchecked = (
       return ok({
         meta,
         nodes,
-        ...(corruptNodeIds.length > 0 ? { corruptNodeIds } : {}),
+        // Always present — empty when no entry was dropped — so the
+        // drop-and-surface contract is visible to exhaustive consumers
+        // (round-23 tda-3).
+        corruptNodeIds,
       });
     },
   };

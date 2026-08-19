@@ -11,8 +11,11 @@
  * depend on side-effects — a three-module cycle held open by a primitive that
  * belongs beneath both of them.
  *
- * This module imports nothing.
+ * This module imports nothing at runtime (its only imports are type-only and
+ * erased before emit).
  */
+
+import type { RunId, NodeId } from "./ids.js";
 
 export type WitnessKind =
   | "version"          // monotonic integer (Hibernate @Version, Mongo __v)
@@ -175,4 +178,20 @@ export const __brandWitness = (w: {
   resource: string;
   value: string;
 }): Witness => w as Witness;
+
+/**
+ * One successful write to a resource — the conflicting-write record carried
+ * by freshness conflicts and violations, and the lookup result of freshness
+ * index reads. ONE encoding (round-23 tda-1): `FreshnessConflict`
+ * (`types/freshness.ts`) and `FreshnessViolationEvent` (`types/events.ts`)
+ * previously re-declared this shape structurally; both now reference this
+ * type, so the three copies cannot drift. Lives here, below both consumers,
+ * to keep `types/freshness.ts` ↔ `types/events.ts` free of cycles.
+ */
+export interface WriteEntry {
+  readonly runId: RunId;
+  readonly nodeId: NodeId;
+  readonly newWitness: Witness;
+  readonly succeededAtMs: number;
+}
 
