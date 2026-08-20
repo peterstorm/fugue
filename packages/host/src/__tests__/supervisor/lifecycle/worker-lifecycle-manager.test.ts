@@ -31,6 +31,7 @@ import {
   createInMemoryWorkerRedisFake,
   WORKER_KEY_PREFIX,
   type WorkerRecord,
+  type WorkerRegistry,
   type UdsLivenessProbe,
 } from "../../../supervisor/lifecycle/worker-registry-redis.js";
 import type { SpawnPort, ProcManagePort, WorkerSpawnSpec, WorkerHandle } from "../../../supervisor/lifecycle/spawn-port.js";
@@ -735,6 +736,34 @@ describe("createWorkerLifecycle: crash-exit watcher (FR-014/FR-015, AD-8)", () =
     expect(back.ok).toBe(true);
     expect(spawned.length).toBe(2); // the only respawn is request-driven, not exit-driven
     expect(lc.liveWorkerCount()).toBe(1);
+  });
+
+  test("a graceful-drain registry rejection is caught and logged with tenant context", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    const baseRegistry = createWorkerRegistry(fake.redis, async () => true);
+    const registry: WorkerRegistry = {
+      ...baseRegistry,
+      remove: async () => { throw new Error("registry transport rejected"); },
+    };
+    const { spawn, proc, spawned } = makeSpawn();
+    const log = recordingLog();
+    const lc = createWorkerLifecycle({
+      spawn, proc, registry, probe: async () => true,
+      tenants: tenantsView({ acme: { eagerPin: false } }),
+      clock: fixedClock().clock, config: baseConfig(), logger: log,
+    });
+    await lc.ensureWorker(tid("acme"));
+    await lc.drain(tid("acme"));
+
+    spawned[0]!.exit(0);
+    await flushMicrotasks();
+
+    const watcherFailure = log.errors.find((line) => line.msg.includes("exit watcher threw"));
+    expect(watcherFailure?.ctx).toMatchObject({
+      tenant: tid("acme"),
+      error: "registry transport rejected",
+    });
+    expect(lc.liveWorkerCount()).toBe(0);
   });
 });
 

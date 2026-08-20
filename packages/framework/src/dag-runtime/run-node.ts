@@ -213,6 +213,11 @@ export const runNodeShared = async (
       }
     }
 
+    // Built-in nodes can emit sub-spans while executing. Bind those timestamps
+    // to the same runtime clock as node-start/node-end; do not reuse the
+    // node-visible ClockCapability, which is a separate domain-time seam.
+    runCtx = { ...runCtx, eventTimestamp: stamp };
+
     let runResult: Result<unknown, FrameworkError>;
     try {
       // Capability erasure boundary: the node's `run` is typed against the

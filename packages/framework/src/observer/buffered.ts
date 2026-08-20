@@ -10,7 +10,7 @@ export type { RunSummary } from "./run-summary.js";
 import type { RunSummary } from "./run-summary.js";
 
 export interface AggregateCounters {
-  runCount: number;
+  readonly runCount: number;
 }
 
 /** Pure: compute RunSummary from buffered events and the RunEndEvent. */
@@ -58,10 +58,9 @@ export function computeRunSummary(
   };
 }
 
-/** Per-run buffer entry — events plus the wall-clock time it was opened. */
+/** Per-run buffer entry — events plus its latest activity timestamp. */
 interface RunBuffer {
   events: ObserverEvent[];
-  createdAt: number;
   /** Last wall-clock time this run produced an event; refreshed per event so
    * the orphan sweep evicts INACTIVE buffers only — an active long-running
    * run must never be dropped mid-run (its run summary would be silently
@@ -101,11 +100,9 @@ const DEFAULT_SWEEP_MS = 5 * 60 * 1000; // 5min
  */
 export class BufferedObserver implements Observer, Disposable {
   private readonly buffers = new Map<string, RunBuffer>();
-  readonly aggregates: AggregateCounters = { runCount: 0 };
-  /** Buffers dropped because `run-end` never arrived within TTL. Useful for monitoring. */
-  evicted = 0;
-  /** Count of events lost to dispatch failures during replay. Useful for monitoring. */
-  dispatchErrors = 0;
+  private runCount = 0;
+  private evictedCount = 0;
+  private dispatchErrorCount = 0;
   private readonly ttlMs: number;
   private readonly sweepHandle: ReturnType<typeof setInterval> | null;
   private readonly now: () => number;
@@ -130,6 +127,21 @@ export class BufferedObserver implements Observer, Disposable {
     }
   }
 
+  /** Immutable aggregate metric snapshot. */
+  get aggregates(): AggregateCounters {
+    return Object.freeze({ runCount: this.runCount });
+  }
+
+  /** Buffers dropped because `run-end` never arrived within TTL. */
+  get evicted(): number {
+    return this.evictedCount;
+  }
+
+  /** Count of events lost to dispatch failures during replay. */
+  get dispatchErrors(): number {
+    return this.dispatchErrorCount;
+  }
+
   /** Stop the background sweep. Call when discarding the observer. */
   close(): void {
     if (this.sweepHandle) clearInterval(this.sweepHandle);
@@ -143,7 +155,7 @@ export class BufferedObserver implements Observer, Disposable {
    * Hostile-seam guard for the injected clock, parity with the file backend's
    * readClock discipline (ADR-0080): a throwing clock must never escape as an
    * uncaught timer exception, and a non-finite stamp must never silently
-   * disable eviction (a NaN cutoff makes `createdAt < cutoff` permanently
+   * disable eviction (a NaN cutoff makes timestamp comparisons permanently
    * false — orphaned run buffers would never be dropped and no diagnostic
    * would ever fire). Returns `null`, after a loud diagnostic, when the clock
    * cannot be trusted this cycle; every caller skips rather than comparing
@@ -179,7 +191,7 @@ export class BufferedObserver implements Observer, Disposable {
     for (const [runId, buf] of this.buffers) {
       if (buf.lastActivityAt < cutoff) {
         this.buffers.delete(runId);
-        this.evicted++;
+        this.evictedCount++;
         fwLogger().warn(
           `[BufferedObserver] Evicting orphaned run buffer ${runId} (last activity: ${nowMs - buf.lastActivityAt}ms ago, events: ${buf.events.length})`,
         );
@@ -204,7 +216,7 @@ export class BufferedObserver implements Observer, Disposable {
         );
         return;
       }
-      buf = { events: [], createdAt, lastActivityAt: createdAt };
+      buf = { events: [], lastActivityAt: createdAt };
       this.buffers.set(runId, buf);
     }
     // An open buffer absorbs the event even when the clock misbehaves
@@ -225,7 +237,7 @@ export class BufferedObserver implements Observer, Disposable {
    * silently re-open the leak class those pins guard.
    */
   private accountDispatchFailure(event: ObserverEvent, error: unknown, label: string): void {
-    this.dispatchErrors++;
+    this.dispatchErrorCount++;
     if (this.onReplayFailure) {
       this.onReplayFailure(event, error);
     } else {
@@ -253,7 +265,7 @@ export class BufferedObserver implements Observer, Disposable {
     const events = buf?.events ?? [];
     const summary = computeRunSummary(events, e);
 
-    this.aggregates.runCount++;
+    this.runCount++;
 
     // Policy evaluation is programmer-provided — let bugs surface visibly.
     // Fail-open: flush on policy error to avoid silent data loss.

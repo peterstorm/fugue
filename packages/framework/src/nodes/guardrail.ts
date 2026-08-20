@@ -120,7 +120,7 @@ export const createGuardrailNode = <I, T>(
         nodeId: id,
         parentSpanId: config.id,
         kind: "GUARDRAIL",
-        timestamp: new Date(),
+        timestamp: ctx.eventTimestamp?.() ?? new Date(),
         duration: 0,
         attributes: {
           "guardrail.passed": result.passed,

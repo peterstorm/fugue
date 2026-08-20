@@ -66,6 +66,63 @@ describe("startRedisProbe", () => {
     expect(maxActive).toBe(1); // the inFlight guard prevents concurrent pings
   });
 
+  it("an onAlive fault is not misclassified as a dead Redis connection", async () => {
+    const redis: RedisConnectivityPort = { ping: async () => ok(undefined) };
+    let dead = 0;
+    let callbackWarnings = 0;
+    const logger: LogPort = {
+      info: () => {},
+      error: () => {},
+      warn: (message) => { if (message.includes("onAlive callback threw")) callbackWarnings++; },
+    };
+    const handle = startRedisProbe(redis, 5, {
+      onAlive: () => { throw new Error("state transition failed"); },
+      onDead: () => { dead++; },
+    }, logger);
+
+    await wait(30);
+    handle.stop();
+
+    expect(callbackWarnings).toBeGreaterThan(0);
+    expect(dead).toBe(0);
+  });
+
+  it("a throwing logger cannot suppress the dead callback", async () => {
+    const redis: RedisConnectivityPort = { ping: async () => err(pingErr) };
+    let dead = 0;
+    const logger: LogPort = {
+      info: () => {},
+      warn: () => { throw new Error("logger down"); },
+      error: () => {},
+    };
+    const handle = startRedisProbe(redis, 5, {
+      onAlive: () => {},
+      onDead: () => { dead++; },
+    }, logger);
+
+    await wait(30);
+    handle.stop();
+
+    expect(dead).toBeGreaterThan(0);
+  });
+
+  it("an onDead fault is contained and later ticks continue", async () => {
+    const redis: RedisConnectivityPort = { ping: async () => err(pingErr) };
+    let deadCalls = 0;
+    const handle = startRedisProbe(redis, 5, {
+      onAlive: () => {},
+      onDead: () => {
+        deadCalls++;
+        throw new Error("degrade transition failed");
+      },
+    }, noopLogger);
+
+    await wait(30);
+    handle.stop();
+
+    expect(deadCalls).toBeGreaterThan(1);
+  });
+
   it("treats a thrown ping as a dead connection", async () => {
     const redis: RedisConnectivityPort = {
       ping: async () => { throw new Error("connection reset"); },

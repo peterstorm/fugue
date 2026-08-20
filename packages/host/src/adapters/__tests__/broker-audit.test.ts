@@ -158,4 +158,32 @@ describe("createBrokerAudit — emits over tracer + logger spine", () => {
     expect(errors[0]?.data?.scope).toBe("msgraph:sites.read");
     expect(errors[0]?.data?.auditError).toContain("logger exploded");
   });
+
+  it("writes a direct stderr breadcrumb when both audit emission and logger fallback fail", async () => {
+    const chunks: string[] = [];
+    const originalWrite = process.stderr.write;
+    process.stderr.write = ((chunk: string | Uint8Array): boolean => {
+      chunks.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const tracer: Tracer = { withSpan: async () => { throw new Error("tracer exploded"); } };
+      const logger: LogPort = {
+        info: () => {},
+        warn: () => {},
+        error: () => { throw new Error("logger exploded"); },
+      };
+      const audit = createBrokerAudit(tracer, logger);
+
+      await expect(audit.refusal(agentFields, "scope-not-assigned")).resolves.toBeUndefined();
+
+      const breadcrumb = chunks.join("");
+      expect(breadcrumb).toContain("record may be lost");
+      expect(breadcrumb).toContain("scope=msgraph:sites.read");
+      expect(breadcrumb).toContain("tracer exploded");
+      expect(breadcrumb).toContain("logger exploded");
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+  });
 });

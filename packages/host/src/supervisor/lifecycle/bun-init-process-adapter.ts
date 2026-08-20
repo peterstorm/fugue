@@ -301,11 +301,6 @@ interface BunInitProcessAdapter extends InitProcessPort {
 }
 
 /**
- * Build the Bun.spawn-backed PID-1 adapter. Resolves the libc reaper eagerly so a
- * libc-resolution failure surfaces at startup (fail-fast), not on the first
- * orphaned worker.
- */
-/**
  * Escalation policy for FFI reap faults, separated from the adapter so it is
  * unit-testable without a real FFI fault. A broken `waitpid` seam fails
  * identically on every cycle, so the first fault logs at error level, then every
@@ -341,6 +336,11 @@ export const createReapFaultEscalation = (
   };
 };
 
+/**
+ * Build the Bun.spawn-backed PID-1 adapter. Resolves the libc reaper eagerly so a
+ * libc-resolution failure surfaces at startup (fail-fast), not on the first
+ * orphaned worker.
+ */
 export const createBunInitProcessAdapter = (
   cfg: BunInitAdapterConfig,
   logger?: LogPort,

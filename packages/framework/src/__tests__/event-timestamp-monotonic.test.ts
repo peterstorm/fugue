@@ -11,6 +11,7 @@ import { defineDag, runDag } from "../executor/index.js";
 import { RecordingObserver } from "../observer/observer.js";
 import { makeNodeContext } from "../shared/index.js";
 import { ok } from "../types/result.js";
+import { createGuardrailNode } from "../nodes/guardrail.js";
 import { DAG_INPUT } from "../types/ids.js";
 import type { NodeDef } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
@@ -95,6 +96,40 @@ describe("§4.1 — observer-event timestamps respect the injected nowFn", () =>
       }),
       { numRuns: 25 },
     );
+  });
+
+  it("built-in node sub-spans use the injected runtime clock", async () => {
+    const guardrail = createGuardrailNode({
+      id: "clocked-guardrail",
+      inputSchema: z.unknown(),
+      outputSchema: z.any(),
+      validate: (input) => ({
+        kind: "validated" as const,
+        value: input,
+        passed: false,
+        warnings: ["forced failure"],
+        checks: [{ dimension: "clock", passed: false, detail: "forced failure" }],
+      }),
+    });
+    const dag = defineDag({
+      id: "built-in-clock",
+      nodes: { "clocked-guardrail": guardrail },
+      edges: [{ from: DAG_INPUT, to: "clocked-guardrail" }],
+      outputNodeId: "clocked-guardrail",
+    });
+    const observer = new RecordingObserver();
+    const fixed = 1_700_000_123_456;
+
+    const result = await runDag(
+      dag,
+      { seed: 1 },
+      makeNodeContext({ runId: "built-in-run", dagId: "built-in-clock", observer }),
+      { now: () => fixed },
+    );
+
+    expect(result.ok).toBe(true);
+    const subSpan = observer.events.find((event) => event.type === "sub-span");
+    expect(subSpan?.timestamp.getTime()).toBe(fixed);
   });
 
   it("all timestamps come from the injected clock (never wall-clock fallback)", async () => {

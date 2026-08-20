@@ -28,7 +28,7 @@
  * REFERENCE only; this module never dereferences a secret.
  */
 
-import { ok, err } from "@fuguejs/framework";
+import { ok, err, safeErrorMessage } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import { workerUnavailable, formatHostError } from "../../domain/host-error.js";
 import type { HostError } from "../../domain/host-error.js";
@@ -447,7 +447,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     // the entry as `draining` so the slot stays counted until the worker truly exits;
     // the drainComplete branch here is what frees it.
     watchedTenants.add(tenant); // this incarnation is watcher-covered (see set docs).
-    void handle.exited.then((code) => {
+    void handle.exited.then(async (code) => {
       const cur = workers.get(tenant);
       if (cur === undefined) return;
       if (cur.phase === "draining" && cur.pid === handle.pid) {
@@ -458,24 +458,25 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
           logger.error("[worker-lifecycle] drainComplete rejected on draining exit (invariant)", { tenant });
         }
         workers.delete(tenant);
-        void removeRecord(tenant);
+        await removeRecord(tenant);
         return;
       }
       if (cur.phase === "live" && cur.pid === handle.pid) {
-        void onCrash(tenant, code).catch((e) =>
-          logger.error("[worker-lifecycle] onCrash threw", { tenant, error: e instanceof Error ? e.message : String(e) }),
-        );
+        await onCrash(tenant, code);
       }
-    }).catch((e) => {
-      // The drain branch (drainComplete, the injected clock, and the logger
-      // itself) can throw where the crash branch already catches onCrash —
-      // an unguarded throw here would surface only as a process-level
-      // unhandled rejection, dropping the tenant attribution. Mirror the
-      // sibling catch so a fault is logged at its site.
-      logger.error("[worker-lifecycle] exit watcher threw", {
-        tenant,
-        error: e instanceof Error ? e.message : String(e),
-      });
+    }).catch((error) => {
+      // This is the terminal promise boundary for every watcher effect,
+      // including graceful-drain registry removal. It must not throw even when
+      // the logger is broken, or the catch itself would create an unhandled
+      // rejection and lose the tenant attribution it exists to preserve.
+      try {
+        logger.error("[worker-lifecycle] exit watcher threw", {
+          tenant,
+          error: safeErrorMessage(error),
+        });
+      } catch {
+        // No further diagnostic seam is available here.
+      }
     });
 
     return ok({ udsPath });

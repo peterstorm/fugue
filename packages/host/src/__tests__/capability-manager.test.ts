@@ -223,6 +223,29 @@ describe("capability-manager", () => {
       if (!result.ok) expect(result.error.error.message).toContain("connect-boom");
     });
 
+    it("hostile thrown values cannot bypass failing-handle cleanup or reject the Result seam", async () => {
+      const connectFailure = Proxy.revocable({}, {});
+      const closeFailure = Proxy.revocable({}, {});
+      connectFailure.revoke();
+      closeFailure.revoke();
+      let closeCalls = 0;
+      const handles = [
+        makeHandle("hostile", {
+          connect: async () => { throw connectFailure.proxy; },
+          close: async () => {
+            closeCalls++;
+            throw closeFailure.proxy;
+          },
+        }),
+      ];
+
+      const result = await connectAll(handles, { info: () => {}, error: () => {} });
+
+      expect(isErr(result)).toBe(true);
+      expect(closeCalls).toBe(1);
+      if (!result.ok) expect(result.error.connected).toEqual([]);
+    });
+
     it("a close failure on the failing handle never masks the connect error", async () => {
       const errorLogs: string[] = [];
       const handles = [

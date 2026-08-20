@@ -179,7 +179,7 @@ export const connectAll = async (
         await handle.connect();
         logLifecycleWithoutThrowing(logger, "info", `Capability '${handle.name}' connected`);
       } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
+        const message = safeErrorMessage(e);
         logLifecycleWithoutThrowing(logger, "error", `Capability '${handle.name}' failed to connect`, { error: message });
         // The failing handle's adapter may have constructed resources at
         // factory time (e.g. a pg Pool opens sockets before connect() runs).
@@ -194,7 +194,7 @@ export const connectAll = async (
               logger,
               "error",
               `Capability '${handle.name}' failed to close after connect failure`,
-              { error: closeError instanceof Error ? closeError.message : String(closeError) },
+              { error: safeErrorMessage(closeError) },
             );
           }
         }

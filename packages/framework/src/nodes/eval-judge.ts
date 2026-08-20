@@ -19,6 +19,7 @@ import { nodeId } from "../types/ids.js";
 import { JUDGE_SYSTEM_FRAME, resolveRubric, assembleJudgeUserMessage } from "./eval-judge-prompt.js";
 import { enrichLlmSpan } from "../tracing/index.js";
 import { dispatchEvent } from "../observer/dispatch.js";
+import { safeErrorMessage } from "../types/safe-error.js";
 
 // Re-export types from their canonical home in `types/`.
 export type { EvalJudgeResult, EvalJudgeNodeDef, EvalJudgeNodeConfig, EvalJudgeRubric } from "../types/eval-judge.js";
@@ -54,7 +55,7 @@ const warnWithoutThrowing = (ctx: NodeContext, message: string): void => {
 
 /** Emit an observer event when the judge cannot evaluate the output. */
 const emitJudgeSkipped = (ctx: NodeContext, judgeId: string, reason: string): void => {
-  if (ctx.observer) {
+  try {
     dispatchEvent(ctx.observer, {
       type: "sub-span",
       runId: ctx.runId,
@@ -62,13 +63,18 @@ const emitJudgeSkipped = (ctx: NodeContext, judgeId: string, reason: string): vo
       nodeId: nodeId(judgeId),
       parentSpanId: judgeId,
       kind: "EVALUATOR",
-      timestamp: new Date(),
+      timestamp: ctx.eventTimestamp?.() ?? new Date(),
       duration: 0,
       attributes: {
         "eval_judge.skipped": true,
         "eval_judge.skip_reason": reason,
       },
     });
+  } catch (error) {
+    warnWithoutThrowing(
+      ctx,
+      `[eval-judge:${judgeId}] skipped-event emission failed: ${safeErrorMessage(error)}`,
+    );
   }
 };
 
@@ -160,17 +166,13 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
         return llmFailureResult(msg);
       }
 
-      const rubric = resolveRubric(
-        { criteria: config.criteria, threshold, rubric: config.rubric },
-        ctx.prompts?.get ?? null,
-      );
-
-      // Assemble user message
-      const userMessage = assembleJudgeUserMessage(rubric, dagInput, dagOutput);
-
-      // Make LLM call
-      const model = config.model ?? DEFAULT_JUDGE_MODEL;
       try {
+        const rubric = resolveRubric(
+          { criteria: config.criteria, threshold, rubric: config.rubric },
+          ctx.prompts?.get ?? null,
+        );
+        const userMessage = assembleJudgeUserMessage(rubric, dagInput, dagOutput);
+        const model = config.model ?? DEFAULT_JUDGE_MODEL;
         const result = await llm.sendStructured({
           system: JUDGE_SYSTEM_FRAME,
           user: userMessage,
@@ -181,7 +183,7 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
         });
 
         if (!result.ok) {
-          const msg = `LLM call failed: ${"message" in result.error ? result.error.message : String(result.error)}`;
+          const msg = `LLM call failed: ${safeErrorMessage(result.error)}`;
           warnWithoutThrowing(ctx, `[eval-judge:${config.id}] ${msg}`);
           emitJudgeSkipped(ctx, config.id, msg);
           return llmFailureResult(msg);
@@ -199,7 +201,10 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
             contentFilter: ctx.contentFilter,
           });
         } catch (spanErr) {
-          warnWithoutThrowing(ctx, `[eval-judge:${config.id}] enrichLlmSpan threw: ${spanErr instanceof Error ? spanErr.message : String(spanErr)}`);
+          warnWithoutThrowing(
+            ctx,
+            `[eval-judge:${config.id}] enrichLlmSpan threw: ${safeErrorMessage(spanErr)}`,
+          );
         }
 
         // Validate response shape (defense-in-depth: some LlmClient impls skip schema validation)
@@ -212,7 +217,7 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
 
         return toEvalJudgeResult(parsed.data, threshold, config.criteria);
       } catch (e) {
-        const msg = `Unexpected error: ${e instanceof Error ? e.message : String(e)}`;
+        const msg = `Unexpected error: ${safeErrorMessage(e)}`;
         warnWithoutThrowing(ctx, `[eval-judge:${config.id}] ${msg}`);
         emitJudgeSkipped(ctx, config.id, msg);
         return llmFailureResult(msg);

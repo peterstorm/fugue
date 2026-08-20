@@ -20,6 +20,7 @@
  * survives whichever spine an operator queries.
  */
 
+import { safeErrorMessage } from "@fuguejs/framework";
 import type { Tracer, RunId, NodeId } from "@fuguejs/framework";
 import type { LogPort } from "../ports.js";
 
@@ -103,6 +104,15 @@ export interface BrokerAudit {
   readonly refusal: (fields: BrokerAuditFields, reason: string) => Promise<void>;
 }
 
+/** Last-resort audit breadcrumb that bypasses the structured logger. */
+const writeAuditFallback = (message: string): void => {
+  try {
+    process.stderr.write(`${message}\n`);
+  } catch {
+    // stderr itself is unavailable — nothing further is possible.
+  }
+};
+
 /**
  * Construct a `BrokerAudit` over the host's existing tracer and logger. The span
  * name discriminates mint vs refusal so a trace query can count each; the log
@@ -134,11 +144,15 @@ export const createBrokerAudit = (tracer: Tracer, logger: LogPort): BrokerAudit 
       try {
         logger.error("capability broker audit emission failed — record may be lost", {
           ...payload,
-          auditError: auditErr instanceof Error ? auditErr.message : String(auditErr),
+          auditError: safeErrorMessage(auditErr),
         });
-      } catch {
-        // Last-resort sink itself failed; swallow to honour the never-throw
-        // contract. The Result channel already carries the real outcome.
+      } catch (loggerError) {
+        writeAuditFallback(
+          `capability broker audit emission failed — record may be lost; ` +
+            `result=${outcome.result} runId=${fields.runId} nodeId=${fields.nodeId} ` +
+            `scope=${fields.scope}; audit failure=${safeErrorMessage(auditErr)}; ` +
+            `logger failure=${safeErrorMessage(loggerError)}`,
+        );
       }
     }
   };

@@ -118,10 +118,9 @@ interface FoundryRunSummaryObserverOpts {
   readonly now?: () => number;
 }
 
-/** Per-run buffer entry — events plus the wall-clock time it was opened. */
+/** Per-run buffer entry — events plus its latest activity timestamp. */
 interface RunSummaryBuffer {
   events: ObserverEvent[];
-  createdAt: number;
   /** Last wall-clock time this run produced an event; refreshed per event so
    * the orphan sweep evicts INACTIVE buffers only — an active long-running
    * run is never dropped mid-run, or its summary would be silently zeroed at
@@ -252,7 +251,6 @@ export class FoundryRunSummaryObserver implements Observer {
     }
     const opened: RunSummaryBuffer = {
       events: [event],
-      createdAt: activity,
       lastActivityAt: activity,
     };
     this.buffered.set(event.runId, opened);

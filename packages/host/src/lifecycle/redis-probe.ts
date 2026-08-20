@@ -13,6 +13,7 @@
  * @satisfies NFR-012 — Redis loss degrades, it does not crash; recovers automatically.
  */
 
+import { safeErrorMessage } from "@fuguejs/framework";
 import type { RedisConnectivityPort, LogPort } from "../ports.js";
 
 /**
@@ -32,6 +33,34 @@ export interface RedisProbeHandle {
   readonly stop: () => void;
 }
 
+/** Probe diagnostics are secondary and must never alter connectivity state. */
+const warnWithoutThrowing = (
+  logger: LogPort,
+  message: string,
+  data: Record<string, unknown>,
+): void => {
+  try {
+    logger.warn(message, data);
+  } catch {
+    // A broken logger cannot suppress or reclassify the probe result.
+  }
+};
+
+/** Callback faults are application faults, never evidence about Redis health. */
+const invokeCallbackWithoutThrowing = (
+  callback: () => void,
+  callbackName: "onAlive" | "onDead",
+  logger: LogPort,
+): void => {
+  try {
+    callback();
+  } catch (error) {
+    warnWithoutThrowing(logger, `Redis liveness probe ${callbackName} callback threw`, {
+      error: safeErrorMessage(error),
+    });
+  }
+};
+
 /**
  * Start the Redis liveness probe. Returns a handle whose `stop()` is idempotent
  * and halts further ticks immediately (in-flight ticks are discarded).
@@ -49,22 +78,29 @@ export const startRedisProbe = (
     if (stopped || inFlight) return;
     inFlight = true;
     try {
-      const result = await redis.ping();
+      let result: Awaited<ReturnType<RedisConnectivityPort["ping"]>>;
+      try {
+        result = await redis.ping();
+      } catch (error) {
+        // ping() is contractually Result-returning; only a throw from this narrow
+        // I/O seam is classified as a dead connection.
+        if (!stopped) {
+          warnWithoutThrowing(
+            logger,
+            "Redis liveness probe threw unexpectedly — treating as disconnected",
+            { error: safeErrorMessage(error) },
+          );
+          invokeCallbackWithoutThrowing(callbacks.onDead, "onDead", logger);
+        }
+        return;
+      }
+
       if (stopped) return;
       if (result.ok) {
-        callbacks.onAlive();
+        invokeCallbackWithoutThrowing(callbacks.onAlive, "onAlive", logger);
       } else {
-        logger.warn("Redis liveness probe failed", { error: result.error.kind });
-        callbacks.onDead();
-      }
-    } catch (e) {
-      // ping() is contractually Result-returning; a throw is unexpected but must
-      // still be treated as a dead connection rather than swallowed.
-      if (!stopped) {
-        logger.warn("Redis liveness probe threw unexpectedly — treating as disconnected", {
-          error: e instanceof Error ? e.message : String(e),
-        });
-        callbacks.onDead();
+        warnWithoutThrowing(logger, "Redis liveness probe failed", { error: result.error.kind });
+        invokeCallbackWithoutThrowing(callbacks.onDead, "onDead", logger);
       }
     } finally {
       inFlight = false;

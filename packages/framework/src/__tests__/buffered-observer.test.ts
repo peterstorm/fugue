@@ -105,6 +105,24 @@ describe("BufferedObserver", () => {
     expect(buffered.aggregates.runCount).toBe(2);
   });
 
+  it("metric views cannot mutate observer-managed counters", () => {
+    const buffered = new BufferedObserver(new RecordingObserver(), alwaysOn());
+    buffered.observe(runStart());
+    buffered.observe(runEnd());
+
+    const snapshot = buffered.aggregates;
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(() => {
+      (snapshot as { runCount: number }).runCount = 999;
+    }).toThrow();
+    expect(buffered.aggregates.runCount).toBe(1);
+    expect(() => {
+      (buffered as unknown as { evicted: number }).evicted = 999;
+    }).toThrow();
+    expect(buffered.evicted).toBe(0);
+    buffered.close();
+  });
+
   it("a run-end dispatch failure is accounted like a replay failure (dispatchErrors + onReplayFailure)", () => {
     const prev = process.env.OBSERVER_STRICT;
     process.env.OBSERVER_STRICT = "1"; // dispatchEvent rethrows so the failure is observable
@@ -184,12 +202,8 @@ describe("BufferedObserver", () => {
     buffered.close();
   });
 
-  // round-23 pta-1: the inactivity-eviction semantics (cr-1, round-22) must be
-  // PINNED in the framework twin — the two injected-clock tests below are the
-  // pair that distinguishes `lastActivityAt`-based from `createdAt`-based
-  // eviction. With only createdAt-stamping tests, reverting `evictStale` to
-  // `buf.createdAt < cutoff` (or deleting the `lastActivityAt` refresh in
-  // `observe`) passes the suite while silently re-introducing the
+  // The injected-clock pair below pins inactivity-based eviction: deleting
+  // the `lastActivityAt` refresh in `observe` would silently re-introduce the
   // mid-run summary-zeroing bug (SC-008).
   it("evicts by INACTIVITY, not open time: an active run past the TTL is NOT evicted", () => {
     let nowMs = 0;
@@ -198,23 +212,23 @@ describe("BufferedObserver", () => {
       now: () => nowMs,
       ttlMs: 1_000,
     });
-    buffered.observe(runStart("r1")); // createdAt = lastActivityAt = 0
+    buffered.observe(runStart("r1")); // initial activity = 0
     nowMs = 5_000; // far past the TTL
     buffered.observe(nodeEnd("n1")); // fresh activity refreshes lastActivityAt
     buffered.evictStale();
-    // createdAt is stale but the buffer is ACTIVE — it must survive.
+    // The initial stamp is stale but the buffer is ACTIVE — it must survive.
     expect(buffered.evicted).toBe(0);
     buffered.close();
   });
 
-  it("evicts an IDLE orphan past the TTL (the createdAt-only twin of the pair)", () => {
+  it("evicts an IDLE orphan past the TTL", () => {
     let nowMs = 0;
     const inner = new RecordingObserver();
     const buffered = new BufferedObserver(inner, alwaysOn(), {
       now: () => nowMs,
       ttlMs: 1_000,
     });
-    buffered.observe(runStart("r1")); // createdAt = lastActivityAt = 0
+    buffered.observe(runStart("r1")); // initial activity = 0
     nowMs = 5_000;
     buffered.evictStale();
     // Never touched again — orphaned on BOTH clocks, so it is evicted.

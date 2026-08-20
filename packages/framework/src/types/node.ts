@@ -282,6 +282,12 @@ export interface BaseNodeContext {
   readonly judgeLlm: LlmClient | null;
   readonly http: HttpCapability | null;
   readonly clock: ClockCapability | null;
+  /**
+   * Runtime-owned observer timestamp seam. `runNodeShared` replaces this for
+   * each invocation from `RunOptions.now`; built-in nodes use it for sub-spans.
+   * Distinct from the node-visible `clock` capability, which models domain time.
+   */
+  readonly eventTimestamp?: () => Date;
   readonly signal?: AbortSignal;
   /**
    * Optional content filter for trace span data. When set, content (prompts,
@@ -339,6 +345,7 @@ export const RESERVED_NON_CAPABILITY_KEYS = [
   "tracer",
   "observer",
   "checkpointWriter",
+  "eventTimestamp",
   "signal",
   "contentFilter",
 ] as const satisfies readonly (keyof BaseNodeContext)[];

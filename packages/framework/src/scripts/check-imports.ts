@@ -481,20 +481,6 @@ const isImportedFrameworkError = (
 // ---------------------------------------------------------------------------
 
 /**
- * Find direct calls to the public, string-typed cache-error constructor in a
- * file-backend implementation. `file/boundary-error.ts` is intentionally the
- * only excluded production definition: tests live outside file/** and remain
- * free to prove the public factory's compatibility contract.
- *
- * Coverage is import-derived, not textual: it catches the member call
- * (`frameworkError.cacheError(…)` / `ns.frameworkError.cacheError(…)`) and
- * the DESTRUCTURED local bindings that alias the same factory —
- * `const { cacheError } = frameworkError; cacheError(…)` and
- * `const cacheError = frameworkError.cacheError;` — which would otherwise be
- * bare-identifier calls the member audit cannot attribute.
- */
-
-/**
  * The three zero-validation widening casts exported from `types/ids.js`.
  * They bypass `ID_PATTERN`, so the codebase's own hostile-caller doctrine
  * (ADR-0080) requires their import surface to be boundary-enforced rather
@@ -593,6 +579,19 @@ export const findUncheckedBrandImports = (
   return violations;
 };
 
+/**
+ * Find direct calls to the public, string-typed cache-error constructor in a
+ * file-backend implementation. `file/boundary-error.ts` is intentionally the
+ * only excluded production definition: tests live outside file/** and remain
+ * free to prove the public factory's compatibility contract.
+ *
+ * Coverage is import-derived, not textual: it catches the member call
+ * (`frameworkError.cacheError(…)` / `ns.frameworkError.cacheError(…)`) and
+ * the DESTRUCTURED local bindings that alias the same factory —
+ * `const { cacheError } = frameworkError; cacheError(…)` and
+ * `const cacheError = frameworkError.cacheError;` — which would otherwise be
+ * bare-identifier calls the member audit cannot attribute.
+ */
 const findFileCacheErrorBypasses = (
   source: string,
   relPath: string,

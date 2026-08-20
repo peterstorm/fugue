@@ -37,7 +37,7 @@ interface LlmWithToolsNodeConfigBase<I, O> {
   readonly toolChoice?: SendWithToolsRequest<O>["toolChoice"];
   /** Cap on tool-use turns. Default 10. */
   readonly maxIterations?: number;
-  /** Anthropic-only extended thinking; ignored by other providers. */
+  /** Provider-specific reasoning/thinking configuration for clients that support it. */
   readonly thinking?: { type: "enabled"; budgetTokens: number };
   /**
    * Inline system prompt. Used when `promptName` is omitted, or as a fallback
@@ -63,11 +63,6 @@ export type LlmWithToolsNodeConfig<I, O> =
   LlmWithToolsNodeConfigBase<I, O> & LlmWithToolsSkipConfig<I, O>;
 
 /**
- * Build a tool-call LLM node. The factory mirrors `createLlmNode` but routes
- * through `LlmClient.sendWithTools`, so the model can call registered tools
- * mid-completion before producing the final structured answer.
- */
-/**
  * Tool-using LLM node. The optional `promptName` is exposed on the returned
  * `NodeDef` so describe/manifest tooling can introspect prompt references
  * without a `as unknown` cast.
@@ -78,6 +73,11 @@ export type LlmWithToolsNodeDef<I, O> =
     readonly promptName?: string;
   };
 
+/**
+ * Build a tool-call LLM node. The factory mirrors `createLlmNode` but routes
+ * through `LlmClient.sendWithTools`, so the model can call registered tools
+ * mid-completion before producing the final structured answer.
+ */
 export const createLlmWithToolsNode = <I, O>(
   config: LlmWithToolsNodeConfig<I, O>,
 ): LlmWithToolsNodeDef<I, O> => {

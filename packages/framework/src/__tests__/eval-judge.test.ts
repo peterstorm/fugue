@@ -1,4 +1,4 @@
-import { NoopObserver } from "../observer/observer.js";
+import { NoopObserver, RecordingObserver } from "../observer/observer.js";
 import { N } from "./_id-helpers.js";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { describe, test, expect } from "bun:test";
@@ -291,6 +291,68 @@ describe("createEvalJudgeNode", () => {
 
       expect(result.outcome).toBe("skipped-llm-failure");
       expect(result.reason).toContain("No LLM client available");
+    });
+
+    test("cyclic DAG data cannot escape during prompt assembly", async () => {
+      const cyclic: Record<string, unknown> = {};
+      cyclic.self = cyclic;
+      const node = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
+
+      const result = await node.run(cyclic, "out", makeCtx({ judgeLlm: makeMockLlm({
+        score: 1,
+        criteria_scores: [],
+        failed_criteria: [],
+        reason: "unused",
+      }) }));
+
+      expect(result.outcome).toBe("skipped-llm-failure");
+      expect(result.reason).toContain("Unexpected error");
+    });
+
+    test("a throwing prompt provider returns a typed judge outcome", async () => {
+      const node = createEvalJudgeNode({
+        id: N("j"),
+        criteria: [N("x")],
+        rubric: { source: "template", templateId: "rubric" },
+      });
+
+      const result = await node.run("in", "out", makeCtx({
+        judgeLlm: makeMockLlm({ score: 1, criteria_scores: [], failed_criteria: [], reason: "unused" }),
+        prompts: { get: () => { throw new Error("prompt store unavailable"); } },
+      }));
+
+      expect(result.outcome).toBe("skipped-llm-failure");
+      expect(result.reason).toContain("prompt store unavailable");
+    });
+
+    test("a hostile LLM rejection is rendered safely and never rejects node.run", async () => {
+      const rejection = Proxy.revocable({}, {});
+      rejection.revoke();
+      const llm: LlmClient = {
+        sendWithTools: stubSendWithTools,
+        sendStructured: async () => { throw rejection.proxy; },
+      };
+      const node = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
+
+      const result = await node.run("in", "out", makeCtx({ judgeLlm: llm }));
+
+      expect(result.outcome).toBe("skipped-llm-failure");
+      expect(result.reason).toContain("Unexpected error");
+    });
+
+    test("skipped evaluator sub-spans use the runtime event timestamp seam", async () => {
+      const observer = new RecordingObserver();
+      const fixed = new Date("2026-08-20T12:34:56.789Z");
+      const node = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
+
+      await node.run("in", "out", makeCtx({
+        judgeLlm: makeFailingLlm("unavailable"),
+        observer,
+        eventTimestamp: () => new Date(fixed),
+      }));
+
+      const subSpan = observer.events.find((event) => event.type === "sub-span");
+      expect(subSpan?.timestamp).toEqual(fixed);
     });
 
     test("fails quality gating closed when LLM returns an error", async () => {

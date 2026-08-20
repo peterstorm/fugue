@@ -54,41 +54,68 @@ const capturingLogger = (): { logger: LogPort; logs: CapturedLog[] } => {
 // ── Pure: parseThinInitEnv ──────────────────────────────────────────────────────
 
 describe("parseThinInitEnv (pure)", () => {
-  test("empty env → safe defaults", () => {
-    expect(parseThinInitEnv({})).toEqual({ maxRestartsPerWindow: 5, windowMs: 60_000, shutdownGraceMs: 10_000 });
+  test("empty env → safe defaults without warnings", () => {
+    expect(parseThinInitEnv({})).toEqual({
+      maxRestartsPerWindow: 5,
+      windowMs: 60_000,
+      shutdownGraceMs: 10_000,
+      warnings: [],
+    });
   });
 
-  test("valid overrides are honoured", () => {
+  test("valid overrides are honoured without warnings", () => {
     const cfg = parseThinInitEnv({
       THIN_INIT_MAX_SUPERVISOR_RESTARTS: "3",
       THIN_INIT_SUPERVISOR_RESTART_WINDOW_MS: "30000",
       THIN_INIT_SHUTDOWN_GRACE_MS: "0",
     });
-    expect(cfg).toEqual({ maxRestartsPerWindow: 3, windowMs: 30_000, shutdownGraceMs: 0 });
+    expect(cfg).toEqual({
+      maxRestartsPerWindow: 3,
+      windowMs: 30_000,
+      shutdownGraceMs: 0,
+      warnings: [],
+    });
   });
 
-  test("invalid / out-of-range values fall back to defaults (PID 1 never refuses to start over a typo)", () => {
+  test("invalid values fall back safely and return operator-visible warnings", () => {
     const cfg = parseThinInitEnv({
       THIN_INIT_MAX_SUPERVISOR_RESTARTS: "0", // below min 1
       THIN_INIT_SUPERVISOR_RESTART_WINDOW_MS: "500", // below min 1000
       THIN_INIT_SHUTDOWN_GRACE_MS: "abc", // not a number
     });
-    expect(cfg).toEqual({ maxRestartsPerWindow: 5, windowMs: 60_000, shutdownGraceMs: 10_000 });
+    expect(cfg).toEqual({
+      maxRestartsPerWindow: 5,
+      windowMs: 60_000,
+      shutdownGraceMs: 10_000,
+      warnings: [
+        { name: "THIN_INIT_MAX_SUPERVISOR_RESTARTS", raw: "0", fallback: 5, minimum: 1 },
+        { name: "THIN_INIT_SUPERVISOR_RESTART_WINDOW_MS", raw: "500", fallback: 60_000, minimum: 1000 },
+        { name: "THIN_INIT_SHUTDOWN_GRACE_MS", raw: "abc", fallback: 10_000, minimum: 0 },
+      ],
+    });
+    expect(Object.isFrozen(cfg.warnings)).toBe(true);
   });
 
-  test("empty / whitespace-only values mean 'use the default', NOT 0 (Number('')===0 would otherwise disable the grace window)", () => {
+  test("empty / whitespace-only values intentionally mean 'use the default' without warnings", () => {
     const cfg = parseThinInitEnv({
       THIN_INIT_MAX_SUPERVISOR_RESTARTS: "",
       THIN_INIT_SUPERVISOR_RESTART_WINDOW_MS: "   ",
       THIN_INIT_SHUTDOWN_GRACE_MS: "", // must NOT become a 0ms drain window
     });
-    expect(cfg).toEqual({ maxRestartsPerWindow: 5, windowMs: 60_000, shutdownGraceMs: 10_000 });
+    expect(cfg).toEqual({
+      maxRestartsPerWindow: 5,
+      windowMs: 60_000,
+      shutdownGraceMs: 10_000,
+      warnings: [],
+    });
   });
 
-  test('a finite but non-integer value ("3.5") is rejected by the integer guard → default (no silent parseInt truncation)', () => {
-    // Number("3.5")=3.5 passes `>= min` but `Number.isInteger` rejects it; a future
-    // swap to parseInt would silently truncate to a 3ms grace — this pins the fallback.
-    expect(parseThinInitEnv({ THIN_INIT_SHUTDOWN_GRACE_MS: "3.5" }).shutdownGraceMs).toBe(10_000);
+  test('a finite but non-integer value ("3.5") emits a warning instead of being silently truncated', () => {
+    const cfg = parseThinInitEnv({ THIN_INIT_SHUTDOWN_GRACE_MS: "3.5" });
+    expect(cfg.shutdownGraceMs).toBe(10_000);
+    expect(cfg.warnings).toEqual([
+      { name: "THIN_INIT_SHUTDOWN_GRACE_MS", raw: "3.5", fallback: 10_000, minimum: 0 },
+    ]);
   });
 });
 
