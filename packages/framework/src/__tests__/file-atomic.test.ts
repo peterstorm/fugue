@@ -480,6 +480,7 @@ describe("withFileLock — stale steal and ownership", () => {
       rmSync(lockPath, { recursive: true, force: true });
       mkdirSync(lockPath);
       writeFileSync(join(lockPath, "pid"), foreignPid);
+      writeFileSync(join(lockPath, "owner"), "foreign-token");
     });
 
     // withFileLock's release ran in `finally` — and correctly no-oped.
@@ -859,6 +860,7 @@ describe("withFileLock — stale steal and ownership", () => {
       const foreignPid = String(deadPid());
       mkdirSync(lockPath);
       writeFileSync(join(lockPath, "pid"), foreignPid); // NOT our pid
+      writeFileSync(join(lockPath, "owner"), "foreign-token"); // proves token mismatch
       chmodSync(lockPath, 0o500);
 
       releaseFileLock(lockPath, "not-the-foreign-owner");
@@ -1056,6 +1058,34 @@ describe("file-lock diagnostics", () => {
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("verify ownership while reading ownership token");
     expect(warnings[0]).toContain("EIO");
+    releaseFileLock(lockPath, ownershipToken);
+  });
+
+  test("a corrupt foreign pid plus unreadable token is an inconclusive typed release failure", async () => {
+    const warnings: string[] = [];
+    recordingLogger(warnings);
+    const lockPath = join(tempDir(), "append.lock");
+    const ownershipToken = await acquireFileLock(lockPath);
+    writeFileSync(join(lockPath, "pid"), String(deadPid()));
+
+    let failure: unknown;
+    try {
+      releaseFileLock(lockPath, ownershipToken, {
+        readOwnershipToken: () => { throw errnoFailure("EACCES", "token cannot be verified"); },
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({
+      kind: "cache-error",
+      operation: "releaseFileLock",
+      message: expect.stringContaining("EACCES"),
+    });
+    expect(existsSync(lockPath)).toBe(true);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("ownership token");
+    writeFileSync(join(lockPath, "pid"), String(process.pid));
     releaseFileLock(lockPath, ownershipToken);
   });
 

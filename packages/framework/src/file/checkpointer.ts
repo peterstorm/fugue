@@ -39,7 +39,7 @@
 //   stored frameworkVersion ≠ FRAMEWORK_VERSION   ⇒ checkpoint-version-mismatch (ADR-0017)
 //   expectedDagFingerprint supplied and ≠ stored  ⇒ checkpoint-version-mismatch
 //   createdAt older than TTL_SECONDS (24h)        ⇒ checkpoint-expired
-//   per-node entry corrupt                        ⇒ DROPPED + surfaced in corruptNodeIds
+//   per-node entry corrupt                        ⇒ DROPPED + surfaced in corruptNodeAddresses
 //
 // Expiry is evaluated LAZILY at load through the injected `now()` (FR-027):
 // there is no background sweeper and no physical GC in this pass, so an
@@ -80,8 +80,10 @@ import { join } from "node:path";
 import { atomicWriteFile } from "./atomic.js";
 import { META_FILE, NODES_DIR, isBoundaryId, keyDigest } from "./layout.js";
 import {
+  corruptCheckpointAddressValue,
   evaluateCheckpointLoadGates,
   guardedCheckpointClockRead,
+  reportCorruptCheckpointEntry,
 } from "../checkpoint/checkpointer.js";
 import {
   isPlainObject,
@@ -109,6 +111,7 @@ import {
 import type {
   Checkpointer,
   CheckpointerLoadOpts,
+  CorruptCheckpointAddress,
   NodeState,
   RunMeta,
   RunState,
@@ -121,6 +124,7 @@ import { ID_PATTERN, __brandNodeId, __brandRunId } from "../types/ids.js";
 import type { Result } from "../types/result.js";
 import { err, ok } from "../types/result.js";
 import { frameworkError } from "../types/error-factories.js";
+import { fwLogger } from "../logger.js";
 import {
   isMissingPathError,
   isMissingPathProbe,
@@ -133,7 +137,6 @@ import {
   fileCacheError,
   fileOperationError,
   isFileBackendPathString,
-  warnWithoutThrowing,
   type FileOperation,
 } from "./boundary-error.js";
 
@@ -560,7 +563,7 @@ const createFileCheckpointerUnchecked = (
       }
 
       const nodes: Record<string, NodeState> = {};
-      const corruptNodeIds: string[] = [];
+      const corruptNodeAddresses: CorruptCheckpointAddress[] = [];
       // The listing block pairs `nodesDirectory` and `fileNames`: a non-empty
       // listing implies a non-null directory, and an absent directory lists
       // empty — so the wrap below is the single narrowing point, and the
@@ -607,23 +610,21 @@ const createFileCheckpointerUnchecked = (
           }
 
           if (verdict.kind === "corrupt") {
-            // Diagnostic alongside the `corruptNodeIds` surface (round-23
-            // tda-3), never part of the load verdict: a throwing host logger
-            // must not turn a healthy durable read into a typed failure
-            // (boundary-error.ts doctrine — the Redis twin logs the same
-            // event unguarded). `warnWithoutThrowing` keeps the emission
-            // total.
-            warnWithoutThrowing(
-              `[FileCheckpointer] Dropping corrupt checkpoint entry runId=${runId} nodeKey=${verdict.address}: ${verdict.message}`,
-            );
-            corruptNodeIds.push(verdict.address);
+            const address = corruptCheckpointAddressValue(verdict.address);
+            const report = reportCorruptCheckpointEntry({
+              warning: `[FileCheckpointer] Dropping corrupt checkpoint entry runId=${runId} address=${address}: ${verdict.message}`,
+              warn: (warning) => fwLogger().warn(warning),
+              loggerFailure: (message) => checkpointerCacheError("load", message),
+            });
+            if (!report.ok) return report;
+            corruptNodeAddresses.push(verdict.address);
             continue;
           }
           // `defineProperty`, not `nodes[key] = …`: `__proto__` is an
           // ID_PATTERN-valid nodeId (`_` is in the charset), and plain assignment
           // would hit `Object.prototype`'s `__proto__` SETTER — re-parenting the
           // returned map instead of adding an entry, silently losing a stored
-          // node with no `corruptNodeIds` trace. A data descriptor always creates
+          // node with no `corruptNodeAddresses` trace. A data descriptor always creates
           // an OWN, enumerable property, so every stored address round-trips
           // (US2) and the in-memory backend's computed-key semantics are matched
           // exactly. The map keeps its ordinary prototype so callers comparing it
@@ -643,7 +644,7 @@ const createFileCheckpointerUnchecked = (
         // Always present — empty when no entry was dropped — so the
         // drop-and-surface contract is visible to exhaustive consumers
         // (round-23 tda-3).
-        corruptNodeIds,
+        corruptNodeAddresses,
       });
     },
   };

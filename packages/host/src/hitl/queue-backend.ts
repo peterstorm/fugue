@@ -1,3 +1,4 @@
+import { safeErrorMessage } from "@fuguejs/framework";
 import type { QueueBackend } from "@fuguejs/framework";
 import type { LogPort } from "../ports.js";
 
@@ -40,8 +41,12 @@ export const closeHitlQueueBackend = async (
   try {
     await backend.close();
   } catch (error) {
-    logger.error("Failed to close HITL queue backend", {
-      error: error instanceof Error ? error.message : String(error),
-    });
+    try {
+      logger.error("Failed to close HITL queue backend", {
+        error: safeErrorMessage(error),
+      });
+    } catch {
+      // Shutdown cleanup remains best-effort even when its logger is broken.
+    }
   }
 };

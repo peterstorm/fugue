@@ -49,7 +49,10 @@ export class InMemoryCache implements Cache {
     } catch (e) {
       return err({ kind: "cache-error", operation: "get", message: `key="${key}": clock failed: ${safeErrorMessage(e)}` });
     }
-    if (!Number.isFinite(nowMs) || nowMs > entry.expiresAt) {
+    if (!Number.isFinite(nowMs)) {
+      return err({ kind: "cache-error", operation: "get", message: `key="${key}": clock returned a non-finite timestamp` });
+    }
+    if (nowMs > entry.expiresAt) {
       this.store.delete(key);
       return ok(null);
     }

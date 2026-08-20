@@ -24,6 +24,24 @@ const rawNodeId = (s: string): NodeId => s as unknown as NodeId;
 const MAX_SAFE = Number.MAX_SAFE_INTEGER; // 9_007_199_254_740_991
 const id128 = "id".padEnd(128, "x");
 
+const optsOf = (
+  namespace: string | undefined,
+  index: number | undefined,
+  attempt: number | undefined,
+): CompositeNodeKeyOpts => {
+  if (index !== undefined) {
+    return {
+      ...(namespace !== undefined ? { namespace } : {}),
+      index,
+      ...(attempt !== undefined ? { attempt } : {}),
+    };
+  }
+  if (attempt !== undefined) {
+    return { ...(namespace !== undefined ? { namespace } : {}), attempt };
+  }
+  return {};
+};
+
 describe("DEFAULT_NODE_NAMESPACE", () => {
   it("is exactly 'dag'", () => {
     expect(DEFAULT_NODE_NAMESPACE).toBe("dag");
@@ -44,9 +62,11 @@ describe("compositeNodeKey — canonical folding (ADR-0075)", () => {
     // but forgot its addressing component: silently folding would store the
     // entry under the bare canonical nodeId and discard the intent, so the
     // shape is refused instead (parse, don't validate).
+    // @ts-expect-error — namespace-only is intentionally unrepresentable.
     expect(() => compositeNodeKey(N("read-node"), { namespace: "sub" })).toThrow(
       /namespace.*without index\/attempt.*ambiguous/,
     );
+    // @ts-expect-error — runtime defense still rejects forged JavaScript.
     expect(() => compositeNodeKey(N("read-node"), { namespace: "@@@bad" })).toThrow(/ambiguous/);
     // With an addressing component present, the namespace participates.
     expect(compositeNodeKey(N("read-node"), { namespace: "sub", index: 0 })).toBe("sub@read-node@0@0");
@@ -330,11 +350,7 @@ describe("collision-freedom", () => {
     const addresses = new Set<string>();
     for (let i = 0; i < nodeIds.length; i += 1) {
       // Immutable construction — `undefined` components mean "absent" to the codec.
-      const opts: CompositeNodeKeyOpts = {
-        namespace: namespaces[i],
-        index: indexes[i],
-        attempt: attempts[i],
-      };
+      const opts = optsOf(namespaces[i], indexes[i], attempts[i]);
       const key = compositeNodeKey(N(nodeIds[i]), opts);
       keys.add(key);
       addresses.add(JSON.stringify([nodeIds[i], opts.namespace ?? null, opts.index ?? null, opts.attempt ?? null]));
@@ -371,11 +387,8 @@ describe("fast-check properties", () => {
     attempt: maybeInt,
   });
 
-  const toOpts = (a: { readonly nodeId: string; readonly namespace?: string; readonly index?: number; readonly attempt?: number }): CompositeNodeKeyOpts => ({
-    namespace: a.namespace,
-    index: a.index,
-    attempt: a.attempt,
-  });
+  const toOpts = (a: { readonly nodeId: string; readonly namespace?: string; readonly index?: number; readonly attempt?: number }): CompositeNodeKeyOpts =>
+    optsOf(a.namespace, a.index, a.attempt);
 
   const isCanonical = (a: { readonly index?: number; readonly attempt?: number }): boolean =>
     a.index === undefined && a.attempt === undefined;
@@ -411,6 +424,7 @@ describe("fast-check properties", () => {
     // SAME address. (A namespace alone is rejected as ambiguous, so the
     // canonical form can never carry namespace intent.)
     expect(compositeNodeKey(N("read-node"))).toBe(compositeNodeKey(N("read-node"), {}));
+    // @ts-expect-error — compile-time rejection is the advisory's invariant.
     expect(() => compositeNodeKey(N("read-node"), { namespace: "sub" })).toThrow(/ambiguous/);
     // Composite form: absent components and explicit defaults are the same
     // address — the twins the old `?? null` property key counted as distinct.

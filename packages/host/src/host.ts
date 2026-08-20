@@ -13,7 +13,7 @@
  * @satisfies NFR-020 — Host MUST log startup/shutdown lifecycle events
  */
 
-import { ok, err, runId as makeRunId } from "@fuguejs/framework";
+import { ok, err, runId as makeRunId, safeErrorMessage } from "@fuguejs/framework";
 import type { Result, DagId, NodeContext, DagDef, FrameworkError } from "@fuguejs/framework";
 import { runDag } from "@fuguejs/framework";
 import type { HostConfig } from "./domain/config.js";
@@ -164,6 +164,34 @@ export interface HostInstance {
   readonly triggerSync: () => Promise<void>;
   readonly server: { port: number; stop: () => void } | null;
 }
+
+/**
+ * Stop a listener acquired before a later bind-finalization failure (notably
+ * UDS chmod). The returned diagnostic is evidence that the listener may still
+ * be live; logging is secondary and can never interrupt the remaining cleanup.
+ */
+export const stopBoundServerAfterBindFailure = (
+  server: { readonly stop: () => void } | undefined,
+  bindDescription: string,
+  logger: Pick<SyncLogger, "error">,
+): string | undefined => {
+  if (server === undefined) return undefined;
+  try {
+    server.stop();
+    return undefined;
+  } catch (error) {
+    const diagnostic = safeErrorMessage(error);
+    try {
+      logger.error("Failed to stop HTTP server after bind finalization failure — listener may still be live", {
+        bind: bindDescription,
+        error: diagnostic,
+      });
+    } catch {
+      // The returned HostError remains the authoritative cleanup diagnostic.
+    }
+    return diagnostic;
+  }
+};
 
 // ── Capability Broker selection (T8 / per-node minting) ───────────────────
 
@@ -818,31 +846,42 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     // the default umask. Stop it (and the already-started HITL worker) explicitly —
     // depending only on the OPTIONAL `onShutdown` would otherwise leave a
     // mis-permissioned tenant socket listening, worse than a clean boot failure.
-    try {
-      bunServer?.stop();
-    } catch {
-      // never fully bound / already stopped — nothing to reclaim
-    }
+    const serverStopFailure = stopBoundServerAfterBindFailure(bunServer, bindDesc, logger);
     if (hitlWorker) {
-      await hitlWorker.close().catch((closeErr) => {
-        logger.error("Failed to close HITL worker after server bind failure", {
-          error: closeErr instanceof Error ? closeErr.message : String(closeErr),
-        });
-      });
+      try {
+        await hitlWorker.close();
+      } catch (closeError) {
+        try {
+          logger.error("Failed to close HITL worker after server bind failure", {
+            error: safeErrorMessage(closeError),
+          });
+        } catch {
+          // Continue the remaining boot-abort cleanup.
+        }
+      }
       hitlWorker = undefined;
     }
     // Close connected capabilities (reverse topological order), then infrastructure.
     if (sortedHandles.length > 0) await closeAll(sortedHandles, logger);
     if (deps.onShutdown) {
-      await deps.onShutdown().catch((cleanupErr) => {
-        logger.error("Failed to clean up resources after server bind failure", {
-          error: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
-        });
-      });
+      try {
+        await deps.onShutdown();
+      } catch (cleanupError) {
+        try {
+          logger.error("Failed to clean up resources after server bind failure", {
+            error: safeErrorMessage(cleanupError),
+          });
+        } catch {
+          // The primary bind failure remains authoritative.
+        }
+      }
     }
+    const stopContext = serverStopFailure === undefined
+      ? ""
+      : `; failed to stop the bound server and the listener may still be live: ${serverStopFailure}`;
     return err({
       kind: "internal-invariant-violated",
-      message: `Failed to bind HTTP server on ${bindDesc}: ${e instanceof Error ? e.message : String(e)}`,
+      message: `Failed to bind HTTP server on ${bindDesc}: ${safeErrorMessage(e)}${stopContext}`,
       context: unixPath !== undefined ? { unix: unixPath } : { port: config.PORT },
     });
   }

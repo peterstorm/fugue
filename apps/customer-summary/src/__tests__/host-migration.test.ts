@@ -79,34 +79,39 @@ describe("resolveDefaults with customer-summary registration", () => {
 // ---------------------------------------------------------------------------
 
 describe("SummarizeInputSchema", () => {
-  test("accepts valid customerId", () => {
-    const result = SummarizeInputSchema.safeParse({ customerId: "cust-123" });
+  test("accepts the standalone customer_id wire shape and parses domain customerId", () => {
+    const result = SummarizeInputSchema.safeParse({ customer_id: "cust-123" });
     expect(result.success).toBe(true);
+    if (result.success) expect(result.data).toEqual({ customerId: "cust-123" });
   });
 
-  test("rejects empty customerId", () => {
-    const result = SummarizeInputSchema.safeParse({ customerId: "" });
+  test("rejects empty customer_id", () => {
+    const result = SummarizeInputSchema.safeParse({ customer_id: "" });
     expect(result.success).toBe(false);
   });
 
-  test("rejects missing customerId", () => {
+  test("rejects missing customer_id", () => {
     const result = SummarizeInputSchema.safeParse({});
     expect(result.success).toBe(false);
   });
 
+  test("rejects camel-case wire input instead of silently diverging from server.ts", () => {
+    expect(SummarizeInputSchema.safeParse({ customerId: "cust-123" }).success).toBe(false);
+  });
+
   test("accepts optional resume_run_id", () => {
     const result = SummarizeInputSchema.safeParse({
-      customerId: "cust-123",
+      customer_id: "cust-123",
       resume_run_id: "run-abc",
     });
     expect(result.success).toBe(true);
     if (result.success) {
-      expect(result.data.resume_run_id).toBe("run-abc");
+      expect(result.data).toEqual({ customerId: "cust-123", resume_run_id: "run-abc" });
     }
   });
 
   test("accepts payload without resume_run_id", () => {
-    const result = SummarizeInputSchema.safeParse({ customerId: "cust-123" });
+    const result = SummarizeInputSchema.safeParse({ customer_id: "cust-123" });
     expect(result.success).toBe(true);
     if (result.success) {
       expect(result.data.resume_run_id).toBeUndefined();
@@ -117,9 +122,8 @@ describe("SummarizeInputSchema", () => {
     expect(typeof registration.inputSchema.parse).toBe("function");
   });
 
-  test("inputSchema validates same shape as SummarizeInputSchema", () => {
-    const valid = { customerId: "test-id" };
-    const parsed = registration.inputSchema.parse(valid);
-    expect(parsed).toEqual(valid);
+  test("registration inputSchema performs the same wire-to-domain parse", () => {
+    const parsed = registration.inputSchema.parse({ customer_id: "test-id" });
+    expect(parsed).toEqual({ customerId: "test-id" });
   });
 });

@@ -492,6 +492,23 @@ describe("Wave 6.2 — InMemoryCache accepts an injectable now() seam", () => {
     }
   });
 
+  it("a non-finite get clock returns a typed error without evicting the entry", async () => {
+    let now = 1_000;
+    const cache = new InMemoryCache({ now: () => now });
+    expect((await cache.set("k", "v", 10)).ok).toBe(true);
+
+    now = Number.POSITIVE_INFINITY;
+    const invalidClock = await cache.get("k", z.string());
+    expect(invalidClock.ok).toBe(false);
+    if (!invalidClock.ok) {
+      expect(invalidClock.error).toMatchObject({ kind: "cache-error", operation: "get" });
+    }
+
+    now = 2_000;
+    const recovered = await cache.get("k", z.string());
+    expect(recovered).toEqual(ok("v"));
+  });
+
   it("a cyclic value is a typed cache-error on set, never a raw rejection (round-22 sfh-3)", async () => {
     const cache = new InMemoryCache({ now: () => 1_000 });
     const cyclic: Record<string, unknown> = {};

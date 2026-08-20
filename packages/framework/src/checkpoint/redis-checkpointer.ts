@@ -3,13 +3,21 @@ import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { RunId, NodeId } from "../types/ids.js";
 import { ok, err } from "../types/result.js";
-import type { Checkpointer, CheckpointerLoadOpts, RunMeta, NodeState, RunState } from "./checkpointer.js";
+import type {
+  Checkpointer,
+  CheckpointerLoadOpts,
+  CorruptCheckpointAddress,
+  RunMeta,
+  NodeState,
+  RunState,
+} from "./checkpointer.js";
 import {
   TTL_SECONDS,
   evaluateCheckpointLoadGates,
   guardedCheckpointClockRead,
   parseNodeStateRecord,
   parseRunMetaRecord,
+  reportCorruptCheckpointEntry,
 } from "./checkpointer.js";
 import { FRAMEWORK_VERSION } from "./fingerprint.js";
 import { frameworkError } from "../types/error-factories.js";
@@ -77,7 +85,7 @@ const deserializeNode = (raw: string): NodeState => {
   // gates live in the checkpoint core's `parseNodeStateRecord` — a non-string
   // or `ID_PATTERN`-violating nodeId, or a non-canonical completedAt, from
   // corrupt/drifted bytes must fail as corrupt HERE — per-entry, dropping the
-  // row into `corruptNodeIds` — never flow a number/object into the node map
+  // row into `corruptNodeAddresses` — never flow a number/object into the node map
   // and node dispatch. (The `output` field stays adapter-side pass-through.)
   const parsedNode = parseNodeStateRecord(stored);
   if (!parsedNode.ok) {
@@ -213,10 +221,10 @@ export class RedisCheckpointer implements Checkpointer {
 
     // Per-entry deserialize: a single corrupt row must not poison the rest.
     // Missing nodes will be re-executed (DAG nodes are idempotency-safe by design).
-    // Surface dropped ids on `corruptNodeIds` so callers can distinguish
-    // "node never ran" from "node ran but checkpoint is unreadable".
+    // Surface dropped node-key addresses so callers can distinguish "node
+    // never ran" from "node ran but checkpoint is unreadable".
     const nodes: Record<string, NodeState> = {};
-    const corruptNodeIds: string[] = [];
+    const corruptNodeAddresses: CorruptCheckpointAddress[] = [];
     for (const [nodeId, raw] of Object.entries(rawNodes)) {
       try {
         // `__proto__` matches ID_PATTERN (`_` is in the charset), so it is a
@@ -230,11 +238,14 @@ export class RedisCheckpointer implements Checkpointer {
           writable: true,
           configurable: true,
         });
-      } catch (e) {
-        fwLogger().warn(
-          `[RedisCheckpointer] Dropping corrupt checkpoint entry runId=${runId} nodeId=${nodeId}: ${e instanceof Error ? e.message : e}`,
-        );
-        corruptNodeIds.push(nodeId);
+      } catch (error) {
+        const report = reportCorruptCheckpointEntry({
+          warning: `[RedisCheckpointer] Dropping corrupt checkpoint entry runId=${runId} nodeId=${nodeId}: ${safeErrorMessage(error)}`,
+          warn: (warning) => fwLogger().warn(warning),
+          loggerFailure: (message) => frameworkError.cacheError("checkpoint:load", message),
+        });
+        if (!report.ok) return report;
+        corruptNodeAddresses.push({ kind: "node-key", nodeKey: nodeId });
       }
     }
 
@@ -244,7 +255,7 @@ export class RedisCheckpointer implements Checkpointer {
       // Always present — empty when no entry was dropped — so the
       // drop-and-surface contract is visible to exhaustive consumers
       // (round-23 tda-3).
-      corruptNodeIds,
+      corruptNodeAddresses,
     });
   }
 

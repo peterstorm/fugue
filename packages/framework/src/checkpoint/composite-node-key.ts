@@ -60,14 +60,39 @@ export const DEFAULT_NODE_NAMESPACE = "dag";
  * so mapped/fan-out instances (index) and retry attempts address distinct
  * durable entries without overwriting each other.
  */
-export interface CompositeNodeKeyOpts {
+type CanonicalNodeKeyOpts = {
+  readonly namespace?: never;
+  readonly index?: never;
+  readonly attempt?: never;
+};
+
+type IndexedNodeKeyOpts = {
+  /** Composite namespace; defaults to `DEFAULT_NODE_NAMESPACE` ("dag"). Must match `ID_PATTERN`. */
+  readonly namespace?: string;
+  /** Instance index for mapped/fan-out node instances; non-negative safe integer (default 0). */
+  readonly index: number;
+  /** Retry/attempt counter; non-negative safe integer (default 0). */
+  readonly attempt?: number;
+};
+
+type AttemptedNodeKeyOpts = {
   /** Composite namespace; defaults to `DEFAULT_NODE_NAMESPACE` ("dag"). Must match `ID_PATTERN`. */
   readonly namespace?: string;
   /** Instance index for mapped/fan-out node instances; non-negative safe integer (default 0). */
   readonly index?: number;
   /** Retry/attempt counter; non-negative safe integer (default 0). */
-  readonly attempt?: number;
-}
+  readonly attempt: number;
+};
+
+/**
+ * Canonical options are empty. Composite options carry at least `index` or
+ * `attempt`, making the namespace-only caller error unrepresentable for typed
+ * consumers while runtime boundaries still reject forged JavaScript values.
+ */
+export type CompositeNodeKeyOpts =
+  | CanonicalNodeKeyOpts
+  | IndexedNodeKeyOpts
+  | AttemptedNodeKeyOpts;
 
 /**
  * A composite address requires an addressing component: `namespace` alone
@@ -77,7 +102,11 @@ export interface CompositeNodeKeyOpts {
  * `index: 0` would land on a DIFFERENT durable entry. Illegal shapes are made
  * unrepresentable instead of silently folded (parse, don't validate).
  */
-const assertNoNamespaceAlone = (opts: CompositeNodeKeyOpts): void => {
+const assertNoNamespaceAlone = (opts: {
+  readonly namespace?: string;
+  readonly index?: number;
+  readonly attempt?: number;
+}): void => {
   if (opts.namespace !== undefined && opts.index === undefined && opts.attempt === undefined) {
     throw new Error(
       `Invalid composite node key opts: namespace "${opts.namespace}" without index/attempt is ambiguous — ` +
@@ -230,7 +259,7 @@ const parseDecimalComponent = (raw: string): number | null => {
  * The re-validation is fail-closed: an out-of-contract key (e.g. a nodeId
  * that is not `ID_PATTERN`-valid, or `@01@` leading-zero index) is rejected
  * rather than half-interpreted — corrupt stored entries surface as `null` and
- * the caller decides how to name them (e.g. `corruptNodeIds`).
+ * the caller classifies them as a discriminated corrupt checkpoint address.
  */
 export const parseCompositeNodeKey = (key: string): ParsedCompositeNodeKey | null => {
   if (typeof key !== "string") return null;

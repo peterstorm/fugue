@@ -9,7 +9,7 @@
  * - ADR-0075 composite addressing: canonical folding, and every permutation of
  *   namespace/index/attempt resolving to a DISTINCT durable entry, all
  *   returned by one `load` (FR-022)
- * - per-entry corruption dropped and surfaced in `corruptNodeIds`, keyed by
+ * - per-entry corruption dropped and surfaced in `corruptNodeAddresses`, keyed by
  *   the stored nodeKey when it is trustworthy and by the filename when it is
  *   not; duplicate primitive Map keys are rejected before deserialization
  * - node-file read failures remain `cache-error(load)` and are never warned/
@@ -47,9 +47,9 @@ import {
 } from "../file.js";
 import { META_FILE, NODES_DIR, keyDigest } from "../file/layout.js";
 import { FRAMEWORK_VERSION } from "../checkpoint/fingerprint.js";
-import { TTL_SECONDS, evaluateCheckpointLoadGates } from "../checkpoint/checkpointer.js";
+import { corruptCheckpointAddressValue, TTL_SECONDS, evaluateCheckpointLoadGates } from "../checkpoint/checkpointer.js";
 import { ok, err } from "../types/result.js";
-import type { Checkpointer, NodeState, RunMeta } from "../checkpoint/checkpointer.js";
+import type { Checkpointer, CorruptCheckpointAddress, NodeState, RunMeta } from "../checkpoint/checkpointer.js";
 import { checkpointerSuite } from "./_checkpointer-suite.js";
 import { D, N, R } from "./_id-helpers.js";
 import type { RunId, NodeId } from "../types/ids.js";
@@ -172,6 +172,9 @@ const hostileErrorCorpus = (): readonly unknown[] => {
 const nodesDirOf = (directory: string, runId: string): string =>
   join(directory, runId, NODES_DIR);
 
+const corruptAddressValues = (addresses: readonly CorruptCheckpointAddress[]): readonly string[] =>
+  addresses.map(corruptCheckpointAddressValue);
+
 /** Write a raw `meta.json` straight to disk, bypassing `setMeta` — the file
  * backend's equivalent of the Redis suite's raw `redis.set`. */
 const writeRawMeta = (directory: string, runId: string, contents: string): void => {
@@ -264,7 +267,7 @@ checkpointerSuite(
           completedAt: "not-a-date",
         }),
       );
-      return { corruptAddress: nodeId };
+      return { corruptAddress: { kind: "node-key" as const, nodeKey: nodeId } };
     },
   },
 );
@@ -386,7 +389,7 @@ describe("FileCheckpointer — unknown run", () => {
     expect(result).toEqual({ ok: true, value: null });
   });
 
-  it("meta with no nodes/ directory loads with an empty nodes map and no corruptNodeIds", async () => {
+  it("meta with no nodes/ directory loads with an empty nodes map and no corruptNodeAddresses", async () => {
     const cp = createFileCheckpointer(freshDirectory());
     await cp.setMeta(R("run-empty"), META({ nodeCount: 4 }));
     const result = await cp.load(R("run-empty"));
@@ -394,7 +397,7 @@ describe("FileCheckpointer — unknown run", () => {
     if (!result.ok || result.value === null) throw new Error("expected a loaded run state");
     expect(result.value.nodes).toEqual({});
     // Always present, empty when nothing was dropped (round-23 tda-3).
-    expect(result.value.corruptNodeIds).toEqual([]);
+    expect(corruptAddressValues(result.value.corruptNodeAddresses)).toEqual([]);
     expect(result.value.meta.nodeCount).toBe(4);
   });
 });
@@ -856,10 +859,10 @@ describe("FileCheckpointer — load failure precedence", () => {
     const result = await load(directory);
     if (!result.ok || result.value === null) throw new Error("expected a loaded checkpoint");
     expect(result.value.nodes).toEqual({});
-    expect(result.value.corruptNodeIds).toEqual([`${keyDigest("corrupt-node")}.json`]);
+    expect(corruptAddressValues(result.value.corruptNodeAddresses)).toEqual([`${keyDigest("corrupt-node")}.json`]);
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("Dropping corrupt checkpoint entry");
-    expect(warnings[0]).toContain(`nodeKey=${keyDigest("corrupt-node")}.json`);
+    expect(warnings[0]).toContain(`address=${keyDigest("corrupt-node")}.json`);
   });
 
   it("a non-ENOENT nodes/ listing failure (readdir EACCES) fails typed cache-error(load) naming the directory", async () => {
@@ -942,7 +945,7 @@ describe("FileCheckpointer — composite addressing (FR-022, ADR-0075)", () => {
       expect(result.value.nodes[expectedKey].nodeId).toBe(N(nodeId));
     }
     // Always present, empty when nothing was dropped (round-23 tda-3).
-    expect(result.value.corruptNodeIds).toEqual([]);
+    expect(corruptAddressValues(result.value.corruptNodeAddresses)).toEqual([]);
   });
 
   it("rejects a namespace-only save with a typed checkpoint-write-failed (index and attempt both absent)", async () => {
@@ -955,9 +958,13 @@ describe("FileCheckpointer — composite addressing (FR-022, ADR-0075)", () => {
     // (ADR-0075): the codec refuses to silently discard it and store under the
     // bare canonical nodeId — the file backend converts the refusal into a
     // typed error, never a raw throw.
-    const result = await cp.saveNode(R("run-fold"), N("n1"), node("n1", "namespaced"), {
-      namespace: "other",
-    });
+    const result = await cp.saveNode(
+      R("run-fold"),
+      N("n1"),
+      node("n1", "namespaced"),
+      // @ts-expect-error — namespace-only is intentionally unrepresentable.
+      { namespace: "other" },
+    );
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("checkpoint-write-failed");
@@ -993,7 +1000,7 @@ describe("FileCheckpointer — composite addressing (FR-022, ADR-0075)", () => {
   // `__proto__` matches ID_PATTERN (`_` is in the charset), so it is a
   // LEGAL nodeId. Building the returned map with `nodes[key] = state` would
   // hit `Object.prototype`'s `__proto__` setter and re-parent the map instead
-  // of storing an entry — the node would vanish with no `corruptNodeIds`
+  // of storing an entry — the node would vanish with no `corruptNodeAddresses`
   // trace, which is exactly the silent loss US2 forbids.
   it("round-trips prototype-named node ids (__proto__/constructor/prototype) as OWN entries", async () => {
     const cp = createFileCheckpointer(freshDirectory());
@@ -1012,7 +1019,7 @@ describe("FileCheckpointer — composite addressing (FR-022, ADR-0075)", () => {
       expect(result.value.nodes[id].nodeId).toBe(N(id));
     }
     // Always present, empty when nothing was dropped (round-23 tda-3).
-    expect(result.value.corruptNodeIds).toEqual([]);
+    expect(corruptAddressValues(result.value.corruptNodeAddresses)).toEqual([]);
     // The map itself was never re-parented by the `__proto__` entry.
     expect(Object.getPrototypeOf(result.value.nodes)).toBe(Object.prototype);
   });
@@ -1075,7 +1082,7 @@ describe("FileCheckpointer — output fidelity", () => {
     expect(Object.keys(result.value.nodes)).toEqual(["n1"]);
     expect(result.value.nodes["n1"].output).toBeUndefined();
     // Always present, empty when nothing was dropped (round-23 tda-3).
-    expect(result.value.corruptNodeIds).toEqual([]);
+    expect(corruptAddressValues(result.value.corruptNodeAddresses)).toEqual([]);
   });
 
   it("preserves distinct object-key identities even when their serialized shapes match", async () => {
@@ -1145,7 +1152,7 @@ describe("FileCheckpointer — corrupt node entries (FR-028)", () => {
   const expectWarningsFor = (addresses: readonly string[]): void => {
     expect(warnings).toHaveLength(addresses.length);
     for (const address of addresses) {
-      const warning = warnings.find((candidate) => candidate.includes(`nodeKey=${address}:`));
+      const warning = warnings.find((candidate) => candidate.includes(`address=${address}:`));
       expect(warning).toBeDefined();
       expect(warning).toContain("[FileCheckpointer] Dropping corrupt checkpoint entry");
       expect(warning).toContain("runId=run-c");
@@ -1169,7 +1176,7 @@ describe("FileCheckpointer — corrupt node entries (FR-028)", () => {
     if (!result.ok || result.value === null) throw new Error("expected a loaded run state");
     expect(Object.keys(result.value.nodes)).toEqual(["good"]);
     expect(result.value.nodes["good"].output).toBe("kept");
-    expect(result.value.corruptNodeIds).toEqual([fileName]);
+    expect(corruptAddressValues(result.value.corruptNodeAddresses)).toEqual([fileName]);
     expectWarningsFor([fileName]);
   });
 
@@ -1190,7 +1197,7 @@ describe("FileCheckpointer — corrupt node entries (FR-028)", () => {
 
     const result = await cp.load(R("run-c"));
     if (!result.ok || result.value === null) throw new Error("expected a loaded run state");
-    expect(result.value.corruptNodeIds).toEqual(["claims-to-be"]);
+    expect(corruptAddressValues(result.value.corruptNodeAddresses)).toEqual(["claims-to-be"]);
     expect(result.value.nodes["claims-to-be"]).toBeUndefined();
     expectWarningsFor(["claims-to-be"]);
   });
@@ -1211,7 +1218,7 @@ describe("FileCheckpointer — corrupt node entries (FR-028)", () => {
 
     const result = await cp.load(R("run-c"));
     if (!result.ok || result.value === null) throw new Error("expected a loaded run state");
-    expect(result.value.corruptNodeIds).toEqual(["dag@n9@0@0"]);
+    expect(corruptAddressValues(result.value.corruptNodeAddresses)).toEqual(["dag@n9@0@0"]);
     expectWarningsFor(["dag@n9@0@0"]);
   });
 
@@ -1235,7 +1242,7 @@ describe("FileCheckpointer — corrupt node entries (FR-028)", () => {
     if (!result.ok || result.value === null) throw new Error("expected a loaded run state");
     const addresses = nonCanonical.map(([nodeKey]) => nodeKey);
     expect(Object.keys(result.value.nodes)).toEqual(["good"]);
-    expect([...(result.value.corruptNodeIds ?? [])].sort()).toEqual([...addresses].sort());
+    expect([...corruptAddressValues(result.value.corruptNodeAddresses)].sort()).toEqual([...addresses].sort());
     expectWarningsFor(addresses);
     expect(
       warnings.every((warning) =>
@@ -1255,7 +1262,7 @@ describe("FileCheckpointer — corrupt node entries (FR-028)", () => {
 
     const result = await cp.load(R("run-c"));
     if (!result.ok || result.value === null) throw new Error("expected a loaded run state");
-    expect(result.value.corruptNodeIds).toEqual(["n8"]);
+    expect(corruptAddressValues(result.value.corruptNodeAddresses)).toEqual(["n8"]);
     expectWarningsFor(["n8"]);
   });
 
@@ -1265,7 +1272,7 @@ describe("FileCheckpointer — corrupt node entries (FR-028)", () => {
 
     const result = await cp.load(R("run-c"));
     if (!result.ok || result.value === null) throw new Error("expected a loaded run state");
-    expect(result.value.corruptNodeIds).toEqual(["x"]);
+    expect(corruptAddressValues(result.value.corruptNodeAddresses)).toEqual(["x"]);
     expectWarningsFor(["x"]);
   });
 
@@ -1285,7 +1292,7 @@ describe("FileCheckpointer — corrupt node entries (FR-028)", () => {
 
     const result = await cp.load(R("run-c"));
     if (!result.ok || result.value === null) throw new Error("expected a loaded run state");
-    expect(result.value.corruptNodeIds).toEqual(["dag@n1@2@0"]);
+    expect(corruptAddressValues(result.value.corruptNodeAddresses)).toEqual(["dag@n1@2@0"]);
     expect(result.value.nodes["dag@n1@2@0"]).toBeUndefined();
     expectWarningsFor(["dag@n1@2@0"]);
   });
@@ -1307,7 +1314,7 @@ describe("FileCheckpointer — corrupt node entries (FR-028)", () => {
 
     const result = await cp.load(R("run-c"));
     if (!result.ok || result.value === null) throw new Error("expected a loaded run state");
-    expect(result.value.corruptNodeIds).toEqual([`${keyDigest(malformed)}.json`]);
+    expect(corruptAddressValues(result.value.corruptNodeAddresses)).toEqual([`${keyDigest(malformed)}.json`]);
     expectWarningsFor([`${keyDigest(malformed)}.json`]);
   });
 
@@ -1321,7 +1328,7 @@ describe("FileCheckpointer — corrupt node entries (FR-028)", () => {
     if (!result.ok || result.value === null) throw new Error("expected a loaded run state");
     expect(Object.keys(result.value.nodes).sort()).toEqual(["dag@good2@3@0", "good"]);
     const corruptAddresses = [`${keyDigest("a")}.json`, `${keyDigest("b")}.json`];
-    expect([...(result.value.corruptNodeIds ?? [])].sort()).toEqual(
+    expect([...corruptAddressValues(result.value.corruptNodeAddresses)].sort()).toEqual(
       [...corruptAddresses].sort(),
     );
     expectWarningsFor(corruptAddresses);
@@ -1350,7 +1357,7 @@ describe("FileCheckpointer — corrupt node entries (FR-028)", () => {
     if (!result.ok || result.value === null) throw new Error("expected a loaded run state");
     expect(Object.keys(result.value.nodes)).toEqual(["good"]);
     const addresses = adversarialOutputs.map(([nodeKey]) => nodeKey);
-    expect([...(result.value.corruptNodeIds ?? [])].sort()).toEqual([...addresses].sort());
+    expect([...corruptAddressValues(result.value.corruptNodeAddresses)].sort()).toEqual([...addresses].sort());
     expectWarningsFor(addresses);
     expect(warnings.every((warning) => /canonical|serializer-tag|__map__/.test(warning))).toBe(true);
   });
@@ -1368,7 +1375,7 @@ describe("FileCheckpointer — corrupt node entries (FR-028)", () => {
     const result = await cp.load(R("run-c"));
     if (!result.ok || result.value === null) throw new Error("expected a loaded run state");
     expect(Object.keys(result.value.nodes)).toEqual(["good"]);
-    expect(result.value.corruptNodeIds).toEqual([nodeKey]);
+    expect(corruptAddressValues(result.value.corruptNodeAddresses)).toEqual([nodeKey]);
     expectWarningsFor([nodeKey]);
     expect(warnings[0]).toContain("duplicates a primitive Map key");
   });
@@ -1398,7 +1405,7 @@ describe("FileCheckpointer — corrupt node entries (FR-028)", () => {
     if (!result.ok || result.value === null) throw new Error("expected a loaded run state");
     expect(Object.keys(result.value.nodes)).toEqual(["good"]);
     const addresses = adversarialSets.map(([nodeKey]) => nodeKey);
-    expect([...(result.value.corruptNodeIds ?? [])].sort()).toEqual([...addresses].sort());
+    expect([...corruptAddressValues(result.value.corruptNodeAddresses)].sort()).toEqual([...addresses].sort());
     expectWarningsFor(addresses);
     expect(warnings.every((warning) => warning.includes("duplicates a primitive Set value"))).toBe(true);
   });
@@ -1423,7 +1430,7 @@ describe("FileCheckpointer — corrupt node entries (FR-028)", () => {
     if (!result.ok || result.value === null) throw new Error("expected a loaded run state");
     expect(Object.keys(result.value.nodes)).toEqual(["good"]);
     const addresses = adversarialOutputs.map(([nodeKey]) => nodeKey);
-    expect([...(result.value.corruptNodeIds ?? [])].sort()).toEqual([...addresses].sort());
+    expect([...corruptAddressValues(result.value.corruptNodeAddresses)].sort()).toEqual([...addresses].sort());
     expectWarningsFor(addresses);
     expect(warnings.every((warning) => warning.includes("prototype-pollution-filtered"))).toBe(true);
   });
@@ -1440,7 +1447,7 @@ describe("FileCheckpointer — corrupt node entries (FR-028)", () => {
 
     const result = await cp.load(R("run-c"));
     if (!result.ok || result.value === null) throw new Error("expected a loaded run state");
-    expect(result.value.corruptNodeIds).toEqual([nodeKey]);
+    expect(corruptAddressValues(result.value.corruptNodeAddresses)).toEqual([nodeKey]);
     expectWarningsFor([nodeKey]);
     expect(warnings[0]).toContain("unknown node-envelope field");
   });
@@ -1461,7 +1468,7 @@ describe("FileCheckpointer — corrupt node entries (FR-028)", () => {
     expect(warnings).toEqual([]);
   });
 
-  it("a throwing corrupt-node warning logger does NOT fail the load — the drop is surfaced via corruptNodeIds and the emission is best-effort", async () => {
+  it("a throwing required corrupt-node warning logger returns cache-error(load)", async () => {
     const { directory, cp } = await seed();
     const fileName = `${keyDigest("logger-failure")}.json`;
     writeRawNode(directory, "run-c", fileName, "truncated{");
@@ -1476,19 +1483,15 @@ describe("FileCheckpointer — corrupt node entries (FR-028)", () => {
       error: () => {},
     });
 
-    // The load verdict is a function of the durable bytes, not of the
-    // telemetry singleton (round-24 atl-2): a throwing host logger must not
-    // turn a healthy durable read into a typed failure. The emission runs
-    // through warnWithoutThrowing (boundary-error.ts doctrine) and the drop
-    // is surfaced through corruptNodeIds (round-23 tda-3).
     const result = await cp.load(R("run-c"));
     expect(warningAttempted).toBe(true);
-    if (!result.ok) throw new Error("expected a successful load despite the throwing logger");
-    expect(result.value).not.toBeNull();
-    if (result.value === null) return;
-    expect(result.value.corruptNodeIds).toEqual([fileName]);
-    expect(Object.keys(result.value.nodes)).toEqual(["good"]);
-    expect(result.value.nodes["good"].output).toBe("kept");
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected required-warning failure");
+    expect(result.error).toMatchObject({ kind: "cache-error", operation: "load" });
+    if (result.error.kind === "cache-error") {
+      expect(result.error.message).toContain("failed to report dropped corrupt checkpoint entry");
+      expect(result.error.message).toContain("logger unavailable");
+    }
   });
 
   it("reports a corrupt meta as checkpoint-corrupt, not as a per-entry drop", async () => {
@@ -1533,7 +1536,7 @@ describe("FileCheckpointer — atomic writes (FR-029)", () => {
     if (!result.ok || result.value === null) throw new Error("expected a loaded run state");
     expect(result.value.nodes["n1"].output).toBe("committed");
     // Always present, empty when nothing was dropped (round-23 tda-3).
-    expect(result.value.corruptNodeIds).toEqual([]);
+    expect(corruptAddressValues(result.value.corruptNodeAddresses)).toEqual([]);
   });
 
   it("a failed commit returns cache-error(saveNode) and leaves no partial entry", async () => {
@@ -1878,7 +1881,7 @@ describe("FileCheckpointer — boundary validation (FR-016)", () => {
   it("accepts plain null-prototype SaveNodeOpts and copies their supported shape", async () => {
     const cp = createFileCheckpointer(freshDirectory());
     await cp.setMeta(R("run-null-proto"), META());
-    const opts = Object.create(null) as { namespace?: string; index?: number };
+    const opts = Object.create(null) as { namespace: string; index: number };
     opts.namespace = "nested";
     opts.index = 2;
 

@@ -51,22 +51,9 @@ import { buildDocumentsCapability, describeDocumentsAdapter } from "./adapters/d
 import { buildOracleCapability, connectStringHost } from "./adapters/oracle-capability.js";
 import { closeHitlQueueBackend, createHitlQueueBackend } from "./hitl/queue-backend.js";
 import type { SharedInfra } from "./ports.js";
-import type { SyncLogger } from "./sync/sync-loop.js";
-import { ok, err, noopTracer, AnthropicLlmClient, OpenAILlmClient, createHttpCapability, systemClock } from "@fuguejs/framework";
-import type { Result, LlmClient, CapabilityHandle } from "@fuguejs/framework";
-
-// ── Logger ───────────────────────────────────────────────────────────────────
-
-const safeStringify = (obj: unknown): string => {
-  try { return JSON.stringify(obj); }
-  catch (_e) { return `[unserializable: ${typeof obj}]`; }
-};
-
-const createLogger = (): SyncLogger => ({
-  info: (msg, data) => console.info(safeStringify({ level: "info", msg, ...data, ts: new Date().toISOString() })),
-  warn: (msg, data) => console.warn(safeStringify({ level: "warn", msg, ...data, ts: new Date().toISOString() })),
-  error: (msg, data) => console.error(safeStringify({ level: "error", msg, ...data, ts: new Date().toISOString() })),
-});
+import { ok, err, noopTracer, createHttpCapability, systemClock } from "@fuguejs/framework";
+import type { Result, CapabilityHandle } from "@fuguejs/framework";
+import { createHostLlmClient, createJsonConsoleLogger } from "./entrypoint-wiring.js";
 
 // ── Pure bootstrap planner (functional core — unit-testable, no I/O) ──────────
 
@@ -183,27 +170,10 @@ export const buildWorkerBootstrap = (
 // The ioredis adapter is SHARED with `main.ts` (see `adapters/redis-connectivity.ts`);
 // the worker only supplies the optional per-tenant ACL credential (ADR-0067).
 
-// ── LLM Client (mirrors main.ts) ───────────────────────────────────────────────
-
-const createLlmClient = async (config: HostConfig): Promise<LlmClient> => {
-  if (config.LLM_PROVIDER === "anthropic") {
-    const { default: Anthropic } = await import("@anthropic-ai/sdk");
-    return new AnthropicLlmClient(new Anthropic({ apiKey: config.ANTHROPIC_API_KEY }));
-  }
-  if (config.LLM_PROVIDER === "azure") {
-    const endpoint = (config.AZURE_OPENAI_ENDPOINT ?? "").replace(/\/$/, "");
-    const deployment = config.AZURE_OPENAI_DEPLOYMENT ?? "";
-    const apiKey = config.AZURE_OPENAI_API_KEY ?? "";
-    const baseUrl = `${endpoint}/openai/deployments/${deployment}`;
-    return new OpenAILlmClient({ apiKey, baseUrl, apiVersion: config.AZURE_OPENAI_API_VERSION, modelOverride: deployment });
-  }
-  return new OpenAILlmClient({ apiKey: config.OPENAI_API_KEY!, baseUrl: "https://api.openai.com/v1" });
-};
-
 // ── Main (imperative shell) ────────────────────────────────────────────────────
 
 const main = async () => {
-  const logger = createLogger();
+  const logger = createJsonConsoleLogger();
 
   // Step 1-4 (pure planning): env → tenant → secrets → config → socket path.
   // The env-file SecretsSource is constructed HERE — the sole site that carries
@@ -284,7 +254,7 @@ const main = async () => {
     }
 
     const sharedInfra: SharedInfra = {
-      llm: await createLlmClient(config),
+      llm: await createHostLlmClient(config),
       redis,
       tracer: noopTracer,
       contentFilter: null,

@@ -35,7 +35,7 @@ import type { SyncLogger } from "../sync/sync-loop.js";
 import type { HostConfig } from "../domain/config.js";
 import { parseHostConfig } from "../domain/config.js";
 import type { HostInstance } from "../host.js";
-import { createHost } from "../host.js";
+import { createHost, stopBoundServerAfterBindFailure } from "../host.js";
 import { tenantId } from "../domain/tenant.js";
 import { signTenantHeader, TENANT_HEADER_NAME } from "../domain/tenant-header.js";
 
@@ -134,6 +134,27 @@ const fetchOverUds = (sock: string, path: string, headers?: Record<string, strin
   } as RequestInit & { unix: string });
 
 // ── Tests ──────────────────────────────────────────────────────────────────
+
+describe("stopBoundServerAfterBindFailure", () => {
+  test("returns a total diagnostic when stop and the logger both throw", () => {
+    const hostile = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(hostile, "message", { get: () => { throw new Error("message trap"); } });
+    Object.defineProperty(hostile, "toString", { value: () => { throw new Error("string trap"); } });
+
+    const diagnostic = stopBoundServerAfterBindFailure(
+      { stop: () => { throw hostile; } },
+      "unix socket /tmp/tenant.sock",
+      { error: () => { throw new Error("logger trap"); } },
+    );
+
+    expect(diagnostic).toBeTypeOf("string");
+    expect(diagnostic).not.toBe("");
+  });
+
+  test("returns no diagnostic when no listener was acquired", () => {
+    expect(stopBoundServerAfterBindFailure(undefined, "port 8080", testLogger())).toBeUndefined();
+  });
+});
 
 describe("createHost — UDS bind + chmod 0600 (FR-007)", () => {
   let host: HostInstance | null = null;

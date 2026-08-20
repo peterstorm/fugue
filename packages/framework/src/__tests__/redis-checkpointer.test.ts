@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import Redis from "ioredis";
 import { InMemoryCheckpointer, TTL_SECONDS } from "../checkpoint/checkpointer.js";
 import type { CheckpointerLoadOpts, InMemoryStoredMeta, RunMeta } from "../checkpoint/checkpointer.js";
@@ -8,6 +8,7 @@ import { RedisCheckpointer } from "../checkpoint/redis-checkpointer.js";
 import { checkpointerSuite } from "./_checkpointer-suite.js";
 import { D, N, R } from "./_id-helpers.js";
 import { formatFrameworkError, retriabilityOf } from "../types/errors.js";
+import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
 
 // The backend-neutral contract lives in `_checkpointer-suite.ts`. This file
 // supplies each backend's raw-state bypass and retains only Redis-specific
@@ -473,6 +474,35 @@ describe("InMemoryCheckpointer — hostile-value totality", () => {
   });
 });
 
+describe("RedisCheckpointer — required corruption observability", () => {
+  afterEach(() => __resetFrameworkLogger());
+
+  test("a throwing corrupt-entry logger returns typed cache-error(load), never a raw rejection", async () => {
+    const meta = JSON.stringify({
+      dagId: "d",
+      startedAt: "2025-01-01T00:00:00.000Z",
+      nodeCount: 1,
+      createdAt: new Date().toISOString(),
+      frameworkVersion: FRAMEWORK_VERSION,
+    });
+    const redis = {
+      get: async () => meta,
+      hgetall: async () => ({ broken: "{ not json" }),
+    } as unknown as Redis;
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: () => { throw new Error("logger unavailable"); },
+      error: () => {},
+    });
+
+    const result = await new RedisCheckpointer(redis).load(R("logger-contract"));
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected required-warning failure");
+    expect(result.error).toMatchObject({ kind: "cache-error", operation: "checkpoint:load" });
+  });
+});
+
 // Redis integration is opt-in, matching the queue adapter tests. Set
 // REDIS_URL=redis://localhost:6379 to run the shared contract and the
 // Redis-specific script-cache regression.
@@ -574,7 +604,7 @@ describeRedis("RedisCheckpointer", () => {
       },
       setCorruptNode: async (_cp, runId, nodeId) => {
         await redisOrThrow().hset(`chkpt:${runId}`, nodeId, "{ not valid json");
-        return { corruptAddress: nodeId };
+        return { corruptAddress: { kind: "node-key" as const, nodeKey: nodeId } };
       },
     },
     async () => cleanRuns(SHARED_RUN_IDS),
@@ -734,7 +764,7 @@ describeRedis("RedisCheckpointer", () => {
   // gates before restoring branded ID domains. Corrupt meta bytes must
   // settle as `checkpoint-corrupt` — never flow negative/Infinity/string
   // counts or non-string ids into consumers as a "valid" checkpoint — and a
-  // corrupt node row must drop into `corruptNodeIds`, not into the map.
+  // corrupt node row must drop into `corruptNodeAddresses`, not into the map.
   test.each([
     ["negative nodeCount", { nodeCount: -7 }],
     ["string nodeCount", { nodeCount: "3" }],
@@ -783,7 +813,7 @@ describeRedis("RedisCheckpointer", () => {
     expect(result.ok).toBe(true);
     if (result.ok && result.value !== null) {
       // The corrupt row is surfaced, not silently merged.
-      expect(result.value.corruptNodeIds).toContain("evil");
+      expect(result.value.corruptNodeAddresses).toContainEqual({ kind: "node-key", nodeKey: "evil" });
       expect(Object.keys(result.value.nodes)).toEqual(["good"]);
     }
   });

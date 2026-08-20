@@ -700,16 +700,22 @@ describe("parseNodeFile — strict parse of one node file", () => {
   it("recovers a valid node address even when the rest of the entry is corrupt (FR-028)", () => {
     const digestMismatch = parseNodeFile(fileNameOf("n2"), envelopeJson("n1"));
     expect(digestMismatch.kind).toBe("corrupt");
-    if (digestMismatch.kind === "corrupt") expect(digestMismatch.address).toBe("n1");
+    if (digestMismatch.kind === "corrupt") {
+      expect(digestMismatch.address).toEqual({ kind: "node-key", nodeKey: "n1" });
+    }
 
     const unknownField = parseNodeFile(fileNameOf("n1"), envelopeJson("n1", { extra: 1 }));
     expect(unknownField.kind).toBe("corrupt");
-    if (unknownField.kind === "corrupt") expect(unknownField.address).toBe("n1");
+    if (unknownField.kind === "corrupt") {
+      expect(unknownField.address).toEqual({ kind: "node-key", nodeKey: "n1" });
+    }
 
     // With no recoverable nodeKey (malformed envelope), the filename is the address.
     const badKey = parseNodeFile(fileNameOf("n1"), envelopeJson("n1", { nodeKey: 42 }));
     expect(badKey.kind).toBe("corrupt");
-    if (badKey.kind === "corrupt") expect(badKey.address).toBe(fileNameOf("n1"));
+    if (badKey.kind === "corrupt") {
+      expect(badKey.address).toEqual({ kind: "digest-filename", fileName: fileNameOf("n1") });
+    }
   });
 });
 
@@ -811,6 +817,17 @@ describe("parseSaveNodeBoundary — closed options grammar (FR-016)", () => {
       if (attemptRes.ok) throw new Error(`attempt ${String(bad)} was accepted`);
       expect(attemptRes.error).toContain("non-negative safe integer");
     }
+  });
+
+  it("rejects namespace-only options before constructing the typed union", () => {
+    const result = parseSaveNodeBoundary(
+      "run-1",
+      "n1",
+      rawState,
+      snapshotSaveNodeOpts({ namespace: "ns" }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("without index/attempt");
   });
 
   it("produces a fresh frozen canonical options object with exactly the supplied fields", () => {

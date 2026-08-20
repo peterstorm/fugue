@@ -1,4 +1,14 @@
-export { type Checkpointer, type RunMeta, type NodeState, type RunState, type SaveNodeOpts, type InMemoryStoredMeta, InMemoryCheckpointer } from "./checkpointer.js";
+export {
+  type Checkpointer,
+  type CorruptCheckpointAddress,
+  type RunMeta,
+  type NodeState,
+  type RunState,
+  type SaveNodeOpts,
+  type InMemoryStoredMeta,
+  corruptCheckpointAddressValue,
+  InMemoryCheckpointer,
+} from "./checkpointer.js";
 export { dagFingerprint, FRAMEWORK_VERSION } from "./fingerprint.js";
 export {
   compositeNodeKey,

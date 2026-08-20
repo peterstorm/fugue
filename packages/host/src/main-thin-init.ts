@@ -25,18 +25,7 @@ import { runThinInit } from "./supervisor/lifecycle/thin-init.js";
 import type { ThinInitConfig, InitProcessPort } from "./supervisor/lifecycle/thin-init.js";
 import { createBunInitProcessAdapter } from "./supervisor/lifecycle/bun-init-process-adapter.js";
 import type { LogPort } from "./ports.js";
-
-// ── Logger (mirrors main-supervisor.ts) ─────────────────────────────────────────
-
-const safeStringify = (obj: unknown): string => {
-  try { return JSON.stringify(obj); } catch { return `[unserializable: ${typeof obj}]`; }
-};
-
-const createLogger = (): LogPort => ({
-  info: (msg, data) => console.info(safeStringify({ level: "info", msg, ...data, ts: new Date().toISOString() })),
-  warn: (msg, data) => console.warn(safeStringify({ level: "warn", msg, ...data, ts: new Date().toISOString() })),
-  error: (msg, data) => console.error(safeStringify({ level: "error", msg, ...data, ts: new Date().toISOString() })),
-});
+import { createJsonConsoleLogger } from "./entrypoint-wiring.js";
 
 // ── Pure: env → config (testable without a process) ─────────────────────────────
 
@@ -193,7 +182,7 @@ export const installProcessLifetimeReaper = (
 // ── Imperative shell: the binary ────────────────────────────────────────────────
 
 const main = async (): Promise<void> => {
-  const logger = createLogger();
+  const logger = createJsonConsoleLogger();
 
   // LAST-RESORT nets for PID 1 (see `createGlobalErrorHandlers`): a stray throw in a
   // signal handler / timer callback — OUTSIDE the awaited startup chain that

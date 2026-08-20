@@ -16,13 +16,17 @@ import { join } from "node:path";
 import { JsonFixtureSource } from "./sources/json-fixture-source.js";
 
 // ---------------------------------------------------------------------------
-// Input schema — extracted from server.ts SummarizeRequestSchema
+// Input boundary — preserve server.ts's snake-case /summarize wire contract,
+// then translate once into the DAG's camel-case domain input.
 // ---------------------------------------------------------------------------
 
 export const SummarizeInputSchema = z.object({
-  customerId: z.string().min(1),
+  customer_id: z.string().min(1),
   resume_run_id: z.string().optional(),
-});
+}).transform(({ customer_id, resume_run_id }) => ({
+  customerId: customer_id,
+  ...(resume_run_id !== undefined ? { resume_run_id } : {}),
+}));
 
 // ---------------------------------------------------------------------------
 // DAG factory — creates a summary DAG with a default fixture source.
@@ -33,7 +37,8 @@ export const SummarizeInputSchema = z.object({
 // the host registration we pass a REAL fixture source (JsonFixtureSource) with
 // a placeholder customerId — the fetch node consumes the per-request
 // customer_id from the validated input payload via node execution context, so
-// the DAG structure itself is static while the customer comes from the request.
+// the DAG structure itself is static while the customer comes from the parsed
+// request as camel-case `customerId`.
 // ---------------------------------------------------------------------------
 
 const createRegisteredDag = () => {

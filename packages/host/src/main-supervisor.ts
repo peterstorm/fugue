@@ -28,7 +28,7 @@ import { formatHostError, fsPurgeFailed } from "./domain/host-error.js";
 import type { HostError } from "./domain/host-error.js";
 import type { Result } from "@fuguejs/framework";
 import { ok, err } from "@fuguejs/framework";
-import type { RedisConnectivityPort, RedisPort, RedisPubSubPort, TokenStorePort, LogPort } from "./ports.js";
+import type { RedisConnectivityPort, RedisPort, RedisPubSubPort, TokenStorePort } from "./ports.js";
 import { createSupervisor, createTerminationHandler } from "./supervisor/supervisor.js";
 import type { AdmissionPort, AdmissionOutcome, AuthDeps } from "./supervisor/supervisor.js";
 import {
@@ -70,18 +70,7 @@ import { runBootstrap } from "./supervisor/bootstrap/run-bootstrap.js";
 import { createRealmJwtVerifier } from "./adapters/realm-jwt-verifier.js";
 import type { RealmJwtDeps } from "./http/middleware/auth.js";
 import type { AuthenticatedUser, Team } from "./domain/auth.js";
-
-// ── Logger (mirrors main.ts) ─────────────────────────────────────────────────
-
-const safeStringify = (obj: unknown): string => {
-  try { return JSON.stringify(obj); } catch { return `[unserializable: ${typeof obj}]`; }
-};
-
-const createLogger = (): LogPort => ({
-  info: (msg, data) => console.info(safeStringify({ level: "info", msg, ...data, ts: new Date().toISOString() })),
-  warn: (msg, data) => console.warn(safeStringify({ level: "warn", msg, ...data, ts: new Date().toISOString() })),
-  error: (msg, data) => console.error(safeStringify({ level: "error", msg, ...data, ts: new Date().toISOString() })),
-});
+import { createJsonConsoleLogger } from "./entrypoint-wiring.js";
 
 // ── Redis (connectivity + commands + pub/sub) ────────────────────────────────
 
@@ -198,7 +187,7 @@ const createRedis = async (redisUrl: string): Promise<Result<RedisBundle, HostEr
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 const main = async () => {
-  const logger = createLogger();
+  const logger = createJsonConsoleLogger();
 
   logger.info("[supervisor] parsing configuration");
   const configResult = parseHostConfig(process.env as Record<string, string | undefined>);

@@ -295,6 +295,30 @@ export const guardedCheckpointClockRead = (
   }
 };
 
+export interface CorruptCheckpointReportInput {
+  readonly warning: string;
+  readonly warn: (warning: string) => void;
+  readonly loggerFailure: (message: string) => FrameworkError;
+}
+
+/**
+ * Required corrupt-entry observability policy shared by persisted adapters.
+ * A dropped entry is successful only when its warning was emitted; a hostile
+ * logger becomes the adapter's typed load error and never rejects raw.
+ */
+export const reportCorruptCheckpointEntry = (
+  input: CorruptCheckpointReportInput,
+): Result<void, FrameworkError> => {
+  try {
+    input.warn(input.warning);
+    return ok(undefined);
+  } catch (error) {
+    return err(input.loggerFailure(
+      `failed to report dropped corrupt checkpoint entry: ${safeErrorMessage(error)}`,
+    ));
+  }
+};
+
 // --- Domain types ---
 
 export interface RunMeta {
@@ -339,6 +363,13 @@ export interface NodeState {
   readonly completedAt: Date;
 }
 
+export type CorruptCheckpointAddress =
+  | { readonly kind: "node-key"; readonly nodeKey: string }
+  | { readonly kind: "digest-filename"; readonly fileName: string };
+
+export const corruptCheckpointAddressValue = (address: CorruptCheckpointAddress): string =>
+  address.kind === "node-key" ? address.nodeKey : address.fileName;
+
 export interface RunState {
   readonly meta: RunMeta;
   /**
@@ -354,14 +385,13 @@ export interface RunState {
    */
   readonly nodes: Record<string, NodeState>;
   /**
-   * Backend-specific addresses of stored entries that could not be decoded and
-   * were dropped from `nodes`. Redis reports hash-field node ids; the file
-   * backend reports a recoverable stored nodeKey, or the digest filename when
-   * no address can be recovered. Always present — empty on a clean load — so
-   * the drop-and-surface contract is visible to exhaustive consumers
-   * (round-23 tda-3).
+   * Parsed addresses of stored entries that could not be decoded and were
+   * dropped from `nodes`. Redis hash fields and recoverable file entries are
+   * `node-key`; an unreadable file envelope is `digest-filename`. The
+   * discriminant prevents consumers from treating an opaque digest as a node
+   * that can be re-executed. Always present and empty on a clean load.
    */
-  readonly corruptNodeIds: readonly string[];
+  readonly corruptNodeAddresses: readonly CorruptCheckpointAddress[];
 }
 
 // --- Checkpointer interface ---
@@ -589,8 +619,8 @@ export class InMemoryCheckpointer implements Checkpointer {
         meta: this.detachStored(meta, "checkpoint meta"),
         nodes: this.detachStored(this.nodes.get(runId) ?? {}, `checkpoint nodes for ${runId}`),
         // In-memory state cannot carry undecodable entries — nothing is ever
-        // dropped, so the contract field is present and empty (round-23 tda-3).
-        corruptNodeIds: [],
+        // dropped, so the contract field is present and empty.
+        corruptNodeAddresses: [],
       });
     } catch (error) {
       // Stored state that cannot be detached is stored-state corruption: the

@@ -11,7 +11,6 @@
  */
 
 import { parseHostConfig } from "./domain/config.js";
-import type { HostConfig } from "./domain/config.js";
 import { formatHostError } from "./domain/host-error.js";
 import { createHost } from "./host.js";
 import { createBunGitAdapter, createLocalGitAdapter } from "./adapters/git-sync.js";
@@ -22,66 +21,14 @@ import { buildDocumentsCapability, describeDocumentsAdapter } from "./adapters/d
 import { buildOracleCapability, connectStringHost } from "./adapters/oracle-capability.js";
 import { closeHitlQueueBackend, createHitlQueueBackend } from "./hitl/queue-backend.js";
 import type { SharedInfra } from "./ports.js";
-import type { SyncLogger } from "./sync/sync-loop.js";
-import { noopTracer, AnthropicLlmClient, OpenAILlmClient, createHttpCapability, systemClock } from "@fuguejs/framework";
-import type { LlmClient, CapabilityHandle } from "@fuguejs/framework";
-
-// ── Logger ─────────────────────────────────────────────────────────────────
-
-const safeStringify = (obj: unknown): string => {
-  try { return JSON.stringify(obj); }
-  catch (_e) { return `[unserializable: ${typeof obj}]`; }
-};
-
-const createLogger = (): SyncLogger => ({
-  info: (msg, data) => console.info(safeStringify({ level: "info", msg, ...data, ts: new Date().toISOString() })),
-  warn: (msg, data) => console.warn(safeStringify({ level: "warn", msg, ...data, ts: new Date().toISOString() })),
-  error: (msg, data) => console.error(safeStringify({ level: "error", msg, ...data, ts: new Date().toISOString() })),
-});
-
-// ── LLM Client ─────────────────────────────────────────────────────────────
-
-/**
- * Create the LLM client from config.
- *
- * - Anthropic: wraps `@anthropic-ai/sdk` via AnthropicLlmClient (framework export).
- *   Dynamic import mirrors the ioredis pattern — avoids loading the SDK at module
- *   evaluation time (useful for tests that never call LLM).
- * - OpenAI: OpenAILlmClient uses fetch directly — no vendor SDK import needed.
- * - Azure: OpenAILlmClient with Azure endpoint + api-version auth.
- *
- * Config validation (superRefine in config.ts) guarantees the required keys are
- * present for the selected provider before this function is called.
- */
-const createLlmClient = async (config: HostConfig): Promise<LlmClient> => {
-  if (config.LLM_PROVIDER === "anthropic") {
-    const { default: Anthropic } = await import("@anthropic-ai/sdk");
-    return new AnthropicLlmClient(new Anthropic({ apiKey: config.ANTHROPIC_API_KEY }));
-  }
-
-  if (config.LLM_PROVIDER === "azure") {
-    // Config validation (superRefine) guarantees these fields are set when provider is 'azure'.
-    // We read them with fallback to empty string to satisfy the linter — Zod already validated.
-    const endpoint = (config.AZURE_OPENAI_ENDPOINT ?? "").replace(/\/$/, "");
-    const deployment = config.AZURE_OPENAI_DEPLOYMENT ?? "";
-    const apiKey = config.AZURE_OPENAI_API_KEY ?? "";
-    // Construct the full deployment URL Azure OpenAI expects:
-    // https://<resource>.openai.azure.com/openai/deployments/<deployment>
-    const baseUrl = `${endpoint}/openai/deployments/${deployment}`;
-    return new OpenAILlmClient({ apiKey, baseUrl, apiVersion: config.AZURE_OPENAI_API_VERSION, modelOverride: deployment });
-  }
-
-  // LLM_PROVIDER === "openai"
-  return new OpenAILlmClient({
-    apiKey: config.OPENAI_API_KEY!,
-    baseUrl: "https://api.openai.com/v1",
-  });
-};
+import { noopTracer, createHttpCapability, systemClock } from "@fuguejs/framework";
+import type { CapabilityHandle } from "@fuguejs/framework";
+import { createHostLlmClient, createJsonConsoleLogger } from "./entrypoint-wiring.js";
 
 // ── Main ───────────────────────────────────────────────────────────────────
 
 const main = async () => {
-  const logger = createLogger();
+  const logger = createJsonConsoleLogger();
 
   // Step 1: Parse config from environment
   logger.info("Parsing host configuration from environment...");
@@ -158,7 +105,7 @@ const main = async () => {
 
     // Step 3: Create shared infrastructure
     const sharedInfra: SharedInfra = {
-      llm: await createLlmClient(config),
+      llm: await createHostLlmClient(config),
       redis,
       tracer: noopTracer,
       contentFilter: null,

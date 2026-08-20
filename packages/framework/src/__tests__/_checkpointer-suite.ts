@@ -20,7 +20,12 @@
 
 import { describe, test, expect, beforeEach } from "bun:test";
 import type { NodeId, DagId } from "../types/ids.js";
-import type { Checkpointer, RunMeta, NodeState } from "../checkpoint/checkpointer.js";
+import type {
+  Checkpointer,
+  CorruptCheckpointAddress,
+  RunMeta,
+  NodeState,
+} from "../checkpoint/checkpointer.js";
 import { FRAMEWORK_VERSION } from "../checkpoint/fingerprint.js";
 import { D, N, R } from "./_id-helpers.js";
 
@@ -63,7 +68,7 @@ export interface CheckpointerSuiteRaw {
     cp: Checkpointer,
     runId: string,
     nodeId: string,
-  ): Promise<{ readonly corruptAddress: string }>;
+  ): Promise<{ readonly corruptAddress: CorruptCheckpointAddress }>;
 }
 
 export function checkpointerSuite(
@@ -122,7 +127,7 @@ export function checkpointerSuite(
     // every saved node round-trips as an OWN entry with the returned map
     // un-reparented. A plain bracket assignment in any adapter's `load` would
     // hit `Object.prototype`'s `__proto__` SETTER: no own entry, no
-    // `corruptNodeIds` trace, no error — a silent re-execution on resume.
+    // `corruptNodeAddresses` trace, no error — a silent re-execution on resume.
     // Lifted into the shared suite in round-17 (previously pinned per-adapter
     // in file-checkpointer.test.ts and the in-memory block of
     // redis-checkpointer.test.ts, which the Redis leg itself never ran) so
@@ -343,7 +348,7 @@ export function checkpointerSuite(
         if (!result.ok || result.value === null) throw new Error("expected loaded checkpoint");
         expect(Object.keys(result.value.nodes)).toEqual(["good-node"]);
         expect(result.value.nodes["good-node"].output).toEqual({ kept: true });
-        expect(result.value.corruptNodeIds).toEqual([corruptAddress]);
+        expect(result.value.corruptNodeAddresses).toEqual([corruptAddress]);
       });
     }
   });

@@ -559,21 +559,18 @@ export const releaseFileLock = (
     // STALE, so this path must consult the authoritative ownership proof
     // (the acquisition token) before deciding. A MATCHING token means the
     // lock is provably ours despite the corrupt pid: warn and remove it.
-    // Every other outcome (token missing, unreadable, or foreign — e.g. the
-    // lock was stale-reaped and re-acquired by another owner, whose token
-    // now lives here) stays a SILENT no-op: silence is contractually
-    // reserved for "absent or proven not ours", and this branch cannot
-    // prove ownership. Unlike the owning-pid path below, an unreadable
-    // token here is inconclusive, not a release failure — the pid already
-    // said "not ours", so there is no owned lock to leak.
-    let recordedToken: string;
-    try {
-      recordedToken = (hooks.readOwnershipToken?.(lockPath)
-        ?? readFileSync(join(lockPath, OWNER_FILE), "utf-8")).trim();
-    } catch {
-      return;
-    }
-    if (recordedToken !== ownershipToken) return;
+    // Absence or a different token proves this acquisition no longer owns
+    // the canonical lock and is a safe no-op. An unreadable token is not
+    // proof of foreign ownership: the pid bytes may be corrupt while the
+    // authoritative token still belongs to this acquisition, so the shared
+    // metadata gate must surface that inconclusive release as a typed failure.
+    const token = readReleaseMetadata(
+      lockPath,
+      "ownership token",
+      () => hooks.readOwnershipToken?.(lockPath)
+        ?? readFileSync(join(lockPath, OWNER_FILE), "utf-8"),
+    );
+    if (token.kind === "absent" || token.value !== ownershipToken) return;
     warnWithoutThrowing(
       `[FileLock] owner pid metadata corrupt (recorded "${pid.value}", expected "${process.pid}") but ownership token matches — removing the owned lock`,
     );

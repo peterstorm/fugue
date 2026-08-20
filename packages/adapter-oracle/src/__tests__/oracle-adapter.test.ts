@@ -17,6 +17,7 @@ import {
   createOracleAdapter,
   mapOracleError,
   healthCheckWithTimeout,
+  parseOracleReadSql,
   stripCredentials,
   ORACLE_SESSION_NLS_SQL,
 } from "../index.js";
@@ -120,6 +121,12 @@ describe("@fuguejs/oracle — createFakeOracleCapability", () => {
       if (result.ok) {
         expect(result.value).toHaveLength(2);
       }
+    });
+
+    it("enforces the same read-only SQL domain as the production client", async () => {
+      const result = await oracle.queryRaw("DELETE FROM packages");
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.kind).toBe("node-crash");
     });
   });
 
@@ -399,6 +406,33 @@ describe("@fuguejs/oracle — stripCredentials (exported, FR-041/SC-008)", () =>
   });
 });
 
+describe("@fuguejs/oracle — read-only SQL parser", () => {
+  it.each([
+    "SELECT 1 FROM DUAL",
+    "  -- purpose\nSELECT * FROM packages",
+    "/* purpose */ WITH rows AS (SELECT 1 AS n FROM DUAL) SELECT * FROM rows",
+  ])("accepts a read statement: %s", (sql) => {
+    expect(parseOracleReadSql(sql).ok).toBe(true);
+  });
+
+  it.each([
+    "INSERT INTO audit_log(id) VALUES (1)",
+    "UPDATE packages SET price = 0",
+    "DELETE FROM packages",
+    "MERGE INTO packages p USING dual d ON (1 = 1) WHEN MATCHED THEN UPDATE SET p.price = 0",
+    "ALTER SESSION SET NLS_DATE_FORMAT = 'YYYY-MM-DD'",
+    "BEGIN dangerous_proc(); END;",
+    "",
+    "/* unterminated",
+  ])("rejects a non-read statement: %s", (sql) => {
+    const result = parseOracleReadSql(sql);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatchObject({ kind: "node-crash", retriability: "non-retriable" });
+    }
+  });
+});
+
 describe("@fuguejs/oracle — createOracleClient (real client, fake queryable)", () => {
   it("query validates all rows against the schema", async () => {
     const client = createOracleClient(queryableWithRows([
@@ -408,6 +442,20 @@ describe("@fuguejs/oracle — createOracleClient (real client, fake queryable)",
     const result = await client.query(PackageSchema, "SELECT * FROM packages");
     expect(isOk(result)).toBe(true);
     if (result.ok) expect(result.value).toHaveLength(2);
+  });
+
+  it("rejects DML before the queryable I/O seam", async () => {
+    let executions = 0;
+    const client = createOracleClient({
+      execute: async () => {
+        executions += 1;
+        return { rows: [] };
+      },
+    });
+
+    const result = await client.queryRaw("DELETE FROM packages");
+    expect(result.ok).toBe(false);
+    expect(executions).toBe(0);
   });
 
   it("query returns node-crash when any row fails validation", async () => {
@@ -699,6 +747,50 @@ describe("@fuguejs/oracle — createOracleAdapter().connect() credential strippi
     await expect(handle.connect?.()).rejects.toBeInstanceOf(Error);
     expect(closed).toBe(true);
   });
+
+  it("rejects a successful probe whose connection cannot be released", async () => {
+    installOracledbMock(() => ({
+      execute: async () => ({ rows: [{ "1": 1 }] }),
+      close: async () => {
+        throw new Error("ORA-12599: release failed for scott/tiger@dbhost:1521/PRICING");
+      },
+    }));
+    const handle = createOracleAdapter({
+      connectString: "dbhost:1521/PRICING",
+      user: "u",
+      password: "p",
+    });
+
+    let failure: unknown;
+    try {
+      await handle.connect?.();
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain("connect validation release failed");
+    expect((failure as Error).message).toContain("ORA-12599");
+    expect((failure as Error).message).not.toContain("scott/tiger");
+  });
+
+  it("preserves a probe failure when release and the warning transport also fail", async () => {
+    installOracledbMock(() => ({
+      execute: async () => { throw new Error("ORA-00942: primary validation failure"); },
+      close: async () => { throw new Error("ORA-12599: secondary release failure"); },
+    }));
+    const handle = createOracleAdapter({
+      connectString: "dbhost:1521/PRICING",
+      user: "u",
+      password: "p",
+    });
+    const originalWarn = console.warn;
+    console.warn = () => { throw new Error("warning transport failed"); };
+    try {
+      await expect(handle.connect?.()).rejects.toThrow("ORA-00942");
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -898,6 +990,30 @@ describe("@fuguejs/oracle — createOracleAdapter() production query/close lifec
     expect(String(warns[0]?.join(" "))).toContain("query failed and connection release also failed");
     expect(String(warns[0]?.join(" "))).toContain("ORA-12599");
     expect(String(warns[0]?.join(" "))).not.toContain("user/pass@dbhost");
+  });
+
+  it("a throwing warning transport cannot replace the primary statement failure", async () => {
+    installOracledbMock(() => ({
+      execute: async () => { throw new Error("ORA-00942: primary statement failure"); },
+      close: async () => { throw new Error("ORA-12599: secondary release failure"); },
+    }));
+    const handle = createOracleAdapter({
+      connectString: "dbhost:1521/PRICING",
+      user: "u",
+      password: "p",
+    });
+    const originalWarn = console.warn;
+    console.warn = () => { throw new Error("warning transport failed"); };
+    try {
+      const result = await handle.client.queryRaw("SELECT * FROM packages");
+      expect(result.ok).toBe(false);
+      if (!result.ok && (result.error.kind === "node-crash" || result.error.kind === "transient")) {
+        expect(result.error.message).toContain("ORA-00942");
+        expect(result.error.message).not.toContain("secondary release failure");
+      }
+    } finally {
+      console.warn = originalWarn;
+    }
   });
 
   it("close() drains the pool with pool.close(0) after a successful open", async () => {

@@ -56,4 +56,15 @@ describe("HITL queue backend wiring", () => {
       data: { error: "redis close failed" },
     }]);
   });
+
+  it("contains hostile close failures even when rendering and logging both throw", async () => {
+    const hostile = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(hostile, "message", { get: () => { throw new Error("message trap"); } });
+    Object.defineProperty(hostile, "toString", { value: () => { throw new Error("string trap"); } });
+
+    await expect(closeHitlQueueBackend(
+      fakeBackend(async () => { throw hostile; }),
+      { error: () => { throw new Error("logger trap"); } },
+    )).resolves.toBeUndefined();
+  });
 });

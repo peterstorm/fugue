@@ -36,6 +36,7 @@ import {
   parseNodeStateRecord,
   parseRunMetaRecord,
   type CheckpointerLoadOpts,
+  type CorruptCheckpointAddress,
   type NodeState,
   type RunMeta,
   type SaveNodeOpts,
@@ -525,16 +526,25 @@ const NODE_FILE_NAME_PATTERN = /^([0-9a-f]{64})\.json$/;
 
 /**
  * Verdict for one file in `nodes/` — a usable entry, or a corrupt one that
- * `load` drops and surfaces in `corruptNodeIds`.
+ * `load` drops and surfaces in `corruptNodeAddresses`.
  *
- * `address` is the name the caller gets back: a structurally recoverable
- * stored `nodeKey`, otherwise the filename. Digest disagreement still makes
- * the entry unusable, but does not erase a valid node address that callers can
- * use to distinguish "corrupt" from "never ran" (FR-028).
+ * `address` preserves whether the parser recovered a stored `nodeKey` or only
+ * the opaque digest filename. Digest disagreement still makes the entry
+ * unusable, but does not erase a valid node address callers can re-execute.
  */
 export type NodeEntryVerdict =
   | { readonly kind: "entry"; readonly nodeKey: string; readonly state: NodeState }
-  | { readonly kind: "corrupt"; readonly address: string; readonly message: string };
+  | { readonly kind: "corrupt"; readonly address: CorruptCheckpointAddress; readonly message: string };
+
+const digestFilenameAddress = (fileName: string): CorruptCheckpointAddress => ({
+  kind: "digest-filename",
+  fileName,
+});
+
+const nodeKeyAddress = (nodeKey: string): CorruptCheckpointAddress => ({
+  kind: "node-key",
+  nodeKey,
+});
 
 /**
  * Validate the RAW JSON representation of a node output before
@@ -579,12 +589,12 @@ export const parseNodeFile = (fileName: string, text: string): NodeEntryVerdict 
   try {
     raw = JSON.parse(text);
   } catch (error) {
-    return { kind: "corrupt", address: fileName, message: `not valid JSON: ${messageOf(error)}` };
+    return { kind: "corrupt", address: digestFilenameAddress(fileName), message: `not valid JSON: ${messageOf(error)}` };
   }
   if (!isPlainRecord(raw)) {
     return {
       kind: "corrupt",
-      address: fileName,
+      address: digestFilenameAddress(fileName),
       message: `node entry must be a JSON object, got ${render(raw)}`,
     };
   }
@@ -594,7 +604,7 @@ export const parseNodeFile = (fileName: string, text: string): NodeEntryVerdict 
   if (typeof nodeKey !== "string" || parsedNodeKey === null) {
     return {
       kind: "corrupt",
-      address: fileName,
+      address: digestFilenameAddress(fileName),
       message: `nodeKey ${render(nodeKey)} is not a well-formed canonical or composite node key`,
     };
   }
@@ -604,7 +614,7 @@ export const parseNodeFile = (fileName: string, text: string): NodeEntryVerdict 
   if (unknownField !== undefined) {
     return {
       kind: "corrupt",
-      address: nodeKey,
+      address: nodeKeyAddress(nodeKey),
       message: `unknown node-envelope field ${render(unknownField)}; expected exactly { nodeKey, nodeId, output, completedAt }`,
     };
   }
@@ -614,7 +624,7 @@ export const parseNodeFile = (fileName: string, text: string): NodeEntryVerdict 
   if (missingField !== undefined) {
     return {
       kind: "corrupt",
-      address: nodeKey,
+      address: nodeKeyAddress(nodeKey),
       message: `missing node-envelope field ${render(missingField)}; expected exactly { nodeKey, nodeId, output, completedAt }`,
     };
   }
@@ -625,7 +635,7 @@ export const parseNodeFile = (fileName: string, text: string): NodeEntryVerdict 
   if (nameMatch === null) {
     return {
       kind: "corrupt",
-      address: nodeKey,
+      address: nodeKeyAddress(nodeKey),
       message: `filename does not match the node-entry contract <sha256hex(nodeKey)>.json`,
     };
   }
@@ -633,7 +643,7 @@ export const parseNodeFile = (fileName: string, text: string): NodeEntryVerdict 
   if (keyDigest(nodeKey) !== digest) {
     return {
       kind: "corrupt",
-      address: nodeKey,
+      address: nodeKeyAddress(nodeKey),
       message: `nodeKey ${render(nodeKey)} digests to ${keyDigest(nodeKey)} but was read from ${fileName} — the entry does not own this address`,
     };
   }
@@ -642,7 +652,7 @@ export const parseNodeFile = (fileName: string, text: string): NodeEntryVerdict 
   if (!parsedNodeFields.ok) {
     return {
       kind: "corrupt",
-      address: nodeKey,
+      address: nodeKeyAddress(nodeKey),
       message: parsedNodeFields.error,
     };
   }
@@ -650,7 +660,7 @@ export const parseNodeFile = (fileName: string, text: string): NodeEntryVerdict 
   if (parsedNodeKey.nodeId !== nodeId) {
     return {
       kind: "corrupt",
-      address: nodeKey,
+      address: nodeKeyAddress(nodeKey),
       message: `nodeKey names nodeId ${render(parsedNodeKey.nodeId)} but entry contains ${render(nodeId)}`,
     };
   }
@@ -660,7 +670,7 @@ export const parseNodeFile = (fileName: string, text: string): NodeEntryVerdict 
   if (!outputValidation.ok) {
     return {
       kind: "corrupt",
-      address: nodeKey,
+      address: nodeKeyAddress(nodeKey),
       message: `serialized output is not canonical: ${outputValidation.error}`,
     };
   }
@@ -768,11 +778,22 @@ export const parseSaveNodeBoundary = (
     return err(`attempt must be a non-negative safe integer, got ${render(attempt)}`);
   }
 
-  return ok(Object.freeze({
-    ...(namespace !== undefined ? { namespace } : {}),
-    ...(index !== undefined ? { index } : {}),
-    ...(attempt !== undefined ? { attempt } : {}),
-  }));
+  if (index !== undefined) {
+    return ok(Object.freeze({
+      ...(namespace !== undefined ? { namespace } : {}),
+      index,
+      ...(attempt !== undefined ? { attempt } : {}),
+    }));
+  }
+  if (attempt !== undefined) {
+    return ok(Object.freeze({
+      ...(namespace !== undefined ? { namespace } : {}),
+      attempt,
+    }));
+  }
+  return namespace === undefined
+    ? ok(Object.freeze({}))
+    : err("namespace without index/attempt is ambiguous; supply index and/or attempt");
 };
 
 const LOAD_OPTION_FIELDS: ReadonlySet<string> = new Set(["expectedDagFingerprint"]);
