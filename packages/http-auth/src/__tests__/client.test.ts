@@ -63,6 +63,7 @@ const fakeTokens = (tokens: string[]): TokenProvider & { invalidations: number }
       const t = tokens[Math.min(i, tokens.length - 1)];
       return ok(t as BearerToken);
     },
+    probe: async () => ok(undefined),
     invalidate: (): void => {
       state.invalidations += 1;
       i += 1;
@@ -169,6 +170,26 @@ describe("createAuthedHttpClient — request construction", () => {
     expect(isErr(result)).toBe(true);
     if (!result.ok) expect(result.error.kind).toBe("node-crash");
   });
+
+  it("rejects cyclic and BigInt request bodies as non-retriable payload errors without fetching", async () => {
+    const { fetch, calls } = recordingFetch(() => jsonResponse(200, { id: "1", name: "unused" }));
+    const client = makeClient(fetch, fakeTokens(["tok-1"]));
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+
+    for (const body of [cyclic, { amount: 1n }]) {
+      const result = await client.post("/customers", { schema: PayloadSchema, body });
+      expect(isErr(result)).toBe(true);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("node-crash");
+        if (result.error.kind === "node-crash") {
+          expect(result.error.message).toContain("not JSON-serializable");
+          expect(result.error.retriability).toBe("non-retriable");
+        }
+      }
+    }
+    expect(calls).toHaveLength(0);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -222,6 +243,7 @@ describe("createAuthedHttpClient — 401 retry", () => {
     const { fetch, calls } = recordingFetch(() => jsonResponse(200, { id: "1", name: "Alice" }));
     const failingTokens: TokenProvider = {
       get: async () => err({ kind: "transient", nodeId: nodeId("test"), message: "auth down" }),
+      probe: async () => ok(undefined),
       invalidate: () => {},
     };
     const client = makeClient(fetch, failingTokens);
@@ -294,6 +316,53 @@ describe("createAuthedHttpClient — error mapping", () => {
       const result = await op();
       expect(isErr(result)).toBe(true);
     }
+  });
+
+  it("normalizes a rejecting initial token lookup into a secret-free Result", async () => {
+    const { fetch, calls } = recordingFetch(() => jsonResponse(200, { id: "1", name: "unused" }));
+    const tokens: TokenProvider = {
+      get: async () => { throw new Error("provider leaked s3cret"); },
+      probe: async () => ok(undefined),
+      invalidate: () => {},
+    };
+    const result = await makeClient(fetch, tokens).get("/x", { schema: PayloadSchema });
+
+    expect(isErr(result)).toBe(true);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.message).not.toContain("s3cret");
+      }
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it("normalizes rejecting refresh lookup and throwing invalidation into Results", async () => {
+    const { fetch, calls } = recordingFetch(() => jsonResponse(401, "expired"));
+    let gets = 0;
+    const rejectingRefresh: TokenProvider = {
+      get: async () => {
+        gets += 1;
+        if (gets === 1) return ok("stale" as BearerToken);
+        throw new Error("refresh rejected");
+      },
+      probe: async () => ok(undefined),
+      invalidate: () => {},
+    };
+    const refreshResult = await makeClient(fetch, rejectingRefresh).get("/x", { schema: PayloadSchema });
+    expect(isErr(refreshResult)).toBe(true);
+    if (!refreshResult.ok) expect(refreshResult.error.kind).toBe("node-crash");
+    expect(calls).toHaveLength(1);
+
+    const throwingInvalidate: TokenProvider = {
+      get: async () => ok("stale" as BearerToken),
+      probe: async () => ok(undefined),
+      invalidate: () => { throw new Error("invalidate rejected"); },
+    };
+    const invalidationResult = await makeClient(fetch, throwingInvalidate).get("/x", { schema: PayloadSchema });
+    expect(isErr(invalidationResult)).toBe(true);
+    if (!invalidationResult.ok) expect(invalidationResult.error.kind).toBe("node-crash");
+    expect(calls).toHaveLength(2);
   });
 });
 

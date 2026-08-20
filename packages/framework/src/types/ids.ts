@@ -4,7 +4,8 @@
 // these types at compile time — callers must go through the smart
 // constructors (`runId`, `nodeId`, `dagId`) which validate against
 // `ID_PATTERN`, or through the internal `__brandXxx` escape hatches for
-// trusted framework code that has already validated by other means.
+// trusted framework code that has already validated by other means. The
+// validating DagId escape applies DagId's stricter no-colon grammar.
 //
 // At runtime the values are still plain strings; the brand is erased by
 // TypeScript. The hard brand catches argument-swap bugs and ensures that
@@ -103,7 +104,8 @@ export const dagId = (s: string): DagId => {
 
 /**
  * @internal Brand for trusted internal entry points (`defineDag`,
- * `makeNodeContext`, factory helpers). Still validates against `ID_PATTERN` —
+ * `makeNodeContext`, factory helpers). Still validates against the identifier's
+ * own grammar (`DagId` uses `DAG_ID_REGEX`; the others use `ID_PATTERN`) —
  * "trusted" code has bugs too, and an unvalidated id silently corrupts every
  * downstream map lookup. Use the `*Unchecked` variants only on profiled hot
  * paths. NOT public API — not re-exported from the barrel (`src/index.ts`).
@@ -118,10 +120,7 @@ export const __brandNodeId = (s: string): NodeId => {
   return s as NodeId;
 };
 /** @internal See `__brandRunId`. */
-export const __brandDagId = (s: string): DagId => {
-  validate("dagId", s);
-  return s as DagId;
-};
+export const __brandDagId = (s: string): DagId => dagId(s);
 
 /**
  * @internal Unchecked widening cast — bypasses `ID_PATTERN`. ONLY for profiled

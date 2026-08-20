@@ -46,8 +46,18 @@ type VisualizeResult =
 //      `dag_input` / `dag_output` virtual tokens (a node literally named
 //      `dag_input` must not merge with the request node).
 // Rendered labels still show the original id; only the token is encoded.
-const escapeIdChar = (c: string): string =>
-  c === "_" ? "__" : c === ":" ? "_c" : c === "-" ? "_d" : `_x${c.charCodeAt(0).toString(16)}_`;
+const escapeIdChar = (c: string): string => {
+  switch (c) {
+    case "_":
+      return "__";
+    case ":":
+      return "_c";
+    case "-":
+      return "_d";
+    default:
+      return `_x${c.charCodeAt(0).toString(16)}_`;
+  }
+};
 const safeId = (id: string): string =>
   id === DAG_INPUT ? "dag_input" : `n_${id.replace(/[^A-Za-z0-9]/g, escapeIdChar)}`;
 

@@ -3,147 +3,114 @@
 ## Authority
 
 - Branch: `feat/f6-file-durable-runtime`
-- Review run: `.claude/reviews/review-and-fix-runs/review-20260820T042126Z-252116661`
-- Canonical result: `.claude/reviews/review-and-fix-runs/review-20260820T042126Z-252116661/result.json` (digest `214e1b1b51e64d9a5a70d1ad40d2ea1c2e4fb46741351ba88f9a136a98e49b1c`)
-- Frozen review scope: the exact 378 paths in `result.json.scope`; no finding or remediation input was reconstructed outside that result.
-- Planned support paths outside the frozen scope:
-  - `.claude/plans/2026-08-20-pr-remediation.md`
-  - `packages/host/src/__tests__/supervisor/registry/redis-registry-adapter.test.ts`
-  - `packages/host/src/hitl/queue-backend.ts`
-  - `packages/host/src/hitl/__tests__/queue-backend.test.ts`
-  - `packages/http-auth/src/abort-classification.ts`
-  - `packages/http-auth/src/__tests__/abort-classification.test.ts`
+- Review Run Directory: `.claude/reviews/review-and-fix-runs/review-20260820T071638Z-5dce674c-24a5-43c9-b4a0-9acb9a09f8e5`
+- Canonical result: `.claude/reviews/review-and-fix-runs/review-20260820T071638Z-5dce674c-24a5-43c9-b4a0-9acb9a09f8e5/result.json`
+- Canonical result digest: `84527524a06cbd6f122e739f3cb40e39948a546bc1ed565e6d16453887ec2f73`
+- Exact frozen scope: the 398 literal paths in `result.json.scope`; no review finding, scope path, or adjudication was reconstructed outside the canonical result.
+- This plan supersedes the earlier same-day plan authority because the latest standalone run reviewed that remediation's complete dirty state.
+- Required support paths outside the frozen scope:
+  - `packages/framework/src/__tests__/ids.test.ts`
+  - `packages/http-auth/README.md`
 
 ## Mandatory surviving critical findings
 
-### `type-design-analyzer-1` — invalid persisted DAG IDs can acquire the `DagId` brand
+1. **`code-reviewer-1` — health checks can join an unbounded in-flight mint**
+   - Add an uncached, non-deduplicated `TokenProvider.probe(signal)` operation that never reads or populates the request cache.
+   - Make `healthCheckWithTimeout` race that probe against an independent hard deadline and abort as best-effort cleanup, so even a fetch that ignores `AbortSignal` settles unhealthy on time.
+   - Pin both an already-pending cached mint and a signal-ignoring probe; prove the late probe cannot repopulate or invalidate the request cache.
 
-`parseRunMetaRecord` currently applies `__brandDagIdUnchecked` after checking only `typeof string`, allowing a colon-bearing stored value to escape as `RunMeta.dagId` even though `DagId` excludes `:`.
+2. **`silent-failure-hunter-1` — request-body serialization is misclassified as transport failure**
+   - Serialize request bodies before entering the fetch/network `try`.
+   - Return a secret-free, non-retriable `node-crash` for cyclic, `BigInt`, or throwing serialization inputs; never invoke fetch for malformed payloads.
+   - Add behavior tests for cyclic and `BigInt` bodies.
 
-Fix:
+3. **`silent-failure-hunter-2` — token clock failures escape or poison expiry**
+   - Introduce one guarded finite epoch-ms clock read returning `Result`.
+   - Use it for mint expiry and cached-token freshness; reject throwing/non-finite clocks as secret-free, deterministic, non-retriable token-provider errors.
+   - Reject non-finite computed expiry values and add mint-time, cached-read, `NaN`, and `Infinity` regressions.
 
-1. Parse `dagId` through the existing `tryDagId` smart parser at the shared file/Redis metadata boundary.
-2. Return the parser diagnostic as the existing corrupt-metadata error path instead of minting an invalid brand.
-3. Remove the unchecked brand import and stale compatibility commentary.
-4. Add file-codec and Redis regression pins proving colon-bearing metadata is rejected while valid IDs still parse.
-5. Update the checkpoint contract comments and `CONTEXT.md` only where needed to state that deserialization re-establishes the branded invariant.
+4. **`type-design-analyzer-1` — Redis freshness decode mints an invalid witness value**
+   - Parse persisted witness values as non-empty strings before branding; do not pass untrusted bytes directly to `__brandWitness`.
+   - Replace the existing empty-value acceptance test with rejection coverage for empty and non-string values, and pin fail-closed `findConflict` behavior.
 
-Panel audit: reproduction and blast-radius upheld the finding; the intent lens dissented because the old string-only acceptance was deliberate compatibility behavior. The finding survived 2/3 and is mandatory. This pre-release branch’s documented “no backward-compat shims” invariant favors restoring the declared `DagId` domain.
+5. **`comment-analyzer-1` — digest-addressing comment overclaims collision freedom**
+   - Correct the file checkpointer documentation to state SHA-256 collision resistance rather than mathematical injectivity; retain the actual stored-key digest verification behavior without claiming impossible collision freedom.
 
-### `comment-analyzer-1` — bare `SC-008` contradicts the citation qualification policy
+6. **`comment-analyzer-2` — authenticated client can leak token-provider rejections**
+   - Normalize rejected `TokenProvider.get()` calls into a secret-free, non-retriable `node-crash` Result before both initial send and 401 retry.
+   - Guard `invalidate()` as part of the same no-exception capability contract.
+   - Add plain-fake regressions for first-get rejection, refresh-get rejection, and invalidation throws.
 
-Fix all three reviewed bare citations in `apps/customer-summary/src/observability-composition.ts` and its test to say `observability spec SC-008`, preserving behavior and making requirement searches unambiguous.
-
-Panel audit: reproduction, intent, and blast-radius all upheld this finding.
+7. **`architecture-tech-lead-1` — `FileJob` is not substitutable for `JobLike`**
+   - Restore `FileJob` as a structural extension/alias of the kernel `JobLike` contract so mutable-container state is assignable at the adapter seam.
+   - Expose recursive static immutability through a separate file-specific `readFileJobSnapshot` helper and `FileJobSnapshot` type, while keeping the existing deep-frozen runtime getter.
+   - Add compile-time substitutability and `job.updateData(job.data)` round-trip pins for nested mutable containers.
 
 ## Advisory dispositions
 
-### Accepted
+All eight advisories are dispositioned autonomously from the canonical evidence.
 
-1. **`silent-failure-hunter-1` — tenant-event callback failures**
-   - Accept: callback failure can escape the Redis pub/sub shell.
-   - Fix: allow `void | Promise<void>`, invoke through a guarded helper, and report both synchronous throws and rejected promises with event context without letting either escape. Add regression tests for both modes.
+1. **`code-reviewer-2` — accepted.** It is the caller-visible half of mandatory `architecture-tech-lead-1`; the separate immutable snapshot helper makes the public round-trip compile without weakening runtime immutability.
+2. **`code-reviewer-3` — accepted.** Wrapping each `quit()` call in an async boundary is a complete, low-risk fix that preserves the documented attempt-every-close contract; add a synchronously throwing first-target regression.
+3. **`pr-test-analyzer-2` — accepted.** It directly pins mandatory `code-reviewer-1`, including a mint/probe that ignores cancellation.
+4. **`type-design-analyzer-2` — accepted.** `__brandDagId` is a validating internal constructor, so it must apply the DagId-specific no-colon grammar rather than the wider generic ID grammar; add direct smart/internal constructor parity tests.
+5. **`comment-analyzer-3` — accepted.** Remove review-round identifiers from the three production comments while retaining durable behavioral rationale.
+6. **`code-simplifier-1` — accepted.** The timeout cleanup sequence already has two real callers with identical semantics; one private helper improves locality without changing either public interface or error construction.
+7. **`code-simplifier-2` — accepted.** Replace the three hand-built `DagMachineContext` values with the existing `testRuntimeContext` fixture and explicit overrides; assertions and behavior remain unchanged.
+8. **`code-simplifier-3` — accepted.** Replace the nested ternary with a flat exhaustive `switch`, preserving the injective Mermaid encoding byte-for-byte.
 
-2. **`silent-failure-hunter-2` — Oracle release failure after statement failure**
-   - Accept: the statement error must remain primary, but the secondary release failure is operationally relevant.
-   - Fix: emit the same credential-stripped release warning used by the successful-statement path, with wording that identifies the preserved statement failure. Extend the existing dual-failure test to pin the warning and credential stripping.
+No advisory is deferred or dismissed.
 
-3. **`silent-failure-hunter-3` — libc candidate diagnostics discarded**
-   - Accept: PID-1 already fails fast, but the final error lacks actionable candidate causes.
-   - Fix: model candidate load as a small discriminated result carrying either a reaper or a sanitized diagnostic, aggregate failures in `resolveReaper`, and include each candidate/cause in the final startup error. Keep the injectable pure resolution loop and add tests for cause aggregation.
+## Refuted critical audit — retain, never fix
 
-4. **`silent-failure-hunter-4` — logger failure erases cleanup warnings**
-   - Accept: best-effort cleanup must remain non-throwing, but a broken configured logger should have a last-resort diagnostic.
-   - Fix: after a logger throw, attempt a guarded `process.stderr.write`; swallow only the fallback’s own failure. Add focused tests for logger failure and stderr failure.
+### `pr-test-analyzer-1` — declarative bootstrap allegedly lacks behavioral tests
 
-5. **`type-design-analyzer-2` — mutable `FileCheckpointCommit.data`**
-   - Accept: public mutation can make the exposed snapshot disagree with proven `json`.
-   - Fix: narrow `FileCheckpointCommit` to opaque proven bytes, retain detached decoded data in module-private storage, and expose a non-barrel internal accessor only to `file/job.ts`. Update tests to assert the public commit no longer exposes mutable decoded state.
-
-6. **`type-design-analyzer-3` — Map/Set payloads survive `deepFreeze` mutable**
-   - Accept: canonical event decoding restores Map/Set/Date, so the reader is not JSON-only and `Object.freeze` does not protect their internal slots.
-   - Fix: make the shared deep-immutability transform return read-only Map/Set/Date proxies, recursively protect collection members, and block mutator methods while preserving read/serialization behavior. Add reader and job pins for Map/Set/Date mutation attempts.
-
-7. **`comment-analyzer-2` — stale sync-loop re-export comment**
-   - Accept: repository tests import DAG-factory helpers from their owner, not `sync-loop`.
-   - Fix: remove the unused pass-through re-exports and stale comment, retaining only the imports used by sync orchestration. This follows the pre-release no-compat-shim invariant.
-
-8. **`architecture-tech-lead-1` — ADR-0079 contradicts fail-closed implementation**
-   - Accept: both adapters and tests withhold a conflict verdict on corruption.
-   - Fix: amend ADR-0079’s Decision and Consequences to state typed fail-closed `cache-error`, remove warning-and-absent text, and align the operational guidance with ADR-0025 and ADR-0080.
-
-9. **`architecture-tech-lead-2` — test-only atomic-write hook leaks through public options**
-   - Accept: deterministic failure injection is implementation knowledge, not a production option.
-   - Fix: keep public `FileFreshnessIndexOptions` clock-only; move hooks to an internal options type and a non-barrel `createFileFreshnessIndexForTesting` helper used by the focused test. Preserve closed option parsing and all failure semantics.
-
-10. **`code-simplifier-1` — duplicated HITL queue wiring**
-    - Accept: both host entry points duplicate the same feature gate, dynamic import, construction log, and safe close policy.
-    - Fix: add one internal HITL queue wiring module with construction and non-throwing close operations, test configured/unconfigured and close-failure behavior, then use it from both entry points.
-
-11. **`code-simplifier-2` — duplicated timeout/abort classification**
-    - Accept: the subtle timeout-vs-caller-cancel rule is identical while only downstream error mapping differs.
-    - Fix: extract a pure package-local classifier returning a closed `timeout | abort | other` verdict, test the signal/error matrix, and preserve each caller’s existing error text and retry mapping.
-
-### Dismissed
-
-12. **`code-simplifier-3` — centralize all `NodeContext` test literals**
-    - Dismiss: the cited repository contexts intentionally vary capabilities, observers, tracers, and validation state. A broad shared default would hide test-specific dependencies and increase fixture coupling; the existing small local builders keep each test’s required context explicit. This is low-risk test duplication, not a correctness or interface defect.
-
-## Refuted critical audit
-
-`result.json.refuted_critical_findings` is empty. No critical finding is excluded from remediation. The intent-lens dissent on `type-design-analyzer-1` is retained above as panel evidence but did not meet the panel threshold for refutation.
+- **Disposition:** refuted; no remediation.
+- **Reproduction panel evidence:** `packages/host/src/__tests__/supervisor/bootstrap/run-bootstrap.test.ts` covers mounted-file precedence, fail-closed reads, dual-store reconciliation, rotation, cross-team reuse, unknown teams, and secret-safe errors; `parse-bootstrap.test.ts` covers malformed input, canonicalization, canonical duplicates, and secret-safe parser diagnostics.
+- **Security panel evidence:** the same suites directly cover both token stores, rotation, idempotency, unknown teams, duplicate-token fail-closed behavior, file precedence, unreadable files, canonicalization, and secret-free errors.
+- **Intent lens:** uncertain only because that lens could not establish tests elsewhere; the two evidence-bearing lenses met the panel threshold for refutation.
 
 ## Planned touched paths
 
-In frozen scope:
-
-- `CONTEXT.md`
-- `apps/customer-summary/src/observability-composition.ts`
-- `apps/customer-summary/src/__tests__/observability-composition.test.ts`
-- `docs/adr/0079-file-freshness-index-digest-addressed-latest-write-files-with-lazy-ttl-parity.md`
-- `packages/adapter-oracle/src/index.ts`
-- `packages/adapter-oracle/src/__tests__/oracle-adapter.test.ts`
-- `packages/framework/src/checkpoint/checkpointer.ts`
-- `packages/framework/src/file.ts`
-- `packages/framework/src/file/boundary-error.ts`
-- `packages/framework/src/file/checkpoint-record.ts`
-- `packages/framework/src/file/deep-freeze.ts`
-- `packages/framework/src/file/event-log.ts`
-- `packages/framework/src/file/freshness-index.ts`
-- `packages/framework/src/file/job.ts`
-- `packages/framework/src/__tests__/file-boundary-error.test.ts`
-- `packages/framework/src/__tests__/file-checkpointer-codec.test.ts`
-- `packages/framework/src/__tests__/file-event-record.test.ts`
-- `packages/framework/src/__tests__/file-freshness-index.test.ts`
-- `packages/framework/src/__tests__/file-job.test.ts`
-- `packages/framework/src/__tests__/redis-checkpointer.test.ts`
-- `packages/host/src/main.ts`
-- `packages/host/src/worker-main.ts`
-- `packages/host/src/supervisor/lifecycle/bun-init-process-adapter.ts`
-- `packages/host/src/__tests__/supervisor/lifecycle/bun-init-process-adapter.test.ts`
-- `packages/host/src/supervisor/registry/redis-registry-adapter.ts`
-- `packages/host/src/sync/sync-loop.ts`
+- `.claude/plans/2026-08-20-pr-remediation.md`
+- `packages/http-auth/README.md` (support path)
 - `packages/http-auth/src/auth.ts`
 - `packages/http-auth/src/client.ts`
-
-Support paths are listed under Authority and will be registered at remediation start.
+- `packages/http-auth/src/index.ts`
+- `packages/http-auth/src/__tests__/auth.test.ts`
+- `packages/http-auth/src/__tests__/client.test.ts`
+- `packages/http-auth/src/__tests__/index.test.ts`
+- `packages/framework/src/checkpoint/redis-freshness-index.ts`
+- `packages/framework/src/__tests__/redis-freshness-index.test.ts`
+- `packages/framework/src/file/checkpointer.ts`
+- `packages/framework/src/file/job.ts`
+- `packages/framework/src/file.ts`
+- `packages/framework/src/__tests__/file-job.test.ts`
+- `packages/framework/src/types/ids.ts`
+- `packages/framework/src/__tests__/ids.test.ts` (support path)
+- `packages/framework/src/queue-bullmq/event-log.ts`
+- `packages/host/src/entrypoint-wiring.ts`
+- `packages/host/src/__tests__/entrypoint-wiring.test.ts`
+- `packages/host/src/adapters/git-sync.ts`
+- `packages/host/src/__tests__/git-sync.test.ts` (validation; no behavior change expected)
+- `packages/framework/src/__tests__/pass-2-remediation.test.ts`
+- `packages/framework/src/cli/visualize.ts`
+- `packages/framework/src/__tests__/cli/visualize.test.ts` (validation; encoding remains byte-identical)
 
 ## Validation
 
-Run focused tests after each coherent move, then the complete gates:
+The focused baseline was green before remediation: 158 tests across the eight directly affected suites.
+
+Run coherent focused gates after each move, then full repository gates:
 
 ```bash
-bun test packages/framework/src/__tests__/file-checkpointer-codec.test.ts packages/framework/src/__tests__/redis-checkpointer.test.ts
-bun test apps/customer-summary/src/__tests__/observability-composition.test.ts
-bun test packages/host/src/__tests__/supervisor/registry/redis-registry-adapter.test.ts
-bun test packages/adapter-oracle/src/__tests__/oracle-adapter.test.ts
-bun test packages/host/src/__tests__/supervisor/lifecycle/bun-init-process-adapter.test.ts
-bun test packages/framework/src/__tests__/file-boundary-error.test.ts packages/framework/src/__tests__/file-event-record.test.ts packages/framework/src/__tests__/file-job.test.ts packages/framework/src/__tests__/file-freshness-index.test.ts
-bun test packages/host/src/hitl/__tests__/queue-backend.test.ts
-bun test packages/http-auth/src/__tests__/abort-classification.test.ts packages/http-auth/src/__tests__/auth.test.ts packages/http-auth/src/__tests__/client.test.ts
+bun test packages/http-auth/src/__tests__/auth.test.ts packages/http-auth/src/__tests__/client.test.ts packages/http-auth/src/__tests__/index.test.ts
+bun test packages/framework/src/__tests__/redis-freshness-index.test.ts packages/framework/src/__tests__/file-job.test.ts packages/framework/src/__tests__/ids.test.ts
+bun test packages/host/src/__tests__/entrypoint-wiring.test.ts packages/host/src/__tests__/git-sync.test.ts
+bun test packages/framework/src/__tests__/pass-2-remediation.test.ts packages/framework/src/__tests__/cli/visualize.test.ts packages/framework/src/queue-bullmq/__tests__/queue-bullmq-adapter.test.ts
 bun run check:docs
 bun run typecheck
 bun run test
 ```
 
-After the full green baseline, run the mandatory `distill` apply-mode pass one move at a time, re-running covering tests after each accepted simplification. Then start registered remediation with every support path above; let the orchestration engine install the exact verified index before commit and push.
+After the implementation is green, run the mandatory `distill` apply-mode pass one move at a time with covering tests, then start registered remediation with both support paths declared above. The orchestration engine—not the parent—must audit, stage, verify, and atomically install the exact index before commit and push.

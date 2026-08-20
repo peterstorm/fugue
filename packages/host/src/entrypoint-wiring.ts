@@ -1,9 +1,11 @@
 import {
   AnthropicLlmClient,
   OpenAILlmClient,
+  safeErrorMessage,
 } from "@fuguejs/framework";
 import type { LlmClient } from "@fuguejs/framework";
 import type { HostConfig } from "./domain/config.js";
+import type { HostError } from "./domain/host-error.js";
 import type { LogPort } from "./ports.js";
 
 export interface JsonLogSink {
@@ -27,7 +29,69 @@ const renderLogLine = (
   try {
     return JSON.stringify({ level, msg: message, ...data, ts: now().toISOString() });
   } catch {
-    return `[unserializable: object]`;
+    return JSON.stringify({
+      level,
+      msg: message,
+      ts: null,
+      logSerializationError: "log payload could not be serialized",
+    });
+  }
+};
+
+/** Derive every secret spelling that a Redis driver diagnostic might echo. */
+export const redisUrlRedactions = (redisUrl: string): readonly string[] => {
+  const redactions = new Set<string>([redisUrl]);
+  try {
+    const password = new URL(redisUrl).password;
+    if (password.length > 0) {
+      redactions.add(password);
+      try {
+        redactions.add(decodeURIComponent(password));
+      } catch {
+        // Keep the URL-encoded spelling; malformed percent escapes cannot add a decoded form.
+      }
+    }
+  } catch {
+    // Host config currently accepts non-URL Redis connection strings; redact the raw value.
+  }
+  return [...redactions];
+};
+
+/** Build an observable Redis failure without allowing configured secrets into diagnostics. */
+export const redisOperationFailure = (
+  operation: string,
+  error: unknown,
+  redactions: readonly string[] = [],
+): HostError => {
+  let diagnostic = safeErrorMessage(error);
+  for (const secret of redactions) {
+    if (secret.length > 0) diagnostic = diagnostic.replaceAll(secret, "[redacted]");
+  }
+  return { kind: "redis-unavailable", operation: `${operation} (${diagnostic})` };
+};
+
+export interface RedisDisconnectTarget {
+  readonly name: string;
+  readonly quit: () => Promise<unknown>;
+}
+
+/** Attempt every Redis close and reject once with all failures preserved. */
+export const disconnectRedisClients = async (
+  targets: readonly RedisDisconnectTarget[],
+): Promise<void> => {
+  const outcomes = await Promise.allSettled(
+    targets.map(async (target) => target.quit()),
+  );
+  const failures = outcomes.flatMap((outcome, index) =>
+    outcome.status === "rejected"
+      ? [new Error(`${targets[index]!.name}: ${safeErrorMessage(outcome.reason)}`)]
+      : [],
+  );
+  if (failures.length > 0) {
+    throw new AggregateError(
+      failures,
+      `Redis disconnect failed: ${failures.map((failure) => failure.message).join("; ")}`,
+    );
   }
 };
 

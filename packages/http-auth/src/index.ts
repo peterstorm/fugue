@@ -166,7 +166,7 @@ const HEALTH_CHECK_TIMEOUT_MS = 5_000;
  *
  * Lifecycle:
  * - `connect()` mints the first token (fails boot if credentials are bad).
- * - `healthCheck()` does a token-mint round-trip, racing a 5s timeout.
+ * - `healthCheck()` does an uncached token probe under an independent 5s deadline.
  * - `close()` is a no-op (no pool to drain).
  *
  * The boot-scoped token cache means a steady-state request injects the cached
@@ -223,39 +223,34 @@ export const createHttpAuthAdapter = (config: HttpAuthConfig): CapabilityHandle<
 const describeError = (error: FrameworkError): string => formatFrameworkError(error);
 
 /**
- * Run a fresh token mint against a deadline. A hung auth endpoint reports
- * unhealthy instead of stalling the caller, AND the underlying mint is actually
- * cancelled on timeout via an `AbortController` — so an orphaned mint cannot
- * later repopulate the cache (split-brain). Exported for testing.
+ * Run an uncached token probe against a hard deadline. The deadline settles
+ * independently of fetch cancellation, so a hostile or broken fetch that ignores
+ * `AbortSignal` cannot stall readiness. The probe never populates the request
+ * cache, making a late completion harmless. Exported for testing.
  */
 export const healthCheckWithTimeout = async (
   tokens: TokenProvider,
   timeoutMs: number,
 ): Promise<Result<void, string>> => {
-  // Drive the mint off this controller's signal so a deadline hit cancels the
-  // in-flight fetch rather than leaving it running detached.
   const controller = new AbortController();
-  let timer: ReturnType<typeof setTimeout> | undefined = setTimeout(
-    () => controller.abort(new Error(`health check timed out after ${timeoutMs}ms`)),
-    timeoutMs,
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const deadline = new Promise<Result<void, string>>((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort(new Error(`health check timed out after ${timeoutMs}ms`));
+      resolve(err(`health check timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+  const probe = tokens.probe(controller.signal).then(
+    (result): Result<void, string> =>
+      result.ok ? ok(undefined) : err(describeError(result.error)),
+    (): Result<void, string> => err("token provider probe failed outside its Result contract"),
   );
+
   try {
-    // Force a mint round-trip so the check exercises the real auth path. The
-    // signal cancels that mint on timeout (no orphaned, cache-populating fetch).
-    tokens.invalidate();
-    const result = await tokens.get(controller.signal);
-    if (result.ok) return ok(undefined);
-    // A cancelled mint surfaces as a node-crash whose message names the deadline;
-    // formatFrameworkError keeps it secret-free.
-    return err(describeError(result.error));
-  } catch (e) {
-    // get() is Result-based and must not throw; this is defence-in-depth.
-    return err(e instanceof Error ? e.message : String(e));
+    return await Promise.race([probe, deadline]);
   } finally {
-    if (timer != null) {
-      clearTimeout(timer);
-      timer = undefined;
-    }
+    if (timer !== undefined) clearTimeout(timer);
   }
 };
 

@@ -62,11 +62,10 @@ describe("RedisFreshnessIndex encoding", () => {
     expect(decoded!.witnessValue).toBe('{"key":"val\\nue"}');
   });
 
-  it("handles empty witness value", () => {
-    const member = encode(R("r"), N("n"), "version", "");
-    const decoded = decode(member);
-    expect(decoded).not.toBeNull();
-    expect(decoded!.witnessValue).toBe("");
+  it("rejects empty and non-string witness values from persisted bytes", () => {
+    expect(decode(JSON.stringify(["r", "n", "version", ""]))).toBeNull();
+    expect(decode(JSON.stringify(["r", "n", "version", null]))).toBeNull();
+    expect(decode(JSON.stringify(["r", "n", "version", 42]))).toBeNull();
   });
 
   it("handles unicode witness values", () => {
@@ -153,22 +152,25 @@ describe("RedisFreshnessIndex findConflict — corrupt-member verdict (ADR-0025)
     expect(index.consecutiveFailures).toBe(1);
   });
 
-  it("fails closed on an off-contract-kind member (closed-union gate at the verdict)", async () => {
-    // The member string is the port grammar's raw bytes; an off-contract
-    // kind can only be INJECTED as bytes (the typed encoder refuses it —
-    // `freshnessMemberKey` takes the closed `WitnessKind` union, round-22
-    // tda-2), which is exactly what a corrupt/hostile store would hold.
-    const corruptMember = JSON.stringify(["run-9", "writer", "bogus-kind", "v"]);
-    const { redis } = fakeFindConflictRedis([corruptMember, "900"]);
-    const index = new RedisFreshnessIndex(redis);
+  it("fails closed on off-contract kind or witness-value members", async () => {
+    const corruptMembers = [
+      JSON.stringify(["run-9", "writer", "bogus-kind", "v"]),
+      JSON.stringify(["run-9", "writer", "version", ""]),
+      JSON.stringify(["run-9", "writer", "version", null]),
+    ];
 
-    const result = await index.findConflict(witness("version", resourceName("res:a"), "1"), 0);
-    expect(result.ok).toBe(false);
-    if (result.ok) throw new Error("expected a fail-closed rejection");
-    expect(result.error.kind).toBe("cache-error");
-    if (result.error.kind === "cache-error") {
-      expect(result.error.operation).toBe("freshness:findConflict");
-      expect(result.error.message).toContain("res:a");
+    for (const corruptMember of corruptMembers) {
+      const { redis } = fakeFindConflictRedis([corruptMember, "900"]);
+      const index = new RedisFreshnessIndex(redis);
+      const result = await index.findConflict(witness("version", resourceName("res:a"), "1"), 0);
+
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("expected a fail-closed rejection");
+      expect(result.error.kind).toBe("cache-error");
+      if (result.error.kind === "cache-error") {
+        expect(result.error.operation).toBe("freshness:findConflict");
+        expect(result.error.message).toContain("res:a");
+      }
     }
   });
 

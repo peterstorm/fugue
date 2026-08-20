@@ -18,7 +18,7 @@
 
 import { z } from "zod";
 import type { Result, FrameworkError } from "@fuguejs/framework";
-import { ok, err, nodeId } from "@fuguejs/framework";
+import { ok, err, nodeId, safeErrorMessage } from "@fuguejs/framework";
 import { classifyAbort } from "./abort-classification.js";
 
 // ---------------------------------------------------------------------------
@@ -131,13 +131,14 @@ export interface AuthConfig {
  * next `get()` re-mints (used on a `401`).
  *
  * `get()` accepts an optional `AbortSignal`: when a mint is actually performed
- * (cache miss), aborting the signal cancels the in-flight fetch so a caller that
- * has given up (e.g. a health check that hit its deadline) does not leave an
- * orphaned mint that could later repopulate the cache (split-brain). A cancelled
- * mint maps to a non-retriable `node-crash` (see `mapTokenError`).
+ * (cache miss), aborting the signal cancels the in-flight fetch. `probe()` always
+ * performs an uncached, non-deduplicated mint for lifecycle health checks; it
+ * never reads or populates the request cache, so a late signal-ignoring probe
+ * cannot change steady-state authentication state.
  */
 export interface TokenProvider {
   get(signal?: AbortSignal): Promise<Result<BearerToken, FrameworkError>>;
+  probe(signal?: AbortSignal): Promise<Result<void, FrameworkError>>;
   invalidate(): void;
 }
 
@@ -256,6 +257,25 @@ interface CachedToken {
   readonly expiresAtMs: number | null;
 }
 
+const tokenClockError = (detail: string): FrameworkError => ({
+  kind: "node-crash",
+  nodeId: AUTH_NODE_ID,
+  message: `Token provider clock invalid: ${detail}`,
+  retriability: "non-retriable",
+});
+
+/** Parse the injected clock at its boundary so invalid time never enters cache state. */
+const readTokenClock = (now: () => number): Result<number, FrameworkError> => {
+  try {
+    const value = now();
+    return Number.isFinite(value)
+      ? ok(value)
+      : err(tokenClockError("expected a finite epoch-ms value"));
+  } catch {
+    return err(tokenClockError("clock threw while reading epoch milliseconds"));
+  }
+};
+
 /**
  * Perform the token grant over the injected fetch seam. Side-effecting I/O is
  * isolated here; response *processing* (schema, expiry computation) is pure.
@@ -332,10 +352,16 @@ const mintToken = async (
       return err(mapTokenError("parse", `unexpected token response shape (${paths})`));
     }
 
-    const expiresAtMs =
-      parsed.data.expires_in !== undefined
-        ? now() + parsed.data.expires_in * 1000 - EXPIRY_SKEW_MS
-        : null;
+    let expiresAtMs: number | null = null;
+    if (parsed.data.expires_in !== undefined) {
+      const clock = readTokenClock(now);
+      if (!clock.ok) return err(clock.error);
+      const computedExpiry = clock.value + parsed.data.expires_in * 1000 - EXPIRY_SKEW_MS;
+      if (!Number.isFinite(computedExpiry)) {
+        return err(tokenClockError("computed token expiry was not finite"));
+      }
+      expiresAtMs = computedExpiry;
+    }
 
     return ok({ token: asBearerToken(parsed.data.access_token), expiresAtMs });
   } catch (error) {
@@ -354,7 +380,7 @@ const mintToken = async (
     if (abort === "abort") {
       return err(mapTokenError("abort", "request cancelled"));
     }
-    return err(mapTokenError("network", error instanceof Error ? error.message : String(error)));
+    return err(mapTokenError("network", safeErrorMessage(error)));
   } finally {
     if (timer != null) clearTimeout(timer);
     if (onExternalAbort && externalSignal) externalSignal.removeEventListener("abort", onExternalAbort);
@@ -395,8 +421,11 @@ export const createTokenProvider = (deps: TokenProviderDeps): TokenProvider => {
   // asked to drop.
   let generation = 0;
 
-  const isFresh = (entry: CachedToken): boolean =>
-    entry.expiresAtMs === null || entry.expiresAtMs > now();
+  const isFresh = (entry: CachedToken): Result<boolean, FrameworkError> => {
+    if (entry.expiresAtMs === null) return ok(true);
+    const clock = readTokenClock(now);
+    return clock.ok ? ok(entry.expiresAtMs > clock.value) : err(clock.error);
+  };
 
   const refresh = (signal?: AbortSignal): Promise<Result<CachedToken, FrameworkError>> => {
     if (inflight) return inflight;
@@ -420,9 +449,24 @@ export const createTokenProvider = (deps: TokenProviderDeps): TokenProvider => {
 
   return {
     get: async (signal?: AbortSignal): Promise<Result<BearerToken, FrameworkError>> => {
-      if (cached && isFresh(cached)) return ok(cached.token);
+      if (cached) {
+        const freshness = isFresh(cached);
+        if (!freshness.ok) return err(freshness.error);
+        if (freshness.value) return ok(cached.token);
+      }
       const result = await refresh(signal);
       return result.ok ? ok(result.value.token) : err(result.error);
+    },
+
+    probe: async (signal?: AbortSignal): Promise<Result<void, FrameworkError>> => {
+      const result = await mintToken(
+        deps.auth,
+        deps.fetch,
+        now,
+        deps.defaultTimeoutMs,
+        signal,
+      );
+      return result.ok ? ok(undefined) : err(result.error);
     },
 
     invalidate: (): void => {
@@ -437,4 +481,10 @@ export const createTokenProvider = (deps: TokenProviderDeps): TokenProvider => {
 // Exports for the client / adapter
 // ---------------------------------------------------------------------------
 
-export { AUTH_NODE_ID, basicAuthHeader, buildGrantBody, mapTokenError, mintToken };
+export {
+  AUTH_NODE_ID,
+  basicAuthHeader,
+  buildGrantBody,
+  mapTokenError,
+  mintToken,
+};

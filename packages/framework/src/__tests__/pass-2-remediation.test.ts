@@ -40,6 +40,7 @@ import { DAG_INPUT } from "../types/ids.js";
 
 import fc from "fast-check";
 import { N, R } from "./_id-helpers.js";
+import { testRuntimeContext } from "./_context-factories.js";
 
 const makeBaseCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
   runId: "test-run" as RunId,
@@ -186,26 +187,15 @@ describe("Wave 1.4 — handleNodeFailed fast-fails node-crash retriable:false", 
       outputNodeId: "a",
       defaultRetryLimit: 5,
     });
-    return {
+    return testRuntimeContext({
       dag,
       waves: [[N("a")]],
-      outputs: new Map(),
-      retries: new Map(),
       initialInput: null,
-      activeNodeIds: new Set(["a"]) as any,
-      incomingByNode: new Map(),
+      activeNodeIds: new Set([N("a")]),
       outgoingByNode: computeOutgoingByNode(dag),
-    unconditionalAdj: computeUnconditionalAdj(dag),
-      nodeById: new Map(dag.nodes.map((n) => [n.id, n])),
-      retryConfigs: new Map(dag.nodes.filter(n => n.retry).map(n => [n.id, { backoffMs: n.retry!.backoffMs ?? [1000, 2000, 4000], jitterRatio: n.retry!.jitterRatio ?? 0.2 }] as const)),
-      outputNodeId: dag.outputNodeId,
-      defaultRetryLimit: dag.defaultRetryLimit,
-      retryLimits: dag.retryLimits,
-      humanReviewNodeIds: new Set(dag.nodes.filter(n => n.humanReview !== undefined).map(n => n.id)),
-      humanReviewPrompts: new Map(dag.nodes.filter(n => n.humanReview !== undefined).map(n => [n.id, n.humanReview!.prompt] as const)),
-      edges: dag.edges,
-      confidenceByNode: new Map(),
-    };
+      unconditionalAdj: computeUnconditionalAdj(dag),
+      nodeById: new Map(dag.nodes.map((node) => [node.id, node])),
+    });
   };
 
   it("retriability: non-retriable bypasses the retry budget", () => {
@@ -246,26 +236,15 @@ describe("Wave 1.4 — dagTransition propagates ERROR.retriable into failed term
       edges: [{ from: DAG_INPUT, to: "a" }],
       outputNodeId: "a",
     });
-    return {
+    return testRuntimeContext({
       dag,
       waves: [[N("a")]],
-      outputs: new Map(),
-      retries: new Map(),
       initialInput: null,
-      activeNodeIds: new Set(["a"]) as any,
-      incomingByNode: new Map(),
+      activeNodeIds: new Set([N("a")]),
       outgoingByNode: computeOutgoingByNode(dag),
-    unconditionalAdj: computeUnconditionalAdj(dag),
-      nodeById: new Map(dag.nodes.map((n) => [n.id, n])),
-      retryConfigs: new Map(dag.nodes.filter(n => n.retry).map(n => [n.id, { backoffMs: n.retry!.backoffMs ?? [1000, 2000, 4000], jitterRatio: n.retry!.jitterRatio ?? 0.2 }] as const)),
-      outputNodeId: dag.outputNodeId,
-      defaultRetryLimit: dag.defaultRetryLimit,
-      retryLimits: dag.retryLimits,
-      humanReviewNodeIds: new Set(dag.nodes.filter(n => n.humanReview !== undefined).map(n => n.id)),
-      humanReviewPrompts: new Map(dag.nodes.filter(n => n.humanReview !== undefined).map(n => [n.id, n.humanReview!.prompt] as const)),
-      edges: dag.edges,
-      confidenceByNode: new Map(),
-    };
+      unconditionalAdj: computeUnconditionalAdj(dag),
+      nodeById: new Map(dag.nodes.map((node) => [node.id, node])),
+    });
   };
 
   it("retriable: false produces node-crash with retriable: false on the failed terminal", () => {
@@ -591,7 +570,7 @@ describe("Wave 7 — resumeCheckpoint on the stateful executor", () => {
 // ===========================================================================
 
 describe("Wave 7 — handleNodeFailed pre-increments co-failed siblings", () => {
-  const ctxWithRetries = (retries: Map<string, number>): DagMachineContext => {
+  const ctxWithRetries = (retries: ReadonlyMap<string, number>): DagMachineContext => {
     const dag = defineDag({
       id: "d",
       nodes: {
@@ -612,27 +591,16 @@ describe("Wave 7 — handleNodeFailed pre-increments co-failed siblings", () => 
       outputNodeId: "a",
       defaultRetryLimit: 2,
     });
-    return {
+    return testRuntimeContext({
       dag,
       waves: [[N("a"), N("b")]],
-      outputs: new Map(),
-      // @ts-expect-error — branded ID test fixture
-      retries,
+      retries: new Map([...retries].map(([id, count]) => [N(id), count])),
       initialInput: null,
-      activeNodeIds: new Set(["a", "b"]) as any,
-      incomingByNode: new Map(),
+      activeNodeIds: new Set([N("a"), N("b")]),
       outgoingByNode: computeOutgoingByNode(dag),
-    unconditionalAdj: computeUnconditionalAdj(dag),
-      nodeById: new Map(dag.nodes.map((n) => [n.id, n])),
-      retryConfigs: new Map(dag.nodes.filter(n => n.retry).map(n => [n.id, { backoffMs: n.retry!.backoffMs ?? [1000, 2000, 4000], jitterRatio: n.retry!.jitterRatio ?? 0.2 }] as const)),
-      outputNodeId: dag.outputNodeId,
-      defaultRetryLimit: dag.defaultRetryLimit,
-      retryLimits: dag.retryLimits,
-      humanReviewNodeIds: new Set(dag.nodes.filter(n => n.humanReview !== undefined).map(n => n.id)),
-      humanReviewPrompts: new Map(dag.nodes.filter(n => n.humanReview !== undefined).map(n => [n.id, n.humanReview!.prompt] as const)),
-      edges: dag.edges,
-      confidenceByNode: new Map(),
-    };
+      unconditionalAdj: computeUnconditionalAdj(dag),
+      nodeById: new Map(dag.nodes.map((node) => [node.id, node])),
+    });
   };
 
   it("two co-failed siblings each consume the retry slot; neither gets retryLimit+1", () => {

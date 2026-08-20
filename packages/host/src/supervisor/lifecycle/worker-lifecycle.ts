@@ -32,7 +32,7 @@
  * @satisfies AD-9   — OOM is just a `crash`; containment is structural (per-worker ADT).
  */
 
-import { match } from "ts-pattern";
+import { match, P } from "ts-pattern";
 import type { Result } from "@fuguejs/framework";
 import { ok, err } from "@fuguejs/framework";
 import type { TenantId } from "../../domain/tenant.js";
@@ -280,8 +280,10 @@ export const crash = (
   now: number,
 ): Result<WorkerState, WorkerTransitionError> =>
   match<WorkerState, Result<WorkerState, WorkerTransitionError>>(state)
-    .with({ phase: "live" }, (s) => ok({ phase: "crashed", tenant: s.tenant, eagerPin: s.eagerPin, crashedAt: now, exitCode }))
-    .with({ phase: "draining" }, (s) => ok({ phase: "crashed", tenant: s.tenant, eagerPin: s.eagerPin, crashedAt: now, exitCode }))
+    .with(
+      { phase: P.union("live", "draining") },
+      (s) => ok({ phase: "crashed", tenant: s.tenant, eagerPin: s.eagerPin, crashedAt: now, exitCode }),
+    )
     .with({ phase: "spawning" }, (s) => err(invalidWorkerTransition(s.tenant, s.phase, "crashed")))
     .with({ phase: "crashed" }, (s) => err(invalidWorkerTransition(s.tenant, s.phase, "crashed")))
     .with({ phase: "evicted" }, (s) => err(invalidWorkerTransition(s.tenant, s.phase, "crashed")))

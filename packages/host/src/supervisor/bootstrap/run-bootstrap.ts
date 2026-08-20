@@ -158,9 +158,10 @@ const reconcileInto = async (
 
 /**
  * Seed ONE team→token into BOTH the platform store (supervisor routing) and the
- * owning tenant's store (worker re-auth). Each store is reconciled idempotently;
- * both must succeed (fail-closed) so a token is never half-installed — present for
- * routing but rejected by the worker, or vice versa.
+ * owning tenant's store (worker re-auth). Each store is reconciled idempotently
+ * and boot fails closed before serving unless both succeed. The writes are not a
+ * cross-store transaction: if the tenant write fails after the platform write,
+ * that prior write is retained and the next idempotent boot completes the pair.
  */
 const reconcileTeamToken = async (
   deps: BootstrapDeps,

@@ -41,6 +41,7 @@ import { describedToMermaid } from "./visualize.js";
 import { writeAuthoredScaffold } from "./new.js";
 import { DEFAULT_MODEL } from "./new-templates.js";
 import { CONFIDENCE_BUCKET } from "./vocabulary.js";
+import { parseFlagValue } from "./arg-parsing.js";
 import { formatLintError, type LintError, type NewResult } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -242,13 +243,13 @@ export const parseComposeArgs = (args: readonly string[]): ParsedComposeArgs | P
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
     const takeValue = (flag: string): string | undefined => {
-      const value = args[i + 1];
-      if (value === undefined || value.startsWith("--")) {
-        problems.push(`${flag} requires a value`);
+      const parsed = parseFlagValue(args, i, flag);
+      i = parsed.nextIndex;
+      if (!parsed.ok) {
+        problems.push(parsed.problem);
         return undefined;
       }
-      i++;
-      return value;
+      return parsed.value;
     };
     match(arg)
       .with("--team", () => {

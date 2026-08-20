@@ -383,7 +383,7 @@ export interface RunState {
    * in-memory and Redis backends collapse composite saves onto the bare
    * `nodeId` key instead (FR-023: they ignore `SaveNodeOpts` entirely).
    */
-  readonly nodes: Record<string, NodeState>;
+  readonly nodes: Readonly<Record<string, NodeState>>;
   /**
    * Parsed addresses of stored entries that could not be decoded and were
    * dropped from `nodes`. Redis hash fields and recoverable file entries are

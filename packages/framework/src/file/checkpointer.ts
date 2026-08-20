@@ -26,10 +26,10 @@
 // amendment), so byte-identity covers exactly the no-options form — any
 // `index`/`attempt` (with or without `namespace`) emits the composite key
 // `namespace@nodeId@index@attempt` instead (round-23 ca-1). Because `@` is
-// outside `ID_PATTERN`, a composite key can never collide with a canonical one,
-// and distinct addresses digest to distinct filenames — so any two distinct
-// addresses resolve to distinct durable entries and `load` returns them all,
-// keyed by their stored nodeKey.
+// outside `ID_PATTERN`, a composite key can never equal a canonical one. Their
+// SHA-256 filenames are cryptographically collision-resistant rather than
+// mathematically injective; every read still verifies that the stored nodeKey
+// owns the filename digest before returning the entry.
 //
 // Load order is Redis-parity (FR-025..FR-028), and deliberately so: a caller
 // swapping backends must observe the same error for the same durable state.

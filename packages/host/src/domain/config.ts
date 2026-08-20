@@ -41,6 +41,21 @@ export interface KeycloakClientCredentialConfig {
   readonly clientSecret: string;
 }
 
+type CredentialEndpointIssue = "not-https" | "embedded-credentials" | null;
+
+/** Classify a secret-bearing endpoint once at the environment trust boundary. */
+const credentialEndpointIssue = (raw: string): CredentialEndpointIssue => {
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "https:") return "not-https";
+    if (url.username.length > 0 || url.password.length > 0) return "embedded-credentials";
+    return null;
+  } catch {
+    // `z.string().url()` owns malformed-URL diagnostics for these fields.
+    return null;
+  }
+};
+
 // ---------------------------------------------------------------------------
 // Host Config — parsed from environment variables
 // ---------------------------------------------------------------------------
@@ -768,6 +783,26 @@ export const HostConfigSchema = z.object({
       path: ["MSGRAPH_TENANT_ID"],
       message: "MSGRAPH_TENANT_ID, MSGRAPH_CLIENT_ID, and MSGRAPH_CLIENT_SECRET required when DOCUMENTS_ADAPTER is 'ms-graph'",
     });
+  }
+  for (const [field, value, secretDescription] of [
+    ["MSGRAPH_BASE_URL", c.MSGRAPH_BASE_URL, "bearer access token"],
+    ["MSGRAPH_TOKEN_URL", c.MSGRAPH_TOKEN_URL, "MS Graph client secret"],
+  ] as const) {
+    if (value === undefined) continue;
+    const issue = credentialEndpointIssue(value);
+    if (issue === "not-https") {
+      ctx.addIssue({
+        code: "custom",
+        path: [field],
+        message: `must be an https:// URL (the ${secretDescription} is sent to this endpoint)`,
+      });
+    } else if (issue === "embedded-credentials") {
+      ctx.addIssue({
+        code: "custom",
+        path: [field],
+        message: "must not contain embedded URL credentials",
+      });
+    }
   }
   // ── CDRator `authedHttp` capability (FR-060/NFR-010) ───────────────────────
   // The capability is gated on CDRATOR_URL: once it is set the operator credentials,

@@ -70,7 +70,12 @@ import { runBootstrap } from "./supervisor/bootstrap/run-bootstrap.js";
 import { createRealmJwtVerifier } from "./adapters/realm-jwt-verifier.js";
 import type { RealmJwtDeps } from "./http/middleware/auth.js";
 import type { AuthenticatedUser, Team } from "./domain/auth.js";
-import { createJsonConsoleLogger } from "./entrypoint-wiring.js";
+import {
+  createJsonConsoleLogger,
+  disconnectRedisClients,
+  redisOperationFailure,
+  redisUrlRedactions,
+} from "./entrypoint-wiring.js";
 
 // ── Redis (connectivity + commands + pub/sub) ────────────────────────────────
 
@@ -95,6 +100,9 @@ const createRedis = async (redisUrl: string): Promise<Result<RedisBundle, HostEr
     const { Redis } = await import("ioredis");
     const client = new Redis(redisUrl, { maxRetriesPerRequest: 3, lazyConnect: true });
     const subClient = new Redis(redisUrl, { maxRetriesPerRequest: 3, lazyConnect: true });
+    const redisRedactions = redisUrlRedactions(redisUrl);
+    const redisFailure = (operation: string, error: unknown): HostError =>
+      redisOperationFailure(operation, error, redisRedactions);
 
     const connectivity: RedisConnectivityPort = {
       ping: async () => {
@@ -102,45 +110,84 @@ const createRedis = async (redisUrl: string): Promise<Result<RedisBundle, HostEr
           if (client.status === "wait") await client.connect();
           await client.ping();
           return ok(undefined);
-        } catch (e) {
-          return err({ kind: "redis-unavailable" as const, operation: `PING (${e instanceof Error ? e.message : String(e)})` });
+        } catch (error) {
+          return err(redisFailure("PING", error));
         }
       },
     };
 
     const redis: RedisPort = {
-      get: async (key) => { try { return ok(await client.get(key)); } catch (e) { return err({ kind: "redis-unavailable" as const, operation: `GET ${key}` }); } },
+      get: async (key) => {
+        try { return ok(await client.get(key)); }
+        catch (error) { return err(redisFailure(`GET ${key}`, error)); }
+      },
       set: async (key, value, opts) => {
         try {
-          const r = opts?.expiresInSec !== undefined ? await client.set(key, value, "EX", opts.expiresInSec) : await client.set(key, value);
-          return ok(r);
-        } catch { return err({ kind: "redis-unavailable" as const, operation: `SET ${key}` }); }
+          const result = opts?.expiresInSec !== undefined
+            ? await client.set(key, value, "EX", opts.expiresInSec)
+            : await client.set(key, value);
+          return ok(result);
+        } catch (error) {
+          return err(redisFailure(`SET ${key}`, error));
+        }
       },
-      del: async (key) => { try { return ok(await client.del(key)); } catch { return err({ kind: "redis-unavailable" as const, operation: `DEL ${key}` }); } },
+      del: async (key) => {
+        try { return ok(await client.del(key)); }
+        catch (error) { return err(redisFailure(`DEL ${key}`, error)); }
+      },
       scan: async (pattern, cursor = "0") => {
-        try { const [c, keys] = await client.scan(cursor, "MATCH", pattern, "COUNT", 100); return ok({ cursor: c, keys }); }
-        catch { return err({ kind: "redis-unavailable" as const, operation: `SCAN ${pattern}` }); }
+        try {
+          const [nextCursor, keys] = await client.scan(cursor, "MATCH", pattern, "COUNT", 100);
+          return ok({ cursor: nextCursor, keys });
+        } catch (error) {
+          return err(redisFailure(`SCAN ${pattern}`, error));
+        }
       },
       setNx: async (key, value, opts) => {
         try {
-          if (opts?.expiresInSec !== undefined) { const r = await client.set(key, value, "EX", opts.expiresInSec, "NX"); return ok(r === "OK"); }
+          if (opts?.expiresInSec !== undefined) {
+            const result = await client.set(key, value, "EX", opts.expiresInSec, "NX");
+            return ok(result === "OK");
+          }
           return ok((await client.setnx(key, value)) === 1);
-        } catch { return err({ kind: "redis-unavailable" as const, operation: `SETNX ${key}` }); }
+        } catch (error) {
+          return err(redisFailure(`SETNX ${key}`, error));
+        }
       },
-      sAdd: async (key, member) => { try { return ok(await client.sadd(key, member)); } catch { return err({ kind: "redis-unavailable" as const, operation: `SADD ${key}` }); } },
-      sRem: async (key, member) => { try { return ok(await client.srem(key, member)); } catch { return err({ kind: "redis-unavailable" as const, operation: `SREM ${key}` }); } },
-      sMembers: async (key) => { try { return ok(await client.smembers(key)); } catch { return err({ kind: "redis-unavailable" as const, operation: `SMEMBERS ${key}` }); } },
+      sAdd: async (key, member) => {
+        try { return ok(await client.sadd(key, member)); }
+        catch (error) { return err(redisFailure(`SADD ${key}`, error)); }
+      },
+      sRem: async (key, member) => {
+        try { return ok(await client.srem(key, member)); }
+        catch (error) { return err(redisFailure(`SREM ${key}`, error)); }
+      },
+      sMembers: async (key) => {
+        try { return ok(await client.smembers(key)); }
+        catch (error) { return err(redisFailure(`SMEMBERS ${key}`, error)); }
+      },
     };
 
     const pubsub: RedisPubSubPort = {
-      publish: async (channel, message) => { try { await client.publish(channel, message); return ok(undefined); } catch { return err({ kind: "redis-unavailable" as const, operation: `PUBLISH ${channel}` }); } },
+      publish: async (channel, message) => {
+        try {
+          await client.publish(channel, message);
+          return ok(undefined);
+        } catch (error) {
+          return err(redisFailure(`PUBLISH ${channel}`, error));
+        }
+      },
       subscribe: async (channel, handler) => {
         try {
           if (subClient.status === "wait") await subClient.connect();
-          subClient.on("message", (ch, msg) => { if (ch === channel) handler(msg); });
+          subClient.on("message", (receivedChannel, message) => {
+            if (receivedChannel === channel) handler(message);
+          });
           await subClient.subscribe(channel);
           return ok({ unsubscribe: async () => { await subClient.unsubscribe(channel); } });
-        } catch { return err({ kind: "redis-unavailable" as const, operation: `SUBSCRIBE ${channel}` }); }
+        } catch (error) {
+          return err(redisFailure(`SUBSCRIBE ${channel}`, error));
+        }
       },
     };
 
@@ -150,14 +197,18 @@ const createRedis = async (redisUrl: string): Promise<Result<RedisBundle, HostEr
           if (client.status === "wait") await client.connect();
           await client.call("ACL", "SETUSER", username, ...rules);
           return ok(undefined);
-        } catch { return err({ kind: "redis-unavailable" as const, operation: `ACL SETUSER ${username}` }); }
+        } catch (error) {
+          return err(redisFailure(`ACL SETUSER ${username}`, error));
+        }
       },
       delUser: async (username) => {
         try {
           if (client.status === "wait") await client.connect();
           await client.call("ACL", "DELUSER", username);
           return ok(undefined);
-        } catch { return err({ kind: "redis-unavailable" as const, operation: `ACL DELUSER ${username}` }); }
+        } catch (error) {
+          return err(redisFailure(`ACL DELUSER ${username}`, error));
+        }
       },
     };
 
@@ -177,10 +228,13 @@ const createRedis = async (redisUrl: string): Promise<Result<RedisBundle, HostEr
       pubsub,
       aclAdmin,
       auditStream,
-      disconnect: async () => { await client.quit().catch(() => {}); await subClient.quit().catch(() => {}); },
+      disconnect: () => disconnectRedisClients([
+        { name: "command", quit: () => client.quit() },
+        { name: "subscriber", quit: () => subClient.quit() },
+      ]),
     });
-  } catch (e) {
-    return err({ kind: "redis-unavailable", operation: `Redis init: ${e instanceof Error ? e.message : String(e)}` });
+  } catch (error) {
+    return err(redisOperationFailure("Redis init", error, redisUrlRedactions(redisUrl)));
   }
 };
 

@@ -6,7 +6,7 @@
  * catches errors from all routes.
  */
 
-import { match } from "ts-pattern";
+import { match, P } from "ts-pattern";
 import type { Context } from "hono";
 import type { HostError } from "../../domain/host-error.js";
 import { httpStatusFor, formatHostError, retryAfterSecondsFor } from "../../domain/host-error.js";
@@ -42,26 +42,33 @@ const detailsFor = (error: HostError): unknown =>
     .with({ kind: "timeout" }, (e) => ({ timeoutMs: e.timeoutMs }))
     .with({ kind: "forbidden" }, (e) => ({ callerTeam: e.callerTeam, dagTeam: e.dagTeam }))
     .with({ kind: "dag-disabled" }, (e) => ({ reason: e.reason }))
-    .with({ kind: "body-parse-failed" }, () => undefined)
-    .with({ kind: "git-clone-failed" }, () => undefined)
-    .with({ kind: "git-pull-failed" }, () => undefined)
-    .with({ kind: "git-timeout" }, () => undefined)
-    .with({ kind: "git-spawn-failed" }, () => undefined)
-    .with({ kind: "import-failed" }, () => undefined)
-    .with({ kind: "no-default-export" }, () => undefined)
-    .with({ kind: "redis-unavailable" }, () => undefined)
-    .with({ kind: "bun-install-failed" }, () => undefined)
-    .with({ kind: "config-invalid" }, () => undefined)
-    .with({ kind: "tenant-config-invalid" }, () => undefined)
-    .with({ kind: "dag-validation-failed" }, () => undefined)
-    .with({ kind: "discovery-failed" }, () => undefined)
-    .with({ kind: "async-result-expired" }, () => undefined)
-    .with({ kind: "run-not-found" }, () => undefined)
+    .with(
+      {
+        kind: P.union(
+          "body-parse-failed",
+          "git-clone-failed",
+          "git-pull-failed",
+          "git-timeout",
+          "git-spawn-failed",
+          "import-failed",
+          "no-default-export",
+          "redis-unavailable",
+          "bun-install-failed",
+          "config-invalid",
+          "tenant-config-invalid",
+          "dag-validation-failed",
+          "discovery-failed",
+          "async-result-expired",
+          "run-not-found",
+        ),
+      },
+      () => undefined,
+    )
     .with({ kind: "run-not-suspended" }, (e) => ({ status: e.status }))
-    .with({ kind: "notification-failed" }, () => undefined)
-    .with({ kind: "unauthorized" }, () => undefined)
-    .with({ kind: "team-already-exists" }, () => undefined)
-    .with({ kind: "team-not-found" }, () => undefined)
+    .with(
+      { kind: P.union("notification-failed", "unauthorized", "team-already-exists", "team-not-found") },
+      () => undefined,
+    )
     // NON-LEAKING (FR-040): tenant-unknown exposes NO details — no tenant id,
     // no "available", nothing that could confirm another tenant's existence.
     .with({ kind: "tenant-unknown" }, () => undefined)

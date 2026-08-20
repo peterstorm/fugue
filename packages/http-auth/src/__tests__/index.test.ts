@@ -4,8 +4,8 @@
  *
  * Every test injects a fake `fetch` seam — no network. Covers: `connect()` on
  * bad credentials throwing a SECRET-FREE error; `healthCheckWithTimeout`'s
- * timeout path returning `err` (and cancelling the orphaned mint); and the
- * documented `"body" in route` misread caveat of the fake.
+ * timeout path returning `err` under signal-ignoring probes without touching
+ * the request cache; and the fake's explicitly branded shaped-route contract.
  */
 
 import { describe, it, expect } from "bun:test";
@@ -84,31 +84,83 @@ describe("healthCheckWithTimeout", () => {
     expect(isOk(result)).toBe(true);
   });
 
-  it("timeout path returns err and cancels the orphaned mint (no cache populate)", async () => {
-    // A signal-respecting mint that only settles when its signal aborts. The
-    // health-check deadline must cancel it (→ err) rather than leaving it to
-    // resolve and populate the cache.
+  it("timeout aborts a signal-aware probe and cannot populate the request cache", async () => {
     let aborted = false;
-    const fetch: FetchLike = (_url, init) =>
-      new Promise<FetchResponseLike>((_resolve, reject) => {
+    let calls = 0;
+    const fetch: FetchLike = (_url, init) => {
+      calls += 1;
+      if (calls > 1) {
+        return Promise.resolve(jsonResponse(200, { access_token: "fresh-token", expires_in: 3600 }));
+      }
+      return new Promise<FetchResponseLike>((_resolve, reject) => {
         init.signal?.addEventListener("abort", () => {
           aborted = true;
-          const e = new Error("aborted");
-          e.name = "AbortError";
-          reject(e);
+          const error = new Error("aborted");
+          error.name = "AbortError";
+          reject(error);
         });
       });
+    };
     const tokens = createTokenProvider({ auth: baseConfig(fetch).auth, fetch });
-    const result = await healthCheckWithTimeout(tokens, 5);
-    expect(isErr(result)).toBe(true);
+
+    const timedOut = await healthCheckWithTimeout(tokens, 5);
+    expect(isErr(timedOut)).toBe(true);
     expect(aborted).toBe(true);
 
-    // The cancelled mint must not have populated the cache: a subsequent get()
-    // (with a now-resolving fetch) mints afresh rather than serving a phantom.
-    // Re-point the provider at a healthy mint by building a fresh one — the
-    // original provider's cache is what we assert stayed empty.
-    // (A fresh get() on the same provider would re-enter the same hung fetch,
-    // so we assert via the abort flag + err result above.)
+    const requestToken = await tokens.get();
+    expect(isOk(requestToken)).toBe(true);
+    expect(calls).toBe(2);
+  });
+
+  it("settles by the hard deadline when an already-pending mint and the probe both ignore abort", async () => {
+    let releaseRequestMint: (response: FetchResponseLike) => void = () => {};
+    const requestMint = new Promise<FetchResponseLike>((resolve) => {
+      releaseRequestMint = resolve;
+    });
+    let calls = 0;
+    const fetch: FetchLike = async () => {
+      calls += 1;
+      if (calls === 1) return requestMint;
+      return new Promise<FetchResponseLike>(() => {});
+    };
+    const tokens = createTokenProvider({ auth: baseConfig(fetch).auth, fetch });
+    const pendingRequest = tokens.get();
+    await Promise.resolve();
+
+    const started = Date.now();
+    const result = await healthCheckWithTimeout(tokens, 10);
+    expect(Date.now() - started).toBeLessThan(250);
+    expect(isErr(result)).toBe(true);
+    expect(calls).toBe(2);
+
+    releaseRequestMint(jsonResponse(200, { access_token: "request-token", expires_in: 3600 }));
+    expect(isOk(await pendingRequest)).toBe(true);
+  });
+
+  it("a late signal-ignoring probe cannot replace an existing cached request token", async () => {
+    let releaseProbe: (response: FetchResponseLike) => void = () => {};
+    const probe = new Promise<FetchResponseLike>((resolve) => {
+      releaseProbe = resolve;
+    });
+    let calls = 0;
+    const fetch: FetchLike = async () => {
+      calls += 1;
+      return calls === 1
+        ? jsonResponse(200, { access_token: "steady-token", expires_in: 3600 })
+        : probe;
+    };
+    const tokens = createTokenProvider({ auth: baseConfig(fetch).auth, fetch, now: () => 0 });
+    const steady = await tokens.get();
+    expect(steady.ok && String(steady.value)).toBe("steady-token");
+
+    const result = await healthCheckWithTimeout(tokens, 5);
+    expect(isErr(result)).toBe(true);
+    releaseProbe(jsonResponse(200, { access_token: "late-probe-token", expires_in: 3600 }));
+    await Promise.resolve();
+
+    const stillSteady = await tokens.get();
+    expect(stillSteady.ok && String(stillSteady.value)).toBe("steady-token");
+    expect(calls).toBe(2);
   });
 
   it("the health-check error is secret-free", async () => {

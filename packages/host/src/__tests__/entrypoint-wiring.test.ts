@@ -3,7 +3,10 @@ import { parseHostConfig } from "../domain/config.js";
 import {
   createHostLlmClient,
   createJsonConsoleLogger,
+  disconnectRedisClients,
   planHostLlm,
+  redisOperationFailure,
+  redisUrlRedactions,
 } from "../entrypoint-wiring.js";
 import type { LlmClient } from "@fuguejs/framework";
 
@@ -41,18 +44,90 @@ describe("createJsonConsoleLogger", () => {
     ]);
   });
 
-  it("preserves the established fallback for unserializable data", () => {
+  it("preserves level and message when contextual data is unserializable", () => {
     const lines: string[] = [];
-    const logger = createJsonConsoleLogger({
-      info: (line) => lines.push(line),
-      warn: (line) => lines.push(line),
-      error: (line) => lines.push(line),
-    });
+    const logger = createJsonConsoleLogger(
+      {
+        info: (line) => lines.push(line),
+        warn: (line) => lines.push(line),
+        error: (line) => lines.push(line),
+      },
+      () => new Date("2026-08-20T05:00:00.000Z"),
+    );
     const cyclic: Record<string, unknown> = {};
     cyclic.self = cyclic;
 
     logger.error("failed", cyclic);
-    expect(lines).toEqual(["[unserializable: object]"]);
+    expect(JSON.parse(lines[0]!)).toEqual({
+      level: "error",
+      msg: "failed",
+      ts: null,
+      logSerializationError: "log payload could not be serialized",
+    });
+  });
+});
+
+describe("Redis entrypoint cleanup", () => {
+  it("attempts every quit and rejects with every cleanup failure", async () => {
+    const attempted: string[] = [];
+
+    const cleanup = disconnectRedisClients([
+      {
+        name: "command",
+        quit: async () => {
+          attempted.push("command");
+          throw new Error("socket closed");
+        },
+      },
+      {
+        name: "subscriber",
+        quit: async () => {
+          attempted.push("subscriber");
+          throw new Error("ACL denied");
+        },
+      },
+    ]);
+
+    await expect(cleanup).rejects.toThrow(
+      "Redis disconnect failed: command: socket closed; subscriber: ACL denied",
+    );
+    expect(attempted).toEqual(["command", "subscriber"]);
+  });
+
+  it("still attempts later clients when an earlier quit throws synchronously", async () => {
+    const attempted: string[] = [];
+
+    await expect(disconnectRedisClients([
+      {
+        name: "command",
+        quit: () => {
+          attempted.push("command");
+          throw new Error("sync failure");
+        },
+      },
+      {
+        name: "subscriber",
+        quit: async () => {
+          attempted.push("subscriber");
+        },
+      },
+    ])).rejects.toThrow("Redis disconnect failed: command: sync failure");
+
+    expect(attempted).toEqual(["command", "subscriber"]);
+  });
+
+  it("keeps Redis command diagnostics while redacting configured secrets", () => {
+    const redisUrl = "redis://user:p%40ssword@redis:6379";
+    const failure = redisOperationFailure(
+      "GET fugue:key",
+      new Error(`NOAUTH password p@ssword from ${redisUrl}`),
+      redisUrlRedactions(redisUrl),
+    );
+
+    expect(failure).toEqual({
+      kind: "redis-unavailable",
+      operation: "GET fugue:key (NOAUTH password [redacted] from [redacted])",
+    });
   });
 });
 

@@ -7,6 +7,22 @@
 // sites (job snapshots and decoded event records), so replacing nested values
 // with proxies cannot affect caller-owned state.
 
+type Primitive = string | number | boolean | bigint | symbol | null | undefined;
+type DateMutationMethod = Extract<keyof Date, `set${string}`>;
+
+/** Date view whose mutating `set*` methods are absent, matching the proxy. */
+export type ReadonlyDate = Omit<Date, DateMutationMethod>;
+
+/** Recursive static counterpart to this module's runtime freeze/proxy transform. */
+export type DeepReadonly<T> =
+  T extends Primitive ? T
+    : T extends Date ? ReadonlyDate
+    : T extends ReadonlyMap<infer K, infer V> ? ReadonlyMap<DeepReadonly<K>, DeepReadonly<V>>
+      : T extends ReadonlySet<infer V> ? ReadonlySet<DeepReadonly<V>>
+        : T extends (...args: infer _Args) => infer _Return ? T
+          : T extends object ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
+            : T;
+
 const mutationError = (kind: "Map" | "Set" | "Date", operation: PropertyKey): never => {
   throw new TypeError(`${kind}.${String(operation)} is disabled on a deeply immutable snapshot`);
 };
@@ -88,7 +104,7 @@ const readonlyDate = (source: Date, memo: WeakMap<object, unknown>): Date => {
  * property descriptors are retained; only their value is replaced when a
  * nested Map/Set/Date needs a read-only proxy.
  */
-export const deepFreeze = <T>(value: T): T => {
+export const deepFreeze = <T>(value: T): DeepReadonly<T> => {
   const memo = new WeakMap<object, unknown>();
 
   const freeze = (current: unknown): unknown => {
@@ -113,5 +129,5 @@ export const deepFreeze = <T>(value: T): T => {
     return current;
   };
 
-  return freeze(value) as T;
+  return freeze(value) as DeepReadonly<T>;
 };

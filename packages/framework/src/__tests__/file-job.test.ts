@@ -35,6 +35,7 @@ import {
   createFileJournal,
   readFileEvents,
   readFileEventRecords,
+  readFileJobSnapshot,
   serializeFileCheckpoint,
   type CreateFileJobArgs,
   type FileCheckpointData,
@@ -418,6 +419,26 @@ describe("createFileJob.updateData — checkpoint losslessness (FR-009)", () => 
 // ---------------------------------------------------------------------------
 
 describe("createFileJob.data — deep-frozen clone snapshot contract", () => {
+  it("stays JobLike-substitutable while exposing an explicit immutable snapshot view", async () => {
+    const initial = {
+      state: { nested: { count: 1 } },
+      context: { labels: ["a"] },
+    };
+    const job = createFileJob({ directory: tempDir(), initial });
+    const substitutable: JobLike<typeof initial.state, unknown, typeof initial.context> = job;
+    const snapshot = readFileJobSnapshot(job);
+    if (false) {
+      // @ts-expect-error — nested state is recursively readonly.
+      snapshot.state.nested.count = 2;
+      // @ts-expect-error — nested arrays expose no mutating methods.
+      snapshot.context.labels.push("b");
+    }
+
+    await job.updateData(job.data);
+    expect(substitutable.data.state.nested.count).toBe(1);
+    expect(snapshot.state.nested.count).toBe(1);
+  });
+
   it("detaches the initial seed from caller-owned references before the factory returns", () => {
     const dir = tempDir();
     const initial = genesis();
@@ -505,16 +526,22 @@ describe("createFileJob.data — deep-frozen clone snapshot contract", () => {
     };
     const job = createFileJob<MapState, RichContext>({ directory: dir, initial: seed });
 
-    const first = job.data;
-    const second = job.data;
+    const substitutable: JobLike<MapState, unknown, RichContext> = job;
+    const first = readFileJobSnapshot(job);
+    const second = readFileJobSnapshot(job);
+    expect(substitutable).toBe(job);
     // Fresh clones — distinct Map/Set/Date objects per read:
     expect(first.state.tags).not.toBe(second.state.tags);
     expect(first.context.ids).not.toBe(second.context.ids);
 
     // Every built-in mutator fails at the returned snapshot boundary.
+    // @ts-expect-error — ReadonlyMap excludes mutators; execute anyway to pin the runtime proxy.
     expect(() => first.state.tags.set("a", 999)).toThrow(/deeply immutable snapshot/);
+    // @ts-expect-error — ReadonlyMap excludes mutators; execute anyway to pin the runtime proxy.
     expect(() => first.state.tags.delete("a")).toThrow(/deeply immutable snapshot/);
+    // @ts-expect-error — ReadonlySet excludes mutators; execute anyway to pin the runtime proxy.
     expect(() => first.context.ids.add("evil")).toThrow(/deeply immutable snapshot/);
+    // @ts-expect-error — ReadonlyDate excludes set* mutators; execute anyway to pin the runtime proxy.
     expect(() => first.context.at.setUTCFullYear(1999)).toThrow(/deeply immutable snapshot/);
 
     // Subsequent reads are untouched:
@@ -526,7 +553,7 @@ describe("createFileJob.data — deep-frozen clone snapshot contract", () => {
     // And the durable checkpoint is untouched: committing the CURRENT (unmutated)
     // snapshot reproduces the seed commit bytes exactly.
     const expectedJson = serializeFileCheckpoint({ state: seed.state, context: seed.context }).json;
-    await job.updateData(job.data);
+    await job.updateData(seed);
     expect(createFileJournal(dir).readCheckpoint()).toBe(rawCheckpointJson(expectedJson));
   });
 

@@ -38,8 +38,12 @@ export type {
   FileCheckpointData,
 } from "./file/checkpoint-record.js";
 export { readFileEvents, readFileEventRecords } from "./file/event-log.js";
-export { createFileJob } from "./file/job.js";
-export type { CreateFileJobArgs } from "./file/job.js";
+export { createFileJob, readFileJobSnapshot } from "./file/job.js";
+export type {
+  CreateFileJobArgs,
+  FileJob,
+  FileJobSnapshot,
+} from "./file/job.js";
 // Log-authoritative resume with the checkpoint agreement proof (ADR-0077).
 export { resumeFileJob } from "./file/resume.js";
 export type { ResumeFileJobArgs } from "./file/resume.js";

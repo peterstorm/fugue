@@ -209,6 +209,23 @@ describe("createTokenProvider — caching & invalidation", () => {
     expect(later.ok && String(later.value)).toBe("eternal");
     expect(calls).toHaveLength(1);
   });
+
+  it("probe always mints without reading or populating the request cache", async () => {
+    let mint = 0;
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, { access_token: `tok-${++mint}`, expires_in: 3600 }),
+    );
+    const provider = createTokenProvider({ auth: baseAuth, fetch, now: () => 0 });
+
+    const first = await provider.get();
+    const probe = await provider.probe();
+    const cached = await provider.get();
+
+    expect(first.ok && String(first.value)).toBe("tok-1");
+    expect(isOk(probe)).toBe(true);
+    expect(cached.ok && String(cached.value)).toBe("tok-1");
+    expect(calls).toHaveLength(2);
+  });
 });
 
 describe("createTokenProvider — single-flight", () => {
@@ -257,6 +274,64 @@ describe("createTokenProvider — error mapping (no throw escapes)", () => {
     const result = await provider.get();
     expect(isErr(result)).toBe(true);
     if (!result.ok) expect(result.error.kind).toBe("transient");
+  });
+
+  it("maps throwing and non-finite mint clocks to deterministic non-retriable Results", async () => {
+    const fetch: FetchLike = async () =>
+      jsonResponse(200, { access_token: "tok", expires_in: 60 });
+    const clocks: Array<() => number> = [
+      () => { throw new Error("clock exploded"); },
+      () => Number.NaN,
+      () => Number.POSITIVE_INFINITY,
+    ];
+
+    for (const now of clocks) {
+      const result = await createTokenProvider({ auth: baseAuth, fetch, now }).get();
+      expect(isErr(result)).toBe(true);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("node-crash");
+        if (result.error.kind === "node-crash") {
+          expect(result.error.message).toContain("clock");
+          expect(result.error.retriability).toBe("non-retriable");
+        }
+      }
+    }
+  });
+
+  it("returns a clock error from cached freshness checks instead of rejecting or re-minting", async () => {
+    let reads = 0;
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, { access_token: "tok", expires_in: 60 }),
+    );
+    const provider = createTokenProvider({
+      auth: baseAuth,
+      fetch,
+      now: () => {
+        reads += 1;
+        if (reads === 1) return 0;
+        throw new Error("cached clock exploded");
+      },
+    });
+
+    expect(isOk(await provider.get())).toBe(true);
+    const cached = await provider.get();
+    expect(isErr(cached)).toBe(true);
+    if (!cached.ok) expect(cached.error.kind).toBe("node-crash");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("rejects a non-finite computed expiry instead of poisoning the cache", async () => {
+    const fetch: FetchLike = async () =>
+      jsonResponse(200, { access_token: "tok", expires_in: Number.MAX_VALUE });
+    const result = await createTokenProvider({ auth: baseAuth, fetch, now: () => 0 }).get();
+
+    expect(isErr(result)).toBe(true);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.message).toContain("computed token expiry");
+      }
+    }
   });
 
   it("a 5xx maps to transient with httpStatus", async () => {

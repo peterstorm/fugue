@@ -29,6 +29,8 @@
 // mutation of a returned snapshot can never diverge the in-memory working
 // copy from the durable journal — a later `updateData` always commits what
 // the kernel actually produced, not what a caller scribbled on a stale copy.
+// The kernel-compatible `data` type stays substitutable for `JobLike`; callers
+// that need recursive static immutability use `readFileJobSnapshot(job)`.
 //
 // FAILURE SURFACE (ADR-0080): `JobLike` has no Result channel, so every rejected
 // operation throws through its existing shell. That throwing channel is
@@ -47,6 +49,7 @@ import { createFileJournal } from "./journal.js";
 import type { FileJournalOptions } from "./journal.js";
 import { checkpointDataOf, serializeFileCheckpoint } from "./checkpoint-record.js";
 import { deepFreeze } from "./deep-freeze.js";
+import type { DeepReadonly } from "./deep-freeze.js";
 import { CHECKPOINT_FILE, PROGRESS_FILE } from "./layout.js";
 import { safeErrorMessage } from "../types/safe-error.js";
 import { fileOperationError } from "./boundary-error.js";
@@ -60,6 +63,30 @@ export interface CreateFileJobArgs<S, C> extends FileJournalOptions {
    * resumed state on a re-run. */
   readonly initial: { state: S; context: C };
 }
+
+const fileJobBrand: unique symbol = Symbol("@fuguejs/framework/file-job");
+
+/** File-backed adapter remains substitutable anywhere the kernel accepts `JobLike`. */
+export interface FileJob<S, E = unknown, C = unknown> extends JobLike<S, E, C> {
+  /** Nominal proof consumed by `readFileJobSnapshot`; not part of `JobLike`. */
+  readonly [fileJobBrand]: true;
+}
+
+/** Recursively immutable view backed by the file job's deep-frozen data getter. */
+export type FileJobSnapshot<S, C> = DeepReadonly<{
+  readonly state: S;
+  readonly context: C;
+}>;
+
+/**
+ * Read a file job snapshot with its stronger recursive static contract.
+ *
+ * `FileJob.data` keeps the kernel's exact type for adapter substitutability;
+ * this helper exposes the stronger runtime invariant without changing the port.
+ */
+export const readFileJobSnapshot = <S, E, C>(
+  job: FileJob<S, E, C>,
+): FileJobSnapshot<S, C> => job.data as FileJobSnapshot<S, C>;
 
 // ---------------------------------------------------------------------------
 // Snapshot immutability (see the snapshot contract in the module header)
@@ -108,7 +135,7 @@ export { deepFreeze as __testDeepFreeze };
  * is the ADR-0080 boundary converting each to typed `FrameworkError`
  * (`cache-error`, operation + path in the message).
  */
-const createFileJobUnchecked = <S, C>(args: CreateFileJobArgs<S, C>): JobLike<S, unknown, C> => {
+const createFileJobUnchecked = <S, C>(args: CreateFileJobArgs<S, C>): FileJob<S, unknown, C> => {
   if (typeof args !== "object" || args === null || Array.isArray(args)) {
     throw new TypeError("createFileJob arguments must be an object");
   }
@@ -140,18 +167,23 @@ const createFileJobUnchecked = <S, C>(args: CreateFileJobArgs<S, C>): JobLike<S,
   let snapshot: { state: S; context: C } = initialSnapshot;
 
   return {
+    [fileJobBrand]: true,
+
     /**
      * Deeply immutable CLONE of the snapshot per read: caller mutation can
      * never diverge the snapshot. Plain objects/arrays are frozen; Map/Set/Date
      * use read-only proxies because Object.freeze cannot protect their internal
      * slots. The
-     * top-level `Readonly` wrapper makes the immutability invariant visible
-     * to callers at the type level; the per-property deep freeze is the
-     * runtime guarantee behind it.
+     * `readFileJobSnapshot` makes the recursive immutability invariant visible
+     * at the file-specific type surface; the kernel-facing getter retains the
+     * exact `JobLike` shape for substitutability.
      */
-    get data(): Readonly<{ readonly state: S; readonly context: C }> {
+    get data(): { readonly state: S; readonly context: C } {
       try {
-        return deepFreeze(structuredClone(snapshot));
+        return deepFreeze(structuredClone(snapshot)) as {
+          readonly state: S;
+          readonly context: C;
+        };
       } catch (error) {
         // structuredClone cannot clone functions/symbols — state that is
         // non-durable by FR-009 anyway; name the contract instead of leaking
@@ -232,7 +264,7 @@ const createFileJobUnchecked = <S, C>(args: CreateFileJobArgs<S, C>): JobLike<S,
  * (`cache-error`, operation + path in the message, ADR-0080) before any rejection
  * leaks — constructing a file JobLike never permits a raw throw.
  */
-export const createFileJob = <S, C>(args: CreateFileJobArgs<S, C>): JobLike<S, unknown, C> => {
+export const createFileJob = <S, C>(args: CreateFileJobArgs<S, C>): FileJob<S, unknown, C> => {
   try {
     return createFileJobUnchecked(args);
   } catch (error) {

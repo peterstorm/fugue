@@ -144,16 +144,51 @@ describe("HostConfigSchema", () => {
     expect(parseHostConfig({ ...base, MSGRAPH_RESOLVE_PATHS: "yes" }).ok).toBe(false);
   });
 
-  it("rejects a non-URL MSGRAPH_BASE_URL", () => {
+  const msGraphEnv = {
+    ...validEnv,
+    DOCUMENTS_ADAPTER: "ms-graph",
+    MSGRAPH_TENANT_ID: "t",
+    MSGRAPH_CLIENT_ID: "c",
+    MSGRAPH_CLIENT_SECRET: "s",
+  };
+
+  it("accepts HTTPS sovereign-cloud MS Graph endpoint overrides", () => {
     const result = parseHostConfig({
-      ...validEnv,
-      DOCUMENTS_ADAPTER: "ms-graph",
-      MSGRAPH_TENANT_ID: "t",
-      MSGRAPH_CLIENT_ID: "c",
-      MSGRAPH_CLIENT_SECRET: "s",
-      MSGRAPH_BASE_URL: "not a url",
+      ...msGraphEnv,
+      MSGRAPH_BASE_URL: "https://graph.microsoft.us/v1.0",
+      MSGRAPH_TOKEN_URL: "https://login.microsoftonline.us/t/oauth2/v2.0/token",
     });
-    expect(result.ok).toBe(false);
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects non-URL and cleartext MS Graph endpoint overrides", () => {
+    expect(parseHostConfig({ ...msGraphEnv, MSGRAPH_BASE_URL: "not a url" }).ok).toBe(false);
+
+    for (const field of ["MSGRAPH_BASE_URL", "MSGRAPH_TOKEN_URL"] as const) {
+      const result = parseHostConfig({
+        ...msGraphEnv,
+        [field]: "http://graph.example.com/credential-transport",
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok && result.error.kind === "config-invalid") {
+        expect(result.error.message).toContain(field);
+        expect(result.error.message).toContain("https://");
+      }
+    }
+  });
+
+  it("rejects embedded credentials in MS Graph endpoint overrides", () => {
+    for (const field of ["MSGRAPH_BASE_URL", "MSGRAPH_TOKEN_URL"] as const) {
+      const result = parseHostConfig({
+        ...msGraphEnv,
+        [field]: "https://user:password@graph.example.com/v1.0",
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok && result.error.kind === "config-invalid") {
+        expect(result.error.message).toContain(field);
+        expect(result.error.message).toContain("embedded URL credentials");
+      }
+    }
   });
 
   it("rejects BOT_APP_ID without BOT_APP_PASSWORD (ADR-0060)", () => {

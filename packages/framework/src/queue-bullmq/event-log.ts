@@ -117,8 +117,7 @@ function parseEnvelope(
     // The `payload` KEY is present but has NO value — a truncated/partial
     // stream entry. Same tampering class as corrupt JSON below: fail closed
     // loudly instead of fabricating `{ payload: undefined }` events that
-    // would replay through the machine as if they were history (round-23
-    // sfh-1).
+    // would replay through the machine as if they were history.
     fwLogger().warn(
       `[readEvents] stream "${streamKey}" entry "${entryId}" has a payload key with no value — refusing to fabricate an event`,
     );
@@ -153,8 +152,8 @@ function parseEnvelope(
 }
 
 // Envelope-vs-bare-payload discrimination is the SHARED guard owned beside
-// the `RecordedEvent` type (state-machine/replay.ts `isRecordedEvent` — ONE
-// encoding, round-22 atl-2): a stored envelope whose `synthetic` field is
+// the `RecordedEvent` type (state-machine/replay.ts `isRecordedEvent` — one
+// encoding): a stored envelope whose `synthetic` field is
 // present-but-non-boolean fails the guard and is treated as a legacy bare
 // payload (re-enveloped from the entry ID) instead of silently passing as
 // envelope-shaped.
@@ -187,8 +186,8 @@ export const __parseEntryIdTimestamp = (
 ): { recordedAtMs: number; synthetic: boolean } => parseEntryIdTimestamp(entryId);
 
 /**
- * Test-only re-export of the envelope parser (round-23 sfh-1). The
- * truncated-payload fail-closed branch is unreachable through ioredis XADD
+ * Test-only re-export of the envelope parser. The truncated-payload fail-closed
+ * branch is unreachable through ioredis XADD
  * (Redis itself rejects odd field lists), but real streams restored from
  * RDB snapshots or written by other writers can violate the invariant — so
  * the branch is pinned here, unit-level.

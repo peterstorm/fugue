@@ -77,9 +77,8 @@ export const failOpenResult = (reason: string): EvalJudgeResult => ({
 });
 
 /**
- * Construct a fail-closed `crash` result. Used by the eval-judge orchestrator
- * when an unexpected exception escapes the judge's own internal fail-open
- * handling (span setup bug, encoder failure, etc.).
+ * Construct a fail-closed `crash` result for callers that choose to convert an
+ * unexpected evaluator exception into an observable terminal judge outcome.
  */
 export const crashResult = (reason: string): EvalJudgeResult => ({
   outcome: "crash",

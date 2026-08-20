@@ -64,6 +64,12 @@ const decodeMember = (
       );
       return null;
     }
+    if (typeof parsed[3] !== "string" || parsed[3].length === 0) {
+      fwLogger().warn(
+        `[RedisFreshnessIndex] decodeMember: witnessValue must be a non-empty string: ${member.slice(0, 100)}`,
+      );
+      return null;
+    }
     return {
       runId: __brandRunId(parsed[0]),
       nodeId: __brandNodeId(parsed[1]),

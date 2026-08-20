@@ -39,6 +39,31 @@ interface SpawnResult {
 }
 
 /**
+ * Start bounded background cleanup without delaying delivery of a timeout error.
+ * The caller retains operation-specific error construction; this helper owns the
+ * shared SIGTERM → grace race → SIGKILL → stream-drain lifecycle.
+ */
+const cleanupTimedOutChild = (
+  terminate: () => void,
+  forceKill: () => void,
+  exited: Promise<number>,
+  drainStreams: () => Promise<unknown>,
+): void => {
+  terminate();
+  const settled = exited.catch(() => 0);
+  void (async () => {
+    const winner = await Promise.race([
+      settled,
+      new Promise<"grace">((resolve) =>
+        setTimeout(() => resolve("grace"), KILL_GRACE_MS),
+      ),
+    ]);
+    if (winner === "grace") forceKill();
+    await drainStreams();
+  })();
+};
+
+/**
  * Execute a git command via Bun.spawn with timeout and stderr capture.
  * Returns exit code, stdout, stderr.
  */
@@ -62,26 +87,16 @@ const spawnGit = async (
     const result = await Promise.race([proc.exited, timeout]);
 
     if (result === "timeout") {
-      // Deliver the timeout error FIRST — cleanup must never gate it. A child
-      // that ignores SIGTERM would otherwise make the `await proc.exited`
-      // cleanup hang forever and the bounded timeout would silently degrade to
-      // an unbounded stall with no error delivered. The kill + drain therefore
-      // run in the BACKGROUND under a fixed grace window, escalating to SIGKILL
-      // if the child is still alive, and the error is returned immediately.
-      proc.kill();
-      const exited = proc.exited.catch(() => 0);
-      void (async () => {
-        const winner = await Promise.race([
-          exited,
-          new Promise<"grace">((resolve) => setTimeout(() => resolve("grace"), KILL_GRACE_MS)),
-        ]);
-        if (winner === "grace") proc.kill("SIGKILL");
-        // Drain streams to release file descriptors
-        await Promise.allSettled([
+      // Deliver the timeout error before bounded background cleanup settles.
+      cleanupTimedOutChild(
+        () => proc.kill(),
+        () => proc.kill("SIGKILL"),
+        proc.exited,
+        () => Promise.allSettled([
           new Response(proc.stdout).text(),
           new Response(proc.stderr).text(),
-        ]);
-      })();
+        ]),
+      );
       return err({
         kind: "git-timeout",
         operation: `git ${args.join(" ")}`,
@@ -266,22 +281,16 @@ export const runBunInstall = async (
     const result = await Promise.race([proc.exited, timeout]);
 
     if (result === "timeout") {
-      // Deliver the timeout error FIRST — same bounded background cleanup as
-      // `spawnGit`: a `bun install` stuck in uninterruptible I/O must not turn
-      // the timeout into an unbounded boot-time stall with no error delivered.
-      proc.kill();
-      const exited = proc.exited.catch(() => 0);
-      void (async () => {
-        const winner = await Promise.race([
-          exited,
-          new Promise<"grace">((resolve) => setTimeout(() => resolve("grace"), KILL_GRACE_MS)),
-        ]);
-        if (winner === "grace") proc.kill("SIGKILL");
-        await Promise.allSettled([
+      // Same error-first bounded cleanup as git command execution.
+      cleanupTimedOutChild(
+        () => proc.kill(),
+        () => proc.kill("SIGKILL"),
+        proc.exited,
+        () => Promise.allSettled([
           new Response(proc.stdout).text(),
           new Response(proc.stderr).text(),
-        ]);
-      })();
+        ]),
+      );
       return err({
         kind: "bun-install-failed",
         message: "bun install timed out",

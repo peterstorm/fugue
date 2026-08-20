@@ -57,6 +57,7 @@ import { runGauntlet, type GauntletResult } from "./gauntlet.js";
 import { parseKebab, parseKebabIdent, type Kebab, type KebabIdent } from "./identifiers.js";
 import { resolveRoot } from "./paths.js";
 import { freshRegistryEntry, serializeRegistry, type RegistryEntry } from "./prompts.js";
+import { parseFlagValue } from "./arg-parsing.js";
 import { formatLintError, type LintAdvisory, type NewResult } from "./types.js";
 
 export interface NewOptions {
@@ -131,13 +132,13 @@ export const parseNewArgs = (args: readonly string[]): ParsedNewArgs | ParsedNew
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
     const takeValue = (flag: string): string | undefined => {
-      const value = args[i + 1];
-      if (value === undefined || value.startsWith("--")) {
-        problems.push(`${flag} requires a value`);
+      const parsed = parseFlagValue(args, i, flag);
+      i = parsed.nextIndex;
+      if (!parsed.ok) {
+        problems.push(parsed.problem);
         return undefined;
       }
-      i++;
-      return value;
+      return parsed.value;
     };
     match(arg)
       .with("--shape", () => {

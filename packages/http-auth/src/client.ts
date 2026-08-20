@@ -145,6 +145,38 @@ interface RequestBody {
 
 const NO_BODY: RequestBody = { body: undefined };
 
+const serializeRequestBody = (body: unknown | undefined): Result<string | undefined, FrameworkError> => {
+  if (body === undefined) return ok(undefined);
+  try {
+    const serialized = JSON.stringify(body);
+    return serialized === undefined
+      ? err(makeNodeCrashError("Request body was not JSON-serializable"))
+      : ok(serialized);
+  } catch {
+    return err(makeNodeCrashError("Request body was not JSON-serializable"));
+  }
+};
+
+const tokenProviderContractError = (): FrameworkError =>
+  makeNodeCrashError("Token provider failed outside its Result contract");
+
+const getToken = async (tokens: TokenProvider): ReturnType<TokenProvider["get"]> => {
+  try {
+    return await tokens.get();
+  } catch {
+    return err(tokenProviderContractError());
+  }
+};
+
+const invalidateToken = (tokens: TokenProvider): Result<void, FrameworkError> => {
+  try {
+    tokens.invalidate();
+    return ok(undefined);
+  } catch {
+    return err(tokenProviderContractError());
+  }
+};
+
 const sendOnce = async <T>(
   deps: AuthedClientDeps,
   method: string,
@@ -155,14 +187,15 @@ const sendOnce = async <T>(
 ): Promise<SendOutcome<T>> => {
   const fullUrl = buildUrl(deps.config.baseUrl, path);
   const timeoutMs = opts.timeoutMs ?? deps.config.timeoutMs;
-  const body = payload.body;
+  const serializedBody = serializeRequestBody(payload.body);
+  if (!serializedBody.ok) return { tag: "error", error: serializedBody.error };
 
   const headers: Record<string, string> = {
     ...deps.config.defaultHeaders,
     ...opts.headers,
     Authorization: `Bearer ${token}`,
   };
-  if (body !== undefined && !headers["Content-Type"] && !headers["content-type"]) {
+  if (serializedBody.value !== undefined && !headers["Content-Type"] && !headers["content-type"]) {
     headers["Content-Type"] = payload.contentType ?? "application/json";
   }
 
@@ -178,7 +211,7 @@ const sendOnce = async <T>(
     const response = await deps.fetch(fullUrl, {
       method,
       headers,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
+      body: serializedBody.value,
       signal: controller?.signal,
     });
 
@@ -252,7 +285,7 @@ const execute = async <T>(
   payload: RequestBody,
   opts: AuthedRequestOpts<T>,
 ): Promise<Result<T, FrameworkError>> => {
-  const first = await deps.tokens.get();
+  const first = await getToken(deps.tokens);
   if (!first.ok) return err(first.error);
 
   const outcome = await sendOnce(deps, method, path, first.value, payload, opts);
@@ -260,8 +293,9 @@ const execute = async <T>(
   if (outcome.tag === "error") return err(outcome.error);
 
   // outcome.tag === "unauthorized": invalidate, re-mint, retry exactly once.
-  deps.tokens.invalidate();
-  const second = await deps.tokens.get();
+  const invalidated = invalidateToken(deps.tokens);
+  if (!invalidated.ok) return err(invalidated.error);
+  const second = await getToken(deps.tokens);
   if (!second.ok) return err(second.error);
 
   const retry = await sendOnce(deps, method, path, second.value, payload, opts);

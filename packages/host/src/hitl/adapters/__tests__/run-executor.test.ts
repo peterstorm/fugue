@@ -21,6 +21,7 @@ import {
   DAG_INPUT,
   noopTracer,
   gitSha,
+  nodeId,
   EXECUTOR_NODE_ID,
 } from "@fuguejs/framework";
 import { compileDagToMachine, stripNonPersistable } from "@fuguejs/framework/advanced";
@@ -206,7 +207,7 @@ describe("createRunExecutor — channel split (err vs failed)", () => {
       // A genuine node-scoped framework error came through (cause unwrapped)…
       expect(e.kind).toBe("node-crash");
       if (e.kind === "node-crash") {
-        expect(e.nodeId).toBe("only");
+        expect(e.nodeId).toBe(nodeId("only"));
         expect(e.retriability).toBe("non-retriable");
         expect(e.message).toBe("node blew up");
       }
