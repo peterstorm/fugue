@@ -605,10 +605,39 @@ export const createRedisTenantRegistry = (
  */
 export const subscribeTenantEvents = async (
   pubsub: RedisPubSubPort,
-  onEvent: (event: TenantEvent) => void,
+  onEvent: (event: TenantEvent) => void | Promise<void>,
   hooks: RegistryDegradedHooks = {},
   logger?: LogPort,
 ): Promise<Result<{ readonly unsubscribe: () => Promise<void> }, HostError>> => {
+  const reportHandlerFailure = (event: TenantEvent, error: unknown): void => {
+    let message: string;
+    try {
+      message = error instanceof Error ? error.message : String(error);
+    } catch {
+      message = "<unprintable tenant-event handler failure>";
+    }
+    try {
+      logger?.error("[tenant-registry] Tenant event handler failed — event isolated", {
+        kind: event.kind,
+        tenant: event.tenant,
+        error: message,
+      });
+    } catch {
+      // A diagnostic sink must not turn an already-isolated callback failure
+      // into an unhandled pub/sub exception.
+    }
+  };
+
+  const dispatchEvent = (event: TenantEvent): void => {
+    try {
+      void Promise.resolve(onEvent(event)).catch((error: unknown) => {
+        reportHandlerFailure(event, error);
+      });
+    } catch (error) {
+      reportHandlerFailure(event, error);
+    }
+  };
+
   let sub;
   try {
     sub = await pubsub.subscribe(TENANT_EVENTS_CHANNEL, (raw) => {
@@ -617,7 +646,7 @@ export const subscribeTenantEvents = async (
         logger?.warn("[tenant-registry] Dropping malformed tenant event", { raw: raw.slice(0, 120) });
         return;
       }
-      onEvent(event);
+      dispatchEvent(event);
     });
   } catch (e) {
     logger?.warn("[tenant-registry] Redis subscribe threw — treating as disconnected", {

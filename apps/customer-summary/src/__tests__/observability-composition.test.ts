@@ -528,7 +528,7 @@ describe("FoundryRunSummaryObserver — throwing sink is swallowed AND logged", 
 // Round-21 atl-2 — the observer bounds its OWN buffer (TTL orphan sweep,
 // BufferedObserver parity): a run that never emits `run-end` must not leak.
 // Round-22 cr-1 — eviction is INACTIVITY-based: a run that is still emitting
-// events is alive and must never be dropped mid-run (SC-008); only buffers
+// events is alive and must never be dropped mid-run (observability spec SC-008); only buffers
 // idle past the TTL are evicted.
 // ---------------------------------------------------------------------------
 describe("FoundryRunSummaryObserver — orphan-buffer eviction (round-21 atl-2 / round-22 cr-1)", () => {

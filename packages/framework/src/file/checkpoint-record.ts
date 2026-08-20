@@ -1,15 +1,15 @@
 // Pure checkpoint smart constructor for the file journal.
 //
-// A checkpoint commit is both:
-//   1. validated, lossless JSON bytes for `{ schemaVersion: 1, data }`; and
-//   2. a detached snapshot reconstructed from those exact bytes.
+// A checkpoint commit is an opaque capability over validated, lossless JSON
+// bytes for `{ schemaVersion: 1, data }`. The detached snapshot reconstructed
+// from those exact bytes stays module-private; `file/job.ts` reaches it through
+// the internal accessor below, while public callers cannot mutate decoded data
+// until it disagrees with the proven `json`.
 //
 // `FileJournal.writeCheckpoint` accepts only values minted here. The nominal
 // type prevents ordinary TypeScript callers from supplying arbitrary strings,
 // while the module-private WeakSet prevents JavaScript callers from forging a
-// structurally similar object. The detached `data` value is what createFileJob
-// installs after the bytes commit, so caller-owned references can never make
-// the in-memory snapshot diverge from checkpoint.json.
+// structurally similar object.
 
 import { deepJsonEqual, serializeValue } from "../state-machine/serialize.js";
 import { safeDiagnosticRender } from "../types/safe-error.js";
@@ -28,15 +28,18 @@ export interface FileCheckpointData<S, C> {
  * module-private WeakSet remains the unforgeability gate.
  */
 const FILE_CHECKPOINT_COMMIT: unique symbol = Symbol("FILE_CHECKPOINT_COMMIT");
+declare const FILE_CHECKPOINT_DATA_TYPE: unique symbol;
 
-/** Opaque, losslessness-proved checkpoint bytes plus their detached data. */
+/** Opaque, losslessness-proved checkpoint bytes. Decoded data is not public. */
 export interface FileCheckpointCommit<S, C> {
   readonly json: string;
-  readonly data: FileCheckpointData<S, C>;
   readonly [FILE_CHECKPOINT_COMMIT]: true;
+  /** Compile-time-only invariant carried by the private module symbol. */
+  readonly [FILE_CHECKPOINT_DATA_TYPE]?: FileCheckpointData<S, C>;
 }
 
 const issuedCommits = new WeakSet<object>();
+const issuedCommitData = new WeakMap<object, FileCheckpointData<unknown, unknown>>();
 
 // Module-instance-scoped by design: a commit minted under a DUPLICATED module
 // instance (duplicate bundle, pnpm aliasing, two copies of this package)
@@ -52,10 +55,23 @@ export const isFileCheckpointCommit = (
   typeof value === "object" && value !== null && issuedCommits.has(value);
 
 /**
+ * Package-internal decoded-data accessor used only by `file/job.ts` after a
+ * commit has been minted. It is deliberately omitted from the public file
+ * barrel, keeping `FileCheckpointCommit` opaque to package consumers.
+ */
+export const checkpointDataOf = <S, C>(
+  commit: FileCheckpointCommit<S, C>,
+): FileCheckpointData<S, C> => {
+  const data = issuedCommitData.get(commit);
+  if (data === undefined) throw new TypeError("checkpoint commit was not minted by this module instance");
+  return data as FileCheckpointData<S, C>;
+};
+
+/**
  * Mint the `FileCheckpointCommit` capability: pre-scan the whole
  * `{ schemaVersion, data }` envelope through the shared FR-009 losslessness
  * gate, serialize it ONCE, round-trip verify the exact bytes, and take the
- * deep-equal verdict — the returned `data` snapshot is reconstructed from
+ * deep-equal verdict — the module-private snapshot is reconstructed from
  * those exact committed bytes, so in-memory state can never diverge from
  * `checkpoint.json` (the shared `deepJsonEqual` semantics — NaN equals NaN,
  * `-0` equals `0` — are documented on `state-machine/serialize.ts`).
@@ -136,7 +152,6 @@ const serializeFileCheckpointUnchecked = <S, C>(
 
   const commit = Object.freeze({
     json,
-    data: detached,
     // The nominal brand is carried by the runtime object itself (the
     // interface says `[FILE_CHECKPOINT_COMMIT]: true`), so the type does not
     // lie about what exists; the module-private WeakSet remains the real
@@ -144,6 +159,7 @@ const serializeFileCheckpointUnchecked = <S, C>(
     [FILE_CHECKPOINT_COMMIT]: true as const,
   }) as FileCheckpointCommit<S, C>;
   issuedCommits.add(commit);
+  issuedCommitData.set(commit, detached as FileCheckpointData<unknown, unknown>);
   return commit;
 };
 

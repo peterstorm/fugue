@@ -484,8 +484,13 @@ export const createOracleAdapter = (config: OracleAdapterConfig): CapabilityHand
       } catch (e) {
         try {
           await conn.close();
-        } catch {
-          // ignore: the statement error is the one worth surfacing.
+        } catch (closeError) {
+          // Preserve the statement error as the caller-visible outcome, but do
+          // not erase evidence that the pooled connection also failed to
+          // release (a repeated release fault can exhaust the pool).
+          console.warn(
+            `[oracle] query failed and connection release also failed; preserving statement error: ${stripCredentials(closeError instanceof Error ? closeError.message : String(closeError))}`,
+          );
         }
         throw e;
       }

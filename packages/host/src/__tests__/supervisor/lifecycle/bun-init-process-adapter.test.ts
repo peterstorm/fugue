@@ -124,14 +124,19 @@ describe("resolveReaper (candidate resolution + fail-fast)", () => {
     const tried: string[] = [];
     const reap = resolveReaper(["a", "b", "c"], (c) => {
       tried.push(c);
-      return c === "b" ? () => {} : null;
+      return c === "b"
+        ? { kind: "loaded", reaper: () => {} }
+        : { kind: "failed", diagnostic: `${c} unavailable` };
     });
     expect(typeof reap).toBe("function");
     expect(tried).toEqual(["a", "b"]); // stopped at the first success
   });
 
-  test("throws fail-fast naming the tried candidates when NONE provide waitpid", () => {
-    expect(() => resolveReaper(["x.so", "y.so"], () => null)).toThrow(/could not load a libc.*x\.so, y\.so/s);
+  test("throws fail-fast with every candidate's actionable failure cause", () => {
+    expect(() => resolveReaper(["x.so", "y.so"], (candidate) => ({
+      kind: "failed",
+      diagnostic: candidate === "x.so" ? "ENOENT: library missing" : "symbol waitpid missing",
+    }))).toThrow(/could not load a libc.*x\.so: ENOENT: library missing; y\.so: symbol waitpid missing/s);
   });
 
   test("resolves a REAL waitpid on this platform — the FFI binding is live, not a stub", () => {

@@ -302,6 +302,7 @@ describe("parseStoredMeta — strict parse of meta.json (parse, don't validate)"
     };
     const cases: Array<[string, string]> = [
       ["dagId must be a string", JSON.stringify({ ...base, dagId: 4 })],
+      ["colons not allowed", JSON.stringify({ ...base, dagId: "tenant:dag" })],
       ["startedAt must be a string", JSON.stringify({ ...base, startedAt: 4 })],
       ["createdAt must be a string", JSON.stringify({ ...base, createdAt: {} })],
       ["nodeCount must be a non-negative safe integer", JSON.stringify({ ...base, nodeCount: -1 })],

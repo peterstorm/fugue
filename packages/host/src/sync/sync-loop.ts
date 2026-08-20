@@ -31,10 +31,6 @@ import type { GitPort, ModuleLoaderPort, Clock } from "../ports.js";
 import { loadResultToRegisteredDag } from "../domain/dag-factory.js";
 import type { HostTimeoutDefaults } from "../domain/dag-factory.js";
 
-// Re-export for test convenience (tests import from sync-loop)
-export { loadResultToRegisteredDag, loadResultsToSnapshots } from "../domain/dag-factory.js";
-export type { HostTimeoutDefaults } from "../domain/dag-factory.js";
-
 // ── Types ──────────────────────────────────────────────────────────────────
 
 /**

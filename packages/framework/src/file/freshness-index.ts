@@ -42,6 +42,7 @@
 import { mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { atomicWriteFile, withFileLock } from "./atomic.js";
+import type { AtomicWriteFileTestHooks } from "./atomic.js";
 import { isBoundaryIdString, isPlainRecord, keyDigest } from "./layout.js";
 import type { WriteAttemptedEvent } from "../types/events.js";
 import type {
@@ -452,26 +453,25 @@ const corruptRecordContext = (
 export interface FileFreshnessIndexOptions {
   /** Clock stamping writes and evaluating the lazy 24h TTL. */
   readonly now?: () => number;
-  /** TEST-ONLY seam: threads deterministic hooks (e.g. a squatted temp
-   * path) into `recordWrite`'s commit (`atomicWriteFile`) so a body-internal
-   * commit failure is reproducible without FS races. Production callers
-   * omit it (atomic.ts mints a unique temp path). */
-  readonly atomicWriteFileHooks?: import("./atomic.js").AtomicWriteFileTestHooks;
+}
+
+/** Implementation-module-only options for deterministic failure injection. */
+export interface FileFreshnessIndexTestOptions extends FileFreshnessIndexOptions {
+  readonly atomicWriteFileHooks?: AtomicWriteFileTestHooks;
 }
 
 const createFileFreshnessIndexUnchecked = (
   directory: string,
-  opts: FileFreshnessIndexOptions = {},
+  opts: FileFreshnessIndexTestOptions = {},
+  allowTestHooks = false,
 ): FreshnessIndex => {
   if (!isFileBackendPathString(directory)) {
     throw new TypeError(`directory must be a non-empty NUL-free string, got ${safeDiagnosticRender(directory)}`);
   }
-  // This factory's options grammar = the shared closed clock shape (options.ts
-  // — the journal twin's exact encoding) PLUS the test-only
-  // `atomicWriteFileHooks` seam (recordWrite's commit), declared to the shared
-  // parser below. The seam is test-only, typed at the interface, and consumed
-  // by atomicWriteFile's own typed catch boundary.
-  const now = parseFileFactoryClock(opts, ["atomicWriteFileHooks"]);
+  // The public options grammar is clock-only. Focused tests opt into the
+  // implementation hook through a non-barrel factory below; production callers
+  // cannot couple to atomic-write temp-path mechanics.
+  const now = parseFileFactoryClock(opts, allowTestHooks ? ["atomicWriteFileHooks"] : []);
 
   /**
    * Clock read + representability gate, shared by `recordWrite` (write
@@ -664,13 +664,13 @@ const createFileFreshnessIndexUnchecked = (
   };
 };
 
-/** Typed factory shell: invalid configuration cannot leak a runtime throw. */
-export const createFileFreshnessIndex = (
+const createFileFreshnessIndexBoundary = (
   directory: string,
-  opts: FileFreshnessIndexOptions = {},
+  opts: FileFreshnessIndexTestOptions,
+  allowTestHooks: boolean,
 ): FreshnessIndex => {
   try {
-    return createFileFreshnessIndexUnchecked(directory, opts);
+    return createFileFreshnessIndexUnchecked(directory, opts, allowTestHooks);
   } catch (error) {
     throw fileOperationError(
       "createFileFreshnessIndex",
@@ -679,6 +679,18 @@ export const createFileFreshnessIndex = (
     );
   }
 };
+
+/** Typed factory shell: invalid configuration cannot leak a runtime throw. */
+export const createFileFreshnessIndex = (
+  directory: string,
+  opts: FileFreshnessIndexOptions = {},
+): FreshnessIndex => createFileFreshnessIndexBoundary(directory, opts, false);
+
+/** Focused-test factory; intentionally omitted from `@fuguejs/framework/file`. */
+export const createFileFreshnessIndexForTesting = (
+  directory: string,
+  opts: FileFreshnessIndexTestOptions,
+): FreshnessIndex => createFileFreshnessIndexBoundary(directory, opts, true);
 
 // Exported only for equal-score parity tests; omitted from the file barrel.
 export {

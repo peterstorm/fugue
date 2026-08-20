@@ -150,6 +150,47 @@ describe("redis tenant registry — pub/sub emission (AD-5)", () => {
     await fake.pubsub.publish(TENANT_EVENTS_CHANNEL, JSON.stringify({ kind: "bogus", tenant: "x" }));
     expect(observed).toEqual([]); // both dropped, no throw
   });
+
+  for (const mode of ["throw", "reject"] as const) {
+    it(`isolates and logs a handler ${mode} without breaking later events`, async () => {
+      const fake = createInMemoryRedisFake();
+      const errors: Array<{ readonly message: string; readonly data?: Record<string, unknown> }> = [];
+      let calls = 0;
+      const logger = {
+        info: () => {},
+        warn: () => {},
+        error: (message: string, data?: Record<string, unknown>) => { errors.push({ message, data }); },
+      };
+      const sub = await subscribeTenantEvents(
+        fake.pubsub,
+        () => {
+          calls += 1;
+          if (calls === 1) {
+            if (mode === "throw") throw new Error("sync callback exploded");
+            return Promise.reject(new Error("async callback exploded"));
+          }
+        },
+        {},
+        logger,
+      );
+      expect(sub.ok).toBe(true);
+
+      await fake.pubsub.publish(TENANT_EVENTS_CHANNEL, JSON.stringify({ kind: "registered", tenant: "acme" }));
+      await Promise.resolve();
+      await fake.pubsub.publish(TENANT_EVENTS_CHANNEL, JSON.stringify({ kind: "reconfigured", tenant: "acme" }));
+      await Promise.resolve();
+
+      expect(calls).toBe(2);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]?.message).toContain("Tenant event handler failed");
+      expect(errors[0]?.data).toMatchObject({
+        kind: "registered",
+        tenant: "acme",
+        error: mode === "throw" ? "sync callback exploded" : "async callback exploded",
+      });
+      if (sub.ok) await sub.value.unsubscribe();
+    });
+  }
 });
 
 describe("redis tenant registry — fail-closed (FR-022 / FR-023)", () => {

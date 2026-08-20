@@ -18,6 +18,7 @@ import type { z } from "zod";
 import type { Result, FrameworkError } from "@fuguejs/framework";
 import { ok, err, nodeId, frameworkError } from "@fuguejs/framework";
 import type { TokenProvider, FetchLike } from "./auth.js";
+import { classifyAbort } from "./abort-classification.js";
 
 const CLIENT_NODE_ID = nodeId("http-auth-client");
 
@@ -219,21 +220,15 @@ const sendOnce = async <T>(
     // reason on the controller's signal is the source of truth (a
     // signal-respecting fetch rejects with that reason): our timeout aborts with
     // `Error("timeout")`; an external cancel aborts with no/other reason.
-    const reason: unknown = controller?.signal.reason;
-    const isOurTimeout =
-      (reason instanceof Error && reason.message === "timeout") ||
-      (error instanceof Error && (error.message === "timeout" || error.name === "TimeoutError"));
-    const isAbort =
-      controller?.signal.aborted === true ||
-      (error instanceof Error && error.name === "AbortError");
+    const abort = classifyAbort(controller?.signal, error);
 
     // Our OWN timeout → transient: a slow endpoint should be retried.
-    if (isOurTimeout) {
+    if (abort === "timeout") {
       return { tag: "error", error: makeTransientError(`HTTP request timed out after ${timeoutMs}ms: ${method} ${fullUrl}`) };
     }
     // A non-timeout abort means the caller/node cancelled this request →
     // non-retriable node-crash: auto-retrying cancelled work defeats the cancel.
-    if (isAbort) {
+    if (abort === "abort") {
       return { tag: "error", error: makeNodeCrashError(`HTTP request cancelled: ${method} ${fullUrl}`) };
     }
     return {

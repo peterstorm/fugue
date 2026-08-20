@@ -6,8 +6,8 @@ import { FRAMEWORK_VERSION } from "./fingerprint.js";
 import type { CompositeNodeKeyOpts } from "./composite-node-key.js";
 import {
   ID_PATTERN,
-  __brandDagIdUnchecked,
   __brandNodeId,
+  tryDagId,
 } from "../types/ids.js";
 import { isRepresentableTimestampMs } from "../types/clock.js";
 import {
@@ -168,6 +168,8 @@ export const parseRunMetaRecord = (
   if (typeof dagId !== "string") {
     return err(`dagId must be a string, got ${safeDiagnosticRender(dagId)}`);
   }
+  const parsedDagId = tryDagId(dagId);
+  if (!parsedDagId.ok) return err(parsedDagId.error);
   if (typeof startedAt !== "string") {
     return err(`startedAt must be a string, got ${safeDiagnosticRender(startedAt)}`);
   }
@@ -198,13 +200,9 @@ export const parseRunMetaRecord = (
   if (!parsedCreatedAt.ok) return err(parsedCreatedAt.error);
   return ok({
     meta: {
-      // Read-side parse boundary: the stored bytes were written by a consumer
-      // of the (now branded) port. The frozen acceptance domain is a
-      // `typeof`/grammar shape check (it does NOT re-derive the `DagId`
-      // pattern domain at read time — that would newly reject stored values,
-      // a behavior change to a frozen surface), so the brand is applied
-      // unchecked: an honest re-typing of the deserialized value.
-      dagId: __brandDagIdUnchecked(dagId),
+      // Parse, don't validate: persisted metadata re-establishes the stricter
+      // colon-free DagId domain before RunMeta can escape this boundary.
+      dagId: parsedDagId.value,
       startedAt: parsedStartedAt.value,
       nodeCount,
       ...(subject !== undefined ? { subject } : {}),
@@ -306,8 +304,9 @@ export interface RunMeta {
    * namespaces; construct via `dagId()` from `types/ids.ts`). Every valid
    * `DagDef.id` is already in this domain (validated at `validateDagShape`
    * time), so honest consumers brand at zero runtime cost; the adapters
-   * still shape-re-validate at their hostile boundary (ADR-0080) — the brand
-   * declares the domain, it never relaxes a runtime gate.
+   * still re-parse at their hostile boundary (ADR-0080) — the brand declares
+   * the domain, and deserialization re-establishes it before a persisted value
+   * can return as `RunMeta`.
    */
   readonly dagId: DagId;
   readonly startedAt: Date;
@@ -407,14 +406,13 @@ export interface Checkpointer {
    * engine's sibling `CheckpointWriter.write(runId: RunId, nodeId: NodeId, …)`
    * port already declared. The brands are the DOMAIN declaration at the
    * consumer level (argument-swap safety; `DagId`'s colon-free domain is
-   * enforced at the smart constructor, not re-derived per adapter). They do
-   * NOT relax any runtime gate: a brand-bypassed hostile value still reaches
+   * enforced by both the smart constructor and persisted metadata parser).
+   * They do NOT relax any runtime gate: a brand-bypassed hostile value still reaches
    * each adapter's boundary, which keeps its own shape/path re-validation
    * (the file backend re-validates against `ID_PATTERN` for path safety,
-   * NFR-010/ADR-0080; the other backends keep their frozen acceptance
-   * domains). Backend-swap parity of RUNTIME behavior is unchanged by the
-   * re-typing — it is a compile-time contract move, byte-identical at every
-   * runtime input.
+   * NFR-010/ADR-0080; metadata reads re-establish the shared ID domains).
+   * Backend-swap parity is structural: no adapter may return an invalid branded
+   * identifier from persisted bytes.
    */
   load(
     runId: RunId,

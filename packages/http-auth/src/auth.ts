@@ -19,6 +19,7 @@
 import { z } from "zod";
 import type { Result, FrameworkError } from "@fuguejs/framework";
 import { ok, err, nodeId } from "@fuguejs/framework";
+import { classifyAbort } from "./abort-classification.js";
 
 // ---------------------------------------------------------------------------
 // Branded bearer token
@@ -342,21 +343,15 @@ const mintToken = async (
     // abort reason carried on the controller's signal is the source of truth: a
     // signal-respecting fetch rejects with that reason. Our timeout aborts with
     // `Error("timeout")`; an external cancel aborts with no/other reason.
-    const reason: unknown = controller?.signal.reason;
-    const isOurTimeout =
-      (reason instanceof Error && reason.message === "timeout") ||
-      (error instanceof Error && (error.message === "timeout" || error.name === "TimeoutError"));
-    const isAbort =
-      controller?.signal.aborted === true ||
-      (error instanceof Error && error.name === "AbortError");
+    const abort = classifyAbort(controller?.signal, error);
 
     // Our OWN timeout → transient: a slow auth endpoint should be retried.
-    if (isOurTimeout) {
+    if (abort === "timeout") {
       return err(mapTokenError("timeout", `after ${timeoutMs}ms`));
     }
     // A non-timeout abort means the caller/node cancelled the mint → must NOT
     // auto-retry the cancelled work; map to a non-retriable node-crash.
-    if (isAbort) {
+    if (abort === "abort") {
       return err(mapTokenError("abort", "request cancelled"));
     }
     return err(mapTokenError("network", error instanceof Error ? error.message : String(error)));

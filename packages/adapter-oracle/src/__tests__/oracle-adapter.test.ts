@@ -864,7 +864,7 @@ describe("@fuguejs/oracle — createOracleAdapter() production query/close lifec
       },
       close: async () => {
         closed += 1;
-        throw new Error("ORA-12599: release fault");
+        throw new Error("ORA-12599: release fault with user/pass@dbhost");
       },
     }));
 
@@ -874,7 +874,15 @@ describe("@fuguejs/oracle — createOracleAdapter() production query/close lifec
       password: "p",
     });
 
-    const result = await handle.client.query(PackageSchema, "SELECT * FROM packages");
+    const warns: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warns.push(args); };
+    let result;
+    try {
+      result = await handle.client.query(PackageSchema, "SELECT * FROM packages");
+    } finally {
+      console.warn = originalWarn;
+    }
     expect(isErr(result)).toBe(true);
     if (!result.ok) {
       const e = result.error;
@@ -886,6 +894,10 @@ describe("@fuguejs/oracle — createOracleAdapter() production query/close lifec
       }
     }
     expect(closed).toBe(1);
+    expect(warns).toHaveLength(1);
+    expect(String(warns[0]?.join(" "))).toContain("query failed and connection release also failed");
+    expect(String(warns[0]?.join(" "))).toContain("ORA-12599");
+    expect(String(warns[0]?.join(" "))).not.toContain("user/pass@dbhost");
   });
 
   it("close() drains the pool with pool.close(0) after a successful open", async () => {

@@ -25,7 +25,7 @@
 // (`resumeFileJob` reconstructs it; this adapter is deliberately
 // resumption-free so the kernel contract stays byte-identical with the
 // in-memory/Redis adapters). SNAPSHOT CONTRACT: each `data` read returns a
-// DEEP-FROZEN CLONE (structuredClone + recursive Object.freeze), so caller
+// DEEPLY IMMUTABLE CLONE (structuredClone + recursive freeze/read-only proxies), so caller
 // mutation of a returned snapshot can never diverge the in-memory working
 // copy from the durable journal — a later `updateData` always commits what
 // the kernel actually produced, not what a caller scribbled on a stale copy.
@@ -45,7 +45,7 @@ import { join } from "node:path";
 import type { JobLike } from "../state-machine/types.js";
 import { createFileJournal } from "./journal.js";
 import type { FileJournalOptions } from "./journal.js";
-import { serializeFileCheckpoint } from "./checkpoint-record.js";
+import { checkpointDataOf, serializeFileCheckpoint } from "./checkpoint-record.js";
 import { deepFreeze } from "./deep-freeze.js";
 import { CHECKPOINT_FILE, PROGRESS_FILE } from "./layout.js";
 import { safeErrorMessage } from "../types/safe-error.js";
@@ -122,10 +122,11 @@ const createFileJobUnchecked = <S, C>(args: CreateFileJobArgs<S, C>): JobLike<S,
   // returned snapshot is reconstructed from the exact canonical bytes and is
   // therefore detached from caller-owned state/context before the factory
   // returns.
-  const initialSnapshot = serializeFileCheckpoint({
+  const initialCommit = serializeFileCheckpoint({
     state: initial.state,
     context: initial.context,
-  }).data;
+  });
+  const initialSnapshot = checkpointDataOf(initialCommit);
   const journal = createFileJournal(
     directory,
     configuredNow !== undefined ? { now: configuredNow } : {},
@@ -140,10 +141,10 @@ const createFileJobUnchecked = <S, C>(args: CreateFileJobArgs<S, C>): JobLike<S,
 
   return {
     /**
-     * Deep-frozen CLONE of the snapshot per read: caller mutation can never
-     * diverge the snapshot (plain objects/arrays are frozen — mutation throws
-     * in strict mode and no-ops otherwise — and even unfreezable structures
-     * like Map/Set/Date are isolated by the fresh clone per call). The
+     * Deeply immutable CLONE of the snapshot per read: caller mutation can
+     * never diverge the snapshot. Plain objects/arrays are frozen; Map/Set/Date
+     * use read-only proxies because Object.freeze cannot protect their internal
+     * slots. The
      * top-level `Readonly` wrapper makes the immutability invariant visible
      * to callers at the type level; the per-property deep freeze is the
      * runtime guarantee behind it.
@@ -189,7 +190,7 @@ const createFileJobUnchecked = <S, C>(args: CreateFileJobArgs<S, C>): JobLike<S,
         // the in-flight commit or the snapshot installed after it succeeds.
         const commit = serializeFileCheckpoint(captured);
         await journal.writeCheckpoint(commit);
-        snapshot = commit.data;
+        snapshot = checkpointDataOf(commit);
       } catch (error) {
         throw fileOperationError("updateData", join(directory, CHECKPOINT_FILE), error);
       }

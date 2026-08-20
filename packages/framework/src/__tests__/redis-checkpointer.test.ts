@@ -731,7 +731,7 @@ describeRedis("RedisCheckpointer", () => {
   });
 
   // Round-19 sfh-2: the Redis read-side codec applies the file codec's shape
-  // gates before the id-domain brand pass-through. Corrupt meta bytes must
+  // gates before restoring branded ID domains. Corrupt meta bytes must
   // settle as `checkpoint-corrupt` — never flow negative/Infinity/string
   // counts or non-string ids into consumers as a "valid" checkpoint — and a
   // corrupt node row must drop into `corruptNodeIds`, not into the map.
@@ -741,6 +741,7 @@ describeRedis("RedisCheckpointer", () => {
     ["non-finite nodeCount (JSON null)", { nodeCount: 1e999 }],
     ["missing nodeCount", { nodeCount: undefined }],
     ["non-string dagId", { dagId: 42 }],
+    ["colon-bearing dagId", { dagId: "tenant:dag" }],
     ["non-string startedAt", { startedAt: 123 }],
     ["non-string createdAt", { createdAt: null }],
   ])("corrupt stored meta (%s) settles as typed checkpoint-corrupt", async (_label, mutation) => {

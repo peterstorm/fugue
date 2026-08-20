@@ -125,7 +125,7 @@ interface RunSummaryBuffer {
   /** Last wall-clock time this run produced an event; refreshed per event so
    * the orphan sweep evicts INACTIVE buffers only — an active long-running
    * run is never dropped mid-run, or its summary would be silently zeroed at
-   * a late run-end (SC-008). */
+   * a late run-end (observability spec SC-008). */
   lastActivityAt: number;
 }
 
@@ -206,7 +206,7 @@ export class FoundryRunSummaryObserver implements Observer {
   /** Drop run buffers whose LAST ACTIVITY exceeded `ttlMs` without a run-end.
    * Eviction is inactivity-based (not open-time-based): a run that keeps
    * emitting events is alive by definition and must not be evicted mid-run,
-   * or its summary would be silently zeroed at a late run-end (SC-008).
+   * or its summary would be silently zeroed at a late run-end (observability spec SC-008).
    * Public so tests can drive eviction deterministically (BufferedObserver
    * parity). */
   evictStale(): void {

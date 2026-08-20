@@ -20,6 +20,7 @@ import { createRedisConnectivity } from "./adapters/redis-connectivity.js";
 import { buildCdratorCapability } from "./adapters/cdrator-capability.js";
 import { buildDocumentsCapability, describeDocumentsAdapter } from "./adapters/documents-capability.js";
 import { buildOracleCapability, connectStringHost } from "./adapters/oracle-capability.js";
+import { closeHitlQueueBackend, createHitlQueueBackend } from "./hitl/queue-backend.js";
 import type { SharedInfra } from "./ports.js";
 import type { SyncLogger } from "./sync/sync-loop.js";
 import { noopTracer, AnthropicLlmClient, OpenAILlmClient, createHttpCapability, systemClock } from "@fuguejs/framework";
@@ -173,17 +174,9 @@ const main = async () => {
     // Step 5: Create module loader (pass logger so prompt errors route through structured logging)
     const loader = createModuleLoader(logger);
 
-    // Step 6: Wire the HITL queue backend (ADR-0060) when Teams is configured.
-    // BullMQ needs its own Redis connection (separate from the app RedisPort);
-    // the framework's backend owns it. Dynamic import mirrors the ioredis/SDK
-    // pattern — bullmq loads only when HITL is enabled.
-    let queueBackend: import("@fuguejs/framework").QueueBackend | undefined;
-    const hitlConfigured = config.TEAMS_WEBHOOK_URL !== undefined || config.BOT_APP_ID !== undefined;
-    if (hitlConfigured) {
-      const { createBullMQBackend } = await import("@fuguejs/framework/bullmq");
-      queueBackend = createBullMQBackend(config.REDIS_URL);
-      logger.info("HITL queue backend (BullMQ) constructed");
-    }
+    // Step 6: Wire the optional HITL queue. The shared helper keeps the feature
+    // gate, lazy BullMQ import, and ownership log identical in both entrypoints.
+    const queueBackend = await createHitlQueueBackend(config, logger);
 
     // Step 7: Create and boot host
     const hostResult = await createHost({
@@ -195,11 +188,7 @@ const main = async () => {
       logger,
       queueBackend,
       onShutdown: async () => {
-        if (queueBackend) {
-          await queueBackend.close().catch((e: unknown) => {
-            logger.error("Failed to close HITL queue backend", { error: e instanceof Error ? e.message : String(e) });
-          });
-        }
+        await closeHitlQueueBackend(queueBackend, logger);
         await disconnectRedis();
       },
     });

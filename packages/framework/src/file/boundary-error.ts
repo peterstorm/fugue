@@ -134,11 +134,19 @@ export const isFileBackendPathString = (value: unknown): value is string =>
  * untrusted too: a host logger must never replace the primary filesystem
  * failure or break lock release with a raw throw.
  */
-export const warnWithoutThrowing = (message: string): void => {
+export const warnWithoutThrowing = (
+  message: string,
+  writeFallback: (diagnostic: string) => unknown = (diagnostic) => process.stderr.write(diagnostic),
+): void => {
   try {
     fwLogger().warn(message);
   } catch {
-    // Cleanup and lock correctness take precedence. Result-bearing callers
-    // that require an observable warning handle logger failure explicitly.
+    // Preserve the primary filesystem outcome, but make one last guarded
+    // attempt when the configured logger itself is broken.
+    try {
+      writeFallback(`[file-backend warning fallback] ${message}\n`);
+    } catch {
+      // Cleanup and lock correctness still take precedence over diagnostics.
+    }
   }
 };

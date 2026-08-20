@@ -493,11 +493,9 @@ describe("createFileJob.data — deep-frozen clone snapshot contract", () => {
     });
   });
 
-  it("Map/Set/Date members are isolated by the fresh clone per read (the guarantee Object.freeze alone cannot provide)", async () => {
-    // Object.freeze is shallow over Map/Set/Date contents — a frozen Map is
-    // still settable. The `data` getter's documented isolation for these
-    // structures is the FRESH structuredClone per call; this pins it (every
-    // other snapshot-contract test uses plain objects only).
+  it("Map/Set/Date members reject mutation as well as remaining isolated per read", async () => {
+    // Object.freeze is shallow over Map/Set/Date internal slots. The shared
+    // deep-immutability transform wraps those built-ins in read-only proxies.
     type MapState = { tags: Map<string, number> };
     type RichContext = { ids: Set<string>; at: Date };
     const dir = tempDir();
@@ -513,12 +511,11 @@ describe("createFileJob.data — deep-frozen clone snapshot contract", () => {
     expect(first.state.tags).not.toBe(second.state.tags);
     expect(first.context.ids).not.toBe(second.context.ids);
 
-    // The clone's Map/Set are NOT frozen (freeze cannot reach their contents) —
-    // mutation is legal and MUST stay contained in the throwaway clone:
-    first.state.tags.set("a", 999);
-    first.state.tags.set("evil", 1);
-    first.context.ids.add("evil");
-    first.context.at.setUTCFullYear(1999);
+    // Every built-in mutator fails at the returned snapshot boundary.
+    expect(() => first.state.tags.set("a", 999)).toThrow(/deeply immutable snapshot/);
+    expect(() => first.state.tags.delete("a")).toThrow(/deeply immutable snapshot/);
+    expect(() => first.context.ids.add("evil")).toThrow(/deeply immutable snapshot/);
+    expect(() => first.context.at.setUTCFullYear(1999)).toThrow(/deeply immutable snapshot/);
 
     // Subsequent reads are untouched:
     expect(job.data.state.tags.get("a")).toBe(1);
@@ -550,6 +547,31 @@ describe("createFileJob.data — deep-frozen clone snapshot contract", () => {
     const typed = asCacheError(failure, "createFileJob");
     expect(typed.message).toContain("losslessly serializable");
     expect(typed.message).toContain("FR-009");
+  });
+
+  it("readFileEventRecords returns Map/Set/Date payloads with blocked internal-slot mutation", async () => {
+    const dir = tempDir();
+    const job = createFileJob<S, C>({ directory: dir, initial: genesis() });
+    await job.appendEvent({
+      tags: new Map<string, number>([["a", 1]]),
+      ids: new Set<string>(["x"]),
+      at: new Date("2026-01-02T03:04:05.000Z"),
+    }, "immutable-event");
+
+    const result = readFileEventRecords(dir);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const event = result.value[0]?.event as {
+      tags: Map<string, number>;
+      ids: Set<string>;
+      at: Date;
+    };
+    expect(() => event.tags.set("evil", 2)).toThrow(/deeply immutable snapshot/);
+    expect(() => event.ids.add("evil")).toThrow(/deeply immutable snapshot/);
+    expect(() => event.at.setTime(0)).toThrow(/deeply immutable snapshot/);
+    expect(event.tags.get("a")).toBe(1);
+    expect(event.ids.has("x")).toBe(true);
+    expect(event.at.toISOString()).toBe("2026-01-02T03:04:05.000Z");
   });
 
   it("deepFreeze freezes objects nested under symbol keys too (fully-immutable contract)", () => {
@@ -790,9 +812,10 @@ describe("serializeFileCheckpoint — non-object data gate (round-14 A8)", () =>
     expect(typed.message).toContain(label === "array" ? "Array" : label);
     expect(typed.failureClass).toBe("permanent");
   });
-  it("still round-trips a plain-object data envelope (the gate is shape-only)", () => {
+  it("still round-trips a plain-object data envelope while keeping decoded data opaque", () => {
     const commit = serializeFileCheckpoint({ state: { kind: "pending", count: 1 }, context: { value: 1 } });
-    expect(commit.data).toEqual({ state: { kind: "pending", count: 1 }, context: { value: 1 } });
+    expect("data" in commit).toBe(false);
+    expect(Object.keys(commit)).toEqual(["json"]);
     const parsed = JSON.parse(commit.json) as { schemaVersion: number; data: { state: unknown; context: unknown } };
     expect(parsed.schemaVersion).toBe(1);
     expect(parsed.data).toEqual({ state: { kind: "pending", count: 1 }, context: { value: 1 } });

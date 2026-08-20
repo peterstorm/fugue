@@ -1,38 +1,117 @@
-// Shared deep-freeze primitive for the file backend.
+// Shared deep-immutability primitive for the file backend.
 //
-// ONE implementation of "recursively Object.freeze a structured value, in
-// place" (round-24 tda-4): the job snapshot (`job.ts` `data` getter) and the
-// strict event-log reader (`event-log.ts` `readStrict`) both promise
-// runtime-immutable results — the former typed `Readonly`, the latter typed
-// `readonly` — and both make that promise true with this same walk, so the
-// freeze semantics (symbol keys included, Map/Set/Date shallow) can never
-// drift between the two promises.
-//
-// Safe wherever the value is a FRESH tree the caller does not share: the
-// job's `structuredClone` output and the reader's freshly parsed JSON records
-// are both exactly that. Plain objects and arrays become fully immutable
-// (mutation throws in strict mode); Map/Set/Date instances are frozen
-// shallowly — their mutation APIs operate on internal slots, so their content
-// is guarded by the per-read clone isolation (job) or by never being
-// reachable from persisted bytes at all (the strict reader's JSON-only
-// records cannot carry Map/Set/Date).
+// Plain objects and arrays are frozen in place. Map, Set, and Date need more:
+// Object.freeze does not protect their internal slots, so this transform wraps
+// them in read-only proxies that preserve normal reads/iteration/serialization
+// while rejecting every mutator. Inputs are fresh detached trees at both call
+// sites (job snapshots and decoded event records), so replacing nested values
+// with proxies cannot affect caller-owned state.
+
+const mutationError = (kind: "Map" | "Set" | "Date", operation: PropertyKey): never => {
+  throw new TypeError(`${kind}.${String(operation)} is disabled on a deeply immutable snapshot`);
+};
+
+const readonlyMap = (
+  source: Map<unknown, unknown>,
+  freeze: (value: unknown) => unknown,
+  memo: WeakMap<object, unknown>,
+): Map<unknown, unknown> => {
+  const target = new Map<unknown, unknown>();
+  let proxy: Map<unknown, unknown>;
+  proxy = new Proxy(target, {
+    get(map, property) {
+      if (property === "set" || property === "delete" || property === "clear") {
+        return () => mutationError("Map", property);
+      }
+      if (property === "forEach") {
+        return (callback: (value: unknown, key: unknown, map: Map<unknown, unknown>) => void, thisArg?: unknown): void => {
+          map.forEach((value, key) => callback.call(thisArg, value, key, proxy));
+        };
+      }
+      const member = Reflect.get(map, property, map) as unknown;
+      return typeof member === "function" ? member.bind(map) : member;
+    },
+  });
+  memo.set(source, proxy);
+  for (const [key, value] of source) target.set(freeze(key), freeze(value));
+  Object.freeze(target);
+  return proxy;
+};
+
+const readonlySet = (
+  source: Set<unknown>,
+  freeze: (value: unknown) => unknown,
+  memo: WeakMap<object, unknown>,
+): Set<unknown> => {
+  const target = new Set<unknown>();
+  let proxy: Set<unknown>;
+  proxy = new Proxy(target, {
+    get(set, property) {
+      if (property === "add" || property === "delete" || property === "clear") {
+        return () => mutationError("Set", property);
+      }
+      if (property === "forEach") {
+        return (callback: (value: unknown, key: unknown, set: Set<unknown>) => void, thisArg?: unknown): void => {
+          set.forEach((value) => callback.call(thisArg, value, value, proxy));
+        };
+      }
+      const member = Reflect.get(set, property, set) as unknown;
+      return typeof member === "function" ? member.bind(set) : member;
+    },
+  });
+  memo.set(source, proxy);
+  for (const value of source) target.add(freeze(value));
+  Object.freeze(target);
+  return proxy;
+};
+
+const readonlyDate = (source: Date, memo: WeakMap<object, unknown>): Date => {
+  let proxy: Date;
+  proxy = new Proxy(source, {
+    get(date, property) {
+      if (typeof property === "string" && property.startsWith("set")) {
+        return () => mutationError("Date", property);
+      }
+      const member = Reflect.get(date, property, date) as unknown;
+      return typeof member === "function" ? member.bind(date) : member;
+    },
+  });
+  memo.set(source, proxy);
+  Object.freeze(source);
+  return proxy;
+};
 
 /**
- * Recursively `Object.freeze` a structured value, in place.
+ * Recursively make a detached structured value runtime-immutable.
  *
- * `Reflect.ownKeys` — not `Object.getOwnPropertyNames` — so objects nested
- * under symbol keys are frozen too. (The current sources never carry
- * symbol-keyed properties: `structuredClone` omits symbol keys, the FR-009
- * boundary rejects symbol-keyed state, and parsed JSON is string-keyed — but
- * the totality keeps the primitive correct for any future source that does
- * carry them, pinned by `__testDeepFreeze` in job.ts.)
+ * Repeated references and cycles preserve identity through `memo`. Plain
+ * property descriptors are retained; only their value is replaced when a
+ * nested Map/Set/Date needs a read-only proxy.
  */
 export const deepFreeze = <T>(value: T): T => {
-  if (value !== null && typeof value === "object") {
-    for (const key of Reflect.ownKeys(value)) {
-      deepFreeze((value as Record<PropertyKey, unknown>)[key]);
+  const memo = new WeakMap<object, unknown>();
+
+  const freeze = (current: unknown): unknown => {
+    if (current === null || typeof current !== "object") return current;
+    const known = memo.get(current);
+    if (known !== undefined) return known;
+
+    if (current instanceof Map) return readonlyMap(current, freeze, memo);
+    if (current instanceof Set) return readonlySet(current, freeze, memo);
+    if (current instanceof Date) return readonlyDate(current, memo);
+
+    memo.set(current, current);
+    for (const key of Reflect.ownKeys(current)) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(current, key);
+      if (descriptor === undefined || !("value" in descriptor)) continue;
+      const frozenValue = freeze(descriptor.value);
+      if (frozenValue !== descriptor.value) {
+        Reflect.defineProperty(current, key, { ...descriptor, value: frozenValue });
+      }
     }
-    Object.freeze(value);
-  }
-  return value;
+    Object.freeze(current);
+    return current;
+  };
+
+  return freeze(value) as T;
 };

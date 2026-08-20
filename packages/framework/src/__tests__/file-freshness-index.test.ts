@@ -25,6 +25,7 @@ import { InMemoryFreshnessIndex } from "../dag-runtime/freshness-check.js";
 import {
   __testSerializeRedisFreshnessMember,
   createFileFreshnessIndex,
+  createFileFreshnessIndexForTesting,
 } from "../file/freshness-index.js";
 import { createFileFreshnessIndex as barrelCreateFileFreshnessIndex } from "../file.js";
 import { TTL_SECONDS } from "../checkpoint/checkpointer.js";
@@ -175,6 +176,7 @@ describe("createFileFreshnessIndex — public surface and durable singleton", ()
       [tempDirectory(), null],
       [tempDirectory(), { now: 7 }],
       [tempDirectory(), { typo: true }],
+      [tempDirectory(), { atomicWriteFileHooks: {} }],
       [tempDirectory(), new (class OptionsInstance {})()],
     ] as const) {
       let failure: unknown;
@@ -913,7 +915,7 @@ describe("createFileFreshnessIndex — strict codec and typed failures", () => {
     const squatterFile = join(directory, "tmp-squatter");
     writeFileSync(squatterFile, "squatter");
 
-    const index = createFileFreshnessIndex(directory, {
+    const index = createFileFreshnessIndexForTesting(directory, {
       now: () => 1_000,
       atomicWriteFileHooks: {
         temporaryPath: () => join(squatterFile, "tmp.json"),

@@ -64,6 +64,21 @@ const WNOHANG = 1;
 /** A non-blocking zombie reaper: drains every currently-reapable child. */
 type ReapFn = () => void;
 
+/** Closed result of probing one libc candidate for a callable `waitpid`. */
+export type ReaperLoadResult =
+  | { readonly kind: "loaded"; readonly reaper: ReapFn }
+  | { readonly kind: "failed"; readonly diagnostic: string };
+
+const nativeLoadDiagnostic = (error: unknown): string => {
+  let raw: string;
+  try {
+    raw = error instanceof Error ? error.message : String(error);
+  } catch {
+    raw = "<unprintable native-loader failure>";
+  }
+  return raw.replace(/\s+/g, " ").slice(0, 500);
+};
+
 /**
  * PURE drain loop for the reaper: invoke `reapOne` (one non-blocking `waitpid`)
  * until it reports nothing left to reap. `reapOne` returns the waitpid result:
@@ -109,16 +124,18 @@ export const drainReap = (reapOne: () => number, onFault?: () => void): void => 
 
 /**
  * Try to bind a reaper to libc's `waitpid` via ONE candidate shared object.
- * Returns the reaper closure, or `null` if this candidate can't provide `waitpid`
- * (wrong libc for the image / dlopen failure). Injectable into `resolveReaper` so
- * the candidate-resolution loop and its fail-fast are unit-testable.
+ * Failure retains a bounded one-line diagnostic so startup can explain why
+ * every candidate was rejected. Injectable into `resolveReaper` so the pure
+ * candidate-resolution loop and its fail-fast are unit-testable.
  */
-const loadWaitpidReaper = (candidate: string, onFault?: () => void): ReapFn | null => {
+const loadWaitpidReaper = (candidate: string, onFault?: () => void): ReaperLoadResult => {
   try {
     const lib = dlopen(candidate, {
       waitpid: { args: [FFIType.i32, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
     });
-    if (typeof lib.symbols.waitpid !== "function") return null;
+    if (typeof lib.symbols.waitpid !== "function") {
+      return { kind: "failed", diagnostic: "loaded library did not expose a callable waitpid symbol" };
+    }
     // `status` MUST stay alive for the process lifetime (the kernel writes the
     // child's exit status into it); `ptr(status)` is recomputed each call so the
     // closure keeps `status` (and `lib`) referenced — never GC'd out from under a
@@ -126,10 +143,13 @@ const loadWaitpidReaper = (candidate: string, onFault?: () => void): ReapFn | nu
     const status = new Int32Array(1);
     // -1 = wait for ANY child (incl. re-parented orphans). Drained (and made
     // throw-safe) by `drainReap`.
-    return () =>
-      drainReap(() => lib.symbols.waitpid(-1, ptr(status), WNOHANG) as number, onFault);
-  } catch {
-    return null;
+    return {
+      kind: "loaded",
+      reaper: () =>
+        drainReap(() => lib.symbols.waitpid(-1, ptr(status), WNOHANG) as number, onFault),
+    };
+  } catch (error) {
+    return { kind: "failed", diagnostic: nativeLoadDiagnostic(error) };
   }
 };
 
@@ -142,14 +162,16 @@ const loadWaitpidReaper = (candidate: string, onFault?: () => void): ReapFn | nu
  */
 export const resolveReaper = (
   candidates: readonly string[],
-  load: (candidate: string) => ReapFn | null = loadWaitpidReaper,
+  load: (candidate: string) => ReaperLoadResult = loadWaitpidReaper,
 ): ReapFn => {
+  const failures: string[] = [];
   for (const candidate of candidates) {
-    const reaper = load(candidate);
-    if (reaper) return reaper;
+    const result = load(candidate);
+    if (result.kind === "loaded") return result.reaper;
+    failures.push(`${candidate}: ${result.diagnostic}`);
   }
   throw new Error(
-    `[thin-init] could not load a libc exporting waitpid (PID 1 cannot reap zombies). Tried: ${candidates.join(", ")}`,
+    `[thin-init] could not load a libc exporting waitpid (PID 1 cannot reap zombies). Candidate failures: ${failures.join("; ")}`,
   );
 };
 

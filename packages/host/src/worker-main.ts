@@ -49,6 +49,7 @@ import { createRedisConnectivity } from "./adapters/redis-connectivity.js";
 import { buildCdratorCapability } from "./adapters/cdrator-capability.js";
 import { buildDocumentsCapability, describeDocumentsAdapter } from "./adapters/documents-capability.js";
 import { buildOracleCapability, connectStringHost } from "./adapters/oracle-capability.js";
+import { closeHitlQueueBackend, createHitlQueueBackend } from "./hitl/queue-backend.js";
 import type { SharedInfra } from "./ports.js";
 import type { SyncLogger } from "./sync/sync-loop.js";
 import { ok, err, noopTracer, AnthropicLlmClient, OpenAILlmClient, createHttpCapability, systemClock } from "@fuguejs/framework";
@@ -296,13 +297,7 @@ const main = async () => {
     const git = isLocalMode ? createLocalGitAdapter() : createBunGitAdapter();
     const loader = createModuleLoader(logger);
 
-    let queueBackend: import("@fuguejs/framework").QueueBackend | undefined;
-    const hitlConfigured = config.TEAMS_WEBHOOK_URL !== undefined || config.BOT_APP_ID !== undefined;
-    if (hitlConfigured) {
-      const { createBullMQBackend } = await import("@fuguejs/framework/bullmq");
-      queueBackend = createBullMQBackend(config.REDIS_URL);
-      logger.info("HITL queue backend (BullMQ) constructed");
-    }
+    const queueBackend = await createHitlQueueBackend(config, logger);
 
     // Step 6: createHost bound to THIS tenant, serving on the per-tenant UDS.
     const hostResult = await createHost({
@@ -316,11 +311,7 @@ const main = async () => {
       tenant,
       bind: { unix: socketPath },
       onShutdown: async () => {
-        if (queueBackend) {
-          await queueBackend.close().catch((e: unknown) => {
-            logger.error("Failed to close HITL queue backend", { error: e instanceof Error ? e.message : String(e) });
-          });
-        }
+        await closeHitlQueueBackend(queueBackend, logger);
         await disconnectRedis();
       },
     });

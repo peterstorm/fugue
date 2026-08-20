@@ -2,11 +2,13 @@ import { describe, expect, it } from "bun:test";
 import {
   fileCacheError,
   fileOperationError,
+  warnWithoutThrowing,
   type FileOperation,
 } from "../file/boundary-error.js";
 import { frameworkError } from "../types/error-factories.js";
 import type { FrameworkError } from "../types/errors.js";
 import { retriabilityOf } from "../types/errors.js";
+import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
 
 const FILE_OPERATION_TYPECHECK_COVERAGE = [
   "acquireFileLock",
@@ -98,6 +100,38 @@ describe("file boundary error operation vocabulary", () => {
       operation: "consumer-defined-operation",
       message: "external adapter failure",
     });
+  });
+});
+
+describe("warnWithoutThrowing — last-resort diagnostics", () => {
+  it("falls back to stderr when the configured logger throws", () => {
+    const fallback: string[] = [];
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: () => { throw new Error("logger offline"); },
+      error: () => {},
+    });
+    try {
+      expect(() => warnWithoutThrowing("owned lock cleanup failed", (line) => fallback.push(line))).not.toThrow();
+      expect(fallback).toEqual(["[file-backend warning fallback] owned lock cleanup failed\n"]);
+    } finally {
+      __resetFrameworkLogger();
+    }
+  });
+
+  it("never replaces the primary failure when both logger and stderr fallback throw", () => {
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: () => { throw new Error("logger offline"); },
+      error: () => {},
+    });
+    try {
+      expect(() => warnWithoutThrowing("cleanup failed", () => { throw new Error("stderr offline"); })).not.toThrow();
+    } finally {
+      __resetFrameworkLogger();
+    }
   });
 });
 
