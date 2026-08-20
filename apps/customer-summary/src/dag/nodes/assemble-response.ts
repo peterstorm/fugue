@@ -8,16 +8,40 @@ import { SynthesisOutputSchema } from "../../schemas/summary.js";
 import type { SynthesisOutput } from "../../schemas/summary.js";
 import type { ExtractionResult } from "./extract-features.js";
 
+const GuardrailCheckSchema = z.object({
+  dimension: z.string(),
+  passed: z.boolean(),
+  detail: z.string(),
+});
+
+const GuardrailResultSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("skipped"),
+    value: z.undefined(),
+    passed: z.literal(true),
+    warnings: z.array(z.string()),
+    checks: z.array(GuardrailCheckSchema),
+  }),
+  z.object({
+    kind: z.literal("validated"),
+    value: SynthesisOutputSchema,
+    passed: z.boolean(),
+    warnings: z.array(z.string()),
+    checks: z.array(GuardrailCheckSchema),
+  }),
+  z.object({
+    kind: z.literal("failed"),
+    passed: z.literal(false),
+    error: z.string(),
+    warnings: z.array(z.string()),
+    checks: z.array(GuardrailCheckSchema),
+  }),
+]);
+
 const InputSchema = z.object({
   $input: z.object({ customerId: z.string().min(1) }),
   "extract-features": z.object({ branch: z.string() }).passthrough(),
-  "grounding-guardrail": z.object({
-    kind: z.enum(["skipped", "validated"]),
-    value: SynthesisOutputSchema.optional(),
-    passed: z.boolean(),
-    warnings: z.array(z.string()),
-    checks: z.array(z.object({ dimension: z.string(), passed: z.boolean(), detail: z.string() })),
-  }).optional(),
+  "grounding-guardrail": GuardrailResultSchema.optional(),
 });
 
 interface AssembleInput {

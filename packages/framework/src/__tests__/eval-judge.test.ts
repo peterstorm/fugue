@@ -280,6 +280,19 @@ describe("createEvalJudgeNode", () => {
       expect(result.reason).toContain("No LLM client available");
     });
 
+    test("a throwing logger cannot violate the no-LLM result seam", async () => {
+      const node = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
+      const result = await node.run("in", "out", makeCtx({
+        logger: {
+          warn: () => { throw new Error("logger transport down"); },
+          error: () => {},
+        },
+      }));
+
+      expect(result.outcome).toBe("skipped-llm-failure");
+      expect(result.reason).toContain("No LLM client available");
+    });
+
     test("fails quality gating closed when LLM returns an error", async () => {
       const llm = makeFailingLlm("rate limited");
       const node = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });

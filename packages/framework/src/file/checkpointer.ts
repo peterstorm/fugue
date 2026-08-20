@@ -126,7 +126,6 @@ import { err, ok } from "../types/result.js";
 import { CHECKPOINT_INVALID_NODE_ID, frameworkError } from "../types/error-factories.js";
 import { fwLogger } from "../logger.js";
 import {
-  isMissingPathError,
   isMissingPathProbe,
   probeErrorCode,
   safeDiagnosticRender,
@@ -503,7 +502,7 @@ const createFileCheckpointerUnchecked = (
         // inspection is itself untrusted; a trapped getter becomes part of the
         // typed diagnostic instead of being erased or escaping raw.
         const codeProbe = probeErrorCode(error);
-        if (isMissingPathError(error)) return ok(null);
+        if (isMissingPathProbe(codeProbe)) return ok(null);
         return err(
           checkpointerCacheError(
             "load",

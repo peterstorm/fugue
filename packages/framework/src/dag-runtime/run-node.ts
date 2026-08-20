@@ -1,5 +1,6 @@
 // runNodeShared — single implementation of per-node execution.
-// Sole caller: `dag-runtime/wave-execution.ts`.
+// The only production caller is `dag-runtime/wave-execution.ts`; focused tests
+// invoke this seam directly to pin pre-span behavior.
 //
 // Behavioral options:
 //
@@ -14,8 +15,9 @@
 // `Err({ kind: "checkpoint-write-failed" })`. No writer wired → no write;
 // checkpointing is driven solely by the presence of the writer.
 //
-// The caller always emits the same `node-start | node-end | node-error` event
-// sequence — there is no caller-specific event suppression.
+// Event shape follows the execution path: checkpoint hits emit `node-skipped`;
+// input assembly/validation can fail before `node-start`; dispatched execution
+// emits `node-start` followed by `node-end` or `node-error`.
 
 import type { Result } from "../types/result.js";
 import { ok, err } from "../types/result.js";

@@ -139,6 +139,29 @@ interface ConnectFailure {
   readonly connected: readonly CapabilityHandle[];
 }
 
+type LifecycleLogMethod = (msg: string, data?: Record<string, unknown>) => void;
+type LifecycleLogger = {
+  readonly info?: LifecycleLogMethod;
+  readonly warn?: LifecycleLogMethod;
+  readonly error?: LifecycleLogMethod;
+};
+type ConnectLogger = Required<Pick<LifecycleLogger, "info" | "error">>;
+type CloseLogger = Required<Pick<LifecycleLogger, "info" | "warn">>;
+
+/** Lifecycle diagnostics are secondary and must not alter control flow. */
+const logLifecycleWithoutThrowing = (
+  logger: LifecycleLogger,
+  level: "info" | "warn" | "error",
+  message: string,
+  data?: Record<string, unknown>,
+): void => {
+  try {
+    logger[level]?.(message, data);
+  } catch {
+    // Continue with the already-decided lifecycle or cleanup outcome.
+  }
+};
+
 /**
  * Connect all capability handles in topological order.
  * Stops on first failure; the Err carries the connected prefix so the
@@ -146,18 +169,18 @@ interface ConnectFailure {
  */
 export const connectAll = async (
   handles: readonly CapabilityHandle[],
-  logger: { info: (msg: string, data?: Record<string, unknown>) => void; error: (msg: string, data?: Record<string, unknown>) => void },
+  logger: ConnectLogger,
 ): Promise<Result<void, ConnectFailure>> => {
   const connected: CapabilityHandle[] = [];
   for (const handle of handles) {
     if (handle.connect) {
-      logger.info(`Connecting capability '${handle.name}'...`);
+      logLifecycleWithoutThrowing(logger, "info", `Connecting capability '${handle.name}'...`);
       try {
         await handle.connect();
-        logger.info(`Capability '${handle.name}' connected`);
+        logLifecycleWithoutThrowing(logger, "info", `Capability '${handle.name}' connected`);
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
-        logger.error(`Capability '${handle.name}' failed to connect`, { error: message });
+        logLifecycleWithoutThrowing(logger, "error", `Capability '${handle.name}' failed to connect`, { error: message });
         // The failing handle's adapter may have constructed resources at
         // factory time (e.g. a pg Pool opens sockets before connect() runs).
         // Close it best-effort so an aborted boot doesn't orphan them — the
@@ -167,9 +190,12 @@ export const connectAll = async (
           try {
             await handle.close();
           } catch (closeError) {
-            logger.error(`Capability '${handle.name}' failed to close after connect failure`, {
-              error: closeError instanceof Error ? closeError.message : String(closeError),
-            });
+            logLifecycleWithoutThrowing(
+              logger,
+              "error",
+              `Capability '${handle.name}' failed to close after connect failure`,
+              { error: closeError instanceof Error ? closeError.message : String(closeError) },
+            );
           }
         }
         return err({
@@ -193,25 +219,6 @@ interface CloseFailure {
   readonly error: string;
 }
 
-type CloseLogger = {
-  readonly info: (msg: string, data?: Record<string, unknown>) => void;
-  readonly warn: (msg: string, data?: Record<string, unknown>) => void;
-};
-
-/** Cleanup diagnostics are secondary and must never alter cleanup control flow. */
-const logCloseWithoutThrowing = (
-  logger: CloseLogger,
-  level: "info" | "warn",
-  message: string,
-  data?: Record<string, unknown>,
-): void => {
-  try {
-    logger[level](message, data);
-  } catch {
-    // No fallback can improve the already-decided close outcome. Continue.
-  }
-};
-
 /**
  * Close all capability handles in reverse order (dependencies close last).
  * Best-effort — continues on failure, logs errors. Returns the failures so
@@ -230,12 +237,12 @@ export const closeAll = async (
 
     try {
       await handle.close();
-      logCloseWithoutThrowing(logger, "info", `Capability '${handle.name}' closed`);
+      logLifecycleWithoutThrowing(logger, "info", `Capability '${handle.name}' closed`);
     } catch (caught) {
       const error = safeErrorMessage(caught);
       // Record the close outcome before attempting secondary diagnostics.
       failures.push({ name: handle.name, error });
-      logCloseWithoutThrowing(
+      logLifecycleWithoutThrowing(
         logger,
         "warn",
         `Capability '${handle.name}' failed to close`,

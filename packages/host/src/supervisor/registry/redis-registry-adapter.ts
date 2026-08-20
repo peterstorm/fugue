@@ -54,7 +54,6 @@ import {
 } from "./tenant-registry.js";
 import type {
   ActiveTenantConfig,
-  DeregisteredTenantConfig,
   TenantConfig,
   TenantRegistry,
 } from "./tenant-registry.js";
@@ -146,42 +145,47 @@ const serialize = (cfg: TenantConfig): string => {
   );
 };
 
-/**
- * Parse a persisted record back into a validated `TenantConfig` through the pure
- * core's smart constructor (parse-don't-validate). Re-brands `id` / `secretsRef`
- * via their canonical constructors. Returns `undefined` for an unreadable or
- * invalid record (the caller treats that as data corruption, best-effort skip).
- */
-const deserialize = (raw: string): TenantConfig | undefined => {
+/** Persisted tenant corruption is data, not an erased `undefined`. */
+type CorruptTenantRecord = {
+  readonly kind: "corrupt-tenant-record";
+  readonly reason: string;
+};
+
+const corruptTenantRecord = (reason: string): Result<never, CorruptTenantRecord> =>
+  err({ kind: "corrupt-tenant-record", reason });
+
+/** Parse persisted bytes into the validated tenant ADT or a typed corruption. */
+const deserialize = (raw: string): Result<TenantConfig, CorruptTenantRecord> => {
   let obj: unknown;
   try {
     obj = JSON.parse(raw);
   } catch {
-    return undefined;
+    return corruptTenantRecord("invalid JSON");
   }
-  if (typeof obj !== "object" || obj === null) return undefined;
+  if (typeof obj !== "object" || obj === null || Array.isArray(obj)) {
+    return corruptTenantRecord("record must be an object");
+  }
   const o = obj as Record<string, unknown>;
-  if (typeof o.id !== "string") return undefined;
+  if (typeof o.id !== "string") return corruptTenantRecord("id must be a string");
   const idR = tenantId(o.id);
-  if (!idR.ok) return undefined;
-  // A non-string or BLANK secretsRef is a corrupt record (skip), not a 500: every
-  // tenant carries a non-blank ref (enforced at the register boundary), and
-  // `markSecretsRef` throws on blank — so guard here rather than let a corrupt
-  // round-trip throw.
-  if (typeof o.secretsRef !== "string" || o.secretsRef.trim() === "") return undefined;
-  // Fail-closed on the lifecycle discriminant: a record without a known `status`
-  // is treated as corrupt (skip), consistent with every other corrupt-record
-  // branch. An unknown/missing status NEVER silently round-trips as active.
-  if (o.status !== "active" && o.status !== "deregistered") return undefined;
-  // A deregistered record MUST carry a numeric tombstone, or it is corrupt.
-  if (o.status === "deregistered" && typeof o.deregisteredAt !== "number") return undefined;
-  const km = o.keycloakClientMapping as Record<string, unknown> | undefined;
-  const adm = o.admission as Record<string, unknown> | undefined;
-  if (!km || !adm) return undefined;
-  // String-typed persisted fields MUST round-trip as strings. A non-string value
-  // is a corrupt record (skip), mirroring the id / secretsRef / agent-map branches
-  // above — never coerce (`String(42)` → "42") a malformed value into a
-  // valid-looking team / realm / clientId / fsRoot. Parse-don't-validate boundary.
+  if (!idR.ok) return corruptTenantRecord("id is invalid");
+  if (typeof o.secretsRef !== "string" || o.secretsRef.trim() === "") {
+    return corruptTenantRecord("secretsRef must be a non-blank string");
+  }
+  if (o.status !== "active" && o.status !== "deregistered") {
+    return corruptTenantRecord("status must be active or deregistered");
+  }
+  if (o.status === "deregistered" && typeof o.deregisteredAt !== "number") {
+    return corruptTenantRecord("deregisteredAt must be numeric for a deregistered tenant");
+  }
+  if (typeof o.keycloakClientMapping !== "object" || o.keycloakClientMapping === null || Array.isArray(o.keycloakClientMapping)) {
+    return corruptTenantRecord("keycloakClientMapping must be an object");
+  }
+  if (typeof o.admission !== "object" || o.admission === null || Array.isArray(o.admission)) {
+    return corruptTenantRecord("admission must be an object");
+  }
+  const km = o.keycloakClientMapping as Record<string, unknown>;
+  const adm = o.admission as Record<string, unknown>;
   const rawTeam = o.team;
   const rawRealm = km.realm;
   const rawClientId = km.clientId;
@@ -194,38 +198,27 @@ const deserialize = (raw: string): TenantConfig | undefined => {
     typeof rawFsRoot !== "string" ||
     typeof rawDagsRoot !== "string"
   ) {
-    return undefined;
+    return corruptTenantRecord("team, realm, clientId, fsRoot, and dagsRoot must be strings");
   }
-  // Sanitize the DAG→client map: every value must be a string. A non-string value
-  // is a corrupt record (skip), mirroring the register-boundary parse — never cast
-  // a malformed value through as a client id. Own enumerable properties only.
   const rawAgentMap = km.agentClientIdsByDag;
-  const agentClientIdsByDag: Record<string, string> = {};
-  if (typeof rawAgentMap === "object" && rawAgentMap !== null) {
-    for (const [dag, value] of Object.entries(rawAgentMap as Record<string, unknown>)) {
-      if (typeof value !== "string") return undefined;
-      agentClientIdsByDag[dag] = value;
-    }
+  if (typeof rawAgentMap !== "object" || rawAgentMap === null || Array.isArray(rawAgentMap)) {
+    return corruptTenantRecord("agentClientIdsByDag must be an object");
   }
-  // Admission limits MUST round-trip as numbers. A non-number persisted value is a
-  // corrupt record (skip) — never coerce (`Number(true)` → 1, `Number(null)` → 0,
-  // `Number("5")` → 5) a malformed value into a valid-looking limit, mirroring the
-  // string-field guards above. `tenantConfig` is then the final non-negative-integer
-  // assertion over already-typed numbers. Parse-don't-validate boundary.
+  const agentClientIdsByDag: Record<string, string> = {};
+  for (const [dag, value] of Object.entries(rawAgentMap as Record<string, unknown>)) {
+    if (typeof value !== "string") {
+      return corruptTenantRecord("agentClientIdsByDag values must be strings");
+    }
+    agentClientIdsByDag[dag] = value;
+  }
   const rawMaxConcurrentRuns = adm.maxConcurrentRuns;
   const rawMaxQueuedRuns = adm.maxQueuedRuns;
   if (typeof rawMaxConcurrentRuns !== "number" || typeof rawMaxQueuedRuns !== "number") {
-    return undefined;
+    return corruptTenantRecord("admission limits must be numbers");
   }
-  // `eagerPin` MUST round-trip as a boolean. A non-boolean is a corrupt record
-  // (skip), mirroring the string/number guards above — never TRUTHY-coerce
-  // (`Boolean("false")` → true) a malformed value into a valid-looking keep-hot flag
-  // that would silently pin a worker against idle eviction (it is the AUTHORITATIVE
-  // pin source, AD-7). Parse-don't-validate boundary, consistent with the strict
-  // `o.eagerPin === true` read in worker-registry-redis.ts / admin/tenants.ts.
-  if (typeof o.eagerPin !== "boolean") return undefined;
-  // Build the validated ACTIVE config through the smart constructor (the parse
-  // boundary), then promote to the deregistered variant if the record said so.
+  if (typeof o.eagerPin !== "boolean") {
+    return corruptTenantRecord("eagerPin must be a boolean");
+  }
   const parsed = tenantConfig({
     id: idR.value,
     team: markTeam(rawTeam),
@@ -243,14 +236,13 @@ const deserialize = (raw: string): TenantConfig | undefined => {
     },
     eagerPin: o.eagerPin,
   });
-  if (!parsed.ok) return undefined;
-  if (o.status === "active") return parsed.value;
-  const tombstoned: DeregisteredTenantConfig = {
+  if (!parsed.ok) return corruptTenantRecord("record violates tenant configuration invariants");
+  if (o.status === "active") return ok(parsed.value);
+  return ok({
     ...parsed.value,
     status: "deregistered",
     deregisteredAt: o.deregisteredAt as number,
-  };
-  return tombstoned;
+  });
 };
 
 // ── Port ─────────────────────────────────────────────────────────────────────
@@ -566,12 +558,22 @@ export const createRedisTenantRegistry = (
           }
           if (!valR.ok) return err(dead("tenant-hydrate"));
           if (valR.value === null || valR.value === "") continue;
-          const cfg = deserialize(valR.value);
-          if (cfg === undefined) {
-            logger?.warn("[tenant-registry] Skipping corrupt tenant config record", { key });
-            continue;
+          const parsed = deserialize(valR.value);
+          if (!parsed.ok) {
+            try {
+              logger?.warn("[tenant-registry] Corrupt tenant config aborted hydrate", {
+                key,
+                reason: parsed.error.reason,
+              });
+            } catch {
+              // Diagnostic failure must not replace the typed corruption result.
+            }
+            return err({
+              kind: "config-invalid",
+              message: `persisted tenant registry contains a corrupt record at '${key}': ${parsed.error.reason}`,
+            });
           }
-          configs.push(cfg);
+          configs.push(parsed.value);
         }
         cursor = scanResult.value.cursor;
       } while (cursor !== "0");

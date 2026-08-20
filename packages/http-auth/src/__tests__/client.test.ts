@@ -7,8 +7,8 @@
  * header composition (Authorization Bearer + defaultHeaders + per-call); body
  * JSON-stringification + Zod validation of the response; the `401` →
  * invalidate + re-mint + single retry path; error classification (transient
- * 5xx/network vs non-retriable parse/4xx); and that no exception escapes any
- * method.
+ * network/408/429/5xx vs non-retriable parse/other 4xx); and that no exception
+ * escapes any method.
  */
 
 import { describe, it, expect } from "bun:test";

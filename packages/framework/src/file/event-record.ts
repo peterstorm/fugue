@@ -494,7 +494,7 @@ const assertLosslessEventUnchecked = (
     const prior = active.get(value);
     if (prior !== undefined) {
       throw new Error(
-        `serializeFileEventRecord: circular reference at ${path} — ${prior} is an ancestor of ${path}; JSON cannot represent object cycles (FR-009)`,
+        `${operation}: circular reference at ${path} — ${prior} is an ancestor of ${path}; JSON cannot represent object cycles (FR-009)`,
       );
     }
     // Depth ceiling (FR-009): a value nested past the shared

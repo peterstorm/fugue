@@ -254,6 +254,8 @@ export const proveResumeAgreement = <S, E, C>(
   //    excessive-depth failures never rely on the permissive decoder
   //    throwing.
   const checkpointPath = join(directory, CHECKPOINT_FILE);
+  const corruptCheckpoint = (message: string): Result<never, FrameworkError> =>
+    err(frameworkError.checkpointCorrupt(runId, `${checkpointPath}: ${message}`));
 
   // Raw-JSON seam, identical to the strict record codec's ordering:
   // `JSON.parse` → validate the COMPLETE raw checkpoint with the shared exact
@@ -272,12 +274,7 @@ export const proveResumeAgreement = <S, E, C>(
   try {
     rawEnvelope = JSON.parse(checkpointJson);
   } catch (error) {
-    return err(
-      frameworkError.checkpointCorrupt(
-        runId,
-        `${checkpointPath}: not valid JSON: ${safeErrorMessage(error)}`,
-      ),
-    );
+    return corruptCheckpoint(`not valid JSON: ${safeErrorMessage(error)}`);
   }
   const grammar = validateSerializedValueGrammar(rawEnvelope, {
     rootPath: "checkpoint",
@@ -285,11 +282,8 @@ export const proveResumeAgreement = <S, E, C>(
     initialDepth: 1,
   });
   if (!grammar.ok) {
-    return err(
-      frameworkError.checkpointCorrupt(
-        runId,
-        `${checkpointPath}: serialized checkpoint is not canonical: ${grammar.error}; the checkpoint is corrupt or hostile and resume fails closed (FR-009)`,
-      ),
+    return corruptCheckpoint(
+      `serialized checkpoint is not canonical: ${grammar.error}; the checkpoint is corrupt or hostile and resume fails closed (FR-009)`,
     );
   }
   const envelopeResult = guardCheckpointCorrupt(
@@ -300,38 +294,26 @@ export const proveResumeAgreement = <S, E, C>(
   if (!envelopeResult.ok) return envelopeResult;
   const envelope = envelopeResult.value;
   if (typeof envelope !== "object" || envelope === null || Array.isArray(envelope)) {
-    return err(
-      frameworkError.checkpointCorrupt(
-        runId,
-        `${checkpointPath}: checkpoint must be a JSON object with the shape { schemaVersion, data: { state, context } }`,
-      ),
+    return corruptCheckpoint(
+      "checkpoint must be a JSON object with the shape { schemaVersion, data: { state, context } }",
     );
   }
   const record = envelope as Record<string, unknown>;
   for (const key of Object.keys(record)) {
     if (key !== "schemaVersion" && key !== "data") {
-      return err(
-        frameworkError.checkpointCorrupt(
-          runId,
-          `${checkpointPath}: unknown top-level field ${JSON.stringify(key)} — the checkpoint envelope is exactly { schemaVersion, data: { state, context } }`,
-        ),
+      return corruptCheckpoint(
+        `unknown top-level field ${JSON.stringify(key)} — the checkpoint envelope is exactly { schemaVersion, data: { state, context } }`,
       );
     }
   }
   if (record.schemaVersion !== JOURNAL_SCHEMA_VERSION) {
-    return err(
-      frameworkError.checkpointCorrupt(
-        runId,
-        `${checkpointPath}: unsupported schemaVersion ${safeDiagnosticRender(record.schemaVersion)} — expected ${JOURNAL_SCHEMA_VERSION}`,
-      ),
+    return corruptCheckpoint(
+      `unsupported schemaVersion ${safeDiagnosticRender(record.schemaVersion)} — expected ${JOURNAL_SCHEMA_VERSION}`,
     );
   }
   if (!("data" in record)) {
-    return err(
-      frameworkError.checkpointCorrupt(
-        runId,
-        `${checkpointPath}: missing data payload — the checkpoint envelope is { schemaVersion, data: { state, context } }`,
-      ),
+    return corruptCheckpoint(
+      "missing data payload — the checkpoint envelope is { schemaVersion, data: { state, context } }",
     );
   }
   const decodedAttempt = guardCheckpointCorrupt(
@@ -359,12 +341,7 @@ export const proveResumeAgreement = <S, E, C>(
   );
   if (!decodedAttempt.ok) return decodedAttempt;
   if (decodedAttempt.value.kind === "rejected") {
-    return err(
-      frameworkError.checkpointCorrupt(
-        runId,
-        `${checkpointPath}: ${decodedAttempt.value.message}`,
-      ),
-    );
+    return corruptCheckpoint(decodedAttempt.value.message);
   }
   const checkpointData = decodedAttempt.value.value;
 

@@ -363,6 +363,8 @@ describe("createFileJob.updateData — checkpoint losslessness (FR-009)", () => 
     expect(typed.message).toContain("updateData");
     expect(typed.message).toContain("FR-009");
     expect(typed.message).toMatch(/circular/);
+    expect(typed.message).toContain("serializeFileCheckpoint:");
+    expect(typed.message).not.toContain("serializeFileEventRecord:");
     expect(typed.message).toContain(join(dir, CHECKPOINT_FILE));
     expect(createFileJournal(dir).readCheckpoint()).toBeNull();
     expect(job.data).toEqual(genesis());

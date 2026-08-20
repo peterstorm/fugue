@@ -18,7 +18,8 @@
 import type { DagDef } from "../types/dag.js";
 import type { NodeDef, ValidatedNodeContext } from "../types/node.js";
 import type { MintingAuthority } from "../types/capability-broker.js";
-import type { FrameworkError } from "../types/errors.js";
+import { isFrameworkError, messageOf, type FrameworkError } from "../types/errors.js";
+import { safeErrorMessage } from "../types/safe-error.js";
 import type { NodeId } from "../types/ids.js";
 import { nodeId } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
@@ -152,25 +153,29 @@ export const executeWave = async (
           { checkpoint: resumeCheckpoint, now: nowFn, minting },
         );
         return { nodeId, result, outcome };
-      } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
-        const crash: FrameworkError = {
-          kind: "node-crash",
-          nodeId,
-          message: `unexpected executor error: ${message}`,
-          retriability: "retriable",
-          stack: e instanceof Error ? e.stack : undefined,
-        };
+      } catch (caught) {
+        const frameworkError: FrameworkError = isFrameworkError(caught)
+          ? caught
+          : {
+              kind: "node-crash",
+              nodeId,
+              message: safeErrorMessage(caught),
+              retriability: "non-retriable",
+            };
         emit(nodeCtx, {
           type: "node-error",
           runId: nodeCtx.runId,
           dagId: dag.id,
           nodeId,
           timestamp: stamp(),
-          error: message,
-          frameworkError: crash,
+          error: messageOf(frameworkError),
+          frameworkError,
         });
-        return { nodeId, result: err(crash) as Result<unknown, FrameworkError>, outcome: EMPTY_OUTCOME };
+        return {
+          nodeId,
+          result: err(frameworkError) as Result<unknown, FrameworkError>,
+          outcome: EMPTY_OUTCOME,
+        };
       }
     }),
   );
@@ -201,7 +206,7 @@ export const executeWave = async (
         nodeId: sibling.nodeId,
         sideEffects: nodeMap.get(sibling.nodeId)?.sideEffects,
         timestamp: stamp(),
-        error: sibling.error.kind === "node-crash" ? sibling.error.message : JSON.stringify(sibling.error),
+        error: messageOf(sibling.error),
         frameworkError: sibling.error,
       });
     }

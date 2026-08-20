@@ -1,9 +1,9 @@
 // Topology helpers — pure graph algorithms for DAG structure analysis.
 // All functions are pure; no I/O.
 //
-// Extracted from conditional.ts for separation of concerns:
+// Runtime routing is split by responsibility:
 // - topology.ts: static graph analysis (adjacency, reachability, incoming sources)
-// - routing.ts: business-rule evaluation (predicate evaluation, route decisions)
+// - route-emission.ts / reroute.ts: route decisions, emission, and reroute validation
 
 import type { DagDef, EdgeDef } from "../types/dag.js";
 import {

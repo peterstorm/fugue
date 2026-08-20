@@ -43,6 +43,15 @@ const DEFAULT_THRESHOLD = 0.8;
 /** Default model for eval-judge (GPT-4o-mini). */
 const DEFAULT_JUDGE_MODEL = "gpt-4o-mini";
 
+/** Judge diagnostics are secondary to the promised total result seam. */
+const warnWithoutThrowing = (ctx: NodeContext, message: string): void => {
+  try {
+    ctx.logger.warn(message);
+  } catch {
+    // The caller still receives the already-decided EvalJudgeResult.
+  }
+};
+
 /** Emit an observer event when the judge cannot evaluate the output. */
 const emitJudgeSkipped = (ctx: NodeContext, judgeId: string, reason: string): void => {
   if (ctx.observer) {
@@ -147,7 +156,7 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
       const llm: LlmClient | null = ctx.judgeLlm ?? ctx.llm ?? null;
       if (!llm) {
         const msg = "No LLM client available (neither judgeLlm nor llm on context)";
-        ctx.logger.warn(`[eval-judge:${config.id}] ${msg}`);
+        warnWithoutThrowing(ctx, `[eval-judge:${config.id}] ${msg}`);
         return llmFailureResult(msg);
       }
 
@@ -173,7 +182,7 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
 
         if (!result.ok) {
           const msg = `LLM call failed: ${"message" in result.error ? result.error.message : String(result.error)}`;
-          ctx.logger.warn(`[eval-judge:${config.id}] ${msg}`);
+          warnWithoutThrowing(ctx, `[eval-judge:${config.id}] ${msg}`);
           emitJudgeSkipped(ctx, config.id, msg);
           return llmFailureResult(msg);
         }
@@ -190,21 +199,21 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
             contentFilter: ctx.contentFilter,
           });
         } catch (spanErr) {
-          ctx.logger.warn(`[eval-judge:${config.id}] enrichLlmSpan threw: ${spanErr instanceof Error ? spanErr.message : String(spanErr)}`);
+          warnWithoutThrowing(ctx, `[eval-judge:${config.id}] enrichLlmSpan threw: ${spanErr instanceof Error ? spanErr.message : String(spanErr)}`);
         }
 
         // Validate response shape (defense-in-depth: some LlmClient impls skip schema validation)
         const parsed = EvalJudgeResponseSchema.safeParse(result.value.output);
         if (!parsed.success) {
           const msg = `Invalid judge response: ${parsed.error.message}`;
-          ctx.logger.warn(`[eval-judge:${config.id}] ${msg}`);
+          warnWithoutThrowing(ctx, `[eval-judge:${config.id}] ${msg}`);
           return llmFailureResult(msg);
         }
 
         return toEvalJudgeResult(parsed.data, threshold, config.criteria);
       } catch (e) {
         const msg = `Unexpected error: ${e instanceof Error ? e.message : String(e)}`;
-        ctx.logger.warn(`[eval-judge:${config.id}] ${msg}`);
+        warnWithoutThrowing(ctx, `[eval-judge:${config.id}] ${msg}`);
         emitJudgeSkipped(ctx, config.id, msg);
         return llmFailureResult(msg);
       }

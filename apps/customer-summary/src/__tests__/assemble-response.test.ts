@@ -79,6 +79,27 @@ describe("assemble-response node", () => {
     }
   });
 
+  test("failed guardrail crosses input parsing and degrades gracefully", async () => {
+    const node = createAssembleResponseNode();
+    const parsed = node.inputSchema.safeParse({
+      $input: { customerId: "cust-001" },
+      "extract-features": { branch: "ok", customer: { id: "cust-001", name: "Test", accountType: "personal" }, recentUtterances: [], scoredConversations: [] },
+      "grounding-guardrail": {
+        kind: "failed",
+        passed: false,
+        error: "validator crashed",
+        warnings: ["Guardrail validation threw an error: validator crashed"],
+        checks: [{ dimension: "internal-error", passed: false, detail: "validator crashed" }],
+      },
+    });
+
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) throw new Error("expected failed guardrail input to parse");
+    const result = await node.run(parsed.data, makeCtx());
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.status).toBe("degraded");
+  });
+
   test("ok branch with missing guardrail — degrades gracefully", async () => {
     const node = createAssembleResponseNode();
     const result = await node.run(

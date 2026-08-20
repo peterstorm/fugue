@@ -5,8 +5,8 @@
  * - automatic injection of the managed bearer token as `Authorization: Bearer …`
  * - Zod validation of every response body (`Result`, never throws)
  * - FrameworkError mapping mirroring the framework's built-in HTTP capability
- *   (timeout/network/5xx → `transient`; invalid JSON/4xx/schema mismatch →
- *   non-retriable `node-crash`)
+ *   (timeout/network/408/429/5xx → `transient`; invalid JSON/other 4xx/schema
+ *   mismatch → non-retriable `node-crash`)
  * - a single `401` retry: on a `401` from any verb, the token is invalidated,
  *   re-minted, and the original request retried exactly once.
  *

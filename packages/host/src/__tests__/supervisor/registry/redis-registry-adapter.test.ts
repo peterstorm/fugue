@@ -401,8 +401,8 @@ describe("redis tenant registry — resolveForNewRun fail-closed seam (FR-022 / 
   });
 });
 
-describe("redis tenant registry — hydrate skips corrupt records (deserialize fail-closed)", () => {
-  it("loads a valid record and skips a garbage one without throwing or going degraded", async () => {
+describe("redis tenant registry — hydrate rejects corrupt records without a partial commit", () => {
+  it("rejects a garbage record, preserves the prior snapshot, and does not report a Redis outage", async () => {
     const fake = createInMemoryRedisFake();
     // Seed one valid record (round-tripped through a real register) + garbage.
     const seedReg = createRedisTenantRegistry(fake.redis, fake.pubsub);
@@ -410,15 +410,25 @@ describe("redis tenant registry — hydrate skips corrupt records (deserialize f
     fake.store.set(`${TENANT_KEY_PREFIX}bad`, "{not json");
 
     let dead = 0;
-    const reg = createRedisTenantRegistry(fake.redis, fake.pubsub, { onRedisDead: () => { dead += 1; } });
+    const logger = {
+      info: () => {},
+      warn: () => { throw new Error("logger unavailable"); },
+      error: () => {},
+    };
+    const reg = createRedisTenantRegistry(
+      fake.redis,
+      fake.pubsub,
+      { onRedisDead: () => { dead += 1; } },
+      logger,
+    );
     const hydrated = await reg.hydrate();
-    expect(hydrated.ok).toBe(true);
-    expect(dead).toBe(0); // corrupt record is a skip, NOT a Redis outage
-    expect(reg.lookup(tid("good")).ok).toBe(true);
-    expect(reg.lookup(tid("bad")).ok).toBe(false);
+    expect(hydrated.ok).toBe(false);
+    if (!hydrated.ok) expect(hydrated.error.kind).toBe("config-invalid");
+    expect(dead).toBe(0); // corruption is not a Redis outage
+    expect(reg.snapshot().entries.size).toBe(0); // valid sibling was not partially committed
   });
 
-  it("skips a record with an unknown/missing status discriminant (fail-closed)", async () => {
+  it("rejects a record with an unknown/missing status discriminant (fail-closed)", async () => {
     const fake = createInMemoryRedisFake();
     const seedReg = createRedisTenantRegistry(fake.redis, fake.pubsub);
     await seedReg.register(makeConfig("good"), 1000);
@@ -439,9 +449,9 @@ describe("redis tenant registry — hydrate skips corrupt records (deserialize f
     );
     const reg = createRedisTenantRegistry(fake.redis, fake.pubsub);
     const hydrated = await reg.hydrate();
-    expect(hydrated.ok).toBe(true);
-    expect(reg.lookup(tid("good")).ok).toBe(true);
-    expect(reg.snapshot().entries.has(tid("weird"))).toBe(false);
+    expect(hydrated.ok).toBe(false);
+    if (!hydrated.ok) expect(hydrated.error.kind).toBe("config-invalid");
+    expect(reg.snapshot().entries.size).toBe(0);
   });
 
   it("round-trips a deregistered record through hydrate (status:deregistered + tombstone)", async () => {
@@ -460,10 +470,10 @@ describe("redis tenant registry — hydrate skips corrupt records (deserialize f
     if (entry?.status === "deregistered") expect(entry.deregisteredAt).toBe(1500);
   });
 
-  // ── per-field corrupt-record skip branches (parse-don't-validate boundary) ──
-  // Each persisted field that is the wrong shape must make the WHOLE record a
-  // skip (not a 500, not a coerced round-trip). A structurally-valid sibling must
-  // still hydrate, and no Redis-outage hook may fire — corruption is not an outage.
+  // ── Per-field corrupt-record branches (parse-don't-validate boundary) ──
+  // Any malformed persisted field aborts the whole hydrate before commit. A
+  // structurally valid sibling is not installed from a partial scan, and a
+  // corruption verdict never fires the Redis-outage hook.
   const validRaw = (id: string): Record<string, unknown> => ({
     status: "active",
     id,
@@ -476,7 +486,7 @@ describe("redis tenant registry — hydrate skips corrupt records (deserialize f
     eagerPin: false,
   });
 
-  const expectSkipped = async (key: string, raw: unknown): Promise<void> => {
+  const expectCorruptHydrate = async (key: string, raw: unknown): Promise<void> => {
     const fake = createInMemoryRedisFake();
     const seedReg = createRedisTenantRegistry(fake.redis, fake.pubsub);
     await seedReg.register(makeConfig("good"), 1000);
@@ -485,66 +495,66 @@ describe("redis tenant registry — hydrate skips corrupt records (deserialize f
     let dead = 0;
     const reg = createRedisTenantRegistry(fake.redis, fake.pubsub, { onRedisDead: () => { dead += 1; } });
     const hydrated = await reg.hydrate();
-    expect(hydrated.ok).toBe(true);
-    expect(dead).toBe(0); // corrupt record is a skip, NOT a Redis outage
-    expect(reg.lookup(tid("good")).ok).toBe(true); // valid sibling still loads
-    expect(reg.snapshot().entries.has(tid(key))).toBe(false); // corrupt one skipped
+    expect(hydrated.ok).toBe(false);
+    if (!hydrated.ok) expect(hydrated.error.kind).toBe("config-invalid");
+    expect(dead).toBe(0);
+    expect(reg.snapshot().entries.size).toBe(0);
   };
 
-  it("skips a record whose secretsRef is blank or non-string", async () => {
-    await expectSkipped("blank-ref", { ...validRaw("blank-ref"), secretsRef: "   " });
-    await expectSkipped("num-ref", { ...validRaw("num-ref"), secretsRef: 42 });
+  it("rejects a record whose secretsRef is blank or non-string", async () => {
+    await expectCorruptHydrate("blank-ref", { ...validRaw("blank-ref"), secretsRef: "   " });
+    await expectCorruptHydrate("num-ref", { ...validRaw("num-ref"), secretsRef: 42 });
   });
 
-  it("skips a deregistered record missing its numeric deregisteredAt tombstone", async () => {
+  it("rejects a deregistered record missing its numeric deregisteredAt tombstone", async () => {
     // status:deregistered with no `deregisteredAt` (or a non-numeric one) is corrupt.
-    await expectSkipped("no-tomb", { ...validRaw("no-tomb"), status: "deregistered" });
-    await expectSkipped("str-tomb", { ...validRaw("str-tomb"), status: "deregistered", deregisteredAt: "soon" });
+    await expectCorruptHydrate("no-tomb", { ...validRaw("no-tomb"), status: "deregistered" });
+    await expectCorruptHydrate("str-tomb", { ...validRaw("str-tomb"), status: "deregistered", deregisteredAt: "soon" });
   });
 
-  it("skips a record with a non-string value in agentClientIdsByDag", async () => {
-    await expectSkipped("bad-agent", {
+  it("rejects a record with a non-string value in agentClientIdsByDag", async () => {
+    await expectCorruptHydrate("bad-agent", {
       ...validRaw("bad-agent"),
       keycloakClientMapping: { realm: "fugue", clientId: "c", agentClientIdsByDag: { "lead-desk": 99 } },
     });
   });
 
-  it("skips a record that coerces a non-string team / realm / clientId / fsRoot", async () => {
+  it("rejects a record that coerces a non-string team / realm / clientId / fsRoot", async () => {
     // Guards the boundary against `String(42)` → "42" silently round-tripping a
     // malformed scalar as a valid-looking field.
-    await expectSkipped("num-team", { ...validRaw("num-team"), team: 7 });
-    await expectSkipped("num-realm", {
+    await expectCorruptHydrate("num-team", { ...validRaw("num-team"), team: 7 });
+    await expectCorruptHydrate("num-realm", {
       ...validRaw("num-realm"),
       keycloakClientMapping: { realm: 7, clientId: "c", agentClientIdsByDag: {} },
     });
-    await expectSkipped("num-client", {
+    await expectCorruptHydrate("num-client", {
       ...validRaw("num-client"),
       keycloakClientMapping: { realm: "fugue", clientId: 7, agentClientIdsByDag: {} },
     });
-    await expectSkipped("num-root", { ...validRaw("num-root"), fsRoot: 7 });
-    await expectSkipped("num-dags-root", { ...validRaw("num-dags-root"), dagsRoot: 7 });
+    await expectCorruptHydrate("num-root", { ...validRaw("num-root"), fsRoot: 7 });
+    await expectCorruptHydrate("num-dags-root", { ...validRaw("num-dags-root"), dagsRoot: 7 });
   });
 
-  it("skips a record whose admission limits are non-numbers (never coerce via Number(...))", async () => {
+  it("rejects a record whose admission limits are non-numbers (never coerce via Number(...))", async () => {
     // A non-number admission limit must skip-as-corrupt, NOT coerce: `Number("5")`
     // → 5, `Number(true)` → 1, `Number(null)` → 0 would silently round-trip a
     // malformed value as a valid-looking ceiling. Parity with the string-field
     // guards above (parse-don't-validate boundary).
-    await expectSkipped("str-conc", { ...validRaw("str-conc"), admission: { maxConcurrentRuns: "5", maxQueuedRuns: 8 } });
-    await expectSkipped("bool-conc", { ...validRaw("bool-conc"), admission: { maxConcurrentRuns: true, maxQueuedRuns: 8 } });
-    await expectSkipped("null-queue", { ...validRaw("null-queue"), admission: { maxConcurrentRuns: 4, maxQueuedRuns: null } });
-    await expectSkipped("arr-queue", { ...validRaw("arr-queue"), admission: { maxConcurrentRuns: 4, maxQueuedRuns: [] } });
-    await expectSkipped("missing-queue", { ...validRaw("missing-queue"), admission: { maxConcurrentRuns: 4 } });
+    await expectCorruptHydrate("str-conc", { ...validRaw("str-conc"), admission: { maxConcurrentRuns: "5", maxQueuedRuns: 8 } });
+    await expectCorruptHydrate("bool-conc", { ...validRaw("bool-conc"), admission: { maxConcurrentRuns: true, maxQueuedRuns: 8 } });
+    await expectCorruptHydrate("null-queue", { ...validRaw("null-queue"), admission: { maxConcurrentRuns: 4, maxQueuedRuns: null } });
+    await expectCorruptHydrate("arr-queue", { ...validRaw("arr-queue"), admission: { maxConcurrentRuns: 4, maxQueuedRuns: [] } });
+    await expectCorruptHydrate("missing-queue", { ...validRaw("missing-queue"), admission: { maxConcurrentRuns: 4 } });
   });
 
-  it("skips a record whose eagerPin is a non-boolean (never truthy-coerce)", async () => {
+  it("rejects a record whose eagerPin is a non-boolean (never truthy-coerce)", async () => {
     // eagerPin is the authoritative pin source (AD-7): idleEvict/isIdleEvictable
     // consume it TRUTHILY, so a coercion like `Boolean(o.eagerPin)` would turn the
     // string "false" into a pinned-forever worker. The guard must skip-as-corrupt,
     // not coerce. The "false" case specifically pins the dangerous Boolean("false")
     // → true regression.
-    await expectSkipped("str-pin", { ...validRaw("str-pin"), eagerPin: "false" });
-    await expectSkipped("num-pin", { ...validRaw("num-pin"), eagerPin: 1 });
+    await expectCorruptHydrate("str-pin", { ...validRaw("str-pin"), eagerPin: "false" });
+    await expectCorruptHydrate("num-pin", { ...validRaw("num-pin"), eagerPin: 1 });
   });
 });
 

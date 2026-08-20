@@ -17,8 +17,9 @@ import { brandAsValidatedNodeContext } from "../types/node.js";
 import type { DagMachineContext } from "../dag-runtime/types.js";
 import type { NodeDef } from "../types/node.js";
 import type { DagDef } from "../types/dag.js";
+import type { FrameworkError } from "../types/errors.js";
 import { z } from "zod";
-import { ok } from "../types/result.js";
+import { err, ok } from "../types/result.js";
 
 const makeNode = (id: string): NodeDef<unknown, unknown> => ({
   id: N(id),
@@ -206,6 +207,79 @@ describe("executeWave — error paths", () => {
         retriability: "non-retriable",
         message: "<unprintable error>",
       });
+    }
+  });
+
+  it("the wave boundary preserves a typed FrameworkError thrown outside runNodeShared", async () => {
+    const thrown: FrameworkError = {
+      kind: "validation",
+      nodeId: N("a"),
+      message: "incoming lookup failed",
+    };
+    const machineCtx = makeMachineCtx();
+    const incomingByNode = new Map(machineCtx.incomingByNode);
+    incomingByNode.get = () => { throw thrown; };
+
+    const result = await executeWave(
+      0,
+      { ...machineCtx, incomingByNode },
+      makeConfig(),
+    );
+
+    expect(result.event.type).toBe("node-failed");
+    if (result.event.type === "node-failed") {
+      expect(result.event.error).toBe(thrown);
+    }
+  });
+
+  it("the wave boundary classifies an unexpected executor throw as non-retriable", async () => {
+    const machineCtx = makeMachineCtx();
+    const incomingByNode = new Map(machineCtx.incomingByNode);
+    incomingByNode.get = () => { throw new TypeError("broken incoming index"); };
+
+    const result = await executeWave(
+      0,
+      { ...machineCtx, incomingByNode },
+      makeConfig(),
+    );
+
+    expect(result.event.type).toBe("node-failed");
+    if (result.event.type === "node-failed") {
+      expect(result.event.error).toMatchObject({
+        kind: "node-crash",
+        message: "broken incoming index",
+        retriability: "non-retriable",
+      });
+    }
+  });
+
+  it("a cyclic sibling error cannot replace the primary node-failed event", async () => {
+    const primary: FrameworkError = {
+      kind: "validation",
+      nodeId: N("a"),
+      message: "primary failure",
+    };
+    const cyclic = {
+      kind: "validation" as const,
+      nodeId: N("b"),
+      message: "sibling failure",
+    } as FrameworkError & { self?: unknown };
+    cyclic.self = cyclic;
+    const nodes = new Map<string, NodeDef<unknown, unknown>>([
+      ["a", { ...makeNode("a"), run: async () => err(primary) }],
+      ["b", { ...makeNode("b"), run: async () => err(cyclic) }],
+    ]);
+
+    const result = await executeWave(
+      0,
+      makeMachineCtx([["a", "b"]]),
+      makeConfig(nodes),
+    );
+
+    expect(result.event.type).toBe("node-failed");
+    if (result.event.type === "node-failed") {
+      expect(result.event.error).toBe(primary);
+      expect(result.event.coFailedNodeIds).toEqual([N("b")]);
     }
   });
 });

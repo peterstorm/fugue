@@ -203,6 +203,26 @@ describe("capability-manager", () => {
       }
     });
 
+    it("a throwing error logger cannot mask the connect failure or skip failing-handle cleanup", async () => {
+      let failingClosed = false;
+      const handles = [
+        makeHandle("b", {
+          connect: async () => { throw new Error("connect-boom"); },
+          close: async () => { failingClosed = true; },
+        }),
+      ];
+      const logger = {
+        info: () => {},
+        error: () => { throw new Error("logger transport down"); },
+      };
+
+      const result = await connectAll(handles, logger);
+
+      expect(isErr(result)).toBe(true);
+      expect(failingClosed).toBe(true);
+      if (!result.ok) expect(result.error.error.message).toContain("connect-boom");
+    });
+
     it("a close failure on the failing handle never masks the connect error", async () => {
       const errorLogs: string[] = [];
       const handles = [
