@@ -158,7 +158,7 @@ describe("POST /summarize", () => {
             dagFingerprint: id.dagFingerprint,
             frameworkVersion: id.frameworkVersion,
           });
-          await cp.saveNode(victimRunId, N("fetch-crm"), {
+          await cp.saveNode(victimRunId, {
             nodeId: N("fetch-crm"),
             output: { customer: { customerId: "cust-001", secret: "victim-data" } },
             completedAt: new Date(),

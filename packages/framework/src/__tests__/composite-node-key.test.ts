@@ -527,11 +527,10 @@ describe("InMemoryCheckpointer — composite opts (FR-023)", () => {
 
     const withOptsResult = await withOpts.saveNode(
       R("run-1"),
-      N("n1"),
       nodeState,
       { namespace: "sub", index: 3, attempt: 1 },
     );
-    const canonicalResult = await canonical.saveNode(R("run-1"), N("n1"), nodeState);
+    const canonicalResult = await canonical.saveNode(R("run-1"), nodeState);
     expect(withOptsResult).toEqual(canonicalResult);
 
     const a = await withOpts.load(R("run-1"));
@@ -547,7 +546,7 @@ describe("InMemoryCheckpointer — composite opts (FR-023)", () => {
     const cp = new InMemoryCheckpointer();
     await cp.setMeta(R("run-1"), meta);
     const malformed = Object.freeze({ namespace: "../ignored", index: -1, attempt: Number.NaN });
-    const result = await cp.saveNode(R("run-1"), N("n1"), nodeState, malformed);
+    const result = await cp.saveNode(R("run-1"), nodeState, malformed);
 
     expect(result).toEqual({ ok: true, value: undefined });
     const loaded = await cp.load(R("run-1"));
@@ -565,7 +564,7 @@ describe("InMemoryCheckpointer — composite opts (FR-023)", () => {
     });
     const cp = new InMemoryCheckpointer();
     await cp.setMeta(R("run-1"), meta);
-    await cp.saveNode(R("run-1"), N("n1"), nodeState, { index: 1, attempt: 2 });
+    await cp.saveNode(R("run-1"), nodeState, { index: 1, attempt: 2 });
 
     expect(calls).toEqual([]);
   });

@@ -1,10 +1,8 @@
 // Eval-judge runner called by runDagStateful after a successful DAG run.
-// Each judge runs in its own OTel span. The judge's own `run` implementation
-// is fail-open for LLM-side errors (`outcome: "skipped-llm-failure"`), so a
-// broken model cannot block the run. Orchestrator-level exceptions caught
-// here surface as `outcome: "crash"` (fail-closed) so quality gates filtering
-// on `judgePassed(r)` see the broken judge rather than silently treating it
-// as passing.
+// Each judge runs in its own OTel span. LLM-side errors surface as the explicit
+// `skipped-llm-failure` outcome and fail quality gating closed; they do not erase
+// the already-produced DAG output. Orchestrator-level exceptions caught here
+// surface as `crash`, which is also fail-closed.
 
 import { type Span, SpanStatusCode } from "@opentelemetry/api";
 import type { EvalJudgeNodeDef, EvalJudgeResult } from "../nodes/eval-judge.js";
@@ -55,7 +53,7 @@ export const runEvalJudges = async (
             return result;
           } catch (e) {
             // Orchestrator-side exception (span setup, tracer/attribute bug,
-            // or a judge whose `run` threw past its own internal fail-open).
+            // or a judge whose `run` threw past its own Result-like outcome seam).
             // Producing a "passed" result here would silently disable quality
             // gates that rely on `judgePassed` — operators would see a broken
             // judge as passing every run. Return `outcome: "crash"` so the

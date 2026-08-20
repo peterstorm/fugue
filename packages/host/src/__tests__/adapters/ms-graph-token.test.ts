@@ -192,21 +192,38 @@ describe("createMsGraphTokenProvider — secret hygiene & failure mapping", () =
     expect(message).not.toContain("client-1");
   });
 
-  test("network failure → error names the endpoint host, not the secret", async () => {
-    const fetchImpl: TokenFetch = async () => {
-      throw new Error(`fetch failed for ${SECRET}: connect ECONNREFUSED`);
+  test("network failure cannot expose raw or form-encoded credentials echoed from the request body", async () => {
+    const clientId = "client+id@example.com";
+    const clientSecret = "secret+/=?&% value";
+    let echoedBody = "";
+    const fetchImpl: TokenFetch = async (_url, init) => {
+      echoedBody = init.body;
+      throw new Error(`connect ECONNREFUSED; request body=${init.body}`);
     };
-    const get = createMsGraphTokenProvider({ ...baseConfig, fetchImpl });
+    const get = createMsGraphTokenProvider({
+      ...baseConfig,
+      clientId,
+      clientSecret,
+      fetchImpl,
+    });
     let error: unknown;
     try {
       await get();
     } catch (e) {
       error = e;
     }
-    expect((error as Error).message).toContain("login.microsoftonline.com");
-    expect((error as Error).message).toContain("ECONNREFUSED");
-    expect((error as Error).message).toContain("[redacted]");
-    expect((error as Error).message).not.toContain(SECRET);
+
+    const message = (error as Error).message;
+    const encodedClientId = new URLSearchParams({ value: clientId }).toString().slice("value=".length);
+    const encodedSecret = new URLSearchParams({ value: clientSecret }).toString().slice("value=".length);
+    expect(echoedBody).toContain(encodedClientId);
+    expect(echoedBody).toContain(encodedSecret);
+    expect(message).toContain("login.microsoftonline.com");
+    expect(message).not.toContain("ECONNREFUSED");
+    expect(message).not.toContain(clientId);
+    expect(message).not.toContain(clientSecret);
+    expect(message).not.toContain(encodedClientId);
+    expect(message).not.toContain(encodedSecret);
   });
 
   test("200 with json() rejection → parser-controlled text cannot expose credentials", async () => {

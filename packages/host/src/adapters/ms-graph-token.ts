@@ -14,8 +14,6 @@
  * including the client secret, back to the caller).
  */
 
-import { safeErrorMessage } from "@fuguejs/framework";
-
 /** The v2.0 token endpoint response shape. */
 interface TokenResponse {
   readonly access_token: string;
@@ -73,16 +71,6 @@ const FALLBACK_LIFETIME_MS = 3_600_000; // v2.0 always sends expires_in; 1 h kee
 const defaultTokenUrl = (tenantId: string): string =>
   `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`;
 
-const redactConfiguredCredentials = (
-  error: unknown,
-  credentials: readonly string[],
-): string =>
-  credentials.reduce(
-    (diagnostic, credential) =>
-      credential.length > 0 ? diagnostic.replaceAll(credential, "[redacted]") : diagnostic,
-    safeErrorMessage(error),
-  );
-
 interface CachedToken {
   readonly accessToken: string;
   readonly expiresAtMs: number;
@@ -129,12 +117,12 @@ export const createMsGraphTokenProvider = (
         body,
         signal: AbortSignal.timeout(timeoutMs),
       });
-    } catch (e) {
-      const diagnostic = redactConfiguredCredentials(e, [
-        config.clientSecret,
-        config.clientId,
-      ]);
-      throw new Error(`MS Graph token request to ${endpointHost} failed: ${diagnostic}`);
+    } catch {
+      // Network errors are transport-controlled and may echo the exact form
+      // body, including percent-encoded credentials. Preserve only trusted
+      // endpoint context; representation-by-representation redaction is not a
+      // complete secret boundary.
+      throw new Error(`MS Graph token request to ${endpointHost} failed`);
     }
     if (res.status !== 200) {
       throw new Error(`MS Graph token endpoint ${endpointHost} returned ${res.status}`);

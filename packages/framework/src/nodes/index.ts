@@ -4,5 +4,5 @@ export { createHumanReviewNode, withHumanReview, type HumanReviewNodeConfig } fr
 export { createLlmNode, type LlmNodeConfig, type LlmNodeDef } from "./llm.js";
 export { createLlmWithToolsNode, type LlmWithToolsNodeConfig, type LlmWithToolsNodeDef } from "./llm-with-tools.js";
 export { createGuardrailNode, type GuardrailNodeConfig, type GuardrailResult, type GuardrailSkipped, type GuardrailValidated, type GuardrailCheck } from "./guardrail.js";
-export { createEvalJudgeNode, type EvalJudgeNodeConfig, type EvalJudgeNodeDef, type EvalJudgeResult, type EvalJudgeResponse, EvalJudgeResponseSchema, toEvalJudgeResult, failOpenResult } from "./eval-judge.js";
+export { createEvalJudgeNode, type EvalJudgeNodeConfig, type EvalJudgeNodeDef, type EvalJudgeResult, type EvalJudgeResponse, EvalJudgeResponseSchema, toEvalJudgeResult, llmFailureResult } from "./eval-judge.js";
 export { JUDGE_SYSTEM_FRAME, generateDefaultRubric, resolveRubric, assembleJudgeUserMessage } from "./eval-judge-prompt.js";

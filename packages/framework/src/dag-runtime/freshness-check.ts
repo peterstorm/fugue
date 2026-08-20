@@ -75,7 +75,6 @@ export const checkFreshness = (
         conflicts.push({
           writeNodeId: e.nodeId,
           writeRunId: e.runId,
-          resource,
           conditionedOnWitness: e.conditionedOn,
           conflictingWrite: {
             runId: latest.runId,

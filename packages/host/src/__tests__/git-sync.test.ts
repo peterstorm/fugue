@@ -322,7 +322,7 @@ describe("GitPort interface", () => {
       }
     });
 
-    it("runBunInstall returns bun-install-failed on a stalled registry and terminates the stuck child", async () => {
+    it("the adapter's configured timeout bounds install and terminates the stuck child", async () => {
       const server = await stallServer();
       await server.listen();
       const dir = await mkdtemp(join(tmpdir(), "fugue-bun-stall-"));
@@ -330,8 +330,9 @@ describe("GitPort interface", () => {
         await writeFile(join(dir, "package.json"), JSON.stringify({ name: "stall", dependencies: { "slow-dep": "^1.0.0" } }));
         await writeFile(join(dir, "bunfig.toml"), `[install]\nregistry = "http://127.0.0.1:${server.port}"\n`);
 
+        const adapter = createBunGitAdapter(400);
         const started = Date.now();
-        const result = await runBunInstall(dir, 400);
+        const result = await adapter.install(dir);
         const elapsed = Date.now() - started;
 
         expect(result.ok).toBe(false);

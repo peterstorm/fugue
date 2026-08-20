@@ -202,7 +202,7 @@ export const createBunGitAdapter = (timeoutMs: number = DEFAULT_TIMEOUT_MS): Git
     return ok(result.value.stdout.length > 0);
   },
 
-  install: (repoPath) => runBunInstall(repoPath),
+  install: (repoPath) => runBunInstall(repoPath, timeoutMs),
 });
 
 // ── Local (Dev Mode) Adapter ───────────────────────────────────────────────

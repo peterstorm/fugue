@@ -748,46 +748,44 @@ describe("snapshotSaveNodeOpts — snapshot-once boundary reads", () => {
   });
 });
 
-describe("parseSaveNodeBoundary — closed options grammar (FR-016)", () => {
+describe("parseSaveNodeBoundary — one node identity + closed options grammar (FR-016)", () => {
   const rawState = snapshotNodeState(STATE());
 
-  it("rejects boundary-invalid runId, nodeId, and state.nodeId before any path join", () => {
+  it("rejects boundary-invalid runId and state.nodeId before any path join", () => {
     for (const hostile of ["", "../run", "run/..", "a\u0000b", "has space", "a".repeat(129)]) {
-      const runRes = parseSaveNodeBoundary(hostile, "n1", rawState, undefined);
+      const runRes = parseSaveNodeBoundary(hostile, rawState, undefined);
       if (runRes.ok) throw new Error(`runId ${JSON.stringify(hostile)} was accepted`);
       expect(runRes.error).toContain("does not match");
-      const nodeRes = parseSaveNodeBoundary("run-1", hostile, rawState, undefined);
-      if (nodeRes.ok) throw new Error(`nodeId ${JSON.stringify(hostile)} was accepted`);
-      expect(nodeRes.error).toContain("does not match");
-      const stateRes = parseSaveNodeBoundary("run-1", "n1", snapshotNodeState(STATE({ nodeId: hostile })), undefined);
+      const stateRes = parseSaveNodeBoundary(
+        "run-1",
+        snapshotNodeState(STATE({ nodeId: hostile })),
+        undefined,
+      );
       if (stateRes.ok) throw new Error(`state.nodeId ${JSON.stringify(hostile)} was accepted`);
       expect(stateRes.error).toContain("does not match");
     }
   });
 
-  it("requires state.nodeId to match the addressed nodeId and state to be a record", () => {
-    const mismatch = parseSaveNodeBoundary("run-1", "n1", snapshotNodeState(STATE({ nodeId: "n2" })), undefined);
-    expect(mismatch.ok).toBe(false);
-    if (!mismatch.ok) expect(mismatch.error).toContain("must match addressed nodeId");
-    // null/undefined are unreadable to the snapshotter (the shell catches the
-    // throw); other non-records produce a snapshot the boundary rejects.
+  it("rejects non-record state snapshots", () => {
     expect(() => snapshotNodeState(null)).toThrow();
     expect(() => snapshotNodeState(undefined)).toThrow();
     for (const badState of [42, "state", [1]]) {
-      const nonRecord = parseSaveNodeBoundary("run-1", "n1", snapshotNodeState(badState), undefined);
+      const nonRecord = parseSaveNodeBoundary("run-1", snapshotNodeState(badState), undefined);
       if (nonRecord.ok) throw new Error(`state ${JSON.stringify(badState)} was accepted`);
       expect(nonRecord.error).toContain("node state must be an object");
     }
   });
 
-  it("returns ok(undefined) when no options are present", () => {
-    const result = parseSaveNodeBoundary("run-1", "n1", rawState, undefined);
-    expect(result).toEqual({ ok: true, value: undefined });
+  it("returns the parsed branded state nodeId when no options are present", () => {
+    expect(parseSaveNodeBoundary("run-1", rawState, undefined)).toEqual({
+      ok: true,
+      value: { nodeId: N("n1"), saveOpts: undefined },
+    });
   });
 
   it("rejects class instances and arrays as options", () => {
     for (const badOpts of [new (class O {})(), [1, 2]]) {
-      const result = parseSaveNodeBoundary("run-1", "n1", rawState, snapshotSaveNodeOpts(badOpts));
+      const result = parseSaveNodeBoundary("run-1", rawState, snapshotSaveNodeOpts(badOpts));
       expect(result.ok).toBe(false);
       if (!result.ok) expect(result.error).toContain("plain object");
     }
@@ -795,25 +793,25 @@ describe("parseSaveNodeBoundary — closed options grammar (FR-016)", () => {
 
   it("rejects unsupported own keys, including symbols and typos", () => {
     for (const unsupported of [{ typo: 1 }, { namespace: "ns", index: 1, extra: 2 }]) {
-      const result = parseSaveNodeBoundary("run-1", "n1", rawState, snapshotSaveNodeOpts(unsupported));
+      const result = parseSaveNodeBoundary("run-1", rawState, snapshotSaveNodeOpts(unsupported));
       expect(result.ok).toBe(false);
       if (!result.ok) expect(result.error).toContain("unsupported field");
     }
     const symbolOpts = { namespace: "ns" };
     (symbolOpts as Record<symbol, unknown>)[Symbol("hidden")] = 1;
-    const symbolResult = parseSaveNodeBoundary("run-1", "n1", rawState, snapshotSaveNodeOpts(symbolOpts));
+    const symbolResult = parseSaveNodeBoundary("run-1", rawState, snapshotSaveNodeOpts(symbolOpts));
     expect(symbolResult.ok).toBe(false);
     if (!symbolResult.ok) expect(symbolResult.error).toContain("unsupported field");
   });
 
   it("validates namespace against ID_PATTERN and index/attempt as non-negative safe integers", () => {
-    const badNamespace = parseSaveNodeBoundary("run-1", "n1", rawState, snapshotSaveNodeOpts({ namespace: "../ns" }));
+    const badNamespace = parseSaveNodeBoundary("run-1", rawState, snapshotSaveNodeOpts({ namespace: "../ns" }));
     expect(badNamespace.ok).toBe(false);
     for (const bad of [-1, 1.5, "1", Number.NaN, Number.POSITIVE_INFINITY]) {
-      const indexRes = parseSaveNodeBoundary("run-1", "n1", rawState, snapshotSaveNodeOpts({ index: bad }));
+      const indexRes = parseSaveNodeBoundary("run-1", rawState, snapshotSaveNodeOpts({ index: bad }));
       if (indexRes.ok) throw new Error(`index ${String(bad)} was accepted`);
       expect(indexRes.error).toContain("non-negative safe integer");
-      const attemptRes = parseSaveNodeBoundary("run-1", "n1", rawState, snapshotSaveNodeOpts({ attempt: bad }));
+      const attemptRes = parseSaveNodeBoundary("run-1", rawState, snapshotSaveNodeOpts({ attempt: bad }));
       if (attemptRes.ok) throw new Error(`attempt ${String(bad)} was accepted`);
       expect(attemptRes.error).toContain("non-negative safe integer");
     }
@@ -822,7 +820,6 @@ describe("parseSaveNodeBoundary — closed options grammar (FR-016)", () => {
   it("rejects namespace-only options before constructing the typed union", () => {
     const result = parseSaveNodeBoundary(
       "run-1",
-      "n1",
       rawState,
       snapshotSaveNodeOpts({ namespace: "ns" }),
     );
@@ -831,16 +828,22 @@ describe("parseSaveNodeBoundary — closed options grammar (FR-016)", () => {
   });
 
   it("produces a fresh frozen canonical options object with exactly the supplied fields", () => {
-    const result = parseSaveNodeBoundary("run-1", "n1", rawState, snapshotSaveNodeOpts({ namespace: "ns", index: 2, attempt: 3 }));
-    expect(result).toEqual({ ok: true, value: { namespace: "ns", index: 2, attempt: 3 } });
+    const result = parseSaveNodeBoundary(
+      "run-1",
+      rawState,
+      snapshotSaveNodeOpts({ namespace: "ns", index: 2, attempt: 3 }),
+    );
+    expect(result).toEqual({
+      ok: true,
+      value: { nodeId: N("n1"), saveOpts: { namespace: "ns", index: 2, attempt: 3 } },
+    });
     if (!result.ok) return;
-    expect(Object.isFrozen(result.value)).toBe(true);
-    expect(result.value).not.toBe(undefined);
+    expect(Object.isFrozen(result.value.saveOpts)).toBe(true);
 
-    const partial = parseSaveNodeBoundary("run-1", "n1", rawState, snapshotSaveNodeOpts({ index: 0 }));
+    const partial = parseSaveNodeBoundary("run-1", rawState, snapshotSaveNodeOpts({ index: 0 }));
     expect(partial.ok).toBe(true);
     if (!partial.ok) return;
-    expect(partial.value).toEqual({ index: 0 });
+    expect(partial.value).toEqual({ nodeId: N("n1"), saveOpts: { index: 0 } });
   });
 });
 

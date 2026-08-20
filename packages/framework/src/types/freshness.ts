@@ -7,7 +7,7 @@
  */
 export type { WitnessKind, ResourceName, Witness, WitnessValue } from "./witness.js";
 export { resourceName, __brandResourceName, witnessValue, witness, stampWitness, __brandWitness, isWitnessKind } from "./witness.js";
-import type { ResourceName, Witness, WitnessKind } from "./witness.js";
+import type { Witness, WitnessKind } from "./witness.js";
 // ---------------------------------------------------------------------------
 // FreshnessIndex port + supporting types
 //
@@ -28,8 +28,7 @@ export interface FreshnessConflict {
   /** The write node that is conditioned on a stale witness. */
   readonly writeNodeId: NodeId;
   readonly writeRunId: RunId;
-  /** Branded — derived from `conditionedOnWitness.resource`, cannot drift from it. */
-  readonly resource: ResourceName;
+  /** Owns the conflict resource; consumers read `conditionedOnWitness.resource`. */
   readonly conditionedOnWitness: Witness;
   /** The conflicting write that superseded the conditioned-on witness. */
   readonly conflictingWrite: WriteEntry;

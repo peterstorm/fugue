@@ -265,7 +265,7 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
       // (branded ids — the checkpoint domain's one identifier ownership rule);
       // the engine calls it with already-validated RunId/NodeId values.
       write: async (runId: RunId, nodeId: NodeId, value: unknown) => {
-        const r = await cp.saveNode(runId, nodeId, {
+        const r = await cp.saveNode(runId, {
           nodeId,
           output: value,
           completedAt: new Date(),

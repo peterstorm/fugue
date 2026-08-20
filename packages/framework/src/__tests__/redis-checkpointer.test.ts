@@ -64,7 +64,7 @@ checkpointerSuite(
 describe("InMemoryCheckpointer — hostile-value totality", () => {
   test("saveNode refuses non-cloneable state with a typed checkpoint-write-failed, never a raw rejection", async () => {
     const cp = new InMemoryCheckpointer();
-    const result = await cp.saveNode(R("hostile-1"), N("n1"), {
+    const result = await cp.saveNode(R("hostile-1"), {
       nodeId: N("n1"),
       output: { run: () => 42 }, // functions are not cloneable
       completedAt: new Date(),
@@ -76,8 +76,8 @@ describe("InMemoryCheckpointer — hostile-value totality", () => {
 
   test("saveNode truthful branding: an invalid raw nodeId never inhabits the branded field and rendering stays bounded", async () => {
     const cp = new InMemoryCheckpointer();
-    const result = await cp.saveNode(R("hostile-2"), "not a valid id!" as NodeId, {
-      nodeId: N("n1"),
+    const result = await cp.saveNode(R("hostile-2"), {
+      nodeId: "not a valid id!" as NodeId,
       output: { run: () => 42 },
       completedAt: new Date(),
     });
@@ -85,7 +85,7 @@ describe("InMemoryCheckpointer — hostile-value totality", () => {
     if (!result.ok) {
       expect(result.error.kind).toBe("checkpoint-write-failed");
       if (result.error.kind === "checkpoint-write-failed") {
-        expect(result.error.invalidNodeId).toBeDefined();
+        expect(result.error.invalidNodeId).toBe("not a valid id!");
         expect(formatFrameworkError(result.error).length).toBeLessThan(500);
       }
     }
@@ -156,8 +156,8 @@ describe("InMemoryCheckpointer — hostile-value totality", () => {
     } as unknown as string;
     // Must RESOLVE with a typed err — a raw rejection (from the catch's own
     // message template) is the FR-040 escape this test pins closed.
-    const result = await cp.saveNode(R("hostile-5"), hostileNodeId as NodeId, {
-      nodeId: N("n1"),
+    const result = await cp.saveNode(R("hostile-5"), {
+      nodeId: hostileNodeId as NodeId,
       output: { run: () => 42 },
       completedAt: new Date(),
     });
@@ -170,23 +170,19 @@ describe("InMemoryCheckpointer — hostile-value totality", () => {
     }
   });
 
-  test("saveNode with a brand-bypassed coercible non-string nodeId never rejects raw (total key coercion)", async () => {
+  test("saveNode rejects a brand-bypassed non-string nodeId through the typed boundary", async () => {
     const cp = new InMemoryCheckpointer();
-    // A non-string id whose `toString` succeeds coerces exactly as a raw
-    // computed key always did — the key is carried by the SAME total
-    // renderer (`stringOf`) so a hostile variant can only degrade, never
-    // throw out of the async port.
     const coercibleNodeId = { toString: () => "coerced-key" } as unknown as string;
-    const result = await cp.saveNode(R("hostile-6"), coercibleNodeId as NodeId, {
-      nodeId: N("n1"),
+    const result = await cp.saveNode(R("hostile-6"), {
+      nodeId: coercibleNodeId as NodeId,
       output: { value: 1 },
       completedAt: new Date(),
     });
-    expect(result.ok).toBe(true);
-    const loaded = await cp.load(R("hostile-6"));
-    expect(loaded.ok).toBe(true);
-    if (loaded.ok && loaded.value !== null) {
-      expect(Object.hasOwn(loaded.value.nodes, "coerced-key")).toBe(true);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected typed refusal");
+    expect(result.error.kind).toBe("checkpoint-write-failed");
+    if (result.error.kind === "checkpoint-write-failed") {
+      expect(result.error.invalidNodeId).toBe("coerced-key");
     }
   });
 
@@ -247,8 +243,8 @@ describe("InMemoryCheckpointer — hostile-value totality", () => {
     // quoting, no truncation (formatFrameworkError is the single bounding
     // point and renders it once).
     const longRaw = "bad-node!".padEnd(80, "x");
-    const result = await cp.saveNode(R("hostile-7"), longRaw as NodeId, {
-      nodeId: N("n1"),
+    const result = await cp.saveNode(R("hostile-7"), {
+      nodeId: longRaw as NodeId,
       output: { run: () => 42 },
       completedAt: new Date(),
     });
@@ -273,8 +269,8 @@ describe("InMemoryCheckpointer — hostile-value totality", () => {
     // Hostile non-string runId: the invalidRunId facet the file backend's
     // writeFailed already emits — parity on both fields.
     const hostileRunId = { toString: () => "<unprintable>" } as unknown as RunId;
-    const result2 = await cp.saveNode(hostileRunId, "not a valid id!" as NodeId, {
-      nodeId: N("n1"),
+    const result2 = await cp.saveNode(hostileRunId, {
+      nodeId: "not a valid id!" as NodeId,
       output: { run: () => 42 },
       completedAt: new Date(),
     });
@@ -650,7 +646,7 @@ describeRedis("RedisCheckpointer", () => {
     const runId = makeRunId();
     await cp.setMeta(R(runId), { dagId: D("d"), startedAt: new Date(), nodeCount: 3 });
 
-    await cp.saveNode(R(runId), N("n1"), {
+    await cp.saveNode(R(runId), {
       nodeId: N("n1"),
       output: { v: 1 },
       completedAt: new Date(),
@@ -660,14 +656,14 @@ describeRedis("RedisCheckpointer", () => {
 
     await redisOrThrow().script("FLUSH");
 
-    const result = await cp.saveNode(R(runId), N("n2"), {
+    const result = await cp.saveNode(R(runId), {
       nodeId: N("n2"),
       output: { v: 2 },
       completedAt: new Date(),
     });
     expect(result.ok).toBe(true);
 
-    await cp.saveNode(R(runId), N("n3"), {
+    await cp.saveNode(R(runId), {
       nodeId: N("n3"),
       output: { v: 3 },
       completedAt: new Date(),
@@ -822,7 +818,7 @@ describeRedis("RedisCheckpointer", () => {
   test("a non-string nodeId in a stored node row drops the row as corrupt, never into the map", async () => {
     const runId = makeRunId();
     await cp.setMeta(R(runId), { dagId: D("d"), startedAt: new Date(), nodeCount: 2 });
-    await cp.saveNode(R(runId), N("good"), {
+    await cp.saveNode(R(runId), {
       nodeId: N("good"),
       output: { v: 1 },
       completedAt: new Date(),

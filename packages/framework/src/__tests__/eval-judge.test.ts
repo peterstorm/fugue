@@ -6,7 +6,7 @@ import { judgePassed } from "../types/eval-judge.js";
 import {
   createEvalJudgeNode,
   toEvalJudgeResult,
-  failOpenResult,
+  llmFailureResult,
   EvalJudgeResponseSchema,
 } from "../../src/nodes/eval-judge.js";
 import type { EvalJudgeResponse } from "../../src/nodes/eval-judge.js";
@@ -167,11 +167,11 @@ describe("toEvalJudgeResult", () => {
   });
 });
 
-describe("failOpenResult", () => {
-  test("returns skipped-llm-failure outcome that is fail-open", () => {
-    const result = failOpenResult("LLM unavailable");
+describe("llmFailureResult", () => {
+  test("returns skipped-llm-failure outcome that fails quality gating closed", () => {
+    const result = llmFailureResult("LLM unavailable");
     expect(result.outcome).toBe("skipped-llm-failure");
-    expect(judgePassed(result)).toBe(true);
+    expect(judgePassed(result)).toBe(false);
     expect(result.score).toBeNull();
     expect(result.reason).toContain("LLM unavailable");
     expect(result.failedCriteria).toHaveLength(0);
@@ -273,27 +273,44 @@ describe("createEvalJudgeNode", () => {
       expect(calledWith).toBe("mainLlm");
     });
 
-    test("fail-open when no LLM client available", async () => {
+    test("fails quality gating closed when no LLM client is available", async () => {
       const node = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
       const result = await node.run("in", "out", makeCtx());
-      expect(judgePassed(result)).toBe(true);
+      expect(judgePassed(result)).toBe(false);
       expect(result.reason).toContain("No LLM client available");
     });
 
-    test("fail-open when LLM returns error", async () => {
+    test("fails quality gating closed when LLM returns an error", async () => {
       const llm = makeFailingLlm("rate limited");
       const node = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
       const result = await node.run("in", "out", makeCtx({ judgeLlm: llm }));
-      expect(judgePassed(result)).toBe(true);
+      expect(judgePassed(result)).toBe(false);
       expect(result.reason).toContain("rate limited");
     });
 
-    test("fail-open when LLM throws exception", async () => {
+    test("fails quality gating closed when LLM throws", async () => {
       const llm = makeThrowingLlm();
       const node = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
       const result = await node.run("in", "out", makeCtx({ judgeLlm: llm }));
-      expect(judgePassed(result)).toBe(true);
+      expect(judgePassed(result)).toBe(false);
       expect(result.reason).toContain("network timeout");
+    });
+
+    test("fails quality gating closed when the structured response is invalid", async () => {
+      const llm: LlmClient = {
+        sendWithTools: stubSendWithTools,
+        sendStructured: async () => ok({
+          output: { score: 2, criteria_scores: [], failed_criteria: [], reason: "invalid" },
+          tokensIn: 0,
+          tokensOut: 0,
+          rawText: "",
+        }) as any,
+      };
+      const node = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
+      const result = await node.run("in", "out", makeCtx({ judgeLlm: llm }));
+      expect(result.outcome).toBe("skipped-llm-failure");
+      expect(judgePassed(result)).toBe(false);
+      expect(result.reason).toContain("Invalid judge response");
     });
 
     test("uses rubricInline in the prompt", async () => {

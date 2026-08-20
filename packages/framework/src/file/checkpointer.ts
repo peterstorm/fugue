@@ -19,7 +19,7 @@
 // closed as corrupt rather than being served under an address it does not own.
 //
 // ADR-0075 composite addressing: this is the ONE backend that implements it
-// (FR-022/FR-023). `saveNode`'s 4th argument goes through `compositeNodeKey`,
+// (FR-022/FR-023). `saveNode`'s options argument goes through `compositeNodeKey`,
 // whose canonical folding makes a save with no `index`, `attempt`, OR
 // `namespace` byte-identical to a pre-extension save (stored key = the bare
 // `nodeId`); a `namespace` alone is rejected as ambiguous (ADR-0075
@@ -45,8 +45,8 @@
 // there is no background sweeper and no physical GC in this pass, so an
 // expired run's bytes stay on disk while its `load` fails closed.
 //
-// Boundary validation (FR-016/FR-029): `runId`, `nodeId`, `state.nodeId`, and
-// the composite `namespace`/`index`/`attempt` are ALL re-validated here, before
+// Boundary validation (FR-016/FR-029): `runId`, `state.nodeId`, and the
+// composite `namespace`/`index`/`attempt` are ALL re-validated here, before
 // any `join`, even though the port types are branded — a bypassed brand (a JS
 // caller, a widening cast, a value deserialized from an untrusted transport) is
 // exactly the case this boundary exists for. Validation first, `join` second:
@@ -119,11 +119,11 @@ import type {
 } from "../checkpoint/checkpointer.js";
 import { compositeNodeKey } from "../checkpoint/composite-node-key.js";
 import type { FrameworkError } from "../types/errors.js";
-import type { RunId, NodeId } from "../types/ids.js";
-import { ID_PATTERN, __brandNodeId, __brandRunId } from "../types/ids.js";
+import type { RunId } from "../types/ids.js";
+import { ID_PATTERN, __brandRunId } from "../types/ids.js";
 import type { Result } from "../types/result.js";
 import { err, ok } from "../types/result.js";
-import { frameworkError } from "../types/error-factories.js";
+import { CHECKPOINT_INVALID_NODE_ID, frameworkError } from "../types/error-factories.js";
 import { fwLogger } from "../logger.js";
 import {
   isMissingPathError,
@@ -393,36 +393,37 @@ const createFileCheckpointerUnchecked = (
 
     async saveNode(
       runId: RunId,
-      nodeId: NodeId,
       state: NodeState,
       saveOpts?: SaveNodeOpts,
     ): Promise<Result<void, FrameworkError>> {
       let rawState: RawNodeSnapshot;
       let rawSaveOpts: RawSaveNodeOptsSnapshot | undefined;
+      let rawNodeId: unknown = CHECKPOINT_INVALID_NODE_ID;
       try {
         // Snapshot ALL caller-owned property bags before validating any field.
         // No code below this block consults `state` or `saveOpts` again.
         rawState = snapshotNodeState(state);
+        rawNodeId = rawState.nodeId;
         rawSaveOpts = snapshotSaveNodeOpts(saveOpts);
       } catch (error) {
         return err(
           writeFailed(
             runId,
-            nodeId,
+            rawNodeId,
             `saveNode rejected an unreadable boundary value: ${messageOf(error)}`,
           ),
         );
       }
 
-      const parsedBoundary = parseSaveNodeBoundary(runId, nodeId, rawState, rawSaveOpts);
+      const parsedBoundary = parseSaveNodeBoundary(runId, rawState, rawSaveOpts);
       if (!parsedBoundary.ok) {
-        return err(writeFailed(runId, nodeId, `saveNode rejected: ${parsedBoundary.error}`));
+        return err(writeFailed(runId, rawState.nodeId, `saveNode rejected: ${parsedBoundary.error}`));
       }
-      const parsedSaveOpts = parsedBoundary.value;
+      const { nodeId, saveOpts: parsedSaveOpts } = parsedBoundary.value;
       let nodeKey: string;
       let json: string;
       try {
-        nodeKey = compositeNodeKey(__brandNodeId(nodeId), parsedSaveOpts);
+        nodeKey = compositeNodeKey(nodeId, parsedSaveOpts);
         json = serializeNode(nodeKey, rawState);
       } catch (error) {
         return err(

@@ -126,7 +126,7 @@ describe("SC-006 gate integrity pins", () => {
       output: { done: true },
       completedAt: new Date(0),
     };
-    const saveRes = await cp.saveNode(rid, N("n1"), state, { index: 1, attempt: 2 });
+    const saveRes = await cp.saveNode(rid, state, { index: 1, attempt: 2 });
     expect(saveRes.ok).toBe(true);
 
     const loadRes = await cp.load(rid);

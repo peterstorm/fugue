@@ -34,7 +34,7 @@ The stored address also had to be deterministic, reversible, and unambiguous. Va
 ## Decision
 **Adopt the `@`-delimited string codec with canonical folding, and implement composite persistence only in the file checkpointer.**
 
-The port in [`checkpoint/checkpointer.ts`](../../packages/framework/src/checkpoint/checkpointer.ts) adds an optional fourth argument to `Checkpointer.saveNode`: `opts?: SaveNodeOpts`, where `SaveNodeOpts` aliases `CompositeNodeKeyOpts { namespace?: string; index?: number; attempt?: number }`. Because the argument is optional, existing call sites remain source-compatible.
+The port in [`checkpoint/checkpointer.ts`](../../packages/framework/src/checkpoint/checkpointer.ts) accepts `saveNode(runId, state, opts?)`, where `state.nodeId` is the sole canonical node identity and `SaveNodeOpts` aliases `CompositeNodeKeyOpts { namespace?: string; index?: number; attempt?: number }`. The optional third argument extends that identity with composite addressing without duplicating node identity at the interface.
 
 The pure codec in [`checkpoint/composite-node-key.ts`](../../packages/framework/src/checkpoint/composite-node-key.ts) defines these invariants:
 
@@ -51,7 +51,7 @@ The shipped file implementation in [`file/checkpointer.ts`](../../packages/frame
 ## Consequences
 
 **Positive:**
-- Existing calls, canonical node keys, and in-memory and Redis storage remain unchanged; no checkpoint migration is required.
+- Canonical node keys and in-memory and Redis storage remain unchanged; no checkpoint migration is required.
 - The file backend can persist indexed, namespaced, and attempted instances of the same node without overwriting the canonical entry or another normalized composite address.
 - The separator rule and strict parser make malformed or impossible stored addresses detectable rather than silently interpreting them.
 - The pure exported codec gives producers, persistence implementations, and consumers one definition of the composite address grammar.
@@ -67,6 +67,10 @@ The shipped file implementation in [`file/checkpointer.ts`](../../packages/frame
 **Namespace-only `SaveNodeOpts` are rejected, not folded.** The Decision bullet above ("a supplied namespace alone does not change the address") described the original encoder behavior. During the 2026-08-14 standalone-review remediation (`.claude/plans/2026-08-14-pr-remediation-215348.md`, advisory `type-design-analyzer-1/5`, accepted), the silent fold was changed to a contract violation: `compositeNodeKey` throws when a runtime caller supplies `namespace` without `index` or `attempt`, because a namespace-only address would be silently discarded while a later composite save with `index: 0` would land on a different durable entry. The file backend maps a forged runtime shape to typed `checkpoint-write-failed`.
 
 The 2026-08-20 remediation also encoded this invariant in `CompositeNodeKeyOpts`: the canonical arm is empty, while each composite arm requires `index` or `attempt`. Namespace-only is therefore a compile-time error for typed callers and remains runtime-rejected for JavaScript/brand-bypassed input. The pins are `composite-node-key.test.ts` (compile-time `@ts-expect-error` plus runtime refusal) and `file-checkpointer-codec.test.ts` (hostile boundary parse). The canonical-fold behavior for omitted `index`/`attempt` (bare `nodeId`, byte-identical for existing consumers) is unchanged.
+
+## Amendment (2026-08-20 — single node identity)
+
+`Checkpointer.saveNode` now takes `(runId, state, opts?)`; the separate addressed `nodeId` parameter was removed. `NodeState.nodeId` is the one identity used by canonical keys, composite-key construction, and serialized node envelopes. The previous `(nodeId, state.nodeId)` pair admitted mismatches that the file adapter rejected but the in-memory and Redis adapters persisted. Removing the duplicate shrinks the port state space so backend disagreement is unrepresentable for typed callers; the file boundary still re-parses forged JavaScript inputs before path construction. This is a pre-release interface deepening, so no compatibility overload is retained.
 
 ## Related
 

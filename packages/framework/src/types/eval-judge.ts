@@ -25,9 +25,9 @@ export type EvalJudgeRubric =
 //   - "passed":             judge ran, score >= threshold, no failed criteria
 //   - "failed":             judge ran, score < threshold OR some criteria failed
 //   - "skipped-llm-failure": LLM-side failure (call error, schema mismatch);
-//                            fail-open — `judgePassed(r)` returns true
+//                            fail-closed — `judgePassed(r)` returns false
 //   - "crash":              orchestrator-side exception (span setup, encoder
-//                            bug, judge `run` threw past its own fail-open);
+//                            bug, judge `run` threw past its outcome boundary);
 //                            fail-closed — `judgePassed(r)` returns false and
 //                            `crashMessage` carries the structured cause.
 //
@@ -52,12 +52,12 @@ export type EvalJudgeResult =
     });
 
 /**
- * True when the judge result satisfies gating logic. `"passed"` is the happy
- * path; `"skipped-llm-failure"` is fail-open (a broken model must not block a
- * run). `"failed"` and `"crash"` return false.
+ * True only when the evaluator completed and passed. An unavailable evaluator
+ * is not evidence of output quality, so `"skipped-llm-failure"`, `"failed"`,
+ * and `"crash"` all return false.
  */
 export const judgePassed = (r: EvalJudgeResult): boolean =>
-  r.outcome === "passed" || r.outcome === "skipped-llm-failure";
+  r.outcome === "passed";
 
 /** True when the judge orchestrator caught an exception. */
 export const judgeCrashed = (r: EvalJudgeResult): boolean => r.outcome === "crash";

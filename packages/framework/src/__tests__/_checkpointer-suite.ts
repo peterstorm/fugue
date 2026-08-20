@@ -111,7 +111,7 @@ export function checkpointerSuite(
       await cp.setMeta(R("run-2"), meta);
 
       const nodeState: NodeState = { nodeId: "n1" as NodeId, output: { text: "hello" }, completedAt: new Date("2025-06-01T12:00:00Z") };
-      const saveResult = await cp.saveNode(R("run-2"), N("n1"), nodeState);
+      const saveResult = await cp.saveNode(R("run-2"), nodeState);
       expect(saveResult.ok).toBe(true);
 
       const loadResult = await cp.load(R("run-2"));
@@ -141,7 +141,7 @@ export function checkpointerSuite(
         subject: "s",
         frameworkVersion: FRAMEWORK_VERSION,
       });
-      const saved = await cp.saveNode(R("hostile-proto"), N("__proto__"), {
+      const saved = await cp.saveNode(R("hostile-proto"), {
         nodeId: N("__proto__"),
         output: { value: 1 },
         completedAt: new Date(),
@@ -175,7 +175,7 @@ export function checkpointerSuite(
         output: { text: "hello" },
         completedAt: new Date("2025-06-01T12:00:00Z"),
       };
-      const saveResult = await cp.saveNode(R(runId), N("n1"), nodeState);
+      const saveResult = await cp.saveNode(R(runId), nodeState);
       expect(saveResult.ok).toBe(true);
 
       // Mutate the caller-owned inputs AFTER the successful writes...
@@ -204,7 +204,7 @@ export function checkpointerSuite(
       await cp.setMeta(R("run-3"), meta);
 
       for (const id of ["a", "b", "c"]) {
-        await cp.saveNode(R("run-3"), N(id), { nodeId: N(id), output: id, completedAt: new Date() });
+        await cp.saveNode(R("run-3"), { nodeId: N(id), output: id, completedAt: new Date() });
       }
 
       const loadResult = await cp.load(R("run-3"));
@@ -336,7 +336,7 @@ export function checkpointerSuite(
           startedAt: new Date(),
           nodeCount: 2,
         });
-        await cp.saveNode(R(runId), N("good-node"), {
+        await cp.saveNode(R(runId), {
           nodeId: N("good-node"),
           output: { kept: true },
           completedAt: new Date(),

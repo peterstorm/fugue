@@ -58,7 +58,7 @@ import {
   serializedPath as outputPath,
   MAX_SAFE_RECORD_DEPTH,
 } from "../state-machine/serialize.js";
-import { ID_PATTERN } from "../types/ids.js";
+import { ID_PATTERN, __brandNodeId, type NodeId } from "../types/ids.js";
 import { isRepresentableTimestampMs } from "../types/clock.js";
 import type { Result } from "../types/result.js";
 import { err, ok } from "../types/result.js";
@@ -727,33 +727,31 @@ export const snapshotSaveNodeOpts = (opts: unknown): RawSaveNodeOptsSnapshot | u
   });
 };
 
-/** Parse the snapshotted runtime boundary into canonical options. Once this
- * succeeds, all supported fields and invariants are established before path
- * construction or persistence (FR-016/FR-029). Parse-named like its siblings
- * (`parseLoadOpts`/`parseStoredMeta`/`parseNodeFile`): the Ok side carries the
- * parsed canonical value, the Err side the boundary violation. */
+export interface ParsedSaveNodeBoundary {
+  readonly nodeId: NodeId;
+  readonly saveOpts: SaveNodeOpts | undefined;
+}
+
+/** Parse the snapshotted runtime boundary into one canonical node address.
+ * `state.nodeId` is the sole node identity; once this succeeds, a mismatched
+ * addressed-id/state pair is structurally impossible. */
 export const parseSaveNodeBoundary = (
   runId: unknown,
-  nodeId: unknown,
   state: RawNodeSnapshot,
   opts: RawSaveNodeOptsSnapshot | undefined,
-): Result<SaveNodeOpts | undefined, string> => {
+): Result<ParsedSaveNodeBoundary, string> => {
   if (!isBoundaryId(runId)) {
     return err(`runId ${render(runId)} does not match ${ID_PATTERN.source} — refusing to address a path outside the run directory`);
-  }
-  if (!isBoundaryId(nodeId)) {
-    return err(`nodeId ${render(nodeId)} does not match ${ID_PATTERN.source} — refusing to address a path outside the run directory`);
   }
   if (!state.plainRecord) {
     return err("node state must be an object");
   }
-  if (!isBoundaryId(state.nodeId)) {
+  if (!isBoundaryIdString(state.nodeId)) {
     return err(`state.nodeId ${render(state.nodeId)} does not match ${ID_PATTERN.source}`);
   }
-  if (state.nodeId !== nodeId) {
-    return err(`state.nodeId ${render(state.nodeId)} must match addressed nodeId ${render(nodeId)}`);
-  }
-  if (opts === undefined) return ok(undefined);
+
+  const nodeId = __brandNodeId(state.nodeId);
+  if (opts === undefined) return ok({ nodeId, saveOpts: undefined });
   if (!opts.plainObject) {
     return err("saveNode options must be a plain object when present");
   }
@@ -779,20 +777,26 @@ export const parseSaveNodeBoundary = (
   }
 
   if (index !== undefined) {
-    return ok(Object.freeze({
-      ...(namespace !== undefined ? { namespace } : {}),
-      index,
-      ...(attempt !== undefined ? { attempt } : {}),
-    }));
+    return ok({
+      nodeId,
+      saveOpts: Object.freeze({
+        ...(namespace !== undefined ? { namespace } : {}),
+        index,
+        ...(attempt !== undefined ? { attempt } : {}),
+      }),
+    });
   }
   if (attempt !== undefined) {
-    return ok(Object.freeze({
-      ...(namespace !== undefined ? { namespace } : {}),
-      attempt,
-    }));
+    return ok({
+      nodeId,
+      saveOpts: Object.freeze({
+        ...(namespace !== undefined ? { namespace } : {}),
+        attempt,
+      }),
+    });
   }
   return namespace === undefined
-    ? ok(Object.freeze({}))
+    ? ok({ nodeId, saveOpts: Object.freeze({}) })
     : err("namespace without index/attempt is ambiguous; supply index and/or attempt");
 };
 

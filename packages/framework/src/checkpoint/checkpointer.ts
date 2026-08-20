@@ -11,7 +11,9 @@ import {
 } from "../types/ids.js";
 import { isRepresentableTimestampMs } from "../types/clock.js";
 import {
+  CHECKPOINT_INVALID_NODE_ID,
   CHECKPOINT_INVALID_RUN_ID,
+  buildCheckpointWriteFailed,
   frameworkError,
   stringOf,
 } from "../types/error-factories.js";
@@ -428,6 +430,23 @@ export interface CheckpointerLoadOpts {
   readonly expectedDagFingerprint?: string;
 }
 
+/** Snapshot the hostile load-options seam exactly once for adapters whose
+ * public grammar is the single optional fingerprint field. */
+export const snapshotExpectedDagFingerprint = (
+  opts: CheckpointerLoadOpts | undefined,
+): Result<string | undefined, FrameworkError> => {
+  try {
+    return ok(opts?.expectedDagFingerprint);
+  } catch (error) {
+    return err(
+      frameworkError.cacheError(
+        "checkpoint:load",
+        `load could not inspect options: ${safeErrorMessage(error)}`,
+      ),
+    );
+  }
+};
+
 export interface Checkpointer {
   /**
    * Identifier ownership (one encoding for the
@@ -451,7 +470,7 @@ export interface Checkpointer {
   /**
    * Persist a node's terminal state under `runId`.
    *
-   * The optional 4th argument enables composite addressing (ADR-0075): with
+   * The optional 3rd argument enables composite addressing (ADR-0075): with
    * `index`/`attempt` both absent the entry is stored under the canonical
    * `nodeId` key (existing behavior, byte-identical); with either present the
    * entry is stored under the composite key (see `SaveNodeOpts`). The
@@ -459,7 +478,7 @@ export interface Checkpointer {
    * composite addressing is a versioned opt-in implemented by the file
    * backend. `load` returns entries keyed by the stored nodeKey.
    */
-  saveNode(runId: RunId, nodeId: NodeId, state: NodeState, opts?: SaveNodeOpts): Promise<Result<void, FrameworkError>>;
+  saveNode(runId: RunId, state: NodeState, opts?: SaveNodeOpts): Promise<Result<void, FrameworkError>>;
   setMeta(runId: RunId, meta: RunMeta): Promise<Result<void, FrameworkError>>;
 }
 
@@ -582,20 +601,9 @@ export class InMemoryCheckpointer implements Checkpointer {
     if (!stored) return ok(null);
     const { meta, createdAt } = stored;
 
-    // The caller-owned `opts` bag is a hostile seam (parity with the file
-    // backend's `parseLoadOpts` snapshot-once discipline): read
-    // `expectedDagFingerprint` EXACTLY ONCE under a guard — a throwing
-    // accessor getter must become a typed `cache-error`, never a raw
-    // rejection, and a stateful getter (different value per read) must not
-    // be able to make the gate and the comparison disagree.
-    let expectedDagFingerprint: string | undefined;
-    try {
-      expectedDagFingerprint = opts?.expectedDagFingerprint;
-    } catch (error) {
-      return err(
-        frameworkError.cacheError("checkpoint:load", `load could not inspect options: ${safeErrorMessage(error)}`),
-      );
-    }
+    const expectedFingerprint = snapshotExpectedDagFingerprint(opts);
+    if (!expectedFingerprint.ok) return expectedFingerprint;
+    const expectedDagFingerprint = expectedFingerprint.value;
 
     // ADR-0017/FR-026/FR-027 gate decision — delegated to the ONE shared
     // encoding (`evaluateCheckpointLoadGates`): gate ORDER and verdict
@@ -649,41 +657,33 @@ export class InMemoryCheckpointer implements Checkpointer {
 
   async saveNode(
     runId: RunId,
-    nodeId: NodeId,
     state: NodeState,
     _opts?: SaveNodeOpts,
   ): Promise<Result<void, FrameworkError>> {
-    // FR-023: options are intentionally unobserved. In-memory behavior remains
-    // identical to the pre-extension implementation: the bare nodeId is the
-    // only key and no log, warning, validation, or other side effect occurs.
-    // Non-cloneable state is refused with a typed error — the file backend
-    // maps the same value class to `checkpoint-write-failed` (FR-040,
-    // ADR-0080); the port must never reject with a raw Error.
+    // FR-023: options are intentionally unobserved. `state.nodeId` is the one
+    // identity source and the bare key used by this backend.
     const existing = this.nodes.get(runId) ?? {};
+    let rawNodeId: unknown = CHECKPOINT_INVALID_NODE_ID;
     let detached: NodeState;
     try {
-      detached = this.detachStored(state, `node state for ${nodeId}`);
+      const nodeId = state.nodeId;
+      rawNodeId = nodeId;
+      const snapshot: NodeState = {
+        nodeId,
+        output: state.output,
+        completedAt: state.completedAt,
+      };
+      detached = this.detachStored(snapshot, `node state for ${safeDiagnosticRender(nodeId)}`);
     } catch (error) {
-      // The message must render the id through the total diagnostic renderer
-      // (FR-040): a hostile raw `nodeId` whose `toString` throws is caught
-      // above and must not throw AGAIN inside this catch's own template.
-      // Construction goes through the public `checkpointWriteFailed` factory
-      // — the ONE truthful-branding construction path shared with the file
-      // backend (the documented exception to that module's brand-throwing
-      // default).
       return err(
-        frameworkError.checkpointWriteFailed(
+        buildCheckpointWriteFailed(
           runId,
-          nodeId,
-          `state for node ${safeDiagnosticRender(nodeId)} is not cloneable (stored checkpoint state is never aliased by reference): ${safeErrorMessage(error)}`,
+          rawNodeId,
+          `node state is not a readable cloneable snapshot: ${safeErrorMessage(error)}`,
         ),
       );
     }
-    // Total key coercion (FR-040): a brand-bypassed non-string `nodeId` whose
-    // `toString` throws must not reject the port raw from the computed key —
-    // strings key byte-identically as before, hostile values degrade to the
-    // unprintable placeholder.
-    this.nodes.set(runId, { ...existing, [stringOf(nodeId)]: detached });
+    this.nodes.set(runId, { ...existing, [stringOf(detached.nodeId)]: detached });
     return ok(undefined);
   }
 

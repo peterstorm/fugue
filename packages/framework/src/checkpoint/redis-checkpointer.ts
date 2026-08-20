@@ -18,6 +18,7 @@ import {
   parseNodeStateRecord,
   parseRunMetaRecord,
   reportCorruptCheckpointEntry,
+  snapshotExpectedDagFingerprint,
 } from "./checkpointer.js";
 import { FRAMEWORK_VERSION } from "./fingerprint.js";
 import { frameworkError } from "../types/error-factories.js";
@@ -72,12 +73,21 @@ const deserializeMeta = (raw: string): { meta: RunMeta; createdAt: Date } => {
   return { meta: parsed.value.meta, createdAt: parsed.value.createdAt };
 };
 
-const serializeNode = (state: NodeState): string =>
-  JSON.stringify({
-    nodeId: state.nodeId,
-    output: state.output,
-    completedAt: state.completedAt.toISOString(),
-  } satisfies StoredNodeState);
+const serializeNode = (
+  state: NodeState,
+): { readonly nodeId: NodeId; readonly payload: string } => {
+  const nodeId = state.nodeId;
+  const output = state.output;
+  const completedAt = state.completedAt;
+  return {
+    nodeId,
+    payload: JSON.stringify({
+      nodeId,
+      output,
+      completedAt: completedAt.toISOString(),
+    } satisfies StoredNodeState),
+  };
+};
 
 const deserializeNode = (raw: string): NodeState => {
   const stored: StoredNodeState = JSON.parse(raw);
@@ -175,20 +185,9 @@ export class RedisCheckpointer implements Checkpointer {
       });
     }
 
-    // The caller-owned `opts` bag is a hostile seam (parity with the
-    // in-memory adapter and the file backend's `parseLoadOpts` snapshot-once
-    // discipline): read `expectedDagFingerprint` EXACTLY ONCE under a guard —
-    // a throwing accessor getter becomes a typed `cache-error`, never a raw
-    // rejection, and a stateful getter (different value per read) cannot make
-    // the gate and the comparison disagree.
-    let expectedDagFingerprint: string | undefined;
-    try {
-      expectedDagFingerprint = opts?.expectedDagFingerprint;
-    } catch (error) {
-      return err(
-        frameworkError.cacheError("checkpoint:load", `load could not inspect options: ${safeErrorMessage(error)}`),
-      );
-    }
+    const expectedFingerprint = snapshotExpectedDagFingerprint(opts);
+    if (!expectedFingerprint.ok) return expectedFingerprint;
+    const expectedDagFingerprint = expectedFingerprint.value;
 
     // ADR-0017/FR-026/FR-027 gate decision — the ONE shared encoding
     // (evaluateCheckpointLoadGates): gate order + verdict construction are
@@ -259,9 +258,9 @@ export class RedisCheckpointer implements Checkpointer {
     });
   }
 
-  async saveNode(runId: RunId, nodeId: NodeId, state: NodeState): Promise<Result<void, FrameworkError>> {
-    const payload = serializeNode(state);
+  async saveNode(runId: RunId, state: NodeState): Promise<Result<void, FrameworkError>> {
     try {
+      const { nodeId, payload } = serializeNode(state);
       if (!this.saveNodeSha) {
         this.saveNodeSha = await this.redis.script("LOAD", SAVE_NODE_SCRIPT) as string;
       }

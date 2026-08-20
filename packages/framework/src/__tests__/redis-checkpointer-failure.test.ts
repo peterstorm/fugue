@@ -47,7 +47,7 @@ describe("RedisCheckpointer — connection failure paths", () => {
 
   test("saveNode() returns cache-error on connection failure", async () => {
     const cp = new RedisCheckpointer(makeFailingRedis("ECONNREFUSED") as any);
-    const result = await cp.saveNode(runId("run-test-789"), nodeId("node-1"), {
+    const result = await cp.saveNode(runId("run-test-789"), {
       nodeId: nodeId("node-1"),
       output: { data: "test" },
       completedAt: new Date(),

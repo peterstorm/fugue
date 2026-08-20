@@ -15,8 +15,7 @@ import type { Context } from "hono";
 import { tryDagId, buildDescribedDag, formatFrameworkError } from "@fuguejs/framework";
 import type { HostEnv } from "../env.js";
 import type { LogPort } from "../../ports.js";
-import type { AuthIdentity } from "../../domain/auth.js";
-import { canAccessDag } from "../../domain/auth.js";
+import { authorizeDagAccess } from "./dag-access.js";
 import { errorResponse } from "../response.js";
 import type { DagManifestResponse } from "../response.js";
 import { canServeRequests, getRegistry } from "../../domain/host-state.js";
@@ -137,21 +136,9 @@ const assembleManifest = (
   }
 
   // Team isolation: same model as POST /dags/:id/run. Manifests can leak
-  // sensitive schema details (PII field names, internal model identifiers),
-  // so a team token cannot manifest another team's DAGs.
-  const identity = c.get("authIdentity") as AuthIdentity | undefined;
-  if (!identity) {
-    return errorResponse(c, 401, "unauthorized", "Missing auth identity — middleware not applied");
-  }
-  if (!canAccessDag(identity, registered.team)) {
-    // `user` identities are refusable too (canRunDag policy) — name the kind
-    // honestly rather than mislabelling a refused user as "admin".
-    const callerTeam = identity.kind === "team" ? identity.team : identity.kind;
-    return errorResponse(c, 403, "forbidden",
-      `Token for team '${callerTeam}' cannot access DAG '${dagId}' (owned by '${registered.team}')`,
-      { dagId, details: { callerTeam, dagTeam: registered.team } },
-    );
-  }
+  // sensitive schema details (PII field names, internal model identifiers).
+  const access = authorizeDagAccess(c, dagId, registered);
+  if (!access.ok) return access.response;
 
   const built = buildManifest(registered, onSchemaWarning);
   if (!built.ok) {

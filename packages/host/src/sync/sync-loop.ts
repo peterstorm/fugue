@@ -108,12 +108,12 @@ export interface SyncLoopHandle {
  * Execute a single sync cycle. This is the core logic without timer management.
  *
  * Steps:
- * 1. Get current SHA
- * 2. Compare with last SHA — skip if unchanged
- * 3. Pull changes
+ * 1. Pull changes in remote mode after the initial sync
+ * 2. Get the current SHA
+ * 3. Compare with the last SHA — skip if unchanged
  * 4. Check lockfile changes → bun install
  * 5. Discover + load all DAGs
- * 6. Build new registry
+ * 6. Build the new registry
  */
 export const executeSyncCycle = async (
   git: GitPort,
