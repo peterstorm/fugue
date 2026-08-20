@@ -71,10 +71,13 @@ All sound, practical advisories are accepted in this round.
 These must be registered when remediation orchestration starts:
 
 - `.claude/plans/2026-08-20-pr-remediation-round-25.md`
+- `apps/customer-summary/src/__tests__/shutdown.test.ts`
 - `packages/host/src/entrypoint-wiring.ts`
 - `packages/host/src/__tests__/entrypoint-wiring.test.ts`
+- `packages/host/src/__tests__/host-uds-bind.test.ts`
+- `packages/host/src/main-supervisor.ts`
 
-All other planned edits are within `result.json.scope`. If implementation discovers another required support path, stop and register it in a fresh remediation run rather than touching it under an incomplete authorization set.
+The initial remediation run `remediation-2026-08-20-054426-f6-file-durable-runtime` registered only the plan and two entrypoint-wiring paths, then blocked on the three omitted test/supervisor paths. It was retained and explicitly abandoned as superseded by `remediation-2026-08-20-054500-f6-file-durable-runtime`, whose complete six-path manifest installed the verified index.
 
 ## Validation
 
