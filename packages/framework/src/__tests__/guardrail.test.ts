@@ -96,6 +96,32 @@ describe("createGuardrailNode", () => {
     expect((subSpans[0] as any).kind).toBe("GUARDRAIL");
   });
 
+  test("hostile thrown values, logger failures, and observer failures still return GuardrailFailed", async () => {
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    const node = createGuardrailNode({
+      id: N("test-guardrail"),
+      inputSchema: InputSchema,
+      outputSchema: OutputSchema,
+      validate: () => { throw revoked.proxy; },
+    });
+    const ctx = {
+      ...makeCtx({ observe: () => { throw new Error("observer failed"); } }),
+      logger: {
+        warn: () => {},
+        error: () => { throw new Error("logger failed"); },
+      },
+    };
+
+    const result = await node.run({ value: 1 }, ctx);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.kind).toBe("failed");
+      if (result.value.kind === "failed") expect(result.value.error).toContain("unprintable");
+    }
+  });
+
   test("does not emit sub-span on success", async () => {
     const observer = new RecordingObserver();
     const node = createGuardrailNode({

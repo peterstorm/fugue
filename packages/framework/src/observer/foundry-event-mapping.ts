@@ -25,8 +25,8 @@
 //   * `mapRunSummaryToFoundry(summary, runEnd)` — the FULL FR-019 emission.
 //     The app-layer run-summary bridge computes a `RunSummary` and calls
 //     this so the summary event carries duration, status, nodeCount,
-//     retryCount, cacheHitCount, and totalCost, plus pre-aggregated
-//     cost/run-latency metrics dimensioned by dagId.
+//     retryCount, plus cacheHitCount/totalCost when available, and
+//     pre-aggregated cost/run-latency metrics dimensioned by dagId.
 //
 // We do NOT invent fields on the bare event. Callers wanting the complete
 // FR-019/SC-008 summary use `mapRunSummaryToFoundry`.
@@ -299,8 +299,9 @@ export interface RunSummaryExtras {
  * pre-aggregated cost/token/run-latency metrics dimensioned by dagId (FR-020).
  *
  * This is the entry point the app-layer run-summary bridge uses so that
- * 100% of completed runs produce a summary event carrying run duration, status,
- * node count, retry count, cache-hit count, and total cost (SC-008).
+ * completed runs produce a summary event carrying run duration, status, node
+ * count, and retry count. Cache-hit count and total cost are included when the
+ * bridge/summary can supply them (SC-008).
  */
 export function mapRunSummaryToFoundry(
   summary: RunSummary,

@@ -104,6 +104,41 @@ describe("buildUrl", () => {
 // ---------------------------------------------------------------------------
 
 describe("createAuthedHttpClient — request construction", () => {
+  it("rejects a cross-origin absolute URL before reading a token or calling fetch", async () => {
+    let tokenReads = 0;
+    let fetchCalls = 0;
+    const tokens: TokenProvider = {
+      get: async () => {
+        tokenReads += 1;
+        return ok("managed-secret" as BearerToken);
+      },
+      probe: async () => ok(undefined),
+      invalidate: () => {},
+    };
+    const fetch: FetchLike = async () => {
+      fetchCalls += 1;
+      return jsonResponse(200, { id: "1", name: "leaked" });
+    };
+
+    const result = await makeClient(fetch, tokens).get("https://attacker.example/steal", { schema: PayloadSchema });
+
+    expect(isErr(result)).toBe(true);
+    if (!result.ok) expect(result.error.kind).toBe("node-crash");
+    expect(tokenReads).toBe(0);
+    expect(fetchCalls).toBe(0);
+  });
+
+  it("accepts a same-origin absolute URL", async () => {
+    const { fetch, calls } = recordingFetch(() => jsonResponse(200, { id: "1", name: "Alice" }));
+    const result = await makeClient(fetch, fakeTokens(["tok-1"])).get(
+      "https://api.example.com/customers/1",
+      { schema: PayloadSchema },
+    );
+
+    expect(isOk(result)).toBe(true);
+    expect(calls[0]?.url).toBe("https://api.example.com/customers/1");
+  });
+
   it("GET builds baseUrl+path and injects the bearer token + default headers", async () => {
     const { fetch, calls } = recordingFetch(() => jsonResponse(200, { id: "1", name: "Alice" }));
     const client = makeClient(fetch, fakeTokens(["tok-1"]));
@@ -259,14 +294,15 @@ describe("createAuthedHttpClient — 401 retry", () => {
 // ---------------------------------------------------------------------------
 
 describe("createAuthedHttpClient — error mapping", () => {
-  it("5xx → transient (retriable) with httpStatus", async () => {
-    const { fetch } = recordingFetch(() => jsonResponse(503, "unavailable"));
-    const client = makeClient(fetch, fakeTokens(["t1"]));
+  it("5xx → transient without reflecting an echoed bearer token", async () => {
+    const { fetch } = recordingFetch(() => jsonResponse(503, "server echoed managed-secret"));
+    const client = makeClient(fetch, fakeTokens(["managed-secret"]));
     const result = await client.get("/x", { schema: PayloadSchema });
     expect(isErr(result)).toBe(true);
     if (!result.ok) {
       expect(result.error.kind).toBe("transient");
       if (result.error.kind === "transient") expect(result.error.httpStatus).toBe(503);
+      expect(JSON.stringify(result.error)).not.toContain("managed-secret");
     }
   });
 
@@ -281,12 +317,17 @@ describe("createAuthedHttpClient — error mapping", () => {
     }
   });
 
-  it("a network throw → transient (no exception escapes)", async () => {
-    const fetch: FetchLike = async () => { throw new Error("ECONNRESET"); };
-    const client = makeClient(fetch, fakeTokens(["t1"]));
+  it("a network throw → secret-free transient (no exception escapes)", async () => {
+    const fetch: FetchLike = async (_url, init) => {
+      throw new Error(`transport reflected ${init.headers.Authorization}`);
+    };
+    const client = makeClient(fetch, fakeTokens(["managed-secret"]));
     const result = await client.get("/x", { schema: PayloadSchema });
     expect(isErr(result)).toBe(true);
-    if (!result.ok) expect(result.error.kind).toBe("transient");
+    if (!result.ok) {
+      expect(result.error.kind).toBe("transient");
+      expect(JSON.stringify(result.error)).not.toContain("managed-secret");
+    }
   });
 
   it("invalid JSON body → non-retriable node-crash", async () => {
@@ -528,6 +569,8 @@ describe("createFakeAuthedHttpCapability", () => {
     "POST /orders": shapedRoute({ body: { id: "ord-1", name: "Order" } }),
     "GET /customers/999": shapedRoute({ status: 404, body: "Not Found" }),
     "GET /flaky": shapedRoute({ status: 503, body: "down" }),
+    "GET /rate-limited": shapedRoute({ status: 429, body: "slow down" }),
+    "GET /timed-out": shapedRoute({ status: 408, body: "too slow" }),
   });
   const client = fake.client;
 
@@ -562,11 +605,14 @@ describe("createFakeAuthedHttpCapability", () => {
     }
   });
 
-  it("a 5xx status route → transient", async () => {
-    const result = await client.get("/flaky", { schema: PayloadSchema });
-    expect(isErr(result)).toBe(true);
-    if (!result.ok) expect(result.error.kind).toBe("transient");
-  });
+  it.each(["/flaky", "/rate-limited", "/timed-out"])(
+    "a retriable production status route (%s) → transient",
+    async (path) => {
+      const result = await client.get(path, { schema: PayloadSchema });
+      expect(isErr(result)).toBe(true);
+      if (!result.ok) expect(result.error.kind).toBe("transient");
+    },
+  );
 
   it("matchBody mismatch fails the route so a wrong payload surfaces", async () => {
     const fakeWithAssertion = createFakeAuthedHttpCapability({

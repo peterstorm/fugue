@@ -91,9 +91,9 @@ export function createRedisStreamReader(
  * Forward-compatible across the envelope rollout:
  * - **New format**: payload is a JSON-encoded `{ recordedAtMs, event }` envelope.
  *   Used as-is after `deserializeValue` restores Map/Set tagging.
- * - **Legacy format**: payload is the raw domain event (no envelope wrapper).
- *   Detected by absence of both `recordedAtMs` and `event` fields. The
- *   envelope is synthesized with `recordedAtMs` parsed from the stream
+ * - **Legacy format**: any payload that does not satisfy `isRecordedEvent` is
+ *   treated as a raw domain event. The envelope is synthesized with
+ *   `recordedAtMs` parsed from the stream
  *   entry ID's millisecond prefix (`1715200000000-0` → `1715200000000`).
  */
 function parseEnvelope(

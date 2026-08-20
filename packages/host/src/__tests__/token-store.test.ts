@@ -348,31 +348,22 @@ describe("createRedisTokenStore", () => {
       }
     });
 
-    it("logs a warning and skips a team whose key read FAILS (read failure ≠ absent key — round-23 sfh-2)", async () => {
-      const warnings: unknown[][] = [];
-      const logger: LogPort = {
-        info: () => {},
-        warn: (...args: unknown[]) => warnings.push(args),
-        error: () => {},
-      };
+    it("fails closed when any indexed team read fails instead of returning ok(partial)", async () => {
       const { redis } = createFakeRedis({ failGetOnKey: "team-a" });
-      const tokenStore = createRedisTokenStore(redis, TENANT, logger);
+      const tokenStore = createRedisTokenStore(redis, TENANT, noopLogger);
 
       await tokenStore.store("team-a", hash1, grant1);
       await tokenStore.store("team-b", hash2, grant2);
 
       const result = await tokenStore.listTeams();
-      // The failed read is skipped, the rest of the list stays intact...
-      expect(result.ok).toBe(true);
-      if (result.ok) {
-        expect(result.value.map((g) => g.team)).toEqual(["team-b"]);
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("redis-unavailable");
+        if (result.error.kind === "redis-unavailable") {
+          expect(result.error.operation).toContain("team-a");
+        }
       }
-      // ...but the skip is NOT silent: one warning names the team and the
-      // failure kind, so a "missing team" report has a breadcrumb.
-      expect(warnings).toHaveLength(1);
-      expect(String(warnings[0][0])).toContain("listTeams");
-      expect(String(warnings[0][0])).toContain("read failure");
-      expect(JSON.stringify(warnings[0])).toContain("team-a");
     });
 
     it("uses SMEMBERS on the index — never SCAN or KEYS (the ACL denies them)", async () => {
@@ -465,6 +456,28 @@ describe("createRedisTokenStore", () => {
       if (result.ok) expect(result.value.map(g => g.team)).toEqual(["team-b"]);
       // The index still holds the stale member — it self-heals on next revoke.
       expect([...(sets.get(`fugue:${TENANT}:teams-index`) ?? [])].sort()).toEqual(["team-a", "team-b"]);
+    });
+
+    it.each([
+      ["malformed JSON", "{not-json"],
+      ["invalid record shape", JSON.stringify({ hash: hash1, grant: { team: "team-a" } })],
+      ["mismatched indexed team", JSON.stringify({ hash: hash1, grant: grant2 })],
+    ])("fails closed on %s instead of returning an ok(partial) listing", async (_label, corruptValue) => {
+      const { redis, store } = createFakeRedis();
+      const tokenStore = createRedisTokenStore(redis, TENANT, noopLogger);
+      await tokenStore.store("team-a", hash1, grant1);
+      await tokenStore.store("team-b", hash2, grant2);
+      store.set(`fugue:${TENANT}:teams:team-a`, corruptValue);
+
+      const result = await tokenStore.listTeams();
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("redis-unavailable");
+        if (result.error.kind === "redis-unavailable") {
+          expect(result.error.operation).toContain("team-a");
+        }
+      }
     });
 
     it("fails closed when SMEMBERS errors (Redis unavailable)", async () => {

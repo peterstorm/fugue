@@ -101,6 +101,8 @@ import type { Result } from "../types/result.js";
 import { ok, err } from "../types/result.js";
 import { runId } from "../types/ids.js";
 import type { RunId } from "../types/ids.js";
+import { genesis, machine } from "./_file-resume-fixture.js";
+import type { C, E, S } from "./_file-resume-fixture.js";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -185,36 +187,6 @@ const hostileThrownValueMatrix = (): readonly HostileThrownValue[] => [
 // appended, never checkpointed, and its key appears in no prefix replay)
 // ---------------------------------------------------------------------------
 
-type S =
-  | { kind: "pending"; count: number }
-  | { kind: "succeeded"; count: number }
-  | { kind: "failed"; count: number };
-type E = { type: "STEP" } | { type: "DONE" } | { type: "FAIL" };
-type C = { value: number };
-
-const machine: Machine<S, E, C> = {
-  transition(state, event, context) {
-    if (state.kind === "pending" && event.type === "STEP") {
-      return { state: { kind: "pending", count: state.count + 1 }, context: { value: context.value + 1 } };
-    }
-    if (state.kind === "pending" && event.type === "DONE") {
-      return { state: { kind: "succeeded", count: state.count }, context };
-    }
-    if (state.kind === "pending" && event.type === "FAIL") {
-      return { state: { kind: "failed", count: state.count }, context };
-    }
-    return { state, context };
-  },
-  isTerminal: (s) => s.kind === "succeeded" || s.kind === "failed",
-  isFailed: (s) => s.kind === "failed",
-  stateProgress: (s) => (s.kind === "succeeded" ? 100 : s.kind === "failed" ? 0 : 50),
-  stateKey: (s) => JSON.stringify(s),
-};
-
-const genesis = (): { state: S; context: C } => ({
-  state: { kind: "pending", count: 0 },
-  context: { value: 0 },
-});
 
 /**
  * Deterministic, FR-015-safe dedup keyer — mirrors the DAG layer's injected

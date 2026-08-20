@@ -41,6 +41,17 @@ export interface FileCheckpointCommit<S, C> {
 const issuedCommits = new WeakSet<object>();
 const issuedCommitData = new WeakMap<object, FileCheckpointData<unknown, unknown>>();
 
+const checkpointDataKind = (data: unknown): string => {
+  if (data === null) return "null";
+  if (Array.isArray(data)) return "Array";
+  return typeof data;
+};
+
+const hasExactCheckpointDataKeys = (data: object): boolean => {
+  const keys = Object.keys(data);
+  return keys.length === 2 && keys.includes("state") && keys.includes("context");
+};
+
 // Module-instance-scoped by design: a commit minted under a DUPLICATED module
 // instance (duplicate bundle, pnpm aliasing, two copies of this package)
 // fails `isFileCheckpointCommit` as an apparent forgery. That is the safe
@@ -93,7 +104,12 @@ const serializeFileCheckpointUnchecked = <S, C>(
   // `undefined` event with a named FR-009 reason.
   if (typeof data !== "object" || data === null || Array.isArray(data)) {
     throw new Error(
-      `serializeFileCheckpoint: data must be a plain object (the { state, context } envelope), got ${data === null ? "null" : Array.isArray(data) ? "Array" : typeof data}: ${safeDiagnosticRender(data)} (FR-009)`,
+      `serializeFileCheckpoint: data must be a plain object (the { state, context } envelope), got ${checkpointDataKind(data)}: ${safeDiagnosticRender(data)} (FR-009)`,
+    );
+  }
+  if (!hasExactCheckpointDataKeys(data)) {
+    throw new Error(
+      `serializeFileCheckpoint: data must contain exactly the own enumerable fields { state, context }, got ${safeDiagnosticRender(Object.keys(data))} (FR-009)`,
     );
   }
 

@@ -28,6 +28,8 @@ import { ok, err } from "../types/result.js";
 import { NoopObserver } from "../observer/observer.js";
 import { DAG_INPUT } from "../types/ids.js";
 import { N } from "./_id-helpers.js";
+import { setFrameworkTracer, __resetFrameworkTracer } from "../tracing/global-tracer.js";
+import { setFrameworkLogger, __resetFrameworkLogger } from "../logger.js";
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -403,6 +405,161 @@ describe("Wave 1.4 — eval-judge orchestrator exception flips passed to false",
     }
 
     void dag; // dag construction validated; not needed for the judge-runner direct call
+  });
+
+  it("a tracer setup failure cannot replace or suppress the judge outcome", async () => {
+    let runCalls = 0;
+    const judge: EvalJudgeNodeDef = {
+      id: N("tracer-failure-judge"),
+      kind: "eval-judge",
+      config: { id: N("tracer-failure-judge"), criteria: [N("c1")] },
+      run: async () => {
+        runCalls += 1;
+        return {
+          outcome: "passed",
+          score: 1,
+          criteriaScores: { c1: 1 },
+          failedCriteria: [],
+          reason: "authoritative judge result",
+        };
+      },
+    };
+    setFrameworkTracer({
+      startActiveSpan: () => { throw new Error("tracer unavailable"); },
+    } as unknown as Parameters<typeof setFrameworkTracer>[0]);
+
+    try {
+      const { runEvalJudges } = await import("../dag-runtime/eval-judges.js");
+      const results = await runEvalJudges([judge], null, null, new Map(), makeBaseCtx());
+      expect(results[0]?.outcome).toBe("passed");
+      expect(runCalls).toBe(1);
+    } finally {
+      __resetFrameworkTracer();
+    }
+  });
+
+  it("a throwing span.addEvent is best-effort and leaves the judge result authoritative", async () => {
+    const judge: EvalJudgeNodeDef = {
+      id: N("span-event-failure-judge"),
+      kind: "eval-judge",
+      config: { id: N("span-event-failure-judge"), criteria: [N("c1")] },
+      run: async () => ({
+        outcome: "passed",
+        score: 1,
+        criteriaScores: { c1: 1 },
+        failedCriteria: [],
+        reason: "passed",
+      }),
+    };
+    const span = {
+      addEvent: () => { throw new Error("event exporter down"); },
+      setStatus: () => {},
+      end: () => {},
+    };
+    setFrameworkTracer({
+      startActiveSpan: (_name: string, _opts: unknown, fn: (activeSpan: typeof span) => unknown) => fn(span),
+    } as unknown as Parameters<typeof setFrameworkTracer>[0]);
+
+    try {
+      const { runEvalJudges } = await import("../dag-runtime/eval-judges.js");
+      const results = await runEvalJudges([judge], null, null, new Map(), makeBaseCtx());
+      expect(results[0]?.outcome).toBe("passed");
+    } finally {
+      __resetFrameworkTracer();
+    }
+  });
+
+  it("a tracer rejecting after callback invocation does not run the judge twice", async () => {
+    let runCalls = 0;
+    const judge: EvalJudgeNodeDef = {
+      id: N("post-callback-tracer-failure"),
+      kind: "eval-judge",
+      config: { id: N("post-callback-tracer-failure"), criteria: [N("c1")] },
+      run: async () => {
+        runCalls += 1;
+        return {
+          outcome: "passed",
+          score: 1,
+          criteriaScores: { c1: 1 },
+          failedCriteria: [],
+          reason: "passed",
+        };
+      },
+    };
+    const span = { addEvent: () => {}, setStatus: () => {}, end: () => {} };
+    setFrameworkTracer({
+      startActiveSpan: async (_name: string, _opts: unknown, fn: (activeSpan: typeof span) => Promise<unknown>) => {
+        await fn(span);
+        throw new Error("tracer rejected after callback");
+      },
+    } as unknown as Parameters<typeof setFrameworkTracer>[0]);
+
+    try {
+      const { runEvalJudges } = await import("../dag-runtime/eval-judges.js");
+      const results = await runEvalJudges([judge], null, null, new Map(), makeBaseCtx());
+      expect(results[0]?.outcome).toBe("passed");
+      expect(runCalls).toBe(1);
+    } finally {
+      __resetFrameworkTracer();
+    }
+  });
+
+  it("throwing logger and span cleanup preserve the original judge crash result", async () => {
+    const judge: EvalJudgeNodeDef = {
+      id: N("hostile-cleanup-judge"),
+      kind: "eval-judge",
+      config: { id: N("hostile-cleanup-judge"), criteria: [N("c1")] },
+      run: async () => { throw new Error("primary judge failure"); },
+    };
+    const span = {
+      addEvent: () => {},
+      setStatus: () => { throw new Error("setStatus failed"); },
+      end: () => { throw new Error("end failed"); },
+    };
+    setFrameworkTracer({
+      startActiveSpan: (_name: string, _opts: unknown, fn: (activeSpan: typeof span) => unknown) => fn(span),
+    } as unknown as Parameters<typeof setFrameworkTracer>[0]);
+
+    try {
+      const { runEvalJudges } = await import("../dag-runtime/eval-judges.js");
+      const results = await runEvalJudges([judge], null, null, new Map(), makeBaseCtx({
+        logger: { warn: () => {}, error: () => { throw new Error("logger failed"); } },
+      }));
+      expect(results[0]?.outcome).toBe("crash");
+      if (results[0]?.outcome === "crash") expect(results[0].crashMessage).toBe("primary judge failure");
+    } finally {
+      __resetFrameworkTracer();
+    }
+  });
+
+  it("a throwing background logger cannot abort independent cleanup or reject the typed result", async () => {
+    let ended = 0;
+    let emitted = 0;
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: () => {},
+      error: () => { throw new Error("logger failed"); },
+    });
+
+    try {
+      const { runFinalizeInBackground } = await import("../dag-runtime/eval-judges.js");
+      const result = await runFinalizeInBackground(
+        async () => { throw new Error("finalize failed"); },
+        {
+          setStatus: () => { throw new Error("setStatus failed"); },
+          end: () => { ended += 1; },
+        } as unknown as import("@opentelemetry/api").Span,
+        () => { emitted += 1; },
+      );
+
+      expect(result.judgesPassed).toBe(false);
+      expect(result.judgesCrashed).toBe(true);
+      expect(ended).toBe(1);
+      expect(emitted).toBe(1);
+    } finally {
+      __resetFrameworkLogger();
+    }
   });
 
   it("a healthy judge that scores below threshold returns outcome:failed (not a crash)", async () => {

@@ -451,7 +451,11 @@ export const deserializeValue = (value: unknown): unknown => {
   return value;
 };
 
-/** Serialize to JSON string — suitable for Redis/storage writes. */
+/**
+ * Serialize the supported, pre-scanned value domain to JSON storage bytes.
+ * Outside that domain, `JSON.stringify` may throw or produce `undefined` at
+ * runtime; persistence boundaries must apply their losslessness gate first.
+ */
 export const toJson = (value: unknown): string =>
   JSON.stringify(serializeValue(value));
 

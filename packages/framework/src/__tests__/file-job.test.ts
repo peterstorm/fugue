@@ -841,6 +841,20 @@ describe("serializeFileCheckpoint — non-object data gate (round-14 A8)", () =>
     expect(typed.message).toContain(label === "array" ? "Array" : label);
     expect(typed.failureClass).toBe("permanent");
   });
+  it.each([
+    ["missing context", { state: { kind: "pending" } }],
+    ["missing state", { context: { value: 1 } }],
+    ["extra own field", { state: { kind: "pending" }, context: { value: 1 }, extra: true }],
+  ] as const)("rejects a %s instead of minting an inexact data envelope", (_label, value) => {
+    const typed = rejectShape(value);
+    expect(typed).not.toBeNull();
+    if (typed === null) return;
+    expect(typed.message).toContain("exactly");
+    expect(typed.message).toContain("state");
+    expect(typed.message).toContain("context");
+    expect(typed.failureClass).toBe("permanent");
+  });
+
   it("still round-trips a plain-object data envelope while keeping decoded data opaque", () => {
     const commit = serializeFileCheckpoint({ state: { kind: "pending", count: 1 }, context: { value: 1 } });
     expect("data" in commit).toBe(false);

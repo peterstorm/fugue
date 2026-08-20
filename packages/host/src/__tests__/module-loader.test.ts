@@ -472,6 +472,26 @@ describe("Module Loader", () => {
       rmSync(dagDir, { recursive: true });
     });
 
+    it("contains a throwing prompt-error callback and still returns the readable prompts", async () => {
+      const { loadPromptsForModule } = await import("../adapters/module-loader.js");
+      const dagDir = join(TEST_DIR, "dags", "team-a", "throwing-prompt-callback");
+      const promptsDir = join(dagDir, "prompts");
+      mkdirSync(promptsDir, { recursive: true });
+      mkdirSync(join(promptsDir, "broken.txt"), { recursive: true });
+      writeFileSync(join(promptsDir, "good.txt"), "works fine");
+
+      try {
+        const result = await loadPromptsForModule(
+          join(dagDir, "dag.ts"),
+          () => { throw new Error("diagnostic sink failed"); },
+        );
+        expect(result.get("good")).toBe("works fine");
+        expect(result.has("broken")).toBe(false);
+      } finally {
+        rmSync(dagDir, { recursive: true, force: true });
+      }
+    });
+
     it("calls onFileError for a non-ENOENT prompts-directory listing failure (unreadable dir, EACCES class)", async () => {
       // Round-18 sfh-1: the catch around readdir(promptsDir) once swallowed
       // EVERY listing failure as "no prompts directory". Only ENOENT may mean

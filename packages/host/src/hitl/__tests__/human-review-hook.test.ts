@@ -116,6 +116,45 @@ describe("makeOnHumanReview", () => {
     expect(notifier.sent).toHaveLength(1); // notified despite the marker write failing
     expect(notifier.sent[0]!.nodeId).toBe(NODE);
   });
+
+  it("throwing diagnostics cannot bypass decision, marker, or notification fallbacks", async () => {
+    const logger = {
+      info: () => {},
+      warn: () => { throw new Error("warn transport failed"); },
+      error: () => { throw new Error("error transport failed"); },
+    };
+    const lookupFailure = makeOnHumanReview({
+      decisions: decisionStore({
+        async getDecision() { return err({ kind: "redis-unavailable", operation: "GET" }); },
+      }),
+      notifier: notifierSpy().port,
+      runId: RUN,
+      dagId: DAG,
+      logger,
+    });
+    const markerFailure = makeOnHumanReview({
+      decisions: decisionStore({
+        async markPending() { return err({ kind: "redis-unavailable", operation: "SET NX" }); },
+      }),
+      notifier: notifierSpy().port,
+      runId: RUN,
+      dagId: DAG,
+      logger,
+    });
+    const notificationFailure = makeOnHumanReview({
+      decisions: decisionStore(),
+      notifier: {
+        async notify() { return err({ kind: "notification-failed", operation: "notify" }); },
+      },
+      runId: RUN,
+      dagId: DAG,
+      logger,
+    });
+
+    expect(await lookupFailure(req)).toEqual({ kind: "pending" });
+    expect(await markerFailure(req)).toEqual({ kind: "pending" });
+    expect(await notificationFailure(req)).toEqual({ kind: "pending" });
+  });
 });
 
 describe("makeOnDecisionConsumed", () => {
@@ -138,6 +177,23 @@ describe("makeOnDecisionConsumed", () => {
     const consume = makeOnDecisionConsumed({ decisions, runId: RUN });
 
     // Must resolve, not reject — a failed consume cannot fail an already-committed run.
+    await expect(consume(NODE)).resolves.toBeUndefined();
+  });
+
+  it("a throwing clear-failure logger cannot fail an already-committed run", async () => {
+    const decisions = decisionStore({
+      async clear() { return err({ kind: "redis-unavailable", operation: "DEL" }); },
+    });
+    const consume = makeOnDecisionConsumed({
+      decisions,
+      runId: RUN,
+      logger: {
+        info: () => {},
+        warn: () => { throw new Error("logger failed"); },
+        error: () => {},
+      },
+    });
+
     await expect(consume(NODE)).resolves.toBeUndefined();
   });
 });

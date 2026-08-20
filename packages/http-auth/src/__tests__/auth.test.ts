@@ -276,6 +276,29 @@ describe("createTokenProvider — error mapping (no throw escapes)", () => {
     if (!result.ok) expect(result.error.kind).toBe("transient");
   });
 
+  it("discards a fetch rejection that reflects Basic auth and grant credentials", async () => {
+    const auth: AuthConfig = {
+      ...baseAuth,
+      basicAuth: { username: "client-id", password: "client-secret" },
+    };
+    let reflectedBasic = "";
+    const fetch: FetchLike = async (_url, init) => {
+      reflectedBasic = init.headers.Authorization ?? "";
+      throw new Error(`request headers=${reflectedBasic} body=${init.body}`);
+    };
+
+    const result = await createTokenProvider({ auth, fetch }).get();
+
+    expect(isErr(result)).toBe(true);
+    if (!result.ok) {
+      const serialized = JSON.stringify(result.error);
+      expect(serialized).not.toContain("s3cret");
+      expect(serialized).not.toContain("client-secret");
+      expect(serialized).not.toContain(reflectedBasic);
+      expect(serialized).toContain("https://auth.example.com");
+    }
+  });
+
   it("maps throwing and non-finite mint clocks to deterministic non-retriable Results", async () => {
     const fetch: FetchLike = async () =>
       jsonResponse(200, { access_token: "tok", expires_in: 60 });
@@ -481,26 +504,35 @@ describe("createTokenProvider — error mapping (no throw escapes)", () => {
     if (!result.ok) expect(result.error.kind).toBe("transient");
   });
 
-  it("a non-timeout external AbortError → non-retriable node-crash (cancellation)", async () => {
-    const fetch: FetchLike = (_url, init) =>
-      new Promise((_resolve, reject) => {
-        init.signal?.addEventListener("abort", () => {
-          const e = new Error("aborted");
-          e.name = "AbortError";
-          reject(e);
-        });
-      });
-    // No timeout configured — the only abort is the external one we fire.
+  it("one caller's cancellation stops only its wait and cannot poison shared refresh waiters", async () => {
+    let releaseMint: (response: FetchResponseLike) => void = () => {};
+    const gate = new Promise<FetchResponseLike>((resolve) => { releaseMint = resolve; });
+    let mintCalls = 0;
+    const fetch: FetchLike = async (_url, init) => {
+      mintCalls += 1;
+      // The boot-scoped shared mint owns no request signal.
+      expect(init.signal?.aborted ?? false).toBe(false);
+      return gate;
+    };
     const provider = createTokenProvider({ auth: baseAuth, fetch });
-    const external = new AbortController();
-    const pending = provider.get(external.signal);
-    external.abort(); // caller cancels — NOT a timeout
-    const result = await pending;
-    expect(isErr(result)).toBe(true);
-    if (!result.ok) {
-      expect(result.error.kind).toBe("node-crash");
-      if (result.error.kind === "node-crash") expect(result.error.retriability).toBe("non-retriable");
+    const cancelledCaller = new AbortController();
+
+    const cancelled = provider.get(cancelledCaller.signal);
+    const independent = provider.get();
+    cancelledCaller.abort();
+
+    const cancelledResult = await cancelled;
+    expect(isErr(cancelledResult)).toBe(true);
+    if (!cancelledResult.ok && cancelledResult.error.kind === "node-crash") {
+      expect(cancelledResult.error.retriability).toBe("non-retriable");
     }
+
+    releaseMint(jsonResponse(200, { access_token: "shared-token", expires_in: 3600 }));
+    const independentResult = await independent;
+    expect(independentResult.ok && String(independentResult.value)).toBe("shared-token");
+    expect(mintCalls).toBe(1);
+    expect((await provider.get()).ok).toBe(true);
+    expect(mintCalls).toBe(1);
   });
 
   it("invalidate() during an in-flight mint is not overwritten by the resolving mint", async () => {

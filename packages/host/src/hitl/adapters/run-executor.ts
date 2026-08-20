@@ -67,6 +67,18 @@ const toFrameworkError = (e: unknown): FrameworkError => {
   };
 };
 
+const logExecutionFailureWithoutThrowing = (
+  logger: LogPort | undefined,
+  message: string,
+  data: Record<string, unknown>,
+): void => {
+  try {
+    logger?.error?.(message, data);
+  } catch {
+    // The modeled failed RunExecOutcome remains authoritative.
+  }
+};
+
 export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
   const { sharedInfra, getRegisteredDag, broker, agentClientMap, tenant, logger } = deps;
 
@@ -140,7 +152,8 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
         // faults BEFORE the slice can start (unknown DAG) — and log at error
         // with the message: the recorded FrameworkError below carries that
         // message as the operator's durable diagnostic.
-        logger?.error?.(
+        logExecutionFailureWithoutThrowing(
+          logger,
           phase === "setup" ? "hitl: context build failed" : "hitl: run slice failed",
           {
             runId: req.runId,

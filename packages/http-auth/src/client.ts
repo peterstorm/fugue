@@ -78,6 +78,31 @@ export const buildUrl = (baseUrl: string, path: string): string => {
   return `${base}${suffix}`;
 };
 
+interface RequestTarget {
+  readonly url: string;
+  /** Trusted diagnostic label: origin + pathname, never query/user-info. */
+  readonly label: string;
+}
+
+/** Resolve and confine a request before the managed token is acquired. */
+const resolveRequestTarget = (
+  baseUrl: string,
+  path: string,
+): Result<RequestTarget, FrameworkError> => {
+  try {
+    const base = new URL(baseUrl);
+    const url = new URL(buildUrl(baseUrl, path));
+    if (url.origin !== base.origin) {
+      return err(makeNodeCrashError(
+        `Authenticated request origin '${url.origin}' does not match configured origin '${base.origin}'`,
+      ));
+    }
+    return ok({ url: url.href, label: `${url.origin}${url.pathname}` });
+  } catch {
+    return err(makeNodeCrashError("Authenticated request URL is invalid"));
+  }
+};
+
 const makeTransientError = (message: string, httpStatus?: number): FrameworkError =>
   frameworkError.transient(CLIENT_NODE_ID, message, httpStatus);
 
@@ -97,7 +122,7 @@ const makeNodeCrashError = (message: string): FrameworkError => ({
 const RETRIABLE_HTTP_STATUSES: ReadonlySet<number> = new Set([408, 429]);
 
 /** A non-2xx response is retriable when it is 5xx, 429 (rate-limit) or 408 (timeout). */
-const isRetriableHttpStatus = (status: number): boolean =>
+export const isRetriableHttpStatus = (status: number): boolean =>
   status >= 500 || RETRIABLE_HTTP_STATUSES.has(status);
 
 /**
@@ -180,12 +205,12 @@ const invalidateToken = (tokens: TokenProvider): Result<void, FrameworkError> =>
 const sendOnce = async <T>(
   deps: AuthedClientDeps,
   method: string,
-  path: string,
+  target: RequestTarget,
   token: string,
   payload: RequestBody,
   opts: AuthedRequestOpts<T>,
 ): Promise<SendOutcome<T>> => {
-  const fullUrl = buildUrl(deps.config.baseUrl, path);
+  const fullUrl = target.url;
   const timeoutMs = opts.timeoutMs ?? deps.config.timeoutMs;
   const serializedBody = serializeRequestBody(payload.body);
   if (!serializedBody.ok) return { tag: "error", error: serializedBody.error };
@@ -221,31 +246,34 @@ const sendOnce = async <T>(
     }
 
     if (!response.ok) {
-      const text = await response.text().catch(() => "<body unreadable>");
+      // Drain best-effort for connection reuse, but never copy an authenticated
+      // peer's response body into our error: it may echo the bearer token.
+      await response.text().catch(() => "");
       // 5xx, 429 (rate-limit) and 408 (request timeout) are the retriable HTTP
       // signals → transient. Every other non-2xx (deterministic 4xx) is a
       // non-retriable node-crash: retrying the same request would fail again.
+      const message = `HTTP ${response.status} from ${method} ${target.label}`;
       if (isRetriableHttpStatus(response.status)) {
-        return { tag: "error", error: makeTransientError(`HTTP ${response.status} ${response.statusText}: ${text.slice(0, 500)}`, response.status) };
+        return { tag: "error", error: makeTransientError(message, response.status) };
       }
-      return { tag: "error", error: makeNodeCrashError(`HTTP ${response.status} ${response.statusText}: ${text.slice(0, 500)}`) };
+      return { tag: "error", error: makeNodeCrashError(message) };
     }
 
     let responseBody: unknown;
     try {
       responseBody = await response.json();
-    } catch (parseError) {
+    } catch {
       return {
         tag: "error",
-        error: makeNodeCrashError(
-          `Response body was not valid JSON: ${parseError instanceof Error ? parseError.message : String(parseError)} (${method} ${fullUrl})`,
-        ),
+        error: makeNodeCrashError(`Response body was not valid JSON for ${method} ${target.label}`),
       };
     }
 
     const parsed = opts.schema.safeParse(responseBody);
     if (!parsed.success) {
-      return { tag: "error", error: makeNodeCrashError(`Response validation failed: ${parsed.error.message}`) };
+      // Even issue paths can be derived from attacker-controlled response keys.
+      // Keep the diagnostic entirely trusted at this credential-bearing seam.
+      return { tag: "error", error: makeNodeCrashError(`Response validation failed for ${method} ${target.label}`) };
     }
     return { tag: "ok", value: parsed.data };
   } catch (error: unknown) {
@@ -266,7 +294,9 @@ const sendOnce = async <T>(
     }
     return {
       tag: "error",
-      error: makeTransientError(`HTTP request failed: ${error instanceof Error ? error.message : String(error)}`),
+      // The fetch seam saw the Authorization header. Its rejection text is
+      // therefore untrusted and may reflect the managed bearer token.
+      error: makeTransientError(`HTTP request failed: ${method} ${target.label}`),
     };
   } finally {
     if (timer != null) clearTimeout(timer);
@@ -285,10 +315,13 @@ const execute = async <T>(
   payload: RequestBody,
   opts: AuthedRequestOpts<T>,
 ): Promise<Result<T, FrameworkError>> => {
+  const target = resolveRequestTarget(deps.config.baseUrl, path);
+  if (!target.ok) return err(target.error);
+
   const first = await getToken(deps.tokens);
   if (!first.ok) return err(first.error);
 
-  const outcome = await sendOnce(deps, method, path, first.value, payload, opts);
+  const outcome = await sendOnce(deps, method, target.value, first.value, payload, opts);
   if (outcome.tag === "ok") return ok(outcome.value);
   if (outcome.tag === "error") return err(outcome.error);
 
@@ -298,7 +331,7 @@ const execute = async <T>(
   const second = await getToken(deps.tokens);
   if (!second.ok) return err(second.error);
 
-  const retry = await sendOnce(deps, method, path, second.value, payload, opts);
+  const retry = await sendOnce(deps, method, target.value, second.value, payload, opts);
   if (retry.tag === "ok") return ok(retry.value);
   if (retry.tag === "error") return err(retry.error);
   // A second consecutive 401 — surface as a non-retriable auth failure rather

@@ -7,6 +7,7 @@
 import { type Span, SpanStatusCode } from "@opentelemetry/api";
 import type { EvalJudgeNodeDef, EvalJudgeResult } from "../nodes/eval-judge.js";
 import { judgePassed, judgeCrashed } from "../types/eval-judge.js";
+import { safeErrorMessage } from "../types/safe-error.js";
 import { crashResult } from "../nodes/eval-judge.js";
 import type { NodeContext } from "../types/node.js";
 import type { DagDef } from "../types/dag.js";
@@ -24,53 +25,92 @@ import { closeRootSpan, outcomeFromMeta } from "./run-telemetry.js";
 
 import type { NodeId } from "../types/ids.js";
 
+/** Secondary diagnostics must never replace the primary modeled outcome. */
+const bestEffort = (action: () => void): void => {
+  try {
+    action();
+  } catch {
+    // Deliberately contained: the caller's Result/EvalJudgeResult is authoritative.
+  }
+};
+
+const reportJudgeCrash = (
+  judge: EvalJudgeNodeDef,
+  ctx: NodeContext,
+  cause: unknown,
+  span?: Span,
+): EvalJudgeResult => {
+  const message = safeErrorMessage(cause);
+  const diagnostic = `[eval-judge:${judge.id}] Unexpected error: ${message}`;
+  bestEffort(() => ctx.logger.error(diagnostic));
+  if (span) bestEffort(() => span.setStatus({ code: SpanStatusCode.ERROR, message: diagnostic }));
+  return crashResult(message);
+};
+
+const executeJudge = async (
+  judge: EvalJudgeNodeDef,
+  dagInput: unknown,
+  dagOutput: unknown,
+  nodeOutputs: ReadonlyMap<NodeId, unknown>,
+  ctx: NodeContext,
+  span?: Span,
+): Promise<EvalJudgeResult> => {
+  let result: EvalJudgeResult;
+  try {
+    const judgeInput = { dagInput, dagOutput, nodeOutputs: Object.fromEntries(nodeOutputs) };
+    if (span) {
+      bestEffort(() => {
+        const filter = resolveContentFilter(ctx);
+        span.addEvent(EVENT_NODE_INPUT, filter
+          ? { data: filter(JSON.stringify({ ...judgeInput, criteria: judge.config.criteria })) }
+          : { data_redacted: "true", criteria: JSON.stringify(judge.config.criteria) });
+      });
+    }
+    result = await judge.run(judgeInput, dagOutput, ctx);
+  } catch (cause) {
+    result = reportJudgeCrash(judge, ctx, cause, span);
+  }
+
+  if (span) {
+    bestEffort(() => span.addEvent(EVENT_NODE_OUTPUT, { data: JSON.stringify(result) }));
+    if (!judgePassed(result)) {
+      bestEffort(() => span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: `${result.outcome}: score=${result.score ?? "null"}. ${result.reason}`,
+      }));
+    }
+    bestEffort(() => span.end());
+  }
+  return result;
+};
+
 export const runEvalJudges = async (
   judges: readonly EvalJudgeNodeDef[],
   dagInput: unknown,
   dagOutput: unknown,
   nodeOutputs: ReadonlyMap<NodeId, unknown>,
   ctx: NodeContext,
-): Promise<EvalJudgeResult[]> => {
-  return Promise.all(
-    judges.map(async (judge) =>
-      fwTracer().startActiveSpan(
-        `eval-judge:${judge.id}`,
-        { attributes: { [AI_SPAN_TYPE]: SPAN_TYPE_TOOL } },
-        async (span) => {
-          try {
-            const judgeInput = { dagInput, dagOutput, nodeOutputs: Object.fromEntries(nodeOutputs) };
-            const filter = resolveContentFilter(ctx);
-            span.addEvent(EVENT_NODE_INPUT, filter
-              ? { data: filter(JSON.stringify({ ...judgeInput, criteria: judge.config.criteria })) }
-              : { data_redacted: "true", criteria: JSON.stringify(judge.config.criteria) });
-
-            const result = await judge.run(judgeInput, dagOutput, ctx);
-            span.addEvent(EVENT_NODE_OUTPUT, { data: JSON.stringify(result) });
-            if (!judgePassed(result)) {
-              span.setStatus({ code: SpanStatusCode.ERROR, message: `${result.outcome}: score=${result.score ?? "null"}. ${result.reason}` });
-            }
-            span.end();
-            return result;
-          } catch (e) {
-            // Orchestrator-side exception (span setup, tracer/attribute bug,
-            // or a judge whose `run` threw past its own Result-like outcome seam).
-            // Producing a "passed" result here would silently disable quality
-            // gates that rely on `judgePassed` — operators would see a broken
-            // judge as passing every run. Return `outcome: "crash"` so the
-            // failure is visible to both run-end aggregation
-            // (`evalJudgeFailed`) and any downstream gating logic.
-            const msg = e instanceof Error ? e.message : String(e);
-            const prefix = `[eval-judge:${judge.id}] Unexpected error: ${msg}`;
-            (ctx.logger?.error ?? fwLogger().error)(prefix);
-            span.setStatus({ code: SpanStatusCode.ERROR, message: prefix });
-            span.end();
-            return crashResult(msg);
-          }
-        },
-      ),
-    ),
+): Promise<EvalJudgeResult[]> =>
+  Promise.all(
+    judges.map(async (judge): Promise<EvalJudgeResult> => {
+      let callbackResult: Promise<EvalJudgeResult> | undefined;
+      try {
+        return await fwTracer().startActiveSpan(
+          `eval-judge:${judge.id}`,
+          { attributes: { [AI_SPAN_TYPE]: SPAN_TYPE_TOOL } },
+          (span) => {
+            callbackResult = executeJudge(judge, dagInput, dagOutput, nodeOutputs, ctx, span);
+            return callbackResult;
+          },
+        );
+      } catch (cause) {
+        bestEffort(() => ctx.logger.warn(
+          `[eval-judge:${judge.id}] tracing unavailable; judge outcome remains authoritative: ${safeErrorMessage(cause)}`,
+        ));
+        return callbackResult ?? executeJudge(judge, dagInput, dagOutput, nodeOutputs, ctx);
+      }
+    }),
   );
-};
 
 // ---------------------------------------------------------------------------
 // finalizeRunWithJudges — happy-path finalize for runDagStateful
@@ -135,33 +175,36 @@ export const runFinalizeInBackground = (
       judgesCrashed: meta.evalJudgeResults?.some(judgeCrashed) ?? false,
       meta,
     }))
-    .catch((e): import("./run-dag-stateful.js").BackgroundResult => {
-      fwLogger().error("[runDagStateful] background finalize failed:", e);
+    .catch((cause): import("./run-dag-stateful.js").BackgroundResult => {
+      const logCleanupFailure = (message: string, error: unknown): void =>
+        bestEffort(() => fwLogger().error(message, safeErrorMessage(error)));
+
+      logCleanupFailure("[runDagStateful] background finalize failed:", cause);
       try {
         rootSpan.setStatus({
           code: SpanStatusCode.ERROR,
-          message: e instanceof Error ? e.message : String(e),
+          message: safeErrorMessage(cause),
         });
-      } catch (setStatusErr) {
-        fwLogger().error(
+      } catch (setStatusError) {
+        logCleanupFailure(
           "[runDagStateful] rootSpan.setStatus threw during background-finalize error cleanup:",
-          setStatusErr,
+          setStatusError,
         );
       }
       try {
         rootSpan.end();
-      } catch (endErr) {
-        fwLogger().error(
+      } catch (endError) {
+        logCleanupFailure(
           "[runDagStateful] rootSpan.end threw during background-finalize error cleanup (span will leak until TTL eviction):",
-          endErr,
+          endError,
         );
       }
       try {
         emitRunEnd("error");
-      } catch (emitErr) {
-        fwLogger().error(
+      } catch (emitError) {
+        logCleanupFailure(
           "[runDagStateful] emitRunEnd threw during background-finalize error cleanup:",
-          emitErr,
+          emitError,
         );
       }
       return {

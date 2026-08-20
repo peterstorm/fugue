@@ -42,6 +42,19 @@ interface OnHumanReviewDeps {
   readonly logger?: LogPort;
 }
 
+const logWithoutThrowing = (
+  logger: LogPort | undefined,
+  level: "warn" | "error",
+  message: string,
+  data: Record<string, unknown>,
+): void => {
+  try {
+    logger?.[level]?.(message, data);
+  } catch {
+    // Diagnostics cannot replace a safe pending/committed outcome.
+  }
+};
+
 /**
  * Build the per-run `onHumanReview` hook the worker passes to
  * `runResumableDagJob`. Closes over the run's id + the decision/notifier stores.
@@ -62,7 +75,7 @@ export const makeOnHumanReview = (deps: OnHumanReviewDeps) =>
     if (!decision.ok) {
       // Fail-safe: an errored decision lookup must NOT be read as approval.
       // Re-park so the run stays safe and a later resume can retry the lookup.
-      logger?.warn?.("hitl: decision lookup failed — re-parking", {
+      logWithoutThrowing(logger, "warn", "hitl: decision lookup failed — re-parking", {
         runId,
         nodeId: req.nodeId,
         error: decision.error.kind,
@@ -76,7 +89,7 @@ export const makeOnHumanReview = (deps: OnHumanReviewDeps) =>
       // Fail-open: if the pending marker is unwritable (store blip), assume this
       // is the first park and notify, rather than going silent. Surface the
       // store error so a duplicate notification on a later re-park is explained.
-      logger?.warn?.("hitl: markPending failed — assuming first park and notifying", {
+      logWithoutThrowing(logger, "warn", "hitl: markPending failed — assuming first park and notifying", {
         runId,
         nodeId: req.nodeId,
         error: pending.error.kind,
@@ -94,7 +107,7 @@ export const makeOnHumanReview = (deps: OnHumanReviewDeps) =>
       if (!notified.ok) {
         // Non-fatal: the run is parked durably regardless. Surface the failure
         // so an operator can re-trigger delivery; do not fail the run.
-        logger?.error?.("hitl: review notification failed — run parked without notice", {
+        logWithoutThrowing(logger, "error", "hitl: review notification failed — run parked without notice", {
           runId,
           nodeId: req.nodeId,
           error: notified.error.kind,
@@ -127,7 +140,7 @@ export const makeOnDecisionConsumed = (deps: OnDecisionConsumedDeps) =>
     const { decisions, runId, logger } = deps;
     const cleared = await decisions.clear(runId, nodeId);
     if (!cleared.ok) {
-      logger?.warn?.("hitl: failed to clear consumed decision (non-fatal, TTL reaps)", {
+      logWithoutThrowing(logger, "warn", "hitl: failed to clear consumed decision (non-fatal, TTL reaps)", {
         runId,
         nodeId,
         error: cleared.error.kind,

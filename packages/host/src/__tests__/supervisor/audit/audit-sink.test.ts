@@ -260,6 +260,23 @@ describe("compound sink", () => {
     expect(good.records).toHaveLength(1);
   });
 
+  it("isolates a synchronous contract violation before fan-out promises exist", async () => {
+    const errors: Array<Record<string, unknown> | undefined> = [];
+    const logger: LogPort = {
+      info: () => {},
+      warn: () => {},
+      error: (_message, data) => errors.push(data),
+    };
+    const bad = { record: () => { throw new Error("synchronous sink failure"); } };
+    const good = createFakeAuditSink();
+    const sink = createCompoundAuditSink([bad, good], logger);
+
+    await expect(sink.record(rec())).resolves.toBeUndefined();
+    expect(good.records).toHaveLength(1);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.reason).toBe("synchronous sink failure");
+  });
+
   it("logs a rejecting sink (never-throw contract violation) via the logger, with the reason", async () => {
     const errors: { msg: string; meta?: Record<string, unknown> }[] = [];
     const logger: LogPort = {

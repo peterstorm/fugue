@@ -92,11 +92,12 @@ const DEFAULT_SWEEP_MS = 5 * 60 * 1000; // 5min
  * to a persistence policy (tail-based sampling). Implements `Observer` for event
  * ingestion and `Disposable` for resource cleanup.
  *
- * Lifecycle: construct → observe(events) → close() / [Symbol.dispose]()
+ * Lifecycle: construct → observe(event) → close() / [Symbol.dispose]()
  *
  * Events are buffered by runId. On `run-end`, the persistence policy decides
- * whether to flush the run's events to the downstream exporter. Stale runs
- * (no events for `staleSweepMs`) are evicted to bound memory.
+ * whether to flush the run's events to the downstream exporter. Runs inactive
+ * for `ttlMs` are evicted to bound memory; `sweepIntervalMs` controls how often
+ * that eviction check runs.
  */
 export class BufferedObserver implements Observer, Disposable {
   private readonly buffers = new Map<string, RunBuffer>();

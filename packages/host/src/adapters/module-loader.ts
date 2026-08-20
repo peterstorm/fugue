@@ -61,6 +61,19 @@ const loadFugueYaml = async (modulePath: string): Promise<Result<FugueYaml | nul
 
 // ── Implementation ─────────────────────────────────────────────────────────
 
+/** Prompt diagnostics are secondary to the loader's Result/no-throw contract. */
+const reportPromptError = (
+  handler: ((path: string, error: unknown) => void) | undefined,
+  path: string,
+  error: unknown,
+): void => {
+  try {
+    handler?.(path, error);
+  } catch {
+    // A broken diagnostic sink must not turn a best-effort prompt read into a rejection.
+  }
+};
+
 /**
  * Load a single DAG module from the filesystem.
  *
@@ -266,7 +279,7 @@ export const loadPromptsForModule = async (
       } catch (e) {
         // Prompt file exists but can't be read — DAG will fail at runtime
         // with "prompt-not-found". Log so operators can diagnose.
-        onFileError?.(filePath, e);
+        reportPromptError(onFileError, filePath, e);
       }
     }
   } catch (e) {
@@ -277,7 +290,7 @@ export const loadPromptsForModule = async (
     // hard-error handling and the per-file onFileError logging above).
     const probe = probeErrorCode(e);
     if (probe.kind !== "code" || probe.code !== "ENOENT") {
-      onFileError?.(promptsDir, e);
+      reportPromptError(onFileError, promptsDir, e);
     }
   }
 

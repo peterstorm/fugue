@@ -66,6 +66,7 @@ import {
   type AuthedHttpCapability,
   type AuthedRequestOpts,
   type AuthedBodyRequestOpts,
+  isRetriableHttpStatus,
 } from "./client.js";
 
 // ---------------------------------------------------------------------------
@@ -260,8 +261,8 @@ export const healthCheckWithTimeout = async (
 
 /**
  * A canned response for one route in the fake capability. A `status` outside
- * 2xx produces the same error classification as the real client (5xx →
- * transient, other non-2xx → non-retriable node-crash); a `matchBody` that
+ * 2xx produces the same error classification as the real client (5xx/408/429
+ * → transient, other non-2xx → non-retriable node-crash); a `matchBody` that
  * returns `false` fails the route so a wrong-payload bug surfaces in tests.
  *
  * Construct one with {@link shapedRoute} — that brand is how the fake tells a
@@ -368,7 +369,7 @@ const matchRoute = <T>(
     const status = route.status;
     if (status != null && (status < 200 || status >= 300)) {
       const bodyText = String(route.body ?? "");
-      if (status >= 500) {
+      if (isRetriableHttpStatus(status)) {
         return err({ kind: "transient", nodeId: FAKE_NODE_ID, message: `HTTP ${status}: ${bodyText.slice(0, 500)}`, httpStatus: status });
       }
       return err({ kind: FAKE_NODE_ID_KIND, nodeId: FAKE_NODE_ID, message: `HTTP ${status}: ${bodyText.slice(0, 500)}`, retriability: "non-retriable" });

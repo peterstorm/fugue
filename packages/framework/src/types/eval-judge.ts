@@ -68,7 +68,7 @@ export interface EvalJudgeNodeConfig {
   readonly id: string;
   /** Criteria to evaluate against. */
   readonly criteria: readonly string[];
-  /** Score threshold — below this, the judge returns outcome: "failed". Default 0.8. */
+  /** Score threshold in the inclusive range [0, 1]. Parsed by `createEvalJudgeNode`; default 0.8. */
   readonly threshold?: number;
   /**
    * Rubric source. Omit to fall back to an auto-generated default rubric

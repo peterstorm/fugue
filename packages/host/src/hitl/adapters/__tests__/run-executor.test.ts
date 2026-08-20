@@ -266,6 +266,33 @@ describe("createRunExecutor — channel split (err vs failed)", () => {
       expect(e.message).toContain("infra exploded");
     }
   });
+
+  it("a throwing failure logger cannot replace the original failed outcome", async () => {
+    const dag = singleNodeDag((async () => ok("x")) as never);
+    const reg = registered(dag);
+    const throwingInfra: SharedInfra = {
+      ...sharedInfra(),
+      get capabilities(): never { throw new Error("original setup failure"); },
+    };
+    const exec = createRunExecutor({
+      sharedInfra: throwingInfra,
+      getRegisteredDag: () => reg,
+      agentClientMap: { "exec-dag": "fugue-agent-exec" },
+      logger: {
+        info: () => {},
+        warn: () => {},
+        error: () => { throw new Error("logger transport failed"); },
+      },
+    });
+    const jobLike = await seedJobLike(dag, null);
+
+    const result = await exec.run(runReq(dag, jobLike, null));
+
+    expect(result.ok && result.value.kind).toBe("failed");
+    if (result.ok && result.value.kind === "failed" && result.value.error.kind === "node-crash") {
+      expect(result.value.error.message).toContain("original setup failure");
+    }
+  });
 });
 
 describe("createRunExecutor — fail-closed on an empty AGENT_CLIENT_MAP (FR-040)", () => {

@@ -27,7 +27,9 @@
  */
 
 import { ok, err } from "@fuguejs/framework";
+import type { Result } from "@fuguejs/framework";
 import { redisUnavailable, teamAlreadyExists } from "../domain/host-error.js";
+import { markTeam } from "../domain/auth.js";
 import type { TokenGrant, TokenHash } from "../domain/auth.js";
 import type { TenantId } from "../domain/cache-keys.js";
 import type { TokenStorePort, RedisPort, LogPort } from "../ports.js";
@@ -50,6 +52,48 @@ const teamKey = (tenant: TenantId, team: string): string => `${teamKeyPrefix(ten
  * so `listTeams` never needs a denied keyspace-enumeration command.
  */
 const teamsIndexKey = (tenant: TenantId): string => `fugue:${tenant}:teams-index`;
+
+interface StoredTeamRecord {
+  readonly hash: string;
+  readonly grant: TokenGrant;
+}
+
+const parseStoredTeamRecord = (json: string): Result<StoredTeamRecord, string> => {
+  let value: unknown;
+  try {
+    value = JSON.parse(json);
+  } catch {
+    return err("malformed JSON");
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return err("record must be an object");
+  }
+  const record = value as Record<string, unknown>;
+  const grant = record.grant;
+  if (
+    typeof record.hash !== "string" || record.hash.length === 0 ||
+    typeof grant !== "object" || grant === null || Array.isArray(grant)
+  ) {
+    return err("record must contain hash and grant");
+  }
+  const grantRecord = grant as Record<string, unknown>;
+  if (
+    typeof grantRecord.team !== "string" ||
+    typeof grantRecord.label !== "string" ||
+    typeof grantRecord.createdAt !== "number" ||
+    !Number.isFinite(grantRecord.createdAt)
+  ) {
+    return err("grant fields are invalid");
+  }
+  return ok({
+    hash: record.hash,
+    grant: {
+      team: markTeam(grantRecord.team),
+      label: grantRecord.label,
+      createdAt: grantRecord.createdAt,
+    },
+  });
+};
 
 // ── In-Memory Adapter (tests) ──────────────────────────────────────────────
 
@@ -192,27 +236,28 @@ export const createRedisTokenStore = (
       for (const team of indexResult.value) {
         const valueResult = await redis.get(teamKey(tenant, team));
         if (!valueResult.ok) {
-          // A FAILED read is not an absent key: skipping silently would present
-          // a truncated team list as the complete answer during a Redis blip.
-          // Name the team and error kind so "missing team" reports have a
-          // breadcrumb (round-23 sfh-2).
-          logger?.warn?.(
-            "[token-store] listTeams: skipping team due to read failure",
-            { team, error: valueResult.error.kind },
-          );
-          continue;
+          // A failed read is not an absent key. Returning the grants collected
+          // so far would misrepresent an incomplete admin listing as complete.
+          return err(redisUnavailable(`token-list-teams: failed reading team '${team}'`));
         }
         if (valueResult.value === null || valueResult.value === "") {
           // Index names a team whose key is gone — best-effort skip.
           // (Self-heals on next revoke, which SREMs the stale member.)
           continue;
         }
-        try {
-          const parsed = JSON.parse(valueResult.value) as { hash: string; grant: TokenGrant };
-          grants.push(parsed.grant);
-        } catch {
-          logger?.warn("[token-store] Skipping corrupt team index entry", { team });
+        const parsed = parseStoredTeamRecord(valueResult.value);
+        if (!parsed.ok || parsed.value.grant.team !== team) {
+          try {
+            logger?.warn("[token-store] Corrupt team index entry — refusing partial listing", {
+              team,
+              reason: parsed.ok ? "grant team does not match indexed team" : parsed.error,
+            });
+          } catch {
+            // The typed corruption failure remains authoritative.
+          }
+          return err(redisUnavailable(`token-list-teams: corrupt team record for '${team}'`));
         }
+        grants.push(parsed.value.grant);
       }
 
       return ok(grants);

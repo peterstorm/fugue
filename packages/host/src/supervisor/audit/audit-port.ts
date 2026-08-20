@@ -156,9 +156,9 @@ export interface AuditRecord {
 }
 
 /**
- * Smart constructor for an `AuditRecord`. The single seam where a lifecycle op
- * becomes an audit record — keeps the four required fields together and is the
- * only producer, so every emitted record is well-formed by construction.
+ * Preferred constructor for an `AuditRecord`. This keeps the required fields
+ * together at lifecycle call sites; `AuditRecord` remains an exported structural
+ * type, so external callers can also construct a conforming value directly.
  */
 export const auditRecord = (input: {
   readonly actor: AuditActor;

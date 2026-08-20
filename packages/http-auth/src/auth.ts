@@ -18,7 +18,7 @@
 
 import { z } from "zod";
 import type { Result, FrameworkError } from "@fuguejs/framework";
-import { ok, err, nodeId, safeErrorMessage } from "@fuguejs/framework";
+import { ok, err, nodeId } from "@fuguejs/framework";
 import { classifyAbort } from "./abort-classification.js";
 
 // ---------------------------------------------------------------------------
@@ -130,11 +130,11 @@ export interface AuthConfig {
  * returns a cached token or mints one; `invalidate()` drops the cache so the
  * next `get()` re-mints (used on a `401`).
  *
- * `get()` accepts an optional `AbortSignal`: when a mint is actually performed
- * (cache miss), aborting the signal cancels the in-flight fetch. `probe()` always
- * performs an uncached, non-deduplicated mint for lifecycle health checks; it
- * never reads or populates the request cache, so a late signal-ignoring probe
- * cannot change steady-state authentication state.
+ * `get()` accepts an optional `AbortSignal` that cancels only that caller's wait.
+ * The boot-scoped single-flight mint is shared and remains governed by its own
+ * timeout, so one cancelled request cannot poison unrelated waiters. `probe()`
+ * always performs an uncached, non-deduplicated mint and forwards its signal to
+ * that private mint; it never reads or populates the request cache.
  */
 export interface TokenProvider {
   get(signal?: AbortSignal): Promise<Result<BearerToken, FrameworkError>>;
@@ -170,6 +170,15 @@ const basicAuthHeader = (basic: BasicAuth): string => {
       ? Buffer.from(raw, "utf8").toString("base64")
       : btoa(raw);
   return `Basic ${encoded}`;
+};
+
+/** Trusted endpoint label for diagnostics; excludes URL user-info, path, and query. */
+const tokenEndpointOrigin = (tokenUrl: string): string => {
+  try {
+    return new URL(tokenUrl).origin;
+  } catch {
+    return "configured token endpoint";
+  }
 };
 
 /** Build the `x-www-form-urlencoded` grant body from config. */
@@ -380,7 +389,9 @@ const mintToken = async (
     if (abort === "abort") {
       return err(mapTokenError("abort", "request cancelled"));
     }
-    return err(mapTokenError("network", safeErrorMessage(error)));
+    // The fetch seam received Basic auth and the form-encoded credentials.
+    // Its rejection text is untrusted and may reflect either; discard it.
+    return err(mapTokenError("network", `request failed contacting ${tokenEndpointOrigin(auth.tokenUrl)}`));
   } finally {
     if (timer != null) clearTimeout(timer);
     if (onExternalAbort && externalSignal) externalSignal.removeEventListener("abort", onExternalAbort);
@@ -427,10 +438,10 @@ export const createTokenProvider = (deps: TokenProviderDeps): TokenProvider => {
     return clock.ok ? ok(entry.expiresAtMs > clock.value) : err(clock.error);
   };
 
-  const refresh = (signal?: AbortSignal): Promise<Result<CachedToken, FrameworkError>> => {
+  const refresh = (): Promise<Result<CachedToken, FrameworkError>> => {
     if (inflight) return inflight;
     const startedGeneration = generation;
-    const p = mintToken(deps.auth, deps.fetch, now, deps.defaultTimeoutMs, signal)
+    const p = mintToken(deps.auth, deps.fetch, now, deps.defaultTimeoutMs)
       .then((result) => {
         // Only write the cache if no invalidate() intervened since this mint
         // started — otherwise the just-invalidated token would be resurrected.
@@ -447,6 +458,27 @@ export const createTokenProvider = (deps: TokenProviderDeps): TokenProvider => {
     return p;
   };
 
+  const awaitRefresh = (
+    pending: Promise<Result<CachedToken, FrameworkError>>,
+    signal: AbortSignal | undefined,
+  ): Promise<Result<CachedToken, FrameworkError>> => {
+    if (signal === undefined) return pending;
+    if (signal.aborted) return Promise.resolve(err(mapTokenError("abort", "request cancelled")));
+
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (result: Result<CachedToken, FrameworkError>): void => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        resolve(result);
+      };
+      const onAbort = (): void => finish(err(mapTokenError("abort", "request cancelled")));
+      signal.addEventListener("abort", onAbort, { once: true });
+      pending.then(finish);
+    });
+  };
+
   return {
     get: async (signal?: AbortSignal): Promise<Result<BearerToken, FrameworkError>> => {
       if (cached) {
@@ -454,7 +486,7 @@ export const createTokenProvider = (deps: TokenProviderDeps): TokenProvider => {
         if (!freshness.ok) return err(freshness.error);
         if (freshness.value) return ok(cached.token);
       }
-      const result = await refresh(signal);
+      const result = await awaitRefresh(refresh(), signal);
       return result.ok ? ok(result.value.token) : err(result.error);
     },
 

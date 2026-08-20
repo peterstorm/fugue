@@ -183,7 +183,9 @@ export const createCompoundAuditSink = (
   logger?: LogPort,
 ): AuditPort => ({
   record: async (rec) => {
-    const settled = await Promise.allSettled(sinks.map((s) => s.record(rec)));
+    const settled = await Promise.allSettled(
+      sinks.map((sink) => Promise.resolve().then(() => sink.record(rec))),
+    );
     settled.forEach((result, index) => {
       if (result.status === "rejected") {
         const reason = safeErrorMessage(result.reason);

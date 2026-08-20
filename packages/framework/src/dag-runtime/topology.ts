@@ -37,7 +37,8 @@ const buildOutgoing = (dag: DagDef): Map<NodeId, EdgeDef[]> => {
  * along unconditional edges only. Conditional and default targets are added
  * later when their predicate fires.
  *
- * Wave-0 entry points are nodes with no incoming edges of any kind.
+ * Wave-0 entry points are nodes with no incoming edges from real nodes;
+ * virtual `DAG_INPUT` edges are already satisfied and do not count.
  *
  * Accepts either a `DagDef` (for compile-time) or raw `edges` + precomputed
  * `outgoing` map (for the pure transition layer which has no access to `DagDef`).

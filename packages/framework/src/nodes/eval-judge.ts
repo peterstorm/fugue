@@ -41,6 +41,15 @@ export type EvalJudgeResponse = z.infer<typeof EvalJudgeResponseSchema>;
 /** Default threshold if not specified. */
 const DEFAULT_THRESHOLD = 0.8;
 
+/** Parse the authoring value before a judge definition can enter a DAG. */
+const parseEvalJudgeThreshold = (threshold: number | undefined): number => {
+  const resolved = threshold ?? DEFAULT_THRESHOLD;
+  if (!Number.isFinite(resolved) || resolved < 0 || resolved > 1) {
+    throw new RangeError(`Eval-judge threshold must be a finite number in [0, 1]; got ${String(resolved)}`);
+  }
+  return resolved;
+};
+
 /** Default model for eval-judge (GPT-4o-mini). */
 const DEFAULT_JUDGE_MODEL = "gpt-4o-mini";
 
@@ -107,33 +116,59 @@ export const crashResult = (reason: string): EvalJudgeResult => ({
  * Convert raw LLM response to EvalJudgeResult, applying threshold.
  */
 export const toEvalJudgeResult = (response: EvalJudgeResponse, threshold: number, criteria: readonly string[]): EvalJudgeResult => {
-  const scoresMap: Record<string, number> = {};
-  for (const { name, score } of response.criteria_scores) {
-    scoresMap[name.toLowerCase()] = score;
+  const configuredNames = criteria.map((criterion) => criterion.toLowerCase());
+  const configuredSet = new Set(configuredNames);
+  if (configuredSet.size !== configuredNames.length) {
+    return llmFailureResult("Invalid judge response semantics: configured criteria are not unique");
   }
 
-  const failedCriteria = criteria.filter((c) => {
-    const score = scoresMap[c.toLowerCase()];
-    return score !== undefined && score < threshold;
-  });
+  const scores = new Map<string, number>();
+  for (const { name, score } of response.criteria_scores) {
+    const normalizedName = name.toLowerCase();
+    if (scores.has(normalizedName)) {
+      return llmFailureResult(`Invalid judge response semantics: duplicate criterion '${name}'`);
+    }
+    scores.set(normalizedName, score);
+  }
 
-  const passed = response.score >= threshold && failedCriteria.length === 0;
+  const responseNames = [...scores.keys()];
+  const missing = criteria.filter((criterion) => !scores.has(criterion.toLowerCase()));
+  const unexpected = responseNames.filter((name) => !configuredSet.has(name));
+  if (missing.length > 0 || unexpected.length > 0) {
+    return llmFailureResult(
+      `Invalid judge response semantics: criteria coverage mismatch (missing: ${missing.join(", ") || "none"}; unexpected: ${unexpected.join(", ") || "none"})`,
+    );
+  }
 
-  return passed
-    ? {
-        outcome: "passed",
-        score: response.score,
-        criteriaScores: scoresMap,
-        failedCriteria,
-        reason: response.reason,
-      }
-    : {
-        outcome: "failed",
-        score: response.score,
-        criteriaScores: scoresMap,
-        failedCriteria,
-        reason: response.reason,
-      };
+  const declaredFailures = response.failed_criteria.map((criterion) => criterion.toLowerCase());
+  const declaredFailureSet = new Set(declaredFailures);
+  if (declaredFailureSet.size !== declaredFailures.length) {
+    return llmFailureResult("Invalid judge response semantics: failed_criteria contains duplicates");
+  }
+  const unexpectedFailures = declaredFailures.filter((criterion) => !configuredSet.has(criterion));
+  if (unexpectedFailures.length > 0) {
+    return llmFailureResult(
+      `Invalid judge response semantics: failed_criteria names unconfigured criteria: ${unexpectedFailures.join(", ")}`,
+    );
+  }
+
+  const failedCriteria = criteria.filter((criterion) => scores.get(criterion.toLowerCase())! < threshold);
+  const computedFailureSet = new Set(failedCriteria.map((criterion) => criterion.toLowerCase()));
+  const failureDeclarationMatches =
+    computedFailureSet.size === declaredFailureSet.size &&
+    [...computedFailureSet].every((criterion) => declaredFailureSet.has(criterion));
+  if (!failureDeclarationMatches) {
+    return llmFailureResult("Invalid judge response semantics: failed_criteria contradicts criteria_scores");
+  }
+
+  const outcome = response.score >= threshold && failedCriteria.length === 0 ? "passed" : "failed";
+  return {
+    outcome,
+    score: response.score,
+    criteriaScores: Object.fromEntries(scores),
+    failedCriteria,
+    reason: response.reason,
+  };
 };
 
 /**
@@ -150,29 +185,43 @@ export const toEvalJudgeResult = (response: EvalJudgeResponse, threshold: number
  * ```
  */
 export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeDef => {
-  const threshold = config.threshold ?? DEFAULT_THRESHOLD;
-  const brandedId = nodeId(config.id);
+  const configuredId = config.id;
+  const configuredCriteria = config.criteria;
+  const configuredThreshold = config.threshold;
+  const configuredRubric = config.rubric;
+  const configuredModel = config.model;
+  const threshold = parseEvalJudgeThreshold(configuredThreshold);
+  const brandedId = nodeId(configuredId);
+  const criteria = Object.freeze([...configuredCriteria]);
+  const rubric = configuredRubric === undefined ? undefined : Object.freeze({ ...configuredRubric });
+  const normalizedConfig: EvalJudgeNodeConfig = Object.freeze({
+    id: brandedId,
+    criteria,
+    threshold,
+    ...(rubric === undefined ? {} : { rubric }),
+    ...(configuredModel === undefined ? {} : { model: configuredModel }),
+  });
 
   return {
     id: brandedId,
     kind: "eval-judge",
-    config: { ...config, id: brandedId },
+    config: normalizedConfig,
     run: async (dagInput: unknown, dagOutput: unknown, ctx: NodeContext): Promise<EvalJudgeResult> => {
       // Resolve LLM client (judgeLlm > llm > explicit unavailable outcome)
       const llm: LlmClient | null = ctx.judgeLlm ?? ctx.llm ?? null;
       if (!llm) {
         const msg = "No LLM client available (neither judgeLlm nor llm on context)";
-        warnWithoutThrowing(ctx, `[eval-judge:${config.id}] ${msg}`);
+        warnWithoutThrowing(ctx, `[eval-judge:${brandedId}] ${msg}`);
         return llmFailureResult(msg);
       }
 
       try {
-        const rubric = resolveRubric(
-          { criteria: config.criteria, threshold, rubric: config.rubric },
+        const resolvedRubric = resolveRubric(
+          { criteria, threshold, rubric },
           ctx.prompts?.get ?? null,
         );
-        const userMessage = assembleJudgeUserMessage(rubric, dagInput, dagOutput);
-        const model = config.model ?? DEFAULT_JUDGE_MODEL;
+        const userMessage = assembleJudgeUserMessage(resolvedRubric, dagInput, dagOutput);
+        const model = configuredModel ?? DEFAULT_JUDGE_MODEL;
         const result = await llm.sendStructured({
           system: JUDGE_SYSTEM_FRAME,
           user: userMessage,
@@ -184,8 +233,8 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
 
         if (!result.ok) {
           const msg = `LLM call failed: ${safeErrorMessage(result.error)}`;
-          warnWithoutThrowing(ctx, `[eval-judge:${config.id}] ${msg}`);
-          emitJudgeSkipped(ctx, config.id, msg);
+          warnWithoutThrowing(ctx, `[eval-judge:${brandedId}] ${msg}`);
+          emitJudgeSkipped(ctx, brandedId, msg);
           return llmFailureResult(msg);
         }
 
@@ -203,7 +252,7 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
         } catch (spanErr) {
           warnWithoutThrowing(
             ctx,
-            `[eval-judge:${config.id}] enrichLlmSpan threw: ${safeErrorMessage(spanErr)}`,
+            `[eval-judge:${brandedId}] enrichLlmSpan threw: ${safeErrorMessage(spanErr)}`,
           );
         }
 
@@ -211,15 +260,15 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
         const parsed = EvalJudgeResponseSchema.safeParse(result.value.output);
         if (!parsed.success) {
           const msg = `Invalid judge response: ${parsed.error.message}`;
-          warnWithoutThrowing(ctx, `[eval-judge:${config.id}] ${msg}`);
+          warnWithoutThrowing(ctx, `[eval-judge:${brandedId}] ${msg}`);
           return llmFailureResult(msg);
         }
 
-        return toEvalJudgeResult(parsed.data, threshold, config.criteria);
+        return toEvalJudgeResult(parsed.data, threshold, criteria);
       } catch (e) {
         const msg = `Unexpected error: ${safeErrorMessage(e)}`;
-        warnWithoutThrowing(ctx, `[eval-judge:${config.id}] ${msg}`);
-        emitJudgeSkipped(ctx, config.id, msg);
+        warnWithoutThrowing(ctx, `[eval-judge:${brandedId}] ${msg}`);
+        emitJudgeSkipped(ctx, brandedId, msg);
         return llmFailureResult(msg);
       }
     },
