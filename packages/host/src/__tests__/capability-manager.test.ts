@@ -12,7 +12,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { ok, err, isOk, isErr } from "@fuguejs/framework";
-import type { CapabilityHandle } from "@fuguejs/framework";
+import type { Capability, CapabilityHandle } from "@fuguejs/framework";
 import {
   topoSortHandles,
   connectAll,
@@ -29,7 +29,7 @@ const makeHandle = (
   name: string,
   overrides: Partial<CapabilityHandle> = {},
 ): CapabilityHandle => ({
-  name: name as any,
+  name: name as Capability,
   client: { __name: name },
   ...overrides,
 });
@@ -51,7 +51,7 @@ describe("capability-manager", () => {
 
     it("respects dependsOn ordering", () => {
       const handles = [
-        makeHandle("cache", { dependsOn: ["db"] as any }),
+        makeHandle("cache", { dependsOn: ["db" as Capability] }),
         makeHandle("db"),
         makeHandle("http"),
       ];
@@ -59,31 +59,31 @@ describe("capability-manager", () => {
       expect(isOk(result)).toBe(true);
       if (result.ok) {
         const names = result.value.map((h) => h.name);
-        const dbIndex = names.indexOf("db" as any);
-        const cacheIndex = names.indexOf("cache" as any);
+        const dbIndex = names.indexOf("db" as Capability);
+        const cacheIndex = names.indexOf("cache" as Capability);
         expect(dbIndex).toBeLessThan(cacheIndex);
       }
     });
 
     it("handles chain dependencies (a → b → c)", () => {
       const handles = [
-        makeHandle("a", { dependsOn: ["b"] as any }),
-        makeHandle("b", { dependsOn: ["c"] as any }),
+        makeHandle("a", { dependsOn: ["b" as Capability] }),
+        makeHandle("b", { dependsOn: ["c" as Capability] }),
         makeHandle("c"),
       ];
       const result = topoSortHandles(handles);
       expect(isOk(result)).toBe(true);
       if (result.ok) {
         const names = result.value.map((h) => h.name);
-        expect(names.indexOf("c" as any)).toBeLessThan(names.indexOf("b" as any));
-        expect(names.indexOf("b" as any)).toBeLessThan(names.indexOf("a" as any));
+        expect(names.indexOf("c" as Capability)).toBeLessThan(names.indexOf("b" as Capability));
+        expect(names.indexOf("b" as Capability)).toBeLessThan(names.indexOf("a" as Capability));
       }
     });
 
     it("detects cycles", () => {
       const handles = [
-        makeHandle("a", { dependsOn: ["b"] as any }),
-        makeHandle("b", { dependsOn: ["a"] as any }),
+        makeHandle("a", { dependsOn: ["b" as Capability] }),
+        makeHandle("b", { dependsOn: ["a" as Capability] }),
       ];
       const result = topoSortHandles(handles);
       expect(isErr(result)).toBe(true);
@@ -94,7 +94,7 @@ describe("capability-manager", () => {
     });
 
     it("rejects a dependsOn entry with no registered handle", () => {
-      const handles = [makeHandle("cache", { dependsOn: ["db"] as any })];
+      const handles = [makeHandle("cache", { dependsOn: ["db" as Capability] })];
       const result = topoSortHandles(handles);
       expect(isErr(result)).toBe(true);
       if (!result.ok) {
@@ -115,7 +115,7 @@ describe("capability-manager", () => {
     });
 
     it("rejects a handle with a null client — loud at boot, not a phantom missing-capability at run time", () => {
-      const handles = [makeHandle("db", { client: null as any })];
+      const handles = [makeHandle("db", { client: null as never })];
       const result = topoSortHandles(handles);
       expect(isErr(result)).toBe(true);
       if (!result.ok) {
@@ -126,7 +126,7 @@ describe("capability-manager", () => {
     });
 
     it("rejects a handle with an undefined client", () => {
-      const handles = [makeHandle("db", { client: undefined as any })];
+      const handles = [makeHandle("db", { client: undefined as never })];
       const result = topoSortHandles(handles);
       expect(isErr(result)).toBe(true);
       if (!result.ok) {
@@ -256,6 +256,42 @@ describe("capability-manager", () => {
       const failures = await closeAll(handles, logger);
       expect(failures).toEqual([]);
     });
+
+    it("a throwing info logger cannot stop remaining successful closes", async () => {
+      const order: string[] = [];
+      const handles = [
+        makeHandle("a", { close: async () => { order.push("a"); } }),
+        makeHandle("b", { close: async () => { order.push("b"); } }),
+      ];
+      const logger = {
+        info: () => { throw new Error("logger transport down"); },
+        warn: () => { throw new Error("logger transport down"); },
+      };
+
+      await expect(closeAll(handles, logger)).resolves.toEqual([]);
+      expect(order).toEqual(["b", "a"]);
+    });
+
+    it("a throwing warn logger cannot mask a close failure or stop later closes", async () => {
+      const order: string[] = [];
+      const hostile = Object.create(null) as Record<string, unknown>;
+      Object.defineProperty(hostile, "message", { get: () => { throw new Error("message getter"); } });
+      Object.defineProperty(hostile, "toString", { value: () => { throw new Error("toString"); } });
+      const handles = [
+        makeHandle("a", { close: async () => { order.push("a"); } }),
+        makeHandle("b", { close: async () => { throw hostile; } }),
+        makeHandle("c", { close: async () => { order.push("c"); } }),
+      ];
+      const logger = {
+        info: () => {},
+        warn: () => { throw new Error("logger transport down"); },
+      };
+
+      const failures = await closeAll(handles, logger);
+
+      expect(order).toEqual(["c", "a"]);
+      expect(failures).toEqual([{ name: "b", error: "[object Object]" }]);
+    });
   });
 
   describe("checkHealth", () => {
@@ -304,8 +340,8 @@ describe("capability-manager", () => {
       const clientA = { foo: "bar" };
       const clientB = { baz: 42 };
       const handles = [
-        makeHandle("a", { client: clientA as any }),
-        makeHandle("b", { client: clientB as any }),
+        makeHandle("a", { client: clientA as never }),
+        makeHandle("b", { client: clientB as never }),
       ];
       const result = extractClients(handles);
       expect(result).toEqual({ a: clientA, b: clientB });
@@ -320,8 +356,8 @@ describe("capability-manager", () => {
       // reachable if a future caller bypasses it — it must fail loudly here
       // rather than silently drop a handle (last-writer-wins).
       const handles = [
-        makeHandle("db", { client: { a: 1 } as any }),
-        makeHandle("db", { client: { b: 2 } as any }),
+        makeHandle("db", { client: { a: 1 } as never }),
+        makeHandle("db", { client: { b: 2 } as never }),
       ];
       expect(() => extractClients(handles)).toThrow(/duplicate capability handle name 'db'/);
     });

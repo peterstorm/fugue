@@ -64,7 +64,7 @@ console.log("Running DAG with grounded LLM output (cust-001)...");
     prompts: { get: () => "synthesis prompt" },
     llm,
   };
-  const dag = createSummaryDag(source, "cust-001");
+  const dag = createSummaryDag(source);
   const result = await runDag<{ customerId: string }, SummaryResponse>(dag, { customerId: "cust-001" }, ctx);
 
   if (result.ok && result.value.status === "ok") {
@@ -99,7 +99,7 @@ console.log("\nRunning DAG with hallucinating LLM output (cust-001)...");
     prompts: { get: () => "synthesis prompt" },
     llm,
   };
-  const dag = createSummaryDag(source, "cust-001");
+  const dag = createSummaryDag(source);
   const result = await runDag<{ customerId: string }, SummaryResponse>(dag, { customerId: "cust-001" }, ctx);
 
   if (result.ok && result.value.status === "ok") {

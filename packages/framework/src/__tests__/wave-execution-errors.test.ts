@@ -139,4 +139,73 @@ describe("executeWave — error paths", () => {
     // executor's responsibility. The wave completes normally.
     expect(result.event.type).toBe("wave-done");
   });
+
+  it("an unexpected thrown node defect is a non-retriable node-crash", async () => {
+    const node = {
+      ...makeNode("a"),
+      run: async () => { throw new TypeError("deterministic authoring defect"); },
+    } satisfies NodeDef<unknown, unknown>;
+
+    const result = await executeWave(
+      0,
+      makeMachineCtx(),
+      makeConfig(new Map([["a", node]])),
+    );
+
+    expect(result.event.type).toBe("node-failed");
+    if (result.event.type === "node-failed") {
+      expect(result.event.error).toMatchObject({
+        kind: "node-crash",
+        retriability: "non-retriable",
+        message: "deterministic authoring defect",
+      });
+    }
+  });
+
+  it("a thrown FrameworkError keeps its typed kind instead of becoming node-crash", async () => {
+    const thrown = {
+      kind: "validation" as const,
+      nodeId: N("a"),
+      message: "typed validation failure",
+    };
+    const node = {
+      ...makeNode("a"),
+      run: async () => { throw thrown; },
+    } satisfies NodeDef<unknown, unknown>;
+
+    const result = await executeWave(
+      0,
+      makeMachineCtx(),
+      makeConfig(new Map([["a", node]])),
+    );
+
+    expect(result.event.type).toBe("node-failed");
+    if (result.event.type === "node-failed") {
+      expect(result.event.error).toBe(thrown);
+    }
+  });
+
+  it("a hostile thrown value cannot throw again while being rendered", async () => {
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    const node = {
+      ...makeNode("a"),
+      run: async () => { throw revoked.proxy; },
+    } satisfies NodeDef<unknown, unknown>;
+
+    const result = await executeWave(
+      0,
+      makeMachineCtx(),
+      makeConfig(new Map([["a", node]])),
+    );
+
+    expect(result.event.type).toBe("node-failed");
+    if (result.event.type === "node-failed") {
+      expect(result.event.error).toMatchObject({
+        kind: "node-crash",
+        retriability: "non-retriable",
+        message: "<unprintable error>",
+      });
+    }
+  });
 });

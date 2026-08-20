@@ -38,7 +38,7 @@ const createTestApp = (cp: Checkpointer = new InMemoryCheckpointer()) => {
 // the identity check in server.ts rejects with 409.
 const currentDagIdentity = () => {
   const source = new JsonFixtureSource(fixturesDir);
-  const dag = createSummaryDag(source, "cust-001");
+  const dag = createSummaryDag(source);
   return {
     dagId: dag.id,
     nodeCount: dag.nodes.length,

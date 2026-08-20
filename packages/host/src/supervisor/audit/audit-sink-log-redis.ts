@@ -25,6 +25,7 @@
  */
 
 import type { LogPort } from "../../ports.js";
+import { safeErrorMessage } from "@fuguejs/framework";
 import { match } from "ts-pattern";
 import type { AuditPort, AuditRecord } from "./audit-port.js";
 
@@ -77,6 +78,29 @@ const summarize = (rec: AuditRecord): string =>
     .with("partial", () => `[audit] PARTIAL ${rec.action} tenant='${rec.tenant}' by ${rec.actor.kind}${rec.detail ? ` (${rec.detail})` : ""}`)
     .exhaustive();
 
+const writeAuditFallback = (message: string): void => {
+  try {
+    process.stderr.write(`${message}\n`);
+  } catch {
+    // stderr itself is unavailable — nothing further is possible.
+  }
+};
+
+const logAuditFailureWithoutThrowing = (
+  logger: LogPort | undefined,
+  level: "warn" | "error",
+  message: string,
+  data: Record<string, unknown>,
+  fallback: string,
+): void => {
+  if (logger === undefined) return;
+  try {
+    logger[level](message, data);
+  } catch (loggerError) {
+    writeAuditFallback(`${fallback}; logger failure: ${safeErrorMessage(loggerError)}`);
+  }
+};
+
 // ── Log sink ──────────────────────────────────────────────────────────────────
 
 /**
@@ -102,15 +126,10 @@ export const createLogAuditSink = (logger: LogPort): AuditPort => ({
     } catch (e) {
       // A logger that threw must not break the request path — but the floor
       // must not be SILENT: emit a last-resort breadcrumb that bypasses the
-      // host logger entirely. The write itself is guarded — stderr can be
-      // unavailable, and nothing further is possible in that case.
-      try {
-        process.stderr.write(
-          `[audit] LOG SINK FAILURE — record not logged: ${rec.action} tenant='${rec.tenant}': ${e instanceof Error ? e.message : String(e)}\n`,
-        );
-      } catch {
-        // stderr itself is unavailable — nothing further is possible.
-      }
+      // host logger entirely.
+      writeAuditFallback(
+        `[audit] LOG SINK FAILURE — record not logged: ${rec.action} tenant='${rec.tenant}': ${safeErrorMessage(e)}`,
+      );
     }
   },
 });
@@ -132,11 +151,14 @@ export const createRedisStreamAuditSink = (
     try {
       await stream.xAdd(streamKey, auditRecordToFields(rec));
     } catch (e) {
-      logger?.warn("[audit] Redis stream XADD failed — audit record not persisted to stream", {
-        tenant: rec.tenant,
-        action: rec.action,
-        error: e instanceof Error ? e.message : String(e),
-      });
+      const error = safeErrorMessage(e);
+      logAuditFailureWithoutThrowing(
+        logger,
+        "warn",
+        "[audit] Redis stream XADD failed — audit record not persisted to stream",
+        { tenant: rec.tenant, action: rec.action, error },
+        `[audit] REDIS STREAM FAILURE — ${rec.action} tenant='${rec.tenant}': ${error}`,
+      );
     }
   },
 });
@@ -164,12 +186,14 @@ export const createCompoundAuditSink = (
     const settled = await Promise.allSettled(sinks.map((s) => s.record(rec)));
     settled.forEach((result, index) => {
       if (result.status === "rejected") {
-        logger?.error("[audit] compound sink: a sink violated the never-throw contract (rejected)", {
-          sinkIndex: index,
-          tenant: rec.tenant,
-          action: rec.action,
-          reason: result.reason instanceof Error ? result.reason.message : String(result.reason),
-        });
+        const reason = safeErrorMessage(result.reason);
+        logAuditFailureWithoutThrowing(
+          logger,
+          "error",
+          "[audit] compound sink: a sink violated the never-throw contract (rejected)",
+          { sinkIndex: index, tenant: rec.tenant, action: rec.action, reason },
+          `[audit] COMPOUND SINK FAILURE — sink=${index} ${rec.action} tenant='${rec.tenant}': ${reason}`,
+        );
       }
     });
   },

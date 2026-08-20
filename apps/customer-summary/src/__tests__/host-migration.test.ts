@@ -13,6 +13,8 @@ import {
   validateDagRegistration,
   resolveDefaults,
 } from "@fuguejs/host/contract";
+import { FakeLlmClient, makeNodeContext, runDag } from "@fuguejs/framework";
+import type { SummaryResponse } from "../schemas/response.js";
 
 // ---------------------------------------------------------------------------
 // DagRegistration shape validation
@@ -125,5 +127,28 @@ describe("SummarizeInputSchema", () => {
   test("registration inputSchema performs the same wire-to-domain parse", () => {
     const parsed = registration.inputSchema.parse({ customer_id: "test-id" });
     expect(parsed).toEqual({ customerId: "test-id" });
+  });
+
+  test("hosted execution returns the requested customerId, never construction-time identity", async () => {
+    const input = SummarizeInputSchema.parse({ customer_id: "host-request-404" });
+    const ctx = makeNodeContext({
+      runId: "host-registration-test",
+      dagId: registration.dag.id,
+      llm: new FakeLlmClient(() => ({})),
+      judgeLlm: new FakeLlmClient(() => ({})),
+      prompts: { get: () => "summary prompt" },
+    });
+
+    const result = await runDag<{ customerId: string }, SummaryResponse>(
+      registration.dag,
+      input,
+      ctx,
+    );
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.status).toBe("not_found");
+      expect(result.value.customerId).toBe("host-request-404");
+    }
   });
 });

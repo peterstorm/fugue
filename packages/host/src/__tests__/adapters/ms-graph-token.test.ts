@@ -194,7 +194,7 @@ describe("createMsGraphTokenProvider — secret hygiene & failure mapping", () =
 
   test("network failure → error names the endpoint host, not the secret", async () => {
     const fetchImpl: TokenFetch = async () => {
-      throw new Error("fetch failed: connect ECONNREFUSED");
+      throw new Error(`fetch failed for ${SECRET}: connect ECONNREFUSED`);
     };
     const get = createMsGraphTokenProvider({ ...baseConfig, fetchImpl });
     let error: unknown;
@@ -205,7 +205,30 @@ describe("createMsGraphTokenProvider — secret hygiene & failure mapping", () =
     }
     expect((error as Error).message).toContain("login.microsoftonline.com");
     expect((error as Error).message).toContain("ECONNREFUSED");
+    expect((error as Error).message).toContain("[redacted]");
     expect((error as Error).message).not.toContain(SECRET);
+  });
+
+  test("200 with json() rejection → parser-controlled text cannot expose credentials", async () => {
+    const fetchImpl: TokenFetch = async () => ({
+      status: 200,
+      json: async () => { throw new Error(`invalid JSON after ${SECRET} for client-1`); },
+    });
+    const get = createMsGraphTokenProvider({ ...baseConfig, fetchImpl });
+
+    let error: unknown;
+    try {
+      await get();
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).toContain("login.microsoftonline.com");
+    expect(message).toContain("non-JSON body");
+    expect(message).not.toContain(SECRET);
+    expect(message).not.toContain("client-1");
   });
 
   test("200 with no access_token → loud failure (never an empty token)", async () => {

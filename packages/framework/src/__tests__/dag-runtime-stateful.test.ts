@@ -34,7 +34,7 @@ const makeNode = (
   kind: "transform",
   inputSchema: z.unknown(),
   outputSchema: z.unknown(),
-  run: noop as any,
+  run: noop as never,
   requires: [],
   sideEffects: { kind: "none" },
   confidence: { mode: "none" },
@@ -668,7 +668,7 @@ describe("runDagStateful — abort", () => {
     expect(observedSignalAborted).toBe(true);
   });
 
-  it("node throw produces err(retry-exhausted) — executor wraps throw as node-failed", async () => {
+  it("node throw produces a non-retriable node-crash without consuming retry budget", async () => {
     const dag = makeDag({
       nodes: [
         makeNode("a", {
@@ -683,8 +683,11 @@ describe("runDagStateful — abort", () => {
     const result = await runDagStateful(dag, null, makeCtx());
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      // executor catches the throw and returns node-failed which exhausts retry budget (0 retries default)
-      expect(result.error.kind).toBe("retry-exhausted");
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("non-retriable");
+        expect(result.error.message).toBe("unexpected crash");
+      }
     }
   });
 });
@@ -720,7 +723,7 @@ describe("runDagStateful — validation (FR-025)", () => {
       nodes: [
         makeNode("a", {
           outputSchema: z.string(),
-          run: async () => ok(42 as any), // returns a number when string expected
+          run: async () => ok(42 as unknown), // returns a number when string expected
         }),
       ],
       edges: [{ from: DAG_INPUT, to: "a" }],

@@ -215,6 +215,31 @@ describe("redis-stream sink (never-throw contract)", () => {
     expect(warns.length).toBe(1);
     expect(stream.entries).toHaveLength(0);
   });
+
+  it("still resolves when both XADD and its warning logger throw", async () => {
+    const stream = createFakeAuditStream();
+    stream.setFail(true);
+    const written: string[] = [];
+    const original = process.stderr.write;
+    process.stderr.write = ((chunk: unknown): boolean => {
+      written.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const logger: LogPort = {
+        info: () => {},
+        warn: () => { throw new Error("warning transport down"); },
+        error: () => {},
+      };
+      const sink = createRedisStreamAuditSink(stream, logger);
+
+      await expect(sink.record(rec())).resolves.toBeUndefined();
+      expect(written.join("\n")).toContain("REDIS STREAM FAILURE");
+      expect(written.join("\n")).toContain("warning transport down");
+    } finally {
+      process.stderr.write = original;
+    }
+  });
 });
 
 describe("compound sink", () => {
@@ -253,5 +278,19 @@ describe("compound sink", () => {
     expect(errors).toHaveLength(1);
     expect(errors[0]?.meta?.reason).toBe("sink down");
     expect(errors[0]?.meta?.sinkIndex).toBe(0);
+  });
+
+  it("a throwing contract-violation logger cannot make compound record reject", async () => {
+    const good = createFakeAuditSink();
+    const bad = { record: async () => { throw new Error("sink down"); } };
+    const logger: LogPort = {
+      info: () => {},
+      warn: () => {},
+      error: () => { throw new Error("error transport down"); },
+    };
+    const sink = createCompoundAuditSink([bad, good], logger);
+
+    await expect(sink.record(rec())).resolves.toBeUndefined();
+    expect(good.records).toHaveLength(1);
   });
 });

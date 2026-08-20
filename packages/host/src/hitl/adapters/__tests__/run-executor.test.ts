@@ -191,10 +191,10 @@ describe("createRunExecutor — channel split (err vs failed)", () => {
 
   it("toFrameworkError surfaces the kernel's FrameworkError cause verbatim (cause-unwrap branch)", async () => {
     // `runResumableDagJob` throws an Error whose `cause` is the real FrameworkError
-    // (here a node throw → kernel `retry-exhausted` after its retry budget). The
-    // executor's `toFrameworkError` takes the `cause` branch and surfaces that
-    // framework error verbatim — NOT the synthetic `node-crash`/EXECUTOR_NODE_ID
-    // fallback it would emit if the cause were missing.
+    // (here a deterministic node throw → non-retriable node-crash). The executor's
+    // `toFrameworkError` takes the `cause` branch and surfaces that framework error
+    // verbatim — NOT the synthetic node-crash on EXECUTOR_NODE_ID it would emit
+    // if the cause were missing.
     const dag = singleNodeDag((async () => { throw new Error("node blew up"); }) as never);
     const reg = registered(dag);
     const exec = createRunExecutor({ sharedInfra: sharedInfra(), getRegisteredDag: () => reg, agentClientMap: { "exec-dag": "fugue-agent-exec" } });
@@ -203,10 +203,14 @@ describe("createRunExecutor — channel split (err vs failed)", () => {
     expect(res.ok && res.value.kind).toBe("failed");
     if (res.ok && res.value.kind === "failed") {
       const e = res.value.error;
-      // A genuine framework discriminant came through (the cause was unwrapped)…
-      expect(e.kind).toBe("retry-exhausted");
-      // …rather than the host's fallback wrapper (which only appears if `cause`
-      // were absent): that fallback is always `node-crash` on the EXECUTOR node.
+      // A genuine node-scoped framework error came through (cause unwrapped)…
+      expect(e.kind).toBe("node-crash");
+      if (e.kind === "node-crash") {
+        expect(e.nodeId).toBe("only");
+        expect(e.retriability).toBe("non-retriable");
+        expect(e.message).toBe("node blew up");
+      }
+      // …rather than the host's fallback wrapper on the executor sentinel.
       expect(e.kind === "node-crash" && e.nodeId === EXECUTOR_NODE_ID).toBe(false);
     }
   });

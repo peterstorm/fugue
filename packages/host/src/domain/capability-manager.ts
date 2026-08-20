@@ -13,7 +13,7 @@
  */
 
 import type { Result } from "@fuguejs/framework";
-import { ok, err } from "@fuguejs/framework";
+import { ok, err, safeErrorMessage } from "@fuguejs/framework";
 import type { CapabilityHandle, Capability, CapabilityRegistry } from "@fuguejs/framework";
 import type { HostError } from "./host-error.js";
 
@@ -193,6 +193,25 @@ interface CloseFailure {
   readonly error: string;
 }
 
+type CloseLogger = {
+  readonly info: (msg: string, data?: Record<string, unknown>) => void;
+  readonly warn: (msg: string, data?: Record<string, unknown>) => void;
+};
+
+/** Cleanup diagnostics are secondary and must never alter cleanup control flow. */
+const logCloseWithoutThrowing = (
+  logger: CloseLogger,
+  level: "info" | "warn",
+  message: string,
+  data?: Record<string, unknown>,
+): void => {
+  try {
+    logger[level](message, data);
+  } catch {
+    // No fallback can improve the already-decided close outcome. Continue.
+  }
+};
+
 /**
  * Close all capability handles in reverse order (dependencies close last).
  * Best-effort — continues on failure, logs errors. Returns the failures so
@@ -201,22 +220,27 @@ interface CloseFailure {
  */
 export const closeAll = async (
   handles: readonly CapabilityHandle[],
-  logger: { info: (msg: string, data?: Record<string, unknown>) => void; warn: (msg: string, data?: Record<string, unknown>) => void },
+  logger: CloseLogger,
 ): Promise<readonly CloseFailure[]> => {
   const failures: CloseFailure[] = [];
   // Close in reverse order (dependents close before dependencies)
   const reversed = [...handles].reverse();
   for (const handle of reversed) {
-    if (handle.close) {
-      try {
-        await handle.close();
-        logger.info(`Capability '${handle.name}' closed`);
-      } catch (e) {
-        const error = e instanceof Error ? e.message : String(e);
-        logger.warn(`Capability '${handle.name}' failed to close`, { error });
-        failures.push({ name: handle.name, error });
-        // Best-effort — continue closing others
-      }
+    if (!handle.close) continue;
+
+    try {
+      await handle.close();
+      logCloseWithoutThrowing(logger, "info", `Capability '${handle.name}' closed`);
+    } catch (caught) {
+      const error = safeErrorMessage(caught);
+      // Record the close outcome before attempting secondary diagnostics.
+      failures.push({ name: handle.name, error });
+      logCloseWithoutThrowing(
+        logger,
+        "warn",
+        `Capability '${handle.name}' failed to close`,
+        { error },
+      );
     }
   }
   return failures;

@@ -89,7 +89,7 @@ export const createApp = (deps: AppDeps): Hono => {
     const checkpointer = deps.checkpointer;
 
     try {
-      const dag = createSummaryDag(deps.source, customer_id, {
+      const dag = createSummaryDag(deps.source, {
         model: deps.model,
         judgeModel: deps.judgeModel,
         thinking: deps.thinking,

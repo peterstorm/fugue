@@ -17,7 +17,6 @@ interface SummaryDagOpts {
 
 export const createSummaryDag = (
   source: ConversationSource,
-  customerId: string,
   opts: SummaryDagOpts = {},
 ): DagDef => {
   const fetchCustomer = createFetchCustomerNode(source);
@@ -27,7 +26,7 @@ export const createSummaryDag = (
     systemPrompt: opts.synthesisSystemPrompt,
   });
   const groundingGuardrail = createGroundingGuardrailNode();
-  const assembleResponse = createAssembleResponseNode(customerId);
+  const assembleResponse = createAssembleResponseNode();
 
   const summaryEvalJudge = createEvalJudgeNode({
     id: "summary-quality-judge",
@@ -51,6 +50,7 @@ export const createSummaryDag = (
       // DAG request explicitly. `fetch-crm` consumes the request (`{ customerId }`),
       // so it takes the DAG input rather than being a source.
       { from: DAG_INPUT, to: "fetch-crm" },
+      { from: DAG_INPUT, to: "assemble-response" },
       { from: "fetch-crm", to: "extract-features" },
       { from: "extract-features", to: "synthesize" },
       { from: "synthesize", to: "grounding-guardrail" },

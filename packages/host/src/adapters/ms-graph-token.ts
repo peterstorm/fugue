@@ -14,6 +14,8 @@
  * including the client secret, back to the caller).
  */
 
+import { safeErrorMessage } from "@fuguejs/framework";
+
 /** The v2.0 token endpoint response shape. */
 interface TokenResponse {
   readonly access_token: string;
@@ -71,6 +73,16 @@ const FALLBACK_LIFETIME_MS = 3_600_000; // v2.0 always sends expires_in; 1 h kee
 const defaultTokenUrl = (tenantId: string): string =>
   `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`;
 
+const redactConfiguredCredentials = (
+  error: unknown,
+  credentials: readonly string[],
+): string =>
+  credentials.reduce(
+    (diagnostic, credential) =>
+      credential.length > 0 ? diagnostic.replaceAll(credential, "[redacted]") : diagnostic,
+    safeErrorMessage(error),
+  );
+
 interface CachedToken {
   readonly accessToken: string;
   readonly expiresAtMs: number;
@@ -118,9 +130,11 @@ export const createMsGraphTokenProvider = (
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (e) {
-      throw new Error(
-        `MS Graph token request to ${endpointHost} failed: ${e instanceof Error ? e.message : String(e)}`,
-      );
+      const diagnostic = redactConfiguredCredentials(e, [
+        config.clientSecret,
+        config.clientId,
+      ]);
+      throw new Error(`MS Graph token request to ${endpointHost} failed: ${diagnostic}`);
     }
     if (res.status !== 200) {
       throw new Error(`MS Graph token endpoint ${endpointHost} returned ${res.status}`);
@@ -128,10 +142,10 @@ export const createMsGraphTokenProvider = (
     let json: unknown;
     try {
       json = await res.json();
-    } catch (e) {
-      throw new Error(
-        `MS Graph token endpoint returned a non-JSON body: ${e instanceof Error ? e.message : String(e)}`,
-      );
+    } catch {
+      // Response-parser errors are endpoint-controlled and can echo the POST
+      // body. Preserve only trusted endpoint context at this secret boundary.
+      throw new Error(`MS Graph token endpoint ${endpointHost} returned a non-JSON body`);
     }
     const parsed = json as Partial<TokenResponse> | null;
     const accessToken = typeof parsed?.access_token === "string" ? parsed.access_token : "";

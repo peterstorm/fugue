@@ -20,6 +20,8 @@
 import type { Result } from "../types/result.js";
 import { ok, err } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
+import { isFrameworkError, messageOf } from "../types/errors.js";
+import { safeErrorMessage } from "../types/safe-error.js";
 import type { NodeContext, NodeDef, ValidatedNodeContext } from "../types/node.js";
 import type { MintingAuthority, ScopedCapabilityHandle } from "../types/capability-broker.js";
 import { invocationFor } from "../types/capability-broker.js";
@@ -85,7 +87,7 @@ export const runNodeShared = async (
         dagId,
         nodeId,
         timestamp: stamp(),
-        error: `checkpoint replay rejected: ${String(validated.error)}`,
+        error: `checkpoint replay rejected: ${messageOf(validated.error)}`,
         frameworkError: validated.error,
       });
       return { result: validated, outcome: EMPTY_OUTCOME };
@@ -118,7 +120,7 @@ export const runNodeShared = async (
       dagId,
       nodeId,
       timestamp: stamp(),
-      error: `input validation failed: ${JSON.stringify(inputResult.error as FrameworkError)}`,
+      error: `input validation failed: ${messageOf(inputResult.error)}`,
       frameworkError: inputResult.error,
     });
     return { result: inputResult, outcome: EMPTY_OUTCOME };
@@ -156,7 +158,7 @@ export const runNodeShared = async (
           kind: "infra-unreachable" as const,
           operation: "mint" as const,
           hop: "capability-broker",
-          message: `broker.mintFor threw across the port boundary (contract violation): ${e instanceof Error ? e.message : String(e)}`,
+          message: `broker.mintFor threw across the port boundary (contract violation): ${safeErrorMessage(e)}`,
         });
       }
       if (!minted.ok) {
@@ -167,7 +169,7 @@ export const runNodeShared = async (
           nodeId,
           sideEffects: node.sideEffects,
           timestamp: stamp(),
-          error: `capability minting refused: ${JSON.stringify(minted.error)}`,
+          error: `capability minting refused: ${messageOf(minted.error)}`,
           frameworkError: minted.error,
         });
         return err(minted.error);
@@ -202,7 +204,7 @@ export const runNodeShared = async (
           nodeId,
           sideEffects: node.sideEffects,
           timestamp: stamp(),
-          error: `broker claimed but did not deliver capabilities: ${JSON.stringify(missingErr)}`,
+          error: `broker claimed but did not deliver capabilities: ${messageOf(missingErr)}`,
           frameworkError: missingErr,
         });
         return err(missingErr);
@@ -221,16 +223,17 @@ export const runNodeShared = async (
         ctx: NodeContext,
       ) => Promise<Result<unknown, FrameworkError>>;
       runResult = await runFn(inputResult.value, runCtx);
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      const stack = e instanceof Error ? e.stack : undefined;
-      const crash: FrameworkError = {
-        kind: "node-crash" as const,
-        nodeId,
-        retriability: "retriable" as const,
-        message,
-        stack,
-      };
+    } catch (caught) {
+      const frameworkError: FrameworkError = isFrameworkError(caught)
+        ? caught
+        : {
+            kind: "node-crash",
+            nodeId,
+            retriability: "non-retriable",
+            message: safeErrorMessage(caught),
+          };
+      const message = messageOf(frameworkError);
+      const stack = frameworkError.kind === "node-crash" ? frameworkError.stack : undefined;
       emit(ctx, {
         type: "node-error",
         runId: ctx.runId,
@@ -239,25 +242,23 @@ export const runNodeShared = async (
         sideEffects: node.sideEffects,
         timestamp: stamp(),
         error: message,
-        stack,
-        frameworkError: crash,
+        ...(stack !== undefined ? { stack } : {}),
+        frameworkError,
       });
-      return err(crash);
+      return err(frameworkError);
     }
 
     if (!runResult.ok) {
-      const frameworkError: FrameworkError =
-        runResult.error !== null &&
-        typeof runResult.error === "object" &&
-        "kind" in runResult.error &&
-        typeof (runResult.error as Record<string, unknown>).kind === "string"
-          ? (runResult.error as FrameworkError)
-          : { kind: "node-crash" as const, nodeId, retriability: "retriable" as const, message: String(runResult.error) };
+      const frameworkError: FrameworkError = isFrameworkError(runResult.error)
+        ? runResult.error
+        : {
+            kind: "node-crash",
+            nodeId,
+            retriability: "non-retriable",
+            message: safeErrorMessage(runResult.error),
+          };
 
-      const errorMsg =
-        frameworkError.kind === "node-crash"
-          ? frameworkError.message
-          : JSON.stringify(frameworkError);
+      const errorMsg = messageOf(frameworkError);
 
       emit(ctx, {
         type: "node-error",
@@ -281,7 +282,7 @@ export const runNodeShared = async (
         nodeId,
         sideEffects: node.sideEffects,
         timestamp: stamp(),
-        error: `output validation failed: ${JSON.stringify(outputResult.error as FrameworkError)}`,
+        error: `output validation failed: ${messageOf(outputResult.error)}`,
         frameworkError: outputResult.error,
       });
       return outputResult;
@@ -291,7 +292,7 @@ export const runNodeShared = async (
       try {
         await ctx.checkpointWriter.write(ctx.runId, nodeId, outputResult.value);
       } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
+        const message = safeErrorMessage(e);
         const cpwError: FrameworkError = {
           kind: "checkpoint-write-failed" as const,
           runId: ctx.runId,

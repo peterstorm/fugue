@@ -239,8 +239,11 @@ export async function emitFreshnessWitnessEvents(
         }
         return ok(undefined);
       })
-      .with({ kind: "none" }, async () => ok(undefined))
-      .with({ kind: "external-call" }, async () => ok(undefined))
+      .with(
+        { kind: "none" },
+        { kind: "external-call" },
+        async () => ok(undefined),
+      )
       .exhaustive();
 
     if (!branchResult.ok) return branchResult;

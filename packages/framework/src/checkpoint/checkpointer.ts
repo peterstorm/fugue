@@ -693,7 +693,6 @@ export class InMemoryCheckpointer implements Checkpointer {
     // silently rewrite stored checkpoint state after a successful ok(undefined)
     // — the same aliasing class `detachStored` exists to prevent.
     let detached: RunMeta;
-    let createdAt: Date;
     try {
       detached = this.detachStored(meta, "checkpoint meta");
     } catch (error) {
@@ -705,17 +704,39 @@ export class InMemoryCheckpointer implements Checkpointer {
     // comparison — see `readClock`).
     const createdAtClock = this.readClock("setMeta", runId);
     if (!createdAtClock.ok) return createdAtClock;
-    createdAt = new Date(createdAtClock.value);
-    // Always stamp the writer's framework version unless the caller supplied
-    // their own (lets tests construct stale-version payloads). Matches
-    // `RedisCheckpointer.setMeta` exactly so backend swap is transparent.
-    this.metas.set(runId, {
-      meta: {
-        ...detached,
+    const createdAt = new Date(createdAtClock.value);
+
+    // Re-establish the complete persisted-meta grammar before admitting the
+    // snapshot to storage. TypeScript brands can be forged and RunMeta's
+    // primitive fields can be supplied by JavaScript, so in-memory must reject
+    // the same invalid nodeCount/ID/date/optional-field states as file/Redis.
+    let parsed: ReturnType<typeof parseRunMetaRecord>;
+    try {
+      parsed = parseRunMetaRecord({
+        dagId: detached.dagId,
+        startedAt: detached.startedAt.toISOString(),
+        nodeCount: detached.nodeCount,
+        createdAt: createdAt.toISOString(),
+        ...(detached.subject !== undefined ? { subject: detached.subject } : {}),
+        ...(detached.dagFingerprint !== undefined
+          ? { dagFingerprint: detached.dagFingerprint }
+          : {}),
         frameworkVersion: detached.frameworkVersion ?? FRAMEWORK_VERSION,
-      },
-      createdAt,
-    });
+      });
+    } catch (error) {
+      return err(
+        frameworkError.cacheError(
+          "checkpoint:setMeta",
+          safeErrorMessage(error),
+          "permanent",
+        ),
+      );
+    }
+    if (!parsed.ok) {
+      return err(frameworkError.cacheError("checkpoint:setMeta", parsed.error, "permanent"));
+    }
+
+    this.metas.set(runId, parsed.value);
     return ok(undefined);
   }
 }

@@ -1,8 +1,9 @@
-// foundry-event-mapping.ts — PURE functional core.
+// foundry-event-mapping.ts — telemetry mapping core.
 //
 // Maps framework domain `ObserverEvent`s into vendor-neutral `FoundryEmission`
-// records (events + pre-aggregated metrics). NO I/O, NO clock reads, NO
-// logging — deterministic over its input. The imperative shell
+// records (events + pre-aggregated metrics). It performs no I/O or clock reads;
+// deliberately dropped non-finite telemetry emits a diagnostic warning so a
+// monitoring false negative cannot disappear silently. The imperative shell
 // (`AiFoundryObserver`) forwards each emission to a `FoundryTelemetrySink`.
 //
 // Spec anchors: FR-018 (record run summaries, routing decisions, pruned

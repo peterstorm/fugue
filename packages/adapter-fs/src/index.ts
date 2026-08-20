@@ -119,8 +119,8 @@ const MIME_BY_EXT: Readonly<Record<string, string>> = {
  * are retriable. Exported for testing.
  */
 export const mapFsError = (e: unknown, path: string): FrameworkError => {
-  // Total code probe from the framework (round-23 cs-3): a hostile thrown
-  // value (revoked proxy, throwing getter) can never throw across this
+  // Total code probe from the framework: a hostile thrown value (revoked
+  // proxy, throwing getter) can never throw across this
   // boundary. `probeErrorCode` reports string codes — identical to the
   // previous `"code" in e` read for `node:fs` errors, strictly more total
   // otherwise.

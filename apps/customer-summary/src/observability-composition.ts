@@ -420,9 +420,9 @@ export const resolveFoundryLeg = (
         "MLflow tracing continues unaffected:",
       foundryErr,
     );
-    // MLflow is guaranteed selectable alongside Foundry in well-formed config;
-    // if Foundry was the SOLE backend, fall back to MLflow so tracing still
-    // initializes. Rebuild as a NON-EMPTY tuple (matching the config-layer
+    // Preserve an already-selected MLflow leg after removing Foundry. If
+    // Foundry was the SOLE backend, explicitly fall back to MLflow so tracing
+    // still initializes. Rebuild as a NON-EMPTY tuple (matching the config-layer
     // `TraceBackends` invariant) and freeze it so the degraded selection stays
     // immutable.
     const [head, ...tail] = resolved.traceBackends.filter((b) => b !== "foundry");

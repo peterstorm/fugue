@@ -3,8 +3,15 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseHostConfig } from "../../domain/config.js";
-import { buildDocumentsCapability, describeDocumentsAdapter } from "../../adapters/documents-capability.js";
+import {
+  buildDocumentsCapability,
+  describeDocumentsAdapter,
+  type DocumentsCapabilitySeams,
+} from "../../adapters/documents-capability.js";
+import type { MsGraphTokenProviderConfig } from "../../adapters/ms-graph-token.js";
 import { localPathRef } from "@fuguejs/fs";
+import type { MsGraphAdapterConfig } from "@fuguejs/ms-graph";
+import type { CapabilityHandle } from "@fuguejs/framework";
 
 /**
  * buildDocumentsCapability — the SINGLE documents-adapter wiring shared by
@@ -83,6 +90,73 @@ describe("buildDocumentsCapability", () => {
     );
     expect(stock).toBeDefined();
     expect(resolving).toBeDefined();
+  });
+
+  it("derives sovereign scope and propagates request timeout to token and Graph adapters", async () => {
+    let tokenConfig: MsGraphTokenProviderConfig | undefined;
+    let adapterConfig: MsGraphAdapterConfig | undefined;
+    const fakeHandle = {
+      name: "documents",
+      client: {},
+    } as unknown as CapabilityHandle<"documents">;
+    const seams: DocumentsCapabilitySeams = {
+      createTokenProvider: (captured) => {
+        tokenConfig = captured;
+        return async () => "token";
+      },
+      loadMsGraphAdapters: async () => ({
+        createMsGraphAdapter: (captured) => {
+          adapterConfig = captured;
+          return fakeHandle;
+        },
+        createPathResolvingMsGraphAdapter: () => fakeHandle,
+      }),
+    };
+
+    await buildDocumentsCapability(
+      config({
+        DOCUMENTS_ADAPTER: "ms-graph",
+        ...msgGraphEnv,
+        MSGRAPH_BASE_URL: "https://graph.microsoft.us/v1.0",
+        MSGRAPH_REQUEST_TIMEOUT_MS: "4321",
+      }),
+      seams,
+    );
+
+    expect(tokenConfig?.scope).toBe("https://graph.microsoft.us/.default");
+    expect(tokenConfig?.requestTimeoutMs).toBe(4321);
+    expect(adapterConfig?.graphBaseUrl).toBe("https://graph.microsoft.us/v1.0");
+    expect(adapterConfig?.requestTimeoutMs).toBe(4321);
+  });
+
+  it("an explicit MSGRAPH_SCOPE overrides base-URL scope derivation", async () => {
+    let tokenConfig: MsGraphTokenProviderConfig | undefined;
+    const fakeHandle = {
+      name: "documents",
+      client: {},
+    } as unknown as CapabilityHandle<"documents">;
+    const seams: DocumentsCapabilitySeams = {
+      createTokenProvider: (captured) => {
+        tokenConfig = captured;
+        return async () => "token";
+      },
+      loadMsGraphAdapters: async () => ({
+        createMsGraphAdapter: () => fakeHandle,
+        createPathResolvingMsGraphAdapter: () => fakeHandle,
+      }),
+    };
+
+    await buildDocumentsCapability(
+      config({
+        DOCUMENTS_ADAPTER: "ms-graph",
+        ...msgGraphEnv,
+        MSGRAPH_BASE_URL: "https://graph.microsoft.us/v1.0",
+        MSGRAPH_SCOPE: "api://custom/.default",
+      }),
+      seams,
+    );
+
+    expect(tokenConfig?.scope).toBe("api://custom/.default");
   });
 });
 

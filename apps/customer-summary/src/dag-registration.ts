@@ -31,25 +31,18 @@ export const SummarizeInputSchema = z.object({
 // ---------------------------------------------------------------------------
 // DAG factory — creates a summary DAG with a default fixture source.
 //
-// NOTE: createSummaryDag requires a ConversationSource and customerId at
-// construction time (DAG nodes close over them: createFetchCustomerNode closes
-// over the source; createAssembleResponseNode closes over the customerId). For
-// the host registration we pass a REAL fixture source (JsonFixtureSource) with
-// a placeholder customerId — the fetch node consumes the per-request
-// customer_id from the validated input payload via node execution context, so
-// the DAG structure itself is static while the customer comes from the parsed
-// request as camel-case `customerId`.
+// The source is construction-scoped infrastructure. Customer identity is
+// request-scoped domain data: explicit DAG-input edges deliver the parsed
+// `customerId` to both fetching and response assembly, so every response
+// variant is correlated to the request that produced it.
 // ---------------------------------------------------------------------------
 
 const createRegisteredDag = () => {
-  // The fixture source is the default for standalone mode; when hosted, the
-  // per-request customerId arrives via the validated input payload (the
-  // customerId "placeholder" below is only the assembly node's closure).
-  // Resolve fixtures relative to this module, not process CWD.
-  // Ensures the DAG works whether loaded by the standalone server or the Fugue host.
+  // Resolve fixtures relative to this module, not process CWD. This keeps the
+  // registration loadable by both the standalone server and Fugue host.
   const fixturesDir = join(import.meta.dir, "..", "fixtures", "customers");
   const defaultSource = new JsonFixtureSource(fixturesDir);
-  return createSummaryDag(defaultSource, "placeholder");
+  return createSummaryDag(defaultSource);
 };
 
 // ---------------------------------------------------------------------------

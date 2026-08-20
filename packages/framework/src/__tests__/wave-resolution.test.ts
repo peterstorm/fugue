@@ -1,4 +1,5 @@
 import { describe, it, expect } from "bun:test";
+import { z } from "zod";
 import {
   handleWaveDone,
   advanceToNextWave,
@@ -6,12 +7,12 @@ import {
   activeWaveNodes,
   waveIndexOf,
 } from "../dag-runtime/wave-resolution.js";
-import type { DagMachineContext } from "../dag-runtime/types.js";
 import type { Decision } from "../dag-runtime/routing.js";
 import type { DagDef, EdgeDef } from "../types/dag.js";
 import type { NodeDef } from "../types/node.js";
 import { nonEmptyString } from "../types/non-empty-string.js";
 import { N, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import { testRuntimeContext as mkCtx } from "./_context-factories.js";
 
 // ---------------------------------------------------------------------------
 // Minimal test fixtures
@@ -20,12 +21,12 @@ import { N, D, nodeMap, nodeSet } from "./_id-helpers.js";
 const mkNodeDef = (id: string, opts?: { humanReview?: { prompt: string } }): NodeDef<unknown, unknown> => ({
   id: N(id),
   kind: "transform",
-  inputSchema: { parse: (x: unknown) => x } as any,
-  outputSchema: { parse: (x: unknown) => x } as any,
+  inputSchema: z.unknown(),
+  outputSchema: z.unknown(),
   requires: [] as const,
   sideEffects: { kind: "none" },
   confidence: { mode: "none" },
-  run: async (i: unknown) => ({ ok: true, value: i } as any),
+  run: async (i: unknown) => ({ ok: true, value: i }),
   ...(opts?.humanReview ? { humanReview: { prompt: nonEmptyString(opts.humanReview.prompt) } } : {}),
 });
 
@@ -34,35 +35,6 @@ const mkEdge = (from: string, to: string): EdgeDef => ({
   to: N(to),
   kind: "unconditional",
 });
-
-const mkCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext => {
-  const dag = overrides.dag ?? ({ id: D("test"), nodes: [], edges: [], outputNodeId: undefined } as unknown as DagDef);
-  return {
-    waves: overrides.waves ?? [],
-    outputs: overrides.outputs ?? new Map(),
-    retries: overrides.retries ?? new Map(),
-    initialInput: null,
-    activeNodeIds: overrides.activeNodeIds ?? new Set(),
-    dag,
-    incomingByNode: overrides.incomingByNode ?? new Map(),
-    outgoingByNode: overrides.outgoingByNode ?? new Map(),
-    unconditionalAdj: overrides.unconditionalAdj ?? new Map(),
-    nodeById: overrides.nodeById ?? new Map(),
-    retryConfigs: overrides.retryConfigs ?? new Map(),
-    outputNodeId: dag.outputNodeId,
-    defaultRetryLimit: dag.defaultRetryLimit,
-    retryLimits: dag.retryLimits,
-    humanReviewNodeIds: overrides.humanReviewNodeIds ?? new Set(
-      (dag.nodes ?? []).filter((n) => n.humanReview !== undefined).map((n) => n.id),
-    ),
-    humanReviewPrompts: overrides.humanReviewPrompts ?? new Map(
-      (dag.nodes ?? []).filter((n) => n.humanReview !== undefined).map((n) => [n.id, n.humanReview!.prompt] as const),
-    ),
-    edges: dag.edges ?? [],
-    confidenceByNode: new Map(),
-    ...overrides,
-  };
-};
 
 // ---------------------------------------------------------------------------
 // activeWaveNodes

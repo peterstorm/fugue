@@ -36,10 +36,35 @@
 import type { CapabilityHandle } from "@fuguejs/framework";
 import type { MsGraphAdapterConfig } from "@fuguejs/ms-graph";
 import type { HostConfig } from "../domain/config.js";
-import { createMsGraphTokenProvider } from "./ms-graph-token.js";
+import {
+  createMsGraphTokenProvider as createDefaultMsGraphTokenProvider,
+  type MsGraphTokenProviderConfig,
+} from "./ms-graph-token.js";
+
+interface MsGraphAdapterFactories {
+  readonly createMsGraphAdapter: (
+    config: MsGraphAdapterConfig,
+  ) => CapabilityHandle<"documents">;
+  readonly createPathResolvingMsGraphAdapter: (
+    config: MsGraphAdapterConfig,
+  ) => CapabilityHandle<"documents">;
+}
+
+export interface DocumentsCapabilitySeams {
+  readonly createTokenProvider: (
+    config: MsGraphTokenProviderConfig,
+  ) => () => Promise<string>;
+  readonly loadMsGraphAdapters: () => Promise<MsGraphAdapterFactories>;
+}
+
+const defaultDocumentsCapabilitySeams: DocumentsCapabilitySeams = {
+  createTokenProvider: createDefaultMsGraphTokenProvider,
+  loadMsGraphAdapters: async () => import("@fuguejs/ms-graph"),
+};
 
 export const buildDocumentsCapability = async (
   config: HostConfig,
+  seams: DocumentsCapabilitySeams = defaultDocumentsCapabilitySeams,
 ): Promise<CapabilityHandle<"documents"> | undefined> => {
   if (config.DOCUMENTS_ADAPTER === "fs") {
     const { createFsAdapter } = await import("@fuguejs/fs");
@@ -50,7 +75,7 @@ export const buildDocumentsCapability = async (
   if (config.DOCUMENTS_ADAPTER === "ms-graph") {
     // Config validation (superRefine) guarantees the three MSGRAPH_* credentials.
     const graphBaseUrl = config.MSGRAPH_BASE_URL;
-    const getAccessToken = createMsGraphTokenProvider({
+    const getAccessToken = seams.createTokenProvider({
       tenantId: config.MSGRAPH_TENANT_ID!,
       clientId: config.MSGRAPH_CLIENT_ID!,
       clientSecret: config.MSGRAPH_CLIENT_SECRET!,
@@ -74,7 +99,8 @@ export const buildDocumentsCapability = async (
 
     // Dynamic import mirrors the @fuguejs/fs / ioredis pattern — the adapter
     // package loads only when configured.
-    const { createMsGraphAdapter, createPathResolvingMsGraphAdapter } = await import("@fuguejs/ms-graph");
+    const { createMsGraphAdapter, createPathResolvingMsGraphAdapter } =
+      await seams.loadMsGraphAdapters();
     // Opt-in (default false): standard tenants keep the stock adapter's
     // documented item-path URL shape; the path-resolving wrapper is for the
     // tenant class in peterstorm/fugue#36.

@@ -104,6 +104,30 @@ describe("InMemoryCheckpointer — hostile-value totality", () => {
     if (!result.ok) expect(result.error.kind).toBe("cache-error");
   });
 
+  test.each([-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    "setMeta rejects invalid nodeCount %s before in-memory storage",
+    async (nodeCount) => {
+      const cp = new InMemoryCheckpointer();
+      const result = await cp.setMeta(R("invalid-node-count"), {
+        dagId: D("d"),
+        startedAt: new Date("2025-01-01T00:00:00Z"),
+        nodeCount,
+      });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error).toMatchObject({
+          kind: "cache-error",
+          operation: "checkpoint:setMeta",
+          failureClass: "permanent",
+        });
+        if (result.error.kind === "cache-error") {
+          expect(result.error.message).toContain("nodeCount must be a non-negative safe integer");
+        }
+      }
+    },
+  );
+
   test("load refuses undetachable stored state (smuggled via the raw bypass) with typed checkpoint-corrupt", async () => {
     const store = new Map<string, InMemoryStoredMeta>();
     const cp = new InMemoryCheckpointer({ testStore: store });

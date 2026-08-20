@@ -9,6 +9,7 @@ import type { SynthesisOutput } from "../../schemas/summary.js";
 import type { ExtractionResult } from "./extract-features.js";
 
 const InputSchema = z.object({
+  $input: z.object({ customerId: z.string().min(1) }),
   "extract-features": z.object({ branch: z.string() }).passthrough(),
   "grounding-guardrail": z.object({
     kind: z.enum(["skipped", "validated"]),
@@ -20,16 +21,18 @@ const InputSchema = z.object({
 });
 
 interface AssembleInput {
+  readonly $input: { readonly customerId: string };
   readonly "extract-features": ExtractionResult;
   readonly "grounding-guardrail": GuardrailResult<SynthesisOutput> | undefined;
 }
 
-export const createAssembleResponseNode = (customerId: string) =>
+export const createAssembleResponseNode = () =>
   createTransformNode<AssembleInput, SummaryResponse>({
     id: "assemble-response",
     inputSchema: InputSchema as z.ZodType<AssembleInput>,
     outputSchema: SummaryResponseSchema as z.ZodType<SummaryResponse>,
     transform: (input): Result<SummaryResponse, FrameworkError> => {
+      const customerId = input.$input.customerId;
       const extraction = input["extract-features"];
 
       return match(extraction)
