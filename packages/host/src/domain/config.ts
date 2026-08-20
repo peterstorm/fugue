@@ -56,6 +56,29 @@ const credentialEndpointIssue = (raw: string): CredentialEndpointIssue => {
   }
 };
 
+/** Parse an optional JSON-object env value once, with field-owned diagnostics. */
+const jsonObjectEnv = <T>(
+  schema: z.ZodType<T>,
+  invalidJsonMessage: string,
+  invalidShapeMessage: string,
+) => z.string().optional().transform((raw, ctx): T => {
+  let parsed: unknown = {};
+  if (raw !== undefined && raw.trim() !== "") {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      ctx.addIssue({ code: "custom", message: invalidJsonMessage });
+      return z.NEVER;
+    }
+  }
+  const shape = schema.safeParse(parsed);
+  if (!shape.success) {
+    ctx.addIssue({ code: "custom", message: invalidShapeMessage });
+    return z.NEVER;
+  }
+  return shape.data;
+});
+
 // ---------------------------------------------------------------------------
 // Host Config — parsed from environment variables
 // ---------------------------------------------------------------------------
@@ -154,43 +177,29 @@ export const HostConfigSchema = z.object({
    * fail-closed gate looks up here. They are NOT DAG ids — the dagId→client
    * placeholder identity is gone.
    */
-  AGENT_CLIENT_SCOPES: z
-    .string()
-    .optional()
-    .transform((raw, ctx): Readonly<Record<string, readonly string[]>> => {
-      if (raw === undefined || raw.trim() === "") return {};
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        ctx.addIssue({ code: "custom", message: "AGENT_CLIENT_SCOPES must be valid JSON" });
-        return z.NEVER;
+  AGENT_CLIENT_SCOPES: jsonObjectEnv(
+    z.record(z.string(), z.array(z.string())),
+    "AGENT_CLIENT_SCOPES must be valid JSON",
+    "AGENT_CLIENT_SCOPES must be a JSON object of clientId → string[]",
+  ).transform((scopesByClient, ctx): Readonly<Record<string, readonly string[]>> => {
+    // Validate every scope NAME, not just the JSON shape: a typo'd scope
+    // (`msgrpah:mail.send`) otherwise passes boot and then fail-closes EVERY
+    // mint for that client at runtime.
+    const badScopes: string[] = [];
+    for (const [clientId, scopes] of Object.entries(scopesByClient)) {
+      for (const scope of scopes) {
+        if (parseScope(scope) === undefined) badScopes.push(`${clientId} → "${scope}"`);
       }
-      const shape = z.record(z.string(), z.array(z.string())).safeParse(parsed);
-      if (!shape.success) {
-        ctx.addIssue({ code: "custom", message: "AGENT_CLIENT_SCOPES must be a JSON object of clientId → string[]" });
-        return z.NEVER;
-      }
-      // Validate every scope NAME, not just the JSON shape: a typo'd scope
-      // (`msgrpah:mail.send`) otherwise passes boot and then fail-closes EVERY
-      // mint for that client at runtime — contradicting the "fails at boot, never
-      // at runtime" contract. Reject unparseable scope names here so the defect
-      // surfaces at startup.
-      const badScopes: string[] = [];
-      for (const [clientId, scopes] of Object.entries(shape.data)) {
-        for (const scope of scopes) {
-          if (parseScope(scope) === undefined) badScopes.push(`${clientId} → "${scope}"`);
-        }
-      }
-      if (badScopes.length > 0) {
-        ctx.addIssue({
-          code: "custom",
-          message: `AGENT_CLIENT_SCOPES contains unrecognised scope name(s): ${badScopes.join(", ")} (expected "<provider>:<operation>", e.g. "msgraph:mail.send")`,
-        });
-        return z.NEVER;
-      }
-      return shape.data;
-    }),
+    }
+    if (badScopes.length > 0) {
+      ctx.addIssue({
+        code: "custom",
+        message: `AGENT_CLIENT_SCOPES contains unrecognised scope name(s): ${badScopes.join(", ")} (expected "<provider>:<operation>", e.g. "msgraph:mail.send")`,
+      });
+      return z.NEVER;
+    }
+    return scopesByClient;
+  }),
   /**
    * The DAG-id → REAL Keycloak agent-type client-id map (FR-040 (keycloak-entra-wiring), ADR-0056
    * Variant A: one service-account client per agent TYPE). A JSON object mapping
@@ -207,28 +216,11 @@ export const HostConfigSchema = z.object({
    * Parsed/validated here (Zod) so a malformed map fails at BOOT, never at
    * runtime. The value is `Readonly<Record<string, string>>`.
    */
-  AGENT_CLIENT_MAP: z
-    .string()
-    .optional()
-    .transform((raw, ctx): Readonly<Record<string, string>> => {
-      if (raw === undefined || raw.trim() === "") return {};
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        ctx.addIssue({ code: "custom", message: "AGENT_CLIENT_MAP must be valid JSON" });
-        return z.NEVER;
-      }
-      const shape = z.record(z.string(), z.string().min(1)).safeParse(parsed);
-      if (!shape.success) {
-        ctx.addIssue({
-          code: "custom",
-          message: "AGENT_CLIENT_MAP must be a JSON object of dagId → non-empty Keycloak client id",
-        });
-        return z.NEVER;
-      }
-      return shape.data;
-    }),
+  AGENT_CLIENT_MAP: jsonObjectEnv(
+    z.record(z.string(), z.string().min(1)),
+    "AGENT_CLIENT_MAP must be valid JSON",
+    "AGENT_CLIENT_MAP must be a JSON object of dagId → non-empty Keycloak client id",
+  ),
   // ── Entra / Keycloak agent-client wiring (Phase 0 — config-presence gating) ──
   /**
    * Microsoft Entra (Azure AD) tenant id the host's workload-identity-federation
@@ -271,34 +263,14 @@ export const HostConfigSchema = z.object({
    * map; a lookup miss returns `undefined` (fail-closed, FR-004) so an unknown
    * agent client never triggers egress.
    */
-  KEYCLOAK_AGENT_CLIENT_CREDENTIALS: z
-    .string()
-    .optional()
-    .transform((raw, ctx): Readonly<Record<string, KeycloakClientCredentialConfig>> => {
-      if (raw === undefined || raw.trim() === "") return {};
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        ctx.addIssue({ code: "custom", message: "KEYCLOAK_AGENT_CLIENT_CREDENTIALS must be valid JSON" });
-        return z.NEVER;
-      }
-      const shape = z
-        .record(
-          z.string(),
-          z.object({ clientId: z.string().min(1), clientSecret: z.string().min(1) }).strict(),
-        )
-        .safeParse(parsed);
-      if (!shape.success) {
-        ctx.addIssue({
-          code: "custom",
-          message:
-            "KEYCLOAK_AGENT_CLIENT_CREDENTIALS must be a JSON object of agentClientId → { clientId, clientSecret } (non-empty strings)",
-        });
-        return z.NEVER;
-      }
-      return shape.data;
-    }),
+  KEYCLOAK_AGENT_CLIENT_CREDENTIALS: jsonObjectEnv(
+    z.record(
+      z.string(),
+      z.object({ clientId: z.string().min(1), clientSecret: z.string().min(1) }).strict(),
+    ),
+    "KEYCLOAK_AGENT_CLIENT_CREDENTIALS must be valid JSON",
+    "KEYCLOAK_AGENT_CLIENT_CREDENTIALS must be a JSON object of agentClientId → { clientId, clientSecret } (non-empty strings)",
+  ),
   /**
    * The Dynamics 365 organization host the host's `dynamics:*` capabilities read
    * from (e.g. `org.crm4.dynamics.com`), used to build the per-org Graph/Dataverse
@@ -360,28 +332,11 @@ export const HostConfigSchema = z.object({
    * Teams click is refused until approvers are mapped. Parsed/validated here so a
    * malformed map fails at boot, never at runtime.
    */
-  HITL_APPROVER_TEAMS: z
-    .string()
-    .optional()
-    .transform((raw, ctx): Readonly<Record<string, readonly string[]>> => {
-      if (raw === undefined || raw.trim() === "") return {};
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        ctx.addIssue({ code: "custom", message: "HITL_APPROVER_TEAMS must be valid JSON" });
-        return z.NEVER;
-      }
-      const shape = z.record(z.string(), z.array(z.string())).safeParse(parsed);
-      if (!shape.success) {
-        ctx.addIssue({
-          code: "custom",
-          message: "HITL_APPROVER_TEAMS must be a JSON object of aadObjectId → string[] (team ids)",
-        });
-        return z.NEVER;
-      }
-      return shape.data;
-    }),
+  HITL_APPROVER_TEAMS: jsonObjectEnv(
+    z.record(z.string(), z.array(z.string())),
+    "HITL_APPROVER_TEAMS must be valid JSON",
+    "HITL_APPROVER_TEAMS must be a JSON object of aadObjectId → string[] (team ids)",
+  ),
   /**
    * Per-team CHANNEL routing for the in-Teams (Bot Framework) transport
    * (FR-041 (keycloak-entra-wiring), US5), as a JSON object mapping a Teams team's
@@ -401,28 +356,11 @@ export const HostConfigSchema = z.object({
    * default channel. Absent/empty → `{}`. Parsed/validated here so a malformed
    * map fails at boot, never at runtime.
    */
-  HITL_TEAM_CHANNELS: z
-    .string()
-    .optional()
-    .transform((raw, ctx): Readonly<Record<string, string>> => {
-      if (raw === undefined || raw.trim() === "") return {};
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        ctx.addIssue({ code: "custom", message: "HITL_TEAM_CHANNELS must be valid JSON" });
-        return z.NEVER;
-      }
-      const shape = z.record(z.string(), z.string().min(1)).safeParse(parsed);
-      if (!shape.success) {
-        ctx.addIssue({
-          code: "custom",
-          message: "HITL_TEAM_CHANNELS must be a JSON object of aadGroupId → non-empty fugue team id",
-        });
-        return z.NEVER;
-      }
-      return shape.data;
-    }),
+  HITL_TEAM_CHANNELS: jsonObjectEnv(
+    z.record(z.string(), z.string().min(1)),
+    "HITL_TEAM_CHANNELS must be valid JSON",
+    "HITL_TEAM_CHANNELS must be a JSON object of aadGroupId → non-empty fugue team id",
+  ),
   /** MLflow tracking server URI */
   MLFLOW_TRACKING_URI: z.string().optional(),
   /** MLflow experiment ID */

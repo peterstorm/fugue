@@ -46,6 +46,20 @@ export const outputPreview = (output: unknown): string => {
   return s.length > 4000 ? `${s.slice(0, 4000)}\n… (truncated)` : s;
 };
 
+/** Common review content; transports append only their interaction controls. */
+export const reviewCardBody = (n: ReviewNotification): readonly unknown[] => [
+  { type: "TextBlock", size: "Large", weight: "Bolder", text: "Human review required" },
+  {
+    type: "TextBlock",
+    isSubtle: true,
+    wrap: true,
+    text: `DAG \`${n.dagId}\` · node \`${n.nodeId}\` · run \`${n.runId}\``,
+  },
+  { type: "TextBlock", wrap: true, text: n.prompt },
+  { type: "TextBlock", weight: "Bolder", text: "Output under review:" },
+  { type: "TextBlock", wrap: true, fontType: "Monospace", text: outputPreview(n.output) },
+];
+
 /**
  * Build the Adaptive Card CONTENT for a parked review. Two `Action.Execute`
  * buttons (Approve / Reject) tagged with `REVIEW_VERB` + the gate identity, and
@@ -56,16 +70,7 @@ export const buildReviewCard = (n: ReviewNotification): unknown => ({
   type: "AdaptiveCard",
   version: "1.4",
   body: [
-    { type: "TextBlock", size: "Large", weight: "Bolder", text: "Human review required" },
-    {
-      type: "TextBlock",
-      isSubtle: true,
-      wrap: true,
-      text: `DAG \`${n.dagId}\` · node \`${n.nodeId}\` · run \`${n.runId}\``,
-    },
-    { type: "TextBlock", wrap: true, text: n.prompt },
-    { type: "TextBlock", weight: "Bolder", text: "Output under review:" },
-    { type: "TextBlock", wrap: true, fontType: "Monospace", text: outputPreview(n.output) },
+    ...reviewCardBody(n),
     { type: "Input.Text", id: "reason", isMultiline: true, placeholder: "Reason (required to reject)" },
   ],
   actions: [

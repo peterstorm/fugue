@@ -12,7 +12,6 @@
 
 import { Hono } from "hono";
 import type { HostState } from "../domain/host-state.js";
-import { canServeRequests } from "../domain/host-state.js";
 import { createErrorHandler } from "./middleware/error-handler.js";
 import { createAuthMiddleware } from "./middleware/auth.js";
 import type { AuthMiddlewareDeps } from "./middleware/auth.js";
@@ -25,7 +24,7 @@ import { createGetRunHandler, createApproveRunHandler } from "./handlers/runs.js
 import { createCreateTeamHandler, createListTeamsHandler, createRevokeTeamHandler } from "./handlers/admin/teams.js";
 import type { AdminHandlerDeps } from "./handlers/admin/teams.js";
 import type { LogPort } from "../ports.js";
-import { errorResponse } from "./response.js";
+import { errorResponse, hostUnavailableResponse } from "./response.js";
 
 import type { HostEnv } from "./env.js";
 
@@ -144,11 +143,8 @@ export const createRouter = (deps: RouterDeps): Hono<HostEnv> => {
   const runDagByRouteHandler = createRunDagHandler(deps, (c) => routeOf(c));
   app.post("*", async (c) => {
     const state = c.get("hostState");
-    if (!canServeRequests(state)) {
-      return errorResponse(c, 503, "host-unavailable", `Host is ${state.phase} — not accepting requests`, {
-        details: { phase: state.phase },
-      });
-    }
+    const unavailable = hostUnavailableResponse(c, state);
+    if (unavailable) return unavailable;
     if (routeOf(c) === "") {
       return errorResponse(c, 404, "not-found", `No DAG is registered at route '${c.req.path}'`);
     }

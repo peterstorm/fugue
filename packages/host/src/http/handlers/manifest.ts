@@ -16,9 +16,9 @@ import { tryDagId, buildDescribedDag, formatFrameworkError } from "@fuguejs/fram
 import type { HostEnv } from "../env.js";
 import type { LogPort } from "../../ports.js";
 import { authorizeDagAccess } from "./dag-access.js";
-import { errorResponse } from "../response.js";
+import { errorResponse, hostUnavailableResponse } from "../response.js";
 import type { DagManifestResponse } from "../response.js";
-import { canServeRequests, getRegistry } from "../../domain/host-state.js";
+import { getRegistry } from "../../domain/host-state.js";
 import { lookupDag } from "../../domain/registry.js";
 import type { RegisteredDag } from "../../domain/registry.js";
 
@@ -110,11 +110,8 @@ const assembleManifest = (
   const dagId = dagIdResult.value;
 
   const hostState = c.get("hostState");
-  if (!canServeRequests(hostState)) {
-    return errorResponse(c, 503, "host-unavailable", `Host is ${hostState.phase} — not accepting requests`, {
-      details: { phase: hostState.phase },
-    });
-  }
+  const unavailable = hostUnavailableResponse(c, hostState);
+  if (unavailable) return unavailable;
 
   // `canServeRequests` only returns true in phases that carry a registry, so
   // `getRegistry` must be defined here. Treat the absence as the framework

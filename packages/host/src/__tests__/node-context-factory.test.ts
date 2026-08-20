@@ -2,7 +2,7 @@
  * Unit tests for node-context-factory.ts
  *
  * Tests resolveTtl, createNamespacedCache (error degradation, corrupted JSON),
- * and createNamespacedCheckpointWriter (best-effort writes).
+ * and createNamespacedCheckpointWriter (durability failures reject).
  */
 
 import { describe, it, expect } from "bun:test";
@@ -290,24 +290,38 @@ describe("createNamespacedCheckpointWriter", () => {
     expect(store.get(expectedKey)).toBe(JSON.stringify({ output: "done" }));
   });
 
-  it("best-effort — does not throw on Redis failure", async () => {
+  it("rejects on Redis failure so runDag can surface checkpoint-write-failed", async () => {
     const { logger, logs } = collectLogs();
     const writer = createNamespacedCheckpointWriter(failingRedis(), testTenant, testDagId, testRunId, undefined, logger);
 
-    // Should not throw
-    await writer.write(testRunId, testNodeId, { data: 1 });
+    await expect(writer.write(testRunId, testNodeId, { data: 1 })).rejects.toThrow(/Checkpoint write failed/);
     expect(logs.some(l => l.msg.includes("Checkpoint write failed"))).toBe(true);
   });
 
-  it("handles non-serializable values gracefully", async () => {
+  it.each([
+    ["cyclic", (() => { const value: Record<string, unknown> = {}; value.self = value; return value; })()],
+    ["undefined", undefined],
+    ["BigInt", { amount: 1n }],
+  ])("rejects a %s checkpoint value as non-serializable", async (_label, value) => {
     const { redis } = createMockRedis();
     const { logger, logs } = collectLogs();
     const writer = createNamespacedCheckpointWriter(redis, testTenant, testDagId, testRunId, undefined, logger);
 
-    const circular: Record<string, unknown> = {};
-    circular.self = circular;
-    await writer.write(testRunId, testNodeId, circular);
+    await expect(writer.write(testRunId, testNodeId, value)).rejects.toThrow(/not serializable/);
     expect(logs.some(l => l.msg.includes("not serializable"))).toBe(true);
+  });
+
+  it("preserves the checkpoint failure when the logger throws", async () => {
+    const throwingLogger: LogPort = {
+      info: () => {},
+      warn: () => { throw new Error("logger failed"); },
+      error: () => { throw new Error("logger failed"); },
+    };
+    const writer = createNamespacedCheckpointWriter(
+      failingRedis(), testTenant, testDagId, testRunId, undefined, throwingLogger,
+    );
+
+    await expect(writer.write(testRunId, testNodeId, { data: 1 })).rejects.toThrow(/Checkpoint write failed/);
   });
 });
 

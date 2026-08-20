@@ -7,6 +7,8 @@
 
 import type { Context } from "hono";
 import type { DescribedDag } from "@fuguejs/framework";
+import type { HostState } from "../domain/host-state.js";
+import { canServeRequests } from "../domain/host-state.js";
 
 // ---------------------------------------------------------------------------
 // Response Types
@@ -105,6 +107,14 @@ export const errorResponse = (
 
   return jsonWithStatus(c, body, status);
 };
+
+/** Return the canonical 503 response when the host lifecycle cannot serve. */
+export const hostUnavailableResponse = (c: Context, state: HostState): Response | null =>
+  canServeRequests(state)
+    ? null
+    : errorResponse(c, 503, "host-unavailable", `Host is ${state.phase} — not accepting requests`, {
+        details: { phase: state.phase },
+      });
 
 export const successResponse = <T>(
   c: Context,

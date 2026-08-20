@@ -22,7 +22,7 @@ import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import type { HumanReviewNotifierPort } from "../ports.js";
 import type { ReviewNotification } from "../types.js";
-import { outputPreview } from "./bot/card.js";
+import { reviewCardBody } from "./bot/card.js";
 
 /** A minimal JSON POST transport — injected so the notifier is fakeable. */
 export interface WebhookHttp {
@@ -55,14 +55,6 @@ export const buildAdaptiveCardPayload = (
   approvalBaseUrl: string,
 ): unknown => {
   const link = approvalUrl(approvalBaseUrl, notification.runId);
-  // A compact, valid preview of the output under review — the SHARED total
-  // renderer (bot/card.ts `outputPreview`): a catch fallback that calls
-  // `String()` itself can throw on a null-prototype output or a hostile
-  // toString/Symbol.toPrimitive, escaping `notify`'s Result boundary as a raw
-  // rejection and escalating a parked run to a retriable node-failed. The
-  // helper also bounds the preview so a large output can't bloat the card.
-  const preview = outputPreview(notification.output);
-
   return {
     type: "message",
     attachments: [
@@ -72,18 +64,7 @@ export const buildAdaptiveCardPayload = (
           $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
           type: "AdaptiveCard",
           version: "1.4",
-          body: [
-            { type: "TextBlock", size: "Large", weight: "Bolder", text: "Human review required" },
-            {
-              type: "TextBlock",
-              isSubtle: true,
-              wrap: true,
-              text: `DAG \`${notification.dagId}\` · node \`${notification.nodeId}\` · run \`${notification.runId}\``,
-            },
-            { type: "TextBlock", wrap: true, text: notification.prompt },
-            { type: "TextBlock", weight: "Bolder", text: "Output under review:" },
-            { type: "TextBlock", wrap: true, fontType: "Monospace", text: preview },
-          ],
+          body: reviewCardBody(notification),
           actions: [{ type: "Action.OpenUrl", title: "Review", url: link }],
         },
       },

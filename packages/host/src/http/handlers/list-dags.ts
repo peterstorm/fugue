@@ -12,9 +12,9 @@
 
 import type { Context } from "hono";
 import type { HostEnv } from "../env.js";
-import { dagListResponse } from "../response.js";
+import { dagListResponse, hostUnavailableResponse } from "../response.js";
 import type { DagListItem } from "../response.js";
-import { canServeRequests, getRegistry } from "../../domain/host-state.js";
+import { getRegistry } from "../../domain/host-state.js";
 import { errorResponse } from "../response.js";
 import type { AuthIdentity } from "../../domain/auth.js";
 import { canAccessDag } from "../../domain/auth.js";
@@ -27,11 +27,8 @@ import { canAccessDag } from "../../domain/auth.js";
 export const listDagsHandler = (c: Context<HostEnv>): Response => {
   const hostState = c.get("hostState");
 
-  if (!canServeRequests(hostState)) {
-    return errorResponse(c, 503, "host-unavailable", `Host is ${hostState.phase} — not accepting requests`, {
-      details: { phase: hostState.phase },
-    });
-  }
+  const unavailable = hostUnavailableResponse(c, hostState);
+  if (unavailable) return unavailable;
 
   const identity = c.get("authIdentity") as AuthIdentity | undefined;
   if (!identity) {

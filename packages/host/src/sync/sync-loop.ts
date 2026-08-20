@@ -17,7 +17,8 @@
  * @satisfies FR-005 — Run bun install if the lockfile (bun.lock / bun.lockb) changed between commits
  * @satisfies FR-002 — Discover DAGs by scanning dags/{team}/{name}/dag.ts convention
  * @satisfies FR-003 — Dynamically import discovered DAG modules with SHA cache-busting
- * @satisfies NFR-003 — Git sync detection MUST complete within poll interval + 5s (individual ops timeout at 30s; overall cycle timeout TBD — tracked for future enforcement)
+ * LIMITATION: Git operations have individual timeouts, but the sync cycle has no
+ * enclosing deadline and therefore does not yet satisfy NFR-003's poll interval + 5s bound.
  * @satisfies NFR-010 — Failing DAG import MUST NOT affect other registered DAGs
  */
 

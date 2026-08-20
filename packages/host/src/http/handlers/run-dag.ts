@@ -17,10 +17,10 @@ import type { HostEnv } from "../env.js";
 import type { NodeContextForDag } from "../../domain/run-context.js";
 import type { AuthIdentity } from "../../domain/auth.js";
 import { authorizeDagAccess } from "./dag-access.js";
-import { errorResponse, successResponse } from "../response.js";
+import { errorResponse, hostUnavailableResponse, successResponse } from "../response.js";
 import type { HostError } from "../../domain/host-error.js";
 import { formatHostError, httpStatusFor } from "../../domain/host-error.js";
-import { canServeRequests, getRegistry } from "../../domain/host-state.js";
+import { getRegistry } from "../../domain/host-state.js";
 import { lookupDag } from "../../domain/registry.js";
 import type { RegisteredDag } from "../../domain/registry.js";
 import { acquire, release } from "../../domain/concurrency.js";
@@ -98,11 +98,8 @@ export const createRunDagHandler = (
     const hostState = c.get("hostState");
 
     // 1. Reject if host cannot serve requests (booting, draining, stopped)
-    if (!canServeRequests(hostState)) {
-      return errorResponse(c, 503, "host-unavailable", `Host is ${hostState.phase} — not accepting requests`, {
-        details: { phase: hostState.phase },
-      });
-    }
+    const unavailable = hostUnavailableResponse(c, hostState);
+    if (unavailable) return unavailable;
 
     const registry = getRegistry(hostState);
     if (!registry) {

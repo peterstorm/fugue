@@ -285,12 +285,12 @@ const sendOnce = async <T>(
 
     // Our OWN timeout → transient: a slow endpoint should be retried.
     if (abort === "timeout") {
-      return { tag: "error", error: makeTransientError(`HTTP request timed out after ${timeoutMs}ms: ${method} ${fullUrl}`) };
+      return { tag: "error", error: makeTransientError(`HTTP request timed out after ${timeoutMs}ms: ${method} ${target.label}`) };
     }
     // A non-timeout abort means the caller/node cancelled this request →
     // non-retriable node-crash: auto-retrying cancelled work defeats the cancel.
     if (abort === "abort") {
-      return { tag: "error", error: makeNodeCrashError(`HTTP request cancelled: ${method} ${fullUrl}`) };
+      return { tag: "error", error: makeNodeCrashError(`HTTP request cancelled: ${method} ${target.label}`) };
     }
     return {
       tag: "error",
@@ -336,7 +336,7 @@ const execute = async <T>(
   if (retry.tag === "error") return err(retry.error);
   // A second consecutive 401 — surface as a non-retriable auth failure rather
   // than looping. The credentials/token are not included (NFR-010).
-  return err(makeNodeCrashError(`Authentication failed after token refresh: ${method} ${path} returned 401`));
+  return err(makeNodeCrashError(`Authentication failed after token refresh: ${method} ${target.value.label} returned 401`));
 };
 
 // ---------------------------------------------------------------------------

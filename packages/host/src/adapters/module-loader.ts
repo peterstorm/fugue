@@ -149,12 +149,15 @@ export const loadDagModule = async (
     }
   }
 
-  // Load prompts from sibling prompts/ directory (best-effort)
+  // Load prompts from the sibling directory. Only an absent directory is optional;
+  // a discovered-but-unreadable asset fails this DAG load with its real cause.
   const promptErrorHandler = onPromptError ?? ((path: string, e: unknown) => {
     // Fallback when no logger injected — prompt errors still surfaced, just via console
     console.warn(`[module-loader] Failed to read prompt file '${path}': ${e instanceof Error ? e.message : String(e)}`);
   });
-  const prompts = await loadPromptsForModule(modulePath, promptErrorHandler);
+  const promptsResult = await loadPromptsForModule(modulePath, promptErrorHandler);
+  if (!promptsResult.ok) return promptsResult;
+  const prompts = promptsResult.value;
 
   // Opt-in prompt versioning: when prompts/registry.json exists, every prompt
   // must match its registered hash. Fail-closed per DAG (NFR-010): an edited-
@@ -256,45 +259,46 @@ const validatePromptRegistry = async (
 
 /**
  * Load all .txt files from a prompts/ directory colocated with the DAG module.
- * Returns an empty Map if no prompts directory exists.
- * Best-effort: individual file failures are logged but don't block loading.
+ * Returns `ok(emptyMap)` only when the directory is absent. Any other directory
+ * or file read failure is a typed deployment error so a partial prompt set can
+ * never register and later masquerade as `prompt-not-found`.
  */
 export const loadPromptsForModule = async (
   modulePath: string,
   onFileError?: (path: string, error: unknown) => void,
-): Promise<ReadonlyMap<string, string>> => {
-  const dagDir = dirname(modulePath);
-  const promptsDir = join(dagDir, "prompts");
+): Promise<Result<ReadonlyMap<string, string>, HostError>> => {
+  const promptsDir = join(dirname(modulePath), "prompts");
   const map = new Map<string, string>();
+  const readFailure = (path: string, error: unknown): Result<ReadonlyMap<string, string>, HostError> => {
+    reportPromptError(onFileError, path, error);
+    return err({
+      kind: "config-invalid",
+      message: `Cannot read prompt asset ${path}: ${error instanceof Error ? error.message : String(error)}`,
+    });
+  };
 
+  let entries: string[];
   try {
-    const entries = await readdir(promptsDir);
-    for (const entry of entries) {
-      if (!entry.endsWith(".txt")) continue;
-      const filePath = join(promptsDir, entry);
-      try {
-        const text = await readFile(filePath, "utf-8");
-        const name = entry.slice(0, -4); // strip .txt
-        map.set(name, text);
-      } catch (e) {
-        // Prompt file exists but can't be read — DAG will fail at runtime
-        // with "prompt-not-found". Log so operators can diagnose.
-        reportPromptError(onFileError, filePath, e);
-      }
-    }
+    entries = await readdir(promptsDir);
   } catch (e) {
-    // Absence is ENOENT ONLY — a bare catch would swallow EACCES/ENOTDIR/
-    // ELOOP/EMFILE and misreport a permission-broken prompts dir as "no
-    // prompts", deferring the failure to a misattributed runtime
-    // prompt-not-found (parity with validatePromptRegistry's non-ENOENT
-    // hard-error handling and the per-file onFileError logging above).
     const probe = probeErrorCode(e);
-    if (probe.kind !== "code" || probe.code !== "ENOENT") {
-      reportPromptError(onFileError, promptsDir, e);
+    return probe.kind === "code" && probe.code === "ENOENT"
+      ? ok(map)
+      : readFailure(promptsDir, e);
+  }
+
+  for (const entry of entries) {
+    if (!entry.endsWith(".txt")) continue;
+    const filePath = join(promptsDir, entry);
+    try {
+      const text = await readFile(filePath, "utf-8");
+      map.set(entry.slice(0, -4), text);
+    } catch (e) {
+      return readFailure(filePath, e);
     }
   }
 
-  return map;
+  return ok(map);
 };
 
 /**

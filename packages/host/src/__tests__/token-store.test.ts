@@ -152,8 +152,9 @@ describe("token store — tenant key namespacing (SECURITY: AD-4 / US2 / SC-001)
     const storeB = createRedisTokenStore(redis, OTHER_TENANT, noopLogger);
 
     // Identical logical inputs (same team name, same token hash, same grant).
-    const ra = await storeA.store("shared-team", hash1, grant1);
-    const rb = await storeB.store("shared-team", hash1, grant1);
+    const sharedGrant: TokenGrant = { ...grant1, team: "shared-team" };
+    const ra = await storeA.store("shared-team", hash1, sharedGrant);
+    const rb = await storeB.store("shared-team", hash1, sharedGrant);
 
     // Both succeed — they do NOT clash on the team-claim SETNX, because the keys
     // are namespaced by tenant. A collision would make the second store fail with
@@ -208,8 +209,9 @@ describe("token store — tenant key namespacing (SECURITY: AD-4 / US2 / SC-001)
     const storeA = createRedisTokenStore(redis, TENANT, noopLogger);
     const storeB = createRedisTokenStore(redis, OTHER_TENANT, noopLogger);
 
-    await storeA.store("shared-team", hash1, grant1);
-    await storeB.store("shared-team", hash1, grant1);
+    const sharedGrant: TokenGrant = { ...grant1, team: "shared-team" };
+    await storeA.store("shared-team", hash1, sharedGrant);
+    await storeB.store("shared-team", hash1, sharedGrant);
 
     await storeA.revoke("shared-team");
 
@@ -221,7 +223,7 @@ describe("token store — tenant key namespacing (SECURITY: AD-4 / US2 / SC-001)
 
     const stillB = await storeB.resolve(hash1);
     expect(stillB.ok).toBe(true);
-    if (stillB.ok) expect(stillB.value?.team).toBe("team-a");
+    if (stillB.ok) expect(stillB.value?.team).toBe("shared-team");
   });
 });
 
@@ -526,6 +528,38 @@ describe("createRedisTokenStore", () => {
         expect(result.value).toBeNull();
       }
     });
+
+    it.each([
+      ["missing grant fields", JSON.stringify({ team: "team-a" })],
+      ["non-canonical team", JSON.stringify({ ...grant1, team: " Team-A " })],
+      ["non-finite timestamp", JSON.stringify({ ...grant1, createdAt: "NaN" })],
+      ["non-object JSON", JSON.stringify([grant1])],
+    ])("fails closed on a parseable persisted grant with %s", async (_label, persisted) => {
+      const { redis, store } = createFakeRedis();
+      store.set(`fugue:${TENANT}:tokens:${hash1}`, persisted);
+      const tokenStore = createRedisTokenStore(redis, TENANT, noopLogger);
+
+      const result = await tokenStore.resolve(hash1);
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.kind).toBe("redis-unavailable");
+    });
+
+    it("contains a throwing corruption logger and preserves the typed resolve failure", async () => {
+      const { redis, store } = createFakeRedis();
+      store.set(`fugue:${TENANT}:tokens:${hash1}`, "{}");
+      const throwingLogger: LogPort = {
+        info: () => {},
+        warn: () => { throw new Error("warn sink failed"); },
+        error: () => { throw new Error("error sink failed"); },
+      };
+      const tokenStore = createRedisTokenStore(redis, TENANT, throwingLogger);
+
+      const result = await tokenStore.resolve(hash1);
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.kind).toBe("redis-unavailable");
+    });
   });
 
   describe("revoke", () => {
@@ -564,6 +598,29 @@ describe("createRedisTokenStore", () => {
       if (result.ok) {
         expect(result.value).toBeNull();
       }
+    });
+
+    it.each([
+      ["missing hash", JSON.stringify({})],
+      ["missing grant", JSON.stringify({ hash: hash1 })],
+      ["mismatched grant team", JSON.stringify({ hash: hash1, grant: grant2 })],
+    ])("fails closed before deleting anything when the reverse index has %s", async (_label, corruptRecord) => {
+      const { redis, store, sets } = createFakeRedis();
+      const tokenStore = createRedisTokenStore(redis, TENANT, noopLogger);
+      await tokenStore.store("team-a", hash1, grant1);
+      const teamRecordKey = `fugue:${TENANT}:teams:team-a`;
+      const tokenRecordKey = `fugue:${TENANT}:tokens:${hash1}`;
+      store.set(teamRecordKey, corruptRecord);
+
+      const result = await tokenStore.revoke("team-a");
+
+      expect(result.ok).toBe(false);
+      expect(store.has(teamRecordKey)).toBe(true);
+      expect(store.has(tokenRecordKey)).toBe(true);
+      expect(sets.get(`fugue:${TENANT}:teams-index`)?.has("team-a")).toBe(true);
+      const stillResolvable = await tokenStore.resolve(hash1);
+      expect(stillResolvable.ok).toBe(true);
+      if (stillResolvable.ok) expect(stillResolvable.value?.team).toBe("team-a");
     });
   });
 });

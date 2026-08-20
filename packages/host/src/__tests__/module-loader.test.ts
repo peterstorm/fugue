@@ -463,8 +463,8 @@ describe("Module Loader", () => {
         (path) => errors.push(path),
       );
 
-      expect(result.get("good")).toBe("works fine");
-      expect(result.has("broken")).toBe(false);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.kind).toBe("config-invalid");
       expect(errors.length).toBe(1);
       expect(errors[0]).toContain("broken.txt");
 
@@ -472,7 +472,7 @@ describe("Module Loader", () => {
       rmSync(dagDir, { recursive: true });
     });
 
-    it("contains a throwing prompt-error callback and still returns the readable prompts", async () => {
+    it("contains a throwing prompt-error callback and preserves the typed read failure", async () => {
       const { loadPromptsForModule } = await import("../adapters/module-loader.js");
       const dagDir = join(TEST_DIR, "dags", "team-a", "throwing-prompt-callback");
       const promptsDir = join(dagDir, "prompts");
@@ -485,8 +485,8 @@ describe("Module Loader", () => {
           join(dagDir, "dag.ts"),
           () => { throw new Error("diagnostic sink failed"); },
         );
-        expect(result.get("good")).toBe("works fine");
-        expect(result.has("broken")).toBe(false);
+        expect(result.ok).toBe(false);
+        if (!result.ok) expect(result.error.kind).toBe("config-invalid");
       } finally {
         rmSync(dagDir, { recursive: true, force: true });
       }
@@ -516,9 +516,10 @@ describe("Module Loader", () => {
         if (process.getuid?.() === 0) {
           // Root bypasses the permission gate; absence-vs-failure cannot be
           // exercised this way — accept either outcome, but never a throw.
-          expect(result.size).toBeGreaterThanOrEqual(0);
+          expect(result.ok).toBe(true);
         } else {
-          expect(result.size).toBe(0);
+          expect(result.ok).toBe(false);
+          if (!result.ok) expect(result.error.kind).toBe("config-invalid");
           expect(errors.length).toBe(1);
           expect(errors[0]).toContain("prompts");
         }

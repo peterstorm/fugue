@@ -29,7 +29,7 @@
 import { ok, err } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import { redisUnavailable, teamAlreadyExists } from "../domain/host-error.js";
-import { markTeam } from "../domain/auth.js";
+import { canonicalizeTeamName, markTeam } from "../domain/auth.js";
 import type { TokenGrant, TokenHash } from "../domain/auth.js";
 import type { TenantId } from "../domain/cache-keys.js";
 import type { TokenStorePort, RedisPort, LogPort } from "../ports.js";
@@ -58,41 +58,68 @@ interface StoredTeamRecord {
   readonly grant: TokenGrant;
 }
 
-const parseStoredTeamRecord = (json: string): Result<StoredTeamRecord, string> => {
-  let value: unknown;
+/** Diagnostics can never replace the token store's typed Result contract. */
+const reportTokenStore = (
+  logger: LogPort | undefined,
+  level: "warn" | "error",
+  message: string,
+  context: Record<string, unknown>,
+): void => {
   try {
-    value = JSON.parse(json);
+    logger?.[level](message, context);
+  } catch {
+    // The authorization/persistence failure remains authoritative.
+  }
+};
+
+const parseJson = (json: string): Result<unknown, string> => {
+  try {
+    return ok(JSON.parse(json));
   } catch {
     return err("malformed JSON");
   }
+};
+
+/** Parse untrusted persisted bytes into the complete authorization grant. */
+const parseTokenGrant = (value: unknown): Result<TokenGrant, string> => {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return err("record must be an object");
+    return err("grant must be an object");
   }
   const record = value as Record<string, unknown>;
-  const grant = record.grant;
   if (
-    typeof record.hash !== "string" || record.hash.length === 0 ||
-    typeof grant !== "object" || grant === null || Array.isArray(grant)
+    typeof record.team !== "string" ||
+    record.team.length === 0 ||
+    canonicalizeTeamName(record.team) !== record.team ||
+    typeof record.label !== "string" ||
+    typeof record.createdAt !== "number" ||
+    !Number.isFinite(record.createdAt)
   ) {
-    return err("record must contain hash and grant");
-  }
-  const grantRecord = grant as Record<string, unknown>;
-  if (
-    typeof grantRecord.team !== "string" ||
-    typeof grantRecord.label !== "string" ||
-    typeof grantRecord.createdAt !== "number" ||
-    !Number.isFinite(grantRecord.createdAt)
-  ) {
-    return err("grant fields are invalid");
+    return err("grant fields are invalid or the team is not canonical");
   }
   return ok({
-    hash: record.hash,
-    grant: {
-      team: markTeam(grantRecord.team),
-      label: grantRecord.label,
-      createdAt: grantRecord.createdAt,
-    },
+    team: markTeam(record.team),
+    label: record.label,
+    createdAt: record.createdAt,
   });
+};
+
+const parseStoredTokenGrant = (json: string): Result<TokenGrant, string> => {
+  const parsed = parseJson(json);
+  return parsed.ok ? parseTokenGrant(parsed.value) : parsed;
+};
+
+const parseStoredTeamRecord = (json: string): Result<StoredTeamRecord, string> => {
+  const parsed = parseJson(json);
+  if (!parsed.ok) return parsed;
+  if (typeof parsed.value !== "object" || parsed.value === null || Array.isArray(parsed.value)) {
+    return err("record must be an object");
+  }
+  const record = parsed.value as Record<string, unknown>;
+  if (typeof record.hash !== "string" || record.hash.length === 0) {
+    return err("record must contain a non-empty hash");
+  }
+  const grant = parseTokenGrant(record.grant);
+  return grant.ok ? ok({ hash: record.hash, grant: grant.value }) : grant;
 };
 
 // ── In-Memory Adapter (tests) ──────────────────────────────────────────────
@@ -164,15 +191,15 @@ export const createRedisTokenStore = (
         return err(redisUnavailable("token-resolve"));
       }
       if (result.value === null || result.value === "") return ok(null);
-      try {
-        return ok(JSON.parse(result.value) as TokenGrant);
-      } catch (e) {
-        logger?.error("[token-store] Corrupt grant data in Redis", {
+      const parsed = parseStoredTokenGrant(result.value);
+      if (!parsed.ok) {
+        reportTokenStore(logger, "error", "[token-store] Corrupt grant data in Redis", {
           hashPrefix: String(hash).slice(0, 8),
-          error: e instanceof Error ? e.message : String(e),
+          reason: parsed.error,
         });
         return err(redisUnavailable(`token-resolve: corrupt grant data for hash ${String(hash).slice(0, 8)}…`));
       }
+      return ok(parsed.value);
     },
 
     store: async (team, hash, grant) => {
@@ -195,7 +222,7 @@ export const createRedisTokenStore = (
         // Rollback: delete the team index we just claimed
         const rollbackResult = await redis.del(teamKey(tenant, team));
         if (!rollbackResult.ok) {
-          logger?.error("[token-store] CRITICAL: Failed to rollback team claim — team slot is occupied but token is not stored", {
+          reportTokenStore(logger, "error", "[token-store] CRITICAL: Failed to rollback team claim — team slot is occupied but token is not stored", {
             team,
             hashPrefix: String(hash).slice(0, 8),
           });
@@ -212,7 +239,7 @@ export const createRedisTokenStore = (
         const tokenRollback = await redis.del(tokenKey(tenant, hash));
         const teamRollback = await redis.del(teamKey(tenant, team));
         if (!tokenRollback.ok || !teamRollback.ok) {
-          logger?.error("[token-store] CRITICAL: Failed to rollback after team-index SADD failure — token/team keys may be orphaned", {
+          reportTokenStore(logger, "error", "[token-store] CRITICAL: Failed to rollback after team-index SADD failure — token/team keys may be orphaned", {
             team,
             hashPrefix: String(hash).slice(0, 8),
           });
@@ -247,14 +274,10 @@ export const createRedisTokenStore = (
         }
         const parsed = parseStoredTeamRecord(valueResult.value);
         if (!parsed.ok || parsed.value.grant.team !== team) {
-          try {
-            logger?.warn("[token-store] Corrupt team index entry — refusing partial listing", {
-              team,
-              reason: parsed.ok ? "grant team does not match indexed team" : parsed.error,
-            });
-          } catch {
-            // The typed corruption failure remains authoritative.
-          }
+          reportTokenStore(logger, "warn", "[token-store] Corrupt team index entry — refusing partial listing", {
+            team,
+            reason: parsed.ok ? "grant team does not match indexed team" : parsed.error,
+          });
           return err(redisUnavailable(`token-list-teams: corrupt team record for '${team}'`));
         }
         grants.push(parsed.value.grant);
@@ -280,17 +303,15 @@ export const createRedisTokenStore = (
         return ok(undefined);
       }
 
-      let hash: string;
-      try {
-        const parsed = JSON.parse(teamResult.value) as { hash: string };
-        hash = parsed.hash;
-      } catch (e) {
-        logger?.error("[token-store] Corrupt team index data in Redis — revocation failed", {
+      const parsed = parseStoredTeamRecord(teamResult.value);
+      if (!parsed.ok || parsed.value.grant.team !== team) {
+        reportTokenStore(logger, "error", "[token-store] Corrupt team index data in Redis — revocation failed", {
           team,
-          error: e instanceof Error ? e.message : String(e),
+          reason: parsed.ok ? "grant team does not match requested team" : parsed.error,
         });
         return err(redisUnavailable(`token-revoke: corrupt team index for '${team}' — manual cleanup required`));
       }
+      const { hash } = parsed.value;
 
       // Remove the team from the enumeration index FIRST so listTeams() stops
       // reporting it even if a subsequent key delete fails (fail toward "not

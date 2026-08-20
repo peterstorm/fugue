@@ -92,8 +92,8 @@ export const readFileJobSnapshot = <S, E, C>(
 // Snapshot immutability (see the snapshot contract in the module header)
 // ---------------------------------------------------------------------------
 
-// The recursive freeze primitive lives in `deep-freeze.ts` (round-24 tda-4) —
-// ONE implementation shared with the strict event-log reader, so the two
+// The recursive freeze primitive lives in `deep-freeze.ts` — ONE implementation
+// shared with the strict event-log reader, so the two
 // runtime-immutability promises cannot drift apart. Here it is always applied
 // to a `structuredClone` output, a fresh tree a caller never shares with the
 // snapshot; the shared module documents the reader-side source.

@@ -172,36 +172,54 @@ export const createNamespacedCheckpointWriter = (
 ): CheckpointWriter => {
   let consecutiveWriteFailures = 0;
   const FAILURE_ESCALATION_THRESHOLD = 10;
+  const report = (
+    level: "warn" | "error",
+    message: string,
+    context: Record<string, unknown>,
+  ): void => {
+    try {
+      logger[level](message, context);
+    } catch {
+      // Checkpoint durability failure remains authoritative over diagnostics.
+    }
+  };
 
   return {
     write: async (_runId: RunId, nodeId: NodeId, value: unknown): Promise<void> => {
       const fullKey = buildCheckpointKey(tenant, dagId, runId, nodeId);
       let serialized: string;
       try {
-        serialized = JSON.stringify(value);
+        const encoded = JSON.stringify(value);
+        if (encoded === undefined) throw new TypeError("JSON.stringify returned undefined");
+        serialized = encoded;
       } catch (e) {
-        logger.warn("Checkpoint write failed — value not serializable", { key: fullKey, dagId, runId, nodeId: nodeId as string, error: e instanceof Error ? e.message : String(e) });
-        return; // Best-effort — don't kill the DAG execution
+        const message = e instanceof Error ? e.message : String(e);
+        report("warn", "Checkpoint write failed — value not serializable", {
+          key: fullKey, dagId, runId, nodeId: nodeId as string, error: message,
+        });
+        throw new Error(`Checkpoint write failed for ${fullKey}: value not serializable (${message})`);
       }
       const setResult = checkpointTtlSec !== undefined
         ? await redis.set(fullKey, serialized, { expiresInSec: checkpointTtlSec })
         : await redis.set(fullKey, serialized);
       if (!setResult.ok) {
-        // Best-effort — don't kill the DAG execution. Escalate warn→error after a
-        // run of consecutive failures so a sustained checkpoint-write outage
-        // (Redis brownout → silent loss of resumability) is alertable, mirroring
-        // the cache adapter rather than logging a flat warn forever.
         consecutiveWriteFailures++;
+        const context = {
+          key: fullKey,
+          dagId,
+          runId,
+          nodeId: nodeId as string,
+          error: setResult.error.kind,
+          consecutiveFailures: consecutiveWriteFailures,
+        };
         if (consecutiveWriteFailures >= FAILURE_ESCALATION_THRESHOLD) {
-          logger.error("Checkpoint write failures exceeded threshold — Redis may be degraded", {
-            key: fullKey, dagId, runId, nodeId: nodeId as string, consecutiveFailures: consecutiveWriteFailures,
-          });
+          report("error", "Checkpoint write failures exceeded threshold — Redis may be degraded", context);
         } else {
-          logger.warn("Checkpoint write failed — Redis error", { key: fullKey, dagId, runId, nodeId: nodeId as string, error: setResult.error.kind });
+          report("warn", "Checkpoint write failed — Redis error", context);
         }
-      } else {
-        consecutiveWriteFailures = 0;
+        throw new Error(`Checkpoint write failed for ${fullKey}: ${setResult.error.kind}`);
       }
+      consecutiveWriteFailures = 0;
     },
   };
 };

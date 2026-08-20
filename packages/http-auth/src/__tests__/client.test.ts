@@ -254,9 +254,13 @@ describe("createAuthedHttpClient — 401 retry", () => {
     const tokens = fakeTokens(["t1", "t2"]);
     const client = makeClient(fetch, tokens);
 
-    const result = await client.get("/customers/1", { schema: PayloadSchema });
+    const result = await client.get("/customers/1?api_key=query-secret", { schema: PayloadSchema });
     expect(isErr(result)).toBe(true);
-    if (!result.ok) expect(result.error.kind).toBe("node-crash");
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      expect(JSON.stringify(result.error)).not.toContain("query-secret");
+      expect(JSON.stringify(result.error)).toContain("https://api.example.com/customers/1");
+    }
 
     expect(tokens.invalidations).toBe(1); // invalidated once, retried once, then gave up
     expect(calls).toHaveLength(2);
@@ -448,9 +452,13 @@ describe("createAuthedHttpClient — retriability classification", () => {
       tokens: fakeTokens(["t1"]),
       fetch,
     });
-    const result = await client.get("/slow", { schema: PayloadSchema });
+    const result = await client.get("/slow?api_key=query-secret", { schema: PayloadSchema });
     expect(isErr(result)).toBe(true);
-    if (!result.ok) expect(result.error.kind).toBe("transient");
+    if (!result.ok) {
+      expect(result.error.kind).toBe("transient");
+      expect(JSON.stringify(result.error)).not.toContain("query-secret");
+      expect(JSON.stringify(result.error)).toContain("https://api.example.com/slow");
+    }
   });
 
   it("a non-timeout AbortError (cancellation) → non-retriable node-crash", async () => {
@@ -465,11 +473,13 @@ describe("createAuthedHttpClient — retriability classification", () => {
       tokens: fakeTokens(["t1"]),
       fetch,
     });
-    const result = await client.get("/x", { schema: PayloadSchema });
+    const result = await client.get("/x?api_key=query-secret", { schema: PayloadSchema });
     expect(isErr(result)).toBe(true);
     if (!result.ok) {
       expect(result.error.kind).toBe("node-crash");
       if (result.error.kind === "node-crash") expect(result.error.retriability).toBe("non-retriable");
+      expect(JSON.stringify(result.error)).not.toContain("query-secret");
+      expect(JSON.stringify(result.error)).toContain("https://api.example.com/x");
     }
   });
 });

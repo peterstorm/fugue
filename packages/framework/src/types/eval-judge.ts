@@ -36,7 +36,7 @@ export type EvalJudgeRubric =
 // ---------------------------------------------------------------------------
 
 interface EvalJudgeResultBase {
-  readonly criteriaScores: Record<string, number>;
+  readonly criteriaScores: Readonly<Record<string, number>>;
   readonly failedCriteria: readonly string[];
   readonly reason: string;
 }

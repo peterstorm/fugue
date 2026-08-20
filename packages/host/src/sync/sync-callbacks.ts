@@ -142,10 +142,17 @@ export const createSyncCallbacks = (deps: SyncCallbackDeps): SyncCallbacks => {
     },
 
     onNoChange: (unchangedSha) => {
-      if (isShuttingDown()) return;
-      const currentRegistry = getRegistry(getState());
-      if (!currentRegistry) return; // shouldn't happen from syncing state
-      const result = syncCompleted(getState(), currentRegistry, unchangedSha, clock());
+      const state = getState();
+      if (state.phase === "draining" || state.phase === "stopped") return;
+      const currentRegistry = getRegistry(state);
+      if (!currentRegistry) {
+        logger.error("syncCompleted (no-change) invariant violated — current state has no registry", {
+          currentPhase: state.phase,
+          sha: unchangedSha,
+        });
+        return;
+      }
+      const result = syncCompleted(state, currentRegistry, unchangedSha, clock());
       if (result.ok) {
         setState(result.value);
       } else {

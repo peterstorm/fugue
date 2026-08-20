@@ -1,87 +1,121 @@
-# PR Remediation — 2026-08-20
+# Adjudicated PR Remediation — 2026-08-20
 
-## Authority and exact scope
+## Authority
 
 - Branch: `feat/f6-file-durable-runtime`
-- Base: `6c316cb53a9b7dfd88f2908b26108979eddbb04a`
-- Reviewed head: `29102088959dbe77c338b9fc711591b5256499b8`
-- Review Run Directory: `.claude/reviews/review-and-fix-runs/standalone-2026-08-20-163857-f6-file-durable-runtime`
-- Canonical result: `.claude/reviews/review-and-fix-runs/standalone-2026-08-20-163857-f6-file-durable-runtime/result.json`
-- Canonical result digest: `126626e60d0abfaee4d2096a0234c2b3b317bdec1a4551f744178392607e8c63`
-- Exact frozen scope: the 410 literal paths in `result.json.scope`, derived by the registered `all` review. That immutable array is the sole review authority.
-- This file supersedes the prior same-day plan because the current run reviewed the prior remediation state, including that plan.
-- Planned support path outside frozen scope: `packages/framework/src/__tests__/_file-resume-fixture.ts`.
+- Review run: `.claude/reviews/review-and-fix-runs/20260820T173931Z-c3ff0f23-standalone-review`
+- Canonical result: `.claude/reviews/review-and-fix-runs/20260820T173931Z-c3ff0f23-standalone-review/result.json`
+- Result digest: `61414cd07e6d36434159b0389d430b7b1d3ee7e768e99ce550c1bfd5375bb939`
+- Exact frozen scope: the 412 literal paths in `result.json.scope`; remediation will touch only those paths plus regression/support paths registered at remediation start.
 
 ## Mandatory surviving critical findings
 
-1. **`code-reviewer-1` — configured eval criteria can be omitted while the judge passes**
-   - Enforce case-insensitive, unique, exact response coverage for every configured criterion.
-   - Reject missing, duplicate, unexpected, or `failed_criteria`-inconsistent semantic responses as fail-closed evaluator outcomes before quality-gate evaluation.
-   - Add pure regressions for omissions, duplicates, extras, contradictory failure declarations, and valid exact coverage.
+1. **`code-reviewer-1` — invalid Redis token grants are trusted**
+   - File: `packages/host/src/adapters/token-store.ts:168`
+   - Fix: add one pure `TokenGrant` parser and use it for both token values and reverse-index records. Require a non-empty team and label plus a finite timestamp, then construct the canonical team value. Corrupt records return `redis-unavailable`; authorization never consumes unparsed Redis bytes.
+   - Regression: seed parseable malformed token JSON and prove `resolve` fails closed.
 
-2. **`silent-failure-hunter-1` — RunExecutor logging can replace the modeled failed outcome**
-   - Guard setup/execution diagnostics so a throwing `LogPort` cannot escape the catch branch.
-   - Add a regression proving a context-build failure plus hostile logger still settles as `ok({ kind: "failed" })` with the original durable error.
+2. **`code-reviewer-2` — revocation can report success without deleting the bearer**
+   - File: `packages/host/src/adapters/token-store.ts:285`
+   - Fix: parse the complete reverse-index record with the same parser before any `SREM`/`DEL`; require its grant team to match the requested team. Corruption leaves every key untouched and returns a typed failure.
+   - Regression: seed `{}` and mismatched records, then prove revocation fails and the original token remains resolvable.
 
-3. **`silent-failure-hunter-2` — HITL fallback logging can reject instead of re-parking**
-   - Route every non-fatal decision lookup, pending-marker, notification, and post-commit clear diagnostic through a non-throwing helper.
-   - Add hostile-logger regressions for each fallback contract.
+3. **`silent-failure-hunter-1` — checkpoint loss is converted to DAG success**
+   - File: `packages/host/src/adapters/node-context-factory.ts:184`
+   - Fix: make checkpoint serialization and Redis write failures reject the `CheckpointWriter.write` promise after best-effort diagnostics. Treat `JSON.stringify(...) === undefined` as non-serializable. This restores the framework contract that `runDag` maps writer rejection to `checkpoint-write-failed`.
+   - Regression: prove cyclic, `undefined`, and Redis-failed writes reject; successful writes and TTL behavior remain unchanged.
 
-4. **`comment-analyzer-1` — a synchronous compound audit sink throw aborts fan-out**
-   - Invoke each sink behind its own promise boundary before `Promise.allSettled` so synchronous throws become isolated rejections.
-   - Add a regression proving later sinks run, the compound resolves, and the violation remains observable.
+4. **`comment-analyzer-1` — false NFR-003 satisfaction claim**
+   - File: `packages/host/src/sync/sync-loop.ts:20`
+   - Fix: remove the `@satisfies NFR-003` assertion and replace it with a truthful limitation note: operation-level timeouts exist, but no cycle-level `poll interval + 5s` deadline is enforced.
 
 ## Advisory dispositions
 
-1. **`code-reviewer-2` — accepted.** The caller-owned eval config currently changes runtime behavior after construction while `node.config` can disagree. Snapshot and freeze criteria, rubric, model, id, and normalized threshold once; make both the definition and closure use that immutable value.
-2. **`pr-test-analyzer-1` — dismissed.** Its proposed regression would pin the undesirable behavior that a throwing `span.addEvent` changes the quality-gate result to `crash`. The accepted architecture finding below instead makes observability best-effort and adds the inverse regression: the judge outcome remains authoritative.
-3. **`type-design-analyzer-1` — accepted.** The file checkpoint capability promises an exact `{ state, context }` data envelope. Enforce the closed own-key shape before minting and add missing/extra-field regressions.
-4. **`comment-analyzer-2` — accepted.** `AuditRecord` is exported and structural, so reword `auditRecord` as the preferred construction seam rather than the only producer.
-5. **`comment-analyzer-3` — accepted.** Correct `toJson` documentation to state its supported pre-scanned domain and its throw/undefined behavior outside that domain; do not widen this comment fix into an API migration.
-6. **`architecture-tech-lead-1` — accepted.** Telemetry must not decide eval quality. Run each judge independently of tracer/span failures, make all trace decoration best-effort, avoid duplicate judge execution when hostile tracers reject after invoking the callback, and update tracing regressions.
-7. **`architecture-tech-lead-2` — accepted.** A boot-scoped single-flight mint must not inherit one request’s cancellation. Keep the underlying shared refresh governed only by its own timeout and model request cancellation as waiter-specific; add concurrent cancellation regressions.
-8. **`architecture-tech-lead-3` — accepted.** A corrupt existing team record is not a stale absent index member. Parse persisted team records through a pure typed parser and return `redis-unavailable` for malformed JSON or shape instead of `ok(partial)`; retain absent-key skipping.
-9. **`code-simplifier-1` — accepted.** The two resume suites use the same state machine model. Extract one private test fixture so future invariant changes have one edit site and both suites continue testing the same model.
-10. **`code-simplifier-2` — accepted.** Replace the checkpoint data-kind nested ternary with a named helper while implementing the exact envelope gate; preserve the existing error vocabulary.
+1. **`code-reviewer-3` — accepted.** Token-store logging is secondary to the `Result` contract. Route all token-store warn/error calls through non-throwing helpers and add throwing-logger regressions so diagnostics cannot replace a typed failure.
 
-## Refuted critical audit — retain, never fix
+2. **`code-reviewer-4` — accepted.** Timeout, cancellation, and repeated-401 diagnostics currently use `fullUrl`/raw `path`. Replace them with `RequestTarget.label` and add query-secret regressions for all three branches.
 
-- None. The registered Refutation Panel upheld all four critical findings under reproduction, intent, and blast-radius lenses.
+3. **`silent-failure-hunter-2` — accepted.** Prompt loading currently logs unreadable directories/files and returns a partial map. Return `Result<ReadonlyMap<...>, HostError>` from the internal prompt-load boundary; only `ENOENT` means absence, while any discovered unreadable prompt fails that DAG load with the real deployment error. Preserve per-DAG isolation in `loadAll`.
 
-## Planned touched paths
+4. **`silent-failure-hunter-3` — accepted.** `onNoChange` without a registry is a state-machine invariant violation. Log it explicitly and retain the existing registry/state behavior for valid no-change callbacks. The HostState ADT makes a `syncing` state without a registry unrepresentable, so no valid `syncFailed` transition exists from the only no-registry phases (`booting`/`stopped`); the regression pins loud surfacing rather than fabricating state.
+
+5. **`pr-test-analyzer-3` — dismissed as stale.** `packages/host/src/__tests__/metered-llm.test.ts` already covers pre-call budget refusal, partial usage on failed calls, settled-cumulative reporting, concurrent reservations/overshoot bounds, and reservation release after throws; `packages/host/src/__tests__/llm-meter.test.ts` additionally property-tests budget and reservation invariants. No missing behavior remains to add.
+
+6. **`type-design-analyzer-1` — accepted.** Change `criteriaScores` to `Readonly<Record<string, number>>`, preventing mutation through the public result type without changing runtime behavior.
+
+7. **`comment-analyzer-2` — accepted.** Remove the stale `(round-24 tda-4)` remediation-history tag while retaining the durable shared-implementation rationale.
+
+8. **`code-simplifier-1` — accepted.** Extract one local Zod JSON-record transformer for absent/blank handling, `JSON.parse`, shape errors, and `z.NEVER`; keep scope-name validation at the `AGENT_CLIENT_SCOPES` call site. Existing config tests pin each field's diagnostics and parsed shape.
+
+9. **`code-simplifier-2` — accepted.** Centralize the repeated 503 host-serving policy in the HTTP response module and reuse it from the DAG handlers and custom-route fallback. The helper owns the stable status/error/message/details contract rather than merely forwarding arbitrary parameters.
+
+10. **`code-simplifier-3` — accepted.** Extract a pure common review-card body builder in the bot card module; bot and webhook transports append only their transport-specific controls. Existing card/notifier tests will pin both envelopes.
+
+11. **`code-simplifier-4` — deferred.** The 1,100-line worker-lifecycle suite deliberately exposes scenario-local wiring variations, and the suggested fixture-builder refactor changes a broad test harness unrelated to any surviving defect. It has no production/correctness impact and should be handled as a dedicated distill pass with one scenario at a time, not mixed into security/durability remediation.
+
+## Refuted critical audit — retained, never fixed
+
+1. **`pr-test-analyzer-1` — Keycloak broker authorization-before-egress tests allegedly absent**
+   - Reproduction panel: `packages/host/src/adapters/__tests__/keycloak-broker.test.ts` exercises an unassigned scope and proves both Keycloak and WIF egress counters remain zero while returning `policy-refusal`.
+   - Intent panel: the same behavioral test directly proves the fail-closed ordering.
+   - Security panel: unknown/unassigned scope produces zero endpoint and WIF egress.
+   - Disposition: refuted by all three lenses; no remediation.
+
+2. **`pr-test-analyzer-2` — live Keycloak endpoint tests allegedly absent**
+   - Reproduction panel: `packages/host/src/adapters/__tests__/keycloak-token-endpoint-http.test.ts` covers client-credentials and exchange-v2 request bodies, credential-miss zero egress, HTTP denial, success, and transport rejection.
+   - Intent panel: the live endpoint contract is behaviorally exercised across mint and exchange paths.
+   - Security panel: subject proof, credential gating, denial mapping, and transport failures are covered.
+   - Disposition: refuted by all three lenses; no remediation.
+
+## Planned files
+
+Production/review-scope paths:
 
 - `.claude/plans/2026-08-20-pr-remediation.md`
-- `packages/framework/src/nodes/eval-judge.ts`
-- `packages/framework/src/dag-runtime/eval-judges.ts`
-- `packages/framework/src/file/checkpoint-record.ts`
-- `packages/framework/src/state-machine/serialize.ts`
-- `packages/framework/src/__tests__/eval-judge.test.ts`
-- `packages/framework/src/__tests__/pass-3-remediation.test.ts`
-- `packages/framework/src/__tests__/file-job.test.ts`
-- `packages/framework/src/__tests__/file-resume.test.ts`
-- `packages/framework/src/__tests__/file-resume-proof.test.ts`
-- `packages/framework/src/__tests__/_file-resume-fixture.ts` (support path outside frozen scope)
-- `packages/host/src/hitl/adapters/run-executor.ts`
-- `packages/host/src/hitl/human-review-hook.ts`
-- `packages/host/src/supervisor/audit/audit-sink-log-redis.ts`
-- `packages/host/src/supervisor/audit/audit-port.ts`
 - `packages/host/src/adapters/token-store.ts`
-- `packages/host/src/hitl/adapters/__tests__/run-executor.test.ts`
-- `packages/host/src/hitl/__tests__/human-review-hook.test.ts`
-- `packages/host/src/__tests__/supervisor/audit/audit-sink.test.ts`
+- `packages/host/src/adapters/node-context-factory.ts`
+- `packages/host/src/sync/sync-loop.ts`
+- `packages/http-auth/src/client.ts`
+- `packages/host/src/adapters/module-loader.ts`
+- `packages/host/src/sync/sync-callbacks.ts`
+- `packages/framework/src/types/eval-judge.ts`
+- `packages/framework/src/file/job.ts`
+- `packages/host/src/domain/config.ts`
+- `packages/host/src/http/response.ts`
+- `packages/host/src/http/handlers/list-dags.ts`
+- `packages/host/src/http/handlers/run-dag.ts`
+- `packages/host/src/http/handlers/manifest.ts`
+- `packages/host/src/http/router.ts`
+- `packages/host/src/hitl/adapters/bot/card.ts`
+- `packages/host/src/hitl/adapters/webhook-notifier.ts`
+
+Regression/support paths (register if outside `result.json.scope`):
+
 - `packages/host/src/__tests__/token-store.test.ts`
-- `packages/http-auth/src/auth.ts`
-- `packages/http-auth/src/__tests__/auth.test.ts`
+- `packages/host/src/__tests__/node-context-factory.test.ts`
+- `packages/http-auth/src/__tests__/client.test.ts`
+- `packages/host/src/__tests__/module-loader.test.ts`
+- `packages/host/src/__tests__/sync-callbacks.test.ts`
+- `packages/host/src/hitl/adapters/bot/__tests__/bot.test.ts`
+- `packages/host/src/hitl/adapters/__tests__/webhook-notifier.test.ts`
 
 ## Validation
 
-Baseline before remediation: 280 targeted tests passed across the ten directly affected suites.
-
-1. `bun test packages/framework/src/__tests__/eval-judge.test.ts packages/framework/src/__tests__/pass-3-remediation.test.ts packages/framework/src/__tests__/file-job.test.ts packages/framework/src/__tests__/file-resume.test.ts packages/framework/src/__tests__/file-resume-proof.test.ts`
-2. `bun test packages/host/src/hitl/adapters/__tests__/run-executor.test.ts packages/host/src/hitl/__tests__/human-review-hook.test.ts packages/host/src/__tests__/supervisor/audit/audit-sink.test.ts packages/host/src/__tests__/token-store.test.ts`
-3. `bun test packages/http-auth/src/__tests__/auth.test.ts`
-4. `bun run --filter @fuguejs/framework typecheck`
-5. `bun run --filter @fuguejs/host typecheck`
-6. `bun run --filter @fuguejs/http-auth typecheck`
-7. `bun run typecheck`
-8. `bun test`
+1. Focused regressions:
+   - `bun test packages/host/src/__tests__/token-store.test.ts`
+   - `bun test packages/host/src/__tests__/node-context-factory.test.ts`
+   - `bun test packages/http-auth/src/__tests__/client.test.ts`
+   - `bun test packages/host/src/__tests__/module-loader.test.ts`
+   - `bun test packages/host/src/__tests__/sync-callbacks.test.ts`
+   - `bun test packages/host/src/hitl/adapters/bot/__tests__/bot.test.ts packages/host/src/hitl/adapters/__tests__/webhook-notifier.test.ts`
+2. Package type gates:
+   - `bun run --filter @fuguejs/framework typecheck`
+   - `bun run --filter @fuguejs/http-auth typecheck`
+   - `bun run --filter @fuguejs/host typecheck`
+3. Full relevant tests:
+   - `bun run --filter @fuguejs/framework test`
+   - `bun run --filter @fuguejs/http-auth test`
+   - `bun run --filter @fuguejs/host test`
+4. Repository gates:
+   - `bun run typecheck`
+   - `bun run test`
