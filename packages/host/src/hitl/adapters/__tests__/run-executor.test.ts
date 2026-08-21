@@ -241,6 +241,31 @@ describe("createRunExecutor — channel split (err vs failed)", () => {
     }
   });
 
+  it("a hostile caught value cannot escape while diagnostics are rendered", async () => {
+    const dag = singleNodeDag((async () => ok("x")) as never);
+    const reg = registered(dag);
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    const throwingInfra: SharedInfra = {
+      ...sharedInfra(),
+      get capabilities(): never { throw revoked.proxy; },
+    };
+    const exec = createRunExecutor({
+      sharedInfra: throwingInfra,
+      getRegisteredDag: () => reg,
+      agentClientMap: { "exec-dag": "fugue-agent-exec" },
+    });
+    const jobLike = await seedJobLike(dag, null);
+
+    const result = await exec.run(runReq(dag, jobLike, null));
+
+    expect(result.ok && result.value.kind).toBe("failed");
+    if (result.ok && result.value.kind === "failed" && result.value.error.kind === "node-crash") {
+      expect(result.value.error.nodeId).toBe(EXECUTOR_NODE_ID);
+      expect(typeof result.value.error.message).toBe("string");
+    }
+  });
+
   it("a context-build throw settles as `failed` carrying the wiring fault's message (the durable diagnostic)", async () => {
     // The setup phase is host wiring (context build), not an in-DAG node crash.
     // Whatever channel settles it, the recorded FrameworkError must carry the

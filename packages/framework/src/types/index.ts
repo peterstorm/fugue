@@ -28,7 +28,7 @@ export {
 
 // ── Errors ────────────────────────────────────────────────────────────────
 export type { FrameworkError, FrameworkErrorKind, MissingCapability, PartialTokenUsage } from "./errors.js";
-export { formatFrameworkError, FrameworkAugmentedError, usageOfError } from "./errors.js";
+export { formatFrameworkError, isFrameworkError, FrameworkAugmentedError, usageOfError } from "./errors.js";
 export { frameworkError } from "./error-factories.js";
 
 // ── Total error diagnostics ───────────────────────────────────────────────

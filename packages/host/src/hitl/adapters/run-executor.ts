@@ -15,7 +15,7 @@
  * drop it).
  */
 
-import { runResumableDagJob, ok, err, EXECUTOR_NODE_ID } from "@fuguejs/framework";
+import { runResumableDagJob, ok, err, EXECUTOR_NODE_ID, isFrameworkError, safeErrorMessage } from "@fuguejs/framework";
 import type {
   Result,
   FrameworkError,
@@ -56,16 +56,23 @@ interface RunExecutorDeps {
   readonly logger?: LogPort;
 }
 
-const toFrameworkError = (e: unknown): FrameworkError => {
-  const cause = (e as { cause?: FrameworkError }).cause;
-  if (cause && typeof cause === "object" && "kind" in cause) return cause;
-  return {
+const frameworkCauseOf = (error: unknown): FrameworkError | null => {
+  if (!((typeof error === "object" && error !== null) || typeof error === "function")) return null;
+  try {
+    const cause = Reflect.get(error, "cause");
+    return isFrameworkError(cause) ? cause : null;
+  } catch {
+    return null;
+  }
+};
+
+const toFrameworkError = (error: unknown): FrameworkError =>
+  frameworkCauseOf(error) ?? {
     kind: "node-crash",
     retriability: "retriable",
     nodeId: EXECUTOR_NODE_ID,
-    message: e instanceof Error ? e.message : String(e),
+    message: safeErrorMessage(error),
   };
-};
 
 const logExecutionFailureWithoutThrowing = (
   logger: LogPort | undefined,
@@ -158,7 +165,7 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
           {
             runId: req.runId,
             dagId: req.dagId,
-            error: e instanceof Error ? e.message : String(e),
+            error: safeErrorMessage(e),
           },
         );
         return ok({ kind: "failed", error: toFrameworkError(e) });

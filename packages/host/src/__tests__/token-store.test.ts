@@ -443,20 +443,22 @@ describe("createRedisTokenStore", () => {
       if (result.ok) expect(result.value.map(g => g.team)).toEqual(["team-b"]);
     });
 
-    it("skips index members whose team key is missing (best-effort, self-healing)", async () => {
+    it("fails closed when an index member's team key is missing", async () => {
       const { redis, store, sets } = createFakeRedis();
       const tokenStore = createRedisTokenStore(redis, TENANT, noopLogger);
 
       await tokenStore.store("team-a", hash1, grant1);
       await tokenStore.store("team-b", hash2, grant2);
 
-      // Simulate a torn state: index still names team-a but its key vanished.
+      // Simulate persistence drift: index still names team-a but its key vanished.
       store.delete(`fugue:${TENANT}:teams:team-a`);
 
       const result = await tokenStore.listTeams();
-      expect(result.ok).toBe(true);
-      if (result.ok) expect(result.value.map(g => g.team)).toEqual(["team-b"]);
-      // The index still holds the stale member — it self-heals on next revoke.
+      expect(result.ok).toBe(false);
+      if (!result.ok && result.error.kind === "redis-unavailable") {
+        expect(result.error.operation).toContain("missing team record");
+      }
+      // Listing fails rather than misrepresenting the surviving member as complete.
       expect([...(sets.get(`fugue:${TENANT}:teams-index`) ?? [])].sort()).toEqual(["team-a", "team-b"]);
     });
 

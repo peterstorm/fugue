@@ -38,7 +38,7 @@ Fugue's durable-runtime ports (JobLike event journal, Checkpointer, FreshnessInd
 
 **Acceptance Scenarios:**
 - Given a file checkpointer over a fresh directory, When I `load` an unknown run, Then I get a clean `null` (never an error)
-- Given a saved node under any composite address (namespace, nodeId, index, attempt) or the canonical form (plain nodeId), When I load the run, Then every stored node comes back with its exact output, including per-node corrupt entries dropped and surfaced via `corruptNodeIds`
+- Given a saved node under any composite address (namespace, nodeId, index, attempt) or the canonical form (plain nodeId), When I load the run, Then every stored node comes back with its exact output, including per-node corrupt entries dropped and surfaced via `corruptNodeAddresses`
 - Given a checkpoint written by a different framework version, When I load with the shared suite's checks active, Then load rejects with `checkpoint-version-mismatch` (ADR-0017 semantics)
 - Given an `expectedDagFingerprint` option and a stored fingerprint that is absent or different, When I load, Then load rejects with `checkpoint-version-mismatch`
 - Given a checkpoint older than 24h, When I load, Then load reports `checkpoint-expired` — expiry evaluated lazily at load, with no background sweeper
@@ -90,7 +90,7 @@ Fugue's durable-runtime ports (JobLike event journal, Checkpointer, FreshnessInd
 - FR-025: `load` MUST reject with `checkpoint-version-mismatch` when the stored framework version differs from `FRAMEWORK_VERSION` (ADR-0017).
 - FR-026: `load` MUST reject with `checkpoint-version-mismatch` when `expectedDagFingerprint` is supplied and the stored fingerprint is absent or different.
 - FR-027: `load` MUST evaluate 24h expiry lazily at load and report `checkpoint-expired` for past-TTL metadata, mirroring the Redis TTL contract; there MUST be no background sweeper and no physical garbage collection in this pass.
-- FR-028: A corrupt/truncated individual node entry MUST be dropped from the loaded node set and its address surfaced in `corruptNodeIds` (so callers can distinguish "never ran" from "ran but stored corrupt"); a corrupt metadata entry MUST surface a typed `checkpoint-corrupt` error.
+- FR-028: A corrupt/truncated individual node entry MUST be dropped from the loaded node set and its address surfaced in `corruptNodeAddresses` as the `CorruptCheckpointAddress` discriminated union — `node-key` (a stored key was recovered and is re-executable) or `digest-filename` (only the opaque digest filename was) — so callers can distinguish "never ran" from "ran but stored corrupt"; a corrupt metadata entry MUST surface a typed `checkpoint-corrupt` error.
 - FR-029: Checkpointer writes MUST be atomic (reader observes prior-complete or new-complete, never partial), and run/node identifiers MUST be re-validated at the persistence boundary under the same fail-closed charset discipline as FR-016.
 
 ### Core — file FreshnessIndex (US3)
@@ -130,7 +130,7 @@ Fugue's durable-runtime ports (JobLike event journal, Checkpointer, FreshnessInd
 
 Measurable outcomes that define "done". Acceptance bar for **P1** is SC-001 through SC-006 in full; **P2** additionally requires SC-007.
 
-- SC-001: `createFileCheckpointer` passes the ENTIRE shared `checkpointerSuite` — zero failures across all parametrized cases: version-mismatch rejection (ADR-0017), `expectedDagFingerprint` opt-in, 24h TTL expiry at load, per-entry corrupt-node drop with `corruptNodeIds`, composite addressing, atomicity.
+- SC-001: `createFileCheckpointer` passes the ENTIRE shared `checkpointerSuite` — zero failures across all parametrized cases: version-mismatch rejection (ADR-0017), `expectedDagFingerprint` opt-in, 24h TTL expiry at load, per-entry corrupt-node drop with `corruptNodeAddresses`, composite addressing, atomicity.
 - SC-002: Crash-window resume test proves both sides of the suite: (a) a crash between `appendEvent` and `updateData` resumes and recovers the lagging checkpoint by log replay; (b) a manufactured checkpoint/log disagreement fails closed with the typed `checkpoint-corrupt` error. Both asserted by automated test.
 - SC-003: Append dedup idempotency is proven by automated test: the same `dedupKey` appended twice produces exactly one record (content and position of the first preserved), and the no-op holds across a simulated crash between the two calls.
 - SC-004: `bun run typecheck` in `packages/framework` is green (zero errors).
@@ -219,3 +219,4 @@ None outstanding. The full interview was pre-completed: scenario priorities, sco
 |------|--------|--------|
 | 2026-08-12 | Initial draft from brainstorm + completed interview rulings | specify agent (F6) |
 | 2026-08-13 | Repaired FR-032/FR-040 contradictions against binding AD-5/AD-6 and ADR-0079/0080 without changing port signatures | code implementer (T15) |
+| 2026-08-21 | Renamed the stale `corruptNodeIds` surface name to the shipped `corruptNodeAddresses` (`CorruptCheckpointAddress` union, ADR-0075) in US2, FR-028, and SC-001 — no port-signature or behavior change (round-29 remediation, comment-analyzer-1) | review-and-fix remediation (round 29) |

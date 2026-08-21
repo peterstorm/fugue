@@ -133,7 +133,18 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
     if (!created.ok) return created;
 
     const enqueued = await runQueue.enqueue(runId);
-    if (!enqueued.ok) return enqueued;
+    if (!enqueued.ok) {
+      // A queued record without a wakeup violates the durable-requeue invariant.
+      // Compensate by settling it terminally; `RunStorePort.setStatus` removes the
+      // active-index member (ADR-0074), so it cannot strand quota or be mistaken
+      // for a resumable run. If this write fails, return that typed persistence
+      // failure: no durable compensation was established for the caller to trust.
+      const compensated = await runStore.setStatus(runId, {
+        kind: "failed",
+        error: asRunFailure(enqueued.error),
+      });
+      return compensated.ok ? enqueued : compensated;
+    }
 
     return ok({ runId });
   };

@@ -57,7 +57,7 @@ None.
 | FR-025 | Load rejects `checkpoint-version-mismatch` on framework-version difference (ADR-0017) | Covered — AD-6 table; suite case |
 | FR-026 | Load rejects `checkpoint-version-mismatch` when `expectedDagFingerprint` supplied and absent/different | Covered — AD-6 table; load opts |
 | FR-027 | 24h expiry evaluated lazily at load ⇒ `checkpoint-expired`; no sweeper, no physical GC | Covered — AD-6, INV-3, `now()`-injected TTL |
-| FR-028 | Corrupt node entry dropped + surfaced in `corruptNodeIds`; corrupt metadata ⇒ typed `checkpoint-corrupt` | Covered — checkpointer load behavior + `fwLogger().warn` parity |
+| FR-028 | Corrupt node entry dropped + surfaced in `corruptNodeAddresses`; corrupt metadata ⇒ typed `checkpoint-corrupt` | Covered — checkpointer load behavior + `fwLogger().warn` parity |
 | FR-029 | Checkpointer writes atomic; run/node identifiers re-validated at fs boundary, fail closed | Covered — `atomic.ts` + Security notes; `checkpoint-write-failed` mapping |
 | FR-030 | File FreshnessIndex implements `recordWrite`/`findConflict` durably across restart | Covered — AD-5; SC-007 |
 | FR-031 | `recordWrite` atomic latest-write replace per resource | Covered — AD-5 tmp+rename replace |
@@ -79,7 +79,7 @@ None.
 | SC-006 | `check-imports.ts` green incl. no broker imports in file backend | Covered — verification 6; INV-1 |
 | SC-007 | FreshnessIndex durability: write visible to `findConflict` after restart; Redis-identical conflict semantics | Covered — Phase 5 `file-freshness-index.test.ts`; verification 7 |
 | US1 | Durable file-backed job with crash-safe resume (5 acceptance scenarios: identical-final-state round-trip; benign lag window recovered by replay; strict-prefix disagreement fails closed; corrupt/truncated JSON never silently skipped; invalid identifiers rejected at boundary) | Covered — via FR-004/005/008/009/010/014/015/016; completed-journal round-trip test; progress round-trip exercised |
-| US2 | File-backed Checkpointer over the composite address space (6 acceptance scenarios: unknown run ⇒ `null`; all composite/canonical nodes returned with exact outputs, corrupt entries via `corruptNodeIds`; version mismatch; fingerprint opt-in; lazy 24h expiry; invalid node IDs fail closed) | Covered — via FR-020…FR-029; `file-checkpointer.test.ts` covers every scenario |
+| US2 | File-backed Checkpointer over the composite address space (6 acceptance scenarios: unknown run ⇒ `null`; all composite/canonical nodes returned with exact outputs, corrupt entries via `corruptNodeAddresses`; version mismatch; fingerprint opt-in; lazy 24h expiry; invalid node IDs fail closed) | Covered — via FR-020…FR-029; `file-checkpointer.test.ts` covers every scenario |
 | US3 | Durable single-process FreshnessIndex (3 acceptance scenarios: restart visibility + stale-write detection; atomic latest-write replace; no-record ⇒ clean no-conflict) | Covered — via FR-030…FR-032 + SC-007; scenario parity vs `InMemoryFreshnessIndex` |
 
 ## Verification

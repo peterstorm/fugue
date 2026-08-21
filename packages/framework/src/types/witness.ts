@@ -62,8 +62,9 @@ declare const __resourceNameBrand: unique symbol;
  * produced by `extractWitness` must name the same resource as the node's
  * `sideEffects.resource`.
  *
- * Valid resource names are non-empty strings following the convention
- * `system:entity[:id]` (e.g. `"postgres:orders"`, `"stripe:charges:ch_123"`).
+ * Resource names are non-empty strings. `system:entity[:id]` (for example
+ * `"postgres:orders"` or `"stripe:charges:ch_123"`) is a naming convention,
+ * not a constructor-enforced grammar.
  */
 export type ResourceName = string & { readonly [__resourceNameBrand]: void };
 

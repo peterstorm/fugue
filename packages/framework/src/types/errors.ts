@@ -352,48 +352,55 @@ export type FrameworkError =
 export type FrameworkErrorKind = FrameworkError["kind"];
 
 /**
- * Every `FrameworkError["kind"]` literal as a runtime set — the closed
- * discriminant domain of `isFrameworkError`. Indexed by the union type
- * (`Set<FrameworkError["kind"]>`), so a typo'd kind is a COMPILE error;
- * a new kind must be registered here or the guard fails closed on it (a
- * not-yet-registered kind is not recognized as a typed framework error,
- * which is the conservative direction: it is never relabeled as typed).
+ * Every `FrameworkError["kind"]` literal — the closed discriminant domain
+ * of `isFrameworkError` — as a Record indexed by the FULL union, so BOTH
+ * membership and coverage are compile-checked. A kind added to the
+ * `FrameworkError` union and omitted here is a compile error (TS2741) —
+ * not a silent registration miss that would make `isFrameworkError` fail
+ * closed on the new kind and let the boundary fences (resume.ts, job.ts
+ * `appendEvent`, atomic.ts `acquireFileLock`) re-tag it, silently losing
+ * its identity — and a key here the union no longer declares is a compile
+ * error too. (type-design-analyzer-1, review run
+ * standalone-2026-08-21-181423-f6-file-durable-runtime)
  */
-const FRAMEWORK_ERROR_KINDS: ReadonlySet<string> = new Set<FrameworkError["kind"]>([
-  "validation",
-  "retry-exhausted",
-  "checkpoint-missing",
-  "checkpoint-expired",
-  "checkpoint-corrupt",
-  "checkpoint-version-mismatch",
-  "checkpoint-write-failed",
-  "prompt-not-found",
-  "cache-error",
-  "node-crash",
-  "cycle-detected",
-  "aborted",
-  "rejected",
-  "invalid-reroute",
-  "transient",
-  "missing-default-edge",
-  "output-unreachable-under-routing",
-  "predicate-malformed",
-  "duplicate-edge",
-  "root-expects-input",
-  "source-has-incoming",
-  "invalid-dag-input-edge",
-  "missing-capability",
-  "llm-budget-exceeded",
-  "infra-unreachable",
-  "policy-refusal",
-  "downstream-denied",
-]);
+const FRAMEWORK_ERROR_KINDS: Record<FrameworkErrorKind, true> = {
+  validation: true,
+  "retry-exhausted": true,
+  "checkpoint-missing": true,
+  "checkpoint-expired": true,
+  "checkpoint-corrupt": true,
+  "checkpoint-version-mismatch": true,
+  "checkpoint-write-failed": true,
+  "prompt-not-found": true,
+  "cache-error": true,
+  "node-crash": true,
+  "cycle-detected": true,
+  aborted: true,
+  rejected: true,
+  "invalid-reroute": true,
+  transient: true,
+  "missing-default-edge": true,
+  "output-unreachable-under-routing": true,
+  "predicate-malformed": true,
+  "duplicate-edge": true,
+  "root-expects-input": true,
+  "source-has-incoming": true,
+  "invalid-dag-input-edge": true,
+  "missing-capability": true,
+  "llm-budget-exceeded": true,
+  "infra-unreachable": true,
+  "policy-refusal": true,
+  "downstream-denied": true,
+};
+
+/** Derived membership set (string-keyed for the untyped `kind` probe). */
+const FRAMEWORK_ERROR_KIND_SET: ReadonlySet<string> = new Set(Object.keys(FRAMEWORK_ERROR_KINDS));
 
 /**
  * Runtime type guard for `FrameworkError` — narrows an unknown value (a
  * caught throw, a boundary-crossing payload) to the typed union by
  * discriminant inspection: the value must be an object carrying a string
- * `kind` that is a member of the CLOSED `FrameworkError["kind"]` set.
+ * `kind` that is a member of the CLOSED `FrameworkErrorKind` domain.
  * Anything else — a plain `Error`, a hostile object carrying an off-union
  * `kind` string — is NOT a typed framework error and must not be relabeled
  * as one by a boundary that only ever throws typed values (e.g. the file
@@ -403,7 +410,7 @@ export const isFrameworkError = (value: unknown): value is FrameworkError => {
   try {
     if (typeof value !== "object" || value === null || !("kind" in value)) return false;
     const kind = Reflect.get(value, "kind");
-    return typeof kind === "string" && FRAMEWORK_ERROR_KINDS.has(kind);
+    return typeof kind === "string" && FRAMEWORK_ERROR_KIND_SET.has(kind);
   } catch {
     // A revoked/hostile Proxy is not safely inspectable and therefore cannot
     // be admitted as a typed framework error.

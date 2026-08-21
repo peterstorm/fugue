@@ -1,5 +1,7 @@
 # PR Remediation — 2026-08-21
 
+> **Superseded for active remediation by Round 30 below.** Earlier rounds remain as historical evidence; the only authority for Round 30 findings and dispositions is its linked canonical `result.json`.
+
 ## Authority
 
 - Branch: `feat/f6-file-durable-runtime`
@@ -54,6 +56,56 @@
 11. **`code-simplifier-2` — accepted.** `serializeMeta` constructs `new Date(createdAtMs)` before the `isRepresentableTimestampMs` guard, an invalid-Date-then-discarded reading. Move the gate above the construction (zero behavior change).
 
 No advisory is deferred or dismissed: every claim was verified against the code and every fix is a complete in-scope change (or a named new test file registered as a support path).
+
+## Round 30 — active remediation plan
+
+### Authority and exact reviewed scope
+
+- Branch: `feat/f6-file-durable-runtime`
+- Review Run Directory: `.claude/reviews/review-and-fix-runs/standalone-review-20260821-221908-21514`
+- Canonical result: `.claude/reviews/review-and-fix-runs/standalone-review-20260821-221908-21514/result.json`
+- Result digest: `3e851009fd0229d411473035fa1455eaa024c185280bbf1fd2fbd797f06a9704` (40,987 bytes).
+- Exact scope: the literal 419 paths in `result.json.scope`; this plan relies exclusively on the published `surviving_critical_findings`, `advisory_findings`, and `refuted_critical_findings` below.
+- Support paths outside the frozen scope to register before remediation: this plan only.
+
+### Mandatory surviving critical findings
+
+1. **`silent-failure-hunter-2` — `packages/host/src/hitl/adapters/run-executor.ts:59`.** A hostile caught value can throw while `toFrameworkError` or logging evaluates `.cause`, `.message`, `instanceof`, or `String`, violating `RunExecutorPort.run`'s never-throw contract.
+   - Replace raw diagnostic/cause access with total framework diagnostic helpers and a guarded `Reflect.get`-based framework-error inspection.
+   - Ensure the catch path always returns `ok({ kind: "failed", error })`, including a revoked proxy or throwing coercion hook.
+   - Add an adversarial caught-value regression test that proves the failed outcome survives and uses a safe fallback diagnostic.
+
+2. **`architecture-tech-lead-1` — `packages/host/src/hitl/service.ts:132`.** A successful `RunStorePort.create` followed by failed `RunQueuePort.enqueue` leaves a non-terminal active run with no wakeup path.
+   - Compensate the created record by terminally settling it as `failed` with the typed enqueue failure mapped through the existing `asRunFailure`; terminal settlement removes it from ADR-0074's active-run index.
+   - If compensation itself fails, surface that typed persistence error rather than reporting the start as successful.
+   - Add a plain-fake test proving failed initial enqueue leaves a terminal failed run, removes its active-index slot, and returns the enqueue error.
+
+### Advisory dispositions
+
+| ID | Disposition | Reason and planned action |
+| --- | --- | --- |
+| `code-reviewer-1` | accepted | `module-graph-acyclic.test.ts` wrongly relies on package-root invocation while the documented command runs from repository root. Derive `SRC` from the test module directory and run the framework suite from root. |
+| `silent-failure-hunter-3` | deferred | ADR-0060 explicitly makes decision-store and notifier failures non-fatal after durable parking; requiring a logger or defining a process-stderr fallback changes the host observability contract and needs a dedicated operational-sink design. The existing optional logger still records the typed error when wired. |
+| `silent-failure-hunter-4` | accepted | A missing team record named by the durable enumeration index is persistence drift, not a complete list. Return typed `redis-unavailable` after a warning rather than silently returning a partial listing; pin it in token-store tests. |
+| `pr-test-analyzer-2` | dismissed | Direct evidence refutes the alleged gap: `packages/adapter-fs/src/__tests__/fs-adapter.test.ts` already pins pre-abort for content and metadata, mid-read `AbortError`/`TimeoutError`, confinement before I/O, and `mapFsError` classifications. No redundant tests are warranted. |
+| `type-design-analyzer-1` | accepted | Existing legitimate callers use non-colon names (for example `"src"`), so enforcing the claimed grammar would be a breaking false invariant. Correct the documentation to state the actual non-empty invariant and call the colon shape a convention only. |
+| `comment-analyzer-1` | accepted | Clarify PostgreSQL `queryOne` as returning the first validated row (or null), matching the existing implementation without changing query semantics. |
+| `comment-analyzer-2` | accepted | Apply the same first-row clarification to Oracle `queryOne`. |
+| `code-simplifier-1` | accepted | Extract the repeated freshness node-error envelope into one local helper while preserving error/message/timestamp behavior; run its focused tests after the single simplification move. |
+| `code-simplifier-2` | accepted | Centralize the hostile-clock read and finite-timestamp guard in `InMemoryCache` without changing `get`/`set` errors; run cache/clock tests after the move. |
+| `code-simplifier-3` | accepted | Share thrown-span finalization in capability tracing without changing error rethrow, span status, exception recording, or close ordering; run tracing tests after the move. |
+
+### Refuted-critical audit — retain, never fix
+
+1. **`silent-failure-hunter-1` — `packages/framework/src/file/atomic.ts:223`**: *“protocolEntries treats an unreadable fence directory as no fence entries…”* Refuted by the reproduction and security lenses: `tryFencedBirth` must create inside the fence and wraps failure; if creation succeeds but listing fails, `readdirSync` is wrapped as a typed file-operation failure.
+2. **`pr-test-analyzer-1` — `packages/adapter-fs/src/index.ts:141`**: *“no direct tests prove confinement…”* Refuted unanimously: `fs-adapter.test.ts` already exercises traversal, escaping absolute paths, root-directory rejection, and verifies traversal through `getContent` performs no injected filesystem I/O; `getMetadata` shares the gate.
+
+### Planned paths and validation
+
+- Criticals: `packages/host/src/hitl/adapters/run-executor.ts`, `packages/host/src/hitl/adapters/__tests__/run-executor.test.ts`, `packages/host/src/hitl/service.ts`, `packages/host/src/hitl/__tests__/service.test.ts`.
+- Accepted advisories: `packages/framework/src/__tests__/module-graph-acyclic.test.ts`, `packages/host/src/adapters/token-store.ts`, `packages/host/src/__tests__/token-store.test.ts`, `packages/framework/src/types/witness.ts`, `packages/adapter-pg/src/index.ts`, `packages/adapter-oracle/src/index.ts`, `packages/framework/src/dag-runtime/freshness-emission.ts`, `packages/framework/src/cache/cache.ts`, `packages/framework/src/tracing/capability-tracing.ts`, and their existing focused tests.
+- Support: `.claude/plans/2026-08-21-pr-remediation.md`.
+- Validation: focused `bun test` commands for every changed package/test file; `bun test packages/framework`; `bun test packages/host`; `bun test packages/adapter-fs`; `bun run typecheck`; then the registered remediation run's engine-owned audit and temporary-index installation.
 
 ## Refuted critical audit — retain, never fix
 

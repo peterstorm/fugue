@@ -68,8 +68,8 @@ export interface PgCapability {
   query<T>(schema: z.ZodType<T>, sql: string, params?: unknown[]): Promise<Result<T[], FrameworkError>>;
 
   /**
-   * Execute a query expecting at most one row. Returns `null` if no rows match.
-   * Validates the row against the schema if present.
+   * Execute a query and return the first row, or `null` if no rows match.
+   * Validates that first row against the schema if present; additional rows are ignored.
    */
   queryOne<T>(schema: z.ZodType<T>, sql: string, params?: unknown[]): Promise<Result<T | null, FrameworkError>>;
 

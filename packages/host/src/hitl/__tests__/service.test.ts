@@ -634,6 +634,33 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     if (!res.ok) expect(res.error.kind).toBe("redis-unavailable");
   });
 
+  it("startRun compensates a failed initial enqueue by terminally settling and releasing the active slot", async () => {
+    const store = inMemoryRunStore();
+    const queue: RunQueuePort = {
+      async enqueue() {
+        return err({ kind: "redis-unavailable", operation: "initial enqueue" });
+      },
+    };
+    const service = createHitlRunService({
+      runStore: store.port,
+      runQueue: queue,
+      decisions: inMemoryDecisionStore().port,
+      tenant: TENANT,
+      notifier: recordingNotifier().port,
+      executor: realExecutor(oneNodeDag()),
+      clock: () => 1_000,
+      newRunId: () => mkRunId("run-enqueue-failure"),
+    });
+
+    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+
+    expect(started.ok).toBe(false);
+    if (!started.ok) expect(started.error.kind).toBe("redis-unavailable");
+    const record = store.runs.get("run-enqueue-failure" as RunId)!;
+    expect(record.status.kind).toBe("failed");
+    expect(store.active.has(record.runId)).toBe(false);
+  });
+
   it("recordDecision returns err when the decision is stored but the resume enqueue fails (decided-but-not-woken)", async () => {
     // service.ts:274-289 — putDecision succeeds (the approval is durable) but
     // runQueue.enqueue fails, so the run is not re-woken. The decision is NOT

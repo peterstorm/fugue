@@ -37,6 +37,18 @@ export async function emitFreshnessWitnessEvents(
   const { waveNodeIds, nodeMap, nodeCtx, machineCtx, dagId, nowFn, freshnessIndex, witnessAccumulator } = ctx;
   const stamp = (): Date => new Date(nowFn());
   const priorOutputs = machineCtx.outputs;
+  const emitNodeError = (nodeId: NodeId, error: string, frameworkError: FrameworkError): void => {
+    emit(nodeCtx, {
+      type: "node-error",
+      runId: nodeCtx.runId,
+      dagId,
+      nodeId,
+      sideEffects: nodeMap.get(nodeId)?.sideEffects,
+      timestamp: stamp(),
+      error,
+      frameworkError,
+    });
+  };
 
   for (const nodeId of waveNodeIds) {
     // Skip nodes that didn't actually execute (checkpoint-resumed or
@@ -74,16 +86,7 @@ export async function emitFreshnessWitnessEvents(
             `[emitFreshnessWitnessEvents] extractWitness failed for node '${nodeId}': ${msg}`,
           );
           const fwError: FrameworkError = { kind: "node-crash", nodeId, retriability: "non-retriable", message: `extractWitness threw: ${msg}` };
-          emit(nodeCtx, {
-            type: "node-error",
-            runId: nodeCtx.runId,
-            dagId,
-            nodeId,
-            sideEffects: nodeMap.get(nodeId)?.sideEffects,
-            timestamp: stamp(),
-            error: `extractWitness failed: ${msg}`,
-            frameworkError: fwError,
-          });
+          emitNodeError(nodeId, `extractWitness failed: ${msg}`, fwError);
           // Fail-closed: downstream writes nodes need this witness for conflict
           // detection. Proceeding without it would silently allow stale writes.
           return err(fwError);
@@ -101,16 +104,7 @@ export async function emitFreshnessWitnessEvents(
           const message = `writes node '${nodeId}' declares only one of extractConditionedOn/extractNewWitness — both are required for freshness tracking`;
           const fwError: FrameworkError = { kind: "node-crash", nodeId, retriability: "non-retriable", message };
           fwLogger().error(`[emitFreshnessWitnessEvents] ${message}`);
-          emit(nodeCtx, {
-            type: "node-error",
-            runId: nodeCtx.runId,
-            dagId,
-            nodeId,
-            sideEffects: nodeMap.get(nodeId)?.sideEffects,
-            timestamp: stamp(),
-            error: message,
-            frameworkError: fwError,
-          });
+          emitNodeError(nodeId, message, fwError);
           return err(fwError);
         }
 
@@ -120,16 +114,7 @@ export async function emitFreshnessWitnessEvents(
         if (!inputResult.ok) {
           const message = `BUG: input reconstruction failed for writes node '${nodeId}': ${inputResult.error.kind === "node-crash" ? inputResult.error.message : "unknown"}`;
           fwLogger().error(`[emitFreshnessWitnessEvents] ${message}`);
-          emit(nodeCtx, {
-            type: "node-error",
-            runId: nodeCtx.runId,
-            dagId,
-            nodeId,
-            sideEffects: nodeMap.get(nodeId)?.sideEffects,
-            timestamp: stamp(),
-            error: message,
-            frameworkError: inputResult.error,
-          });
+          emitNodeError(nodeId, message, inputResult.error);
           return err(inputResult.error);
         }
         const nodeInput = inputResult.value;
@@ -147,16 +132,7 @@ export async function emitFreshnessWitnessEvents(
           const msg = `extractConditionedOn/extractNewWitness failed for node '${nodeId}': ${e instanceof Error ? e.message : e}`;
           fwLogger().warn(`[emitFreshnessWitnessEvents] ${msg}`);
           const fwError: FrameworkError = { kind: "node-crash", nodeId, retriability: "non-retriable", message: `freshness extractor threw: ${msg}` };
-          emit(nodeCtx, {
-            type: "node-error",
-            runId: nodeCtx.runId,
-            dagId,
-            nodeId,
-            sideEffects: nodeMap.get(nodeId)?.sideEffects,
-            timestamp: stamp(),
-            error: `freshness extractor failed: ${msg}`,
-            frameworkError: fwError,
-          });
+          emitNodeError(nodeId, `freshness extractor failed: ${msg}`, fwError);
           // Fail-closed: broken extractors are an authoring bug that must be fixed.
           return err(fwError);
         }
@@ -175,16 +151,7 @@ export async function emitFreshnessWitnessEvents(
           // conflict detection would allow undetectable stale writes; synthesizing
           // a fake conflict event would mislead consumers. ADR-0025.
           const fwError: FrameworkError = { kind: "node-crash", nodeId, retriability: "retriable", message: `freshness check unavailable: ${msg}` };
-          emit(nodeCtx, {
-            type: "node-error",
-            runId: nodeCtx.runId,
-            dagId,
-            nodeId,
-            sideEffects: nodeMap.get(nodeId)?.sideEffects,
-            timestamp: stamp(),
-            error: `freshness conflict check failed: ${msg}`,
-            frameworkError: fwError,
-          });
+          emitNodeError(nodeId, `freshness conflict check failed: ${msg}`, fwError);
           return err(fwError);
         }
         const conflict = conflictResult.value;
@@ -225,16 +192,7 @@ export async function emitFreshnessWitnessEvents(
             `[emitFreshnessWitnessEvents] freshnessIndex.recordWrite failed for node '${nodeId}': ${msg}`,
           );
           const fwError: FrameworkError = { kind: "node-crash", nodeId, retriability: "retriable", message: `freshness recordWrite failed: ${msg}` };
-          emit(nodeCtx, {
-            type: "node-error",
-            runId: nodeCtx.runId,
-            dagId,
-            nodeId,
-            sideEffects: nodeMap.get(nodeId)?.sideEffects,
-            timestamp: stamp(),
-            error: `freshness recordWrite failed: ${msg}`,
-            frameworkError: fwError,
-          });
+          emitNodeError(nodeId, `freshness recordWrite failed: ${msg}`, fwError);
           return err(fwError);
         }
         return ok(undefined);

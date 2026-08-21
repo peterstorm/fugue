@@ -733,8 +733,23 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
           input,
         );
       logger.info("HITL durable run engine enabled (Bot Framework in-Teams transport)");
-    } else {
-      logger.info("HITL durable run engine enabled (Teams webhook transport)");
+    } else if (notifierSelection.kind === "webhook") {
+      // The webhook branch is the only selection that reaches here: a
+      // `disabled` selection never defines `notifier`, so the outer
+      // `notifier !== undefined` guard is false for it (the former bare
+      // `else` was unreachable). Name the resolved approval base in the boot
+      // log — the one resolved HITL config value that was previously
+      // unlogged — and flag the DERIVED `http://localhost:<PORT>` default,
+      // whose card Review deep-link is unreachable outside the host machine;
+      // every sibling boot decision logs its resolution the same way.
+      // (silent-failure-hunter-1, review run
+      // standalone-2026-08-21-181423-f6-file-durable-runtime)
+      logger.info(
+        `HITL durable run engine enabled (Teams webhook transport) — approval base ${notifierSelection.approvalBaseUrl}` +
+          (config.HITL_APPROVAL_BASE_URL === undefined
+            ? " (derived localhost default: HITL_APPROVAL_BASE_URL is unset — Review deep-links are unreachable outside the host machine)"
+            : ""),
+      );
     }
   } else if (notifier !== undefined && deps.queueBackend === undefined) {
     logger.warn("A HITL notifier is configured but no queue backend was wired — HITL is disabled");

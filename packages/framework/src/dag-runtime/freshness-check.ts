@@ -7,8 +7,10 @@
  * `conditionedOn` witness has been superseded by an intervening write to the
  * same resource, returns a `FreshnessCheckResult` describing the conflict.
  *
- * This module is the single-process fallback. Cross-process detection with
- * Redis-backed indexes is layered on top (see `checkpoint/redis-freshness-index.ts`).
+ * This module is the single-process fallback. Cross-process detection is
+ * layered on top via the Redis adapter (`checkpoint/redis-freshness-index.ts`)
+ * or the durable file adapter (`file/freshness-index.ts`, FR-030 — records
+ * survive process restart).
  */
 
 import type { WitnessCapturedEvent, WriteAttemptedEvent } from "../types/events.js";
@@ -106,7 +108,8 @@ export const checkFreshness = (
  * per-resource write log that can be queried at write time.
  *
  * Thread-safe within a single JS event loop (no concurrent mutation).
- * For cross-process detection, see Redis-backed freshness index.
+ * For cross-process detection, see the Redis-backed or file-backed freshness
+ * index adapters.
  *
  * Bounded in two dimensions:
  *   - Each resource retains at most `maxEntriesPerResource` write entries (default 1000).

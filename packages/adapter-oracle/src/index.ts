@@ -141,8 +141,9 @@ export interface OracleCapability {
   query<T>(schema: z.ZodType<T>, sql: string, binds?: Record<string, unknown>): Promise<Result<T[], FrameworkError>>;
 
   /**
-   * Execute a query expecting at most one row. Returns `null` if no rows match.
-   * Validates the row against the schema if present. Binds `:name` placeholders.
+   * Execute a query and return the first row, or `null` if no rows match.
+   * Validates that first row against the schema if present; additional rows are ignored.
+   * Binds `:name` placeholders.
    */
   queryOne<T>(schema: z.ZodType<T>, sql: string, binds?: Record<string, unknown>): Promise<Result<T | null, FrameworkError>>;
 

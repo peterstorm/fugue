@@ -15,7 +15,7 @@
  */
 
 import { trace, SpanStatusCode } from "@opentelemetry/api";
-import type { Tracer as OtelTracer } from "@opentelemetry/api";
+import type { Span, Tracer as OtelTracer } from "@opentelemetry/api";
 import type { CapabilityHandle } from "../types/capability-handle.js";
 import type { Capability } from "../types/node.js";
 
@@ -34,6 +34,14 @@ const FUGUE_CAPABILITY_ERROR_KIND = "fugue.capability.error_kind";
 /**
  * Options for capability tracing.
  */
+const finalizeThrownSpan = (span: Span, error: unknown): never => {
+  const message = error instanceof Error ? error.message : String(error);
+  span.setStatus({ code: SpanStatusCode.ERROR, message });
+  span.recordException(error instanceof Error ? error : new Error(message));
+  span.end();
+  throw error;
+};
+
 export interface TracedCapabilityOpts {
   /**
    * OTel tracer name used for span creation.
@@ -143,15 +151,7 @@ export const withTracedCapability = <K extends Capability>(
                   span.end();
                   return resolved;
                 },
-                (error) => {
-                  span.setStatus({
-                    code: SpanStatusCode.ERROR,
-                    message: error instanceof Error ? error.message : String(error),
-                  });
-                  span.recordException(error instanceof Error ? error : new Error(String(error)));
-                  span.end();
-                  throw error;
-                },
+                (error) => finalizeThrownSpan(span, error),
               );
             }
 
@@ -165,13 +165,7 @@ export const withTracedCapability = <K extends Capability>(
             span.end();
             return result;
           } catch (error) {
-            span.setStatus({
-              code: SpanStatusCode.ERROR,
-              message: error instanceof Error ? error.message : String(error),
-            });
-            span.recordException(error instanceof Error ? error : new Error(String(error)));
-            span.end();
-            throw error;
+            return finalizeThrownSpan(span, error);
           }
         });
       };

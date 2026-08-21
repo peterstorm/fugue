@@ -268,9 +268,12 @@ export const createRedisTokenStore = (
           return err(redisUnavailable(`token-list-teams: failed reading team '${team}'`));
         }
         if (valueResult.value === null || valueResult.value === "") {
-          // Index names a team whose key is gone — best-effort skip.
-          // (Self-heals on next revoke, which SREMs the stale member.)
-          continue;
+          // An index member without its durable record is persistence drift.
+          // Do not represent a partial administrative listing as complete.
+          reportTokenStore(logger, "warn", "[token-store] Team index points at missing team record — refusing partial listing", {
+            team,
+          });
+          return err(redisUnavailable(`token-list-teams: missing team record for '${team}'`));
         }
         const parsed = parseStoredTeamRecord(valueResult.value);
         if (!parsed.ok || parsed.value.grant.team !== team) {

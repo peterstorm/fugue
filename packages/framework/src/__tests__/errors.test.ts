@@ -22,6 +22,7 @@ import { match } from "ts-pattern";
 import { runId as makeRunId, nodeId as makeNodeId } from "../types/ids.js";
 import {
   formatFrameworkError,
+  isFrameworkError,
   messageOf,
   retriabilityOf,
   usageOfError,
@@ -360,6 +361,19 @@ describe("retriabilityOf — single source of truth for the retry fast-fail fork
     // and this guards the test itself from falling behind.
     const kinds = new Set(cases.map(([e]) => e.kind));
     expect(kinds.size).toBe(27);
+  });
+
+  it("recognizes every table-constructed kind as a typed framework error (identity survives the guard)", () => {
+    // The closed kind domain in types/errors.ts is compiler-checked for
+    // COVERAGE (a kind added to the union and omitted from the
+    // `Record<FrameworkErrorKind, true>` table is a compile error); this pins
+    // the consumer-side contract from the other side: no kind this file
+    // constructs is dropped by `isFrameworkError`, so the boundary fences that
+    // branch on it (resume.ts, job.ts appendEvent, atomic.ts acquireFileLock)
+    // can never re-tag a kind that lost its identity.
+    for (const [error] of cases) {
+      expect(isFrameworkError(error)).toBe(true);
+    }
   });
 });
 

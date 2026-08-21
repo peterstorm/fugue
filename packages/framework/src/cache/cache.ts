@@ -37,22 +37,26 @@ export class InMemoryCache implements Cache {
     this.now = opts?.now ?? Date.now;
   }
 
-  async get<T>(key: string, schema: z.ZodType<T>): Promise<Result<T | null, FrameworkError>> {
-    const entry = this.store.get(key);
-    if (!entry) return ok(null);
+  private readClock(operation: "get" | "set", key: string): Result<number, FrameworkError> {
     // The clock is a hostile seam: a throwing clock must surface as a typed
     // cache-error, never a raw rejection, and a non-finite now must not make
     // the TTL comparison silently meaningless.
-    let nowMs: number;
     try {
-      nowMs = this.now();
-    } catch (e) {
-      return err({ kind: "cache-error", operation: "get", message: `key="${key}": clock failed: ${safeErrorMessage(e)}` });
+      const nowMs = this.now();
+      return Number.isFinite(nowMs)
+        ? ok(nowMs)
+        : err({ kind: "cache-error", operation, message: `key="${key}": clock returned a non-finite timestamp` });
+    } catch (error) {
+      return err({ kind: "cache-error", operation, message: `key="${key}": clock failed: ${safeErrorMessage(error)}` });
     }
-    if (!Number.isFinite(nowMs)) {
-      return err({ kind: "cache-error", operation: "get", message: `key="${key}": clock returned a non-finite timestamp` });
-    }
-    if (nowMs > entry.expiresAt) {
+  }
+
+  async get<T>(key: string, schema: z.ZodType<T>): Promise<Result<T | null, FrameworkError>> {
+    const entry = this.store.get(key);
+    if (!entry) return ok(null);
+    const now = this.readClock("get", key);
+    if (!now.ok) return now;
+    if (now.value > entry.expiresAt) {
       this.store.delete(key);
       return ok(null);
     }
@@ -78,18 +82,11 @@ export class InMemoryCache implements Cache {
     } catch (e) {
       return err({ kind: "cache-error", operation: "set", message: `key="${key}": JSON.stringify failed: ${safeErrorMessage(e)}` });
     }
-    let nowMs: number;
-    try {
-      nowMs = this.now();
-    } catch (e) {
-      return err({ kind: "cache-error", operation: "set", message: `key="${key}": clock failed: ${safeErrorMessage(e)}` });
-    }
-    if (!Number.isFinite(nowMs)) {
-      return err({ kind: "cache-error", operation: "set", message: `key="${key}": clock returned a non-finite timestamp` });
-    }
+    const now = this.readClock("set", key);
+    if (!now.ok) return now;
     this.store.set(key, {
       value: json,
-      expiresAt: nowMs + ttlSec * 1000,
+      expiresAt: now.value + ttlSec * 1000,
     });
     return ok(undefined);
   }

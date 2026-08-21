@@ -15,8 +15,8 @@ import { describe, expect, it } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, normalize } from "node:path";
 
-// bun test runs from the package root.
-const SRC = join(process.cwd(), "src");
+// Resolve from this test module: `bun test packages/framework` runs at repo root.
+const SRC = join(__dirname, "..");
 
 /**
  * Cycles that are not misplacement and are deliberately not fixed here.

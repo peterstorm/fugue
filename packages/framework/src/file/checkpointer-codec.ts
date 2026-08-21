@@ -834,10 +834,14 @@ export const parseLoadOpts = (
 
   // The exact-key gate above already proved `ownKeys` is `[]` or exactly
   // `["expectedDagFingerprint"]`, so a single direct read IS the presence
-  // check: it yields `undefined` exactly when the key is absent, with one
+  // check: it yields `undefined` when the key is ABSENT or holds an explicit
+  // `undefined` — both fold into the no-fingerprint path below — with one
   // property observation (pinned in file-checkpointer-codec.test.ts,
   // "returns fresh frozen option objects the caller cannot mutate or
   // re-observe" — the counting-Proxy `reads === 1` assertion).
+  // (comment-analyzer-2, review run
+  // standalone-2026-08-21-181423-f6-file-durable-runtime: the former biconditional
+  // "exactly when the key is absent" was not true for an explicit `undefined`)
   const expectedDagFingerprint = loadOpts.expectedDagFingerprint;
   if (expectedDagFingerprint !== undefined && typeof expectedDagFingerprint !== "string") {
     return err(
