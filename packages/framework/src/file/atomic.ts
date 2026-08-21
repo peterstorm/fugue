@@ -395,13 +395,14 @@ export const stealStaleFileLock = async (
  * this protects same-pid concurrent callers as well as cross-process owners.
  *
  * Bounded acquisition: at most `MAX_ACQUIRE_ATTEMPTS` (50) attempts with a
- * `RETRY_MS` (100 ms) backoff — a backoff budget of ≈5 s, which is the exact
- * ceiling for live-holder contention (each attempt probes, finds the owner
- * live, and sleeps). An attempt that observes a stale owner or a tomb
- * additionally awaits `fencedReap`, whose birth-barrier wait carries its own
- * bounded budget (50×100 ms) while live birth intents are active — so a
- * stalled live contender fencing the reap can stretch the TOTAL wall time
- * to roughly 50×(5 s barrier budget + backoff) before the typed timeout.
+ * `RETRY_MS` (100 ms) backoff — a sleep budget of ≈5 s. For pure live-holder
+ * contention (each attempt probes, finds the owner live, and sleeps) the
+ * wall-time ceiling is that sleep budget PLUS the per-attempt probe/staging
+ * overhead, not the budget alone. An attempt that observes a stale owner or
+ * a tomb additionally awaits `fencedReap`, whose birth-barrier wait carries
+ * its own bounded budget (50×100 ms) while live birth intents are active —
+ * so a stalled live contender fencing the reap can stretch the TOTAL wall
+ * time to roughly 50×(5 s barrier budget + backoff) before the typed timeout.
  * On exhaustion this throws the typed `cache-error(acquireFileLock)` naming
  * the lock path plus any blocking fence entries (live tombs / pending
  * birth-reap intents) and the last blocking owner-probe diagnostic — never a

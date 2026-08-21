@@ -20,6 +20,16 @@ const SummarizeRequestSchema = z.object({
 
 interface HealthDeps {
   readonly checkRedis?: () => Promise<boolean>;
+  /**
+   * LLM availability gate. Bootstrap wires this to the provider-key fallback:
+   * when no API key is configured the app runs on the unconfigured
+   * `FakeLlmClient`, so EVERY /summarize is guaranteed to fail — readiness
+   * must report not-ready (503) exactly like the Redis gate, or k8s leaves
+   * the pod in service while it can serve nothing. Default-true when unwired
+   * (test apps that construct `createApp` directly with a fake LLM keep
+   * today's readiness semantics).
+   */
+  readonly checkLlm?: () => Promise<boolean>;
   readonly checkMlflow?: () => Promise<boolean>;
   /**
    * Cumulative per-trace-backend export-failure counts when MULTIPLE backends
@@ -231,7 +241,8 @@ export const createApp = (deps: AppDeps): Hono => {
   app.get("/livez", (c) => c.json({ status: "alive" }, 200));
 
   // Readiness: 503 only when a dependency required to serve traffic is down.
-  // Redis (queues / checkpoints / cache) is required; MLflow (tracing) is
+  // Redis (queues / checkpoints / cache) and the LLM (every /summarize needs a
+  // real provider, not the unconfigured fake) are required; MLflow (tracing) is
   // informational and never gates readiness — losing it must not remove pods.
   const checkReadiness = async () => {
     // A rejecting probe is treated as "down", but the rejection reason is logged
@@ -241,6 +252,12 @@ export const createApp = (deps: AppDeps): Hono => {
     const redisOk = deps.health?.checkRedis
       ? await deps.health.checkRedis().catch((err) => {
           log.debug("[/readyz] checkRedis probe threw — treating Redis as not-ready:", err);
+          return false;
+        })
+      : true;
+    const llmOk = deps.health?.checkLlm
+      ? await deps.health.checkLlm().catch((err) => {
+          log.debug("[/readyz] checkLlm probe threw — treating the LLM as unavailable:", err);
           return false;
         })
       : true;
@@ -258,21 +275,22 @@ export const createApp = (deps: AppDeps): Hono => {
       : null;
     const tracingDegraded =
       exporterFailures !== null && exporterFailures.some((f) => f.failures > 0);
-    const httpStatus = redisOk ? 200 : 503;
-    // Three outcomes, one level: redis down gates readiness entirely; with
-    // redis up, any degraded trace backend (MLflow or a secondary exporter)
-    // downgrades to `ready-degraded` (observability spec FR-026: degrades the signal, never
+    const httpStatus = redisOk && llmOk ? 200 : 503;
+    // Three outcomes, one level: redis or the LLM down gates readiness entirely
+    // (either one means /summarize cannot serve traffic); with both up, any
+    // degraded trace backend (MLflow or a secondary exporter) downgrades to
+    // `ready-degraded` (observability spec FR-026: degrades the signal, never
     // gates readiness).
     const degraded = !mlflowOk || tracingDegraded;
     let status: string;
-    if (!redisOk) {
+    if (!redisOk || !llmOk) {
       status = "not-ready";
     } else if (degraded) {
       status = "ready-degraded";
     } else {
       status = "ready";
     }
-    return { status, redis: redisOk, mlflow: mlflowOk, exporterFailures, httpStatus } as const;
+    return { status, redis: redisOk, llm: llmOk, mlflow: mlflowOk, exporterFailures, httpStatus } as const;
   };
 
   app.get("/readyz", async (c) => {
@@ -281,6 +299,7 @@ export const createApp = (deps: AppDeps): Hono => {
       {
         status: r.status,
         redis: r.redis,
+        llm: r.llm,
         mlflow: r.mlflow,
         // Only present on a multi-backend deployment; omitted (null) otherwise.
         ...(r.exporterFailures ? { tracingExporterFailures: r.exporterFailures } : {}),

@@ -394,6 +394,74 @@ export const selectCapabilityBroker = (
   });
 };
 
+// ── HITL notifier transport selection (ADR-0060) ──────────────────────────
+
+/**
+ * The boot-time HITL notifier transport selection (ADR-0060) — the pure
+ * AUTHORITY seam. Exported so the selection logic (config → transport, Bot
+ * precedence over webhook, the derived approval base URL, and the
+ * `BOT_APP_ID`-without-password classification) is testable without booting a
+ * full host — the sibling seam to `selectCapabilityBroker`.
+ *
+ * Precedence: the Bot Framework in-Teams transport requires the COMPLETE
+ * `BOT_APP_ID` + `BOT_APP_PASSWORD` pair and wins when both transports are
+ * configured; `TEAMS_WEBHOOK_URL` selects the link-out webhook transport
+ * (with the explicit or `http://localhost:<PORT>`-defaulted approval base
+ * URL) — a complete webhook therefore beats an INCOMPLETE bot pair, the
+ * pre-extraction chain's order, preserved; a lone `BOT_APP_ID` (password
+ * missing) classifies as `disabled/bot-password-missing` — the
+ * lowest-precedence arm, surfaced only when no webhook is configured, which
+ * is exactly when the shell emits its single boot warning; neither configures
+ * no transport (HITL stays off).
+ */
+export type HitlNotifierSelection =
+  | {
+      readonly kind: "bot-framework";
+      readonly appId: string;
+      readonly appPassword: string;
+      readonly tokenUrl?: string;
+    }
+  | {
+      readonly kind: "webhook";
+      readonly webhookUrl: string;
+      /** Resolved approval base — explicit `HITL_APPROVAL_BASE_URL` or the
+       * `http://localhost:<PORT>` default. */
+      readonly approvalBaseUrl: string;
+    }
+  | {
+      readonly kind: "disabled";
+      readonly reason: "bot-password-missing" | "unconfigured";
+    };
+
+export const selectHitlNotifierTransport = (
+  config: Pick<
+    HostConfig,
+    "BOT_APP_ID" | "BOT_APP_PASSWORD" | "BOT_TOKEN_URL" | "TEAMS_WEBHOOK_URL" | "HITL_APPROVAL_BASE_URL" | "PORT"
+  >,
+): HitlNotifierSelection => {
+  if (config.BOT_APP_ID !== undefined && config.BOT_APP_PASSWORD !== undefined) {
+    // Parse-don't-validate: lift the pair into ONE narrowed selection so the
+    // shell never needs a non-null assertion on the bot credentials.
+    return {
+      kind: "bot-framework",
+      appId: config.BOT_APP_ID,
+      appPassword: config.BOT_APP_PASSWORD,
+      ...(config.BOT_TOKEN_URL !== undefined ? { tokenUrl: config.BOT_TOKEN_URL } : {}),
+    };
+  }
+  if (config.TEAMS_WEBHOOK_URL !== undefined) {
+    return {
+      kind: "webhook",
+      webhookUrl: config.TEAMS_WEBHOOK_URL,
+      approvalBaseUrl: config.HITL_APPROVAL_BASE_URL ?? `http://localhost:${config.PORT}`,
+    };
+  }
+  if (config.BOT_APP_ID !== undefined) {
+    return { kind: "disabled", reason: "bot-password-missing" };
+  }
+  return { kind: "disabled", reason: "unconfigured" };
+};
+
 // ── Host Factory ───────────────────────────────────────────────────────────
 
 /**
@@ -548,9 +616,11 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
   let hitlWorker: WorkerHandle | undefined;
   let teamsBotHandle: ((input: { authHeader: string | undefined; activity: unknown }) => Promise<BotResponse>) | undefined;
 
-  // Select the notifier transport. Bot Framework (in-Teams buttons) takes
+  // Select the notifier transport via the pure seam
+  // (`selectHitlNotifierTransport`). Bot Framework (in-Teams buttons) takes
   // precedence over the webhook (link-out) when both are configured.
-  const botConfigured = config.BOT_APP_ID !== undefined && config.BOT_APP_PASSWORD !== undefined;
+  const notifierSelection = selectHitlNotifierTransport(config);
+  const botConfigured = notifierSelection.kind === "bot-framework";
   let notifier: HumanReviewNotifierPort | undefined;
   let conversations: ConversationStorePort | undefined;
   // Resolve a run's DAG id to its OWNING team off the LIVE registry (the same
@@ -561,7 +631,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     const reg = getRegistry(hostState);
     return reg ? lookupDag(reg, dagId)?.team : undefined;
   };
-  if (botConfigured) {
+  if (notifierSelection.kind === "bot-framework") {
     // SECURITY (FR-013 / SC-001): the HITL conversation store is bound to the
     // `routedTenant` so every `fugue:<tenant>:hitl:*` key is scoped under that
     // tenant's Redis ACL. `routedTenant` is the worker's resolved `Tenant.id`
@@ -570,22 +640,22 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     conversations = createRedisConversationStore(sharedInfra.redis, routedTenant, sharedInfra.logger);
     const connector = createBotConnector(
       {
-        appId: config.BOT_APP_ID!,
-        appPassword: config.BOT_APP_PASSWORD!,
-        ...(config.BOT_TOKEN_URL !== undefined ? { tokenUrl: config.BOT_TOKEN_URL } : {}),
+        appId: notifierSelection.appId,
+        appPassword: notifierSelection.appPassword,
+        ...(notifierSelection.tokenUrl !== undefined ? { tokenUrl: notifierSelection.tokenUrl } : {}),
       },
       sharedInfra.logger,
     );
     notifier = createBotFrameworkNotifier({ connector, conversations, resolveDagTeam });
-  } else if (config.TEAMS_WEBHOOK_URL !== undefined) {
+  } else if (notifierSelection.kind === "webhook") {
     notifier = createWebhookNotifier(
       {
-        webhookUrl: config.TEAMS_WEBHOOK_URL,
-        approvalBaseUrl: config.HITL_APPROVAL_BASE_URL ?? `http://localhost:${config.PORT}`,
+        webhookUrl: notifierSelection.webhookUrl,
+        approvalBaseUrl: notifierSelection.approvalBaseUrl,
       },
       fetchWebhookHttp(),
     );
-  } else if (config.BOT_APP_ID !== undefined) {
+  } else if (notifierSelection.reason === "bot-password-missing") {
     logger.warn("BOT_APP_ID is set but BOT_APP_PASSWORD is not — Bot Framework transport disabled");
   }
 
@@ -638,7 +708,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     // The in-Teams transport also needs its inbound endpoint: verify the Bot
     // Framework token, then dispatch button clicks to the run service.
     if (botConfigured && conversations !== undefined) {
-      const verify = createBotTokenVerifier({ appId: config.BOT_APP_ID! });
+      const verify = createBotTokenVerifier({ appId: notifierSelection.appId });
       const svc = hitlService;
       const convs = conversations;
       teamsBotHandle = (input) =>

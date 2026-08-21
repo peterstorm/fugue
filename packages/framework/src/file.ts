@@ -29,8 +29,12 @@
  */
 
 // Durable journal, strict event-log reader, and JobLike adapter.
-export { createFileJournal } from "./file/journal.js";
-export type { FileJournal, FileJournalOptions } from "./file/journal.js";
+export { createFileJournal, rawCheckpointJson } from "./file/journal.js";
+export type {
+  FileJournal,
+  FileJournalOptions,
+  RawCheckpointJson,
+} from "./file/journal.js";
 export { serializeFileCheckpoint } from "./file/checkpoint-record.js";
 export { isFileCheckpointCommit } from "./file/checkpoint-record.js";
 export type {

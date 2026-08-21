@@ -21,7 +21,7 @@ import {
 } from "@fuguejs/framework";
 import { RedisCache, RedisCheckpointer } from "@fuguejs/framework/redis";
 import { DefaultAzureCredential } from "@azure/identity";
-import type { LlmClient, TracingHandle, Checkpointer, CheckpointWriter, Observer, FoundryTelemetrySink, FrameworkError, RunId, NodeId } from "@fuguejs/framework";
+import type { LlmClient, TracingHandle, Checkpointer, CheckpointWriter, Observer, FoundryTelemetrySink, PromptRegistry, RunId, NodeId } from "@fuguejs/framework";
 import { NoopObserver } from "@fuguejs/framework";
 import { JsonFixtureSource } from "./sources/json-fixture-source.js";
 import { createApp, type AppDeps, type ContextCache } from "./server.js";
@@ -158,6 +158,40 @@ export const setUpTracing = async (
   }
 };
 
+export const loadAppPrompts = async (
+  registry: PromptRegistry,
+  log: AppLogger,
+): Promise<Map<string, string>> => {
+  const prompts = new Map<string, string>();
+  // One load path for every prompt. `synthesis` and `synthesis-system` are
+  // pipeline-fatal: a load failure MUST fail bootstrap loudly (the same idiom
+  // as resolveObservabilityBackends — a config error never silently degrades),
+  // because a missing SYSTEM prompt cannot be detected per-request: the LLM
+  // node would silently fall back to its generic default system prompt
+  // (nodes/llm.ts) and every subsequent /summarize run would complete 200
+  // under degraded behavior with no per-request, response, or readiness signal.
+  const loadFatal = async (name: string): Promise<string> => {
+    const loaded = await registry.load(name);
+    if (loaded.ok) return loaded.value.text;
+    const e = loaded.error;
+    const detail = e.kind === "prompt-not-found" ? e.reason : JSON.stringify(e);
+    throw new Error(`Required prompt "${name}" failed to load — ${detail}`);
+  };
+  prompts.set("synthesis", await loadFatal("synthesis"));
+  prompts.set("synthesis-system", await loadFatal("synthesis-system"));
+  // Note: the summary-eval-rubric prompt is loaded for external eval tooling
+  // only; it is intentionally not consumed in the in-pipeline run (post-hoc
+  // evaluation is handled by the eval sidecar), so it degrades to
+  // log-and-continue.
+  const rubric = await registry.load("summary-eval-rubric");
+  if (rubric.ok) {
+    prompts.set("summary-eval-rubric", rubric.value.text);
+  } else {
+    log.warn("Failed to load summary-eval-rubric prompt:", rubric.error);
+  }
+  return prompts;
+};
+
 export const bootstrap = async (injectedLogger?: AppLogger) => {
   const log = injectedLogger ?? consoleAppLogger;
   // Route the framework's fault-isolation warnings (CompositeSpanExporter,
@@ -292,30 +326,17 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
     dir: promptsDir,
     registryPath: join(promptsDir, "registry.json"),
   });
-  const prompts = new Map<string, string>();
-  // One load path for all prompt files: load-or-log, name threaded through so
-  // each prompt keeps its own severity (synthesis/synthesis-system are fatal
-  // to the pipeline, the eval rubric only feeds post-hoc tooling).
-  const loadPrompt = async (
-    name: string,
-    onFail: (error: FrameworkError) => void,
-  ): Promise<void> => {
-    const loaded = await promptRegistry.load(name);
-    if (loaded.ok) {
-      prompts.set(name, loaded.value.text);
-    } else {
-      onFail(loaded.error);
-    }
-  };
-  await loadPrompt("synthesis", (error) => log.error("Failed to load synthesis prompt:", error));
-  await loadPrompt("summary-eval-rubric", (error) => log.warn("Failed to load summary-eval-rubric prompt:", error));
-  await loadPrompt("synthesis-system", (error) => log.error("Failed to load synthesis-system prompt:", error));
-  // Note: the summary-eval-rubric prompt is loaded for external eval tooling only;
-  // it is intentionally not consumed in the in-pipeline run (post-hoc evaluation
-  // is handled by the eval sidecar).
+  // Pipeline-fatal prompts (synthesis / synthesis-system) fail bootstrap
+  // loudly on load failure; the post-hoc eval rubric degrades (see
+  // loadAppPrompts for the per-prompt severity contract).
+  const prompts = await loadAppPrompts(promptRegistry, log);
 
   // LLM client
   let llm: LlmClient;
+  // True when the no-API-key fallback put the app on the unconfigured
+  // FakeLlmClient — every /summarize is then guaranteed to fail, so readiness
+  // must report not-ready (checkLlm) instead of serving traffic into it.
+  let llmIsFake = false;
   const provider = config.LLM_PROVIDER;
   // For Azure, deployment name is used as the model parameter
   const model = provider === "azure"
@@ -346,6 +367,7 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
   } else {
     log.warn(`No API key set for provider "${provider}" — using FakeLlmClient (all LLM calls will fail)`);
     llm = new FakeLlmClient(new Map());
+    llmIsFake = true;
   }
 
   // ENABLE_THINKING is only honored by providers whose client implements reasoning.
@@ -390,6 +412,11 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
       // service while checkpointer/cache are null). Flag is event-driven —
       // no per-request ping (would add round-trip on every k8s probe).
       checkRedis: async () => redisHealthy && redis !== null,
+      // Readiness gate for the LLM fallback: the unconfigured FakeLlmClient
+      // guarantees every /summarize fails, so the pod must come OUT of
+      // rotation instead of reporting ready while it can serve nothing.
+      // No I/O — reads the bootstrap-set flag (same shape as checkRedis).
+      checkLlm: async () => !llmIsFake,
       checkMlflow: async () => {
         try {
           // Bound the probe: a black-holed MLflow endpoint must not hang the k8s

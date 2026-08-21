@@ -64,6 +64,7 @@ import { MAX_SAFE_RECORD_DEPTH } from "../file/event-record.js";
 import { D, N } from "./_id-helpers.js";
 import { FRAMEWORK_VERSION } from "../checkpoint/fingerprint.js";
 import { keyDigest } from "../file/layout.js";
+import type { RunMeta } from "../checkpoint/checkpointer.js";
 
 /** Narrow the `FrameworkError` union onto the `checkpoint-write-failed`
  * variant after asserting the discriminant (TS cannot narrow through
@@ -274,6 +275,34 @@ describe("serializeMeta — writes the exact on-disk grammar or throws", () => {
     expect(() =>
       serializeMeta(snapshotMeta({ dagId: "d", startedAt: new Date(0), nodeCount: 1 }), Number.POSITIVE_INFINITY),
     ).toThrow(/clock produced a non-representable timestamp/);
+  });
+
+  it("re-establishes the DagId domain at the write boundary — the load gate rejects the same bytes (tda-1 parity)", () => {
+    // The file WRITE boundary must refuse a dagId outside the DagId domain
+    // (review run.vtN26syQLu type-design-analyzer-1): persisting bytes that
+    // this SAME backend's load gate (`parseRunMetaRecord` → `tryDagId`) would
+    // reject as `checkpoint-corrupt` made the backend write-read asymmetric.
+    for (const outOfDomain of ["tenant:dag", "", "bad id", "a".repeat(129)]) {
+      expect(() =>
+        serializeMeta(snapshotMeta({ dagId: outOfDomain as RunMeta["dagId"], startedAt: new Date(0), nodeCount: 1 }), 0),
+      ).toThrow(/meta\.dagId is outside the DagId domain/);
+    }
+    // One encoding, both boundaries: the load-side twin rejects the same
+    // value with the shared `tryDagId` diagnostic.
+    const loadVerdict = parseStoredMeta(
+      JSON.stringify({
+        dagId: "tenant:dag",
+        startedAt: "2025-01-01T00:00:00.000Z",
+        nodeCount: 1,
+        createdAt: "2025-01-01T00:00:00.000Z",
+      }),
+    );
+    expect(loadVerdict.ok).toBe(false);
+    if (!loadVerdict.ok) expect(loadVerdict.error).toContain("colons not allowed");
+    // And an in-domain dagId still serializes (no over-rejection).
+    expect(() =>
+      serializeMeta(snapshotMeta({ dagId: "customer-summary", startedAt: new Date(0), nodeCount: 1 }), 0),
+    ).not.toThrow();
   });
 });
 

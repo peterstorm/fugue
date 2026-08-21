@@ -299,6 +299,14 @@ describe("GitPort interface", () => {
       const server = await stallServer();
       await server.listen();
       const dir = await mkdtemp(join(tmpdir(), "fugue-git-stall-"));
+      // The bounded background cleanup (SIGTERM → grace → SIGKILL → drain)
+      // outlives the error delivery: a fault inside that IIFE would surface as
+      // a process-level unhandled rejection with no log line (silent-failure-
+      // hunter-3). Pin the contract on the public path: no unhandled rejection
+      // across the full cleanup window.
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+      process.on("unhandledRejection", onUnhandled);
       try {
         const adapter = createBunGitAdapter(400);
         const started = Date.now();
@@ -316,7 +324,13 @@ describe("GitPort interface", () => {
         // so the socket is not used as a liveness probe here — the bun
         // branch below proves whole-tree termination.
         expect(elapsed).toBeLessThan(4_000);
+
+        // Cover the full background-cleanup window (grace KILL_GRACE_MS +
+        // stream drain) before asserting on unhandled rejections.
+        await new Promise((r) => setTimeout(r, 2_500));
+        expect(unhandled).toEqual([]);
       } finally {
+        process.off("unhandledRejection", onUnhandled);
         await server.close();
         await rm(dir, { recursive: true, force: true });
       }

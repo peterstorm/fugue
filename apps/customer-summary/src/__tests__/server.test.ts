@@ -426,6 +426,48 @@ describe("GET /readyz", () => {
     expect((await res.json()).status).toBe("not-ready");
   });
 
+  test("unavailable LLM (unconfigured fake fallback) gates readiness — 503 not-ready", async () => {
+    // The bootstrap no-API-key fallback puts the app on the unconfigured
+    // FakeLlmClient: every /summarize is guaranteed to fail, so readiness must
+    // report not-ready (silent-failure-hunter-2) instead of serving traffic in.
+    const source = new JsonFixtureSource(fixturesDir);
+    const llm = new FakeLlmClient(new Map());
+    const app = createApp({
+      source,
+      llm,
+      health: {
+        checkRedis: async () => true,
+        checkLlm: async () => false,
+        checkMlflow: async () => true,
+      },
+    });
+    const res = await get(app, "/readyz");
+    expect(res.status).toBe(503);
+    const json = await res.json();
+    expect(json.status).toBe("not-ready");
+    expect(json.redis).toBe(true);
+    expect(json.llm).toBe(false);
+  });
+
+  test("checkLlm probe throws — treated as down (503)", async () => {
+    const source = new JsonFixtureSource(fixturesDir);
+    const llm = new FakeLlmClient(new Map());
+    const app = createApp({
+      source,
+      llm,
+      health: {
+        checkRedis: async () => true,
+        checkLlm: async () => { throw new Error("llm probe fault"); },
+        checkMlflow: async () => true,
+      },
+    });
+    const res = await get(app, "/readyz");
+    expect(res.status).toBe(503);
+    const json = await res.json();
+    expect(json.status).toBe("not-ready");
+    expect(json.llm).toBe(false);
+  });
+
   test("a failing secondary trace backend degrades the signal but does NOT gate readiness (observability spec FR-026)", async () => {
     // Multi-backend deployment where one exporter (e.g. Foundry) keeps failing
     // while MLflow succeeds. This must surface as ready-degraded@200 with the

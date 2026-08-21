@@ -44,6 +44,7 @@ import {
   createFileJournal,
   readFileEventRecords,
   readFileEvents,
+  resumeFileJob,
   serializeFileCheckpoint,
   serializeFileEventRecord,
 } from "../file.js";
@@ -61,6 +62,11 @@ import {
 import type { FrameworkError } from "../types/errors.js";
 import { retriabilityOf } from "../types/errors.js";
 import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
+import type { Result } from "../types/result.js";
+import { err, ok } from "../types/result.js";
+import { runId } from "../types/ids.js";
+import { genesis, machine } from "./_file-resume-fixture.js";
+import type { C, E, S } from "./_file-resume-fixture.js";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -1801,4 +1807,92 @@ describe("symlink policy (pinned divergence from the file checkpointer)", () => 
     expect(lstatSync(join(events, name)).isSymbolicLink()).toBe(true); // untouched
     expect(readFileSync(target, "utf8")).toBe("squatting bytes"); // untouched
   });
+});
+
+// ---------------------------------------------------------------------------
+// Scale (review run.vtN26syQLu pta-1): per-append listing is O(files) and
+// resume's strict-prefix scan is O(n). Both are unguarded at the design's
+// stated scale (hundreds-to-low-thousands of events); the largest
+// real-journal exercise before this block was ~25–30 events. This pins that
+// the full append→checkpoint→resume cycle stays practical at N=1000.
+// ---------------------------------------------------------------------------
+
+describe("scale — N=1000 keyed appends + full-log resume (review pta-1)", () => {
+  const N = 1000;
+
+  /** The caller's strict checkpoint decoder — the same idiom as
+   * `file-resume.test.ts`: envelope fields validated, payload passed to the
+   * machine replay. */
+  const scaleParseCheckpoint = (data: unknown): Result<{ state: S; context: C }, string> => {
+    if (typeof data !== "object" || data === null || Array.isArray(data)) {
+      return err("checkpoint data must be an object with state and context");
+    }
+    const record = data as Record<string, unknown>;
+    if (!("state" in record) || !("context" in record)) {
+      return err("checkpoint data must have state and context fields");
+    }
+    return ok({ state: record.state as S, context: record.context as C });
+  };
+
+  it("1000 appends stay contiguous and a 1000-event resume replays fully in bounded wall-clock", async () => {
+    const dir = tempDir();
+    const journal = createFileJournal(dir);
+    const startedAt = Date.now();
+
+    for (let i = 0; i < N; i += 1) {
+      await journal.appendEvent({ type: "STEP", i }, `scale:${i}`);
+      // The kernel's own commit cadence at scale: a checkpoint projection
+      // every 100th event plus a final one (crash lag ≤ 99 events — the
+      // strict-prefix window the resume proof accepts).
+      if ((i + 1) % 100 === 0 || i === N - 1) {
+        await journal.writeCheckpoint(
+          serializeFileCheckpoint({
+            state: { kind: "pending", count: i + 1 },
+            context: { value: i + 1 },
+          }),
+        );
+      }
+    }
+
+    const appendElapsedMs = Date.now() - startedAt;
+    // Pathological per-append regressions (O(n²) re-listing, per-file content
+    // parsing on the hot path) blow past this at N=1000 long before a slow
+    // CI runner's flake window; a healthy run measures ~2 s locally.
+    expect(appendElapsedMs).toBeLessThan(60_000);
+
+    const files = listEventFiles(dir);
+    expect(files).toHaveLength(N);
+    // Lexicographic order == append order survives at scale: contiguous
+    // 6-digit prefixes 000000…000999 in exactly append order, each named by
+    // its own key digest.
+    for (let i = 0; i < N; i += 1) {
+      expect(files[i]).toBe(`${String(i).padStart(6, "0")}-${keyDigest(`scale:${i}`)}.json`);
+    }
+
+    const records = readFileEventRecords(dir);
+    expect(records.ok).toBe(true);
+    if (!records.ok) return;
+    expect(records.value).toHaveLength(N);
+    expect(records.value.map((r) => Number(r.sequence))).toEqual(Array.from({ length: N }, (_, i) => i));
+
+    // Resume through the real agreement proof: the final checkpoint agrees
+    // with the full 1000-event replay (guards the O(n) strict-prefix scan
+    // and the checkpoint-first acquisition at scale).
+    const resumed = await resumeFileJob<S, E, C>({
+      runId: runId("scale-1000"),
+      directory: dir,
+      machine,
+      genesis: genesis(),
+      parseCheckpoint: scaleParseCheckpoint,
+    });
+    expect(resumed.ok).toBe(true);
+    if (resumed.ok) {
+      expect(resumed.value.state).toEqual({ kind: "pending", count: N });
+      expect(resumed.value.context).toEqual({ value: N });
+    }
+
+    // The total cycle (1000 appends + 10 checkpoints + 1000-record replay)
+    // stays inside the same generous bound.
+    expect(Date.now() - startedAt).toBeLessThan(60_000);
+  }, 90_000);
 });

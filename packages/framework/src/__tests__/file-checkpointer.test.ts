@@ -53,7 +53,7 @@ import type { Checkpointer, CorruptCheckpointAddress, NodeState, RunMeta } from 
 import { checkpointerSuite } from "./_checkpointer-suite.js";
 import { D, N, R } from "./_id-helpers.js";
 import type { RunId } from "../types/ids.js";
-import { __brandNodeIdUnchecked, __brandRunIdUnchecked } from "../types/ids.js";
+import { __brandDagIdUnchecked, __brandNodeIdUnchecked, __brandRunIdUnchecked } from "../types/ids.js";
 import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
 import type { FrameworkError } from "../types/errors.js";
 import { isFrameworkError, retriabilityOf } from "../types/errors.js";
@@ -2222,6 +2222,29 @@ describe("FileCheckpointer — boundary validation (FR-016)", () => {
       if (result.ok) throw new Error(`expected a rejection for ${JSON.stringify(hostile)}`);
       expect(result.error.kind).toBe("cache-error");
     }
+  });
+
+  it("rejects an out-of-domain dagId on setMeta — the write boundary re-establishes the DagId domain (tda-1)", async () => {
+    const directory = freshDirectory();
+    const cp = createFileCheckpointer(directory);
+    // Brand BYPASSED (the port type says DagId; the runtime trusts nothing):
+    // this backend's own re-validation must refuse to persist bytes its own
+    // LOAD gate (`parseRunMetaRecord` → `tryDagId`) would later reject as
+    // `checkpoint-corrupt` — an ok-then-corrupt checkpoint is worse than a
+    // write failure (review run.vtN26syQLu type-design-analyzer-1).
+    const outOfDomain = ["tenant:dag", "", "a b", "x".repeat(129)];
+    for (const raw of outOfDomain) {
+      const result = await cp.setMeta(R("run-dag-domain"), META({ dagId: __brandDagIdUnchecked(raw) }));
+      expect(result.ok, raw).toBe(false);
+      if (result.ok) throw new Error(`expected a rejection for ${JSON.stringify(raw)}`);
+      expect(result.error.kind).toBe("checkpoint-write-failed");
+      if (result.error.kind !== "checkpoint-write-failed") throw new Error("unreachable");
+      expect(result.error.message).toContain("DagId domain");
+    }
+    // Nothing was written — not even the run directory.
+    expect(existsSync(join(directory, "run-dag-domain"))).toBe(false);
+    // And an in-domain dagId still round-trips (no over-rejection).
+    expect((await cp.setMeta(R("run-dag-domain-ok"), META({ dagId: D("customer-summary") }))).ok).toBe(true);
   });
 });
 

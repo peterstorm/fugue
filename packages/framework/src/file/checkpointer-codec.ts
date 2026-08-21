@@ -58,7 +58,7 @@ import {
   serializedPath as outputPath,
   MAX_SAFE_RECORD_DEPTH,
 } from "../state-machine/serialize.js";
-import { ID_PATTERN, __brandNodeId, type NodeId } from "../types/ids.js";
+import { ID_PATTERN, __brandNodeId, tryDagId, type NodeId } from "../types/ids.js";
 import { isRepresentableTimestampMs } from "../types/clock.js";
 import type { Result } from "../types/result.js";
 import { err, ok } from "../types/result.js";
@@ -203,6 +203,15 @@ export const serializeMeta = (meta: RawMetaSnapshot, createdAtMs: number): strin
   if (typeof dagId !== "string") {
     throw new Error(`meta.dagId must be a string, got ${render(dagId)}`);
   }
+  // The file WRITE boundary re-establishes the DagId domain, exactly as the
+  // SAME backend's load gate does (`parseRunMetaRecord` → `tryDagId`) and as
+  // the in-memory backend's `RunMeta.dagId` typing excludes it: persisting
+  // bytes that load would reject as `checkpoint-corrupt` would make the
+  // backend write-read asymmetric (round-23 tda-5 domain parity).
+  const parsedDagId = tryDagId(dagId);
+  if (!parsedDagId.ok) {
+    throw new Error(`meta.dagId is outside the DagId domain: ${parsedDagId.error}`);
+  }
   if (!isValidDate(startedAt)) {
     throw new Error(`meta.startedAt must be a valid Date, got ${render(startedAt)}`);
   }
@@ -224,10 +233,10 @@ export const serializeMeta = (meta: RawMetaSnapshot, createdAtMs: number): strin
       `meta.frameworkVersion must be a string when present, got ${render(frameworkVersion)}`,
     );
   }
-  const createdAt = new Date(createdAtMs);
   if (!isRepresentableTimestampMs(createdAtMs)) {
     throw new Error(`clock produced a non-representable timestamp: ${render(createdAtMs)}`);
   }
+  const createdAt = new Date(createdAtMs);
   const stored: StoredMeta = Object.freeze({
     dagId,
     startedAt: Date.prototype.toISOString.call(startedAt),
@@ -776,28 +785,28 @@ export const parseSaveNodeBoundary = (
     return err(`attempt must be a non-negative safe integer, got ${render(attempt)}`);
   }
 
-  if (index !== undefined) {
-    return ok({
-      nodeId,
-      saveOpts: Object.freeze({
-        ...(namespace !== undefined ? { namespace } : {}),
-        index,
-        ...(attempt !== undefined ? { attempt } : {}),
-      }),
-    });
+  // One guard + one exit for every presence combination: a bare `namespace`
+  // is the single ambiguous shape (no index/attempt to address). The
+  // per-case construction stays type-exact against the `SaveNodeOpts`
+  // discriminated union — its per-case REQUIRED field (`index` / `attempt`)
+  // is the union's essential state space, so a single all-optional spread
+  // would need an unsound assertion to type-check.
+  if (namespace !== undefined && index === undefined && attempt === undefined) {
+    return err("namespace without index/attempt is ambiguous; supply index and/or attempt");
   }
-  if (attempt !== undefined) {
-    return ok({
-      nodeId,
-      saveOpts: Object.freeze({
-        ...(namespace !== undefined ? { namespace } : {}),
-        attempt,
-      }),
-    });
-  }
-  return namespace === undefined
-    ? ok({ nodeId, saveOpts: Object.freeze({}) })
-    : err("namespace without index/attempt is ambiguous; supply index and/or attempt");
+  const saveOpts: SaveNodeOpts =
+    index !== undefined
+      ? Object.freeze({
+          ...(namespace !== undefined ? { namespace } : {}),
+          index,
+          ...(attempt !== undefined ? { attempt } : {}),
+        })
+      : Object.freeze(
+          attempt !== undefined
+            ? { ...(namespace !== undefined ? { namespace } : {}), attempt }
+            : {},
+        );
+  return ok({ nodeId, saveOpts });
 };
 
 const LOAD_OPTION_FIELDS: ReadonlySet<string> = new Set(["expectedDagFingerprint"]);

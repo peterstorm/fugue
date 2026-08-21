@@ -478,10 +478,12 @@ const createFileFreshnessIndexUnchecked = (
    * stamp) and `findConflict` (lazy TTL evaluation). Both rejections are
    * code-constructed and deterministic — a throwing or non-finite injected
    * clock fails identically on every retry — so both are pinned
-   * "permanent". The two checkpointer backends consolidated the same pair the
+   * "permanent". The checkpointer backends consolidate the same pair the
    * same way (file/checkpointer.ts `readClock`, checkpoint/checkpointer.ts
-   * `readClock`); this is the third clock-guard implementation, covering the
-   * last two of the five clock sites (`recordWrite`, `findConflict`).
+   * `readClock`); this module keeps that same guard shape for its own two
+   * clock sites (`recordWrite`, `findConflict`) — the shared invariant is
+   * the guard shape, not a site count, which is what keeps this comment
+   * from silently drifting when clock sites are added or removed.
    */
   const readClock = (
     operation: "freshness:recordWrite" | "freshness:findConflict",

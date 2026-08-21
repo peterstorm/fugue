@@ -42,6 +42,12 @@ interface SpawnResult {
  * Start bounded background cleanup without delaying delivery of a timeout error.
  * The caller retains operation-specific error construction; this helper owns the
  * shared SIGTERM → grace race → SIGKILL → stream-drain lifecycle.
+ *
+ * The whole cleanup is best-effort by design — the timeout error has ALREADY
+ * been delivered when this runs — so a fault inside the IIFE (a rejecting
+ * `drainStreams` under its `Promise<unknown>` contract, or a throwing
+ * `forceKill`) must not escape as a process-level unhandled rejection with no
+ * operator breadcrumb: terminal catch, logged, done.
  */
 const cleanupTimedOutChild = (
   terminate: () => void,
@@ -52,14 +58,18 @@ const cleanupTimedOutChild = (
   terminate();
   const settled = exited.catch(() => 0);
   void (async () => {
-    const winner = await Promise.race([
-      settled,
-      new Promise<"grace">((resolve) =>
-        setTimeout(() => resolve("grace"), KILL_GRACE_MS),
-      ),
-    ]);
-    if (winner === "grace") forceKill();
-    await drainStreams();
+    try {
+      const winner = await Promise.race([
+        settled,
+        new Promise<"grace">((resolve) =>
+          setTimeout(() => resolve("grace"), KILL_GRACE_MS),
+        ),
+      ]);
+      if (winner === "grace") forceKill();
+      await drainStreams();
+    } catch (e) {
+      console.warn(`[git-sync] bounded cleanup of timed-out child failed (timeout error already delivered): ${e instanceof Error ? e.message : String(e)}`);
+    }
   })();
 };
 

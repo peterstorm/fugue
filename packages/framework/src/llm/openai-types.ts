@@ -128,9 +128,15 @@ export const parseToolCalls = (output: readonly ResponsesOutputItem[]): ToolCall
     try {
       parsedInput = JSON.parse(block.arguments || "{}");
     } catch (parseErr) {
-      // Surface as unknown_input; dispatchToolCall will turn it into an is_error result.
+      // Unparseable arguments are passed through as the RAW string: the tool's
+      // Zod inputSchema then rejects it (expected object, received string) and
+      // dispatchToolCall turns that into the is_error `invalid_input` result
+      // the model can recover from by retrying with well-formed JSON. The
+      // operator breadcrumb is the warn above; no intermediate marker is
+      // needed (nothing downstream distinguishes parse failures from other
+      // schema violations).
       fwLogger().warn(`[openai-client] Failed to parse tool-call arguments for '${block.name}': ${parseErr instanceof Error ? parseErr.message : parseErr}`);
-      parsedInput = { __parse_error__: block.arguments };
+      parsedInput = block.arguments;
     }
     calls.push({ id: block.call_id, name: block.name, input: parsedInput });
   }
