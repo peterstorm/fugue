@@ -869,10 +869,36 @@ describe("parseSaveNodeBoundary — one node identity + closed options grammar (
     if (!result.ok) return;
     expect(Object.isFrozen(result.value.saveOpts)).toBe(true);
 
-    const partial = parseSaveNodeBoundary("run-1", rawState, snapshotSaveNodeOpts({ index: 0 }));
-    expect(partial.ok).toBe(true);
-    if (!partial.ok) return;
-    expect(partial.value).toEqual({ nodeId: N("n1"), saveOpts: { index: 0 } });
+    const indexOnly = parseSaveNodeBoundary(
+      "run-1",
+      rawState,
+      snapshotSaveNodeOpts({ index: 0 }),
+    );
+    expect(indexOnly).toEqual({
+      ok: true,
+      value: { nodeId: N("n1"), saveOpts: { index: 0 } },
+    });
+
+    const attemptOnly = parseSaveNodeBoundary(
+      "run-1",
+      rawState,
+      snapshotSaveNodeOpts({ namespace: "ns", attempt: 0 }),
+    );
+    expect(attemptOnly).toEqual({
+      ok: true,
+      value: { nodeId: N("n1"), saveOpts: { namespace: "ns", attempt: 0 } },
+    });
+
+    const empty = parseSaveNodeBoundary("run-1", rawState, snapshotSaveNodeOpts({}));
+    expect(empty).toEqual({
+      ok: true,
+      value: { nodeId: N("n1"), saveOpts: {} },
+    });
+    if (indexOnly.ok && attemptOnly.ok && empty.ok) {
+      expect(Object.isFrozen(indexOnly.value.saveOpts)).toBe(true);
+      expect(Object.isFrozen(attemptOnly.value.saveOpts)).toBe(true);
+      expect(Object.isFrozen(empty.value.saveOpts)).toBe(true);
+    }
   });
 });
 

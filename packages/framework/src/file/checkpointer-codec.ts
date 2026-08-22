@@ -794,19 +794,22 @@ export const parseSaveNodeBoundary = (
   if (namespace !== undefined && index === undefined && attempt === undefined) {
     return err("namespace without index/attempt is ambiguous; supply index and/or attempt");
   }
-  const saveOpts: SaveNodeOpts =
-    index !== undefined
-      ? Object.freeze({
-          ...(namespace !== undefined ? { namespace } : {}),
-          index,
-          ...(attempt !== undefined ? { attempt } : {}),
-        })
-      : Object.freeze(
-          attempt !== undefined
-            ? { ...(namespace !== undefined ? { namespace } : {}), attempt }
-            : {},
-        );
-  return ok({ nodeId, saveOpts });
+  if (index !== undefined) {
+    const saveOpts: SaveNodeOpts = Object.freeze({
+      ...(namespace !== undefined ? { namespace } : {}),
+      index,
+      ...(attempt !== undefined ? { attempt } : {}),
+    });
+    return ok({ nodeId, saveOpts });
+  }
+  if (attempt !== undefined) {
+    const saveOpts: SaveNodeOpts = Object.freeze({
+      ...(namespace !== undefined ? { namespace } : {}),
+      attempt,
+    });
+    return ok({ nodeId, saveOpts });
+  }
+  return ok({ nodeId, saveOpts: Object.freeze({}) });
 };
 
 const LOAD_OPTION_FIELDS: ReadonlySet<string> = new Set(["expectedDagFingerprint"]);

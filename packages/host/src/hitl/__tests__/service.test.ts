@@ -91,6 +91,13 @@ const inMemoryRunStore = () => {
       for (const id of [...active]) if (!runs.has(id)) active.delete(id);
       return ok(active.size);
     },
+    async listActiveRunIds() {
+      for (const id of [...active]) {
+        const run = runs.get(id);
+        if (run === undefined || isTerminal(run.status)) active.delete(id);
+      }
+      return ok([...active] as RunId[]);
+    },
   };
   return { port, runs, active };
 };
@@ -131,12 +138,12 @@ const inMemoryDecisionStore = () => {
       pendingMarks.add(k);
       return ok(true);
     },
-    async isPending(runId, nodeId) {
-      return ok(pendingMarks.has(key(runId, nodeId)));
-    },
-    async putDecision(runId, nodeId, action) {
-      decisions.set(key(runId, nodeId), action);
-      return ok(undefined);
+    async resolvePending(runId, nodeId, action) {
+      const k = key(runId, nodeId);
+      if (!pendingMarks.has(k)) return ok({ kind: "not-pending" });
+      if (decisions.has(k)) return ok({ kind: "already-resolved" });
+      decisions.set(k, action);
+      return ok({ kind: "accepted" });
     },
     async getDecision(runId, nodeId) {
       return ok(decisions.get(key(runId, nodeId)) ?? null);
@@ -465,12 +472,10 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
   });
 
   it("two valid approvals racing the SAME open gate → execute once, notify once, consume once (ADR-0060 duplicate-approval window)", async () => {
-    // ADR-0060 "Known timing window → Duplicate approval": two approvals can both
-    // observe `isPending === true` and both `enqueue` (the queue is intentionally
-    // non-idempotent; resume re-enqueues must never be dropped). The resolved
-    // behaviour: the single-flight lock + terminal/already-advanced guard mean the
-    // gated node executes EXACTLY ONCE; the second job is a redundant no-op slice,
-    // with NO duplicate notification and the decision consumed exactly once.
+    // Two approvals can both observe the open gate, but resolvePending's SET NX
+    // preserves the first action. Both durable outcomes may enqueue (the queue is
+    // intentionally non-idempotent); the single-flight lock + terminal guard mean
+    // the gated node executes exactly once and the second slice is a no-op.
     let draftRuns = 0;
     let reviewRuns = 0;
     const dag = twoWaveDag({ onDraft: () => { draftRuns++; }, onReview: () => { reviewRuns++; } });
@@ -484,13 +489,13 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     expect(store.runs.get(runId)!.status.kind).toBe("suspended");
     expect(notif.sent).toHaveLength(1);
 
-    // TWO approvals race the SAME open gate: both see the pending marker, both
-    // record (idempotent — same gate, last write wins), both enqueue a wakeup.
+    // TWO approvals race the SAME open gate: the first action is durable and the
+    // second observes `already-resolved`; both may enqueue an idempotent wakeup.
     const first = await service.recordDecision(runId, "review" as NodeId, { kind: "approve", actor: "Alice" });
     const second = await service.recordDecision(runId, "review" as NodeId, { kind: "approve", actor: "Bob" });
     expect(first.ok).toBe(true);
     expect(second.ok).toBe(true);
-    // Both passed `isPending` and both enqueued — TWO wakeup jobs are now queued.
+    expect(dec.decisions.get(`${runId}:review`)).toEqual({ kind: "approve", actor: "Alice" });
     expect(queue.pending).toHaveLength(2);
 
     // Drain both jobs. The first resumes → completes + consumes (clears) the gate;
@@ -634,11 +639,15 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     if (!res.ok) expect(res.error.kind).toBe("redis-unavailable");
   });
 
-  it("startRun compensates a failed initial enqueue by terminally settling and releasing the active slot", async () => {
+  it("keeps an accepted run durable when the initial wakeup fails, then reconciliation wakes it", async () => {
     const store = inMemoryRunStore();
+    const delivered: RunId[] = [];
+    let failEnqueue = true;
     const queue: RunQueuePort = {
-      async enqueue() {
-        return err({ kind: "redis-unavailable", operation: "initial enqueue" });
+      async enqueue(runId) {
+        if (failEnqueue) return err({ kind: "redis-unavailable", operation: "initial enqueue" });
+        delivered.push(runId);
+        return ok(undefined);
       },
     };
     const service = createHitlRunService({
@@ -653,19 +662,74 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     });
 
     const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    expect(started.ok).toBe(true);
+    const durable = store.runs.get("run-enqueue-failure" as RunId)!;
+    expect(durable.status.kind).toBe("queued");
+    expect(store.active.has(durable.runId)).toBe(true);
 
-    expect(started.ok).toBe(false);
-    if (!started.ok) expect(started.error.kind).toBe("redis-unavailable");
-    const record = store.runs.get("run-enqueue-failure" as RunId)!;
-    expect(record.status.kind).toBe("failed");
-    expect(store.active.has(record.runId)).toBe(false);
+    failEnqueue = false;
+    const reconciled = await service.reconcileActiveRuns();
+    expect(reconciled).toEqual(ok([{ kind: "woken", runId: durable.runId }]));
+    expect(delivered).toEqual([durable.runId]);
   });
 
-  it("recordDecision returns err when the decision is stored but the resume enqueue fails (decided-but-not-woken)", async () => {
-    // service.ts:274-289 — putDecision succeeds (the approval is durable) but
-    // runQueue.enqueue fails, so the run is not re-woken. The decision is NOT
-    // lost (it outlives via the store), but the half-completed approval must be
-    // surfaced as `err` rather than reported ok, so the stuck run is diagnosable.
+  it("a fresh service instance reconciles an accepted queued run after restart", async () => {
+    const store = inMemoryRunStore();
+    const decisions = inMemoryDecisionStore();
+    const common = {
+      runStore: store.port,
+      decisions: decisions.port,
+      tenant: TENANT,
+      notifier: recordingNotifier().port,
+      executor: realExecutor(oneNodeDag()),
+      clock: () => 1_000,
+      newRunId: () => mkRunId("restart-run"),
+    };
+    const beforeRestart = createHitlRunService({
+      ...common,
+      runQueue: { async enqueue() { return err({ kind: "redis-unavailable", operation: "queue down" }); } },
+    });
+    expect((await beforeRestart.startRun("test-dag" as DagId, null, ADMIN)).ok).toBe(true);
+
+    const delivered: RunId[] = [];
+    const afterRestart = createHitlRunService({
+      ...common,
+      runQueue: { async enqueue(runId) { delivered.push(runId); return ok(undefined); } },
+    });
+    expect(await afterRestart.reconcileActiveRuns()).toEqual(ok([
+      { kind: "woken", runId: "restart-run" as RunId },
+    ]));
+    expect(delivered).toEqual(["restart-run" as RunId]);
+  });
+
+  it("surfaces active enumeration errors through the typed reconciliation result", async () => {
+    const store = inMemoryRunStore();
+    const brokenStore: RunStorePort = {
+      ...store.port,
+      async listActiveRunIds() {
+        return err({ kind: "redis-unavailable", operation: "SMEMBERS active" });
+      },
+    };
+    const service = createHitlRunService({
+      runStore: brokenStore,
+      runQueue: inMemoryRunQueue().port,
+      decisions: inMemoryDecisionStore().port,
+      tenant: TENANT,
+      notifier: recordingNotifier().port,
+      executor: realExecutor(oneNodeDag()),
+      clock: () => 1_000,
+      newRunId: () => mkRunId("unused"),
+    });
+
+    const reconciled = await service.reconcileActiveRuns();
+    expect(reconciled.ok).toBe(false);
+    if (!reconciled.ok) expect(reconciled.error.kind).toBe("redis-unavailable");
+  });
+
+  it("a stored decision whose direct wakeup fails completes after reconciliation", async () => {
+    // Resolution succeeds durably while the direct queue wakeup fails. The
+    // acceptance remains successful; a later server-owned sweep must discover
+    // the non-terminal run and resume it without another human request.
     const dag = twoWaveDag();
     const store = inMemoryRunStore();
     const baseQueue = inMemoryRunQueue();
@@ -693,10 +757,15 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
 
     failEnqueue = true;
     const res = await service.recordDecision(runId, "review" as NodeId, { kind: "approve" });
-    expect(res.ok).toBe(false);
-    if (!res.ok) expect(res.error.kind).toBe("redis-unavailable");
-    // The decision IS durably stored despite the failed wakeup — "decided but not woken".
+    expect(res.ok).toBe(true); // durable acceptance is authoritative
     expect(dec.decisions.has(`${runId}:review`)).toBe(true);
+    expect(store.runs.get(runId)?.status.kind).toBe("suspended");
+
+    failEnqueue = false;
+    const reconciled = await service.reconcileActiveRuns();
+    expect(reconciled.ok).toBe(true);
+    await baseQueue.drain();
+    expect(store.runs.get(runId)?.status.kind).toBe("completed");
   });
 
   it("getRun reflects the lifecycle: queued → suspended → completed", async () => {

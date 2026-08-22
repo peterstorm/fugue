@@ -75,6 +75,7 @@ const fakeHitl = (overrides: Partial<HitlRunService> = {}): HitlRunService => ({
   startRun: mock(async () => ok({ runId: mkRunId("run-1") })),
   processRun: async () => ok(undefined),
   recordDecision: mock(async () => ok(undefined)),
+  reconcileActiveRuns: async () => ok([]),
   getRun: async () => ok(record()),
   ...overrides,
 });

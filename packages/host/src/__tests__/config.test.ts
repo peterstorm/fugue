@@ -36,6 +36,13 @@ describe("HostConfigSchema", () => {
     expect(c.CIRCUIT_BREAKER_WINDOW_MS).toBe(60_000);
     expect(c.DEFAULT_CACHE_TTL_MS).toBe(300_000);
     expect(c.DEFAULT_CHECKPOINT_TTL_MS).toBe(86_400_000);
+    expect(c.HITL_RECONCILE_INTERVAL_MS).toBe(30_000);
+  });
+
+  it("parses a bounded HITL reconciliation interval and rejects a hot loop", () => {
+    const parsed = parseHostConfig({ ...validEnv, HITL_RECONCILE_INTERVAL_MS: "1500" });
+    expect(parsed.ok && parsed.value.HITL_RECONCILE_INTERVAL_MS).toBe(1500);
+    expect(parseHostConfig({ ...validEnv, HITL_RECONCILE_INTERVAL_MS: "999" }).ok).toBe(false);
   });
 
   it("rejects missing DAGS_REPO_URL", () => {

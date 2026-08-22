@@ -59,13 +59,19 @@ interface HitlRunServiceDeps {
   readonly logger?: LogPort;
 }
 
+export type ReconciliationAttempt =
+  | { readonly kind: "woken"; readonly runId: RunId }
+  | { readonly kind: "wakeup-failed"; readonly runId: RunId; readonly error: HostError };
+
 export interface HitlRunService {
   /** Seed + persist + enqueue a fresh HITL run. Returns its run id. */
   startRun(dagId: DagId, input: unknown, identity: AuthIdentity): Promise<Result<{ runId: RunId }, HostError>>;
   /** Worker handler: execute/resume `runId` and fold the outcome into its status. */
   processRun(runId: RunId): Promise<Result<void, HostError>>;
-  /** Approval: record a human decision for a parked gate and re-enqueue the run. */
+  /** Approval: atomically resolve a parked gate and request a resume wakeup. */
   recordDecision(runId: RunId, nodeId: NodeId, action: HumanAction): Promise<Result<void, HostError>>;
+  /** Idempotently request a wakeup for every durable non-terminal run. */
+  reconcileActiveRuns(): Promise<Result<readonly ReconciliationAttempt[], HostError>>;
   /** Fetch a run record (status poll), or `ok(null)` if unknown. */
   getRun(runId: RunId): Promise<Result<RunRecord | null, HostError>>;
 }
@@ -100,11 +106,11 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
     //
     // SOFT CEILING (by design): this is a non-atomic check-then-create over the
     // active-run SET — the per-tenant Redis ACL denies `eval`/Lua (ADR-0067), so
-    // there is no atomic check-and-reserve. Two concurrent durable starts can each
-    // read `active < maxQueuedRuns` before either creates, transiently overshooting
-    // the bound by the in-flight `startRun` concurrency. The overshoot is small and
-    // bounded (single-threaded worker event loop), self-heals as runs settle and
-    // `countActiveRuns` prunes, and is acceptable: a counter-based hard ceiling
+    // there is no atomic check-and-reserve. Concurrent durable starters can each
+    // read `active < maxQueuedRuns` before any creates, transiently overshooting
+    // the bound by at most the number of concurrent starters. The overshoot
+    // self-heals as runs settle and `countActiveRuns` prunes, and is acceptable:
+    // a counter-based hard ceiling
     // (`INCR`/`DECR`) would add a counter-vs-SET consistency invariant that drifts
     // on crashes. Non-durable load is bounded separately by the supervisor's
     // request-scoped `maxConcurrentRuns` gate.
@@ -134,16 +140,13 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
 
     const enqueued = await runQueue.enqueue(runId);
     if (!enqueued.ok) {
-      // A queued record without a wakeup violates the durable-requeue invariant.
-      // Compensate by settling it terminally; `RunStorePort.setStatus` removes the
-      // active-index member (ADR-0074), so it cannot strand quota or be mistaken
-      // for a resumable run. If this write fails, return that typed persistence
-      // failure: no durable compensation was established for the caller to trust.
-      const compensated = await runStore.setStatus(runId, {
-        kind: "failed",
-        error: asRunFailure(enqueued.error),
+      // The run is already durably accepted. Do not destroy it merely because
+      // the direct wakeup failed: server-owned reconciliation enumerates this
+      // active record after restart and on every lifecycle tick.
+      logger?.error?.("hitl: run accepted but initial wakeup failed — reconciliation will retry", {
+        runId,
+        error: enqueued.error.kind,
       });
-      return compensated.ok ? enqueued : compensated;
     }
 
     return ok({ runId });
@@ -261,47 +264,53 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
       return err({ kind: "run-not-found", runId });
     }
 
-    // Engine-level invariant: a decision can only resolve the gate the run is
-    // CURRENTLY parked at. The authority is the decision store's pending marker,
-    // NOT the run-store status: the hook writes the marker (markPending) BEFORE
-    // it sends the notification and clears it when the gate resolves, so it is
-    // present for the whole window a reviewer could respond — including the brief
-    // slice after the notification is delivered but before the worker has folded
-    // the `suspended` status back into the run store (`processRun` sets `running`,
-    // runs the executor — which notifies — and only then writes `suspended`).
-    // Gating on the lagging status field would 409-drop an approval that lands in
-    // that window and permanently strand the decided run. The marker absence also
-    // covers the cases the status check did: a never-parked (`queued`) run and a
-    // stale gate the run already advanced past (its marker was cleared on resolve).
-    const pending = await decisions.isPending(runId, nodeId);
-    if (!pending.ok) return pending;
-    if (!pending.value) {
+    // The pending marker is the authority during the brief `running` window;
+    // SET NX inside `resolvePending` makes the action first-writer atomic.
+    const resolution = await decisions.resolvePending(runId, nodeId, action);
+    if (!resolution.ok) return resolution;
+    if (resolution.value.kind === "not-pending") {
       const status = record.status.kind === "suspended" && record.status.nodeId !== nodeId
         ? `suspended at a different gate (${record.status.nodeId})`
         : record.status.kind;
       return err({ kind: "run-not-suspended", runId, status });
     }
 
-    const stored = await decisions.putDecision(runId, nodeId, action);
-    if (!stored.ok) return stored;
-
+    // Both accepted and already-resolved identify durable state that is safe to
+    // wake. A failed direct wakeup does not revoke the accepted decision: the
+    // lifecycle reconciler owns eventual delivery, including after restart.
     const enqueued = await runQueue.enqueue(runId);
     if (!enqueued.ok) {
-      // The decision is now durably stored but the run was not re-enqueued to
-      // act on it. Recoverable (a retried approval re-enqueues; the decision
-      // TTL outlives the run), but surface the half-completed approval so the
-      // decided-but-not-woken run is diagnosable rather than silently stuck.
-      logger?.error?.("hitl: decision stored but resume enqueue failed — run not woken", {
+      logger?.error?.("hitl: decision accepted but resume wakeup failed — reconciliation will retry", {
         runId,
         nodeId,
+        resolution: resolution.value.kind,
         error: enqueued.error.kind,
       });
-      return enqueued;
     }
     return ok(undefined);
   };
 
+  const reconcileActiveRuns = async (): Promise<Result<readonly ReconciliationAttempt[], HostError>> => {
+    const active = await runStore.listActiveRunIds();
+    if (!active.ok) return active;
+
+    const attempts: ReconciliationAttempt[] = [];
+    for (const runId of active.value) {
+      const woken = await runQueue.enqueue(runId);
+      if (woken.ok) {
+        attempts.push({ kind: "woken", runId });
+      } else {
+        attempts.push({ kind: "wakeup-failed", runId, error: woken.error });
+        logger?.error?.("hitl: active-run reconciliation wakeup failed", {
+          runId,
+          error: woken.error.kind,
+        });
+      }
+    }
+    return ok(attempts);
+  };
+
   const getRun = (runId: RunId): Promise<Result<RunRecord | null, HostError>> => runStore.get(runId);
 
-  return { startRun, processRun, recordDecision, getRun };
+  return { startRun, processRun, recordDecision, reconcileActiveRuns, getRun };
 };

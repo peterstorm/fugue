@@ -116,6 +116,45 @@ export const createRedisConnectivity = async (
       },
     };
 
+    // WATCH state is connection-scoped, so serialize compare-delete transactions
+    // on this client. Other ordinary Redis commands remain concurrent; a write
+    // to the watched key makes EXEC abort, which is exactly the ownership change
+    // this comparator must observe.
+    let compareDeleteTail: Promise<void> = Promise.resolve();
+    const compareAndDelete = async (
+      key: string,
+      expectedValue: string,
+    ): Promise<Result<boolean, HostError>> => {
+      let releaseTurn: () => void = () => {};
+      const turn = new Promise<void>((resolve) => { releaseTurn = resolve; });
+      const previous = compareDeleteTail;
+      compareDeleteTail = previous.then(() => turn);
+      await previous;
+
+      try {
+        await client.watch(key);
+        const current = await client.get(key);
+        if (current !== expectedValue) {
+          await client.unwatch();
+          return ok(false);
+        }
+        const executed = await client.multi().del(key).exec();
+        // A null EXEC means the watched key changed (expiry or successor write)
+        // after the read. The old holder no longer owns a deletable lease.
+        if (executed === null) return ok(false);
+        const [commandError, deleted] = executed[0] ?? [];
+        if (commandError !== null) throw commandError;
+        return ok(deleted === 1);
+      } catch (e) {
+        // Best effort only: preserve the primary comparator error if UNWATCH also
+        // fails. Redis clears WATCH state after EXEC and on disconnect.
+        try { await client.unwatch(); } catch { /* primary error is authoritative */ }
+        return err(redisErr(`COMPARE-AND-DELETE ${key}`, e));
+      } finally {
+        releaseTurn();
+      }
+    };
+
     const redis: RedisPort = {
       get: async (key) => {
         try {
@@ -163,6 +202,7 @@ export const createRedisConnectivity = async (
           return err(redisErr(`SETNX ${key}`, e));
         }
       },
+      compareAndDelete,
       sAdd: async (key, member) => {
         try {
           return ok(await client.sadd(key, member));

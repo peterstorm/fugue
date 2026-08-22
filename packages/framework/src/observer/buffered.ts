@@ -4,6 +4,7 @@ import type { PersistencePolicy } from "./policy.js";
 import { fwLogger } from "../logger.js";
 import { dispatchEvent } from "./dispatch.js";
 import { match } from "ts-pattern";
+import { safeDiagnosticRender, safeErrorMessage } from "../types/safe-error.js";
 export { dispatchEvent } from "./dispatch.js";
 
 export type { RunSummary } from "./run-summary.js";
@@ -87,6 +88,18 @@ interface BufferedObserverOpts {
 const DEFAULT_TTL_MS = 60 * 60 * 1000; // 1h
 const DEFAULT_SWEEP_MS = 5 * 60 * 1000; // 5min
 
+/** Observer diagnostics must never become a second observability failure. */
+const bestEffortLog = (
+  level: "error" | "warn",
+  message: string,
+): void => {
+  try {
+    fwLogger()[level](message);
+  } catch {
+    // Accounting and cleanup remain authoritative when the logger is broken.
+  }
+};
+
 /**
  * Buffered observer that accumulates per-run events and flushes them according
  * to a persistence policy (tail-based sampling). Implements `Observer` for event
@@ -167,14 +180,16 @@ export class BufferedObserver implements Observer, Disposable {
     try {
       nowMs = this.now();
     } catch (error) {
-      fwLogger().error(
-        `[BufferedObserver] clock threw — eviction disabled this cycle: ${error instanceof Error ? error.message : String(error)}`,
+      bestEffortLog(
+        "error",
+        `[BufferedObserver] clock threw — eviction disabled this cycle: ${safeErrorMessage(error)}`,
       );
       return null;
     }
     if (!Number.isFinite(nowMs)) {
-      fwLogger().warn(
-        `[BufferedObserver] clock returned a non-finite stamp (${String(nowMs)}) — eviction disabled this cycle`,
+      bestEffortLog(
+        "warn",
+        `[BufferedObserver] clock returned a non-finite stamp (${safeDiagnosticRender(nowMs)}) — eviction disabled this cycle`,
       );
       return null;
     }
@@ -193,7 +208,8 @@ export class BufferedObserver implements Observer, Disposable {
       if (buf.lastActivityAt < cutoff) {
         this.buffers.delete(runId);
         this.evictedCount++;
-        fwLogger().warn(
+        bestEffortLog(
+          "warn",
           `[BufferedObserver] Evicting orphaned run buffer ${runId} (last activity: ${nowMs - buf.lastActivityAt}ms ago, events: ${buf.events.length})`,
         );
       }
@@ -239,10 +255,21 @@ export class BufferedObserver implements Observer, Disposable {
    */
   private accountDispatchFailure(event: ObserverEvent, error: unknown, label: string): void {
     this.dispatchErrorCount++;
-    if (this.onReplayFailure) {
+    if (!this.onReplayFailure) {
+      bestEffortLog(
+        "error",
+        `[BufferedObserver] Replay failed for ${label}: ${safeErrorMessage(error)}`,
+      );
+      return;
+    }
+
+    try {
       this.onReplayFailure(event, error);
-    } else {
-      fwLogger().error(`[BufferedObserver] Replay failed for ${label}: ${error instanceof Error ? error.message : error}`);
+    } catch (deadLetterError) {
+      bestEffortLog(
+        "error",
+        `[BufferedObserver] Replay failed for ${label}: ${safeErrorMessage(error)}; dead-letter callback also failed: ${safeErrorMessage(deadLetterError)}`,
+      );
     }
   }
 
@@ -261,7 +288,7 @@ export class BufferedObserver implements Observer, Disposable {
       // run-end with no preceding run-start. Surface this rather than
       // silently emitting an orphan event — it usually indicates a buggy
       // caller or a double-finalize race.
-      fwLogger().warn(`[BufferedObserver] onRunEnd for unknown runId=${e.runId}`);
+      bestEffortLog("warn", `[BufferedObserver] onRunEnd for unknown runId=${e.runId}`);
     }
     const events = buf?.events ?? [];
     const summary = computeRunSummary(events, e);
@@ -274,9 +301,9 @@ export class BufferedObserver implements Observer, Disposable {
     try {
       shouldFlush = this.policy.shouldFlush(summary);
     } catch (policyErr) {
-      fwLogger().error(
-        `[BufferedObserver] PersistencePolicy.shouldFlush threw — flushing to avoid data loss:`,
-        policyErr instanceof Error ? policyErr.message : policyErr,
+      bestEffortLog(
+        "error",
+        `[BufferedObserver] PersistencePolicy.shouldFlush threw — flushing to avoid data loss: ${safeErrorMessage(policyErr)}`,
       );
       shouldFlush = true;
     }
@@ -293,7 +320,8 @@ export class BufferedObserver implements Observer, Disposable {
           }
         }
         if (replayFailures > 0) {
-          fwLogger().error(
+          bestEffortLog(
+            "error",
             `[BufferedObserver] ${replayFailures}/${events.length} events lost during replay for run ${e.runId}`,
           );
         }
@@ -309,7 +337,10 @@ export class BufferedObserver implements Observer, Disposable {
           this.accountDispatchFailure(e, err, "run-end");
         }
       } else {
-        fwLogger().warn(`[BufferedObserver] Dropping ${events.length} events for run ${e.runId} (filtered by persistence policy)`);
+        bestEffortLog(
+          "warn",
+          `[BufferedObserver] Dropping ${events.length} events for run ${e.runId} (filtered by persistence policy)`,
+        );
       }
     } finally {
       // Always clear the buffer — orphaning it on a flush-time throw is what

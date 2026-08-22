@@ -719,6 +719,12 @@ export const createInMemoryRedisFake = (): InMemoryRedisFake => {
       store.set(key, value);
       return ok(true);
     },
+    compareAndDelete: async (key, expected) => {
+      if (failing) return failErr("compareAndDelete");
+      if (store.get(key) !== expected) return ok(false);
+      store.delete(key);
+      return ok(true);
+    },
     sAdd: async (key, member) => {
       if (failing) return failErr("sAdd");
       const set = sets.get(key) ?? new Set<string>();

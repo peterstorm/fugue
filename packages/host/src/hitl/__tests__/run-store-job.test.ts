@@ -37,6 +37,7 @@ const fakeStore = (saveResult: () => ReturnType<RunStorePort["saveCheckpoint"]>)
     async saveCheckpoint(_runId, checkpoint) { saved.push(checkpoint); return saveResult(); },
     async setStatus(_runId, _status: RunStatus) { return ok(undefined); },
     async countActiveRuns() { return ok(0); },
+  async listActiveRunIds() { return ok([]); },
   };
   return { port, saved };
 };

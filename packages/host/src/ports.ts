@@ -155,6 +155,15 @@ export type RedisPort = {
    * forever and never self-heals.
    */
   readonly setNx: (key: string, value: string, opts?: { expiresInSec?: number }) => Promise<Result<boolean, HostError>>;
+  /**
+   * Delete `key` only while its value still equals `expectedValue`.
+   *
+   * This is one atomic Redis transaction, not `GET` followed by `DEL`: lease
+   * expiry may let a successor acquire the same key between those commands,
+   * and an expired holder must never delete that successor's lock. Returns
+   * `true` only when this caller's value was present and deleted.
+   */
+  readonly compareAndDelete: (key: string, expectedValue: string) => Promise<Result<boolean, HostError>>;
 }
 
 /**

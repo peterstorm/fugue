@@ -303,6 +303,11 @@ export const HostConfigSchema = z.object({
   /** Max concurrent HITL run slices the worker processes. Default 4. */
   HITL_WORKER_CONCURRENCY: z.coerce.number().int().min(1).default(4),
   /**
+   * Server-owned active-run wakeup reconciliation cadence. Runs once after the
+   * worker starts and then at this bounded interval; shutdown clears the owner.
+   */
+  HITL_RECONCILE_INTERVAL_MS: z.coerce.number().int().min(1000).default(30_000),
+  /**
    * Microsoft Bot Framework app id. Setting this (with BOT_APP_PASSWORD)
    * selects the IN-Teams transport: reviews post interactive Approve/Reject
    * cards and the bot endpoint (`POST /teams/messages`) records decisions

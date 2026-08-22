@@ -35,6 +35,7 @@ class FakeRedis {
   readonly calls: Array<{ readonly m: string; readonly args: readonly unknown[] }> = [];
   private readonly throwOn: Set<string>;
   private readonly o: FakeOverrides;
+  private readonly values = new Map<string, string>();
 
   constructor(o: FakeOverrides = {}) {
     this.status = o.initialStatus ?? "wait";
@@ -56,9 +57,10 @@ class FakeRedis {
     this.rec("ping", []);
     return "PONG";
   }
+  seed(key: string, value: string): void { this.values.set(key, value); }
   async get(key: string): Promise<string | null> {
     this.rec("get", [key]);
-    return this.o.getResult ?? null;
+    return "getResult" in this.o ? this.o.getResult ?? null : this.values.get(key) ?? null;
   }
   async set(...args: unknown[]): Promise<unknown> {
     this.rec("set", args);
@@ -69,6 +71,31 @@ class FakeRedis {
   async setnx(...args: unknown[]): Promise<unknown> {
     this.rec("setnx", args);
     return "setnxResult" in this.o ? this.o.setnxResult : 1;
+  }
+  async watch(key: string): Promise<string> {
+    this.rec("watch", [key]);
+    return "OK";
+  }
+  async unwatch(): Promise<string> {
+    this.rec("unwatch", []);
+    return "OK";
+  }
+  multi() {
+    this.rec("multi", []);
+    let deleteKey = "";
+    const chain = {
+      del: (key: string) => {
+        this.rec("multi.del", [key]);
+        deleteKey = key;
+        return chain;
+      },
+      exec: async () => {
+        this.rec("multi.exec", []);
+        const deleted = this.values.delete(deleteKey) ? 1 : 0;
+        return [[null, deleted]] as [Error | null, unknown][];
+      },
+    };
+    return chain;
   }
   async del(key: string): Promise<number> {
     this.rec("del", [key]);
@@ -231,6 +258,21 @@ describe("createRedisConnectivity — data port", () => {
     if (isErr(errR) && errR.error.kind === "redis-unavailable") {
       expect(errR.error.operation).toMatch(/GET k/);
     }
+  });
+
+  it("compareAndDelete uses WATCH/MULTI/EXEC and deletes only the matching owner", async () => {
+    const matching = new FakeRedis();
+    matching.seed("lease", "owner-a");
+    const deleted = await (await wire(matching)).bundle.redis.compareAndDelete("lease", "owner-a");
+    expect(isOk(deleted) && deleted.value).toBe(true);
+    expect(matching.calls.map((c) => c.m)).toEqual(["watch", "get", "multi", "multi.del", "multi.exec"]);
+
+    const successor = new FakeRedis();
+    successor.seed("lease", "owner-b");
+    const preserved = await (await wire(successor)).bundle.redis.compareAndDelete("lease", "owner-a");
+    expect(isOk(preserved) && preserved.value).toBe(false);
+    expect(successor.calls.map((c) => c.m)).toEqual(["watch", "get", "unwatch"]);
+    expect(await successor.get("lease")).toBe("owner-b");
   });
 
   it("sMembers wraps a thrown error as Err(redis-unavailable)", async () => {

@@ -98,8 +98,11 @@ type PersistedStatusVerdict =
 
 const parsePersistedStatus = (raw: string): PersistedStatusVerdict => {
   try {
-    const obj = JSON.parse(raw) as { status?: { kind?: unknown } };
-    const kind = obj?.status?.kind;
+    const parsed = RunMetaSchema.safeParse(JSON.parse(raw));
+    if (!parsed.success) {
+      return { kind: "corrupt", parseError: parsed.error.message };
+    }
+    const kind = parsed.data.status.kind;
     return kind === "completed" || kind === "failed"
       ? { kind: "terminal" }
       : { kind: "live" };
@@ -161,6 +164,13 @@ export const createInMemoryRunStore = (
         if (!runs.has(id)) active.delete(id);
       }
       return ok(active.size);
+    },
+    async listActiveRunIds() {
+      for (const id of [...active]) {
+        const record = runs.get(id);
+        if (record === undefined || isTerminalStatus(record.status)) active.delete(id);
+      }
+      return ok([...active] as RunId[]);
     },
   };
 };
@@ -224,25 +234,104 @@ export const createRedisRunStore = (
     return ok(parsed.data as RunMeta);
   };
 
+  const inspectActiveIndex = async (): Promise<Result<{
+    readonly runIds: readonly RunId[];
+    readonly conservativeCount: number;
+  }, HostError>> => {
+    const members = await redis.sMembers(activeKey(tenant));
+    if (!members.ok) return err(members.error);
+
+    const runIds: RunId[] = [];
+    let conservativeCount = 0;
+    for (const rawId of members.value) {
+      const parsedId = tryRunId(rawId);
+      if (!parsedId.ok) {
+        const pruned = await redis.sRem(activeKey(tenant), rawId);
+        if (!pruned.ok) {
+          logger?.warn?.("hitl: active-run index prune failed (invalid run id)", {
+            runId: rawId,
+            error: pruned.error.kind,
+          });
+        }
+        continue;
+      }
+
+      const raw = await redis.get(runKey(tenant, parsedId.value));
+      if (!raw.ok) return err(raw.error);
+      if (raw.value === null) {
+        // Metadata is the publication point. A live checkpoint with no metadata
+        // is either an in-flight create or an unpublished remnant; keep its index
+        // intent conservatively so a concurrent sweep cannot prune immediately
+        // before publication. Once the checkpoint TTL expires too, prune.
+        const checkpoint = await redis.get(ckptKey(tenant, parsedId.value));
+        if (!checkpoint.ok) return err(checkpoint.error);
+        if (checkpoint.value !== null) {
+          conservativeCount++;
+          continue;
+        }
+        const pruned = await redis.sRem(activeKey(tenant), rawId);
+        if (!pruned.ok) {
+          logger?.warn?.("hitl: active-run index prune failed (leaked entry; count may over-report until next sweep)", {
+            runId: rawId,
+            error: pruned.error.kind,
+          });
+          conservativeCount++;
+        }
+        continue;
+      }
+
+      const verdict = parsePersistedStatus(raw.value);
+      if (verdict.kind === "corrupt") {
+        logger?.warn?.("hitl: active-run index scan: unparseable run meta treated as live (count may over-report)", {
+          runId: rawId,
+          error: verdict.parseError,
+        });
+        conservativeCount++;
+        continue;
+      }
+      if (verdict.kind === "terminal") {
+        const pruned = await redis.sRem(activeKey(tenant), rawId);
+        if (!pruned.ok) {
+          logger?.warn?.("hitl: active-run index prune failed (terminal entry; count may over-report until next sweep)", {
+            runId: rawId,
+            error: pruned.error.kind,
+          });
+          conservativeCount++;
+        }
+        continue;
+      }
+      runIds.push(parsedId.value);
+      conservativeCount++;
+    }
+    return ok({ runIds, conservativeCount });
+  };
+
   return {
     async create(record) {
       const { checkpoint, ...meta } = record;
-      // Atomic create-once WITH TTL (SET NX EX): enforces create-once (a
-      // duplicate run id is a caller bug) and never leaves a TTL-less meta key
-      // if the process crashes between acquisition and expiry.
-      const set = await redis.setNx(runKey(tenant, record.runId), JSON.stringify(meta), expiry);
-      if (!set.ok) return err(set.error);
-      if (!set.value) {
+      // Reject an already-published/torn legacy record before touching its
+      // checkpoint. SET NX on the checkpoint remains the concurrent authority.
+      const existing = await redis.get(runKey(tenant, record.runId));
+      if (!existing.ok) return err(existing.error);
+      if (existing.value !== null) {
         return err({ kind: "internal-invariant-violated", message: `run '${record.runId}' already exists`, context: {} });
       }
-      const ckpt = await redis.set(ckptKey(tenant, record.runId), checkpoint, expiry);
+      // Publication protocol: prepare every byte needed to run BEFORE making the
+      // metadata visible. Checkpoint/index remnants are non-runnable and the
+      // active-index scan self-heals them; a visible queued run is complete.
+      const ckpt = await redis.setNx(ckptKey(tenant, record.runId), checkpoint, expiry);
       if (!ckpt.ok) return err(ckpt.error);
-      // Join the per-tenant active-run index (ADR-0074): a fresh run is non-terminal.
-      // Idempotent (SADD of a present member is a no-op). Fail-closed on a Redis
-      // error — consistent with the meta/ckpt writes above (the meta key's TTL
-      // self-cleans any orphan if this is the op that fails).
+      if (!ckpt.value) {
+        return err({ kind: "internal-invariant-violated", message: `run '${record.runId}' already exists or has an unpublished checkpoint`, context: {} });
+      }
       const idx = await redis.sAdd(activeKey(tenant), record.runId);
       if (!idx.ok) return err(idx.error);
+      // Metadata is the publication point and remains create-once with TTL.
+      const published = await redis.setNx(runKey(tenant, record.runId), JSON.stringify(meta), expiry);
+      if (!published.ok) return err(published.error);
+      if (!published.value) {
+        return err({ kind: "internal-invariant-violated", message: `run '${record.runId}' already exists`, context: {} });
+      }
       return ok(undefined);
     },
 
@@ -282,58 +371,13 @@ export const createRedisRunStore = (
     },
 
     async countActiveRuns() {
-      // Read the per-tenant active-run index SET (ADR-0074) — `sMembers`, NOT
-      // `scan` (the per-tenant ACL denies enumeration, ADR-0067).
-      const members = await redis.sMembers(activeKey(tenant));
-      if (!members.ok) return err(members.error);
-      let live = 0;
-      for (const id of members.value) {
-        // SELF-HEAL of leaked index entries so the count never inflates beyond the
-        // runs that ACTUALLY occupy a slot. A read failure IS surfaced (fail-closed)
-        // so the gate never admits on a bad count; a prune failure is non-fatal.
-        const raw = await redis.get(runKey(tenant, id as RunId));
-        if (!raw.ok) return err(raw.error);
-        if (raw.value === null) {
-          // Meta absent (TTL-expired / hard-deleted) → leaked index entry; prune it.
-          // Best-effort: a failed prune leaves the entry counted (conservative
-          // over-count, never under-count, so no slot is wrongly freed) — but log
-          // it, matching the house best-effort-with-log style. A persistently
-          // failing prune would otherwise silently inflate the count toward
-          // `maxQueuedRuns` and 429 legitimate startRun calls with no trail.
-          const pruned = await redis.sRem(activeKey(tenant), id);
-          if (!pruned.ok) {
-            logger?.warn?.("hitl: active-run index prune failed (leaked entry; count may over-report until next sweep)", { runId: id, error: pruned.error.kind });
-          }
-          continue;
-        }
-        const verdict = parsePersistedStatus(raw.value);
-        if (verdict.kind === "corrupt") {
-          // Unparseable meta: treat as live (conservative over-count, matching
-          // the missing-meta prune below) but LOG it — a silent swallow would
-          // otherwise inflate the count toward `maxQueuedRuns` and 429
-          // legitimate startRun calls with no trail pointing at the corrupt key.
-          logger?.warn?.("hitl: active-run index scan: unparseable run meta treated as live (count may over-report)", {
-            runId: id,
-            error: verdict.parseError,
-          });
-        }
-        if (verdict.kind === "terminal") {
-          // TERMINAL but still indexed: the settle-time `sRem` did not land (a
-          // transient Redis blip AFTER the terminal meta write). The meta key still
-          // EXISTS, so the missing-meta prune above cannot catch it — `processRun`'s
-          // terminal guard never re-issues the `sRem` either, so without pruning here
-          // the run would leak a `maxQueuedRuns` slot for up to the run TTL (days).
-          // Prune authoritatively on the persisted status. Idempotent. Best-effort
-          // (a failed prune over-counts, never under-counts) but logged, as above.
-          const pruned = await redis.sRem(activeKey(tenant), id);
-          if (!pruned.ok) {
-            logger?.warn?.("hitl: active-run index prune failed (terminal entry; count may over-report until next sweep)", { runId: id, error: pruned.error.kind });
-          }
-          continue;
-        }
-        live++;
-      }
-      return ok(live);
+      const active = await inspectActiveIndex();
+      return active.ok ? ok(active.value.conservativeCount) : active;
+    },
+
+    async listActiveRunIds() {
+      const active = await inspectActiveIndex();
+      return active.ok ? ok(active.value.runIds) : active;
     },
   };
 };

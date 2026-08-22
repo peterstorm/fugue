@@ -69,6 +69,24 @@ export default {
 };
 `;
 
+const HOSTILE_IMPORT_REJECTION_MODULE = `
+const hostile = new Proxy({}, {
+  get() { throw new Error("property access exploded"); },
+  getPrototypeOf() { throw new Error("prototype access exploded"); },
+});
+await Promise.reject(hostile);
+export default {};
+`;
+
+const THROWING_STACK_IMPORT_REJECTION_MODULE = `
+const failure = new Error("import exploded");
+Object.defineProperty(failure, "stack", {
+  get() { throw new Error("stack access exploded"); },
+});
+await Promise.reject(failure);
+export default {};
+`;
+
 // Nested deeper than dags/{team}/{dag} — proves discovery is depth-agnostic
 // (dags/business-sales/leads/lead-scoring/dag.ts). Team is the first folder.
 const NESTED_DAG_MODULE = `
@@ -153,8 +171,14 @@ beforeAll(() => {
   mkdirSync(join(TEST_DIR, "dags", "broken", "syntax-error"), { recursive: true });
   writeFileSync(join(TEST_DIR, "dags", "broken", "syntax-error", "dag.ts"), SYNTAX_ERROR_MODULE);
 
-  // fugue.yaml fixtures live under a SEPARATE root so loadAll(TEST_DIR) counts are unaffected.
+  // fugue.yaml and hostile-import fixtures live under a SEPARATE root so
+  // loadAll(TEST_DIR) counts are unaffected.
   if (existsSync(YAML_DIR)) rmSync(YAML_DIR, { recursive: true });
+
+  mkdirSync(join(YAML_DIR, "imports", "hostile-rejection"), { recursive: true });
+  writeFileSync(join(YAML_DIR, "imports", "hostile-rejection", "dag.ts"), HOSTILE_IMPORT_REJECTION_MODULE);
+  mkdirSync(join(YAML_DIR, "imports", "throwing-stack"), { recursive: true });
+  writeFileSync(join(YAML_DIR, "imports", "throwing-stack", "dag.ts"), THROWING_STACK_IMPORT_REJECTION_MODULE);
 
   // DAG with a sibling fugue.yaml (merge/override)
   mkdirSync(join(YAML_DIR, "dags", "cx", "with-yaml"), { recursive: true });
@@ -210,6 +234,32 @@ describe("Module Loader", () => {
           expect(result.error.message).not.toBe("");
         }
       }
+    });
+
+    it("returns import-failed when module evaluation rejects with a hostile Proxy", async () => {
+      const path = join(YAML_DIR, "imports", "hostile-rejection", "dag.ts");
+      const result = await loadDagModule(path, gitSha("hostile-import"));
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.kind).toBe("import-failed");
+      if (result.error.kind !== "import-failed") return;
+      expect(result.error.path).toBe(path);
+      expect(result.error.message).toBe("<unprintable error>");
+      expect(result.error.stack).toBeUndefined();
+    });
+
+    it("returns import-failed without reading a throwing stack accessor", async () => {
+      const path = join(YAML_DIR, "imports", "throwing-stack", "dag.ts");
+      const result = await loadDagModule(path, gitSha("throwing-stack-import"));
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.kind).toBe("import-failed");
+      if (result.error.kind !== "import-failed") return;
+      expect(result.error.path).toBe(path);
+      expect(result.error.message).toBe("import exploded");
+      expect(result.error.stack).toBeUndefined();
     });
 
     it("returns no-default-export when module has no default export", async () => {

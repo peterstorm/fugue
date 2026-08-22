@@ -168,6 +168,7 @@ const fakeHitl = (overrides: Partial<HitlRunService> = {}): HitlRunService => ({
   startRun: async () => ok({ runId: "run-1" as RunId }),
   processRun: async () => ok(undefined),
   recordDecision: mock(async () => ok(undefined)),
+  reconcileActiveRuns: async () => ok([]),
   getRun: async () => ok(suspendedRecord()),
   ...overrides,
 });
@@ -594,6 +595,7 @@ const fakeRedis = (): RedisPort & { _set: (k: string, v: string) => void } => {
     async del(k) { const had = m.delete(k); return ok(had ? 1 : 0); },
     async scan() { return ok({ cursor: "0", keys: [...m.keys()] }); },
     async setNx(k, v) { if (m.has(k)) return ok(false); m.set(k, v); return ok(true); },
+    async compareAndDelete(k, expected) { if (m.get(k) !== expected) return ok(false); m.delete(k); return ok(true); },
     async sAdd() { return ok(1); },
     async sRem() { return ok(1); },
     async sMembers() { return ok([]); },

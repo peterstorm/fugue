@@ -3,7 +3,8 @@
  *
  * Tracks, per `(runId, nodeId)` human gate: whether it is pending (so a
  * resume-then-re-park loop notifies only once) and the human's decision (so a
- * resume resolves the gate). `markPending` is atomic create-once via `SET NX`.
+ * resume resolves the gate). `markPending` and first-writer decision resolution
+ * are atomic create-once operations via `SET NX EX`.
  *
  * Redis key layout (KEY_SEP between runId/nodeId — see below), tenant-prefixed
  * (AD-4 / FR-013 / SC-001):
@@ -85,16 +86,21 @@ export const createRedisDecisionStore = (
       return ok(set.value);
     },
 
-    async isPending(runId, nodeId) {
-      const res = await redis.get(pendingKey(tenant, runId, nodeId));
-      if (!res.ok) return err(res.error);
-      return ok(res.value !== null);
-    },
+    async resolvePending(runId, nodeId, action) {
+      const pending = await redis.get(pendingKey(tenant, runId, nodeId));
+      if (!pending.ok) return err(pending.error);
+      if (pending.value === null) return ok({ kind: "not-pending" });
 
-    async putDecision(runId, nodeId, action) {
-      const res = await redis.set(decisionKey(tenant, runId, nodeId), JSON.stringify(action), expiry);
-      if (!res.ok) return err(res.error);
-      return ok(undefined);
+      // First writer wins atomically. A racing decision can observe the pending
+      // marker too, but SET NX EX preserves the already-durable action instead
+      // of overwriting it; both callers may safely request an idempotent wakeup.
+      const resolved = await redis.setNx(
+        decisionKey(tenant, runId, nodeId),
+        JSON.stringify(action),
+        expiry,
+      );
+      if (!resolved.ok) return err(resolved.error);
+      return ok(resolved.value ? { kind: "accepted" } : { kind: "already-resolved" });
     },
 
     async getDecision(runId, nodeId) {

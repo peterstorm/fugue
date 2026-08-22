@@ -27,11 +27,10 @@ const notifierSpy = () => {
   return { port, sent };
 };
 
-/** A decision store whose four ops are individually overridable for the branch under test. */
+/** A decision store whose operations are individually overridable for the branch under test. */
 const decisionStore = (overrides: Partial<DecisionStorePort> = {}): DecisionStorePort => ({
   async markPending() { return ok(true); },
-  async isPending() { return ok(false); },
-  async putDecision() { return ok(undefined); },
+  async resolvePending() { return ok({ kind: "not-pending" }); },
   async getDecision() { return ok(null); },
   async clear() { return ok(undefined); },
   ...overrides,

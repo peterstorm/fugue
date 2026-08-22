@@ -114,6 +114,25 @@ export const safeErrorMessage = (error: unknown): string => {
 };
 
 /**
+ * Total stack extraction for an arbitrary caught value. Stack is optional
+ * diagnostic data: primitives, absent/non-string stacks, throwing getters,
+ * Proxy traps, and revoked Proxies all produce `undefined` rather than
+ * replacing the primary failure with a diagnostic throw.
+ */
+export const safeErrorStack = (error: unknown): string | undefined => {
+  if (!((typeof error === "object" && error !== null) || typeof error === "function")) {
+    return undefined;
+  }
+
+  try {
+    const stack = Reflect.get(error, "stack");
+    return typeof stack === "string" ? stack : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+/**
  * Inspect `code` without invoking an `in`/`has` trap and without allowing a
  * getter, Proxy, or revoked Proxy to throw across the diagnostic boundary.
  */

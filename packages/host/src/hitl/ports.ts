@@ -53,6 +53,12 @@ export interface RunStorePort {
    * `maxQueuedRuns` itself bounds).
    */
   countActiveRuns(): Promise<Result<number, HostError>>;
+  /**
+   * Enumerate every durably-published NON-terminal run id for server-owned
+   * wakeup reconciliation. The active index is the only tenant-safe enumeration
+   * source (Redis SCAN is denied); stale/terminal members are self-healed.
+   */
+  listActiveRunIds(): Promise<Result<readonly RunId[], HostError>>;
 }
 
 /**
@@ -84,21 +90,24 @@ export interface HumanReviewNotifierPort {
  * returns `true` only on the FIRST park for a gate, so a resume-then-re-park
  * loop never re-sends the notification.
  */
+export type DecisionResolution =
+  | { readonly kind: "accepted" }
+  | { readonly kind: "already-resolved" }
+  | { readonly kind: "not-pending" };
+
 export interface DecisionStorePort {
   /** Mark a gate as pending review. Returns `true` if newly created (dedups notifications). */
   markPending(runId: RunId, nodeId: NodeId): Promise<Result<boolean, HostError>>;
   /**
-   * Is `(runId, nodeId)` currently the gate the run is parked at? The marker is
-   * written by the hook BEFORE it notifies and cleared when the gate resolves,
-   * so it is the authoritative "parked here right now" signal — present for the
-   * whole window a reviewer could respond, including the brief slice after the
-   * notification is delivered but before the worker has folded the `suspended`
-   * status back into the run store. Gating an approval on this (not the lagging
-   * run status) is what stops a fast approval being dropped and stranding the run.
+   * Resolve a pending gate with first-writer-wins semantics. `accepted` means
+   * this action won the atomic create; `already-resolved` preserves the winner;
+   * `not-pending` means this gate cannot currently accept a decision.
    */
-  isPending(runId: RunId, nodeId: NodeId): Promise<Result<boolean, HostError>>;
-  /** Record the human's decision for a parked gate. */
-  putDecision(runId: RunId, nodeId: NodeId, action: HumanAction): Promise<Result<void, HostError>>;
+  resolvePending(
+    runId: RunId,
+    nodeId: NodeId,
+    action: HumanAction,
+  ): Promise<Result<DecisionResolution, HostError>>;
   /** Fetch a recorded decision, or `ok(null)` if none yet. */
   getDecision(runId: RunId, nodeId: NodeId): Promise<Result<HumanAction | null, HostError>>;
   /** Remove the pending marker and any decision for a gate (after it resolves). */

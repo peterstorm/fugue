@@ -1,8 +1,9 @@
-import { describe, it, expect } from "bun:test";
+import { afterEach, describe, it, expect } from "bun:test";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { BufferedObserver, computeRunSummary } from "../observer/buffered.js";
 import { RecordingObserver, type Observer } from "../observer/observer.js";
 import { alwaysOn } from "../observer/policy.js";
+import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
 import type {
   RunStartEvent,
   NodeStartEvent,
@@ -46,6 +47,10 @@ function runEnd(status: "ok" | "error" = "ok", runId = "r1"): RunEndEvent {
 }
 
 describe("BufferedObserver", () => {
+  afterEach(() => {
+    __resetFrameworkLogger();
+  });
+
   it("events are buffered until run-end", () => {
     const inner = new RecordingObserver();
     const buffered = new BufferedObserver(inner, alwaysOn());
@@ -184,6 +189,88 @@ describe("BufferedObserver", () => {
     // silent.
     expect(buffered.evicted).toBe(0);
     buffered.close();
+  });
+
+  it("a hostile clock and a throwing logger cannot escape the failure path", () => {
+    setFrameworkLogger({
+      debug: () => { throw new Error("logger down"); },
+      info: () => { throw new Error("logger down"); },
+      warn: () => { throw new Error("logger down"); },
+      error: () => { throw new Error("logger down"); },
+    });
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    const buffered = new BufferedObserver(new RecordingObserver(), alwaysOn(), {
+      now: () => { throw revoked.proxy; },
+      sweepIntervalMs: 0,
+    });
+
+    expect(() => buffered.observe(runStart("hostile-clock"))).not.toThrow();
+    expect(() => buffered.evictStale()).not.toThrow();
+    expect(buffered.dispatchErrors).toBe(1);
+    expect(buffered.evicted).toBe(0);
+    buffered.close();
+  });
+
+  it("a hostile runtime-forged clock return is diagnosed without coercion", () => {
+    const errors: string[] = [];
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: (message) => { errors.push(message); },
+      error: (message) => { errors.push(message); },
+    });
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    const buffered = new BufferedObserver(new RecordingObserver(), alwaysOn(), {
+      now: () => revoked.proxy as unknown as number,
+      sweepIntervalMs: 0,
+    });
+
+    expect(() => buffered.observe(runStart("hostile-clock-return"))).not.toThrow();
+    expect(buffered.dispatchErrors).toBe(1);
+    expect(errors.some((message) => message.includes("<unprintable>"))).toBe(true);
+    buffered.close();
+  });
+
+  it("a throwing dead-letter sink logs both failures and replay accounting continues", () => {
+    const previousStrict = process.env.OBSERVER_STRICT;
+    process.env.OBSERVER_STRICT = "1";
+    const errors: string[] = [];
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: () => {},
+      error: (message) => { errors.push(message); },
+    });
+    try {
+      const seen: ObserverEvent[] = [];
+      const inner: Observer = {
+        observe(event): void {
+          if (event.type === "node-start") throw new Error("primary dispatch failed");
+          seen.push(event);
+        },
+      };
+      const buffered = new BufferedObserver(inner, alwaysOn(), {
+        sweepIntervalMs: 0,
+        onReplayFailure: () => { throw new Error("dead-letter failed"); },
+      });
+
+      buffered.observe(runStart());
+      buffered.observe(nodeStart("n1"));
+      buffered.observe(nodeEnd("n1"));
+      expect(() => buffered.observe(runEnd())).not.toThrow();
+
+      expect(buffered.dispatchErrors).toBe(1);
+      expect(seen.map((event) => event.type)).toEqual(["run-start", "node-end", "run-end"]);
+      expect(errors.some((message) =>
+        message.includes("primary dispatch failed") && message.includes("dead-letter failed")
+      )).toBe(true);
+      buffered.close();
+    } finally {
+      if (previousStrict === undefined) delete process.env.OBSERVER_STRICT;
+      else process.env.OBSERVER_STRICT = previousStrict;
+    }
   });
 
   it("a non-finite sweep clock warns and skips eviction instead of NaN-comparing forever", () => {

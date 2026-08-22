@@ -63,6 +63,7 @@ export const fakeRedis = (): { port: RedisConnectivityPort; redis: RedisPort } =
         return ok({ cursor: "0", keys: [...store.keys()].filter((k) => k.startsWith(prefix)) });
       },
       setNx: async (key, value) => { if (store.has(key)) return ok(false); store.set(key, value); return ok(true); },
+      compareAndDelete: async (key, expected) => { if (store.get(key) !== expected) return ok(false); store.delete(key); return ok(true); },
       sAdd: async (key, member) => {
         const s = sets.get(key) ?? new Set<string>(); const had = s.has(member); s.add(member); sets.set(key, s); return ok(had ? 0 : 1);
       },

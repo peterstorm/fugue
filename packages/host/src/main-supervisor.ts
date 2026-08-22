@@ -116,6 +116,32 @@ const createRedis = async (redisUrl: string): Promise<Result<RedisBundle, HostEr
       },
     };
 
+    let compareDeleteTail: Promise<void> = Promise.resolve();
+    const compareAndDelete: RedisPort["compareAndDelete"] = async (key, expectedValue) => {
+      let releaseTurn: () => void = () => {};
+      const turn = new Promise<void>((resolve) => { releaseTurn = resolve; });
+      const previous = compareDeleteTail;
+      compareDeleteTail = previous.then(() => turn);
+      await previous;
+      try {
+        await client.watch(key);
+        if (await client.get(key) !== expectedValue) {
+          await client.unwatch();
+          return ok(false);
+        }
+        const executed = await client.multi().del(key).exec();
+        if (executed === null) return ok(false);
+        const [commandError, deleted] = executed[0] ?? [];
+        if (commandError !== null) throw commandError;
+        return ok(deleted === 1);
+      } catch (error) {
+        try { await client.unwatch(); } catch { /* primary failure is authoritative */ }
+        return err(redisFailure(`COMPARE-AND-DELETE ${key}`, error));
+      } finally {
+        releaseTurn();
+      }
+    };
+
     const redis: RedisPort = {
       get: async (key) => {
         try { return ok(await client.get(key)); }
@@ -154,6 +180,7 @@ const createRedis = async (redisUrl: string): Promise<Result<RedisBundle, HostEr
           return err(redisFailure(`SETNX ${key}`, error));
         }
       },
+      compareAndDelete,
       sAdd: async (key, member) => {
         try { return ok(await client.sadd(key, member)); }
         catch (error) { return err(redisFailure(`SADD ${key}`, error)); }

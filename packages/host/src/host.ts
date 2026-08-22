@@ -614,6 +614,8 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
   // review; non-HITL DAGs keep the synchronous inline path.
   let hitlService: HitlRunService | undefined;
   let hitlWorker: WorkerHandle | undefined;
+  let hitlReconciliationTimer: ReturnType<typeof setInterval> | undefined;
+  let hitlReconciliationTask: Promise<void> | undefined;
   let teamsBotHandle: ((input: { authHeader: string | undefined; activity: unknown }) => Promise<BotResponse>) | undefined;
 
   // Select the notifier transport via the pure seam
@@ -687,7 +689,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
       lockTtlSec: config.HITL_LOCK_TTL_SEC,
       logger: sharedInfra.logger,
     });
-    hitlService = createHitlRunService({
+    const service = createHitlRunService({
       runStore,
       runQueue: runQueue.queue,
       decisions,
@@ -703,19 +705,51 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
       ...(config.FUGUE_MAX_QUEUED_RUNS !== undefined ? { maxQueuedRuns: config.FUGUE_MAX_QUEUED_RUNS } : {}),
       logger: sharedInfra.logger,
     });
-    hitlWorker = runQueue.startWorker(hitlService.processRun, { concurrency: config.HITL_WORKER_CONCURRENCY });
+    hitlService = service;
+    hitlWorker = runQueue.startWorker(service.processRun, { concurrency: config.HITL_WORKER_CONCURRENCY });
+
+    // Durable queue delivery is a wakeup optimization, not the ownership source.
+    // Reconcile once AFTER the worker exists (restart recovery), then periodically
+    // for direct enqueue failures. Never overlap sweeps; one active-index walk is
+    // sufficient because every wakeup is idempotent at processRun + lock seams.
+    const reconcileHitlRuns = (): Promise<void> => {
+      if (hitlReconciliationTask !== undefined) return hitlReconciliationTask;
+      hitlReconciliationTask = (async () => {
+        try {
+          const reconciled = await service.reconcileActiveRuns();
+          if (!reconciled.ok) {
+            logger.error("HITL active-run reconciliation failed", {
+              error: reconciled.error.kind,
+            });
+          }
+        } catch (error) {
+          // Adapter contracts are no-throw, but lifecycle supervision must remain
+          // total if a non-conforming dependency rejects unexpectedly.
+          logger.error("HITL active-run reconciliation threw", {
+            error: safeErrorMessage(error),
+          });
+        } finally {
+          hitlReconciliationTask = undefined;
+        }
+      })();
+      return hitlReconciliationTask;
+    };
+    await reconcileHitlRuns();
+    hitlReconciliationTimer = setInterval(
+      () => { void reconcileHitlRuns(); },
+      config.HITL_RECONCILE_INTERVAL_MS,
+    );
 
     // The in-Teams transport also needs its inbound endpoint: verify the Bot
     // Framework token, then dispatch button clicks to the run service.
     if (botConfigured && conversations !== undefined) {
       const verify = createBotTokenVerifier({ appId: notifierSelection.appId });
-      const svc = hitlService;
       const convs = conversations;
       teamsBotHandle = (input) =>
         handleBotActivity(
           {
             verify,
-            hitl: svc,
+            hitl: service,
             conversations: convs,
             // FR-041: authorize the Teams approver against the run's DAG-owning
             // team at parity with the HTTP path. The team is resolved from the
@@ -932,6 +966,11 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     // depending only on the OPTIONAL `onShutdown` would otherwise leave a
     // mis-permissioned tenant socket listening, worse than a clean boot failure.
     const serverStopFailure = stopBoundServerAfterBindFailure(bunServer, bindDesc, logger);
+    if (hitlReconciliationTimer !== undefined) {
+      clearInterval(hitlReconciliationTimer);
+      hitlReconciliationTimer = undefined;
+    }
+    if (hitlReconciliationTask !== undefined) await hitlReconciliationTask;
     if (hitlWorker) {
       try {
         await hitlWorker.close();
@@ -1099,6 +1138,13 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
       server.stop();
       server = null;
     }
+
+    // Stop server-owned reconciliation before closing the worker/Redis it uses.
+    if (hitlReconciliationTimer !== undefined) {
+      clearInterval(hitlReconciliationTimer);
+      hitlReconciliationTimer = undefined;
+    }
+    if (hitlReconciliationTask !== undefined) await hitlReconciliationTask;
 
     // Stop the HITL worker (ADR-0060) — drains its in-flight job, then no more
     // run slices are processed. The queue backend itself is closed by the

@@ -39,6 +39,7 @@ import { fwLogger } from "../logger.js";
 import type { SideEffectProfile } from "../types/side-effects.js";
 import { nodeId as brandNodeId } from "../types/ids.js";
 import { __brandNodeId } from "../types/ids.js";
+import { safeErrorMessage, safeErrorStack } from "../types/safe-error.js";
 
 // ---------------------------------------------------------------------------
 // Types (unchanged public surface)
@@ -70,6 +71,18 @@ export const createDagRunMeta = (): DagRunMeta => ({
   evalJudgeFailed: false,
   evalJudgeResults: [],
 });
+
+/** Diagnostics are secondary to the modeled node outcome. */
+const bestEffortLog = (
+  level: "debug" | "error",
+  message: string,
+): void => {
+  try {
+    fwLogger()[level](message);
+  } catch {
+    // A broken logger must not replace the primary node failure.
+  }
+};
 
 /**
  * Fold a batch of per-node outcomes into a fresh, immutable `DagRunMeta`.
@@ -168,16 +181,17 @@ export const withTracedNodeSpan = async (
       // Fail closed: the idempotency key is the dedup signal infrastructure
       // uses for writes / external calls. Running the node without it risks a
       // double-write or duplicate external call. Abort the node instead.
-      const msg = e instanceof Error ? e.message : String(e);
-      fwLogger().error(
-        `[withTracedNodeSpan] idempotencyKey evaluation failed for node '${nodeId}': ${msg}`,
+      const message = safeErrorMessage(e);
+      bestEffortLog(
+        "error",
+        `[withTracedNodeSpan] idempotencyKey evaluation failed for node '${nodeId}': ${message}`,
       );
       return {
         result: err({
           kind: "node-crash",
           nodeId: brandNodeId(nodeId),
           retriability: "non-retriable",
-          message: `idempotencyKey extractor threw for node '${nodeId}': ${msg}`,
+          message: `idempotencyKey extractor threw for node '${nodeId}': ${message}`,
         }),
         outcome: EMPTY_OUTCOME,
       };
@@ -200,10 +214,24 @@ export const withTracedNodeSpan = async (
       try {
         result = await fn();
       } catch (e) {
-        try { span.setStatus({ code: SpanStatusCode.ERROR, message: String(e) }); } catch (spanErr) { fwLogger().debug("[withTracedNodeSpan] span.setStatus failed:", spanErr); }
-        try { span.end(); } catch (spanErr) { fwLogger().debug("[withTracedNodeSpan] span.end failed — span may leak:", spanErr); }
-        const message = e instanceof Error ? e.message : String(e);
-        const stack = e instanceof Error ? e.stack : undefined;
+        const message = safeErrorMessage(e);
+        const stack = safeErrorStack(e);
+        try {
+          span.setStatus({ code: SpanStatusCode.ERROR, message });
+        } catch (spanError) {
+          bestEffortLog(
+            "debug",
+            `[withTracedNodeSpan] span.setStatus failed: ${safeErrorMessage(spanError)}`,
+          );
+        }
+        try {
+          span.end();
+        } catch (spanError) {
+          bestEffortLog(
+            "debug",
+            `[withTracedNodeSpan] span.end failed — span may leak: ${safeErrorMessage(spanError)}`,
+          );
+        }
         return {
           result: err({
             kind: "node-crash" as const,

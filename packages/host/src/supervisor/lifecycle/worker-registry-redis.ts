@@ -398,6 +398,12 @@ export const createInMemoryWorkerRedisFake = (): InMemoryWorkerRedisFake => {
       store.set(key, value);
       return ok(true);
     },
+    compareAndDelete: async (key, expected) => {
+      if (failing) return failErr("compareAndDelete");
+      if (store.get(key) !== expected) return ok(false);
+      store.delete(key);
+      return ok(true);
+    },
     sAdd: async () => (failing ? failErr("sAdd") : ok(1)),
     sRem: async () => (failing ? failErr("sRem") : ok(1)),
     sMembers: async () => (failing ? failErr("sMembers") : ok([])),

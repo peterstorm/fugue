@@ -36,13 +36,19 @@ const lockKey = (runId: string, tenant: TenantId = TENANT) => `fugue:${tenant}:h
 // ── recording fake RedisPort ──────────────────────────────────────────────────
 const fakeRedis = (preset: Record<string, string> = {}) => {
   const m = new Map<string, string>(Object.entries(preset));
-  const calls = { setNx: [] as { key: string; opts?: { expiresInSec?: number } }[], set: [] as string[], del: [] as string[] };
+  const calls = {
+    setNx: [] as { key: string; value: string; opts?: { expiresInSec?: number } }[],
+    set: [] as string[],
+    del: [] as string[],
+    compareAndDelete: [] as { key: string; expected: string }[],
+  };
   const redis: RedisPort = {
     async get(k) { return ok(m.get(k) ?? null); },
     async set(k, v, _opts) { calls.set.push(k); m.set(k, v); return ok("OK"); },
     async del(k) { calls.del.push(k); const had = m.delete(k); return ok(had ? 1 : 0); },
     async scan() { return ok({ cursor: "0", keys: [...m.keys()] }); },
-    async setNx(k, v, opts) { calls.setNx.push({ key: k, opts }); if (m.has(k)) return ok(false); m.set(k, v); return ok(true); },
+    async setNx(k, v, opts) { calls.setNx.push({ key: k, value: v, opts }); if (m.has(k)) return ok(false); m.set(k, v); return ok(true); },
+    async compareAndDelete(k, expected) { calls.compareAndDelete.push({ key: k, expected }); if (m.get(k) !== expected) return ok(false); m.delete(k); return ok(true); },
     async sAdd() { return ok(1); },
     async sRem() { return ok(1); },
     async sMembers() { return ok([]); },
@@ -80,17 +86,69 @@ describe("createRunQueue — single-flight lock", () => {
   it("C2: acquires the lock atomically with its TTL (SET NX EX), not setNx-then-set", async () => {
     const { redis, calls } = fakeRedis();
     const fb = fakeBackend();
-    const q = createRunQueue({ backend: fb.backend, redis, tenant: TENANT, lockTtlSec: 300 });
+    const q = createRunQueue({
+      backend: fb.backend,
+      redis,
+      tenant: TENANT,
+      lockTtlSec: 300,
+      newLockToken: () => "owner-1",
+    });
     q.startWorker(okProcess, { concurrency: 2 });
 
     await fb.getWorker()(fb.job(RUN));
 
     // The single setNx carries the TTL atomically…
-    expect(calls.setNx).toEqual([{ key: lockKey(RUN), opts: { expiresInSec: 300 } }]);
+    expect(calls.setNx).toEqual([{ key: lockKey(RUN), value: "owner-1", opts: { expiresInSec: 300 } }]);
     // …and there is NO separate `set` on the lock key (the old crash-prone path).
     expect(calls.set).not.toContain(lockKey(RUN));
-    // Lock released after the slice.
-    expect(calls.del).toContain(lockKey(RUN));
+    // Release uses the same owner token in the atomic comparator.
+    expect(calls.compareAndDelete).toEqual([{ key: lockKey(RUN), expected: "owner-1" }]);
+  });
+
+  it("an expired holder cannot delete a successor worker's lock", async () => {
+    const { redis, calls, m } = fakeRedis();
+    const fb = fakeBackend();
+    const q = createRunQueue({
+      backend: fb.backend,
+      redis,
+      tenant: TENANT,
+      lockTtlSec: 1,
+      newLockToken: () => "expired-owner",
+    });
+    q.startWorker(async () => {
+      // Simulate this lease expiring and a successor acquiring before finally.
+      m.set(lockKey(RUN), "successor-owner");
+      return ok(undefined);
+    });
+
+    await fb.getWorker()(fb.job(RUN));
+
+    expect(calls.compareAndDelete).toEqual([{ key: lockKey(RUN), expected: "expired-owner" }]);
+    expect(m.get(lockKey(RUN))).toBe("successor-owner");
+  });
+
+  it("logs the typed Redis failure kind when ownership-checked release fails", async () => {
+    const base = fakeRedis();
+    const redis: RedisPort = {
+      ...base.redis,
+      async compareAndDelete() {
+        return err({ kind: "redis-unavailable", operation: "WATCH/EXEC release" });
+      },
+    };
+    const warnings: Array<Record<string, unknown>> = [];
+    const fb = fakeBackend();
+    const q = createRunQueue({
+      backend: fb.backend,
+      redis,
+      tenant: TENANT,
+      lockTtlSec: 300,
+      logger: { info() {}, error() {}, warn(_message, data) { warnings.push(data ?? {}); } },
+    });
+    q.startWorker(okProcess);
+
+    await fb.getWorker()(fb.job(RUN));
+
+    expect(warnings).toEqual([{ runId: RUN, error: "redis-unavailable" }]);
   });
 
   it("C1: re-enqueues (deferred) a wakeup that loses the lock — never drops it", async () => {
@@ -130,8 +188,8 @@ describe("createRunQueue — single-flight lock", () => {
     q.startWorker(async () => err({ kind: "redis-unavailable", operation: "run-store get" }), { concurrency: 2 });
 
     await expect(fb.getWorker()(fb.job(RUN))).rejects.toThrow(/processRun failed for run-1/);
-    // The finally released the lock even though the slice threw.
-    expect(calls.del).toContain(lockKey(RUN));
+    // The finally attempted an ownership-checked release even though the slice threw.
+    expect(calls.compareAndDelete).toHaveLength(1);
   });
 
   it("A1: configures the queue with a retry budget (defaultAttempts > 1)", () => {
@@ -168,10 +226,11 @@ describe("createRunQueue — cross-tenant lock isolation (SECURITY: AD-4 / FR-01
     // Tenant B ran its slice (no false contention against tenant A's lock)…
     expect(bProcessed).toBe(1);
     // …acquiring and releasing ONLY its own tenant-prefixed lock key.
-    expect(calls.setNx).toEqual([{ key: lockKey(RUN, OTHER_TENANT), opts: { expiresInSec: 300 } }]);
-    expect(calls.del).toEqual([lockKey(RUN, OTHER_TENANT)]);
+    expect(calls.setNx).toHaveLength(1);
+    expect(calls.setNx[0]?.key).toBe(lockKey(RUN, OTHER_TENANT));
+    expect(calls.compareAndDelete[0]?.key).toBe(lockKey(RUN, OTHER_TENANT));
     // Tenant A's lock key is untouched (B physically cannot name it).
     expect(m.get(lockKey(RUN, TENANT))).toBe("1");
-    expect(calls.del).not.toContain(lockKey(RUN, TENANT));
+    expect(calls.compareAndDelete.some((c) => c.key === lockKey(RUN, TENANT))).toBe(false);
   });
 });

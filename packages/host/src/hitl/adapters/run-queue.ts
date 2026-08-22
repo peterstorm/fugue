@@ -54,6 +54,8 @@ interface RunQueueDeps {
    * Default 5.
    */
   readonly maxAttempts?: number;
+  /** Fresh ownership token per acquired lease. Defaults to `crypto.randomUUID`. */
+  readonly newLockToken?: () => string;
   readonly logger?: LogPort;
 }
 
@@ -76,6 +78,7 @@ export const createRunQueue = (deps: RunQueueDeps): RunQueueHandle => {
   const name = deps.queueName ?? "fugue-hitl-runs";
   const contentionDelayMs = deps.lockContentionDelayMs ?? 1000;
   const maxAttempts = deps.maxAttempts ?? 5;
+  const newLockToken = deps.newLockToken ?? (() => crypto.randomUUID());
   // `defaultAttempts` makes a worker that THROWS on a transient infra failure
   // actually retried (the outer crash-fallback loop) instead of acked once.
   const handle = backend.createQueue<RunId, null>(name, { defaultAttempts: maxAttempts });
@@ -106,11 +109,11 @@ export const createRunQueue = (deps: RunQueueDeps): RunQueueHandle => {
       async (job) => {
         const runId = job.data.state;
 
-        // Single-flight: only one worker processes a given run at a time.
-        // Acquire the lock AND its TTL atomically (SET NX EX) so a worker crash
-        // mid-slice self-heals after `lockTtlSec` rather than wedging the run
-        // behind a lock that never expires.
-        const acquired = await redis.setNx(lockKey(tenant, runId), "1", { expiresInSec: lockTtlSec });
+        // Single-flight: only one worker processes a given run at a time. Every
+        // lease carries a fresh owner token; release compares that token
+        // atomically so an expired holder cannot delete a successor's lease.
+        const lockToken = newLockToken();
+        const acquired = await redis.setNx(lockKey(tenant, runId), lockToken, { expiresInSec: lockTtlSec });
         if (!acquired.ok) {
           // The lock store is unavailable — throw so the queue retries this
           // wakeup rather than silently acking and dropping it.
@@ -142,8 +145,13 @@ export const createRunQueue = (deps: RunQueueDeps): RunQueueHandle => {
             throw new Error(`hitl: processRun failed for ${runId}: ${result.error.kind}`, { cause: result.error });
           }
         } finally {
-          const released = await redis.del(lockKey(tenant, runId));
-          if (!released.ok) logger?.warn?.("hitl: failed to release lock", { runId });
+          const released = await redis.compareAndDelete(lockKey(tenant, runId), lockToken);
+          if (!released.ok) {
+            logger?.warn?.("hitl: failed to release owned lock", {
+              runId,
+              error: released.error.kind,
+            });
+          }
         }
       },
       { concurrency: opts?.concurrency ?? 4 },

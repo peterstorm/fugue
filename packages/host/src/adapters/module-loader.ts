@@ -11,7 +11,7 @@
 
 import { readdir, readFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
-import { ok, err, computePromptHash, probeErrorCode } from "@fuguejs/framework";
+import { ok, err, computePromptHash, probeErrorCode, safeErrorMessage } from "@fuguejs/framework";
 import type { Result, DagId, GitSha } from "@fuguejs/framework";
 import { tryDagId, dagId } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
@@ -39,8 +39,9 @@ const loadFugueYaml = async (modulePath: string): Promise<Result<FugueYaml | nul
   try {
     text = await readFile(yamlPath, "utf-8");
   } catch (e) {
-    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return ok(null);
-    return err({ kind: "config-invalid", message: `Cannot read ${yamlPath}: ${e instanceof Error ? e.message : String(e)}` });
+    const probe = probeErrorCode(e);
+    if (probe.kind === "code" && probe.code === "ENOENT") return ok(null);
+    return err({ kind: "config-invalid", message: `Cannot read ${yamlPath}: ${safeErrorMessage(e)}` });
   }
   // Guard the native API at first use: if Bun.YAML is unavailable on this runtime, report
   // THAT — not a misleading "malformed fugue.yaml" that blames the operator's file.
@@ -51,7 +52,7 @@ const loadFugueYaml = async (modulePath: string): Promise<Result<FugueYaml | nul
   try {
     parsed = BunYAML.parse(text);
   } catch (e) {
-    return err({ kind: "config-invalid", message: `Malformed fugue.yaml at ${yamlPath}: ${e instanceof Error ? e.message : String(e)}` });
+    return err({ kind: "config-invalid", message: `Malformed fugue.yaml at ${yamlPath}: ${safeErrorMessage(e)}` });
   }
   return parseFugueYaml(parsed, yamlPath);
 };
@@ -60,6 +61,19 @@ const loadFugueYaml = async (modulePath: string): Promise<Result<FugueYaml | nul
 
 
 // ── Implementation ─────────────────────────────────────────────────────────
+
+/** Total stack extraction for import diagnostics; hostile accessors mean no stack. */
+const safeImportStack = (error: unknown): string | undefined => {
+  if ((typeof error !== "object" || error === null) && typeof error !== "function") {
+    return undefined;
+  }
+  try {
+    const stack = Reflect.get(error, "stack");
+    return typeof stack === "string" ? stack : undefined;
+  } catch {
+    return undefined;
+  }
+};
 
 /** Prompt diagnostics are secondary to the loader's Result/no-throw contract. */
 const reportPromptError = (
@@ -99,8 +113,8 @@ export const loadDagModule = async (
     return err({
       kind: "import-failed",
       path: modulePath,
-      message: e instanceof Error ? e.message : String(e),
-      stack: e instanceof Error ? e.stack : undefined,
+      message: safeErrorMessage(e),
+      stack: safeImportStack(e),
     });
   }
 
@@ -153,7 +167,7 @@ export const loadDagModule = async (
   // a discovered-but-unreadable asset fails this DAG load with its real cause.
   const promptErrorHandler = onPromptError ?? ((path: string, e: unknown) => {
     // Fallback when no logger injected — prompt errors still surfaced, just via console
-    console.warn(`[module-loader] Failed to read prompt file '${path}': ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[module-loader] Failed to read prompt file '${path}': ${safeErrorMessage(e)}`);
   });
   const promptsResult = await loadPromptsForModule(modulePath, promptErrorHandler);
   if (!promptsResult.ok) return promptsResult;
@@ -199,11 +213,12 @@ const validatePromptRegistry = async (
   try {
     raw = await readFile(registryPath, "utf-8");
   } catch (e) {
-    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return ok(undefined); // opt-in
+    const probe = probeErrorCode(e);
+    if (probe.kind === "code" && probe.code === "ENOENT") return ok(undefined); // opt-in
     return err({
       kind: "dag-validation-failed",
       dagId: forDagId,
-      reason: `Cannot read prompt registry: ${e instanceof Error ? e.message : String(e)}`,
+      reason: `Cannot read prompt registry: ${safeErrorMessage(e)}`,
       message: `DAG '${forDagId}': cannot read ${registryPath}`,
     });
   }
@@ -220,7 +235,7 @@ const validatePromptRegistry = async (
   try {
     registry = JSON.parse(raw);
   } catch (e) {
-    return invalid(`registry.json is not valid JSON: ${e instanceof Error ? e.message : String(e)}`);
+    return invalid(`registry.json is not valid JSON: ${safeErrorMessage(e)}`);
   }
   if (registry === null || typeof registry !== "object" || Array.isArray(registry)) {
     return invalid("registry.json must be an object keyed by prompt name");
@@ -273,7 +288,7 @@ export const loadPromptsForModule = async (
     reportPromptError(onFileError, path, error);
     return err({
       kind: "config-invalid",
-      message: `Cannot read prompt asset ${path}: ${error instanceof Error ? error.message : String(error)}`,
+      message: `Cannot read prompt asset ${path}: ${safeErrorMessage(error)}`,
     });
   };
 
@@ -343,7 +358,7 @@ export const discoverDagPaths = async (dagsRoot: string): Promise<Result<string[
     return err({
       kind: "discovery-failed",
       dagsRoot,
-      message: e instanceof Error ? e.message : String(e),
+      message: safeErrorMessage(e),
     });
   }
 };
@@ -389,7 +404,7 @@ export const createModuleLoader = (logger?: import("../ports.js").LogPort): Modu
   const onPromptError: ((path: string, e: unknown) => void) | undefined = logger
     ? (path, e) => logger.warn("[module-loader] Failed to read prompt file", {
         promptPath: path,
-        error: e instanceof Error ? e.message : String(e),
+        error: safeErrorMessage(e),
       })
     : undefined;
   return {

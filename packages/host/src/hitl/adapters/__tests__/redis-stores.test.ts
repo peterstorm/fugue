@@ -49,6 +49,7 @@ const fakeRedis = (): RecordingRedis => {
     async del(k): Promise<Result<number, HostError>> { const had = m.delete(k); return ok(had ? 1 : 0); },
     async scan(): Promise<Result<{ cursor: string; keys: string[] }, HostError>> { return ok({ cursor: "0", keys: [...m.keys()] }); },
     async setNx(k, v, opts): Promise<Result<boolean, HostError>> { setNxOpts.set(k, opts); if (m.has(k)) return ok(false); m.set(k, v); return ok(true); },
+    async compareAndDelete(k, expected): Promise<Result<boolean, HostError>> { if (m.get(k) !== expected) return ok(false); m.delete(k); return ok(true); },
     async sAdd(): Promise<Result<number, HostError>> { return ok(1); },
     async sRem(): Promise<Result<number, HostError>> { return ok(1); },
     async sMembers(): Promise<Result<string[], HostError>> { return ok([]); },
@@ -65,6 +66,7 @@ const seedableRedis = (): { redis: RedisPort; seed: (k: string, v: string) => vo
     async del(k) { const had = m.delete(k); return ok(had ? 1 : 0); },
     async scan() { return ok({ cursor: "0", keys: [...m.keys()] }); },
     async setNx(k, v) { if (m.has(k)) return ok(false); m.set(k, v); return ok(true); },
+    async compareAndDelete(k, expected) { if (m.get(k) !== expected) return ok(false); m.delete(k); return ok(true); },
     async sAdd() { return ok(1); },
     async sRem() { return ok(1); },
     async sMembers() { return ok([]); },
@@ -104,8 +106,9 @@ describe("RedisRunStore", () => {
     await store.create(r);
     // Meta is created atomically WITH its TTL (never a TTL-less key on a crash).
     expect(redis.setNxOpts.get("fugue:tenant-a:hitl:run:run-1")).toEqual({ expiresInSec: 4242 });
-    // The checkpoint key is bounded too.
-    expect(redis.setOpts.get("fugue:tenant-a:hitl:ckpt:run-1")).toEqual({ expiresInSec: 4242 });
+    // The checkpoint is also create-once with TTL, so a duplicate publication
+    // attempt cannot overwrite an existing run before metadata NX rejects it.
+    expect(redis.setNxOpts.get("fugue:tenant-a:hitl:ckpt:run-1")).toEqual({ expiresInSec: 4242 });
   });
 
   it("saveCheckpoint and setStatus re-apply the TTL (sliding expiry, never a TTL-less write)", async () => {
@@ -124,9 +127,11 @@ describe("RedisRunStore", () => {
   it("create is single-shot (duplicate run id errs)", async () => {
     const redis = fakeRedis();
     const store = createRedisRunStore(redis, TENANT, cfg);
-    await store.create(record());
-    const dup = await store.create(record());
+    await store.create(record({ checkpoint: "original" }));
+    const dup = await store.create(record({ checkpoint: "replacement" }));
     expect(dup.ok).toBe(false);
+    const original = await store.get("run-1" as RunId);
+    expect(original.ok && original.value?.checkpoint).toBe("original");
   });
 
   it("get returns null for an unknown run", async () => {
@@ -235,16 +240,19 @@ describe("RedisDecisionStore", () => {
     expect(redis.setNxOpts.get(`fugue:tenant-a:hitl:pending:${runId}\x1f${nodeId}`)).toEqual({ expiresInSec: 9001 });
   });
 
-  it("putDecision applies the configured TTL to the decision key", async () => {
+  it("resolvePending atomically creates the decision with TTL and preserves the first writer", async () => {
     const redis = fakeRedis();
     const store = createRedisDecisionStore(redis, TENANT, { ttlSec: 1234 });
-    await store.putDecision(runId, nodeId, approve);
-    expect(redis.setOpts.get(`fugue:tenant-a:hitl:decision:${runId}\x1f${nodeId}`)).toEqual({ expiresInSec: 1234 });
-  });
+    await store.markPending(runId, nodeId);
 
-  it("putDecision then getDecision round-trips the action", async () => {
-    const store = createRedisDecisionStore(fakeRedis(), TENANT, cfg);
-    await store.putDecision(runId, nodeId, approve);
+    const [first, second] = await Promise.all([
+      store.resolvePending(runId, nodeId, approve),
+      store.resolvePending(runId, nodeId, { kind: "reject", reason: "too late" }),
+    ]);
+
+    expect(first).toEqual(ok({ kind: "accepted" }));
+    expect(second).toEqual(ok({ kind: "already-resolved" }));
+    expect(redis.setNxOpts.get(`fugue:tenant-a:hitl:decision:${runId}\x1f${nodeId}`)).toEqual({ expiresInSec: 1234 });
     const got = await store.getDecision(runId, nodeId);
     expect(got.ok && got.value).toEqual(approve);
   });
@@ -258,7 +266,7 @@ describe("RedisDecisionStore", () => {
   it("clear removes pending marker and decision", async () => {
     const store = createRedisDecisionStore(fakeRedis(), TENANT, cfg);
     await store.markPending(runId, nodeId);
-    await store.putDecision(runId, nodeId, approve);
+    await store.resolvePending(runId, nodeId, approve);
     await store.clear(runId, nodeId);
 
     const got = await store.getDecision(runId, nodeId);
@@ -271,7 +279,8 @@ describe("RedisDecisionStore", () => {
   it("round-trips a reroute action with fields", async () => {
     const store = createRedisDecisionStore(fakeRedis(), TENANT, cfg);
     const reroute: HumanAction = { kind: "reroute", targetNodeId: "draft" as NodeId, reason: "redo" };
-    await store.putDecision(runId, nodeId, reroute);
+    await store.markPending(runId, nodeId);
+    await store.resolvePending(runId, nodeId, reroute);
     const got = await store.getDecision(runId, nodeId);
     expect(got.ok && got.value).toEqual(reroute);
   });
@@ -297,18 +306,13 @@ describe("RedisDecisionStore", () => {
     if (!got.ok) expect(got.error.kind).toBe("internal-invariant-violated");
   });
 
-  it("isPending reflects the marker: true while parked, false before/after clear", async () => {
+  it("resolvePending returns not-pending before a park and after clear", async () => {
     const store = createRedisDecisionStore(fakeRedis(), TENANT, cfg);
-    const isPending = async (): Promise<boolean> => {
-      const r = await store.isPending(runId, nodeId);
-      if (!r.ok) throw new Error("isPending errored");
-      return r.value;
-    };
-    expect(await isPending()).toBe(false);
+    expect(await store.resolvePending(runId, nodeId, approve)).toEqual(ok({ kind: "not-pending" }));
     await store.markPending(runId, nodeId);
-    expect(await isPending()).toBe(true);
+    expect(await store.resolvePending(runId, nodeId, approve)).toEqual(ok({ kind: "accepted" }));
     await store.clear(runId, nodeId);
-    expect(await isPending()).toBe(false);
+    expect(await store.resolvePending(runId, nodeId, approve)).toEqual(ok({ kind: "not-pending" }));
   });
 
   it("composite keys are injective — `:` in an id cannot alias a different gate", async () => {
@@ -317,8 +321,10 @@ describe("RedisDecisionStore", () => {
     const store = createRedisDecisionStore(fakeRedis(), TENANT, cfg);
     const gateA = { runId: "a:b" as RunId, nodeId: "c" as NodeId };
     const gateB = { runId: "a" as RunId, nodeId: "b:c" as NodeId };
-    await store.putDecision(gateA.runId, gateA.nodeId, { kind: "approve" });
-    await store.putDecision(gateB.runId, gateB.nodeId, { kind: "reject", reason: "no" });
+    await store.markPending(gateA.runId, gateA.nodeId);
+    await store.markPending(gateB.runId, gateB.nodeId);
+    await store.resolvePending(gateA.runId, gateA.nodeId, { kind: "approve" });
+    await store.resolvePending(gateB.runId, gateB.nodeId, { kind: "reject", reason: "no" });
 
     const a = await store.getDecision(gateA.runId, gateA.nodeId);
     const b = await store.getDecision(gateB.runId, gateB.nodeId);
@@ -346,6 +352,7 @@ const sharedRedis = (): RedisPort & { readonly _keys: ReadonlyMap<string, string
     async del(k) { const had = m.delete(k); return ok(had ? 1 : 0); },
     async scan() { return ok({ cursor: "0", keys: [...m.keys()] }); },
     async setNx(k, v) { if (m.has(k)) return ok(false); m.set(k, v); return ok(true); },
+    async compareAndDelete(k, expected) { if (m.get(k) !== expected) return ok(false); m.delete(k); return ok(true); },
     async sAdd() { return ok(1); },
     async sRem() { return ok(1); },
     async sMembers() { return ok([]); },
@@ -409,8 +416,8 @@ describe("HITL stores — cross-tenant isolation (SECURITY: AD-4 / FR-013 / SC-0
     const bMark = await b.markPending(runId, nodeId);
     expect(bMark.ok && bMark.value).toBe(true);
 
-    await a.putDecision(runId, nodeId, { kind: "approve" });
-    await b.putDecision(runId, nodeId, { kind: "reject", reason: "b-only" });
+    await a.resolvePending(runId, nodeId, { kind: "approve" });
+    await b.resolvePending(runId, nodeId, { kind: "reject", reason: "b-only" });
 
     // Each store reads ONLY its own tenant's decision.
     const gotA = await a.getDecision(runId, nodeId);
@@ -429,10 +436,10 @@ describe("HITL stores — cross-tenant isolation (SECURITY: AD-4 / FR-013 / SC-0
     await a.clear(runId, nodeId);
     const aGone = await a.getDecision(runId, nodeId);
     const bStill = await b.getDecision(runId, nodeId);
-    const bPending = await b.isPending(runId, nodeId);
+    const bStillPending = await b.markPending(runId, nodeId);
     expect(aGone.ok && aGone.value).toBe(null);
     expect(bStill.ok && bStill.value).toEqual({ kind: "reject", reason: "b-only" });
-    expect(bPending.ok && bPending.value).toBe(true);
+    expect(bStillPending.ok && bStillPending.value).toBe(false);
 
     // A's clear deleted ONLY A's keys; every surviving key is tenant B's.
     const after = [...redis._keys.keys()];
@@ -457,17 +464,97 @@ const setBackedRedis = () => {
     async del(k) { const had = kv.delete(k); return ok(had ? 1 : 0); },
     async scan() { return ok({ cursor: "0", keys: [...kv.keys()] }); },
     async setNx(k, v) { if (kv.has(k)) return ok(false); kv.set(k, v); return ok(true); },
+    async compareAndDelete(k, expected) { if (kv.get(k) !== expected) return ok(false); kv.delete(k); return ok(true); },
     async sAdd(k, m) { const s = sets.get(k) ?? new Set<string>(); const had = s.has(m); s.add(m); sets.set(k, s); return ok(had ? 0 : 1); },
     async sRem(k, m) { const s = sets.get(k); if (!s || !s.has(m)) return ok(0); s.delete(m); if (s.size === 0) sets.delete(k); return ok(1); },
     async sMembers(k) { return ok([...(sets.get(k) ?? [])]); },
   };
   // `expireRunKey` simulates a TTL-expired / hard-deleted run record while leaving
   // a stale entry in the active SET — the leak the self-heal must prune.
-  return { redis, kv, sets, expireRunKey: (tenant: string, runId: string) => kv.delete(`fugue:${tenant}:hitl:run:${runId}`) };
+  return {
+    redis,
+    kv,
+    sets,
+    expireRunKey: (tenant: string, runId: string) => kv.delete(`fugue:${tenant}:hitl:run:${runId}`),
+    expireCheckpointKey: (tenant: string, runId: string) => kv.delete(`fugue:${tenant}:hitl:ckpt:${runId}`),
+  };
 };
 
 describe("RedisRunStore — active-run index (ADR-0074)", () => {
   const cfg = { ttlSec: 3600 };
+
+  it("publishes metadata last: checkpoint failure leaves no visible run or index intent", async () => {
+    const base = setBackedRedis();
+    const redis: RedisPort = {
+      ...base.redis,
+      async setNx(key, value, opts) {
+        if (key.includes(":hitl:ckpt:")) return err({ kind: "redis-unavailable", operation: "checkpoint" });
+        return base.redis.setNx(key, value, opts);
+      },
+    };
+    const store = createRedisRunStore(redis, TENANT, cfg);
+
+    expect((await store.create(record())).ok).toBe(false);
+    expect(base.kv.has("fugue:tenant-a:hitl:run:run-1")).toBe(false);
+    expect(base.sets.get("fugue:tenant-a:hitl:active")?.has("run-1") ?? false).toBe(false);
+  });
+
+  it("publishes metadata last: index failure leaves only a non-runnable checkpoint remnant", async () => {
+    const base = setBackedRedis();
+    const redis: RedisPort = {
+      ...base.redis,
+      async sAdd() { return err({ kind: "redis-unavailable", operation: "active index" }); },
+    };
+    const store = createRedisRunStore(redis, TENANT, cfg);
+
+    expect((await store.create(record())).ok).toBe(false);
+    expect(base.kv.has("fugue:tenant-a:hitl:ckpt:run-1")).toBe(true);
+    expect(base.kv.has("fugue:tenant-a:hitl:run:run-1")).toBe(false);
+  });
+
+  it("a concurrent active-index sweep cannot prune an in-flight metadata publication", async () => {
+    const base = setBackedRedis();
+    let store!: ReturnType<typeof createRedisRunStore>;
+    let observedDuringPublication: readonly RunId[] | undefined;
+    const redis: RedisPort = {
+      ...base.redis,
+      async sAdd(key, member) {
+        const added = await base.redis.sAdd(key, member);
+        const during = await store.listActiveRunIds();
+        if (!during.ok) throw new Error("unexpected active-index read failure");
+        observedDuringPublication = during.value;
+        return added;
+      },
+    };
+    store = createRedisRunStore(redis, TENANT, cfg);
+
+    expect((await store.create(record())).ok).toBe(true);
+    expect(observedDuringPublication).toEqual([]); // unpublished is not runnable
+    expect(await store.listActiveRunIds()).toEqual(ok(["run-1" as RunId]));
+  });
+
+  it("publishes metadata last: publication failure leaves prepared remnants that enumeration self-heals", async () => {
+    const base = setBackedRedis();
+    const redis: RedisPort = {
+      ...base.redis,
+      async setNx(key, value, opts) {
+        if (key.includes(":hitl:run:")) return err({ kind: "redis-unavailable", operation: "metadata publish" });
+        return base.redis.setNx(key, value, opts);
+      },
+    };
+    const store = createRedisRunStore(redis, TENANT, cfg);
+
+    expect((await store.create(record())).ok).toBe(false);
+    expect(base.kv.has("fugue:tenant-a:hitl:ckpt:run-1")).toBe(true);
+    expect(base.kv.has("fugue:tenant-a:hitl:run:run-1")).toBe(false);
+    expect((await store.listActiveRunIds())).toEqual(ok([]));
+    // The live checkpoint may be an in-flight publication, so the sweep keeps
+    // the intent until that TTL-bound remnant also disappears.
+    expect(base.sets.get("fugue:tenant-a:hitl:active")?.has("run-1") ?? false).toBe(true);
+    base.expireCheckpointKey("tenant-a", "run-1");
+    expect((await store.listActiveRunIds())).toEqual(ok([]));
+    expect(base.sets.get("fugue:tenant-a:hitl:active")?.has("run-1") ?? false).toBe(false);
+  });
 
   it("create joins the active index; countActiveRuns reflects it", async () => {
     const { redis } = setBackedRedis();
@@ -478,6 +565,7 @@ describe("RedisRunStore — active-run index (ADR-0074)", () => {
     await store.create(record({ runId: "r2" as RunId }));
     const c = await store.countActiveRuns();
     expect(c.ok && c.value).toBe(2);
+    expect(await store.listActiveRunIds()).toEqual(ok(["r1" as RunId, "r2" as RunId]));
   });
 
   it("a terminal status (completed/failed) leaves the index; a non-terminal status does not", async () => {
@@ -537,12 +625,13 @@ describe("RedisRunStore — active-run index (ADR-0074)", () => {
   });
 
   it("self-heals a leaked index member whose run record expired (TTL) — pruned and excluded", async () => {
-    const { redis, expireRunKey, sets } = setBackedRedis();
+    const { redis, expireRunKey, expireCheckpointKey, sets } = setBackedRedis();
     const store = createRedisRunStore(redis, TENANT, cfg);
     await store.create(record({ runId: "r1" as RunId }));
     await store.create(record({ runId: "r2" as RunId }));
     // r1's run record TTLs out but its id is still in the active SET (the leak).
     expireRunKey("tenant-a", "r1");
+    expireCheckpointKey("tenant-a", "r1");
     const c = await store.countActiveRuns();
     expect(c.ok && c.value).toBe(1); // only r2 is backed by a live record
     // The stale member was pruned from the SET (not merely skipped).

@@ -38,6 +38,7 @@ import {
   safeDiagnosticString,
   safeErrorMessage,
   safeErrorMessageWithCodeProbe,
+  safeErrorStack,
   UNPRINTABLE_ERROR,
   UNPRINTABLE_VALUE,
 } from "../types/safe-error.js";
@@ -485,6 +486,26 @@ describe("safeErrorMessage — hostile thrown-value matrix", () => {
     }
     expect(safeErrorMessage(revoked.proxy)).toBe(UNPRINTABLE_ERROR);
     expect(safeErrorMessage(nullPrototype)).toBe("null prototype failure");
+  });
+});
+
+describe("safeErrorStack — hostile stack extraction", () => {
+  it("returns ordinary stacks and is total for absent, throwing, and revoked stacks", () => {
+    const ordinary = new Error("boom");
+    expect(safeErrorStack(ordinary)).toBe(ordinary.stack);
+    expect(safeErrorStack("boom")).toBeUndefined();
+    expect(safeErrorStack({ stack: 42 })).toBeUndefined();
+
+    const throwingStack = Object.defineProperty({}, "stack", {
+      get: () => { throw new Error("stack unavailable"); },
+    });
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+
+    for (const hostile of [throwingStack, revoked.proxy]) {
+      expect(() => safeErrorStack(hostile)).not.toThrow();
+      expect(safeErrorStack(hostile)).toBeUndefined();
+    }
   });
 });
 
