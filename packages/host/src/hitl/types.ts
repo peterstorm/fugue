@@ -12,6 +12,7 @@
 
 import { ok, err } from "@fuguejs/framework";
 import type { DagId, RunId, NodeId, FrameworkError, NonEmptyString, Result } from "@fuguejs/framework";
+import type { Team } from "../domain/auth.js";
 
 /**
  * The serializable projection of an `AuthIdentity` persisted on a run. The live
@@ -68,6 +69,8 @@ export type RunStatus =
 export interface RunRecord {
   readonly runId: RunId;
   readonly dagId: DagId;
+  /** Immutable resource owner captured from the registered DAG at acceptance. */
+  readonly ownerTeam: Team;
   readonly input: unknown;
   readonly identity: PersistedIdentity;
   readonly status: RunStatus;
@@ -77,6 +80,11 @@ export interface RunRecord {
   readonly updatedAtMs: RunTimestampMs;
 }
 
+/** The only lifecycle state accepted by `RunStorePort.create`. */
+export type QueuedRunRecord = Omit<RunRecord, "status"> & {
+  readonly status: Extract<RunStatus, { readonly kind: "queued" }>;
+};
+
 /**
  * What a reviewer is shown when a run parks at a human gate. The notifier
  * adapter (Teams webhook / Bot Framework / …) turns this into a message; the
@@ -85,6 +93,8 @@ export interface RunRecord {
 export interface ReviewNotification {
   readonly runId: RunId;
   readonly dagId: DagId;
+  /** Immutable run owner; notification routing must never re-resolve live registry ownership. */
+  readonly ownerTeam: Team;
   readonly nodeId: NodeId;
   readonly prompt: string;
   readonly output: unknown;

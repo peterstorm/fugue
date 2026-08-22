@@ -602,10 +602,10 @@ const main = async () => {
   }
 
   // Auth material — admin token (always) + optional realm-JWT verifier group.
-  // The supervisor's team-token store is keyed under a reserved platform tenant
-  // (`platform`) — team-token→team resolution at the boundary is a supervisor
-  // concern; the resolved team is then mapped to its owning tenant by the
-  // registry view. (T8/later waves reconcile per-tenant token keying.)
+  // The supervisor's team-token store is intentionally keyed under the reserved
+  // platform tenant: token→team resolution is a platform-boundary concern, while
+  // the resolved team is mapped to its owning tenant by the registry view. Worker
+  // re-authentication separately uses each tenant's scoped token store.
   const platformTenant = tenantId("platform");
   if (!platformTenant.ok) {
     logger.error("[supervisor] unreachable: 'platform' failed tenant-id validation");

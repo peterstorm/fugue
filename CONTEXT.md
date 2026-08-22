@@ -76,8 +76,9 @@ gates, freshness-aware state management, and production observability.
 | **Human Review Gate** | A node declares `humanReview: { prompt }`. After execution, the run pauses in `awaiting-human`. |
 | **HumanAction** | The reviewer's response: `"approve"`, `"approve-with-edit"`, `"reject"`, `"reroute"`. |
 | **HumanInterventionEvent** | Phase 4 capstone: first-class telemetry capturing the full decision context (confidence, side-effects, prior witnesses). |
+| **Run Owner Team** | Immutable resource owner captured from the registered DAG when a durable HITL run is accepted. Historical status, approval authorization, and review routing use this persisted team; later DAG reassignment/removal cannot transfer access. |
 | **Run Lease** | Opaque, run-bound worker ownership capability carrying a random Redis token and cancellation signal. Every HITL checkpoint/status write atomically verifies it; renewal failure aborts the active slice. |
-| **Pending Review Delivery** | Durable gate-notification state: `notification-required` until delivery succeeds, then atomically `notified`. Failed delivery remains retriable and cannot produce a suspended but unnotified run. |
+| **Pending Review Delivery** | Durable gate-notification state: `notification-required` until delivery succeeds, then atomically `notified`. Failed delivery remains retriable and cannot produce a suspended but unnotified run. Team-routed delivery fails closed when the Run Owner Team has no stored conversation; it never falls back to another/default channel. |
 
 ### Observability
 

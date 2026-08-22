@@ -20,9 +20,10 @@
  */
 
 import { z } from "zod";
-import { asNonEmptyString, ok, err, tryRunId, tryNodeId, tryDagId } from "@fuguejs/framework";
+import { asNonEmptyString, ok, err, safeErrorMessage, tryRunId, tryNodeId, tryDagId } from "@fuguejs/framework";
 import type { Result, RunId } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
+import { markTeam } from "../../domain/auth.js";
 import type { TenantId } from "../../domain/tenant.js";
 import type { HitlRedisPort, LogPort } from "../../ports.js";
 import type { RunLease, RunStorePort } from "../ports.js";
@@ -120,6 +121,7 @@ const RunStatusSchema = z.discriminatedUnion("kind", [
 const RunMetaSchema = z.object({
   runId: brandedId(tryRunId),
   dagId: brandedId(tryDagId),
+  ownerTeam: z.string().transform(markTeam),
   input: z.unknown(),
   identity: PersistedIdentitySchema,
   status: RunStatusSchema,
@@ -135,6 +137,19 @@ const isTerminalStatus = (status: RunStatus): boolean =>
 
 const leaseLost = (lease: RunLease): Result<never, HostError> =>
   err({ kind: "run-lease-lost", runId: lease.runId });
+
+const logWithoutThrowing = (
+  logger: LogPort | undefined,
+  level: "warn" | "error",
+  message: string,
+  data: Record<string, unknown>,
+): void => {
+  try {
+    logger?.[level]?.(message, data);
+  } catch {
+    // Diagnostics never replace the store's typed persistence outcome.
+  }
+};
 
 const readRunTimestamp = (now: () => number): Result<RunTimestampMs, HostError> => {
   const timestamp = tryRunTimestampMs(now());
@@ -299,13 +314,13 @@ export const createRedisRunStore = (
       redis.compareAndDelete(ckptKey(tenant, runId), checkpoint),
     ]);
     if (!index.ok) {
-      logger?.warn?.("hitl: failed to remove active index after unpublished create", {
+      logWithoutThrowing(logger, "warn", "hitl: failed to remove active index after unpublished create", {
         runId,
         error: index.error.kind,
       });
     }
     if (!preparedCheckpoint.ok) {
-      logger?.warn?.("hitl: failed to remove checkpoint after unpublished create", {
+      logWithoutThrowing(logger, "warn", "hitl: failed to remove checkpoint after unpublished create", {
         runId,
         error: preparedCheckpoint.error.kind,
       });
@@ -320,12 +335,18 @@ export const createRedisRunStore = (
     try {
       raw = JSON.parse(res.value);
     } catch (e) {
-      logger?.error?.("hitl: corrupt run metadata in store (malformed JSON)", { runId, error: e instanceof Error ? e.message : String(e) });
+      logWithoutThrowing(logger, "error", "hitl: corrupt run metadata in store (malformed JSON)", {
+        runId,
+        error: safeErrorMessage(e),
+      });
       return err({ kind: "internal-invariant-violated", message: `corrupt run metadata for '${runId}'`, context: {} });
     }
     const parsed = RunMetaSchema.safeParse(raw);
     if (!parsed.success) {
-      logger?.error?.("hitl: corrupt run metadata in store (invalid shape)", { runId, error: parsed.error.message });
+      logWithoutThrowing(logger, "error", "hitl: corrupt run metadata in store (invalid shape)", {
+        runId,
+        error: parsed.error.message,
+      });
       return err({ kind: "internal-invariant-violated", message: `corrupt run metadata for '${runId}'`, context: {} });
     }
     return ok(parsed.data as RunMeta);
@@ -345,7 +366,7 @@ export const createRedisRunStore = (
       if (!parsedId.ok) {
         const pruned = await redis.sRem(activeKey(tenant), rawId);
         if (!pruned.ok) {
-          logger?.warn?.("hitl: active-run index prune failed (invalid run id)", {
+          logWithoutThrowing(logger, "warn", "hitl: active-run index prune failed (invalid run id)", {
             runId: rawId,
             error: pruned.error.kind,
           });
@@ -368,7 +389,7 @@ export const createRedisRunStore = (
         }
         const pruned = await redis.sRem(activeKey(tenant), rawId);
         if (!pruned.ok) {
-          logger?.warn?.("hitl: active-run index prune failed (leaked entry; count may over-report until next sweep)", {
+          logWithoutThrowing(logger, "warn", "hitl: active-run index prune failed (leaked entry; count may over-report until next sweep)", {
             runId: rawId,
             error: pruned.error.kind,
           });
@@ -379,7 +400,7 @@ export const createRedisRunStore = (
 
       const verdict = parsePersistedStatus(raw.value);
       if (verdict.kind === "corrupt") {
-        logger?.warn?.("hitl: active-run index scan: unparseable run meta treated as live (count may over-report)", {
+        logWithoutThrowing(logger, "warn", "hitl: active-run index scan: unparseable run meta treated as live (count may over-report)", {
           runId: rawId,
           error: verdict.parseError,
         });
@@ -389,7 +410,7 @@ export const createRedisRunStore = (
       if (verdict.kind === "terminal") {
         const pruned = await redis.sRem(activeKey(tenant), rawId);
         if (!pruned.ok) {
-          logger?.warn?.("hitl: active-run index prune failed (terminal entry; count may over-report until next sweep)", {
+          logWithoutThrowing(logger, "warn", "hitl: active-run index prune failed (terminal entry; count may over-report until next sweep)", {
             runId: rawId,
             error: pruned.error.kind,
           });

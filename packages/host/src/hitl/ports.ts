@@ -21,7 +21,7 @@ import type {
 } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
-import type { RunRecord, RunStatus, PersistedIdentity } from "./types.js";
+import type { QueuedRunRecord, RunRecord, RunStatus, PersistedIdentity } from "./types.js";
 
 const RUN_LEASE: unique symbol = Symbol("RunLease");
 
@@ -51,7 +51,7 @@ export interface RunStorePort {
    * Create a fresh run record. Errs if the run id already exists. Also joins the
    * run to the per-tenant active-run index (ADR-0074) — a fresh run is non-terminal.
    */
-  create(record: RunRecord): Promise<Result<void, HostError>>;
+  create(record: QueuedRunRecord): Promise<Result<void, HostError>>;
   /** Fetch a run, or `ok(null)` if unknown. */
   get(runId: RunId): Promise<Result<RunRecord | null, HostError>>;
   /** Persist a checkpoint only while this worker still owns the run lease. */
@@ -68,10 +68,10 @@ export interface RunStorePort {
    * `maxQueuedRuns` admission axis (ADR-0074). Read from the per-tenant active-run
    * index SET (`fugue:<tenant>:hitl:active`) via `sMembers`, NOT `scan` (which the
    * per-tenant ACL denies, ADR-0067). SELF-HEALING: a member whose run record no
-   * longer exists (TTL-expired / hard-deleted) is pruned and excluded, so the
-   * count never inflates from missing/terminal leaked indices. Checkpoint-only
-   * publication remnants, corrupt metadata, and prune failures are counted
-   * conservatively to avoid under-admission. Bounded O(N) in the set size (which
+   * longer exists (TTL-expired / hard-deleted) is pruned when possible.
+   * Successfully pruned missing/terminal members are excluded; checkpoint-only
+   * publication remnants, corrupt metadata, and members whose pruning fails are
+   * counted conservatively to avoid under-admission. Bounded O(N) in the set size (which
    * `maxQueuedRuns` itself bounds).
    */
   countActiveRuns(): Promise<Result<number, HostError>>;

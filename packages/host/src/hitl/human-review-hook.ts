@@ -32,6 +32,7 @@ import type {
   HumanReviewOutcome,
 } from "@fuguejs/framework";
 import type { DecisionStorePort, HumanReviewNotifierPort } from "./ports.js";
+import type { Team } from "../domain/auth.js";
 import type { LogPort } from "../ports.js";
 
 interface OnHumanReviewDeps {
@@ -39,6 +40,7 @@ interface OnHumanReviewDeps {
   readonly notifier: HumanReviewNotifierPort;
   readonly runId: RunId;
   readonly dagId: DagId;
+  readonly ownerTeam: Team;
   readonly logger?: LogPort;
 }
 
@@ -63,7 +65,7 @@ const logWithoutThrowing = (
  */
 export const makeOnHumanReview = (deps: OnHumanReviewDeps) =>
   async (req: { nodeId: NodeId; output: unknown; prompt: string }): Promise<HumanReviewOutcome> => {
-    const { decisions, notifier, runId, dagId, logger } = deps;
+    const { decisions, notifier, runId, dagId, ownerTeam, logger } = deps;
 
     // 1. Decision already in? Resolve the gate by RETURNING it. Consumption
     //    (clear) is deferred to onDecisionConsumed, fired post-checkpoint.
@@ -99,6 +101,7 @@ export const makeOnHumanReview = (deps: OnHumanReviewDeps) =>
       const delivered = await notifier.notify({
         runId,
         dagId,
+        ownerTeam,
         nodeId: req.nodeId,
         prompt: req.prompt,
         output: req.output,

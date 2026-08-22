@@ -4,6 +4,7 @@
 
 import { describe, it, expect } from "bun:test";
 import type { DagId, RunId, NodeId } from "@fuguejs/framework";
+import { markTeam } from "../../../domain/auth.js";
 import type { ReviewNotification } from "../../types.js";
 import {
   buildAdaptiveCardPayload,
@@ -15,6 +16,7 @@ import {
 const notification: ReviewNotification = {
   runId: "run-42" as RunId,
   dagId: "lead-desk" as DagId,
+  ownerTeam: markTeam("sales"),
   nodeId: "review" as NodeId,
   prompt: "Approve the drafted reply?",
   output: { reply: "Hello!" },

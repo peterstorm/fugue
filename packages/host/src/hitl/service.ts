@@ -21,7 +21,7 @@ import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
 import { formatHostError, tenantOverQuota } from "../domain/host-error.js";
 import type { TenantId } from "../domain/tenant.js";
-import type { AuthIdentity } from "../domain/auth.js";
+import type { AuthIdentity, Team } from "../domain/auth.js";
 import type { LogPort } from "../ports.js";
 import type {
   RunStorePort,
@@ -32,7 +32,7 @@ import type {
   RunLease,
 } from "./ports.js";
 import { tryRunTimestampMs } from "./types.js";
-import type { RunRecord } from "./types.js";
+import type { QueuedRunRecord, RunRecord } from "./types.js";
 import { makeRunStoreJobLike } from "./run-store-job.js";
 import { makeOnHumanReview, makeOnDecisionConsumed } from "./human-review-hook.js";
 import { toPersistedIdentity } from "./identity.js";
@@ -68,7 +68,7 @@ export type ReconciliationAttempt =
 
 export interface HitlRunService {
   /** Seed + persist a fresh run and request its initial wakeup. */
-  startRun(dagId: DagId, input: unknown, identity: AuthIdentity): Promise<Result<{ runId: RunId }, HostError>>;
+  startRun(dagId: DagId, ownerTeam: Team, input: unknown, identity: AuthIdentity): Promise<Result<{ runId: RunId }, HostError>>;
   /** Worker handler: execute/resume `runId` and fold the outcome into its status. */
   processRun(lease: RunLease): Promise<Result<void, HostError>>;
   /** Approval: atomically resolve a parked gate and request a resume wakeup. */
@@ -106,6 +106,7 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
 
   const startRun = async (
     dagId: DagId,
+    ownerTeam: Team,
     input: unknown,
     identity: AuthIdentity,
   ): Promise<Result<{ runId: RunId }, HostError>> => {
@@ -147,9 +148,10 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
         context: {},
       });
     }
-    const record: RunRecord = {
+    const record: QueuedRunRecord = {
       runId,
       dagId,
+      ownerTeam,
       input,
       identity: toPersistedIdentity(identity),
       status: { kind: "queued" },
@@ -222,6 +224,7 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
       notifier,
       runId,
       dagId: record.dagId,
+      ownerTeam: record.ownerTeam,
       logger,
     });
     // ADR-0060: decision consumption is deferred to AFTER the post-gate

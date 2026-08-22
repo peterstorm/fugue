@@ -153,6 +153,26 @@ into the existing durable hook-retry path; it never returns `pending` and never
 leaves a permanently deduplicated but unnotified gate. Decision lookup failures
 likewise retry the hook instead of suspending without an actionable marker.
 
+### Immutable run ownership and fail-closed team routing (2026-08-22 amendment)
+
+Durable acceptance captures the registered DAG's owning `Team` on `RunRecord`.
+That resource attribute is immutable for the life of the run. HTTP status and
+approval authorization, Bot click authorization, and review-notification routing
+all use the persisted owner; none re-resolves ownership from the mutable live DAG
+registry. Reassigning or removing a DAG therefore cannot grant a replacement team
+access to historical output or controls, nor revoke the original owner's access.
+
+A Bot review notification carries the same owner and may be delivered only to
+that team's stored conversation reference. If the reference is absent, delivery
+returns `notification-failed` and the durable hook retry path remains active. It
+never falls back to the default conversation, because that channel may belong to
+a different team. The HTTP decision body's display fields are not identity: the
+recorded `HumanAction.actor` is derived from the authenticated principal after
+resource authorization.
+
+Creation is typed separately as `QueuedRunRecord`; the run-store create operation
+cannot accept a terminal or already-running lifecycle state into the active index.
+
 ## Consequences
 
 **Positive**
@@ -190,6 +210,10 @@ likewise retry the hook instead of suspending without an actionable marker.
     `HITL_TEAM_CHANNELS`. Cross-team approval is prevented by the authz gate, so
     single-team-per-channel is no longer a security requirement. See
     `team-security-and-capabilities.md` AD-7 (IMPLEMENTED).
+  - **UPDATE (2026-08-22):** authorization and routing now use the immutable
+    `RunRecord.ownerTeam` captured at durable acceptance. A missing owner-team
+    conversation fails closed and never falls back to the default channel; DAG
+    reassignment/removal cannot transfer historical-run access.
 - The host's run-store-backed `JobLike.appendEvent` is a **no-op**: the durable
   run record carries the latest `{state, context}` checkpoint (sufficient for
   suspend/resume correctness) but **not** the kernel's per-transition event

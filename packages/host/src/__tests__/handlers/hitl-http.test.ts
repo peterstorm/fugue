@@ -13,6 +13,7 @@ import { createGetRunHandler, createApproveRunHandler } from "../../http/handler
 import type { RegisteredDag, Registry } from "../../domain/registry.js";
 import { freeze } from "../../domain/registry.js";
 import type { HostState } from "../../domain/host-state.js";
+import { markTeam } from "../../domain/auth.js";
 import type { AuthIdentity } from "../../domain/auth.js";
 import type { HitlRunService } from "../../hitl/service.js";
 import type { RunRecord } from "../../hitl/types.js";
@@ -62,6 +63,7 @@ const baseRunDagDeps = (overrides?: Partial<RunDagDeps>): RunDagDeps => {
 const record = (overrides: Partial<RunRecord> = {}): RunRecord => ({
   runId: mkRunId("run-1"),
   dagId: dagId("hitl-dag"),
+  ownerTeam: markTeam("test-team"),
   input: {},
   identity: { kind: "admin" },
   status: { kind: "suspended", nodeId: "review" as NodeId, prompt: "ok?" },
@@ -146,11 +148,39 @@ describe("GET /runs/:runId", () => {
     expect(res.status).toBe(404);
   });
 
-  it("403 when the caller cannot access the run's DAG team", async () => {
+  it("403 when the caller cannot access the run's immutable owner team", async () => {
     const hitl = fakeHitl();
     const teamState = readyState([makeRegisteredDag("hitl-dag", true, "other-team")]);
-    const res = await app(baseRunDagDeps({ hitl }), teamState, { kind: "team", team: "mine", label: "Mine" }).request("/runs/run-1");
+    const res = await app(baseRunDagDeps({ hitl }), teamState, { kind: "team", team: markTeam("mine"), label: "Mine" }).request("/runs/run-1");
     expect(res.status).toBe(403);
+  });
+
+  it("keeps historical access with the persisted owner after the live DAG is reassigned", async () => {
+    const hitl = fakeHitl();
+    const reassigned = readyState([makeRegisteredDag("hitl-dag", true, "replacement-team")]);
+
+    const originalOwner = await app(
+      baseRunDagDeps({ hitl }),
+      reassigned,
+      { kind: "team", team: markTeam("test-team"), label: "Original" },
+    ).request("/runs/run-1");
+    const replacementOwner = await app(
+      baseRunDagDeps({ hitl }),
+      reassigned,
+      { kind: "team", team: markTeam("replacement-team"), label: "Replacement" },
+    ).request("/runs/run-1");
+
+    expect(originalOwner.status).toBe(200);
+    expect(replacementOwner.status).toBe(403);
+  });
+
+  it("keeps historical access when the live DAG is removed", async () => {
+    const res = await app(
+      baseRunDagDeps({ hitl: fakeHitl() }),
+      readyState([]),
+      { kind: "team", team: markTeam("test-team"), label: "Original" },
+    ).request("/runs/run-1");
+    expect(res.status).toBe(200);
   });
 });
 
@@ -166,14 +196,25 @@ describe("POST /runs/:runId/approve", () => {
     expect(hitl.recordDecision).toHaveBeenCalledTimes(1);
     const call = (hitl.recordDecision as ReturnType<typeof mock>).mock.calls[0]!;
     expect(call[1]).toBe("review" as NodeId);
-    expect(call[2]).toEqual({ kind: "approve" });
+    expect(call[2]).toEqual({ kind: "approve", actor: "admin" });
   });
 
   it("maps reject body to a reject HumanAction", async () => {
     const hitl = fakeHitl();
     await postJson(app(baseRunDagDeps({ hitl }), state), "/runs/run-1/approve", { decision: "reject", reason: "no" });
     const call = (hitl.recordDecision as ReturnType<typeof mock>).mock.calls[0]!;
-    expect(call[2]).toEqual({ kind: "reject", reason: "no" });
+    expect(call[2]).toEqual({ kind: "reject", reason: "no", actor: "admin" });
+  });
+
+  it("ignores a client-forged actor and records the authenticated principal", async () => {
+    const hitl = fakeHitl();
+    await postJson(
+      app(baseRunDagDeps({ hitl }), state, { kind: "team", team: markTeam("test-team"), label: "Trusted label" }),
+      "/runs/run-1/approve",
+      { decision: "approve", actor: "forged-admin" },
+    );
+    const call = (hitl.recordDecision as ReturnType<typeof mock>).mock.calls[0]!;
+    expect(call[2]).toEqual({ kind: "approve", actor: "team:test-team" });
   });
 
   it("409 when the run is not awaiting review", async () => {

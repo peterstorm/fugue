@@ -9,8 +9,8 @@
  *                                  "approve-with-edit" | "reroute", ... }.
  *
  * Authorization mirrors run submission: the caller's identity must be able to
- * access the run's owning DAG team (admin, or the owning team). A run for an
- * unknown/forbidden DAG is treated as not-found / forbidden respectively.
+ * access the immutable owning team captured on the run at durable acceptance.
+ * Later DAG reassignment or removal cannot change historical-run access.
  */
 
 import { match } from "ts-pattern";
@@ -22,8 +22,6 @@ import type { AuthIdentity } from "../../domain/auth.js";
 import { canAccessDag } from "../../domain/auth.js";
 import { errorResponse, successResponse } from "../response.js";
 import { httpStatusFor, formatHostError } from "../../domain/host-error.js";
-import { getRegistry } from "../../domain/host-state.js";
-import { lookupDag } from "../../domain/registry.js";
 import type { HitlRunService } from "../../hitl/service.js";
 import type { RunRecord, RunStatus } from "../../hitl/types.js";
 
@@ -56,42 +54,32 @@ const statusView = (record: RunRecord): unknown =>
     }))
     .exhaustive();
 
-/**
- * Authorize the caller against the run's owning DAG team. Returns the team's id
- * via `ok`, or an HTTP response to short-circuit. A run whose DAG is no longer
- * registered is treated as not-found (we cannot establish its team).
- */
+/** Authorize the caller against the run's immutable resource owner. */
 const authorizeRunAccess = (
   c: Context<HostEnv>,
   record: RunRecord,
-): { ok: true } | { ok: false; response: Response } => {
+): { ok: true; identity: AuthIdentity } | { ok: false; response: Response } => {
   const identity = c.get("authIdentity") as AuthIdentity | undefined;
   if (!identity) {
     return { ok: false, response: errorResponse(c, 401, "unauthorized", "Missing auth identity — middleware not applied") };
   }
-  const hostState = c.get("hostState");
-  const registry = getRegistry(hostState);
-  const registered = registry ? lookupDag(registry, record.dagId) : undefined;
-  if (!registered) {
-    return { ok: false, response: errorResponse(c, 404, "run-not-found", `Run '${record.runId}' references unknown DAG '${record.dagId}'`) };
-  }
-  if (!canAccessDag(identity, registered.team)) {
+  if (!canAccessDag(identity, record.ownerTeam)) {
     const callerTeam = identity.kind === "team" ? identity.team : identity.kind;
     return {
       ok: false,
       response: errorResponse(c, 403, "forbidden",
-        `Token for '${callerTeam}' cannot access run '${record.runId}' (DAG owned by '${registered.team}')`,
+        `Token for '${callerTeam}' cannot access run '${record.runId}' (run owned by '${record.ownerTeam}')`,
         { dagId: record.dagId },
       ),
     };
   }
-  return { ok: true };
+  return { ok: true, identity };
 };
 
 const loadAuthorizedRun = async (
   c: Context<HostEnv>,
   hitl: HitlRunService,
-): Promise<{ ok: true; record: RunRecord } | { ok: false; response: Response }> => {
+): Promise<{ ok: true; record: RunRecord; identity: AuthIdentity } | { ok: false; response: Response }> => {
   const runIdRaw = c.req.param("runId") ?? "";
   const parsed = tryRunId(runIdRaw);
   if (!parsed.ok) {
@@ -111,7 +99,7 @@ const loadAuthorizedRun = async (
 
   const authorized = authorizeRunAccess(c, fetched.value);
   return authorized.ok
-    ? { ok: true, record: fetched.value }
+    ? { ok: true, record: fetched.value, identity: authorized.identity }
     : authorized;
 };
 
@@ -132,18 +120,16 @@ const parseDecision = (body: unknown): { ok: true; action: HumanAction } | { ok:
   if (typeof body !== "object" || body === null) return { ok: false, message: "body must be a JSON object" };
   const b = body as Record<string, unknown>;
   const decision = b.decision;
-  const actor = typeof b.actor === "string" ? b.actor : undefined;
-  const actorPatch = actor ? { actor } : {};
 
   return match(decision)
-    .with("approve", () => ({ ok: true as const, action: { kind: "approve" as const, ...actorPatch } }))
+    .with("approve", () => ({ ok: true as const, action: { kind: "approve" as const } }))
     .with("approve-with-edit", () =>
       "newOutput" in b
-        ? { ok: true as const, action: { kind: "approve-with-edit" as const, newOutput: b.newOutput, ...actorPatch } }
+        ? { ok: true as const, action: { kind: "approve-with-edit" as const, newOutput: b.newOutput } }
         : { ok: false as const, message: "approve-with-edit requires 'newOutput'" })
     .with("reject", () =>
       typeof b.reason === "string"
-        ? { ok: true as const, action: { kind: "reject" as const, reason: b.reason, ...actorPatch } }
+        ? { ok: true as const, action: { kind: "reject" as const, reason: b.reason } }
         : { ok: false as const, message: "reject requires a string 'reason'" })
     .with("reroute", () => {
       if (typeof b.targetNodeId !== "string") {
@@ -158,12 +144,23 @@ const parseDecision = (body: unknown): { ok: true; action: HumanAction } | { ok:
           kind: "reroute" as const,
           targetNodeId: target.value,
           ...(typeof b.reason === "string" ? { reason: b.reason } : {}),
-          ...actorPatch,
         },
       };
     })
     .otherwise(() => ({ ok: false as const, message: "decision must be one of: approve, approve-with-edit, reject, reroute" }));
 };
+
+const auditActor = (identity: AuthIdentity): string =>
+  match(identity)
+    .with({ kind: "admin" }, () => "admin")
+    .with({ kind: "team" }, (teamIdentity) => `team:${teamIdentity.team}`)
+    .with({ kind: "user" }, (userIdentity) => `user:${userIdentity.sub}`)
+    .exhaustive();
+
+const attributeDecision = (action: HumanAction, identity: AuthIdentity): HumanAction => ({
+  ...action,
+  actor: auditActor(identity),
+});
 
 export const createApproveRunHandler = (deps: RunsHandlerDeps) =>
   async (c: Context<HostEnv>): Promise<Response> => {
@@ -172,7 +169,7 @@ export const createApproveRunHandler = (deps: RunsHandlerDeps) =>
     }
     const loaded = await loadAuthorizedRun(c, deps.hitl);
     if (!loaded.ok) return loaded.response;
-    const { record } = loaded;
+    const { record, identity } = loaded;
     const runId = record.runId;
 
     // The gate being decided is the run's CURRENT suspended gate. Approving a run
@@ -197,7 +194,11 @@ export const createApproveRunHandler = (deps: RunsHandlerDeps) =>
       return errorResponse(c, 400, "invalid-decision", parsed.message, { runId });
     }
 
-    const recorded = await deps.hitl.recordDecision(record.runId, gateNodeId, parsed.action);
+    const recorded = await deps.hitl.recordDecision(
+      record.runId,
+      gateNodeId,
+      attributeDecision(parsed.action, identity),
+    );
     if (!recorded.ok) {
       return errorResponse(c, httpStatusFor(recorded.error), recorded.error.kind, formatHostError(recorded.error), { runId });
     }

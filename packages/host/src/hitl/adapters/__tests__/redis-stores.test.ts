@@ -6,10 +6,11 @@ import { nonEmptyString, ok, err } from "@fuguejs/framework";
 import type { Result, RunId, NodeId, DagId, HumanAction } from "@fuguejs/framework";
 import type { HitlRedisPort, LogPort } from "../../../ports.js";
 import type { HostError } from "../../../domain/host-error.js";
+import { markTeam } from "../../../domain/auth.js";
 import { tenantId } from "../../../domain/tenant.js";
 import type { TenantId } from "../../../domain/tenant.js";
 import { tryRunTimestampMs } from "../../types.js";
-import type { RunRecord, RunTimestampMs } from "../../types.js";
+import type { QueuedRunRecord, RunTimestampMs } from "../../types.js";
 import { createRedisRunStore } from "../run-store.js";
 import { createRedisDecisionStore } from "../decision-store.js";
 import { issueRunLease } from "../../ports.js";
@@ -115,9 +116,10 @@ const acquireLease = async (
   return issueRunLease(runId, ownerToken, new AbortController().signal);
 };
 
-const record = (overrides: Partial<RunRecord> = {}): RunRecord => ({
+const record = (overrides: Partial<QueuedRunRecord> = {}): QueuedRunRecord => ({
   runId: "run-1" as RunId,
   dagId: "dag-1" as DagId,
+  ownerTeam: markTeam("sales"),
   input: { x: 1 },
   identity: { kind: "admin" },
   status: { kind: "queued" },
@@ -253,7 +255,7 @@ describe("RedisRunStore", () => {
   it("errs internal-invariant-violated on a torn record (metadata but no checkpoint)", async () => {
     const { redis, seed } = seedableRedis();
     // Seed only the meta key (e.g. the checkpoint key TTL-expired first).
-    seed("fugue:tenant-a:hitl:run:run-1", JSON.stringify({ runId: "run-1", dagId: "d", input: {}, identity: { kind: "admin" }, status: { kind: "queued" }, createdAtMs: 1, updatedAtMs: 1 }));
+    seed("fugue:tenant-a:hitl:run:run-1", JSON.stringify({ runId: "run-1", dagId: "d", ownerTeam: "sales", input: {}, identity: { kind: "admin" }, status: { kind: "queued" }, createdAtMs: 1, updatedAtMs: 1 }));
     const store = createRedisRunStore(redis, TENANT, cfg);
     const res = await store.get("run-1" as RunId);
     expect(res.ok).toBe(false);
@@ -272,7 +274,7 @@ describe("RedisRunStore", () => {
   it("rejects failed metadata whose FrameworkError is missing required fields", async () => {
     const { redis, seed } = seedableRedis();
     seed("fugue:tenant-a:hitl:run:run-1", JSON.stringify({
-      runId: "run-1", dagId: "d", input: {}, identity: { kind: "admin" },
+      runId: "run-1", dagId: "d", ownerTeam: "sales", input: {}, identity: { kind: "admin" },
       status: { kind: "failed", error: { kind: "node-crash" } }, createdAtMs: 1, updatedAtMs: 1,
     }));
     const store = createRedisRunStore(redis, TENANT, cfg);
@@ -286,7 +288,7 @@ describe("RedisRunStore", () => {
   it("rejects a persisted suspended status with an empty prompt", async () => {
     const { redis, seed } = seedableRedis();
     seed("fugue:tenant-a:hitl:run:run-1", JSON.stringify({
-      runId: "run-1", dagId: "d", input: {}, identity: { kind: "admin" },
+      runId: "run-1", dagId: "d", ownerTeam: "sales", input: {}, identity: { kind: "admin" },
       status: { kind: "suspended", nodeId: "review", prompt: "   " }, createdAtMs: 1, updatedAtMs: 1,
     }));
     const store = createRedisRunStore(redis, TENANT, cfg);
@@ -299,7 +301,7 @@ describe("RedisRunStore", () => {
     // Parses as JSON but the status discriminant is unknown — must be rejected
     // (parse-don't-validate) rather than flowing in to drive an exhaustive match.
     seed("fugue:tenant-a:hitl:run:run-1", JSON.stringify({
-      runId: "run-1", dagId: "d", input: {}, identity: { kind: "admin" },
+      runId: "run-1", dagId: "d", ownerTeam: "sales", input: {}, identity: { kind: "admin" },
       status: { kind: "teleported" }, createdAtMs: 1, updatedAtMs: 1,
     }));
     const store = createRedisRunStore(redis, TENANT, cfg);
@@ -412,6 +414,31 @@ describe("RedisDecisionStore", () => {
     const got = await store.getDecision(runId, nodeId);
     expect(got.ok).toBe(false);
     if (!got.ok) expect(got.error.kind).toBe("internal-invariant-violated");
+  });
+
+  it("a throwing corruption logger cannot escape the typed decision error", async () => {
+    const logger: LogPort = {
+      info() {},
+      warn() {},
+      error() { throw new Error("logger transport failed"); },
+    };
+    const malformed = seedableRedis();
+    malformed.seed(`fugue:tenant-a:hitl:decision:${runId}\x1f${nodeId}`, "{not json");
+    const invalid = seedableRedis();
+    invalid.seed(
+      `fugue:tenant-a:hitl:decision:${runId}\x1f${nodeId}`,
+      JSON.stringify({ kind: "reject" }),
+    );
+
+    const malformedResult = await createRedisDecisionStore(malformed.redis, TENANT, cfg, logger)
+      .getDecision(runId, nodeId);
+    const invalidResult = await createRedisDecisionStore(invalid.redis, TENANT, cfg, logger)
+      .getDecision(runId, nodeId);
+
+    expect(malformedResult.ok).toBe(false);
+    expect(invalidResult.ok).toBe(false);
+    if (!malformedResult.ok) expect(malformedResult.error.kind).toBe("internal-invariant-violated");
+    if (!invalidResult.ok) expect(invalidResult.error.kind).toBe("internal-invariant-violated");
   });
 
   it("resolvePending returns not-pending before a park and after clear", async () => {
@@ -631,6 +658,27 @@ describe("RedisRunStore — active-run index (ADR-0074)", () => {
     expect((await store.create(record())).ok).toBe(false);
     expect(base.kv.has("fugue:tenant-a:hitl:ckpt:run-1")).toBe(false);
     expect(base.kv.has("fugue:tenant-a:hitl:run:run-1")).toBe(false);
+  });
+
+  it("a throwing compensation logger cannot replace the original create failure", async () => {
+    const base = setBackedRedis();
+    const original: HostError = { kind: "redis-unavailable", operation: "active index" };
+    const redis: HitlRedisPort = {
+      ...base.redis,
+      async sAdd() { return err(original); },
+      async sRem() { return err({ kind: "redis-unavailable", operation: "compensate index" }); },
+      async compareAndDelete() { return err({ kind: "redis-unavailable", operation: "compensate checkpoint" }); },
+    };
+    const logger: LogPort = {
+      info() {},
+      warn() { throw new Error("logger transport failed"); },
+      error() {},
+    };
+    const store = createRedisRunStore(redis, TENANT, cfg, logger);
+
+    const result = await store.create(record());
+
+    expect(result).toEqual(err(original));
   });
 
   it("a concurrent active-index sweep cannot prune an in-flight metadata publication", async () => {

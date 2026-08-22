@@ -39,6 +39,7 @@ import type {
 import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import type { LogPort } from "../../ports.js";
+import { markTeam } from "../../domain/auth.js";
 import type { AuthIdentity } from "../../domain/auth.js";
 import { tenantId } from "../../domain/tenant.js";
 import type { TenantId } from "../../domain/tenant.js";
@@ -262,6 +263,7 @@ const realExecutor = (dag: DagDef): RunExecutorPort => ({
 // ---------------------------------------------------------------------------
 
 const ADMIN: AuthIdentity = { kind: "admin" };
+const OWNER_TEAM = markTeam("test-team");
 const THROWING_ERROR_LOGGER: LogPort = {
   info: () => {},
   warn: () => {},
@@ -332,11 +334,12 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const { service, store, queue, notif } = setup(dag);
 
     // 1. start → queued
-    const started = await service.startRun("test-dag" as DagId, { x: 1 }, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, { x: 1 }, ADMIN);
     expect(started.ok).toBe(true);
     if (!started.ok) return;
     const runId = started.value.runId;
     expect(store.runs.get(runId)?.status.kind).toBe("queued");
+    expect(store.runs.get(runId)?.ownerTeam).toBe(OWNER_TEAM);
 
     // 2. worker processes → parks at the review gate, notifies once
     await queue.drain();
@@ -348,6 +351,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     }
     expect(notif.sent).toHaveLength(1);
     expect(notif.sent[0]!.nodeId).toBe("review" as NodeId);
+    expect(notif.sent[0]!.ownerTeam).toBe(OWNER_TEAM);
     // The reviewer sees the GATED node's output (what's under review).
     expect(notif.sent[0]!.output).toBe("review-out");
 
@@ -372,7 +376,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const dag = twoWaveDag();
     const { service, store, queue, notif } = setup(dag);
 
-    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     if (!started.ok) throw new Error("startRun failed");
     const runId = started.value.runId;
 
@@ -389,7 +393,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const dag = twoWaveDag();
     const { service, store, queue } = setup(dag);
 
-    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     if (!started.ok) throw new Error("startRun failed");
     const runId = started.value.runId;
 
@@ -406,7 +410,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const dag = twoWaveDag();
     const { service, store, queue } = setup(dag);
 
-    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     if (!started.ok) throw new Error("startRun failed");
     const runId = started.value.runId;
 
@@ -431,7 +435,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const dag = twoWaveDag();
     const { service, store, queue } = setup(dag);
 
-    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     if (!started.ok) throw new Error("startRun failed");
     const runId = started.value.runId;
 
@@ -487,7 +491,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     });
     queue.setProcessor(service.processRun);
 
-    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     if (!started.ok) throw new Error("startRun failed");
     const runId = started.value.runId;
 
@@ -508,7 +512,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const dag = twoWaveDag({ onDraft: () => { draftRuns++; }, onReview: () => { reviewRuns++; } });
     const { service, store, queue, dec, notif } = setup(dag);
 
-    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     if (!started.ok) throw new Error("startRun failed");
     const runId = started.value.runId;
 
@@ -548,7 +552,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const dag = twoWaveDag({ onDraft: () => { draftRuns++; }, onReview: () => { reviewRuns++; } });
     const { service, store, queue } = setup(dag);
 
-    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     if (!started.ok) throw new Error("startRun failed");
     const runId = started.value.runId;
 
@@ -604,7 +608,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
       newRunId: () => mkRunId("run-running-write-failure"),
     });
 
-    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     if (!started.ok) throw new Error("startRun failed");
     const result = await service.processRun(leaseFor(started.value.runId));
 
@@ -623,7 +627,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const dag = twoWaveDag();
     const { service, store } = setup(dag);
 
-    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     if (!started.ok) throw new Error("startRun failed");
     const runId = started.value.runId;
 
@@ -659,7 +663,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
       clock: () => 1_000,
       newRunId: () => mkRunId("removed-dag-run"),
     });
-    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     if (!started.ok) throw new Error("startRun failed");
 
     expect(await service.processRun(leaseFor(started.value.runId))).toEqual(ok(undefined));
@@ -698,7 +702,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
       notifier: notif.port, executor, clock: () => 1_000, newRunId: () => mkRunId(`run-${++counter}`),
     });
 
-    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     if (!started.ok) throw new Error("startRun failed");
     const res = await service.processRun(leaseFor(started.value.runId));
     expect(res).toEqual(err({ kind: "internal-invariant-violated", message: "infra boom", context: {} }));
@@ -728,7 +732,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
       notifier: notif.port, executor: realExecutor(dag), clock: () => 1_000, newRunId: () => mkRunId(`run-${++counter}`),
     });
 
-    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     if (!started.ok) throw new Error("startRun failed");
     const res = await service.processRun(leaseFor(started.value.runId));
     expect(res.ok).toBe(false);
@@ -758,7 +762,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
       logger: THROWING_ERROR_LOGGER,
     });
 
-    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     expect(started.ok).toBe(true);
     const durable = store.runs.get("run-enqueue-failure" as RunId)!;
     expect(durable.status.kind).toBe("queued");
@@ -786,7 +790,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
       ...common,
       runQueue: { async enqueue() { return err({ kind: "redis-unavailable", operation: "queue down" }); } },
     });
-    expect((await beforeRestart.startRun("test-dag" as DagId, null, ADMIN)).ok).toBe(true);
+    expect((await beforeRestart.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN)).ok).toBe(true);
 
     const delivered: RunId[] = [];
     const afterRestart = createHitlRunService({
@@ -826,7 +830,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
   it("reconciliation skips a suspended run with no durable decision", async () => {
     const dag = twoWaveDag();
     const { service, queue, store } = setup(dag);
-    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     if (!started.ok) throw new Error("startRun failed");
     await queue.drain();
     expect(store.runs.get(started.value.runId)?.status.kind).toBe("suspended");
@@ -860,7 +864,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     });
     baseQueue.setProcessor(service.processRun);
 
-    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     if (!started.ok) throw new Error("startRun failed");
     const runId = started.value.runId;
     await baseQueue.drain(); // park at the review gate
@@ -892,7 +896,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
       newRunId: () => mkRunId("reconcile-logger-run"),
       logger: THROWING_ERROR_LOGGER,
     });
-    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     if (!started.ok) throw new Error("startRun failed");
 
     const result = await service.reconcileActiveRuns();
@@ -908,7 +912,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const dag = twoWaveDag();
     const { service, queue } = setup(dag);
 
-    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     if (!started.ok) throw new Error("startRun failed");
     const runId = started.value.runId;
 
@@ -953,10 +957,10 @@ describe("HitlRunService — per-tenant maxQueuedRuns gate (ADR-0074)", () => {
 
   it("refuses startRun with `tenant-over-quota` once the active-run count reaches maxQueuedRuns", async () => {
     const { service } = gateService(2);
-    expect((await service.startRun("test-dag" as DagId, null, ADMIN)).ok).toBe(true);
-    expect((await service.startRun("test-dag" as DagId, null, ADMIN)).ok).toBe(true);
+    expect((await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN)).ok).toBe(true);
+    expect((await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN)).ok).toBe(true);
     // At the ceiling (2 outstanding) — the third is refused, scoped to this tenant.
-    const third = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const third = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     expect(third.ok).toBe(false);
     if (!third.ok) {
       expect(third.error.kind).toBe("tenant-over-quota");
@@ -969,28 +973,28 @@ describe("HitlRunService — per-tenant maxQueuedRuns gate (ADR-0074)", () => {
 
   it("frees a slot when a run settles terminal — a subsequent startRun is admitted again", async () => {
     const { service, store } = gateService(1);
-    const first = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const first = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     expect(first.ok).toBe(true);
     // At the ceiling of 1 — the next is refused.
-    expect((await service.startRun("test-dag" as DagId, null, ADMIN)).ok).toBe(false);
+    expect((await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN)).ok).toBe(false);
     // Settle the first run terminal → it leaves the active index → a slot frees.
     if (first.ok) await store.port.setStatus(leaseFor(first.value.runId), { kind: "completed", output: 1 });
-    expect((await service.startRun("test-dag" as DagId, null, ADMIN)).ok).toBe(true);
+    expect((await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN)).ok).toBe(true);
   });
 
   it("a suspended (parked-at-gate) run still occupies a slot — it is non-terminal", async () => {
     const { service, store } = gateService(1);
-    const first = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const first = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     expect(first.ok).toBe(true);
     if (first.ok) await store.port.setStatus(leaseFor(first.value.runId), { kind: "suspended", nodeId: "g" as NodeId, prompt: nonEmptyString("p") });
     // Still at the ceiling — a parked run is outstanding, so the next is refused.
-    expect((await service.startRun("test-dag" as DagId, null, ADMIN)).ok).toBe(false);
+    expect((await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN)).ok).toBe(false);
   });
 
   it("UNSET maxQueuedRuns means unlimited — the gate never fires (backwards compatible)", async () => {
     const { service } = gateService(undefined);
     for (let i = 0; i < 5; i++) {
-      expect((await service.startRun("test-dag" as DagId, null, ADMIN)).ok).toBe(true);
+      expect((await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN)).ok).toBe(true);
     }
   });
 });

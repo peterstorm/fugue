@@ -171,7 +171,7 @@ export const createRunDagHandler = (
           { dagId },
         );
       }
-      const started = await deps.hitl.startRun(dagId, parseResult.data, identity);
+      const started = await deps.hitl.startRun(dagId, registered.team, parseResult.data, identity);
       if (!started.ok) {
         return errorResponse(c, httpStatusFor(started.error), started.error.kind, formatHostError(started.error), { dagId });
       }

@@ -51,7 +51,7 @@
 import { z } from "zod";
 import { match } from "ts-pattern";
 import type { Result, FrameworkError, CapabilityHandle } from "@fuguejs/framework";
-import { ok, err, nodeId, frameworkError } from "@fuguejs/framework";
+import { ok, err, nodeId, frameworkError, safeErrorMessage } from "@fuguejs/framework";
 import type { DocumentSource, FileRef, FileMeta, ReadOpts } from "@fuguejs/document-source";
 import { unsupportedRefError, parseIsoUtc } from "@fuguejs/document-source";
 
@@ -122,8 +122,6 @@ const MS_GRAPH_NODE_ID = nodeId("ms-graph-capability");
 
 export const DEFAULT_GRAPH_BASE = "https://graph.microsoft.com/v1.0";
 export const DEFAULT_TIMEOUT_MS = 30_000;
-
-const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 // Route through the canonical `frameworkError.transient` factory so the
 // `httpStatus` spread logic lives in exactly one place; this helper just pins
@@ -233,7 +231,7 @@ const acquireToken = async (
     if (!token) return err(transientErr("token provider returned an empty token"));
     return ok(token);
   } catch (e) {
-    return err(transientErr(`token acquisition failed: ${msg(e)}`));
+    return err(transientErr(`token acquisition failed: ${safeErrorMessage(e)}`));
   }
 };
 
@@ -282,7 +280,7 @@ const graphGet = async (
     // the caller's *own* signal rather than the error name — retrying a timeout
     // is correct, retrying a deliberate cancel is not.
     if (opts?.signal?.aborted) return err(abortedErr(url));
-    return err(transientErr(`Graph request failed for ${url.split("?")[0]}: ${msg(e)}`));
+    return err(transientErr(`Graph request failed for ${url.split("?")[0]}: ${safeErrorMessage(e)}`));
   }
 };
 
@@ -315,7 +313,7 @@ export const createMsGraphAdapter = (config: MsGraphAdapterConfig): CapabilityHa
         const buf = await res.value.arrayBuffer();
         return ok(new Uint8Array(buf));
       } catch (e) {
-        return err(transientErr(`failed reading Graph response body: ${msg(e)}`));
+        return err(transientErr(`failed reading Graph response body: ${safeErrorMessage(e)}`));
       }
     },
 
@@ -330,7 +328,7 @@ export const createMsGraphAdapter = (config: MsGraphAdapterConfig): CapabilityHa
       try {
         json = await res.value.json();
       } catch (e) {
-        return err(transientErr(`failed parsing Graph metadata JSON: ${msg(e)}`));
+        return err(transientErr(`failed parsing Graph metadata JSON: ${safeErrorMessage(e)}`));
       }
       const parsed = DriveItemSchema.safeParse(json);
       if (!parsed.success) {
@@ -372,7 +370,7 @@ export const createMsGraphAdapter = (config: MsGraphAdapterConfig): CapabilityHa
         const token = await config.getAccessToken();
         return token ? ok(undefined) : err("ms-graph: empty token");
       } catch (e) {
-        return err(`ms-graph: ${msg(e)}`);
+        return err(`ms-graph: ${safeErrorMessage(e)}`);
       }
     },
   };

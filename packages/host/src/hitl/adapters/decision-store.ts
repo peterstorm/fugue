@@ -20,7 +20,7 @@
  */
 
 import { z } from "zod";
-import { ok, err, tryNodeId } from "@fuguejs/framework";
+import { ok, err, safeErrorMessage, tryNodeId } from "@fuguejs/framework";
 import type { Result, RunId, NodeId, HumanAction } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import type { TenantId } from "../../domain/tenant.js";
@@ -74,6 +74,18 @@ interface RedisDecisionStoreConfig {
 
 const notificationRequired = (marker: string): string => `notification-required:${marker}`;
 const notified = (marker: string): string => `notified:${marker}`;
+
+const logWithoutThrowing = (
+  logger: LogPort | undefined,
+  message: string,
+  data: Record<string, unknown>,
+): void => {
+  try {
+    logger?.error?.(message, data);
+  } catch {
+    // Diagnostics never replace the store's typed decision outcome.
+  }
+};
 
 const parsePendingReview = (raw: string): Result<PendingReview, HostError> => {
   if (raw.startsWith("notification-required:") && raw.length > "notification-required:".length) {
@@ -156,14 +168,22 @@ export const createRedisDecisionStore = (
       try {
         raw = JSON.parse(res.value);
       } catch (e) {
-        logger?.error?.("hitl: corrupt decision in store (malformed JSON)", { runId, nodeId, error: e instanceof Error ? e.message : String(e) });
+        logWithoutThrowing(logger, "hitl: corrupt decision in store (malformed JSON)", {
+          runId,
+          nodeId,
+          error: safeErrorMessage(e),
+        });
         return err({ kind: "internal-invariant-violated", message: `corrupt decision for '${runId}/${nodeId}'`, context: {} });
       }
       const parsed = HumanActionSchema.safeParse(raw);
       if (!parsed.success) {
         // Parses as JSON but is not a well-formed HumanAction — never resume a
         // run on a malformed decision; surface it via the same error channel.
-        logger?.error?.("hitl: corrupt decision in store (invalid shape)", { runId, nodeId, error: parsed.error.message });
+        logWithoutThrowing(logger, "hitl: corrupt decision in store (invalid shape)", {
+          runId,
+          nodeId,
+          error: parsed.error.message,
+        });
         return err({ kind: "internal-invariant-violated", message: `corrupt decision for '${runId}/${nodeId}'`, context: {} });
       }
       return ok(parsed.data as HumanAction);

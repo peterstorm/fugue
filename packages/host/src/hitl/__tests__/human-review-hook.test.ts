@@ -13,12 +13,14 @@ import { describe, it, expect } from "bun:test";
 import { ok, err } from "@fuguejs/framework";
 import type { RunId, NodeId, DagId, HumanAction } from "@fuguejs/framework";
 import type { DecisionStorePort, HumanReviewNotifierPort } from "../ports.js";
+import { markTeam } from "../../domain/auth.js";
 import type { ReviewNotification } from "../types.js";
 import { makeOnHumanReview, makeOnDecisionConsumed } from "../human-review-hook.js";
 
 const RUN = "run-1" as RunId;
 const NODE = "review" as NodeId;
 const DAG = "dag-1" as DagId;
+const OWNER_TEAM = markTeam("test-team");
 const req = { nodeId: NODE, output: { x: 1 }, prompt: "ok?" };
 
 const notifierSpy = () => {
@@ -41,7 +43,7 @@ describe("makeOnHumanReview", () => {
   it("retries the hook and does NOT notify when the decision lookup errors", async () => {
     const notifier = notifierSpy();
     const decisions = decisionStore({ async getDecision() { return err({ kind: "redis-unavailable", operation: "GET decision" }); } });
-    const hook = makeOnHumanReview({ decisions, notifier: notifier.port, runId: RUN, dagId: DAG });
+    const hook = makeOnHumanReview({ decisions, notifier: notifier.port, runId: RUN, dagId: DAG, ownerTeam: OWNER_TEAM });
 
     await expect(hook(req)).rejects.toThrow("decision lookup failed");
 
@@ -57,7 +59,7 @@ describe("makeOnHumanReview", () => {
       async getDecision() { return ok(action); },
       async clear() { clearCalls += 1; return ok(undefined); },
     });
-    const hook = makeOnHumanReview({ decisions, notifier: notifierSpy().port, runId: RUN, dagId: DAG });
+    const hook = makeOnHumanReview({ decisions, notifier: notifierSpy().port, runId: RUN, dagId: DAG, ownerTeam: OWNER_TEAM });
 
     const outcome = await hook(req);
 
@@ -78,7 +80,7 @@ describe("makeOnHumanReview", () => {
       },
       async markNotified() { delivered = true; return ok(true); },
     });
-    const hook = makeOnHumanReview({ decisions, notifier: notifier.port, runId: RUN, dagId: DAG });
+    const hook = makeOnHumanReview({ decisions, notifier: notifier.port, runId: RUN, dagId: DAG, ownerTeam: OWNER_TEAM });
 
     expect(await hook(req)).toEqual({ kind: "pending" });
     expect(await hook(req)).toEqual({ kind: "pending" });
@@ -105,7 +107,7 @@ describe("makeOnHumanReview", () => {
           : ok(undefined);
       },
     };
-    const hook = makeOnHumanReview({ decisions, notifier, runId: RUN, dagId: DAG });
+    const hook = makeOnHumanReview({ decisions, notifier, runId: RUN, dagId: DAG, ownerTeam: OWNER_TEAM });
 
     await expect(hook(req)).rejects.toThrow("review notification failed");
     expect(await hook(req)).toEqual({ kind: "pending" });
@@ -118,7 +120,7 @@ describe("makeOnHumanReview", () => {
     const decisions = decisionStore({
       async preparePending() { return err({ kind: "redis-unavailable", operation: "SET NX pending" }); },
     });
-    const hook = makeOnHumanReview({ decisions, notifier: notifier.port, runId: RUN, dagId: DAG });
+    const hook = makeOnHumanReview({ decisions, notifier: notifier.port, runId: RUN, dagId: DAG, ownerTeam: OWNER_TEAM });
 
     await expect(hook(req)).rejects.toThrow("preparePending failed");
     expect(notifier.sent).toHaveLength(0);
@@ -137,6 +139,7 @@ describe("makeOnHumanReview", () => {
       notifier: notifierSpy().port,
       runId: RUN,
       dagId: DAG,
+      ownerTeam: OWNER_TEAM,
       logger,
     });
     const markerFailure = makeOnHumanReview({
@@ -146,6 +149,7 @@ describe("makeOnHumanReview", () => {
       notifier: notifierSpy().port,
       runId: RUN,
       dagId: DAG,
+      ownerTeam: OWNER_TEAM,
       logger,
     });
     const notificationFailure = makeOnHumanReview({
@@ -155,6 +159,7 @@ describe("makeOnHumanReview", () => {
       },
       runId: RUN,
       dagId: DAG,
+      ownerTeam: OWNER_TEAM,
       logger,
     });
 

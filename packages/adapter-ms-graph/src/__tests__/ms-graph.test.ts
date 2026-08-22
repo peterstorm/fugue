@@ -276,6 +276,16 @@ describe("createMsGraphAdapter — getContent", () => {
     expect(fetched).toBe(false);
   });
 
+  it("keeps a hostile token-provider throw inside the transient Result", async () => {
+    const hostile = Object.create(null) as unknown;
+    const handle = createMsGraphAdapter({ getAccessToken: async () => { throw hostile; } });
+
+    const res = await handle.client.getContent(driveItemRef("d", "i"));
+
+    expect(isErr(res)).toBe(true);
+    if (!res.ok && res.error.kind === "transient") expect(typeof res.error.message).toBe("string");
+  });
+
   it("treats an empty token as transient", async () => {
     const handle = createMsGraphAdapter({ getAccessToken: async () => "" });
     const res = await handle.client.getContent(driveItemRef("d", "i"));
@@ -297,6 +307,16 @@ describe("createMsGraphAdapter — getContent", () => {
       expect(res.error.kind).toBe("transient");
       if (res.error.kind === "transient") expect(res.error.message).toContain("ECONNRESET");
     }
+  });
+
+  it("keeps a hostile fetch throw inside the transient Result", async () => {
+    const hostile = Object.create(null) as unknown;
+    const handle = createMsGraphAdapter(baseConfig({ fetchImpl: async () => { throw hostile; } }));
+
+    const res = await handle.client.getContent(driveItemRef("d", "i"));
+
+    expect(isErr(res)).toBe(true);
+    if (!res.ok && res.error.kind === "transient") expect(typeof res.error.message).toBe("string");
   });
 
   it("composes the caller's abort signal with the request timeout and propagates a caller abort as non-retriable `aborted`", async () => {
@@ -368,6 +388,21 @@ describe("createMsGraphAdapter — getContent", () => {
       if (res.error.kind === "transient") expect(res.error.message).toContain("reading Graph response body");
     }
   });
+
+  it("keeps a hostile body-read throw inside the transient Result", async () => {
+    const hostile = Object.create(null) as unknown;
+    const brokenBody = {
+      ok: true,
+      status: 200,
+      arrayBuffer: async () => { throw hostile; },
+    } as unknown as Response;
+    const handle = createMsGraphAdapter(baseConfig({ fetchImpl: async () => brokenBody }));
+
+    const res = await handle.client.getContent(driveItemRef("d", "i"));
+
+    expect(isErr(res)).toBe(true);
+    if (!res.ok && res.error.kind === "transient") expect(typeof res.error.message).toBe("string");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -438,6 +473,21 @@ describe("createMsGraphAdapter — getMetadata", () => {
     if (!res.ok) expect(res.error.kind).toBe("transient");
   });
 
+  it("keeps a hostile metadata JSON rejection inside the transient Result", async () => {
+    const hostile = Object.create(null) as unknown;
+    const brokenBody = {
+      ok: true,
+      status: 200,
+      json: async () => { throw hostile; },
+    } as unknown as Response;
+    const handle = createMsGraphAdapter(baseConfig({ fetchImpl: async () => brokenBody }));
+
+    const res = await handle.client.getMetadata(driveItemRef("d", "i"));
+
+    expect(isErr(res)).toBe(true);
+    if (!res.ok && res.error.kind === "transient") expect(typeof res.error.message).toBe("string");
+  });
+
   it("rejects an unexpected driveItem shape as a non-retriable node-crash", async () => {
     const stub = stubFetch(() => new Response(JSON.stringify({ nope: true }), { status: 200 }));
     const handle = createMsGraphAdapter(baseConfig({ fetchImpl: stub.fetchImpl }));
@@ -473,6 +523,16 @@ describe("createMsGraphAdapter — lifecycle", () => {
 
     const badHandle = createMsGraphAdapter({ getAccessToken: async () => "" });
     expect(isErr((await badHandle.healthCheck?.())!)).toBe(true);
+  });
+
+  it("keeps a hostile health-check throw inside the string error Result", async () => {
+    const hostile = Object.create(null) as unknown;
+    const handle = createMsGraphAdapter({ getAccessToken: async () => { throw hostile; } });
+
+    const res = await handle.healthCheck?.();
+
+    expect(res !== undefined && isErr(res)).toBe(true);
+    if (res !== undefined && !res.ok) expect(typeof res.error).toBe("string");
   });
 
   it("registers under the documents capability", () => {

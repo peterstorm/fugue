@@ -37,7 +37,7 @@ import type {
 import type { RedisPort, SharedInfra } from "../../../ports.js";
 import type { RegisteredDag } from "../../../domain/registry.js";
 import { tryRunTimestampMs } from "../../types.js";
-import type { RunRecord, RunStatus, PersistedIdentity, RunTimestampMs } from "../../types.js";
+import type { PersistedIdentity, QueuedRunRecord, RunTimestampMs } from "../../types.js";
 import { makeRunStoreJobLike } from "../../run-store-job.js";
 import { issueRunLease } from "../../ports.js";
 import { createInMemoryRunStore } from "../run-store.js";
@@ -131,12 +131,13 @@ const seedJobLike = async (dag: DagDef, input: unknown, failCheckpoint = false) 
     context: stripNonPersistable(compiled.value.initialContext),
   });
   const store = createInMemoryRunStore();
-  const record: RunRecord = {
+  const record: QueuedRunRecord = {
     runId: "run-1" as never,
     dagId: dag.id as DagId,
+    ownerTeam: markTeam("eng"),
     input,
     identity: ADMIN,
-    status: { kind: "running" } as RunStatus,
+    status: { kind: "queued" },
     checkpoint,
     createdAtMs: timestamp(1),
     updatedAtMs: timestamp(1),

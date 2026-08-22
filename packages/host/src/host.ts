@@ -626,14 +626,6 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
   const botConfigured = notifierSelection.kind === "bot-framework";
   let notifier: HumanReviewNotifierPort | undefined;
   let conversations: ConversationStorePort | undefined;
-  // Resolve a run's DAG id to its OWNING team off the LIVE registry (the same
-  // `lookupDag` the HTTP path uses). Shared by the notifier (confidentiality
-  // routing — FR-041) and the inbound handler (authz parity — SC-006). `undefined`
-  // when the DAG is no longer registered.
-  const resolveDagTeam = (dagId: DagId): Team | undefined => {
-    const reg = getRegistry(hostState);
-    return reg ? lookupDag(reg, dagId)?.team : undefined;
-  };
   if (notifierSelection.kind === "bot-framework") {
     // SECURITY (FR-013 / SC-001): the HITL conversation store is bound to the
     // `routedTenant` so every `fugue:<tenant>:hitl:*` key is scoped under that
@@ -649,7 +641,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
       },
       sharedInfra.logger,
     );
-    notifier = createBotFrameworkNotifier({ connector, conversations, resolveDagTeam });
+    notifier = createBotFrameworkNotifier({ connector, conversations });
   } else if (notifierSelection.kind === "webhook") {
     notifier = createWebhookNotifier(
       {
@@ -756,11 +748,8 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
             verify,
             hitl: service,
             conversations: convs,
-            // FR-041: authorize the Teams approver against the run's DAG-owning
-            // team at parity with the HTTP path. The team is resolved from the
-            // live registry (same `lookupDag` the HTTP path + notifier use), and
-            // the approver's membership from `HITL_APPROVER_TEAMS`.
-            resolveDagTeam,
+            // FR-041: authorize the Teams approver against the immutable owning
+            // team persisted on the run, at parity with the HTTP path.
             approverTeams: config.HITL_APPROVER_TEAMS,
             // FR-041 (confidentiality routing): on `conversationUpdate` map the
             // Teams team `aadGroupId` to a fugue team so the captured reference is
