@@ -165,6 +165,16 @@ const poolWithRows = (rows: unknown[], rowCount: number | null = rows.length): P
   query: async () => ({ rows, rowCount }),
 });
 
+const revokedProxy = (): unknown => {
+  const revoked = Proxy.revocable({}, {});
+  revoked.revoke();
+  return revoked.proxy;
+};
+
+const throwingMessageAccessor = (): unknown => Object.defineProperty({}, "message", {
+  get: () => { throw new Error("message accessor failed"); },
+});
+
 describe("@fuguejs/pg — mapPgError classification", () => {
   it.each([
     ["08006", "connection failure"],
@@ -211,6 +221,14 @@ describe("@fuguejs/pg — mapPgError classification", () => {
     }
   });
 
+  it("revoked proxies and throwing accessors cannot escape the mapper", () => {
+    for (const hostile of [revokedProxy(), throwingMessageAccessor()]) {
+      const mapped = mapPgError(hostile, "SELECT 1");
+      expect(mapped.kind).toBe("node-crash");
+      if (mapped.kind === "node-crash") expect(typeof mapped.message).toBe("string");
+    }
+  });
+
   it("a non-string `code` does not throw — falls through to non-retriable node-crash", () => {
     // A driver/edge case that sets `code` to a non-string (here: numeric) must
     // not make `pgCode.startsWith(...)` throw out of mapPgError and escape the
@@ -246,6 +264,19 @@ describe("@fuguejs/pg — createPgClient (real client, fake pool)", () => {
     if (!result.ok) {
       expect(result.error.kind).toBe("node-crash");
       expect(result.error.kind === "node-crash" && result.error.retriability).toBe("non-retriable");
+    }
+  });
+
+  it("query contains a revoked proxy thrown by the pool", async () => {
+    const result = await createPgClient(poolThatThrows(revokedProxy())).query(
+      UserSchema,
+      "SELECT * FROM users",
+    );
+
+    expect(isErr(result)).toBe(true);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") expect(typeof result.error.message).toBe("string");
     }
   });
 
@@ -322,6 +353,13 @@ describe("@fuguejs/pg — healthCheckWithTimeout", () => {
     const result = await healthCheckWithTimeout(poolThatThrows(pgError("08006", "down")), 1_000);
     expect(isErr(result)).toBe(true);
     if (!result.ok) expect(result.error).toContain("down");
+  });
+
+  it("a throwing message accessor returns Err instead of escaping", async () => {
+    const result = await healthCheckWithTimeout(poolThatThrows(throwingMessageAccessor()), 1_000);
+
+    expect(isErr(result)).toBe(true);
+    if (!result.ok) expect(typeof result.error).toBe("string");
   });
 
   it("hung pool → Err after the timeout", async () => {

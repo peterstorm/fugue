@@ -196,15 +196,14 @@ export interface FileJournal {
    * reporting a permission-broken run directory as "no checkpoint" would
    * be a silent fresh start. The RAW-JSON brand documents in the type that
    * parsing is the caller's business (the resume layer's strict
-   * `parseCheckpoint`) — the capability-typed write twin's mirror
-   * (round-23 tda-5). */
+   * `parseCheckpoint`) — the capability-typed write twin's mirror. */
   readCheckpoint(): RawCheckpointJson | null;
 }
 
 /**
  * The unvalidated `checkpoint.json` bytes, branded so the "must strict-parse
  * before trusting" obligation is visible in the type instead of only the doc
- * comment (round-23 tda-5): `RawCheckpointJson` cannot be produced from
+ * comment: `RawCheckpointJson` cannot be produced from
  * arbitrary strings by accident — it is minted only at the file read site.
  */
 export type RawCheckpointJson = string & {

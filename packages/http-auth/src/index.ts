@@ -202,7 +202,7 @@ export const createHttpAuthAdapter = (config: HttpAuthConfig): CapabilityHandle<
       const minted = await tokens.get();
       if (!minted.ok) {
         // The error message is secret-free by construction (NFR-010).
-        throw new Error(`http-auth connect failed: ${describeError(minted.error)}`);
+        throw new Error(`http-auth connect failed: ${formatFrameworkError(minted.error)}`);
       }
     },
 
@@ -213,15 +213,6 @@ export const createHttpAuthAdapter = (config: HttpAuthConfig): CapabilityHandle<
     healthCheck: () => healthCheckWithTimeout(tokens, HEALTH_CHECK_TIMEOUT_MS),
   };
 };
-
-/**
- * Render a FrameworkError to a short, secret-free string for boot diagnostics.
- * Delegates to the framework's exhaustive `formatFrameworkError` so a NEW
- * `FrameworkError` variant can never silently lose context here — adding a kind
- * without a case there is a compile error, which this inherits. (NFR-010: the
- * error variants this package emits never embed the token/credentials.)
- */
-const describeError = (error: FrameworkError): string => formatFrameworkError(error);
 
 /**
  * Run an uncached token probe against a hard deadline. The deadline settles
@@ -244,7 +235,7 @@ export const healthCheckWithTimeout = async (
   });
   const probe = tokens.probe(controller.signal).then(
     (result): Result<void, string> =>
-      result.ok ? ok(undefined) : err(describeError(result.error)),
+      result.ok ? ok(undefined) : err(formatFrameworkError(result.error)),
     (): Result<void, string> => err("token provider probe failed outside its Result contract"),
   );
 

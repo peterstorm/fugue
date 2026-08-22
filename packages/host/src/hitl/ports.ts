@@ -201,9 +201,10 @@ export interface RunExecutorPort {
   seedCheckpoint(dagId: DagId, input: unknown): Promise<Result<string, HostError>>;
   /**
    * Run or resume a DAG through the framework's resumable kernel. Never throws:
-   * a framework run-failure — including context-build faults after the slice
-   * begins — is mapped onto the `failed` outcome. The `err` channel carries host
-   * failures that require queue retry, including unknown DAG and checkpoint I/O.
+   * permanent run failures — including context-build faults after the slice
+   * begins and a DAG removed after durable acceptance — map onto the `failed`
+   * outcome. The `err` channel carries host failures that require queue retry,
+   * including checkpoint I/O.
    */
   run(req: RunExecutionRequest): Promise<Result<RunExecOutcome, HostError>>;
 }

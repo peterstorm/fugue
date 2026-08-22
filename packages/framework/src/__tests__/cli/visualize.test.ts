@@ -13,6 +13,7 @@ import { describedToMermaid, runVisualize } from "../../cli/visualize.js";
 import { writeAuthoredScaffold } from "../../cli/new.js";
 import { parseAuthoredDag } from "../../cli/authored.js";
 import type { DescribedDag } from "../../describe/index.js";
+import { runBin } from "./_run-bin.js";
 
 const tmpRoot = resolve(__dirname, ".tmp-visualize");
 
@@ -226,19 +227,6 @@ describe("runVisualize", () => {
 // Bin subprocess contract for `--raw` — the one command whose success output
 // is NOT JSON (the bare Mermaid text, for piping into docs).
 // ---------------------------------------------------------------------------
-
-const binPath = resolve(__dirname, "..", "..", "..", "bin", "fugue.ts");
-
-const runBin = async (
-  args: readonly string[],
-): Promise<{ exitCode: number; stdout: string; stderr: string }> => {
-  const proc = Bun.spawn(["bun", binPath, ...args], { stdout: "pipe", stderr: "pipe" });
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  return { exitCode: await proc.exited, stdout, stderr };
-};
 
 describe("fugue visualize --raw (subprocess)", () => {
   it("prints the bare Mermaid diagram (no JSON) on stdout, exit 0", async () => {

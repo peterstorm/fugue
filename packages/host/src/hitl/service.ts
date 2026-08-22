@@ -1,7 +1,8 @@
 /**
  * HITL run service (ADR-0060) — the durable-requeue engine, provider-agnostic.
  *
- *   startRun       — seed a run's checkpoint, persist it, enqueue it → returns runId
+ *   startRun       — seed + persist a run, attempt its direct wakeup, return runId;
+ *                    reconciliation retries failed wakeups
  *   processRun     — the worker handler: run/resume via the executor, fold the
  *                    outcome into the run's status (completed | suspended | failed)
  *   recordDecision — an approval: record the human's action, re-enqueue the run
@@ -86,6 +87,19 @@ const asRunFailure = (hostError: HostError): FrameworkError => ({
   message: `host run execution failed: ${hostError.kind}`,
 });
 
+const logWithoutThrowing = (
+  logger: LogPort | undefined,
+  level: "warn" | "error",
+  message: string,
+  data: Record<string, unknown>,
+): void => {
+  try {
+    logger?.[level]?.(message, data);
+  } catch {
+    // Diagnostics never replace the service's durable or typed outcome.
+  }
+};
+
 export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService => {
   const { runStore, runQueue, decisions, notifier, executor, clock, newRunId, tenant, maxQueuedRuns, logger } = deps;
   const retryAfterSeconds = deps.retryAfterSeconds ?? 5;
@@ -152,7 +166,7 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
       // The run is already durably accepted. Do not destroy it merely because
       // the direct wakeup failed: server-owned reconciliation enumerates this
       // active record after restart and on every lifecycle tick.
-      logger?.error?.("hitl: run accepted but initial wakeup failed — reconciliation will retry", {
+      logWithoutThrowing(logger, "error", "hitl: run accepted but initial wakeup failed — reconciliation will retry", {
         runId,
         error: enqueued.error.kind,
         message: formatHostError(enqueued.error),
@@ -170,13 +184,13 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
     const record = fetched.value;
     if (record === null) {
       // Nothing to process — a stale enqueue (run deleted/expired). Not an error.
-      logger?.warn?.("hitl: processRun for unknown run — ignoring", { runId });
+      logWithoutThrowing(logger, "warn", "hitl: processRun for unknown run — ignoring", { runId });
       return ok(undefined);
     }
 
     // Terminal runs are never re-processed (a double-enqueue after completion).
     if (record.status.kind === "completed" || record.status.kind === "failed") {
-      logger?.warn?.("hitl: processRun for terminal run — ignoring", {
+      logWithoutThrowing(logger, "warn", "hitl: processRun for terminal run — ignoring", {
         runId,
         status: record.status.kind,
       });
@@ -194,7 +208,7 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
       // A corrupt checkpoint will not heal on retry — settle the run `failed`
       // (terminal) so a status poll surfaces it, and return `ok` so the worker
       // does NOT re-process (a retry would only hit the same corrupt state).
-      logger?.error?.("hitl: corrupt checkpoint — settling run failed", {
+      logWithoutThrowing(logger, "error", "hitl: corrupt checkpoint — settling run failed", {
         runId,
         error: jobLikeResult.error.kind,
       });
@@ -277,7 +291,7 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
     // lifecycle reconciler owns eventual delivery, including after restart.
     const enqueued = await runQueue.enqueue(runId);
     if (!enqueued.ok) {
-      logger?.error?.("hitl: decision accepted but resume wakeup failed — reconciliation will retry", {
+      logWithoutThrowing(logger, "error", "hitl: decision accepted but resume wakeup failed — reconciliation will retry", {
         runId,
         nodeId,
         resolution: resolution.value.kind,
@@ -308,7 +322,7 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
         attempts.push({ kind: "woken", runId });
       } else {
         attempts.push({ kind: "wakeup-failed", runId, error: woken.error });
-        logger?.error?.("hitl: active-run reconciliation wakeup failed", {
+        logWithoutThrowing(logger, "error", "hitl: active-run reconciliation wakeup failed", {
           runId,
           error: woken.error.kind,
           message: formatHostError(woken.error),

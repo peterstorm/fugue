@@ -28,6 +28,7 @@ interface FakeOverrides {
   readonly getResult?: string | null;
   readonly execNullOnce?: boolean;
   readonly throwOn?: readonly string[];
+  readonly thrownValue?: unknown;
 }
 
 class FakeRedis {
@@ -48,7 +49,9 @@ class FakeRedis {
 
   private rec(m: string, args: readonly unknown[]): void {
     this.calls.push({ m, args });
-    if (this.throwOn.has(m)) throw new Error(`${m} boom`);
+    if (this.throwOn.has(m)) {
+      throw "thrownValue" in this.o ? this.o.thrownValue : new Error(`${m} boom`);
+    }
   }
 
   async connect(): Promise<void> {
@@ -127,9 +130,9 @@ class FakeRedis {
     };
     return chain;
   }
-  async del(key: string): Promise<number> {
-    this.rec("del", [key]);
-    return 1;
+  async del(...keys: string[]): Promise<number> {
+    this.rec("del", keys);
+    return keys.length;
   }
   async scan(...args: unknown[]): Promise<[string, string[]]> {
     this.rec("scan", args);
@@ -277,6 +280,16 @@ describe("createRedisConnectivity — data port", () => {
     expect(setCall?.args).toEqual(["k", "v", "EX", 60]);
   });
 
+  it("del submits every key in one Redis command", async () => {
+    const fake = new FakeRedis();
+    const { bundle } = await wire(fake);
+
+    const result = await bundle.redis.del("pending", "decision");
+
+    expect(isOk(result) && result.value).toBe(2);
+    expect(fake.calls.find((call) => call.m === "del")?.args).toEqual(["pending", "decision"]);
+  });
+
   it("get returns the value on success and Err(redis-unavailable) on a thrown client error", async () => {
     const okFake = new FakeRedis({ getResult: "hello" });
     const okR = await (await wire(okFake)).bundle.redis.get("k");
@@ -331,6 +344,35 @@ describe("createRedisConnectivity — data port", () => {
     expect(rejected && isOk(rejected) && rejected.value).toBe(false);
     expect(await successor.get("checkpoint")).toBeNull();
     expect(successor.calls.some((c) => c.m === "multi.set")).toBe(false);
+  });
+
+  it("a revoked proxy thrown by the client stays inside redisErr's typed boundary", async () => {
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    const fake = new FakeRedis({ throwOn: ["get"], thrownValue: revoked.proxy });
+
+    const result = await (await wire(fake)).bundle.redis.get("hostile-key");
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result) && result.error.kind === "redis-unavailable") {
+      expect(result.error.operation).toContain("GET hostile-key");
+      expect(typeof result.error.operation).toBe("string");
+    }
+  });
+
+  it("a throwing message accessor cannot escape redisErr", async () => {
+    const hostile = Object.defineProperty({}, "message", {
+      get: () => { throw new Error("message accessor failed"); },
+    });
+    const fake = new FakeRedis({ throwOn: ["ping"], thrownValue: hostile, initialStatus: "ready" });
+
+    const result = await (await wire(fake)).bundle.port.ping();
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result) && result.error.kind === "redis-unavailable") {
+      expect(result.error.operation).toContain("PING at startup");
+      expect(typeof result.error.operation).toBe("string");
+    }
   });
 
   it("sMembers wraps a thrown error as Err(redis-unavailable)", async () => {

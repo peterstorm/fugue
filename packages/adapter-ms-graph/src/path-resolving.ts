@@ -48,7 +48,7 @@
  */
 
 import type { CapabilityHandle, FrameworkError, Result } from "@fuguejs/framework";
-import { err, frameworkError, nodeId, ok } from "@fuguejs/framework";
+import { err, frameworkError, nodeId, ok, safeErrorMessage } from "@fuguejs/framework";
 import type { DocumentSource, FileRef, ReadOpts } from "@fuguejs/document-source";
 import {
   createMsGraphAdapter,
@@ -176,7 +176,7 @@ export const createPathResolvingMsGraphAdapter = (
         // access_token) — collapsing them into a constant would force the
         // operator to re-derive the cause by hand. The stock adapter's twin
         // preserves the cause the same way.
-        tokenError = e instanceof Error ? e.message : String(e);
+        tokenError = safeErrorMessage(e);
         return "";
       }
     })();
@@ -213,7 +213,7 @@ export const createPathResolvingMsGraphAdapter = (
       return err(
         frameworkError.transient(
           SP_RESOLVE_NODE_ID,
-          `SharePoint path resolution request failed: ${e instanceof Error ? e.message : String(e)}`,
+          `SharePoint path resolution request failed: ${safeErrorMessage(e)}`,
         ),
       );
     }

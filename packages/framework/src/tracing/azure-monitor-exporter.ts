@@ -40,8 +40,7 @@ import { fwLogger } from "../logger.js";
 // typecheck rejects. Used ONLY to load the Azure exporter lazily-yet-synchronously
 // at construction time (see `buildInner`) so the default MLflow-only path never
 // loads the Azure SDK.
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const require = createRequire(__filename);
+const requireModule = createRequire(__filename);
 
 /**
  * The assembled auth options forwarded to the inner Azure exporter. This is the
@@ -175,13 +174,13 @@ export class AzureMonitorExporter implements SpanExporter {
     // real assembly path, with no live network.
     if (config.createInner) return config.createInner(opts);
 
-    // The module-scoped `require` (from `createRequire(__filename)`) gives an
-    // ESM-safe SYNCHRONOUS require. The load stays LAZY: it runs only here,
+    // The module-scoped `requireModule` (from `createRequire(__filename)`) gives
+    // an ESM-safe SYNCHRONOUS require. The load stays LAZY: it runs only here,
     // when the Azure exporter is actually constructed without a `createInner`
     // seam (auth present, no override). So the default MLflow-only path — and
     // every seam path — never loads the Azure SDK, even though the package is a
     // HARD dependency (FR-029) and always installed.
-    const { AzureMonitorTraceExporter } = require("@azure/monitor-opentelemetry-exporter") as {
+    const { AzureMonitorTraceExporter } = requireModule("@azure/monitor-opentelemetry-exporter") as {
       AzureMonitorTraceExporter: new (opts: AzureMonitorInnerOpts) => SpanExporter;
     };
 

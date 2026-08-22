@@ -411,6 +411,41 @@ describe("createPathResolvingMsGraphAdapter — self-heal", () => {
 });
 
 describe("createPathResolvingMsGraphAdapter — failures", () => {
+  test("a revoked proxy thrown by the token provider stays inside the Result boundary", async () => {
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    const handle = createPathResolvingMsGraphAdapter({
+      getAccessToken: async () => { throw revoked.proxy; },
+      fetchImpl: makeFakeGraph(freshState()),
+    });
+
+    const result = await handle.client.getMetadata(ref("/workbooks/Brancheliste.xlsx"));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "transient") {
+      expect(result.error.message).toContain("token acquisition failed");
+      expect(typeof result.error.message).toBe("string");
+    }
+  });
+
+  test("a hostile fetch throw stays inside the Result boundary", async () => {
+    const hostile = Object.defineProperty({}, "message", {
+      get: () => { throw new Error("message accessor failed"); },
+    });
+    const handle = createPathResolvingMsGraphAdapter({
+      getAccessToken: async () => "tok",
+      fetchImpl: async () => { throw hostile; },
+    });
+
+    const result = await handle.client.getMetadata(ref("/workbooks/Brancheliste.xlsx"));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "transient") {
+      expect(result.error.message).toContain("request failed");
+      expect(typeof result.error.message).toBe("string");
+    }
+  });
+
   test("missing segment → non-retriable node-crash naming folder + segment", async () => {
     const state = freshState();
     const handle = boot(state);

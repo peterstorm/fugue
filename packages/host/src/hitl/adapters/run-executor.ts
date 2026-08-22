@@ -6,9 +6,10 @@
  * run-store-backed `jobLike` so a run can park and resume.
  *
  * `run` never throws: a framework run-failure (including an abort/timeout of an
- * execution slice) is mapped onto the `failed` outcome. The `err` channel carries
- * host infrastructure failures, including a durable checkpoint write that aborts
- * the kernel, so the queue can retry from the last persisted state. A
+ * execution slice or a DAG removed after durable acceptance) is mapped onto the
+ * `failed` outcome. The `err` channel carries retryable host infrastructure
+ * failures, including a durable checkpoint write that aborts the kernel, so the
+ * queue can retry from the last persisted state. A
  * CONTEXT-BUILD fault (host wiring: invalid tenant team, FR-040 unmapped agent
  * client) is logged at `error` with the actual message and settles as the
  * `failed` outcome — NOT `err` — so the recorded `FrameworkError` keeps the
@@ -105,7 +106,20 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
 
     async run(req: RunExecutionRequest): Promise<Result<RunExecOutcome, HostError>> {
       const registered = getRegisteredDag(req.dagId);
-      if (!registered) return err({ kind: "dag-not-found", dagId: req.dagId, available: [] });
+      if (!registered) {
+        // The DAG existed when seedCheckpoint accepted this durable run but was
+        // removed by a later registry sync. Retrying cannot restore registry
+        // intent, so settle the run instead of leaving it active forever.
+        return ok({
+          kind: "failed",
+          error: {
+            kind: "node-crash",
+            retriability: "non-retriable",
+            nodeId: EXECUTOR_NODE_ID,
+            message: `DAG '${req.dagId}' is no longer registered`,
+          },
+        });
+      }
 
       // One execution slice runs from resume to the next gate/terminal — bounded
       // compute. Apply the DAG's configured timeout to the slice (the human wait

@@ -108,7 +108,8 @@ export type GitPort = {
 export type RedisPort = {
   readonly get: (key: string) => Promise<Result<string | null, HostError>>;
   readonly set: (key: string, value: string, opts?: { expiresInSec?: number }) => Promise<Result<string | null, HostError>>;
-  readonly del: (key: string) => Promise<Result<number, HostError>>;
+  /** Atomically delete one or more keys with a single Redis DEL command. */
+  readonly del: (key: string, ...additionalKeys: readonly string[]) => Promise<Result<number, HostError>>;
   /**
    * Cursor-based key scanning — a keyspace-enumeration primitive.
    *

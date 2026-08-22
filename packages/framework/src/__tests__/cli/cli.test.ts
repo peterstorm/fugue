@@ -4,26 +4,10 @@ import { runLint } from "../../cli/lint.js";
 import { parseRegistrationMeta, runDescribe } from "../../cli/describe.js";
 import { runCapabilities } from "../../cli/capabilities.js";
 import { BUILTIN_CAPABILITY_KEYS } from "../../types/node.js";
+import { runBin } from "./_run-bin.js";
 
 const fixturePath = (name: string): string =>
   resolve(__dirname, "fixtures", name);
-
-const binPath = resolve(__dirname, "..", "..", "..", "bin", "fugue.ts");
-
-const runBin = async (
-  args: readonly string[],
-): Promise<{ exitCode: number; stdout: string; stderr: string }> => {
-  const proc = Bun.spawn(["bun", binPath, ...args], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  const exitCode = await proc.exited;
-  return { exitCode, stdout, stderr };
-};
 
 describe("runLint", () => {
   it("reports ok for a valid DAG file", async () => {

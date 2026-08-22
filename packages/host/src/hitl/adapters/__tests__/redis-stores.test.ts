@@ -49,7 +49,9 @@ const fakeRedis = (): RecordingRedis => {
     setNxOpts,
     async get(k): Promise<Result<string | null, HostError>> { return ok(m.get(k) ?? null); },
     async set(k, v, opts): Promise<Result<string | null, HostError>> { setOpts.set(k, opts); m.set(k, v); return ok("OK"); },
-    async del(k): Promise<Result<number, HostError>> { const had = m.delete(k); return ok(had ? 1 : 0); },
+    async del(k, ...additionalKeys): Promise<Result<number, HostError>> {
+      return ok([k, ...additionalKeys].reduce((count, key) => count + (m.delete(key) ? 1 : 0), 0));
+    },
     async scan(): Promise<Result<{ cursor: string; keys: string[] }, HostError>> { return ok({ cursor: "0", keys: [...m.keys()] }); },
     async setNx(k, v, opts): Promise<Result<boolean, HostError>> { setNxOpts.set(k, opts); if (m.has(k)) return ok(false); m.set(k, v); return ok(true); },
     async compareAndDelete(k, expected): Promise<Result<boolean, HostError>> { if (m.get(k) !== expected) return ok(false); m.delete(k); return ok(true); },
@@ -80,7 +82,9 @@ const seedableRedis = (): { redis: HitlRedisPort; seed: (k: string, v: string) =
   const redis: HitlRedisPort = {
     async get(k) { return ok(m.get(k) ?? null); },
     async set(k, v) { m.set(k, v); return ok("OK"); },
-    async del(k) { const had = m.delete(k); return ok(had ? 1 : 0); },
+    async del(k, ...additionalKeys) {
+      return ok([k, ...additionalKeys].reduce((count, key) => count + (m.delete(key) ? 1 : 0), 0));
+    },
     async scan() { return ok({ cursor: "0", keys: [...m.keys()] }); },
     async setNx(k, v) { if (m.has(k)) return ok(false); m.set(k, v); return ok(true); },
     async compareAndDelete(k, expected) { if (m.get(k) !== expected) return ok(false); m.delete(k); return ok(true); },
@@ -354,12 +358,25 @@ describe("RedisDecisionStore", () => {
     expect(got.ok && got.value).toBe(null);
   });
 
-  it("clear removes pending marker and decision", async () => {
-    const store = createRedisDecisionStore(fakeRedis(), TENANT, cfg);
+  it("clear atomically removes the pending marker and decision", async () => {
+    const base = fakeRedis();
+    const deleteCalls: string[][] = [];
+    const redis: HitlRedisPort = {
+      ...base,
+      async del(key, ...additionalKeys) {
+        deleteCalls.push([key, ...additionalKeys]);
+        return base.del(key, ...additionalKeys);
+      },
+    };
+    const store = createRedisDecisionStore(redis, TENANT, cfg);
     await store.preparePending(runId, nodeId);
     await store.resolvePending(runId, nodeId, approve);
     await store.clear(runId, nodeId);
 
+    expect(deleteCalls).toEqual([[
+      `fugue:tenant-a:hitl:pending:${runId}\x1f${nodeId}`,
+      `fugue:tenant-a:hitl:decision:${runId}\x1f${nodeId}`,
+    ]]);
     const got = await store.getDecision(runId, nodeId);
     expect(got.ok && got.value).toBe(null);
     // preparePending is fresh again after clear.
@@ -440,7 +457,9 @@ const sharedRedis = (): HitlRedisPort & { readonly _keys: ReadonlyMap<string, st
     _keys: m,
     async get(k) { return ok(m.get(k) ?? null); },
     async set(k, v) { m.set(k, v); return ok("OK"); },
-    async del(k) { const had = m.delete(k); return ok(had ? 1 : 0); },
+    async del(k, ...additionalKeys) {
+      return ok([k, ...additionalKeys].reduce((count, key) => count + (m.delete(key) ? 1 : 0), 0));
+    },
     async scan() { return ok({ cursor: "0", keys: [...m.keys()] }); },
     async setNx(k, v) { if (m.has(k)) return ok(false); m.set(k, v); return ok(true); },
     async compareAndDelete(k, expected) { if (m.get(k) !== expected) return ok(false); m.delete(k); return ok(true); },
@@ -558,7 +577,9 @@ const setBackedRedis = () => {
   const redis: HitlRedisPort = {
     async get(k) { return ok(kv.get(k) ?? null); },
     async set(k, v) { kv.set(k, v); return ok("OK"); },
-    async del(k) { const had = kv.delete(k); return ok(had ? 1 : 0); },
+    async del(k, ...additionalKeys) {
+      return ok([k, ...additionalKeys].reduce((count, key) => count + (kv.delete(key) ? 1 : 0), 0));
+    },
     async scan() { return ok({ cursor: "0", keys: [...kv.keys()] }); },
     async setNx(k, v) { if (kv.has(k)) return ok(false); kv.set(k, v); return ok(true); },
     async compareAndDelete(k, expected) { if (kv.get(k) !== expected) return ok(false); kv.delete(k); return ok(true); },

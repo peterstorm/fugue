@@ -3,9 +3,9 @@
 // SharedInfra + RegisteredDag (ports-and-adapters fakes, no Redis/BullMQ/network).
 //
 // Covers what the service-level fakes can't:
-//   - the channel split: an UNKNOWN DAG is the `err` channel, but a genuine
-//     run-FAILURE is `ok({ kind: "failed" })` so the service settles the run
-//     (never the err channel, which is reserved for host infra faults);
+//   - the channel split: a DAG removed after durable acceptance and genuine
+//     run failures are `ok({ kind: "failed" })` so the service settles them;
+//     the err channel is reserved for retryable host infrastructure faults;
 //   - `toFrameworkError` cause-unwrapping (a thrown error carrying a
 //     `FrameworkError` cause surfaces that cause verbatim);
 //   - the AbortController slice-timeout wiring: the slice is bounded by
@@ -165,13 +165,21 @@ const runReq = (dag: DagDef, jobLike: Awaited<ReturnType<typeof seedJobLike>>, i
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 describe("createRunExecutor — channel split (err vs failed)", () => {
-  it("an UNKNOWN dag uses the `err` channel (host infra fault), not `failed`", async () => {
+  it("a DAG removed after durable acceptance settles as a non-retriable failed outcome", async () => {
     const exec = createRunExecutor({ sharedInfra: sharedInfra(), getRegisteredDag: () => undefined });
     const dag = singleNodeDag(noopRun as never);
     const jobLike = await seedJobLike(dag, null);
-    const res = await exec.run(runReq(dag, jobLike, null));
-    expect(res.ok).toBe(false);
-    if (!res.ok) expect(res.error.kind).toBe("dag-not-found");
+
+    const result = await exec.run(runReq(dag, jobLike, null));
+
+    expect(result.ok && result.value.kind).toBe("failed");
+    if (result.ok && result.value.kind === "failed") {
+      expect(result.value.error.kind).toBe("node-crash");
+      if (result.value.error.kind === "node-crash") {
+        expect(result.value.error.retriability).toBe("non-retriable");
+        expect(result.value.error.message).toContain("no longer registered");
+      }
+    }
   });
 
   it("a known dag that COMPLETES returns ok({ kind: 'completed' }) with the output", async () => {

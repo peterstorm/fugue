@@ -129,11 +129,10 @@ export { deepFreeze as __testDeepFreeze };
  * - `appendEvent(event, dedupKey?)` — durable append under the per-directory
  *   lock; keyed re-derivations land as no-ops (FR-004, SC-003).
  *
- * This unchecked body throws raw diagnostics where the typed boundary is the
- * public `createFileJob` shell: factory-validation rejections are raw strings
- * and every other runtime/infrastructure rejection crosses to the shell, which
- * is the ADR-0080 boundary converting each to typed `FrameworkError`
- * (`cache-error`, operation + path in the message).
+ * This unchecked body leaves factory-validation rejections for the public
+ * `createFileJob` shell to wrap. Method-time failures occur after construction
+ * and are wrapped by each method or journal boundary as typed `FrameworkError`
+ * values (`cache-error`, operation + path in the message).
  */
 const createFileJobUnchecked = <S, C>(args: CreateFileJobArgs<S, C>): FileJob<S, unknown, C> => {
   if (typeof args !== "object" || args === null || Array.isArray(args)) {

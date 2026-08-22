@@ -2,8 +2,9 @@
  * RunQueue adapter (ADR-0060) — the wake-up trigger over the framework's
  * backend-agnostic `QueueBackend` (BullMQ in production, in-memory in tests).
  *
- * The queue carries ONLY the run id, not the run state — the durable state lives
- * in the `RunStore`. Each enqueue creates a fresh queue job (no `jobId` dedup),
+ * The queue carries only the durable run id plus tenant context, never run state —
+ * the durable state lives in the `RunStore`. Each enqueue creates a fresh queue
+ * job (no `jobId` dedup),
  * so a re-enqueue to RESUME a parked run always works even after the prior job
  * completed. Concurrency safety (a double-approval enqueuing the same run twice)
  * is enforced by a single-flight Redis lock around `processRun`, so a run is

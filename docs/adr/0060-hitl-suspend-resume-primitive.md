@@ -138,7 +138,10 @@ kernel because that interface has no `Result` channel, but it retains the typed
 `HostError` alongside the handle. The host executor restores that error onto its
 `Result.err` channel, and `processRun` returns it to the queue. The run therefore
 retries from the last durable checkpoint and is never terminalized merely
-because checkpoint persistence was temporarily unavailable.
+because checkpoint persistence was temporarily unavailable. By contrast, a DAG
+that disappears from the registry after its run was durably accepted is a
+permanent run failure: the executor returns a non-retriable `failed` outcome so
+the service terminalizes the record and removes it from active reconciliation.
 
 ### Durable notification-delivery state (2026-08-22 amendment)
 
@@ -213,16 +216,18 @@ again. The mechanism:
 - The host wires `onDecisionConsumed` to clear the decision + pending marker.
 
 So a crash before the durable checkpoint re-reads the same decision on resume
-(safe direction); the clear runs strictly after durability. This is also safe
-under `reroute` (which re-gates the same node within a run): the clear runs in
+(safe direction); the clear runs strictly after durability. The decision store
+removes the pending marker and decision with one atomic multi-key Redis `DEL`,
+so a clear can never expose the torn state “gate closed, old decision retained.”
+This is also safe under ordinary `reroute` re-gating: the atomic clear runs in
 the same kernel iteration as the post-reroute checkpoint, many iterations before
-any re-gate, so a re-gate never sees a stale decision. **Residual (documented):**
-a crash landing in the tiny window between `updateData` and `onCommitted`, *and*
-a later `reroute` re-gate of that exact node, could let the un-cleared decision
-auto-resolve the re-review. This is far narrower than the original window (it
-needs reroute + a crash in an adjacent-await gap) and no worse than a tolerated
-`clear` failure; fully closing it would require a decision-store transaction
-spanning the checkpoint write.
+the node can gate again. **Residual (documented):** a crash landing in the tiny
+window between `updateData` and `onCommitted`, or a whole-command clear failure,
+can retain both the pending marker and decision until TTL; paired with a later
+`reroute` re-gate of that exact node, the old decision could auto-resolve the
+re-review. Fully closing that cross-store window requires generation-bound
+decisions or a transaction spanning checkpoint persistence and decision
+consumption.
 
 ### Known timing window (accepted for v1)
 

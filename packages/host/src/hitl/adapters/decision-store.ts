@@ -170,11 +170,13 @@ export const createRedisDecisionStore = (
     },
 
     async clear(runId, nodeId): Promise<Result<void, HostError>> {
-      const dp = await redis.del(pendingKey(tenant, runId, nodeId));
-      if (!dp.ok) return err(dp.error);
-      const dd = await redis.del(decisionKey(tenant, runId, nodeId));
-      if (!dd.ok) return err(dd.error);
-      return ok(undefined);
+      // Redis DEL over multiple keys is one atomic command: a consumed gate can
+      // never retain its decision after its pending marker has disappeared.
+      const cleared = await redis.del(
+        pendingKey(tenant, runId, nodeId),
+        decisionKey(tenant, runId, nodeId),
+      );
+      return cleared.ok ? ok(undefined) : err(cleared.error);
     },
   };
 };

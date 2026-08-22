@@ -245,11 +245,12 @@ export const createRedisConnectivity = async (
           return err(redisErr(`SET ${key}`, e));
         }
       },
-      del: async (key) => {
+      del: async (key, ...additionalKeys) => {
+        const keys = [key, ...additionalKeys];
         try {
-          return ok(await client.del(key));
+          return ok(await client.del(...keys));
         } catch (e) {
-          return err(redisErr(`DEL ${key}`, e));
+          return err(redisErr(`DEL ${keys.join(" ")}`, e));
         }
       },
       scan: async (pattern, cursor = "0") => {

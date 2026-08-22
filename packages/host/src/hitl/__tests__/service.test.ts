@@ -38,6 +38,7 @@ import type {
 } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
+import type { LogPort } from "../../ports.js";
 import type { AuthIdentity } from "../../domain/auth.js";
 import { tenantId } from "../../domain/tenant.js";
 import type { TenantId } from "../../domain/tenant.js";
@@ -261,6 +262,11 @@ const realExecutor = (dag: DagDef): RunExecutorPort => ({
 // ---------------------------------------------------------------------------
 
 const ADMIN: AuthIdentity = { kind: "admin" };
+const THROWING_ERROR_LOGGER: LogPort = {
+  info: () => {},
+  warn: () => {},
+  error: () => { throw new Error("logger transport failed"); },
+};
 
 // The worker's bound tenant — names the `tenant-over-quota` error the
 // maxQueuedRuns gate returns (ADR-0074). The service requires it.
@@ -630,6 +636,38 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     expect(store.runs.get(runId)!.status.kind).toBe("failed"); // settled terminal
   });
 
+  it("terminalizes a permanent executor failure so reconciliation cannot retry it forever", async () => {
+    const store = inMemoryRunStore();
+    const queue = inMemoryRunQueue();
+    const permanent: FrameworkError = {
+      kind: "node-crash",
+      retriability: "non-retriable",
+      nodeId: "__executor__" as NodeId,
+      message: "DAG is no longer registered",
+    };
+    const executor: RunExecutorPort = {
+      async seedCheckpoint() { return ok(toJson({ state: { kind: "pending" }, context: {} })); },
+      async run() { return ok({ kind: "failed", error: permanent }); },
+    };
+    const service = createHitlRunService({
+      runStore: store.port,
+      runQueue: queue.port,
+      decisions: inMemoryDecisionStore().port,
+      tenant: TENANT,
+      notifier: recordingNotifier().port,
+      executor,
+      clock: () => 1_000,
+      newRunId: () => mkRunId("removed-dag-run"),
+    });
+    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    if (!started.ok) throw new Error("startRun failed");
+
+    expect(await service.processRun(leaseFor(started.value.runId))).toEqual(ok(undefined));
+    expect(store.runs.get(started.value.runId)?.status).toEqual({ kind: "failed", error: permanent });
+    expect(store.active.has(started.value.runId)).toBe(false);
+    expect(await service.reconcileActiveRuns()).toEqual(ok([]));
+  });
+
   it("returns executor infrastructure errors for queue retry without terminalizing the run", async () => {
     // A typed executor Err (including checkpoint persistence failure) is not a
     // DAG outcome. Keep the run non-terminal at its running entry fence and let
@@ -717,6 +755,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
       executor: realExecutor(oneNodeDag()),
       clock: () => 1_000,
       newRunId: () => mkRunId("run-enqueue-failure"),
+      logger: THROWING_ERROR_LOGGER,
     });
 
     const started = await service.startRun("test-dag" as DagId, null, ADMIN);
@@ -817,6 +856,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const service = createHitlRunService({
       runStore: store.port, runQueue: queuePort, decisions: dec.port, tenant: TENANT,
       notifier: notif.port, executor: realExecutor(dag), clock: () => 1_000, newRunId: () => mkRunId(`run-${++counter}`),
+      logger: THROWING_ERROR_LOGGER,
     });
     baseQueue.setProcessor(service.processRun);
 
@@ -837,6 +877,31 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     expect(reconciled.ok).toBe(true);
     await baseQueue.drain();
     expect(store.runs.get(runId)?.status.kind).toBe("completed");
+  });
+
+  it("a throwing reconciliation logger cannot replace a typed wakeup-failed attempt", async () => {
+    const store = inMemoryRunStore();
+    const service = createHitlRunService({
+      runStore: store.port,
+      runQueue: { async enqueue() { return err({ kind: "redis-unavailable", operation: "enqueue" }); } },
+      decisions: inMemoryDecisionStore().port,
+      tenant: TENANT,
+      notifier: recordingNotifier().port,
+      executor: realExecutor(oneNodeDag()),
+      clock: () => 1_000,
+      newRunId: () => mkRunId("reconcile-logger-run"),
+      logger: THROWING_ERROR_LOGGER,
+    });
+    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    if (!started.ok) throw new Error("startRun failed");
+
+    const result = await service.reconcileActiveRuns();
+
+    expect(result.ok && result.value).toEqual([{
+      kind: "wakeup-failed",
+      runId: started.value.runId,
+      error: { kind: "redis-unavailable", operation: "enqueue" },
+    }]);
   });
 
   it("getRun reflects the lifecycle: queued → suspended → completed", async () => {

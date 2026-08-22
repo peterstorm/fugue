@@ -1,7 +1,7 @@
 import { describe, test, expect, afterEach } from "bun:test";
 import { createApp } from "../server.js";
 import { JsonFixtureSource } from "../sources/json-fixture-source.js";
-import { FakeLlmClient, InMemoryCheckpointer, dagFingerprint, FRAMEWORK_VERSION, runId as mkRunId, nodeId as N, dagId as D, type Checkpointer } from "@fuguejs/framework";
+import { FakeLlmClient, InMemoryCheckpointer, dagFingerprint, FRAMEWORK_VERSION, ok, runId as mkRunId, nodeId as N, dagId as D, type Checkpointer } from "@fuguejs/framework";
 import { createFileCheckpointer } from "@fuguejs/framework/file";
 import { SummaryResponseSchema } from "../schemas/response.js";
 import { createSummaryDag } from "../dag/summary-dag.js";
@@ -92,6 +92,22 @@ describe("POST /summarize", () => {
         body: "{}",
       }),
     );
+    expect(res.status).toBe(400);
+  });
+
+  test("empty resume_run_id returns 400", async () => {
+    const res = await post(createTestApp(), "/summarize", {
+      customer_id: "cust-001",
+      resume_run_id: "",
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test("malformed resume_run_id returns 400", async () => {
+    const res = await post(createTestApp(), "/summarize", {
+      customer_id: "cust-001",
+      resume_run_id: "contains spaces",
+    });
     expect(res.status).toBe(400);
   });
 
@@ -294,6 +310,45 @@ describe("POST /summarize", () => {
         });
       });
     }
+
+    test("resume fails closed when the checkpointer reports a corrupt node address", async () => {
+      const base = new InMemoryCheckpointer();
+      const id = currentDagIdentity();
+      const runId = mkRunId("corrupt-node-run");
+      await base.setMeta(runId, {
+        dagId: id.dagId,
+        startedAt: new Date(),
+        nodeCount: id.nodeCount,
+        subject: "cust-001",
+        dagFingerprint: id.dagFingerprint,
+        frameworkVersion: id.frameworkVersion,
+      });
+      await base.saveNode(runId, {
+        nodeId: N("fetch-crm"),
+        output: { customer: { customerId: "cust-001", secret: "must-not-resume" } },
+        completedAt: new Date(),
+      });
+      const corrupting: Checkpointer = {
+        load: async (requestedRunId, opts) => {
+          const loaded = await base.load(requestedRunId, opts);
+          if (!loaded.ok || loaded.value === null) return loaded;
+          return ok({
+            ...loaded.value,
+            corruptNodeAddresses: [{ kind: "node-key", nodeKey: "fetch-crm" }],
+          });
+        },
+        saveNode: (requestedRunId, state, opts) => base.saveNode(requestedRunId, state, opts),
+        setMeta: (requestedRunId, meta) => base.setMeta(requestedRunId, meta),
+      };
+
+      const res = await post(createTestApp(corrupting), "/summarize", {
+        customer_id: "cust-001",
+        resume_run_id: runId,
+      });
+
+      expect(res.status).toBe(500);
+      expect((await res.json()).error).toBe("Resume failed");
+    });
 
     test("/summarize returns 503 when checkpointer is null (codex finding #1)", async () => {
       const source = new JsonFixtureSource(fixturesDir);

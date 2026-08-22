@@ -16,6 +16,7 @@ import { runPromptsCheck } from "../../cli/prompts.js";
 import { parseNewArgs, runNew } from "../../cli/new.js";
 import { parseKebab, parseKebabIdent, type Kebab, type KebabIdent } from "../../cli/identifiers.js";
 import { DAG_SHAPES, buildScaffold, yamlScalar } from "../../cli/new-templates.js";
+import { runBin } from "./_run-bin.js";
 
 // `NewOptions.name` / `TemplateCtx.name` are branded (`KebabIdent`) — parse
 // test names through the single smart constructor, never cast.
@@ -40,8 +41,6 @@ const mustTeam = (raw: string): Kebab => {
 // generated shape directly.
 
 const tmpRoot = resolve(__dirname, ".tmp-new");
-const binPath = resolve(__dirname, "..", "..", "..", "bin", "fugue.ts");
-
 beforeAll(async () => {
   await rm(tmpRoot, { recursive: true, force: true });
   await mkdir(tmpRoot, { recursive: true });
@@ -49,17 +48,6 @@ beforeAll(async () => {
 afterAll(async () => {
   await rm(tmpRoot, { recursive: true, force: true });
 });
-
-const runBin = async (
-  args: readonly string[],
-): Promise<{ exitCode: number; stdout: string; stderr: string }> => {
-  const proc = Bun.spawn(["bun", binPath, ...args], { stdout: "pipe", stderr: "pipe" });
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  return { exitCode: await proc.exited, stdout, stderr };
-};
 
 // --------------------------------------------------------------------------
 // The acceptance matrix: generated scaffolds lint clean.

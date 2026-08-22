@@ -167,6 +167,13 @@ export const createApp = (deps: AppDeps): Hono => {
           );
           return c.json({ error: "Checkpoint incompatible with current DAG" }, 409);
         }
+        if (loaded.value.corruptNodeAddresses.length > 0) {
+          log.error(
+            `[/summarize] checkpoint contains corrupt node entries for run=${resume_run_id}: ` +
+            JSON.stringify(loaded.value.corruptNodeAddresses),
+          );
+          return c.json({ error: "Resume failed" }, 500);
+        }
         resumeCheckpoint = new Map(
           Object.entries(loaded.value.nodes).map(([nodeId, ns]) => [nodeId, ns.output]),
         );
