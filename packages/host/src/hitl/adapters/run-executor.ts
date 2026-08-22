@@ -110,6 +110,9 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
       // compute. Apply the DAG's configured timeout to the slice (the human wait
       // happens BETWEEN slices, while parked, and is not bounded by this).
       const controller = new AbortController();
+      const abortForLeaseLoss = (): void => controller.abort(req.signal.reason);
+      if (req.signal.aborted) abortForLeaseLoss();
+      else req.signal.addEventListener("abort", abortForLeaseLoss, { once: true });
       const SLICE_TIMEOUT = Symbol("hitl-slice-timeout");
       const timeoutId = setTimeout(() => controller.abort(SLICE_TIMEOUT), registered.config.timeout);
 
@@ -171,6 +174,7 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
         return ok({ kind: "failed", error: toFrameworkError(e) });
       } finally {
         clearTimeout(timeoutId);
+        req.signal.removeEventListener("abort", abortForLeaseLoss);
       }
     },
   };

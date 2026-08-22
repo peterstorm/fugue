@@ -654,7 +654,9 @@ describe("FoundryRunSummaryObserver — orphan-buffer eviction (round-21 atl-2 /
       },
     });
     // observe() skips buffering when the clock is untrustworthy (never throws).
+    t = null;
     expect(() => obs.observe(nodeStart("rHostile", "d1", "n1"))).not.toThrow();
+    expect(obs.droppedEvents).toBe(1);
     const obs2 = new FoundryRunSummaryObserver(sink, {
       ttlMs: 500,
       sweepIntervalMs: 0,
@@ -663,6 +665,27 @@ describe("FoundryRunSummaryObserver — orphan-buffer eviction (round-21 atl-2 /
     obs2.observe(nodeStart("rNaN", "d1", "n1"));
     obs2.evictStale();
     expect(warns.some((w) => w.msg.includes("clock returned a non-finite stamp"))).toBe(true);
+  });
+
+  test("hostile clock values and a throwing framework logger cannot escape the guard", () => {
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: () => { throw new Error("warn transport failed"); },
+      error: () => { throw new Error("error transport failed"); },
+    });
+    const { sink } = recordingSink();
+    const obs = new FoundryRunSummaryObserver(sink, {
+      ttlMs: 500,
+      sweepIntervalMs: 0,
+      now: () => { throw revoked.proxy; },
+    });
+
+    expect(() => obs.observe(nodeStart("rHostile", "d1", "n1"))).not.toThrow();
+    expect(() => obs.evictStale()).not.toThrow();
+    expect(obs.droppedEvents).toBe(1);
   });
 });
 

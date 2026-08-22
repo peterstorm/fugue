@@ -22,6 +22,24 @@ import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { RunRecord, RunStatus, PersistedIdentity } from "./types.js";
 
+const RUN_LEASE: unique symbol = Symbol("RunLease");
+
+/**
+ * Opaque capability proving which queue worker owns a run's live Redis lease.
+ * The random owner token is checked atomically by persistence adapters; the
+ * signal aborts the active execution slice as soon as renewal becomes unsafe.
+ */
+export type RunLease = Readonly<{
+  runId: RunId;
+  ownerToken: string;
+  signal: AbortSignal;
+  [RUN_LEASE]: true;
+}>;
+
+/** Queue-adapter capability constructor; callers cannot build a lease by shape. */
+export const issueRunLease = (runId: RunId, ownerToken: string, signal: AbortSignal): RunLease =>
+  Object.freeze({ runId, ownerToken, signal, [RUN_LEASE]: true as const });
+
 /**
  * Durable persistence for runs. `checkpoint` is updated on every state-machine
  * transition (via the run-store-backed `JobLike`), so a worker crash resumes
@@ -35,14 +53,15 @@ export interface RunStorePort {
   create(record: RunRecord): Promise<Result<void, HostError>>;
   /** Fetch a run, or `ok(null)` if unknown. */
   get(runId: RunId): Promise<Result<RunRecord | null, HostError>>;
-  /** Persist the serialized `{state, context}` checkpoint (per-transition). */
-  saveCheckpoint(runId: RunId, checkpoint: string): Promise<Result<void, HostError>>;
+  /** Persist a checkpoint only while this worker still owns the run lease. */
+  saveCheckpoint(lease: RunLease, checkpoint: string): Promise<Result<void, HostError>>;
   /**
-   * Update the run's lifecycle status. A TERMINAL status (`completed`/`failed`)
+   * Update the run's lifecycle status only while `lease` is still owned. A
+   * TERMINAL status (`completed`/`failed`)
    * also removes the run from the per-tenant active-run index (ADR-0074); a
    * non-terminal status leaves the index untouched.
    */
-  setStatus(runId: RunId, status: RunStatus): Promise<Result<void, HostError>>;
+  setStatus(lease: RunLease, status: RunStatus): Promise<Result<void, HostError>>;
   /**
    * Count this tenant's NON-terminal (queued / running / suspended) runs — the
    * `maxQueuedRuns` admission axis (ADR-0074). Read from the per-tenant active-run
@@ -87,19 +106,24 @@ export interface HumanReviewNotifierPort {
 
 /**
  * Records and resolves the human's decision for a parked review, keyed by
- * `(runId, nodeId)`. The `onHumanReview` hook reads it on each (re)dispatch:
- * a decision present resolves the gate; its absence parks the run. `markPending`
- * returns `true` only on the FIRST park for a gate, so a resume-then-re-park
- * loop never re-sends the notification.
+ * `(runId, nodeId)`. The pending marker carries durable notification-delivery
+ * state, so a failed first delivery remains retriable while a delivered review
+ * is deduplicated across ordinary re-parks.
  */
+export type PendingReview =
+  | { readonly kind: "notification-required"; readonly marker: string }
+  | { readonly kind: "notified" };
+
 export type DecisionResolution =
   | { readonly kind: "accepted" }
   | { readonly kind: "already-resolved" }
   | { readonly kind: "not-pending" };
 
 export interface DecisionStorePort {
-  /** Mark a gate as pending review. Returns `true` if newly created (dedups notifications). */
-  markPending(runId: RunId, nodeId: NodeId): Promise<Result<boolean, HostError>>;
+  /** Create/read the durable pending + notification-delivery state for a gate. */
+  preparePending(runId: RunId, nodeId: NodeId): Promise<Result<PendingReview, HostError>>;
+  /** Atomically mark the matching pending marker notified after delivery succeeds. */
+  markNotified(runId: RunId, nodeId: NodeId, marker: string): Promise<Result<boolean, HostError>>;
   /**
    * Resolve a pending gate with first-writer-wins semantics. `accepted` means
    * this action won the atomic create; `already-resolved` preserves the winner;
@@ -133,6 +157,8 @@ export interface RunExecutionRequest {
   readonly dagId: DagId;
   readonly input: unknown;
   readonly identity: PersistedIdentity;
+  /** Aborted immediately when queue lease ownership can no longer be trusted. */
+  readonly signal: AbortSignal;
   /** Run-store-backed durable job handle (carries + persists the checkpoint). */
   readonly jobLike: JobLike<DagPhase, unknown, DagMachineContextPersisted>;
   /** The host's review hook (decision-store + notifier closure). Read-only: it

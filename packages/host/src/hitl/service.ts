@@ -28,6 +28,7 @@ import type {
   DecisionStorePort,
   HumanReviewNotifierPort,
   RunExecutorPort,
+  RunLease,
 } from "./ports.js";
 import { tryRunTimestampMs } from "./types.js";
 import type { RunRecord } from "./types.js";
@@ -65,10 +66,10 @@ export type ReconciliationAttempt =
   | { readonly kind: "wakeup-failed"; readonly runId: RunId; readonly error: HostError };
 
 export interface HitlRunService {
-  /** Seed + persist + enqueue a fresh HITL run. Returns its run id. */
+  /** Seed + persist a fresh run and request its initial wakeup. */
   startRun(dagId: DagId, input: unknown, identity: AuthIdentity): Promise<Result<{ runId: RunId }, HostError>>;
   /** Worker handler: execute/resume `runId` and fold the outcome into its status. */
-  processRun(runId: RunId): Promise<Result<void, HostError>>;
+  processRun(lease: RunLease): Promise<Result<void, HostError>>;
   /** Approval: atomically resolve a parked gate and request a resume wakeup. */
   recordDecision(runId: RunId, nodeId: NodeId, action: HumanAction): Promise<Result<void, HostError>>;
   /** Idempotently wake queued/running runs and suspended runs with a durable decision. */
@@ -161,7 +162,9 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
     return ok({ runId });
   };
 
-  const processRun = async (runId: RunId): Promise<Result<void, HostError>> => {
+  const processRun = async (lease: RunLease): Promise<Result<void, HostError>> => {
+    const runId = lease.runId;
+    if (lease.signal.aborted) return err({ kind: "run-lease-lost", runId });
     const fetched = await runStore.get(runId);
     if (!fetched.ok) return fetched;
     const record = fetched.value;
@@ -180,19 +183,13 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
       return ok(undefined);
     }
 
-    // Best-effort transition to `running`. A failed write here does not stop
-    // execution (the run is already being processed and the eventual settle
-    // write is checked); we surface it so a status poll reporting a stale
-    // `queued`/`suspended` during the slice is explainable, rather than silent.
-    const marked = await runStore.setStatus(runId, { kind: "running" });
-    if (!marked.ok) {
-      logger?.warn?.("hitl: failed to mark run running — proceeding best-effort", {
-        runId,
-        error: marked.error.kind,
-      });
-    }
+    // Fail closed before executing: the running write proves both metadata
+    // writability and current lease ownership. Side effects never start after a
+    // known persistence/fencing failure.
+    const marked = await runStore.setStatus(lease, { kind: "running" });
+    if (!marked.ok) return marked;
 
-    const jobLikeResult = makeRunStoreJobLike(runStore, runId, record.checkpoint);
+    const jobLikeResult = makeRunStoreJobLike(runStore, lease, record.checkpoint);
     if (!jobLikeResult.ok) {
       // A corrupt checkpoint will not heal on retry — settle the run `failed`
       // (terminal) so a status poll surfaces it, and return `ok` so the worker
@@ -201,7 +198,7 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
         runId,
         error: jobLikeResult.error.kind,
       });
-      const settled = await runStore.setStatus(runId, { kind: "failed", error: asRunFailure(jobLikeResult.error) });
+      const settled = await runStore.setStatus(lease, { kind: "failed", error: asRunFailure(jobLikeResult.error) });
       if (!settled.ok) return settled;
       return ok(undefined);
     }
@@ -225,10 +222,13 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
       dagId: record.dagId,
       input: record.input,
       identity: record.identity,
+      signal: lease.signal,
       jobLike,
       onHumanReview,
       onDecisionConsumed,
     });
+
+    if (lease.signal.aborted) return err({ kind: "run-lease-lost", runId });
 
     if (!result.ok) {
       // Pre-slice host failure (unknown DAG, run-store fault) — settle the run
@@ -240,7 +240,7 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
       // job is DONE: return `ok` (no queue retry — a retry would only no-op on
       // the terminal guard above). Pre-settle transient failures (e.g. the
       // `runStore.get` above) return `err` and ARE retried by the worker.
-      const settled = await runStore.setStatus(runId, { kind: "failed", error: asRunFailure(result.error) });
+      const settled = await runStore.setStatus(lease, { kind: "failed", error: asRunFailure(result.error) });
       if (!settled.ok) {
         // Could not even record the failure — leave it to the queue to retry.
         logger?.error?.("hitl: failed to settle run failed", { runId, error: settled.error.kind });
@@ -251,13 +251,13 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
 
     return match(result.value)
       .with({ kind: "completed" }, (o) =>
-        runStore.setStatus(runId, { kind: "completed", output: o.output }))
+        runStore.setStatus(lease, { kind: "completed", output: o.output }))
       // The checkpoint was already persisted by the job handle on suspend; record
       // the gate so a status poll / Teams card can render the prompt.
       .with({ kind: "suspended" }, (o) =>
-        runStore.setStatus(runId, { kind: "suspended", nodeId: o.nodeId, prompt: o.prompt }))
+        runStore.setStatus(lease, { kind: "suspended", nodeId: o.nodeId, prompt: o.prompt }))
       .with({ kind: "failed" }, (o) =>
-        runStore.setStatus(runId, { kind: "failed", error: o.error }))
+        runStore.setStatus(lease, { kind: "failed", error: o.error }))
       .exhaustive();
   };
 

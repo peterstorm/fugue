@@ -13,7 +13,7 @@
  * module graph for tests that never connect.
  */
 
-import type { RedisConnectivityPort, RedisPort } from "../ports.js";
+import type { HitlRedisPort, RedisConnectivityPort, RedisPort } from "../ports.js";
 import type { HostError } from "../domain/host-error.js";
 import { ok, err, safeErrorMessage } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
@@ -60,6 +60,15 @@ const redisErr = (operation: string, e: unknown): HostError => ({
  * `SET … EX … NX` acquire) testable against a fake.
  */
 export type RedisClientFactory = (redisUrl: string, options: RedisOptions) => IoRedis;
+
+export const requireHitlRedisPort = (redis: RedisPort): HitlRedisPort => {
+  const missing = (["compareAndExpire", "setIfValue", "setNxIfPresent"] as const)
+    .filter((capability) => redis[capability] === undefined);
+  if (missing.length > 0) {
+    throw new Error(`hitl: Redis transaction capabilities unavailable: ${missing.join(", ")}`);
+  }
+  return redis as HitlRedisPort;
+};
 
 const defaultIoredisFactory = async (): Promise<RedisClientFactory> => {
   const { Redis } = await import("ioredis");
@@ -171,6 +180,30 @@ export const createRedisConnectivity = async (
         }
       });
 
+    const setIfValue: RedisPort["setIfValue"] = (guardKey, expectedValue, key, value, opts) =>
+      serializeWatch(async () => {
+        try {
+          for (;;) {
+            await client.watch(guardKey);
+            if (await client.get(guardKey) !== expectedValue) {
+              await client.unwatch();
+              return ok(false);
+            }
+            const executed = await client.multi().set(key, value, "EX", opts.expiresInSec).exec();
+            // The renewal transaction may touch the watched lease key without
+            // changing its owner token. Re-read and retry instead of reporting a
+            // false ownership loss on that benign WATCH conflict.
+            if (executed === null) continue;
+            const [commandError, written] = executed[0] ?? [];
+            if (commandError !== null) throw commandError;
+            return ok(written === "OK");
+          }
+        } catch (e) {
+          try { await client.unwatch(); } catch { /* primary error is authoritative */ }
+          return err(redisErr(`SET-IF-VALUE ${guardKey} -> ${key}`, e));
+        }
+      });
+
     const setNxIfPresent: RedisPort["setNxIfPresent"] = (guardKey, key, value, opts) =>
       serializeWatch(async () => {
         try {
@@ -243,6 +276,7 @@ export const createRedisConnectivity = async (
       },
       compareAndDelete,
       compareAndExpire,
+      setIfValue,
       setNxIfPresent,
       sAdd: async (key, member) => {
         try {

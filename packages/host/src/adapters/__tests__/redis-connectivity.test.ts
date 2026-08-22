@@ -26,6 +26,7 @@ interface FakeOverrides {
   readonly setResult?: unknown;
   readonly setnxResult?: unknown;
   readonly getResult?: string | null;
+  readonly execNullOnce?: boolean;
   readonly throwOn?: readonly string[];
 }
 
@@ -36,11 +37,13 @@ class FakeRedis {
   private readonly throwOn: Set<string>;
   private readonly o: FakeOverrides;
   private readonly values = new Map<string, string>();
+  private execNullRemaining: number;
 
   constructor(o: FakeOverrides = {}) {
     this.status = o.initialStatus ?? "wait";
     this.throwOn = new Set(o.throwOn ?? []);
     this.o = o;
+    this.execNullRemaining = o.execNullOnce ? 1 : 0;
   }
 
   private rec(m: string, args: readonly unknown[]): void {
@@ -82,17 +85,44 @@ class FakeRedis {
   }
   multi() {
     this.rec("multi", []);
-    let deleteKey = "";
+    let operation:
+      | { readonly kind: "delete"; readonly key: string }
+      | { readonly kind: "expire"; readonly key: string }
+      | { readonly kind: "set"; readonly key: string; readonly value: string }
+      | undefined;
     const chain = {
       del: (key: string) => {
         this.rec("multi.del", [key]);
-        deleteKey = key;
+        operation = { kind: "delete", key };
+        return chain;
+      },
+      expire: (key: string, seconds: number) => {
+        this.rec("multi.expire", [key, seconds]);
+        operation = { kind: "expire", key };
+        return chain;
+      },
+      set: (key: string, value: string, ...args: unknown[]) => {
+        this.rec("multi.set", [key, value, ...args]);
+        operation = { kind: "set", key, value };
         return chain;
       },
       exec: async () => {
         this.rec("multi.exec", []);
-        const deleted = this.values.delete(deleteKey) ? 1 : 0;
-        return [[null, deleted]] as [Error | null, unknown][];
+        if (this.execNullRemaining > 0) {
+          this.execNullRemaining -= 1;
+          return null;
+        }
+        if (operation?.kind === "delete") {
+          return [[null, this.values.delete(operation.key) ? 1 : 0]] as [Error | null, unknown][];
+        }
+        if (operation?.kind === "expire") {
+          return [[null, this.values.has(operation.key) ? 1 : 0]] as [Error | null, unknown][];
+        }
+        if (operation?.kind === "set") {
+          this.values.set(operation.key, operation.value);
+          return [[null, "OK"]] as [Error | null, unknown][];
+        }
+        return [] as [Error | null, unknown][];
       },
     };
     return chain;
@@ -273,6 +303,34 @@ describe("createRedisConnectivity — data port", () => {
     expect(isOk(preserved) && preserved.value).toBe(false);
     expect(successor.calls.map((c) => c.m)).toEqual(["watch", "get", "unwatch"]);
     expect(await successor.get("lease")).toBe("owner-b");
+  });
+
+  it("setIfValue atomically fences a target write with the matching owner token", async () => {
+    const matching = new FakeRedis();
+    matching.seed("lease", "owner-a");
+    const written = await (await wire(matching)).bundle.redis.setIfValue?.(
+      "lease", "owner-a", "checkpoint", "next", { expiresInSec: 60 },
+    );
+    expect(written && isOk(written) && written.value).toBe(true);
+    expect(await matching.get("checkpoint")).toBe("next");
+    expect(matching.calls.some((c) => c.m === "multi.set")).toBe(true);
+
+    const renewedDuringWrite = new FakeRedis({ execNullOnce: true });
+    renewedDuringWrite.seed("lease", "owner-a");
+    const retried = await (await wire(renewedDuringWrite)).bundle.redis.setIfValue?.(
+      "lease", "owner-a", "checkpoint", "after-renewal", { expiresInSec: 60 },
+    );
+    expect(retried && isOk(retried) && retried.value).toBe(true);
+    expect(renewedDuringWrite.calls.filter((c) => c.m === "multi.exec")).toHaveLength(2);
+
+    const successor = new FakeRedis();
+    successor.seed("lease", "owner-b");
+    const rejected = await (await wire(successor)).bundle.redis.setIfValue?.(
+      "lease", "owner-a", "checkpoint", "stale", { expiresInSec: 60 },
+    );
+    expect(rejected && isOk(rejected) && rejected.value).toBe(false);
+    expect(await successor.get("checkpoint")).toBeNull();
+    expect(successor.calls.some((c) => c.m === "multi.set")).toBe(false);
   });
 
   it("sMembers wraps a thrown error as Err(redis-unavailable)", async () => {

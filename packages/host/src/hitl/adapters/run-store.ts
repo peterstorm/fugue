@@ -24,8 +24,8 @@ import { ok, err, tryRunId, tryNodeId, tryDagId } from "@fuguejs/framework";
 import type { Result, RunId } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import type { TenantId } from "../../domain/tenant.js";
-import type { RedisPort, LogPort } from "../../ports.js";
-import type { RunStorePort } from "../ports.js";
+import type { HitlRedisPort, LogPort } from "../../ports.js";
+import type { RunLease, RunStorePort } from "../ports.js";
 import { tryRunTimestampMs } from "../types.js";
 import type { RunRecord, RunStatus, RunTimestampMs } from "../types.js";
 
@@ -80,6 +80,20 @@ const RunMetaSchema = z.object({
 /** A terminal run has left the active set; a non-terminal run still occupies a slot. */
 const isTerminalStatus = (status: RunStatus): boolean =>
   status.kind === "completed" || status.kind === "failed";
+
+const leaseLost = (lease: RunLease): Result<never, HostError> =>
+  err({ kind: "run-lease-lost", runId: lease.runId });
+
+const readRunTimestamp = (now: () => number): Result<RunTimestampMs, HostError> => {
+  const timestamp = tryRunTimestampMs(now());
+  return timestamp.ok
+    ? timestamp
+    : err({
+        kind: "internal-invariant-violated",
+        message: `HITL clock returned an invalid timestamp: ${timestamp.error}`,
+        context: {},
+      });
+};
 
 /**
  * Whether a PERSISTED run-meta JSON string carries a terminal status. Defensive
@@ -145,25 +159,21 @@ export const createInMemoryRunStore = (
     async get(runId) {
       return ok(runs.get(runId) ?? null);
     },
-    async saveCheckpoint(runId, checkpoint) {
-      const r = runs.get(runId);
-      if (!r) return err({ kind: "run-not-found", runId });
-      runs.set(runId, { ...r, checkpoint });
+    async saveCheckpoint(lease, checkpoint) {
+      if (lease.signal.aborted) return leaseLost(lease);
+      const r = runs.get(lease.runId);
+      if (!r) return err({ kind: "run-not-found", runId: lease.runId });
+      runs.set(lease.runId, { ...r, checkpoint });
       return ok(undefined);
     },
-    async setStatus(runId, status: RunStatus) {
-      const r = runs.get(runId);
-      if (!r) return err({ kind: "run-not-found", runId });
-      const updatedAtMs = tryRunTimestampMs(now());
-      if (!updatedAtMs.ok) {
-        return err({
-          kind: "internal-invariant-violated",
-          message: `HITL clock returned an invalid timestamp: ${updatedAtMs.error}`,
-          context: {},
-        });
-      }
-      runs.set(runId, { ...r, status, updatedAtMs: updatedAtMs.value });
-      if (isTerminalStatus(status)) active.delete(runId); // settled → leave the index
+    async setStatus(lease, status: RunStatus) {
+      if (lease.signal.aborted) return leaseLost(lease);
+      const r = runs.get(lease.runId);
+      if (!r) return err({ kind: "run-not-found", runId: lease.runId });
+      const updatedAtMs = readRunTimestamp(now);
+      if (!updatedAtMs.ok) return updatedAtMs;
+      runs.set(lease.runId, { ...r, status, updatedAtMs: updatedAtMs.value });
+      if (isTerminalStatus(status)) active.delete(lease.runId); // settled → leave the index
       return ok(undefined);
     },
     async countActiveRuns() {
@@ -191,6 +201,7 @@ export const createInMemoryRunStore = (
 // that builds a run/checkpoint key without a tenant.
 const runKey = (tenant: TenantId, runId: RunId): string => `fugue:${tenant}:hitl:run:${runId}`;
 const ckptKey = (tenant: TenantId, runId: RunId): string => `fugue:${tenant}:hitl:ckpt:${runId}`;
+const leaseKey = (tenant: TenantId, runId: RunId): string => `fugue:${tenant}:hitl:lock:${runId}`;
 /**
  * The per-tenant active-run index SET (ADR-0074). Holds the run ids of all
  * non-terminal runs. Read via `sMembers` (NOT `scan`, which the per-tenant ACL
@@ -210,7 +221,7 @@ interface RedisRunStoreConfig {
 }
 
 export const createRedisRunStore = (
-  redis: RedisPort,
+  redis: HitlRedisPort,
   tenant: TenantId,
   config: RedisRunStoreConfig,
   logger?: LogPort,
@@ -218,10 +229,16 @@ export const createRedisRunStore = (
   const expiry = { expiresInSec: config.ttlSec };
   const now = config.now ?? Date.now;
 
-  const writeMeta = async (runId: RunId, meta: RunMeta): Promise<Result<void, HostError>> => {
-    const res = await redis.set(runKey(tenant, runId), JSON.stringify(meta), expiry);
+  const writeMeta = async (lease: RunLease, meta: RunMeta): Promise<Result<void, HostError>> => {
+    const res = await redis.setIfValue(
+      leaseKey(tenant, lease.runId),
+      lease.ownerToken,
+      runKey(tenant, lease.runId),
+      JSON.stringify(meta),
+      expiry,
+    );
     if (!res.ok) return err(res.error);
-    return ok(undefined);
+    return res.value ? ok(undefined) : leaseLost(lease);
   };
 
   const compensateUnpublishedCreate = async (runId: RunId, checkpoint: string): Promise<void> => {
@@ -384,30 +401,32 @@ export const createRedisRunStore = (
       return ok({ ...metaRes.value, checkpoint: ckptRes.value });
     },
 
-    async saveCheckpoint(runId, checkpoint) {
-      const res = await redis.set(ckptKey(tenant, runId), checkpoint, expiry);
+    async saveCheckpoint(lease, checkpoint) {
+      if (lease.signal.aborted) return leaseLost(lease);
+      const res = await redis.setIfValue(
+        leaseKey(tenant, lease.runId),
+        lease.ownerToken,
+        ckptKey(tenant, lease.runId),
+        checkpoint,
+        expiry,
+      );
       if (!res.ok) return err(res.error);
-      return ok(undefined);
+      return res.value ? ok(undefined) : leaseLost(lease);
     },
 
-    async setStatus(runId, status) {
-      const metaRes = await readMeta(runId);
+    async setStatus(lease, status) {
+      if (lease.signal.aborted) return leaseLost(lease);
+      const metaRes = await readMeta(lease.runId);
       if (!metaRes.ok) return err(metaRes.error);
-      if (metaRes.value === null) return err({ kind: "run-not-found", runId });
-      const updatedAtMs = tryRunTimestampMs(now());
-      if (!updatedAtMs.ok) {
-        return err({
-          kind: "internal-invariant-violated",
-          message: `HITL clock returned an invalid timestamp: ${updatedAtMs.error}`,
-          context: {},
-        });
-      }
-      const written = await writeMeta(runId, { ...metaRes.value, status, updatedAtMs: updatedAtMs.value });
+      if (metaRes.value === null) return err({ kind: "run-not-found", runId: lease.runId });
+      const updatedAtMs = readRunTimestamp(now);
+      if (!updatedAtMs.ok) return updatedAtMs;
+      const written = await writeMeta(lease, { ...metaRes.value, status, updatedAtMs: updatedAtMs.value });
       if (!written.ok) return written;
       if (isTerminalStatus(status)) {
         // Settled → leave the active-run index (ADR-0074). Idempotent (SREM of an
         // absent member is a no-op), so a re-settle never drifts the count.
-        const idx = await redis.sRem(activeKey(tenant), runId);
+        const idx = await redis.sRem(activeKey(tenant), lease.runId);
         if (!idx.ok) return err(idx.error);
       }
       return ok(undefined);

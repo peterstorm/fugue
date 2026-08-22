@@ -10,13 +10,18 @@
 //       not swallowed, and the lock is released first.
 
 import { describe, it, expect } from "bun:test";
+import { Queue } from "bullmq";
+import { existsSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ok, err } from "@fuguejs/framework";
 import type { Result, RunId, QueueBackend, JobLike, WorkerHandle, EnqueueOpts, QueueOpts } from "@fuguejs/framework";
-import type { RedisPort } from "../../../ports.js";
+import type { HitlRedisPort, RedisPort } from "../../../ports.js";
+import { requireHitlRedisPort } from "../../../adapters/redis-connectivity.js";
 import type { HostError } from "../../../domain/host-error.js";
 import { tenantId } from "../../../domain/tenant.js";
 import type { TenantId } from "../../../domain/tenant.js";
-import { createRunQueue } from "../run-queue.js";
+import { createRunQueue, hitlQueueName } from "../run-queue.js";
 
 /** Build a `TenantId` for a test from a known-good literal via the canonical constructor. */
 const mkTenant = (s: string): TenantId => {
@@ -42,7 +47,7 @@ const fakeRedis = (preset: Record<string, string> = {}) => {
     del: [] as string[],
     compareAndDelete: [] as { key: string; expected: string }[],
   };
-  const redis: RedisPort = {
+  const redis: HitlRedisPort = {
     async get(k) { return ok(m.get(k) ?? null); },
     async set(k, v, _opts) { calls.set.push(k); m.set(k, v); return ok("OK"); },
     async del(k) { calls.del.push(k); const had = m.delete(k); return ok(had ? 1 : 0); },
@@ -50,6 +55,8 @@ const fakeRedis = (preset: Record<string, string> = {}) => {
     async setNx(k, v, opts) { calls.setNx.push({ key: k, value: v, opts }); if (m.has(k)) return ok(false); m.set(k, v); return ok(true); },
     async compareAndDelete(k, expected) { calls.compareAndDelete.push({ key: k, expected }); if (m.get(k) !== expected) return ok(false); m.delete(k); return ok(true); },
     async compareAndExpire(k, expected) { return ok(m.get(k) === expected); },
+    async setIfValue(guard, expected, key, value) { if (m.get(guard) !== expected) return ok(false); m.set(key, value); return ok(true); },
+    async setNxIfPresent(guard, key, value) { if (!m.has(guard)) return ok("not-present"); if (m.has(key)) return ok("exists"); m.set(key, value); return ok("created"); },
     async sAdd() { return ok(1); },
     async sRem() { return ok(1); },
     async sMembers() { return ok([]); },
@@ -82,6 +89,75 @@ const fakeBackend = () => {
 };
 
 const okProcess = async (): Promise<Result<void, HostError>> => ok(undefined);
+
+const expectActiveRenewalFailure = async (
+  renew: HitlRedisPort["compareAndExpire"],
+): Promise<void> => {
+  const base = fakeRedis();
+  const redis: HitlRedisPort = { ...base.redis, compareAndExpire: renew };
+  const fb = fakeBackend();
+  const queue = createRunQueue({
+    backend: fb.backend,
+    redis,
+    tenant: TENANT,
+    lockTtlSec: 0.002,
+    newLockToken: () => "owner-1",
+  });
+  let aborted = false;
+  queue.startWorker(async (lease) => {
+    await new Promise<void>((resolve) => {
+      if (lease.signal.aborted) {
+        aborted = true;
+        resolve();
+        return;
+      }
+      lease.signal.addEventListener("abort", () => {
+        aborted = true;
+        resolve();
+      }, { once: true });
+    });
+    return err({ kind: "run-lease-lost", runId: lease.runId });
+  });
+
+  await expect(fb.getWorker()(fb.job(RUN))).rejects.toThrow(/lock renewal failed/);
+  expect(aborted).toBe(true);
+  expect(base.calls.compareAndDelete).toEqual([{ key: lockKey(RUN), expected: "owner-1" }]);
+};
+
+describe("createRunQueue — BullMQ-compatible naming", () => {
+  it("constructs a real BullMQ Queue with the tenant-qualified default", async () => {
+    const socket = join(tmpdir(), `fugue-bullmq-${process.pid}-${crypto.randomUUID()}.sock`);
+    const redis = Bun.spawn([
+      "redis-server",
+      "--port", "0",
+      "--unixsocket", socket,
+      "--unixsocketperm", "700",
+      "--save", "",
+      "--appendonly", "no",
+    ], { stdout: "ignore", stderr: "ignore" });
+    for (let attempt = 0; attempt < 100 && !existsSync(socket); attempt++) {
+      await Bun.sleep(5);
+    }
+    if (!existsSync(socket)) throw new Error("test Redis socket did not become ready");
+
+    const name = hitlQueueName(TENANT);
+    const queue = new Queue(name, { connection: { path: socket } });
+    try {
+      expect(queue.name).toBe("fugue-tenant-a-hitl-runs");
+      await queue.waitUntilReady();
+    } finally {
+      await queue.close();
+      redis.kill();
+      await redis.exited;
+      rmSync(socket, { force: true });
+    }
+  });
+
+  it("rejects empty or colon-containing custom names before backend construction", () => {
+    expect(() => hitlQueueName(TENANT, "")).toThrow("non-empty");
+    expect(() => hitlQueueName(TENANT, "fugue:tenant-a:hitl:runs")).toThrow("must not contain ':'");
+  });
+});
 
 describe("createRunQueue — single-flight lock", () => {
   it("C2: acquires the lock atomically with its TTL (SET NX EX), not setNx-then-set", async () => {
@@ -130,7 +206,7 @@ describe("createRunQueue — single-flight lock", () => {
 
   it("logs the typed Redis failure kind when ownership-checked release fails", async () => {
     const base = fakeRedis();
-    const redis: RedisPort = {
+    const redis: HitlRedisPort = {
       ...base.redis,
       async compareAndDelete() {
         return err({ kind: "redis-unavailable", operation: "WATCH/EXEC release" });
@@ -200,20 +276,29 @@ describe("createRunQueue — single-flight lock", () => {
     expect(fb.getQueueOpts()?.defaultAttempts).toBe(7);
   });
 
-  it("rejects a missing renewal capability before any worker can acquire a lease", async () => {
+  it("rejects missing HITL transaction capabilities at composition", () => {
     const base = fakeRedis();
-    const redis: RedisPort = { ...base.redis, compareAndExpire: undefined };
-    const fb = fakeBackend();
-    const queue = createRunQueue({ backend: fb.backend, redis, tenant: TENANT, lockTtlSec: 300 });
-    queue.startWorker(okProcess);
+    const incomplete: RedisPort = { ...base.redis, compareAndExpire: undefined };
 
-    await expect(fb.getWorker()(fb.job(RUN))).rejects.toThrow("Redis lease renewal is unavailable");
+    expect(() => requireHitlRedisPort(incomplete)).toThrow("compareAndExpire");
     expect(base.calls.setNx).toHaveLength(0);
+  });
+
+  it("aborts an active slice and retries when lease ownership is lost", async () => {
+    await expectActiveRenewalFailure(async () => ok(false));
+  });
+
+  it("aborts an active slice and retries when lease renewal returns a typed error", async () => {
+    await expectActiveRenewalFailure(async () => err({ kind: "redis-unavailable", operation: "renew" }));
+  });
+
+  it("aborts an active slice and retries when lease renewal throws", async () => {
+    await expectActiveRenewalFailure(async () => { throw new Error("renew threw"); });
   });
 
   it("throws when the lock STORE is unavailable (wakeup retried, not acked-and-dropped)", async () => {
     const base = fakeRedis();
-    const redis: RedisPort = { ...base.redis, async setNx() { return err({ kind: "redis-unavailable", operation: "SETNX" }); } };
+    const redis: HitlRedisPort = { ...base.redis, async setNx() { return err({ kind: "redis-unavailable", operation: "SETNX" }); } };
     const fb = fakeBackend();
     const q = createRunQueue({ backend: fb.backend, redis, tenant: TENANT, lockTtlSec: 300 });
     q.startWorker(okProcess, { concurrency: 2 });

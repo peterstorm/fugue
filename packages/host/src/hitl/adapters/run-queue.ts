@@ -15,26 +15,16 @@ import { ok, err, safeErrorMessage } from "@fuguejs/framework";
 import type { Result, RunId, QueueBackend, WorkerHandle } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import type { TenantId } from "../../domain/tenant.js";
-import type { RedisPort, LogPort } from "../../ports.js";
-import type { RunQueuePort } from "../ports.js";
+import type { HitlRedisPort, LogPort } from "../../ports.js";
+import { issueRunLease } from "../ports.js";
+import type { RunLease, RunQueuePort } from "../ports.js";
 
 /** Trigger envelope binds the wakeup to its tenant as well as its durable run id. */
 type RunTrigger = { readonly state: RunId; readonly context: { readonly tenant: TenantId } };
 
-type LeaseRedisPort = RedisPort & {
-  readonly compareAndExpire: NonNullable<RedisPort["compareAndExpire"]>;
-};
-
-const requireLeaseRedis = (redis: RedisPort): LeaseRedisPort => {
-  if (redis.compareAndExpire === undefined) {
-    throw new Error("hitl: Redis lease renewal is unavailable");
-  }
-  return redis as LeaseRedisPort;
-};
-
 interface RunQueueDeps {
   readonly backend: QueueBackend;
-  readonly redis: RedisPort;
+  readonly redis: HitlRedisPort;
   /**
    * The tenant this queue's single-flight locks are scoped to (AD-4 / FR-013 /
    * SC-001). The lock key is forced under `fugue:<tenant>:hitl:lock:`, so under
@@ -77,16 +67,37 @@ interface RunQueueHandle {
    * framework `WorkerHandle` for lifecycle/shutdown wiring.
    */
   startWorker(
-    processRun: (runId: RunId) => Promise<Result<void, HostError>>,
+    processRun: (lease: RunLease) => Promise<Result<void, HostError>>,
     opts?: { concurrency?: number },
   ): WorkerHandle;
 }
 
 const lockKey = (tenant: TenantId, runId: RunId): string => `fugue:${tenant}:hitl:lock:${runId}`;
 
+export const hitlQueueName = (tenant: TenantId, configured?: string): string => {
+  const name = configured ?? `fugue-${tenant}-hitl-runs`;
+  if (name.length === 0 || name.includes(":")) {
+    throw new RangeError("HITL queue name must be non-empty and must not contain ':' (BullMQ restriction)");
+  }
+  return name;
+};
+
+const logWithoutThrowing = (
+  logger: LogPort | undefined,
+  level: "warn" | "error",
+  message: string,
+  data: Record<string, unknown>,
+): void => {
+  try {
+    logger?.[level]?.(message, data);
+  } catch {
+    // Diagnostics cannot replace the lease outcome.
+  }
+};
+
 export const createRunQueue = (deps: RunQueueDeps): RunQueueHandle => {
   const { backend, tenant, lockTtlSec, logger } = deps;
-  const name = deps.queueName ?? `fugue:${tenant}:hitl:runs`; 
+  const name = hitlQueueName(tenant, deps.queueName);
   const contentionDelayMs = deps.lockContentionDelayMs ?? 1000;
   const maxAttempts = deps.maxAttempts ?? 5;
   const newLockToken = deps.newLockToken ?? (() => crypto.randomUUID());
@@ -112,15 +123,13 @@ export const createRunQueue = (deps: RunQueueDeps): RunQueueHandle => {
   const queue: RunQueuePort = { enqueue: (runId) => enqueue(runId) };
 
   const startWorker = (
-    processRun: (runId: RunId) => Promise<Result<void, HostError>>,
+    processRun: (lease: RunLease) => Promise<Result<void, HostError>>,
     opts?: { concurrency?: number },
   ): WorkerHandle =>
     backend.createWorker<RunId, { readonly tenant: TenantId }>(
       name,
       async (job) => {
-        // Validate before lock acquisition: an incomplete adapter must fail the
-        // wakeup without leaving a TTL-bound lease behind.
-        const redis = requireLeaseRedis(deps.redis);
+        const redis = deps.redis;
         const runId = job.data.state;
         if (job.data.context.tenant !== tenant) {
           throw new Error(`hitl: rejected cross-tenant wakeup for ${runId}`);
@@ -154,31 +163,37 @@ export const createRunQueue = (deps: RunQueueDeps): RunQueueHandle => {
         // A lock is a lease, not a permanent mutex. Renew before half its TTL
         // elapses, always with the owner token, and fail closed if ownership
         // cannot be verified by the construction-validated lease port.
-        const compareAndExpire = redis.compareAndExpire;
         const renewEveryMs = Math.max(1, Math.floor(lockTtlSec * 500));
+        const leaseController = new AbortController();
+        const lease = issueRunLease(runId, lockToken, leaseController.signal);
         let renewalFailure: HostError | "ownership-lost" | undefined;
         let renewalTail: Promise<void> = Promise.resolve();
+        const failLease = (failure: HostError | "ownership-lost"): void => {
+          if (renewalFailure !== undefined) return;
+          renewalFailure = failure;
+          const detail = failure === "ownership-lost" ? failure : failure.kind;
+          logWithoutThrowing(logger, "error", "hitl: lock renewal failed — aborting run slice for retry", {
+            runId,
+            error: detail,
+          });
+          leaseController.abort(failure);
+        };
         const renewLease = (): void => {
           renewalTail = renewalTail.then(async () => {
             if (renewalFailure !== undefined) return;
             try {
-              const renewed = await compareAndExpire(lockKey(tenant, runId), lockToken, lockTtlSec);
-              if (!renewed.ok) {
-                renewalFailure = renewed.error;
-                logger?.error?.("hitl: lock renewal failed — retrying", { runId, error: renewed.error.kind });
-              } else if (!renewed.value) {
-                renewalFailure = "ownership-lost";
-                logger?.error?.("hitl: lock ownership lost during processing — retrying", { runId });
-              }
+              const renewed = await redis.compareAndExpire(lockKey(tenant, runId), lockToken, lockTtlSec);
+              if (!renewed.ok) failLease(renewed.error);
+              else if (!renewed.value) failLease("ownership-lost");
             } catch (error) {
-              renewalFailure = { kind: "redis-unavailable", operation: `HITL lease renewal: ${safeErrorMessage(error)}` };
+              failLease({ kind: "redis-unavailable", operation: `HITL lease renewal: ${safeErrorMessage(error)}` });
             }
           });
         };
         const renewalTimer = setInterval(renewLease, renewEveryMs);
 
         try {
-          const result = await processRun(runId);
+          const result = await processRun(lease);
           await renewalTail;
           if (renewalFailure !== undefined) {
             const detail = renewalFailure === "ownership-lost" ? renewalFailure : renewalFailure.kind;

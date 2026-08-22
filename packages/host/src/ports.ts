@@ -167,6 +167,20 @@ export type RedisPort = {
   /** Atomically renew a lease only while its ownership token still matches. */
   readonly compareAndExpire?: (key: string, expectedValue: string, expiresInSec: number) => Promise<Result<boolean, HostError>>;
   /**
+   * Set `key` only while `guardKey` still equals `expectedValue`.
+   *
+   * The comparison and write are one optimistic Redis transaction. HITL uses
+   * this to fence checkpoint/status writes with the worker's live lease token
+   * and to commit notification-delivery state without a GET/SET gap.
+   */
+  readonly setIfValue?: (
+    guardKey: string,
+    expectedValue: string,
+    key: string,
+    value: string,
+    opts: { expiresInSec: number },
+  ) => Promise<Result<boolean, HostError>>;
+  /**
    * Atomically verify that `guardKey` exists and create `key` only if absent.
    * The outcomes distinguish a closed gate, a newly persisted value, and a
    * competing writer without leaking Redis transaction mechanics to HITL.
@@ -178,6 +192,18 @@ export type RedisPort = {
     opts: { expiresInSec: number },
   ) => Promise<Result<"not-present" | "created" | "exists", HostError>>;
 }
+
+/**
+ * Construction-proven Redis capability required by durable HITL adapters.
+ * The generic Redis port keeps transaction methods optional for unrelated
+ * consumers; host composition parses it once so no HITL worker can start with
+ * a partially implemented transaction surface.
+ */
+export type HitlRedisPort = RedisPort & {
+  readonly compareAndExpire: NonNullable<RedisPort["compareAndExpire"]>;
+  readonly setIfValue: NonNullable<RedisPort["setIfValue"]>;
+  readonly setNxIfPresent: NonNullable<RedisPort["setNxIfPresent"]>;
+};
 
 /**
  * Port for Redis connectivity validation (PING command).

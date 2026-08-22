@@ -121,16 +121,17 @@ const parseDecision = (body: unknown): { ok: true; action: HumanAction } | { ok:
   const b = body as Record<string, unknown>;
   const decision = b.decision;
   const actor = typeof b.actor === "string" ? b.actor : undefined;
+  const actorPatch = actor ? { actor } : {};
 
   return match(decision)
-    .with("approve", () => ({ ok: true as const, action: { kind: "approve" as const, ...(actor ? { actor } : {}) } }))
+    .with("approve", () => ({ ok: true as const, action: { kind: "approve" as const, ...actorPatch } }))
     .with("approve-with-edit", () =>
       "newOutput" in b
-        ? { ok: true as const, action: { kind: "approve-with-edit" as const, newOutput: b.newOutput, ...(actor ? { actor } : {}) } }
+        ? { ok: true as const, action: { kind: "approve-with-edit" as const, newOutput: b.newOutput, ...actorPatch } }
         : { ok: false as const, message: "approve-with-edit requires 'newOutput'" })
     .with("reject", () =>
       typeof b.reason === "string"
-        ? { ok: true as const, action: { kind: "reject" as const, reason: b.reason, ...(actor ? { actor } : {}) } }
+        ? { ok: true as const, action: { kind: "reject" as const, reason: b.reason, ...actorPatch } }
         : { ok: false as const, message: "reject requires a string 'reason'" })
     .with("reroute", () => {
       if (typeof b.targetNodeId !== "string") {
@@ -145,7 +146,7 @@ const parseDecision = (body: unknown): { ok: true; action: HumanAction } | { ok:
           kind: "reroute" as const,
           targetNodeId: target.value,
           ...(typeof b.reason === "string" ? { reason: b.reason } : {}),
-          ...(actor ? { actor } : {}),
+          ...actorPatch,
         },
       };
     })

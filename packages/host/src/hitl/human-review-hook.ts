@@ -6,9 +6,9 @@
  *   1. A decision already recorded  → RETURN it (the gate resolves). The hook
  *      does NOT clear it here — consumption is deferred to `makeOnDecisionConsumed`,
  *      which the kernel calls only AFTER the post-gate checkpoint is durable.
- *   2. No decision yet              → mark the gate pending; on the FIRST park
- *      (markPending returned `true`) send the notification; return `pending` so
- *      the run suspends.
+ *   2. No decision yet              → prepare durable pending/notification
+ *      state; retry delivery while it is `notification-required`; atomically
+ *      mark successful delivery `notified`; only then return `pending`.
  *
  * Read/consume split (the durability fix): if the hook cleared the decision the
  * moment it read it, a worker crash AFTER the clear but BEFORE the kernel
@@ -18,13 +18,11 @@
  * the post-commit callback, a crash in that window re-reads the same decision on
  * resume (effectively-once consumption).
  *
- * Fail-safe by construction: a decision-store read error returns `pending`
- * (re-park) rather than fabricating an approval — a missing/erroring decision
- * must never be read as "yes". A pending-marker write error throws into the
- * kernel retry path: a reviewer is never notified about a gate whose decision
- * cannot be durably recorded. A notification failure does NOT crash the run:
- * the run is already safely parked and can be re-notified out of band; we log
- * and still return `pending`.
+ * Fail-safe by construction: decision reads, pending-state writes, notification
+ * delivery, and delivery-state commits all throw into the kernel's retriable
+ * hook path. A missing/erroring decision is never read as approval, and the
+ * hook never returns `pending` until the gate is durably actionable and its
+ * notification has been delivered. Failed deliveries remain durably retriable.
  */
 
 import type {
@@ -75,47 +73,54 @@ export const makeOnHumanReview = (deps: OnHumanReviewDeps) =>
     }
 
     if (!decision.ok) {
-      // Fail-safe: an errored decision lookup must NOT be read as approval.
-      // Re-park so the run stays safe and a later resume can retry the lookup.
-      logWithoutThrowing(logger, "warn", "hitl: decision lookup failed — re-parking", {
+      // An errored lookup cannot establish either "approved" or "no decision".
+      // Throw so the kernel retries the hook without producing `suspended`.
+      logWithoutThrowing(logger, "warn", "hitl: decision lookup failed — retrying hook", {
         runId,
         nodeId: req.nodeId,
         error: decision.error.kind,
       });
-      return { kind: "pending" };
+      throw new Error(`hitl: decision lookup failed for ${runId}/${req.nodeId}: ${decision.error.kind}`);
     }
 
-    // 2. No decision yet → park. Notify only on the first park for this gate.
-    const pending = await decisions.markPending(runId, req.nodeId);
+    // 2. No decision yet → establish an actionable pending gate. Delivery state
+    // is durable: a failed notification remains `notification-required`, while
+    // a committed success deduplicates ordinary re-parks.
+    const pending = await decisions.preparePending(runId, req.nodeId);
     if (!pending.ok) {
-      // Fail closed: an actionable notification is valid only after its pending
-      // marker exists, because `recordDecision` atomically resolves that marker.
-      // Throwing enters the kernel's retry/failure path rather than advertising
-      // a review a human can never resolve.
-      logWithoutThrowing(logger, "error", "hitl: markPending failed — refusing unresolvable notification", {
+      logWithoutThrowing(logger, "error", "hitl: preparePending failed — refusing unresolvable notification", {
         runId,
         nodeId: req.nodeId,
         error: pending.error.kind,
       });
-      throw new Error(`hitl: markPending failed for ${runId}/${req.nodeId}: ${pending.error.kind}`);
+      throw new Error(`hitl: preparePending failed for ${runId}/${req.nodeId}: ${pending.error.kind}`);
     }
-    const isFirstPark = pending.value;
-    if (isFirstPark) {
-      const notified = await notifier.notify({
+    if (pending.value.kind === "notification-required") {
+      const delivered = await notifier.notify({
         runId,
         dagId,
         nodeId: req.nodeId,
         prompt: req.prompt,
         output: req.output,
       });
-      if (!notified.ok) {
-        // Non-fatal: the run is parked durably regardless. Surface the failure
-        // so an operator can re-trigger delivery; do not fail the run.
-        logWithoutThrowing(logger, "error", "hitl: review notification failed — run parked without notice", {
+      if (!delivered.ok) {
+        logWithoutThrowing(logger, "error", "hitl: review notification failed — retrying hook", {
           runId,
           nodeId: req.nodeId,
-          error: notified.error.kind,
+          error: delivered.error.kind,
         });
+        throw new Error(`hitl: review notification failed for ${runId}/${req.nodeId}: ${delivered.error.kind}`);
+      }
+
+      const committed = await decisions.markNotified(runId, req.nodeId, pending.value.marker);
+      if (!committed.ok || !committed.value) {
+        const detail = committed.ok ? "pending marker changed" : committed.error.kind;
+        logWithoutThrowing(logger, "error", "hitl: notification delivered but delivery state was not committed — retrying hook", {
+          runId,
+          nodeId: req.nodeId,
+          error: detail,
+        });
+        throw new Error(`hitl: notification state commit failed for ${runId}/${req.nodeId}: ${detail}`);
       }
     }
     return { kind: "pending" };

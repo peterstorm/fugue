@@ -28,6 +28,7 @@ import type { GitPort } from "./ports.js";
 import type { ModuleLoaderPort } from "./ports.js";
 import type { SharedInfra } from "./ports.js";
 import type { RedisConnectivityPort } from "./ports.js";
+import { requireHitlRedisPort } from "./adapters/redis-connectivity.js";
 import { createNodeContextForDag } from "./adapters/node-context-factory.js";
 import type { NodeContextForDag } from "./domain/run-context.js";
 import { createRedisTokenStore } from "./adapters/token-store.js";
@@ -662,12 +663,16 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
   }
 
   if (notifier !== undefined && deps.queueBackend !== undefined) {
+    // Parse the generic Redis adapter once at composition. Every HITL adapter
+    // below receives a required transaction capability; incomplete wiring fails
+    // before a queue worker can acquire or execute any run.
+    const hitlRedis = requireHitlRedisPort(sharedInfra.redis);
     // FR-013 / SC-001: bind the durable HITL stores to the `routedTenant` so
     // every `fugue:<tenant>:hitl:*` key stays under that tenant's Redis ACL.
     // `routedTenant` is the worker's resolved `Tenant.id`, or the constant
     // `default` fallback in the single-tenant path where no tenant is injected.
-    const runStore = createRedisRunStore(sharedInfra.redis, routedTenant, { ttlSec: config.HITL_RUN_TTL_SEC }, sharedInfra.logger);
-    const decisions = createRedisDecisionStore(sharedInfra.redis, routedTenant, { ttlSec: config.HITL_RUN_TTL_SEC }, sharedInfra.logger);
+    const runStore = createRedisRunStore(hitlRedis, routedTenant, { ttlSec: config.HITL_RUN_TTL_SEC }, sharedInfra.logger);
+    const decisions = createRedisDecisionStore(hitlRedis, routedTenant, { ttlSec: config.HITL_RUN_TTL_SEC }, sharedInfra.logger);
     const executor = createRunExecutor({
       sharedInfra,
       getRegisteredDag: (id) => {
@@ -681,7 +686,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     });
     const runQueue = createRunQueue({
       backend: deps.queueBackend,
-      redis: sharedInfra.redis,
+      redis: hitlRedis,
       // FR-013 / SC-001: scope the single-flight lock key to the `routedTenant`
       // (`fugue:<tenant>:hitl:lock:*`) — the worker's resolved `Tenant.id`, or the
       // constant `default` fallback in the single-tenant path.

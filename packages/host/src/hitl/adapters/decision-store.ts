@@ -23,8 +23,8 @@ import { ok, err, tryNodeId } from "@fuguejs/framework";
 import type { Result, RunId, NodeId, HumanAction } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import type { TenantId } from "../../domain/tenant.js";
-import type { RedisPort, LogPort } from "../../ports.js";
-import type { DecisionStorePort } from "../ports.js";
+import type { HitlRedisPort, LogPort } from "../../ports.js";
+import type { DecisionStorePort, PendingReview } from "../ports.js";
 
 /**
  * Shape validator for a persisted `HumanAction` (ADR-0060). The decision is read
@@ -67,32 +67,70 @@ const decisionKey = (tenant: TenantId, runId: RunId, nodeId: NodeId): string => 
 interface RedisDecisionStoreConfig {
   /** TTL applied to pending/decision keys, in seconds. Should exceed the run TTL. */
   readonly ttlSec: number;
+  /** Fresh marker token for notification-delivery CAS. Defaults to randomUUID. */
+  readonly newPendingMarker?: () => string;
 }
 
+const notificationRequired = (marker: string): string => `notification-required:${marker}`;
+const notified = (marker: string): string => `notified:${marker}`;
+
+const parsePendingReview = (raw: string): Result<PendingReview, HostError> => {
+  if (raw.startsWith("notification-required:") && raw.length > "notification-required:".length) {
+    return ok({ kind: "notification-required", marker: raw.slice("notification-required:".length) });
+  }
+  if (raw.startsWith("notified:") && raw.length > "notified:".length) {
+    return ok({ kind: "notified" });
+  }
+  return err({
+    kind: "internal-invariant-violated",
+    message: "corrupt pending-review notification state",
+    context: {},
+  });
+};
+
 export const createRedisDecisionStore = (
-  redis: RedisPort,
+  redis: HitlRedisPort,
   tenant: TenantId,
   config: RedisDecisionStoreConfig,
   logger?: LogPort,
 ): DecisionStorePort => {
   const expiry = { expiresInSec: config.ttlSec };
+  const newPendingMarker = config.newPendingMarker ?? (() => crypto.randomUUID());
 
   return {
-    async markPending(runId, nodeId) {
-      // Atomic create-once WITH TTL (SET NX EX): the marker can never exist
-      // without an expiry, so a crash never leaves a TTL-less pending marker.
-      const set = await redis.setNx(pendingKey(tenant, runId, nodeId), "1", expiry);
-      if (!set.ok) return err(set.error);
-      return ok(set.value);
+    async preparePending(runId, nodeId) {
+      const key = pendingKey(tenant, runId, nodeId);
+      for (;;) {
+        const marker = newPendingMarker();
+        const created = await redis.setNx(key, notificationRequired(marker), expiry);
+        if (!created.ok) return err(created.error);
+        if (created.value) return ok({ kind: "notification-required", marker });
+
+        const existing = await redis.get(key);
+        if (!existing.ok) return err(existing.error);
+        // A concurrent post-commit clear can remove the marker between SET NX
+        // and GET. Retry creation rather than returning an impossible state.
+        if (existing.value === null) continue;
+        return parsePendingReview(existing.value);
+      }
+    },
+
+    async markNotified(runId, nodeId, marker) {
+      const key = pendingKey(tenant, runId, nodeId);
+      const committed = await redis.setIfValue(
+        key,
+        notificationRequired(marker),
+        key,
+        notified(marker),
+        expiry,
+      );
+      return committed;
     },
 
     async resolvePending(runId, nodeId, action) {
       // The guard check and first-writer decision publication share one Redis
       // optimistic transaction. A concurrent clear invalidates EXEC and retries,
       // so a resolver cannot recreate a decision after its gate has closed.
-      if (redis.setNxIfPresent === undefined) {
-        return err({ kind: "internal-invariant-violated", message: "Redis decision transaction is unavailable", context: {} });
-      }
       const resolved = await redis.setNxIfPresent(
         pendingKey(tenant, runId, nodeId),
         decisionKey(tenant, runId, nodeId),

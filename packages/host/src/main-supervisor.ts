@@ -163,6 +163,26 @@ const createRedis = async (redisUrl: string): Promise<Result<RedisBundle, HostEr
           return err(redisFailure(`COMPARE-AND-EXPIRE ${key}`, error));
         }
       });
+    const setIfValue: RedisPort["setIfValue"] = (guardKey, expectedValue, key, value, opts) =>
+      serializeWatch(async () => {
+        try {
+          for (;;) {
+            await client.watch(guardKey);
+            if (await client.get(guardKey) !== expectedValue) {
+              await client.unwatch();
+              return ok(false);
+            }
+            const executed = await client.multi().set(key, value, "EX", opts.expiresInSec).exec();
+            if (executed === null) continue;
+            const [commandError, written] = executed[0] ?? [];
+            if (commandError !== null) throw commandError;
+            return ok(written === "OK");
+          }
+        } catch (error) {
+          try { await client.unwatch(); } catch { /* primary error is authoritative */ }
+          return err(redisFailure(`SET-IF-VALUE ${guardKey} -> ${key}`, error));
+        }
+      });
     const setNxIfPresent: RedisPort["setNxIfPresent"] = (guardKey, key, value, opts) =>
       serializeWatch(async () => {
         try {
@@ -224,6 +244,7 @@ const createRedis = async (redisUrl: string): Promise<Result<RedisBundle, HostEr
       },
       compareAndDelete,
       compareAndExpire,
+      setIfValue,
       setNxIfPresent,
       sAdd: async (key, member) => {
         try { return ok(await client.sadd(key, member)); }

@@ -29,7 +29,8 @@ const notifierSpy = () => {
 
 /** A decision store whose operations are individually overridable for the branch under test. */
 const decisionStore = (overrides: Partial<DecisionStorePort> = {}): DecisionStorePort => ({
-  async markPending() { return ok(true); },
+  async preparePending() { return ok({ kind: "notification-required", marker: "marker-1" }); },
+  async markNotified() { return ok(true); },
   async resolvePending() { return ok({ kind: "not-pending" }); },
   async getDecision() { return ok(null); },
   async clear() { return ok(undefined); },
@@ -37,16 +38,15 @@ const decisionStore = (overrides: Partial<DecisionStorePort> = {}): DecisionStor
 });
 
 describe("makeOnHumanReview", () => {
-  it("re-parks (pending) and does NOT notify when the decision lookup errors", async () => {
+  it("retries the hook and does NOT notify when the decision lookup errors", async () => {
     const notifier = notifierSpy();
     const decisions = decisionStore({ async getDecision() { return err({ kind: "redis-unavailable", operation: "GET decision" }); } });
     const hook = makeOnHumanReview({ decisions, notifier: notifier.port, runId: RUN, dagId: DAG });
 
-    const outcome = await hook(req);
+    await expect(hook(req)).rejects.toThrow("decision lookup failed");
 
-    expect(outcome).toEqual({ kind: "pending" });
-    // An errored lookup must never be fabricated into an approval, and must not
-    // re-notify (the run is already parked).
+    // An errored lookup must never be fabricated into an approval or suspend a
+    // run before its actionable pending marker exists.
     expect(notifier.sent).toHaveLength(0);
   });
 
@@ -69,9 +69,14 @@ describe("makeOnHumanReview", () => {
 
   it("parks and notifies on the FIRST park, then re-parks without re-notifying", async () => {
     const notifier = notifierSpy();
-    let firstPark = true;
+    let delivered = false;
     const decisions = decisionStore({
-      async markPending() { const was = firstPark; firstPark = false; return ok(was); },
+      async preparePending() {
+        return ok(delivered
+          ? { kind: "notified" }
+          : { kind: "notification-required", marker: "marker-1" });
+      },
+      async markNotified() { delivered = true; return ok(true); },
     });
     const hook = makeOnHumanReview({ decisions, notifier: notifier.port, runId: RUN, dagId: DAG });
 
@@ -81,34 +86,41 @@ describe("makeOnHumanReview", () => {
     expect(notifier.sent[0]!.nodeId).toBe(NODE);
   });
 
-  it("still parks (pending) when notification fails on the first park — non-fatal, no re-notify", async () => {
-    // First park succeeds (markPending → true), but delivery fails. The run is
-    // already durably parked, so the hook must NOT fail the run: it logs and
-    // returns pending. A later re-park (markPending → false) must NOT retry
-    // delivery (the notify only fires on the first park).
-    let firstPark = true;
+  it("retries a failed first notification and parks only after delivery is committed", async () => {
     let notifyCalls = 0;
+    let delivered = false;
     const decisions = decisionStore({
-      async markPending() { const was = firstPark; firstPark = false; return ok(was); },
+      async preparePending() {
+        return ok(delivered
+          ? { kind: "notified" }
+          : { kind: "notification-required", marker: "marker-1" });
+      },
+      async markNotified() { delivered = true; return ok(true); },
     });
     const notifier: HumanReviewNotifierPort = {
-      async notify() { notifyCalls += 1; return err({ kind: "notification-failed", operation: "notify" }); },
+      async notify() {
+        notifyCalls += 1;
+        return notifyCalls === 1
+          ? err({ kind: "notification-failed", operation: "notify" })
+          : ok(undefined);
+      },
     };
     const hook = makeOnHumanReview({ decisions, notifier, runId: RUN, dagId: DAG });
 
-    expect(await hook(req)).toEqual({ kind: "pending" }); // parked despite delivery failure
-    expect(await hook(req)).toEqual({ kind: "pending" }); // re-park
-    expect(notifyCalls).toBe(1); // attempted once on first park, never on re-park
+    await expect(hook(req)).rejects.toThrow("review notification failed");
+    expect(await hook(req)).toEqual({ kind: "pending" });
+    expect(await hook(req)).toEqual({ kind: "pending" });
+    expect(notifyCalls).toBe(2);
   });
 
-  it("fails closed when markPending errors — rejects and does not notify", async () => {
+  it("fails closed when preparePending errors — rejects and does not notify", async () => {
     const notifier = notifierSpy();
     const decisions = decisionStore({
-      async markPending() { return err({ kind: "redis-unavailable", operation: "SET NX pending" }); },
+      async preparePending() { return err({ kind: "redis-unavailable", operation: "SET NX pending" }); },
     });
     const hook = makeOnHumanReview({ decisions, notifier: notifier.port, runId: RUN, dagId: DAG });
 
-    await expect(hook(req)).rejects.toThrow("markPending failed");
+    await expect(hook(req)).rejects.toThrow("preparePending failed");
     expect(notifier.sent).toHaveLength(0);
   });
 
@@ -129,7 +141,7 @@ describe("makeOnHumanReview", () => {
     });
     const markerFailure = makeOnHumanReview({
       decisions: decisionStore({
-        async markPending() { return err({ kind: "redis-unavailable", operation: "SET NX" }); },
+        async preparePending() { return err({ kind: "redis-unavailable", operation: "SET NX" }); },
       }),
       notifier: notifierSpy().port,
       runId: RUN,
@@ -146,9 +158,9 @@ describe("makeOnHumanReview", () => {
       logger,
     });
 
-    expect(await lookupFailure(req)).toEqual({ kind: "pending" });
-    await expect(markerFailure(req)).rejects.toThrow("markPending failed");
-    expect(await notificationFailure(req)).toEqual({ kind: "pending" });
+    await expect(lookupFailure(req)).rejects.toThrow("decision lookup failed");
+    await expect(markerFailure(req)).rejects.toThrow("preparePending failed");
+    await expect(notificationFailure(req)).rejects.toThrow("review notification failed");
   });
 });
 

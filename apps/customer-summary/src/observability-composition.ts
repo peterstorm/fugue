@@ -32,6 +32,7 @@ import {
   dispatchEvent,
   fwLogger,
   isCacheHit,
+  safeErrorMessage,
 } from "@fuguejs/framework";
 import type {
   Observer,
@@ -131,6 +132,17 @@ interface RunSummaryBuffer {
 const SUMMARY_TTL_MS = 60 * 60 * 1000; // 1h
 const SUMMARY_SWEEP_MS = 5 * 60 * 1000; // 5min
 
+const logFrameworkWithoutThrowing = (
+  level: "warn" | "error",
+  message: string,
+): void => {
+  try {
+    fwLogger()[level](message);
+  } catch {
+    // Diagnostics cannot turn a guarded observability seam into a throw path.
+  }
+};
+
 export class FoundryRunSummaryObserver implements Observer {
   private readonly inner: AiFoundryObserver;
   // Inner buffer keyed by runId. Per-run entries are normally bounded by their
@@ -188,13 +200,15 @@ export class FoundryRunSummaryObserver implements Observer {
     try {
       nowMs = this.now();
     } catch (error) {
-      fwLogger().error(
-        `[FoundryRunSummaryObserver] clock threw — eviction disabled this cycle: ${error instanceof Error ? error.message : String(error)}`,
+      logFrameworkWithoutThrowing(
+        "error",
+        `[FoundryRunSummaryObserver] clock threw — eviction disabled this cycle: ${safeErrorMessage(error)}`,
       );
       return null;
     }
     if (!Number.isFinite(nowMs)) {
-      fwLogger().warn(
+      logFrameworkWithoutThrowing(
+        "warn",
         `[FoundryRunSummaryObserver] clock returned a non-finite stamp (${String(nowMs)}) — eviction disabled this cycle`,
       );
       return null;
@@ -244,7 +258,8 @@ export class FoundryRunSummaryObserver implements Observer {
     }
     if (activity === null) {
       this.droppedEvents++;
-      fwLogger().warn(
+      logFrameworkWithoutThrowing(
+        "warn",
         `[FoundryRunSummaryObserver] clock unavailable — run buffer not opened for runId '${String(event.runId)}'; event dropped (counted)`,
       );
       return this.inner.observe(event);

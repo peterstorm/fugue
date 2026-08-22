@@ -26,12 +26,12 @@
  */
 
 import { toJson, tryFromJson, isDagPhaseKind } from "@fuguejs/framework";
-import type { JobLike, DagPhase, DagMachineContextPersisted, RunId } from "@fuguejs/framework";
+import type { JobLike, DagPhase, DagMachineContextPersisted } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import { ok, err } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
 import { internalInvariantViolated } from "../domain/host-error.js";
-import type { RunStorePort } from "./ports.js";
+import type { RunLease, RunStorePort } from "./ports.js";
 
 type Envelope = { state: DagPhase; context: DagMachineContextPersisted };
 
@@ -52,7 +52,7 @@ const isEnvelope = (v: unknown): v is Envelope => {
 };
 
 /**
- * Build a `JobLike` over the run store for `runId`, seeded from the run's
+ * Build a `JobLike` over the run store for `lease.runId`, seeded from the run's
  * serialized checkpoint. The returned handle persists each checkpoint back to
  * the store; `updateProgress`/`appendEvent` are intentional no-ops here (run
  * progress is derived from `RunStatus`; HITL runs carry only the latest
@@ -64,9 +64,10 @@ const isEnvelope = (v: unknown): v is Envelope => {
  */
 export const makeRunStoreJobLike = (
   runStore: RunStorePort,
-  runId: RunId,
+  lease: RunLease,
   initialCheckpoint: string,
 ): Result<JobLike<DagPhase, unknown, DagMachineContextPersisted>, HostError> => {
+  const runId = lease.runId;
   const parsed = tryFromJson(initialCheckpoint);
   if (!parsed.ok) {
     return err(internalInvariantViolated(
@@ -88,8 +89,7 @@ export const makeRunStoreJobLike = (
       return envelope;
     },
     async updateData(d: { state: DagPhase; context: DagMachineContextPersisted }): Promise<void> {
-      envelope = d;
-      const persisted = await runStore.saveCheckpoint(runId, toJson(d));
+      const persisted = await runStore.saveCheckpoint(lease, toJson(d));
       if (!persisted.ok) {
         // Fatal: the kernel must not advance on a checkpoint we failed to
         // persist. Throwing surfaces as a run failure (handleKernelError) and
@@ -98,6 +98,7 @@ export const makeRunStoreJobLike = (
           `makeRunStoreJobLike: failed to persist checkpoint for run '${runId}': ${persisted.error.kind}`,
         );
       }
+      envelope = d;
     },
     async updateProgress(): Promise<void> {
       // No-op: run progress is surfaced via RunStatus, not a 0–100 percent.

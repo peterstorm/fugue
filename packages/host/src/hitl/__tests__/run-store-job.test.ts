@@ -13,11 +13,13 @@
 import { describe, it, expect } from "bun:test";
 import { ok, err, toJson, fromJson } from "@fuguejs/framework";
 import type { RunId, DagPhase, DagMachineContextPersisted, Result, JobLike } from "@fuguejs/framework";
+import { issueRunLease } from "../ports.js";
 import type { RunStorePort } from "../ports.js";
 import type { RunRecord, RunStatus } from "../types.js";
 import { makeRunStoreJobLike } from "../run-store-job.js";
 
 const RUN = "run-1" as RunId;
+const LEASE = issueRunLease(RUN, "test-owner", new AbortController().signal);
 type Envelope = { state: DagPhase; context: DagMachineContextPersisted };
 const envelope = (kind: string): Envelope => ({ state: { kind } as unknown as DagPhase, context: {} as DagMachineContextPersisted });
 const initial = toJson(envelope("pending"));
@@ -34,10 +36,10 @@ const fakeStore = (saveResult: () => ReturnType<RunStorePort["saveCheckpoint"]>)
   const port: RunStorePort = {
     async create() { return ok(undefined); },
     async get() { return ok(null as RunRecord | null); },
-    async saveCheckpoint(_runId, checkpoint) { saved.push(checkpoint); return saveResult(); },
-    async setStatus(_runId, _status: RunStatus) { return ok(undefined); },
+    async saveCheckpoint(_lease, checkpoint) { saved.push(checkpoint); return saveResult(); },
+    async setStatus(_lease, _status: RunStatus) { return ok(undefined); },
     async countActiveRuns() { return ok(0); },
-  async listActiveRunIds() { return ok([]); },
+    async listActiveRunIds() { return ok([]); },
   };
   return { port, saved };
 };
@@ -45,13 +47,13 @@ const fakeStore = (saveResult: () => ReturnType<RunStorePort["saveCheckpoint"]>)
 describe("makeRunStoreJobLike", () => {
   it("exposes the initial checkpoint via the sync data getter", () => {
     const { port } = fakeStore(() => Promise.resolve(ok(undefined)));
-    const job = expectJob(makeRunStoreJobLike(port, RUN, initial));
+    const job = expectJob(makeRunStoreJobLike(port, LEASE, initial));
     expect(job.data).toEqual(fromJson(initial) as Envelope);
   });
 
   it("persists each updateData (serialized) and reflects it in data", async () => {
     const { port, saved } = fakeStore(() => Promise.resolve(ok(undefined)));
-    const job = expectJob(makeRunStoreJobLike(port, RUN, initial));
+    const job = expectJob(makeRunStoreJobLike(port, LEASE, initial));
     const next = envelope("awaiting-human");
 
     await job.updateData(next);
@@ -60,15 +62,16 @@ describe("makeRunStoreJobLike", () => {
     expect(job.data).toEqual(next);
   });
 
-  it("THROWS on a persist failure (kernel must not advance on an unpersisted checkpoint)", async () => {
+  it("THROWS on a persist failure without advancing the local checkpoint", async () => {
     const { port } = fakeStore(() => Promise.resolve(err({ kind: "redis-unavailable", operation: "saveCheckpoint" })));
-    const job = expectJob(makeRunStoreJobLike(port, RUN, initial));
+    const job = expectJob(makeRunStoreJobLike(port, LEASE, initial));
     await expect(job.updateData(envelope("awaiting-human"))).rejects.toThrow(/failed to persist checkpoint/);
+    expect(job.data).toEqual(fromJson(initial) as Envelope);
   });
 
   it("REJECTS a checkpoint with malformed JSON (parse-don't-validate)", () => {
     const { port } = fakeStore(() => Promise.resolve(ok(undefined)));
-    const result = makeRunStoreJobLike(port, RUN, "{not json");
+    const result = makeRunStoreJobLike(port, LEASE, "{not json");
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("internal-invariant-violated");
@@ -78,10 +81,8 @@ describe("makeRunStoreJobLike", () => {
 
   it("REJECTS a checkpoint whose state.kind is not a known DagPhase (corrupt discriminant)", () => {
     const { port } = fakeStore(() => Promise.resolve(ok(undefined)));
-    // Structurally an envelope, but `state.kind` is not a real phase — exactly
-    // the value that would otherwise throw NonExhaustiveError inside dagTransition.
     const corrupt = toJson({ state: { kind: "totally-bogus" }, context: {} });
-    const result = makeRunStoreJobLike(port, RUN, corrupt);
+    const result = makeRunStoreJobLike(port, LEASE, corrupt);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("internal-invariant-violated");
@@ -91,7 +92,7 @@ describe("makeRunStoreJobLike", () => {
 
   it("REJECTS a checkpoint missing the state/context envelope shape", () => {
     const { port } = fakeStore(() => Promise.resolve(ok(undefined)));
-    const result = makeRunStoreJobLike(port, RUN, toJson({ state: { kind: "pending" } })); // no context
+    const result = makeRunStoreJobLike(port, LEASE, toJson({ state: { kind: "pending" } }));
     expect(result.ok).toBe(false);
   });
 });

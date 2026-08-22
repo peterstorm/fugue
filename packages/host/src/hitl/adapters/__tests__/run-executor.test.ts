@@ -38,6 +38,7 @@ import type { RegisteredDag } from "../../../domain/registry.js";
 import { tryRunTimestampMs } from "../../types.js";
 import type { RunRecord, RunStatus, PersistedIdentity, RunTimestampMs } from "../../types.js";
 import { makeRunStoreJobLike } from "../../run-store-job.js";
+import { issueRunLease } from "../../ports.js";
 import { createInMemoryRunStore } from "../run-store.js";
 import { createRunExecutor } from "../run-executor.js";
 
@@ -140,7 +141,8 @@ const seedJobLike = async (dag: DagDef, input: unknown) => {
     updatedAtMs: timestamp(1),
   };
   await store.create(record);
-  const jl = makeRunStoreJobLike(store, "run-1" as never, checkpoint);
+  const lease = issueRunLease(record.runId, "test-owner", new AbortController().signal);
+  const jl = makeRunStoreJobLike(store, lease, checkpoint);
   if (!jl.ok) throw new Error("jobLike build failed");
   return jl.value;
 };
@@ -150,6 +152,7 @@ const runReq = (dag: DagDef, jobLike: Awaited<ReturnType<typeof seedJobLike>>, i
   dagId: dag.id as DagId,
   input,
   identity: ADMIN,
+  signal: new AbortController().signal,
   jobLike,
   onHumanReview: async () => ({ kind: "approve" }) as never,
   onDecisionConsumed: async () => {},
@@ -403,6 +406,34 @@ describe("createRunExecutor — slice timeout (AbortController wiring)", () => {
     // Never throws: the abort surfaces as a settled `failed` outcome.
     expect(res.ok).toBe(true);
     if (res.ok) expect(res.value.kind).toBe("failed");
+  });
+
+  it("aborts the node context immediately when the queue lease signal aborts", async () => {
+    let observedAbort = false;
+    let markStarted: () => void = () => {};
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const dag = singleNodeDag((async (_i: unknown, ctx: NodeContext) => {
+      markStarted();
+      await new Promise<void>((resolve) => {
+        ctx.signal?.addEventListener("abort", () => {
+          observedAbort = true;
+          resolve();
+        }, { once: true });
+      });
+      throw new Error("lease aborted");
+    }) as never);
+    const reg = registered(dag, 60_000);
+    const exec = createRunExecutor({ sharedInfra: sharedInfra(), getRegisteredDag: () => reg, agentClientMap: { "exec-dag": "fugue-agent-exec" } });
+    const jobLike = await seedJobLike(dag, null);
+    const leaseController = new AbortController();
+    const execution = exec.run({ ...runReq(dag, jobLike, null), signal: leaseController.signal });
+
+    await started;
+    leaseController.abort("ownership-lost");
+    const result = await execution;
+
+    expect(observedAbort).toBe(true);
+    expect(result.ok && result.value.kind).toBe("failed");
   });
 
   it("a fast slice under config.timeout completes normally (timeout does not fire)", async () => {

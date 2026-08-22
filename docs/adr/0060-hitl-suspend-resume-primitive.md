@@ -116,6 +116,32 @@ work with one predicate and no extra bookkeeping.
 4. Worker resumes at `suspended` → hook finds the decision → returns the
    `HumanAction` → run proceeds (or re-parks if more gates remain).
 
+### Ownership-fenced execution slices (2026-08-22 amendment)
+
+Every queue acquisition now produces an opaque, run-bound `RunLease` carrying
+its random Redis owner token and an abort signal. The lease is threaded through
+`processRun`, the run-store-backed `JobLike`, and the executor. Checkpoint and
+status writes atomically compare the live lock token before committing, so an
+expired worker cannot overwrite a successor's checkpoint or terminal state.
+
+Lease renewal returning false, returning a typed error, or throwing aborts the
+active node-context signal immediately and makes the queue job retry. The
+`running` status write is no longer best-effort: it is the entry fence proving
+both metadata writability and ownership, and the service refuses to invoke the
+executor when it fails. The executor also checks the aborted lease before any
+outcome fold. This combines cooperative cancellation at effectful node
+boundaries with hard persistence fencing at every durable transition.
+
+### Durable notification-delivery state (2026-08-22 amendment)
+
+A pending review marker now has two persisted states: `notification-required`
+(with a random marker token) and `notified`. The hook retries the notifier while
+delivery is required and atomically changes the matching marker to `notified`
+only after delivery succeeds. A failed delivery or delivery-state commit throws
+into the existing durable hook-retry path; it never returns `pending` and never
+leaves a permanently deduplicated but unnotified gate. Decision lookup failures
+likewise retry the hook instead of suspending without an actionable marker.
+
 ## Consequences
 
 **Positive**
@@ -225,17 +251,12 @@ is a conscious decision, not an oversight.
   pending-marker guard, or making the enqueue idempotent per `(runId, nodeId)`)
   would tighten it if approve/reject contention ever becomes a concern.
 
-- **Best-effort `running` status write asserts meta-key health only at settle.**
-  `processRun` writes `setStatus(running)` best-effort (logs and proceeds on
-  failure) because the *checkpoint* (`ckpt` key) is the durability authority, not
-  the *status* (`meta` key). Under a narrow partial-failure mode where the meta
-  key specifically is failing writes while the ckpt key succeeds, a (possibly
-  side-effecting) resume slice runs before the meta-write fault surfaces — the
-  *settle* `setStatus` is checked and returns `err`, triggering a queue retry from
-  the last durable checkpoint. Bounded by the single-flight lock; the trade-off is
-  that meta-write health is asserted at settle time, not slice entry. Accepted:
-  treating the early write as fatal would fail-fast a run whose checkpoint is
-  perfectly durable.
+- **Superseded: best-effort `running` status write.** The earlier v1 trade-off
+  allowed execution after `setStatus(running)` failed. The 2026-08-22 ownership-
+  fencing amendment rejects that trade-off: the write is now a mandatory,
+  lease-guarded entry fence, and failure returns to the queue before any node
+  slice executes. This deliberately prefers fail-closed durability over running
+  against a checkpoint store whose lifecycle metadata just proved unwritable.
 
 ## References
 

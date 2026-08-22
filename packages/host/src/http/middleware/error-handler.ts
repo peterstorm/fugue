@@ -60,6 +60,7 @@ const detailsFor = (error: HostError): unknown =>
           "discovery-failed",
           "async-result-expired",
           "run-not-found",
+          "run-lease-lost",
         ),
       },
       () => undefined,
