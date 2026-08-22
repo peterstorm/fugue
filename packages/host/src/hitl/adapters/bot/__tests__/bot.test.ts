@@ -3,7 +3,7 @@
 // (approve/reject buttons, bot-added capture, auth), all with fakes.
 
 import { describe, it, expect, mock } from "bun:test";
-import { ok, err } from "@fuguejs/framework";
+import { nonEmptyString, ok, err } from "@fuguejs/framework";
 import type { DagId, RunId, NodeId, Result } from "@fuguejs/framework";
 import type { ReviewNotification } from "../../../types.js";
 import { tryRunTimestampMs } from "../../../types.js";
@@ -164,7 +164,7 @@ const suspendedRecord = (overrides: Partial<RunRecord> = {}): RunRecord => ({
   dagId: "lead-desk" as DagId,
   input: {},
   identity: { kind: "admin" },
-  status: { kind: "suspended", nodeId: "review" as NodeId, prompt: "ok?" },
+  status: { kind: "suspended", nodeId: "review" as NodeId, prompt: nonEmptyString("ok?") },
   checkpoint: "{}",
   createdAtMs: timestamp(1),
   updatedAtMs: timestamp(1),
@@ -399,7 +399,7 @@ describe("bot messages handler", () => {
     // arrives from the old card-A ("review"). Recording now would silently
     // approve gate B, which the reviewer never saw.
     const hitl = fakeHitl({
-      getRun: async () => ok(suspendedRecord({ status: { kind: "suspended", nodeId: "review-2" as NodeId, prompt: "ok?" } })),
+      getRun: async () => ok(suspendedRecord({ status: { kind: "suspended", nodeId: "review-2" as NodeId, prompt: nonEmptyString("ok?") } })),
     });
     const res = await handleBotActivity(
       botDeps(hitl),
@@ -535,7 +535,7 @@ describe("bot messages handler — approver authorization (FR-041, SC-006)", () 
   });
 
   it("oracle-close: an unauthorized clicker probing a MOVED-ON run gets the generic refusal, not 'moved on'", async () => {
-    const hitl = fakeHitl({ getRun: async () => ok(suspendedRecord({ status: { kind: "suspended", nodeId: "review-2" as NodeId, prompt: "ok?" } })) });
+    const hitl = fakeHitl({ getRun: async () => ok(suspendedRecord({ status: { kind: "suspended", nodeId: "review-2" as NodeId, prompt: nonEmptyString("ok?") } })) });
     const res = await handleBotActivity(
       botDeps(hitl),
       { authHeader: "Bearer x", activity: invokeActivity(approve, { name: "Mallory", aadObjectId: "aad-mallory" }) },

@@ -6,8 +6,9 @@
  * run-store-backed `jobLike` so a run can park and resume.
  *
  * `run` never throws: a framework run-failure (including an abort/timeout of an
- * execution slice) is mapped onto the `failed` outcome. The `err` channel is
- * reserved for faults BEFORE the slice can start (unknown DAG). A
+ * execution slice) is mapped onto the `failed` outcome. The `err` channel carries
+ * host infrastructure failures, including a durable checkpoint write that aborts
+ * the kernel, so the queue can retry from the last persisted state. A
  * CONTEXT-BUILD fault (host wiring: invalid tenant team, FR-040 unmapped agent
  * client) is logged at `error` with the actual message and settles as the
  * `failed` outcome — NOT `err` — so the recorded `FrameworkError` keeps the
@@ -15,7 +16,7 @@
  * drop it).
  */
 
-import { runResumableDagJob, ok, err, EXECUTOR_NODE_ID, isFrameworkError, safeErrorMessage } from "@fuguejs/framework";
+import { asNonEmptyString, runResumableDagJob, ok, err, EXECUTOR_NODE_ID, isFrameworkError, safeErrorMessage } from "@fuguejs/framework";
 import type {
   Result,
   FrameworkError,
@@ -144,22 +145,36 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
         phase = "execution";
 
         const outcome = await runResumableDagJob<unknown, unknown>(registered.dag, req.input, ctx, {
-          jobLike: req.jobLike,
+          jobLike: req.job.jobLike,
           onHumanReview: req.onHumanReview,
           onDecisionConsumed: req.onDecisionConsumed,
           ...(broker !== undefined && origin !== undefined ? { minting: { broker, origin } } : {}),
         });
 
         if (outcome.kind === "suspended") {
-          return ok({ kind: "suspended", nodeId: outcome.nodeId, prompt: outcome.prompt });
+          const prompt = asNonEmptyString(outcome.prompt);
+          if (prompt === undefined) {
+            throw new Error(`run suspended at '${outcome.nodeId}' with an empty review prompt`);
+          }
+          return ok({ kind: "suspended", nodeId: outcome.nodeId, prompt });
         }
         return ok({ kind: "completed", output: outcome.output });
       } catch (e) {
+        const checkpointFailure = req.job.checkpointFailure();
+        if (checkpointFailure !== null) {
+          logExecutionFailureWithoutThrowing(
+            logger,
+            "hitl: checkpoint persistence failed — retrying run slice",
+            { runId: req.runId, dagId: req.dagId, error: checkpointFailure.kind },
+          );
+          return err(checkpointFailure);
+        }
+
         // Setup phase: a host wiring fault (the factory's fail-closed throws).
         // Execution phase: runResumableDagJob threw on a genuine run failure
-        // (incl. abort). Map both to the `failed` outcome so the service
-        // settles the run — the `err` channel is reserved for host infra
-        // faults BEFORE the slice can start (unknown DAG) — and log at error
+        // (incl. abort). Checkpoint infrastructure failures returned above are
+        // the exception; all remaining throws become a terminal failed outcome
+        // with the original diagnostic and are logged at error
         // with the message: the recorded FrameworkError below carries that
         // message as the operator's durable diagnostic.
         logExecutionFailureWithoutThrowing(

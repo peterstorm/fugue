@@ -242,6 +242,27 @@ describe("createRunQueue — single-flight lock", () => {
     expect(fb.enqueued).toEqual([{ id: RUN, delayMs: 1500 }]); // …but preserved the wakeup
   });
 
+  it("C1: a throwing contention logger cannot prevent deferred re-enqueue", async () => {
+    const { redis } = fakeRedis({ [lockKey(RUN)]: "owner" });
+    const fb = fakeBackend();
+    const q = createRunQueue({
+      backend: fb.backend,
+      redis,
+      tenant: TENANT,
+      lockTtlSec: 300,
+      lockContentionDelayMs: 250,
+      logger: {
+        info() {},
+        error() {},
+        warn() { throw new Error("logger transport failed"); },
+      },
+    });
+    q.startWorker(okProcess);
+
+    await expect(fb.getWorker()(fb.job(RUN))).resolves.toBeUndefined();
+    expect(fb.enqueued).toEqual([{ id: RUN, delayMs: 250 }]);
+  });
+
   it("C1: the preserved wakeup is processed once the lock frees (decision not lost)", async () => {
     let processed = 0;
     const { redis, m } = fakeRedis({ [lockKey(RUN)]: "1" });

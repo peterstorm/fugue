@@ -202,7 +202,7 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
       if (!settled.ok) return settled;
       return ok(undefined);
     }
-    const jobLike = jobLikeResult.value;
+    const job = jobLikeResult.value;
     const onHumanReview = makeOnHumanReview({
       decisions,
       notifier,
@@ -223,7 +223,7 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
       input: record.input,
       identity: record.identity,
       signal: lease.signal,
-      jobLike,
+      job,
       onHumanReview,
       onDecisionConsumed,
     });
@@ -231,22 +231,10 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
     if (lease.signal.aborted) return err({ kind: "run-lease-lost", runId });
 
     if (!result.ok) {
-      // Pre-slice host failure (unknown DAG, run-store fault) — settle the run
-      // failed so a status poll surfaces it rather than leaving it stuck
-      // "running". (A mid-slice CONTEXT-BUILD fault never reaches this branch:
-      // the executor settles it as the `failed` outcome so the recorded
-      // FrameworkError keeps the factory's message — the mapping below would
-      // drop it.) The run has reached a durable terminal state, so the worker
-      // job is DONE: return `ok` (no queue retry — a retry would only no-op on
-      // the terminal guard above). Pre-settle transient failures (e.g. the
-      // `runStore.get` above) return `err` and ARE retried by the worker.
-      const settled = await runStore.setStatus(lease, { kind: "failed", error: asRunFailure(result.error) });
-      if (!settled.ok) {
-        // Could not even record the failure — leave it to the queue to retry.
-        logger?.error?.("hitl: failed to settle run failed", { runId, error: settled.error.kind });
-        return settled;
-      }
-      return ok(undefined);
+      // Host infrastructure failures, including checkpoint persistence, remain
+      // non-terminal. Returning Err makes the queue retry from the last durable
+      // checkpoint instead of recording an infrastructure blip as DAG failure.
+      return result;
     }
 
     return match(result.value)

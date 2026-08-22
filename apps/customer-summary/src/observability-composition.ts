@@ -230,7 +230,8 @@ export class FoundryRunSummaryObserver implements Observer {
       if (buf.lastActivityAt < cutoff) {
         this.buffered.delete(runId);
         this.evicted++;
-        fwLogger().warn(
+        logFrameworkWithoutThrowing(
+          "warn",
           `[FoundryRunSummaryObserver] evicted stale run buffer for runId '${String(runId)}' — no events within ${this.ttlMs}ms and run-end never arrived`,
         );
       }

@@ -20,7 +20,7 @@
  */
 
 import { z } from "zod";
-import { ok, err, tryRunId, tryNodeId, tryDagId } from "@fuguejs/framework";
+import { asNonEmptyString, ok, err, tryRunId, tryNodeId, tryDagId } from "@fuguejs/framework";
 import type { Result, RunId } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import type { TenantId } from "../../domain/tenant.js";
@@ -36,9 +36,9 @@ import type { RunRecord, RunStatus, RunTimestampMs } from "../types.js";
 // smart constructors guarding the HTTP/bot read paths, it must be PARSED, not
 // `as`-cast: a value that parses as JSON but is structurally wrong (unknown
 // status/identity `kind`, missing field) is rejected rather than flowing in to
-// drive an exhaustive match off a corrupt discriminant. The `failed` error is
-// kept loose (only its `kind` discriminant is asserted) so a `FrameworkError`
-// shape change never trips the reader; all of its fields round-trip intact.
+// drive an exhaustive match off corrupt data. A `failed` status parses the
+// complete current `FrameworkError` shape: missing required fields are rejected,
+// while loose objects preserve additive fields across rolling upgrades.
 //
 // Branded ids are refined through the SAME smart constructors the HTTP/bot
 // ingress paths use (`tryRunId`/`tryNodeId`/`tryDagId`), not a bare
@@ -57,12 +57,64 @@ const PersistedIdentitySchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("user"), sub: z.string(), azp: z.string() }),
 ]);
 
+const NodeIdSchema = brandedId(tryNodeId);
+const RunIdSchema = brandedId(tryRunId);
+const optionalUsage = z.object({ tokensIn: z.number(), tokensOut: z.number() }).optional();
+const retriability = z.enum(["retriable", "non-retriable"]);
+const frameworkErrorKinds = z.enum([
+  "validation", "retry-exhausted", "checkpoint-missing", "checkpoint-expired",
+  "checkpoint-corrupt", "checkpoint-version-mismatch", "checkpoint-write-failed",
+  "prompt-not-found", "cache-error", "node-crash", "cycle-detected", "aborted",
+  "rejected", "invalid-reroute", "transient", "missing-default-edge",
+  "output-unreachable-under-routing", "predicate-malformed", "duplicate-edge",
+  "root-expects-input", "source-has-incoming", "invalid-dag-input-edge",
+  "missing-capability", "llm-budget-exceeded", "infra-unreachable",
+  "policy-refusal", "downstream-denied",
+]);
+
+// Persisted run failures are control-plane data, not an opaque diagnostic blob.
+// Require every current FrameworkError variant's mandatory fields while keeping
+// objects loose so additive fields survive rolling upgrades.
+const FrameworkErrorSchema = z.discriminatedUnion("kind", [
+  z.looseObject({ kind: z.literal("validation"), nodeId: NodeIdSchema, message: z.string(), path: z.string().optional() }),
+  z.looseObject({ kind: z.literal("retry-exhausted"), nodeId: NodeIdSchema, attempts: z.number(), lastError: z.string(), rootErrorKind: frameworkErrorKinds.exclude(["retry-exhausted"]) }),
+  z.looseObject({ kind: z.literal("checkpoint-missing"), runId: RunIdSchema }),
+  z.looseObject({ kind: z.literal("checkpoint-expired"), runId: RunIdSchema, expiredAt: z.string() }),
+  z.looseObject({ kind: z.literal("checkpoint-corrupt"), runId: RunIdSchema, nodeId: NodeIdSchema.optional(), message: z.string() }),
+  z.looseObject({ kind: z.literal("checkpoint-version-mismatch"), runId: RunIdSchema, expected: z.string(), actual: z.string().optional() }),
+  z.looseObject({ kind: z.literal("checkpoint-write-failed"), runId: RunIdSchema, nodeId: NodeIdSchema, invalidRunId: z.string().optional(), invalidNodeId: z.string().optional(), message: z.string() }),
+  z.looseObject({ kind: z.literal("prompt-not-found"), promptName: z.string(), reason: z.string() }),
+  z.looseObject({ kind: z.literal("cache-error"), operation: z.string(), message: z.string(), failureClass: z.enum(["transient", "permanent"]).optional() }),
+  z.looseObject({ kind: z.literal("node-crash"), nodeId: NodeIdSchema, message: z.string(), stack: z.string().optional(), retriability, httpStatus: z.number().optional(), usage: optionalUsage }),
+  z.looseObject({ kind: z.literal("cycle-detected"), nodeIds: z.array(NodeIdSchema) }),
+  z.looseObject({ kind: z.literal("aborted"), reason: z.string(), usage: optionalUsage }),
+  z.looseObject({ kind: z.literal("rejected"), nodeId: NodeIdSchema, reason: z.string() }),
+  z.looseObject({ kind: z.literal("invalid-reroute"), targetNodeId: NodeIdSchema, message: z.string() }),
+  z.looseObject({ kind: z.literal("transient"), nodeId: NodeIdSchema, message: z.string(), httpStatus: z.number().optional(), usage: optionalUsage }),
+  z.looseObject({ kind: z.literal("missing-default-edge"), nodeId: NodeIdSchema }),
+  z.looseObject({ kind: z.literal("output-unreachable-under-routing"), outputNodeId: NodeIdSchema, missedFromNode: NodeIdSchema }),
+  z.looseObject({ kind: z.literal("predicate-malformed"), nodeId: NodeIdSchema, message: z.string() }),
+  z.looseObject({ kind: z.literal("duplicate-edge"), fromNodeId: NodeIdSchema, toNodeId: NodeIdSchema }),
+  z.looseObject({ kind: z.literal("root-expects-input"), nodeId: NodeIdSchema, message: z.string() }),
+  z.looseObject({ kind: z.literal("source-has-incoming"), nodeId: NodeIdSchema, message: z.string() }),
+  z.looseObject({ kind: z.literal("invalid-dag-input-edge"), edge: z.object({ from: z.string(), to: z.string() }), message: z.string() }),
+  z.looseObject({ kind: z.literal("missing-capability"), missing: z.array(z.object({ nodeId: NodeIdSchema, capability: z.string() })).min(1) }),
+  z.looseObject({ kind: z.literal("llm-budget-exceeded"), runId: RunIdSchema, nodeId: NodeIdSchema, cumulative: z.number(), budget: z.number() }),
+  z.looseObject({ kind: z.literal("infra-unreachable"), operation: z.enum(["mint", "exchange", "federation", "downstream"]), hop: z.string(), message: z.string() }),
+  z.looseObject({ kind: z.literal("policy-refusal"), scope: z.string(), agentClientId: z.string().optional() }),
+  z.looseObject({ kind: z.literal("downstream-denied"), resource: z.string(), reason: z.string() }),
+]);
+
 const RunStatusSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("queued") }),
   z.object({ kind: z.literal("running") }),
-  z.object({ kind: z.literal("suspended"), nodeId: brandedId(tryNodeId), prompt: z.string() }),
+  z.object({
+    kind: z.literal("suspended"),
+    nodeId: NodeIdSchema,
+    prompt: z.string().refine((value) => asNonEmptyString(value) !== undefined, { message: "prompt must be non-empty" }),
+  }),
   z.object({ kind: z.literal("completed"), output: z.unknown() }),
-  z.object({ kind: z.literal("failed"), error: z.looseObject({ kind: z.string() }) }),
+  z.object({ kind: z.literal("failed"), error: FrameworkErrorSchema }),
 ]);
 
 const RunMetaSchema = z.object({

@@ -2,7 +2,7 @@
 // driven by an in-memory RedisPort fake (no Redis).
 
 import { describe, it, expect } from "bun:test";
-import { ok, err } from "@fuguejs/framework";
+import { nonEmptyString, ok, err } from "@fuguejs/framework";
 import type { Result, RunId, NodeId, DagId, HumanAction } from "@fuguejs/framework";
 import type { HitlRedisPort, LogPort } from "../../../ports.js";
 import type { HostError } from "../../../domain/host-error.js";
@@ -204,7 +204,7 @@ describe("RedisRunStore", () => {
     const lease = await acquireLease(redis, r.runId);
 
     await store.saveCheckpoint(lease, '{"state":{"kind":"suspended"}}');
-    await store.setStatus(lease, { kind: "suspended", nodeId: "review" as NodeId, prompt: "ok?" });
+    await store.setStatus(lease, { kind: "suspended", nodeId: "review" as NodeId, prompt: nonEmptyString("ok?") });
 
     const got = await store.get(r.runId);
     if (!got.ok || !got.value) throw new Error("expected record");
@@ -263,6 +263,31 @@ describe("RedisRunStore", () => {
     const res = await store.get("run-1" as RunId);
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.kind).toBe("internal-invariant-violated");
+  });
+
+  it("rejects failed metadata whose FrameworkError is missing required fields", async () => {
+    const { redis, seed } = seedableRedis();
+    seed("fugue:tenant-a:hitl:run:run-1", JSON.stringify({
+      runId: "run-1", dagId: "d", input: {}, identity: { kind: "admin" },
+      status: { kind: "failed", error: { kind: "node-crash" } }, createdAtMs: 1, updatedAtMs: 1,
+    }));
+    const store = createRedisRunStore(redis, TENANT, cfg);
+
+    const result = await store.get("run-1" as RunId);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("internal-invariant-violated");
+  });
+
+  it("rejects a persisted suspended status with an empty prompt", async () => {
+    const { redis, seed } = seedableRedis();
+    seed("fugue:tenant-a:hitl:run:run-1", JSON.stringify({
+      runId: "run-1", dagId: "d", input: {}, identity: { kind: "admin" },
+      status: { kind: "suspended", nodeId: "review", prompt: "   " }, createdAtMs: 1, updatedAtMs: 1,
+    }));
+    const store = createRedisRunStore(redis, TENANT, cfg);
+
+    expect((await store.get("run-1" as RunId)).ok).toBe(false);
   });
 
   it("errs internal-invariant-violated on structurally-invalid metadata (valid JSON, bad shape)", async () => {
@@ -649,7 +674,7 @@ describe("RedisRunStore — active-run index (ADR-0074)", () => {
     const l3 = await acquireLease(redis, "r3" as RunId);
 
     // suspended is NON-terminal — still occupies a slot.
-    await store.setStatus(l1, { kind: "suspended", nodeId: "g" as NodeId, prompt: "p" });
+    await store.setStatus(l1, { kind: "suspended", nodeId: "g" as NodeId, prompt: nonEmptyString("p") });
     const cSusp = await store.countActiveRuns();
     expect(cSusp.ok && cSusp.value).toBe(3);
 

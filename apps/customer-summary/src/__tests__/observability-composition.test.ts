@@ -562,6 +562,27 @@ describe("FoundryRunSummaryObserver — orphan-buffer eviction (round-21 atl-2 /
     expect(summaries).toHaveLength(1);
   });
 
+  test("stale eviction still completes when the framework logger throws", () => {
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: () => { throw new Error("warn transport failed"); },
+      error: () => {},
+    });
+    const { sink } = recordingSink();
+    let t = 0;
+    const obs = new FoundryRunSummaryObserver(sink, {
+      ttlMs: 10,
+      sweepIntervalMs: 0,
+      now: () => t,
+    });
+    obs.observe(nodeStart("rThrowingLogger", "d1", "n1"));
+    t = 11;
+
+    expect(() => obs.evictStale()).not.toThrow();
+    expect(obs.evicted).toBe(1);
+  });
+
   test("an ACTIVE run spanning the TTL is never evicted mid-run (round-22 cr-1)", () => {
     const { sink, events } = recordingSink();
     let t = 0;

@@ -11,7 +11,7 @@
  */
 
 import { ok, err } from "@fuguejs/framework";
-import type { DagId, RunId, NodeId, FrameworkError, Result } from "@fuguejs/framework";
+import type { DagId, RunId, NodeId, FrameworkError, NonEmptyString, Result } from "@fuguejs/framework";
 
 /**
  * The serializable projection of an `AuthIdentity` persisted on a run. The live
@@ -54,7 +54,7 @@ export const tryRunTimestampMs = (value: unknown): Result<RunTimestampMs, string
 export type RunStatus =
   | { readonly kind: "queued" }
   | { readonly kind: "running" }
-  | { readonly kind: "suspended"; readonly nodeId: NodeId; readonly prompt: string }
+  | { readonly kind: "suspended"; readonly nodeId: NodeId; readonly prompt: NonEmptyString }
   | { readonly kind: "completed"; readonly output: unknown }
   | { readonly kind: "failed"; readonly error: FrameworkError };
 

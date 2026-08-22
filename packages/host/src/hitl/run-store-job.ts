@@ -7,9 +7,10 @@
  * The kernel reads `data` synchronously and writes via async `updateData`. We
  * deserialize the checkpoint once at construction and keep it in a local, so the
  * sync `data` getter is cheap; each `updateData` re-serializes and persists. A
- * persist failure is fatal to the run (it throws) — the kernel surfaces it as a
- * run failure and the queue can retry from the last good checkpoint, which is
- * strictly safer than silently advancing on an unpersisted state.
+ * persist failure aborts the kernel through JobLike's required throwing shell,
+ * while a side channel retains the typed `HostError` so the host executor can
+ * return it to the queue for retry from the last good checkpoint. It is never
+ * collapsed into a terminal DAG failure.
  *
  * Parse-don't-validate at the deserialization boundary: the checkpoint is the
  * highest-stakes value read back from Redis (its `state.kind` seeds the
@@ -31,7 +32,7 @@ import type { Result } from "@fuguejs/framework";
 import { ok, err } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
 import { internalInvariantViolated } from "../domain/host-error.js";
-import type { RunLease, RunStorePort } from "./ports.js";
+import type { RunExecutionJob, RunLease, RunStorePort } from "./ports.js";
 
 type Envelope = { state: DagPhase; context: DagMachineContextPersisted };
 
@@ -66,7 +67,7 @@ export const makeRunStoreJobLike = (
   runStore: RunStorePort,
   lease: RunLease,
   initialCheckpoint: string,
-): Result<JobLike<DagPhase, unknown, DagMachineContextPersisted>, HostError> => {
+): Result<RunExecutionJob, HostError> => {
   const runId = lease.runId;
   const parsed = tryFromJson(initialCheckpoint);
   if (!parsed.ok) {
@@ -83,19 +84,21 @@ export const makeRunStoreJobLike = (
   }
 
   let envelope: Envelope = parsed.value;
+  let failure: HostError | null = null;
 
-  return ok({
+  const jobLike: JobLike<DagPhase, unknown, DagMachineContextPersisted> = {
     get data(): { state: DagPhase; context: DagMachineContextPersisted } {
       return envelope;
     },
     async updateData(d: { state: DagPhase; context: DagMachineContextPersisted }): Promise<void> {
       const persisted = await runStore.saveCheckpoint(lease, toJson(d));
       if (!persisted.ok) {
-        // Fatal: the kernel must not advance on a checkpoint we failed to
-        // persist. Throwing surfaces as a run failure (handleKernelError) and
-        // the queue retries from the last durably-persisted state.
+        failure = persisted.error;
+        // JobLike has no Result channel. Throw only to abort the kernel; the
+        // executor reads `checkpointFailure` and restores the typed host error.
         throw new Error(
           `makeRunStoreJobLike: failed to persist checkpoint for run '${runId}': ${persisted.error.kind}`,
+          { cause: persisted.error },
         );
       }
       envelope = d;
@@ -109,5 +112,7 @@ export const makeRunStoreJobLike = (
       // is a tracked follow-up (ADR-0060 Consequences); it is not required for
       // suspend/resume correctness.
     },
-  });
+  };
+
+  return ok({ jobLike, checkpointFailure: () => failure });
 };

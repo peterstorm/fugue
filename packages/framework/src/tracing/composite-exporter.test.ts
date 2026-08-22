@@ -228,6 +228,31 @@ describe("CompositeSpanExporter — fault isolation", () => {
     await expect(composite.shutdown()).resolves.toBeUndefined();
   });
 
+  it("a throwing framework logger cannot wedge export or reject lifecycle methods", async () => {
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: () => { throw new Error("warn transport failed"); },
+      error: () => { throw new Error("error transport failed"); },
+    });
+    const failed = new FakeExporter(
+      { kind: "result-failed" },
+      { async: true, rejectFlush: true, rejectShutdown: true },
+    );
+    const thrown = new FakeExporter({ kind: "throw" });
+    const composite = new CompositeSpanExporter([failed, thrown], 50);
+
+    await expect(exportOnce(composite, [fakeSpan("s")])).resolves.toMatchObject({
+      code: ExportResultCode.FAILED,
+    });
+    await expect(composite.forceFlush()).resolves.toBeUndefined();
+    await expect(composite.shutdown()).resolves.toBeUndefined();
+    expect(composite.childFailureCounts).toEqual([
+      { index: 0, failures: 1 },
+      { index: 1, failures: 1 },
+    ]);
+  });
+
   it("one child returning FAILED does not stop others; aggregate is SUCCESS", async () => {
     const bad = new FakeExporter({ kind: "result-failed" });
     const good = new FakeExporter();

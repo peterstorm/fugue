@@ -1,6 +1,7 @@
 import type { Observer } from "./observer.js";
 import type { ObserverEvent } from "../types/events.js";
 import { fwLogger } from "../logger.js";
+import { safeErrorMessage, safeErrorStack } from "../types/safe-error.js";
 
 /**
  * When `OBSERVER_STRICT=1` is set, dispatchEvent rethrows any observer failure
@@ -36,32 +37,45 @@ export function __clearStrictFailure(): void {
  * continue). Under `OBSERVER_STRICT=1` the error is re-thrown after logging
  * so tests surface programming bugs in observer implementations.
  */
+const logObserverFailureWithoutThrowing = (
+  message: string,
+  error: unknown,
+): void => {
+  const diagnostic = safeErrorStack(error) ?? safeErrorMessage(error);
+  try {
+    fwLogger().error(message, diagnostic);
+  } catch {
+    // Observer failures remain isolated even when the diagnostic transport fails.
+  }
+};
+
 export function dispatchEvent(observer: Observer, event: ObserverEvent): void {
   try {
     const result: unknown = observer.observe(event);
     // Guard: if observe() returns a thenable despite void signature, catch its rejection
     // to prevent unhandled promise rejections from crashing the process.
     if (result !== null && result !== undefined && typeof (result as { catch?: unknown }).catch === "function") {
-      (result as Promise<void>).catch((e) => {
-        fwLogger().error(
+      (result as Promise<void>).catch((error: unknown) => {
+        const originalMessage = safeErrorMessage(error);
+        logObserverFailureWithoutThrowing(
           `[observer] async observe() rejected for ${event.type} — Observer.observe must be synchronous:`,
-          e instanceof Error ? e.message : e,
+          error,
         );
         if (isStrictMode()) {
-          const error = e instanceof Error ? e : new Error(String(e));
-          error.message = `[OBSERVER_STRICT] Observer.observe() returned a rejected Promise for event '${event.type}'. ` +
-            `Observer.observe MUST be synchronous. Original: ${error.message}`;
-          // Cannot throw from the already-returned synchronous dispatchEvent;
-          // record it so tests can assert via `__lastStrictFailure()`.
-          lastStrictFailure = error;
+          // Always construct a fresh Error: an arbitrary rejected value may have
+          // hostile prototype/message behavior and must never break this handler.
+          lastStrictFailure = new Error(
+            `[OBSERVER_STRICT] Observer.observe() returned a rejected Promise for event '${event.type}'. ` +
+              `Observer.observe MUST be synchronous. Original: ${originalMessage}`,
+          );
         }
       });
     }
-  } catch (e) {
-    fwLogger().error(
+  } catch (error) {
+    logObserverFailureWithoutThrowing(
       `[observer] dispatchEvent failed for ${event.type}:`,
-      e instanceof Error && e.stack ? e.stack : e,
+      error,
     );
-    if (isStrictMode()) throw e;
+    if (isStrictMode()) throw error;
   }
 }

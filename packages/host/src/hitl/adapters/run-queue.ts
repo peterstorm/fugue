@@ -152,7 +152,7 @@ export const createRunQueue = (deps: RunQueueDeps): RunQueueHandle => {
           // so re-enqueue (deferred) to guarantee the decision is acted on once
           // the lock frees. A bare drop here is the lost-wakeup that strands a
           // decided run.
-          logger?.warn?.("hitl: run already in flight — deferring wakeup", { runId });
+          logWithoutThrowing(logger, "warn", "hitl: run already in flight — deferring wakeup", { runId });
           const requeued = await enqueue(runId, { delayMs: contentionDelayMs });
           if (!requeued.ok) {
             throw new Error(`hitl: failed to defer wakeup for ${runId}: ${requeued.error.kind}`, { cause: requeued.error });

@@ -1,10 +1,14 @@
 import { witness, RN } from "./_freshness-helpers.js";
-import { describe, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import fc from "fast-check";
 import { RecordingObserver, createObserver } from "../observer/observer.js";
 import { dispatchEvent } from "../observer/buffered.js";
 import type { ObserverEvent } from "../types/events.js";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
+import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
+
+
+afterEach(() => __resetFrameworkLogger());
 
 // ---------------------------------------------------------------------------
 // Arbitrary ObserverEvent generator — covers all 13 discriminants
@@ -97,6 +101,22 @@ describe("Observer property tests", () => {
       }),
       { numRuns: 200 },
     );
+  });
+
+  it("throwing diagnostic transports cannot break sync or async observer isolation", async () => {
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: () => {},
+      error: () => { throw new Error("logger transport failed"); },
+    });
+    const event: ObserverEvent = { type: "run-start", runId: rid, dagId: did, timestamp: ts };
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+
+    expect(() => dispatchEvent({ observe: () => { throw revoked.proxy; } }, event)).not.toThrow();
+    expect(() => dispatchEvent({ observe: (() => Promise.reject(revoked.proxy)) as never }, event)).not.toThrow();
+    await Promise.resolve();
   });
 
   it("dispatchEvent with throwing observer does not propagate", () => {

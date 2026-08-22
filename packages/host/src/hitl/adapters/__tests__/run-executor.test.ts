@@ -16,6 +16,7 @@ import { z } from "zod";
 import { markTeam } from "../../../domain/auth.js";
 import {
   ok,
+  err,
   toJson,
   defineDag,
   DAG_INPUT,
@@ -122,7 +123,7 @@ const timestamp = (value: number): RunTimestampMs => {
 };
 
 /** Seed a real checkpoint for `dag`+`input` and wrap it in a run-store-backed jobLike. */
-const seedJobLike = async (dag: DagDef, input: unknown) => {
+const seedJobLike = async (dag: DagDef, input: unknown, failCheckpoint = false) => {
   const compiled = compileDagToMachine(dag, input);
   if (!compiled.ok) throw new Error("compile failed");
   const checkpoint = toJson({
@@ -142,7 +143,10 @@ const seedJobLike = async (dag: DagDef, input: unknown) => {
   };
   await store.create(record);
   const lease = issueRunLease(record.runId, "test-owner", new AbortController().signal);
-  const jl = makeRunStoreJobLike(store, lease, checkpoint);
+  const runStore = failCheckpoint
+    ? { ...store, saveCheckpoint: async () => err({ kind: "redis-unavailable" as const, operation: "saveCheckpoint" }) }
+    : store;
+  const jl = makeRunStoreJobLike(runStore, lease, checkpoint);
   if (!jl.ok) throw new Error("jobLike build failed");
   return jl.value;
 };
@@ -153,7 +157,7 @@ const runReq = (dag: DagDef, jobLike: Awaited<ReturnType<typeof seedJobLike>>, i
   input,
   identity: ADMIN,
   signal: new AbortController().signal,
-  jobLike,
+  job: jobLike,
   onHumanReview: async () => ({ kind: "approve" }) as never,
   onDecisionConsumed: async () => {},
 });
@@ -181,6 +185,17 @@ describe("createRunExecutor — channel split (err vs failed)", () => {
       expect(res.value.kind).toBe("completed");
       if (res.value.kind === "completed") expect(res.value.output).toBe("done");
     }
+  });
+
+  it("a checkpoint persistence failure stays on the typed host error channel for queue retry", async () => {
+    const dag = singleNodeDag((async () => ok("done")) as never);
+    const reg = registered(dag);
+    const exec = createRunExecutor({ sharedInfra: sharedInfra(), getRegisteredDag: () => reg, agentClientMap: { "exec-dag": "fugue-agent-exec" } });
+    const jobLike = await seedJobLike(dag, null, true);
+
+    const result = await exec.run(runReq(dag, jobLike, null));
+
+    expect(result).toEqual(err({ kind: "redis-unavailable", operation: "saveCheckpoint" }));
   });
 
   it("a genuine run-FAILURE is the `failed` outcome on the OK channel (service settles it)", async () => {

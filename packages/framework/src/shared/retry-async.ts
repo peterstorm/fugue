@@ -21,7 +21,8 @@ interface RetryOpts {
  *
  * Delay between attempt `i` and `i+1` is `baseDelayMs * (i + 1)`.
  *
- * NOTE: this variant throws the raw last error on exhaustion.
+ * On exhaustion, the last `Error` is thrown as-is; a non-`Error` thrown value
+ * is wrapped in an `Error` so callers always receive the documented shape.
  */
 export const retryAsync = async <T>(
   fn: () => Promise<T>,

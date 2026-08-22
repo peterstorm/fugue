@@ -235,12 +235,12 @@ const realExecutor = (dag: DagDef): RunExecutorPort => ({
   async run(req: RunExecutionRequest): Promise<Result<RunExecOutcome, HostError>> {
     try {
       const outcome = await runResumableDagJob<unknown, unknown>(dag, req.input, makeCtx(), {
-        jobLike: req.jobLike,
+        jobLike: req.job.jobLike,
         onHumanReview: req.onHumanReview,
         onDecisionConsumed: req.onDecisionConsumed,
       });
       if (outcome.kind === "suspended") {
-        return ok({ kind: "suspended", nodeId: outcome.nodeId, prompt: outcome.prompt });
+        return ok({ kind: "suspended", nodeId: outcome.nodeId, prompt: nonEmptyString(outcome.prompt) });
       }
       return ok({ kind: "completed", output: outcome.output });
     } catch (e) {
@@ -338,7 +338,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     expect(parked.status.kind).toBe("suspended");
     if (parked.status.kind === "suspended") {
       expect(parked.status.nodeId).toBe("review" as NodeId);
-      expect(parked.status.prompt).toBe("Approve the draft?");
+      expect(parked.status.prompt).toBe(nonEmptyString("Approve the draft?"));
     }
     expect(notif.sent).toHaveLength(1);
     expect(notif.sent[0]!.nodeId).toBe("review" as NodeId);
@@ -630,11 +630,10 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     expect(store.runs.get(runId)!.status.kind).toBe("failed"); // settled terminal
   });
 
-  it("returns err (queue retry) when settling `failed` after a host-infra failure also fails to write", async () => {
-    // service.ts:211-226 — the executor returns a host-infra `err`, so the run
-    // must settle `failed`; if that settle `setStatus` ITSELF fails there is no
-    // durable terminal state, so processRun returns `err` and the worker retries
-    // rather than acking a run still stuck `running`.
+  it("returns executor infrastructure errors for queue retry without terminalizing the run", async () => {
+    // A typed executor Err (including checkpoint persistence failure) is not a
+    // DAG outcome. Keep the run non-terminal at its running entry fence and let
+    // the queue retry from the last durable checkpoint.
     const dag = twoWaveDag();
     const store = inMemoryRunStore();
     const queue = inMemoryRunQueue();
@@ -648,24 +647,25 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
         return err({ kind: "internal-invariant-violated", message: "infra boom", context: {} });
       },
     };
-    // Fail only the terminal `failed` write; the best-effort `running` write succeeds.
-    const failingStore: RunStorePort = {
+    let terminalWrites = 0;
+    const trackingStore: RunStorePort = {
       ...store.port,
       async setStatus(lease, status: RunStatus) {
-        if (status.kind === "failed") return err({ kind: "redis-unavailable", operation: "setStatus(failed)" });
+        if (status.kind === "failed") terminalWrites++;
         return store.port.setStatus(lease, status);
       },
     };
     const service = createHitlRunService({
-      runStore: failingStore, runQueue: queue.port, decisions: dec.port, tenant: TENANT,
+      runStore: trackingStore, runQueue: queue.port, decisions: dec.port, tenant: TENANT,
       notifier: notif.port, executor, clock: () => 1_000, newRunId: () => mkRunId(`run-${++counter}`),
     });
 
     const started = await service.startRun("test-dag" as DagId, null, ADMIN);
     if (!started.ok) throw new Error("startRun failed");
     const res = await service.processRun(leaseFor(started.value.runId));
-    expect(res.ok).toBe(false);
-    if (!res.ok) expect(res.error.kind).toBe("redis-unavailable");
+    expect(res).toEqual(err({ kind: "internal-invariant-violated", message: "infra boom", context: {} }));
+    expect(terminalWrites).toBe(0);
+    expect(store.runs.get(started.value.runId)?.status.kind).toBe("running");
   });
 
   it("returns err (queue retry) when folding a `completed` outcome into the store fails", async () => {
@@ -917,7 +917,7 @@ describe("HitlRunService — per-tenant maxQueuedRuns gate (ADR-0074)", () => {
     const { service, store } = gateService(1);
     const first = await service.startRun("test-dag" as DagId, null, ADMIN);
     expect(first.ok).toBe(true);
-    if (first.ok) await store.port.setStatus(leaseFor(first.value.runId), { kind: "suspended", nodeId: "g" as NodeId, prompt: "p" });
+    if (first.ok) await store.port.setStatus(leaseFor(first.value.runId), { kind: "suspended", nodeId: "g" as NodeId, prompt: nonEmptyString("p") });
     // Still at the ceiling — a parked run is outstanding, so the next is refused.
     expect((await service.startRun("test-dag" as DagId, null, ADMIN)).ok).toBe(false);
   });

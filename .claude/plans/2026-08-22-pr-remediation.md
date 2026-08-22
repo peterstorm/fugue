@@ -1,149 +1,121 @@
-# PR Remediation Plan — Adjudicated Standalone Review
+# PR Remediation — 2026-08-22
 
-- **Date:** 2026-08-22
-- **Branch:** `feat/f6-file-durable-runtime`
-- **Review authority:** `.claude/reviews/review-and-fix-runs/standalone-review-20260822T141150Z/result.json`
-- **Review result digest:** `583c0f8503bc89cc633e233ed164dc6e074bc258765f236dfcc8ab4da29eff6c`
-- **Frozen review scope:** the exact 431-path `result.json.scope` array. The plan itself is already in scope.
-- **Registered support paths:** `docs/adr/0060-hitl-suspend-resume-primitive.md` (the fixes supersede its accepted best-effort semantics) and `packages/host/src/hitl/run-store-job.ts` (the checkpoint writer must receive the lease capability, but this existing file was outside the frozen scope).
-- **Remediation runs:** `remediation-20260822T150208Z` blocked because the second support path was initially omitted and is retained as evidence; `remediation-20260822T150322Z` superseded it and installed verified index digest `db30ff636074e845aa78b9df5f21ef90a9cc48c9e6cbfae48f9cc2438e7e8fdd`.
-- **Baseline commit:** `7055231`
+## Authority
 
-## Architectural approach
+- Branch: `feat/f6-file-durable-runtime`
+- Review run: `.claude/reviews/review-and-fix-runs/2026-08-22T150849Z-01a02a04-standalone-review`
+- Canonical result: `result.json` digest `b41fb3a2a37ee4a30de2e2a920ddd57ee93b7da42bd992fbd57f7bd06915ca44`
+- Frozen review scope: the 433 paths enumerated by canonical `result.json.scope`
+- Baseline: relevant framework/app/host suites green (218 tests); workspace typecheck green
 
-The durable HITL worker will carry an opaque, run-bound lease capability from queue acquisition through the service, checkpoint job, executor, and run store. Redis checkpoint/status writes will atomically compare the live lock token before committing. Lease-renewal failure will abort the execution slice immediately, and stale workers will be unable to persist checkpoints or lifecycle outcomes even if user code is slow to observe cancellation.
+## Exact remediation scope
 
-HITL Redis transaction requirements will be parsed once at host composition into a narrow required-capability type. Missing compare/transaction operations will therefore fail during composition, not during a worker slice. Human-review notification delivery will become durable state (`notification-required` versus `notified`) so failed deliveries retry without making an unresolvable gate or suppressing all future notification attempts.
+Planned production paths:
+
+- `packages/framework/src/observer/dispatch.ts`
+- `packages/framework/src/tracing/composite-exporter.ts`
+- `packages/framework/src/shared/retry-async.ts`
+- `packages/framework/src/types/errors.ts`
+- `apps/customer-summary/src/observability-composition.ts`
+- `packages/host/src/domain/circuit-breaker.ts`
+- `packages/host/src/hitl/types.ts`
+- `packages/host/src/hitl/ports.ts`
+- `packages/host/src/hitl/run-store-job.ts`
+- `packages/host/src/hitl/adapters/run-executor.ts`
+- `packages/host/src/hitl/adapters/run-store.ts`
+- `packages/host/src/hitl/adapters/decision-store.ts`
+- `packages/host/src/hitl/adapters/run-queue.ts`
+- `packages/host/src/hitl/service.ts`
+- `packages/host/src/http/handlers/runs.ts`
+- `docs/adr/0060-hitl-suspend-resume-primitive.md`
+
+Planned regression paths:
+
+- `packages/framework/src/__tests__/observer-property.test.ts`
+- `packages/framework/src/tracing/composite-exporter.test.ts`
+- `apps/customer-summary/src/__tests__/observability-composition.test.ts`
+- `packages/host/src/hitl/__tests__/run-store-job.test.ts`
+- `packages/host/src/hitl/__tests__/service.test.ts`
+- `packages/host/src/hitl/adapters/__tests__/run-executor.test.ts`
+- `packages/host/src/hitl/adapters/__tests__/redis-stores.test.ts`
+- `packages/host/src/hitl/adapters/__tests__/run-queue.test.ts`
+- `packages/host/src/__tests__/handlers/hitl-http.test.ts`
+
+This plan path is itself in the frozen review scope.
 
 ## Mandatory surviving critical findings
 
-### `code-reviewer-1` — BullMQ rejects the default queue name
+### C1 — `silent-failure-hunter-1`: observer isolation can be broken by diagnostics
 
-**Evidence:** `packages/host/src/hitl/adapters/run-queue.ts:89` defaults to `fugue:${tenant}:hitl:runs`; BullMQ 5.76.10 rejects `:` in queue names.
+`packages/framework/src/observer/dispatch.ts:45`
 
-**Fix:**
-- Derive a colon-free tenant-qualified default queue name.
-- Parse custom names at construction and reject empty/colon-containing values before backend construction.
-- Add a regression that passes the derived name through the real BullMQ `Queue` constructor without requiring a live Redis operation.
+Fix: centralize observer-failure rendering through total `safeErrorMessage` / `safeErrorStack` and route framework logging through a non-throwing helper. Preserve strict-mode semantics while ensuring production sync failures, async rejections, hostile caught values, and hostile logger transports cannot escape the observer boundary.
 
-### `code-reviewer-2` — decision lookup failure strands an unmarked run
+Regression: synchronous throw and asynchronous rejection with a throwing framework logger; hostile rejection rendering remains total.
 
-**Evidence:** `human-review-hook.ts` returns `pending` on `getDecision` error before creating a pending marker or notification; reconciliation cannot wake an undecided suspended run and approval cannot resolve a missing marker.
+### C2 — `silent-failure-hunter-2`: composite exporter can wedge or reject when logging throws
 
-**Fix:** Throw a retriable hook failure after total best-effort diagnostics. Never return `pending` unless the pending-review and notification-delivery invariants have been established.
+`packages/framework/src/tracing/composite-exporter.ts:73`
 
-### `code-reviewer-3` — failed first notification is never retried
+Fix: make every export/lifecycle/post-settlement diagnostic best-effort and non-throwing without changing settlement accounting, rate limiting, aggregate results, or lifecycle no-reject contracts.
 
-**Evidence:** the pending marker remains after a notification error, so later dispatches see an existing marker and suppress delivery forever.
+Regression: failed result, synchronous throw, async callback failure, `forceFlush`, and `shutdown` all settle under a throwing framework logger.
 
-**Fix:** Replace the boolean first-park protocol with durable notification state. `preparePending` returns either `notification-required` with an opaque marker token or `notified`; successful delivery atomically transitions the matching marker to `notified`. Delivery/commit failure throws, leaving `notification-required` retriable. Add failure-then-success and successful-dedup tests.
+### C3 — `type-design-analyzer-1`: persisted failed status admits malformed `FrameworkError`
 
-### `code-reviewer-4` and `silent-failure-hunter-2` — lease loss does not stop execution
+`packages/host/src/hitl/adapters/run-store.ts:65`
 
-**Evidence:** renewal failure is only inspected after `processRun` resolves, allowing the expired owner to continue while a successor acquires the run.
+Fix: replace the discriminant-only persisted error schema with an exhaustive structural `FrameworkError` schema that requires every variant's mandatory fields while preserving optional fields and the existing closed discriminant. Add corrupt-metadata pins for missing required fields and round-trip pins for representative valid variants.
 
-**Fix:**
-- Create an `AbortController` per acquired lease and abort immediately on `ok(false)`, typed renewal error, or thrown renewal failure.
-- Pass the lease signal through `processRun` and `RunExecutionRequest` to the executor’s node context, composed with the slice timeout.
-- Check cancellation before every durable fold and make checkpoint/status writes ownership-fenced.
-- Render/log renewal failures through total, best-effort diagnostics.
-- Add active-slice tests for false/error/throw renewal outcomes proving immediate abort and queue retry.
+Panel note: the intent lens argued discriminant-only forward compatibility, but reproduction and blast-radius upheld the finding; canonical adjudication requires the strict parse boundary.
 
-### `silent-failure-hunter-1` — failed running-status write is ignored
+### C4 — `comment-analyzer-1`: DecisionStore key-layout comment is stale
 
-**Evidence:** `processRun` logs `setStatus(running)` failure and executes side-effecting DAG work anyway.
+`packages/host/src/hitl/adapters/decision-store.ts:11`
 
-**Fix:** Make the ownership-fenced running transition mandatory and return its typed error before constructing/executing the slice. Add a test proving executor invocation remains zero.
+Fix: document `preparePending` and the two persisted pending-marker states (`notification-required:<marker>`, `notified:<marker>`) exactly.
 
-### `pr-test-analyzer-1` — renewal failure branches lack regression coverage
+### C5/C6 — `comment-analyzer-2` and `architecture-tech-lead-1`: checkpoint persistence failure is falsely documented and terminalized
 
-**Fix:** Add deterministic async tests for `compareAndExpire` returning `ok(false)`, returning `err`, and throwing while `processRun` is pending. Assert the lease signal aborts, the job rejects for retry, and release remains ownership-checked.
+`packages/host/src/hitl/run-store-job.ts:10,91`
 
-### `type-design-analyzer-1` — status writes carry no owner token
+Fix: deepen the run-store JobLike seam so it records the typed `HostError` produced by `saveCheckpoint` before throwing through the framework's required `JobLike` shell. Thread a read-only checkpoint-failure channel through `RunExecutionRequest`; the production executor returns that typed infrastructure failure on `Result.err`, and `processRun` returns it to the worker for queue retry instead of writing terminal `failed`. The local checkpoint remains at the last durable state.
 
-**Evidence:** `RunStorePort.setStatus(runId, status)` cannot distinguish the active owner from an expired worker.
-
-**Fix:**
-- Introduce an opaque `RunLease` capability containing the run identity, random owner token, and cancellation signal.
-- Change worker-only checkpoint/status methods to accept the lease instead of a free run id.
-- Implement Redis writes with an atomic compare-live-token-and-set transaction.
-- Add stale-owner adapter tests proving a successor token prevents checkpoint and terminal writes.
-
-### `comment-analyzer-1` — hostile clock diagnostics can escape
-
-**Evidence:** `readClock` catches the clock but then performs unsafe coercion and unguarded replaceable logger calls.
-
-**Fix:** Use total `safeErrorMessage` rendering and a non-throwing framework-logger helper. Add a hostile thrown-value plus throwing-logger regression for `observe` and `evictStale`.
+Regression: JobLike records the typed failure without advancing, production executor returns the original `redis-unavailable`, and service leaves the run non-terminal and returns `err` for retry.
 
 ## Advisory dispositions
 
-### Accepted — `pr-test-analyzer-2`
+### Accepted
 
-Add the missing negative reconciliation test: a suspended run with no durable decision is skipped and not enqueued. This is low-risk and directly protects queue-churn behavior touched by the critical hook fixes.
+1. `code-reviewer-1` — use the existing non-throwing framework-log helper in `FoundryRunSummaryObserver.evictStale`; add throwing-logger eviction regression.
+2. `code-reviewer-2` — duplicate surface of C2; accepted and fully covered by the mandatory composite-exporter fix/tests.
+3. `pr-test-analyzer-1` — make lock-contention logging non-throwing and prove deferred enqueue still occurs under a throwing logger.
+4. `type-design-analyzer-2` — carry `NonEmptyString` in host suspended statuses/outcomes and parse persisted prompts with the framework smart constructor so an empty human gate is unrepresentable.
+5. `comment-analyzer-3` — correct `retryAsync` JSDoc: existing `Error` is rethrown; non-Error values are wrapped.
+6. `comment-analyzer-4` — describe the circuit threshold as the maximum failures allowed; opening occurs on the next failure.
+7. `code-simplifier-1` — extract the shared run-id parsing, store lookup, not-found/error mapping, and authorization precondition used by both run handlers.
+8. `code-simplifier-3` — remove ephemeral standalone-review provenance from the framework error-kind invariant comment while retaining the durable compile-coverage rationale.
 
-### Accepted — `comment-analyzer-2`
+### Deferred
 
-Update `startRun` documentation from “persist + enqueue” to truthful “persist + request wakeup; reconciliation retries wakeup failures.” This documents existing accepted durability semantics.
+1. `architecture-tech-lead-2` — the in-memory RunStore cannot truthfully verify ownership from `RunLease` alone because lease authority lives in the queue/Redis lock. Correct parity requires a shared lease-registry seam used by queue and store, not a fake-only token heuristic. Defer to a dedicated deepening that can redesign both adapters and their acquisition API without weakening the opaque capability contract; production Redis fencing already has stale-owner parity tests.
+2. `code-simplifier-2` — the duplication is real, but the supervisor adapter multiplexes connectivity, data, pub/sub, privileged ACL, and audit-stream capabilities while the worker adapter owns only data connectivity. A safe extraction changes the ioredis composition seam and needs focused integration coverage for both binaries; defer rather than mix a high-blast-radius interface refactor into correctness remediation.
 
-### Accepted — `comment-analyzer-3`
+### Dismissed
 
-Correct the observability test by making the clock hostile before the assertion and pinning the intended no-throw/drop behavior. The current comment and setup disagree.
-
-### Accepted — `architecture-tech-lead-1`
-
-Introduce a narrow required HITL Redis transaction-capability type and parse the broad optional `RedisPort` once during host composition. Queue, decision, and run-store adapters receive only a construction-proven capability; missing renewal/decision/fenced-write operations fail before worker startup. This is practical in scope and directly supports the mandatory invariants.
-
-### Accepted — `code-simplifier-1`
-
-Extract the duplicated run-status timestamp parsing/error construction in `run-store.ts` into one file-local Result helper while modifying both status adapters for lease fencing.
-
-### Accepted — `code-simplifier-2`
-
-Precompute the optional actor patch once in `parseDecision` and reuse it in all successful `HumanAction` branches. This is behavior-preserving, local, and independently test-covered by the existing handler suite.
+1. `type-design-analyzer-3` — `HITL_LOCK_TTL_SEC` is parsed by `domain/config.ts` as an integer `>= 1` before the sole production call to `createRunQueue`; contention delay and attempt count are private defaults with no untrusted production input. Branded constructor types would not close a reachable invalid production state in the reviewed code.
 
 ## Refuted critical audit
 
-`result.json.refuted_critical_findings` is empty. The Refutation Panel upheld all nine critical findings (eight unanimously across reproduction/intent/security; the test-gap finding was upheld by reproduction/security and uncertain only under intent). No refuted finding will be fixed.
-
-## Planned files
-
-- `.claude/plans/2026-08-22-pr-remediation.md`
-- `docs/adr/0060-hitl-suspend-resume-primitive.md` (registered remediation support path)
-- `packages/host/package.json`, `bun.lock`
-- `packages/host/src/ports.ts`
-- `packages/host/src/adapters/redis-connectivity.ts`
-- `packages/host/src/main-supervisor.ts`
-- `CONTEXT.md`
-- `packages/host/src/domain/host-error.ts`
-- `packages/host/src/host.ts`
-- `packages/host/src/__tests__/fixtures/host-boot-fakes.ts`
-- `packages/host/src/hitl/ports.ts`
-- `packages/host/src/hitl/run-store-job.ts` (registered remediation support path)
-- `packages/host/src/hitl/service.ts`
-- `packages/host/src/hitl/human-review-hook.ts`
-- `packages/host/src/hitl/adapters/run-queue.ts`
-- `packages/host/src/hitl/adapters/run-store.ts`
-- `packages/host/src/hitl/adapters/decision-store.ts`
-- `packages/host/src/hitl/adapters/run-executor.ts`
-- relevant existing HITL adapter/service/hook/executor/job tests
-- `packages/host/src/http/handlers/runs.ts`, `packages/host/src/http/middleware/error-handler.ts`, and existing handler tests
-- `apps/customer-summary/src/observability-composition.ts`
-- `apps/customer-summary/src/__tests__/observability-composition.test.ts`
-
-All listed paths belong to the frozen review scope except the two explicitly registered support paths above.
+Canonical `result.json.refuted_critical_findings` is empty. All six critical findings survived the registered panel. The panel's single contrary lens on C3 is retained above; it did not meet the two-lens refutation threshold.
 
 ## Validation
 
-1. Establish green baseline before implementation/distillation:
-   - `bun test packages/host/src/hitl/__tests__/human-review-hook.test.ts packages/host/src/hitl/__tests__/run-store-job.test.ts packages/host/src/hitl/__tests__/service.test.ts packages/host/src/hitl/adapters/__tests__/redis-stores.test.ts packages/host/src/hitl/adapters/__tests__/run-executor.test.ts packages/host/src/hitl/adapters/__tests__/run-queue.test.ts`
+1. Focused regression suites:
+   - `bun test packages/framework/src/__tests__/observer-property.test.ts packages/framework/src/tracing/composite-exporter.test.ts packages/framework/src/__tests__/retry-async.test.ts`
    - `bun test apps/customer-summary/src/__tests__/observability-composition.test.ts`
-2. Focused tests after each coherent move.
-3. `bun run --filter @fuguejs/host typecheck`
-4. `bun run --filter @fuguejs/customer-summary typecheck`
-5. `bun run --filter @fuguejs/host test`
-6. `bun run --filter customer-summary test`
-7. `bun run typecheck`
-8. `bun test`
-9. `bun scripts/check-doc-links.ts`
-10. Distill apply-mode pass only after the affected baseline is green; rerun covering tests after each simplification.
-11. Registered remediation must validate and atomically install the exact authorized index before commit/push.
+   - `bun test packages/host/src/hitl/__tests__/run-store-job.test.ts packages/host/src/hitl/adapters/__tests__/run-executor.test.ts packages/host/src/hitl/__tests__/service.test.ts packages/host/src/hitl/adapters/__tests__/redis-stores.test.ts packages/host/src/hitl/adapters/__tests__/run-queue.test.ts packages/host/src/__tests__/handlers/hitl-http.test.ts packages/host/src/__tests__/circuit-breaker.test.ts`
+2. Workspace typecheck: `bun run typecheck`
+3. Full workspace tests: `bun test`
+4. Documentation links: `bun run check:docs`
+5. Registered remediation validation and exact-index installation through the orchestration façade.

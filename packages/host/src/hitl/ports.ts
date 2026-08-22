@@ -17,6 +17,7 @@ import type {
   JobLike,
   DagPhase,
   DagMachineContextPersisted,
+  NonEmptyString,
 } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
@@ -143,13 +144,19 @@ export interface DecisionStorePort {
 /**
  * The outcome of executing (or resuming) a run: a settled result the service
  * folds into a `RunStatus`. `failed` carries the framework error so a status
- * poll surfaces the real cause; a transient infra failure to even start
- * executing is the `err` channel of the enclosing `Result`.
+ * poll surfaces the real cause; host infrastructure failures before or during
+ * durable checkpointing use the `err` channel of the enclosing `Result`.
  */
 export type RunExecOutcome =
   | { readonly kind: "completed"; readonly output: unknown }
-  | { readonly kind: "suspended"; readonly nodeId: NodeId; readonly prompt: string }
+  | { readonly kind: "suspended"; readonly nodeId: NodeId; readonly prompt: NonEmptyString }
   | { readonly kind: "failed"; readonly error: FrameworkError };
+
+/** Durable JobLike paired with the typed failure channel for its writes. */
+export interface RunExecutionJob {
+  readonly jobLike: JobLike<DagPhase, unknown, DagMachineContextPersisted>;
+  readonly checkpointFailure: () => HostError | null;
+}
 
 /** Inputs the executor needs to run/resume one run. */
 export interface RunExecutionRequest {
@@ -159,8 +166,8 @@ export interface RunExecutionRequest {
   readonly identity: PersistedIdentity;
   /** Aborted immediately when queue lease ownership can no longer be trusted. */
   readonly signal: AbortSignal;
-  /** Run-store-backed durable job handle (carries + persists the checkpoint). */
-  readonly jobLike: JobLike<DagPhase, unknown, DagMachineContextPersisted>;
+  /** Run-store-backed durable job handle and its typed write-failure channel. */
+  readonly job: RunExecutionJob;
   /** The host's review hook (decision-store + notifier closure). Read-only: it
    * resolves a gate by READING the recorded decision; it does NOT consume it. */
   readonly onHumanReview: (req: {
@@ -195,8 +202,8 @@ export interface RunExecutorPort {
   /**
    * Run or resume a DAG through the framework's resumable kernel. Never throws:
    * a framework run-failure — including context-build faults after the slice
-   * begins — is mapped onto the `failed` outcome. The `err` channel is reserved
-   * for host failures before the slice can execute (for example unknown DAG).
+   * begins — is mapped onto the `failed` outcome. The `err` channel carries host
+   * failures that require queue retry, including unknown DAG and checkpoint I/O.
    */
   run(req: RunExecutionRequest): Promise<Result<RunExecOutcome, HostError>>;
 }

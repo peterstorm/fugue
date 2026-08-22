@@ -30,7 +30,7 @@ export type CircuitState =
 
 /** Default configuration constants */
 export const DEFAULTS = {
-  /** Number of failures that triggers open state */
+  /** Maximum failures allowed before the next failure opens the circuit. */
   threshold: 5,
   /** Sliding window duration in milliseconds (60 seconds) */
   windowMs: 60_000,
@@ -79,7 +79,7 @@ export const recordSuccess = (s: CircuitState, now: number): CircuitState =>
  *
  * @param s - Current circuit state
  * @param now - Current timestamp
- * @param threshold - Number of failures to trigger open (default: 5)
+ * @param threshold - Maximum failures allowed before opening (default: 5)
  * @param windowMs - Sliding window size in ms (default: 60_000)
  */
 export const recordFailure = (

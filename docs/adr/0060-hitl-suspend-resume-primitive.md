@@ -132,6 +132,14 @@ executor when it fails. The executor also checks the aborted lease before any
 outcome fold. This combines cooperative cancellation at effectful node
 boundaries with hard persistence fencing at every durable transition.
 
+A checkpoint write failure is a transient host-infrastructure outcome, not a
+terminal DAG outcome. The run-store-backed `JobLike` must throw to abort the
+kernel because that interface has no `Result` channel, but it retains the typed
+`HostError` alongside the handle. The host executor restores that error onto its
+`Result.err` channel, and `processRun` returns it to the queue. The run therefore
+retries from the last durable checkpoint and is never terminalized merely
+because checkpoint persistence was temporarily unavailable.
+
 ### Durable notification-delivery state (2026-08-22 amendment)
 
 A pending review marker now has two persisted states: `notification-required`

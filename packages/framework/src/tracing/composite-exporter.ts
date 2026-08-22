@@ -54,6 +54,17 @@ export interface ChildFailureCount {
  */
 const EXPORT_SETTLE_TIMEOUT_MS = 30_000;
 
+const logFrameworkWithoutThrowing = (
+  level: "warn" | "error",
+  message: string,
+): void => {
+  try {
+    fwLogger()[level](message);
+  } catch {
+    // Export settlement and lifecycle outcomes remain authoritative.
+  }
+};
+
 /**
  * Rate-limited per-child failure logging. Logs at true powers of ten —
  * occurrences 1, 10, 100, 1000, … — to surface a misbehaving backend at first
@@ -70,7 +81,8 @@ const logChildFailure = (
   // current order of magnitude).
   const shouldLog = c === 1 || c === Math.pow(10, Math.floor(Math.log10(c)));
   if (shouldLog) {
-    fwLogger().warn(
+    logFrameworkWithoutThrowing(
+      "warn",
       `[CompositeSpanExporter] child #${index} export failed (occurrence ${c}): ${reason}`,
     );
   }
@@ -212,7 +224,8 @@ export class CompositeSpanExporter implements SpanExporter {
           // misbehaving this badly is anomalous, so surface it instead of
           // dropping it entirely silently.
           const reason = safeErrorMessage(err);
-          fwLogger().warn(
+          logFrameworkWithoutThrowing(
+            "warn",
             `[CompositeSpanExporter] child #${index} threw AFTER it already settled (ignored): ${reason}`,
           );
         }
@@ -313,11 +326,15 @@ export class CompositeSpanExporter implements SpanExporter {
       if (r.status === "rejected") {
         const reason = safeErrorMessage(r.reason);
         reasons.push(`#${index}: ${reason}`);
-        fwLogger().warn(`[CompositeSpanExporter] child #${index} ${op}() failed: ${reason}`);
+        logFrameworkWithoutThrowing(
+          "warn",
+          `[CompositeSpanExporter] child #${index} ${op}() failed: ${reason}`,
+        );
       }
     });
     if (reasons.length > 0 && reasons.length === results.length) {
-      fwLogger().error(
+      logFrameworkWithoutThrowing(
+        "error",
         `[CompositeSpanExporter] ${op}() — ALL ${results.length} child exporter(s) failed: ` +
           reasons.join("; "),
       );

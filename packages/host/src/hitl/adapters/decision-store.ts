@@ -3,12 +3,13 @@
  *
  * Tracks, per `(runId, nodeId)` human gate: whether it is pending (so a
  * resume-then-re-park loop notifies only once) and the human's decision (so a
- * resume resolves the gate). `markPending` and first-writer decision resolution
- * are atomic create-once operations via `SET NX EX`.
+ * resume resolves the gate). `preparePending` uses atomic create-once `SET NX
+ * EX`; first-writer decision resolution is atomic too.
  *
  * Redis key layout (KEY_SEP between runId/nodeId — see below), tenant-prefixed
  * (AD-4 / FR-013 / SC-001):
- *   fugue:<tenant>:hitl:pending:<runId>␟<nodeId>   →  "1"        (presence = pending)
+ *   fugue:<tenant>:hitl:pending:<runId>␟<nodeId>   →  "notification-required:<marker>"
+ *                                                       | "notified:<marker>"
  *   fugue:<tenant>:hitl:decision:<runId>␟<nodeId>  →  JSON HumanAction
  *
  * SECURITY INVARIANT (load-bearing for AD-4 / FR-013 / SC-001): the store is

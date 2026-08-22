@@ -88,29 +88,41 @@ const authorizeRunAccess = (
   return { ok: true };
 };
 
+const loadAuthorizedRun = async (
+  c: Context<HostEnv>,
+  hitl: HitlRunService,
+): Promise<{ ok: true; record: RunRecord } | { ok: false; response: Response }> => {
+  const runIdRaw = c.req.param("runId") ?? "";
+  const parsed = tryRunId(runIdRaw);
+  if (!parsed.ok) {
+    return { ok: false, response: errorResponse(c, 404, "run-not-found", `Run '${runIdRaw}' not found`) };
+  }
+
+  const fetched = await hitl.getRun(parsed.value);
+  if (!fetched.ok) {
+    return {
+      ok: false,
+      response: errorResponse(c, httpStatusFor(fetched.error), fetched.error.kind, formatHostError(fetched.error)),
+    };
+  }
+  if (fetched.value === null) {
+    return { ok: false, response: errorResponse(c, 404, "run-not-found", `Run '${parsed.value}' not found`) };
+  }
+
+  const authorized = authorizeRunAccess(c, fetched.value);
+  return authorized.ok
+    ? { ok: true, record: fetched.value }
+    : authorized;
+};
+
 export const createGetRunHandler = (deps: RunsHandlerDeps) =>
   async (c: Context<HostEnv>): Promise<Response> => {
     if (!deps.hitl) {
       return errorResponse(c, 501, "hitl-not-configured", "HITL is not configured on this host");
     }
-    const runIdRaw = c.req.param("runId") ?? "";
-    const runIdParsed = tryRunId(runIdRaw);
-    if (!runIdParsed.ok) {
-      // A malformed id can reference no run; treat as not-found (don't leak the
-      // id-format rule), and never feed an unparsed string into the store.
-      return errorResponse(c, 404, "run-not-found", `Run '${runIdRaw}' not found`);
-    }
-    const runId = runIdParsed.value;
-    const fetched = await deps.hitl.getRun(runId);
-    if (!fetched.ok) {
-      return errorResponse(c, httpStatusFor(fetched.error), fetched.error.kind, formatHostError(fetched.error));
-    }
-    if (fetched.value === null) {
-      return errorResponse(c, 404, "run-not-found", `Run '${runId}' not found`);
-    }
-    const auth = authorizeRunAccess(c, fetched.value);
-    if (!auth.ok) return auth.response;
-    return successResponse(c, statusView(fetched.value));
+    const loaded = await loadAuthorizedRun(c, deps.hitl);
+    if (!loaded.ok) return loaded.response;
+    return successResponse(c, statusView(loaded.record));
   };
 
 // ── Approval body parsing ────────────────────────────────────────────────────
@@ -158,24 +170,10 @@ export const createApproveRunHandler = (deps: RunsHandlerDeps) =>
     if (!deps.hitl) {
       return errorResponse(c, 501, "hitl-not-configured", "HITL is not configured on this host");
     }
-    const runIdRaw = c.req.param("runId") ?? "";
-    const runIdParsed = tryRunId(runIdRaw);
-    if (!runIdParsed.ok) {
-      return errorResponse(c, 404, "run-not-found", `Run '${runIdRaw}' not found`);
-    }
-    const runId = runIdParsed.value;
-
-    const fetched = await deps.hitl.getRun(runId);
-    if (!fetched.ok) {
-      return errorResponse(c, httpStatusFor(fetched.error), fetched.error.kind, formatHostError(fetched.error));
-    }
-    const record = fetched.value;
-    if (record === null) {
-      return errorResponse(c, 404, "run-not-found", `Run '${runId}' not found`);
-    }
-
-    const auth = authorizeRunAccess(c, record);
-    if (!auth.ok) return auth.response;
+    const loaded = await loadAuthorizedRun(c, deps.hitl);
+    if (!loaded.ok) return loaded.response;
+    const { record } = loaded;
+    const runId = record.runId;
 
     // The gate being decided is the run's CURRENT suspended gate. Approving a run
     // that isn't parked is a conflict (nothing to decide).

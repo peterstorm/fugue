@@ -360,8 +360,7 @@ export type FrameworkErrorKind = FrameworkError["kind"];
  * closed on the new kind and let the boundary fences (resume.ts, job.ts
  * `appendEvent`, atomic.ts `acquireFileLock`) re-tag it, silently losing
  * its identity — and a key here the union no longer declares is a compile
- * error too. (type-design-analyzer-1, review run
- * standalone-2026-08-21-181423-f6-file-durable-runtime)
+ * error too.
  */
 const FRAMEWORK_ERROR_KINDS: Record<FrameworkErrorKind, true> = {
   validation: true,

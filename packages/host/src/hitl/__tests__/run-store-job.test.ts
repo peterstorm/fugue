@@ -12,9 +12,9 @@
 
 import { describe, it, expect } from "bun:test";
 import { ok, err, toJson, fromJson } from "@fuguejs/framework";
-import type { RunId, DagPhase, DagMachineContextPersisted, Result, JobLike } from "@fuguejs/framework";
+import type { RunId, DagPhase, DagMachineContextPersisted, Result } from "@fuguejs/framework";
 import { issueRunLease } from "../ports.js";
-import type { RunStorePort } from "../ports.js";
+import type { RunExecutionJob, RunStorePort } from "../ports.js";
 import type { RunRecord, RunStatus } from "../types.js";
 import { makeRunStoreJobLike } from "../run-store-job.js";
 
@@ -25,7 +25,7 @@ const envelope = (kind: string): Envelope => ({ state: { kind } as unknown as Da
 const initial = toJson(envelope("pending"));
 
 /** Unwrap a successful construction, failing the test loudly otherwise. */
-const expectJob = (r: Result<JobLike<DagPhase, unknown, DagMachineContextPersisted>, unknown>): JobLike<DagPhase, unknown, DagMachineContextPersisted> => {
+const expectJob = (r: Result<RunExecutionJob, unknown>): RunExecutionJob => {
   if (!r.ok) throw new Error(`expected ok JobLike, got err: ${JSON.stringify(r.error)}`);
   return r.value;
 };
@@ -47,26 +47,27 @@ const fakeStore = (saveResult: () => ReturnType<RunStorePort["saveCheckpoint"]>)
 describe("makeRunStoreJobLike", () => {
   it("exposes the initial checkpoint via the sync data getter", () => {
     const { port } = fakeStore(() => Promise.resolve(ok(undefined)));
-    const job = expectJob(makeRunStoreJobLike(port, LEASE, initial));
-    expect(job.data).toEqual(fromJson(initial) as Envelope);
+    const { jobLike } = expectJob(makeRunStoreJobLike(port, LEASE, initial));
+    expect(jobLike.data).toEqual(fromJson(initial) as Envelope);
   });
 
   it("persists each updateData (serialized) and reflects it in data", async () => {
     const { port, saved } = fakeStore(() => Promise.resolve(ok(undefined)));
-    const job = expectJob(makeRunStoreJobLike(port, LEASE, initial));
+    const { jobLike } = expectJob(makeRunStoreJobLike(port, LEASE, initial));
     const next = envelope("awaiting-human");
 
-    await job.updateData(next);
+    await jobLike.updateData(next);
 
     expect(saved).toEqual([toJson(next)]);
-    expect(job.data).toEqual(next);
+    expect(jobLike.data).toEqual(next);
   });
 
   it("THROWS on a persist failure without advancing the local checkpoint", async () => {
     const { port } = fakeStore(() => Promise.resolve(err({ kind: "redis-unavailable", operation: "saveCheckpoint" })));
     const job = expectJob(makeRunStoreJobLike(port, LEASE, initial));
-    await expect(job.updateData(envelope("awaiting-human"))).rejects.toThrow(/failed to persist checkpoint/);
-    expect(job.data).toEqual(fromJson(initial) as Envelope);
+    await expect(job.jobLike.updateData(envelope("awaiting-human"))).rejects.toThrow(/failed to persist checkpoint/);
+    expect(job.jobLike.data).toEqual(fromJson(initial) as Envelope);
+    expect(job.checkpointFailure()).toEqual({ kind: "redis-unavailable", operation: "saveCheckpoint" });
   });
 
   it("REJECTS a checkpoint with malformed JSON (parse-don't-validate)", () => {
