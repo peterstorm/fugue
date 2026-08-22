@@ -2,7 +2,7 @@ import type { ObserverEvent, RunEndEvent } from "../types/events.js";
 import type { Observer } from "./observer.js";
 import type { PersistencePolicy } from "./policy.js";
 import { fwLogger } from "../logger.js";
-import { dispatchEvent } from "./dispatch.js";
+import { attemptDispatchEvent } from "./dispatch.js";
 import { match } from "ts-pattern";
 import { safeDiagnosticRender, safeErrorMessage } from "../types/safe-error.js";
 export { dispatchEvent } from "./dispatch.js";
@@ -312,11 +312,10 @@ export class BufferedObserver implements Observer, Disposable {
       if (shouldFlush) {
         let replayFailures = 0;
         for (const buffered of events) {
-          try {
-            dispatchEvent(this.inner, buffered);
-          } catch (err) {
+          const dispatch = attemptDispatchEvent(this.inner, buffered);
+          if (dispatch.kind === "failed") {
             replayFailures++;
-            this.accountDispatchFailure(buffered, err, `${buffered.type}`);
+            this.accountDispatchFailure(buffered, dispatch.error, `${buffered.type}`);
           }
         }
         if (replayFailures > 0) {
@@ -328,13 +327,12 @@ export class BufferedObserver implements Observer, Disposable {
         // Guard the final run-end dispatch the same way as the replay loop —
         // an unguarded throw here used to escape, skip buffer cleanup, and
         // leak the run-id's events for the lifetime of the observer. The
-        // failure is accounted exactly like the replay loop's: counted in
-        // `dispatchErrors` and routed through `onReplayFailure` (the dead-letter
-        // seam), not logged-and-forgotten.
-        try {
-          dispatchEvent(this.inner, e);
-        } catch (err) {
-          this.accountDispatchFailure(e, err, "run-end");
+        // failure is accounted exactly like the replay loop's in production:
+        // counted in `dispatchErrors` and routed through `onReplayFailure` (the
+        // dead-letter seam), not logged-and-forgotten.
+        const runEndDispatch = attemptDispatchEvent(this.inner, e);
+        if (runEndDispatch.kind === "failed") {
+          this.accountDispatchFailure(e, runEndDispatch.error, "run-end");
         }
       } else {
         bestEffortLog(

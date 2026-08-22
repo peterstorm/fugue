@@ -552,7 +552,7 @@ export const createRedisTenantRegistry = (
         return ok(undefined);
       }),
 
-    hydrate: async () => {
+    hydrate: () => serializeMutation(async () => {
       const configs: TenantConfig[] = [];
       let cursor = "0";
       const pattern = `${TENANT_KEY_PREFIX}*`;
@@ -604,23 +604,15 @@ export const createRedisTenantRegistry = (
         cursor = scanResult.value.cursor;
       } while (cursor !== "0");
 
-      // Order the in-memory commit against the mutator chain. Like every other
-      // mutator (register/deregister/reconfigure/hardDelete), hydrate is a
-      // read-modify-write of the shared `registry` — it REASSIGNS it. Routing the
-      // commit through `serializeMutation` guarantees it cannot interleave with an
-      // in-flight mutation and overwrite the in-memory view WITHOUT a tenant whose
-      // Redis write already landed (the exact "second commit drops the first's
-      // tenant until restart" divergence the gate exists to prevent — see the design
-      // note above this block). The scan/get reads stay OUTSIDE the gate (they hold
-      // no in-memory reference); only the final commit is serialised.
-      return serializeMutation(async () => {
-        const hydrated = registryOf(configs);
-        if (!hydrated.ok) return hydrated;
-        registry = hydrated.value;
-        alive();
-        return ok(registry);
-      });
-    },
+      // Hydration is one serialized snapshot replacement, including scan/read.
+      // Keeping the reads inside the mutation gate prevents a successful register
+      // from committing between a stale scan and this replacement commit.
+      const hydrated = registryOf(configs);
+      if (!hydrated.ok) return hydrated;
+      registry = hydrated.value;
+      alive();
+      return ok(registry);
+    }),
   };
 };
 

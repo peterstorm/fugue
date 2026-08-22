@@ -49,7 +49,16 @@ const logObserverFailureWithoutThrowing = (
   }
 };
 
-export function dispatchEvent(observer: Observer, event: ObserverEvent): void {
+export type DispatchAttempt =
+  | { readonly kind: "delivered" }
+  | { readonly kind: "failed"; readonly error: unknown };
+
+/**
+ * Invoke a synchronous Observer and expose a synchronous throw as data. Async
+ * thenable rejection remains isolated here because it cannot be returned from
+ * this synchronous interface.
+ */
+export function attemptDispatchEvent(observer: Observer, event: ObserverEvent): DispatchAttempt {
   try {
     const result: unknown = observer.observe(event);
     // Guard: if observe() returns a thenable despite void signature, catch its rejection
@@ -71,11 +80,18 @@ export function dispatchEvent(observer: Observer, event: ObserverEvent): void {
         }
       });
     }
+    return { kind: "delivered" };
   } catch (error) {
-    logObserverFailureWithoutThrowing(
-      `[observer] dispatchEvent failed for ${event.type}:`,
-      error,
-    );
-    if (isStrictMode()) throw error;
+    return { kind: "failed", error };
   }
+}
+
+export function dispatchEvent(observer: Observer, event: ObserverEvent): void {
+  const attempt = attemptDispatchEvent(observer, event);
+  if (attempt.kind === "delivered") return;
+  logObserverFailureWithoutThrowing(
+    `[observer] dispatchEvent failed for ${event.type}:`,
+    attempt.error,
+  );
+  if (isStrictMode()) throw attempt.error;
 }

@@ -16,6 +16,7 @@ import type { RunId, DagPhase, DagMachineContextPersisted, Result } from "@fugue
 import { issueRunLease } from "../ports.js";
 import type { RunExecutionJob, RunStorePort } from "../ports.js";
 import type { RunRecord, RunStatus } from "../types.js";
+import { logWithoutThrowing } from "../diagnostic-logging.js";
 import { makeRunStoreJobLike } from "../run-store-job.js";
 
 const RUN = "run-1" as RunId;
@@ -36,6 +37,7 @@ const fakeStore = (saveResult: () => ReturnType<RunStorePort["saveCheckpoint"]>)
   const port: RunStorePort = {
     async create() { return ok(undefined); },
     async get() { return ok(null as RunRecord | null); },
+    async getMetadata() { return ok(null); },
     async saveCheckpoint(_lease, checkpoint) { saved.push(checkpoint); return saveResult(); },
     async setStatus(_lease, _status: RunStatus) { return ok(undefined); },
     async countActiveRuns() { return ok(0); },
@@ -60,6 +62,27 @@ describe("makeRunStoreJobLike", () => {
 
     expect(saved).toEqual([toJson(next)]);
     expect(jobLike.data).toEqual(next);
+  });
+
+  it("returns detached checkpoint snapshots from data", () => {
+    const { port } = fakeStore(() => Promise.resolve(ok(undefined)));
+    const { jobLike } = expectJob(makeRunStoreJobLike(port, LEASE, initial));
+    const exposed = jobLike.data as { state: { kind: string } };
+
+    exposed.state.kind = "failed";
+
+    expect(jobLike.data.state.kind).toBe("pending");
+  });
+
+  it("detaches the live checkpoint from the updateData caller after persistence", async () => {
+    const { port } = fakeStore(() => Promise.resolve(ok(undefined)));
+    const { jobLike } = expectJob(makeRunStoreJobLike(port, LEASE, initial));
+    const next = envelope("awaiting-human") as Envelope & { state: { kind: string } };
+
+    await jobLike.updateData(next);
+    next.state.kind = "failed";
+
+    expect(jobLike.data.state.kind).toBe("awaiting-human");
   });
 
   it("THROWS on a persist failure without advancing the local checkpoint", async () => {
@@ -95,5 +118,34 @@ describe("makeRunStoreJobLike", () => {
     const { port } = fakeStore(() => Promise.resolve(ok(undefined)));
     const result = makeRunStoreJobLike(port, LEASE, toJson({ state: { kind: "pending" } }));
     expect(result.ok).toBe(false);
+  });
+});
+
+describe("logWithoutThrowing", () => {
+  it("uses an independent fallback when the configured logger throws", () => {
+    const diagnostics: string[] = [];
+
+    logWithoutThrowing(
+      { info() {}, warn() {}, error() { throw new Error("logger transport failed"); } },
+      "error",
+      "checkpoint failed",
+      { runId: RUN },
+      (diagnostic) => diagnostics.push(diagnostic),
+    );
+
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toContain("[hitl diagnostic fallback] error checkpoint failed");
+    expect(diagnostics[0]).toContain("runId=run-1");
+    expect(diagnostics[0]).toContain("loggerError=logger transport failed");
+  });
+
+  it("never replaces the modeled outcome when the fallback also throws", () => {
+    expect(() => logWithoutThrowing(
+      { info() {}, warn() { throw new Error("logger failed"); }, error() {} },
+      "warn",
+      "cleanup failed",
+      {},
+      () => { throw new Error("stderr failed"); },
+    )).not.toThrow();
   });
 });

@@ -176,49 +176,59 @@ export const createFsAdapter = (config: FsAdapterConfig): CapabilityHandle<"docu
   const fs = config.fsImpl ?? defaultFs;
   const root = resolve(config.rootDir);
 
-  /** Resolve the absolute, confined path for a localPath ref (or fail closed). */
-  const pathFor = (ref: FileRef): Result<string, FrameworkError> =>
+  type ResolvedLocalPath = Readonly<{
+    absolutePath: string;
+    authoredPath: string;
+  }>;
+
+  /** Resolve and narrow a localPath ref (or fail closed). */
+  const pathFor = (ref: FileRef): Result<ResolvedLocalPath, FrameworkError> =>
     match(ref)
-      .with({ kind: "localPath" }, (r) => resolveWithinRoot(root, r.path))
-      .otherwise((r) => err(unsupportedRefError("fs", r)));
+      .with({ kind: "localPath" }, (localRef) => {
+        const absolute = resolveWithinRoot(root, localRef.path);
+        return absolute.ok
+          ? ok({ absolutePath: absolute.value, authoredPath: localRef.path })
+          : absolute;
+      })
+      .otherwise((foreignRef) => err(unsupportedRefError("fs", foreignRef)));
 
   const client: DocumentSource = {
     getContent: async (ref, opts): Promise<Result<Uint8Array, FrameworkError>> => {
-      const abs = pathFor(ref);
-      if (!abs.ok) return abs;
-      if (opts?.signal?.aborted) return err(abortedErr(abs.value));
+      const resolved = pathFor(ref);
+      if (!resolved.ok) return resolved;
+      const { absolutePath } = resolved.value;
+      if (opts?.signal?.aborted) return err(abortedErr(absolutePath));
       try {
         // `node:fs` honors `signal`, so a mid-read abort rejects with an
         // AbortError that we map to the `aborted` error kind (not a transient
         // fs fault) — keeping abort semantics consistent with the ms-graph adapter.
-        return ok(await fs.readFile(abs.value, { signal: opts?.signal }));
+        return ok(await fs.readFile(absolutePath, { signal: opts?.signal }));
       } catch (e) {
-        if (isAbort(e) || opts?.signal?.aborted) return err(abortedErr(abs.value));
-        return err(mapFsError(e, abs.value));
+        if (isAbort(e) || opts?.signal?.aborted) return err(abortedErr(absolutePath));
+        return err(mapFsError(e, absolutePath));
       }
     },
 
     getMetadata: async (ref, opts): Promise<Result<FileMeta, FrameworkError>> => {
-      const abs = pathFor(ref);
-      if (!abs.ok) return abs;
+      const resolved = pathFor(ref);
+      if (!resolved.ok) return resolved;
+      const { absolutePath, authoredPath } = resolved.value;
       // `node:fs.stat` takes no signal, so abort can only be honored up front
       // (a stat is a single near-instant syscall, not a streamable read).
-      if (opts?.signal?.aborted) return err(abortedErr(abs.value));
+      if (opts?.signal?.aborted) return err(abortedErr(absolutePath));
       try {
-        const s = await fs.stat(abs.value);
-        const name = basename(abs.value);
+        const s = await fs.stat(absolutePath);
+        const name = basename(absolutePath);
         const mime = MIME_BY_EXT[extname(name).toLowerCase()];
-        // `ref.path` is the stable, root-relative identifier the DAG authored.
-        const id = ref.kind === "localPath" ? ref.path : name;
         return ok({
-          id,
+          id: authoredPath,
           name,
           sizeBytes: s.size,
           lastModified: isoUtcFromDate(new Date(s.mtimeMs)),
           ...(mime !== undefined ? { mimeType: mime } : {}),
         });
       } catch (e) {
-        return err(mapFsError(e, abs.value));
+        return err(mapFsError(e, absolutePath));
       }
     },
   };

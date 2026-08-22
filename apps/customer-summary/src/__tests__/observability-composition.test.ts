@@ -522,6 +522,23 @@ describe("FoundryRunSummaryObserver — throwing sink is swallowed AND logged", 
     expect(warns.every((w) => w.msg.includes("[FoundryRunSummaryObserver]"))).toBe(true);
     expect(warns.some((w) => w.msg.includes("swallowed"))).toBe(true);
   });
+
+  test("a throwing diagnostic logger cannot break the guarded run tail", () => {
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: () => { throw new Error("logger unavailable"); },
+      error: () => {},
+    });
+    const throwing: FoundryTelemetrySink = {
+      trackEvent: () => { throw new Error("event-boom"); },
+      trackMetric: () => { throw new Error("metric-boom"); },
+      flush: async () => {},
+    };
+    const obs = new FoundryRunSummaryObserver(throwing);
+
+    expect(() => obs.observe(runEnd("rSafeTail", "dSafeTail", "error", 7))).not.toThrow();
+  });
 });
 
 // ---------------------------------------------------------------------------

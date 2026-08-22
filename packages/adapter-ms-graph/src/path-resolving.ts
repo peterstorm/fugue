@@ -304,24 +304,20 @@ export const createPathResolvingMsGraphAdapter = (
     for (let i = 0; i < segments.length; i += 1) {
       const seg = segments[i];
       const isLast = i === segments.length - 1;
+      const prefix = segments.slice(0, i + 1).join("/");
       if (!isLast) {
         // Intermediate folders are cached per prefix, so N files in one folder
         // cost ONE folder listing + N per-file lookups, not N full walks.
-        const prefix = segments.slice(0, i + 1).join("/");
         const hit = prefixCache.get(itemCacheKey(drive.driveId, prefix));
         if (hit !== undefined) {
           current = hit;
           continue;
         }
-        const c = await childItem(drive.driveId, current, seg, opts);
-        if (!c.ok) return c;
-        prefixCache.set(itemCacheKey(drive.driveId, prefix), c.value.id);
-        current = c.value.id;
-      } else {
-        const c = await childItem(drive.driveId, current, seg, opts);
-        if (!c.ok) return c;
-        current = c.value.id;
       }
+      const child = await childItem(drive.driveId, current, seg, opts);
+      if (!child.ok) return child;
+      current = child.value.id;
+      if (!isLast) prefixCache.set(itemCacheKey(drive.driveId, prefix), current);
     }
     return ok({ driveId: drive.driveId, itemId: current });
   };

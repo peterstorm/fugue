@@ -298,9 +298,9 @@ export class FoundryRunSummaryObserver implements Observer {
         // AiFoundryObserver, which does its own logging), so the swallow MUST be
         // logged here or the failure would be invisible. Mirror the framework
         // observer's warn so a dropped run-summary emission is still observable.
-        fwLogger().warn(
-          `[FoundryRunSummaryObserver] sink.${emission.kind === "event" ? "trackEvent" : "trackMetric"} threw for '${emission.name}' (run summary) — swallowed:`,
-          err instanceof Error ? err.message : err,
+        logFrameworkWithoutThrowing(
+          "warn",
+          `[FoundryRunSummaryObserver] sink.${emission.kind === "event" ? "trackEvent" : "trackMetric"} threw for '${emission.name}' (run summary) — swallowed: ${safeErrorMessage(err)}`,
         );
       }
     }

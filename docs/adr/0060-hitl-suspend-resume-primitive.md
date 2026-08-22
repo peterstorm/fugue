@@ -173,6 +173,12 @@ resource authorization.
 Creation is typed separately as `QueuedRunRecord`; the run-store create operation
 cannot accept a terminal or already-running lifecycle state into the active index.
 
+Lifecycle/status reads are also separated from execution reads. `getMetadata`
+returns the durable lifecycle/auth projection without requiring checkpoint bytes,
+so a terminal status remains pollable when its older checkpoint key has expired.
+Worker, decision, and reconciliation paths continue to use the checkpoint-required
+execution read and therefore fail closed on a torn active record.
+
 ## Consequences
 
 **Positive**

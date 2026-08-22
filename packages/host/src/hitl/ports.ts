@@ -21,9 +21,11 @@ import type {
 } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
-import type { QueuedRunRecord, RunRecord, RunStatus, PersistedIdentity } from "./types.js";
+import type { QueuedRunRecord, RunMetadata, RunRecord, RunStatus, PersistedIdentity } from "./types.js";
 
 const RUN_LEASE: unique symbol = Symbol("RunLease");
+declare const runLeaseOwnerTokenBrand: unique symbol;
+type RunLeaseOwnerToken = string & { readonly [runLeaseOwnerTokenBrand]: "RunLeaseOwnerToken" };
 
 /**
  * Opaque capability proving which queue worker owns a run's live Redis lease.
@@ -32,14 +34,23 @@ const RUN_LEASE: unique symbol = Symbol("RunLease");
  */
 export type RunLease = Readonly<{
   runId: RunId;
-  ownerToken: string;
+  ownerToken: RunLeaseOwnerToken;
   signal: AbortSignal;
   [RUN_LEASE]: true;
 }>;
 
 /** Queue-adapter capability constructor; callers cannot build a lease by shape. */
-export const issueRunLease = (runId: RunId, ownerToken: string, signal: AbortSignal): RunLease =>
-  Object.freeze({ runId, ownerToken, signal, [RUN_LEASE]: true as const });
+export const issueRunLease = (runId: RunId, ownerToken: string, signal: AbortSignal): RunLease => {
+  if (ownerToken.length === 0) {
+    throw new RangeError("RunLease owner token must be non-empty");
+  }
+  return Object.freeze({
+    runId,
+    ownerToken: ownerToken as RunLeaseOwnerToken,
+    signal,
+    [RUN_LEASE]: true as const,
+  });
+};
 
 /**
  * Durable persistence for runs. `checkpoint` is updated on every state-machine
@@ -52,8 +63,10 @@ export interface RunStorePort {
    * run to the per-tenant active-run index (ADR-0074) — a fresh run is non-terminal.
    */
   create(record: QueuedRunRecord): Promise<Result<void, HostError>>;
-  /** Fetch a run, or `ok(null)` if unknown. */
+  /** Fetch a complete execution record, requiring checkpoint bytes. */
   get(runId: RunId): Promise<Result<RunRecord | null, HostError>>;
+  /** Fetch lifecycle/auth metadata without coupling status reads to checkpoint availability. */
+  getMetadata(runId: RunId): Promise<Result<RunMetadata | null, HostError>>;
   /** Persist a checkpoint only while this worker still owns the run lease. */
   saveCheckpoint(lease: RunLease, checkpoint: string): Promise<Result<void, HostError>>;
   /**

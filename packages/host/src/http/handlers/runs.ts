@@ -23,14 +23,14 @@ import { canAccessDag } from "../../domain/auth.js";
 import { errorResponse, successResponse } from "../response.js";
 import { httpStatusFor, formatHostError } from "../../domain/host-error.js";
 import type { HitlRunService } from "../../hitl/service.js";
-import type { RunRecord, RunStatus } from "../../hitl/types.js";
+import type { RunMetadata, RunStatus } from "../../hitl/types.js";
 
 interface RunsHandlerDeps {
   readonly hitl?: HitlRunService;
 }
 
 /** Public JSON view of a run's status (never leaks internal checkpoint/identity). */
-const statusView = (record: RunRecord): unknown =>
+const statusView = (record: RunMetadata): unknown =>
   match(record.status)
     .with({ kind: "queued" }, () => ({ runId: record.runId, dagId: record.dagId, status: "queued" }))
     .with({ kind: "running" }, () => ({ runId: record.runId, dagId: record.dagId, status: "running" }))
@@ -57,7 +57,7 @@ const statusView = (record: RunRecord): unknown =>
 /** Authorize the caller against the run's immutable resource owner. */
 const authorizeRunAccess = (
   c: Context<HostEnv>,
-  record: RunRecord,
+  record: RunMetadata,
 ): { ok: true; identity: AuthIdentity } | { ok: false; response: Response } => {
   const identity = c.get("authIdentity") as AuthIdentity | undefined;
   if (!identity) {
@@ -79,7 +79,7 @@ const authorizeRunAccess = (
 const loadAuthorizedRun = async (
   c: Context<HostEnv>,
   hitl: HitlRunService,
-): Promise<{ ok: true; record: RunRecord; identity: AuthIdentity } | { ok: false; response: Response }> => {
+): Promise<{ ok: true; record: RunMetadata; identity: AuthIdentity } | { ok: false; response: Response }> => {
   const runIdRaw = c.req.param("runId") ?? "";
   const parsed = tryRunId(runIdRaw);
   if (!parsed.ok) {

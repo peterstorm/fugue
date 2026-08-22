@@ -32,7 +32,7 @@ import { issueRunLease } from "../ports.js";
 import { logWithoutThrowing } from "../diagnostic-logging.js";
 import type { RunLease, RunStorePort } from "../ports.js";
 import { tryRunTimestampMs } from "../types.js";
-import type { RunRecord, RunStatus, RunTimestampMs } from "../types.js";
+import type { RunMetadata, RunRecord, RunStatus, RunTimestampMs } from "../types.js";
 
 // ── Persisted-shape validators (parse-don't-validate across the Redis boundary) ─
 //
@@ -104,6 +104,17 @@ const RunMetaSchema = z.object({
 const isTerminalStatus = (status: RunStatus): boolean =>
   status.kind === "completed" || status.kind === "failed";
 
+const metadataOf = (record: RunRecord): RunMetadata => ({
+  runId: record.runId,
+  dagId: record.dagId,
+  ownerTeam: record.ownerTeam,
+  input: record.input,
+  identity: record.identity,
+  status: record.status,
+  createdAtMs: record.createdAtMs,
+  updatedAtMs: record.updatedAtMs,
+});
+
 const leaseLost = (lease: RunLease): Result<never, HostError> =>
   err({ kind: "run-lease-lost", runId: lease.runId });
 
@@ -146,7 +157,7 @@ const parsePersistedStatus = (raw: string): PersistedStatusVerdict => {
   } catch (e) {
     return {
       kind: "corrupt",
-      parseError: e instanceof Error ? e.message : String(e),
+      parseError: safeErrorMessage(e),
     };
   }
 };
@@ -191,6 +202,13 @@ export const createInMemoryRunStore = (
   const runs = new Map<string, RunRecord>();
   // Mirrors the Redis active-run index SET (ADR-0074): run ids of non-terminal runs.
   const active = new Set<string>();
+  const inspectActiveIndex = (): readonly RunId[] => {
+    for (const id of [...active]) {
+      const record = runs.get(id);
+      if (record === undefined || isTerminalStatus(record.status)) active.delete(id);
+    }
+    return [...active] as RunId[];
+  };
   return {
     _runs: runs,
     _active: active,
@@ -204,6 +222,10 @@ export const createInMemoryRunStore = (
     },
     async get(runId) {
       return ok(runs.get(runId) ?? null);
+    },
+    async getMetadata(runId) {
+      const record = runs.get(runId);
+      return ok(record === undefined ? null : metadataOf(record));
     },
     async saveCheckpoint(lease, checkpoint) {
       if (!leases.owns(lease)) return leaseLost(lease);
@@ -223,19 +245,10 @@ export const createInMemoryRunStore = (
       return ok(undefined);
     },
     async countActiveRuns() {
-      // Self-heal (parity with the Redis adapter): drop any indexed id whose run
-      // record no longer exists, then count the live remainder.
-      for (const id of [...active]) {
-        if (!runs.has(id)) active.delete(id);
-      }
-      return ok(active.size);
+      return ok(inspectActiveIndex().length);
     },
     async listActiveRunIds() {
-      for (const id of [...active]) {
-        const record = runs.get(id);
-        if (record === undefined || isTerminalStatus(record.status)) active.delete(id);
-      }
-      return ok([...active] as RunId[]);
+      return ok(inspectActiveIndex());
     },
   };
 };
@@ -257,7 +270,7 @@ const leaseKey = (tenant: TenantId, runId: RunId): string => `fugue:${tenant}:hi
 const activeKey = (tenant: TenantId): string => `fugue:${tenant}:hitl:active`;
 
 /** The metadata half of a `RunRecord` (everything except the checkpoint string). */
-type RunMeta = Omit<RunRecord, "checkpoint">;
+type RunMeta = RunMetadata;
 
 interface RedisRunStoreConfig {
   /** TTL applied to run keys on every write, in seconds. Bounds storage growth. */
@@ -486,6 +499,8 @@ export const createRedisRunStore = (
       }
       return ok({ ...metaRes.value, checkpoint: ckptRes.value });
     },
+
+    getMetadata: readMeta,
 
     async saveCheckpoint(lease, checkpoint) {
       if (lease.signal.aborted) return leaseLost(lease);

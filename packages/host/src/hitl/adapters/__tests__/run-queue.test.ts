@@ -21,6 +21,7 @@ import { requireHitlRedisPort } from "../../../adapters/redis-connectivity.js";
 import type { HostError } from "../../../domain/host-error.js";
 import { tenantId } from "../../../domain/tenant.js";
 import type { TenantId } from "../../../domain/tenant.js";
+import { issueRunLease } from "../../ports.js";
 import { createRunQueue, hitlQueueName } from "../run-queue.js";
 
 /** Build a `TenantId` for a test from a known-good literal via the canonical constructor. */
@@ -46,6 +47,7 @@ const fakeRedis = (preset: Record<string, string> = {}) => {
     set: [] as string[],
     del: [] as string[],
     compareAndDelete: [] as { key: string; expected: string }[],
+    compareAndExpire: [] as { key: string; expected: string; ttlSec: number }[],
   };
   const redis: HitlRedisPort = {
     async get(k) { return ok(m.get(k) ?? null); },
@@ -54,7 +56,7 @@ const fakeRedis = (preset: Record<string, string> = {}) => {
     async scan() { return ok({ cursor: "0", keys: [...m.keys()] }); },
     async setNx(k, v, opts) { calls.setNx.push({ key: k, value: v, opts }); if (m.has(k)) return ok(false); m.set(k, v); return ok(true); },
     async compareAndDelete(k, expected) { calls.compareAndDelete.push({ key: k, expected }); if (m.get(k) !== expected) return ok(false); m.delete(k); return ok(true); },
-    async compareAndExpire(k, expected) { return ok(m.get(k) === expected); },
+    async compareAndExpire(k, expected, ttlSec) { calls.compareAndExpire.push({ key: k, expected, ttlSec }); return ok(m.get(k) === expected); },
     async setIfValue(guard, expected, key, value) { if (m.get(guard) !== expected) return ok(false); m.set(key, value); return ok(true); },
     async setNxIfPresent(guard, key, value) { if (!m.has(guard)) return ok("not-present"); if (m.has(key)) return ok("exists"); m.set(key, value); return ok("created"); },
     async sAdd() { return ok(1); },
@@ -65,7 +67,7 @@ const fakeRedis = (preset: Record<string, string> = {}) => {
 };
 
 // ── fake QueueBackend: captures the worker fn + records enqueues ───────────────
-const fakeBackend = () => {
+const fakeBackend = (enqueueFailure?: unknown) => {
   let workerFn: ((job: JobLike<RunId, unknown, { readonly tenant: TenantId }>) => Promise<void>) | undefined;
   const enqueued: { id: string; delayMs?: number }[] = [];
   let queueOpts: QueueOpts | undefined;
@@ -73,7 +75,10 @@ const fakeBackend = () => {
     createQueue(_name, opts) {
       queueOpts = opts;
       return {
-        async enqueue(id: string, _data: { state: RunId; context: { readonly tenant: TenantId } }, eo?: EnqueueOpts) { enqueued.push({ id, delayMs: eo?.delayMs }); },
+        async enqueue(id: string, _data: { state: RunId; context: { readonly tenant: TenantId } }, eo?: EnqueueOpts) {
+          if (enqueueFailure !== undefined) throw enqueueFailure;
+          enqueued.push({ id, delayMs: eo?.delayMs });
+        },
         async drain() {},
         async close() {},
       } as never;
@@ -156,6 +161,25 @@ describe("createRunQueue — BullMQ-compatible naming", () => {
   it("rejects empty or colon-containing custom names before backend construction", () => {
     expect(() => hitlQueueName(TENANT, "")).toThrow("non-empty");
     expect(() => hitlQueueName(TENANT, "fugue:tenant-a:hitl:runs")).toThrow("must not contain ':'");
+  });
+});
+
+describe("createRunQueue — enqueue boundary", () => {
+  it("converts a backend enqueue throw into a typed Err", async () => {
+    const { redis } = fakeRedis();
+    const fb = fakeBackend(new Error("queue backend unavailable"));
+    const queue = createRunQueue({ backend: fb.backend, redis, tenant: TENANT, lockTtlSec: 300 });
+
+    const result = await queue.queue.enqueue(RUN);
+
+    expect(result).toEqual(err({
+      kind: "redis-unavailable",
+      operation: "HITL enqueue: queue backend unavailable",
+    }));
+  });
+
+  it("rejects an empty lease owner token at the capability constructor", () => {
+    expect(() => issueRunLease(RUN, "", new AbortController().signal)).toThrow("non-empty");
   });
 });
 
@@ -242,6 +266,15 @@ describe("createRunQueue — single-flight lock", () => {
     expect(fb.enqueued).toEqual([{ id: RUN, delayMs: 1500 }]); // …but preserved the wakeup
   });
 
+  it("C1: a failed deferred re-enqueue throws so the queue retries the wakeup", async () => {
+    const { redis } = fakeRedis({ [lockKey(RUN)]: "owner" });
+    const fb = fakeBackend(new Error("deferred enqueue failed"));
+    const queue = createRunQueue({ backend: fb.backend, redis, tenant: TENANT, lockTtlSec: 300 });
+    queue.startWorker(okProcess);
+
+    await expect(fb.getWorker()(fb.job(RUN))).rejects.toThrow(/failed to defer wakeup/);
+  });
+
   it("C1: a throwing contention logger cannot prevent deferred re-enqueue", async () => {
     const { redis } = fakeRedis({ [lockKey(RUN)]: "owner" });
     const fb = fakeBackend();
@@ -303,6 +336,40 @@ describe("createRunQueue — single-flight lock", () => {
 
     expect(() => requireHitlRedisPort(incomplete)).toThrow("compareAndExpire");
     expect(base.calls.setNx).toHaveLength(0);
+  });
+
+  it("renews a long-running slice with the acquired owner token and configured TTL", async () => {
+    const base = fakeRedis();
+    let renewalObserved!: () => void;
+    const renewed = new Promise<void>((resolve) => { renewalObserved = resolve; });
+    const redis: HitlRedisPort = {
+      ...base.redis,
+      async compareAndExpire(key, expected, ttlSec) {
+        const result = await base.redis.compareAndExpire(key, expected, ttlSec);
+        renewalObserved();
+        return result;
+      },
+    };
+    const fb = fakeBackend();
+    const queue = createRunQueue({
+      backend: fb.backend,
+      redis,
+      tenant: TENANT,
+      lockTtlSec: 0.01,
+      newLockToken: () => "renewing-owner",
+    });
+    queue.startWorker(async () => {
+      await renewed;
+      return ok(undefined);
+    });
+
+    await fb.getWorker()(fb.job(RUN));
+
+    expect(base.calls.compareAndExpire).toContainEqual({
+      key: lockKey(RUN),
+      expected: "renewing-owner",
+      ttlSec: 0.01,
+    });
   });
 
   it("aborts an active slice and retries when lease ownership is lost", async () => {

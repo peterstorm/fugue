@@ -128,44 +128,50 @@ describe("BufferedObserver", () => {
     buffered.close();
   });
 
-  it("a run-end dispatch failure is accounted like a replay failure (dispatchErrors + onReplayFailure)", () => {
-    const prev = process.env.OBSERVER_STRICT;
-    process.env.OBSERVER_STRICT = "1"; // dispatchEvent rethrows so the failure is observable
-    try {
-      const seen: ObserverEvent[] = [];
-      const inner: Observer = {
-        observe(event: ObserverEvent): void {
-          if (event.type === "run-end") throw new Error("run-end sink down");
-          seen.push(event);
-        },
-      };
-      const failures: Array<{ event: ObserverEvent; error: unknown }> = [];
-      const buffered = new BufferedObserver(inner, alwaysOn(), {
-        onReplayFailure: (event, error) => failures.push({ event, error }),
-      });
+  it("accounts a production run-end dispatch failure through the dead-letter seam", () => {
+    const seen: ObserverEvent[] = [];
+    const inner: Observer = {
+      observe(event: ObserverEvent): void {
+        if (event.type === "run-end") throw new Error("run-end sink down");
+        seen.push(event);
+      },
+    };
+    const failures: Array<{ event: ObserverEvent; error: unknown }> = [];
+    const buffered = new BufferedObserver(inner, alwaysOn(), {
+      onReplayFailure: (event, error) => failures.push({ event, error }),
+    });
 
-      buffered.observe(runStart());
-      buffered.observe(nodeStart("n1"));
-      buffered.observe(nodeEnd("n1"));
-      buffered.observe(runEnd());
+    buffered.observe(runStart());
+    buffered.observe(nodeStart("n1"));
+    buffered.observe(nodeEnd("n1"));
+    buffered.observe(runEnd());
 
-      // The run-end dispatch failure is COUNTED, like the replay loop's.
-      expect(buffered.dispatchErrors).toBe(1);
-      // ...and ROUTED through the dead-letter seam carrying the run-end event
-      // — not logged-and-forgotten.
-      expect(failures).toHaveLength(1);
-      if (failures[0]) {
-        expect(failures[0].event.type).toBe("run-end");
-        expect((failures[0].error as Error).message).toBe("run-end sink down");
-      }
-      // The buffered events were each dispatched exactly once — the failure
-      // neither skipped the replay nor leaked/doubled the run's buffer.
-      expect(seen.map((e) => e.type)).toEqual(["run-start", "node-start", "node-end"]);
-      buffered.close();
-    } finally {
-      if (prev === undefined) delete process.env.OBSERVER_STRICT;
-      else process.env.OBSERVER_STRICT = prev;
-    }
+    expect(buffered.dispatchErrors).toBe(1);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.event.type).toBe("run-end");
+    expect((failures[0]?.error as Error).message).toBe("run-end sink down");
+    expect(seen.map((e) => e.type)).toEqual(["run-start", "node-start", "node-end"]);
+    buffered.close();
+  });
+
+  it("accounts production replay failures without OBSERVER_STRICT", () => {
+    const failures: ObserverEvent[] = [];
+    const inner: Observer = {
+      observe(event): void {
+        if (event.type === "node-start") throw new Error("replay sink down");
+      },
+    };
+    const buffered = new BufferedObserver(inner, alwaysOn(), {
+      onReplayFailure: (event) => failures.push(event),
+    });
+
+    buffered.observe(runStart());
+    buffered.observe(nodeStart("n1"));
+    buffered.observe(runEnd());
+
+    expect(buffered.dispatchErrors).toBe(1);
+    expect(failures.map((event) => event.type)).toEqual(["node-start"]);
+    buffered.close();
   });
 
   it("a throwing sweep clock is diagnosed and skips eviction (never an uncaught timer exception)", () => {

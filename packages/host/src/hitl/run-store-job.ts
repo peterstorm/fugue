@@ -52,6 +52,14 @@ const isEnvelope = (v: unknown): v is Envelope => {
   return isDagPhaseKind((state as Record<string, unknown>).kind);
 };
 
+const envelopeSnapshot = (serialized: string): Envelope => {
+  const parsed = tryFromJson(serialized);
+  if (!parsed.ok || !isEnvelope(parsed.value)) {
+    throw new Error("makeRunStoreJobLike: framework-authored checkpoint failed its own envelope parser");
+  }
+  return parsed.value;
+};
+
 /**
  * Build a `JobLike` over the run store for `lease.runId`, seeded from the run's
  * serialized checkpoint. The returned handle persists each checkpoint back to
@@ -88,10 +96,12 @@ export const makeRunStoreJobLike = (
 
   const jobLike: JobLike<DagPhase, unknown, DagMachineContextPersisted> = {
     get data(): { state: DagPhase; context: DagMachineContextPersisted } {
-      return envelope;
+      return envelopeSnapshot(toJson(envelope));
     },
     async updateData(d: { state: DagPhase; context: DagMachineContextPersisted }): Promise<void> {
-      const persisted = await runStore.saveCheckpoint(lease, toJson(d));
+      const serialized = toJson(d);
+      const nextEnvelope = envelopeSnapshot(serialized);
+      const persisted = await runStore.saveCheckpoint(lease, serialized);
       if (!persisted.ok) {
         failure = persisted.error;
         // JobLike has no Result channel. Throw only to abort the kernel; the
@@ -101,7 +111,7 @@ export const makeRunStoreJobLike = (
           { cause: persisted.error },
         );
       }
-      envelope = d;
+      envelope = nextEnvelope;
     },
     async updateProgress(): Promise<void> {
       // No-op: run progress is surfaced via RunStatus, not a 0–100 percent.

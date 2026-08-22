@@ -80,6 +80,9 @@ export interface RunRecord {
   readonly updatedAtMs: RunTimestampMs;
 }
 
+/** Lifecycle/auth projection that remains readable without execution checkpoint bytes. */
+export type RunMetadata = Omit<RunRecord, "checkpoint">;
+
 /** The only lifecycle state accepted by `RunStorePort.create`. */
 export type QueuedRunRecord = Omit<RunRecord, "status"> & {
   readonly status: Extract<RunStatus, { readonly kind: "queued" }>;

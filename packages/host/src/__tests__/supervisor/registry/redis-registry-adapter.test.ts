@@ -680,6 +680,42 @@ describe("redis tenant registry — concurrent cross-tenant register both surviv
   });
 });
 
+describe("redis tenant registry — concurrent hydration", () => {
+  it("cannot replace a successful registration with a stale scan snapshot", async () => {
+    const fake = createInMemoryRedisFake();
+    const seed = createRedisTenantRegistry(fake.redis, fake.pubsub);
+    await seed.register(makeConfig("seed"), 1000);
+
+    let scanStarted!: () => void;
+    let releaseScan!: () => void;
+    const started = new Promise<void>((resolve) => { scanStarted = resolve; });
+    const release = new Promise<void>((resolve) => { releaseScan = resolve; });
+    const delayedRedis = {
+      ...fake.redis,
+      async scan(pattern: string, cursor?: string) {
+        const staleSnapshot = await fake.redis.scan(pattern, cursor);
+        scanStarted();
+        await release;
+        return staleSnapshot;
+      },
+    };
+    const registry = createRedisTenantRegistry(delayedRedis, fake.pubsub);
+
+    const hydration = registry.hydrate();
+    await started;
+    const registration = registry.register(makeConfig("concurrent"), 2000);
+    releaseScan();
+
+    const [hydrated, registered] = await Promise.all([hydration, registration]);
+    expect(hydrated.ok).toBe(true);
+    expect(registered.ok).toBe(true);
+    expect([...registry.snapshot().entries.keys()].sort()).toEqual([
+      tid("concurrent"),
+      tid("seed"),
+    ]);
+  });
+});
+
 describe("redis tenant registry — hardDelete (grace-window purge, FR-030)", () => {
   it("(a) hardDelete on an ABSENT tenant is an idempotent no-op (no del/publish)", async () => {
     const fake = createInMemoryRedisFake();

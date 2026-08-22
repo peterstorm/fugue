@@ -152,6 +152,21 @@ describe("InMemoryRunStore — lease parity", () => {
   });
 });
 
+describe("InMemoryRunStore — active-index parity", () => {
+  it("count and list both self-heal a leaked terminal member", async () => {
+    const leases = createInMemoryRunLeaseAuthority();
+    const store = createInMemoryRunStore(leases, () => 200);
+    const run = record();
+    await store.create(run);
+    await store.setStatus(leases.acquire(run.runId), { kind: "completed", output: "done" });
+    (store._active as Set<string>).add(run.runId); // model a stale persisted index member
+
+    expect(await store.countActiveRuns()).toEqual(ok(0));
+    expect(await store.listActiveRunIds()).toEqual(ok([]));
+    expect(store._active.has(run.runId)).toBe(false);
+  });
+});
+
 describe("RedisRunStore", () => {
   const cfg = { ttlSec: 3600 };
 
@@ -321,7 +336,7 @@ describe("RedisRunStore", () => {
     if (!res.ok) expect(res.error.kind).toBe("redis-unavailable");
   });
 
-  it("errs internal-invariant-violated on a torn record (metadata but no checkpoint)", async () => {
+  it("errs internal-invariant-violated on a torn execution record (metadata but no checkpoint)", async () => {
     const { redis, seed } = seedableRedis();
     // Seed only the meta key (e.g. the checkpoint key TTL-expired first).
     seed("fugue:tenant-a:hitl:run:run-1", JSON.stringify({ runId: "run-1", dagId: "d", ownerTeam: "sales", input: {}, identity: { kind: "admin" }, status: { kind: "queued" }, createdAtMs: 1, updatedAtMs: 1 }));
@@ -329,6 +344,29 @@ describe("RedisRunStore", () => {
     const res = await store.get("run-1" as RunId);
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.kind).toBe("internal-invariant-violated");
+  });
+
+  it("reads terminal lifecycle metadata after checkpoint expiry", async () => {
+    const { redis, seed } = seedableRedis();
+    seed("fugue:tenant-a:hitl:run:run-1", JSON.stringify({
+      runId: "run-1",
+      dagId: "d",
+      ownerTeam: "sales",
+      input: {},
+      identity: { kind: "admin" },
+      status: { kind: "completed", output: { answer: 42 } },
+      createdAtMs: 1,
+      updatedAtMs: 2,
+    }));
+    const store = createRedisRunStore(redis, TENANT, cfg);
+
+    const metadata = await store.getMetadata("run-1" as RunId);
+
+    expect(metadata.ok && metadata.value?.status).toEqual({
+      kind: "completed",
+      output: { answer: 42 },
+    });
+    expect((await store.get("run-1" as RunId)).ok).toBe(false);
   });
 
   it("errs internal-invariant-violated on corrupt (non-JSON) metadata", async () => {

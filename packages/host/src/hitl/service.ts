@@ -32,7 +32,7 @@ import type {
   RunLease,
 } from "./ports.js";
 import { tryRunTimestampMs } from "./types.js";
-import type { QueuedRunRecord, RunRecord } from "./types.js";
+import type { QueuedRunRecord, RunMetadata } from "./types.js";
 import { makeRunStoreJobLike } from "./run-store-job.js";
 import { makeOnHumanReview, makeOnDecisionConsumed } from "./human-review-hook.js";
 import { toPersistedIdentity } from "./identity.js";
@@ -77,7 +77,7 @@ export interface HitlRunService {
   /** Idempotently wake queued/running runs and suspended runs with a durable decision. */
   reconcileActiveRuns(): Promise<Result<readonly ReconciliationAttempt[], HostError>>;
   /** Fetch a run record (status poll), or `ok(null)` if unknown. */
-  getRun(runId: RunId): Promise<Result<RunRecord | null, HostError>>;
+  getRun(runId: RunId): Promise<Result<RunMetadata | null, HostError>>;
 }
 
 /** Map a host infra failure to a `FrameworkError` so it can settle a run's `failed` status. */
@@ -331,7 +331,7 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
     return ok(attempts);
   };
 
-  const getRun = (runId: RunId): Promise<Result<RunRecord | null, HostError>> => runStore.get(runId);
+  const getRun = (runId: RunId): Promise<Result<RunMetadata | null, HostError>> => runStore.getMetadata(runId);
 
   return { startRun, processRun, recordDecision, reconcileActiveRuns, getRun };
 };
