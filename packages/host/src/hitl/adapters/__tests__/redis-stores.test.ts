@@ -50,6 +50,13 @@ const fakeRedis = (): RecordingRedis => {
     async scan(): Promise<Result<{ cursor: string; keys: string[] }, HostError>> { return ok({ cursor: "0", keys: [...m.keys()] }); },
     async setNx(k, v, opts): Promise<Result<boolean, HostError>> { setNxOpts.set(k, opts); if (m.has(k)) return ok(false); m.set(k, v); return ok(true); },
     async compareAndDelete(k, expected): Promise<Result<boolean, HostError>> { if (m.get(k) !== expected) return ok(false); m.delete(k); return ok(true); },
+    async setNxIfPresent(guard, key, value, opts): Promise<Result<"not-present" | "created" | "exists", HostError>> {
+      if (!m.has(guard)) return ok("not-present");
+      if (m.has(key)) return ok("exists");
+      setNxOpts.set(key, opts);
+      m.set(key, value);
+      return ok("created");
+    },
     async sAdd(): Promise<Result<number, HostError>> { return ok(1); },
     async sRem(): Promise<Result<number, HostError>> { return ok(1); },
     async sMembers(): Promise<Result<string[], HostError>> { return ok([]); },
@@ -353,6 +360,7 @@ const sharedRedis = (): RedisPort & { readonly _keys: ReadonlyMap<string, string
     async scan() { return ok({ cursor: "0", keys: [...m.keys()] }); },
     async setNx(k, v) { if (m.has(k)) return ok(false); m.set(k, v); return ok(true); },
     async compareAndDelete(k, expected) { if (m.get(k) !== expected) return ok(false); m.delete(k); return ok(true); },
+    async setNxIfPresent(guard, key, value) { if (!m.has(guard)) return ok("not-present"); if (m.has(key)) return ok("exists"); m.set(key, value); return ok("created"); },
     async sAdd() { return ok(1); },
     async sRem() { return ok(1); },
     async sMembers() { return ok([]); },

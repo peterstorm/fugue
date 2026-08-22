@@ -19,7 +19,7 @@
  * control is the authz gate on the inbound button click (`canAccessDag`).
  */
 
-import { err } from "@fuguejs/framework";
+import { err, safeErrorMessage } from "@fuguejs/framework";
 import type { Result, DagId } from "@fuguejs/framework";
 import type { Team } from "../../../domain/auth.js";
 import type { HostError } from "../../../domain/host-error.js";
@@ -54,7 +54,7 @@ export const createBotFrameworkNotifier = (deps: {
     } catch (e) {
       return err({
         kind: "notification-failed",
-        operation: `bot proactive send: card build failed: ${e instanceof Error ? e.message : String(e)}`,
+        operation: `bot proactive send: card build failed: ${safeErrorMessage(e)}`, 
       });
     }
 

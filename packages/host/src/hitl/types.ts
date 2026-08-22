@@ -10,7 +10,8 @@
  * lifecycle status, the persisted record, and the notification a reviewer sees.
  */
 
-import type { DagId, RunId, NodeId, FrameworkError } from "@fuguejs/framework";
+import { ok, err } from "@fuguejs/framework";
+import type { DagId, RunId, NodeId, FrameworkError, Result } from "@fuguejs/framework";
 
 /**
  * The serializable projection of an `AuthIdentity` persisted on a run. The live
@@ -29,6 +30,15 @@ export type PersistedIdentity =
   | { readonly kind: "admin" }
   | { readonly kind: "team"; readonly team: string; readonly label: string }
   | { readonly kind: "user"; readonly sub: string; readonly azp: string };
+
+/** A finite millisecond timestamp accepted by the HITL persistence parser. */
+export type RunTimestampMs = number;
+
+/** Parse an untrusted clock reading into the timestamp domain. */
+export const tryRunTimestampMs = (value: unknown): Result<RunTimestampMs, string> =>
+  typeof value === "number" && Number.isFinite(value)
+    ? ok(value as RunTimestampMs)
+    : err("expected a finite number");
 
 /**
  * A run's lifecycle status (an ADT — illegal combinations are unrepresentable).
@@ -62,8 +72,8 @@ export interface RunRecord {
   readonly status: RunStatus;
   /** Serialized `{state, context}` checkpoint (framework `toJson`). */
   readonly checkpoint: string;
-  readonly createdAtMs: number;
-  readonly updatedAtMs: number;
+  readonly createdAtMs: RunTimestampMs;
+  readonly updatedAtMs: RunTimestampMs;
 }
 
 /**

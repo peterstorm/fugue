@@ -49,7 +49,9 @@ export interface RunStorePort {
    * index SET (`fugue:<tenant>:hitl:active`) via `sMembers`, NOT `scan` (which the
    * per-tenant ACL denies, ADR-0067). SELF-HEALING: a member whose run record no
    * longer exists (TTL-expired / hard-deleted) is pruned and excluded, so the
-   * count never inflates from leaked indices. Bounded O(N) in the set size (which
+   * count never inflates from missing/terminal leaked indices. Checkpoint-only
+   * publication remnants, corrupt metadata, and prune failures are counted
+   * conservatively to avoid under-admission. Bounded O(N) in the set size (which
    * `maxQueuedRuns` itself bounds).
    */
   countActiveRuns(): Promise<Result<number, HostError>>;
@@ -166,8 +168,9 @@ export interface RunExecutorPort {
   seedCheckpoint(dagId: DagId, input: unknown): Promise<Result<string, HostError>>;
   /**
    * Run or resume a DAG through the framework's resumable kernel. Never throws:
-   * a framework run-failure is mapped onto the `failed` outcome; only a host
-   * infra failure (unknown DAG, context build) uses the `err` channel.
+   * a framework run-failure — including context-build faults after the slice
+   * begins — is mapped onto the `failed` outcome. The `err` channel is reserved
+   * for host failures before the slice can execute (for example unknown DAG).
    */
   run(req: RunExecutionRequest): Promise<Result<RunExecOutcome, HostError>>;
 }

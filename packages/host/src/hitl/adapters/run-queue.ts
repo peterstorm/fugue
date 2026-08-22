@@ -7,11 +7,11 @@
  * so a re-enqueue to RESUME a parked run always works even after the prior job
  * completed. Concurrency safety (a double-approval enqueuing the same run twice)
  * is enforced by a single-flight Redis lock around `processRun`, so a run is
- * never executed by two workers at once (which would double-run side-effecting
- * nodes).
+ * executed concurrently while its owner keeps the Redis lease alive (which
+ * would double-run side-effecting nodes).
  */
 
-import { ok, err } from "@fuguejs/framework";
+import { ok, err, safeErrorMessage } from "@fuguejs/framework";
 import type { Result, RunId, QueueBackend, WorkerHandle } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import type { TenantId } from "../../domain/tenant.js";
@@ -94,7 +94,7 @@ export const createRunQueue = (deps: RunQueueDeps): RunQueueHandle => {
       );
       return ok(undefined);
     } catch (e) {
-      return err({ kind: "redis-unavailable", operation: `HITL enqueue: ${e instanceof Error ? e.message : String(e)}` });
+      return err({ kind: "redis-unavailable", operation: `HITL enqueue: ${safeErrorMessage(e)}` });
     }
   };
 
@@ -134,8 +134,38 @@ export const createRunQueue = (deps: RunQueueDeps): RunQueueHandle => {
           return;
         }
 
+        // A lock is a lease, not a permanent mutex. Renew before half its TTL
+        // elapses, always with the owner token, and fail closed if the bound
+        // Redis adapter cannot verify continued ownership.
+        if (redis.compareAndExpire === undefined) {
+          throw new Error("hitl: Redis lease renewal is unavailable");
+        }
+        const compareAndExpire = redis.compareAndExpire;
+        const renewEveryMs = Math.max(1, Math.floor(lockTtlSec * 500));
+        let renewalFailure: HostError | "ownership-lost" | undefined;
+        let renewalTail: Promise<void> = Promise.resolve();
+        const renewLease = (): void => {
+          renewalTail = renewalTail.then(async () => {
+            if (renewalFailure !== undefined) return;
+            const renewed = await compareAndExpire(lockKey(tenant, runId), lockToken, lockTtlSec);
+            if (!renewed.ok) {
+              renewalFailure = renewed.error;
+              logger?.error?.("hitl: lock renewal failed — retrying", { runId, error: renewed.error.kind });
+            } else if (!renewed.value) {
+              renewalFailure = "ownership-lost";
+              logger?.error?.("hitl: lock ownership lost during processing — retrying", { runId });
+            }
+          });
+        };
+        const renewalTimer = setInterval(renewLease, renewEveryMs);
+
         try {
           const result = await processRun(runId);
+          await renewalTail;
+          if (renewalFailure !== undefined) {
+            const detail = renewalFailure === "ownership-lost" ? renewalFailure : renewalFailure.kind;
+            throw new Error(`hitl: lock renewal failed for ${runId}: ${detail}`);
+          }
           if (!result.ok) {
             // A host-infra failure BEFORE the run settled (e.g. a transient
             // run-store read). Throw so the queue retries; the `finally` below
@@ -145,6 +175,8 @@ export const createRunQueue = (deps: RunQueueDeps): RunQueueHandle => {
             throw new Error(`hitl: processRun failed for ${runId}: ${result.error.kind}`, { cause: result.error });
           }
         } finally {
+          clearInterval(renewalTimer);
+          await renewalTail;
           const released = await redis.compareAndDelete(lockKey(tenant, runId), lockToken);
           if (!released.ok) {
             logger?.warn?.("hitl: failed to release owned lock", {

@@ -330,15 +330,9 @@ export const healthCheckWithTimeout = async (
 /**
  * In-memory fake PgCapability for unit testing nodes that use `ctx.db`.
  *
- * Accepts a response map that returns canned results for SQL patterns. A key
- * matches by exact SQL first, then by **longest prefix**.
- *
- * ⚠️ Prefix-match foot-gun: because matching falls back to `startsWith`, a route
- * key that is a prefix of an unrelated query will match it in tests while the
- * real adapter runs the exact SQL the pool is given. Prefer full-SQL keys; reach
- * for short prefixes only when you deliberately want a broad match, and keep keys
- * specific enough that one can't accidentally swallow another's query. Params are
- * not inspected, so this fake cannot catch a wrong-`$n`-binding bug.
+ * Accepts a response map that returns canned results for exact SQL strings.
+ * Query parameters are part of the route contract when supplied, so a fake
+ * cannot silently accept a query that production would bind differently.
  *
  * @example
  * ```ts
@@ -351,32 +345,25 @@ export const healthCheckWithTimeout = async (
 interface FakePgRoute {
   readonly rows?: unknown[];
   readonly rowCount?: number;
+  /** Exact positional bindings required by this canned response. */
+  readonly params?: readonly unknown[];
 }
 
 export const createFakePgCapability = (
   routes: Readonly<Record<string, unknown[] | FakePgRoute>>,
 ): CapabilityHandle<"db"> => {
-  const matchRoute = (sql: string): FakePgRoute | null => {
-    // Try exact match first, then longest prefix match
+  const matchRoute = (sql: string, params?: unknown[]): FakePgRoute | null => {
     const direct = routes[sql];
-    if (direct) {
-      return Array.isArray(direct) ? { rows: direct } : direct;
-    }
-    // Find the longest prefix match
-    let bestMatch: FakePgRoute | null = null;
-    let bestLength = 0;
-    for (const [pattern, value] of Object.entries(routes)) {
-      if (sql.startsWith(pattern) && pattern.length > bestLength) {
-        bestMatch = Array.isArray(value) ? { rows: value } : value;
-        bestLength = pattern.length;
-      }
-    }
-    return bestMatch;
+    if (direct === undefined) return null;
+    const route = Array.isArray(direct) ? { rows: direct } : direct;
+    return route.params === undefined || JSON.stringify(route.params) === JSON.stringify(params ?? [])
+      ? route
+      : null;
   };
 
   const client: PgCapability = {
-    query: async <T,>(schema: z.ZodType<T>, sql: string, _params?: unknown[]): Promise<Result<T[], FrameworkError>> => {
-      const route = matchRoute(sql);
+    query: async <T,>(schema: z.ZodType<T>, sql: string, params?: unknown[]): Promise<Result<T[], FrameworkError>> => {
+      const route = matchRoute(sql, params);
       if (!route || !route.rows) {
         return ok([] as T[]);
       }
@@ -391,8 +378,8 @@ export const createFakePgCapability = (
       return ok(validated);
     },
 
-    queryOne: async <T,>(schema: z.ZodType<T>, sql: string, _params?: unknown[]): Promise<Result<T | null, FrameworkError>> => {
-      const route = matchRoute(sql);
+    queryOne: async <T,>(schema: z.ZodType<T>, sql: string, params?: unknown[]): Promise<Result<T | null, FrameworkError>> => {
+      const route = matchRoute(sql, params);
       if (!route || !route.rows || route.rows.length === 0) return ok(null);
       const parsed = schema.safeParse(route.rows[0]);
       if (!parsed.success) {
@@ -401,13 +388,13 @@ export const createFakePgCapability = (
       return ok(parsed.data);
     },
 
-    execute: async (sql: string, _params?: unknown[]): Promise<Result<{ rowCount: number }, FrameworkError>> => {
-      const route = matchRoute(sql);
+    execute: async (sql: string, params?: unknown[]): Promise<Result<{ rowCount: number }, FrameworkError>> => {
+      const route = matchRoute(sql, params);
       return ok({ rowCount: route?.rowCount ?? 0 });
     },
 
-    queryRaw: async (sql: string, _params?: unknown[]): Promise<Result<unknown[], FrameworkError>> => {
-      const route = matchRoute(sql);
+    queryRaw: async (sql: string, params?: unknown[]): Promise<Result<unknown[], FrameworkError>> => {
+      const route = matchRoute(sql, params);
       return ok(route?.rows ?? []);
     },
   };

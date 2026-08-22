@@ -17,7 +17,7 @@
  * reason.
  */
 
-import { ok, err } from "@fuguejs/framework";
+import { ok, err, safeErrorMessage } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import type { HumanReviewNotifierPort } from "../ports.js";
@@ -93,7 +93,7 @@ export const createWebhookNotifier = (
     } catch (e) {
       return err({
         kind: "notification-failed",
-        operation: `Teams webhook card build: ${e instanceof Error ? e.message : String(e)}`,
+        operation: `Teams webhook card build: ${safeErrorMessage(e)}`, 
       });
     }
     let res: { status: number };
@@ -102,7 +102,7 @@ export const createWebhookNotifier = (
     } catch (e) {
       return err({
         kind: "notification-failed",
-        operation: `Teams webhook POST: ${e instanceof Error ? e.message : String(e)}`,
+        operation: `Teams webhook POST: ${safeErrorMessage(e)}`, 
       });
     }
     if (res.status < 200 || res.status >= 300) {

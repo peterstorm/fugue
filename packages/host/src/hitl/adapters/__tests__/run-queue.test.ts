@@ -49,6 +49,7 @@ const fakeRedis = (preset: Record<string, string> = {}) => {
     async scan() { return ok({ cursor: "0", keys: [...m.keys()] }); },
     async setNx(k, v, opts) { calls.setNx.push({ key: k, value: v, opts }); if (m.has(k)) return ok(false); m.set(k, v); return ok(true); },
     async compareAndDelete(k, expected) { calls.compareAndDelete.push({ key: k, expected }); if (m.get(k) !== expected) return ok(false); m.delete(k); return ok(true); },
+    async compareAndExpire(k, expected) { return ok(m.get(k) === expected); },
     async sAdd() { return ok(1); },
     async sRem() { return ok(1); },
     async sMembers() { return ok([]); },

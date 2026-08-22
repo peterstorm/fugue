@@ -30,10 +30,11 @@ describe("@fuguejs/pg — createFakePgCapability", () => {
       { id: "1", name: "Alice", email: "alice@example.com" },
       { id: "2", name: "Bob", email: "bob@example.com" },
     ],
-    "SELECT * FROM users WHERE id": [
-      { id: "1", name: "Alice", email: "alice@example.com" },
-    ],
-    "INSERT INTO orders": { rowCount: 1 },
+    "SELECT * FROM users WHERE id = $1": {
+      rows: [{ id: "1", name: "Alice", email: "alice@example.com" }],
+      params: ["1"],
+    },
+    "INSERT INTO orders VALUES ($1)": { rowCount: 1, params: ["data"] },
   });
 
   const db: PgCapability = fakeHandle.client;
@@ -49,7 +50,7 @@ describe("@fuguejs/pg — createFakePgCapability", () => {
       }
     });
 
-    it("prefix match — SQL with params matches prefix route", async () => {
+    it("matches exact SQL with its configured params", async () => {
       const result = await db.query(UserSchema, "SELECT * FROM users WHERE id = $1", ["1"]);
       expect(isOk(result)).toBe(true);
       if (result.ok) {
@@ -132,17 +133,18 @@ describe("@fuguejs/pg — createFakePgCapability", () => {
     });
   });
 
-  describe("longest-prefix matching", () => {
-    it("when two prefixes match, the longest wins", async () => {
+  describe("exact route matching", () => {
+    it("does not let a broad route swallow different SQL or bindings", async () => {
       const handle = createFakePgCapability({
-        "SELECT * FROM users": [{ id: "broad", name: "Broad", email: "b@example.com" }],
-        "SELECT * FROM users WHERE id": [{ id: "narrow", name: "Narrow", email: "n@example.com" }],
+        "SELECT * FROM users WHERE id = $1": {
+          rows: [{ id: "narrow", name: "Narrow", email: "n@example.com" }],
+          params: ["1"],
+        },
       });
-      const result = await handle.client.query(UserSchema, "SELECT * FROM users WHERE id = $1", ["1"]);
-      expect(isOk(result)).toBe(true);
-      if (result.ok) {
-        expect(result.value[0]?.id).toBe("narrow");
-      }
+      const wrongSql = await handle.client.query(UserSchema, "SELECT * FROM users WHERE id = $1 OR true", ["1"]);
+      const wrongParams = await handle.client.query(UserSchema, "SELECT * FROM users WHERE id = $1", ["2"]);
+      expect(wrongSql).toEqual({ ok: true, value: [] });
+      expect(wrongParams).toEqual({ ok: true, value: [] });
     });
   });
 });

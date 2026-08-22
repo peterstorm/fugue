@@ -116,44 +116,83 @@ export const createRedisConnectivity = async (
       },
     };
 
-    // WATCH state is connection-scoped, so serialize compare-delete transactions
-    // on this client. Other ordinary Redis commands remain concurrent; a write
-    // to the watched key makes EXEC abort, which is exactly the ownership change
-    // this comparator must observe.
-    let compareDeleteTail: Promise<void> = Promise.resolve();
-    const compareAndDelete = async (
-      key: string,
-      expectedValue: string,
-    ): Promise<Result<boolean, HostError>> => {
+    // WATCH state is connection-scoped, so every optimistic transaction shares
+    // one turnstile. Ordinary Redis commands remain concurrent; only the small
+    // ownership/gate transactions need this client-local serialization.
+    let watchTail: Promise<void> = Promise.resolve();
+    const serializeWatch = async <T,>(work: () => Promise<Result<T, HostError>>): Promise<Result<T, HostError>> => {
       let releaseTurn: () => void = () => {};
       const turn = new Promise<void>((resolve) => { releaseTurn = resolve; });
-      const previous = compareDeleteTail;
-      compareDeleteTail = previous.then(() => turn);
+      const previous = watchTail;
+      watchTail = previous.then(() => turn);
       await previous;
-
       try {
-        await client.watch(key);
-        const current = await client.get(key);
-        if (current !== expectedValue) {
-          await client.unwatch();
-          return ok(false);
-        }
-        const executed = await client.multi().del(key).exec();
-        // A null EXEC means the watched key changed (expiry or successor write)
-        // after the read. The old holder no longer owns a deletable lease.
-        if (executed === null) return ok(false);
-        const [commandError, deleted] = executed[0] ?? [];
-        if (commandError !== null) throw commandError;
-        return ok(deleted === 1);
-      } catch (e) {
-        // Best effort only: preserve the primary comparator error if UNWATCH also
-        // fails. Redis clears WATCH state after EXEC and on disconnect.
-        try { await client.unwatch(); } catch { /* primary error is authoritative */ }
-        return err(redisErr(`COMPARE-AND-DELETE ${key}`, e));
+        return await work();
       } finally {
         releaseTurn();
       }
     };
+
+    const compareAndDelete: RedisPort["compareAndDelete"] = (key, expectedValue) =>
+      serializeWatch(async () => {
+        try {
+          await client.watch(key);
+          if (await client.get(key) !== expectedValue) {
+            await client.unwatch();
+            return ok(false);
+          }
+          const executed = await client.multi().del(key).exec();
+          if (executed === null) return ok(false);
+          const [commandError, deleted] = executed[0] ?? [];
+          if (commandError !== null) throw commandError;
+          return ok(deleted === 1);
+        } catch (e) {
+          try { await client.unwatch(); } catch { /* primary error is authoritative */ }
+          return err(redisErr(`COMPARE-AND-DELETE ${key}`, e));
+        }
+      });
+
+    const compareAndExpire: RedisPort["compareAndExpire"] = (key, expectedValue, expiresInSec) =>
+      serializeWatch(async () => {
+        try {
+          await client.watch(key);
+          if (await client.get(key) !== expectedValue) {
+            await client.unwatch();
+            return ok(false);
+          }
+          const executed = await client.multi().expire(key, expiresInSec).exec();
+          if (executed === null) return ok(false);
+          const [commandError, renewed] = executed[0] ?? [];
+          if (commandError !== null) throw commandError;
+          return ok(renewed === 1);
+        } catch (e) {
+          try { await client.unwatch(); } catch { /* primary error is authoritative */ }
+          return err(redisErr(`COMPARE-AND-EXPIRE ${key}`, e));
+        }
+      });
+
+    const setNxIfPresent: RedisPort["setNxIfPresent"] = (guardKey, key, value, opts) =>
+      serializeWatch(async () => {
+        try {
+          // EXEC retries when a concurrent clear changes the watched pending
+          // marker between verification and decision publication.
+          for (;;) {
+            await client.watch(guardKey);
+            if (await client.get(guardKey) === null) {
+              await client.unwatch();
+              return ok("not-present");
+            }
+            const executed = await client.multi().set(key, value, "EX", opts.expiresInSec, "NX").exec();
+            if (executed === null) continue;
+            const [commandError, created] = executed[0] ?? [];
+            if (commandError !== null) throw commandError;
+            return ok(created === "OK" ? "created" : "exists");
+          }
+        } catch (e) {
+          try { await client.unwatch(); } catch { /* primary error is authoritative */ }
+          return err(redisErr(`SETNX-IF-PRESENT ${guardKey} -> ${key}`, e));
+        }
+      });
 
     const redis: RedisPort = {
       get: async (key) => {
@@ -203,6 +242,8 @@ export const createRedisConnectivity = async (
         }
       },
       compareAndDelete,
+      compareAndExpire,
+      setNxIfPresent,
       sAdd: async (key, member) => {
         try {
           return ok(await client.sadd(key, member));

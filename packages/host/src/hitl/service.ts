@@ -18,7 +18,7 @@ import type { DagId, RunId, NodeId, HumanAction, FrameworkError } from "@fuguejs
 import { ok, err, EXECUTOR_NODE_ID } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
-import { tenantOverQuota } from "../domain/host-error.js";
+import { formatHostError, tenantOverQuota } from "../domain/host-error.js";
 import type { TenantId } from "../domain/tenant.js";
 import type { AuthIdentity } from "../domain/auth.js";
 import type { LogPort } from "../ports.js";
@@ -29,6 +29,7 @@ import type {
   HumanReviewNotifierPort,
   RunExecutorPort,
 } from "./ports.js";
+import { tryRunTimestampMs } from "./types.js";
 import type { RunRecord } from "./types.js";
 import { makeRunStoreJobLike } from "./run-store-job.js";
 import { makeOnHumanReview, makeOnDecisionConsumed } from "./human-review-hook.js";
@@ -70,7 +71,7 @@ export interface HitlRunService {
   processRun(runId: RunId): Promise<Result<void, HostError>>;
   /** Approval: atomically resolve a parked gate and request a resume wakeup. */
   recordDecision(runId: RunId, nodeId: NodeId, action: HumanAction): Promise<Result<void, HostError>>;
-  /** Idempotently request a wakeup for every durable non-terminal run. */
+  /** Idempotently wake queued/running runs and suspended runs with a durable decision. */
   reconcileActiveRuns(): Promise<Result<readonly ReconciliationAttempt[], HostError>>;
   /** Fetch a run record (status poll), or `ok(null)` if unknown. */
   getRun(runId: RunId): Promise<Result<RunRecord | null, HostError>>;
@@ -123,7 +124,14 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
     }
 
     const runId = newRunId();
-    const now = clock();
+    const timestamp = tryRunTimestampMs(clock());
+    if (!timestamp.ok) {
+      return err({
+        kind: "internal-invariant-violated",
+        message: `HITL clock returned an invalid timestamp: ${timestamp.error}`,
+        context: {},
+      });
+    }
     const record: RunRecord = {
       runId,
       dagId,
@@ -131,8 +139,8 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
       identity: toPersistedIdentity(identity),
       status: { kind: "queued" },
       checkpoint: seeded.value,
-      createdAtMs: now,
-      updatedAtMs: now,
+      createdAtMs: timestamp.value,
+      updatedAtMs: timestamp.value,
     };
 
     const created = await runStore.create(record);
@@ -146,6 +154,7 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
       logger?.error?.("hitl: run accepted but initial wakeup failed — reconciliation will retry", {
         runId,
         error: enqueued.error.kind,
+        message: formatHostError(enqueued.error),
       });
     }
 
@@ -285,6 +294,7 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
         nodeId,
         resolution: resolution.value.kind,
         error: enqueued.error.kind,
+        message: formatHostError(enqueued.error),
       });
     }
     return ok(undefined);
@@ -296,6 +306,15 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
 
     const attempts: ReconciliationAttempt[] = [];
     for (const runId of active.value) {
+      const run = await runStore.get(runId);
+      if (!run.ok) return run;
+      if (run.value === null || run.value.status.kind === "completed" || run.value.status.kind === "failed") continue;
+      if (run.value.status.kind === "suspended") {
+        const decision = await decisions.getDecision(runId, run.value.status.nodeId);
+        if (!decision.ok) return decision;
+        if (decision.value === null) continue;
+      }
+
       const woken = await runQueue.enqueue(runId);
       if (woken.ok) {
         attempts.push({ kind: "woken", runId });
@@ -304,6 +323,7 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
         logger?.error?.("hitl: active-run reconciliation wakeup failed", {
           runId,
           error: woken.error.kind,
+          message: formatHostError(woken.error),
         });
       }
     }

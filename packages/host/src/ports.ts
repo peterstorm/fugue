@@ -164,6 +164,19 @@ export type RedisPort = {
    * `true` only when this caller's value was present and deleted.
    */
   readonly compareAndDelete: (key: string, expectedValue: string) => Promise<Result<boolean, HostError>>;
+  /** Atomically renew a lease only while its ownership token still matches. */
+  readonly compareAndExpire?: (key: string, expectedValue: string, expiresInSec: number) => Promise<Result<boolean, HostError>>;
+  /**
+   * Atomically verify that `guardKey` exists and create `key` only if absent.
+   * The outcomes distinguish a closed gate, a newly persisted value, and a
+   * competing writer without leaking Redis transaction mechanics to HITL.
+   */
+  readonly setNxIfPresent?: (
+    guardKey: string,
+    key: string,
+    value: string,
+    opts: { expiresInSec: number },
+  ) => Promise<Result<"not-present" | "created" | "exists", HostError>>;
 }
 
 /**

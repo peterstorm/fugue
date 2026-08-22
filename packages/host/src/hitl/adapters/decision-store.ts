@@ -87,20 +87,26 @@ export const createRedisDecisionStore = (
     },
 
     async resolvePending(runId, nodeId, action) {
-      const pending = await redis.get(pendingKey(tenant, runId, nodeId));
-      if (!pending.ok) return err(pending.error);
-      if (pending.value === null) return ok({ kind: "not-pending" });
-
-      // First writer wins atomically. A racing decision can observe the pending
-      // marker too, but SET NX EX preserves the already-durable action instead
-      // of overwriting it; both callers may safely request an idempotent wakeup.
-      const resolved = await redis.setNx(
+      // The guard check and first-writer decision publication share one Redis
+      // optimistic transaction. A concurrent clear invalidates EXEC and retries,
+      // so a resolver cannot recreate a decision after its gate has closed.
+      if (redis.setNxIfPresent === undefined) {
+        return err({ kind: "internal-invariant-violated", message: "Redis decision transaction is unavailable", context: {} });
+      }
+      const resolved = await redis.setNxIfPresent(
+        pendingKey(tenant, runId, nodeId),
         decisionKey(tenant, runId, nodeId),
         JSON.stringify(action),
         expiry,
       );
       if (!resolved.ok) return err(resolved.error);
-      return ok(resolved.value ? { kind: "accepted" } : { kind: "already-resolved" });
+      return ok(
+        resolved.value === "not-present"
+          ? { kind: "not-pending" }
+          : resolved.value === "created"
+            ? { kind: "accepted" }
+            : { kind: "already-resolved" },
+      );
     },
 
     async getDecision(runId, nodeId) {
