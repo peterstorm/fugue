@@ -4,7 +4,9 @@
 - **Branch:** `feat/f6-file-durable-runtime`
 - **Review authority:** `.claude/reviews/review-and-fix-runs/standalone-review-20260822T141150Z/result.json`
 - **Review result digest:** `583c0f8503bc89cc633e233ed164dc6e074bc258765f236dfcc8ab4da29eff6c`
-- **Frozen review scope:** the exact 431-path `result.json.scope` array. The plan itself is already in scope. `docs/adr/0060-hitl-suspend-resume-primitive.md` is the sole required support path outside that scope because the critical fixes supersede its accepted best-effort status-write and notification-delivery text.
+- **Frozen review scope:** the exact 431-path `result.json.scope` array. The plan itself is already in scope.
+- **Registered support paths:** `docs/adr/0060-hitl-suspend-resume-primitive.md` (the fixes supersede its accepted best-effort semantics) and `packages/host/src/hitl/run-store-job.ts` (the checkpoint writer must receive the lease capability, but this existing file was outside the frozen scope).
+- **Remediation runs:** `remediation-20260822T150208Z` blocked because the second support path was initially omitted and is retained as evidence; `remediation-20260822T150322Z` superseded it and installed verified index digest `db30ff636074e845aa78b9df5f21ef90a9cc48c9e6cbfae48f9cc2438e7e8fdd`.
 - **Baseline commit:** `7055231`
 
 ## Architectural approach
@@ -116,7 +118,7 @@ Precompute the optional actor patch once in `parseDecision` and reuse it in all 
 - `packages/host/src/host.ts`
 - `packages/host/src/__tests__/fixtures/host-boot-fakes.ts`
 - `packages/host/src/hitl/ports.ts`
-- `packages/host/src/hitl/run-store-job.ts`
+- `packages/host/src/hitl/run-store-job.ts` (registered remediation support path)
 - `packages/host/src/hitl/service.ts`
 - `packages/host/src/hitl/human-review-hook.ts`
 - `packages/host/src/hitl/adapters/run-queue.ts`
@@ -128,7 +130,7 @@ Precompute the optional actor patch once in `parseDecision` and reuse it in all 
 - `apps/customer-summary/src/observability-composition.ts`
 - `apps/customer-summary/src/__tests__/observability-composition.test.ts`
 
-All listed paths belong to the frozen review scope except the explicitly registered ADR-0060 support path above.
+All listed paths belong to the frozen review scope except the two explicitly registered support paths above.
 
 ## Validation
 
