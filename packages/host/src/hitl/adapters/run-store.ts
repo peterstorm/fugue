@@ -20,12 +20,13 @@
  */
 
 import { z } from "zod";
-import { asNonEmptyString, ok, err, safeErrorMessage, tryRunId, tryNodeId, tryDagId } from "@fuguejs/framework";
-import type { Result, RunId } from "@fuguejs/framework";
+import { asNonEmptyString, ok, err, safeErrorMessage, tryRunId, tryNodeId, tryDagId, toJson, fromJson } from "@fuguejs/framework";
+import type { Capability, FrameworkError, NonEmptyString, Result, RunId } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import { markTeam } from "../../domain/auth.js";
 import type { TenantId } from "../../domain/tenant.js";
 import type { HitlRedisPort, LogPort } from "../../ports.js";
+import { issueRunLease } from "../ports.js";
 import type { RunLease, RunStorePort } from "../ports.js";
 import { tryRunTimestampMs } from "../types.js";
 import type { RunRecord, RunStatus, RunTimestampMs } from "../types.js";
@@ -48,9 +49,14 @@ import type { RunRecord, RunStatus, RunTimestampMs } from "../types.js";
 // branded `NodeId` its own regex would reject — closing the last gap between
 // "parses" and "is a valid branded id".
 
-/** A zod string refined by a framework id smart constructor (parse-don't-validate). */
-const brandedId = (parse: (s: string) => Result<unknown, string>) =>
-  z.string().refine((s) => parse(s).ok, { message: "value is not a valid branded id" });
+/** A zod string transformed by a framework id smart constructor (parse-don't-validate). */
+const brandedId = <T>(parse: (s: string) => Result<T, string>): z.ZodType<T> =>
+  z.string().transform((value, context) => {
+    const parsed = parse(value);
+    if (parsed.ok) return parsed.value;
+    context.addIssue({ code: "custom", message: "value is not a valid branded id" });
+    return z.NEVER;
+  });
 
 const PersistedIdentitySchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("admin") }),
@@ -62,6 +68,13 @@ const NodeIdSchema = brandedId(tryNodeId);
 const RunIdSchema = brandedId(tryRunId);
 const optionalUsage = z.object({ tokensIn: z.number(), tokensOut: z.number() }).optional();
 const retriability = z.enum(["retriable", "non-retriable"]);
+const CapabilitySchema: z.ZodType<Capability> = z.string().transform((value) => value as Capability);
+const NonEmptyStringSchema: z.ZodType<NonEmptyString> = z.string().transform((value, context) => {
+  const parsed = asNonEmptyString(value);
+  if (parsed !== undefined) return parsed;
+  context.addIssue({ code: "custom", message: "prompt must be non-empty" });
+  return z.NEVER;
+});
 const frameworkErrorKinds = z.enum([
   "validation", "retry-exhausted", "checkpoint-missing", "checkpoint-expired",
   "checkpoint-corrupt", "checkpoint-version-mismatch", "checkpoint-write-failed",
@@ -76,13 +89,13 @@ const frameworkErrorKinds = z.enum([
 // Persisted run failures are control-plane data, not an opaque diagnostic blob.
 // Require every current FrameworkError variant's mandatory fields while keeping
 // objects loose so additive fields survive rolling upgrades.
-const FrameworkErrorSchema = z.discriminatedUnion("kind", [
+const FrameworkErrorSchemaDefinition = z.discriminatedUnion("kind", [
   z.looseObject({ kind: z.literal("validation"), nodeId: NodeIdSchema, message: z.string(), path: z.string().optional() }),
   z.looseObject({ kind: z.literal("retry-exhausted"), nodeId: NodeIdSchema, attempts: z.number(), lastError: z.string(), rootErrorKind: frameworkErrorKinds.exclude(["retry-exhausted"]) }),
   z.looseObject({ kind: z.literal("checkpoint-missing"), runId: RunIdSchema }),
   z.looseObject({ kind: z.literal("checkpoint-expired"), runId: RunIdSchema, expiredAt: z.string() }),
   z.looseObject({ kind: z.literal("checkpoint-corrupt"), runId: RunIdSchema, nodeId: NodeIdSchema.optional(), message: z.string() }),
-  z.looseObject({ kind: z.literal("checkpoint-version-mismatch"), runId: RunIdSchema, expected: z.string(), actual: z.string().optional() }),
+  z.looseObject({ kind: z.literal("checkpoint-version-mismatch"), runId: RunIdSchema, expected: z.string(), actual: z.union([z.string(), z.undefined()]) }),
   z.looseObject({ kind: z.literal("checkpoint-write-failed"), runId: RunIdSchema, nodeId: NodeIdSchema, invalidRunId: z.string().optional(), invalidNodeId: z.string().optional(), message: z.string() }),
   z.looseObject({ kind: z.literal("prompt-not-found"), promptName: z.string(), reason: z.string() }),
   z.looseObject({ kind: z.literal("cache-error"), operation: z.string(), message: z.string(), failureClass: z.enum(["transient", "permanent"]).optional() }),
@@ -99,12 +112,26 @@ const FrameworkErrorSchema = z.discriminatedUnion("kind", [
   z.looseObject({ kind: z.literal("root-expects-input"), nodeId: NodeIdSchema, message: z.string() }),
   z.looseObject({ kind: z.literal("source-has-incoming"), nodeId: NodeIdSchema, message: z.string() }),
   z.looseObject({ kind: z.literal("invalid-dag-input-edge"), edge: z.object({ from: z.string(), to: z.string() }), message: z.string() }),
-  z.looseObject({ kind: z.literal("missing-capability"), missing: z.array(z.object({ nodeId: NodeIdSchema, capability: z.string() })).min(1) }),
+  z.looseObject({
+    kind: z.literal("missing-capability"),
+    missing: z.tuple(
+      [z.object({ nodeId: NodeIdSchema, capability: CapabilitySchema })],
+      z.object({ nodeId: NodeIdSchema, capability: CapabilitySchema }),
+    ),
+  }),
   z.looseObject({ kind: z.literal("llm-budget-exceeded"), runId: RunIdSchema, nodeId: NodeIdSchema, cumulative: z.number(), budget: z.number() }),
   z.looseObject({ kind: z.literal("infra-unreachable"), operation: z.enum(["mint", "exchange", "federation", "downstream"]), hop: z.string(), message: z.string() }),
   z.looseObject({ kind: z.literal("policy-refusal"), scope: z.string(), agentClientId: z.string().optional() }),
   z.looseObject({ kind: z.literal("downstream-denied"), resource: z.string(), reason: z.string() }),
 ]);
+type MissingFrameworkErrorKind = Exclude<
+  FrameworkError["kind"],
+  z.output<typeof FrameworkErrorSchemaDefinition>["kind"]
+>;
+type ExhaustiveFrameworkErrorSchema = [MissingFrameworkErrorKind] extends [never]
+  ? z.ZodType<FrameworkError>
+  : never;
+const FrameworkErrorSchema: ExhaustiveFrameworkErrorSchema = FrameworkErrorSchemaDefinition;
 
 const RunStatusSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("queued") }),
@@ -112,7 +139,7 @@ const RunStatusSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("suspended"),
     nodeId: NodeIdSchema,
-    prompt: z.string().refine((value) => asNonEmptyString(value) !== undefined, { message: "prompt must be non-empty" }),
+    prompt: NonEmptyStringSchema,
   }),
   z.object({ kind: z.literal("completed"), output: z.unknown() }),
   z.object({ kind: z.literal("failed"), error: FrameworkErrorSchema }),
@@ -180,7 +207,7 @@ type PersistedStatusVerdict =
 
 const parsePersistedStatus = (raw: string): PersistedStatusVerdict => {
   try {
-    const parsed = RunMetaSchema.safeParse(JSON.parse(raw));
+    const parsed = RunMetaSchema.safeParse(fromJson(raw));
     if (!parsed.success) {
       return { kind: "corrupt", parseError: parsed.error.message };
     }
@@ -198,12 +225,36 @@ const parsePersistedStatus = (raw: string): PersistedStatusVerdict => {
 
 // ── In-Memory Adapter (tests/dev) ───────────────────────────────────────────
 
+/** In-memory counterpart of Redis lease-token ownership. Acquiring a successor
+ * replaces the prior token, so a still-live stale lease is fenced identically
+ * to production. Queue fakes and the run-store fake share this authority. */
+export interface InMemoryRunLeaseAuthority {
+  acquire(runId: RunId, ownerToken?: string, signal?: AbortSignal): RunLease;
+  owns(lease: RunLease): boolean;
+}
+
+export const createInMemoryRunLeaseAuthority = (
+  newOwnerToken: () => string = () => crypto.randomUUID(),
+): InMemoryRunLeaseAuthority => {
+  const owners = new Map<RunId, string>();
+  return {
+    acquire(runId, ownerToken = newOwnerToken(), signal = new AbortController().signal) {
+      owners.set(runId, ownerToken);
+      return issueRunLease(runId, ownerToken, signal);
+    },
+    owns(lease) {
+      return !lease.signal.aborted && owners.get(lease.runId) === lease.ownerToken;
+    },
+  };
+};
+
 /**
  * In-memory run store. No Redis required. Exposes `_runs` for assertions.
  * Semantics match the Redis adapter (create is single-shot; checkpoint/status
  * are independent updates; an `active` index mirrors the non-terminal runs).
  */
 export const createInMemoryRunStore = (
+  leases: Pick<InMemoryRunLeaseAuthority, "owns">,
   now: () => number = Date.now,
 ): RunStorePort & {
   readonly _runs: ReadonlyMap<string, RunRecord>;
@@ -227,14 +278,14 @@ export const createInMemoryRunStore = (
       return ok(runs.get(runId) ?? null);
     },
     async saveCheckpoint(lease, checkpoint) {
-      if (lease.signal.aborted) return leaseLost(lease);
+      if (!leases.owns(lease)) return leaseLost(lease);
       const r = runs.get(lease.runId);
       if (!r) return err({ kind: "run-not-found", runId: lease.runId });
       runs.set(lease.runId, { ...r, checkpoint });
       return ok(undefined);
     },
     async setStatus(lease, status: RunStatus) {
-      if (lease.signal.aborted) return leaseLost(lease);
+      if (!leases.owns(lease)) return leaseLost(lease);
       const r = runs.get(lease.runId);
       if (!r) return err({ kind: "run-not-found", runId: lease.runId });
       const updatedAtMs = readRunTimestamp(now);
@@ -287,6 +338,18 @@ interface RedisRunStoreConfig {
   readonly now?: () => number;
 }
 
+const serializeRunMeta = (meta: RunMeta): Result<string, HostError> => {
+  try {
+    return ok(toJson(meta));
+  } catch (error) {
+    return err({
+      kind: "internal-invariant-violated",
+      message: `run metadata is not losslessly serializable: ${safeErrorMessage(error)}`,
+      context: {},
+    });
+  }
+};
+
 export const createRedisRunStore = (
   redis: HitlRedisPort,
   tenant: TenantId,
@@ -297,21 +360,28 @@ export const createRedisRunStore = (
   const now = config.now ?? Date.now;
 
   const writeMeta = async (lease: RunLease, meta: RunMeta): Promise<Result<void, HostError>> => {
+    const encoded = serializeRunMeta(meta);
+    if (!encoded.ok) return encoded;
     const res = await redis.setIfValue(
       leaseKey(tenant, lease.runId),
       lease.ownerToken,
       runKey(tenant, lease.runId),
-      JSON.stringify(meta),
+      encoded.value,
       expiry,
     );
     if (!res.ok) return err(res.error);
     return res.value ? ok(undefined) : leaseLost(lease);
   };
 
-  const compensateUnpublishedCreate = async (runId: RunId, checkpoint: string): Promise<void> => {
-    const [index, preparedCheckpoint] = await Promise.all([
+  const compensateUnpublishedCreate = async (
+    runId: RunId,
+    checkpoint: string,
+    encodedMeta: string,
+  ): Promise<void> => {
+    const [index, preparedCheckpoint, publishedMeta] = await Promise.all([
       redis.sRem(activeKey(tenant), runId),
       redis.compareAndDelete(ckptKey(tenant, runId), checkpoint),
+      redis.compareAndDelete(runKey(tenant, runId), encodedMeta),
     ]);
     if (!index.ok) {
       logWithoutThrowing(logger, "warn", "hitl: failed to remove active index after unpublished create", {
@@ -325,6 +395,12 @@ export const createRedisRunStore = (
         error: preparedCheckpoint.error.kind,
       });
     }
+    if (!publishedMeta.ok) {
+      logWithoutThrowing(logger, "warn", "hitl: failed to remove ambiguously published metadata after create failure", {
+        runId,
+        error: publishedMeta.error.kind,
+      });
+    }
   };
 
   const readMeta = async (runId: RunId): Promise<Result<RunMeta | null, HostError>> => {
@@ -333,9 +409,9 @@ export const createRedisRunStore = (
     if (res.value === null) return ok(null);
     let raw: unknown;
     try {
-      raw = JSON.parse(res.value);
+      raw = fromJson(res.value);
     } catch (e) {
-      logWithoutThrowing(logger, "error", "hitl: corrupt run metadata in store (malformed JSON)", {
+      logWithoutThrowing(logger, "error", "hitl: corrupt run metadata in store (malformed or non-canonical serialization)", {
         runId,
         error: safeErrorMessage(e),
       });
@@ -349,7 +425,20 @@ export const createRedisRunStore = (
       });
       return err({ kind: "internal-invariant-violated", message: `corrupt run metadata for '${runId}'`, context: {} });
     }
-    return ok(parsed.data as RunMeta);
+    return ok(parsed.data);
+  };
+
+  const pruneActiveMember = async (
+    rawId: string,
+    warning: string,
+  ): Promise<boolean> => {
+    const pruned = await redis.sRem(activeKey(tenant), rawId);
+    if (pruned.ok) return true;
+    logWithoutThrowing(logger, "warn", warning, {
+      runId: rawId,
+      error: pruned.error.kind,
+    });
+    return false;
   };
 
   const inspectActiveIndex = async (): Promise<Result<{
@@ -364,13 +453,7 @@ export const createRedisRunStore = (
     for (const rawId of members.value) {
       const parsedId = tryRunId(rawId);
       if (!parsedId.ok) {
-        const pruned = await redis.sRem(activeKey(tenant), rawId);
-        if (!pruned.ok) {
-          logWithoutThrowing(logger, "warn", "hitl: active-run index prune failed (invalid run id)", {
-            runId: rawId,
-            error: pruned.error.kind,
-          });
-        }
+        await pruneActiveMember(rawId, "hitl: active-run index prune failed (invalid run id)");
         continue;
       }
 
@@ -387,14 +470,11 @@ export const createRedisRunStore = (
           conservativeCount++;
           continue;
         }
-        const pruned = await redis.sRem(activeKey(tenant), rawId);
-        if (!pruned.ok) {
-          logWithoutThrowing(logger, "warn", "hitl: active-run index prune failed (leaked entry; count may over-report until next sweep)", {
-            runId: rawId,
-            error: pruned.error.kind,
-          });
-          conservativeCount++;
-        }
+        const pruned = await pruneActiveMember(
+          rawId,
+          "hitl: active-run index prune failed (leaked entry; count may over-report until next sweep)",
+        );
+        if (!pruned) conservativeCount++;
         continue;
       }
 
@@ -408,14 +488,11 @@ export const createRedisRunStore = (
         continue;
       }
       if (verdict.kind === "terminal") {
-        const pruned = await redis.sRem(activeKey(tenant), rawId);
-        if (!pruned.ok) {
-          logWithoutThrowing(logger, "warn", "hitl: active-run index prune failed (terminal entry; count may over-report until next sweep)", {
-            runId: rawId,
-            error: pruned.error.kind,
-          });
-          conservativeCount++;
-        }
+        const pruned = await pruneActiveMember(
+          rawId,
+          "hitl: active-run index prune failed (terminal entry; count may over-report until next sweep)",
+        );
+        if (!pruned) conservativeCount++;
         continue;
       }
       runIds.push(parsedId.value);
@@ -427,6 +504,8 @@ export const createRedisRunStore = (
   return {
     async create(record) {
       const { checkpoint, ...meta } = record;
+      const encodedMeta = serializeRunMeta(meta);
+      if (!encodedMeta.ok) return encodedMeta;
       // Reject an already-published/torn legacy record before touching its
       // checkpoint. SET NX on the checkpoint remains the concurrent authority.
       const existing = await redis.get(runKey(tenant, record.runId));
@@ -444,17 +523,17 @@ export const createRedisRunStore = (
       }
       const idx = await redis.sAdd(activeKey(tenant), record.runId);
       if (!idx.ok) {
-        await compensateUnpublishedCreate(record.runId, checkpoint);
+        await compensateUnpublishedCreate(record.runId, checkpoint, encodedMeta.value);
         return err(idx.error);
       }
       // Metadata is the publication point and remains create-once with TTL.
-      const published = await redis.setNx(runKey(tenant, record.runId), JSON.stringify(meta), expiry);
+      const published = await redis.setNx(runKey(tenant, record.runId), encodedMeta.value, expiry);
       if (!published.ok) {
-        await compensateUnpublishedCreate(record.runId, checkpoint);
+        await compensateUnpublishedCreate(record.runId, checkpoint, encodedMeta.value);
         return err(published.error);
       }
       if (!published.value) {
-        await compensateUnpublishedCreate(record.runId, checkpoint);
+        await compensateUnpublishedCreate(record.runId, checkpoint, encodedMeta.value);
         return err({ kind: "internal-invariant-violated", message: `run '${record.runId}' already exists`, context: {} });
       }
       return ok(undefined);

@@ -152,14 +152,20 @@ export const handleBotActivity = async (
           : undefined;
       if (mappedTeam !== undefined) {
         const savedTeam = await deps.conversations.saveTeamReference(mappedTeam, ref);
-        if (!savedTeam.ok) deps.logger?.error?.("hitl/bot: failed to persist team conversation reference", { team: mappedTeam, error: savedTeam.error.kind });
-        else deps.logger?.info?.("hitl/bot: captured per-team conversation reference", { team: mappedTeam });
+        if (!savedTeam.ok) {
+          deps.logger?.error?.("hitl/bot: failed to persist team conversation reference", { team: mappedTeam, error: savedTeam.error.kind });
+          return { status: 503 };
+        }
+        deps.logger?.info?.("hitl/bot: captured per-team conversation reference", { team: mappedTeam });
       } else {
         deps.logger?.info?.("hitl/bot: conversationUpdate with no mapped team — default reference only", { aadGroupId });
       }
       const saved = await deps.conversations.saveDefaultReference(ref);
-      if (!saved.ok) deps.logger?.error?.("hitl/bot: failed to persist conversation reference", { error: saved.error.kind });
-      else deps.logger?.info?.("hitl/bot: captured default conversation reference for proactive reviews");
+      if (!saved.ok) {
+        deps.logger?.error?.("hitl/bot: failed to persist conversation reference", { error: saved.error.kind });
+        return { status: 503 };
+      }
+      deps.logger?.info?.("hitl/bot: captured default conversation reference for proactive reviews");
     }
     return { status: 200 };
   }

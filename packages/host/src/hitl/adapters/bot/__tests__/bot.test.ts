@@ -250,6 +250,30 @@ describe("bot messages handler", () => {
     expect(def.ok && def.value?.conversationId).toBe("19:sales");
   });
 
+  it("returns 503 and does not acknowledge a mapped team reference that failed to persist", async () => {
+    const base = createInMemoryConversationStore();
+    const conversations = {
+      ...base,
+      async saveTeamReference(): Promise<Result<void, HostError>> {
+        return err({ kind: "redis-unavailable", operation: "save team conversation" });
+      },
+    };
+
+    const res = await handleBotActivity(
+      botDeps(fakeHitl(), conversations),
+      { authHeader: "Bearer x", activity: {
+        type: "conversationUpdate",
+        serviceUrl: TRUSTED_SERVICE_URL,
+        conversation: { id: "19:sales" },
+        channelData: { team: { aadGroupId: "grp-sales" } },
+      } },
+    );
+
+    expect(res.status).toBe(503);
+    expect(await base.getTeamReference("sales")).toEqual(ok(null));
+    expect(await base.getDefaultReference()).toEqual(ok(null));
+  });
+
   it("conversationUpdate with an UNMAPPED team aadGroupId stores only the default (no team reference)", async () => {
     const conversations = createInMemoryConversationStore();
     const res = await handleBotActivity(

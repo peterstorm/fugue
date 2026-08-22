@@ -14,6 +14,7 @@ import type { ConcurrencyState } from "../../domain/concurrency.js";
 import { initCircuit } from "../../domain/circuit-breaker.js";
 import type { CircuitState } from "../../domain/circuit-breaker.js";
 import type { AuthIdentity } from "../../domain/auth.js";
+import type { HitlRunService } from "../../hitl/service.js";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -37,6 +38,15 @@ const makeDag = (id: string, team = "test-team"): RegisteredDag => ({
 const makeDisabledDag = (id: string): RegisteredDag => ({
   ...makeDag(id),
   status: { kind: "disabled", reason: "circuit open" },
+});
+
+const makeHitlDag = (id: string): RegisteredDag => ({
+  ...makeDag(id),
+  dag: {
+    id: dagId(id),
+    nodes: [{ humanReview: { prompt: "Approve?" } }],
+    edges: [],
+  } as unknown as RegisteredDag["dag"],
 });
 
 const makeReadyState = (registry: Registry): HostState => ({
@@ -152,13 +162,36 @@ describe("run-dag handler", () => {
     expect(res.status).toBe(401);
   });
 
-  it("returns 403 when team cannot access DAG", async () => {
+  it("returns 403 before invoking either synchronous or HITL execution for another team", async () => {
     const identity: AuthIdentity = { kind: "team", team: "other-team", label: "other" };
-    const app = createTestApp(defaultDeps(), readyState, identity);
-    const res = await post(app, "test-dag", { query: "hi" });
-    expect(res.status).toBe(403);
-    const body = await res.json();
-    expect(body.error).toBe("forbidden");
+
+    for (const candidate of [makeDag("sync-denied"), makeHitlDag("hitl-denied")]) {
+      let executeCalls = 0;
+      let startRunCalls = 0;
+      let concurrencyWrites = 0;
+      const hitl = {
+        async startRun() {
+          startRunCalls++;
+          return ok({ runId: "should-not-run" as never });
+        },
+      } as HitlRunService;
+      const deps = defaultDeps({
+        hitl,
+        executeDag: (async () => {
+          executeCalls++;
+          return ok({ unreachable: true });
+        }) as RunDagDeps["executeDag"],
+        setConcurrency: () => { concurrencyWrites++; },
+      });
+      const deniedState = makeReadyState(freeze([candidate], sha, Date.now()));
+      const res = await post(createTestApp(deps, deniedState, identity), candidate.id, { query: "hi" });
+
+      expect(res.status).toBe(403);
+      expect((await res.json()).error).toBe("forbidden");
+      expect(executeCalls).toBe(0);
+      expect(startRunCalls).toBe(0);
+      expect(concurrencyWrites).toBe(0);
+    }
   });
 
   describe("identity threading into the run (FR-W3-007)", () => {

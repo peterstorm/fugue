@@ -39,8 +39,7 @@ import type { RegisteredDag } from "../../../domain/registry.js";
 import { tryRunTimestampMs } from "../../types.js";
 import type { PersistedIdentity, QueuedRunRecord, RunTimestampMs } from "../../types.js";
 import { makeRunStoreJobLike } from "../../run-store-job.js";
-import { issueRunLease } from "../../ports.js";
-import { createInMemoryRunStore } from "../run-store.js";
+import { createInMemoryRunLeaseAuthority, createInMemoryRunStore } from "../run-store.js";
 import { createRunExecutor } from "../run-executor.js";
 
 // ── in-memory SharedInfra ─────────────────────────────────────────────────────
@@ -130,7 +129,8 @@ const seedJobLike = async (dag: DagDef, input: unknown, failCheckpoint = false) 
     state: compiled.value.initialState,
     context: stripNonPersistable(compiled.value.initialContext),
   });
-  const store = createInMemoryRunStore();
+  const leases = createInMemoryRunLeaseAuthority();
+  const store = createInMemoryRunStore(leases);
   const record: QueuedRunRecord = {
     runId: "run-1" as never,
     dagId: dag.id as DagId,
@@ -143,7 +143,7 @@ const seedJobLike = async (dag: DagDef, input: unknown, failCheckpoint = false) 
     updatedAtMs: timestamp(1),
   };
   await store.create(record);
-  const lease = issueRunLease(record.runId, "test-owner", new AbortController().signal);
+  const lease = leases.acquire(record.runId, "test-owner");
   const runStore = failCheckpoint
     ? { ...store, saveCheckpoint: async () => err({ kind: "redis-unavailable" as const, operation: "saveCheckpoint" }) }
     : store;

@@ -194,6 +194,91 @@ export interface ResumeProofArgs<S, E, C> {
   readonly parseCheckpoint: (data: unknown) => Result<{ state: S; context: C }, string>;
 }
 
+interface CheckpointDecodeArgs<S, C> {
+  readonly runId: RunId;
+  readonly checkpointPath: string;
+  readonly checkpointJson: string;
+  readonly parseCheckpoint: (data: unknown) => Result<{ state: S; context: C }, string>;
+}
+
+/** Decode one checkpoint envelope through the canonical serializer grammar and
+ * the caller-owned payload parser. Gate ordering and diagnostics are part of the
+ * persistence contract: raw JSON → grammar → deserialize → envelope → payload. */
+const decodeCheckpointData = <S, C>(
+  args: CheckpointDecodeArgs<S, C>,
+): Result<{ state: S; context: C }, FrameworkError> => {
+  const { runId, checkpointPath, checkpointJson, parseCheckpoint } = args;
+  const corruptCheckpoint = (message: string): Result<never, FrameworkError> =>
+    err(frameworkError.checkpointCorrupt(runId, `${checkpointPath}: ${message}`));
+
+  let rawEnvelope: unknown;
+  try {
+    rawEnvelope = JSON.parse(checkpointJson);
+  } catch (error) {
+    return corruptCheckpoint(`not valid JSON: ${safeErrorMessage(error)}`);
+  }
+  const grammar = validateSerializedValueGrammar(rawEnvelope, {
+    rootPath: "checkpoint",
+    maxDepth: MAX_SAFE_RECORD_DEPTH,
+    initialDepth: 1,
+  });
+  if (!grammar.ok) {
+    return corruptCheckpoint(
+      `serialized checkpoint is not canonical: ${grammar.error}; the checkpoint is corrupt or hostile and resume fails closed (FR-009)`,
+    );
+  }
+  const envelopeResult = guardCheckpointCorrupt(
+    runId,
+    `${checkpointPath}: deserializeValue threw while decoding a serializer-tagged value inside the checkpoint payload`,
+    () => deserializeValue(rawEnvelope),
+  );
+  if (!envelopeResult.ok) return envelopeResult;
+  const envelope = envelopeResult.value;
+  if (typeof envelope !== "object" || envelope === null || Array.isArray(envelope)) {
+    return corruptCheckpoint(
+      "checkpoint must be a JSON object with the shape { schemaVersion, data: { state, context } }",
+    );
+  }
+  const record = envelope as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (key !== "schemaVersion" && key !== "data") {
+      return corruptCheckpoint(
+        `unknown top-level field ${JSON.stringify(key)} — the checkpoint envelope is exactly { schemaVersion, data: { state, context } }`,
+      );
+    }
+  }
+  if (record.schemaVersion !== JOURNAL_SCHEMA_VERSION) {
+    return corruptCheckpoint(
+      `unsupported schemaVersion ${safeDiagnosticRender(record.schemaVersion)} — expected ${JOURNAL_SCHEMA_VERSION}`,
+    );
+  }
+  if (!("data" in record)) {
+    return corruptCheckpoint(
+      "missing data payload — the checkpoint envelope is { schemaVersion, data: { state, context } }",
+    );
+  }
+  const decodedAttempt = guardCheckpointCorrupt(
+    runId,
+    `${checkpointPath}: parseCheckpoint threw while decoding the checkpoint payload`,
+    () => {
+      const decoded = parseCheckpoint(record.data);
+      if (decoded === null || typeof decoded !== "object" || !("ok" in decoded)) {
+        return {
+          kind: "rejected",
+          message: `parseCheckpoint returned a non-Result value ${safeDiagnosticRender(decoded)}; it must return ok(data) or err(message)`,
+        } as const;
+      }
+      return decoded.ok
+        ? ({ kind: "decoded", value: decoded.value } as const)
+        : ({ kind: "rejected", message: safeErrorMessage(decoded.error) } as const);
+    },
+  );
+  if (!decodedAttempt.ok) return decodedAttempt;
+  return decodedAttempt.value.kind === "decoded"
+    ? ok(decodedAttempt.value.value)
+    : corruptCheckpoint(decodedAttempt.value.message);
+};
+
 /**
  * The ADR-0077 agreement proof over already-acquired representations — see the
  * module header for the algorithm and the totality discipline. Always
@@ -254,96 +339,14 @@ export const proveResumeAgreement = <S, E, C>(
   //    excessive-depth failures never rely on the permissive decoder
   //    throwing.
   const checkpointPath = join(directory, CHECKPOINT_FILE);
-  const corruptCheckpoint = (message: string): Result<never, FrameworkError> =>
-    err(frameworkError.checkpointCorrupt(runId, `${checkpointPath}: ${message}`));
-
-  // Raw-JSON seam, identical to the strict record codec's ordering:
-  // `JSON.parse` → validate the COMPLETE raw checkpoint with the shared exact
-  // serializer grammar → `deserializeValue`. A weaker pollution-only scan is
-  // deliberately not duplicated here. The shared iterative validator sees
-  // every nested raw object before the decoder can reinterpret a reserved tag
-  // or erase a sibling/pollution field, and enforces the same bounded canonical
-  // Map/Set/Date/undefined grammar used by event records and node outputs.
-  // `initialDepth: 1` counts the checkpoint envelope at depth 1 — exactly the
-  // depth at which the write codec's losslessness pre-scan starts
-  // (`assertLosslessEvent(payload)` in checkpoint-record.ts), so the write
-  // and read boundaries share ONE depth domain: a checkpoint the writer can
-  // produce is never rejected as too deep by resume, and one the writer
-  // refuses is refused here too (FR-009 identical counting).
-  let rawEnvelope: unknown;
-  try {
-    rawEnvelope = JSON.parse(checkpointJson);
-  } catch (error) {
-    return corruptCheckpoint(`not valid JSON: ${safeErrorMessage(error)}`);
-  }
-  const grammar = validateSerializedValueGrammar(rawEnvelope, {
-    rootPath: "checkpoint",
-    maxDepth: MAX_SAFE_RECORD_DEPTH,
-    initialDepth: 1,
+  const checkpointDataResult = decodeCheckpointData({
+    runId,
+    checkpointPath,
+    checkpointJson,
+    parseCheckpoint,
   });
-  if (!grammar.ok) {
-    return corruptCheckpoint(
-      `serialized checkpoint is not canonical: ${grammar.error}; the checkpoint is corrupt or hostile and resume fails closed (FR-009)`,
-    );
-  }
-  const envelopeResult = guardCheckpointCorrupt(
-    runId,
-    `${checkpointPath}: deserializeValue threw while decoding a serializer-tagged value inside the checkpoint payload`,
-    () => deserializeValue(rawEnvelope),
-  );
-  if (!envelopeResult.ok) return envelopeResult;
-  const envelope = envelopeResult.value;
-  if (typeof envelope !== "object" || envelope === null || Array.isArray(envelope)) {
-    return corruptCheckpoint(
-      "checkpoint must be a JSON object with the shape { schemaVersion, data: { state, context } }",
-    );
-  }
-  const record = envelope as Record<string, unknown>;
-  for (const key of Object.keys(record)) {
-    if (key !== "schemaVersion" && key !== "data") {
-      return corruptCheckpoint(
-        `unknown top-level field ${JSON.stringify(key)} — the checkpoint envelope is exactly { schemaVersion, data: { state, context } }`,
-      );
-    }
-  }
-  if (record.schemaVersion !== JOURNAL_SCHEMA_VERSION) {
-    return corruptCheckpoint(
-      `unsupported schemaVersion ${safeDiagnosticRender(record.schemaVersion)} — expected ${JOURNAL_SCHEMA_VERSION}`,
-    );
-  }
-  if (!("data" in record)) {
-    return corruptCheckpoint(
-      "missing data payload — the checkpoint envelope is { schemaVersion, data: { state, context } }",
-    );
-  }
-  const decodedAttempt = guardCheckpointCorrupt(
-    runId,
-    `${checkpointPath}: parseCheckpoint threw while decoding the checkpoint payload`,
-    () => {
-      const decoded = parseCheckpoint(record.data);
-      // A decoder that FORGETS the Result wrapper (returns the bare
-      // `{ state, context }` payload) would otherwise fall into the rejected
-      // arm with `decoded.error === undefined` — resume would still fail
-      // closed and typed, but the reason the operator greps for would read
-      // `<checkpoint path>: undefined`. Name the off-contract RETURN instead
-      // of its (absent) error. A throwing `ok`/`error` accessor still throws
-      // here and is handled by the guard above.
-      if (decoded === null || typeof decoded !== "object" || !("ok" in decoded)) {
-        return {
-          kind: "rejected",
-          message: `parseCheckpoint returned a non-Result value ${safeDiagnosticRender(decoded)}; it must return ok(data) or err(message)`,
-        } as const;
-      }
-      return decoded.ok
-        ? ({ kind: "decoded", value: decoded.value } as const)
-        : ({ kind: "rejected", message: safeErrorMessage(decoded.error) } as const);
-    },
-  );
-  if (!decodedAttempt.ok) return decodedAttempt;
-  if (decodedAttempt.value.kind === "rejected") {
-    return corruptCheckpoint(decodedAttempt.value.message);
-  }
-  const checkpointData = decodedAttempt.value.value;
+  if (!checkpointDataResult.ok) return checkpointDataResult;
+  const checkpointData = checkpointDataResult.value;
 
   // 4. Agreement (ADR-0077 step 6): the checkpoint equals the FULL replay ⇒
   //    resume from `replayed`. Context is deliberately not compared — the

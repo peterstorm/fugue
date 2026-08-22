@@ -38,12 +38,27 @@ import type { DecisionStorePort, PendingReview } from "../ports.js";
  * constructor the ingress paths use, so a persisted reroute target outside
  * `ID_PATTERN` is rejected rather than flowing in as a branded `NodeId`.
  */
-const HumanActionSchema = z.discriminatedUnion("kind", [
+const PersistedNodeIdSchema: z.ZodType<NodeId> = z.string().transform((value, context) => {
+  const parsed = tryNodeId(value);
+  if (parsed.ok) return parsed.value;
+  context.addIssue({ code: "custom", message: "value is not a valid branded id" });
+  return z.NEVER;
+});
+
+const HumanActionSchemaDefinition = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("approve"), actor: z.string().optional() }),
   z.object({ kind: z.literal("approve-with-edit"), newOutput: z.unknown(), actor: z.string().optional() }),
   z.object({ kind: z.literal("reject"), reason: z.string(), actor: z.string().optional() }),
-  z.object({ kind: z.literal("reroute"), targetNodeId: z.string().refine((s) => tryNodeId(s).ok, { message: "value is not a valid branded id" }), reason: z.string().optional(), actor: z.string().optional() }),
+  z.object({ kind: z.literal("reroute"), targetNodeId: PersistedNodeIdSchema, reason: z.string().optional(), actor: z.string().optional() }),
 ]);
+type MissingHumanActionKind = Exclude<
+  HumanAction["kind"],
+  z.output<typeof HumanActionSchemaDefinition>["kind"]
+>;
+type ExhaustiveHumanActionSchema = [MissingHumanActionKind] extends [never]
+  ? z.ZodType<HumanAction>
+  : never;
+const HumanActionSchema: ExhaustiveHumanActionSchema = HumanActionSchemaDefinition;
 
 /**
  * Composite-key separator between `runId` and `nodeId`. The unit separator
@@ -186,7 +201,7 @@ export const createRedisDecisionStore = (
         });
         return err({ kind: "internal-invariant-violated", message: `corrupt decision for '${runId}/${nodeId}'`, context: {} });
       }
-      return ok(parsed.data as HumanAction);
+      return ok(parsed.data);
     },
 
     async clear(runId, nodeId): Promise<Result<void, HostError>> {

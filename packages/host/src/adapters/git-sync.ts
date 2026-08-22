@@ -5,7 +5,7 @@
  * The BunGitAdapter implements it by shelling out to `git` via Bun.spawn.
  *
  * Dev mode: When `DAGS_LOCAL_PATH` is set, LocalGitAdapter reads the directory
- * directly and hashes file mtimes for SHA comparison.
+ * directly and hashes file mtimes and sizes for SHA comparison.
  *
  * @satisfies FR-001 — Poll git branch and detect new commits by comparing SHAs
  * @satisfies FR-005 — Run bun install if the lockfile (bun.lock / bun.lockb) changed between commits
@@ -220,7 +220,7 @@ export const createBunGitAdapter = (timeoutMs: number = DEFAULT_TIMEOUT_MS): Git
 /**
  * Create a local filesystem adapter for dev mode.
  * Skips clone/pull — reads directory directly.
- * currentSha returns a hash of file modification times.
+ * currentSha returns a hash of file modification times and sizes.
  *
  * NOTE: The mtime hash uses a simplified djb2-like algorithm. Hash collisions
  * are possible (two different file states → same hash → sync skipped).

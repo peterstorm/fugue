@@ -1,129 +1,111 @@
 # PR Remediation Plan — 2026-08-22
 
-## Authority
+## Authority and exact scope
 
 - Branch: `feat/f6-file-durable-runtime`
-- Review run: `.claude/reviews/review-and-fix-runs/standalone-review-20260822T171900Z`
-- Canonical result: `.claude/reviews/review-and-fix-runs/standalone-review-20260822T171900Z/result.json`
-- Frozen review scope: the exact 435-path `result.json.scope` array.
-- Baseline: 182 targeted tests passed, 0 failed.
-- Required support paths outside frozen scope: `packages/adapter-ms-graph/src/__tests__/ms-graph.test.ts`, `packages/host/src/hitl/adapters/bot/__tests__/connector.test.ts`, and `packages/host/src/hitl/adapters/bot/ports.ts`.
-
-## Planned remediation scope
-
-- `.claude/plans/2026-08-22-pr-remediation.md`
-- `CONTEXT.md`
-- `docs/adr/0060-hitl-suspend-resume-primitive.md`
-- `packages/adapter-ms-graph/src/index.ts`
-- `packages/adapter-ms-graph/src/__tests__/ms-graph.test.ts`
-- `packages/host/src/host.ts`
-- `packages/host/src/main-supervisor.ts`
-- `packages/host/src/http/handlers/run-dag.ts`
-- `packages/host/src/http/handlers/runs.ts`
-- `packages/host/src/__tests__/handlers/hitl-http.test.ts`
-- `packages/host/src/hitl/types.ts`
-- `packages/host/src/hitl/ports.ts`
-- `packages/host/src/hitl/service.ts`
-- `packages/host/src/hitl/human-review-hook.ts`
-- `packages/host/src/hitl/__tests__/human-review-hook.test.ts`
-- `packages/host/src/hitl/adapters/run-store.ts`
-- `packages/host/src/hitl/adapters/decision-store.ts`
-- `packages/host/src/hitl/adapters/bot/notifier.ts`
-- `packages/host/src/hitl/adapters/bot/messages-handler.ts`
-- `packages/host/src/hitl/adapters/bot/ports.ts`
-- `packages/host/src/hitl/adapters/bot/connector.ts`
-- `packages/host/src/hitl/__tests__/service.test.ts`
-- `packages/host/src/hitl/adapters/__tests__/redis-stores.test.ts`
-- `packages/host/src/hitl/adapters/__tests__/run-executor.test.ts`
-- `packages/host/src/hitl/adapters/__tests__/webhook-notifier.test.ts`
-- `packages/host/src/hitl/adapters/bot/__tests__/bot.test.ts`
-- `packages/host/src/hitl/adapters/bot/__tests__/connector.test.ts`
+- Review run: `.claude/reviews/review-and-fix-runs/standalone-review-20260822T182240Z-01a02ab5`
+- Canonical result: `.claude/reviews/review-and-fix-runs/standalone-review-20260822T182240Z-01a02ab5/result.json`
+- Result digest: `25612dd2cd6fd3c1d5e52c46fdd499c7f6187c576d2bd0223198a33f7b9bb511`
+- Frozen review scope: exactly the 438 paths in the immutable `result.json.scope` array; no path outside that array is reviewed authority.
+- Remediation support paths outside frozen scope: none. This plan and every planned production/regression path are members of the frozen scope.
 
 ## Surviving critical findings — mandatory
 
-### `code-reviewer-1` — resolved team must never fall back to the default channel
+### `pr-test-analyzer-1` — denied DAG execution is not pinned side-effect-free
 
-**Finding:** a resolved team's missing conversation reference falls back to the default channel, disclosing its prompt/output to another channel.
+**Finding:** `POST /dags/:id/run` lacks a route-level negative authorization test proving a non-admin identity from another team receives `403` before either `hitl.startRun` or `executeDag` is invoked.
 
-**Fix:** persist the immutable owning team on each run and carry it on `ReviewNotification`. The Bot notifier will route only to that team's stored conversation reference; a missing reference returns typed `notification-failed` and sends nothing. Remove the live-registry resolver and default fallback from run notification delivery. Add regressions proving no default send occurs.
+**Fix:** extend `packages/host/src/__tests__/handlers/run-dag.test.ts` with denied cross-team requests for both synchronous and HITL DAGs. Use recording fakes and assert `403`, `executeDag` call count zero, `hitl.startRun` call count zero, and no concurrency mutation.
 
-### `code-reviewer-2` — historical run authorization must use immutable ownership
+### `architecture-tech-lead-1` — HITL lease ownership seam has disagreeing adapters
 
-**Finding:** HTTP and Bot authorization derive ownership from the mutable live DAG registry, so DAG reassignment changes access to historical runs.
+**Finding:** Redis writes atomically validate `RunLease.ownerToken`, while the in-memory run-store adapter and service fake accept any non-aborted same-run lease.
 
-**Fix:** add branded `ownerTeam` to `RunRecord`, capture it from the authorized registered DAG at durable creation, parse it at the Redis boundary, and authorize HTTP/Bot access directly against the persisted resource attribute. Add reassignment/removal regressions proving the original owner retains access and a replacement owner gains none.
-
-### `comment-analyzer-1` — active-count contract overstates pruning
-
-**Finding:** the port comment says stale members never inflate the count even though failed pruning is counted conservatively.
-
-**Fix:** state the exact invariant: successfully pruned missing/terminal members are excluded; unprunable members and other uncertain evidence are counted conservatively.
-
-### `code-simplifier-1` — MS Graph catch rendering is non-total
-
-**Finding:** the local `msg` helper can throw while handling a hostile thrown value.
-
-**Fix:** delete the duplicate and reuse framework `safeErrorMessage` at every stock-adapter catch boundary. Add hostile null-prototype regressions for token acquisition, fetch/body handling, and health checks.
-
-### `code-simplifier-2` — Bot connector catch rendering is non-total
-
-**Finding:** Bot connector catch paths repeat `instanceof Error`/`String`, allowing hostile thrown values to escape the typed Result path.
-
-**Fix:** use `safeErrorMessage` at token fetch, token JSON, and send catches. Add hostile thrown-value regressions for each path.
+**Fix:** add one in-memory lease authority used to issue and validate leases, make `createInMemoryRunStore` require that authority for checkpoint/status writes, and migrate HITL service/executor tests to the production in-memory adapter plus the same authority. Add adapter-contract regressions proving a successor lease invalidates a still-live stale owner for both checkpoint and terminal writes, matching the Redis regression.
 
 ## Advisory dispositions
 
 ### Accepted
 
-1. **`code-reviewer-3` — client-controlled audit actor.** Sound identity-integrity issue. Remove body-controlled `actor`; derive the actor from the authenticated `AuthIdentity` after authorization, and test that forged body values cannot enter the recorded `HumanAction`.
-2. **`pr-test-analyzer-1` — throwing logger during run-store compensation.** Sound typed-boundary gap. Make run-store diagnostics total and add a compensation-path regression proving the original `HostError` remains authoritative.
-3. **`pr-test-analyzer-2` — throwing logger during corrupt-decision reporting.** Sound typed-boundary gap. Make decision-store diagnostics total and add malformed/invalid-decision regressions proving no logger exception escapes.
-4. **`type-design-analyzer-1` — unrestricted `RunStorePort.create`.** Sound and narrow. Introduce `QueuedRunRecord` with `status: { kind: "queued" }`; `create` accepts only this creation state, while `get` continues returning the full lifecycle union.
-5. **`comment-analyzer-2` — transitional supervisor comment.** Replace `T8/later waves` with the durable platform-token-store invariant and current ownership rationale.
+1. **`code-reviewer-1` — lossless completed-output persistence.** Sound adapter-parity bug. Persist/read run metadata with the framework `toJson`/`fromJson` codec rather than plain JSON, retain strict `RunMetaSchema` parsing after decode, and add Map/Set/Date completed-output round-trip coverage.
+2. **`code-reviewer-2` — ambiguous metadata publication.** Sound Redis failure ambiguity. Serialize metadata once and include an exact-value `compareAndDelete` of the metadata publication key in failed-create compensation. Add a write-then-error fake proving no metadata-only run survives.
+3. **`code-reviewer-3` — mapped conversation persistence acknowledged despite failure.** Sound delivery gap. Return a retryable `503` when owner-team conversation persistence fails so Bot Framework can retry; add a handler regression proving the failure is caller-visible and default persistence cannot turn it into success.
+4. **`type-design-analyzer-1` — HumanAction schema drift.** Sound compile-time coupling gap. Type the persisted-decision schema against `HumanAction` and preserve branded reroute parsing so a new action variant fails compilation until persistence handles it.
+5. **`type-design-analyzer-2` — FrameworkError schema drift.** Sound compile-time coupling gap. Type the persisted-failure schema against `FrameworkError` so union changes cannot compile without updating the persistence parser; retain strict mandatory-field tests.
+6. **`comment-analyzer-1` — local SHA comment drift.** Sound documentation defect. State that dev-mode SHA hashes modification times and sizes.
+7. **`code-simplifier-1` — resume proof mixes envelope decoding with agreement logic.** Sound altitude issue. Extract a private pure checkpoint decoder preserving gate order, diagnostics, and `Result` behavior; run the full resume-proof suite after the move.
+8. **`code-simplifier-2` — active-index prune/log duplication.** Sound local duplication. Extract one local prune-and-warn helper while preserving each branch’s conservative-count decision.
 
 ### Deferred
 
-1. **`architecture-tech-lead-1` — serialized checkpoint strings.** Sound, but a truthful value object must coordinate seed serialization, Redis parsing, `RunExecutionRequest`, `RunStorePort`, and framework checkpoint codec semantics. The current Redis/job construction paths already parse the high-risk stored bytes. Defer to a dedicated checkpoint-codec deepening rather than adding a field-only brand that lies at the physical boundary.
-2. **`architecture-tech-lead-2` — mutable `RunStoreJobLike.data`.** Sound contract drift, but fixing only this adapter would create a stronger snapshot promise than shared `JobLike` and the memory/BullMQ adapters expose. Defer to a coordinated JobLike immutable-snapshot contract with adapter-parity tests.
+1. **`architecture-tech-lead-2` — framework-owned FrameworkError persistence codec.** The ownership concern is sound, but moving the parser into the framework changes a public cross-package seam and requires a coordinated persistence-version policy. This remediation accepts the overlapping compile-coupling advisory (`type-design-analyzer-2`) so drift fails the build, while deferring codec ownership to a dedicated framework persistence deepening.
 
 ### Dismissed
 
-1. **`type-design-analyzer-2` — raw lease owner token/exported issuer.** Dismiss: this module is not publicly exported, only the queue adapter and tests issue leases, and durable writes independently compare the unpredictable live Redis token atomically. Branding an internally generated UUID would not add runtime authority; the Redis fence is the authority.
-2. **`code-simplifier-3` — worker lifecycle fixture factory.** Dismiss: test-only repetition does not affect correctness, and a broad fixture rewrite would add review churn unrelated to surviving or accepted remediation.
-3. **`code-simplifier-4` — shared NodeContext test factory.** Dismiss: the existing shared context factories model DAG-machine context, not `NodeContext`; consolidating many unrelated framework suites is a broad test-architecture refactor with no correctness benefit in this remediation.
+None.
 
 ## Refuted critical audit — retain, never fix
 
 ### `silent-failure-hunter-1`
 
-**Claim:** `startRun` hides a lost initial wakeup after durable creation.
+**Claim:** `startRun` returns success after direct enqueue failure and strands the run.
 
 **Panel evidence:**
 
-- Intent: durable creation is the acceptance boundary; the active index survives and immediate/periodic lifecycle reconciliation retries wakeups, with restart coverage.
-- Security: the wakeup is delayed, not lost; reconciliation enumerates every non-terminal active record and retries enqueue.
+- Reproduction: service tests reproduce initial enqueue failure and prove later wakeup, including after restart; `host.ts` starts and periodically runs reconciliation.
+- Intent: durable run creation is the acceptance boundary; the queue is a wakeup trigger, and reconciliation owns delayed delivery.
+- Security: the durable active record remains authoritative and discoverable, so the wakeup is delayed rather than lost.
 
-No compensation/deletion behavior will be introduced.
+No create compensation or caller-visible enqueue failure will be introduced.
 
 ### `silent-failure-hunter-2`
 
-**Claim:** `recordDecision` reports success when direct resume enqueue fails.
+**Claim:** `recordDecision` returns success after direct resume enqueue failure and loses resume.
 
 **Panel evidence:**
 
-- Intent: the accepted decision remains durable and reconciliation specifically re-enqueues suspended runs with stored decisions.
-- Security: direct enqueue failure delays rather than loses resume; durable decision state is the authority.
+- Reproduction: `a stored decision whose direct wakeup fails completes after reconciliation` reaches terminal completion.
+- Intent: the decision is durably accepted before enqueue; reconciliation re-enqueues suspended runs with stored decisions.
+- Security: durable decision state remains authoritative, so direct enqueue failure delays rather than loses resume.
 
-No rollback or false failure response will be introduced.
+No decision rollback or false failure response will be introduced.
+
+### `pr-test-analyzer-2`
+
+**Claim:** the manifest route lacks cross-team negative authorization coverage.
+
+**Panel evidence:**
+
+- Reproduction: `manifest.test.ts` already sends another team through the real route and asserts `403`.
+- Intent: the existing route-level test pins the intended cross-team denial, and `buildManifest` is pure.
+- Security: authorization precedes manifest construction and no schema metadata is returned.
+
+No duplicate manifest test will be added.
+
+## Planned files
+
+- `.claude/plans/2026-08-22-pr-remediation.md`
+- `packages/host/src/hitl/ports.ts`
+- `packages/host/src/hitl/adapters/run-store.ts`
+- `packages/host/src/hitl/adapters/decision-store.ts`
+- `packages/host/src/hitl/adapters/bot/messages-handler.ts`
+- `packages/host/src/adapters/git-sync.ts`
+- `packages/framework/src/file/resume-proof.ts`
+- `packages/host/src/__tests__/handlers/run-dag.test.ts`
+- `packages/host/src/hitl/__tests__/service.test.ts`
+- `packages/host/src/hitl/adapters/__tests__/run-executor.test.ts`
+- `packages/host/src/hitl/adapters/__tests__/redis-stores.test.ts`
+- `packages/host/src/hitl/adapters/bot/__tests__/bot.test.ts`
+- `packages/framework/src/__tests__/file-resume-proof.test.ts` (validation authority; edit only if extraction exposes a missing regression)
 
 ## Validation
 
-1. Targeted regressions:
+1. Baseline and focused regressions:
    ```bash
-   bun test packages/host/src/hitl/__tests__/service.test.ts packages/host/src/hitl/__tests__/human-review-hook.test.ts packages/host/src/hitl/__tests__/run-store-job.test.ts packages/host/src/hitl/adapters/__tests__/redis-stores.test.ts packages/host/src/hitl/adapters/bot/__tests__/bot.test.ts packages/host/src/hitl/adapters/bot/__tests__/connector.test.ts packages/host/src/__tests__/handlers/hitl-http.test.ts packages/adapter-ms-graph/src/__tests__/ms-graph.test.ts
+   bun test packages/host/src/__tests__/handlers/run-dag.test.ts packages/host/src/hitl/__tests__/service.test.ts packages/host/src/hitl/adapters/__tests__/run-executor.test.ts packages/host/src/hitl/adapters/__tests__/redis-stores.test.ts packages/host/src/hitl/adapters/bot/__tests__/bot.test.ts packages/framework/src/__tests__/file-resume-proof.test.ts
    ```
 2. Host typecheck: `bun run --filter @fuguejs/host typecheck`
-3. MS Graph typecheck/build: `bun run --filter @fuguejs/ms-graph typecheck && bun run --filter @fuguejs/ms-graph build`
+3. Framework typecheck: `bun run --filter @fuguejs/framework typecheck`
 4. Full workspace typecheck: `bun run typecheck`
 5. Full workspace tests: `bun run test`
 6. Documentation links: `bun run check:docs`

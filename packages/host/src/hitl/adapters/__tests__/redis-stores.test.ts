@@ -11,7 +11,7 @@ import { tenantId } from "../../../domain/tenant.js";
 import type { TenantId } from "../../../domain/tenant.js";
 import { tryRunTimestampMs } from "../../types.js";
 import type { QueuedRunRecord, RunTimestampMs } from "../../types.js";
-import { createRedisRunStore } from "../run-store.js";
+import { createInMemoryRunLeaseAuthority, createInMemoryRunStore, createRedisRunStore } from "../run-store.js";
 import { createRedisDecisionStore } from "../decision-store.js";
 import { issueRunLease } from "../../ports.js";
 import type { RunLease } from "../../ports.js";
@@ -129,6 +129,29 @@ const record = (overrides: Partial<QueuedRunRecord> = {}): QueuedRunRecord => ({
   ...overrides,
 });
 
+describe("InMemoryRunStore — lease parity", () => {
+  it("rejects still-live stale-owner writes after a successor acquires the run", async () => {
+    const leases = createInMemoryRunLeaseAuthority();
+    const store = createInMemoryRunStore(leases, () => 200);
+    const run = record();
+    await store.create(run);
+    const stale = leases.acquire(run.runId, "stale-owner");
+    const successor = leases.acquire(run.runId, "successor-owner");
+
+    expect(await store.saveCheckpoint(stale, "stale-checkpoint")).toEqual(
+      err({ kind: "run-lease-lost", runId: run.runId }),
+    );
+    expect(await store.setStatus(stale, { kind: "completed", output: "stale" })).toEqual(
+      err({ kind: "run-lease-lost", runId: run.runId }),
+    );
+    expect((await store.setStatus(successor, { kind: "completed", output: "successor" })).ok).toBe(true);
+
+    const persisted = await store.get(run.runId);
+    expect(persisted.ok && persisted.value?.checkpoint).toBe(run.checkpoint);
+    expect(persisted.ok && persisted.value?.status).toEqual({ kind: "completed", output: "successor" });
+  });
+});
+
 describe("RedisRunStore", () => {
   const cfg = { ttlSec: 3600 };
 
@@ -152,6 +175,23 @@ describe("RedisRunStore", () => {
     // The checkpoint is also create-once with TTL, so a duplicate publication
     // attempt cannot overwrite an existing run before metadata NX rejects it.
     expect(redis.setNxOpts.get("fugue:tenant-a:hitl:ckpt:run-1")).toEqual({ expiresInSec: 4242 });
+  });
+
+  it("completed output round-trips Map, Set, and Date without adapter drift", async () => {
+    const redis = fakeRedis();
+    const store = createRedisRunStore(redis, TENANT, cfg);
+    const run = record();
+    await store.create(run);
+    const lease = await acquireLease(redis, run.runId);
+    const output = {
+      byNode: new Map([["review", new Set(["approved", "audited"])]]),
+      completedAt: new Date("2026-08-22T18:30:00.000Z"),
+    };
+
+    expect((await store.setStatus(lease, { kind: "completed", output })).ok).toBe(true);
+    const persisted = await store.get(run.runId);
+
+    expect(persisted.ok && persisted.value?.status).toEqual({ kind: "completed", output });
   });
 
   it("saveCheckpoint and setStatus re-apply the TTL (sliding expiry, never a TTL-less write)", async () => {
@@ -700,6 +740,25 @@ describe("RedisRunStore — active-run index (ADR-0074)", () => {
     expect((await store.create(record())).ok).toBe(true);
     expect(observedDuringPublication).toEqual([]); // unpublished is not runnable
     expect(await store.listActiveRunIds()).toEqual(ok(["run-1" as RunId]));
+  });
+
+  it("compensates an ambiguously committed metadata publication after write-then-error", async () => {
+    const base = setBackedRedis();
+    const redis: HitlRedisPort = {
+      ...base.redis,
+      async setNx(key, value, opts) {
+        if (!key.includes(":hitl:run:")) return base.redis.setNx(key, value, opts);
+        const committed = await base.redis.setNx(key, value, opts);
+        if (!committed.ok || !committed.value) return committed;
+        return err({ kind: "redis-unavailable", operation: "metadata response lost" });
+      },
+    };
+    const store = createRedisRunStore(redis, TENANT, cfg);
+
+    expect((await store.create(record())).ok).toBe(false);
+    expect(base.kv.has("fugue:tenant-a:hitl:run:run-1")).toBe(false);
+    expect(base.kv.has("fugue:tenant-a:hitl:ckpt:run-1")).toBe(false);
+    expect(base.sets.get("fugue:tenant-a:hitl:active")?.has("run-1") ?? false).toBe(false);
   });
 
   it("compensates metadata publication failure without consuming a quota slot", async () => {
