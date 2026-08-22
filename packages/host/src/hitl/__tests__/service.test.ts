@@ -41,7 +41,8 @@ import type { HostError } from "../../domain/host-error.js";
 import type { AuthIdentity } from "../../domain/auth.js";
 import { tenantId } from "../../domain/tenant.js";
 import type { TenantId } from "../../domain/tenant.js";
-import type { RunRecord, RunStatus, ReviewNotification } from "../types.js";
+import { tryRunTimestampMs } from "../types.js";
+import type { RunRecord, RunStatus, ReviewNotification, RunTimestampMs } from "../types.js";
 import type {
   RunStorePort,
   RunQueuePort,
@@ -57,6 +58,12 @@ import type { HitlRunService } from "../service.js";
 // ---------------------------------------------------------------------------
 // In-memory fakes
 // ---------------------------------------------------------------------------
+
+const timestamp = (value: number): RunTimestampMs => {
+  const parsed = tryRunTimestampMs(value);
+  if (!parsed.ok) throw new Error(`invalid test timestamp: ${parsed.error}`);
+  return parsed.value;
+};
 
 const inMemoryRunStore = () => {
   const runs = new Map<string, RunRecord>();
@@ -77,13 +84,13 @@ const inMemoryRunStore = () => {
     async saveCheckpoint(runId, checkpoint) {
       const r = runs.get(runId);
       if (!r) return err({ kind: "run-not-found", runId });
-      runs.set(runId, { ...r, checkpoint, updatedAtMs: r.updatedAtMs + 1 });
+      runs.set(runId, { ...r, checkpoint, updatedAtMs: timestamp(r.updatedAtMs + 1) });
       return ok(undefined);
     },
     async setStatus(runId, status: RunStatus) {
       const r = runs.get(runId);
       if (!r) return err({ kind: "run-not-found", runId });
-      runs.set(runId, { ...r, status, updatedAtMs: r.updatedAtMs + 1 });
+      runs.set(runId, { ...r, status, updatedAtMs: timestamp(r.updatedAtMs + 1) });
       if (isTerminal(status)) active.delete(runId);
       return ok(undefined);
     },

@@ -70,6 +70,12 @@ class FakeExporter implements SpanExporter {
 const exportOnce = (exp: SpanExporter, spans: ReadableSpan[]): Promise<ExportResult> =>
   new Promise((resolve) => exp.export(spans, resolve));
 
+const hostileThrownValue = (): unknown =>
+  new Proxy({}, {
+    get() { throw new Error("hostile getter"); },
+    getPrototypeOf() { throw new Error("hostile prototype"); },
+  });
+
 // Recording logger so warn-spam assertions can be made without console noise.
 let warnings: string[] = [];
 let errors: string[] = [];
@@ -204,6 +210,22 @@ describe("CompositeSpanExporter — fault isolation", () => {
       { index: 0, failures: 1 },
       { index: 1, failures: 0 },
     ]);
+  });
+
+  it("hostile thrown values cannot escape export, forceFlush, or shutdown", async () => {
+    const hostile = hostileThrownValue();
+    const child: SpanExporter = {
+      export() { throw hostile; },
+      async forceFlush() { throw hostile; },
+      async shutdown() { throw hostile; },
+    };
+    const composite = new CompositeSpanExporter([child]);
+
+    await expect(exportOnce(composite, [fakeSpan("s")])).resolves.toMatchObject({
+      code: ExportResultCode.FAILED,
+    });
+    await expect(composite.forceFlush()).resolves.toBeUndefined();
+    await expect(composite.shutdown()).resolves.toBeUndefined();
   });
 
   it("one child returning FAILED does not stop others; aggregate is SUCCESS", async () => {

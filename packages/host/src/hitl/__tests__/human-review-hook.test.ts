@@ -101,22 +101,18 @@ describe("makeOnHumanReview", () => {
     expect(notifyCalls).toBe(1); // attempted once on first park, never on re-park
   });
 
-  it("fails OPEN when markPending errors — assumes first park and notifies anyway", async () => {
-    // A markPending store blip must not silence the review: better a possible
-    // duplicate notification on a later re-park than a run parked with no notice
-    // at all. The hook treats an errored markPending as the first park.
+  it("fails closed when markPending errors — rejects and does not notify", async () => {
     const notifier = notifierSpy();
     const decisions = decisionStore({
       async markPending() { return err({ kind: "redis-unavailable", operation: "SET NX pending" }); },
     });
     const hook = makeOnHumanReview({ decisions, notifier: notifier.port, runId: RUN, dagId: DAG });
 
-    expect(await hook(req)).toEqual({ kind: "pending" });
-    expect(notifier.sent).toHaveLength(1); // notified despite the marker write failing
-    expect(notifier.sent[0]!.nodeId).toBe(NODE);
+    await expect(hook(req)).rejects.toThrow("markPending failed");
+    expect(notifier.sent).toHaveLength(0);
   });
 
-  it("throwing diagnostics cannot bypass decision, marker, or notification fallbacks", async () => {
+  it("throwing diagnostics cannot bypass decision, marker, or notification outcomes", async () => {
     const logger = {
       info: () => {},
       warn: () => { throw new Error("warn transport failed"); },
@@ -151,7 +147,7 @@ describe("makeOnHumanReview", () => {
     });
 
     expect(await lookupFailure(req)).toEqual({ kind: "pending" });
-    expect(await markerFailure(req)).toEqual({ kind: "pending" });
+    await expect(markerFailure(req)).rejects.toThrow("markPending failed");
     expect(await notificationFailure(req)).toEqual({ kind: "pending" });
   });
 });

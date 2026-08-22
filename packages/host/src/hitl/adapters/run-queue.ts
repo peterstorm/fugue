@@ -7,8 +7,8 @@
  * so a re-enqueue to RESUME a parked run always works even after the prior job
  * completed. Concurrency safety (a double-approval enqueuing the same run twice)
  * is enforced by a single-flight Redis lock around `processRun`, so a run is
- * executed concurrently while its owner keeps the Redis lease alive (which
- * would double-run side-effecting nodes).
+ * not executed concurrently while its owner keeps the Redis lease alive (which
+ * prevents double-running side-effecting nodes).
  */
 
 import { ok, err, safeErrorMessage } from "@fuguejs/framework";
@@ -18,8 +18,19 @@ import type { TenantId } from "../../domain/tenant.js";
 import type { RedisPort, LogPort } from "../../ports.js";
 import type { RunQueuePort } from "../ports.js";
 
-/** Trigger envelope: the queue only needs the run id. */
-type RunTrigger = { state: RunId; context: null };
+/** Trigger envelope binds the wakeup to its tenant as well as its durable run id. */
+type RunTrigger = { readonly state: RunId; readonly context: { readonly tenant: TenantId } };
+
+type LeaseRedisPort = RedisPort & {
+  readonly compareAndExpire: NonNullable<RedisPort["compareAndExpire"]>;
+};
+
+const requireLeaseRedis = (redis: RedisPort): LeaseRedisPort => {
+  if (redis.compareAndExpire === undefined) {
+    throw new Error("hitl: Redis lease renewal is unavailable");
+  }
+  return redis as LeaseRedisPort;
+};
 
 interface RunQueueDeps {
   readonly backend: QueueBackend;
@@ -32,7 +43,7 @@ interface RunQueueDeps {
    * cannot be built without a tenant.
    */
   readonly tenant: TenantId;
-  /** Queue name (default `fugue-hitl-runs`). */
+  /** Queue name (default is tenant-qualified). */
   readonly queueName?: string;
   /**
    * Single-flight lock TTL (seconds). Bounds how long a crashed worker's lock
@@ -74,14 +85,14 @@ interface RunQueueHandle {
 const lockKey = (tenant: TenantId, runId: RunId): string => `fugue:${tenant}:hitl:lock:${runId}`;
 
 export const createRunQueue = (deps: RunQueueDeps): RunQueueHandle => {
-  const { backend, redis, tenant, lockTtlSec, logger } = deps;
-  const name = deps.queueName ?? "fugue-hitl-runs";
+  const { backend, tenant, lockTtlSec, logger } = deps;
+  const name = deps.queueName ?? `fugue:${tenant}:hitl:runs`; 
   const contentionDelayMs = deps.lockContentionDelayMs ?? 1000;
   const maxAttempts = deps.maxAttempts ?? 5;
   const newLockToken = deps.newLockToken ?? (() => crypto.randomUUID());
   // `defaultAttempts` makes a worker that THROWS on a transient infra failure
   // actually retried (the outer crash-fallback loop) instead of acked once.
-  const handle = backend.createQueue<RunId, null>(name, { defaultAttempts: maxAttempts });
+  const handle = backend.createQueue<RunId, { readonly tenant: TenantId }>(name, { defaultAttempts: maxAttempts });
 
   const enqueue = async (runId: RunId, opts?: { delayMs?: number }): Promise<Result<void, HostError>> => {
     try {
@@ -89,7 +100,7 @@ export const createRunQueue = (deps: RunQueueDeps): RunQueueHandle => {
       // rejected as a duplicate.
       await handle.enqueue(
         runId,
-        { state: runId, context: null } satisfies RunTrigger,
+        { state: runId, context: { tenant } } satisfies RunTrigger,
         opts?.delayMs !== undefined ? { delayMs: opts.delayMs } : undefined,
       );
       return ok(undefined);
@@ -104,10 +115,16 @@ export const createRunQueue = (deps: RunQueueDeps): RunQueueHandle => {
     processRun: (runId: RunId) => Promise<Result<void, HostError>>,
     opts?: { concurrency?: number },
   ): WorkerHandle =>
-    backend.createWorker<RunId, null>(
+    backend.createWorker<RunId, { readonly tenant: TenantId }>(
       name,
       async (job) => {
+        // Validate before lock acquisition: an incomplete adapter must fail the
+        // wakeup without leaving a TTL-bound lease behind.
+        const redis = requireLeaseRedis(deps.redis);
         const runId = job.data.state;
+        if (job.data.context.tenant !== tenant) {
+          throw new Error(`hitl: rejected cross-tenant wakeup for ${runId}`);
+        }
 
         // Single-flight: only one worker processes a given run at a time. Every
         // lease carries a fresh owner token; release compares that token
@@ -135,11 +152,8 @@ export const createRunQueue = (deps: RunQueueDeps): RunQueueHandle => {
         }
 
         // A lock is a lease, not a permanent mutex. Renew before half its TTL
-        // elapses, always with the owner token, and fail closed if the bound
-        // Redis adapter cannot verify continued ownership.
-        if (redis.compareAndExpire === undefined) {
-          throw new Error("hitl: Redis lease renewal is unavailable");
-        }
+        // elapses, always with the owner token, and fail closed if ownership
+        // cannot be verified by the construction-validated lease port.
         const compareAndExpire = redis.compareAndExpire;
         const renewEveryMs = Math.max(1, Math.floor(lockTtlSec * 500));
         let renewalFailure: HostError | "ownership-lost" | undefined;
@@ -147,13 +161,17 @@ export const createRunQueue = (deps: RunQueueDeps): RunQueueHandle => {
         const renewLease = (): void => {
           renewalTail = renewalTail.then(async () => {
             if (renewalFailure !== undefined) return;
-            const renewed = await compareAndExpire(lockKey(tenant, runId), lockToken, lockTtlSec);
-            if (!renewed.ok) {
-              renewalFailure = renewed.error;
-              logger?.error?.("hitl: lock renewal failed — retrying", { runId, error: renewed.error.kind });
-            } else if (!renewed.value) {
-              renewalFailure = "ownership-lost";
-              logger?.error?.("hitl: lock ownership lost during processing — retrying", { runId });
+            try {
+              const renewed = await compareAndExpire(lockKey(tenant, runId), lockToken, lockTtlSec);
+              if (!renewed.ok) {
+                renewalFailure = renewed.error;
+                logger?.error?.("hitl: lock renewal failed — retrying", { runId, error: renewed.error.kind });
+              } else if (!renewed.value) {
+                renewalFailure = "ownership-lost";
+                logger?.error?.("hitl: lock ownership lost during processing — retrying", { runId });
+              }
+            } catch (error) {
+              renewalFailure = { kind: "redis-unavailable", operation: `HITL lease renewal: ${safeErrorMessage(error)}` };
             }
           });
         };

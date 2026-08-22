@@ -288,7 +288,7 @@ export const checkHealth = async (
       results.push({
         status: "unhealthy",
         name: handle.name,
-        reason: e instanceof Error ? e.message : String(e),
+        reason: safeErrorMessage(e),
       });
       hasUnhealthy = true;
     }

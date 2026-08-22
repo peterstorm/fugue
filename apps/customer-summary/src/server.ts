@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
-import { runDag, dagFingerprint, FRAMEWORK_VERSION, makeNodeContext, runId as brandRunId, dagId as brandDagId } from "@fuguejs/framework";
+import { runDag, dagFingerprint, FRAMEWORK_VERSION, makeNodeContext, runId as brandRunId, tryRunId, dagId as brandDagId } from "@fuguejs/framework";
 import type { NodeContext, LlmClient, Observer, Checkpointer, ContextCacheAdapter, CheckpointWriter, ContentFilter } from "@fuguejs/framework";
 import type { SummaryResponse } from "./schemas/index.js";
 import type { ConversationSource } from "./sources/conversation-source.js";
@@ -13,7 +13,9 @@ import { consoleAppLogger } from "./logger.js";
 
 const SummarizeRequestSchema = z.object({
   customer_id: z.string().min(1),
-  resume_run_id: z.string().optional(),
+  resume_run_id: z.string().refine((value) => tryRunId(value).ok, {
+    message: "must be a valid run id",
+  }).optional(),
 });
 
 // --- Health check deps ---
@@ -249,24 +251,16 @@ export const createApp = (deps: AppDeps): Hono => {
     // here so the seam is safe-by-construction: a future probe that throws
     // WITHOUT its own internal logging still leaves an operator breadcrumb rather
     // than flipping readiness silently.
-    const redisOk = deps.health?.checkRedis
-      ? await deps.health.checkRedis().catch((err) => {
-          log.debug("[/readyz] checkRedis probe threw — treating Redis as not-ready:", err);
-          return false;
-        })
-      : true;
-    const llmOk = deps.health?.checkLlm
-      ? await deps.health.checkLlm().catch((err) => {
-          log.debug("[/readyz] checkLlm probe threw — treating the LLM as unavailable:", err);
-          return false;
-        })
-      : true;
-    const mlflowOk = deps.health?.checkMlflow
-      ? await deps.health.checkMlflow().catch((err) => {
-          log.debug("[/readyz] checkMlflow probe threw — treating MLflow as unavailable:", err);
-          return false;
-        })
-      : true;
+    const probe = async (check: (() => Promise<boolean>) | undefined, message: string): Promise<boolean> =>
+      check
+        ? check().catch((error) => {
+            log.debug(message, error);
+            return false;
+          })
+        : true;
+    const redisOk = await probe(deps.health?.checkRedis, "[/readyz] checkRedis probe threw — treating Redis as not-ready:");
+    const llmOk = await probe(deps.health?.checkLlm, "[/readyz] checkLlm probe threw — treating the LLM as unavailable:");
+    const mlflowOk = await probe(deps.health?.checkMlflow, "[/readyz] checkMlflow probe threw — treating MLflow as unavailable:");
     // Cumulative per-backend export failures (multi-backend fan-out only).
     // Informational: a failing SECONDARY trace backend degrades the signal but
     // never gates readiness (observability spec FR-026) — exactly like MLflow above.

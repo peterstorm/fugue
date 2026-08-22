@@ -6,7 +6,8 @@ import { describe, it, expect, mock } from "bun:test";
 import { ok, err } from "@fuguejs/framework";
 import type { DagId, RunId, NodeId, Result } from "@fuguejs/framework";
 import type { ReviewNotification } from "../../../types.js";
-import type { RunRecord } from "../../../types.js";
+import { tryRunTimestampMs } from "../../../types.js";
+import type { RunRecord, RunTimestampMs } from "../../../types.js";
 import type { HitlRunService } from "../../../service.js";
 import { buildReviewCard, buildReviewActivity, REVIEW_VERB } from "../card.js";
 import { createBotFrameworkNotifier } from "../notifier.js";
@@ -152,6 +153,12 @@ describe("bot notifier", () => {
 
 const okVerify: VerifyBotToken = async () => ok(undefined);
 
+const timestamp = (value: number): RunTimestampMs => {
+  const parsed = tryRunTimestampMs(value);
+  if (!parsed.ok) throw new Error(`invalid test timestamp: ${parsed.error}`);
+  return parsed.value;
+};
+
 const suspendedRecord = (overrides: Partial<RunRecord> = {}): RunRecord => ({
   runId: "run-1" as RunId,
   dagId: "lead-desk" as DagId,
@@ -159,8 +166,8 @@ const suspendedRecord = (overrides: Partial<RunRecord> = {}): RunRecord => ({
   identity: { kind: "admin" },
   status: { kind: "suspended", nodeId: "review" as NodeId, prompt: "ok?" },
   checkpoint: "{}",
-  createdAtMs: 1,
-  updatedAtMs: 1,
+  createdAtMs: timestamp(1),
+  updatedAtMs: timestamp(1),
   ...overrides,
 });
 

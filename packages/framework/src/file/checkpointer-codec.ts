@@ -504,10 +504,9 @@ export const serializeNode = (nodeKey: string, state: RawNodeSnapshot): string =
   if (!isBoundaryIdString(nodeId)) {
     throw new Error(`state.nodeId ${render(nodeId)} does not match ${ID_PATTERN.source}`);
   }
-  if (!(completedAt instanceof Date)) {
-    throw new Error(`state.completedAt must be a valid Date, got ${render(completedAt)}`);
-  }
-  const completedAtMs = Date.prototype.getTime.call(completedAt);
+  const completedAtMs = completedAt instanceof Date
+    ? Date.prototype.getTime.call(completedAt)
+    : Number.NaN;
   if (!isRepresentableTimestampMs(completedAtMs)) {
     throw new Error(`state.completedAt must be a valid Date, got ${render(completedAt)}`);
   }

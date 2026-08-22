@@ -26,7 +26,8 @@ import type { HostError } from "../../domain/host-error.js";
 import type { TenantId } from "../../domain/tenant.js";
 import type { RedisPort, LogPort } from "../../ports.js";
 import type { RunStorePort } from "../ports.js";
-import type { RunRecord, RunStatus } from "../types.js";
+import { tryRunTimestampMs } from "../types.js";
+import type { RunRecord, RunStatus, RunTimestampMs } from "../types.js";
 
 // ── Persisted-shape validators (parse-don't-validate across the Redis boundary) ─
 //
@@ -70,8 +71,8 @@ const RunMetaSchema = z.object({
   input: z.unknown(),
   identity: PersistedIdentitySchema,
   status: RunStatusSchema,
-  createdAtMs: z.number(),
-  updatedAtMs: z.number(),
+  createdAtMs: z.number().finite().transform((value) => value as RunTimestampMs),
+  updatedAtMs: z.number().finite().transform((value) => value as RunTimestampMs),
 });
 
 // ── Active-run index (ADR-0074) ──────────────────────────────────────────────
@@ -153,7 +154,15 @@ export const createInMemoryRunStore = (
     async setStatus(runId, status: RunStatus) {
       const r = runs.get(runId);
       if (!r) return err({ kind: "run-not-found", runId });
-      runs.set(runId, { ...r, status, updatedAtMs: now() });
+      const updatedAtMs = tryRunTimestampMs(now());
+      if (!updatedAtMs.ok) {
+        return err({
+          kind: "internal-invariant-violated",
+          message: `HITL clock returned an invalid timestamp: ${updatedAtMs.error}`,
+          context: {},
+        });
+      }
+      runs.set(runId, { ...r, status, updatedAtMs: updatedAtMs.value });
       if (isTerminalStatus(status)) active.delete(runId); // settled → leave the index
       return ok(undefined);
     },
@@ -213,6 +222,25 @@ export const createRedisRunStore = (
     const res = await redis.set(runKey(tenant, runId), JSON.stringify(meta), expiry);
     if (!res.ok) return err(res.error);
     return ok(undefined);
+  };
+
+  const compensateUnpublishedCreate = async (runId: RunId, checkpoint: string): Promise<void> => {
+    const [index, preparedCheckpoint] = await Promise.all([
+      redis.sRem(activeKey(tenant), runId),
+      redis.compareAndDelete(ckptKey(tenant, runId), checkpoint),
+    ]);
+    if (!index.ok) {
+      logger?.warn?.("hitl: failed to remove active index after unpublished create", {
+        runId,
+        error: index.error.kind,
+      });
+    }
+    if (!preparedCheckpoint.ok) {
+      logger?.warn?.("hitl: failed to remove checkpoint after unpublished create", {
+        runId,
+        error: preparedCheckpoint.error.kind,
+      });
+    }
   };
 
   const readMeta = async (runId: RunId): Promise<Result<RunMeta | null, HostError>> => {
@@ -325,11 +353,18 @@ export const createRedisRunStore = (
         return err({ kind: "internal-invariant-violated", message: `run '${record.runId}' already exists or has an unpublished checkpoint`, context: {} });
       }
       const idx = await redis.sAdd(activeKey(tenant), record.runId);
-      if (!idx.ok) return err(idx.error);
+      if (!idx.ok) {
+        await compensateUnpublishedCreate(record.runId, checkpoint);
+        return err(idx.error);
+      }
       // Metadata is the publication point and remains create-once with TTL.
       const published = await redis.setNx(runKey(tenant, record.runId), JSON.stringify(meta), expiry);
-      if (!published.ok) return err(published.error);
+      if (!published.ok) {
+        await compensateUnpublishedCreate(record.runId, checkpoint);
+        return err(published.error);
+      }
       if (!published.value) {
+        await compensateUnpublishedCreate(record.runId, checkpoint);
         return err({ kind: "internal-invariant-violated", message: `run '${record.runId}' already exists`, context: {} });
       }
       return ok(undefined);
@@ -359,7 +394,15 @@ export const createRedisRunStore = (
       const metaRes = await readMeta(runId);
       if (!metaRes.ok) return err(metaRes.error);
       if (metaRes.value === null) return err({ kind: "run-not-found", runId });
-      const written = await writeMeta(runId, { ...metaRes.value, status, updatedAtMs: now() });
+      const updatedAtMs = tryRunTimestampMs(now());
+      if (!updatedAtMs.ok) {
+        return err({
+          kind: "internal-invariant-violated",
+          message: `HITL clock returned an invalid timestamp: ${updatedAtMs.error}`,
+          context: {},
+        });
+      }
+      const written = await writeMeta(runId, { ...metaRes.value, status, updatedAtMs: updatedAtMs.value });
       if (!written.ok) return written;
       if (isTerminalStatus(status)) {
         // Settled → leave the active-run index (ADR-0074). Idempotent (SREM of an

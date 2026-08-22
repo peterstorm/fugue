@@ -20,7 +20,9 @@
  *
  * Fail-safe by construction: a decision-store read error returns `pending`
  * (re-park) rather than fabricating an approval — a missing/erroring decision
- * must never be read as "yes". A notification failure does NOT crash the run:
+ * must never be read as "yes". A pending-marker write error throws into the
+ * kernel retry path: a reviewer is never notified about a gate whose decision
+ * cannot be durably recorded. A notification failure does NOT crash the run:
  * the run is already safely parked and can be re-notified out of band; we log
  * and still return `pending`.
  */
@@ -86,16 +88,18 @@ export const makeOnHumanReview = (deps: OnHumanReviewDeps) =>
     // 2. No decision yet → park. Notify only on the first park for this gate.
     const pending = await decisions.markPending(runId, req.nodeId);
     if (!pending.ok) {
-      // Fail-open: if the pending marker is unwritable (store blip), assume this
-      // is the first park and notify, rather than going silent. Surface the
-      // store error so a duplicate notification on a later re-park is explained.
-      logWithoutThrowing(logger, "warn", "hitl: markPending failed — assuming first park and notifying", {
+      // Fail closed: an actionable notification is valid only after its pending
+      // marker exists, because `recordDecision` atomically resolves that marker.
+      // Throwing enters the kernel's retry/failure path rather than advertising
+      // a review a human can never resolve.
+      logWithoutThrowing(logger, "error", "hitl: markPending failed — refusing unresolvable notification", {
         runId,
         nodeId: req.nodeId,
         error: pending.error.kind,
       });
+      throw new Error(`hitl: markPending failed for ${runId}/${req.nodeId}: ${pending.error.kind}`);
     }
-    const isFirstPark = pending.ok ? pending.value : true;
+    const isFirstPark = pending.value;
     if (isFirstPark) {
       const notified = await notifier.notify({
         runId,

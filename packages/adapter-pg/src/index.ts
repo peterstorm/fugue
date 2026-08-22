@@ -44,7 +44,7 @@
 import { createRequire } from "node:module";
 import type { z } from "zod";
 import type { Result, FrameworkError, CapabilityHandle } from "@fuguejs/framework";
-import { ok, err, nodeId } from "@fuguejs/framework";
+import { ok, err, nodeId, probeErrorCode, safeErrorMessage } from "@fuguejs/framework";
 import type { PoolConfig } from "pg";
 
 // ---------------------------------------------------------------------------
@@ -132,18 +132,15 @@ export interface PgAdapterConfig {
  * drives retry behavior.
  */
 export const mapPgError = (error: unknown, sql: string): FrameworkError => {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = safeErrorMessage(error);
   // Determine if the error is transient (connection issues) or permanent (syntax, constraint).
-  // Guard the SQLSTATE on its runtime type — a non-string `code` (a driver that
-  // sets it numeric, or an unrelated object carrying a `code` field) must not
-  // make `.startsWith` throw out of this function and escape the client's catch.
-  if (error instanceof Error && "code" in error) {
-    const pgCode = (error as { code?: unknown }).code;
+  // The total probe preserves the Result boundary even for hostile proxies and
+  // throwing accessors at the driver boundary.
+  const code = probeErrorCode(error);
+  if (code.kind === "code") {
+    const pgCode = code.code;
     // Connection-class errors (08xxx) and insufficient resources (53xxx) are transient
-    if (
-      typeof pgCode === "string" &&
-      (pgCode.startsWith("08") || pgCode.startsWith("53") || pgCode === "57P01")
-    ) {
+    if (pgCode.startsWith("08") || pgCode.startsWith("53") || pgCode === "57P01") {
       return { kind: "transient", nodeId: PG_NODE_ID, message: `PG transient: ${message} (${pgCode})` };
     }
   }
@@ -317,7 +314,7 @@ export const healthCheckWithTimeout = async (
     ]);
     return ok(undefined);
   } catch (e) {
-    return err(e instanceof Error ? e.message : String(e));
+    return err(safeErrorMessage(e));
   } finally {
     if (timer != null) clearTimeout(timer);
   }

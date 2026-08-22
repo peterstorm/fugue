@@ -8,7 +8,8 @@ import type { RedisPort, LogPort } from "../../../ports.js";
 import type { HostError } from "../../../domain/host-error.js";
 import { tenantId } from "../../../domain/tenant.js";
 import type { TenantId } from "../../../domain/tenant.js";
-import type { RunRecord } from "../../types.js";
+import { tryRunTimestampMs } from "../../types.js";
+import type { RunRecord, RunTimestampMs } from "../../types.js";
 import { createRedisRunStore } from "../run-store.js";
 import { createRedisDecisionStore } from "../decision-store.js";
 
@@ -81,6 +82,12 @@ const seedableRedis = (): { redis: RedisPort; seed: (k: string, v: string) => vo
   return { redis, seed: (k, v) => m.set(k, v) };
 };
 
+const timestamp = (value: number): RunTimestampMs => {
+  const parsed = tryRunTimestampMs(value);
+  if (!parsed.ok) throw new Error(`invalid test timestamp: ${parsed.error}`);
+  return parsed.value;
+};
+
 const record = (overrides: Partial<RunRecord> = {}): RunRecord => ({
   runId: "run-1" as RunId,
   dagId: "dag-1" as DagId,
@@ -88,8 +95,8 @@ const record = (overrides: Partial<RunRecord> = {}): RunRecord => ({
   identity: { kind: "admin" },
   status: { kind: "queued" },
   checkpoint: '{"state":{"kind":"pending"}}',
-  createdAtMs: 100,
-  updatedAtMs: 100,
+  createdAtMs: timestamp(100),
+  updatedAtMs: timestamp(100),
   ...overrides,
 });
 
@@ -172,8 +179,8 @@ describe("RedisRunStore", () => {
     await store.setStatus(r.runId, { kind: "completed", output: 1 });
     const got = await store.get(r.runId);
     if (!got.ok || !got.value) throw new Error("expected record");
-    expect(got.value.updatedAtMs).toBe(999);
-    expect(got.value.createdAtMs).toBe(100);
+    expect(got.value.updatedAtMs).toBe(timestamp(999));
+    expect(got.value.createdAtMs).toBe(timestamp(100));
   });
 
   it("setStatus on an unknown run errs run-not-found", async () => {
@@ -507,7 +514,7 @@ describe("RedisRunStore — active-run index (ADR-0074)", () => {
     expect(base.sets.get("fugue:tenant-a:hitl:active")?.has("run-1") ?? false).toBe(false);
   });
 
-  it("publishes metadata last: index failure leaves only a non-runnable checkpoint remnant", async () => {
+  it("compensates an index failure by removing the prepared checkpoint", async () => {
     const base = setBackedRedis();
     const redis: RedisPort = {
       ...base.redis,
@@ -516,7 +523,7 @@ describe("RedisRunStore — active-run index (ADR-0074)", () => {
     const store = createRedisRunStore(redis, TENANT, cfg);
 
     expect((await store.create(record())).ok).toBe(false);
-    expect(base.kv.has("fugue:tenant-a:hitl:ckpt:run-1")).toBe(true);
+    expect(base.kv.has("fugue:tenant-a:hitl:ckpt:run-1")).toBe(false);
     expect(base.kv.has("fugue:tenant-a:hitl:run:run-1")).toBe(false);
   });
 
@@ -541,7 +548,7 @@ describe("RedisRunStore — active-run index (ADR-0074)", () => {
     expect(await store.listActiveRunIds()).toEqual(ok(["run-1" as RunId]));
   });
 
-  it("publishes metadata last: publication failure leaves prepared remnants that enumeration self-heals", async () => {
+  it("compensates metadata publication failure without consuming a quota slot", async () => {
     const base = setBackedRedis();
     const redis: RedisPort = {
       ...base.redis,
@@ -553,13 +560,8 @@ describe("RedisRunStore — active-run index (ADR-0074)", () => {
     const store = createRedisRunStore(redis, TENANT, cfg);
 
     expect((await store.create(record())).ok).toBe(false);
-    expect(base.kv.has("fugue:tenant-a:hitl:ckpt:run-1")).toBe(true);
+    expect(base.kv.has("fugue:tenant-a:hitl:ckpt:run-1")).toBe(false);
     expect(base.kv.has("fugue:tenant-a:hitl:run:run-1")).toBe(false);
-    expect((await store.listActiveRunIds())).toEqual(ok([]));
-    // The live checkpoint may be an in-flight publication, so the sweep keeps
-    // the intent until that TTL-bound remnant also disappears.
-    expect(base.sets.get("fugue:tenant-a:hitl:active")?.has("run-1") ?? false).toBe(true);
-    base.expireCheckpointKey("tenant-a", "run-1");
     expect((await store.listActiveRunIds())).toEqual(ok([]));
     expect(base.sets.get("fugue:tenant-a:hitl:active")?.has("run-1") ?? false).toBe(false);
   });

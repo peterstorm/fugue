@@ -32,7 +32,8 @@ export type PersistedIdentity =
   | { readonly kind: "user"; readonly sub: string; readonly azp: string };
 
 /** A finite millisecond timestamp accepted by the HITL persistence parser. */
-export type RunTimestampMs = number;
+declare const runTimestampMsBrand: unique symbol;
+export type RunTimestampMs = number & { readonly [runTimestampMsBrand]: "RunTimestampMs" };
 
 /** Parse an untrusted clock reading into the timestamp domain. */
 export const tryRunTimestampMs = (value: unknown): Result<RunTimestampMs, string> =>

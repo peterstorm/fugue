@@ -59,14 +59,14 @@ const fakeRedis = (preset: Record<string, string> = {}) => {
 
 // ── fake QueueBackend: captures the worker fn + records enqueues ───────────────
 const fakeBackend = () => {
-  let workerFn: ((job: JobLike<RunId, unknown, null>) => Promise<void>) | undefined;
+  let workerFn: ((job: JobLike<RunId, unknown, { readonly tenant: TenantId }>) => Promise<void>) | undefined;
   const enqueued: { id: string; delayMs?: number }[] = [];
   let queueOpts: QueueOpts | undefined;
   const backend: QueueBackend = {
     createQueue(_name, opts) {
       queueOpts = opts;
       return {
-        async enqueue(id: string, _data: { state: RunId; context: null }, eo?: EnqueueOpts) { enqueued.push({ id, delayMs: eo?.delayMs }); },
+        async enqueue(id: string, _data: { state: RunId; context: { readonly tenant: TenantId } }, eo?: EnqueueOpts) { enqueued.push({ id, delayMs: eo?.delayMs }); },
         async drain() {},
         async close() {},
       } as never;
@@ -77,7 +77,7 @@ const fakeBackend = () => {
     },
     async close() {},
   };
-  const job = (state: RunId): JobLike<RunId, unknown, null> => ({ data: { state, context: null } } as never);
+  const job = (state: RunId, tenant: TenantId = TENANT): JobLike<RunId, unknown, { readonly tenant: TenantId }> => ({ data: { state, context: { tenant } } } as never);
   return { backend, enqueued, job, getWorker: () => workerFn!, getQueueOpts: () => queueOpts };
 };
 
@@ -200,6 +200,17 @@ describe("createRunQueue — single-flight lock", () => {
     expect(fb.getQueueOpts()?.defaultAttempts).toBe(7);
   });
 
+  it("rejects a missing renewal capability before any worker can acquire a lease", async () => {
+    const base = fakeRedis();
+    const redis: RedisPort = { ...base.redis, compareAndExpire: undefined };
+    const fb = fakeBackend();
+    const queue = createRunQueue({ backend: fb.backend, redis, tenant: TENANT, lockTtlSec: 300 });
+    queue.startWorker(okProcess);
+
+    await expect(fb.getWorker()(fb.job(RUN))).rejects.toThrow("Redis lease renewal is unavailable");
+    expect(base.calls.setNx).toHaveLength(0);
+  });
+
   it("throws when the lock STORE is unavailable (wakeup retried, not acked-and-dropped)", async () => {
     const base = fakeRedis();
     const redis: RedisPort = { ...base.redis, async setNx() { return err({ kind: "redis-unavailable", operation: "SETNX" }); } };
@@ -211,7 +222,17 @@ describe("createRunQueue — single-flight lock", () => {
   });
 });
 
-describe("createRunQueue — cross-tenant lock isolation (SECURITY: AD-4 / FR-013 / SC-001)", () => {
+describe("createRunQueue — cross-tenant wakeup isolation (SECURITY: AD-4 / FR-013 / SC-001)", () => {
+  it("rejects a trigger carrying another tenant before it can acquire that tenant's lock", async () => {
+    const { redis, calls } = fakeRedis();
+    const fb = fakeBackend();
+    const queue = createRunQueue({ backend: fb.backend, redis, tenant: TENANT, lockTtlSec: 300 });
+    queue.startWorker(okProcess);
+
+    await expect(fb.getWorker()(fb.job(RUN, OTHER_TENANT))).rejects.toThrow("cross-tenant wakeup");
+    expect(calls.setNx).toHaveLength(0);
+  });
+
   it("two queues bound to different tenants do NOT contend on the same runId's lock", async () => {
     // ONE shared Redis, two queues for different tenants. Tenant A holds its lock
     // for RUN; tenant B's worker must NOT see it as contended — its lock key lives
@@ -222,7 +243,7 @@ describe("createRunQueue — cross-tenant lock isolation (SECURITY: AD-4 / FR-01
     const qB = createRunQueue({ backend: fb.backend, redis, tenant: OTHER_TENANT, lockTtlSec: 300 });
     qB.startWorker(async () => { bProcessed++; return ok(undefined); }, { concurrency: 2 });
 
-    await fb.getWorker()(fb.job(RUN));
+    await fb.getWorker()(fb.job(RUN, OTHER_TENANT));
 
     // Tenant B ran its slice (no false contention against tenant A's lock)…
     expect(bProcessed).toBe(1);

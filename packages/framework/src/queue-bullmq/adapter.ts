@@ -6,6 +6,7 @@
 import { Queue, Worker } from "bullmq";
 import type { ConnectionOptions } from "bullmq";
 import Redis from "ioredis";
+import type { RedisOptions } from "ioredis";
 import type { JobLike } from "../state-machine/types.js";
 import type {
   QueueBackend,
@@ -24,22 +25,35 @@ import { fwLogger } from "../logger.js";
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Parse a Redis URL (redis://host:port) or accept a {host,port} object and
- * return a { host, port } tuple.
- */
-function parseConnection(connection: ConnectionInput): { host: string; port: number } {
-  if (typeof connection === "string") {
-    const url = new URL(connection);
-    return {
-      host: url.hostname,
-      port: parseInt(url.port || "6379", 10),
-    };
-  }
-  return connection;
-}
+/** Redis connection inputs accepted by the BullMQ infrastructure adapter. */
+type ConnectionInput = string | { readonly host: string; readonly port: number };
 
-type ConnectionInput = string | { host: string; port: number };
+/**
+ * Parse the supported Redis URL surface once, retaining every connection
+ * setting ioredis/BullMQ need: credentials, selected database, and TLS.
+ */
+export const __parseConnection = (connection: ConnectionInput): RedisOptions => {
+  if (typeof connection !== "string") return connection;
+
+  const url = new URL(connection);
+  if (url.protocol !== "redis:" && url.protocol !== "rediss:") {
+    throw new RangeError(`Redis connection URL must use redis: or rediss:, got ${url.protocol}`);
+  }
+  const dbSegment = url.pathname.slice(1);
+  const db = dbSegment === "" ? undefined : Number(dbSegment);
+  if (db !== undefined && (!Number.isInteger(db) || db < 0)) {
+    throw new RangeError(`Redis connection URL has an invalid database index: ${url.pathname}`);
+  }
+
+  return {
+    host: url.hostname,
+    port: Number(url.port || "6379"),
+    ...(url.username === "" ? {} : { username: decodeURIComponent(url.username) }),
+    ...(url.password === "" ? {} : { password: decodeURIComponent(url.password) }),
+    ...(db === undefined ? {} : { db }),
+    ...(url.protocol === "rediss:" ? { tls: {} } : {}),
+  };
+};
 
 // ---------------------------------------------------------------------------
 // createBullMQBackend
@@ -57,10 +71,11 @@ export function createBullMQBackend(
   connection: ConnectionInput,
   eventLogOpts?: EventLogOpts,
 ): QueueBackend {
-  const { host, port } = parseConnection(connection);
+  const redisConnection = __parseConnection(connection);
 
   // Shared ioredis connection used by adaptBullMQJob for XADD/XRANGE
-  const redis = new Redis(port, host, {
+  const redis = new Redis({
+    ...redisConnection,
     maxRetriesPerRequest: null,
     enableReadyCheck: false,
     lazyConnect: false,
@@ -72,7 +87,7 @@ export function createBullMQBackend(
     fwLogger().error("[BullMQ] Shared Redis connection error:", err);
   });
 
-  const bullConnection: ConnectionOptions = { host, port };
+  const bullConnection: ConnectionOptions = redisConnection;
 
   // Track every queue/worker so close() can wait on all of them.
   const queues = new Set<Queue<any, any, string>>();

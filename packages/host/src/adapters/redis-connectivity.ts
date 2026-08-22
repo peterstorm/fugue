@@ -15,7 +15,7 @@
 
 import type { RedisConnectivityPort, RedisPort } from "../ports.js";
 import type { HostError } from "../domain/host-error.js";
-import { ok, err } from "@fuguejs/framework";
+import { ok, err, safeErrorMessage } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 // Type-only — erased at compile time, so importing this module loads NO ioredis
 // at runtime. The driver is pulled by the dynamic `import("ioredis")` in the
@@ -47,7 +47,7 @@ interface RedisConnectivityBundle {
  */
 const redisErr = (operation: string, e: unknown): HostError => ({
   kind: "redis-unavailable",
-  operation: `${operation}: ${e instanceof Error ? e.message : String(e)}`,
+  operation: `${operation}: ${safeErrorMessage(e)}`, 
 });
 
 /**

@@ -29,6 +29,7 @@ import { enrichHumanRespondedEvent, type UnenrichedDagEvent } from "./reroute.js
 import type { Witness } from "../types/freshness.js";
 import { type FreshnessIndex, InMemoryFreshnessIndex } from "./freshness-check.js";
 import { type NodeSpanOutcome } from "./node-span.js";
+import { safeErrorMessage, safeErrorStack } from "../types/safe-error.js";
 
 // ---------------------------------------------------------------------------
 // Backoff + jitter
@@ -113,9 +114,9 @@ const callHumanReviewHook = async (
   try {
     outcome = await hooks.onHumanReview({ nodeId, output, prompt });
   } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    const stack = e instanceof Error ? e.stack : undefined;
-    const crash: FrameworkError = { kind: "node-crash", nodeId, retriability: "retriable", message, stack };
+    const message = safeErrorMessage(e);
+    const stack = safeErrorStack(e);
+    const crash: FrameworkError = { kind: "node-crash", nodeId, retriability: "retriable", message, ...(stack !== undefined ? { stack } : {}) };
     emit(nodeCtx, {
       type: "node-error",
       runId: nodeCtx.runId,

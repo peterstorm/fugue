@@ -35,7 +35,8 @@ import type {
 } from "@fuguejs/framework";
 import type { RedisPort, SharedInfra } from "../../../ports.js";
 import type { RegisteredDag } from "../../../domain/registry.js";
-import type { RunRecord, RunStatus, PersistedIdentity } from "../../types.js";
+import { tryRunTimestampMs } from "../../types.js";
+import type { RunRecord, RunStatus, PersistedIdentity, RunTimestampMs } from "../../types.js";
 import { makeRunStoreJobLike } from "../../run-store-job.js";
 import { createInMemoryRunStore } from "../run-store.js";
 import { createRunExecutor } from "../run-executor.js";
@@ -113,6 +114,12 @@ const registered = (dag: DagDef, timeout = 30_000): RegisteredDag => ({
 
 const ADMIN: PersistedIdentity = { kind: "admin" };
 
+const timestamp = (value: number): RunTimestampMs => {
+  const parsed = tryRunTimestampMs(value);
+  if (!parsed.ok) throw new Error(`invalid test timestamp: ${parsed.error}`);
+  return parsed.value;
+};
+
 /** Seed a real checkpoint for `dag`+`input` and wrap it in a run-store-backed jobLike. */
 const seedJobLike = async (dag: DagDef, input: unknown) => {
   const compiled = compileDagToMachine(dag, input);
@@ -129,8 +136,8 @@ const seedJobLike = async (dag: DagDef, input: unknown) => {
     identity: ADMIN,
     status: { kind: "running" } as RunStatus,
     checkpoint,
-    createdAtMs: 1,
-    updatedAtMs: 1,
+    createdAtMs: timestamp(1),
+    updatedAtMs: timestamp(1),
   };
   await store.create(record);
   const jl = makeRunStoreJobLike(store, "run-1" as never, checkpoint);

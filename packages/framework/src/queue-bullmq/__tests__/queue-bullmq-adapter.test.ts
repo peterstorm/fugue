@@ -21,6 +21,7 @@ import {
 } from "../index.js";
 import { __parseEnvelope, __resetEventLogState } from "../event-log.js";
 import { adaptBullMQJob } from "../job.js";
+import { __parseConnection } from "../adapter.js";
 
 // ---------------------------------------------------------------------------
 // Environment gate
@@ -971,8 +972,26 @@ describe("createRedisStreamReader — readEventsBetween argument validation", ()
 });
 
 // ---------------------------------------------------------------------------
-// createWorker — RangeError guard unit tests
+// Redis connection parsing + worker RangeError guards (pure, no Redis needed)
 // ---------------------------------------------------------------------------
+
+describe("createBullMQBackend — Redis connection parsing", () => {
+  it("preserves credentials, database selection, and TLS from a Redis URL", () => {
+    expect(__parseConnection("rediss://user:p%40ss@cache.example:6380/4")).toEqual({
+      host: "cache.example",
+      port: 6380,
+      username: "user",
+      password: "p@ss",
+      db: 4,
+      tls: {},
+    });
+  });
+
+  it("rejects unsupported schemes and invalid database selections", () => {
+    expect(() => __parseConnection("http://cache.example:6379/0")).toThrow(RangeError);
+    expect(() => __parseConnection("redis://cache.example/not-a-db")).toThrow(RangeError);
+  });
+});
 
 describe("createQueue / createWorker — RangeError guards (pure, no Redis needed)", () => {
   // These tests use a dummy connection and never actually connect to Redis.
