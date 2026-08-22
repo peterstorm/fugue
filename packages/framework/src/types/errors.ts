@@ -1,6 +1,8 @@
 // Discriminated union of all framework errors
 
 import { match } from "ts-pattern";
+import { z } from "zod";
+import { tryNodeId, tryRunId } from "./ids.js";
 import type { RunId, NodeId } from "./ids.js";
 // Type-only circular reference with `types/node.ts` (which imports
 // `FrameworkError` from this module) — safe: type imports erase at compile
@@ -350,6 +352,81 @@ export type FrameworkError =
 
 /** Discriminant union of all error kinds — use for consumer-side exhaustive switches. */
 export type FrameworkErrorKind = FrameworkError["kind"];
+
+// The framework owns the wire parser for its error ADT. Persistence adapters
+// compose this schema into their own records instead of duplicating all 27
+// variants and drifting when the framework error vocabulary changes.
+const persistedBrandedId = <T>(parse: (raw: string) => { readonly ok: true; readonly value: T } | { readonly ok: false }): z.ZodType<T> =>
+  z.string().transform((value, context) => {
+    const parsed = parse(value);
+    if (parsed.ok) return parsed.value;
+    context.addIssue({ code: "custom", message: "value is not a valid branded id" });
+    return z.NEVER;
+  });
+
+const PersistedNodeIdSchema = persistedBrandedId(tryNodeId);
+const PersistedRunIdSchema = persistedBrandedId(tryRunId);
+const persistedUsageSchema = z.object({ tokensIn: z.number(), tokensOut: z.number() }).optional();
+const persistedRetriabilitySchema = z.enum(["retriable", "non-retriable"]);
+const PersistedCapabilitySchema: z.ZodType<Capability> = z.string().transform((value) => value as Capability);
+const persistedFrameworkErrorKinds = z.enum([
+  "validation", "retry-exhausted", "checkpoint-missing", "checkpoint-expired",
+  "checkpoint-corrupt", "checkpoint-version-mismatch", "checkpoint-write-failed",
+  "prompt-not-found", "cache-error", "node-crash", "cycle-detected", "aborted",
+  "rejected", "invalid-reroute", "transient", "missing-default-edge",
+  "output-unreachable-under-routing", "predicate-malformed", "duplicate-edge",
+  "root-expects-input", "source-has-incoming", "invalid-dag-input-edge",
+  "missing-capability", "llm-budget-exceeded", "infra-unreachable",
+  "policy-refusal", "downstream-denied",
+]);
+
+const PersistedFrameworkErrorSchemaDefinition = z.discriminatedUnion("kind", [
+  z.looseObject({ kind: z.literal("validation"), nodeId: PersistedNodeIdSchema, message: z.string(), path: z.string().optional() }),
+  z.looseObject({ kind: z.literal("retry-exhausted"), nodeId: PersistedNodeIdSchema, attempts: z.number(), lastError: z.string(), rootErrorKind: persistedFrameworkErrorKinds.exclude(["retry-exhausted"]) }),
+  z.looseObject({ kind: z.literal("checkpoint-missing"), runId: PersistedRunIdSchema }),
+  z.looseObject({ kind: z.literal("checkpoint-expired"), runId: PersistedRunIdSchema, expiredAt: z.string() }),
+  z.looseObject({ kind: z.literal("checkpoint-corrupt"), runId: PersistedRunIdSchema, nodeId: PersistedNodeIdSchema.optional(), message: z.string() }),
+  z.looseObject({ kind: z.literal("checkpoint-version-mismatch"), runId: PersistedRunIdSchema, expected: z.string(), actual: z.union([z.string(), z.undefined()]) }),
+  z.looseObject({ kind: z.literal("checkpoint-write-failed"), runId: PersistedRunIdSchema, nodeId: PersistedNodeIdSchema, invalidRunId: z.string().optional(), invalidNodeId: z.string().optional(), message: z.string() }),
+  z.looseObject({ kind: z.literal("prompt-not-found"), promptName: z.string(), reason: z.string() }),
+  z.looseObject({ kind: z.literal("cache-error"), operation: z.string(), message: z.string(), failureClass: z.enum(["transient", "permanent"]).optional() }),
+  z.looseObject({ kind: z.literal("node-crash"), nodeId: PersistedNodeIdSchema, message: z.string(), stack: z.string().optional(), retriability: persistedRetriabilitySchema, httpStatus: z.number().optional(), usage: persistedUsageSchema }),
+  z.looseObject({ kind: z.literal("cycle-detected"), nodeIds: z.array(PersistedNodeIdSchema) }),
+  z.looseObject({ kind: z.literal("aborted"), reason: z.string(), usage: persistedUsageSchema }),
+  z.looseObject({ kind: z.literal("rejected"), nodeId: PersistedNodeIdSchema, reason: z.string() }),
+  z.looseObject({ kind: z.literal("invalid-reroute"), targetNodeId: PersistedNodeIdSchema, message: z.string() }),
+  z.looseObject({ kind: z.literal("transient"), nodeId: PersistedNodeIdSchema, message: z.string(), httpStatus: z.number().optional(), usage: persistedUsageSchema }),
+  z.looseObject({ kind: z.literal("missing-default-edge"), nodeId: PersistedNodeIdSchema }),
+  z.looseObject({ kind: z.literal("output-unreachable-under-routing"), outputNodeId: PersistedNodeIdSchema, missedFromNode: PersistedNodeIdSchema }),
+  z.looseObject({ kind: z.literal("predicate-malformed"), nodeId: PersistedNodeIdSchema, message: z.string() }),
+  z.looseObject({ kind: z.literal("duplicate-edge"), fromNodeId: PersistedNodeIdSchema, toNodeId: PersistedNodeIdSchema }),
+  z.looseObject({ kind: z.literal("root-expects-input"), nodeId: PersistedNodeIdSchema, message: z.string() }),
+  z.looseObject({ kind: z.literal("source-has-incoming"), nodeId: PersistedNodeIdSchema, message: z.string() }),
+  z.looseObject({ kind: z.literal("invalid-dag-input-edge"), edge: z.object({ from: z.string(), to: z.string() }), message: z.string() }),
+  z.looseObject({
+    kind: z.literal("missing-capability"),
+    missing: z.tuple(
+      [z.object({ nodeId: PersistedNodeIdSchema, capability: PersistedCapabilitySchema })],
+      z.object({ nodeId: PersistedNodeIdSchema, capability: PersistedCapabilitySchema }),
+    ),
+  }),
+  z.looseObject({ kind: z.literal("llm-budget-exceeded"), runId: PersistedRunIdSchema, nodeId: PersistedNodeIdSchema, cumulative: z.number(), budget: z.number() }),
+  z.looseObject({ kind: z.literal("infra-unreachable"), operation: z.enum(["mint", "exchange", "federation", "downstream"]), hop: z.string(), message: z.string() }),
+  z.looseObject({ kind: z.literal("policy-refusal"), scope: z.string(), agentClientId: z.string().optional() }),
+  z.looseObject({ kind: z.literal("downstream-denied"), resource: z.string(), reason: z.string() }),
+]);
+
+type MissingPersistedFrameworkErrorKind = Exclude<
+  FrameworkErrorKind,
+  z.output<typeof PersistedFrameworkErrorSchemaDefinition>["kind"]
+>;
+type ExhaustivePersistedFrameworkErrorSchema = [MissingPersistedFrameworkErrorKind] extends [never]
+  ? z.ZodType<FrameworkError>
+  : never;
+
+/** Loose, exhaustive wire parser for persisted `FrameworkError` control-plane data. */
+export const PersistedFrameworkErrorSchema: ExhaustivePersistedFrameworkErrorSchema =
+  PersistedFrameworkErrorSchemaDefinition;
 
 /**
  * Every `FrameworkError["kind"]` literal — the closed discriminant domain

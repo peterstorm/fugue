@@ -166,6 +166,19 @@ describe("register", () => {
     expect(r2.value).toBe(r1.value);
   });
 
+  it("does not expose a mutable backing Map that can bypass registry transitions", () => {
+    const cfg = makeConfig("a");
+    const registered = register(emptyRegistry(), cfg, 1000);
+    if (!registered.ok) throw new Error("setup");
+    const forged = makeConfig("b", { team: cfg.team });
+    const exposed = registered.value.entries as Map<TenantId, ActiveTenantConfig>;
+
+    expect(exposed.set).toBeUndefined();
+    expect(() => exposed.set(forged.id, forged)).toThrow();
+    expect(lookup(registered.value, forged.id).ok).toBe(false);
+    expect(activeTenants(registered.value)).toEqual([cfg]);
+  });
+
   it("replaces when the config differs", () => {
     const cfg = makeConfig("a");
     const r1 = register(emptyRegistry(), cfg, 1000);

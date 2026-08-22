@@ -33,6 +33,7 @@ import type { AgentClientMap } from "../../domain/auth.js";
 import type { TenantId } from "../../domain/tenant.js";
 import type { RunExecutorPort, RunExecOutcome, RunExecutionRequest } from "../ports.js";
 import { toExecIdentity } from "../identity.js";
+import { logWithoutThrowing } from "../diagnostic-logging.js";
 
 interface RunExecutorDeps {
   readonly sharedInfra: SharedInfra;
@@ -75,18 +76,6 @@ const toFrameworkError = (error: unknown): FrameworkError =>
     nodeId: EXECUTOR_NODE_ID,
     message: safeErrorMessage(error),
   };
-
-const logExecutionFailureWithoutThrowing = (
-  logger: LogPort | undefined,
-  message: string,
-  data: Record<string, unknown>,
-): void => {
-  try {
-    logger?.error?.(message, data);
-  } catch {
-    // The modeled failed RunExecOutcome remains authoritative.
-  }
-};
 
 export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
   const { sharedInfra, getRegisteredDag, broker, agentClientMap, tenant, logger } = deps;
@@ -176,8 +165,9 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
       } catch (e) {
         const checkpointFailure = req.job.checkpointFailure();
         if (checkpointFailure !== null) {
-          logExecutionFailureWithoutThrowing(
+          logWithoutThrowing(
             logger,
+            "error",
             "hitl: checkpoint persistence failed — retrying run slice",
             { runId: req.runId, dagId: req.dagId, error: checkpointFailure.kind },
           );
@@ -191,8 +181,9 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
         // with the original diagnostic and are logged at error
         // with the message: the recorded FrameworkError below carries that
         // message as the operator's durable diagnostic.
-        logExecutionFailureWithoutThrowing(
+        logWithoutThrowing(
           logger,
+          "error",
           phase === "setup" ? "hitl: context build failed" : "hitl: run slice failed",
           {
             runId: req.runId,

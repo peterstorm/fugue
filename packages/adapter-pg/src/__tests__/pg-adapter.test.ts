@@ -368,4 +368,27 @@ describe("@fuguejs/pg — healthCheckWithTimeout", () => {
     expect(isErr(result)).toBe(true);
     if (!result.ok) expect(result.error).toContain("timed out after 20ms");
   });
+
+  it("logs a late probe rejection after the timeout without changing the verdict", async () => {
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown): void => { warnings.push(String(message)); };
+    try {
+      const lateRejector: PgQueryable = {
+        query: () => new Promise((_, reject) => {
+          setTimeout(() => reject(pgError("08006", "connection reset late")), 30);
+        }),
+      };
+
+      const result = await healthCheckWithTimeout(lateRejector, 5);
+      expect(isErr(result)).toBe(true);
+      if (!result.ok) expect(result.error).toContain("timed out after 5ms");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(warnings.some((warning) => warning.includes("late probe failure after timeout"))).toBe(true);
+      expect(warnings.some((warning) => warning.includes("connection reset late"))).toBe(true);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
 });

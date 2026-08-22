@@ -77,6 +77,14 @@ export const stringOf = (value: unknown): string => {
  * encoding — output for every input is byte-identical to the pre-consolidation
  * per-site encodings (pinned by the per-backend hostile corpora).
  */
+const checkpointNodeId = (nodeIdRaw: unknown | undefined): NodeId => {
+  if (nodeIdRaw === undefined) return META_RECORD_NODE_ID;
+  if (typeof nodeIdRaw === "string" && ID_PATTERN.test(nodeIdRaw)) {
+    return __brandNodeId(nodeIdRaw);
+  }
+  return CHECKPOINT_INVALID_NODE_ID;
+};
+
 export const buildCheckpointWriteFailed = (
   runIdRaw: unknown,
   nodeIdRaw: unknown | undefined,
@@ -84,15 +92,10 @@ export const buildCheckpointWriteFailed = (
 ): FrameworkError => {
   const runIdValid = typeof runIdRaw === "string" && ID_PATTERN.test(runIdRaw);
   const nodeIdValid = typeof nodeIdRaw === "string" && ID_PATTERN.test(nodeIdRaw);
-  // Absent means "this is the meta record", which is distinct from "present but
-  // unparseable" — the three cases are a chain, so they read as one.
-  const nodeId = nodeIdRaw === undefined
-    ? META_RECORD_NODE_ID
-    : nodeIdValid ? __brandNodeId(nodeIdRaw) : CHECKPOINT_INVALID_NODE_ID;
   return {
     kind: "checkpoint-write-failed",
     runId: runIdValid ? __brandRunId(runIdRaw) : CHECKPOINT_INVALID_RUN_ID,
-    nodeId,
+    nodeId: checkpointNodeId(nodeIdRaw),
     ...(!runIdValid ? { invalidRunId: stringOf(runIdRaw) } : {}),
     ...(nodeIdRaw !== undefined && !nodeIdValid
       ? { invalidNodeId: stringOf(nodeIdRaw) }

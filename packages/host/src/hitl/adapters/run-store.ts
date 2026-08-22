@@ -19,14 +19,17 @@
  *   cross-tenant HITL key unrepresentable.
  */
 
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
-import { asNonEmptyString, ok, err, safeErrorMessage, tryRunId, tryNodeId, tryDagId, toJson, fromJson } from "@fuguejs/framework";
-import type { Capability, FrameworkError, NonEmptyString, Result, RunId } from "@fuguejs/framework";
+import { asNonEmptyString, ok, err, PersistedFrameworkErrorSchema, safeErrorMessage, tryRunId, tryNodeId, tryDagId, toJson, fromJson } from "@fuguejs/framework";
+import { assertLosslessEvent } from "@fuguejs/framework/file";
+import type { NonEmptyString, Result, RunId } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import { markTeam } from "../../domain/auth.js";
 import type { TenantId } from "../../domain/tenant.js";
 import type { HitlRedisPort, LogPort } from "../../ports.js";
 import { issueRunLease } from "../ports.js";
+import { logWithoutThrowing } from "../diagnostic-logging.js";
 import type { RunLease, RunStorePort } from "../ports.js";
 import { tryRunTimestampMs } from "../types.js";
 import type { RunRecord, RunStatus, RunTimestampMs } from "../types.js";
@@ -65,73 +68,12 @@ const PersistedIdentitySchema = z.discriminatedUnion("kind", [
 ]);
 
 const NodeIdSchema = brandedId(tryNodeId);
-const RunIdSchema = brandedId(tryRunId);
-const optionalUsage = z.object({ tokensIn: z.number(), tokensOut: z.number() }).optional();
-const retriability = z.enum(["retriable", "non-retriable"]);
-const CapabilitySchema: z.ZodType<Capability> = z.string().transform((value) => value as Capability);
 const NonEmptyStringSchema: z.ZodType<NonEmptyString> = z.string().transform((value, context) => {
   const parsed = asNonEmptyString(value);
   if (parsed !== undefined) return parsed;
   context.addIssue({ code: "custom", message: "prompt must be non-empty" });
   return z.NEVER;
 });
-const frameworkErrorKinds = z.enum([
-  "validation", "retry-exhausted", "checkpoint-missing", "checkpoint-expired",
-  "checkpoint-corrupt", "checkpoint-version-mismatch", "checkpoint-write-failed",
-  "prompt-not-found", "cache-error", "node-crash", "cycle-detected", "aborted",
-  "rejected", "invalid-reroute", "transient", "missing-default-edge",
-  "output-unreachable-under-routing", "predicate-malformed", "duplicate-edge",
-  "root-expects-input", "source-has-incoming", "invalid-dag-input-edge",
-  "missing-capability", "llm-budget-exceeded", "infra-unreachable",
-  "policy-refusal", "downstream-denied",
-]);
-
-// Persisted run failures are control-plane data, not an opaque diagnostic blob.
-// Require every current FrameworkError variant's mandatory fields while keeping
-// objects loose so additive fields survive rolling upgrades.
-const FrameworkErrorSchemaDefinition = z.discriminatedUnion("kind", [
-  z.looseObject({ kind: z.literal("validation"), nodeId: NodeIdSchema, message: z.string(), path: z.string().optional() }),
-  z.looseObject({ kind: z.literal("retry-exhausted"), nodeId: NodeIdSchema, attempts: z.number(), lastError: z.string(), rootErrorKind: frameworkErrorKinds.exclude(["retry-exhausted"]) }),
-  z.looseObject({ kind: z.literal("checkpoint-missing"), runId: RunIdSchema }),
-  z.looseObject({ kind: z.literal("checkpoint-expired"), runId: RunIdSchema, expiredAt: z.string() }),
-  z.looseObject({ kind: z.literal("checkpoint-corrupt"), runId: RunIdSchema, nodeId: NodeIdSchema.optional(), message: z.string() }),
-  z.looseObject({ kind: z.literal("checkpoint-version-mismatch"), runId: RunIdSchema, expected: z.string(), actual: z.union([z.string(), z.undefined()]) }),
-  z.looseObject({ kind: z.literal("checkpoint-write-failed"), runId: RunIdSchema, nodeId: NodeIdSchema, invalidRunId: z.string().optional(), invalidNodeId: z.string().optional(), message: z.string() }),
-  z.looseObject({ kind: z.literal("prompt-not-found"), promptName: z.string(), reason: z.string() }),
-  z.looseObject({ kind: z.literal("cache-error"), operation: z.string(), message: z.string(), failureClass: z.enum(["transient", "permanent"]).optional() }),
-  z.looseObject({ kind: z.literal("node-crash"), nodeId: NodeIdSchema, message: z.string(), stack: z.string().optional(), retriability, httpStatus: z.number().optional(), usage: optionalUsage }),
-  z.looseObject({ kind: z.literal("cycle-detected"), nodeIds: z.array(NodeIdSchema) }),
-  z.looseObject({ kind: z.literal("aborted"), reason: z.string(), usage: optionalUsage }),
-  z.looseObject({ kind: z.literal("rejected"), nodeId: NodeIdSchema, reason: z.string() }),
-  z.looseObject({ kind: z.literal("invalid-reroute"), targetNodeId: NodeIdSchema, message: z.string() }),
-  z.looseObject({ kind: z.literal("transient"), nodeId: NodeIdSchema, message: z.string(), httpStatus: z.number().optional(), usage: optionalUsage }),
-  z.looseObject({ kind: z.literal("missing-default-edge"), nodeId: NodeIdSchema }),
-  z.looseObject({ kind: z.literal("output-unreachable-under-routing"), outputNodeId: NodeIdSchema, missedFromNode: NodeIdSchema }),
-  z.looseObject({ kind: z.literal("predicate-malformed"), nodeId: NodeIdSchema, message: z.string() }),
-  z.looseObject({ kind: z.literal("duplicate-edge"), fromNodeId: NodeIdSchema, toNodeId: NodeIdSchema }),
-  z.looseObject({ kind: z.literal("root-expects-input"), nodeId: NodeIdSchema, message: z.string() }),
-  z.looseObject({ kind: z.literal("source-has-incoming"), nodeId: NodeIdSchema, message: z.string() }),
-  z.looseObject({ kind: z.literal("invalid-dag-input-edge"), edge: z.object({ from: z.string(), to: z.string() }), message: z.string() }),
-  z.looseObject({
-    kind: z.literal("missing-capability"),
-    missing: z.tuple(
-      [z.object({ nodeId: NodeIdSchema, capability: CapabilitySchema })],
-      z.object({ nodeId: NodeIdSchema, capability: CapabilitySchema }),
-    ),
-  }),
-  z.looseObject({ kind: z.literal("llm-budget-exceeded"), runId: RunIdSchema, nodeId: NodeIdSchema, cumulative: z.number(), budget: z.number() }),
-  z.looseObject({ kind: z.literal("infra-unreachable"), operation: z.enum(["mint", "exchange", "federation", "downstream"]), hop: z.string(), message: z.string() }),
-  z.looseObject({ kind: z.literal("policy-refusal"), scope: z.string(), agentClientId: z.string().optional() }),
-  z.looseObject({ kind: z.literal("downstream-denied"), resource: z.string(), reason: z.string() }),
-]);
-type MissingFrameworkErrorKind = Exclude<
-  FrameworkError["kind"],
-  z.output<typeof FrameworkErrorSchemaDefinition>["kind"]
->;
-type ExhaustiveFrameworkErrorSchema = [MissingFrameworkErrorKind] extends [never]
-  ? z.ZodType<FrameworkError>
-  : never;
-const FrameworkErrorSchema: ExhaustiveFrameworkErrorSchema = FrameworkErrorSchemaDefinition;
 
 const RunStatusSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("queued") }),
@@ -142,7 +84,7 @@ const RunStatusSchema = z.discriminatedUnion("kind", [
     prompt: NonEmptyStringSchema,
   }),
   z.object({ kind: z.literal("completed"), output: z.unknown() }),
-  z.object({ kind: z.literal("failed"), error: FrameworkErrorSchema }),
+  z.object({ kind: z.literal("failed"), error: PersistedFrameworkErrorSchema }),
 ]);
 
 const RunMetaSchema = z.object({
@@ -164,19 +106,6 @@ const isTerminalStatus = (status: RunStatus): boolean =>
 
 const leaseLost = (lease: RunLease): Result<never, HostError> =>
   err({ kind: "run-lease-lost", runId: lease.runId });
-
-const logWithoutThrowing = (
-  logger: LogPort | undefined,
-  level: "warn" | "error",
-  message: string,
-  data: Record<string, unknown>,
-): void => {
-  try {
-    logger?.[level]?.(message, data);
-  } catch {
-    // Diagnostics never replace the store's typed persistence outcome.
-  }
-};
 
 const readRunTimestamp = (now: () => number): Result<RunTimestampMs, HostError> => {
   const timestamp = tryRunTimestampMs(now());
@@ -211,8 +140,7 @@ const parsePersistedStatus = (raw: string): PersistedStatusVerdict => {
     if (!parsed.success) {
       return { kind: "corrupt", parseError: parsed.error.message };
     }
-    const kind = parsed.data.status.kind;
-    return kind === "completed" || kind === "failed"
+    return isTerminalStatus(parsed.data.status)
       ? { kind: "terminal" }
       : { kind: "live" };
   } catch (e) {
@@ -340,7 +268,13 @@ interface RedisRunStoreConfig {
 
 const serializeRunMeta = (meta: RunMeta): Result<string, HostError> => {
   try {
-    return ok(toJson(meta));
+    assertLosslessEvent(meta, { operation: "serializeRunMeta", root: "metadata" });
+    const encoded = toJson(meta);
+    const restored = fromJson(encoded);
+    if (!isDeepStrictEqual(restored, meta)) {
+      throw new Error("run metadata failed losslessness round-trip verification");
+    }
+    return ok(encoded);
   } catch (error) {
     return err({
       kind: "internal-invariant-violated",

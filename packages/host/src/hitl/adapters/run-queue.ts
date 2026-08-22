@@ -19,6 +19,7 @@ import type { TenantId } from "../../domain/tenant.js";
 import type { HitlRedisPort, LogPort } from "../../ports.js";
 import { issueRunLease } from "../ports.js";
 import type { RunLease, RunQueuePort } from "../ports.js";
+import { logWithoutThrowing } from "../diagnostic-logging.js";
 
 /** Trigger envelope binds the wakeup to its tenant as well as its durable run id. */
 type RunTrigger = { readonly state: RunId; readonly context: { readonly tenant: TenantId } };
@@ -81,19 +82,6 @@ export const hitlQueueName = (tenant: TenantId, configured?: string): string => 
     throw new RangeError("HITL queue name must be non-empty and must not contain ':' (BullMQ restriction)");
   }
   return name;
-};
-
-const logWithoutThrowing = (
-  logger: LogPort | undefined,
-  level: "warn" | "error",
-  message: string,
-  data: Record<string, unknown>,
-): void => {
-  try {
-    logger?.[level]?.(message, data);
-  } catch {
-    // Diagnostics cannot replace the lease outcome.
-  }
 };
 
 export const createRunQueue = (deps: RunQueueDeps): RunQueueHandle => {

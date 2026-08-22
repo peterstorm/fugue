@@ -177,6 +177,35 @@ describe("RedisRunStore", () => {
     expect(redis.setNxOpts.get("fugue:tenant-a:hitl:ckpt:run-1")).toEqual({ expiresInSec: 4242 });
   });
 
+  it("rejects a run input containing a literal reserved serializer tag without publishing metadata", async () => {
+    const store = createRedisRunStore(fakeRedis(), TENANT, cfg);
+    const run = record({ input: { __date__: "2026-08-22T18:30:00.000Z" } });
+
+    const created = await store.create(run);
+
+    expect(created.ok).toBe(false);
+    if (!created.ok) expect(created.error.kind).toBe("internal-invariant-violated");
+    expect(await store.get(run.runId)).toEqual(ok(null));
+  });
+
+  it("rejects a completed output containing a literal reserved serializer tag without changing status", async () => {
+    const redis = fakeRedis();
+    const store = createRedisRunStore(redis, TENANT, cfg);
+    const run = record();
+    await store.create(run);
+    const lease = await acquireLease(redis, run.runId);
+
+    const settled = await store.setStatus(lease, {
+      kind: "completed",
+      output: { __undefined__: true },
+    });
+
+    expect(settled.ok).toBe(false);
+    if (!settled.ok) expect(settled.error.kind).toBe("internal-invariant-violated");
+    const persisted = await store.get(run.runId);
+    expect(persisted.ok && persisted.value?.status).toEqual({ kind: "queued" });
+  });
+
   it("completed output round-trips Map, Set, and Date without adapter drift", async () => {
     const redis = fakeRedis();
     const store = createRedisRunStore(redis, TENANT, cfg);

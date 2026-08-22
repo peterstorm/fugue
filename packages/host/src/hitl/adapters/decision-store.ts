@@ -25,7 +25,8 @@ import type { Result, RunId, NodeId, HumanAction } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import type { TenantId } from "../../domain/tenant.js";
 import type { HitlRedisPort, LogPort } from "../../ports.js";
-import type { DecisionStorePort, PendingReview } from "../ports.js";
+import type { DecisionResolution, DecisionStorePort, PendingReview } from "../ports.js";
+import { logWithoutThrowing } from "../diagnostic-logging.js";
 
 /**
  * Shape validator for a persisted `HumanAction` (ADR-0060). The decision is read
@@ -90,17 +91,13 @@ interface RedisDecisionStoreConfig {
 const notificationRequired = (marker: string): string => `notification-required:${marker}`;
 const notified = (marker: string): string => `notified:${marker}`;
 
-const logWithoutThrowing = (
-  logger: LogPort | undefined,
-  message: string,
-  data: Record<string, unknown>,
-): void => {
-  try {
-    logger?.error?.(message, data);
-  } catch {
-    // Diagnostics never replace the store's typed decision outcome.
-  }
-};
+type RedisDecisionOutcome = "not-present" | "created" | "exists";
+
+const DECISION_RESOLUTION_BY_REDIS_OUTCOME = {
+  "not-present": { kind: "not-pending" },
+  created: { kind: "accepted" },
+  exists: { kind: "already-resolved" },
+} as const satisfies Record<RedisDecisionOutcome, DecisionResolution>;
 
 const parsePendingReview = (raw: string): Result<PendingReview, HostError> => {
   if (raw.startsWith("notification-required:") && raw.length > "notification-required:".length) {
@@ -166,13 +163,7 @@ export const createRedisDecisionStore = (
         expiry,
       );
       if (!resolved.ok) return err(resolved.error);
-      return ok(
-        resolved.value === "not-present"
-          ? { kind: "not-pending" }
-          : resolved.value === "created"
-            ? { kind: "accepted" }
-            : { kind: "already-resolved" },
-      );
+      return ok(DECISION_RESOLUTION_BY_REDIS_OUTCOME[resolved.value]);
     },
 
     async getDecision(runId, nodeId) {
@@ -183,7 +174,7 @@ export const createRedisDecisionStore = (
       try {
         raw = JSON.parse(res.value);
       } catch (e) {
-        logWithoutThrowing(logger, "hitl: corrupt decision in store (malformed JSON)", {
+        logWithoutThrowing(logger, "error", "hitl: corrupt decision in store (malformed JSON)", {
           runId,
           nodeId,
           error: safeErrorMessage(e),
@@ -194,7 +185,7 @@ export const createRedisDecisionStore = (
       if (!parsed.success) {
         // Parses as JSON but is not a well-formed HumanAction — never resume a
         // run on a malformed decision; surface it via the same error channel.
-        logWithoutThrowing(logger, "hitl: corrupt decision in store (invalid shape)", {
+        logWithoutThrowing(logger, "error", "hitl: corrupt decision in store (invalid shape)", {
           runId,
           nodeId,
           error: parsed.error.message,

@@ -292,6 +292,14 @@ export const createPgAdapter = (config: PgAdapterConfig): CapabilityHandle<"db">
   };
 };
 
+const warnPgWithoutThrowing = (error: unknown): void => {
+  try {
+    console.warn(`[pg] health check: late probe failure after timeout: ${safeErrorMessage(error)}`);
+  } catch {
+    // Diagnostics are subordinate to the already-decided timeout verdict.
+  }
+};
+
 /**
  * Race SELECT 1 against a timeout. A pool that hangs (e.g. exhausted
  * connections, dead network) reports unhealthy instead of stalling the
@@ -302,14 +310,19 @@ export const healthCheckWithTimeout = async (
   timeoutMs: number,
 ): Promise<Result<void, string>> => {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
   try {
+    const query = pool.query("SELECT 1");
+    query.catch((lateError: unknown) => {
+      if (timedOut) warnPgWithoutThrowing(lateError);
+    });
     await Promise.race([
-      pool.query("SELECT 1"),
+      query,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error(`health check timed out after ${timeoutMs}ms`)),
-          timeoutMs,
-        );
+        timer = setTimeout(() => {
+          timedOut = true;
+          reject(new Error(`health check timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
       }),
     ]);
     return ok(undefined);

@@ -155,6 +155,35 @@ export interface TenantRegistry {
 }
 
 /**
+ * Copy entries behind a frozen read-only facade. Unlike a `Map` merely typed as
+ * `ReadonlyMap`, the exposed value has no runtime mutation methods, so a cast
+ * cannot bypass the registry transitions or team-uniqueness invariant.
+ */
+const registryWithEntries = (
+  entries: ReadonlyMap<TenantId, TenantConfig> = new Map(),
+): TenantRegistry => {
+  const snapshot = new Map(entries);
+  let view: ReadonlyMap<TenantId, TenantConfig>;
+  const facade = {
+    get size(): number { return snapshot.size; },
+    get: (key: TenantId): TenantConfig | undefined => snapshot.get(key),
+    has: (key: TenantId): boolean => snapshot.has(key),
+    entries: (): MapIterator<[TenantId, TenantConfig]> => snapshot.entries(),
+    keys: (): MapIterator<TenantId> => snapshot.keys(),
+    values: (): MapIterator<TenantConfig> => snapshot.values(),
+    [Symbol.iterator]: (): MapIterator<[TenantId, TenantConfig]> => snapshot[Symbol.iterator](),
+    forEach(
+      callback: (value: TenantConfig, key: TenantId, map: ReadonlyMap<TenantId, TenantConfig>) => void,
+      thisArg?: unknown,
+    ): void {
+      for (const [key, value] of snapshot) callback.call(thisArg, value, key, view);
+    },
+  } satisfies ReadonlyMap<TenantId, TenantConfig>;
+  view = Object.freeze(facade);
+  return Object.freeze({ entries: view });
+};
+
+/**
  * The empty registry — the boot-time starting point before any sync. A FRESH
  * instance per call (mirrors `domain/registry.ts`'s `emptyRegistry`): a shared
  * singleton exposing a `ReadonlyMap` is only readonly at compile time, so a
@@ -162,7 +191,7 @@ export interface TenantRegistry {
  * across every boot/test. Returning a new frozen record each call removes that
  * shared state entirely.
  */
-export const emptyRegistry = (): TenantRegistry => Object.freeze({ entries: new Map<TenantId, TenantConfig>() });
+export const emptyRegistry = (): TenantRegistry => registryWithEntries();
 
 /**
  * Build a registry from a seed of configs. Used by the adapter when hydrating
@@ -173,9 +202,7 @@ export const emptyRegistry = (): TenantRegistry => Object.freeze({ entries: new 
 export const registryOf = (seed: readonly TenantConfig[] = []): TenantRegistry => {
   const entries = new Map<TenantId, TenantConfig>();
   for (const cfg of seed) entries.set(cfg.id, cfg);
-  // Freeze the record (as `emptyRegistry` does) so every producer upholds the
-  // same runtime-immutability guard, not only compile-time `ReadonlyMap`.
-  return Object.freeze({ entries });
+  return registryWithEntries(entries);
 };
 
 /**
@@ -309,9 +336,7 @@ const agentMapEquals = (
 const withEntry = (registry: TenantRegistry, cfg: TenantConfig): TenantRegistry => {
   const next = new Map(registry.entries);
   next.set(cfg.id, cfg);
-  // Freeze the record consistently with `emptyRegistry`/`registryOf` (uniform
-  // runtime-immutability guard atop the compile-time `ReadonlyMap`).
-  return Object.freeze({ entries: next });
+  return registryWithEntries(next);
 };
 
 /**

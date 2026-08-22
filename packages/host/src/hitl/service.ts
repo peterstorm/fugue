@@ -36,6 +36,7 @@ import type { QueuedRunRecord, RunRecord } from "./types.js";
 import { makeRunStoreJobLike } from "./run-store-job.js";
 import { makeOnHumanReview, makeOnDecisionConsumed } from "./human-review-hook.js";
 import { toPersistedIdentity } from "./identity.js";
+import { logWithoutThrowing } from "./diagnostic-logging.js";
 
 interface HitlRunServiceDeps {
   readonly runStore: RunStorePort;
@@ -86,19 +87,6 @@ const asRunFailure = (hostError: HostError): FrameworkError => ({
   nodeId: EXECUTOR_NODE_ID,
   message: `host run execution failed: ${hostError.kind}`,
 });
-
-const logWithoutThrowing = (
-  logger: LogPort | undefined,
-  level: "warn" | "error",
-  message: string,
-  data: Record<string, unknown>,
-): void => {
-  try {
-    logger?.[level]?.(message, data);
-  } catch {
-    // Diagnostics never replace the service's durable or typed outcome.
-  }
-};
 
 export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService => {
   const { runStore, runQueue, decisions, notifier, executor, clock, newRunId, tenant, maxQueuedRuns, logger } = deps;

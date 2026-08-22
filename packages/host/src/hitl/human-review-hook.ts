@@ -34,6 +34,7 @@ import type {
 import type { DecisionStorePort, HumanReviewNotifierPort } from "./ports.js";
 import type { Team } from "../domain/auth.js";
 import type { LogPort } from "../ports.js";
+import { logWithoutThrowing } from "./diagnostic-logging.js";
 
 interface OnHumanReviewDeps {
   readonly decisions: DecisionStorePort;
@@ -43,19 +44,6 @@ interface OnHumanReviewDeps {
   readonly ownerTeam: Team;
   readonly logger?: LogPort;
 }
-
-const logWithoutThrowing = (
-  logger: LogPort | undefined,
-  level: "warn" | "error",
-  message: string,
-  data: Record<string, unknown>,
-): void => {
-  try {
-    logger?.[level]?.(message, data);
-  } catch {
-    // Diagnostics cannot replace a safe pending/committed outcome.
-  }
-};
 
 /**
  * Build the per-run `onHumanReview` hook the worker passes to

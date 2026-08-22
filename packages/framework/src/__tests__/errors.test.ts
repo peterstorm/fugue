@@ -23,6 +23,7 @@ import { runId as makeRunId, nodeId as makeNodeId } from "../types/ids.js";
 import {
   formatFrameworkError,
   isFrameworkError,
+  PersistedFrameworkErrorSchema,
   messageOf,
   retriabilityOf,
   usageOfError,
@@ -101,6 +102,34 @@ describe("FrameworkError: checkpoint-write-failed diagnostics", () => {
     expect(formatFrameworkError(error)).toBe(
       "checkpoint write failed for run 'run-budget' node 'checkpoint_meta': meta write failed",
     );
+  });
+});
+
+describe("PersistedFrameworkErrorSchema", () => {
+  it("parses a complete variant, brands ids, and preserves additive fields", () => {
+    const parsed = PersistedFrameworkErrorSchema.safeParse({
+      kind: "node-crash",
+      nodeId: "node-x",
+      message: "boom",
+      retriability: "retriable",
+      futureDiagnostic: "preserved",
+    });
+
+    expect(parsed.success).toBe(true);
+    if (parsed.success && parsed.data.kind === "node-crash") {
+      expect(parsed.data.nodeId).toBe(makeNodeId("node-x"));
+      expect((parsed.data as FrameworkError & { futureDiagnostic?: string }).futureDiagnostic).toBe("preserved");
+    }
+  });
+
+  it("rejects missing required fields and invalid branded ids", () => {
+    expect(PersistedFrameworkErrorSchema.safeParse({ kind: "node-crash" }).success).toBe(false);
+    expect(PersistedFrameworkErrorSchema.safeParse({
+      kind: "node-crash",
+      nodeId: "bad node id",
+      message: "boom",
+      retriability: "retriable",
+    }).success).toBe(false);
   });
 });
 
