@@ -10,7 +10,7 @@
 // full-loop service test never exercises.
 
 import { describe, it, expect } from "bun:test";
-import { ok, err } from "@fuguejs/framework";
+import { nonEmptyString, ok, err } from "@fuguejs/framework";
 import type { RunId, NodeId, DagId, HumanAction } from "@fuguejs/framework";
 import type { DecisionStorePort, HumanReviewNotifierPort } from "../ports.js";
 import { markTeam } from "../../domain/auth.js";
@@ -21,7 +21,7 @@ const RUN = "run-1" as RunId;
 const NODE = "review" as NodeId;
 const DAG = "dag-1" as DagId;
 const OWNER_TEAM = markTeam("test-team");
-const req = { nodeId: NODE, output: { x: 1 }, prompt: "ok?" };
+const req = { nodeId: NODE, output: { x: 1 }, prompt: nonEmptyString("ok?") };
 
 const notifierSpy = () => {
   const sent: ReviewNotification[] = [];
@@ -113,6 +113,20 @@ describe("makeOnHumanReview", () => {
     expect(await hook(req)).toEqual({ kind: "pending" });
     expect(await hook(req)).toEqual({ kind: "pending" });
     expect(notifyCalls).toBe(2);
+  });
+
+  it("rejects a blank prompt before it can cross the notifier boundary", async () => {
+    const notifier = notifierSpy();
+    const hook = makeOnHumanReview({
+      decisions: decisionStore(),
+      notifier: notifier.port,
+      runId: RUN,
+      dagId: DAG,
+      ownerTeam: OWNER_TEAM,
+    });
+
+    await expect(hook({ ...req, prompt: "   " })).rejects.toThrow("blank review prompt");
+    expect(notifier.sent).toHaveLength(0);
   });
 
   it("fails closed when preparePending errors — rejects and does not notify", async () => {

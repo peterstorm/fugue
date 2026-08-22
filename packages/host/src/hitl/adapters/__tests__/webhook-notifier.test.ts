@@ -3,6 +3,7 @@
 // with an injected fake HTTP transport (no network).
 
 import { describe, it, expect } from "bun:test";
+import { nonEmptyString } from "@fuguejs/framework";
 import type { DagId, RunId, NodeId } from "@fuguejs/framework";
 import { markTeam } from "../../../domain/auth.js";
 import type { ReviewNotification } from "../../types.js";
@@ -18,7 +19,7 @@ const notification: ReviewNotification = {
   dagId: "lead-desk" as DagId,
   ownerTeam: markTeam("sales"),
   nodeId: "review" as NodeId,
-  prompt: "Approve the drafted reply?",
+  prompt: nonEmptyString("Approve the drafted reply?"),
   output: { reply: "Hello!" },
 };
 

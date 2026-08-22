@@ -19,7 +19,7 @@ import { redisUnavailable } from "../../../domain/host-error.js";
 import { tenantId, markSecretsRef } from "../../../domain/tenant.js";
 import type { TenantId } from "../../../domain/tenant.js";
 import { tenantConfig, registryOf } from "../../../supervisor/registry/tenant-registry.js";
-import type { ActiveTenantConfig, DeregisteredTenantConfig } from "../../../supervisor/registry/tenant-registry.js";
+import type { ActiveTenantConfig, DeregisteredTenantConfig, TenantConfig, TenantRegistry } from "../../../supervisor/registry/tenant-registry.js";
 import {
   DAY_MS,
   DEFAULT_GRACE_WINDOW_MS,
@@ -58,6 +58,12 @@ const tombstone = (id: string, deregisteredAt: number): DeregisteredTenantConfig
   status: "deregistered",
   deregisteredAt,
 });
+
+const seededRegistry = (seed: readonly TenantConfig[]): TenantRegistry => {
+  const parsed = registryOf(seed);
+  if (!parsed.ok) throw new Error(`bad registry seed: ${JSON.stringify(parsed.error)}`);
+  return parsed.value;
+};
 
 // ── Fake footprint ports (recorded calls) ─────────────────────────────────────
 
@@ -115,7 +121,7 @@ describe("selectPurgeable", () => {
   it("returns only deregistered tenants past their window", () => {
     const now = 10_000_000;
     const win = DAY_MS;
-    const registry = registryOf([
+    const registry = seededRegistry([
       makeActive("active-one"),
       tombstone("due", now - 2 * DAY_MS),       // past window → purge
       tombstone("in-window", now - 1),          // still in window → retained
@@ -125,7 +131,7 @@ describe("selectPurgeable", () => {
   });
 
   it("never selects an active tenant", () => {
-    const registry = registryOf([makeActive("a"), makeActive("b")]);
+    const registry = seededRegistry([makeActive("a"), makeActive("b")]);
     expect(selectPurgeable(registry, 0, Number.MAX_SAFE_INTEGER)).toHaveLength(0);
   });
 });
@@ -166,7 +172,7 @@ describe("runGracePurgeSweep (SC-010 retain-then-purge)", () => {
     const now = 10_000_000;
     const win = DAY_MS;
     const deps = recordingDeps();
-    const registry = registryOf([
+    const registry = seededRegistry([
       makeActive("active"),
       tombstone("due", now - 2 * DAY_MS),
       tombstone("retained", now - 1),
@@ -183,7 +189,7 @@ describe("runGracePurgeSweep (SC-010 retain-then-purge)", () => {
     const win = DAY_MS;
     // `due-bad`'s keyspace purge persistently fails; `due-ok` purges cleanly.
     const deps = recordingDeps({ failKeyspaceFor: (t) => t === tid("due-bad") });
-    const registry = registryOf([
+    const registry = seededRegistry([
       tombstone("due-ok", now - 2 * DAY_MS),
       tombstone("due-bad", now - 2 * DAY_MS),
       tombstone("retained", now - 1),
@@ -228,7 +234,7 @@ describe("runGracePurgeSweep (SC-010 retain-then-purge)", () => {
     // Fail a DIFFERENT step than keyspace — the sweep must surface the genuine
     // typed step name, and the keysDeleted from the step that DID run.
     const deps = recordingDeps({ failAcl: true });
-    const registry = registryOf([tombstone("due", now - 2 * DAY_MS)]);
+    const registry = seededRegistry([tombstone("due", now - 2 * DAY_MS)]);
     const warnings: Array<{ msg: string; data?: Record<string, unknown> }> = [];
     const capturingLog = {
       info: () => {},

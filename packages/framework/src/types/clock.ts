@@ -66,10 +66,10 @@ export const fixedClock = (at: Date): ClockCapability => {
  * TTL comparisons silently compare `NaN` — both fail-closed only when the
  * guard rejects the value BEFORE the conversion.
  *
- * This is the shared guard for the three ms→Date clock sites — the file
- * checkpointer `readClock`, the in-memory checkpointer `readClock`, and the
- * checkpoint codec serializers' timestamp checks (`serializeMeta`'s
- * `createdAtMs`, `serializeNode`'s `completedAt` getTime). The raw-ms clock
+ * This is the shared guard for ms→Date clock consumers, including Redis/file/
+ * in-memory checkpointer clock reads and checkpoint codec timestamp checks
+ * (`serializeMeta`'s `createdAtMs`, `serializeNode`'s `completedAt` getTime).
+ * The raw-ms clock
  * domain (journal `recordedAtMs`, freshness-index `writtenAtMs`) is
  * deliberately NOT this check: those values are stored as raw `number`s
  * and consumed by arithmetic — no `Date` conversion ever happens — so

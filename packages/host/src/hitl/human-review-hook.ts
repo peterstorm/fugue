@@ -25,6 +25,7 @@
  * notification has been delivered. Failed deliveries remain durably retriable.
  */
 
+import { asNonEmptyString } from "@fuguejs/framework";
 import type {
   RunId,
   DagId,
@@ -86,12 +87,20 @@ export const makeOnHumanReview = (deps: OnHumanReviewDeps) =>
       throw new Error(`hitl: preparePending failed for ${runId}/${req.nodeId}: ${pending.error.kind}`);
     }
     if (pending.value.kind === "notification-required") {
+      const prompt = asNonEmptyString(req.prompt);
+      if (prompt === undefined) {
+        logWithoutThrowing(logger, "error", "hitl: blank review prompt — refusing invalid notification", {
+          runId,
+          nodeId: req.nodeId,
+        });
+        throw new Error(`hitl: blank review prompt for ${runId}/${req.nodeId}`);
+      }
       const delivered = await notifier.notify({
         runId,
         dagId,
         ownerTeam,
         nodeId: req.nodeId,
-        prompt: req.prompt,
+        prompt,
         output: req.output,
       });
       if (!delivered.ok) {

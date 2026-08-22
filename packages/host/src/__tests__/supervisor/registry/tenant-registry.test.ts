@@ -58,6 +58,12 @@ const makeConfig = (id: string, overrides: Partial<TenantConfigBase> = {}): Acti
   return r.value;
 };
 
+const seededRegistry = (seed: readonly ActiveTenantConfig[]): TenantRegistry => {
+  const parsed = registryOf(seed);
+  if (!parsed.ok) throw new Error(`bad registry seed: ${JSON.stringify(parsed.error)}`);
+  return parsed.value;
+};
+
 // ── Smart constructor (parse-don't-validate) ─────────────────────────────────
 
 describe("tenantConfig parse boundary", () => {
@@ -262,6 +268,45 @@ describe("team uniqueness (team↔tenant is 1:1)", () => {
 
 // ── deregister ───────────────────────────────────────────────────────────────
 
+describe("registryOf parse boundary", () => {
+  it("rejects duplicate active team ownership regardless of seed order", () => {
+    const a = makeConfig("a", { team: "shared" });
+    const b = makeConfig("b", { team: "shared" });
+
+    for (const seed of [[a, b], [b, a]]) {
+      const parsed = registryOf(seed);
+      expect(isErr(parsed)).toBe(true);
+      if (!parsed.ok) expect(parsed.error.kind).toBe("config-invalid");
+    }
+  });
+
+  it("allows one active owner when the prior tenant is deregistered", () => {
+    const a = makeConfig("a", { team: "shared" });
+    const registered = register(emptyRegistry(), a, 1000);
+    if (!registered.ok) throw new Error("setup register");
+    const deregistered = deregister(registered.value, a.id, 1100);
+    if (!deregistered.ok) throw new Error("setup deregister");
+    const tombstone = retainedEntry(deregistered.value, a.id);
+    if (tombstone === undefined) throw new Error("missing tombstone");
+
+    const parsed = registryOf([tombstone, makeConfig("b", { team: "shared" })]);
+    expect(isOk(parsed)).toBe(true);
+  });
+
+  it("property: any two distinct active tenant ids sharing a team are rejected", () => {
+    fc.assert(
+      fc.property(fc.string({ minLength: 1, maxLength: 40 }), (team) => {
+        const a = makeConfig("a", { team });
+        const b = makeConfig("b", { team });
+        expect(isErr(registryOf([a, b]))).toBe(true);
+        expect(isErr(registryOf([b, a]))).toBe(true);
+      }),
+    );
+  });
+});
+
+// ── deregister ───────────────────────────────────────────────────────────────
+
 describe("deregister", () => {
   it("marks deregisteredAt and RETAINS the entry (deregistered-then-retained)", () => {
     const cfg = makeConfig("a");
@@ -359,7 +404,7 @@ describe("lookup (fail-closed)", () => {
   });
 
   it("activeTenants / isActive exclude deregistered entries", () => {
-    let reg = registryOf([makeConfig("a"), makeConfig("b")]);
+    let reg = seededRegistry([makeConfig("a"), makeConfig("b")]);
     expect(activeTenants(reg).length).toBe(2);
     const d = deregister(reg, tid("a"), 1500);
     if (!d.ok) throw new Error("deregister");

@@ -34,7 +34,7 @@
  * transition to it and only persists/announces the RESULT.
  */
 
-import { ok, err } from "@fuguejs/framework";
+import { ok, err, safeErrorMessage } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import { redisUnavailable } from "../../domain/host-error.js";
 import type { HostError } from "../../domain/host-error.js";
@@ -46,6 +46,7 @@ import { match } from "ts-pattern";
 import {
   emptyRegistry,
   registryOf,
+  removeRetainedEntry,
   tenantConfig,
   register as coreRegister,
   deregister as coreDeregister,
@@ -112,6 +113,26 @@ interface RegistryDegradedHooks {
   readonly onRedisDead?: () => void;
   readonly onRedisAlive?: () => void;
 }
+
+const warnWithoutThrowing = (
+  logger: LogPort | undefined,
+  message: string,
+  data?: Record<string, unknown>,
+): void => {
+  try {
+    logger?.warn(message, data);
+  } catch {
+    // Diagnostics must never replace a typed adapter outcome.
+  }
+};
+
+const callHookWithoutThrowing = (hook: (() => void) | undefined): void => {
+  try {
+    hook?.();
+  } catch {
+    // Host-state diagnostics are advisory; the adapter's own gate is authoritative.
+  }
+};
 
 // ── Serialization (secrets are a REFERENCE only) ─────────────────────────────
 
@@ -338,13 +359,15 @@ export const createRedisTenantRegistry = (
   let probeDegraded = false;
 
   const dead = (operation: string): HostError => {
+    // Latch first: no diagnostic or host-state callback can leave the local
+    // new-run gate stale after Redis failed.
     writeDegraded = true;
-    hooks.onRedisDead?.();
+    callHookWithoutThrowing(hooks.onRedisDead);
     return redisUnavailable(operation);
   };
   const alive = (): void => {
     writeDegraded = false;
-    hooks.onRedisAlive?.();
+    callHookWithoutThrowing(hooks.onRedisAlive);
   };
 
   /** Persist a config + publish its event. Fails closed on any Redis failure. */
@@ -358,11 +381,12 @@ export const createRedisTenantRegistry = (
     try {
       setResult = await redis.set(tenantKey(cfg.id), serialize(cfg));
     } catch (e) {
-      logger?.warn("[tenant-registry] Redis set threw — treating as disconnected", {
+      const failure = dead(op);
+      warnWithoutThrowing(logger, "[tenant-registry] Redis set threw — treating as disconnected", {
         op,
-        error: e instanceof Error ? e.message : String(e),
+        error: safeErrorMessage(e),
       });
-      return err(dead(op));
+      return err(failure);
     }
     if (!setResult.ok) {
       return err(dead(op));
@@ -374,11 +398,12 @@ export const createRedisTenantRegistry = (
     try {
       pubResult = await pubsub.publish(TENANT_EVENTS_CHANNEL, JSON.stringify(event));
     } catch (e) {
-      logger?.warn("[tenant-registry] Redis publish threw — treating as disconnected", {
+      const failure = dead(op);
+      warnWithoutThrowing(logger, "[tenant-registry] Redis publish threw — treating as disconnected", {
         op,
-        error: e instanceof Error ? e.message : String(e),
+        error: safeErrorMessage(e),
       });
-      return err(dead(op));
+      return err(failure);
     }
     if (!pubResult.ok) {
       return err(dead(op));
@@ -499,11 +524,12 @@ export const createRedisTenantRegistry = (
         try {
           delResult = await redis.del(tenantKey(id));
         } catch (e) {
-          logger?.warn("[tenant-registry] Redis del threw during hardDelete — treating as disconnected", {
+          const failure = dead("tenant-hard-delete");
+          warnWithoutThrowing(logger, "[tenant-registry] Redis del threw during hardDelete — treating as disconnected", {
             tenant: id,
-            error: e instanceof Error ? e.message : String(e),
+            error: safeErrorMessage(e),
           });
-          return err(dead("tenant-hard-delete"));
+          return err(failure);
         }
         if (!delResult.ok) return err(dead("tenant-hard-delete"));
         // Announce the absence so subscribers re-read (and observe the tenant gone).
@@ -511,19 +537,17 @@ export const createRedisTenantRegistry = (
         try {
           pubResult = await pubsub.publish(TENANT_EVENTS_CHANNEL, JSON.stringify({ kind: "deregistered", tenant: id }));
         } catch (e) {
-          logger?.warn("[tenant-registry] Redis publish threw during hardDelete — treating as disconnected", {
+          const failure = dead("tenant-hard-delete");
+          warnWithoutThrowing(logger, "[tenant-registry] Redis publish threw during hardDelete — treating as disconnected", {
             tenant: id,
-            error: e instanceof Error ? e.message : String(e),
+            error: safeErrorMessage(e),
           });
-          return err(dead("tenant-hard-delete"));
+          return err(failure);
         }
         if (!pubResult.ok) return err(dead("tenant-hard-delete"));
-        // Advance the in-memory view: drop the entry entirely. Freeze the record
-        // for parity with every other registry producer (`emptyRegistry`,
-        // `registryOf`, `withEntry`) so the runtime-immutability guard is uniform.
-        const next = new Map(registry.entries);
-        next.delete(id);
-        registry = Object.freeze({ entries: next });
+        // Advance through the pure core so hard deletion preserves the same
+        // runtime-read-only facade as every other registry transition.
+        registry = removeRetainedEntry(registry, id);
         alive();
         return ok(undefined);
       }),
@@ -537,10 +561,11 @@ export const createRedisTenantRegistry = (
         try {
           scanResult = await redis.scan(pattern, cursor);
         } catch (e) {
-          logger?.warn("[tenant-registry] Redis scan threw during hydrate — treating as disconnected", {
-            error: e instanceof Error ? e.message : String(e),
+          const failure = dead("tenant-hydrate");
+          warnWithoutThrowing(logger, "[tenant-registry] Redis scan threw during hydrate — treating as disconnected", {
+            error: safeErrorMessage(e),
           });
-          return err(dead("tenant-hydrate"));
+          return err(failure);
         }
         if (!scanResult.ok) {
           return err(dead("tenant-hydrate"));
@@ -550,11 +575,12 @@ export const createRedisTenantRegistry = (
           try {
             valR = await redis.get(key);
           } catch (e) {
-            logger?.warn("[tenant-registry] Redis get threw during hydrate — treating as disconnected", {
+            const failure = dead("tenant-hydrate");
+            warnWithoutThrowing(logger, "[tenant-registry] Redis get threw during hydrate — treating as disconnected", {
               key,
-              error: e instanceof Error ? e.message : String(e),
+              error: safeErrorMessage(e),
             });
-            return err(dead("tenant-hydrate"));
+            return err(failure);
           }
           if (!valR.ok) return err(dead("tenant-hydrate"));
           if (valR.value === null || valR.value === "") continue;
@@ -588,7 +614,9 @@ export const createRedisTenantRegistry = (
       // note above this block). The scan/get reads stay OUTSIDE the gate (they hold
       // no in-memory reference); only the final commit is serialised.
       return serializeMutation(async () => {
-        registry = registryOf(configs);
+        const hydrated = registryOf(configs);
+        if (!hydrated.ok) return hydrated;
+        registry = hydrated.value;
         alive();
         return ok(registry);
       });
@@ -645,23 +673,23 @@ export const subscribeTenantEvents = async (
     sub = await pubsub.subscribe(TENANT_EVENTS_CHANNEL, (raw) => {
       const event = parseEvent(raw);
       if (event === undefined) {
-        logger?.warn("[tenant-registry] Dropping malformed tenant event", { raw: raw.slice(0, 120) });
+        warnWithoutThrowing(logger, "[tenant-registry] Dropping malformed tenant event", { raw: raw.slice(0, 120) });
         return;
       }
       dispatchEvent(event);
     });
   } catch (e) {
-    logger?.warn("[tenant-registry] Redis subscribe threw — treating as disconnected", {
-      error: e instanceof Error ? e.message : String(e),
+    warnWithoutThrowing(logger, "[tenant-registry] Redis subscribe threw — treating as disconnected", {
+      error: safeErrorMessage(e),
     });
-    hooks.onRedisDead?.();
+    callHookWithoutThrowing(hooks.onRedisDead);
     return err(redisUnavailable("tenant-subscribe"));
   }
   if (!sub.ok) {
-    hooks.onRedisDead?.();
+    callHookWithoutThrowing(hooks.onRedisDead);
     return err(redisUnavailable("tenant-subscribe"));
   }
-  hooks.onRedisAlive?.();
+  callHookWithoutThrowing(hooks.onRedisAlive);
   return ok(sub.value);
 };
 

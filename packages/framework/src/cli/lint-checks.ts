@@ -80,26 +80,24 @@ const detectShapeHelper = (dag: DagDef): LintAdvisory | null => {
 
   const ids = dag.nodes.map((n) => n.id as string);
   const indeg = new Map<string, number>(ids.map((id) => [id, 0]));
-  const outdeg = new Map<string, number>(ids.map((id) => [id, 0]));
   const outTargets = new Map<string, string[]>(ids.map((id) => [id, []]));
   const actualEdges = new Set<string>();
   for (const e of edges) {
     const f = e.from as string;
     const t = e.to as string;
-    outdeg.set(f, (outdeg.get(f) ?? 0) + 1);
     indeg.set(t, (indeg.get(t) ?? 0) + 1);
     outTargets.get(f)!.push(t);
     actualEdges.add(edgeKey(f, t));
   }
   const sources = ids.filter((id) => indeg.get(id) === 0);
-  const sinks = ids.filter((id) => outdeg.get(id) === 0);
+  const sinks = ids.filter((id) => outTargets.get(id)!.length === 0);
 
   // Linear: single chain — one source, one sink, every node in/out degree ≤ 1.
   if (
     edges.length === ids.length - 1 &&
     sources.length === 1 &&
     sinks.length === 1 &&
-    ids.every((id) => (indeg.get(id) ?? 0) <= 1 && (outdeg.get(id) ?? 0) <= 1)
+    ids.every((id) => (indeg.get(id) ?? 0) <= 1 && outTargets.get(id)!.length <= 1)
   ) {
     return {
       kind: "shape-helper-hint",
@@ -145,7 +143,7 @@ const detectShapeHelper = (dag: DagDef): LintAdvisory | null => {
   // Fan-out with no join: every edge leaves the source; branches are all sinks.
   if (
     edges.length === branches.length &&
-    branches.every((b) => outdeg.get(b) === 0)
+    branches.every((b) => outTargets.get(b)!.length === 0)
   ) {
     return {
       kind: "shape-helper-hint",

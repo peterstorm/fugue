@@ -261,6 +261,34 @@ describe("redis tenant registry — fail-closed (FR-022 / FR-023)", () => {
     expect(dead).toBe(1);
   });
 
+  it("latches degradation and returns a typed error even when rendering, logging, and the dead hook throw", async () => {
+    const fake = createInMemoryRedisFake();
+    const hostile = Object.create(null) as { toString: () => string };
+    hostile.toString = () => { throw new Error("cannot render"); };
+    const redis = {
+      ...fake.redis,
+      set: async () => { throw hostile; },
+    };
+    const reg = createRedisTenantRegistry(
+      redis,
+      fake.pubsub,
+      { onRedisDead: () => { throw new Error("dead hook unavailable"); } },
+      {
+        info: () => {},
+        warn: () => { throw new Error("logger unavailable"); },
+        error: () => {},
+      },
+    );
+
+    const result = await reg.register(makeConfig("acme"), 1000);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("redis-unavailable");
+    const gated = reg.resolveForNewRun(tid("ghost"));
+    expect(gated.ok).toBe(false);
+    if (!gated.ok) expect(gated.error.kind).toBe("redis-unavailable");
+  });
+
   it("recovers: onRedisAlive fires after a successful op following an outage", async () => {
     const fake = createInMemoryRedisFake();
     let alive = 0;
@@ -452,6 +480,20 @@ describe("redis tenant registry — hydrate rejects corrupt records without a pa
     expect(hydrated.ok).toBe(false);
     if (!hydrated.ok) expect(hydrated.error.kind).toBe("config-invalid");
     expect(reg.snapshot().entries.size).toBe(0);
+  });
+
+  it("rejects duplicate active team ownership without committing a partial snapshot", async () => {
+    const fake = createInMemoryRedisFake();
+    const reg = createRedisTenantRegistry(fake.redis, fake.pubsub);
+    await reg.register(makeConfig("prior"), 1000);
+    fake.store.set(`${TENANT_KEY_PREFIX}a`, JSON.stringify({ ...validRaw("a"), team: "shared" }));
+    fake.store.set(`${TENANT_KEY_PREFIX}b`, JSON.stringify({ ...validRaw("b"), team: "shared" }));
+
+    const hydrated = await reg.hydrate();
+
+    expect(hydrated.ok).toBe(false);
+    if (!hydrated.ok) expect(hydrated.error.kind).toBe("config-invalid");
+    expect([...reg.snapshot().entries.keys()]).toEqual([tid("prior")]);
   });
 
   it("round-trips a deregistered record through hydrate (status:deregistered + tombstone)", async () => {
@@ -668,10 +710,12 @@ describe("redis tenant registry — hardDelete (grace-window purge, FR-030)", ()
     // Gone from the in-memory view entirely (NOT a tombstone — hard delete).
     expect(reg.snapshot().entries.has(tid("acme"))).toBe(false);
     expect(reg.lookup(tid("acme")).ok).toBe(false);
-    // The post-hardDelete registry is FROZEN — runtime-immutability parity with the
-    // other producers (register/deregister/reconfigure), so no caller can mutate the
-    // shared in-memory view out from under a concurrent reader.
+    // The post-hardDelete registry uses the same runtime-read-only facade as
+    // every other transition: neither the record nor its entries expose mutation.
     expect(Object.isFrozen(reg.snapshot())).toBe(true);
+    const exposed = reg.snapshot().entries as Map<TenantId, ActiveTenantConfig>;
+    expect(exposed.set).toBeUndefined();
+    expect(() => exposed.set(tid("forged"), makeConfig("forged"))).toThrow();
   });
 
   it("(c) a del failure fails closed and does NOT advance the in-memory view", async () => {

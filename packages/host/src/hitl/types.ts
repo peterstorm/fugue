@@ -96,6 +96,6 @@ export interface ReviewNotification {
   /** Immutable run owner; notification routing must never re-resolve live registry ownership. */
   readonly ownerTeam: Team;
   readonly nodeId: NodeId;
-  readonly prompt: string;
+  readonly prompt: NonEmptyString;
   readonly output: unknown;
 }

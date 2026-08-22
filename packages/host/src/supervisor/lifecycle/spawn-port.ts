@@ -11,8 +11,8 @@
  *                            get its UDS path; drain/evict/restart; reconcile on
  *                            restart; how many workers are live").
  *
- * All fallible operations return `Result<…, HostError>` — fail-closed, never throw
- * (the Bun adapter catches thrown spawn/kill errors and converts them).
+ * Spawn and signal failures return `Result<…, HostError>` — fail-closed, never
+ * throw. `isAlive` is intentionally a best-effort boolean liveness probe.
  */
 
 import type { Result } from "@fuguejs/framework";

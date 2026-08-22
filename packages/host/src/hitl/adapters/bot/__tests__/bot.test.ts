@@ -38,7 +38,7 @@ const notification: ReviewNotification = {
   dagId: "lead-desk" as DagId,
   ownerTeam: markTeam("sales"),
   nodeId: "review" as NodeId,
-  prompt: "Approve the reply?",
+  prompt: nonEmptyString("Approve the reply?"),
   output: { reply: "Hi" },
 };
 

@@ -9,8 +9,9 @@
  *
  * PARSE-DON'T-VALIDATE: `AuditAction` is a closed discriminated union of the
  * three lifecycle verbs — there is no representable "audit record for some other
- * action", so the type itself guarantees multi-tenant spec SC-008's "100% of register/deregister/
- * reconfigure emit a record" cannot be undermined by a typo'd free-form string.
+ * action", so constructed records cannot drift through typo'd free-form action
+ * strings. Handler wiring and tests remain responsible for proving every
+ * register/deregister/reconfigure attempt emits a record.
  *
  * NON-LEAKING: a record names exactly ONE tenant (the one the op acted on) and
  * carries no other tenant's id — mirroring the host's per-tenant error

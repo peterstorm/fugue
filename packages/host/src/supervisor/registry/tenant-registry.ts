@@ -194,15 +194,33 @@ const registryWithEntries = (
 export const emptyRegistry = (): TenantRegistry => registryWithEntries();
 
 /**
- * Build a registry from a seed of configs. Used by the adapter when hydrating
- * from Redis on startup, and by tests. Last-writer-wins on duplicate ids (the
- * seed is already-persisted state, so a duplicate is a hydration artifact, not a
- * user action — no error).
+ * Parse a seed of configs into a registry. Used by the adapter when hydrating
+ * from Redis on startup, and by tests. Duplicate ids remain last-writer-wins (a
+ * seed artifact), then the complete retained snapshot is checked before it is
+ * exposed: two distinct ACTIVE tenants may never own the same team. Returning a
+ * `Result` makes the security-critical team-routing invariant part of registry
+ * construction instead of a convention enforced only by live mutations.
  */
-export const registryOf = (seed: readonly TenantConfig[] = []): TenantRegistry => {
+export const registryOf = (
+  seed: readonly TenantConfig[] = [],
+): Result<TenantRegistry, HostError> => {
   const entries = new Map<TenantId, TenantConfig>();
   for (const cfg of seed) entries.set(cfg.id, cfg);
-  return registryWithEntries(entries);
+
+  const activeOwnerByTeam = new Map<Team, TenantId>();
+  for (const cfg of entries.values()) {
+    if (cfg.status === "deregistered") continue;
+    const owner = activeOwnerByTeam.get(cfg.team);
+    if (owner !== undefined && owner !== cfg.id) {
+      return err({
+        kind: "config-invalid",
+        message: `persisted tenant registry assigns team '${cfg.team}' to active tenants '${owner}' and '${cfg.id}'`,
+      });
+    }
+    activeOwnerByTeam.set(cfg.team, cfg.id);
+  }
+
+  return ok(registryWithEntries(entries));
 };
 
 /**
@@ -336,6 +354,20 @@ const agentMapEquals = (
 const withEntry = (registry: TenantRegistry, cfg: TenantConfig): TenantRegistry => {
   const next = new Map(registry.entries);
   next.set(cfg.id, cfg);
+  return registryWithEntries(next);
+};
+
+/**
+ * Remove a retained entry entirely, rebuilding the same runtime-read-only facade
+ * as every other registry transition. Absent removal is an idempotent no-op.
+ */
+export const removeRetainedEntry = (
+  registry: TenantRegistry,
+  id: TenantId,
+): TenantRegistry => {
+  if (!registry.entries.has(id)) return registry;
+  const next = new Map(registry.entries);
+  next.delete(id);
   return registryWithEntries(next);
 };
 

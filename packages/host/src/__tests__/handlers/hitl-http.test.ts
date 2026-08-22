@@ -199,6 +199,22 @@ describe("POST /runs/:runId/approve", () => {
     expect(call[2]).toEqual({ kind: "approve", actor: "admin" });
   });
 
+  it("denies a cross-team approval before recording any decision", async () => {
+    const hitl = fakeHitl();
+    const res = await postJson(
+      app(
+        baseRunDagDeps({ hitl }),
+        state,
+        { kind: "team", team: markTeam("other-team"), label: "Other" },
+      ),
+      "/runs/run-1/approve",
+      { decision: "approve" },
+    );
+
+    expect(res.status).toBe(403);
+    expect(hitl.recordDecision).toHaveBeenCalledTimes(0);
+  });
+
   it("maps reject body to a reject HumanAction", async () => {
     const hitl = fakeHitl();
     await postJson(app(baseRunDagDeps({ hitl }), state), "/runs/run-1/approve", { decision: "reject", reason: "no" });

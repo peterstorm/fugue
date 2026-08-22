@@ -3,8 +3,9 @@
  * `ProcManagePort` (AD-9). The decision-shaped part (argv + env construction,
  * incl. the per-worker heap cap) is factored into the PURE `buildWorkerSpawn`
  * function so it is unit-testable WITHOUT spawning a real process; the adapter
- * itself only does the actual `Bun.spawn` / `process.kill` I/O and fail-closes
- * thrown errors into `HostError`.
+ * itself only does the actual `Bun.spawn` / `process.kill` I/O. Spawn and signal
+ * failures fail closed into `HostError`; `isAlive` classifies signal-0 failures
+ * into its best-effort boolean liveness result.
  *
  * HEAP CAP MECHANISM (AD-9, WORKER_HEAP_CAP_MB):
  *   Bun has no dedicated per-process heap CLI flag, but it honours the

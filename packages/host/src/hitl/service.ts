@@ -92,6 +92,25 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
   const { runStore, runQueue, decisions, notifier, executor, clock, newRunId, tenant, maxQueuedRuns, logger } = deps;
   const retryAfterSeconds = deps.retryAfterSeconds ?? 5;
 
+  /**
+   * Request the low-latency wakeup after durable acceptance. Failure is
+   * intentionally non-fatal: lifecycle reconciliation owns eventual delivery.
+   */
+  const requestDirectWakeup = async (
+    runId: RunId,
+    failureMessage: string,
+    context: Readonly<Record<string, unknown>> = {},
+  ): Promise<void> => {
+    const enqueued = await runQueue.enqueue(runId);
+    if (enqueued.ok) return;
+    logWithoutThrowing(logger, "error", failureMessage, {
+      runId,
+      ...context,
+      error: enqueued.error.kind,
+      message: formatHostError(enqueued.error),
+    });
+  };
+
   const startRun = async (
     dagId: DagId,
     ownerTeam: Team,
@@ -151,17 +170,12 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
     const created = await runStore.create(record);
     if (!created.ok) return created;
 
-    const enqueued = await runQueue.enqueue(runId);
-    if (!enqueued.ok) {
-      // The run is already durably accepted. Do not destroy it merely because
-      // the direct wakeup failed: server-owned reconciliation enumerates this
-      // active record after restart and on every lifecycle tick.
-      logWithoutThrowing(logger, "error", "hitl: run accepted but initial wakeup failed — reconciliation will retry", {
-        runId,
-        error: enqueued.error.kind,
-        message: formatHostError(enqueued.error),
-      });
-    }
+    // The run is already durably accepted. Do not destroy it merely because
+    // the direct wakeup fails: reconciliation enumerates the active record.
+    await requestDirectWakeup(
+      runId,
+      "hitl: run accepted but initial wakeup failed — reconciliation will retry",
+    );
 
     return ok({ runId });
   };
@@ -278,18 +292,12 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
     }
 
     // Both accepted and already-resolved identify durable state that is safe to
-    // wake. A failed direct wakeup does not revoke the accepted decision: the
-    // lifecycle reconciler owns eventual delivery, including after restart.
-    const enqueued = await runQueue.enqueue(runId);
-    if (!enqueued.ok) {
-      logWithoutThrowing(logger, "error", "hitl: decision accepted but resume wakeup failed — reconciliation will retry", {
-        runId,
-        nodeId,
-        resolution: resolution.value.kind,
-        error: enqueued.error.kind,
-        message: formatHostError(enqueued.error),
-      });
-    }
+    // wake. A failed direct wakeup does not revoke the accepted decision.
+    await requestDirectWakeup(
+      runId,
+      "hitl: decision accepted but resume wakeup failed — reconciliation will retry",
+      { nodeId, resolution: resolution.value.kind },
+    );
     return ok(undefined);
   };
 
