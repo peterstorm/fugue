@@ -9,7 +9,8 @@
  * Redis key layout (checkpoint split from metadata so per-transition checkpoint
  * writes never race the status writes), tenant-prefixed (AD-4 / FR-013 / SC-001):
  *   fugue:<tenant>:hitl:run:<runId>   →  JSON RunMeta (record minus checkpoint)
- *   fugue:<tenant>:hitl:ckpt:<runId>  →  checkpoint string (framework `toJson`)
+ *   fugue:<tenant>:hitl:ckpt:<runId>  →  checkpoint string (framework `toJson`),
+ *                                        initially a complete creation intent
  *   fugue:<tenant>:hitl:active        →  SET of non-terminal run ids
  *   fugue:<tenant>:hitl:lock:<runId>  →  queue-worker lease-fence token
  *
@@ -99,6 +100,21 @@ const RunMetaSchema = z.object({
   createdAtMs: z.number().finite().transform((value) => value as RunTimestampMs),
   updatedAtMs: z.number().finite().transform((value) => value as RunTimestampMs),
 });
+
+const RunCreationIntentSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("run-creation-preparation"),
+    metadata: RunMetaSchema,
+    checkpoint: z.string(),
+  }),
+  z.object({
+    kind: z.literal("run-creation-intent"),
+    metadata: RunMetaSchema,
+    checkpoint: z.string(),
+  }),
+]);
+
+type RunCreationIntent = z.output<typeof RunCreationIntentSchema>;
 
 // ── Active-run index (ADR-0074) ──────────────────────────────────────────────
 
@@ -307,6 +323,74 @@ const serializeRunMeta = (meta: RunMeta): Result<string, HostError> => {
   }
 };
 
+const serializeRunCreationIntent = (
+  kind: RunCreationIntent["kind"],
+  metadata: RunMeta,
+  checkpoint: string,
+): Result<string, HostError> => {
+  const intent: RunCreationIntent = {
+    kind,
+    metadata,
+    checkpoint,
+  };
+  try {
+    assertLosslessEvent(intent, { operation: "serializeRunCreationIntent", root: "intent" });
+    const encoded = toJson(intent);
+    const restored = RunCreationIntentSchema.safeParse(fromJson(encoded));
+    if (!restored.success || !isDeepStrictEqual(restored.data, intent)) {
+      throw new Error("run creation intent failed losslessness round-trip verification");
+    }
+    return ok(encoded);
+  } catch (error) {
+    return err({
+      kind: "internal-invariant-violated",
+      message: `run creation intent is not losslessly serializable: ${safeErrorMessage(error)}`,
+      context: {},
+    });
+  }
+};
+
+type DecodedCheckpoint =
+  | { readonly kind: "checkpoint"; readonly checkpoint: string }
+  | {
+      readonly kind: "recoverable-intent";
+      readonly checkpoint: string;
+      readonly metadata: RunMeta;
+    };
+
+/** Recognize the adapter-owned creation-intent envelope; ordinary checkpoints pass through. */
+const decodeStoredCheckpoint = (raw: string): Result<DecodedCheckpoint, HostError> => {
+  let decoded: unknown;
+  try {
+    decoded = fromJson(raw);
+  } catch {
+    return ok({ kind: "checkpoint", checkpoint: raw });
+  }
+  if (
+    typeof decoded !== "object" ||
+    decoded === null ||
+    !("kind" in decoded) ||
+    (decoded.kind !== "run-creation-preparation" && decoded.kind !== "run-creation-intent")
+  ) {
+    return ok({ kind: "checkpoint", checkpoint: raw });
+  }
+  const intent = RunCreationIntentSchema.safeParse(decoded);
+  if (!intent.success) {
+    return err({
+      kind: "internal-invariant-violated",
+      message: "corrupt HITL run creation intent",
+      context: {},
+    });
+  }
+  return intent.data.kind === "run-creation-intent"
+    ? ok({
+        kind: "recoverable-intent",
+        checkpoint: intent.data.checkpoint,
+        metadata: intent.data.metadata,
+      })
+    : ok({ kind: "checkpoint", checkpoint: intent.data.checkpoint });
+};
+
 export const createRedisRunStore = (
   redis: HitlRedisPort,
   tenant: TenantId,
@@ -389,7 +473,14 @@ export const createRedisRunStore = (
   const readMeta = async (runId: RunId): Promise<Result<RunMeta | null, HostError>> => {
     const res = await redis.get(runKey(tenant, runId));
     if (!res.ok) return err(res.error);
-    if (res.value === null) return ok(null);
+    if (res.value === null) {
+      const checkpoint = await redis.get(ckptKey(tenant, runId));
+      if (!checkpoint.ok) return err(checkpoint.error);
+      if (checkpoint.value === null) return ok(null);
+      const decoded = decodeStoredCheckpoint(checkpoint.value);
+      if (!decoded.ok) return decoded;
+      return ok(decoded.value.kind === "recoverable-intent" ? decoded.value.metadata : null);
+    }
     let raw: unknown;
     try {
       raw = fromJson(res.value);
@@ -443,13 +534,17 @@ export const createRedisRunStore = (
       const raw = await redis.get(runKey(tenant, parsedId.value));
       if (!raw.ok) return err(raw.error);
       if (raw.value === null) {
-        // Metadata is the publication point. A live checkpoint with no metadata
-        // is either an in-flight create or an unpublished remnant; keep its index
-        // intent conservatively so a concurrent sweep cannot prune immediately
-        // before publication. Once the checkpoint TTL expires too, prune.
+        // A valid creation intent is a complete, accepted recovery source for an
+        // ambiguously acknowledged metadata publication. Raw checkpoint-only
+        // remnants remain non-runnable and are counted conservatively.
         const checkpoint = await redis.get(ckptKey(tenant, parsedId.value));
         if (!checkpoint.ok) return err(checkpoint.error);
         if (checkpoint.value !== null) {
+          const decoded = decodeStoredCheckpoint(checkpoint.value);
+          if (!decoded.ok) return decoded;
+          if (decoded.value.kind === "recoverable-intent") {
+            runIds.push(parsedId.value);
+          }
           conservativeCount++;
           continue;
         }
@@ -490,6 +585,18 @@ export const createRedisRunStore = (
       const { checkpoint, ...meta } = record;
       const encodedMeta = serializeRunMeta(meta);
       if (!encodedMeta.ok) return encodedMeta;
+      const encodedPreparation = serializeRunCreationIntent(
+        "run-creation-preparation",
+        meta,
+        checkpoint,
+      );
+      if (!encodedPreparation.ok) return encodedPreparation;
+      const encodedIntent = serializeRunCreationIntent(
+        "run-creation-intent",
+        meta,
+        checkpoint,
+      );
+      if (!encodedIntent.ok) return encodedIntent;
       // Reject an already-published/torn legacy record before touching its
       // checkpoint. SET NX on the checkpoint remains the concurrent authority.
       const existing = await redis.get(runKey(tenant, record.runId));
@@ -497,17 +604,17 @@ export const createRedisRunStore = (
       if (existing.value !== null) {
         return err({ kind: "internal-invariant-violated", message: `run '${record.runId}' already exists`, context: {} });
       }
-      // Publication protocol: prepare every byte needed to run BEFORE making the
-      // metadata visible. Checkpoint/index remnants are non-runnable and the
-      // active-index scan self-heals them; a visible queued run is complete.
-      const ckpt = await redis.setNx(ckptKey(tenant, record.runId), checkpoint, expiry);
+      // Prepare a COMPLETE creation intent before metadata publication. If the
+      // metadata acknowledgement is ambiguous, this confirmed record lets both
+      // direct execution and active-index reconciliation recover the run.
+      const ckpt = await redis.setNx(ckptKey(tenant, record.runId), encodedPreparation.value, expiry);
       if (!ckpt.ok) return err(ckpt.error);
       if (!ckpt.value) {
         return err({ kind: "internal-invariant-violated", message: `run '${record.runId}' already exists or has an unpublished checkpoint`, context: {} });
       }
       const idx = await redis.sAdd(activeKey(tenant), record.runId);
       if (!idx.ok) {
-        await removePreparedCreate(record.runId, checkpoint);
+        await removePreparedCreate(record.runId, encodedPreparation.value);
         return err(idx.error);
       }
       // Metadata is the publication point and remains create-once with TTL.
@@ -515,18 +622,39 @@ export const createRedisRunStore = (
       if (!published.ok) {
         const exactMetadataAbsent = await compensateAmbiguousPublication(
           record.runId,
-          checkpoint,
+          encodedPreparation.value,
           encodedMeta.value,
         );
         if (exactMetadataAbsent) return err(published.error);
-        logWithoutThrowing(logger, "error", "hitl: run metadata publication acknowledgement is uncertain — treating run as accepted", {
-          runId: record.runId,
-          error: published.error.kind,
-        });
-        return ok({ kind: "publication-uncertain" });
+        const preserved = await redis.setIfValue(
+          ckptKey(tenant, record.runId),
+          encodedPreparation.value,
+          ckptKey(tenant, record.runId),
+          encodedIntent.value,
+          expiry,
+        );
+        if (!preserved.ok) {
+          logWithoutThrowing(logger, "warn", "hitl: failed to preserve recoverable creation intent", {
+            runId: record.runId,
+            error: preserved.error.kind,
+          });
+        }
+        if (preserved.ok && preserved.value) {
+          logWithoutThrowing(logger, "error", "hitl: run metadata publication acknowledgement is uncertain — treating recoverable intent as accepted", {
+            runId: record.runId,
+            error: published.error.kind,
+          });
+          return ok({ kind: "publication-uncertain" });
+        }
+        const observed = await redis.get(runKey(tenant, record.runId));
+        if (observed.ok && observed.value === encodedMeta.value) {
+          return ok({ kind: "publication-uncertain" });
+        }
+        await removePreparedCreate(record.runId, encodedPreparation.value);
+        return err(published.error);
       }
       if (!published.value) {
-        await removePreparedCreate(record.runId, checkpoint);
+        await removePreparedCreate(record.runId, encodedPreparation.value);
         return err({ kind: "internal-invariant-violated", message: `run '${record.runId}' already exists`, context: {} });
       }
       return ok({ kind: "created" });
@@ -543,7 +671,9 @@ export const createRedisRunStore = (
         // rather than resuming from a missing state.
         return err({ kind: "internal-invariant-violated", message: `run '${runId}' has metadata but no checkpoint`, context: {} });
       }
-      return ok({ ...metaRes.value, checkpoint: ckptRes.value });
+      const decoded = decodeStoredCheckpoint(ckptRes.value);
+      if (!decoded.ok) return decoded;
+      return ok({ ...metaRes.value, checkpoint: decoded.value.checkpoint });
     },
 
     getMetadata: readMeta,

@@ -161,6 +161,45 @@ describe("freshness conflict detection — property tests (Phase 3)", () => {
     );
   });
 
+  it("InMemoryFreshnessIndex selects the greatest timestamp regardless of arrival order", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: 0, max: 9_000 }),
+        fc.integer({ min: 1, max: 1_000 }),
+        fc.boolean(),
+        async (olderAtMs, deltaMs, reverseArrival) => {
+          const newerAtMs = olderAtMs + deltaMs;
+          const older = toWriteAttemptedEvent({
+            runId: R("older"),
+            nodeId: N("older"),
+            resource: "postgres:orders",
+            conditionedOnValue: "0",
+            newWitnessValue: "1",
+            succeededAtMs: olderAtMs,
+          });
+          const newer = toWriteAttemptedEvent({
+            runId: R("newer"),
+            nodeId: N("newer"),
+            resource: "postgres:orders",
+            conditionedOnValue: "1",
+            newWitnessValue: "2",
+            succeededAtMs: newerAtMs,
+          });
+          const index = new InMemoryFreshnessIndex();
+          const arrival = reverseArrival ? [newer, older] : [older, newer];
+          for (const event of arrival) unwrap(await index.recordWrite(event));
+
+          const conflict = unwrap(await index.findConflict(
+            witness("version", RN("postgres:orders"), "0"),
+            newerAtMs,
+          ));
+          return conflict?.runId === R("newer") && conflict.succeededAtMs === newerAtMs;
+        },
+      ),
+      { numRuns: 300 },
+    );
+  });
+
   it("stampWitness yields the stamped resource and preserves (kind, value) for any input", () => {
     // Exercises the new resource-free → stamp path directly (the conflict
     // properties above build full Witness events and never reach stampWitness).

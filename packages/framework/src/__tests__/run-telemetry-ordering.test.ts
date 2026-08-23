@@ -2,6 +2,7 @@ import { afterEach, describe, test, expect } from "bun:test";
 import type { RunId, DagId } from "../types/ids.js";
 import { beginRunTelemetry, closeRootSpan, startRunSpan } from "../dag-runtime/run-telemetry.js";
 import { __resetFrameworkTracer, setFrameworkTracer } from "../tracing/global-tracer.js";
+import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
 import type { NodeContext } from "../types/node.js";
 import type { DagDef } from "../types/dag.js";
 import type { Observer } from "../observer/observer.js";
@@ -20,6 +21,7 @@ import type { ObserverEvent } from "../types/events.js";
 describe("run telemetry remains secondary to DAG execution", () => {
   afterEach(() => {
     __resetFrameworkTracer();
+    __resetFrameworkLogger();
   });
 
   const makeCtx = (observer: Observer): NodeContext => ({
@@ -50,6 +52,26 @@ describe("run telemetry remains secondary to DAG execution", () => {
 
     // Calling emitRunEnd still works.
     emitRunEnd("ok");
+  });
+
+  test("returns emitRunEnd when both run-start dispatch and failure logging throw", () => {
+    const seen: ObserverEvent["type"][] = [];
+    const observer: Observer = {
+      observe(event) {
+        seen.push(event.type);
+        if (event.type === "run-start") throw new Error("observer down");
+      },
+    };
+    setFrameworkLogger({
+      debug() { throw new Error("debug logger down"); },
+      info() { throw new Error("info logger down"); },
+      warn() { throw new Error("warn logger down"); },
+      error() { throw new Error("error logger down"); },
+    });
+
+    const { emitRunEnd } = beginRunTelemetry(makeCtx(observer), dag, {});
+    expect(() => emitRunEnd("ok")).not.toThrow();
+    expect(seen).toEqual(["run-start", "run-end"]);
   });
 
   test("emitRunEnd dispatches run-end even after run-start throw", () => {

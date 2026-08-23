@@ -191,12 +191,15 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
     }
     const entries = this.writes.get(resource) ?? [];
     entries.push(entry);
-    // Evict oldest entries when over per-resource capacity
+    // Stable timestamp order makes the tail authoritative even when completion
+    // callbacks arrive out of order; equal timestamps retain arrival ordering.
+    entries.sort((left, right) => left.succeededAtMs - right.succeededAtMs);
+    // Retain the timestamp-newest bounded window for this resource.
     if (entries.length > this.maxEntries) {
       entries.splice(0, entries.length - this.maxEntries);
     }
     this.writes.set(resource, entries);
-    this.latest.set(resource, entry);
+    this.latest.set(resource, entries[entries.length - 1]!);
     return ok(undefined);
   }
 
@@ -205,9 +208,9 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
    * write. Returns the conflicting write entry, or `null`.
    *
    * Fast path (sinceMs === 0): O(1) check against the latest write per resource.
-   * Slow path (sinceMs > 0): O(1) check against the last entry — entries are
-   * append-only (monotonically ordered by succeededAtMs), so the latest is
-   * always the last element.
+   * Slow path (sinceMs > 0): O(1) check against the last entry — `recordWrite`
+   * keeps entries monotonically ordered by `succeededAtMs`, so the latest is
+   * always the last element even when callbacks arrive out of order.
    */
   async findConflict(
     conditionedOn: import("../types/freshness.js").Witness,
@@ -220,8 +223,7 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
       if (entry && entry.newWitness.value !== conditionedOnValue) return ok(entry);
       return ok(null);
     }
-    // Slow path: entries are append-only (monotonically ordered by succeededAtMs).
-    // The latest write is always the last element.
+    // Slow path: entries are timestamp-ordered; the latest is the last element.
     const entries = this.writes.get(resource) ?? [];
     if (entries.length === 0) return ok(null);
     const latest = entries[entries.length - 1]!;

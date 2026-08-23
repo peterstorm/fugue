@@ -5,8 +5,9 @@
  * data, so a run survives queue retention and resumes from the store.
  *
  * The kernel reads `data` synchronously and writes via async `updateData`. We
- * deserialize the checkpoint once at construction and keep it in a local, so the
- * sync `data` getter is cheap; each `updateData` re-serializes and persists. A
+ * deserialize the checkpoint once at construction and keep it local, so the
+ * sync `data` getter avoids Redis I/O while returning a validated detached
+ * snapshot; each `updateData` re-serializes and persists. A
  * persist failure aborts the kernel through JobLike's required throwing shell,
  * while a side channel retains the typed `HostError` so the host executor can
  * terminalize the run with an actionable diagnostic. It must not retry from the
@@ -60,8 +61,11 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const hasOwn = (value: Readonly<Record<string, unknown>>, key: string): boolean =>
   Object.prototype.hasOwnProperty.call(value, key);
 
-const finiteNumber = (value: unknown): value is number =>
-  typeof value === "number" && Number.isFinite(value);
+const nonNegativeInteger = (value: unknown): value is number =>
+  typeof value === "number" && Number.isInteger(value) && value >= 0;
+
+const positiveInteger = (value: unknown): value is number =>
+  nonNegativeInteger(value) && value > 0;
 
 const parseNodeId = (value: unknown): NodeId | null => {
   if (typeof value !== "string") return null;
@@ -78,7 +82,7 @@ const parseHumanGatePayload = (
     !hasOwn(state, "output") ||
     typeof state.prompt !== "string" ||
     !Array.isArray(state.pendingReviews) ||
-    !finiteNumber(state.wave)
+    !nonNegativeInteger(state.wave)
   ) {
     return null;
   }
@@ -105,7 +109,7 @@ const parseHumanGatePayload = (
 const DAG_PHASE_PARSERS = {
   pending: () => ({ kind: "pending" }),
   running: (state) =>
-    finiteNumber(state.wave) ? { kind: "running", wave: state.wave } : null,
+    nonNegativeInteger(state.wave) ? { kind: "running", wave: state.wave } : null,
   "awaiting-human": (state) => {
     const payload = parseHumanGatePayload(state);
     return payload === null ? null : { kind: "awaiting-human", ...payload };
@@ -117,9 +121,9 @@ const DAG_PHASE_PARSERS = {
   retrying: (state) => {
     const nodeId = parseNodeId(state.nodeId);
     return nodeId !== null &&
-      finiteNumber(state.wave) &&
-      finiteNumber(state.attempt) &&
-      finiteNumber(state.nextDelayMs)
+      nonNegativeInteger(state.wave) &&
+      positiveInteger(state.attempt) &&
+      nonNegativeInteger(state.nextDelayMs)
       ? {
           kind: "retrying",
           wave: state.wave,
@@ -131,7 +135,7 @@ const DAG_PHASE_PARSERS = {
   },
   "retrying-hook": (state) => {
     const payload = parseHumanGatePayload(state);
-    return payload !== null && finiteNumber(state.attempt) && finiteNumber(state.nextDelayMs)
+    return payload !== null && positiveInteger(state.attempt) && nonNegativeInteger(state.nextDelayMs)
       ? {
           kind: "retrying-hook",
           ...payload,

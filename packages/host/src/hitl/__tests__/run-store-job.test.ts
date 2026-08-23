@@ -175,6 +175,24 @@ describe("makeRunStoreJobLike", () => {
     }
   });
 
+  it("REJECTS negative or fractional phase indexes, attempts, and delays", () => {
+    const { port } = fakeStore(() => Promise.resolve(ok(undefined)));
+    const invalidStates: readonly unknown[] = [
+      { kind: "running", wave: -1 },
+      { kind: "running", wave: 0.5 },
+      { ...VALID_PHASES.suspended, wave: -1 },
+      { ...VALID_PHASES.retrying, attempt: 0 },
+      { ...VALID_PHASES.retrying, attempt: 1.5 },
+      { ...VALID_PHASES.retrying, nextDelayMs: -1 },
+      { ...VALID_PHASES["retrying-hook"], nextDelayMs: 0.5 },
+    ];
+
+    for (const state of invalidStates) {
+      const result = makeRunStoreJobLike(port, LEASE, toJson({ state, context: VALID_CONTEXT }));
+      expect(result.ok, `invalid numeric phase payload was accepted: ${JSON.stringify(state)}`).toBe(false);
+    }
+  });
+
   it("REJECTS gate phases carrying an invalid branded node id", () => {
     const { port } = fakeStore(() => Promise.resolve(ok(undefined)));
     const result = makeRunStoreJobLike(port, LEASE, toJson({

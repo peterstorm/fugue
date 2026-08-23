@@ -65,8 +65,10 @@ export type RunStatusUpdate = Exclude<RunStatus, { readonly kind: "queued" }>;
 
 /**
  * Parse a requested lifecycle update against the current durable state.
- * Active states may progress or settle. Terminal writes are idempotent only
- * when byte-for-byte equal; resurrection and terminal rewrites are rejected.
+ * A queued or suspended run must enter through the lease-fenced `running`
+ * state before it may park or settle. Re-entering `running` is idempotent for a
+ * retried worker slice. Terminal writes are idempotent only when byte-for-byte
+ * equal; resurrection and terminal rewrites are rejected.
  */
 export const transitionRunStatus = (
   current: RunStatus,
@@ -77,7 +79,12 @@ export const transitionRunStatus = (
       ? ok(next)
       : err(`cannot transition terminal '${current.kind}' run to '${next.kind}'`);
   }
-  return ok(next);
+  const valid = current.kind === "running"
+    || (current.kind === "queued" && next.kind === "running")
+    || (current.kind === "suspended" && next.kind === "running");
+  return valid
+    ? ok(next)
+    : err(`cannot transition '${current.kind}' run directly to '${next.kind}'`);
 };
 
 /**

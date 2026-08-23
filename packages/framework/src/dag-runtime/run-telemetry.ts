@@ -93,7 +93,9 @@ export const beginRunTelemetry = (
       timestamp: new Date(nowFn()),
     });
   } catch (e) {
-    fwLogger().error("[runTelemetry] run-start dispatch threw:", e);
+    bestEffortRootTelemetry("run-start failure log", () => {
+      fwLogger().error("[runTelemetry] run-start dispatch threw:", e);
+    });
   }
 
   return { emitRunEnd, nowFn };

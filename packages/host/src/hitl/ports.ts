@@ -95,9 +95,12 @@ export interface RunStorePort {
    */
   countActiveRuns(): Promise<Result<number, HostError>>;
   /**
-   * Enumerate every durably-published NON-terminal run id for server-owned
-   * wakeup reconciliation. The active index is the only tenant-safe enumeration
-   * source (Redis SCAN is denied); stale/terminal members are self-healed.
+   * Enumerate every recoverable NON-terminal run id for server-owned wakeup
+   * reconciliation. This includes published metadata, valid creation intents,
+   * and corrupt-metadata members so reconciliation can inspect and report them;
+   * raw checkpoint-only remnants remain omitted. The active index is the only
+   * tenant-safe enumeration source (Redis SCAN is denied); stale/terminal
+   * members are self-healed.
    */
   listActiveRunIds(): Promise<Result<readonly RunId[], HostError>>;
 }
@@ -163,8 +166,10 @@ export interface DecisionStorePort {
 /**
  * The outcome of executing (or resuming) a run: a settled result the service
  * folds into a `RunStatus`. `failed` carries the framework error so a status
- * poll surfaces the real cause; host infrastructure failures before or during
- * durable checkpointing use the `err` channel of the enclosing `Result`.
+ * poll surfaces the real cause. Host failures before an authoritative run
+ * outcome exists use the enclosing `Result`'s `err` channel for queue retry;
+ * post-transition checkpoint failures become terminal `failed` outcomes because
+ * replaying the prior checkpoint could duplicate already-completed side effects.
  */
 export type RunExecOutcome =
   | { readonly kind: "completed"; readonly output: unknown }
@@ -222,8 +227,9 @@ export interface RunExecutorPort {
    * Run or resume a DAG through the framework's resumable kernel. Never throws:
    * permanent run failures — including context-build faults after the slice
    * begins and a DAG removed after durable acceptance — map onto the `failed`
-   * outcome. The `err` channel carries host failures that require queue retry,
-   * including checkpoint I/O.
+   * outcome. The `err` channel carries pre-outcome host failures that require
+   * queue retry; post-transition checkpoint I/O failures are terminalized as a
+   * `failed` outcome to prevent unsafe replay.
    */
   run(req: RunExecutionRequest): Promise<Result<RunExecOutcome, HostError>>;
 }

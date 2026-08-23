@@ -175,10 +175,16 @@ resource authorization.
 Creation is typed separately as `QueuedRunRecord`; the run-store create operation
 cannot accept a terminal or already-running lifecycle state into the active index.
 Its result also distinguishes confirmed creation from publication uncertainty.
-When Redis may have committed metadata but lost the acknowledgement, and exact
-metadata removal/absence cannot be proved, the host conservatively acknowledges
-the run as accepted and requests its wakeup. It never returns a creation error
-while an executable published record may remain for reconciliation to discover.
+Before publishing metadata, Redis stores a losslessly serialized creation
+preparation containing both initial metadata and checkpoint. Preparations are not
+runnable and are omitted from reconciliation while publication is in flight. If
+metadata acknowledgement is ambiguous and exact removal/absence cannot be proved,
+the adapter must first atomically promote that preparation to a recoverable
+creation intent (or observe the published metadata) before acknowledging the run.
+The active index can enumerate a recoverable intent and execution/lifecycle reads
+can reconstruct the complete queued record from it, so an accepted result cannot
+become an undiscoverable checkpoint-only remnant. Ordinary lease-fenced execution
+publishes metadata before replacing the intent envelope with later checkpoints.
 
 Lifecycle/status reads are also separated from execution reads. `getMetadata`
 returns the durable lifecycle/auth projection without requiring checkpoint bytes,
@@ -302,13 +308,16 @@ is a conscious decision, not an oversight.
   pending-marker guard, or making the enqueue idempotent per `(runId, nodeId)`)
   would tighten it if approve/reject contention ever becomes a concern.
 
-- **Creation publication uncertainty is acknowledged, never denied.** Metadata is
-  the executable publication point. If its `SET NX` response is lost, cleanup
-  returns evidence: a creation error is safe only when exact metadata absence or
-  removal is proved. Otherwise `create` returns `publication-uncertain`, the
-  service treats the run as accepted, and normal direct/reconciliation wakeups
-  remain authorized. This favors a conservative accepted response over the
-  forbidden outcome where a caller receives an error and the run later executes.
+- **Creation publication uncertainty is acknowledged only with a recovery source.**
+  Metadata is the normal executable publication point. The checkpoint key first
+  holds a complete but non-runnable creation preparation. If metadata's `SET NX`
+  response is lost, cleanup returns evidence: exact metadata absence/removal may
+  safely return a creation error; otherwise the preparation must be atomically
+  promoted to a recoverable creation intent (or metadata must be observed) before
+  `create` returns `publication-uncertain`. Direct and reconciliation wakeups can
+  read that intent as the complete queued record even when metadata never
+  committed. An in-flight preparation is omitted, preventing a concurrent sweep
+  from executing a run whose create call has not yet been acknowledged.
 
 - **Superseded: best-effort `running` status write.** The earlier v1 trade-off
   allowed execution after `setStatus(running)` failed. The 2026-08-22 ownership-

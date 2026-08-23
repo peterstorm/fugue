@@ -9,8 +9,8 @@ import type { HostError } from "../../../domain/host-error.js";
 import { markTeam } from "../../../domain/auth.js";
 import { tenantId } from "../../../domain/tenant.js";
 import type { TenantId } from "../../../domain/tenant.js";
-import { tryRunTimestampMs } from "../../types.js";
-import type { QueuedRunRecord, RunTimestampMs } from "../../types.js";
+import { transitionRunStatus, tryRunTimestampMs } from "../../types.js";
+import type { QueuedRunRecord, RunStatus, RunStatusUpdate, RunTimestampMs } from "../../types.js";
 import { createInMemoryRunLeaseAuthority, createInMemoryRunStore, createRedisRunStore } from "../run-store.js";
 import { createRedisDecisionStore } from "../decision-store.js";
 import { issueRunLease } from "../../ports.js";
@@ -129,6 +129,39 @@ const record = (overrides: Partial<QueuedRunRecord> = {}): QueuedRunRecord => ({
   ...overrides,
 });
 
+describe("transitionRunStatus — lifecycle state machine", () => {
+  const completed = { kind: "completed", output: "done" } as const;
+  const failed = { kind: "failed", error: { kind: "aborted", reason: "test" } } as const;
+  const currentStates: readonly RunStatus[] = [
+    { kind: "queued" },
+    { kind: "running" },
+    { kind: "suspended", nodeId: "review" as NodeId, prompt: nonEmptyString("Approve?") },
+    completed,
+    failed,
+  ];
+  const updates: readonly RunStatusUpdate[] = [
+    { kind: "running" },
+    { kind: "suspended", nodeId: "review" as NodeId, prompt: nonEmptyString("Approve?") },
+    completed,
+    failed,
+  ];
+
+  it("accepts exactly the legal lifecycle transitions", () => {
+    for (const current of currentStates) {
+      for (const next of updates) {
+        const expected = current.kind === "running"
+          || ((current.kind === "queued" || current.kind === "suspended") && next.kind === "running")
+          || (current.kind === "completed" && next === completed)
+          || (current.kind === "failed" && next === failed);
+        expect(
+          transitionRunStatus(current, next).ok,
+          `${current.kind} -> ${next.kind}`,
+        ).toBe(expected);
+      }
+    }
+  });
+});
+
 describe("InMemoryRunStore — lease parity", () => {
   it("rejects still-live stale-owner writes after a successor acquires the run", async () => {
     const leases = createInMemoryRunLeaseAuthority();
@@ -137,6 +170,7 @@ describe("InMemoryRunStore — lease parity", () => {
     await store.create(run);
     const stale = leases.acquire(run.runId, "stale-owner");
     const successor = leases.acquire(run.runId, "successor-owner");
+    expect((await store.setStatus(successor, { kind: "running" })).ok).toBe(true);
 
     expect(await store.saveCheckpoint(stale, "stale-checkpoint")).toEqual(
       err({ kind: "run-lease-lost", runId: run.runId }),
@@ -158,7 +192,9 @@ describe("InMemoryRunStore — active-index parity", () => {
     const store = createInMemoryRunStore(leases, () => 200);
     const run = record();
     await store.create(run);
-    await store.setStatus(leases.acquire(run.runId), { kind: "completed", output: "done" });
+    const lease = leases.acquire(run.runId);
+    await store.setStatus(lease, { kind: "running" });
+    await store.setStatus(lease, { kind: "completed", output: "done" });
     (store._active as Set<string>).add(run.runId); // model a stale persisted index member
 
     expect(await store.countActiveRuns()).toEqual(ok(0));
@@ -232,6 +268,7 @@ describe("RedisRunStore", () => {
       completedAt: new Date("2026-08-22T18:30:00.000Z"),
     };
 
+    expect((await store.setStatus(lease, { kind: "running" })).ok).toBe(true);
     expect((await store.setStatus(lease, { kind: "completed", output })).ok).toBe(true);
     const persisted = await store.get(run.runId);
 
@@ -248,6 +285,7 @@ describe("RedisRunStore", () => {
     await store.saveCheckpoint(lease, '{"state":{"kind":"suspended"}}');
     expect(redis.setOpts.get("fugue:tenant-a:hitl:ckpt:run-1")).toEqual({ expiresInSec: 7 });
 
+    await store.setStatus(lease, { kind: "running" });
     await store.setStatus(lease, { kind: "completed", output: 1 });
     expect(redis.setOpts.get("fugue:tenant-a:hitl:run:run-1")).toEqual({ expiresInSec: 7 });
   });
@@ -258,6 +296,7 @@ describe("RedisRunStore", () => {
     const r = record();
     await store.create(r);
     const stale = await acquireLease(redis, r.runId, TENANT, "stale-owner");
+    await store.setStatus(stale, { kind: "running" });
     await redis.set(`fugue:${TENANT}:hitl:lock:${r.runId}`, "successor-owner", { expiresInSec: 60 });
 
     const checkpoint = await store.saveCheckpoint(stale, '{"state":{"kind":"succeeded"}}');
@@ -267,7 +306,7 @@ describe("RedisRunStore", () => {
     expect(terminal).toEqual(err({ kind: "run-lease-lost", runId: r.runId }));
     const unchanged = await store.get(r.runId);
     expect(unchanged.ok && unchanged.value?.checkpoint).toBe(r.checkpoint);
-    expect(unchanged.ok && unchanged.value?.status.kind).toBe("queued");
+    expect(unchanged.ok && unchanged.value?.status.kind).toBe("running");
   });
 
   it("create is single-shot (duplicate run id errs)", async () => {
@@ -294,6 +333,7 @@ describe("RedisRunStore", () => {
     const lease = await acquireLease(redis, r.runId);
 
     await store.saveCheckpoint(lease, '{"state":{"kind":"suspended"}}');
+    await store.setStatus(lease, { kind: "running" });
     await store.setStatus(lease, { kind: "suspended", nodeId: "review" as NodeId, prompt: nonEmptyString("ok?") });
 
     const got = await store.get(r.runId);
@@ -311,6 +351,7 @@ describe("RedisRunStore", () => {
     const r = record(); // createdAtMs/updatedAtMs = 100
     await store.create(r);
     const lease = await acquireLease(redis, r.runId);
+    await store.setStatus(lease, { kind: "running" });
     t = 999;
     await store.setStatus(lease, { kind: "completed", output: 1 });
     const got = await store.get(r.runId);
@@ -878,6 +919,44 @@ describe("RedisRunStore — active-run index (ADR-0074)", () => {
     expect(await store.listActiveRunIds()).toEqual(ok(["run-1" as RunId]));
   });
 
+  it("keeps an accepted run discoverable when metadata never committed and compensation is unavailable", async () => {
+    const base = setBackedRedis();
+    const redis: HitlRedisPort = {
+      ...base.redis,
+      async setNx(key, value, opts) {
+        if (key.includes(":hitl:run:")) {
+          return err({ kind: "redis-unavailable", operation: "metadata publish before commit" });
+        }
+        return base.redis.setNx(key, value, opts);
+      },
+      async compareAndDelete(key, expected) {
+        if (key.includes(":hitl:run:")) {
+          return err({ kind: "redis-unavailable", operation: "metadata compensation" });
+        }
+        return base.redis.compareAndDelete(key, expected);
+      },
+    };
+    const store = createRedisRunStore(redis, TENANT, cfg);
+    const expected = record();
+
+    const created = await store.create(expected);
+
+    expect(created).toEqual(ok({ kind: "publication-uncertain" }));
+    expect(base.kv.has("fugue:tenant-a:hitl:run:run-1")).toBe(false);
+    expect(await store.get(expected.runId)).toEqual(ok(expected));
+    expect(await store.getMetadata(expected.runId)).toEqual(ok({
+      runId: expected.runId,
+      dagId: expected.dagId,
+      ownerTeam: expected.ownerTeam,
+      input: expected.input,
+      identity: expected.identity,
+      status: expected.status,
+      createdAtMs: expected.createdAtMs,
+      updatedAtMs: expected.updatedAtMs,
+    }));
+    expect(await store.listActiveRunIds()).toEqual(ok([expected.runId]));
+  });
+
   it("compensates metadata publication failure without consuming a quota slot", async () => {
     const base = setBackedRedis();
     const redis: HitlRedisPort = {
@@ -917,6 +996,9 @@ describe("RedisRunStore — active-run index (ADR-0074)", () => {
     const l1 = await acquireLease(redis, "r1" as RunId);
     const l2 = await acquireLease(redis, "r2" as RunId);
     const l3 = await acquireLease(redis, "r3" as RunId);
+    await store.setStatus(l1, { kind: "running" });
+    await store.setStatus(l2, { kind: "running" });
+    await store.setStatus(l3, { kind: "running" });
 
     // suspended is NON-terminal — still occupies a slot.
     await store.setStatus(l1, { kind: "suspended", nodeId: "g" as NodeId, prompt: nonEmptyString("p") });
@@ -974,6 +1056,7 @@ describe("RedisRunStore — active-run index (ADR-0074)", () => {
     const store = createRedisRunStore(redis, TENANT, cfg);
     await store.create(record({ runId: "r1" as RunId }));
     const lease = await acquireLease(redis, "r1" as RunId);
+    await store.setStatus(lease, { kind: "running" });
     await store.setStatus(lease, { kind: "completed", output: 1 });
     await store.setStatus(lease, { kind: "completed", output: 1 }); // duplicate settle
     const c = await store.countActiveRuns();
@@ -985,6 +1068,7 @@ describe("RedisRunStore — active-run index (ADR-0074)", () => {
     const store = createRedisRunStore(redis, TENANT, cfg);
     await store.create(record({ runId: "r1" as RunId }));
     const lease = await acquireLease(redis, "r1" as RunId);
+    await store.setStatus(lease, { kind: "running" });
     await store.setStatus(lease, { kind: "completed", output: 1 });
 
     const resurrected = await store.setStatus(lease, { kind: "running" });
@@ -1028,6 +1112,7 @@ describe("RedisRunStore — active-run index (ADR-0074)", () => {
     const lease = await acquireLease(redis, "r1" as RunId);
 
     // Settle r1: writes the terminal meta AND issues the `sRem` (which lands here).
+    await store.setStatus(lease, { kind: "running" });
     await store.setStatus(lease, { kind: "completed", output: 1 });
     // Model the leak: the settle-time `sRem` having NO-OPped — re-add r1 to the
     // active SET while its terminal meta key is still PRESENT in `kv`.

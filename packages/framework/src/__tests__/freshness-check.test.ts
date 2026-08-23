@@ -162,6 +162,36 @@ describe("InMemoryFreshnessIndex", () => {
     expect(unwrap(await index.findConflict(mkWitness("postgres:orders", "41"), 500))).not.toBeNull();
   });
 
+  it("selects the timestamp-latest write when callbacks arrive out of order", async () => {
+    const index = new InMemoryFreshnessIndex();
+    const newer: WriteAttemptedEvent = {
+      type: "write-attempted",
+      runId: R("newer"),
+      dagId: D("d"),
+      nodeId: N("newer-writer"),
+      conditionedOn: mkWitness("postgres:orders", "41"),
+      newWitness: mkWitness("postgres:orders", "43"),
+      succeededAtMs: 2000,
+      timestamp: new Date(2000),
+    };
+    const older: WriteAttemptedEvent = {
+      ...newer,
+      runId: R("older"),
+      nodeId: N("older-writer"),
+      newWitness: mkWitness("postgres:orders", "42"),
+      succeededAtMs: 1000,
+      timestamp: new Date(1000),
+    };
+
+    await index.recordWrite(newer);
+    await index.recordWrite(older);
+
+    const conflict = unwrap(await index.findConflict(mkWitness("postgres:orders", "41"), 1500));
+    expect(conflict?.runId).toBe(R("newer"));
+    expect(conflict?.succeededAtMs).toBe(2000);
+    expect(unwrap(await index.findConflict(mkWitness("postgres:orders", "43"), 0))).toBeNull();
+  });
+
   it("clear empties the index", async () => {
     const index = new InMemoryFreshnessIndex();
     await index.recordWrite({

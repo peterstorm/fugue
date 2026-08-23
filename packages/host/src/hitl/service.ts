@@ -89,6 +89,9 @@ const asRunFailure = (hostError: HostError): FrameworkError => ({
   message: `host run execution failed: ${hostError.kind}`,
 });
 
+const isTerminalRunStatus = (status: RunMetadata["status"]): boolean =>
+  status.kind === "completed" || status.kind === "failed";
+
 export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService => {
   const { runStore, runQueue, decisions, notifier, executor, clock, newRunId, tenant, maxQueuedRuns, logger } = deps;
   const retryAfterSeconds = deps.retryAfterSeconds ?? 5;
@@ -200,7 +203,7 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
     }
 
     // Terminal runs are never re-processed (a double-enqueue after completion).
-    if (record.status.kind === "completed" || record.status.kind === "failed") {
+    if (isTerminalRunStatus(record.status)) {
       logWithoutThrowing(logger, "warn", "hitl: processRun for terminal run — ignoring", {
         runId,
         status: record.status.kind,
@@ -328,7 +331,7 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
         recordInspectionFailure(runId, run.error);
         continue;
       }
-      if (run.value === null || run.value.status.kind === "completed" || run.value.status.kind === "failed") continue;
+      if (run.value === null || isTerminalRunStatus(run.value.status)) continue;
       if (run.value.status.kind === "suspended") {
         const decision = await decisions.getDecision(runId, run.value.status.nodeId);
         if (!decision.ok) {

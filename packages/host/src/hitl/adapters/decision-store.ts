@@ -111,8 +111,11 @@ interface RedisDecisionStoreConfig {
   readonly newPendingMarker?: () => string;
 }
 
-const notificationRequired = (marker: string): string => `notification-required:${marker}`;
-const notified = (marker: string): string => `notified:${marker}`;
+const NOTIFICATION_REQUIRED_PREFIX = "notification-required:";
+const NOTIFIED_PREFIX = "notified:";
+
+const notificationRequired = (marker: string): string => `${NOTIFICATION_REQUIRED_PREFIX}${marker}`;
+const notified = (marker: string): string => `${NOTIFIED_PREFIX}${marker}`;
 
 type RedisDecisionOutcome = "not-present" | "created" | "exists";
 
@@ -123,10 +126,10 @@ const DECISION_RESOLUTION_BY_REDIS_OUTCOME = {
 } as const satisfies Record<RedisDecisionOutcome, DecisionResolution>;
 
 const parsePendingReview = (raw: string): Result<PendingReview, HostError> => {
-  if (raw.startsWith("notification-required:") && raw.length > "notification-required:".length) {
-    return ok({ kind: "notification-required", marker: raw.slice("notification-required:".length) });
+  if (raw.startsWith(NOTIFICATION_REQUIRED_PREFIX) && raw.length > NOTIFICATION_REQUIRED_PREFIX.length) {
+    return ok({ kind: "notification-required", marker: raw.slice(NOTIFICATION_REQUIRED_PREFIX.length) });
   }
-  if (raw.startsWith("notified:") && raw.length > "notified:".length) {
+  if (raw.startsWith(NOTIFIED_PREFIX) && raw.length > NOTIFIED_PREFIX.length) {
     return ok({ kind: "notified" });
   }
   return err({
