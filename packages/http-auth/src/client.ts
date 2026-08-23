@@ -19,6 +19,8 @@ import type { Result, FrameworkError } from "@fuguejs/framework";
 import { ok, err, nodeId, frameworkError } from "@fuguejs/framework";
 import type { TokenProvider, FetchLike } from "./auth.js";
 import { classifyAbort } from "./abort-classification.js";
+import { isRetriableHttpStatus } from "./http-status.js";
+export { isRetriableHttpStatus } from "./http-status.js";
 
 const CLIENT_NODE_ID = nodeId("http-auth-client");
 
@@ -112,18 +114,6 @@ const makeNodeCrashError = (message: string): FrameworkError => ({
   message,
   retriability: "non-retriable",
 });
-
-/**
- * HTTP statuses that are retriable despite being non-5xx: `429 Too Many
- * Requests` (rate-limit — back off and retry) and `408 Request Timeout`. These
- * are the textbook retriable signals, so we classify them `transient` rather
- * than a non-retriable crash. Mirrors the token-mint path in `auth.ts`.
- */
-const RETRIABLE_HTTP_STATUSES: ReadonlySet<number> = new Set([408, 429]);
-
-/** A non-2xx response is retriable when it is 5xx, 429 (rate-limit) or 408 (timeout). */
-export const isRetriableHttpStatus = (status: number): boolean =>
-  status >= 500 || RETRIABLE_HTTP_STATUSES.has(status);
 
 /**
  * The raw outcome of a single fetch attempt, before token-refresh logic. We

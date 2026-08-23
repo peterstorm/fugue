@@ -142,9 +142,10 @@ export const handleBotActivity = async (
       // Per-team routing (FR-041, confidentiality): if the activity carries a
       // Teams team `aadGroupId` that maps to a fugue team, ALSO store the
       // reference under that team so its cards route to its own channel. We
-      // STILL store the default for back-compat and as the fallback for unmapped
-      // teams. Own-property lookup only — an inherited key (`constructor`, …)
-      // must never resolve a team (mirrors identity.ts, fail-closed).
+      // still store the default for back-compat and operational reference, but
+      // review delivery never falls back to it: an unmapped owner fails closed.
+      // Own-property lookup only — an inherited key (`constructor`, …) must
+      // never resolve a team (mirrors identity.ts, fail-closed).
       const aadGroupId = str(obj(obj(activity.channelData).team).aadGroupId);
       const mappedTeam =
         aadGroupId !== undefined && Object.prototype.hasOwnProperty.call(deps.teamChannels, aadGroupId)

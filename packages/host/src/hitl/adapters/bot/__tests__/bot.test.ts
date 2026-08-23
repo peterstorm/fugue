@@ -245,7 +245,7 @@ describe("bot messages handler", () => {
     // grp-sales maps to fugue team "sales" → stored under that team key.
     const team = await conversations.getTeamReference("sales");
     expect(team.ok && team.value?.conversationId).toBe("19:sales");
-    // Default is STILL stored (back-compat / fallback for unmapped teams).
+    // Default is still stored for back-compat/operations, never as a review-delivery fallback.
     const def = await conversations.getDefaultReference();
     expect(def.ok && def.value?.conversationId).toBe("19:sales");
   });
@@ -644,7 +644,7 @@ describe("createRedisConversationStore", () => {
   // ── Per-team conversation routing (FR-041) ──────────────────────────────────
   it("round-trips PER-TEAM references under distinct keys; one team's ref does not leak to another", async () => {
     const store = createRedisConversationStore(fakeRedis(), TENANT);
-    // A team with no reference returns null (caller falls back to default).
+    // A team with no reference returns null; the notifier treats that as no route and fails closed.
     expect(await store.getTeamReference("sales")).toEqual(ok(null));
 
     await store.saveTeamReference("sales", { serviceUrl: TRUSTED_SERVICE_URL, conversationId: "19:sales" });

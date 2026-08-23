@@ -132,16 +132,18 @@ executor when it fails. The executor also checks the aborted lease before any
 outcome fold. This combines cooperative cancellation at effectful node
 boundaries with hard persistence fencing at every durable transition.
 
-A checkpoint write failure is a transient host-infrastructure outcome, not a
-terminal DAG outcome. The run-store-backed `JobLike` must throw to abort the
-kernel because that interface has no `Result` channel, but it retains the typed
-`HostError` alongside the handle. The host executor restores that error onto its
-`Result.err` channel, and `processRun` returns it to the queue. The run therefore
-retries from the last durable checkpoint and is never terminalized merely
-because checkpoint persistence was temporarily unavailable. By contrast, a DAG
-that disappears from the registry after its run was durably accepted is a
-permanent run failure: the executor returns a non-retriable `failed` outcome so
-the service terminalizes the record and removes it from active reconciliation.
+A checkpoint write failure after a transition is a terminal safety outcome.
+The transition may follow node side effects or consumption of a human decision,
+so replaying from the prior durable checkpoint can duplicate work. The
+run-store-backed `JobLike` must throw to abort the kernel because that interface
+has no `Result` channel, but it retains the typed `HostError` alongside the
+handle. The host executor converts that captured failure into a non-retriable
+`failed` outcome carrying the original diagnostic; `processRun` persists the
+terminal status and the queue acknowledges the slice instead of replaying it.
+The terminal write remains lease-fenced: a worker that has lost ownership cannot
+overwrite a successor. A DAG that disappears from the registry after durable
+acceptance follows the same non-retriable outcome path, so reconciliation cannot
+keep retrying a permanently unrunnable record.
 
 ### Durable notification-delivery state (2026-08-22 amendment)
 

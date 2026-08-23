@@ -12,9 +12,11 @@
  * prevents double-running side-effecting nodes).
  */
 
-import { ok, err, safeErrorMessage } from "@fuguejs/framework";
+import { ok, err, safeErrorMessage, tryRunId } from "@fuguejs/framework";
 import type { Result, RunId, QueueBackend, WorkerHandle } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
+import { formatHostError, internalInvariantViolated } from "../../domain/host-error.js";
+import { tenantId } from "../../domain/tenant.js";
 import type { TenantId } from "../../domain/tenant.js";
 import type { HitlRedisPort, LogPort } from "../../ports.js";
 import { issueRunLease } from "../ports.js";
@@ -23,6 +25,48 @@ import { logWithoutThrowing } from "../diagnostic-logging.js";
 
 /** Trigger envelope binds the wakeup to its tenant as well as its durable run id. */
 type RunTrigger = { readonly state: RunId; readonly context: { readonly tenant: TenantId } };
+
+const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** Parse durable queue data before it can name a lock key or issue a lease. */
+export const parseRunTrigger = (
+  value: unknown,
+  expectedTenant: TenantId,
+): Result<RunTrigger, HostError> => {
+  if (!isRecord(value) || !isRecord(value.context)) {
+    return err(internalInvariantViolated("invalid HITL queue trigger envelope", {}));
+  }
+  if (typeof value.state !== "string") {
+    return err(internalInvariantViolated("invalid HITL queue trigger run id", {}));
+  }
+  const runId = tryRunId(value.state);
+  if (!runId.ok) {
+    return err(internalInvariantViolated("invalid HITL queue trigger run id", {
+      reason: runId.error,
+    }));
+  }
+  if (typeof value.context.tenant !== "string") {
+    return err(internalInvariantViolated("invalid HITL queue trigger tenant", {
+      runId: runId.value,
+    }));
+  }
+  const parsedTenant = tenantId(value.context.tenant);
+  if (!parsedTenant.ok) {
+    return err(internalInvariantViolated("invalid HITL queue trigger tenant", {
+      runId: runId.value,
+      reason: parsedTenant.error.kind,
+    }));
+  }
+  if (parsedTenant.value !== expectedTenant) {
+    return err(internalInvariantViolated(`cross-tenant wakeup for '${runId.value}'`, {
+      runId: runId.value,
+      expectedTenant,
+      actualTenant: parsedTenant.value,
+    }));
+  }
+  return ok({ state: runId.value, context: { tenant: parsedTenant.value } });
+};
 
 interface RunQueueDeps {
   readonly backend: QueueBackend;
@@ -118,11 +162,14 @@ export const createRunQueue = (deps: RunQueueDeps): RunQueueHandle => {
     backend.createWorker<RunId, { readonly tenant: TenantId }>(
       name,
       async (job) => {
-        const redis = deps.redis;
-        const runId = job.data.state;
-        if (job.data.context.tenant !== tenant) {
-          throw new Error(`hitl: rejected cross-tenant wakeup for ${runId}`);
+        const trigger = parseRunTrigger(job.data, tenant);
+        if (!trigger.ok) {
+          throw new Error(`hitl: rejected durable wakeup: ${formatHostError(trigger.error)}`, {
+            cause: trigger.error,
+          });
         }
+        const redis = deps.redis;
+        const runId = trigger.value.state;
 
         // Single-flight: only one worker processes a given run at a time. Every
         // lease carries a fresh owner token; release compares that token

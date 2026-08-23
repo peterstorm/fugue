@@ -11,7 +11,9 @@
 import { describe, it, expect } from "bun:test";
 import fc from "fast-check";
 import { toJson, fromJson } from "../state-machine/serialize.js";
+import { parsePersistedDagContext } from "../dag-runtime/persistence.js";
 import { N } from "./_id-helpers.js";
+import type { DagMachineContextPersisted } from "../dag-runtime/types.js";
 import type { NodeId } from "../types/ids.js";
 
 // ---------------------------------------------------------------------------
@@ -204,5 +206,73 @@ describe("toJson/fromJson roundtrip property", () => {
     expect(restored.has("a")).toBe(true);
     expect(restored.get("b")).toBe(null);
     expect(restored.get("c")).toBe(42);
+  });
+});
+
+const CONTEXT_NODE = N("context-node");
+const VALID_PERSISTED_CONTEXT: DagMachineContextPersisted = {
+  waves: [[CONTEXT_NODE]],
+  edges: [{ from: CONTEXT_NODE, to: CONTEXT_NODE, kind: "conditional" }],
+  unconditionalAdj: new Map([[CONTEXT_NODE, []]]),
+  outputNodeId: CONTEXT_NODE,
+  retries: new Map([[CONTEXT_NODE, 0]]),
+  retryConfigs: new Map([[
+    CONTEXT_NODE,
+    { backoffMs: [100, 200], jitterRatio: 0.1 },
+  ]]),
+  defaultRetryLimit: 1,
+  retryLimits: { [CONTEXT_NODE]: 2 },
+  humanReviewNodeIds: new Set([CONTEXT_NODE]),
+  humanReviewPrompts: new Map([[CONTEXT_NODE, "Approve?"]]),
+  activeNodeIds: new Set([CONTEXT_NODE]),
+  confidenceByNode: new Map([[CONTEXT_NODE, null]]),
+  outputs: new Map([[CONTEXT_NODE, { answer: 42 }]]),
+  initialInput: { request: true },
+};
+
+const REQUIRED_CONTEXT_FIELDS = [
+  "waves",
+  "edges",
+  "unconditionalAdj",
+  "outputNodeId",
+  "retries",
+  "retryConfigs",
+  "defaultRetryLimit",
+  "retryLimits",
+  "humanReviewNodeIds",
+  "humanReviewPrompts",
+  "activeNodeIds",
+  "confidenceByNode",
+  "outputs",
+  "initialInput",
+] as const satisfies readonly (keyof DagMachineContextPersisted)[];
+
+describe("parsePersistedDagContext", () => {
+  it("parses a canonical serialization round-trip and preserves the fingerprint", () => {
+    const fingerprint = "a".repeat(64);
+    const restored = fromJson(toJson({
+      ...VALID_PERSISTED_CONTEXT,
+      __dagFingerprint: fingerprint,
+    }));
+
+    const parsed = parsePersistedDagContext(restored);
+
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(toJson(parsed.value)).toBe(toJson({
+        ...VALID_PERSISTED_CONTEXT,
+        __dagFingerprint: fingerprint,
+      }));
+      expect(parsed.value.__dagFingerprint).toBe(fingerprint);
+      expect("when" in parsed.value.edges[0]!).toBe(false);
+    }
+  });
+
+  it("property: removing any required field is always rejected", () => {
+    fc.assert(fc.property(fc.constantFrom(...REQUIRED_CONTEXT_FIELDS), (field) => {
+      const candidate: Record<string, unknown> = { ...VALID_PERSISTED_CONTEXT };
+      delete candidate[field];
+      expect(parsePersistedDagContext(candidate).ok).toBe(false);
+    }));
   });
 });

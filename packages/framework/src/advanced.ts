@@ -18,7 +18,7 @@ export { dagTransition } from "./dag-runtime/transition.js";
 // store (not BullMQ job-data) needs `stripNonPersistable` to seed the initial
 // serializable checkpoint envelope. `wrapDagJobLike` re-injects the live
 // DAG-derived fields on read, so the persisted context carries plain data only.
-export { stripNonPersistable, wrapDagJobLike } from "./dag-runtime/persistence.js";
+export { parsePersistedDagContext, stripNonPersistable, wrapDagJobLike } from "./dag-runtime/persistence.js";
 export type { PersistedDagContext, WrappedDagJobLike } from "./dag-runtime/persistence.js";
 
 /**

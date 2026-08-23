@@ -907,6 +907,18 @@ describe("RedisRunStore — active-run index (ADR-0074)", () => {
     expect(kv.has("fugue:tenant-a:hitl:run:r1")).toBe(true);
   });
 
+  it("enumerates a valid run id whose published metadata is corrupt", async () => {
+    const { redis, kv } = setBackedRedis();
+    const store = createRedisRunStore(redis, TENANT, cfg);
+    await store.create(record({ runId: "r1" as RunId }));
+    await store.create(record({ runId: "r2" as RunId }));
+    kv.set("fugue:tenant-a:hitl:run:r1", "not-json{{{");
+
+    const active = await store.listActiveRunIds();
+
+    expect(active).toEqual(ok(["r1" as RunId, "r2" as RunId]));
+  });
+
   it("re-settling a terminal run is idempotent — the count never goes negative or drifts", async () => {
     const { redis } = setBackedRedis();
     const store = createRedisRunStore(redis, TENANT, cfg);

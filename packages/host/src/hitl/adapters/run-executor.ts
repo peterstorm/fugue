@@ -7,10 +7,9 @@
  *
  * `run` never throws: a framework run-failure (including an abort/timeout of an
  * execution slice or a DAG removed after durable acceptance) is mapped onto the
- * `failed` outcome. The `err` channel carries retryable host infrastructure
- * failures, including a durable checkpoint write that aborts the kernel, so the
- * queue can retry from the last persisted state. A
- * CONTEXT-BUILD fault (host wiring: invalid tenant team, FR-040 unmapped agent
+ * `failed` outcome. A post-transition checkpoint failure also fails the run
+ * closed: retrying from the prior checkpoint could replay already-completed
+ * side effects or a consumed human decision. A CONTEXT-BUILD fault (host wiring: invalid tenant team, FR-040 unmapped agent
  * client) is logged at `error` with the actual message and settles as the
  * `failed` outcome — NOT `err` — so the recorded `FrameworkError` keeps the
  * factory's descriptive message (the service's `err`→run-failure mapping would
@@ -26,6 +25,7 @@ import type {
 import { compileDagToMachine, stripNonPersistable } from "@fuguejs/framework/advanced";
 import { toJson } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
+import { formatHostError } from "../../domain/host-error.js";
 import type { SharedInfra, LogPort } from "../../ports.js";
 import type { RegisteredDag } from "../../domain/registry.js";
 import { createNodeContextForDag } from "../../adapters/node-context-factory.js";
@@ -76,6 +76,13 @@ const toFrameworkError = (error: unknown): FrameworkError =>
     nodeId: EXECUTOR_NODE_ID,
     message: safeErrorMessage(error),
   };
+
+const checkpointWriteFailure = (failure: HostError): FrameworkError => ({
+  kind: "node-crash",
+  retriability: "non-retriable",
+  nodeId: EXECUTOR_NODE_ID,
+  message: `checkpoint persistence failed after execution advanced; run stopped to avoid replaying side effects: ${formatHostError(failure)}`,
+});
 
 export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
   const { sharedInfra, getRegisteredDag, broker, agentClientMap, tenant, logger } = deps;
@@ -168,10 +175,10 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
           logWithoutThrowing(
             logger,
             "error",
-            "hitl: checkpoint persistence failed — retrying run slice",
+            "hitl: checkpoint persistence failed — failing run closed to avoid replay",
             { runId: req.runId, dagId: req.dagId, error: checkpointFailure.kind },
           );
-          return err(checkpointFailure);
+          return ok({ kind: "failed", error: checkpointWriteFailure(checkpointFailure) });
         }
 
         // Setup phase: a host wiring fault (the factory's fail-closed throws).

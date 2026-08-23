@@ -433,6 +433,7 @@ export const createRedisRunStore = (
           runId: rawId,
           error: verdict.parseError,
         });
+        runIds.push(parsedId.value);
         conservativeCount++;
         continue;
       }

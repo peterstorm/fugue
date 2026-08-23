@@ -9,8 +9,8 @@
  * sync `data` getter is cheap; each `updateData` re-serializes and persists. A
  * persist failure aborts the kernel through JobLike's required throwing shell,
  * while a side channel retains the typed `HostError` so the host executor can
- * return it to the queue for retry from the last good checkpoint. It is never
- * collapsed into a terminal DAG failure.
+ * terminalize the run with an actionable diagnostic. It must not retry from the
+ * prior checkpoint because execution may already have produced side effects.
  *
  * Parse-don't-validate at the deserialization boundary: the checkpoint is the
  * highest-stakes value read back from Redis (its `state.kind` seeds the
@@ -33,6 +33,7 @@ import {
   tryFromJson,
   tryNodeId,
 } from "@fuguejs/framework";
+import { parsePersistedDagContext } from "@fuguejs/framework/advanced";
 import type {
   DagMachineContextPersisted,
   DagPhase,
@@ -154,11 +155,11 @@ const parseDagPhase = (value: unknown): DagPhase | null => {
 
 /** Parse a deserialized checkpoint into the trusted execution envelope. */
 const parseEnvelope = (value: unknown): Envelope | null => {
-  if (!isRecord(value) || !isRecord(value.context)) return null;
+  if (!isRecord(value)) return null;
   const state = parseDagPhase(value.state);
-  return state === null
-    ? null
-    : { state, context: value.context as unknown as DagMachineContextPersisted };
+  if (state === null) return null;
+  const context = parsePersistedDagContext(value.context);
+  return context.ok ? { state, context: context.value } : null;
 };
 
 const envelopeSnapshot = (serialized: string): Envelope => {

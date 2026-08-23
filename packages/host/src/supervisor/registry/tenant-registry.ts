@@ -159,10 +159,33 @@ export interface TenantRegistry {
  * `ReadonlyMap`, the exposed value has no runtime mutation methods, so a cast
  * cannot bypass the registry transitions or team-uniqueness invariant.
  */
+const snapshotTenantConfig = (config: TenantConfig): TenantConfig => {
+  if (
+    Object.isFrozen(config) &&
+    Object.isFrozen(config.admission) &&
+    Object.isFrozen(config.keycloakClientMapping) &&
+    Object.isFrozen(config.keycloakClientMapping.agentClientIdsByDag)
+  ) {
+    return config;
+  }
+  return Object.freeze({
+    ...config,
+    admission: Object.freeze({ ...config.admission }),
+    keycloakClientMapping: Object.freeze({
+      ...config.keycloakClientMapping,
+      agentClientIdsByDag: Object.freeze({
+        ...config.keycloakClientMapping.agentClientIdsByDag,
+      }),
+    }),
+  });
+};
+
 const registryWithEntries = (
   entries: ReadonlyMap<TenantId, TenantConfig> = new Map(),
 ): TenantRegistry => {
-  const snapshot = new Map(entries);
+  const snapshot = new Map(
+    Array.from(entries, ([id, config]) => [id, snapshotTenantConfig(config)] as const),
+  );
   let view: ReadonlyMap<TenantId, TenantConfig>;
   const facade = {
     get size(): number { return snapshot.size; },

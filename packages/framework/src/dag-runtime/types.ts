@@ -223,10 +223,16 @@ export type DagEvent =
 //   - The slice names document what each transition helper depends on
 // ---------------------------------------------------------------------------
 
+/** Closure-free edge representation carried by durable machine contexts. */
+export type PersistedEdgeDef =
+  | { readonly from: NodeId; readonly to: NodeId; readonly kind: "unconditional" }
+  | { readonly from: NodeId; readonly to: NodeId; readonly kind: "conditional" }
+  | { readonly from: NodeId; readonly to: NodeId; readonly kind: "default" };
+
 /** Topology facts computed once at compile time. Immutable after construction. */
 export interface DagTopology {
   readonly waves: readonly (readonly NodeId[])[];
-  readonly edges: readonly EdgeDef[];
+  readonly edges: readonly PersistedEdgeDef[];
   /**
    * Closure-free unconditional adjacency. Maps each node to the targets of its
    * unconditional out-edges. Used by `expandActive` and `seedInitialActiveSet`
@@ -314,6 +320,8 @@ export interface DagMachineContextPersisted extends DagTopology, DagRetryState, 
 // ---------------------------------------------------------------------------
 
 export interface DagMachineContext extends DagMachineContextPersisted {
+  /** Live edges retain conditional predicate closures; persisted edges do not. */
+  readonly edges: readonly EdgeDef[];
   readonly dag: DagDef;
   /**
    * Precomputed adjacency: `nodeId → out-edges` (includes predicate closures).

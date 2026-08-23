@@ -127,7 +127,10 @@ export const compileDagToMachine = (
       // DagMachineContextPersisted; spread with the live fields to reconstruct
       // the full DagMachineContext.
       const result = dagTransition(state, event, ctx);
-      return { state: result.state, context: { ...ctx, ...result.context } };
+      return {
+        state: result.state,
+        context: { ...ctx, ...result.context, edges: ctx.edges },
+      };
     },
     isTerminal,
     isFailed,

@@ -251,9 +251,9 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
     if (lease.signal.aborted) return err({ kind: "run-lease-lost", runId });
 
     if (!result.ok) {
-      // Host infrastructure failures, including checkpoint persistence, remain
-      // non-terminal. Returning Err makes the queue retry from the last durable
-      // checkpoint instead of recording an infrastructure blip as DAG failure.
+      // Infrastructure failures detected before a run outcome exists remain
+      // retryable. Post-transition checkpoint failures arrive as a failed run
+      // outcome instead, because replaying the prior checkpoint is unsafe.
       return result;
     }
 

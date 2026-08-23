@@ -607,8 +607,9 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
       nodeId: "__executor__" as NodeId,
       message: "DAG is no longer registered",
     };
+    const seeded = realExecutor(oneNodeDag());
     const executor: RunExecutorPort = {
-      async seedCheckpoint() { return ok(toJson({ state: { kind: "pending" }, context: {} })); },
+      seedCheckpoint: seeded.seedCheckpoint,
       async run() { return ok({ kind: "failed", error: permanent }); },
     };
     const service = createHitlRunService({
@@ -631,9 +632,9 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
   });
 
   it("returns executor infrastructure errors for queue retry without terminalizing the run", async () => {
-    // A typed executor Err (including checkpoint persistence failure) is not a
-    // DAG outcome. Keep the run non-terminal at its running entry fence and let
-    // the queue retry from the last durable checkpoint.
+    // A typed executor Err detected before a run outcome exists is not a DAG
+    // outcome. Keep the run non-terminal at its running entry fence and let the
+    // queue retry. Post-transition checkpoint loss is a separate failed outcome.
     const dag = twoWaveDag();
     const store = inMemoryRunStore();
     const queue = inMemoryRunQueue(store.acquireLease);

@@ -20,6 +20,7 @@ import { z } from "zod";
 import type { Result, FrameworkError } from "@fuguejs/framework";
 import { ok, err, nodeId } from "@fuguejs/framework";
 import { classifyAbort } from "./abort-classification.js";
+import { isRetriableHttpStatus } from "./http-status.js";
 
 // ---------------------------------------------------------------------------
 // Branded bearer token
@@ -200,14 +201,6 @@ const buildGrantBody = (auth: AuthConfig): string => {
 };
 
 /**
- * HTTP statuses that are retriable despite being non-5xx: `429 Too Many
- * Requests` (rate-limit — back off and retry) and `408 Request Timeout` (the
- * server timed the request out — retry). These are the textbook retriable
- * signals, so we classify them `transient` rather than a non-retriable crash.
- */
-const RETRIABLE_HTTP_STATUSES: ReadonlySet<number> = new Set([408, 429]);
-
-/**
  * Map a token-mint failure to a `FrameworkError`. The token/credentials are
  * never included in the message (NFR-010).
  *
@@ -218,7 +211,7 @@ const RETRIABLE_HTTP_STATUSES: ReadonlySet<number> = new Set([408, 429]);
  *   non-retriable `node-crash` — a deliberate cancellation must NOT silently
  *   auto-retry the very work the caller asked to stop.
  * - HTTP `5xx`, `429` (rate-limit), `408` (request timeout): `transient` — all
- *   retriable per `RETRIABLE_HTTP_STATUSES` + the 5xx range.
+ *   retriable per the shared HTTP-status policy.
  * - any other non-2xx `4xx` or an unparseable body: non-retriable `node-crash`
  *   (a deterministic rejection — retrying with the same credentials/body would
  *   just fail again).
@@ -241,7 +234,7 @@ const mapTokenError = (
     };
   }
   // 5xx + rate-limit (429) + request-timeout (408) are the retriable HTTP signals.
-  if (kind === "http" && status !== undefined && (status >= 500 || RETRIABLE_HTTP_STATUSES.has(status))) {
+  if (kind === "http" && status !== undefined && isRetriableHttpStatus(status)) {
     return { kind: "transient", nodeId: AUTH_NODE_ID, message: `Token mint HTTP ${status}`, httpStatus: status };
   }
   if (kind === "http") {

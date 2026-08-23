@@ -22,7 +22,7 @@ import type { HostError } from "../../../domain/host-error.js";
 import { tenantId } from "../../../domain/tenant.js";
 import type { TenantId } from "../../../domain/tenant.js";
 import { issueRunLease } from "../../ports.js";
-import { createRunQueue, hitlQueueName } from "../run-queue.js";
+import { createRunQueue, hitlQueueName, parseRunTrigger } from "../run-queue.js";
 
 /** Build a `TenantId` for a test from a known-good literal via the canonical constructor. */
 const mkTenant = (s: string): TenantId => {
@@ -165,6 +165,24 @@ describe("createRunQueue — BullMQ-compatible naming", () => {
 });
 
 describe("createRunQueue — enqueue boundary", () => {
+  it("parses a durable trigger into branded ids only for the bound tenant", () => {
+    expect(parseRunTrigger(
+      { state: RUN, context: { tenant: TENANT } },
+      TENANT,
+    )).toEqual(ok({ state: RUN, context: { tenant: TENANT } }));
+
+    for (const malformed of [
+      null,
+      {},
+      { state: "bad run id", context: { tenant: TENANT } },
+      { state: RUN, context: {} },
+      { state: RUN, context: { tenant: "bad:tenant" } },
+      { state: RUN, context: { tenant: OTHER_TENANT } },
+    ]) {
+      expect(parseRunTrigger(malformed, TENANT).ok).toBe(false);
+    }
+  });
+
   it("converts a backend enqueue throw into a typed Err", async () => {
     const { redis } = fakeRedis();
     const fb = fakeBackend(new Error("queue backend unavailable"));
@@ -433,6 +451,19 @@ describe("createRunQueue — single-flight lock", () => {
 });
 
 describe("createRunQueue — cross-tenant wakeup isolation (SECURITY: AD-4 / FR-013 / SC-001)", () => {
+  it("rejects a malformed durable run id before any lock-key construction", async () => {
+    const { redis, calls } = fakeRedis();
+    const fb = fakeBackend();
+    const queue = createRunQueue({ backend: fb.backend, redis, tenant: TENANT, lockTtlSec: 300 });
+    queue.startWorker(okProcess);
+    const malformedJob = {
+      data: { state: "bad run id", context: { tenant: TENANT } },
+    };
+
+    await expect(fb.getWorker()(malformedJob as never)).rejects.toThrow("invalid HITL queue trigger run id");
+    expect(calls.setNx).toHaveLength(0);
+  });
+
   it("rejects a trigger carrying another tenant before it can acquire that tenant's lock", async () => {
     const { redis, calls } = fakeRedis();
     const fb = fakeBackend();

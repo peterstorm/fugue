@@ -3,9 +3,9 @@
 // SharedInfra + RegisteredDag (ports-and-adapters fakes, no Redis/BullMQ/network).
 //
 // Covers what the service-level fakes can't:
-//   - the channel split: a DAG removed after durable acceptance and genuine
-//     run failures are `ok({ kind: "failed" })` so the service settles them;
-//     the err channel is reserved for retryable host infrastructure faults;
+//   - the channel split: permanent run failures and post-transition checkpoint
+//     failures are `ok({ kind: "failed" })` so the service settles them without
+//     replaying the prior durable checkpoint;
 //   - `toFrameworkError` cause-unwrapping (a thrown error carrying a
 //     `FrameworkError` cause surfaces that cause verbatim);
 //   - the AbortController slice-timeout wiring: the slice is bounded by
@@ -196,7 +196,7 @@ describe("createRunExecutor — channel split (err vs failed)", () => {
     }
   });
 
-  it("a checkpoint persistence failure stays on the typed host error channel for queue retry", async () => {
+  it("a checkpoint persistence failure fails closed instead of replaying the prior checkpoint", async () => {
     const dag = singleNodeDag((async () => ok("done")) as never);
     const reg = registered(dag);
     const exec = createRunExecutor({ sharedInfra: sharedInfra(), getRegisteredDag: () => reg, agentClientMap: { "exec-dag": "fugue-agent-exec" } });
@@ -204,7 +204,18 @@ describe("createRunExecutor — channel split (err vs failed)", () => {
 
     const result = await exec.run(runReq(dag, jobLike, null));
 
-    expect(result).toEqual(err({ kind: "redis-unavailable", operation: "saveCheckpoint" }));
+    expect(result.ok && result.value.kind).toBe("failed");
+    if (result.ok && result.value.kind === "failed") {
+      expect(result.value.error).toMatchObject({
+        kind: "node-crash",
+        retriability: "non-retriable",
+        nodeId: EXECUTOR_NODE_ID,
+      });
+      if (result.value.error.kind === "node-crash") {
+        expect(result.value.error.message).toContain("stopped to avoid replaying side effects");
+        expect(result.value.error.message).toContain("saveCheckpoint");
+      }
+    }
   });
 
   it("a genuine run-FAILURE is the `failed` outcome on the OK channel (service settles it)", async () => {

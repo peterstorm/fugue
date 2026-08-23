@@ -2,9 +2,9 @@
 //
 // The kernel checkpoints {state, context} after every transition through this
 // handle. Two load-bearing invariants are pinned here:
-//   1. A PERSIST FAILURE is fatal — updateData() throws so the kernel surfaces a
-//      run failure and the queue retries from the last good checkpoint, rather
-//      than silently advancing on an unpersisted state.
+//   1. A PERSIST FAILURE is fatal — updateData() throws so the kernel aborts and
+//      the host terminalizes the run rather than replaying side effects from the
+//      last good checkpoint or silently advancing unpersisted state.
 //   2. Parse-don't-validate at deserialization — a corrupt checkpoint (malformed
 //      JSON or an invalid envelope shape) is REJECTED as a Result error rather
 //      than `as`-cast into a bad `DagPhase` that would later blow up the
@@ -29,6 +29,22 @@ const GATE = {
   pendingReviews: [],
   wave: 1,
 } as const;
+const VALID_CONTEXT: DagMachineContextPersisted = {
+  waves: [[GATE.nodeId]],
+  edges: [],
+  unconditionalAdj: new Map(),
+  outputNodeId: GATE.nodeId,
+  retries: new Map(),
+  retryConfigs: new Map(),
+  defaultRetryLimit: undefined,
+  retryLimits: undefined,
+  humanReviewNodeIds: new Set([GATE.nodeId]),
+  humanReviewPrompts: new Map([[GATE.nodeId, GATE.prompt]]),
+  activeNodeIds: new Set([GATE.nodeId]),
+  confidenceByNode: new Map(),
+  outputs: new Map(),
+  initialInput: null,
+};
 const VALID_PHASES: Record<DagPhase["kind"], DagPhase> = {
   pending: { kind: "pending" },
   running: { kind: "running", wave: 0 },
@@ -41,7 +57,7 @@ const VALID_PHASES: Record<DagPhase["kind"], DagPhase> = {
 };
 const envelope = (kind: DagPhase["kind"]): Envelope => ({
   state: { ...VALID_PHASES[kind] } as DagPhase,
-  context: {} as DagMachineContextPersisted,
+  context: VALID_CONTEXT,
 });
 const initial = toJson(envelope("pending"));
 
@@ -126,13 +142,13 @@ describe("makeRunStoreJobLike", () => {
   it("ACCEPTS complete representatives of every DagPhase variant", () => {
     const { port } = fakeStore(() => Promise.resolve(ok(undefined)));
     for (const phase of Object.values(VALID_PHASES)) {
-      expect(makeRunStoreJobLike(port, LEASE, toJson({ state: phase, context: {} })).ok).toBe(true);
+      expect(makeRunStoreJobLike(port, LEASE, toJson({ state: phase, context: VALID_CONTEXT })).ok).toBe(true);
     }
   });
 
   it("REJECTS a checkpoint whose state.kind is not a known DagPhase (corrupt discriminant)", () => {
     const { port } = fakeStore(() => Promise.resolve(ok(undefined)));
-    const corrupt = toJson({ state: { kind: "totally-bogus" }, context: {} });
+    const corrupt = toJson({ state: { kind: "totally-bogus" }, context: VALID_CONTEXT });
     const result = makeRunStoreJobLike(port, LEASE, corrupt);
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -154,7 +170,7 @@ describe("makeRunStoreJobLike", () => {
     ] as const satisfies readonly Exclude<DagPhase["kind"], "pending">[];
 
     for (const kind of incompleteKinds) {
-      const result = makeRunStoreJobLike(port, LEASE, toJson({ state: { kind }, context: {} }));
+      const result = makeRunStoreJobLike(port, LEASE, toJson({ state: { kind }, context: VALID_CONTEXT }));
       expect(result.ok, `${kind} was accepted without its required payload`).toBe(false);
     }
   });
@@ -163,9 +179,44 @@ describe("makeRunStoreJobLike", () => {
     const { port } = fakeStore(() => Promise.resolve(ok(undefined)));
     const result = makeRunStoreJobLike(port, LEASE, toJson({
       state: { ...VALID_PHASES.suspended, nodeId: "not a node id" },
-      context: {},
+      context: VALID_CONTEXT,
     }));
     expect(result.ok).toBe(false);
+  });
+
+  it("REJECTS a context missing any required persisted field", () => {
+    const { port } = fakeStore(() => Promise.resolve(ok(undefined)));
+    for (const field of Object.keys(VALID_CONTEXT)) {
+      const context: Record<string, unknown> = { ...VALID_CONTEXT };
+      delete context[field];
+      const result = makeRunStoreJobLike(port, LEASE, toJson({
+        state: { kind: "pending" },
+        context,
+      }));
+      expect(result.ok, `context without '${field}' was accepted`).toBe(false);
+    }
+  });
+
+  it("REJECTS wrong container shapes inside persisted context", () => {
+    const { port } = fakeStore(() => Promise.resolve(ok(undefined)));
+    const corruptions: ReadonlyArray<readonly [keyof DagMachineContextPersisted, unknown]> = [
+      ["waves", {}],
+      ["outputs", {}],
+      ["retries", []],
+      ["retryConfigs", {}],
+      ["activeNodeIds", []],
+      ["humanReviewNodeIds", []],
+      ["humanReviewPrompts", {}],
+      ["unconditionalAdj", {}],
+      ["confidenceByNode", {}],
+    ];
+    for (const [field, value] of corruptions) {
+      const result = makeRunStoreJobLike(port, LEASE, toJson({
+        state: { kind: "pending" },
+        context: { ...VALID_CONTEXT, [field]: value },
+      }));
+      expect(result.ok, `context with corrupt '${field}' was accepted`).toBe(false);
+    }
   });
 
   it("REJECTS a checkpoint missing the state/context envelope shape", () => {

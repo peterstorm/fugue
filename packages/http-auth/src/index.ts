@@ -301,25 +301,9 @@ const isShapedRoute = (route: unknown): route is ShapedAuthedHttpRoute =>
   typeof route === "object" && route !== null && (route as Record<symbol, unknown>)[SHAPED_ROUTE] === true;
 
 /**
- * In-memory fake `AuthedHttpCapability` for testing DAG nodes that use
- * `ctx.authedHttp`. No network, no token machinery — routes match on
- * `"METHOD /path"` (or the bare path). Mirrors `createFakeHttpCapability`.
- *
- * @remarks
- * A route value is a *raw* payload (returned verbatim) unless it was built with
- * {@link shapedRoute}, which brands it as control metadata (`status`/`matchBody`/
- * explicit `body`). Detection is by that brand — NOT a `"body" in route` shape
- * heuristic — so a raw payload that legitimately carries a top-level `body`
- * field round-trips unchanged instead of being misread as a shaped route.
- *
- * @example
- * ```ts
- * const fake = createFakeAuthedHttpCapability({
- *   "GET /customers/123": { id: "123", name: "Alice" },               // raw
- *   "POST /orders": shapedRoute({ body: { orderId: "ord-1" } }),      // shaped
- *   "GET /customers/999": shapedRoute({ status: 404, body: "Not Found" }),
- * });
- * ```
+ * In-memory fake `AuthedHttpCapability` for DAG-node tests. Routes match on
+ * `"METHOD /path"` or the bare path; use {@link shapedRoute} for control
+ * metadata such as status and body matching.
  */
 export const createFakeAuthedHttpCapability = (
   routes: Readonly<Record<string, unknown>>,

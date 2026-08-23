@@ -185,6 +185,48 @@ describe("register", () => {
     expect(activeTenants(registered.value)).toEqual([cfg]);
   });
 
+  it("stores a detached config snapshot so later caller mutation cannot bypass invariants", () => {
+    const cfg = makeConfig("a");
+    const registered = register(emptyRegistry(), cfg, 1000);
+    if (!registered.ok) throw new Error("setup");
+    const mutable = cfg as unknown as {
+      team: string;
+      fsRoot: string;
+      admission: { maxConcurrentRuns: number };
+      keycloakClientMapping: { agentClientIdsByDag: Record<string, string> };
+    };
+
+    mutable.team = "forged-team";
+    mutable.fsRoot = "/forged";
+    mutable.admission.maxConcurrentRuns = 999;
+    mutable.keycloakClientMapping.agentClientIdsByDag["lead-desk"] = "forged-agent";
+
+    const stored = lookup(registered.value, cfg.id);
+    if (!stored.ok) throw new Error("lookup");
+    expect(stored.value.team).toBe("a-team");
+    expect(stored.value.fsRoot).toBe("/srv/a");
+    expect(stored.value.admission.maxConcurrentRuns).toBe(4);
+    expect(stored.value.keycloakClientMapping.agentClientIdsByDag["lead-desk"]).toBe("a-agent");
+  });
+
+  it("freezes retrieved configs recursively so casts cannot mutate live registry state", () => {
+    const cfg = makeConfig("a");
+    const registered = register(emptyRegistry(), cfg, 1000);
+    if (!registered.ok) throw new Error("setup");
+    const stored = lookup(registered.value, cfg.id);
+    if (!stored.ok) throw new Error("lookup");
+    const mutable = stored.value as unknown as {
+      team: string;
+      admission: { maxQueuedRuns: number };
+      keycloakClientMapping: { agentClientIdsByDag: Record<string, string> };
+    };
+
+    expect(() => { mutable.team = "forged-team"; }).toThrow();
+    expect(() => { mutable.admission.maxQueuedRuns = 999; }).toThrow();
+    expect(() => { mutable.keycloakClientMapping.agentClientIdsByDag["lead-desk"] = "forged-agent"; }).toThrow();
+    expect(lookup(registered.value, cfg.id)).toEqual(stored);
+  });
+
   it("replaces when the config differs", () => {
     const cfg = makeConfig("a");
     const r1 = register(emptyRegistry(), cfg, 1000);
