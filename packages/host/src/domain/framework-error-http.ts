@@ -187,8 +187,9 @@ export const classifyHostError = (
 export const classifyFrameworkError = (error: FrameworkError): FrameworkErrorHttp =>
   match(error)
     // Settled authorization "no" — fail-closed, never retried, NOT a host fault.
-    .with({ kind: "policy-refusal" }, () => SETTLED_DENIAL)
-    .with({ kind: "downstream-denied" }, () => SETTLED_DENIAL)
+    // One arm for the pair, matching how `classifyRootKind` already groups them,
+    // so the two classifiers cannot drift on what counts as a settled denial.
+    .with({ kind: P.union("policy-refusal", "downstream-denied") }, () => SETTLED_DENIAL)
     // Deterministic per-run usage limit — client should back off, not the host.
     .with({ kind: "llm-budget-exceeded" }, () => BUDGET_LIMIT)
     // Transient provider-reach failure — retriable AND a real infra signal.

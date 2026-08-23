@@ -53,7 +53,7 @@ import { startRedisProbe } from "../lifecycle/redis-probe.js";
 import type { RedisProbeHandle } from "../lifecycle/redis-probe.js";
 import { routeRequest, workerSocketForTenant } from "./routing.js";
 import type { AdmissionDecision, WorkerPresence, RouteDecision } from "./routing.js";
-import { proxyToWorker, bunUdsTransport } from "./uds-proxy.js";
+import { proxyToWorker, makeBunUdsTransport, UDS_PROXY_OVERHEAD_MS } from "./uds-proxy.js";
 import type { UdsTransport } from "./uds-proxy.js";
 import { handleAdminTenants } from "../http/handlers/admin/tenants.js";
 import type { AdminTenantsDeps } from "../http/handlers/admin/tenants.js";
@@ -308,7 +308,12 @@ export const createSupervisor = async (
   // multi-tenant spec FR-005: structurally assert no tenant-secret channel exists.
   assertNoTenantSecrets(deps);
 
-  const transport: UdsTransport = deps.transport ?? bunUdsTransport;
+  // The proxy wait is BOUNDED (see uds-proxy.ts): the deadline is the worker's
+  // own maximum run budget plus connect/stream overhead. Anything past that is a
+  // stalled worker, and an unbounded wait there would permanently leak this
+  // tenant's admission slot (released only in the `finally` below).
+  const transport: UdsTransport =
+    deps.transport ?? makeBunUdsTransport(config.MAX_DAG_TIMEOUT_MS + UDS_PROXY_OVERHEAD_MS);
 
   // ── Mutable state (imperative shell) ───────────────────────────────────────
   // The supervisor has no DAG registry of its own (it routes, it does not

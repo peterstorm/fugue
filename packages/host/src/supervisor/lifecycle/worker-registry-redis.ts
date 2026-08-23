@@ -28,7 +28,7 @@
  * hydrate. Per-tenant worker ACLs never touch this prefix.
  */
 
-import { ok, err } from "@fuguejs/framework";
+import { ok, err, safeErrorMessage } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import { redisUnavailable } from "../../domain/host-error.js";
 import type { HostError } from "../../domain/host-error.js";
@@ -211,25 +211,23 @@ export const createWorkerRegistry = (
           tenant,
           key,
         });
-        let pruned = true;
+        // Best-effort per the deserialize contract: a prune failure must not
+        // fail the read — the record stays corrupt-and-untreated until the next
+        // reconcile (which prunes on its own path). ONE log line per failed
+        // prune, whichever way it failed: the throw path previously logged here
+        // and again below, so a single fault read as two in the operator's log.
+        let pruneFailure: string | undefined;
         try {
           const prune = await redis.del(key);
-          if (!prune.ok) pruned = false;
+          if (!prune.ok) pruneFailure = "reported unavailable";
         } catch (e) {
-          // Best-effort per the deserialize contract: a prune failure must not
-          // fail the read — the record stays corrupt-and-untreated until the
-          // next reconcile (which prunes on its own path).
-          pruned = false;
-          logger?.warn("[worker-registry] corrupt-record prune threw — leaving to reconcile", {
-            tenant,
-            key,
-            error: e instanceof Error ? e.message : String(e),
-          });
+          pruneFailure = `threw: ${safeErrorMessage(e)}`;
         }
-        if (!pruned) {
-          logger?.warn("[worker-registry] corrupt-record prune reported unavailable — leaving to reconcile", {
+        if (pruneFailure !== undefined) {
+          logger?.warn("[worker-registry] corrupt-record prune failed — leaving to reconcile", {
             tenant,
             key,
+            reason: pruneFailure,
           });
         }
         return ok(null);

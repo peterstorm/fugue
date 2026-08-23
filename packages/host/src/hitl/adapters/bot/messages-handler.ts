@@ -167,6 +167,17 @@ export const handleBotActivity = async (
         return { status: 503 };
       }
       deps.logger?.info?.("hitl/bot: captured default conversation reference for proactive reviews");
+    } else {
+      // `captureReference` returned nothing: the activity is missing the fields
+      // a proactive post needs (conversation id / serviceUrl). Every other branch
+      // in this handler logs; without this line a malformed or truncated
+      // conversationUpdate silently persists NO reference for the team, and the
+      // eventual "notification-failed: no conversation reference for owning
+      // team" has no trail back to the activity that caused it. 200 is still
+      // correct — Bot Framework must not retry an unusable activity.
+      deps.logger?.warn?.("hitl/bot: conversationUpdate carried no usable conversation reference — nothing persisted", {
+        conversationId: str(obj(activity.conversation).id),
+      });
     }
     return { status: 200 };
   }
@@ -244,7 +255,9 @@ export const handleBotActivity = async (
     // `queued`/`running` are TRANSIENT, not terminal: the run may be mid-slice
     // with its `suspended` status not yet folded back into the store (the notify
     // that produced this card fires from inside the slice while status is still
-    // `running` — see service.ts recordDecision). Rendering a resolved card here
+    // `running`, and the `suspended` status is only folded back into the store
+    // by the outcome match AFTER `executor.run` returns — both in
+    // service.ts processRun). Rendering a resolved card here
     // would replace the buttons and mislead the reviewer into thinking the review
     // is over, when the gate is in fact still open and re-approvable, and no
     // re-notification fires for the same gate. Keep the card and ask them to

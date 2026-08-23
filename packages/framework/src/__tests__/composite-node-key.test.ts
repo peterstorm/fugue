@@ -14,9 +14,28 @@ import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
 import {
   DEFAULT_NODE_NAMESPACE,
   compositeNodeKey,
-  parseCompositeNodeKey,
+  parseCompositeNodeKey as parseCompositeNodeKeyBranded,
 } from "../checkpoint/composite-node-key.js";
-import type { CompositeNodeKeyOpts, ParsedCompositeNodeKey } from "../checkpoint/composite-node-key.js";
+import type { CompositeNodeKeyOpts } from "../checkpoint/composite-node-key.js";
+
+/**
+ * De-branded mirror of `ParsedCompositeNodeKey`. `parseCompositeNodeKey` carries
+ * the `ID_PATTERN` proof forward as a branded `NodeId`; brands erase at runtime
+ * and `toEqual` compares structurally, so this file keeps its expectations as
+ * plain string literals instead of minting a `NodeId` at every assertion.
+ */
+type ExpectedParse =
+  | { readonly form: "canonical"; readonly nodeId: string }
+  | {
+      readonly form: "composite";
+      readonly namespace: string;
+      readonly nodeId: string;
+      readonly index: number;
+      readonly attempt: number;
+    };
+
+const parseCompositeNodeKey = (key: string): ExpectedParse | null =>
+  parseCompositeNodeKeyBranded(key) as ExpectedParse | null;
 
 /** Cast a hostile string past the NodeId brand — the codec must still reject it. */
 const rawNodeId = (s: string): NodeId => s as unknown as NodeId;
@@ -264,7 +283,7 @@ describe("round-trip — parse(encode(a)) deep-equals a", () => {
     readonly opts?: CompositeNodeKeyOpts;
   }
 
-  const expectRoundTrip = (address: Address, expected: ParsedCompositeNodeKey): void => {
+  const expectRoundTrip = (address: Address, expected: ExpectedParse): void => {
     const key = compositeNodeKey(N(address.nodeId), address.opts);
     expect(parseCompositeNodeKey(key)).toEqual(expected);
   };
@@ -404,7 +423,7 @@ describe("fast-check properties", () => {
         fc.pre(isValidAddress(a));
         const key = compositeNodeKey(N(a.nodeId), toOpts(a));
         const parsed = parseCompositeNodeKey(key);
-        const expected: ParsedCompositeNodeKey = isCanonical(a)
+        const expected: ExpectedParse = isCanonical(a)
           ? { form: "canonical", nodeId: a.nodeId }
           : {
               form: "composite",

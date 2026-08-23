@@ -22,12 +22,13 @@
  */
 
 import { dirname } from "node:path";
-import { ok, err } from "@fuguejs/framework";
+import { ok, err, safeErrorMessage, probeErrorCode } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import { internalInvariantViolated } from "../../domain/host-error.js";
 import type { LogPort } from "../../ports.js";
 import type { SpawnPort, ProcManagePort, WorkerSpawnSpec, WorkerHandle } from "./spawn-port.js";
+import { cleanEnvRecord } from "./spawn-port.js";
 
 // ── Pure: argv + env construction (testable without spawning) ──────────────────
 
@@ -81,10 +82,7 @@ export const buildWorkerSpawn = (
   // workers share a uid/trust domain (AD-2/AD-9); per-tenant ISOLATION rests on the
   // Redis ACL key-scope + signed tenant header, not on withholding platform config.
   // Start from inherited env (drop undefined values for a clean string record).
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(inheritedEnv)) {
-    if (v !== undefined) env[k] = v;
-  }
+  const env: Record<string, string> = cleanEnvRecord(inheritedEnv);
 
   // extraEnv first — must not be able to override the tenant binding below.
   if (spec.extraEnv) {
@@ -183,7 +181,10 @@ export const createBunSpawnAdapter = (
       process.kill(pid, 0);
       return true;
     } catch (e) {
-      const code = e instanceof Error && "code" in e ? (e as { code?: string }).code : undefined;
+      // Total code probe: a hostile thrown value must not throw across this
+      // liveness boundary, where a throw would read as neither alive nor dead.
+      const probe = probeErrorCode(e);
+      const code = probe.kind === "code" ? probe.code : undefined;
       // EPERM: the process EXISTS but we lack permission to signal it. That is a
       // live process from a liveness standpoint, AND a misconfiguration worth a
       // warning (the supervisor and worker are expected to share a uid). ESRCH
@@ -191,6 +192,17 @@ export const createBunSpawnAdapter = (
       if (code === "EPERM") {
         logger?.warn("[bun-spawn] isAlive got EPERM — process exists but cannot be signalled (uid mismatch?)", { pid });
         return true;
+      }
+      // ESRCH is the ONLY expected dead case. Anything else — an unrecognised
+      // errno, or a value we could not probe at all — is reported dead too
+      // (fail-closed for routing), but silently doing so is how a live worker
+      // gets misclassified, SIGKILL'd and respawned against a UDS the "dead"
+      // process still holds, with no trail explaining why. Leave one.
+      if (code !== "ESRCH") {
+        logger?.warn(
+          "[bun-spawn] isAlive got an unexpected signal-probe failure — treating the process as dead",
+          { pid, code: code ?? "<unprobeable>", error: safeErrorMessage(e) },
+        );
       }
       return false;
     }

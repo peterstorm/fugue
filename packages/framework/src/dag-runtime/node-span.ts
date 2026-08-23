@@ -151,16 +151,19 @@ export const classifyGuardrailOutcome = (
 // ---------------------------------------------------------------------------
 
 /**
- * Wrap node execution in an OTel span. Infrastructure only — creates the span,
- * sets attributes, records input/output events, sets error status, ends span.
+ * Wrap node execution in an OTel span. Infrastructure plus the span-side
+ * guardrail tagging — creates the span, records input/output events, sets error
+ * status, tags a failed guardrail, and ends the span before returning.
  *
- * Does NOT inspect the result for guardrail semantics. The caller classifies
- * the result via `classifyGuardrailOutcome` after this returns, and may set
- * additional span attributes (e.g. `ai.guardrail.passed`) on the active span.
+ * Returns `{ result, outcome }`. The span itself is NOT returned: it is already
+ * ended by the time this resolves, so there is no post-hoc attribute window for
+ * the caller to use. `outcome` is the `NodeSpanOutcome` produced by the pure
+ * `classifyGuardrailOutcome`, which this function calls internally on the
+ * success path so the guardrail status/attribute land on the span it owns; the
+ * caller folds that outcome into `DagRunMeta` via `foldOutcomes`.
  *
- * Returns `{ result, span }` where `span` is the (already-ended) span reference.
- * The caller can use the span for post-hoc attribute setting if needed before
- * the span is exported (span attributes can be set after `end()` in many SDKs).
+ * Every span mutation is best-effort (`bestEffortTelemetry`): a throwing tracer
+ * is logged and discarded, never allowed to replace the modeled node outcome.
  */
 export const withTracedNodeSpan = async (
   nodeId: string,

@@ -14,6 +14,7 @@
  * (middleware, handlers) calls these for decisions.
  */
 
+import { base64url } from "./base64url.js";
 import { match } from "ts-pattern";
 
 // ── Branded Types ──────────────────────────────────────────────────────────
@@ -450,12 +451,6 @@ export const hashToken = async (token: string): Promise<TokenHash> => {
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────────
-
-/** Encode bytes as base64url (no padding) */
-const base64url = (bytes: Uint8Array): string => {
-  const base64 = btoa(String.fromCharCode(...bytes));
-  return base64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-};
 
 /** Encode bytes as lowercase hex string */
 const hexEncode = (bytes: Uint8Array): string =>

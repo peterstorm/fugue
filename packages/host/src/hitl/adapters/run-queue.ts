@@ -255,6 +255,19 @@ export const createRunQueue = (deps: RunQueueDeps): RunQueueHandle => {
               runId,
               error: released.error.kind,
             });
+          } else if (!released.value) {
+            // `ok` only says the compare-and-delete RAN; `false` says it did not
+            // MATCH — this worker no longer owned the lease. That means the TTL
+            // elapsed (a stalled event loop past `lockTtlSec`) and a successor
+            // claimed the run while we still believed we held it. Correctness is
+            // protected elsewhere by lease-fenced writes in run-store.ts, so this
+            // is not a failure to act on — but every other stale-lease path in
+            // this file logs, and without this line a lost lease is byte-for-byte
+            // indistinguishable from a clean release in the log, removing the one
+            // trail an operator has when investigating duplicated node side effects.
+            logWithoutThrowing(logger, "warn", "hitl: lock lease was lost to a successor before release", {
+              runId,
+            });
           }
         }
       },

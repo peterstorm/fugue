@@ -170,6 +170,22 @@ interface FakeLlmClientOpts {
   readonly withToolsScript?: FakeWithToolsScript;
 }
 
+
+/**
+ * Build the deterministic retriable node-crash constructor for one request.
+ *
+ * `sendStructured` and `sendWithTools` each guard caller-supplied (possibly
+ * hostile) response providers and need the identical crash shape bound to the
+ * same node id; they previously declared the identical closure twice.
+ */
+const retriableCrashFor = (nodeId: NodeId) => (message: string) =>
+  ({
+    kind: "node-crash",
+    retriability: "retriable",
+    nodeId,
+    message,
+  }) as const;
+
 export class FakeLlmClient implements LlmClient {
   private readonly responses: FakeResponseProvider;
   private readonly withToolsScript: FakeWithToolsScript | undefined;
@@ -193,16 +209,10 @@ export class FakeLlmClient implements LlmClient {
     // the provider guard below, so it needs no snapshot.
     const nodeId = readHostileField(req, "nodeId", UNKNOWN_NODE_ID);
     const model = readHostileField(req, "model", "");
-    // One encoding for this method's guarded seams: the deterministic
-    // retriable node-crash bound to the request's node id (the deliberate
-    // non-retriable iteration-limit site in `sendWithTools` stays explicit
-    // instead of hiding in the builder).
-    const crash = (message: string) => ({
-      kind: "node-crash",
-      retriability: "retriable",
-      nodeId,
-      message,
-    }) as const;
+    // The shared retriable-crash builder, bound to this request's node id. The
+    // deliberate non-retriable iteration-limit exit in `sendWithTools` stays
+    // explicit rather than hiding in the builder.
+    const crash = retriableCrashFor(nodeId);
     // The response provider is caller code (and possibly a hostile Proxy): a
     // throw must become a typed node-crash, never a raw rejection (FR-040 —
     // the real clients keep every LLM seam inside the Result boundary).
@@ -286,16 +296,10 @@ export class FakeLlmClient implements LlmClient {
     // guarded regions below and need no snapshot.
     const nodeId = readHostileField(req, "nodeId", UNKNOWN_NODE_ID);
     const maxIterations = readHostileField(req, "maxIterations", undefined) ?? 10;
-    // One encoding for this method's guarded seams (see the twin builder in
-    // `sendStructured`): deterministic retriable node-crash bound to the
-    // request's node id; the non-retriable iteration-limit exit below stays
-    // explicit as the deliberate exception.
-    const crash = (message: string) => ({
-      kind: "node-crash",
-      retriability: "retriable",
-      nodeId,
-      message,
-    }) as const;
+    // The shared retriable-crash builder, bound to this request's node id. The
+    // deliberate non-retriable iteration-limit exit in `sendWithTools` stays
+    // explicit rather than hiding in the builder.
+    const crash = retriableCrashFor(nodeId);
     if (this.withToolsScript === undefined) {
       return err(crash("FakeLlmClient: no withToolsScript configured"));
     }

@@ -152,6 +152,17 @@ export const runNodeShared = async (
       // the wave-level catch-all and be reclassified as a RETRIABLE
       // `node-crash`, re-firing the broker (token-endpoint egress) on every
       // retry and losing the 403/503 taxonomy.
+      //
+      // Why this fence classifies NON-retriable while `node-span.ts`'s outer
+      // catch classifies a thrown `fn()` as RETRIABLE: the two catches sit at
+      // different altitudes and know different things. `node-span` wraps the
+      // whole node body, where a throw is an unclassified fault of unknown
+      // origin, and retriable is the safe default. Here we know exactly which
+      // call threw and that it is a CONTRACT VIOLATION by an extension — the
+      // same broker, given the same invocation, will violate it identically on
+      // every retry, so retrying only repeats the egress. The narrower catch
+      // must win: it is fenced INSIDE the broader one precisely so this
+      // classification is not overwritten by the general default.
       let minted: Result<ScopedCapabilityHandle, FrameworkError>;
       try {
         minted = await opts.minting.broker.mintFor(inv, node.requires);

@@ -174,7 +174,8 @@ describe("proxyToWorker — 200 contract preservation + fail-closed", () => {
 
 describe("proxyToWorker — real fetch-over-UDS round trip (Bun transport)", () => {
   it("proxies over a real Unix-domain socket, preserving the 200 contract and a canonically-verifiable header", async () => {
-    const { bunUdsTransport } = await import("../../supervisor/uds-proxy.js");
+    const { makeBunUdsTransport } = await import("../../supervisor/uds-proxy.js");
+    const bunUdsTransport = makeBunUdsTransport(10_000);
     const tmpSock = `/tmp/fugue-test-${crypto.randomUUID()}.sock`;
     let seenHeader: string | null = null;
     const worker = Bun.serve({

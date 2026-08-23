@@ -59,7 +59,8 @@ export type { HostDeps, HostInstance } from "./host.js";
 // ── Lifecycle ──────────────────────────────────────────────────────────────
 
 export { executeStartup, validateRedis, buildSyncConfig } from "./lifecycle/startup.js";
-export type { StartupDeps, BootResult, RedisConnectivityPort } from "./lifecycle/startup.js";
+export type { StartupDeps, BootResult } from "./lifecycle/startup.js";
+export type { RedisConnectivityPort } from "./ports.js";
 export { registerSignalHandlers } from "./lifecycle/signals.js";
 export type { SignalHandlerDeps, SignalHandlerHandle } from "./lifecycle/signals.js";
 

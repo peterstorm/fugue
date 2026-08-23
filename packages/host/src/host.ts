@@ -14,13 +14,13 @@
  */
 
 import { ok, err, runId as makeRunId, safeErrorMessage } from "@fuguejs/framework";
-import type { Result, DagId, NodeContext, DagDef, FrameworkError } from "@fuguejs/framework";
+import type { Result, DagId, NodeContext, DagDef, FrameworkError, RunId, CapabilityHandle } from "@fuguejs/framework";
 import { runDag } from "@fuguejs/framework";
 import type { HostConfig } from "./domain/config.js";
 import type { HostState } from "./domain/host-state.js";
 import { booting, bootComplete, beginDrain, drainComplete, redisDied, redisRecovered } from "./domain/host-state.js";
 import type { RegisteredDag } from "./domain/registry.js";
-import type { AuthIdentity } from "./domain/auth.js";
+import type { AuthIdentity, SubjectToken } from "./domain/auth.js";
 import { initConcurrency, reconcileDagLimits } from "./domain/concurrency.js";
 import type { CircuitState } from "./domain/circuit-breaker.js";
 import { initCircuit } from "./domain/circuit-breaker.js";
@@ -35,6 +35,7 @@ import { createRedisTokenStore } from "./adapters/token-store.js";
 import { tenantId } from "./domain/tenant.js";
 import type { TenantId } from "./domain/tenant.js";
 import { formatHostError } from "./domain/host-error.js";
+import type { HostError } from "./domain/host-error.js";
 import { verifyTenantHeader, TENANT_HEADER_NAME } from "./domain/tenant-header.js";
 import { createRealmJwtVerifier } from "./adapters/realm-jwt-verifier.js";
 import type { RealmJwtDeps } from "./http/middleware/auth.js";
@@ -206,8 +207,8 @@ export const stopBoundServerAfterBindFailure = (
  * fail-closed behaviour itself is unchanged).
  */
 const inertResolveSubjectToken = (
-  _runId: import("@fuguejs/framework").RunId,
-): import("./domain/auth.js").SubjectToken | undefined => undefined;
+  _runId: RunId,
+): SubjectToken | undefined => undefined;
 
 /**
  * Run `execute`, then ALWAYS `release(runId)` from the registry — on the normal
@@ -222,7 +223,7 @@ const inertResolveSubjectToken = (
  */
 export const withSubjectTokenRelease = async <T>(
   registry: Pick<SubjectTokenRegistry, "release">,
-  runId: import("@fuguejs/framework").RunId,
+  runId: RunId,
   execute: () => Promise<T>,
 ): Promise<T> => {
   try {
@@ -275,7 +276,7 @@ export const selectCapabilityBroker = (
    * fails the user path CLOSED (no proof → no exchange) — never a proof-less
    * token. `createHost` passes the live registry's `resolve`.
    */
-  resolveSubjectToken: (runId: import("@fuguejs/framework").RunId) => import("./domain/auth.js").SubjectToken | undefined = inertResolveSubjectToken,
+  resolveSubjectToken: (runId: RunId) => SubjectToken | undefined = inertResolveSubjectToken,
 ): CapabilityBroker | undefined => {
   if (config.REALM_JWT_ISSUER === undefined) {
     // Operability (mirror of the empty-policy warning below): a scope POLICY is
@@ -471,7 +472,7 @@ export const selectHitlNotifierTransport = (
  * This is the imperative shell — it constructs mutable state,
  * wires subsystems, and manages lifecycle.
  */
-export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, import("./domain/host-error.js").HostError>> => {
+export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, HostError>> => {
   const { config, git, loader, redis, sharedInfra, logger } = deps;
 
   // The tenant every per-tenant Redis key/ACL namespace is scoped under. T6: a
@@ -501,7 +502,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
   });
 
   if (!startupResult.ok) {
-    return startupResult as Result<never, import("./domain/host-error.js").HostError>;
+    return startupResult as Result<never, HostError>;
   }
 
   const { registry, sha, syncConfig } = startupResult.value;
@@ -511,11 +512,11 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
   // Failure here aborts boot — a missing capability at runtime is worse than
   // a clean boot failure.
   const capHandles = sharedInfra.capabilities;
-  let sortedHandles: readonly import("@fuguejs/framework").CapabilityHandle[] = [];
+  let sortedHandles: readonly CapabilityHandle[] = [];
   if (capHandles.length > 0) {
     const sortResult = topoSortHandles(capHandles);
     if (!sortResult.ok) {
-      return sortResult as Result<never, import("./domain/host-error.js").HostError>;
+      return sortResult as Result<never, HostError>;
     }
     sortedHandles = sortResult.value;
     const connectResult = await connectAll(sortedHandles, logger);

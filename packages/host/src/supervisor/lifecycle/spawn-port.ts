@@ -159,3 +159,22 @@ export interface WorkerLifecyclePort {
    */
   readonly livenessSweep: () => Promise<readonly TenantId[]>;
 }
+
+/**
+ * Copy an inherited env into a clean `Record<string, string>`, dropping keys
+ * whose value is `undefined`.
+ *
+ * ONE definition shared by both spawn adapters (`bun-spawn-adapter` for
+ * workers, `bun-init-process-adapter` for the supervisor). `process.env` is
+ * typed with optional values but `Bun.spawn` wants a total string record, and
+ * the two adapters previously each open-coded this same narrowing loop.
+ */
+export const cleanEnvRecord = (
+  source: Record<string, string | undefined>,
+): Record<string, string> => {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (value !== undefined) out[key] = value;
+  }
+  return out;
+};

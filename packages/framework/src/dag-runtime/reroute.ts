@@ -27,8 +27,10 @@ const computeRerouteActiveSet = (
   targetNodeId: NodeId,
   machineCtx: DagMachineContext,
 ): RerouteResult => {
+  // `findIndex` returns -1 or a valid index by contract, so "not found" is the
+  // ONLY reachable rejection here — an upper-bound disjunct could never fire.
   const targetWave = machineCtx.waves.findIndex((w) => w.includes(targetNodeId));
-  if (targetWave === -1 || targetWave > machineCtx.waves.length - 1) {
+  if (targetWave === -1) {
     return { kind: "invalid-target", targetNodeId };
   }
 

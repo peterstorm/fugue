@@ -340,9 +340,9 @@ export const occupiesSlot = (state: WorkerState): boolean =>
 /** The worker's UDS socket path, if it currently has one (live/draining only). */
 export const udsPathOf = (state: WorkerState): string | undefined =>
   match(state)
-    .with({ phase: "live" }, (s) => s.udsPath)
-    .with({ phase: "draining" }, (s) => s.udsPath)
-    .with({ phase: "spawning" }, () => undefined)
-    .with({ phase: "crashed" }, () => undefined)
-    .with({ phase: "evicted" }, () => undefined)
+    // Two arms, not five — the union arms group the phases that share a verdict,
+    // matching the idiom this file's own `crash` already uses. Still exhaustive:
+    // adding a phase remains a compile error.
+    .with({ phase: P.union("live", "draining") }, (s) => s.udsPath)
+    .with({ phase: P.union("spawning", "crashed", "evicted") }, () => undefined)
     .exhaustive();

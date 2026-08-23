@@ -115,11 +115,18 @@ const assertNoNamespaceAlone = (opts: {
   }
 };
 
-const isIdComponent = (value: unknown): boolean =>
+const isIdComponent = (value: unknown): value is NodeId =>
   // The typeof guard mirrors `ids.ts`'s `validate()`: `RegExp.prototype.test`
   // coerces non-strings, so `ID_PATTERN.test(42)` would return true and a
   // bypassed brand smuggling a number would mint junk keys instead of
   // failing closed.
+  //
+  // The predicate narrows to `NodeId` because this check IS `NodeId`'s smart
+  // constructor rule — the very same `ID_PATTERN` `ids.ts` validates against.
+  // Returning a bare `boolean` computed that proof and then threw it away at
+  // the type level, forcing consumers to compare a branded `nodeId` against an
+  // unbranded parse result (see `checkpointer-codec.ts`'s nodeKey/entry
+  // agreement check). Brands erase at runtime, so this is a pure strengthening.
   typeof value === "string" && ID_PATTERN.test(value);
 
 /**
@@ -215,11 +222,16 @@ export const compositeNodeKey = (nodeId: NodeId, opts?: CompositeNodeKeyOpts): s
 
 /** Successful parse of a stored checkpoint nodeKey (see `parseCompositeNodeKey`). */
 export type ParsedCompositeNodeKey =
-  | { readonly form: "canonical"; readonly nodeId: string }
+  | { readonly form: "canonical"; readonly nodeId: NodeId }
   | {
       readonly form: "composite";
+      // A namespace is validated by the SAME `ID_PATTERN` rule as a nodeId but
+      // is deliberately NOT branded `NodeId`: it names a keyspace, not a node,
+      // and typing it `NodeId` would make a namespace silently assignable
+      // wherever a node id is expected. No consumer needs a distinct namespace
+      // brand today, so it stays a validated `string`.
       readonly namespace: string;
-      readonly nodeId: string;
+      readonly nodeId: NodeId;
       readonly index: number;
       readonly attempt: number;
     };

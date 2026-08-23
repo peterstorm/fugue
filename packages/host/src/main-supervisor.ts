@@ -49,7 +49,7 @@ import { createBunSpawnAdapter } from "./supervisor/lifecycle/bun-spawn-adapter.
 import { createWorkerRegistry } from "./supervisor/lifecycle/worker-registry-redis.js";
 import type { UdsLivenessProbe } from "./supervisor/lifecycle/worker-registry-redis.js";
 import { purgeTenantKeyspace } from "./supervisor/lifecycle/purge-keyspace.js";
-import { bunUdsTransport, buildProbeRequest } from "./supervisor/uds-proxy.js";
+import { makeBunUdsTransport, PROBE_UDS_TIMEOUT_MS, buildProbeRequest } from "./supervisor/uds-proxy.js";
 import type { AdminTenantsDeps } from "./http/handlers/admin/tenants.js";
 import {
   runGracePurgeSweep,
@@ -472,9 +472,14 @@ const main = async () => {
   // 404s and an unsigned probe is rejected 401, either of which would make every
   // live worker read as dead → SIGKILL → 503. Any non-2xx / transport failure →
   // not live (fail-closed).
+  // The probe carries its OWN short deadline (PROBE_UDS_TIMEOUT_MS), not the data
+  // path's: a worker that cannot answer `/health` promptly is, for routing
+  // purposes, indistinguishable from dead — and an unbounded probe would stall
+  // the liveness sweep itself on exactly the wedged worker it exists to detect.
+  const probeTransport = makeBunUdsTransport(PROBE_UDS_TIMEOUT_MS);
   const udsProbe: UdsLivenessProbe = async (record) => {
     const req = buildProbeRequest(config.FUGUE_SUPERVISOR_HMAC_KEY, record.tenant);
-    const r = await bunUdsTransport(record.udsPath, req);
+    const r = await probeTransport(record.udsPath, req);
     return r.ok && r.value.status >= 200 && r.value.status < 300;
   };
 

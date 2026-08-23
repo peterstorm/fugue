@@ -28,6 +28,7 @@
  * structure and `.ok`-checked, fail-closed Result handling.
  */
 
+import { base64url } from "../../domain/base64url.js";
 import { ok, err } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import { redisUnavailable } from "../../domain/host-error.js";
@@ -107,13 +108,6 @@ export type AclProvisionerDeps = {
 export const ACL_PASSWORD_RANDOM_BYTES = 32;
 
 // ── Password formatting (pure) ───────────────────────────────────────────────
-
-/** base64url (no padding) — same alphabet the team-token formatter uses. */
-const base64url = (bytes: Uint8Array): string => {
-  let bin = "";
-  for (const b of bytes) bin += String.fromCharCode(b);
-  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-};
 
 /**
  * Format raw random bytes into an ACL password. Pure; enforces full entropy so a

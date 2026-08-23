@@ -18,6 +18,8 @@ import { trace, SpanStatusCode } from "@opentelemetry/api";
 import type { Span, Tracer as OtelTracer } from "@opentelemetry/api";
 import type { CapabilityHandle } from "../types/capability-handle.js";
 import type { Capability } from "../types/node.js";
+import { fwLogger } from "../logger.js";
+import { safeErrorMessage } from "../types/safe-error.js";
 
 // ---------------------------------------------------------------------------
 // Semantic conventions for capability spans
@@ -34,11 +36,61 @@ const FUGUE_CAPABILITY_ERROR_KIND = "fugue.capability.error_kind";
 /**
  * Options for capability tracing.
  */
+/**
+ * Diagnostics are secondary to the modeled capability outcome. A broken logger
+ * must never replace the real result or the real error.
+ */
+const bestEffortLog = (message: string): void => {
+  try {
+    fwLogger().debug(message);
+  } catch {
+    // A broken logger must not replace the primary capability outcome.
+  }
+};
+
+/**
+ * Run a span mutation for its side effect only. A `Span` implementation may
+ * throw from `setAttribute`/`setStatus`/`recordException`/`end` (a double-end
+ * guard, a span processor that throws synchronously from `onEnd`, a test
+ * tracer). Telemetry is NOT part of the capability contract, so such a failure
+ * is logged and discarded — it must never turn a successful call into a
+ * rejection, nor replace a real capability error with a telemetry one.
+ *
+ * Mirrors `dag-runtime/node-span.ts`'s `bestEffortTelemetry`: the same
+ * isolation invariant, applied at the capability boundary.
+ */
+const bestEffortTelemetry = (operation: string, effect: () => void): void => {
+  try {
+    effect();
+  } catch (error) {
+    bestEffortLog(
+      `[withTracedCapability] ${operation} failed: ${safeErrorMessage(error)}`,
+    );
+  }
+};
+
+/** Tag an `{ ok: false }` Result onto the span. Shared by the async and sync paths. */
+const tagErrResult = (span: Span, value: unknown): void => {
+  if (!isErrResult(value)) return;
+  const errKind = (value as { error: { kind?: string } }).error?.kind ?? "unknown";
+  bestEffortTelemetry("err-result span tagging", () => {
+    span.setAttribute(FUGUE_CAPABILITY_ERROR_KIND, errKind);
+    span.setStatus({ code: SpanStatusCode.ERROR, message: errKind });
+  });
+};
+
+/**
+ * End the span for a thrown capability error and rethrow THE ORIGINAL error.
+ * Every span call is best-effort: a telemetry fault here must not mask the real
+ * cause the caller needs to see.
+ */
 const finalizeThrownSpan = (span: Span, error: unknown): never => {
-  const message = error instanceof Error ? error.message : String(error);
-  span.setStatus({ code: SpanStatusCode.ERROR, message });
-  span.recordException(error instanceof Error ? error : new Error(message));
-  span.end();
+  const message = safeErrorMessage(error);
+  bestEffortTelemetry("thrown-error span status", () => {
+    span.setStatus({ code: SpanStatusCode.ERROR, message });
+    span.recordException(error instanceof Error ? error : new Error(message));
+  });
+  bestEffortTelemetry("span.end", () => span.end());
   throw error;
 };
 
@@ -115,22 +167,28 @@ export const withTracedCapability = <K extends Capability>(
       return (...args: unknown[]) => {
         const spanName = `${capName}.${methodName}`;
         return otelTracer.startActiveSpan(spanName, (span) => {
-          span.setAttribute(FUGUE_CAPABILITY_NAME, capName);
-          span.setAttribute(FUGUE_CAPABILITY_METHOD, methodName);
+          bestEffortTelemetry("base attributes", () => {
+            span.setAttribute(FUGUE_CAPABILITY_NAME, capName);
+            span.setAttribute(FUGUE_CAPABILITY_METHOD, methodName);
+          });
 
           // Extract custom attributes if configured
           if (opts.extractAttributes) {
             try {
               const attrs = opts.extractAttributes(methodName, args);
-              for (const [k, v] of Object.entries(attrs)) {
-                span.setAttribute(k, v);
-              }
+              bestEffortTelemetry("custom attributes", () => {
+                for (const [k, v] of Object.entries(attrs)) {
+                  span.setAttribute(k, v);
+                }
+              });
             } catch (extractError) {
               // Best-effort — don't crash the actual call for attribute
               // extraction, but leave a trace of the failure on the span so
               // a buggy extractor is diagnosable.
-              span.addEvent("fugue.capability.attribute_extraction_failed", {
-                message: extractError instanceof Error ? extractError.message : String(extractError),
+              bestEffortTelemetry("attribute-extraction failure event", () => {
+                span.addEvent("fugue.capability.attribute_extraction_failed", {
+                  message: safeErrorMessage(extractError),
+                });
               });
             }
           }
@@ -142,13 +200,11 @@ export const withTracedCapability = <K extends Capability>(
             if (result && typeof result === "object" && "then" in result) {
               return (result as Promise<unknown>).then(
                 (resolved) => {
-                  // Check if it's a Result with ok: false
-                  if (isErrResult(resolved)) {
-                    const errKind = (resolved as { error: { kind?: string } }).error?.kind ?? "unknown";
-                    span.setAttribute(FUGUE_CAPABILITY_ERROR_KIND, errKind);
-                    span.setStatus({ code: SpanStatusCode.ERROR, message: errKind });
-                  }
-                  span.end();
+                  // The capability already succeeded here. Every span call below
+                  // is best-effort so a throwing tracer can never reject this
+                  // promise and discard `resolved`.
+                  tagErrResult(span, resolved);
+                  bestEffortTelemetry("span.end", () => span.end());
                   return resolved;
                 },
                 (error) => finalizeThrownSpan(span, error),
@@ -157,12 +213,8 @@ export const withTracedCapability = <K extends Capability>(
 
             // Synchronous return (unlikely for capabilities but handle
             // gracefully) — a sync `Result` Err still errors the span.
-            if (isErrResult(result)) {
-              const errKind = (result as { error: { kind?: string } }).error?.kind ?? "unknown";
-              span.setAttribute(FUGUE_CAPABILITY_ERROR_KIND, errKind);
-              span.setStatus({ code: SpanStatusCode.ERROR, message: errKind });
-            }
-            span.end();
+            tagErrResult(span, result);
+            bestEffortTelemetry("span.end", () => span.end());
             return result;
           } catch (error) {
             return finalizeThrownSpan(span, error);

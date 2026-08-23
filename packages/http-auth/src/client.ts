@@ -172,14 +172,26 @@ const serializeRequestBody = (body: unknown | undefined): Result<string | undefi
   }
 };
 
-const tokenProviderContractError = (): FrameworkError =>
-  makeNodeCrashError("Token provider failed outside its Result contract");
+/**
+ * A `TokenProvider` that throws has violated its Result contract. The caught
+ * value is DELIBERATELY discarded rather than rendered into the message: a
+ * provider mints credentials, so whatever it throws may carry one (a bearer in
+ * a wrapped upstream response, a client secret echoed by a misconfigured SDK).
+ * `client.test.ts` pins this — "normalizes a rejecting initial token lookup
+ * into a secret-free Result" asserts the returned message does NOT contain the
+ * provider's thrown text. The operation name is the one safe discriminator, so
+ * it is carried; the cause is not. Do not "improve" this by echoing the error.
+ */
+const tokenProviderContractError = (operation: string): FrameworkError =>
+  makeNodeCrashError(
+    `Token provider failed outside its Result contract during ${operation}`,
+  );
 
 const getToken = async (tokens: TokenProvider): ReturnType<TokenProvider["get"]> => {
   try {
     return await tokens.get();
   } catch {
-    return err(tokenProviderContractError());
+    return err(tokenProviderContractError("get"));
   }
 };
 
@@ -188,7 +200,7 @@ const invalidateToken = (tokens: TokenProvider): Result<void, FrameworkError> =>
     tokens.invalidate();
     return ok(undefined);
   } catch {
-    return err(tokenProviderContractError());
+    return err(tokenProviderContractError("invalidate"));
   }
 };
 

@@ -45,7 +45,7 @@ import type { Result, FrameworkError } from "@fuguejs/framework";
 import { err } from "@fuguejs/framework";
 import type { DownstreamScope } from "../domain/capability-scope.js";
 import type { HttpPost, HttpPostResponse } from "./fetch-http-post.js";
-import { parseOAuthTokenBody } from "./oauth-token-body.js";
+import { parseOAuthTokenBody, oauthErrorDescription } from "./oauth-token-body.js";
 
 /**
  * The reference `aud` value an Entra federated-credential `client_assertion` must
@@ -220,9 +220,7 @@ export const mapWifResponse = (
   // A settled authorization "no" — FIC mismatch / WIF rejection / resource denial
   // all collapse into one `downstream-denied` (FR-X-002).
   if (res.status === 400 || res.status === 401 || res.status === 403) {
-    const described = [res.json.error_description, res.json.error]
-      .find((value): value is string => typeof value === "string");
-    const reason = described ?? `Entra WIF denied (HTTP ${res.status})`;
+    const reason = oauthErrorDescription(res.json) ?? `Entra WIF denied (HTTP ${res.status})`;
     return err({ kind: "downstream-denied", resource: audience, reason });
   }
 

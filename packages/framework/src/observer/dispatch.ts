@@ -32,10 +32,9 @@ export function __clearStrictFailure(): void {
 }
 
 /**
- * Error-isolating dispatch wrapper. Calls `observer.observe(event)` and
- * catches any failure — production observers MUST be failure-tolerant (runs
- * continue). Under `OBSERVER_STRICT=1` the error is re-thrown after logging
- * so tests surface programming bugs in observer implementations.
+ * Log an observer failure via `fwLogger`, swallowing any failure of the
+ * diagnostic transport itself. Never calls `observer.observe` and never
+ * throws — observer isolation must survive a broken logger.
  */
 const logObserverFailureWithoutThrowing = (
   message: string,
@@ -86,6 +85,13 @@ export function attemptDispatchEvent(observer: Observer, event: ObserverEvent): 
   }
 }
 
+/**
+ * Error-isolating dispatch wrapper. Calls `observer.observe(event)` (via
+ * `attemptDispatchEvent`) and catches any failure — production observers MUST
+ * be failure-tolerant (runs continue). Under `OBSERVER_STRICT=1` the error is
+ * re-thrown after logging so tests surface programming bugs in observer
+ * implementations.
+ */
 export function dispatchEvent(observer: Observer, event: ObserverEvent): void {
   const attempt = attemptDispatchEvent(observer, event);
   if (attempt.kind === "delivered") return;

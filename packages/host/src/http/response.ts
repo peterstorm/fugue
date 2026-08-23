@@ -138,9 +138,8 @@ export const dagListResponse = (c: Context, dags: readonly DagListItem[]): Respo
 export const healthResponse = (
   c: Context,
   status: "ok" | "degraded" | "unavailable",
-  timestamp?: string,
 ): Response => {
-  const body: HealthResponse = { status, timestamp: timestamp ?? new Date().toISOString() };
+  const body: HealthResponse = { status, timestamp: new Date().toISOString() };
   const httpStatus = status === "unavailable" ? 503 : 200;
   return jsonWithStatus(c, body, httpStatus);
 };

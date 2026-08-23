@@ -91,11 +91,6 @@ type OnSyncNoChange = (sha: GitSha) => void;
 type OnSyncError = (error: HostError) => void;
 
 /**
- * Clock function — re-exported from ports for backward compatibility.
- */
-export type { Clock } from "../ports.js";
-
-/**
  * Handle returned from startSyncLoop to control the loop.
  */
 export interface SyncLoopHandle {

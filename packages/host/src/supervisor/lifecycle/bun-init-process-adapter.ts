@@ -30,6 +30,7 @@
  * non-reaping PID 1.
  */
 
+import { cleanEnvRecord } from "./spawn-port.js";
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import { readdirSync } from "node:fs";
 import type { LogPort } from "../../ports.js";
@@ -354,12 +355,7 @@ export const createBunInitProcessAdapter = (
   let terminating = false;
   let currentPid: number | undefined;
 
-  const buildEnv = (): Record<string, string> => {
-    const src = cfg.env ?? process.env;
-    const out: Record<string, string> = {};
-    for (const [k, v] of Object.entries(src)) if (v !== undefined) out[k] = v;
-    return out;
-  };
+  const buildEnv = (): Record<string, string> => cleanEnvRecord(cfg.env ?? process.env);
 
   return {
     spawnSupervisor: () => {

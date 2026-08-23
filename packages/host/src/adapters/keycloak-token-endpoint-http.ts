@@ -52,7 +52,7 @@ import type {
   ExchangeV2Request,
 } from "./keycloak-token-endpoint.js";
 import type { KeycloakClientCredential, AgentClientCredentials } from "./agent-client-credentials.js";
-import { parseOAuthTokenBody } from "./oauth-token-body.js";
+import { parseOAuthTokenBody, oauthErrorDescription } from "./oauth-token-body.js";
 
 /**
  * The OAuth 2.0 Token Exchange grant URN (RFC 8693). Fixed and structural — the
@@ -204,9 +204,7 @@ export const mapKeycloakTokenResponse = (
   // A settled authorization "no" — bad credential / scope or audience not
   // permitted for this client. A denial is an answer, not an outage.
   if (res.status === 400 || res.status === 401 || res.status === 403) {
-    const described = [res.json.error_description, res.json.error]
-      .find((value): value is string => typeof value === "string");
-    const reason = described ?? `Keycloak token endpoint denied (HTTP ${res.status})`;
+    const reason = oauthErrorDescription(res.json) ?? `Keycloak token endpoint denied (HTTP ${res.status})`;
     return err({ kind: "downstream-denied", resource: audience, reason });
   }
 

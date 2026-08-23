@@ -9,6 +9,17 @@ const defaultClassifyError = (error: unknown): { retriable: boolean; message: st
 });
 
 /**
+ * The event's `type` discriminant, or a fixed placeholder for an event that has
+ * none. ONE encoding: both the fallback checkpoint key and the retry dedup slot
+ * are derived from it, and a divergence between them would silently change
+ * which events collapse onto the same slot.
+ */
+const eventTypeOf = (event: unknown): string =>
+  typeof (event as { type?: unknown })?.type === "string"
+    ? (event as { type: string }).type
+    : "<event>";
+
+/**
  * Fallback dedup key when no `computeDedupKey` is injected via opts.
  * Uses string concatenation (no crypto) so the kernel stays runtime-agnostic.
  * Callers wanting collision-resistant keys (e.g., the DAG runtime) inject a
@@ -18,13 +29,7 @@ const fallbackDedupKey = (
   prevStateKey: string,
   attemptNumber: number,
   event: unknown,
-): string => {
-  const eventType =
-    typeof (event as { type?: unknown })?.type === "string"
-      ? (event as { type: string }).type
-      : "<event>";
-  return `${prevStateKey}|${attemptNumber}|${eventType}`;
-};
+): string => `${prevStateKey}|${attemptNumber}|${eventTypeOf(event)}`;
 
 /**
  * Drive a machine to terminal state, checkpointing after every successful
@@ -124,11 +129,7 @@ export const runStateMachine = async <S, E, C>(
     // running → retrying in the DAG machine) produce distinct dedup keys.
     // Keying by stateKey alone collapses cross-cycle retries onto a single
     // dedup slot and suppresses the second node-failed event in the audit log.
-    const eventType =
-      typeof (event as { type?: unknown })?.type === "string"
-        ? (event as { type: string }).type
-        : "<event>";
-    const dedupSlot = `${prevStateKey}::${eventType}`;
+    const dedupSlot = `${prevStateKey}::${eventTypeOf(event)}`;
     if (isRetry) {
       retryCounters.set(dedupSlot, (retryCounters.get(dedupSlot) ?? 0) + 1);
     }

@@ -49,6 +49,7 @@
  */
 
 import { z } from "zod";
+import { encodePathSegments } from "./path-encoding.js";
 import { match } from "ts-pattern";
 import type { Result, FrameworkError, CapabilityHandle } from "@fuguejs/framework";
 import { ok, err, nodeId, frameworkError, safeErrorMessage } from "@fuguejs/framework";
@@ -167,12 +168,7 @@ const buildSignal = (opts: ReadOpts | undefined, timeoutMs: number): AbortSignal
 };
 
 /** Percent-encode each path segment while preserving `/` separators. */
-const encodePath = (p: string): string =>
-  p
-    .split("/")
-    .filter((seg) => seg.length > 0)
-    .map(encodeURIComponent)
-    .join("/");
+const encodePath = encodePathSegments;
 
 /**
  * Encode a sharing URL into a Graph share token (`u!{base64url}`), per the

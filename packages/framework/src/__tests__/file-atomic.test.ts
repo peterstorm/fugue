@@ -49,7 +49,15 @@ import {
   stealStaleFileLock,
   withFileLock,
 } from "../file/atomic.js";
+import type { LockOwnershipToken } from "../file/atomic.js";
 import { setFrameworkLogger, __resetFrameworkLogger } from "../logger.js";
+
+// Ownership tokens are branded so a `releaseFileLock(path, token)` argument swap
+// is a compile error. These tests deliberately pass raw strings — real tokens read
+// back off disk, and intentionally WRONG tokens — so they opt out explicitly here
+// rather than weakening the production signature.
+const T = (raw: string): LockOwnershipToken => raw as LockOwnershipToken;
+
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -355,7 +363,7 @@ describe("withFileLock — mutual exclusion", () => {
     expect(existsSync(lockPath)).toBe(true);
 
     const token = readFileSync(join(lockPath, "owner"), "utf-8");
-    releaseFileLock(lockPath, token);
+    releaseFileLock(lockPath, T(token));
     expect(existsSync(lockPath)).toBe(false);
   });
 
@@ -461,7 +469,7 @@ describe("withFileLock — stale steal and ownership", () => {
     const lockPath = join(dir, "append.lock");
     const ownershipToken = await acquireFileLock(lockPath);
 
-    releaseFileLock(lockPath, "wrong-same-process-token");
+    releaseFileLock(lockPath, T("wrong-same-process-token"));
     expect(existsSync(lockPath)).toBe(true);
 
     releaseFileLock(lockPath, ownershipToken);
@@ -863,7 +871,7 @@ describe("withFileLock — stale steal and ownership", () => {
       writeFileSync(join(lockPath, "owner"), "foreign-token"); // proves token mismatch
       chmodSync(lockPath, 0o500);
 
-      releaseFileLock(lockPath, "not-the-foreign-owner");
+      releaseFileLock(lockPath, T("not-the-foreign-owner"));
 
       // The ownership check short-circuits before any rmSync: the foreign
       // holder's lock is untouched AND no warning fires (not our problem).
@@ -1095,13 +1103,13 @@ describe("file-lock diagnostics", () => {
     const dir = tempDir();
     const absentLock = join(dir, "absent.lock");
 
-    releaseFileLock(absentLock, "already-released");
+    releaseFileLock(absentLock, T("already-released"));
     expect(warnings).toEqual([]);
 
     const tornLock = join(dir, "torn.lock");
     mkdirSync(tornLock);
     writeFileSync(join(tornLock, "owner"), "token-without-pid");
-    expect(() => releaseFileLock(tornLock, "token-without-pid")).toThrow();
+    expect(() => releaseFileLock(tornLock, T("token-without-pid"))).toThrow();
 
     expect(existsSync(tornLock)).toBe(true);
     expect(warnings).toHaveLength(1);
@@ -1135,7 +1143,7 @@ describe("file-lock diagnostics", () => {
     expect(existsSync(lockPath)).toBe(true);
 
     const token = readFileSync(join(lockPath, "owner"), "utf-8");
-    releaseFileLock(lockPath, token);
+    releaseFileLock(lockPath, T(token));
   });
 
   test("throwing logger and hostile errno diagnostics cannot break exclusion or mask the primary operation", async () => {

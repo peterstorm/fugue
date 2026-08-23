@@ -28,11 +28,10 @@ import {
   createNamespacedCache,
   createNamespacedCheckpointWriter,
   createNodeContextForDag,
-  invocationOriginForIdentity,
   buildCacheKey,
   buildCheckpointKey,
 } from "../adapters/node-context-factory.js";
-import { subjectTokenForIdentity } from "../domain/run-context.js";
+import { subjectTokenForIdentity, invocationOriginForIdentity } from "../domain/run-context.js";
 import { markSubjectToken, type AuthIdentity, type SubjectToken } from "../domain/auth.js";
 import { tenantId } from "../domain/tenant.js";
 import type { TenantId } from "../domain/tenant.js";

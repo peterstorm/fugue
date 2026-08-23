@@ -41,5 +41,23 @@ export const parseFileFactoryClock = (
   if (configuredNow !== undefined && typeof configuredNow !== "function") {
     throw new Error(`options.now must be a function, got ${safeDiagnosticRender(configuredNow)}`);
   }
-  return configuredNow === undefined ? Date.now : configuredNow as () => number;
+  if (configuredNow === undefined) return Date.now;
+  // FR-040 total-guard convention: validating that a caller-supplied callback is
+  // CALLABLE proves nothing about what it returns. An unchecked
+  // `now: () => "not-a-number"` (or one that drifts to NaN/Infinity) passes the
+  // typeof gate and then contaminates every `recordedAtMs` this factory stamps,
+  // which is exactly the field resume/freshness ordering is decided on. Guard the
+  // return the same way `resume-proof.ts`'s `guardedStateKey` guards its own
+  // callback: check on every call, since a clock may be well-behaved once and not
+  // thereafter, and fail closed at the call rather than write a poisoned record.
+  const supplied = configuredNow as () => unknown;
+  return (): number => {
+    const value = supplied();
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      throw new Error(
+        `options.now must return a finite number, got ${safeDiagnosticRender(value)}`,
+      );
+    }
+    return value;
+  };
 };

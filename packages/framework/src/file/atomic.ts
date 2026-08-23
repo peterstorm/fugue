@@ -55,9 +55,24 @@ import {
 } from "./boundary-error.js";
 import { isFrameworkError } from "../types/errors.js";
 
+/**
+ * Proof that a string is a lock-ownership token minted by `uniqueToken`, not an
+ * arbitrary string that happens to be one.
+ *
+ * `releaseFileLock(lockPath, ownershipToken)` takes two adjacent `string`
+ * parameters drawn from different domains — the classic argument-swap shape
+ * `typescript-patterns.md` calls out by name — and `withFileLock` threads both
+ * through matching-shaped calls, so the swap is reachable, not hypothetical.
+ * A swapped call would look up ownership under a token-shaped path and compare
+ * it against a path-shaped token: both reads fail, the lock is never released,
+ * and the next contender waits out the full acquire budget before a typed
+ * timeout. Branding makes that a compile error instead.
+ */
+export type LockOwnershipToken = string & { readonly __brand: "LockOwnershipToken" };
+
 let tokenCounter = 0;
-const uniqueToken = (): string =>
-  `${process.pid}-${Date.now()}-${tokenCounter++}-${Math.random().toString(36).slice(2)}`;
+const uniqueToken = (): LockOwnershipToken =>
+  `${process.pid}-${Date.now()}-${tokenCounter++}-${Math.random().toString(36).slice(2)}` as LockOwnershipToken;
 
 /** Test-only deterministic temp-path hook; production calls always mint a unique path. */
 export interface AtomicWriteFileTestHooks {
@@ -411,7 +426,7 @@ export const stealStaleFileLock = async (
 export const acquireFileLock = async (
   lockPath: string,
   hooks: FileLockTestHooks = {},
-): Promise<string> => {
+): Promise<LockOwnershipToken> => {
   try {
     const ownershipToken = uniqueToken();
     let staleHookRan = false;
@@ -541,7 +556,7 @@ const readReleaseMetadata = (
  */
 export const releaseFileLock = (
   lockPath: string,
-  ownershipToken: string,
+  ownershipToken: LockOwnershipToken,
   hooks: FileLockTestHooks = {},
 ): void => {
   const pid = readReleaseMetadata(

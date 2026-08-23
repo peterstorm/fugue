@@ -191,9 +191,14 @@ describe("worker-registry: corrupt-record observability", () => {
     // The corrupt record SURVIVES the failed prune — reconcile prunes it later.
     expect(fake.store.has(`${WORKER_KEY_PREFIX}acme`)).toBe(true);
     // Both facts are surfaced: the corrupt read AND the prune that could not run.
+    // The prune failure is ONE line whichever way it failed (result-level `!ok`
+    // here, a throw on the other path), with the manner in `reason` — so a
+    // single fault can never read as two in an operator's log.
     const warns = logs.filter((l) => l.level === "warn");
     expect(warns.some((l) => l.msg.includes("corrupt worker record"))).toBe(true);
-    expect(warns.some((l) => l.msg.includes("prune reported unavailable"))).toBe(true);
+    const pruneWarns = warns.filter((l) => l.msg.includes("corrupt-record prune failed"));
+    expect(pruneWarns).toHaveLength(1);
+    expect((pruneWarns[0]!.data as { reason?: string }).reason).toBe("reported unavailable");
   });
 });
 

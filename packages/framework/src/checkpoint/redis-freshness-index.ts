@@ -36,6 +36,7 @@ import type { FrameworkError } from "../types/errors.js";
 import { ok, err } from "../types/result.js";
 import { __brandRunId, __brandNodeId } from "../types/ids.js";
 import { fwLogger } from "../logger.js";
+import { safeErrorMessage } from "../types/safe-error.js";
 
 const KEY_PREFIX = "fugue:freshness:";
 
@@ -77,8 +78,15 @@ const decodeMember = (
       witnessValue: parsed[3],
     };
   } catch (e) {
+    // This catch spans BOTH `JSON.parse` and the `__brandRunId`/`__brandNodeId`
+    // smart constructors below it, which throw on a grammar-invalid id. Naming
+    // it unconditionally "JSON parse failed" sent whoever was debugging a
+    // corrupt freshness entry after the wrong root cause. Report what actually
+    // failed instead; either way the entry is dropped and the read fails closed.
     fwLogger().warn(
-      `[RedisFreshnessIndex] decodeMember: JSON parse failed: ${e instanceof Error ? e.message : e}`,
+      `[RedisFreshnessIndex] decodeMember: ${
+        e instanceof SyntaxError ? "JSON parse failed" : "entry rejected"
+      }: ${safeErrorMessage(e)}: ${member.slice(0, 100)}`,
     );
     return null;
   }
@@ -175,7 +183,7 @@ export class RedisFreshnessIndex implements FreshnessIndex {
       return err({
         kind: "cache-error",
         operation: "freshness:recordWrite",
-        message: `resource '${event.newWitness.resource}': ${e instanceof Error ? e.message : String(e)}`,
+        message: `resource '${event.newWitness.resource}': ${safeErrorMessage(e)}`,
       });
     }
   }
@@ -246,7 +254,7 @@ export class RedisFreshnessIndex implements FreshnessIndex {
       return err({
         kind: "cache-error",
         operation: "freshness:findConflict",
-        message: `resource '${resource}': ${e instanceof Error ? e.message : String(e)}`,
+        message: `resource '${resource}': ${safeErrorMessage(e)}`,
       });
     }
   }

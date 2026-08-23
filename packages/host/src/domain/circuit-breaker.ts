@@ -153,11 +153,7 @@ export const attemptReset = (
  *
  * @param now - Current timestamp for the new window start (defaults to 0)
  */
-export const forceReset = (now: number = 0): CircuitState => ({
-  state: "closed",
-  failureCount: 0,
-  windowStart: now,
-});
+export const forceReset = (now: number = 0): CircuitState => initCircuit(now);
 
 // ---------------------------------------------------------------------------
 // Queries (pure)

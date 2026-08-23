@@ -412,6 +412,74 @@ describe("runDagStateful — HITL approve-with-edit", () => {
     }
   });
 
+  // ADR-0060 fail-closed post-commit hook, END TO END.
+  //
+  // `runStateMachine` rethrows an `onCommitted` failure AFTER the checkpoint is
+  // durable, so the owning shell fails the run closed rather than reporting
+  // success for a run whose effectively-once side effect never happened. That
+  // rethrow was only ever exercised against the hook factory in isolation; these
+  // cases drive it through the real `runDagStateful` composition, which is the
+  // path production actually takes (`run-dag-stateful.ts` translates the generic
+  // `onCommitted` into `onDecisionConsumed`).
+  it("a throwing onDecisionConsumed fails the run closed rather than reporting success", async () => {
+    const dag = makeDag({
+      nodes: [
+        makeNode("a", {
+          humanReview: { prompt: "Approve?" },
+          run: async () => ok("original"),
+        }),
+      ],
+      edges: [{ from: DAG_INPUT, to: "a" }],
+      outputNodeId: "a",
+      defaultRetryLimit: 0,
+    });
+
+    const onHumanReview = async (_req: unknown): Promise<HumanAction> => ({ kind: "approve" });
+    let consumed = 0;
+    const onDecisionConsumed = async (): Promise<void> => {
+      consumed += 1;
+      throw new Error("decision store unreachable");
+    };
+
+    const result = await runDagStateful(dag, null, makeCtx(), {
+      onHumanReview,
+      onDecisionConsumed,
+    });
+
+    // The hook DID fire (the decision was committed first) …
+    expect(consumed).toBe(1);
+    // … and its failure is authoritative: the run must NOT report success.
+    expect(result.ok).toBe(false);
+  });
+
+  it("a succeeding onDecisionConsumed leaves the approved run successful", async () => {
+    const dag = makeDag({
+      nodes: [
+        makeNode("a", {
+          humanReview: { prompt: "Approve?" },
+          run: async () => ok("original"),
+        }),
+      ],
+      edges: [{ from: DAG_INPUT, to: "a" }],
+      outputNodeId: "a",
+      defaultRetryLimit: 0,
+    });
+
+    const onHumanReview = async (_req: unknown): Promise<HumanAction> => ({ kind: "approve" });
+    const consumedNodes: string[] = [];
+
+    const result = await runDagStateful<unknown, string>(dag, null, makeCtx(), {
+      onHumanReview,
+      onDecisionConsumed: (nodeId) => { consumedNodes.push(nodeId as string); },
+    });
+
+    // Pins the CONTRACT the failing twin depends on: the hook fires exactly once,
+    // named for the resolved gate, and a clean hook does not disturb the outcome.
+    expect(consumedNodes).toEqual(["a"]);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value).toBe("original");
+  });
+
   // Wave 2 §2.5: a reviewer's edited output must conform to the node's
   // outputSchema. Without this guard, a mis-typed edit silently propagates to
   // downstream nodes.

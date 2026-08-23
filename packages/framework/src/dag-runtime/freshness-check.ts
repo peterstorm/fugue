@@ -207,10 +207,14 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
    * Check if a conditioned-on witness has been superseded by a more recent
    * write. Returns the conflicting write entry, or `null`.
    *
-   * Fast path (sinceMs === 0): O(1) check against the latest write per resource.
-   * Slow path (sinceMs > 0): O(1) check against the last entry — `recordWrite`
-   * keeps entries monotonically ordered by `succeededAtMs`, so the latest is
-   * always the last element even when callbacks arrive out of order.
+   * Both branches are O(1); the split is by QUESTION asked, not by cost.
+   *   - `sinceMs === 0` — "any write ever": read the per-resource latest directly.
+   *   - `sinceMs > 0`  — "any write since T": read the last entry, which
+   *     `recordWrite` keeps monotonically ordered by `succeededAtMs`, so the
+   *     latest is always the last element even when callbacks arrive out of
+   *     order, and one comparison settles it.
+   * (The second branch was historically labelled a "slow path"; it is a scan no
+   * longer, and the name outlived the implementation.)
    */
   async findConflict(
     conditionedOn: import("../types/freshness.js").Witness,

@@ -258,19 +258,32 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     }
   };
 
-  /** Persist a record derived from a live/draining pure state (best-effort fail-closed). */
-  const persistRecord = async (state: WorkerState): Promise<void> => {
+  /**
+   * Persist a record derived from a live/draining pure state.
+   *
+   * Returns the write outcome instead of swallowing it: the registry record is
+   * the ONLY channel through which a restarted supervisor can rediscover a
+   * worker. `reconcileReadopt` rebuilds the in-memory map exclusively from
+   * `registry.reconcileReadopt()` — there is no independent scan of live pids or
+   * bound sockets — so a record that never lands makes its worker invisible to
+   * BOTH readoption and `evict` while it stays alive and bound to the tenant's
+   * UDS, still holding that tenant's credentials. The two call sites have
+   * genuinely different obligations here, so the decision belongs to them, not
+   * to a `warn` inside this helper.
+   *
+   * A phase with no durable record (anything but live/draining) is a no-op success.
+   */
+  const persistRecord = async (state: WorkerState): Promise<Result<void, HostError>> => {
     let record: WorkerRecord | undefined;
     if (state.phase === "live") {
       record = { tenant: state.tenant, pid: state.pid, udsPath: state.udsPath, startedAt: state.startedAt, health: "live", eagerPin: state.eagerPin };
     } else if (state.phase === "draining") {
       record = { tenant: state.tenant, pid: state.pid, udsPath: state.udsPath, startedAt: state.drainStartedAt, health: "draining", eagerPin: state.eagerPin };
     }
-    if (record === undefined) return;
+    if (record === undefined) return ok(undefined);
     const r = await registry.put(record);
-    if (!r.ok) {
-      logger.warn("[worker-lifecycle] registry put failed (continuing — routing uses in-memory state)", { tenant: state.tenant });
-    }
+    if (!r.ok) return err(r.error);
+    return ok(undefined);
   };
 
   /** Remove a tenant's registry record (best-effort). */
@@ -431,7 +444,24 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
       return err(workerUnavailable(tenant));
     }
     workers.set(tenant, liveResult.value);
-    await persistRecord(liveResult.value);
+    // FAIL CLOSED: a live worker with no durable registry record is a permanent
+    // split-brain — a supervisor restart could neither readopt nor evict it,
+    // while it keeps holding the tenant's UDS and credentials. Since the record
+    // is unwritable, the only state we can still guarantee is "no worker": tear
+    // this incarnation down and surface worker-unavailable, so the next request
+    // retries a clean spawn instead of routing to an unrecoverable orphan.
+    const persisted = await persistRecord(liveResult.value);
+    if (!persisted.ok) {
+      logger.error(
+        "[worker-lifecycle] registry put failed for a live worker — killing it rather than leaving an unreadoptable orphan",
+        { tenant, pid: handle.pid, error: formatHostError(persisted.error) },
+      );
+      workers.delete(tenant);
+      // The entry is gone, so a failed kill leaks a process still bound to the
+      // UDS while the slot reads as reclaimed — orphan-risk (error).
+      await signalWorker(tenant, handle.pid, "SIGKILL", true);
+      return err(workerUnavailable(tenant));
+    }
 
     // EXIT WATCHER (multi-tenant spec FR-014/FR-015/FR-017/AD-8): `handle.exited` is the ONLY exit
     // signal for a worker THIS process spawned. When it resolves, react ONLY if the
@@ -605,7 +635,19 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     }
     const next = draining.value;
     workers.set(tenant, next);
-    await persistRecord(next);
+    // Best-effort by design, unlike the spawn path: the draining record is
+    // TRANSITIONAL. The worker has already been SIGTERM'd, and its exit drives
+    // `drainComplete` → `removeRecord`. A failed write leaves the prior `live`
+    // record behind; a restart re-adopts it as live and the liveness probe
+    // prunes it once the worker is gone. Killing the worker here to force
+    // consistency would discard the in-flight work `drain` exists to preserve.
+    const persistedDrain = await persistRecord(next);
+    if (!persistedDrain.ok) {
+      logger.warn(
+        "[worker-lifecycle] registry put failed for a draining worker (continuing — the drain exit path removes the record)",
+        { tenant, error: formatHostError(persistedDrain.error) },
+      );
+    }
     // Signal the worker to stop accepting new work (SIGTERM). In-flight work
     // finishes; the crash/exit path drives the terminal transition.
     await signalWorker(tenant, next.pid, "SIGTERM", false);

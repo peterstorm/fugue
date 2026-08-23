@@ -22,8 +22,6 @@ import type { GitPort, ModuleLoaderPort, RedisConnectivityPort } from "../ports.
 import { initialSync } from "../sync/sync-loop.js";
 import type { SyncConfig, SyncLogger } from "../sync/sync-loop.js";
 
-// Re-export for backwards compatibility
-export type { RedisConnectivityPort } from "../ports.js";
 
 /**
  * The boot result — everything needed to wire the host together.

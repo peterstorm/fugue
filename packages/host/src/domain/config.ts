@@ -727,18 +727,43 @@ export const HostConfigSchema = z.object({
       message: "MSGRAPH_TENANT_ID, MSGRAPH_CLIENT_ID, and MSGRAPH_CLIENT_SECRET required when DOCUMENTS_ADAPTER is 'ms-graph'",
     });
   }
-  for (const [field, value, secretDescription] of [
-    ["MSGRAPH_BASE_URL", c.MSGRAPH_BASE_URL, "bearer access token"],
-    ["MSGRAPH_TOKEN_URL", c.MSGRAPH_TOKEN_URL, "MS Graph client secret"],
+  // EVERY secret-bearing endpoint is classified by the SINGLE canonical
+  // `credentialEndpointIssue`, so the two checks it encodes — non-HTTPS and
+  // embedded URL credentials — can never drift apart per field. Each entry
+  // carries only its own bespoke not-https diagnostic (what secret this
+  // endpoint receives); the embedded-credentials diagnostic is uniform.
+  // Splitting this table would reintroduce the gap where a field was guarded
+  // by a hand-rolled `startsWith("https://")` that silently accepted
+  // `https://user:secret@host` — all of these parse as `z.string().url()`, so
+  // such a value reaches the endpoint (and its logs) intact.
+  for (const [field, value, notHttpsMessage] of [
+    ["MSGRAPH_BASE_URL", c.MSGRAPH_BASE_URL,
+      "must be an https:// URL (the bearer access token is sent to this endpoint)"],
+    ["MSGRAPH_TOKEN_URL", c.MSGRAPH_TOKEN_URL,
+      "must be an https:// URL (the MS Graph client secret is sent to this endpoint)"],
+    // The operator password and the optional client-id/secret HTTP Basic header
+    // are POSTed here; an http:// token URL would leak them in cleartext.
+    ["CDRATOR_AUTH_URL", c.CDRATOR_AUTH_URL,
+      "must be an https:// URL (the operator password is POSTed to this endpoint)"],
+    // The minted bearer token is sent as `Authorization: Bearer` to this core
+    // API base URL on EVERY request.
+    ["CDRATOR_URL", c.CDRATOR_URL,
+      "must be an https:// URL (the minted bearer token is sent here on every request)"],
+    // The review card embeds the output-under-review and an approval deep-link.
+    ["TEAMS_WEBHOOK_URL", c.TEAMS_WEBHOOK_URL,
+      "must be an https:// URL (HITL review content must not be sent over cleartext http)"],
+    // The bot app password is POSTed to the token endpoint.
+    ["BOT_TOKEN_URL", c.BOT_TOKEN_URL,
+      "must be an https:// URL (the bot app password is sent to this endpoint)"],
+    // The agent client secret is POSTed to the Keycloak token endpoint
+    // (client-credentials mint + RFC 8693 exchange).
+    ["KEYCLOAK_TOKEN_URL", c.KEYCLOAK_TOKEN_URL,
+      "must be an https:// URL (the agent client secret is sent to this endpoint)"],
   ] as const) {
     if (value === undefined) continue;
     const issue = credentialEndpointIssue(value);
     if (issue === "not-https") {
-      ctx.addIssue({
-        code: "custom",
-        path: [field],
-        message: `must be an https:// URL (the ${secretDescription} is sent to this endpoint)`,
-      });
+      ctx.addIssue({ code: "custom", path: [field], message: notHttpsMessage });
     } else if (issue === "embedded-credentials") {
       ctx.addIssue({
         code: "custom",
@@ -809,16 +834,6 @@ export const HostConfigSchema = z.object({
       message: "ORACLE_POOL_MIN must not exceed ORACLE_POOL_MAX",
     });
   }
-  // The operator password and the optional client-id/secret HTTP Basic header are
-  // POSTed to the token endpoint; an http:// token URL would leak them in cleartext.
-  if (c.CDRATOR_AUTH_URL !== undefined && !c.CDRATOR_AUTH_URL.startsWith("https://")) {
-    ctx.addIssue({ code: "custom", path: ["CDRATOR_AUTH_URL"], message: "must be an https:// URL (the operator password is POSTed to this endpoint)" });
-  }
-  // The minted bearer token is sent as `Authorization: Bearer` to this core API base
-  // URL on EVERY request; an http:// core URL would transmit the token in cleartext.
-  if (c.CDRATOR_URL !== undefined && !c.CDRATOR_URL.startsWith("https://")) {
-    ctx.addIssue({ code: "custom", path: ["CDRATOR_URL"], message: "must be an https:// URL (the minted bearer token is sent here on every request)" });
-  }
   // Client id and secret are an inseparable pair: HTTP Basic on the token request
   // needs BOTH. One without the other is an internally-inconsistent config that
   // would silently half-build the Basic header. Reject the mismatch at boot.
@@ -829,26 +844,11 @@ export const HostConfigSchema = z.object({
       message: "CDRATOR_CLIENT_ID and CDRATOR_CLIENT_SECRET must be set together (HTTP Basic on the token request needs both)",
     });
   }
-  // The review card embeds the output-under-review and an approval deep-link;
-  // posting it over http would exfiltrate that in cleartext. Fail boot loudly
-  // rather than send HITL review content unencrypted.
-  if (c.TEAMS_WEBHOOK_URL !== undefined && !c.TEAMS_WEBHOOK_URL.startsWith("https://")) {
-    ctx.addIssue({ code: "custom", path: ["TEAMS_WEBHOOK_URL"], message: "must be an https:// URL (HITL review content must not be sent over cleartext http)" });
-  }
   // The in-Teams (Bot Framework) transport needs both the app id AND the app
   // password to mint a connector token. Enforce the pair at boot rather than
   // failing on the first review when the connector tries to authenticate.
   if (c.BOT_APP_ID !== undefined && !c.BOT_APP_PASSWORD) {
     ctx.addIssue({ code: "custom", path: ["BOT_APP_PASSWORD"], message: "Required when BOT_APP_ID is set" });
-  }
-  // The app password is POSTed to the token endpoint; an http override leaks it.
-  if (c.BOT_TOKEN_URL !== undefined && !c.BOT_TOKEN_URL.startsWith("https://")) {
-    ctx.addIssue({ code: "custom", path: ["BOT_TOKEN_URL"], message: "must be an https:// URL (the bot app password is sent to this endpoint)" });
-  }
-  // The agent client secret is POSTed to the Keycloak token endpoint (client-
-  // credentials mint + RFC 8693 exchange); an http override leaks it in cleartext.
-  if (c.KEYCLOAK_TOKEN_URL !== undefined && !c.KEYCLOAK_TOKEN_URL.startsWith("https://")) {
-    ctx.addIssue({ code: "custom", path: ["KEYCLOAK_TOKEN_URL"], message: "must be an https:// URL (the agent client secret is sent to this endpoint)" });
   }
   // NFR-014 (derived token URL): when KEYCLOAK_TOKEN_URL is UNSET the live
   // Keycloak endpoint DERIVES its URL from REALM_JWT_ISSUER

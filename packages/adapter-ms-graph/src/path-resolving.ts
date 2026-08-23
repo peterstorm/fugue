@@ -48,6 +48,7 @@
  */
 
 import type { CapabilityHandle, FrameworkError, Result } from "@fuguejs/framework";
+import { encodePathSegments } from "./path-encoding.js";
 import { err, frameworkError, nodeId, ok, safeErrorMessage } from "@fuguejs/framework";
 import type { DocumentSource, FileRef, ReadOpts } from "@fuguejs/document-source";
 import {
@@ -106,12 +107,7 @@ export interface PathResolvingMsGraphHandle extends CapabilityHandle<"documents"
 const enc = encodeURIComponent;
 
 /** Per-segment encoding — the `/` separators of a site path must stay literal. */
-const encSegments = (p: string): string =>
-  p
-    .split("/")
-    .filter((seg) => seg.length > 0)
-    .map(encodeURIComponent)
-    .join("/");
+const encSegments = encodePathSegments;
 
 const normPath = (p: string): string => p.replace(/\/+/g, "/").replace(/^\/+|\/+$/g, "");
 

@@ -68,7 +68,17 @@ const fileJobBrand: unique symbol = Symbol("@fuguejs/framework/file-job");
 
 /** File-backed adapter remains substitutable anywhere the kernel accepts `JobLike`. */
 export interface FileJob<S, E = unknown, C = unknown> extends JobLike<S, E, C> {
-  /** Nominal proof consumed by `readFileJobSnapshot`; not part of `JobLike`. */
+  /**
+   * COMPILE-TIME nominal marker; not part of `JobLike` and NOT verified at
+   * runtime. It exists so a structurally-identical `JobLike` cannot be passed
+   * where a `FileJob` is required — `readFileJobSnapshot` never reads it, and
+   * there is no `WeakSet`/`isFileJob` guard behind it, unlike the unforgeable
+   * `FileCheckpointCommit` in `checkpoint-record.ts`. That is proportionate
+   * here: the blast radius is in-package, whereas the commit capability crosses
+   * a port where an external caller could forge one. Calling this a "proof
+   * consumed by readFileJobSnapshot" overclaimed a runtime check that has never
+   * existed; if a real proof is ever needed, back it with a WeakSet guard.
+   */
   readonly [fileJobBrand]: true;
 }
 

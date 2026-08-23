@@ -62,8 +62,9 @@ const applySignedTenantHeader = (headers: Headers, hmacKey: string | undefined, 
 // ── Transport seam (injected — keeps the proxy testable without a real UDS) ──
 
 /**
- * The HTTP-over-UDS transport. The production adapter is `bunUdsTransport`
- * (Bun's `fetch(url, { unix })`); tests inject a fake that points at a real
+ * The HTTP-over-UDS transport. The production adapter is built by
+ * `makeBunUdsTransport(timeoutMs)` (Bun's `fetch(url, { unix })` under a bounded
+ * `AbortSignal`); tests inject a fake that points at a real
  * in-process server on a temp socket, or that simulates a connect failure. The
  * seam returns a `Result` so a connect/transport failure is an explicit value,
  * never a thrown error the shell has to catch ad hoc.
@@ -74,32 +75,70 @@ export type UdsTransport = (
 ) => Promise<Result<Response, { readonly reason: string }>>;
 
 /**
- * Production HTTP-over-UDS transport using Bun's `fetch(url, { unix })`. The URL
- * host is irrelevant (the connection is the socket), so a fixed sentinel host is
- * used; the path/query/method/headers/body all come from the forwarded request.
- * A connect/transport error is caught and returned as a typed transport failure
- * (the proxy maps it to `worker-unavailable`).
+ * Headroom added to the worker's own maximum run budget to derive the data-path
+ * proxy deadline. The supervisor must outlive the longest run a worker may
+ * legitimately execute (`MAX_DAG_TIMEOUT_MS`) plus connect/stream overhead —
+ * any longer and the wait is a stall, not work in progress. Derived rather than
+ * configured so the two bounds can never be set inconsistently.
  */
-export const bunUdsTransport: UdsTransport = async (socketPath, request) => {
-  try {
-    const url = new URL(request.url);
-    // Preserve path + query; the authority is the socket, not a TCP host.
-    const target = `http://uds.fugue.internal${url.pathname}${url.search}`;
-    const res = await fetch(target, {
-      method: request.method,
-      headers: request.headers,
-      body: request.body,
-      // Bun streams a request body; declare half-duplex so a body-carrying
-      // method (POST/PUT) does not throw under the fetch streaming contract.
-      ...(request.body !== null ? { duplex: "half" } : {}),
-      // Bun-specific: dial the Unix-domain socket instead of a TCP host.
-      unix: socketPath,
-    } as RequestInit & { unix: string; duplex?: "half" });
-    return ok(res);
-  } catch (e) {
-    return err({ reason: e instanceof Error ? e.message : String(e) });
-  }
-};
+export const UDS_PROXY_OVERHEAD_MS = 15_000;
+
+/**
+ * Deadline for the UDS LIVENESS probe. A probe is a `/health` GET a healthy
+ * worker answers immediately; anything slower is indistinguishable from dead
+ * for routing purposes, and the probe must not itself become a stall.
+ */
+export const PROBE_UDS_TIMEOUT_MS = 5_000;
+
+/**
+ * Build the production HTTP-over-UDS transport using Bun's `fetch(url, { unix })`.
+ * The URL host is irrelevant (the connection is the socket), so a fixed sentinel
+ * host is used; the path/query/method/headers/body all come from the forwarded
+ * request. A connect/transport error is caught and returned as a typed transport
+ * failure (the proxy maps it to `worker-unavailable`).
+ *
+ * BOUNDED WAIT (fail-closed): the fetch carries an `AbortSignal.timeout`. A
+ * worker that ACCEPTS the UDS connection and then stalls — deadlock, runaway
+ * loop, stop-the-world pause — never settles the promise on its own. Because
+ * `supervisor.ts` releases the tenant's admission slot only in the `finally`
+ * after this await, an unbounded wait would leak that slot permanently: each
+ * subsequent request consumes another until `maxConcurrentRuns` is exhausted
+ * and every further request for the tenant is refused `tenant-over-quota`, with
+ * nothing in the logs naming the real cause. The deadline converts that silent
+ * lockout into a typed transport failure, so the slot is always released and
+ * the tenant degrades to a visible 503 instead.
+ */
+export const makeBunUdsTransport = (timeoutMs: number): UdsTransport =>
+  async (socketPath, request) => {
+    try {
+      const url = new URL(request.url);
+      // Preserve path + query; the authority is the socket, not a TCP host.
+      const target = `http://uds.fugue.internal${url.pathname}${url.search}`;
+      const res = await fetch(target, {
+        method: request.method,
+        headers: request.headers,
+        body: request.body,
+        // Bounded wait — see the fail-closed note above.
+        signal: AbortSignal.timeout(timeoutMs),
+        // Bun streams a request body; declare half-duplex so a body-carrying
+        // method (POST/PUT) does not throw under the fetch streaming contract.
+        ...(request.body !== null ? { duplex: "half" } : {}),
+        // Bun-specific: dial the Unix-domain socket instead of a TCP host.
+        unix: socketPath,
+      } as RequestInit & { unix: string; duplex?: "half" });
+      return ok(res);
+    } catch (e) {
+      // An abort is a STALLED worker, not a connect failure — name it so the
+      // 503 is diagnosable as "worker did not respond" rather than a generic
+      // transport error. `TimeoutError` is what `AbortSignal.timeout` raises.
+      const timedOut = e instanceof DOMException && e.name === "TimeoutError";
+      return err({
+        reason: timedOut
+          ? `worker did not respond within ${timeoutMs}ms (stalled — request aborted)`
+          : e instanceof Error ? e.message : String(e),
+      });
+    }
+  };
 
 /**
  * Build the supervisor→worker UDS LIVENESS probe request: a GET to the worker's

@@ -168,7 +168,7 @@ export class RedisCheckpointer implements Checkpointer {
       return err({
         kind: "cache-error" as const,
         operation: "load:get-meta",
-        message: e instanceof Error ? e.message : String(e),
+        message: safeErrorMessage(e),
       });
     }
     if (!rawMeta) return ok(null);
@@ -181,7 +181,7 @@ export class RedisCheckpointer implements Checkpointer {
       return err({
         kind: "checkpoint-corrupt" as const,
         runId,
-        message: `meta deserialize failed: ${e instanceof Error ? e.message : String(e)}`,
+        message: `meta deserialize failed: ${safeErrorMessage(e)}`,
       });
     }
 
@@ -214,7 +214,7 @@ export class RedisCheckpointer implements Checkpointer {
       return err({
         kind: "cache-error" as const,
         operation: "load:hgetall-nodes",
-        message: e instanceof Error ? e.message : String(e),
+        message: safeErrorMessage(e),
       });
     }
 
@@ -297,7 +297,7 @@ export class RedisCheckpointer implements Checkpointer {
       return err({
         kind: "cache-error" as const,
         operation: "saveNode",
-        message: e instanceof Error ? e.message : String(e),
+        message: safeErrorMessage(e),
       });
     }
   }
@@ -318,7 +318,7 @@ export class RedisCheckpointer implements Checkpointer {
       return err({
         kind: "cache-error" as const,
         operation: "setMeta",
-        message: e instanceof Error ? e.message : String(e),
+        message: safeErrorMessage(e),
       });
     }
   }

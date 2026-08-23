@@ -249,12 +249,12 @@ export const resolveTtl = (dag: RegisteredDag): ResolvedTtl => {
   };
 };
 
-// `NodeContextForDag` and the pure `invocationOriginForIdentity` moved to
-// `domain/run-context.ts` — the contract of the `createContext` port belongs
-// to the domain, not this adapter (the HTTP layer names it without importing
-// adapter modules). Re-exported here for backward compatibility.
-export { invocationOriginForIdentity };
-export type { NodeContextForDag };
+// `NodeContextForDag` and the pure `invocationOriginForIdentity` live in
+// `domain/run-context.ts` — the contract of the `createContext` port belongs to
+// the domain, not this adapter (the HTTP layer names it without importing
+// adapter modules). They are deliberately NOT re-exported here: every consumer
+// imports them from the domain module directly, and a pre-release compat alias
+// would only give the domain contract a second name to drift under.
 
 /**
  * Construct the BASE NodeContext for a specific DAG execution, plus the run's
