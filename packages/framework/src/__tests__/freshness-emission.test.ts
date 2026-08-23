@@ -131,6 +131,47 @@ describe("emitFreshnessWitnessEvents", () => {
     expect(writes[0]!.newWitness.value).toBe("43");
   });
 
+  // pr-test-analyzer-1 — the fail-closed defence-in-depth branch for a
+  // hand-built DAG that bypassed `defineDag`'s own XOR validation. Left
+  // unexercised, a regression here silently DISABLES freshness tracking for the
+  // node instead of aborting the wave.
+  for (const [label, sideEffects] of [
+    ["extractNewWitness without extractConditionedOn", {
+      kind: "writes" as const,
+      resource: RN("pg:orders"),
+      extractNewWitness: () => witnessValue("version", "43"),
+    }],
+    ["extractConditionedOn without extractNewWitness", {
+      kind: "writes" as const,
+      resource: RN("pg:orders"),
+      extractConditionedOn: () => witness("version", RN("pg:orders"), "42"),
+    }],
+  ] as const) {
+    it(`fails the wave closed when a writes node declares only ${label}`, async () => {
+      const obs = new RecordingObserver();
+      const writeNode = makeNodeDef("write-node", { sideEffects: sideEffects as never });
+      const nodeMap = new Map([[NID_WRITE, writeNode]]);
+      const machineCtx = makeMachineCtx();
+      const newOutputs = new Map([[NID_WRITE, { ok: true }]]);
+      const index = new InMemoryFreshnessIndex();
+
+      const ctx = makePostWaveCtx([NID_WRITE], nodeMap as any, machineCtx, obs, index);
+      const result = await emitFreshnessWitnessEvents(ctx, newOutputs, new Set());
+
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("unreachable");
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind !== "node-crash") throw new Error("unreachable");
+      // Deterministic authoring bug — never burn the retry budget on it.
+      expect(result.error.retriability).toBe("non-retriable");
+      expect(result.error.message).toContain("declares only one of extractConditionedOn/extractNewWitness");
+      // The failure is observable, not silent.
+      expect(obs.events.some((e) => e.type === "node-error")).toBe(true);
+      // …and NO write was recorded for a node whose freshness config is broken.
+      expect(obs.events.some((e) => e.type === "write-attempted")).toBe(false);
+    });
+  }
+
   it("emits freshness-violation when conflict detected", async () => {
     const obs = new RecordingObserver();
     const writeNode = makeNodeDef("write-node", {

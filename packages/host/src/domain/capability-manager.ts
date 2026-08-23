@@ -58,7 +58,10 @@ export interface CapabilityHealthReport {
 export const topoSortHandles = (
   handles: readonly CapabilityHandle[],
 ): Result<readonly CapabilityHandle[], HostError> => {
-  const byName = new Map<string, CapabilityHandle>();
+  // Keyed by `Capability`, not `string`: `CapabilityHandle.name` is already
+  // narrowed to the closed capability vocabulary, and widening it here would
+  // let a lookup with an arbitrary string typecheck.
+  const byName = new Map<Capability, CapabilityHandle>();
   for (const handle of handles) {
     if (byName.has(handle.name)) {
       return err({
@@ -81,11 +84,14 @@ export const topoSortHandles = (
     byName.set(handle.name, handle);
   }
 
-  const visited = new Set<string>();
-  const visiting = new Set<string>();
+  // The whole traversal stays in the closed `Capability` vocabulary — handle
+  // names and `dependsOn` entries are already `Capability`, so nothing here
+  // needs to widen back to `string`.
+  const visited = new Set<Capability>();
+  const visiting = new Set<Capability>();
   const sorted: CapabilityHandle[] = [];
 
-  const visit = (name: string): HostError | null => {
+  const visit = (name: Capability): HostError | null => {
     if (visited.has(name)) return null;
     if (visiting.has(name)) {
       return {
@@ -342,9 +348,9 @@ export const checkHealth = async (
 export const extractClients = (
   handles: readonly CapabilityHandle[],
 ): Partial<{ readonly [K in Capability]: CapabilityRegistry[K] }> => {
-  const clients: Record<string, unknown> = {};
+  const clients: Partial<Record<Capability, unknown>> = {};
   for (const handle of handles) {
-    if (Object.prototype.hasOwnProperty.call(clients, handle.name)) {
+    if (Object.hasOwn(clients, handle.name)) {
       throw new Error(
         `extractClients: duplicate capability handle name '${handle.name}' — ` +
           `topoSortHandles should have rejected this at boot. This is a wiring bug.`,

@@ -44,7 +44,7 @@ import {
   WORKER_REDIS_ACL_PASSWORD_ENV,
   parseAclCredential,
 } from "./supervisor/secrets/redis-acl.js";
-import { createRedisConnectivity } from "./adapters/redis-connectivity.js";
+import { createRedisConnectivity, disconnectRedisQuietly } from "./adapters/redis-connectivity.js";
 import { closeHitlQueueBackend, createHitlQueueBackend } from "./hitl/queue-backend.js";
 import { ok, err } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
@@ -244,14 +244,7 @@ const main = async () => {
 
     logger.info("Fugue worker is running", { tenant, socketPath });
   } catch (e) {
-    await disconnectRedis().catch((disconnectErr: unknown) => {
-      console.error(JSON.stringify({
-        level: "error",
-        msg: "Failed to disconnect Redis during error cleanup",
-        error: disconnectErr instanceof Error ? disconnectErr.message : String(disconnectErr),
-        ts: new Date().toISOString(),
-      }));
-    });
+    await disconnectRedisQuietly(disconnectRedis);
     throw e;
   }
 };

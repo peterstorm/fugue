@@ -5,12 +5,13 @@
 // constructs errors outside the framework's node factories. Grammar-invalid
 // ids reach the brand smart constructors, which throw (the
 // brand-constructor invariant). `checkpointWriteFailed` is the documented
-// exception: per the `checkpoint-write-failed` consumer contract
-// (types/errors.ts), a rejected raw id never inhabits the branded field — it
-// takes the truthful placeholder and the rejected bytes are preserved
-// additively in `invalidRunId`/`invalidNodeId`, never a raw throw.
+// exception: per the correlated address ADTs in `types/checkpoint-address.ts`,
+// a rejected raw id never inhabits the branded arm — it takes the placeholder
+// and the rejected bytes are preserved additively in
+// `invalidRunId`/`invalidNodeId`, never a raw throw.
 
-import { ID_PATTERN, __brandNodeId, __brandRunId, nodeId as brandNodeId, runId as brandRunId } from "./ids.js";
+import { nodeId as brandNodeId, runId as brandRunId } from "./ids.js";
+import { buildCheckpointWriteFailed } from "./checkpoint-address.js";
 import type { NodeId, RunId } from "./ids.js";
 import type { FrameworkError, MissingCapability, Retriability } from "./errors.js";
 import type { Capability } from "./node.js";
@@ -18,91 +19,25 @@ import type { Capability } from "./node.js";
 const toNodeId = (nid: string | NodeId): NodeId => brandNodeId(nid as string);
 const toRunId = (rid: string | RunId): RunId => brandRunId(rid as string);
 
-/**
- * Grammar-valid diagnostic locations used ONLY when a rejected raw id cannot
- * inhabit the required branded field of a `checkpoint-write-failed` value
- * (truthful branding — the ADR-0080 surface documented on the variant in
- * `errors.ts`). THE canonical placeholders: every `checkpoint-write-failed`
- * construction site (the public factory, the in-memory adapter, the file
- * backend's `writeFailed`) imports these, so the naming rule has one
- * encoding. The rejected bytes remain available in the additive
- * `invalidRunId` / `invalidNodeId` diagnostics.
- */
-export const CHECKPOINT_INVALID_RUN_ID: RunId = brandRunId("checkpoint_invalid_run");
-export const CHECKPOINT_INVALID_NODE_ID: NodeId = brandNodeId("checkpoint_invalid_node");
-
-/**
- * Grammar-valid diagnostic location used for metadata-scoped write failures.
- * `checkpoint-write-failed.nodeId` is a legacy required field, so metadata
- * failures need a truthful internal address even though no DAG node was being
- * written. THE canonical placeholder — imported by the shared builder below
- * and re-exported from the file codec (`file/checkpointer-codec.ts`) so the
- * `@fuguejs/framework/file` barrel and test imports keep their paths.
- */
-export const META_RECORD_NODE_ID: NodeId = __brandNodeId("checkpoint_meta");
-
-/**
- * Total renderer for a rejected raw boundary value: strings are carried
- * UNMODIFIED — the additive `invalidRunId`/`invalidNodeId` fields preserve the
- * rejected RAW bytes, and log-line bounding is `formatFrameworkError`'s single
- * job; non-strings stringify safely, degrading to the unprintable placeholder
- * when `toString` itself throws (FR-040). The ONE encoding shared by every
- * `checkpoint-write-failed` construction site.
- */
-export const stringOf = (value: unknown): string => {
-  if (typeof value === "string") return value;
-  try {
-    return String(value);
-  } catch {
-    return "<unprintable>";
-  }
-};
-
-/**
- * THE ONE `checkpoint-write-failed` construction path (the consolidation
- * of the manually-mirrored policy that used to live in the file
- * codec's `writeFailed` and the public factory below): valid raw identifiers
- * retain their own brands. Invalid raw identifiers are never branded as
- * themselves — the required legacy fields receive the documented, grammar-
- * valid placeholders while additive diagnostics preserve the rejected bytes
- * (`stringOf`). `nodeIdRaw === undefined` means "this is the meta record"
- * (distinct from "present but unparseable") and takes `META_RECORD_NODE_ID`
- * without an `invalidNodeId` field.
- *
- * `typeof` guard before the pattern test: `RegExp.test` coerces non-strings,
- * so a bypassed numeric brand would otherwise match `ID_PATTERN` and inhabit
- * the branded field instead of routing through the placeholder + `invalid*`
- * diagnostic. Every construction site (the public factory, the file codec,
- * the in-memory adapter) consumes this builder, so the naming rule has one
- * encoding — output for every input is byte-identical to the pre-consolidation
- * per-site encodings (pinned by the per-backend hostile corpora).
- */
-const checkpointNodeId = (nodeIdRaw: unknown | undefined): NodeId => {
-  if (nodeIdRaw === undefined) return META_RECORD_NODE_ID;
-  if (typeof nodeIdRaw === "string" && ID_PATTERN.test(nodeIdRaw)) {
-    return __brandNodeId(nodeIdRaw);
-  }
-  return CHECKPOINT_INVALID_NODE_ID;
-};
-
-export const buildCheckpointWriteFailed = (
-  runIdRaw: unknown,
-  nodeIdRaw: unknown | undefined,
-  message: string,
-): FrameworkError => {
-  const runIdValid = typeof runIdRaw === "string" && ID_PATTERN.test(runIdRaw);
-  const nodeIdValid = typeof nodeIdRaw === "string" && ID_PATTERN.test(nodeIdRaw);
-  return {
-    kind: "checkpoint-write-failed",
-    runId: runIdValid ? __brandRunId(runIdRaw) : CHECKPOINT_INVALID_RUN_ID,
-    nodeId: checkpointNodeId(nodeIdRaw),
-    ...(!runIdValid ? { invalidRunId: stringOf(runIdRaw) } : {}),
-    ...(nodeIdRaw !== undefined && !nodeIdValid
-      ? { invalidNodeId: stringOf(nodeIdRaw) }
-      : {}),
-    message,
-  };
-};
+// The checkpoint-address concern — the correlated address ADTs, their
+// canonical placeholders, the `stringOf` raw-value renderer and THE ONE
+// `checkpoint-write-failed` builder — lives in its own leaf module. Re-exported
+// here so every existing import path (`types/error-factories.js`, and the file
+// codec's own re-export) keeps resolving.
+export {
+  buildCheckpointWriteFailed,
+  CHECKPOINT_INVALID_NODE_ID,
+  CHECKPOINT_INVALID_RUN_ID,
+  META_RECORD_NODE_ID,
+  stringOf,
+} from "./checkpoint-address.js";
+export type {
+  CheckpointPlaceholderNodeId,
+  CheckpointPlaceholderRunId,
+  CheckpointWriteFailedError,
+  CheckpointWriteNodeAddress,
+  CheckpointWriteRunAddress,
+} from "./checkpoint-address.js";
 
 /** Ergonomic factories for constructing FrameworkError values with string node/run IDs. */
 export const frameworkError = {

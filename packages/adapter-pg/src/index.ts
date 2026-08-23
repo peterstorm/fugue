@@ -179,60 +179,80 @@ export interface PgQueryable {
 }
 
 /**
+ * Validate every row against the caller's schema, failing on the FIRST bad row.
+ *
+ * ONE encoding (round-38 cs-25) of the row-validation loop the real client and
+ * the fake each carried; they differ only in the label their validation failure
+ * names, so a schema-rejection reads the same shape from either.
+ */
+const validateRows = <T,>(
+  schema: z.ZodType<T>,
+  rows: readonly unknown[],
+  label: string,
+): Result<T[], FrameworkError> => {
+  const validated: T[] = [];
+  for (const row of rows) {
+    const parsed = schema.safeParse(row);
+    if (!parsed.success) {
+      return err(rowValidationError(label, parsed.error.message));
+    }
+    validated.push(parsed.data);
+  }
+  return ok(validated);
+};
+
+/** `validateRows` for the at-most-one-row shape: no rows reads as `ok(null)`. */
+const validateFirstRow = <T,>(
+  schema: z.ZodType<T>,
+  rows: readonly unknown[],
+  label: string,
+): Result<T | null, FrameworkError> => {
+  if (rows.length === 0) return ok(null);
+  const parsed = schema.safeParse(rows[0]);
+  return parsed.success
+    ? ok(parsed.data)
+    : err(rowValidationError(label, parsed.error.message));
+};
+
+/**
  * Build a `PgCapability` over an injected pool. Exported for testing —
  * `createPgAdapter` is the production entry point that owns pool
  * construction and lifecycle.
  */
-export const createPgClient = (pool: PgQueryable): PgCapability => ({
-  query: async <T,>(schema: z.ZodType<T>, sql: string, params?: unknown[]): Promise<Result<T[], FrameworkError>> => {
+export const createPgClient = (pool: PgQueryable): PgCapability => {
+  /**
+   * Run one pooled statement and project its result, mapping ANY thrown driver
+   * error onto the typed `mapPgError` failure. ONE encoding of the
+   * try/catch-around-`pool.query` shape all four methods need — an arm that
+   * forgot the catch would surface a raw driver exception through a
+   * `Result`-typed port.
+   */
+  const run = async <T,>(
+    sql: string,
+    params: unknown[] | undefined,
+    project: (result: Awaited<ReturnType<PgQueryable["query"]>>) => Result<T, FrameworkError>,
+  ): Promise<Result<T, FrameworkError>> => {
     try {
-      const result = await pool.query(sql, params);
-      const validated: T[] = [];
-      for (const row of result.rows) {
-        const parsed = schema.safeParse(row);
-        if (!parsed.success) {
-          return err(rowValidationError("Row validation failed", parsed.error.message));
-        }
-        validated.push(parsed.data);
-      }
-      return ok(validated);
+      return project(await pool.query(sql, params));
     } catch (error) {
       return err(mapPgError(error, sql));
     }
-  },
+  };
 
-  queryOne: async <T,>(schema: z.ZodType<T>, sql: string, params?: unknown[]): Promise<Result<T | null, FrameworkError>> => {
-    try {
-      const result = await pool.query(sql, params);
-      if (result.rows.length === 0) return ok(null);
-      const parsed = schema.safeParse(result.rows[0]);
-      if (!parsed.success) {
-        return err(rowValidationError("Row validation failed", parsed.error.message));
-      }
-      return ok(parsed.data);
-    } catch (error) {
-      return err(mapPgError(error, sql));
-    }
-  },
+  return {
+    query: <T,>(schema: z.ZodType<T>, sql: string, params?: unknown[]): Promise<Result<T[], FrameworkError>> =>
+      run(sql, params, (result) => validateRows(schema, result.rows, "Row validation failed")),
 
-  execute: async (sql: string, params?: unknown[]): Promise<Result<{ rowCount: number }, FrameworkError>> => {
-    try {
-      const result = await pool.query(sql, params);
-      return ok({ rowCount: result.rowCount ?? 0 });
-    } catch (error) {
-      return err(mapPgError(error, sql));
-    }
-  },
+    queryOne: <T,>(schema: z.ZodType<T>, sql: string, params?: unknown[]): Promise<Result<T | null, FrameworkError>> =>
+      run(sql, params, (result) => validateFirstRow(schema, result.rows, "Row validation failed")),
 
-  queryRaw: async (sql: string, params?: unknown[]): Promise<Result<unknown[], FrameworkError>> => {
-    try {
-      const result = await pool.query(sql, params);
-      return ok(result.rows);
-    } catch (error) {
-      return err(mapPgError(error, sql));
-    }
-  },
-});
+    execute: (sql: string, params?: unknown[]): Promise<Result<{ rowCount: number }, FrameworkError>> =>
+      run(sql, params, (result) => ok({ rowCount: result.rowCount ?? 0 })),
+
+    queryRaw: (sql: string, params?: unknown[]): Promise<Result<unknown[], FrameworkError>> =>
+      run(sql, params, (result) => ok(result.rows)),
+  };
+};
 
 // ---------------------------------------------------------------------------
 // Adapter Factory
@@ -385,25 +405,12 @@ export const createFakePgCapability = (
       if (!route || !route.rows) {
         return ok([] as T[]);
       }
-      const validated: T[] = [];
-      for (const row of route.rows) {
-        const parsed = schema.safeParse(row);
-        if (!parsed.success) {
-          return err(rowValidationError("Fake row validation", parsed.error.message));
-        }
-        validated.push(parsed.data);
-      }
-      return ok(validated);
+      return validateRows(schema, route.rows, "Fake row validation");
     },
 
     queryOne: async <T,>(schema: z.ZodType<T>, sql: string, params?: unknown[]): Promise<Result<T | null, FrameworkError>> => {
       const route = matchRoute(sql, params);
-      if (!route || !route.rows || route.rows.length === 0) return ok(null);
-      const parsed = schema.safeParse(route.rows[0]);
-      if (!parsed.success) {
-        return err(rowValidationError("Fake row validation", parsed.error.message));
-      }
-      return ok(parsed.data);
+      return validateFirstRow(schema, route?.rows ?? [], "Fake row validation");
     },
 
     execute: async (sql: string, params?: unknown[]): Promise<Result<{ rowCount: number }, FrameworkError>> => {

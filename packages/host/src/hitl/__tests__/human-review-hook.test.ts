@@ -140,6 +140,47 @@ describe("makeOnHumanReview", () => {
     expect(notifier.sent).toHaveLength(0);
   });
 
+  // pr-test-analyzer-2 — the `committed.ok && !committed.value` sub-branch. It is
+  // a DIFFERENT condition from a store error: the notification was delivered,
+  // but the pending marker changed underneath it (a concurrent resolution took
+  // the gate). The hook must still fail closed and retry rather than park on a
+  // marker it no longer owns.
+  it("fails closed when the notification lands but a concurrent resolution moved the pending marker", async () => {
+    const notifier = notifierSpy();
+    const decisions = decisionStore({
+      // ok, but `false`: the marker this hook prepared is no longer the live one.
+      async markNotified() { return ok(false); },
+    });
+    const hook = makeOnHumanReview({ decisions, notifier: notifier.port, runId: RUN, dagId: DAG, ownerTeam: OWNER_TEAM });
+
+    await expect(hook(req)).rejects.toThrow("notification state commit failed");
+    // The notification DID go out — this is not the delivery-failure branch.
+    expect(notifier.sent).toHaveLength(1);
+  });
+
+  it("distinguishes a marker race from a store error in the thrown detail", async () => {
+    const race = makeOnHumanReview({
+      decisions: decisionStore({ async markNotified() { return ok(false); } }),
+      notifier: notifierSpy().port,
+      runId: RUN,
+      dagId: DAG,
+      ownerTeam: OWNER_TEAM,
+    });
+    const storeError = makeOnHumanReview({
+      decisions: decisionStore({
+        async markNotified() { return err({ kind: "redis-unavailable", operation: "SET notified" }); },
+      }),
+      notifier: notifierSpy().port,
+      runId: RUN,
+      dagId: DAG,
+      ownerTeam: OWNER_TEAM,
+    });
+
+    // Same fail-closed outcome, DIFFERENT operator-facing cause.
+    await expect(race(req)).rejects.toThrow("pending marker changed");
+    await expect(storeError(req)).rejects.toThrow("redis-unavailable");
+  });
+
   it("throwing diagnostics cannot bypass decision, marker, or notification outcomes", async () => {
     const logger = {
       info: () => {},

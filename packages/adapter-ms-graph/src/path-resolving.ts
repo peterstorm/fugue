@@ -106,9 +106,6 @@ export interface PathResolvingMsGraphHandle extends CapabilityHandle<"documents"
 
 const enc = encodeURIComponent;
 
-/** Per-segment encoding — the `/` separators of a site path must stay literal. */
-const encSegments = encodePathSegments;
-
 const normPath = (p: string): string => p.replace(/\/+/g, "/").replace(/^\/+|\/+$/g, "");
 
 const itemCacheKey = (driveId: string, filePath: string): string => `${driveId}\n${normPath(filePath)}`;
@@ -231,7 +228,7 @@ export const createPathResolvingMsGraphAdapter = (
     if (hit !== undefined) return ok(hit);
     // The root site (sitePath "/") is the documented `sites/{host}:` form —
     // no trailing slash. Sub-sites keep the `sites/{host}:{path}` form.
-    const pathPart = encSegments(sitePath);
+    const pathPart = encodePathSegments(sitePath);
     const r = await graphJson(
       pathPart === "" ? `/sites/${enc(siteHostname)}:` : `/sites/${enc(siteHostname)}:/${pathPart}`,
       opts,

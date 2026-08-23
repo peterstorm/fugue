@@ -10,6 +10,7 @@ import { INVALID_SPAN_CONTEXT, type Span, SpanStatusCode, trace } from "@opentel
 import { match } from "ts-pattern";
 import { fwTracer } from "../tracing/global-tracer.js";
 import { fwLogger } from "../logger.js";
+import { bestEffort, bestEffortLog } from "./best-effort.js";
 import { dispatchEvent } from "../observer/buffered.js";
 import type { NodeContext } from "../types/node.js";
 import type { DagDef } from "../types/dag.js";
@@ -27,21 +28,9 @@ import {
 
 const FALLBACK_ROOT_SPAN = trace.wrapSpanContext(INVALID_SPAN_CONTEXT);
 
-const bestEffortLog = (message: string): void => {
-  try {
-    fwLogger().debug(message);
-  } catch {
-    // A broken logger must not replace the primary DAG outcome.
-  }
-};
-
-const bestEffortRootTelemetry = (operation: string, effect: () => void): void => {
-  try {
-    effect();
-  } catch (error) {
-    bestEffortLog(`[runTelemetry] ${operation} failed: ${safeErrorMessage(error)}`);
-  }
-};
+/** Diagnostics are secondary to the modeled DAG outcome (see `best-effort.ts`). */
+const bestEffortRootTelemetry = (operation: string, effect: () => void): void =>
+  bestEffort("[runTelemetry]", operation, effect);
 
 // ---------------------------------------------------------------------------
 // run-start / run-end observer events
@@ -139,6 +128,7 @@ export const startRunSpan = async <T>(
     );
   } catch (error) {
     bestEffortLog(
+      "debug",
       `[runTelemetry] span creation failed; DAG outcome remains authoritative: ${safeErrorMessage(error)}`,
     );
     return callbackResult ?? fn(FALLBACK_ROOT_SPAN);
@@ -217,7 +207,7 @@ export const closeRootSpan = (rootSpan: Span, outcome: RootSpanOutcome): void =>
       })
       .exhaustive();
   } catch (error) {
-    bestEffortLog(`[runTelemetry] outcome finalization failed: ${safeErrorMessage(error)}`);
+    bestEffortLog("debug", `[runTelemetry] outcome finalization failed: ${safeErrorMessage(error)}`);
   } finally {
     bestEffortRootTelemetry("span.end", () => rootSpan.end());
   }

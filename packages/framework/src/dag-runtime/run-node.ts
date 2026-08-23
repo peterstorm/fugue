@@ -77,21 +77,38 @@ export const runNodeShared = async (
   const nowFn = opts.now ?? Date.now;
   const stamp = (): Date => new Date(nowFn());
 
+  /**
+   * THE one `node-error` emission for this node (round-38 cs-1, replacing eight
+   * near-copies). `sideEffects` is a static property of the node, so it is
+   * carried on EVERY failure event — two of the eight copies omitted it, which
+   * left a buffered-observer post-mortem unable to tell whether a node that
+   * failed input validation was a writer.
+   */
+  const emitNodeError = (
+    error: string,
+    frameworkError: FrameworkError,
+    extra?: { readonly stack?: string },
+  ): void => {
+    emit(ctx, {
+      type: "node-error",
+      runId: ctx.runId,
+      dagId,
+      nodeId,
+      sideEffects: node.sideEffects,
+      timestamp: stamp(),
+      error,
+      ...(extra?.stack !== undefined ? { stack: extra.stack } : {}),
+      frameworkError,
+    });
+  };
+
   // Checkpoint resume hit — validate against the current output schema and
   // return the cached value without entering a span.
   if (opts.checkpoint?.has(nodeId)) {
     const cached = opts.checkpoint.get(nodeId);
     const validated = validateOutput(node.outputSchema, cached, nodeId);
     if (!validated.ok) {
-      emit(ctx, {
-        type: "node-error",
-        runId: ctx.runId,
-        dagId,
-        nodeId,
-        timestamp: stamp(),
-        error: `checkpoint replay rejected: ${messageOf(validated.error)}`,
-        frameworkError: validated.error,
-      });
+      emitNodeError(`checkpoint replay rejected: ${messageOf(validated.error)}`, validated.error);
       return { result: validated, outcome: EMPTY_OUTCOME };
     }
     emit(ctx, {
@@ -116,15 +133,7 @@ export const runNodeShared = async (
     // Emit node-error so buffered observers don't see the node simply disappear
     // — without this, a node that fails input validation produces no event at
     // all, making post-mortems on a buffered run impossible.
-    emit(ctx, {
-      type: "node-error",
-      runId: ctx.runId,
-      dagId,
-      nodeId,
-      timestamp: stamp(),
-      error: `input validation failed: ${messageOf(inputResult.error)}`,
-      frameworkError: inputResult.error,
-    });
+    emitNodeError(`input validation failed: ${messageOf(inputResult.error)}`, inputResult.error);
     return { result: inputResult, outcome: EMPTY_OUTCOME };
   }
 
@@ -175,16 +184,7 @@ export const runNodeShared = async (
         });
       }
       if (!minted.ok) {
-        emit(ctx, {
-          type: "node-error",
-          runId: ctx.runId,
-          dagId,
-          nodeId,
-          sideEffects: node.sideEffects,
-          timestamp: stamp(),
-          error: `capability minting refused: ${messageOf(minted.error)}`,
-          frameworkError: minted.error,
-        });
+        emitNodeError(`capability minting refused: ${messageOf(minted.error)}`, minted.error);
         return err(minted.error);
       }
       runCtx = mergeScopedCapabilities(ctx, minted.value);
@@ -210,16 +210,7 @@ export const runNodeShared = async (
             ...restUndelivered.map((capability) => ({ nodeId, capability })),
           ],
         };
-        emit(ctx, {
-          type: "node-error",
-          runId: ctx.runId,
-          dagId,
-          nodeId,
-          sideEffects: node.sideEffects,
-          timestamp: stamp(),
-          error: `broker claimed but did not deliver capabilities: ${messageOf(missingErr)}`,
-          frameworkError: missingErr,
-        });
+        emitNodeError(`broker claimed but did not deliver capabilities: ${messageOf(missingErr)}`, missingErr);
         return err(missingErr);
       }
     }
@@ -245,17 +236,7 @@ export const runNodeShared = async (
       const frameworkError = asNodeFrameworkError(caught, nodeId);
       const message = messageOf(frameworkError);
       const stack = frameworkError.kind === "node-crash" ? frameworkError.stack : undefined;
-      emit(ctx, {
-        type: "node-error",
-        runId: ctx.runId,
-        dagId,
-        nodeId,
-        sideEffects: node.sideEffects,
-        timestamp: stamp(),
-        error: message,
-        ...(stack !== undefined ? { stack } : {}),
-        frameworkError,
-      });
+      emitNodeError(message, frameworkError, { ...(stack !== undefined ? { stack } : {}) });
       return err(frameworkError);
     }
 
@@ -264,31 +245,13 @@ export const runNodeShared = async (
 
       const errorMsg = messageOf(frameworkError);
 
-      emit(ctx, {
-        type: "node-error",
-        runId: ctx.runId,
-        dagId,
-        nodeId,
-        sideEffects: node.sideEffects,
-        timestamp: stamp(),
-        error: errorMsg,
-        frameworkError,
-      });
+      emitNodeError(errorMsg, frameworkError);
       return err(frameworkError);
     }
 
     const outputResult = validateOutput(node.outputSchema, runResult.value, nodeId);
     if (!outputResult.ok) {
-      emit(ctx, {
-        type: "node-error",
-        runId: ctx.runId,
-        dagId,
-        nodeId,
-        sideEffects: node.sideEffects,
-        timestamp: stamp(),
-        error: `output validation failed: ${messageOf(outputResult.error)}`,
-        frameworkError: outputResult.error,
-      });
+      emitNodeError(`output validation failed: ${messageOf(outputResult.error)}`, outputResult.error);
       return outputResult;
     }
 
@@ -303,16 +266,7 @@ export const runNodeShared = async (
           nodeId,
           message,
         };
-        emit(ctx, {
-          type: "node-error",
-          runId: ctx.runId,
-          dagId,
-          nodeId,
-          sideEffects: node.sideEffects,
-          timestamp: stamp(),
-          error: `checkpoint-write-failed: ${message}`,
-          frameworkError: cpwError,
-        });
+        emitNodeError(`checkpoint-write-failed: ${message}`, cpwError);
         return err(cpwError);
       }
     }

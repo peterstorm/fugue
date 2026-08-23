@@ -295,47 +295,80 @@ export const validateSerializedValueGrammar = (
   return ok(undefined);
 };
 
-/** Serialize a value to a plain JSON-safe object, preserving Map/Set/Date/undefined. */
-export const serializeValue = (value: unknown): unknown => {
+/**
+ * Fail-closed depth backstop for the two RECURSIVE walks of this grammar.
+ *
+ * `deepJsonEqual` and `validateSerializedValueGrammar` are iterative and carry
+ * their own ceiling; `serializeValue`/`deserializeValue` recurse, so the
+ * ceiling `MAX_SAFE_RECORD_DEPTH` documents as belonging to "every recursive
+ * walk in this grammar" has to live INSIDE them — not in whichever caller
+ * remembered to pre-scan. The `file/*` layer does pre-scan (`assertLosslessEvent`,
+ * the checkpoint codec, the resume-proof read gate); the `queue-bullmq/*` layer
+ * hands Redis/BullMQ payloads straight to these walks, so without this backstop a
+ * hostile ~20k-deep tenant payload escapes as a raw `RangeError` from a blown
+ * call stack instead of a named, bounded failure.
+ *
+ * The backstop can never be TIGHTER than an existing pre-scan: every file-layer
+ * pre-scan counts with `initialDepth` 0 or 1 against the same `maxDepth`, and
+ * this walk roots at 0, so it admits at least everything they admit. Counting
+ * matches `validateSerializedValueGrammar` exactly — a container costs a hop,
+ * a primitive leaf does not — so a writer can never emit a value the strict
+ * reader then rejects on depth.
+ */
+const depthExceeded = (walk: string, depth: number): never => {
+  throw new Error(
+    `${walk}: value nesting exceeds the safe depth ceiling ${MAX_SAFE_RECORD_DEPTH} (depth ${depth}) — deeper values overflow this recursive walk; refusing to recurse (FR-009)`,
+  );
+};
+
+const serializeAt = (value: unknown, depth: number): unknown => {
   if (value === undefined) {
     return { [UNDEFINED_TAG]: true } satisfies SerializedUndefined;
   }
 
   if (value instanceof Date) {
+    if (depth > MAX_SAFE_RECORD_DEPTH) depthExceeded("serializeValue", depth);
     return { [DATE_TAG]: value.toISOString() } satisfies SerializedDate;
   }
 
   if (value instanceof Map) {
+    if (depth > MAX_SAFE_RECORD_DEPTH) depthExceeded("serializeValue", depth);
     const entries: Array<[unknown, unknown]> = [];
     for (const [k, v] of value.entries()) {
-      entries.push([serializeValue(k), serializeValue(v)]);
+      entries.push([serializeAt(k, depth + 1), serializeAt(v, depth + 1)]);
     }
     return { [MAP_TAG]: entries } satisfies SerializedMap;
   }
 
   if (value instanceof Set) {
+    if (depth > MAX_SAFE_RECORD_DEPTH) depthExceeded("serializeValue", depth);
     const items: unknown[] = [];
     for (const item of value.values()) {
-      items.push(serializeValue(item));
+      items.push(serializeAt(item, depth + 1));
     }
     return { [SET_TAG]: items } satisfies SerializedSet;
   }
 
   if (Array.isArray(value)) {
-    return value.map(serializeValue);
+    if (depth > MAX_SAFE_RECORD_DEPTH) depthExceeded("serializeValue", depth);
+    return value.map((item) => serializeAt(item, depth + 1));
   }
 
   if (value !== null && typeof value === "object") {
+    if (depth > MAX_SAFE_RECORD_DEPTH) depthExceeded("serializeValue", depth);
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
       if (POLLUTION_KEYS.has(k)) continue;
-      out[k] = serializeValue(v);
+      out[k] = serializeAt(v, depth + 1);
     }
     return out;
   }
 
   return value;
 };
+
+/** Serialize a value to a plain JSON-safe object, preserving Map/Set/Date/undefined. */
+export const serializeValue = (value: unknown): unknown => serializeAt(value, 0);
 
 /**
  * Structural equality over `serializeValue` canonical forms — the ONE shared
@@ -396,15 +429,18 @@ export const deepJsonEqual = (a: unknown, b: unknown): boolean => {
   return true;
 };
 
-/** Deserialize a value produced by serializeValue, restoring Map/Set/Date/undefined. */
-export const deserializeValue = (value: unknown): unknown => {
+const deserializeAt = (value: unknown, depth: number): unknown => {
   if (value === null || value === undefined) return value;
 
   if (Array.isArray(value)) {
-    return value.map(deserializeValue);
+    if (depth > MAX_SAFE_RECORD_DEPTH) depthExceeded("deserializeValue", depth);
+    return value.map((item) => deserializeAt(item, depth + 1));
   }
 
   if (typeof value === "object") {
+    // Same counting as `validateSerializedValueGrammar`: the container costs
+    // the hop, and a tag object is a container like any other.
+    if (depth > MAX_SAFE_RECORD_DEPTH) depthExceeded("deserializeValue", depth);
     const obj = value as Record<string, unknown>;
 
     // Detect serialized undefined
@@ -425,7 +461,7 @@ export const deserializeValue = (value: unknown): unknown => {
     if (MAP_TAG in obj && Array.isArray(obj[MAP_TAG])) {
       const map = new Map<unknown, unknown>();
       for (const [k, v] of obj[MAP_TAG] as Array<[unknown, unknown]>) {
-        map.set(deserializeValue(k), deserializeValue(v));
+        map.set(deserializeAt(k, depth + 1), deserializeAt(v, depth + 1));
       }
       return map;
     }
@@ -434,7 +470,7 @@ export const deserializeValue = (value: unknown): unknown => {
     if (SET_TAG in obj && Array.isArray(obj[SET_TAG])) {
       const set = new Set<unknown>();
       for (const item of obj[SET_TAG] as unknown[]) {
-        set.add(deserializeValue(item));
+        set.add(deserializeAt(item, depth + 1));
       }
       return set;
     }
@@ -443,13 +479,16 @@ export const deserializeValue = (value: unknown): unknown => {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(obj)) {
       if (POLLUTION_KEYS.has(k)) continue;
-      out[k] = deserializeValue(v);
+      out[k] = deserializeAt(v, depth + 1);
     }
     return out;
   }
 
   return value;
 };
+
+/** Deserialize a value produced by serializeValue, restoring Map/Set/Date/undefined. */
+export const deserializeValue = (value: unknown): unknown => deserializeAt(value, 0);
 
 /**
  * Serialize the supported, pre-scanned value domain to JSON storage bytes.

@@ -17,6 +17,7 @@ import type { WitnessCapturedEvent, WriteAttemptedEvent } from "../types/events.
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import { ok } from "../types/result.js";
+import { writeEntryOf } from "../types/freshness.js";
 import type { FreshnessConflict, FreshnessCheckResult, FreshnessIndex, WriteEntry } from "../types/freshness.js";
 
 export type { FreshnessConflict, FreshnessCheckResult, FreshnessIndex, WriteEntry };
@@ -78,22 +79,12 @@ export const checkFreshness = (
           writeNodeId: e.nodeId,
           writeRunId: e.runId,
           conditionedOnWitness: e.conditionedOn,
-          conflictingWrite: {
-            runId: latest.runId,
-            nodeId: latest.nodeId,
-            newWitness: latest.newWitness,
-            succeededAtMs: latest.succeededAtMs,
-          },
+          conflictingWrite: writeEntryOf(latest),
         });
       }
 
       // Record this write
-      existingWrites.push({
-        runId: e.runId,
-        nodeId: e.nodeId,
-        newWitness: e.newWitness,
-        succeededAtMs: e.succeededAtMs,
-      });
+      existingWrites.push(writeEntryOf(e));
       writesByResource.set(resource, existingWrites);
     }
     // witness-captured events don't need tracking for the basic algorithm;
@@ -145,12 +136,7 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
    */
   async recordWrite(event: WriteAttemptedEvent): Promise<Result<void, FrameworkError>> {
     const resource = event.newWitness.resource;
-    const entry: WriteEntry = {
-      runId: event.runId,
-      nodeId: event.nodeId,
-      newWitness: event.newWitness,
-      succeededAtMs: event.succeededAtMs,
-    };
+    const entry: WriteEntry = writeEntryOf(event);
     if (!this.writes.has(resource)) {
       // New resource — check global capacity before adding
       if (this.writes.size >= this.maxResources) {

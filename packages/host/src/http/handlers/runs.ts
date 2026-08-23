@@ -14,6 +14,7 @@
  */
 
 import { requireAuthIdentity, callerTeamLabel } from "./dag-access.js";
+import type { DagAccessDecision } from "./dag-access.js";
 import { match } from "ts-pattern";
 import type { Context } from "hono";
 import type { HumanAction } from "@fuguejs/framework";
@@ -59,7 +60,7 @@ const statusView = (record: RunMetadata): unknown =>
 const authorizeRunAccess = (
   c: Context<HostEnv>,
   record: RunMetadata,
-): { ok: true; identity: AuthIdentity } | { ok: false; response: Response } => {
+): DagAccessDecision => {
   const authed = requireAuthIdentity(c);
   if (!authed.ok) return authed;
   const { identity } = authed;

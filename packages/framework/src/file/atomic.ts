@@ -547,6 +547,43 @@ const readReleaseMetadata = (
 };
 
 /**
+ * Prove ownership from the authoritative acquisition token, then remove the
+ * lock. ONE encoding (round-38 cs-11) of the token-read / ownership-gate /
+ * `rmSync` / typed-throw sequence the corrupt-pid and normal-pid branches of
+ * `releaseFileLock` both need; they differ only in the noun the failure names
+ * and whether a warning precedes the removal.
+ *
+ * Absence or a different token proves this acquisition no longer owns the
+ * canonical lock, and releasing is a safe no-op. An UNREADABLE token is not
+ * proof of foreign ownership — `readReleaseMetadata` surfaces that inconclusive
+ * case as a typed failure rather than silently returning.
+ */
+const releaseOwnedLock = (
+  lockPath: string,
+  ownershipToken: LockOwnershipToken,
+  hooks: FileLockTestHooks,
+  subject: string,
+  warnBeforeRemoval?: string,
+): void => {
+  const token = readReleaseMetadata(
+    lockPath,
+    "ownership token",
+    () => hooks.readOwnershipToken?.(lockPath)
+      ?? readFileSync(join(lockPath, OWNER_FILE), "utf-8"),
+  );
+  if (token.kind === "absent" || token.value !== ownershipToken) return;
+  if (warnBeforeRemoval !== undefined) warnWithoutThrowing(warnBeforeRemoval);
+  try {
+    rmSync(lockPath, { recursive: true, force: true });
+  } catch (error) {
+    throw releaseFailure(
+      lockPath,
+      `failed to remove ${subject}; lock left in place: ${safeErrorMessage(error)}`,
+    );
+  }
+};
+
+/**
  * Remove the canonical owner only when both pid and token still match.
  *
  * Absence and proven ownership mismatch are safe no-ops. An inconclusive
@@ -580,43 +617,17 @@ export const releaseFileLock = (
     // proof of foreign ownership: the pid bytes may be corrupt while the
     // authoritative token still belongs to this acquisition, so the shared
     // metadata gate must surface that inconclusive release as a typed failure.
-    const token = readReleaseMetadata(
+    releaseOwnedLock(
       lockPath,
-      "ownership token",
-      () => hooks.readOwnershipToken?.(lockPath)
-        ?? readFileSync(join(lockPath, OWNER_FILE), "utf-8"),
-    );
-    if (token.kind === "absent" || token.value !== ownershipToken) return;
-    warnWithoutThrowing(
+      ownershipToken,
+      hooks,
+      "the owned lock directory whose pid metadata was corrupt",
       `[FileLock] owner pid metadata corrupt (recorded "${pid.value}", expected "${process.pid}") but ownership token matches — removing the owned lock`,
     );
-    try {
-      rmSync(lockPath, { recursive: true, force: true });
-    } catch (error) {
-      throw releaseFailure(
-        lockPath,
-        `failed to remove the owned lock directory whose pid metadata was corrupt; lock left in place: ${safeErrorMessage(error)}`,
-      );
-    }
     return;
   }
 
-  const token = readReleaseMetadata(
-    lockPath,
-    "ownership token",
-    () => hooks.readOwnershipToken?.(lockPath)
-      ?? readFileSync(join(lockPath, OWNER_FILE), "utf-8"),
-  );
-  if (token.kind === "absent" || token.value !== ownershipToken) return;
-
-  try {
-    rmSync(lockPath, { recursive: true, force: true });
-  } catch (error) {
-    throw releaseFailure(
-      lockPath,
-      `failed to remove the owned lock directory; lock left in place: ${safeErrorMessage(error)}`,
-    );
-  }
+  releaseOwnedLock(lockPath, ownershipToken, hooks, "the owned lock directory");
 };
 
 type CriticalSectionOutcome<T> =

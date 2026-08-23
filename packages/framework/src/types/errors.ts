@@ -3,6 +3,11 @@
 import { match } from "ts-pattern";
 import { z } from "zod";
 import { tryNodeId, tryRunId } from "./ids.js";
+// The checkpoint-address ADTs and their ONE construction path live in a leaf
+// module that imports only `ids.js`, so parsing a persisted record can reuse
+// the builder here without creating an import cycle.
+import { buildCheckpointWriteFailed } from "./checkpoint-address.js";
+import type { CheckpointWriteFailedError } from "./checkpoint-address.js";
 import type { RunId, NodeId } from "./ids.js";
 // Type-only circular reference with `types/node.ts` (which imports
 // `FrameworkError` from this module) — safe: type imports erase at compile
@@ -31,6 +36,16 @@ export type PartialTokenUsage = {
   readonly tokensIn: number;
   readonly tokensOut: number;
 };
+
+// The `checkpoint-write-failed` address ADTs are re-exported here so consumers
+// keep reaching the whole error vocabulary through this module.
+export type {
+  CheckpointPlaceholderNodeId,
+  CheckpointPlaceholderRunId,
+  CheckpointWriteFailedError,
+  CheckpointWriteNodeAddress,
+  CheckpointWriteRunAddress,
+} from "./checkpoint-address.js";
 
 export type FrameworkError =
   | { readonly kind: "validation"; readonly nodeId: NodeId; readonly message: string; readonly path?: string }
@@ -69,30 +84,7 @@ export type FrameworkError =
       readonly expected: string;
       readonly actual: string | undefined;
     }
-  | {
-      readonly kind: "checkpoint-write-failed";
-      /**
-       * Required for public source compatibility. Persistence boundaries use
-       * grammar-valid internal location identifiers when a rejected raw value
-       * cannot truthfully inhabit a brand; the raw value is then carried by
-       * `invalidRunId` / `invalidNodeId`.
-       *
-       * CONSUMER CONTRACT: inspect `invalidRunId` FIRST — when present, this
-       * field is a fabricated internal placeholder, not the address of a real
-       * run; attribute the failure to the raw value in `invalidRunId`.
-       */
-      readonly runId: RunId;
-      /**
-       * CONSUMER CONTRACT: inspect `invalidNodeId` FIRST — when present, this
-       * field is a fabricated internal placeholder, not the address of a real
-       * node; attribute the failure to the raw value in `invalidNodeId`.
-       */
-      readonly nodeId: NodeId;
-      /** Present only when the corresponding raw boundary value was invalid. */
-      readonly invalidRunId?: string;
-      readonly invalidNodeId?: string;
-      readonly message: string;
-    }
+  | CheckpointWriteFailedError
   | { readonly kind: "prompt-not-found"; readonly promptName: string; readonly reason: string }
   | {
       readonly kind: "cache-error";
@@ -424,9 +416,31 @@ type ExhaustivePersistedFrameworkErrorSchema = [MissingPersistedFrameworkErrorKi
   ? z.ZodType<FrameworkError>
   : never;
 
+/**
+ * Re-correlate a parsed `checkpoint-write-failed` record.
+ *
+ * The wire record is four independent fields; the in-memory ADT is two
+ * correlated address arms. Routing the parsed record back through THE ONE
+ * construction path (`buildCheckpointWriteFailed`) rebuilds the correlation
+ * from the same rule the writer used, so a persisted record can never enter
+ * the process as a half-correlated value (a placeholder id with no
+ * `invalidRunId`, or a real id carrying one). The rebuild is idempotent on
+ * every record this framework writes.
+ */
+const correlateCheckpointAddresses = (
+  parsed: z.output<typeof PersistedFrameworkErrorSchemaDefinition>,
+): FrameworkError =>
+  parsed.kind === "checkpoint-write-failed"
+    ? buildCheckpointWriteFailed(
+        parsed.invalidRunId ?? parsed.runId,
+        parsed.invalidNodeId ?? parsed.nodeId,
+        parsed.message,
+      )
+    : parsed;
+
 /** Loose, exhaustive wire parser for persisted `FrameworkError` control-plane data. */
 export const PersistedFrameworkErrorSchema: ExhaustivePersistedFrameworkErrorSchema =
-  PersistedFrameworkErrorSchemaDefinition;
+  PersistedFrameworkErrorSchemaDefinition.transform(correlateCheckpointAddresses);
 
 /**
  * Every `FrameworkError["kind"]` literal — the closed discriminant domain

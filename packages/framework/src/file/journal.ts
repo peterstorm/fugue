@@ -79,26 +79,18 @@ import { join } from "node:path";
 // Strict checkpoint-projection reader — ONE read seam for the resume shell
 // and this store-shaped surface (round-21 atl-1).
 import { readCheckpointFile, listJsonFileNames } from "./event-log.js";
+import type { RawCheckpointJson } from "./event-log.js";
 import { atomicWriteFile, withFileLock } from "./atomic.js";
+import { isAlreadyCommitted, planAppend } from "./append-plan.js";
 import {
   APPEND_LOCK,
   CHECKPOINT_FILE,
   EVENTS_DIR,
-  JOURNAL_SCHEMA_VERSION,
-  MAX_LEXICOGRAPHIC_SEQUENCE,
   PROGRESS_FILE,
-  keyDigest,
-  eventFileName,
-  eventDigestOf,
   parseEventFileName,
 } from "./layout.js";
-import {
-  parseJournalSequence,
-  parseOptionalDedupKey,
-  parseRecordedAtMs,
-  serializeFileEventRecord,
-} from "./event-record.js";
-import type { FileEventRecord, RecordedAtMs } from "./event-record.js";
+import { parseOptionalDedupKey, parseRecordedAtMs } from "./event-record.js";
+import type { RecordedAtMs } from "./event-record.js";
 import { isFileCheckpointCommit } from "./checkpoint-record.js";
 import type { FileCheckpointCommit } from "./checkpoint-record.js";
 import { toJson } from "../state-machine/serialize.js";
@@ -106,7 +98,6 @@ import type { FrameworkError } from "../types/errors.js";
 import { safeDiagnosticRender } from "../types/safe-error.js";
 import { parseFileFactoryClock } from "./options.js";
 import {
-  fileCacheError,
   fileOperationError,
   fileThrownValueMessage,
   isFileBackendPathString,
@@ -131,26 +122,10 @@ const fsFailure = (
 ): FrameworkError =>
   fileOperationError(operation, `run directory ${directory}`, error, failureClass);
 
-/**
- * Build the ADR-0080 typed failure for the journal's permanent capacity ceiling.
- * The public error taxonomy stays closed: capacity exhaustion uses the
- * existing `cache-error` kind, with append operation and durable-layout
- * context sufficient to diagnose the non-transient condition.
- *
- * Exported at this narrow seam so the classification can be tested without
- * manufacturing a 1,000,000-record directory.
- */
-export const journalCapacityError = (
-  operation: Extract<FileOperation, "appendEvent">,
-  directory: string,
-  sequence: number,
-): FrameworkError =>
-  fileCacheError(
-    operation,
-    `${operation} failed for run directory ${directory}: sequence ${sequence} exceeds the 6-digit lexicographic ceiling ${MAX_LEXICOGRAPHIC_SEQUENCE} (${EVENTS_DIR} listing) — journal capacity exhausted`,
-    // Deterministic: re-running the append reproduces the same ceiling.
-    "permanent",
-  );
+// The capacity classification lives with the append decision core it belongs
+// to; re-exported here so existing imports (and its narrow-seam tests) keep
+// resolving.
+export { journalCapacityError } from "./append-plan.js";
 
 // ---------------------------------------------------------------------------
 // Journal options / interface
@@ -200,24 +175,12 @@ export interface FileJournal {
   readCheckpoint(): RawCheckpointJson | null;
 }
 
-/**
- * The unvalidated `checkpoint.json` bytes, branded so the "must strict-parse
- * before trusting" obligation is visible in the type instead of only the doc
- * comment: `RawCheckpointJson` cannot be produced from
- * arbitrary strings by accident — it is minted only at the file read site.
- */
-export type RawCheckpointJson = string & {
-  readonly __rawCheckpointJson: unique symbol;
-};
-
-/**
- * Mint the raw-checkpoint brand at the byte-read boundary (and in tests that
- * compare read bytes against written bytes). Not a validation gate — the
- * strict parse is the consumer's job, and that obligation is exactly what the
- * brand makes visible.
- */
-export const rawCheckpointJson = (value: string): RawCheckpointJson =>
-  value as RawCheckpointJson;
+// `RawCheckpointJson` and its mint live at the byte-read seam
+// (`event-log.ts`), which is the ONE reader both this store-shaped
+// `readCheckpoint` and the ADR-0077 resume proof go through. Re-exported here
+// so the `@fuguejs/framework/file` barrel and existing imports keep resolving.
+export type { RawCheckpointJson } from "./event-log.js";
+export { rawCheckpointJson } from "./event-log.js";
 
 // ---------------------------------------------------------------------------
 // createFileJournal
@@ -364,35 +327,18 @@ export const createFileJournal = (
       await withFileLock(lockPath, () => {
         const existing = listEventFiles();
 
-        // Keyed dedup by the durable listing: the filename digest suffix IS
-        // the durable fact, so a crash at any point before/after the rename
-        // re-checks the same fact on retry and converges on exactly one record
-        // (a no-op only after the commit — SC-003). Every listed entry has
-        // already been verified name-contract-valid AND a regular file
-        // (listEventFiles), so a match here is a genuine committed record —
-        // never a directory squat that would silently swallow the append.
-        if (key !== "") {
-          const digest = keyDigest(key);
-          if (existing.some((name) => name.endsWith(`-${digest}.json`))) return;
-        }
+        // Dedup FIRST — before the clock is touched — so a deduped append
+        // cannot fail on a clock it never needed (SC-003 / FR-015).
+        if (isAlreadyCommitted(existing, key)) return;
 
-        const parsedSequence = parseJournalSequence(existing.length);
-        if (!parsedSequence.ok) {
-          // An array length is always a non-negative safe integer, so the
-          // parse can fail on the lexicographic ceiling ONLY — throw the
-          // capacity-specific rejection directly (it names the established
-          // message contract and the durable listing fact).
-          throw journalCapacityError("appendEvent", directory, existing.length);
-        }
-        // The injected clock is stamped inside the append critical section
-        // and is the one dependency that can fail without touching the
-        // filesystem — name it explicitly so a throwing or non-finite clock
-        // is diagnosed as a clock failure, not misattributed to the lock
-        // machinery or the record codec (parity with the checkpointer and
-        // freshness-index clock guards). The stamp is minted through
-        // `parseRecordedAtMs` — the record codec's single finiteness clause
-        // — so the journal can never hand the serializer a value the strict
-        // reader would reject.
+        // The injected clock is stamped inside the append critical section and
+        // is the one dependency that can fail without touching the filesystem —
+        // name it explicitly so a throwing or non-finite clock is diagnosed as a
+        // clock failure, not misattributed to the lock machinery or the record
+        // codec (parity with the checkpointer and freshness-index clock guards).
+        // The stamp is minted through `parseRecordedAtMs` — the record codec's
+        // single finiteness clause — so the journal can never hand the
+        // serializer a value the strict reader would reject.
         let recordedAtMs: RecordedAtMs;
         try {
           const parsedStamp = parseRecordedAtMs(now());
@@ -409,49 +355,20 @@ export const createFileJournal = (
             "permanent",
           );
         }
-        const record: FileEventRecord = {
-          schemaVersion: JOURNAL_SCHEMA_VERSION,
-          sequence: parsedSequence.value,
-          dedupKey: key,
-          recordedAtMs,
-          event,
-        };
 
-        // Both callees throw ALREADY-TYPED failures (`serializeFileEventRecord`
-        // and `atomicWriteFile` name their own operation, location, and
-        // inferred failureClass) — there are no inner catches here. The outer
-        // catch re-tags the `withFileLock` boundary at the public journal
-        // surface, so a PRE-LOCK failure carries exactly one `appendEvent
-        // failed at run directory D:` layer, while a failure INSIDE the lock
-        // body carries three: the inner typed failure, the `withFileLock`
-        // boundary layer (which names the lock path — deliberately retained,
-        // pinned by file-freshness-index.test.ts), and the outer `appendEvent`
-        // layer. The lock inner catch wraps unconditionally, unlike its
-        // sibling `acquireFileLock` ride-through — a maintainer decision, not
-        // a comment to deny.
-        const json = serializeFileEventRecord(
-          record.sequence,
-          record.dedupKey,
-          record.recordedAtMs,
-          record.event,
-        );
-        // The keyless filename digest is derived from the ROUND-TRIP-VERIFIED
-        // canonical bytes just produced (ONE observation of the persisted
-        // content, recomputed from `json` exactly as the strict reader will)
-        // — never a fresh `toJson` walk over the CALLER-owned event. A
-        // stateful proxy event could otherwise serialize one value and digest
-        // another, emitting a record whose filename disagrees with its
-        // persisted content (the strict reader would fail closed at resume,
-        // FR-009). `serializeFileEventRecord` already accomplished the
-        // lossless round-trip, so parsing its output is deterministic.
-        const canonicalEvent = (JSON.parse(json) as { readonly event: unknown }).event;
-        atomicWriteFile(
-          join(
-            eventsDir,
-            eventFileName(record.sequence, eventDigestOf({ dedupKey: key, sequence: parsedSequence.value, event: canonicalEvent })),
-          ),
-          json,
-        );
+        // Both the plan and `atomicWriteFile` throw ALREADY-TYPED failures
+        // (they name their own operation, location, and inferred failureClass)
+        // — there are no inner catches here. The outer catch re-tags the
+        // `withFileLock` boundary at the public journal surface, so a PRE-LOCK
+        // failure carries exactly one `appendEvent failed at run directory D:`
+        // layer, while a failure INSIDE the lock body carries three: the inner
+        // typed failure, the `withFileLock` boundary layer (which names the lock
+        // path — deliberately retained, pinned by file-freshness-index.test.ts),
+        // and the outer `appendEvent` layer. The lock inner catch wraps
+        // unconditionally, unlike its sibling `acquireFileLock` ride-through —
+        // a maintainer decision, not a comment to deny.
+        const plan = planAppend({ existing, dedupKey: key, recordedAtMs, event, directory });
+        atomicWriteFile(join(eventsDir, plan.fileName), plan.json);
       });
     } catch (error) {
       // withFileLock preserves a primary append-body failure when release also
@@ -515,10 +432,8 @@ export const createFileJournal = (
     }
   };
 
-  const readCheckpoint = (): RawCheckpointJson | null => {
-    const bytes = readCheckpointFile(directory);
-    return bytes === null ? null : rawCheckpointJson(bytes);
-  };
+  // The shared reader already mints the brand at the byte-read seam.
+  const readCheckpoint = (): RawCheckpointJson | null => readCheckpointFile(directory);
 
   return { appendEvent, writeCheckpoint, writeProgress, readCheckpoint };
 };

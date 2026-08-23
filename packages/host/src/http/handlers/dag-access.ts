@@ -20,9 +20,7 @@ export type DagAccessDecision =
  * a different reason than it actually did. Absence here is a WIRING bug (the
  * middleware did not run), not a caller error — which is why the message says so.
  */
-export const requireAuthIdentity = (
-  c: Context<HostEnv>,
-): { readonly ok: true; readonly identity: AuthIdentity } | { readonly ok: false; readonly response: Response } => {
+export const requireAuthIdentity = (c: Context<HostEnv>): DagAccessDecision => {
   const identity = c.get("authIdentity") as AuthIdentity | undefined;
   return identity
     ? { ok: true, identity }

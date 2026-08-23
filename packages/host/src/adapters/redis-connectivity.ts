@@ -326,3 +326,25 @@ export const createRedisConnectivity = async (
     return err(redisErr("Redis client initialization", e));
   }
 };
+
+/**
+ * Best-effort Redis disconnect on an entrypoint's error path.
+ *
+ * ONE encoding (round-38 cs-19) of the cleanup both `main.ts` and
+ * `worker-main.ts` need on their startup-failure path. It goes to `console`
+ * rather than the structured logger deliberately: the logger may itself be part
+ * of the failed bootstrap, and this diagnostic must not be able to displace the
+ * original error being rethrown.
+ */
+export const disconnectRedisQuietly = async (
+  disconnect: () => Promise<void>,
+): Promise<void> => {
+  await disconnect().catch((disconnectErr: unknown) => {
+    console.error(JSON.stringify({
+      level: "error",
+      msg: "Failed to disconnect Redis during error cleanup",
+      error: disconnectErr instanceof Error ? disconnectErr.message : String(disconnectErr),
+      ts: new Date().toISOString(),
+    }));
+  });
+};

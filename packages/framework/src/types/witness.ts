@@ -121,12 +121,23 @@ export type WitnessValue = {
   readonly resource?: never;
 };
 
-/** Smart constructor for a resource-free witness value. Validates non-empty value and closed kind. */
-export const witnessValue = (kind: WitnessKind, value: string): WitnessValue => {
+/**
+ * The ONE witness-construction invariant behind both smart constructors
+ * (round-38 cs-6): a closed `WitnessKind` and a non-empty value. Throwing is
+ * the constructor-invariant contract — the framework's single caller
+ * (`freshness-emission.ts`) converts it to a typed `node-crash` at the wave
+ * boundary.
+ */
+const assertWitnessFields = (kind: WitnessKind, value: string): void => {
   assertWitnessKind(kind);
   if (!value) {
     throw new Error("Witness value must be non-empty");
   }
+};
+
+/** Smart constructor for a resource-free witness value. Validates non-empty value and closed kind. */
+export const witnessValue = (kind: WitnessKind, value: string): WitnessValue => {
+  assertWitnessFields(kind, value);
   return { kind, value };
 };
 
@@ -142,10 +153,7 @@ export const witness = (
   resource: ResourceName,
   value: string,
 ): Witness => {
-  assertWitnessKind(kind);
-  if (!value) {
-    throw new Error("Witness value must be non-empty");
-  }
+  assertWitnessFields(kind, value);
   return { kind, resource, value } as Witness;
 };
 
@@ -195,4 +203,23 @@ export interface WriteEntry {
   readonly newWitness: Witness;
   readonly succeededAtMs: number;
 }
+
+/**
+ * Project a `WriteEntry` out of any value that already carries the four
+ * fields — a `write-attempted` event, a stored freshness singleton, or another
+ * `WriteEntry`.
+ *
+ * ONE encoding of the projection (round-38 cs-8/cs-9): it was previously
+ * re-inlined field-by-field at four sites across `freshness-check.ts` and
+ * `freshness-emission.ts`, where a new field on `WriteEntry` would have had to
+ * be remembered in each. Returns a fresh object deliberately — the result is
+ * emitted on observer events, and aliasing an index's internal entry into an
+ * event would let an observer's own handling reach back into index state.
+ */
+export const writeEntryOf = (source: WriteEntry): WriteEntry => ({
+  runId: source.runId,
+  nodeId: source.nodeId,
+  newWitness: source.newWitness,
+  succeededAtMs: source.succeededAtMs,
+});
 

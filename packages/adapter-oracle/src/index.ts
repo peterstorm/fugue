@@ -340,6 +340,42 @@ export interface OracleQueryable {
 }
 
 /**
+ * Validate every row against the caller's schema, failing on the FIRST bad row.
+ *
+ * ONE encoding (round-38 cs-24) of the row-validation loop the real client and
+ * the fake each carried; they differ only in the label their validation failure
+ * names, so a schema-rejection reads the same shape from either.
+ */
+const validateRows = <T,>(
+  schema: z.ZodType<T>,
+  rows: readonly unknown[],
+  label: string,
+): Result<T[], FrameworkError> => {
+  const validated: T[] = [];
+  for (const row of rows) {
+    const parsed = schema.safeParse(row);
+    if (!parsed.success) {
+      return err(rowValidationError(label, parsed.error.message));
+    }
+    validated.push(parsed.data);
+  }
+  return ok(validated);
+};
+
+/** `validateRows` for the at-most-one-row shape: no rows reads as `ok(null)`. */
+const validateFirstRow = <T,>(
+  schema: z.ZodType<T>,
+  rows: readonly unknown[],
+  label: string,
+): Result<T | null, FrameworkError> => {
+  if (rows.length === 0) return ok(null);
+  const parsed = schema.safeParse(rows[0]);
+  return parsed.success
+    ? ok(parsed.data)
+    : err(rowValidationError(label, parsed.error.message));
+};
+
+/**
  * Build an `OracleCapability` over an injected queryable seam. Exported for
  * testing — `createOracleAdapter` is the production entry point that owns pool
  * construction and lifecycle.
@@ -347,55 +383,40 @@ export interface OracleQueryable {
  * `outFormat` is supplied per execute by the seam itself (the adapter sets
  * `OUT_FORMAT_OBJECT`); the client passes binds through verbatim.
  */
-export const createOracleClient = (queryable: OracleQueryable): OracleCapability => ({
-  query: async <T,>(schema: z.ZodType<T>, sql: string, binds?: Record<string, unknown>): Promise<Result<T[], FrameworkError>> => {
+export const createOracleClient = (queryable: OracleQueryable): OracleCapability => {
+  /**
+   * Parse the statement as a READ, execute it, and project its rows — mapping
+   * ANY thrown driver error onto the typed `mapOracleError` failure. ONE
+   * encoding of the parse-SQL / execute / catch shape all three methods need;
+   * an arm that skipped the read-only parse would let a write statement through
+   * a read-only capability.
+   */
+  const run = async <T,>(
+    sql: string,
+    binds: Record<string, unknown> | undefined,
+    project: (rows: readonly unknown[]) => Result<T, FrameworkError>,
+  ): Promise<Result<T, FrameworkError>> => {
     const readSql = parseOracleReadSql(sql);
     if (!readSql.ok) return readSql;
     try {
       const result = await queryable.execute(readSql.value, binds ?? {});
-      const rows = result.rows ?? [];
-      const validated: T[] = [];
-      for (const row of rows) {
-        const parsed = schema.safeParse(row);
-        if (!parsed.success) {
-          return err(rowValidationError("Row validation failed", parsed.error.message));
-        }
-        validated.push(parsed.data);
-      }
-      return ok(validated);
+      return project(result.rows ?? []);
     } catch (error) {
       return err(mapOracleError(error, sql));
     }
-  },
+  };
 
-  queryOne: async <T,>(schema: z.ZodType<T>, sql: string, binds?: Record<string, unknown>): Promise<Result<T | null, FrameworkError>> => {
-    const readSql = parseOracleReadSql(sql);
-    if (!readSql.ok) return readSql;
-    try {
-      const result = await queryable.execute(readSql.value, binds ?? {});
-      const rows = result.rows ?? [];
-      if (rows.length === 0) return ok(null);
-      const parsed = schema.safeParse(rows[0]);
-      if (!parsed.success) {
-        return err(rowValidationError("Row validation failed", parsed.error.message));
-      }
-      return ok(parsed.data);
-    } catch (error) {
-      return err(mapOracleError(error, sql));
-    }
-  },
+  return {
+    query: <T,>(schema: z.ZodType<T>, sql: string, binds?: Record<string, unknown>): Promise<Result<T[], FrameworkError>> =>
+      run(sql, binds, (rows) => validateRows(schema, rows, "Row validation failed")),
 
-  queryRaw: async (sql: string, binds?: Record<string, unknown>): Promise<Result<unknown[], FrameworkError>> => {
-    const readSql = parseOracleReadSql(sql);
-    if (!readSql.ok) return readSql;
-    try {
-      const result = await queryable.execute(readSql.value, binds ?? {});
-      return ok(result.rows ?? []);
-    } catch (error) {
-      return err(mapOracleError(error, sql));
-    }
-  },
-});
+    queryOne: <T,>(schema: z.ZodType<T>, sql: string, binds?: Record<string, unknown>): Promise<Result<T | null, FrameworkError>> =>
+      run(sql, binds, (rows) => validateFirstRow(schema, rows, "Row validation failed")),
+
+    queryRaw: (sql: string, binds?: Record<string, unknown>): Promise<Result<unknown[], FrameworkError>> =>
+      run(sql, binds, (rows) => ok([...rows])),
+  };
+};
 
 // ---------------------------------------------------------------------------
 // Adapter Factory
@@ -747,27 +768,14 @@ export const createFakeOracleCapability = (
       if (!route || !route.rows) {
         return ok([] as T[]);
       }
-      const validated: T[] = [];
-      for (const row of route.rows) {
-        const parsed = schema.safeParse(row);
-        if (!parsed.success) {
-          return err(rowValidationError("Fake row validation", parsed.error.message));
-        }
-        validated.push(parsed.data);
-      }
-      return ok(validated);
+      return validateRows(schema, route.rows, "Fake row validation");
     },
 
     queryOne: async <T,>(schema: z.ZodType<T>, sql: string, _binds?: Record<string, unknown>): Promise<Result<T | null, FrameworkError>> => {
       const readSql = parseOracleReadSql(sql);
       if (!readSql.ok) return readSql;
       const route = matchRoute(readSql.value);
-      if (!route || !route.rows || route.rows.length === 0) return ok(null);
-      const parsed = schema.safeParse(route.rows[0]);
-      if (!parsed.success) {
-        return err(rowValidationError("Fake row validation", parsed.error.message));
-      }
-      return ok(parsed.data);
+      return validateFirstRow(schema, route?.rows ?? [], "Fake row validation");
     },
 
     queryRaw: async (sql: string, _binds?: Record<string, unknown>): Promise<Result<unknown[], FrameworkError>> => {

@@ -297,6 +297,30 @@ export const guardedCheckpointClockRead = (
   }
 };
 
+/**
+ * The STANDARD checkpoint-clock read: `guardedCheckpointClockRead` bound to the
+ * shared renderers and the `checkpoint:<op>` cache-error naming.
+ *
+ * ONE encoding (round-38 cs-12) for the in-memory and Redis adapters, whose
+ * `readClock` methods were byte-identical wrappers. The FILE adapter keeps its
+ * own binding deliberately: its throwing-clock arm qualifies the message with
+ * the run directory, and that pinned wording is part of its contract.
+ */
+export const standardCheckpointClockRead = (
+  operation: "setMeta" | "load",
+  runId: RunId,
+  now: () => number,
+): Result<number, FrameworkError> =>
+  guardedCheckpointClockRead({
+    operation,
+    runId,
+    now,
+    render: safeDiagnosticRender,
+    cacheError: (op, message) =>
+      frameworkError.cacheError(`checkpoint:${op}`, message, "permanent"),
+    throwMessage: safeErrorMessage,
+  });
+
 export interface CorruptCheckpointReportInput {
   readonly warning: string;
   readonly warn: (warning: string) => void;
@@ -579,18 +603,7 @@ export class InMemoryCheckpointer implements Checkpointer {
     operation: "setMeta" | "load",
     runId: RunId,
   ): Result<number, FrameworkError> {
-    // ONE encoding with the Redis and file adapters (round-23 cs-2): the
-    // guard structure, representability gate, and "permanent" classification
-    // live in the checkpoint core; the twin adapters' pins keep their
-    // byte-identical messages through this adapter's renderers below.
-    return guardedCheckpointClockRead({
-      operation,
-      runId,
-      now: () => this.now(),
-      render: safeDiagnosticRender,
-      cacheError: (op, message) => frameworkError.cacheError(`checkpoint:${op}`, message, "permanent"),
-      throwMessage: safeErrorMessage,
-    });
+    return standardCheckpointClockRead(operation, runId, () => this.now());
   }
 
   async load(
@@ -647,11 +660,16 @@ export class InMemoryCheckpointer implements Checkpointer {
               `stored checkpoint state could not be detached: ${safeErrorMessage(error)}`,
             ),
           )
-        : err({
-            kind: "checkpoint-corrupt",
-            runId: CHECKPOINT_INVALID_RUN_ID,
-            message: `stored checkpoint state could not be detached for run ${safeDiagnosticRender(runId)}: ${safeErrorMessage(error)}`,
-          });
+        : // `checkpoint-corrupt` has no additive `invalidRunId` field, so the
+          // placeholder has to inhabit the branded address itself; it is
+          // grammar-valid, so the factory brands it without throwing and the
+          // rejected bytes are rendered into the message instead.
+          err(
+            frameworkError.checkpointCorrupt(
+              CHECKPOINT_INVALID_RUN_ID,
+              `stored checkpoint state could not be detached for run ${safeDiagnosticRender(runId)}: ${safeErrorMessage(error)}`,
+            ),
+          );
     }
   }
 

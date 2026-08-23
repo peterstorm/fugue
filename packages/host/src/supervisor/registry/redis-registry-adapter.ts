@@ -370,7 +370,6 @@ export const createRedisTenantRegistry = (
     callHookWithoutThrowing(hooks.onRedisAlive);
   };
 
-  /** Persist a config + publish its event. Fails closed on any Redis failure. */
   /**
    * Run one Redis step of a write: a THROW and a `!ok` Result are the SAME
    * condition here — Redis is unreachable — so both collapse to the fail-closed
@@ -386,17 +385,19 @@ export const createRedisTenantRegistry = (
     op: string,
     threwMessage: string,
     run: () => Promise<Result<T, HostError>>,
+    context: Readonly<Record<string, unknown>> = {},
   ): Promise<Result<T, HostError>> => {
     try {
       const result = await run();
       return result.ok ? result : err(dead(op));
     } catch (e) {
       const failure = dead(op);
-      warnWithoutThrowing(logger, threwMessage, { op, error: safeErrorMessage(e) });
+      warnWithoutThrowing(logger, threwMessage, { op, ...context, error: safeErrorMessage(e) });
       return err(failure);
     }
   };
 
+  /** Persist a config + publish its event. Fails closed on any Redis failure. */
   const persistAndAnnounce = async (
     cfg: TenantConfig,
     event: TenantEvent,
@@ -534,31 +535,21 @@ export const createRedisTenantRegistry = (
         // Delete the persisted record FIRST; fail closed (do NOT advance memory) on
         // any Redis failure so the in-memory view never diverges from a delete that
         // did not land.
-        let delResult: Result<number, HostError>;
-        try {
-          delResult = await redis.del(tenantKey(id));
-        } catch (e) {
-          const failure = dead("tenant-hard-delete");
-          warnWithoutThrowing(logger, "[tenant-registry] Redis del threw during hardDelete — treating as disconnected", {
-            tenant: id,
-            error: safeErrorMessage(e),
-          });
-          return err(failure);
-        }
-        if (!delResult.ok) return err(dead("tenant-hard-delete"));
+        const delResult = await redisStep(
+          "tenant-hard-delete",
+          "[tenant-registry] Redis del threw during hardDelete — treating as disconnected",
+          () => redis.del(tenantKey(id)),
+          { tenant: id },
+        );
+        if (!delResult.ok) return delResult;
         // Announce the absence so subscribers re-read (and observe the tenant gone).
-        let pubResult: Result<void, HostError>;
-        try {
-          pubResult = await pubsub.publish(TENANT_EVENTS_CHANNEL, JSON.stringify({ kind: "deregistered", tenant: id }));
-        } catch (e) {
-          const failure = dead("tenant-hard-delete");
-          warnWithoutThrowing(logger, "[tenant-registry] Redis publish threw during hardDelete — treating as disconnected", {
-            tenant: id,
-            error: safeErrorMessage(e),
-          });
-          return err(failure);
-        }
-        if (!pubResult.ok) return err(dead("tenant-hard-delete"));
+        const pubResult = await redisStep(
+          "tenant-hard-delete",
+          "[tenant-registry] Redis publish threw during hardDelete — treating as disconnected",
+          () => pubsub.publish(TENANT_EVENTS_CHANNEL, JSON.stringify({ kind: "deregistered", tenant: id })),
+          { tenant: id },
+        );
+        if (!pubResult.ok) return pubResult;
         // Advance through the pure core so hard deletion preserves the same
         // runtime-read-only facade as every other registry transition.
         registry = removeRetainedEntry(registry, id);
@@ -571,32 +562,20 @@ export const createRedisTenantRegistry = (
       let cursor = "0";
       const pattern = `${TENANT_KEY_PREFIX}*`;
       do {
-        let scanResult;
-        try {
-          scanResult = await redis.scan(pattern, cursor);
-        } catch (e) {
-          const failure = dead("tenant-hydrate");
-          warnWithoutThrowing(logger, "[tenant-registry] Redis scan threw during hydrate — treating as disconnected", {
-            error: safeErrorMessage(e),
-          });
-          return err(failure);
-        }
-        if (!scanResult.ok) {
-          return err(dead("tenant-hydrate"));
-        }
+        const scanResult = await redisStep(
+          "tenant-hydrate",
+          "[tenant-registry] Redis scan threw during hydrate — treating as disconnected",
+          () => redis.scan(pattern, cursor),
+        );
+        if (!scanResult.ok) return scanResult;
         for (const key of scanResult.value.keys) {
-          let valR;
-          try {
-            valR = await redis.get(key);
-          } catch (e) {
-            const failure = dead("tenant-hydrate");
-            warnWithoutThrowing(logger, "[tenant-registry] Redis get threw during hydrate — treating as disconnected", {
-              key,
-              error: safeErrorMessage(e),
-            });
-            return err(failure);
-          }
-          if (!valR.ok) return err(dead("tenant-hydrate"));
+          const valR = await redisStep(
+            "tenant-hydrate",
+            "[tenant-registry] Redis get threw during hydrate — treating as disconnected",
+            () => redis.get(key),
+            { key },
+          );
+          if (!valR.ok) return valR;
           if (valR.value === null || valR.value === "") continue;
           const parsed = deserialize(valR.value);
           if (!parsed.ok) {

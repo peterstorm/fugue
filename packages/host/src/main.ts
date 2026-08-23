@@ -14,7 +14,7 @@ import { buildRuntimeDeps } from "./adapters/runtime-capabilities.js";
 import { parseHostConfig } from "./domain/config.js";
 import { formatHostError } from "./domain/host-error.js";
 import { createHost } from "./host.js";
-import { createRedisConnectivity } from "./adapters/redis-connectivity.js";
+import { createRedisConnectivity, disconnectRedisQuietly } from "./adapters/redis-connectivity.js";
 import { closeHitlQueueBackend, createHitlQueueBackend } from "./hitl/queue-backend.js";
 import { createJsonConsoleLogger } from "./entrypoint-wiring.js";
 
@@ -76,14 +76,7 @@ const main = async () => {
 
     logger.info("Fugue host is running");
   } catch (e) {
-    await disconnectRedis().catch((disconnectErr: unknown) => {
-      console.error(JSON.stringify({
-        level: "error",
-        msg: "Failed to disconnect Redis during error cleanup",
-        error: disconnectErr instanceof Error ? disconnectErr.message : String(disconnectErr),
-        ts: new Date().toISOString(),
-      }));
-    });
+    await disconnectRedisQuietly(disconnectRedis);
     throw e;
   }
 };

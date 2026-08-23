@@ -12,10 +12,11 @@
 import { match } from "ts-pattern";
 import type { NodeId } from "../types/ids.js";
 import type { Witness } from "../types/freshness.js";
-import { stampWitness } from "../types/freshness.js";
+import { stampWitness, writeEntryOf } from "../types/freshness.js";
 import type { FrameworkError } from "../types/errors.js";
 import { type Result, ok, err } from "../types/result.js";
 import { fwLogger } from "../logger.js";
+import { bestEffortLog } from "./best-effort.js";
 import { formatFrameworkError } from "../types/errors.js";
 import { safeErrorMessage } from "../types/safe-error.js";
 import { buildNodeInput } from "../shared/build-input.js";
@@ -23,13 +24,7 @@ import { emit } from "./emit.js";
 import type { PostWaveContext } from "./post-wave-context.js";
 
 /** Extraction diagnostics are subordinate to the fail-closed `Result`. */
-const warnWithoutThrowing = (message: string): void => {
-  try {
-    fwLogger().warn(message);
-  } catch {
-    // The modeled extractor failure remains authoritative.
-  }
-};
+const warnWithoutThrowing = (message: string): void => bestEffortLog("warn", message);
 
 /**
  * Emit freshness witness events for all reads/writes nodes in a wave.
@@ -173,12 +168,7 @@ export async function emitFreshnessWitnessEvents(
             nodeId,
             resource: conditionedOn.resource,
             conditionedOnWitness: conditionedOn,
-            conflictingWrite: {
-              runId: conflict.runId,
-              nodeId: conflict.nodeId,
-              newWitness: conflict.newWitness,
-              succeededAtMs: conflict.succeededAtMs,
-            },
+            conflictingWrite: writeEntryOf(conflict),
             detectedAtMs: nowFn(),
             timestamp: stamp(),
           });

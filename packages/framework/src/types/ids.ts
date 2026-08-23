@@ -137,15 +137,24 @@ export const __brandDagIdUnchecked = (s: string): DagId => s as DagId;
 // Result-returning variants — for parse boundaries where throwing is undesirable.
 // ---------------------------------------------------------------------------
 
+/**
+ * The ONE `ID_PATTERN` acceptance test behind both `try*` parsers (round-38
+ * cs-5) — the same clause `validate` factors for their throwing siblings.
+ * `typeof` first: `RegExp.test` coerces non-strings, so a bypassed caller's
+ * number would otherwise match.
+ */
+const matchesIdPattern = (s: string): boolean =>
+  typeof s === "string" && ID_PATTERN.test(s);
+
 /** Parse a string into a RunId, returning a Result instead of throwing. */
 export const tryRunId = (s: string): Result<RunId, string> =>
-  typeof s === "string" && ID_PATTERN.test(s)
+  matchesIdPattern(s)
     ? ok(s as RunId)
     : err(`Invalid runId "${s}": must match ${ID_PATTERN.source}`);
 
 /** Parse a string into a NodeId, returning a Result instead of throwing. */
 export const tryNodeId = (s: string): Result<NodeId, string> =>
-  typeof s === "string" && ID_PATTERN.test(s)
+  matchesIdPattern(s)
     ? ok(s as NodeId)
     : err(`Invalid nodeId "${s}": must match ${ID_PATTERN.source}`);
 

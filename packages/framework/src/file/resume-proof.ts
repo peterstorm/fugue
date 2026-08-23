@@ -76,6 +76,7 @@
 
 import { join } from "node:path";
 import { CHECKPOINT_FILE, EVENTS_DIR, JOURNAL_SCHEMA_VERSION } from "./layout.js";
+import type { RawCheckpointJson } from "./event-log.js";
 import { replayEvents, foldStep } from "../state-machine/replay.js";
 import {
   deserializeValue,
@@ -165,7 +166,7 @@ export interface ResumeProofArgs<S, E, C> {
   /** The raw checkpoint file contents exactly as read, or `null` when no
    * checkpoint.json exists (the benign crash-before-first-checkpoint
    * window — the log alone proves state). */
-  readonly checkpointJson: string | null;
+  readonly checkpointJson: RawCheckpointJson | null;
   /** The pure state machine the log is folded through — replay must
    * reconstruct the identical state the original run reached (FR-011).
    * The executor is NEVER consulted. */
@@ -197,7 +198,7 @@ export interface ResumeProofArgs<S, E, C> {
 interface CheckpointDecodeArgs<S, C> {
   readonly runId: RunId;
   readonly checkpointPath: string;
-  readonly checkpointJson: string;
+  readonly checkpointJson: RawCheckpointJson;
   readonly parseCheckpoint: (data: unknown) => Result<{ state: S; context: C }, string>;
 }
 

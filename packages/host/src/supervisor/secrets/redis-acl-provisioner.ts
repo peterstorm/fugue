@@ -167,7 +167,15 @@ export const apply = async (
   if (!setResult.ok) {
     // Do NOT return the credential: the user may not have been created. The
     // password simply goes out of scope here, unretained and unlogged.
-    return err(redisUnavailable("redis-acl-apply"));
+    //
+    // PROPAGATE the admin port's own diagnostic rather than manufacturing a
+    // generic one. The production adapter already builds it through
+    // `redisOperationFailure`, which redacts the credential, so there is no
+    // secret to protect here — and the operator needs it: a malformed ACL rule
+    // token (a CODE bug) and a genuine Redis outage are the same log line
+    // without it, which sends whoever is debugging at infra health instead of
+    // the deploy that broke `buildAclSpec`.
+    return err(setResult.error);
   }
 
   // (5) Hand the credential back for the caller to inject into the owning
@@ -193,7 +201,9 @@ export const revoke = async (
   const username = aclUsername(tenant);
   const delResult = await admin.delUser(username);
   if (!delResult.ok) {
-    return err(redisUnavailable("redis-acl-revoke"));
+    // Same reasoning as `apply`: the admin port's diagnostic is already
+    // credential-redacted and names the operation that actually failed.
+    return err(delResult.error);
   }
   return ok(undefined);
 };

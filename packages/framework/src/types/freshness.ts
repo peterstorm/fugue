@@ -45,6 +45,7 @@ export interface FreshnessCheckResult {
  * `WriteEntry` from this module keep resolving.
  */
 export type { WriteEntry } from "./witness.js";
+export { writeEntryOf } from "./witness.js";
 
 export interface FreshnessIndex {
   /** Record a successful write for future conflict detection. */

@@ -52,6 +52,28 @@ interface OnHumanReviewDeps {
  * READ-ONLY with respect to the decision store's recorded decision: it returns a
  * present decision without consuming it (see `makeOnDecisionConsumed`).
  */
+/**
+ * Log a hook failure, then throw it. ONE encoding (round-38 cs-15) of the
+ * idiom every failure arm in this module needs: the diagnostic goes to the
+ * (possibly broken) logger WITHOUT being able to replace the throw, and the
+ * thrown message stays the structured `hitl: <what> for <runId>/<nodeId>[: <detail>]`
+ * the kernel's retry path reads.
+ */
+function logAndThrow(
+  logger: LogPort | undefined,
+  level: "warn" | "error",
+  logMessage: string,
+  throwMessage: string,
+  context: { readonly runId: RunId; readonly nodeId: NodeId; readonly error?: string },
+): never {
+  // A function DECLARATION, not an arrow const: TypeScript only propagates a
+  // `never` return into control-flow narrowing for declarations and explicitly
+  // annotated consts, and every caller here relies on the code after the call
+  // being unreachable.
+  logWithoutThrowing(logger, level, logMessage, context);
+  throw new Error(throwMessage);
+}
+
 export const makeOnHumanReview = (deps: OnHumanReviewDeps) =>
   async (req: { nodeId: NodeId; output: unknown; prompt: string }): Promise<HumanReviewOutcome> => {
     const { decisions, notifier, runId, dagId, ownerTeam, logger } = deps;
@@ -66,12 +88,13 @@ export const makeOnHumanReview = (deps: OnHumanReviewDeps) =>
     if (!decision.ok) {
       // An errored lookup cannot establish either "approved" or "no decision".
       // Throw so the kernel retries the hook without producing `suspended`.
-      logWithoutThrowing(logger, "warn", "hitl: decision lookup failed — retrying hook", {
-        runId,
-        nodeId: req.nodeId,
-        error: decision.error.kind,
-      });
-      throw new Error(`hitl: decision lookup failed for ${runId}/${req.nodeId}: ${decision.error.kind}`);
+      logAndThrow(
+        logger,
+        "warn",
+        "hitl: decision lookup failed — retrying hook",
+        `hitl: decision lookup failed for ${runId}/${req.nodeId}: ${decision.error.kind}`,
+        { runId, nodeId: req.nodeId, error: decision.error.kind },
+      );
     }
 
     // 2. No decision yet → establish an actionable pending gate. Delivery state
@@ -79,21 +102,24 @@ export const makeOnHumanReview = (deps: OnHumanReviewDeps) =>
     // a committed success deduplicates ordinary re-parks.
     const pending = await decisions.preparePending(runId, req.nodeId);
     if (!pending.ok) {
-      logWithoutThrowing(logger, "error", "hitl: preparePending failed — refusing unresolvable notification", {
-        runId,
-        nodeId: req.nodeId,
-        error: pending.error.kind,
-      });
-      throw new Error(`hitl: preparePending failed for ${runId}/${req.nodeId}: ${pending.error.kind}`);
+      logAndThrow(
+        logger,
+        "error",
+        "hitl: preparePending failed — refusing unresolvable notification",
+        `hitl: preparePending failed for ${runId}/${req.nodeId}: ${pending.error.kind}`,
+        { runId, nodeId: req.nodeId, error: pending.error.kind },
+      );
     }
     if (pending.value.kind === "notification-required") {
       const prompt = asNonEmptyString(req.prompt);
       if (prompt === undefined) {
-        logWithoutThrowing(logger, "error", "hitl: blank review prompt — refusing invalid notification", {
-          runId,
-          nodeId: req.nodeId,
-        });
-        throw new Error(`hitl: blank review prompt for ${runId}/${req.nodeId}`);
+        logAndThrow(
+          logger,
+          "error",
+          "hitl: blank review prompt — refusing invalid notification",
+          `hitl: blank review prompt for ${runId}/${req.nodeId}`,
+          { runId, nodeId: req.nodeId },
+        );
       }
       const delivered = await notifier.notify({
         runId,
@@ -104,23 +130,25 @@ export const makeOnHumanReview = (deps: OnHumanReviewDeps) =>
         output: req.output,
       });
       if (!delivered.ok) {
-        logWithoutThrowing(logger, "error", "hitl: review notification failed — retrying hook", {
-          runId,
-          nodeId: req.nodeId,
-          error: delivered.error.kind,
-        });
-        throw new Error(`hitl: review notification failed for ${runId}/${req.nodeId}: ${delivered.error.kind}`);
+        logAndThrow(
+          logger,
+          "error",
+          "hitl: review notification failed — retrying hook",
+          `hitl: review notification failed for ${runId}/${req.nodeId}: ${delivered.error.kind}`,
+          { runId, nodeId: req.nodeId, error: delivered.error.kind },
+        );
       }
 
       const committed = await decisions.markNotified(runId, req.nodeId, pending.value.marker);
       if (!committed.ok || !committed.value) {
         const detail = committed.ok ? "pending marker changed" : committed.error.kind;
-        logWithoutThrowing(logger, "error", "hitl: notification delivered but delivery state was not committed — retrying hook", {
-          runId,
-          nodeId: req.nodeId,
-          error: detail,
-        });
-        throw new Error(`hitl: notification state commit failed for ${runId}/${req.nodeId}: ${detail}`);
+        logAndThrow(
+          logger,
+          "error",
+          "hitl: notification delivered but delivery state was not committed — retrying hook",
+          `hitl: notification state commit failed for ${runId}/${req.nodeId}: ${detail}`,
+          { runId, nodeId: req.nodeId, error: detail },
+        );
       }
     }
     return { kind: "pending" };
@@ -148,13 +176,12 @@ export const makeOnDecisionConsumed = (deps: OnDecisionConsumedDeps) =>
     const { decisions, runId, logger } = deps;
     const cleared = await decisions.clear(runId, nodeId);
     if (!cleared.ok) {
-      logWithoutThrowing(logger, "error", "hitl: failed to clear consumed decision — failing run closed", {
-        runId,
-        nodeId,
-        error: cleared.error.kind,
-      });
-      throw new Error(
+      logAndThrow(
+        logger,
+        "error",
+        "hitl: failed to clear consumed decision — failing run closed",
         `hitl: consumed decision cleanup failed for ${runId}/${nodeId}: ${cleared.error.kind}`,
+        { runId, nodeId, error: cleared.error.kind },
       );
     }
   };

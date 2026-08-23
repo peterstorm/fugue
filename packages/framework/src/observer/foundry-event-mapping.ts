@@ -101,12 +101,6 @@ export type FoundryEmission =
     };
 
 /**
- * Build a `metric` emission, or `undefined` if `value` is non-finite. The single
- * construction site for `metric` emissions: finiteness is enforced HERE (via
- * {@link asFinite}) rather than re-checked at every producer. Callers push the
- * result only when defined.
- */
-/**
  * Build an event emission, attaching `measurements` only when at least one entry
  * survived the finiteness filter.
  *
@@ -125,6 +119,12 @@ const eventEmission = (
     ? { kind: "event", name, properties, measurements }
     : { kind: "event", name, properties };
 
+/**
+ * Build a `metric` emission, or `undefined` if `value` is non-finite. The single
+ * construction site for `metric` emissions: finiteness is enforced HERE (via
+ * {@link asFinite}) rather than re-checked at every producer. Callers push the
+ * result only when defined.
+ */
 const metricEmission = (
   name: FoundryMetricName,
   value: number,

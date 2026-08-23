@@ -1,8 +1,11 @@
 /**
  * Graph path encoding — ONE definition, in a dependency-free module.
  *
- * `index.ts` and `path-resolving.ts` each previously carried their own copy
- * (`encodePath` / `encSegments`). Both build request URLs that the Graph
+ * `index.ts` and `path-resolving.ts` each previously carried their own copy,
+ * then a differently-named local alias for this one (`encodePath` /
+ * `encSegments`, dropped in round 38 — an alias that adds no translation only
+ * gives the same function two more names to search for). Both build request
+ * URLs that the Graph
  * service parses strictly, so a divergence between them would surface as
  * mismatched 404s between two adapters that are supposed to address items
  * identically. The shared definition lives here rather than in either module

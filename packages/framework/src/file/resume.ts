@@ -105,6 +105,7 @@
 // `resume-proof.ts` (which documents its own `node:path` dependency).
 
 import { readFileEvents, readCheckpointFile } from "./event-log.js";
+import type { RawCheckpointJson } from "./event-log.js";
 import { proveResumeAgreement } from "./resume-proof.js";
 import { isBoundaryId } from "./layout.js";
 import type { Machine } from "../state-machine/types.js";
@@ -219,7 +220,7 @@ const resumeFileJobUnchecked = async <S, E, C>(
   //    unchanged; any other throw is re-tagged `checkpoint-corrupt` — a
   //    boundary-totality fence (ADR-0080) keeping this shell total even if a
   //    future change makes the journal throw something untyped.
-  let checkpointJson: string | null;
+  let checkpointJson: RawCheckpointJson | null;
   try {
     checkpointJson = readCheckpointFile(directory);
   } catch (error) {

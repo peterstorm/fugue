@@ -21,6 +21,11 @@ import { describe, it, expect } from "bun:test";
 import { match } from "ts-pattern";
 import { runId as makeRunId, nodeId as makeNodeId } from "../types/ids.js";
 import {
+  CHECKPOINT_INVALID_NODE_ID,
+  CHECKPOINT_INVALID_RUN_ID,
+  META_RECORD_NODE_ID,
+} from "../types/error-factories.js";
+import {
   formatFrameworkError,
   isFrameworkError,
   PersistedFrameworkErrorSchema,
@@ -56,11 +61,14 @@ const budgetError: FrameworkError = {
 };
 
 describe("FrameworkError: checkpoint-write-failed diagnostics", () => {
-  it("keeps legacy branded locations required while preferring invalid raw diagnostics", () => {
+  it("keeps legacy wire fields required while preferring invalid raw diagnostics", () => {
+    // The rejected-address arm: the placeholders are the ONLY inhabitants the
+    // type admits alongside an `invalid*` diagnostic — a real `RunId`/`NodeId`
+    // here is now a compile error, which is the whole point of the ADT split.
     const error: FrameworkError = {
       kind: "checkpoint-write-failed",
-      runId: makeRunId("checkpoint_invalid_run"),
-      nodeId: makeNodeId("checkpoint_invalid_node"),
+      runId: CHECKPOINT_INVALID_RUN_ID,
+      nodeId: CHECKPOINT_INVALID_NODE_ID,
       invalidRunId: "../escape",
       invalidNodeId: "bad/node",
       message: "boundary rejected",
@@ -79,9 +87,11 @@ describe("FrameworkError: checkpoint-write-failed diagnostics", () => {
     const huge = "x".repeat(200_000);
     const error: FrameworkError = {
       kind: "checkpoint-write-failed",
-      runId: makeRunId("checkpoint_invalid_run"),
-      nodeId: makeNodeId("checkpoint_invalid_node"),
+      runId: CHECKPOINT_INVALID_RUN_ID,
       invalidRunId: huge,
+      // Only the RUN address was rejected here; the node address is real, and
+      // the ADT now makes that combination the only representable one.
+      nodeId: nid,
       message: "boundary rejected",
     };
 
@@ -95,7 +105,7 @@ describe("FrameworkError: checkpoint-write-failed diagnostics", () => {
     const error: FrameworkError = {
       kind: "checkpoint-write-failed",
       runId: rid,
-      nodeId: makeNodeId("checkpoint_meta"),
+      nodeId: META_RECORD_NODE_ID,
       message: "meta write failed",
     };
 

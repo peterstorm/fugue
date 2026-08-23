@@ -550,6 +550,28 @@ const main = async () => {
     logger,
   });
 
+  /**
+   * Start one unref'd background sweep. ONE encoding (round-38 cs-20) of the
+   * schedule skeleton both sweeps need: the sweep POLICY lives in the
+   * lifecycle, the binary owns the schedule, a throw inside a sweep is logged
+   * and never allowed to reject unhandled, and the timer must not keep the
+   * process alive by itself.
+   */
+  const startSweep = (
+    label: string,
+    intervalMs: number,
+    sweep: () => Promise<unknown>,
+  ): ReturnType<typeof setInterval> => {
+    const timer = setInterval(() => {
+      void sweep().catch((e) => {
+        logger.error(`[supervisor] ${label} threw`, { error: e instanceof Error ? e.message : String(e) });
+      });
+    }, intervalMs);
+    if (typeof timer.unref === "function") timer.unref();
+    logger.info(`[supervisor] ${label} started`, { intervalMs });
+    return timer;
+  };
+
   // ── Idle-evict sweep timer (AD-7/FR-017) ───────────────────────────────────
   // The lifecycle owns the eviction POLICY (idleEvictSweep respects eager-pin +
   // TTL); the binary owns the SCHEDULE. Sweep at a fraction of the idle TTL so an
@@ -557,14 +579,7 @@ const main = async () => {
   // coarser interval would let workers linger up to one whole TTL past expiry).
   // Clamp to a sane floor so a tiny configured TTL cannot busy-loop the sweep.
   const sweepIntervalMs = Math.max(1000, Math.floor(config.WORKER_IDLE_EVICT_MS / 4));
-  const idleSweepTimer = setInterval(() => {
-    void lifecycle.idleEvictSweep().catch((e) => {
-      logger.error("[supervisor] idle-evict sweep threw", { error: e instanceof Error ? e.message : String(e) });
-    });
-  }, sweepIntervalMs);
-  // Don't let the sweep timer keep the process alive on its own.
-  if (typeof idleSweepTimer.unref === "function") idleSweepTimer.unref();
-  logger.info("[supervisor] idle-evict sweep started", { intervalMs: sweepIntervalMs });
+  const idleSweepTimer = startSweep("idle-evict sweep", sweepIntervalMs, () => lifecycle.idleEvictSweep());
 
   // ── Liveness sweep timer (SC-006, FR-014/FR-015) ───────────────────────────
   // Crash-detection SAFETY NET for RE-ADOPTED workers. A worker spawned by THIS
@@ -575,13 +590,7 @@ const main = async () => {
   // forever. The policy (who is watcher-covered) lives in the lifecycle; the binary
   // owns the schedule. Watcher-covered workers are skipped, so this is a no-op once
   // every adopted worker has been replaced by a spawned (watched) one.
-  const livenessSweepTimer = setInterval(() => {
-    void lifecycle.livenessSweep().catch((e) => {
-      logger.error("[supervisor] liveness sweep threw", { error: e instanceof Error ? e.message : String(e) });
-    });
-  }, config.WORKER_LIVENESS_SWEEP_MS);
-  if (typeof livenessSweepTimer.unref === "function") livenessSweepTimer.unref();
-  logger.info("[supervisor] liveness sweep started", { intervalMs: config.WORKER_LIVENESS_SWEEP_MS });
+  const livenessSweepTimer = startSweep("liveness sweep", config.WORKER_LIVENESS_SWEEP_MS, () => lifecycle.livenessSweep());
 
   // SC-006 / FR-020: re-adopt still-live workers BEFORE serving.
   const readopt = await lifecycle.reconcileReadopt();

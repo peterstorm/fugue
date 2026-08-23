@@ -42,6 +42,28 @@ export function emitRoutingDecisions(
   const routingDecisions = new Map<NodeId, Decision>();
   const confidenceValues = new Map<NodeId, Confidence | null>();
 
+  /**
+   * THE one routing-failure emission (round-38 cs-2, replacing three
+   * near-copies). Each site differs only in the node it blames, the typed error
+   * and the display text.
+   */
+  const emitNodeError = (
+    nodeId: NodeId,
+    error: string,
+    frameworkError: FrameworkError,
+  ): void => {
+    emit(nodeCtx, {
+      type: "node-error",
+      runId: nodeCtx.runId,
+      dagId,
+      nodeId,
+      sideEffects: nodeMap.get(nodeId)?.sideEffects,
+      timestamp: stamp(),
+      error,
+      frameworkError,
+    });
+  };
+
   for (const nodeId of waveNodeIds) {
     if (!newOutputs.has(nodeId)) continue;
     const outgoing = machineCtx.outgoingByNode.get(nodeId) ?? [];
@@ -59,16 +81,7 @@ export function emitRoutingDecisions(
       if (!outputCheck.success) {
         const message = `output schema validation failed before predicate evaluation for node '${nodeId}': ${outputCheck.error.message}`;
         const schemaErr: FrameworkError = { kind: "predicate-malformed", nodeId, message };
-        emit(nodeCtx, {
-          type: "node-error",
-          runId: nodeCtx.runId,
-          dagId,
-          nodeId,
-          sideEffects: nodeDef.sideEffects,
-          timestamp: stamp(),
-          error: message,
-          frameworkError: schemaErr,
-        });
+        emitNodeError(nodeId, message, schemaErr);
         return {
           decisions: routingDecisions,
           confidenceValues,
@@ -85,16 +98,7 @@ export function emitRoutingDecisions(
       } catch (e) {
         const message = `confidence.extract failed for node '${nodeId}': ${e instanceof Error ? e.message : e}`;
         const crashErr: FrameworkError = { kind: "node-crash", nodeId, retriability: "non-retriable", message };
-        emit(nodeCtx, {
-          type: "node-error",
-          runId: nodeCtx.runId,
-          dagId,
-          nodeId,
-          sideEffects: nodeMap.get(nodeId)?.sideEffects,
-          timestamp: stamp(),
-          error: message,
-          frameworkError: crashErr,
-        });
+        emitNodeError(nodeId, message, crashErr);
         return {
           decisions: routingDecisions,
           confidenceValues,
@@ -111,16 +115,7 @@ export function emitRoutingDecisions(
         nodeId: decision.fromNodeId,
         message: decision.message,
       };
-      emit(nodeCtx, {
-        type: "node-error",
-        runId: nodeCtx.runId,
-        dagId,
-        nodeId,
-        sideEffects: nodeMap.get(nodeId)?.sideEffects,
-        timestamp: stamp(),
-        error: `predicate-malformed: ${decision.message}`,
-        frameworkError: predErr,
-      });
+      emitNodeError(nodeId, `predicate-malformed: ${decision.message}`, predErr);
       return {
         decisions: routingDecisions,
         confidenceValues,

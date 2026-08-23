@@ -222,6 +222,37 @@ describe("validateDagShape", () => {
     }
   });
 
+  it("rejects a retryLimits key that names no node in the DAG (type-design-analyzer-7)", () => {
+    // `retryLimits` is a raw string-keyed record on the authoring surface and a
+    // branded key type does not survive `Record<NodeId, number>` — TypeScript
+    // erases it to a string index signature. So a typo can only be caught here,
+    // and unchecked it silently no-ops: the node quietly runs on
+    // `defaultRetryLimit ?? 0` instead of the budget its author configured.
+    const r = validateDagShape({
+      id: "typo-limits",
+      nodes: { A: mkNode("A") },
+      edges: [{ from: DAG_INPUT, to: "A" }],
+      retryLimits: { Ay: 5 },
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok && r.error.kind === "validation") {
+      expect(r.error.message).toContain("retryLimits['Ay'] names no node");
+    } else {
+      throw new Error(`expected a validation error for the unknown retryLimits key, got ${r.ok ? "ok" : r.error.kind}`);
+    }
+  });
+
+  it("still accepts a retryLimits key that names a real node", () => {
+    expect(
+      validateDagShape({
+        id: "good-limits",
+        nodes: { A: mkNode("A"), B: mkNode("B") },
+        edges: [{ from: DAG_INPUT, to: "A" }, { from: "A", to: "B" }],
+        retryLimits: { A: 1, B: 2 },
+      }).ok,
+    ).toBe(true);
+  });
+
   it("accepts boundary-legal retryLimits/defaultRetryLimit and single-element ladders", () => {
     const dag: DagDefInput = {
       id: "ok-retry-budgets",

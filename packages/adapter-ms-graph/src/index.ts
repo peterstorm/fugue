@@ -167,9 +167,6 @@ const buildSignal = (opts: ReadOpts | undefined, timeoutMs: number): AbortSignal
   return AbortSignal.any(signals);
 };
 
-/** Percent-encode each path segment while preserving `/` separators. */
-const encodePath = encodePathSegments;
-
 /**
  * Encode a sharing URL into a Graph share token (`u!{base64url}`), per the
  * Graph `/shares` addressing scheme. Exported for testing.
@@ -196,8 +193,8 @@ export const resolveUrls = (
       return ok({ content: `${item}/content`, metadata: item });
     })
     .with({ kind: "sharePointPath" }, (r) => {
-      const site = `${base}/sites/${encodeURIComponent(r.siteHostname)}:/${encodePath(r.sitePath)}:`;
-      const item = `${site}/drive/root:/${encodePath(r.filePath)}`;
+      const site = `${base}/sites/${encodeURIComponent(r.siteHostname)}:/${encodePathSegments(r.sitePath)}:`;
+      const item = `${site}/drive/root:/${encodePathSegments(r.filePath)}`;
       return ok({ content: `${item}:/content`, metadata: item });
     })
     .with({ kind: "shareUrl" }, (r) => {

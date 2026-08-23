@@ -48,6 +48,8 @@ import { describe, it, expect } from "bun:test";
 import { proveResumeAgreement } from "../file/resume-proof.js";
 import type { ResumeProofArgs } from "../file/resume-proof.js";
 import { serializeFileCheckpoint } from "../file/checkpoint-record.js";
+import { rawCheckpointJson } from "../file/event-log.js";
+import type { RawCheckpointJson } from "../file/event-log.js";
 import type { Machine, RecordedEvent } from "../state-machine/types.js";
 import { toJson } from "../state-machine/serialize.js";
 import type { Result } from "../types/result.js";
@@ -93,23 +95,34 @@ const stepLog = (count: number): readonly RecordedEvent<unknown>[] =>
   Array.from({ length: count }, (_, i) => recorded({ type: "STEP" }, (i + 1) * 1_000));
 
 /** Serialize a checkpoint exactly as `serializeFileCheckpoint` would. */
-const checkpointJson = (state: S, context: C): string =>
-  toJson({ schemaVersion: 1, data: { state, context } });
+const checkpointJson = (state: S, context: C): RawCheckpointJson =>
+  rawCheckpointJson(toJson({ schemaVersion: 1, data: { state, context } }));
 
-/** The proof under test with sane defaults; tests override what they probe. */
+/**
+ * The proof under test with sane defaults; tests override what they probe.
+ *
+ * `checkpointJson` is branded `RawCheckpointJson` on the real seam (it is minted
+ * at the byte read in `event-log.ts`), so hand-written corpora mint it here —
+ * the brand marks "not yet strict-parsed", which is exactly what these fixtures
+ * are.
+ */
 const prove = (
-  overrides: Partial<ResumeProofArgs<S, E, C>>,
-): Result<{ state: S; context: C }, FrameworkError> =>
-  proveResumeAgreement<S, E, C>({
+  overrides: Partial<Omit<ResumeProofArgs<S, E, C>, "checkpointJson">> & {
+    readonly checkpointJson?: string | null;
+  },
+): Result<{ state: S; context: C }, FrameworkError> => {
+  const { checkpointJson: raw, ...rest } = overrides;
+  return proveResumeAgreement<S, E, C>({
     runId: runId("pure-proof"),
     directory: "run/pure-proof",
     events: [],
-    checkpointJson: null,
     machine,
     genesis: genesis(),
     parseCheckpoint,
-    ...overrides,
+    ...rest,
+    checkpointJson: raw === undefined || raw === null ? null : rawCheckpointJson(raw),
   });
+};
 
 // ---------------------------------------------------------------------------
 // Full agreement — the checkpoint equals the full replay (ADR-0077 step 6)
@@ -571,10 +584,12 @@ describe("proveResumeAgreement — checkpoint envelope decode gates", () => {
       runId: runId("pure-canonical-tags"),
       directory: "run/pure-proof",
       events: [recorded({ type: "ADVANCE" })],
-      checkpointJson: toJson({
-        schemaVersion: 1,
-        data: { state: taggedState(1), context: taggedContext(1) },
-      }),
+      checkpointJson: rawCheckpointJson(
+        toJson({
+          schemaVersion: 1,
+          data: { state: taggedState(1), context: taggedContext(1) },
+        }),
+      ),
       machine: taggedMachine,
       genesis: { state: taggedState(0), context: taggedContext(0) },
       parseCheckpoint(data) {

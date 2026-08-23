@@ -35,7 +35,7 @@ import {
   NODE_KIND_TO_SPAN_TYPE,
   SPAN_TYPE_CHAIN,
 } from "../tracing/semantic-conventions.js";
-import { fwLogger } from "../logger.js";
+import { bestEffort, bestEffortLog } from "./best-effort.js";
 import type { SideEffectProfile } from "../types/side-effects.js";
 import { nodeId as brandNodeId } from "../types/ids.js";
 import { __brandNodeId } from "../types/ids.js";
@@ -72,28 +72,9 @@ export const createDagRunMeta = (): DagRunMeta => ({
   evalJudgeResults: [],
 });
 
-/** Diagnostics are secondary to the modeled node outcome. */
-const bestEffortLog = (
-  level: "debug" | "error",
-  message: string,
-): void => {
-  try {
-    fwLogger()[level](message);
-  } catch {
-    // A broken logger must not replace the primary node failure.
-  }
-};
-
-const bestEffortTelemetry = (operation: string, effect: () => void): void => {
-  try {
-    effect();
-  } catch (error) {
-    bestEffortLog(
-      "debug",
-      `[withTracedNodeSpan] ${operation} failed: ${safeErrorMessage(error)}`,
-    );
-  }
-};
+/** Diagnostics are secondary to the modeled node outcome (see `best-effort.ts`). */
+const bestEffortTelemetry = (operation: string, effect: () => void): void =>
+  bestEffort("[withTracedNodeSpan]", operation, effect);
 
 const FALLBACK_NODE_SPAN = trace.wrapSpanContext(INVALID_SPAN_CONTEXT);
 

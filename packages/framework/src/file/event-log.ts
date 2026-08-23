@@ -198,6 +198,27 @@ const failure = (operation: FileOperation, reason: StrictReadFailure): Framework
   fileCacheError(operation, reason.message, reason.permanent === true ? "permanent" : undefined);
 
 /**
+ * The unvalidated `checkpoint.json` bytes, branded so the "must strict-parse
+ * before trusting" obligation is visible in the type instead of only in a doc
+ * comment: `RawCheckpointJson` cannot be produced from arbitrary strings by
+ * accident — it is minted only at the byte-read site below, which is the ONE
+ * seam both the journal's store-shaped `readCheckpoint` and the ADR-0077
+ * resume proof read through.
+ */
+export type RawCheckpointJson = string & {
+  readonly __rawCheckpointJson: unique symbol;
+};
+
+/**
+ * Mint the raw-checkpoint brand at the byte-read boundary (and in tests that
+ * compare read bytes against written bytes). Not a validation gate — the strict
+ * parse is the consumer's job, and that obligation is exactly what the brand
+ * makes visible.
+ */
+export const rawCheckpointJson = (value: string): RawCheckpointJson =>
+  value as RawCheckpointJson;
+
+/**
  * Raw read of the checkpoint projection (`<directory>/checkpoint.json` — the
  * `writeCheckpoint` shape). Returns `null` on ENOENT-only absence; every
  * other read failure throws a typed `cache-error` named `readCheckpoint`
@@ -206,9 +227,9 @@ const failure = (operation: FileOperation, reason: StrictReadFailure): Framework
  * transport — the shared reader, FR-009/ADR-0080). Decoding is the proof's
  * job, never this seam's.
  */
-export const readCheckpointFile = (directory: string): string | null => {
+export const readCheckpointFile = (directory: string): RawCheckpointJson | null => {
   try {
-    return readFileSync(join(directory, CHECKPOINT_FILE), "utf-8");
+    return rawCheckpointJson(readFileSync(join(directory, CHECKPOINT_FILE), "utf-8"));
   } catch (error) {
     // Absence is ENOENT ONLY: `existsSync` swallows EACCES/ENOTDIR and
     // would misreport a permission-broken directory as "no checkpoint".

@@ -106,20 +106,25 @@ export function createBullMQBackend(
 
   const bullConnection: ConnectionOptions = redisConnection;
 
+  /**
+   * ONE positive-integer range guard for the two option fields that carry one
+   * (round-38 cs-14). Both are counts BullMQ would otherwise accept as `0`,
+   * `1.5` or `NaN` and then behave undefinedly on, so both fail loudly at the
+   * call that supplied them.
+   */
+  const assertPositiveInteger = (field: string, value: number | undefined): void => {
+    if (value !== undefined && (!Number.isInteger(value) || value < 1)) {
+      throw new RangeError(`${field} must be a finite integer >= 1, got ${value}`);
+    }
+  };
+
   // Track every queue/worker so close() can wait on all of them.
   const queues = new Set<Queue<any, any, string>>();
   const workers = new Set<Worker<any>>();
   let closed = false;
 
   function createQueue<S, C>(name: string, opts?: QueueOpts): QueueHandle<S, C> {
-    if (
-      opts?.defaultAttempts !== undefined &&
-      (!Number.isInteger(opts.defaultAttempts) || opts.defaultAttempts < 1)
-    ) {
-      throw new RangeError(
-        `defaultAttempts must be a finite integer >= 1, got ${opts.defaultAttempts}`,
-      );
-    }
+    assertPositiveInteger("defaultAttempts", opts?.defaultAttempts);
 
     // Use `any` for BullMQ internals — the public API is typed via QueueHandle<S, C>
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -181,14 +186,7 @@ export function createBullMQBackend(
     process: (job: JobLike<S, unknown, C>) => Promise<void>,
     opts?: WorkerOpts,
   ): WorkerHandle {
-    if (
-      opts?.concurrency !== undefined &&
-      (!Number.isInteger(opts.concurrency) || opts.concurrency < 1)
-    ) {
-      throw new RangeError(
-        `concurrency must be a finite integer >= 1, got ${opts.concurrency}`,
-      );
-    }
+    assertPositiveInteger("concurrency", opts?.concurrency);
 
     const worker = new Worker<{ state: S; context: C }>(
       name,

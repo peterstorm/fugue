@@ -79,18 +79,23 @@ const validateApproveEdit = (
  * the hook returns `pending`). Only the retrying-hook branch prepends a sleep —
  * that lives at the call site.
  */
+/**
+ * The human-review hook the executor calls when a node's wave suspends. Declared
+ * once (round-38 cs-3) rather than inlined at both the private helper and the
+ * public `buildDagExecutor` signature, so the two can never drift.
+ */
+export type OnHumanReviewHook = (req: {
+  nodeId: NodeId;
+  output: unknown;
+  prompt: string;
+}) => Promise<import("./types.js").HumanReviewOutcome>;
+
 const callHumanReviewHook = async (
   phaseKind: "awaiting-human" | "retrying-hook" | "suspended",
   nodeId: NodeId,
   output: unknown,
   prompt: string,
-  hooks: {
-    onHumanReview?: (req: {
-      nodeId: NodeId;
-      output: unknown;
-      prompt: string;
-    }) => Promise<import("./types.js").HumanReviewOutcome>;
-  } | undefined,
+  hooks: { onHumanReview?: OnHumanReviewHook } | undefined,
   nodeMap: Map<NodeId, NodeDef<unknown, unknown>>,
   nodeCtx: NodeContext,
   dagId: DagId,
@@ -203,11 +208,7 @@ export const buildDagExecutor = (
   dag: DagDef,
   nodeCtx: ValidatedNodeContext,
   hooks?: {
-    onHumanReview?: (req: {
-      nodeId: NodeId;
-      output: unknown;
-      prompt: string;
-    }) => Promise<import("./types.js").HumanReviewOutcome>;
+    onHumanReview?: OnHumanReviewHook;
     /** Called once per wave with the per-node outcomes; the caller folds them into run-level meta. */
     recordOutcomes?: (outcomes: readonly NodeSpanOutcome[]) => void;
     /**

@@ -993,6 +993,49 @@ describe("createFileJournal.appendEvent — writer-side readdir failure (ADR-008
   });
 });
 
+describe("createFileJournal.appendEvent — per-entry stat failure in the writer's listing (ADR-0080)", () => {
+  // pr-test-analyzer-3. `listEventFiles`'s per-entry `statSync(entryPath)` catch
+  // is a SEPARATE error-mapping path from the directory-level `readdirSync`
+  // EACCES branch (0o300, above) and the "not a regular file" branch: readdir
+  // succeeds, the name parses, and the stat itself fails. A dangling symlink
+  // reaches it deterministically and without root-sensitivity — `statSync`
+  // FOLLOWS symlinks, so the missing target surfaces as ENOENT at exactly that
+  // call, where a `chmod` technique would have failed earlier at the lock mkdir.
+  it("a dangling symlink wearing a valid record name fails the append typed, naming the run directory", async () => {
+    const dir = tempDir();
+    const journal = createFileJournal(dir);
+    await journal.appendEvent({ type: "A" }, "k0");
+
+    const eventsDir = join(dir, EVENTS_DIR);
+    const dangling = join(eventsDir, `000001-${"a".repeat(64)}.json`);
+    symlinkSync(join(eventsDir, "target-that-does-not-exist"), dangling);
+
+    let error: unknown;
+    try {
+      await journal.appendEvent({ type: "B" }, "k1");
+    } catch (e) {
+      error = e;
+    }
+
+    expect(error).toBeDefined();
+    const typed = asCacheError(error as FrameworkError);
+    expect(typed.operation).toBe("appendEvent");
+    expect(typed.message).toContain(dir);
+    expect(typed.message).toMatch(/ENOENT|no such file/i);
+    // An unstatable entry is the ENVIRONMENT class (restoring the target clears
+    // it), unlike the deterministic name-contract and non-regular-file squats
+    // this same loop pins "permanent".
+    expect(typed.failureClass).toBeUndefined();
+
+    // The append did NOT land: a listing the writer cannot verify must never
+    // be used to assign a sequence. Only the original record and the dangling
+    // symlink wear a `.json` name; no `000002-…` record was committed.
+    const records = readdirSync(eventsDir).filter((n) => n.endsWith(".json")).sort();
+    expect(records).toHaveLength(2);
+    expect(records.some((n) => n.startsWith("000002-"))).toBe(false);
+  });
+});
+
 describe("createFileJournal.appendEvent — events-dir creation failure (ADR-0080)", () => {
   it("a FILE squatting the events path (ENOTDIR) fails the first append typed with the run directory named", async () => {
     const dir = tempDir();

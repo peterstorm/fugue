@@ -14,7 +14,7 @@ import type {
 import {
   TTL_SECONDS,
   evaluateCheckpointLoadGates,
-  guardedCheckpointClockRead,
+  standardCheckpointClockRead,
   parseNodeStateRecord,
   parseRunMetaRecord,
   reportCorruptCheckpointEntry,
@@ -22,7 +22,7 @@ import {
 } from "./checkpointer.js";
 import { FRAMEWORK_VERSION } from "./fingerprint.js";
 import { frameworkError } from "../types/error-factories.js";
-import { safeDiagnosticRender, safeErrorMessage } from "../types/safe-error.js";
+import { safeErrorMessage } from "../types/safe-error.js";
 import { fwLogger } from "../logger.js";
 
 interface StoredMeta {
@@ -143,18 +143,7 @@ export class RedisCheckpointer implements Checkpointer {
     operation: "setMeta" | "load",
     runId: RunId,
   ): Result<number, FrameworkError> {
-    // ONE encoding with the in-memory and file twins (round-23 cs-2): the
-    // guard structure, representability gate, and "permanent" classification
-    // live in the checkpoint core; the twin adapters' pins keep their
-    // byte-identical messages through this adapter's renderers below.
-    return guardedCheckpointClockRead({
-      operation,
-      runId,
-      now: () => this.now(),
-      render: safeDiagnosticRender,
-      cacheError: (op, message) => frameworkError.cacheError(`checkpoint:${op}`, message, "permanent"),
-      throwMessage: safeErrorMessage,
-    });
+    return standardCheckpointClockRead(operation, runId, () => this.now());
   }
 
   async load(

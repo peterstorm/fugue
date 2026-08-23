@@ -175,28 +175,33 @@ export type { AuthEnv } from "../env.js";
  * 4. Hash token → Redis lookup → identity = team
  * 5. Not found → 401
  */
+/**
+ * The shared bearer-challenge 401. ONE encoding (round-38 cs-18) of the
+ * status + `WWW-Authenticate` pair the header-shape rejections all owe the
+ * caller: a challenge omitted from one of them would leave a client unable to
+ * tell it should retry with credentials.
+ */
+const bearerChallenge = (c: Context, message: string): Response =>
+  errorResponse(c, 401, "unauthorized", message, {
+    headers: { "WWW-Authenticate": "Bearer" },
+  });
+
 export const createAuthMiddleware = (deps: AuthMiddlewareDeps) => {
   return async (c: Context, next: Next): Promise<Response | void> => {
     const authHeader = c.req.header("Authorization");
 
     if (!authHeader) {
-      return errorResponse(c, 401, "unauthorized", "Missing Authorization header", {
-        headers: { "WWW-Authenticate": "Bearer" },
-      });
+      return bearerChallenge(c, "Missing Authorization header");
     }
 
     if (!authHeader.startsWith("Bearer ")) {
-      return errorResponse(c, 401, "unauthorized", "Authorization header must use Bearer scheme", {
-        headers: { "WWW-Authenticate": "Bearer" },
-      });
+      return bearerChallenge(c, "Authorization header must use Bearer scheme");
     }
 
     const token = authHeader.slice(7); // "Bearer ".length
 
     if (token.length === 0) {
-      return errorResponse(c, 401, "unauthorized", "Empty bearer token", {
-        headers: { "WWW-Authenticate": "Bearer" },
-      });
+      return bearerChallenge(c, "Empty bearer token");
     }
 
     // Path 1: Admin token (constant-time, no Redis)
