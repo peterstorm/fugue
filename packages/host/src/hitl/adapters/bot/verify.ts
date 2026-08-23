@@ -13,6 +13,7 @@
  * the security-critical parsing/classification is unit-tested directly.
  */
 
+import { lazyJwks, type JwksResolver } from "../../../adapters/lazy-jwks.js";
 import { ok, err } from "@fuguejs/framework";
 import type { BotAuthError, VerifyBotToken } from "./ports.js";
 
@@ -66,27 +67,17 @@ interface BotVerifyConfig {
 }
 
 export const createBotTokenVerifier = (config: BotVerifyConfig): VerifyBotToken => {
-  // Lazily-initialised remote JWKS set (cached across calls; jose caches keys
-  // and refreshes on rotation internally).
-  let jwksPromise: Promise<(protectedHeader: unknown, token: unknown) => Promise<unknown>> | null = null;
-
-  const getJwks = async () => {
-    if (jwksPromise === null) {
-      jwksPromise = (async () => {
-        const jose = await import("jose");
-        const meta = await fetch(OPENID_CONFIG_URL);
-        if (!meta.ok) throw new Error(`openid metadata HTTP ${meta.status}`);
-        const { jwks_uri } = (await meta.json()) as { jwks_uri?: string };
-        if (typeof jwks_uri !== "string") throw new Error("openid metadata missing jwks_uri");
-        return jose.createRemoteJWKSet(new URL(jwks_uri)) as unknown as (p: unknown, t: unknown) => Promise<unknown>;
-      })().catch((e) => {
-        // Reset so a transient metadata failure can be retried on the next call.
-        jwksPromise = null;
-        throw e;
-      });
-    }
-    return jwksPromise;
-  };
+  // Lazily-initialised remote JWKS set — single-flight, reset on failure so a
+  // transient metadata outage is retried rather than wedging the verifier (see
+  // `lazyJwks`). `jose` caches keys and refreshes on rotation internally.
+  const getJwks = lazyJwks(async () => {
+    const jose = await import("jose");
+    const meta = await fetch(OPENID_CONFIG_URL);
+    if (!meta.ok) throw new Error(`openid metadata HTTP ${meta.status}`);
+    const { jwks_uri } = (await meta.json()) as { jwks_uri?: string };
+    if (typeof jwks_uri !== "string") throw new Error("openid metadata missing jwks_uri");
+    return jose.createRemoteJWKSet(new URL(jwks_uri)) as unknown as JwksResolver;
+  });
 
   return async (authHeader) => {
     const token = bearer(authHeader);

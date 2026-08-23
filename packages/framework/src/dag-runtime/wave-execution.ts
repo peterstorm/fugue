@@ -18,8 +18,7 @@
 import type { DagDef } from "../types/dag.js";
 import type { NodeDef, ValidatedNodeContext } from "../types/node.js";
 import type { MintingAuthority } from "../types/capability-broker.js";
-import { isFrameworkError, messageOf, type FrameworkError } from "../types/errors.js";
-import { safeErrorMessage } from "../types/safe-error.js";
+import { messageOf, asNodeFrameworkError, type FrameworkError } from "../types/errors.js";
 import type { NodeId } from "../types/ids.js";
 import { nodeId } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
@@ -154,14 +153,7 @@ export const executeWave = async (
         );
         return { nodeId, result, outcome };
       } catch (caught) {
-        const frameworkError: FrameworkError = isFrameworkError(caught)
-          ? caught
-          : {
-              kind: "node-crash",
-              nodeId,
-              message: safeErrorMessage(caught),
-              retriability: "non-retriable",
-            };
+        const frameworkError = asNodeFrameworkError(caught, nodeId);
         emit(nodeCtx, {
           type: "node-error",
           runId: nodeCtx.runId,

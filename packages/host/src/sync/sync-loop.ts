@@ -28,7 +28,7 @@ import type { Result, GitSha } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { Registry } from "../domain/registry.js";
 import { freeze } from "../domain/registry.js";
-import type { GitPort, ModuleLoaderPort, Clock } from "../ports.js";
+import type { GitPort, ModuleLoaderPort, Clock, BulkLoadResult } from "../ports.js";
 import { loadResultToRegisteredDag } from "../domain/dag-factory.js";
 import type { HostTimeoutDefaults } from "../domain/dag-factory.js";
 
@@ -111,6 +111,58 @@ export interface SyncLoopHandle {
  * 5. Discover + load all DAGs
  * 6. Build the new registry
  */
+/**
+ * Load every DAG at `sha`, isolate per-DAG load failures, and freeze the result
+ * into an immutable registry.
+ *
+ * ONE definition shared by `initialSync` and `executeSyncCycle`. Both perform the
+ * same four steps — loadAll, warn per isolated failure, map to registered DAGs,
+ * freeze — and both then log the same counts. Keeping two copies risked the
+ * initial boot and the steady-state refresh disagreeing about what a "loaded"
+ * registry is, which is precisely the drift that would show up as a DAG present
+ * after boot but absent after the first sync (or the reverse).
+ *
+ * `label` distinguishes the two completion log lines ("Sync complete" vs
+ * "Initial sync complete"), which operators grep for separately.
+ */
+const loadRegistryAt = async (
+  sha: GitSha,
+  label: string,
+  deps: {
+    readonly loader: ModuleLoaderPort;
+    readonly config: SyncConfig;
+    readonly clock: Clock;
+    readonly logger: SyncLogger;
+  },
+): Promise<{
+  readonly registry: Registry;
+  /** The isolated per-DAG load failures, forwarded verbatim to the sync outcome. */
+  readonly errors: BulkLoadResult["errors"];
+}> => {
+  const { loader, config, clock, logger } = deps;
+  const bulkResult = await loader.loadAll(config.repoPath, sha);
+
+  // Per-DAG load failures are ISOLATED: one broken DAG must not take the whole
+  // registry down, so each is warned and the rest still load.
+  for (const loadError of bulkResult.errors) {
+    logger.warn(`DAG load failed (isolated): ${loadError.path}`, { error: loadError.error });
+  }
+
+  const now = clock();
+  const registeredDags = bulkResult.loaded.map((lr) =>
+    loadResultToRegisteredDag(lr, sha, now, config.hostTimeoutDefaults),
+  );
+  const registry = freeze(registeredDags, sha, now);
+
+  logger.info(`${label}: ${bulkResult.loaded.length} DAGs loaded`, {
+    sha,
+    loaded: bulkResult.loaded.length,
+    errors: bulkResult.errors.length,
+  });
+
+  return { registry, errors: bulkResult.errors };
+};
+
 export const executeSyncCycle = async (
   git: GitPort,
   loader: ModuleLoaderPort,
@@ -188,35 +240,19 @@ export const executeSyncCycle = async (
     }
   }
 
-  // Step 5: Discover and load all DAGs
-  const bulkResult = await loader.loadAll(config.repoPath, currentSha);
-
-  if (bulkResult.errors.length > 0) {
-    for (const loadError of bulkResult.errors) {
-      logger.warn(`DAG load failed (isolated): ${loadError.path}`, {
-        error: loadError.error,
-      });
-    }
-  }
-
-  // Step 6: Build new registry
-  const now = clock();
-  const registeredDags = bulkResult.loaded.map((lr) =>
-    loadResultToRegisteredDag(lr, currentSha, now, config.hostTimeoutDefaults),
-  );
-  const registry = freeze(registeredDags, currentSha, now);
-
-  logger.info(`Sync complete: ${bulkResult.loaded.length} DAGs loaded`, {
-    sha: currentSha,
-    loaded: bulkResult.loaded.length,
-    errors: bulkResult.errors.length,
+  // Steps 5 + 6: discover, load (isolating per-DAG failures) and freeze.
+  const { registry, errors } = await loadRegistryAt(currentSha, "Sync complete", {
+    loader,
+    config,
+    clock,
+    logger,
   });
 
   return {
     kind: "updated",
     newSha: currentSha,
     registry,
-    errors: bulkResult.errors,
+    errors,
   };
 };
 
@@ -366,27 +402,11 @@ export const initialSync = async (
 
   const sha = shaResult.value;
 
-  // Load all DAGs
-  const bulkResult = await loader.loadAll(config.repoPath, sha);
-
-  if (bulkResult.errors.length > 0) {
-    for (const loadError of bulkResult.errors) {
-      logger.warn(`DAG load failed (isolated): ${loadError.path}`, {
-        error: loadError.error,
-      });
-    }
-  }
-
-  const now = clock();
-  const registeredDags = bulkResult.loaded.map((lr) =>
-    loadResultToRegisteredDag(lr, sha, now, config.hostTimeoutDefaults),
-  );
-  const registry = freeze(registeredDags, sha, now);
-
-  logger.info(`Initial sync complete: ${bulkResult.loaded.length} DAGs loaded`, {
-    sha,
-    loaded: bulkResult.loaded.length,
-    errors: bulkResult.errors.length,
+  const { registry } = await loadRegistryAt(sha, "Initial sync complete", {
+    loader,
+    config,
+    clock,
+    logger,
   });
 
   return ok({ registry, sha });

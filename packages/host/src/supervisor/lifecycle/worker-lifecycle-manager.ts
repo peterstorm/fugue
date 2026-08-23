@@ -292,6 +292,55 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     if (!r.ok) logger.warn("[worker-lifecycle] registry remove failed (continuing)", { tenant });
   };
 
+  /**
+   * Abandon a spawn in progress: forget the map entry, then SIGKILL the process
+   * we started.
+   *
+   * ONE definition for `lazySpawn`'s abort branches (UDS never came up, the
+   * `spawning` entry vanished under us, the `workerLive` transition was rejected,
+   * the registry write failed). Deleting the entry BEFORE signalling is
+   * load-bearing: the crash-exit watcher keys on "is the map entry still THIS
+   * incarnation?", so a deliberate abort SIGKILL must not be readable as a crash
+   * and trigger a respawn.
+   *
+   * `orphanRisk` says whether a FAILED kill would leave a process still bound to
+   * the tenant's UDS while the slot already reads as reclaimed — true once a
+   * registry record existed, false while the spawn was never announced.
+   */
+  const abortSpawn = async (
+    tenant: TenantId,
+    pid: number,
+    orphanRisk: boolean,
+  ): Promise<Result<never, HostError>> => {
+    workers.delete(tenant);
+    await signalWorker(tenant, pid, "SIGKILL", orphanRisk);
+    return err(workerUnavailable(tenant));
+  };
+
+  /**
+   * Immediate revoke of a running worker: forget it, drop its registry record,
+   * then SIGTERM+SIGKILL back-to-back with NO intervening wait.
+   *
+   * ONE definition for `evict` (multi-tenant spec FR-029 / NFR-012) and
+   * `idleEvictSweep` (AD-7), which are the same teardown with different triggers.
+   * This is deliberately NOT graceful — that is `drain()`'s job (SIGTERM only,
+   * terminal cleanup deferred to `drainComplete` on actual exit). SIGTERM is the
+   * polite first signal; SIGKILL guarantees the slot is reclaimed even if the
+   * worker ignores it, so the live-worker count (FR-033) cannot under-count.
+   * Both are idempotent on a dead pid.
+   *
+   * Entry and record are removed FIRST (same crash-watcher reason as
+   * `abortSpawn`), which is exactly why a failed SIGKILL is orphan-risk: the slot
+   * reads as reclaimed while a process may still hold the UDS.
+   */
+  const hardStopAndForget = async (tenant: TenantId, pid: number | undefined): Promise<void> => {
+    workers.delete(tenant);
+    await removeRecord(tenant);
+    if (pid === undefined) return;
+    await signalWorker(tenant, pid, "SIGTERM", false);
+    await signalWorker(tenant, pid, "SIGKILL", true);
+  };
+
   /** Wait, bounded, for a worker's UDS to become reachable via the probe. */
   const waitForUds = async (record: WorkerRecord): Promise<boolean> => {
     const deadline = clock() + config.spawnReadyTimeoutMs;
@@ -420,11 +469,8 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     const ready = await waitForUds(probeRecord);
     if (!ready) {
       logger.warn("[worker-lifecycle] worker UDS did not become ready in time — killing + worker-unavailable", { tenant, pid: handle.pid });
-      workers.delete(tenant);
-      // No live slot/registry record was ever taken for this incarnation, but a
-      // failed kill still leaks the spawned process — surface it (warn).
-      await signalWorker(tenant, handle.pid, "SIGKILL", false);
-      return err(workerUnavailable(tenant));
+      // No live slot/registry record was ever taken for this incarnation.
+      return abortSpawn(tenant, handle.pid, false);
     }
 
     // Pure transition spawning → live.
@@ -433,15 +479,12 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
       // The entry was concurrently replaced (e.g. an evict) — fail closed for
       // this request rather than resurrect a stale spawn.
       logger.warn("[worker-lifecycle] spawning state vanished before workerLive — refusing", { tenant });
-      await signalWorker(tenant, handle.pid, "SIGKILL", false);
-      return err(workerUnavailable(tenant));
+      return abortSpawn(tenant, handle.pid, false);
     }
     const liveResult = lifecycle.workerLive(current, handle.pid, udsPath, clock());
     if (!liveResult.ok) {
       logger.error("[worker-lifecycle] workerLive transition rejected (invariant)", { tenant });
-      workers.delete(tenant);
-      await signalWorker(tenant, handle.pid, "SIGKILL", false);
-      return err(workerUnavailable(tenant));
+      return abortSpawn(tenant, handle.pid, false);
     }
     workers.set(tenant, liveResult.value);
     // FAIL CLOSED: a live worker with no durable registry record is a permanent
@@ -456,11 +499,8 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
         "[worker-lifecycle] registry put failed for a live worker — killing it rather than leaving an unreadoptable orphan",
         { tenant, pid: handle.pid, error: formatHostError(persisted.error) },
       );
-      workers.delete(tenant);
-      // The entry is gone, so a failed kill leaks a process still bound to the
-      // UDS while the slot reads as reclaimed — orphan-risk (error).
-      await signalWorker(tenant, handle.pid, "SIGKILL", true);
-      return err(workerUnavailable(tenant));
+      // A registry record may exist, so a failed kill is orphan-risk (error).
+      return abortSpawn(tenant, handle.pid, true);
     }
 
     // EXIT WATCHER (multi-tenant spec FR-014/FR-015/FR-017/AD-8): `handle.exited` is the ONLY exit
@@ -661,25 +701,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     // the field) for the deliberate stop signals.
     let pid: number | undefined;
     if (current.phase === "live" || current.phase === "draining") pid = current.pid;
-    // CRITICAL: remove the entry BEFORE signalling. The crash-exit watcher's
-    // guard keys on "is the map entry still THIS live/draining incarnation?";
-    // deleting first guarantees a deliberate evict SIGKILL — which resolves the
-    // worker's `handle.exited` — is NOT misread as a crash (no spurious restart).
-    workers.delete(tenant);
-    await removeRecord(tenant);
-    if (pid !== undefined) {
-      // Immediate revoke (multi-tenant spec FR-029 / NFR-012), NOT a graceful drain: SIGTERM and
-      // SIGKILL fire back-to-back with NO intervening wait — `signalWorker` returns
-      // once the signal is delivered, it does not await `exited` — so this is a HARD
-      // kill. (Graceful "let in-flight work finish" is `drain()`'s job: SIGTERM only,
-      // terminal cleanup deferred to `drainComplete` on actual exit.) SIGTERM is the
-      // polite first signal; SIGKILL guarantees the slot is reclaimed if the worker
-      // ignores it. Both are idempotent on a dead pid. The entry + registry record
-      // were ALREADY removed above, so a failed SIGKILL leaves an orphan still bound
-      // to the UDS while the slot reads as reclaimed — orphan-risk (error).
-      await signalWorker(tenant, pid, "SIGTERM", false);
-      await signalWorker(tenant, pid, "SIGKILL", true);
-    }
+    await hardStopAndForget(tenant, pid);
     return ok(undefined);
   };
 
@@ -735,18 +757,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
       // pinned worker returns err here and is skipped (AD-7).
       const result = lifecycle.idleEvict(state, config.idleEvictMs, clock());
       if (!result.ok) continue;
-      const pid = state.pid;
-      // Remove the entry BEFORE signalling so the crash-exit watcher's guard sees
-      // this is no longer the live incarnation — a deliberate idle-evict SIGTERM
-      // that resolves `handle.exited` must not be misread as a crash (no respawn).
-      workers.delete(tenant);
-      await removeRecord(tenant);
-      // Drain then force-stop (mirrors `evict`): SIGTERM lets an idle worker exit
-      // cleanly, SIGKILL GUARANTEES the slot is reclaimed so the live-worker count
-      // (multi-tenant spec FR-033) cannot under-count a worker that ignores SIGTERM. Entry + record
-      // are already removed, so a failed SIGKILL leaves an orphan — orphan-risk.
-      await signalWorker(tenant, pid, "SIGTERM", false);
-      await signalWorker(tenant, pid, "SIGKILL", true);
+      await hardStopAndForget(tenant, state.pid);
       evicted.push(tenant);
     }
     return evicted;

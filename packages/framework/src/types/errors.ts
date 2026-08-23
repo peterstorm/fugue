@@ -736,3 +736,33 @@ export class FrameworkAugmentedError extends Error {
     this.frameworkErrorJson = JSON.stringify(error);
   }
 }
+
+
+/**
+ * Normalize an arbitrary caught value into a `FrameworkError` attributed to a
+ * node.
+ *
+ * ONE encoding of the "a node threw / returned a non-FrameworkError" rule, used
+ * by every site that converts a raw failure into the modeled node outcome
+ * (`run-node`'s throw and non-Result-error paths, `wave-execution`'s outer
+ * catch). Two decisions in here are easy to get subtly wrong in a copy:
+ *
+ *   - An ALREADY-typed `FrameworkError` passes through UNCHANGED. Re-wrapping it
+ *     would bury a precise `policy-refusal` or `infra-unreachable` — and its
+ *     retriability — under a generic node-crash.
+ *   - An untyped value becomes `non-retriable`. A throw we cannot classify is
+ *     assumed deterministic: replaying it would re-run the node's side effects
+ *     for a failure that will simply happen again.
+ *
+ * `safeErrorMessage` renders the value, so a hostile thrown object cannot throw
+ * again while being described.
+ */
+export const asNodeFrameworkError = (caught: unknown, nodeId: NodeId): FrameworkError =>
+  isFrameworkError(caught)
+    ? caught
+    : {
+        kind: "node-crash",
+        nodeId,
+        retriability: "non-retriable",
+        message: safeErrorMessage(caught),
+      };

@@ -6,7 +6,7 @@
  *
  * Route protection:
  * - /health, /readiness — unauthenticated (k8s probes)
- * - /admin/* — requires admin token
+ * - /admin/* — requires admin token (includes /admin/capabilities/health)
  * - /dags/* — requires any valid token (team or admin), authorization checked per-DAG
  */
 
@@ -23,6 +23,8 @@ import type { RunDagDeps } from "./handlers/run-dag.js";
 import { createGetRunHandler, createApproveRunHandler } from "./handlers/runs.js";
 import { createCreateTeamHandler, createListTeamsHandler, createRevokeTeamHandler } from "./handlers/admin/teams.js";
 import type { AdminHandlerDeps } from "./handlers/admin/teams.js";
+import { createCapabilityHealthHandler } from "./handlers/admin/capabilities.js";
+import type { CapabilityHealthHandlerDeps } from "./handlers/admin/capabilities.js";
 import type { LogPort } from "../ports.js";
 import { errorResponse, hostUnavailableResponse } from "./response.js";
 
@@ -36,6 +38,11 @@ export interface RouterDeps extends RunDagDeps, AuthMiddlewareDeps {
   readonly getHostState: () => HostState;
   readonly logger: LogPort;
   readonly adminHandlerDeps: AdminHandlerDeps;
+  /**
+   * Connected capability handles, for the admin capability-health diagnostic.
+   * Read lazily: the host assigns them during boot, after this router is built.
+   */
+  readonly capabilityHealthDeps: CapabilityHealthHandlerDeps;
   /**
    * Inbound Bot Framework activity handler (ADR-0060). When wired, mounts
    * `POST /teams/messages` BEFORE the team-token auth middleware — Teams
@@ -103,6 +110,11 @@ export const createRouter = (deps: RouterDeps): Hono<HostEnv> => {
   const createTeam = createCreateTeamHandler(deps.adminHandlerDeps);
   const listTeams = createListTeamsHandler(deps.adminHandlerDeps);
   const revokeTeam = createRevokeTeamHandler(deps.adminHandlerDeps);
+
+  // Operator-driven dependency diagnostics (admin-gated — the report names every
+  // wired capability and echoes failure reasons; see the handler's module doc for
+  // why this is deliberately NOT on /health or /readiness).
+  app.get("/admin/capabilities/health", createCapabilityHealthHandler(deps.capabilityHealthDeps));
 
   app.post("/admin/teams", createTeam);
   app.get("/admin/teams", listTeams);

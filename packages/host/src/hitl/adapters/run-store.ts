@@ -22,10 +22,9 @@
  *   making a flat, cross-tenant HITL key unrepresentable.
  */
 
-import { isDeepStrictEqual } from "node:util";
+import { serializeLossless } from "./lossless-json.js";
 import { z } from "zod";
-import { asNonEmptyString, ok, err, PersistedFrameworkErrorSchema, safeErrorMessage, tryRunId, tryNodeId, tryDagId, toJson, fromJson } from "@fuguejs/framework";
-import { assertLosslessEvent } from "@fuguejs/framework/file";
+import { asNonEmptyString, ok, err, PersistedFrameworkErrorSchema, safeErrorMessage, tryRunId, tryNodeId, tryDagId, fromJson } from "@fuguejs/framework";
 import type { NonEmptyString, Result, RunId } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import { markTeam } from "../../domain/auth.js";
@@ -305,23 +304,12 @@ interface RedisRunStoreConfig {
   readonly now?: () => number;
 }
 
-const serializeRunMeta = (meta: RunMeta): Result<string, HostError> => {
-  try {
-    assertLosslessEvent(meta, { operation: "serializeRunMeta", root: "metadata" });
-    const encoded = toJson(meta);
-    const restored = fromJson(encoded);
-    if (!isDeepStrictEqual(restored, meta)) {
-      throw new Error("run metadata failed losslessness round-trip verification");
-    }
-    return ok(encoded);
-  } catch (error) {
-    return err({
-      kind: "internal-invariant-violated",
-      message: `run metadata is not losslessly serializable: ${safeErrorMessage(error)}`,
-      context: {},
-    });
-  }
-};
+const serializeRunMeta = (meta: RunMeta): Result<string, HostError> =>
+  serializeLossless(meta, {
+    operation: "serializeRunMeta",
+    root: "metadata",
+    subject: "run metadata",
+  });
 
 const serializeRunCreationIntent = (
   kind: RunCreationIntent["kind"],
@@ -333,21 +321,12 @@ const serializeRunCreationIntent = (
     metadata,
     checkpoint,
   };
-  try {
-    assertLosslessEvent(intent, { operation: "serializeRunCreationIntent", root: "intent" });
-    const encoded = toJson(intent);
-    const restored = RunCreationIntentSchema.safeParse(fromJson(encoded));
-    if (!restored.success || !isDeepStrictEqual(restored.data, intent)) {
-      throw new Error("run creation intent failed losslessness round-trip verification");
-    }
-    return ok(encoded);
-  } catch (error) {
-    return err({
-      kind: "internal-invariant-violated",
-      message: `run creation intent is not losslessly serializable: ${safeErrorMessage(error)}`,
-      context: {},
-    });
-  }
+  return serializeLossless(intent, {
+    operation: "serializeRunCreationIntent",
+    root: "intent",
+    subject: "run creation intent",
+    schema: RunCreationIntentSchema,
+  });
 };
 
 type DecodedCheckpoint =

@@ -28,6 +28,7 @@
  * @satisfies FR-035 — reuses `createHost`; does not replace the single-tenant path.
  */
 
+import { buildRuntimeDeps } from "./adapters/runtime-capabilities.js";
 import { parseHostConfig } from "./domain/config.js";
 import { workerSocketPath } from "./domain/config.js";
 import type { HostConfig } from "./domain/config.js";
@@ -43,17 +44,11 @@ import {
   WORKER_REDIS_ACL_PASSWORD_ENV,
   parseAclCredential,
 } from "./supervisor/secrets/redis-acl.js";
-import { createBunGitAdapter, createLocalGitAdapter } from "./adapters/git-sync.js";
-import { createModuleLoader } from "./adapters/module-loader.js";
 import { createRedisConnectivity } from "./adapters/redis-connectivity.js";
-import { buildCdratorCapability } from "./adapters/cdrator-capability.js";
-import { buildDocumentsCapability, describeDocumentsAdapter } from "./adapters/documents-capability.js";
-import { buildOracleCapability, connectStringHost } from "./adapters/oracle-capability.js";
 import { closeHitlQueueBackend, createHitlQueueBackend } from "./hitl/queue-backend.js";
-import type { SharedInfra } from "./ports.js";
-import { ok, err, noopTracer, createHttpCapability, systemClock } from "@fuguejs/framework";
-import type { Result, CapabilityHandle } from "@fuguejs/framework";
-import { createHostLlmClient, createJsonConsoleLogger } from "./entrypoint-wiring.js";
+import { ok, err } from "@fuguejs/framework";
+import type { Result } from "@fuguejs/framework";
+import { createJsonConsoleLogger } from "./entrypoint-wiring.js";
 
 // ── Pure bootstrap planner (functional core — unit-testable, no I/O) ──────────
 
@@ -217,55 +212,10 @@ const main = async () => {
   const { port: redisPort, redis, disconnect: disconnectRedis } = redisResult.value;
 
   try {
-    const capabilities: CapabilityHandle[] = [
-      createHttpCapability(),
-      { name: "clock", client: systemClock },
-    ];
-
-    // ADR-0052: optional `documents` capability, selected by environment
-    // (fs / ms-graph) — the SAME shared builder as the single-tenant entry
-    // (main.ts), so the adapter selection can never drift between topologies.
-    // Undefined when unconfigured → a `requires: ["documents"]` DAG fails the
-    // boot-time capability check (zero-regression baseline, same gating as the
-    // oracle / authedHttp capabilities).
-    const documents = await buildDocumentsCapability(config);
-    if (documents !== undefined) {
-      capabilities.push(documents);
-      logger.info(`documents capability: ${describeDocumentsAdapter(config)}`, { tenant });
-    }
-
-    // Optional `authedHttp` capability (FR-060): the generic @fuguejs/http-auth
-    // adapter configured for the CDRator/Oister REST API from CDRATOR_* env.
-    // Same gating as the documents adapter — undefined when CDRATOR_URL is unset.
-    const cdrator = buildCdratorCapability(config);
-    if (cdrator !== undefined) {
-      capabilities.push(cdrator);
-      logger.info(`authedHttp capability: @fuguejs/http-auth targeting ${config.CDRATOR_URL}`, { tenant });
-    }
-
-    // Optional `oracle` capability (FR-031/FR-033): @fuguejs/oracle wired from
-    // ORACLE_* env. Same gating as the documents adapter — undefined when
-    // ORACLE_CONNECT_STRING is unset. We log ONLY the non-secret host:port/service
-    // of the connect string, never user/password (FR-041/SC-008).
-    const oracle = buildOracleCapability(config, logger);
-    if (oracle !== undefined) {
-      capabilities.push(oracle);
-      logger.info(`oracle capability: @fuguejs/oracle targeting ${connectStringHost(config.ORACLE_CONNECT_STRING!)}`, { tenant });
-    }
-
-    const sharedInfra: SharedInfra = {
-      llm: await createHostLlmClient(config),
-      redis,
-      tracer: noopTracer,
-      contentFilter: null,
-      prompts: null,
-      logger,
-      capabilities,
-    };
-
-    const isLocalMode = config.DAGS_LOCAL_PATH !== undefined && config.DAGS_LOCAL_PATH !== "";
-    const git = isLocalMode ? createLocalGitAdapter() : createBunGitAdapter();
-    const loader = createModuleLoader(logger);
+    // The SAME runtime wiring as the single-tenant entry (`main.ts`) — see
+    // `buildRuntimeDeps`. Log lines carry the tenant so capability selection is
+    // attributable per worker.
+    const { sharedInfra, git, loader } = await buildRuntimeDeps(config, redis, logger, { tenant });
 
     const queueBackend = await createHitlQueueBackend(config, logger);
 

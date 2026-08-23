@@ -27,59 +27,111 @@ const mutationError = (kind: "Map" | "Set" | "Date", operation: PropertyKey): ne
   throw new TypeError(`${kind}.${String(operation)} is disabled on a deeply immutable snapshot`);
 };
 
+/**
+ * Build the read-only Proxy shared by `Map` and `Set` snapshots.
+ *
+ * ONE definition of the container-proxy protocol; `readonlyMap`/`readonlySet`
+ * supply only what genuinely differs (which methods mutate, how `forEach`
+ * re-dispatches, how entries are copied in). The four steps below are ORDER-
+ * SENSITIVE, which is exactly why they should not be maintained twice:
+ *
+ *   1. Create the proxy and memoize it BEFORE populating, so a container that
+ *      contains itself resolves to this proxy instead of recursing forever.
+ *   2. Populate the target through `freeze`, so nested values are snapshots too.
+ *   3. `Object.freeze` the target — the proxy blocks the mutator METHODS, this
+ *      blocks direct property writes on the underlying container.
+ *   4. Return the proxy, never the target.
+ *
+ * `forEach` is special-cased because the native implementation passes the RAW
+ * container as the callback's third argument, handing callers an unfrozen
+ * reference straight out of a "deeply immutable" snapshot. Every other method is
+ * bound to the target so `this` is the real container rather than the proxy.
+ */
+const readonlyContainer = <C extends Map<unknown, unknown> | Set<unknown>>(
+  source: C,
+  spec: {
+    readonly kind: "Map" | "Set";
+    readonly empty: () => C;
+    readonly mutators: ReadonlySet<string>;
+    readonly forEach: (
+      container: C,
+      proxy: C,
+      callback: (value: unknown, key: unknown, container: C) => void,
+      thisArg: unknown,
+    ) => void;
+    readonly populate: (target: C, source: C) => void;
+  },
+  memo: WeakMap<object, unknown>,
+): C => {
+  const target = spec.empty();
+  let proxy: C;
+  proxy = new Proxy(target, {
+    get(container, property) {
+      if (typeof property === "string" && spec.mutators.has(property)) {
+        return () => mutationError(spec.kind, property);
+      }
+      if (property === "forEach") {
+        return (
+          callback: (value: unknown, key: unknown, container: C) => void,
+          thisArg?: unknown,
+        ): void => spec.forEach(container as C, proxy, callback, thisArg);
+      }
+      const member = Reflect.get(container, property, container) as unknown;
+      return typeof member === "function" ? member.bind(container) : member;
+    },
+  }) as C;
+  memo.set(source, proxy);
+  spec.populate(target, source);
+  Object.freeze(target);
+  return proxy;
+};
+
+const MAP_MUTATORS: ReadonlySet<string> = new Set(["set", "delete", "clear"]);
+const SET_MUTATORS: ReadonlySet<string> = new Set(["add", "delete", "clear"]);
+
 const readonlyMap = (
   source: Map<unknown, unknown>,
   freeze: (value: unknown) => unknown,
   memo: WeakMap<object, unknown>,
-): Map<unknown, unknown> => {
-  const target = new Map<unknown, unknown>();
-  let proxy: Map<unknown, unknown>;
-  proxy = new Proxy(target, {
-    get(map, property) {
-      if (property === "set" || property === "delete" || property === "clear") {
-        return () => mutationError("Map", property);
-      }
-      if (property === "forEach") {
-        return (callback: (value: unknown, key: unknown, map: Map<unknown, unknown>) => void, thisArg?: unknown): void => {
-          map.forEach((value, key) => callback.call(thisArg, value, key, proxy));
-        };
-      }
-      const member = Reflect.get(map, property, map) as unknown;
-      return typeof member === "function" ? member.bind(map) : member;
+): Map<unknown, unknown> =>
+  readonlyContainer(
+    source,
+    {
+      kind: "Map",
+      empty: () => new Map<unknown, unknown>(),
+      mutators: MAP_MUTATORS,
+      forEach: (map, proxy, callback, thisArg) => {
+        map.forEach((value, key) => callback.call(thisArg, value, key, proxy));
+      },
+      populate: (target, from) => {
+        for (const [key, value] of from) target.set(freeze(key), freeze(value));
+      },
     },
-  });
-  memo.set(source, proxy);
-  for (const [key, value] of source) target.set(freeze(key), freeze(value));
-  Object.freeze(target);
-  return proxy;
-};
+    memo,
+  );
 
 const readonlySet = (
   source: Set<unknown>,
   freeze: (value: unknown) => unknown,
   memo: WeakMap<object, unknown>,
-): Set<unknown> => {
-  const target = new Set<unknown>();
-  let proxy: Set<unknown>;
-  proxy = new Proxy(target, {
-    get(set, property) {
-      if (property === "add" || property === "delete" || property === "clear") {
-        return () => mutationError("Set", property);
-      }
-      if (property === "forEach") {
-        return (callback: (value: unknown, key: unknown, set: Set<unknown>) => void, thisArg?: unknown): void => {
-          set.forEach((value) => callback.call(thisArg, value, value, proxy));
-        };
-      }
-      const member = Reflect.get(set, property, set) as unknown;
-      return typeof member === "function" ? member.bind(set) : member;
+): Set<unknown> =>
+  readonlyContainer(
+    source,
+    {
+      kind: "Set",
+      empty: () => new Set<unknown>(),
+      mutators: SET_MUTATORS,
+      // A Set's forEach passes the value as BOTH value and key, matching the
+      // native contract.
+      forEach: (set, proxy, callback, thisArg) => {
+        set.forEach((value) => callback.call(thisArg, value, value, proxy));
+      },
+      populate: (target, from) => {
+        for (const value of from) target.add(freeze(value));
+      },
     },
-  });
-  memo.set(source, proxy);
-  for (const value of source) target.add(freeze(value));
-  Object.freeze(target);
-  return proxy;
-};
+    memo,
+  );
 
 const readonlyDate = (source: Date, memo: WeakMap<object, unknown>): Date => {
   let proxy: Date;

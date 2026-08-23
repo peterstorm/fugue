@@ -55,6 +55,24 @@ import type { PoolConfig } from "pg";
 const PG_NODE_ID = nodeId("pg-capability");
 
 /**
+ * The row-validation failure this adapter returns when a driver row does not
+ * match the caller's schema.
+ *
+ * ONE constructor for all four sites (production + fake x query/queryOne). The
+ * classification is the reason to share it: a schema mismatch is `non-retriable`
+ * — the same query returns the same non-conforming row, so retrying only repeats
+ * the round trip. A copy that omitted `retriability` would fall back to retriable
+ * and turn a deterministic contract violation into a retry storm against the
+ * database.
+ */
+const rowValidationError = (label: string, detail: string): FrameworkError => ({
+  kind: "node-crash",
+  nodeId: PG_NODE_ID,
+  message: label + ": " + detail,
+  retriability: "non-retriable",
+});
+
+/**
  * PostgreSQL capability interface — what nodes see on `ctx.db`.
  *
  * All methods return `Result` — no exceptions escape. Query results are
@@ -173,12 +191,7 @@ export const createPgClient = (pool: PgQueryable): PgCapability => ({
       for (const row of result.rows) {
         const parsed = schema.safeParse(row);
         if (!parsed.success) {
-          return err({
-            kind: "node-crash",
-            nodeId: PG_NODE_ID,
-            message: `Row validation failed: ${parsed.error.message}`,
-            retriability: "non-retriable",
-          });
+          return err(rowValidationError("Row validation failed", parsed.error.message));
         }
         validated.push(parsed.data);
       }
@@ -194,12 +207,7 @@ export const createPgClient = (pool: PgQueryable): PgCapability => ({
       if (result.rows.length === 0) return ok(null);
       const parsed = schema.safeParse(result.rows[0]);
       if (!parsed.success) {
-        return err({
-          kind: "node-crash",
-          nodeId: PG_NODE_ID,
-          message: `Row validation failed: ${parsed.error.message}`,
-          retriability: "non-retriable",
-        });
+        return err(rowValidationError("Row validation failed", parsed.error.message));
       }
       return ok(parsed.data);
     } catch (error) {
@@ -381,7 +389,7 @@ export const createFakePgCapability = (
       for (const row of route.rows) {
         const parsed = schema.safeParse(row);
         if (!parsed.success) {
-          return err({ kind: "node-crash", nodeId: PG_NODE_ID, message: `Fake row validation: ${parsed.error.message}`, retriability: "non-retriable" });
+          return err(rowValidationError("Fake row validation", parsed.error.message));
         }
         validated.push(parsed.data);
       }
@@ -393,7 +401,7 @@ export const createFakePgCapability = (
       if (!route || !route.rows || route.rows.length === 0) return ok(null);
       const parsed = schema.safeParse(route.rows[0]);
       if (!parsed.success) {
-        return err({ kind: "node-crash", nodeId: PG_NODE_ID, message: `Fake row validation: ${parsed.error.message}`, retriability: "non-retriable" });
+        return err(rowValidationError("Fake row validation", parsed.error.message));
       }
       return ok(parsed.data);
     },

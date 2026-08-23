@@ -85,6 +85,54 @@ export interface BotResponse {
 const obj = (v: unknown): Record<string, unknown> => (typeof v === "object" && v !== null ? (v as Record<string, unknown>) : {});
 const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
 
+/**
+ * The inbound Bot Framework activity, parsed ONCE at the entry point.
+ *
+ * This is the highest-stakes untrusted input in the HITL surface, and its shape
+ * knowledge used to be spread across a dozen inline `obj(obj(obj(x).y).z)`
+ * chains at each access site — so adding or moving a field meant finding every
+ * chain, and no single place stated what an activity is. The safe readers below
+ * are total (a missing or wrongly-typed field becomes `undefined`, never a
+ * throw), which is what lets this be a plain parse rather than a Result: an
+ * activity that is missing what a branch needs is REJECTED by that branch's own
+ * guard, with the diagnostic that branch can give.
+ *
+ * Deliberately NOT parsed here: `runId` / `nodeId` from the card payload. Those
+ * go through their smart constructors (`tryRunId` / `tryNodeId`) at the point of
+ * use, so a malformed id is a branded-type failure rather than a string that
+ * merely looks present.
+ */
+interface ParsedActivity {
+  readonly type: string | undefined;
+  readonly name: string | undefined;
+  readonly serviceUrl: string | undefined;
+  readonly channelId: string | undefined;
+  readonly conversationId: string | undefined;
+  readonly recipientId: string | undefined;
+  /** The Teams team `aadGroupId`, used to route cards to the owning team's channel. */
+  readonly aadGroupId: string | undefined;
+  readonly fromAadObjectId: string | undefined;
+  readonly fromName: string | undefined;
+  /** The adaptive-card action payload the client POSTs back (`value.action.data`). */
+  readonly cardData: Record<string, unknown>;
+}
+
+const parseActivity = (raw: unknown): ParsedActivity => {
+  const activity = obj(raw);
+  return {
+    type: str(activity.type),
+    name: str(activity.name),
+    serviceUrl: str(activity.serviceUrl),
+    channelId: str(activity.channelId),
+    conversationId: str(obj(activity.conversation).id),
+    recipientId: str(obj(activity.recipient).id),
+    aadGroupId: str(obj(obj(activity.channelData).team).aadGroupId),
+    fromAadObjectId: str(obj(activity.from).aadObjectId),
+    fromName: str(obj(activity.from).name),
+    cardData: obj(obj(obj(activity.value).action).data),
+  };
+};
+
 /** A Teams `adaptiveCard/action` invoke response carrying a refreshed card. */
 const cardInvokeResponse = (card: unknown): BotResponse => ({
   status: 200,
@@ -103,15 +151,16 @@ const toAction = (decision: string, reason: string | undefined, actor: string): 
     .with("reject", (): HumanAction => ({ kind: "reject", reason: reason && reason.trim() !== "" ? reason : "(no reason provided)", actor }))
     .otherwise(() => null);
 
-const captureReference = (activity: Record<string, unknown>): ConversationReference | null => {
-  const serviceUrl = str(activity.serviceUrl);
-  const conversationId = str(obj(activity.conversation).id);
+const captureReference = (activity: ParsedActivity): ConversationReference | null => {
+  const { serviceUrl, conversationId, channelId, recipientId } = activity;
+  // Both are REQUIRED to post proactively later; without either there is nothing
+  // usable to persist.
   if (serviceUrl === undefined || conversationId === undefined) return null;
   return {
     serviceUrl,
     conversationId,
-    ...(str(activity.channelId) !== undefined ? { channelId: str(activity.channelId)! } : {}),
-    ...(str(obj(activity.recipient).id) !== undefined ? { botId: str(obj(activity.recipient).id)! } : {}),
+    ...(channelId !== undefined ? { channelId } : {}),
+    ...(recipientId !== undefined ? { botId: recipientId } : {}),
   };
 };
 
@@ -126,8 +175,8 @@ export const handleBotActivity = async (
     return { status: verified.error.kind === "unavailable" ? 503 : 401 };
   }
 
-  const activity = obj(input.activity);
-  const type = str(activity.type);
+  const activity = parseActivity(input.activity);
+  const { type } = activity;
 
   // 2. Bot added to a channel → remember where to post reviews.
   if (type === "conversationUpdate") {
@@ -146,7 +195,7 @@ export const handleBotActivity = async (
       // review delivery never falls back to it: an unmapped owner fails closed.
       // Own-property lookup only — an inherited key (`constructor`, …) must
       // never resolve a team (mirrors identity.ts, fail-closed).
-      const aadGroupId = str(obj(obj(activity.channelData).team).aadGroupId);
+      const { aadGroupId } = activity;
       const mappedTeam =
         aadGroupId !== undefined && Object.prototype.hasOwnProperty.call(deps.teamChannels, aadGroupId)
           ? deps.teamChannels[aadGroupId]
@@ -176,17 +225,17 @@ export const handleBotActivity = async (
       // team" has no trail back to the activity that caused it. 200 is still
       // correct — Bot Framework must not retry an unusable activity.
       deps.logger?.warn?.("hitl/bot: conversationUpdate carried no usable conversation reference — nothing persisted", {
-        conversationId: str(obj(activity.conversation).id),
+        conversationId: activity.conversationId,
       });
     }
     return { status: 200 };
   }
 
   // 3. Card button click.
-  const isCardAction = type === "invoke" && str(activity.name) === "adaptiveCard/action";
+  const isCardAction = type === "invoke" && activity.name === "adaptiveCard/action";
   if (!isCardAction) return { status: 200 };
 
-  const data = obj(obj(obj(activity.value).action).data);
+  const data = activity.cardData;
   if (data.verb !== REVIEW_VERB) return { status: 200 }; // not ours
 
   const runIdRaw = str(data.runId);
@@ -205,8 +254,8 @@ export const handleBotActivity = async (
   const nodeIdParsed = tryNodeId(nodeIdRaw);
   if (!nodeIdParsed.ok) return messageInvokeResponse("Malformed review action.");
   const nodeId = nodeIdParsed.value;
-  const aadObjectId = str(obj(activity.from).aadObjectId);
-  const actor = str(obj(activity.from).name) ?? aadObjectId ?? "teams-user";
+  const aadObjectId = activity.fromAadObjectId;
+  const actor = activity.fromName ?? aadObjectId ?? "teams-user";
   const action = toAction(decision, str(data.reason), actor);
   if (action === null) return messageInvokeResponse(`Unknown decision '${decision}'.`);
 

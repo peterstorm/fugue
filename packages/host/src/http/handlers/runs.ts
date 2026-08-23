@@ -13,6 +13,7 @@
  * Later DAG reassignment or removal cannot change historical-run access.
  */
 
+import { requireAuthIdentity, callerTeamLabel } from "./dag-access.js";
 import { match } from "ts-pattern";
 import type { Context } from "hono";
 import type { HumanAction } from "@fuguejs/framework";
@@ -59,12 +60,11 @@ const authorizeRunAccess = (
   c: Context<HostEnv>,
   record: RunMetadata,
 ): { ok: true; identity: AuthIdentity } | { ok: false; response: Response } => {
-  const identity = c.get("authIdentity") as AuthIdentity | undefined;
-  if (!identity) {
-    return { ok: false, response: errorResponse(c, 401, "unauthorized", "Missing auth identity — middleware not applied") };
-  }
+  const authed = requireAuthIdentity(c);
+  if (!authed.ok) return authed;
+  const { identity } = authed;
   if (!canAccessDag(identity, record.ownerTeam)) {
-    const callerTeam = identity.kind === "team" ? identity.team : identity.kind;
+    const callerTeam = callerTeamLabel(identity);
     return {
       ok: false,
       response: errorResponse(c, 403, "forbidden",

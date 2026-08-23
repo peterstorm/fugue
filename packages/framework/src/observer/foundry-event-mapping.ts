@@ -106,6 +106,25 @@ export type FoundryEmission =
  * {@link asFinite}) rather than re-checked at every producer. Callers push the
  * result only when defined.
  */
+/**
+ * Build an event emission, attaching `measurements` only when at least one entry
+ * survived the finiteness filter.
+ *
+ * ONE constructor for the shape three call sites spelled out as a ternary over
+ * two nearly-identical object literals. The omission is deliberate and must stay
+ * uniform: Application Insights rejects non-finite values, so `finiteMeasurements`
+ * returns `undefined` when nothing is left, and the key must then be ABSENT
+ * rather than present-and-empty. Mirrors the sibling `metricEmission`.
+ */
+const eventEmission = (
+  name: FoundryEventName,
+  properties: Record<string, string>,
+  measurements: Record<string, FiniteNumber> | undefined,
+): Extract<FoundryEmission, { kind: "event" }> =>
+  measurements
+    ? { kind: "event", name, properties, measurements }
+    : { kind: "event", name, properties };
+
 const metricEmission = (
   name: FoundryMetricName,
   value: number,
@@ -201,10 +220,7 @@ export function mapEventToFoundry(
         chosenCount: e.chosenTargets.length,
         prunedCount: e.prunedTargets.length,
       });
-      const ev: FoundryEmission = measurements
-        ? { kind: "event", name: FOUNDRY_EVENT_ROUTE_DECISION, properties: props, measurements }
-        : { kind: "event", name: FOUNDRY_EVENT_ROUTE_DECISION, properties: props };
-      return [ev];
+      return [eventEmission(FOUNDRY_EVENT_ROUTE_DECISION, props, measurements)];
     })
     .with({ type: "node-pruned" }, (e) => [
       {
@@ -260,18 +276,11 @@ function runEndEmissions(e: RunEndEvent): readonly FoundryEmission[] {
   const out: FoundryEmission[] = [];
   const measurements = finiteMeasurements({ durationMs: e.duration });
   out.push(
-    measurements
-      ? {
-          kind: "event",
-          name: FOUNDRY_EVENT_RUN_SUMMARY,
-          properties: { dagId: e.dagId, runId: e.runId, status: e.status },
-          measurements,
-        }
-      : {
-          kind: "event",
-          name: FOUNDRY_EVENT_RUN_SUMMARY,
-          properties: { dagId: e.dagId, runId: e.runId, status: e.status },
-        },
+    eventEmission(
+      FOUNDRY_EVENT_RUN_SUMMARY,
+      { dagId: e.dagId, runId: e.runId, status: e.status },
+      measurements,
+    ),
   );
   const latency = metricEmission(FOUNDRY_METRIC_RUN_LATENCY, e.duration, { dagId: e.dagId });
   if (latency) out.push(latency);
@@ -322,9 +331,7 @@ export function mapRunSummaryToFoundry(
     status: summary.status,
   };
 
-  const summaryEvent: FoundryEmission = measurements
-    ? { kind: "event", name: FOUNDRY_EVENT_RUN_SUMMARY, properties, measurements }
-    : { kind: "event", name: FOUNDRY_EVENT_RUN_SUMMARY, properties };
+  const summaryEvent = eventEmission(FOUNDRY_EVENT_RUN_SUMMARY, properties, measurements);
 
   const out: FoundryEmission[] = [summaryEvent];
 

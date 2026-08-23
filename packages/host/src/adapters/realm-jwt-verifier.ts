@@ -34,6 +34,7 @@
  * @satisfies NFR-020 — JWKS-down → `unavailable`, bad-sig → `invalid`; never throws.
  */
 
+import { lazyJwks, type JwksResolver } from "./lazy-jwks.js";
 import { ok, err } from "@fuguejs/framework";
 import { markSignatureVerified, type RealmJwtClaims } from "../domain/auth.js";
 import type { JwtVerifyError, VerifyRealmJwt } from "../http/middleware/auth.js";
@@ -154,29 +155,15 @@ export const createRealmJwtVerifier = (config: RealmJwtVerifierConfig): VerifyRe
   // An explicit `jwksUri` (e.g. an in-cluster route) wins; else derive from issuer.
   const jwksUri = config.jwksUri ?? realmJwksUri(config.issuer);
 
-  // Lazily-initialised remote JWKS resolver, cached across calls. Mirrors the
-  // Bot verifier: `createRemoteJWKSet` is synchronous (no metadata fetch — the
-  // certs URL is derived directly), the network call happens lazily inside
-  // `jwtVerify`, so a JWKS outage surfaces as a verify-time `unavailable`.
-  let jwksPromise: Promise<(protectedHeader: unknown, token: unknown) => Promise<unknown>> | null = null;
-
-  const getJwks = async () => {
-    if (jwksPromise === null) {
-      jwksPromise = (async () => {
-        const jose = await import("jose");
-        return jose.createRemoteJWKSet(new URL(jwksUri)) as unknown as (
-          p: unknown,
-          t: unknown,
-        ) => Promise<unknown>;
-      })().catch((e) => {
-        // Reset so a transient construction failure (e.g. a bad URL surfacing
-        // late) can be retried on the next call rather than wedging the verifier.
-        jwksPromise = null;
-        throw e;
-      });
-    }
-    return jwksPromise;
-  };
+  // Lazily-initialised remote JWKS resolver — SAME protocol as the Bot verifier,
+  // now literally the same code (see `lazyJwks`). `createRemoteJWKSet` is
+  // synchronous here (no metadata fetch — the certs URL is derived directly), so
+  // the network call happens lazily inside `jwtVerify` and a JWKS outage surfaces
+  // as a verify-time `unavailable`.
+  const getJwks = lazyJwks(async () => {
+    const jose = await import("jose");
+    return jose.createRemoteJWKSet(new URL(jwksUri)) as unknown as JwksResolver;
+  });
 
   return async (token: string) => {
     let jwks: (p: unknown, t: unknown) => Promise<unknown>;

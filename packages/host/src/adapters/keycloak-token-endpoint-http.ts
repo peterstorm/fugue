@@ -41,7 +41,7 @@
  */
 
 import type { Result, FrameworkError } from "@fuguejs/framework";
-import { err } from "@fuguejs/framework";
+import { err, safeErrorMessage } from "@fuguejs/framework";
 import type { DownstreamScope } from "../domain/capability-scope.js";
 import { agentClientIdFromFrameworkOrigin } from "../domain/auth.js";
 import type { HttpPost, HttpPostResponse } from "./fetch-http-post.js";
@@ -268,63 +268,56 @@ export const createKeycloakTokenEndpoint = (
 ): KeycloakTokenEndpoint => {
   const { config, http, credentials } = deps;
 
-  return {
-    mintClientCredentials: async (
-      req: ClientCredentialsRequest,
-    ): Promise<Result<MintedToken, FrameworkError>> => {
-      // Fail closed BEFORE any egress on an unknown/unconfigured agent client:
-      // no credential → nothing to present → refuse at the Keycloak hop with
-      // ZERO downstream (Entra) egress (FR-012 / NFR-010).
-      const cred = credentials(agentClientIdFromFrameworkOrigin(req.agentClientId));
-      if (cred === undefined) {
-        return err(noCredentialRefusal(req.agentClientId, req.audience));
-      }
-      const body = buildClientCredentialsBody(cred, req);
-      let res: HttpPostResponse;
-      try {
-        res = await http.post(config.tokenUrl, body);
-      } catch (e) {
-        // Transport-level failure (DNS/socket) — we never reached an answer.
-        return err({
-          kind: "infra-unreachable",
-          operation: "mint",
-          hop: "client-credentials",
-          message: `Keycloak token endpoint transport failure: ${e instanceof Error ? e.message : String(e)}`,
-        });
-      }
-      return mapKeycloakTokenResponse(req.audience, "mint", "client-credentials", res);
-    },
+  /**
+   * The request skeleton both grants share: resolve the agent credential, refuse
+   * BEFORE any egress if there is none, POST the grant-specific body, and map the
+   * response.
+   *
+   * ONE definition for `mintClientCredentials` and `exchangeV2`, which differ only
+   * in the body builder and two labels. The fail-closed credential check is the
+   * reason to share it: a grant that ever forgot it would reach Keycloak — and on
+   * to Entra — with no credential to present, which is exactly the zero-downstream-
+   * egress guarantee FR-012 / NFR-010 make. The transport catch is here too, so
+   * neither grant can leak a secret or a user JWT into an error message (NFR-014):
+   * only the transport error's own text is rendered, never the request body.
+   */
+  const requestGrant = async (
+    req: { readonly agentClientId: ClientCredentialsRequest["agentClientId"]; readonly audience: ClientCredentialsRequest["audience"] },
+    operation: "mint" | "exchange",
+    hop: "client-credentials" | "token-exchange",
+    buildBody: (cred: NonNullable<ReturnType<typeof credentials>>) => Parameters<typeof http.post>[1],
+  ): Promise<Result<MintedToken, FrameworkError>> => {
+    const cred = credentials(agentClientIdFromFrameworkOrigin(req.agentClientId));
+    if (cred === undefined) {
+      return err(noCredentialRefusal(req.agentClientId, req.audience));
+    }
+    let res: HttpPostResponse;
+    try {
+      res = await http.post(config.tokenUrl, buildBody(cred));
+    } catch (e) {
+      // Transport-level failure (DNS/socket) — we never reached an answer.
+      return err({
+        kind: "infra-unreachable",
+        operation,
+        hop,
+        message: `Keycloak token endpoint transport failure: ${safeErrorMessage(e)}`,
+      });
+    }
+    return mapKeycloakTokenResponse(req.audience, operation, hop, res);
+  };
 
-    exchangeV2: async (
-      req: ExchangeV2Request,
-    ): Promise<Result<MintedToken, FrameworkError>> => {
-      // Fail closed BEFORE any egress on an unknown/unconfigured agent client:
-      // no credential → nothing to authenticate the exchange AS → refuse at the
-      // Keycloak hop with ZERO downstream (Entra) egress (FR-012 / NFR-010). The
-      // `req.subjectToken` (the user's verified JWT) is REQUIRED by the type, so
-      // the user's proof is always present here — the broker refused locally if it
-      // could not resolve one (FR-030); this never mints a proof-less token.
-      const cred = credentials(agentClientIdFromFrameworkOrigin(req.agentClientId));
-      if (cred === undefined) {
-        return err(noCredentialRefusal(req.agentClientId, req.audience));
-      }
-      // Present the user's verified JWT as the RFC 8693 `subject_token` so the
-      // exchanged token preserves `sub`=user and sets `azp`=agent (FR-030/FR-031).
-      const body = buildExchangeV2Body(cred, req);
-      let res: HttpPostResponse;
-      try {
-        res = await http.post(config.tokenUrl, body);
-      } catch (e) {
-        // Transport-level failure (DNS/socket) — we never reached an answer. The
-        // message never echoes the secret or the user JWT (NFR-014).
-        return err({
-          kind: "infra-unreachable",
-          operation: "exchange",
-          hop: "token-exchange",
-          message: `Keycloak token endpoint transport failure: ${e instanceof Error ? e.message : String(e)}`,
-        });
-      }
-      return mapKeycloakTokenResponse(req.audience, "exchange", "token-exchange", res);
-    },
+  return {
+    mintClientCredentials: (req: ClientCredentialsRequest) =>
+      requestGrant(req, "mint", "client-credentials", (cred) =>
+        buildClientCredentialsBody(cred, req)),
+
+    // `req.subjectToken` (the user's verified JWT) is REQUIRED by the type, so the
+    // user's proof is always present here — the broker refused locally if it could
+    // not resolve one (FR-030); this never mints a proof-less token. It is
+    // presented as the RFC 8693 `subject_token` so the exchanged token preserves
+    // `sub`=user and sets `azp`=agent (FR-030/FR-031).
+    exchangeV2: (req: ExchangeV2Request) =>
+      requestGrant(req, "exchange", "token-exchange", (cred) =>
+        buildExchangeV2Body(cred, req)),
   };
 };

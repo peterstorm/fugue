@@ -344,3 +344,29 @@ export const eventDigestOf = (record: {
     throw fileOperationError("eventDigestOf", "event digest", error, "permanent");
   }
 };
+
+// ---------------------------------------------------------------------------
+// Option-shape gates
+// ---------------------------------------------------------------------------
+
+/**
+ * The first own key of `ownKeys` that is not in `supported`, or `undefined` when
+ * every key is supported.
+ *
+ * ONE encoding of the exact-key gate that four option parsers share
+ * (`saveNode` opts, `load` opts, `createFileCheckpointer` opts, and the shared
+ * factory-clock parser). All four are trust boundaries over CALLER-supplied
+ * objects, and the `typeof key !== "string"` half is the load-bearing part: a
+ * `Symbol` own key would pass a naive `has(key)` lookup against a `Set<string>`,
+ * so an unsupported symbol-keyed option would be silently ignored instead of
+ * rejected. Rejecting unknown keys is what makes a typo a loud error rather than
+ * a silently-ignored setting.
+ */
+export const findUnsupportedKey = (
+  ownKeys: readonly PropertyKey[],
+  supported: ReadonlySet<string> | readonly string[],
+): PropertyKey | undefined => {
+  const isSupported = (key: string): boolean =>
+    supported instanceof Set ? supported.has(key) : (supported as readonly string[]).includes(key);
+  return ownKeys.find((key) => typeof key !== "string" || !isSupported(key));
+};

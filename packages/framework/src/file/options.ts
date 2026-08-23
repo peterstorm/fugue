@@ -14,6 +14,7 @@
 // deliberately STRICTER descriptor-isolated variant (it reasons about Proxy
 // observation counts) and does not share this encoding.
 
+import { findUnsupportedKey } from "./layout.js";
 import { safeDiagnosticRender } from "../types/safe-error.js";
 
 export const parseFileFactoryClock = (
@@ -28,9 +29,7 @@ export const parseFileFactoryClock = (
     throw new Error("options must be a plain object");
   }
   const keys = Reflect.ownKeys(opts);
-  const unsupported = keys.find(
-    (key) => key !== "now" && !extraOptionKeys.includes(key as string),
-  );
+  const unsupported = findUnsupportedKey(keys, ["now", ...extraOptionKeys]);
   if (unsupported !== undefined) {
     const supported = ["now", ...extraOptionKeys].join(" / ");
     throw new Error(`unsupported option ${safeDiagnosticRender(unsupported)}; supported options are ${supported}`);

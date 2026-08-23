@@ -371,42 +371,56 @@ export const createRedisTenantRegistry = (
   };
 
   /** Persist a config + publish its event. Fails closed on any Redis failure. */
+  /**
+   * Run one Redis step of a write: a THROW and a `!ok` Result are the SAME
+   * condition here — Redis is unreachable — so both collapse to the fail-closed
+   * `dead(op)` failure, and only the throw path needs a log (a typed `!ok`
+   * already carries its own diagnosis).
+   *
+   * ONE definition for the steps of this two-phase write. The invariant it
+   * protects is that the in-memory view is NEVER advanced on a partial write:
+   * every step must fail closed the same way, and a step that handled only one
+   * of the two failure channels would let a half-applied write look successful.
+   */
+  const redisStep = async <T>(
+    op: string,
+    threwMessage: string,
+    run: () => Promise<Result<T, HostError>>,
+  ): Promise<Result<T, HostError>> => {
+    try {
+      const result = await run();
+      return result.ok ? result : err(dead(op));
+    } catch (e) {
+      const failure = dead(op);
+      warnWithoutThrowing(logger, threwMessage, { op, error: safeErrorMessage(e) });
+      return err(failure);
+    }
+  };
+
   const persistAndAnnounce = async (
     cfg: TenantConfig,
     event: TenantEvent,
     op: string,
   ): Promise<Result<void, HostError>> => {
     // Step 1: persist the record. Catch a thrown client error → fail closed.
-    let setResult: Result<string | null, HostError>;
-    try {
-      setResult = await redis.set(tenantKey(cfg.id), serialize(cfg));
-    } catch (e) {
-      const failure = dead(op);
-      warnWithoutThrowing(logger, "[tenant-registry] Redis set threw — treating as disconnected", {
-        op,
-        error: safeErrorMessage(e),
-      });
-      return err(failure);
-    }
+    const setResult = await redisStep(
+      op,
+      "[tenant-registry] Redis set threw — treating as disconnected",
+      () => redis.set(tenantKey(cfg.id), serialize(cfg)),
+    );
     if (!setResult.ok) {
-      return err(dead(op));
+      return err(setResult.error);
     }
 
     // Step 2: announce on the pub/sub channel. A publish failure is also a Redis
     // outage — fail closed (do NOT advance the in-memory view).
-    let pubResult: Result<void, HostError>;
-    try {
-      pubResult = await pubsub.publish(TENANT_EVENTS_CHANNEL, JSON.stringify(event));
-    } catch (e) {
-      const failure = dead(op);
-      warnWithoutThrowing(logger, "[tenant-registry] Redis publish threw — treating as disconnected", {
-        op,
-        error: safeErrorMessage(e),
-      });
-      return err(failure);
-    }
+    const pubResult = await redisStep(
+      op,
+      "[tenant-registry] Redis publish threw — treating as disconnected",
+      () => pubsub.publish(TENANT_EVENTS_CHANNEL, JSON.stringify(event)),
+    );
     if (!pubResult.ok) {
-      return err(dead(op));
+      return err(pubResult.error);
     }
 
     alive();

@@ -19,16 +19,15 @@
  * gates, making a flat cross-tenant decision key unrepresentable.
  */
 
-import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
-import { fromJson, ok, err, safeErrorMessage, toJson, tryNodeId } from "@fuguejs/framework";
-import { assertLosslessEvent } from "@fuguejs/framework/file";
+import { fromJson, ok, err, safeErrorMessage, tryNodeId } from "@fuguejs/framework";
 import type { Result, RunId, NodeId, HumanAction } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import type { TenantId } from "../../domain/tenant.js";
 import type { HitlRedisPort, LogPort } from "../../ports.js";
 import type { DecisionResolution, DecisionStorePort, PendingReview } from "../ports.js";
 import { logWithoutThrowing } from "../diagnostic-logging.js";
+import { serializeLossless } from "./lossless-json.js";
 
 /**
  * Shape validator for a persisted `HumanAction` (ADR-0060). The decision is read
@@ -63,26 +62,13 @@ type ExhaustiveHumanActionSchema = [MissingHumanActionKind] extends [never]
   : never;
 const HumanActionSchema: ExhaustiveHumanActionSchema = HumanActionSchemaDefinition;
 
-const serializeHumanAction = (action: HumanAction): Result<string, HostError> => {
-  try {
-    assertLosslessEvent(action, {
-      operation: "serializeHumanAction",
-      root: "decision",
-    });
-    const encoded = toJson(action);
-    const restored = HumanActionSchema.safeParse(fromJson(encoded));
-    if (!restored.success || !isDeepStrictEqual(restored.data, action)) {
-      throw new Error("human action failed losslessness round-trip verification");
-    }
-    return ok(encoded);
-  } catch (error) {
-    return err({
-      kind: "internal-invariant-violated",
-      message: `human action is not losslessly serializable: ${safeErrorMessage(error)}`,
-      context: {},
-    });
-  }
-};
+const serializeHumanAction = (action: HumanAction): Result<string, HostError> =>
+  serializeLossless(action, {
+    operation: "serializeHumanAction",
+    root: "decision",
+    subject: "human action",
+    schema: HumanActionSchema,
+  });
 
 /**
  * Composite-key separator between `runId` and `nodeId`. The unit separator

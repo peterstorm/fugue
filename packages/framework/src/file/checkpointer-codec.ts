@@ -31,6 +31,7 @@
 // policy). Moving the codecs here keeps every pure invariant directly
 // testable without a temp directory.
 
+import { findUnsupportedKey } from "./layout.js";
 import { isBoundaryId, isBoundaryIdString, isPlainRecord, keyDigest } from "./layout.js";
 import {
   parseNodeStateRecord,
@@ -764,9 +765,7 @@ export const parseSaveNodeBoundary = (
     return err("saveNode options must be a plain object when present");
   }
 
-  const unsupportedKey = opts.ownKeys.find(
-    (key) => typeof key !== "string" || !SAVE_NODE_OPTION_FIELDS.has(key),
-  );
+  const unsupportedKey = findUnsupportedKey(opts.ownKeys, SAVE_NODE_OPTION_FIELDS);
   if (unsupportedKey !== undefined) {
     return err(
       `saveNode options contain unsupported field ${render(unsupportedKey)}; supported fields are namespace, index, attempt`,
@@ -825,9 +824,7 @@ export const parseLoadOpts = (
   }
 
   const ownKeys = Reflect.ownKeys(loadOpts);
-  const unsupportedKey = ownKeys.find(
-    (key) => typeof key !== "string" || !LOAD_OPTION_FIELDS.has(key),
-  );
+  const unsupportedKey = findUnsupportedKey(ownKeys, LOAD_OPTION_FIELDS);
   if (unsupportedKey !== undefined) {
     return err(
       `load options contain unsupported field ${render(unsupportedKey)}; supported field is expectedDagFingerprint`,

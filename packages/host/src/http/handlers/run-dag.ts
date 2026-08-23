@@ -101,18 +101,14 @@ export const createRunDagHandler = (
     const unavailable = hostUnavailableResponse(c, hostState);
     if (unavailable) return unavailable;
 
+    // "no registry yet" and "registry without this DAG" are the SAME answer to the
+    // caller — this DAG is not servable — and differ only in what can be listed
+    // as available. Deriving `available` from the registry (empty when there is
+    // none) keeps one 404 shape instead of two that could drift apart.
     const registry = getRegistry(hostState);
-    if (!registry) {
-      const notFound: HostError = { kind: "dag-not-found", dagId, available: [] };
-      return errorResponse(c, 404, notFound.kind, formatHostError(notFound), {
-        dagId,
-        details: { available: [] },
-      });
-    }
-
-    const registered = lookupDag(registry, dagId);
+    const registered = registry ? lookupDag(registry, dagId) : undefined;
     if (!registered) {
-      const available = Array.from(registry.dags.keys());
+      const available = registry ? Array.from(registry.dags.keys()) : [];
       const notFound: HostError = { kind: "dag-not-found", dagId, available };
       return errorResponse(c, 404, notFound.kind, formatHostError(notFound), {
         dagId,

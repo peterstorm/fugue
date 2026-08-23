@@ -24,7 +24,7 @@ import type { HostError } from "./host-error.js";
 /**
  * Health status of a single capability.
  */
-type CapabilityHealth =
+export type CapabilityHealth =
   | { readonly status: "healthy"; readonly name: string }
   | { readonly status: "unhealthy"; readonly name: string; readonly reason: string }
   | { readonly status: "no-check"; readonly name: string };
@@ -32,7 +32,7 @@ type CapabilityHealth =
 /**
  * Aggregated health of all capabilities.
  */
-interface CapabilityHealthReport {
+export interface CapabilityHealthReport {
   readonly overall: "healthy" | "degraded";
   readonly capabilities: readonly CapabilityHealth[];
 }
@@ -262,8 +262,10 @@ export const closeAll = async (
  * Run health checks on all capabilities that declare one.
  * Returns aggregated report. Best-effort — never throws.
  *
- * Note: nothing in the host runtime calls this yet — it exists for the
- * degraded-state detection follow-up (periodic polling is not wired).
+ * Consumed by `GET /admin/capabilities/health` (see
+ * `http/handlers/admin/capabilities.ts`, which documents why this is an
+ * operator-driven admin route rather than a kubelet probe). Feeding the host's
+ * degraded state from a periodic poll remains a separate, unbuilt feature.
  */
 export const checkHealth = async (
   handles: readonly CapabilityHandle[],

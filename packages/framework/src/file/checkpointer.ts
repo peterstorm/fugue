@@ -75,6 +75,7 @@
 // built-ins (the digest comes from `layout.ts`, which owns the `node:crypto`
 // import); no broker modules.
 
+import { findUnsupportedKey } from "./layout.js";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { atomicWriteFile } from "./atomic.js";
@@ -213,9 +214,7 @@ const parseFileCheckpointerClock = (opts: unknown): (() => number) => {
       `createFileCheckpointer could not inspect options own keys: ${messageOf(error)}`,
     );
   }
-  const unsupportedKey = ownKeys.find(
-    (key) => typeof key !== "string" || !FILE_CHECKPOINTER_OPTION_FIELDS.has(key),
-  );
+  const unsupportedKey = findUnsupportedKey(ownKeys, FILE_CHECKPOINTER_OPTION_FIELDS);
   if (unsupportedKey !== undefined) {
     throw new TypeError(
       `createFileCheckpointer options contain unsupported own key ${render(unsupportedKey)}; supported key is now`,
@@ -562,81 +561,15 @@ const createFileCheckpointerUnchecked = (
         }
       }
 
-      const nodes: Record<string, NodeState> = {};
-      const corruptNodeAddresses: CorruptCheckpointAddress[] = [];
-      // The listing block pairs `nodesDirectory` and `fileNames`: a non-empty
-      // listing implies a non-null directory, and an absent directory lists
-      // empty — so the wrap below is the single narrowing point, and the
-      // loop body never re-justifies a state that cannot occur.
-      if (nodesDirectory !== null) {
-        // Sorted so the corrupt-address ordering is deterministic across
-        // platforms (readdir order is not specified).
-        for (const fileName of [...fileNames].sort()) {
-          // `.tmp.<unique-token>` crash litter (and anything else not claiming to be a
-          // record) is invisible to the reader — that IS the tmp+rename
-          // atomicity guarantee (FR-029), not a dropped entry.
-          if (!fileName.endsWith(".json")) continue;
-
-          let nodeText: string;
-          try {
-            nodeText = readFileSync(verifyExistingFile(nodesDirectory, fileName), "utf-8");
-            assertDirectoryIdentity(nodesDirectory);
-            assertDirectoryIdentity(runDirectory);
-          } catch (error) {
-            // An unreadable path is an environment/I/O failure, not evidence
-            // that persisted bytes are malformed. Never warn/drop it as a
-            // corrupt node: the caller must see the failed load operation.
-            return err(
-              checkpointerCacheError(
-                "load",
-                `load failed to read node entry ${render(fileName)} for run ${render(runId)} under ${render(directory)}: ${messageOf(error)}`,
-              ),
-            );
-          }
-
-          let verdict: NodeEntryVerdict;
-          try {
-            verdict = parseNodeFile(fileName, nodeText);
-          } catch (error) {
-            // The pure parser returns a verdict for every expected malformed
-            // byte shape. A throw is therefore an implementation defect and is
-            // surfaced as a typed load failure, never mislabeled as corruption.
-            return err(
-              checkpointerCacheError(
-                "load",
-                `load hit an unexpected node parser failure for ${render(fileName)} in run ${render(runId)}: ${messageOf(error)}`,
-              ),
-            );
-          }
-
-          if (verdict.kind === "corrupt") {
-            const address = corruptCheckpointAddressValue(verdict.address);
-            const report = reportCorruptCheckpointEntry({
-              warning: `[FileCheckpointer] Dropping corrupt checkpoint entry runId=${runId} address=${address}: ${verdict.message}`,
-              warn: (warning) => fwLogger().warn(warning),
-              loggerFailure: (message) => checkpointerCacheError("load", message),
-            });
-            if (!report.ok) return report;
-            corruptNodeAddresses.push(verdict.address);
-            continue;
-          }
-          // `defineProperty`, not `nodes[key] = …`: `__proto__` is an
-          // ID_PATTERN-valid nodeId (`_` is in the charset), and plain assignment
-          // would hit `Object.prototype`'s `__proto__` SETTER — re-parenting the
-          // returned map instead of adding an entry, silently losing a stored
-          // node with no `corruptNodeAddresses` trace. A data descriptor always creates
-          // an OWN, enumerable property, so every stored address round-trips
-          // (US2) and the in-memory backend's computed-key semantics are matched
-          // exactly. The map keeps its ordinary prototype so callers comparing it
-          // against a plain object literal are unaffected.
-          Object.defineProperty(nodes, verdict.nodeKey, {
-            value: verdict.state,
-            enumerable: true,
-            writable: true,
-            configurable: true,
-          });
-        }
-      }
+      const collected = collectNodeEntries({
+        runId,
+        directory,
+        runDirectory,
+        nodesDirectory,
+        fileNames,
+      });
+      if (!collected.ok) return collected;
+      const { nodes, corruptNodeAddresses } = collected.value;
 
       return ok({
         meta,
@@ -658,6 +591,118 @@ const createFileCheckpointerUnchecked = (
  * @throws {FrameworkError} `cache-error(createFileCheckpointer)` when
  * `directory` or the complete own-property options grammar cannot be parsed.
  */
+
+/**
+ * Read, verify and parse every node entry under a run's `nodes/` directory.
+ *
+ * Extracted from `load`, which had dropped from orchestration altitude (gate
+ * checks, meta decoding) straight into a 70-line file-read/verify/parse loop.
+ * The two are separate concerns: `load` decides WHETHER the checkpoint may be
+ * read, this decides WHAT the stored entries say.
+ *
+ * The three failure channels here are deliberate and distinct:
+ *   - An unreadable path is an environment/I/O failure and fails the whole load.
+ *     It is NOT evidence that persisted bytes are malformed, so it must never be
+ *     downgraded to a dropped "corrupt" entry.
+ *   - A parser THROW is an implementation defect and also fails the load — the
+ *     pure parser returns a verdict for every expected malformed shape.
+ *   - A `corrupt` VERDICT is the expected bad-bytes case: warn, record the
+ *     address, and keep reading, so one bad entry cannot hide the rest.
+ */
+const collectNodeEntries = (args: {
+  readonly runId: string;
+  readonly directory: string;
+  readonly runDirectory: VerifiedDirectory;
+  readonly nodesDirectory: VerifiedDirectory | null;
+  readonly fileNames: readonly string[];
+}): Result<
+  {
+    readonly nodes: Record<string, NodeState>;
+    readonly corruptNodeAddresses: readonly CorruptCheckpointAddress[];
+  },
+  FrameworkError
+> => {
+  const { runId, directory, runDirectory, nodesDirectory, fileNames } = args;
+  const nodes: Record<string, NodeState> = {};
+  const corruptNodeAddresses: CorruptCheckpointAddress[] = [];
+  // The listing block pairs `nodesDirectory` and `fileNames`: a non-empty
+  // listing implies a non-null directory, and an absent directory lists
+  // empty — so the wrap below is the single narrowing point, and the
+  // loop body never re-justifies a state that cannot occur.
+  if (nodesDirectory !== null) {
+    // Sorted so the corrupt-address ordering is deterministic across
+    // platforms (readdir order is not specified).
+    for (const fileName of [...fileNames].sort()) {
+      // `.tmp.<unique-token>` crash litter (and anything else not claiming to be a
+      // record) is invisible to the reader — that IS the tmp+rename
+      // atomicity guarantee (FR-029), not a dropped entry.
+      if (!fileName.endsWith(".json")) continue;
+
+      let nodeText: string;
+      try {
+        nodeText = readFileSync(verifyExistingFile(nodesDirectory, fileName), "utf-8");
+        assertDirectoryIdentity(nodesDirectory);
+        assertDirectoryIdentity(runDirectory);
+      } catch (error) {
+        // An unreadable path is an environment/I/O failure, not evidence
+        // that persisted bytes are malformed. Never warn/drop it as a
+        // corrupt node: the caller must see the failed load operation.
+        return err(
+          checkpointerCacheError(
+            "load",
+            `load failed to read node entry ${render(fileName)} for run ${render(runId)} under ${render(directory)}: ${messageOf(error)}`,
+          ),
+        );
+      }
+
+      let verdict: NodeEntryVerdict;
+      try {
+        verdict = parseNodeFile(fileName, nodeText);
+      } catch (error) {
+        // The pure parser returns a verdict for every expected malformed
+        // byte shape. A throw is therefore an implementation defect and is
+        // surfaced as a typed load failure, never mislabeled as corruption.
+        return err(
+          checkpointerCacheError(
+            "load",
+            `load hit an unexpected node parser failure for ${render(fileName)} in run ${render(runId)}: ${messageOf(error)}`,
+          ),
+        );
+      }
+
+      if (verdict.kind === "corrupt") {
+        const address = corruptCheckpointAddressValue(verdict.address);
+        const report = reportCorruptCheckpointEntry({
+          warning: `[FileCheckpointer] Dropping corrupt checkpoint entry runId=${runId} address=${address}: ${verdict.message}`,
+          warn: (warning) => fwLogger().warn(warning),
+          loggerFailure: (message) => checkpointerCacheError("load", message),
+        });
+        if (!report.ok) return report;
+        corruptNodeAddresses.push(verdict.address);
+        continue;
+      }
+      // `defineProperty`, not `nodes[key] = …`: `__proto__` is an
+      // ID_PATTERN-valid nodeId (`_` is in the charset), and plain assignment
+      // would hit `Object.prototype`'s `__proto__` SETTER — re-parenting the
+      // returned map instead of adding an entry, silently losing a stored
+      // node with no `corruptNodeAddresses` trace. A data descriptor always creates
+      // an OWN, enumerable property, so every stored address round-trips
+      // (US2) and the in-memory backend's computed-key semantics are matched
+      // exactly. The map keeps its ordinary prototype so callers comparing it
+      // against a plain object literal are unaffected.
+      Object.defineProperty(nodes, verdict.nodeKey, {
+        value: verdict.state,
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+    }
+  }
+
+
+  return ok({ nodes, corruptNodeAddresses });
+};
+
 export const createFileCheckpointer = (
   directory: string,
   opts?: FileCheckpointerOptions,

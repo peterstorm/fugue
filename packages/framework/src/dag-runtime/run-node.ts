@@ -22,7 +22,7 @@
 import type { Result } from "../types/result.js";
 import { ok, err } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
-import { isFrameworkError, messageOf } from "../types/errors.js";
+import { messageOf, asNodeFrameworkError } from "../types/errors.js";
 import { safeErrorMessage } from "../types/safe-error.js";
 import type { NodeContext, NodeDef, ValidatedNodeContext } from "../types/node.js";
 import type { MintingAuthority, ScopedCapabilityHandle } from "../types/capability-broker.js";
@@ -242,14 +242,7 @@ export const runNodeShared = async (
       ) => Promise<Result<unknown, FrameworkError>>;
       runResult = await runFn(inputResult.value, runCtx);
     } catch (caught) {
-      const frameworkError: FrameworkError = isFrameworkError(caught)
-        ? caught
-        : {
-            kind: "node-crash",
-            nodeId,
-            retriability: "non-retriable",
-            message: safeErrorMessage(caught),
-          };
+      const frameworkError = asNodeFrameworkError(caught, nodeId);
       const message = messageOf(frameworkError);
       const stack = frameworkError.kind === "node-crash" ? frameworkError.stack : undefined;
       emit(ctx, {
@@ -267,14 +260,7 @@ export const runNodeShared = async (
     }
 
     if (!runResult.ok) {
-      const frameworkError: FrameworkError = isFrameworkError(runResult.error)
-        ? runResult.error
-        : {
-            kind: "node-crash",
-            nodeId,
-            retriability: "non-retriable",
-            message: safeErrorMessage(runResult.error),
-          };
+      const frameworkError = asNodeFrameworkError(runResult.error, nodeId);
 
       const errorMsg = messageOf(frameworkError);
 
