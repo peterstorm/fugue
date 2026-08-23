@@ -21,7 +21,7 @@ import {
 } from "../index.js";
 import { __parseEnvelope, __resetEventLogState } from "../event-log.js";
 import { adaptBullMQJob } from "../job.js";
-import { __parseConnection } from "../adapter.js";
+import { __dispatchFailureHandler, __parseConnection } from "../adapter.js";
 
 // ---------------------------------------------------------------------------
 // Environment gate
@@ -562,6 +562,19 @@ describe("adaptBullMQJob appendEvent (XADD)", () => {
 // ---------------------------------------------------------------------------
 // onFailed + onError handler tests
 // ---------------------------------------------------------------------------
+
+describe("BullMQ failure-handler isolation (pure)", () => {
+  it("reports a synchronous handler throw instead of letting it escape dispatch", async () => {
+    const reported = new Promise<Error>((resolve) => {
+      expect(() => __dispatchFailureHandler(
+        () => { throw new Error("synchronous handler failure"); },
+        resolve,
+      )).not.toThrow();
+    });
+
+    await expect(reported).resolves.toMatchObject({ message: "synchronous handler failure" });
+  });
+});
 
 describe("createBullMQBackend — onFailed + onError handlers", () => {
   redisIt("onFailed fires with correct id/error/attemptsMade when job throws", async () => {

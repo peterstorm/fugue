@@ -841,9 +841,6 @@ export const parseLoadOpts = (
   // property observation (pinned in file-checkpointer-codec.test.ts,
   // "returns fresh frozen option objects the caller cannot mutate or
   // re-observe" — the counting-Proxy `reads === 1` assertion).
-  // (comment-analyzer-2, review run
-  // standalone-2026-08-21-181423-f6-file-durable-runtime: the former biconditional
-  // "exactly when the key is absent" was not true for an explicit `undefined`)
   const expectedDagFingerprint = loadOpts.expectedDagFingerprint;
   if (expectedDagFingerprint !== undefined && typeof expectedDagFingerprint !== "string") {
     return err(

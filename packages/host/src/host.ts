@@ -770,8 +770,6 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
       // unlogged — and flag the DERIVED `http://localhost:<PORT>` default,
       // whose card Review deep-link is unreachable outside the host machine;
       // every sibling boot decision logs its resolution the same way.
-      // (silent-failure-hunter-1, review run
-      // standalone-2026-08-21-181423-f6-file-durable-runtime)
       logger.info(
         `HITL durable run engine enabled (Teams webhook transport) — approval base ${notifierSelection.approvalBaseUrl}` +
           (config.HITL_APPROVAL_BASE_URL === undefined

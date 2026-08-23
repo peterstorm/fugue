@@ -193,7 +193,10 @@ export const createRunQueue = (deps: RunQueueDeps): RunQueueHandle => {
             // run-store read). Throw so the queue retries; the `finally` below
             // releases the lock first. (A run that settled `failed` returns
             // `ok` from processRun — it is durably recorded, not retried.)
-            logger?.error?.("hitl: processRun returned error — retrying", { runId, error: result.error.kind });
+            logWithoutThrowing(logger, "error", "hitl: processRun returned error — retrying", {
+              runId,
+              error: result.error.kind,
+            });
             throw new Error(`hitl: processRun failed for ${runId}: ${result.error.kind}`, { cause: result.error });
           }
         } finally {
@@ -201,7 +204,7 @@ export const createRunQueue = (deps: RunQueueDeps): RunQueueHandle => {
           await renewalTail;
           const released = await redis.compareAndDelete(lockKey(tenant, runId), lockToken);
           if (!released.ok) {
-            logger?.warn?.("hitl: failed to release owned lock", {
+            logWithoutThrowing(logger, "warn", "hitl: failed to release owned lock", {
               runId,
               error: released.error.kind,
             });

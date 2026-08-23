@@ -252,6 +252,27 @@ describe("createRunQueue — single-flight lock", () => {
     expect(warnings).toEqual([{ runId: RUN, error: "redis-unavailable" }]);
   });
 
+  it("a throwing release logger cannot turn best-effort cleanup diagnostics into worker failure", async () => {
+    const base = fakeRedis();
+    const redis: HitlRedisPort = {
+      ...base.redis,
+      async compareAndDelete() {
+        return err({ kind: "redis-unavailable", operation: "WATCH/EXEC release" });
+      },
+    };
+    const fb = fakeBackend();
+    const q = createRunQueue({
+      backend: fb.backend,
+      redis,
+      tenant: TENANT,
+      lockTtlSec: 300,
+      logger: { info() {}, error() {}, warn() { throw new Error("logger transport failed"); } },
+    });
+    q.startWorker(okProcess);
+
+    await expect(fb.getWorker()(fb.job(RUN))).resolves.toBeUndefined();
+  });
+
   it("C1: re-enqueues (deferred) a wakeup that loses the lock — never drops it", async () => {
     let processed = 0;
     // Lock already held by another worker.
@@ -320,6 +341,22 @@ describe("createRunQueue — single-flight lock", () => {
 
     await expect(fb.getWorker()(fb.job(RUN))).rejects.toThrow(/processRun failed for run-1/);
     // The finally attempted an ownership-checked release even though the slice threw.
+    expect(calls.compareAndDelete).toHaveLength(1);
+  });
+
+  it("A1: a throwing process-error logger cannot replace the retry-triggering worker failure", async () => {
+    const { redis, calls } = fakeRedis();
+    const fb = fakeBackend();
+    const q = createRunQueue({
+      backend: fb.backend,
+      redis,
+      tenant: TENANT,
+      lockTtlSec: 300,
+      logger: { info() {}, warn() {}, error() { throw new Error("logger transport failed"); } },
+    });
+    q.startWorker(async () => err({ kind: "redis-unavailable", operation: "run-store get" }));
+
+    await expect(fb.getWorker()(fb.job(RUN))).rejects.toThrow(/processRun failed for run-1/);
     expect(calls.compareAndDelete).toHaveLength(1);
   });
 

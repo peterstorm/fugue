@@ -20,6 +20,7 @@ import type {
 import { adaptBullMQJob } from "./job.js";
 import { serializeValue } from "../state-machine/serialize.js";
 import { fwLogger } from "../logger.js";
+import { safeErrorMessage } from "../types/safe-error.js";
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -53,6 +54,22 @@ export const __parseConnection = (connection: ConnectionInput): RedisOptions => 
     ...(db === undefined ? {} : { db }),
     ...(url.protocol === "rediss:" ? { tls: {} } : {}),
   };
+};
+
+/**
+ * Invoke a user failure handler inside a promise boundary. Deferring the call
+ * is load-bearing: `Promise.resolve(handler())` evaluates `handler()` first, so
+ * a synchronous throw would escape before the rejection handler exists.
+ */
+export const __dispatchFailureHandler = (
+  handler: () => Promise<void> | void,
+  report: (error: Error) => void,
+): void => {
+  void Promise.resolve()
+    .then(handler)
+    .catch((error) => {
+      report(error instanceof Error ? error : new Error(safeErrorMessage(error)));
+    });
 };
 
 // ---------------------------------------------------------------------------
@@ -210,23 +227,22 @@ export function createBullMQBackend(
       const attemptsMade = job.attemptsMade ?? 1;
       const max = job.opts?.attempts ?? 1;
 
+      const reportHandlerFailure = (handlerError: Error): void => {
+        worker.emit("error", handlerError);
+      };
       if (attemptsMade >= max) {
         for (const handler of exhaustedHandlers) {
-          Promise.resolve(handler(id, error, attemptsMade)).catch((handlerErr) => {
-            worker.emit(
-              "error",
-              handlerErr instanceof Error ? handlerErr : new Error(String(handlerErr)),
-            );
-          });
+          __dispatchFailureHandler(
+            () => handler(id, error, attemptsMade),
+            reportHandlerFailure,
+          );
         }
       } else {
         for (const handler of failedHandlers) {
-          Promise.resolve(handler(id, error, attemptsMade, max)).catch((handlerErr) => {
-            worker.emit(
-              "error",
-              handlerErr instanceof Error ? handlerErr : new Error(String(handlerErr)),
-            );
-          });
+          __dispatchFailureHandler(
+            () => handler(id, error, attemptsMade, max),
+            reportHandlerFailure,
+          );
         }
       }
     });

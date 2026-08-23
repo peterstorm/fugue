@@ -1,5 +1,5 @@
 import { witness, witnessValue, RN } from "./_freshness-helpers.js";
-import { describe, it, expect } from "bun:test";
+import { afterEach, describe, it, expect } from "bun:test";
 import { emitFreshnessWitnessEvents } from "../dag-runtime/freshness-emission.js";
 import { InMemoryFreshnessIndex, type FreshnessIndex } from "../dag-runtime/freshness-check.js";
 import { RecordingObserver } from "../observer/observer.js";
@@ -10,6 +10,11 @@ import type { PostWaveContext } from "../dag-runtime/post-wave-context.js";
 import type { WitnessCapturedEvent, WriteAttemptedEvent, FreshnessViolationEvent } from "../types/events.js";
 import { z } from "zod";
 import { ok, err } from "../types/result.js";
+import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
+
+afterEach(() => {
+  __resetFrameworkLogger();
+});
 
 const NID_READ = nodeId("read-node");
 const NID_WRITE = nodeId("write-node");
@@ -209,6 +214,47 @@ describe("emitFreshnessWitnessEvents", () => {
     }
     expect(obs.events.filter((e) => e.type === "witness-captured")).toHaveLength(0);
     expect(obs.events.some((e) => e.type === "node-error")).toBe(true);
+  });
+
+  it("preserves the fail-closed extractor result when error coercion and logging are hostile", async () => {
+    const obs = new RecordingObserver();
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    const readNode = makeNodeDef("read-node", {
+      sideEffects: {
+        kind: "reads",
+        resource: RN("pg:orders"),
+        extractWitness: () => { throw revoked.proxy; },
+      },
+    });
+    setFrameworkLogger({
+      debug() {},
+      info() {},
+      warn() { throw new Error("logger transport failed"); },
+      error() {},
+    });
+    const ctx = makePostWaveCtx(
+      [NID_READ],
+      new Map([[NID_READ, readNode]]) as any,
+      makeMachineCtx(),
+      obs,
+      new InMemoryFreshnessIndex(),
+    );
+
+    const result = await emitFreshnessWitnessEvents(
+      ctx,
+      new Map([[NID_READ, {}]]),
+      new Set(),
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatchObject({
+        kind: "node-crash",
+        message: expect.stringContaining("<unprintable error>"),
+      });
+    }
+    expect(obs.events.some((event) => event.type === "node-error")).toBe(true);
   });
 
   it("no events for pure transform (kind: none)", async () => {

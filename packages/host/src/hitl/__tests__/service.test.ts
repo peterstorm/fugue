@@ -785,6 +785,47 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     if (!reconciled.ok) expect(reconciled.error.kind).toBe("redis-unavailable");
   });
 
+  it("continues reconciliation after a run-specific inspection failure", async () => {
+    const store = inMemoryRunStore();
+    const corruptRunId = mkRunId("corrupt-run");
+    const healthyRunId = mkRunId("healthy-run");
+    const inspectionError: HostError = {
+      kind: "internal-invariant-violated",
+      message: "corrupt checkpoint",
+      context: { runId: corruptRunId },
+    };
+    const inspectingStore: RunStorePort = {
+      ...store.port,
+      async get(runId) {
+        return runId === corruptRunId ? err(inspectionError) : store.port.get(runId);
+      },
+    };
+    const delivered: RunId[] = [];
+    const ids = [corruptRunId, healthyRunId];
+    const service = createHitlRunService({
+      runStore: inspectingStore,
+      runQueue: { async enqueue(runId) { delivered.push(runId); return ok(undefined); } },
+      decisions: inMemoryDecisionStore().port,
+      tenant: TENANT,
+      notifier: recordingNotifier().port,
+      executor: realExecutor(oneNodeDag()),
+      clock: () => 1_000,
+      newRunId: () => ids.shift()!,
+      logger: THROWING_ERROR_LOGGER,
+    });
+    expect((await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN)).ok).toBe(true);
+    expect((await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN)).ok).toBe(true);
+    delivered.length = 0;
+
+    const reconciled = await service.reconcileActiveRuns();
+
+    expect(reconciled).toEqual(ok([
+      { kind: "inspection-failed", runId: corruptRunId, error: inspectionError },
+      { kind: "woken", runId: healthyRunId },
+    ]));
+    expect(delivered).toEqual([healthyRunId]);
+  });
+
   it("reconciliation skips a suspended run with no durable decision", async () => {
     const dag = twoWaveDag();
     const { service, queue, store } = setup(dag);

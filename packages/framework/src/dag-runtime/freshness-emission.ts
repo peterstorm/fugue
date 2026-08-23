@@ -17,9 +17,19 @@ import type { FrameworkError } from "../types/errors.js";
 import { type Result, ok, err } from "../types/result.js";
 import { fwLogger } from "../logger.js";
 import { formatFrameworkError } from "../types/errors.js";
+import { safeErrorMessage } from "../types/safe-error.js";
 import { buildNodeInput } from "../shared/build-input.js";
 import { emit } from "./emit.js";
 import type { PostWaveContext } from "./post-wave-context.js";
+
+/** Extraction diagnostics are subordinate to the fail-closed `Result`. */
+const warnWithoutThrowing = (message: string): void => {
+  try {
+    fwLogger().warn(message);
+  } catch {
+    // The modeled extractor failure remains authoritative.
+  }
+};
 
 /**
  * Emit freshness witness events for all reads/writes nodes in a wave.
@@ -81,8 +91,8 @@ export async function emitFreshnessWitnessEvents(
           });
           witnessAccumulator?.set(capturedWitness.resource, capturedWitness);
         } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          fwLogger().warn(
+          const msg = safeErrorMessage(e);
+          warnWithoutThrowing(
             `[emitFreshnessWitnessEvents] extractWitness failed for node '${nodeId}': ${msg}`,
           );
           const fwError: FrameworkError = { kind: "node-crash", nodeId, retriability: "non-retriable", message: `extractWitness threw: ${msg}` };
@@ -129,8 +139,8 @@ export async function emitFreshnessWitnessEvents(
           conditionedOn = se.extractConditionedOn(nodeInput);
           newWitness = stampWitness(se.resource, se.extractNewWitness(output));
         } catch (e) {
-          const msg = `extractConditionedOn/extractNewWitness failed for node '${nodeId}': ${e instanceof Error ? e.message : e}`;
-          fwLogger().warn(`[emitFreshnessWitnessEvents] ${msg}`);
+          const msg = `extractConditionedOn/extractNewWitness failed for node '${nodeId}': ${safeErrorMessage(e)}`;
+          warnWithoutThrowing(`[emitFreshnessWitnessEvents] ${msg}`);
           const fwError: FrameworkError = { kind: "node-crash", nodeId, retriability: "non-retriable", message: `freshness extractor threw: ${msg}` };
           emitNodeError(nodeId, `freshness extractor failed: ${msg}`, fwError);
           // Fail-closed: broken extractors are an authoring bug that must be fixed.

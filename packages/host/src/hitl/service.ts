@@ -65,7 +65,8 @@ interface HitlRunServiceDeps {
 
 export type ReconciliationAttempt =
   | { readonly kind: "woken"; readonly runId: RunId }
-  | { readonly kind: "wakeup-failed"; readonly runId: RunId; readonly error: HostError };
+  | { readonly kind: "wakeup-failed"; readonly runId: RunId; readonly error: HostError }
+  | { readonly kind: "inspection-failed"; readonly runId: RunId; readonly error: HostError };
 
 export interface HitlRunService {
   /** Seed + persist a fresh run and request its initial wakeup. */
@@ -306,13 +307,28 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
     if (!active.ok) return active;
 
     const attempts: ReconciliationAttempt[] = [];
+    const recordInspectionFailure = (runId: RunId, error: HostError): void => {
+      attempts.push({ kind: "inspection-failed", runId, error });
+      logWithoutThrowing(logger, "error", "hitl: active-run reconciliation inspection failed", {
+        runId,
+        error: error.kind,
+        message: formatHostError(error),
+      });
+    };
+
     for (const runId of active.value) {
       const run = await runStore.get(runId);
-      if (!run.ok) return run;
+      if (!run.ok) {
+        recordInspectionFailure(runId, run.error);
+        continue;
+      }
       if (run.value === null || run.value.status.kind === "completed" || run.value.status.kind === "failed") continue;
       if (run.value.status.kind === "suspended") {
         const decision = await decisions.getDecision(runId, run.value.status.nodeId);
-        if (!decision.ok) return decision;
+        if (!decision.ok) {
+          recordInspectionFailure(runId, decision.error);
+          continue;
+        }
         if (decision.value === null) continue;
       }
 

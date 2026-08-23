@@ -26,8 +26,20 @@
  * serialize is plain data — `toJson`/`fromJson` round-trip its Maps/Sets.
  */
 
-import { toJson, tryFromJson, isDagPhaseKind } from "@fuguejs/framework";
-import type { JobLike, DagPhase, DagMachineContextPersisted } from "@fuguejs/framework";
+import {
+  PersistedFrameworkErrorSchema,
+  isDagPhaseKind,
+  toJson,
+  tryFromJson,
+  tryNodeId,
+} from "@fuguejs/framework";
+import type {
+  DagMachineContextPersisted,
+  DagPhase,
+  HumanGatePayload,
+  JobLike,
+  NodeId,
+} from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import { ok, err } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
@@ -35,29 +47,127 @@ import { internalInvariantViolated } from "../domain/host-error.js";
 import type { RunExecutionJob, RunLease, RunStorePort } from "./ports.js";
 
 type Envelope = { state: DagPhase; context: DagMachineContextPersisted };
+type DagPhaseParserMap = {
+  readonly [Kind in DagPhase["kind"]]: (
+    state: Readonly<Record<string, unknown>>,
+  ) => Extract<DagPhase, { readonly kind: Kind }> | null;
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const hasOwn = (value: Readonly<Record<string, unknown>>, key: string): boolean =>
+  Object.prototype.hasOwnProperty.call(value, key);
+
+const finiteNumber = (value: unknown): value is number =>
+  typeof value === "number" && Number.isFinite(value);
+
+const parseNodeId = (value: unknown): NodeId | null => {
+  if (typeof value !== "string") return null;
+  const parsed = tryNodeId(value);
+  return parsed.ok ? parsed.value : null;
+};
+
+const parseHumanGatePayload = (
+  state: Readonly<Record<string, unknown>>,
+): HumanGatePayload | null => {
+  const nodeId = parseNodeId(state.nodeId);
+  if (
+    nodeId === null ||
+    !hasOwn(state, "output") ||
+    typeof state.prompt !== "string" ||
+    !Array.isArray(state.pendingReviews) ||
+    !finiteNumber(state.wave)
+  ) {
+    return null;
+  }
+  const pendingReviews: NodeId[] = [];
+  for (const rawNodeId of state.pendingReviews) {
+    const parsed = parseNodeId(rawNodeId);
+    if (parsed === null) return null;
+    pendingReviews.push(parsed);
+  }
+  return {
+    nodeId,
+    output: state.output,
+    prompt: state.prompt,
+    pendingReviews,
+    wave: state.wave,
+  };
+};
 
 /**
- * Validate a deserialized checkpoint has the `{state, context}` envelope shape,
- * with `state` carrying a known `DagPhase` discriminant and `context` an object.
- * This is the parse step that keeps a corrupt `state.kind` out of the exhaustive
- * transition; it intentionally does not deep-validate every context field (that
- * data is framework-authored), only the discriminant that drives control flow.
+ * Complete wire parsers for every `DagPhase` variant. The record key domain is
+ * compiler-checked against `DagPhase["kind"]`, so adding a phase without its
+ * required-field parser fails typecheck instead of weakening checkpoint reads.
  */
-const isEnvelope = (v: unknown): v is Envelope => {
-  if (typeof v !== "object" || v === null) return false;
-  const o = v as Record<string, unknown>;
-  const state = o.state;
-  if (typeof state !== "object" || state === null) return false;
-  if (typeof o.context !== "object" || o.context === null) return false;
-  return isDagPhaseKind((state as Record<string, unknown>).kind);
+const DAG_PHASE_PARSERS = {
+  pending: () => ({ kind: "pending" }),
+  running: (state) =>
+    finiteNumber(state.wave) ? { kind: "running", wave: state.wave } : null,
+  "awaiting-human": (state) => {
+    const payload = parseHumanGatePayload(state);
+    return payload === null ? null : { kind: "awaiting-human", ...payload };
+  },
+  suspended: (state) => {
+    const payload = parseHumanGatePayload(state);
+    return payload === null ? null : { kind: "suspended", ...payload };
+  },
+  retrying: (state) => {
+    const nodeId = parseNodeId(state.nodeId);
+    return nodeId !== null &&
+      finiteNumber(state.wave) &&
+      finiteNumber(state.attempt) &&
+      finiteNumber(state.nextDelayMs)
+      ? {
+          kind: "retrying",
+          wave: state.wave,
+          nodeId,
+          attempt: state.attempt,
+          nextDelayMs: state.nextDelayMs,
+        }
+      : null;
+  },
+  "retrying-hook": (state) => {
+    const payload = parseHumanGatePayload(state);
+    return payload !== null && finiteNumber(state.attempt) && finiteNumber(state.nextDelayMs)
+      ? {
+          kind: "retrying-hook",
+          ...payload,
+          attempt: state.attempt,
+          nextDelayMs: state.nextDelayMs,
+        }
+      : null;
+  },
+  succeeded: (state) =>
+    hasOwn(state, "output") ? { kind: "succeeded", output: state.output } : null,
+  failed: (state) => {
+    const error = PersistedFrameworkErrorSchema.safeParse(state.error);
+    return error.success ? { kind: "failed", error: error.data } : null;
+  },
+} satisfies DagPhaseParserMap;
+
+const parseDagPhase = (value: unknown): DagPhase | null => {
+  if (!isRecord(value) || !isDagPhaseKind(value.kind)) return null;
+  return DAG_PHASE_PARSERS[value.kind](value);
+};
+
+/** Parse a deserialized checkpoint into the trusted execution envelope. */
+const parseEnvelope = (value: unknown): Envelope | null => {
+  if (!isRecord(value) || !isRecord(value.context)) return null;
+  const state = parseDagPhase(value.state);
+  return state === null
+    ? null
+    : { state, context: value.context as unknown as DagMachineContextPersisted };
 };
 
 const envelopeSnapshot = (serialized: string): Envelope => {
   const parsed = tryFromJson(serialized);
-  if (!parsed.ok || !isEnvelope(parsed.value)) {
+  const envelope = parsed.ok ? parseEnvelope(parsed.value) : null;
+  if (envelope === null) {
     throw new Error("makeRunStoreJobLike: framework-authored checkpoint failed its own envelope parser");
   }
-  return parsed.value;
+  return envelope;
 };
 
 /**
@@ -84,14 +194,15 @@ export const makeRunStoreJobLike = (
       { runId, error: parsed.error.message },
     ));
   }
-  if (!isEnvelope(parsed.value)) {
+  const initialEnvelope = parseEnvelope(parsed.value);
+  if (initialEnvelope === null) {
     return err(internalInvariantViolated(
       `corrupt checkpoint for run '${runId}' (invalid envelope shape)`,
       { runId },
     ));
   }
 
-  let envelope: Envelope = parsed.value;
+  let envelope = initialEnvelope;
   let failure: HostError | null = null;
 
   const jobLike: JobLike<DagPhase, unknown, DagMachineContextPersisted> = {

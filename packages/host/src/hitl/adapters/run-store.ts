@@ -10,13 +10,15 @@
  * writes never race the status writes), tenant-prefixed (AD-4 / FR-013 / SC-001):
  *   fugue:<tenant>:hitl:run:<runId>   →  JSON RunMeta (record minus checkpoint)
  *   fugue:<tenant>:hitl:ckpt:<runId>  →  checkpoint string (framework `toJson`)
+ *   fugue:<tenant>:hitl:active        →  SET of non-terminal run ids
+ *   fugue:<tenant>:hitl:lock:<runId>  →  queue-worker lease-fence token
  *
  * SECURITY INVARIANT (load-bearing for AD-4 / FR-013 / SC-001):
  *   The Redis store is constructed bound to ONE `TenantId`, so a single store
  *   instance can only ever read/write its own tenant's run & checkpoint keys.
  *   Under the per-tenant Redis ACL (`~fugue:<tenant>:*`) a store holding tenant
- *   A's id physically cannot name tenant B's runs/checkpoints — making a flat,
- *   cross-tenant HITL key unrepresentable.
+ *   A's id physically cannot name tenant B's run/checkpoint/index/lease keys —
+ *   making a flat, cross-tenant HITL key unrepresentable.
  */
 
 import { isDeepStrictEqual } from "node:util";

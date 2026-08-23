@@ -12,7 +12,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { ok, err, toJson, fromJson } from "@fuguejs/framework";
-import type { RunId, DagPhase, DagMachineContextPersisted, Result } from "@fuguejs/framework";
+import type { RunId, NodeId, DagPhase, DagMachineContextPersisted, Result } from "@fuguejs/framework";
 import { issueRunLease } from "../ports.js";
 import type { RunExecutionJob, RunStorePort } from "../ports.js";
 import type { RunRecord, RunStatus } from "../types.js";
@@ -22,7 +22,27 @@ import { makeRunStoreJobLike } from "../run-store-job.js";
 const RUN = "run-1" as RunId;
 const LEASE = issueRunLease(RUN, "test-owner", new AbortController().signal);
 type Envelope = { state: DagPhase; context: DagMachineContextPersisted };
-const envelope = (kind: string): Envelope => ({ state: { kind } as unknown as DagPhase, context: {} as DagMachineContextPersisted });
+const GATE = {
+  nodeId: "review" as NodeId,
+  output: null,
+  prompt: "Approve?",
+  pendingReviews: [],
+  wave: 1,
+} as const;
+const VALID_PHASES: Record<DagPhase["kind"], DagPhase> = {
+  pending: { kind: "pending" },
+  running: { kind: "running", wave: 0 },
+  "awaiting-human": { kind: "awaiting-human", ...GATE },
+  suspended: { kind: "suspended", ...GATE },
+  retrying: { kind: "retrying", wave: 0, nodeId: GATE.nodeId, attempt: 1, nextDelayMs: 10 },
+  "retrying-hook": { kind: "retrying-hook", ...GATE, attempt: 1, nextDelayMs: 10 },
+  succeeded: { kind: "succeeded", output: null },
+  failed: { kind: "failed", error: { kind: "aborted", reason: "test" } },
+};
+const envelope = (kind: DagPhase["kind"]): Envelope => ({
+  state: { ...VALID_PHASES[kind] } as DagPhase,
+  context: {} as DagMachineContextPersisted,
+});
 const initial = toJson(envelope("pending"));
 
 /** Unwrap a successful construction, failing the test loudly otherwise. */
@@ -103,6 +123,13 @@ describe("makeRunStoreJobLike", () => {
     }
   });
 
+  it("ACCEPTS complete representatives of every DagPhase variant", () => {
+    const { port } = fakeStore(() => Promise.resolve(ok(undefined)));
+    for (const phase of Object.values(VALID_PHASES)) {
+      expect(makeRunStoreJobLike(port, LEASE, toJson({ state: phase, context: {} })).ok).toBe(true);
+    }
+  });
+
   it("REJECTS a checkpoint whose state.kind is not a known DagPhase (corrupt discriminant)", () => {
     const { port } = fakeStore(() => Promise.resolve(ok(undefined)));
     const corrupt = toJson({ state: { kind: "totally-bogus" }, context: {} });
@@ -112,6 +139,33 @@ describe("makeRunStoreJobLike", () => {
       expect(result.error.kind).toBe("internal-invariant-violated");
       expect(result.error).toMatchObject({ message: expect.stringContaining("invalid envelope shape") });
     }
+  });
+
+  it("REJECTS known DagPhase discriminants whose variant-required fields are missing", () => {
+    const { port } = fakeStore(() => Promise.resolve(ok(undefined)));
+    const incompleteKinds = [
+      "running",
+      "awaiting-human",
+      "suspended",
+      "retrying",
+      "retrying-hook",
+      "succeeded",
+      "failed",
+    ] as const satisfies readonly Exclude<DagPhase["kind"], "pending">[];
+
+    for (const kind of incompleteKinds) {
+      const result = makeRunStoreJobLike(port, LEASE, toJson({ state: { kind }, context: {} }));
+      expect(result.ok, `${kind} was accepted without its required payload`).toBe(false);
+    }
+  });
+
+  it("REJECTS gate phases carrying an invalid branded node id", () => {
+    const { port } = fakeStore(() => Promise.resolve(ok(undefined)));
+    const result = makeRunStoreJobLike(port, LEASE, toJson({
+      state: { ...VALID_PHASES.suspended, nodeId: "not a node id" },
+      context: {},
+    }));
+    expect(result.ok).toBe(false);
   });
 
   it("REJECTS a checkpoint missing the state/context envelope shape", () => {
