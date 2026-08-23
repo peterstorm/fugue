@@ -41,9 +41,9 @@ import { computeIncomingByNode, computeOutgoingByNode, computeUnconditionalAdj }
  * The persisted shape plus an optional fingerprint stamp. This is the type
  * that actually lives in the durable backend (BullMQ job data, Redis, etc.).
  *
- * `__dagFingerprint` is stamped by `wrapDagJobLike.updateData` and compared
- * on resume by `verifyDagFingerprint`. Absent on first-write snapshots —
- * treated as "no prior fingerprint" rather than a mismatch.
+ * `__dagFingerprint` is stamped by `persistDagContext` and compared on resume
+ * by `verifyDagFingerprint`. It remains optional only for caller-owned fresh or
+ * legacy in-memory snapshots; durable seed writers must use `persistDagContext`.
  */
 export type PersistedDagContext = DagMachineContextPersisted & {
   readonly __dagFingerprint?: string;
@@ -332,6 +332,20 @@ export const stripNonPersistable = (
 });
 
 /**
+ * Project a live DAG context into its complete durable representation. The DAG
+ * which produced the context supplies the fingerprint in the same pure step, so
+ * an initial seed and later transition checkpoints cannot disagree about
+ * topology binding.
+ */
+export const persistDagContext = (
+  ctx: DagMachineContext,
+  dag: DagDef,
+): PersistedDagContext => ({
+  ...stripNonPersistable(ctx),
+  __dagFingerprint: dagFingerprint(dag),
+});
+
+/**
  * Wrap a caller-supplied `JobLike` (typed against the persisted shape) so the
  * runner sees a fully-formed `DagMachineContext`. The wrapper:
  *
@@ -379,10 +393,7 @@ export const wrapDagJobLike = (
     },
     async updateData(d: { state: DagPhase; context: DagMachineContext }): Promise<void> {
       cachedData = null; // invalidate cache
-      const persistable: PersistedDagContext = {
-        ...stripNonPersistable(d.context),
-        __dagFingerprint: expectedFingerprint,
-      };
+      const persistable = persistDagContext(d.context, dag);
       await inner.updateData({
         state: d.state,
         context: persistable,

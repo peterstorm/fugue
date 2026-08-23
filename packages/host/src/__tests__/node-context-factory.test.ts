@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { ok, err, isOk, dagId, runId as makeRunId, nodeId as makeNodeId, gitSha, noopTracer, createHttpCapability, systemClock } from "@fuguejs/framework";
+import { fromJson, ok, err, isOk, dagId, runId as makeRunId, nodeId as makeNodeId, gitSha, noopTracer, createHttpCapability, systemClock } from "@fuguejs/framework";
 import type {
   Result,
   DagId,
@@ -300,8 +300,11 @@ describe("createNamespacedCheckpointWriter", () => {
 
   it.each([
     ["cyclic", (() => { const value: Record<string, unknown> = {}; value.self = value; return value; })()],
-    ["undefined", undefined],
     ["BigInt", { amount: 1n }],
+    ["non-finite number", { nested: { score: Number.NaN } }],
+    ["function property", { nested: { run: () => 1 } }],
+    ["symbol property", { nested: { marker: Symbol("x") } }],
+    ["custom toJSON", { value: 1, toJSON: () => ({ value: 2 }) }],
   ])("rejects a %s checkpoint value as non-serializable", async (_label, value) => {
     const { redis } = createMockRedis();
     const { logger, logs } = collectLogs();
@@ -309,6 +312,25 @@ describe("createNamespacedCheckpointWriter", () => {
 
     await expect(writer.write(testRunId, testNodeId, value)).rejects.toThrow(/not serializable/);
     expect(logs.some(l => l.msg.includes("not serializable"))).toBe(true);
+  });
+
+  it("losslessly round-trips Map, Set, Date, and explicit undefined", async () => {
+    const store = new Map<string, string>();
+    const { redis } = createMockRedis(store);
+    const { logger } = collectLogs();
+    const writer = createNamespacedCheckpointWriter(
+      redis, testTenant, testDagId, testRunId, undefined, logger,
+    );
+    const value = {
+      byNode: new Map([[testNodeId, new Set(["approved"])]]),
+      at: new Date("2026-08-23T07:00:00.000Z"),
+      optional: undefined,
+    };
+
+    await writer.write(testRunId, testNodeId, value);
+
+    const key = buildCheckpointKey(testTenant, testDagId, testRunId, testNodeId);
+    expect(fromJson(store.get(key)!)).toEqual(value);
   });
 
   it("preserves the checkpoint failure when the logger throws", async () => {

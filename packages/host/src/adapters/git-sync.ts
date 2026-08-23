@@ -73,6 +73,38 @@ const cleanupTimedOutChild = (
   })();
 };
 
+const runBoundedProcess = async (
+  command: readonly string[],
+  cwd: string | undefined,
+  timeoutMs: number,
+): Promise<SpawnResult | "timeout"> => {
+  const proc = Bun.spawn([...command], { cwd, stdout: "pipe", stderr: "pipe" });
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<"timeout">((resolve) => {
+    timeoutId = setTimeout(() => resolve("timeout"), timeoutMs);
+  });
+  const result = await Promise.race([proc.exited, timeout]);
+  const drainStreams = async (): Promise<readonly [string, string]> =>
+    Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+
+  if (result === "timeout") {
+    cleanupTimedOutChild(
+      () => proc.kill(),
+      () => proc.kill("SIGKILL"),
+      proc.exited,
+      drainStreams,
+    );
+    return "timeout";
+  }
+
+  clearTimeout(timeoutId);
+  const [stdout, stderr] = await drainStreams();
+  return { exitCode: result, stdout: stdout.trim(), stderr: stderr.trim() };
+};
+
 /**
  * Execute a git command via Bun.spawn with timeout and stderr capture.
  * Returns exit code, stdout, stderr.
@@ -83,41 +115,14 @@ const spawnGit = async (
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
 ): Promise<Result<SpawnResult, HostError>> => {
   try {
-    const proc = Bun.spawn(["git", ...args], {
-      cwd,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<"timeout">((resolve) => {
-      timeoutId = setTimeout(() => resolve("timeout"), timeoutMs);
-    });
-
-    const result = await Promise.race([proc.exited, timeout]);
-
+    const result = await runBoundedProcess(["git", ...args], cwd, timeoutMs);
     if (result === "timeout") {
-      // Deliver the timeout error before bounded background cleanup settles.
-      cleanupTimedOutChild(
-        () => proc.kill(),
-        () => proc.kill("SIGKILL"),
-        proc.exited,
-        () => Promise.allSettled([
-          new Response(proc.stdout).text(),
-          new Response(proc.stderr).text(),
-        ]),
-      );
       return err({
         kind: "git-timeout",
         operation: `git ${args.join(" ")}`,
       });
     }
-
-    clearTimeout(timeoutId);
-    const stdout = await new Response(proc.stdout).text();
-    const stderr = await new Response(proc.stderr).text();
-
-    return ok({ exitCode: result, stdout: stdout.trim(), stderr: stderr.trim() });
+    return ok(result);
   } catch (e) {
     return err({
       kind: "git-spawn-failed",
@@ -277,52 +282,23 @@ export const runBunInstall = async (
     if (!(await Bun.file(join(cwd, "package.json")).exists())) {
       return ok(undefined);
     }
-    const proc = Bun.spawn(["bun", "install", "--frozen-lockfile"], {
+    const result = await runBoundedProcess(
+      ["bun", "install", "--frozen-lockfile"],
       cwd,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<"timeout">((resolve) => {
-      timeoutId = setTimeout(() => resolve("timeout"), timeoutMs);
-    });
-
-    const result = await Promise.race([proc.exited, timeout]);
-
+      timeoutMs,
+    );
     if (result === "timeout") {
-      // Same error-first bounded cleanup as git command execution.
-      cleanupTimedOutChild(
-        () => proc.kill(),
-        () => proc.kill("SIGKILL"),
-        proc.exited,
-        () => Promise.allSettled([
-          new Response(proc.stdout).text(),
-          new Response(proc.stderr).text(),
-        ]),
-      );
       return err({
         kind: "bun-install-failed",
         message: "bun install timed out",
       });
     }
-
-    clearTimeout(timeoutId);
-
-    if (result !== 0) {
-      const stderr = await new Response(proc.stderr).text();
-      await new Response(proc.stdout).text(); // drain stdout
+    if (result.exitCode !== 0) {
       return err({
         kind: "bun-install-failed",
-        message: stderr.trim() || `exit code ${result}`,
+        message: result.stderr || `exit code ${result.exitCode}`,
       });
     }
-
-    // Drain streams on success path too
-    await Promise.allSettled([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]);
     return ok(undefined);
   } catch (e) {
     return err({

@@ -17,6 +17,7 @@
  *   keycloak-broker.ts — same tag, different spec namespace.
  */
 
+import { isDeepStrictEqual } from "node:util";
 import type {
   ContextCacheAdapter,
   CheckpointWriter,
@@ -28,7 +29,8 @@ import type {
   FrameworkError,
 } from "@fuguejs/framework";
 import type { InvocationOrigin } from "@fuguejs/framework";
-import { makeNodeContext, ok, isErr } from "@fuguejs/framework";
+import { fromJson, makeNodeContext, ok, isErr, safeErrorMessage, toJson } from "@fuguejs/framework";
+import { assertLosslessEvent } from "@fuguejs/framework/file";
 import type { RegisteredDag } from "../domain/registry.js";
 import type { AuthIdentity, AgentClientMap } from "../domain/auth.js";
 import type { RedisPort, SharedInfra, LogPort } from "../ports.js";
@@ -189,11 +191,16 @@ export const createNamespacedCheckpointWriter = (
       const fullKey = buildCheckpointKey(tenant, dagId, runId, nodeId);
       let serialized: string;
       try {
-        const encoded = JSON.stringify(value);
-        if (encoded === undefined) throw new TypeError("JSON.stringify returned undefined");
-        serialized = encoded;
+        assertLosslessEvent(value, {
+          operation: "checkpointWriter.write",
+          root: "nodeOutput",
+        });
+        serialized = toJson(value);
+        if (!isDeepStrictEqual(fromJson(serialized), value)) {
+          throw new Error("node output failed losslessness round-trip verification");
+        }
       } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
+        const message = safeErrorMessage(e);
         report("warn", "Checkpoint write failed — value not serializable", {
           key: fullKey, dagId, runId, nodeId: nodeId as string, error: message,
         });

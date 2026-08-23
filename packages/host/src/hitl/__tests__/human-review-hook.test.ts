@@ -196,17 +196,16 @@ describe("makeOnDecisionConsumed", () => {
     expect(cleared).toEqual([[RUN, NODE]]);
   });
 
-  it("is non-fatal when the clear fails (post-gate state is already durable; TTL reaps)", async () => {
+  it("fails closed when clearing the consumed decision fails", async () => {
     const decisions = decisionStore({
       async clear() { return err({ kind: "redis-unavailable", operation: "DEL" }); },
     });
     const consume = makeOnDecisionConsumed({ decisions, runId: RUN });
 
-    // Must resolve, not reject — a failed consume cannot fail an already-committed run.
-    await expect(consume(NODE)).resolves.toBeUndefined();
+    await expect(consume(NODE)).rejects.toThrow("consumed decision cleanup failed");
   });
 
-  it("a throwing clear-failure logger cannot fail an already-committed run", async () => {
+  it("a throwing clear-failure logger cannot hide the fail-closed outcome", async () => {
     const decisions = decisionStore({
       async clear() { return err({ kind: "redis-unavailable", operation: "DEL" }); },
     });
@@ -215,11 +214,11 @@ describe("makeOnDecisionConsumed", () => {
       runId: RUN,
       logger: {
         info: () => {},
-        warn: () => { throw new Error("logger failed"); },
-        error: () => {},
+        warn: () => {},
+        error: () => { throw new Error("logger failed"); },
       },
     });
 
-    await expect(consume(NODE)).resolves.toBeUndefined();
+    await expect(consume(NODE)).rejects.toThrow("consumed decision cleanup failed");
   });
 });

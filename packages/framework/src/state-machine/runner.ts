@@ -156,13 +156,19 @@ export const runStateMachine = async <S, E, C>(
       // persisted, so a caller's effectively-once side effect (e.g. consuming a
       // human decision) is ordered strictly after durability. A crash between
       // `updateData` and here leaves the side effect un-run, which is the safe
-      // direction: the decision is re-read on resume rather than lost. A throw
-      // is swallowed (the transition is already persisted) like `onTrace`.
+      // direction: the decision is re-read on resume rather than lost. Unlike
+      // telemetry, this callback may enforce a business invariant; a failure is
+      // rethrown after durability so the owning shell can fail the run closed.
       if (opts.onCommitted !== undefined) {
         try {
           await opts.onCommitted({ prevState, event, state, context });
         } catch (commitErr) {
-          log.error("[runStateMachine] onCommitted threw — ignoring to preserve durability:", commitErr);
+          try {
+            log.error("[runStateMachine] onCommitted threw — failing closed after checkpoint:", commitErr);
+          } catch {
+            // The committed-callback failure remains authoritative.
+          }
+          throw commitErr;
         }
       }
       // Do not persist progress for failed states — the runner throws below

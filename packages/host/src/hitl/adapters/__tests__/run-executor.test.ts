@@ -19,13 +19,14 @@ import {
   err,
   toJson,
   defineDag,
+  dagFingerprint,
   DAG_INPUT,
   noopTracer,
   gitSha,
   nodeId,
   EXECUTOR_NODE_ID,
 } from "@fuguejs/framework";
-import { compileDagToMachine, stripNonPersistable } from "@fuguejs/framework/advanced";
+import { compileDagToMachine, persistDagContext } from "@fuguejs/framework/advanced";
 import type {
   DagDef,
   DagId,
@@ -127,7 +128,7 @@ const seedJobLike = async (dag: DagDef, input: unknown, failCheckpoint = false) 
   if (!compiled.ok) throw new Error("compile failed");
   const checkpoint = toJson({
     state: compiled.value.initialState,
-    context: stripNonPersistable(compiled.value.initialContext),
+    context: persistDagContext(compiled.value.initialContext, dag),
   });
   const leases = createInMemoryRunLeaseAuthority();
   const store = createInMemoryRunStore(leases);
@@ -181,6 +182,55 @@ describe("createRunExecutor — channel split (err vs failed)", () => {
         expect(result.value.error.message).toContain("no longer registered");
       }
     }
+  });
+
+  it("rejects topology drift between initial seed and the first worker slice", async () => {
+    const v1 = singleNodeDag((async () => ok("v1")) as never);
+    let v2Runs = 0;
+    const v2 = defineDag({
+      id: "exec-dag",
+      nodes: {
+        first: makeNode("first", { run: (async () => { v2Runs += 1; return ok("first"); }) as never }),
+        second: makeNode("second", { run: (async () => { v2Runs += 1; return ok("second"); }) as never }),
+      },
+      edges: [{ from: DAG_INPUT, to: "first" }, { from: "first", to: "second" }],
+      outputNodeId: "second",
+    });
+    let live = registered(v1);
+    const exec = createRunExecutor({
+      sharedInfra: sharedInfra(),
+      getRegisteredDag: () => live,
+      agentClientMap: { "exec-dag": "fugue-agent-exec" },
+    });
+    const seeded = await exec.seedCheckpoint(v1.id as DagId, null);
+    if (!seeded.ok) throw new Error("seed failed");
+    expect(seeded.value).toContain(dagFingerprint(v1));
+
+    const leases = createInMemoryRunLeaseAuthority();
+    const store = createInMemoryRunStore(leases);
+    const record: QueuedRunRecord = {
+      runId: "run-1" as never,
+      dagId: v1.id as DagId,
+      ownerTeam: markTeam("eng"),
+      input: null,
+      identity: ADMIN,
+      status: { kind: "queued" },
+      checkpoint: seeded.value,
+      createdAtMs: timestamp(1),
+      updatedAtMs: timestamp(1),
+    };
+    await store.create(record);
+    const job = makeRunStoreJobLike(store, leases.acquire(record.runId), seeded.value);
+    if (!job.ok) throw new Error("job build failed");
+    live = registered(v2);
+
+    const result = await exec.run(runReq(v2, job.value, null));
+
+    expect(result.ok && result.value.kind).toBe("failed");
+    if (result.ok && result.value.kind === "failed") {
+      expect(result.value.error.kind).toBe("checkpoint-version-mismatch");
+    }
+    expect(v2Runs).toBe(0);
   });
 
   it("a known dag that COMPLETES returns ok({ kind: 'completed' }) with the output", async () => {

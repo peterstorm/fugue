@@ -170,6 +170,12 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
 
     const created = await runStore.create(record);
     if (!created.ok) return created;
+    if (created.value.kind === "publication-uncertain") {
+      logWithoutThrowing(logger, "error", "hitl: run creation acknowledgement was lost — treating run as accepted", {
+        runId,
+        dagId,
+      });
+    }
 
     // The run is already durably accepted. Do not destroy it merely because
     // the direct wakeup fails: reconciliation enumerates the active record.

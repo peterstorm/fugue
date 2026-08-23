@@ -28,9 +28,20 @@ const createTestApp = (cp: Checkpointer = new InMemoryCheckpointer()) => {
     new Map([["claude-sonnet-4-20250514", makeSynthesisOutput()]]),
   );
   const prompts = new Map([["synthesis", "Summarize customer {{customerId}}"]]);
-  // /summarize requires a checkpointer (durability is part of the contract).
-  // Tests that intentionally exercise the null-checkpointer path should pass null explicitly.
-  return createApp({ source, llm, prompts, checkpointer: cp });
+  // /summarize requires both checkpoint read/meta and node-output write ports.
+  // Tests that intentionally exercise an incomplete pair construct the app directly.
+  return createApp({
+    source,
+    llm,
+    prompts,
+    checkpointer: cp,
+    checkpointWriter: {
+      async write(runId, nodeId, output) {
+        const saved = await cp.saveNode(runId, { nodeId, output, completedAt: new Date() });
+        if (!saved.ok) throw new Error(`test checkpoint write failed: ${saved.error.kind}`);
+      },
+    },
+  });
 };
 
 // Compute the DAG identity that /summarize will compare against on resume.
@@ -361,6 +372,24 @@ describe("POST /summarize", () => {
       expect(res.status).toBe(503);
       const json = await res.json();
       expect(json.error).toBe("Checkpoint store unavailable");
+    });
+
+    test("/summarize returns 503 when the node-output checkpoint writer is missing", async () => {
+      const source = new JsonFixtureSource(fixturesDir);
+      const llm = new FakeLlmClient(
+        new Map([["claude-sonnet-4-20250514", makeSynthesisOutput()]]),
+      );
+      const app = createApp({
+        source,
+        llm,
+        prompts: new Map([["synthesis", "Summarize customer {{customerId}}"]]),
+        checkpointer: new InMemoryCheckpointer(),
+      });
+
+      const res = await post(app, "/summarize", { customer_id: "cust-001" });
+
+      expect(res.status).toBe(503);
+      expect((await res.json()).error).toBe("Checkpoint store unavailable");
     });
 
     test("/summarize returns 503 even when resume_run_id is provided but checkpointer null", async () => {

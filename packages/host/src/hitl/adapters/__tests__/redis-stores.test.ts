@@ -461,6 +461,32 @@ describe("RedisDecisionStore", () => {
     expect(got.ok && got.value).toEqual(approve);
   });
 
+  it("losslessly round-trips approve-with-edit output with Map and undefined", async () => {
+    const store = createRedisDecisionStore(fakeRedis(), TENANT, cfg);
+    const action: HumanAction = {
+      kind: "approve-with-edit",
+      newOutput: { values: new Map([["review", new Set(["ok"])]]), optional: undefined },
+    };
+    await store.preparePending(runId, nodeId);
+
+    expect(await store.resolvePending(runId, nodeId, action)).toEqual(ok({ kind: "accepted" }));
+    expect(await store.getDecision(runId, nodeId)).toEqual(ok(action));
+  });
+
+  it("rejects a non-lossless approve-with-edit without throwing or publishing", async () => {
+    const store = createRedisDecisionStore(fakeRedis(), TENANT, cfg);
+    await store.preparePending(runId, nodeId);
+
+    const resolved = await store.resolvePending(runId, nodeId, {
+      kind: "approve-with-edit",
+      newOutput: { score: Number.NaN },
+    });
+
+    expect(resolved.ok).toBe(false);
+    if (!resolved.ok) expect(resolved.error.kind).toBe("internal-invariant-violated");
+    expect(await store.getDecision(runId, nodeId)).toEqual(ok(null));
+  });
+
   it("getDecision returns null when none recorded", async () => {
     const store = createRedisDecisionStore(fakeRedis(), TENANT, cfg);
     const got = await store.getDecision(runId, nodeId);
@@ -828,6 +854,30 @@ describe("RedisRunStore — active-run index (ADR-0074)", () => {
     expect(base.sets.get("fugue:tenant-a:hitl:active")?.has("run-1") ?? false).toBe(false);
   });
 
+  it("acknowledges publication uncertainty when committed metadata cannot be removed", async () => {
+    const base = setBackedRedis();
+    const redis: HitlRedisPort = {
+      ...base.redis,
+      async setNx(key, value, opts) {
+        if (!key.includes(":hitl:run:")) return base.redis.setNx(key, value, opts);
+        const committed = await base.redis.setNx(key, value, opts);
+        if (!committed.ok || !committed.value) return committed;
+        return err({ kind: "redis-unavailable", operation: "metadata response lost" });
+      },
+      async sRem() { return err({ kind: "redis-unavailable", operation: "compensate index" }); },
+      async compareAndDelete() {
+        return err({ kind: "redis-unavailable", operation: "compensation unavailable" });
+      },
+    };
+    const store = createRedisRunStore(redis, TENANT, cfg);
+
+    const created = await store.create(record());
+
+    expect(created).toEqual(ok({ kind: "publication-uncertain" }));
+    expect((await store.get("run-1" as RunId)).ok).toBe(true);
+    expect(await store.listActiveRunIds()).toEqual(ok(["run-1" as RunId]));
+  });
+
   it("compensates metadata publication failure without consuming a quota slot", async () => {
     const base = setBackedRedis();
     const redis: HitlRedisPort = {
@@ -928,6 +978,26 @@ describe("RedisRunStore — active-run index (ADR-0074)", () => {
     await store.setStatus(lease, { kind: "completed", output: 1 }); // duplicate settle
     const c = await store.countActiveRuns();
     expect(c.ok && c.value).toBe(0);
+  });
+
+  it("rejects terminal resurrection and cross-terminal rewrites without index drift", async () => {
+    const { redis } = setBackedRedis();
+    const store = createRedisRunStore(redis, TENANT, cfg);
+    await store.create(record({ runId: "r1" as RunId }));
+    const lease = await acquireLease(redis, "r1" as RunId);
+    await store.setStatus(lease, { kind: "completed", output: 1 });
+
+    const resurrected = await store.setStatus(lease, { kind: "running" });
+    const rewritten = await store.setStatus(lease, {
+      kind: "failed",
+      error: { kind: "aborted", reason: "rewrite" },
+    });
+
+    expect(resurrected.ok).toBe(false);
+    expect(rewritten.ok).toBe(false);
+    const metadata = await store.getMetadata("r1" as RunId);
+    expect(metadata.ok && metadata.value?.status).toEqual({ kind: "completed", output: 1 });
+    expect(await store.countActiveRuns()).toEqual(ok(0));
   });
 
   it("self-heals a leaked index member whose run record expired (TTL) — pruned and excluded", async () => {

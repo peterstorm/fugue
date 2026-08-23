@@ -19,8 +19,10 @@
  * gates, making a flat cross-tenant decision key unrepresentable.
  */
 
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
-import { ok, err, safeErrorMessage, tryNodeId } from "@fuguejs/framework";
+import { fromJson, ok, err, safeErrorMessage, toJson, tryNodeId } from "@fuguejs/framework";
+import { assertLosslessEvent } from "@fuguejs/framework/file";
 import type { Result, RunId, NodeId, HumanAction } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import type { TenantId } from "../../domain/tenant.js";
@@ -60,6 +62,27 @@ type ExhaustiveHumanActionSchema = [MissingHumanActionKind] extends [never]
   ? z.ZodType<HumanAction>
   : never;
 const HumanActionSchema: ExhaustiveHumanActionSchema = HumanActionSchemaDefinition;
+
+const serializeHumanAction = (action: HumanAction): Result<string, HostError> => {
+  try {
+    assertLosslessEvent(action, {
+      operation: "serializeHumanAction",
+      root: "decision",
+    });
+    const encoded = toJson(action);
+    const restored = HumanActionSchema.safeParse(fromJson(encoded));
+    if (!restored.success || !isDeepStrictEqual(restored.data, action)) {
+      throw new Error("human action failed losslessness round-trip verification");
+    }
+    return ok(encoded);
+  } catch (error) {
+    return err({
+      kind: "internal-invariant-violated",
+      message: `human action is not losslessly serializable: ${safeErrorMessage(error)}`,
+      context: {},
+    });
+  }
+};
 
 /**
  * Composite-key separator between `runId` and `nodeId`. The unit separator
@@ -153,13 +176,15 @@ export const createRedisDecisionStore = (
     },
 
     async resolvePending(runId, nodeId, action) {
+      const encoded = serializeHumanAction(action);
+      if (!encoded.ok) return encoded;
       // The guard check and first-writer decision publication share one Redis
       // optimistic transaction. A concurrent clear invalidates EXEC and retries,
       // so a resolver cannot recreate a decision after its gate has closed.
       const resolved = await redis.setNxIfPresent(
         pendingKey(tenant, runId, nodeId),
         decisionKey(tenant, runId, nodeId),
-        JSON.stringify(action),
+        encoded.value,
         expiry,
       );
       if (!resolved.ok) return err(resolved.error);
@@ -172,9 +197,9 @@ export const createRedisDecisionStore = (
       if (res.value === null) return ok(null);
       let raw: unknown;
       try {
-        raw = JSON.parse(res.value);
+        raw = fromJson(res.value);
       } catch (e) {
-        logWithoutThrowing(logger, "error", "hitl: corrupt decision in store (malformed JSON)", {
+        logWithoutThrowing(logger, "error", "hitl: corrupt decision in store (malformed or non-canonical serialization)", {
           runId,
           nodeId,
           error: safeErrorMessage(e),

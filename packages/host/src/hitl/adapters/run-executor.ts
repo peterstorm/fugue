@@ -22,7 +22,7 @@ import type {
   FrameworkError,
   CapabilityBroker,
 } from "@fuguejs/framework";
-import { compileDagToMachine, stripNonPersistable } from "@fuguejs/framework/advanced";
+import { compileDagToMachine, persistDagContext } from "@fuguejs/framework/advanced";
 import { toJson } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import { formatHostError } from "../../domain/host-error.js";
@@ -96,7 +96,7 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
         // A compile failure (cycle) is a registration/authoring defect.
         return err({ kind: "dag-validation-failed", dagId, reason: compiled.error.kind, message: `compile failed: ${compiled.error.kind}` });
       }
-      const persisted = stripNonPersistable(compiled.value.initialContext);
+      const persisted = persistDagContext(compiled.value.initialContext, registered.dag);
       return ok(toJson({ state: compiled.value.initialState, context: persisted }));
     },
 

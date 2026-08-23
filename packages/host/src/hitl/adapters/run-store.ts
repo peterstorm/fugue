@@ -33,7 +33,7 @@ import type { HitlRedisPort, LogPort } from "../../ports.js";
 import { issueRunLease } from "../ports.js";
 import { logWithoutThrowing } from "../diagnostic-logging.js";
 import type { RunLease, RunStorePort } from "../ports.js";
-import { tryRunTimestampMs } from "../types.js";
+import { transitionRunStatus, tryRunTimestampMs } from "../types.js";
 import type { RunMetadata, RunRecord, RunStatus, RunTimestampMs } from "../types.js";
 
 // ── Persisted-shape validators (parse-don't-validate across the Redis boundary) ─
@@ -220,7 +220,7 @@ export const createInMemoryRunStore = (
       }
       runs.set(record.runId, record);
       active.add(record.runId); // a fresh run is non-terminal — join the index
-      return ok(undefined);
+      return ok({ kind: "created" });
     },
     async get(runId) {
       return ok(runs.get(runId) ?? null);
@@ -236,14 +236,22 @@ export const createInMemoryRunStore = (
       runs.set(lease.runId, { ...r, checkpoint });
       return ok(undefined);
     },
-    async setStatus(lease, status: RunStatus) {
+    async setStatus(lease, status) {
       if (!leases.owns(lease)) return leaseLost(lease);
       const r = runs.get(lease.runId);
       if (!r) return err({ kind: "run-not-found", runId: lease.runId });
+      const transition = transitionRunStatus(r.status, status);
+      if (!transition.ok) {
+        return err({
+          kind: "internal-invariant-violated",
+          message: `invalid run '${lease.runId}' lifecycle update: ${transition.error}`,
+          context: {},
+        });
+      }
       const updatedAtMs = readRunTimestamp(now);
       if (!updatedAtMs.ok) return updatedAtMs;
-      runs.set(lease.runId, { ...r, status, updatedAtMs: updatedAtMs.value });
-      if (isTerminalStatus(status)) active.delete(lease.runId); // settled → leave the index
+      runs.set(lease.runId, { ...r, status: transition.value, updatedAtMs: updatedAtMs.value });
+      if (isTerminalStatus(transition.value)) active.delete(lease.runId); // settled → leave the index
       return ok(undefined);
     },
     async countActiveRuns() {
@@ -322,15 +330,13 @@ export const createRedisRunStore = (
     return res.value ? ok(undefined) : leaseLost(lease);
   };
 
-  const compensateUnpublishedCreate = async (
+  const removePreparedCreate = async (
     runId: RunId,
     checkpoint: string,
-    encodedMeta: string,
   ): Promise<void> => {
-    const [index, preparedCheckpoint, publishedMeta] = await Promise.all([
+    const [index, preparedCheckpoint] = await Promise.all([
       redis.sRem(activeKey(tenant), runId),
       redis.compareAndDelete(ckptKey(tenant, runId), checkpoint),
-      redis.compareAndDelete(runKey(tenant, runId), encodedMeta),
     ]);
     if (!index.ok) {
       logWithoutThrowing(logger, "warn", "hitl: failed to remove active index after unpublished create", {
@@ -344,12 +350,40 @@ export const createRedisRunStore = (
         error: preparedCheckpoint.error.kind,
       });
     }
+  };
+
+  const compensateAmbiguousPublication = async (
+    runId: RunId,
+    checkpoint: string,
+    encodedMeta: string,
+  ): Promise<boolean> => {
+    const publishedMeta = await redis.compareAndDelete(
+      runKey(tenant, runId),
+      encodedMeta,
+    );
     if (!publishedMeta.ok) {
       logWithoutThrowing(logger, "warn", "hitl: failed to remove ambiguously published metadata after create failure", {
         runId,
         error: publishedMeta.error.kind,
       });
+      return false;
     }
+
+    let exactMetadataAbsent = publishedMeta.value;
+    if (!exactMetadataAbsent) {
+      const observed = await redis.get(runKey(tenant, runId));
+      if (!observed.ok) {
+        logWithoutThrowing(logger, "warn", "hitl: failed to verify metadata absence after create compensation", {
+          runId,
+          error: observed.error.kind,
+        });
+        return false;
+      }
+      exactMetadataAbsent = observed.value !== encodedMeta;
+    }
+
+    if (exactMetadataAbsent) await removePreparedCreate(runId, checkpoint);
+    return exactMetadataAbsent;
   };
 
   const readMeta = async (runId: RunId): Promise<Result<RunMeta | null, HostError>> => {
@@ -473,20 +507,29 @@ export const createRedisRunStore = (
       }
       const idx = await redis.sAdd(activeKey(tenant), record.runId);
       if (!idx.ok) {
-        await compensateUnpublishedCreate(record.runId, checkpoint, encodedMeta.value);
+        await removePreparedCreate(record.runId, checkpoint);
         return err(idx.error);
       }
       // Metadata is the publication point and remains create-once with TTL.
       const published = await redis.setNx(runKey(tenant, record.runId), encodedMeta.value, expiry);
       if (!published.ok) {
-        await compensateUnpublishedCreate(record.runId, checkpoint, encodedMeta.value);
-        return err(published.error);
+        const exactMetadataAbsent = await compensateAmbiguousPublication(
+          record.runId,
+          checkpoint,
+          encodedMeta.value,
+        );
+        if (exactMetadataAbsent) return err(published.error);
+        logWithoutThrowing(logger, "error", "hitl: run metadata publication acknowledgement is uncertain — treating run as accepted", {
+          runId: record.runId,
+          error: published.error.kind,
+        });
+        return ok({ kind: "publication-uncertain" });
       }
       if (!published.value) {
-        await compensateUnpublishedCreate(record.runId, checkpoint, encodedMeta.value);
+        await removePreparedCreate(record.runId, checkpoint);
         return err({ kind: "internal-invariant-violated", message: `run '${record.runId}' already exists`, context: {} });
       }
-      return ok(undefined);
+      return ok({ kind: "created" });
     },
 
     async get(runId) {
@@ -523,11 +566,19 @@ export const createRedisRunStore = (
       const metaRes = await readMeta(lease.runId);
       if (!metaRes.ok) return err(metaRes.error);
       if (metaRes.value === null) return err({ kind: "run-not-found", runId: lease.runId });
+      const transition = transitionRunStatus(metaRes.value.status, status);
+      if (!transition.ok) {
+        return err({
+          kind: "internal-invariant-violated",
+          message: `invalid run '${lease.runId}' lifecycle update: ${transition.error}`,
+          context: {},
+        });
+      }
       const updatedAtMs = readRunTimestamp(now);
       if (!updatedAtMs.ok) return updatedAtMs;
-      const written = await writeMeta(lease, { ...metaRes.value, status, updatedAtMs: updatedAtMs.value });
+      const written = await writeMeta(lease, { ...metaRes.value, status: transition.value, updatedAtMs: updatedAtMs.value });
       if (!written.ok) return written;
-      if (isTerminalStatus(status)) {
+      if (isTerminalStatus(transition.value)) {
         // Settled → leave the active-run index (ADR-0074). Idempotent (SREM of an
         // absent member is a no-op), so a re-settle never drifts the count.
         const idx = await redis.sRem(activeKey(tenant), lease.runId);

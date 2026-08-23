@@ -10,6 +10,7 @@
  * lifecycle status, the persisted record, and the notification a reviewer sees.
  */
 
+import { isDeepStrictEqual } from "node:util";
 import { ok, err } from "@fuguejs/framework";
 import type { DagId, RunId, NodeId, FrameworkError, NonEmptyString, Result } from "@fuguejs/framework";
 import type { Team } from "../domain/auth.js";
@@ -58,6 +59,26 @@ export type RunStatus =
   | { readonly kind: "suspended"; readonly nodeId: NodeId; readonly prompt: NonEmptyString }
   | { readonly kind: "completed"; readonly output: unknown }
   | { readonly kind: "failed"; readonly error: FrameworkError };
+
+/** Lifecycle commands accepted after durable creation; `queued` is create-only. */
+export type RunStatusUpdate = Exclude<RunStatus, { readonly kind: "queued" }>;
+
+/**
+ * Parse a requested lifecycle update against the current durable state.
+ * Active states may progress or settle. Terminal writes are idempotent only
+ * when byte-for-byte equal; resurrection and terminal rewrites are rejected.
+ */
+export const transitionRunStatus = (
+  current: RunStatus,
+  next: RunStatusUpdate,
+): Result<RunStatusUpdate, string> => {
+  if (current.kind === "completed" || current.kind === "failed") {
+    return isDeepStrictEqual(current, next)
+      ? ok(next)
+      : err(`cannot transition terminal '${current.kind}' run to '${next.kind}'`);
+  }
+  return ok(next);
+};
 
 /**
  * The durable record of a run. `checkpoint` is the framework's serialized

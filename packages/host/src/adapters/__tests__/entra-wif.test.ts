@@ -184,6 +184,14 @@ describe("entra-wif — success maps to an app-only token", () => {
   // A14: `expires_in` must parse to POSITIVE FINITE seconds — NaN/Infinity/
   // negative/string would mint a born-stale or never-expiring cache entry
   // downstream, so each is a malformed 2xx → infra-unreachable, never ok.
+  it("200 with an empty access_token is malformed", () => {
+    const result = mapWifResponse("https://graph.microsoft.com", {
+      status: 200,
+      json: { access_token: "", expires_in: 3600 },
+    });
+    expect(result.ok).toBe(false);
+  });
+
   it.each([
     ["NaN", Number.NaN],
     ["negative", -3600],

@@ -1,7 +1,7 @@
 import { describe, expect, test, afterEach } from "bun:test";
 import { setFrameworkTracer, __resetFrameworkTracer } from "../tracing/global-tracer.js";
 import { withTracedNodeSpan } from "../dag-runtime/node-span.js";
-import { ok } from "../types/result.js";
+import { err, ok } from "../types/result.js";
 import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
 import { UNPRINTABLE_ERROR } from "../types/safe-error.js";
 import { resourceName } from "../types/freshness.js";
@@ -138,6 +138,62 @@ describe("withTracedNodeSpan span leak under thrown fn (Wave 1.1)", () => {
     if (!result.ok && result.error.kind === "node-crash") {
       expect(result.error.message).toBe(UNPRINTABLE_ERROR);
     }
+  });
+
+  test("cyclic payloads and throwing content filters cannot prevent or replace execution", async () => {
+    const recorded: RecordedSpan[] = [];
+    setFrameworkTracer(makeFakeTracer(recorded) as unknown as Parameters<typeof setFrameworkTracer>[0]);
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    let calls = 0;
+
+    const first = await withTracedNodeSpan(
+      "n1",
+      "transform",
+      cyclic,
+      (value) => value,
+      { kind: "none" },
+      async () => { calls += 1; return ok(cyclic); },
+    );
+    const second = await withTracedNodeSpan(
+      "n2",
+      "transform",
+      { safe: true },
+      () => { throw new Error("filter down"); },
+      { kind: "none" },
+      async () => { calls += 1; return ok({ done: true }); },
+    );
+
+    expect(first.result).toEqual(ok(cyclic));
+    expect(second.result).toEqual(ok({ done: true }));
+    expect(calls).toBe(2);
+    expect(recorded.every((span) => span.ended)).toBe(true);
+  });
+
+  test("hostile span methods cannot replace successful or failed node Results", async () => {
+    let endAttempts = 0;
+    setFrameworkTracer({
+      startActiveSpan(_name: string, _opts: unknown, fn: (span: unknown) => unknown) {
+        return fn({
+          addEvent() { throw new Error("event down"); },
+          setStatus() { throw new Error("status down"); },
+          setAttribute() { throw new Error("attribute down"); },
+          end() { endAttempts += 1; throw new Error("end down"); },
+        });
+      },
+    } as unknown as Parameters<typeof setFrameworkTracer>[0]);
+    const modeled = err({ kind: "aborted" as const, reason: "modeled" });
+
+    const success = await withTracedNodeSpan(
+      "n1", "transform", null, null, { kind: "none" }, async () => ok("done"),
+    );
+    const failure = await withTracedNodeSpan(
+      "n2", "transform", null, null, { kind: "none" }, async () => modeled,
+    );
+
+    expect(success.result).toEqual(ok("done"));
+    expect(failure.result).toEqual(modeled);
+    expect(endAttempts).toBe(2);
   });
 
   test("idempotency extractor failures stay modeled when diagnostics are hostile", async () => {

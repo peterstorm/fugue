@@ -15,7 +15,7 @@ import { ok, err, toJson, fromJson } from "@fuguejs/framework";
 import type { RunId, NodeId, DagPhase, DagMachineContextPersisted, Result } from "@fuguejs/framework";
 import { issueRunLease } from "../ports.js";
 import type { RunExecutionJob, RunStorePort } from "../ports.js";
-import type { RunRecord, RunStatus } from "../types.js";
+import type { RunRecord } from "../types.js";
 import { logWithoutThrowing } from "../diagnostic-logging.js";
 import { makeRunStoreJobLike } from "../run-store-job.js";
 
@@ -71,11 +71,11 @@ const expectJob = (r: Result<RunExecutionJob, unknown>): RunExecutionJob => {
 const fakeStore = (saveResult: () => ReturnType<RunStorePort["saveCheckpoint"]>) => {
   const saved: string[] = [];
   const port: RunStorePort = {
-    async create() { return ok(undefined); },
+    async create() { return ok({ kind: "created" }); },
     async get() { return ok(null as RunRecord | null); },
     async getMetadata() { return ok(null); },
     async saveCheckpoint(_lease, checkpoint) { saved.push(checkpoint); return saveResult(); },
-    async setStatus(_lease, _status: RunStatus) { return ok(undefined); },
+    async setStatus() { return ok(undefined); },
     async countActiveRuns() { return ok(0); },
     async listActiveRunIds() { return ok([]); },
   };

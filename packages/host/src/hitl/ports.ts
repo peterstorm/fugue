@@ -21,7 +21,7 @@ import type {
 } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
-import type { QueuedRunRecord, RunMetadata, RunRecord, RunStatus, PersistedIdentity } from "./types.js";
+import type { QueuedRunRecord, RunMetadata, RunRecord, RunStatusUpdate, PersistedIdentity } from "./types.js";
 
 const RUN_LEASE: unique symbol = Symbol("RunLease");
 declare const runLeaseOwnerTokenBrand: unique symbol;
@@ -57,12 +57,18 @@ export const issueRunLease = (runId: RunId, ownerToken: string, signal: AbortSig
  * transition (via the run-store-backed `JobLike`), so a worker crash resumes
  * from the last persisted state.
  */
+export type RunCreationOutcome =
+  | { readonly kind: "created" }
+  | { readonly kind: "publication-uncertain" };
+
 export interface RunStorePort {
   /**
-   * Create a fresh run record. Errs if the run id already exists. Also joins the
-   * run to the per-tenant active-run index (ADR-0074) — a fresh run is non-terminal.
+   * Create a fresh run record and join the active index. Publication uncertainty
+   * is an accepted outcome, never an Err: Redis may have committed metadata even
+   * when its acknowledgement was lost, and reconciliation must remain allowed to
+   * discover that run.
    */
-  create(record: QueuedRunRecord): Promise<Result<void, HostError>>;
+  create(record: QueuedRunRecord): Promise<Result<RunCreationOutcome, HostError>>;
   /** Fetch a complete execution record, requiring checkpoint bytes. */
   get(runId: RunId): Promise<Result<RunRecord | null, HostError>>;
   /** Fetch lifecycle/auth metadata without coupling status reads to checkpoint availability. */
@@ -75,7 +81,7 @@ export interface RunStorePort {
    * also removes the run from the per-tenant active-run index (ADR-0074); a
    * non-terminal status leaves the index untouched.
    */
-  setStatus(lease: RunLease, status: RunStatus): Promise<Result<void, HostError>>;
+  setStatus(lease: RunLease, status: RunStatusUpdate): Promise<Result<void, HostError>>;
   /**
    * Count this tenant's NON-terminal (queued / running / suspended) runs — the
    * `maxQueuedRuns` admission axis (ADR-0074). Read from the per-tenant active-run

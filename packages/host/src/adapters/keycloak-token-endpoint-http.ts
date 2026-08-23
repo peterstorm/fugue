@@ -41,7 +41,7 @@
  */
 
 import type { Result, FrameworkError } from "@fuguejs/framework";
-import { ok, err } from "@fuguejs/framework";
+import { err } from "@fuguejs/framework";
 import type { DownstreamScope } from "../domain/capability-scope.js";
 import { agentClientIdFromFrameworkOrigin } from "../domain/auth.js";
 import type { HttpPost, HttpPostResponse } from "./fetch-http-post.js";
@@ -52,6 +52,7 @@ import type {
   ExchangeV2Request,
 } from "./keycloak-token-endpoint.js";
 import type { KeycloakClientCredential, AgentClientCredentials } from "./agent-client-credentials.js";
+import { parseOAuthTokenBody } from "./oauth-token-body.js";
 
 /**
  * The OAuth 2.0 Token Exchange grant URN (RFC 8693). Fixed and structural — the
@@ -190,19 +191,8 @@ export const mapKeycloakTokenResponse = (
   res: HttpPostResponse,
 ): Result<MintedToken, FrameworkError> => {
   if (res.status === 200) {
-    const accessToken = res.json.access_token;
-    const expiresIn = res.json.expires_in;
-    // `expires_in` must parse to POSITIVE FINITE seconds at this boundary: a
-    // NaN/Infinity/non-positive lifetime would mint a born-stale or
-    // never-expiring cache entry downstream, so it is malformed, not usable.
-    if (
-      typeof accessToken === "string" &&
-      typeof expiresIn === "number" &&
-      Number.isFinite(expiresIn) &&
-      expiresIn > 0
-    ) {
-      return ok({ accessToken, expiresInSec: expiresIn });
-    }
+    const token = parseOAuthTokenBody(res.json);
+    if (token.ok) return token;
     return err({
       kind: "infra-unreachable",
       operation,

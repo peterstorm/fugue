@@ -1,117 +1,140 @@
-# PR Remediation — 2026-08-23
+# PR Remediation — 2026-08-23 (round 33)
 
 ## Review authority
 
 - Branch: `feat/f6-file-durable-runtime`
-- Reviewed HEAD: `89fb82adba0954503d4d21f6852fda21ab737733`
+- Reviewed HEAD: `0b55a06541dc9e1010d56459e6a5462e0aaf21c3`
 - Merge base with `origin/main`: `6c316cb53a9b7dfd88f2908b26108979eddbb04a`
-- Review run: `.claude/reviews/review-and-fix-runs/review-20260823T051143Z-cc16951f`
-- Canonical result: `.claude/reviews/review-and-fix-runs/review-20260823T051143Z-cc16951f/result.json`
-- Frozen scope: the exact 443 paths in `result.json.scope`; remediation changes are limited to finding paths, their in-scope tests/docs, and the support paths listed below.
-- Planned support paths outside the frozen review scope:
-  - `.claude/plans/2026-08-23-pr-remediation.md`
-  - `packages/http-auth/src/http-status.ts`
+- Review run: `.claude/reviews/review-and-fix-runs/review-20260823T055808Z-ed64599a`
+- Canonical result: `.claude/reviews/review-and-fix-runs/review-20260823T055808Z-ed64599a/result.json`
+- Frozen scope: the exact 448 paths in `result.json.scope`.
+- Planned support path outside the frozen review scope:
+  - `packages/host/src/adapters/oauth-token-body.ts`
 
 ## Surviving critical findings — mandatory
 
-### `code-reviewer-1` — persisted DAG context is cast instead of parsed
+### `code-reviewer-1` — initial HITL checkpoint lacks a DAG fingerprint
 
-**Evidence:** `packages/host/src/hitl/run-store-job.ts:161` accepts any record-shaped `context` and casts it to `DagMachineContextPersisted`. All three refutation lenses upheld the finding; current tests intentionally accept `{}`.
-
-**Fix:**
-
-1. Add a framework-owned, pure parser for the complete persisted DAG context, including required Maps/Sets, branded node IDs, topology edges/adjacency, retry state, human-gate state, routing confidence, `initialInput`, and the optional DAG fingerprint.
-2. Represent persisted topology edges without predicate closures so the durable type tells the truth.
-3. Use the parser in `makeRunStoreJobLike`; reject malformed context before constructing `JobLike`.
-4. Replace empty-context fixtures with real compiled persisted contexts and add table/property coverage proving missing or wrong-shaped required fields are rejected.
-
-### `silent-failure-hunter-1` — checkpoint-write errors replay side effects
-
-**Evidence:** `packages/host/src/hitl/adapters/run-executor.ts:165` returns the checkpoint `HostError`; `processRun` sends that error to queue retry while the last durable checkpoint may precede already-executed side effects. All three panel lenses upheld the replay path.
+**Evidence:** `seedCheckpoint` strips the compiled context but does not stamp `__dagFingerprint`; `verifyDagFingerprint` accepts absence as a fresh first write. All three refutation lenses upheld that a registry change before the first worker slice can combine seed-derived topology with the replacement live DAG.
 
 **Fix:**
 
-1. Convert a captured post-transition checkpoint failure into a non-retriable terminal run failure on the executor outcome channel rather than the queue-retry error channel.
-2. Preserve the checkpoint failure kind and diagnostic in the durable `FrameworkError` and non-throwing error log.
-3. Let `processRun` persist `status: failed`; update ADR-0060 and comments that currently prescribe retry from the last checkpoint.
-4. Pin executor/service regressions proving the failure is terminalized and not returned for queue replay.
+1. Add one framework-owned pure persistence projection that strips closure fields and stamps the fingerprint of the DAG which produced the context.
+2. Reuse that projection both for initial HITL seed serialization and every `wrapDagJobLike.updateData` write so the two durable write paths cannot drift.
+3. Add an executor regression that seeds under DAG v1, swaps to a topologically different v2 before the first slice, and proves fingerprint mismatch occurs before node execution.
+4. Update persistence comments that currently describe an absent seed fingerprint as expected.
 
-### `comment-analyzer-1` — production Bot routing comment claims a default fallback
+### `silent-failure-hunter-1` — node-output checkpoints use lossy `JSON.stringify`
 
-**Evidence:** `packages/host/src/hitl/adapters/bot/messages-handler.ts:145` says unmapped teams fall back to the default, while the notifier only reads a team reference and fails closed.
+**Evidence:** nested `undefined`, functions, symbols, Maps/Sets, custom `toJSON`, and non-finite numbers can be silently omitted or coerced without `JSON.stringify` throwing. All three panel lenses upheld the durability-integrity failure.
 
-**Fix:** State that the default is retained only as a back-compat/operational reference and is never a review-delivery fallback.
+**Fix:**
 
-### `comment-analyzer-2` — mapped-team Bot test repeats the fallback claim
+1. Pre-scan node output with the framework's canonical losslessness validator and encode it with the framework lossless serializer rather than raw JSON.
+2. Keep the imperative Redis shell thin and preserve the existing fail-closed throw contract and diagnostic isolation.
+3. Extend checkpoint-writer tests with lossy nested values/non-finite values and a positive Map/Set/undefined round trip.
 
-**Evidence:** `packages/host/src/hitl/adapters/bot/__tests__/bot.test.ts:248` describes the stored default as a fallback contradicted by notifier behavior.
+### `silent-failure-hunter-2` — telemetry faults can replace node outcomes
 
-**Fix:** Rewrite the assertion comment to describe independent back-compat storage with no delivery fallback.
+**Evidence:** input/output serialization, content filtering, `addEvent`, success-path `setStatus`/`setAttribute`, and `end` are outside best-effort guards. All three lenses upheld that tracing failures can prevent execution or replace a successful modeled Result.
 
-### `comment-analyzer-3` — conversation-store test claims callers fall back
+**Fix:**
 
-**Evidence:** `packages/host/src/hitl/adapters/bot/__tests__/bot.test.ts:647` claims a missing team reference falls back to default, while delivery fails closed.
+1. Concentrate all telemetry-only serialization/filter/span operations behind a no-throw best-effort helper.
+2. Structure the callback so node execution happens once, its Result remains authoritative, and span end is attempted exactly once in a finalizer.
+3. Preserve the fail-closed idempotency-key extractor because that is execution safety, not telemetry.
+4. Add hostile-span, cyclic payload, throwing-filter, and successful-node regressions proving telemetry cannot replace the node Result.
 
-**Fix:** Rewrite the comment to state absence means no per-team route and must be handled fail-closed by the notifier.
+### `comment-analyzer-1` — customer-summary claims durability without requiring the writer
+
+**Evidence:** `/summarize` rejects a missing `Checkpointer` but still passes an absent `CheckpointWriter`; `run-node.ts` explicitly skips node-output writes when no writer is wired. All three lenses upheld the mismatch.
+
+**Fix:** Require both the read/meta `Checkpointer` and node-output `CheckpointWriter` before accepting traffic, bind the proven writer locally, and add a 503 regression for either missing half. Keep the hard durability comment aligned with the enforced pair.
+
+### `architecture-tech-lead-1` — clear failure can permit stale decision reuse
+
+**Evidence:** decisions are addressed only by `(runId,nodeId)`, reads precede pending preparation, and `makeOnDecisionConsumed` currently swallows `clear` failure. A reroute can revisit the same gate before TTL and reuse the uncleared action. All three lenses upheld the path.
+
+**Fix:**
+
+1. Fail closed when post-commit decision clearing fails: log without throwing from diagnostics, then reject the committed callback so the executor terminalizes the run instead of continuing toward a re-entrant gate.
+2. Preserve the read-after-checkpoint ordering which prevents lost approvals; do not clear before durability.
+3. Pin hook and service regressions proving a clear failure cannot continue/re-gate and becomes a durable failed outcome.
+4. Amend ADR-0060 to replace the obsolete “non-fatal TTL” residual with the fail-closed terminal behavior.
+
+### `architecture-tech-lead-2` — ambiguous Redis create can execute after an error response
+
+**Evidence:** metadata `SET NX` can commit and return `Err`; if compare-and-delete compensation also errors, visible metadata/checkpoint/index remain and reconciliation can execute the run after `startRun` reported failure. All three lenses upheld the publication ambiguity.
+
+**Fix:**
+
+1. Replace the shallow `create(): Result<void>` outcome with a typed creation outcome distinguishing confirmed creation from publication uncertainty.
+2. Make compensation return evidence. Return the original error only when exact metadata removal/absence is proven; when publication cannot be disproved, return the accepted-but-uncertain outcome rather than telling the caller the run did not start.
+3. Have the service treat both creation outcomes as accepted, log the uncertain case prominently, and issue the normal direct wakeup; any actually published record remains discoverable by reconciliation.
+4. Add fault-injection coverage for write-then-error plus failed metadata compensation, proving no runnable record can coexist with an `Err` creation result.
+5. Document the conservative acknowledgement rule in ADR-0060.
 
 ## Advisory dispositions
 
-### Accepted — `code-reviewer-2`: corrupt active metadata omitted from reconciliation
+### Accepted — `silent-failure-hunter-3`: HumanAction serialization can throw or mutate edits
 
-The claim is sound and the fix is local. Keep corrupt metadata conservatively counted, but include its valid `RunId` in `listActiveRunIds` so reconciliation emits `inspection-failed` while continuing healthy runs. Add Redis-store and service-level regression coverage.
+The claim is sound and shares the mandatory durability rule. Guard serialization, use the framework lossless codec, parse with `fromJson` plus the existing HumanAction schema, and return a typed invariant error for non-lossless actions. Add approve-with-edit regressions for hostile/lossless values.
 
-### Accepted — `type-design-analyzer-1`: registry exposes live mutable configs
+### Accepted — `type-design-analyzer-1`: lifecycle resurrection is representable
 
-The runtime-read-only Map facade does not protect nested `TenantConfig` objects. Snapshot and recursively freeze each config and nested mapping/admission record when building a registry. Add regression coverage showing mutation attempts cannot alter lookup, lifecycle, team ownership, or paths.
+The claim is sound: `setStatus` accepts `queued` and terminal-to-active requests while adapters remove terminal records from the active index and never re-add them. Introduce a non-queued `RunStatusUpdate` command type plus one pure transition parser used by both adapters; permit active progress and idempotent same-terminal settlement, reject terminal resurrection/cross-terminal rewrites, and test index stability.
 
-### Dismissed as duplicate — `architecture-tech-lead-1`: persisted context cast
+### Accepted — `comment-analyzer-2`: ContextCache comment conflates cache and checkpointing
 
-This is the same defect and location as mandatory critical `code-reviewer-1`. It receives no separate change; the critical fix and tests fully disposition it.
+Rewrite it to name only NodeContext response caching.
 
-### Accepted — `architecture-tech-lead-2`: durable queue trigger is trusted by generic type
+### Accepted — `comment-analyzer-3`: bootstrap cache comment claims a nonexistent writer method
 
-Add a pure `RunTrigger` parser using `tryRunId` and `tenantId`, compare the parsed tenant to the queue-bound tenant, and reject malformed/cross-tenant data before lock-key construction or lease issuance. Add malformed payload tests in the existing queue suite.
+Rewrite it to state that cache `get`/`set` and `CheckpointWriter` are separate ports.
 
-### Accepted — `code-simplifier-1`: duplicated HTTP retry-status policy
+### Accepted — `code-simplifier-1`: duplicated bounded child-process lifecycle
 
-Create one internal pure `isRetriableHttpStatus` helper in `packages/http-auth/src/http-status.ts`; reuse it from token minting and the authenticated client while preserving the existing client export and behavior. Run both auth and client suites.
+The duplication is real and the current timeout semantics are already aligned. Extract one private bounded-process runner in `git-sync.ts`; retain operation-specific HostError mapping at the callers. Run existing git-sync timeout/stream-drain tests after the behavior-preserving move.
 
-### Accepted — `code-simplifier-2`: repeated fake-route branding JSDoc
+### Accepted — `code-simplifier-2`: duplicated OAuth token-body parser
 
-Keep the raw-vs-shaped invariant and example at `shapedRoute`/`SHAPED_ROUTE`; trim the fake factory comment to its own responsibility and refer to `shapedRoute` instead of repeating the full invariant/example.
+The validation rule is byte-for-byte the same and is a pure boundary parser. Add `oauth-token-body.ts` as the single pure parser for non-empty `access_token` plus positive finite `expires_in`; reuse it from Keycloak and Entra mappers while preserving each hop's distinct error attribution/message. Cover the shared parser through both existing adapter suites.
 
 ## Refuted critical audit
 
-No critical findings were refuted (`result.json.refuted_critical_findings` is empty).
+### `pr-test-analyzer-1` — filesystem traversal tests allegedly absent
+
+Refuted by the reproduction and security lenses. `packages/adapter-fs/src/__tests__/fs-adapter.test.ts` already tests `../etc/passwd`, `../../secret`, `/etc/passwd`, and nested traversal and routes them through `resolveWithinRoot`. No remediation will be applied.
 
 ## Validation
 
 Targeted gates:
 
 ```bash
-bun test packages/framework/src/__tests__/context-serialization-roundtrip.test.ts
-bun test packages/host/src/hitl/__tests__/run-store-job.test.ts \
-  packages/host/src/hitl/adapters/__tests__/run-executor.test.ts \
+bun test packages/host/src/hitl/adapters/__tests__/run-executor.test.ts \
+  packages/host/src/__tests__/node-context-factory.test.ts \
+  packages/framework/src/__tests__/node-span-leak.test.ts \
+  packages/host/src/hitl/__tests__/human-review-hook.test.ts \
   packages/host/src/hitl/__tests__/service.test.ts \
-  packages/host/src/hitl/adapters/__tests__/run-queue.test.ts \
   packages/host/src/hitl/adapters/__tests__/redis-stores.test.ts \
-  packages/host/src/hitl/adapters/bot/__tests__/bot.test.ts \
-  packages/host/src/__tests__/supervisor/registry/tenant-registry.test.ts
-bun test packages/http-auth/src/__tests__/auth.test.ts \
-  packages/http-auth/src/__tests__/client.test.ts \
-  packages/http-auth/src/__tests__/index.test.ts
+  apps/customer-summary/src/__tests__/server.test.ts
+bun test packages/host/src/__tests__/git-sync.test.ts \
+  packages/host/src/adapters/__tests__/entra-wif.test.ts \
+  packages/host/src/adapters/__tests__/keycloak-token-endpoint-http.test.ts
+bun test packages/framework/src/__tests__/dag-fingerprint-resume.test.ts \
+  packages/framework/src/__tests__/context-serialization-roundtrip.test.ts
 ```
 
-Package and full relevant gates:
+Package/full relevant gates:
 
 ```bash
 bun run --cwd packages/framework typecheck
 bun run --cwd packages/host typecheck
-bun run --cwd packages/http-auth typecheck
+bun run --cwd apps/customer-summary typecheck
 bun run --cwd packages/framework test
 bun run --cwd packages/host test
-bun run --cwd packages/http-auth test
+bun run --cwd apps/customer-summary test
 bun run check:docs
 ```
 
-After a green implementation baseline, run the required `distill` apply-mode pass one move at a time and re-run the covering tests after each accepted simplification.
+After a green implementation baseline, run the required `distill` apply-mode pass one move at a time and rerun covering tests after every accepted simplification.

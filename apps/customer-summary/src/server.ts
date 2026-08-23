@@ -46,7 +46,7 @@ interface HealthDeps {
   readonly tracingExporterFailures?: () => ReadonlyArray<{ readonly index: number; readonly failures: number }> | null;
 }
 
-/** Simplified cache adapter for NodeContext — wraps Cache + Checkpointer */
+/** Cache adapter used for NodeContext response caching. */
 export type ContextCache = ContextCacheAdapter;
 
 // --- App dependencies ---
@@ -95,10 +95,11 @@ export const createApp = (deps: AppDeps): Hono => {
     // resume works and so that retried/in-flight writes are not lost on crash.
     // If the checkpoint store is unavailable, refuse traffic at the handler
     // (belt-and-suspenders with /readyz reporting not-ready).
-    if (!deps.checkpointer) {
+    if (!deps.checkpointer || !deps.checkpointWriter) {
       return c.json({ error: "Checkpoint store unavailable" }, 503);
     }
     const checkpointer = deps.checkpointer;
+    const checkpointWriter = deps.checkpointWriter;
 
     try {
       const dag = createSummaryDag(deps.source, {
@@ -202,7 +203,7 @@ export const createApp = (deps: AppDeps): Hono => {
         dagId: dag.id,
         observer: deps.observer ?? undefined,
         cache: deps.cache,
-        checkpointWriter: deps.checkpointWriter,
+        checkpointWriter,
         prompts: { get: (name: string) => deps.prompts?.get(name) ?? null },
         llm: deps.llm,
         judgeLlm: deps.llm,

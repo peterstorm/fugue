@@ -84,6 +84,17 @@ const bestEffortLog = (
   }
 };
 
+const bestEffortTelemetry = (operation: string, effect: () => void): void => {
+  try {
+    effect();
+  } catch (error) {
+    bestEffortLog(
+      "debug",
+      `[withTracedNodeSpan] ${operation} failed: ${safeErrorMessage(error)}`,
+    );
+  }
+};
+
 /**
  * Fold a batch of per-node outcomes into a fresh, immutable `DagRunMeta`.
  * Concurrent siblings each return their own outcome; the wave caller folds
@@ -202,71 +213,66 @@ export const withTracedNodeSpan = async (
     `node:${nodeId}`,
     { attributes: attrs },
     async (span) => {
-      span.addEvent(
-        EVENT_NODE_INPUT,
-        contentFilter ? { data: contentFilter(JSON.stringify(input)) } : { data_redacted: "true" },
-      );
-
-      let result: Result<unknown, FrameworkError>;
-      // Guarantee `span.end()` runs on every path — including observer throws
-      // re-raised by `dispatchEvent` under `OBSERVER_STRICT=1`. Without the
-      // try/finally an unhandled rejection inside `fn()` would leak the span.
-      try {
-        result = await fn();
-      } catch (e) {
-        const message = safeErrorMessage(e);
-        const stack = safeErrorStack(e);
-        try {
-          span.setStatus({ code: SpanStatusCode.ERROR, message });
-        } catch (spanError) {
-          bestEffortLog(
-            "debug",
-            `[withTracedNodeSpan] span.setStatus failed: ${safeErrorMessage(spanError)}`,
-          );
-        }
-        try {
-          span.end();
-        } catch (spanError) {
-          bestEffortLog(
-            "debug",
-            `[withTracedNodeSpan] span.end failed — span may leak: ${safeErrorMessage(spanError)}`,
-          );
-        }
-        return {
-          result: err({
-            kind: "node-crash" as const,
-            nodeId: __brandNodeId(nodeId),
-            retriability: "retriable" as const,
-            message,
-            ...(stack ? { stack } : {}),
-          }),
-          outcome: EMPTY_OUTCOME,
-        };
-      }
-
-      if (result.ok) {
+      bestEffortTelemetry("input event", () => {
         span.addEvent(
-          EVENT_NODE_OUTPUT,
-          contentFilter ? { data: contentFilter(JSON.stringify(result.value)) } : { data_redacted: "true" },
+          EVENT_NODE_INPUT,
+          contentFilter ? { data: contentFilter(JSON.stringify(input)) } : { data_redacted: "true" },
         );
-        // Classify guardrail outcome and set span attributes accordingly.
-        // This is the one place where the span wrapper touches domain logic —
-        // but only to set the span's error status and attribute; the outcome
-        // classification itself is delegated to classifyGuardrailOutcome.
+      });
+
+      try {
+        let result: Result<unknown, FrameworkError>;
+        try {
+          result = await fn();
+        } catch (error) {
+          const message = safeErrorMessage(error);
+          const stack = safeErrorStack(error);
+          bestEffortTelemetry("span.setStatus", () => {
+            span.setStatus({ code: SpanStatusCode.ERROR, message });
+          });
+          return {
+            result: err({
+              kind: "node-crash" as const,
+              nodeId: __brandNodeId(nodeId),
+              retriability: "retriable" as const,
+              message,
+              ...(stack ? { stack } : {}),
+            }),
+            outcome: EMPTY_OUTCOME,
+          };
+        }
+
+        if (!result.ok) {
+          bestEffortTelemetry("span.setStatus", () => {
+            span.setStatus({
+              code: SpanStatusCode.ERROR,
+              message: safeErrorMessage(result.error),
+            });
+          });
+          return { result, outcome: EMPTY_OUTCOME };
+        }
+
+        bestEffortTelemetry("output event", () => {
+          span.addEvent(
+            EVENT_NODE_OUTPUT,
+            contentFilter ? { data: contentFilter(JSON.stringify(result.value)) } : { data_redacted: "true" },
+          );
+        });
         const outcome = classifyGuardrailOutcome(kind, result);
         if (outcome.guardrailFailed) {
-          span.setStatus({ code: SpanStatusCode.ERROR, message: `Guardrail failed: ${outcome.guardrailWarnings.join("; ")}` });
-          span.setAttribute(AI_GUARDRAIL_PASSED, false);
+          bestEffortTelemetry("guardrail span status", () => {
+            span.setStatus({
+              code: SpanStatusCode.ERROR,
+              message: `Guardrail failed: ${outcome.guardrailWarnings.join("; ")}`,
+            });
+          });
+          bestEffortTelemetry("guardrail span attribute", () => {
+            span.setAttribute(AI_GUARDRAIL_PASSED, false);
+          });
         }
-        span.end();
         return { result, outcome };
-      } else {
-        const errMsg = result.error && typeof result.error === "object" && "message" in result.error
-          ? (result.error as { message: string }).message
-          : JSON.stringify(result.error);
-        span.setStatus({ code: SpanStatusCode.ERROR, message: errMsg });
-        span.end();
-        return { result, outcome: EMPTY_OUTCOME };
+      } finally {
+        bestEffortTelemetry("span.end", () => span.end());
       }
     },
   );

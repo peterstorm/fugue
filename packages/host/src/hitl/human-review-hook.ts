@@ -139,20 +139,22 @@ interface OnDecisionConsumedDeps {
  * consumption: the decision survives until the run has durably advanced past the
  * gate, so a crash mid-resume re-reads it rather than losing the approval.
  *
- * A clear failure is non-fatal: the post-gate state is already durable, so a
- * stale decision lingers harmlessly until its TTL (a DAG node gates once per run
- * except on `reroute`, which re-gates only after this clear has already run). We
- * log and move on.
+ * A clear failure fails the run closed. The post-gate state is already durable,
+ * but a reroute may revisit the same `(runId,nodeId)` before TTL; continuing
+ * would let that stale authorization auto-resolve a new gate instance.
  */
 export const makeOnDecisionConsumed = (deps: OnDecisionConsumedDeps) =>
   async (nodeId: NodeId): Promise<void> => {
     const { decisions, runId, logger } = deps;
     const cleared = await decisions.clear(runId, nodeId);
     if (!cleared.ok) {
-      logWithoutThrowing(logger, "warn", "hitl: failed to clear consumed decision (non-fatal, TTL reaps)", {
+      logWithoutThrowing(logger, "error", "hitl: failed to clear consumed decision — failing run closed", {
         runId,
         nodeId,
         error: cleared.error.kind,
       });
+      throw new Error(
+        `hitl: consumed decision cleanup failed for ${runId}/${nodeId}: ${cleared.error.kind}`,
+      );
     }
   };

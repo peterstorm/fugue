@@ -174,6 +174,11 @@ resource authorization.
 
 Creation is typed separately as `QueuedRunRecord`; the run-store create operation
 cannot accept a terminal or already-running lifecycle state into the active index.
+Its result also distinguishes confirmed creation from publication uncertainty.
+When Redis may have committed metadata but lost the acknowledgement, and exact
+metadata removal/absence cannot be proved, the host conservatively acknowledges
+the run as accepted and requests its wakeup. It never returns a creation error
+while an executable published record may remain for reconciliation to discover.
 
 Lifecycle/status reads are also separated from execution reads. `getMetadata`
 returns the durable lifecycle/auth projection without requiring checkpoint bytes,
@@ -253,13 +258,14 @@ removes the pending marker and decision with one atomic multi-key Redis `DEL`,
 so a clear can never expose the torn state “gate closed, old decision retained.”
 This is also safe under ordinary `reroute` re-gating: the atomic clear runs in
 the same kernel iteration as the post-reroute checkpoint, many iterations before
-the node can gate again. **Residual (documented):** a crash landing in the tiny
-window between `updateData` and `onCommitted`, or a whole-command clear failure,
-can retain both the pending marker and decision until TTL; paired with a later
-`reroute` re-gate of that exact node, the old decision could auto-resolve the
-re-review. Fully closing that cross-store window requires generation-bound
-decisions or a transaction spanning checkpoint persistence and decision
-consumption.
+the node can gate again. A whole-command clear failure now fails the run closed:
+the committed callback rejects, the host executor terminalizes the run, and the
+stale decision can never reach a later re-gate. **Residual:** a process crash in
+the tiny window between `updateData` and `onCommitted` can still retain the old
+decision after the checkpoint advances; a later reroute to that exact node could
+reuse it. Fully closing that crash-only cross-store window requires generation-
+bound decisions or a transaction spanning checkpoint persistence and decision
+consumption. Clear failures no longer add another path into that residual.
 
 ### Known timing window (accepted for v1)
 
@@ -295,6 +301,14 @@ is a conscious decision, not an oversight.
   resolve to whichever wrote last — acceptable for v1; a true CAS (`SET` with a
   pending-marker guard, or making the enqueue idempotent per `(runId, nodeId)`)
   would tighten it if approve/reject contention ever becomes a concern.
+
+- **Creation publication uncertainty is acknowledged, never denied.** Metadata is
+  the executable publication point. If its `SET NX` response is lost, cleanup
+  returns evidence: a creation error is safe only when exact metadata absence or
+  removal is proved. Otherwise `create` returns `publication-uncertain`, the
+  service treats the run as accepted, and normal direct/reconciliation wakeups
+  remain authorized. This favors a conservative accepted response over the
+  forbidden outcome where a caller receives an error and the run later executes.
 
 - **Superseded: best-effort `running` status write.** The earlier v1 trade-off
   allowed execution after `setStatus(running)` failed. The 2026-08-22 ownership-

@@ -24,7 +24,7 @@ import {
   NoopObserver,
   nonEmptyString,
 } from "@fuguejs/framework";
-import { compileDagToMachine, stripNonPersistable } from "@fuguejs/framework/advanced";
+import { compileDagToMachine, persistDagContext } from "@fuguejs/framework/advanced";
 import type {
   DagId,
   RunId,
@@ -43,7 +43,7 @@ import { markTeam } from "../../domain/auth.js";
 import type { AuthIdentity } from "../../domain/auth.js";
 import { tenantId } from "../../domain/tenant.js";
 import type { TenantId } from "../../domain/tenant.js";
-import type { RunRecord, RunStatus, ReviewNotification } from "../types.js";
+import type { RunRecord, RunStatusUpdate, ReviewNotification } from "../types.js";
 import type {
   RunStorePort,
   RunQueuePort,
@@ -189,7 +189,7 @@ const realExecutor = (dag: DagDef): RunExecutorPort => ({
   async seedCheckpoint(_dagId, input) {
     const compiled = compileDagToMachine(dag, input);
     if (!compiled.ok) return err({ kind: "internal-invariant-violated", message: "compile failed", context: {} });
-    const persisted = stripNonPersistable(compiled.value.initialContext);
+    const persisted = persistDagContext(compiled.value.initialContext, dag);
     return ok(toJson({ state: compiled.value.initialState, context: persisted }));
   },
   async run(req: RunExecutionRequest): Promise<Result<RunExecOutcome, HostError>> {
@@ -379,6 +379,39 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const done = store.runs.get(runId)!;
     expect(done.status.kind).toBe("failed");
     if (done.status.kind === "failed") expect(done.status.error.kind).toBe("rejected");
+  });
+
+  it("terminalizes the run when consumed-decision cleanup fails", async () => {
+    const dag = twoWaveDag();
+    const store = inMemoryRunStore();
+    const queue = inMemoryRunQueue(store.acquireLease);
+    const baseDecisions = inMemoryDecisionStore();
+    const decisions: DecisionStorePort = {
+      ...baseDecisions.port,
+      async clear() { return err({ kind: "redis-unavailable", operation: "DEL decision" }); },
+    };
+    const service = createHitlRunService({
+      runStore: store.port,
+      runQueue: queue.port,
+      decisions,
+      tenant: TENANT,
+      notifier: recordingNotifier().port,
+      executor: realExecutor(dag),
+      clock: () => 1_000,
+      newRunId: () => mkRunId("cleanup-failure-run"),
+    });
+    queue.setProcessor(service.processRun);
+
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
+    if (!started.ok) throw new Error("startRun failed");
+    await queue.drain();
+    await service.recordDecision(started.value.runId, "review" as NodeId, { kind: "approve" });
+    await queue.drain();
+
+    const persisted = store.runs.get(started.value.runId);
+    expect(persisted?.status.kind).toBe("failed");
+    expect(store.active.has(started.value.runId)).toBe(false);
+    expect(baseDecisions.decisions.has(`${started.value.runId}:review`)).toBe(true);
   });
 
   it("recordDecision for an unknown run errs run-not-found", async () => {
@@ -651,7 +684,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     let terminalWrites = 0;
     const trackingStore: RunStorePort = {
       ...store.port,
-      async setStatus(lease, status: RunStatus) {
+      async setStatus(lease, status: RunStatusUpdate) {
         if (status.kind === "failed") terminalWrites++;
         return store.port.setStatus(lease, status);
       },
@@ -681,7 +714,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     let counter = 0;
     const failingStore: RunStorePort = {
       ...store.port,
-      async setStatus(lease, status: RunStatus) {
+      async setStatus(lease, status: RunStatusUpdate) {
         if (status.kind === "completed") return err({ kind: "redis-unavailable", operation: "setStatus(completed)" });
         return store.port.setStatus(lease, status);
       },
@@ -696,6 +729,34 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const res = await service.processRun(store.acquireLease(started.value.runId));
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.kind).toBe("redis-unavailable");
+  });
+
+  it("treats publication uncertainty as accepted and requests the normal wakeup", async () => {
+    const store = inMemoryRunStore();
+    const uncertainStore: RunStorePort = {
+      ...store.port,
+      async create(record) {
+        const created = await store.port.create(record);
+        return created.ok ? ok({ kind: "publication-uncertain" }) : created;
+      },
+    };
+    const delivered: RunId[] = [];
+    const service = createHitlRunService({
+      runStore: uncertainStore,
+      runQueue: { async enqueue(runId) { delivered.push(runId); return ok(undefined); } },
+      decisions: inMemoryDecisionStore().port,
+      tenant: TENANT,
+      notifier: recordingNotifier().port,
+      executor: realExecutor(oneNodeDag()),
+      clock: () => 1_000,
+      newRunId: () => mkRunId("uncertain-run"),
+    });
+
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
+
+    expect(started).toEqual(ok({ runId: "uncertain-run" as RunId }));
+    expect(delivered).toEqual(["uncertain-run" as RunId]);
+    expect(store.runs.has("uncertain-run" as RunId)).toBe(true);
   });
 
   it("keeps an accepted run durable when the initial wakeup fails, then reconciliation wakes it", async () => {
@@ -978,7 +1039,11 @@ describe("HitlRunService — per-tenant maxQueuedRuns gate (ADR-0074)", () => {
     // At the ceiling of 1 — the next is refused.
     expect((await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN)).ok).toBe(false);
     // Settle the first run terminal → it leaves the active index → a slot frees.
-    if (first.ok) await store.port.setStatus(store.acquireLease(first.value.runId), { kind: "completed", output: 1 });
+    if (first.ok) {
+      const lease = store.acquireLease(first.value.runId);
+      await store.port.setStatus(lease, { kind: "running" });
+      await store.port.setStatus(lease, { kind: "completed", output: 1 });
+    }
     expect((await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN)).ok).toBe(true);
   });
 
@@ -986,7 +1051,11 @@ describe("HitlRunService — per-tenant maxQueuedRuns gate (ADR-0074)", () => {
     const { service, store } = gateService(1);
     const first = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     expect(first.ok).toBe(true);
-    if (first.ok) await store.port.setStatus(store.acquireLease(first.value.runId), { kind: "suspended", nodeId: "g" as NodeId, prompt: nonEmptyString("p") });
+    if (first.ok) {
+      const lease = store.acquireLease(first.value.runId);
+      await store.port.setStatus(lease, { kind: "running" });
+      await store.port.setStatus(lease, { kind: "suspended", nodeId: "g" as NodeId, prompt: nonEmptyString("p") });
+    }
     // Still at the ceiling — a parked run is outstanding, so the next is refused.
     expect((await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN)).ok).toBe(false);
   });

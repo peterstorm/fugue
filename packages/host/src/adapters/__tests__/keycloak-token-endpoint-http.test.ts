@@ -142,6 +142,7 @@ describe("mapKeycloakTokenResponse — status → Result", () => {
 
   it.each([
     ["missing access_token", { expires_in: 900 }],
+    ["empty access_token", { access_token: "", expires_in: 900 }],
     ["NaN expires_in", { access_token: "t", expires_in: Number.NaN }],
     ["negative expires_in", { access_token: "t", expires_in: -1 }],
     ["zero expires_in", { access_token: "t", expires_in: 0 }],

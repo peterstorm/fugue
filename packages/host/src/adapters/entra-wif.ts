@@ -42,9 +42,10 @@
  */
 
 import type { Result, FrameworkError } from "@fuguejs/framework";
-import { ok, err } from "@fuguejs/framework";
+import { err } from "@fuguejs/framework";
 import type { DownstreamScope } from "../domain/capability-scope.js";
 import type { HttpPost, HttpPostResponse } from "./fetch-http-post.js";
+import { parseOAuthTokenBody } from "./oauth-token-body.js";
 
 /**
  * The reference `aud` value an Entra federated-credential `client_assertion` must
@@ -201,19 +202,8 @@ export const mapWifResponse = (
   res: HttpPostResponse,
 ): Result<AppOnlyToken, FrameworkError> => {
   if (res.status === 200) {
-    const accessToken = res.json.access_token;
-    const expiresIn = res.json.expires_in;
-    // `expires_in` must parse to POSITIVE FINITE seconds at this boundary: a
-    // NaN/Infinity/non-positive lifetime would mint a born-stale or
-    // never-expiring cache entry downstream, so it is malformed, not usable.
-    if (
-      typeof accessToken === "string" &&
-      typeof expiresIn === "number" &&
-      Number.isFinite(expiresIn) &&
-      expiresIn > 0
-    ) {
-      return ok({ accessToken, expiresInSec: expiresIn });
-    }
+    const token = parseOAuthTokenBody(res.json);
+    if (token.ok) return token;
     // 200 but a malformed body — treat as a reach failure, not a denial: we did
     // not get a usable answer. A4 (intentional, documented): a 2xx without a
     // usable token is mapped to the retriable `infra-unreachable` channel rather

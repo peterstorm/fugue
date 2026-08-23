@@ -263,7 +263,8 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
     checkpointer = new RedisCheckpointer(redis);
     const cp = checkpointer;
 
-    // Adapter: NodeContext.cache expects get/set/writeCheckpoint
+    // Adapter: NodeContext.cache expects get/set. Node-output persistence is
+    // wired separately through the CheckpointWriter below.
     // get() returns a discriminated hit/miss so nullable values
     // are no longer ambiguous with cache misses.
     contextCache = {
