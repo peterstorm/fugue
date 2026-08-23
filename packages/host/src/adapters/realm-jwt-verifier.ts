@@ -6,15 +6,15 @@
  * on success, brands the decoded claims with `markSignatureVerified` — the single
  * trust boundary that produces `SignatureVerifiedClaims`.
  *
- * SIGNATURE-ONLY — by design (AD-4 / FR-003). This adapter does NOT check
- * iss/aud/exp; that is the pure `validateRealmJwtClaims` validator's job
- * (`domain/jwt-validation.ts`), which the auth middleware calls on the branded
- * claims this verifier returns. Duplicating iss/aud/exp here would fork the policy
- * across two sites; instead `jose.jwtVerify` runs with NO `issuer`/`audience`
- * option (signature + algorithm allowlist only). It DOES still pin an asymmetric
- * `alg` allowlist (defence-in-depth against an `alg:none`/HS256 confusion attack)
- * and tolerate normal clock skew — neither of those re-validates a CLAIM, so the
- * iss/aud/exp split is preserved.
+ * CRYPTOGRAPHIC + STANDARD TEMPORAL VERIFICATION — by design (AD-4 / FR-003).
+ * `jose.jwtVerify` verifies the signature/algorithm and also enforces registered
+ * temporal claims such as `exp` and `nbf` with the configured clock tolerance.
+ * It receives NO `issuer`/`audience` option: realm-specific issuer/audience policy,
+ * strict expiry/not-before checks against the injected application clock, and
+ * defensive claim parsing remain in pure `validateRealmJwtClaims`
+ * (`domain/jwt-validation.ts`). The asymmetric `alg` allowlist is defence in depth
+ * against `alg:none`/HS256 confusion; the 60-second tolerance handles normal clock
+ * skew at the jose boundary without replacing the stricter pure policy check.
  *
  * FAIL CLOSED (NFR-020 — no bare throws, every failure a typed result):
  *   - valid signature → `ok(SignatureVerifiedClaims)`.
@@ -27,9 +27,10 @@
  * `jose` is imported dynamically (matching the Bot verifier) so it loads only
  * when the realm-JWT path is wired.
  *
- * @satisfies FR-003 — verify a realm JWT's signature against the realm's keys;
- *   iss/aud/exp left to the pure claim validator.
- * @satisfies AD-4 — `createRemoteJWKSet` → `markSignatureVerified`, signature-only.
+ * @satisfies FR-003 — verify against the realm's keys; issuer/audience and strict
+ *   application-clock claim policy remain in the pure validator.
+ * @satisfies AD-4 — `createRemoteJWKSet` → jose signature/temporal verification →
+ *   `markSignatureVerified`; the brand attests the cryptographic trust boundary.
  * @satisfies NFR-020 — JWKS-down → `unavailable`, bad-sig → `invalid`; never throws.
  */
 
@@ -42,7 +43,8 @@ import type { JwtVerifyError, VerifyRealmJwt } from "../http/middleware/auth.js"
  * RS/PS/ES allowlist makes "asymmetric only" load-bearing in code
  * (defence-in-depth against an `alg:none`/HS256 confusion attack), rather than
  * trusting the JWKS resolver to never hand back a symmetric key. This is an
- * ALGORITHM gate, not a CLAIM check — the iss/aud/exp split (FR-003) is untouched.
+ * ALGORITHM gate, not itself a claim check; jose's surrounding `jwtVerify` call
+ * separately applies its standard temporal-claim checks.
  * The full RS/PS/ES 256/384/512 set is allowed: all are asymmetric and equally
  * safe against the alg-confusion attack, so the allowlist stays complete rather
  * than carrying an unexplained gap a key-rotation could trip over.
@@ -141,7 +143,7 @@ export const realmJwksUri = (issuer: string): string =>
 type JosePayload = Record<string, unknown>;
 
 /**
- * Construct the live realm JWT signature verifier. The remote JWKS set is created
+ * Construct the live realm JWT signature and temporal verifier. The remote JWKS set is created
  * LAZILY on first verify (so construction never touches the network) and cached
  * across calls (jose refreshes keys on rotation internally). The returned
  * `VerifyRealmJwt` NEVER throws — a transport/JWKS fault is `unavailable`, a
@@ -189,16 +191,18 @@ export const createRealmJwtVerifier = (config: RealmJwtVerifierConfig): VerifyRe
 
     try {
       const jose = await import("jose");
-      // SIGNATURE-ONLY: NO `issuer`/`audience` option — iss/aud/exp stay in the
-      // pure `validateRealmJwtClaims`. The `algorithms` allowlist is an
-      // asymmetric-`alg` gate (anti-confusion), not a claim check.
+      // NO `issuer`/`audience` option: those realm-specific policies stay in pure
+      // `validateRealmJwtClaims`. jose still enforces standard `exp`/`nbf` semantics
+      // here with clock tolerance; the pure validator re-parses and checks them
+      // again against its injected strict application clock. The `algorithms`
+      // allowlist is an asymmetric-`alg` anti-confusion gate.
       const { payload } = await jose.jwtVerify(token, jwks as never, {
         algorithms: [...REALM_TOKEN_ALGS],
         clockTolerance: CLOCK_TOLERANCE,
       });
-      // The signature passed — brand the decoded claims. The downstream pure
-      // validator re-parses every value, so passing the raw payload through the
-      // brand is safe: the brand attests SIGNATURE, the validator attests CLAIMS.
+      // Signature and jose's standard temporal checks passed. The downstream pure
+      // validator re-parses every value and applies realm policy, so passing the raw
+      // payload through is safe: the brand attests SIGNATURE, not complete policy.
       return ok(markSignatureVerified(payload as JosePayload as unknown as RealmJwtClaims));
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);

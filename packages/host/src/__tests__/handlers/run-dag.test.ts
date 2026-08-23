@@ -194,6 +194,36 @@ describe("run-dag handler", () => {
     }
   });
 
+  it("maps HITL start failures through httpStatusFor without synchronous fallback", async () => {
+    const hitlDag = makeHitlDag("hitl-start-failure");
+    const hitlState = makeReadyState(freeze([hitlDag], sha, Date.now()));
+    let executeCalls = 0;
+    const hitl = {
+      async startRun() {
+        return err({ kind: "redis-unavailable" as const, operation: "create-hitl-run" });
+      },
+    } as HitlRunService;
+    const deps = defaultDeps({
+      hitl,
+      executeDag: (async () => {
+        executeCalls += 1;
+        return ok({ unreachable: true });
+      }) as RunDagDeps["executeDag"],
+    });
+
+    const res = await post(
+      createTestApp(deps, hitlState),
+      "hitl-start-failure",
+      { query: "hi" },
+    );
+    const body = await res.json();
+
+    expect(res.status).toBe(503);
+    expect(body.error).toBe("redis-unavailable");
+    expect(body.ok).toBe(false);
+    expect(executeCalls).toBe(0);
+  });
+
   describe("identity threading into the run (FR-W3-007)", () => {
     // The user `sub`/`azp` must reach `createContext` so T8 can build
     // `Invocation.origin`. We capture the identity arg to prove the seam works,

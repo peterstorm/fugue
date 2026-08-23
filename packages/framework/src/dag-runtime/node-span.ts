@@ -15,7 +15,7 @@
 // `ai.guardrail.passed`) are set by the caller after classification, not
 // inside the span wrapper.
 
-import { SpanStatusCode } from "@opentelemetry/api";
+import { INVALID_SPAN_CONTEXT, type Span, SpanStatusCode, trace } from "@opentelemetry/api";
 import { fwTracer } from "../tracing/global-tracer.js";
 import type { Result } from "../types/result.js";
 import { err } from "../types/result.js";
@@ -94,6 +94,8 @@ const bestEffortTelemetry = (operation: string, effect: () => void): void => {
     );
   }
 };
+
+const FALLBACK_NODE_SPAN = trace.wrapSpanContext(INVALID_SPAN_CONTEXT);
 
 /**
  * Fold a batch of per-node outcomes into a fresh, immutable `DagRunMeta`.
@@ -209,72 +211,86 @@ export const withTracedNodeSpan = async (
     }
   }
 
-  return fwTracer().startActiveSpan(
-    `node:${nodeId}`,
-    { attributes: attrs },
-    async (span) => {
-      bestEffortTelemetry("input event", () => {
+  const executeNode = async (span: Span) => {
+    bestEffortTelemetry("input event", () => {
+      span.addEvent(
+        EVENT_NODE_INPUT,
+        contentFilter ? { data: contentFilter(JSON.stringify(input)) } : { data_redacted: "true" },
+      );
+    });
+
+    try {
+      let result: Result<unknown, FrameworkError>;
+      try {
+        result = await fn();
+      } catch (error) {
+        const message = safeErrorMessage(error);
+        const stack = safeErrorStack(error);
+        bestEffortTelemetry("span.setStatus", () => {
+          span.setStatus({ code: SpanStatusCode.ERROR, message });
+        });
+        return {
+          result: err({
+            kind: "node-crash" as const,
+            nodeId: __brandNodeId(nodeId),
+            retriability: "retriable" as const,
+            message,
+            ...(stack ? { stack } : {}),
+          }),
+          outcome: EMPTY_OUTCOME,
+        };
+      }
+
+      if (!result.ok) {
+        bestEffortTelemetry("span.setStatus", () => {
+          span.setStatus({
+            code: SpanStatusCode.ERROR,
+            message: safeErrorMessage(result.error),
+          });
+        });
+        return { result, outcome: EMPTY_OUTCOME };
+      }
+
+      bestEffortTelemetry("output event", () => {
         span.addEvent(
-          EVENT_NODE_INPUT,
-          contentFilter ? { data: contentFilter(JSON.stringify(input)) } : { data_redacted: "true" },
+          EVENT_NODE_OUTPUT,
+          contentFilter ? { data: contentFilter(JSON.stringify(result.value)) } : { data_redacted: "true" },
         );
       });
-
-      try {
-        let result: Result<unknown, FrameworkError>;
-        try {
-          result = await fn();
-        } catch (error) {
-          const message = safeErrorMessage(error);
-          const stack = safeErrorStack(error);
-          bestEffortTelemetry("span.setStatus", () => {
-            span.setStatus({ code: SpanStatusCode.ERROR, message });
+      const outcome = classifyGuardrailOutcome(kind, result);
+      if (outcome.guardrailFailed) {
+        bestEffortTelemetry("guardrail span status", () => {
+          span.setStatus({
+            code: SpanStatusCode.ERROR,
+            message: `Guardrail failed: ${outcome.guardrailWarnings.join("; ")}`,
           });
-          return {
-            result: err({
-              kind: "node-crash" as const,
-              nodeId: __brandNodeId(nodeId),
-              retriability: "retriable" as const,
-              message,
-              ...(stack ? { stack } : {}),
-            }),
-            outcome: EMPTY_OUTCOME,
-          };
-        }
-
-        if (!result.ok) {
-          bestEffortTelemetry("span.setStatus", () => {
-            span.setStatus({
-              code: SpanStatusCode.ERROR,
-              message: safeErrorMessage(result.error),
-            });
-          });
-          return { result, outcome: EMPTY_OUTCOME };
-        }
-
-        bestEffortTelemetry("output event", () => {
-          span.addEvent(
-            EVENT_NODE_OUTPUT,
-            contentFilter ? { data: contentFilter(JSON.stringify(result.value)) } : { data_redacted: "true" },
-          );
         });
-        const outcome = classifyGuardrailOutcome(kind, result);
-        if (outcome.guardrailFailed) {
-          bestEffortTelemetry("guardrail span status", () => {
-            span.setStatus({
-              code: SpanStatusCode.ERROR,
-              message: `Guardrail failed: ${outcome.guardrailWarnings.join("; ")}`,
-            });
-          });
-          bestEffortTelemetry("guardrail span attribute", () => {
-            span.setAttribute(AI_GUARDRAIL_PASSED, false);
-          });
-        }
-        return { result, outcome };
-      } finally {
-        bestEffortTelemetry("span.end", () => span.end());
+        bestEffortTelemetry("guardrail span attribute", () => {
+          span.setAttribute(AI_GUARDRAIL_PASSED, false);
+        });
       }
-    },
-  );
+      return { result, outcome };
+    } finally {
+      bestEffortTelemetry("span.end", () => span.end());
+    }
+  };
+
+  let callbackResult: ReturnType<typeof executeNode> | undefined;
+  try {
+    return await fwTracer().startActiveSpan(
+      `node:${nodeId}`,
+      { attributes: attrs },
+      (span) => {
+        callbackResult = executeNode(span);
+        return callbackResult;
+      },
+    );
+  } catch (error) {
+    bestEffortLog(
+      "debug",
+      `[withTracedNodeSpan] span creation failed; node outcome remains authoritative: ${safeErrorMessage(error)}`,
+    );
+    return callbackResult ?? executeNode(FALLBACK_NODE_SPAN);
+  }
 };
 

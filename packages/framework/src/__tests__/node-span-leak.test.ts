@@ -196,6 +196,60 @@ describe("withTracedNodeSpan span leak under thrown fn (Wave 1.1)", () => {
     expect(endAttempts).toBe(2);
   });
 
+  test("a tracer setup throw falls back to exactly-once untraced node execution", async () => {
+    setFrameworkTracer({
+      startActiveSpan() {
+        throw new Error("tracer setup down");
+      },
+    } as unknown as Parameters<typeof setFrameworkTracer>[0]);
+    let calls = 0;
+    const modeled = err({ kind: "aborted" as const, reason: "authoritative" });
+
+    const { result } = await withTracedNodeSpan(
+      "n1",
+      "transform",
+      null,
+      null,
+      { kind: "none" },
+      async () => {
+        calls += 1;
+        return modeled;
+      },
+    );
+
+    expect(calls).toBe(1);
+    expect(result).toEqual(modeled);
+  });
+
+  test("a tracer throw after callback invocation does not execute the node twice", async () => {
+    const recorded: RecordedSpan[] = [];
+    const delegate = makeFakeTracer(recorded);
+    setFrameworkTracer({
+      startActiveSpan(name: string, opts: unknown, fn: (span: unknown) => unknown) {
+        delegate.startActiveSpan(name, opts, fn);
+        throw new Error("tracer failed after callback");
+      },
+    } as unknown as Parameters<typeof setFrameworkTracer>[0]);
+    let calls = 0;
+
+    const { result } = await withTracedNodeSpan(
+      "n1",
+      "transform",
+      null,
+      null,
+      { kind: "none" },
+      async () => {
+        calls += 1;
+        return ok("authoritative");
+      },
+    );
+
+    expect(calls).toBe(1);
+    expect(result).toEqual(ok("authoritative"));
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]?.ended).toBe(true);
+  });
+
   test("idempotency extractor failures stay modeled when diagnostics are hostile", async () => {
     setFrameworkLogger({
       debug: () => { throw new Error("logger down"); },

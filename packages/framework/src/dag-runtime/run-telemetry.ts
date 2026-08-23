@@ -6,13 +6,14 @@
 // — share the same span-close vocabulary so success/failure paths emit
 // identical attributes.
 
-import { type Span, SpanStatusCode } from "@opentelemetry/api";
+import { INVALID_SPAN_CONTEXT, type Span, SpanStatusCode, trace } from "@opentelemetry/api";
 import { match } from "ts-pattern";
 import { fwTracer } from "../tracing/global-tracer.js";
 import { fwLogger } from "../logger.js";
 import { dispatchEvent } from "../observer/buffered.js";
 import type { NodeContext } from "../types/node.js";
 import type { DagDef } from "../types/dag.js";
+import { safeErrorMessage } from "../types/safe-error.js";
 import { type EvalJudgeResult, judgePassed } from "../nodes/eval-judge.js";
 import type { DagRunMeta } from "./node-span.js";
 import {
@@ -23,6 +24,24 @@ import {
   EVENT_NODE_OUTPUT,
   SPAN_TYPE_CHAIN,
 } from "../tracing/semantic-conventions.js";
+
+const FALLBACK_ROOT_SPAN = trace.wrapSpanContext(INVALID_SPAN_CONTEXT);
+
+const bestEffortLog = (message: string): void => {
+  try {
+    fwLogger().debug(message);
+  } catch {
+    // A broken logger must not replace the primary DAG outcome.
+  }
+};
+
+const bestEffortRootTelemetry = (operation: string, effect: () => void): void => {
+  try {
+    effect();
+  } catch (error) {
+    bestEffortLog(`[runTelemetry] ${operation} failed: ${safeErrorMessage(error)}`);
+  }
+};
 
 // ---------------------------------------------------------------------------
 // run-start / run-end observer events
@@ -89,25 +108,40 @@ export const beginRunTelemetry = (
  * convention attributes and add the input event. Caller is responsible for
  * eventually closing the span (via `closeRootSpan`).
  */
-export const startRunSpan = <T>(
+export const startRunSpan = async <T>(
   dag: DagDef,
   nodeCtx: NodeContext,
   fn: (rootSpan: Span) => Promise<T>,
-): Promise<T> =>
-  fwTracer().startActiveSpan(
-    `run:${dag.id}`,
-    {
-      attributes: {
-        [AI_SPAN_TYPE]: SPAN_TYPE_CHAIN,
-        [AI_DAG_ID]: dag.id,
-        [AI_RUN_ID]: nodeCtx.runId,
+): Promise<T> => {
+  let callbackResult: Promise<T> | undefined;
+  try {
+    return await fwTracer().startActiveSpan(
+      `run:${dag.id}`,
+      {
+        attributes: {
+          [AI_SPAN_TYPE]: SPAN_TYPE_CHAIN,
+          [AI_DAG_ID]: dag.id,
+          [AI_RUN_ID]: nodeCtx.runId,
+        },
       },
-    },
-    async (rootSpan: Span) => {
-      rootSpan.addEvent(EVENT_NODE_INPUT, { [AI_DAG_ID]: dag.id, [AI_RUN_ID]: nodeCtx.runId });
-      return fn(rootSpan);
-    },
-  );
+      (rootSpan: Span) => {
+        bestEffortRootTelemetry("input event", () => {
+          rootSpan.addEvent(EVENT_NODE_INPUT, {
+            [AI_DAG_ID]: dag.id,
+            [AI_RUN_ID]: nodeCtx.runId,
+          });
+        });
+        callbackResult = Promise.resolve().then(() => fn(rootSpan));
+        return callbackResult;
+      },
+    );
+  } catch (error) {
+    bestEffortLog(
+      `[runTelemetry] span creation failed; DAG outcome remains authoritative: ${safeErrorMessage(error)}`,
+    );
+    return callbackResult ?? fn(FALLBACK_ROOT_SPAN);
+  }
+};
 
 // ---------------------------------------------------------------------------
 // Root-span finalize — single vocabulary for ok / eval-failed / guardrail-failed / error
@@ -128,48 +162,63 @@ type RootSpanOutcome =
   | { readonly kind: "error"; readonly error: unknown };
 
 /**
- * Set status, emit the output event, and end the span. Pure side-effect on
- * the OTel SDK — idempotent at the SDK level (a second `end()` is a no-op).
+ * Best-effort status/event finalization. Every span operation is independent so
+ * one hostile telemetry method cannot block later cleanup or replace the DAG outcome.
  */
 export const closeRootSpan = (rootSpan: Span, outcome: RootSpanOutcome): void => {
-  match(outcome)
-    .with({ kind: "ok" }, () => {
-      rootSpan.addEvent(EVENT_NODE_OUTPUT, { status: "ok" });
-    })
-    .with({ kind: "ok-eval-failed" }, ({ failedCriteria, evalJudgeResults }) => {
-      rootSpan.setStatus({
-        code: SpanStatusCode.ERROR,
-        message: `Eval-judge failed: ${failedCriteria.join(", ")}`,
-      });
-      rootSpan.addEvent(EVENT_NODE_OUTPUT, {
-        status: "ok",
-        evalJudgeFailed: "true",
-        evalJudgeResults: JSON.stringify(evalJudgeResults),
-      });
-    })
-    .with({ kind: "ok-guardrail-failed" }, ({ warnings }) => {
-      rootSpan.setStatus({
-        code: SpanStatusCode.ERROR,
-        message: `Guardrail failed: ${warnings.join("; ")}`,
-      });
-      rootSpan.addEvent(EVENT_NODE_OUTPUT, {
-        status: "ok",
-        guardrailWarnings: JSON.stringify(warnings),
-      });
-    })
-    .with({ kind: "error" }, ({ error }) => {
-      const errMsg = error && typeof error === "object" && "message" in error
-        ? (error as { message: string }).message
-        : JSON.stringify(error);
-      rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: errMsg });
-      rootSpan.addEvent(EVENT_NODE_OUTPUT, {
-        status: "error",
-        error: JSON.stringify(error),
-      });
-    })
-    .exhaustive();
-
-  rootSpan.end();
+  try {
+    match(outcome)
+      .with({ kind: "ok" }, () => {
+        bestEffortRootTelemetry("output event", () => {
+          rootSpan.addEvent(EVENT_NODE_OUTPUT, { status: "ok" });
+        });
+      })
+      .with({ kind: "ok-eval-failed" }, ({ failedCriteria, evalJudgeResults }) => {
+        bestEffortRootTelemetry("eval status", () => {
+          rootSpan.setStatus({
+            code: SpanStatusCode.ERROR,
+            message: `Eval-judge failed: ${failedCriteria.join(", ")}`,
+          });
+        });
+        bestEffortRootTelemetry("eval output event", () => {
+          rootSpan.addEvent(EVENT_NODE_OUTPUT, {
+            status: "ok",
+            evalJudgeFailed: "true",
+            evalJudgeResults: JSON.stringify(evalJudgeResults),
+          });
+        });
+      })
+      .with({ kind: "ok-guardrail-failed" }, ({ warnings }) => {
+        bestEffortRootTelemetry("guardrail status", () => {
+          rootSpan.setStatus({
+            code: SpanStatusCode.ERROR,
+            message: `Guardrail failed: ${warnings.join("; ")}`,
+          });
+        });
+        bestEffortRootTelemetry("guardrail output event", () => {
+          rootSpan.addEvent(EVENT_NODE_OUTPUT, {
+            status: "ok",
+            guardrailWarnings: JSON.stringify(warnings),
+          });
+        });
+      })
+      .with({ kind: "error" }, ({ error }) => {
+        bestEffortRootTelemetry("error status", () => {
+          rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: safeErrorMessage(error) });
+        });
+        bestEffortRootTelemetry("error output event", () => {
+          rootSpan.addEvent(EVENT_NODE_OUTPUT, {
+            status: "error",
+            error: JSON.stringify(error),
+          });
+        });
+      })
+      .exhaustive();
+  } catch (error) {
+    bestEffortLog(`[runTelemetry] outcome finalization failed: ${safeErrorMessage(error)}`);
+  } finally {
+    bestEffortRootTelemetry("span.end", () => rootSpan.end());
+  }
 };
 
 /**
