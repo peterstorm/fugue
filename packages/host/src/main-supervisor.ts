@@ -66,6 +66,7 @@ import {
 import type { AuditStreamPort } from "./supervisor/audit/audit-sink-log-redis.js";
 import type { AuditPort } from "./supervisor/audit/audit-port.js";
 import { createRedisTokenStore } from "./adapters/token-store.js";
+import { createIoredisRedisPort } from "./adapters/redis-connectivity.js";
 import { runBootstrap } from "./supervisor/bootstrap/run-bootstrap.js";
 import { createRealmJwtVerifier } from "./adapters/realm-jwt-verifier.js";
 import type { RealmJwtDeps } from "./http/middleware/auth.js";
@@ -116,120 +117,8 @@ const createRedis = async (redisUrl: string): Promise<Result<RedisBundle, HostEr
       },
     };
 
-    // WATCH state is connection-scoped: serialize the small optimistic
-    // transactions while allowing ordinary Redis calls to stay concurrent.
-    let watchTail: Promise<void> = Promise.resolve();
-    const serializeWatch = async <T,>(work: () => Promise<Result<T, HostError>>): Promise<Result<T, HostError>> => {
-      let releaseTurn: () => void = () => {};
-      const turn = new Promise<void>((resolve) => { releaseTurn = resolve; });
-      const previous = watchTail;
-      watchTail = previous.then(() => turn);
-      await previous;
-      try { return await work(); } finally { releaseTurn(); }
-    };
-    /**
-     * Own the WATCH failure contract for every optimistic-locking method: on a
-     * throw, release the watch before converting to a typed failure.
-     *
-     * ONE definition instead of the identical catch-and-unwatch tail repeated on
-     * each method. The UNWATCH is the load-bearing part: `serializeWatch` runs
-     * these turns on a SHARED connection, so a watch left dangling by a throwing
-     * turn would still be armed when the next turn's MULTI executes, silently
-     * aborting an unrelated caller's transaction. The unwatch is itself guarded
-     * because the primary error must stay authoritative.
-     */
-    const watchGuarded = <T>(
-      operation: string,
-      body: () => Promise<Result<T, HostError>>,
-    ): Promise<Result<T, HostError>> =>
-      serializeWatch(async () => {
-        try {
-          return await body();
-        } catch (error) {
-          try { await client.unwatch(); } catch { /* primary error is authoritative */ }
-          return err(redisFailure(operation, error));
-        }
-      });
+    const redis = createIoredisRedisPort(client, redisFailure);
 
-    /**
-     * The optimistic-locking skeleton shared by every compare-and-X operation:
-     * WATCH the key, re-read it, abort unless it still holds `expectedValue`,
-     * then run `stage`'s single command inside a MULTI that Redis discards if
-     * the key changed under us.
-     *
-     * ONE definition: `compareAndDelete` and `compareAndExpire` are the same
-     * protocol differing only in the queued command, and both are used to fence
-     * LEASE ownership. A divergence in this skeleton — a missed UNWATCH leaking
-     * a watch into the next turn, or a `null` exec read as success — would let
-     * one worker act on a lease another already owns.
-     *
-     * `exec()` returning `null` means the WATCH tripped: report `false` (someone
-     * else won), never an error. A queued command's own error IS thrown, so it
-     * becomes a typed `redisFailure` rather than a silent `false`.
-     */
-    const compareAndRun = (
-      operation: string,
-      key: string,
-      expectedValue: string,
-      stage: (multi: ReturnType<typeof client.multi>) => ReturnType<typeof client.multi>,
-    ): Promise<Result<boolean, HostError>> =>
-      watchGuarded(`${operation} ${key}`, async () => {
-        await client.watch(key);
-        if (await client.get(key) !== expectedValue) {
-          await client.unwatch();
-          return ok(false);
-        }
-        const executed = await stage(client.multi()).exec();
-        if (executed === null) return ok(false);
-        const [commandError, applied] = executed[0] ?? [];
-        if (commandError !== null) throw commandError;
-        return ok(applied === 1);
-      });
-    const compareAndDelete: RedisPort["compareAndDelete"] = (key, expectedValue) =>
-      compareAndRun("COMPARE-AND-DELETE", key, expectedValue, (multi) => multi.del(key));
-    const compareAndExpire: RedisPort["compareAndExpire"] = (key, expectedValue, expiresInSec) =>
-      compareAndRun("COMPARE-AND-EXPIRE", key, expectedValue, (multi) => multi.expire(key, expiresInSec));
-    const setIfValue: RedisPort["setIfValue"] = (guardKey, expectedValue, key, value, opts) =>
-      watchGuarded(`SET-IF-VALUE ${guardKey} -> ${key}`, async () => {
-        for (;;) {
-          await client.watch(guardKey);
-          if (await client.get(guardKey) !== expectedValue) {
-            await client.unwatch();
-            return ok(false);
-          }
-          const executed = await client.multi().set(key, value, "EX", opts.expiresInSec).exec();
-          if (executed === null) continue;
-          const [commandError, written] = executed[0] ?? [];
-          if (commandError !== null) throw commandError;
-          return ok(written === "OK");
-        }
-      });
-    const setNxIfPresent: RedisPort["setNxIfPresent"] = (guardKey, key, value, opts) =>
-      watchGuarded(`SETNX-IF-PRESENT ${guardKey} -> ${key}`, async () => {
-        for (;;) {
-          await client.watch(guardKey);
-          if (await client.get(guardKey) === null) {
-            await client.unwatch();
-            return ok("not-present");
-          }
-          const executed = await client.multi().set(key, value, "EX", opts.expiresInSec, "NX").exec();
-          if (executed === null) continue;
-          const [commandError, created] = executed[0] ?? [];
-          if (commandError !== null) throw commandError;
-          return ok(created === "OK" ? "created" : "exists");
-        }
-      });
-
-    /**
-     * Run one Redis command, converting a thrown driver error into the port's
-     * typed `redisFailure`. ONE wrapper instead of the identical try/catch
-     * repeated on every method: the port's whole contract is "never throw, always
-     * return a Result", and a single method that forgot its catch would break
-     * that contract silently, surfacing as an unhandled rejection far from here.
-     *
-     * `describe` is the operation label used in the failure (e.g. `GET foo`);
-     * it is a thunk so the label is only built on the failure path.
-     */
     const redisCall = async <T>(
       describe: () => string,
       run: () => Promise<T>,
@@ -239,33 +128,6 @@ const createRedis = async (redisUrl: string): Promise<Result<RedisBundle, HostEr
       } catch (error) {
         return err(redisFailure(describe(), error));
       }
-    };
-
-    const redis: RedisPort = {
-      get: (key) => redisCall(() => `GET ${key}`, () => client.get(key)),
-      set: (key, value, opts) =>
-        redisCall(() => `SET ${key}`, () =>
-          opts?.expiresInSec !== undefined
-            ? client.set(key, value, "EX", opts.expiresInSec)
-            : client.set(key, value)),
-      del: (key) => redisCall(() => `DEL ${key}`, () => client.del(key)),
-      scan: (pattern, cursor = "0") =>
-        redisCall(() => `SCAN ${pattern}`, async () => {
-          const [nextCursor, keys] = await client.scan(cursor, "MATCH", pattern, "COUNT", 100);
-          return { cursor: nextCursor, keys };
-        }),
-      setNx: (key, value, opts) =>
-        redisCall(() => `SETNX ${key}`, async () =>
-          opts?.expiresInSec !== undefined
-            ? (await client.set(key, value, "EX", opts.expiresInSec, "NX")) === "OK"
-            : (await client.setnx(key, value)) === 1),
-      compareAndDelete,
-      compareAndExpire,
-      setIfValue,
-      setNxIfPresent,
-      sAdd: (key, member) => redisCall(() => `SADD ${key}`, () => client.sadd(key, member)),
-      sRem: (key, member) => redisCall(() => `SREM ${key}`, () => client.srem(key, member)),
-      sMembers: (key) => redisCall(() => `SMEMBERS ${key}`, () => client.smembers(key)),
     };
 
     const pubsub: RedisPubSubPort = {

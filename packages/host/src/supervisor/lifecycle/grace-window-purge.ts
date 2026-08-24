@@ -290,6 +290,18 @@ export const purgeTenantFootprint = async (
 export const purgeSucceeded = (outcome: PurgeOutcome): boolean =>
   outcome.kind === "completed" && outcome.failedSteps.length === 0;
 
+const warnWithoutThrowing = (
+  logger: LogPort | undefined,
+  message: string,
+  data: Record<string, unknown>,
+): void => {
+  try {
+    logger?.warn(message, data);
+  } catch {
+    // A warning transport cannot starve later due tenants in the same sweep.
+  }
+};
+
 // ── Imperative shell: the sweep ───────────────────────────────────────────────
 
 /**
@@ -323,13 +335,13 @@ export const runGracePurgeSweep = async (
       // NOT a retryable failure: the tenant is alive again, so there is nothing
       // left to reclaim. Logged distinctly so an operator can see a revival
       // raced a sweep rather than reading it as a stuck purge.
-      logger?.warn("[grace-purge] tenant revived mid-purge — abandoning purge", {
+      warnWithoutThrowing(logger, "[grace-purge] tenant revived mid-purge — abandoning purge", {
         tenant: outcome.tenant,
         abortedAt: outcome.abortedAt,
         keysDeleted: outcome.keysDeleted,
       });
     } else if (outcome.failedSteps.length > 0) {
-      logger?.warn("[grace-purge] tenant footprint purge partially failed — will retry next sweep", {
+      warnWithoutThrowing(logger, "[grace-purge] tenant footprint purge partially failed — will retry next sweep", {
         tenant: outcome.tenant,
         failedSteps: outcome.failedSteps,
         keysDeleted: outcome.keysDeleted,

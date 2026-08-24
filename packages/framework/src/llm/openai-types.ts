@@ -8,7 +8,7 @@
 
 import type { ToolCall } from "./tool-dispatch.js";
 import type { ToolDispatchResult } from "./tool-dispatch.js";
-import { fwLogger } from "../logger.js";
+import { logFrameworkWithoutThrowing } from "../logger.js";
 
 // ---------------------------------------------------------------------------
 // Type definitions
@@ -135,7 +135,10 @@ export const parseToolCalls = (output: readonly ResponsesOutputItem[]): ToolCall
       // operator breadcrumb is the warn above; no intermediate marker is
       // needed (nothing downstream distinguishes parse failures from other
       // schema violations).
-      fwLogger().warn(`[openai-client] Failed to parse tool-call arguments for '${block.name}': ${parseErr instanceof Error ? parseErr.message : parseErr}`);
+      logFrameworkWithoutThrowing(
+        "warn",
+        `[openai-client] Failed to parse tool-call arguments for '${block.name}': ${parseErr instanceof Error ? parseErr.message : parseErr}`,
+      );
       parsedInput = block.arguments;
     }
     calls.push({ id: block.call_id, name: block.name, input: parsedInput });

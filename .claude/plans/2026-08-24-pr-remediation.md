@@ -1,85 +1,109 @@
-# PR Remediation Plan — Adjudicated Standalone Review (round 40)
+# PR Remediation Plan — Adjudicated Standalone Review (round 41)
 
 **Branch:** `feat/f6-file-durable-runtime`
-**Review HEAD (frozen source):** `9acbb111ca1eda714ff80421765a61e12a4d3cbf`
-**Review Run Directory:** `.claude/reviews/review-and-fix-runs/review-20260824T071615Z-01a032a0`
-**Canonical result:** `<run>/result.json` (digest `bb0518a728b677b2f7deb5b562a0f56ee1f7c728accba28af1800a4f55a0e4c8`)
-**Frozen scope:** exactly the 481 paths in `result.json.scope`
-**Adjudication:** 7 reviewers → 8 critical findings → 3-lens Refutation Panel (`reproduction`, `intent`, `security`) → **8 surviving / 0 refuted**; 11 advisories independently dispositioned below.
+**Review HEAD (frozen source):** `f9eaf9e0858a2ea214531622245f9a71f48e4710`
+**Exact scope:** all 482 paths in the canonical `result.json.scope`
+**Review Run Directory:** `.claude/reviews/review-and-fix-runs/review-20260824T081944Z-183545583`
+**Canonical result:** `<review-run>/result.json` (digest `d98804efd5939779459fe9421a6c8e3cb042d99d65368e645bda5e4fb33ffc8f`)
+**Adjudication:** 7 reviewers → 5 critical findings → registered 3-lens Refutation Panel (`reproduction`, `intent`, `security`) → **5 surviving / 0 refuted**; 8 advisories dispositioned independently below.
 
 ## Mandatory surviving critical findings
 
-1. **`code-reviewer-1` — checkpoint-resumed freshness gap**
-   `packages/framework/src/dag-runtime/wave-execution.ts:261`
-   Stop treating checkpoint presence as proof that post-node freshness bookkeeping completed. Re-emit owed read/write bookkeeping for checkpoint-resumed outputs, retain the in-process witnessed set only for completed bookkeeping, and make write retries recognize their own previously committed write so a crash or ambiguous acknowledgement cannot create a self-conflict. Add crash-window and ambiguous-commit regression tests.
+1. **`silent-failure-hunter-1` — freshness diagnostics escape the Result boundary**
+   `packages/framework/src/checkpoint/redis-freshness-index.ts:127`
+   Add one framework logger helper that cannot throw, route freshness degradation diagnostics through it, and add a regression proving the fifth Redis failure still returns the original typed `cache-error` when the configured logger throws.
 
-2. **`code-reviewer-2` — unfenced tenant purge/revival race**
-   `packages/host/src/supervisor/lifecycle/grace-window-purge.ts:264`
-   Replace check-then-destruct with an adapter-owned, runtime-proven purge lease acquired against the exact tombstone. Registry mutations are refused while that lease is active; destructive ports run only after acquisition; hard deletion requires the authentic lease and occurs only after every footprint step succeeds; failures retain the tombstone and release the lease for retry. Add lifecycle and registry concurrency regressions proving revival cannot interleave with destructive work.
+2. **`pr-test-analyzer-1` — supervisor Redis WATCH implementation lacks behavioral coverage**
+   `packages/host/src/main-supervisor.ts:170`
+   Eliminate the private supervisor copy by extracting the complete ioredis-backed `RedisPort` construction into the existing shared Redis adapter. Both worker/single-tenant connectivity and supervisor composition will use that implementation. Extend its fake-client contract suite to cover WATCH conflicts, queued command errors, guarded `UNWATCH` cleanup, and transaction serialization.
 
-3. **`silent-failure-hunter-1` — logger escapes persisted state transition**
-   `packages/framework/src/state-machine/runner.ts:196`
-   Route both `onTrace` diagnostic paths through a non-throwing logger helper. Add a regression where both the trace callback and injected logger throw while the durable transition still succeeds.
+3. **`type-design-analyzer-1` — aborted RunLease authority can be laundered**
+   `packages/host/src/hitl/ports.ts:61`
+   Replace the globally exported issuer/token projection pair with a closure-backed `RunLeaseAuthority` factory that returns separately narrowed issuer and verifier capabilities. Composition creates one authority and passes only issuance to the queue and only verification to stores. A newly created authority cannot recognize a lease from another authority, so a lease holder cannot recover its token or reissue authority. Update production wiring, in-memory adapters, tests, `CONTEXT.md`, and ADR-0060.
 
-4. **`type-design-analyzer-1` — reissuable HITL lease**
-   `packages/host/src/hitl/ports.ts:35`
-   Remove `ownerToken` from the public lease value, back issuance with module-private WeakMap proof, and make run-store adapters extract tokens only through the internal proof function. Assertion-forged or copied leases fail closed; an aborted holder cannot mint a fresh lease because it cannot recover the token. Update lease tests.
+4. **`comment-analyzer-1` — worker-registry fail-closed header contradicts best-effort prune**
+   `packages/host/src/supervisor/lifecycle/worker-registry-redis.ts:18`
+   Correct the module contract to distinguish mandatory Redis operations from deliberately best-effort stale-entry pruning; keep runtime behavior unchanged.
 
-5. **`comment-analyzer-1` — authenticated HTTP option accessors escape**
-   `packages/http-auth/src/client.ts:57`
-   Fence all request-option reads, including body/content-type extraction, inside the Result boundary and map contract violations to a secret-free non-retriable error. Add hostile-accessor tests for body and common options.
-
-6. **`comment-analyzer-2` — Graph abort accessor escapes**
-   `packages/adapter-ms-graph/src/path-resolving.ts:47`
-   Read and inspect caller signals only inside guarded code, reuse the captured signal for composition, and ensure both preflight and catch-path abort checks stay inside the Result boundary. Add a hostile signal/accessor regression.
-
-7. **`architecture-tech-lead-1` — global logger in pure response assembly**
-   `apps/customer-summary/src/dag/nodes/assemble-response.ts:76`
-   Remove logging from the transform; the degraded response is the pure modeled outcome. Add a regression proving degraded assembly is independent of a throwing framework logger.
-
-8. **`code-simplifier-1` — unreachable test-fixture branch**
-   `packages/framework/src/__tests__/dag-transition.test.ts:104`
-   Delete the always-true ternary and preserve its effective fixture value directly.
+5. **`architecture-tech-lead-1` — supervisor `RedisPort.del` drops additional keys**
+   `packages/host/src/main-supervisor.ts:251`
+   Resolve through the shared Redis adapter from finding 2. Its existing multi-key `DEL` implementation forwards every key in one command; retain and strengthen the adapter contract test so supervisor composition inherits the atomic behavior.
 
 ## Advisory dispositions
 
 ### Accepted
 
-- **`code-reviewer-3`** — own ambiguously committed freshness writes can be reported as conflicts. Fold into critical 1 by identifying the current run/node/new-witness write as already recorded and treating it as completed bookkeeping.
-- **`silent-failure-hunter-2`** — `retryAsync` logging can abort retry. Guard the diagnostic and add a throwing-logger retry regression.
-- **`silent-failure-hunter-3`** — BullMQ error listeners can throw through diagnostics. Use one non-throwing adapter-local logger helper for Redis, Queue, and Worker listeners and pin it with a throwing-logger connection-error test.
-- **`silent-failure-hunter-4`** — `startRun` clock exceptions escape. Catch clock contract violations, map them to `internal-invariant-violated`, and add a service regression.
-- **`type-design-analyzer-2`** — structural `ActiveTenantConfig` bypasses parsing. Add a private construction brand minted only by `tenantConfig`; registry transitions continue accepting only the parsed type.
-- **`comment-analyzer-3`** — RunLease opacity comments overclaim runtime authority. Resolved by critical 4's WeakMap-backed runtime proof and revised contract text.
-- **`code-simplifier-2`** — duplicate retry-config fixture. Move the existing helper above `makeCtx` and reuse it there.
+- **`code-reviewer-1` — purge warning logger can starve later tenants.** Sound availability defect with a small in-scope fix. Make warning emission best-effort and add a two-tenant sweep regression proving a throwing logger cannot stop later purges.
+- **`silent-failure-hunter-2` — malformed OpenAI tool-call recovery can be replaced by a logger throw.** Sound Result/recovery-boundary defect. Reuse the non-throwing framework logger helper and add a malformed-arguments regression.
+- **`silent-failure-hunter-3` — Zod introspection fallback can be replaced by a logger throw.** Sound totality defect. Reuse the non-throwing framework logger helper and add an introspection-failure regression.
+- **`pr-test-analyzer-2` — purge lease release is not behaviorally pinned on failed exits.** Sound concurrency-safety coverage gap. Record `releasePurge` calls and assert release after partial footprint failure and hard-delete failure.
+- **`type-design-analyzer-2` — `RunTimestampMs` admits negative and fractional values.** Sound value-object invariant gap. Parse only non-negative safe integers, use the smart constructor at persisted metadata ingress, and add constructor/persistence regressions.
+- **`comment-analyzer-2` — `startedAt` comment misstates idle-eviction behavior.** Sound documentation defect. State that `startedAt` preserves uptime/diagnostic continuity; idle timing restarts from adopted activity.
+- **`code-simplifier-1` — supervisor duplicates Redis optimistic-transaction machinery.** Sound and directly coupled to critical findings 2 and 5. Consolidate behind the existing adapter seam rather than patching the duplicate.
 
 ### Deferred
 
-- **`type-design-analyzer-3`** — metadata-scoped checkpoint failures share the `NodeId` arm. Sound, but a truthful fix requires an additive persisted-wire discriminant and ADR/codec migration across all checkpoint backends; this remediation does not change that wire format. The residual is already explicit in `checkpoint-address.ts`.
-- **`architecture-tech-lead-2`** — effectful `retryAsync` lives under documented-pure `shared/`. Sound, but relocating the scheduler orchestration seam changes module structure/import policy rather than the accepted safety behavior; defer to a dedicated deepening. The throwing-logger correctness defect is fixed now.
-- **`architecture-tech-lead-3`** — `RedisPort` is vendor-wide. Sound, but splitting a port used across roughly 128 host references is a cross-subsystem architecture migration requiring consumer-owned ports and fake parity; defer to a dedicated deepening rather than mix it into critical remediation.
+None.
 
 ### Dismissed
 
-- **`code-simplifier-3`** — extract a worker-lifecycle test harness factory. The repeated setup is scenario-specific test data with materially different override points; hiding it behind another local abstraction would trade visible arrangements for indirection without reducing production risk or representable states.
+- **`code-simplifier-2` — consolidate worker/tenant registry Redis test fakes.** Dismissed: these fakes are local fixtures for different adapter contracts and expose subsystem-specific state/operations. Sharing a wide test fake would couple otherwise independent suites without reducing production state space or addressing a correctness finding.
 
 ## Refuted critical findings audit
 
-None. All eight critical findings survived the registered panel. Seven were upheld by all three lenses; `code-simplifier-1` was upheld by reproduction and intent, with security uncertain. The canonical panel evidence remains in `result.json.panel.outcomes` and `transcripts/refutation-slot:*/attempt-1.raw`.
+None. All five critical findings survived unanimously across reproduction, intent, and security. Canonical panel evidence is retained in `result.json.panel.outcomes` and the three `refutation-slot:*` raw transcripts.
 
-## Support paths outside the frozen review scope
+## Planned files
 
-- `packages/framework/src/__tests__/retry-async.test.ts` — regression pin for accepted advisory `silent-failure-hunter-2`.
+- `.claude/plans/2026-08-24-pr-remediation.md`
+- `CONTEXT.md`
+- `docs/adr/0060-hitl-suspend-resume-primitive.md`
+- `packages/framework/src/logger.ts`
+- `packages/framework/src/checkpoint/redis-freshness-index.ts`
+- `packages/framework/src/llm/openai-types.ts`
+- `packages/framework/src/llm/zod-schema.ts`
+- `packages/framework/src/__tests__/redis-freshness-index.test.ts`
+- `packages/framework/src/__tests__/llm-tool-call.test.ts`
+- `packages/framework/src/__tests__/zod-schema.test.ts`
+- `packages/host/src/adapters/redis-connectivity.ts`
+- `packages/host/src/adapters/__tests__/redis-connectivity.test.ts`
+- `packages/host/src/main-supervisor.ts`
+- `packages/host/src/host.ts`
+- `packages/host/src/hitl/ports.ts`
+- `packages/host/src/hitl/types.ts`
+- `packages/host/src/hitl/adapters/run-queue.ts`
+- `packages/host/src/hitl/adapters/run-store.ts`
+- existing HITL tests that issue or verify leases
+- `packages/host/src/supervisor/lifecycle/grace-window-purge.ts`
+- `packages/host/src/supervisor/lifecycle/worker-registry-redis.ts`
+- `packages/host/src/__tests__/supervisor/lifecycle/grace-window-purge.test.ts`
 
-Every other changed path, including this plan and the remaining regression suites, is inside the frozen 481-path scope.
+The engine reported `packages/framework/src/logger.ts` outside the frozen review scope; it is the support path required for the shared no-throw diagnostic helper. Every other planned path is inside the frozen scope.
 
 ## Validation
 
-Focused tests after each move, then:
+Focused regression gates:
+
+```bash
+bun test packages/framework/src/__tests__/redis-freshness-index.test.ts \
+  packages/framework/src/__tests__/llm-tool-call.test.ts \
+  packages/framework/src/__tests__/zod-schema.test.ts
+bun test packages/host/src/adapters/__tests__/redis-connectivity.test.ts \
+  packages/host/src/hitl/adapters/__tests__/run-queue.test.ts \
+  packages/host/src/hitl/adapters/__tests__/redis-stores.test.ts \
+  packages/host/src/hitl/__tests__/run-store-job.test.ts \
+  packages/host/src/__tests__/supervisor/lifecycle/grace-window-purge.test.ts \
+  packages/host/src/__tests__/supervisor/lifecycle/worker-registry-redis.test.ts
+bun run --filter @fuguejs/framework typecheck
+bun run --filter @fuguejs/host typecheck
+```
+
+Full validation before registered remediation:
 
 ```bash
 bun run typecheck
 bun run test
+bun run check:docs
 ```
 
-The registered remediation run must validate successfully before it atomically installs the verified Git index.
+After the implementation is green, run the mandatory `distill` apply-mode pass one move at a time and re-run covering tests before starting registered remediation.

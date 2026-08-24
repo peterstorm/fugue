@@ -1,12 +1,11 @@
 /**
  * ioredis-backed Redis connectivity adapter — SHARED by both binaries.
  *
- * The single-tenant binary (`main.ts`) and the per-tenant worker (`worker-main.ts`)
- * need the SAME `RedisConnectivityPort` + `RedisPort` over ioredis; the only
- * worker-specific delta is an optional per-tenant ACL credential (ADR-0067) that
- * overrides the inherited `REDIS_URL` auth. This module is that one
- * implementation, so a fix or a new `RedisPort` method lands in ONE place and both
- * binaries inherit it — no drift between two hand-maintained copies.
+ * The single-tenant binary (`main.ts`), per-tenant worker (`worker-main.ts`),
+ * and supervisor (`main-supervisor.ts`) need the SAME `RedisPort` over ioredis.
+ * The worker's only delta is an optional per-tenant ACL credential (ADR-0067);
+ * the supervisor composes privileged pub/sub, ACL, and audit capabilities around
+ * the same data-port factory. A command or transaction fix therefore lands once.
  *
  * Side-effectful (it dials Redis), so it lives in `adapters/` (imperative shell),
  * never in `domain/`. The dynamic `import("ioredis")` keeps the driver out of the
@@ -47,8 +46,139 @@ interface RedisConnectivityBundle {
  */
 const redisErr = (operation: string, e: unknown): HostError => ({
   kind: "redis-unavailable",
-  operation: `${operation}: ${safeErrorMessage(e)}`, 
+  operation: `${operation}: ${safeErrorMessage(e)}`,
 });
+
+type RedisFailure = (operation: string, error: unknown) => HostError;
+
+/**
+ * Adapt one ioredis command connection to the complete host `RedisPort`.
+ * WATCH state and error conversion live here so every binary shares the same
+ * optimistic-transaction, cleanup, and multi-key command contracts.
+ */
+export const createIoredisRedisPort = (
+  client: IoRedis,
+  redisFailure: RedisFailure = redisErr,
+): RedisPort => {
+  let watchTail: Promise<void> = Promise.resolve();
+  const serializeWatch = async <T,>(
+    work: () => Promise<Result<T, HostError>>,
+  ): Promise<Result<T, HostError>> => {
+    let releaseTurn: () => void = () => {};
+    const turn = new Promise<void>((resolve) => { releaseTurn = resolve; });
+    const previous = watchTail;
+    watchTail = previous.then(() => turn);
+    await previous;
+    try {
+      return await work();
+    } finally {
+      releaseTurn();
+    }
+  };
+
+  const watchGuarded = <T>(
+    operation: string,
+    body: () => Promise<Result<T, HostError>>,
+  ): Promise<Result<T, HostError>> =>
+    serializeWatch(async () => {
+      try {
+        return await body();
+      } catch (error) {
+        try { await client.unwatch(); } catch { /* primary error is authoritative */ }
+        return err(redisFailure(operation, error));
+      }
+    });
+
+  const compareAndRun = (
+    operation: string,
+    key: string,
+    expectedValue: string,
+    stage: (multi: ReturnType<typeof client.multi>) => ReturnType<typeof client.multi>,
+  ): Promise<Result<boolean, HostError>> =>
+    watchGuarded(`${operation} ${key}`, async () => {
+      await client.watch(key);
+      if (await client.get(key) !== expectedValue) {
+        await client.unwatch();
+        return ok(false);
+      }
+      const executed = await stage(client.multi()).exec();
+      if (executed === null) return ok(false);
+      const [commandError, applied] = executed[0] ?? [];
+      if (commandError !== null) throw commandError;
+      return ok(applied === 1);
+    });
+
+  const redisCall = async <T>(
+    describe: () => string,
+    run: () => Promise<T>,
+  ): Promise<Result<T, HostError>> => {
+    try {
+      return ok(await run());
+    } catch (error) {
+      return err(redisFailure(describe(), error));
+    }
+  };
+
+  return {
+    get: (key) => redisCall(() => `GET ${key}`, () => client.get(key)),
+    set: (key, value, opts) =>
+      redisCall(() => `SET ${key}`, () =>
+        opts?.expiresInSec !== undefined
+          ? client.set(key, value, "EX", opts.expiresInSec)
+          : client.set(key, value)),
+    del: (key, ...additionalKeys) => {
+      const keys = [key, ...additionalKeys];
+      return redisCall(() => `DEL ${keys.join(" ")}`, () => client.del(...keys));
+    },
+    scan: (pattern, cursor = "0") =>
+      redisCall(() => `SCAN ${pattern}`, async () => {
+        const [nextCursor, keys] = await client.scan(cursor, "MATCH", pattern, "COUNT", 100);
+        return { cursor: nextCursor, keys };
+      }),
+    setNx: (key, value, opts) =>
+      redisCall(() => `SETNX ${key}`, async () =>
+        opts?.expiresInSec !== undefined
+          ? (await client.set(key, value, "EX", opts.expiresInSec, "NX")) === "OK"
+          : (await client.setnx(key, value)) === 1),
+    compareAndDelete: (key, expectedValue) =>
+      compareAndRun("COMPARE-AND-DELETE", key, expectedValue, (multi) => multi.del(key)),
+    compareAndExpire: (key, expectedValue, expiresInSec) =>
+      compareAndRun("COMPARE-AND-EXPIRE", key, expectedValue, (multi) => multi.expire(key, expiresInSec)),
+    setIfValue: (guardKey, expectedValue, key, value, opts) =>
+      watchGuarded(`SET-IF-VALUE ${guardKey} -> ${key}`, async () => {
+        for (;;) {
+          await client.watch(guardKey);
+          if (await client.get(guardKey) !== expectedValue) {
+            await client.unwatch();
+            return ok(false);
+          }
+          const executed = await client.multi().set(key, value, "EX", opts.expiresInSec).exec();
+          if (executed === null) continue;
+          const [commandError, written] = executed[0] ?? [];
+          if (commandError !== null) throw commandError;
+          return ok(written === "OK");
+        }
+      }),
+    setNxIfPresent: (guardKey, key, value, opts) =>
+      watchGuarded(`SETNX-IF-PRESENT ${guardKey} -> ${key}`, async () => {
+        for (;;) {
+          await client.watch(guardKey);
+          if (await client.get(guardKey) === null) {
+            await client.unwatch();
+            return ok("not-present");
+          }
+          const executed = await client.multi().set(key, value, "EX", opts.expiresInSec, "NX").exec();
+          if (executed === null) continue;
+          const [commandError, created] = executed[0] ?? [];
+          if (commandError !== null) throw commandError;
+          return ok(created === "OK" ? "created" : "exists");
+        }
+      }),
+    sAdd: (key, member) => redisCall(() => `SADD ${key}`, () => client.sadd(key, member)),
+    sRem: (key, member) => redisCall(() => `SREM ${key}`, () => client.srem(key, member)),
+    sMembers: (key) => redisCall(() => `SMEMBERS ${key}`, () => client.smembers(key)),
+  };
+};
 
 /**
  * Factory for the underlying ioredis client. INJECTED so a unit test can supply a
@@ -125,195 +255,7 @@ export const createRedisConnectivity = async (
       },
     };
 
-    // WATCH state is connection-scoped, so every optimistic transaction shares
-    // one turnstile. Ordinary Redis commands remain concurrent; only the small
-    // ownership/gate transactions need this client-local serialization.
-    let watchTail: Promise<void> = Promise.resolve();
-    const serializeWatch = async <T,>(work: () => Promise<Result<T, HostError>>): Promise<Result<T, HostError>> => {
-      let releaseTurn: () => void = () => {};
-      const turn = new Promise<void>((resolve) => { releaseTurn = resolve; });
-      const previous = watchTail;
-      watchTail = previous.then(() => turn);
-      await previous;
-      try {
-        return await work();
-      } finally {
-        releaseTurn();
-      }
-    };
-
-    /**
-     * Own the WATCH failure contract for every optimistic-locking method: on a
-     * throw, release the watch before converting to a typed failure.
-     *
-     * ONE definition instead of the identical catch-and-unwatch tail repeated on
-     * each method. The UNWATCH is the load-bearing part: `serializeWatch` runs
-     * these turns on a SHARED connection, so a watch left dangling by a throwing
-     * turn would still be armed when the next turn's MULTI executes, silently
-     * aborting an unrelated caller's transaction. The unwatch is itself guarded
-     * because the primary error must stay authoritative.
-     */
-    const watchGuarded = <T>(
-      operation: string,
-      body: () => Promise<Result<T, HostError>>,
-    ): Promise<Result<T, HostError>> =>
-      serializeWatch(async () => {
-        try {
-          return await body();
-        } catch (e) {
-          try { await client.unwatch(); } catch { /* primary error is authoritative */ }
-          return err(redisErr(operation, e));
-        }
-      });
-
-    /**
-     * The compare-and-X protocol: WATCH the key, re-read it, abort unless it still
-     * holds `expectedValue`, then run `stage`'s single command inside a MULTI that
-     * Redis discards if the key changed underneath.
-     *
-     * Shared by `compareAndDelete` and `compareAndExpire`, which are the same
-     * protocol differing only in the queued command — and both fence LEASE
-     * ownership, so a divergence here would let one worker act on a lease another
-     * already holds. A `null` exec means the WATCH tripped (report `false`, someone
-     * else won); a queued command's own error is thrown so it becomes a typed
-     * failure rather than a silent `false`.
-     */
-    const compareAndRun = (
-      operation: string,
-      key: string,
-      expectedValue: string,
-      stage: (multi: ReturnType<typeof client.multi>) => ReturnType<typeof client.multi>,
-    ): Promise<Result<boolean, HostError>> =>
-      watchGuarded(`${operation} ${key}`, async () => {
-        await client.watch(key);
-        if (await client.get(key) !== expectedValue) {
-          await client.unwatch();
-          return ok(false);
-        }
-        const executed = await stage(client.multi()).exec();
-        if (executed === null) return ok(false);
-        const [commandError, applied] = executed[0] ?? [];
-        if (commandError !== null) throw commandError;
-        return ok(applied === 1);
-      });
-
-    const compareAndDelete: RedisPort["compareAndDelete"] = (key, expectedValue) =>
-      compareAndRun("COMPARE-AND-DELETE", key, expectedValue, (multi) => multi.del(key));
-
-    const compareAndExpire: RedisPort["compareAndExpire"] = (key, expectedValue, expiresInSec) =>
-      compareAndRun("COMPARE-AND-EXPIRE", key, expectedValue, (multi) => multi.expire(key, expiresInSec));
-
-    const setIfValue: RedisPort["setIfValue"] = (guardKey, expectedValue, key, value, opts) =>
-      watchGuarded(`SET-IF-VALUE ${guardKey} -> ${key}`, async () => {
-        for (;;) {
-          await client.watch(guardKey);
-          if (await client.get(guardKey) !== expectedValue) {
-            await client.unwatch();
-            return ok(false);
-          }
-          const executed = await client.multi().set(key, value, "EX", opts.expiresInSec).exec();
-          // The renewal transaction may touch the watched lease key without
-          // changing its owner token. Re-read and retry instead of reporting a
-          // false ownership loss on that benign WATCH conflict.
-          if (executed === null) continue;
-          const [commandError, written] = executed[0] ?? [];
-          if (commandError !== null) throw commandError;
-          return ok(written === "OK");
-        }
-      });
-
-    const setNxIfPresent: RedisPort["setNxIfPresent"] = (guardKey, key, value, opts) =>
-      watchGuarded(`SETNX-IF-PRESENT ${guardKey} -> ${key}`, async () => {
-        // EXEC retries when a concurrent clear changes the watched pending
-        // marker between verification and decision publication.
-        for (;;) {
-          await client.watch(guardKey);
-          if (await client.get(guardKey) === null) {
-            await client.unwatch();
-            return ok("not-present");
-          }
-          const executed = await client.multi().set(key, value, "EX", opts.expiresInSec, "NX").exec();
-          if (executed === null) continue;
-          const [commandError, created] = executed[0] ?? [];
-          if (commandError !== null) throw commandError;
-          return ok(created === "OK" ? "created" : "exists");
-        }
-      });
-
-    const redis: RedisPort = {
-      get: async (key) => {
-        try {
-          return ok(await client.get(key));
-        } catch (e) {
-          return err(redisErr(`GET ${key}`, e));
-        }
-      },
-      set: async (key, value, opts) => {
-        try {
-          const result = opts?.expiresInSec !== undefined
-            ? await client.set(key, value, "EX", opts.expiresInSec)
-            : await client.set(key, value);
-          return ok(result);
-        } catch (e) {
-          return err(redisErr(`SET ${key}`, e));
-        }
-      },
-      del: async (key, ...additionalKeys) => {
-        const keys = [key, ...additionalKeys];
-        try {
-          return ok(await client.del(...keys));
-        } catch (e) {
-          return err(redisErr(`DEL ${keys.join(" ")}`, e));
-        }
-      },
-      scan: async (pattern, cursor = "0") => {
-        try {
-          const [nextCursor, keys] = await client.scan(cursor, "MATCH", pattern, "COUNT", 100);
-          return ok({ cursor: nextCursor, keys });
-        } catch (e) {
-          return err(redisErr(`SCAN ${pattern}`, e));
-        }
-      },
-      setNx: async (key, value, opts) => {
-        try {
-          if (opts?.expiresInSec !== undefined) {
-            // Atomic acquire-with-TTL: the key can never exist without an expiry,
-            // so a crash after acquisition still self-heals after the TTL.
-            const result = await client.set(key, value, "EX", opts.expiresInSec, "NX");
-            return ok(result === "OK");
-          }
-          const result = await client.setnx(key, value);
-          return ok(result === 1);
-        } catch (e) {
-          return err(redisErr(`SETNX ${key}`, e));
-        }
-      },
-      compareAndDelete,
-      compareAndExpire,
-      setIfValue,
-      setNxIfPresent,
-      sAdd: async (key, member) => {
-        try {
-          return ok(await client.sadd(key, member));
-        } catch (e) {
-          return err(redisErr(`SADD ${key}`, e));
-        }
-      },
-      sRem: async (key, member) => {
-        try {
-          return ok(await client.srem(key, member));
-        } catch (e) {
-          return err(redisErr(`SREM ${key}`, e));
-        }
-      },
-      sMembers: async (key) => {
-        try {
-          return ok(await client.smembers(key));
-        } catch (e) {
-          return err(redisErr(`SMEMBERS ${key}`, e));
-        }
-      },
-    };
+    const redis = createIoredisRedisPort(client);
 
     return ok({
       port,

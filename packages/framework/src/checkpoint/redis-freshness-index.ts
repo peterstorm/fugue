@@ -35,7 +35,7 @@ import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import { ok, err } from "../types/result.js";
 import { __brandRunId, __brandNodeId } from "../types/ids.js";
-import { fwLogger } from "../logger.js";
+import { logFrameworkWithoutThrowing } from "../logger.js";
 import { safeErrorMessage } from "../types/safe-error.js";
 
 const KEY_PREFIX = "fugue:freshness:";
@@ -50,7 +50,8 @@ const decodeMember = (
   try {
     const parsed = JSON.parse(member);
     if (!Array.isArray(parsed) || parsed.length !== 4) {
-      fwLogger().warn(
+      logFrameworkWithoutThrowing(
+        "warn",
         `[RedisFreshnessIndex] decodeMember: unexpected shape (length=${Array.isArray(parsed) ? parsed.length : "not-array"}): ${member.slice(0, 100)}`,
       );
       return null;
@@ -60,13 +61,15 @@ const decodeMember = (
     // in-memory adapter mints through the kind-checked constructors). An
     // off-contract kind is a corrupt entry, exactly like a shape failure.
     if (!isWitnessKind(parsed[2])) {
-      fwLogger().warn(
+      logFrameworkWithoutThrowing(
+        "warn",
         `[RedisFreshnessIndex] decodeMember: unknown witnessKind ${String(parsed[2]).slice(0, 100)}: ${member.slice(0, 100)}`,
       );
       return null;
     }
     if (typeof parsed[3] !== "string" || parsed[3].length === 0) {
-      fwLogger().warn(
+      logFrameworkWithoutThrowing(
+        "warn",
         `[RedisFreshnessIndex] decodeMember: witnessValue must be a non-empty string: ${member.slice(0, 100)}`,
       );
       return null;
@@ -83,7 +86,8 @@ const decodeMember = (
     // it unconditionally "JSON parse failed" sent whoever was debugging a
     // corrupt freshness entry after the wrong root cause. Report what actually
     // failed instead; either way the entry is dropped and the read fails closed.
-    fwLogger().warn(
+    logFrameworkWithoutThrowing(
+      "warn",
       `[RedisFreshnessIndex] decodeMember: ${
         e instanceof SyntaxError ? "JSON parse failed" : "entry rejected"
       }: ${safeErrorMessage(e)}: ${member.slice(0, 100)}`,
@@ -128,7 +132,8 @@ export class RedisFreshnessIndex implements FreshnessIndex {
     this._consecutiveFailures++;
     this._lastError = e instanceof Error ? e : new Error(String(e));
     if (this._consecutiveFailures >= 5) {
-      fwLogger().warn(
+      logFrameworkWithoutThrowing(
+        "warn",
         `[RedisFreshnessIndex] degraded: ${this._consecutiveFailures} consecutive failures`,
       );
     }

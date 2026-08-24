@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { fwLogger } from "../logger.js";
+import { logFrameworkWithoutThrowing } from "../logger.js";
 
 /**
  * Convert a Zod schema to a JSON Schema object suitable for LLM API calls.
@@ -52,9 +52,11 @@ const renderObjectSchema = (schema: unknown): Record<string, unknown> | null => 
     // positives), but a render failure on a *real* object schema would silently
     // defer a genuine fan-in-key-mismatch to the runtime Zod parse. Log at debug
     // so a future zodToJsonSchema regression is diagnosable instead of invisible.
-    fwLogger().debug("renderObjectSchema: schema introspection threw, treating as unverifiable", {
-      error: e instanceof Error ? e.message : String(e),
-    });
+    logFrameworkWithoutThrowing(
+      "debug",
+      "renderObjectSchema: schema introspection threw, treating as unverifiable",
+      { error: e instanceof Error ? e.message : String(e) },
+    );
     return null;
   }
   if (json.type !== "object") return null;

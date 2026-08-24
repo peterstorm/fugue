@@ -11,9 +11,13 @@ import { tenantId } from "../../../domain/tenant.js";
 import type { TenantId } from "../../../domain/tenant.js";
 import { transitionRunStatus, tryRunTimestampMs } from "../../types.js";
 import type { QueuedRunRecord, RunStatus, RunStatusUpdate, RunTimestampMs } from "../../types.js";
-import { createInMemoryRunLeaseAuthority, createInMemoryRunStore, createRedisRunStore } from "../run-store.js";
+import {
+  createInMemoryRunLeaseAuthority,
+  createInMemoryRunStore,
+  createRedisRunStore as createRedisRunStoreAdapter,
+} from "../run-store.js";
 import { createRedisDecisionStore } from "../decision-store.js";
-import { issueRunLease } from "../../ports.js";
+import { createRunLeaseAuthority } from "../../ports.js";
 import type { RunLease } from "../../ports.js";
 
 /** Build a `TenantId` for a test from a known-good literal via the canonical constructor. */
@@ -27,6 +31,14 @@ const mkTenant = (s: string): TenantId => {
 // cross-tenant isolation invariant (SC-001) at the HITL durable-store layer.
 const TENANT = mkTenant("tenant-a");
 const OTHER_TENANT = mkTenant("tenant-b");
+const leaseAuthority = createRunLeaseAuthority();
+const createRedisRunStore = (
+  redis: HitlRedisPort,
+  tenant: TenantId,
+  config: { readonly ttlSec: number; readonly now?: () => number },
+  logger?: LogPort,
+): ReturnType<typeof createRedisRunStoreAdapter> =>
+  createRedisRunStoreAdapter(redis, tenant, config, leaseAuthority.verifier, logger);
 
 /** A `set`/`setNx` opts record so a test can assert the TTL was passed (SET …EX). */
 type WriteOpts = { expiresInSec?: number } | undefined;
@@ -113,7 +125,7 @@ const acquireLease = async (
 ): Promise<RunLease> => {
   const acquired = await redis.setNx(`fugue:${tenant}:hitl:lock:${runId}`, ownerToken, { expiresInSec: 60 });
   if (!acquired.ok || !acquired.value) throw new Error(`failed to acquire test lease for ${runId}`);
-  return issueRunLease(runId, ownerToken, new AbortController().signal);
+  return leaseAuthority.issuer.issue(runId, ownerToken, new AbortController().signal);
 };
 
 const record = (overrides: Partial<QueuedRunRecord> = {}): QueuedRunRecord => ({
@@ -127,6 +139,16 @@ const record = (overrides: Partial<QueuedRunRecord> = {}): QueuedRunRecord => ({
   createdAtMs: timestamp(100),
   updatedAtMs: timestamp(100),
   ...overrides,
+});
+
+describe("RunTimestampMs", () => {
+  it("accepts only non-negative safe integer epoch milliseconds", () => {
+    expect(tryRunTimestampMs(0).ok).toBe(true);
+    expect(tryRunTimestampMs(Number.MAX_SAFE_INTEGER).ok).toBe(true);
+    for (const invalid of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN, Infinity]) {
+      expect(tryRunTimestampMs(invalid).ok, String(invalid)).toBe(false);
+    }
+  });
 });
 
 describe("transitionRunStatus — lifecycle state machine", () => {
@@ -442,6 +464,27 @@ describe("RedisRunStore", () => {
     const store = createRedisRunStore(redis, TENANT, cfg);
 
     expect((await store.get("run-1" as RunId)).ok).toBe(false);
+  });
+
+  it("rejects persisted negative or fractional run timestamps", async () => {
+    for (const invalidTimestamp of [-1, 1.5]) {
+      const { redis, seed } = seedableRedis();
+      seed("fugue:tenant-a:hitl:run:run-1", JSON.stringify({
+        runId: "run-1",
+        dagId: "d",
+        ownerTeam: "sales",
+        input: {},
+        identity: { kind: "admin" },
+        status: { kind: "queued" },
+        createdAtMs: invalidTimestamp,
+        updatedAtMs: 1,
+      }));
+      const store = createRedisRunStore(redis, TENANT, cfg);
+
+      const result = await store.getMetadata("run-1" as RunId);
+
+      expect(result.ok, String(invalidTimestamp)).toBe(false);
+    }
   });
 
   it("errs internal-invariant-violated on structurally-invalid metadata (valid JSON, bad shape)", async () => {

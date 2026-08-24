@@ -89,6 +89,7 @@ import { createRedisDecisionStore } from "./hitl/adapters/decision-store.js";
 import { createRunExecutor } from "./hitl/adapters/run-executor.js";
 import { createRunQueue } from "./hitl/adapters/run-queue.js";
 import { createWebhookNotifier, fetchWebhookHttp } from "./hitl/adapters/webhook-notifier.js";
+import { createRunLeaseAuthority } from "./hitl/ports.js";
 import type { HumanReviewNotifierPort } from "./hitl/ports.js";
 import { createBotFrameworkNotifier } from "./hitl/adapters/bot/notifier.js";
 import { createBotConnector } from "./hitl/adapters/bot/connector.js";
@@ -587,11 +588,18 @@ const wireHitlRunEngine = async (args: {
     // below receives a required transaction capability; incomplete wiring fails
     // before a queue worker can acquire or execute any run.
     const hitlRedis = requireHitlRedisPort(sharedInfra.redis);
+    const leaseAuthority = createRunLeaseAuthority();
     // FR-013 / SC-001: bind the durable HITL stores to the `routedTenant` so
     // every `fugue:<tenant>:hitl:*` key stays under that tenant's Redis ACL.
     // `routedTenant` is the worker's resolved `Tenant.id`, or the constant
     // `default` fallback in the single-tenant path where no tenant is injected.
-    const runStore = createRedisRunStore(hitlRedis, routedTenant, { ttlSec: config.HITL_RUN_TTL_SEC }, sharedInfra.logger);
+    const runStore = createRedisRunStore(
+      hitlRedis,
+      routedTenant,
+      { ttlSec: config.HITL_RUN_TTL_SEC },
+      leaseAuthority.verifier,
+      sharedInfra.logger,
+    );
     const decisions = createRedisDecisionStore(hitlRedis, routedTenant, { ttlSec: config.HITL_RUN_TTL_SEC }, sharedInfra.logger);
     const executor = createRunExecutor({
       sharedInfra,
@@ -607,6 +615,7 @@ const wireHitlRunEngine = async (args: {
     const runQueue = createRunQueue({
       backend: queueBackend,
       redis: hitlRedis,
+      leaseIssuer: leaseAuthority.issuer,
       // FR-013 / SC-001: scope the single-flight lock key to the `routedTenant`
       // (`fugue:<tenant>:hitl:lock:*`) — the worker's resolved `Tenant.id`, or the
       // constant `default` fallback in the single-tenant path.

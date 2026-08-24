@@ -1,6 +1,9 @@
-import { describe, it, expect } from "bun:test";
+import { afterEach, describe, it, expect } from "bun:test";
 import { z } from "zod";
 import { zodToJsonSchema, objectSchemaKeys, objectSchemaRequiredKeys } from "../llm/zod-schema.js";
+import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
+
+afterEach(() => __resetFrameworkLogger());
 
 describe("zodToJsonSchema", () => {
   it("strips $schema key from output", () => {
@@ -50,6 +53,21 @@ describe("zodToJsonSchema", () => {
     const result = zodToJsonSchema(schema);
     const tags = (result.properties as any).tags;
     expect(tags.type).toBe("array");
+  });
+});
+
+describe("object schema introspection failure", () => {
+  it("returns null even when the diagnostic logger throws", () => {
+    setFrameworkLogger({
+      debug() { throw new Error("logger transport failed"); },
+      info() {},
+      warn() {},
+      error() {},
+    });
+    const schemaLike = { parse() {} };
+
+    expect(objectSchemaKeys(schemaLike)).toBeNull();
+    expect(objectSchemaRequiredKeys(schemaLike)).toBeNull();
   });
 });
 

@@ -81,6 +81,7 @@ interface RecordingDeps extends GracePurgeDeps {
     keyspace: TenantId[];
     fs: string[];
     registry: TenantId[];
+    release: TenantId[];
   };
 }
 
@@ -93,7 +94,14 @@ const recordingDeps = (
     hardDelete?: (lease: TenantPurgeLease) => Promise<Result<HardDeleteOutcome, HostError>>;
   } = {},
 ): RecordingDeps => {
-  const calls = { acl: [] as TenantId[], workerRegistry: [] as TenantId[], keyspace: [] as TenantId[], fs: [] as string[], registry: [] as TenantId[] };
+  const calls = {
+    acl: [] as TenantId[],
+    workerRegistry: [] as TenantId[],
+    keyspace: [] as TenantId[],
+    fs: [] as string[],
+    registry: [] as TenantId[],
+    release: [] as TenantId[],
+  };
   const ksFails = (t: TenantId): boolean => opts.failKeyspace === true || (opts.failKeyspaceFor?.(t) ?? false);
   const issueTestLease = (tenant: TenantId): TenantPurgeLease =>
     Object.freeze({ tenant }) as TenantPurgeLease;
@@ -108,7 +116,7 @@ const recordingDeps = (
       hardDelete: opts.hardDelete
         ? async (lease) => { calls.registry.push(lease.tenant); return opts.hardDelete!(lease); }
         : async (lease) => { calls.registry.push(lease.tenant); return ok("deleted" as const); },
-      releasePurge: async () => {},
+      releasePurge: async (lease) => { calls.release.push(lease.tenant); },
     },
   };
 };
@@ -189,6 +197,22 @@ describe("purgeTenantFootprint (FR-030 footprint reclamation)", () => {
     // later sweep can retry the failed idempotent operation.
     expect(deps.calls.acl).toHaveLength(1);
     expect(deps.calls.registry).toHaveLength(0);
+    expect(deps.calls.release).toEqual([tid("acme")]);
+  });
+
+  it("releases the purge lease after hard-delete failure", async () => {
+    const cfg = tombstone("acme", 0);
+    const deps = recordingDeps({
+      hardDelete: async () => err(redisUnavailable("hard delete")),
+    });
+
+    const outcome = await purgeTenantFootprint(deps, cfg);
+
+    expect(outcome.kind === "completed" ? outcome.failedSteps : null).toEqual([
+      "registry-hard-delete",
+    ]);
+    expect(deps.calls.registry).toEqual([tid("acme")]);
+    expect(deps.calls.release).toEqual([tid("acme")]);
   });
 });
 
@@ -314,6 +338,26 @@ describe("runGracePurgeSweep (SC-010 retain-then-purge)", () => {
     const stuckWarn = warnings.find((w) => (w.data?.tenant as TenantId | undefined) === tid("due-bad"));
     expect(stuckWarn).toBeDefined();
     expect(stuckWarn!.data?.failedSteps).toEqual(["keyspace-purge"]);
+  });
+
+  it("continues purging later tenants when the warning logger throws", async () => {
+    const now = 10_000_000;
+    const registry = seededRegistry([
+      tombstone("due-bad", now - 2 * DAY_MS),
+      tombstone("due-ok", now - 2 * DAY_MS),
+    ]);
+    const deps = recordingDeps({ failKeyspaceFor: (tenant) => tenant === tid("due-bad") });
+    const throwingLog = {
+      info: () => {},
+      warn: () => { throw new Error("logger transport failed"); },
+      error: () => {},
+    };
+
+    const outcomes = await runGracePurgeSweep(deps, registry, DAY_MS, now, throwingLog);
+
+    expect(outcomes.map((outcome) => outcome.tenant)).toEqual([tid("due-bad"), tid("due-ok")]);
+    expect(deps.calls.acl).toEqual([tid("due-bad"), tid("due-ok")]);
+    expect(purgeSucceeded(outcomes[1]!)).toBe(true);
   });
 
   it("propagates the REAL failed step + keysDeleted from the sweep — a DIFFERENT failing step (acl-revoke) proves it is not hardcoded to one step or a 'see-error' placeholder (SC-010)", async () => {

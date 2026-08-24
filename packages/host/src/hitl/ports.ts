@@ -24,7 +24,6 @@ import type { HostError } from "../domain/host-error.js";
 import type { QueuedRunRecord, RunMetadata, RunRecord, RunStatusUpdate, PersistedIdentity } from "./types.js";
 
 const RUN_LEASE: unique symbol = Symbol("RunLease");
-const runLeaseOwners = new WeakMap<object, string>();
 
 /**
  * Runtime-authenticated capability proving which queue worker owns a run's live
@@ -39,27 +38,47 @@ export type RunLease = Readonly<{
   [RUN_LEASE]: true;
 }>;
 
-/** Queue-adapter capability constructor; the owner token never leaves the issuer. */
-export const issueRunLease = (runId: RunId, ownerToken: string, signal: AbortSignal): RunLease => {
-  if (ownerToken.length === 0) {
-    throw new RangeError("RunLease owner token must be non-empty");
-  }
-  const lease: RunLease = Object.freeze({
-    runId,
-    signal,
-    [RUN_LEASE]: true as const,
-  });
-  runLeaseOwners.set(lease, ownerToken);
-  return lease;
-};
+export type RunLeaseIssuer = Readonly<{
+  issue: (runId: RunId, ownerToken: string, signal: AbortSignal) => RunLease;
+}>;
+
+export type RunLeaseVerifier = Readonly<{
+  ownerToken: (lease: RunLease) => string | null;
+}>;
+
+/** Issuance and verification capabilities backed by one private proof registry. */
+export type RunLeaseAuthority = Readonly<{
+  issuer: RunLeaseIssuer;
+  verifier: RunLeaseVerifier;
+}>;
 
 /**
- * Adapter-internal proof projection. `null` means the value was forged or
- * copied rather than issued by `issueRunLease`; stores fail that case closed as
- * `run-lease-lost`.
+ * Create one lease authority for a host composition. Queue code receives only
+ * `issuer`; stores receive only `verifier`. A different authority cannot project
+ * or reissue an existing lease because its WeakMap has never seen that value.
  */
-export const runLeaseOwnerToken = (lease: RunLease): string | null =>
-  runLeaseOwners.get(lease) ?? null;
+export const createRunLeaseAuthority = (): RunLeaseAuthority => {
+  const owners = new WeakMap<object, string>();
+  const issue: RunLeaseIssuer["issue"] = (runId, ownerToken, signal) => {
+    if (ownerToken.length === 0) {
+      throw new RangeError("RunLease owner token must be non-empty");
+    }
+    const lease: RunLease = Object.freeze({
+      runId,
+      signal,
+      [RUN_LEASE]: true as const,
+    });
+    owners.set(lease, ownerToken);
+    return lease;
+  };
+  return Object.freeze({
+    issuer: Object.freeze({ issue }),
+    verifier: Object.freeze({
+      ownerToken: (lease: RunLease) =>
+        lease.signal.aborted ? null : owners.get(lease) ?? null,
+    }),
+  });
+};
 
 /**
  * Durable persistence for runs. `checkpoint` is updated on every state-machine

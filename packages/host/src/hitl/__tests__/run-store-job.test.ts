@@ -13,14 +13,18 @@
 import { describe, it, expect } from "bun:test";
 import { ok, err, toJson, fromJson } from "@fuguejs/framework";
 import type { RunId, NodeId, DagPhase, DagMachineContextPersisted, Result } from "@fuguejs/framework";
-import { issueRunLease } from "../ports.js";
+import { createRunLeaseAuthority } from "../ports.js";
 import type { RunExecutionJob, RunStorePort } from "../ports.js";
 import type { RunRecord } from "../types.js";
 import { logWithoutThrowing } from "../diagnostic-logging.js";
 import { makeRunStoreJobLike } from "../run-store-job.js";
 
 const RUN = "run-1" as RunId;
-const LEASE = issueRunLease(RUN, "test-owner", new AbortController().signal);
+const LEASE = createRunLeaseAuthority().issuer.issue(
+  RUN,
+  "test-owner",
+  new AbortController().signal,
+);
 type Envelope = { state: DagPhase; context: DagMachineContextPersisted };
 const GATE = {
   nodeId: "review" as NodeId,

@@ -10,8 +10,11 @@
  * pattern as redis-checkpointer.test.ts).
  */
 
-import { describe, it, expect } from "bun:test";
+import { afterEach, describe, it, expect } from "bun:test";
 import { N, R } from "./_id-helpers.js";
+import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
+
+afterEach(() => __resetFrameworkLogger());
 import {
   __testEncodeMember,
   __testDecodeMember,
@@ -133,6 +136,34 @@ const fakeFindConflictRedis = (members: readonly string[]): {
 };
 
 describe("RedisFreshnessIndex findConflict — corrupt-member verdict (ADR-0025)", () => {
+  it("preserves the typed freshness failure when the degradation logger throws", async () => {
+    setFrameworkLogger({
+      debug() {},
+      info() {},
+      warn() { throw new Error("logger transport failed"); },
+      error() {},
+    });
+    const redis = {
+      zrevrangebyscore: async () => { throw new Error("redis unavailable"); },
+    } as unknown as ConstructorParameters<typeof RedisFreshnessIndex>[0];
+    const index = new RedisFreshnessIndex(redis);
+
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      const result = await index.findConflict(
+        witness("version", resourceName("res:logger-failure"), "1"),
+        0,
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("cache-error");
+        if (result.error.kind === "cache-error") {
+          expect(result.error.message).toContain("redis unavailable");
+        }
+      }
+    }
+    expect(index.consecutiveFailures).toBe(5);
+  });
+
   it("fails closed on an undecodable (non-JSON) latest member instead of returning ok(null)", async () => {
     const { redis, state } = fakeFindConflictRedis(["not-json", "900"]);
     const index = new RedisFreshnessIndex(redis);

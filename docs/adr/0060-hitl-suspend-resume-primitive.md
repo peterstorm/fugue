@@ -119,10 +119,14 @@ work with one predicate and no extra bookkeeping.
 ### Ownership-fenced execution slices (2026-08-22 amendment)
 
 Every queue acquisition now produces an opaque, run-bound `RunLease` carrying
-its random Redis owner token and an abort signal. The lease is threaded through
-`processRun`, the run-store-backed `JobLike`, and the executor. Checkpoint and
-status writes atomically compare the live lock token before committing, so an
-expired worker cannot overwrite a successor's checkpoint or terminal state.
+an abort signal while its random Redis owner token remains sealed. One
+composition-owned authority exposes separately narrowed issuer and verifier
+capabilities backed by a private WeakMap: the queue receives only issuance,
+stores receive only verification, and a fresh authority cannot recognize or
+reissue another authority's lease. The lease is threaded through `processRun`,
+the run-store-backed `JobLike`, and the executor. Checkpoint and status writes
+atomically compare the live lock token before committing, so an expired worker
+cannot overwrite a successor's checkpoint or terminal state.
 
 Lease renewal returning false, returning a typed error, or throwing aborts the
 active node-context signal immediately and makes the queue job retry. The

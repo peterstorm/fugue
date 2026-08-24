@@ -15,12 +15,12 @@
  *   3. ADOPT the ones that answer (return their `AdoptableWorker` records), and
  *   4. PRUNE (delete) the dead entries so the registry self-heals.
  *
- * FAIL-CLOSED (reuse the established degraded semantics): on ANY Redis failure
- * (read/write/scan/del returning `!ok`, or a thrown client error) every method
- * returns the SAME `redis-unavailable` HostError every other Redis adapter
- * returns (→ 503) and invokes the optional `onRedisDead` hook so the host's
- * existing `redisDied` degraded machine drives the state — this adapter NEVER
- * builds a parallel degraded state and NEVER throws.
+ * FAIL-CLOSED (reuse the established degraded semantics): failures of mandatory
+ * Redis operations return the same `redis-unavailable` HostError as the other
+ * adapters (→ 503) and invoke `onRedisDead`, so the existing `redisDied` machine
+ * drives degraded state. Stale/corrupt-entry pruning during `get` and
+ * `reconcileReadopt` is deliberately best-effort: failures are warning-logged
+ * while the authoritative read/adoption result still succeeds.
  *
  * The enumeration uses `scan` over `fugue:supervisor:workers:*`, which is a
  * SUPERVISOR/admin keyspace (not tenant-scoped), so `scan` is permitted here
@@ -57,9 +57,10 @@ type WorkerHealth = Extract<WorkerPhase, "live" | "draining">;
 
 /**
  * The persisted worker record. Carries ONLY routing/liveness metadata — never a
- * secret (the supervisor holds none; multi-tenant spec FR-005). `startedAt` lets the new supervisor
- * preserve the original worker uptime when it re-adopts (so idle-evict math stays
- * honest across a supervisor restart).
+ * secret (the supervisor holds none; multi-tenant spec FR-005). `startedAt` lets
+ * the new supervisor preserve original uptime and diagnostic continuity when it
+ * re-adopts. Idle eviction uses `lastActivityAt`, which adoption intentionally
+ * resets to the current clock.
  *
  * `eagerPin` (AD-7) is persisted as a BELT-AND-SUSPENDERS source for re-adoption:
  * the AUTHORITATIVE source on re-adoption is the live tenant registry config (so a

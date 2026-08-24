@@ -19,8 +19,7 @@ import { formatHostError, internalInvariantViolated } from "../../domain/host-er
 import { tenantId } from "../../domain/tenant.js";
 import type { TenantId } from "../../domain/tenant.js";
 import type { HitlRedisPort, LogPort } from "../../ports.js";
-import { issueRunLease } from "../ports.js";
-import type { RunLease, RunQueuePort } from "../ports.js";
+import type { RunLease, RunLeaseIssuer, RunQueuePort } from "../ports.js";
 import { logWithoutThrowing } from "../diagnostic-logging.js";
 
 /** Trigger envelope binds the wakeup to its tenant as well as its durable run id. */
@@ -71,6 +70,8 @@ export const parseRunTrigger = (
 interface RunQueueDeps {
   readonly backend: QueueBackend;
   readonly redis: HitlRedisPort;
+  /** Lease issuance half of the composition-owned authority. */
+  readonly leaseIssuer: RunLeaseIssuer;
   /**
    * The tenant this queue's single-flight locks are scoped to (AD-4 / FR-013 /
    * SC-001). The lock key is forced under `fugue:<tenant>:hitl:lock:`, so under
@@ -201,7 +202,7 @@ export const createRunQueue = (deps: RunQueueDeps): RunQueueHandle => {
         // cannot be verified by the construction-validated lease port.
         const renewEveryMs = Math.max(1, Math.floor(lockTtlSec * 500));
         const leaseController = new AbortController();
-        const lease = issueRunLease(runId, lockToken, leaseController.signal);
+        const lease = deps.leaseIssuer.issue(runId, lockToken, leaseController.signal);
         let renewalFailure: HostError | "ownership-lost" | undefined;
         let renewalTail: Promise<void> = Promise.resolve();
         const failLease = (failure: HostError | "ownership-lost"): void => {

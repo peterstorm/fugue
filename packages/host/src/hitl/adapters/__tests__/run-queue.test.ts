@@ -21,9 +21,9 @@ import { requireHitlRedisPort } from "../../../adapters/redis-connectivity.js";
 import type { HostError } from "../../../domain/host-error.js";
 import { tenantId } from "../../../domain/tenant.js";
 import type { TenantId } from "../../../domain/tenant.js";
-import { issueRunLease, runLeaseOwnerToken } from "../../ports.js";
+import { createRunLeaseAuthority } from "../../ports.js";
 import type { RunLease } from "../../ports.js";
-import { createRunQueue, hitlQueueName, parseRunTrigger } from "../run-queue.js";
+import { createRunQueue as createRunQueueAdapter, hitlQueueName, parseRunTrigger } from "../run-queue.js";
 
 /** Build a `TenantId` for a test from a known-good literal via the canonical constructor. */
 const mkTenant = (s: string): TenantId => {
@@ -36,6 +36,11 @@ const TENANT = mkTenant("tenant-a");
 const OTHER_TENANT = mkTenant("tenant-b");
 
 const RUN = "run-1" as RunId;
+const leaseAuthority = createRunLeaseAuthority();
+const createRunQueue = (
+  deps: Omit<Parameters<typeof createRunQueueAdapter>[0], "leaseIssuer">,
+): ReturnType<typeof createRunQueueAdapter> =>
+  createRunQueueAdapter({ ...deps, leaseIssuer: leaseAuthority.issuer });
 // The lock key is tenant-prefixed (AD-4 / FR-013 / SC-001) — assertions target
 // the bound tenant's namespace.
 const lockKey = (runId: string, tenant: TenantId = TENANT) => `fugue:${tenant}:hitl:lock:${runId}`;
@@ -198,16 +203,21 @@ describe("createRunQueue — enqueue boundary", () => {
   });
 
   it("rejects an empty lease owner token at the capability constructor", () => {
-    expect(() => issueRunLease(RUN, "", new AbortController().signal)).toThrow("non-empty");
+    expect(() => leaseAuthority.issuer.issue(RUN, "", new AbortController().signal)).toThrow("non-empty");
   });
 
-  it("keeps the owner token secret and rejects copied/assertion-forged lease shapes", () => {
-    const lease = issueRunLease(RUN, "owner-secret", new AbortController().signal);
+  it("keeps owner authority local and rejects copied or cross-authority leases", () => {
+    const controller = new AbortController();
+    const lease = leaseAuthority.issuer.issue(RUN, "owner-secret", controller.signal);
+    const unrelatedAuthority = createRunLeaseAuthority();
     expect("ownerToken" in lease).toBe(false);
-    expect(runLeaseOwnerToken(lease)).toBe("owner-secret");
+    expect(leaseAuthority.verifier.ownerToken(lease)).toBe("owner-secret");
 
+    controller.abort();
+    expect(leaseAuthority.verifier.ownerToken(lease)).toBeNull();
     const forged = { ...lease } as RunLease;
-    expect(runLeaseOwnerToken(forged)).toBeNull();
+    expect(leaseAuthority.verifier.ownerToken(forged)).toBeNull();
+    expect(unrelatedAuthority.verifier.ownerToken(lease)).toBeNull();
     // @ts-expect-error — owner authority is not exposed on the capability.
     void lease.ownerToken;
   });

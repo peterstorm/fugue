@@ -33,15 +33,15 @@ export type PersistedIdentity =
   | { readonly kind: "team"; readonly team: string; readonly label: string }
   | { readonly kind: "user"; readonly sub: string; readonly azp: string };
 
-/** A finite millisecond timestamp accepted by the HITL persistence parser. */
+/** A non-negative safe-integer epoch-millisecond timestamp. */
 declare const runTimestampMsBrand: unique symbol;
 export type RunTimestampMs = number & { readonly [runTimestampMsBrand]: "RunTimestampMs" };
 
 /** Parse an untrusted clock reading into the timestamp domain. */
 export const tryRunTimestampMs = (value: unknown): Result<RunTimestampMs, string> =>
-  typeof value === "number" && Number.isFinite(value)
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0
     ? ok(value as RunTimestampMs)
-    : err("expected a finite number");
+    : err("expected a non-negative safe integer");
 
 /**
  * A run's lifecycle status (an ADT — illegal combinations are unrepresentable).

@@ -30,9 +30,9 @@ import type { HostError } from "../../domain/host-error.js";
 import { markTeam } from "../../domain/auth.js";
 import type { TenantId } from "../../domain/tenant.js";
 import type { HitlRedisPort, LogPort } from "../../ports.js";
-import { issueRunLease, runLeaseOwnerToken } from "../ports.js";
+import { createRunLeaseAuthority } from "../ports.js";
 import { logWithoutThrowing } from "../diagnostic-logging.js";
-import type { RunLease, RunStorePort } from "../ports.js";
+import type { RunLease, RunLeaseVerifier, RunStorePort } from "../ports.js";
 import { transitionRunStatus, tryRunTimestampMs } from "../types.js";
 import type { RunMetadata, RunRecord, RunStatus, RunTimestampMs } from "../types.js";
 
@@ -95,6 +95,13 @@ const RunStatusSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("failed"), error: PersistedFrameworkErrorSchema }),
 ]);
 
+const RunTimestampMsSchema: z.ZodType<RunTimestampMs> = z.unknown().transform((value, context) => {
+  const parsed = tryRunTimestampMs(value);
+  if (parsed.ok) return parsed.value;
+  context.addIssue({ code: "custom", message: parsed.error });
+  return z.NEVER;
+});
+
 const RunMetaSchema = z.object({
   runId: brandedId(tryRunId),
   dagId: brandedId(tryDagId),
@@ -102,8 +109,8 @@ const RunMetaSchema = z.object({
   input: z.unknown(),
   identity: PersistedIdentitySchema,
   status: RunStatusSchema,
-  createdAtMs: z.number().finite().transform((value) => value as RunTimestampMs),
-  updatedAtMs: z.number().finite().transform((value) => value as RunTimestampMs),
+  createdAtMs: RunTimestampMsSchema,
+  updatedAtMs: RunTimestampMsSchema,
 });
 
 const RunCreationIntentSchema = z.discriminatedUnion("kind", [
@@ -199,14 +206,15 @@ export const createInMemoryRunLeaseAuthority = (
   newOwnerToken: () => string = () => crypto.randomUUID(),
 ): InMemoryRunLeaseAuthority => {
   const owners = new Map<RunId, string>();
+  const authority = createRunLeaseAuthority();
   return {
     acquire(runId, ownerToken = newOwnerToken(), signal = new AbortController().signal) {
       owners.set(runId, ownerToken);
-      return issueRunLease(runId, ownerToken, signal);
+      return authority.issuer.issue(runId, ownerToken, signal);
     },
     owns(lease) {
-      const ownerToken = runLeaseOwnerToken(lease);
-      return ownerToken !== null && !lease.signal.aborted && owners.get(lease.runId) === ownerToken;
+      const ownerToken = authority.verifier.ownerToken(lease);
+      return ownerToken !== null && owners.get(lease.runId) === ownerToken;
     },
   };
 };
@@ -381,13 +389,14 @@ export const createRedisRunStore = (
   redis: HitlRedisPort,
   tenant: TenantId,
   config: RedisRunStoreConfig,
+  leases: RunLeaseVerifier,
   logger?: LogPort,
 ): RunStorePort => {
   const expiry = { expiresInSec: config.ttlSec };
   const now = config.now ?? Date.now;
 
   const writeMeta = async (lease: RunLease, meta: RunMeta): Promise<Result<void, HostError>> => {
-    const ownerToken = runLeaseOwnerToken(lease);
+    const ownerToken = leases.ownerToken(lease);
     if (ownerToken === null) return leaseLost(lease);
     const encoded = serializeRunMeta(meta);
     if (!encoded.ok) return encoded;
@@ -668,7 +677,7 @@ export const createRedisRunStore = (
 
     async saveCheckpoint(lease, checkpoint) {
       if (lease.signal.aborted) return leaseLost(lease);
-      const ownerToken = runLeaseOwnerToken(lease);
+      const ownerToken = leases.ownerToken(lease);
       if (ownerToken === null) return leaseLost(lease);
       const res = await redis.setIfValue(
         leaseKey(tenant, lease.runId),
