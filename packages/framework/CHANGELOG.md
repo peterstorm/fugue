@@ -7,6 +7,17 @@ and its lockstep packages (`@fuguejs/host`, `@fuguejs/fs`, `@fuguejs/ms-graph`,
 follows [Keep a Changelog](https://keepachangelog.com/); this project is
 pre-1.0, so a minor bump may carry breaking changes.
 
+## [0.5.1] — 2026-08-24
+
+### Fixed
+
+- Release CI now installs the Redis binary required by the BullMQ integration
+  test before running the publish gate. The `v0.5.0` workflow stopped before
+  publication, so `0.5.1` is the first npm release containing the changes
+  described below.
+
+[0.5.1]: https://github.com/peterstorm/fugue/releases/tag/v0.5.1
+
 ## [0.5.0] — 2026-08-24
 
 ### Added
