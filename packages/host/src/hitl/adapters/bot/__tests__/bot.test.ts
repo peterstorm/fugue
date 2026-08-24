@@ -3,10 +3,11 @@
 // (approve/reject buttons, bot-added capture, auth), all with fakes.
 
 import { describe, it, expect, mock } from "bun:test";
-import { ok, err } from "@fuguejs/framework";
+import { nonEmptyString, ok, err } from "@fuguejs/framework";
 import type { DagId, RunId, NodeId, Result } from "@fuguejs/framework";
 import type { ReviewNotification } from "../../../types.js";
-import type { RunRecord } from "../../../types.js";
+import { tryRunTimestampMs } from "../../../types.js";
+import type { RunRecord, RunTimestampMs } from "../../../types.js";
 import type { HitlRunService } from "../../../service.js";
 import { buildReviewCard, buildReviewActivity, REVIEW_VERB } from "../card.js";
 import { createBotFrameworkNotifier } from "../notifier.js";
@@ -15,7 +16,6 @@ import type { BotConnectorPort, VerifyBotToken } from "../ports.js";
 import { handleBotActivity } from "../messages-handler.js";
 import { isTrustedBotServiceUrl } from "../trusted-host.js";
 import { markTeam } from "../../../../domain/auth.js";
-import type { Team } from "../../../../domain/auth.js";
 import type { RedisPort } from "../../../../ports.js";
 import type { HostError } from "../../../../domain/host-error.js";
 import { tenantId } from "../../../../domain/tenant.js";
@@ -36,8 +36,9 @@ const TRUSTED_SERVICE_URL = "https://smba.trafficmanager.net/amer/";
 const notification: ReviewNotification = {
   runId: "run-1" as RunId,
   dagId: "lead-desk" as DagId,
+  ownerTeam: markTeam("sales"),
   nodeId: "review" as NodeId,
-  prompt: "Approve the reply?",
+  prompt: nonEmptyString("Approve the reply?"),
   output: { reply: "Hi" },
 };
 
@@ -67,66 +68,56 @@ describe("bot card", () => {
     expect(act.type).toBe("message");
     expect(act.attachments[0]!.contentType).toBe("application/vnd.microsoft.card.adaptive");
   });
+
+  it("renders hostile outputs through the TOTAL preview fallback (SFH-2): a null-prototype output cannot throw a second time", () => {
+    // `JSON.stringify` throws on circular structures; the old catch fallback
+    // `String(output)` threw AGAIN on a null-prototype object (TypeError:
+    // cannot convert object to primitive value), escaping the notifier's
+    // Result boundary as a raw rejection. The shared total renderer must
+    // produce a preview string for every hostile output class.
+    const hostileOutput = Object.create(null) as unknown;
+    (hostileOutput as Record<string, unknown>).self = hostileOutput; // circular AND null-prototype
+    const card = buildReviewCard({ ...notification, output: hostileOutput }) as {
+      body: { text?: string }[];
+    };
+    const texts = card.body.map((b) => b.text ?? "").join("\n");
+    expect(texts).toContain("Output under review:");
+    // A text preview exists (never a throw, never an empty preview).
+    const preview = texts.split("Output under review:")[1] ?? "";
+    expect(preview.trim().length).toBeGreaterThan(0);
+  });
 });
 
 // ── notifier ─────────────────────────────────────────────────────────────────
 
-// A notifier whose `resolveDagTeam` always misses (no team routing) — exercises
-// the back-compat default-only delivery path.
-const noTeam = (): Team | undefined => undefined;
-
 describe("bot notifier", () => {
-  it("posts the review activity to the stored default conversation (unmapped team)", async () => {
-    const sent: { ref: unknown; activity: unknown }[] = [];
-    const connector: BotConnectorPort = { sendToConversation: async (ref, activity) => { sent.push({ ref, activity }); return ok(undefined); } };
-    const conversations = createInMemoryConversationStore();
-    await conversations.saveDefaultReference({ serviceUrl: TRUSTED_SERVICE_URL, conversationId: "19:abc" });
-
-    const res = await createBotFrameworkNotifier({ connector, conversations, resolveDagTeam: noTeam }).notify(notification);
-    expect(res.ok).toBe(true);
-    expect(sent).toHaveLength(1);
-    expect((sent[0]!.ref as { conversationId: string }).conversationId).toBe("19:abc");
-  });
-
-  it("errs notification-failed when the bot has no conversation reference yet", async () => {
-    const connector: BotConnectorPort = { sendToConversation: async () => ok(undefined) };
-    const res = await createBotFrameworkNotifier({ connector, conversations: createInMemoryConversationStore(), resolveDagTeam: noTeam }).notify(notification);
-    expect(res.ok).toBe(false);
-    if (!res.ok) expect(res.error.kind).toBe("notification-failed");
-  });
-
-  // ── Per-team routing (FR-041, confidentiality) ───────────────────────────────
-  it("routes to the TEAM channel (not the default) when the run's team has its own reference", async () => {
+  it("routes to the immutable owner team's channel even when a default exists", async () => {
     const sent: { ref: { conversationId: string }; activity: unknown }[] = [];
     const connector: BotConnectorPort = { sendToConversation: async (ref, activity) => { sent.push({ ref: ref as { conversationId: string }, activity }); return ok(undefined); } };
     const conversations = createInMemoryConversationStore();
-    // Both a default AND a per-team reference exist; the team reference must win.
     await conversations.saveDefaultReference({ serviceUrl: TRUSTED_SERVICE_URL, conversationId: "19:default" });
     await conversations.saveTeamReference("sales", { serviceUrl: TRUSTED_SERVICE_URL, conversationId: "19:sales" });
 
-    const res = await createBotFrameworkNotifier({ connector, conversations, resolveDagTeam: () => markTeam("sales") }).notify(notification);
+    const res = await createBotFrameworkNotifier({ connector, conversations }).notify(notification);
+
     expect(res.ok).toBe(true);
     expect(sent).toHaveLength(1);
-    // Confidentiality: the card went to the team channel, NEVER the default.
     expect(sent[0]!.ref.conversationId).toBe("19:sales");
   });
 
-  it("falls back to the default channel when the run's team has NO team reference", async () => {
-    const sent: { ref: { conversationId: string } }[] = [];
-    const connector: BotConnectorPort = { sendToConversation: async (ref) => { sent.push({ ref: ref as { conversationId: string } }); return ok(undefined); } };
+  it("fails closed instead of disclosing to the default channel when the owner has no team reference", async () => {
+    const sent: unknown[] = [];
+    const connector: BotConnectorPort = { sendToConversation: async (...args) => { sent.push(args); return ok(undefined); } };
     const conversations = createInMemoryConversationStore();
-    await conversations.saveDefaultReference({ serviceUrl: TRUSTED_SERVICE_URL, conversationId: "19:default" });
-    // Team resolves, but it has no stored reference → fall back to default.
-    const res = await createBotFrameworkNotifier({ connector, conversations, resolveDagTeam: () => markTeam("sales") }).notify(notification);
-    expect(res.ok).toBe(true);
-    expect(sent[0]!.ref.conversationId).toBe("19:default");
-  });
+    await conversations.saveDefaultReference({ serviceUrl: TRUSTED_SERVICE_URL, conversationId: "19:other-team" });
 
-  it("errs notification-failed when a team resolves but neither a team NOR a default reference exists", async () => {
-    const connector: BotConnectorPort = { sendToConversation: async () => ok(undefined) };
-    const res = await createBotFrameworkNotifier({ connector, conversations: createInMemoryConversationStore(), resolveDagTeam: () => markTeam("sales") }).notify(notification);
+    const res = await createBotFrameworkNotifier({ connector, conversations }).notify(notification);
+
     expect(res.ok).toBe(false);
-    if (!res.ok) expect(res.error.kind).toBe("notification-failed");
+    if (!res.ok && res.error.kind === "notification-failed") {
+      expect(res.error.operation).toContain("sales");
+    }
+    expect(sent).toHaveLength(0);
   });
 });
 
@@ -134,15 +125,22 @@ describe("bot notifier", () => {
 
 const okVerify: VerifyBotToken = async () => ok(undefined);
 
+const timestamp = (value: number): RunTimestampMs => {
+  const parsed = tryRunTimestampMs(value);
+  if (!parsed.ok) throw new Error(`invalid test timestamp: ${parsed.error}`);
+  return parsed.value;
+};
+
 const suspendedRecord = (overrides: Partial<RunRecord> = {}): RunRecord => ({
   runId: "run-1" as RunId,
   dagId: "lead-desk" as DagId,
+  ownerTeam: markTeam("sales"),
   input: {},
   identity: { kind: "admin" },
-  status: { kind: "suspended", nodeId: "review" as NodeId, prompt: "ok?" },
+  status: { kind: "suspended", nodeId: "review" as NodeId, prompt: nonEmptyString("ok?") },
   checkpoint: "{}",
-  createdAtMs: 1,
-  updatedAtMs: 1,
+  createdAtMs: timestamp(1),
+  updatedAtMs: timestamp(1),
   ...overrides,
 });
 
@@ -150,6 +148,7 @@ const fakeHitl = (overrides: Partial<HitlRunService> = {}): HitlRunService => ({
   startRun: async () => ok({ runId: "run-1" as RunId }),
   processRun: async () => ok(undefined),
   recordDecision: mock(async () => ok(undefined)),
+  reconcileActiveRuns: async () => ok([]),
   getRun: async () => ok(suspendedRecord()),
   ...overrides,
 });
@@ -158,13 +157,10 @@ const fakeHitl = (overrides: Partial<HitlRunService> = {}): HitlRunService => ({
 // The `lead-desk` DAG (the default suspendedRecord) is owned by team "sales".
 // Alice (aadObjectId "aad-alice") is a member of "sales" → authorized. Mallory
 // ("aad-mallory") is a member of "marketing" only → a non-member, refused.
-const DAG_TEAM = markTeam("sales");
 const APPROVER_TEAMS = { "aad-alice": ["sales"], "aad-mallory": ["marketing"] };
 // The Teams team `aadGroupId` → fugue team map (HITL_TEAM_CHANNELS).
 const TEAM_CHANNELS: Record<string, string> = { "grp-sales": "sales" };
-const resolveDagTeamOk = (): Team | undefined => DAG_TEAM;
-
-/** Build the bot deps with the FR-041 authz wiring (team resolver + approver map). */
+/** Build the bot deps with the FR-041 approver-map authz wiring. */
 const botDeps = (
   hitl: HitlRunService,
   conversations = createInMemoryConversationStore(),
@@ -173,7 +169,6 @@ const botDeps = (
   verify: okVerify,
   hitl,
   conversations,
-  resolveDagTeam: resolveDagTeamOk,
   approverTeams: APPROVER_TEAMS,
   teamChannels: TEAM_CHANNELS,
   ...overrides,
@@ -250,9 +245,33 @@ describe("bot messages handler", () => {
     // grp-sales maps to fugue team "sales" → stored under that team key.
     const team = await conversations.getTeamReference("sales");
     expect(team.ok && team.value?.conversationId).toBe("19:sales");
-    // Default is STILL stored (back-compat / fallback for unmapped teams).
+    // Default is still stored for back-compat/operations, never as a review-delivery fallback.
     const def = await conversations.getDefaultReference();
     expect(def.ok && def.value?.conversationId).toBe("19:sales");
+  });
+
+  it("returns 503 and does not acknowledge a mapped team reference that failed to persist", async () => {
+    const base = createInMemoryConversationStore();
+    const conversations = {
+      ...base,
+      async saveTeamReference(): Promise<Result<void, HostError>> {
+        return err({ kind: "redis-unavailable", operation: "save team conversation" });
+      },
+    };
+
+    const res = await handleBotActivity(
+      botDeps(fakeHitl(), conversations),
+      { authHeader: "Bearer x", activity: {
+        type: "conversationUpdate",
+        serviceUrl: TRUSTED_SERVICE_URL,
+        conversation: { id: "19:sales" },
+        channelData: { team: { aadGroupId: "grp-sales" } },
+      } },
+    );
+
+    expect(res.status).toBe(503);
+    expect(await base.getTeamReference("sales")).toEqual(ok(null));
+    expect(await base.getDefaultReference()).toEqual(ok(null));
   });
 
   it("conversationUpdate with an UNMAPPED team aadGroupId stores only the default (no team reference)", async () => {
@@ -373,7 +392,7 @@ describe("bot messages handler", () => {
     // arrives from the old card-A ("review"). Recording now would silently
     // approve gate B, which the reviewer never saw.
     const hitl = fakeHitl({
-      getRun: async () => ok(suspendedRecord({ status: { kind: "suspended", nodeId: "review-2" as NodeId, prompt: "ok?" } })),
+      getRun: async () => ok(suspendedRecord({ status: { kind: "suspended", nodeId: "review-2" as NodeId, prompt: nonEmptyString("ok?") } })),
     });
     const res = await handleBotActivity(
       botDeps(hitl),
@@ -389,7 +408,7 @@ describe("bot messages handler", () => {
     const hitl = fakeHitl();
     const res = await handleBotActivity(
       botDeps(hitl),
-      // "../secret" contains '/' and '.', neither permitted by ID_REGEX.
+      // "../secret" contains '/' and '.', neither permitted by ID_PATTERN.
       { authHeader: "Bearer x", activity: invokeActivity({ verb: REVIEW_VERB, runId: "../secret", nodeId: "review", decision: "approve" }) },
     );
     expect(res.status).toBe(200);
@@ -464,24 +483,26 @@ describe("bot messages handler — approver authorization (FR-041, SC-006)", () 
     expect((hitl.recordDecision as ReturnType<typeof mock>).mock.calls).toHaveLength(0);
   });
 
-  it("a run whose DAG is no longer registered fails closed (team unresolvable) — no record", async () => {
-    const hitl = fakeHitl();
+  it("DAG removal does not revoke the persisted owner's authorized approver", async () => {
+    const hitl = fakeHitl({
+      getRun: async () => ok(suspendedRecord({ dagId: "removed-dag" as DagId })),
+    });
     const res = await handleBotActivity(
-      // resolveDagTeam returns undefined → cannot establish the run's team.
-      botDeps(hitl, undefined, { resolveDagTeam: () => undefined }),
+      botDeps(hitl),
       { authHeader: "Bearer x", activity: invokeActivity(approve, { name: "Alice", aadObjectId: "aad-alice" }) },
     );
     expect(res.status).toBe(200);
-    expect((res.body as { type: string; value: string }).value).toBe("You are not authorized to act on this review.");
-    expect((hitl.recordDecision as ReturnType<typeof mock>).mock.calls).toHaveLength(0);
+    expect((hitl.recordDecision as ReturnType<typeof mock>).mock.calls).toHaveLength(1);
   });
 
   it("a member of a DIFFERENT team than the run's is refused (cross-team isolation)", async () => {
     // The run is owned by "marketing"; Alice ∈ "sales" only. Even though Alice is
     // a known approver, she is not a member of THIS run's team → refused.
-    const hitl = fakeHitl();
+    const hitl = fakeHitl({
+      getRun: async () => ok(suspendedRecord({ ownerTeam: markTeam("marketing") })),
+    });
     const res = await handleBotActivity(
-      botDeps(hitl, undefined, { resolveDagTeam: () => markTeam("marketing") }),
+      botDeps(hitl),
       { authHeader: "Bearer x", activity: invokeActivity(approve, { name: "Alice", aadObjectId: "aad-alice" }) },
     );
     expect(res.status).toBe(200);
@@ -509,7 +530,7 @@ describe("bot messages handler — approver authorization (FR-041, SC-006)", () 
   });
 
   it("oracle-close: an unauthorized clicker probing a MOVED-ON run gets the generic refusal, not 'moved on'", async () => {
-    const hitl = fakeHitl({ getRun: async () => ok(suspendedRecord({ status: { kind: "suspended", nodeId: "review-2" as NodeId, prompt: "ok?" } })) });
+    const hitl = fakeHitl({ getRun: async () => ok(suspendedRecord({ status: { kind: "suspended", nodeId: "review-2" as NodeId, prompt: nonEmptyString("ok?") } })) });
     const res = await handleBotActivity(
       botDeps(hitl),
       { authHeader: "Bearer x", activity: invokeActivity(approve, { name: "Mallory", aadObjectId: "aad-mallory" }) },
@@ -576,6 +597,7 @@ const fakeRedis = (): RedisPort & { _set: (k: string, v: string) => void } => {
     async del(k) { const had = m.delete(k); return ok(had ? 1 : 0); },
     async scan() { return ok({ cursor: "0", keys: [...m.keys()] }); },
     async setNx(k, v) { if (m.has(k)) return ok(false); m.set(k, v); return ok(true); },
+    async compareAndDelete(k, expected) { if (m.get(k) !== expected) return ok(false); m.delete(k); return ok(true); },
     async sAdd() { return ok(1); },
     async sRem() { return ok(1); },
     async sMembers() { return ok([]); },
@@ -622,7 +644,7 @@ describe("createRedisConversationStore", () => {
   // ── Per-team conversation routing (FR-041) ──────────────────────────────────
   it("round-trips PER-TEAM references under distinct keys; one team's ref does not leak to another", async () => {
     const store = createRedisConversationStore(fakeRedis(), TENANT);
-    // A team with no reference returns null (caller falls back to default).
+    // A team with no reference returns null; the notifier treats that as no route and fails closed.
     expect(await store.getTeamReference("sales")).toEqual(ok(null));
 
     await store.saveTeamReference("sales", { serviceUrl: TRUSTED_SERVICE_URL, conversationId: "19:sales" });

@@ -117,6 +117,19 @@ describe("tryCatch", () => {
     const r = tryCatch(() => 5, () => "never");
     expect(r).toEqual({ ok: true, value: 5 });
   });
+
+  it("totally wraps hostile thrown values with the default Error mapping", () => {
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+
+    expect(() => tryCatch(() => { throw revoked.proxy; })).not.toThrow();
+    const r = tryCatch(() => { throw revoked.proxy; });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error).toBeInstanceOf(Error);
+      expect(r.error.message).toBe("<unprintable error>");
+    }
+  });
 });
 
 describe("tryCatchAsync", () => {
@@ -143,6 +156,23 @@ describe("tryCatchAsync", () => {
       (e) => ({ code: "FAIL", msg: (e as Error).message }),
     );
     expect(r).toEqual({ ok: false, error: { code: "FAIL", msg: "raw" } });
+  });
+
+  it("totally wraps hostile rejected values with the default Error mapping", async () => {
+    const hostile = Object.defineProperties({}, {
+      message: { get: () => { throw new Error("message unavailable"); } },
+      toString: { get: () => { throw new Error("toString unavailable"); } },
+      [Symbol.toPrimitive]: {
+        get: () => { throw new Error("Symbol.toPrimitive unavailable"); },
+      },
+    });
+
+    const r = await tryCatchAsync(async () => { throw hostile; });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error).toBeInstanceOf(Error);
+      expect(r.error.message).toBe("[object Object]");
+    }
   });
 });
 

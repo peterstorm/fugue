@@ -4,7 +4,7 @@ import { z } from "zod";
 import { OpenAILlmClient } from "../llm/openai-client.js";
 import type { ToolDef } from "../types/llm.js";
 import { tool } from "../llm/tools.js";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import { N } from "./_id-helpers.js";
 
 // ---------------------------------------------------------------------------
 // fetch stub

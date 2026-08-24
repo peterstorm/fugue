@@ -10,8 +10,10 @@
  * - Connection pool lifecycle management via CapabilityHandle
  * - Health check (SELECT 1 FROM DUAL) for degraded-state detection
  *
- * **Read-only.** The capability exposes `query`/`queryOne`/`queryRaw` only —
- * there is no write/exec surface (FR-032).
+ * **Read-only.** The capability accepts only `SELECT`/`WITH` statement shapes
+ * through `query`/`queryOne`/`queryRaw` (FR-032). Production database grants
+ * remain the authoritative defense against side effects hidden in stored
+ * functions or other database-owned code.
  *
  * The driver is loaded in **thin mode** (pure-JS Oracle Net over TCP — no
  * Instant Client, no native addon, musl/alpine-safe) and lazy-loaded via
@@ -62,7 +64,7 @@
 import { createRequire } from "node:module";
 import type { z } from "zod";
 import type { Result, FrameworkError, CapabilityHandle } from "@fuguejs/framework";
-import { ok, err, nodeId } from "@fuguejs/framework";
+import { ok, err, nodeId, safeErrorMessage } from "@fuguejs/framework";
 
 // ---------------------------------------------------------------------------
 // Capability Interface
@@ -72,6 +74,77 @@ import { ok, err, nodeId } from "@fuguejs/framework";
 const ORACLE_NODE_ID = nodeId("oracle-capability");
 
 /**
+ * The row-validation failure this adapter returns when a driver row does not
+ * match the caller's schema.
+ *
+ * ONE constructor for all four sites (production + fake x query/queryOne). The
+ * classification is the reason to share it: a schema mismatch is `non-retriable`
+ * — the same query returns the same non-conforming row, so retrying only repeats
+ * the round trip. A copy that omitted `retriability` would fall back to retriable
+ * and turn a deterministic contract violation into a retry storm against the
+ * database.
+ */
+const rowValidationError = (label: string, detail: string): FrameworkError =>
+  oracleCrash(label + ": " + detail);
+
+declare const __oracleReadSqlBrand: unique symbol;
+export type OracleReadSql = string & { readonly [__oracleReadSqlBrand]: void };
+
+const firstOracleStatementToken = (sql: string): string | undefined => {
+  let cursor = 0;
+  while (cursor < sql.length) {
+    const rest = sql.slice(cursor);
+    const whitespace = /^\s+/.exec(rest);
+    if (whitespace !== null) {
+      cursor += whitespace[0].length;
+      continue;
+    }
+    if (rest.startsWith("--")) {
+      const newline = rest.indexOf("\n");
+      if (newline === -1) return undefined;
+      cursor += newline + 1;
+      continue;
+    }
+    if (rest.startsWith("/*")) {
+      const end = rest.indexOf("*/", 2);
+      if (end === -1) return undefined;
+      cursor += end + 2;
+      continue;
+    }
+    return /^[A-Za-z]+/.exec(rest)?.[0].toUpperCase();
+  }
+  return undefined;
+};
+
+/**
+ * THE one non-retriable `node-crash` for this adapter. Every crash it reports is
+ * deterministic — a malformed statement, a schema mismatch, an Oracle error that
+ * is not in the transient set — so `retriability` is fixed here rather than
+ * repeated at each site, where an omission would silently fall back to retriable
+ * and turn a permanent failure into a retry storm against the database.
+ */
+const oracleCrash = (message: string): FrameworkError => ({
+  kind: "node-crash",
+  nodeId: ORACLE_NODE_ID,
+  message,
+  retriability: "non-retriable",
+});
+
+/** Parse caller SQL into the adapter's read-only statement domain. */
+export const parseOracleReadSql = (sql: string): Result<OracleReadSql, FrameworkError> => {
+  if (typeof sql !== "string") {
+    return err(oracleCrash("Oracle capability accepts only string SELECT/WITH read statements"));
+  }
+  const token = firstOracleStatementToken(sql);
+  if (token === "SELECT" || token === "WITH") return ok(sql as OracleReadSql);
+  return err(
+    oracleCrash(
+      `Oracle capability accepts only SELECT/WITH read statements; received ${token ?? "no complete statement token"}`,
+    ),
+  );
+};
+
+/**
  * Oracle capability interface — what nodes see on `ctx.oracle`.
  *
  * All methods return `Result` — no exceptions escape. Query results are
@@ -79,7 +152,8 @@ const ORACLE_NODE_ID = nodeId("oracle-capability");
  * and supplied as `Record<string, unknown>` — the one API divergence from
  * `@fuguejs/pg`'s positional `$1` / `unknown[]`.
  *
- * Read-only: there is intentionally no `execute`/write method.
+ * Read-only: there is no public `execute`/write method, and all three query
+ * methods reject SQL whose first statement token is not `SELECT` or `WITH`.
  */
 export interface OracleCapability {
   /**
@@ -89,8 +163,9 @@ export interface OracleCapability {
   query<T>(schema: z.ZodType<T>, sql: string, binds?: Record<string, unknown>): Promise<Result<T[], FrameworkError>>;
 
   /**
-   * Execute a query expecting at most one row. Returns `null` if no rows match.
-   * Validates the row against the schema if present. Binds `:name` placeholders.
+   * Execute a query and return the first row, or `null` if no rows match.
+   * Validates that first row against the schema if present; additional rows are ignored.
+   * Binds `:name` placeholders.
    */
   queryOne<T>(schema: z.ZodType<T>, sql: string, binds?: Record<string, unknown>): Promise<Result<T | null, FrameworkError>>;
 
@@ -109,7 +184,7 @@ export interface OracleCapability {
 
 declare module "@fuguejs/framework" {
   interface CapabilityRegistry {
-    /** Oracle database capability (read-only). Access via `ctx.oracle` in nodes. */
+    /** Oracle database capability (SELECT/WITH statements only). Access via `ctx.oracle` in nodes. */
     oracle: OracleCapability;
   }
 }
@@ -122,7 +197,7 @@ declare module "@fuguejs/framework" {
  * Configuration for the Oracle adapter. Credentials come from env config
  * only — never hardcoded (FR-040) and never logged (FR-041).
  */
-export interface OracleAdapterConfig {
+interface OracleAdapterConfig {
   /** Easy-connect string: `HOST:PORT/SERVICE`. */
   readonly connectString: string;
   /** Oracle schema/user. */
@@ -165,11 +240,15 @@ const ORA_CODE_GLOBAL = /ORA-\d{5}/g;
  */
 const oraCodeFromErrorNum = (error: unknown): string | undefined => {
   if (error == null || typeof error !== "object") return undefined;
-  const errorNum = (error as { readonly errorNum?: unknown }).errorNum;
-  if (typeof errorNum !== "number" || !Number.isInteger(errorNum) || errorNum < 0) {
+  try {
+    const errorNum = (error as { readonly errorNum?: unknown }).errorNum;
+    if (typeof errorNum !== "number" || !Number.isInteger(errorNum) || errorNum < 0) {
+      return undefined;
+    }
+    return `ORA-${String(errorNum).padStart(5, "0")}`;
+  } catch {
     return undefined;
   }
-  return `ORA-${String(errorNum).padStart(5, "0")}`;
 };
 
 /**
@@ -206,6 +285,18 @@ export const stripCredentials = (message: string): string =>
     // key=value password fields (password=, pwd=, user=, uid=).
     .replace(/\b(password|pwd|user|uid)\s*=\s*[^;,\s)]+/gi, "$1=***");
 
+const oracleDiagnostic = (error: unknown): string =>
+  stripCredentials(safeErrorMessage(error));
+
+const warnOracleWithoutThrowing = (context: string, error: unknown): void => {
+  const diagnostic = oracleDiagnostic(error);
+  try {
+    console.warn(`[oracle] ${context}: ${diagnostic}`);
+  } catch {
+    // Diagnostics are secondary to the already-decided query/probe outcome.
+  }
+};
+
 /**
  * Map an `oracledb` error to a `FrameworkError`. Connection-class ORA- codes
  * (`ORA-03113/03114/12541/12170/12514`) are `transient` (retriable);
@@ -214,8 +305,7 @@ export const stripCredentials = (message: string): string =>
  * testing — this classification drives retry behavior.
  */
 export const mapOracleError = (error: unknown, sql: string): FrameworkError => {
-  const rawMessage = error instanceof Error ? error.message : String(error);
-  const message = stripCredentials(rawMessage);
+  const message = stripCredentials(safeErrorMessage(error));
 
   // Prefer the driver's structured numeric `errorNum` when present (it is the
   // unambiguous code), then fall back to scanning the message. Oracle commonly
@@ -231,12 +321,7 @@ export const mapOracleError = (error: unknown, sql: string): FrameworkError => {
     return { kind: "transient", nodeId: ORACLE_NODE_ID, message: `Oracle transient: ${message} (${transientCode})` };
   }
 
-  return {
-    kind: "node-crash",
-    nodeId: ORACLE_NODE_ID,
-    message: `Oracle error: ${message} [sql: ${stripCredentials(sql).slice(0, 100)}]`,
-    retriability: "non-retriable",
-  };
+  return oracleCrash(`Oracle error: ${message} [sql: ${stripCredentials(sql).slice(0, 100)}]`);
 };
 
 /**
@@ -254,6 +339,42 @@ export interface OracleQueryable {
 }
 
 /**
+ * Validate every row against the caller's schema, failing on the FIRST bad row.
+ *
+ * ONE encoding (round-38 cs-24) of the row-validation loop the real client and
+ * the fake each carried; they differ only in the label their validation failure
+ * names, so a schema-rejection reads the same shape from either.
+ */
+const validateRows = <T,>(
+  schema: z.ZodType<T>,
+  rows: readonly unknown[],
+  label: string,
+): Result<T[], FrameworkError> => {
+  const validated: T[] = [];
+  for (const row of rows) {
+    const parsed = schema.safeParse(row);
+    if (!parsed.success) {
+      return err(rowValidationError(label, parsed.error.message));
+    }
+    validated.push(parsed.data);
+  }
+  return ok(validated);
+};
+
+/** `validateRows` for the at-most-one-row shape: no rows reads as `ok(null)`. */
+const validateFirstRow = <T,>(
+  schema: z.ZodType<T>,
+  rows: readonly unknown[],
+  label: string,
+): Result<T | null, FrameworkError> => {
+  if (rows.length === 0) return ok(null);
+  const parsed = schema.safeParse(rows[0]);
+  return parsed.success
+    ? ok(parsed.data)
+    : err(rowValidationError(label, parsed.error.message));
+};
+
+/**
  * Build an `OracleCapability` over an injected queryable seam. Exported for
  * testing — `createOracleAdapter` is the production entry point that owns pool
  * construction and lifecycle.
@@ -261,59 +382,40 @@ export interface OracleQueryable {
  * `outFormat` is supplied per execute by the seam itself (the adapter sets
  * `OUT_FORMAT_OBJECT`); the client passes binds through verbatim.
  */
-export const createOracleClient = (queryable: OracleQueryable): OracleCapability => ({
-  query: async <T,>(schema: z.ZodType<T>, sql: string, binds?: Record<string, unknown>): Promise<Result<T[], FrameworkError>> => {
+export const createOracleClient = (queryable: OracleQueryable): OracleCapability => {
+  /**
+   * Parse the statement as a READ, execute it, and project its rows — mapping
+   * ANY thrown driver error onto the typed `mapOracleError` failure. ONE
+   * encoding of the parse-SQL / execute / catch shape all three methods need;
+   * an arm that skipped the read-only parse would let a write statement through
+   * a read-only capability.
+   */
+  const run = async <T,>(
+    sql: string,
+    binds: Record<string, unknown> | undefined,
+    project: (rows: readonly unknown[]) => Result<T, FrameworkError>,
+  ): Promise<Result<T, FrameworkError>> => {
+    const readSql = parseOracleReadSql(sql);
+    if (!readSql.ok) return readSql;
     try {
-      const result = await queryable.execute(sql, binds ?? {});
-      const rows = result.rows ?? [];
-      const validated: T[] = [];
-      for (const row of rows) {
-        const parsed = schema.safeParse(row);
-        if (!parsed.success) {
-          return err({
-            kind: "node-crash",
-            nodeId: ORACLE_NODE_ID,
-            message: `Row validation failed: ${parsed.error.message}`,
-            retriability: "non-retriable",
-          });
-        }
-        validated.push(parsed.data);
-      }
-      return ok(validated);
+      const result = await queryable.execute(readSql.value, binds ?? {});
+      return project(result.rows ?? []);
     } catch (error) {
       return err(mapOracleError(error, sql));
     }
-  },
+  };
 
-  queryOne: async <T,>(schema: z.ZodType<T>, sql: string, binds?: Record<string, unknown>): Promise<Result<T | null, FrameworkError>> => {
-    try {
-      const result = await queryable.execute(sql, binds ?? {});
-      const rows = result.rows ?? [];
-      if (rows.length === 0) return ok(null);
-      const parsed = schema.safeParse(rows[0]);
-      if (!parsed.success) {
-        return err({
-          kind: "node-crash",
-          nodeId: ORACLE_NODE_ID,
-          message: `Row validation failed: ${parsed.error.message}`,
-          retriability: "non-retriable",
-        });
-      }
-      return ok(parsed.data);
-    } catch (error) {
-      return err(mapOracleError(error, sql));
-    }
-  },
+  return {
+    query: <T,>(schema: z.ZodType<T>, sql: string, binds?: Record<string, unknown>): Promise<Result<T[], FrameworkError>> =>
+      run(sql, binds, (rows) => validateRows(schema, rows, "Row validation failed")),
 
-  queryRaw: async (sql: string, binds?: Record<string, unknown>): Promise<Result<unknown[], FrameworkError>> => {
-    try {
-      const result = await queryable.execute(sql, binds ?? {});
-      return ok(result.rows ?? []);
-    } catch (error) {
-      return err(mapOracleError(error, sql));
-    }
-  },
-});
+    queryOne: <T,>(schema: z.ZodType<T>, sql: string, binds?: Record<string, unknown>): Promise<Result<T | null, FrameworkError>> =>
+      run(sql, binds, (rows) => validateFirstRow(schema, rows, "Row validation failed")),
+
+    queryRaw: (sql: string, binds?: Record<string, unknown>): Promise<Result<unknown[], FrameworkError>> =>
+      run(sql, binds, (rows) => ok([...rows])),
+  };
+};
 
 // ---------------------------------------------------------------------------
 // Adapter Factory
@@ -457,17 +559,41 @@ export const createOracleAdapter = (config: OracleAdapterConfig): CapabilityHand
   };
 
   // Production queryable: acquire a pooled connection, execute with
-  // OUT_FORMAT_OBJECT, always release the connection.
+  // OUT_FORMAT_OBJECT, always release the connection. A release failure must
+  // never mask a SUCCEEDED statement (mirror the connect() path below): a
+  // completed query returning Err would read as a retriable failure and a
+  // write DML re-run becomes a double-execution hazard — the exact class the
+  // rest of the system works to prevent. The close failure is reported
+  // alongside the primary outcome (credential-stripped warn), never instead
+  // of it. A failing execute still releases, but the statement error stays
+  // primary.
   const queryable: OracleQueryable = {
     execute: async (sql, binds, opts) => {
       const pool = await getPool();
       const conn = await pool.getConnection();
       try {
-        return await conn.execute(sql, binds ?? {}, {
+        const result = await conn.execute(sql, binds ?? {}, {
           outFormat: opts?.outFormat ?? oracledb.OUT_FORMAT_OBJECT,
         });
-      } finally {
-        await conn.close();
+        try {
+          await conn.close();
+        } catch (closeError) {
+          warnOracleWithoutThrowing("query succeeded but connection release failed", closeError);
+        }
+        return result;
+      } catch (e) {
+        try {
+          await conn.close();
+        } catch (closeError) {
+          // Preserve the statement error as the caller-visible outcome, but do
+          // not erase evidence that the pooled connection also failed to
+          // release (a repeated release fault can exhaust the pool).
+          warnOracleWithoutThrowing(
+            "query failed and connection release also failed; preserving statement error",
+            closeError,
+          );
+        }
+        throw e;
       }
     },
   };
@@ -486,24 +612,30 @@ export const createOracleAdapter = (config: OracleAdapterConfig): CapabilityHand
       // through stripCredentials, releasing the connection in finally (FR-041 /
       // NFR-020 / SC-008).
       let conn: OracleConnection | undefined;
+      let primaryFailure: Error | undefined;
       try {
         const pool = await getPool();
         conn = await pool.getConnection();
         await conn.execute("SELECT 1 FROM DUAL", {}, { outFormat: oracledb.OUT_FORMAT_OBJECT });
-      } catch (e) {
-        throw new Error(stripCredentials(e instanceof Error ? e.message : String(e)));
-      } finally {
-        // The connection is only acquired if getConnection() resolved; release it
-        // even when SELECT 1 throws. close() failures are swallowed — the
-        // original (stripped) error is the one worth surfacing.
-        if (conn != null) {
-          try {
-            await conn.close();
-          } catch {
-            // ignore: a release failure must not mask the connect error.
+      } catch (error) {
+        primaryFailure = new Error(oracleDiagnostic(error));
+      }
+
+      if (conn !== undefined) {
+        try {
+          await conn.close();
+        } catch (releaseError) {
+          if (primaryFailure !== undefined) {
+            warnOracleWithoutThrowing(
+              "connect validation failed and connection release also failed; preserving validation error",
+              releaseError,
+            );
+          } else {
+            throw new Error(`Oracle connect validation release failed: ${oracleDiagnostic(releaseError)}`);
           }
         }
       }
+      if (primaryFailure !== undefined) throw primaryFailure;
     },
 
     close: async () => {
@@ -526,27 +658,41 @@ export const healthCheckWithTimeout = async (
   timeoutMs: number,
 ): Promise<Result<void, string>> => {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  // Set ONLY by the timer callback, so it is true exactly when the timeout won
+  // the race. The late-failure warning below is gated on it — an execute that
+  // simply rejects fast never timed out, and reporting it as a "late probe
+  // failure after timeout" would be a false claim on top of the real error the
+  // `catch` already returns. Mirrors `@fuguejs/pg`'s twin.
+  let timedOut = false;
   // Hold the execute promise so that, if the timeout wins the race, we can
   // still attach a catch to the (now losing) in-flight execute. Without this a
   // later rejection — a hung connection eventually erroring, or the production
   // seam's `conn.close()` throwing in `finally` — becomes a process-level
   // unhandledRejection AFTER we already returned Err(timeout). Swallow it with
-  // intent: the timeout result has already been decided.
+  // intent: the timeout result has already been decided — but do not let the
+  // late cause VANISH: log it (credential-stripped, like the rest of this
+  // file) so the operator can see WHY the probe exceeded the budget (ORA-03113
+  // / ORA-03135, pool exhaustion, …) instead of guessing. Diagnostics must
+  // never throw: a failing log must not replace the decided verdict.
   const executePromise = queryable.execute("SELECT 1 FROM DUAL", {});
-  executePromise.catch(() => {});
+  executePromise.catch((lateError: unknown) => {
+    if (timedOut) {
+      warnOracleWithoutThrowing("health check: late probe failure after timeout", lateError);
+    }
+  });
   try {
     await Promise.race([
       executePromise,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error(`health check timed out after ${timeoutMs}ms`)),
-          timeoutMs,
-        );
+        timer = setTimeout(() => {
+          timedOut = true;
+          reject(new Error(`health check timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
       }),
     ]);
     return ok(undefined);
   } catch (e) {
-    return err(stripCredentials(e instanceof Error ? e.message : String(e)));
+    return err(oracleDiagnostic(e));
   } finally {
     if (timer != null) clearTimeout(timer);
   }
@@ -583,7 +729,7 @@ export const healthCheckWithTimeout = async (
  * });
  * ```
  */
-export interface FakeOracleRoute {
+interface FakeOracleRoute {
   readonly rows?: unknown[];
   /**
    * When `true`, this route matches any SQL that `startsWith` its key (longest
@@ -623,33 +769,26 @@ export const createFakeOracleCapability = (
 
   const client: OracleCapability = {
     query: async <T,>(schema: z.ZodType<T>, sql: string, _binds?: Record<string, unknown>): Promise<Result<T[], FrameworkError>> => {
-      const route = matchRoute(sql);
+      const readSql = parseOracleReadSql(sql);
+      if (!readSql.ok) return readSql;
+      const route = matchRoute(readSql.value);
       if (!route || !route.rows) {
         return ok([] as T[]);
       }
-      const validated: T[] = [];
-      for (const row of route.rows) {
-        const parsed = schema.safeParse(row);
-        if (!parsed.success) {
-          return err({ kind: "node-crash", nodeId: ORACLE_NODE_ID, message: `Fake row validation: ${parsed.error.message}`, retriability: "non-retriable" });
-        }
-        validated.push(parsed.data);
-      }
-      return ok(validated);
+      return validateRows(schema, route.rows, "Fake row validation");
     },
 
     queryOne: async <T,>(schema: z.ZodType<T>, sql: string, _binds?: Record<string, unknown>): Promise<Result<T | null, FrameworkError>> => {
-      const route = matchRoute(sql);
-      if (!route || !route.rows || route.rows.length === 0) return ok(null);
-      const parsed = schema.safeParse(route.rows[0]);
-      if (!parsed.success) {
-        return err({ kind: "node-crash", nodeId: ORACLE_NODE_ID, message: `Fake row validation: ${parsed.error.message}`, retriability: "non-retriable" });
-      }
-      return ok(parsed.data);
+      const readSql = parseOracleReadSql(sql);
+      if (!readSql.ok) return readSql;
+      const route = matchRoute(readSql.value);
+      return validateFirstRow(schema, route?.rows ?? [], "Fake row validation");
     },
 
     queryRaw: async (sql: string, _binds?: Record<string, unknown>): Promise<Result<unknown[], FrameworkError>> => {
-      const route = matchRoute(sql);
+      const readSql = parseOracleReadSql(sql);
+      if (!readSql.ok) return readSql;
+      const route = matchRoute(readSql.value);
       return ok(route?.rows ?? []);
     },
   };

@@ -3,9 +3,10 @@
 //        approve / approve-with-edit / reject / reroute-back / reroute-forward-invalid / abort
 
 import { describe, it, expect } from "bun:test";
-import type { RunId, NodeId, DagId } from "../types/ids.js";
+import type { NodeId } from "../types/ids.js";
 import { DAG_INPUT } from "../types/ids.js";
-import { N, R, D, nodeMap, nodeSet, NO_SIDE_EFFECTS, NO_CONFIDENCE } from "./_id-helpers.js";
+import { N, NO_SIDE_EFFECTS, NO_CONFIDENCE } from "./_id-helpers.js";
+import { FE, RN, witness } from "./_freshness-helpers.js";
 import { dagTransition } from "../dag-runtime/transition.js";
 import { computeOutgoingByNode, computeUnconditionalAdj } from "../dag-runtime/topology.js";
 import {
@@ -25,6 +26,7 @@ import { type NodeOverride, brandedOverride } from "./_node-override.js";
 import type { FrameworkError } from "../types/errors.js";
 import { defineDag, defineDagFromArray } from "../executor/define-dag.js";
 import { z } from "zod";
+import { nonEmptyString } from "../types/non-empty-string.js";
 
 // ---------------------------------------------------------------------------
 // Helpers / fixtures
@@ -97,11 +99,19 @@ const makeDag = (overrides: MakeDagOverrides = {}): DagDef => {
   });
 };
 
+/** Build the retry policy projection used by runtime-context fixtures. */
+const retryConfigsFrom = (dag: DagDef): RetryConfigs =>
+  new Map(
+    dag.nodes
+      .filter((n) => n.retry)
+      .map((n) => [n.id, { backoffMs: n.retry!.backoffMs ?? [1000, 2000, 4000], jitterRatio: n.retry!.jitterRatio ?? 0.2 }] as const),
+  );
+
 const makeCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext => {
   const dag = overrides.dag ?? makeDag();
   return {
     dag,
-    waves: [dag.nodes.map(n => n.id)].length ? [[N("a")], [N("b")], [N("c")]] : [],
+    waves: [[N("a")], [N("b")], [N("c")]],
     outputs: new Map(),
     retries: new Map(),
     initialInput: null,
@@ -110,11 +120,7 @@ const makeCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext 
     unconditionalAdj: computeUnconditionalAdj(dag),
     incomingByNode: new Map(),
     nodeById: new Map(dag.nodes.map((n) => [n.id, n])),
-    retryConfigs: new Map(
-      dag.nodes
-        .filter((n) => n.retry)
-        .map((n) => [n.id, { backoffMs: n.retry!.backoffMs ?? [1000, 2000, 4000], jitterRatio: n.retry!.jitterRatio ?? 0.2 }] as const),
-    ),
+    retryConfigs: retryConfigsFrom(dag),
     outputNodeId: dag.outputNodeId,
     defaultRetryLimit: dag.defaultRetryLimit,
     retryLimits: dag.retryLimits,
@@ -123,6 +129,9 @@ const makeCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext 
     edges: dag.edges,
     confidenceByNode: new Map(),
     ...overrides,
+    priorWitnesses: overrides.priorWitnesses ?? new Map(),
+    freshnessCompletedNodeIds: overrides.freshnessCompletedNodeIds ?? new Set(),
+    freshnessExecutionEpoch: overrides.freshnessExecutionEpoch ?? FE(),
   };
 };
 
@@ -147,7 +156,7 @@ const awaitingHuman = (
   // @ts-expect-error — branded ID test fixture
   nodeId,
   output: { result: "some-output" },
-  prompt: "Please review",
+  prompt: nonEmptyString("Please review"),
   // @ts-expect-error — branded ID test fixture
   pendingReviews,
   wave,
@@ -228,6 +237,46 @@ describe("dagTransition — running", () => {
     const result = dagTransition(running(0), event, ctx);
     expect(result.state).toEqual({ kind: "running", wave: 1 });
     expect(result.context.outputs.get(N("a"))).toBe(42);
+  });
+
+  it("folds the executor's latest-witness projection into durable context", () => {
+    const ctx = makeCtx();
+    const priorWitnesses = new Map([[
+      "postgres:orders",
+      witness("version", RN("postgres:orders"), "42"),
+    ]]);
+    const event: DagEvent = {
+      type: "wave-done",
+      wave: 0,
+      outputs: new Map([[N("a"), 42]]),
+      routingDecisions: new Map(),
+      priorWitnesses,
+    };
+
+    const result = dagTransition(running(0), event, ctx);
+
+    expect(result.context.priorWitnesses).not.toBe(priorWitnesses);
+    expect(result.context.priorWitnesses.get("postgres:orders")).toEqual(
+      witness("version", RN("postgres:orders"), "42"),
+    );
+  });
+
+  it("folds freshness-completion proof into an immutable durable set", () => {
+    const ctx = makeCtx({ freshnessCompletedNodeIds: new Set([N("a")]) });
+    const freshnessCompletedNodeIds = new Set([N("a"), N("b")]);
+    const event: DagEvent = {
+      type: "wave-done",
+      wave: 0,
+      outputs: new Map([[N("a"), 42]]),
+      routingDecisions: new Map(),
+      freshnessCompletedNodeIds,
+    };
+
+    const result = dagTransition(running(0), event, ctx);
+
+    expect(result.context.freshnessCompletedNodeIds).not.toBe(freshnessCompletedNodeIds);
+    expect(result.context.freshnessCompletedNodeIds).toEqual(new Set([N("a"), N("b")]));
+    expect(ctx.freshnessCompletedNodeIds).toEqual(new Set([N("a")]));
   });
 
   it("wave-done on last wave => succeeded", () => {
@@ -341,6 +390,35 @@ describe("dagTransition — retrying", () => {
     if (result.state.kind === "retrying") {
       expect(result.state.attempt).toBe(2);
     }
+  });
+
+  it("node-failed during retrying folds partial freshness progress before retry policy", () => {
+    const dag = makeDag({ defaultRetryLimit: 2 });
+    const originalWitnesses = new Map([[
+      "postgres:orders",
+      witness("version", RN("postgres:orders"), "41"),
+    ]]);
+    const ctx = makeCtx({ dag, priorWitnesses: originalWitnesses });
+    const phase: DagPhase = { kind: "retrying", wave: 0, nodeId: N("a"), attempt: 1, nextDelayMs: 1000 };
+    const event: DagEvent = {
+      type: "node-failed",
+      nodeId: N("a"),
+      error: nodeFailedError,
+      priorWitnesses: new Map([[
+        "postgres:orders",
+        witness("version", RN("postgres:orders"), "42"),
+      ]]),
+      freshnessCompletedNodeIds: new Set([N("b")]),
+    };
+
+    const result = dagTransition(phase, event, ctx);
+
+    expect(result.state.kind).toBe("retrying");
+    expect(result.context.priorWitnesses.get("postgres:orders")?.value).toBe("42");
+    expect(result.context.priorWitnesses).not.toBe(event.priorWitnesses);
+    expect(result.context.freshnessCompletedNodeIds).toEqual(new Set([N("b")]));
+    expect(result.context.freshnessCompletedNodeIds).not.toBe(event.freshnessCompletedNodeIds);
+    expect(originalWitnesses.get("postgres:orders")?.value).toBe("41");
   });
 
   it("node-failed during retrying when exhausted => failed", () => {
@@ -510,6 +588,7 @@ describe("dagTransition — reroute backward (FR-031)", () => {
     expect(result.context.outputs.has(N("c"))).toBe(false);
     // Wave 0 outputs preserved
     expect(result.context.outputs.get(N("a"))).toBe(N("a-out"));
+    expect(Number(result.context.freshnessExecutionEpoch)).toBe(1);
   });
 
   it("reroute to current wave => allowed (FR-031 — same wave counts as backward)", () => {
@@ -522,6 +601,7 @@ describe("dagTransition — reroute backward (FR-031)", () => {
     const event: DagEvent = { type: "human-responded", nodeId: "b" as NodeId, action, rerouteActiveSet: new Set<NodeId>() };
     const result = dagTransition(phase, event, ctx);
     expect(result.state).toMatchObject({ kind: "running", wave: 1 });
+    expect(Number(result.context.freshnessExecutionEpoch)).toBe(1);
   });
 });
 
@@ -761,17 +841,14 @@ describe("advanceToNextWave", () => {
   });
 
   it("fails when outputNodeId unset and last wave is empty (F3)", () => {
-    // waves has an empty last entry
-    // @ts-expect-error — branded ID test fixture
-    const ctx = makeCtx({ waves: [[] as any] as unknown as readonly (readonly string[])[], outputs: new Map() });
-    const result = advanceToNextWave(-1, ctx); // nextWave = 0 >= waves.length=1? No. Need to reach terminal.
-    // Actually use makeCtx with waves so that nextWave >= waves.length
-    const ctx2 = makeCtx({ waves: [[]], outputs: new Map() });
-    const result2 = advanceToNextWave(0, ctx2);
-    // nextWave=1 >= waves.length=1 => terminal; last wave is [], so should fail
-    expect(result2.state.kind).toBe("failed");
-    if (result2.state.kind === "failed") {
-      expect(result2.state.error.kind).toBe("node-crash");
+    // Advancing FROM wave 0 makes nextWave (1) >= waves.length (1), so the run
+    // reaches terminal — and the last wave is empty, so there is no node to
+    // fall back to for the output.
+    const ctx = makeCtx({ waves: [[]], outputs: new Map() });
+    const result = advanceToNextWave(0, ctx);
+    expect(result.state.kind).toBe("failed");
+    if (result.state.kind === "failed") {
+      expect(result.state.error.kind).toBe("node-crash");
     }
   });
 
@@ -851,14 +928,6 @@ describe("collectHumanReviewQueue", () => {
 // ---------------------------------------------------------------------------
 // computeBackoffMs — unit tests
 // ---------------------------------------------------------------------------
-
-/** Build a RetryConfigs map from a DagDef for use in computeBackoffMs tests. */
-const retryConfigsFrom = (dag: DagDef): RetryConfigs =>
-  new Map(
-    dag.nodes
-      .filter((n) => n.retry)
-      .map((n) => [n.id, { backoffMs: n.retry!.backoffMs ?? [1000, 2000, 4000], jitterRatio: n.retry!.jitterRatio ?? 0.2 }] as const),
-  );
 
 describe("computeBackoffMs", () => {
   it("returns base delay (no jitter) when no node retry config", () => {
@@ -1009,7 +1078,7 @@ describe("compileDagToMachine", () => {
     expect(machine.stateProgress({ kind: "pending" })).toBe(0);
     expect(machine.stateProgress({ kind: "running", wave: 0 })).toBe(10);
     expect(machine.stateProgress({ kind: "retrying", wave: 0, nodeId: "a" as NodeId, attempt: 1, nextDelayMs: 1000 })).toBe(10);
-    expect(machine.stateProgress({ kind: "awaiting-human", nodeId: "a" as NodeId, output: null, prompt: "", pendingReviews: [], wave: 0 })).toBe(50);
+    expect(machine.stateProgress({ kind: "awaiting-human", nodeId: "a" as NodeId, output: null, prompt: nonEmptyString("review"), pendingReviews: [], wave: 0 })).toBe(50);
     expect(machine.stateProgress({ kind: "succeeded", output: null })).toBe(100);
     expect(machine.stateProgress({ kind: "failed", error: nodeFailedError })).toBe(100);
   });
@@ -1096,7 +1165,7 @@ describe("dagTransition — awaiting-human hook-crash retry (FR-029a)", () => {
     // @ts-expect-error — branded ID test fixture
     nodeId,
     output: { result: "preserved-output" },
-    prompt: "original-prompt",
+    prompt: nonEmptyString("original-prompt"),
     // @ts-expect-error — branded ID test fixture
     pendingReviews,
     wave,
@@ -1113,7 +1182,7 @@ describe("dagTransition — awaiting-human hook-crash retry (FR-029a)", () => {
     if (result.state.kind === "retrying-hook") {
       expect(result.state.nodeId).toBe(N("a"));
       expect(result.state.output).toEqual({ result: "preserved-output" });
-      expect(result.state.prompt).toBe("original-prompt");
+      expect(result.state.prompt).toBe(nonEmptyString("original-prompt"));
       expect(result.state.attempt).toBe(1);
       expect(result.state.nextDelayMs).toBeGreaterThan(0);
       expect(result.state.pendingReviews).toEqual([]);
@@ -1207,7 +1276,7 @@ describe("dagTransition — retrying-hook (FR-029a)", () => {
     kind: "retrying-hook",
     nodeId: "a" as NodeId,
     output: { result: "preserved-output" },
-    prompt: "original-prompt",
+    prompt: nonEmptyString("original-prompt"),
     attempt,
     nextDelayMs: 1000,
     // @ts-expect-error — branded ID test fixture
@@ -1354,7 +1423,7 @@ describe("dagTransition — suspended (ADR-0060)", () => {
     // @ts-expect-error — branded ID test fixture
     nodeId,
     output: { result: "preserved-output" },
-    prompt: "original-prompt",
+    prompt: nonEmptyString("original-prompt"),
     // @ts-expect-error — branded ID test fixture
     pendingReviews,
     wave,
@@ -1367,7 +1436,7 @@ describe("dagTransition — suspended (ADR-0060)", () => {
       kind: "awaiting-human",
       nodeId: "a" as NodeId,
       output: { result: "preserved-output" },
-      prompt: "original-prompt",
+      prompt: nonEmptyString("original-prompt"),
       pendingReviews: [],
       wave: 0,
     };
@@ -1378,7 +1447,7 @@ describe("dagTransition — suspended (ADR-0060)", () => {
       kind: "suspended",
       nodeId: N("a"),
       output: { result: "preserved-output" },
-      prompt: "original-prompt",
+      prompt: nonEmptyString("original-prompt"),
       wave: 0,
     });
   });
@@ -1389,7 +1458,7 @@ describe("dagTransition — suspended (ADR-0060)", () => {
       kind: "awaiting-human",
       nodeId: "a" as NodeId,
       output: { result: "preserved-output" },
-      prompt: "original-prompt",
+      prompt: nonEmptyString("original-prompt"),
       pendingReviews: [],
       wave: 0,
     };
@@ -1502,7 +1571,7 @@ describe("dagTransition — suspended (ADR-0060)", () => {
     if (result.state.kind === "retrying-hook") {
       expect(result.state.nodeId).toBe(N("a"));
       expect(result.state.output).toEqual({ result: "preserved-output" });
-      expect(result.state.prompt).toBe("original-prompt");
+      expect(result.state.prompt).toBe(nonEmptyString("original-prompt"));
       expect(result.state.attempt).toBe(1);
       expect(result.state.pendingReviews).toEqual([N("b"), N("c")]);
       expect(result.state.wave).toBe(2);
@@ -1554,7 +1623,7 @@ describe("dagTransition — suspended (ADR-0060)", () => {
       kind: "retrying-hook",
       nodeId: "a" as NodeId,
       output: { result: "preserved-output" },
-      prompt: "original-prompt",
+      prompt: nonEmptyString("original-prompt"),
       attempt: 2,
       nextDelayMs: 1000,
       pendingReviews: ["b" as NodeId],
@@ -1575,7 +1644,7 @@ describe("dagTransition — suspended (ADR-0060)", () => {
       kind: "retrying-hook",
       nodeId: "a" as NodeId,
       output: { result: "preserved-output" },
-      prompt: "original-prompt",
+      prompt: nonEmptyString("original-prompt"),
       attempt: 2,
       nextDelayMs: 1000,
       pendingReviews: [],
@@ -1603,7 +1672,7 @@ describe("compileDagToMachine — retrying-hook predicates", () => {
       kind: "retrying-hook",
       nodeId: "a" as NodeId,
       output: "out",
-      prompt: "p",
+      prompt: nonEmptyString("p"),
       attempt: 1,
       nextDelayMs: 1000,
       pendingReviews: [],

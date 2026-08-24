@@ -1,14 +1,13 @@
-import { describe, it, expect, mock } from "bun:test";
+import { describe, it, expect } from "bun:test";
+import { testNodeContext } from "./_context-factories.js";
 import { z } from "zod";
 import { runLlmCallPipeline } from "../nodes/llm-pipeline.js";
 import type { LlmPipelineConfig, LlmCallFn } from "../nodes/llm-pipeline.js";
-import type { NodeContext, ContextCacheAdapter, CacheLookup } from "../types/node.js";
+import type { NodeContext, ContextCacheAdapter } from "../types/node.js";
 import type { LlmResponse } from "../types/llm.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { Result } from "../types/result.js";
 import { ok, err } from "../types/result.js";
-import type { NodeId, RunId, DagId } from "../types/ids.js";
-import { NoopObserver } from "../observer/observer.js";
 import { N, R, D } from "./_id-helpers.js";
 
 // ---------------------------------------------------------------------------
@@ -46,17 +45,13 @@ const makeCache = (overrides?: Partial<ContextCacheAdapter>): ContextCacheAdapte
 });
 
 const warns: string[] = [];
-const makeCtx = (cache?: ContextCacheAdapter | null): NodeContext => ({
-  runId: R("r1"),
-  dagId: D("d1"),
-  observer: new NoopObserver(),
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null,
-  cache: cache ?? null,
-  prompts: null,
-  llm: null, http: null, clock: null,
-  logger: { warn: (msg: string) => warns.push(msg), error: () => {} },
-});
+const makeCtx = (cache?: ContextCacheAdapter | null): NodeContext =>
+  testNodeContext({
+    runId: R("r1"),
+    dagId: D("d1"),
+    cache: cache ?? null,
+    logger: { warn: (msg: string) => warns.push(msg), error: () => {} },
+  });
 
 // ---------------------------------------------------------------------------
 // Tests

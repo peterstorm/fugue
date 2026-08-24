@@ -9,7 +9,7 @@ import type { ScoredConversation } from "../../extraction/recency.js";
 import { selectWithinBudget } from "../tokens.js";
 import { MessageSchema, ConversationSchema } from "../../schemas/crm.js";
 
-export interface CustomerIdentity {
+interface CustomerIdentity {
   readonly id: string;
   readonly name: string;
   readonly accountType: string;

@@ -4,26 +4,10 @@ import { runLint } from "../../cli/lint.js";
 import { parseRegistrationMeta, runDescribe } from "../../cli/describe.js";
 import { runCapabilities } from "../../cli/capabilities.js";
 import { BUILTIN_CAPABILITY_KEYS } from "../../types/node.js";
+import { runBin } from "./_run-bin.js";
 
 const fixturePath = (name: string): string =>
   resolve(__dirname, "fixtures", name);
-
-const binPath = resolve(__dirname, "..", "..", "..", "bin", "fugue.ts");
-
-const runBin = async (
-  args: readonly string[],
-): Promise<{ exitCode: number; stdout: string; stderr: string }> => {
-  const proc = Bun.spawn(["bun", binPath, ...args], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  const exitCode = await proc.exited;
-  return { exitCode, stdout, stderr };
-};
 
 describe("runLint", () => {
   it("reports ok for a valid DAG file", async () => {
@@ -186,10 +170,12 @@ describe("runDescribe", () => {
   });
 
   it("carries schema-serialization failures on the ok result's warnings (schema ships as null)", async () => {
-    // The fixture's registration inputSchema is z.void() — unrepresentable in
-    // JSON Schema. The describe stays ok (best-effort), the affected schema
-    // is null, and the failure reaches BOTH the machine-readable `warnings`
-    // and stderr (for subprocess callers).
+    // The fixture's registration inputSchema is HOSTILE (a non-schema value in
+    // the shape) — `zodToJsonSchema` cannot introspect it. The describe stays
+    // ok (best-effort), the affected schema is null, and the failure reaches
+    // BOTH the machine-readable `warnings` and stderr (for subprocess callers).
+    // (Standard unrepresentable types like z.date()/z.void() no longer reach
+    // this channel — they render as open schemas, see schema-dates.ts.)
     const stderrSpy = spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
       const result = await runDescribe(fixturePath("schema-warning.ts"));
@@ -201,6 +187,25 @@ describe("runDescribe", () => {
       }
       const written = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
       expect(written).toContain("[fugue describe] inputSchema");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("renders z.date()/z.void() schemas WITHOUT warnings (unrepresentable types render as open schemas — peterstorm/fugue#36)", async () => {
+    // Date/void columns used to throw in zodToJsonSchema and ship the schema
+    // as null with a false-alarm warning. They now render as open schemas —
+    // describe must ship the schema with an EMPTY warnings array.
+    const stderrSpy = spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const result = await runDescribe(fixturePath("schema-dates.ts"));
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.warnings).toEqual([]);
+        expect(result.dag.inputSchema).not.toBeNull();
+        const props = result.dag.inputSchema?.properties as Record<string, unknown>;
+        expect(props.at).toEqual({});
+      }
     } finally {
       stderrSpy.mockRestore();
     }
@@ -324,7 +329,7 @@ describe("fugue bin (subprocess)", () => {
     const parsed = JSON.parse(stdout);
     expect(parsed.ok).toBe(true);
     expect(parsed.path).toContain("valid-dag.ts");
-  });
+  }, 60_000);
 
   it("lint exits 1 and emits dag-definition-error on a broken DAG", async () => {
     const { exitCode, stdout } = await runBin(["lint", fixturePath("invalid-edge-typo.ts")]);
@@ -332,7 +337,7 @@ describe("fugue bin (subprocess)", () => {
     const parsed = JSON.parse(stdout);
     expect(parsed.ok).toBe(false);
     expect(parsed.errors[0].kind).toBe("dag-definition-error");
-  });
+  }, 60_000);
 
   it("describe emits a full DAG manifest as JSON", async () => {
     const { exitCode, stdout } = await runBin(["describe", fixturePath("valid-dag.ts")]);
@@ -341,7 +346,7 @@ describe("fugue bin (subprocess)", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.dag.id).toBe("valid-fixture");
     expect(parsed.dag.waves).toEqual([["fetch-user"], ["summarize"]]);
-  });
+  }, 60_000);
 
   it("capabilities exits 0 and emits the built-in catalogue as JSON", async () => {
     const { exitCode, stdout } = await runBin(["capabilities"]);

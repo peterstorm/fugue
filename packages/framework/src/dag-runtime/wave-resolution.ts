@@ -27,6 +27,17 @@ export const waveNodes = (ctx: DagMachineContextPersisted, wave: number): readon
 export const activeWaveNodes = (ctx: DagMachineContextPersisted, wave: number): readonly NodeId[] =>
   waveNodes(ctx, wave).filter((id) => ctx.activeNodeIds.has(id));
 
+/** Build the canonical node → wave lookup used by multi-entry filtering passes. */
+export const waveIndexByNodeId = (
+  ctx: Pick<DagMachineContextPersisted, "waves">,
+): ReadonlyMap<NodeId, number> => {
+  const index = new Map<NodeId, number>();
+  for (let wave = 0; wave < ctx.waves.length; wave += 1) {
+    for (const nodeId of ctx.waves[wave] ?? []) index.set(nodeId, wave);
+  }
+  return index;
+};
+
 /** The index of the wave that contains a given nodeId, or -1 if not found. */
 export const waveIndexOf = (ctx: DagMachineContextPersisted, nodeId: NodeId): number =>
   ctx.waves.findIndex((w) => w.includes(nodeId));
@@ -131,7 +142,21 @@ export const handleWaveDone = (
     // is valid per DagPhase.awaiting-human.output: unknown. The human reviewer
     // receives whatever the node produced, including undefined.
     const nodeOutput = newOutputs.get(firstNodeId);
-    const prompt = newCtx.humanReviewPrompts.get(firstNodeId) ?? "";
+    const prompt = newCtx.humanReviewPrompts.get(firstNodeId);
+    if (prompt === undefined) {
+      return {
+        state: {
+          kind: "failed",
+          error: {
+            kind: "node-crash",
+            retriability: "retriable",
+            nodeId: firstNodeId,
+            message: `node '${firstNodeId}' missing humanReview prompt`,
+          },
+        },
+        context: newCtx,
+      };
+    }
 
     return {
       state: {

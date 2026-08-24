@@ -1,4 +1,4 @@
-import { resourceName, witness, witnessValue, mkWitness, RN } from "./_freshness-helpers.js";
+import { witness, witnessValue, RN } from "./_freshness-helpers.js";
 /**
  * Phase 3 test — freshness witness: no-conflict case.
  *
@@ -11,21 +11,18 @@ import { resourceName, witness, witnessValue, mkWitness, RN } from "./_freshness
 
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
-import { N, R, D, NO_CONFIDENCE } from "./_id-helpers.js";
+import { N, R, D } from "./_id-helpers.js";
 import type { NodeDef, NodeContext } from "../types/node.js";
 import type {
   WitnessCapturedEvent,
   WriteAttemptedEvent,
   FreshnessViolationEvent,
-  ObserverEvent,
 } from "../types/events.js";
-import type { Witness } from "../types/freshness.js";
 import { ok } from "../types/result.js";
 import { RecordingObserver } from "../observer/observer.js";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
 import { defineDagFromArray } from "../executor/define-dag.js";
 import { DAG_INPUT } from "../types/ids.js";
-import type { RunId, DagId } from "../types/ids.js";
 
 const mkCtx = (observer: RecordingObserver): NodeContext => ({
   runId: R("fresh-r1"),
@@ -134,7 +131,7 @@ describe("freshness witness — no conflict (Phase 3)", () => {
     expect(witnessCaptured).toHaveLength(0);
   });
 
-  it("reads node skipped via checkpoint does NOT emit witness-captured", async () => {
+  it("reads node resumed from a node-output checkpoint still completes owed freshness bookkeeping", async () => {
     const observer = new RecordingObserver();
     const readNode: NodeDef<unknown, { version: number }> = {
       id: N("reader"),
@@ -152,13 +149,15 @@ describe("freshness witness — no conflict (Phase 3)", () => {
     const checkpoint = new Map<string, unknown>([["reader", { version: 99 }]]);
     await runDagStateful(dag, null, mkCtx(observer), { resumeCheckpoint: checkpoint });
 
-    // Node was skipped — extractWitness should NOT have been called
+    // The computation was skipped, but the node-output checkpoint is written
+    // before post-wave freshness. Resume must therefore reconstruct the witness.
     const witnessCaptured = observer.events.filter(
       (e): e is WitnessCapturedEvent => e.type === "witness-captured",
     );
-    expect(witnessCaptured).toHaveLength(0);
+    expect(witnessCaptured).toHaveLength(1);
+    expect(witnessCaptured[0]?.nodeId).toBe(N("reader"));
 
-    // Verify the node was actually skipped
+    // Verify only the node computation was skipped.
     const skipped = observer.events.filter(
       (e) => e.type === "node-skipped",
     );

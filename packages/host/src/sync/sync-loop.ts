@@ -17,22 +17,20 @@
  * @satisfies FR-005 — Run bun install if the lockfile (bun.lock / bun.lockb) changed between commits
  * @satisfies FR-002 — Discover DAGs by scanning dags/{team}/{name}/dag.ts convention
  * @satisfies FR-003 — Dynamically import discovered DAG modules with SHA cache-busting
- * @satisfies NFR-003 — Git sync detection MUST complete within poll interval + 5s (individual ops timeout at 30s; overall cycle timeout TBD — tracked for future enforcement)
+ * LIMITATION: Git operations have individual timeouts, but the sync cycle has no
+ * enclosing deadline and therefore does not yet satisfy NFR-003's poll interval + 5s bound.
  * @satisfies NFR-010 — Failing DAG import MUST NOT affect other registered DAGs
  */
 
+import { match } from "ts-pattern";
 import { ok } from "@fuguejs/framework";
 import type { Result, GitSha } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { Registry } from "../domain/registry.js";
 import { freeze } from "../domain/registry.js";
-import type { GitPort, ModuleLoaderPort, LoadResult, Clock } from "../ports.js";
-import { loadResultToRegisteredDag, loadResultsToSnapshots } from "../domain/dag-factory.js";
+import type { GitPort, ModuleLoaderPort, Clock, BulkLoadResult } from "../ports.js";
+import { loadResultToRegisteredDag } from "../domain/dag-factory.js";
 import type { HostTimeoutDefaults } from "../domain/dag-factory.js";
-
-// Re-export for test convenience (tests import from sync-loop)
-export { loadResultToRegisteredDag, loadResultsToSnapshots } from "../domain/dag-factory.js";
-export type { HostTimeoutDefaults } from "../domain/dag-factory.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -47,7 +45,7 @@ export type { HostTimeoutDefaults } from "../domain/dag-factory.js";
  *   before any successful sync
  * - skipped: `previousSha` — the last known SHA (or `null` if never synced)
  */
-export type SyncResult =
+type SyncResult =
   | { readonly kind: "no-change"; readonly currentSha: GitSha }
   | { readonly kind: "updated"; readonly newSha: GitSha; readonly registry: Registry; readonly errors: readonly { readonly path: string; readonly error: HostError }[] }
   | { readonly kind: "error"; readonly previousSha: GitSha | null; readonly syncError: HostError }
@@ -75,27 +73,22 @@ export type SyncLogger = import("../ports.js").LogPort;
 /**
  * Callback invoked when a sync cycle begins (before pulling).
  */
-export type OnSyncStarted = () => void;
+type OnSyncStarted = () => void;
 
 /**
  * Callback invoked when sync completes with a new registry.
  */
-export type OnSyncComplete = (registry: Registry, sha: GitSha) => void;
+type OnSyncComplete = (registry: Registry, sha: GitSha) => void;
 
 /**
  * Callback invoked when sync completes with no changes (SHA unchanged).
  */
-export type OnSyncNoChange = (sha: GitSha) => void;
+type OnSyncNoChange = (sha: GitSha) => void;
 
 /**
  * Callback invoked when sync fails.
  */
-export type OnSyncError = (error: HostError) => void;
-
-/**
- * Clock function — re-exported from ports for backward compatibility.
- */
-export type { Clock } from "../ports.js";
+type OnSyncError = (error: HostError) => void;
 
 /**
  * Handle returned from startSyncLoop to control the loop.
@@ -108,15 +101,67 @@ export interface SyncLoopHandle {
 // ── Core Sync Logic (depends on ports) ─────────────────────────────────────
 
 /**
+ * Load every DAG at `sha`, isolate per-DAG load failures, and freeze the result
+ * into an immutable registry.
+ *
+ * ONE definition shared by `initialSync` and `executeSyncCycle`. Both perform the
+ * same four steps — loadAll, warn per isolated failure, map to registered DAGs,
+ * freeze — and both then log the same counts. Keeping two copies risked the
+ * initial boot and the steady-state refresh disagreeing about what a "loaded"
+ * registry is, which is precisely the drift that would show up as a DAG present
+ * after boot but absent after the first sync (or the reverse).
+ *
+ * `label` distinguishes the two completion log lines ("Sync complete" vs
+ * "Initial sync complete"), which operators grep for separately.
+ */
+const loadRegistryAt = async (
+  sha: GitSha,
+  label: string,
+  deps: {
+    readonly loader: ModuleLoaderPort;
+    readonly config: SyncConfig;
+    readonly clock: Clock;
+    readonly logger: SyncLogger;
+  },
+): Promise<{
+  readonly registry: Registry;
+  /** The isolated per-DAG load failures, forwarded verbatim to the sync outcome. */
+  readonly errors: BulkLoadResult["errors"];
+}> => {
+  const { loader, config, clock, logger } = deps;
+  const bulkResult = await loader.loadAll(config.repoPath, sha);
+
+  // Per-DAG load failures are ISOLATED: one broken DAG must not take the whole
+  // registry down, so each is warned and the rest still load.
+  for (const loadError of bulkResult.errors) {
+    logger.warn(`DAG load failed (isolated): ${loadError.path}`, { error: loadError.error });
+  }
+
+  const now = clock();
+  const registeredDags = bulkResult.loaded.map((lr) =>
+    loadResultToRegisteredDag(lr, sha, now, config.hostTimeoutDefaults),
+  );
+  const registry = freeze(registeredDags, sha, now);
+
+  logger.info(`${label}: ${bulkResult.loaded.length} DAGs loaded`, {
+    sha,
+    loaded: bulkResult.loaded.length,
+    errors: bulkResult.errors.length,
+  });
+
+  return { registry, errors: bulkResult.errors };
+};
+
+/**
  * Execute a single sync cycle. This is the core logic without timer management.
  *
  * Steps:
- * 1. Get current SHA
- * 2. Compare with last SHA — skip if unchanged
- * 3. Pull changes
+ * 1. Pull changes in remote mode after the initial sync
+ * 2. Get the current SHA
+ * 3. Compare with the last SHA — skip if unchanged
  * 4. Check lockfile changes → bun install
  * 5. Discover + load all DAGs
- * 6. Build new registry
+ * 6. Build the new registry
  */
 export const executeSyncCycle = async (
   git: GitPort,
@@ -195,35 +240,19 @@ export const executeSyncCycle = async (
     }
   }
 
-  // Step 5: Discover and load all DAGs
-  const bulkResult = await loader.loadAll(config.repoPath, currentSha);
-
-  if (bulkResult.errors.length > 0) {
-    for (const loadError of bulkResult.errors) {
-      logger.warn(`DAG load failed (isolated): ${loadError.path}`, {
-        error: loadError.error,
-      });
-    }
-  }
-
-  // Step 6: Build new registry
-  const now = clock();
-  const registeredDags = bulkResult.loaded.map((lr) =>
-    loadResultToRegisteredDag(lr, currentSha, now, config.hostTimeoutDefaults),
-  );
-  const registry = freeze(registeredDags, currentSha, now);
-
-  logger.info(`Sync complete: ${bulkResult.loaded.length} DAGs loaded`, {
-    sha: currentSha,
-    loaded: bulkResult.loaded.length,
-    errors: bulkResult.errors.length,
+  // Steps 5 + 6: discover, load (isolating per-DAG failures) and freeze.
+  const { registry, errors } = await loadRegistryAt(currentSha, "Sync complete", {
+    loader,
+    config,
+    clock,
+    logger,
   });
 
   return {
     kind: "updated",
     newSha: currentSha,
     registry,
-    errors: bulkResult.errors,
+    errors,
   };
 };
 
@@ -258,18 +287,32 @@ export const startSyncLoop = (
       onStarted();
       const result = await executeSyncCycle(git, loader, config, lastSha, logger, clock);
 
-      if (result.kind === "updated") {
-        // Call onComplete BEFORE advancing SHA — if onComplete throws,
-        // SHA stays at lastSha so the next cycle will retry this commit.
-        onComplete(result.registry, result.newSha);
-        lastSha = result.newSha;
-      } else if (result.kind === "no-change") {
-        lastSha = result.currentSha;
-        // Transition syncing → ready (sync succeeded, nothing changed)
-        onNoChange(result.currentSha);
-      } else if (result.kind === "error") {
-        onError(result.syncError);
-      }
+      // Exhaustive: a new SyncCycleResult variant is a compile error here
+      // rather than a cycle that silently notifies no one.
+      match(result)
+        .with({ kind: "updated" }, (updated) => {
+          // Call onComplete BEFORE advancing SHA — if onComplete throws,
+          // SHA stays at lastSha so the next cycle will retry this commit.
+          onComplete(updated.registry, updated.newSha);
+          lastSha = updated.newSha;
+        })
+        .with({ kind: "no-change" }, (unchanged) => {
+          lastSha = unchanged.currentSha;
+          // Transition syncing → ready (sync succeeded, nothing changed)
+          onNoChange(unchanged.currentSha);
+        })
+        .with({ kind: "error" }, (failed) => {
+          onError(failed.syncError);
+        })
+        .with({ kind: "skipped" }, () => {
+          // Not reachable here: `skipped` is produced by doSync's re-entrancy
+          // guard ABOVE, before executeSyncCycle runs. It shares the SyncResult
+          // type but not this path — the in-progress cycle owns the callbacks,
+          // so firing any of them again would double-report one sync. The
+          // if-chain this replaced omitted the case silently; stating it is the
+          // whole point of `.exhaustive()`.
+        })
+        .exhaustive();
 
       return result;
     } catch (e) {
@@ -359,27 +402,11 @@ export const initialSync = async (
 
   const sha = shaResult.value;
 
-  // Load all DAGs
-  const bulkResult = await loader.loadAll(config.repoPath, sha);
-
-  if (bulkResult.errors.length > 0) {
-    for (const loadError of bulkResult.errors) {
-      logger.warn(`DAG load failed (isolated): ${loadError.path}`, {
-        error: loadError.error,
-      });
-    }
-  }
-
-  const now = clock();
-  const registeredDags = bulkResult.loaded.map((lr) =>
-    loadResultToRegisteredDag(lr, sha, now, config.hostTimeoutDefaults),
-  );
-  const registry = freeze(registeredDags, sha, now);
-
-  logger.info(`Initial sync complete: ${bulkResult.loaded.length} DAGs loaded`, {
-    sha,
-    loaded: bulkResult.loaded.length,
-    errors: bulkResult.errors.length,
+  const { registry } = await loadRegistryAt(sha, "Initial sync complete", {
+    loader,
+    config,
+    clock,
+    logger,
   });
 
   return ok({ registry, sha });

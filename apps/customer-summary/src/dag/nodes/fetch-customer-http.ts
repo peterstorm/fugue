@@ -22,7 +22,6 @@ import type { Result, FrameworkError } from "@fuguejs/framework";
 import { CrmRecordSchema } from "../../schemas/crm.js";
 
 const InputSchema = z.object({ customerId: z.string() });
-type Input = z.infer<typeof InputSchema>;
 
 const OutputSchema = z.object({ customer: CrmRecordSchema.nullable() });
 type Output = z.infer<typeof OutputSchema>;

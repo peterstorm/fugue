@@ -62,8 +62,7 @@ export type JwtVerifyError =
  * hardcoded); tests inject a fake. This port is the ONLY producer of
  * `SignatureVerifiedClaims` (it calls `markSignatureVerified` AFTER checking the
  * signature) — and `validateRealmJwtClaims` accepts only that brand, so the
- * "signature first" ordering is enforced by the type system, not convention
- * (review C5).
+ * "signature first" ordering is enforced by the type system, not convention.
  */
 export type VerifyRealmJwt = (token: string) => Promise<Result<SignatureVerifiedClaims, JwtVerifyError>>;
 
@@ -161,12 +160,9 @@ export const isJwtShape = (token: string): boolean => {
 // Middleware factory
 // ---------------------------------------------------------------------------
 
-/** @deprecated Use HostEnv from router.ts — kept for test backward compatibility */
-export type AuthEnv = {
-  Variables: {
-    authIdentity: AuthIdentity;
-  };
-};
+// Both Hono context shapes live in `env.js`; re-exported here for the
+// middleware's own test call sites.
+export type { AuthEnv } from "../env.js";
 
 /**
  * Creates a Hono middleware that resolves bearer tokens to AuthIdentity.
@@ -179,28 +175,54 @@ export type AuthEnv = {
  * 4. Hash token → Redis lookup → identity = team
  * 5. Not found → 401
  */
+/**
+ * The shared bearer-challenge 401. ONE encoding (round-38 cs-18) of the
+ * status + `WWW-Authenticate` pair the header-shape rejections all owe the
+ * caller: a challenge omitted from one of them would leave a client unable to
+ * tell it should retry with credentials.
+ */
+const bearerChallenge = (c: Context, message: string): Response =>
+  errorResponse(c, 401, "unauthorized", message, {
+    headers: { "WWW-Authenticate": "Bearer" },
+  });
+
+/**
+ * THE one 503 for an auth INFRASTRUCTURE failure (verifier throw, JWKS outage,
+ * key rotation). Sharing it keeps the client-facing text uniformly free of the
+ * server-side reason — which is logged, never returned — so no site can start
+ * leaking why authentication is unavailable.
+ */
+const authServiceUnavailable = (c: Context): Response =>
+  errorResponse(c, 503, "auth-service-unavailable",
+    "Authentication service temporarily unavailable");
+
+/**
+ * THE one 401 for a token that was PRESENT but did not verify. Distinct from
+ * `bearerChallenge` (header-shape problems, plain `Bearer` challenge): a
+ * presented-but-invalid token owes the `invalid_token` error code so a client
+ * knows to re-authenticate rather than merely add credentials.
+ */
+const invalidBearerToken = (c: Context): Response =>
+  errorResponse(c, 401, "unauthorized", "Invalid bearer token", {
+    headers: { "WWW-Authenticate": "Bearer error=\"invalid_token\"" },
+  });
+
 export const createAuthMiddleware = (deps: AuthMiddlewareDeps) => {
   return async (c: Context, next: Next): Promise<Response | void> => {
     const authHeader = c.req.header("Authorization");
 
     if (!authHeader) {
-      return errorResponse(c, 401, "unauthorized", "Missing Authorization header", {
-        headers: { "WWW-Authenticate": "Bearer" },
-      });
+      return bearerChallenge(c, "Missing Authorization header");
     }
 
     if (!authHeader.startsWith("Bearer ")) {
-      return errorResponse(c, 401, "unauthorized", "Authorization header must use Bearer scheme", {
-        headers: { "WWW-Authenticate": "Bearer" },
-      });
+      return bearerChallenge(c, "Authorization header must use Bearer scheme");
     }
 
     const token = authHeader.slice(7); // "Bearer ".length
 
     if (token.length === 0) {
-      return errorResponse(c, 401, "unauthorized", "Empty bearer token", {
-        headers: { "WWW-Authenticate": "Bearer" },
-      });
+      return bearerChallenge(c, "Empty bearer token");
     }
 
     // Path 1: Admin token (constant-time, no Redis)
@@ -230,8 +252,7 @@ export const createAuthMiddleware = (deps: AuthMiddlewareDeps) => {
           error: e instanceof Error ? e.message : String(e),
         });
         // Verifier infrastructure (JWKS fetch, key rotation) failure → 503.
-        return errorResponse(c, 503, "auth-service-unavailable",
-          "Authentication service temporarily unavailable");
+        return authServiceUnavailable(c);
       }
 
       if (!verified.ok) {
@@ -242,17 +263,14 @@ export const createAuthMiddleware = (deps: AuthMiddlewareDeps) => {
           deps.logger?.error("[auth-middleware] JWT signature verification unavailable", {
             reason: verified.error.reason,
           });
-          return errorResponse(c, 503, "auth-service-unavailable",
-            "Authentication service temporarily unavailable");
+          return authServiceUnavailable(c);
         }
         // Bad signature / unparsable token → 401 (never leak the reason to the
         // client; log it server-side, mirroring the claim-validation path).
         deps.logger?.warn("[auth-middleware] JWT signature verification rejected token", {
           reason: verified.error.reason,
         });
-        return errorResponse(c, 401, "unauthorized", "Invalid bearer token", {
-          headers: { "WWW-Authenticate": "Bearer error=\"invalid_token\"" },
-        });
+        return invalidBearerToken(c);
       }
 
       // `exp` is UNIX seconds (OIDC). Injected `now` is expected to already be
@@ -270,9 +288,7 @@ export const createAuthMiddleware = (deps: AuthMiddlewareDeps) => {
         deps.logger?.warn("[auth-middleware] JWT claim validation failed", {
           reason: describeAuthError(claimsResult.error),
         });
-        return errorResponse(c, 401, "unauthorized", "Invalid bearer token", {
-          headers: { "WWW-Authenticate": "Bearer error=\"invalid_token\"" },
-        });
+        return invalidBearerToken(c);
       }
 
       // Capture the wiring-site authorization policy onto the identity: the
@@ -311,8 +327,7 @@ export const createAuthMiddleware = (deps: AuthMiddlewareDeps) => {
           errorKind: resolveResult.error.kind,
           error: JSON.stringify(resolveResult.error),
         });
-        return errorResponse(c, 503, "auth-service-unavailable",
-          "Authentication service temporarily unavailable");
+        return authServiceUnavailable(c);
       }
       grant = resolveResult.value;
     } catch (e) {
@@ -322,14 +337,11 @@ export const createAuthMiddleware = (deps: AuthMiddlewareDeps) => {
         stack: e instanceof Error ? e.stack : undefined,
       });
       // crypto.subtle or unexpected failure — surface as 503
-      return errorResponse(c, 503, "auth-service-unavailable",
-        "Authentication service temporarily unavailable");
+      return authServiceUnavailable(c);
     }
 
     if (!grant) {
-      return errorResponse(c, 401, "unauthorized", "Invalid bearer token", {
-        headers: { "WWW-Authenticate": "Bearer error=\"invalid_token\"" },
-      });
+      return invalidBearerToken(c);
     }
 
     c.set("authIdentity", {

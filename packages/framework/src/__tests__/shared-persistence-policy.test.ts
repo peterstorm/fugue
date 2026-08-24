@@ -8,7 +8,7 @@
 // "drop both" / "persist both" decisions per run.
 
 import { describe, it, expect } from "bun:test";
-import type { RunId, NodeId, DagId } from "../types/ids.js";
+import type { DagId } from "../types/ids.js";
 import { trace } from "@opentelemetry/api";
 import type { ReadableSpan } from "@opentelemetry/sdk-trace-base";
 import { BufferedObserver, computeRunSummary } from "../observer/buffered.js";
@@ -17,7 +17,6 @@ import { RecordingObserver } from "../observer/observer.js";
 import type { PersistencePolicy } from "../observer/policy.js";
 import type { RunSummary } from "../observer/buffered.js";
 import type { RunStartEvent, RunEndEvent } from "../types/events.js";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 
 // Minimal SpanExporter stub — captures what was exported so the assertion
 // distinguishes "exported" from "dropped".

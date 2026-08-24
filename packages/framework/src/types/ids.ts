@@ -3,8 +3,9 @@
 // Hard-branded newtypes over `string`. A plain `string` does NOT satisfy
 // these types at compile time — callers must go through the smart
 // constructors (`runId`, `nodeId`, `dagId`) which validate against
-// `ID_REGEX`, or through the internal `__brandXxx` escape hatches for
-// trusted framework code that has already validated by other means.
+// `ID_PATTERN`, or through the internal `__brandXxx` escape hatches for
+// trusted framework code that has already validated by other means. The
+// validating DagId escape applies DagId's stricter no-colon grammar.
 //
 // At runtime the values are still plain strings; the brand is erased by
 // TypeScript. The hard brand catches argument-swap bugs and ensures that
@@ -26,7 +27,7 @@ export type DagId = string & { readonly [__dagIdBrand]: void };
 
 // ---------------------------------------------------------------------------
 // DAG_INPUT — the reserved virtual edge source carrying the DAG's request
-// (C0 / framework 0.2.0). It is spelled "$input": `$` is outside `ID_REGEX`'s
+// (C0 / framework 0.2.0). It is spelled "$input": `$` is outside `ID_PATTERN`'s
 // character class *by construction*, so DAG_INPUT can never collide with a real
 // node id (every real id goes through `nodeId()`, which rejects `$`). At run
 // start the validated DAG input is seeded into the outputs map under this key,
@@ -51,44 +52,42 @@ export const isDagInput = (id: string): id is DagInputId => id === DAG_INPUT;
 // Allow `:` so callers can namespace run ids (`tenant:run-abc`) without
 // jumping through encoding hoops. The regex stays restrictive enough that
 // IDs remain URL-safe and printable in operator UIs.
-const ID_REGEX = /^[A-Za-z0-9_:-]{1,128}$/;
+/** The regex every framework identifier is validated against. */
+export const ID_PATTERN = /^[A-Za-z0-9_:-]{1,128}$/;
 
 // Load-time assertion of the load-bearing invariant from the DAG_INPUT block
-// above: the reserved request id is spelled outside `ID_REGEX` so it can never
+// above: the reserved request id is spelled outside `ID_PATTERN` so it can never
 // collide with a real node id (which always goes through `nodeId()`). Enforced
 // here rather than only commented — if either the constant or the regex ever
 // drifts so that `$input` becomes a valid id, the module fails to load.
-if (ID_REGEX.test(DAG_INPUT)) {
+if (ID_PATTERN.test(DAG_INPUT)) {
   throw new Error(
-    `Framework invariant violated: DAG_INPUT ("${DAG_INPUT}") must not match ID_REGEX (${ID_REGEX.source}); it would collide with a real node id`,
+    `Framework invariant violated: DAG_INPUT ("${DAG_INPUT}") must not match ID_PATTERN (${ID_PATTERN.source}); it would collide with a real node id`,
   );
 }
 
-/** The regex used to validate all framework identifiers. Exported for client-side validation reuse. */
-export const ID_PATTERN = ID_REGEX;
-
 const validate = (kind: string, s: string): void => {
-  if (typeof s !== "string" || !ID_REGEX.test(s)) {
+  if (typeof s !== "string" || !ID_PATTERN.test(s)) {
     throw new Error(
-      `Invalid ${kind} "${s}": must match ${ID_REGEX.source}`,
+      `Invalid ${kind} "${s}": must match ${ID_PATTERN.source}`,
     );
   }
 };
 
-/** Smart constructor for `RunId`. Validates the string against `ID_REGEX`. */
+/** Smart constructor for `RunId`. Validates the string against `ID_PATTERN`. */
 export const runId = (s: string): RunId => {
   validate("runId", s);
   return s as RunId;
 };
 
-/** Smart constructor for `NodeId`. Validates the string against `ID_REGEX`. */
+/** Smart constructor for `NodeId`. Validates the string against `ID_PATTERN`. */
 export const nodeId = (s: string): NodeId => {
   validate("nodeId", s);
   return s as NodeId;
 };
 
 /**
- * Pattern for DagId — stricter than the general ID_REGEX.
+ * Pattern for DagId — stricter than the general ID_PATTERN.
  * Disallows `:` to prevent Redis key namespace escape (keys use `:` as delimiter).
  */
 const DAG_ID_REGEX = /^[A-Za-z0-9_-]{1,128}$/;
@@ -105,7 +104,8 @@ export const dagId = (s: string): DagId => {
 
 /**
  * @internal Brand for trusted internal entry points (`defineDag`,
- * `makeNodeContext`, factory helpers). Still validates against `ID_REGEX` —
+ * `makeNodeContext`, factory helpers). Still validates against the identifier's
+ * own grammar (`DagId` uses `DAG_ID_REGEX`; the others use `ID_PATTERN`) —
  * "trusted" code has bugs too, and an unvalidated id silently corrupts every
  * downstream map lookup. Use the `*Unchecked` variants only on profiled hot
  * paths. NOT public API — not re-exported from the barrel (`src/index.ts`).
@@ -120,13 +120,10 @@ export const __brandNodeId = (s: string): NodeId => {
   return s as NodeId;
 };
 /** @internal See `__brandRunId`. */
-export const __brandDagId = (s: string): DagId => {
-  validate("dagId", s);
-  return s as DagId;
-};
+export const __brandDagId = (s: string): DagId => dagId(s);
 
 /**
- * @internal Unchecked widening cast — bypasses `ID_REGEX`. ONLY for profiled
+ * @internal Unchecked widening cast — bypasses `ID_PATTERN`. ONLY for profiled
  * hot deserialization/replay paths where id provenance is already guaranteed.
  * Prefer `__brandRunId` everywhere else.
  */
@@ -140,17 +137,26 @@ export const __brandDagIdUnchecked = (s: string): DagId => s as DagId;
 // Result-returning variants — for parse boundaries where throwing is undesirable.
 // ---------------------------------------------------------------------------
 
+/**
+ * The ONE `ID_PATTERN` acceptance test behind both `try*` parsers (round-38
+ * cs-5) — the same clause `validate` factors for their throwing siblings.
+ * `typeof` first: `RegExp.test` coerces non-strings, so a bypassed caller's
+ * number would otherwise match.
+ */
+const matchesIdPattern = (s: string): boolean =>
+  typeof s === "string" && ID_PATTERN.test(s);
+
 /** Parse a string into a RunId, returning a Result instead of throwing. */
 export const tryRunId = (s: string): Result<RunId, string> =>
-  typeof s === "string" && ID_REGEX.test(s)
+  matchesIdPattern(s)
     ? ok(s as RunId)
-    : err(`Invalid runId "${s}": must match ${ID_REGEX.source}`);
+    : err(`Invalid runId "${s}": must match ${ID_PATTERN.source}`);
 
 /** Parse a string into a NodeId, returning a Result instead of throwing. */
 export const tryNodeId = (s: string): Result<NodeId, string> =>
-  typeof s === "string" && ID_REGEX.test(s)
+  matchesIdPattern(s)
     ? ok(s as NodeId)
-    : err(`Invalid nodeId "${s}": must match ${ID_REGEX.source}`);
+    : err(`Invalid nodeId "${s}": must match ${ID_PATTERN.source}`);
 
 /** Parse a string into a DagId, returning a Result instead of throwing. */
 export const tryDagId = (s: string): Result<DagId, string> =>

@@ -3,9 +3,9 @@
 // SharedInfra + RegisteredDag (ports-and-adapters fakes, no Redis/BullMQ/network).
 //
 // Covers what the service-level fakes can't:
-//   - the channel split: an UNKNOWN DAG is the `err` channel, but a genuine
-//     run-FAILURE is `ok({ kind: "failed" })` so the service settles the run
-//     (never the err channel, which is reserved for host infra faults);
+//   - the channel split: permanent run failures and post-transition checkpoint
+//     failures are `ok({ kind: "failed" })` so the service settles them without
+//     replaying the prior durable checkpoint;
 //   - `toFrameworkError` cause-unwrapping (a thrown error carrying a
 //     `FrameworkError` cause surfaces that cause verbatim);
 //   - the AbortController slice-timeout wiring: the slice is bounded by
@@ -19,16 +19,17 @@ import {
   err,
   toJson,
   defineDag,
+  dagFingerprint,
   DAG_INPUT,
   noopTracer,
   gitSha,
+  nodeId,
   EXECUTOR_NODE_ID,
 } from "@fuguejs/framework";
-import { compileDagToMachine, stripNonPersistable } from "@fuguejs/framework/advanced";
+import { compileDagToMachine, persistDagContext } from "@fuguejs/framework/advanced";
 import type {
   DagDef,
   DagId,
-  NodeId,
   NodeContext,
   NodeDef,
   LlmClient,
@@ -36,21 +37,23 @@ import type {
 } from "@fuguejs/framework";
 import type { RedisPort, SharedInfra } from "../../../ports.js";
 import type { RegisteredDag } from "../../../domain/registry.js";
-import type { RunRecord, RunStatus, PersistedIdentity } from "../../types.js";
+import { tryRunTimestampMs } from "../../types.js";
+import type { PersistedIdentity, QueuedRunRecord, RunTimestampMs } from "../../types.js";
+import type { RunExecutionJob } from "../../ports.js";
 import { makeRunStoreJobLike } from "../../run-store-job.js";
-import { createInMemoryRunStore } from "../run-store.js";
+import { createInMemoryRunLeaseAuthority, createInMemoryRunStore } from "../run-store.js";
 import { createRunExecutor } from "../run-executor.js";
 
 // ── in-memory SharedInfra ─────────────────────────────────────────────────────
 
-const stubRedis = (): RedisPort => {
-  const m = new Map<string, string>();
+const stubRedis = (m = new Map<string, string>()): RedisPort => {
   return {
     async get(k) { return ok(m.get(k) ?? null); },
     async set(k, v) { m.set(k, v); return ok("OK"); },
     async del(k) { const had = m.delete(k); return ok(had ? 1 : 0); },
     async scan() { return ok({ cursor: "0", keys: [...m.keys()] }); },
     async setNx(k, v) { if (m.has(k)) return ok(false); m.set(k, v); return ok(true); },
+    async compareAndDelete(k, expected) { if (m.get(k) !== expected) return ok(false); m.delete(k); return ok(true); },
     async sAdd() { return ok(1); },
     async sRem() { return ok(1); },
     async sMembers() { return ok([]); },
@@ -113,37 +116,68 @@ const registered = (dag: DagDef, timeout = 30_000): RegisteredDag => ({
 
 const ADMIN: PersistedIdentity = { kind: "admin" };
 
+const timestamp = (value: number): RunTimestampMs => {
+  const parsed = tryRunTimestampMs(value);
+  if (!parsed.ok) throw new Error(`invalid test timestamp: ${parsed.error}`);
+  return parsed.value;
+};
+
 /** Seed a real checkpoint for `dag`+`input` and wrap it in a run-store-backed jobLike. */
-const seedJobLike = async (dag: DagDef, input: unknown) => {
+const seedJobLike = async (
+  dag: DagDef,
+  input: unknown,
+  opts: {
+    readonly failCheckpoint?: boolean;
+    readonly beforeCheckpointCommit?: () => Promise<void>;
+  } = {},
+) => {
   const compiled = compileDagToMachine(dag, input);
   if (!compiled.ok) throw new Error("compile failed");
   const checkpoint = toJson({
     state: compiled.value.initialState,
-    context: stripNonPersistable(compiled.value.initialContext),
+    context: persistDagContext(compiled.value.initialContext, dag),
   });
-  const store = createInMemoryRunStore();
-  const record: RunRecord = {
+  const leases = createInMemoryRunLeaseAuthority();
+  const store = createInMemoryRunStore(leases);
+  const record: QueuedRunRecord = {
     runId: "run-1" as never,
     dagId: dag.id as DagId,
+    ownerTeam: markTeam("eng"),
     input,
     identity: ADMIN,
-    status: { kind: "running" } as RunStatus,
+    status: { kind: "queued" },
     checkpoint,
-    createdAtMs: 1,
-    updatedAtMs: 1,
+    createdAtMs: timestamp(1),
+    updatedAtMs: timestamp(1),
   };
   await store.create(record);
-  const jl = makeRunStoreJobLike(store, "run-1" as never, checkpoint);
+  const lease = leases.acquire(record.runId, "test-owner");
+  const runStore = opts.failCheckpoint
+    ? { ...store, saveCheckpoint: async () => err({ kind: "redis-unavailable" as const, operation: "saveCheckpoint" }) }
+    : opts.beforeCheckpointCommit !== undefined
+      ? {
+          ...store,
+          saveCheckpoint: async (...args: Parameters<typeof store.saveCheckpoint>) => {
+            await opts.beforeCheckpointCommit?.();
+            return store.saveCheckpoint(...args);
+          },
+        }
+      : store;
+  const jl = makeRunStoreJobLike(runStore, lease, checkpoint);
   if (!jl.ok) throw new Error("jobLike build failed");
-  return jl.value;
+  return {
+    ...jl.value,
+    persistedCheckpoint: () => store._runs.get(record.runId)?.checkpoint ?? "",
+  };
 };
 
-const runReq = (dag: DagDef, jobLike: Awaited<ReturnType<typeof seedJobLike>>, input: unknown) => ({
+const runReq = (dag: DagDef, jobLike: RunExecutionJob, input: unknown) => ({
   runId: "run-1" as never,
   dagId: dag.id as DagId,
   input,
   identity: ADMIN,
-  jobLike,
+  signal: new AbortController().signal,
+  job: jobLike,
   onHumanReview: async () => ({ kind: "approve" }) as never,
   onDecisionConsumed: async () => {},
 });
@@ -151,13 +185,95 @@ const runReq = (dag: DagDef, jobLike: Awaited<ReturnType<typeof seedJobLike>>, i
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 describe("createRunExecutor — channel split (err vs failed)", () => {
-  it("an UNKNOWN dag uses the `err` channel (host infra fault), not `failed`", async () => {
+  it("a DAG removed after durable acceptance settles as a non-retriable failed outcome", async () => {
     const exec = createRunExecutor({ sharedInfra: sharedInfra(), getRegisteredDag: () => undefined });
     const dag = singleNodeDag(noopRun as never);
     const jobLike = await seedJobLike(dag, null);
-    const res = await exec.run(runReq(dag, jobLike, null));
-    expect(res.ok).toBe(false);
-    if (!res.ok) expect(res.error.kind).toBe("dag-not-found");
+
+    const result = await exec.run(runReq(dag, jobLike, null));
+
+    expect(result.ok && result.value.kind).toBe("failed");
+    if (result.ok && result.value.kind === "failed") {
+      expect(result.value.error.kind).toBe("node-crash");
+      if (result.value.error.kind === "node-crash") {
+        expect(result.value.error.retriability).toBe("non-retriable");
+        expect(result.value.error.message).toContain("no longer registered");
+      }
+    }
+  });
+
+  it("rejects topology drift between initial seed and the first worker slice", async () => {
+    const v1 = singleNodeDag((async () => ok("v1")) as never);
+    let v2Runs = 0;
+    const v2 = defineDag({
+      id: "exec-dag",
+      nodes: {
+        first: makeNode("first", { run: (async () => { v2Runs += 1; return ok("first"); }) as never }),
+        second: makeNode("second", { run: (async () => { v2Runs += 1; return ok("second"); }) as never }),
+      },
+      edges: [{ from: DAG_INPUT, to: "first" }, { from: "first", to: "second" }],
+      outputNodeId: "second",
+    });
+    let live = registered(v1);
+    const exec = createRunExecutor({
+      sharedInfra: sharedInfra(),
+      getRegisteredDag: () => live,
+      agentClientMap: { "exec-dag": "fugue-agent-exec" },
+    });
+    const seeded = await exec.seedCheckpoint(v1.id as DagId, null);
+    if (!seeded.ok) throw new Error("seed failed");
+    expect(seeded.value).toContain(dagFingerprint(v1));
+
+    const leases = createInMemoryRunLeaseAuthority();
+    const store = createInMemoryRunStore(leases);
+    const record: QueuedRunRecord = {
+      runId: "run-1" as never,
+      dagId: v1.id as DagId,
+      ownerTeam: markTeam("eng"),
+      input: null,
+      identity: ADMIN,
+      status: { kind: "queued" },
+      checkpoint: seeded.value,
+      createdAtMs: timestamp(1),
+      updatedAtMs: timestamp(1),
+    };
+    await store.create(record);
+    const job = makeRunStoreJobLike(store, leases.acquire(record.runId), seeded.value);
+    if (!job.ok) throw new Error("job build failed");
+    live = registered(v2);
+
+    const result = await exec.run(runReq(v2, job.value, null));
+
+    expect(result.ok && result.value.kind).toBe("failed");
+    if (result.ok && result.value.kind === "failed") {
+      expect(result.value.error.kind).toBe("checkpoint-version-mismatch");
+    }
+    expect(v2Runs).toBe(0);
+  });
+
+  it("contains a throwing startSlice port inside the never-throw run boundary", async () => {
+    const dag = singleNodeDag((async () => ok("unreachable")) as never);
+    const reg = registered(dag);
+    const exec = createRunExecutor({
+      sharedInfra: sharedInfra(),
+      getRegisteredDag: () => reg,
+      agentClientMap: { "exec-dag": "fugue-agent-exec" },
+    });
+    const jobLike = await seedJobLike(dag, null);
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    const throwingJob: RunExecutionJob = {
+      ...jobLike,
+      startSlice: async () => { throw revoked.proxy; },
+    };
+
+    const result = await exec.run(runReq(dag, throwingJob, null));
+
+    expect(result.ok && result.value.kind).toBe("failed");
+    if (result.ok && result.value.kind === "failed" && result.value.error.kind === "node-crash") {
+      expect(result.value.error.nodeId).toBe(EXECUTOR_NODE_ID);
+      expect(typeof result.value.error.message).toBe("string");
+    }
   });
 
   it("a known dag that COMPLETES returns ok({ kind: 'completed' }) with the output", async () => {
@@ -170,6 +286,28 @@ describe("createRunExecutor — channel split (err vs failed)", () => {
     if (res.ok) {
       expect(res.value.kind).toBe("completed");
       if (res.value.kind === "completed") expect(res.value.output).toBe("done");
+    }
+  });
+
+  it("a checkpoint persistence failure fails closed instead of replaying the prior checkpoint", async () => {
+    const dag = singleNodeDag((async () => ok("done")) as never);
+    const reg = registered(dag);
+    const exec = createRunExecutor({ sharedInfra: sharedInfra(), getRegisteredDag: () => reg, agentClientMap: { "exec-dag": "fugue-agent-exec" } });
+    const jobLike = await seedJobLike(dag, null, { failCheckpoint: true });
+
+    const result = await exec.run(runReq(dag, jobLike, null));
+
+    expect(result.ok && result.value.kind).toBe("failed");
+    if (result.ok && result.value.kind === "failed") {
+      expect(result.value.error).toMatchObject({
+        kind: "node-crash",
+        retriability: "non-retriable",
+        nodeId: EXECUTOR_NODE_ID,
+      });
+      if (result.value.error.kind === "node-crash") {
+        expect(result.value.error.message).toContain("stopped to avoid replaying side effects");
+        expect(result.value.error.message).toContain("saveCheckpoint");
+      }
     }
   });
 
@@ -193,10 +331,10 @@ describe("createRunExecutor — channel split (err vs failed)", () => {
 
   it("toFrameworkError surfaces the kernel's FrameworkError cause verbatim (cause-unwrap branch)", async () => {
     // `runResumableDagJob` throws an Error whose `cause` is the real FrameworkError
-    // (here a node throw → kernel `retry-exhausted` after its retry budget). The
-    // executor's `toFrameworkError` takes the `cause` branch and surfaces that
-    // framework error verbatim — NOT the synthetic `node-crash`/EXECUTOR_NODE_ID
-    // fallback it would emit if the cause were missing.
+    // (here a deterministic node throw → non-retriable node-crash). The executor's
+    // `toFrameworkError` takes the `cause` branch and surfaces that framework error
+    // verbatim — NOT the synthetic node-crash on EXECUTOR_NODE_ID it would emit
+    // if the cause were missing.
     const dag = singleNodeDag((async () => { throw new Error("node blew up"); }) as never);
     const reg = registered(dag);
     const exec = createRunExecutor({ sharedInfra: sharedInfra(), getRegisteredDag: () => reg, agentClientMap: { "exec-dag": "fugue-agent-exec" } });
@@ -205,10 +343,14 @@ describe("createRunExecutor — channel split (err vs failed)", () => {
     expect(res.ok && res.value.kind).toBe("failed");
     if (res.ok && res.value.kind === "failed") {
       const e = res.value.error;
-      // A genuine framework discriminant came through (the cause was unwrapped)…
-      expect(e.kind).toBe("retry-exhausted");
-      // …rather than the host's fallback wrapper (which only appears if `cause`
-      // were absent): that fallback is always `node-crash` on the EXECUTOR node.
+      // A genuine node-scoped framework error came through (cause unwrapped)…
+      expect(e.kind).toBe("node-crash");
+      if (e.kind === "node-crash") {
+        expect(e.nodeId).toBe(nodeId("only"));
+        expect(e.retriability).toBe("non-retriable");
+        expect(e.message).toBe("node blew up");
+      }
+      // …rather than the host's fallback wrapper on the executor sentinel.
       expect(e.kind === "node-crash" && e.nodeId === EXECUTOR_NODE_ID).toBe(false);
     }
   });
@@ -235,6 +377,84 @@ describe("createRunExecutor — channel split (err vs failed)", () => {
       const e = res.value.error;
       expect(e.kind).toBe("node-crash");
       if (e.kind === "node-crash") expect(e.nodeId).toBe(EXECUTOR_NODE_ID);
+    }
+  });
+
+  it("a hostile caught value cannot escape while diagnostics are rendered", async () => {
+    const dag = singleNodeDag((async () => ok("x")) as never);
+    const reg = registered(dag);
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    const throwingInfra: SharedInfra = {
+      ...sharedInfra(),
+      get capabilities(): never { throw revoked.proxy; },
+    };
+    const exec = createRunExecutor({
+      sharedInfra: throwingInfra,
+      getRegisteredDag: () => reg,
+      agentClientMap: { "exec-dag": "fugue-agent-exec" },
+    });
+    const jobLike = await seedJobLike(dag, null);
+
+    const result = await exec.run(runReq(dag, jobLike, null));
+
+    expect(result.ok && result.value.kind).toBe("failed");
+    if (result.ok && result.value.kind === "failed" && result.value.error.kind === "node-crash") {
+      expect(result.value.error.nodeId).toBe(EXECUTOR_NODE_ID);
+      expect(typeof result.value.error.message).toBe("string");
+    }
+  });
+
+  it("a context-build throw settles as `failed` carrying the wiring fault's message (the durable diagnostic)", async () => {
+    // The setup phase is host wiring (context build), not an in-DAG node crash.
+    // Whatever channel settles it, the recorded FrameworkError must carry the
+    // factory's actual message — the operator's only durable diagnostic (the
+    // service's err-channel mapping would drop it), and the log line must be
+    // findable at error level with the message attached.
+    const dag = singleNodeDag((async () => ok("x")) as never);
+    const reg = registered(dag);
+    const throwingInfra: SharedInfra = {
+      ...sharedInfra(),
+      get capabilities(): never { throw new Error("infra exploded"); },
+    };
+    const exec = createRunExecutor({ sharedInfra: throwingInfra, getRegisteredDag: () => reg, agentClientMap: { "exec-dag": "fugue-agent-exec" } });
+    const jobLike = await seedJobLike(dag, null);
+    const res = await exec.run(runReq(dag, jobLike, null));
+    expect(res.ok && res.value.kind).toBe("failed");
+    if (res.ok && res.value.kind === "failed") {
+      const e = res.value.error;
+      if (e.kind !== "node-crash") {
+        throw new Error(`expected the node-crash fallback, got ${e.kind}`);
+      }
+      // The factory's actual message survives into the recorded error.
+      expect(e.message).toContain("infra exploded");
+    }
+  });
+
+  it("a throwing failure logger cannot replace the original failed outcome", async () => {
+    const dag = singleNodeDag((async () => ok("x")) as never);
+    const reg = registered(dag);
+    const throwingInfra: SharedInfra = {
+      ...sharedInfra(),
+      get capabilities(): never { throw new Error("original setup failure"); },
+    };
+    const exec = createRunExecutor({
+      sharedInfra: throwingInfra,
+      getRegisteredDag: () => reg,
+      agentClientMap: { "exec-dag": "fugue-agent-exec" },
+      logger: {
+        info: () => {},
+        warn: () => {},
+        error: () => { throw new Error("logger transport failed"); },
+      },
+    });
+    const jobLike = await seedJobLike(dag, null);
+
+    const result = await exec.run(runReq(dag, jobLike, null));
+
+    expect(result.ok && result.value.kind).toBe("failed");
+    if (result.ok && result.value.kind === "failed" && result.value.error.kind === "node-crash") {
+      expect(result.value.error.message).toContain("original setup failure");
     }
   });
 });
@@ -316,6 +536,145 @@ describe("createRunExecutor — slice timeout (AbortController wiring)", () => {
     if (res.ok) expect(res.value.kind).toBe("failed");
   });
 
+  it("hard-bounds an abort-insensitive node and fences late durable progress", async () => {
+    const dag = singleNodeDag((async () => {
+      await Bun.sleep(40); // deliberately ignores ctx.signal
+      return ok("late-success");
+    }) as never);
+    const reg = registered(dag, 5);
+    const exec = createRunExecutor({
+      sharedInfra: sharedInfra(),
+      getRegisteredDag: () => reg,
+      agentClientMap: { "exec-dag": "fugue-agent-exec" },
+    });
+    const job = await seedJobLike(dag, null);
+
+    const result = await Promise.race([
+      exec.run(runReq(dag, job, null)),
+      Bun.sleep(250).then(() => { throw new Error("worker slice remained wedged"); }),
+    ]);
+
+    expect(result.ok && result.value.kind).toBe("failed");
+    if (result.ok && result.value.kind === "failed") {
+      expect(result.value.error.kind).toBe("aborted");
+    }
+    const checkpointAtTimeout = job.persistedCheckpoint();
+    await Bun.sleep(60);
+    expect(job.persistedCheckpoint()).toBe(checkpointAtTimeout);
+  });
+
+  it("rejects a checkpoint write that started before but reaches commit after the deadline", async () => {
+    const dag = singleNodeDag((async () => ok("done")) as never);
+    const reg = registered(dag, 5);
+    let markWriteStarted!: () => void;
+    let releaseWrite!: () => void;
+    const writeStarted = new Promise<void>((resolve) => { markWriteStarted = resolve; });
+    const writeBlocked = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    const job = await seedJobLike(dag, null, {
+      beforeCheckpointCommit: async () => {
+        markWriteStarted();
+        await writeBlocked;
+      },
+    });
+    const exec = createRunExecutor({
+      sharedInfra: sharedInfra(),
+      getRegisteredDag: () => reg,
+      agentClientMap: { "exec-dag": "fugue-agent-exec" },
+    });
+    const checkpointBefore = job.persistedCheckpoint();
+
+    const execution = exec.run(runReq(dag, job, null));
+    await writeStarted;
+    const result = await execution;
+    expect(result.ok && result.value.kind).toBe("failed");
+
+    releaseWrite();
+    await Bun.sleep(20);
+    expect(job.persistedCheckpoint()).toBe(checkpointBefore);
+  });
+
+  it("does not consume a decision when its post-gate checkpoint reaches commit after timeout", async () => {
+    const dag = defineDag({
+      id: "exec-dag",
+      nodes: {
+        only: makeNode("only", {
+          humanReview: { prompt: "Approve?" } as never,
+          run: (async () => ok("reviewed")) as never,
+        }),
+      },
+      edges: [{ from: DAG_INPUT, to: "only" }],
+      outputNodeId: "only",
+    });
+    let blockCheckpoint = false;
+    let markWriteStarted!: () => void;
+    let releaseWrite!: () => void;
+    const writeStarted = new Promise<void>((resolve) => { markWriteStarted = resolve; });
+    const writeBlocked = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    const job = await seedJobLike(dag, null, {
+      beforeCheckpointCommit: async () => {
+        if (!blockCheckpoint) return;
+        markWriteStarted();
+        await writeBlocked;
+      },
+    });
+    let live = registered(dag, 60_000);
+    const exec = createRunExecutor({
+      sharedInfra: sharedInfra(),
+      getRegisteredDag: () => live,
+      agentClientMap: { "exec-dag": "fugue-agent-exec" },
+    });
+
+    const parked = await exec.run({
+      ...runReq(dag, job, null),
+      onHumanReview: async () => ({ kind: "pending" }),
+    });
+    expect(parked.ok && parked.value.kind).toBe("suspended");
+
+    live = registered(dag, 5);
+    blockCheckpoint = true;
+    let consumed = 0;
+    const resumed = exec.run({
+      ...runReq(dag, job, null),
+      onHumanReview: async () => ({ kind: "approve" }),
+      onDecisionConsumed: async () => { consumed += 1; },
+    });
+    await writeStarted;
+    const timedOut = await resumed;
+    expect(timedOut.ok && timedOut.value.kind).toBe("failed");
+
+    releaseWrite();
+    await Bun.sleep(20);
+    expect(consumed).toBe(0);
+  });
+
+  it("aborts the node context immediately when the queue lease signal aborts", async () => {
+    let observedAbort = false;
+    let markStarted: () => void = () => {};
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const dag = singleNodeDag((async (_i: unknown, ctx: NodeContext) => {
+      markStarted();
+      await new Promise<void>((resolve) => {
+        ctx.signal?.addEventListener("abort", () => {
+          observedAbort = true;
+          resolve();
+        }, { once: true });
+      });
+      throw new Error("lease aborted");
+    }) as never);
+    const reg = registered(dag, 60_000);
+    const exec = createRunExecutor({ sharedInfra: sharedInfra(), getRegisteredDag: () => reg, agentClientMap: { "exec-dag": "fugue-agent-exec" } });
+    const jobLike = await seedJobLike(dag, null);
+    const leaseController = new AbortController();
+    const execution = exec.run({ ...runReq(dag, jobLike, null), signal: leaseController.signal });
+
+    await started;
+    leaseController.abort("ownership-lost");
+    const result = await execution;
+
+    expect(observedAbort).toBe(true);
+    expect(result.ok && result.value.kind).toBe("failed");
+  });
+
   it("a fast slice under config.timeout completes normally (timeout does not fire)", async () => {
     const dag = singleNodeDag((async () => ok("fast")) as never);
     const reg = registered(dag, 60_000);
@@ -342,25 +701,13 @@ const mkTenant = (s: string) => {
   return r.value;
 };
 
-/** A Map-backed RedisPort that RECORDS every key written, for namespace assertions. */
-const capturingRedis = (store: Map<string, string>): RedisPort => ({
-  async get(k) { return ok(store.get(k) ?? null); },
-  async set(k, v) { store.set(k, v); return ok("OK"); },
-  async del(k) { const had = store.delete(k); return ok(had ? 1 : 0); },
-  async scan() { return ok({ cursor: "0", keys: [...store.keys()] }); },
-  async setNx(k, v) { if (store.has(k)) return ok(false); store.set(k, v); return ok(true); },
-  async sAdd() { return ok(1); },
-  async sRem() { return ok(1); },
-  async sMembers() { return ok([]); },
-});
-
 describe("createRunExecutor — forwards deps.tenant as routedTenant (SC-001)", () => {
   it("namespaces a resumed run's keys under deps.tenant, NEVER the DAG's owning team (id != team)", async () => {
     // The DAG is owned by team "eng" (see `registered`); the worker is routed for
     // tenant "acme-prod". A node writes a cache key during the run — it must land
     // under fugue:acme-prod:, proving deps.tenant flowed into the node context.
     const store = new Map<string, string>();
-    const infra: SharedInfra = { ...sharedInfra(), redis: capturingRedis(store) };
+    const infra: SharedInfra = { ...sharedInfra(), redis: stubRedis(store) };
     const dag = singleNodeDag((async (_i: unknown, ctx: NodeContext) => {
       if (!ctx.cache) throw new Error("expected a namespaced cache on the node context");
       await ctx.cache.set("probe", { v: 1 });
@@ -386,7 +733,7 @@ describe("createRunExecutor — forwards deps.tenant as routedTenant (SC-001)", 
 
   it("OMITTING deps.tenant falls back to the dag.team derivation (single-tenant parity)", async () => {
     const store = new Map<string, string>();
-    const infra: SharedInfra = { ...sharedInfra(), redis: capturingRedis(store) };
+    const infra: SharedInfra = { ...sharedInfra(), redis: stubRedis(store) };
     const dag = singleNodeDag((async (_i: unknown, ctx: NodeContext) => {
       if (!ctx.cache) throw new Error("expected a namespaced cache on the node context");
       await ctx.cache.set("probe", { v: 1 });

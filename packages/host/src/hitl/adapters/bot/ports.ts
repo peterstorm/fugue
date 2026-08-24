@@ -29,8 +29,8 @@ export interface ConversationReference {
 
 /**
  * Stores the conversation reference(s) the bot can post reviews to. A DEFAULT
- * reference (the channel the bot was added to) is kept for back-compat and as the
- * fallback channel; PER-TEAM references (FR-041) let the notifier deliver one
+ * reference records the most recently observed bot channel for operational
+ * compatibility; PER-TEAM references (FR-041) let the notifier deliver one
  * team's review cards to that team's OWN channel.
  *
  * Per-team routing is a CONFIDENTIALITY measure — it decides WHERE a card is
@@ -38,14 +38,13 @@ export interface ConversationReference {
  * channel. It is NOT the control that prevents acting on another team's runs:
  * that is the authorization gate (`canAccessDag`) on the inbound button-click
  * path (`messages-handler.ts`), which refuses a non-member's click regardless of
- * which channel the card reached. A team without its own reference falls back to
- * the default channel.
+ * which channel the card reached. A run owner without its own reference fails
+ * closed; review delivery never falls back to the default channel.
  *
  * Wiring: `saveTeamReference` is called from `handleBotActivity` on
  * `conversationUpdate` when the activity's `channelData.team.aadGroupId` maps to
- * a fugue team via `HITL_TEAM_CHANNELS`; `getTeamReference` is read by
- * `createBotFrameworkNotifier` to pick the team channel before falling back to
- * the default.
+ * a fugue team via `HITL_TEAM_CHANNELS`; `getTeamReference` is the notifier's
+ * only routing source for review delivery.
  */
 export interface ConversationStorePort {
   saveDefaultReference(ref: ConversationReference): Promise<Result<void, HostError>>;
@@ -56,9 +55,9 @@ export interface ConversationStorePort {
    */
   saveTeamReference(team: string, ref: ConversationReference): Promise<Result<void, HostError>>;
   /**
-   * Fetch a team's conversation reference, or `ok(null)` when the team has none
-   * (the notifier then falls back to the default channel). Used for confidentiality
-   * routing, not authorization (FR-041).
+   * Fetch a team's conversation reference, or `ok(null)` when the team has none.
+   * The notifier treats absence as a typed delivery failure. Used for
+   * confidentiality routing, not authorization (FR-041).
    */
   getTeamReference(team: string): Promise<Result<ConversationReference | null, HostError>>;
 }

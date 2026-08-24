@@ -5,7 +5,7 @@
 // `createTimeoutSignal` that wires the abort-controller, timer, and
 // caller-signal forwarding so each client doesn't repeat the pattern.
 
-export interface TimeoutHandle {
+interface TimeoutHandle {
   /** The composite signal to pass to fetch / SDK calls. */
   readonly signal: AbortSignal;
   /** True when the timeout (not the caller) triggered the abort. */

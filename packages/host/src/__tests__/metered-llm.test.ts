@@ -102,6 +102,65 @@ describe("metered-llm: no budget (FR-W1-006 passthrough)", () => {
   });
 });
 
+describe("metered-llm: diagnostic failures never replace LLM outcomes", () => {
+  const throwingLogger: LogPort = {
+    info() { throw Object.create(null); },
+    warn() { throw Object.create(null); },
+    error() { throw Object.create(null); },
+  };
+
+  it("preserves a successful call and a later budget refusal when logging throws", async () => {
+    const { inner, calls } = fakeInner(10, 5);
+    const metered = createMeteredLlm(inner, {
+      dagId,
+      runId,
+      budget: 10,
+      logger: throwingLogger,
+    });
+
+    const succeeded = await metered.sendStructured(structuredReq(nodeA));
+    const refused = await metered.sendStructured(structuredReq(nodeA));
+
+    expect(succeeded.ok).toBe(true);
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.error.kind).toBe("llm-budget-exceeded");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("preserves a typed provider error when its diagnostic throws", async () => {
+    const expected: FrameworkError = {
+      kind: "transient",
+      nodeId: nodeA,
+      message: "provider unavailable",
+    };
+    const inner: LlmClient = {
+      sendStructured: async () => err(expected),
+      sendWithTools: async () => err(expected),
+    };
+    const metered = createMeteredLlm(inner, { dagId, runId, logger: throwingLogger });
+
+    expect(await metered.sendStructured(structuredReq(nodeA))).toEqual(err(expected));
+  });
+
+  it("rethrows the original hostile provider value when error logging throws", async () => {
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    const inner: LlmClient = {
+      sendStructured: async () => { throw revoked.proxy; },
+      sendWithTools: async () => { throw revoked.proxy; },
+    };
+    const metered = createMeteredLlm(inner, { dagId, runId, logger: throwingLogger });
+
+    let caught: unknown;
+    try {
+      await metered.sendStructured(structuredReq(nodeA));
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBe(revoked.proxy);
+  });
+});
+
 describe("metered-llm: attribution stamp (FR-W0-001 / SC-001)", () => {
   it("emits a structured metering log with (dagId, runId, nodeId) on every successful call", async () => {
     const { inner } = fakeInner(100, 50);

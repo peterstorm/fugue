@@ -27,7 +27,7 @@ export interface DagSnapshot {
 /**
  * Result of comparing two sets of DAG snapshots.
  */
-export interface DagDiff {
+interface DagDiff {
   readonly added: readonly DagSnapshot[];
   readonly removed: readonly DagSnapshot[];
   readonly changed: readonly DagSnapshot[];

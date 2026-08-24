@@ -15,6 +15,7 @@ import * as fc from "fast-check";
 import {
   httpStatusFor,
   formatHostError,
+  retryAfterSeconds,
   retryAfterSecondsFor,
   tenantUnknown,
   tenantOverQuota,
@@ -40,6 +41,23 @@ describe("tenant error smart constructors", () => {
       tenant: "acme",
       retryAfterSeconds: 30,
     });
+  });
+
+  it("Retry-After accepts exactly the non-negative safe-integer domain", () => {
+    fc.assert(
+      fc.property(fc.double(), (value) => {
+        const accepted = Number.isSafeInteger(value) && value >= 0;
+        if (accepted) {
+          expect(retryAfterSeconds(value)).toBe(value);
+          expect(tenantOverQuota(tid("acme"), value).retryAfterSeconds).toBe(value);
+        } else {
+          expect(() => retryAfterSeconds(value)).toThrow(
+            "retryAfterSeconds must be a non-negative safe integer",
+          );
+          expect(() => tenantOverQuota(tid("acme"), value)).toThrow();
+        }
+      }),
+    );
   });
 
   it("workerUnavailable carries its own tenant", () => {

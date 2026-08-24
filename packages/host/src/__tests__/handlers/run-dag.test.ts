@@ -4,6 +4,7 @@ import { dagId, gitSha, ok, err, runDag, defineDagFromArray, createFetchNode, ma
 import type { NodeContext, FrameworkError, DagId, Capability, CapabilityBroker, InvocationOrigin } from "@fuguejs/framework";
 import { z } from "zod";
 import { createRunDagHandler } from "../../http/handlers/run-dag.js";
+import { settleBeforeDeadline } from "../../adapters/settle-before-deadline.js";
 import type { RunDagDeps } from "../../http/handlers/run-dag.js";
 import type { RegisteredDag } from "../../domain/registry.js";
 import type { HostState } from "../../domain/host-state.js";
@@ -14,6 +15,7 @@ import type { ConcurrencyState } from "../../domain/concurrency.js";
 import { initCircuit } from "../../domain/circuit-breaker.js";
 import type { CircuitState } from "../../domain/circuit-breaker.js";
 import type { AuthIdentity } from "../../domain/auth.js";
+import type { HitlRunService } from "../../hitl/service.js";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -37,6 +39,15 @@ const makeDag = (id: string, team = "test-team"): RegisteredDag => ({
 const makeDisabledDag = (id: string): RegisteredDag => ({
   ...makeDag(id),
   status: { kind: "disabled", reason: "circuit open" },
+});
+
+const makeHitlDag = (id: string): RegisteredDag => ({
+  ...makeDag(id),
+  dag: {
+    id: dagId(id),
+    nodes: [{ humanReview: { prompt: "Approve?" } }],
+    edges: [],
+  } as unknown as RegisteredDag["dag"],
 });
 
 const makeReadyState = (registry: Registry): HostState => ({
@@ -152,13 +163,66 @@ describe("run-dag handler", () => {
     expect(res.status).toBe(401);
   });
 
-  it("returns 403 when team cannot access DAG", async () => {
+  it("returns 403 before invoking either synchronous or HITL execution for another team", async () => {
     const identity: AuthIdentity = { kind: "team", team: "other-team", label: "other" };
-    const app = createTestApp(defaultDeps(), readyState, identity);
-    const res = await post(app, "test-dag", { query: "hi" });
-    expect(res.status).toBe(403);
+
+    for (const candidate of [makeDag("sync-denied"), makeHitlDag("hitl-denied")]) {
+      let executeCalls = 0;
+      let startRunCalls = 0;
+      let concurrencyWrites = 0;
+      const hitl = {
+        async startRun() {
+          startRunCalls++;
+          return ok({ runId: "should-not-run" as never });
+        },
+      } as HitlRunService;
+      const deps = defaultDeps({
+        hitl,
+        executeDag: (async () => {
+          executeCalls++;
+          return ok({ unreachable: true });
+        }) as RunDagDeps["executeDag"],
+        setConcurrency: () => { concurrencyWrites++; },
+      });
+      const deniedState = makeReadyState(freeze([candidate], sha, Date.now()));
+      const res = await post(createTestApp(deps, deniedState, identity), candidate.id, { query: "hi" });
+
+      expect(res.status).toBe(403);
+      expect((await res.json()).error).toBe("forbidden");
+      expect(executeCalls).toBe(0);
+      expect(startRunCalls).toBe(0);
+      expect(concurrencyWrites).toBe(0);
+    }
+  });
+
+  it("maps HITL start failures through httpStatusFor without synchronous fallback", async () => {
+    const hitlDag = makeHitlDag("hitl-start-failure");
+    const hitlState = makeReadyState(freeze([hitlDag], sha, Date.now()));
+    let executeCalls = 0;
+    const hitl = {
+      async startRun() {
+        return err({ kind: "redis-unavailable" as const, operation: "create-hitl-run" });
+      },
+    } as HitlRunService;
+    const deps = defaultDeps({
+      hitl,
+      executeDag: (async () => {
+        executeCalls += 1;
+        return ok({ unreachable: true });
+      }) as RunDagDeps["executeDag"],
+    });
+
+    const res = await post(
+      createTestApp(deps, hitlState),
+      "hitl-start-failure",
+      { query: "hi" },
+    );
     const body = await res.json();
-    expect(body.error).toBe("forbidden");
+
+    expect(res.status).toBe(503);
+    expect(body.error).toBe("redis-unavailable");
+    expect(body.ok).toBe(false);
+    expect(executeCalls).toBe(0);
   });
 
   describe("identity threading into the run (FR-W3-007)", () => {
@@ -308,8 +372,8 @@ describe("run-dag handler", () => {
   });
 
   it("returns 500 and releases the concurrency token when createContext throws", async () => {
-    // Exercises the setup-guard branch: createContext throwing must clear the timeout timer,
-    // mark the circuit, rethrow → 500, and the outer finally must still release the slot.
+    // Exercises the setup-guard branch: createContext throwing must mark the
+    // circuit, rethrow → 500, and still release the slot in the outer finally.
     let concurrency = initConcurrency(50, 10);
     const deps = defaultDeps({
       getConcurrency: () => concurrency,
@@ -344,7 +408,7 @@ describe("run-dag handler", () => {
     // Async sibling of the sync-throw setup-guard test above. The async migration introduced
     // a new failure mode: `await deps.createContext(...)` resolving to a REJECTED promise (how a
     // failing broker surfaces in Wave 4). The setup-guard catch must handle it identically to a
-    // sync throw — clear the timer, mark the circuit, 500, and the outer finally releases the slot.
+    // sync throw — mark the circuit, return 500, and release the slot.
     let concurrency = initConcurrency(50, 10);
     const deps = defaultDeps({
       getConcurrency: () => concurrency,
@@ -558,10 +622,66 @@ describe("run-dag handler", () => {
       e.name = "AbortError";
       throw e;
     }) as RunDagDeps["executeDag"];
-    const app = createTestApp(defaultDeps({ executeDag: timeoutExecute }), makeReadyState(reg));
+    const diagnostics: Array<{ readonly message: string; readonly data?: Record<string, unknown> }> = [];
+    const app = createTestApp(defaultDeps({
+      executeDag: timeoutExecute,
+      logger: {
+        info() {},
+        warn() {},
+        error(message, data) { diagnostics.push({ message, data }); },
+      },
+    }), makeReadyState(reg));
     const res = await post(app, "slow-dag", { query: "hi" });
     expect(res.status).toBe(408);
     expect((await res.json()).error).toBe("timeout");
+
+    await Bun.sleep(60);
+    expect(diagnostics).toContainEqual({
+      message: "host: DAG execution rejected after request deadline",
+      data: { dagId: "slow-dag", runId: "test-run-id", error: "aborted" },
+    });
+  });
+
+  it("maps the framework's typed aborted Result to 408 when the host deadline fires", async () => {
+    const base = makeDag("typed-timeout-dag");
+    const timedDag: RegisteredDag = { ...base, config: { ...base.config, timeout: 5 } };
+    const reg = freeze([timedDag], sha, Date.now());
+    const executeDag = (async (_dag: unknown, _input: unknown, ctx: NodeContext) => {
+      await new Promise<void>((resolve) => {
+        if (ctx.signal?.aborted) return resolve();
+        ctx.signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+      return err({ kind: "aborted", reason: "signal" });
+    }) as RunDagDeps["executeDag"];
+
+    const response = await post(
+      createTestApp(defaultDeps({ executeDag }), makeReadyState(reg)),
+      "typed-timeout-dag",
+      { query: "hi" },
+    );
+
+    expect(response.status).toBe(408);
+    expect((await response.json()).error).toBe("timeout");
+  });
+
+  it("hard-bounds abort-insensitive execution and releases its concurrency token", async () => {
+    const base = makeDag("wedged-dag");
+    const timedDag: RegisteredDag = { ...base, config: { ...base.config, timeout: 5 } };
+    const reg = freeze([timedDag], sha, Date.now());
+    let concurrency = initConcurrency(50, 10);
+    const deps = defaultDeps({
+      getConcurrency: () => concurrency,
+      setConcurrency: (next) => { concurrency = next; },
+      executeDag: (() => new Promise(() => {})) as RunDagDeps["executeDag"],
+    });
+
+    const response = await Promise.race([
+      post(createTestApp(deps, makeReadyState(reg)), "wedged-dag", { query: "hi" }),
+      Bun.sleep(250).then(() => { throw new Error("host request remained wedged"); }),
+    ]);
+
+    expect(response.status).toBe(408);
+    expect(concurrency.global.current).toBe(0);
   });
 
   it("honors a per-DAG circuitBreaker.failureThreshold (opens sooner than the host default)", async () => {
@@ -624,5 +744,36 @@ describe("run-dag handler", () => {
     const app = createTestApp(defaultDeps({ executeDag: okDag }), readyState, identity);
     const res = await post(app, "test-dag", { query: "hi" });
     expect(res.status).toBe(200);
+  });
+});
+
+describe("settleBeforeDeadline diagnostics", () => {
+  it("reports timeout-cancellation failure without replacing hard settlement", async () => {
+    const failures: unknown[] = [];
+    const result = await settleBeforeDeadline(
+      new Promise<never>(() => {}),
+      1,
+      () => { throw new Error("abort transport failed"); },
+      { onTimeoutCancellationFailure: (error) => failures.push(error) },
+    );
+
+    expect(result).toEqual({ kind: "timed-out" });
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toBeInstanceOf(Error);
+  });
+
+  it("contains a throwing late-rejection diagnostic", async () => {
+    const operation = new Promise<never>((_resolve, reject) => {
+      setTimeout(() => reject(new Error("late failure")), 10);
+    });
+    const result = await settleBeforeDeadline(
+      operation,
+      1,
+      () => {},
+      { onLateRejection: () => { throw new Error("logger failed"); } },
+    );
+
+    expect(result).toEqual({ kind: "timed-out" });
+    await expect(Bun.sleep(20)).resolves.toBeUndefined();
   });
 });

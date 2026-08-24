@@ -6,7 +6,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { AnthropicLlmClient } from "../llm/anthropic-client.js";
 import type { ToolDef } from "../types/llm.js";
 import { tool } from "../llm/tools.js";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import { N } from "./_id-helpers.js";
 
 // ---------------------------------------------------------------------------
 // Anthropic SDK stub
@@ -97,19 +97,26 @@ type SchemaType = z.infer<typeof Schema>;
 // sendStructured
 // ---------------------------------------------------------------------------
 
+/**
+ * The base `sendStructured` request. Only `nodeId` genuinely varies across the
+ * ~14 call sites in this file; spreading and overriding makes each test say
+ * what it actually changes instead of restating the whole envelope.
+ */
+const structuredRequest = (node: string) => ({
+  system: "s",
+  user: "u",
+  model: "claude-test",
+  schema: Schema,
+  nodeId: node as NodeId,
+});
+
 describe("AnthropicLlmClient.sendStructured", () => {
   it("parses tool_use input against the Zod schema and returns ok with token usage", async () => {
     const client = new AnthropicLlmClient(
       makeStub(async () => makeToolUseResponse({ greeting: "hi" }, 12, 7)),
     );
 
-    const result = await client.sendStructured<SchemaType>({
-      system: "system",
-      user: "user",
-      model: "claude-test",
-      schema: Schema,
-      nodeId: "test-node" as NodeId,
-    });
+    const result = await client.sendStructured<SchemaType>({ ...structuredRequest("test-node"), system: "system", user: "user" });
 
     expect(result.ok).toBe(true);
     if (result.ok) {
@@ -129,13 +136,7 @@ describe("AnthropicLlmClient.sendStructured", () => {
       }),
     );
 
-    const base = {
-      system: "s",
-      user: "u",
-      model: "claude-test",
-      schema: Schema,
-      nodeId: "test-node" as NodeId,
-    };
+    const base = structuredRequest("test-node");
     // A pinned temperature reaches the wire (compose pins 0 for determinism)…
     await client.sendStructured<SchemaType>({ ...base, temperature: 0 });
     expect(seen[0]?.temperature).toBe(0);
@@ -150,13 +151,7 @@ describe("AnthropicLlmClient.sendStructured", () => {
     // the stop_reason. Dropping the `truncateErrorBody(JSON.stringify(...))`
     // suffix (FIX 2) makes the marker vanish from the message and this fail.
     const client = new AnthropicLlmClient(makeStub(async () => makeTextResponse("BODY_MARKER_9f3a")));
-    const result = await client.sendStructured<SchemaType>({
-      system: "s",
-      user: "u",
-      model: "claude-test",
-      schema: Schema,
-      nodeId: "my-node" as NodeId,
-    });
+    const result = await client.sendStructured<SchemaType>(structuredRequest("my-node"));
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("node-crash");
@@ -187,13 +182,7 @@ describe("AnthropicLlmClient.sendStructured", () => {
       stop_reason: "max_tokens",
     } as Anthropic.Message;
     const missingToolUse = new AnthropicLlmClient(makeStub(async () => truncatedText));
-    const r1 = await missingToolUse.sendStructured<SchemaType>({
-      system: "s",
-      user: "u",
-      model: "claude-test",
-      schema: Schema,
-      nodeId: "trunc-1" as NodeId,
-    });
+    const r1 = await missingToolUse.sendStructured<SchemaType>(structuredRequest("trunc-1"));
     expect(r1.ok).toBe(false);
     if (!r1.ok) {
       // Hard assertion (not a soft guard) — a reclassified arm must FAIL
@@ -211,13 +200,7 @@ describe("AnthropicLlmClient.sendStructured", () => {
       stop_reason: "max_tokens",
     } as Anthropic.Message;
     const schemaFails = new AnthropicLlmClient(makeStub(async () => truncatedToolUse));
-    const r2 = await schemaFails.sendStructured<SchemaType>({
-      system: "s",
-      user: "u",
-      model: "claude-test",
-      schema: Schema,
-      nodeId: "trunc-2" as NodeId,
-    });
+    const r2 = await schemaFails.sendStructured<SchemaType>(structuredRequest("trunc-2"));
     expect(r2.ok).toBe(false);
     if (!r2.ok) {
       expect(r2.error.kind).toBe("node-crash");
@@ -235,13 +218,7 @@ describe("AnthropicLlmClient.sendStructured", () => {
       stop_reason: "refusal",
     } as unknown as Anthropic.Message;
     const client = new AnthropicLlmClient(makeStub(async () => refused));
-    const result = await client.sendStructured<SchemaType>({
-      system: "s",
-      user: "u",
-      model: "claude-test",
-      schema: Schema,
-      nodeId: "refuse-struct" as NodeId,
-    });
+    const result = await client.sendStructured<SchemaType>(structuredRequest("refuse-struct"));
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("node-crash");
@@ -261,14 +238,7 @@ describe("AnthropicLlmClient.sendStructured", () => {
       }),
     );
     for (const temperature of [Number.NaN, Number.POSITIVE_INFINITY, -0.1, 1.5]) {
-      const result = await client.sendStructured<SchemaType>({
-        system: "s",
-        user: "u",
-        model: "claude-test",
-        schema: Schema,
-        nodeId: "temp-node" as NodeId,
-        temperature,
-      });
+      const result = await client.sendStructured<SchemaType>({ ...structuredRequest("temp-node"), temperature });
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.error.kind).toBe("validation");
@@ -280,14 +250,7 @@ describe("AnthropicLlmClient.sendStructured", () => {
     }
     // The boundary values of the documented [0, 1] range are legal.
     for (const temperature of [0, 1]) {
-      const result = await client.sendStructured<SchemaType>({
-        system: "s",
-        user: "u",
-        model: "claude-test",
-        schema: Schema,
-        nodeId: "temp-node" as NodeId,
-        temperature,
-      });
+      const result = await client.sendStructured<SchemaType>({ ...structuredRequest("temp-node"), temperature });
       expect(result.ok).toBe(true);
     }
     // None of the rejected requests reached the wire.
@@ -305,13 +268,7 @@ describe("AnthropicLlmClient.sendStructured", () => {
         return makeToolUseResponse({ greeting: "hi" });
       }),
     );
-    const result = await client.sendStructured<SchemaType>({
-      system: "s",
-      user: "u",
-      model: "claude-test",
-      schema: {} as unknown as z.ZodType<SchemaType>,
-      nodeId: "bad-schema" as NodeId,
-    });
+    const result = await client.sendStructured<SchemaType>({ ...structuredRequest("bad-schema"), schema: {} as unknown as z.ZodType<SchemaType> });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("validation");
@@ -327,13 +284,7 @@ describe("AnthropicLlmClient.sendStructured", () => {
     const client = new AnthropicLlmClient(
       makeStub(async () => makeToolUseResponse({ wrong: "shape" }, 12, 7)),
     );
-    const result = await client.sendStructured<SchemaType>({
-      system: "s",
-      user: "u",
-      model: "claude-test",
-      schema: Schema,
-      nodeId: "schema-node" as NodeId,
-    });
+    const result = await client.sendStructured<SchemaType>(structuredRequest("schema-node"));
     expect(result.ok).toBe(false);
     if (!result.ok && result.error.kind === "node-crash") {
       expect(result.error.nodeId).toBe(N("schema-node"));
@@ -350,13 +301,7 @@ describe("AnthropicLlmClient.sendStructured", () => {
         throw new APIUserAbortError();
       }),
     );
-    const result = await client.sendStructured<SchemaType>({
-      system: "s",
-      user: "u",
-      model: "claude-test",
-      schema: Schema,
-      nodeId: "test-node" as NodeId,
-    });
+    const result = await client.sendStructured<SchemaType>(structuredRequest("test-node"));
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("aborted");
@@ -371,13 +316,7 @@ describe("AnthropicLlmClient.sendStructured", () => {
         throw e;
       }),
     );
-    const result = await client.sendStructured<SchemaType>({
-      system: "s",
-      user: "u",
-      model: "claude-test",
-      schema: Schema,
-      nodeId: "test-node" as NodeId,
-    });
+    const result = await client.sendStructured<SchemaType>(structuredRequest("test-node"));
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("aborted");
@@ -390,13 +329,7 @@ describe("AnthropicLlmClient.sendStructured", () => {
         throw new Error("network down");
       }),
     );
-    const result = await client.sendStructured<SchemaType>({
-      system: "s",
-      user: "u",
-      model: "claude-test",
-      schema: Schema,
-      nodeId: "n" as NodeId,
-    });
+    const result = await client.sendStructured<SchemaType>(structuredRequest("n"));
     expect(result.ok).toBe(false);
     if (!result.ok && result.error.kind === "node-crash") {
       expect(result.error.nodeId).toBe(N("n"));
@@ -749,13 +682,7 @@ describe("AnthropicLlmClient — non-429 4xx mapping (sendStructured)", () => {
     const client = new AnthropicLlmClient(
       makeStub(async () => { throw authError; }),
     );
-    const result = await client.sendStructured<SchemaType>({
-      system: "s",
-      user: "u",
-      model: "claude-test",
-      schema: Schema,
-      nodeId: "auth-node" as NodeId,
-    });
+    const result = await client.sendStructured<SchemaType>(structuredRequest("auth-node"));
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("node-crash");
@@ -775,13 +702,7 @@ describe("AnthropicLlmClient — 429 mapping (sendStructured)", () => {
     const client = new AnthropicLlmClient(
       makeStub(async () => { throw rateLimitError; }),
     );
-    const result = await client.sendStructured<SchemaType>({
-      system: "s",
-      user: "u",
-      model: "claude-test",
-      schema: Schema,
-      nodeId: "rl-node" as NodeId,
-    });
+    const result = await client.sendStructured<SchemaType>(structuredRequest("rl-node"));
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("transient");

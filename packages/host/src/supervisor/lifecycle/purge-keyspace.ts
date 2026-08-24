@@ -1,5 +1,5 @@
 /**
- * Tenant keyspace purge (FR-030, SC-010) — the scan + delete leaf that reclaims
+ * Tenant keyspace purge (multi-tenant spec FR-030, SC-010) — the scan + delete leaf that reclaims
  * every `fugue:<tenant>:*` key for a deregistered tenant during the grace-window
  * sweep. Factored out of the supervisor composition root (`main-supervisor.ts`)
  * so its best-effort enumeration invariant is unit-testable WITHOUT a real Redis.

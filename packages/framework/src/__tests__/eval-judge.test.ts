@@ -1,12 +1,14 @@
-import { NoopObserver } from "../observer/observer.js";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
-import type { RunId, NodeId, DagId } from "../types/ids.js";
+import { RecordingObserver } from "../observer/observer.js";
+import { testNodeContext } from "./_context-factories.js";
+import { N } from "./_id-helpers.js";
+import type { NodeId } from "../types/ids.js";
 import { describe, test, expect } from "bun:test";
+import fc from "fast-check";
 import { judgePassed } from "../types/eval-judge.js";
 import {
   createEvalJudgeNode,
   toEvalJudgeResult,
-  failOpenResult,
+  llmFailureResult,
   EvalJudgeResponseSchema,
 } from "../../src/nodes/eval-judge.js";
 import type { EvalJudgeResponse } from "../../src/nodes/eval-judge.js";
@@ -17,19 +19,7 @@ import { stubSendWithTools } from "./_llm-mocks.js";
 
 // --- Helpers ---
 
-const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
-  runId: "test-run" as RunId,
-  dagId: "test-dag" as DagId,
-  observer: new NoopObserver(),
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null,
-  cache: null,
-  prompts: null,
-  llm: null, http: null,
-  clock: null,
-  logger: { warn: () => {}, error: () => {} },
-  ...overrides,
-});
+const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => testNodeContext(overrides);
 
 const makeMockLlm = (response: EvalJudgeResponse): LlmClient => ({
   sendWithTools: stubSendWithTools,
@@ -94,6 +84,18 @@ describe("toEvalJudgeResult", () => {
     expect(result.failedCriteria).toHaveLength(0);
   });
 
+  test("supports criterion names that overlap object prototype keys", () => {
+    const result = toEvalJudgeResult({
+      score: 1,
+      criteria_scores: [{ name: "__proto__", score: 1 }],
+      failed_criteria: [],
+      reason: "Valid",
+    }, 0.8, ["__proto__"]);
+
+    expect(result.outcome).toBe("passed");
+    expect(Object.prototype.hasOwnProperty.call(result.criteriaScores, "__proto__")).toBe(true);
+  });
+
   test("fails when score < threshold", () => {
     const response: EvalJudgeResponse = {
       score: 0.6,
@@ -110,7 +112,7 @@ describe("toEvalJudgeResult", () => {
     const response: EvalJudgeResponse = {
       score: 0.85,
       criteria_scores: [{ name: "factuality", score: 0.95 }, { name: "relevance", score: 0.75 }],
-      failed_criteria: [],
+      failed_criteria: ["relevance"],
       reason: "Mostly good",
     };
     const result = toEvalJudgeResult(response, 0.8, ["factuality", "relevance"]);
@@ -119,17 +121,63 @@ describe("toEvalJudgeResult", () => {
     expect(result.failedCriteria).not.toContain("factuality");
   });
 
-  test("ignores criteria not in the config list", () => {
-    const response: EvalJudgeResponse = {
+  test("fails closed when a configured criterion is omitted", () => {
+    const result = toEvalJudgeResult({
+      score: 1,
+      criteria_scores: [{ name: "factuality", score: 1 }],
+      failed_criteria: [],
+      reason: "Incomplete evaluation",
+    }, 0.8, ["factuality", "relevance"]);
+
+    expect(result.outcome).toBe("skipped-llm-failure");
+    expect(judgePassed(result)).toBe(false);
+    expect(result.reason).toContain("missing: relevance");
+  });
+
+  test("fails closed on duplicate or unexpected criterion scores", () => {
+    const duplicate = toEvalJudgeResult({
+      score: 1,
+      criteria_scores: [{ name: "factuality", score: 1 }, { name: "Factuality", score: 1 }],
+      failed_criteria: [],
+      reason: "Duplicate",
+    }, 0.8, ["factuality"]);
+    const unexpected = toEvalJudgeResult({
+      score: 1,
+      criteria_scores: [{ name: "factuality", score: 1 }, { name: "extra", score: 1 }],
+      failed_criteria: [],
+      reason: "Extra",
+    }, 0.8, ["factuality"]);
+
+    expect(duplicate.outcome).toBe("skipped-llm-failure");
+    expect(unexpected.outcome).toBe("skipped-llm-failure");
+  });
+
+  test("fails closed when failed_criteria contradicts the criterion scores", () => {
+    const result = toEvalJudgeResult({
       score: 0.9,
-      criteria_scores: [{ name: "factuality", score: 0.9 }, { name: "extra", score: 0.1 }],
-      failed_criteria: ["extra"],
-      reason: "Fine",
-    };
-    // Only checking "factuality" — "extra" is not in our criteria list
-    const result = toEvalJudgeResult(response, 0.8, ["factuality"]);
-    expect(judgePassed(result)).toBe(true);
-    expect(result.failedCriteria).toHaveLength(0);
+      criteria_scores: [{ name: "factuality", score: 0.2 }],
+      failed_criteria: [],
+      reason: "Contradictory",
+    }, 0.8, ["factuality"]);
+
+    expect(result.outcome).toBe("skipped-llm-failure");
+    expect(result.reason).toContain("contradicts");
+  });
+
+  test("property: omitting any configured criterion can never pass", () => {
+    fc.assert(fc.property(
+      fc.uniqueArray(fc.integer({ min: 0, max: 1_000 }), { minLength: 1, maxLength: 12 }),
+      (ids) => {
+        const criteria = ids.map((id) => `criterion-${id}`);
+        const response: EvalJudgeResponse = {
+          score: 1,
+          criteria_scores: criteria.slice(1).map((name) => ({ name, score: 1 })),
+          failed_criteria: [],
+          reason: "Incomplete",
+        };
+        expect(judgePassed(toEvalJudgeResult(response, 0.8, criteria))).toBe(false);
+      },
+    ));
   });
 
   test("handles edge case: score exactly at threshold", () => {
@@ -167,11 +215,11 @@ describe("toEvalJudgeResult", () => {
   });
 });
 
-describe("failOpenResult", () => {
-  test("returns skipped-llm-failure outcome that is fail-open", () => {
-    const result = failOpenResult("LLM unavailable");
+describe("llmFailureResult", () => {
+  test("returns skipped-llm-failure outcome that fails quality gating closed", () => {
+    const result = llmFailureResult("LLM unavailable");
     expect(result.outcome).toBe("skipped-llm-failure");
-    expect(judgePassed(result)).toBe(true);
+    expect(judgePassed(result)).toBe(false);
     expect(result.score).toBeNull();
     expect(result.reason).toContain("LLM unavailable");
     expect(result.failedCriteria).toHaveLength(0);
@@ -188,12 +236,79 @@ describe("createEvalJudgeNode", () => {
     expect(node.kind).toBe("eval-judge");
   });
 
-  test("uses default threshold of 0.8", () => {
+  test("normalizes the default threshold to 0.8 on the constructed definition", () => {
     const node = createEvalJudgeNode({
       id: N("judge"),
       criteria: ["x"],
     });
-    expect(node.config.threshold).toBeUndefined(); // stored as config, applied at runtime
+    expect(node.config.threshold).toBe(0.8);
+  });
+
+  test("rejects non-finite and out-of-range thresholds before constructing a judge", () => {
+    for (const threshold of [-1, -Number.MIN_VALUE, 1.01, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      expect(() => createEvalJudgeNode({ id: N("judge"), criteria: ["x"], threshold })).toThrow(RangeError);
+    }
+  });
+
+  test("accepts every finite threshold in the inclusive [0, 1] domain", () => {
+    fc.assert(fc.property(
+      fc.double({ min: 0, max: 1, noNaN: true, noDefaultInfinity: true }),
+      (threshold) => {
+        const node = createEvalJudgeNode({ id: N("judge"), criteria: ["x"], threshold });
+        expect(node.config.threshold).toBe(threshold);
+      },
+    ));
+  });
+
+  test("snapshots nested caller configuration and runs from the immutable definition", async () => {
+    const criteria = ["factuality"];
+    const rubric: { source: "inline"; text: string } = { source: "inline", text: "original rubric" };
+    const config = {
+      id: N("original-judge"),
+      criteria,
+      threshold: 0.8,
+      rubric,
+      model: "original-model",
+    };
+    let capturedModel = "";
+    let capturedUser = "";
+    const node = createEvalJudgeNode(config);
+
+    criteria[0] = "mutated";
+    rubric.text = "mutated rubric";
+    config.id = N("mutated-judge");
+    config.model = "mutated-model";
+
+    const result = await node.run("input", "output", makeCtx({
+      judgeLlm: {
+        sendWithTools: stubSendWithTools,
+        sendStructured: async (request) => {
+          capturedModel = request.model;
+          capturedUser = request.user;
+          return ok({
+            output: {
+              score: 1,
+              criteria_scores: [{ name: "factuality", score: 1 }],
+              failed_criteria: [],
+              reason: "valid",
+            },
+            tokensIn: 0,
+            tokensOut: 0,
+            rawText: "",
+          }) as any;
+        },
+      },
+    }));
+
+    expect(result.outcome).toBe("passed");
+    expect(node.id).toBe(N("original-judge"));
+    expect(node.config.criteria).toEqual(["factuality"]);
+    expect(node.config.rubric).toEqual({ source: "inline", text: "original rubric" });
+    expect(capturedModel).toBe("original-model");
+    expect(capturedUser).toContain("original rubric");
+    expect(Object.isFrozen(node.config)).toBe(true);
+    expect(Object.isFrozen(node.config.criteria)).toBe(true);
+    expect(Object.isFrozen(node.config.rubric)).toBe(true);
   });
 
   describe("run()", () => {
@@ -220,7 +335,7 @@ describe("createEvalJudgeNode", () => {
       const llm = makeMockLlm({
         score: 0.5,
         criteria_scores: [{ name: "factuality", score: 0.3 }, { name: "relevance", score: 0.7 }],
-        failed_criteria: ["factuality"],
+        failed_criteria: ["factuality", "relevance"],
         reason: "Contains hallucinations",
       });
 
@@ -240,7 +355,7 @@ describe("createEvalJudgeNode", () => {
       let calledWith = "";
       const judgeLlm: LlmClient = {
         sendWithTools: stubSendWithTools,
-        sendStructured: async (req) => {
+        sendStructured: async (_req) => {
           calledWith = "judgeLlm";
           return ok({ output: { score: 1, criteria_scores: [], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
         },
@@ -273,27 +388,134 @@ describe("createEvalJudgeNode", () => {
       expect(calledWith).toBe("mainLlm");
     });
 
-    test("fail-open when no LLM client available", async () => {
+    test("fails quality gating closed when no LLM client is available", async () => {
       const node = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
       const result = await node.run("in", "out", makeCtx());
-      expect(judgePassed(result)).toBe(true);
+      expect(judgePassed(result)).toBe(false);
       expect(result.reason).toContain("No LLM client available");
     });
 
-    test("fail-open when LLM returns error", async () => {
+    test("a throwing logger cannot violate the no-LLM result seam", async () => {
+      const node = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
+      const result = await node.run("in", "out", makeCtx({
+        logger: {
+          warn: () => { throw new Error("logger transport down"); },
+          error: () => {},
+        },
+      }));
+
+      expect(result.outcome).toBe("skipped-llm-failure");
+      expect(result.reason).toContain("No LLM client available");
+    });
+
+    test("cyclic DAG data cannot escape during prompt assembly", async () => {
+      const cyclic: Record<string, unknown> = {};
+      cyclic.self = cyclic;
+      const node = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
+
+      const result = await node.run(cyclic, "out", makeCtx({ judgeLlm: makeMockLlm({
+        score: 1,
+        criteria_scores: [],
+        failed_criteria: [],
+        reason: "unused",
+      }) }));
+
+      // Orchestrator-side, not LLM-side: prompt assembly choked on the DAG's own
+      // data before any model was consulted. That is a bug in us, so it surfaces
+      // as `crash` — which is what makes it visible on `judgesCrashed` — rather
+      // than being merged into the "model was flaky" bucket. Both fail closed.
+      expect(result.outcome).toBe("crash");
+      expect(judgePassed(result)).toBe(false);
+      expect(result.reason).toContain("Unexpected error");
+    });
+
+    test("a throwing prompt provider returns a typed judge outcome", async () => {
+      const node = createEvalJudgeNode({
+        id: N("j"),
+        criteria: [N("x")],
+        rubric: { source: "template", templateId: "rubric" },
+      });
+
+      const result = await node.run("in", "out", makeCtx({
+        judgeLlm: makeMockLlm({ score: 1, criteria_scores: [], failed_criteria: [], reason: "unused" }),
+        prompts: { get: () => { throw new Error("prompt store unavailable"); } },
+      }));
+
+      // The prompt store broke its contract — again orchestrator-side, so the
+      // outcome is `crash` and the cause survives on `crashMessage`.
+      expect(result.outcome).toBe("crash");
+      expect(judgePassed(result)).toBe(false);
+      expect(result.reason).toContain("prompt store unavailable");
+      if (result.outcome === "crash") {
+        expect(result.crashMessage).toContain("prompt store unavailable");
+      }
+    });
+
+    test("a hostile LLM rejection is rendered safely and never rejects node.run", async () => {
+      const rejection = Proxy.revocable({}, {});
+      rejection.revoke();
+      const llm: LlmClient = {
+        sendWithTools: stubSendWithTools,
+        sendStructured: async () => { throw rejection.proxy; },
+      };
+      const node = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
+
+      const result = await node.run("in", "out", makeCtx({ judgeLlm: llm }));
+
+      // An `LlmClient` that THROWS instead of returning `err(...)` has broken the
+      // port contract. The LLM's modeled failure mode (`!result.ok`) still maps
+      // to `skipped-llm-failure`; a contract violation is a `crash`.
+      expect(result.outcome).toBe("crash");
+      expect(judgePassed(result)).toBe(false);
+      expect(result.reason).toContain("Unexpected error");
+    });
+
+    test("skipped evaluator sub-spans use the runtime event timestamp seam", async () => {
+      const observer = new RecordingObserver();
+      const fixed = new Date("2026-08-20T12:34:56.789Z");
+      const node = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
+
+      await node.run("in", "out", makeCtx({
+        judgeLlm: makeFailingLlm("unavailable"),
+        observer,
+        eventTimestamp: () => new Date(fixed),
+      }));
+
+      const subSpan = observer.events.find((event) => event.type === "sub-span");
+      expect(subSpan?.timestamp).toEqual(fixed);
+    });
+
+    test("fails quality gating closed when LLM returns an error", async () => {
       const llm = makeFailingLlm("rate limited");
       const node = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
       const result = await node.run("in", "out", makeCtx({ judgeLlm: llm }));
-      expect(judgePassed(result)).toBe(true);
+      expect(judgePassed(result)).toBe(false);
       expect(result.reason).toContain("rate limited");
     });
 
-    test("fail-open when LLM throws exception", async () => {
+    test("fails quality gating closed when LLM throws", async () => {
       const llm = makeThrowingLlm();
       const node = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
       const result = await node.run("in", "out", makeCtx({ judgeLlm: llm }));
-      expect(judgePassed(result)).toBe(true);
+      expect(judgePassed(result)).toBe(false);
       expect(result.reason).toContain("network timeout");
+    });
+
+    test("fails quality gating closed when the structured response is invalid", async () => {
+      const llm: LlmClient = {
+        sendWithTools: stubSendWithTools,
+        sendStructured: async () => ok({
+          output: { score: 2, criteria_scores: [], failed_criteria: [], reason: "invalid" },
+          tokensIn: 0,
+          tokensOut: 0,
+          rawText: "",
+        }) as any,
+      };
+      const node = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
+      const result = await node.run("in", "out", makeCtx({ judgeLlm: llm }));
+      expect(result.outcome).toBe("skipped-llm-failure");
+      expect(judgePassed(result)).toBe(false);
+      expect(result.reason).toContain("Invalid judge response");
     });
 
     test("uses rubricInline in the prompt", async () => {

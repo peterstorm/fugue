@@ -42,7 +42,7 @@ import { mkdir, readdir, readFile, rm, rmdir, writeFile } from "node:fs/promises
 import { join } from "node:path";
 import { match } from "ts-pattern";
 import {
-  SHAPES,
+  DAG_SHAPES,
   buildScaffold,
   fugueYaml,
   parseShape,
@@ -57,6 +57,7 @@ import { runGauntlet, type GauntletResult } from "./gauntlet.js";
 import { parseKebab, parseKebabIdent, type Kebab, type KebabIdent } from "./identifiers.js";
 import { resolveRoot } from "./paths.js";
 import { freshRegistryEntry, serializeRegistry, type RegistryEntry } from "./prompts.js";
+import { parseFlagValue } from "./arg-parsing.js";
 import { formatLintError, type LintAdvisory, type NewResult } from "./types.js";
 
 export interface NewOptions {
@@ -83,18 +84,18 @@ export interface NewOptions {
 }
 
 // KEBAB (single-sourced in `identifiers.ts`) is a valid DAG id and directory
-// segment. (Runtime ids allow the wider /^[A-Za-z0-9_:-]{1,128}$/ — ID_REGEX
+// segment. (Runtime ids allow the wider /^[A-Za-z0-9_:-]{1,128}$/ — ID_PATTERN
 // in types/ids.ts; we hold authors to the kebab convention every existing
 // DAG follows.)
 
-export interface ParsedNewArgs {
+interface ParsedNewArgs {
   readonly ok: true;
   /** Discriminant: shape mode vs `--from` mode — narrow on this, not key probing. */
   readonly mode: "shape";
   readonly options: NewOptions;
 }
 /** `fugue new --from <authored.json>` — everything else comes from the file. */
-export interface ParsedNewFromArgs {
+interface ParsedNewFromArgs {
   readonly ok: true;
   /** Discriminant: shape mode vs `--from` mode — narrow on this, not key probing. */
   readonly mode: "from";
@@ -103,7 +104,7 @@ export interface ParsedNewFromArgs {
   readonly root?: string;
   readonly force: boolean;
 }
-export interface ParseNewError {
+interface ParseNewError {
   readonly ok: false;
   readonly problems: readonly string[];
 }
@@ -131,13 +132,13 @@ export const parseNewArgs = (args: readonly string[]): ParsedNewArgs | ParsedNew
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
     const takeValue = (flag: string): string | undefined => {
-      const value = args[i + 1];
-      if (value === undefined || value.startsWith("--")) {
-        problems.push(`${flag} requires a value`);
+      const parsed = parseFlagValue(args, i, flag);
+      i = parsed.nextIndex;
+      if (!parsed.ok) {
+        problems.push(parsed.problem);
         return undefined;
       }
-      i++;
-      return value;
+      return parsed.value;
     };
     match(arg)
       .with("--shape", () => {
@@ -213,10 +214,10 @@ export const parseNewArgs = (args: readonly string[]): ParsedNewArgs | ParsedNew
   // membership check narrows, so the success arm never needs an `as Shape`.
   let parsedShape: Shape | null = null;
   if (shape === undefined) {
-    problems.push(`missing --shape (one of: ${SHAPES.join(", ")})`);
+    problems.push(`missing --shape (one of: ${DAG_SHAPES.join(", ")})`);
   } else {
     parsedShape = parseShape(shape);
-    if (parsedShape === null) problems.push(`unknown --shape '${shape}' (one of: ${SHAPES.join(", ")})`);
+    if (parsedShape === null) problems.push(`unknown --shape '${shape}' (one of: ${DAG_SHAPES.join(", ")})`);
   }
 
   // `--review` is a human-review gate (an aspect) — but the scaffold only knows
@@ -307,6 +308,26 @@ const isDirNonEmpty = async (dir: string): Promise<boolean> => {
  * contract (mirrors `runNewFrom`'s write-failed arm). A malformed template is
  * a framework bug, not an author error, so it still propagates.
  */
+/**
+ * THE one scaffold writer: write a file under `dir` and record its path
+ * relative to `relDir`. Both scaffold paths (`runNew`, `writeAuthoredScaffold`)
+ * report written files the same way, so the pairing of "where bytes land" and
+ * "what the outcome reports" is expressed once and cannot drift.
+ */
+const createScaffoldWriter = (
+  dir: string,
+  relDir: string,
+): { readonly written: string[]; readonly write: (rel: string, content: string) => Promise<void> } => {
+  const written: string[] = [];
+  return {
+    written,
+    write: async (rel, content) => {
+      await writeFile(join(dir, rel), content, "utf-8");
+      written.push(join(relDir, rel));
+    },
+  };
+};
+
 export const runNew = async (options: NewOptions): Promise<NewResult> => {
   const cwd = process.cwd();
   const root = options.root ?? cwd;
@@ -343,11 +364,7 @@ export const runNew = async (options: NewOptions): Promise<NewResult> => {
   };
   const scaffold = buildScaffold(options.shape, ctx);
 
-  const written: string[] = [];
-  const write = async (rel: string, content: string): Promise<void> => {
-    await writeFile(join(dir, rel), content, "utf-8");
-    written.push(join(relDir, rel));
-  };
+  const { written, write } = createScaffoldWriter(dir, relDir);
 
   // The mkdir + write batch is an environment surface (ENOSPC/EACCES/EISDIR,
   // …) — fold a throw into the `{ ok: false, problems }` envelope (mirrors
@@ -429,7 +446,7 @@ export const runNew = async (options: NewOptions): Promise<NewResult> => {
 // `fugue new --from <authored.json>` — deterministic codegen (Phase B2)
 // ---------------------------------------------------------------------------
 
-export interface NewFromOptions {
+interface NewFromOptions {
   /** Path to the dag.authored.json file. */
   readonly from: string;
   readonly owner?: string;
@@ -582,11 +599,7 @@ export const writeAuthoredScaffold = async (
 
   await mkdir(dir, { recursive: true });
 
-  const written: string[] = [];
-  const write = async (rel: string, content: string): Promise<void> => {
-    await writeFile(join(dir, rel), content, "utf-8");
-    written.push(join(relDir, rel));
-  };
+  const { written, write } = createScaffoldWriter(dir, relDir);
 
   // Partial-write semantics: this batch is in-process ordering, NOT crash
   // atomicity — a mid-batch IO failure (ENOSPC/EACCES) propagates the real

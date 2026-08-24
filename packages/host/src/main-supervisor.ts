@@ -27,8 +27,8 @@ import { parseHostConfig } from "./domain/config.js";
 import { formatHostError, fsPurgeFailed } from "./domain/host-error.js";
 import type { HostError } from "./domain/host-error.js";
 import type { Result } from "@fuguejs/framework";
-import { ok, err } from "@fuguejs/framework";
-import type { RedisConnectivityPort, RedisPort, RedisPubSubPort, TokenStorePort, LogPort } from "./ports.js";
+import { ok, err, safeErrorMessage } from "@fuguejs/framework";
+import type { RedisConnectivityPort, RedisPort, RedisPubSubPort, TokenStorePort } from "./ports.js";
 import { createSupervisor, createTerminationHandler } from "./supervisor/supervisor.js";
 import type { AdmissionPort, AdmissionOutcome, AuthDeps } from "./supervisor/supervisor.js";
 import {
@@ -49,7 +49,7 @@ import { createBunSpawnAdapter } from "./supervisor/lifecycle/bun-spawn-adapter.
 import { createWorkerRegistry } from "./supervisor/lifecycle/worker-registry-redis.js";
 import type { UdsLivenessProbe } from "./supervisor/lifecycle/worker-registry-redis.js";
 import { purgeTenantKeyspace } from "./supervisor/lifecycle/purge-keyspace.js";
-import { bunUdsTransport, buildProbeRequest } from "./supervisor/uds-proxy.js";
+import { makeBunUdsTransport, PROBE_UDS_TIMEOUT_MS, buildProbeRequest } from "./supervisor/uds-proxy.js";
 import type { AdminTenantsDeps } from "./http/handlers/admin/tenants.js";
 import {
   runGracePurgeSweep,
@@ -66,22 +66,17 @@ import {
 import type { AuditStreamPort } from "./supervisor/audit/audit-sink-log-redis.js";
 import type { AuditPort } from "./supervisor/audit/audit-port.js";
 import { createRedisTokenStore } from "./adapters/token-store.js";
+import { createIoredisRedisPort } from "./adapters/redis-connectivity.js";
 import { runBootstrap } from "./supervisor/bootstrap/run-bootstrap.js";
 import { createRealmJwtVerifier } from "./adapters/realm-jwt-verifier.js";
 import type { RealmJwtDeps } from "./http/middleware/auth.js";
 import type { AuthenticatedUser, Team } from "./domain/auth.js";
-
-// ── Logger (mirrors main.ts) ─────────────────────────────────────────────────
-
-const safeStringify = (obj: unknown): string => {
-  try { return JSON.stringify(obj); } catch { return `[unserializable: ${typeof obj}]`; }
-};
-
-const createLogger = (): LogPort => ({
-  info: (msg, data) => console.info(safeStringify({ level: "info", msg, ...data, ts: new Date().toISOString() })),
-  warn: (msg, data) => console.warn(safeStringify({ level: "warn", msg, ...data, ts: new Date().toISOString() })),
-  error: (msg, data) => console.error(safeStringify({ level: "error", msg, ...data, ts: new Date().toISOString() })),
-});
+import {
+  createJsonConsoleLogger,
+  disconnectRedisClients,
+  redisOperationFailure,
+  redisUrlRedactions,
+} from "./entrypoint-wiring.js";
 
 // ── Redis (connectivity + commands + pub/sub) ────────────────────────────────
 
@@ -106,6 +101,9 @@ const createRedis = async (redisUrl: string): Promise<Result<RedisBundle, HostEr
     const { Redis } = await import("ioredis");
     const client = new Redis(redisUrl, { maxRetriesPerRequest: 3, lazyConnect: true });
     const subClient = new Redis(redisUrl, { maxRetriesPerRequest: 3, lazyConnect: true });
+    const redisRedactions = redisUrlRedactions(redisUrl);
+    const redisFailure = (operation: string, error: unknown): HostError =>
+      redisOperationFailure(operation, error, redisRedactions);
 
     const connectivity: RedisConnectivityPort = {
       ping: async () => {
@@ -113,46 +111,37 @@ const createRedis = async (redisUrl: string): Promise<Result<RedisBundle, HostEr
           if (client.status === "wait") await client.connect();
           await client.ping();
           return ok(undefined);
-        } catch (e) {
-          return err({ kind: "redis-unavailable" as const, operation: `PING (${e instanceof Error ? e.message : String(e)})` });
+        } catch (error) {
+          return err(redisFailure("PING", error));
         }
       },
     };
 
-    const redis: RedisPort = {
-      get: async (key) => { try { return ok(await client.get(key)); } catch (e) { return err({ kind: "redis-unavailable" as const, operation: `GET ${key}` }); } },
-      set: async (key, value, opts) => {
-        try {
-          const r = opts?.expiresInSec !== undefined ? await client.set(key, value, "EX", opts.expiresInSec) : await client.set(key, value);
-          return ok(r);
-        } catch { return err({ kind: "redis-unavailable" as const, operation: `SET ${key}` }); }
-      },
-      del: async (key) => { try { return ok(await client.del(key)); } catch { return err({ kind: "redis-unavailable" as const, operation: `DEL ${key}` }); } },
-      scan: async (pattern, cursor = "0") => {
-        try { const [c, keys] = await client.scan(cursor, "MATCH", pattern, "COUNT", 100); return ok({ cursor: c, keys }); }
-        catch { return err({ kind: "redis-unavailable" as const, operation: `SCAN ${pattern}` }); }
-      },
-      setNx: async (key, value, opts) => {
-        try {
-          if (opts?.expiresInSec !== undefined) { const r = await client.set(key, value, "EX", opts.expiresInSec, "NX"); return ok(r === "OK"); }
-          return ok((await client.setnx(key, value)) === 1);
-        } catch { return err({ kind: "redis-unavailable" as const, operation: `SETNX ${key}` }); }
-      },
-      sAdd: async (key, member) => { try { return ok(await client.sadd(key, member)); } catch { return err({ kind: "redis-unavailable" as const, operation: `SADD ${key}` }); } },
-      sRem: async (key, member) => { try { return ok(await client.srem(key, member)); } catch { return err({ kind: "redis-unavailable" as const, operation: `SREM ${key}` }); } },
-      sMembers: async (key) => { try { return ok(await client.smembers(key)); } catch { return err({ kind: "redis-unavailable" as const, operation: `SMEMBERS ${key}` }); } },
+    const redis = createIoredisRedisPort(client, redisFailure);
+
+    const redisCall = async <T>(
+      describe: () => string,
+      run: () => Promise<T>,
+    ): Promise<Result<T, HostError>> => {
+      try {
+        return ok(await run());
+      } catch (error) {
+        return err(redisFailure(describe(), error));
+      }
     };
 
     const pubsub: RedisPubSubPort = {
-      publish: async (channel, message) => { try { await client.publish(channel, message); return ok(undefined); } catch { return err({ kind: "redis-unavailable" as const, operation: `PUBLISH ${channel}` }); } },
-      subscribe: async (channel, handler) => {
-        try {
+      publish: (channel, message) =>
+        redisCall(() => `PUBLISH ${channel}`, async () => { await client.publish(channel, message); }),
+      subscribe: (channel, handler) =>
+        redisCall(() => `SUBSCRIBE ${channel}`, async () => {
           if (subClient.status === "wait") await subClient.connect();
-          subClient.on("message", (ch, msg) => { if (ch === channel) handler(msg); });
+          subClient.on("message", (receivedChannel, message) => {
+            if (receivedChannel === channel) handler(message);
+          });
           await subClient.subscribe(channel);
-          return ok({ unsubscribe: async () => { await subClient.unsubscribe(channel); } });
-        } catch { return err({ kind: "redis-unavailable" as const, operation: `SUBSCRIBE ${channel}` }); }
-      },
+          return { unsubscribe: async () => { await subClient.unsubscribe(channel); } };
+        }),
     };
 
     const aclAdmin: RedisAclAdminPort = {
@@ -161,14 +150,18 @@ const createRedis = async (redisUrl: string): Promise<Result<RedisBundle, HostEr
           if (client.status === "wait") await client.connect();
           await client.call("ACL", "SETUSER", username, ...rules);
           return ok(undefined);
-        } catch { return err({ kind: "redis-unavailable" as const, operation: `ACL SETUSER ${username}` }); }
+        } catch (error) {
+          return err(redisFailure(`ACL SETUSER ${username}`, error));
+        }
       },
       delUser: async (username) => {
         try {
           if (client.status === "wait") await client.connect();
           await client.call("ACL", "DELUSER", username);
           return ok(undefined);
-        } catch { return err({ kind: "redis-unavailable" as const, operation: `ACL DELUSER ${username}` }); }
+        } catch (error) {
+          return err(redisFailure(`ACL DELUSER ${username}`, error));
+        }
       },
     };
 
@@ -188,17 +181,20 @@ const createRedis = async (redisUrl: string): Promise<Result<RedisBundle, HostEr
       pubsub,
       aclAdmin,
       auditStream,
-      disconnect: async () => { await client.quit().catch(() => {}); await subClient.quit().catch(() => {}); },
+      disconnect: () => disconnectRedisClients([
+        { name: "command", quit: () => client.quit() },
+        { name: "subscriber", quit: () => subClient.quit() },
+      ]),
     });
-  } catch (e) {
-    return err({ kind: "redis-unavailable", operation: `Redis init: ${e instanceof Error ? e.message : String(e)}` });
+  } catch (error) {
+    return err(redisOperationFailure("Redis init", error, redisUrlRedactions(redisUrl)));
   }
 };
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 const main = async () => {
-  const logger = createLogger();
+  const logger = createJsonConsoleLogger();
 
   logger.info("[supervisor] parsing configuration");
   const configResult = parseHostConfig(process.env as Record<string, string | undefined>);
@@ -215,13 +211,26 @@ const main = async () => {
   }
   const { connectivity, redis, pubsub, aclAdmin, auditStream, disconnect } = redisResult.value;
 
+  /**
+   * THE one fail-closed exit for a boot step that cannot proceed. Every such
+   * step owes the SAME three things in the SAME order: say why, release the
+   * Redis connection, exit non-zero so thin-init restarts and retries. A site
+   * that skipped the disconnect would leak a connection on every restart loop.
+   * Only reachable once `disconnect` exists — the two earlier boot failures
+   * (config parse, Redis connect) have nothing to release.
+   */
+  const failClosed = async (message: string): Promise<never> => {
+    logger.error(message);
+    await disconnect();
+    process.exit(1);
+  };
+
   // Tenant registry (config + secrets REFERENCES only — never a secret value).
   const registry = createRedisTenantRegistry(redis, pubsub, {}, logger);
   const hydrateResult = await registry.hydrate();
   if (!hydrateResult.ok) {
-    logger.error(`[supervisor] tenant registry hydrate failed: ${formatHostError(hydrateResult.error)}`);
-    await disconnect();
-    process.exit(1);
+    await failClosed(`[supervisor] tenant registry hydrate failed: ${formatHostError(hydrateResult.error)}`);
+    return;
   }
 
   // NOTE (single-supervisor topology, ADR-0064): we hydrate the registry once at
@@ -337,9 +346,14 @@ const main = async () => {
   // 404s and an unsigned probe is rejected 401, either of which would make every
   // live worker read as dead → SIGKILL → 503. Any non-2xx / transport failure →
   // not live (fail-closed).
+  // The probe carries its OWN short deadline (PROBE_UDS_TIMEOUT_MS), not the data
+  // path's: a worker that cannot answer `/health` promptly is, for routing
+  // purposes, indistinguishable from dead — and an unbounded probe would stall
+  // the liveness sweep itself on exactly the wedged worker it exists to detect.
+  const probeTransport = makeBunUdsTransport(PROBE_UDS_TIMEOUT_MS);
   const udsProbe: UdsLivenessProbe = async (record) => {
     const req = buildProbeRequest(config.FUGUE_SUPERVISOR_HMAC_KEY, record.tenant);
-    const r = await bunUdsTransport(record.udsPath, req);
+    const r = await probeTransport(record.udsPath, req);
     return r.ok && r.value.status >= 200 && r.value.status < 300;
   };
 
@@ -411,6 +425,32 @@ const main = async () => {
     logger,
   });
 
+  /**
+   * Start one unref'd background sweep. ONE encoding (round-38 cs-20) of the
+   * schedule skeleton both sweeps need: the sweep POLICY lives in the
+   * lifecycle, the binary owns the schedule, a throw inside a sweep is logged
+   * and never allowed to reject unhandled, and the timer must not keep the
+   * process alive by itself.
+   */
+  const startSweep = (
+    label: string,
+    intervalMs: number,
+    sweep: () => Promise<unknown>,
+  ): ReturnType<typeof setInterval> => {
+    const timer = setInterval(() => {
+      void sweep().catch((error) => {
+        try {
+          logger.error(`[supervisor] ${label} threw`, { error: safeErrorMessage(error) });
+        } catch {
+          // The sweep rejection remains contained when diagnostics fail.
+        }
+      });
+    }, intervalMs);
+    if (typeof timer.unref === "function") timer.unref();
+    logger.info(`[supervisor] ${label} started`, { intervalMs });
+    return timer;
+  };
+
   // ── Idle-evict sweep timer (AD-7/FR-017) ───────────────────────────────────
   // The lifecycle owns the eviction POLICY (idleEvictSweep respects eager-pin +
   // TTL); the binary owns the SCHEDULE. Sweep at a fraction of the idle TTL so an
@@ -418,14 +458,7 @@ const main = async () => {
   // coarser interval would let workers linger up to one whole TTL past expiry).
   // Clamp to a sane floor so a tiny configured TTL cannot busy-loop the sweep.
   const sweepIntervalMs = Math.max(1000, Math.floor(config.WORKER_IDLE_EVICT_MS / 4));
-  const idleSweepTimer = setInterval(() => {
-    void lifecycle.idleEvictSweep().catch((e) => {
-      logger.error("[supervisor] idle-evict sweep threw", { error: e instanceof Error ? e.message : String(e) });
-    });
-  }, sweepIntervalMs);
-  // Don't let the sweep timer keep the process alive on its own.
-  if (typeof idleSweepTimer.unref === "function") idleSweepTimer.unref();
-  logger.info("[supervisor] idle-evict sweep started", { intervalMs: sweepIntervalMs });
+  const idleSweepTimer = startSweep("idle-evict sweep", sweepIntervalMs, () => lifecycle.idleEvictSweep());
 
   // ── Liveness sweep timer (SC-006, FR-014/FR-015) ───────────────────────────
   // Crash-detection SAFETY NET for RE-ADOPTED workers. A worker spawned by THIS
@@ -436,13 +469,7 @@ const main = async () => {
   // forever. The policy (who is watcher-covered) lives in the lifecycle; the binary
   // owns the schedule. Watcher-covered workers are skipped, so this is a no-op once
   // every adopted worker has been replaced by a spawned (watched) one.
-  const livenessSweepTimer = setInterval(() => {
-    void lifecycle.livenessSweep().catch((e) => {
-      logger.error("[supervisor] liveness sweep threw", { error: e instanceof Error ? e.message : String(e) });
-    });
-  }, config.WORKER_LIVENESS_SWEEP_MS);
-  if (typeof livenessSweepTimer.unref === "function") livenessSweepTimer.unref();
-  logger.info("[supervisor] liveness sweep started", { intervalMs: config.WORKER_LIVENESS_SWEEP_MS });
+  const livenessSweepTimer = startSweep("liveness sweep", config.WORKER_LIVENESS_SWEEP_MS, () => lifecycle.livenessSweep());
 
   // SC-006 / FR-020: re-adopt still-live workers BEFORE serving.
   const readopt = await lifecycle.reconcileReadopt();
@@ -455,9 +482,8 @@ const main = async () => {
     // abandons in-flight runs (violating SC-006's survival intent). Exit instead:
     // thin-init restarts the supervisor and retries the readopt once Redis is
     // healthy again, bounded by the supervisor restart budget.
-    logger.error(`[supervisor] worker re-adoption failed — exiting fail-closed (thin-init will restart and retry): ${formatHostError(readopt.error)}`);
-    await disconnect();
-    process.exit(1);
+    await failClosed(`[supervisor] worker re-adoption failed — exiting fail-closed (thin-init will restart and retry): ${formatHostError(readopt.error)}`);
+    return;
   }
   if (readopt.value.adopted.length > 0 || readopt.value.pruned.length > 0) {
     logger.info("[supervisor] worker re-adoption complete", {
@@ -467,15 +493,14 @@ const main = async () => {
   }
 
   // Auth material — admin token (always) + optional realm-JWT verifier group.
-  // The supervisor's team-token store is keyed under a reserved platform tenant
-  // (`platform`) — team-token→team resolution at the boundary is a supervisor
-  // concern; the resolved team is then mapped to its owning tenant by the
-  // registry view. (T8/later waves reconcile per-tenant token keying.)
+  // The supervisor's team-token store is intentionally keyed under the reserved
+  // platform tenant: token→team resolution is a platform-boundary concern, while
+  // the resolved team is mapped to its owning tenant by the registry view. Worker
+  // re-authentication separately uses each tenant's scoped token store.
   const platformTenant = tenantId("platform");
   if (!platformTenant.ok) {
-    logger.error("[supervisor] unreachable: 'platform' failed tenant-id validation");
-    await disconnect();
-    process.exit(1);
+    await failClosed("[supervisor] unreachable: 'platform' failed tenant-id validation");
+    return;
   }
   const tokenStore: TokenStorePort = createRedisTokenStore(redis, platformTenant.value, logger);
 
@@ -518,9 +543,8 @@ const main = async () => {
     },
   );
   if (!bootstrapResult.ok) {
-    logger.error(`[supervisor] declarative bootstrap failed — exiting fail-closed: ${formatHostError(bootstrapResult.error)}`);
-    await disconnect();
-    process.exit(1);
+    await failClosed(`[supervisor] declarative bootstrap failed — exiting fail-closed: ${formatHostError(bootstrapResult.error)}`);
+    return;
   }
   if (bootstrapResult.value.tenantsApplied > 0 || bootstrapResult.value.teamTokensApplied > 0) {
     logger.info("[supervisor] declarative bootstrap complete", {
@@ -611,11 +635,15 @@ const main = async () => {
     // residual open slot a safe no-op the next sweep retries. Without this, the
     // per-tenant admission counters would leak one entry per purged tenant id.
     registry: {
-      hardDelete: async (tenant) => {
-        const r = await registry.hardDelete(tenant);
-        if (r.ok) tenantConc = forgetTenant(tenantConc, tenant);
+      beginPurge: (tombstone) => registry.beginPurge(tombstone),
+      hardDelete: async (lease) => {
+        const r = await registry.hardDelete(lease);
+        // Reclaim admission state only when the fenced record was genuinely
+        // removed; a superseded refusal keeps the tenant's bookkeeping.
+        if (r.ok && r.value === "deleted") tenantConc = forgetTenant(tenantConc, lease.tenant);
         return r;
       },
+      releasePurge: (lease) => registry.releasePurge(lease),
     },
   };
 
@@ -623,34 +651,33 @@ const main = async () => {
   // The binary owns the SCHEDULE; the policy (which tenants are due) lives in the
   // pure `selectPurgeable`. Each tick purges deregistered tenants whose grace
   // window elapsed. Idempotent, so a missed/coarse tick only delays reclamation.
-  const gracePurgeTimer = setInterval(() => {
-    void (async () => {
-      try {
-        const outcomes = await runGracePurgeSweep(
-          gracePurgeDeps,
-          registry.snapshot(),
-          config.SUPERVISOR_GRACE_WINDOW_MS,
-          Date.now(),
-          logger,
-        );
-        const purged = outcomes.filter(purgeSucceeded).length;
-        if (outcomes.length > 0) {
-          logger.info("[supervisor] grace-window purge sweep complete", {
-            attempted: outcomes.length,
-            purged,
-            partial: outcomes.length - purged,
-          });
-        }
-      } catch (e) {
-        logger.error("[supervisor] grace-window purge sweep threw", { error: e instanceof Error ? e.message : String(e) });
-      }
-    })();
-  }, config.SUPERVISOR_GRACE_PURGE_INTERVAL_MS);
-  if (typeof gracePurgeTimer.unref === "function") gracePurgeTimer.unref();
-  logger.info("[supervisor] grace-window purge sweep started", {
-    intervalMs: config.SUPERVISOR_GRACE_PURGE_INTERVAL_MS,
-    graceWindowMs: config.SUPERVISOR_GRACE_WINDOW_MS,
-  });
+  // Schedules go through `startSweep` — the ONE schedule skeleton (interval,
+  // unref so a timer never holds the process open, throw-to-log, start log) that
+  // every sweep in this binary shares.
+  const gracePurgeTimer = startSweep(
+    "grace-window purge sweep",
+    config.SUPERVISOR_GRACE_PURGE_INTERVAL_MS,
+    async () => {
+      const outcomes = await runGracePurgeSweep(
+        gracePurgeDeps,
+        registry.snapshot(),
+        config.SUPERVISOR_GRACE_WINDOW_MS,
+        Date.now(),
+        logger,
+      );
+      if (outcomes.length === 0) return;
+      const purged = outcomes.filter(purgeSucceeded).length;
+      const superseded = outcomes.filter((o) => o.kind === "superseded").length;
+      logger.info("[supervisor] grace-window purge sweep complete", {
+        attempted: outcomes.length,
+        purged,
+        // Revived mid-purge — abandoned on purpose, NOT a partial failure the
+        // next tick should retry.
+        superseded,
+        partial: outcomes.length - purged - superseded,
+      });
+    },
+  );
 
   const supervisorResult = await createSupervisor({
     config,
@@ -689,9 +716,8 @@ const main = async () => {
   });
 
   if (!supervisorResult.ok) {
-    logger.error(`[supervisor] failed to start: ${formatHostError(supervisorResult.error)}`);
-    await disconnect();
-    process.exit(1);
+    await failClosed(`[supervisor] failed to start: ${formatHostError(supervisorResult.error)}`);
+    return;
   }
 
   const supervisor = supervisorResult.value;

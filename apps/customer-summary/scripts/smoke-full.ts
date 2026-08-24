@@ -37,7 +37,7 @@ import {
   makeNodeContext,
   ok,
 } from "@fuguejs/framework";
-import type { ToolDef, ToolCall, NodeContext } from "@fuguejs/framework";
+import type { ToolDef, ToolCall, NodeContext, GuardrailResult, Tracer } from "@fuguejs/framework";
 import { OpenAILlmClient } from "@fuguejs/framework";
 import { trace, SpanStatusCode } from "@opentelemetry/api";
 import { JsonFixtureSource } from "../src/sources/json-fixture-source.js";
@@ -138,7 +138,7 @@ console.log("=== Case 1: Full production DAG (customer summary) ===");
     judgeLlm: llm,
   };
 
-  const dag = createSummaryDag(source, "cust-001");
+  const dag = createSummaryDag(source);
   const result = await runDag<{ customerId: string }, SummaryResponse>(
     dag,
     { customerId: "cust-001" },
@@ -424,7 +424,7 @@ console.log("\n=== Case 3: Multi-node DAG (fetch → parallel analysis → guard
   const consistencyGuardrail = createGuardrailNode<z.infer<typeof FinalReportSchema>, z.infer<typeof FinalReportSchema>>({
     id: "consistency-check",
     inputSchema: FinalReportSchema,
-    outputSchema: GuardrailOutputSchema as any,
+    outputSchema: GuardrailOutputSchema as z.ZodType<GuardrailResult<FinalReport>>,
     validate: (report) => {
       const checks: Array<{ dimension: string; passed: boolean; detail: string }> = [];
       const warnings: string[] = [];
@@ -510,7 +510,10 @@ console.log("\n=== Case 3: Multi-node DAG (fetch → parallel analysis → guard
     },
   });
 
-  const result = await runDag<{ customerId: string }, any>(
+  const result = await runDag<
+    { customerId: string },
+    z.infer<typeof GuardrailOutputSchema>
+  >(
     dag,
     { customerId: "cust-001" },
     ctx,
@@ -726,7 +729,7 @@ console.log("\n=== Case 5: Tool call failure (exercises error spans) ===");
   }
   // Check observer captured the tool error event
   const errorEvents = observer.events.filter(
-    (e) => e.type === "sub-span" && (e as any).attributes?.["tool.error"],
+    (event) => event.type === "sub-span" && event.attributes["tool.error"],
   );
   console.log(`  Observer events: ${observer.events.length} (tool errors: ${errorEvents.length})`);
 }

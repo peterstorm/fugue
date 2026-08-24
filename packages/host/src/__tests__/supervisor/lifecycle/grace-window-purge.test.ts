@@ -15,11 +15,18 @@
 
 import { describe, it, expect } from "bun:test";
 import { ok, err } from "@fuguejs/framework";
+import type { Result } from "@fuguejs/framework";
+import type { HostError } from "../../../domain/host-error.js";
+import type {
+  BeginPurgeOutcome,
+  HardDeleteOutcome,
+  TenantPurgeLease,
+} from "../../../supervisor/registry/redis-registry-adapter.js";
 import { redisUnavailable } from "../../../domain/host-error.js";
 import { tenantId, markSecretsRef } from "../../../domain/tenant.js";
 import type { TenantId } from "../../../domain/tenant.js";
 import { tenantConfig, registryOf } from "../../../supervisor/registry/tenant-registry.js";
-import type { ActiveTenantConfig, DeregisteredTenantConfig } from "../../../supervisor/registry/tenant-registry.js";
+import type { ActiveTenantConfig, DeregisteredTenantConfig, TenantConfig, TenantRegistry } from "../../../supervisor/registry/tenant-registry.js";
 import {
   DAY_MS,
   DEFAULT_GRACE_WINDOW_MS,
@@ -59,6 +66,12 @@ const tombstone = (id: string, deregisteredAt: number): DeregisteredTenantConfig
   deregisteredAt,
 });
 
+const seededRegistry = (seed: readonly TenantConfig[]): TenantRegistry => {
+  const parsed = registryOf(seed);
+  if (!parsed.ok) throw new Error(`bad registry seed: ${JSON.stringify(parsed.error)}`);
+  return parsed.value;
+};
+
 // ── Fake footprint ports (recorded calls) ─────────────────────────────────────
 
 interface RecordingDeps extends GracePurgeDeps {
@@ -68,19 +81,43 @@ interface RecordingDeps extends GracePurgeDeps {
     keyspace: TenantId[];
     fs: string[];
     registry: TenantId[];
+    release: TenantId[];
   };
 }
 
-const recordingDeps = (opts: { failKeyspace?: boolean; failKeyspaceFor?: (t: TenantId) => boolean; failAcl?: boolean } = {}): RecordingDeps => {
-  const calls = { acl: [] as TenantId[], workerRegistry: [] as TenantId[], keyspace: [] as TenantId[], fs: [] as string[], registry: [] as TenantId[] };
+const recordingDeps = (
+  opts: {
+    failKeyspace?: boolean;
+    failKeyspaceFor?: (t: TenantId) => boolean;
+    failAcl?: boolean;
+    beginPurge?: (tombstone: DeregisteredTenantConfig) => Promise<Result<BeginPurgeOutcome, HostError>>;
+    hardDelete?: (lease: TenantPurgeLease) => Promise<Result<HardDeleteOutcome, HostError>>;
+  } = {},
+): RecordingDeps => {
+  const calls = {
+    acl: [] as TenantId[],
+    workerRegistry: [] as TenantId[],
+    keyspace: [] as TenantId[],
+    fs: [] as string[],
+    registry: [] as TenantId[],
+    release: [] as TenantId[],
+  };
   const ksFails = (t: TenantId): boolean => opts.failKeyspace === true || (opts.failKeyspaceFor?.(t) ?? false);
+  const issueTestLease = (tenant: TenantId): TenantPurgeLease =>
+    Object.freeze({ tenant }) as TenantPurgeLease;
   return {
     calls,
     acl: { revokeAcl: async (t) => { calls.acl.push(t); return opts.failAcl ? err(redisUnavailable("acl")) : ok(undefined); } },
     workerRegistry: { remove: async (t) => { calls.workerRegistry.push(t); return ok(undefined); } },
     keyspace: { purgeKeyspace: async (t) => { calls.keyspace.push(t); return ksFails(t) ? err(redisUnavailable("ks")) : ok(3); } },
     fs: { removeMount: async (root) => { calls.fs.push(root); return ok(undefined); } },
-    registry: { hardDelete: async (t) => { calls.registry.push(t); return ok(undefined); } },
+    registry: {
+      beginPurge: opts.beginPurge ?? (async (t) => ok({ kind: "acquired", lease: issueTestLease(t.id) })),
+      hardDelete: opts.hardDelete
+        ? async (lease) => { calls.registry.push(lease.tenant); return opts.hardDelete!(lease); }
+        : async (lease) => { calls.registry.push(lease.tenant); return ok("deleted" as const); },
+      releasePurge: async (lease) => { calls.release.push(lease.tenant); },
+    },
   };
 };
 
@@ -115,7 +152,7 @@ describe("selectPurgeable", () => {
   it("returns only deregistered tenants past their window", () => {
     const now = 10_000_000;
     const win = DAY_MS;
-    const registry = registryOf([
+    const registry = seededRegistry([
       makeActive("active-one"),
       tombstone("due", now - 2 * DAY_MS),       // past window → purge
       tombstone("in-window", now - 1),          // still in window → retained
@@ -125,7 +162,7 @@ describe("selectPurgeable", () => {
   });
 
   it("never selects an active tenant", () => {
-    const registry = registryOf([makeActive("a"), makeActive("b")]);
+    const registry = seededRegistry([makeActive("a"), makeActive("b")]);
     expect(selectPurgeable(registry, 0, Number.MAX_SAFE_INTEGER)).toHaveLength(0);
   });
 });
@@ -134,11 +171,11 @@ describe("selectPurgeable", () => {
 
 describe("purgeTenantFootprint (FR-030 footprint reclamation)", () => {
   it("revokes ACL, removes worker registry, purges keyspace + fs, hard-deletes registry", async () => {
-    const deps = recordingDeps();
     const cfg = tombstone("acme", 0);
+    const deps = recordingDeps();
     const outcome = await purgeTenantFootprint(deps, cfg);
     expect(purgeSucceeded(outcome)).toBe(true);
-    expect(outcome.failedSteps).toEqual([]);
+    expect(outcome.kind === "completed" ? outcome.failedSteps : null).toEqual([]);
     expect(deps.calls.acl).toEqual([tid("acme")]);
     expect(deps.calls.workerRegistry).toEqual([tid("acme")]);
     expect(deps.calls.keyspace).toEqual([tid("acme")]);
@@ -148,16 +185,97 @@ describe("purgeTenantFootprint (FR-030 footprint reclamation)", () => {
   });
 
   it("reports a partial failure with the REAL typed failed step (fail-closed) so the sweep retries", async () => {
+    const cfg = tombstone("acme", 0);
     const deps = recordingDeps({ failKeyspace: true });
-    const outcome = await purgeTenantFootprint(deps, tombstone("acme", 0));
+    const outcome = await purgeTenantFootprint(deps, cfg);
     expect(purgeSucceeded(outcome)).toBe(false);
     // The genuine typed failed step is preserved — never a "see-error" placeholder.
-    expect(outcome.failedSteps).toEqual(["keyspace-purge"]);
+    expect(outcome.kind === "completed" ? outcome.failedSteps : null).toEqual(["keyspace-purge"]);
     // keysDeleted from a failed keyspace step is 0; the successful steps still ran.
     expect(outcome.keysDeleted).toBe(0);
-    // Even with one failed step, every OTHER step was still attempted (idempotent).
+    // Every footprint step was attempted, but the tombstone was retained so a
+    // later sweep can retry the failed idempotent operation.
     expect(deps.calls.acl).toHaveLength(1);
-    expect(deps.calls.registry).toHaveLength(1);
+    expect(deps.calls.registry).toHaveLength(0);
+    expect(deps.calls.release).toEqual([tid("acme")]);
+  });
+
+  it("releases the purge lease after hard-delete failure", async () => {
+    const cfg = tombstone("acme", 0);
+    const deps = recordingDeps({
+      hardDelete: async () => err(redisUnavailable("hard delete")),
+    });
+
+    const outcome = await purgeTenantFootprint(deps, cfg);
+
+    expect(outcome.kind === "completed" ? outcome.failedSteps : null).toEqual([
+      "registry-hard-delete",
+    ]);
+    expect(deps.calls.registry).toEqual([tid("acme")]);
+    expect(deps.calls.release).toEqual([tid("acme")]);
+  });
+});
+
+describe("purgeTenantFootprint — tenant revived mid-purge (FR-030 race)", () => {
+  it("ABANDONS the purge as soon as the tombstone it observed is no longer live", async () => {
+    const cfg = tombstone("acme", 0);
+    // The registry refuses the stale tombstone before issuing purge authority.
+    const deps = recordingDeps({
+      beginPurge: async () => ok({ kind: "superseded" as const }),
+    });
+
+    const outcome = await purgeTenantFootprint(deps, cfg);
+
+    expect(outcome.kind).toBe("superseded");
+    expect(purgeSucceeded(outcome)).toBe(false);
+    expect(outcome.kind === "superseded" ? outcome.abortedAt : null).toBe("registry-purge-fence");
+    // NOTHING destructive ran against the live tenant.
+    expect(deps.calls.acl).toEqual([]);
+    expect(deps.calls.workerRegistry).toEqual([]);
+    expect(deps.calls.keyspace).toEqual([]);
+    expect(deps.calls.fs).toEqual([]);
+    expect(deps.calls.registry).toEqual([]);
+  });
+
+  it("reports `superseded` when the revival is only caught by the final compare-and-delete", async () => {
+    const cfg = tombstone("acme", 0);
+    // The between-step re-check sees an unchanged tombstone (the revival lands
+    // after step 4), so only the atomic compare-and-delete can catch it — the
+    // case the registry adapter's guard exists for.
+    const deps = recordingDeps({
+      hardDelete: async () => ok("superseded" as const),
+    });
+
+    const outcome = await purgeTenantFootprint(deps, cfg);
+
+    expect(outcome.kind).toBe("superseded");
+    expect(outcome.kind === "superseded" ? outcome.abortedAt : null).toBe("registry-hard-delete");
+    // The earlier steps DID run — this is the window the compare-and-delete
+    // narrows but cannot retroactively undo; it is the permanent step it closes.
+    expect(deps.calls.acl).toEqual([tid("acme")]);
+    expect(deps.calls.registry).toEqual([tid("acme")]);
+  });
+
+  it("a superseded purge is NOT retried by the sweep and is logged as a revival", async () => {
+    const now = 10_000_000;
+    const registry = seededRegistry([tombstone("due", now - 2 * DAY_MS)]);
+    const deps = recordingDeps({
+      beginPurge: async () => ok({ kind: "superseded" as const }),
+    });
+    const warnings: Array<{ msg: string; data?: Record<string, unknown> }> = [];
+    const capturingLog = {
+      info: () => {},
+      warn: (msg: string, data?: Record<string, unknown>) => { warnings.push({ msg, ...(data ? { data } : {}) }); },
+      error: () => {},
+    };
+
+    const outcomes = await runGracePurgeSweep(deps, registry, DAY_MS, now, capturingLog);
+
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]!.kind).toBe("superseded");
+    const warn = warnings.find((w) => w.msg.includes("revived"));
+    expect(warn).toBeDefined();
+    expect(warn!.data?.abortedAt).toBe("registry-purge-fence");
   });
 });
 
@@ -165,12 +283,12 @@ describe("runGracePurgeSweep (SC-010 retain-then-purge)", () => {
   it("purges only the due tenant; retains the in-window one", async () => {
     const now = 10_000_000;
     const win = DAY_MS;
-    const deps = recordingDeps();
-    const registry = registryOf([
+    const registry = seededRegistry([
       makeActive("active"),
       tombstone("due", now - 2 * DAY_MS),
       tombstone("retained", now - 1),
     ]);
+    const deps = recordingDeps();
     const outcomes = await runGracePurgeSweep(deps, registry, win, now);
     expect(outcomes.map((o) => o.tenant)).toEqual([tid("due")]);
     // The retained tenant's footprint was NOT touched (still in grace window).
@@ -182,12 +300,12 @@ describe("runGracePurgeSweep (SC-010 retain-then-purge)", () => {
     const now = 10_000_000;
     const win = DAY_MS;
     // `due-bad`'s keyspace purge persistently fails; `due-ok` purges cleanly.
-    const deps = recordingDeps({ failKeyspaceFor: (t) => t === tid("due-bad") });
-    const registry = registryOf([
+    const registry = seededRegistry([
       tombstone("due-ok", now - 2 * DAY_MS),
       tombstone("due-bad", now - 2 * DAY_MS),
       tombstone("retained", now - 1),
     ]);
+    const deps = recordingDeps({ failKeyspaceFor: (t) => t === tid("due-bad") });
     const warnings: Array<{ msg: string; data?: Record<string, unknown> }> = [];
     const capturingLog = {
       info: () => {},
@@ -205,12 +323,12 @@ describe("runGracePurgeSweep (SC-010 retain-then-purge)", () => {
 
     // The clean tenant is fully purged with its real keysDeleted preserved.
     expect(purgeSucceeded(okOutcome)).toBe(true);
-    expect(okOutcome.failedSteps).toEqual([]);
+    expect(okOutcome.kind === "completed" ? okOutcome.failedSteps : null).toEqual([]);
     expect(okOutcome.keysDeleted).toBe(3);
 
     // The failing tenant carries the GENUINE typed failed step — never ["see-error"].
     expect(purgeSucceeded(badOutcome)).toBe(false);
-    expect(badOutcome.failedSteps).toEqual(["keyspace-purge"]);
+    expect(badOutcome.kind === "completed" ? badOutcome.failedSteps : null).toEqual(["keyspace-purge"]);
     expect(badOutcome.keysDeleted).toBe(0);
 
     // The retained (in-window) tenant was never touched.
@@ -222,13 +340,33 @@ describe("runGracePurgeSweep (SC-010 retain-then-purge)", () => {
     expect(stuckWarn!.data?.failedSteps).toEqual(["keyspace-purge"]);
   });
 
+  it("continues purging later tenants when the warning logger throws", async () => {
+    const now = 10_000_000;
+    const registry = seededRegistry([
+      tombstone("due-bad", now - 2 * DAY_MS),
+      tombstone("due-ok", now - 2 * DAY_MS),
+    ]);
+    const deps = recordingDeps({ failKeyspaceFor: (tenant) => tenant === tid("due-bad") });
+    const throwingLog = {
+      info: () => {},
+      warn: () => { throw new Error("logger transport failed"); },
+      error: () => {},
+    };
+
+    const outcomes = await runGracePurgeSweep(deps, registry, DAY_MS, now, throwingLog);
+
+    expect(outcomes.map((outcome) => outcome.tenant)).toEqual([tid("due-bad"), tid("due-ok")]);
+    expect(deps.calls.acl).toEqual([tid("due-bad"), tid("due-ok")]);
+    expect(purgeSucceeded(outcomes[1]!)).toBe(true);
+  });
+
   it("propagates the REAL failed step + keysDeleted from the sweep — a DIFFERENT failing step (acl-revoke) proves it is not hardcoded to one step or a 'see-error' placeholder (SC-010)", async () => {
     const now = 10_000_000;
     const win = DAY_MS;
     // Fail a DIFFERENT step than keyspace — the sweep must surface the genuine
     // typed step name, and the keysDeleted from the step that DID run.
+    const registry = seededRegistry([tombstone("due", now - 2 * DAY_MS)]);
     const deps = recordingDeps({ failAcl: true });
-    const registry = registryOf([tombstone("due", now - 2 * DAY_MS)]);
     const warnings: Array<{ msg: string; data?: Record<string, unknown> }> = [];
     const capturingLog = {
       info: () => {},
@@ -241,7 +379,7 @@ describe("runGracePurgeSweep (SC-010 retain-then-purge)", () => {
     expect(outcomes).toHaveLength(1);
     const outcome = outcomes[0]!;
     // The GENUINE typed failed step is propagated — not "see-error", not collapsed.
-    expect(outcome.failedSteps).toEqual(["acl-revoke"]);
+    expect(outcome.kind === "completed" ? outcome.failedSteps : null).toEqual(["acl-revoke"]);
     expect(purgeSucceeded(outcome)).toBe(false);
     // keyspace-purge still ran (every other step is attempted), so the REAL
     // keysDeleted survives into the sweep outcome.

@@ -1,5 +1,6 @@
 // runNodeShared — single implementation of per-node execution.
-// Sole caller: `dag-runtime/wave-execution.ts`.
+// The only production caller is `dag-runtime/wave-execution.ts`; focused tests
+// invoke this seam directly to pin pre-span behavior.
 //
 // Behavioral options:
 //
@@ -14,12 +15,15 @@
 // `Err({ kind: "checkpoint-write-failed" })`. No writer wired → no write;
 // checkpointing is driven solely by the presence of the writer.
 //
-// The caller always emits the same `node-start | node-end | node-error` event
-// sequence — there is no caller-specific event suppression.
+// Event shape follows the execution path: checkpoint hits emit `node-skipped`;
+// input assembly/validation can fail before `node-start`; dispatched execution
+// emits `node-start` followed by `node-end` or `node-error`.
 
 import type { Result } from "../types/result.js";
 import { ok, err } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
+import { messageOf, asNodeFrameworkError } from "../types/errors.js";
+import { safeErrorMessage } from "../types/safe-error.js";
 import type { NodeContext, NodeDef, ValidatedNodeContext } from "../types/node.js";
 import type { MintingAuthority, ScopedCapabilityHandle } from "../types/capability-broker.js";
 import { invocationFor } from "../types/capability-broker.js";
@@ -32,7 +36,7 @@ import { withTracedNodeSpan, EMPTY_OUTCOME, type NodeSpanOutcome } from "./node-
 import { resolveContentFilter } from "../tracing/content-filter.js";
 import type { IncomingSources } from "../shared/incoming.js";
 
-export interface RunNodeOpts {
+interface RunNodeOpts {
   /**
    * When provided and contains the node's id, the node skips execution.
    * The cached value is validated against `outputSchema` before being
@@ -73,21 +77,36 @@ export const runNodeShared = async (
   const nowFn = opts.now ?? Date.now;
   const stamp = (): Date => new Date(nowFn());
 
+  /**
+   * THE one `node-error` emission for this node. `sideEffects` is a static
+   * property of the node, so it is carried on EVERY failure event; buffered
+   * post-mortems can identify a writer even when input validation failed.
+   */
+  const emitNodeError = (
+    error: string,
+    frameworkError: FrameworkError,
+    extra?: { readonly stack?: string },
+  ): void => {
+    emit(ctx, {
+      type: "node-error",
+      runId: ctx.runId,
+      dagId,
+      nodeId,
+      sideEffects: node.sideEffects,
+      timestamp: stamp(),
+      error,
+      ...(extra?.stack !== undefined ? { stack: extra.stack } : {}),
+      frameworkError,
+    });
+  };
+
   // Checkpoint resume hit — validate against the current output schema and
   // return the cached value without entering a span.
   if (opts.checkpoint?.has(nodeId)) {
     const cached = opts.checkpoint.get(nodeId);
     const validated = validateOutput(node.outputSchema, cached, nodeId);
     if (!validated.ok) {
-      emit(ctx, {
-        type: "node-error",
-        runId: ctx.runId,
-        dagId,
-        nodeId,
-        timestamp: stamp(),
-        error: `checkpoint replay rejected: ${String(validated.error)}`,
-        frameworkError: validated.error,
-      });
+      emitNodeError(`checkpoint replay rejected: ${messageOf(validated.error)}`, validated.error);
       return { result: validated, outcome: EMPTY_OUTCOME };
     }
     emit(ctx, {
@@ -112,15 +131,7 @@ export const runNodeShared = async (
     // Emit node-error so buffered observers don't see the node simply disappear
     // — without this, a node that fails input validation produces no event at
     // all, making post-mortems on a buffered run impossible.
-    emit(ctx, {
-      type: "node-error",
-      runId: ctx.runId,
-      dagId,
-      nodeId,
-      timestamp: stamp(),
-      error: `input validation failed: ${JSON.stringify(inputResult.error as FrameworkError)}`,
-      frameworkError: inputResult.error,
-    });
+    emitNodeError(`input validation failed: ${messageOf(inputResult.error)}`, inputResult.error);
     return { result: inputResult, outcome: EMPTY_OUTCOME };
   }
 
@@ -148,6 +159,17 @@ export const runNodeShared = async (
       // the wave-level catch-all and be reclassified as a RETRIABLE
       // `node-crash`, re-firing the broker (token-endpoint egress) on every
       // retry and losing the 403/503 taxonomy.
+      //
+      // Why this fence classifies NON-retriable while `node-span.ts`'s outer
+      // catch classifies a thrown `fn()` as RETRIABLE: the two catches sit at
+      // different altitudes and know different things. `node-span` wraps the
+      // whole node body, where a throw is an unclassified fault of unknown
+      // origin, and retriable is the safe default. Here we know exactly which
+      // call threw and that it is a CONTRACT VIOLATION by an extension — the
+      // same broker, given the same invocation, will violate it identically on
+      // every retry, so retrying only repeats the egress. The narrower catch
+      // must win: it is fenced INSIDE the broader one precisely so this
+      // classification is not overwritten by the general default.
       let minted: Result<ScopedCapabilityHandle, FrameworkError>;
       try {
         minted = await opts.minting.broker.mintFor(inv, node.requires);
@@ -156,20 +178,11 @@ export const runNodeShared = async (
           kind: "infra-unreachable" as const,
           operation: "mint" as const,
           hop: "capability-broker",
-          message: `broker.mintFor threw across the port boundary (contract violation): ${e instanceof Error ? e.message : String(e)}`,
+          message: `broker.mintFor threw across the port boundary (contract violation): ${safeErrorMessage(e)}`,
         });
       }
       if (!minted.ok) {
-        emit(ctx, {
-          type: "node-error",
-          runId: ctx.runId,
-          dagId,
-          nodeId,
-          sideEffects: node.sideEffects,
-          timestamp: stamp(),
-          error: `capability minting refused: ${JSON.stringify(minted.error)}`,
-          frameworkError: minted.error,
-        });
+        emitNodeError(`capability minting refused: ${messageOf(minted.error)}`, minted.error);
         return err(minted.error);
       }
       runCtx = mergeScopedCapabilities(ctx, minted.value);
@@ -195,19 +208,15 @@ export const runNodeShared = async (
             ...restUndelivered.map((capability) => ({ nodeId, capability })),
           ],
         };
-        emit(ctx, {
-          type: "node-error",
-          runId: ctx.runId,
-          dagId,
-          nodeId,
-          sideEffects: node.sideEffects,
-          timestamp: stamp(),
-          error: `broker claimed but did not deliver capabilities: ${JSON.stringify(missingErr)}`,
-          frameworkError: missingErr,
-        });
+        emitNodeError(`broker claimed but did not deliver capabilities: ${messageOf(missingErr)}`, missingErr);
         return err(missingErr);
       }
     }
+
+    // Built-in nodes can emit sub-spans while executing. Bind those timestamps
+    // to the same runtime clock as node-start/node-end; do not reuse the
+    // node-visible ClockCapability, which is a separate domain-time seam.
+    runCtx = { ...runCtx, eventTimestamp: stamp };
 
     let runResult: Result<unknown, FrameworkError>;
     try {
@@ -221,69 +230,26 @@ export const runNodeShared = async (
         ctx: NodeContext,
       ) => Promise<Result<unknown, FrameworkError>>;
       runResult = await runFn(inputResult.value, runCtx);
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      const stack = e instanceof Error ? e.stack : undefined;
-      const crash: FrameworkError = {
-        kind: "node-crash" as const,
-        nodeId,
-        retriability: "retriable" as const,
-        message,
-        stack,
-      };
-      emit(ctx, {
-        type: "node-error",
-        runId: ctx.runId,
-        dagId,
-        nodeId,
-        sideEffects: node.sideEffects,
-        timestamp: stamp(),
-        error: message,
-        stack,
-        frameworkError: crash,
-      });
-      return err(crash);
+    } catch (caught) {
+      const frameworkError = asNodeFrameworkError(caught, nodeId);
+      const message = messageOf(frameworkError);
+      const stack = frameworkError.kind === "node-crash" ? frameworkError.stack : undefined;
+      emitNodeError(message, frameworkError, { ...(stack !== undefined ? { stack } : {}) });
+      return err(frameworkError);
     }
 
     if (!runResult.ok) {
-      const frameworkError: FrameworkError =
-        runResult.error !== null &&
-        typeof runResult.error === "object" &&
-        "kind" in runResult.error &&
-        typeof (runResult.error as Record<string, unknown>).kind === "string"
-          ? (runResult.error as FrameworkError)
-          : { kind: "node-crash" as const, nodeId, retriability: "retriable" as const, message: String(runResult.error) };
+      const frameworkError = asNodeFrameworkError(runResult.error, nodeId);
 
-      const errorMsg =
-        frameworkError.kind === "node-crash"
-          ? frameworkError.message
-          : JSON.stringify(frameworkError);
+      const errorMsg = messageOf(frameworkError);
 
-      emit(ctx, {
-        type: "node-error",
-        runId: ctx.runId,
-        dagId,
-        nodeId,
-        sideEffects: node.sideEffects,
-        timestamp: stamp(),
-        error: errorMsg,
-        frameworkError,
-      });
+      emitNodeError(errorMsg, frameworkError);
       return err(frameworkError);
     }
 
     const outputResult = validateOutput(node.outputSchema, runResult.value, nodeId);
     if (!outputResult.ok) {
-      emit(ctx, {
-        type: "node-error",
-        runId: ctx.runId,
-        dagId,
-        nodeId,
-        sideEffects: node.sideEffects,
-        timestamp: stamp(),
-        error: `output validation failed: ${JSON.stringify(outputResult.error as FrameworkError)}`,
-        frameworkError: outputResult.error,
-      });
+      emitNodeError(`output validation failed: ${messageOf(outputResult.error)}`, outputResult.error);
       return outputResult;
     }
 
@@ -291,23 +257,14 @@ export const runNodeShared = async (
       try {
         await ctx.checkpointWriter.write(ctx.runId, nodeId, outputResult.value);
       } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
+        const message = safeErrorMessage(e);
         const cpwError: FrameworkError = {
           kind: "checkpoint-write-failed" as const,
           runId: ctx.runId,
           nodeId,
           message,
         };
-        emit(ctx, {
-          type: "node-error",
-          runId: ctx.runId,
-          dagId,
-          nodeId,
-          sideEffects: node.sideEffects,
-          timestamp: stamp(),
-          error: `checkpoint-write-failed: ${message}`,
-          frameworkError: cpwError,
-        });
+        emitNodeError(`checkpoint-write-failed: ${message}`, cpwError);
         return err(cpwError);
       }
     }

@@ -5,14 +5,13 @@
  */
 
 import { describe, test, expect } from "bun:test";
-import { toolUseLoop, type ToolLoopProvider, type TurnResult } from "../llm/tool-use-loop.js";
+import { toolUseLoop, type ToolLoopProvider } from "../llm/tool-use-loop.js";
 import { toolName } from "../llm/tools.js";
 import { z } from "zod";
-import { ok, err, isOk, isErr } from "../types/result.js";
-import type { Result } from "../types/result.js";
-import type { FrameworkError } from "../types/errors.js";
-import { N, R, D, NO_SIDE_EFFECTS, NO_CONFIDENCE } from "./_id-helpers.js";
+import { ok, err } from "../types/result.js";
+import { N } from "./_id-helpers.js";
 import { makeNodeContext } from "../shared/make-node-context.js";
+import type { NodeContext } from "../types/node.js";
 import { stubLlmClient } from "./_llm-mocks.js";
 import { setFrameworkLogger, __resetFrameworkLogger } from "../logger.js";
 
@@ -75,6 +74,28 @@ const errorOnTurn = (errorTurn: number): ToolLoopProvider => {
 };
 
 describe("toolUseLoop", () => {
+  test("hostile tool-name validation failures remain typed", async () => {
+    const hostile = {
+      get message(): never { throw new Error("message getter escaped"); },
+      [Symbol.toPrimitive](): never { throw new Error("coercion escaped"); },
+    };
+    const tools = [{
+      get name(): never { throw hostile; },
+    }] as never;
+
+    const result = await toolUseLoop(
+      immediateProvider('{"answer":"unreachable"}'),
+      { nodeId: N("n1"), model: "m", schema, tools, maxIterations: 1 },
+      makeCtx(),
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("validation");
+      if (result.error.kind === "validation") expect(typeof result.error.message).toBe("string");
+    }
+  });
+
   test("immediate final answer — parses JSON and validates schema", async () => {
     const result = await toolUseLoop(
       immediateProvider('{"answer":"hello"}'),
@@ -394,6 +415,133 @@ describe("toolUseLoop", () => {
       expect(w?.data.dagId).toBe("test-dag");
     } finally {
       __resetFrameworkLogger();
+    }
+  });
+
+  test("throwing usage diagnostics preserve the original validation Result", async () => {
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: () => { throw new Error("logger transport failed"); },
+      error: () => {},
+    });
+    try {
+      let calls = 0;
+      const provider: ToolLoopProvider = {
+        call: async () => {
+          calls += 1;
+          return calls === 1
+            ? ok({
+                toolCalls: [{ id: "c", name: "tool", input: {} }],
+                textContent: undefined,
+                tokensIn: 10,
+                tokensOut: 15,
+              })
+            : err({ kind: "validation", nodeId: N("n1"), message: "bad schema" });
+        },
+        appendToolResults: () => {},
+      };
+
+      const result = await toolUseLoop(
+        provider,
+        {
+          nodeId: N("n1"),
+          model: "m",
+          schema,
+          tools: [{ name: toolName("tool"), description: "t", inputSchema: z.object({}), outputSchema: z.string(), run: async () => ok("r") }],
+          maxIterations: 3,
+        },
+        makeCtx(),
+      );
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.kind).toBe("validation");
+    } finally {
+      __resetFrameworkLogger();
+    }
+  });
+
+  test("a hostile tool-dispatch throw remains a typed non-retriable error", async () => {
+    const hostile = {
+      [Symbol.toPrimitive](): never { throw new Error("coercion escaped"); },
+      toString(): never { throw new Error("toString escaped"); },
+    };
+    const base = makeCtx();
+    const hostileCtx = {
+      ...base,
+      get llm(): never { throw hostile; },
+    } as NodeContext;
+    const provider: ToolLoopProvider = {
+      call: async () => ok({
+        toolCalls: [{ id: "c", name: "tool", input: {} }],
+        textContent: undefined,
+        tokensIn: 4,
+        tokensOut: 6,
+      }),
+      appendToolResults: () => {},
+    };
+
+    const result = await toolUseLoop(
+      provider,
+      {
+        nodeId: N("n1"),
+        model: "m",
+        schema,
+        tools: [{ name: toolName("tool"), description: "t", inputSchema: z.object({}), outputSchema: z.string(), run: async () => ok("r") }],
+        maxIterations: 2,
+      },
+      hostileCtx,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "node-crash") {
+      expect(result.error.retriability).toBe("non-retriable");
+      expect(result.error.message).toContain("tool dispatch threw");
+      expect(result.error.usage).toEqual({ tokensIn: 4, tokensOut: 6 });
+    }
+  });
+
+  test("appendToolResults failures are typed after tool side effects", async () => {
+    let providerCalls = 0;
+    let toolCalls = 0;
+    const provider: ToolLoopProvider = {
+      call: async () => {
+        providerCalls += 1;
+        return ok({
+          toolCalls: [{ id: "c", name: "tool", input: {} }],
+          textContent: undefined,
+          tokensIn: 7,
+          tokensOut: 9,
+        });
+      },
+      appendToolResults: () => { throw new Error("conversation serialization failed"); },
+    };
+
+    const result = await toolUseLoop(
+      provider,
+      {
+        nodeId: N("n1"),
+        model: "m",
+        schema,
+        tools: [{
+          name: toolName("tool"),
+          description: "t",
+          inputSchema: z.object({}),
+          outputSchema: z.string(),
+          run: async () => { toolCalls += 1; return ok("r"); },
+        }],
+        maxIterations: 3,
+      },
+      makeCtx(),
+    );
+
+    expect(providerCalls).toBe(1);
+    expect(toolCalls).toBe(1);
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "node-crash") {
+      expect(result.error.retriability).toBe("non-retriable");
+      expect(result.error.message).toContain("provider.appendToolResults threw");
+      expect(result.error.usage).toEqual({ tokensIn: 7, tokensOut: 9 });
     }
   });
 

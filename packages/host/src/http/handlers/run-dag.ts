@@ -10,17 +10,17 @@
  */
 
 import type { Context } from "hono";
-import type { DagId, Result, NodeContext, FrameworkError, InvocationOrigin } from "@fuguejs/framework";
-import { formatFrameworkError, tryDagId } from "@fuguejs/framework";
+import type { Result, NodeContext, FrameworkError, InvocationOrigin } from "@fuguejs/framework";
+import { formatFrameworkError, safeErrorMessage, tryDagId } from "@fuguejs/framework";
 import type { DagDef } from "@fuguejs/framework";
-import type { HostEnv } from "../router.js";
+import type { HostEnv } from "../env.js";
 import type { NodeContextForDag } from "../../domain/run-context.js";
 import type { AuthIdentity } from "../../domain/auth.js";
-import { canAccessDag } from "../../domain/auth.js";
-import { errorResponse, successResponse } from "../response.js";
+import { authorizeDagAccess } from "./dag-access.js";
+import { errorResponse, hostUnavailableResponse, successResponse } from "../response.js";
 import type { HostError } from "../../domain/host-error.js";
 import { formatHostError, httpStatusFor } from "../../domain/host-error.js";
-import { canServeRequests, getRegistry } from "../../domain/host-state.js";
+import { getRegistry } from "../../domain/host-state.js";
 import { lookupDag } from "../../domain/registry.js";
 import type { RegisteredDag } from "../../domain/registry.js";
 import { acquire, release } from "../../domain/concurrency.js";
@@ -29,6 +29,9 @@ import { checkCircuit, markSuccess, markFailure } from "../../domain/circuit-gua
 import type { CircuitPort, CircuitConfig } from "../../domain/circuit-guard.js";
 import { classifyFrameworkError } from "../../domain/framework-error-http.js";
 import type { HitlRunService } from "../../hitl/service.js";
+import { settleBeforeDeadline } from "../../adapters/settle-before-deadline.js";
+import { logWithoutThrowing } from "../../hitl/diagnostic-logging.js";
+import type { LogPort } from "../../ports.js";
 
 // ---------------------------------------------------------------------------
 // Types for the handler's dependencies (injectable for testing)
@@ -72,6 +75,8 @@ export interface RunDagDeps {
     origin: InvocationOrigin | undefined,
   ) => Promise<Result<O, FrameworkError>>;
   readonly clock: () => number;
+  /** Optional structured diagnostics for failures settling after a hard deadline. */
+  readonly logger?: LogPort;
 }
 
 /**
@@ -98,24 +103,17 @@ export const createRunDagHandler = (
     const hostState = c.get("hostState");
 
     // 1. Reject if host cannot serve requests (booting, draining, stopped)
-    if (!canServeRequests(hostState)) {
-      return errorResponse(c, 503, "host-unavailable", `Host is ${hostState.phase} — not accepting requests`, {
-        details: { phase: hostState.phase },
-      });
-    }
+    const unavailable = hostUnavailableResponse(c, hostState);
+    if (unavailable) return unavailable;
 
+    // "no registry yet" and "registry without this DAG" are the SAME answer to the
+    // caller — this DAG is not servable — and differ only in what can be listed
+    // as available. Deriving `available` from the registry (empty when there is
+    // none) keeps one 404 shape instead of two that could drift apart.
     const registry = getRegistry(hostState);
-    if (!registry) {
-      const notFound: HostError = { kind: "dag-not-found", dagId, available: [] };
-      return errorResponse(c, 404, notFound.kind, formatHostError(notFound), {
-        dagId,
-        details: { available: [] },
-      });
-    }
-
-    const registered = lookupDag(registry, dagId);
+    const registered = registry ? lookupDag(registry, dagId) : undefined;
     if (!registered) {
-      const available = Array.from(registry.dags.keys());
+      const available = registry ? Array.from(registry.dags.keys()) : [];
       const notFound: HostError = { kind: "dag-not-found", dagId, available };
       return errorResponse(c, 404, notFound.kind, formatHostError(notFound), {
         dagId,
@@ -129,20 +127,10 @@ export const createRunDagHandler = (
       return errorResponse(c, 503, disabled.kind, formatHostError(disabled), { dagId });
     }
 
-    // 1.5. Authorization — check team scope
-    const identity = c.get("authIdentity") as AuthIdentity | undefined;
-    if (!identity) {
-      return errorResponse(c, 401, "unauthorized", "Missing auth identity — middleware not applied");
-    }
-    if (!canAccessDag(identity, registered.team)) {
-      // `user` identities are refusable too (canRunDag policy) — name the kind
-      // honestly rather than mislabelling a refused user as "admin".
-      const callerTeam = identity.kind === "team" ? identity.team : identity.kind;
-      return errorResponse(c, 403, "forbidden",
-        `Token for team '${callerTeam}' cannot access DAG '${dagId}' (owned by '${registered.team}')`,
-        { dagId, details: { callerTeam, dagTeam: registered.team } },
-      );
-    }
+    // 1.5. Authorization — check team scope and carry the parsed identity.
+    const access = authorizeDagAccess(c, dagId, registered);
+    if (!access.ok) return access.response;
+    const { identity } = access;
 
     // 2. Parse and validate input
     let input: unknown;
@@ -184,7 +172,7 @@ export const createRunDagHandler = (
           { dagId },
         );
       }
-      const started = await deps.hitl.startRun(dagId, parseResult.data, identity);
+      const started = await deps.hitl.startRun(dagId, registered.team, parseResult.data, identity);
       if (!started.ok) {
         return errorResponse(c, httpStatusFor(started.error), started.error.kind, formatHostError(started.error), { dagId });
       }
@@ -206,25 +194,31 @@ export const createRunDagHandler = (
 
     // Effective circuit config: per-DAG override (if declared) merged over the host
     // default. Each field the DAG omits falls back to the host-level config.
+    // No branch on whether an override EXISTS: each field already falls back to
+    // the host default on its own, so "no override" and "an override that sets
+    // nothing" are the same merge — writing it once removes the chance of the
+    // two arms drifting to different defaults.
     const cbOverride = registered.config.circuitBreaker;
-    const circuitConfig: CircuitConfig = cbOverride
-      ? {
-          threshold: cbOverride.failureThreshold ?? deps.circuitConfig.threshold,
-          windowMs: deps.circuitConfig.windowMs,
-          cooldownMs: cbOverride.resetTimeoutMs ?? deps.circuitConfig.cooldownMs,
-        }
-      : deps.circuitConfig;
+    const circuitConfig: CircuitConfig = {
+      threshold: cbOverride?.failureThreshold ?? deps.circuitConfig.threshold,
+      windowMs: deps.circuitConfig.windowMs,
+      cooldownMs: cbOverride?.resetTimeoutMs ?? deps.circuitConfig.cooldownMs,
+    };
 
     const concurrency = deps.getConcurrency();
     const acquireResult = acquire(concurrency, dagId, now);
 
     if (!acquireResult.ok) {
-      const concErr: HostError = acquireResult.error.kind === "global-at-capacity"
+      // ONE test of the capacity scope: the error kind and the `scope` detail
+      // are two views of the same fact, and deriving them from separate
+      // comparisons let them disagree if either side were ever edited alone.
+      const atGlobalCapacity = acquireResult.error.kind === "global-at-capacity";
+      const concErr: HostError = atGlobalCapacity
         ? { kind: "global-concurrency-exceeded" }
         : { kind: "dag-concurrency-exceeded", dagId };
       return errorResponse(c, 429, concErr.kind, formatHostError(concErr), {
         dagId,
-        details: { scope: acquireResult.error.kind === "global-at-capacity" ? "global" : "dag" },
+        details: { scope: atGlobalCapacity ? "global" : "dag" },
         headers: { "Retry-After": "5" },
       });
     }
@@ -246,18 +240,14 @@ export const createRunDagHandler = (
 
     const { permit } = circuitCheck;
 
-    // 5. Execute DAG with timeout
-    // INVARIANT: The outer try/finally guarantees token release.
-    // The setup guard (above) clears the timer if createContext throws.
-    // The inner try/catch handles execution-level errors.
+    // 5. Execute DAG with a cooperative signal AND a hard settlement deadline.
+    // INVARIANT: the outer finally releases the token even when execution never
+    // observes cancellation; the deadline race itself never awaits late work.
     try {
       const timeoutMs = registered.config.timeout;
       const HOST_TIMEOUT = Symbol("host-timeout");
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(HOST_TIMEOUT), timeoutMs);
 
-      // Declare ctx before the execution try so it's accessible in the catch block.
-      // Guard the createContext call so the timer is cleared if it throws (leak prevention).
       let ctx: NodeContext;
       let origin: InvocationOrigin | undefined;
       try {
@@ -270,22 +260,66 @@ export const createRunDagHandler = (
         ctx = built.ctx;
         origin = built.origin;
       } catch (setupErr) {
-        clearTimeout(timeoutId);
         markFailure(permit, deps.clock(), circuitConfig);
         throw setupErr;
       }
       const startTime = deps.clock();
+      const timeoutResponse = (): Response => {
+        markFailure(permit, deps.clock(), circuitConfig);
+        const timeoutErr: HostError = {
+          kind: "timeout",
+          dagId,
+          runId: ctx.runId,
+          timeoutMs,
+        };
+        return errorResponse(c, 408, timeoutErr.kind, formatHostError(timeoutErr), {
+          dagId,
+          runId: ctx.runId,
+          details: { timeoutMs },
+        });
+      };
 
       try {
-        const result = await deps.executeDag(
-          registered.dag,
-          parseResult.data,
-          ctx,
-          origin,
+        const completion = await settleBeforeDeadline(
+          deps.executeDag(registered.dag, parseResult.data, ctx, origin),
+          timeoutMs,
+          () => controller.abort(HOST_TIMEOUT),
+          {
+            onLateFulfillment: (lateResult) => {
+              if (!lateResult.ok) {
+                logWithoutThrowing(
+                  deps.logger,
+                  "error",
+                  "host: DAG execution failed after request deadline",
+                  { dagId, runId: ctx.runId, error: formatFrameworkError(lateResult.error) },
+                );
+              }
+            },
+            onLateRejection: (error) => logWithoutThrowing(
+              deps.logger,
+              "error",
+              "host: DAG execution rejected after request deadline",
+              { dagId, runId: ctx.runId, error: safeErrorMessage(error) },
+            ),
+            onTimeoutCancellationFailure: (error) => logWithoutThrowing(
+              deps.logger,
+              "error",
+              "host: request timeout cancellation failed",
+              { dagId, runId: ctx.runId, error: safeErrorMessage(error) },
+            ),
+          },
         );
+        if (completion.kind === "timed-out") return timeoutResponse();
 
-        clearTimeout(timeoutId);
+        const result = completion.value;
         const durationMs = deps.clock() - startTime;
+
+        // A cooperative runtime usually settles cancellation as Result.err,
+        // rather than throwing AbortError. The host-owned sentinel distinguishes
+        // this timeout from caller cancellation and preserves FR-028's HTTP 408.
+        if (!result.ok && result.error.kind === "aborted" && controller.signal.reason === HOST_TIMEOUT) {
+          return timeoutResponse();
+        }
 
         // 6. Map Result to HTTP response (review I4). A settled authorization
         // "no" (policy-refusal / downstream-denied → 403) and a per-run usage
@@ -297,39 +331,32 @@ export const createRunDagHandler = (
         if (result.ok) {
           markSuccess(permit, deps.clock());
           return successResponse(c, result.value, { runId: ctx.runId, durationMs });
-        } else {
-          const cls = classifyFrameworkError(result.error);
-          if (cls.countsAsCircuitFailure) {
-            markFailure(permit, deps.clock(), circuitConfig);
-          } else {
-            markSuccess(permit, deps.clock());
-          }
-          const msg = formatFrameworkError(result.error);
-          return errorResponse(c, cls.status, result.error.kind, msg, {
-            dagId,
-            runId: ctx.runId,
-            ...(cls.retryAfterSeconds !== undefined
-              ? { headers: { "Retry-After": String(cls.retryAfterSeconds) } }
-              : {}),
-          });
         }
-      } catch (e: unknown) {
-        clearTimeout(timeoutId);
 
-        // Handle abort (timeout) — only if caused by HOST_TIMEOUT sentinel
-        if (e instanceof Error && e.name === "AbortError" && controller.signal.reason === HOST_TIMEOUT) {
+        const cls = classifyFrameworkError(result.error);
+        if (cls.countsAsCircuitFailure) {
           markFailure(permit, deps.clock(), circuitConfig);
-          const timeoutErr: HostError = {
-            kind: "timeout",
-            dagId,
-            runId: ctx.runId,
-            timeoutMs,
-          };
-          return errorResponse(c, 408, timeoutErr.kind, formatHostError(timeoutErr), {
-            dagId,
-            runId: ctx.runId,
-            details: { timeoutMs },
-          });
+        } else {
+          markSuccess(permit, deps.clock());
+        }
+        const msg = formatFrameworkError(result.error);
+        return errorResponse(c, cls.status, result.error.kind, msg, {
+          dagId,
+          runId: ctx.runId,
+          ...(cls.retryAfterSeconds !== undefined
+            ? { headers: { "Retry-After": String(cls.retryAfterSeconds) } }
+            : {}),
+        });
+      } catch (e: unknown) {
+        // Thrown cooperative aborts share the same host-owned timeout response.
+        let isAbortError = false;
+        try {
+          isAbortError = e instanceof Error && e.name === "AbortError";
+        } catch {
+          // Hostile thrown values continue through the generic error boundary.
+        }
+        if (isAbortError && controller.signal.reason === HOST_TIMEOUT) {
+          return timeoutResponse();
         }
 
         markFailure(permit, deps.clock(), circuitConfig);

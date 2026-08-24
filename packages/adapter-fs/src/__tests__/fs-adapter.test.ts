@@ -212,4 +212,39 @@ describe("mapFsError", () => {
     expect(mapFsError({ code: "EISDIR" }, "/p").kind).toBe("node-crash");
     expect(mapFsError({ code: "EIO" }, "/p").kind).toBe("transient");
   });
+
+  // `mapFsError` switched from a raw `"code" in e` read to the framework's
+  // `probeErrorCode` precisely so a hostile thrown value cannot throw across
+  // this boundary. `probeErrorCode` is proven total on its own, but nothing
+  // pinned the property AT THIS composition site — so reintroducing a direct
+  // property read here would have gone unnoticed. These cases pin it.
+  it("is total for non-object thrown values", () => {
+    for (const hostile of [undefined, null, 42, "ENOENT", Symbol("EIO"), true]) {
+      const mapped = mapFsError(hostile, "/p");
+      // No code is probeable, so every one falls through to the transient arm.
+      expect(mapped.kind).toBe("transient");
+    }
+  });
+
+  it("does not let a throwing `code` getter escape", () => {
+    const throwingGetter = Object.defineProperty({}, "code", {
+      get() { throw new Error("hostile getter"); },
+      enumerable: true,
+      configurable: true,
+    });
+    expect(() => mapFsError(throwingGetter, "/p")).not.toThrow();
+    expect(mapFsError(throwingGetter, "/p").kind).toBe("transient");
+  });
+
+  it("does not let a revoked Proxy escape", () => {
+    const { proxy, revoke } = Proxy.revocable({ code: "ENOENT" }, {});
+    revoke();
+    expect(() => mapFsError(proxy, "/p")).not.toThrow();
+    expect(mapFsError(proxy, "/p").kind).toBe("transient");
+  });
+
+  it("still reads a real Node fs error through a normal Error instance", () => {
+    const real = Object.assign(new Error("ENOENT: no such file"), { code: "ENOENT" });
+    expect(mapFsError(real, "/p").kind).toBe("node-crash");
+  });
 });

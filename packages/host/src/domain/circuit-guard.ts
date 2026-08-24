@@ -5,10 +5,12 @@
  * This module captures that protocol as composable functions,
  * preventing ordering bugs and missed state writes.
  *
- * The CircuitPermit token enforces the protocol at the type level:
- * - checkCircuit() returns a permit when allowed (or denied result)
- * - markSuccess() and markFailure() CONSUME the permit — calling without one is a compile error
- * - This makes "mark without check" and "check without mark" impossible
+ * The CircuitPermit token proves that checkCircuit() allowed the request:
+ * - checkCircuit() returns a branded permit when allowed (or a denied result)
+ * - markSuccess() and markFailure() require that permit, so "mark without check"
+ *   is a compile-time error for honest TypeScript callers
+ * - TypeScript is not linear: it cannot prove that a permit is eventually marked
+ *   or prevent a caller from reusing one. The handler owns that control-flow rule.
  *
  * DESIGN: This module lives in domain/ because it encapsulates a deterministic
  * protocol over an injected port handle. The transition sequence is fully
@@ -64,8 +66,9 @@ declare const __circuitPermitBrand: unique symbol;
 
 /**
  * Proof that the circuit breaker allowed this request through.
- * Only `checkCircuit` can produce one. `markSuccess`/`markFailure` consume it.
- * This prevents calling mark* without first checking, or forgetting to mark after execution.
+ * Only `checkCircuit` can produce one through the public API. Requiring it on
+ * `markSuccess`/`markFailure` prevents marking without an allowed check; the
+ * type does not claim linear consumption or prove eventual completion.
  */
 export interface CircuitPermit {
   readonly [__circuitPermitBrand]: void;
@@ -75,7 +78,7 @@ export interface CircuitPermit {
 
 // ── Guard Results ──────────────────────────────────────────────────────────
 
-export type CircuitCheckResult =
+type CircuitCheckResult =
   | { readonly allowed: true; readonly permit: CircuitPermit }
   | { readonly allowed: false; readonly reason: "circuit-open" };
 
@@ -123,7 +126,7 @@ export const checkCircuit = (
  * Record a successful execution in the circuit breaker.
  * In half-open state, this heals the circuit back to closed.
  *
- * Consumes the CircuitPermit — enforces that check was called first.
+ * Requires a CircuitPermit — enforces that an allowed check happened first.
  */
 export const markSuccess = (permit: CircuitPermit, now: number): void => {
   const circuit = recordSuccess(permit.port.get(permit.dagId), now);
@@ -134,7 +137,7 @@ export const markSuccess = (permit: CircuitPermit, now: number): void => {
  * Record a failed execution in the circuit breaker.
  * May transition closed → open if threshold exceeded.
  *
- * Consumes the CircuitPermit — enforces that check was called first.
+ * Requires a CircuitPermit — enforces that an allowed check happened first.
  *
  * @param config - Circuit breaker thresholds (from HostConfig). Defaults to DEFAULTS if omitted.
  */

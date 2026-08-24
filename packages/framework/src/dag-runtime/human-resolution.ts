@@ -4,9 +4,11 @@
 import { match } from "ts-pattern";
 import type { DagPhase, DagMachineContextPersisted, HumanAction } from "./types.js";
 import type { NodeId } from "../types/ids.js";
+import { freshnessExecutionEpoch } from "../types/witness.js";
 import {
   type WaveDoneResult,
   advanceToNextWave,
+  waveIndexByNodeId,
   waveIndexOf,
 } from "./wave-resolution.js";
 
@@ -99,16 +101,28 @@ const handleReroute = (
   // FR-031: backward (or current wave) reroute — reset completed and resume from target wave.
   // Pre-build the nodeId → waveIndex map so the two filters below are O(N)
   // per pass instead of repeating ctx.waves.findIndex per node (O(N²)).
-  const waveByNodeId = new Map<NodeId, number>();
-  for (let w = 0; w < ctx.waves.length; w++) {
-    for (const id of ctx.waves[w]) waveByNodeId.set(id, w);
-  }
+  const waveByNodeId = waveIndexByNodeId(ctx);
   const beforeTargetWave = (nodeId: NodeId): boolean =>
     (waveByNodeId.get(nodeId) ?? -1) < targetWave;
 
   const survivingOutputs = new Map(
     [...ctx.outputs].filter(([nodeId]) => beforeTargetWave(nodeId)),
   );
+
+  if (ctx.freshnessExecutionEpoch === Number.MAX_SAFE_INTEGER) {
+    return {
+      state: {
+        kind: "failed",
+        error: {
+          kind: "node-crash",
+          nodeId: currentState.nodeId,
+          retriability: "non-retriable",
+          message: "freshness execution epoch exhausted; reroute refused",
+        },
+      },
+      context: ctx,
+    };
+  }
 
   // The executor precomputes the active set by re-evaluating predicates for
   // prior waves. If not provided (shouldn't happen in normal operation),
@@ -119,6 +133,14 @@ const handleReroute = (
     ...ctx,
     outputs: survivingOutputs,
     retries: new Map([...ctx.retries].filter(([nodeId]) => beforeTargetWave(nodeId))),
+    // Completion proof is valid only for work that survives the reroute.
+    // Target/later nodes execute again and therefore owe fresh bookkeeping.
+    freshnessCompletedNodeIds: new Set(
+      [...ctx.freshnessCompletedNodeIds].filter(beforeTargetWave),
+    ),
+    // The checkpoint lands before replacement work starts. Bookkeeping retries
+    // retain this epoch; another reroute creates a new logical execution.
+    freshnessExecutionEpoch: freshnessExecutionEpoch(ctx.freshnessExecutionEpoch + 1),
     activeNodeIds: reseededActive,
   };
 
@@ -155,7 +177,21 @@ const resolveHumanApproved = (
       };
     }
     const nodeOutput = ctx.outputs.get(nextNodeId);
-    const prompt = ctx.humanReviewPrompts.get(nextNodeId) ?? "";
+    const prompt = ctx.humanReviewPrompts.get(nextNodeId);
+    if (prompt === undefined) {
+      return {
+        state: {
+          kind: "failed",
+          error: {
+            kind: "node-crash",
+            retriability: "retriable",
+            nodeId: nextNodeId,
+            message: `node '${nextNodeId}' missing humanReview prompt`,
+          },
+        },
+        context: ctx,
+      };
+    }
 
     return {
       state: {

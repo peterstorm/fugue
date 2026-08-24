@@ -8,10 +8,10 @@
  *
  *   - per-tenant concurrency ceiling — each tenant gets its OWN `{current,max}`
  *     slot count, so one tenant saturating its ceiling can NEVER consume
- *     another tenant's slots (FR-032, SC-011, US8). Rejection is the caller's
- *     OWN `tenant-over-quota` (429 + per-tenant Retry-After, FR-038).
+ *     another tenant's slots (multi-tenant spec FR-032, SC-011, US8). Rejection is the caller's
+ *     OWN `tenant-over-quota` (429 + per-tenant Retry-After, multi-tenant spec FR-038).
  *
- * LIVE-WORKER BOUND (FR-033) lives ELSEWHERE: the worker-lifecycle manager's
+ * LIVE-WORKER BOUND (multi-tenant spec FR-033) lives ELSEWHERE: the worker-lifecycle manager's
  * `liveWorkerCount()` is the SOLE authoritative enforcement point (it refuses a
  * new spawn at `SUPERVISOR_MAX_LIVE_WORKERS` → `worker-unavailable` 503).
  * Admission deliberately does NOT mirror that count — a second counter here
@@ -24,22 +24,23 @@
  * are copied, never mutated in place.
  *
  * AD-9: admission is pure supervisor state. The per-tenant MEMORY ceiling
- * (FR-034) is enforced elsewhere — via the per-worker heap flag at spawn
+ * (multi-tenant spec FR-034) is enforced elsewhere — via the per-worker heap flag at spawn
  * (T6/T8). Here we model only the per-tenant admission/concurrency axis: how
  * many concurrent runs a tenant may have in flight.
  *
- * @satisfies FR-032 — per-tenant resource admission replaces the single global limit.
- * @satisfies FR-038 — over-quota → 429 + Retry-After, scoped to the offending tenant.
- * @satisfies SC-011 / US8 — anti-starvation: a heavy tenant cannot reject others.
+ * @satisfies multi-tenant spec FR-032 — per-tenant resource admission replaces the single global limit.
+ * @satisfies multi-tenant spec FR-038 — over-quota → 429 + Retry-After, scoped to the offending tenant.
+ * @satisfies multi-tenant spec SC-011 / US8 — anti-starvation: a heavy tenant cannot reject others.
  */
 
 import type { Result } from "@fuguejs/framework";
 import { ok, err } from "@fuguejs/framework";
 import type { TenantId } from "../domain/tenant.js";
-import type { HostError } from "../domain/host-error.js";
+import type { HostError, RetryAfterSeconds } from "../domain/host-error.js";
 import {
   tenantOverQuota,
   internalInvariantViolated,
+  retryAfterSeconds,
 } from "../domain/host-error.js";
 import {
   type ConcurrencyState,
@@ -67,33 +68,46 @@ import {
  * `domain/concurrency.ts`, a constructor rejecting `current > max` would
  * contradict the intentional, documented drain-down behaviour.
  */
-export interface TenantConcurrency {
+declare const __tenantConcurrencyLimitBrand: unique symbol;
+export type TenantConcurrencyLimit = number & {
+  readonly [__tenantConcurrencyLimitBrand]: "TenantConcurrencyLimit";
+};
+
+/** Parse the non-negative safe-integer ceiling before it can enter admission state. */
+export const tenantConcurrencyLimit = (value: number): TenantConcurrencyLimit => {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError("tenant concurrency limit must be a non-negative safe integer");
+  }
+  return value as TenantConcurrencyLimit;
+};
+
+interface TenantConcurrency {
   readonly current: number;
-  readonly max: number;
+  readonly max: TenantConcurrencyLimit;
 }
 
 /**
  * Tenant-aware concurrency state. COMPOSES (does not fork) the existing
  * `ConcurrencyState` for the global-execution + per-DAG axes, and adds:
- *   - `perTenant`         — per-tenant concurrency ceilings (FR-032).
+ *   - `perTenant`         — per-tenant concurrency ceilings (multi-tenant spec FR-032).
  *   - `defaultTenantMax`  — ceiling applied to a tenant with no explicit limit.
  *
  * Spec shape (plan): `ConcurrencyState & { perTenant }`. We model the
  * "& ConcurrencyState" by EMBEDDING it as `inner` rather than spreading, so the
  * inner ADT's invariants stay owned by `domain/concurrency.ts` and cannot drift
- * here. The global live-worker bound (FR-033) is NOT modelled here — the
+ * here. The global live-worker bound (multi-tenant spec FR-033) is NOT modelled here — the
  * worker-lifecycle manager is its sole authoritative enforcer (see module doc).
  */
 export interface TenantConcurrencyState {
   readonly inner: ConcurrencyState<TenantId>;
   readonly perTenant: ReadonlyMap<TenantId, TenantConcurrency>;
-  readonly defaultTenantMax: number;
+  readonly defaultTenantMax: TenantConcurrencyLimit;
   /**
    * Retry-After (seconds) advertised when a tenant is over its OWN ceiling
-   * (FR-038). Carried on state (config), surfaced on the `tenant-over-quota`
+   * (multi-tenant spec FR-038). Carried on state (config), surfaced on the `tenant-over-quota`
    * error so the HTTP layer reads it from the error, never a hardcoded header.
    */
-  readonly retryAfterSeconds: number;
+  readonly retryAfterSeconds: RetryAfterSeconds;
 }
 
 /** @internal Unique symbol for type-level branding — prevents external forgery. */
@@ -123,10 +137,10 @@ export interface AdmitToken {
 // Builders
 // ---------------------------------------------------------------------------
 
-export interface AdmissionConfig {
-  /** Default per-tenant concurrency ceiling (FR-032). */
+interface AdmissionConfig {
+  /** Default per-tenant concurrency ceiling (multi-tenant spec FR-032). */
   readonly defaultTenantMax?: number;
-  /** Retry-After (seconds) advertised on `tenant-over-quota` (FR-038). */
+  /** Retry-After (seconds) advertised on `tenant-over-quota` (multi-tenant spec FR-038). */
   readonly retryAfterSeconds?: number;
 }
 
@@ -140,12 +154,12 @@ export interface AdmissionConfig {
  * inner per-key counter and our `perTenant` counter move in lockstep.
  *
  * The inner GLOBAL limit, by contrast, MUST NOT be the cross-tenant bottleneck:
- * FR-032 REPLACES the single global concurrency limit with per-tenant quotas,
- * and SC-011 requires that one tenant saturating the box never rejects another.
+ * multi-tenant spec FR-032 REPLACES the single global concurrency limit with per-tenant quotas,
+ * and multi-tenant spec SC-011 requires that one tenant saturating the box never rejects another.
  * If the inner global limit could bind first, a heavy tenant filling it would
- * starve others — exactly the failure SC-011 forbids. So the inner global is
+ * starve others — exactly the failure multi-tenant spec SC-011 forbids. So the inner global is
  * sized so it can NEVER bind before the per-tenant ceilings do: the box-wide
- * hard cap is the worker-lifecycle manager's live-worker bound (FR-033, enforced
+ * hard cap is the worker-lifecycle manager's live-worker bound (multi-tenant spec FR-033, enforced
  * there), not a shared inner execution counter. `INNER_GLOBAL_HEADROOM` makes
  * the inner global a non-binding safety net rather than a starvation vector.
  */
@@ -153,7 +167,7 @@ export interface AdmissionConfig {
 /**
  * Sizes the inner global limit large enough that it never binds before the
  * per-tenant ceilings. The true box-wide cap is the lifecycle manager's
- * live-worker bound (FR-033); this is just a non-binding upper safety net
+ * live-worker bound (multi-tenant spec FR-033); this is just a non-binding upper safety net
  * inherited from the inner ADT.
  *
  * PRECONDITION: the "inner global never binds" guarantee (and the unreachable-branch
@@ -165,10 +179,10 @@ const INNER_GLOBAL_HEADROOM = 1_000_000;
 
 /**
  * Create initial tenant-aware concurrency state. The per-tenant ceilings
- * (FR-032) are the binding admission axis here; the inner `ConcurrencyState`'s
+ * (multi-tenant spec FR-032) are the binding admission axis here; the inner `ConcurrencyState`'s
  * global limit is deliberately sized so it never binds first (see
- * `INNER_GLOBAL_HEADROOM`), because FR-032 REPLACES the single global
- * concurrency limit with per-tenant quotas. The live-worker bound (FR-033) is
+ * `INNER_GLOBAL_HEADROOM`), because multi-tenant spec FR-032 REPLACES the single global
+ * concurrency limit with per-tenant quotas. The live-worker bound (multi-tenant spec FR-033) is
  * enforced by the worker-lifecycle manager, not here.
  *
  * @param config.defaultTenantMax the per-tenant ceiling for unconfigured tenants.
@@ -176,12 +190,12 @@ const INNER_GLOBAL_HEADROOM = 1_000_000;
 export const initTenantConcurrency = (
   config: AdmissionConfig = {},
 ): TenantConcurrencyState => {
-  const defaultTenantMax = config.defaultTenantMax ?? 10;
+  const defaultTenantMax = tenantConcurrencyLimit(config.defaultTenantMax ?? 10);
   return {
     inner: initConcurrency<TenantId>(INNER_GLOBAL_HEADROOM, defaultTenantMax),
     perTenant: new Map(),
     defaultTenantMax,
-    retryAfterSeconds: config.retryAfterSeconds ?? 5,
+    retryAfterSeconds: retryAfterSeconds(config.retryAfterSeconds ?? 5),
   };
 };
 
@@ -196,10 +210,11 @@ export const withTenantLimit = (
   tenant: TenantId,
   max: number,
 ): TenantConcurrencyState => {
+  const limit = tenantConcurrencyLimit(max);
   const existing = state.perTenant.get(tenant);
   const perTenant = new Map(state.perTenant);
-  perTenant.set(tenant, { current: existing?.current ?? 0, max });
-  return { ...state, perTenant, inner: withDagLimit(state.inner, tenant, max) };
+  perTenant.set(tenant, { current: existing?.current ?? 0, max: limit });
+  return { ...state, perTenant, inner: withDagLimit(state.inner, tenant, limit) };
 };
 
 /**
@@ -236,19 +251,19 @@ export const forgetTenant = (
 // ---------------------------------------------------------------------------
 
 /**
- * Admit a tenant for a NEW run (FR-032/038). The gate, in order:
+ * Admit a tenant for a NEW run (multi-tenant spec FR-032/038). The gate, in order:
  *
  *   1. PER-TENANT CEILING — if THIS tenant is at its own ceiling, refuse with
  *      `tenant-over-quota` (429 + per-tenant Retry-After). This check is scoped
  *      entirely to the caller's own counters, so it can never be triggered by
- *      another tenant's load (FR-032, SC-011).
+ *      another tenant's load (multi-tenant spec FR-032, SC-011).
  *   2. INNER CONCURRENCY — defer to the existing `acquire` for the global +
  *      per-DAG limits, using the tenant id as the inner key. An inner rejection
  *      (global-at-capacity / dag-at-capacity) is mapped to the tenant's own
  *      `tenant-over-quota` so the box-wide global limit also surfaces as a
  *      retriable, tenant-scoped 429 rather than leaking a global signal.
  *
- * The global live-worker bound (FR-033) is NOT checked here — the worker-lifecycle
+ * The global live-worker bound (multi-tenant spec FR-033) is NOT checked here — the worker-lifecycle
  * manager is its sole enforcer (see module doc).
  *
  * Returns the new state + an `AdmitToken` on success, or a `HostError`.
@@ -263,7 +278,7 @@ export const admitTenant = (
   const tenantState =
     state.perTenant.get(tenant) ?? { current: 0, max: state.defaultTenantMax };
 
-  // 1. Per-tenant ceiling (FR-032 / FR-038). Scoped to the caller only.
+  // 1. Per-tenant ceiling (multi-tenant spec FR-032 / FR-038). Scoped to the caller only.
   if (tenantState.current >= tenantState.max) {
     return err(tenantOverQuota(tenant, state.retryAfterSeconds));
   }
@@ -341,10 +356,6 @@ export const releaseTenant = (
 /** Current in-flight count for a tenant (0 if the tenant has never been admitted). */
 export const tenantCurrent = (state: TenantConcurrencyState, tenant: TenantId): number =>
   state.perTenant.get(tenant)?.current ?? 0;
-
-/** Effective ceiling for a tenant (its explicit limit, else the default). */
-export const tenantMax = (state: TenantConcurrencyState, tenant: TenantId): number =>
-  state.perTenant.get(tenant)?.max ?? state.defaultTenantMax;
 
 /**
  * Whether `admitTenant` would succeed RIGHT NOW for this tenant, without

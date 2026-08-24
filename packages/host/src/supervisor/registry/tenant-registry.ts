@@ -1,12 +1,12 @@
 /**
- * Tenant registry — PURE functional core (FR-024, FR-027, SC-009).
+ * Tenant registry — PURE functional core (multi-tenant spec FR-024, FR-027, SC-009).
  *
  * This module is the runtime tenant registry's algebraic data model and its
  * total, pure, IDEMPOTENT transformations. It holds per-tenant CONFIG only — a
- * secrets *reference* (never a secret value, AD-6 / FR-005), the tenant's fs
+ * secrets *reference* (never a secret value, AD-6 / multi-tenant spec FR-005), the tenant's fs
  * root, its Keycloak client mapping, admission limits, and lifecycle metadata —
  * and it is mutated at runtime by `register` / `deregister` / `reconfigure`
- * (FR-024).
+ * (multi-tenant spec FR-024).
  *
  * STRICTLY NO I/O. No Redis, no clock, no `Date.now()`: every function receives
  * the data it needs (including `now`) as a parameter and returns a NEW immutable
@@ -24,7 +24,7 @@
  * uses `ts-pattern`'s exhaustive `match` on `status` instead of probing an
  * optional field.
  *
- * FAIL-CLOSED LOOKUP (FR-022): `lookup` returns first-class ABSENCE for an
+ * FAIL-CLOSED LOOKUP (multi-tenant spec FR-022): `lookup` returns first-class ABSENCE for an
  * unknown — or already-deregistered — tenant (`Result.err(tenantUnknown())`),
  * never a guessed or fabricated config. The supervisor turns that into a refusal
  * to start a NEW run; the Redis adapter additionally fails closed on infra loss
@@ -32,7 +32,7 @@
  * cannot positively confirm a tenant therefore NEVER routes on stale/guessed
  * config.
  *
- * IDEMPOTENCY (FR-027, SC-009): repeating an identical `register` or
+ * IDEMPOTENCY (multi-tenant spec FR-027, SC-009): repeating an identical `register` or
  * `deregister` yields a STRUCTURALLY identical registry — same entries, same
  * `deregisteredAt` timestamps. `register` of an unchanged config is a no-op that
  * returns the SAME registry reference; `deregister` of an absent or
@@ -41,6 +41,7 @@
  * grace-window clock.
  */
 
+import { posix } from "node:path";
 import { match } from "ts-pattern";
 import { ok, err } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
@@ -51,6 +52,11 @@ import type { Team } from "../../domain/auth.js";
 
 // ── Per-tenant config value types ────────────────────────────────────────────
 
+const VALIDATED_TENANT_CONFIG: unique symbol = Symbol("ValidatedTenantConfig");
+type ValidatedTenantConfig = {
+  readonly [VALIDATED_TENANT_CONFIG]: true;
+};
+
 /**
  * A tenant's Keycloak client mapping: the realm the tenant authenticates
  * against, the supervisor-facing OIDC client id used to resolve identities for
@@ -59,7 +65,7 @@ import type { Team } from "../../domain/auth.js";
  * `AGENT_CLIENT_IDS_BY_DAG` config shape, scoped per tenant). Held as plain,
  * already-validated data — this is config the registry carries, not a secret.
  */
-export interface KeycloakClientMapping {
+interface KeycloakClientMapping {
   readonly realm: string;
   /** The supervisor-facing OIDC client id for resolving this tenant's identities. */
   readonly clientId: string;
@@ -68,12 +74,12 @@ export interface KeycloakClientMapping {
 }
 
 /**
- * This tenant's OWN admission ceilings (FR-041 / SC-012 are enforced elsewhere;
+ * This tenant's OWN admission ceilings (multi-tenant spec FR-041 / SC-012 are enforced elsewhere;
  * the registry only carries the numbers). All counts are non-negative integers;
  * the smart constructor (`tenantConfig`) is the parse boundary that guarantees
  * that, so downstream code can treat these as already-valid.
  */
-export interface TenantLimits {
+interface TenantLimits {
   /** Max concurrently-running runs admitted for this tenant. */
   readonly maxConcurrentRuns: number;
   /** Max queued (pending-admission) runs for this tenant. */
@@ -81,11 +87,11 @@ export interface TenantLimits {
 }
 
 /**
- * The lifecycle-independent fields of a tenant's configuration record (FR-024).
+ * The lifecycle-independent fields of a tenant's configuration record (multi-tenant spec FR-024).
  *
  * `secretsRef` is the branded `SecretsRef` — a REFERENCE only. The registry (and
  * the supervisor that holds it) never carries a secret VALUE; dereferencing is
- * the worker's job via its `SecretsSource` (AD-6, FR-005). The type system keeps
+ * the worker's job via its `SecretsSource` (AD-6, multi-tenant spec FR-005). The type system keeps
  * "reference" and "secret" disjoint, so a registry entry can never be a secret.
  */
 export interface TenantConfigBase {
@@ -94,7 +100,7 @@ export interface TenantConfigBase {
   readonly keycloakClientMapping: KeycloakClientMapping;
   readonly fsRoot: string;
   /**
-   * The per-tenant DAG root the worker discovers graphs under (FR-002). Injected
+   * The per-tenant DAG root the worker discovers graphs under (multi-tenant spec FR-002). Injected
    * into the worker's spawn env as `DAGS_LOCAL_PATH`, so the worker runs the
    * LocalGitAdapter rooted HERE and globs `dags/**​/dag.ts` under it alone.
    *
@@ -104,7 +110,7 @@ export interface TenantConfigBase {
    * code/prompts at rest — not the whole baked tree. Each per-team baked
    * `fugue-dags-<team>` image is staged by an initContainer into a DISTINCT
    * subdir (e.g. `/dags/<tenant>`), and that subdir is this tenant's `dagsRoot`.
-   * Like `fsRoot`, it is a CONFINED absolute path.
+   * Like `fsRoot`, it is parsed into this tenant's platform-owned subtree.
    */
   readonly dagsRoot: string;
   readonly secretsRef: SecretsRef;
@@ -117,7 +123,7 @@ export interface TenantConfigBase {
  * no tombstone — the type itself forbids a `deregisteredAt` here, so "an active
  * config carrying a deregistration instant" is not a representable value.
  */
-export type ActiveTenantConfig = TenantConfigBase & {
+export type ActiveTenantConfig = TenantConfigBase & ValidatedTenantConfig & {
   readonly status: "active";
 };
 
@@ -129,7 +135,7 @@ export type ActiveTenantConfig = TenantConfigBase & {
  * `deregisteredAt` is REQUIRED on this variant — the deregistered state always
  * carries its instant.
  */
-export type DeregisteredTenantConfig = TenantConfigBase & {
+export type DeregisteredTenantConfig = TenantConfigBase & ValidatedTenantConfig & {
   readonly status: "deregistered";
   readonly deregisteredAt: number;
 };
@@ -155,6 +161,58 @@ export interface TenantRegistry {
 }
 
 /**
+ * Copy entries behind a frozen read-only facade. Unlike a `Map` merely typed as
+ * `ReadonlyMap`, the exposed value has no runtime mutation methods, so a cast
+ * cannot bypass the registry transitions or team-uniqueness invariant.
+ */
+const snapshotTenantConfig = (config: TenantConfig): TenantConfig => {
+  if (
+    Object.isFrozen(config) &&
+    Object.isFrozen(config.admission) &&
+    Object.isFrozen(config.keycloakClientMapping) &&
+    Object.isFrozen(config.keycloakClientMapping.agentClientIdsByDag)
+  ) {
+    return config;
+  }
+  return Object.freeze({
+    ...config,
+    admission: Object.freeze({ ...config.admission }),
+    keycloakClientMapping: Object.freeze({
+      ...config.keycloakClientMapping,
+      agentClientIdsByDag: Object.freeze({
+        ...config.keycloakClientMapping.agentClientIdsByDag,
+      }),
+    }),
+  });
+};
+
+const registryWithEntries = (
+  entries: ReadonlyMap<TenantId, TenantConfig> = new Map(),
+): TenantRegistry => {
+  const snapshot = new Map(
+    Array.from(entries, ([id, config]) => [id, snapshotTenantConfig(config)] as const),
+  );
+  let view: ReadonlyMap<TenantId, TenantConfig>;
+  const facade = {
+    get size(): number { return snapshot.size; },
+    get: (key: TenantId): TenantConfig | undefined => snapshot.get(key),
+    has: (key: TenantId): boolean => snapshot.has(key),
+    entries: (): MapIterator<[TenantId, TenantConfig]> => snapshot.entries(),
+    keys: (): MapIterator<TenantId> => snapshot.keys(),
+    values: (): MapIterator<TenantConfig> => snapshot.values(),
+    [Symbol.iterator]: (): MapIterator<[TenantId, TenantConfig]> => snapshot[Symbol.iterator](),
+    forEach(
+      callback: (value: TenantConfig, key: TenantId, map: ReadonlyMap<TenantId, TenantConfig>) => void,
+      thisArg?: unknown,
+    ): void {
+      for (const [key, value] of snapshot) callback.call(thisArg, value, key, view);
+    },
+  } satisfies ReadonlyMap<TenantId, TenantConfig>;
+  view = Object.freeze(facade);
+  return Object.freeze({ entries: view });
+};
+
+/**
  * The empty registry — the boot-time starting point before any sync. A FRESH
  * instance per call (mirrors `domain/registry.ts`'s `emptyRegistry`): a shared
  * singleton exposing a `ReadonlyMap` is only readonly at compile time, so a
@@ -162,31 +220,55 @@ export interface TenantRegistry {
  * across every boot/test. Returning a new frozen record each call removes that
  * shared state entirely.
  */
-export const emptyRegistry = (): TenantRegistry => Object.freeze({ entries: new Map<TenantId, TenantConfig>() });
+export const emptyRegistry = (): TenantRegistry => registryWithEntries();
 
 /**
- * Build a registry from a seed of configs. Used by the adapter when hydrating
- * from Redis on startup, and by tests. Last-writer-wins on duplicate ids (the
- * seed is already-persisted state, so a duplicate is a hydration artifact, not a
- * user action — no error).
+ * Parse a seed of configs into a registry. Used by the adapter when hydrating
+ * from Redis on startup, and by tests. Duplicate ids remain last-writer-wins (a
+ * seed artifact), then the complete retained snapshot is checked before it is
+ * exposed: two distinct ACTIVE tenants may never own the same team. Returning a
+ * `Result` makes the security-critical team-routing invariant part of registry
+ * construction instead of a convention enforced only by live mutations.
  */
-export const registryOf = (seed: readonly TenantConfig[] = []): TenantRegistry => {
+export const registryOf = (
+  seed: readonly TenantConfig[] = [],
+): Result<TenantRegistry, HostError> => {
   const entries = new Map<TenantId, TenantConfig>();
   for (const cfg of seed) entries.set(cfg.id, cfg);
-  // Freeze the record (as `emptyRegistry` does) so every producer upholds the
-  // same runtime-immutability guard, not only compile-time `ReadonlyMap`.
-  return Object.freeze({ entries });
+
+  const activeOwnerByTeam = new Map<Team, TenantId>();
+  for (const cfg of entries.values()) {
+    if (cfg.status === "deregistered") continue;
+    const owner = activeOwnerByTeam.get(cfg.team);
+    if (owner !== undefined && owner !== cfg.id) {
+      return err({
+        kind: "config-invalid",
+        message: `persisted tenant registry assigns team '${cfg.team}' to active tenants '${owner}' and '${cfg.id}'`,
+      });
+    }
+    activeOwnerByTeam.set(cfg.team, cfg.id);
+  }
+
+  return ok(registryWithEntries(entries));
 };
 
 /**
- * A CONFINED absolute path: a leading `/`, no NUL byte (defeats path-truncation
- * tricks), and no `..` traversal segment (so a consumer that deletes or reads
- * under it cannot escape the intended mount). Shared by the `fsRoot` (purge
- * target) and `dagsRoot` (DAG discovery root) checks so both uphold the SAME
- * invariant from one definition.
+ * A canonical path owned by one tenant. The fixed platform roots are deliberate:
+ * `fsRoot` is recursively deleted during purge and `dagsRoot` is executable-code
+ * authority, so syntax-only "absolute" validation is insufficient. A tenant may
+ * name its root or a descendant, but never `/`, a host path, or another tenant's
+ * subtree. `posix.normalize(path) === path` rejects aliases (`..`, `.`, `//`)
+ * before prefix comparison.
  */
-const isConfinedAbsolutePath = (p: string): boolean =>
-  p.startsWith("/") && !p.includes("\0") && !p.split("/").includes("..");
+const isTenantOwnedPath = (
+  path: string,
+  platformRoot: "/srv" | "/dags",
+  id: TenantId,
+): boolean => {
+  if (path.includes("\0") || posix.normalize(path) !== path) return false;
+  const tenantRoot = `${platformRoot}/${id}`;
+  return path === tenantRoot || path.startsWith(`${tenantRoot}/`);
+};
 
 // ── Smart constructor (parse-don't-validate) ────────────────────────────────
 
@@ -200,42 +282,38 @@ const isConfinedAbsolutePath = (p: string): boolean =>
  * `tenantId` / `markSecretsRef` are the seams that validate/brand them), so this
  * constructor's job is to validate the remaining INVARIANTS and reject illegal
  * states up front:
- *   - non-empty team and fsRoot,
+ *   - non-empty team and tenant-owned canonical fsRoot/dagsRoot paths,
  *   - non-negative INTEGER admission limits,
- *   - a non-empty realm/clientId in the keycloak mapping.
+ *   - a non-empty realm/clientId and non-empty per-DAG agent client ids.
  * Returns `Result` (never throws) since configs arrive from registration data.
  */
 export const tenantConfig = (input: TenantConfigBase): Result<ActiveTenantConfig, HostError> => {
+  const invalid = (message: string): Result<never, HostError> =>
+    err({ kind: "config-invalid", message: `tenant '${input.id}': ${message}` });
+
   if (input.team.length === 0) {
-    return err({ kind: "config-invalid", message: `tenant '${input.id}': team must be non-empty` });
+    return invalid("team must be non-empty");
   }
   if (input.fsRoot.length === 0) {
-    return err({ kind: "config-invalid", message: `tenant '${input.id}': fsRoot must be non-empty` });
+    return invalid("fsRoot must be non-empty");
   }
-  // fsRoot is the per-tenant on-disk mount the grace-window purge RECLAIMS
-  // (deletes), so it must be a CONFINED absolute path: a relative path or any
-  // `..` traversal segment could escape the intended root and make the purge
-  // delete outside the tenant's mount. A NUL byte is rejected to defeat
-  // path-truncation tricks. Parse-don't-validate: a registered tenant always
-  // carries a confined fsRoot.
-  if (!isConfinedAbsolutePath(input.fsRoot)) {
-    return err({ kind: "config-invalid", message: `tenant '${input.id}': fsRoot must be a confined absolute path (leading '/', no '..' traversal segment)` });
+  // fsRoot is the recursive purge target. Parse-don't-validate it into the
+  // tenant-owned `/srv/<tenantId>` subtree so arbitrary host and sibling-tenant
+  // deletion targets are impossible after registration.
+  if (!isTenantOwnedPath(input.fsRoot, "/srv", input.id)) {
+    return invalid(`fsRoot must be '/srv/${input.id}' or a canonical descendant`);
   }
   if (input.dagsRoot.length === 0) {
-    return err({ kind: "config-invalid", message: `tenant '${input.id}': dagsRoot must be non-empty` });
+    return invalid("dagsRoot must be non-empty");
   }
-  // dagsRoot becomes the worker's DAGS_LOCAL_PATH — the directory it globs
-  // `dags/**​/dag.ts` under. It is a per-tenant mount (the team's staged DAG
-  // bundle), so it must be a CONFINED absolute path for the same reason fsRoot is:
-  // a relative path or `..` segment could point discovery outside the tenant's
-  // intended bundle, defeating the at-rest DAG-isolation boundary this field
-  // exists to enforce. Parse-don't-validate: a registered tenant always carries a
-  // confined dagsRoot.
-  if (!isConfinedAbsolutePath(input.dagsRoot)) {
-    return err({ kind: "config-invalid", message: `tenant '${input.id}': dagsRoot must be a confined absolute path (leading '/', no '..' traversal segment)` });
+  // dagsRoot becomes DAGS_LOCAL_PATH and therefore code-loading authority.
+  // Restrict it to this tenant's `/dags/<tenantId>` subtree so a worker cannot
+  // discover host code or another tenant's staged bundle.
+  if (!isTenantOwnedPath(input.dagsRoot, "/dags", input.id)) {
+    return invalid(`dagsRoot must be '/dags/${input.id}' or a canonical descendant`);
   }
   if (input.keycloakClientMapping.realm.length === 0 || input.keycloakClientMapping.clientId.length === 0) {
-    return err({ kind: "config-invalid", message: `tenant '${input.id}': keycloak realm and clientId must be non-empty` });
+    return invalid("keycloak realm and clientId must be non-empty");
   }
   // Per-DAG agent-client ids must be non-empty — same invariant the env-side
   // `AGENT_CLIENT_MAP` enforces (`domain/config.ts`, `z.string().min(1)`: "dagId →
@@ -244,14 +322,15 @@ export const tenantConfig = (input: TenantConfigBase): Result<ActiveTenantConfig
   // rather than letting a blank client id surface as a fail-open later.
   for (const [dagId, clientId] of Object.entries(input.keycloakClientMapping.agentClientIdsByDag)) {
     if (clientId.length === 0) {
-      return err({ kind: "config-invalid", message: `tenant '${input.id}': agentClientIdsByDag['${dagId}'] must be a non-empty client id` });
+      return invalid(`agentClientIdsByDag['${dagId}'] must be a non-empty client id`);
     }
   }
   const { maxConcurrentRuns, maxQueuedRuns } = input.admission;
   if (!Number.isInteger(maxConcurrentRuns) || maxConcurrentRuns < 0 || !Number.isInteger(maxQueuedRuns) || maxQueuedRuns < 0) {
-    return err({ kind: "config-invalid", message: `tenant '${input.id}': admission limits must be non-negative integers` });
+    return invalid("admission limits must be non-negative integers");
   }
   const active: ActiveTenantConfig = {
+    [VALIDATED_TENANT_CONFIG]: true,
     status: "active",
     id: input.id,
     team: input.team,
@@ -275,11 +354,19 @@ export const tenantConfig = (input: TenantConfigBase): Result<ActiveTenantConfig
  * Deep structural equality for the config fields that define a tenant's
  * identity-config, INCLUDING the lifecycle discriminant + tombstone. This is what
  * makes `register`/`reconfigure` idempotent: a re-apply of a structurally
- * identical config is a no-op (same-reference return, FR-027 / SC-009).
+ * identical config is a no-op (same-reference return, multi-tenant spec FR-027 / SC-009).
  */
+const sameLifecycle = (a: TenantConfig, b: TenantConfig): boolean =>
+  match<[TenantConfig, TenantConfig]>([a, b])
+    .with([{ status: "active" }, { status: "active" }], () => true)
+    .with(
+      [{ status: "deregistered" }, { status: "deregistered" }],
+      ([left, right]) => left.deregisteredAt === right.deregisteredAt,
+    )
+    .otherwise(() => false);
+
 const configEquals = (a: TenantConfig, b: TenantConfig): boolean =>
-  a.status === b.status &&
-  (a.status !== "deregistered" || b.status !== "deregistered" || a.deregisteredAt === b.deregisteredAt) &&
+  sameLifecycle(a, b) &&
   a.id === b.id &&
   a.team === b.team &&
   a.fsRoot === b.fsRoot &&
@@ -309,9 +396,21 @@ const agentMapEquals = (
 const withEntry = (registry: TenantRegistry, cfg: TenantConfig): TenantRegistry => {
   const next = new Map(registry.entries);
   next.set(cfg.id, cfg);
-  // Freeze the record consistently with `emptyRegistry`/`registryOf` (uniform
-  // runtime-immutability guard atop the compile-time `ReadonlyMap`).
-  return Object.freeze({ entries: next });
+  return registryWithEntries(next);
+};
+
+/**
+ * Remove a retained entry entirely, rebuilding the same runtime-read-only facade
+ * as every other registry transition. Absent removal is an idempotent no-op.
+ */
+export const removeRetainedEntry = (
+  registry: TenantRegistry,
+  id: TenantId,
+): TenantRegistry => {
+  if (!registry.entries.has(id)) return registry;
+  const next = new Map(registry.entries);
+  next.delete(id);
+  return registryWithEntries(next);
 };
 
 /**
@@ -340,7 +439,7 @@ const teamOwnedByOther = (
 // ── Transitions (pure, total, idempotent) ────────────────────────────────────
 
 /**
- * Register (or re-register) a tenant (FR-024, FR-027, SC-009).
+ * Register (or re-register) a tenant (multi-tenant spec FR-024, FR-027, SC-009).
  *
  * Always lands the config in its ACTIVE shape — the `cfg` argument is an
  * `ActiveTenantConfig` by construction (the union forbids passing a tombstone
@@ -348,7 +447,7 @@ const teamOwnedByOther = (
  *
  * IDEMPOTENT: if an entry with the same id and a STRUCTURALLY identical config
  * already exists, this is a no-op and returns the SAME registry reference — so
- * repeating an identical register produces an identical end state (SC-009). A
+ * repeating an identical register produces an identical end state (multi-tenant spec SC-009). A
  * register of a previously-deregistered tenant REVIVES it: registration is the
  * canonical way to bring a tenant back.
  *
@@ -362,7 +461,7 @@ export const register = (
 ): Result<TenantRegistry, HostError> => {
   const existing = registry.entries.get(cfg.id);
   if (existing !== undefined && configEquals(existing, cfg)) {
-    // No-op: identical end state. Return the same reference (SC-009).
+    // No-op: identical end state. Return the same reference (multi-tenant spec SC-009).
     return ok(registry);
   }
   // Enforce team↔tenant 1:1 (fail-closed) so the supervisor's team→tenant routing
@@ -378,7 +477,7 @@ export const register = (
 };
 
 /**
- * Deregister a tenant (FR-024, FR-027, SC-009).
+ * Deregister a tenant (multi-tenant spec FR-024, FR-027, SC-009).
  *
  * Transitions the entry to the `DeregisteredTenantConfig` variant
  * (`status:"deregistered"`, `deregisteredAt = now`) and RETAINS it
@@ -390,7 +489,7 @@ export const register = (
  * the same registry, NOT an error). Deregistering an ALREADY-deregistered tenant
  * preserves the ORIGINAL `deregisteredAt` and returns the same registry — a
  * retried deregister never bumps the grace-window clock, so repeating it yields
- * an identical end state (SC-009).
+ * an identical end state (multi-tenant spec SC-009).
  */
 export const deregister = (
   registry: TenantRegistry,
@@ -420,7 +519,7 @@ export const deregister = (
 };
 
 /**
- * Reconfigure a registered, ACTIVE tenant (FR-024).
+ * Reconfigure a registered, ACTIVE tenant (multi-tenant spec FR-024).
  *
  * Replaces the config in place (immutably). Per AD-5 the new config takes effect
  * on the tenant's NEXT worker spawn — this function ONLY updates registry state;
@@ -468,7 +567,7 @@ export const reconfigure = (
 // ── Queries (fail-closed) ────────────────────────────────────────────────────
 
 /**
- * Resolve a tenant's ACTIVE config (FR-022 fail-closed).
+ * Resolve a tenant's ACTIVE config (multi-tenant spec FR-022 fail-closed).
  *
  * Returns `Result.err(tenantUnknown())` for an unknown OR a
  * deregistered-but-retained tenant — never a guessed config, never the retained

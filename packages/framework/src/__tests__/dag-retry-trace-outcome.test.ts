@@ -20,7 +20,7 @@ import { defineDagFromArray } from "../executor/define-dag.js";
 import type { NodeContext, NodeDef } from "../types/node.js";
 import type { TraceEvent } from "../state-machine/types.js";
 import type { DagPhase, DagEvent } from "../dag-runtime/types.js";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import { N } from "./_id-helpers.js";
 
 const mkCtx = (): NodeContext => ({
   runId: "retry-trace-run" as RunId,

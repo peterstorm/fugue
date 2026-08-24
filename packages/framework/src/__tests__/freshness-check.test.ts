@@ -10,13 +10,10 @@
 import { describe, it, expect } from "bun:test";
 import { N, R, D } from "./_id-helpers.js";
 import { checkFreshness, InMemoryFreshnessIndex } from "../dag-runtime/freshness-check.js";
-import type { WitnessCapturedEvent, WriteAttemptedEvent } from "../types/events.js";
-import { witness, resourceName } from "../types/freshness.js";
-import type { Witness } from "../types/freshness.js";
+import type { WriteAttemptedEvent } from "../types/events.js";
+import { FE, mkWitness, RN } from "./_freshness-helpers.js";
 import { unwrap } from "../types/result.js";
-
-const mkWitness = (resource: string, value: string, kind: "version" = "version"): Witness =>
-  witness(kind, resourceName(resource), value);
+import { freshnessWriteIdentityOf } from "../types/freshness.js";
 
 describe("checkFreshness — pure conflict detection", () => {
   it("returns empty conflicts when no writes exist", () => {
@@ -30,6 +27,7 @@ describe("checkFreshness — pure conflict detection", () => {
       runId: R("r1"),
       dagId: D("d1"),
       nodeId: N("writer"),
+      executionEpoch: FE(),
       conditionedOn: mkWitness("postgres:orders", "42"),
       newWitness: mkWitness("postgres:orders", "43"),
       succeededAtMs: 1000,
@@ -46,6 +44,7 @@ describe("checkFreshness — pure conflict detection", () => {
       runId: R("r1"),
       dagId: D("d1"),
       nodeId: N("writer-1"),
+      executionEpoch: FE(),
       conditionedOn: mkWitness("postgres:orders", "42"),
       newWitness: mkWitness("postgres:orders", "43"),
       succeededAtMs: 1000,
@@ -57,6 +56,7 @@ describe("checkFreshness — pure conflict detection", () => {
       runId: R("r2"),
       dagId: D("d1"),
       nodeId: N("writer-2"),
+      executionEpoch: FE(),
       conditionedOn: mkWitness("postgres:orders", "42"), // stale!
       newWitness: mkWitness("postgres:orders", "44"),
       succeededAtMs: 2000,
@@ -71,12 +71,52 @@ describe("checkFreshness — pure conflict detection", () => {
     expect(result.conflicts[0]!.conflictingWrite.runId).toBe(R("r1"));
   });
 
+  it("records a completed write under newWitness.resource, not conditionedOn.resource", () => {
+    const crossResourceWrite: WriteAttemptedEvent = {
+      type: "write-attempted",
+      runId: R("cross-resource"),
+      dagId: D("d1"),
+      nodeId: N("writer-b"),
+      executionEpoch: FE(),
+      conditionedOn: mkWitness("postgres:source-a", "a1"),
+      newWitness: mkWitness("postgres:target-b", "b2"),
+      succeededAtMs: 1000,
+      timestamp: new Date(1000),
+    };
+    const stillFreshOnA: WriteAttemptedEvent = {
+      ...crossResourceWrite,
+      runId: R("still-fresh-a"),
+      nodeId: N("writer-c"),
+      conditionedOn: mkWitness("postgres:source-a", "a1"),
+      newWitness: mkWitness("postgres:target-c", "c2"),
+      succeededAtMs: 2000,
+      timestamp: new Date(2000),
+    };
+    const staleOnB: WriteAttemptedEvent = {
+      ...crossResourceWrite,
+      runId: R("stale-b"),
+      nodeId: N("writer-d"),
+      conditionedOn: mkWitness("postgres:target-b", "b1"),
+      newWitness: mkWitness("postgres:target-d", "d2"),
+      succeededAtMs: 3000,
+      timestamp: new Date(3000),
+    };
+
+    const result = checkFreshness([], [crossResourceWrite, stillFreshOnA, staleOnB]);
+
+    expect(result.conflicts).toHaveLength(1);
+    expect(result.conflicts[0]?.writeRunId).toBe(R("stale-b"));
+    expect(result.conflicts[0]?.conflictingWrite.runId).toBe(R("cross-resource"));
+    expect(result.conflicts[0]?.conflictingWrite.newWitness.resource).toBe(RN("postgres:target-b"));
+  });
+
   it("no conflict when different resources", () => {
     const write1: WriteAttemptedEvent = {
       type: "write-attempted",
       runId: R("r1"),
       dagId: D("d1"),
       nodeId: N("writer-1"),
+      executionEpoch: FE(),
       conditionedOn: mkWitness("postgres:orders", "42"),
       newWitness: mkWitness("postgres:orders", "43"),
       succeededAtMs: 1000,
@@ -88,6 +128,7 @@ describe("checkFreshness — pure conflict detection", () => {
       runId: R("r2"),
       dagId: D("d1"),
       nodeId: N("writer-2"),
+      executionEpoch: FE(),
       conditionedOn: mkWitness("postgres:users", "1"), // different resource
       newWitness: mkWitness("postgres:users", "2"),
       succeededAtMs: 2000,
@@ -112,6 +153,7 @@ describe("InMemoryFreshnessIndex", () => {
       runId: R("r1"),
       dagId: D("d"),
       nodeId: N("w"),
+      executionEpoch: FE(),
       conditionedOn: mkWitness("postgres:orders", "41"),
       newWitness: mkWitness("postgres:orders", "42"),
       succeededAtMs: 1000,
@@ -129,6 +171,7 @@ describe("InMemoryFreshnessIndex", () => {
       runId: R("r1"),
       dagId: D("d"),
       nodeId: N("w"),
+      executionEpoch: FE(),
       conditionedOn: mkWitness("postgres:orders", "41"),
       newWitness: mkWitness("postgres:orders", "42"),
       succeededAtMs: 1000,
@@ -149,6 +192,7 @@ describe("InMemoryFreshnessIndex", () => {
       runId: R("r1"),
       dagId: D("d"),
       nodeId: N("w"),
+      executionEpoch: FE(),
       conditionedOn: mkWitness("postgres:orders", "41"),
       newWitness: mkWitness("postgres:orders", "42"),
       succeededAtMs: 1000,
@@ -162,6 +206,62 @@ describe("InMemoryFreshnessIndex", () => {
     expect(unwrap(await index.findConflict(mkWitness("postgres:orders", "41"), 500))).not.toBeNull();
   });
 
+  it("selects the timestamp-latest write when callbacks arrive out of order", async () => {
+    const index = new InMemoryFreshnessIndex();
+    const newer: WriteAttemptedEvent = {
+      type: "write-attempted",
+      runId: R("newer"),
+      dagId: D("d"),
+      nodeId: N("newer-writer"),
+      executionEpoch: FE(),
+      conditionedOn: mkWitness("postgres:orders", "41"),
+      newWitness: mkWitness("postgres:orders", "43"),
+      succeededAtMs: 2000,
+      timestamp: new Date(2000),
+    };
+    const older: WriteAttemptedEvent = {
+      ...newer,
+      runId: R("older"),
+      nodeId: N("older-writer"),
+      newWitness: mkWitness("postgres:orders", "42"),
+      succeededAtMs: 1000,
+      timestamp: new Date(1000),
+    };
+
+    await index.recordWrite(newer);
+    await index.recordWrite(older);
+
+    const conflict = unwrap(await index.findConflict(mkWitness("postgres:orders", "41"), 1500));
+    expect(conflict?.runId).toBe(R("newer"));
+    expect(conflict?.succeededAtMs).toBe(2000);
+    expect(unwrap(await index.findConflict(mkWitness("postgres:orders", "43"), 0))).toBeNull();
+  });
+
+  it("evicts acknowledgement identities with the bounded write window", async () => {
+    const index = new InMemoryFreshnessIndex({ maxEntriesPerResource: 2 });
+    const event = (sequence: number): WriteAttemptedEvent => ({
+      type: "write-attempted",
+      runId: R(`r${sequence}`),
+      dagId: D("d"),
+      nodeId: N(`w${sequence}`),
+      executionEpoch: FE(sequence),
+      conditionedOn: mkWitness("postgres:orders", String(sequence)),
+      newWitness: mkWitness("postgres:orders", String(sequence + 1)),
+      succeededAtMs: sequence,
+      timestamp: new Date(sequence),
+    });
+    const oldest = event(1);
+    const retained = [event(2), event(3)] as const;
+
+    await index.recordWrite(oldest);
+    for (const write of retained) await index.recordWrite(write);
+
+    expect(unwrap(await index.hasRecordedWrite(freshnessWriteIdentityOf(oldest)))).toBe(false);
+    for (const write of retained) {
+      expect(unwrap(await index.hasRecordedWrite(freshnessWriteIdentityOf(write)))).toBe(true);
+    }
+  });
+
   it("clear empties the index", async () => {
     const index = new InMemoryFreshnessIndex();
     await index.recordWrite({
@@ -169,6 +269,7 @@ describe("InMemoryFreshnessIndex", () => {
       runId: R("r1"),
       dagId: D("d"),
       nodeId: N("w"),
+      executionEpoch: FE(),
       conditionedOn: mkWitness("postgres:orders", "41"),
       newWitness: mkWitness("postgres:orders", "42"),
       succeededAtMs: 1000,

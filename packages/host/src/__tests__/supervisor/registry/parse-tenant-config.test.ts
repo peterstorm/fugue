@@ -233,7 +233,7 @@ describe("parseTenantConfigBody — secretsRef (required, non-blank)", () => {
   });
 });
 
-describe("parseTenantConfigBody — dagsRoot (required, confined absolute path)", () => {
+describe("parseTenantConfigBody — dagsRoot (required tenant-owned root)", () => {
   it("rejects a missing dagsRoot", () => {
     const { dagsRoot: _d, ...rest } = validBody();
     const r = parseTenantConfigBody(ALPHA, rest);
@@ -250,7 +250,7 @@ describe("parseTenantConfigBody — dagsRoot (required, confined absolute path)"
     expect(r.error.kind).toBe("tenant-config-invalid");
   });
 
-  it("rejects a traversing dagsRoot (registry confined-path check → translated to tenant-config-invalid)", () => {
+  it("rejects a traversing dagsRoot (registry tenant-owned-path check → translated to tenant-config-invalid)", () => {
     const r = parseTenantConfigBody(ALPHA, validBody({ dagsRoot: "/dags/../etc" }));
     expect(r.ok).toBe(false);
     if (r.ok) return;
@@ -447,8 +447,8 @@ const validBodyArb = fc.record({
   realm: fc.stringMatching(/^[a-z][a-z0-9-]{0,20}$/),
   clientId: fc.stringMatching(/^[a-z][a-z0-9-]{0,20}$/),
   agentClientIdsByDag: fc.dictionary(segment, segment.filter((s) => s.length > 0), { maxKeys: 4 }),
-  fsRoot: segment.map((s) => `/srv/${s}`),
-  dagsRoot: segment.map((s) => `/dags/${s}`),
+  fsRoot: segment.map((s) => `/srv/alpha/${s}`),
+  dagsRoot: segment.map((s) => `/dags/alpha/${s}`),
   secretsRef: segment.map((s) => `/run/secrets/${s}.env`),
   maxConcurrentRuns: fc.nat({ max: 1000 }),
   maxQueuedRuns: fc.nat({ max: 1000 }),

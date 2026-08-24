@@ -134,7 +134,7 @@ const runEnd = (runId: string, dagId: string, status: "ok" | "error", duration: 
   ({ type: "run-end", runId, dagId, status, duration, timestamp: new Date() } as unknown as ObserverEvent);
 
 // ---------------------------------------------------------------------------
-// Default path (no Foundry) — byte-for-byte unchanged (SC-006 / FR-003 / FR-027)
+// Default path (no Foundry) — byte-for-byte unchanged (observability spec SC-006 / FR-003 / FR-027)
 // ---------------------------------------------------------------------------
 describe("composeObservability — default (MLflow-only) path", () => {
   const resolved: ResolvedObservability = { kind: "mlflow-only", traceBackends: ["mlflow"] };
@@ -179,7 +179,7 @@ describe("composeObservability — Foundry-only path", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Dual-export path — order + both backends (FR-002 / FR-011)
+// Dual-export path — order + both backends (observability spec FR-002 / FR-011)
 // ---------------------------------------------------------------------------
 describe("composeObservability — dual-export path", () => {
   const resolved: ResolvedObservability = {
@@ -209,9 +209,9 @@ describe("composeObservability — dual-export path", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Policy sharing — discarded trace produces NO domain events (FR-021 / SC-010)
+// Policy sharing — discarded trace produces NO domain events (observability spec FR-021 / SC-010)
 // ---------------------------------------------------------------------------
-describe("composeObservability — shared policy gating (FR-021 / SC-010)", () => {
+describe("composeObservability — shared policy gating (observability spec FR-021 / SC-010)", () => {
   const resolved: ResolvedObservability = {
     kind: "with-foundry",
     traceBackends: ["mlflow", "foundry"],
@@ -253,9 +253,9 @@ describe("composeObservability — shared policy gating (FR-021 / SC-010)", () =
 });
 
 // ---------------------------------------------------------------------------
-// SC-008 — full run summary (nodeCount / retryCount / cacheHitCount)
+// observability spec SC-008 — full run summary (nodeCount / retryCount / cacheHitCount)
 // ---------------------------------------------------------------------------
-describe("FoundryRunSummaryObserver — full FR-019 summary (SC-008)", () => {
+describe("FoundryRunSummaryObserver — full observability spec FR-019 summary (observability spec SC-008)", () => {
   test("run-end emits ONE summary carrying nodeCount/retryCount/cacheHitCount", () => {
     const { sink, events, metrics } = recordingSink();
     const obs = new FoundryRunSummaryObserver(sink);
@@ -343,7 +343,7 @@ describe("foundrySinkOver — Application Insights adapter", () => {
 });
 
 // ---------------------------------------------------------------------------
-// createAppInsightsClient — auth translation (FR-022 / FR-023)
+// createAppInsightsClient — auth translation (observability spec FR-022 / FR-023)
 // BOTH modes build an ISOLATED client (useGlobalProviders:false); entra-id adds
 // a credential via config.aadTokenCredential — NO global useAzureMonitor distro,
 // so the sink never collides with the framework's global TracerProvider.
@@ -394,7 +394,7 @@ describe("createAppInsightsClient — auth translation", () => {
       { mode: "entra-id", connectionString: nes("InstrumentationKey=entra") },
       r.seams,
     );
-    // The credential factory IS invoked (FR-023).
+    // The credential factory IS invoked (observability spec FR-023).
     expect(r.credentialInvocations).toBe(1);
     // The credential is applied to the SAME isolated client (config.aadTokenCredential),
     // not configured through a global pipeline.
@@ -522,11 +522,214 @@ describe("FoundryRunSummaryObserver — throwing sink is swallowed AND logged", 
     expect(warns.every((w) => w.msg.includes("[FoundryRunSummaryObserver]"))).toBe(true);
     expect(warns.some((w) => w.msg.includes("swallowed"))).toBe(true);
   });
+
+  test("a throwing diagnostic logger cannot break the guarded run tail", () => {
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: () => { throw new Error("logger unavailable"); },
+      error: () => {},
+    });
+    const throwing: FoundryTelemetrySink = {
+      trackEvent: () => { throw new Error("event-boom"); },
+      trackMetric: () => { throw new Error("metric-boom"); },
+      flush: async () => {},
+    };
+    const obs = new FoundryRunSummaryObserver(throwing);
+
+    expect(() => obs.observe(runEnd("rSafeTail", "dSafeTail", "error", 7))).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round-21 atl-2 — the observer bounds its OWN buffer (TTL orphan sweep,
+// BufferedObserver parity): a run that never emits `run-end` must not leak.
+// Round-22 cr-1 — eviction is INACTIVITY-based: a run that is still emitting
+// events is alive and must never be dropped mid-run (observability spec SC-008); only buffers
+// idle past the TTL are evicted.
+// ---------------------------------------------------------------------------
+describe("FoundryRunSummaryObserver — orphan-buffer eviction (round-21 atl-2 / round-22 cr-1)", () => {
+  test("a run whose run-end never arrives is evicted after the TTL", () => {
+    const { warns } = recordingFrameworkLogger();
+    const { sink, events } = recordingSink();
+    let t = 1_000;
+    const obs = new FoundryRunSummaryObserver(sink, {
+      ttlMs: 500,
+      sweepIntervalMs: 0, // no timer — eviction is driven explicitly
+      now: () => t,
+    });
+
+    obs.observe(nodeStart("rOrphan", "d1", "n1"));
+    obs.observe(nodeSkippedCheckpoint("rOrphan", "d1", "n2"));
+    expect(obs.evicted).toBe(0);
+
+    // Advance past the TTL (inactivity-based: last activity at t=1_000,
+    // cutoff at t=1_500) and sweep: the orphaned buffer is dropped and
+    // counted — the class is memory-safe standalone, not only under the
+    // production wrapper.
+    t = 1_600;
+    obs.evictStale();
+    expect(obs.evicted).toBe(1);
+    expect(warns.some((w) => w.msg.includes("evicted stale run buffer for runId 'rOrphan'"))).toBe(true);
+
+    // A LATE run-end after eviction sees an empty buffer: the summary is the
+    // run-end-only baseline — no leak, no crash.
+    obs.observe(runEnd("rOrphan", "d1", "ok", 10));
+    const summaries = events.filter((e) => e.name === FOUNDRY_EVENT_RUN_SUMMARY);
+    expect(summaries).toHaveLength(1);
+  });
+
+  test("stale eviction still completes when the framework logger throws", () => {
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: () => { throw new Error("warn transport failed"); },
+      error: () => {},
+    });
+    const { sink } = recordingSink();
+    let t = 0;
+    const obs = new FoundryRunSummaryObserver(sink, {
+      ttlMs: 10,
+      sweepIntervalMs: 0,
+      now: () => t,
+    });
+    obs.observe(nodeStart("rThrowingLogger", "d1", "n1"));
+    t = 11;
+
+    expect(() => obs.evictStale()).not.toThrow();
+    expect(obs.evicted).toBe(1);
+  });
+
+  test("an ACTIVE run spanning the TTL is never evicted mid-run (round-22 cr-1)", () => {
+    const { sink, events } = recordingSink();
+    let t = 0;
+    const obs = new FoundryRunSummaryObserver(sink, {
+      ttlMs: 500,
+      sweepIntervalMs: 0,
+      now: () => t,
+    });
+
+    // Events keep arriving, far past the TTL (a long-running DAG /
+    // awaiting-human run): each event refreshes lastActivityAt, so every
+    // sweep sees the run alive.
+    obs.observe(nodeStart("rActive", "d1", "n1"));     // lastActivityAt = 0 (opened)
+    t = 400;
+    obs.observe(nodeSkippedCheckpoint("rActive", "d1", "n2")); // lastActivityAt = 400
+    t = 800;
+    obs.evictStale(); // cutoff 300 — 400 ≥ 300: alive (activity refresh won)
+    expect(obs.evicted).toBe(0);
+    obs.observe(nodeSkippedCheckpoint("rActive", "d1", "n3")); // lastActivityAt = 800
+    t = 1_200;
+    obs.evictStale(); // cutoff 700 — 800 ≥ 700: still alive
+    expect(obs.evicted).toBe(0);
+
+    // The run-end finally arrives: the full summary is emitted — the buffer
+    // was NEVER dropped, so nodeCount reflects the real run.
+    t = 1_300;
+    obs.observe(runEnd("rActive", "d1", "ok", 10));
+    const summaries = events.filter((e) => e.name === FOUNDRY_EVENT_RUN_SUMMARY);
+    expect(summaries).toHaveLength(1);
+    const summary = summaries[0] as { measurements?: { nodeCount?: number } };
+    expect(summary.measurements?.nodeCount).toBe(3);
+  });
+
+  test("an already-open buffer absorbs events even when the clock misbehaves (round-22 cr-2)", () => {
+    const { sink, events } = recordingSink();
+    let t = 1_000;
+    let broken = false;
+    const obs = new FoundryRunSummaryObserver(sink, {
+      ttlMs: 500,
+      sweepIntervalMs: 0,
+      now: () => {
+        if (broken) throw new Error("clock boom");
+        return t;
+      },
+    });
+    obs.observe(nodeStart("rHostile", "d1", "n1")); // opens the buffer
+    // The clock breaks for subsequent events of the SAME run: the open buffer
+    // must still absorb them (no stamp needed) — events are only dropped when
+    // a NEW buffer would have to be opened unstampable.
+    broken = true;
+    obs.observe(nodeSkippedCheckpoint("rHostile", "d1", "n2"));
+    obs.observe(nodeSkippedCheckpoint("rHostile", "d1", "n3"));
+    expect(obs.droppedEvents).toBe(0);
+    broken = false;
+    obs.observe(runEnd("rHostile", "d1", "ok", 10));
+    const summaries = events.filter((e) => e.name === FOUNDRY_EVENT_RUN_SUMMARY);
+    expect(summaries).toHaveLength(1);
+    const summary = summaries[0] as { measurements?: { nodeCount?: number } };
+    expect(summary.measurements?.nodeCount).toBe(3);
+  });
+
+  test("a run that emits run-end on time is never touched by the sweep", () => {
+    const { sink } = recordingSink();
+    let t = 1_000;
+    const obs = new FoundryRunSummaryObserver(sink, {
+      ttlMs: 500,
+      sweepIntervalMs: 0,
+      now: () => t,
+    });
+    obs.observe(nodeStart("rFresh", "d1", "n1"));
+    t = 1_400; // inside the TTL
+    obs.evictStale();
+    expect(obs.evicted).toBe(0);
+
+    t = 1_500; // still inside the TTL at run-end time
+    obs.observe(runEnd("rFresh", "d1", "ok", 5));
+    expect(obs.evicted).toBe(0);
+  });
+
+  test("a hostile injected clock cannot break observe() and disables eviction loudly for that cycle", () => {
+    const { warns } = recordingFrameworkLogger();
+    const { sink } = recordingSink();
+    let t: number | null = 1_000;
+    const obs = new FoundryRunSummaryObserver(sink, {
+      ttlMs: 500,
+      sweepIntervalMs: 0,
+      now: () => {
+        if (t === null) throw new Error("clock boom");
+        return t;
+      },
+    });
+    // observe() skips buffering when the clock is untrustworthy (never throws).
+    t = null;
+    expect(() => obs.observe(nodeStart("rHostile", "d1", "n1"))).not.toThrow();
+    expect(obs.droppedEvents).toBe(1);
+    const obs2 = new FoundryRunSummaryObserver(sink, {
+      ttlMs: 500,
+      sweepIntervalMs: 0,
+      now: () => Number.NaN,
+    });
+    obs2.observe(nodeStart("rNaN", "d1", "n1"));
+    obs2.evictStale();
+    expect(warns.some((w) => w.msg.includes("clock returned a non-finite stamp"))).toBe(true);
+  });
+
+  test("hostile clock values and a throwing framework logger cannot escape the guard", () => {
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: () => { throw new Error("warn transport failed"); },
+      error: () => { throw new Error("error transport failed"); },
+    });
+    const { sink } = recordingSink();
+    const obs = new FoundryRunSummaryObserver(sink, {
+      ttlMs: 500,
+      sweepIntervalMs: 0,
+      now: () => { throw revoked.proxy; },
+    });
+
+    expect(() => obs.observe(nodeStart("rHostile", "d1", "n1"))).not.toThrow();
+    expect(() => obs.evictStale()).not.toThrow();
+    expect(obs.droppedEvents).toBe(1);
+  });
 });
 
 // ---------------------------------------------------------------------------
 // Fix 4 — Foundry construction failure must NOT disable MLflow tracing
-// (FR-026 / SC-006 / SC-009)
+// (observability spec FR-026 / SC-006 / SC-009)
 // ---------------------------------------------------------------------------
 describe("resolveFoundryLeg — Foundry construction is isolated from MLflow", () => {
   const dualResolved: ResolvedObservability = {
@@ -655,7 +858,7 @@ describe("resolveFoundryLeg — Foundry construction is isolated from MLflow", (
 
 // ---------------------------------------------------------------------------
 // Bootstrap wiring — ONE shared persistence-policy instance reaches BOTH the
-// trace pipeline (initTracing) and the domain-event observer (FR-021 / SC-010).
+// trace pipeline (initTracing) and the domain-event observer (observability spec FR-021 / SC-010).
 //
 // The composition layer above proves the observer gates on its given policy, and
 // init.test.ts proves initTracing exposes the policy it was handed. The gap this
@@ -665,7 +868,7 @@ describe("resolveFoundryLeg — Foundry construction is isolated from MLflow", (
 // wiring (resolveFoundryLeg → composeObservability → initTracing) with a SINGLE
 // policy const and assert the instance is shared end-to-end.
 // ---------------------------------------------------------------------------
-describe("bootstrap wiring — single shared policy instance (FR-021 / SC-010)", () => {
+describe("bootstrap wiring — single shared policy instance (observability spec FR-021 / SC-010)", () => {
   const dualResolved: ResolvedObservability = {
     kind: "with-foundry",
     traceBackends: ["mlflow", "foundry"],

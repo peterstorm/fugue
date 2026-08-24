@@ -9,7 +9,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
-import { ok, isOk, isErr } from "@fuguejs/framework";
+import { isOk, isErr } from "@fuguejs/framework";
 import {
   createFakePgCapability,
   createPgClient,
@@ -30,10 +30,11 @@ describe("@fuguejs/pg — createFakePgCapability", () => {
       { id: "1", name: "Alice", email: "alice@example.com" },
       { id: "2", name: "Bob", email: "bob@example.com" },
     ],
-    "SELECT * FROM users WHERE id": [
-      { id: "1", name: "Alice", email: "alice@example.com" },
-    ],
-    "INSERT INTO orders": { rowCount: 1 },
+    "SELECT * FROM users WHERE id = $1": {
+      rows: [{ id: "1", name: "Alice", email: "alice@example.com" }],
+      params: ["1"],
+    },
+    "INSERT INTO orders VALUES ($1)": { rowCount: 1, params: ["data"] },
   });
 
   const db: PgCapability = fakeHandle.client;
@@ -49,7 +50,7 @@ describe("@fuguejs/pg — createFakePgCapability", () => {
       }
     });
 
-    it("prefix match — SQL with params matches prefix route", async () => {
+    it("matches exact SQL with its configured params", async () => {
       const result = await db.query(UserSchema, "SELECT * FROM users WHERE id = $1", ["1"]);
       expect(isOk(result)).toBe(true);
       if (result.ok) {
@@ -132,17 +133,18 @@ describe("@fuguejs/pg — createFakePgCapability", () => {
     });
   });
 
-  describe("longest-prefix matching", () => {
-    it("when two prefixes match, the longest wins", async () => {
+  describe("exact route matching", () => {
+    it("does not let a broad route swallow different SQL or bindings", async () => {
       const handle = createFakePgCapability({
-        "SELECT * FROM users": [{ id: "broad", name: "Broad", email: "b@example.com" }],
-        "SELECT * FROM users WHERE id": [{ id: "narrow", name: "Narrow", email: "n@example.com" }],
+        "SELECT * FROM users WHERE id = $1": {
+          rows: [{ id: "narrow", name: "Narrow", email: "n@example.com" }],
+          params: ["1"],
+        },
       });
-      const result = await handle.client.query(UserSchema, "SELECT * FROM users WHERE id = $1", ["1"]);
-      expect(isOk(result)).toBe(true);
-      if (result.ok) {
-        expect(result.value[0]?.id).toBe("narrow");
-      }
+      const wrongSql = await handle.client.query(UserSchema, "SELECT * FROM users WHERE id = $1 OR true", ["1"]);
+      const wrongParams = await handle.client.query(UserSchema, "SELECT * FROM users WHERE id = $1", ["2"]);
+      expect(wrongSql).toEqual({ ok: true, value: [] });
+      expect(wrongParams).toEqual({ ok: true, value: [] });
     });
   });
 });
@@ -161,6 +163,16 @@ const poolThatThrows = (error: unknown): PgQueryable => ({
 
 const poolWithRows = (rows: unknown[], rowCount: number | null = rows.length): PgQueryable => ({
   query: async () => ({ rows, rowCount }),
+});
+
+const revokedProxy = (): unknown => {
+  const revoked = Proxy.revocable({}, {});
+  revoked.revoke();
+  return revoked.proxy;
+};
+
+const throwingMessageAccessor = (): unknown => Object.defineProperty({}, "message", {
+  get: () => { throw new Error("message accessor failed"); },
 });
 
 describe("@fuguejs/pg — mapPgError classification", () => {
@@ -209,6 +221,14 @@ describe("@fuguejs/pg — mapPgError classification", () => {
     }
   });
 
+  it("revoked proxies and throwing accessors cannot escape the mapper", () => {
+    for (const hostile of [revokedProxy(), throwingMessageAccessor()]) {
+      const mapped = mapPgError(hostile, "SELECT 1");
+      expect(mapped.kind).toBe("node-crash");
+      if (mapped.kind === "node-crash") expect(typeof mapped.message).toBe("string");
+    }
+  });
+
   it("a non-string `code` does not throw — falls through to non-retriable node-crash", () => {
     // A driver/edge case that sets `code` to a non-string (here: numeric) must
     // not make `pgCode.startsWith(...)` throw out of mapPgError and escape the
@@ -244,6 +264,19 @@ describe("@fuguejs/pg — createPgClient (real client, fake pool)", () => {
     if (!result.ok) {
       expect(result.error.kind).toBe("node-crash");
       expect(result.error.kind === "node-crash" && result.error.retriability).toBe("non-retriable");
+    }
+  });
+
+  it("query contains a revoked proxy thrown by the pool", async () => {
+    const result = await createPgClient(poolThatThrows(revokedProxy())).query(
+      UserSchema,
+      "SELECT * FROM users",
+    );
+
+    expect(isErr(result)).toBe(true);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") expect(typeof result.error.message).toBe("string");
     }
   });
 
@@ -322,10 +355,40 @@ describe("@fuguejs/pg — healthCheckWithTimeout", () => {
     if (!result.ok) expect(result.error).toContain("down");
   });
 
+  it("a throwing message accessor returns Err instead of escaping", async () => {
+    const result = await healthCheckWithTimeout(poolThatThrows(throwingMessageAccessor()), 1_000);
+
+    expect(isErr(result)).toBe(true);
+    if (!result.ok) expect(typeof result.error).toBe("string");
+  });
+
   it("hung pool → Err after the timeout", async () => {
     const hung: PgQueryable = { query: () => new Promise(() => {}) };
     const result = await healthCheckWithTimeout(hung, 20);
     expect(isErr(result)).toBe(true);
     if (!result.ok) expect(result.error).toContain("timed out after 20ms");
+  });
+
+  it("logs a late probe rejection after the timeout without changing the verdict", async () => {
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown): void => { warnings.push(String(message)); };
+    try {
+      const lateRejector: PgQueryable = {
+        query: () => new Promise((_, reject) => {
+          setTimeout(() => reject(pgError("08006", "connection reset late")), 30);
+        }),
+      };
+
+      const result = await healthCheckWithTimeout(lateRejector, 5);
+      expect(isErr(result)).toBe(true);
+      if (!result.ok) expect(result.error).toContain("timed out after 5ms");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(warnings.some((warning) => warning.includes("late probe failure after timeout"))).toBe(true);
+      expect(warnings.some((warning) => warning.includes("connection reset late"))).toBe(true);
+    } finally {
+      console.warn = originalWarn;
+    }
   });
 });

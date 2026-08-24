@@ -1,4 +1,4 @@
-import { resourceName, witness, witnessValue, mkWitness, RN } from "./_freshness-helpers.js";
+import { witness, witnessValue, RN } from "./_freshness-helpers.js";
 // Phase 4 — HumanInterventionEvent tests
 // Verifies that `HumanInterventionEvent` is emitted via the observer for each
 // human-action variant, with correct fields (actor, action, context, elapsedMs).
@@ -10,13 +10,16 @@ import { N, R, D, NO_SIDE_EFFECTS, NO_CONFIDENCE } from "./_id-helpers.js";
 import { confidence } from "../types/confidence.js";
 import { RecordingObserver } from "../observer/observer.js";
 import { ok } from "../types/result.js";
-import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
+import { runDagStateful, runDagStatefulOutcome } from "../dag-runtime/run-dag-stateful.js";
+import { compileDagToMachine } from "../dag-runtime/machine.js";
+import { persistDagContext } from "../dag-runtime/persistence.js";
+import { createInMemoryJob } from "../queue/in-memory-job.js";
 import { makeNodeContext } from "../shared/make-node-context.js";
 import { defineDag } from "../executor/define-dag.js";
 import type { NodeDef, NodeContext } from "../types/node.js";
 import { type NodeOverride, brandedOverride } from "./_node-override.js";
 import type { HumanInterventionEvent } from "../types/events.js";
-import type { HumanAction } from "../dag-runtime/types.js";
+import type { DagMachineContextPersisted, DagPhase, HumanAction } from "../dag-runtime/types.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -317,6 +320,62 @@ describe("Phase 4 — HumanInterventionEvent", () => {
     const evt = findInterventionEvent(observer.events);
     expect(evt).toBeDefined();
     expect(evt!.context.priorWitnesses).toContainEqual(witness("version", RN("postgres:orders"), "42"));
+  });
+
+  test("durable suspend/resume preserves prior witnesses across a new executor", async () => {
+    const dag = defineDag({
+      id: "durable-witnesses",
+      nodes: {
+        reader: makeNode("reader", {
+          sideEffects: {
+            kind: "reads",
+            resource: RN("postgres:orders"),
+            extractWitness: (output: unknown) =>
+              witnessValue("version", String((output as { version: number }).version)),
+          },
+          run: async () => ok({ version: 42 }),
+        }),
+        review: makeNode("review", { humanReview: { prompt: "Approve?" } }),
+      },
+      edges: [{ from: DAG_INPUT, to: "reader" }, { from: "reader", to: "review" }],
+    });
+    const compiled = compileDagToMachine(dag, null);
+    if (!compiled.ok) throw new Error("compile failed");
+    const durableJob = createInMemoryJob<DagPhase, DagMachineContextPersisted>({
+      state: compiled.value.initialState,
+      context: persistDagContext(compiled.value.initialContext, dag),
+    });
+
+    const parked = await runDagStatefulOutcome(dag, null, makeNodeContext({
+      runId: R("durable-witness-run"),
+      dagId: D("durable-witnesses"),
+      observer: new RecordingObserver(),
+    }), {
+      jobLike: durableJob,
+      onHumanReview: async () => ({ kind: "pending" as const }),
+    });
+    expect(parked).toMatchObject({ ok: true, value: { kind: "suspended" } });
+    expect(durableJob.data.context.priorWitnesses.get("postgres:orders")).toEqual(
+      witness("version", RN("postgres:orders"), "42"),
+    );
+
+    // A second top-level invocation builds a new executor, reproducing the
+    // process/requeue lifetime that used to reset its local witness Map.
+    const resumedObserver = new RecordingObserver();
+    const resumed = await runDagStatefulOutcome(dag, null, makeNodeContext({
+      runId: R("durable-witness-run"),
+      dagId: D("durable-witnesses"),
+      observer: resumedObserver,
+    }), {
+      jobLike: durableJob,
+      onHumanReview: async () => ({ kind: "approve" as const }),
+    });
+
+    expect(resumed).toMatchObject({ ok: true, value: { kind: "completed" } });
+    const intervention = findInterventionEvent(resumedObserver.events);
+    expect(intervention?.context.priorWitnesses).toContainEqual(
+      witness("version", RN("postgres:orders"), "42"),
+    );
   });
 
   test("I9: retrying-hook path emits HumanInterventionEvent", async () => {

@@ -17,11 +17,12 @@
  * reason.
  */
 
-import { ok, err } from "@fuguejs/framework";
+import { ok, err, safeErrorMessage } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import type { HumanReviewNotifierPort } from "../ports.js";
 import type { ReviewNotification } from "../types.js";
+import { reviewCardBody } from "./bot/card.js";
 
 /** A minimal JSON POST transport — injected so the notifier is fakeable. */
 export interface WebhookHttp {
@@ -29,7 +30,7 @@ export interface WebhookHttp {
   readonly post: (url: string, jsonBody: string) => Promise<{ readonly status: number }>;
 }
 
-export interface WebhookNotifierConfig {
+interface WebhookNotifierConfig {
   /** Teams Incoming Webhook (Workflows) URL the card is POSTed to. */
   readonly webhookUrl: string;
   /**
@@ -54,16 +55,6 @@ export const buildAdaptiveCardPayload = (
   approvalBaseUrl: string,
 ): unknown => {
   const link = approvalUrl(approvalBaseUrl, notification.runId);
-  // A compact, valid preview of the output under review (best-effort stringify).
-  let outputPreview: string;
-  try {
-    outputPreview = JSON.stringify(notification.output, null, 2) ?? String(notification.output);
-  } catch {
-    outputPreview = String(notification.output);
-  }
-  // Bound the preview so a large output doesn't bloat the card.
-  if (outputPreview.length > 4000) outputPreview = `${outputPreview.slice(0, 4000)}\n… (truncated)`;
-
   return {
     type: "message",
     attachments: [
@@ -73,18 +64,7 @@ export const buildAdaptiveCardPayload = (
           $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
           type: "AdaptiveCard",
           version: "1.4",
-          body: [
-            { type: "TextBlock", size: "Large", weight: "Bolder", text: "Human review required" },
-            {
-              type: "TextBlock",
-              isSubtle: true,
-              wrap: true,
-              text: `DAG \`${notification.dagId}\` · node \`${notification.nodeId}\` · run \`${notification.runId}\``,
-            },
-            { type: "TextBlock", wrap: true, text: notification.prompt },
-            { type: "TextBlock", weight: "Bolder", text: "Output under review:" },
-            { type: "TextBlock", wrap: true, fontType: "Monospace", text: outputPreview },
-          ],
+          body: reviewCardBody(notification),
           actions: [{ type: "Action.OpenUrl", title: "Review", url: link }],
         },
       },
@@ -103,14 +83,26 @@ export const createWebhookNotifier = (
   http: WebhookHttp,
 ): HumanReviewNotifierPort => ({
   async notify(notification): Promise<Result<void, HostError>> {
-    const body = JSON.stringify(buildAdaptiveCardPayload(notification, config.approvalBaseUrl));
+    // The whole card build runs INSIDE the try so any residual throw (a
+    // hostile output that defeats both JSON.stringify and the total fallback)
+    // maps to `notification-failed` instead of escaping as a raw rejection
+    // (the review hook would escalate a PARKED run to a retriable node-failed).
+    let body: string;
+    try {
+      body = JSON.stringify(buildAdaptiveCardPayload(notification, config.approvalBaseUrl));
+    } catch (e) {
+      return err({
+        kind: "notification-failed",
+        operation: `Teams webhook card build: ${safeErrorMessage(e)}`, 
+      });
+    }
     let res: { status: number };
     try {
       res = await http.post(config.webhookUrl, body);
     } catch (e) {
       return err({
         kind: "notification-failed",
-        operation: `Teams webhook POST: ${e instanceof Error ? e.message : String(e)}`,
+        operation: `Teams webhook POST: ${safeErrorMessage(e)}`, 
       });
     }
     if (res.status < 200 || res.status >= 300) {

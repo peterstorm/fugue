@@ -68,6 +68,21 @@ describe("runGracefulShutdown — per-step fault isolation (shutdown wedge)", ()
     expect(warns.length).toBe(5); // one per failing step
     void order;
   });
+
+  test("a throwing logger cannot reject shutdown or strand later teardown steps", async () => {
+    const order: string[] = [];
+    const throwingLog: AppLogger = {
+      debug: () => { throw new Error("debug logger failed"); },
+      info: () => { throw new Error("info logger failed"); },
+      warn: () => { throw new Error("warn logger failed"); },
+      error: () => { throw new Error("error logger failed"); },
+    };
+
+    await expect(
+      runGracefulShutdown(handlesRecording(order, "flush"), throwingLog),
+    ).resolves.toBeUndefined();
+    expect(order).toEqual(ALL_STEPS);
+  });
 });
 
 describe("runGracefulShutdown — absent handles", () => {

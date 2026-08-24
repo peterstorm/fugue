@@ -17,6 +17,7 @@ import {
   libcCandidates,
   resolveReaper,
   drainReap,
+  createReapFaultEscalation,
   broadcastSignalToWorkers,
   createBunInitProcessAdapter,
 } from "../../../supervisor/lifecycle/bun-init-process-adapter.js";
@@ -53,41 +54,68 @@ const capturingLogger = (): { logger: LogPort; logs: CapturedLog[] } => {
 // ── Pure: parseThinInitEnv ──────────────────────────────────────────────────────
 
 describe("parseThinInitEnv (pure)", () => {
-  test("empty env → safe defaults", () => {
-    expect(parseThinInitEnv({})).toEqual({ maxRestartsPerWindow: 5, windowMs: 60_000, shutdownGraceMs: 10_000 });
+  test("empty env → safe defaults without warnings", () => {
+    expect(parseThinInitEnv({})).toEqual({
+      maxRestartsPerWindow: 5,
+      windowMs: 60_000,
+      shutdownGraceMs: 10_000,
+      warnings: [],
+    });
   });
 
-  test("valid overrides are honoured", () => {
+  test("valid overrides are honoured without warnings", () => {
     const cfg = parseThinInitEnv({
       THIN_INIT_MAX_SUPERVISOR_RESTARTS: "3",
       THIN_INIT_SUPERVISOR_RESTART_WINDOW_MS: "30000",
       THIN_INIT_SHUTDOWN_GRACE_MS: "0",
     });
-    expect(cfg).toEqual({ maxRestartsPerWindow: 3, windowMs: 30_000, shutdownGraceMs: 0 });
+    expect(cfg).toEqual({
+      maxRestartsPerWindow: 3,
+      windowMs: 30_000,
+      shutdownGraceMs: 0,
+      warnings: [],
+    });
   });
 
-  test("invalid / out-of-range values fall back to defaults (PID 1 never refuses to start over a typo)", () => {
+  test("invalid values fall back safely and return operator-visible warnings", () => {
     const cfg = parseThinInitEnv({
       THIN_INIT_MAX_SUPERVISOR_RESTARTS: "0", // below min 1
       THIN_INIT_SUPERVISOR_RESTART_WINDOW_MS: "500", // below min 1000
       THIN_INIT_SHUTDOWN_GRACE_MS: "abc", // not a number
     });
-    expect(cfg).toEqual({ maxRestartsPerWindow: 5, windowMs: 60_000, shutdownGraceMs: 10_000 });
+    expect(cfg).toEqual({
+      maxRestartsPerWindow: 5,
+      windowMs: 60_000,
+      shutdownGraceMs: 10_000,
+      warnings: [
+        { name: "THIN_INIT_MAX_SUPERVISOR_RESTARTS", raw: "0", fallback: 5, minimum: 1 },
+        { name: "THIN_INIT_SUPERVISOR_RESTART_WINDOW_MS", raw: "500", fallback: 60_000, minimum: 1000 },
+        { name: "THIN_INIT_SHUTDOWN_GRACE_MS", raw: "abc", fallback: 10_000, minimum: 0 },
+      ],
+    });
+    expect(Object.isFrozen(cfg.warnings)).toBe(true);
   });
 
-  test("empty / whitespace-only values mean 'use the default', NOT 0 (Number('')===0 would otherwise disable the grace window)", () => {
+  test("empty / whitespace-only values intentionally mean 'use the default' without warnings", () => {
     const cfg = parseThinInitEnv({
       THIN_INIT_MAX_SUPERVISOR_RESTARTS: "",
       THIN_INIT_SUPERVISOR_RESTART_WINDOW_MS: "   ",
       THIN_INIT_SHUTDOWN_GRACE_MS: "", // must NOT become a 0ms drain window
     });
-    expect(cfg).toEqual({ maxRestartsPerWindow: 5, windowMs: 60_000, shutdownGraceMs: 10_000 });
+    expect(cfg).toEqual({
+      maxRestartsPerWindow: 5,
+      windowMs: 60_000,
+      shutdownGraceMs: 10_000,
+      warnings: [],
+    });
   });
 
-  test('a finite but non-integer value ("3.5") is rejected by the integer guard → default (no silent parseInt truncation)', () => {
-    // Number("3.5")=3.5 passes `>= min` but `Number.isInteger` rejects it; a future
-    // swap to parseInt would silently truncate to a 3ms grace — this pins the fallback.
-    expect(parseThinInitEnv({ THIN_INIT_SHUTDOWN_GRACE_MS: "3.5" }).shutdownGraceMs).toBe(10_000);
+  test('a finite but non-integer value ("3.5") emits a warning instead of being silently truncated', () => {
+    const cfg = parseThinInitEnv({ THIN_INIT_SHUTDOWN_GRACE_MS: "3.5" });
+    expect(cfg.shutdownGraceMs).toBe(10_000);
+    expect(cfg.warnings).toEqual([
+      { name: "THIN_INIT_SHUTDOWN_GRACE_MS", raw: "3.5", fallback: 10_000, minimum: 0 },
+    ]);
   });
 });
 
@@ -123,14 +151,19 @@ describe("resolveReaper (candidate resolution + fail-fast)", () => {
     const tried: string[] = [];
     const reap = resolveReaper(["a", "b", "c"], (c) => {
       tried.push(c);
-      return c === "b" ? () => {} : null;
+      return c === "b"
+        ? { kind: "loaded", reaper: () => {} }
+        : { kind: "failed", diagnostic: `${c} unavailable` };
     });
     expect(typeof reap).toBe("function");
     expect(tried).toEqual(["a", "b"]); // stopped at the first success
   });
 
-  test("throws fail-fast naming the tried candidates when NONE provide waitpid", () => {
-    expect(() => resolveReaper(["x.so", "y.so"], () => null)).toThrow(/could not load a libc.*x\.so, y\.so/s);
+  test("throws fail-fast with every candidate's actionable failure cause", () => {
+    expect(() => resolveReaper(["x.so", "y.so"], (candidate) => ({
+      kind: "failed",
+      diagnostic: candidate === "x.so" ? "ENOENT: library missing" : "symbol waitpid missing",
+    }))).toThrow(/could not load a libc.*x\.so: ENOENT: library missing; y\.so: symbol waitpid missing/s);
   });
 
   test("resolves a REAL waitpid on this platform — the FFI binding is live, not a stub", () => {
@@ -173,6 +206,67 @@ describe("drainReap (pure drain loop)", () => {
       }),
     ).not.toThrow();
     expect(calls).toBe(1); // faulted once, then ended the cycle (no infinite loop)
+  });
+
+  test("a fault signals onFault exactly once — the wiring can count and escalate (a broken seam is NOT invisible)", () => {
+    let signals = 0;
+    drainReap(
+      () => {
+        throw new Error("simulated ffi marshalling fault");
+      },
+      () => {
+        signals++;
+      },
+    );
+    expect(signals).toBe(1);
+  });
+
+  test("a clean drain signals onFault NOT at all", () => {
+    let signals = 0;
+    drainReap(() => 0, () => {
+      signals++;
+    });
+    expect(signals).toBe(0);
+  });
+});
+
+// ── createReapFaultEscalation: the broken-reaper observability policy ────────────
+
+describe("createReapFaultEscalation (broken-seam escalation policy)", () => {
+  test("the first fault logs at error level with faultCount=1", () => {
+    const { logger, logs } = capturingLogger();
+    const esc = createReapFaultEscalation(logger);
+    esc.runCycle(() => esc.onFault());
+    expect(logs).toHaveLength(1);
+    expect(logs[0].level).toBe("error");
+    expect(logs[0].msg).toContain("waitpid FFI fault");
+    expect(logs[0].data).toMatchObject({ faultCount: 1 });
+  });
+
+  test("faults 2..9 of a run are throttled; the 10th consecutive fault logs again with faultCount=10", () => {
+    const { logger, logs } = capturingLogger();
+    const esc = createReapFaultEscalation(logger);
+    for (let i = 0; i < 10; i++) esc.runCycle(() => esc.onFault());
+    expect(logs).toHaveLength(2);
+    expect(logs[0].data).toMatchObject({ faultCount: 1 });
+    expect(logs[1].data).toMatchObject({ faultCount: 10 });
+  });
+
+  test("a fault-free cycle resets the counter — a later fault is the 'first' again (transient faults don't stay elevated)", () => {
+    const { logger, logs } = capturingLogger();
+    const esc = createReapFaultEscalation(logger);
+    esc.runCycle(() => esc.onFault()); // fault 1 → logged
+    esc.runCycle(() => {}); // healthy cycle → reset
+    esc.runCycle(() => esc.onFault()); // fault 1 again → logged as faultCount=1
+    expect(logs).toHaveLength(2);
+    expect(logs[1].data).toMatchObject({ faultCount: 1 });
+  });
+
+  test("works without a logger (log port is optional at the PID-1 boundary)", () => {
+    const esc = createReapFaultEscalation();
+    expect(() => {
+      esc.runCycle(() => esc.onFault());
+    }).not.toThrow();
   });
 });
 
@@ -233,15 +327,23 @@ describe("broadcastSignalToWorkers (pod-shutdown worker drain)", () => {
     expect(errLog?.data).toMatchObject({ error: "EACCES: /proc not readable" });
   });
 
-  test("a systematic kill failure (EPERM) signals ZERO workers but is distinguishable from success via the summary (signalled=0)", () => {
+  test("signal failures retain each worker pid and errno while the broadcast continues", () => {
     const { logger, logs } = capturingLogger();
     broadcastSignalToWorkers("SIGINT", {
       selfPid: 1,
       enumerate: () => ["2", "3"],
-      kill: () => {
-        throw new Error("EPERM");
+      kill: (pid) => {
+        throw new Error(pid === 2 ? "EPERM" : "EINVAL");
       },
       logger,
+    });
+    const warning = logs.find((l) => l.level === "warn");
+    expect(warning?.data).toEqual({
+      sig: "SIGINT",
+      failures: [
+        { pid: 2, error: "EPERM" },
+        { pid: 3, error: "EINVAL" },
+      ],
     });
     const summary = logs.find((l) => l.level === "info");
     expect(summary?.data).toMatchObject({ sig: "SIGINT", enumerated: 2, signalled: 0 });
@@ -459,6 +561,37 @@ describe("createBunInitProcessAdapter (real spawn/exit/terminate)", () => {
     // Test runner is NOT pid 1, so the worker broadcast is correctly skipped — this
     // must never enumerate + signal host processes.
     expect(() => adapter.beginTermination("SIGTERM")).not.toThrow();
+  });
+
+  test("a non-ESRCH supervisor signal failure is observable without escaping shutdown", () => {
+    const { logger, logs } = capturingLogger();
+    const failure = Object.assign(new Error("operation not permitted"), { code: "EPERM" });
+    const adapter = createBunInitProcessAdapter({
+      supervisorEntry: "/irrelevant/main-supervisor.ts",
+      spawn: () => ({ pid: 4242, exited: new Promise<number | null>(() => {}) }),
+      kill: () => { throw failure; },
+    }, logger);
+    adapter.spawnSupervisor();
+
+    expect(() => adapter.beginTermination("SIGTERM")).not.toThrow();
+    const signalFailure = logs.find((log) => log.msg.includes("failed to signal supervisor"));
+    expect(signalFailure).toMatchObject({
+      level: "error",
+      data: { pid: 4242, sig: "SIGTERM", code: "EPERM", error: "operation not permitted" },
+    });
+  });
+
+  test("ESRCH from supervisor signalling is the silent already-exited case", () => {
+    const { logger, logs } = capturingLogger();
+    const adapter = createBunInitProcessAdapter({
+      supervisorEntry: "/irrelevant/main-supervisor.ts",
+      spawn: () => ({ pid: 4242, exited: new Promise<number | null>(() => {}) }),
+      kill: () => { throw Object.assign(new Error("no such process"), { code: "ESRCH" }); },
+    }, logger);
+    adapter.spawnSupervisor();
+
+    expect(() => adapter.beginTermination("SIGINT")).not.toThrow();
+    expect(logs.some((log) => log.msg.includes("failed to signal supervisor"))).toBe(false);
   });
 
   test("after beginTermination, spawnSupervisor PARKS instead of respawning (no shutdown spawn-storm)", async () => {

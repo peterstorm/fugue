@@ -1,14 +1,14 @@
 import { describe, test, expect } from "bun:test";
 import { z } from "zod";
-import { ok, err, runDag, createTransformNode, FakeLlmClient, RecordingObserver, makeNodeContext, runId, nodeId, dagId, frameworkError } from "@fuguejs/framework";
+import { ok, err, runDag, createTransformNode, FakeLlmClient, RecordingObserver, makeNodeContext, runId, nodeId, dagId } from "@fuguejs/framework";
 import type { CheckpointWriter } from "@fuguejs/framework";
-import type { NodeContext, DagDef } from "@fuguejs/framework";
+import type { NodeContext } from "@fuguejs/framework";
 import type { SummaryResponse } from "../schemas/response.js";
 import type { SynthesisOutput } from "../schemas/summary.js";
 import { JsonFixtureSource } from "../sources/json-fixture-source.js";
 import { createSummaryDag } from "../dag/summary-dag.js";
 import { join } from "node:path";
-import { defineDag, defineDagFromArray, DAG_INPUT } from "@fuguejs/framework";
+import { defineDagFromArray, DAG_INPUT } from "@fuguejs/framework";
 
 const FIXTURES_DIR = join(import.meta.dir, "../../fixtures/customers");
 
@@ -44,7 +44,7 @@ describe("E2E observability flow", () => {
   test("full DAG run emits RunStart, NodeStart/End per node, RunEnd(ok)", async () => {
     const { observer, events } = collectingObserver();
     const source = new JsonFixtureSource(FIXTURES_DIR);
-    const dag = createSummaryDag(source, "cust-001");
+    const dag = createSummaryDag(source);
 
     const ctx = makeCtx({
       observer,
@@ -97,13 +97,13 @@ describe("E2E observability flow", () => {
   });
 });
 
-// --- Resume integration (SC-008) ---
+// --- Resume integration (ai-summary spec SC-008) ---
 
-describe("E2E resume integration (SC-008)", () => {
+describe("E2E resume integration (ai-summary spec SC-008)", () => {
   test("resume skips checkpointed nodes, only re-runs uncompleted ones", async () => {
     const { observer, events } = collectingObserver();
     const source = new JsonFixtureSource(FIXTURES_DIR);
-    const dag = createSummaryDag(source, "cust-001");
+    const dag = createSummaryDag(source);
 
     // First run the DAG normally to get real checkpoint data for first 2 nodes
     const firstRunObserver = new RecordingObserver();
@@ -121,14 +121,21 @@ describe("E2E resume integration (SC-008)", () => {
     expect(firstResult.ok).toBe(true);
 
     // Extract actual outputs for fetch-crm and extract-features
-    const fetchEndEvent = firstRunObserver.events.find((e) => e.type === "node-end" && (e as any).nodeId === "fetch-crm");
-    const extractEndEvent = firstRunObserver.events.find((e) => e.type === "node-end" && (e as any).nodeId === "extract-features");
+    const fetchEndEvent = firstRunObserver.events.find(
+      (event) => event.type === "node-end" && event.nodeId === "fetch-crm",
+    );
+    const extractEndEvent = firstRunObserver.events.find(
+      (event) => event.type === "node-end" && event.nodeId === "extract-features",
+    );
     expect(fetchEndEvent).toBeDefined();
     expect(extractEndEvent).toBeDefined();
+    if (fetchEndEvent?.type !== "node-end" || extractEndEvent?.type !== "node-end") {
+      throw new Error("expected checkpoint source node-end events");
+    }
 
     const checkpoint = new Map<string, unknown>([
-      ["fetch-crm", (fetchEndEvent as any)!.output],
-      ["extract-features", (extractEndEvent as any)!.output],
+      ["fetch-crm", fetchEndEvent.output],
+      ["extract-features", extractEndEvent.output],
     ]);
 
     // Resume run
@@ -138,7 +145,7 @@ describe("E2E resume integration (SC-008)", () => {
       dagId: dag.id,
     });
 
-    const result = await runDag(dag, undefined, ctx, {
+    const result = await runDag(dag, { customerId: "cust-001" }, ctx, {
       resume: { runId: runId("resume-run"), checkpoint },
     });
 
@@ -170,7 +177,7 @@ describe("E2E resume integration (SC-008)", () => {
   test("resume with all nodes checkpointed does zero work", async () => {
     const { observer, events } = collectingObserver();
     const source = new JsonFixtureSource(FIXTURES_DIR);
-    const dag = createSummaryDag(source, "cust-001");
+    const dag = createSummaryDag(source);
 
     // Run first to get all outputs
     const firstRunObserver2 = new RecordingObserver();
@@ -187,7 +194,7 @@ describe("E2E resume integration (SC-008)", () => {
     // Checkpoint ALL nodes
     const nodeEndEvents = firstRunObserver2.events.filter((e) => e.type === "node-end");
     const checkpoint = new Map<string, unknown>(
-      nodeEndEvents.map((e) => [(e as any).nodeId as string, (e as any).output]),
+      nodeEndEvents.map((event) => [event.nodeId, event.output]),
     );
 
     const ctx = makeCtx({

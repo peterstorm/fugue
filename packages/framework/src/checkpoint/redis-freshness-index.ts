@@ -4,9 +4,13 @@
  * Uses a ZSET per resource:
  *   Key:    `fugue:freshness:{resource}`
  *   Score:  `succeededAtMs`
- *   Member: JSON array `[runId, nodeId, witnessKind, witnessValue]`
+ *   Member: `freshnessMemberKey` — the port-owned
+ *           `[runId, nodeId, fixedWidthExecutionEpoch, witnessKind, witnessValue]` JSON array
+ *           (types/freshness.js), shared with the file backend's
+ *           equal-score tie-break (ADR-0079).
  *
- * `recordWrite` is an atomic ZADD + EXPIRE (Lua script). `findConflict`
+ * `recordWrite` is an atomic ZADD + EXPIRE (Lua script). `hasRecordedWrite`
+ * uses exact-member ZSCORE for durable logical acknowledgement. `findConflict`
  * uses `ZREVRANGEBYSCORE ... LIMIT 0 1` to fetch the latest write only.
  * Both operations are O(log N).
  *
@@ -20,57 +24,40 @@
 
 import type Redis from "ioredis";
 import type { WriteAttemptedEvent } from "../types/events.js";
-import type { FreshnessIndex, WriteEntry, WitnessKind, ResourceName } from "../types/freshness.js";
-import { __brandWitness } from "../types/freshness.js";
-import type { RunId, NodeId } from "../types/ids.js";
+import type {
+  FreshnessIndex,
+  FreshnessWriteIdentity,
+  WriteEntry,
+  WitnessKind,
+} from "../types/freshness.js";
+import {
+  FRESHNESS_TTL_SECONDS,
+  __brandWitness,
+  freshnessMemberKey,
+  freshnessWriteKey,
+  parseFreshnessMemberKey,
+} from "../types/freshness.js";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import { ok, err } from "../types/result.js";
-import { __brandRunId, __brandNodeId } from "../types/ids.js";
-import { fwLogger } from "../logger.js";
+import { logFrameworkWithoutThrowing } from "../logger.js";
+import { safeErrorMessage } from "../types/safe-error.js";
 
-const TTL_SECONDS = 86_400; // 24h — matches checkpoint TTL
 const KEY_PREFIX = "fugue:freshness:";
-
-/**
- * Encode a write entry as a ZSET member. Uses a JSON array for unambiguous
- * parsing — witness values are freeform strings that may contain any
- * delimiter character.
- */
-const encodeMember = (
-  runId: RunId,
-  nodeId: NodeId,
-  witnessKind: string,
-  witnessValue: string,
-): string => JSON.stringify([runId, nodeId, witnessKind, witnessValue]);
 
 /**
  * Decode a ZSET member back to its components. Returns `null` on parse
  * failure (corrupt entry or format change).
  */
-const decodeMember = (
-  member: string,
-): { runId: RunId; nodeId: NodeId; witnessKind: string; witnessValue: string } | null => {
-  try {
-    const parsed = JSON.parse(member);
-    if (!Array.isArray(parsed) || parsed.length !== 4) {
-      fwLogger().warn(
-        `[RedisFreshnessIndex] decodeMember: unexpected shape (length=${Array.isArray(parsed) ? parsed.length : "not-array"}): ${member.slice(0, 100)}`,
-      );
-      return null;
-    }
-    return {
-      runId: __brandRunId(parsed[0]),
-      nodeId: __brandNodeId(parsed[1]),
-      witnessKind: parsed[2],
-      witnessValue: parsed[3],
-    };
-  } catch (e) {
-    fwLogger().warn(
-      `[RedisFreshnessIndex] decodeMember: JSON parse failed: ${e instanceof Error ? e.message : e}`,
+const decodeMember = (member: string) => {
+  const decoded = parseFreshnessMemberKey(member);
+  if (decoded === null) {
+    logFrameworkWithoutThrowing(
+      "warn",
+      `[RedisFreshnessIndex] decodeMember: entry rejected: ${member.slice(0, 100)}`,
     );
-    return null;
   }
+  return decoded;
 };
 
 /**
@@ -107,9 +94,10 @@ export class RedisFreshnessIndex implements FreshnessIndex {
 
   private onFailure(e: unknown): void {
     this._consecutiveFailures++;
-    this._lastError = e instanceof Error ? e : new Error(String(e));
+    this._lastError = e instanceof Error ? e : new Error(safeErrorMessage(e));
     if (this._consecutiveFailures >= 5) {
-      fwLogger().warn(
+      logFrameworkWithoutThrowing(
+        "warn",
         `[RedisFreshnessIndex] degraded: ${this._consecutiveFailures} consecutive failures`,
       );
     }
@@ -117,9 +105,10 @@ export class RedisFreshnessIndex implements FreshnessIndex {
 
   async recordWrite(event: WriteAttemptedEvent): Promise<Result<void, FrameworkError>> {
     const key = KEY_PREFIX + event.newWitness.resource;
-    const member = encodeMember(
+    const member = freshnessMemberKey(
       event.runId,
       event.nodeId,
+      event.executionEpoch,
       event.newWitness.kind,
       event.newWitness.value,
     );
@@ -139,7 +128,7 @@ export class RedisFreshnessIndex implements FreshnessIndex {
           key,
           score,
           member,
-          String(TTL_SECONDS),
+          String(FRESHNESS_TTL_SECONDS),
         );
       } catch (e) {
         // NOSCRIPT — fall back to inline EVAL and re-prime the SHA.
@@ -151,7 +140,7 @@ export class RedisFreshnessIndex implements FreshnessIndex {
             key,
             score,
             member,
-            String(TTL_SECONDS),
+            String(FRESHNESS_TTL_SECONDS),
           );
         } else {
           throw e;
@@ -164,7 +153,29 @@ export class RedisFreshnessIndex implements FreshnessIndex {
       return err({
         kind: "cache-error",
         operation: "freshness:recordWrite",
-        message: `resource '${event.newWitness.resource}': ${e instanceof Error ? e.message : String(e)}`,
+        message: `resource '${event.newWitness.resource}': ${safeErrorMessage(e)}`,
+      });
+    }
+  }
+
+  async hasRecordedWrite(
+    identity: FreshnessWriteIdentity,
+  ): Promise<Result<boolean, FrameworkError>> {
+    let resource = "<unavailable>";
+    try {
+      resource = identity.newWitness.resource;
+      const score = await this.redis.zscore(
+        KEY_PREFIX + resource,
+        freshnessWriteKey(identity),
+      );
+      this.onSuccess();
+      return ok(score !== null);
+    } catch (e) {
+      this.onFailure(e);
+      return err({
+        kind: "cache-error",
+        operation: "freshness:hasRecordedWrite",
+        message: `resource '${resource}': ${safeErrorMessage(e)}`,
       });
     }
   }
@@ -196,11 +207,29 @@ export class RedisFreshnessIndex implements FreshnessIndex {
         const memberStr = members[0]!;
         const score = Number(members[1]!);
         const decoded = decodeMember(memberStr);
-        if (decoded && decoded.witnessValue !== conditionedOnValue) {
+        if (decoded === null) {
+          // Fail closed (ADR-0025): the LATEST write's member is undecodable
+          // (partial write, out-of-band mutation, format change). This index
+          // exists to detect stale writes; an unreadable latest member is not
+          // a verified no-conflict verdict — the caller must abort the wave
+          // rather than proceed without conflict detection. Deterministic:
+          // the same bytes reproduce the same rejection, so pin "permanent"
+          // like the sibling verdicts. onFailure keeps the failure surface
+          // observable to the port's instrumentation.
+          this.onFailure(new Error(`undecodable freshness member for resource '${resource}'`));
+          return err({
+            kind: "cache-error",
+            operation: "freshness:findConflict",
+            message: `resource '${resource}': latest write member is corrupt/undecodable — conflict verdict withheld (fail closed)`,
+            failureClass: "permanent",
+          });
+        }
+        if (decoded.witnessValue !== conditionedOnValue) {
           this.onSuccess();
           return ok({
             runId: decoded.runId,
             nodeId: decoded.nodeId,
+            executionEpoch: decoded.executionEpoch,
             newWitness: __brandWitness({
               kind: decoded.witnessKind as WitnessKind,
               resource,
@@ -218,11 +247,11 @@ export class RedisFreshnessIndex implements FreshnessIndex {
       return err({
         kind: "cache-error",
         operation: "freshness:findConflict",
-        message: `resource '${resource}': ${e instanceof Error ? e.message : String(e)}`,
+        message: `resource '${resource}': ${safeErrorMessage(e)}`,
       });
     }
   }
 }
 
 // Exported for unit testing of the encoding roundtrip.
-export { encodeMember as __testEncodeMember, decodeMember as __testDecodeMember };
+export { freshnessMemberKey as __testEncodeMember, decodeMember as __testDecodeMember };

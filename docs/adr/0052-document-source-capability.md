@@ -230,10 +230,28 @@ Delivered on this branch (compiling, unit-tested, no network):
 
 Remaining (gated on decisions not yet available):
 
-- MSAL / `@azure/identity` token-provider wiring in the host config (gated on
-  the Entra app + cert/secret choice).
-- Confirmation of SharePoint vs OneDrive and the concrete `FileRef` variant the
-  DAG will author (gated on where the file actually lives).
+- (delivered) Token-provider wiring in the host config: app-only client
+  credentials (no auth SDK — the provider is pure, `adapters/ms-graph-token.ts`:
+  single-flight, cached with a 60 s refresh lead, secrets never logged), wired
+  from `MSGRAPH_TENANT_ID` / `MSGRAPH_CLIENT_ID` / `MSGRAPH_CLIENT_SECRET` with
+  sovereign-cloud overrides (`MSGRAPH_BASE_URL` / `MSGRAPH_TOKEN_URL` /
+  `MSGRAPH_SCOPE` / `MSGRAPH_REQUEST_TIMEOUT_MS`). `DOCUMENTS_ADAPTER=ms-graph`
+  is now a first-class host config value in BOTH entries (single-tenant
+  `main.ts` and multi-tenant `worker-main.ts`) via the shared
+  `adapters/documents-capability.ts` builder.
+- (delivered) The concrete variant in production is SharePoint
+  `sharePointPathRef`. Tenants whose Graph backend rejects the documented
+  item-path URL forms tenant-wide (probed live — peterstorm/fugue#36) use the
+  opt-in `MSGRAPH_RESOLVE_PATHS=true`, which selects
+  `createPathResolvingMsGraphAdapter` (`path-resolving.ts`): it resolves a
+  sharePointPath ref to a driveItem id by id-based folder-walk, self-heals
+  delete-and-reupload refreshes (bounded one re-walk on a 404), and delegates
+  byte I/O to the stock adapter. Standard tenants keep the stock URL shape.
+- (delivered, related) `zodToJsonSchema` now renders unrepresentable types
+  (`z.date()`, `z.void()`, …) as open schemas instead of throwing
+  (`unrepresentable: "any"`, peterstorm/fugue#36 related item), so object
+  schemas with date columns are introspectable by the fan-in lint and the LLM
+  structured-output path.
 
 ## Related
 

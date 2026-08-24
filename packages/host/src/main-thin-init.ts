@@ -25,35 +25,49 @@ import { runThinInit } from "./supervisor/lifecycle/thin-init.js";
 import type { ThinInitConfig, InitProcessPort } from "./supervisor/lifecycle/thin-init.js";
 import { createBunInitProcessAdapter } from "./supervisor/lifecycle/bun-init-process-adapter.js";
 import type { LogPort } from "./ports.js";
-
-// ── Logger (mirrors main-supervisor.ts) ─────────────────────────────────────────
-
-const safeStringify = (obj: unknown): string => {
-  try { return JSON.stringify(obj); } catch { return `[unserializable: ${typeof obj}]`; }
-};
-
-const createLogger = (): LogPort => ({
-  info: (msg, data) => console.info(safeStringify({ level: "info", msg, ...data, ts: new Date().toISOString() })),
-  warn: (msg, data) => console.warn(safeStringify({ level: "warn", msg, ...data, ts: new Date().toISOString() })),
-  error: (msg, data) => console.error(safeStringify({ level: "error", msg, ...data, ts: new Date().toISOString() })),
-});
+import { createJsonConsoleLogger } from "./entrypoint-wiring.js";
 
 // ── Pure: env → config (testable without a process) ─────────────────────────────
 
-export interface ThinInitEnvConfig extends ThinInitConfig {
-  /** Bounded grace (ms) after forwarding SIGTERM before PID 1 exits the pod. */
-  readonly shutdownGraceMs: number;
+type ThinInitEnvName =
+  | "THIN_INIT_MAX_SUPERVISOR_RESTARTS"
+  | "THIN_INIT_SUPERVISOR_RESTART_WINDOW_MS"
+  | "THIN_INIT_SHUTDOWN_GRACE_MS";
+
+export interface ThinInitEnvWarning {
+  readonly name: ThinInitEnvName;
+  readonly raw: string;
+  readonly fallback: number;
+  readonly minimum: number;
 }
 
-const parseIntEnv = (raw: string | undefined, fallback: number, min: number): number => {
+interface ThinInitEnvConfig extends ThinInitConfig {
+  /** Bounded grace (ms) after forwarding SIGTERM before PID 1 exits the pod. */
+  readonly shutdownGraceMs: number;
+  /** Malformed configured values that were replaced with safe defaults. */
+  readonly warnings: readonly ThinInitEnvWarning[];
+}
+
+type ParsedIntEnv =
+  | { readonly value: number; readonly warning: null }
+  | { readonly value: number; readonly warning: ThinInitEnvWarning };
+
+const parseIntEnv = (
+  name: ThinInitEnvName,
+  raw: string | undefined,
+  fallback: number,
+  minimum: number,
+): ParsedIntEnv => {
   // An unset OR empty/whitespace-only var → the default. `Number("")` and
   // `Number("   ")` are BOTH 0, which would otherwise pass `>= min 0` and silently
   // yield 0 (e.g. THIN_INIT_SHUTDOWN_GRACE_MS="" → a 0ms drain window instead of
-  // the 10s default) — an empty env var is common in k8s/compose and must mean
-  // "use the default", not "0".
-  if (raw === undefined || raw.trim() === "") return fallback;
-  const n = Number(raw);
-  return Number.isInteger(n) && n >= min ? n : fallback;
+  // the 10s default) — an empty env var is common in k8s/compose and intentionally
+  // means "use the default", not "0".
+  if (raw === undefined || raw.trim() === "") return { value: fallback, warning: null };
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed >= minimum
+    ? { value: parsed, warning: null }
+    : { value: fallback, warning: { name, raw, fallback, minimum } };
 };
 
 /**
@@ -70,11 +84,35 @@ const parseIntEnv = (raw: string | undefined, fallback: number, min: number): nu
  * pod exit. (This is config, not the old unref'd-timer BUG, which exited
  * immediately regardless of the configured grace.)
  */
-export const parseThinInitEnv = (env: Readonly<Record<string, string | undefined>>): ThinInitEnvConfig => ({
-  maxRestartsPerWindow: parseIntEnv(env.THIN_INIT_MAX_SUPERVISOR_RESTARTS, 5, 1),
-  windowMs: parseIntEnv(env.THIN_INIT_SUPERVISOR_RESTART_WINDOW_MS, 60_000, 1000),
-  shutdownGraceMs: parseIntEnv(env.THIN_INIT_SHUTDOWN_GRACE_MS, 10_000, 0),
-});
+export const parseThinInitEnv = (env: Readonly<Record<string, string | undefined>>): ThinInitEnvConfig => {
+  const restarts = parseIntEnv(
+    "THIN_INIT_MAX_SUPERVISOR_RESTARTS",
+    env.THIN_INIT_MAX_SUPERVISOR_RESTARTS,
+    5,
+    1,
+  );
+  const window = parseIntEnv(
+    "THIN_INIT_SUPERVISOR_RESTART_WINDOW_MS",
+    env.THIN_INIT_SUPERVISOR_RESTART_WINDOW_MS,
+    60_000,
+    1000,
+  );
+  const shutdownGrace = parseIntEnv(
+    "THIN_INIT_SHUTDOWN_GRACE_MS",
+    env.THIN_INIT_SHUTDOWN_GRACE_MS,
+    10_000,
+    0,
+  );
+  const warnings = [restarts.warning, window.warning, shutdownGrace.warning]
+    .filter((warning): warning is ThinInitEnvWarning => warning !== null);
+
+  return {
+    maxRestartsPerWindow: restarts.value,
+    windowMs: window.value,
+    shutdownGraceMs: shutdownGrace.value,
+    warnings: Object.freeze(warnings),
+  };
+};
 
 /**
  * PURE: how PID 1 ends once the supervise loop RETURNS. The loop returns only on
@@ -91,7 +129,7 @@ export const decidePostLoopExit = (terminated: boolean): "defer-to-grace-timer" 
 
 // ── Shutdown handler (testable: injected exit + grace-timer seams) ───────────────
 
-export interface ShutdownDeps {
+interface ShutdownDeps {
   /** Forward shutdown to the supervisor + workers and park the supervise loop. */
   readonly beginTermination: (sig: "SIGTERM" | "SIGINT") => void;
   readonly graceMs: number;
@@ -102,7 +140,7 @@ export interface ShutdownDeps {
   readonly setGraceTimer: (fn: () => void, ms: number) => void;
 }
 
-export interface ShutdownHandler {
+interface ShutdownHandler {
   readonly onSignal: (sig: "SIGTERM" | "SIGINT") => void;
   readonly isTerminated: () => boolean;
 }
@@ -138,7 +176,7 @@ export const createShutdownHandler = (deps: ShutdownDeps): ShutdownHandler => {
 
 // ── Last-resort PID-1 error nets (testable: no exit seam ⇒ cannot exit) ───────────
 
-export interface GlobalErrorHandlers {
+interface GlobalErrorHandlers {
   readonly onUncaughtException: (e: unknown) => void;
   readonly onUnhandledRejection: (reason: unknown) => void;
 }
@@ -193,7 +231,7 @@ export const installProcessLifetimeReaper = (
 // ── Imperative shell: the binary ────────────────────────────────────────────────
 
 const main = async (): Promise<void> => {
-  const logger = createLogger();
+  const logger = createJsonConsoleLogger();
 
   // LAST-RESORT nets for PID 1 (see `createGlobalErrorHandlers`): a stray throw in a
   // signal handler / timer callback — OUTSIDE the awaited startup chain that
@@ -203,6 +241,11 @@ const main = async (): Promise<void> => {
   process.on("unhandledRejection", errorHandlers.onUnhandledRejection);
 
   const cfg = parseThinInitEnv(process.env);
+  for (const warning of cfg.warnings) {
+    logger.warn("[thin-init] invalid environment value — using safe default", {
+      ...warning,
+    });
+  }
   // The supervisor binary is a sibling of this file (src/ in dev, dist/ in build),
   // mirroring how main-supervisor resolves the worker entrypoint.
   const supervisorEntry = path.join(path.dirname(process.argv[1] ?? ""), "main-supervisor.ts");

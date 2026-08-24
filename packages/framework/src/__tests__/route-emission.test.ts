@@ -5,7 +5,7 @@ import type { NodeDef, NodeContext } from "../types/node.js";
 import type { NodeId } from "../types/ids.js";
 import type { EdgeDef } from "../types/dag.js";
 import type { DagMachineContext } from "../dag-runtime/types.js";
-import type { PostWaveContext } from "../dag-runtime/wave-execution.js";
+import type { PostWaveContext } from "../dag-runtime/post-wave-context.js";
 import { InMemoryFreshnessIndex } from "../dag-runtime/freshness-check.js";
 import { N, R, D } from "./_id-helpers.js";
 
@@ -70,7 +70,6 @@ const makePostWaveCtx = (
   dagId: D("d1"),
   nowFn: Date.now,
   freshnessIndex: new InMemoryFreshnessIndex(),
-  priorOutputs: new Map(),
 });
 
 // ---------------------------------------------------------------------------
@@ -185,6 +184,35 @@ describe("emitRoutingDecisions", () => {
 
     const nodeErrors = obs.events.filter((e) => e.type === "node-error");
     expect(nodeErrors).toHaveLength(1);
+  });
+
+  it("hostile confidence.extract throw remains a node-attributed failure", () => {
+    const obs = new RecordingObserver();
+    const hostile = {
+      [Symbol.toPrimitive]: () => { throw new Error("coercion trap"); },
+      toString: () => { throw new Error("toString trap"); },
+    };
+    const nodeDef = makeNodeDef({
+      confidence: {
+        mode: "value",
+        extract: () => { throw hostile; },
+      },
+    });
+    const ctx = makePostWaveCtx(
+      [N("a")],
+      new Map([[N("a"), nodeDef]]),
+      new Map([[N("a"), [conditionalEdge("a", "yes", () => true)]]]),
+      obs,
+    );
+
+    const result = emitRoutingDecisions(ctx, new Map([[N("a"), { value: 1 }]]));
+
+    expect(result.earlyFailure).toMatchObject({
+      type: "node-failed",
+      nodeId: N("a"),
+      error: { kind: "node-crash", nodeId: N("a") },
+    });
+    expect(obs.events.filter((event) => event.type === "node-error")).toHaveLength(1);
   });
 
   it("predicate throws → predicate-malformed earlyFailure", () => {

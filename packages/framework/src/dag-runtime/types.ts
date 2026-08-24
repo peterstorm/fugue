@@ -7,6 +7,8 @@ import type { Decision } from "./routing.js";
 import type { IncomingSources } from "./topology.js";
 import type { NodeId } from "../types/ids.js";
 import { nodeId } from "../types/ids.js";
+import type { Witness, FreshnessExecutionEpoch } from "../types/witness.js";
+import type { NonEmptyString } from "../types/non-empty-string.js";
 
 /**
  * Sentinel node id used by the executor/runner when an ERROR event arrives
@@ -55,7 +57,7 @@ export interface HumanGatePayload {
   /** The gated node's already-produced output — what is under review. */
   readonly output: unknown;
   /** The review prompt shown to the human. */
-  readonly prompt: string;
+  readonly prompt: NonEmptyString;
   /** Remaining review queue: node ids to review after the current one (ascending order). */
   readonly pendingReviews: readonly NodeId[];
   /** Wave index we paused on. */
@@ -159,6 +161,10 @@ export type DagEvent =
        * `decideRoute` on fallback paths without calling closures.
        */
       readonly confidenceValues?: ReadonlyMap<NodeId, import("../types/confidence.js").Confidence | null>;
+      /** Latest captured read witness per resource, folded into durable run state. */
+      readonly priorWitnesses?: ReadonlyMap<string, Witness>;
+      /** Nodes whose post-wave freshness bookkeeping is durably complete. */
+      readonly freshnessCompletedNodeIds?: ReadonlySet<NodeId>;
     }
   | {
       readonly type: "node-failed";
@@ -177,6 +183,16 @@ export type DagEvent =
        * preventing off-by-one retry accounting when multiple nodes fail together.
        */
       readonly coFailedNodeIds?: ReadonlyArray<NodeId>;
+      /**
+       * Updated witness projection when failure occurred after freshness
+       * emission began. Absent for dispatch/hook failures that captured none.
+       */
+      readonly priorWitnesses?: ReadonlyMap<string, Witness>;
+      /**
+       * Updated durable completion proof when failure occurred after freshness
+       * emission began. Absent for dispatch/hook failures.
+       */
+      readonly freshnessCompletedNodeIds?: ReadonlySet<NodeId>;
     }
   | {
       readonly type: "human-responded";
@@ -223,10 +239,16 @@ export type DagEvent =
 //   - The slice names document what each transition helper depends on
 // ---------------------------------------------------------------------------
 
+/** Closure-free edge representation carried by durable machine contexts. */
+export type PersistedEdgeDef =
+  | { readonly from: NodeId; readonly to: NodeId; readonly kind: "unconditional" }
+  | { readonly from: NodeId; readonly to: NodeId; readonly kind: "conditional" }
+  | { readonly from: NodeId; readonly to: NodeId; readonly kind: "default" };
+
 /** Topology facts computed once at compile time. Immutable after construction. */
 export interface DagTopology {
   readonly waves: readonly (readonly NodeId[])[];
-  readonly edges: readonly EdgeDef[];
+  readonly edges: readonly PersistedEdgeDef[];
   /**
    * Closure-free unconditional adjacency. Maps each node to the targets of its
    * unconditional out-edges. Used by `expandActive` and `seedInitialActiveSet`
@@ -256,7 +278,7 @@ export interface DagHumanGateConfig {
   /** Node IDs that declare human review (data only — no closures). */
   readonly humanReviewNodeIds: ReadonlySet<NodeId>;
   /** Human review prompts by node ID (plain data, extracted at compile time). */
-  readonly humanReviewPrompts: ReadonlyMap<NodeId, string>;
+  readonly humanReviewPrompts: ReadonlyMap<NodeId, NonEmptyString>;
 }
 
 /** Routing/active-set state that evolves per wave. */
@@ -290,6 +312,19 @@ export interface DagRoutingState {
 export interface DagMachineContextPersisted extends DagTopology, DagRetryState, DagHumanGateConfig, DagRoutingState {
   readonly outputs: ReadonlyMap<NodeId, unknown>;
   readonly initialInput: unknown;
+  /** Latest captured read witness per resource; durable across HITL suspension. */
+  readonly priorWitnesses: ReadonlyMap<string, Witness>;
+  /**
+   * Nodes whose post-wave freshness bookkeeping completed. This proof is
+   * distinct from `outputs`: an output can be checkpointed before its witness
+   * is emitted, while completed bookkeeping must survive worker replacement.
+   */
+  readonly freshnessCompletedNodeIds: ReadonlySet<NodeId>;
+  /**
+   * Logical execution generation stamped onto freshness writes. Stable across
+   * bookkeeping retries; incremented before replacement work after a reroute.
+   */
+  readonly freshnessExecutionEpoch: FreshnessExecutionEpoch;
 }
 
 // ---------------------------------------------------------------------------
@@ -314,6 +349,8 @@ export interface DagMachineContextPersisted extends DagTopology, DagRetryState, 
 // ---------------------------------------------------------------------------
 
 export interface DagMachineContext extends DagMachineContextPersisted {
+  /** Live edges retain conditional predicate closures; persisted edges do not. */
+  readonly edges: readonly EdgeDef[];
   readonly dag: DagDef;
   /**
    * Precomputed adjacency: `nodeId → out-edges` (includes predicate closures).

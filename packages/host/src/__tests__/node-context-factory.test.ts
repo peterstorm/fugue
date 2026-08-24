@@ -2,11 +2,11 @@
  * Unit tests for node-context-factory.ts
  *
  * Tests resolveTtl, createNamespacedCache (error degradation, corrupted JSON),
- * and createNamespacedCheckpointWriter (best-effort writes).
+ * and createNamespacedCheckpointWriter (durability failures reject).
  */
 
 import { describe, it, expect } from "bun:test";
-import { ok, err, isOk, dagId, runId as makeRunId, nodeId as makeNodeId, gitSha, noopTracer, createHttpCapability, systemClock } from "@fuguejs/framework";
+import { fromJson, ok, err, isOk, dagId, runId as makeRunId, nodeId as makeNodeId, gitSha, noopTracer, createHttpCapability, systemClock } from "@fuguejs/framework";
 import type {
   Result,
   DagId,
@@ -28,11 +28,10 @@ import {
   createNamespacedCache,
   createNamespacedCheckpointWriter,
   createNodeContextForDag,
-  invocationOriginForIdentity,
   buildCacheKey,
   buildCheckpointKey,
 } from "../adapters/node-context-factory.js";
-import { subjectTokenForIdentity } from "../domain/run-context.js";
+import { subjectTokenForIdentity, invocationOriginForIdentity } from "../domain/run-context.js";
 import { markSubjectToken, type AuthIdentity, type SubjectToken } from "../domain/auth.js";
 import { tenantId } from "../domain/tenant.js";
 import type { TenantId } from "../domain/tenant.js";
@@ -149,6 +148,25 @@ const collectLogs = () => {
 
 // ── resolveTtl ─────────────────────────────────────────────────────────────
 
+/**
+ * THE one shared-infra fixture. It was redefined verbatim in six places (plus
+ * two parameterized-but-identical copies) — every copy carrying the same stub
+ * llm/redis/tracer/logger — so a change to what `SharedInfra` requires had to be
+ * remembered eight times. `capabilities` defaults to none; the tests that care
+ * pass the handles they are actually asserting on.
+ */
+const baseSharedInfra = (
+  capabilities: SharedInfra["capabilities"] = [],
+): SharedInfra => ({
+  llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
+  redis: createMockRedis().redis,
+  tracer: noopTracer,
+  contentFilter: null,
+  prompts: null,
+  logger: { info: () => {}, warn: () => {}, error: () => {} },
+  capabilities,
+});
+
 describe("resolveTtl", () => {
   it("returns undefined for both when no TTL configured", () => {
     const dag = makeDag();
@@ -248,6 +266,35 @@ describe("createNamespacedCache", () => {
     expect(logs.some(l => l.level === "warn" && l.msg.includes("Cache set failed"))).toBe(true);
   });
 
+  it("cache fallback outcomes survive a throwing diagnostic logger", async () => {
+    const throwingLogger: LogPort = {
+      info: () => {},
+      warn: () => { throw new Error("logger failed"); },
+      error: () => { throw new Error("logger failed"); },
+    };
+    const failed = createNamespacedCache(
+      failingRedis(), testTenant, testDagId, undefined, throwingLogger,
+    );
+    expect(await failed.get("missing")).toEqual({ hit: false });
+    expect((await failed.set("key", "value")).ok).toBe(true);
+
+    const corruptedStore = new Map([
+      [buildCacheKey(testTenant, testDagId, "corrupt"), "not-json{{{"],
+    ]);
+    const corrupted = createNamespacedCache(
+      createMockRedis(corruptedStore).redis,
+      testTenant,
+      testDagId,
+      undefined,
+      throwingLogger,
+    );
+    expect(await corrupted.get("corrupt")).toEqual({ hit: false });
+
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    expect((await corrupted.set("cyclic", cyclic)).ok).toBe(true);
+  });
+
   it("set handles non-serializable values gracefully", async () => {
     const { redis } = createMockRedis();
     const { logger, logs } = collectLogs();
@@ -290,42 +337,66 @@ describe("createNamespacedCheckpointWriter", () => {
     expect(store.get(expectedKey)).toBe(JSON.stringify({ output: "done" }));
   });
 
-  it("best-effort — does not throw on Redis failure", async () => {
+  it("rejects on Redis failure so runDag can surface checkpoint-write-failed", async () => {
     const { logger, logs } = collectLogs();
     const writer = createNamespacedCheckpointWriter(failingRedis(), testTenant, testDagId, testRunId, undefined, logger);
 
-    // Should not throw
-    await writer.write(testRunId, testNodeId, { data: 1 });
+    await expect(writer.write(testRunId, testNodeId, { data: 1 })).rejects.toThrow(/Checkpoint write failed/);
     expect(logs.some(l => l.msg.includes("Checkpoint write failed"))).toBe(true);
   });
 
-  it("handles non-serializable values gracefully", async () => {
+  it.each([
+    ["cyclic", (() => { const value: Record<string, unknown> = {}; value.self = value; return value; })()],
+    ["BigInt", { amount: 1n }],
+    ["non-finite number", { nested: { score: Number.NaN } }],
+    ["function property", { nested: { run: () => 1 } }],
+    ["symbol property", { nested: { marker: Symbol("x") } }],
+    ["custom toJSON", { value: 1, toJSON: () => ({ value: 2 }) }],
+  ])("rejects a %s checkpoint value as non-serializable", async (_label, value) => {
     const { redis } = createMockRedis();
     const { logger, logs } = collectLogs();
     const writer = createNamespacedCheckpointWriter(redis, testTenant, testDagId, testRunId, undefined, logger);
 
-    const circular: Record<string, unknown> = {};
-    circular.self = circular;
-    await writer.write(testRunId, testNodeId, circular);
+    await expect(writer.write(testRunId, testNodeId, value)).rejects.toThrow(/not serializable/);
     expect(logs.some(l => l.msg.includes("not serializable"))).toBe(true);
+  });
+
+  it("losslessly round-trips Map, Set, Date, and explicit undefined", async () => {
+    const store = new Map<string, string>();
+    const { redis } = createMockRedis(store);
+    const { logger } = collectLogs();
+    const writer = createNamespacedCheckpointWriter(
+      redis, testTenant, testDagId, testRunId, undefined, logger,
+    );
+    const value = {
+      byNode: new Map([[testNodeId, new Set(["approved"])]]),
+      at: new Date("2026-08-23T07:00:00.000Z"),
+      optional: undefined,
+    };
+
+    await writer.write(testRunId, testNodeId, value);
+
+    const key = buildCheckpointKey(testTenant, testDagId, testRunId, testNodeId);
+    expect(fromJson(store.get(key)!)).toEqual(value);
+  });
+
+  it("preserves the checkpoint failure when the logger throws", async () => {
+    const throwingLogger: LogPort = {
+      info: () => {},
+      warn: () => { throw new Error("logger failed"); },
+      error: () => { throw new Error("logger failed"); },
+    };
+    const writer = createNamespacedCheckpointWriter(
+      failingRedis(), testTenant, testDagId, testRunId, undefined, throwingLogger,
+    );
+
+    await expect(writer.write(testRunId, testNodeId, { data: 1 })).rejects.toThrow(/Checkpoint write failed/);
   });
 });
 
 // ── Built-in http capability wiring (ADR-0051) ──────────────────────────────
 
 describe("createNodeContextForDag — built-in http capability", () => {
-  const baseSharedInfra = (
-    capabilities: SharedInfra["capabilities"],
-  ): SharedInfra => ({
-    llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
-    redis: createMockRedis().redis,
-    tracer: noopTracer,
-    contentFilter: null,
-    prompts: null,
-    logger: { info: () => {}, warn: () => {}, error: () => {} },
-    capabilities,
-  });
-
   // Regression guard: main.ts wires `createHttpCapability()` into
   // `sharedInfra.capabilities`. If that wiring is dropped, `ctx.http` is null
   // and any `requires: ["http"]` DAG fails the boot-time capability check.
@@ -382,16 +453,6 @@ describe("createNodeContextForDag — built-in http capability", () => {
 // ACL-escaping key, so it must stay fail-closed.
 
 describe("createNodeContextForDag — fail-closed tenant derivation (AD-4 / US2 / SC-001)", () => {
-  const baseSharedInfra = (): SharedInfra => ({
-    llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
-    redis: createMockRedis().redis,
-    tracer: noopTracer,
-    contentFilter: null,
-    prompts: null,
-    logger: { info: () => {}, warn: () => {}, error: () => {} },
-    capabilities: [],
-  });
-
   it("REFUSES (throws) when the DAG's owning team contains a colon — never emits a key that escapes the tenant prefix", async () => {
     // A team with a `:` cannot be a TenantId (`:` is the key-segment delimiter);
     // interpolating it unchecked would forge a sibling namespace
@@ -476,18 +537,6 @@ describe("createNodeContextForDag — routed-tenant key namespacing (ADR-0067 / 
 // ── Static client wiring (SC-005 zero-regression) ───────────────────────────
 
 describe("createNodeContextForDag — static client wiring (SC-005)", () => {
-  const baseSharedInfra = (
-    capabilities: SharedInfra["capabilities"],
-  ): SharedInfra => ({
-    llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
-    redis: createMockRedis().redis,
-    tracer: noopTracer,
-    contentFilter: null,
-    prompts: null,
-    logger: { info: () => {}, warn: () => {}, error: () => {} },
-    capabilities,
-  });
-
   // Regression proof for the base-context wiring: the boot-scoped static client
   // must be reachable on the NodeContext BYTE-IDENTICAL to what `extractClients`
   // produces — the SAME reference, not a copy. Per-node minting layers OVER this
@@ -658,15 +707,6 @@ describe("invocationOriginForIdentity — user sub threading + real-client resol
   });
 
   it("the factory accepts a user identity and produces a usable NodeContext (sub threaded, no throw)", async () => {
-    const baseSharedInfra = (): SharedInfra => ({
-      llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
-      redis: createMockRedis().redis,
-      tracer: noopTracer,
-      contentFilter: null,
-      prompts: null,
-      logger: { info: () => {}, warn: () => {}, error: () => {} },
-      capabilities: [],
-    });
     const userIdentity: AuthIdentity = { kind: "user", sub: "user-xyz", azp: "fugue-frontend", canRunDag: () => true };
     const shared = baseSharedInfra();
 
@@ -689,15 +729,6 @@ describe("invocationOriginForIdentity — user sub threading + real-client resol
   });
 
   it("FR-040 fail-closed: the factory REFUSES (throws) a DAG with no agent client mapping when minting is ACTIVE — never mints an absent identity", async () => {
-    const baseSharedInfra = (): SharedInfra => ({
-      llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
-      redis: createMockRedis().redis,
-      tracer: noopTracer,
-      contentFilter: null,
-      prompts: null,
-      logger: { info: () => {}, warn: () => {}, error: () => {} },
-      capabilities: [],
-    });
     const shared = baseSharedInfra();
     // Empty map + minting ACTIVE (broker wired) → the DAG has no agent client →
     // fail closed (the origin WOULD be consumed by per-node minting).
@@ -714,15 +745,6 @@ describe("invocationOriginForIdentity — user sub threading + real-client resol
   });
 
   it("zero-regression no-realm baseline (SC-001/SC-005): an UNMAPPED dag with minting INACTIVE does NOT throw and yields origin `undefined` — a no-realm deployment must not 500 every run", async () => {
-    const baseSharedInfra = (): SharedInfra => ({
-      llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
-      redis: createMockRedis().redis,
-      tracer: noopTracer,
-      contentFilter: null,
-      prompts: null,
-      logger: { info: () => {}, warn: () => {}, error: () => {} },
-      capabilities: [],
-    });
     const shared = baseSharedInfra();
     // Empty map (the default) + minting INACTIVE (no broker) → origin is never
     // consumed, so the run proceeds on the static path with origin === undefined.
@@ -740,15 +762,6 @@ describe("invocationOriginForIdentity — user sub threading + real-client resol
   });
 
   it("FR-040 + NFR-014 ordering: a user run carrying a subject token on an UNMAPPED dag (minting active) throws BEFORE binding the token — no JWT retained under a non-proceeding run", async () => {
-    const baseSharedInfra = (): SharedInfra => ({
-      llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
-      redis: createMockRedis().redis,
-      tracer: noopTracer,
-      contentFilter: null,
-      prompts: null,
-      logger: { info: () => {}, warn: () => {}, error: () => {} },
-      capabilities: [],
-    });
     const shared = baseSharedInfra();
     const bound: RunId[] = [];
     const userWithProof: AuthIdentity = {
@@ -808,16 +821,6 @@ describe("subjectTokenForIdentity — pure host-side extraction (FR-030/FR-032)"
 });
 
 describe("createNodeContextForDag — binds the subject token host-side, NEVER on the origin (FR-032)", () => {
-  const baseSharedInfra = (): SharedInfra => ({
-    llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
-    redis: createMockRedis().redis,
-    tracer: noopTracer,
-    contentFilter: null,
-    prompts: null,
-    logger: { info: () => {}, warn: () => {}, error: () => {} },
-    capabilities: [],
-  });
-
   it("binds runId → subject token via the sink for a user run; the token is ABSENT from the string-only origin", async () => {
     const proof = markSubjectToken("verified.user.jwt-FR032");
     const userIdentity: AuthIdentity = {

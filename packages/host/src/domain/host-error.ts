@@ -16,6 +16,19 @@ import type { TenantId } from "./tenant.js";
 // Zod 4 re-exports $ZodIssue as the canonical issue type
 type ZodIssue = z.core.$ZodIssue;
 
+declare const __retryAfterSecondsBrand: unique symbol;
+export type RetryAfterSeconds = number & {
+  readonly [__retryAfterSecondsBrand]: "RetryAfterSeconds";
+};
+
+/** HTTP Retry-After delay-seconds grammar (RFC integer form). */
+export const retryAfterSeconds = (value: number): RetryAfterSeconds => {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError("retryAfterSeconds must be a non-negative safe integer");
+  }
+  return value as RetryAfterSeconds;
+};
+
 export type HostError =
   | { readonly kind: "git-clone-failed"; readonly url: string; readonly message: string }
   | { readonly kind: "git-pull-failed"; readonly message: string }
@@ -44,6 +57,7 @@ export type HostError =
   | { readonly kind: "discovery-failed"; readonly dagsRoot: string; readonly message: string }
   | { readonly kind: "async-result-expired"; readonly runId: RunId }
   | { readonly kind: "run-not-found"; readonly runId: RunId }
+  | { readonly kind: "run-lease-lost"; readonly runId: RunId }
   | { readonly kind: "run-not-suspended"; readonly runId: RunId; readonly status: string }
   | { readonly kind: "notification-failed"; readonly operation: string }
   | { readonly kind: "unauthorized"; readonly reason: string }
@@ -69,7 +83,7 @@ export type HostError =
   // the error (data, not a hardcoded header) so admission can compute a tenant-
   // specific backoff. It names no other tenant — one tenant's saturation can
   // never surface as another tenant's error (FR-041).
-  | { readonly kind: "tenant-over-quota"; readonly tenant: TenantId; readonly retryAfterSeconds: number }
+  | { readonly kind: "tenant-over-quota"; readonly tenant: TenantId; readonly retryAfterSeconds: RetryAfterSeconds }
   // `worker-unavailable` (SC-012, FR-041, AD-8): the owning tenant's worker is
   // crashed/draining/unreachable. 503 for THAT tenant only — a worker fault is
   // contained to its tenant and never bleeds into another's request path.
@@ -102,6 +116,7 @@ export const httpStatusFor = (error: HostError): number =>
     .with({ kind: "redis-unavailable" }, () => 503)
     .with({ kind: "async-result-expired" }, () => 410)
     .with({ kind: "run-not-found" }, () => 404)
+    .with({ kind: "run-lease-lost" }, () => 503)
     .with({ kind: "run-not-suspended" }, () => 409)
     .with({ kind: "notification-failed" }, () => 502)
     .with({ kind: "git-clone-failed" }, () => 500)
@@ -162,6 +177,7 @@ export const formatHostError = (error: HostError): string =>
     .with({ kind: "discovery-failed" }, (e) => `DAG discovery failed for '${e.dagsRoot}': ${e.message}`)
     .with({ kind: "async-result-expired" }, (e) => `async result for run '${e.runId}' has expired`)
     .with({ kind: "run-not-found" }, (e) => `run '${e.runId}' not found`)
+    .with({ kind: "run-lease-lost" }, (e) => `run '${e.runId}' lease ownership was lost`)
     .with({ kind: "run-not-suspended" }, (e) => `run '${e.runId}' is '${e.status}', not awaiting human review`)
     .with({ kind: "notification-failed" }, (e) => `review notification failed during '${e.operation}'`)
     .with({ kind: "unauthorized" }, (e) => `unauthorized: ${e.reason}`)
@@ -186,10 +202,6 @@ export const redisUnavailable = (operation: string): HostError => ({ kind: "redi
 /** Producer of `fs-purge-failed` — a local filesystem fault during grace-window mount reclamation (NOT a Redis outage). */
 export const fsPurgeFailed = (message: string): HostError => ({ kind: "fs-purge-failed", message });
 export const teamAlreadyExists = (team: string): HostError => ({ kind: "team-already-exists", team });
-export const teamNotFound = (team: string): HostError => ({ kind: "team-not-found", team });
-export const importFailed = (path: string, message: string, stack?: string): HostError => ({ kind: "import-failed", path, message, stack });
-export const noDefaultExport = (path: string): HostError => ({ kind: "no-default-export", path });
-export const discoveryFailed = (dagsRoot: string, message: string): HostError => ({ kind: "discovery-failed", dagsRoot, message });
 export const internalInvariantViolated = (message: string, context: Record<string, unknown>): HostError => ({ kind: "internal-invariant-violated", message, context });
 
 /**
@@ -215,10 +227,10 @@ export const tenantUnknown = (): HostError => ({ kind: "tenant-unknown" });
  * hit and the backoff to advertise are both carried on the error — the
  * Retry-After header is derived from `retryAfterSeconds`, not hardcoded.
  */
-export const tenantOverQuota = (tenant: TenantId, retryAfterSeconds: number): HostError => ({
+export const tenantOverQuota = (tenant: TenantId, rawRetryAfterSeconds: number): HostError => ({
   kind: "tenant-over-quota",
   tenant,
-  retryAfterSeconds,
+  retryAfterSeconds: retryAfterSeconds(rawRetryAfterSeconds),
 });
 
 /** Producer of `worker-unavailable` (SC-012, AD-8) for THIS tenant only. */
@@ -269,6 +281,7 @@ export const retryAfterSecondsFor = (error: HostError): number | undefined =>
         { kind: "discovery-failed" },
         { kind: "async-result-expired" },
         { kind: "run-not-found" },
+        { kind: "run-lease-lost" },
         { kind: "run-not-suspended" },
         { kind: "notification-failed" },
         { kind: "unauthorized" },

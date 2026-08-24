@@ -1,8 +1,10 @@
 /**
  * Generic OAuth2-style token provider for `@fuguejs/http-auth`.
  *
- * Mints a single boot-scoped bearer token via an `application/x-www-form-urlencoded`
- * password/operator grant and caches it. The token is shared across every request;
+ * Mints a single boot-scoped bearer token via an OAuth2-style,
+ * `application/x-www-form-urlencoded` grant and caches it. Resource-owner
+ * credentials are optional, so two-legged `client_credentials` is supported.
+ * The token is shared across every request;
  * it is minted lazily on first use, refreshed when absent or expired, and
  * invalidated on a `401` so the next `get()` re-mints.
  *
@@ -19,6 +21,8 @@
 import { z } from "zod";
 import type { Result, FrameworkError } from "@fuguejs/framework";
 import { ok, err, nodeId } from "@fuguejs/framework";
+import { classifyAbort } from "./abort-classification.js";
+import { isRetriableHttpStatus } from "./http-status.js";
 
 // ---------------------------------------------------------------------------
 // Branded bearer token
@@ -129,14 +133,15 @@ export interface AuthConfig {
  * returns a cached token or mints one; `invalidate()` drops the cache so the
  * next `get()` re-mints (used on a `401`).
  *
- * `get()` accepts an optional `AbortSignal`: when a mint is actually performed
- * (cache miss), aborting the signal cancels the in-flight fetch so a caller that
- * has given up (e.g. a health check that hit its deadline) does not leave an
- * orphaned mint that could later repopulate the cache (split-brain). A cancelled
- * mint maps to a non-retriable `node-crash` (see `mapTokenError`).
+ * `get()` accepts an optional `AbortSignal` that cancels only that caller's wait.
+ * The boot-scoped single-flight mint is shared and remains governed by its own
+ * timeout, so one cancelled request cannot poison unrelated waiters. `probe()`
+ * always performs an uncached, non-deduplicated mint and forwards its signal to
+ * that private mint; it never reads or populates the request cache.
  */
 export interface TokenProvider {
   get(signal?: AbortSignal): Promise<Result<BearerToken, FrameworkError>>;
+  probe(signal?: AbortSignal): Promise<Result<void, FrameworkError>>;
   invalidate(): void;
 }
 
@@ -170,6 +175,15 @@ const basicAuthHeader = (basic: BasicAuth): string => {
   return `Basic ${encoded}`;
 };
 
+/** Trusted endpoint label for diagnostics; excludes URL user-info, path, and query. */
+const tokenEndpointOrigin = (tokenUrl: string): string => {
+  try {
+    return new URL(tokenUrl).origin;
+  } catch {
+    return "configured token endpoint";
+  }
+};
+
 /** Build the `x-www-form-urlencoded` grant body from config. */
 const buildGrantBody = (auth: AuthConfig): string => {
   const params = new URLSearchParams();
@@ -189,14 +203,6 @@ const buildGrantBody = (auth: AuthConfig): string => {
 };
 
 /**
- * HTTP statuses that are retriable despite being non-5xx: `429 Too Many
- * Requests` (rate-limit — back off and retry) and `408 Request Timeout` (the
- * server timed the request out — retry). These are the textbook retriable
- * signals, so we classify them `transient` rather than a non-retriable crash.
- */
-const RETRIABLE_HTTP_STATUSES: ReadonlySet<number> = new Set([408, 429]);
-
-/**
  * Map a token-mint failure to a `FrameworkError`. The token/credentials are
  * never included in the message (NFR-010).
  *
@@ -207,7 +213,7 @@ const RETRIABLE_HTTP_STATUSES: ReadonlySet<number> = new Set([408, 429]);
  *   non-retriable `node-crash` — a deliberate cancellation must NOT silently
  *   auto-retry the very work the caller asked to stop.
  * - HTTP `5xx`, `429` (rate-limit), `408` (request timeout): `transient` — all
- *   retriable per `RETRIABLE_HTTP_STATUSES` + the 5xx range.
+ *   retriable per the shared HTTP-status policy.
  * - any other non-2xx `4xx` or an unparseable body: non-retriable `node-crash`
  *   (a deterministic rejection — retrying with the same credentials/body would
  *   just fail again).
@@ -230,7 +236,7 @@ const mapTokenError = (
     };
   }
   // 5xx + rate-limit (429) + request-timeout (408) are the retriable HTTP signals.
-  if (kind === "http" && status !== undefined && (status >= 500 || RETRIABLE_HTTP_STATUSES.has(status))) {
+  if (kind === "http" && status !== undefined && isRetriableHttpStatus(status)) {
     return { kind: "transient", nodeId: AUTH_NODE_ID, message: `Token mint HTTP ${status}`, httpStatus: status };
   }
   if (kind === "http") {
@@ -254,6 +260,25 @@ interface CachedToken {
   readonly token: BearerToken;
   readonly expiresAtMs: number | null;
 }
+
+const tokenClockError = (detail: string): FrameworkError => ({
+  kind: "node-crash",
+  nodeId: AUTH_NODE_ID,
+  message: `Token provider clock invalid: ${detail}`,
+  retriability: "non-retriable",
+});
+
+/** Parse the injected clock at its boundary so invalid time never enters cache state. */
+const readTokenClock = (now: () => number): Result<number, FrameworkError> => {
+  try {
+    const value = now();
+    return Number.isFinite(value)
+      ? ok(value)
+      : err(tokenClockError("expected a finite epoch-ms value"));
+  } catch {
+    return err(tokenClockError("clock threw while reading epoch milliseconds"));
+  }
+};
 
 /**
  * Perform the token grant over the injected fetch seam. Side-effecting I/O is
@@ -331,10 +356,16 @@ const mintToken = async (
       return err(mapTokenError("parse", `unexpected token response shape (${paths})`));
     }
 
-    const expiresAtMs =
-      parsed.data.expires_in !== undefined
-        ? now() + parsed.data.expires_in * 1000 - EXPIRY_SKEW_MS
-        : null;
+    let expiresAtMs: number | null = null;
+    if (parsed.data.expires_in !== undefined) {
+      const clock = readTokenClock(now);
+      if (!clock.ok) return err(clock.error);
+      const computedExpiry = clock.value + parsed.data.expires_in * 1000 - EXPIRY_SKEW_MS;
+      if (!Number.isFinite(computedExpiry)) {
+        return err(tokenClockError("computed token expiry was not finite"));
+      }
+      expiresAtMs = computedExpiry;
+    }
 
     return ok({ token: asBearerToken(parsed.data.access_token), expiresAtMs });
   } catch (error) {
@@ -342,24 +373,20 @@ const mintToken = async (
     // abort reason carried on the controller's signal is the source of truth: a
     // signal-respecting fetch rejects with that reason. Our timeout aborts with
     // `Error("timeout")`; an external cancel aborts with no/other reason.
-    const reason: unknown = controller?.signal.reason;
-    const isOurTimeout =
-      (reason instanceof Error && reason.message === "timeout") ||
-      (error instanceof Error && (error.message === "timeout" || error.name === "TimeoutError"));
-    const isAbort =
-      controller?.signal.aborted === true ||
-      (error instanceof Error && error.name === "AbortError");
+    const abort = classifyAbort(controller?.signal, error);
 
     // Our OWN timeout → transient: a slow auth endpoint should be retried.
-    if (isOurTimeout) {
+    if (abort === "timeout") {
       return err(mapTokenError("timeout", `after ${timeoutMs}ms`));
     }
     // A non-timeout abort means the caller/node cancelled the mint → must NOT
     // auto-retry the cancelled work; map to a non-retriable node-crash.
-    if (isAbort) {
+    if (abort === "abort") {
       return err(mapTokenError("abort", "request cancelled"));
     }
-    return err(mapTokenError("network", error instanceof Error ? error.message : String(error)));
+    // The fetch seam received Basic auth and the form-encoded credentials.
+    // Its rejection text is untrusted and may reflect either; discard it.
+    return err(mapTokenError("network", `request failed contacting ${tokenEndpointOrigin(auth.tokenUrl)}`));
   } finally {
     if (timer != null) clearTimeout(timer);
     if (onExternalAbort && externalSignal) externalSignal.removeEventListener("abort", onExternalAbort);
@@ -370,7 +397,7 @@ const mintToken = async (
 // Provider factory — the one justified piece of encapsulated mutable state
 // ---------------------------------------------------------------------------
 
-export interface TokenProviderDeps {
+interface TokenProviderDeps {
   readonly auth: AuthConfig;
   readonly fetch: FetchLike;
   /** Epoch-ms clock seam; defaults to `Date.now`. Injected by tests. */
@@ -400,13 +427,16 @@ export const createTokenProvider = (deps: TokenProviderDeps): TokenProvider => {
   // asked to drop.
   let generation = 0;
 
-  const isFresh = (entry: CachedToken): boolean =>
-    entry.expiresAtMs === null || entry.expiresAtMs > now();
+  const isFresh = (entry: CachedToken): Result<boolean, FrameworkError> => {
+    if (entry.expiresAtMs === null) return ok(true);
+    const clock = readTokenClock(now);
+    return clock.ok ? ok(entry.expiresAtMs > clock.value) : err(clock.error);
+  };
 
-  const refresh = (signal?: AbortSignal): Promise<Result<CachedToken, FrameworkError>> => {
+  const refresh = (): Promise<Result<CachedToken, FrameworkError>> => {
     if (inflight) return inflight;
     const startedGeneration = generation;
-    const p = mintToken(deps.auth, deps.fetch, now, deps.defaultTimeoutMs, signal)
+    const p = mintToken(deps.auth, deps.fetch, now, deps.defaultTimeoutMs)
       .then((result) => {
         // Only write the cache if no invalidate() intervened since this mint
         // started — otherwise the just-invalidated token would be resurrected.
@@ -423,11 +453,47 @@ export const createTokenProvider = (deps: TokenProviderDeps): TokenProvider => {
     return p;
   };
 
+  const awaitRefresh = (
+    pending: Promise<Result<CachedToken, FrameworkError>>,
+    signal: AbortSignal | undefined,
+  ): Promise<Result<CachedToken, FrameworkError>> => {
+    if (signal === undefined) return pending;
+    if (signal.aborted) return Promise.resolve(err(mapTokenError("abort", "request cancelled")));
+
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (result: Result<CachedToken, FrameworkError>): void => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        resolve(result);
+      };
+      const onAbort = (): void => finish(err(mapTokenError("abort", "request cancelled")));
+      signal.addEventListener("abort", onAbort, { once: true });
+      pending.then(finish);
+    });
+  };
+
   return {
     get: async (signal?: AbortSignal): Promise<Result<BearerToken, FrameworkError>> => {
-      if (cached && isFresh(cached)) return ok(cached.token);
-      const result = await refresh(signal);
+      if (cached) {
+        const freshness = isFresh(cached);
+        if (!freshness.ok) return err(freshness.error);
+        if (freshness.value) return ok(cached.token);
+      }
+      const result = await awaitRefresh(refresh(), signal);
       return result.ok ? ok(result.value.token) : err(result.error);
+    },
+
+    probe: async (signal?: AbortSignal): Promise<Result<void, FrameworkError>> => {
+      const result = await mintToken(
+        deps.auth,
+        deps.fetch,
+        now,
+        deps.defaultTimeoutMs,
+        signal,
+      );
+      return result.ok ? ok(undefined) : err(result.error);
     },
 
     invalidate: (): void => {
@@ -442,4 +508,10 @@ export const createTokenProvider = (deps: TokenProviderDeps): TokenProvider => {
 // Exports for the client / adapter
 // ---------------------------------------------------------------------------
 
-export { AUTH_NODE_ID, basicAuthHeader, buildGrantBody, mapTokenError, mintToken };
+export {
+  AUTH_NODE_ID,
+  basicAuthHeader,
+  buildGrantBody,
+  mapTokenError,
+  mintToken,
+};

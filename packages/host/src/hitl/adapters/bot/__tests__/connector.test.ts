@@ -58,6 +58,19 @@ describe("createBotConnector", () => {
     if (!res.ok) expect(res.error.kind).toBe("notification-failed");
   });
 
+  it("keeps a hostile token-fetch throw inside the notification-failed Result", async () => {
+    const hostile = Object.create(null) as unknown;
+    installFetch(() => { throw hostile; });
+    const connector = createBotConnector({ appId: "a", appPassword: "p", tokenUrl: TOKEN_URL, now: () => 1 });
+
+    const res = await connector.sendToConversation(ref, {});
+
+    expect(res.ok).toBe(false);
+    if (!res.ok && res.error.kind === "notification-failed") {
+      expect(typeof res.error.operation).toBe("string");
+    }
+  });
+
   it("maps a malformed token response (missing expires_in) to notification-failed", async () => {
     installFetch((url) => (url === TOKEN_URL ? resp(200, { access_token: "t" }) : resp(200, {})));
     const connector = createBotConnector({ appId: "a", appPassword: "p", tokenUrl: TOKEN_URL, now: () => 1 });
@@ -66,12 +79,43 @@ describe("createBotConnector", () => {
     if (!res.ok) expect(res.error.kind).toBe("notification-failed");
   });
 
+  it("keeps a hostile token JSON rejection inside the notification-failed Result", async () => {
+    const hostile = Object.create(null) as unknown;
+    installFetch((url) => url === TOKEN_URL
+      ? { ok: true, status: 200, json: async () => { throw hostile; } }
+      : resp(200, {}));
+    const connector = createBotConnector({ appId: "a", appPassword: "p", tokenUrl: TOKEN_URL, now: () => 1 });
+
+    const res = await connector.sendToConversation(ref, {});
+
+    expect(res.ok).toBe(false);
+    if (!res.ok && res.error.kind === "notification-failed") {
+      expect(typeof res.error.operation).toBe("string");
+    }
+  });
+
   it("maps a send non-2xx to notification-failed", async () => {
     installFetch((url) => (url === TOKEN_URL ? resp(200, tokenBody(3600)) : resp(502, {})));
     const connector = createBotConnector({ appId: "a", appPassword: "p", tokenUrl: TOKEN_URL, now: () => 1 });
     const res = await connector.sendToConversation(ref, {});
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.kind).toBe("notification-failed");
+  });
+
+  it("keeps a hostile proactive-send throw inside the notification-failed Result", async () => {
+    const hostile = Object.create(null) as unknown;
+    installFetch((url) => {
+      if (url === TOKEN_URL) return resp(200, tokenBody(3600));
+      throw hostile;
+    });
+    const connector = createBotConnector({ appId: "a", appPassword: "p", tokenUrl: TOKEN_URL, now: () => 1 });
+
+    const res = await connector.sendToConversation(ref, {});
+
+    expect(res.ok).toBe(false);
+    if (!res.ok && res.error.kind === "notification-failed") {
+      expect(typeof res.error.operation).toBe("string");
+    }
   });
 
   it("refuses to send to an untrusted serviceUrl WITHOUT acquiring a token", async () => {

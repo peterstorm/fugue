@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import type { RunId, NodeId, DagId } from "../types/ids.js";
+import type { RunId, DagId } from "../types/ids.js";
 import { z } from "zod";
 import { NoopObserver } from "../observer/observer.js";
 import { dispatchToolCall, dispatchToolCallsWithSpans } from "../llm/tool-dispatch.js";
@@ -8,7 +8,6 @@ import { tool } from "../llm/tools.js";
 import type { NodeContext } from "../types/node.js";
 import type { Tracer } from "../tracing/tracer.js";
 import type { ToolCall } from "../llm/tool-dispatch.js";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 import { stubLlmClient } from "./_llm-mocks.js";
 
 const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({

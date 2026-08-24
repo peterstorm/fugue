@@ -1,23 +1,53 @@
 /**
- * Tests for the `llm-budget-exceeded` FrameworkError variant (FR-W1-003).
+ * Shared error-taxonomy test surface for `FrameworkError` (`types/errors.ts`)
+ * and its total renderers — the blocks:
  *
- * Verifies the new variant is discriminable on `kind`, carries its structured
- * payload, formats to a legible single line, and round-trips through
- * FrameworkAugmentedError — without breaking the exhaustive `formatFrameworkError`.
+ * - `checkpoint-write-failed` diagnostics (truthful branding + `invalid*` facets)
+ * - `llm-budget-exceeded` (FR-W1-003)
+ * - `infra-unreachable` / `policy-refusal` / `downstream-denied` (FR-X-001/002)
+ * - capability-broker taxonomy discriminability (SC-013)
+ * - `retriabilityOf` — the single source of truth for the retry fast-fail fork
+ * - `usageOfError` — the FR-W0-001 token-attribution contract (which kinds carry `usage`)
+ * - `safeErrorMessage` hostile thrown-value matrix
+ * - total Node errno diagnostics
+ * - `messageOf` retry-exhausted lastError summariser
+ *
+ * Each block verifies its variant is discriminable on `kind`, carries its
+ * structured payload, and formats to a legible single line — without breaking
+ * the exhaustive `formatFrameworkError`.
  */
 
 import { describe, it, expect } from "bun:test";
 import { match } from "ts-pattern";
 import { runId as makeRunId, nodeId as makeNodeId } from "../types/ids.js";
 import {
+  CHECKPOINT_INVALID_NODE_ID,
+  CHECKPOINT_INVALID_RUN_ID,
+  META_RECORD_NODE_ID,
+} from "../types/error-factories.js";
+import {
   formatFrameworkError,
+  isFrameworkError,
+  PersistedFrameworkErrorSchema,
   messageOf,
   retriabilityOf,
+  usageOfError,
   FrameworkAugmentedError,
   type FrameworkError,
+  type PartialTokenUsage,
   type Retriability,
 } from "../types/errors.js";
 import type { Capability } from "../types/node.js";
+import {
+  probeErrorCode,
+  safeDiagnosticRender,
+  safeDiagnosticString,
+  safeErrorMessage,
+  safeErrorMessageWithCodeProbe,
+  safeErrorStack,
+  UNPRINTABLE_ERROR,
+  UNPRINTABLE_VALUE,
+} from "../types/safe-error.js";
 
 const rid = makeRunId("run-budget");
 const nid = makeNodeId("node-x");
@@ -29,6 +59,89 @@ const budgetError: FrameworkError = {
   cumulative: 1200,
   budget: 1000,
 };
+
+describe("FrameworkError: checkpoint-write-failed diagnostics", () => {
+  it("keeps legacy wire fields required while preferring invalid raw diagnostics", () => {
+    // The rejected-address arm: the placeholders are the ONLY inhabitants the
+    // type admits alongside an `invalid*` diagnostic — a real `RunId`/`NodeId`
+    // here is now a compile error, which is the whole point of the ADT split.
+    const error: FrameworkError = {
+      kind: "checkpoint-write-failed",
+      runId: CHECKPOINT_INVALID_RUN_ID,
+      nodeId: CHECKPOINT_INVALID_NODE_ID,
+      invalidRunId: "../escape",
+      invalidNodeId: "bad/node",
+      message: "boundary rejected",
+    };
+
+    // Discriminant narrowing preserves the established required source shape.
+    expect(String(error.runId)).toBe("checkpoint_invalid_run");
+    expect(String(error.nodeId)).toBe("checkpoint_invalid_node");
+    expect(error.invalidRunId).toBe("../escape");
+    expect(error.invalidNodeId).toBe("bad/node");
+    expect(formatFrameworkError(error)).toContain("../escape");
+    expect(formatFrameworkError(error)).toContain("bad/node");
+  });
+
+  it("renders a hostile multi-KB invalid id bounded: structured bytes preserved, log line truncated", () => {
+    const huge = "x".repeat(200_000);
+    const error: FrameworkError = {
+      kind: "checkpoint-write-failed",
+      runId: CHECKPOINT_INVALID_RUN_ID,
+      invalidRunId: huge,
+      // Only the RUN address was rejected here; the node address is real, and
+      // the ADT now makes that combination the only representable one.
+      nodeId: nid,
+      message: "boundary rejected",
+    };
+
+    expect(error.invalidRunId).toBe(huge); // structured consumers keep raw bytes
+    const rendered = formatFrameworkError(error);
+    expect(rendered.length).toBeLessThan(500); // never an unbounded log line
+    expect(rendered).toContain("checkpoint write failed");
+  });
+
+  it("formats a metadata failure with its grammar-valid internal node location", () => {
+    const error: FrameworkError = {
+      kind: "checkpoint-write-failed",
+      runId: rid,
+      nodeId: META_RECORD_NODE_ID,
+      message: "meta write failed",
+    };
+
+    expect(formatFrameworkError(error)).toBe(
+      "checkpoint write failed for run 'run-budget' node 'checkpoint_meta': meta write failed",
+    );
+  });
+});
+
+describe("PersistedFrameworkErrorSchema", () => {
+  it("parses a complete variant, brands ids, and preserves additive fields", () => {
+    const parsed = PersistedFrameworkErrorSchema.safeParse({
+      kind: "node-crash",
+      nodeId: "node-x",
+      message: "boom",
+      retriability: "retriable",
+      futureDiagnostic: "preserved",
+    });
+
+    expect(parsed.success).toBe(true);
+    if (parsed.success && parsed.data.kind === "node-crash") {
+      expect(parsed.data.nodeId).toBe(makeNodeId("node-x"));
+      expect((parsed.data as FrameworkError & { futureDiagnostic?: string }).futureDiagnostic).toBe("preserved");
+    }
+  });
+
+  it("rejects missing required fields and invalid branded ids", () => {
+    expect(PersistedFrameworkErrorSchema.safeParse({ kind: "node-crash" }).success).toBe(false);
+    expect(PersistedFrameworkErrorSchema.safeParse({
+      kind: "node-crash",
+      nodeId: "bad node id",
+      message: "boom",
+      retriability: "retriable",
+    }).success).toBe(false);
+  });
+});
 
 describe("FrameworkError: llm-budget-exceeded", () => {
   it("is discriminable on kind and carries the structured payload", () => {
@@ -260,6 +373,10 @@ describe("retriabilityOf — single source of truth for the retry fast-fail fork
     [{ kind: "checkpoint-version-mismatch", runId: rid2, expected: "2", actual: "1" }, "retriable"],
     [{ kind: "prompt-not-found", promptName: "p", reason: "missing" }, "retriable"],
     [{ kind: "cache-error", operation: "get", message: "timeout" }, "retriable"],
+    // cache-error's explicit failure-class discriminant overrides the default:
+    // deterministic file-backend failures must fast-fail like the other
+    // deterministic kinds instead of burning the retry budget.
+    [{ kind: "cache-error", operation: "appendEvent", message: "capacity exhausted", failureClass: "permanent" }, "non-retriable"],
     [{ kind: "cycle-detected", nodeIds: [nid] }, "retriable"],
     [{ kind: "rejected", nodeId: nid, reason: "no" }, "retriable"],
     [{ kind: "invalid-reroute", targetNodeId: nid, message: "bad" }, "retriable"],
@@ -285,6 +402,210 @@ describe("retriabilityOf — single source of truth for the retry fast-fail fork
     const kinds = new Set(cases.map(([e]) => e.kind));
     expect(kinds.size).toBe(27);
   });
+
+  it("recognizes every table-constructed kind as a typed framework error (identity survives the guard)", () => {
+    // The closed kind domain in types/errors.ts is compiler-checked for
+    // COVERAGE (a kind added to the union and omitted from the
+    // `Record<FrameworkErrorKind, true>` table is a compile error); this pins
+    // the consumer-side contract from the other side: no kind this file
+    // constructs is dropped by `isFrameworkError`, so the boundary fences that
+    // branch on it (resume.ts, job.ts appendEvent, atomic.ts acquireFileLock)
+    // can never re-tag a kind that lost its identity.
+    for (const [error] of cases) {
+      expect(isFrameworkError(error)).toBe(true);
+    }
+  });
+});
+
+describe("usageOfError — FR-W0-001 token-attribution contract", () => {
+  const nid = makeNodeId("node-u");
+  const rid2 = makeRunId("run-u");
+  const used = { tokensIn: 7, tokensOut: 3 };
+
+  // The contract: ONLY `node-crash`, `transient`, and `aborted` carry `usage`
+  // (the tool-use-loop variants that can burn tokens before failing); every
+  // other kind reads `undefined`. The usage-carrying rows pin BOTH directions
+  // — passthrough of the exact partial totals, and `undefined` when absent —
+  // because the loop's budget accounting branches on the presence/absence of
+  // the value, not merely on the kind. Every non-carrying kind gets an explicit
+  // row (not `.otherwise`-style silence): a regression that moves an arm
+  // between the two sides of `usageOfError`'s exhaustive `match` compiles
+  // cleanly (both sides stay exhaustive), so this table is the pin.
+  const cases: ReadonlyArray<readonly [FrameworkError, PartialTokenUsage | undefined]> = [
+    // The three usage-carrying kinds — passthrough AND absence, per kind.
+    [{ kind: "node-crash", nodeId: nid, message: "boom", retriability: "retriable", usage: used }, used],
+    [{ kind: "node-crash", nodeId: nid, message: "boom", retriability: "non-retriable" }, undefined],
+    [{ kind: "transient", nodeId: nid, message: "429", usage: used }, used],
+    [{ kind: "transient", nodeId: nid, message: "429" }, undefined],
+    [{ kind: "aborted", reason: "caller cancelled", usage: used }, used],
+    [{ kind: "aborted", reason: "caller cancelled" }, undefined],
+    // Every other kind reads undefined — one row per kind.
+    [{ kind: "validation", nodeId: nid, message: "schema mismatch" }, undefined],
+    [{ kind: "checkpoint-write-failed", runId: rid2, nodeId: nid, message: "disk full" }, undefined],
+    [{ kind: "policy-refusal", scope: "msgraph:mail.send" }, undefined],
+    [{ kind: "downstream-denied", resource: "https://graph", reason: "FIC mismatch" }, undefined],
+    [{ kind: "llm-budget-exceeded", runId: rid2, nodeId: nid, cumulative: 10, budget: 5 }, undefined],
+    [{ kind: "missing-capability", missing: [{ nodeId: nid, capability: "llm" as Capability }] }, undefined],
+    [{ kind: "retry-exhausted", nodeId: nid, attempts: 3, lastError: "x", rootErrorKind: "transient" }, undefined],
+    [{ kind: "checkpoint-missing", runId: rid2 }, undefined],
+    [{ kind: "checkpoint-expired", runId: rid2, expiredAt: "2026-01-01T00:00:00Z" }, undefined],
+    [{ kind: "checkpoint-corrupt", runId: rid2, message: "corrupt" }, undefined],
+    [{ kind: "checkpoint-version-mismatch", runId: rid2, expected: "2", actual: "1" }, undefined],
+    [{ kind: "prompt-not-found", promptName: "p", reason: "missing" }, undefined],
+    [{ kind: "cache-error", operation: "get", message: "timeout" }, undefined],
+    [{ kind: "cache-error", operation: "appendEvent", message: "capacity exhausted", failureClass: "permanent" }, undefined],
+    [{ kind: "cycle-detected", nodeIds: [nid] }, undefined],
+    [{ kind: "rejected", nodeId: nid, reason: "no" }, undefined],
+    [{ kind: "invalid-reroute", targetNodeId: nid, message: "bad" }, undefined],
+    [{ kind: "missing-default-edge", nodeId: nid }, undefined],
+    [{ kind: "output-unreachable-under-routing", outputNodeId: nid, missedFromNode: nid }, undefined],
+    [{ kind: "predicate-malformed", nodeId: nid, message: "bad predicate" }, undefined],
+    [{ kind: "duplicate-edge", fromNodeId: nid, toNodeId: nid }, undefined],
+    [{ kind: "root-expects-input", nodeId: nid, message: "expects input" }, undefined],
+    [{ kind: "source-has-incoming", nodeId: nid, message: "has edge" }, undefined],
+    [{ kind: "invalid-dag-input-edge", edge: { from: "$input", to: "n" }, message: "bad" }, undefined],
+    [{ kind: "infra-unreachable", operation: "mint", hop: "cc", message: "down" }, undefined],
+  ];
+
+  it("attributes usage exactly on the three tool-use-loop kinds and nowhere else", () => {
+    for (const [error, expected] of cases) {
+      expect(usageOfError(error)).toEqual(expected);
+    }
+  });
+
+  it("covers every FrameworkError kind (no kind silently defaults)", () => {
+    // Same guard as the `retriabilityOf` block: a new kind without a row here
+    // would drift the count; `usageOfError`'s `.exhaustive()` fails
+    // compilation first, and this guards the table itself.
+    const kinds = new Set(cases.map(([e]) => e.kind));
+    expect(kinds.size).toBe(27);
+  });
+
+  it("returns the caller's exact partial totals, not a copy or a mutation sink", () => {
+    // Passthrough is reference-identity: the metering shell must attribute the
+    // SAME partials the loop accumulated (a silent copy would break identity
+    // comparisons the budget code is allowed to make).
+    const withUsage: FrameworkError = { kind: "transient", nodeId: nid, message: "429", usage: used };
+    expect(usageOfError(withUsage)).toBe(used);
+  });
+});
+
+describe("safeErrorMessage — hostile thrown-value matrix", () => {
+  it("is total without instanceof, unguarded message reads, or coercion leaks", () => {
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    const nullPrototype = Object.assign(Object.create(null) as object, {
+      message: "null prototype failure",
+    });
+    const throwingMessage = Object.defineProperty({}, "message", {
+      get: () => { throw new Error("message unavailable"); },
+    });
+    const coercionTraps = Object.defineProperties({}, {
+      toString: {
+        get: () => { throw new Error("toString unavailable"); },
+      },
+      [Symbol.toPrimitive]: {
+        get: () => { throw new Error("Symbol.toPrimitive unavailable"); },
+      },
+    });
+    const hostileInstanceof = new Proxy({}, {
+      getPrototypeOf: () => { throw new Error("prototype unavailable"); },
+    });
+
+    const corpus: readonly unknown[] = [
+      revoked.proxy,
+      nullPrototype,
+      throwingMessage,
+      coercionTraps,
+      hostileInstanceof,
+    ];
+    for (const hostile of corpus) {
+      expect(() => safeErrorMessage(hostile)).not.toThrow();
+      expect(typeof safeErrorMessage(hostile)).toBe("string");
+    }
+    expect(safeErrorMessage(revoked.proxy)).toBe(UNPRINTABLE_ERROR);
+    expect(safeErrorMessage(nullPrototype)).toBe("null prototype failure");
+  });
+});
+
+describe("safeErrorStack — hostile stack extraction", () => {
+  it("returns ordinary stacks and is total for absent, throwing, and revoked stacks", () => {
+    const ordinary = new Error("boom");
+    expect(safeErrorStack(ordinary)).toBe(ordinary.stack);
+    expect(safeErrorStack("boom")).toBeUndefined();
+    expect(safeErrorStack({ stack: 42 })).toBeUndefined();
+
+    const throwingStack = Object.defineProperty({}, "stack", {
+      get: () => { throw new Error("stack unavailable"); },
+    });
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+
+    for (const hostile of [throwingStack, revoked.proxy]) {
+      expect(() => safeErrorStack(hostile)).not.toThrow();
+      expect(safeErrorStack(hostile)).toBeUndefined();
+    }
+  });
+});
+
+describe("total Node errno diagnostics", () => {
+  it("returns a discriminated code/absence result without invoking Proxy has traps", () => {
+    let hasCalls = 0;
+    const coded = new Proxy({ code: "ENOENT" }, {
+      has: () => {
+        hasCalls += 1;
+        throw new Error("has trap must not run");
+      },
+    });
+
+    expect(probeErrorCode(coded)).toEqual({ kind: "code", code: "ENOENT" });
+    expect(probeErrorCode(new Error("ordinary"))).toEqual({ kind: "absent" });
+    expect(probeErrorCode(null)).toEqual({ kind: "absent" });
+    expect(hasCalls).toBe(0);
+  });
+
+  it("captures throwing code getters as safe actionable inspection diagnostics", () => {
+    const primary = new Error("primary filesystem failure");
+    Object.defineProperty(primary, "code", {
+      get: () => { throw new Error("code getter exploded"); },
+    });
+
+    const probe = probeErrorCode(primary);
+    expect(probe).toEqual({
+      kind: "inspection-failed",
+      diagnostic: "code getter exploded",
+    });
+    expect(safeErrorMessageWithCodeProbe(primary, probe)).toBe(
+      "primary filesystem failure (error code inspection failed: code getter exploded)",
+    );
+  });
+
+  it("is total for Proxy get traps, revoked Proxies, and hostile thrown trap values", () => {
+    const revokedThrown = Proxy.revocable({}, {});
+    revokedThrown.revoke();
+    const hostileGet = new Proxy(new Error("primary proxy failure"), {
+      get(target, property, receiver) {
+        if (property === "code") throw revokedThrown.proxy;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const revokedError = Proxy.revocable({}, {});
+    revokedError.revoke();
+
+    for (const hostile of [hostileGet, revokedError.proxy] as const) {
+      expect(() => probeErrorCode(hostile)).not.toThrow();
+      const probe = probeErrorCode(hostile);
+      expect(probe.kind).toBe("inspection-failed");
+      expect(() => safeErrorMessageWithCodeProbe(hostile, probe)).not.toThrow();
+      expect(safeErrorMessageWithCodeProbe(hostile, probe)).toContain(
+        "error code inspection failed",
+      );
+    }
+    expect(probeErrorCode(hostileGet)).toEqual({
+      kind: "inspection-failed",
+      diagnostic: UNPRINTABLE_ERROR,
+    });
+  });
 });
 
 describe("messageOf — retry-exhausted lastError summariser", () => {
@@ -298,5 +619,85 @@ describe("messageOf — retry-exhausted lastError summariser", () => {
   it("JSON-stringifies every other kind so no structured payload is lost", () => {
     const err: FrameworkError = { kind: "downstream-denied", resource: "https://graph", reason: "FIC mismatch" };
     expect(messageOf(err)).toBe(JSON.stringify(err));
+  });
+
+  it("is total for hostile unknown values, throwing Error.message getters, revocation, and cycles", () => {
+    const throwingMessage = new Error("hidden");
+    Object.defineProperty(throwingMessage, "message", {
+      configurable: true,
+      get: () => { throw new Error("message unavailable"); },
+    });
+    const allTraps = new Proxy({}, {
+      get: () => { throw new Error("get unavailable"); },
+      getPrototypeOf: () => { throw new Error("prototype unavailable"); },
+      ownKeys: () => { throw new Error("keys unavailable"); },
+    });
+    const throwingCoercion = Object.defineProperties({}, {
+      toString: { get: () => { throw new Error("toString unavailable"); } },
+      [Symbol.toPrimitive]: {
+        get: () => { throw new Error("Symbol.toPrimitive unavailable"); },
+      },
+    });
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    const cyclic: Record<string, unknown> = { kind: "checkpoint-missing" };
+    cyclic.self = cyclic;
+    const corpus: readonly unknown[] = [
+      allTraps,
+      throwingCoercion,
+      throwingMessage,
+      revoked.proxy,
+      cyclic,
+    ];
+
+    for (const hostile of corpus) {
+      expect(() => messageOf(hostile)).not.toThrow();
+      expect(typeof messageOf(hostile)).toBe("string");
+      expect(() => safeDiagnosticRender(hostile)).not.toThrow();
+      expect(typeof safeDiagnosticRender(hostile)).toBe("string");
+    }
+    expect(messageOf(revoked.proxy)).toBe(UNPRINTABLE_ERROR);
+    expect(safeDiagnosticRender(revoked.proxy)).toBe(UNPRINTABLE_VALUE);
+  });
+});
+
+describe("safeDiagnosticString — total, non-truncated rendering for known strings (FR-040)", () => {
+  // Round-10 A7 (type-design-analyzer): the `parseFileEventRecord` catch-all
+  // rendered its `source` path through `safeDiagnosticRender`, whose 60-char
+  // cap truncates legal-but-long run-directory paths in exactly the branch
+  // where the full name is the diagnostic. `safeDiagnosticString` keeps the
+  // escape-only half of that rendering (JSON quoting — quotes, backslashes,
+  // and control characters cannot break the surrounding message) and drops
+  // the cap.
+
+  const longPath =
+    "/var/lib/fugue/runs/2026-08-17/standalone-2026-08-17-171928-f6-file-durable-runtime/events/node-a1b2c3/000042-9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08.json";
+
+  it("preserves a string past the 60-char cap in full (the deliberate divergence from safeDiagnosticRender)", () => {
+    expect(longPath.length).toBeGreaterThan(60);
+    const rendered = safeDiagnosticString(longPath);
+    // JSON-quoted, complete, and not the truncated form.
+    expect(rendered).toBe(JSON.stringify(longPath));
+    expect(rendered).not.toContain("…(");
+    // The cap still applies to the arbitrary-value renderer — pin the
+    // divergence so the two renderers cannot be conflated later.
+    expect(safeDiagnosticRender(longPath)).toContain("…(");
+  });
+
+  it("escapes quotes, backslashes, and control characters (no structural injection)", () => {
+    const hostile = 'a"quote\\back\nnew\rline\ttab';
+    const rendered = safeDiagnosticString(hostile);
+    // The rendered form is a self-contained JSON string literal: parsing it
+    // back yields exactly the original — quotes and escapes cannot break out
+    // of the surrounding `\`${rendered}: message\`` interpolation.
+    expect(JSON.parse(rendered)).toBe(hostile);
+    expect(rendered).not.toContain("\n");
+  });
+
+  it("is total on every string (empty included) and never throws", () => {
+    expect(() => safeDiagnosticString("")).not.toThrow();
+    expect(safeDiagnosticString("")).toBe('""');
+    expect(() => safeDiagnosticString("a")).not.toThrow();
+    expect(safeDiagnosticString("a")).toBe('"a"');
   });
 });

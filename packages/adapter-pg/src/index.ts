@@ -44,8 +44,8 @@
 import { createRequire } from "node:module";
 import type { z } from "zod";
 import type { Result, FrameworkError, CapabilityHandle } from "@fuguejs/framework";
-import { ok, err, nodeId } from "@fuguejs/framework";
-import type { Pool as PgPool, PoolConfig } from "pg";
+import { ok, err, nodeId, probeErrorCode, safeErrorMessage } from "@fuguejs/framework";
+import type { PoolConfig } from "pg";
 
 // ---------------------------------------------------------------------------
 // Capability Interface
@@ -53,6 +53,28 @@ import type { Pool as PgPool, PoolConfig } from "pg";
 
 /** Sentinel node ID for pg capability errors */
 const PG_NODE_ID = nodeId("pg-capability");
+
+/**
+ * THE one non-retriable `node-crash` for this adapter. Every crash it reports is
+ * deterministic — a schema mismatch, a PG error outside the transient classes —
+ * so `retriability` is fixed here rather than repeated at each site, where an
+ * omission would silently fall back to retriable and turn a permanent failure
+ * into a retry storm against the database.
+ */
+const pgCrash = (message: string): FrameworkError => ({
+  kind: "node-crash",
+  nodeId: PG_NODE_ID,
+  message,
+  retriability: "non-retriable",
+});
+
+/**
+ * The row-validation failure shared by production and fake query paths. Schema
+ * mismatch is deterministic, so the shared `pgCrash` classification prevents a
+ * missing retriability field from turning it into a database retry storm.
+ */
+const rowValidationError = (label: string, detail: string): FrameworkError =>
+  pgCrash(label + ": " + detail);
 
 /**
  * PostgreSQL capability interface — what nodes see on `ctx.db`.
@@ -68,8 +90,8 @@ export interface PgCapability {
   query<T>(schema: z.ZodType<T>, sql: string, params?: unknown[]): Promise<Result<T[], FrameworkError>>;
 
   /**
-   * Execute a query expecting at most one row. Returns `null` if no rows match.
-   * Validates the row against the schema if present.
+   * Execute a query and return the first row, or `null` if no rows match.
+   * Validates that first row against the schema if present; additional rows are ignored.
    */
   queryOne<T>(schema: z.ZodType<T>, sql: string, params?: unknown[]): Promise<Result<T | null, FrameworkError>>;
 
@@ -132,27 +154,19 @@ export interface PgAdapterConfig {
  * drives retry behavior.
  */
 export const mapPgError = (error: unknown, sql: string): FrameworkError => {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = safeErrorMessage(error);
   // Determine if the error is transient (connection issues) or permanent (syntax, constraint).
-  // Guard the SQLSTATE on its runtime type — a non-string `code` (a driver that
-  // sets it numeric, or an unrelated object carrying a `code` field) must not
-  // make `.startsWith` throw out of this function and escape the client's catch.
-  if (error instanceof Error && "code" in error) {
-    const pgCode = (error as { code?: unknown }).code;
+  // The total probe preserves the Result boundary even for hostile proxies and
+  // throwing accessors at the driver boundary.
+  const code = probeErrorCode(error);
+  if (code.kind === "code") {
+    const pgCode = code.code;
     // Connection-class errors (08xxx) and insufficient resources (53xxx) are transient
-    if (
-      typeof pgCode === "string" &&
-      (pgCode.startsWith("08") || pgCode.startsWith("53") || pgCode === "57P01")
-    ) {
+    if (pgCode.startsWith("08") || pgCode.startsWith("53") || pgCode === "57P01") {
       return { kind: "transient", nodeId: PG_NODE_ID, message: `PG transient: ${message} (${pgCode})` };
     }
   }
-  return {
-    kind: "node-crash",
-    nodeId: PG_NODE_ID,
-    message: `PG error: ${message} [sql: ${sql.slice(0, 100)}]`,
-    retriability: "non-retriable",
-  };
+  return pgCrash(`PG error: ${message} [sql: ${sql.slice(0, 100)}]`);
 };
 
 /**
@@ -164,70 +178,80 @@ export interface PgQueryable {
 }
 
 /**
+ * Validate every row against the caller's schema, failing on the FIRST bad row.
+ *
+ * ONE encoding (round-38 cs-25) of the row-validation loop the real client and
+ * the fake each carried; they differ only in the label their validation failure
+ * names, so a schema-rejection reads the same shape from either.
+ */
+const validateRows = <T,>(
+  schema: z.ZodType<T>,
+  rows: readonly unknown[],
+  label: string,
+): Result<T[], FrameworkError> => {
+  const validated: T[] = [];
+  for (const row of rows) {
+    const parsed = schema.safeParse(row);
+    if (!parsed.success) {
+      return err(rowValidationError(label, parsed.error.message));
+    }
+    validated.push(parsed.data);
+  }
+  return ok(validated);
+};
+
+/** `validateRows` for the at-most-one-row shape: no rows reads as `ok(null)`. */
+const validateFirstRow = <T,>(
+  schema: z.ZodType<T>,
+  rows: readonly unknown[],
+  label: string,
+): Result<T | null, FrameworkError> => {
+  if (rows.length === 0) return ok(null);
+  const parsed = schema.safeParse(rows[0]);
+  return parsed.success
+    ? ok(parsed.data)
+    : err(rowValidationError(label, parsed.error.message));
+};
+
+/**
  * Build a `PgCapability` over an injected pool. Exported for testing —
  * `createPgAdapter` is the production entry point that owns pool
  * construction and lifecycle.
  */
-export const createPgClient = (pool: PgQueryable): PgCapability => ({
-  query: async <T,>(schema: z.ZodType<T>, sql: string, params?: unknown[]): Promise<Result<T[], FrameworkError>> => {
+export const createPgClient = (pool: PgQueryable): PgCapability => {
+  /**
+   * Run one pooled statement and project its result, mapping ANY thrown driver
+   * error onto the typed `mapPgError` failure. ONE encoding of the
+   * try/catch-around-`pool.query` shape all four methods need — an arm that
+   * forgot the catch would surface a raw driver exception through a
+   * `Result`-typed port.
+   */
+  const run = async <T,>(
+    sql: string,
+    params: unknown[] | undefined,
+    project: (result: Awaited<ReturnType<PgQueryable["query"]>>) => Result<T, FrameworkError>,
+  ): Promise<Result<T, FrameworkError>> => {
     try {
-      const result = await pool.query(sql, params);
-      const validated: T[] = [];
-      for (const row of result.rows) {
-        const parsed = schema.safeParse(row);
-        if (!parsed.success) {
-          return err({
-            kind: "node-crash",
-            nodeId: PG_NODE_ID,
-            message: `Row validation failed: ${parsed.error.message}`,
-            retriability: "non-retriable",
-          });
-        }
-        validated.push(parsed.data);
-      }
-      return ok(validated);
+      return project(await pool.query(sql, params));
     } catch (error) {
       return err(mapPgError(error, sql));
     }
-  },
+  };
 
-  queryOne: async <T,>(schema: z.ZodType<T>, sql: string, params?: unknown[]): Promise<Result<T | null, FrameworkError>> => {
-    try {
-      const result = await pool.query(sql, params);
-      if (result.rows.length === 0) return ok(null);
-      const parsed = schema.safeParse(result.rows[0]);
-      if (!parsed.success) {
-        return err({
-          kind: "node-crash",
-          nodeId: PG_NODE_ID,
-          message: `Row validation failed: ${parsed.error.message}`,
-          retriability: "non-retriable",
-        });
-      }
-      return ok(parsed.data);
-    } catch (error) {
-      return err(mapPgError(error, sql));
-    }
-  },
+  return {
+    query: <T,>(schema: z.ZodType<T>, sql: string, params?: unknown[]): Promise<Result<T[], FrameworkError>> =>
+      run(sql, params, (result) => validateRows(schema, result.rows, "Row validation failed")),
 
-  execute: async (sql: string, params?: unknown[]): Promise<Result<{ rowCount: number }, FrameworkError>> => {
-    try {
-      const result = await pool.query(sql, params);
-      return ok({ rowCount: result.rowCount ?? 0 });
-    } catch (error) {
-      return err(mapPgError(error, sql));
-    }
-  },
+    queryOne: <T,>(schema: z.ZodType<T>, sql: string, params?: unknown[]): Promise<Result<T | null, FrameworkError>> =>
+      run(sql, params, (result) => validateFirstRow(schema, result.rows, "Row validation failed")),
 
-  queryRaw: async (sql: string, params?: unknown[]): Promise<Result<unknown[], FrameworkError>> => {
-    try {
-      const result = await pool.query(sql, params);
-      return ok(result.rows);
-    } catch (error) {
-      return err(mapPgError(error, sql));
-    }
-  },
-});
+    execute: (sql: string, params?: unknown[]): Promise<Result<{ rowCount: number }, FrameworkError>> =>
+      run(sql, params, (result) => ok({ rowCount: result.rowCount ?? 0 })),
+
+    queryRaw: (sql: string, params?: unknown[]): Promise<Result<unknown[], FrameworkError>> =>
+      run(sql, params, (result) => ok(result.rows)),
+  };
+};
 
 // ---------------------------------------------------------------------------
 // Adapter Factory
@@ -295,6 +319,14 @@ export const createPgAdapter = (config: PgAdapterConfig): CapabilityHandle<"db">
   };
 };
 
+const warnPgWithoutThrowing = (error: unknown): void => {
+  try {
+    console.warn(`[pg] health check: late probe failure after timeout: ${safeErrorMessage(error)}`);
+  } catch {
+    // Diagnostics are subordinate to the already-decided timeout verdict.
+  }
+};
+
 /**
  * Race SELECT 1 against a timeout. A pool that hangs (e.g. exhausted
  * connections, dead network) reports unhealthy instead of stalling the
@@ -305,19 +337,24 @@ export const healthCheckWithTimeout = async (
   timeoutMs: number,
 ): Promise<Result<void, string>> => {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
   try {
+    const query = pool.query("SELECT 1");
+    query.catch((lateError: unknown) => {
+      if (timedOut) warnPgWithoutThrowing(lateError);
+    });
     await Promise.race([
-      pool.query("SELECT 1"),
+      query,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error(`health check timed out after ${timeoutMs}ms`)),
-          timeoutMs,
-        );
+        timer = setTimeout(() => {
+          timedOut = true;
+          reject(new Error(`health check timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
       }),
     ]);
     return ok(undefined);
   } catch (e) {
-    return err(e instanceof Error ? e.message : String(e));
+    return err(safeErrorMessage(e));
   } finally {
     if (timer != null) clearTimeout(timer);
   }
@@ -330,15 +367,9 @@ export const healthCheckWithTimeout = async (
 /**
  * In-memory fake PgCapability for unit testing nodes that use `ctx.db`.
  *
- * Accepts a response map that returns canned results for SQL patterns. A key
- * matches by exact SQL first, then by **longest prefix**.
- *
- * ⚠️ Prefix-match foot-gun: because matching falls back to `startsWith`, a route
- * key that is a prefix of an unrelated query will match it in tests while the
- * real adapter runs the exact SQL the pool is given. Prefer full-SQL keys; reach
- * for short prefixes only when you deliberately want a broad match, and keep keys
- * specific enough that one can't accidentally swallow another's query. Params are
- * not inspected, so this fake cannot catch a wrong-`$n`-binding bug.
+ * Accepts a response map that returns canned results for exact SQL strings.
+ * Query parameters are part of the route contract when supplied, so a fake
+ * cannot silently accept a query that production would bind differently.
  *
  * @example
  * ```ts
@@ -348,66 +379,46 @@ export const healthCheckWithTimeout = async (
  * });
  * ```
  */
-export interface FakePgRoute {
+interface FakePgRoute {
   readonly rows?: unknown[];
   readonly rowCount?: number;
+  /** Exact positional bindings required by this canned response. */
+  readonly params?: readonly unknown[];
 }
 
 export const createFakePgCapability = (
   routes: Readonly<Record<string, unknown[] | FakePgRoute>>,
 ): CapabilityHandle<"db"> => {
-  const matchRoute = (sql: string): FakePgRoute | null => {
-    // Try exact match first, then longest prefix match
+  const matchRoute = (sql: string, params?: unknown[]): FakePgRoute | null => {
     const direct = routes[sql];
-    if (direct) {
-      return Array.isArray(direct) ? { rows: direct } : direct;
-    }
-    // Find the longest prefix match
-    let bestMatch: FakePgRoute | null = null;
-    let bestLength = 0;
-    for (const [pattern, value] of Object.entries(routes)) {
-      if (sql.startsWith(pattern) && pattern.length > bestLength) {
-        bestMatch = Array.isArray(value) ? { rows: value } : value;
-        bestLength = pattern.length;
-      }
-    }
-    return bestMatch;
+    if (direct === undefined) return null;
+    const route = Array.isArray(direct) ? { rows: direct } : direct;
+    return route.params === undefined || JSON.stringify(route.params) === JSON.stringify(params ?? [])
+      ? route
+      : null;
   };
 
   const client: PgCapability = {
-    query: async <T,>(schema: z.ZodType<T>, sql: string, _params?: unknown[]): Promise<Result<T[], FrameworkError>> => {
-      const route = matchRoute(sql);
+    query: async <T,>(schema: z.ZodType<T>, sql: string, params?: unknown[]): Promise<Result<T[], FrameworkError>> => {
+      const route = matchRoute(sql, params);
       if (!route || !route.rows) {
         return ok([] as T[]);
       }
-      const validated: T[] = [];
-      for (const row of route.rows) {
-        const parsed = schema.safeParse(row);
-        if (!parsed.success) {
-          return err({ kind: "node-crash", nodeId: PG_NODE_ID, message: `Fake row validation: ${parsed.error.message}`, retriability: "non-retriable" });
-        }
-        validated.push(parsed.data);
-      }
-      return ok(validated);
+      return validateRows(schema, route.rows, "Fake row validation");
     },
 
-    queryOne: async <T,>(schema: z.ZodType<T>, sql: string, _params?: unknown[]): Promise<Result<T | null, FrameworkError>> => {
-      const route = matchRoute(sql);
-      if (!route || !route.rows || route.rows.length === 0) return ok(null);
-      const parsed = schema.safeParse(route.rows[0]);
-      if (!parsed.success) {
-        return err({ kind: "node-crash", nodeId: PG_NODE_ID, message: `Fake row validation: ${parsed.error.message}`, retriability: "non-retriable" });
-      }
-      return ok(parsed.data);
+    queryOne: async <T,>(schema: z.ZodType<T>, sql: string, params?: unknown[]): Promise<Result<T | null, FrameworkError>> => {
+      const route = matchRoute(sql, params);
+      return validateFirstRow(schema, route?.rows ?? [], "Fake row validation");
     },
 
-    execute: async (sql: string, _params?: unknown[]): Promise<Result<{ rowCount: number }, FrameworkError>> => {
-      const route = matchRoute(sql);
+    execute: async (sql: string, params?: unknown[]): Promise<Result<{ rowCount: number }, FrameworkError>> => {
+      const route = matchRoute(sql, params);
       return ok({ rowCount: route?.rowCount ?? 0 });
     },
 
-    queryRaw: async (sql: string, _params?: unknown[]): Promise<Result<unknown[], FrameworkError>> => {
-      const route = matchRoute(sql);
+    queryRaw: async (sql: string, params?: unknown[]): Promise<Result<unknown[], FrameworkError>> => {
+      const route = matchRoute(sql, params);
       return ok(route?.rows ?? []);
     },
   };

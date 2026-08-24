@@ -1,5 +1,7 @@
 // Hand-rolled Result type — no external dependencies
 
+import { safeErrorMessage } from "./safe-error.js";
+
 export type Ok<T> = { readonly ok: true; readonly value: T };
 export type Err<E> = { readonly ok: false; readonly error: E };
 export type Result<T, E> = Ok<T> | Err<E>;
@@ -50,24 +52,30 @@ export const fold = <T, E, R>(
 /** Wrap a throwing function in a Result. Catches synchronous exceptions. */
 export function tryCatch<T>(fn: () => T): Result<T, Error>;
 export function tryCatch<T, E>(fn: () => T, mapError: (e: unknown) => E): Result<T, E>;
-export function tryCatch<T, E = Error>(fn: () => T, mapError?: (e: unknown) => E): Result<T, E> {
+export function tryCatch<T, E>(
+  fn: () => T,
+  mapError?: (e: unknown) => E,
+): Result<T, E | Error> {
   try {
     return ok(fn());
   } catch (e) {
     if (mapError) return err(mapError(e));
-    return err((e instanceof Error ? e : new Error(String(e))) as E);
+    return err(new Error(safeErrorMessage(e)));
   }
 }
 
 /** Wrap an async throwing function in a Result. */
 export function tryCatchAsync<T>(fn: () => Promise<T>): Promise<Result<T, Error>>;
 export function tryCatchAsync<T, E>(fn: () => Promise<T>, mapError: (e: unknown) => E): Promise<Result<T, E>>;
-export async function tryCatchAsync<T, E = Error>(fn: () => Promise<T>, mapError?: (e: unknown) => E): Promise<Result<T, E>> {
+export async function tryCatchAsync<T, E>(
+  fn: () => Promise<T>,
+  mapError?: (e: unknown) => E,
+): Promise<Result<T, E | Error>> {
   try {
     return ok(await fn());
   } catch (e) {
     if (mapError) return err(mapError(e));
-    return err((e instanceof Error ? e : new Error(String(e))) as E);
+    return err(new Error(safeErrorMessage(e)));
   }
 }
 
@@ -122,6 +130,3 @@ export const mapAsync = async <T, U, E>(
   fn: (value: T) => Promise<U>,
 ): Promise<Result<U, E>> => (r.ok ? ok(await fn(r.value)) : r);
 
-/** Lift a nullable value into a Result. Returns Err(error) for null/undefined. */
-export const fromNullable = <T, E>(value: T | null | undefined, error: E): Result<T, E> =>
-  value != null ? ok(value) : err(error);

@@ -6,8 +6,8 @@
 // Run with: REDIS_URL=redis://localhost:6379 bun test
 
 import { NoopObserver } from "../../observer/observer.js";
-import { N, R, D, nodeMap, nodeSet } from "../../__tests__/_id-helpers.js";
-import type { RunId, NodeId, DagId } from "../../types/ids.js";
+import { __resetFrameworkLogger, setFrameworkLogger } from "../../logger.js";
+import type { RunId } from "../../types/ids.js";
 import { DAG_INPUT } from "../../types/ids.js";
 import { describe, it, expect, afterEach } from "bun:test";
 import Redis from "ioredis";
@@ -19,7 +19,9 @@ import {
   createRedisMarkerStore,
   createRedisStreamReader,
 } from "../index.js";
+import { __parseEnvelope, __resetEventLogState } from "../event-log.js";
 import { adaptBullMQJob } from "../job.js";
+import { __dispatchFailureHandler, __parseConnection } from "../adapter.js";
 
 // ---------------------------------------------------------------------------
 // Environment gate
@@ -83,28 +85,6 @@ afterEach(async () => {
 type S = { kind: "pending" } | { kind: "running" } | { kind: "succeeded" } | { kind: "failed"; reason: string };
 type E = { type: "START" } | { type: "DONE" } | { type: "FAIL"; reason: string } | { type: "ERROR"; retriable: boolean; message: string };
 type C = { value: number };
-
-const testMachine: Machine<S, E, C> = {
-  transition(state, event, context) {
-    if (state.kind === "pending" && event.type === "START") {
-      return { state: { kind: "running" }, context };
-    }
-    if (state.kind === "running" && event.type === "DONE") {
-      return { state: { kind: "succeeded" }, context: { value: context.value + 1 } };
-    }
-    if (state.kind === "running" && event.type === "FAIL") {
-      return { state: { kind: "failed", reason: event.reason }, context };
-    }
-    if (event.type === "ERROR") {
-      return { state: { kind: "failed", reason: event.message }, context };
-    }
-    return { state, context };
-  },
-  isTerminal: (s) => s.kind === "succeeded" || s.kind === "failed",
-  isFailed: (s) => s.kind === "failed",
-  stateProgress: (s) => (s.kind === "pending" ? 0 : s.kind === "running" ? 50 : 100),
-  stateKey: (s) => JSON.stringify(s),
-};
 
 // ---------------------------------------------------------------------------
 // createRedisMarkerStore — FR-043
@@ -304,6 +284,40 @@ describe("Redis Streams event log (XADD/XRANGE)", () => {
 
     await expect(reader.readEvents(queueName, jobId)).rejects.toThrow(/Corrupt event/);
     await r.del(streamKey);
+  });
+
+  // round-23 sfh-1 unit pins: the truncated-payload fail-closed branch is
+  // unreachable through ioredis XADD (Redis itself rejects odd field lists),
+  // but a stream restored from RDB or written by another writer can carry a
+  // `payload` key with no value — the entry type Redis accepts from every
+  // legitimate writer must keep parsing, the fabricated-event class must fail
+  // closed louder than the legacy path it used to share.
+  it("parseEnvelope: a genuine legacy entry (no payload field) still reconstructs", () => {
+    const ev = __parseEnvelope("events:q:j", "1715200000000-0", ["type", "legacy", "acked", "1"]);
+    expect(ev.recordedAtMs).toBe(1715200000000);
+    expect(ev.event).toEqual({ type: "legacy", acked: "1" });
+  });
+
+  it("parseEnvelope: payload key PRESENT but valueless fails closed as corrupt (never fabricates an event)", () => {
+    const warnings: string[] = [];
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: (message) => warnings.push(String(message)),
+      error: () => {},
+    });
+    try {
+      expect(() =>
+        // Odd field list: `payload` is the LAST field with no value.
+        __parseEnvelope("events:q:j", "1715200000000-0", ["type", "bad", "payload"]),
+      ).toThrow(/Corrupt event in stream "events:q:j" entry "1715200000000-0"/);
+      // …and the rejection is loud, not silent: a warning names the stream/entry.
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain("events:q:j");
+      expect(warnings[0]).toContain("refusing to fabricate");
+    } finally {
+      __resetFrameworkLogger();
+    }
   });
 });
 
@@ -548,6 +562,19 @@ describe("adaptBullMQJob appendEvent (XADD)", () => {
 // ---------------------------------------------------------------------------
 // onFailed + onError handler tests
 // ---------------------------------------------------------------------------
+
+describe("BullMQ failure-handler isolation (pure)", () => {
+  it("reports a synchronous handler throw instead of letting it escape dispatch", async () => {
+    const reported = new Promise<Error>((resolve) => {
+      expect(() => __dispatchFailureHandler(
+        () => { throw new Error("synchronous handler failure"); },
+        resolve,
+      )).not.toThrow();
+    });
+
+    await expect(reported).resolves.toMatchObject({ message: "synchronous handler failure" });
+  });
+});
 
 describe("createBullMQBackend — onFailed + onError handlers", () => {
   redisIt("onFailed fires with correct id/error/attemptsMade when job throws", async () => {
@@ -958,8 +985,26 @@ describe("createRedisStreamReader — readEventsBetween argument validation", ()
 });
 
 // ---------------------------------------------------------------------------
-// createWorker — RangeError guard unit tests
+// Redis connection parsing + worker RangeError guards (pure, no Redis needed)
 // ---------------------------------------------------------------------------
+
+describe("createBullMQBackend — Redis connection parsing", () => {
+  it("preserves credentials, database selection, and TLS from a Redis URL", () => {
+    expect(__parseConnection("rediss://user:p%40ss@cache.example:6380/4")).toEqual({
+      host: "cache.example",
+      port: 6380,
+      username: "user",
+      password: "p@ss",
+      db: 4,
+      tls: {},
+    });
+  });
+
+  it("rejects unsupported schemes and invalid database selections", () => {
+    expect(() => __parseConnection("http://cache.example:6379/0")).toThrow(RangeError);
+    expect(() => __parseConnection("redis://cache.example/not-a-db")).toThrow(RangeError);
+  });
+});
 
 describe("createQueue / createWorker — RangeError guards (pure, no Redis needed)", () => {
   // These tests use a dummy connection and never actually connect to Redis.
@@ -994,6 +1039,13 @@ describe("createQueue / createWorker — RangeError guards (pure, no Redis neede
     ).toThrow(RangeError);
   });
 
+  it("createQueue throws RangeError for defaultAttempts = 1.5 (the gate is integer, not just finite)", () => {
+    const backend = createBullMQBackend(dummyConn);
+    expect(() =>
+      backend.createQueue("q", { defaultAttempts: 1.5 }),
+    ).toThrow(RangeError);
+  });
+
   it("createWorker throws RangeError for concurrency = 0", () => {
     const backend = createBullMQBackend(dummyConn);
     expect(() =>
@@ -1022,6 +1074,13 @@ describe("createQueue / createWorker — RangeError guards (pure, no Redis neede
     ).toThrow(RangeError);
   });
 
+  it("createWorker throws RangeError for concurrency = 1.5 (the gate is integer, not just finite)", () => {
+    const backend = createBullMQBackend(dummyConn);
+    expect(() =>
+      backend.createWorker("q", async () => {}, { concurrency: 1.5 }),
+    ).toThrow(RangeError);
+  });
+
   it("createQueue does not throw for defaultAttempts = 1", () => {
     const backend = createBullMQBackend(dummyConn);
     expect(() =>
@@ -1035,6 +1094,65 @@ describe("createQueue / createWorker — RangeError guards (pure, no Redis neede
       backend.createWorker("q", async () => {}, { concurrency: 1 }),
     ).not.toThrow();
   });
+
+  // Regression (round-12 A1): the Queue's INTERNAL connection (a separate
+  // ioredis instance behind the plain {host, port}) is re-emitted as an
+  // "error" event on the Queue by BullMQ (queue-base forwards its
+  // RedisConnection errors). The shared-connection and Worker listeners
+  // existed, but the Queue had none — an unhandled "error" event is a
+  // process-level hazard on the runtimes that enforce ERR_UNHANDLED_ERROR.
+  // Pin: a dead-port connection failure surfaces as a LOGGED queue error
+  // (named), never an unhandled throw.
+  it("createQueue routes internal-connection failures through the logger (named queue), never unhandled", async () => {
+    const lines: string[] = [];
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: () => {},
+      error: (msg: string, ...args: unknown[]) => {
+        lines.push([msg, ...args.map((a) => String(a))].join(" "));
+      },
+    });
+    try {
+      const backend = createBullMQBackend(dummyConn);
+      backend.createQueue("a1-pin-queue");
+      // ECONNREFUSED on localhost arrives within milliseconds; poll generously
+      // so the pin is deterministic regardless of retry backoff timing.
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline && !lines.some((l) => l.includes("[BullMQ] Queue \"a1-pin-queue\" error:"))) {
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      expect(lines.some((l) => l.includes("[BullMQ] Queue \"a1-pin-queue\" error:"))).toBe(true);
+      await backend.close();
+    } finally {
+      __resetFrameworkLogger();
+    }
+  }, 15_000);
+
+  it("a throwing framework logger cannot reopen a contained Queue error event", async () => {
+    let errorCalls = 0;
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: () => {},
+      error: () => {
+        errorCalls += 1;
+        throw new Error("logger transport failed");
+      },
+    });
+    try {
+      const backend = createBullMQBackend(dummyConn);
+      backend.createQueue("throwing-logger-queue");
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline && errorCalls === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(errorCalls).toBeGreaterThan(0);
+      await expect(backend.close()).resolves.toBeUndefined();
+    } finally {
+      __resetFrameworkLogger();
+    }
+  }, 15_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -1050,7 +1168,7 @@ describe("§6.11 — BullMQ DAG resume reconstructs nodeMap via live dag", () =>
     const { runDagAsWorkerJob } = await import("../../executor/run-dag.js");
     const { defineDagFromArray } = await import("../../executor/define-dag.js");
     const { z } = await import("zod");
-    const { ok, err } = await import("../../types/result.js");
+    const { ok } = await import("../../types/result.js");
     type NodeContext = import("../../types/node.js").NodeContext;
     type NodeDef = import("../../types/node.js").NodeDef<unknown, unknown>;
 
@@ -1163,14 +1281,8 @@ describe("§6.11 — BullMQ DAG resume reconstructs nodeMap via live dag", () =>
 
 // ---------------------------------------------------------------------------
 // SC-003: Crash-resume — real BullMQ job + adaptBullMQJob.
-//
-// The previous incarnation of this section held a 100-line `it.skip` block
-// that documented a stall-race against BullMQ's 30-second stalled-job timer.
-// A perpetually-skipped test for a critical invariant is a maintenance
-// hazard: future readers either trust the green CI run or rewrite the
-// architecture independently. Coverage for the resume contract now lives in
-// pass-4 follow-up §6.11 (single-worker re-entry that survives the phase-1
-// throw, no two-worker stall). Deleted here per pass-4 W5.8.
+// The executable single-worker re-entry scenario immediately above proves
+// resume after a mid-run throw without relying on BullMQ's stalled-job timer.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------

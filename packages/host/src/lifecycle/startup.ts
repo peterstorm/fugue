@@ -2,7 +2,7 @@
  * Startup sequence — validates preconditions and performs initial sync.
  *
  * This module handles:
- * 1. Validate Redis connectivity (PING) — exit with error if unreachable (FR-006)
+ * 1. Validate Redis connectivity (PING) — return an error if unreachable (FR-006)
  * 2. Build sync config from HostConfig (local vs remote mode)
  * 3. Initial clone + load all DAGs into Registry
  *
@@ -13,9 +13,8 @@
  * @satisfies NFR-020 — Host MUST log startup/shutdown lifecycle events
  */
 
-import { ok, err } from "@fuguejs/framework";
+import { ok } from "@fuguejs/framework";
 import type { Result, GitSha } from "@fuguejs/framework";
-import { gitSha } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { HostConfig } from "../domain/config.js";
 import type { Registry } from "../domain/registry.js";
@@ -23,8 +22,6 @@ import type { GitPort, ModuleLoaderPort, RedisConnectivityPort } from "../ports.
 import { initialSync } from "../sync/sync-loop.js";
 import type { SyncConfig, SyncLogger } from "../sync/sync-loop.js";
 
-// Re-export for backwards compatibility
-export type { RedisConnectivityPort } from "../ports.js";
 
 /**
  * The boot result — everything needed to wire the host together.
@@ -50,7 +47,7 @@ export interface StartupDeps {
 
 /**
  * Validate Redis connectivity by sending PING.
- * Exits with actionable error message if unreachable.
+ * Logs and returns the failed Result when unreachable; the caller owns startup refusal.
  *
  * @satisfies FR-006 — Host MUST refuse to start if Redis is unreachable
  */

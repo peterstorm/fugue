@@ -1,4 +1,4 @@
-import { resourceName, witness, mkWitness, RN } from "./_freshness-helpers.js";
+import { witness, RN } from "./_freshness-helpers.js";
 import { describe, it, expect } from "bun:test";
 import { emitHumanIntervention } from "../dag-runtime/human-emission.js";
 import { RecordingObserver } from "../observer/observer.js";

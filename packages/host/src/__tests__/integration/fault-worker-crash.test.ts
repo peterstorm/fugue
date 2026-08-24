@@ -26,7 +26,7 @@ import type { Result } from "@fuguejs/framework";
 import { createSupervisor } from "../../supervisor/supervisor.js";
 import type { AuthDeps, AdmissionPort, SupervisorDeps } from "../../supervisor/supervisor.js";
 import type { UdsTransport } from "../../supervisor/uds-proxy.js";
-import { TENANT_HEADER } from "../../supervisor/uds-proxy.js";
+import { TENANT_HEADER_NAME } from "../../domain/tenant-header.js";
 import { verifyTenantHeader } from "../../domain/tenant-header.js";
 import { markTenant, tenantId, markSecretsRef } from "../../domain/tenant.js";
 import type { Tenant, TenantId, TenantRegistryView } from "../../domain/tenant.js";
@@ -126,7 +126,7 @@ const lifecycleConfig = (over: Partial<WorkerLifecycleConfig> = {}): WorkerLifec
 const makeTransport = (liveSockets: Set<string>): UdsTransport => async (socketPath, req) => {
   // Verify the signed tenant header is present + valid for the socket's tenant —
   // a cross-tenant routing bug would stamp the wrong tenant here.
-  const header = req.headers.get(TENANT_HEADER);
+  const header = req.headers.get(TENANT_HEADER_NAME);
   const tenantFromSocket = socketPath.slice(`${UDS_DIR}/`.length, -".sock".length);
   if (!header || verifyTenantHeader(KEY, tenantFromSocket, header).kind !== "ok") {
     return ok(new Response(JSON.stringify({ error: "bad-header" }), { status: 421 }));

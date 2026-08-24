@@ -12,7 +12,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
-import { N, D, NO_SIDE_EFFECTS, NO_CONFIDENCE } from "./_id-helpers.js";
+import { N, NO_SIDE_EFFECTS, NO_CONFIDENCE } from "./_id-helpers.js";
 import { validateCapabilities } from "../shared/capabilities.js";
 import { defineDagFromArray } from "../executor/define-dag.js";
 import { DAG_INPUT } from "../types/ids.js";

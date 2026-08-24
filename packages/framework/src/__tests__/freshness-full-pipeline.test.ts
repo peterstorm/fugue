@@ -1,4 +1,4 @@
-import { resourceName, witness, witnessValue, mkWitness, RN } from "./_freshness-helpers.js";
+import { FE, witness, witnessValue, RN } from "./_freshness-helpers.js";
 /**
  * Wave 6 — Test gap coverage for review remediation.
  *
@@ -17,7 +17,7 @@ import { defineDag } from "../executor/define-dag.js";
 import { DAG_INPUT } from "../types/ids.js";
 import { makeNodeContext } from "../shared/make-node-context.js";
 import { ok } from "../types/result.js";
-import type { NodeDef, NodeContext } from "../types/node.js";
+import type { NodeDef } from "../types/node.js";
 import { type NodeOverride, brandedOverride } from "./_node-override.js";
 import type { WitnessCapturedEvent, WriteAttemptedEvent, FreshnessViolationEvent, HumanInterventionEvent } from "../types/events.js";
 
@@ -74,6 +74,7 @@ describe("checkFreshness with witness events in timeline", () => {
         runId: R("r1"),
         dagId: D("d"),
         nodeId: N("writer1"),
+        executionEpoch: FE(),
         conditionedOn: witness("version", RN("postgres:orders"), "1"),
         newWitness: witness("version", RN("postgres:orders"), "2"),
         succeededAtMs: 200,
@@ -84,6 +85,7 @@ describe("checkFreshness with witness events in timeline", () => {
         runId: R("r2"),
         dagId: D("d"),
         nodeId: N("writer2"),
+        executionEpoch: FE(),
         conditionedOn: witness("version", RN("postgres:orders"), "2"),
         newWitness: witness("version", RN("postgres:orders"), "3"),
         succeededAtMs: 400,
@@ -115,6 +117,7 @@ describe("checkFreshness with witness events in timeline", () => {
         runId: R("r1"),
         dagId: D("d"),
         nodeId: N("writer1"),
+        executionEpoch: FE(),
         conditionedOn: witness("version", RN("postgres:orders"), "1"),
         newWitness: witness("version", RN("postgres:orders"), "2"),
         succeededAtMs: 100,
@@ -125,6 +128,7 @@ describe("checkFreshness with witness events in timeline", () => {
         runId: R("r2"),
         dagId: D("d"),
         nodeId: N("writer2"),
+        executionEpoch: FE(),
         // Stale! Conditioned on "1" but "2" already written
         conditionedOn: witness("version", RN("postgres:orders"), "1"),
         newWitness: witness("version", RN("postgres:orders"), "3"),
@@ -154,6 +158,7 @@ describe("Full pipeline: reads → freshness violation → human intervention", 
       runId: R("other-run"),
       dagId: D("pipeline"),
       nodeId: N("other-writer"),
+      executionEpoch: FE(),
       conditionedOn: witness("version", RN("postgres:orders"), "42"),
       newWitness: witness("version", RN("postgres:orders"), "43"),
       succeededAtMs: 500,
@@ -208,7 +213,7 @@ describe("Full pipeline: reads → freshness violation → human intervention", 
       (e) => e.type === "freshness-violation",
     ) as FreshnessViolationEvent | undefined;
     expect(violation).toBeDefined();
-    expect(violation!.resource).toBe(RN("postgres:orders"));
+    expect(violation!.conditionedOnWitness.resource).toBe(RN("postgres:orders"));
     expect(violation!.conditionedOnWitness.value).toBe("42");
     expect(violation!.conflictingWrite.newWitness.value).toBe("43");
 

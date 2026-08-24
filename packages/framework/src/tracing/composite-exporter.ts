@@ -31,6 +31,7 @@
 import { ExportResultCode, type ExportResult } from "@opentelemetry/core";
 import type { ReadableSpan, SpanExporter } from "@opentelemetry/sdk-trace-base";
 import { fwLogger } from "../logger.js";
+import { safeErrorMessage } from "../types/safe-error.js";
 
 /** Per-child cumulative export-failure count, exposed for health checks. */
 export interface ChildFailureCount {
@@ -51,7 +52,18 @@ export interface ChildFailureCount {
  * cannot hang indefinitely. A total hang therefore surfaces as FAILED (an
  * actionable outage) rather than an invisible wedge.
  */
-export const EXPORT_SETTLE_TIMEOUT_MS = 30_000;
+const EXPORT_SETTLE_TIMEOUT_MS = 30_000;
+
+const logFrameworkWithoutThrowing = (
+  level: "warn" | "error",
+  message: string,
+): void => {
+  try {
+    fwLogger()[level](message);
+  } catch {
+    // Export settlement and lifecycle outcomes remain authoritative.
+  }
+};
 
 /**
  * Rate-limited per-child failure logging. Logs at true powers of ten —
@@ -69,7 +81,8 @@ const logChildFailure = (
   // current order of magnitude).
   const shouldLog = c === 1 || c === Math.pow(10, Math.floor(Math.log10(c)));
   if (shouldLog) {
-    fwLogger().warn(
+    logFrameworkWithoutThrowing(
+      "warn",
       `[CompositeSpanExporter] child #${index} export failed (occurrence ${c}): ${reason}`,
     );
   }
@@ -139,7 +152,7 @@ export class CompositeSpanExporter implements SpanExporter {
       }
       const aggregated = new Error(
         `CompositeSpanExporter: all ${total} child exporter(s) failed: ` +
-          errors.map((e) => e.message).join("; "),
+          errors.map((e) => safeErrorMessage(e)).join("; "),
       );
       resultCallback({ code: ExportResultCode.FAILED, error: aggregated });
     };
@@ -148,16 +161,16 @@ export class CompositeSpanExporter implements SpanExporter {
       if (result.code === ExportResultCode.SUCCESS) {
         anySuccess = true;
       } else {
-        const reason = result.error?.message ?? "unknown error";
+        const reason = result.error === undefined ? "unknown error" : safeErrorMessage(result.error);
         logChildFailure(this.failureCounters[index]!, index, reason);
-        errors.push(result.error ?? new Error(reason));
+        errors.push(new Error(reason));
       }
       settled++;
       if (settled === total) finalize();
     };
 
     const onChildThrow = (index: number, err: unknown): void => {
-      const error = err instanceof Error ? err : new Error(String(err));
+      const error = new Error(safeErrorMessage(err));
       logChildFailure(this.failureCounters[index]!, index, error.message);
       errors.push(error);
       settled++;
@@ -210,8 +223,9 @@ export class CompositeSpanExporter implements SpanExporter {
           // timed out): not double-counted (the latch is closed), but a child
           // misbehaving this badly is anomalous, so surface it instead of
           // dropping it entirely silently.
-          const reason = err instanceof Error ? err.message : String(err);
-          fwLogger().warn(
+          const reason = safeErrorMessage(err);
+          logFrameworkWithoutThrowing(
+            "warn",
             `[CompositeSpanExporter] child #${index} threw AFTER it already settled (ignored): ${reason}`,
           );
         }
@@ -255,7 +269,7 @@ export class CompositeSpanExporter implements SpanExporter {
           }
           settled = true;
           clearTimeout(timer);
-          rejectOp(e instanceof Error ? e : new Error(String(e)));
+          rejectOp(new Error(safeErrorMessage(e)));
         },
       );
     });
@@ -310,13 +324,17 @@ export class CompositeSpanExporter implements SpanExporter {
     const reasons: string[] = [];
     results.forEach((r, index) => {
       if (r.status === "rejected") {
-        const reason = r.reason instanceof Error ? r.reason.message : String(r.reason);
+        const reason = safeErrorMessage(r.reason);
         reasons.push(`#${index}: ${reason}`);
-        fwLogger().warn(`[CompositeSpanExporter] child #${index} ${op}() failed: ${reason}`);
+        logFrameworkWithoutThrowing(
+          "warn",
+          `[CompositeSpanExporter] child #${index} ${op}() failed: ${reason}`,
+        );
       }
     });
     if (reasons.length > 0 && reasons.length === results.length) {
-      fwLogger().error(
+      logFrameworkWithoutThrowing(
+        "error",
         `[CompositeSpanExporter] ${op}() — ALL ${results.length} child exporter(s) failed: ` +
           reasons.join("; "),
       );

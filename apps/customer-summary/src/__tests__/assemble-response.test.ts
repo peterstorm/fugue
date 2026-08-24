@@ -1,6 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { createAssembleResponseNode } from "../dag/nodes/assemble-response.js";
-import { makeNodeContext } from "@fuguejs/framework";
+import { fwLogger, makeNodeContext, setFrameworkLogger } from "@fuguejs/framework";
 import type { SynthesisOutput } from "../schemas/summary.js";
 import type { GuardrailResult } from "@fuguejs/framework";
 
@@ -37,9 +37,10 @@ const makeGuardrailFailed = (): GuardrailResult<SynthesisOutput> => ({
 
 describe("assemble-response node", () => {
   test("ok branch with passing guardrail — no groundingWarnings", async () => {
-    const node = createAssembleResponseNode("cust-001");
+    const node = createAssembleResponseNode();
     const result = await node.run(
       {
+        $input: { customerId: "cust-001" },
         "extract-features": { branch: "ok" as const, customer: { id: "cust-001", name: "Test", accountType: "personal" }, recentUtterances: [], scoredConversations: [] },
         "grounding-guardrail": makeGuardrailPassed(),
       },
@@ -57,9 +58,10 @@ describe("assemble-response node", () => {
   });
 
   test("ok branch with failing guardrail — includes groundingWarnings", async () => {
-    const node = createAssembleResponseNode("cust-001");
+    const node = createAssembleResponseNode();
     const result = await node.run(
       {
+        $input: { customerId: "cust-001" },
         "extract-features": { branch: "ok" as const, customer: { id: "cust-001", name: "Test", accountType: "personal" }, recentUtterances: [], scoredConversations: [] },
         "grounding-guardrail": makeGuardrailFailed(),
       },
@@ -77,10 +79,32 @@ describe("assemble-response node", () => {
     }
   });
 
+  test("failed guardrail crosses input parsing and degrades gracefully", async () => {
+    const node = createAssembleResponseNode();
+    const parsed = node.inputSchema.safeParse({
+      $input: { customerId: "cust-001" },
+      "extract-features": { branch: "ok", customer: { id: "cust-001", name: "Test", accountType: "personal" }, recentUtterances: [], scoredConversations: [] },
+      "grounding-guardrail": {
+        kind: "failed",
+        passed: false,
+        error: "validator crashed",
+        warnings: ["Guardrail validation threw an error: validator crashed"],
+        checks: [{ dimension: "internal-error", passed: false, detail: "validator crashed" }],
+      },
+    });
+
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) throw new Error("expected failed guardrail input to parse");
+    const result = await node.run(parsed.data, makeCtx());
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.status).toBe("degraded");
+  });
+
   test("ok branch with missing guardrail — degrades gracefully", async () => {
-    const node = createAssembleResponseNode("cust-001");
+    const node = createAssembleResponseNode();
     const result = await node.run(
       {
+        $input: { customerId: "cust-001" },
         "extract-features": { branch: "ok" as const, customer: { id: "cust-001", name: "Test", accountType: "personal" }, recentUtterances: [], scoredConversations: [] },
         "grounding-guardrail": undefined,
       },
@@ -93,10 +117,35 @@ describe("assemble-response node", () => {
     }
   });
 
+  test("degraded assembly is pure and cannot be replaced by a throwing logger", async () => {
+    const previous = fwLogger();
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: () => { throw new Error("logger unavailable"); },
+      error: () => {},
+    });
+    try {
+      const result = await createAssembleResponseNode().run(
+        {
+          $input: { customerId: "cust-001" },
+          "extract-features": { branch: "ok" as const, customer: { id: "cust-001", name: "Test", accountType: "personal" }, recentUtterances: [], scoredConversations: [] },
+          "grounding-guardrail": undefined,
+        },
+        makeCtx(),
+      );
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.value.status).toBe("degraded");
+    } finally {
+      setFrameworkLogger(previous);
+    }
+  });
+
   test("not_found branch ignores guardrail", async () => {
-    const node = createAssembleResponseNode("cust-999");
+    const node = createAssembleResponseNode();
     const result = await node.run(
       {
+        $input: { customerId: "cust-999" },
         "extract-features": { branch: "not_found" as const },
         "grounding-guardrail": undefined,
       },
@@ -111,9 +160,10 @@ describe("assemble-response node", () => {
   });
 
   test("no_history branch ignores guardrail", async () => {
-    const node = createAssembleResponseNode("cust-019");
+    const node = createAssembleResponseNode();
     const result = await node.run(
       {
+        $input: { customerId: "cust-019" },
         "extract-features": { branch: "no_history" as const },
         "grounding-guardrail": undefined,
       },
@@ -127,9 +177,10 @@ describe("assemble-response node", () => {
   });
 
   test("insufficient_data branch ignores guardrail", async () => {
-    const node = createAssembleResponseNode("cust-017");
+    const node = createAssembleResponseNode();
     const result = await node.run(
       {
+        $input: { customerId: "cust-017" },
         "extract-features": { branch: "insufficient_data" as const },
         "grounding-guardrail": undefined,
       },

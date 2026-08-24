@@ -1,7 +1,15 @@
-// Fixture: a structurally valid DAG whose registration `inputSchema` cannot
-// be rendered to JSON Schema (`z.void()` throws in `zodToJsonSchema`). Used
-// to pin `runDescribe`'s non-fatal warning channel: ok result, `inputSchema:
-// null`, the failure carried on `warnings` and echoed to stderr.
+// Fixture: a structurally valid DAG whose registration `inputSchema` CANNOT be
+// rendered to JSON Schema — it contains a non-schema value in its shape
+// (a hostile schema: the user-facing bug class). Pins `runDescribe`'s
+// non-fatal warning channel: ok result, `inputSchema: null`, the failure
+// carried on `warnings` and echoed to stderr.
+//
+// (The former trigger was `z.void()`, which `zodToJsonSchema` threw on.
+// `unrepresentable: "any"` — peterstorm/fugue#36 — now renders ALL standard
+// unrepresentable types (z.date / z.void / z.map / z.set / z.custom /
+// z.function / transforms) as open schemas, so only genuinely
+// non-introspectable shapes reach this channel. The positive case is pinned
+// by the sibling `schema-dates.ts` fixture.)
 
 import { z } from "zod";
 import {
@@ -32,7 +40,7 @@ const dag = defineLinearDag({
 
 export default {
   dag,
-  // Deliberately unserializable: JSON Schema has no representation for void.
-  inputSchema: z.void(),
+  // Deliberately non-introspectable: a plain string where a Zod schema belongs.
+  inputSchema: z.object({ userId: "not-a-schema" as unknown as z.ZodType<unknown> }),
   meta: { description: "Schema-warning fixture DAG", version: "1.0.0" },
 };

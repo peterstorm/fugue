@@ -10,13 +10,12 @@
  * leak than a single 403 since it surfaces the whole topology at once.
  */
 
+import { requireAuthIdentity } from "./dag-access.js";
 import type { Context } from "hono";
-import type { HostEnv } from "../router.js";
-import { dagListResponse } from "../response.js";
+import type { HostEnv } from "../env.js";
+import { dagListResponse, hostUnavailableResponse } from "../response.js";
 import type { DagListItem } from "../response.js";
-import { canServeRequests, getRegistry } from "../../domain/host-state.js";
-import { errorResponse } from "../response.js";
-import type { AuthIdentity } from "../../domain/auth.js";
+import { getRegistry } from "../../domain/host-state.js";
 import { canAccessDag } from "../../domain/auth.js";
 
 /**
@@ -27,16 +26,12 @@ import { canAccessDag } from "../../domain/auth.js";
 export const listDagsHandler = (c: Context<HostEnv>): Response => {
   const hostState = c.get("hostState");
 
-  if (!canServeRequests(hostState)) {
-    return errorResponse(c, 503, "host-unavailable", `Host is ${hostState.phase} — not accepting requests`, {
-      details: { phase: hostState.phase },
-    });
-  }
+  const unavailable = hostUnavailableResponse(c, hostState);
+  if (unavailable) return unavailable;
 
-  const identity = c.get("authIdentity") as AuthIdentity | undefined;
-  if (!identity) {
-    return errorResponse(c, 401, "unauthorized", "Missing auth identity — middleware not applied");
-  }
+  const authed = requireAuthIdentity(c);
+  if (!authed.ok) return authed.response;
+  const { identity } = authed;
 
   const registry = getRegistry(hostState);
   if (!registry) {

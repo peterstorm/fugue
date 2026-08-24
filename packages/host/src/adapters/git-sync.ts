@@ -5,7 +5,7 @@
  * The BunGitAdapter implements it by shelling out to `git` via Bun.spawn.
  *
  * Dev mode: When `DAGS_LOCAL_PATH` is set, LocalGitAdapter reads the directory
- * directly and hashes file mtimes for SHA comparison.
+ * directly and hashes file mtimes and sizes for SHA comparison.
  *
  * @satisfies FR-001 — Poll git branch and detect new commits by comparing SHAs
  * @satisfies FR-005 — Run bun install if the lockfile (bun.lock / bun.lockb) changed between commits
@@ -13,8 +13,8 @@
  */
 
 import { join } from "node:path";
-import { ok, err, gitSha as brandGitSha } from "@fuguejs/framework";
-import type { Result, GitSha } from "@fuguejs/framework";
+import { ok, err, gitSha as brandGitSha, safeErrorMessage } from "@fuguejs/framework";
+import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { GitPort } from "../ports.js";
 
@@ -23,11 +23,117 @@ import type { GitPort } from "../ports.js";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+/**
+ * How long a timed-out child gets after the initial SIGTERM before cleanup
+ * escalates to SIGKILL. The timeout ERROR is never gated on this — the grace
+ * window only bounds the background cleanup so a SIGTERM-ignoring child
+ * (wedged git, D-state process) cannot turn the bounded timeout into an
+ * unbounded hang.
+ */
+const KILL_GRACE_MS = 2_000;
+
 interface SpawnResult {
   readonly exitCode: number;
   readonly stdout: string;
   readonly stderr: string;
 }
+
+/**
+ * Start bounded background cleanup without delaying delivery of a timeout error.
+ * The caller retains operation-specific error construction; this helper owns the
+ * shared SIGTERM → grace race → SIGKILL → stream-drain lifecycle.
+ *
+ * The whole cleanup is best-effort by design — the timeout error has ALREADY
+ * been delivered when this runs — so a fault inside the IIFE (a rejecting
+ * `drainStreams` under its `Promise<unknown>` contract, or a throwing
+ * `forceKill`) must not escape as a process-level unhandled rejection with no
+ * operator breadcrumb: terminal catch, logged, done.
+ */
+/** @internal Exported for hostile child-exit promise regression tests. */
+export const cleanupTimedOutChild = (
+  terminate: () => void,
+  forceKill: () => void,
+  exited: Promise<number>,
+  drainStreams: () => Promise<unknown>,
+): void => {
+  terminate();
+  const settled = exited.catch((error) => {
+    console.warn(
+      `[git-sync] timed-out child exit wait failed; forcing SIGKILL: ${safeErrorMessage(error)}`,
+    );
+    forceKill();
+    return "exit-wait-failed" as const;
+  });
+  void (async () => {
+    try {
+      const winner = await Promise.race([
+        settled,
+        new Promise<"grace">((resolve) =>
+          setTimeout(() => resolve("grace"), KILL_GRACE_MS),
+        ),
+      ]);
+      if (winner === "grace") forceKill();
+      await drainStreams();
+    } catch (e) {
+      console.warn(`[git-sync] bounded cleanup of timed-out child failed (timeout error already delivered): ${e instanceof Error ? e.message : String(e)}`);
+    }
+  })();
+};
+
+const runBoundedProcess = async (
+  command: readonly string[],
+  cwd: string | undefined,
+  timeoutMs: number,
+): Promise<SpawnResult | "timeout"> => {
+  // A package manager or git transport may spawn descendants. Give the command
+  // its own process group so timeout cleanup cannot leave those descendants
+  // holding sockets or stdio open after the direct child exits.
+  const proc = Bun.spawn([...command], {
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+    detached: true,
+  });
+  const killProcessGroup = (signal: NodeJS.Signals = "SIGTERM"): void => {
+    if (process.platform !== "win32") {
+      try {
+        process.kill(-proc.pid, signal);
+        return;
+      } catch {
+        // The group may already be gone; fall back to the direct child.
+      }
+    }
+    try {
+      proc.kill(signal);
+    } catch {
+      // Timeout cleanup is best-effort and must preserve the typed timeout.
+    }
+  };
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<"timeout">((resolve) => {
+    timeoutId = setTimeout(() => resolve("timeout"), timeoutMs);
+  });
+  const result = await Promise.race([proc.exited, timeout]);
+  const drainStreams = async (): Promise<readonly [string, string]> =>
+    Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+
+  if (result === "timeout") {
+    cleanupTimedOutChild(
+      killProcessGroup,
+      () => killProcessGroup("SIGKILL"),
+      proc.exited,
+      drainStreams,
+    );
+    return "timeout";
+  }
+
+  clearTimeout(timeoutId);
+  const [stdout, stderr] = await drainStreams();
+  return { exitCode: result, stdout: stdout.trim(), stderr: stderr.trim() };
+};
 
 /**
  * Execute a git command via Bun.spawn with timeout and stderr capture.
@@ -39,40 +145,14 @@ const spawnGit = async (
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
 ): Promise<Result<SpawnResult, HostError>> => {
   try {
-    const proc = Bun.spawn(["git", ...args], {
-      cwd,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<"timeout">((resolve) => {
-      timeoutId = setTimeout(() => resolve("timeout"), timeoutMs);
-    });
-
-    const result = await Promise.race([proc.exited, timeout]);
-
+    const result = await runBoundedProcess(["git", ...args], cwd, timeoutMs);
     if (result === "timeout") {
-      proc.kill();
-      // Process may already have exited between timeout race resolution and kill.
-      // The exit reason is not meaningful after kill — the timeout error is already captured below.
-      await proc.exited.catch(() => {});
-      // Drain streams to release file descriptors
-      await Promise.allSettled([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-      ]);
       return err({
         kind: "git-timeout",
         operation: `git ${args.join(" ")}`,
       });
     }
-
-    clearTimeout(timeoutId);
-    const stdout = await new Response(proc.stdout).text();
-    const stderr = await new Response(proc.stderr).text();
-
-    return ok({ exitCode: result, stdout: stdout.trim(), stderr: stderr.trim() });
+    return ok(result);
   } catch (e) {
     return err({
       kind: "git-spawn-failed",
@@ -167,7 +247,7 @@ export const createBunGitAdapter = (timeoutMs: number = DEFAULT_TIMEOUT_MS): Git
     return ok(result.value.stdout.length > 0);
   },
 
-  install: (repoPath) => runBunInstall(repoPath),
+  install: (repoPath) => runBunInstall(repoPath, timeoutMs),
 });
 
 // ── Local (Dev Mode) Adapter ───────────────────────────────────────────────
@@ -175,7 +255,7 @@ export const createBunGitAdapter = (timeoutMs: number = DEFAULT_TIMEOUT_MS): Git
 /**
  * Create a local filesystem adapter for dev mode.
  * Skips clone/pull — reads directory directly.
- * currentSha returns a hash of file modification times.
+ * currentSha returns a hash of file modification times and sizes.
  *
  * NOTE: The mtime hash uses a simplified djb2-like algorithm. Hash collisions
  * are possible (two different file states → same hash → sync skipped).
@@ -232,50 +312,23 @@ export const runBunInstall = async (
     if (!(await Bun.file(join(cwd, "package.json")).exists())) {
       return ok(undefined);
     }
-    const proc = Bun.spawn(["bun", "install", "--frozen-lockfile"], {
+    const result = await runBoundedProcess(
+      ["bun", "install", "--frozen-lockfile"],
       cwd,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<"timeout">((resolve) => {
-      timeoutId = setTimeout(() => resolve("timeout"), timeoutMs);
-    });
-
-    const result = await Promise.race([proc.exited, timeout]);
-
+      timeoutMs,
+    );
     if (result === "timeout") {
-      proc.kill();
-      // Process may already have exited between timeout race resolution and kill.
-      // The exit reason is not meaningful after kill — the timeout error is already captured below.
-      await proc.exited.catch(() => {});
-      await Promise.allSettled([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-      ]);
       return err({
         kind: "bun-install-failed",
         message: "bun install timed out",
       });
     }
-
-    clearTimeout(timeoutId);
-
-    if (result !== 0) {
-      const stderr = await new Response(proc.stderr).text();
-      await new Response(proc.stdout).text(); // drain stdout
+    if (result.exitCode !== 0) {
       return err({
         kind: "bun-install-failed",
-        message: stderr.trim() || `exit code ${result}`,
+        message: result.stderr || `exit code ${result.exitCode}`,
       });
     }
-
-    // Drain streams on success path too
-    await Promise.allSettled([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]);
     return ok(undefined);
   } catch (e) {
     return err({

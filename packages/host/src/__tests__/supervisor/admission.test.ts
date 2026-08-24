@@ -25,6 +25,7 @@ import {
   forgetTenant,
   canAdmit,
   tenantCurrent,
+  tenantConcurrencyLimit,
   type TenantConcurrencyState,
   type AdmitToken,
 } from "../../supervisor/admission.js";
@@ -49,6 +50,30 @@ const admitOrThrow = (
 };
 
 // ── per-tenant ceiling (FR-032 / FR-038) ──────────────────────────────────────
+
+describe("tenantConcurrencyLimit", () => {
+  test("accepts exactly the non-negative safe-integer domain", () => {
+    fc.assert(
+      fc.property(fc.double(), (value) => {
+        const accepted = Number.isSafeInteger(value) && value >= 0;
+        if (accepted) {
+          expect(tenantConcurrencyLimit(value)).toBe(value);
+        } else {
+          expect(() => tenantConcurrencyLimit(value)).toThrow(
+            "tenant concurrency limit must be a non-negative safe integer",
+          );
+        }
+      }),
+    );
+  });
+
+  test("invalid defaults and explicit limits cannot enter state", () => {
+    for (const invalid of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => initTenantConcurrency({ defaultTenantMax: invalid })).toThrow();
+      expect(() => withTenantLimit(initTenantConcurrency(), tid("acme"), invalid)).toThrow();
+    }
+  });
+});
 
 describe("admitTenant — per-tenant ceiling", () => {
   test("admits up to the ceiling, then refuses with tenant-over-quota", () => {

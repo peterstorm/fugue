@@ -173,6 +173,26 @@ describe("log sink", () => {
     const sink = createLogAuditSink({ info: () => { throw new Error("boom"); }, warn: () => {}, error: () => {} });
     await expect(sink.record(rec())).resolves.toBeUndefined();
   });
+
+  it("a throwing logger is reported to stderr as a LAST RESORT — the floor is never silent (action/tenant + cause captured, bypassing the host logger)", async () => {
+    const written: string[] = [];
+    const original = process.stderr.write;
+    process.stderr.write = ((chunk: unknown): boolean => {
+      written.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const sink = createLogAuditSink({ info: () => { throw new Error("logger broke"); }, warn: () => {}, error: () => {} });
+      await expect(sink.record(rec())).resolves.toBeUndefined();
+      expect(written).toHaveLength(1);
+      expect(written[0]!).toContain("LOG SINK FAILURE");
+      expect(written[0]!).toContain("register"); // the record's action
+      expect(written[0]!).toContain("acme"); // the record's tenant
+      expect(written[0]!).toContain("logger broke"); // the cause, not a silent drop
+    } finally {
+      process.stderr.write = original;
+    }
+  });
 });
 
 describe("redis-stream sink (never-throw contract)", () => {
@@ -195,6 +215,31 @@ describe("redis-stream sink (never-throw contract)", () => {
     expect(warns.length).toBe(1);
     expect(stream.entries).toHaveLength(0);
   });
+
+  it("still resolves when both XADD and its warning logger throw", async () => {
+    const stream = createFakeAuditStream();
+    stream.setFail(true);
+    const written: string[] = [];
+    const original = process.stderr.write;
+    process.stderr.write = ((chunk: unknown): boolean => {
+      written.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const logger: LogPort = {
+        info: () => {},
+        warn: () => { throw new Error("warning transport down"); },
+        error: () => {},
+      };
+      const sink = createRedisStreamAuditSink(stream, logger);
+
+      await expect(sink.record(rec())).resolves.toBeUndefined();
+      expect(written.join("\n")).toContain("REDIS STREAM FAILURE");
+      expect(written.join("\n")).toContain("warning transport down");
+    } finally {
+      process.stderr.write = original;
+    }
+  });
 });
 
 describe("compound sink", () => {
@@ -215,6 +260,23 @@ describe("compound sink", () => {
     expect(good.records).toHaveLength(1);
   });
 
+  it("isolates a synchronous contract violation before fan-out promises exist", async () => {
+    const errors: Array<Record<string, unknown> | undefined> = [];
+    const logger: LogPort = {
+      info: () => {},
+      warn: () => {},
+      error: (_message, data) => errors.push(data),
+    };
+    const bad = { record: () => { throw new Error("synchronous sink failure"); } };
+    const good = createFakeAuditSink();
+    const sink = createCompoundAuditSink([bad, good], logger);
+
+    await expect(sink.record(rec())).resolves.toBeUndefined();
+    expect(good.records).toHaveLength(1);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.reason).toBe("synchronous sink failure");
+  });
+
   it("logs a rejecting sink (never-throw contract violation) via the logger, with the reason", async () => {
     const errors: { msg: string; meta?: Record<string, unknown> }[] = [];
     const logger: LogPort = {
@@ -233,5 +295,19 @@ describe("compound sink", () => {
     expect(errors).toHaveLength(1);
     expect(errors[0]?.meta?.reason).toBe("sink down");
     expect(errors[0]?.meta?.sinkIndex).toBe(0);
+  });
+
+  it("a throwing contract-violation logger cannot make compound record reject", async () => {
+    const good = createFakeAuditSink();
+    const bad = { record: async () => { throw new Error("sink down"); } };
+    const logger: LogPort = {
+      info: () => {},
+      warn: () => {},
+      error: () => { throw new Error("error transport down"); },
+    };
+    const sink = createCompoundAuditSink([bad, good], logger);
+
+    await expect(sink.record(rec())).resolves.toBeUndefined();
+    expect(good.records).toHaveLength(1);
   });
 });

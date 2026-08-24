@@ -28,6 +28,7 @@
  * @satisfies FR-035 — reuses `createHost`; does not replace the single-tenant path.
  */
 
+import { buildRuntimeDeps } from "./adapters/runtime-capabilities.js";
 import { parseHostConfig } from "./domain/config.js";
 import { workerSocketPath } from "./domain/config.js";
 import type { HostConfig } from "./domain/config.js";
@@ -43,28 +44,11 @@ import {
   WORKER_REDIS_ACL_PASSWORD_ENV,
   parseAclCredential,
 } from "./supervisor/secrets/redis-acl.js";
-import { createBunGitAdapter, createLocalGitAdapter } from "./adapters/git-sync.js";
-import { createModuleLoader } from "./adapters/module-loader.js";
-import { createRedisConnectivity } from "./adapters/redis-connectivity.js";
-import { buildCdratorCapability } from "./adapters/cdrator-capability.js";
-import { buildOracleCapability, connectStringHost } from "./adapters/oracle-capability.js";
-import type { SharedInfra } from "./ports.js";
-import type { SyncLogger } from "./sync/sync-loop.js";
-import { ok, err, noopTracer, AnthropicLlmClient, OpenAILlmClient, createHttpCapability, systemClock } from "@fuguejs/framework";
-import type { Result, LlmClient, CapabilityHandle } from "@fuguejs/framework";
-
-// ── Logger ───────────────────────────────────────────────────────────────────
-
-const safeStringify = (obj: unknown): string => {
-  try { return JSON.stringify(obj); }
-  catch (_e) { return `[unserializable: ${typeof obj}]`; }
-};
-
-const createLogger = (): SyncLogger => ({
-  info: (msg, data) => console.info(safeStringify({ level: "info", msg, ...data, ts: new Date().toISOString() })),
-  warn: (msg, data) => console.warn(safeStringify({ level: "warn", msg, ...data, ts: new Date().toISOString() })),
-  error: (msg, data) => console.error(safeStringify({ level: "error", msg, ...data, ts: new Date().toISOString() })),
-});
+import { createRedisConnectivity, disconnectRedisQuietly } from "./adapters/redis-connectivity.js";
+import { closeHitlQueueBackend, createHitlQueueBackend } from "./hitl/queue-backend.js";
+import { ok, err } from "@fuguejs/framework";
+import type { Result } from "@fuguejs/framework";
+import { createJsonConsoleLogger } from "./entrypoint-wiring.js";
 
 // ── Pure bootstrap planner (functional core — unit-testable, no I/O) ──────────
 
@@ -77,7 +61,7 @@ const createLogger = (): SyncLogger => ({
  * NOTE: `config` carries the resolved secrets merged in — it is SENSITIVE; the
  * caller MUST NOT log it.
  */
-export interface WorkerBootstrap {
+interface WorkerBootstrap {
   readonly tenant: TenantId;
   readonly secretsRef: SecretsRef;
   readonly config: HostConfig;
@@ -181,27 +165,10 @@ export const buildWorkerBootstrap = (
 // The ioredis adapter is SHARED with `main.ts` (see `adapters/redis-connectivity.ts`);
 // the worker only supplies the optional per-tenant ACL credential (ADR-0067).
 
-// ── LLM Client (mirrors main.ts) ───────────────────────────────────────────────
-
-const createLlmClient = async (config: HostConfig): Promise<LlmClient> => {
-  if (config.LLM_PROVIDER === "anthropic") {
-    const { default: Anthropic } = await import("@anthropic-ai/sdk");
-    return new AnthropicLlmClient(new Anthropic({ apiKey: config.ANTHROPIC_API_KEY }));
-  }
-  if (config.LLM_PROVIDER === "azure") {
-    const endpoint = (config.AZURE_OPENAI_ENDPOINT ?? "").replace(/\/$/, "");
-    const deployment = config.AZURE_OPENAI_DEPLOYMENT ?? "";
-    const apiKey = config.AZURE_OPENAI_API_KEY ?? "";
-    const baseUrl = `${endpoint}/openai/deployments/${deployment}`;
-    return new OpenAILlmClient({ apiKey, baseUrl, apiVersion: config.AZURE_OPENAI_API_VERSION, modelOverride: deployment });
-  }
-  return new OpenAILlmClient({ apiKey: config.OPENAI_API_KEY!, baseUrl: "https://api.openai.com/v1" });
-};
-
 // ── Main (imperative shell) ────────────────────────────────────────────────────
 
 const main = async () => {
-  const logger = createLogger();
+  const logger = createJsonConsoleLogger();
 
   // Step 1-4 (pure planning): env → tenant → secrets → config → socket path.
   // The env-file SecretsSource is constructed HERE — the sole site that carries
@@ -245,57 +212,12 @@ const main = async () => {
   const { port: redisPort, redis, disconnect: disconnectRedis } = redisResult.value;
 
   try {
-    const capabilities: CapabilityHandle[] = [
-      createHttpCapability(),
-      { name: "clock", client: systemClock },
-    ];
+    // The SAME runtime wiring as the single-tenant entry (`main.ts`) — see
+    // `buildRuntimeDeps`. Log lines carry the tenant so capability selection is
+    // attributable per worker.
+    const { sharedInfra, git, loader } = await buildRuntimeDeps(config, redis, logger, { tenant });
 
-    if (config.DOCUMENTS_ADAPTER === "fs") {
-      const { createFsAdapter } = await import("@fuguejs/fs");
-      capabilities.push(createFsAdapter({ rootDir: config.DOCUMENTS_FS_ROOT! }));
-      logger.info(`documents capability: @fuguejs/fs rooted at ${config.DOCUMENTS_FS_ROOT}`);
-    }
-
-    // Optional `authedHttp` capability (FR-060): the generic @fuguejs/http-auth
-    // adapter configured for the CDRator/Oister REST API from CDRATOR_* env.
-    // Same gating as the documents adapter — undefined when CDRATOR_URL is unset.
-    const cdrator = buildCdratorCapability(config);
-    if (cdrator !== undefined) {
-      capabilities.push(cdrator);
-      logger.info(`authedHttp capability: @fuguejs/http-auth targeting ${config.CDRATOR_URL}`, { tenant });
-    }
-
-    // Optional `oracle` capability (FR-031/FR-033): @fuguejs/oracle wired from
-    // ORACLE_* env. Same gating as the documents adapter — undefined when
-    // ORACLE_CONNECT_STRING is unset. We log ONLY the non-secret host:port/service
-    // of the connect string, never user/password (FR-041/SC-008).
-    const oracle = buildOracleCapability(config, logger);
-    if (oracle !== undefined) {
-      capabilities.push(oracle);
-      logger.info(`oracle capability: @fuguejs/oracle targeting ${connectStringHost(config.ORACLE_CONNECT_STRING!)}`, { tenant });
-    }
-
-    const sharedInfra: SharedInfra = {
-      llm: await createLlmClient(config),
-      redis,
-      tracer: noopTracer,
-      contentFilter: null,
-      prompts: null,
-      logger,
-      capabilities,
-    };
-
-    const isLocalMode = config.DAGS_LOCAL_PATH !== undefined && config.DAGS_LOCAL_PATH !== "";
-    const git = isLocalMode ? createLocalGitAdapter() : createBunGitAdapter();
-    const loader = createModuleLoader(logger);
-
-    let queueBackend: import("@fuguejs/framework").QueueBackend | undefined;
-    const hitlConfigured = config.TEAMS_WEBHOOK_URL !== undefined || config.BOT_APP_ID !== undefined;
-    if (hitlConfigured) {
-      const { createBullMQBackend } = await import("@fuguejs/framework/bullmq");
-      queueBackend = createBullMQBackend(config.REDIS_URL);
-      logger.info("HITL queue backend (BullMQ) constructed");
-    }
+    const queueBackend = await createHitlQueueBackend(config, logger);
 
     // Step 6: createHost bound to THIS tenant, serving on the per-tenant UDS.
     const hostResult = await createHost({
@@ -309,11 +231,7 @@ const main = async () => {
       tenant,
       bind: { unix: socketPath },
       onShutdown: async () => {
-        if (queueBackend) {
-          await queueBackend.close().catch((e: unknown) => {
-            logger.error("Failed to close HITL queue backend", { error: e instanceof Error ? e.message : String(e) });
-          });
-        }
+        await closeHitlQueueBackend(queueBackend, logger);
         await disconnectRedis();
       },
     });
@@ -326,14 +244,7 @@ const main = async () => {
 
     logger.info("Fugue worker is running", { tenant, socketPath });
   } catch (e) {
-    await disconnectRedis().catch((disconnectErr: unknown) => {
-      console.error(JSON.stringify({
-        level: "error",
-        msg: "Failed to disconnect Redis during error cleanup",
-        error: disconnectErr instanceof Error ? disconnectErr.message : String(disconnectErr),
-        ts: new Date().toISOString(),
-      }));
-    });
+    await disconnectRedisQuietly(disconnectRedis);
     throw e;
   }
 };

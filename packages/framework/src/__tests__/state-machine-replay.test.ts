@@ -49,7 +49,7 @@ describe("replayEvents", () => {
     const executor: Executor<CountState, CountEvent, CountCtx> = async () => events[i++];
 
     const liveResult = await runStateMachine(job, counterMachine, executor, {
-      errorEventOf: (c) => ({ type: "DONE" } as CountEvent),
+      errorEventOf: (_c) => ({ type: "DONE" } as CountEvent),
     });
 
     // Replay the collected event log from initial state
@@ -241,5 +241,71 @@ describe("replayEventSlice", () => {
     const betweenForm = replayEventSlice(fixture, counterMachine, initial, 0, 3500);
     expect(untilForm.state).toEqual(betweenForm.state);
     expect(untilForm.context).toEqual(betweenForm.context);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// foldStep envelope discriminator (isRecordedEvent) — behavior pins
+//
+// The single envelope-unwrap + `as E` cast site (foldStep, shared by
+// `replayEvents` and the resume proof's strict-prefix scan) discriminates
+// STRUCTURALLY: an entry carrying `recordedAtMs` (a number) + `event`
+// (+ optional BOOLEAN `synthetic`) is treated as an envelope; anything else
+// is raw. A raw machine-event payload that happens to match the envelope
+// shape is unwrapped too — the documented narrowing contract. These pins
+// localize any regression of the cast or discriminator to this suite.
+// ---------------------------------------------------------------------------
+
+describe("foldStep envelope discriminator (isRecordedEvent)", () => {
+  type CaptureState = { received: unknown };
+  const captureMachine: Machine<CaptureState, unknown, Record<string, never>> = {
+    transition(_state, event) {
+      return { state: { received: event }, context: {} };
+    },
+    isTerminal: () => false,
+    isFailed: () => false,
+    stateProgress: () => 50,
+    stateKey: () => "capture",
+  };
+  const captureInitial = {
+    state: { received: undefined } as CaptureState,
+    context: {} as Record<string, never>,
+  };
+
+  const lastReceived = (entry: unknown): unknown =>
+    replayEvents([entry], captureMachine, captureInitial).state.received;
+
+  it("unwraps a clean envelope ({recordedAtMs, event}) to the inner event", () => {
+    expect(lastReceived({ recordedAtMs: 1, event: { type: "X" } })).toEqual({ type: "X" });
+  });
+
+  it("unwraps an envelope with synthetic: true", () => {
+    expect(lastReceived({ recordedAtMs: 1, event: { type: "X" }, synthetic: true })).toEqual({
+      type: "X",
+    });
+  });
+
+  it("treats a NON-boolean synthetic as a RAW event — the whole entry reaches the machine (PR-tightened discriminator)", () => {
+    const entry = { recordedAtMs: 1, event: { type: "X" }, synthetic: "nope" };
+    expect(lastReceived(entry)).toBe(entry);
+  });
+
+  it("treats a non-numeric recordedAtMs as a RAW event", () => {
+    const entry = { recordedAtMs: "1", event: { type: "X" } };
+    expect(lastReceived(entry)).toBe(entry);
+  });
+
+  it("treats a plain raw event that lacks the envelope keys as RAW", () => {
+    const entry = { type: "X" };
+    expect(lastReceived(entry)).toBe(entry);
+  });
+
+  it("pins the documented narrowing: an envelope-SHAPED raw payload (no synthetic) is unwrapped", () => {
+    // A raw machine event shaped exactly like {recordedAtMs, event} is
+    // structurally indistinguishable from an envelope — the current contract
+    // unwraps it. Pinning keeps a future discriminator change (e.g. branding
+    // the envelope — a parked ADR-level decision) visible in this suite.
+    const entry = { recordedAtMs: 5, event: "inner" };
+    expect(lastReceived(entry)).toBe("inner");
   });
 });

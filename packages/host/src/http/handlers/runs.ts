@@ -9,30 +9,30 @@
  *                                  "approve-with-edit" | "reroute", ... }.
  *
  * Authorization mirrors run submission: the caller's identity must be able to
- * access the run's owning DAG team (admin, or the owning team). A run for an
- * unknown/forbidden DAG is treated as not-found / forbidden respectively.
+ * access the immutable owning team captured on the run at durable acceptance.
+ * Later DAG reassignment or removal cannot change historical-run access.
  */
 
+import { requireAuthIdentity, callerTeamLabel } from "./dag-access.js";
+import type { DagAccessDecision } from "./dag-access.js";
 import { match } from "ts-pattern";
 import type { Context } from "hono";
 import type { HumanAction } from "@fuguejs/framework";
 import { formatFrameworkError, tryRunId, tryNodeId } from "@fuguejs/framework";
-import type { HostEnv } from "../router.js";
+import type { HostEnv } from "../env.js";
 import type { AuthIdentity } from "../../domain/auth.js";
 import { canAccessDag } from "../../domain/auth.js";
 import { errorResponse, successResponse } from "../response.js";
 import { httpStatusFor, formatHostError } from "../../domain/host-error.js";
-import { getRegistry } from "../../domain/host-state.js";
-import { lookupDag } from "../../domain/registry.js";
 import type { HitlRunService } from "../../hitl/service.js";
-import type { RunRecord, RunStatus } from "../../hitl/types.js";
+import type { RunMetadata, RunStatus } from "../../hitl/types.js";
 
-export interface RunsHandlerDeps {
+interface RunsHandlerDeps {
   readonly hitl?: HitlRunService;
 }
 
 /** Public JSON view of a run's status (never leaks internal checkpoint/identity). */
-const statusView = (record: RunRecord): unknown =>
+const statusView = (record: RunMetadata): unknown =>
   match(record.status)
     .with({ kind: "queued" }, () => ({ runId: record.runId, dagId: record.dagId, status: "queued" }))
     .with({ kind: "running" }, () => ({ runId: record.runId, dagId: record.dagId, status: "running" }))
@@ -56,36 +56,52 @@ const statusView = (record: RunRecord): unknown =>
     }))
     .exhaustive();
 
-/**
- * Authorize the caller against the run's owning DAG team. Returns the team's id
- * via `ok`, or an HTTP response to short-circuit. A run whose DAG is no longer
- * registered is treated as not-found (we cannot establish its team).
- */
+/** Authorize the caller against the run's immutable resource owner. */
 const authorizeRunAccess = (
   c: Context<HostEnv>,
-  record: RunRecord,
-): { ok: true } | { ok: false; response: Response } => {
-  const identity = c.get("authIdentity") as AuthIdentity | undefined;
-  if (!identity) {
-    return { ok: false, response: errorResponse(c, 401, "unauthorized", "Missing auth identity — middleware not applied") };
-  }
-  const hostState = c.get("hostState");
-  const registry = getRegistry(hostState);
-  const registered = registry ? lookupDag(registry, record.dagId) : undefined;
-  if (!registered) {
-    return { ok: false, response: errorResponse(c, 404, "run-not-found", `Run '${record.runId}' references unknown DAG '${record.dagId}'`) };
-  }
-  if (!canAccessDag(identity, registered.team)) {
-    const callerTeam = identity.kind === "team" ? identity.team : identity.kind;
+  record: RunMetadata,
+): DagAccessDecision => {
+  const authed = requireAuthIdentity(c);
+  if (!authed.ok) return authed;
+  const { identity } = authed;
+  if (!canAccessDag(identity, record.ownerTeam)) {
+    const callerTeam = callerTeamLabel(identity);
     return {
       ok: false,
       response: errorResponse(c, 403, "forbidden",
-        `Token for '${callerTeam}' cannot access run '${record.runId}' (DAG owned by '${registered.team}')`,
+        `Token for '${callerTeam}' cannot access run '${record.runId}' (run owned by '${record.ownerTeam}')`,
         { dagId: record.dagId },
       ),
     };
   }
-  return { ok: true };
+  return { ok: true, identity };
+};
+
+const loadAuthorizedRun = async (
+  c: Context<HostEnv>,
+  hitl: HitlRunService,
+): Promise<{ ok: true; record: RunMetadata; identity: AuthIdentity } | { ok: false; response: Response }> => {
+  const runIdRaw = c.req.param("runId") ?? "";
+  const parsed = tryRunId(runIdRaw);
+  if (!parsed.ok) {
+    return { ok: false, response: errorResponse(c, 404, "run-not-found", `Run '${runIdRaw}' not found`) };
+  }
+
+  const fetched = await hitl.getRun(parsed.value);
+  if (!fetched.ok) {
+    return {
+      ok: false,
+      response: errorResponse(c, httpStatusFor(fetched.error), fetched.error.kind, formatHostError(fetched.error)),
+    };
+  }
+  if (fetched.value === null) {
+    return { ok: false, response: errorResponse(c, 404, "run-not-found", `Run '${parsed.value}' not found`) };
+  }
+
+  const authorized = authorizeRunAccess(c, fetched.value);
+  return authorized.ok
+    ? { ok: true, record: fetched.value, identity: authorized.identity }
+    : authorized;
 };
 
 export const createGetRunHandler = (deps: RunsHandlerDeps) =>
@@ -93,24 +109,9 @@ export const createGetRunHandler = (deps: RunsHandlerDeps) =>
     if (!deps.hitl) {
       return errorResponse(c, 501, "hitl-not-configured", "HITL is not configured on this host");
     }
-    const runIdRaw = c.req.param("runId") ?? "";
-    const runIdParsed = tryRunId(runIdRaw);
-    if (!runIdParsed.ok) {
-      // A malformed id can reference no run; treat as not-found (don't leak the
-      // id-format rule), and never feed an unparsed string into the store.
-      return errorResponse(c, 404, "run-not-found", `Run '${runIdRaw}' not found`);
-    }
-    const runId = runIdParsed.value;
-    const fetched = await deps.hitl.getRun(runId);
-    if (!fetched.ok) {
-      return errorResponse(c, httpStatusFor(fetched.error), fetched.error.kind, formatHostError(fetched.error));
-    }
-    if (fetched.value === null) {
-      return errorResponse(c, 404, "run-not-found", `Run '${runId}' not found`);
-    }
-    const auth = authorizeRunAccess(c, fetched.value);
-    if (!auth.ok) return auth.response;
-    return successResponse(c, statusView(fetched.value));
+    const loaded = await loadAuthorizedRun(c, deps.hitl);
+    if (!loaded.ok) return loaded.response;
+    return successResponse(c, statusView(loaded.record));
   };
 
 // ── Approval body parsing ────────────────────────────────────────────────────
@@ -120,17 +121,16 @@ const parseDecision = (body: unknown): { ok: true; action: HumanAction } | { ok:
   if (typeof body !== "object" || body === null) return { ok: false, message: "body must be a JSON object" };
   const b = body as Record<string, unknown>;
   const decision = b.decision;
-  const actor = typeof b.actor === "string" ? b.actor : undefined;
 
   return match(decision)
-    .with("approve", () => ({ ok: true as const, action: { kind: "approve" as const, ...(actor ? { actor } : {}) } }))
+    .with("approve", () => ({ ok: true as const, action: { kind: "approve" as const } }))
     .with("approve-with-edit", () =>
       "newOutput" in b
-        ? { ok: true as const, action: { kind: "approve-with-edit" as const, newOutput: b.newOutput, ...(actor ? { actor } : {}) } }
+        ? { ok: true as const, action: { kind: "approve-with-edit" as const, newOutput: b.newOutput } }
         : { ok: false as const, message: "approve-with-edit requires 'newOutput'" })
     .with("reject", () =>
       typeof b.reason === "string"
-        ? { ok: true as const, action: { kind: "reject" as const, reason: b.reason, ...(actor ? { actor } : {}) } }
+        ? { ok: true as const, action: { kind: "reject" as const, reason: b.reason } }
         : { ok: false as const, message: "reject requires a string 'reason'" })
     .with("reroute", () => {
       if (typeof b.targetNodeId !== "string") {
@@ -145,36 +145,33 @@ const parseDecision = (body: unknown): { ok: true; action: HumanAction } | { ok:
           kind: "reroute" as const,
           targetNodeId: target.value,
           ...(typeof b.reason === "string" ? { reason: b.reason } : {}),
-          ...(actor ? { actor } : {}),
         },
       };
     })
     .otherwise(() => ({ ok: false as const, message: "decision must be one of: approve, approve-with-edit, reject, reroute" }));
 };
 
+const auditActor = (identity: AuthIdentity): string =>
+  match(identity)
+    .with({ kind: "admin" }, () => "admin")
+    .with({ kind: "team" }, (teamIdentity) => `team:${teamIdentity.team}`)
+    .with({ kind: "user" }, (userIdentity) => `user:${userIdentity.sub}`)
+    .exhaustive();
+
+const attributeDecision = (action: HumanAction, identity: AuthIdentity): HumanAction => ({
+  ...action,
+  actor: auditActor(identity),
+});
+
 export const createApproveRunHandler = (deps: RunsHandlerDeps) =>
   async (c: Context<HostEnv>): Promise<Response> => {
     if (!deps.hitl) {
       return errorResponse(c, 501, "hitl-not-configured", "HITL is not configured on this host");
     }
-    const runIdRaw = c.req.param("runId") ?? "";
-    const runIdParsed = tryRunId(runIdRaw);
-    if (!runIdParsed.ok) {
-      return errorResponse(c, 404, "run-not-found", `Run '${runIdRaw}' not found`);
-    }
-    const runId = runIdParsed.value;
-
-    const fetched = await deps.hitl.getRun(runId);
-    if (!fetched.ok) {
-      return errorResponse(c, httpStatusFor(fetched.error), fetched.error.kind, formatHostError(fetched.error));
-    }
-    const record = fetched.value;
-    if (record === null) {
-      return errorResponse(c, 404, "run-not-found", `Run '${runId}' not found`);
-    }
-
-    const auth = authorizeRunAccess(c, record);
-    if (!auth.ok) return auth.response;
+    const loaded = await loadAuthorizedRun(c, deps.hitl);
+    if (!loaded.ok) return loaded.response;
+    const { record, identity } = loaded;
+    const runId = record.runId;
 
     // The gate being decided is the run's CURRENT suspended gate. Approving a run
     // that isn't parked is a conflict (nothing to decide).
@@ -198,7 +195,11 @@ export const createApproveRunHandler = (deps: RunsHandlerDeps) =>
       return errorResponse(c, 400, "invalid-decision", parsed.message, { runId });
     }
 
-    const recorded = await deps.hitl.recordDecision(record.runId, gateNodeId, parsed.action);
+    const recorded = await deps.hitl.recordDecision(
+      record.runId,
+      gateNodeId,
+      attributeDecision(parsed.action, identity),
+    );
     if (!recorded.ok) {
       return errorResponse(c, httpStatusFor(recorded.error), recorded.error.kind, formatHostError(recorded.error), { runId });
     }

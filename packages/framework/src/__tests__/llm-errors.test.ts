@@ -4,7 +4,6 @@ import {
   classifyLlmError,
   httpFailureToError,
   isAbort,
-  isRateLimit,
   isTimeoutError,
   truncateErrorBody,
 } from "../llm/llm-errors.js";
@@ -27,27 +26,6 @@ describe("isAbort", () => {
     expect(isAbort("not an error")).toBe(false);
     expect(isAbort(null)).toBe(false);
     expect(isAbort(undefined)).toBe(false);
-  });
-});
-
-describe("isRateLimit", () => {
-  test("returns true for status 429", () => {
-    const e = Object.assign(new Error("rate limited"), { status: 429 });
-    expect(isRateLimit(e)).toBe(true);
-  });
-
-  test("returns true for plain object with status 429", () => {
-    expect(isRateLimit({ status: 429 })).toBe(true);
-  });
-
-  test("returns false for other status codes", () => {
-    expect(isRateLimit({ status: 500 })).toBe(false);
-    expect(isRateLimit({ status: 200 })).toBe(false);
-  });
-
-  test("returns false for missing status", () => {
-    expect(isRateLimit(new Error("no status"))).toBe(false);
-    expect(isRateLimit({})).toBe(false);
   });
 });
 
@@ -352,6 +330,45 @@ describe("classifyLlmError", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("aborted");
+    }
+  });
+
+  test("hostile provider diagnostics cannot escape classification", () => {
+    const throwingStatus = {
+      message: "provider failed",
+      get status(): never { throw new Error("status getter escaped"); },
+    };
+    const hostileCoercion = {
+      get message(): never { throw new Error("message getter escaped"); },
+      [Symbol.toPrimitive](): never { throw new Error("coercion escaped"); },
+      toString(): never { throw new Error("toString escaped"); },
+    };
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+
+    for (const value of [throwingStatus, hostileCoercion, revoked.proxy]) {
+      const result = classifyLlmError(value, nodeId);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("node-crash");
+        if (result.error.kind === "node-crash") {
+          expect(typeof result.error.message).toBe("string");
+        }
+      }
+    }
+
+    expect(isAbort(revoked.proxy)).toBe(false);
+    expect(isTimeoutError(revoked.proxy)).toBe(false);
+  });
+
+  test("a throwing provider abort override is advisory and falls back to generic classification", () => {
+    const result = classifyLlmError(new Error("provider failed"), nodeId, {
+      isAbortOverride: () => { throw new Error("override escaped"); },
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "node-crash") {
+      expect(result.error.message).toBe("provider failed");
     }
   });
 

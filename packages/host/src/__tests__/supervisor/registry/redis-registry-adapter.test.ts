@@ -15,7 +15,9 @@ import type { TenantId } from "../../../domain/tenant.js";
 import { tenantConfig } from "../../../supervisor/registry/tenant-registry.js";
 import type {
   ActiveTenantConfig,
+  DeregisteredTenantConfig,
   TenantConfigBase,
+  TenantRegistry,
 } from "../../../supervisor/registry/tenant-registry.js";
 import {
   createRedisTenantRegistry,
@@ -115,7 +117,7 @@ describe("redis tenant registry — pub/sub emission (AD-5)", () => {
     const reg = createRedisTenantRegistry(fake.redis, fake.pubsub);
     await reg.register(makeConfig("acme"), 1000);
     fake.published.length = 0;
-    const res = await reg.reconfigure(makeConfig("acme", { fsRoot: "/srv/acme2" }), 2000);
+    const res = await reg.reconfigure(makeConfig("acme", { fsRoot: "/srv/acme/v2" }), 2000);
     expect(res.ok).toBe(true);
     expect(JSON.parse(fake.published[0].message)).toEqual({ kind: "reconfigured", tenant: "acme" });
   });
@@ -150,6 +152,47 @@ describe("redis tenant registry — pub/sub emission (AD-5)", () => {
     await fake.pubsub.publish(TENANT_EVENTS_CHANNEL, JSON.stringify({ kind: "bogus", tenant: "x" }));
     expect(observed).toEqual([]); // both dropped, no throw
   });
+
+  for (const mode of ["throw", "reject"] as const) {
+    it(`isolates and logs a handler ${mode} without breaking later events`, async () => {
+      const fake = createInMemoryRedisFake();
+      const errors: Array<{ readonly message: string; readonly data?: Record<string, unknown> }> = [];
+      let calls = 0;
+      const logger = {
+        info: () => {},
+        warn: () => {},
+        error: (message: string, data?: Record<string, unknown>) => { errors.push({ message, data }); },
+      };
+      const sub = await subscribeTenantEvents(
+        fake.pubsub,
+        () => {
+          calls += 1;
+          if (calls === 1) {
+            if (mode === "throw") throw new Error("sync callback exploded");
+            return Promise.reject(new Error("async callback exploded"));
+          }
+        },
+        {},
+        logger,
+      );
+      expect(sub.ok).toBe(true);
+
+      await fake.pubsub.publish(TENANT_EVENTS_CHANNEL, JSON.stringify({ kind: "registered", tenant: "acme" }));
+      await Promise.resolve();
+      await fake.pubsub.publish(TENANT_EVENTS_CHANNEL, JSON.stringify({ kind: "reconfigured", tenant: "acme" }));
+      await Promise.resolve();
+
+      expect(calls).toBe(2);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]?.message).toContain("Tenant event handler failed");
+      expect(errors[0]?.data).toMatchObject({
+        kind: "registered",
+        tenant: "acme",
+        error: mode === "throw" ? "sync callback exploded" : "async callback exploded",
+      });
+      if (sub.ok) await sub.value.unsubscribe();
+    });
+  }
 });
 
 describe("redis tenant registry — fail-closed (FR-022 / FR-023)", () => {
@@ -220,6 +263,34 @@ describe("redis tenant registry — fail-closed (FR-022 / FR-023)", () => {
     expect(dead).toBe(1);
   });
 
+  it("latches degradation and returns a typed error even when rendering, logging, and the dead hook throw", async () => {
+    const fake = createInMemoryRedisFake();
+    const hostile = Object.create(null) as { toString: () => string };
+    hostile.toString = () => { throw new Error("cannot render"); };
+    const redis = {
+      ...fake.redis,
+      set: async () => { throw hostile; },
+    };
+    const reg = createRedisTenantRegistry(
+      redis,
+      fake.pubsub,
+      { onRedisDead: () => { throw new Error("dead hook unavailable"); } },
+      {
+        info: () => {},
+        warn: () => { throw new Error("logger unavailable"); },
+        error: () => {},
+      },
+    );
+
+    const result = await reg.register(makeConfig("acme"), 1000);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("redis-unavailable");
+    const gated = reg.resolveForNewRun(tid("ghost"));
+    expect(gated.ok).toBe(false);
+    if (!gated.ok) expect(gated.error.kind).toBe("redis-unavailable");
+  });
+
   it("recovers: onRedisAlive fires after a successful op following an outage", async () => {
     const fake = createInMemoryRedisFake();
     let alive = 0;
@@ -244,10 +315,10 @@ describe("redis tenant registry — persists the CORE-NORMALIZED entry (CRITICAL
     const fake = createInMemoryRedisFake();
     const reg = createRedisTenantRegistry(fake.redis, fake.pubsub);
     await reg.register(makeConfig("acme"), 1000);
-    await reg.reconfigure(makeConfig("acme", { fsRoot: "/srv/acme2" }), 2000);
+    await reg.reconfigure(makeConfig("acme", { fsRoot: "/srv/acme/v2" }), 2000);
     const parsed = JSON.parse(fake.store.get(`${TENANT_KEY_PREFIX}acme`)!);
     expect(parsed.status).toBe("active");
-    expect(parsed.fsRoot).toBe("/srv/acme2");
+    expect(parsed.fsRoot).toBe("/srv/acme/v2");
     expect("deregisteredAt" in parsed).toBe(false);
   });
 
@@ -312,7 +383,7 @@ describe("redis tenant registry — resolveForNewRun fail-closed seam (FR-022 / 
 
     // Drive the adapter into the degraded edge via a failed write.
     fake.setFail(true);
-    const down = await reg.register(makeConfig("acme", { fsRoot: "/srv/acme-x" }), 1100);
+    const down = await reg.register(makeConfig("acme", { fsRoot: "/srv/acme/x" }), 1100);
     expect(down.ok).toBe(false);
 
     // NEW-run resolution fails closed…
@@ -332,16 +403,16 @@ describe("redis tenant registry — resolveForNewRun fail-closed seam (FR-022 / 
     await reg.register(makeConfig("acme"), 1000);
 
     fake.setFail(true);
-    await reg.register(makeConfig("acme", { fsRoot: "/srv/acme-x" }), 1100);
+    await reg.register(makeConfig("acme", { fsRoot: "/srv/acme/x" }), 1100);
     expect(reg.resolveForNewRun(tid("acme")).ok).toBe(false);
 
     // Recover: a successful op flips degraded back off.
     fake.setFail(false);
-    const ok2 = await reg.reconfigure(makeConfig("acme", { fsRoot: "/srv/acme2" }), 2000);
+    const ok2 = await reg.reconfigure(makeConfig("acme", { fsRoot: "/srv/acme/v2" }), 2000);
     expect(ok2.ok).toBe(true);
     const newRun = reg.resolveForNewRun(tid("acme"));
     expect(newRun.ok).toBe(true);
-    if (newRun.ok) expect(newRun.value.fsRoot).toBe("/srv/acme2");
+    if (newRun.ok) expect(newRun.value.fsRoot).toBe("/srv/acme/v2");
   });
 
   it("a successful hydrate clears degraded so resolveForNewRun works", async () => {
@@ -350,7 +421,7 @@ describe("redis tenant registry — resolveForNewRun fail-closed seam (FR-022 / 
     await reg.register(makeConfig("acme"), 1000);
 
     fake.setFail(true);
-    await reg.register(makeConfig("acme", { fsRoot: "/srv/acme-x" }), 1100);
+    await reg.register(makeConfig("acme", { fsRoot: "/srv/acme/x" }), 1100);
     expect(reg.resolveForNewRun(tid("acme")).ok).toBe(false);
 
     fake.setFail(false);
@@ -360,8 +431,8 @@ describe("redis tenant registry — resolveForNewRun fail-closed seam (FR-022 / 
   });
 });
 
-describe("redis tenant registry — hydrate skips corrupt records (deserialize fail-closed)", () => {
-  it("loads a valid record and skips a garbage one without throwing or going degraded", async () => {
+describe("redis tenant registry — hydrate rejects corrupt records without a partial commit", () => {
+  it("rejects a garbage record, preserves the prior snapshot, and does not report a Redis outage", async () => {
     const fake = createInMemoryRedisFake();
     // Seed one valid record (round-tripped through a real register) + garbage.
     const seedReg = createRedisTenantRegistry(fake.redis, fake.pubsub);
@@ -369,15 +440,25 @@ describe("redis tenant registry — hydrate skips corrupt records (deserialize f
     fake.store.set(`${TENANT_KEY_PREFIX}bad`, "{not json");
 
     let dead = 0;
-    const reg = createRedisTenantRegistry(fake.redis, fake.pubsub, { onRedisDead: () => { dead += 1; } });
+    const logger = {
+      info: () => {},
+      warn: () => { throw new Error("logger unavailable"); },
+      error: () => {},
+    };
+    const reg = createRedisTenantRegistry(
+      fake.redis,
+      fake.pubsub,
+      { onRedisDead: () => { dead += 1; } },
+      logger,
+    );
     const hydrated = await reg.hydrate();
-    expect(hydrated.ok).toBe(true);
-    expect(dead).toBe(0); // corrupt record is a skip, NOT a Redis outage
-    expect(reg.lookup(tid("good")).ok).toBe(true);
-    expect(reg.lookup(tid("bad")).ok).toBe(false);
+    expect(hydrated.ok).toBe(false);
+    if (!hydrated.ok) expect(hydrated.error.kind).toBe("config-invalid");
+    expect(dead).toBe(0); // corruption is not a Redis outage
+    expect(reg.snapshot().entries.size).toBe(0); // valid sibling was not partially committed
   });
 
-  it("skips a record with an unknown/missing status discriminant (fail-closed)", async () => {
+  it("rejects a record with an unknown/missing status discriminant (fail-closed)", async () => {
     const fake = createInMemoryRedisFake();
     const seedReg = createRedisTenantRegistry(fake.redis, fake.pubsub);
     await seedReg.register(makeConfig("good"), 1000);
@@ -398,9 +479,23 @@ describe("redis tenant registry — hydrate skips corrupt records (deserialize f
     );
     const reg = createRedisTenantRegistry(fake.redis, fake.pubsub);
     const hydrated = await reg.hydrate();
-    expect(hydrated.ok).toBe(true);
-    expect(reg.lookup(tid("good")).ok).toBe(true);
-    expect(reg.snapshot().entries.has(tid("weird"))).toBe(false);
+    expect(hydrated.ok).toBe(false);
+    if (!hydrated.ok) expect(hydrated.error.kind).toBe("config-invalid");
+    expect(reg.snapshot().entries.size).toBe(0);
+  });
+
+  it("rejects duplicate active team ownership without committing a partial snapshot", async () => {
+    const fake = createInMemoryRedisFake();
+    const reg = createRedisTenantRegistry(fake.redis, fake.pubsub);
+    await reg.register(makeConfig("prior"), 1000);
+    fake.store.set(`${TENANT_KEY_PREFIX}a`, JSON.stringify({ ...validRaw("a"), team: "shared" }));
+    fake.store.set(`${TENANT_KEY_PREFIX}b`, JSON.stringify({ ...validRaw("b"), team: "shared" }));
+
+    const hydrated = await reg.hydrate();
+
+    expect(hydrated.ok).toBe(false);
+    if (!hydrated.ok) expect(hydrated.error.kind).toBe("config-invalid");
+    expect([...reg.snapshot().entries.keys()]).toEqual([tid("prior")]);
   });
 
   it("round-trips a deregistered record through hydrate (status:deregistered + tombstone)", async () => {
@@ -419,10 +514,10 @@ describe("redis tenant registry — hydrate skips corrupt records (deserialize f
     if (entry?.status === "deregistered") expect(entry.deregisteredAt).toBe(1500);
   });
 
-  // ── per-field corrupt-record skip branches (parse-don't-validate boundary) ──
-  // Each persisted field that is the wrong shape must make the WHOLE record a
-  // skip (not a 500, not a coerced round-trip). A structurally-valid sibling must
-  // still hydrate, and no Redis-outage hook may fire — corruption is not an outage.
+  // ── Per-field corrupt-record branches (parse-don't-validate boundary) ──
+  // Any malformed persisted field aborts the whole hydrate before commit. A
+  // structurally valid sibling is not installed from a partial scan, and a
+  // corruption verdict never fires the Redis-outage hook.
   const validRaw = (id: string): Record<string, unknown> => ({
     status: "active",
     id,
@@ -435,7 +530,7 @@ describe("redis tenant registry — hydrate skips corrupt records (deserialize f
     eagerPin: false,
   });
 
-  const expectSkipped = async (key: string, raw: unknown): Promise<void> => {
+  const expectCorruptHydrate = async (key: string, raw: unknown): Promise<void> => {
     const fake = createInMemoryRedisFake();
     const seedReg = createRedisTenantRegistry(fake.redis, fake.pubsub);
     await seedReg.register(makeConfig("good"), 1000);
@@ -444,66 +539,66 @@ describe("redis tenant registry — hydrate skips corrupt records (deserialize f
     let dead = 0;
     const reg = createRedisTenantRegistry(fake.redis, fake.pubsub, { onRedisDead: () => { dead += 1; } });
     const hydrated = await reg.hydrate();
-    expect(hydrated.ok).toBe(true);
-    expect(dead).toBe(0); // corrupt record is a skip, NOT a Redis outage
-    expect(reg.lookup(tid("good")).ok).toBe(true); // valid sibling still loads
-    expect(reg.snapshot().entries.has(tid(key))).toBe(false); // corrupt one skipped
+    expect(hydrated.ok).toBe(false);
+    if (!hydrated.ok) expect(hydrated.error.kind).toBe("config-invalid");
+    expect(dead).toBe(0);
+    expect(reg.snapshot().entries.size).toBe(0);
   };
 
-  it("skips a record whose secretsRef is blank or non-string", async () => {
-    await expectSkipped("blank-ref", { ...validRaw("blank-ref"), secretsRef: "   " });
-    await expectSkipped("num-ref", { ...validRaw("num-ref"), secretsRef: 42 });
+  it("rejects a record whose secretsRef is blank or non-string", async () => {
+    await expectCorruptHydrate("blank-ref", { ...validRaw("blank-ref"), secretsRef: "   " });
+    await expectCorruptHydrate("num-ref", { ...validRaw("num-ref"), secretsRef: 42 });
   });
 
-  it("skips a deregistered record missing its numeric deregisteredAt tombstone", async () => {
+  it("rejects a deregistered record missing its numeric deregisteredAt tombstone", async () => {
     // status:deregistered with no `deregisteredAt` (or a non-numeric one) is corrupt.
-    await expectSkipped("no-tomb", { ...validRaw("no-tomb"), status: "deregistered" });
-    await expectSkipped("str-tomb", { ...validRaw("str-tomb"), status: "deregistered", deregisteredAt: "soon" });
+    await expectCorruptHydrate("no-tomb", { ...validRaw("no-tomb"), status: "deregistered" });
+    await expectCorruptHydrate("str-tomb", { ...validRaw("str-tomb"), status: "deregistered", deregisteredAt: "soon" });
   });
 
-  it("skips a record with a non-string value in agentClientIdsByDag", async () => {
-    await expectSkipped("bad-agent", {
+  it("rejects a record with a non-string value in agentClientIdsByDag", async () => {
+    await expectCorruptHydrate("bad-agent", {
       ...validRaw("bad-agent"),
       keycloakClientMapping: { realm: "fugue", clientId: "c", agentClientIdsByDag: { "lead-desk": 99 } },
     });
   });
 
-  it("skips a record that coerces a non-string team / realm / clientId / fsRoot", async () => {
+  it("rejects a record that coerces a non-string team / realm / clientId / fsRoot", async () => {
     // Guards the boundary against `String(42)` → "42" silently round-tripping a
     // malformed scalar as a valid-looking field.
-    await expectSkipped("num-team", { ...validRaw("num-team"), team: 7 });
-    await expectSkipped("num-realm", {
+    await expectCorruptHydrate("num-team", { ...validRaw("num-team"), team: 7 });
+    await expectCorruptHydrate("num-realm", {
       ...validRaw("num-realm"),
       keycloakClientMapping: { realm: 7, clientId: "c", agentClientIdsByDag: {} },
     });
-    await expectSkipped("num-client", {
+    await expectCorruptHydrate("num-client", {
       ...validRaw("num-client"),
       keycloakClientMapping: { realm: "fugue", clientId: 7, agentClientIdsByDag: {} },
     });
-    await expectSkipped("num-root", { ...validRaw("num-root"), fsRoot: 7 });
-    await expectSkipped("num-dags-root", { ...validRaw("num-dags-root"), dagsRoot: 7 });
+    await expectCorruptHydrate("num-root", { ...validRaw("num-root"), fsRoot: 7 });
+    await expectCorruptHydrate("num-dags-root", { ...validRaw("num-dags-root"), dagsRoot: 7 });
   });
 
-  it("skips a record whose admission limits are non-numbers (never coerce via Number(...))", async () => {
+  it("rejects a record whose admission limits are non-numbers (never coerce via Number(...))", async () => {
     // A non-number admission limit must skip-as-corrupt, NOT coerce: `Number("5")`
     // → 5, `Number(true)` → 1, `Number(null)` → 0 would silently round-trip a
     // malformed value as a valid-looking ceiling. Parity with the string-field
     // guards above (parse-don't-validate boundary).
-    await expectSkipped("str-conc", { ...validRaw("str-conc"), admission: { maxConcurrentRuns: "5", maxQueuedRuns: 8 } });
-    await expectSkipped("bool-conc", { ...validRaw("bool-conc"), admission: { maxConcurrentRuns: true, maxQueuedRuns: 8 } });
-    await expectSkipped("null-queue", { ...validRaw("null-queue"), admission: { maxConcurrentRuns: 4, maxQueuedRuns: null } });
-    await expectSkipped("arr-queue", { ...validRaw("arr-queue"), admission: { maxConcurrentRuns: 4, maxQueuedRuns: [] } });
-    await expectSkipped("missing-queue", { ...validRaw("missing-queue"), admission: { maxConcurrentRuns: 4 } });
+    await expectCorruptHydrate("str-conc", { ...validRaw("str-conc"), admission: { maxConcurrentRuns: "5", maxQueuedRuns: 8 } });
+    await expectCorruptHydrate("bool-conc", { ...validRaw("bool-conc"), admission: { maxConcurrentRuns: true, maxQueuedRuns: 8 } });
+    await expectCorruptHydrate("null-queue", { ...validRaw("null-queue"), admission: { maxConcurrentRuns: 4, maxQueuedRuns: null } });
+    await expectCorruptHydrate("arr-queue", { ...validRaw("arr-queue"), admission: { maxConcurrentRuns: 4, maxQueuedRuns: [] } });
+    await expectCorruptHydrate("missing-queue", { ...validRaw("missing-queue"), admission: { maxConcurrentRuns: 4 } });
   });
 
-  it("skips a record whose eagerPin is a non-boolean (never truthy-coerce)", async () => {
+  it("rejects a record whose eagerPin is a non-boolean (never truthy-coerce)", async () => {
     // eagerPin is the authoritative pin source (AD-7): idleEvict/isIdleEvictable
     // consume it TRUTHILY, so a coercion like `Boolean(o.eagerPin)` would turn the
     // string "false" into a pinned-forever worker. The guard must skip-as-corrupt,
     // not coerce. The "false" case specifically pins the dangerous Boolean("false")
     // → true regression.
-    await expectSkipped("str-pin", { ...validRaw("str-pin"), eagerPin: "false" });
-    await expectSkipped("num-pin", { ...validRaw("num-pin"), eagerPin: 1 });
+    await expectCorruptHydrate("str-pin", { ...validRaw("str-pin"), eagerPin: "false" });
+    await expectCorruptHydrate("num-pin", { ...validRaw("num-pin"), eagerPin: 1 });
   });
 });
 
@@ -517,7 +612,7 @@ describe("redis tenant registry — probe-recovery clears the write-leg latch (F
 
     // Force a WRITE failure → latches `writeDegraded` (the write leg of the gate).
     fake.setFail(true);
-    const down = await reg.register(makeConfig("acme", { fsRoot: "/srv/acme-x" }), 1100);
+    const down = await reg.register(makeConfig("acme", { fsRoot: "/srv/acme/x" }), 1100);
     expect(down.ok).toBe(false);
     if (!down.ok) expect(down.error.kind).toBe("redis-unavailable");
     // The write-leg latch now fails NEW-run resolution closed.
@@ -587,12 +682,78 @@ describe("redis tenant registry — concurrent cross-tenant register both surviv
   });
 });
 
+describe("redis tenant registry — concurrent hydration", () => {
+  it("cannot replace a successful registration with a stale scan snapshot", async () => {
+    const fake = createInMemoryRedisFake();
+    const seed = createRedisTenantRegistry(fake.redis, fake.pubsub);
+    await seed.register(makeConfig("seed"), 1000);
+
+    let scanStarted!: () => void;
+    let releaseScan!: () => void;
+    const started = new Promise<void>((resolve) => { scanStarted = resolve; });
+    const release = new Promise<void>((resolve) => { releaseScan = resolve; });
+    const delayedRedis = {
+      ...fake.redis,
+      async scan(pattern: string, cursor?: string) {
+        const staleSnapshot = await fake.redis.scan(pattern, cursor);
+        scanStarted();
+        await release;
+        return staleSnapshot;
+      },
+    };
+    const registry = createRedisTenantRegistry(delayedRedis, fake.pubsub);
+
+    const hydration = registry.hydrate();
+    await started;
+    const registration = registry.register(makeConfig("concurrent"), 2000);
+    releaseScan();
+
+    const [hydrated, registered] = await Promise.all([hydration, registration]);
+    expect(hydrated.ok).toBe(true);
+    expect(registered.ok).toBe(true);
+    expect([...registry.snapshot().entries.keys()].sort()).toEqual([
+      tid("concurrent"),
+      tid("seed"),
+    ]);
+  });
+});
+
 describe("redis tenant registry — hardDelete (grace-window purge, FR-030)", () => {
+  /**
+   * `hardDelete` is a compare-and-delete: it takes the tombstone the caller
+   * observed, not a bare id. Tenants are therefore deregistered (tombstoned)
+   * first — the real purge order — and the live tombstone is read back from the
+   * snapshot so the comparison is against exactly what the registry committed.
+   */
+  const tombstoneOf = (reg: { snapshot: () => TenantRegistry }, id: string): DeregisteredTenantConfig => {
+    const entry = reg.snapshot().entries.get(tid(id));
+    if (entry === undefined || entry.status !== "deregistered") {
+      throw new Error(`expected a deregistered tombstone for '${id}'`);
+    }
+    return entry;
+  };
+  /** A tombstone for a tenant the registry has never heard of. */
+  const ghostTombstone = (id: string): DeregisteredTenantConfig => ({
+    ...makeConfig(id),
+    status: "deregistered",
+    deregisteredAt: 1,
+  });
+  const acquirePurge = async (
+    reg: ReturnType<typeof createRedisTenantRegistry>,
+    tombstone: DeregisteredTenantConfig,
+  ) => {
+    const begun = await reg.beginPurge(tombstone);
+    if (!begun.ok || begun.value.kind !== "acquired") {
+      throw new Error("expected purge lease acquisition");
+    }
+    return begun.value.lease;
+  };
+
   it("(a) hardDelete on an ABSENT tenant is an idempotent no-op (no del/publish)", async () => {
     const fake = createInMemoryRedisFake();
     const reg = createRedisTenantRegistry(fake.redis, fake.pubsub);
-    const res = await reg.hardDelete(tid("ghost"));
-    expect(res.ok).toBe(true);
+    const res = await reg.beginPurge(ghostTombstone("ghost"));
+    expect(res).toEqual({ ok: true, value: { kind: "superseded" } });
     // Nothing written, nothing announced — the early-return short-circuits all I/O.
     expect(fake.store.size).toBe(0);
     expect(fake.published.length).toBe(0);
@@ -603,11 +764,15 @@ describe("redis tenant registry — hardDelete (grace-window purge, FR-030)", ()
     const fake = createInMemoryRedisFake();
     const reg = createRedisTenantRegistry(fake.redis, fake.pubsub);
     await reg.register(makeConfig("acme"), 1000);
+    await reg.deregister(tid("acme"), 1500);
     expect(fake.store.has(`${TENANT_KEY_PREFIX}acme`)).toBe(true);
+    const tombstone = tombstoneOf(reg, "acme");
     fake.published.length = 0;
 
-    const res = await reg.hardDelete(tid("acme"));
+    const lease = await acquirePurge(reg, tombstone);
+    const res = await reg.hardDelete(lease);
     expect(res.ok).toBe(true);
+    if (res.ok) expect(res.value).toBe("deleted");
     // The fugue:tenants:<id> key is removed from the backing store.
     expect(fake.store.has(`${TENANT_KEY_PREFIX}acme`)).toBe(false);
     // A `deregistered` event is announced so subscribers re-read and observe absence.
@@ -617,26 +782,31 @@ describe("redis tenant registry — hardDelete (grace-window purge, FR-030)", ()
     // Gone from the in-memory view entirely (NOT a tombstone — hard delete).
     expect(reg.snapshot().entries.has(tid("acme"))).toBe(false);
     expect(reg.lookup(tid("acme")).ok).toBe(false);
-    // The post-hardDelete registry is FROZEN — runtime-immutability parity with the
-    // other producers (register/deregister/reconfigure), so no caller can mutate the
-    // shared in-memory view out from under a concurrent reader.
+    // The post-hardDelete registry uses the same runtime-read-only facade as
+    // every other transition: neither the record nor its entries expose mutation.
     expect(Object.isFrozen(reg.snapshot())).toBe(true);
+    const exposed = reg.snapshot().entries as Map<TenantId, ActiveTenantConfig>;
+    expect(exposed.set).toBeUndefined();
+    expect(() => exposed.set(tid("forged"), makeConfig("forged"))).toThrow();
   });
 
   it("(c) a del failure fails closed and does NOT advance the in-memory view", async () => {
     const fake = createInMemoryRedisFake();
     const reg = createRedisTenantRegistry(fake.redis, fake.pubsub);
     await reg.register(makeConfig("acme"), 1000);
+    await reg.deregister(tid("acme"), 1500);
+    const tombstone = tombstoneOf(reg, "acme");
 
-    // Force Redis down AFTER a successful register; the del now fails.
+    // Force Redis down AFTER acquiring the fence; the del now fails.
+    const lease = await acquirePurge(reg, tombstone);
     fake.setFail(true);
-    const res = await reg.hardDelete(tid("acme"));
+    const res = await reg.hardDelete(lease);
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.kind).toBe("redis-unavailable");
-    // Memory NOT advanced — the tenant is still present (mirrors the register/
+    // Memory NOT advanced — the tombstone is still retained (mirrors the register/
     // deregister "in-memory view NOT advanced on failure" assertions).
     expect(reg.snapshot().entries.has(tid("acme"))).toBe(true);
-    expect(reg.lookup(tid("acme")).ok).toBe(true);
+    expect(tombstoneOf(reg, "acme").deregisteredAt).toBe(1500);
   });
 
   it("(c') a publish failure (del landed, event did not) also fails closed, memory NOT advanced", async () => {
@@ -649,6 +819,7 @@ describe("redis tenant registry — hardDelete (grace-window purge, FR-030)", ()
     // publish-failure test's flaky-pubsub wrapper.
     const seedReg = createRedisTenantRegistry(fake.redis, fake.pubsub);
     await seedReg.register(makeConfig("acme"), 1000);
+    await seedReg.deregister(tid("acme"), 1500);
 
     const flakyPubsub = {
       publish: async () => ({ ok: false as const, error: { kind: "redis-unavailable" as const, operation: "publish" } }),
@@ -659,13 +830,14 @@ describe("redis tenant registry — hardDelete (grace-window purge, FR-030)", ()
     expect(hydrated.ok).toBe(true);
     expect(reg.snapshot().entries.has(tid("acme"))).toBe(true);
 
-    const res = await reg.hardDelete(tid("acme"));
+    const lease = await acquirePurge(reg, tombstoneOf(reg, "acme"));
+    const res = await reg.hardDelete(lease);
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.kind).toBe("redis-unavailable");
     // The in-memory view is NOT advanced even though the del landed — fail-closed
     // keeps memory consistent with a delete that didn't fully announce.
     expect(reg.snapshot().entries.has(tid("acme"))).toBe(true);
-    expect(reg.lookup(tid("acme")).ok).toBe(true);
+    expect(tombstoneOf(reg, "acme").deregisteredAt).toBe(1500);
   });
 
   it("(d) a Redis client that THROWS on del is caught and converted to fail-closed (never propagates)", async () => {
@@ -674,6 +846,7 @@ describe("redis tenant registry — hardDelete (grace-window purge, FR-030)", ()
     const seedFake = createInMemoryRedisFake();
     const seedReg = createRedisTenantRegistry(seedFake.redis, seedFake.pubsub);
     await seedReg.register(makeConfig("acme"), 1000);
+    await seedReg.deregister(tid("acme"), 1500);
 
     const throwingRedis = {
       get: seedFake.redis.get,
@@ -693,11 +866,47 @@ describe("redis tenant registry — hardDelete (grace-window purge, FR-030)", ()
     expect(hydrated.ok).toBe(true);
     expect(reg.snapshot().entries.has(tid("acme"))).toBe(true);
 
-    const res = await reg.hardDelete(tid("acme"));
+    const lease = await acquirePurge(reg, tombstoneOf(reg, "acme"));
+    const res = await reg.hardDelete(lease);
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.kind).toBe("redis-unavailable");
     expect(dead).toBe(1);
     // Memory NOT advanced — the throw is caught, converted, and the tenant remains.
     expect(reg.snapshot().entries.has(tid("acme"))).toBe(true);
+  });
+
+  it("(e) refuses revival while a purge lease fences destructive work", async () => {
+    const fake = createInMemoryRedisFake();
+    const reg = createRedisTenantRegistry(fake.redis, fake.pubsub);
+    await reg.register(makeConfig("acme"), 1000);
+    await reg.deregister(tid("acme"), 1500);
+    const observed = tombstoneOf(reg, "acme");
+    const lease = await acquirePurge(reg, observed);
+
+    const revival = await reg.register(makeConfig("acme"), 2000);
+    expect(revival.ok).toBe(false);
+
+    const res = await reg.hardDelete(lease);
+    expect(res).toEqual({ ok: true, value: "deleted" });
+    expect(fake.store.has(`${TENANT_KEY_PREFIX}acme`)).toBe(false);
+    expect(reg.snapshot().entries.has(tid("acme"))).toBe(false);
+  });
+
+  it("(f) release after partial work permits revival and invalidates the old tombstone", async () => {
+    const fake = createInMemoryRedisFake();
+    const reg = createRedisTenantRegistry(fake.redis, fake.pubsub);
+    await reg.register(makeConfig("acme"), 1000);
+    await reg.deregister(tid("acme"), 1500);
+    const observed = tombstoneOf(reg, "acme");
+    const lease = await acquirePurge(reg, observed);
+    await reg.releasePurge(lease);
+
+    await reg.register(makeConfig("acme"), 2000);
+    await reg.deregister(tid("acme"), 2500);
+
+    const res = await reg.beginPurge(observed);
+    expect(res).toEqual({ ok: true, value: { kind: "superseded" } });
+    expect(reg.snapshot().entries.has(tid("acme"))).toBe(true);
+    expect(tombstoneOf(reg, "acme").deregisteredAt).toBe(2500);
   });
 });

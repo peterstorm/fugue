@@ -70,6 +70,12 @@ class FakeExporter implements SpanExporter {
 const exportOnce = (exp: SpanExporter, spans: ReadableSpan[]): Promise<ExportResult> =>
   new Promise((resolve) => exp.export(spans, resolve));
 
+const hostileThrownValue = (): unknown =>
+  new Proxy({}, {
+    get() { throw new Error("hostile getter"); },
+    getPrototypeOf() { throw new Error("hostile prototype"); },
+  });
+
 // Recording logger so warn-spam assertions can be made without console noise.
 let warnings: string[] = [];
 let errors: string[] = [];
@@ -203,6 +209,47 @@ describe("CompositeSpanExporter — fault isolation", () => {
     expect(composite.childFailureCounts).toEqual([
       { index: 0, failures: 1 },
       { index: 1, failures: 0 },
+    ]);
+  });
+
+  it("hostile thrown values cannot escape export, forceFlush, or shutdown", async () => {
+    const hostile = hostileThrownValue();
+    const child: SpanExporter = {
+      export() { throw hostile; },
+      async forceFlush() { throw hostile; },
+      async shutdown() { throw hostile; },
+    };
+    const composite = new CompositeSpanExporter([child]);
+
+    await expect(exportOnce(composite, [fakeSpan("s")])).resolves.toMatchObject({
+      code: ExportResultCode.FAILED,
+    });
+    await expect(composite.forceFlush()).resolves.toBeUndefined();
+    await expect(composite.shutdown()).resolves.toBeUndefined();
+  });
+
+  it("a throwing framework logger cannot wedge export or reject lifecycle methods", async () => {
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: () => { throw new Error("warn transport failed"); },
+      error: () => { throw new Error("error transport failed"); },
+    });
+    const failed = new FakeExporter(
+      { kind: "result-failed" },
+      { async: true, rejectFlush: true, rejectShutdown: true },
+    );
+    const thrown = new FakeExporter({ kind: "throw" });
+    const composite = new CompositeSpanExporter([failed, thrown], 50);
+
+    await expect(exportOnce(composite, [fakeSpan("s")])).resolves.toMatchObject({
+      code: ExportResultCode.FAILED,
+    });
+    await expect(composite.forceFlush()).resolves.toBeUndefined();
+    await expect(composite.shutdown()).resolves.toBeUndefined();
+    expect(composite.childFailureCounts).toEqual([
+      { index: 0, failures: 1 },
+      { index: 1, failures: 1 },
     ]);
   });
 

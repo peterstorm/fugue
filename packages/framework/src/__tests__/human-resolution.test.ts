@@ -1,10 +1,13 @@
 import { describe, it, expect } from "bun:test";
+import { z } from "zod";
 import { handleHumanResponse } from "../dag-runtime/human-resolution.js";
-import type { DagMachineContext, DagPhase, HumanAction } from "../dag-runtime/types.js";
-import type { DagDef, EdgeDef } from "../types/dag.js";
+import type { DagPhase, HumanAction } from "../dag-runtime/types.js";
+import type { DagDef } from "../types/dag.js";
 import type { NodeDef } from "../types/node.js";
 import { nonEmptyString } from "../types/non-empty-string.js";
 import { N, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import { testRuntimeContext as mkCtx } from "./_context-factories.js";
+import { FE } from "./_freshness-helpers.js";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -13,43 +16,14 @@ import { N, D, nodeMap, nodeSet } from "./_id-helpers.js";
 const mkNodeDef = (id: string, opts?: { humanReview?: { prompt: string } }): NodeDef<unknown, unknown> => ({
   id: N(id),
   kind: "transform",
-  inputSchema: { parse: (x: unknown) => x } as any,
-  outputSchema: { parse: (x: unknown) => x } as any,
+  inputSchema: z.unknown(),
+  outputSchema: z.unknown(),
   requires: [] as const,
   sideEffects: { kind: "none" },
   confidence: { mode: "none" },
-  run: async (i: unknown) => ({ ok: true, value: i } as any),
+  run: async (i: unknown) => ({ ok: true, value: i }),
   ...(opts?.humanReview ? { humanReview: { prompt: nonEmptyString(opts.humanReview.prompt) } } : {}),
 });
-
-const mkCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext => {
-  const dag = overrides.dag ?? ({ id: D("test"), nodes: [], edges: [], outputNodeId: undefined } as unknown as DagDef);
-  return {
-    waves: overrides.waves ?? [],
-    outputs: overrides.outputs ?? new Map(),
-    retries: overrides.retries ?? new Map(),
-    initialInput: null,
-    activeNodeIds: overrides.activeNodeIds ?? new Set(),
-    dag,
-    incomingByNode: overrides.incomingByNode ?? new Map(),
-    outgoingByNode: overrides.outgoingByNode ?? new Map(),
-    unconditionalAdj: overrides.unconditionalAdj ?? new Map(),
-    nodeById: overrides.nodeById ?? new Map(),
-    retryConfigs: overrides.retryConfigs ?? new Map(),
-    outputNodeId: dag.outputNodeId,
-    defaultRetryLimit: dag.defaultRetryLimit,
-    retryLimits: dag.retryLimits,
-    humanReviewNodeIds: overrides.humanReviewNodeIds ?? new Set(
-      (dag.nodes ?? []).filter((n) => n.humanReview !== undefined).map((n) => n.id),
-    ),
-    humanReviewPrompts: overrides.humanReviewPrompts ?? new Map(
-      (dag.nodes ?? []).filter((n) => n.humanReview !== undefined).map((n) => [n.id, n.humanReview!.prompt] as const),
-    ),
-    edges: dag.edges ?? [],
-    confidenceByNode: new Map(),
-    ...overrides,
-  };
-};
 
 const mkAwaitingHuman = (
   nodeId: string,
@@ -58,7 +32,7 @@ const mkAwaitingHuman = (
   kind: "awaiting-human",
   nodeId: N(nodeId),
   output: opts?.output ?? `output-${nodeId}`,
-  prompt: `review ${nodeId}`,
+  prompt: nonEmptyString(`review ${nodeId}`),
   pendingReviews: (opts?.pendingReviews ?? []).map(N),
   wave: opts?.wave ?? 0,
 });
@@ -173,6 +147,7 @@ describe("handleHumanResponse — reroute backward", () => {
       waves: [[N("a")], [N("b")], [N("c")]],
       outputs: nodeMap([["a", "A"], ["b", "B"], ["c", "C"]]),
       retries: nodeMap([["b", 1], ["c", 2]]),
+      freshnessCompletedNodeIds: nodeSet(["a", "b", "c"]),
       activeNodeIds: nodeSet(["a", "b", "c"]),
       outgoingByNode: new Map(), // no conditional edges
       nodeById: nodeMap([
@@ -202,6 +177,30 @@ describe("handleHumanResponse — reroute backward", () => {
     // Retries from wave >= target should be cleared
     expect(result.context.retries.has(N("b"))).toBe(false);
     expect(result.context.retries.has(N("c"))).toBe(false);
+    // Freshness completion is invalidated on the same target/later waves.
+    expect(result.context.freshnessCompletedNodeIds).toEqual(new Set());
+    expect(Number(result.context.freshnessExecutionEpoch)).toBe(1);
+  });
+
+  it("fails closed rather than throwing when the execution epoch is exhausted", () => {
+    const ctx = mkCtx({
+      waves: [[N("a")]],
+      outputs: nodeMap([["a", "A"]]),
+      freshnessExecutionEpoch: FE(Number.MAX_SAFE_INTEGER),
+      activeNodeIds: nodeSet(["a"]),
+    });
+
+    const result = handleHumanResponse(
+      mkAwaitingHuman("a"),
+      { kind: "reroute", targetNodeId: N("a") },
+      ctx,
+    );
+
+    expect(result.state).toMatchObject({
+      kind: "failed",
+      error: { kind: "node-crash", retriability: "non-retriable" },
+    });
+    expect(result.context).toBe(ctx);
   });
 
   it("preserves outputs from waves before target", () => {
@@ -209,6 +208,7 @@ describe("handleHumanResponse — reroute backward", () => {
       waves: [[N("a")], [N("b")], [N("c")]],
       outputs: nodeMap([["a", "A"], ["b", "B"]]),
       retries: new Map(),
+      freshnessCompletedNodeIds: nodeSet(["a", "b", "c"]),
       activeNodeIds: nodeSet(["a", "b", "c"]),
       outgoingByNode: new Map(),
       nodeById: nodeMap([
@@ -233,8 +233,10 @@ describe("handleHumanResponse — reroute backward", () => {
     }
     // wave 0 output should survive
     expect(result.context.outputs.get(N("a"))).toBe("A");
-    // wave 1+ outputs cleared
+    // wave 1+ outputs and freshness completion proof are cleared.
     expect(result.context.outputs.has(N("b"))).toBe(false);
+    expect(result.context.freshnessCompletedNodeIds).toEqual(new Set([N("a")]));
+    expect(Number(result.context.freshnessExecutionEpoch)).toBe(1);
   });
 });
 
@@ -298,7 +300,10 @@ describe("handleHumanResponse — pending reviews", () => {
       outputs: nodeMap([["a", "A"], ["b", "B"]]),
       activeNodeIds: nodeSet(["a", "b"]),
       humanReviewNodeIds: new Set([N("a"), N("b")]),
-      humanReviewPrompts: new Map([[N("a"), "review a"], [N("b"), "review b"]]),
+      humanReviewPrompts: new Map([
+        [N("a"), nonEmptyString("review a")],
+        [N("b"), nonEmptyString("review b")],
+      ]),
       nodeById: nodeMap([
         ["a", mkNodeDef("a", { humanReview: { prompt: "review a" } })],
         ["b", mkNodeDef("b", { humanReview: { prompt: "review b" } })],
@@ -311,7 +316,7 @@ describe("handleHumanResponse — pending reviews", () => {
     if (result.state.kind === "awaiting-human") {
       expect(result.state.nodeId).toBe(N("b"));
       expect(result.state.output).toBe("B");
-      expect(result.state.prompt).toBe("review b");
+      expect(result.state.prompt).toBe(nonEmptyString("review b"));
       expect(result.state.pendingReviews).toEqual([]);
     }
   });
@@ -342,7 +347,7 @@ describe("handleHumanResponse — pending reviews", () => {
       outputs: nodeMap([["a", "A"], ["b", "B"]]),
       activeNodeIds: nodeSet(["a", "b"]),
       humanReviewNodeIds: new Set([N("a")]),
-      humanReviewPrompts: new Map([[N("a"), "r"]]),
+      humanReviewPrompts: new Map([[N("a"), nonEmptyString("r")]]),
       nodeById: nodeMap([
         ["a", mkNodeDef("a", { humanReview: { prompt: "r" } })],
         // "b" intentionally not in humanReviewNodeIds

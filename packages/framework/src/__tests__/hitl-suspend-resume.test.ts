@@ -24,6 +24,7 @@ import type { NodeDef, NodeContext } from "../types/node.js";
 import { type NodeOverride, brandedOverride } from "./_node-override.js";
 import type { HumanReviewOutcome, DagPhase, DagMachineContext } from "../dag-runtime/types.js";
 import { ok } from "../types/result.js";
+import { nonEmptyString } from "../types/non-empty-string.js";
 
 // ---------------------------------------------------------------------------
 // Helpers (mirrors dag-runtime-stateful.test.ts)
@@ -96,7 +97,7 @@ describe("HITL suspend (ADR-0060) — pending parks the run", () => {
     expect(outcome.kind).toBe("suspended");
     if (outcome.kind === "suspended") {
       expect(outcome.nodeId).toBe("a" as NodeId);
-      expect(outcome.prompt).toBe("Approve?");
+      expect(outcome.prompt).toBe(nonEmptyString("Approve?"));
     }
     expect(onHumanReview).toHaveBeenCalledTimes(1);
   });

@@ -39,7 +39,7 @@ const baseConfig = (
 });
 
 describe("resolveObservabilityBackends", () => {
-  test("default selection → MLflow only, foundry disabled (FR-003)", () => {
+  test("default selection → MLflow only, foundry disabled (observability spec FR-003)", () => {
     const result = resolveObservabilityBackends(baseConfig());
     expect(isOk(result)).toBe(true);
     if (!isOk(result)) return;
@@ -50,7 +50,7 @@ describe("resolveObservabilityBackends", () => {
     expect(result.value.kind).toBe("mlflow-only");
   });
 
-  test("dual-export selection (mlflow,foundry) → both backends, foundry enabled (FR-002)", () => {
+  test("dual-export selection (mlflow,foundry) → both backends, foundry enabled (observability spec FR-002)", () => {
     const result = resolveObservabilityBackends(
       baseConfig({
         OBSERVABILITY_TRACE_BACKENDS: ["mlflow", "foundry"],
@@ -63,7 +63,7 @@ describe("resolveObservabilityBackends", () => {
     expect(isFoundryEnabled(result.value)).toBe(true);
   });
 
-  test("foundry-only selection → ['foundry'], foundry enabled (FR-002 exclusive)", () => {
+  test("foundry-only selection → ['foundry'], foundry enabled (observability spec FR-002 exclusive)", () => {
     const result = resolveObservabilityBackends(
       baseConfig({
         OBSERVABILITY_TRACE_BACKENDS: ["foundry"],
@@ -76,7 +76,7 @@ describe("resolveObservabilityBackends", () => {
     expect(isFoundryEnabled(result.value)).toBe(true);
   });
 
-  test("foundry + connection-string mode → auth carries the connection string (FR-022)", () => {
+  test("foundry + connection-string mode → auth carries the connection string (observability spec FR-022)", () => {
     const result = resolveObservabilityBackends(
       baseConfig({
         OBSERVABILITY_TRACE_BACKENDS: ["foundry"],
@@ -90,7 +90,7 @@ describe("resolveObservabilityBackends", () => {
     expect(result.value.auth.connectionString).toBe(conn("InstrumentationKey=abc;IngestionEndpoint=https://x/"));
   });
 
-  test("foundry + entra-id mode → auth {mode:'entra-id'} and still carries the connection string (FR-023)", () => {
+  test("foundry + entra-id mode → auth {mode:'entra-id'} and still carries the connection string (observability spec FR-023)", () => {
     const result = resolveObservabilityBackends(
       baseConfig({
         OBSERVABILITY_TRACE_BACKENDS: ["foundry"],
@@ -104,7 +104,7 @@ describe("resolveObservabilityBackends", () => {
     expect(result.value.auth.connectionString).toBe(conn("InstrumentationKey=abc;IngestionEndpoint=https://x/"));
   });
 
-  test("foundry selected without connection string → fail-closed error (FR-006)", () => {
+  test("foundry selected without connection string → fail-closed error (observability spec FR-006)", () => {
     const result = resolveObservabilityBackends(
       baseConfig({
         OBSERVABILITY_TRACE_BACKENDS: ["foundry"],
@@ -118,7 +118,7 @@ describe("resolveObservabilityBackends", () => {
     expect(result.error.reason).toBe("missing-connection-string");
   });
 
-  test("foundry + entra-id without connection string → fail-closed error (FR-006)", () => {
+  test("foundry + entra-id without connection string → fail-closed error (observability spec FR-006)", () => {
     const result = resolveObservabilityBackends(
       baseConfig({
         OBSERVABILITY_TRACE_BACKENDS: ["foundry"],

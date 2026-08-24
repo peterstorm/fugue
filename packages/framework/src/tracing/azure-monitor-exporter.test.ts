@@ -177,7 +177,7 @@ describe("real Azure exporter load path (no seam) — integration smoke", () => 
 });
 
 describe("pass-through translation leaves spans untouched", () => {
-  it("translateSpanForFoundry returns the SAME span reference (empty ATTR_MAP = identity)", () => {
+  it("translateSpanForFoundry returns the SAME span reference", () => {
     const span = fakeSpan("llm", {
       "gen_ai.system": "anthropic",
       "gen_ai.request.model": "claude-3",

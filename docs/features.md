@@ -441,7 +441,8 @@ const updateCustomer: NodeDef = {
 };
 
 // Run 2's write sees: conditionedOn version=5, but Run 1 already wrote version=6.
-// Event emitted: { type: "freshness-violation", resource: "postgres:customers:123", ... }
+// Event emitted: { type: "freshness-violation",
+//   conditionedOnWitness: { resource: "postgres:customers:123", ... }, ... }
 // The operator sees the conflict; the node can react via routing.
 
 // ❌ WITHOUT FAIL-CLOSED SEMANTICS:
@@ -531,7 +532,7 @@ interface Observer {
 const obs = createExhaustiveObserver({
   "run-start": (e) => metrics.runStarted(e.runId),
   "node-end": (e) => metrics.nodeCompleted(e.nodeId, e.duration),
-  "freshness-violation": (e) => alerting.staleWrite(e.resource),
+  "freshness-violation": (e) => alerting.staleWrite(e.conditionedOnWitness.resource),
   "human-intervention": (e) => auditLog.record(e),
   // 💥 COMPILE ERROR if you omit any event type
   // "node-error": ???  ← TypeScript: Property 'node-error' is missing

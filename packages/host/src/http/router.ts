@@ -6,13 +6,12 @@
  *
  * Route protection:
  * - /health, /readiness — unauthenticated (k8s probes)
- * - /admin/* — requires admin token
+ * - /admin/* — requires admin token (includes /admin/capabilities/health)
  * - /dags/* — requires any valid token (team or admin), authorization checked per-DAG
  */
 
 import { Hono } from "hono";
 import type { HostState } from "../domain/host-state.js";
-import { canServeRequests } from "../domain/host-state.js";
 import { createErrorHandler } from "./middleware/error-handler.js";
 import { createAuthMiddleware } from "./middleware/auth.js";
 import type { AuthMiddlewareDeps } from "./middleware/auth.js";
@@ -24,19 +23,12 @@ import type { RunDagDeps } from "./handlers/run-dag.js";
 import { createGetRunHandler, createApproveRunHandler } from "./handlers/runs.js";
 import { createCreateTeamHandler, createListTeamsHandler, createRevokeTeamHandler } from "./handlers/admin/teams.js";
 import type { AdminHandlerDeps } from "./handlers/admin/teams.js";
+import { createCapabilityHealthHandler } from "./handlers/admin/capabilities.js";
+import type { CapabilityHealthHandlerDeps } from "./handlers/admin/capabilities.js";
 import type { LogPort } from "../ports.js";
-import { errorResponse } from "./response.js";
+import { errorResponse, hostUnavailableResponse } from "./response.js";
 
-// ---------------------------------------------------------------------------
-// Shared environment type for Hono context variables
-// ---------------------------------------------------------------------------
-
-export type HostEnv = {
-  Variables: {
-    hostState: HostState;
-    authIdentity: import("../domain/auth.js").AuthIdentity;
-  };
-};
+import type { HostEnv } from "./env.js";
 
 // ---------------------------------------------------------------------------
 // Router factory
@@ -46,6 +38,11 @@ export interface RouterDeps extends RunDagDeps, AuthMiddlewareDeps {
   readonly getHostState: () => HostState;
   readonly logger: LogPort;
   readonly adminHandlerDeps: AdminHandlerDeps;
+  /**
+   * Connected capability handles, for the admin capability-health diagnostic.
+   * Read lazily: the host assigns them during boot, after this router is built.
+   */
+  readonly capabilityHealthDeps: CapabilityHealthHandlerDeps;
   /**
    * Inbound Bot Framework activity handler (ADR-0060). When wired, mounts
    * `POST /teams/messages` BEFORE the team-token auth middleware — Teams
@@ -105,12 +102,19 @@ export const createRouter = (deps: RouterDeps): Hono<HostEnv> => {
       return errorResponse(c, 403, "forbidden", "Admin access required");
     }
     await next();
+    // Admin identity verified; the downstream handler owns the response.
+    return undefined;
   });
 
   // ── Admin routes ─────────────────────────────────────────────────────────
   const createTeam = createCreateTeamHandler(deps.adminHandlerDeps);
   const listTeams = createListTeamsHandler(deps.adminHandlerDeps);
   const revokeTeam = createRevokeTeamHandler(deps.adminHandlerDeps);
+
+  // Operator-driven dependency diagnostics (admin-gated — the report names every
+  // wired capability and echoes failure reasons; see the handler's module doc for
+  // why this is deliberately NOT on /health or /readiness).
+  app.get("/admin/capabilities/health", createCapabilityHealthHandler(deps.capabilityHealthDeps));
 
   app.post("/admin/teams", createTeam);
   app.get("/admin/teams", listTeams);
@@ -151,11 +155,8 @@ export const createRouter = (deps: RouterDeps): Hono<HostEnv> => {
   const runDagByRouteHandler = createRunDagHandler(deps, (c) => routeOf(c));
   app.post("*", async (c) => {
     const state = c.get("hostState");
-    if (!canServeRequests(state)) {
-      return errorResponse(c, 503, "host-unavailable", `Host is ${state.phase} — not accepting requests`, {
-        details: { phase: state.phase },
-      });
-    }
+    const unavailable = hostUnavailableResponse(c, state);
+    if (unavailable) return unavailable;
     if (routeOf(c) === "") {
       return errorResponse(c, 404, "not-found", `No DAG is registered at route '${c.req.path}'`);
     }

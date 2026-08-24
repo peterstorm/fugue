@@ -28,7 +28,7 @@ import type { RunId } from "@fuguejs/framework";
  * `total !== tokensIn + tokensOut` value representable — an illegal state that
  * feeds the budget check directly. Dropping the field makes it unrepresentable.
  */
-export interface RunUsage {
+interface RunUsage {
   readonly tokensIn: number;
   readonly tokensOut: number;
 }
@@ -49,7 +49,7 @@ export interface LlmMeter {
 }
 
 /** A single LLM call's token delta. */
-export interface TokenDelta {
+interface TokenDelta {
   readonly tokensIn: number;
   readonly tokensOut: number;
 }
@@ -61,7 +61,7 @@ export interface TokenDelta {
  * `cumulative` on both branches is the run's total-so-far at decision time
  * (before the in-flight call). `budget` is only meaningful on `refuse`.
  */
-export type BudgetDecision =
+type BudgetDecision =
   | { readonly kind: "allow"; readonly cumulative: number }
   | { readonly kind: "refuse"; readonly cumulative: number; readonly budget: number };
 
@@ -69,10 +69,35 @@ export type BudgetDecision =
 // Builders
 // ---------------------------------------------------------------------------
 
-const ZERO_USAGE: RunUsage = { tokensIn: 0, tokensOut: 0 };
+const ZERO_USAGE: RunUsage = Object.freeze({ tokensIn: 0, tokensOut: 0 });
+
+/** Runtime-read-only snapshot; no mutable `Map` methods escape the ADT. */
+const meterOf = (entries: ReadonlyMap<RunId, RunUsage>): LlmMeter => {
+  const snapshot = new Map(
+    Array.from(entries, ([runId, usage]) => [runId, Object.freeze({ ...usage })] as const),
+  );
+  let view: ReadonlyMap<RunId, RunUsage>;
+  const facade = {
+    get size(): number { return snapshot.size; },
+    get: (runId: RunId): RunUsage | undefined => snapshot.get(runId),
+    has: (runId: RunId): boolean => snapshot.has(runId),
+    entries: (): MapIterator<[RunId, RunUsage]> => snapshot.entries(),
+    keys: (): MapIterator<RunId> => snapshot.keys(),
+    values: (): MapIterator<RunUsage> => snapshot.values(),
+    [Symbol.iterator]: (): MapIterator<[RunId, RunUsage]> => snapshot[Symbol.iterator](),
+    forEach(
+      callback: (usage: RunUsage, runId: RunId, map: ReadonlyMap<RunId, RunUsage>) => void,
+      thisArg?: unknown,
+    ): void {
+      for (const [runId, usage] of snapshot) callback.call(thisArg, usage, runId, view);
+    },
+  } satisfies ReadonlyMap<RunId, RunUsage>;
+  view = Object.freeze(facade);
+  return Object.freeze({ usageByRun: view });
+};
 
 /** The empty meter — no runs have consumed any tokens yet. */
-export const emptyMeter = (): LlmMeter => ({ usageByRun: new Map() });
+export const emptyMeter = (): LlmMeter => meterOf(new Map());
 
 // ---------------------------------------------------------------------------
 // Queries (pure)
@@ -120,7 +145,7 @@ export const accumulate = (meter: LlmMeter, runId: RunId, delta: TokenDelta): Ll
   };
   const usageByRun = new Map(meter.usageByRun);
   usageByRun.set(runId, next);
-  return { usageByRun };
+  return meterOf(usageByRun);
 };
 
 /**
@@ -200,7 +225,7 @@ export const emptyReservation: ReservationState = { reservedInFlight: 0, maxObse
  * frees precisely that, even if the estimate has since grown); a `refuse`
  * carries the figures the shell logs. Illegal blends unrepresentable.
  */
-export type AdmitDecision =
+type AdmitDecision =
   | { readonly kind: "admit"; readonly state: ReservationState; readonly reserved: number }
   | {
       readonly kind: "refuse";
@@ -226,15 +251,12 @@ export const admitWithReservation = (
 ): AdmitDecision => {
   const decision = budgetDecision(meter, runId, budget);
   const projected = decision.cumulative + state.reservedInFlight;
-  // The exceeded budget, when over: a `refuse` decision carries it; the
-  // projection branch requires a defined `budget` to fire. Reading it off the
-  // branches keeps this cast-free — `undefined` means "admit".
-  const exceededBudget =
-    decision.kind === "refuse"
-      ? decision.budget
-      : budget !== undefined && projected >= budget
-        ? budget
-        : undefined;
+  // The exceeded budget, when over: a `refuse` decision carries it; otherwise
+  // the projection is over only when a budget was supplied. Reading it off the
+  // branches keeps this cast-free — `undefined` means "admit". Not `??`: a
+  // `refuse` decision's own budget stands even if it were undefined.
+  const projectedOverBudget = budget !== undefined && projected >= budget ? budget : undefined;
+  const exceededBudget = decision.kind === "refuse" ? decision.budget : projectedOverBudget;
   if (exceededBudget !== undefined) {
     return {
       kind: "refuse",

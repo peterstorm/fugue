@@ -36,6 +36,13 @@ describe("HostConfigSchema", () => {
     expect(c.CIRCUIT_BREAKER_WINDOW_MS).toBe(60_000);
     expect(c.DEFAULT_CACHE_TTL_MS).toBe(300_000);
     expect(c.DEFAULT_CHECKPOINT_TTL_MS).toBe(86_400_000);
+    expect(c.HITL_RECONCILE_INTERVAL_MS).toBe(30_000);
+  });
+
+  it("parses a bounded HITL reconciliation interval and rejects a hot loop", () => {
+    const parsed = parseHostConfig({ ...validEnv, HITL_RECONCILE_INTERVAL_MS: "1500" });
+    expect(parsed.ok && parsed.value.HITL_RECONCILE_INTERVAL_MS).toBe(1500);
+    expect(parseHostConfig({ ...validEnv, HITL_RECONCILE_INTERVAL_MS: "999" }).ok).toBe(false);
   });
 
   it("rejects missing DAGS_REPO_URL", () => {
@@ -92,6 +99,103 @@ describe("HostConfigSchema", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.DOCUMENTS_ADAPTER).toBeUndefined();
+  });
+
+  it("accepts DOCUMENTS_ADAPTER=ms-graph with the three credentials (resolve paths default off)", () => {
+    const result = parseHostConfig({
+      ...validEnv,
+      DOCUMENTS_ADAPTER: "ms-graph",
+      MSGRAPH_TENANT_ID: "tenant-1",
+      MSGRAPH_CLIENT_ID: "client-1",
+      MSGRAPH_CLIENT_SECRET: "secret-1",
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.DOCUMENTS_ADAPTER).toBe("ms-graph");
+    expect(result.value.MSGRAPH_TENANT_ID).toBe("tenant-1");
+    expect(result.value.MSGRAPH_RESOLVE_PATHS).toBe(false);
+  });
+
+  it("rejects DOCUMENTS_ADAPTER=ms-graph missing any credential (fail-closed at boot)", () => {
+    const result = parseHostConfig({
+      ...validEnv,
+      DOCUMENTS_ADAPTER: "ms-graph",
+      MSGRAPH_TENANT_ID: "tenant-1",
+      MSGRAPH_CLIENT_ID: "client-1",
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("config-invalid");
+    if (result.error.kind !== "config-invalid") return;
+    expect(result.error.message).toContain("MSGRAPH_CLIENT_SECRET");
+  });
+
+  it("coerces MSGRAPH_RESOLVE_PATHS string tokens and rejects typos (fail-closed-loud)", () => {
+    const base = {
+      ...validEnv,
+      DOCUMENTS_ADAPTER: "ms-graph",
+      MSGRAPH_TENANT_ID: "t",
+      MSGRAPH_CLIENT_ID: "c",
+      MSGRAPH_CLIENT_SECRET: "s",
+    };
+    for (const v of ["true", "1"]) {
+      const r = parseHostConfig({ ...base, MSGRAPH_RESOLVE_PATHS: v });
+      expect(r.ok).toBe(true);
+      if (r.ok) expect(r.value.MSGRAPH_RESOLVE_PATHS).toBe(true);
+    }
+    const off = parseHostConfig({ ...base, MSGRAPH_RESOLVE_PATHS: "false" });
+    expect(off.ok).toBe(true);
+    if (off.ok) expect(off.value.MSGRAPH_RESOLVE_PATHS).toBe(false);
+    // A typo'd `yes`/`on` is REJECTED at boot rather than silently off — same
+    // fail direction as SUPERVISOR_REDIS_ACL_ENABLED.
+    expect(parseHostConfig({ ...base, MSGRAPH_RESOLVE_PATHS: "yes" }).ok).toBe(false);
+  });
+
+  const msGraphEnv = {
+    ...validEnv,
+    DOCUMENTS_ADAPTER: "ms-graph",
+    MSGRAPH_TENANT_ID: "t",
+    MSGRAPH_CLIENT_ID: "c",
+    MSGRAPH_CLIENT_SECRET: "s",
+  };
+
+  it("accepts HTTPS sovereign-cloud MS Graph endpoint overrides", () => {
+    const result = parseHostConfig({
+      ...msGraphEnv,
+      MSGRAPH_BASE_URL: "https://graph.microsoft.us/v1.0",
+      MSGRAPH_TOKEN_URL: "https://login.microsoftonline.us/t/oauth2/v2.0/token",
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects non-URL and cleartext MS Graph endpoint overrides", () => {
+    expect(parseHostConfig({ ...msGraphEnv, MSGRAPH_BASE_URL: "not a url" }).ok).toBe(false);
+
+    for (const field of ["MSGRAPH_BASE_URL", "MSGRAPH_TOKEN_URL"] as const) {
+      const result = parseHostConfig({
+        ...msGraphEnv,
+        [field]: "http://graph.example.com/credential-transport",
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok && result.error.kind === "config-invalid") {
+        expect(result.error.message).toContain(field);
+        expect(result.error.message).toContain("https://");
+      }
+    }
+  });
+
+  it("rejects embedded credentials in MS Graph endpoint overrides", () => {
+    for (const field of ["MSGRAPH_BASE_URL", "MSGRAPH_TOKEN_URL"] as const) {
+      const result = parseHostConfig({
+        ...msGraphEnv,
+        [field]: "https://user:password@graph.example.com/v1.0",
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok && result.error.kind === "config-invalid") {
+        expect(result.error.message).toContain(field);
+        expect(result.error.message).toContain("embedded URL credentials");
+      }
+    }
   });
 
   it("rejects BOT_APP_ID without BOT_APP_PASSWORD (ADR-0060)", () => {

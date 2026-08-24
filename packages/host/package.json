@@ -24,6 +24,7 @@
     "@fuguejs/framework": "workspace:*",
     "@fuguejs/fs": "workspace:*",
     "@fuguejs/http-auth": "workspace:*",
+    "@fuguejs/ms-graph": "workspace:*",
     "@fuguejs/oracle": "workspace:*",
     "hono": "^4.7.11",
     "ioredis": "^5.10.1",
@@ -34,6 +35,7 @@
   },
   "devDependencies": {
     "@types/bun": "^1.3.13",
+    "bullmq": "^5.76.6",
     "fast-check": "^4.8.0"
   },
   "publishConfig": {

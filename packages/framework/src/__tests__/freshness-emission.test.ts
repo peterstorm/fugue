@@ -1,15 +1,20 @@
-import { resourceName, witness, witnessValue, mkWitness, RN } from "./_freshness-helpers.js";
-import { describe, it, expect } from "bun:test";
+import { witness, witnessValue, RN, FE } from "./_freshness-helpers.js";
+import { afterEach, describe, it, expect } from "bun:test";
 import { emitFreshnessWitnessEvents } from "../dag-runtime/freshness-emission.js";
 import { InMemoryFreshnessIndex, type FreshnessIndex } from "../dag-runtime/freshness-check.js";
 import { RecordingObserver } from "../observer/observer.js";
 import { nodeId, runId, dagId } from "../types/ids.js";
 import type { NodeDef } from "../types/node.js";
 import type { DagMachineContext } from "../dag-runtime/types.js";
-import type { PostWaveContext } from "../dag-runtime/wave-execution.js";
+import type { PostWaveContext } from "../dag-runtime/post-wave-context.js";
 import type { WitnessCapturedEvent, WriteAttemptedEvent, FreshnessViolationEvent } from "../types/events.js";
 import { z } from "zod";
 import { ok, err } from "../types/result.js";
+import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
+
+afterEach(() => {
+  __resetFrameworkLogger();
+});
 
 const NID_READ = nodeId("read-node");
 const NID_WRITE = nodeId("write-node");
@@ -64,6 +69,9 @@ const makeMachineCtx = (): DagMachineContext => ({
   humanReviewPrompts: new Map(),
   edges: [],
   confidenceByNode: new Map(),
+  priorWitnesses: new Map(),
+  freshnessCompletedNodeIds: new Set(),
+  freshnessExecutionEpoch: FE(),
 });
 
 /** Build a PostWaveContext from test parameters. */
@@ -83,7 +91,6 @@ const makePostWaveCtx = (
   nowFn: Date.now,
   freshnessIndex,
   witnessAccumulator,
-  priorOutputs: machineCtx.outputs,
 });
 
 describe("emitFreshnessWitnessEvents", () => {
@@ -126,6 +133,47 @@ describe("emitFreshnessWitnessEvents", () => {
     expect(writes[0]!.newWitness.value).toBe("43");
   });
 
+  // pr-test-analyzer-1 — the fail-closed defence-in-depth branch for a
+  // hand-built DAG that bypassed `defineDag`'s own XOR validation. Left
+  // unexercised, a regression here silently DISABLES freshness tracking for the
+  // node instead of aborting the wave.
+  for (const [label, sideEffects] of [
+    ["extractNewWitness without extractConditionedOn", {
+      kind: "writes" as const,
+      resource: RN("pg:orders"),
+      extractNewWitness: () => witnessValue("version", "43"),
+    }],
+    ["extractConditionedOn without extractNewWitness", {
+      kind: "writes" as const,
+      resource: RN("pg:orders"),
+      extractConditionedOn: () => witness("version", RN("pg:orders"), "42"),
+    }],
+  ] as const) {
+    it(`fails the wave closed when a writes node declares only ${label}`, async () => {
+      const obs = new RecordingObserver();
+      const writeNode = makeNodeDef("write-node", { sideEffects: sideEffects as never });
+      const nodeMap = new Map([[NID_WRITE, writeNode]]);
+      const machineCtx = makeMachineCtx();
+      const newOutputs = new Map([[NID_WRITE, { ok: true }]]);
+      const index = new InMemoryFreshnessIndex();
+
+      const ctx = makePostWaveCtx([NID_WRITE], nodeMap as any, machineCtx, obs, index);
+      const result = await emitFreshnessWitnessEvents(ctx, newOutputs, new Set());
+
+      expect(result.kind).toBe("aborted");
+      if (result.kind !== "aborted") throw new Error("unreachable");
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind !== "node-crash") throw new Error("unreachable");
+      // Deterministic authoring bug — never burn the retry budget on it.
+      expect(result.error.retriability).toBe("non-retriable");
+      expect(result.error.message).toContain("declares only one of extractConditionedOn/extractNewWitness");
+      // The failure is observable, not silent.
+      expect(obs.events.some((e) => e.type === "node-error")).toBe(true);
+      // …and NO write was recorded for a node whose freshness config is broken.
+      expect(obs.events.some((e) => e.type === "write-attempted")).toBe(false);
+    });
+  }
+
   it("emits freshness-violation when conflict detected", async () => {
     const obs = new RecordingObserver();
     const writeNode = makeNodeDef("write-node", {
@@ -143,6 +191,7 @@ describe("emitFreshnessWitnessEvents", () => {
       runId: runId("other-run"),
       dagId: DID,
       nodeId: nodeId("other-writer"),
+      executionEpoch: FE(),
       conditionedOn: witness("version", RN("pg:orders"), "41"),
       newWitness: witness("version", RN("pg:orders"), "43"),
       succeededAtMs: Date.now() - 1000,
@@ -203,12 +252,53 @@ describe("emitFreshnessWitnessEvents", () => {
     const result = await emitFreshnessWitnessEvents(ctx, newOutputs, new Set());
 
     // Fail-closed: extractor failure aborts the wave
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
+    expect(result.kind).toBe("aborted");
+    if (result.kind === "aborted") {
       expect(result.error.kind).toBe("node-crash");
     }
     expect(obs.events.filter((e) => e.type === "witness-captured")).toHaveLength(0);
     expect(obs.events.some((e) => e.type === "node-error")).toBe(true);
+  });
+
+  it("preserves the fail-closed extractor result when error coercion and logging are hostile", async () => {
+    const obs = new RecordingObserver();
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    const readNode = makeNodeDef("read-node", {
+      sideEffects: {
+        kind: "reads",
+        resource: RN("pg:orders"),
+        extractWitness: () => { throw revoked.proxy; },
+      },
+    });
+    setFrameworkLogger({
+      debug() {},
+      info() {},
+      warn() { throw new Error("logger transport failed"); },
+      error() {},
+    });
+    const ctx = makePostWaveCtx(
+      [NID_READ],
+      new Map([[NID_READ, readNode]]) as any,
+      makeMachineCtx(),
+      obs,
+      new InMemoryFreshnessIndex(),
+    );
+
+    const result = await emitFreshnessWitnessEvents(
+      ctx,
+      new Map([[NID_READ, {}]]),
+      new Set(),
+    );
+
+    expect(result.kind).toBe("aborted");
+    if (result.kind === "aborted") {
+      expect(result.error).toMatchObject({
+        kind: "node-crash",
+        message: expect.stringContaining("<unprintable error>"),
+      });
+    }
+    expect(obs.events.some((event) => event.type === "node-error")).toBe(true);
   });
 
   it("no events for pure transform (kind: none)", async () => {
@@ -243,6 +333,47 @@ describe("emitFreshnessWitnessEvents", () => {
     expect(accumulator.get("pg:orders")!.value).toBe("99");
   });
 
+  it("fails closed when logical-write acknowledgement lookup fails", async () => {
+    const obs = new RecordingObserver();
+    const writeNode = makeNodeDef("write-node", {
+      sideEffects: {
+        kind: "writes",
+        resource: RN("pg:orders"),
+        extractConditionedOn: () => witness("version", RN("pg:orders"), "1"),
+        extractNewWitness: () => witnessValue("version", "2"),
+      },
+    });
+    const failingIndex: FreshnessIndex = {
+      hasRecordedWrite: async () => err({
+        kind: "cache-error",
+        operation: "freshness:hasRecordedWrite",
+        message: "Redis down",
+      }),
+      findConflict: async () => ok(null),
+      recordWrite: async () => ok(undefined),
+    };
+    const machineCtx = {
+      ...makeMachineCtx(),
+      outputs: new Map([[NID_READ, { version: 1 }]]),
+    };
+
+    const result = await emitFreshnessWitnessEvents(
+      makePostWaveCtx(
+        [NID_WRITE],
+        new Map([[NID_WRITE, writeNode]]) as any,
+        machineCtx,
+        obs,
+        failingIndex,
+      ),
+      new Map([[NID_WRITE, {}]]),
+      new Set(),
+    );
+
+    expect(result.kind).toBe("aborted");
+    expect(obs.events.some((event) => event.type === "write-attempted")).toBe(false);
+    expect(obs.events.some((event) => event.type === "freshness-violation")).toBe(false);
+  });
+
   it("returns Err when freshnessIndex.recordWrite fails", async () => {
     const obs = new RecordingObserver();
     const writeNode = makeNodeDef("write-node", {
@@ -261,6 +392,7 @@ describe("emitFreshnessWitnessEvents", () => {
 
     // Failing freshness index — recordWrite returns Err
     const failingIndex: FreshnessIndex = {
+      hasRecordedWrite: async () => ok(false),
       recordWrite: async () => err({ kind: "cache-error", operation: "recordWrite", message: "Redis down" }),
       findConflict: async () => ok(null),
     };
@@ -268,11 +400,66 @@ describe("emitFreshnessWitnessEvents", () => {
     const ctx = makePostWaveCtx([NID_WRITE], nodeMap as any, ctxWithOutput, obs, failingIndex);
     const result = await emitFreshnessWitnessEvents(ctx, newOutputs, new Set());
 
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
+    expect(result.kind).toBe("aborted");
+    if (result.kind === "aborted") {
       expect(result.error.kind).toBe("node-crash");
     }
     expect(obs.events.some((e) => e.type === "node-error")).toBe(true);
+  });
+
+  it("preserves witnessed partial progress when index diagnostics throw", async () => {
+    setFrameworkLogger({
+      debug() {},
+      info() {},
+      warn() {},
+      error() { throw new Error("logger transport failed"); },
+    });
+    const pureNode = makeNodeDef("pure-node");
+    const writeNode = makeNodeDef("write-node", {
+      sideEffects: {
+        kind: "writes",
+        resource: RN("pg:orders"),
+        extractConditionedOn: () => witness("version", RN("pg:orders"), "1"),
+        extractNewWitness: () => witnessValue("version", "2"),
+      },
+    });
+    const machineCtx = {
+      ...makeMachineCtx(),
+      outputs: new Map([[NID_READ, { version: 1 }]]),
+    };
+
+    for (const failingIndex of [
+      {
+        hasRecordedWrite: async () => ok(false),
+        findConflict: async () => err({ kind: "cache-error" as const, operation: "findConflict", message: "Redis down" }),
+        recordWrite: async () => ok(undefined),
+      },
+      {
+        hasRecordedWrite: async () => ok(false),
+        findConflict: async () => ok(null),
+        recordWrite: async () => err({ kind: "cache-error" as const, operation: "recordWrite", message: "Redis down" }),
+      },
+    ] satisfies readonly FreshnessIndex[]) {
+      const ctx = makePostWaveCtx(
+        [NID_PURE, NID_WRITE],
+        new Map([[NID_PURE, pureNode], [NID_WRITE, writeNode]]) as any,
+        machineCtx,
+        new RecordingObserver(),
+        failingIndex,
+      );
+
+      const result = await emitFreshnessWitnessEvents(
+        ctx,
+        new Map([[NID_PURE, null], [NID_WRITE, {}]]),
+        new Set(),
+      );
+
+      expect(result.kind).toBe("aborted");
+      if (result.kind === "aborted") {
+        expect(result.witnessed).toEqual(new Set([NID_PURE]));
+        expect(result.error.kind).toBe("node-crash");
+      }
+    }
   });
 
   it("returns Err when writes extractor throws (fail-closed)", async () => {
@@ -296,8 +483,8 @@ describe("emitFreshnessWitnessEvents", () => {
     const result = await emitFreshnessWitnessEvents(ctx, newOutputs, new Set());
 
     // Fail-closed: extractor failure aborts the wave
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
+    expect(result.kind).toBe("aborted");
+    if (result.kind === "aborted") {
       expect(result.error.kind).toBe("node-crash");
     }
     expect(obs.events.some((e) => e.type === "node-error")).toBe(true);
@@ -321,6 +508,7 @@ describe("emitFreshnessWitnessEvents", () => {
     // findConflict fails (e.g. a Redis outage). Fail-closed: the wave must
     // abort rather than synthesize a fake conflict with succeededAtMs: 0.
     const failingIndex: FreshnessIndex = {
+      hasRecordedWrite: async () => ok(false),
       recordWrite: async () => ok(undefined),
       findConflict: async () => err({ kind: "cache-error", operation: "findConflict", message: "Redis down" }),
     };
@@ -328,8 +516,8 @@ describe("emitFreshnessWitnessEvents", () => {
     const ctx = makePostWaveCtx([NID_WRITE], nodeMap as any, ctxWithOutput, obs, failingIndex);
     const result = await emitFreshnessWitnessEvents(ctx, newOutputs, new Set());
 
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
+    expect(result.kind).toBe("aborted");
+    if (result.kind === "aborted") {
       expect(result.error.kind).toBe("node-crash");
     }
     expect(obs.events.some((e) => e.type === "node-error")).toBe(true);

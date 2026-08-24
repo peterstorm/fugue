@@ -10,16 +10,18 @@
 // full-loop service test never exercises.
 
 import { describe, it, expect } from "bun:test";
-import { ok, err } from "@fuguejs/framework";
+import { nonEmptyString, ok, err } from "@fuguejs/framework";
 import type { RunId, NodeId, DagId, HumanAction } from "@fuguejs/framework";
 import type { DecisionStorePort, HumanReviewNotifierPort } from "../ports.js";
+import { markTeam } from "../../domain/auth.js";
 import type { ReviewNotification } from "../types.js";
 import { makeOnHumanReview, makeOnDecisionConsumed } from "../human-review-hook.js";
 
 const RUN = "run-1" as RunId;
 const NODE = "review" as NodeId;
 const DAG = "dag-1" as DagId;
-const req = { nodeId: NODE, output: { x: 1 }, prompt: "ok?" };
+const OWNER_TEAM = markTeam("test-team");
+const req = { nodeId: NODE, output: { x: 1 }, prompt: nonEmptyString("ok?") };
 
 const notifierSpy = () => {
   const sent: ReviewNotification[] = [];
@@ -27,27 +29,26 @@ const notifierSpy = () => {
   return { port, sent };
 };
 
-/** A decision store whose four ops are individually overridable for the branch under test. */
+/** A decision store whose operations are individually overridable for the branch under test. */
 const decisionStore = (overrides: Partial<DecisionStorePort> = {}): DecisionStorePort => ({
-  async markPending() { return ok(true); },
-  async isPending() { return ok(false); },
-  async putDecision() { return ok(undefined); },
+  async preparePending() { return ok({ kind: "notification-required", marker: "marker-1" }); },
+  async markNotified() { return ok(true); },
+  async resolvePending() { return ok({ kind: "not-pending" }); },
   async getDecision() { return ok(null); },
   async clear() { return ok(undefined); },
   ...overrides,
 });
 
 describe("makeOnHumanReview", () => {
-  it("re-parks (pending) and does NOT notify when the decision lookup errors", async () => {
+  it("retries the hook and does NOT notify when the decision lookup errors", async () => {
     const notifier = notifierSpy();
     const decisions = decisionStore({ async getDecision() { return err({ kind: "redis-unavailable", operation: "GET decision" }); } });
-    const hook = makeOnHumanReview({ decisions, notifier: notifier.port, runId: RUN, dagId: DAG });
+    const hook = makeOnHumanReview({ decisions, notifier: notifier.port, runId: RUN, dagId: DAG, ownerTeam: OWNER_TEAM });
 
-    const outcome = await hook(req);
+    await expect(hook(req)).rejects.toThrow("decision lookup failed");
 
-    expect(outcome).toEqual({ kind: "pending" });
-    // An errored lookup must never be fabricated into an approval, and must not
-    // re-notify (the run is already parked).
+    // An errored lookup must never be fabricated into an approval or suspend a
+    // run before its actionable pending marker exists.
     expect(notifier.sent).toHaveLength(0);
   });
 
@@ -58,7 +59,7 @@ describe("makeOnHumanReview", () => {
       async getDecision() { return ok(action); },
       async clear() { clearCalls += 1; return ok(undefined); },
     });
-    const hook = makeOnHumanReview({ decisions, notifier: notifierSpy().port, runId: RUN, dagId: DAG });
+    const hook = makeOnHumanReview({ decisions, notifier: notifierSpy().port, runId: RUN, dagId: DAG, ownerTeam: OWNER_TEAM });
 
     const outcome = await hook(req);
 
@@ -70,11 +71,16 @@ describe("makeOnHumanReview", () => {
 
   it("parks and notifies on the FIRST park, then re-parks without re-notifying", async () => {
     const notifier = notifierSpy();
-    let firstPark = true;
+    let delivered = false;
     const decisions = decisionStore({
-      async markPending() { const was = firstPark; firstPark = false; return ok(was); },
+      async preparePending() {
+        return ok(delivered
+          ? { kind: "notified" }
+          : { kind: "notification-required", marker: "marker-1" });
+      },
+      async markNotified() { delivered = true; return ok(true); },
     });
-    const hook = makeOnHumanReview({ decisions, notifier: notifier.port, runId: RUN, dagId: DAG });
+    const hook = makeOnHumanReview({ decisions, notifier: notifier.port, runId: RUN, dagId: DAG, ownerTeam: OWNER_TEAM });
 
     expect(await hook(req)).toEqual({ kind: "pending" });
     expect(await hook(req)).toEqual({ kind: "pending" });
@@ -82,39 +88,139 @@ describe("makeOnHumanReview", () => {
     expect(notifier.sent[0]!.nodeId).toBe(NODE);
   });
 
-  it("still parks (pending) when notification fails on the first park — non-fatal, no re-notify", async () => {
-    // First park succeeds (markPending → true), but delivery fails. The run is
-    // already durably parked, so the hook must NOT fail the run: it logs and
-    // returns pending. A later re-park (markPending → false) must NOT retry
-    // delivery (the notify only fires on the first park).
-    let firstPark = true;
+  it("retries a failed first notification and parks only after delivery is committed", async () => {
     let notifyCalls = 0;
+    let delivered = false;
     const decisions = decisionStore({
-      async markPending() { const was = firstPark; firstPark = false; return ok(was); },
+      async preparePending() {
+        return ok(delivered
+          ? { kind: "notified" }
+          : { kind: "notification-required", marker: "marker-1" });
+      },
+      async markNotified() { delivered = true; return ok(true); },
     });
     const notifier: HumanReviewNotifierPort = {
-      async notify() { notifyCalls += 1; return err({ kind: "notification-failed", operation: "notify" }); },
+      async notify() {
+        notifyCalls += 1;
+        return notifyCalls === 1
+          ? err({ kind: "notification-failed", operation: "notify" })
+          : ok(undefined);
+      },
     };
-    const hook = makeOnHumanReview({ decisions, notifier, runId: RUN, dagId: DAG });
+    const hook = makeOnHumanReview({ decisions, notifier, runId: RUN, dagId: DAG, ownerTeam: OWNER_TEAM });
 
-    expect(await hook(req)).toEqual({ kind: "pending" }); // parked despite delivery failure
-    expect(await hook(req)).toEqual({ kind: "pending" }); // re-park
-    expect(notifyCalls).toBe(1); // attempted once on first park, never on re-park
+    await expect(hook(req)).rejects.toThrow("review notification failed");
+    expect(await hook(req)).toEqual({ kind: "pending" });
+    expect(await hook(req)).toEqual({ kind: "pending" });
+    expect(notifyCalls).toBe(2);
   });
 
-  it("fails OPEN when markPending errors — assumes first park and notifies anyway", async () => {
-    // A markPending store blip must not silence the review: better a possible
-    // duplicate notification on a later re-park than a run parked with no notice
-    // at all. The hook treats an errored markPending as the first park.
+  it("rejects a blank prompt before it can cross the notifier boundary", async () => {
+    const notifier = notifierSpy();
+    const hook = makeOnHumanReview({
+      decisions: decisionStore(),
+      notifier: notifier.port,
+      runId: RUN,
+      dagId: DAG,
+      ownerTeam: OWNER_TEAM,
+    });
+
+    await expect(hook({ ...req, prompt: "   " })).rejects.toThrow("blank review prompt");
+    expect(notifier.sent).toHaveLength(0);
+  });
+
+  it("fails closed when preparePending errors — rejects and does not notify", async () => {
     const notifier = notifierSpy();
     const decisions = decisionStore({
-      async markPending() { return err({ kind: "redis-unavailable", operation: "SET NX pending" }); },
+      async preparePending() { return err({ kind: "redis-unavailable", operation: "SET NX pending" }); },
     });
-    const hook = makeOnHumanReview({ decisions, notifier: notifier.port, runId: RUN, dagId: DAG });
+    const hook = makeOnHumanReview({ decisions, notifier: notifier.port, runId: RUN, dagId: DAG, ownerTeam: OWNER_TEAM });
 
-    expect(await hook(req)).toEqual({ kind: "pending" });
-    expect(notifier.sent).toHaveLength(1); // notified despite the marker write failing
-    expect(notifier.sent[0]!.nodeId).toBe(NODE);
+    await expect(hook(req)).rejects.toThrow("preparePending failed");
+    expect(notifier.sent).toHaveLength(0);
+  });
+
+  // pr-test-analyzer-2 — the `committed.ok && !committed.value` sub-branch. It is
+  // a DIFFERENT condition from a store error: the notification was delivered,
+  // but the pending marker changed underneath it (a concurrent resolution took
+  // the gate). The hook must still fail closed and retry rather than park on a
+  // marker it no longer owns.
+  it("fails closed when the notification lands but a concurrent resolution moved the pending marker", async () => {
+    const notifier = notifierSpy();
+    const decisions = decisionStore({
+      // ok, but `false`: the marker this hook prepared is no longer the live one.
+      async markNotified() { return ok(false); },
+    });
+    const hook = makeOnHumanReview({ decisions, notifier: notifier.port, runId: RUN, dagId: DAG, ownerTeam: OWNER_TEAM });
+
+    await expect(hook(req)).rejects.toThrow("notification state commit failed");
+    // The notification DID go out — this is not the delivery-failure branch.
+    expect(notifier.sent).toHaveLength(1);
+  });
+
+  it("distinguishes a marker race from a store error in the thrown detail", async () => {
+    const race = makeOnHumanReview({
+      decisions: decisionStore({ async markNotified() { return ok(false); } }),
+      notifier: notifierSpy().port,
+      runId: RUN,
+      dagId: DAG,
+      ownerTeam: OWNER_TEAM,
+    });
+    const storeError = makeOnHumanReview({
+      decisions: decisionStore({
+        async markNotified() { return err({ kind: "redis-unavailable", operation: "SET notified" }); },
+      }),
+      notifier: notifierSpy().port,
+      runId: RUN,
+      dagId: DAG,
+      ownerTeam: OWNER_TEAM,
+    });
+
+    // Same fail-closed outcome, DIFFERENT operator-facing cause.
+    await expect(race(req)).rejects.toThrow("pending marker changed");
+    await expect(storeError(req)).rejects.toThrow("redis-unavailable");
+  });
+
+  it("throwing diagnostics cannot bypass decision, marker, or notification outcomes", async () => {
+    const logger = {
+      info: () => {},
+      warn: () => { throw new Error("warn transport failed"); },
+      error: () => { throw new Error("error transport failed"); },
+    };
+    const lookupFailure = makeOnHumanReview({
+      decisions: decisionStore({
+        async getDecision() { return err({ kind: "redis-unavailable", operation: "GET" }); },
+      }),
+      notifier: notifierSpy().port,
+      runId: RUN,
+      dagId: DAG,
+      ownerTeam: OWNER_TEAM,
+      logger,
+    });
+    const markerFailure = makeOnHumanReview({
+      decisions: decisionStore({
+        async preparePending() { return err({ kind: "redis-unavailable", operation: "SET NX" }); },
+      }),
+      notifier: notifierSpy().port,
+      runId: RUN,
+      dagId: DAG,
+      ownerTeam: OWNER_TEAM,
+      logger,
+    });
+    const notificationFailure = makeOnHumanReview({
+      decisions: decisionStore(),
+      notifier: {
+        async notify() { return err({ kind: "notification-failed", operation: "notify" }); },
+      },
+      runId: RUN,
+      dagId: DAG,
+      ownerTeam: OWNER_TEAM,
+      logger,
+    });
+
+    await expect(lookupFailure(req)).rejects.toThrow("decision lookup failed");
+    await expect(markerFailure(req)).rejects.toThrow("preparePending failed");
+    await expect(notificationFailure(req)).rejects.toThrow("review notification failed");
   });
 });
 
@@ -131,13 +237,29 @@ describe("makeOnDecisionConsumed", () => {
     expect(cleared).toEqual([[RUN, NODE]]);
   });
 
-  it("is non-fatal when the clear fails (post-gate state is already durable; TTL reaps)", async () => {
+  it("fails closed when clearing the consumed decision fails", async () => {
     const decisions = decisionStore({
       async clear() { return err({ kind: "redis-unavailable", operation: "DEL" }); },
     });
     const consume = makeOnDecisionConsumed({ decisions, runId: RUN });
 
-    // Must resolve, not reject — a failed consume cannot fail an already-committed run.
-    await expect(consume(NODE)).resolves.toBeUndefined();
+    await expect(consume(NODE)).rejects.toThrow("consumed decision cleanup failed");
+  });
+
+  it("a throwing clear-failure logger cannot hide the fail-closed outcome", async () => {
+    const decisions = decisionStore({
+      async clear() { return err({ kind: "redis-unavailable", operation: "DEL" }); },
+    });
+    const consume = makeOnDecisionConsumed({
+      decisions,
+      runId: RUN,
+      logger: {
+        info: () => {},
+        warn: () => {},
+        error: () => { throw new Error("logger failed"); },
+      },
+    });
+
+    await expect(consume(NODE)).rejects.toThrow("consumed decision cleanup failed");
   });
 });

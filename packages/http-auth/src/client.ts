@@ -5,8 +5,8 @@
  * - automatic injection of the managed bearer token as `Authorization: Bearer …`
  * - Zod validation of every response body (`Result`, never throws)
  * - FrameworkError mapping mirroring the framework's built-in HTTP capability
- *   (timeout/network/5xx → `transient`; invalid JSON/4xx/schema mismatch →
- *   non-retriable `node-crash`)
+ *   (timeout/network/408/429/5xx → `transient`; invalid JSON/other 4xx/schema
+ *   mismatch → non-retriable `node-crash`)
  * - a single `401` retry: on a `401` from any verb, the token is invalidated,
  *   re-minted, and the original request retried exactly once.
  *
@@ -18,6 +18,9 @@ import type { z } from "zod";
 import type { Result, FrameworkError } from "@fuguejs/framework";
 import { ok, err, nodeId, frameworkError } from "@fuguejs/framework";
 import type { TokenProvider, FetchLike } from "./auth.js";
+import { classifyAbort } from "./abort-classification.js";
+import { isRetriableHttpStatus } from "./http-status.js";
+export { isRetriableHttpStatus } from "./http-status.js";
 
 const CLIENT_NODE_ID = nodeId("http-auth-client");
 
@@ -77,6 +80,31 @@ export const buildUrl = (baseUrl: string, path: string): string => {
   return `${base}${suffix}`;
 };
 
+interface RequestTarget {
+  readonly url: string;
+  /** Trusted diagnostic label: origin + pathname, never query/user-info. */
+  readonly label: string;
+}
+
+/** Resolve and confine a request before the managed token is acquired. */
+const resolveRequestTarget = (
+  baseUrl: string,
+  path: string,
+): Result<RequestTarget, FrameworkError> => {
+  try {
+    const base = new URL(baseUrl);
+    const url = new URL(buildUrl(baseUrl, path));
+    if (url.origin !== base.origin) {
+      return err(makeNodeCrashError(
+        `Authenticated request origin '${url.origin}' does not match configured origin '${base.origin}'`,
+      ));
+    }
+    return ok({ url: url.href, label: `${url.origin}${url.pathname}` });
+  } catch {
+    return err(makeNodeCrashError("Authenticated request URL is invalid"));
+  }
+};
+
 const makeTransientError = (message: string, httpStatus?: number): FrameworkError =>
   frameworkError.transient(CLIENT_NODE_ID, message, httpStatus);
 
@@ -87,17 +115,8 @@ const makeNodeCrashError = (message: string): FrameworkError => ({
   retriability: "non-retriable",
 });
 
-/**
- * HTTP statuses that are retriable despite being non-5xx: `429 Too Many
- * Requests` (rate-limit — back off and retry) and `408 Request Timeout`. These
- * are the textbook retriable signals, so we classify them `transient` rather
- * than a non-retriable crash. Mirrors the token-mint path in `auth.ts`.
- */
-const RETRIABLE_HTTP_STATUSES: ReadonlySet<number> = new Set([408, 429]);
-
-/** A non-2xx response is retriable when it is 5xx, 429 (rate-limit) or 408 (timeout). */
-const isRetriableHttpStatus = (status: number): boolean =>
-  status >= 500 || RETRIABLE_HTTP_STATUSES.has(status);
+const requestOptionsContractError = (): FrameworkError =>
+  makeNodeCrashError("Authenticated request options violated their runtime contract");
 
 /**
  * The raw outcome of a single fetch attempt, before token-refresh logic. We
@@ -119,7 +138,7 @@ export interface AuthedClientConfig {
   readonly timeoutMs?: number;
 }
 
-export interface AuthedClientDeps {
+interface AuthedClientDeps {
   readonly config: AuthedClientConfig;
   readonly tokens: TokenProvider;
   readonly fetch: FetchLike;
@@ -144,24 +163,69 @@ interface RequestBody {
 
 const NO_BODY: RequestBody = { body: undefined };
 
+const serializeRequestBody = (body: unknown | undefined): Result<string | undefined, FrameworkError> => {
+  if (body === undefined) return ok(undefined);
+  try {
+    const serialized = JSON.stringify(body);
+    return serialized === undefined
+      ? err(makeNodeCrashError("Request body was not JSON-serializable"))
+      : ok(serialized);
+  } catch {
+    return err(makeNodeCrashError("Request body was not JSON-serializable"));
+  }
+};
+
+/**
+ * A `TokenProvider` that throws has violated its Result contract. The caught
+ * value is DELIBERATELY discarded rather than rendered into the message: a
+ * provider mints credentials, so whatever it throws may carry one (a bearer in
+ * a wrapped upstream response, a client secret echoed by a misconfigured SDK).
+ * `client.test.ts` pins this — "normalizes a rejecting initial token lookup
+ * into a secret-free Result" asserts the returned message does NOT contain the
+ * provider's thrown text. The operation name is the one safe discriminator, so
+ * it is carried; the cause is not. Do not "improve" this by echoing the error.
+ */
+const tokenProviderContractError = (operation: string): FrameworkError =>
+  makeNodeCrashError(
+    `Token provider failed outside its Result contract during ${operation}`,
+  );
+
+const getToken = async (tokens: TokenProvider): ReturnType<TokenProvider["get"]> => {
+  try {
+    return await tokens.get();
+  } catch {
+    return err(tokenProviderContractError("get"));
+  }
+};
+
+const invalidateToken = (tokens: TokenProvider): Result<void, FrameworkError> => {
+  try {
+    tokens.invalidate();
+    return ok(undefined);
+  } catch {
+    return err(tokenProviderContractError("invalidate"));
+  }
+};
+
 const sendOnce = async <T>(
   deps: AuthedClientDeps,
   method: string,
-  path: string,
+  target: RequestTarget,
   token: string,
   payload: RequestBody,
   opts: AuthedRequestOpts<T>,
 ): Promise<SendOutcome<T>> => {
-  const fullUrl = buildUrl(deps.config.baseUrl, path);
+  const fullUrl = target.url;
   const timeoutMs = opts.timeoutMs ?? deps.config.timeoutMs;
-  const body = payload.body;
+  const serializedBody = serializeRequestBody(payload.body);
+  if (!serializedBody.ok) return { tag: "error", error: serializedBody.error };
 
   const headers: Record<string, string> = {
     ...deps.config.defaultHeaders,
     ...opts.headers,
     Authorization: `Bearer ${token}`,
   };
-  if (body !== undefined && !headers["Content-Type"] && !headers["content-type"]) {
+  if (serializedBody.value !== undefined && !headers["Content-Type"] && !headers["content-type"]) {
     headers["Content-Type"] = payload.contentType ?? "application/json";
   }
 
@@ -177,7 +241,7 @@ const sendOnce = async <T>(
     const response = await deps.fetch(fullUrl, {
       method,
       headers,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
+      body: serializedBody.value,
       signal: controller?.signal,
     });
 
@@ -187,31 +251,34 @@ const sendOnce = async <T>(
     }
 
     if (!response.ok) {
-      const text = await response.text().catch(() => "<body unreadable>");
+      // Drain best-effort for connection reuse, but never copy an authenticated
+      // peer's response body into our error: it may echo the bearer token.
+      await response.text().catch(() => "");
       // 5xx, 429 (rate-limit) and 408 (request timeout) are the retriable HTTP
       // signals → transient. Every other non-2xx (deterministic 4xx) is a
       // non-retriable node-crash: retrying the same request would fail again.
+      const message = `HTTP ${response.status} from ${method} ${target.label}`;
       if (isRetriableHttpStatus(response.status)) {
-        return { tag: "error", error: makeTransientError(`HTTP ${response.status} ${response.statusText}: ${text.slice(0, 500)}`, response.status) };
+        return { tag: "error", error: makeTransientError(message, response.status) };
       }
-      return { tag: "error", error: makeNodeCrashError(`HTTP ${response.status} ${response.statusText}: ${text.slice(0, 500)}`) };
+      return { tag: "error", error: makeNodeCrashError(message) };
     }
 
     let responseBody: unknown;
     try {
       responseBody = await response.json();
-    } catch (parseError) {
+    } catch {
       return {
         tag: "error",
-        error: makeNodeCrashError(
-          `Response body was not valid JSON: ${parseError instanceof Error ? parseError.message : String(parseError)} (${method} ${fullUrl})`,
-        ),
+        error: makeNodeCrashError(`Response body was not valid JSON for ${method} ${target.label}`),
       };
     }
 
     const parsed = opts.schema.safeParse(responseBody);
     if (!parsed.success) {
-      return { tag: "error", error: makeNodeCrashError(`Response validation failed: ${parsed.error.message}`) };
+      // Even issue paths can be derived from attacker-controlled response keys.
+      // Keep the diagnostic entirely trusted at this credential-bearing seam.
+      return { tag: "error", error: makeNodeCrashError(`Response validation failed for ${method} ${target.label}`) };
     }
     return { tag: "ok", value: parsed.data };
   } catch (error: unknown) {
@@ -219,26 +286,22 @@ const sendOnce = async <T>(
     // reason on the controller's signal is the source of truth (a
     // signal-respecting fetch rejects with that reason): our timeout aborts with
     // `Error("timeout")`; an external cancel aborts with no/other reason.
-    const reason: unknown = controller?.signal.reason;
-    const isOurTimeout =
-      (reason instanceof Error && reason.message === "timeout") ||
-      (error instanceof Error && (error.message === "timeout" || error.name === "TimeoutError"));
-    const isAbort =
-      controller?.signal.aborted === true ||
-      (error instanceof Error && error.name === "AbortError");
+    const abort = classifyAbort(controller?.signal, error);
 
     // Our OWN timeout → transient: a slow endpoint should be retried.
-    if (isOurTimeout) {
-      return { tag: "error", error: makeTransientError(`HTTP request timed out after ${timeoutMs}ms: ${method} ${fullUrl}`) };
+    if (abort === "timeout") {
+      return { tag: "error", error: makeTransientError(`HTTP request timed out after ${timeoutMs}ms: ${method} ${target.label}`) };
     }
     // A non-timeout abort means the caller/node cancelled this request →
     // non-retriable node-crash: auto-retrying cancelled work defeats the cancel.
-    if (isAbort) {
-      return { tag: "error", error: makeNodeCrashError(`HTTP request cancelled: ${method} ${fullUrl}`) };
+    if (abort === "abort") {
+      return { tag: "error", error: makeNodeCrashError(`HTTP request cancelled: ${method} ${target.label}`) };
     }
     return {
       tag: "error",
-      error: makeTransientError(`HTTP request failed: ${error instanceof Error ? error.message : String(error)}`),
+      // The fetch seam saw the Authorization header. Its rejection text is
+      // therefore untrusted and may reflect the managed bearer token.
+      error: makeTransientError(`HTTP request failed: ${method} ${target.label}`),
     };
   } finally {
     if (timer != null) clearTimeout(timer);
@@ -257,24 +320,56 @@ const execute = async <T>(
   payload: RequestBody,
   opts: AuthedRequestOpts<T>,
 ): Promise<Result<T, FrameworkError>> => {
-  const first = await deps.tokens.get();
-  if (!first.ok) return err(first.error);
+  try {
+    const target = resolveRequestTarget(deps.config.baseUrl, path);
+    if (!target.ok) return err(target.error);
 
-  const outcome = await sendOnce(deps, method, path, first.value, payload, opts);
-  if (outcome.tag === "ok") return ok(outcome.value);
-  if (outcome.tag === "error") return err(outcome.error);
+    const first = await getToken(deps.tokens);
+    if (!first.ok) return err(first.error);
 
-  // outcome.tag === "unauthorized": invalidate, re-mint, retry exactly once.
-  deps.tokens.invalidate();
-  const second = await deps.tokens.get();
-  if (!second.ok) return err(second.error);
+    const outcome = await sendOnce(deps, method, target.value, first.value, payload, opts);
+    if (outcome.tag === "ok") return ok(outcome.value);
+    if (outcome.tag === "error") return err(outcome.error);
 
-  const retry = await sendOnce(deps, method, path, second.value, payload, opts);
-  if (retry.tag === "ok") return ok(retry.value);
-  if (retry.tag === "error") return err(retry.error);
-  // A second consecutive 401 — surface as a non-retriable auth failure rather
-  // than looping. The credentials/token are not included (NFR-010).
-  return err(makeNodeCrashError(`Authentication failed after token refresh: ${method} ${path} returned 401`));
+    // outcome.tag === "unauthorized": invalidate, re-mint, retry exactly once.
+    const invalidated = invalidateToken(deps.tokens);
+    if (!invalidated.ok) return err(invalidated.error);
+    const second = await getToken(deps.tokens);
+    if (!second.ok) return err(second.error);
+
+    const retry = await sendOnce(deps, method, target.value, second.value, payload, opts);
+    if (retry.tag === "ok") return ok(retry.value);
+    if (retry.tag === "error") return err(retry.error);
+    // A second consecutive 401 — surface as a non-retriable auth failure rather
+    // than looping. The credentials/token are not included (NFR-010).
+    return err(makeNodeCrashError(`Authentication failed after token refresh: ${method} ${target.value.label} returned 401`));
+  } catch {
+    // Request options are a public runtime boundary. A malformed JavaScript
+    // caller or hostile accessor must remain inside the Result channel, and its
+    // thrown text is deliberately discarded because it may contain a token or
+    // request payload.
+    return err(requestOptionsContractError());
+  }
+};
+
+/** Extract body-only options inside the same secret-free Result boundary. */
+const executeBodyRequest = async <T>(
+  deps: AuthedClientDeps,
+  method: "POST" | "PUT" | "PATCH",
+  path: string,
+  opts: AuthedBodyRequestOpts<T>,
+): Promise<Result<T, FrameworkError>> => {
+  try {
+    return await execute(
+      deps,
+      method,
+      path,
+      { body: opts.body, contentType: opts.contentType },
+      opts,
+    );
+  } catch {
+    return err(requestOptionsContractError());
+  }
 };
 
 // ---------------------------------------------------------------------------
@@ -290,11 +385,11 @@ export const createAuthedHttpClient = (deps: AuthedClientDeps): AuthedHttpCapabi
   get: <T>(path: string, opts: AuthedRequestOpts<T>) =>
     execute(deps, "GET", path, NO_BODY, opts),
   post: <T>(path: string, opts: AuthedBodyRequestOpts<T>) =>
-    execute(deps, "POST", path, { body: opts.body, contentType: opts.contentType }, opts),
+    executeBodyRequest(deps, "POST", path, opts),
   put: <T>(path: string, opts: AuthedBodyRequestOpts<T>) =>
-    execute(deps, "PUT", path, { body: opts.body, contentType: opts.contentType }, opts),
+    executeBodyRequest(deps, "PUT", path, opts),
   patch: <T>(path: string, opts: AuthedBodyRequestOpts<T>) =>
-    execute(deps, "PATCH", path, { body: opts.body, contentType: opts.contentType }, opts),
+    executeBodyRequest(deps, "PATCH", path, opts),
   delete: <T>(path: string, opts: AuthedRequestOpts<T>) =>
     execute(deps, "DELETE", path, NO_BODY, opts),
 });

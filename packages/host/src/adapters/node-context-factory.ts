@@ -17,13 +17,11 @@
  *   keycloak-broker.ts — same tag, different spec namespace.
  */
 
+import { isDeepStrictEqual } from "node:util";
 import type {
-  NodeContext,
   ContextCacheAdapter,
   CheckpointWriter,
   CacheLookup,
-  LlmClient,
-  Tracer,
   DagId,
   RunId,
   NodeId,
@@ -31,7 +29,8 @@ import type {
   FrameworkError,
 } from "@fuguejs/framework";
 import type { InvocationOrigin } from "@fuguejs/framework";
-import { makeNodeContext, ok, isErr } from "@fuguejs/framework";
+import { fromJson, makeNodeContext, ok, isErr, safeErrorMessage, toJson } from "@fuguejs/framework";
+import { assertLosslessEvent } from "@fuguejs/framework/file";
 import type { RegisteredDag } from "../domain/registry.js";
 import type { AuthIdentity, AgentClientMap } from "../domain/auth.js";
 import type { RedisPort, SharedInfra, LogPort } from "../ports.js";
@@ -48,7 +47,7 @@ import { createMeteredLlm } from "./metered-llm.js";
  * TTL configuration resolved for a specific DAG — combines host defaults
  * with per-DAG overrides from fugue.yaml.
  */
-export interface ResolvedTtl {
+interface ResolvedTtl {
   readonly cacheTtlSec: number | undefined;
   readonly checkpointTtlSec: number | undefined;
 }
@@ -70,6 +69,64 @@ import { formatHostError } from "../domain/host-error.js";
  * @satisfies FR-013 — Keys prefixed with tenant + DAG namespace
  * @satisfies FR-041 — Per-DAG TTL override applied
  */
+/**
+ * Track consecutive failures of one Redis-backed operation and escalate the log
+ * level once they stop looking like a blip.
+ *
+ * ONE definition for the three sites that need it (cache `get`, cache `set`,
+ * checkpoint `write`), which each declared their own counter, threshold constant
+ * and warn/error branch. The distinction it encodes is the point: a single failed
+ * Redis call is normal operational noise and warns; ten in a row is Redis being
+ * down and must reach `error`, where alerting looks. Three hand-maintained copies
+ * of that rule could drift to three different thresholds — and a counter that a
+ * copy forgot to RESET on success would escalate forever after one bad minute.
+ */
+const reportWithoutThrowing = (
+  logger: LogPort,
+  level: "warn" | "error",
+  message: string,
+  context: Record<string, unknown>,
+): void => {
+  try {
+    logger[level](message, context);
+  } catch {
+    // The cache/checkpoint outcome remains authoritative over diagnostics.
+  }
+};
+
+const failureEscalator = (opts: {
+  readonly threshold: number;
+  /** Logged while the failure still looks transient. */
+  readonly warnMessage: string;
+  /** Logged once `threshold` consecutive failures say the dependency is down. */
+  readonly errorMessage: string;
+  readonly report: (
+    level: "warn" | "error",
+    message: string,
+    context: Record<string, unknown>,
+  ) => void;
+}) => {
+  let consecutiveFailures = 0;
+  return {
+    /** Record a failure and report it at the level the current run length earns. */
+    failed: (context: Record<string, unknown>): void => {
+      consecutiveFailures++;
+      const escalated = consecutiveFailures >= opts.threshold;
+      opts.report(escalated ? "error" : "warn", escalated ? opts.errorMessage : opts.warnMessage, {
+        ...context,
+        consecutiveFailures,
+      });
+    },
+    /** Record a success — the run of failures is over, so the next one starts at 1. */
+    succeeded: (): void => {
+      consecutiveFailures = 0;
+    },
+  };
+};
+
+/** Consecutive Redis failures before a warn becomes an error (see `failureEscalator`). */
+const FAILURE_ESCALATION_THRESHOLD = 10;
+
 export const createNamespacedCache = (
   redis: RedisPort,
   tenant: TenantId,
@@ -77,39 +134,39 @@ export const createNamespacedCache = (
   defaultTtlSec: number | undefined,
   logger: LogPort,
 ): ContextCacheAdapter => {
-  let consecutiveGetFailures = 0;
-  let consecutiveSetFailures = 0;
-  const FAILURE_ESCALATION_THRESHOLD = 10;
+  const getFailures = failureEscalator({
+    threshold: FAILURE_ESCALATION_THRESHOLD,
+    warnMessage: "Cache get failed — graceful degradation to miss",
+    errorMessage: "Cache get failures exceeded threshold — Redis may be degraded",
+    report: (level, message, context) => reportWithoutThrowing(logger, level, message, context),
+  });
+  const setFailures = failureEscalator({
+    threshold: FAILURE_ESCALATION_THRESHOLD,
+    warnMessage: "Cache set failed — Redis error",
+    errorMessage: "Cache set failures exceeded threshold — Redis may be degraded",
+    report: (level, message, context) => reportWithoutThrowing(logger, level, message, context),
+  });
 
   return {
     get: async (key: string): Promise<CacheLookup> => {
       const fullKey = buildCacheKey(tenant, dagId, key);
       const result = await redis.get(fullKey);
       if (!result.ok) {
-        consecutiveGetFailures++;
-        if (consecutiveGetFailures >= FAILURE_ESCALATION_THRESHOLD) {
-          logger.error("Cache get failures exceeded threshold — Redis may be degraded", {
-            key: fullKey, dagId, consecutiveFailures: consecutiveGetFailures,
-          });
-        } else {
-          logger.warn("Cache get failed — graceful degradation to miss", {
-            key: fullKey, dagId, error: result.error.kind,
-          });
-        }
+        getFailures.failed({ key: fullKey, dagId, error: result.error.kind });
         return { hit: false };
       }
-      consecutiveGetFailures = 0;
+      getFailures.succeeded();
       const raw = result.value;
       if (raw === null) return { hit: false };
       try {
         return { hit: true, value: JSON.parse(raw) };
       } catch (e) {
         // Corrupted entry — treat as miss
-        logger.warn("Cache entry corrupted — treating as miss", {
+        reportWithoutThrowing(logger, "warn", "Cache entry corrupted — treating as miss", {
           key: fullKey,
           dagId,
           rawPreview: raw?.slice(0, 100),
-          parseError: e instanceof Error ? e.message : String(e),
+          parseError: safeErrorMessage(e),
         });
         return { hit: false };
       }
@@ -134,7 +191,11 @@ export const createNamespacedCache = (
       try {
         serialized = JSON.stringify(value);
       } catch (e) {
-        logger.warn("Cache set failed — value not serializable", { key: fullKey, dagId, error: e instanceof Error ? e.message : String(e) });
+        reportWithoutThrowing(logger, "warn", "Cache set failed — value not serializable", {
+          key: fullKey,
+          dagId,
+          error: safeErrorMessage(e),
+        });
         return ok(undefined); // Don't kill the request for a cache write failure
       }
       const effectiveTtl = ttlSec ?? defaultTtlSec;
@@ -142,16 +203,9 @@ export const createNamespacedCache = (
         ? await redis.set(fullKey, serialized, { expiresInSec: effectiveTtl })
         : await redis.set(fullKey, serialized);
       if (!setResult.ok) {
-        consecutiveSetFailures++;
-        if (consecutiveSetFailures >= FAILURE_ESCALATION_THRESHOLD) {
-          logger.error("Cache set failures exceeded threshold — Redis may be degraded", {
-            key: fullKey, dagId, consecutiveFailures: consecutiveSetFailures,
-          });
-        } else {
-          logger.warn("Cache set failed — Redis error", { key: fullKey, dagId, error: setResult.error.kind });
-        }
+        setFailures.failed({ key: fullKey, error: setResult.error.kind });
       } else {
-        consecutiveSetFailures = 0;
+        setFailures.succeeded();
       }
       return ok(undefined);
     },
@@ -173,38 +227,53 @@ export const createNamespacedCheckpointWriter = (
   checkpointTtlSec: number | undefined,
   logger: LogPort,
 ): CheckpointWriter => {
-  let consecutiveWriteFailures = 0;
-  const FAILURE_ESCALATION_THRESHOLD = 10;
+  const report = (
+    level: "warn" | "error",
+    message: string,
+    context: Record<string, unknown>,
+  ): void => reportWithoutThrowing(logger, level, message, context);
+
+  const writeFailures = failureEscalator({
+    threshold: FAILURE_ESCALATION_THRESHOLD,
+    warnMessage: "Checkpoint write failed — Redis error",
+    errorMessage: "Checkpoint write failures exceeded threshold — Redis may be degraded",
+    report,
+  });
 
   return {
     write: async (_runId: RunId, nodeId: NodeId, value: unknown): Promise<void> => {
       const fullKey = buildCheckpointKey(tenant, dagId, runId, nodeId);
       let serialized: string;
       try {
-        serialized = JSON.stringify(value);
+        assertLosslessEvent(value, {
+          operation: "checkpointWriter.write",
+          root: "nodeOutput",
+        });
+        serialized = toJson(value);
+        if (!isDeepStrictEqual(fromJson(serialized), value)) {
+          throw new Error("node output failed losslessness round-trip verification");
+        }
       } catch (e) {
-        logger.warn("Checkpoint write failed — value not serializable", { key: fullKey, dagId, runId, nodeId: nodeId as string, error: e instanceof Error ? e.message : String(e) });
-        return; // Best-effort — don't kill the DAG execution
+        const message = safeErrorMessage(e);
+        report("warn", "Checkpoint write failed — value not serializable", {
+          key: fullKey, dagId, runId, nodeId: nodeId as string, error: message,
+        });
+        throw new Error(`Checkpoint write failed for ${fullKey}: value not serializable (${message})`);
       }
       const setResult = checkpointTtlSec !== undefined
         ? await redis.set(fullKey, serialized, { expiresInSec: checkpointTtlSec })
         : await redis.set(fullKey, serialized);
       if (!setResult.ok) {
-        // Best-effort — don't kill the DAG execution. Escalate warn→error after a
-        // run of consecutive failures so a sustained checkpoint-write outage
-        // (Redis brownout → silent loss of resumability) is alertable, mirroring
-        // the cache adapter rather than logging a flat warn forever.
-        consecutiveWriteFailures++;
-        if (consecutiveWriteFailures >= FAILURE_ESCALATION_THRESHOLD) {
-          logger.error("Checkpoint write failures exceeded threshold — Redis may be degraded", {
-            key: fullKey, dagId, runId, nodeId: nodeId as string, consecutiveFailures: consecutiveWriteFailures,
-          });
-        } else {
-          logger.warn("Checkpoint write failed — Redis error", { key: fullKey, dagId, runId, nodeId: nodeId as string, error: setResult.error.kind });
-        }
-      } else {
-        consecutiveWriteFailures = 0;
+        writeFailures.failed({
+          key: fullKey,
+          dagId,
+          runId,
+          nodeId: nodeId as string,
+          error: setResult.error.kind,
+        });
+        throw new Error(`Checkpoint write failed for ${fullKey}: ${setResult.error.kind}`);
       }
+      writeFailures.succeeded();
     },
   };
 };
@@ -227,12 +296,12 @@ export const resolveTtl = (dag: RegisteredDag): ResolvedTtl => {
   };
 };
 
-// `NodeContextForDag` and the pure `invocationOriginForIdentity` moved to
-// `domain/run-context.ts` — the contract of the `createContext` port belongs
-// to the domain, not this adapter (the HTTP layer names it without importing
-// adapter modules). Re-exported here for backward compatibility.
-export { invocationOriginForIdentity };
-export type { NodeContextForDag };
+// `NodeContextForDag` and the pure `invocationOriginForIdentity` live in
+// `domain/run-context.ts` — the contract of the `createContext` port belongs to
+// the domain, not this adapter (the HTTP layer names it without importing
+// adapter modules). They are deliberately NOT re-exported here: every consumer
+// imports them from the domain module directly, and a pre-release compat alias
+// would only give the domain contract a second name to drift under.
 
 /**
  * Construct the BASE NodeContext for a specific DAG execution, plus the run's
@@ -253,8 +322,7 @@ export type { NodeContextForDag };
  * per-node (the only place the real `nodeId` and that node's `requires` are
  * known), so resolving it once at context-construction with empty `requires`
  * (the rejected eager-resolution design) could never reach the minting machinery
- * and silently dropped every statically-configured client on the realm path
- * (review C1).
+ * and silently dropped every statically-configured client on the realm path.
  *
  * Pools stay boot-scoped (FR-W2-005): only authority resolution moved behind the
  * broker, and it now moves per node, in the framework.
@@ -355,9 +423,9 @@ export const createNodeContextForDag = async (
   // attributed (dagId, runId, nodeId), aggregated, and budget-checked in-process
   // (no network round trip). When `llmBudgetTokens` is unset the decorator meters
   // but never refuses (FR-W1-006). One decorator per NodeContext → run-scoped
-  // counter. @satisfies FR-W0-001 FR-W0-004 FR-W1-001..006 (FR-W2-009
-  // groundwork only — LLM authority is run-scoped here, not yet on the
-  // broker's mintFor seam; see keycloak-broker.ts)
+  // counter. @satisfies FR-W0-001 FR-W0-004 FR-W1-001..006 (FR-W2-009:
+  // LLM authority is deliberately run-scoped here — the metered decorator is
+  // the per-run budget authority; see keycloak-broker.ts)
   const llm = createMeteredLlm(shared.llm, {
     dagId,
     runId,

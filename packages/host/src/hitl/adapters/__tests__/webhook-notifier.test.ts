@@ -3,7 +3,9 @@
 // with an injected fake HTTP transport (no network).
 
 import { describe, it, expect } from "bun:test";
+import { nonEmptyString } from "@fuguejs/framework";
 import type { DagId, RunId, NodeId } from "@fuguejs/framework";
+import { markTeam } from "../../../domain/auth.js";
 import type { ReviewNotification } from "../../types.js";
 import {
   buildAdaptiveCardPayload,
@@ -15,8 +17,9 @@ import {
 const notification: ReviewNotification = {
   runId: "run-42" as RunId,
   dagId: "lead-desk" as DagId,
+  ownerTeam: markTeam("sales"),
   nodeId: "review" as NodeId,
-  prompt: "Approve the drafted reply?",
+  prompt: nonEmptyString("Approve the drafted reply?"),
   output: { reply: "Hello!" },
 };
 
@@ -73,5 +76,25 @@ describe("webhook notifier — POST + status mapping", () => {
     const res = await createWebhookNotifier(cfg, http).notify(notification);
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.kind).toBe("notification-failed");
+  });
+
+  it("renders a hostile output through the TOTAL preview fallback (never a raw rejection, never a throw)", async () => {
+    // A cyclic NULL-PROTOTYPE output: JSON.stringify throws (circular), and
+    // the old catch fallback `String(output)` threw AGAIN (null-prototype has
+    // no toString) — a raw rejection that would escalate a parked run to
+    // node-failed. The shared total renderer must produce a preview string
+    // for this class; the card build itself is inside notify's guarded body.
+    const hostile = Object.create(null) as Record<string, unknown>;
+    hostile.self = hostile; // circular AND null-prototype
+    const bodies: string[] = [];
+    const http: WebhookHttp = {
+      post: async (_url, body) => { bodies.push(body); return { status: 200 }; },
+    };
+    const res = await createWebhookNotifier(cfg, http).notify({ ...notification, output: hostile });
+    expect(res.ok).toBe(true);
+    // A preview is still embedded in the POSTed body — the fallback rendered.
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]!.length).toBeGreaterThan(0);
+    expect(() => JSON.parse(bodies[0]!)).not.toThrow();
   });
 });

@@ -99,13 +99,16 @@ on **both** the token-mint path and the request path.
 | HTTP 408 (Request Timeout)                    | `transient` (with httpStatus) | yes        | The server timed the request out — retry.                                            |
 | HTTP 4xx (other non-401)                      | `node-crash` (non-retriable)  | **no**     | Deterministic rejection; the same request would just fail again.                     |
 | invalid JSON / schema mismatch                | `node-crash` (non-retriable)  | **no**     | Deterministic payload defect.                                                        |
+| request body is not JSON-serializable         | `node-crash` (non-retriable)  | **no**     | Deterministic caller payload defect; fetch is not attempted.                         |
+| throwing/non-finite token clock               | `node-crash` (non-retriable)  | **no**     | Invalid time cannot enter token-expiry state.                                        |
+| token provider rejects outside `Result`       | `node-crash` (non-retriable)  | **no**     | The capability normalizes a broken provider contract without exposing its diagnostic. |
 | 401 persisting after a token refresh          | `node-crash` (non-retriable)  | **no**     | A second consecutive 401 is settled auth failure, not a transient blip.              |
 
 Timeout vs. cancellation: our **own** deadline abort (we fire it with the message
 `"timeout"`) stays `transient` (retriable), but a non-timeout `AbortError` — a
-caller/node cancellation, including a health-check deadline cancelling its mint —
-maps to a non-retriable `node-crash`, because auto-retrying cancelled work defeats
-the cancellation.
+caller/node cancellation maps to a non-retriable `node-crash`, because
+auto-retrying cancelled work defeats the cancellation. Lifecycle health checks
+use a separate hard-deadline result rather than relying on cancellation to settle.
 
 ## Lifecycle
 
@@ -114,8 +117,14 @@ lifecycle:
 
 - `connect()` mints the first token (a bad credential fails boot, not the first
   run).
-- `healthCheck()` forces a fresh token-mint round-trip, racing a 5s timeout.
+- `healthCheck()` uses an uncached, non-deduplicated token probe and an
+  independent 5s hard deadline. It aborts the fetch as best-effort cleanup, but
+  still returns unhealthy on time when an injected fetch ignores cancellation;
+  a late probe can never populate or invalidate the request cache.
 - `close()` is a no-op (no connection pool to drain).
+
+The exported `TokenProvider` mirrors this split: `get()` is cached/single-flight,
+while `probe()` is uncached and reserved for lifecycle verification.
 
 ## Testing
 

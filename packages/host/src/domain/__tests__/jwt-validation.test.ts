@@ -11,7 +11,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { validateRealmJwtClaims, describeAuthError } from "../jwt-validation.js";
-import type { RealmJwtClaims, SignatureVerifiedClaims } from "../jwt-validation.js";
+import type { SignatureVerifiedClaims } from "../jwt-validation.js";
 import { markTeam } from "../auth.js";
 
 const EXPECTED_ISS = "https://kc.example.com/realms/fugue-platform";

@@ -33,8 +33,14 @@ export type NodeKind = "fetch" | "transform" | "llm" | "guardrail" | "eval-judge
 
 /** Retry configuration for a single node. */
 export interface NodeRetryConfig {
-  /** Backoff delays in ms for successive attempts [attempt0, attempt1, ...]. Defaults to [1000, 2000, 4000]. */
-  readonly backoffMs?: readonly number[];
+  /**
+   * Backoff delays in ms for successive attempts [attempt0, attempt1, ...].
+   * Defaults to [1000, 2000, 4000]. Non-empty by construction: an empty
+   * ladder has no attempt-0 delay (round-21 tda-1); `validateDagShape`
+   * rejects `[]` at runtime for untyped inputs, and the tuple type makes
+   * the empty state unrepresentable for typed ones.
+   */
+  readonly backoffMs?: readonly [number, ...number[]];
   /** Jitter ratio (0–1) multiplied by the backoff delay and added randomly. Defaults to 0.2. */
   readonly jitterRatio?: number;
 }
@@ -276,6 +282,12 @@ export interface BaseNodeContext {
   readonly judgeLlm: LlmClient | null;
   readonly http: HttpCapability | null;
   readonly clock: ClockCapability | null;
+  /**
+   * Runtime-owned observer timestamp seam. `runNodeShared` replaces this for
+   * each invocation from `RunOptions.now`; built-in nodes use it for sub-spans.
+   * Distinct from the node-visible `clock` capability, which models domain time.
+   */
+  readonly eventTimestamp?: () => Date;
   readonly signal?: AbortSignal;
   /**
    * Optional content filter for trace span data. When set, content (prompts,
@@ -303,7 +315,7 @@ type _Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B 
   ? true
   : false;
 type _StaticAssert<T extends true> = T;
-type _BuiltinKeysComplete = _StaticAssert<
+export type _BuiltinKeysComplete = _StaticAssert<
   _Equal<BuiltinCapabilityKey, Extract<keyof BaseNodeContext, Capability>>
 >;
 
@@ -333,11 +345,12 @@ export const RESERVED_NON_CAPABILITY_KEYS = [
   "tracer",
   "observer",
   "checkpointWriter",
+  "eventTimestamp",
   "signal",
   "contentFilter",
 ] as const satisfies readonly (keyof BaseNodeContext)[];
 
-export type ReservedNonCapabilityKey = (typeof RESERVED_NON_CAPABILITY_KEYS)[number];
+type ReservedNonCapabilityKey = (typeof RESERVED_NON_CAPABILITY_KEYS)[number];
 
 /**
  * The runtime-facing NodeContext shape (capability fields nullable). The

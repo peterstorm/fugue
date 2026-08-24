@@ -8,9 +8,10 @@ import {
   discoverDagPaths,
   loadAll,
   createModuleLoader,
+  loadPromptsForModule,
 } from "../adapters/module-loader.js";
 import type { ModuleLoaderPort, LoadResult, BulkLoadResult } from "../ports.js";
-import { mkdirSync, writeFileSync, rmSync, existsSync } from "fs";
+import { mkdirSync, writeFileSync, rmSync, existsSync, chmodSync } from "fs";
 import { join } from "path";
 
 // ── Test Fixtures ──────────────────────────────────────────────────────────
@@ -67,6 +68,24 @@ const SYNTAX_ERROR_MODULE = `
 export default {
   this is not valid javascript
 };
+`;
+
+const HOSTILE_IMPORT_REJECTION_MODULE = `
+const hostile = new Proxy({}, {
+  get() { throw new Error("property access exploded"); },
+  getPrototypeOf() { throw new Error("prototype access exploded"); },
+});
+await Promise.reject(hostile);
+export default {};
+`;
+
+const THROWING_STACK_IMPORT_REJECTION_MODULE = `
+const failure = new Error("import exploded");
+Object.defineProperty(failure, "stack", {
+  get() { throw new Error("stack access exploded"); },
+});
+await Promise.reject(failure);
+export default {};
 `;
 
 // Nested deeper than dags/{team}/{dag} — proves discovery is depth-agnostic
@@ -153,8 +172,14 @@ beforeAll(() => {
   mkdirSync(join(TEST_DIR, "dags", "broken", "syntax-error"), { recursive: true });
   writeFileSync(join(TEST_DIR, "dags", "broken", "syntax-error", "dag.ts"), SYNTAX_ERROR_MODULE);
 
-  // fugue.yaml fixtures live under a SEPARATE root so loadAll(TEST_DIR) counts are unaffected.
+  // fugue.yaml and hostile-import fixtures live under a SEPARATE root so
+  // loadAll(TEST_DIR) counts are unaffected.
   if (existsSync(YAML_DIR)) rmSync(YAML_DIR, { recursive: true });
+
+  mkdirSync(join(YAML_DIR, "imports", "hostile-rejection"), { recursive: true });
+  writeFileSync(join(YAML_DIR, "imports", "hostile-rejection", "dag.ts"), HOSTILE_IMPORT_REJECTION_MODULE);
+  mkdirSync(join(YAML_DIR, "imports", "throwing-stack"), { recursive: true });
+  writeFileSync(join(YAML_DIR, "imports", "throwing-stack", "dag.ts"), THROWING_STACK_IMPORT_REJECTION_MODULE);
 
   // DAG with a sibling fugue.yaml (merge/override)
   mkdirSync(join(YAML_DIR, "dags", "cx", "with-yaml"), { recursive: true });
@@ -210,6 +235,32 @@ describe("Module Loader", () => {
           expect(result.error.message).not.toBe("");
         }
       }
+    });
+
+    it("returns import-failed when module evaluation rejects with a hostile Proxy", async () => {
+      const path = join(YAML_DIR, "imports", "hostile-rejection", "dag.ts");
+      const result = await loadDagModule(path, gitSha("hostile-import"));
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.kind).toBe("import-failed");
+      if (result.error.kind !== "import-failed") return;
+      expect(result.error.path).toBe(path);
+      expect(result.error.message).toBe("<unprintable error>");
+      expect(result.error.stack).toBeUndefined();
+    });
+
+    it("returns import-failed without reading a throwing stack accessor", async () => {
+      const path = join(YAML_DIR, "imports", "throwing-stack", "dag.ts");
+      const result = await loadDagModule(path, gitSha("throwing-stack-import"));
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.kind).toBe("import-failed");
+      if (result.error.kind !== "import-failed") return;
+      expect(result.error.path).toBe(path);
+      expect(result.error.message).toBe("import exploded");
+      expect(result.error.stack).toBeUndefined();
     });
 
     it("returns no-default-export when module has no default export", async () => {
@@ -448,7 +499,6 @@ describe("Module Loader", () => {
 
     it("calls onFileError callback for unreadable prompt files", async () => {
       // We test loadPromptsForModule directly for this case
-      const { loadPromptsForModule } = await import("../adapters/module-loader.js");
 
       const dagDir = join(TEST_DIR, "dags", "team-a", "unreadable-prompt");
       const promptsDir = join(dagDir, "prompts");
@@ -463,13 +513,68 @@ describe("Module Loader", () => {
         (path) => errors.push(path),
       );
 
-      expect(result.get("good")).toBe("works fine");
-      expect(result.has("broken")).toBe(false);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.kind).toBe("config-invalid");
       expect(errors.length).toBe(1);
       expect(errors[0]).toContain("broken.txt");
 
       // Cleanup
       rmSync(dagDir, { recursive: true });
+    });
+
+    it("contains a throwing prompt-error callback and preserves the typed read failure", async () => {
+      const dagDir = join(TEST_DIR, "dags", "team-a", "throwing-prompt-callback");
+      const promptsDir = join(dagDir, "prompts");
+      mkdirSync(promptsDir, { recursive: true });
+      mkdirSync(join(promptsDir, "broken.txt"), { recursive: true });
+      writeFileSync(join(promptsDir, "good.txt"), "works fine");
+
+      try {
+        const result = await loadPromptsForModule(
+          join(dagDir, "dag.ts"),
+          () => { throw new Error("diagnostic sink failed"); },
+        );
+        expect(result.ok).toBe(false);
+        if (!result.ok) expect(result.error.kind).toBe("config-invalid");
+      } finally {
+        rmSync(dagDir, { recursive: true, force: true });
+      }
+    });
+
+    it("calls onFileError for a non-ENOENT prompts-directory listing failure (unreadable dir, EACCES class)", async () => {
+      // Round-18 sfh-1: the catch around readdir(promptsDir) once swallowed
+      // EVERY listing failure as "no prompts directory". Only ENOENT may mean
+      // absence; an existing-but-unreadable prompts dir (EACCES) must surface
+      // through onFileError instead of being silently treated as absent.
+
+      const dagDir = join(TEST_DIR, "dags", "team-a", "unlistable-prompts");
+      const promptsDir = join(dagDir, "prompts");
+      mkdirSync(promptsDir, { recursive: true });
+      writeFileSync(join(promptsDir, "hidden.txt"), "secret");
+      // 0o000: readdir on the directory now fails with EACCES (POSIX). Skipped
+      // on root-owned CI where the permission bit is not honored.
+      chmodSync(promptsDir, 0o000);
+
+      try {
+        const errors: string[] = [];
+        const result = await loadPromptsForModule(
+          join(dagDir, "dag.ts"),
+          (path) => errors.push(path),
+        );
+        if (process.getuid?.() === 0) {
+          // Root bypasses the permission gate; absence-vs-failure cannot be
+          // exercised this way — accept either outcome, but never a throw.
+          expect(result.ok).toBe(true);
+        } else {
+          expect(result.ok).toBe(false);
+          if (!result.ok) expect(result.error.kind).toBe("config-invalid");
+          expect(errors.length).toBe(1);
+          expect(errors[0]).toContain("prompts");
+        }
+      } finally {
+        chmodSync(promptsDir, 0o755);
+        rmSync(dagDir, { recursive: true, force: true });
+      }
     });
 
     it("prompts flow through loadAll into BulkLoadResult", async () => {

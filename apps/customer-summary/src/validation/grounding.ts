@@ -1,10 +1,12 @@
 import type { SynthesisOutput } from "../schemas/summary.js";
-import type { CrmRecord, Message } from "../schemas/crm.js";
+import type { CrmRecord } from "../schemas/crm.js";
+import { TOPIC_KEYWORDS } from "../extraction/topics.js";
+import { POSITIVE_KEYWORDS, NEGATIVE_KEYWORDS } from "../extraction/sentiment.js";
 
 /**
  * Grounding check result for a single dimension.
  */
-export type GroundingCheck = {
+type GroundingCheck = {
   readonly dimension: string;
   readonly passed: boolean;
   readonly detail: string;
@@ -13,40 +15,25 @@ export type GroundingCheck = {
 /**
  * Aggregate grounding validation result.
  */
-export type GroundingResult = {
+type GroundingResult = {
   readonly checks: readonly GroundingCheck[];
   readonly allPassed: boolean;
   readonly warnings: readonly string[];
 };
 
-// --- Topic keywords (mirrors extraction/topics.ts) ---
-
-const TOPIC_KEYWORDS: Record<string, readonly string[]> = {
-  billing: ["invoice", "payment", "charge", "refund", "bill", "price", "cost", "subscription", "fee"],
-  technical: ["error", "bug", "crash", "slow", "install", "update", "login", "password", "api", "integration"],
-  account: ["account", "profile", "settings", "cancel", "upgrade", "downgrade", "plan"],
-  shipping: ["shipping", "delivery", "tracking", "package", "order", "return", "address"],
-  product: ["feature", "product", "release", "version", "documentation", "tutorial", "guide"],
-  general: ["help", "question", "support", "information", "inquiry", "request", "assistance"],
-};
+// --- Grounding vocabulary: the SHARED tables (one encoding, no mirrors) ---
+// `TOPIC_KEYWORDS` is owned by `extraction/topics.ts` (the extractor is the
+// vocabulary's source of truth); `POSITIVE_KEYWORDS`/`NEGATIVE_KEYWORDS` by
+// `extraction/sentiment.ts`. The private copies this module once kept here
+// drifted from their sources — the `general` topic net in particular — and
+// the guardrail scored grounding against a vocabulary the extractor no longer
+// shared. Import instead of mirror: copies drift.
 
 /** Words that are inherent to the customer support domain and always considered grounded. */
 const DOMAIN_STOP_WORDS = new Set([
   "customer", "support", "service", "satisfaction", "feedback", "experience",
   "resolution", "response", "interaction", "communication", "team",
 ]);
-
-const POSITIVE_KEYWORDS = [
-  "thank", "thanks", "great", "excellent", "awesome", "good", "love",
-  "happy", "pleased", "wonderful", "fantastic", "perfect", "appreciate",
-  "helpful", "satisfied", "amazing",
-] as const;
-
-const NEGATIVE_KEYWORDS = [
-  "terrible", "awful", "bad", "worst", "hate", "angry", "frustrated",
-  "disappointed", "unacceptable", "horrible", "poor", "annoying",
-  "broken", "failure", "useless", "complaint",
-] as const;
 
 // --- Pure validation functions ---
 
@@ -61,8 +48,18 @@ const countKeywords = (text: string, keywords: readonly string[]): number =>
 
 /**
  * Check that every keyTopic in the synthesis output is grounded in the source conversations.
- * Uses word-overlap matching: a topic is grounded if the majority of its meaningful words
- * appear in the source text.
+ *
+ * A topic is grounded when ANY of these hold:
+ * - the topic text appears verbatim in the source text;
+ * - a TOPIC_KEYWORDS entry for the topic has a keyword appearing in the source;
+ * - some keyword from ANY topic group appears inside the topic string AND in the source;
+ * - word-overlap: at least ONE meaningful word of the topic (length > 3, not a domain
+ *   stop word) — or a stem prefix of it (>= 4 chars) — appears in the source text.
+ *   There is NO majority rule: one matching word suffices regardless of how many
+ *   meaningful words the topic has (pinned in grounding.test.ts).
+ * - the topic's meaningful-word set is empty (every word is a DOMAIN_STOP_WORD): it
+ *   always passes with zero source overlap — editing DOMAIN_STOP_WORDS changes which
+ *   topics get this unconditional pass.
  */
 export const checkTopicGrounding = (
   synthesis: SynthesisOutput,
@@ -86,16 +83,15 @@ export const checkTopicGrounding = (
     // Word-overlap: tokenize topic into words, check if at least one meaningful word (or its stem) appears in source
     const words = topicLower.split(/\s+/).filter((w) => w.length > 3 && !DOMAIN_STOP_WORDS.has(w));
     if (words.length === 0) continue; // All words are domain stop words — always grounded
-    const matchedWords = words.filter((w) => {
-        // Direct match
-        if (sourceText.includes(w)) return true;
-        // Stem-like: try progressively shorter prefixes (min 4 chars)
-        for (let len = w.length - 1; len >= 4; len--) {
-          if (sourceText.includes(w.slice(0, len))) return true;
-        }
-        return false;
-      });
-      if (matchedWords.length >= 1) continue;
+    const hasMatchingWord = words.some((word) => {
+      if (sourceText.includes(word)) return true;
+      // Stem-like: try progressively shorter prefixes (min 4 chars)
+      for (let length = word.length - 1; length >= 4; length--) {
+        if (sourceText.includes(word.slice(0, length))) return true;
+      }
+      return false;
+    });
+    if (hasMatchingWord) continue;
     ungrounded.push(topic);
   }
 
@@ -111,6 +107,14 @@ export const checkTopicGrounding = (
 
 /**
  * Check that the sentiment direction is consistent with source message tone.
+ *
+ * Numeric contract (asymmetric per direction, pinned in grounding.test.ts):
+ * - claiming "positive" fails when the source has MORE THAN 2x negative keywords
+ *   AND at least 3 negative indicators;
+ * - claiming "negative" fails when the source has MORE THAN 2x positive keywords
+ *   AND at least 3 positive indicators;
+ * - a neutral claim always passes; a 2x imbalance with fewer than 3 opposing
+ *   indicators passes (the thresholds exist to reject noise, not single words).
  */
 export const checkSentimentConsistency = (
   synthesis: SynthesisOutput,

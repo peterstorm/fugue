@@ -3,7 +3,7 @@
  * per-step fault isolation is unit-testable with plain fakes (no live tracing /
  * redis / Azure).
  *
- * The guarantee (the "shutdown wedge" class fixed across prior rounds, FR-028 —
+ * The guarantee (the "shutdown wedge" class fixed across prior rounds, observability spec FR-028 —
  * export stays off the run's critical path, including teardown):
  * each teardown step is guarded INDEPENDENTLY, so a step that throws/rejects is
  * logged and the REMAINING steps still run. A rejecting trace flush must never
@@ -17,8 +17,22 @@
  */
 import type { AppLogger } from "./logger.js";
 
+const logWithoutThrowing = (
+  log: AppLogger,
+  level: "info" | "warn",
+  message: string,
+  error?: unknown,
+): void => {
+  try {
+    if (error === undefined) log[level](message);
+    else log[level](message, error);
+  } catch {
+    // A diagnostic transport cannot interrupt the remaining teardown steps.
+  }
+};
+
 /** Trace-pipeline teardown surface (subset of `TracingHandle`). */
-export interface TraceShutdownHandle {
+interface TraceShutdownHandle {
   readonly flush: () => Promise<void>;
   readonly shutdown: () => Promise<void>;
 }
@@ -28,15 +42,15 @@ export interface TraceShutdownHandle {
  * or `Symbol.dispose`. The default `NoopObserver` has neither, so the dispose
  * step is a no-op on the byte-for-byte-unchanged path.
  */
-export type DisposableObserver = Partial<Disposable> & { close?: () => void };
+type DisposableObserver = Partial<Disposable> & { close?: () => void };
 
 /** Foundry domain-event sink drain surface. */
-export interface SinkFlushHandle {
+interface SinkFlushHandle {
   readonly flush: () => Promise<void>;
 }
 
 /** Redis teardown surface. `ioredis.disconnect()` returns `void`; awaiting it is harmless. */
-export interface RedisShutdownHandle {
+interface RedisShutdownHandle {
   readonly disconnect: () => void | Promise<void>;
 }
 
@@ -59,16 +73,16 @@ export const runGracefulShutdown = async (
   const { tracing, observer, foundrySink, redis } = handles;
 
   if (tracing) {
-    log.info("Flushing traces...");
+    logWithoutThrowing(log, "info", "Flushing traces...");
     try {
       await tracing.flush();
     } catch (e) {
-      log.warn("Trace flush failed during shutdown:", e);
+      logWithoutThrowing(log, "warn", "Trace flush failed during shutdown:", e);
     }
     try {
       await tracing.shutdown();
     } catch (e) {
-      log.warn("Tracing SDK shutdown failed during shutdown:", e);
+      logWithoutThrowing(log, "warn", "Tracing SDK shutdown failed during shutdown:", e);
     }
   }
 
@@ -81,7 +95,7 @@ export const runGracefulShutdown = async (
       observer[Symbol.dispose]!();
     }
   } catch (e) {
-    log.warn("Observer dispose failed during shutdown:", e);
+    logWithoutThrowing(log, "warn", "Observer dispose failed during shutdown:", e);
   }
 
   // Drain buffered Foundry domain events before exit. The isolated Application
@@ -89,11 +103,11 @@ export const runGracefulShutdown = async (
   // only by attaching a credential — see foundry-sink.ts createAppInsightsClient),
   // so this final flush is required regardless of mode or the last batch is lost.
   if (foundrySink) {
-    log.info("Flushing Foundry domain events...");
+    logWithoutThrowing(log, "info", "Flushing Foundry domain events...");
     try {
       await foundrySink.flush();
     } catch (e) {
-      log.warn("Foundry sink flush failed during shutdown:", e);
+      logWithoutThrowing(log, "warn", "Foundry sink flush failed during shutdown:", e);
     }
   }
 
@@ -101,7 +115,7 @@ export const runGracefulShutdown = async (
     try {
       await redis.disconnect();
     } catch (e) {
-      log.warn("Redis disconnect failed during shutdown:", e);
+      logWithoutThrowing(log, "warn", "Redis disconnect failed during shutdown:", e);
     }
   }
 };

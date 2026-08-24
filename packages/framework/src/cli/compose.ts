@@ -41,6 +41,7 @@ import { describedToMermaid } from "./visualize.js";
 import { writeAuthoredScaffold } from "./new.js";
 import { DEFAULT_MODEL } from "./new-templates.js";
 import { CONFIDENCE_BUCKET } from "./vocabulary.js";
+import { parseFlagValue } from "./arg-parsing.js";
 import { formatLintError, type LintError, type NewResult } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -111,13 +112,13 @@ export interface ComposeOptions {
  * Carried on EVERY outcome arm — `repair-exhausted` is precisely where
  * `repairs` is diagnostic, so failure never discards it.
  */
-export interface ComposeRounds {
+interface ComposeRounds {
   readonly questions: number;
   readonly repairs: number;
   readonly refinements: number;
 }
 
-export type ComposeOutcome =
+type ComposeOutcome =
   | {
       readonly ok: true;
       readonly result: Extract<NewResult, { ok: true }>;
@@ -212,11 +213,11 @@ export type ComposeOutcome =
 // KEBAB (single-sourced in `identifiers.ts`) — the same convention the
 // AuthoredDag schema enforces on `team` and `fugue new` enforces on its path.
 
-export interface ParsedComposeArgs {
+interface ParsedComposeArgs {
   readonly ok: true;
   readonly options: ComposeOptions;
 }
-export interface ParseComposeError {
+interface ParseComposeError {
   readonly ok: false;
   readonly problems: readonly string[];
 }
@@ -242,13 +243,13 @@ export const parseComposeArgs = (args: readonly string[]): ParsedComposeArgs | P
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
     const takeValue = (flag: string): string | undefined => {
-      const value = args[i + 1];
-      if (value === undefined || value.startsWith("--")) {
-        problems.push(`${flag} requires a value`);
+      const parsed = parseFlagValue(args, i, flag);
+      i = parsed.nextIndex;
+      if (!parsed.ok) {
+        problems.push(parsed.problem);
         return undefined;
       }
-      i++;
-      return value;
+      return parsed.value;
     };
     match(arg)
       .with("--team", () => {
@@ -326,7 +327,7 @@ export const parseComposeArgs = (args: readonly string[]): ParsedComposeArgs | P
  * `parseAuthoredDag`'s problems can feed the repair loop rather than fail the
  * transport (see the module header). `parseAuthoredDag` is the ONLY consumer.
  */
-export const ComposeTurnSchema = z.discriminatedUnion("action", [
+const ComposeTurnSchema = z.discriminatedUnion("action", [
   z.object({
     action: z.literal("questions"),
     questions: z.array(z.string().min(1)).min(1).max(5),
@@ -436,7 +437,7 @@ const COMPOSE_NODE_ID = nodeId("fugue-compose");
  * The LintError kinds fixable by editing the AuthoredDag JSON — the element
  * type of the allowlist, so the set can never admit an unrepairable kind.
  */
-export type RepairableKind = "dag-definition-error" | "fan-in-key-mismatch";
+type RepairableKind = "dag-definition-error" | "fan-in-key-mismatch";
 // Compile-time proof every RepairableKind IS a LintError kind (mirrors the
 // `_NoExtraShapes` backstop in types.ts): a renamed/removed kind fails at
 // this annotation instead of silently draining the allowlist.
@@ -477,11 +478,9 @@ export type AnswerClass =
  */
 export const classifyAnswer = (text: string): AnswerClass => {
   const trimmed = text.trim();
-  return /^(yes|y|accept)$/i.test(trimmed)
-    ? { kind: "accept" }
-    : /^(abort|no|quit|exit)$/i.test(trimmed)
-      ? { kind: "abort" }
-      : { kind: "refine", text: trimmed };
+  if (/^(yes|y|accept)$/i.test(trimmed)) return { kind: "accept" };
+  if (/^(abort|no|quit|exit)$/i.test(trimmed)) return { kind: "abort" };
+  return { kind: "refine", text: trimmed };
 };
 
 /**
@@ -491,6 +490,23 @@ export const classifyAnswer = (text: string): AnswerClass => {
  * caller bug (the CLI never sets these options), so the boundary throws
  * rather than returning a ComposeOutcome arm.
  */
+/**
+ * THE one "input stream died" outcome. Both prompt sites (question rounds and
+ * the accept prompt) hit the same wall and must report it identically — same
+ * cause, same rounds, and the most recent gauntlet-proven draft carried along
+ * so hitting the wall never discards proven work.
+ */
+const inputClosed = (
+  rounds: ComposeRounds,
+  lastProven: AuthoredDag | null,
+): ComposeOutcome => ({
+  ok: false,
+  reason: "aborted",
+  cause: "input-closed",
+  rounds,
+  ...(lastProven !== null ? { draft: lastProven } : {}),
+});
+
 const requireRoundBudget = (value: number, name: string): number => {
   if (!Number.isInteger(value) || value < 0) {
     throw new Error(`${name} must be a non-negative integer, got ${value}`);
@@ -627,15 +643,7 @@ export const runCompose = async (
         // spread is uniform with the accept-prompt site; here `lastProven` is
         // still null by construction (no draft has been proven yet), so
         // `draft` stays absent.
-        if (answer.kind === "closed") {
-          return {
-            ok: false,
-            reason: "aborted",
-            cause: "input-closed",
-            rounds,
-            ...(lastProven !== null ? { draft: lastProven } : {}),
-          };
-        }
+        if (answer.kind === "closed") return inputClosed(rounds, lastProven);
         conversation.push(`Q: ${q}\nA: ${answer.text}`);
       }
       continue;
@@ -734,15 +742,7 @@ export const runCompose = async (
       // explicit "abort" answer (a decision), a dead stream is a WALL: the
       // gauntlet-proven draft rides along as typed data (replayable via
       // `fugue new --from`) instead of vanishing with the terminal.
-      if (res.kind === "closed") {
-        return {
-          ok: false,
-          reason: "aborted",
-          cause: "input-closed",
-          rounds,
-          ...(lastProven !== null ? { draft: lastProven } : {}),
-        };
-      }
+      if (res.kind === "closed") return inputClosed(rounds, lastProven);
       answer = res.text.trim();
       if (answer.length > 0) break;
       io.say('Please answer "yes" to write, "abort" to quit, or describe a refinement.');

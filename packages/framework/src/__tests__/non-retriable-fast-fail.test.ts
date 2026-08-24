@@ -8,7 +8,8 @@
 import { describe, it, expect } from "bun:test";
 import { dagTransition } from "../dag-runtime/transition.js";
 import type { DagPhase, DagMachineContextPersisted } from "../dag-runtime/types.js";
-import { N, D } from "./_id-helpers.js";
+import { N } from "./_id-helpers.js";
+import { FE } from "./_freshness-helpers.js";
 import type { FrameworkError } from "../types/errors.js";
 
 const makeCtx = (retryLimits: Record<string, number> = {}): DagMachineContextPersisted => ({
@@ -26,6 +27,9 @@ const makeCtx = (retryLimits: Record<string, number> = {}): DagMachineContextPer
   unconditionalAdj: new Map(),
   humanReviewNodeIds: new Set(),
   humanReviewPrompts: new Map(),
+  priorWitnesses: new Map(),
+  freshnessCompletedNodeIds: new Set(),
+  freshnessExecutionEpoch: FE(),
 });
 
 describe("dagTransition — non-retriable fast-fail", () => {

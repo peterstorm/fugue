@@ -41,6 +41,44 @@ export interface KeycloakClientCredentialConfig {
   readonly clientSecret: string;
 }
 
+type CredentialEndpointIssue = "not-https" | "embedded-credentials" | null;
+
+/** Classify a secret-bearing endpoint once at the environment trust boundary. */
+const credentialEndpointIssue = (raw: string): CredentialEndpointIssue => {
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "https:") return "not-https";
+    if (url.username.length > 0 || url.password.length > 0) return "embedded-credentials";
+    return null;
+  } catch {
+    // `z.string().url()` owns malformed-URL diagnostics for these fields.
+    return null;
+  }
+};
+
+/** Parse an optional JSON-object env value once, with field-owned diagnostics. */
+const jsonObjectEnv = <T>(
+  schema: z.ZodType<T>,
+  invalidJsonMessage: string,
+  invalidShapeMessage: string,
+) => z.string().optional().transform((raw, ctx): T => {
+  let parsed: unknown = {};
+  if (raw !== undefined && raw.trim() !== "") {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      ctx.addIssue({ code: "custom", message: invalidJsonMessage });
+      return z.NEVER;
+    }
+  }
+  const shape = schema.safeParse(parsed);
+  if (!shape.success) {
+    ctx.addIssue({ code: "custom", message: invalidShapeMessage });
+    return z.NEVER;
+  }
+  return shape.data;
+});
+
 // ---------------------------------------------------------------------------
 // Host Config — parsed from environment variables
 // ---------------------------------------------------------------------------
@@ -139,43 +177,29 @@ export const HostConfigSchema = z.object({
    * fail-closed gate looks up here. They are NOT DAG ids — the dagId→client
    * placeholder identity is gone.
    */
-  AGENT_CLIENT_SCOPES: z
-    .string()
-    .optional()
-    .transform((raw, ctx): Readonly<Record<string, readonly string[]>> => {
-      if (raw === undefined || raw.trim() === "") return {};
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        ctx.addIssue({ code: "custom", message: "AGENT_CLIENT_SCOPES must be valid JSON" });
-        return z.NEVER;
+  AGENT_CLIENT_SCOPES: jsonObjectEnv(
+    z.record(z.string(), z.array(z.string())),
+    "AGENT_CLIENT_SCOPES must be valid JSON",
+    "AGENT_CLIENT_SCOPES must be a JSON object of clientId → string[]",
+  ).transform((scopesByClient, ctx): Readonly<Record<string, readonly string[]>> => {
+    // Validate every scope NAME, not just the JSON shape: a typo'd scope
+    // (`msgrpah:mail.send`) otherwise passes boot and then fail-closes EVERY
+    // mint for that client at runtime.
+    const badScopes: string[] = [];
+    for (const [clientId, scopes] of Object.entries(scopesByClient)) {
+      for (const scope of scopes) {
+        if (parseScope(scope) === undefined) badScopes.push(`${clientId} → "${scope}"`);
       }
-      const shape = z.record(z.string(), z.array(z.string())).safeParse(parsed);
-      if (!shape.success) {
-        ctx.addIssue({ code: "custom", message: "AGENT_CLIENT_SCOPES must be a JSON object of clientId → string[]" });
-        return z.NEVER;
-      }
-      // Validate every scope NAME, not just the JSON shape: a typo'd scope
-      // (`msgrpah:mail.send`) otherwise passes boot and then fail-closes EVERY
-      // mint for that client at runtime — contradicting the "fails at boot, never
-      // at runtime" contract. Reject unparseable scope names here so the defect
-      // surfaces at startup (review suggestion).
-      const badScopes: string[] = [];
-      for (const [clientId, scopes] of Object.entries(shape.data)) {
-        for (const scope of scopes) {
-          if (parseScope(scope) === undefined) badScopes.push(`${clientId} → "${scope}"`);
-        }
-      }
-      if (badScopes.length > 0) {
-        ctx.addIssue({
-          code: "custom",
-          message: `AGENT_CLIENT_SCOPES contains unrecognised scope name(s): ${badScopes.join(", ")} (expected "<provider>:<operation>", e.g. "msgraph:mail.send")`,
-        });
-        return z.NEVER;
-      }
-      return shape.data;
-    }),
+    }
+    if (badScopes.length > 0) {
+      ctx.addIssue({
+        code: "custom",
+        message: `AGENT_CLIENT_SCOPES contains unrecognised scope name(s): ${badScopes.join(", ")} (expected "<provider>:<operation>", e.g. "msgraph:mail.send")`,
+      });
+      return z.NEVER;
+    }
+    return scopesByClient;
+  }),
   /**
    * The DAG-id → REAL Keycloak agent-type client-id map (FR-040 (keycloak-entra-wiring), ADR-0056
    * Variant A: one service-account client per agent TYPE). A JSON object mapping
@@ -192,28 +216,11 @@ export const HostConfigSchema = z.object({
    * Parsed/validated here (Zod) so a malformed map fails at BOOT, never at
    * runtime. The value is `Readonly<Record<string, string>>`.
    */
-  AGENT_CLIENT_MAP: z
-    .string()
-    .optional()
-    .transform((raw, ctx): Readonly<Record<string, string>> => {
-      if (raw === undefined || raw.trim() === "") return {};
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        ctx.addIssue({ code: "custom", message: "AGENT_CLIENT_MAP must be valid JSON" });
-        return z.NEVER;
-      }
-      const shape = z.record(z.string(), z.string().min(1)).safeParse(parsed);
-      if (!shape.success) {
-        ctx.addIssue({
-          code: "custom",
-          message: "AGENT_CLIENT_MAP must be a JSON object of dagId → non-empty Keycloak client id",
-        });
-        return z.NEVER;
-      }
-      return shape.data;
-    }),
+  AGENT_CLIENT_MAP: jsonObjectEnv(
+    z.record(z.string(), z.string().min(1)),
+    "AGENT_CLIENT_MAP must be valid JSON",
+    "AGENT_CLIENT_MAP must be a JSON object of dagId → non-empty Keycloak client id",
+  ),
   // ── Entra / Keycloak agent-client wiring (Phase 0 — config-presence gating) ──
   /**
    * Microsoft Entra (Azure AD) tenant id the host's workload-identity-federation
@@ -256,34 +263,14 @@ export const HostConfigSchema = z.object({
    * map; a lookup miss returns `undefined` (fail-closed, FR-004) so an unknown
    * agent client never triggers egress.
    */
-  KEYCLOAK_AGENT_CLIENT_CREDENTIALS: z
-    .string()
-    .optional()
-    .transform((raw, ctx): Readonly<Record<string, KeycloakClientCredentialConfig>> => {
-      if (raw === undefined || raw.trim() === "") return {};
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        ctx.addIssue({ code: "custom", message: "KEYCLOAK_AGENT_CLIENT_CREDENTIALS must be valid JSON" });
-        return z.NEVER;
-      }
-      const shape = z
-        .record(
-          z.string(),
-          z.object({ clientId: z.string().min(1), clientSecret: z.string().min(1) }).strict(),
-        )
-        .safeParse(parsed);
-      if (!shape.success) {
-        ctx.addIssue({
-          code: "custom",
-          message:
-            "KEYCLOAK_AGENT_CLIENT_CREDENTIALS must be a JSON object of agentClientId → { clientId, clientSecret } (non-empty strings)",
-        });
-        return z.NEVER;
-      }
-      return shape.data;
-    }),
+  KEYCLOAK_AGENT_CLIENT_CREDENTIALS: jsonObjectEnv(
+    z.record(
+      z.string(),
+      z.object({ clientId: z.string().min(1), clientSecret: z.string().min(1) }).strict(),
+    ),
+    "KEYCLOAK_AGENT_CLIENT_CREDENTIALS must be valid JSON",
+    "KEYCLOAK_AGENT_CLIENT_CREDENTIALS must be a JSON object of agentClientId → { clientId, clientSecret } (non-empty strings)",
+  ),
   /**
    * The Dynamics 365 organization host the host's `dynamics:*` capabilities read
    * from (e.g. `org.crm4.dynamics.com`), used to build the per-org Graph/Dataverse
@@ -316,6 +303,11 @@ export const HostConfigSchema = z.object({
   /** Max concurrent HITL run slices the worker processes. Default 4. */
   HITL_WORKER_CONCURRENCY: z.coerce.number().int().min(1).default(4),
   /**
+   * Server-owned active-run wakeup reconciliation cadence. Runs once after the
+   * worker starts and then at this bounded interval; shutdown clears the owner.
+   */
+  HITL_RECONCILE_INTERVAL_MS: z.coerce.number().int().min(1000).default(30_000),
+  /**
    * Microsoft Bot Framework app id. Setting this (with BOT_APP_PASSWORD)
    * selects the IN-Teams transport: reviews post interactive Approve/Reject
    * cards and the bot endpoint (`POST /teams/messages`) records decisions
@@ -345,28 +337,11 @@ export const HostConfigSchema = z.object({
    * Teams click is refused until approvers are mapped. Parsed/validated here so a
    * malformed map fails at boot, never at runtime.
    */
-  HITL_APPROVER_TEAMS: z
-    .string()
-    .optional()
-    .transform((raw, ctx): Readonly<Record<string, readonly string[]>> => {
-      if (raw === undefined || raw.trim() === "") return {};
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        ctx.addIssue({ code: "custom", message: "HITL_APPROVER_TEAMS must be valid JSON" });
-        return z.NEVER;
-      }
-      const shape = z.record(z.string(), z.array(z.string())).safeParse(parsed);
-      if (!shape.success) {
-        ctx.addIssue({
-          code: "custom",
-          message: "HITL_APPROVER_TEAMS must be a JSON object of aadObjectId → string[] (team ids)",
-        });
-        return z.NEVER;
-      }
-      return shape.data;
-    }),
+  HITL_APPROVER_TEAMS: jsonObjectEnv(
+    z.record(z.string(), z.array(z.string())),
+    "HITL_APPROVER_TEAMS must be valid JSON",
+    "HITL_APPROVER_TEAMS must be a JSON object of aadObjectId → string[] (team ids)",
+  ),
   /**
    * Per-team CHANNEL routing for the in-Teams (Bot Framework) transport
    * (FR-041 (keycloak-entra-wiring), US5), as a JSON object mapping a Teams team's
@@ -386,28 +361,11 @@ export const HostConfigSchema = z.object({
    * default channel. Absent/empty → `{}`. Parsed/validated here so a malformed
    * map fails at boot, never at runtime.
    */
-  HITL_TEAM_CHANNELS: z
-    .string()
-    .optional()
-    .transform((raw, ctx): Readonly<Record<string, string>> => {
-      if (raw === undefined || raw.trim() === "") return {};
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        ctx.addIssue({ code: "custom", message: "HITL_TEAM_CHANNELS must be valid JSON" });
-        return z.NEVER;
-      }
-      const shape = z.record(z.string(), z.string().min(1)).safeParse(parsed);
-      if (!shape.success) {
-        ctx.addIssue({
-          code: "custom",
-          message: "HITL_TEAM_CHANNELS must be a JSON object of aadGroupId → non-empty fugue team id",
-        });
-        return z.NEVER;
-      }
-      return shape.data;
-    }),
+  HITL_TEAM_CHANNELS: jsonObjectEnv(
+    z.record(z.string(), z.string().min(1)),
+    "HITL_TEAM_CHANNELS must be valid JSON",
+    "HITL_TEAM_CHANNELS must be a JSON object of aadGroupId → non-empty fugue team id",
+  ),
   /** MLflow tracking server URI */
   MLFLOW_TRACKING_URI: z.string().optional(),
   /** MLflow experiment ID */
@@ -426,12 +384,50 @@ export const HostConfigSchema = z.object({
    * Optional `documents` capability adapter (ADR-0052). When unset, DAGs
    * declaring `requires: ["documents"]` fail the boot-time capability check.
    * `fs` wires @fuguejs/fs rooted at DOCUMENTS_FS_ROOT (mounted volume /
-   * initContainer-staged files). Other adapters (ms-graph, …) are wired by
-   * extending this enum alongside their credential config.
+   * initContainer-staged files). `ms-graph` wires @fuguejs/ms-graph with
+   * app-only client credentials from the MSGRAPH_* fields below
+   * (wiring: adapters/documents-capability.ts).
    */
-  DOCUMENTS_ADAPTER: z.enum(["fs"]).optional(),
+  DOCUMENTS_ADAPTER: z.enum(["fs", "ms-graph"]).optional(),
   /** Root directory for the fs documents adapter — required when DOCUMENTS_ADAPTER=fs */
   DOCUMENTS_FS_ROOT: z.string().optional(),
+  // ── ms-graph documents adapter (DOCUMENTS_ADAPTER=ms-graph) ──
+  /** Azure app-registration tenant (directory) id — required when DOCUMENTS_ADAPTER=ms-graph */
+  MSGRAPH_TENANT_ID: z.string().min(1).optional(),
+  /** Azure app (client) id for the app-only client-credentials flow — required when DOCUMENTS_ADAPTER=ms-graph */
+  MSGRAPH_CLIENT_ID: z.string().min(1).optional(),
+  /**
+   * Azure app client secret — required when DOCUMENTS_ADAPTER=ms-graph.
+   * SENSITIVE: never logged — the token provider's errors carry the endpoint
+   * host + HTTP status only (NFR-014, mirroring the Keycloak credentials).
+   */
+  MSGRAPH_CLIENT_SECRET: z.string().min(1).optional(),
+  /**
+   * Graph API base URL including `/v1.0` (default
+   * `https://graph.microsoft.com/v1.0`). Override for sovereign clouds
+   * (e.g. `https://graph.microsoft.us/v1.0`); the token scope derives from
+   * this URL's origin when MSGRAPH_SCOPE is unset.
+   */
+  MSGRAPH_BASE_URL: z.string().url().optional(),
+  /**
+   * OIDC v2.0 token endpoint override (sovereign clouds / tests). Default:
+   * `https://login.microsoftonline.com/{MSGRAPH_TENANT_ID}/oauth2/v2.0/token`.
+   */
+  MSGRAPH_TOKEN_URL: z.string().url().optional(),
+  /** Graph resource scope override. Default: `<Graph origin>/.default`. */
+  MSGRAPH_SCOPE: z.string().min(1).optional(),
+  /** Per-request timeout (ms) for Graph + token calls. Defaults: adapter 30 s, token 15 s. */
+  MSGRAPH_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().optional(),
+  /**
+   * Resolve `sharePointPath` refs to driveItem ids by id-based folder-walk
+   * BEFORE delegating to the stock adapter (peterstorm/fugue#36): required for
+   * tenants whose Graph backend rejects the documented item-path URL forms
+   * tenant-wide. Default `false` — standard tenants keep the stock URL shape.
+   */
+  MSGRAPH_RESOLVE_PATHS: z
+    .union([z.boolean(), z.enum(["true", "false", "1", "0"])])
+    .transform((v) => v === true || v === "true" || v === "1")
+    .default(false),
   // ── CDRator / Oister authenticated-REST capability (`authedHttp`, FR-060/NFR-010) ──
   /**
    * Base URL of the CDRator/Oister core REST API the `authedHttp` capability
@@ -724,6 +720,58 @@ export const HostConfigSchema = z.object({
   if (c.DOCUMENTS_ADAPTER === "fs" && !c.DOCUMENTS_FS_ROOT) {
     ctx.addIssue({ code: "custom", path: ["DOCUMENTS_FS_ROOT"], message: "Required when DOCUMENTS_ADAPTER is 'fs'" });
   }
+  if (c.DOCUMENTS_ADAPTER === "ms-graph" && (!c.MSGRAPH_TENANT_ID || !c.MSGRAPH_CLIENT_ID || !c.MSGRAPH_CLIENT_SECRET)) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["MSGRAPH_TENANT_ID"],
+      message: "MSGRAPH_TENANT_ID, MSGRAPH_CLIENT_ID, and MSGRAPH_CLIENT_SECRET required when DOCUMENTS_ADAPTER is 'ms-graph'",
+    });
+  }
+  // EVERY secret-bearing endpoint is classified by the SINGLE canonical
+  // `credentialEndpointIssue`, so the two checks it encodes — non-HTTPS and
+  // embedded URL credentials — can never drift apart per field. Each entry
+  // carries only its own bespoke not-https diagnostic (what secret this
+  // endpoint receives); the embedded-credentials diagnostic is uniform.
+  // Splitting this table would reintroduce the gap where a field was guarded
+  // by a hand-rolled `startsWith("https://")` that silently accepted
+  // `https://user:secret@host` — all of these parse as `z.string().url()`, so
+  // such a value reaches the endpoint (and its logs) intact.
+  for (const [field, value, notHttpsMessage] of [
+    ["MSGRAPH_BASE_URL", c.MSGRAPH_BASE_URL,
+      "must be an https:// URL (the bearer access token is sent to this endpoint)"],
+    ["MSGRAPH_TOKEN_URL", c.MSGRAPH_TOKEN_URL,
+      "must be an https:// URL (the MS Graph client secret is sent to this endpoint)"],
+    // The operator password and the optional client-id/secret HTTP Basic header
+    // are POSTed here; an http:// token URL would leak them in cleartext.
+    ["CDRATOR_AUTH_URL", c.CDRATOR_AUTH_URL,
+      "must be an https:// URL (the operator password is POSTed to this endpoint)"],
+    // The minted bearer token is sent as `Authorization: Bearer` to this core
+    // API base URL on EVERY request.
+    ["CDRATOR_URL", c.CDRATOR_URL,
+      "must be an https:// URL (the minted bearer token is sent here on every request)"],
+    // The review card embeds the output-under-review and an approval deep-link.
+    ["TEAMS_WEBHOOK_URL", c.TEAMS_WEBHOOK_URL,
+      "must be an https:// URL (HITL review content must not be sent over cleartext http)"],
+    // The bot app password is POSTed to the token endpoint.
+    ["BOT_TOKEN_URL", c.BOT_TOKEN_URL,
+      "must be an https:// URL (the bot app password is sent to this endpoint)"],
+    // The agent client secret is POSTed to the Keycloak token endpoint
+    // (client-credentials mint + RFC 8693 exchange).
+    ["KEYCLOAK_TOKEN_URL", c.KEYCLOAK_TOKEN_URL,
+      "must be an https:// URL (the agent client secret is sent to this endpoint)"],
+  ] as const) {
+    if (value === undefined) continue;
+    const issue = credentialEndpointIssue(value);
+    if (issue === "not-https") {
+      ctx.addIssue({ code: "custom", path: [field], message: notHttpsMessage });
+    } else if (issue === "embedded-credentials") {
+      ctx.addIssue({
+        code: "custom",
+        path: [field],
+        message: "must not contain embedded URL credentials",
+      });
+    }
+  }
   // ── CDRator `authedHttp` capability (FR-060/NFR-010) ───────────────────────
   // The capability is gated on CDRATOR_URL: once it is set the operator credentials,
   // brand key and token endpoint are ALL mandatory — a half-wired capability would
@@ -786,16 +834,6 @@ export const HostConfigSchema = z.object({
       message: "ORACLE_POOL_MIN must not exceed ORACLE_POOL_MAX",
     });
   }
-  // The operator password and the optional client-id/secret HTTP Basic header are
-  // POSTed to the token endpoint; an http:// token URL would leak them in cleartext.
-  if (c.CDRATOR_AUTH_URL !== undefined && !c.CDRATOR_AUTH_URL.startsWith("https://")) {
-    ctx.addIssue({ code: "custom", path: ["CDRATOR_AUTH_URL"], message: "must be an https:// URL (the operator password is POSTed to this endpoint)" });
-  }
-  // The minted bearer token is sent as `Authorization: Bearer` to this core API base
-  // URL on EVERY request; an http:// core URL would transmit the token in cleartext.
-  if (c.CDRATOR_URL !== undefined && !c.CDRATOR_URL.startsWith("https://")) {
-    ctx.addIssue({ code: "custom", path: ["CDRATOR_URL"], message: "must be an https:// URL (the minted bearer token is sent here on every request)" });
-  }
   // Client id and secret are an inseparable pair: HTTP Basic on the token request
   // needs BOTH. One without the other is an internally-inconsistent config that
   // would silently half-build the Basic header. Reject the mismatch at boot.
@@ -806,26 +844,11 @@ export const HostConfigSchema = z.object({
       message: "CDRATOR_CLIENT_ID and CDRATOR_CLIENT_SECRET must be set together (HTTP Basic on the token request needs both)",
     });
   }
-  // The review card embeds the output-under-review and an approval deep-link;
-  // posting it over http would exfiltrate that in cleartext. Fail boot loudly
-  // rather than send HITL review content unencrypted.
-  if (c.TEAMS_WEBHOOK_URL !== undefined && !c.TEAMS_WEBHOOK_URL.startsWith("https://")) {
-    ctx.addIssue({ code: "custom", path: ["TEAMS_WEBHOOK_URL"], message: "must be an https:// URL (HITL review content must not be sent over cleartext http)" });
-  }
   // The in-Teams (Bot Framework) transport needs both the app id AND the app
   // password to mint a connector token. Enforce the pair at boot rather than
   // failing on the first review when the connector tries to authenticate.
   if (c.BOT_APP_ID !== undefined && !c.BOT_APP_PASSWORD) {
     ctx.addIssue({ code: "custom", path: ["BOT_APP_PASSWORD"], message: "Required when BOT_APP_ID is set" });
-  }
-  // The app password is POSTed to the token endpoint; an http override leaks it.
-  if (c.BOT_TOKEN_URL !== undefined && !c.BOT_TOKEN_URL.startsWith("https://")) {
-    ctx.addIssue({ code: "custom", path: ["BOT_TOKEN_URL"], message: "must be an https:// URL (the bot app password is sent to this endpoint)" });
-  }
-  // The agent client secret is POSTed to the Keycloak token endpoint (client-
-  // credentials mint + RFC 8693 exchange); an http override leaks it in cleartext.
-  if (c.KEYCLOAK_TOKEN_URL !== undefined && !c.KEYCLOAK_TOKEN_URL.startsWith("https://")) {
-    ctx.addIssue({ code: "custom", path: ["KEYCLOAK_TOKEN_URL"], message: "must be an https:// URL (the agent client secret is sent to this endpoint)" });
   }
   // NFR-014 (derived token URL): when KEYCLOAK_TOKEN_URL is UNSET the live
   // Keycloak endpoint DERIVES its URL from REALM_JWT_ISSUER

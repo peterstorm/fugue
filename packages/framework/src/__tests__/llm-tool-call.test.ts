@@ -1,6 +1,6 @@
-import { NoopObserver } from "../observer/observer.js";
-import type { RunId, NodeId, DagId } from "../types/ids.js";
-import { describe, test, expect, beforeAll } from "bun:test";
+import { testNodeContext } from "./_context-factories.js";
+import type { NodeId } from "../types/ids.js";
+import { afterEach, describe, test, expect, beforeAll } from "bun:test";
 import { z } from "zod";
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
@@ -8,8 +8,9 @@ import { FakeLlmClient } from "../llm/fake-client.js";
 import type { ToolDef, SendWithToolsRequest } from "../types/llm.js";
 import { tool } from "../llm/tools.js";
 import type { NodeContext, Tracer } from "../types/node.js";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
 import { stubLlmClient } from "./_llm-mocks.js";
+import { parseToolCalls } from "../llm/openai-types.js";
+import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
 
 beforeAll(() => {
   // Register an async-hooks context manager so trace.getActiveSpan() in span helpers
@@ -17,20 +18,34 @@ beforeAll(() => {
   otelContext.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
 });
 
+afterEach(() => __resetFrameworkLogger());
+
+test("malformed OpenAI tool arguments remain recoverable when the diagnostic logger throws", () => {
+  setFrameworkLogger({
+    debug() {},
+    info() {},
+    warn() { throw new Error("logger transport failed"); },
+    error() {},
+  });
+
+  const calls = parseToolCalls([{
+    type: "function_call",
+    call_id: "call-1",
+    name: "add_numbers",
+    arguments: "{not-json",
+  }]);
+
+  expect(calls).toEqual([{
+    id: "call-1",
+    name: "add_numbers",
+    input: "{not-json",
+  }]);
+});
+
 const FinalSchema = z.object({ result: z.number() });
 
-const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
-  runId: "test-run" as RunId,
-  dagId: "test-dag" as DagId,
-  observer: new NoopObserver(),
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null,
-  cache: null,
-  prompts: null,
-  llm: stubLlmClient, http: null, clock: null,
-  logger: { warn: () => {}, error: () => {} },
-  ...overrides,
-});
+const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext =>
+  testNodeContext({ llm: stubLlmClient, ...overrides });
 
 const addNumbers: ToolDef<{ a: number; b: number }, { sum: number }> = tool({
   name: "add_numbers",

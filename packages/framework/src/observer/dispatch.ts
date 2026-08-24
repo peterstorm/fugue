@@ -1,13 +1,17 @@
 import type { Observer } from "./observer.js";
 import type { ObserverEvent } from "../types/events.js";
 import { fwLogger } from "../logger.js";
+import { safeErrorMessage, safeErrorStack } from "../types/safe-error.js";
 
 /**
  * When `OBSERVER_STRICT=1` is set, dispatchEvent rethrows any observer failure
  * instead of catching. Useful in tests to surface programming bugs in observer
  * implementations that would otherwise be silently absorbed in production.
+ * Read per call (not frozen at module load) so a test can toggle it around a
+ * single pin and restore it — production processes never mutate the variable
+ * mid-run, so per-call reads observe the same value as a load-time const.
  */
-const OBSERVER_STRICT =
+const isStrictMode = (): boolean =>
   typeof process !== "undefined" && process.env?.OBSERVER_STRICT === "1";
 
 /**
@@ -28,37 +32,72 @@ export function __clearStrictFailure(): void {
 }
 
 /**
- * Error-isolating dispatch wrapper. Calls `observer.observe(event)` and
- * catches any failure — production observers MUST be failure-tolerant (runs
- * continue). Under `OBSERVER_STRICT=1` the error is re-thrown after logging
- * so tests surface programming bugs in observer implementations.
+ * Log an observer failure via `fwLogger`, swallowing any failure of the
+ * diagnostic transport itself. Never calls `observer.observe` and never
+ * throws — observer isolation must survive a broken logger.
  */
-export function dispatchEvent(observer: Observer, event: ObserverEvent): void {
+const logObserverFailureWithoutThrowing = (
+  message: string,
+  error: unknown,
+): void => {
+  const diagnostic = safeErrorStack(error) ?? safeErrorMessage(error);
+  try {
+    fwLogger().error(message, diagnostic);
+  } catch {
+    // Observer failures remain isolated even when the diagnostic transport fails.
+  }
+};
+
+export type DispatchAttempt =
+  | { readonly kind: "delivered" }
+  | { readonly kind: "failed"; readonly error: unknown };
+
+/**
+ * Invoke a synchronous Observer and expose a synchronous throw as data. Async
+ * thenable rejection remains isolated here because it cannot be returned from
+ * this synchronous interface.
+ */
+export function attemptDispatchEvent(observer: Observer, event: ObserverEvent): DispatchAttempt {
   try {
     const result: unknown = observer.observe(event);
     // Guard: if observe() returns a thenable despite void signature, catch its rejection
     // to prevent unhandled promise rejections from crashing the process.
     if (result !== null && result !== undefined && typeof (result as { catch?: unknown }).catch === "function") {
-      (result as Promise<void>).catch((e) => {
-        fwLogger().error(
+      (result as Promise<void>).catch((error: unknown) => {
+        const originalMessage = safeErrorMessage(error);
+        logObserverFailureWithoutThrowing(
           `[observer] async observe() rejected for ${event.type} — Observer.observe must be synchronous:`,
-          e instanceof Error ? e.message : e,
+          error,
         );
-        if (OBSERVER_STRICT) {
-          const error = e instanceof Error ? e : new Error(String(e));
-          error.message = `[OBSERVER_STRICT] Observer.observe() returned a rejected Promise for event '${event.type}'. ` +
-            `Observer.observe MUST be synchronous. Original: ${error.message}`;
-          // Cannot throw from the already-returned synchronous dispatchEvent;
-          // record it so tests can assert via `__lastStrictFailure()`.
-          lastStrictFailure = error;
+        if (isStrictMode()) {
+          // Always construct a fresh Error: an arbitrary rejected value may have
+          // hostile prototype/message behavior and must never break this handler.
+          lastStrictFailure = new Error(
+            `[OBSERVER_STRICT] Observer.observe() returned a rejected Promise for event '${event.type}'. ` +
+              `Observer.observe MUST be synchronous. Original: ${originalMessage}`,
+          );
         }
       });
     }
-  } catch (e) {
-    fwLogger().error(
-      `[observer] dispatchEvent failed for ${event.type}:`,
-      e instanceof Error && e.stack ? e.stack : e,
-    );
-    if (OBSERVER_STRICT) throw e;
+    return { kind: "delivered" };
+  } catch (error) {
+    return { kind: "failed", error };
   }
+}
+
+/**
+ * Error-isolating dispatch wrapper. Calls `observer.observe(event)` (via
+ * `attemptDispatchEvent`) and catches any failure — production observers MUST
+ * be failure-tolerant (runs continue). Under `OBSERVER_STRICT=1` the error is
+ * re-thrown after logging so tests surface programming bugs in observer
+ * implementations.
+ */
+export function dispatchEvent(observer: Observer, event: ObserverEvent): void {
+  const attempt = attemptDispatchEvent(observer, event);
+  if (attempt.kind === "delivered") return;
+  logObserverFailureWithoutThrowing(
+    `[observer] dispatchEvent failed for ${event.type}:`,
+    attempt.error,
+  );
+  if (isStrictMode()) throw attempt.error;
 }

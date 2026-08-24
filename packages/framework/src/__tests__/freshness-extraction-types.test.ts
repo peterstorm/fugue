@@ -127,6 +127,7 @@ describe("freshness extraction types (Phase 3)", () => {
     const se: Extract<SideEffectProfile, { kind: "writes" }> = {
       kind: "writes",
       resource: RN("postgres:orders"),
+      extractConditionedOn: () => witness("version", RN("postgres:orders"), "0"),
       // @ts-expect-error — extractNewWitness is the symmetric resource-free slot:
       // it returns WitnessValue (`resource: never`), so a full Witness is
       // unassignable here too. Same guarantee as extractWitness above; if this
@@ -134,6 +135,26 @@ describe("freshness extraction types (Phase 3)", () => {
       extractNewWitness: () => witness("version", RN("wrong:resource"), "1"),
     };
     expect(se.extractNewWitness).toBeDefined();
+  });
+
+  test("writes freshness extractors are an all-or-none pair", () => {
+    // @ts-expect-error — a conditioned-on witness without the produced witness
+    // cannot perform freshness bookkeeping and is excluded by the ADT.
+    const missingNewWitness: SideEffectProfile = {
+      kind: "writes",
+      resource: RN("postgres:orders"),
+      extractConditionedOn: () => witness("version", RN("postgres:orders"), "1"),
+    };
+    // @ts-expect-error — a produced witness without its conditioned-on witness
+    // cannot perform conflict detection and is excluded by the ADT.
+    const missingConditionedOn: SideEffectProfile = {
+      kind: "writes",
+      resource: RN("postgres:orders"),
+      extractNewWitness: () => witnessValue("version", "2"),
+    };
+
+    expect(missingNewWitness.kind).toBe("writes");
+    expect(missingConditionedOn.kind).toBe("writes");
   });
 
   test("stampWitness produces the same full Witness as the witness constructor (roundtrip)", () => {
@@ -186,6 +207,19 @@ describe("freshness extraction types (Phase 3)", () => {
     // resource, so it cannot be handed a raw — possibly empty — string).
     expect(() => witness("version", RN("postgres:orders"), "")).toThrow();
     expect(() => resourceName("")).toThrow();
+  });
+
+  // Round-18 tda-1: the smart constructors now enforce the CLOSED WitnessKind
+  // union at mint time (the file adapter's boundary gate is no longer the
+  // only line of defense — a cast or plain-JS caller cannot mint an
+  // off-contract witness). `__brandWitness` remains the trusted
+  // deserialization bypass.
+  test("witness()/witnessValue() reject an off-contract kind (closed-union invariant)", () => {
+    const bogus = "bogus-kind" as unknown as ReturnType<typeof witnessValue>["kind"];
+    expect(() => witnessValue(bogus, "v")).toThrow(TypeError);
+    expect(() => witness(bogus, RN("postgres:orders"), "v")).toThrow(TypeError);
+    // stampWitness routes through witness(), so a smuggled kind is caught there.
+    expect(() => stampWitness(RN("postgres:orders"), witnessValue(bogus, "v"))).toThrow(TypeError);
   });
 
   test("node without extractors compiles (freshness tracking silently skipped)", () => {

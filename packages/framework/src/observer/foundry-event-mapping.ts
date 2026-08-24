@@ -1,8 +1,9 @@
-// foundry-event-mapping.ts — PURE functional core.
+// foundry-event-mapping.ts — telemetry mapping core.
 //
 // Maps framework domain `ObserverEvent`s into vendor-neutral `FoundryEmission`
-// records (events + pre-aggregated metrics). NO I/O, NO clock reads, NO
-// logging — deterministic over its input. The imperative shell
+// records (events + pre-aggregated metrics). It performs no I/O or clock reads;
+// deliberately dropped non-finite telemetry emits a diagnostic warning so a
+// monitoring false negative cannot disappear silently. The imperative shell
 // (`AiFoundryObserver`) forwards each emission to a `FoundryTelemetrySink`.
 //
 // Spec anchors: FR-018 (record run summaries, routing decisions, pruned
@@ -24,8 +25,8 @@
 //   * `mapRunSummaryToFoundry(summary, runEnd)` — the FULL FR-019 emission.
 //     The app-layer run-summary bridge computes a `RunSummary` and calls
 //     this so the summary event carries duration, status, nodeCount,
-//     retryCount, cacheHitCount, and totalCost, plus pre-aggregated
-//     cost/run-latency metrics dimensioned by dagId.
+//     retryCount, plus cacheHitCount/totalCost when available, and
+//     pre-aggregated cost/run-latency metrics dimensioned by dagId.
 //
 // We do NOT invent fields on the bare event. Callers wanting the complete
 // FR-019/SC-008 summary use `mapRunSummaryToFoundry`.
@@ -33,6 +34,8 @@
 import { match } from "ts-pattern";
 import type { NodeSkippedEvent, ObserverEvent, RunEndEvent } from "../types/events.js";
 import type { RunSummary } from "./buffered.js";
+import { fwLogger } from "../logger.js";
+import { safeDiagnosticRender } from "../types/safe-error.js";
 
 // Stable event/metric names. Centralised so the sink contract and tests share
 // one source of truth.
@@ -47,13 +50,13 @@ export const FOUNDRY_METRIC_NODE_LATENCY = "fugue.node.latency_ms" as const;
 export const FOUNDRY_METRIC_NODE_CACHE_HIT = "fugue.node.cache_hit" as const;
 
 /** The three stable Foundry event names. */
-export type FoundryEventName =
+type FoundryEventName =
   | typeof FOUNDRY_EVENT_RUN_SUMMARY
   | typeof FOUNDRY_EVENT_ROUTE_DECISION
   | typeof FOUNDRY_EVENT_NODE_PRUNED;
 
 /** The five stable Foundry metric names. */
-export type FoundryMetricName =
+type FoundryMetricName =
   | typeof FOUNDRY_METRIC_RUN_LATENCY
   | typeof FOUNDRY_METRIC_RUN_COST
   | typeof FOUNDRY_METRIC_RUN_TOKENS
@@ -98,6 +101,25 @@ export type FoundryEmission =
     };
 
 /**
+ * Build an event emission, attaching `measurements` only when at least one entry
+ * survived the finiteness filter.
+ *
+ * ONE constructor for the shape three call sites spelled out as a ternary over
+ * two nearly-identical object literals. The omission is deliberate and must stay
+ * uniform: Application Insights rejects non-finite values, so `finiteMeasurements`
+ * returns `undefined` when nothing is left, and the key must then be ABSENT
+ * rather than present-and-empty. Mirrors the sibling `metricEmission`.
+ */
+const eventEmission = (
+  name: FoundryEventName,
+  properties: Record<string, string>,
+  measurements: Record<string, FiniteNumber> | undefined,
+): Extract<FoundryEmission, { kind: "event" }> =>
+  measurements
+    ? { kind: "event", name, properties, measurements }
+    : { kind: "event", name, properties };
+
+/**
  * Build a `metric` emission, or `undefined` if `value` is non-finite. The single
  * construction site for `metric` emissions: finiteness is enforced HERE (via
  * {@link asFinite}) rather than re-checked at every producer. Callers push the
@@ -109,7 +131,16 @@ const metricEmission = (
   properties?: Record<string, string>,
 ): Extract<FoundryEmission, { kind: "metric" }> | undefined => {
   const v = asFinite(value);
-  if (v === undefined) return undefined;
+  if (v === undefined) {
+    // The drop is deliberate (Application Insights rejects non-finite values)
+    // but must stay OBSERVABLE: a NaN/Infinity duration silently erasing the
+    // node-latency metric would be a monitoring false negative with no path
+    // to discovery (round-23 sfh-3).
+    fwLogger().warn(
+      `[foundry] dropping non-finite metric '${name}' (${safeDiagnosticRender(value)}) — Application Insights rejects non-finite values`,
+    );
+    return undefined;
+  }
   return properties !== undefined
     ? { kind: "metric", name, value: v, properties }
     : { kind: "metric", name, value: v };
@@ -132,6 +163,12 @@ const finiteMeasurements = (
     if (finite !== undefined) {
       out[k] = finite;
       any = true;
+    } else {
+      // Same observability rule as `metricEmission`: dropped data must leave a
+      // breadcrumb, never vanish silently (round-23 sfh-3).
+      fwLogger().warn(
+        `[foundry] dropping non-finite measurement '${k}' (${safeDiagnosticRender(v)}) — Application Insights rejects non-finite values`,
+      );
     }
   }
   return any ? out : undefined;
@@ -183,10 +220,7 @@ export function mapEventToFoundry(
         chosenCount: e.chosenTargets.length,
         prunedCount: e.prunedTargets.length,
       });
-      const ev: FoundryEmission = measurements
-        ? { kind: "event", name: FOUNDRY_EVENT_ROUTE_DECISION, properties: props, measurements }
-        : { kind: "event", name: FOUNDRY_EVENT_ROUTE_DECISION, properties: props };
-      return [ev];
+      return [eventEmission(FOUNDRY_EVENT_ROUTE_DECISION, props, measurements)];
     })
     .with({ type: "node-pruned" }, (e) => [
       {
@@ -242,18 +276,11 @@ function runEndEmissions(e: RunEndEvent): readonly FoundryEmission[] {
   const out: FoundryEmission[] = [];
   const measurements = finiteMeasurements({ durationMs: e.duration });
   out.push(
-    measurements
-      ? {
-          kind: "event",
-          name: FOUNDRY_EVENT_RUN_SUMMARY,
-          properties: { dagId: e.dagId, runId: e.runId, status: e.status },
-          measurements,
-        }
-      : {
-          kind: "event",
-          name: FOUNDRY_EVENT_RUN_SUMMARY,
-          properties: { dagId: e.dagId, runId: e.runId, status: e.status },
-        },
+    eventEmission(
+      FOUNDRY_EVENT_RUN_SUMMARY,
+      { dagId: e.dagId, runId: e.runId, status: e.status },
+      measurements,
+    ),
   );
   const latency = metricEmission(FOUNDRY_METRIC_RUN_LATENCY, e.duration, { dagId: e.dagId });
   if (latency) out.push(latency);
@@ -281,8 +308,9 @@ export interface RunSummaryExtras {
  * pre-aggregated cost/token/run-latency metrics dimensioned by dagId (FR-020).
  *
  * This is the entry point the app-layer run-summary bridge uses so that
- * 100% of completed runs produce a summary event carrying run duration, status,
- * node count, retry count, cache-hit count, and total cost (SC-008).
+ * completed runs produce a summary event carrying run duration, status, node
+ * count, and retry count. Cache-hit count and total cost are included when the
+ * bridge/summary can supply them (SC-008).
  */
 export function mapRunSummaryToFoundry(
   summary: RunSummary,
@@ -303,9 +331,7 @@ export function mapRunSummaryToFoundry(
     status: summary.status,
   };
 
-  const summaryEvent: FoundryEmission = measurements
-    ? { kind: "event", name: FOUNDRY_EVENT_RUN_SUMMARY, properties, measurements }
-    : { kind: "event", name: FOUNDRY_EVENT_RUN_SUMMARY, properties };
+  const summaryEvent = eventEmission(FOUNDRY_EVENT_RUN_SUMMARY, properties, measurements);
 
   const out: FoundryEmission[] = [summaryEvent];
 

@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
-import { runDag, dagFingerprint, FRAMEWORK_VERSION, makeNodeContext, runId as brandRunId } from "@fuguejs/framework";
+import { runDag, dagFingerprint, FRAMEWORK_VERSION, formatFrameworkError, makeNodeContext, runId as brandRunId, tryRunId, dagId as brandDagId, safeErrorMessage } from "@fuguejs/framework";
 import type { NodeContext, LlmClient, Observer, Checkpointer, ContextCacheAdapter, CheckpointWriter, ContentFilter } from "@fuguejs/framework";
 import type { SummaryResponse } from "./schemas/index.js";
 import type { ConversationSource } from "./sources/conversation-source.js";
@@ -13,20 +13,32 @@ import { consoleAppLogger } from "./logger.js";
 
 const SummarizeRequestSchema = z.object({
   customer_id: z.string().min(1),
-  resume_run_id: z.string().optional(),
+  resume_run_id: z.string().refine((value) => tryRunId(value).ok, {
+    message: "must be a valid run id",
+  }).optional(),
 });
 
 // --- Health check deps ---
 
-export interface HealthDeps {
+interface HealthDeps {
   readonly checkRedis?: () => Promise<boolean>;
+  /**
+   * LLM availability gate. Bootstrap wires this to the provider-key fallback:
+   * when no API key is configured the app runs on the unconfigured
+   * `FakeLlmClient`, so EVERY /summarize is guaranteed to fail — readiness
+   * must report not-ready (503) exactly like the Redis gate, or k8s leaves
+   * the pod in service while it can serve nothing. Default-true when unwired
+   * (test apps that construct `createApp` directly with a fake LLM keep
+   * today's readiness semantics).
+   */
+  readonly checkLlm?: () => Promise<boolean>;
   readonly checkMlflow?: () => Promise<boolean>;
   /**
    * Cumulative per-trace-backend export-failure counts when MULTIPLE backends
    * fan out, else `null` (single backend — nothing to fan out). Surfaced in
    * `/readyz` so a constructed-but-failing secondary backend (e.g. Foundry
    * export erroring while MLflow succeeds) is observable beyond the exporter's
-   * rate-limited logs. INFORMATIONAL ONLY — it never gates readiness (FR-026: a
+   * rate-limited logs. INFORMATIONAL ONLY — it never gates readiness (observability spec FR-026: a
    * failing secondary trace backend must not remove the pod), so it can only
    * flip `ready` → `ready-degraded`, never → `not-ready`. A plain synchronous
    * getter (no I/O — it reads in-memory counters).
@@ -34,7 +46,7 @@ export interface HealthDeps {
   readonly tracingExporterFailures?: () => ReadonlyArray<{ readonly index: number; readonly failures: number }> | null;
 }
 
-/** Simplified cache adapter for NodeContext — wraps Cache + Checkpointer */
+/** Cache adapter used for NodeContext response caching. */
 export type ContextCache = ContextCacheAdapter;
 
 // --- App dependencies ---
@@ -55,12 +67,99 @@ export interface AppDeps {
   readonly contentFilter?: ContentFilter | null;
   /** Application logger. Defaults to console-backed logger when omitted. */
   readonly logger?: AppLogger;
+  /** Request-owned DAG timeout. Production defaults to 60 seconds. */
+  readonly requestTimeoutMs?: number;
 }
 
 // --- Create Hono app ---
 
+type ReadinessStatus = "not-ready" | "ready-degraded" | "ready";
+
+const readinessStatus = (notReady: boolean, degraded: boolean): ReadinessStatus => {
+  if (notReady) return "not-ready";
+  if (degraded) return "ready-degraded";
+  return "ready";
+};
+
+/** Diagnostics never replace the response or fallback they describe. */
+const reportWithoutThrowing = (report: () => void): void => {
+  try {
+    report();
+  } catch {
+    // The request/probe outcome remains authoritative.
+  }
+};
+
+const isAbortThrow = (error: unknown): boolean => {
+  try {
+    return error instanceof Error &&
+      (error.name === "AbortError" || error.name === "APIUserAbortError");
+  } catch {
+    return false;
+  }
+};
+
+type DeadlineResult<T> =
+  | { readonly kind: "settled"; readonly value: T }
+  | { readonly kind: "timed-out" };
+
+type DeadlineDiagnostics<T> = {
+  readonly onLateFulfillment: (value: T) => void;
+  readonly onLateRejection: (error: unknown) => void;
+  readonly onTimeoutCancellationFailure: (error: unknown) => void;
+};
+
+const settleBeforeDeadline = <T>(
+  operation: PromiseLike<T>,
+  timeoutMs: number,
+  onTimeout: () => void,
+  diagnostics: DeadlineDiagnostics<T>,
+): Promise<DeadlineResult<T>> =>
+  new Promise((resolve, reject) => {
+    let settled = false;
+    const timeoutId = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try {
+        onTimeout();
+      } catch (error) {
+        reportWithoutThrowing(() => diagnostics.onTimeoutCancellationFailure(error));
+      }
+      resolve({ kind: "timed-out" });
+    }, timeoutMs);
+
+    void operation.then(
+      (value) => {
+        if (settled) {
+          reportWithoutThrowing(() => diagnostics.onLateFulfillment(value));
+          return;
+        }
+        settled = true;
+        clearTimeout(timeoutId);
+        resolve({ kind: "settled", value });
+      },
+      (error: unknown) => {
+        if (settled) {
+          reportWithoutThrowing(() => diagnostics.onLateRejection(error));
+          return;
+        }
+        settled = true;
+        clearTimeout(timeoutId);
+        reject(error);
+      },
+    );
+  });
+
+const parseRequestTimeoutMs = (value: number): number => {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new RangeError("requestTimeoutMs must be a positive safe integer");
+  }
+  return value;
+};
+
 export const createApp = (deps: AppDeps): Hono => {
   const app = new Hono();
+  const timeoutMs = parseRequestTimeoutMs(deps.requestTimeoutMs ?? 60_000);
   const log = deps.logger ?? consoleAppLogger;
 
   app.post("/summarize", async (c) => {
@@ -68,7 +167,9 @@ export const createApp = (deps: AppDeps): Hono => {
     try {
       body = await c.req.json();
     } catch (e) {
-      log.warn(`[/summarize] Request body parse failed: ${e instanceof Error ? e.message : String(e)}`);
+      reportWithoutThrowing(() =>
+        log.warn(`[/summarize] Request body parse failed: ${safeErrorMessage(e)}`),
+      );
       return c.json({ error: "Invalid JSON body" }, 400);
     }
 
@@ -83,13 +184,14 @@ export const createApp = (deps: AppDeps): Hono => {
     // resume works and so that retried/in-flight writes are not lost on crash.
     // If the checkpoint store is unavailable, refuse traffic at the handler
     // (belt-and-suspenders with /readyz reporting not-ready).
-    if (!deps.checkpointer) {
+    if (!deps.checkpointer || !deps.checkpointWriter) {
       return c.json({ error: "Checkpoint store unavailable" }, 503);
     }
     const checkpointer = deps.checkpointer;
+    const checkpointWriter = deps.checkpointWriter;
 
     try {
-      const dag = createSummaryDag(deps.source, customer_id, {
+      const dag = createSummaryDag(deps.source, {
         model: deps.model,
         judgeModel: deps.judgeModel,
         thinking: deps.thinking,
@@ -111,7 +213,9 @@ export const createApp = (deps: AppDeps): Hono => {
           expectedDagFingerprint: fingerprint,
         });
         if (!loaded.ok) {
-          log.warn(`[/summarize] checkpoint load failed for run=${resume_run_id}: ${JSON.stringify(loaded.error)}`);
+          reportWithoutThrowing(() =>
+            log.warn(`[/summarize] checkpoint load failed for run=${resume_run_id}: ${JSON.stringify(loaded.error)}`),
+          );
           // checkpoint-version-mismatch and checkpoint-expired are *semantic*
           // failures (the stored checkpoint is incompatible with the current
           // DAG / framework / TTL); callers must start fresh, not retry. 409
@@ -146,14 +250,26 @@ export const createApp = (deps: AppDeps): Hono => {
           // written. Replaying cached node outputs into the current shape would
           // skip validation against evolved schemas. 409 so callers know to
           // start a fresh run, not retry the same id.
-          log.warn(
-            `[/summarize] checkpoint identity mismatch run=${resume_run_id} ` +
-            `meta.dagId=${meta.dagId} dag.id=${dag.id} ` +
-            `meta.nodeCount=${meta.nodeCount} dag.nodeCount=${dag.nodes.length} ` +
-            `meta.fingerprint=${meta.dagFingerprint} expected=${fingerprint} ` +
-            `meta.frameworkVersion=${meta.frameworkVersion} expected=${FRAMEWORK_VERSION}`,
+          reportWithoutThrowing(() =>
+            log.warn(
+              `[/summarize] checkpoint identity mismatch run=${resume_run_id} ` +
+              `meta.dagId=${meta.dagId} dag.id=${dag.id} ` +
+              `meta.nodeCount=${meta.nodeCount} dag.nodeCount=${dag.nodes.length} ` +
+              `meta.fingerprint=${meta.dagFingerprint} expected=${fingerprint} ` +
+              `meta.frameworkVersion=${meta.frameworkVersion} expected=${FRAMEWORK_VERSION}`,
+            ),
           );
           return c.json({ error: "Checkpoint incompatible with current DAG" }, 409);
+        }
+        if (loaded.value.corruptNodeAddresses.length > 0) {
+          const corruptNodeAddresses = loaded.value.corruptNodeAddresses;
+          reportWithoutThrowing(() =>
+            log.error(
+              `[/summarize] checkpoint contains corrupt node entries for run=${resume_run_id}: ` +
+              JSON.stringify(corruptNodeAddresses),
+            ),
+          );
+          return c.json({ error: "Resume failed" }, 500);
         }
         resumeCheckpoint = new Map(
           Object.entries(loaded.value.nodes).map(([nodeId, ns]) => [nodeId, ns.output]),
@@ -161,7 +277,7 @@ export const createApp = (deps: AppDeps): Hono => {
       }
       if (!resumeCheckpoint) {
         const metaResult = await checkpointer.setMeta(runId, {
-          dagId: dag.id,
+          dagId: brandDagId(dag.id),
           startedAt: new Date(),
           nodeCount: dag.nodes.length,
           subject: customer_id,
@@ -169,21 +285,21 @@ export const createApp = (deps: AppDeps): Hono => {
           frameworkVersion: FRAMEWORK_VERSION,
         });
         if (!metaResult.ok) {
-          log.error(`[/summarize] checkpoint setMeta failed for run=${runId}: ${JSON.stringify(metaResult.error)}`);
+          reportWithoutThrowing(() =>
+            log.error(`[/summarize] checkpoint setMeta failed for run=${runId}: ${JSON.stringify(metaResult.error)}`),
+          );
           return c.json({ error: "Checkpoint store unavailable", requestId: runId }, 503);
         }
       }
 
-      const timeoutMs = 60_000; // 60s request timeout
       const abortController = new AbortController();
-      const timeout = setTimeout(() => abortController.abort("timeout"), timeoutMs);
 
       const ctx: NodeContext = makeNodeContext({
         runId,
         dagId: dag.id,
         observer: deps.observer ?? undefined,
         cache: deps.cache,
-        checkpointWriter: deps.checkpointWriter,
+        checkpointWriter,
         prompts: { get: (name: string) => deps.prompts?.get(name) ?? null },
         llm: deps.llm,
         judgeLlm: deps.llm,
@@ -191,37 +307,67 @@ export const createApp = (deps: AppDeps): Hono => {
         contentFilter: deps.contentFilter,
       });
 
+      const timeoutResponse = (cause: string): Response => {
+        reportWithoutThrowing(() => log.warn(
+          `[/summarize] Request timed out after ${timeoutMs}ms for customer=${customer_id} run=${runId}; cause=${cause}`,
+        ));
+        return c.json({ error: "Request timeout", requestId: runId }, 504);
+      };
+
       let result: Awaited<ReturnType<typeof runDag<{ customerId: string }, SummaryResponse>>>;
       try {
         const runOpts = resumeCheckpoint
           ? { resume: { runId, checkpoint: resumeCheckpoint } }
           : undefined;
-        result = await runDag<{ customerId: string }, SummaryResponse>(dag, { customerId: customer_id }, ctx, runOpts);
+        const completion = await settleBeforeDeadline(
+          runDag<{ customerId: string }, SummaryResponse>(dag, { customerId: customer_id }, ctx, runOpts),
+          timeoutMs,
+          () => abortController.abort("timeout"),
+          {
+            onLateFulfillment: (lateResult) => {
+              if (!lateResult.ok) {
+                log.error(
+                  `[/summarize] DAG failed after timeout for customer=${customer_id} run=${runId}: ${formatFrameworkError(lateResult.error)}`,
+                );
+              }
+            },
+            onLateRejection: (error) => log.error(
+              `[/summarize] DAG rejected after timeout for customer=${customer_id} run=${runId}: ${safeErrorMessage(error)}`,
+            ),
+            onTimeoutCancellationFailure: (error) => log.error(
+              `[/summarize] timeout cancellation failed for customer=${customer_id} run=${runId}: ${safeErrorMessage(error)}`,
+            ),
+          },
+        );
+        if (completion.kind === "timed-out") {
+          return timeoutResponse("hard request deadline expired");
+        }
+        result = completion.value;
       } catch (e) {
-        if (abortController.signal.aborted) {
-          log.warn(`[/summarize] Request timed out after ${timeoutMs}ms for customer=${customer_id} run=${runId}`);
-          return c.json({ error: "Request timeout", requestId: runId }, 504);
+        if (abortController.signal.aborted && isAbortThrow(e)) {
+          return timeoutResponse(safeErrorMessage(e));
         }
         throw e;
-      } finally {
-        clearTimeout(timeout);
       }
 
       if (result.ok) {
         return c.json(result.value, 200);
       }
 
-      // Result is err — determine whether it was timeout-caused:
-      if (abortController.signal.aborted) {
-        log.warn(`[/summarize] Request timed out after ${timeoutMs}ms for customer=${customer_id} run=${runId}`);
-        return c.json({ error: "Request timeout", requestId: runId }, 504);
+      // Only the framework's explicit abort result can be classified as the
+      // request-owned timeout. A different failure racing with the timer keeps
+      // its real classification and diagnostic.
+      if (abortController.signal.aborted && result.error.kind === "aborted") {
+        return timeoutResponse(formatFrameworkError(result.error));
       }
 
       // Framework error — 500 (log detail server-side, return generic message)
-      log.error("[/summarize] DAG error:", JSON.stringify(result.error));
+      reportWithoutThrowing(() =>
+        log.error("[/summarize] DAG error:", formatFrameworkError(result.error)),
+      );
       return c.json({ error: "Internal server error", requestId: runId }, 500);
     } catch (e) {
-      log.error("[/summarize] Unexpected error:", e);
+      reportWithoutThrowing(() => log.error("[/summarize] Unexpected error:", e));
       return c.json({ error: "Internal server error" }, 500);
     }
   });
@@ -231,40 +377,57 @@ export const createApp = (deps: AppDeps): Hono => {
   app.get("/livez", (c) => c.json({ status: "alive" }, 200));
 
   // Readiness: 503 only when a dependency required to serve traffic is down.
-  // Redis (queues / checkpoints / cache) is required; MLflow (tracing) is
+  // Redis (queues / checkpoints / cache) and the LLM (every /summarize needs a
+  // real provider, not the unconfigured fake) are required; MLflow (tracing) is
   // informational and never gates readiness — losing it must not remove pods.
   const checkReadiness = async () => {
     // A rejecting probe is treated as "down", but the rejection reason is logged
     // here so the seam is safe-by-construction: a future probe that throws
     // WITHOUT its own internal logging still leaves an operator breadcrumb rather
     // than flipping readiness silently.
-    const redisOk = deps.health?.checkRedis
-      ? await deps.health.checkRedis().catch((err) => {
-          log.debug("[/readyz] checkRedis probe threw — treating Redis as not-ready:", err);
-          return false;
-        })
-      : true;
-    const mlflowOk = deps.health?.checkMlflow
-      ? await deps.health.checkMlflow().catch((err) => {
-          log.debug("[/readyz] checkMlflow probe threw — treating MLflow as unavailable:", err);
-          return false;
-        })
-      : true;
+    const probe = async (
+      check: (() => Promise<boolean>) | undefined,
+      message: string,
+    ): Promise<boolean> => {
+      if (!check) return true;
+      try {
+        return await check();
+      } catch (error) {
+        reportWithoutThrowing(() => log.debug(message, error));
+        return false;
+      }
+    };
+    const redisOk = await probe(deps.health?.checkRedis, "[/readyz] checkRedis probe threw — treating Redis as not-ready:");
+    const llmOk = await probe(deps.health?.checkLlm, "[/readyz] checkLlm probe threw — treating the LLM as unavailable:");
+    const mlflowOk = await probe(deps.health?.checkMlflow, "[/readyz] checkMlflow probe threw — treating MLflow as unavailable:");
     // Cumulative per-backend export failures (multi-backend fan-out only).
     // Informational: a failing SECONDARY trace backend degrades the signal but
-    // never gates readiness (FR-026) — exactly like MLflow above.
-    const exporterFailures = deps.health?.tracingExporterFailures
-      ? (deps.health.tracingExporterFailures() ?? null)
-      : null;
+    // never gates readiness (observability spec FR-026) — exactly like MLflow above.
+    let exporterFailures: ReadonlyArray<{ readonly index: number; readonly failures: number }> | null = null;
+    let exporterProbeFailed = false;
+    try {
+      exporterFailures = deps.health?.tracingExporterFailures?.() ?? null;
+    } catch (error) {
+      exporterProbeFailed = true;
+      reportWithoutThrowing(() =>
+        log.debug("[/readyz] tracingExporterFailures probe threw — treating tracing as degraded:", error),
+      );
+    }
     const tracingDegraded =
-      exporterFailures !== null && exporterFailures.some((f) => f.failures > 0);
-    const httpStatus = redisOk ? 200 : 503;
-    const status: string = redisOk
-      ? mlflowOk && !tracingDegraded
-        ? "ready"
-        : "ready-degraded"
-      : "not-ready";
-    return { status, redis: redisOk, mlflow: mlflowOk, exporterFailures, httpStatus } as const;
+      exporterProbeFailed ||
+      (exporterFailures !== null && exporterFailures.some((f) => f.failures > 0));
+    // Three outcomes, one level: redis or the LLM down gates readiness entirely
+    // (either one means /summarize cannot serve traffic); with both up, any
+    // degraded trace backend (MLflow or a secondary exporter) downgrades to
+    // `ready-degraded` (observability spec FR-026: degrades the signal, never
+    // gates readiness).
+    const notReady = !redisOk || !llmOk;
+    const degraded = !mlflowOk || tracingDegraded;
+    // Derived from the SAME predicate as `status`, so the HTTP code and the body
+    // can never disagree about whether this instance is ready.
+    const httpStatus = notReady ? 503 : 200;
+    const status = readinessStatus(notReady, degraded);
+    return { status, redis: redisOk, llm: llmOk, mlflow: mlflowOk, exporterFailures, httpStatus } as const;
   };
 
   app.get("/readyz", async (c) => {
@@ -273,6 +436,7 @@ export const createApp = (deps: AppDeps): Hono => {
       {
         status: r.status,
         redis: r.redis,
+        llm: r.llm,
         mlflow: r.mlflow,
         // Only present on a multi-backend deployment; omitted (null) otherwise.
         ...(r.exporterFailures ? { tracingExporterFailures: r.exporterFailures } : {}),

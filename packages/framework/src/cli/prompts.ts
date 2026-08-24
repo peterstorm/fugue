@@ -34,7 +34,11 @@ export const freshRegistryEntry = (body: string): RegistryEntry => ({
  * — its answer depends on the host's ICU tables/locale, so two machines could
  * write byte-different registries for identical content.
  */
-const codepointCompare = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+const codepointCompare = (a: string, b: string): number => {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+};
 
 /**
  * The `prompts/registry.json` byte format: canonical 2-space JSON, keys in
@@ -50,9 +54,9 @@ export const serializeRegistry = (entries: Record<string, RegistryEntry>): strin
   return `${JSON.stringify(sorted, null, 2)}\n`;
 };
 
-export type PromptStatus = "unchanged" | "added" | "bumped" | "removed";
+type PromptStatus = "unchanged" | "added" | "bumped" | "removed";
 
-export interface PromptsResult {
+interface PromptsResult {
   readonly ok: boolean;
   readonly registryPath: string;
   readonly prompts: Record<string, { version: string; hash: string; status: PromptStatus }>;

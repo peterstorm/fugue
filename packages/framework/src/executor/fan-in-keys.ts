@@ -11,7 +11,7 @@
 
 import { objectSchemaKeys } from "../llm/zod-schema.js";
 
-export type FanInKeyCheck =
+type FanInKeyCheck =
   /** Keys match the incoming source ids exactly. */
   | { readonly kind: "ok" }
   /** Schema isn't an introspectable object schema — can't verify, skip. */

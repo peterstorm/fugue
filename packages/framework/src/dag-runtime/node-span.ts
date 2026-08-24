@@ -15,7 +15,7 @@
 // `ai.guardrail.passed`) are set by the caller after classification, not
 // inside the span wrapper.
 
-import { SpanStatusCode } from "@opentelemetry/api";
+import { INVALID_SPAN_CONTEXT, type Span, SpanStatusCode, trace } from "@opentelemetry/api";
 import { fwTracer } from "../tracing/global-tracer.js";
 import type { Result } from "../types/result.js";
 import { err } from "../types/result.js";
@@ -35,11 +35,11 @@ import {
   NODE_KIND_TO_SPAN_TYPE,
   SPAN_TYPE_CHAIN,
 } from "../tracing/semantic-conventions.js";
-import { fwLogger } from "../logger.js";
+import { bestEffort, bestEffortLog } from "./best-effort.js";
 import type { SideEffectProfile } from "../types/side-effects.js";
-import type { NodeId } from "../types/ids.js";
 import { nodeId as brandNodeId } from "../types/ids.js";
 import { __brandNodeId } from "../types/ids.js";
+import { safeErrorMessage, safeErrorStack } from "../types/safe-error.js";
 
 // ---------------------------------------------------------------------------
 // Types (unchanged public surface)
@@ -71,6 +71,12 @@ export const createDagRunMeta = (): DagRunMeta => ({
   evalJudgeFailed: false,
   evalJudgeResults: [],
 });
+
+/** Diagnostics are secondary to the modeled node outcome (see `best-effort.ts`). */
+const bestEffortTelemetry = (operation: string, effect: () => void): void =>
+  bestEffort("[withTracedNodeSpan]", operation, effect);
+
+const FALLBACK_NODE_SPAN = trace.wrapSpanContext(INVALID_SPAN_CONTEXT);
 
 /**
  * Fold a batch of per-node outcomes into a fresh, immutable `DagRunMeta`.
@@ -126,16 +132,19 @@ export const classifyGuardrailOutcome = (
 // ---------------------------------------------------------------------------
 
 /**
- * Wrap node execution in an OTel span. Infrastructure only — creates the span,
- * sets attributes, records input/output events, sets error status, ends span.
+ * Wrap node execution in an OTel span. Infrastructure plus the span-side
+ * guardrail tagging — creates the span, records input/output events, sets error
+ * status, tags a failed guardrail, and ends the span before returning.
  *
- * Does NOT inspect the result for guardrail semantics. The caller classifies
- * the result via `classifyGuardrailOutcome` after this returns, and may set
- * additional span attributes (e.g. `ai.guardrail.passed`) on the active span.
+ * Returns `{ result, outcome }`. The span itself is NOT returned: it is already
+ * ended by the time this resolves, so there is no post-hoc attribute window for
+ * the caller to use. `outcome` is the `NodeSpanOutcome` produced by the pure
+ * `classifyGuardrailOutcome`, which this function calls internally on the
+ * success path so the guardrail status/attribute land on the span it owns; the
+ * caller folds that outcome into `DagRunMeta` via `foldOutcomes`.
  *
- * Returns `{ result, span }` where `span` is the (already-ended) span reference.
- * The caller can use the span for post-hoc attribute setting if needed before
- * the span is exported (span attributes can be set after `end()` in many SDKs).
+ * Every span mutation is best-effort (`bestEffortTelemetry`): a throwing tracer
+ * is logged and discarded, never allowed to replace the modeled node outcome.
  */
 export const withTracedNodeSpan = async (
   nodeId: string,
@@ -169,42 +178,41 @@ export const withTracedNodeSpan = async (
       // Fail closed: the idempotency key is the dedup signal infrastructure
       // uses for writes / external calls. Running the node without it risks a
       // double-write or duplicate external call. Abort the node instead.
-      const msg = e instanceof Error ? e.message : String(e);
-      fwLogger().error(
-        `[withTracedNodeSpan] idempotencyKey evaluation failed for node '${nodeId}': ${msg}`,
+      const message = safeErrorMessage(e);
+      bestEffortLog(
+        "error",
+        `[withTracedNodeSpan] idempotencyKey evaluation failed for node '${nodeId}': ${message}`,
       );
       return {
         result: err({
           kind: "node-crash",
           nodeId: brandNodeId(nodeId),
           retriability: "non-retriable",
-          message: `idempotencyKey extractor threw for node '${nodeId}': ${msg}`,
+          message: `idempotencyKey extractor threw for node '${nodeId}': ${message}`,
         }),
         outcome: EMPTY_OUTCOME,
       };
     }
   }
 
-  return fwTracer().startActiveSpan(
-    `node:${nodeId}`,
-    { attributes: attrs },
-    async (span) => {
+  const executeNode = async (span: Span) => {
+    bestEffortTelemetry("input event", () => {
       span.addEvent(
         EVENT_NODE_INPUT,
         contentFilter ? { data: contentFilter(JSON.stringify(input)) } : { data_redacted: "true" },
       );
+    });
 
+    try {
       let result: Result<unknown, FrameworkError>;
-      // Guarantee `span.end()` runs on every path — including observer throws
-      // re-raised by `dispatchEvent` under `OBSERVER_STRICT=1`. Without the
-      // try/finally an unhandled rejection inside `fn()` would leak the span.
       try {
         result = await fn();
-      } catch (e) {
-        try { span.setStatus({ code: SpanStatusCode.ERROR, message: String(e) }); } catch (spanErr) { fwLogger().debug("[withTracedNodeSpan] span.setStatus failed:", spanErr); }
-        try { span.end(); } catch (spanErr) { fwLogger().debug("[withTracedNodeSpan] span.end failed — span may leak:", spanErr); }
-        const message = e instanceof Error ? e.message : String(e);
-        const stack = e instanceof Error ? e.stack : undefined;
+      } catch (error) {
+        const message = safeErrorMessage(error);
+        const stack = safeErrorStack(error);
+        bestEffortTelemetry("span.setStatus", () => {
+          span.setStatus({ code: SpanStatusCode.ERROR, message });
+        });
         return {
           result: err({
             kind: "node-crash" as const,
@@ -217,31 +225,56 @@ export const withTracedNodeSpan = async (
         };
       }
 
-      if (result.ok) {
+      if (!result.ok) {
+        bestEffortTelemetry("span.setStatus", () => {
+          span.setStatus({
+            code: SpanStatusCode.ERROR,
+            message: safeErrorMessage(result.error),
+          });
+        });
+        return { result, outcome: EMPTY_OUTCOME };
+      }
+
+      bestEffortTelemetry("output event", () => {
         span.addEvent(
           EVENT_NODE_OUTPUT,
           contentFilter ? { data: contentFilter(JSON.stringify(result.value)) } : { data_redacted: "true" },
         );
-        // Classify guardrail outcome and set span attributes accordingly.
-        // This is the one place where the span wrapper touches domain logic —
-        // but only to set the span's error status and attribute; the outcome
-        // classification itself is delegated to classifyGuardrailOutcome.
-        const outcome = classifyGuardrailOutcome(kind, result);
-        if (outcome.guardrailFailed) {
-          span.setStatus({ code: SpanStatusCode.ERROR, message: `Guardrail failed: ${outcome.guardrailWarnings.join("; ")}` });
+      });
+      const outcome = classifyGuardrailOutcome(kind, result);
+      if (outcome.guardrailFailed) {
+        bestEffortTelemetry("guardrail span status", () => {
+          span.setStatus({
+            code: SpanStatusCode.ERROR,
+            message: `Guardrail failed: ${outcome.guardrailWarnings.join("; ")}`,
+          });
+        });
+        bestEffortTelemetry("guardrail span attribute", () => {
           span.setAttribute(AI_GUARDRAIL_PASSED, false);
-        }
-        span.end();
-        return { result, outcome };
-      } else {
-        const errMsg = result.error && typeof result.error === "object" && "message" in result.error
-          ? (result.error as { message: string }).message
-          : JSON.stringify(result.error);
-        span.setStatus({ code: SpanStatusCode.ERROR, message: errMsg });
-        span.end();
-        return { result, outcome: EMPTY_OUTCOME };
+        });
       }
-    },
-  );
+      return { result, outcome };
+    } finally {
+      bestEffortTelemetry("span.end", () => span.end());
+    }
+  };
+
+  let callbackResult: ReturnType<typeof executeNode> | undefined;
+  try {
+    return await fwTracer().startActiveSpan(
+      `node:${nodeId}`,
+      { attributes: attrs },
+      (span) => {
+        callbackResult = executeNode(span);
+        return callbackResult;
+      },
+    );
+  } catch (error) {
+    bestEffortLog(
+      "debug",
+      `[withTracedNodeSpan] span creation failed; node outcome remains authoritative: ${safeErrorMessage(error)}`,
+    );
+    return callbackResult ?? executeNode(FALLBACK_NODE_SPAN);
+  }
 };
 

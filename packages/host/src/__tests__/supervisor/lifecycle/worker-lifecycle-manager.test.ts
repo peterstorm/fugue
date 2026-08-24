@@ -12,7 +12,7 @@
  * eager-pinned re-adopted worker NOT being idle-evictable (AD-7).
  */
 
-import { describe, test, expect, mock } from "bun:test";
+import { describe, test, expect } from "bun:test";
 import * as lifecycleAdt from "../../../supervisor/lifecycle/worker-lifecycle.js";
 import { ok, err } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
@@ -26,11 +26,13 @@ import {
   type TenantSpawnConfigView,
   type WorkerLifecycleConfig,
 } from "../../../supervisor/lifecycle/worker-lifecycle-manager.js";
+import { redisUnavailable } from "../../../domain/host-error.js";
 import {
   createWorkerRegistry,
   createInMemoryWorkerRedisFake,
   WORKER_KEY_PREFIX,
   type WorkerRecord,
+  type WorkerRegistry,
   type UdsLivenessProbe,
 } from "../../../supervisor/lifecycle/worker-registry-redis.js";
 import type { SpawnPort, ProcManagePort, WorkerSpawnSpec, WorkerHandle } from "../../../supervisor/lifecycle/spawn-port.js";
@@ -736,6 +738,34 @@ describe("createWorkerLifecycle: crash-exit watcher (FR-014/FR-015, AD-8)", () =
     expect(spawned.length).toBe(2); // the only respawn is request-driven, not exit-driven
     expect(lc.liveWorkerCount()).toBe(1);
   });
+
+  test("a graceful-drain registry rejection is caught and logged with tenant context", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    const baseRegistry = createWorkerRegistry(fake.redis, async () => true);
+    const registry: WorkerRegistry = {
+      ...baseRegistry,
+      remove: async () => { throw new Error("registry transport rejected"); },
+    };
+    const { spawn, proc, spawned } = makeSpawn();
+    const log = recordingLog();
+    const lc = createWorkerLifecycle({
+      spawn, proc, registry, probe: async () => true,
+      tenants: tenantsView({ acme: { eagerPin: false } }),
+      clock: fixedClock().clock, config: baseConfig(), logger: log,
+    });
+    await lc.ensureWorker(tid("acme"));
+    await lc.drain(tid("acme"));
+
+    spawned[0]!.exit(0);
+    await flushMicrotasks();
+
+    const watcherFailure = log.errors.find((line) => line.msg.includes("exit watcher threw"));
+    expect(watcherFailure?.ctx).toMatchObject({
+      tenant: tid("acme"),
+      error: "registry transport rejected",
+    });
+    expect(lc.liveWorkerCount()).toBe(0);
+  });
 });
 
 // ── liveness sweep: crash-detection SAFETY NET for RE-ADOPTED workers ────────────
@@ -1030,28 +1060,28 @@ describe("createWorkerLifecycle: failed kills surface via the logger (T9 Fix 1)"
 // beginDrain on a live state is total-success, so the rejection branch is defensive
 // — but if it EVER rejects (a true ADT invariant violation) it must surface loudly
 // and distinguishably, not collapse into the legitimate "nothing live" ok(undefined)
-// no-op. We force the rejection by module-mocking beginDrain.
+// no-op. We force the rejection by INJECTING an ADT whose beginDrain rejects — NOT
+// by `mock.module`: bun 1.3.x module mocks are not reliably restorable and leak
+// into other test files sharing the worker process (the pure-ADT suite
+// worker-lifecycle.test.ts would intermittently import the mocked beginDrain and
+// fail its deterministic tests with this fixture's "EPERM: kill denied").
 
 describe("createWorkerLifecycle: beginDrain invariant rejection surfaces (T9 Fix 2)", () => {
   test("a beginDrain rejection AFTER confirming the worker live is logged at ERROR and returns the error", async () => {
-    // Override ONLY beginDrain to reject; everything else stays the real ADT.
-    mock.module("../../../supervisor/lifecycle/worker-lifecycle.js", () => ({
-      ...lifecycleAdt,
-      beginDrain: () => err(signalErr),
-    }));
-    // Re-import the manager so it binds the mocked module.
-    const { createWorkerLifecycle: createWithMock } = await import(
-      "../../../supervisor/lifecycle/worker-lifecycle-manager.js"
-    );
-
+    // Inject an ADT whose ONLY beginDrain rejects; everything else stays the real
+    // ADT. The real `beginDrain` can never reject a live state, so the injected
+    // rejection is a forced contract violation — the cast is the test saying
+    // "this error type is impossible-by-construction", which is exactly the
+    // invariant violation this branch exists to surface.
     const fake = createInMemoryWorkerRedisFake();
     const reg = createWorkerRegistry(fake.redis, async () => true);
     const { spawn, proc } = makeSpawn();
     const log = recordingLog();
-    const lc = createWithMock({
+    const lc = createWorkerLifecycle({
       spawn, proc, registry: reg, probe: async () => true,
       tenants: tenantsView({ acme: { eagerPin: false } }),
       clock: fixedClock().clock, config: baseConfig(), logger: log,
+      lifecycle: { ...lifecycleAdt, beginDrain: () => err(signalErr) as never },
     });
     await lc.ensureWorker(tid("acme"));
 
@@ -1062,9 +1092,8 @@ describe("createWorkerLifecycle: beginDrain invariant rejection surfaces (T9 Fix
     const invariantLine = log.errors.find((l) => l.msg.includes("beginDrain rejected for a confirmed-live worker"));
     expect(invariantLine).toBeDefined();
     expect(invariantLine!.ctx).toMatchObject({ tenant: tid("acme") });
-
-    // Restore the real module so later test files are unaffected.
-    mock.module("../../../supervisor/lifecycle/worker-lifecycle.js", () => ({ ...lifecycleAdt }));
+    // No module mock was ever registered — nothing to restore; every other test
+    // file always binds the real ADT.
   });
 
   test("the legitimate 'nothing live to drain' path stays a quiet ok(undefined) no-op", async () => {
@@ -1080,6 +1109,82 @@ describe("createWorkerLifecycle: beginDrain invariant rejection surfaces (T9 Fix
     // Never spawned → nothing live.
     const r = await lc.drain(tid("acme"));
     expect(r.ok).toBe(true);
+    expect(log.errors.length).toBe(0);
+  });
+});
+
+// ── persistRecord failure paths (registry write vs. worker lifetime) ──────────
+
+describe("createWorkerLifecycle: registry-write failures", () => {
+  /**
+   * A registry whose `put` fails only for records in the given health phase.
+   * The two phases are deliberately separable: a failed `live` put is
+   * FAIL-CLOSED (the worker is killed rather than left unreadoptable), while a
+   * failed `draining` put is BEST-EFFORT (the drain must not discard in-flight
+   * work). Nothing exercised either branch before.
+   */
+  const registryFailingPutFor = (
+    inner: WorkerRegistry,
+    health: "live" | "draining",
+  ): WorkerRegistry => ({
+    ...inner,
+    put: async (record) =>
+      record.health === health
+        ? { ok: false as const, error: redisUnavailable("worker-put") }
+        : inner.put(record),
+  });
+
+  test("a live-record put failure KILLS the just-spawned healthy worker rather than orphaning it", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    const reg = registryFailingPutFor(createWorkerRegistry(fake.redis, async () => true), "live");
+    const { spawn, proc, spawned, signalled } = makeSpawn();
+    const log = recordingLog();
+    const lc = createWorkerLifecycle({
+      spawn, proc, registry: reg,
+      // The health probe SUCCEEDS: the worker reached `live` and is answering.
+      // This is the post-live branch — distinct from the pre-live aborts
+      // (UDS-not-ready, health-check timeout) the existing tests cover.
+      probe: async () => true,
+      tenants: tenantsView({ acme: { eagerPin: false } }),
+      clock: fixedClock().clock, config: baseConfig(), logger: log,
+    });
+
+    const r = await lc.ensureWorker(tid("acme"));
+
+    // The caller gets a failure — never a socket pointing at an unreadoptable worker.
+    expect(r.ok).toBe(false);
+    // It WAS spawned and it WAS killed: leaving it alive is the orphan this
+    // branch exists to prevent.
+    expect(spawned.length).toBe(1);
+    expect(signalled.map((s) => s.pid)).toContain(spawned[0]!.pid);
+    // No live worker is tracked, so the next request retries a clean spawn.
+    expect(lc.liveWorkerCount()).toBe(0);
+    expect(log.errors.some((e) => e.msg.includes("registry put failed for a live worker"))).toBe(true);
+  });
+
+  test("a draining-record put failure is BEST-EFFORT: the worker is still SIGTERM'd and in-flight work survives", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    const inner = createWorkerRegistry(fake.redis, async () => true);
+    const { spawn, proc, spawned, signalled } = makeSpawn();
+    const log = recordingLog();
+    // Spawn succeeds (live put lands), then the DRAINING put fails.
+    const reg = registryFailingPutFor(inner, "draining");
+    const lc = createWorkerLifecycle({
+      spawn, proc, registry: reg, probe: async () => true,
+      tenants: tenantsView({ acme: { eagerPin: false } }),
+      clock: fixedClock().clock, config: baseConfig(), logger: log,
+    });
+
+    expect((await lc.ensureWorker(tid("acme"))).ok).toBe(true);
+    const r = await lc.drain(tid("acme"));
+
+    // The drain still SUCCEEDS — unlike the spawn path, a stale record is
+    // self-healing (restart re-adopts it; the liveness probe prunes it).
+    expect(r.ok).toBe(true);
+    // The worker was signalled, so in-flight work gets its chance to finish.
+    expect(signalled.some((sg) => sg.pid === spawned[0]!.pid && sg.sig === "SIGTERM")).toBe(true);
+    // Warned, not errored: this is a tolerated inconsistency, not a fail-closed.
+    expect(log.warns.some((w) => w.msg.includes("registry put failed for a draining worker"))).toBe(true);
     expect(log.errors.length).toBe(0);
   });
 });

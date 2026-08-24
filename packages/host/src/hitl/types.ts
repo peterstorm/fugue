@@ -10,7 +10,10 @@
  * lifecycle status, the persisted record, and the notification a reviewer sees.
  */
 
-import type { DagId, RunId, NodeId, FrameworkError } from "@fuguejs/framework";
+import { isDeepStrictEqual } from "node:util";
+import { ok, err } from "@fuguejs/framework";
+import type { DagId, RunId, NodeId, FrameworkError, NonEmptyString, Result } from "@fuguejs/framework";
+import type { Team } from "../domain/auth.js";
 
 /**
  * The serializable projection of an `AuthIdentity` persisted on a run. The live
@@ -30,6 +33,16 @@ export type PersistedIdentity =
   | { readonly kind: "team"; readonly team: string; readonly label: string }
   | { readonly kind: "user"; readonly sub: string; readonly azp: string };
 
+/** A non-negative safe-integer epoch-millisecond timestamp. */
+declare const runTimestampMsBrand: unique symbol;
+export type RunTimestampMs = number & { readonly [runTimestampMsBrand]: "RunTimestampMs" };
+
+/** Parse an untrusted clock reading into the timestamp domain. */
+export const tryRunTimestampMs = (value: unknown): Result<RunTimestampMs, string> =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? ok(value as RunTimestampMs)
+    : err("expected a non-negative safe integer");
+
 /**
  * A run's lifecycle status (an ADT — illegal combinations are unrepresentable).
  * `suspended` carries the gate the run is parked at so a status poll / Teams
@@ -43,9 +56,36 @@ export type PersistedIdentity =
 export type RunStatus =
   | { readonly kind: "queued" }
   | { readonly kind: "running" }
-  | { readonly kind: "suspended"; readonly nodeId: NodeId; readonly prompt: string }
+  | { readonly kind: "suspended"; readonly nodeId: NodeId; readonly prompt: NonEmptyString }
   | { readonly kind: "completed"; readonly output: unknown }
   | { readonly kind: "failed"; readonly error: FrameworkError };
+
+/** Lifecycle commands accepted after durable creation; `queued` is create-only. */
+export type RunStatusUpdate = Exclude<RunStatus, { readonly kind: "queued" }>;
+
+/**
+ * Parse a requested lifecycle update against the current durable state.
+ * A queued or suspended run must enter through the lease-fenced `running`
+ * state before it may park or settle. Re-entering `running` is idempotent for a
+ * retried worker slice. Terminal writes are idempotent only when byte-for-byte
+ * equal; resurrection and terminal rewrites are rejected.
+ */
+export const transitionRunStatus = (
+  current: RunStatus,
+  next: RunStatusUpdate,
+): Result<RunStatusUpdate, string> => {
+  if (current.kind === "completed" || current.kind === "failed") {
+    return isDeepStrictEqual(current, next)
+      ? ok(next)
+      : err(`cannot transition terminal '${current.kind}' run to '${next.kind}'`);
+  }
+  const valid = current.kind === "running"
+    || (current.kind === "queued" && next.kind === "running")
+    || (current.kind === "suspended" && next.kind === "running");
+  return valid
+    ? ok(next)
+    : err(`cannot transition '${current.kind}' run directly to '${next.kind}'`);
+};
 
 /**
  * The durable record of a run. `checkpoint` is the framework's serialized
@@ -57,14 +97,24 @@ export type RunStatus =
 export interface RunRecord {
   readonly runId: RunId;
   readonly dagId: DagId;
+  /** Immutable resource owner captured from the registered DAG at acceptance. */
+  readonly ownerTeam: Team;
   readonly input: unknown;
   readonly identity: PersistedIdentity;
   readonly status: RunStatus;
   /** Serialized `{state, context}` checkpoint (framework `toJson`). */
   readonly checkpoint: string;
-  readonly createdAtMs: number;
-  readonly updatedAtMs: number;
+  readonly createdAtMs: RunTimestampMs;
+  readonly updatedAtMs: RunTimestampMs;
 }
+
+/** Lifecycle/auth projection that remains readable without execution checkpoint bytes. */
+export type RunMetadata = Omit<RunRecord, "checkpoint">;
+
+/** The only lifecycle state accepted by `RunStorePort.create`. */
+export type QueuedRunRecord = Omit<RunRecord, "status"> & {
+  readonly status: Extract<RunStatus, { readonly kind: "queued" }>;
+};
 
 /**
  * What a reviewer is shown when a run parks at a human gate. The notifier
@@ -74,7 +124,9 @@ export interface RunRecord {
 export interface ReviewNotification {
   readonly runId: RunId;
   readonly dagId: DagId;
+  /** Immutable run owner; notification routing must never re-resolve live registry ownership. */
+  readonly ownerTeam: Team;
   readonly nodeId: NodeId;
-  readonly prompt: string;
+  readonly prompt: NonEmptyString;
   readonly output: unknown;
 }

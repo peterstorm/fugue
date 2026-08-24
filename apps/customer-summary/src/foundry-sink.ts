@@ -11,7 +11,7 @@
  *   - `trackMetric` → `client.trackMetric` (customMetric, single data point)
  *   - `flush`       → `client.flush`        (graceful-shutdown drain)
  *
- * Auth (FR-022 / FR-023) — BOTH modes use an ISOLATED `TelemetryClient`
+ * Auth (observability spec FR-022 / FR-023) — BOTH modes use an ISOLATED `TelemetryClient`
  * (`useGlobalProviders: false`): manual track calls only, NO global Azure
  * Monitor distro and NO global OpenTelemetry provider registration. This keeps
  * the app's domain-event sink from colliding with the framework's own global
@@ -25,12 +25,12 @@
  *     credential through `parseConfig()` into the isolated client's Azure Monitor
  *     exporter — so AAD auth needs NO global `useAzureMonitor` pipeline.
  *
- * Fail-tolerance (FR-028): track-call fault isolation is provided by the observer
+ * Fail-tolerance (observability spec FR-028): track-call fault isolation is provided by the observer
  * wrappers (the framework's `AiFoundryObserver` and the app's
  * `FoundryRunSummaryObserver`), which wrap every emission in try/catch + log, so
- * this adapter is intentionally a thin pass-through. `flush()` may reject; its
- * sole caller (graceful shutdown in bootstrap.ts) guards and logs it, so a flush
- * failure is surfaced rather than silently swallowed.
+ * this adapter is intentionally a thin pass-through. `flush()` may reject;
+ * graceful shutdown in `shutdown.ts` guards and logs it, so a flush failure is
+ * surfaced rather than silently swallowed.
  */
 import { TelemetryClient } from "applicationinsights";
 import { DefaultAzureCredential } from "@azure/identity";
@@ -41,7 +41,7 @@ import type { ResolvedAuth } from "./observability.js";
 /**
  * Minimal structural view of the Application Insights `TelemetryClient` surface
  * this sink uses. Declaring it lets tests inject a fake client WITHOUT touching
- * `applicationinsights` or any global pipeline (no live Azure, FR-028 test
+ * `applicationinsights` or any global pipeline (no live Azure, observability spec FR-028 test
  * isolation) while keeping the production path strongly typed.
  *
  * Numeric channels are {@link FiniteNumber} (not bare `number`) so the

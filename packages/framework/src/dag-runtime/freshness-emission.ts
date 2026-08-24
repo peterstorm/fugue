@@ -8,24 +8,44 @@
 // Fail-closed (ADR-0025): if any extractor throws OR the freshness index is
 // unavailable, the wave aborts. Synthesizing a fake conflict or proceeding
 // silently would allow undetectable stale writes.
+//
+// An abort is PARTIAL: nodes earlier in the wave may already have had their
+// witnesses recorded. That progress is returned as data on both branches of
+// `FreshnessEmissionOutcome`, so a wave retry can tell what it still owes
+// instead of inferring it from "does an output exist" — which would let a retry
+// close the wave with a write witness permanently missing.
 
 import { match } from "ts-pattern";
-import type { NodeDef } from "../types/node.js";
 import type { NodeId } from "../types/ids.js";
 import type { Witness } from "../types/freshness.js";
-import { stampWitness } from "../types/freshness.js";
+import { stampWitness, writeEntryOf } from "../types/freshness.js";
 import type { FrameworkError } from "../types/errors.js";
 import { type Result, ok, err } from "../types/result.js";
-import { fwLogger } from "../logger.js";
+import { bestEffortLog } from "./best-effort.js";
 import { formatFrameworkError } from "../types/errors.js";
+import { safeErrorMessage } from "../types/safe-error.js";
 import { buildNodeInput } from "../shared/build-input.js";
 import { emit } from "./emit.js";
-import type { PostWaveContext } from "./wave-execution.js";
+import type { PostWaveContext } from "./post-wave-context.js";
+import { nodeErrorEmitter } from "./post-wave-context.js";
+
+/**
+ * The outcome of one wave's freshness emission.
+ *
+ * `witnessed` is present on BOTH variants: an abort still carries the nodes
+ * whose bookkeeping completed before it, so the caller can record that progress
+ * and a retry re-attempts only what is genuinely outstanding. Making the
+ * partial-progress set part of the failure variant is what keeps "aborted with
+ * unknown progress" unrepresentable.
+ */
+export type FreshnessEmissionOutcome =
+  | { readonly kind: "complete"; readonly witnessed: ReadonlySet<NodeId> }
+  | { readonly kind: "aborted"; readonly witnessed: ReadonlySet<NodeId>; readonly error: FrameworkError };
 
 /**
  * Emit freshness witness events for all reads/writes nodes in a wave.
  *
- * Fail-closed: extractor failures surface as `Err` and abort the wave.
+ * Fail-closed: extractor failures abort the wave with an `aborted` outcome.
  * The authoring bug (broken extractor) must be fixed before the DAG
  * can proceed — silently proceeding would allow downstream writes nodes
  * to operate without the witness data they need for conflict detection.
@@ -34,10 +54,12 @@ export async function emitFreshnessWitnessEvents(
   ctx: PostWaveContext,
   newOutputs: ReadonlyMap<NodeId, unknown>,
   skippedNodeIds: ReadonlySet<NodeId>,
-): Promise<Result<void, FrameworkError>> {
+): Promise<FreshnessEmissionOutcome> {
   const { waveNodeIds, nodeMap, nodeCtx, machineCtx, dagId, nowFn, freshnessIndex, witnessAccumulator } = ctx;
   const stamp = (): Date => new Date(nowFn());
   const priorOutputs = machineCtx.outputs;
+  const witnessed = new Set<NodeId>();
+  const emitNodeError = nodeErrorEmitter(ctx);
 
   for (const nodeId of waveNodeIds) {
     // Skip nodes that didn't actually execute (checkpoint-resumed or
@@ -70,21 +92,13 @@ export async function emitFreshnessWitnessEvents(
           });
           witnessAccumulator?.set(capturedWitness.resource, capturedWitness);
         } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          fwLogger().warn(
+          const msg = safeErrorMessage(e);
+          bestEffortLog(
+            "warn",
             `[emitFreshnessWitnessEvents] extractWitness failed for node '${nodeId}': ${msg}`,
           );
           const fwError: FrameworkError = { kind: "node-crash", nodeId, retriability: "non-retriable", message: `extractWitness threw: ${msg}` };
-          emit(nodeCtx, {
-            type: "node-error",
-            runId: nodeCtx.runId,
-            dagId,
-            nodeId,
-            sideEffects: nodeMap.get(nodeId)?.sideEffects,
-            timestamp: stamp(),
-            error: `extractWitness failed: ${msg}`,
-            frameworkError: fwError,
-          });
+          emitNodeError(nodeId, `extractWitness failed: ${msg}`, fwError);
           // Fail-closed: downstream writes nodes need this witness for conflict
           // detection. Proceeding without it would silently allow stale writes.
           return err(fwError);
@@ -101,17 +115,8 @@ export async function emitFreshnessWitnessEvents(
         if (!se.extractConditionedOn || !se.extractNewWitness) {
           const message = `writes node '${nodeId}' declares only one of extractConditionedOn/extractNewWitness — both are required for freshness tracking`;
           const fwError: FrameworkError = { kind: "node-crash", nodeId, retriability: "non-retriable", message };
-          fwLogger().error(`[emitFreshnessWitnessEvents] ${message}`);
-          emit(nodeCtx, {
-            type: "node-error",
-            runId: nodeCtx.runId,
-            dagId,
-            nodeId,
-            sideEffects: nodeMap.get(nodeId)?.sideEffects,
-            timestamp: stamp(),
-            error: message,
-            frameworkError: fwError,
-          });
+          bestEffortLog("error", `[emitFreshnessWitnessEvents] ${message}`);
+          emitNodeError(nodeId, message, fwError);
           return err(fwError);
         }
 
@@ -120,17 +125,8 @@ export async function emitFreshnessWitnessEvents(
         const inputResult = buildNodeInput(priorOutputs, incoming, nodeId);
         if (!inputResult.ok) {
           const message = `BUG: input reconstruction failed for writes node '${nodeId}': ${inputResult.error.kind === "node-crash" ? inputResult.error.message : "unknown"}`;
-          fwLogger().error(`[emitFreshnessWitnessEvents] ${message}`);
-          emit(nodeCtx, {
-            type: "node-error",
-            runId: nodeCtx.runId,
-            dagId,
-            nodeId,
-            sideEffects: nodeMap.get(nodeId)?.sideEffects,
-            timestamp: stamp(),
-            error: message,
-            frameworkError: inputResult.error,
-          });
+          bestEffortLog("error", `[emitFreshnessWitnessEvents] ${message}`);
+          emitNodeError(nodeId, message, inputResult.error);
           return err(inputResult.error);
         }
         const nodeInput = inputResult.value;
@@ -145,64 +141,67 @@ export async function emitFreshnessWitnessEvents(
           conditionedOn = se.extractConditionedOn(nodeInput);
           newWitness = stampWitness(se.resource, se.extractNewWitness(output));
         } catch (e) {
-          const msg = `extractConditionedOn/extractNewWitness failed for node '${nodeId}': ${e instanceof Error ? e.message : e}`;
-          fwLogger().warn(`[emitFreshnessWitnessEvents] ${msg}`);
+          const msg = `extractConditionedOn/extractNewWitness failed for node '${nodeId}': ${safeErrorMessage(e)}`;
+          bestEffortLog("warn", `[emitFreshnessWitnessEvents] ${msg}`);
           const fwError: FrameworkError = { kind: "node-crash", nodeId, retriability: "non-retriable", message: `freshness extractor threw: ${msg}` };
-          emit(nodeCtx, {
-            type: "node-error",
-            runId: nodeCtx.runId,
-            dagId,
-            nodeId,
-            sideEffects: nodeMap.get(nodeId)?.sideEffects,
-            timestamp: stamp(),
-            error: `freshness extractor failed: ${msg}`,
-            frameworkError: fwError,
-          });
+          emitNodeError(nodeId, `freshness extractor failed: ${msg}`, fwError);
           // Fail-closed: broken extractors are an authoring bug that must be fixed.
           return err(fwError);
         }
 
-        // Step 3: Freshness conflict check + event emission
+        // Step 3: Ask the acknowledgement question directly. Conflict lookup
+        // cannot answer it once another write has become latest.
+        const identity = {
+          runId: nodeCtx.runId,
+          nodeId,
+          executionEpoch: machineCtx.freshnessExecutionEpoch,
+          newWitness,
+        };
+        const acknowledgement = await freshnessIndex.hasRecordedWrite(identity);
+        if (!acknowledgement.ok) {
+          const msg = formatFrameworkError(acknowledgement.error);
+          bestEffortLog(
+            "error",
+            `[emitFreshnessWitnessEvents] freshnessIndex.hasRecordedWrite failed for node '${nodeId}': ${msg}`,
+          );
+          const fwError: FrameworkError = {
+            kind: "node-crash",
+            nodeId,
+            retriability: "retriable",
+            message: `freshness acknowledgement unavailable: ${msg}`,
+          };
+          emitNodeError(nodeId, `freshness acknowledgement check failed: ${msg}`, fwError);
+          return err(fwError);
+        }
+        if (acknowledgement.value) return ok(undefined);
+
+        // Step 4: Freshness conflict check + event emission.
         // sinceMs: 0 is intentional — within a run, all prior writes are relevant
         // because topological ordering guarantees the read witness was captured
         // before any writes in later waves.
         const conflictResult = await freshnessIndex.findConflict(conditionedOn, 0);
         if (!conflictResult.ok) {
           const msg = formatFrameworkError(conflictResult.error);
-          fwLogger().error(
+          bestEffortLog(
+            "error",
             `[emitFreshnessWitnessEvents] freshnessIndex.findConflict failed for node '${nodeId}', resource '${conditionedOn.resource}': ${msg}`,
           );
           // Fail-closed: index unavailable → abort the wave. Proceeding without
           // conflict detection would allow undetectable stale writes; synthesizing
           // a fake conflict event would mislead consumers. ADR-0025.
           const fwError: FrameworkError = { kind: "node-crash", nodeId, retriability: "retriable", message: `freshness check unavailable: ${msg}` };
-          emit(nodeCtx, {
-            type: "node-error",
-            runId: nodeCtx.runId,
-            dagId,
-            nodeId,
-            sideEffects: nodeMap.get(nodeId)?.sideEffects,
-            timestamp: stamp(),
-            error: `freshness conflict check failed: ${msg}`,
-            frameworkError: fwError,
-          });
+          emitNodeError(nodeId, `freshness conflict check failed: ${msg}`, fwError);
           return err(fwError);
         }
         const conflict = conflictResult.value;
-        if (conflict) {
+        if (conflict !== null) {
           emit(nodeCtx, {
             type: "freshness-violation",
             runId: nodeCtx.runId,
             dagId,
             nodeId,
-            resource: conditionedOn.resource,
             conditionedOnWitness: conditionedOn,
-            conflictingWrite: {
-              runId: conflict.runId,
-              nodeId: conflict.nodeId,
-              newWitness: conflict.newWitness,
-              succeededAtMs: conflict.succeededAtMs,
-            },
+            conflictingWrite: writeEntryOf(conflict),
             detectedAtMs: nowFn(),
             timestamp: stamp(),
           });
@@ -213,6 +212,7 @@ export async function emitFreshnessWitnessEvents(
           runId: nodeCtx.runId,
           dagId,
           nodeId,
+          executionEpoch: machineCtx.freshnessExecutionEpoch,
           conditionedOn,
           newWitness,
           succeededAtMs: nowFn(),
@@ -222,29 +222,27 @@ export async function emitFreshnessWitnessEvents(
         const writeResult = await freshnessIndex.recordWrite(writeEvent);
         if (!writeResult.ok) {
           const msg = formatFrameworkError(writeResult.error);
-          fwLogger().error(
+          bestEffortLog(
+            "error",
             `[emitFreshnessWitnessEvents] freshnessIndex.recordWrite failed for node '${nodeId}': ${msg}`,
           );
           const fwError: FrameworkError = { kind: "node-crash", nodeId, retriability: "retriable", message: `freshness recordWrite failed: ${msg}` };
-          emit(nodeCtx, {
-            type: "node-error",
-            runId: nodeCtx.runId,
-            dagId,
-            nodeId,
-            sideEffects: nodeMap.get(nodeId)?.sideEffects,
-            timestamp: stamp(),
-            error: `freshness recordWrite failed: ${msg}`,
-            frameworkError: fwError,
-          });
+          emitNodeError(nodeId, `freshness recordWrite failed: ${msg}`, fwError);
           return err(fwError);
         }
         return ok(undefined);
       })
-      .with({ kind: "none" }, async () => ok(undefined))
-      .with({ kind: "external-call" }, async () => ok(undefined))
+      .with(
+        { kind: "none" },
+        { kind: "external-call" },
+        async () => ok(undefined),
+      )
       .exhaustive();
 
-    if (!branchResult.ok) return branchResult;
+    if (!branchResult.ok) return { kind: "aborted", witnessed, error: branchResult.error };
+    // Recorded only after the node's whole branch succeeded — a node that
+    // aborted mid-branch still owes its bookkeeping on the retry.
+    witnessed.add(nodeId);
   }
-  return ok(undefined);
+  return { kind: "complete", witnessed };
 }

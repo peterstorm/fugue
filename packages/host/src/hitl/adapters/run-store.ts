@@ -9,24 +9,33 @@
  * Redis key layout (checkpoint split from metadata so per-transition checkpoint
  * writes never race the status writes), tenant-prefixed (AD-4 / FR-013 / SC-001):
  *   fugue:<tenant>:hitl:run:<runId>   →  JSON RunMeta (record minus checkpoint)
- *   fugue:<tenant>:hitl:ckpt:<runId>  →  checkpoint string (framework `toJson`)
+ *   fugue:<tenant>:hitl:ckpt:<runId>  →  checkpoint string (framework `toJson`),
+ *                                        initially a complete creation intent
+ *   fugue:<tenant>:hitl:active        →  SET of non-terminal run ids
+ *   fugue:<tenant>:hitl:lock:<runId>  →  queue-worker lease-fence token
+ *   fugue:<tenant>:hitl:exec:<runId>  →  TTL-bound execution-generation token
  *
  * SECURITY INVARIANT (load-bearing for AD-4 / FR-013 / SC-001):
  *   The Redis store is constructed bound to ONE `TenantId`, so a single store
  *   instance can only ever read/write its own tenant's run & checkpoint keys.
  *   Under the per-tenant Redis ACL (`~fugue:<tenant>:*`) a store holding tenant
- *   A's id physically cannot name tenant B's runs/checkpoints — making a flat,
- *   cross-tenant HITL key unrepresentable.
+ *   A's id physically cannot name tenant B's run/checkpoint/index/lease keys —
+ *   making a flat, cross-tenant HITL key unrepresentable.
  */
 
+import { serializeLossless } from "./lossless-json.js";
 import { z } from "zod";
-import { ok, err, tryRunId, tryNodeId, tryDagId } from "@fuguejs/framework";
-import type { Result, RunId } from "@fuguejs/framework";
+import { asNonEmptyString, ok, err, PersistedFrameworkErrorSchema, safeErrorMessage, tryRunId, tryNodeId, tryDagId, fromJson } from "@fuguejs/framework";
+import type { NonEmptyString, Result, RunId } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
+import { markTeam } from "../../domain/auth.js";
 import type { TenantId } from "../../domain/tenant.js";
-import type { RedisPort, LogPort } from "../../ports.js";
-import type { RunStorePort } from "../ports.js";
-import type { RunRecord, RunStatus } from "../types.js";
+import type { HitlRedisPort, LogPort } from "../../ports.js";
+import { createRunExecutionFenceAuthority, createRunLeaseAuthority } from "../ports.js";
+import { logWithoutThrowing } from "../diagnostic-logging.js";
+import type { RunExecutionFence, RunLease, RunLeaseVerifier, RunStorePort } from "../ports.js";
+import { transitionRunStatus, tryRunTimestampMs } from "../types.js";
+import type { RunMetadata, RunRecord, RunStatus, RunTimestampMs } from "../types.js";
 
 // ── Persisted-shape validators (parse-don't-validate across the Redis boundary) ─
 //
@@ -35,9 +44,9 @@ import type { RunRecord, RunStatus } from "../types.js";
 // smart constructors guarding the HTTP/bot read paths, it must be PARSED, not
 // `as`-cast: a value that parses as JSON but is structurally wrong (unknown
 // status/identity `kind`, missing field) is rejected rather than flowing in to
-// drive an exhaustive match off a corrupt discriminant. The `failed` error is
-// kept loose (only its `kind` discriminant is asserted) so a `FrameworkError`
-// shape change never trips the reader; all of its fields round-trip intact.
+// drive an exhaustive match off corrupt data. A `failed` status parses the
+// complete current `FrameworkError` shape: missing required fields are rejected,
+// while loose objects preserve additive fields across rolling upgrades.
 //
 // Branded ids are refined through the SAME smart constructors the HTTP/bot
 // ingress paths use (`tryRunId`/`tryNodeId`/`tryDagId`), not a bare
@@ -46,9 +55,20 @@ import type { RunRecord, RunStatus } from "../types.js";
 // branded `NodeId` its own regex would reject — closing the last gap between
 // "parses" and "is a valid branded id".
 
-/** A zod string refined by a framework id smart constructor (parse-don't-validate). */
-const brandedId = (parse: (s: string) => Result<unknown, string>) =>
-  z.string().refine((s) => parse(s).ok, { message: "value is not a valid branded id" });
+/** A zod string transformed by a framework id smart constructor (parse-don't-validate). */
+/**
+ * THE one branded-id Zod transform for persisted HITL records: parse through the
+ * smart constructor, reject anything it refuses. Exported because the decision
+ * store persists branded ids on the same resume path and must apply the same
+ * gate — a second copy could drift into `as`-casting a corrupt id back in.
+ */
+export const brandedId = <T>(parse: (s: string) => Result<T, string>): z.ZodType<T> =>
+  z.string().transform((value, context) => {
+    const parsed = parse(value);
+    if (parsed.ok) return parsed.value;
+    context.addIssue({ code: "custom", message: "value is not a valid branded id" });
+    return z.NEVER;
+  });
 
 const PersistedIdentitySchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("admin") }),
@@ -56,23 +76,58 @@ const PersistedIdentitySchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("user"), sub: z.string(), azp: z.string() }),
 ]);
 
+const NodeIdSchema = brandedId(tryNodeId);
+const NonEmptyStringSchema: z.ZodType<NonEmptyString> = z.string().transform((value, context) => {
+  const parsed = asNonEmptyString(value);
+  if (parsed !== undefined) return parsed;
+  context.addIssue({ code: "custom", message: "prompt must be non-empty" });
+  return z.NEVER;
+});
+
 const RunStatusSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("queued") }),
   z.object({ kind: z.literal("running") }),
-  z.object({ kind: z.literal("suspended"), nodeId: brandedId(tryNodeId), prompt: z.string() }),
+  z.object({
+    kind: z.literal("suspended"),
+    nodeId: NodeIdSchema,
+    prompt: NonEmptyStringSchema,
+  }),
   z.object({ kind: z.literal("completed"), output: z.unknown() }),
-  z.object({ kind: z.literal("failed"), error: z.looseObject({ kind: z.string() }) }),
+  z.object({ kind: z.literal("failed"), error: PersistedFrameworkErrorSchema }),
 ]);
+
+const RunTimestampMsSchema: z.ZodType<RunTimestampMs> = z.unknown().transform((value, context) => {
+  const parsed = tryRunTimestampMs(value);
+  if (parsed.ok) return parsed.value;
+  context.addIssue({ code: "custom", message: parsed.error });
+  return z.NEVER;
+});
 
 const RunMetaSchema = z.object({
   runId: brandedId(tryRunId),
   dagId: brandedId(tryDagId),
+  ownerTeam: z.string().transform(markTeam),
   input: z.unknown(),
   identity: PersistedIdentitySchema,
   status: RunStatusSchema,
-  createdAtMs: z.number(),
-  updatedAtMs: z.number(),
+  createdAtMs: RunTimestampMsSchema,
+  updatedAtMs: RunTimestampMsSchema,
 });
+
+const RunCreationIntentSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("run-creation-preparation"),
+    metadata: RunMetaSchema,
+    checkpoint: z.string(),
+  }),
+  z.object({
+    kind: z.literal("run-creation-intent"),
+    metadata: RunMetaSchema,
+    checkpoint: z.string(),
+  }),
+]);
+
+type RunCreationIntent = z.output<typeof RunCreationIntentSchema>;
 
 // ── Active-run index (ADR-0074) ──────────────────────────────────────────────
 
@@ -80,25 +135,126 @@ const RunMetaSchema = z.object({
 const isTerminalStatus = (status: RunStatus): boolean =>
   status.kind === "completed" || status.kind === "failed";
 
+const metadataOf = (record: RunRecord): RunMetadata => ({
+  runId: record.runId,
+  dagId: record.dagId,
+  ownerTeam: record.ownerTeam,
+  input: record.input,
+  identity: record.identity,
+  status: record.status,
+  createdAtMs: record.createdAtMs,
+  updatedAtMs: record.updatedAtMs,
+});
+
+const leaseLost = (lease: RunLease): Result<never, HostError> =>
+  err({ kind: "run-lease-lost", runId: lease.runId });
+
+const parseExecutionTimeout = (timeoutMs: number): Result<number, HostError> =>
+  Number.isSafeInteger(timeoutMs) && timeoutMs > 0
+    ? ok(timeoutMs)
+    : err({
+        kind: "internal-invariant-violated",
+        message: "HITL execution timeout must be a positive safe integer",
+        context: {},
+      });
+
+const readRunTimestamp = (now: () => number): Result<RunTimestampMs, HostError> => {
+  try {
+    const timestamp = tryRunTimestampMs(now());
+    return timestamp.ok
+      ? timestamp
+      : err({
+          kind: "internal-invariant-violated",
+          message: `HITL clock returned an invalid timestamp: ${timestamp.error}`,
+          context: {},
+        });
+  } catch (error) {
+    return err({
+      kind: "internal-invariant-violated",
+      message: `HITL clock threw while stamping run status: ${safeErrorMessage(error)}`,
+      context: {},
+    });
+  }
+};
+
+const readExecutionToken = (source: () => string): Result<string, HostError> => {
+  try {
+    const token = source();
+    return typeof token === "string" && token.length > 0
+      ? ok(token)
+      : err({
+          kind: "internal-invariant-violated",
+          message: "HITL execution token source returned an empty or non-string token",
+          context: {},
+        });
+  } catch (error) {
+    return err({
+      kind: "internal-invariant-violated",
+      message: `HITL execution token source threw: ${safeErrorMessage(error)}`,
+      context: {},
+    });
+  }
+};
+
 /**
- * Whether a PERSISTED run-meta JSON string carries a terminal status. Defensive and
- * TOTAL: returns false on any parse/shape failure, so a corrupt member is never
- * pruned (it stays counted, exactly as before) — fixing the terminal-index leak must
- * NOT introduce a new "one corrupt record blocks the whole gate" failure mode. Used
- * only by the active-index self-heal to spot a terminal run whose settle-time `sRem`
+ * Whether a PERSISTED run-meta JSON string carries a terminal status. Defensive
+ * and TOTAL: a parse failure yields `{ kind: "corrupt" }` with the parse error
+ * so the caller can log a trail while STILL treating the corrupt member as
+ * live (it stays counted, exactly as before) — fixing the terminal-index leak
+ * must NOT introduce a new "one corrupt record blocks the whole gate" failure
+ * mode, and the corruption must not vanish without a trace (house style:
+ * `readMeta` and the prune failures below both log). Used only by the
+ * active-index self-heal to spot a terminal run whose settle-time `sRem`
  * never landed.
  */
-const persistedStatusIsTerminal = (raw: string): boolean => {
+type PersistedStatusVerdict =
+  | { readonly kind: "terminal" }
+  | { readonly kind: "live" }
+  | { readonly kind: "corrupt"; readonly parseError: string };
+
+const parsePersistedStatus = (raw: string): PersistedStatusVerdict => {
   try {
-    const obj = JSON.parse(raw) as { status?: { kind?: unknown } };
-    const kind = obj?.status?.kind;
-    return kind === "completed" || kind === "failed";
-  } catch {
-    return false;
+    const parsed = RunMetaSchema.safeParse(fromJson(raw));
+    if (!parsed.success) {
+      return { kind: "corrupt", parseError: parsed.error.message };
+    }
+    return isTerminalStatus(parsed.data.status)
+      ? { kind: "terminal" }
+      : { kind: "live" };
+  } catch (e) {
+    return {
+      kind: "corrupt",
+      parseError: safeErrorMessage(e),
+    };
   }
 };
 
 // ── In-Memory Adapter (tests/dev) ───────────────────────────────────────────
+
+/** In-memory counterpart of Redis lease-token ownership. Acquiring a successor
+ * replaces the prior token, so a still-live stale lease is fenced identically
+ * to production. Queue fakes and the run-store fake share this authority. */
+export interface InMemoryRunLeaseAuthority {
+  acquire(runId: RunId, ownerToken?: string, signal?: AbortSignal): RunLease;
+  owns(lease: RunLease): boolean;
+}
+
+export const createInMemoryRunLeaseAuthority = (
+  newOwnerToken: () => string = () => crypto.randomUUID(),
+): InMemoryRunLeaseAuthority => {
+  const owners = new Map<RunId, string>();
+  const authority = createRunLeaseAuthority();
+  return {
+    acquire(runId, ownerToken = newOwnerToken(), signal = new AbortController().signal) {
+      owners.set(runId, ownerToken);
+      return authority.issuer.issue(runId, ownerToken, signal);
+    },
+    owns(lease) {
+      const ownerToken = authority.verifier.ownerToken(lease);
+      return ownerToken !== null && owners.get(lease.runId) === ownerToken;
+    },
+  };
+};
 
 /**
  * In-memory run store. No Redis required. Exposes `_runs` for assertions.
@@ -106,14 +262,24 @@ const persistedStatusIsTerminal = (raw: string): boolean => {
  * are independent updates; an `active` index mirrors the non-terminal runs).
  */
 export const createInMemoryRunStore = (
+  leases: Pick<InMemoryRunLeaseAuthority, "owns">,
   now: () => number = Date.now,
 ): RunStorePort & {
   readonly _runs: ReadonlyMap<string, RunRecord>;
   readonly _active: ReadonlySet<string>;
 } => {
   const runs = new Map<string, RunRecord>();
+  const executionFences = createRunExecutionFenceAuthority();
+  const executionDeadlines = new WeakMap<RunExecutionFence, number>();
   // Mirrors the Redis active-run index SET (ADR-0074): run ids of non-terminal runs.
   const active = new Set<string>();
+  const inspectActiveIndex = (): readonly RunId[] => {
+    for (const id of [...active]) {
+      const record = runs.get(id);
+      if (record === undefined || isTerminalStatus(record.status)) active.delete(id);
+    }
+    return [...active] as RunId[];
+  };
   return {
     _runs: runs,
     _active: active,
@@ -123,31 +289,72 @@ export const createInMemoryRunStore = (
       }
       runs.set(record.runId, record);
       active.add(record.runId); // a fresh run is non-terminal — join the index
-      return ok(undefined);
+      return ok({ kind: "created" });
     },
     async get(runId) {
       return ok(runs.get(runId) ?? null);
     },
-    async saveCheckpoint(runId, checkpoint) {
-      const r = runs.get(runId);
-      if (!r) return err({ kind: "run-not-found", runId });
-      runs.set(runId, { ...r, checkpoint });
+    async getMetadata(runId) {
+      const record = runs.get(runId);
+      return ok(record === undefined ? null : metadataOf(record));
+    },
+    async beginExecution(lease, timeoutMs) {
+      if (!leases.owns(lease)) return leaseLost(lease);
+      const parsedTimeout = parseExecutionTimeout(timeoutMs);
+      if (!parsedTimeout.ok) return parsedTimeout;
+      const startedAt = readRunTimestamp(now);
+      if (!startedAt.ok) return startedAt;
+      const deadline = startedAt.value + parsedTimeout.value;
+      if (!Number.isSafeInteger(deadline)) {
+        return err({
+          kind: "internal-invariant-violated",
+          message: "HITL execution deadline exceeds the safe timestamp domain",
+          context: {},
+        });
+      }
+      const fence = executionFences.issue(lease.runId, crypto.randomUUID());
+      executionDeadlines.set(fence, deadline);
+      return ok(fence);
+    },
+    async saveCheckpoint(lease, fence, checkpoint) {
+      if (!leases.owns(lease)) return leaseLost(lease);
+      const committedAt = readRunTimestamp(now);
+      if (!committedAt.ok) return committedAt;
+      if (
+        fence.runId !== lease.runId ||
+        executionFences.token(fence) === null ||
+        (executionDeadlines.get(fence) ?? -1) <= committedAt.value
+      ) {
+        return leaseLost(lease);
+      }
+      const r = runs.get(lease.runId);
+      if (!r) return err({ kind: "run-not-found", runId: lease.runId });
+      runs.set(lease.runId, { ...r, checkpoint });
       return ok(undefined);
     },
-    async setStatus(runId, status: RunStatus) {
-      const r = runs.get(runId);
-      if (!r) return err({ kind: "run-not-found", runId });
-      runs.set(runId, { ...r, status, updatedAtMs: now() });
-      if (isTerminalStatus(status)) active.delete(runId); // settled → leave the index
+    async setStatus(lease, status) {
+      if (!leases.owns(lease)) return leaseLost(lease);
+      const r = runs.get(lease.runId);
+      if (!r) return err({ kind: "run-not-found", runId: lease.runId });
+      const transition = transitionRunStatus(r.status, status);
+      if (!transition.ok) {
+        return err({
+          kind: "internal-invariant-violated",
+          message: `invalid run '${lease.runId}' lifecycle update: ${transition.error}`,
+          context: {},
+        });
+      }
+      const updatedAtMs = readRunTimestamp(now);
+      if (!updatedAtMs.ok) return updatedAtMs;
+      runs.set(lease.runId, { ...r, status: transition.value, updatedAtMs: updatedAtMs.value });
+      if (isTerminalStatus(transition.value)) active.delete(lease.runId); // settled → leave the index
       return ok(undefined);
     },
     async countActiveRuns() {
-      // Self-heal (parity with the Redis adapter): drop any indexed id whose run
-      // record no longer exists, then count the live remainder.
-      for (const id of [...active]) {
-        if (!runs.has(id)) active.delete(id);
-      }
-      return ok(active.size);
+      return ok(inspectActiveIndex().length);
+    },
+    async listActiveRunIds() {
+      return ok(inspectActiveIndex());
     },
   };
 };
@@ -159,6 +366,8 @@ export const createInMemoryRunStore = (
 // that builds a run/checkpoint key without a tenant.
 const runKey = (tenant: TenantId, runId: RunId): string => `fugue:${tenant}:hitl:run:${runId}`;
 const ckptKey = (tenant: TenantId, runId: RunId): string => `fugue:${tenant}:hitl:ckpt:${runId}`;
+const leaseKey = (tenant: TenantId, runId: RunId): string => `fugue:${tenant}:hitl:lock:${runId}`;
+const executionKey = (tenant: TenantId, runId: RunId): string => `fugue:${tenant}:hitl:exec:${runId}`;
 /**
  * The per-tenant active-run index SET (ADR-0074). Holds the run ids of all
  * non-terminal runs. Read via `sMembers` (NOT `scan`, which the per-tenant ACL
@@ -168,69 +377,371 @@ const ckptKey = (tenant: TenantId, runId: RunId): string => `fugue:${tenant}:hit
 const activeKey = (tenant: TenantId): string => `fugue:${tenant}:hitl:active`;
 
 /** The metadata half of a `RunRecord` (everything except the checkpoint string). */
-type RunMeta = Omit<RunRecord, "checkpoint">;
+type RunMeta = RunMetadata;
 
-export interface RedisRunStoreConfig {
+interface RedisRunStoreConfig {
   /** TTL applied to run keys on every write, in seconds. Bounds storage growth. */
   readonly ttlSec: number;
   /** Wall-clock source (injected for tests). Defaults to `Date.now`. */
   readonly now?: () => number;
+  /** Fresh unguessable execution-generation token. */
+  readonly newExecutionToken?: () => string;
 }
 
+const serializeRunMeta = (meta: RunMeta): Result<string, HostError> =>
+  serializeLossless(meta, {
+    operation: "serializeRunMeta",
+    root: "metadata",
+    subject: "run metadata",
+  });
+
+const serializeRunCreationIntent = (
+  kind: RunCreationIntent["kind"],
+  metadata: RunMeta,
+  checkpoint: string,
+): Result<string, HostError> => {
+  const intent: RunCreationIntent = {
+    kind,
+    metadata,
+    checkpoint,
+  };
+  return serializeLossless(intent, {
+    operation: "serializeRunCreationIntent",
+    root: "intent",
+    subject: "run creation intent",
+    schema: RunCreationIntentSchema,
+  });
+};
+
+type DecodedCheckpoint =
+  | { readonly kind: "checkpoint"; readonly checkpoint: string }
+  | {
+      readonly kind: "recoverable-intent";
+      readonly checkpoint: string;
+      readonly metadata: RunMeta;
+    };
+
+/** Recognize the adapter-owned creation-intent envelope; ordinary checkpoints pass through. */
+const decodeStoredCheckpoint = (
+  runId: RunId,
+  raw: string,
+  logger?: LogPort,
+): Result<DecodedCheckpoint, HostError> => {
+  let decoded: unknown;
+  try {
+    decoded = fromJson(raw);
+  } catch (error) {
+    logWithoutThrowing(logger, "error", "hitl: corrupt stored checkpoint (malformed or non-canonical serialization)", {
+      runId,
+      error: safeErrorMessage(error),
+    });
+    return err({
+      kind: "internal-invariant-violated",
+      message: `corrupt checkpoint for '${runId}'`,
+      context: {},
+    });
+  }
+  if (
+    typeof decoded !== "object" ||
+    decoded === null ||
+    !("kind" in decoded) ||
+    (decoded.kind !== "run-creation-preparation" && decoded.kind !== "run-creation-intent")
+  ) {
+    return ok({ kind: "checkpoint", checkpoint: raw });
+  }
+  const intent = RunCreationIntentSchema.safeParse(decoded);
+  if (!intent.success) {
+    logWithoutThrowing(logger, "error", "hitl: corrupt stored run creation intent", {
+      runId,
+      error: intent.error.message,
+    });
+    return err({
+      kind: "internal-invariant-violated",
+      message: `corrupt HITL run creation intent for '${runId}'`,
+      context: {},
+    });
+  }
+  return intent.data.kind === "run-creation-intent"
+    ? ok({
+        kind: "recoverable-intent",
+        checkpoint: intent.data.checkpoint,
+        metadata: intent.data.metadata,
+      })
+    : ok({ kind: "checkpoint", checkpoint: intent.data.checkpoint });
+};
+
 export const createRedisRunStore = (
-  redis: RedisPort,
+  redis: HitlRedisPort,
   tenant: TenantId,
   config: RedisRunStoreConfig,
+  leases: RunLeaseVerifier,
   logger?: LogPort,
 ): RunStorePort => {
   const expiry = { expiresInSec: config.ttlSec };
   const now = config.now ?? Date.now;
+  const newExecutionToken = config.newExecutionToken ?? (() => crypto.randomUUID());
+  const executionFences = createRunExecutionFenceAuthority();
 
-  const writeMeta = async (runId: RunId, meta: RunMeta): Promise<Result<void, HostError>> => {
-    const res = await redis.set(runKey(tenant, runId), JSON.stringify(meta), expiry);
+  const writeMeta = async (lease: RunLease, meta: RunMeta): Promise<Result<void, HostError>> => {
+    const ownerToken = leases.ownerToken(lease);
+    if (ownerToken === null) return leaseLost(lease);
+    const encoded = serializeRunMeta(meta);
+    if (!encoded.ok) return encoded;
+    const res = await redis.setIfValue(
+      leaseKey(tenant, lease.runId),
+      ownerToken,
+      runKey(tenant, lease.runId),
+      encoded.value,
+      expiry,
+    );
     if (!res.ok) return err(res.error);
-    return ok(undefined);
+    return res.value ? ok(undefined) : leaseLost(lease);
+  };
+
+  const removePreparedCreate = async (
+    runId: RunId,
+    checkpoint: string,
+  ): Promise<void> => {
+    const [index, preparedCheckpoint] = await Promise.all([
+      redis.sRem(activeKey(tenant), runId),
+      redis.compareAndDelete(ckptKey(tenant, runId), checkpoint),
+    ]);
+    if (!index.ok) {
+      logWithoutThrowing(logger, "warn", "hitl: failed to remove active index after unpublished create", {
+        runId,
+        error: index.error.kind,
+      });
+    }
+    if (!preparedCheckpoint.ok) {
+      logWithoutThrowing(logger, "warn", "hitl: failed to remove checkpoint after unpublished create", {
+        runId,
+        error: preparedCheckpoint.error.kind,
+      });
+    }
+  };
+
+  const compensateAmbiguousPublication = async (
+    runId: RunId,
+    checkpoint: string,
+    encodedMeta: string,
+  ): Promise<boolean> => {
+    const publishedMeta = await redis.compareAndDelete(
+      runKey(tenant, runId),
+      encodedMeta,
+    );
+    if (!publishedMeta.ok) {
+      logWithoutThrowing(logger, "warn", "hitl: failed to remove ambiguously published metadata after create failure", {
+        runId,
+        error: publishedMeta.error.kind,
+      });
+      return false;
+    }
+
+    let exactMetadataAbsent = publishedMeta.value;
+    if (!exactMetadataAbsent) {
+      const observed = await redis.get(runKey(tenant, runId));
+      if (!observed.ok) {
+        logWithoutThrowing(logger, "warn", "hitl: failed to verify metadata absence after create compensation", {
+          runId,
+          error: observed.error.kind,
+        });
+        return false;
+      }
+      exactMetadataAbsent = observed.value !== encodedMeta;
+    }
+
+    if (exactMetadataAbsent) await removePreparedCreate(runId, checkpoint);
+    return exactMetadataAbsent;
   };
 
   const readMeta = async (runId: RunId): Promise<Result<RunMeta | null, HostError>> => {
     const res = await redis.get(runKey(tenant, runId));
     if (!res.ok) return err(res.error);
-    if (res.value === null) return ok(null);
+    if (res.value === null) {
+      const checkpoint = await redis.get(ckptKey(tenant, runId));
+      if (!checkpoint.ok) return err(checkpoint.error);
+      if (checkpoint.value === null) return ok(null);
+      const decoded = decodeStoredCheckpoint(runId, checkpoint.value, logger);
+      if (!decoded.ok) return decoded;
+      return ok(decoded.value.kind === "recoverable-intent" ? decoded.value.metadata : null);
+    }
     let raw: unknown;
     try {
-      raw = JSON.parse(res.value);
+      raw = fromJson(res.value);
     } catch (e) {
-      logger?.error?.("hitl: corrupt run metadata in store (malformed JSON)", { runId, error: e instanceof Error ? e.message : String(e) });
+      logWithoutThrowing(logger, "error", "hitl: corrupt run metadata in store (malformed or non-canonical serialization)", {
+        runId,
+        error: safeErrorMessage(e),
+      });
       return err({ kind: "internal-invariant-violated", message: `corrupt run metadata for '${runId}'`, context: {} });
     }
     const parsed = RunMetaSchema.safeParse(raw);
     if (!parsed.success) {
-      logger?.error?.("hitl: corrupt run metadata in store (invalid shape)", { runId, error: parsed.error.message });
+      logWithoutThrowing(logger, "error", "hitl: corrupt run metadata in store (invalid shape)", {
+        runId,
+        error: parsed.error.message,
+      });
       return err({ kind: "internal-invariant-violated", message: `corrupt run metadata for '${runId}'`, context: {} });
     }
-    return ok(parsed.data as RunMeta);
+    return ok(parsed.data);
+  };
+
+  const pruneActiveMember = async (
+    rawId: string,
+    warning: string,
+  ): Promise<boolean> => {
+    const pruned = await redis.sRem(activeKey(tenant), rawId);
+    if (pruned.ok) return true;
+    logWithoutThrowing(logger, "warn", warning, {
+      runId: rawId,
+      error: pruned.error.kind,
+    });
+    return false;
+  };
+
+  const inspectActiveIndex = async (): Promise<Result<{
+    readonly runIds: readonly RunId[];
+    readonly conservativeCount: number;
+  }, HostError>> => {
+    const members = await redis.sMembers(activeKey(tenant));
+    if (!members.ok) return err(members.error);
+
+    const runIds: RunId[] = [];
+    let conservativeCount = 0;
+    for (const rawId of members.value) {
+      const parsedId = tryRunId(rawId);
+      if (!parsedId.ok) {
+        await pruneActiveMember(rawId, "hitl: active-run index prune failed (invalid run id)");
+        continue;
+      }
+
+      const raw = await redis.get(runKey(tenant, parsedId.value));
+      if (!raw.ok) return err(raw.error);
+      if (raw.value === null) {
+        // A valid creation intent is a complete, accepted recovery source for an
+        // ambiguously acknowledged metadata publication. Raw checkpoint-only
+        // remnants remain non-runnable and are counted conservatively.
+        const checkpoint = await redis.get(ckptKey(tenant, parsedId.value));
+        if (!checkpoint.ok) return err(checkpoint.error);
+        if (checkpoint.value !== null) {
+          const decoded = decodeStoredCheckpoint(parsedId.value, checkpoint.value, logger);
+          if (!decoded.ok) return decoded;
+          if (decoded.value.kind === "recoverable-intent") {
+            runIds.push(parsedId.value);
+          }
+          conservativeCount++;
+          continue;
+        }
+        const pruned = await pruneActiveMember(
+          rawId,
+          "hitl: active-run index prune failed (leaked entry; count may over-report until next sweep)",
+        );
+        if (!pruned) conservativeCount++;
+        continue;
+      }
+
+      const verdict = parsePersistedStatus(raw.value);
+      if (verdict.kind === "corrupt") {
+        logWithoutThrowing(logger, "warn", "hitl: active-run index scan: unparseable run meta treated as live (count may over-report)", {
+          runId: rawId,
+          error: verdict.parseError,
+        });
+        runIds.push(parsedId.value);
+        conservativeCount++;
+        continue;
+      }
+      if (verdict.kind === "terminal") {
+        const pruned = await pruneActiveMember(
+          rawId,
+          "hitl: active-run index prune failed (terminal entry; count may over-report until next sweep)",
+        );
+        if (!pruned) conservativeCount++;
+        continue;
+      }
+      runIds.push(parsedId.value);
+      conservativeCount++;
+    }
+    return ok({ runIds, conservativeCount });
   };
 
   return {
     async create(record) {
       const { checkpoint, ...meta } = record;
-      // Atomic create-once WITH TTL (SET NX EX): enforces create-once (a
-      // duplicate run id is a caller bug) and never leaves a TTL-less meta key
-      // if the process crashes between acquisition and expiry.
-      const set = await redis.setNx(runKey(tenant, record.runId), JSON.stringify(meta), expiry);
-      if (!set.ok) return err(set.error);
-      if (!set.value) {
+      const encodedMeta = serializeRunMeta(meta);
+      if (!encodedMeta.ok) return encodedMeta;
+      const encodedPreparation = serializeRunCreationIntent(
+        "run-creation-preparation",
+        meta,
+        checkpoint,
+      );
+      if (!encodedPreparation.ok) return encodedPreparation;
+      const encodedIntent = serializeRunCreationIntent(
+        "run-creation-intent",
+        meta,
+        checkpoint,
+      );
+      if (!encodedIntent.ok) return encodedIntent;
+      // Reject an already-published/torn legacy record before touching its
+      // checkpoint. SET NX on the checkpoint remains the concurrent authority.
+      const existing = await redis.get(runKey(tenant, record.runId));
+      if (!existing.ok) return err(existing.error);
+      if (existing.value !== null) {
         return err({ kind: "internal-invariant-violated", message: `run '${record.runId}' already exists`, context: {} });
       }
-      const ckpt = await redis.set(ckptKey(tenant, record.runId), checkpoint, expiry);
+      // Prepare a COMPLETE creation intent before metadata publication. If the
+      // metadata acknowledgement is ambiguous, this confirmed record lets both
+      // direct execution and active-index reconciliation recover the run.
+      const ckpt = await redis.setNx(ckptKey(tenant, record.runId), encodedPreparation.value, expiry);
       if (!ckpt.ok) return err(ckpt.error);
-      // Join the per-tenant active-run index (ADR-0074): a fresh run is non-terminal.
-      // Idempotent (SADD of a present member is a no-op). Fail-closed on a Redis
-      // error — consistent with the meta/ckpt writes above (the meta key's TTL
-      // self-cleans any orphan if this is the op that fails).
+      if (!ckpt.value) {
+        return err({ kind: "internal-invariant-violated", message: `run '${record.runId}' already exists or has an unpublished checkpoint`, context: {} });
+      }
       const idx = await redis.sAdd(activeKey(tenant), record.runId);
-      if (!idx.ok) return err(idx.error);
-      return ok(undefined);
+      if (!idx.ok) {
+        await removePreparedCreate(record.runId, encodedPreparation.value);
+        return err(idx.error);
+      }
+      // Metadata is the publication point and remains create-once with TTL.
+      const published = await redis.setNx(runKey(tenant, record.runId), encodedMeta.value, expiry);
+      if (!published.ok) {
+        const exactMetadataAbsent = await compensateAmbiguousPublication(
+          record.runId,
+          encodedPreparation.value,
+          encodedMeta.value,
+        );
+        if (exactMetadataAbsent) return err(published.error);
+        const preserved = await redis.setIfValue(
+          ckptKey(tenant, record.runId),
+          encodedPreparation.value,
+          ckptKey(tenant, record.runId),
+          encodedIntent.value,
+          expiry,
+        );
+        if (!preserved.ok) {
+          logWithoutThrowing(logger, "warn", "hitl: failed to preserve recoverable creation intent", {
+            runId: record.runId,
+            error: preserved.error.kind,
+          });
+        }
+        if (preserved.ok && preserved.value) {
+          logWithoutThrowing(logger, "error", "hitl: run metadata publication acknowledgement is uncertain — treating recoverable intent as accepted", {
+            runId: record.runId,
+            error: published.error.kind,
+          });
+          return ok({ kind: "publication-uncertain" });
+        }
+        const observed = await redis.get(runKey(tenant, record.runId));
+        if (observed.ok && observed.value === encodedMeta.value) {
+          return ok({ kind: "publication-uncertain" });
+        }
+        await removePreparedCreate(record.runId, encodedPreparation.value);
+        return err(published.error);
+      }
+      if (!published.value) {
+        await removePreparedCreate(record.runId, encodedPreparation.value);
+        return err({ kind: "internal-invariant-violated", message: `run '${record.runId}' already exists`, context: {} });
+      }
+      return ok({ kind: "created" });
     },
 
     async get(runId) {
@@ -244,72 +755,85 @@ export const createRedisRunStore = (
         // rather than resuming from a missing state.
         return err({ kind: "internal-invariant-violated", message: `run '${runId}' has metadata but no checkpoint`, context: {} });
       }
-      return ok({ ...metaRes.value, checkpoint: ckptRes.value });
+      const decoded = decodeStoredCheckpoint(runId, ckptRes.value, logger);
+      if (!decoded.ok) return decoded;
+      return ok({ ...metaRes.value, checkpoint: decoded.value.checkpoint });
     },
 
-    async saveCheckpoint(runId, checkpoint) {
-      const res = await redis.set(ckptKey(tenant, runId), checkpoint, expiry);
+    getMetadata: readMeta,
+
+    async beginExecution(lease, timeoutMs) {
+      const parsedTimeout = parseExecutionTimeout(timeoutMs);
+      if (!parsedTimeout.ok) return parsedTimeout;
+      const ownerToken = leases.ownerToken(lease);
+      if (ownerToken === null) return leaseLost(lease);
+      const token = readExecutionToken(newExecutionToken);
+      if (!token.ok) return token;
+      const armed = await redis.setIfValue(
+        leaseKey(tenant, lease.runId),
+        ownerToken,
+        executionKey(tenant, lease.runId),
+        token.value,
+        { expiresInMs: parsedTimeout.value },
+      );
+      if (!armed.ok) return err(armed.error);
+      return armed.value
+        ? ok(executionFences.issue(lease.runId, token.value))
+        : leaseLost(lease);
+    },
+
+    async saveCheckpoint(lease, fence, checkpoint) {
+      if (lease.signal.aborted || fence.runId !== lease.runId) return leaseLost(lease);
+      const ownerToken = leases.ownerToken(lease);
+      const executionToken = executionFences.token(fence);
+      if (ownerToken === null || executionToken === null) return leaseLost(lease);
+      const res = await redis.setIfValues(
+        [
+          { key: leaseKey(tenant, lease.runId), expectedValue: ownerToken },
+          { key: executionKey(tenant, lease.runId), expectedValue: executionToken },
+        ],
+        ckptKey(tenant, lease.runId),
+        checkpoint,
+        expiry,
+      );
       if (!res.ok) return err(res.error);
-      return ok(undefined);
+      return res.value ? ok(undefined) : leaseLost(lease);
     },
 
-    async setStatus(runId, status) {
-      const metaRes = await readMeta(runId);
+    async setStatus(lease, status) {
+      if (lease.signal.aborted) return leaseLost(lease);
+      const metaRes = await readMeta(lease.runId);
       if (!metaRes.ok) return err(metaRes.error);
-      if (metaRes.value === null) return err({ kind: "run-not-found", runId });
-      const written = await writeMeta(runId, { ...metaRes.value, status, updatedAtMs: now() });
+      if (metaRes.value === null) return err({ kind: "run-not-found", runId: lease.runId });
+      const transition = transitionRunStatus(metaRes.value.status, status);
+      if (!transition.ok) {
+        return err({
+          kind: "internal-invariant-violated",
+          message: `invalid run '${lease.runId}' lifecycle update: ${transition.error}`,
+          context: {},
+        });
+      }
+      const updatedAtMs = readRunTimestamp(now);
+      if (!updatedAtMs.ok) return updatedAtMs;
+      const written = await writeMeta(lease, { ...metaRes.value, status: transition.value, updatedAtMs: updatedAtMs.value });
       if (!written.ok) return written;
-      if (isTerminalStatus(status)) {
+      if (isTerminalStatus(transition.value)) {
         // Settled → leave the active-run index (ADR-0074). Idempotent (SREM of an
         // absent member is a no-op), so a re-settle never drifts the count.
-        const idx = await redis.sRem(activeKey(tenant), runId);
+        const idx = await redis.sRem(activeKey(tenant), lease.runId);
         if (!idx.ok) return err(idx.error);
       }
       return ok(undefined);
     },
 
     async countActiveRuns() {
-      // Read the per-tenant active-run index SET (ADR-0074) — `sMembers`, NOT
-      // `scan` (the per-tenant ACL denies enumeration, ADR-0067).
-      const members = await redis.sMembers(activeKey(tenant));
-      if (!members.ok) return err(members.error);
-      let live = 0;
-      for (const id of members.value) {
-        // SELF-HEAL of leaked index entries so the count never inflates beyond the
-        // runs that ACTUALLY occupy a slot. A read failure IS surfaced (fail-closed)
-        // so the gate never admits on a bad count; a prune failure is non-fatal.
-        const raw = await redis.get(runKey(tenant, id as RunId));
-        if (!raw.ok) return err(raw.error);
-        if (raw.value === null) {
-          // Meta absent (TTL-expired / hard-deleted) → leaked index entry; prune it.
-          // Best-effort: a failed prune leaves the entry counted (conservative
-          // over-count, never under-count, so no slot is wrongly freed) — but log
-          // it, matching the house best-effort-with-log style. A persistently
-          // failing prune would otherwise silently inflate the count toward
-          // `maxQueuedRuns` and 429 legitimate startRun calls with no trail.
-          const pruned = await redis.sRem(activeKey(tenant), id);
-          if (!pruned.ok) {
-            logger?.warn?.("hitl: active-run index prune failed (leaked entry; count may over-report until next sweep)", { runId: id, error: pruned.error.kind });
-          }
-          continue;
-        }
-        if (persistedStatusIsTerminal(raw.value)) {
-          // TERMINAL but still indexed: the settle-time `sRem` did not land (a
-          // transient Redis blip AFTER the terminal meta write). The meta key still
-          // EXISTS, so the missing-meta prune above cannot catch it — `processRun`'s
-          // terminal guard never re-issues the `sRem` either, so without pruning here
-          // the run would leak a `maxQueuedRuns` slot for up to the run TTL (days).
-          // Prune authoritatively on the persisted status. Idempotent. Best-effort
-          // (a failed prune over-counts, never under-counts) but logged, as above.
-          const pruned = await redis.sRem(activeKey(tenant), id);
-          if (!pruned.ok) {
-            logger?.warn?.("hitl: active-run index prune failed (terminal entry; count may over-report until next sweep)", { runId: id, error: pruned.error.kind });
-          }
-          continue;
-        }
-        live++;
-      }
-      return ok(live);
+      const active = await inspectActiveIndex();
+      return active.ok ? ok(active.value.conservativeCount) : active;
+    },
+
+    async listActiveRunIds() {
+      const active = await inspectActiveIndex();
+      return active.ok ? ok(active.value.runIds) : active;
     },
   };
 };

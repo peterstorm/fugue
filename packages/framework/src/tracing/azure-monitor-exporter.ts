@@ -6,13 +6,9 @@
  * Insights resource. Unlike the MLflow exporter, this is a **pure pass-through**:
  * Foundry consumes the framework's vendor-neutral GenAI semantic attributes
  * (`gen_ai.*`) and framework-owned enrichment (`ai.*`) NATIVELY, so spans flow
- * through unchanged.
- *
- * The empty `ATTR_MAP` below mirrors the MLflow exporter's translation-table
- * shape and exists ONLY as a documented seam: should Foundry ever require a
- * rename, an entry is added here rather than threading vendor logic through the
- * rest of the framework. While the table is empty, span attributes are never
- * mutated.
+ * through unchanged. `translateSpanForFoundry` therefore remains an explicit
+ * identity function; a future vendor requirement can introduce translation
+ * only when there is real behavior to encode.
  *
  * Content-capture / PII gating (FR-012) is applied UPSTREAM in `span-enrich.ts`
  * via the configured `ContentFilter`. This exporter MUST NOT re-filter content —
@@ -40,8 +36,7 @@ import { fwLogger } from "../logger.js";
 // typecheck rejects. Used ONLY to load the Azure exporter lazily-yet-synchronously
 // at construction time (see `buildInner`) so the default MLflow-only path never
 // loads the Azure SDK.
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const require = createRequire(__filename);
+const requireModule = createRequire(__filename);
 
 /**
  * The assembled auth options forwarded to the inner Azure exporter. This is the
@@ -100,37 +95,8 @@ export type AzureMonitorExporterConfig =
   | { readonly auth: AzureMonitorAuth; readonly createInner?: AzureMonitorInnerFactory }
   | { readonly createInner: AzureMonitorInnerFactory };
 
-// ---------------------------------------------------------------------------
-// Declarative translation table
-//
-// EMPTY pass-through. Foundry consumes `gen_ai.*` / `ai.*` attributes natively,
-// so there is nothing to rename. Present only to mirror the MLflow exporter's
-// `ATTR_MAP` shape and to document where a future Foundry-specific rename would
-// live. While empty, `translateAttributes` is the identity function.
-// ---------------------------------------------------------------------------
-const ATTR_MAP: ReadonlyArray<{ readonly from: string; readonly to: string }> = [];
-
-/**
- * Pure attribute translation. With an empty `ATTR_MAP` this is the identity
- * function — it returns the SAME span reference, never mutating or copying.
- * Exported for unit testing the pass-through invariant.
- */
-export const translateSpanForFoundry = (span: ReadableSpan): ReadableSpan => {
-  if (ATTR_MAP.length === 0) return span;
-  // Defensive: if the seam table ever gains entries, apply renames onto a
-  // shallow copy so the original span object stays pristine for sibling
-  // exporters. (Unreachable while ATTR_MAP is empty.)
-  const attrs = { ...(span.attributes as Record<string, unknown>) };
-  for (const { from, to } of ATTR_MAP) {
-    if (attrs[from] !== undefined) attrs[to] = attrs[from];
-  }
-  return new Proxy(span, {
-    get(target, prop, receiver) {
-      if (prop === "attributes") return attrs;
-      return Reflect.get(target, prop, receiver);
-    },
-  });
-};
+/** Explicit Foundry pass-through; returns the same span without mutation. */
+export const translateSpanForFoundry = (span: ReadableSpan): ReadableSpan => span;
 
 /**
  * Thrown at the boundary when no auth input and no test seam are supplied.
@@ -175,13 +141,13 @@ export class AzureMonitorExporter implements SpanExporter {
     // real assembly path, with no live network.
     if (config.createInner) return config.createInner(opts);
 
-    // The module-scoped `require` (from `createRequire(__filename)`) gives an
-    // ESM-safe SYNCHRONOUS require. The load stays LAZY: it runs only here,
+    // The module-scoped `requireModule` (from `createRequire(__filename)`) gives
+    // an ESM-safe SYNCHRONOUS require. The load stays LAZY: it runs only here,
     // when the Azure exporter is actually constructed without a `createInner`
     // seam (auth present, no override). So the default MLflow-only path — and
     // every seam path — never loads the Azure SDK, even though the package is a
     // HARD dependency (FR-029) and always installed.
-    const { AzureMonitorTraceExporter } = require("@azure/monitor-opentelemetry-exporter") as {
+    const { AzureMonitorTraceExporter } = requireModule("@azure/monitor-opentelemetry-exporter") as {
       AzureMonitorTraceExporter: new (opts: AzureMonitorInnerOpts) => SpanExporter;
     };
 
@@ -220,7 +186,7 @@ export class AzureMonitorExporter implements SpanExporter {
    * the result, so the OTel SDK's own retry/backoff still sees the true outcome.
    */
   export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
-    // Pass-through: translate (identity while ATTR_MAP is empty) and delegate.
+    // Pass-through: identity-translate and delegate.
     const translated = spans.map(translateSpanForFoundry);
     this.inner.export(translated, (result) => {
       if (result.code !== ExportResultCode.SUCCESS) {
@@ -234,8 +200,25 @@ export class AzureMonitorExporter implements SpanExporter {
     });
   }
 
+  /**
+   * Failure contract: log-then-continue. `shutdown()` runs on the SDK's shutdown
+   * chain, where a rejection aborts the remaining exporters and makes a clean
+   * stop look like a crash to a process supervisor. A transport failure on the
+   * final flush is worth SEEING — hence the warn, matching `export()`'s
+   * discipline — but never worth propagating, because there is no retry left to
+   * inform and nothing the caller can do with it.
+   */
   async shutdown(): Promise<void> {
-    if (this.inner.shutdown) await this.inner.shutdown();
+    if (!this.inner.shutdown) return;
+    try {
+      await this.inner.shutdown();
+    } catch (e) {
+      fwLogger().warn(
+        `[AzureMonitorExporter] Inner exporter shutdown() failed: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+    }
   }
 
   async forceFlush(): Promise<void> {

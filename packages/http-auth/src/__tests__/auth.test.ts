@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { isOk, isErr } from "@fuguejs/framework";
+import { isOk, isErr, formatFrameworkError } from "@fuguejs/framework";
 import { createTokenProvider, type FetchLike, type FetchResponseLike, type AuthConfig } from "../auth.js";
 
 // ---------------------------------------------------------------------------
@@ -209,6 +209,23 @@ describe("createTokenProvider — caching & invalidation", () => {
     expect(later.ok && String(later.value)).toBe("eternal");
     expect(calls).toHaveLength(1);
   });
+
+  it("probe always mints without reading or populating the request cache", async () => {
+    let mint = 0;
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, { access_token: `tok-${++mint}`, expires_in: 3600 }),
+    );
+    const provider = createTokenProvider({ auth: baseAuth, fetch, now: () => 0 });
+
+    const first = await provider.get();
+    const probe = await provider.probe();
+    const cached = await provider.get();
+
+    expect(first.ok && String(first.value)).toBe("tok-1");
+    expect(isOk(probe)).toBe(true);
+    expect(cached.ok && String(cached.value)).toBe("tok-1");
+    expect(calls).toHaveLength(2);
+  });
 });
 
 describe("createTokenProvider — single-flight", () => {
@@ -257,6 +274,87 @@ describe("createTokenProvider — error mapping (no throw escapes)", () => {
     const result = await provider.get();
     expect(isErr(result)).toBe(true);
     if (!result.ok) expect(result.error.kind).toBe("transient");
+  });
+
+  it("discards a fetch rejection that reflects Basic auth and grant credentials", async () => {
+    const auth: AuthConfig = {
+      ...baseAuth,
+      basicAuth: { username: "client-id", password: "client-secret" },
+    };
+    let reflectedBasic = "";
+    const fetch: FetchLike = async (_url, init) => {
+      reflectedBasic = init.headers.Authorization ?? "";
+      throw new Error(`request headers=${reflectedBasic} body=${init.body}`);
+    };
+
+    const result = await createTokenProvider({ auth, fetch }).get();
+
+    expect(isErr(result)).toBe(true);
+    if (!result.ok) {
+      const serialized = JSON.stringify(result.error);
+      expect(serialized).not.toContain("s3cret");
+      expect(serialized).not.toContain("client-secret");
+      expect(serialized).not.toContain(reflectedBasic);
+      expect(serialized).toContain("https://auth.example.com");
+    }
+  });
+
+  it("maps throwing and non-finite mint clocks to deterministic non-retriable Results", async () => {
+    const fetch: FetchLike = async () =>
+      jsonResponse(200, { access_token: "tok", expires_in: 60 });
+    const clocks: Array<() => number> = [
+      () => { throw new Error("clock exploded"); },
+      () => Number.NaN,
+      () => Number.POSITIVE_INFINITY,
+    ];
+
+    for (const now of clocks) {
+      const result = await createTokenProvider({ auth: baseAuth, fetch, now }).get();
+      expect(isErr(result)).toBe(true);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("node-crash");
+        if (result.error.kind === "node-crash") {
+          expect(result.error.message).toContain("clock");
+          expect(result.error.retriability).toBe("non-retriable");
+        }
+      }
+    }
+  });
+
+  it("returns a clock error from cached freshness checks instead of rejecting or re-minting", async () => {
+    let reads = 0;
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, { access_token: "tok", expires_in: 60 }),
+    );
+    const provider = createTokenProvider({
+      auth: baseAuth,
+      fetch,
+      now: () => {
+        reads += 1;
+        if (reads === 1) return 0;
+        throw new Error("cached clock exploded");
+      },
+    });
+
+    expect(isOk(await provider.get())).toBe(true);
+    const cached = await provider.get();
+    expect(isErr(cached)).toBe(true);
+    if (!cached.ok) expect(cached.error.kind).toBe("node-crash");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("rejects a non-finite computed expiry instead of poisoning the cache", async () => {
+    const fetch: FetchLike = async () =>
+      jsonResponse(200, { access_token: "tok", expires_in: Number.MAX_VALUE });
+    const result = await createTokenProvider({ auth: baseAuth, fetch, now: () => 0 }).get();
+
+    expect(isErr(result)).toBe(true);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.message).toContain("computed token expiry");
+      }
+    }
   });
 
   it("a 5xx maps to transient with httpStatus", async () => {
@@ -406,26 +504,35 @@ describe("createTokenProvider — error mapping (no throw escapes)", () => {
     if (!result.ok) expect(result.error.kind).toBe("transient");
   });
 
-  it("a non-timeout external AbortError → non-retriable node-crash (cancellation)", async () => {
-    const fetch: FetchLike = (_url, init) =>
-      new Promise((_resolve, reject) => {
-        init.signal?.addEventListener("abort", () => {
-          const e = new Error("aborted");
-          e.name = "AbortError";
-          reject(e);
-        });
-      });
-    // No timeout configured — the only abort is the external one we fire.
+  it("one caller's cancellation stops only its wait and cannot poison shared refresh waiters", async () => {
+    let releaseMint: (response: FetchResponseLike) => void = () => {};
+    const gate = new Promise<FetchResponseLike>((resolve) => { releaseMint = resolve; });
+    let mintCalls = 0;
+    const fetch: FetchLike = async (_url, init) => {
+      mintCalls += 1;
+      // The boot-scoped shared mint owns no request signal.
+      expect(init.signal?.aborted ?? false).toBe(false);
+      return gate;
+    };
     const provider = createTokenProvider({ auth: baseAuth, fetch });
-    const external = new AbortController();
-    const pending = provider.get(external.signal);
-    external.abort(); // caller cancels — NOT a timeout
-    const result = await pending;
-    expect(isErr(result)).toBe(true);
-    if (!result.ok) {
-      expect(result.error.kind).toBe("node-crash");
-      if (result.error.kind === "node-crash") expect(result.error.retriability).toBe("non-retriable");
+    const cancelledCaller = new AbortController();
+
+    const cancelled = provider.get(cancelledCaller.signal);
+    const independent = provider.get();
+    cancelledCaller.abort();
+
+    const cancelledResult = await cancelled;
+    expect(isErr(cancelledResult)).toBe(true);
+    if (!cancelledResult.ok && cancelledResult.error.kind === "node-crash") {
+      expect(cancelledResult.error.retriability).toBe("non-retriable");
     }
+
+    releaseMint(jsonResponse(200, { access_token: "shared-token", expires_in: 3600 }));
+    const independentResult = await independent;
+    expect(independentResult.ok && String(independentResult.value)).toBe("shared-token");
+    expect(mintCalls).toBe(1);
+    expect((await provider.get()).ok).toBe(true);
+    expect(mintCalls).toBe(1);
   });
 
   it("invalidate() during an in-flight mint is not overwritten by the resolving mint", async () => {
@@ -467,6 +574,52 @@ describe("createTokenProvider — error mapping (no throw escapes)", () => {
     if (!result.ok) {
       const serialized = JSON.stringify(result.error);
       expect(serialized).not.toContain("super-secret-token");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Token-endpoint labelling in network diagnostics
+// ---------------------------------------------------------------------------
+
+describe("network-failure diagnostics label the token endpoint safely", () => {
+  const networkFailure = (): FetchLike => async () => { throw new Error("ECONNREFUSED"); };
+
+  it("names the endpoint ORIGIN — never its path, query, or user-info", async () => {
+    const provider = createTokenProvider({
+      auth: {
+        ...baseAuth,
+        // User-info and query carry credentials; the diagnostic must survive
+        // reaching a log without carrying them along.
+        tokenUrl: "https://user:hunter2@auth.example.com/oauth/token?client_secret=leak",
+      },
+      fetch: networkFailure(),
+    });
+
+    const result = await provider.get();
+    expect(isErr(result)).toBe(true);
+    if (!result.ok) {
+      const message = formatFrameworkError(result.error);
+      expect(message).toContain("https://auth.example.com");
+      expect(message).not.toContain("hunter2");
+      expect(message).not.toContain("leak");
+      expect(message).not.toContain("/oauth/token");
+    }
+  });
+
+  it("falls back to a constant label when the configured tokenUrl cannot be parsed", async () => {
+    // `AuthConfig.tokenUrl` is a plain string, so an unparseable value reaches
+    // this path. The diagnostic must degrade to a safe constant rather than
+    // throwing a second, unrelated error out of the failure path.
+    const provider = createTokenProvider({
+      auth: { ...baseAuth, tokenUrl: "not a url" },
+      fetch: networkFailure(),
+    });
+
+    const result = await provider.get();
+    expect(isErr(result)).toBe(true);
+    if (!result.ok) {
+      expect(formatFrameworkError(result.error)).toContain("configured token endpoint");
     }
   });
 });

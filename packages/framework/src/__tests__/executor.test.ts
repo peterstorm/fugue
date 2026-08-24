@@ -8,11 +8,10 @@ import type { DagDef } from "../types/dag.js";
 import type { HumanAction } from "../dag-runtime/types.js";
 import { runDag } from "../executor/run-dag.js";
 import { topoSort } from "../shared/topo.js";
-import { createFetchNode } from "../nodes/fetch.js";
 import { createTransformNode } from "../nodes/transform.js";
 import { RecordingObserver, NoopObserver } from "../observer/observer.js";
-import { defineDag, defineDagFromArray } from "../executor/define-dag.js";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import { defineDagFromArray } from "../executor/define-dag.js";
+import { N } from "./_id-helpers.js";
 
 const mkCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
   runId: "test-run" as RunId,
@@ -27,6 +26,40 @@ const mkCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
   logger: { warn: () => {}, error: () => {} },
   ...overrides,
 });
+
+/**
+ * A node that fails `failuresBeforeSuccess` times with a RETRIABLE crash and
+ * then succeeds. Four retry tests hand-rolled a 15–25 line `NodeDef` that
+ * differed only in the failure count, message, output and backoff — so the
+ * retriability that makes the test meaningful was restated four times and could
+ * drift in one of them.
+ */
+const makeFlakyNode = (opts: {
+  readonly failuresBeforeSuccess: number;
+  readonly message: string;
+  readonly output: unknown;
+  readonly backoffMs?: readonly [number, ...number[]];
+  readonly onRun: () => void;
+}): NodeDef<unknown, unknown> => {
+  let attempts = 0;
+  return {
+    id: N("flaky"),
+    kind: "transform",
+    inputSchema: z.any(),
+    outputSchema: z.any(),
+    requires: [],
+    sideEffects: { kind: "none" },
+    confidence: { mode: "none" },
+    run: async () => {
+      opts.onRun();
+      attempts += 1;
+      return attempts <= opts.failuresBeforeSuccess
+        ? err({ kind: "node-crash" as const, nodeId: "flaky" as NodeId, retriability: "retriable" as const, message: opts.message })
+        : ok(opts.output);
+    },
+    ...(opts.backoffMs ? { retry: { backoffMs: opts.backoffMs } } : {}),
+  };
+};
 
 describe("topoSort", () => {
   it("sorts linear DAG into sequential waves", () => {
@@ -734,23 +767,13 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
 
   it("DagDef.defaultRetryLimit routes to state-machine path even without opts.retryLimits", async () => {
     let callCount = 0;
-    const flakyNode: NodeDef<unknown, unknown> = {
-      id: N("flaky"),
-      kind: "transform",
-      inputSchema: z.any(),
-      outputSchema: z.any(),
-          requires: [],
-      sideEffects: { kind: "none" },
-  confidence: { mode: "none" },
-      run: async (_input, _ctx) => {
-        callCount += 1;
-        if (callCount < 2) {
-          return err({ kind: "node-crash" as const, nodeId: "flaky" as NodeId, retriability: "retriable" as const, message: "transient" });
-        }
-        return ok("ok");
-      },
-      retry: { backoffMs: [1] },
-    };
+    const flakyNode = makeFlakyNode({
+      failuresBeforeSuccess: 1,
+      message: "transient",
+      output: "ok",
+      backoffMs: [1],
+      onRun: () => { callCount += 1; },
+    });
     const dag = defineDagFromArray({
       id: "default-retry-dag",
       nodes: [flakyNode],
@@ -764,23 +787,13 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
 
   it("DagDef.retryLimits routes to state-machine path even without opts.retryLimits", async () => {
     let callCount = 0;
-    const flakyNode: NodeDef<unknown, unknown> = {
-      id: N("flaky"),
-      kind: "transform",
-      inputSchema: z.any(),
-      outputSchema: z.any(),
-          requires: [],
-      sideEffects: { kind: "none" },
-  confidence: { mode: "none" },
-      run: async (_input, _ctx) => {
-        callCount += 1;
-        if (callCount < 2) {
-          return err({ kind: "node-crash" as const, nodeId: "flaky" as NodeId, retriability: "retriable" as const, message: "transient" });
-        }
-        return ok("ok");
-      },
-      retry: { backoffMs: [1] },
-    };
+    const flakyNode = makeFlakyNode({
+      failuresBeforeSuccess: 1,
+      message: "transient",
+      output: "ok",
+      backoffMs: [1],
+      onRun: () => { callCount += 1; },
+    });
     const dag = defineDagFromArray({
       id: "retry-limits-dag",
       nodes: [flakyNode],
@@ -795,19 +808,13 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
   it("DagDef.retryLimits = {} (empty) does NOT route to state-machine path", async () => {
     // Empty retryLimits is meaningless; should stay on legacy fast path.
     let callCount = 0;
-    const flakyNode: NodeDef<unknown, unknown> = {
-      id: N("flaky"),
-      kind: "transform",
-      inputSchema: z.any(),
-      outputSchema: z.any(),
-          requires: [],
-      sideEffects: { kind: "none" },
-  confidence: { mode: "none" },
-      run: async (_input, _ctx) => {
-        callCount += 1;
-        return err({ kind: "node-crash" as const, nodeId: "flaky" as NodeId, retriability: "retriable" as const, message: "fail" });
-      },
-    };
+    // Never succeeds, and declares no retry config of its own.
+    const flakyNode = makeFlakyNode({
+      failuresBeforeSuccess: Number.POSITIVE_INFINITY,
+      message: "fail",
+      output: null,
+      onRun: () => { callCount += 1; },
+    });
     const dag = defineDagFromArray({
       id: "empty-retry-limits-dag",
       nodes: [flakyNode],
@@ -822,23 +829,13 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
 
   it("retryLimits triggers state-machine path and is forwarded — node retries on failure", async () => {
     let callCount = 0;
-    const flakyNode: NodeDef<unknown, unknown> = {
-      id: N("flaky"),
-      kind: "transform",
-      inputSchema: z.any(),
-      outputSchema: z.any(),
-          requires: [],
-      sideEffects: { kind: "none" },
-  confidence: { mode: "none" },
-      run: async (_input, _ctx) => {
-        callCount += 1;
-        if (callCount < 3) {
-          return err({ kind: "node-crash" as const, nodeId: "flaky" as NodeId, retriability: "retriable" as const, message: "transient failure" });
-        }
-        return ok("recovered");
-      },
-      retry: { backoffMs: [1, 1, 1] },
-    };
+    const flakyNode = makeFlakyNode({
+      failuresBeforeSuccess: 2,
+      message: "transient failure",
+      output: "recovered",
+      backoffMs: [1, 1, 1],
+      onRun: () => { callCount += 1; },
+    });
     const dag = defineDagFromArray({
       id: "retry-dag",
       nodes: [flakyNode],

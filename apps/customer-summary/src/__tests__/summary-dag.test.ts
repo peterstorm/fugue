@@ -23,7 +23,7 @@ let callCount = 0;
 
 const makeCtx = (): NodeContext => {
   callCount = 0;
-  const llm = new FakeLlmClient((_req: any) => {
+  const llm = new FakeLlmClient((_req: unknown) => {
     callCount++;
     return fakeSynthesisOutput;
   });
@@ -39,7 +39,7 @@ const makeCtx = (): NodeContext => {
 describe("summary-dag", () => {
   test("happy path: ok response for customer with conversations", async () => {
     const source = new JsonFixtureSource(FIXTURES_DIR);
-    const dag = createSummaryDag(source, "cust-001");
+    const dag = createSummaryDag(source);
     const ctx = makeCtx();
 
     const result = await runDag<{ customerId: string }, SummaryResponse>(
@@ -58,13 +58,13 @@ describe("summary-dag", () => {
       }
     }
 
-    // FR-103: one synthesis LLM call + one eval-judge LLM call on happy path
+    // ai-summary spec FR-103: one synthesis LLM call + one eval-judge LLM call on happy path
     expect(callCount).toBe(2);
   });
 
   test("not_found branch for missing customer", async () => {
     const source = new JsonFixtureSource(FIXTURES_DIR);
-    const dag = createSummaryDag(source, "nonexistent-999");
+    const dag = createSummaryDag(source);
     const ctx = makeCtx();
 
     const result = await runDag<{ customerId: string }, SummaryResponse>(
@@ -85,7 +85,7 @@ describe("summary-dag", () => {
 
   test("no_history branch for customer with no conversations", async () => {
     const source = new JsonFixtureSource(FIXTURES_DIR);
-    const dag = createSummaryDag(source, "cust-019");
+    const dag = createSummaryDag(source);
     const ctx = makeCtx();
 
     const result = await runDag<{ customerId: string }, SummaryResponse>(
@@ -106,7 +106,7 @@ describe("summary-dag", () => {
 
   test("insufficient_data branch for minimal customer", async () => {
     const source = new JsonFixtureSource(FIXTURES_DIR);
-    const dag = createSummaryDag(source, "cust-017");
+    const dag = createSummaryDag(source);
     const ctx = makeCtx();
 
     const result = await runDag<{ customerId: string }, SummaryResponse>(

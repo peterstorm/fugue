@@ -15,7 +15,7 @@ import { createInMemoryBackend } from "../queue/in-memory.js";
 import { dagTransition } from "../dag-runtime/transition.js";
 import { handleNodeFailed } from "../dag-runtime/retry-policy.js";
 import { computeOutgoingByNode, computeUnconditionalAdj } from "../dag-runtime/topology.js";
-import type { DagPhase, DagEvent, DagMachineContext } from "../dag-runtime/types.js";
+import type { DagMachineContext } from "../dag-runtime/types.js";
 
 import { defineDag } from "../executor/define-dag.js";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
@@ -33,13 +33,14 @@ import { applyJitter } from "../shared/jitter.js";
 import { diffRegistry } from "../scheduler/diff.js";
 import type { TaskRegistry } from "../scheduler/types.js";
 
-import { ok, err } from "../types/result.js";
+import { ok } from "../types/result.js";
 import { NoopObserver } from "../observer/observer.js";
 import type { NodeContext } from "../types/node.js";
 import { DAG_INPUT } from "../types/ids.js";
 
 import fc from "fast-check";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import { N, R } from "./_id-helpers.js";
+import { testRuntimeContext } from "./_context-factories.js";
 
 const makeBaseCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
   runId: "test-run" as RunId,
@@ -103,6 +104,33 @@ describe("Wave 1.1 — onTrace exceptions do not escape the kernel loop", () => 
     });
     expect(result.state).toEqual({ kind: "succeeded" });
     expect(errors.some((e) => e.includes("onTrace threw"))).toBe(true);
+  });
+
+  it("a throwing trace logger cannot replace an already-persisted transition", async () => {
+    const job = createInMemoryJob<S, null>({ state: { kind: "pending" }, context: null });
+    const events: readonly E[] = [{ type: "START" }, { type: "DONE" }] as const;
+    let index = 0;
+
+    const result = await runStateMachine(
+      job,
+      machine,
+      async () => events[index++]!,
+      {
+        errorEventOf: (classified): E => ({
+          type: "ERROR",
+          retriable: classified.retriable,
+          message: classified.message,
+        }),
+        onTrace: () => { throw new Error("trace failed"); },
+        logger: {
+          warn: () => {},
+          error: () => { throw new Error("logger failed"); },
+        },
+      },
+    );
+
+    expect(result.state).toEqual({ kind: "succeeded" });
+    expect(job.data.state).toEqual({ kind: "succeeded" });
   });
 });
 
@@ -186,26 +214,15 @@ describe("Wave 1.4 — handleNodeFailed fast-fails node-crash retriable:false", 
       outputNodeId: "a",
       defaultRetryLimit: 5,
     });
-    return {
+    return testRuntimeContext({
       dag,
       waves: [[N("a")]],
-      outputs: new Map(),
-      retries: new Map(),
       initialInput: null,
-      activeNodeIds: new Set(["a"]) as any,
-      incomingByNode: new Map(),
+      activeNodeIds: new Set([N("a")]),
       outgoingByNode: computeOutgoingByNode(dag),
-    unconditionalAdj: computeUnconditionalAdj(dag),
-      nodeById: new Map(dag.nodes.map((n) => [n.id, n])),
-      retryConfigs: new Map(dag.nodes.filter(n => n.retry).map(n => [n.id, { backoffMs: n.retry!.backoffMs ?? [1000, 2000, 4000], jitterRatio: n.retry!.jitterRatio ?? 0.2 }] as const)),
-      outputNodeId: dag.outputNodeId,
-      defaultRetryLimit: dag.defaultRetryLimit,
-      retryLimits: dag.retryLimits,
-      humanReviewNodeIds: new Set(dag.nodes.filter(n => n.humanReview !== undefined).map(n => n.id)),
-      humanReviewPrompts: new Map(dag.nodes.filter(n => n.humanReview !== undefined).map(n => [n.id, n.humanReview!.prompt] as const)),
-      edges: dag.edges,
-      confidenceByNode: new Map(),
-    };
+      unconditionalAdj: computeUnconditionalAdj(dag),
+      nodeById: new Map(dag.nodes.map((node) => [node.id, node])),
+    });
   };
 
   it("retriability: non-retriable bypasses the retry budget", () => {
@@ -246,26 +263,15 @@ describe("Wave 1.4 — dagTransition propagates ERROR.retriable into failed term
       edges: [{ from: DAG_INPUT, to: "a" }],
       outputNodeId: "a",
     });
-    return {
+    return testRuntimeContext({
       dag,
       waves: [[N("a")]],
-      outputs: new Map(),
-      retries: new Map(),
       initialInput: null,
-      activeNodeIds: new Set(["a"]) as any,
-      incomingByNode: new Map(),
+      activeNodeIds: new Set([N("a")]),
       outgoingByNode: computeOutgoingByNode(dag),
-    unconditionalAdj: computeUnconditionalAdj(dag),
-      nodeById: new Map(dag.nodes.map((n) => [n.id, n])),
-      retryConfigs: new Map(dag.nodes.filter(n => n.retry).map(n => [n.id, { backoffMs: n.retry!.backoffMs ?? [1000, 2000, 4000], jitterRatio: n.retry!.jitterRatio ?? 0.2 }] as const)),
-      outputNodeId: dag.outputNodeId,
-      defaultRetryLimit: dag.defaultRetryLimit,
-      retryLimits: dag.retryLimits,
-      humanReviewNodeIds: new Set(dag.nodes.filter(n => n.humanReview !== undefined).map(n => n.id)),
-      humanReviewPrompts: new Map(dag.nodes.filter(n => n.humanReview !== undefined).map(n => [n.id, n.humanReview!.prompt] as const)),
-      edges: dag.edges,
-      confidenceByNode: new Map(),
-    };
+      unconditionalAdj: computeUnconditionalAdj(dag),
+      nodeById: new Map(dag.nodes.map((node) => [node.id, node])),
+    });
   };
 
   it("retriable: false produces node-crash with retriable: false on the failed terminal", () => {
@@ -454,6 +460,73 @@ describe("Wave 6.2 — InMemoryCache accepts an injectable now() seam", () => {
     const afterExpiry = await cache.get("k", z.string());
     expect(afterExpiry.ok && afterExpiry.value).toBe(null);
   });
+
+  it("a throwing injected clock is a typed cache-error on set and get, never a raw rejection (round-22 sfh-3)", async () => {
+    let broken = true;
+    const cache = new InMemoryCache({
+      now: () => {
+        if (broken) throw new Error("clock boom");
+        return 1_000;
+      },
+    });
+    const setRes = await cache.set("k", "v", 1);
+    expect(setRes.ok).toBe(false);
+    if (!setRes.ok) {
+      expect(setRes.error.kind).toBe("cache-error");
+      expect((setRes.error as { operation: string }).operation).toBe("set");
+    }
+    // A stored value read with a throwing clock must also fail typed — the
+    // TTL path reads `now()` too (never a raw rejection from the get call).
+    broken = false;
+    await cache.set("k", "v", 1); // healthy clock: value lands in the store
+    broken = true;
+    const getRes = await cache.get("k", z.string());
+    expect(getRes.ok).toBe(false);
+    if (!getRes.ok) {
+      expect(getRes.error.kind).toBe("cache-error");
+      expect((getRes.error as { operation: string }).operation).toBe("get");
+    }
+  });
+
+  it("a non-finite injected clock is a typed cache-error on set, never a raw rejection (round-22 sfh-3)", async () => {
+    const cache = new InMemoryCache({ now: () => Number.NaN });
+    const setRes = await cache.set("k", "v", 1);
+    expect(setRes.ok).toBe(false);
+    if (!setRes.ok) {
+      expect(setRes.error.kind).toBe("cache-error");
+      expect((setRes.error as { operation: string }).operation).toBe("set");
+    }
+  });
+
+  it("a non-finite get clock returns a typed error without evicting the entry", async () => {
+    let now = 1_000;
+    const cache = new InMemoryCache({ now: () => now });
+    expect((await cache.set("k", "v", 10)).ok).toBe(true);
+
+    now = Number.POSITIVE_INFINITY;
+    const invalidClock = await cache.get("k", z.string());
+    expect(invalidClock.ok).toBe(false);
+    if (!invalidClock.ok) {
+      expect(invalidClock.error).toMatchObject({ kind: "cache-error", operation: "get" });
+    }
+
+    now = 2_000;
+    const recovered = await cache.get("k", z.string());
+    expect(recovered).toEqual(ok("v"));
+  });
+
+  it("a cyclic value is a typed cache-error on set, never a raw rejection (round-22 sfh-3)", async () => {
+    const cache = new InMemoryCache({ now: () => 1_000 });
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    const setRes = await cache.set("k", cyclic, 1);
+    expect(setRes.ok).toBe(false);
+    if (!setRes.ok) {
+      expect(setRes.error.kind).toBe("cache-error");
+      expect((setRes.error as { operation: string }).operation).toBe("set");
+      expect((setRes.error as { message: string }).message).toContain("JSON.stringify");
+    }
+  });
 });
 
 // ===========================================================================
@@ -524,7 +597,7 @@ describe("Wave 7 — resumeCheckpoint on the stateful executor", () => {
 // ===========================================================================
 
 describe("Wave 7 — handleNodeFailed pre-increments co-failed siblings", () => {
-  const ctxWithRetries = (retries: Map<string, number>): DagMachineContext => {
+  const ctxWithRetries = (retries: ReadonlyMap<string, number>): DagMachineContext => {
     const dag = defineDag({
       id: "d",
       nodes: {
@@ -545,27 +618,16 @@ describe("Wave 7 — handleNodeFailed pre-increments co-failed siblings", () => 
       outputNodeId: "a",
       defaultRetryLimit: 2,
     });
-    return {
+    return testRuntimeContext({
       dag,
       waves: [[N("a"), N("b")]],
-      outputs: new Map(),
-      // @ts-expect-error — branded ID test fixture
-      retries,
+      retries: new Map([...retries].map(([id, count]) => [N(id), count])),
       initialInput: null,
-      activeNodeIds: new Set(["a", "b"]) as any,
-      incomingByNode: new Map(),
+      activeNodeIds: new Set([N("a"), N("b")]),
       outgoingByNode: computeOutgoingByNode(dag),
-    unconditionalAdj: computeUnconditionalAdj(dag),
-      nodeById: new Map(dag.nodes.map((n) => [n.id, n])),
-      retryConfigs: new Map(dag.nodes.filter(n => n.retry).map(n => [n.id, { backoffMs: n.retry!.backoffMs ?? [1000, 2000, 4000], jitterRatio: n.retry!.jitterRatio ?? 0.2 }] as const)),
-      outputNodeId: dag.outputNodeId,
-      defaultRetryLimit: dag.defaultRetryLimit,
-      retryLimits: dag.retryLimits,
-      humanReviewNodeIds: new Set(dag.nodes.filter(n => n.humanReview !== undefined).map(n => n.id)),
-      humanReviewPrompts: new Map(dag.nodes.filter(n => n.humanReview !== undefined).map(n => [n.id, n.humanReview!.prompt] as const)),
-      edges: dag.edges,
-      confidenceByNode: new Map(),
-    };
+      unconditionalAdj: computeUnconditionalAdj(dag),
+      nodeById: new Map(dag.nodes.map((node) => [node.id, node])),
+    });
   };
 
   it("two co-failed siblings each consume the retry slot; neither gets retryLimit+1", () => {
@@ -679,5 +741,3 @@ describe("Wave 4.1 — input-validation failure emits a node-error event", () =>
   });
 });
 
-// Suppress: defineDagFromArray import keeps tsc happy for downstream tests
-void err;

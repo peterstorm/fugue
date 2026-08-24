@@ -31,6 +31,9 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
+      - name: Install Redis integration-test dependency
+        run: sudo apt-get update && sudo apt-get install --yes redis-server
+
       - name: Check shipped-doc links
         run: bun run check:docs
 

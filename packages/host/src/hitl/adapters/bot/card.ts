@@ -13,27 +13,52 @@
  */
 
 import type { ReviewNotification } from "../../types.js";
+import { safeErrorMessage } from "@fuguejs/framework";
 
 /** The `verb` tagging our card actions, so the bot endpoint ignores foreign cards. */
 export const REVIEW_VERB = "fugue.review" as const;
 
 /** The decision payload an `Action.Execute` button submits back to the bot. */
-export interface ReviewActionData {
+interface ReviewActionData {
   readonly verb: typeof REVIEW_VERB;
   readonly runId: string;
   readonly nodeId: string;
   readonly decision: "approve" | "reject";
 }
 
-const outputPreview = (output: unknown): string => {
+/**
+ * TOTAL preview renderer for the output under review (shared by the bot and
+ * webhook transports — ONE encoding). `JSON.stringify` fails on cyclic
+ * values; the catch fallback must itself be total: `String(output)` can THROW
+ * again on a null-prototype object or a hostile `toString`/`Symbol.toPrimitive`
+ * (a second throw would escape the notify surface as a raw rejection and the
+ * review hook would escalate a parked run to a retriable node-failed).
+ * `safeErrorMessage` is the framework's never-throwing renderer — constant
+ * fallback, diagnostics safe for arbitrary thrown values (FR-040).
+ */
+export const outputPreview = (output: unknown): string => {
   let s: string;
   try {
     s = JSON.stringify(output, null, 2) ?? String(output);
   } catch {
-    s = String(output);
+    s = safeErrorMessage(output);
   }
   return s.length > 4000 ? `${s.slice(0, 4000)}\n… (truncated)` : s;
 };
+
+/** Common review content; transports append only their interaction controls. */
+export const reviewCardBody = (n: ReviewNotification): readonly unknown[] => [
+  { type: "TextBlock", size: "Large", weight: "Bolder", text: "Human review required" },
+  {
+    type: "TextBlock",
+    isSubtle: true,
+    wrap: true,
+    text: `DAG \`${n.dagId}\` · node \`${n.nodeId}\` · run \`${n.runId}\``,
+  },
+  { type: "TextBlock", wrap: true, text: n.prompt },
+  { type: "TextBlock", weight: "Bolder", text: "Output under review:" },
+  { type: "TextBlock", wrap: true, fontType: "Monospace", text: outputPreview(n.output) },
+];
 
 /**
  * Build the Adaptive Card CONTENT for a parked review. Two `Action.Execute`
@@ -45,16 +70,7 @@ export const buildReviewCard = (n: ReviewNotification): unknown => ({
   type: "AdaptiveCard",
   version: "1.4",
   body: [
-    { type: "TextBlock", size: "Large", weight: "Bolder", text: "Human review required" },
-    {
-      type: "TextBlock",
-      isSubtle: true,
-      wrap: true,
-      text: `DAG \`${n.dagId}\` · node \`${n.nodeId}\` · run \`${n.runId}\``,
-    },
-    { type: "TextBlock", wrap: true, text: n.prompt },
-    { type: "TextBlock", weight: "Bolder", text: "Output under review:" },
-    { type: "TextBlock", wrap: true, fontType: "Monospace", text: outputPreview(n.output) },
+    ...reviewCardBody(n),
     { type: "Input.Text", id: "reason", isMultiline: true, placeholder: "Reason (required to reject)" },
   ],
   actions: [

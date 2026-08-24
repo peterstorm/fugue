@@ -2,8 +2,9 @@
 // Covers: linear, fan-out, fan-in, diamond, retry transient, retry exhausted,
 //         HITL approve, approve-with-edit, reject, reroute-back, abort
 
-import { NoopObserver } from "../observer/observer.js";
-import type { RunId, NodeId, DagId } from "../types/ids.js";
+import type { RunId } from "../types/ids.js";
+import { testNodeContext } from "./_context-factories.js";
+import type { NodeId } from "../types/ids.js";
 import { DAG_INPUT } from "../types/ids.js";
 import { describe, it, expect, mock } from "bun:test";
 import { z } from "zod";
@@ -17,7 +18,7 @@ import { type NodeOverride, brandedOverride } from "./_node-override.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { HumanAction } from "../dag-runtime/types.js";
 import { ok, err } from "../types/result.js";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import { N } from "./_id-helpers.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -34,25 +35,14 @@ const makeNode = (
   kind: "transform",
   inputSchema: z.unknown(),
   outputSchema: z.unknown(),
-  run: noop as any,
+  run: noop as never,
   requires: [],
   sideEffects: { kind: "none" },
   confidence: { mode: "none" },
   ...brandedOverride(overrides),
 });
 
-const makeCtx = (): NodeContext => ({
-  runId: "test-run-id" as RunId,
-  dagId: "test-dag" as DagId,
-  observer: new NoopObserver(),
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null,
-  cache: null,
-  prompts: null,
-  llm: null, http: null,
-  clock: null,
-  logger: { warn: () => {}, error: () => {} },
-});
+const makeCtx = (): NodeContext => testNodeContext({ runId: "test-run-id" as RunId });
 
 interface MakeDagOverrides {
   readonly id?: string;
@@ -216,7 +206,7 @@ describe("runDagStateful — diamond DAG", () => {
         makeNode("b", { run: async () => { order.push("b"); return ok("b"); } }),
         makeNode("c", { run: async () => { order.push("c"); return ok("c"); } }),
         makeNode("d", {
-          run: async (input) => { order.push("d"); return ok("d-out"); },
+          run: async (_input) => { order.push("d"); return ok("d-out"); },
         }),
       ],
       edges: [
@@ -412,6 +402,74 @@ describe("runDagStateful — HITL approve-with-edit", () => {
     }
   });
 
+  // ADR-0060 fail-closed post-commit hook, END TO END.
+  //
+  // `runStateMachine` rethrows an `onCommitted` failure AFTER the checkpoint is
+  // durable, so the owning shell fails the run closed rather than reporting
+  // success for a run whose effectively-once side effect never happened. That
+  // rethrow was only ever exercised against the hook factory in isolation; these
+  // cases drive it through the real `runDagStateful` composition, which is the
+  // path production actually takes (`run-dag-stateful.ts` translates the generic
+  // `onCommitted` into `onDecisionConsumed`).
+  it("a throwing onDecisionConsumed fails the run closed rather than reporting success", async () => {
+    const dag = makeDag({
+      nodes: [
+        makeNode("a", {
+          humanReview: { prompt: "Approve?" },
+          run: async () => ok("original"),
+        }),
+      ],
+      edges: [{ from: DAG_INPUT, to: "a" }],
+      outputNodeId: "a",
+      defaultRetryLimit: 0,
+    });
+
+    const onHumanReview = async (_req: unknown): Promise<HumanAction> => ({ kind: "approve" });
+    let consumed = 0;
+    const onDecisionConsumed = async (): Promise<void> => {
+      consumed += 1;
+      throw new Error("decision store unreachable");
+    };
+
+    const result = await runDagStateful(dag, null, makeCtx(), {
+      onHumanReview,
+      onDecisionConsumed,
+    });
+
+    // The hook DID fire (the decision was committed first) …
+    expect(consumed).toBe(1);
+    // … and its failure is authoritative: the run must NOT report success.
+    expect(result.ok).toBe(false);
+  });
+
+  it("a succeeding onDecisionConsumed leaves the approved run successful", async () => {
+    const dag = makeDag({
+      nodes: [
+        makeNode("a", {
+          humanReview: { prompt: "Approve?" },
+          run: async () => ok("original"),
+        }),
+      ],
+      edges: [{ from: DAG_INPUT, to: "a" }],
+      outputNodeId: "a",
+      defaultRetryLimit: 0,
+    });
+
+    const onHumanReview = async (_req: unknown): Promise<HumanAction> => ({ kind: "approve" });
+    const consumedNodes: string[] = [];
+
+    const result = await runDagStateful<unknown, string>(dag, null, makeCtx(), {
+      onHumanReview,
+      onDecisionConsumed: (nodeId) => { consumedNodes.push(nodeId as string); },
+    });
+
+    // Pins the CONTRACT the failing twin depends on: the hook fires exactly once,
+    // named for the resolved gate, and a clean hook does not disturb the outcome.
+    expect(consumedNodes).toEqual(["a"]);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value).toBe("original");
+  });
+
   // Wave 2 §2.5: a reviewer's edited output must conform to the node's
   // outputSchema. Without this guard, a mis-typed edit silently propagates to
   // downstream nodes.
@@ -581,20 +639,40 @@ describe("runDagStateful — HITL reroute-back", () => {
 // ---------------------------------------------------------------------------
 
 describe("runDagStateful — abort", () => {
+  it("contains hostile values thrown by the kernel while converting its failure", async () => {
+    const throwingCause = new Error("kernel failed");
+    Object.defineProperty(throwingCause, "cause", {
+      get(): never { throw new Error("cause getter escaped"); },
+    });
+    const hostileCoercion = {
+      get cause(): never { throw new Error("cause getter escaped"); },
+      get message(): never { throw new Error("message getter escaped"); },
+      [Symbol.toPrimitive](): never { throw new Error("coercion escaped"); },
+    };
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    const dag = makeDag({
+      nodes: [makeNode("a", { run: async () => ok("out") })],
+      edges: [{ from: DAG_INPUT, to: "a" }],
+    });
+
+    for (const thrown of [throwingCause, hostileCoercion, revoked.proxy]) {
+      const result = await runDagStateful(dag, null, makeCtx(), {
+        beforeExecute: () => { throw thrown; },
+      });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok && result.error.kind === "node-crash") {
+        expect(result.error.nodeId).toBe(N("__executor__"));
+        expect(typeof result.error.message).toBe("string");
+      }
+    }
+  });
+
   it("abort event delivered to machine produces err(aborted) (FR-033)", async () => {
-    // We test abort by providing a beforeExecute hook that aborts.
-    // The abort event itself is typically emitted externally; we simulate
-    // via the abort framing: the node throws and we pass an abort event type.
-    // More directly: test that a DAG whose node returns an abort-triggering error
-    // ends up as err(aborted). Since abort comes from the machine level, we verify
-    // via the transition layer rather than executor — the executor never sends "abort"
-    // directly; that is an external signal. Here we ensure that the error path works.
-
-    // The simplest way to verify abort behavior is to use a DAG with humanReview,
-    // provide an onHumanReview that never resolves, but the job emits an abort.
-    // Instead: verify that the DAG properly returns err when a node throws unexpectedly.
-
-    // Actually let's test it using the job directly with an aborted state pre-loaded.
+    // `abort` is an EXTERNAL signal — the executor never emits it — so this
+    // drives the machine directly with a pre-loaded aborted state rather than
+    // going through the executor.
     const dag = makeDag({
       nodes: [makeNode("a", { run: async () => ok("out") })],
       edges: [{ from: DAG_INPUT, to: "a" }],
@@ -668,7 +746,7 @@ describe("runDagStateful — abort", () => {
     expect(observedSignalAborted).toBe(true);
   });
 
-  it("node throw produces err(retry-exhausted) — executor wraps throw as node-failed", async () => {
+  it("node throw produces a non-retriable node-crash without consuming retry budget", async () => {
     const dag = makeDag({
       nodes: [
         makeNode("a", {
@@ -683,8 +761,11 @@ describe("runDagStateful — abort", () => {
     const result = await runDagStateful(dag, null, makeCtx());
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      // executor catches the throw and returns node-failed which exhausts retry budget (0 retries default)
-      expect(result.error.kind).toBe("retry-exhausted");
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("non-retriable");
+        expect(result.error.message).toBe("unexpected crash");
+      }
     }
   });
 });
@@ -720,7 +801,7 @@ describe("runDagStateful — validation (FR-025)", () => {
       nodes: [
         makeNode("a", {
           outputSchema: z.string(),
-          run: async () => ok(42 as any), // returns a number when string expected
+          run: async () => ok(42 as unknown), // returns a number when string expected
         }),
       ],
       edges: [{ from: DAG_INPUT, to: "a" }],

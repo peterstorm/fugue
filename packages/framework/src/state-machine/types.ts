@@ -124,10 +124,10 @@ export interface KernelRunOpts<S, E, C> {
    * decision only once the post-gate state is persisted, so a crash BEFORE the
    * checkpoint re-reads the decision on resume instead of losing it (ADR-0060).
    *
-   * Like `onTrace`, a throw is swallowed (logged): the transition is already
-   * persisted, so a post-commit side-effect failure must not surface a
-   * successful, durably-advanced transition as a fatal run failure. Not called
-   * for terminal-failed transitions (which are never checkpointed, FR-005).
+   * A throw propagates after the checkpoint: unlike telemetry, this callback may
+   * enforce an invariant whose failure requires the owning shell to fail closed
+   * (for example, preventing reuse of a consumed authorization). Not called for
+   * terminal-failed transitions (which are never checkpointed, FR-005).
    */
   onCommitted?: (args: { prevState: S; event: E; state: S; context: C }) => void | Promise<void>;
 }

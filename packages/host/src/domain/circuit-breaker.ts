@@ -18,18 +18,10 @@ import { match } from "ts-pattern";
 /**
  * Reason the circuit entered the open state — discriminated union for machine-parseability.
  */
-export type OpenReason =
+type OpenReason =
   | { readonly kind: "threshold-exceeded"; readonly threshold: number; readonly windowMs: number }
   | { readonly kind: "half-open-test-failed" };
 
-/**
- * Format an OpenReason for human-readable logging.
- */
-export const formatOpenReason = (reason: OpenReason): string =>
-  match(reason)
-    .with({ kind: "threshold-exceeded" }, (r) => `Exceeded ${r.threshold} failures within ${r.windowMs}ms window`)
-    .with({ kind: "half-open-test-failed" }, () => "Half-open test request failed")
-    .exhaustive();
 
 export type CircuitState =
   | { readonly state: "closed"; readonly failureCount: number; readonly windowStart: number }
@@ -38,7 +30,7 @@ export type CircuitState =
 
 /** Default configuration constants */
 export const DEFAULTS = {
-  /** Number of failures that triggers open state */
+  /** Maximum failures allowed before the next failure opens the circuit. */
   threshold: 5,
   /** Sliding window duration in milliseconds (60 seconds) */
   windowMs: 60_000,
@@ -73,8 +65,11 @@ export const initCircuit = (now: number = 0): CircuitState => ({
  */
 export const recordSuccess = (s: CircuitState, now: number): CircuitState =>
   match(s)
-    .with({ state: "closed" }, () => ({ state: "closed" as const, failureCount: 0, windowStart: now }))
-    .with({ state: "half-open" }, () => ({ state: "closed" as const, failureCount: 0, windowStart: now }))
+    .with(
+      { state: "closed" },
+      { state: "half-open" },
+      () => ({ state: "closed" as const, failureCount: 0, windowStart: now }),
+    )
     .with({ state: "open" }, (current) => current)
     .exhaustive();
 
@@ -87,7 +82,7 @@ export const recordSuccess = (s: CircuitState, now: number): CircuitState =>
  *
  * @param s - Current circuit state
  * @param now - Current timestamp
- * @param threshold - Number of failures to trigger open (default: 5)
+ * @param threshold - Maximum failures allowed before opening (default: 5)
  * @param windowMs - Sliding window size in ms (default: 60_000)
  */
 export const recordFailure = (
@@ -150,8 +145,11 @@ export const attemptReset = (
         ? { state: "half-open" as const, testRequestAllowed: true }
         : current,
     )
-    .with({ state: "closed" }, (current) => current)
-    .with({ state: "half-open" }, (current) => current)
+    .with(
+      { state: "closed" },
+      { state: "half-open" },
+      (current) => current,
+    )
     .exhaustive();
 
 /**
@@ -161,11 +159,7 @@ export const attemptReset = (
  *
  * @param now - Current timestamp for the new window start (defaults to 0)
  */
-export const forceReset = (now: number = 0): CircuitState => ({
-  state: "closed",
-  failureCount: 0,
-  windowStart: now,
-});
+export const forceReset = (now: number = 0): CircuitState => initCircuit(now);
 
 // ---------------------------------------------------------------------------
 // Queries (pure)

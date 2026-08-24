@@ -13,6 +13,7 @@ import { describedToMermaid, runVisualize } from "../../cli/visualize.js";
 import { writeAuthoredScaffold } from "../../cli/new.js";
 import { parseAuthoredDag } from "../../cli/authored.js";
 import type { DescribedDag } from "../../describe/index.js";
+import { runBin } from "./_run-bin.js";
 
 const tmpRoot = resolve(__dirname, ".tmp-visualize");
 
@@ -72,7 +73,7 @@ describe("describedToMermaid", () => {
   });
 
   it("keeps distinct node ids distinct and clear of the reserved tokens", () => {
-    // ID_REGEX allows `_`, `:` and `-` — the Mermaid id encoding must be
+    // ID_PATTERN allows `_`, `:` and `-` — the Mermaid id encoding must be
     // INJECTIVE (distinct node ids map to distinct tokens; `a:b` and `a_b`
     // must never merge into one node) and NAMESPACED (a node literally named
     // `dag_input` must not merge with the virtual request node).
@@ -196,9 +197,10 @@ describe("runVisualize", () => {
   });
 
   it("threads describe's schema-serialization warnings through the ok arm (never dropped)", async () => {
-    // The schema-warning fixture's registration inputSchema is z.void() —
-    // describe stays ok with a warning; runVisualize must carry it on
-    // `warnings` (the always-an-array contract), not lose it in the wrap.
+    // The schema-warning fixture's registration inputSchema is HOSTILE (a
+    // non-schema value in the shape) — describe stays ok with a warning;
+    // runVisualize must carry it on `warnings` (the always-an-array
+    // contract), not lose it in the wrap.
     const stderrSpy = spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
       const result = await runVisualize(resolve(__dirname, "fixtures", "schema-warning.ts"));
@@ -226,19 +228,6 @@ describe("runVisualize", () => {
 // is NOT JSON (the bare Mermaid text, for piping into docs).
 // ---------------------------------------------------------------------------
 
-const binPath = resolve(__dirname, "..", "..", "..", "bin", "fugue.ts");
-
-const runBin = async (
-  args: readonly string[],
-): Promise<{ exitCode: number; stdout: string; stderr: string }> => {
-  const proc = Bun.spawn(["bun", binPath, ...args], { stdout: "pipe", stderr: "pipe" });
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  return { exitCode: await proc.exited, stdout, stderr };
-};
-
 describe("fugue visualize --raw (subprocess)", () => {
   it("prints the bare Mermaid diagram (no JSON) on stdout, exit 0", async () => {
     const dagPath = await scaffoldVizDag();
@@ -252,8 +241,7 @@ describe("fugue visualize --raw (subprocess)", () => {
   });
 
   it("a raw failure goes to stderr as JSON with exit 1, stdout stays clean", async () => {
-    const brokenPath = join(tmpRoot, "broken-raw.ts");
-    await Bun.write(brokenPath, "export default {};");
+    const brokenPath = resolve(__dirname, "fixtures", "missing-dag-field.ts");
     const { exitCode, stdout, stderr } = await runBin(["visualize", brokenPath, "--raw"]);
     expect(exitCode).toBe(1);
     expect(stdout).toBe("");

@@ -8,6 +8,11 @@ import { nodeId, runId, dagId } from "../types/ids.js";
 import type { DagDef } from "../types/dag.js";
 import type { Confidence } from "../types/confidence.js";
 import { confidence } from "../types/confidence.js";
+import {
+  buildCheckpointWriteFailed,
+  CHECKPOINT_INVALID_RUN_ID,
+} from "../types/checkpoint-address.js";
+import type { CheckpointWriteFailedError } from "../types/checkpoint-address.js";
 
 describe("Branded type compile-time safety", () => {
   test("plain string does not satisfy NodeId", () => {
@@ -78,5 +83,73 @@ describe("Branded type compile-time safety", () => {
     expect(typeof n).toBe("string");
     expect(typeof r).toBe("string");
     expect(typeof d).toBe("string");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SC-2 / type-design-analyzer-3 — `checkpoint-write-failed` address ADTs
+//
+// The variant used to carry the "inspect `invalidRunId` FIRST" obligation in a
+// doc comment while typing the field as a real `RunId`. These are the pins that
+// the obligation is now the compiler's job: the placeholder is unreadable as a
+// run/node address until the consumer narrows, and the half-correlated shapes
+// (a placeholder with no diagnostic, a real id carrying one) do not typecheck.
+// ---------------------------------------------------------------------------
+
+describe("checkpoint-write-failed address ADTs", () => {
+  test("an unnarrowed address is not usable as a RunId or NodeId", () => {
+    const takesRunId = (_r: RunId): void => {};
+    const takesNodeId = (_n: NodeId): void => {};
+    const e = buildCheckpointWriteFailed("run-1", "node-1", "boom");
+
+    // @ts-expect-error — could be CheckpointPlaceholderRunId; narrow first
+    takesRunId(e.runId);
+    // @ts-expect-error — could be CheckpointPlaceholderNodeId; narrow first
+    takesNodeId(e.nodeId);
+
+    // …and narrowing on the additive diagnostic makes it usable again.
+    if (e.invalidRunId === undefined) takesRunId(e.runId);
+    if (e.invalidNodeId === undefined) takesNodeId(e.nodeId);
+    expect(e.kind).toBe("checkpoint-write-failed");
+  });
+
+  test("a real branded id cannot carry an invalid* diagnostic", () => {
+    // @ts-expect-error — the branded arm excludes `invalidRunId`
+    const _bad: CheckpointWriteFailedError = {
+      kind: "checkpoint-write-failed",
+      runId: runId("run-1"),
+      invalidRunId: "../escape",
+      nodeId: nodeId("node-1"),
+      message: "boom",
+    };
+    void _bad;
+  });
+
+  test("a placeholder cannot appear without its diagnostic", () => {
+    // @ts-expect-error — the placeholder arm REQUIRES `invalidRunId`
+    const _bad: CheckpointWriteFailedError = {
+      kind: "checkpoint-write-failed",
+      runId: CHECKPOINT_INVALID_RUN_ID,
+      nodeId: nodeId("node-1"),
+      message: "boom",
+    };
+    void _bad;
+  });
+
+  test("the builder round-trips both arms with the wire shape unchanged", () => {
+    const valid = buildCheckpointWriteFailed("run-1", "node-1", "boom");
+    expect(String(valid.runId)).toBe("run-1");
+    expect(valid.invalidRunId).toBeUndefined();
+
+    const rejected = buildCheckpointWriteFailed("../escape", "bad/node", "boom");
+    expect(String(rejected.runId)).toBe("checkpoint_invalid_run");
+    expect(rejected.invalidRunId).toBe("../escape");
+    expect(String(rejected.nodeId)).toBe("checkpoint_invalid_node");
+    expect(rejected.invalidNodeId).toBe("bad/node");
+
+    // `nodeIdRaw === undefined` is the meta record, NOT a rejected value.
+    const meta = buildCheckpointWriteFailed("run-1", undefined, "boom");
+    expect(String(meta.nodeId)).toBe("checkpoint_meta");
+    expect(meta.invalidNodeId).toBeUndefined();
   });
 });

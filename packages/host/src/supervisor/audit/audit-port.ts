@@ -1,23 +1,24 @@
 /**
- * AuditPort — the audit trail for tenant lifecycle operations (FR-028, SC-008).
+ * AuditPort — the audit trail for tenant lifecycle operations (multi-tenant spec FR-028, SC-008).
  *
  * Every register / deregister / reconfigure operation MUST emit an audit record
- * carrying AT LEAST `actor`, `timestamp`, `tenant`, and `action` (FR-028). This
+ * carrying AT LEAST `actor`, `timestamp`, `tenant`, and `action` (multi-tenant spec FR-028). This
  * module is the PURE record type + its smart constructor + the port the admin
  * lifecycle handler writes through. The concrete sinks (structured log + Redis
  * stream) live in `audit-sink-log-redis.ts` (the imperative shell).
  *
  * PARSE-DON'T-VALIDATE: `AuditAction` is a closed discriminated union of the
  * three lifecycle verbs — there is no representable "audit record for some other
- * action", so the type itself guarantees SC-008's "100% of register/deregister/
- * reconfigure emit a record" cannot be undermined by a typo'd free-form string.
+ * action", so constructed records cannot drift through typo'd free-form action
+ * strings. Handler wiring and tests remain responsible for proving every
+ * register/deregister/reconfigure attempt emits a record.
  *
  * NON-LEAKING: a record names exactly ONE tenant (the one the op acted on) and
  * carries no other tenant's id — mirroring the host's per-tenant error
- * non-leakage (FR-041). The `outcome` field records whether the op SUCCEEDED or
+ * non-leakage (multi-tenant spec FR-041). The `outcome` field records whether the op SUCCEEDED or
  * was REFUSED, so an audit trail captures denied attempts too (e.g. a non-admin
  * token rejected at the boundary — the authz refusal is itself auditable,
- * SC-008's "0% succeed under a non-admin token" is observable in the trail).
+ * multi-tenant spec SC-008's "0% succeed under a non-admin token" is observable in the trail).
  *
  * INJECTABLE CLOCK: the record's `timestamp` is supplied by the CALLER (the
  * handler stamps it from an injected `now()`), never read from `Date.now()`
@@ -111,18 +112,18 @@ export type AuditAction = "register" | "deregister" | "reconfigure";
  *   - `refused`: an authz denial (non-admin token) or a fail-closed rejection
  *     (e.g. reconfigure of an unknown tenant, an invalid body) — the op never
  *     took effect — so the audit trail records ATTEMPTS, not just successes
- *     (SC-008).
+ *     (multi-tenant spec SC-008).
  *   - `partial`: the op PARTIALLY took effect — the primary state transition
  *     landed but a follow-on side-effect failed (e.g. deregister tombstoned the
- *     tenant, but the worker-evict or token-revoke half of FR-029 failed). The
+ *     tenant, but the worker-evict or token-revoke half of multi-tenant spec FR-029 failed). The
  *     audit record must NOT claim `succeeded` when a half failed — `partial` +
- *     a `detail` naming which half is the TRUTHFUL outcome (FR-029, SC-008).
+ *     a `detail` naming which half is the TRUTHFUL outcome (multi-tenant spec FR-029, SC-008).
  */
 export type AuditOutcome = "succeeded" | "refused" | "partial";
 
 /**
  * Who performed the operation. The admin lifecycle API is admin-token only
- * (FR-026), so the actor is an admin principal; `label` is an optional,
+ * (multi-tenant spec FR-026), so the actor is an admin principal; `label` is an optional,
  * non-secret operator hint (e.g. an `X-Fugue-Actor` header) for the human-
  * readable trail. NEVER carries a token or secret — only the principal KIND and
  * an opaque label.
@@ -134,14 +135,14 @@ export interface AuditActor {
 }
 
 /**
- * An immutable audit record (FR-028). The four REQUIRED fields — `actor`,
+ * An immutable audit record (multi-tenant spec FR-028). The four REQUIRED fields — `actor`,
  * `timestamp`, `tenant`, `action` — are non-optional in the type, so a record
- * that omits any of them is unrepresentable (SC-008 is enforced structurally,
+ * that omits any of them is unrepresentable (multi-tenant spec SC-008 is enforced structurally,
  * not by a runtime check that could be forgotten).
  */
 export interface AuditRecord {
   readonly actor: AuditActor;
-  /** UNIX-millis instant the operation was performed (caller-stamped, FR-028). */
+  /** UNIX-millis instant the operation was performed (caller-stamped, multi-tenant spec FR-028). */
   readonly timestamp: number;
   /**
    * The single tenant this operation acted on (names no other tenant). A
@@ -156,9 +157,9 @@ export interface AuditRecord {
 }
 
 /**
- * Smart constructor for an `AuditRecord`. The single seam where a lifecycle op
- * becomes an audit record — keeps the four required fields together and is the
- * only producer, so every emitted record is well-formed by construction.
+ * Preferred constructor for an `AuditRecord`. This keeps the required fields
+ * together at lifecycle call sites; `AuditRecord` remains an exported structural
+ * type, so external callers can also construct a conforming value directly.
  */
 export const auditRecord = (input: {
   readonly actor: AuditActor;
@@ -179,7 +180,7 @@ export const auditRecord = (input: {
 // ── Port ─────────────────────────────────────────────────────────────────────
 
 /**
- * The audit sink the admin lifecycle handler writes through (FR-028). A single
+ * The audit sink the admin lifecycle handler writes through (multi-tenant spec FR-028). A single
  * method: record one `AuditRecord`. Returns `Promise<void>` and MUST NOT throw —
  * an audit sink that fails (e.g. Redis stream down) must not crash the request
  * path; sinks degrade by logging the failure (a best-effort trail), never by

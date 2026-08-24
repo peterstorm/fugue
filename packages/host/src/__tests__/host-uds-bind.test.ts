@@ -24,116 +24,47 @@
  */
 
 import { describe, test, expect, afterEach, mock } from "bun:test";
-import { ok, err, noopTracer, gitSha } from "@fuguejs/framework";
-import type { DagId } from "@fuguejs/framework";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { statSync, existsSync, rmSync } from "node:fs";
-import type { GitPort, ModuleLoaderPort, BulkLoadResult, SharedInfra, RedisPort } from "../ports.js";
-import type { RedisConnectivityPort } from "../lifecycle/startup.js";
-import type { SyncLogger } from "../sync/sync-loop.js";
-import type { HostConfig } from "../domain/config.js";
-import { parseHostConfig } from "../domain/config.js";
 import type { HostInstance } from "../host.js";
-import { createHost } from "../host.js";
-import { tenantId } from "../domain/tenant.js";
+import { createHost, stopBoundServerAfterBindFailure } from "../host.js";
 import { signTenantHeader, TENANT_HEADER_NAME } from "../domain/tenant-header.js";
-
-// ── Fakes ────────────────────────────────────────────────────────────────────
+import {
+  makeConfig,
+  fakeGit,
+  fakeLoader,
+  fakeRedis,
+  fakeInfra,
+  testLogger,
+  mkTenant,
+  fetchOverUds,
+} from "./fixtures/host-boot-fakes.js";
 
 const HMAC_KEY = "internal-platform-hmac-key-not-a-tenant-secret";
 
-const makeConfig = (overrides?: Record<string, string | undefined>): HostConfig => {
-  const r = parseHostConfig({
-    DAGS_REPO_URL: "https://github.com/test/dags.git",
-    DAGS_LOCAL_PATH: "/tmp/test-dags",
-    REDIS_URL: "redis://localhost:6379",
-    // PORT is unused in UDS mode (we bind a socket), but parse requires >=1.
-    PORT: "8080",
-    DAGS_POLL_INTERVAL_MS: "60000",
-    REDIS_PROBE_INTERVAL_MS: "60000",
-    LLM_PROVIDER: "anthropic",
-    ANTHROPIC_API_KEY: "test-key",
-    ADMIN_TOKEN: "test-admin-token-long-enough",
-    ...overrides,
-  });
-  if (!r.ok) throw new Error(`bad test config: ${JSON.stringify(r.error)}`);
-  return r.value;
-};
-
-const fakeGit = (): GitPort => ({
-  clone: async () => ok(undefined),
-  pull: async () => ok(undefined),
-  currentSha: async () => ok(gitSha("abc1234")),
-  hasLockfileChanged: async () => ok(false),
-  install: async () => ok(undefined),
-});
-
-const fakeLoader = (): ModuleLoaderPort => ({
-  loadDagModule: async (path) => err({ kind: "import-failed", path, message: "not found" }),
-  discoverDagPaths: async () => ok([]),
-  loadAll: async (): Promise<BulkLoadResult> => ({ loaded: [], errors: [] }),
-});
-
-const fakeRedis = (): { port: RedisConnectivityPort; redis: RedisPort } => {
-  const store = new Map<string, string>();
-  const sets = new Map<string, Set<string>>();
-  return {
-    port: { ping: async () => ok(undefined) },
-    redis: {
-      get: async (key) => ok(store.get(key) ?? null),
-      set: async (key, value) => { store.set(key, value); return ok("OK" as string | null); },
-      del: async (key) => { const had = store.has(key) ? 1 : 0; store.delete(key); return ok(had); },
-      scan: async (pattern) => {
-        const prefix = pattern.replace(/\*$/, "");
-        return ok({ cursor: "0", keys: [...store.keys()].filter((k) => k.startsWith(prefix)) });
-      },
-      setNx: async (key, value) => { if (store.has(key)) return ok(false); store.set(key, value); return ok(true); },
-      sAdd: async (key, member) => {
-        const s = sets.get(key) ?? new Set<string>(); const had = s.has(member); s.add(member); sets.set(key, s); return ok(had ? 0 : 1);
-      },
-      sRem: async (key, member) => {
-        const s = sets.get(key); if (!s || !s.has(member)) return ok(0); s.delete(member); return ok(1);
-      },
-      sMembers: async (key) => ok(Array.from(sets.get(key) ?? [])),
-    },
-  };
-};
-
-const fakeInfra = (redis: RedisPort): SharedInfra => ({
-  llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as never,
-  redis,
-  tracer: noopTracer,
-  contentFilter: null,
-  prompts: null,
-  logger: { info: () => {}, warn: () => {}, error: () => {} },
-  capabilities: [],
-});
-
-const testLogger = (): SyncLogger & { logs: Array<{ level: string; msg: string }> } => {
-  const logs: Array<{ level: string; msg: string }> = [];
-  return {
-    logs,
-    info: (msg) => logs.push({ level: "info", msg }),
-    warn: (msg) => logs.push({ level: "warn", msg }),
-    error: (msg) => logs.push({ level: "error", msg }),
-  };
-};
-
-const mkTenant = (id: string) => {
-  const r = tenantId(id);
-  if (!r.ok) throw new Error(`bad tenant ${id}`);
-  return r.value;
-};
-
-/** fetch over a Unix-domain socket (Bun) at an absolute path. */
-const fetchOverUds = (sock: string, path: string, headers?: Record<string, string>): Promise<Response> =>
-  fetch(`http://uds.fugue.internal${path}`, {
-    headers,
-    unix: sock,
-  } as RequestInit & { unix: string });
-
 // ── Tests ──────────────────────────────────────────────────────────────────
+
+describe("stopBoundServerAfterBindFailure", () => {
+  test("returns a total diagnostic when stop and the logger both throw", () => {
+    const hostile = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(hostile, "message", { get: () => { throw new Error("message trap"); } });
+    Object.defineProperty(hostile, "toString", { value: () => { throw new Error("string trap"); } });
+
+    const diagnostic = stopBoundServerAfterBindFailure(
+      { stop: () => { throw hostile; } },
+      "unix socket /tmp/tenant.sock",
+      { error: () => { throw new Error("logger trap"); } },
+    );
+
+    expect(diagnostic).toBeTypeOf("string");
+    expect(diagnostic).not.toBe("");
+  });
+
+  test("returns no diagnostic when no listener was acquired", () => {
+    expect(stopBoundServerAfterBindFailure(undefined, "port 8080", testLogger())).toBeUndefined();
+  });
+});
 
 describe("createHost — UDS bind + chmod 0600 (FR-007)", () => {
   let host: HostInstance | null = null;

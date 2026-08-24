@@ -1,9 +1,9 @@
 // Topology helpers — pure graph algorithms for DAG structure analysis.
 // All functions are pure; no I/O.
 //
-// Extracted from conditional.ts for separation of concerns:
+// Runtime routing is split by responsibility:
 // - topology.ts: static graph analysis (adjacency, reachability, incoming sources)
-// - routing.ts: business-rule evaluation (predicate evaluation, route decisions)
+// - route-emission.ts / reroute.ts: route decisions, emission, and reroute validation
 
 import type { DagDef, EdgeDef } from "../types/dag.js";
 import {
@@ -31,22 +31,14 @@ const buildOutgoing = (dag: DagDef): Map<NodeId, EdgeDef[]> => {
   return out;
 };
 
-const buildIncoming = (dag: DagDef): Map<NodeId, EdgeDef[]> => {
-  const inc = new Map<NodeId, EdgeDef[]>();
-  for (const n of dag.nodes) inc.set(n.id, []);
-  for (const e of dag.edges) {
-    const list = inc.get(e.to);
-    if (list) list.push(e);
-  }
-  return inc;
-};
 
 /**
  * Seed the initial active set: every node reachable from a wave-0 entry point
  * along unconditional edges only. Conditional and default targets are added
  * later when their predicate fires.
  *
- * Wave-0 entry points are nodes with no incoming edges of any kind.
+ * Wave-0 entry points are nodes with no incoming edges from real nodes;
+ * virtual `DAG_INPUT` edges are already satisfied and do not count.
  *
  * Accepts either a `DagDef` (for compile-time) or raw `edges` + precomputed
  * `outgoing` map (for the pure transition layer which has no access to `DagDef`).
@@ -89,10 +81,7 @@ export function seedInitialActiveSet(
     incomingCount.set(e.to, (incomingCount.get(e.to) ?? 0) + 1);
   }
 
-  const seeds: NodeId[] = [];
-  for (const id of nodeIds) {
-    if ((incomingCount.get(id) ?? 0) === 0) seeds.push(id);
-  }
+  const seeds = nodeIds.filter((id) => (incomingCount.get(id) ?? 0) === 0);
 
   const active = new Set<NodeId>(seeds);
   const stack = [...seeds];

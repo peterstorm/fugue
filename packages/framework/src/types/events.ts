@@ -3,7 +3,7 @@ import type { FrameworkError } from "./errors.js";
 import type { RunId, NodeId, DagId } from "./ids.js";
 import type { SideEffectProfile } from "./side-effects.js";
 import type { Confidence } from "./confidence.js";
-import type { Witness, ResourceName } from "./freshness.js";
+import type { Witness, WriteEntry, FreshnessExecutionEpoch } from "./witness.js";
 import type { SideEffectKind } from "./side-effects.js";
 import type { JsonPatch } from "./json-patch.js";
 
@@ -150,6 +150,8 @@ export interface WriteAttemptedEvent {
   readonly runId: RunId;
   readonly dagId: DagId;
   readonly nodeId: NodeId;
+  /** Durable identity of this logical execution; stable across bookkeeping retries. */
+  readonly executionEpoch: FreshnessExecutionEpoch;
   readonly conditionedOn: Witness;
   readonly newWitness: Witness;
   readonly succeededAtMs: number;
@@ -167,15 +169,11 @@ export interface FreshnessViolationEvent {
   readonly runId: RunId;
   readonly dagId: DagId;
   readonly nodeId: NodeId;
-  /** Branded — stamped from `conditionedOnWitness.resource`, cannot drift from it. */
-  readonly resource: ResourceName;
+  /** The violation's resource identity is `conditionedOnWitness.resource`. */
   readonly conditionedOnWitness: Witness;
-  readonly conflictingWrite: {
-    readonly runId: RunId;
-    readonly nodeId: NodeId;
-    readonly newWitness: Witness;
-    readonly succeededAtMs: number;
-  };
+  /** The write that superseded the conditioned-on witness (ONE encoding with
+   * `FreshnessConflict.conflictingWrite` — round-23 tda-1). */
+  readonly conflictingWrite: WriteEntry;
   readonly detectedAtMs: number;
   readonly timestamp: Date;
 }

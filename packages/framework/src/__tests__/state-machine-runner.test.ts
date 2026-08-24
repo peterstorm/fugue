@@ -110,6 +110,21 @@ const makeJob = (state: State = { kind: "pending" }, context: Context = { count:
 const defaultErrorEventOf = (c: { retriable: boolean; message: string }): Event =>
   ({ type: "ERROR", retriable: c.retriable, message: c.message });
 
+const hostileThrownValues: ReadonlyArray<readonly [string, () => unknown]> = [
+  ["throwing Error.message getter", () => {
+    const error = new Error("hidden");
+    Object.defineProperty(error, "message", {
+      get: () => { throw new Error("message getter trap"); },
+    });
+    return error;
+  }],
+  ["revoked Proxy", () => {
+    const { proxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+    return proxy;
+  }],
+];
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -207,6 +222,38 @@ describe("runStateMachine", () => {
       /failed terminal state/i,
     );
   });
+
+  for (const [caseName, makeThrown] of hostileThrownValues) {
+    it(`FR-006: default classifier delivers an ERROR event for ${caseName}`, async () => {
+      const job = createInMemoryJob<RetryState, RetryContext>({
+        state: { kind: "running" },
+        context: { count: 0, retries: 0 },
+      });
+      let calls = 0;
+      const executor: Executor<RetryState, RetryEvent, RetryContext> = async () => {
+        calls += 1;
+        if (calls === 1) throw makeThrown();
+        return { type: "DONE" };
+      };
+
+      const result = await runStateMachine(job, retryMachine, executor, {
+        errorEventOf: (classified) => ({
+          type: "ERROR" as const,
+          retriable: classified.retriable,
+          message: classified.message,
+        }),
+      });
+
+      expect(result.state.kind).toBe("succeeded");
+      expect(calls).toBe(2);
+      const firstEvent = job.events[0]?.event as RetryEvent | undefined;
+      expect(firstEvent?.type).toBe("ERROR");
+      if (firstEvent?.type === "ERROR") {
+        expect(firstEvent.retriable).toBe(true);
+        expect(firstEvent.message.length).toBeGreaterThan(0);
+      }
+    });
+  }
 
   it("US2 S2: error wrapped into ERROR event, machine transitions to retry state (NOT terminal-failed)", async () => {
     // retryMachine stays in "running" on ERROR when retries < 2
@@ -425,6 +472,47 @@ describe("runStateMachine", () => {
     expect(nowCalls).toBeGreaterThanOrEqual(2);
     // And the test itself finished within its own budget.
     expect(Date.now() - startWall).toBeLessThan(500);
+  });
+
+  it("commits a transition before a throwing post-execution trace clock can fail", async () => {
+    const job = makeJob({ kind: "running" });
+    let executorCalls = 0;
+    let clockCalls = 0;
+    const traceErrors: unknown[][] = [];
+    const executor: Executor<State, Event, Context> = async () => {
+      executorCalls += 1;
+      return { type: "DONE" };
+    };
+
+    const result = await runStateMachine(job, simpleMachine, executor, {
+      errorEventOf: defaultErrorEventOf,
+      onTrace: () => {
+        throw new Error("trace must be suppressed when its clock fails");
+      },
+      now: () => {
+        clockCalls += 1;
+        if (clockCalls === 2) throw new Error("trace clock unavailable");
+        return 1_000;
+      },
+      logger: {
+        warn: () => {},
+        error: (...args) => traceErrors.push(args),
+      },
+    });
+
+    expect(result.state.kind).toBe("succeeded");
+    expect(job.data.state.kind).toBe("succeeded");
+    expect(job.events.map(({ event }) => (event as Event).type)).toEqual(["DONE"]);
+    expect(executorCalls).toBe(1);
+    expect(traceErrors).toHaveLength(1);
+    expect(String(traceErrors[0]?.[0])).toContain("trace clock threw");
+
+    // A fresh kernel invocation observes the committed terminal checkpoint and
+    // cannot replay the executor work whose diagnostic timing failed.
+    await runStateMachine(job, simpleMachine, executor, {
+      errorEventOf: defaultErrorEventOf,
+    });
+    expect(executorCalls).toBe(1);
   });
 
   // Gap-5 fix: simulated crash + restart test

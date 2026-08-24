@@ -24,7 +24,7 @@ import {
   NoopObserver,
   nonEmptyString,
 } from "@fuguejs/framework";
-import { compileDagToMachine, stripNonPersistable } from "@fuguejs/framework/advanced";
+import { compileDagToMachine, persistDagContext } from "@fuguejs/framework/advanced";
 import type {
   DagId,
   RunId,
@@ -38,10 +38,12 @@ import type {
 } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
+import type { LogPort } from "../../ports.js";
+import { markTeam } from "../../domain/auth.js";
 import type { AuthIdentity } from "../../domain/auth.js";
 import { tenantId } from "../../domain/tenant.js";
 import type { TenantId } from "../../domain/tenant.js";
-import type { RunRecord, RunStatus, ReviewNotification } from "../types.js";
+import type { RunRecord, RunStatusUpdate, ReviewNotification } from "../types.js";
 import type {
   RunStorePort,
   RunQueuePort,
@@ -50,7 +52,9 @@ import type {
   RunExecutorPort,
   RunExecOutcome,
   RunExecutionRequest,
+  RunLease,
 } from "../ports.js";
+import { createInMemoryRunLeaseAuthority, createInMemoryRunStore } from "../adapters/run-store.js";
 import { createHitlRunService } from "../service.js";
 import type { HitlRunService } from "../service.js";
 
@@ -59,59 +63,34 @@ import type { HitlRunService } from "../service.js";
 // ---------------------------------------------------------------------------
 
 const inMemoryRunStore = () => {
-  const runs = new Map<string, RunRecord>();
-  // Mirror the real adapter's active-run index (ADR-0074) so the maxQueuedRuns
-  // gate can be exercised end-to-end through the service.
-  const active = new Set<string>();
-  const isTerminal = (s: RunStatus) => s.kind === "completed" || s.kind === "failed";
-  const port: RunStorePort = {
-    async create(record) {
-      if (runs.has(record.runId)) return err({ kind: "internal-invariant-violated", message: "dup run", context: {} });
-      runs.set(record.runId, record);
-      active.add(record.runId);
-      return ok(undefined);
-    },
-    async get(runId) {
-      return ok(runs.get(runId) ?? null);
-    },
-    async saveCheckpoint(runId, checkpoint) {
-      const r = runs.get(runId);
-      if (!r) return err({ kind: "run-not-found", runId });
-      runs.set(runId, { ...r, checkpoint, updatedAtMs: r.updatedAtMs + 1 });
-      return ok(undefined);
-    },
-    async setStatus(runId, status: RunStatus) {
-      const r = runs.get(runId);
-      if (!r) return err({ kind: "run-not-found", runId });
-      runs.set(runId, { ...r, status, updatedAtMs: r.updatedAtMs + 1 });
-      if (isTerminal(status)) active.delete(runId);
-      return ok(undefined);
-    },
-    async countActiveRuns() {
-      for (const id of [...active]) if (!runs.has(id)) active.delete(id);
-      return ok(active.size);
-    },
+  const leases = createInMemoryRunLeaseAuthority();
+  const port = createInMemoryRunStore(leases, () => 1_000);
+  return {
+    port,
+    runs: port._runs as Map<string, RunRecord>,
+    active: port._active as Set<string>,
+    acquireLease: (runId: RunId, ownerToken = "test-owner"): RunLease =>
+      leases.acquire(runId, ownerToken),
   };
-  return { port, runs, active };
 };
 
 /** A queue whose processor is set by the service consumer; drains FIFO. */
-const inMemoryRunQueue = () => {
+const inMemoryRunQueue = (acquireLease: (runId: RunId) => RunLease) => {
   const pending: RunId[] = [];
-  let processor: ((runId: RunId) => Promise<Result<void, HostError>>) | null = null;
+  let processor: ((lease: RunLease) => Promise<Result<void, HostError>>) | null = null;
   const port: RunQueuePort = {
     async enqueue(runId) {
       pending.push(runId);
       return ok(undefined);
     },
   };
-  const setProcessor = (p: (runId: RunId) => Promise<Result<void, HostError>>) => { processor = p; };
+  const setProcessor = (p: (lease: RunLease) => Promise<Result<void, HostError>>) => { processor = p; };
   /** Process every queued run (and any enqueued during processing) to completion. */
   const drain = async (): Promise<void> => {
     if (!processor) throw new Error("no processor set");
     while (pending.length > 0) {
       const runId = pending.shift()!;
-      await processor(runId);
+      await processor(acquireLease(runId));
     }
   };
   return { port, setProcessor, drain, pending };
@@ -119,24 +98,32 @@ const inMemoryRunQueue = () => {
 
 const inMemoryDecisionStore = () => {
   const pendingMarks = new Set<string>();
+  const notified = new Set<string>();
   const decisions = new Map<string, HumanAction>();
   // `clears` counts gate resolutions (decision consumed): the hook's
   // `onDecisionConsumed` clears the gate once the post-gate checkpoint is durable.
   const clears: string[] = [];
   const key = (runId: RunId, nodeId: NodeId) => `${runId}:${nodeId}`;
   const port: DecisionStorePort = {
-    async markPending(runId, nodeId) {
+    async preparePending(runId, nodeId) {
       const k = key(runId, nodeId);
-      if (pendingMarks.has(k)) return ok(false);
-      pendingMarks.add(k);
+      if (!pendingMarks.has(k)) pendingMarks.add(k);
+      return ok(notified.has(k)
+        ? { kind: "notified" }
+        : { kind: "notification-required", marker: k });
+    },
+    async markNotified(runId, nodeId, marker) {
+      const k = key(runId, nodeId);
+      if (!pendingMarks.has(k) || marker !== k) return ok(false);
+      notified.add(k);
       return ok(true);
     },
-    async isPending(runId, nodeId) {
-      return ok(pendingMarks.has(key(runId, nodeId)));
-    },
-    async putDecision(runId, nodeId, action) {
-      decisions.set(key(runId, nodeId), action);
-      return ok(undefined);
+    async resolvePending(runId, nodeId, action) {
+      const k = key(runId, nodeId);
+      if (!pendingMarks.has(k)) return ok({ kind: "not-pending" });
+      if (decisions.has(k)) return ok({ kind: "already-resolved" });
+      decisions.set(k, action);
+      return ok({ kind: "accepted" });
     },
     async getDecision(runId, nodeId) {
       return ok(decisions.get(key(runId, nodeId)) ?? null);
@@ -145,6 +132,7 @@ const inMemoryDecisionStore = () => {
       const k = key(runId, nodeId);
       clears.push(k);
       pendingMarks.delete(k);
+      notified.delete(k);
       decisions.delete(k);
       return ok(undefined);
     },
@@ -201,18 +189,20 @@ const realExecutor = (dag: DagDef): RunExecutorPort => ({
   async seedCheckpoint(_dagId, input) {
     const compiled = compileDagToMachine(dag, input);
     if (!compiled.ok) return err({ kind: "internal-invariant-violated", message: "compile failed", context: {} });
-    const persisted = stripNonPersistable(compiled.value.initialContext);
+    const persisted = persistDagContext(compiled.value.initialContext, dag);
     return ok(toJson({ state: compiled.value.initialState, context: persisted }));
   },
   async run(req: RunExecutionRequest): Promise<Result<RunExecOutcome, HostError>> {
     try {
+      const startedJob = await req.job.startSlice(30_000);
+      if (!startedJob.ok) return startedJob;
       const outcome = await runResumableDagJob<unknown, unknown>(dag, req.input, makeCtx(), {
-        jobLike: req.jobLike,
+        jobLike: startedJob.value,
         onHumanReview: req.onHumanReview,
         onDecisionConsumed: req.onDecisionConsumed,
       });
       if (outcome.kind === "suspended") {
-        return ok({ kind: "suspended", nodeId: outcome.nodeId, prompt: outcome.prompt });
+        return ok({ kind: "suspended", nodeId: outcome.nodeId, prompt: nonEmptyString(outcome.prompt) });
       }
       return ok({ kind: "completed", output: outcome.output });
     } catch (e) {
@@ -233,6 +223,12 @@ const realExecutor = (dag: DagDef): RunExecutorPort => ({
 // ---------------------------------------------------------------------------
 
 const ADMIN: AuthIdentity = { kind: "admin" };
+const OWNER_TEAM = markTeam("test-team");
+const THROWING_ERROR_LOGGER: LogPort = {
+  info: () => {},
+  warn: () => {},
+  error: () => { throw new Error("logger transport failed"); },
+};
 
 // The worker's bound tenant — names the `tenant-over-quota` error the
 // maxQueuedRuns gate returns (ADR-0074). The service requires it.
@@ -244,7 +240,7 @@ const TENANT: TenantId = (() => {
 
 const setup = (dag: DagDef) => {
   const store = inMemoryRunStore();
-  const queue = inMemoryRunQueue();
+  const queue = inMemoryRunQueue(store.acquireLease);
   const dec = inMemoryDecisionStore();
   const notif = recordingNotifier();
   let counter = 0;
@@ -295,14 +291,15 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     let draftRuns = 0;
     let reviewRuns = 0;
     const dag = twoWaveDag({ onDraft: () => { draftRuns++; }, onReview: () => { reviewRuns++; } });
-    const { service, store, queue, dec, notif } = setup(dag);
+    const { service, store, queue, notif } = setup(dag);
 
     // 1. start → queued
-    const started = await service.startRun("test-dag" as DagId, { x: 1 }, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, { x: 1 }, ADMIN);
     expect(started.ok).toBe(true);
     if (!started.ok) return;
     const runId = started.value.runId;
     expect(store.runs.get(runId)?.status.kind).toBe("queued");
+    expect(store.runs.get(runId)?.ownerTeam).toBe(OWNER_TEAM);
 
     // 2. worker processes → parks at the review gate, notifies once
     await queue.drain();
@@ -310,10 +307,11 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     expect(parked.status.kind).toBe("suspended");
     if (parked.status.kind === "suspended") {
       expect(parked.status.nodeId).toBe("review" as NodeId);
-      expect(parked.status.prompt).toBe("Approve the draft?");
+      expect(parked.status.prompt).toBe(nonEmptyString("Approve the draft?"));
     }
     expect(notif.sent).toHaveLength(1);
     expect(notif.sent[0]!.nodeId).toBe("review" as NodeId);
+    expect(notif.sent[0]!.ownerTeam).toBe(OWNER_TEAM);
     // The reviewer sees the GATED node's output (what's under review).
     expect(notif.sent[0]!.output).toBe("review-out");
 
@@ -338,7 +336,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const dag = twoWaveDag();
     const { service, store, queue, notif } = setup(dag);
 
-    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     if (!started.ok) throw new Error("startRun failed");
     const runId = started.value.runId;
 
@@ -355,7 +353,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const dag = twoWaveDag();
     const { service, store, queue } = setup(dag);
 
-    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     if (!started.ok) throw new Error("startRun failed");
     const runId = started.value.runId;
 
@@ -372,7 +370,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const dag = twoWaveDag();
     const { service, store, queue } = setup(dag);
 
-    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     if (!started.ok) throw new Error("startRun failed");
     const runId = started.value.runId;
 
@@ -383,6 +381,65 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const done = store.runs.get(runId)!;
     expect(done.status.kind).toBe("failed");
     if (done.status.kind === "failed") expect(done.status.error.kind).toBe("rejected");
+  });
+
+  it("terminalizes the run when consumed-decision cleanup fails", async () => {
+    const dag = twoWaveDag();
+    const store = inMemoryRunStore();
+    const queue = inMemoryRunQueue(store.acquireLease);
+    const baseDecisions = inMemoryDecisionStore();
+    const decisions: DecisionStorePort = {
+      ...baseDecisions.port,
+      async clear() { return err({ kind: "redis-unavailable", operation: "DEL decision" }); },
+    };
+    const service = createHitlRunService({
+      runStore: store.port,
+      runQueue: queue.port,
+      decisions,
+      tenant: TENANT,
+      notifier: recordingNotifier().port,
+      executor: realExecutor(dag),
+      clock: () => 1_000,
+      newRunId: () => mkRunId("cleanup-failure-run"),
+    });
+    queue.setProcessor(service.processRun);
+
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
+    if (!started.ok) throw new Error("startRun failed");
+    await queue.drain();
+    await service.recordDecision(started.value.runId, "review" as NodeId, { kind: "approve" });
+    await queue.drain();
+
+    const persisted = store.runs.get(started.value.runId);
+    expect(persisted?.status.kind).toBe("failed");
+    expect(store.active.has(started.value.runId)).toBe(false);
+    expect(baseDecisions.decisions.has(`${started.value.runId}:review`)).toBe(true);
+  });
+
+  it("maps a throwing startRun clock into the typed HostError channel", async () => {
+    const store = inMemoryRunStore();
+    const service = createHitlRunService({
+      runStore: store.port,
+      runQueue: inMemoryRunQueue(store.acquireLease).port,
+      decisions: inMemoryDecisionStore().port,
+      tenant: TENANT,
+      notifier: recordingNotifier().port,
+      executor: realExecutor(oneNodeDag()),
+      clock: () => { throw new Error("clock unavailable"); },
+      newRunId: () => mkRunId("throwing-clock-run"),
+    });
+
+    const result = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("internal-invariant-violated");
+      if (result.error.kind === "internal-invariant-violated") {
+        expect(result.error.message).toContain("clock unavailable");
+        expect(result.error.context).toEqual({ error: "clock unavailable" });
+      }
+    }
+    expect(store.runs.size).toBe(0);
   });
 
   it("recordDecision for an unknown run errs run-not-found", async () => {
@@ -397,7 +454,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const dag = twoWaveDag();
     const { service, store, queue } = setup(dag);
 
-    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     if (!started.ok) throw new Error("startRun failed");
     const runId = started.value.runId;
 
@@ -427,7 +484,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     // not the lagging run-store status — or it is dropped and the run is stranded.
     const dag = twoWaveDag();
     const store = inMemoryRunStore();
-    const queue = inMemoryRunQueue();
+    const queue = inMemoryRunQueue(store.acquireLease);
     const dec = inMemoryDecisionStore();
     let counter = 0;
     let service: HitlRunService;
@@ -453,7 +510,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     });
     queue.setProcessor(service.processRun);
 
-    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     if (!started.ok) throw new Error("startRun failed");
     const runId = started.value.runId;
 
@@ -465,18 +522,16 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
   });
 
   it("two valid approvals racing the SAME open gate → execute once, notify once, consume once (ADR-0060 duplicate-approval window)", async () => {
-    // ADR-0060 "Known timing window → Duplicate approval": two approvals can both
-    // observe `isPending === true` and both `enqueue` (the queue is intentionally
-    // non-idempotent; resume re-enqueues must never be dropped). The resolved
-    // behaviour: the single-flight lock + terminal/already-advanced guard mean the
-    // gated node executes EXACTLY ONCE; the second job is a redundant no-op slice,
-    // with NO duplicate notification and the decision consumed exactly once.
+    // Two approvals can both observe the open gate, but resolvePending's SET NX
+    // preserves the first action. Both durable outcomes may enqueue (the queue is
+    // intentionally non-idempotent); the single-flight lock + terminal guard mean
+    // the gated node executes exactly once and the second slice is a no-op.
     let draftRuns = 0;
     let reviewRuns = 0;
     const dag = twoWaveDag({ onDraft: () => { draftRuns++; }, onReview: () => { reviewRuns++; } });
     const { service, store, queue, dec, notif } = setup(dag);
 
-    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     if (!started.ok) throw new Error("startRun failed");
     const runId = started.value.runId;
 
@@ -484,13 +539,13 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     expect(store.runs.get(runId)!.status.kind).toBe("suspended");
     expect(notif.sent).toHaveLength(1);
 
-    // TWO approvals race the SAME open gate: both see the pending marker, both
-    // record (idempotent — same gate, last write wins), both enqueue a wakeup.
+    // TWO approvals race the SAME open gate: the first action is durable and the
+    // second observes `already-resolved`; both may enqueue an idempotent wakeup.
     const first = await service.recordDecision(runId, "review" as NodeId, { kind: "approve", actor: "Alice" });
     const second = await service.recordDecision(runId, "review" as NodeId, { kind: "approve", actor: "Bob" });
     expect(first.ok).toBe(true);
     expect(second.ok).toBe(true);
-    // Both passed `isPending` and both enqueued — TWO wakeup jobs are now queued.
+    expect(dec.decisions.get(`${runId}:review`)).toEqual({ kind: "approve", actor: "Alice" });
     expect(queue.pending).toHaveLength(2);
 
     // Drain both jobs. The first resumes → completes + consumes (clears) the gate;
@@ -516,7 +571,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const dag = twoWaveDag({ onDraft: () => { draftRuns++; }, onReview: () => { reviewRuns++; } });
     const { service, store, queue } = setup(dag);
 
-    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     if (!started.ok) throw new Error("startRun failed");
     const runId = started.value.runId;
 
@@ -530,7 +585,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     // A stray double-enqueue AFTER completion (e.g. a duplicate/replayed approval
     // re-waking the run) must hit the terminal guard, not re-run the DAG's
     // side-effecting nodes.
-    const replay = await service.processRun(runId);
+    const replay = await service.processRun(store.acquireLease(runId));
     expect(replay.ok).toBe(true);
     expect(store.runs.get(runId)!.status.kind).toBe("completed");
     expect(draftRuns).toBe(1); // unchanged — guard held
@@ -539,14 +594,51 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
 
   it("processRun for an unknown run is an ok no-op (stale enqueue)", async () => {
     const dag = twoWaveDag();
-    const { service } = setup(dag);
-    const res = await service.processRun(mkRunId("ghost"));
+    const { service, store } = setup(dag);
+    const res = await service.processRun(store.acquireLease(mkRunId("ghost")));
     expect(res.ok).toBe(true);
   });
 
+  it("fails closed before executor invocation when the durable running write fails", async () => {
+    const dag = oneNodeDag();
+    const store = inMemoryRunStore();
+    const queue = inMemoryRunQueue(store.acquireLease);
+    const baseExecutor = realExecutor(dag);
+    let runCalls = 0;
+    const executor: RunExecutorPort = {
+      seedCheckpoint: baseExecutor.seedCheckpoint,
+      async run(req) { runCalls += 1; return baseExecutor.run(req); },
+    };
+    const failingStore: RunStorePort = {
+      ...store.port,
+      async setStatus(lease, status) {
+        if (status.kind === "running") return err({ kind: "redis-unavailable", operation: "setStatus(running)" });
+        return store.port.setStatus(lease, status);
+      },
+    };
+    const service = createHitlRunService({
+      runStore: failingStore,
+      runQueue: queue.port,
+      decisions: inMemoryDecisionStore().port,
+      tenant: TENANT,
+      notifier: recordingNotifier().port,
+      executor,
+      clock: () => 1_000,
+      newRunId: () => mkRunId("run-running-write-failure"),
+    });
+
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
+    if (!started.ok) throw new Error("startRun failed");
+    const result = await service.processRun(store.acquireLease(started.value.runId));
+
+    expect(result).toEqual(err({ kind: "redis-unavailable", operation: "setStatus(running)" }));
+    expect(runCalls).toBe(0);
+    expect(store.runs.get(started.value.runId)?.status.kind).toBe("queued");
+  });
+
   it("settles a corrupt-checkpoint run `failed` and returns ok (no infinite retry)", async () => {
-    // service.ts:130-141 — a structurally-corrupt checkpoint cannot heal on
-    // retry, so processRun settles the run terminal `failed` (a status poll
+    // The corrupt-checkpoint branch cannot heal on retry, so processRun settles
+    // the run terminal `failed` (a status poll
     // surfaces it) and returns OK so the worker acks the job rather than
     // re-processing the same corrupt state forever. The unit boundary
     // (makeRunStoreJobLike rejecting the checkpoint) is covered in
@@ -554,7 +646,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const dag = twoWaveDag();
     const { service, store } = setup(dag);
 
-    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     if (!started.ok) throw new Error("startRun failed");
     const runId = started.value.runId;
 
@@ -562,19 +654,51 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const rec = store.runs.get(runId)!;
     store.runs.set(runId, { ...rec, checkpoint: "}{ not a valid envelope" });
 
-    const res = await service.processRun(runId);
+    const res = await service.processRun(store.acquireLease(runId));
     expect(res.ok).toBe(true); // acked — no queue retry
     expect(store.runs.get(runId)!.status.kind).toBe("failed"); // settled terminal
   });
 
-  it("returns err (queue retry) when settling `failed` after a host-infra failure also fails to write", async () => {
-    // service.ts:174-178 — the executor returns a host-infra `err`, so the run
-    // must settle `failed`; if that settle `setStatus` ITSELF fails there is no
-    // durable terminal state, so processRun returns `err` and the worker retries
-    // rather than acking a run still stuck `running`.
+  it("terminalizes a permanent executor failure so reconciliation cannot retry it forever", async () => {
+    const store = inMemoryRunStore();
+    const queue = inMemoryRunQueue(store.acquireLease);
+    const permanent: FrameworkError = {
+      kind: "node-crash",
+      retriability: "non-retriable",
+      nodeId: "__executor__" as NodeId,
+      message: "DAG is no longer registered",
+    };
+    const seeded = realExecutor(oneNodeDag());
+    const executor: RunExecutorPort = {
+      seedCheckpoint: seeded.seedCheckpoint,
+      async run() { return ok({ kind: "failed", error: permanent }); },
+    };
+    const service = createHitlRunService({
+      runStore: store.port,
+      runQueue: queue.port,
+      decisions: inMemoryDecisionStore().port,
+      tenant: TENANT,
+      notifier: recordingNotifier().port,
+      executor,
+      clock: () => 1_000,
+      newRunId: () => mkRunId("removed-dag-run"),
+    });
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
+    if (!started.ok) throw new Error("startRun failed");
+
+    expect(await service.processRun(store.acquireLease(started.value.runId))).toEqual(ok(undefined));
+    expect(store.runs.get(started.value.runId)?.status).toEqual({ kind: "failed", error: permanent });
+    expect(store.active.has(started.value.runId)).toBe(false);
+    expect(await service.reconcileActiveRuns()).toEqual(ok([]));
+  });
+
+  it("returns executor infrastructure errors for queue retry without terminalizing the run", async () => {
+    // A typed executor Err detected before a run outcome exists is not a DAG
+    // outcome. Keep the run non-terminal at its running entry fence and let the
+    // queue retry. Post-transition checkpoint loss is a separate failed outcome.
     const dag = twoWaveDag();
     const store = inMemoryRunStore();
-    const queue = inMemoryRunQueue();
+    const queue = inMemoryRunQueue(store.acquireLease);
     const dec = inMemoryDecisionStore();
     const notif = recordingNotifier();
     let counter = 0;
@@ -585,41 +709,42 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
         return err({ kind: "internal-invariant-violated", message: "infra boom", context: {} });
       },
     };
-    // Fail only the terminal `failed` write; the best-effort `running` write succeeds.
-    const failingStore: RunStorePort = {
+    let terminalWrites = 0;
+    const trackingStore: RunStorePort = {
       ...store.port,
-      async setStatus(runId, status: RunStatus) {
-        if (status.kind === "failed") return err({ kind: "redis-unavailable", operation: "setStatus(failed)" });
-        return store.port.setStatus(runId, status);
+      async setStatus(lease, status: RunStatusUpdate) {
+        if (status.kind === "failed") terminalWrites++;
+        return store.port.setStatus(lease, status);
       },
     };
     const service = createHitlRunService({
-      runStore: failingStore, runQueue: queue.port, decisions: dec.port, tenant: TENANT,
+      runStore: trackingStore, runQueue: queue.port, decisions: dec.port, tenant: TENANT,
       notifier: notif.port, executor, clock: () => 1_000, newRunId: () => mkRunId(`run-${++counter}`),
     });
 
-    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     if (!started.ok) throw new Error("startRun failed");
-    const res = await service.processRun(started.value.runId);
-    expect(res.ok).toBe(false);
-    if (!res.ok) expect(res.error.kind).toBe("redis-unavailable");
+    const res = await service.processRun(store.acquireLease(started.value.runId));
+    expect(res).toEqual(err({ kind: "internal-invariant-violated", message: "infra boom", context: {} }));
+    expect(terminalWrites).toBe(0);
+    expect(store.runs.get(started.value.runId)?.status.kind).toBe("running");
   });
 
   it("returns err (queue retry) when folding a `completed` outcome into the store fails", async () => {
-    // service.ts:184-185 — the executor completed, but writing the `completed`
-    // status fails; the outcome is not durably recorded, so processRun surfaces
+    // The completed-outcome fold fails while writing `completed`; the outcome is
+    // not durably recorded, so processRun surfaces
     // the err for the worker to retry rather than silently losing the result.
     const dag = oneNodeDag();
     const store = inMemoryRunStore();
-    const queue = inMemoryRunQueue();
+    const queue = inMemoryRunQueue(store.acquireLease);
     const dec = inMemoryDecisionStore();
     const notif = recordingNotifier();
     let counter = 0;
     const failingStore: RunStorePort = {
       ...store.port,
-      async setStatus(runId, status: RunStatus) {
+      async setStatus(lease, status: RunStatusUpdate) {
         if (status.kind === "completed") return err({ kind: "redis-unavailable", operation: "setStatus(completed)" });
-        return store.port.setStatus(runId, status);
+        return store.port.setStatus(lease, status);
       },
     };
     const service = createHitlRunService({
@@ -627,21 +752,190 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
       notifier: notif.port, executor: realExecutor(dag), clock: () => 1_000, newRunId: () => mkRunId(`run-${++counter}`),
     });
 
-    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     if (!started.ok) throw new Error("startRun failed");
-    const res = await service.processRun(started.value.runId);
+    const res = await service.processRun(store.acquireLease(started.value.runId));
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.kind).toBe("redis-unavailable");
   });
 
-  it("recordDecision returns err when the decision is stored but the resume enqueue fails (decided-but-not-woken)", async () => {
-    // service.ts:231-243 — putDecision succeeds (the approval is durable) but
-    // runQueue.enqueue fails, so the run is not re-woken. The decision is NOT
-    // lost (it outlives via the store), but the half-completed approval must be
-    // surfaced as `err` rather than reported ok, so the stuck run is diagnosable.
+  it("treats publication uncertainty as accepted and requests the normal wakeup", async () => {
+    const store = inMemoryRunStore();
+    const uncertainStore: RunStorePort = {
+      ...store.port,
+      async create(record) {
+        const created = await store.port.create(record);
+        return created.ok ? ok({ kind: "publication-uncertain" }) : created;
+      },
+    };
+    const delivered: RunId[] = [];
+    const service = createHitlRunService({
+      runStore: uncertainStore,
+      runQueue: { async enqueue(runId) { delivered.push(runId); return ok(undefined); } },
+      decisions: inMemoryDecisionStore().port,
+      tenant: TENANT,
+      notifier: recordingNotifier().port,
+      executor: realExecutor(oneNodeDag()),
+      clock: () => 1_000,
+      newRunId: () => mkRunId("uncertain-run"),
+    });
+
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
+
+    expect(started).toEqual(ok({ runId: "uncertain-run" as RunId }));
+    expect(delivered).toEqual(["uncertain-run" as RunId]);
+    expect(store.runs.has("uncertain-run" as RunId)).toBe(true);
+  });
+
+  it("keeps an accepted run durable when the initial wakeup fails, then reconciliation wakes it", async () => {
+    const store = inMemoryRunStore();
+    const delivered: RunId[] = [];
+    let failEnqueue = true;
+    const queue: RunQueuePort = {
+      async enqueue(runId) {
+        if (failEnqueue) return err({ kind: "redis-unavailable", operation: "initial enqueue" });
+        delivered.push(runId);
+        return ok(undefined);
+      },
+    };
+    const service = createHitlRunService({
+      runStore: store.port,
+      runQueue: queue,
+      decisions: inMemoryDecisionStore().port,
+      tenant: TENANT,
+      notifier: recordingNotifier().port,
+      executor: realExecutor(oneNodeDag()),
+      clock: () => 1_000,
+      newRunId: () => mkRunId("run-enqueue-failure"),
+      logger: THROWING_ERROR_LOGGER,
+    });
+
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
+    expect(started.ok).toBe(true);
+    const durable = store.runs.get("run-enqueue-failure" as RunId)!;
+    expect(durable.status.kind).toBe("queued");
+    expect(store.active.has(durable.runId)).toBe(true);
+
+    failEnqueue = false;
+    const reconciled = await service.reconcileActiveRuns();
+    expect(reconciled).toEqual(ok([{ kind: "woken", runId: durable.runId }]));
+    expect(delivered).toEqual([durable.runId]);
+  });
+
+  it("a fresh service instance reconciles an accepted queued run after restart", async () => {
+    const store = inMemoryRunStore();
+    const decisions = inMemoryDecisionStore();
+    const common = {
+      runStore: store.port,
+      decisions: decisions.port,
+      tenant: TENANT,
+      notifier: recordingNotifier().port,
+      executor: realExecutor(oneNodeDag()),
+      clock: () => 1_000,
+      newRunId: () => mkRunId("restart-run"),
+    };
+    const beforeRestart = createHitlRunService({
+      ...common,
+      runQueue: { async enqueue() { return err({ kind: "redis-unavailable", operation: "queue down" }); } },
+    });
+    expect((await beforeRestart.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN)).ok).toBe(true);
+
+    const delivered: RunId[] = [];
+    const afterRestart = createHitlRunService({
+      ...common,
+      runQueue: { async enqueue(runId) { delivered.push(runId); return ok(undefined); } },
+    });
+    expect(await afterRestart.reconcileActiveRuns()).toEqual(ok([
+      { kind: "woken", runId: "restart-run" as RunId },
+    ]));
+    expect(delivered).toEqual(["restart-run" as RunId]);
+  });
+
+  it("surfaces active enumeration errors through the typed reconciliation result", async () => {
+    const store = inMemoryRunStore();
+    const brokenStore: RunStorePort = {
+      ...store.port,
+      async listActiveRunIds() {
+        return err({ kind: "redis-unavailable", operation: "SMEMBERS active" });
+      },
+    };
+    const service = createHitlRunService({
+      runStore: brokenStore,
+      runQueue: inMemoryRunQueue(store.acquireLease).port,
+      decisions: inMemoryDecisionStore().port,
+      tenant: TENANT,
+      notifier: recordingNotifier().port,
+      executor: realExecutor(oneNodeDag()),
+      clock: () => 1_000,
+      newRunId: () => mkRunId("unused"),
+    });
+
+    const reconciled = await service.reconcileActiveRuns();
+    expect(reconciled.ok).toBe(false);
+    if (!reconciled.ok) expect(reconciled.error.kind).toBe("redis-unavailable");
+  });
+
+  it("continues reconciliation after a run-specific inspection failure", async () => {
+    const store = inMemoryRunStore();
+    const corruptRunId = mkRunId("corrupt-run");
+    const healthyRunId = mkRunId("healthy-run");
+    const inspectionError: HostError = {
+      kind: "internal-invariant-violated",
+      message: "corrupt checkpoint",
+      context: { runId: corruptRunId },
+    };
+    const inspectingStore: RunStorePort = {
+      ...store.port,
+      async get(runId) {
+        return runId === corruptRunId ? err(inspectionError) : store.port.get(runId);
+      },
+    };
+    const delivered: RunId[] = [];
+    const ids = [corruptRunId, healthyRunId];
+    const service = createHitlRunService({
+      runStore: inspectingStore,
+      runQueue: { async enqueue(runId) { delivered.push(runId); return ok(undefined); } },
+      decisions: inMemoryDecisionStore().port,
+      tenant: TENANT,
+      notifier: recordingNotifier().port,
+      executor: realExecutor(oneNodeDag()),
+      clock: () => 1_000,
+      newRunId: () => ids.shift()!,
+      logger: THROWING_ERROR_LOGGER,
+    });
+    expect((await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN)).ok).toBe(true);
+    expect((await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN)).ok).toBe(true);
+    delivered.length = 0;
+
+    const reconciled = await service.reconcileActiveRuns();
+
+    expect(reconciled).toEqual(ok([
+      { kind: "inspection-failed", runId: corruptRunId, error: inspectionError },
+      { kind: "woken", runId: healthyRunId },
+    ]));
+    expect(delivered).toEqual([healthyRunId]);
+  });
+
+  it("reconciliation skips a suspended run with no durable decision", async () => {
+    const dag = twoWaveDag();
+    const { service, queue, store } = setup(dag);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
+    if (!started.ok) throw new Error("startRun failed");
+    await queue.drain();
+    expect(store.runs.get(started.value.runId)?.status.kind).toBe("suspended");
+    expect(queue.pending).toHaveLength(0);
+
+    expect(await service.reconcileActiveRuns()).toEqual(ok([]));
+    expect(queue.pending).toHaveLength(0);
+  });
+
+  it("a stored decision whose direct wakeup fails completes after reconciliation", async () => {
+    // Resolution succeeds durably while the direct queue wakeup fails. The
+    // acceptance remains successful; a later server-owned sweep must discover
+    // the non-terminal run and resume it without another human request.
     const dag = twoWaveDag();
     const store = inMemoryRunStore();
-    const baseQueue = inMemoryRunQueue();
+    const baseQueue = inMemoryRunQueue(store.acquireLease);
     const dec = inMemoryDecisionStore();
     const notif = recordingNotifier();
     let counter = 0;
@@ -655,10 +949,11 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const service = createHitlRunService({
       runStore: store.port, runQueue: queuePort, decisions: dec.port, tenant: TENANT,
       notifier: notif.port, executor: realExecutor(dag), clock: () => 1_000, newRunId: () => mkRunId(`run-${++counter}`),
+      logger: THROWING_ERROR_LOGGER,
     });
     baseQueue.setProcessor(service.processRun);
 
-    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     if (!started.ok) throw new Error("startRun failed");
     const runId = started.value.runId;
     await baseQueue.drain(); // park at the review gate
@@ -666,17 +961,47 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
 
     failEnqueue = true;
     const res = await service.recordDecision(runId, "review" as NodeId, { kind: "approve" });
-    expect(res.ok).toBe(false);
-    if (!res.ok) expect(res.error.kind).toBe("redis-unavailable");
-    // The decision IS durably stored despite the failed wakeup — "decided but not woken".
+    expect(res.ok).toBe(true); // durable acceptance is authoritative
     expect(dec.decisions.has(`${runId}:review`)).toBe(true);
+    expect(store.runs.get(runId)?.status.kind).toBe("suspended");
+
+    failEnqueue = false;
+    const reconciled = await service.reconcileActiveRuns();
+    expect(reconciled.ok).toBe(true);
+    await baseQueue.drain();
+    expect(store.runs.get(runId)?.status.kind).toBe("completed");
+  });
+
+  it("a throwing reconciliation logger cannot replace a typed wakeup-failed attempt", async () => {
+    const store = inMemoryRunStore();
+    const service = createHitlRunService({
+      runStore: store.port,
+      runQueue: { async enqueue() { return err({ kind: "redis-unavailable", operation: "enqueue" }); } },
+      decisions: inMemoryDecisionStore().port,
+      tenant: TENANT,
+      notifier: recordingNotifier().port,
+      executor: realExecutor(oneNodeDag()),
+      clock: () => 1_000,
+      newRunId: () => mkRunId("reconcile-logger-run"),
+      logger: THROWING_ERROR_LOGGER,
+    });
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
+    if (!started.ok) throw new Error("startRun failed");
+
+    const result = await service.reconcileActiveRuns();
+
+    expect(result.ok && result.value).toEqual([{
+      kind: "wakeup-failed",
+      runId: started.value.runId,
+      error: { kind: "redis-unavailable", operation: "enqueue" },
+    }]);
   });
 
   it("getRun reflects the lifecycle: queued → suspended → completed", async () => {
     const dag = twoWaveDag();
     const { service, queue } = setup(dag);
 
-    const started = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     if (!started.ok) throw new Error("startRun failed");
     const runId = started.value.runId;
 
@@ -701,7 +1026,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
 describe("HitlRunService — per-tenant maxQueuedRuns gate (ADR-0074)", () => {
   const gateService = (maxQueuedRuns: number | undefined) => {
     const store = inMemoryRunStore();
-    const queue = inMemoryRunQueue();
+    const queue = inMemoryRunQueue(store.acquireLease);
     const dec = inMemoryDecisionStore();
     const notif = recordingNotifier();
     let counter = 0;
@@ -721,10 +1046,10 @@ describe("HitlRunService — per-tenant maxQueuedRuns gate (ADR-0074)", () => {
 
   it("refuses startRun with `tenant-over-quota` once the active-run count reaches maxQueuedRuns", async () => {
     const { service } = gateService(2);
-    expect((await service.startRun("test-dag" as DagId, null, ADMIN)).ok).toBe(true);
-    expect((await service.startRun("test-dag" as DagId, null, ADMIN)).ok).toBe(true);
+    expect((await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN)).ok).toBe(true);
+    expect((await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN)).ok).toBe(true);
     // At the ceiling (2 outstanding) — the third is refused, scoped to this tenant.
-    const third = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const third = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     expect(third.ok).toBe(false);
     if (!third.ok) {
       expect(third.error.kind).toBe("tenant-over-quota");
@@ -737,28 +1062,36 @@ describe("HitlRunService — per-tenant maxQueuedRuns gate (ADR-0074)", () => {
 
   it("frees a slot when a run settles terminal — a subsequent startRun is admitted again", async () => {
     const { service, store } = gateService(1);
-    const first = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const first = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     expect(first.ok).toBe(true);
     // At the ceiling of 1 — the next is refused.
-    expect((await service.startRun("test-dag" as DagId, null, ADMIN)).ok).toBe(false);
+    expect((await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN)).ok).toBe(false);
     // Settle the first run terminal → it leaves the active index → a slot frees.
-    if (first.ok) await store.port.setStatus(first.value.runId, { kind: "completed", output: 1 });
-    expect((await service.startRun("test-dag" as DagId, null, ADMIN)).ok).toBe(true);
+    if (first.ok) {
+      const lease = store.acquireLease(first.value.runId);
+      await store.port.setStatus(lease, { kind: "running" });
+      await store.port.setStatus(lease, { kind: "completed", output: 1 });
+    }
+    expect((await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN)).ok).toBe(true);
   });
 
   it("a suspended (parked-at-gate) run still occupies a slot — it is non-terminal", async () => {
     const { service, store } = gateService(1);
-    const first = await service.startRun("test-dag" as DagId, null, ADMIN);
+    const first = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
     expect(first.ok).toBe(true);
-    if (first.ok) await store.port.setStatus(first.value.runId, { kind: "suspended", nodeId: "g" as NodeId, prompt: "p" });
+    if (first.ok) {
+      const lease = store.acquireLease(first.value.runId);
+      await store.port.setStatus(lease, { kind: "running" });
+      await store.port.setStatus(lease, { kind: "suspended", nodeId: "g" as NodeId, prompt: nonEmptyString("p") });
+    }
     // Still at the ceiling — a parked run is outstanding, so the next is refused.
-    expect((await service.startRun("test-dag" as DagId, null, ADMIN)).ok).toBe(false);
+    expect((await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN)).ok).toBe(false);
   });
 
   it("UNSET maxQueuedRuns means unlimited — the gate never fires (backwards compatible)", async () => {
     const { service } = gateService(undefined);
     for (let i = 0; i < 5; i++) {
-      expect((await service.startRun("test-dag" as DagId, null, ADMIN)).ok).toBe(true);
+      expect((await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN)).ok).toBe(true);
     }
   });
 });

@@ -11,7 +11,7 @@ import { isConditionalEdge, isDefaultEdge } from "../types/dag.js";
 import type { NodeDef } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import { frameworkError } from "../types/error-factories.js";
-import type { NodeId, DagId } from "../types/ids.js";
+import type { NodeId } from "../types/ids.js";
 import { nodeId, tryNodeId, dagId, DAG_INPUT, isDagInput } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
 import { CONFIDENCE_ORDER, type ConfidenceBucket } from "../types/confidence.js";
@@ -103,6 +103,96 @@ export const validateDagShape = (
         ),
       );
     }
+
+    // Retry-config numeric domains (NodeRetryConfig): backoff delays must be
+    // finite non-negative milliseconds, the ladder must NOT be empty (an
+    // empty ladder has no attempt-0 delay — `every` would pass it vacuously
+    // and the compiled `?? [1000, 2000, 4000]` default never fires for `[]`),
+    // and the jitter ratio a finite value in [0, 1]. A NaN/negative delay or
+    // out-of-range jitter would otherwise flow unvalidated into `applyJitter`
+    // retry scheduling (a NaN/negative delay collapses `setTimeout` to an
+    // immediate retry spin; jitter > 1 can invert the delay sign). Validation
+    // lives at the single mandatory soundness gate with the same
+    // `validation`-kind error naming the offending node.
+    if (node.retry !== undefined) {
+      const { backoffMs, jitterRatio } = node.retry;
+      if (
+        backoffMs !== undefined &&
+        (backoffMs.length === 0 ||
+          !backoffMs.every((ms) => Number.isFinite(ms) && ms >= 0))
+      ) {
+        return err(
+          validationErr(
+            node.id,
+            `node '${node.id}' retry.backoffMs must be a non-empty ladder of finite non-negative numbers`,
+          ),
+        );
+      }
+      if (
+        jitterRatio !== undefined &&
+        !(Number.isFinite(jitterRatio) && jitterRatio >= 0 && jitterRatio <= 1)
+      ) {
+        return err(
+          validationErr(
+            node.id,
+            `node '${node.id}' retry.jitterRatio must be a finite number in [0, 1]`,
+          ),
+        );
+      }
+    }
+  }
+
+  // DAG-level retry budgets (retryLimits / defaultRetryLimit): per-node
+  // retry counts are compared against attempt counters, so the domain is the
+  // same non-negative-safe-integer class as the node-level numeric gates
+  // above. A bare `as Readonly<Record<string, number>>` pass-through (the
+  // pre-fix shape) let NaN/negative/infinite limits flow into `getRetryLimit`
+  // and corrupt the budget. Same single gate, same `validation`-kind error.
+  if (input.retryLimits !== undefined) {
+    for (const [key, limit] of Object.entries(input.retryLimits)) {
+      // The key must NAME a node in this DAG. `retryLimits` is a raw
+      // string-keyed record on the authoring surface — TypeScript erases a
+      // branded key type on `Record<NodeId, number>` back to a string index
+      // signature, so the only place a typo can be caught is here. Left
+      // unchecked it silently no-ops: `getRetryLimit` never finds the entry
+      // and the node quietly runs on `defaultRetryLimit ?? 0` instead of the
+      // budget its author configured.
+      if (!Object.hasOwn(input.nodes, key)) {
+        return err(
+          validationErr(
+            nodeId("__dag__"),
+            `retryLimits['${key}'] names no node in DAG '${input.id}' — a retry budget for an unknown node would be silently ignored`,
+          ),
+        );
+      }
+      if (limit === undefined) {
+        return err(
+          validationErr(
+            nodeId("__dag__"),
+            `retryLimits['${key}'] must be a non-negative safe integer, got undefined`,
+          ),
+        );
+      }
+      if (!Number.isSafeInteger(limit) || limit < 0) {
+        return err(
+          validationErr(
+            nodeId("__dag__"),
+            `retryLimits['${key}'] must be a non-negative safe integer, got ${String(limit)}`,
+          ),
+        );
+      }
+    }
+  }
+  if (
+    input.defaultRetryLimit !== undefined &&
+    (!Number.isSafeInteger(input.defaultRetryLimit) || input.defaultRetryLimit < 0)
+  ) {
+    return err(
+      validationErr(
+        nodeId("__dag__"),
+        `defaultRetryLimit must be a non-negative safe integer, got ${String(input.defaultRetryLimit)}`,
+      ),
+    );
   }
 
   const nodeIds = new Set(entries.map(([id]) => nodeId(id)));
@@ -306,27 +396,20 @@ export const validateDagShape = (
   // without extractWitness simply opt out of freshness tracking (valid for
   // non-freshness-participating fetch nodes).
   for (const [, node] of entries) {
-    if (
-      node.sideEffects.kind === "writes" &&
-      node.sideEffects.extractNewWitness &&
-      !node.sideEffects.extractConditionedOn
-    ) {
+    const se = node.sideEffects;
+    if (se.kind !== "writes") continue;
+    // One XOR, stated once: whichever extractor is present without its twin
+    // names itself in the message.
+    const missing = se.extractNewWitness && !se.extractConditionedOn
+      ? { declared: "extractNewWitness", absent: "extractConditionedOn" }
+      : se.extractConditionedOn && !se.extractNewWitness
+        ? { declared: "extractConditionedOn", absent: "extractNewWitness" }
+        : null;
+    if (missing !== null) {
       return err(
         validationErr(
           node.id,
-          `Node '${node.id}' declares extractNewWitness but is missing extractConditionedOn`,
-        ),
-      );
-    }
-    if (
-      node.sideEffects.kind === "writes" &&
-      node.sideEffects.extractConditionedOn &&
-      !node.sideEffects.extractNewWitness
-    ) {
-      return err(
-        validationErr(
-          node.id,
-          `Node '${node.id}' declares extractConditionedOn but is missing extractNewWitness`,
+          `Node '${node.id}' declares ${missing.declared} but is missing ${missing.absent}`,
         ),
       );
     }

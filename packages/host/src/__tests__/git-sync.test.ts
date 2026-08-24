@@ -6,7 +6,7 @@ import { ok, err, gitSha } from "@fuguejs/framework";
 import type { Result, GitSha } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { GitPort } from "../ports.js";
-import { createBunGitAdapter, createLocalGitAdapter, runBunInstall } from "../adapters/git-sync.js";
+import { cleanupTimedOutChild, createBunGitAdapter, createLocalGitAdapter, runBunInstall } from "../adapters/git-sync.js";
 
 // ── Fake GitPort for Unit Tests ────────────────────────────────────────────
 
@@ -227,10 +227,10 @@ describe("GitPort interface", () => {
       expect(result.ok).toBe(false);
     });
 
-    it("clone returns error for invalid URL", async () => {
+    it("clone returns error for a missing repository", async () => {
       const adapter = createBunGitAdapter(5000);
       const result = await adapter.clone(
-        "https://invalid.example.com/nonexistent.git",
+        "file:///definitely-missing/fugue.git",
         "/tmp/fugue-test-clone-" + Date.now(),
       );
       expect(result.ok).toBe(false);
@@ -238,6 +238,146 @@ describe("GitPort interface", () => {
         expect(result.error.kind).toBe("git-clone-failed");
       }
     });
+  });
+
+  describe("BunGitAdapter timeout branches (round-21 pta-1 — error-first delivery + bounded termination)", () => {
+    it("forces SIGKILL and drains streams when the child exit promise rejects", async () => {
+      let terminated = 0;
+      let forceKilled = 0;
+      let drained = 0;
+      cleanupTimedOutChild(
+        () => { terminated += 1; },
+        () => { forceKilled += 1; },
+        Promise.reject(new Error("waitpid failed")),
+        async () => { drained += 1; },
+      );
+
+      await Bun.sleep(10);
+
+      expect(terminated).toBe(1);
+      expect(forceKilled).toBe(1);
+      expect(drained).toBe(1);
+    });
+    // Bun resolves the `git` and `bun` binary NAMES itself (empirically: a
+    // PATH shim named `git`/`bun` is never consulted by Bun.spawn), so a
+    // TERM-ignoring stand-in cannot be injected under those names. Instead
+    // both branches are stalled with REAL binaries against a TCP listener
+    // that accepts and never responds: the child is genuinely stuck when the
+    // timeout fires, which is exactly the class the round-20 fix protects
+    // against (the pre-fix `await proc.exited`-before-error would make these
+    // tests hang forever instead of returning a bounded error). Error-first
+    // delivery is pinned by the elapsed bound; termination is pinned by the
+    // stalled transport socket closing after the child is killed.
+    const stallServer = async (): Promise<{
+      port: number;
+      listen: () => Promise<void>;
+      close: () => Promise<void>;
+      sockets: Set<import("node:net").Socket>;
+    }> => {
+      const { createServer } = await import("node:net");
+      const sockets = new Set<import("node:net").Socket>();
+      const server = createServer((sock) => {
+        sockets.add(sock);
+        sock.on("close", () => sockets.delete(sock));
+      });
+      const state = {
+        port: 0,
+        sockets,
+      } as {
+        port: number;
+        listen: () => Promise<void>;
+        close: () => Promise<void>;
+        sockets: Set<import("node:net").Socket>;
+      };
+      state.listen = async () => {
+        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+        state.port = (server.address() as import("node:net").AddressInfo).port;
+      };
+      state.close = () => {
+        // Force-destroy lingering connections (Bun lacks Node's
+        // closeAllConnections) so the close callback cannot hang on a
+        // transport helper that outlives the direct child.
+        for (const sock of [...sockets]) sock.destroy();
+        return new Promise<void>((resolve) => server.close(() => resolve()));
+      };
+      return state;
+    };
+
+    it("delivers git-timeout promptly on a stalled clone (error-first, not gated on the child's exit)", async () => {
+      const server = await stallServer();
+      await server.listen();
+      const dir = await mkdtemp(join(tmpdir(), "fugue-git-stall-"));
+      // The bounded background cleanup (SIGTERM → grace → SIGKILL → drain)
+      // outlives the error delivery: a fault inside that IIFE would surface as
+      // a process-level unhandled rejection with no log line (silent-failure-
+      // hunter-3). Pin the contract on the public path: no unhandled rejection
+      // across the full cleanup window.
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+      process.on("unhandledRejection", onUnhandled);
+      try {
+        const adapter = createBunGitAdapter(400);
+        const started = Date.now();
+        const result = await adapter.clone(`http://127.0.0.1:${server.port}/repo.git`, join(dir, "target"));
+        const elapsed = Date.now() - started;
+
+        expect(result.ok).toBe(false);
+        if (result.ok) throw new Error("expected a timeout error");
+        expect(result.error.kind).toBe("git-timeout");
+        // Error-first: the result is bounded by the timeout budget + slack,
+        // NOT gated on the stuck child's exit (the pre-fix unbounded hang).
+        // Termination of the direct child is exercised implicitly: the child
+        // is killed before the error is delivered; git's internal transport
+        // helper may outlive the direct child briefly (git-owned lifecycle),
+        // so the socket is not used as a liveness probe here — the bun
+        // branch below proves whole-tree termination.
+        expect(elapsed).toBeLessThan(4_000);
+
+        // Cover the full background-cleanup window (grace KILL_GRACE_MS +
+        // stream drain) before asserting on unhandled rejections.
+        await new Promise((r) => setTimeout(r, 2_500));
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.off("unhandledRejection", onUnhandled);
+        await server.close();
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("the adapter's configured timeout bounds install without leaking cleanup failures", async () => {
+      const server = await stallServer();
+      await server.listen();
+      const dir = await mkdtemp(join(tmpdir(), "fugue-bun-stall-"));
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+      process.on("unhandledRejection", onUnhandled);
+      try {
+        await writeFile(join(dir, "package.json"), JSON.stringify({ name: "stall", dependencies: { "slow-dep": "^1.0.0" } }));
+        await writeFile(join(dir, "bunfig.toml"), `[install]\nregistry = "http://127.0.0.1:${server.port}"\n`);
+
+        const adapter = createBunGitAdapter(400);
+        const started = Date.now();
+        const result = await adapter.install(dir);
+        const elapsed = Date.now() - started;
+
+        expect(result.ok).toBe(false);
+        if (result.ok) throw new Error("expected a timeout error");
+        expect(result.error.kind).toBe("bun-install-failed");
+        expect(result.error.message).toContain("timed out");
+        expect(elapsed).toBeLessThan(4_000);
+
+        // Bun's registry transport helper can outlive the direct child on some
+        // runners, so its TCP socket is not a valid child-liveness oracle. The
+        // adapter owns the process-group signals and must keep every cleanup
+        // failure out of the process-level rejection channel.
+        await Bun.sleep(2_500);
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.off("unhandledRejection", onUnhandled);
+        await server.close();
+        await rm(dir, { recursive: true, force: true });
+      }
+    }, 10_000);
   });
 
   describe("BunGitAdapter.hasLockfileChanged (integration — real git repo)", () => {

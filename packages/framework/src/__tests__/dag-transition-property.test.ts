@@ -8,15 +8,17 @@
  * without throwing.
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it } from "bun:test";
 import fc from "fast-check";
 import { dagTransition } from "../dag-runtime/transition.js";
 import type { DagPhase, DagEvent, DagMachineContext } from "../dag-runtime/types.js";
 import type { FrameworkError } from "../types/errors.js";
-import type { NodeId, DagId } from "../types/ids.js";
+import type { NodeId } from "../types/ids.js";
 import type { DagDef } from "../types/dag.js";
-import { N, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import { N, D } from "./_id-helpers.js";
+import { FE } from "./_freshness-helpers.js";
 import { z } from "zod";
+import { nonEmptyString } from "../types/non-empty-string.js";
 
 // ---------------------------------------------------------------------------
 // Minimal DagDef + DagMachineContext fixture for transitions
@@ -62,6 +64,9 @@ const minimalCtx: DagMachineContext = {
   humanReviewPrompts: new Map(),
   edges: minimalDag.edges,
   confidenceByNode: new Map(),
+  priorWitnesses: new Map(),
+  freshnessCompletedNodeIds: new Set(),
+  freshnessExecutionEpoch: FE(),
 };
 
 // ---------------------------------------------------------------------------
@@ -69,6 +74,9 @@ const minimalCtx: DagMachineContext = {
 // ---------------------------------------------------------------------------
 
 const arbNodeId = fc.constantFrom(N("a"), N("b"), N("unknown"));
+const arbPrompt = fc.string({ minLength: 1, maxLength: 20 })
+  .filter((value) => value.trim() !== "")
+  .map(nonEmptyString);
 
 const arbFrameworkError: fc.Arbitrary<FrameworkError> = fc.oneof(
   fc.record({
@@ -103,7 +111,7 @@ const arbDagPhase: fc.Arbitrary<DagPhase> = fc.oneof(
     kind: fc.constant("awaiting-human" as const),
     nodeId: arbNodeId,
     output: fc.oneof(fc.constant(null), fc.string(), fc.integer()),
-    prompt: fc.string({ maxLength: 20 }),
+    prompt: arbPrompt,
     pendingReviews: fc.array(arbNodeId, { maxLength: 3 }),
     wave: fc.nat(5),
   }),
@@ -113,7 +121,7 @@ const arbDagPhase: fc.Arbitrary<DagPhase> = fc.oneof(
     kind: fc.constant("suspended" as const),
     nodeId: arbNodeId,
     output: fc.oneof(fc.constant(null), fc.string(), fc.integer()),
-    prompt: fc.string({ maxLength: 20 }),
+    prompt: arbPrompt,
     pendingReviews: fc.array(arbNodeId, { maxLength: 3 }),
     wave: fc.nat(5),
   }),
@@ -121,7 +129,7 @@ const arbDagPhase: fc.Arbitrary<DagPhase> = fc.oneof(
     kind: fc.constant("retrying-hook" as const),
     nodeId: arbNodeId,
     output: fc.oneof(fc.constant(null), fc.string()),
-    prompt: fc.string({ maxLength: 20 }),
+    prompt: arbPrompt,
     attempt: fc.integer({ min: 1, max: 5 }),
     nextDelayMs: fc.integer({ min: 100, max: 5000 }),
     pendingReviews: fc.array(arbNodeId, { maxLength: 3 }),
@@ -144,6 +152,8 @@ const arbDagEvent: fc.Arbitrary<DagEvent> = fc.oneof(
     wave: fc.nat(5),
     outputs: fc.constant(new Map<NodeId, unknown>()),
     routingDecisions: fc.constant(new Map()),
+    priorWitnesses: fc.constant(new Map()),
+    freshnessCompletedNodeIds: fc.constant(new Set<NodeId>()),
   }),
   fc.record({
     type: fc.constant("node-failed" as const),

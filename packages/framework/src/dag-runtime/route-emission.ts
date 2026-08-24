@@ -13,14 +13,16 @@ import type { Decision } from "./routing.js";
 import { decideRoute } from "./routing.js";
 import { isConditionalEdge } from "../types/dag.js";
 import { emit } from "./emit.js";
-import type { PostWaveContext } from "./wave-execution.js";
+import type { PostWaveContext } from "./post-wave-context.js";
+import { nodeErrorEmitter } from "./post-wave-context.js";
+import { safeErrorMessage } from "../types/safe-error.js";
 
 /**
  * Result of the routing-decision phase. Contains the per-source-node
  * decisions for the wave-done event, and an optional early-failure event
  * when a predicate is malformed (short-circuits the wave).
  */
-export interface RoutingPhaseResult {
+interface RoutingPhaseResult {
   /** Per-source-node routing decisions. Empty map when no conditional edges fired. */
   readonly decisions: ReadonlyMap<NodeId, Decision>;
   /** Per-node extracted confidence values for persisting into the transition context. */
@@ -42,6 +44,13 @@ export function emitRoutingDecisions(
   const routingDecisions = new Map<NodeId, Decision>();
   const confidenceValues = new Map<NodeId, Confidence | null>();
 
+  /**
+   * THE one node-error emission (round-38 cs-2, replacing three near-copies;
+   * now shared with the freshness step via `nodeErrorEmitter`). Each site
+   * differs only in the node it blames, the typed error and the display text.
+   */
+  const emitNodeError = nodeErrorEmitter(ctx);
+
   for (const nodeId of waveNodeIds) {
     if (!newOutputs.has(nodeId)) continue;
     const outgoing = machineCtx.outgoingByNode.get(nodeId) ?? [];
@@ -59,16 +68,7 @@ export function emitRoutingDecisions(
       if (!outputCheck.success) {
         const message = `output schema validation failed before predicate evaluation for node '${nodeId}': ${outputCheck.error.message}`;
         const schemaErr: FrameworkError = { kind: "predicate-malformed", nodeId, message };
-        emit(nodeCtx, {
-          type: "node-error",
-          runId: nodeCtx.runId,
-          dagId,
-          nodeId,
-          sideEffects: nodeDef.sideEffects,
-          timestamp: stamp(),
-          error: message,
-          frameworkError: schemaErr,
-        });
+        emitNodeError(nodeId, message, schemaErr);
         return {
           decisions: routingDecisions,
           confidenceValues,
@@ -83,18 +83,9 @@ export function emitRoutingDecisions(
       try {
         upstreamConfidence = nodeDef.confidence.extract(newOutputs.get(nodeId));
       } catch (e) {
-        const message = `confidence.extract failed for node '${nodeId}': ${e instanceof Error ? e.message : e}`;
+        const message = `confidence.extract failed for node '${nodeId}': ${safeErrorMessage(e)}`;
         const crashErr: FrameworkError = { kind: "node-crash", nodeId, retriability: "non-retriable", message };
-        emit(nodeCtx, {
-          type: "node-error",
-          runId: nodeCtx.runId,
-          dagId,
-          nodeId,
-          sideEffects: nodeMap.get(nodeId)?.sideEffects,
-          timestamp: stamp(),
-          error: message,
-          frameworkError: crashErr,
-        });
+        emitNodeError(nodeId, message, crashErr);
         return {
           decisions: routingDecisions,
           confidenceValues,
@@ -111,16 +102,7 @@ export function emitRoutingDecisions(
         nodeId: decision.fromNodeId,
         message: decision.message,
       };
-      emit(nodeCtx, {
-        type: "node-error",
-        runId: nodeCtx.runId,
-        dagId,
-        nodeId,
-        sideEffects: nodeMap.get(nodeId)?.sideEffects,
-        timestamp: stamp(),
-        error: `predicate-malformed: ${decision.message}`,
-        frameworkError: predErr,
-      });
+      emitNodeError(nodeId, `predicate-malformed: ${decision.message}`, predErr);
       return {
         decisions: routingDecisions,
         confidenceValues,

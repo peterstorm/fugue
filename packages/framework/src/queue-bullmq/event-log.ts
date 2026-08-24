@@ -1,9 +1,11 @@
 // createRedisStreamReader — XRANGE-backed EventLogReader for replay
-// Only queue-bullmq/** may import ioredis (enforced by check-imports.ts)
+// ioredis is imported here and by the three named Redis adapter files
+// (see the check-imports.ts Enforces list)
 
 import type Redis from "ioredis";
 import type { EventLogOpts, EventLogReader } from "../queue/types.js";
 import type { RecordedEvent } from "../state-machine/types.js";
+import { isRecordedEvent } from "../state-machine/replay.js";
 import { defaultStreamKey } from "./job.js";
 import { deserializeValue } from "../state-machine/serialize.js";
 import { fwLogger } from "../logger.js";
@@ -67,9 +69,10 @@ export function createRedisStreamReader(
       // For the half-open semantic [fromMs, toMs):
       //   start = `${fromMs}-0`           (first entry at or after fromMs)
       //   end   = `${toMs - 1}-18446744073709551615`  (last entry strictly before toMs)
-      // Redis treats entry IDs lexicographically with ms.seq numeric ordering;
-      // using max u64 as the seq portion of the end bound captures every
-      // entry recorded at the (toMs - 1)-th millisecond.
+      // Redis compares entry IDs as numeric uint64 pairs (ms field, then seq
+      // field) — NOT lexicographically; using max u64 as the seq portion of
+      // the end bound captures every entry recorded at the (toMs - 1)-th
+      // millisecond precisely because that ordering is numeric.
       const start = `${fromMs}-0`;
       const end = `${toMs - 1}-18446744073709551615`;
       const entries = await redis.xrange(key, start, end);
@@ -88,9 +91,9 @@ export function createRedisStreamReader(
  * Forward-compatible across the envelope rollout:
  * - **New format**: payload is a JSON-encoded `{ recordedAtMs, event }` envelope.
  *   Used as-is after `deserializeValue` restores Map/Set tagging.
- * - **Legacy format**: payload is the raw domain event (no envelope wrapper).
- *   Detected by absence of both `recordedAtMs` and `event` fields. The
- *   envelope is synthesized with `recordedAtMs` parsed from the stream
+ * - **Legacy format**: any payload that does not satisfy `isRecordedEvent` is
+ *   treated as a raw domain event. The envelope is synthesized with
+ *   `recordedAtMs` parsed from the stream
  *   entry ID's millisecond prefix (`1715200000000-0` → `1715200000000`).
  */
 function parseEnvelope(
@@ -99,14 +102,28 @@ function parseEnvelope(
   fields: string[],
 ): RecordedEvent<unknown> {
   const payloadIndex = fields.indexOf("payload");
-  if (payloadIndex === -1 || payloadIndex + 1 >= fields.length) {
-    // No payload field — fall back to reconstructing from all fields.
+  if (payloadIndex === -1) {
+    // Genuine legacy entry (no payload field at all) — reconstruct from the
+    // raw field pairs, as before. Kept silent on purpose: this is the legacy
+    // encoding, not corruption.
     const obj: Record<string, string> = {};
     for (let i = 0; i < fields.length; i += 2) obj[fields[i]] = fields[i + 1];
     const { recordedAtMs, synthetic } = parseEntryIdTimestamp(entryId);
     return synthetic
       ? { recordedAtMs, event: obj, synthetic }
       : { recordedAtMs, event: obj };
+  }
+  if (payloadIndex + 1 >= fields.length) {
+    // The `payload` KEY is present but has NO value — a truncated/partial
+    // stream entry. Same tampering class as corrupt JSON below: fail closed
+    // loudly instead of fabricating `{ payload: undefined }` events that
+    // would replay through the machine as if they were history.
+    fwLogger().warn(
+      `[readEvents] stream "${streamKey}" entry "${entryId}" has a payload key with no value — refusing to fabricate an event`,
+    );
+    throw new Error(
+      `[readEvents] Corrupt event in stream "${streamKey}" entry "${entryId}": payload field is present but has no value`,
+    );
   }
 
   const raw = fields[payloadIndex + 1];
@@ -126,7 +143,7 @@ function parseEnvelope(
     );
   }
 
-  if (isEnvelope(parsed)) return parsed;
+  if (isRecordedEvent(parsed)) return parsed;
   // Legacy bare payload: synthesize the envelope from the entry ID timestamp.
   const { recordedAtMs, synthetic } = parseEntryIdTimestamp(entryId);
   return synthetic
@@ -134,20 +151,12 @@ function parseEnvelope(
     : { recordedAtMs, event: parsed };
 }
 
-/**
- * Type guard for the new envelope shape. Forward-compatible: extra fields are
- * allowed (we only check the required keys), so adding `workerId` /
- * `correlationId` later does not break this check.
- */
-function isEnvelope(v: unknown): v is RecordedEvent<unknown> {
-  return (
-    typeof v === "object" &&
-    v !== null &&
-    "recordedAtMs" in v &&
-    typeof (v as { recordedAtMs: unknown }).recordedAtMs === "number" &&
-    "event" in v
-  );
-}
+// Envelope-vs-bare-payload discrimination is the SHARED guard owned beside
+// the `RecordedEvent` type (state-machine/replay.ts `isRecordedEvent` — one
+// encoding): a stored envelope whose `synthetic` field is
+// present-but-non-boolean fails the guard and is treated as a legacy bare
+// payload (re-enveloped from the entry ID) instead of silently passing as
+// envelope-shaped.
 
 /**
  * Total count of malformed entry IDs seen this process. Used to log at
@@ -175,6 +184,19 @@ export function __resetEventLogState(): void {
 export const __parseEntryIdTimestamp = (
   entryId: string,
 ): { recordedAtMs: number; synthetic: boolean } => parseEntryIdTimestamp(entryId);
+
+/**
+ * Test-only re-export of the envelope parser. The truncated-payload fail-closed
+ * branch is unreachable through ioredis XADD
+ * (Redis itself rejects odd field lists), but real streams restored from
+ * RDB snapshots or written by other writers can violate the invariant — so
+ * the branch is pinned here, unit-level.
+ */
+export const __parseEnvelope = (
+  streamKey: string,
+  entryId: string,
+  fields: string[],
+): RecordedEvent<unknown> => parseEnvelope(streamKey, entryId, fields);
 
 /**
  * Parse the millisecond prefix from a Redis Stream entry ID

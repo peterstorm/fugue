@@ -13,31 +13,27 @@
 //   FR-027  → ADR-0005 (retry backoff with jitter)
 //   FR-029a → ADR-0013 (onHumanReview hook crash retry)
 
-import { match } from "ts-pattern";
+import { match, P } from "ts-pattern";
 import type { Executor } from "../state-machine/types.js";
-import type { DagPhase, DagEvent, DagMachineContext, HumanAction } from "./types.js";
-import { EXECUTOR_NODE_ID } from "./types.js";
+import type { DagPhase, DagEvent, DagMachineContext } from "./types.js";
 import type { DagDef } from "../types/dag.js";
 import type { NodeDef, NodeContext, ValidatedNodeContext } from "../types/node.js";
 import type { MintingAuthority } from "../types/capability-broker.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeId, DagId } from "../types/ids.js";
-import { type Result, ok, err } from "../types/result.js";
 import { emit } from "./emit.js";
-import { applyJitter } from "../shared/jitter.js";
-import { fwLogger } from "../logger.js";
+import { applyJitter, DEFAULT_JITTER_RATIO } from "../shared/jitter.js";
 import { emitHumanIntervention } from "./human-emission.js";
 import { executeWave, type WaveConfig } from "./wave-execution.js";
 import { enrichHumanRespondedEvent, type UnenrichedDagEvent } from "./reroute.js";
-import type { Witness } from "../types/freshness.js";
 import { type FreshnessIndex, InMemoryFreshnessIndex } from "./freshness-check.js";
 import { type NodeSpanOutcome } from "./node-span.js";
+import { safeErrorMessage, safeErrorStack } from "../types/safe-error.js";
+import type { NonEmptyString } from "../types/non-empty-string.js";
 
 // ---------------------------------------------------------------------------
 // Backoff + jitter
 // ---------------------------------------------------------------------------
-
-const DEFAULT_JITTER_RATIO = 0.2;
 
 const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
   new Promise((resolve) => {
@@ -76,25 +72,28 @@ const validateApproveEdit = (
 };
 
 /**
+ * The human-review hook the executor calls when a node's wave suspends. Declared
+ * once (round-38 cs-3) rather than inlined at both the private helper and the
+ * public `buildDagExecutor` signature, so the two can never drift.
+ */
+export type OnHumanReviewHook = (req: {
+  nodeId: NodeId;
+  output: unknown;
+  prompt: NonEmptyString;
+}) => Promise<import("./types.js").HumanReviewOutcome>;
+
+/**
  * Shared body of the `awaiting-human`, `suspended`, and `retrying-hook`
- * executor branches. All three paths: check for a wired hook, invoke it, catch
- * exceptions into a `node-failed`, validate `approve-with-edit` output against
- * the node schema, and finally emit `human-responded` (or `human-suspend` when
- * the hook returns `pending`). Only the retrying-hook branch prepends a sleep —
- * that lives at the call site.
+ * executor branches. All three paths check for a wired hook, invoke it, catch
+ * exceptions into `node-failed`, validate edited output, and emit the resulting
+ * response/suspend event. Retry sleep remains at the call site.
  */
 const callHumanReviewHook = async (
   phaseKind: "awaiting-human" | "retrying-hook" | "suspended",
   nodeId: NodeId,
   output: unknown,
-  prompt: string,
-  hooks: {
-    onHumanReview?: (req: {
-      nodeId: NodeId;
-      output: unknown;
-      prompt: string;
-    }) => Promise<import("./types.js").HumanReviewOutcome>;
-  } | undefined,
+  prompt: NonEmptyString,
+  hooks: { onHumanReview?: OnHumanReviewHook } | undefined,
   nodeMap: Map<NodeId, NodeDef<unknown, unknown>>,
   nodeCtx: NodeContext,
   dagId: DagId,
@@ -118,9 +117,9 @@ const callHumanReviewHook = async (
   try {
     outcome = await hooks.onHumanReview({ nodeId, output, prompt });
   } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    const stack = e instanceof Error ? e.stack : undefined;
-    const crash: FrameworkError = { kind: "node-crash", nodeId, retriability: "retriable", message, stack };
+    const message = safeErrorMessage(e);
+    const stack = safeErrorStack(e);
+    const crash: FrameworkError = { kind: "node-crash", nodeId, retriability: "retriable", message, ...(stack !== undefined ? { stack } : {}) };
     emit(nodeCtx, {
       type: "node-error",
       runId: nodeCtx.runId,
@@ -207,11 +206,7 @@ export const buildDagExecutor = (
   dag: DagDef,
   nodeCtx: ValidatedNodeContext,
   hooks?: {
-    onHumanReview?: (req: {
-      nodeId: NodeId;
-      output: unknown;
-      prompt: string;
-    }) => Promise<import("./types.js").HumanReviewOutcome>;
+    onHumanReview?: OnHumanReviewHook;
     /** Called once per wave with the per-node outcomes; the caller folds them into run-level meta. */
     recordOutcomes?: (outcomes: readonly NodeSpanOutcome[]) => void;
     /**
@@ -228,15 +223,15 @@ export const buildDagExecutor = (
     random?: () => number;
     /**
      * Wall-clock source for observer-event `timestamp` fields. Threaded into
-     * `runWave`, `callHumanReviewHook`, and `runNodeShared`. Defaults to
+     * `executeWave`, `callHumanReviewHook`, and `runNodeShared`. Defaults to
      * `Date.now`; tests pass a deterministic clock so event ordering is
      * checkable via property tests.
      */
     now?: () => number;
     /**
-     * In-memory freshness index for single-process witness tracking. When
-     * omitted, a private instance is created per executor. Pass a shared
-     * instance to enable cross-DAG freshness detection within a process.
+     * FreshnessIndex port for witness tracking. When omitted, a private
+     * in-memory adapter is created per executor. Pass a shared or durable
+     * adapter to coordinate freshness detection beyond one executor.
      */
     freshnessIndex?: FreshnessIndex;
     /**
@@ -258,22 +253,8 @@ export const buildDagExecutor = (
   const nowFn = hooks?.now ?? Date.now;
   const freshnessIndex = hooks?.freshnessIndex ?? new InMemoryFreshnessIndex();
 
-  // Track captured witnesses for HumanInterventionEvent context.
-  // Keyed by resource so only the latest witness per resource is retained—
-  // prevents unbounded growth for long-running DAGs with many reads nodes.
-  // Witnesses accumulate across all waves for the lifetime of the executor,
-  // so a human gate in a later wave sees all prior reads.
-  //
-  // Concurrent reads within the same wave: when multiple nodes in one wave
-  // read the same resource, the last to complete wins (Map.set semantics).
-  // This is safe because same-wave nodes execute at the same logical instant;
-  // the latest witness value is the freshest. For deterministic ordering in
-  // tests, sort witnesses by capturedAtMs.
-  const capturedWitnesses = new Map<string, Witness>();
-
   const waveConfig: WaveConfig = {
     dag, nodeMap, nodeCtx, resumeCheckpoint, nowFn, freshnessIndex,
-    witnessAccumulator: capturedWitnesses,
     minting: hooks?.minting,
   };
 
@@ -302,7 +283,7 @@ export const buildDagExecutor = (
     phaseKind: "awaiting-human" | "retrying-hook" | "suspended",
     nodeId: NodeId,
     output: unknown,
-    prompt: string,
+    prompt: NonEmptyString,
     machineCtx: DagMachineContext,
     delayMs?: number,
   ): Promise<DagEvent> => {
@@ -328,7 +309,7 @@ export const buildDagExecutor = (
         dag.id,
         nowFn,
         awaitStartMs,
-        [...capturedWitnesses.values()],
+        [...machineCtx.priorWitnesses.values()],
       );
       if (!emitResult.ok) {
         return { type: "node-failed", nodeId, error: emitResult.error } satisfies DagEvent;
@@ -349,22 +330,17 @@ export const buildDagExecutor = (
       .with({ kind: "pending" }, () => ({ type: "start" } as DagEvent))
 
       // -----------------------------------------------------------------------
-      // retrying: sleep with jitter then re-run the failing node in its wave
-      // FR-027: delay = nextDelayMs * (1 ± jitterRatio) — symmetric jitter via applyJitter
+      // retrying / running: execute the wave and record its outcomes. Both
+      // payloads carry `wave` and the bodies are byte-identical — they diverge
+      // only in the pre-sleep the retrying path takes (FR-027 jittered delay
+      // before re-running the failed node's wave).
       // -----------------------------------------------------------------------
-      .with({ kind: "retrying" }, async (p) => {
-        const abortEvent = await sleepWithAbortCheck(p.nextDelayMs, p.nodeId);
-        if (abortEvent) return abortEvent;
+      .with({ kind: P.union("retrying", "running") }, async (p) => {
+        if (p.kind === "retrying") {
+          const abortEvent = await sleepWithAbortCheck(p.nextDelayMs, p.nodeId);
+          if (abortEvent) return abortEvent;
+        }
 
-        const { event, outcomes } = await executeWave(p.wave, machineCtx, waveConfig);
-        recordOutcomes?.(outcomes);
-        return event;
-      })
-
-      // -----------------------------------------------------------------------
-      // running: run the current wave
-      // -----------------------------------------------------------------------
-      .with({ kind: "running" }, async (p) => {
         const { event, outcomes } = await executeWave(p.wave, machineCtx, waveConfig);
         recordOutcomes?.(outcomes);
         return event;

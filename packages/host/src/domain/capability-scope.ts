@@ -52,10 +52,10 @@ const KNOWN_SCOPES = {
 } as const;
 
 /** Microsoft Graph operations this layer recognises — derived from `KNOWN_SCOPES`. */
-export type MsGraphOperation = (typeof KNOWN_SCOPES)["msgraph"][number];
+type MsGraphOperation = (typeof KNOWN_SCOPES)["msgraph"][number];
 
 /** Dynamics operations this layer recognises — derived from `KNOWN_SCOPES`. */
-export type DynamicsOperation = (typeof KNOWN_SCOPES)["dynamics"][number];
+type DynamicsOperation = (typeof KNOWN_SCOPES)["dynamics"][number];
 
 /**
  * A parsed, typed downstream scope. Discriminated by `provider`; the
@@ -104,7 +104,7 @@ export type OperationNarrowedHandle = MailSendHandle | SitesReadHandle | Dynamic
  * A mail to send through the `msgraph:mail.send` handle.
  *
  * `from` is the SENDER MAILBOX (an id or UPN, e.g. `agent@contoso.com`) the
- * message is sent AS — it is REQUIRED and load-bearing (review C2): the handle is
+ * message is sent AS — it is REQUIRED and load-bearing: the handle is
  * built over an APP-ONLY (client-credentials / WIF) token, and Microsoft Graph
  * rejects `/me/sendMail` unconditionally for application-permission tokens
  * ("/me request is only valid with delegated authentication flow"). An app-only

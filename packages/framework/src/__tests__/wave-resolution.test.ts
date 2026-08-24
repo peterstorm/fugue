@@ -1,4 +1,5 @@
 import { describe, it, expect } from "bun:test";
+import { z } from "zod";
 import {
   handleWaveDone,
   advanceToNextWave,
@@ -6,13 +7,12 @@ import {
   activeWaveNodes,
   waveIndexOf,
 } from "../dag-runtime/wave-resolution.js";
-import type { DagMachineContext } from "../dag-runtime/types.js";
-import { EXECUTOR_NODE_ID } from "../dag-runtime/types.js";
 import type { Decision } from "../dag-runtime/routing.js";
 import type { DagDef, EdgeDef } from "../types/dag.js";
 import type { NodeDef } from "../types/node.js";
 import { nonEmptyString } from "../types/non-empty-string.js";
 import { N, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import { testRuntimeContext as mkCtx } from "./_context-factories.js";
 
 // ---------------------------------------------------------------------------
 // Minimal test fixtures
@@ -21,12 +21,12 @@ import { N, D, nodeMap, nodeSet } from "./_id-helpers.js";
 const mkNodeDef = (id: string, opts?: { humanReview?: { prompt: string } }): NodeDef<unknown, unknown> => ({
   id: N(id),
   kind: "transform",
-  inputSchema: { parse: (x: unknown) => x } as any,
-  outputSchema: { parse: (x: unknown) => x } as any,
+  inputSchema: z.unknown(),
+  outputSchema: z.unknown(),
   requires: [] as const,
   sideEffects: { kind: "none" },
   confidence: { mode: "none" },
-  run: async (i: unknown) => ({ ok: true, value: i } as any),
+  run: async (i: unknown) => ({ ok: true, value: i }),
   ...(opts?.humanReview ? { humanReview: { prompt: nonEmptyString(opts.humanReview.prompt) } } : {}),
 });
 
@@ -35,35 +35,6 @@ const mkEdge = (from: string, to: string): EdgeDef => ({
   to: N(to),
   kind: "unconditional",
 });
-
-const mkCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext => {
-  const dag = overrides.dag ?? ({ id: D("test"), nodes: [], edges: [], outputNodeId: undefined } as unknown as DagDef);
-  return {
-    waves: overrides.waves ?? [],
-    outputs: overrides.outputs ?? new Map(),
-    retries: overrides.retries ?? new Map(),
-    initialInput: null,
-    activeNodeIds: overrides.activeNodeIds ?? new Set(),
-    dag,
-    incomingByNode: overrides.incomingByNode ?? new Map(),
-    outgoingByNode: overrides.outgoingByNode ?? new Map(),
-    unconditionalAdj: overrides.unconditionalAdj ?? new Map(),
-    nodeById: overrides.nodeById ?? new Map(),
-    retryConfigs: overrides.retryConfigs ?? new Map(),
-    outputNodeId: dag.outputNodeId,
-    defaultRetryLimit: dag.defaultRetryLimit,
-    retryLimits: dag.retryLimits,
-    humanReviewNodeIds: overrides.humanReviewNodeIds ?? new Set(
-      (dag.nodes ?? []).filter((n) => n.humanReview !== undefined).map((n) => n.id),
-    ),
-    humanReviewPrompts: overrides.humanReviewPrompts ?? new Map(
-      (dag.nodes ?? []).filter((n) => n.humanReview !== undefined).map((n) => [n.id, n.humanReview!.prompt] as const),
-    ),
-    edges: dag.edges ?? [],
-    confidenceByNode: new Map(),
-    ...overrides,
-  };
-};
 
 // ---------------------------------------------------------------------------
 // activeWaveNodes
@@ -112,7 +83,10 @@ describe("collectHumanReviewQueue", () => {
       waves: [[N("c"), N("a"), N("b")]],
       activeNodeIds: nodeSet(["a", "b", "c"]),
       humanReviewNodeIds: new Set([N("a"), N("c")]),
-      humanReviewPrompts: new Map([[N("a"), "review a"], [N("c"), "review c"]]),
+      humanReviewPrompts: new Map([
+        [N("a"), nonEmptyString("review a")],
+        [N("c"), nonEmptyString("review c")],
+      ]),
       nodeById: nodeMap([
         ["a", mkNodeDef("a", { humanReview: { prompt: "review a" } })],
         ["b", mkNodeDef("b")],
@@ -174,7 +148,7 @@ describe("handleWaveDone — human review queue", () => {
       waves: [[N("a"), N("b")]],
       activeNodeIds: nodeSet(["a", "b"]),
       humanReviewNodeIds: new Set([N("a")]),
-      humanReviewPrompts: new Map([[N("a"), "review a"]]),
+      humanReviewPrompts: new Map([[N("a"), nonEmptyString("review a")]]),
       nodeById: nodeMap([
         ["a", mkNodeDef("a", { humanReview: { prompt: "review a" } })],
         ["b", mkNodeDef("b")],
@@ -187,7 +161,7 @@ describe("handleWaveDone — human review queue", () => {
     if (result.state.kind === "awaiting-human") {
       expect(result.state.nodeId).toBe(N("a"));
       expect(result.state.output).toBe("output-a");
-      expect(result.state.prompt).toBe("review a");
+      expect(result.state.prompt).toBe(nonEmptyString("review a"));
       expect(result.state.pendingReviews).toEqual([]);
     }
   });
@@ -197,7 +171,10 @@ describe("handleWaveDone — human review queue", () => {
       waves: [[N("c"), N("a")]],
       activeNodeIds: nodeSet(["a", "c"]),
       humanReviewNodeIds: new Set([N("a"), N("c")]),
-      humanReviewPrompts: new Map([[N("a"), "a"], [N("c"), "c"]]),
+      humanReviewPrompts: new Map([
+        [N("a"), nonEmptyString("a")],
+        [N("c"), nonEmptyString("c")],
+      ]),
       nodeById: nodeMap([
         ["a", mkNodeDef("a", { humanReview: { prompt: "a" } })],
         ["c", mkNodeDef("c", { humanReview: { prompt: "c" } })],
@@ -213,25 +190,6 @@ describe("handleWaveDone — human review queue", () => {
     }
   });
 
-  it("fails when humanReview node has no nodeDef", () => {
-    // nodeById is empty — nodeDef lookup will fail
-    const ctx = mkCtx({
-      waves: [[N("a")]],
-      activeNodeIds: nodeSet(["a"]),
-      nodeById: new Map(), // intentionally empty
-      dag: { id: D("test"), nodes: [], edges: [] } as unknown as DagDef,
-    });
-    // Manually construct a scenario: nodeById empty but the node has humanReview
-    // The collectHumanReviewQueue won't find the node (nodeDef is undefined),
-    // so the queue will be empty and we advance. Test the path where nodeDef IS
-    // found by collectHumanReviewQueue but then the handleWaveDone lookup fails.
-    // This requires nodeById to have a partial entry. Let's use a different approach:
-    // Insert a node with humanReview into nodeById, then remove it after collection.
-    // Actually, the simpler test: wave with review node where nodeById returns undefined
-    // inside handleWaveDone after collection. Since collectHumanReviewQueue checks
-    // nodeById too, we need a mock that returns different values on different calls.
-    // Skip this edge case — it's defensive code that can't be reached in normal operation.
-  });
 });
 
 // ---------------------------------------------------------------------------

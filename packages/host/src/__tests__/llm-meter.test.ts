@@ -59,6 +59,16 @@ describe("llm-meter: accumulate + usageFor", () => {
     expect(m1).not.toBe(m0);
   });
 
+  it("does not expose runtime Map mutation methods", () => {
+    const meter = accumulate(emptyMeter(), runA, { tokensIn: 7, tokensOut: 3 });
+    const escaped = meter.usageByRun as Map<RunId, { tokensIn: number; tokensOut: number }>;
+
+    expect(() => escaped.set(runB, { tokensIn: 1_000, tokensOut: 1_000 })).toThrow();
+    expect(usageFor(meter, runB)).toEqual({ tokensIn: 0, tokensOut: 0 });
+    expect(() => { (usageFor(meter, runA) as { tokensIn: number }).tokensIn = 999; }).toThrow();
+    expect(runTotal(usageFor(meter, runA))).toBe(10);
+  });
+
   it("clamps negative deltas to zero (no budget refunds)", () => {
     let m = emptyMeter();
     m = accumulate(m, runA, { tokensIn: -100, tokensOut: -50 });

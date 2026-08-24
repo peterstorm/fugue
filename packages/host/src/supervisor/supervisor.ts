@@ -1,10 +1,10 @@
 /**
  * Supervisor core — the single inbound HTTP listener for the multi-tenant host
- * (FR-001). It is THIN: per request it authenticates the inbound identity →
+ * (multi-tenant spec FR-001). It is THIN: per request it authenticates the inbound identity →
  * resolves the `Tenant` at the boundary → admits the tenant for a NEW run →
  * routes (pure) → reverse-proxies over the owning worker's UDS with a SIGNED
  * `X-Fugue-Tenant` header. It performs NO DAG execution and holds NO tenant
- * secrets (FR-005).
+ * secrets (multi-tenant spec FR-005).
  *
  * MIRRORS `createHost`: `createSupervisor(deps) => Result<SupervisorInstance,
  * HostError>`, same imperative-shell shape (mutable `let` state, a single
@@ -13,7 +13,7 @@
  * inventing a parallel one.
  *
  * SECURITY POSTURE:
- *   - ZERO tenant secrets (FR-005). `SupervisorDeps` carries only auth material
+ *   - ZERO tenant secrets (multi-tenant spec FR-005). `SupervisorDeps` carries only auth material
  *     (admin token, optional realm-JWT verifier group), the tenant registry
  *     (config + a secrets REFERENCE, never a value), the worker-lifecycle port,
  *     routing config, and the INTERNAL HMAC key. There is structurally no
@@ -22,9 +22,9 @@
  *     sole dereferencer (AD-6). `assertNoTenantSecrets` documents/enforces this.
  *   - FAIL-CLOSED at every boundary: unknown identity → 401; unresolved tenant →
  *     404 (`tenant-unknown`, non-leaking); degraded registry → 404 for NEW runs
- *     (FR-022, via `resolveForNewRun`) while in-flight/status keep working
- *     (FR-023, `canServeRequests` NOT widened); worker down → 503 for that tenant.
- *   - No cross-tenant leakage (FR-040/041): the routing core only ever targets
+ *     (multi-tenant spec FR-022, via `resolveForNewRun`) while in-flight/status keep working
+ *     (multi-tenant spec FR-023, `canServeRequests` NOT widened); worker down → 503 for that tenant.
+ *   - No cross-tenant leakage (multi-tenant spec FR-040/041): the routing core only ever targets
  *     the resolved tenant's own socket, and every refusal error names at most the
  *     caller's OWN tenant.
  *
@@ -48,13 +48,12 @@ import { authenticateIdentity } from "../http/authenticate-identity.js";
 import type { AuthDeps } from "../http/authenticate-identity.js";
 import type { Tenant, TenantRegistryView } from "../domain/tenant.js";
 import { resolveTenant } from "../domain/tenant.js";
-import type { TenantId } from "../domain/tenant.js";
 import type { RedisConnectivityPort, LogPort } from "../ports.js";
 import { startRedisProbe } from "../lifecycle/redis-probe.js";
 import type { RedisProbeHandle } from "../lifecycle/redis-probe.js";
 import { routeRequest, workerSocketForTenant } from "./routing.js";
 import type { AdmissionDecision, WorkerPresence, RouteDecision } from "./routing.js";
-import { proxyToWorker, bunUdsTransport } from "./uds-proxy.js";
+import { proxyToWorker, makeBunUdsTransport, UDS_PROXY_OVERHEAD_MS } from "./uds-proxy.js";
 import type { UdsTransport } from "./uds-proxy.js";
 import { handleAdminTenants } from "../http/handlers/admin/tenants.js";
 import type { AdminTenantsDeps } from "../http/handlers/admin/tenants.js";
@@ -70,7 +69,6 @@ import type { AdminTenantsDeps } from "../http/handlers/admin/tenants.js";
  * maps the result into the pure router's `WorkerPresence` so routing never
  * branches on lifecycle internals — see `presenceFromEnsure`.
  */
-export type { WorkerLifecyclePort } from "./lifecycle/spawn-port.js";
 import type { WorkerLifecyclePort, EnsuredWorker } from "./lifecycle/spawn-port.js";
 
 /**
@@ -84,11 +82,11 @@ export const presenceFromEnsure = (
 ): WorkerPresence =>
   result.ok ? { kind: "live", socketPath: result.value.udsPath } : { kind: "unavailable" };
 
-// ── New-run admission port (registry seam, FR-022) ───────────────────────────
+// ── New-run admission port (registry seam, multi-tenant spec FR-022) ───────────────────────────
 
 /**
  * The OUTCOME of admitting a tenant for a NEW run. A successful admission
- * ACQUIRES a per-tenant concurrency slot (FR-032), so the port must hand back a
+ * ACQUIRES a per-tenant concurrency slot (multi-tenant spec FR-032), so the port must hand back a
  * `release` handle the supervisor invokes ONCE the proxied run completes — that
  * is the slot's counterpart `release`. For a REFUSED admission (over-quota /
  * unknown / unavailable) `release` is a no-op: nothing was acquired, so nothing
@@ -114,8 +112,8 @@ export interface AdmissionOutcome {
 
 /**
  * The NEW-run admission gate. The supervisor binds this to the registry's
- * `resolveForNewRun` (which fails closed while Redis is degraded — FR-022) plus
- * the per-tenant ceiling check (FR-032 via `admitTenant`). Kept as a port so the
+ * `resolveForNewRun` (which fails closed while Redis is degraded — multi-tenant spec FR-022) plus
+ * the per-tenant ceiling check (multi-tenant spec FR-032 via `admitTenant`). Kept as a port so the
  * supervisor stays testable with a fake and so the "new-run uses
  * resolveForNewRun, NOT lookup" contract is enforced at the wiring site, not by
  * convention.
@@ -158,7 +156,7 @@ export interface SupervisorDeps {
   /** Worker lifecycle seam (T8 implements; supervisor only asks). */
   readonly lifecycle: WorkerLifecyclePort;
   /**
-   * Admin tenant lifecycle API deps (FR-025). When wired, the single listener
+   * Admin tenant lifecycle API deps (multi-tenant spec FR-025). When wired, the single listener
    * DISPATCHES `/admin/tenants(/:id)` requests to `handleAdminTenants` BEFORE
    * tenant-resolution/proxy — so the admin API is reachable at runtime and an
    * admin request is never resolved as a tenant or proxied. Optional so tests
@@ -168,7 +166,7 @@ export interface SupervisorDeps {
   /** HTTP-over-UDS transport — Bun in prod, fake in tests. Defaults to Bun's. */
   readonly transport?: UdsTransport;
   /**
-   * FR-022: invoked on every Redis liveness-probe edge (`dead=true` on DOWN,
+   * multi-tenant spec FR-022: invoked on every Redis liveness-probe edge (`dead=true` on DOWN,
    * `dead=false` on RECOVERED) so the binary can drive the registry's NEW-run
    * admission gate (`registry.markRedisDegraded`). The supervisor's data path is
    * read-only, so without this the registry's `degraded` flag would only flip on
@@ -177,7 +175,7 @@ export interface SupervisorDeps {
    * the moment the probe sees Redis die (the admission port collapses
    * `resolveForNewRun`'s error to `unknown`; see main-supervisor.ts), and recovers
    * when it sees Redis return. In-flight/status
-   * (`lookup`) and `canServeRequests` are intentionally unaffected (FR-023).
+   * (`lookup`) and `canServeRequests` are intentionally unaffected (multi-tenant spec FR-023).
    */
   readonly onRedisProbeEdge?: (dead: boolean) => void;
   readonly logger: LogPort;
@@ -194,7 +192,7 @@ export interface SupervisorDeps {
   readonly onShutdown?: () => Promise<void>;
 }
 
-export interface SupervisorInstance {
+interface SupervisorInstance {
   readonly getState: () => HostState;
   /** Handle a single inbound request (exposed for tests; also the serve fetch). */
   readonly handle: (request: Request) => Promise<Response>;
@@ -202,7 +200,7 @@ export interface SupervisorInstance {
   readonly server: { port: number; stop: () => void } | null;
 }
 
-// ── FR-005 zero-secrets guard ────────────────────────────────────────────────
+// ── multi-tenant spec FR-005 zero-secrets guard ────────────────────────────────────────────────
 
 /**
  * A compile-time + runtime witness that the supervisor's deps carry NO tenant
@@ -214,7 +212,7 @@ export interface SupervisorInstance {
  * channel would be an obvious, reviewable edit here.
  */
 export const assertNoTenantSecrets = (_deps: SupervisorDeps): void => {
-  // Intentionally empty: FR-005 is enforced by the SHAPE of SupervisorDeps
+  // Intentionally empty: multi-tenant spec FR-005 is enforced by the SHAPE of SupervisorDeps
   // (no secret-bearing field exists). See module header + tenant.ts SecretsRef.
 };
 
@@ -307,10 +305,15 @@ export const createSupervisor = async (
   // Injected clock (repo-wide discipline — NEVER bare Date.now() in the shell's
   // own state transitions). Defaults to Date.now at this composition seam.
   const clock = deps.clock ?? Date.now;
-  // FR-005: structurally assert no tenant-secret channel exists.
+  // multi-tenant spec FR-005: structurally assert no tenant-secret channel exists.
   assertNoTenantSecrets(deps);
 
-  const transport: UdsTransport = deps.transport ?? bunUdsTransport;
+  // The proxy wait is BOUNDED (see uds-proxy.ts): the deadline is the worker's
+  // own maximum run budget plus connect/stream overhead. Anything past that is a
+  // stalled worker, and an unbounded wait there would permanently leak this
+  // tenant's admission slot (released only in the `finally` below).
+  const transport: UdsTransport =
+    deps.transport ?? makeBunUdsTransport(config.MAX_DAG_TIMEOUT_MS + UDS_PROXY_OVERHEAD_MS);
 
   // ── Mutable state (imperative shell) ───────────────────────────────────────
   // The supervisor has no DAG registry of its own (it routes, it does not
@@ -333,7 +336,7 @@ export const createSupervisor = async (
   // ── Request handler ────────────────────────────────────────────────────────
   const handle = async (request: Request): Promise<Response> => {
     // 0a. LIVENESS / READINESS (unauthenticated — k8s probes + Docker HEALTHCHECK).
-    //     The supervisor owns the single inbound listener (FR-001) and there is no
+    //     The supervisor owns the single inbound listener (multi-tenant spec FR-001) and there is no
     //     Hono router in this path, so these MUST be served HERE, and BEFORE admin
     //     dispatch / auth / tenant-resolution — otherwise an unauthenticated GET
     //     /health is rejected 401 and the container is reported permanently
@@ -346,7 +349,7 @@ export const createSupervisor = async (
       if (pathname === "/readiness") return buildReadinessResponse(state);
     }
 
-    // 0. ADMIN TENANT LIFECYCLE API (FR-025). Dispatch `/admin/tenants(/:id)` to
+    // 0. ADMIN TENANT LIFECYCLE API (multi-tenant spec FR-025). Dispatch `/admin/tenants(/:id)` to
     //    the admin handler BEFORE any tenant-resolution/proxy logic, so an admin
     //    request is NEVER resolved as a tenant or reverse-proxied. The handler
     //    enforces its OWN admin-token authz (and audits refusals); a non-admin
@@ -364,7 +367,7 @@ export const createSupervisor = async (
     }
     const identity: AuthIdentity = identityResult.value;
 
-    // 2. Resolve the Tenant at the boundary (FR-002). Fail-closed + non-leaking:
+    // 2. Resolve the Tenant at the boundary (multi-tenant spec FR-002). Fail-closed + non-leaking:
     //    an identity that maps to no registered tenant → tenant-unknown (404).
     const tenantResult = resolveTenant(identity, deps.registryView);
     if (!tenantResult.ok) {
@@ -372,13 +375,13 @@ export const createSupervisor = async (
     }
     const tenant: Tenant = tenantResult.value;
 
-    // 3. NEW-run admission gate (FR-022). Uses the registry's resolveForNewRun
+    // 3. NEW-run admission gate (multi-tenant spec FR-022). Uses the registry's resolveForNewRun
     //    seam, which fails closed (→ tenant-unknown) while Redis is degraded —
-    //    new runs refuse, but in-flight/status keep working (FR-023). Note we do
+    //    new runs refuse, but in-flight/status keep working (multi-tenant spec FR-023). Note we do
     //    NOT consult canServeRequests here to BLOCK: it stays true while degraded
     //    by design so cached/in-flight work is unaffected; only NEW-run admission
     //    fails closed, exactly as the registry seam dictates.
-    //    ACQUIRE-ON-ADMIT: a successful admit claims a per-tenant slot (FR-032)
+    //    ACQUIRE-ON-ADMIT: a successful admit claims a per-tenant slot (multi-tenant spec FR-032)
     //    and hands back `release`, which we MUST call exactly once after the
     //    proxy completes (a `finally` below, so it runs even if proxyToWorker
     //    throws). A refused admit returns a no-op release — nothing acquired,
@@ -387,7 +390,7 @@ export const createSupervisor = async (
 
     // 4. Ensure the owning worker is live (T8 seam) and derive its presence — but
     //    ONLY when admission ADMITTED the request. The socket on a live presence is
-    //    ALWAYS the resolved tenant's own socket (FR-004) — re-derived defensively so
+    //    ALWAYS the resolved tenant's own socket (multi-tenant spec FR-004) — re-derived defensively so
     //    a lifecycle that returned a mismatched socket cannot cause cross-tenant routing.
     let presence: WorkerPresence;
     if (admission.decision.kind !== "admitted") {
@@ -414,7 +417,7 @@ export const createSupervisor = async (
       if (presence.kind === "live") {
         const expected = workerSocketForTenant(config.WORKER_UDS_DIR, tenant);
         if (presence.socketPath !== expected) {
-          logger.error("[supervisor] lifecycle returned a non-owning socket — refusing (FR-004)", {
+          logger.error("[supervisor] lifecycle returned a non-owning socket — refusing (multi-tenant spec FR-004)", {
             tenant: tenant.id,
           });
           presence = { kind: "unavailable" };
@@ -449,7 +452,7 @@ export const createSupervisor = async (
     }
   };
 
-  // ── HTTP server (single listener — FR-001) ─────────────────────────────────
+  // ── HTTP server (single listener — multi-tenant spec FR-001) ─────────────────────────────────
   let bunServer;
   try {
     bunServer = Bun.serve({
@@ -480,7 +483,7 @@ export const createSupervisor = async (
     config.REDIS_PROBE_INTERVAL_MS,
     {
       onDead: () => {
-        // FR-022: drive the registry's NEW-run admission gate closed FIRST, on
+        // multi-tenant spec FR-022: drive the registry's NEW-run admission gate closed FIRST, on
         // every dead tick (idempotent), so a new run is refused the moment the
         // probe sees Redis down — even before/without any registry write.
         deps.onRedisProbeEdge?.(true);
@@ -493,7 +496,7 @@ export const createSupervisor = async (
         }
       },
       onAlive: () => {
-        // FR-022: re-open the NEW-run gate on recovery (idempotent every tick).
+        // multi-tenant spec FR-022: re-open the NEW-run gate on recovery (idempotent every tick).
         deps.onRedisProbeEdge?.(false);
         if (state.phase === "degraded" && state.reason === "redis-disconnected") {
           const r = redisRecovered(state);
@@ -530,8 +533,3 @@ export const createSupervisor = async (
     get server() { return server; },
   });
 };
-
-// Re-export so the binary's wiring can reference the canServeRequests contract
-// without reaching back into host-state.ts (and to document that NEW-run
-// admission fail-closure lives in the registry seam, NOT in canServeRequests).
-export { canServeRequests };

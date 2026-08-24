@@ -6,12 +6,14 @@ import type { DagDef } from "../types/dag.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeId } from "../types/ids.js";
 import { DAG_INPUT } from "../types/ids.js";
-import { type Result, ok, err } from "../types/result.js";
+import { type Result, ok } from "../types/result.js";
 import type { DagPhase, DagEvent, DagMachineContext } from "./types.js";
 import { dagTransition } from "./transition.js";
 import { topoSort } from "../shared/topo.js";
+import { DEFAULT_JITTER_RATIO } from "../shared/jitter.js";
 import { computeIncomingByNode, computeOutgoingByNode, computeUnconditionalAdj, seedInitialActiveSet } from "./topology.js";
 import { match } from "ts-pattern";
+import { freshnessExecutionEpoch } from "../types/witness.js";
 
 // ---------------------------------------------------------------------------
 // stateProgress — maps DagPhase to a 0–100 progress value
@@ -83,7 +85,7 @@ export const compileDagToMachine = (
       n.retry
         ? [[n.id, {
             backoffMs: n.retry.backoffMs ?? [1000, 2000, 4000],
-            jitterRatio: n.retry.jitterRatio ?? 0.2,
+            jitterRatio: n.retry.jitterRatio ?? DEFAULT_JITTER_RATIO,
           }] as const]
         : [],
     ),
@@ -117,6 +119,9 @@ export const compileDagToMachine = (
     ),
     edges: dag.edges,
     confidenceByNode: new Map(),
+    priorWitnesses: new Map(),
+    freshnessCompletedNodeIds: new Set(),
+    freshnessExecutionEpoch: freshnessExecutionEpoch(0),
   };
 
   const machine: Machine<DagPhase, DagEvent, DagMachineContext> = {
@@ -126,7 +131,10 @@ export const compileDagToMachine = (
       // DagMachineContextPersisted; spread with the live fields to reconstruct
       // the full DagMachineContext.
       const result = dagTransition(state, event, ctx);
-      return { state: result.state, context: { ...ctx, ...result.context } };
+      return {
+        state: result.state,
+        context: { ...ctx, ...result.context, edges: ctx.edges },
+      };
     },
     isTerminal,
     isFailed,

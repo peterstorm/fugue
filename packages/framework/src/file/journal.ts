@@ -1,0 +1,439 @@
+// Durable event journal + atomic projections for the file backend (ADR-0076/ADR-0078).
+//
+// `createFileJournal(directory)` is the WRITE side of the on-disk layout:
+//
+//   <directory>/events/<NNNNNN>-<digest>.json   immutable event records
+//   <directory>/events/append.lock/             transient append lock
+//   <directory>/checkpoint.json                 atomic projection of { schemaVersion, data: { state, context } }
+//   <directory>/progress.json                   atomic projection of { percent }
+//
+// `appendEvent` runs the whole append transaction — list existing event
+// files, keyed dedup by filename digest suffix, `sequence = count`, atomic
+// rename commit — UNDER the per-directory lock (`events/append.lock`,
+// `withFileLock` from `atomic.ts`), so persisted
+// sequences are contiguous and replayable in lock-acquisition order. The
+// relative order of genuinely concurrent calls is scheduler-dependent
+// (FR-013, ADR-0078).
+//
+// The dedup decision is the durable file listing itself — no index. A keyed
+// append (`dedupKey !== ""`) whose `sha256hex(dedupKey)` digest suffix
+// already exists in the listing is a no-op. The durable invariant across a
+// crash-retry boundary is exactly-ONE-record convergence: a crash before the
+// rename leaves 0 records (the retry appends); a crash after the rename
+// leaves 1 record (the retry no-ops) — either way the same key re-derives
+// the same filename and the listing converges on exactly one record; a
+// no-op only happens post-commit (SC-003). Keyless appends are
+// content-addressed via `eventDigestOf` (which folds `sequence|toJson(event)`
+// in) and NEVER dedup — parity with the in-memory/Redis keyless semantics.
+// DedupKey parsing (FR-015) happens at this boundary via
+// `parseOptionalDedupKey` from `event-record.ts`, so only omission/undefined
+// normalizes to keyless and the store can never emit a record the strict
+// reader would reject.
+//
+// `writeCheckpoint`/`writeProgress` commit atomically via `atomicWriteFile`
+// (tmp + rename — a reader observes prior-complete or new-complete, never a
+// partial file; FR-006/FR-007). They are deliberately LOCK-FREE: the
+// single-writer contract (ADR-0078, documented on `createFileJob`'s surface in
+// `job.ts`) guarantees exactly one writer per run directory, and the resume
+// proof backstops any violation.
+//
+// Failure surface (ADR-0080): `JobLike` methods are `Promise<void>` — the port
+// has no error channel — so fs I/O failures THROW a typed `FrameworkError`
+// of kind `cache-error` with the failing operation and the run directory
+// named in the message (operation field + message). A failed append is never
+// swallowed: it must abort the transition so the retry re-derives it. This
+// typed path covers the whole append: list failures, lock-acquire failures
+// (e.g. a file squatting on `events/append.lock`), filename computation, the
+// 6-digit sequence capacity ceiling, and the atomic rename itself. Capacity
+// exhaustion is reported as the existing `cache-error` kind with operation
+// `appendEvent` and precise sequence/directory context, as required by ADR-0080.
+// Invariant violations (a non-FR-015 dedupKey, a non-serializable event, a
+// non-finite clock value, or progress outside [0,100]) use the same closed
+// typed throwing channel: `cache-error` with the exact operation and durable
+// path. No plain runtime exception crosses this exported shell (FR-040).
+//
+// Symlink policy (deliberate divergence from the file checkpointer, pinned in
+// `file-journal.test.ts` — the read/write read-through — and `file-atomic.
+// test.ts` — the rename-replaces-symlink mechanism): the journal FOLLOWS
+// symlinks. `listEventFiles`
+// `statSync`s each record name (following), a symlinked `events/` directory
+// is listed and written through, and `atomicWriteFile`'s rename replaces
+// whatever entry — symlink included — sits at the target path. The
+// checkpointer instead establishes a NON-SYMLINK TRUST ANCHOR per
+// `verified-directory.ts` (rejecting symlinked or swapped entries and
+// re-proving directory identity around its address-then-use I/O); the journal
+// does not need that mechanism because its trust boundary is the caller's run
+// directory — a writer inside it can already forge record bytes directly, so
+// symlink rejection would buy no security, only divergence — and its record
+// names are digest-addressed by the layout contract, not caller-controlled
+// path material (the same trust argument the freshness index documents).
+// If the checkpointer's symlink rejection is ever extended to the journal, the
+// pins in `file-journal.test.ts` / `file-atomic.test.ts` are the behavior to
+// update — they make this divergence test-visible instead of a silent
+// resume-behavior change.
+//
+// Import discipline (INV-1): `node:fs`, `node:path` only among node built-ins.
+
+import { mkdirSync, statSync } from "node:fs";
+import { join } from "node:path";
+// Strict checkpoint-projection reader — ONE read seam for the resume shell
+// and this store-shaped surface (round-21 atl-1).
+import { readCheckpointFile, listJsonFileNames } from "./event-log.js";
+import type { RawCheckpointJson } from "./event-log.js";
+import { atomicWriteFile, withFileLock } from "./atomic.js";
+import { isAlreadyCommitted, planAppend } from "./append-plan.js";
+import {
+  APPEND_LOCK,
+  CHECKPOINT_FILE,
+  EVENTS_DIR,
+  PROGRESS_FILE,
+  parseEventFileName,
+} from "./layout.js";
+import { parseOptionalDedupKey, parseRecordedAtMs } from "./event-record.js";
+import type { RecordedAtMs } from "./event-record.js";
+import { isFileCheckpointCommit } from "./checkpoint-record.js";
+import type { FileCheckpointCommit } from "./checkpoint-record.js";
+import { toJson } from "../state-machine/serialize.js";
+import type { FrameworkError } from "../types/errors.js";
+import { safeDiagnosticRender } from "../types/safe-error.js";
+import { parseFileFactoryClock } from "./options.js";
+import {
+  fileOperationError,
+  fileThrownValueMessage,
+  isFileBackendPathString,
+  type FileOperation,
+} from "./boundary-error.js";
+
+// ---------------------------------------------------------------------------
+// Errors (ADR-0080)
+// ---------------------------------------------------------------------------
+
+/**
+ * Wrap a low-level failure as a typed `cache-error` naming the run directory.
+ * `failureClass` marks the deterministic rejection sites (`"permanent"` —
+ * re-running the append cannot clear them); I/O sites leave it absent
+ * (environment class that replay may clear).
+ */
+const fsFailure = (
+  operation: FileOperation,
+  directory: string,
+  error: unknown,
+  failureClass?: "transient" | "permanent",
+): FrameworkError =>
+  fileOperationError(operation, `run directory ${directory}`, error, failureClass);
+
+// The capacity classification lives with the append decision core it belongs
+// to; re-exported here so existing imports (and its narrow-seam tests) keep
+// resolving.
+export { journalCapacityError } from "./append-plan.js";
+
+// ---------------------------------------------------------------------------
+// Journal options / interface
+// ---------------------------------------------------------------------------
+
+export interface FileJournalOptions {
+  /**
+   * Wall-clock source stamping `recordedAtMs` on appended records.
+   * Injected for deterministic tests; defaults to `Date.now`.
+   */
+  readonly now?: () => number;
+}
+
+/**
+ * The durable store behind `createFileJob` (and `resumeFileJob`'s read side).
+ * Methods throw only typed `FrameworkError` per ADR-0080 — kind `cache-error`
+ * with operation + directory/path named, for infrastructure, capacity, and
+ * every runtime invariant rejection.
+ */
+export interface FileJournal {
+  /**
+   * Durable append. Keyed appends dedup by the durable listing (filename
+   * digest suffix) — a re-derived key is a no-op; keyless appends never
+   * dedup. Serialized against concurrent appends by the per-directory lock.
+   * Throws typed `cache-error(appendEvent)` for every rejection — never swallows.
+   */
+  appendEvent(event: unknown, dedupKey?: string): Promise<void>;
+  /**
+   * Atomic projection of a losslessness-proved checkpoint (tmp + rename),
+   * lock-free by the single-writer contract (ADR-0078). The opaque commit can be
+   * created only through `serializeFileCheckpoint`; arbitrary JSON is rejected
+   * at both the TypeScript and runtime boundaries.
+   */
+  writeCheckpoint(commit: FileCheckpointCommit<unknown, unknown>): Promise<void>;
+  /** Atomic projection of `{ percent }` (tmp + rename). Invalid progress
+   * throws typed `cache-error(writeProgress)` — never persists a
+   * `null`-coerced percent. */
+  writeProgress(percent: number): Promise<void>;
+  /** Raw contents of `checkpoint.json` (the `writeCheckpoint` shape
+   * contract), or `null` when the file is genuinely ABSENT (ENOENT only).
+   * An existing-but-unreadable file is an fs failure, not absence: every
+   * other errno (EACCES, ENOTDIR, …) throws a typed `FrameworkError` —
+   * reporting a permission-broken run directory as "no checkpoint" would
+   * be a silent fresh start. The RAW-JSON brand documents in the type that
+   * parsing is the caller's business (the resume layer's strict
+   * `parseCheckpoint`) — the capability-typed write twin's mirror. */
+  readCheckpoint(): RawCheckpointJson | null;
+}
+
+// `RawCheckpointJson` and its mint live at the byte-read seam
+// (`event-log.ts`), which is the ONE reader both this store-shaped
+// `readCheckpoint` and the ADR-0077 resume proof go through. Re-exported here
+// so the `@fuguejs/framework/file` barrel and existing imports keep resolving.
+export type { RawCheckpointJson } from "./event-log.js";
+export { rawCheckpointJson } from "./event-log.js";
+
+// ---------------------------------------------------------------------------
+// createFileJournal
+// ---------------------------------------------------------------------------
+
+/**
+ * Create the journal store for one run directory. No directory is created
+ * until the first write; run-directory lifecycle is the consumer's concern
+ * (FR-044).
+ */
+export const createFileJournal = (
+  directory: string,
+  opts: FileJournalOptions = {},
+): FileJournal => {
+  let now: () => number;
+  try {
+    // One wrap per failure — the body throws plain diagnostic strings (as
+    // `parseFileFactoryClock` already does) and the single outer catch wraps
+    // once at `"factory configuration"`, structurally identical to the
+    // `createFileCheckpointer` / `createFileFreshnessIndex` factories.
+    if (!isFileBackendPathString(directory)) {
+      throw new Error(
+        `directory must be a non-empty NUL-free string, got ${safeDiagnosticRender(directory)}`,
+      );
+    }
+    now = parseFileFactoryClock(opts);
+  } catch (error) {
+    throw fileOperationError("createFileJournal", "factory configuration", error);
+  }
+  const eventsDir = join(directory, EVENTS_DIR);
+  const checkpointPath = join(directory, CHECKPOINT_FILE);
+  const progressPath = join(directory, PROGRESS_FILE);
+
+  /**
+   * List the durable event files (`*.json`) in append order (ADR-0076: the
+   * 6-digit sequence prefix makes lexicographic order == append order).
+   *
+   * Classification is by name SUFFIX only — `append.lock/` (a directory) and
+   * `.tmp.<unique-token>` litter is invisible because it does not end in `.json`;
+   * there is no stat in the filter, so a DIRECTORY wearing a `*.json` name
+   * IS listed (a name-only counter would count it). Every listed name is
+   * therefore verified against the event-file naming contract
+   * (`parseEventFileName` — the single encoded inverse of the `eventFileName`
+   * output shape in layout.ts: 6-digit zero-padded sequence + `-` + 64-hex
+   * digest + `.json`) and its entry type
+   * (must be a regular file): a foreign `*.json` entry (e.g. `README.json`),
+   * a renamed (externally moved) record, or a non-regular file squatting on
+   * a record name would otherwise silently inflate `sequence = count` (and
+   * a squat could dedup a keyed append as a no-op), committing a record the
+   * journal's own strict reader rejects at resume time — the failure
+   * deferred from append-time to read-time. (A DELETED record, by contrast,
+   * cannot appear in the durable listing at all: it produces a contiguity
+   * gap that the strict reader catches, not a count inflation.) Fail fast
+   * instead, with a typed `cache-error` naming the offending entry — the
+   * writer's listing enforces the same contract the strict reader consumes
+   * (parity in both directions): an entry that could never have been written
+   * by this journal fails the append fast instead of silently inflating the
+   * sequence (fail-fast parity with the strict reader in `event-log.ts`).
+   */
+  const listEventFiles = (): readonly string[] => {
+    let names: string[];
+    try {
+      // The shared listing encoding (event-log.ts `listJsonFileNames`):
+      // readdir + `*.json` filter + sort — ONE definition with the strict
+      // reader's listing so the two can never drift (round-22 cs-6). This
+      // call site keeps its own error mapping (`fsFailure`) and adds the
+      // name-contract/regular-file validation below.
+      names = listJsonFileNames(eventsDir);
+    } catch (error) {
+      throw fsFailure("appendEvent", directory, error);
+    }
+    for (const name of names) {
+      const entryPath = join(eventsDir, name);
+      if (parseEventFileName(name) === null) {
+        throw fsFailure(
+          "appendEvent",
+          directory,
+          new Error(
+            `${entryPath} does not match the event-file naming contract (eventFileName: 6-digit zero-padded sequence + "-" + 64-hex digest + ".json") — a foreign or stale *.json entry would silently inflate the sequence and commit a record the strict reader rejects; fail closed at append time (FR-009)`,
+          ),
+          // Deterministic: the foreign entry reproduces the identical rejection
+          // on every retry of the same append; only manual removal clears it.
+          "permanent",
+        );
+      }
+      let isRegular: boolean;
+      try {
+        isRegular = statSync(entryPath).isFile();
+      } catch (error) {
+        throw fsFailure("appendEvent", directory, error);
+      }
+      if (!isRegular) {
+        throw fsFailure(
+          "appendEvent",
+          directory,
+          new Error(
+            `${entryPath} is not a regular file — a directory (or other non-regular file) wearing a record name is listed by the name-only *.json filter but must not be counted as an event: it would silently inflate the sequence and could dedup a keyed append as a no-op; fail closed at append time, parity with the strict reader (FR-009)`,
+          ),
+          // Deterministic: the squatting entry reproduces the identical rejection
+          // on every retry of the same append; only manual removal clears it.
+          "permanent",
+        );
+      }
+    }
+    return names;
+  };
+
+  const appendEvent = async (event: unknown, suppliedDedupKey?: unknown): Promise<void> => {
+    // Snapshot and parse the runtime argument exactly once. Only omission or
+    // explicit `undefined` maps to the durable keyless sentinel; in
+    // particular, `null` must not be erased by nullish coalescing. The parser
+    // rejects non-string objects without rendering/coercing them, so hostile
+    // getters, Proxies, and stateful conversion hooks cannot execute here.
+    const parsedKey = parseOptionalDedupKey(suppliedDedupKey);
+    if (!parsedKey.ok) {
+      // Deterministic FR-015 violation — the same key fails identically on
+      // every retry, so the retry machinery must fast-fail it.
+      throw fileOperationError(
+        "appendEvent",
+        `run directory ${directory}`,
+        `${parsedKey.error}; value is not FR-015-valid — expected omitted/undefined, explicit keyless "", or keyed ^[A-Za-z0-9:_-]{1,256}$ with no "|"; if this came from runStateMachine's "|"-bearing fallback, inject a digest-based computeDedupKey`,
+        "permanent",
+      );
+    }
+    const key = parsedKey.value;
+    try {
+      mkdirSync(eventsDir, { recursive: true });
+    } catch (error) {
+      throw fsFailure("appendEvent", directory, error);
+    }
+
+    // The whole append transaction — list, dedup, sequence, commit — runs
+    // under the per-directory lock. Persisted sequences are therefore
+    // contiguous and replayable in acquisition order (in-process via
+    // Promise.all or across processes); concurrent relative order is chosen
+    // by the scheduler.
+    //
+    // Acquisition, lock-body, and owned-release failures are all normalized
+    // at the append boundary (ADR-0080). `withFileLock` arbitrates body vs cleanup:
+    // release failure rejects an otherwise successful body, while a body
+    // failure remains primary if cleanup also fails.
+    const lockPath = join(eventsDir, APPEND_LOCK);
+    try {
+      await withFileLock(lockPath, () => {
+        const existing = listEventFiles();
+
+        // Dedup FIRST — before the clock is touched — so a deduped append
+        // cannot fail on a clock it never needed (SC-003 / FR-015).
+        if (isAlreadyCommitted(existing, key)) return;
+
+        // The injected clock is stamped inside the append critical section and
+        // is the one dependency that can fail without touching the filesystem —
+        // name it explicitly so a throwing or non-finite clock is diagnosed as a
+        // clock failure, not misattributed to the lock machinery or the record
+        // codec (parity with the checkpointer and freshness-index clock guards).
+        // The stamp is minted through `parseRecordedAtMs` — the record codec's
+        // single finiteness clause — so the journal can never hand the
+        // serializer a value the strict reader would reject.
+        let recordedAtMs: RecordedAtMs;
+        try {
+          const parsedStamp = parseRecordedAtMs(now());
+          if (!parsedStamp.ok) throw new Error(parsedStamp.error);
+          recordedAtMs = parsedStamp.value;
+        } catch (error) {
+          // Deterministic: a clock that throws or stamps non-finite fails
+          // identically on every retry of the same append — the same class
+          // the other code-constructed invariant rejections pin "permanent".
+          throw fileOperationError(
+            "appendEvent",
+            `run directory ${directory}`,
+            `clock failed while stamping the append: ${fileThrownValueMessage(error)}`,
+            "permanent",
+          );
+        }
+
+        // Both the plan and `atomicWriteFile` throw ALREADY-TYPED failures
+        // (they name their own operation, location, and inferred failureClass)
+        // — there are no inner catches here. The outer catch re-tags the
+        // `withFileLock` boundary at the public journal surface, so a PRE-LOCK
+        // failure carries exactly one `appendEvent failed at run directory D:`
+        // layer, while a failure INSIDE the lock body carries three: the inner
+        // typed failure, the `withFileLock` boundary layer (which names the lock
+        // path — deliberately retained, pinned by file-freshness-index.test.ts),
+        // and the outer `appendEvent` layer. The lock inner catch wraps
+        // unconditionally, unlike its sibling `acquireFileLock` ride-through —
+        // a maintainer decision, not a comment to deny.
+        const plan = planAppend({ existing, dedupKey: key, recordedAtMs, event, directory });
+        atomicWriteFile(join(eventsDir, plan.fileName), plan.json);
+      });
+    } catch (error) {
+      // withFileLock preserves a primary append-body failure when release also
+      // fails, and rejects on a release failure after an otherwise successful
+      // body. Re-tag both paths at the public journal boundary.
+      throw fsFailure("appendEvent", directory, error);
+    }
+  };
+
+  const writeCheckpoint = async (
+    commit: FileCheckpointCommit<unknown, unknown>,
+  ): Promise<void> => {
+    try {
+      if (!isFileCheckpointCommit(commit)) {
+        throw new TypeError(
+          `checkpoint must be an opaque commit minted by serializeFileCheckpoint, got ${safeDiagnosticRender(commit)}`,
+        );
+      }
+    } catch (error) {
+      // Deterministic caller bug (not an opaque commit) — retrying cannot
+      // clear it; the TypeError's rendered value stays in the message.
+      throw fileOperationError(
+        "writeCheckpoint",
+        checkpointPath,
+        error,
+        "permanent",
+      );
+    }
+    try {
+      mkdirSync(directory, { recursive: true });
+      atomicWriteFile(checkpointPath, commit.json);
+    } catch (error) {
+      throw fsFailure("writeCheckpoint", directory, error);
+    }
+  };
+
+  const writeProgress = async (percent: number): Promise<void> => {
+    // NaN/±Infinity/out-of-range percent would otherwise persist as
+    // `{"percent":null}`. Reject through the same typed throwing shell before
+    // any filesystem touch.
+    if (
+      typeof percent !== "number" ||
+      !Number.isFinite(percent) ||
+      percent < 0 ||
+      percent > 100
+    ) {
+      throw fileOperationError(
+        "writeProgress",
+        progressPath,
+        `percent must be a finite number in [0, 100], got ${safeDiagnosticRender(percent)}`,
+        // Deterministic: the same value fails identically on retry.
+        "permanent",
+      );
+    }
+    const json = toJson({ percent });
+    try {
+      mkdirSync(directory, { recursive: true });
+      atomicWriteFile(progressPath, json);
+    } catch (error) {
+      throw fsFailure("writeProgress", directory, error);
+    }
+  };
+
+  // The shared reader already mints the brand at the byte-read seam.
+  const readCheckpoint = (): RawCheckpointJson | null => readCheckpointFile(directory);
+
+  return { appendEvent, writeCheckpoint, writeProgress, readCheckpoint };
+};

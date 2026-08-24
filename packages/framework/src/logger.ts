@@ -59,3 +59,16 @@ export const __resetFrameworkLogger = (): void => {
  * return value unconditionally.
  */
 export const fwLogger = (): FrameworkLogger => _logger;
+
+/** Emit a diagnostic without allowing a logger transport failure to alter control flow. */
+export const logFrameworkWithoutThrowing = (
+  level: keyof FrameworkLogger,
+  message: string,
+  ...args: readonly unknown[]
+): void => {
+  try {
+    fwLogger()[level](message, ...args);
+  } catch {
+    // Diagnostics are subordinate to the modeled operation outcome.
+  }
+};

@@ -22,6 +22,7 @@ import { type Result, ok, err } from "../types/result.js";
 import { FrameworkAugmentedError } from "../types/errors.js";
 import { runDagStatefulOutcome as runDagStatefulInternal, type BackgroundResult, type StatefulOutcome } from "../dag-runtime/run-dag-stateful.js";
 import type { FreshnessIndex } from "../dag-runtime/freshness-check.js";
+import type { NonEmptyString } from "../types/non-empty-string.js";
 
 export type { BackgroundResult, StatefulOutcome } from "../dag-runtime/run-dag-stateful.js";
 
@@ -52,7 +53,7 @@ export interface RunOptions {
    *
    * @see ADR-0025 — HumanInterventionEvent telemetry design
    */
-  readonly onHumanReview?: (req: { nodeId: import("../types/ids.js").NodeId; output: unknown; prompt: string }) => Promise<HumanReviewOutcome>;
+  readonly onHumanReview?: (req: { nodeId: import("../types/ids.js").NodeId; output: unknown; prompt: NonEmptyString }) => Promise<HumanReviewOutcome>;
   /**
    * ADR-0060: effectively-once decision consumption. Invoked with the resolved
    * gate's `nodeId` AFTER the post-gate state is durably checkpointed, so a host
@@ -218,7 +219,7 @@ export const runDag = async <I, O>(
  */
 export type WorkerJobOutcome<O> =
   | { readonly kind: "completed"; readonly output: O }
-  | { readonly kind: "suspended"; readonly nodeId: NodeId; readonly prompt: string };
+  | { readonly kind: "suspended"; readonly nodeId: NodeId; readonly prompt: NonEmptyString };
 
 /**
  * Worker entry for DURABLE, suspendable DAG runs (ADR-0060). Like

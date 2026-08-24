@@ -5,7 +5,7 @@ import { ok } from "../types/result.js";
 import { createTransformNode } from "../nodes/transform.js";
 
 describe("createTransformNode", () => {
-  it("transform node receives purified context (no ctx passed to transform)", () => {
+  it("transform node receives purified context (no ctx passed to transform)", async () => {
     let receivedArgs: unknown[] = [];
     const node = createTransformNode({
       id: N("t1"),
@@ -17,8 +17,13 @@ describe("createTransformNode", () => {
       },
     });
 
-    // The transform function signature only takes input, not ctx
     expect(node.kind).toBe("transform");
+
+    // The point of the test: the transform is invoked with the INPUT ONLY.
+    // No node context is forwarded, so a transform cannot reach capabilities.
+    const result = await node.run({ x: 21 }, {} as any);
+    expect(result.ok).toBe(true);
+    expect(receivedArgs).toEqual([{ x: 21 }]);
   });
 
   it("sync transform function works via async run wrapper", async () => {

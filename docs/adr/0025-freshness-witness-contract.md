@@ -213,3 +213,73 @@ This is a breaking change to the two self-referential extractor signatures and
 to `witness(...)` (now `ResourceName`, not `string`), taken pre-1.0 while the
 only call sites were the `customer-summary` example app and the framework's own
 tests; no published DAG consumed them.
+
+## Amendment — paired write extractors and single violation identity (2026-08-24)
+
+A `writes` side-effect profile now represents freshness extraction as an
+all-or-none pair: either both `extractConditionedOn` and `extractNewWitness` are
+absent, or both are required. A partially configured write cannot perform a
+conflict check and was already rejected by runtime validation; excluding that
+state from `SideEffectProfile` moves the same invariant to authoring time while
+retaining the runtime guard for forged JavaScript values.
+
+`FreshnessViolationEvent` also no longer stores a second `resource` field. The
+conditioned-on witness already owns the resource being checked, so consumers
+read `conditionedOnWitness.resource`. Removing the duplicate makes disagreement
+between the event resource and its witness unrepresentable rather than relying
+on every producer to stamp matching values.
+
+## Amendment — durable freshness projections (2026-08-24)
+
+`HumanInterventionEvent.context.priorWitnesses` is a run-history fact, not an
+executor-instance cache. The latest captured read witness per resource therefore
+lives in `DagMachineContextPersisted`. Wave execution starts from that immutable
+projection, freshness emission updates an invocation-local copy, and the
+resulting `wave-done` or post-wave `node-failed` event carries it into the pure
+transition. Human-intervention emission reads only from machine context.
+
+Freshness completion is a separate durable fact. A node output can be persisted
+before its post-wave witness bookkeeping runs, so output presence cannot prove
+that bookkeeping completed. `DagMachineContextPersisted.freshnessCompletedNodeIds`
+records the completed prefix explicitly. Every post-wave success or failure
+carries the updated set into the pure transition; a replacement executor starts
+from it and emits only the outstanding suffix. A backward/current-wave human
+reroute invalidates completion proof for the target wave and every later wave,
+just as it invalidates their outputs: those nodes execute again and therefore
+owe updated freshness bookkeeping.
+
+A committed-but-unacknowledged index write is recognized as the same logical
+write on retry. That durable acknowledgement suppresses both another index
+record and another `write-attempted` observer event, so bookkeeping retries do
+not fabricate duplicate node-side-effect observations.
+
+Logical write identity includes a durable **Freshness Execution Epoch**. Epoch 0
+is created with the run; ordinary node and bookkeeping retries preserve it. A
+valid backward/current-wave HITL reroute increments the epoch in the pure
+transition before the replacement wave is checkpointed. `WriteAttemptedEvent`,
+`WriteEntry`, Redis members, and file singletons all carry the epoch. The own-
+write acknowledgement therefore requires `(runId, nodeId, executionEpoch,
+newWitness)` equality: a lost acknowledgement deduplicates, while a rerouted
+same-valued write remains a distinct observed and indexed execution.
+
+The witness projection remains bounded to one witness per resource and the
+completion proof to one node ID per DAG node while both survive durable HITL
+suspension, worker replacement, and requeue. Persisted context parsing requires
+a resource-consistent witness `Map`, a valid node-ID `Set`, and a non-negative
+safe-integer execution epoch; corrupt bytes fail closed before execution resumes.
+
+A later write can supersede the latest conflict candidate without erasing the
+acknowledgement of an earlier logical write. `FreshnessIndex` therefore exposes
+`hasRecordedWrite(identity)` separately from `findConflict(conditionedOn,
+sinceMs)`. Emission asks the acknowledgement question first and suppresses both
+observer and index duplication when it is true. Redis answers with exact-member
+`ZSCORE`; the in-memory adapter keeps an identity-key ledger; the file singleton
+atomically carries a TTL-bounded `acknowledgedWriteKeys` set alongside its one
+latest conflict candidate. The file set is not conflict history and is never
+used by `findConflict`.
+
+The shared Redis member grammar encodes the execution epoch as a fixed-width
+16-digit decimal string. Equal-score unsigned-byte ordering therefore agrees
+with numeric epoch ordering across the `9 → 10` boundary and through
+`Number.MAX_SAFE_INTEGER`; strict decoders reject numeric or non-canonical epoch
+fields.

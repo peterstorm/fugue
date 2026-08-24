@@ -12,7 +12,7 @@
  * Both feed the SAME `tenantConfig` smart constructor (`tenant-registry.ts`), so
  * a config that registers over HTTP and the identical config seeded from the
  * bootstrap file produce a byte-identical `ActiveTenantConfig` — and the registry
- * `register`'s structural-equality idempotency (SC-009) then treats a
+ * `register`'s structural-equality idempotency (multi-tenant spec SC-009) then treats a
  * bootstrap-then-HTTP (or re-boot) of the same config as a no-op.
  *
  * PURE: no I/O. Takes an already-branded `TenantId` plus the untrusted body and
@@ -31,12 +31,29 @@ import { tenantConfigInvalid } from "../../domain/host-error.js";
 import type { HostError } from "../../domain/host-error.js";
 
 /**
+ * Normalize a required string field from an untrusted config object, or `""`
+ * when it is absent or not a string.
+ *
+ * ONE encoding of the coerce-or-empty step that six required fields share
+ * (`secretsRef`, `dagsRoot`, `team`, `fsRoot`, `keycloakClientMapping.realm`,
+ * `keycloakClientMapping.clientId`). A non-string is deliberately folded to `""`
+ * rather than coerced with `String(...)`: `{ dagsRoot: 123 }` must be REJECTED as
+ * missing, not silently accepted as the path `"123"`.
+ *
+ * `normalize` defaults to `trim`; `team` passes `canonicalizeTeamName` instead,
+ * because its canonical lowercase form is load-bearing for token lookup. Each
+ * caller keeps its own blank check so the rejection names the specific field and
+ * explains what that field is for.
+ */
+const normalizedField = (
+  raw: unknown,
+  normalize: (value: string) => string = (value) => value.trim(),
+): string => (typeof raw === "string" ? normalize(raw) : "");
+
+/**
  * Parse the optional `agentClientIdsByDag` map from an untrusted body.
- * Fail-closed: a non-object resolves to an empty map (the registry smart
- * constructor is the authority on whether an empty map is acceptable), but a
- * present map with ANY non-string value is REJECTED — a malformed value must
- * never be cast through as a client id. Iterates OWN enumerable properties only,
- * so a prototype key cannot smuggle a value in.
+ * Fail-closed: a non-object resolves to an empty map, while any present
+ * non-string value is rejected. Only own enumerable properties are read.
  */
 const parseAgentClientIdsByDag = (
   id: TenantId,
@@ -81,12 +98,12 @@ export const parseTenantConfigBody = (id: TenantId, body: unknown): Result<Activ
   // enumerable properties only (no prototype keys).
   const agentMapResult = parseAgentClientIdsByDag(id, km.agentClientIdsByDag);
   if (!agentMapResult.ok) return agentMapResult;
-  // Every tenant worker requires a secrets reference (FR-005; `worker-main`
+  // Every tenant worker requires a secrets reference (multi-tenant spec FR-005; `worker-main`
   // hard-requires `FUGUE_SECRETS_REF`). Reject a blank/absent one HERE at the
   // trust boundary rather than letting it reach the registry and surface later as
   // a worker-spawn failure. Parse-don't-validate: a registered tenant always
   // carries a usable, non-blank `SecretsRef`.
-  const rawSecretsRef = typeof o.secretsRef === "string" ? o.secretsRef.trim() : "";
+  const rawSecretsRef = normalizedField(o.secretsRef);
   if (rawSecretsRef === "") {
     return err(tenantConfigInvalid(`tenant '${id}': secretsRef is required (where the worker resolves this tenant's secrets)`));
   }
@@ -94,10 +111,10 @@ export const parseTenantConfigBody = (id: TenantId, body: unknown): Result<Activ
   // DAGS_LOCAL_PATH (the per-tenant directory it globs `dags/**​/dag.ts` under, so
   // the worker discovers ONLY this team's DAGs). Reject a blank/absent one HERE at
   // the trust boundary rather than letting it reach the registry; the registry
-  // smart constructor (`tenantConfig`) is the final confined-absolute-path
+  // smart constructor (`tenantConfig`) is the final tenant-owned `/dags/<id>`
   // assertion. Parse-don't-validate: a registered tenant always carries a usable
   // dagsRoot.
-  const rawDagsRoot = typeof o.dagsRoot === "string" ? o.dagsRoot.trim() : "";
+  const rawDagsRoot = normalizedField(o.dagsRoot);
   if (rawDagsRoot === "") {
     return err(tenantConfigInvalid(`tenant '${id}': dagsRoot is required (the per-tenant directory the worker discovers DAGs under)`));
   }
@@ -108,15 +125,15 @@ export const parseTenantConfigBody = (id: TenantId, body: unknown): Result<Activ
   // tokens are stored under the canonical team, so a verbatim `"Foo"` here would
   // silently 403 a token stored under `"foo"`. The registry `tenantConfig` is the
   // final team↔tenant 1:1 authority; this boundary owns the non-blank+canonical shape.
-  const rawTeam = typeof o.team === "string" ? canonicalizeTeamName(o.team) : "";
+  const rawTeam = normalizedField(o.team, canonicalizeTeamName);
   if (rawTeam === "") {
     return err(tenantConfigInvalid(`tenant '${id}': team is required (the canonical team that owns this tenant's DAGs and token)`));
   }
   // Every tenant requires a per-tenant on-disk mount (`fsRoot`) — the directory the
   // grace-window purge reclaims and the worker's confined filesystem root. Reject a
   // blank/absent one HERE, symmetric with dagsRoot/secretsRef; the registry
-  // `tenantConfig` is the final confined-absolute-path authority over this value.
-  const rawFsRoot = typeof o.fsRoot === "string" ? o.fsRoot.trim() : "";
+  // `tenantConfig` is the final tenant-owned `/srv/<id>` authority over this value.
+  const rawFsRoot = normalizedField(o.fsRoot);
   if (rawFsRoot === "") {
     return err(tenantConfigInvalid(`tenant '${id}': fsRoot is required (the per-tenant on-disk mount the worker is confined to)`));
   }
@@ -132,11 +149,11 @@ export const parseTenantConfigBody = (id: TenantId, body: unknown): Result<Activ
   // secretsRef/dagsRoot/team above (rather than defaulting a non-string to "" and
   // leaning on the registry to reject it later as "non-empty" — which misdescribes
   // the actual fault for, e.g., `realm: 123`). Both are required and non-blank.
-  const rawRealm = typeof km.realm === "string" ? km.realm.trim() : "";
+  const rawRealm = normalizedField(km.realm);
   if (rawRealm === "") {
     return err(tenantConfigInvalid(`tenant '${id}': keycloakClientMapping.realm is required and must be a non-blank string`));
   }
-  const rawClientId = typeof km.clientId === "string" ? km.clientId.trim() : "";
+  const rawClientId = normalizedField(km.clientId);
   if (rawClientId === "") {
     return err(tenantConfigInvalid(`tenant '${id}': keycloakClientMapping.clientId is required and must be a non-blank string`));
   }

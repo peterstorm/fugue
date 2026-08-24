@@ -8,14 +8,14 @@
  *   2. the domain-event `Observer` placed into `deps.observer`.
  *
  * Default (no Foundry) path: a SINGLE MLflow exporter + a `NoopObserver` —
- * byte-for-byte the pre-Foundry behaviour (SC-006 / FR-003 / FR-027). The
+ * byte-for-byte the pre-Foundry behaviour (observability spec SC-006 / FR-003 / FR-027). The
  * 1-element exporter tuple unwraps in `normalizeExporter`, so no Composite
  * wrapper is introduced.
  *
- * Foundry path: the MLflow and/or Azure Monitor exporters (FR-002 dual export,
+ * Foundry path: the MLflow and/or Azure Monitor exporters (observability spec FR-002 dual export,
  * order preserved), and an `AiFoundryObserver`-over-sink wrapped in a
  * `BufferedObserver` that SHARES the SAME persistence-policy instance used for
- * trace tail-sampling (FR-021 / SC-010 — a discarded trace produces no orphaned
+ * trace tail-sampling (observability spec FR-021 / SC-010 — a discarded trace produces no orphaned
  * domain events).
  *
  * Why a helper (functional core / imperative shell): the factories are
@@ -32,6 +32,7 @@ import {
   dispatchEvent,
   fwLogger,
   isCacheHit,
+  safeErrorMessage,
 } from "@fuguejs/framework";
 import type {
   Observer,
@@ -52,7 +53,7 @@ import { isFoundryEnabled } from "./observability.js";
 export type { SpanExporter };
 
 /** A non-empty tuple of exporters, the exact shape `initTracing` accepts. */
-export type ExporterList = readonly [SpanExporter, ...SpanExporter[]];
+type ExporterList = readonly [SpanExporter, ...SpanExporter[]];
 
 /**
  * Factories the composition depends on. All injectable so tests can supply
@@ -68,7 +69,7 @@ export interface ObservabilityFactories {
   readonly createFoundrySink: () => FoundryTelemetrySink;
 }
 
-export interface ComposedObservability {
+interface ComposedObservability {
   /** Ordered, non-empty exporter tuple for the widened `initTracing`. */
   readonly exporters: ExporterList;
   /** The domain-event observer for `deps.observer`. */
@@ -76,14 +77,14 @@ export interface ComposedObservability {
 }
 
 /**
- * Inner observer that emits the FULL FR-019 run summary (SC-008).
+ * Inner observer that emits the FULL observability spec FR-019 run summary (observability spec SC-008).
  *
  * `BufferedObserver` replays a run's buffered events one-by-one to its inner
  * observer and then the `run-end`. The framework's `AiFoundryObserver` maps each
  * event via `mapEventToFoundry`, which for `run-end` emits only the BARE summary
- * (duration + status — the fields the bare event guarantees). To satisfy SC-008
+ * (duration + status — the fields the bare event guarantees). To satisfy observability spec SC-008
  * (every completed run produces a summary carrying nodeCount / retryCount /
- * cacheHitCount / totalCost) we bridge here:
+ * cacheHitCount on this domain-event channel) we bridge here:
  *
  *   - non-`run-end` events: forward to the wrapped `AiFoundryObserver`
  *     (route-decision, node-pruned, node-latency / cache-hit metrics) AND record
@@ -94,14 +95,12 @@ export interface ComposedObservability {
  *     forward `run-end` to `AiFoundryObserver`, so the run-summary event is
  *     emitted exactly ONCE (the full one), never the bare one too.
  *
- * `totalCostUsd` is not knowable from observer events (it lives on OTel spans),
- * so it is omitted from the BufferedObserver path. Cost and token totals are
- * span-resident — they are carried on OTel spans (`ai.llm.cost_usd`,
- * `gen_ai.usage.*`), NOT on observer events — and are simply NOT re-emitted on
- * this domain-event channel here: `mapRunSummaryToFoundry` drops them when
- * undefined (which they always are on this observer-derived path).
- * `cacheHitCount` IS knowable here and is always supplied so the SC-008 guarantee
- * holds.
+ * Cost and token totals are span-only because observer events do not carry
+ * them (`ai.llm.cost_usd` / `gen_ai.usage.*` live on OTel spans). This channel
+ * therefore emits node/retry/cache summary metrics and intentionally omits
+ * `totalCostUsd`; `mapRunSummaryToFoundry` drops the absent value.
+ * `cacheHitCount` is knowable here and is always supplied so the observability
+ * spec SC-008 domain-event guarantee holds.
  *
  * This observer is fail-tolerant in the same spirit as `AiFoundryObserver`: it
  * is invoked inside `BufferedObserver`'s guarded replay loop, and it forwards
@@ -109,21 +108,132 @@ export interface ComposedObservability {
  * already guards). A throw in summary mapping is contained per the buffered
  * replay's try/catch.
  */
+interface FoundryRunSummaryObserverOpts {
+  /** Drop a run buffer if `run-end` never arrived within this many ms. Default 1h. */
+  readonly ttlMs?: number;
+  /** Sweep interval for dropping stale buffers. Default 5min. */
+  readonly sweepIntervalMs?: number;
+  /** Injectable clock; defaults to `Date.now`. Used by tests for deterministic eviction. */
+  readonly now?: () => number;
+}
+
+/** Per-run buffer entry — events plus its latest activity timestamp. */
+interface RunSummaryBuffer {
+  events: ObserverEvent[];
+  /** Last wall-clock time this run produced an event; refreshed per event so
+   * the orphan sweep evicts INACTIVE buffers only — an active long-running
+   * run is never dropped mid-run, or its summary would be silently zeroed at
+   * a late run-end (observability spec SC-008). */
+  lastActivityAt: number;
+}
+
+const SUMMARY_TTL_MS = 60 * 60 * 1000; // 1h
+const SUMMARY_SWEEP_MS = 5 * 60 * 1000; // 5min
+
+const logFrameworkWithoutThrowing = (
+  level: "warn" | "error",
+  message: string,
+): void => {
+  try {
+    fwLogger()[level](message);
+  } catch {
+    // Diagnostics cannot turn a guarded observability seam into a throw path.
+  }
+};
+
 export class FoundryRunSummaryObserver implements Observer {
   private readonly inner: AiFoundryObserver;
-  // Inner buffer keyed by runId. Per-run entries are bounded ONLY by their own
-  // terminal `run-end` (`emitRunSummary` → `this.buffered.delete`); this class has
-  // NO TTL / orphan-eviction sweep of its own (unlike the framework
-  // `BufferedObserver`). The bounded-growth invariant is therefore enforced by the
-  // wrapping contract: in production (`composeObservability`) this always runs UNDER
-  // a `BufferedObserver`, which guarantees a terminal `run-end` per run, so entries
-  // cannot accumulate unbounded. Direct/standalone use is TEST-ONLY — a run that
-  // never emits `run-end` (crash, abandoned run) would leak its buffer, so do not
-  // wire this observer standalone in production.
-  private readonly buffered = new Map<string, ObserverEvent[]>();
+  // Inner buffer keyed by runId. Per-run entries are normally bounded by their
+  // own terminal `run-end` (`emitRunSummary` → `this.buffered.delete`); the
+  // TTL sweep mirrors the framework `BufferedObserver`'s orphan-eviction
+  // discipline so a run that never emits `run-end` (crash, abandoned run)
+  // cannot leak its buffer — the class is memory-safe STANDALONE, not only
+  // under the production wrapper contract (round-21 atl-2).
+  private readonly buffered = new Map<string, RunSummaryBuffer>();
+  /** Buffers dropped because `run-end` never arrived within TTL. Useful for monitoring. */
+  evicted = 0;
+  /** Buffering events dropped because the clock was untrustworthy when the
+   * run buffer would have been opened (a hostile clock must not orphan a
+   * buffer that could never be evicted — BufferedObserver parity). */
+  droppedEvents = 0;
+  private readonly ttlMs: number;
+  private readonly sweepHandle: ReturnType<typeof setInterval> | null;
+  private readonly now: () => number;
 
-  constructor(private readonly sink: FoundryTelemetrySink) {
+  constructor(
+    private readonly sink: FoundryTelemetrySink,
+    opts?: FoundryRunSummaryObserverOpts,
+  ) {
     this.inner = new AiFoundryObserver(sink);
+    this.ttlMs = opts?.ttlMs ?? SUMMARY_TTL_MS;
+    this.now = opts?.now ?? Date.now;
+    const sweepMs = opts?.sweepIntervalMs ?? SUMMARY_SWEEP_MS;
+    if (sweepMs > 0) {
+      this.sweepHandle = setInterval(() => this.evictStale(), sweepMs);
+      // Don't keep the event loop alive purely to sweep an idle observer.
+      this.sweepHandle.unref();
+    } else {
+      this.sweepHandle = null;
+    }
+  }
+
+  /** Stop the background sweep. Call when discarding the observer. */
+  close(): void {
+    if (this.sweepHandle) clearInterval(this.sweepHandle);
+  }
+
+  [Symbol.dispose](): void {
+    this.close();
+  }
+
+  /**
+   * Hostile-seam guard for the injected clock, parity with the framework
+   * BufferedObserver's readClock discipline (ADR-0080): a throwing clock must
+   * never escape as an uncaught timer exception, and a non-finite stamp must
+   * never silently disable eviction. Returns `null`, after a loud diagnostic,
+   * when the clock cannot be trusted this cycle.
+   */
+  private readClock(): number | null {
+    let nowMs: number;
+    try {
+      nowMs = this.now();
+    } catch (error) {
+      logFrameworkWithoutThrowing(
+        "error",
+        `[FoundryRunSummaryObserver] clock threw — eviction disabled this cycle: ${safeErrorMessage(error)}`,
+      );
+      return null;
+    }
+    if (!Number.isFinite(nowMs)) {
+      logFrameworkWithoutThrowing(
+        "warn",
+        `[FoundryRunSummaryObserver] clock returned a non-finite stamp (${String(nowMs)}) — eviction disabled this cycle`,
+      );
+      return null;
+    }
+    return nowMs;
+  }
+
+  /** Drop run buffers whose LAST ACTIVITY exceeded `ttlMs` without a run-end.
+   * Eviction is inactivity-based (not open-time-based): a run that keeps
+   * emitting events is alive by definition and must not be evicted mid-run,
+   * or its summary would be silently zeroed at a late run-end (observability spec SC-008).
+   * Public so tests can drive eviction deterministically (BufferedObserver
+   * parity). */
+  evictStale(): void {
+    const nowMs = this.readClock();
+    if (nowMs === null) return;
+    const cutoff = nowMs - this.ttlMs;
+    for (const [runId, buf] of this.buffered) {
+      if (buf.lastActivityAt < cutoff) {
+        this.buffered.delete(runId);
+        this.evicted++;
+        logFrameworkWithoutThrowing(
+          "warn",
+          `[FoundryRunSummaryObserver] evicted stale run buffer for runId '${String(runId)}' — no events within ${this.ttlMs}ms and run-end never arrived`,
+        );
+      }
+    }
   }
 
   observe(event: ObserverEvent): void {
@@ -131,15 +241,39 @@ export class FoundryRunSummaryObserver implements Observer {
       this.emitRunSummary(event);
       return;
     }
-    // Record for the eventual summary, then forward to the per-event mapper.
-    const buf = this.buffered.get(event.runId) ?? [];
-    buf.push(event);
-    this.buffered.set(event.runId, buf);
+    // The open-buffer branch absorbs the event even when the clock
+    // misbehaves (BufferedObserver parity): the activity refresh is
+    // best-effort — a null stamp leaves lastActivityAt stale, but the sweep
+    // is disabled that cycle anyway (readClock gate), so no active run is
+    // evicted on stale data while the clock is broken. Events are dropped
+    // ONLY when a NEW buffer would have to be opened unstampable.
+    const existing = this.buffered.get(event.runId);
+    const activity = this.readClock();
+    if (existing !== undefined) {
+      existing.events.push(event);
+      if (activity !== null) existing.lastActivityAt = activity;
+      this.inner.observe(event);
+      return;
+    }
+    if (activity === null) {
+      this.droppedEvents++;
+      logFrameworkWithoutThrowing(
+        "warn",
+        `[FoundryRunSummaryObserver] clock unavailable — run buffer not opened for runId '${String(event.runId)}'; event dropped (counted)`,
+      );
+      return this.inner.observe(event);
+    }
+    const opened: RunSummaryBuffer = {
+      events: [event],
+      lastActivityAt: activity,
+    };
+    this.buffered.set(event.runId, opened);
     this.inner.observe(event);
   }
 
   private emitRunSummary(runEnd: RunEndEvent): void {
-    const events = this.buffered.get(runEnd.runId) ?? [];
+    const entry = this.buffered.get(runEnd.runId);
+    const events = entry?.events ?? [];
     this.buffered.delete(runEnd.runId);
 
     const summary = computeRunSummary(events, runEnd);
@@ -162,9 +296,9 @@ export class FoundryRunSummaryObserver implements Observer {
         // AiFoundryObserver, which does its own logging), so the swallow MUST be
         // logged here or the failure would be invisible. Mirror the framework
         // observer's warn so a dropped run-summary emission is still observable.
-        fwLogger().warn(
-          `[FoundryRunSummaryObserver] sink.${emission.kind === "event" ? "trackEvent" : "trackMetric"} threw for '${emission.name}' (run summary) — swallowed:`,
-          err instanceof Error ? err.message : err,
+        logFrameworkWithoutThrowing(
+          "warn",
+          `[FoundryRunSummaryObserver] sink.${emission.kind === "event" ? "trackEvent" : "trackMetric"} threw for '${emission.name}' (run summary) — swallowed: ${safeErrorMessage(err)}`,
         );
       }
     }
@@ -184,7 +318,7 @@ export { dispatchEvent };
  * @param policy        the SHARED persistence policy. The SAME instance is the
  *                      one `bootstrap.ts` passes to `initTracing`, so trace
  *                      tail-sampling and domain-event gating make ONE coherent
- *                      decision per run (FR-021 / SC-010).
+ *                      decision per run (observability spec FR-021 / SC-010).
  * @param factories     injectable exporter/sink builders (fakes in tests).
  */
 export const composeObservability = (
@@ -192,7 +326,7 @@ export const composeObservability = (
   policy: PersistencePolicy,
   factories: ObservabilityFactories,
 ): ComposedObservability => {
-  // Build exporters in the resolved `traceBackends` ORDER (FR-002). The selection
+  // Build exporters in the resolved `traceBackends` ORDER (observability spec FR-002). The selection
   // is a NON-EMPTY tuple (config invariant, carried in `TraceBackends`), so the
   // head backend is proven present at the type level — destructuring yields a
   // non-optional head and the result is a non-empty `ExporterList` with no
@@ -210,7 +344,7 @@ export const composeObservability = (
 
   // Foundry path: domain events go to the Application Insights sink via the
   // run-summary-bridging observer, wrapped in a BufferedObserver that SHARES
-  // the trace policy instance (FR-021 / SC-010).
+  // the trace policy instance (observability spec FR-021 / SC-010).
   const sink = factories.createFoundrySink();
   const foundryObserver = new FoundryRunSummaryObserver(sink);
   const observer = new BufferedObserver(foundryObserver, policy);
@@ -221,7 +355,7 @@ export const composeObservability = (
 /**
  * Minimal logging seam for {@link resolveFoundryLeg} — only `error` is used.
  */
-export interface FoundryLegLogger {
+interface FoundryLegLogger {
   error(msg: string, ...args: unknown[]): void;
 }
 
@@ -237,12 +371,12 @@ export interface FoundryLegLogger {
  * - `inactive` — Foundry was never enabled, OR its construction FAILED and the
  *   leg degraded to an MLflow-only `effective` selection. Either way there are
  *   no prebuilt instances. A runtime Foundry construction fault therefore
- *   degrades ONLY the Foundry leg (FR-026 / SC-009) and never disables MLflow
- *   tracing (SC-006).
+ *   degrades ONLY the Foundry leg (observability spec FR-026 / SC-009) and never disables MLflow
+ *   tracing (observability spec SC-006).
  *
  * `{ exporter present, sink null }` (and vice versa) is now unrepresentable.
  */
-export type ResolvedFoundryLeg =
+type ResolvedFoundryLeg =
   | {
       readonly outcome: "active";
       // An active leg means Foundry construction SUCCEEDED, which is only
@@ -261,7 +395,7 @@ export type ResolvedFoundryLeg =
 /**
  * Attempt the Foundry exporter + sink construction in ISOLATION from MLflow.
  *
- * This is the fault-isolation boundary (FR-026 / SC-009): the effectful Foundry
+ * This is the fault-isolation boundary (observability spec FR-026 / SC-009): the effectful Foundry
  * construction runs here, OUTSIDE the lazy composition factories, so a failure
  * degrades only the Foundry leg. MLflow's exporter is built unconditionally by
  * the caller and is unaffected by this function's outcome.
@@ -291,16 +425,16 @@ export const resolveFoundryLeg = (
     return { outcome: "active", effective: resolved, foundryExporter, foundrySink };
   } catch (foundryErr) {
     // Foundry export disabled — MLflow tracing CONTINUES unaffected
-    // (FR-026 / SC-009). Degrade the selection to MLflow-only so the
+    // (observability spec FR-026 / SC-009). Degrade the selection to MLflow-only so the
     // composition emits no Foundry exporter/observer for this run.
     log.error(
       "Azure AI Foundry export construction failed — disabling Foundry export; " +
         "MLflow tracing continues unaffected:",
       foundryErr,
     );
-    // MLflow is guaranteed selectable alongside Foundry in well-formed config;
-    // if Foundry was the SOLE backend, fall back to MLflow so tracing still
-    // initializes. Rebuild as a NON-EMPTY tuple (matching the config-layer
+    // Preserve an already-selected MLflow leg after removing Foundry. If
+    // Foundry was the SOLE backend, explicitly fall back to MLflow so tracing
+    // still initializes. Rebuild as a NON-EMPTY tuple (matching the config-layer
     // `TraceBackends` invariant) and freeze it so the degraded selection stays
     // immutable.
     const [head, ...tail] = resolved.traceBackends.filter((b) => b !== "foundry");

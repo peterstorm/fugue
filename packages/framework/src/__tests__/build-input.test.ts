@@ -6,7 +6,6 @@
 
 import { describe, it, expect } from "bun:test";
 import { buildNodeInput } from "../shared/build-input.js";
-import type { IncomingSources } from "../shared/incoming.js";
 
 describe("buildNodeInput", () => {
   it("no required sources → returns undefined (source node, C0)", () => {

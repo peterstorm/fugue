@@ -3,7 +3,7 @@
  *
  * TOPOLOGY (why a separate init exists):
  *   In one pod we run: [thin-init (PID 1)] → spawns [supervisor] and [workers].
- *   The KEY property the spec demands (FR-019/FR-020, SC-006): the SUPERVISOR can
+ *   The KEY property the multi-tenant spec demands (multi-tenant spec FR-019/FR-020, SC-006): the SUPERVISOR can
  *   restart WITHOUT killing the workers, so in-flight runs keep being served and
  *   the new supervisor RE-ADOPTS the still-live workers from the Redis registry.
  *
@@ -42,8 +42,8 @@
  *   `__tests__/supervisor/lifecycle/bun-init-process-adapter.test.ts`.
  *
  * @satisfies AD-2  — thin init is PID 1; supervisor restart does NOT kill workers.
- * @satisfies FR-019 — live workers continue serving across a supervisor restart.
- * @satisfies FR-021 — in-flight runs survive a supervisor restart (workers persist).
+ * @satisfies multi-tenant spec FR-019 — live workers continue serving across a supervisor restart.
+ * @satisfies multi-tenant spec FR-021 — in-flight runs survive a supervisor restart (workers persist).
  */
 
 import { match } from "ts-pattern";
@@ -73,7 +73,7 @@ export const initialRestartBudget = (
   windowMs,
 });
 
-export type SupervisorRestartDecision =
+type SupervisorRestartDecision =
   | { readonly action: "restart"; readonly budget: RestartBudget }
   | { readonly action: "give-up"; readonly reason: "crash-loop"; readonly budget: RestartBudget };
 

@@ -1,10 +1,12 @@
 // createBullMQBackend — QueueBackend adapter over BullMQ Queue/Worker
 // Validates inputs, wraps BullMQ jobs as JobLike, manages worker lifecycle
-// Only queue-bullmq/** may import bullmq/ioredis (enforced by check-imports.ts)
+// bullmq is imported only by queue-bullmq/**; ioredis is additionally imported by the
+// three named Redis adapter files (see the check-imports.ts Enforces list)
 
 import { Queue, Worker } from "bullmq";
 import type { ConnectionOptions } from "bullmq";
 import Redis from "ioredis";
+import type { RedisOptions } from "ioredis";
 import type { JobLike } from "../state-machine/types.js";
 import type {
   QueueBackend,
@@ -18,27 +20,66 @@ import type {
 import { adaptBullMQJob } from "./job.js";
 import { serializeValue } from "../state-machine/serialize.js";
 import { fwLogger } from "../logger.js";
+import { safeErrorMessage } from "../types/safe-error.js";
 
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Parse a Redis URL (redis://host:port) or accept a {host,port} object and
- * return a { host, port } tuple.
- */
-function parseConnection(connection: ConnectionInput): { host: string; port: number } {
-  if (typeof connection === "string") {
-    const url = new URL(connection);
-    return {
-      host: url.hostname,
-      port: parseInt(url.port || "6379", 10),
-    };
-  }
-  return connection;
-}
+/** Redis connection inputs accepted by the BullMQ infrastructure adapter. */
+type ConnectionInput = string | { readonly host: string; readonly port: number };
 
-type ConnectionInput = string | { host: string; port: number };
+/**
+ * Parse the supported Redis URL surface once, retaining every connection
+ * setting ioredis/BullMQ need: credentials, selected database, and TLS.
+ */
+export const __parseConnection = (connection: ConnectionInput): RedisOptions => {
+  if (typeof connection !== "string") return connection;
+
+  const url = new URL(connection);
+  if (url.protocol !== "redis:" && url.protocol !== "rediss:") {
+    throw new RangeError(`Redis connection URL must use redis: or rediss:, got ${url.protocol}`);
+  }
+  const dbSegment = url.pathname.slice(1);
+  const db = dbSegment === "" ? undefined : Number(dbSegment);
+  if (db !== undefined && (!Number.isInteger(db) || db < 0)) {
+    throw new RangeError(`Redis connection URL has an invalid database index: ${url.pathname}`);
+  }
+
+  return {
+    host: url.hostname,
+    port: Number(url.port || "6379"),
+    ...(url.username === "" ? {} : { username: decodeURIComponent(url.username) }),
+    ...(url.password === "" ? {} : { password: decodeURIComponent(url.password) }),
+    ...(db === undefined ? {} : { db }),
+    ...(url.protocol === "rediss:" ? { tls: {} } : {}),
+  };
+};
+
+/** Error-event handlers exist to contain failures; logging cannot reopen them. */
+const logErrorWithoutThrowing = (message: string, error: unknown): void => {
+  try {
+    fwLogger().error(message, error);
+  } catch {
+    // Infrastructure event remains contained even when diagnostics fail.
+  }
+};
+
+/**
+ * Invoke a user failure handler inside a promise boundary. Deferring the call
+ * is load-bearing: `Promise.resolve(handler())` evaluates `handler()` first, so
+ * a synchronous throw would escape before the rejection handler exists.
+ */
+export const __dispatchFailureHandler = (
+  handler: () => Promise<void> | void,
+  report: (error: Error) => void,
+): void => {
+  void Promise.resolve()
+    .then(handler)
+    .catch((error) => {
+      report(error instanceof Error ? error : new Error(safeErrorMessage(error)));
+    });
+};
 
 // ---------------------------------------------------------------------------
 // createBullMQBackend
@@ -56,21 +97,35 @@ export function createBullMQBackend(
   connection: ConnectionInput,
   eventLogOpts?: EventLogOpts,
 ): QueueBackend {
-  const { host, port } = parseConnection(connection);
+  const redisConnection = __parseConnection(connection);
 
   // Shared ioredis connection used by adaptBullMQJob for XADD/XRANGE
-  const redis = new Redis(port, host, {
+  const redis = new Redis({
+    ...redisConnection,
     maxRetriesPerRequest: null,
     enableReadyCheck: false,
     lazyConnect: false,
   });
 
-  // FR-082: attach default error listener to prevent unhandled-rejection crashes
+  // default error listener: an unhandled ioredis "error" rejection would crash
+  // the process; log it instead
   redis.on("error", (err) => {
-    fwLogger().error("[BullMQ] Shared Redis connection error:", err);
+    logErrorWithoutThrowing("[BullMQ] Shared Redis connection error:", err);
   });
 
-  const bullConnection: ConnectionOptions = { host, port };
+  const bullConnection: ConnectionOptions = redisConnection;
+
+  /**
+   * ONE positive-integer range guard for the two option fields that carry one
+   * (round-38 cs-14). Both are counts BullMQ would otherwise accept as `0`,
+   * `1.5` or `NaN` and then behave undefinedly on, so both fail loudly at the
+   * call that supplied them.
+   */
+  const assertPositiveInteger = (field: string, value: number | undefined): void => {
+    if (value !== undefined && (!Number.isInteger(value) || value < 1)) {
+      throw new RangeError(`${field} must be a finite integer >= 1, got ${value}`);
+    }
+  };
 
   // Track every queue/worker so close() can wait on all of them.
   const queues = new Set<Queue<any, any, string>>();
@@ -78,14 +133,7 @@ export function createBullMQBackend(
   let closed = false;
 
   function createQueue<S, C>(name: string, opts?: QueueOpts): QueueHandle<S, C> {
-    if (
-      opts?.defaultAttempts !== undefined &&
-      (!Number.isFinite(opts.defaultAttempts) || opts.defaultAttempts < 1)
-    ) {
-      throw new RangeError(
-        `defaultAttempts must be a finite integer >= 1, got ${opts.defaultAttempts}`,
-      );
-    }
+    assertPositiveInteger("defaultAttempts", opts?.defaultAttempts);
 
     // Use `any` for BullMQ internals — the public API is typed via QueueHandle<S, C>
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -95,6 +143,17 @@ export function createBullMQBackend(
         opts?.defaultAttempts !== undefined
           ? { attempts: opts.defaultAttempts }
           : undefined,
+    });
+
+    // Attach the default queue error listener: BullMQ re-emits failures of the
+    // Queue's INTERNAL connection (a separate ioredis instance, since
+    // `bullConnection` is a plain {host, port}) as an "error" event on the
+    // Queue itself. An unhandled "error" event would crash the process with
+    // ERR_UNHANDLED_ERROR — the same hazard the shared-connection and Worker
+    // listeners above defend against; log it instead (with the queue name for
+    // correlation).
+    queue.on("error", (err) => {
+      logErrorWithoutThrowing(`[BullMQ] Queue "${name}" error:`, err);
     });
     queues.add(queue);
 
@@ -136,14 +195,7 @@ export function createBullMQBackend(
     process: (job: JobLike<S, unknown, C>) => Promise<void>,
     opts?: WorkerOpts,
   ): WorkerHandle {
-    if (
-      opts?.concurrency !== undefined &&
-      (!Number.isFinite(opts.concurrency) || opts.concurrency < 1)
-    ) {
-      throw new RangeError(
-        `concurrency must be a finite integer >= 1, got ${opts.concurrency}`,
-      );
-    }
+    assertPositiveInteger("concurrency", opts?.concurrency);
 
     const worker = new Worker<{ state: S; context: C }>(
       name,
@@ -161,7 +213,7 @@ export function createBullMQBackend(
     // Attach default worker error listener so internal worker errors don't crash
     // the process when callers have not registered an onError handler.
     worker.on("error", (err) => {
-      fwLogger().error("[BullMQ] Worker internal error:", err);
+      logErrorWithoutThrowing("[BullMQ] Worker internal error:", err);
     });
 
     // Single `worker.on("failed")` listener with internal dispatch.
@@ -182,23 +234,22 @@ export function createBullMQBackend(
       const attemptsMade = job.attemptsMade ?? 1;
       const max = job.opts?.attempts ?? 1;
 
+      const reportHandlerFailure = (handlerError: Error): void => {
+        worker.emit("error", handlerError);
+      };
       if (attemptsMade >= max) {
         for (const handler of exhaustedHandlers) {
-          Promise.resolve(handler(id, error, attemptsMade)).catch((handlerErr) => {
-            worker.emit(
-              "error",
-              handlerErr instanceof Error ? handlerErr : new Error(String(handlerErr)),
-            );
-          });
+          __dispatchFailureHandler(
+            () => handler(id, error, attemptsMade),
+            reportHandlerFailure,
+          );
         }
       } else {
         for (const handler of failedHandlers) {
-          Promise.resolve(handler(id, error, attemptsMade, max)).catch((handlerErr) => {
-            worker.emit(
-              "error",
-              handlerErr instanceof Error ? handlerErr : new Error(String(handlerErr)),
-            );
-          });
+          __dispatchFailureHandler(
+            () => handler(id, error, attemptsMade, max),
+            reportHandlerFailure,
+          );
         }
       }
     });

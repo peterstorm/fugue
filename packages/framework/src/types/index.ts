@@ -28,8 +28,20 @@ export {
 
 // ── Errors ────────────────────────────────────────────────────────────────
 export type { FrameworkError, FrameworkErrorKind, MissingCapability, PartialTokenUsage } from "./errors.js";
-export { formatFrameworkError, FrameworkAugmentedError, usageOfError } from "./errors.js";
+export { formatFrameworkError, isFrameworkError, PersistedFrameworkErrorSchema, FrameworkAugmentedError, usageOfError } from "./errors.js";
 export { frameworkError } from "./error-factories.js";
+
+// ── Total error diagnostics ───────────────────────────────────────────────
+// Total (never-throwing) inspection helpers for values caught at an `unknown`
+// boundary — safe to run while handling an earlier failure. Exported for
+// first-party consumers (host adapters) that implement fail-closed errno
+// logic at I/O boundaries; `probeErrorCode` + `isMissingPathError` keep the
+// absence-vs-failure question one encoding.
+export {
+  safeErrorMessage,
+  probeErrorCode,
+  isMissingPathError,
+} from "./safe-error.js";
 
 // ── Span kinds ────────────────────────────────────────────────────────────
 export type { SpanKind } from "./span.js";
@@ -66,11 +78,24 @@ export type {
 export { CONFIDENCE_ORDER, meetsConfidence, confidence, tryConfidence } from "./confidence.js";
 
 // ── Freshness witness types ───────────────────────────────────────────────
-export type { WitnessKind, Witness, WitnessValue, ResourceName } from "./freshness.js";
+export type {
+  FreshnessExecutionEpoch,
+  FreshnessWriteIdentity,
+  ResourceName,
+  Witness,
+  WitnessKind,
+  WitnessValue,
+} from "./freshness.js";
 // `stampWitness` is intentionally NOT exported here — it is framework-internal
 // (only `dag-runtime/freshness-emission.ts` stamps). Authors return a
 // resource-free `witnessValue(...)`; the framework supplies the resource.
-export { witness, witnessValue, resourceName } from "./freshness.js";
+export {
+  freshnessExecutionEpoch,
+  freshnessWriteIdentityOf,
+  resourceName,
+  witness,
+  witnessValue,
+} from "./freshness.js";
 
 // ── JSON Patch ────────────────────────────────────────────────────────────
 export type { JsonPatchOp, JsonPatch } from "./json-patch.js";
@@ -135,7 +160,7 @@ export { runId, nodeId, dagId, tryRunId, tryNodeId, tryDagId, gitSha, tryGitSha,
 
 // ── Clock capability (C2) ─────────────────────────────────────────────────
 export type { ClockCapability } from "./clock.js";
-export { systemClock, fixedClock } from "./clock.js";
+export { systemClock, fixedClock, isRepresentableTimestampMs } from "./clock.js";
 
 export type { NonEmptyString } from "./non-empty-string.js";
 export { asNonEmptyString, nonEmptyString } from "./non-empty-string.js";

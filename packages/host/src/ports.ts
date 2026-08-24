@@ -105,10 +105,20 @@ export type GitPort = {
  * Redis-like interface for cache/checkpoint operations.
  * Returns Result to make failures explicit — no try/catch required at call sites.
  */
+export type RedisExpiry =
+  | { readonly expiresInSec: number; readonly expiresInMs?: never }
+  | { readonly expiresInMs: number; readonly expiresInSec?: never };
+
+export type RedisValueGuard = {
+  readonly key: string;
+  readonly expectedValue: string;
+};
+
 export type RedisPort = {
   readonly get: (key: string) => Promise<Result<string | null, HostError>>;
   readonly set: (key: string, value: string, opts?: { expiresInSec?: number }) => Promise<Result<string | null, HostError>>;
-  readonly del: (key: string) => Promise<Result<number, HostError>>;
+  /** Atomically delete one or more keys with a single Redis DEL command. */
+  readonly del: (key: string, ...additionalKeys: readonly string[]) => Promise<Result<number, HostError>>;
   /**
    * Cursor-based key scanning — a keyspace-enumeration primitive.
    *
@@ -155,7 +165,66 @@ export type RedisPort = {
    * forever and never self-heals.
    */
   readonly setNx: (key: string, value: string, opts?: { expiresInSec?: number }) => Promise<Result<boolean, HostError>>;
+  /**
+   * Delete `key` only while its value still equals `expectedValue`.
+   *
+   * This is one atomic Redis transaction, not `GET` followed by `DEL`: lease
+   * expiry may let a successor acquire the same key between those commands,
+   * and an expired holder must never delete that successor's lock. Returns
+   * `true` only when this caller's value was present and deleted.
+   */
+  readonly compareAndDelete: (key: string, expectedValue: string) => Promise<Result<boolean, HostError>>;
+  /** Atomically renew a lease only while its ownership token still matches. */
+  readonly compareAndExpire?: (key: string, expectedValue: string, expiresInSec: number) => Promise<Result<boolean, HostError>>;
+  /**
+   * Set `key` only while `guardKey` still equals `expectedValue`.
+   *
+   * The comparison and write are one optimistic Redis transaction. HITL uses
+   * this to fence checkpoint/status writes with the worker's live lease token
+   * and to commit notification-delivery state without a GET/SET gap.
+   */
+  readonly setIfValue?: (
+    guardKey: string,
+    expectedValue: string,
+    key: string,
+    value: string,
+    opts: RedisExpiry,
+  ) => Promise<Result<boolean, HostError>>;
+  /** Atomically set a value only while every supplied guard still matches. */
+  readonly setIfValues?: (
+    guards: readonly [RedisValueGuard, ...RedisValueGuard[]],
+    key: string,
+    value: string,
+    opts: RedisExpiry,
+  ) => Promise<Result<boolean, HostError>>;
+  /**
+   * Atomically verify that `guardKey` exists and create `key` only if absent.
+   * The outcomes distinguish a closed gate, a newly persisted value, and a
+   * competing writer without leaking Redis transaction mechanics to HITL.
+   */
+  readonly setNxIfPresent?: (
+    guardKey: string,
+    key: string,
+    value: string,
+    opts: { expiresInSec: number },
+  ) => Promise<Result<"not-present" | "created" | "exists", HostError>>;
 }
+
+/**
+ * Construction-proven Redis capability required by durable HITL adapters.
+ * The generic Redis port keeps transaction methods optional for unrelated
+ * consumers; host composition parses it once so no HITL worker can start with
+ * a partially implemented transaction surface.
+ */
+export type HitlRedisPort = Pick<
+  RedisPort,
+  "get" | "del" | "sAdd" | "sRem" | "sMembers" | "setNx" | "compareAndDelete"
+> & {
+  readonly compareAndExpire: NonNullable<RedisPort["compareAndExpire"]>;
+  readonly setIfValue: NonNullable<RedisPort["setIfValue"]>;
+  readonly setIfValues: NonNullable<RedisPort["setIfValues"]>;
+  readonly setNxIfPresent: NonNullable<RedisPort["setNxIfPresent"]>;
+};
 
 /**
  * Port for Redis connectivity validation (PING command).

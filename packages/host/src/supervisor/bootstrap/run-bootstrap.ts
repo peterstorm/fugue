@@ -13,7 +13,7 @@
  * is IDEMPOTENT end-to-end so re-running it on every boot (and on a re-seed of an
  * unchanged file) converges without error:
  *   - tenants → `registry.register`, whose structural-equality check makes an
- *     unchanged config a no-op (SC-009);
+ *     unchanged config a no-op (multi-tenant spec SC-009);
  *   - team tokens → reconcile against the store: an identical team+token is a
  *     no-op, a rotated token (same team, new value) UPSERTS, and the same token
  *     reused across two teams fails closed.
@@ -24,7 +24,7 @@
  * every token's team is then cross-checked against an active tenant — a token for
  * an unknown team is a misconfiguration caught at boot, not a silent runtime 403.
  *
- * NEVER LOG SECRETS (NFR-014): a team token's value never reaches a log line or
+ * NEVER LOG SECRETS (keycloak-entra spec NFR-014): a team token's value never reaches a log line or
  * an error message here; only the team name and structural reasons do.
  */
 
@@ -82,7 +82,7 @@ export interface BootstrapDeps {
 }
 
 /** What bootstrap applied — counts only (never a token value), for the boot log. */
-export interface BootstrapSummary {
+interface BootstrapSummary {
   readonly tenantsApplied: number;
   readonly teamTokensApplied: number;
 }
@@ -149,18 +149,17 @@ const reconcileInto = async (
     logger?.info("[bootstrap] rotating team token (team already had a different token)", { team: seed.team });
     const revoked = await store.revoke(seed.team);
     if (!revoked.ok) return err(revoked.error);
-    const reStored = await store.store(seed.team, hash, grant);
-    if (!reStored.ok) return err(reStored.error);
-    return ok(undefined);
+    return store.store(seed.team, hash, grant);
   }
   return err(stored.error);
 };
 
 /**
  * Seed ONE team→token into BOTH the platform store (supervisor routing) and the
- * owning tenant's store (worker re-auth). Each store is reconciled idempotently;
- * both must succeed (fail-closed) so a token is never half-installed — present for
- * routing but rejected by the worker, or vice versa.
+ * owning tenant's store (worker re-auth). Each store is reconciled idempotently
+ * and boot fails closed before serving unless both succeed. The writes are not a
+ * cross-store transaction: if the tenant write fails after the platform write,
+ * that prior write is retained and the next idempotent boot completes the pair.
  */
 const reconcileTeamToken = async (
   deps: BootstrapDeps,

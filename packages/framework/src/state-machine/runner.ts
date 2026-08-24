@@ -2,11 +2,32 @@
 // Transition loop, event sourcing, checkpoint persistence, idempotency, trace emission
 
 import type { Machine, Executor, JobLike, KernelRunOpts } from "./types.js";
+import { safeErrorMessage } from "../types/safe-error.js";
 
 const defaultClassifyError = (error: unknown): { retriable: boolean; message: string } => ({
   retriable: true,
-  message: error instanceof Error ? error.message : String(error),
+  message: safeErrorMessage(error),
 });
+
+/** A diagnostic sink is subordinate to the durable transition outcome. */
+const reportWithoutThrowing = (report: () => void): void => {
+  try {
+    report();
+  } catch {
+    // The transition or callback failure being diagnosed remains authoritative.
+  }
+};
+
+/**
+ * The event's `type` discriminant, or a fixed placeholder for an event that has
+ * none. ONE encoding: both the fallback checkpoint key and the retry dedup slot
+ * are derived from it, and a divergence between them would silently change
+ * which events collapse onto the same slot.
+ */
+const eventTypeOf = (event: unknown): string =>
+  typeof (event as { type?: unknown })?.type === "string"
+    ? (event as { type: string }).type
+    : "<event>";
 
 /**
  * Fallback dedup key when no `computeDedupKey` is injected via opts.
@@ -18,13 +39,7 @@ const fallbackDedupKey = (
   prevStateKey: string,
   attemptNumber: number,
   event: unknown,
-): string => {
-  const eventType =
-    typeof (event as { type?: unknown })?.type === "string"
-      ? (event as { type: string }).type
-      : "<event>";
-  return `${prevStateKey}|${attemptNumber}|${eventType}`;
-};
+): string => `${prevStateKey}|${attemptNumber}|${eventTypeOf(event)}`;
 
 /**
  * Drive a machine to terminal state, checkpointing after every successful
@@ -53,6 +68,16 @@ export const runStateMachine = async <S, E, C>(
   const stamp = (): Date => new Date(nowFn());
   const dedupKeyFn = opts.computeDedupKey ?? fallbackDedupKey;
   const log = opts.logger ?? { warn: () => {}, error: () => {} };
+  const readTraceNow = (): number | undefined => {
+    try {
+      return nowFn();
+    } catch (error) {
+      reportWithoutThrowing(() =>
+        log.error("[runStateMachine] trace clock threw — ignoring diagnostic timing failure:", error),
+      );
+      return undefined;
+    }
+  };
 
   // FR-011: retry counters are per-invocation (fresh map = counters start
   // at 0 for every queue-level attempt).
@@ -76,14 +101,16 @@ export const runStateMachine = async <S, E, C>(
               timestamp: stamp(),
             });
           } catch (traceErr) {
-            log.error("[runStateMachine] onTrace threw — ignoring to preserve durability:", traceErr);
+            reportWithoutThrowing(() =>
+              log.error("[runStateMachine] onTrace threw — ignoring to preserve durability:", traceErr),
+            );
           }
         }
         throw new Error("runStateMachine: aborted by beforeExecute hook");
       }
     }
 
-    const start = nowFn();
+    const traceStartMs = opts.onTrace !== undefined ? readTraceNow() : undefined;
     let event: E;
 
     try {
@@ -100,8 +127,6 @@ export const runStateMachine = async <S, E, C>(
     const result = machine.transition(state, event, context);
     state = result.state;
     context = result.context;
-
-    const durationMs = nowFn() - start;
 
     const isFailed = machine.isFailed(state);
     const isTerminal = machine.isTerminal(state);
@@ -124,11 +149,7 @@ export const runStateMachine = async <S, E, C>(
     // running → retrying in the DAG machine) produce distinct dedup keys.
     // Keying by stateKey alone collapses cross-cycle retries onto a single
     // dedup slot and suppresses the second node-failed event in the audit log.
-    const eventType =
-      typeof (event as { type?: unknown })?.type === "string"
-        ? (event as { type: string }).type
-        : "<event>";
-    const dedupSlot = `${prevStateKey}::${eventType}`;
+    const dedupSlot = `${prevStateKey}::${eventTypeOf(event)}`;
     if (isRetry) {
       retryCounters.set(dedupSlot, (retryCounters.get(dedupSlot) ?? 0) + 1);
     }
@@ -156,13 +177,19 @@ export const runStateMachine = async <S, E, C>(
       // persisted, so a caller's effectively-once side effect (e.g. consuming a
       // human decision) is ordered strictly after durability. A crash between
       // `updateData` and here leaves the side effect un-run, which is the safe
-      // direction: the decision is re-read on resume rather than lost. A throw
-      // is swallowed (the transition is already persisted) like `onTrace`.
+      // direction: the decision is re-read on resume rather than lost. Unlike
+      // telemetry, this callback may enforce a business invariant; a failure is
+      // rethrown after durability so the owning shell can fail the run closed.
       if (opts.onCommitted !== undefined) {
         try {
           await opts.onCommitted({ prevState, event, state, context });
         } catch (commitErr) {
-          log.error("[runStateMachine] onCommitted threw — ignoring to preserve durability:", commitErr);
+          try {
+            log.error("[runStateMachine] onCommitted threw — failing closed after checkpoint:", commitErr);
+          } catch {
+            // The committed-callback failure remains authoritative.
+          }
+          throw commitErr;
         }
       }
       // Do not persist progress for failed states — the runner throws below
@@ -172,21 +199,29 @@ export const runStateMachine = async <S, E, C>(
     }
 
     if (opts.onTrace) {
-      const outcome = isFailed ? "failed" : isRetry ? "retry" : "success";
-      // A throwing onTrace must not escape: the transition is already persisted
-      // and surfacing the throw would surface a successful transition as a fatal
-      // executor crash via run-dag-stateful's outer catch.
-      try {
-        opts.onTrace({
-          state: prevState,
-          event,
-          nextState: state,
-          outcome,
-          durationMs,
-          timestamp: stamp(),
-        });
-      } catch (traceErr) {
-        log.error("[runStateMachine] onTrace threw — ignoring to preserve durability:", traceErr);
+      // Trace timing is diagnostic-only and is read AFTER durability. A hostile
+      // clock can suppress this trace, but can never suppress or replay the
+      // transition whose checkpoint was already committed above.
+      const traceEndMs = readTraceNow();
+      if (traceEndMs !== undefined) {
+        const outcome = isFailed ? "failed" : isRetry ? "retry" : "success";
+        // A throwing onTrace must not escape: the transition is already persisted
+        // and surfacing the throw would surface a successful transition as a fatal
+        // executor crash via run-dag-stateful's outer catch.
+        try {
+          opts.onTrace({
+            state: prevState,
+            event,
+            nextState: state,
+            outcome,
+            durationMs: traceStartMs === undefined ? 0 : traceEndMs - traceStartMs,
+            timestamp: new Date(traceEndMs),
+          });
+        } catch (traceErr) {
+          reportWithoutThrowing(() =>
+            log.error("[runStateMachine] onTrace threw — ignoring to preserve durability:", traceErr),
+          );
+        }
       }
     }
 

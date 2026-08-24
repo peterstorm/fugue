@@ -13,7 +13,11 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { createRedisConnectivity, type RedisClientFactory } from "../redis-connectivity.js";
+import {
+  createRedisConnectivity,
+  disconnectRedisQuietly,
+  type RedisClientFactory,
+} from "../redis-connectivity.js";
 import { isOk, isErr } from "@fuguejs/framework";
 import type { Redis as IoRedis } from "ioredis";
 
@@ -26,7 +30,10 @@ interface FakeOverrides {
   readonly setResult?: unknown;
   readonly setnxResult?: unknown;
   readonly getResult?: string | null;
+  readonly execNullOnce?: boolean;
+  readonly execCommandError?: Error;
   readonly throwOn?: readonly string[];
+  readonly thrownValue?: unknown;
 }
 
 class FakeRedis {
@@ -35,16 +42,21 @@ class FakeRedis {
   readonly calls: Array<{ readonly m: string; readonly args: readonly unknown[] }> = [];
   private readonly throwOn: Set<string>;
   private readonly o: FakeOverrides;
+  private readonly values = new Map<string, string>();
+  private execNullRemaining: number;
 
   constructor(o: FakeOverrides = {}) {
     this.status = o.initialStatus ?? "wait";
     this.throwOn = new Set(o.throwOn ?? []);
     this.o = o;
+    this.execNullRemaining = o.execNullOnce ? 1 : 0;
   }
 
   private rec(m: string, args: readonly unknown[]): void {
     this.calls.push({ m, args });
-    if (this.throwOn.has(m)) throw new Error(`${m} boom`);
+    if (this.throwOn.has(m)) {
+      throw "thrownValue" in this.o ? this.o.thrownValue : new Error(`${m} boom`);
+    }
   }
 
   async connect(): Promise<void> {
@@ -56,9 +68,10 @@ class FakeRedis {
     this.rec("ping", []);
     return "PONG";
   }
+  seed(key: string, value: string): void { this.values.set(key, value); }
   async get(key: string): Promise<string | null> {
     this.rec("get", [key]);
-    return this.o.getResult ?? null;
+    return "getResult" in this.o ? this.o.getResult ?? null : this.values.get(key) ?? null;
   }
   async set(...args: unknown[]): Promise<unknown> {
     this.rec("set", args);
@@ -70,9 +83,67 @@ class FakeRedis {
     this.rec("setnx", args);
     return "setnxResult" in this.o ? this.o.setnxResult : 1;
   }
-  async del(key: string): Promise<number> {
-    this.rec("del", [key]);
-    return 1;
+  async watch(...keys: string[]): Promise<string> {
+    this.rec("watch", keys);
+    return "OK";
+  }
+  async unwatch(): Promise<string> {
+    this.rec("unwatch", []);
+    return "OK";
+  }
+  multi() {
+    this.rec("multi", []);
+    let operation:
+      | { readonly kind: "delete"; readonly key: string }
+      | { readonly kind: "expire"; readonly key: string }
+      | { readonly kind: "set"; readonly key: string; readonly value: string; readonly onlyIfAbsent: boolean }
+      | undefined;
+    const chain = {
+      del: (key: string) => {
+        this.rec("multi.del", [key]);
+        operation = { kind: "delete", key };
+        return chain;
+      },
+      expire: (key: string, seconds: number) => {
+        this.rec("multi.expire", [key, seconds]);
+        operation = { kind: "expire", key };
+        return chain;
+      },
+      set: (key: string, value: string, ...args: unknown[]) => {
+        this.rec("multi.set", [key, value, ...args]);
+        operation = { kind: "set", key, value, onlyIfAbsent: args.includes("NX") };
+        return chain;
+      },
+      exec: async () => {
+        this.rec("multi.exec", []);
+        if (this.execNullRemaining > 0) {
+          this.execNullRemaining -= 1;
+          return null;
+        }
+        if (this.o.execCommandError !== undefined) {
+          return [[this.o.execCommandError, null]] as [Error | null, unknown][];
+        }
+        if (operation?.kind === "delete") {
+          return [[null, this.values.delete(operation.key) ? 1 : 0]] as [Error | null, unknown][];
+        }
+        if (operation?.kind === "expire") {
+          return [[null, this.values.has(operation.key) ? 1 : 0]] as [Error | null, unknown][];
+        }
+        if (operation?.kind === "set") {
+          if (operation.onlyIfAbsent && this.values.has(operation.key)) {
+            return [[null, null]] as [Error | null, unknown][];
+          }
+          this.values.set(operation.key, operation.value);
+          return [[null, "OK"]] as [Error | null, unknown][];
+        }
+        return [] as [Error | null, unknown][];
+      },
+    };
+    return chain;
+  }
+  async del(...keys: string[]): Promise<number> {
+    this.rec("del", keys);
+    return keys.length;
   }
   async scan(...args: unknown[]): Promise<[string, string[]]> {
     this.rec("scan", args);
@@ -220,6 +291,16 @@ describe("createRedisConnectivity — data port", () => {
     expect(setCall?.args).toEqual(["k", "v", "EX", 60]);
   });
 
+  it("del submits every key in one Redis command", async () => {
+    const fake = new FakeRedis();
+    const { bundle } = await wire(fake);
+
+    const result = await bundle.redis.del("pending", "decision");
+
+    expect(isOk(result) && result.value).toBe(2);
+    expect(fake.calls.find((call) => call.m === "del")?.args).toEqual(["pending", "decision"]);
+  });
+
   it("get returns the value on success and Err(redis-unavailable) on a thrown client error", async () => {
     const okFake = new FakeRedis({ getResult: "hello" });
     const okR = await (await wire(okFake)).bundle.redis.get("k");
@@ -230,6 +311,222 @@ describe("createRedisConnectivity — data port", () => {
     expect(isErr(errR)).toBe(true);
     if (isErr(errR) && errR.error.kind === "redis-unavailable") {
       expect(errR.error.operation).toMatch(/GET k/);
+    }
+  });
+
+  it("compareAndDelete uses WATCH/MULTI/EXEC and deletes only the matching owner", async () => {
+    const matching = new FakeRedis();
+    matching.seed("lease", "owner-a");
+    const deleted = await (await wire(matching)).bundle.redis.compareAndDelete("lease", "owner-a");
+    expect(isOk(deleted) && deleted.value).toBe(true);
+    expect(matching.calls.map((c) => c.m)).toEqual(["watch", "get", "multi", "multi.del", "multi.exec"]);
+
+    const successor = new FakeRedis();
+    successor.seed("lease", "owner-b");
+    const preserved = await (await wire(successor)).bundle.redis.compareAndDelete("lease", "owner-a");
+    expect(isOk(preserved) && preserved.value).toBe(false);
+    expect(successor.calls.map((c) => c.m)).toEqual(["watch", "get", "unwatch"]);
+    expect(await successor.get("lease")).toBe("owner-b");
+  });
+
+  it("returns a WATCH conflict as Ok(false)", async () => {
+    const conflicted = new FakeRedis({ execNullOnce: true });
+    conflicted.seed("lease", "owner-a");
+
+    const result = await (await wire(conflicted)).bundle.redis.compareAndDelete("lease", "owner-a");
+
+    expect(isOk(result) && result.value).toBe(false);
+    expect(conflicted.calls.map((call) => call.m)).toEqual([
+      "watch", "get", "multi", "multi.del", "multi.exec",
+    ]);
+  });
+
+  it("converts queued command errors to Err and clears the connection watch", async () => {
+    const fake = new FakeRedis({ execCommandError: new Error("queued command failed") });
+    fake.seed("lease", "owner-a");
+
+    const result = await (await wire(fake)).bundle.redis.compareAndDelete("lease", "owner-a");
+
+    expect(isErr(result)).toBe(true);
+    expect(fake.calls.map((call) => call.m)).toEqual([
+      "watch", "get", "multi", "multi.del", "multi.exec", "unwatch",
+    ]);
+  });
+
+  it("surfaces primary + UNWATCH cleanup failures and poisons later WATCH transactions", async () => {
+    const fake = new FakeRedis({ throwOn: ["get", "unwatch"] });
+    const { bundle } = await wire(fake);
+
+    const first = await bundle.redis.compareAndDelete("lease", "owner-a");
+    const callsAfterFailure = [...fake.calls];
+    const second = await bundle.redis.compareAndDelete("another-lease", "owner-b");
+
+    expect(isErr(first)).toBe(true);
+    if (isErr(first) && first.error.kind === "redis-unavailable") {
+      expect(first.error.operation).toContain("primary failure: get boom");
+      expect(first.error.operation).toContain("UNWATCH cleanup failure: unwatch boom");
+      expect(first.error.operation).toContain("optimistic transactions disabled");
+    }
+    expect(second).toEqual(first);
+    expect(fake.calls).toEqual(callsAfterFailure);
+    expect(fake.calls.map((call) => call.m)).toEqual(["watch", "get", "unwatch"]);
+  });
+
+  it("serializes optimistic transactions on the shared command connection", async () => {
+    const fake = new FakeRedis();
+    fake.seed("lease-a", "owner-a");
+    fake.seed("lease-b", "owner-b");
+    let releaseFirstWatch!: () => void;
+    const firstWatchBlocked = new Promise<void>((resolve) => { releaseFirstWatch = resolve; });
+    const originalWatch = fake.watch.bind(fake);
+    let first = true;
+    fake.watch = async (key: string) => {
+      const result = await originalWatch(key);
+      if (first) {
+        first = false;
+        await firstWatchBlocked;
+      }
+      return result;
+    };
+    const { bundle } = await wire(fake);
+
+    const firstResult = bundle.redis.compareAndDelete("lease-a", "owner-a");
+    const secondResult = bundle.redis.compareAndDelete("lease-b", "owner-b");
+    await Bun.sleep(0);
+    expect(fake.calls.filter((call) => call.m === "watch")).toHaveLength(1);
+
+    releaseFirstWatch();
+    const results = await Promise.all([firstResult, secondResult]);
+    expect(results.every((result) => isOk(result) && result.value)).toBe(true);
+    expect(fake.calls.filter((call) => call.m === "watch")).toHaveLength(2);
+  });
+
+  it("setIfValue atomically fences a target write with the matching owner token", async () => {
+    const matching = new FakeRedis();
+    matching.seed("lease", "owner-a");
+    const written = await (await wire(matching)).bundle.redis.setIfValue?.(
+      "lease", "owner-a", "checkpoint", "next", { expiresInSec: 60 },
+    );
+    expect(written && isOk(written) && written.value).toBe(true);
+    expect(await matching.get("checkpoint")).toBe("next");
+    expect(matching.calls.some((c) => c.m === "multi.set")).toBe(true);
+
+    const renewedDuringWrite = new FakeRedis({ execNullOnce: true });
+    renewedDuringWrite.seed("lease", "owner-a");
+    const retried = await (await wire(renewedDuringWrite)).bundle.redis.setIfValue?.(
+      "lease", "owner-a", "checkpoint", "after-renewal", { expiresInSec: 60 },
+    );
+    expect(retried && isOk(retried) && retried.value).toBe(true);
+    expect(renewedDuringWrite.calls.filter((c) => c.m === "multi.exec")).toHaveLength(2);
+
+    const successor = new FakeRedis();
+    successor.seed("lease", "owner-b");
+    const rejected = await (await wire(successor)).bundle.redis.setIfValue?.(
+      "lease", "owner-a", "checkpoint", "stale", { expiresInSec: 60 },
+    );
+    expect(rejected && isOk(rejected) && rejected.value).toBe(false);
+    expect(await successor.get("checkpoint")).toBeNull();
+    expect(successor.calls.some((c) => c.m === "multi.set")).toBe(false);
+  });
+
+  it("setIfValues requires every guard and supports millisecond execution-fence expiry", async () => {
+    const matching = new FakeRedis();
+    matching.seed("lease", "owner-a");
+    matching.seed("execution", "generation-1");
+    const written = await (await wire(matching)).bundle.redis.setIfValues?.(
+      [
+        { key: "lease", expectedValue: "owner-a" },
+        { key: "execution", expectedValue: "generation-1" },
+      ],
+      "checkpoint",
+      "next",
+      { expiresInMs: 5 },
+    );
+
+    expect(written && isOk(written) && written.value).toBe(true);
+    expect(matching.calls.find((call) => call.m === "watch")?.args).toEqual(["lease", "execution"]);
+    expect(matching.calls.find((call) => call.m === "multi.set")?.args).toEqual([
+      "checkpoint", "next", "PX", 5,
+    ]);
+
+    const expired = new FakeRedis();
+    expired.seed("lease", "owner-a");
+    const rejected = await (await wire(expired)).bundle.redis.setIfValues?.(
+      [
+        { key: "lease", expectedValue: "owner-a" },
+        { key: "execution", expectedValue: "generation-1" },
+      ],
+      "checkpoint",
+      "late",
+      { expiresInSec: 60 },
+    );
+    expect(rejected && isOk(rejected) && rejected.value).toBe(false);
+    expect(expired.calls.some((call) => call.m === "multi")).toBe(false);
+  });
+
+  it("setNxIfPresent distinguishes missing guards, creation, existing targets, and WATCH retries", async () => {
+    const missing = new FakeRedis();
+    const missingResult = await (await wire(missing)).bundle.redis.setNxIfPresent?.(
+      "pending", "decision", "approve", { expiresInSec: 60 },
+    );
+    expect(missingResult && isOk(missingResult) && missingResult.value).toBe("not-present");
+    expect(missing.calls.map((call) => call.m)).toEqual(["watch", "get", "unwatch"]);
+
+    const created = new FakeRedis();
+    created.seed("pending", "marker");
+    const createdResult = await (await wire(created)).bundle.redis.setNxIfPresent?.(
+      "pending", "decision", "approve", { expiresInSec: 60 },
+    );
+    expect(createdResult && isOk(createdResult) && createdResult.value).toBe("created");
+    expect(await created.get("decision")).toBe("approve");
+    expect(created.calls.find((call) => call.m === "multi.set")?.args).toEqual([
+      "decision", "approve", "EX", 60, "NX",
+    ]);
+
+    const existing = new FakeRedis();
+    existing.seed("pending", "marker");
+    existing.seed("decision", "reject");
+    const existingResult = await (await wire(existing)).bundle.redis.setNxIfPresent?.(
+      "pending", "decision", "approve", { expiresInSec: 60 },
+    );
+    expect(existingResult && isOk(existingResult) && existingResult.value).toBe("exists");
+    expect(await existing.get("decision")).toBe("reject");
+
+    const conflicted = new FakeRedis({ execNullOnce: true });
+    conflicted.seed("pending", "marker");
+    const retried = await (await wire(conflicted)).bundle.redis.setNxIfPresent?.(
+      "pending", "decision", "approve", { expiresInSec: 60 },
+    );
+    expect(retried && isOk(retried) && retried.value).toBe("created");
+    expect(conflicted.calls.filter((call) => call.m === "multi.exec")).toHaveLength(2);
+  });
+
+  it("a revoked proxy thrown by the client stays inside redisErr's typed boundary", async () => {
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    const fake = new FakeRedis({ throwOn: ["get"], thrownValue: revoked.proxy });
+
+    const result = await (await wire(fake)).bundle.redis.get("hostile-key");
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result) && result.error.kind === "redis-unavailable") {
+      expect(result.error.operation).toContain("GET hostile-key");
+      expect(typeof result.error.operation).toBe("string");
+    }
+  });
+
+  it("a throwing message accessor cannot escape redisErr", async () => {
+    const hostile = Object.defineProperty({}, "message", {
+      get: () => { throw new Error("message accessor failed"); },
+    });
+    const fake = new FakeRedis({ throwOn: ["ping"], thrownValue: hostile, initialStatus: "ready" });
+
+    const result = await (await wire(fake)).bundle.port.ping();
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result) && result.error.kind === "redis-unavailable") {
+      expect(result.error.operation).toContain("PING at startup");
+      expect(typeof result.error.operation).toBe("string");
     }
   });
 
@@ -244,6 +541,18 @@ describe("createRedisConnectivity — data port", () => {
     const { bundle } = await wire(fake);
     await bundle.disconnect();
     expect(fake.calls.some((c) => c.m === "quit")).toBe(true);
+  });
+
+  it("quiet disconnect contains hostile cleanup failures and fallback logger throws", async () => {
+    const originalConsoleError = console.error;
+    console.error = () => { throw new Error("console unavailable"); };
+    try {
+      await expect(disconnectRedisQuietly((() => {
+        throw Object.create(null);
+      }) as () => Promise<void>)).resolves.toBeUndefined();
+    } finally {
+      console.error = originalConsoleError;
+    }
   });
 });
 

@@ -1,11 +1,19 @@
 // Discriminated union of all framework errors
 
 import { match } from "ts-pattern";
+import { z } from "zod";
+import { tryNodeId, tryRunId } from "./ids.js";
+// The checkpoint-address ADTs and their ONE construction path live in a leaf
+// module that imports only `ids.js`, so parsing a persisted record can reuse
+// the builder here without creating an import cycle.
+import { buildCheckpointWriteFailed } from "./checkpoint-address.js";
+import type { CheckpointWriteFailedError } from "./checkpoint-address.js";
 import type { RunId, NodeId } from "./ids.js";
 // Type-only circular reference with `types/node.ts` (which imports
 // `FrameworkError` from this module) — safe: type imports erase at compile
 // time, so no runtime cycle exists.
 import type { Capability } from "./node.js";
+import { safeDiagnosticRender, safeErrorMessage } from "./safe-error.js";
 
 /** A single unsatisfied capability declaration: which node required which capability. */
 export type MissingCapability = {
@@ -28,6 +36,16 @@ export type PartialTokenUsage = {
   readonly tokensIn: number;
   readonly tokensOut: number;
 };
+
+// The `checkpoint-write-failed` address ADTs are re-exported here so consumers
+// keep reaching the whole error vocabulary through this module.
+export type {
+  CheckpointPlaceholderNodeId,
+  CheckpointPlaceholderRunId,
+  CheckpointWriteFailedError,
+  CheckpointWriteNodeAddress,
+  CheckpointWriteRunAddress,
+} from "./checkpoint-address.js";
 
 export type FrameworkError =
   | { readonly kind: "validation"; readonly nodeId: NodeId; readonly message: string; readonly path?: string }
@@ -66,14 +84,26 @@ export type FrameworkError =
       readonly expected: string;
       readonly actual: string | undefined;
     }
-  | {
-      readonly kind: "checkpoint-write-failed";
-      readonly runId: RunId;
-      readonly nodeId: NodeId;
-      readonly message: string;
-    }
+  | CheckpointWriteFailedError
   | { readonly kind: "prompt-not-found"; readonly promptName: string; readonly reason: string }
-  | { readonly kind: "cache-error"; readonly operation: string; readonly message: string }
+  | {
+      readonly kind: "cache-error";
+      readonly operation: string;
+      readonly message: string;
+      /**
+       * Explicit failure-class discriminant (additive): `"permanent"` marks a
+       * deterministic failure that re-running cannot clear (journal capacity
+       * exhaustion, FR-015 dedup-key violations, invalid progress values,
+       * non-lossless event/checkpoint values, malformed filename inputs),
+       * so `retriabilityOf` can fast-fail it instead of burning the retry
+       * budget. `"transient"`/absent = environment-class failures (fs/lock)
+       * that replay may clear. Populated by the file backend's error shell;
+       * the taxonomy's contract — a new kind can never silently default to
+       * `retriable` — is what this discriminant restores for the closed
+       * `cache-error` kind whose operation vocabulary mixes both classes.
+       */
+      readonly failureClass?: "transient" | "permanent";
+    }
   | {
       readonly kind: "node-crash";
       readonly nodeId: NodeId;
@@ -315,6 +345,169 @@ export type FrameworkError =
 /** Discriminant union of all error kinds — use for consumer-side exhaustive switches. */
 export type FrameworkErrorKind = FrameworkError["kind"];
 
+// The framework owns the wire parser for its error ADT. Persistence adapters
+// compose this schema into their own records instead of duplicating all 27
+// variants and drifting when the framework error vocabulary changes.
+const persistedBrandedId = <T>(parse: (raw: string) => { readonly ok: true; readonly value: T } | { readonly ok: false }): z.ZodType<T> =>
+  z.string().transform((value, context) => {
+    const parsed = parse(value);
+    if (parsed.ok) return parsed.value;
+    context.addIssue({ code: "custom", message: "value is not a valid branded id" });
+    return z.NEVER;
+  });
+
+const PersistedNodeIdSchema = persistedBrandedId(tryNodeId);
+const PersistedRunIdSchema = persistedBrandedId(tryRunId);
+const persistedUsageSchema = z.object({ tokensIn: z.number(), tokensOut: z.number() }).optional();
+const persistedRetriabilitySchema = z.enum(["retriable", "non-retriable"]);
+const PersistedCapabilitySchema: z.ZodType<Capability> = z.string().transform((value) => value as Capability);
+const persistedFrameworkErrorKinds = z.enum([
+  "validation", "retry-exhausted", "checkpoint-missing", "checkpoint-expired",
+  "checkpoint-corrupt", "checkpoint-version-mismatch", "checkpoint-write-failed",
+  "prompt-not-found", "cache-error", "node-crash", "cycle-detected", "aborted",
+  "rejected", "invalid-reroute", "transient", "missing-default-edge",
+  "output-unreachable-under-routing", "predicate-malformed", "duplicate-edge",
+  "root-expects-input", "source-has-incoming", "invalid-dag-input-edge",
+  "missing-capability", "llm-budget-exceeded", "infra-unreachable",
+  "policy-refusal", "downstream-denied",
+]);
+
+const PersistedFrameworkErrorSchemaDefinition = z.discriminatedUnion("kind", [
+  z.looseObject({ kind: z.literal("validation"), nodeId: PersistedNodeIdSchema, message: z.string(), path: z.string().optional() }),
+  z.looseObject({ kind: z.literal("retry-exhausted"), nodeId: PersistedNodeIdSchema, attempts: z.number(), lastError: z.string(), rootErrorKind: persistedFrameworkErrorKinds.exclude(["retry-exhausted"]) }),
+  z.looseObject({ kind: z.literal("checkpoint-missing"), runId: PersistedRunIdSchema }),
+  z.looseObject({ kind: z.literal("checkpoint-expired"), runId: PersistedRunIdSchema, expiredAt: z.string() }),
+  z.looseObject({ kind: z.literal("checkpoint-corrupt"), runId: PersistedRunIdSchema, nodeId: PersistedNodeIdSchema.optional(), message: z.string() }),
+  z.looseObject({ kind: z.literal("checkpoint-version-mismatch"), runId: PersistedRunIdSchema, expected: z.string(), actual: z.union([z.string(), z.undefined()]) }),
+  z.looseObject({ kind: z.literal("checkpoint-write-failed"), runId: PersistedRunIdSchema, nodeId: PersistedNodeIdSchema, invalidRunId: z.string().optional(), invalidNodeId: z.string().optional(), message: z.string() }),
+  z.looseObject({ kind: z.literal("prompt-not-found"), promptName: z.string(), reason: z.string() }),
+  z.looseObject({ kind: z.literal("cache-error"), operation: z.string(), message: z.string(), failureClass: z.enum(["transient", "permanent"]).optional() }),
+  z.looseObject({ kind: z.literal("node-crash"), nodeId: PersistedNodeIdSchema, message: z.string(), stack: z.string().optional(), retriability: persistedRetriabilitySchema, httpStatus: z.number().optional(), usage: persistedUsageSchema }),
+  z.looseObject({ kind: z.literal("cycle-detected"), nodeIds: z.array(PersistedNodeIdSchema) }),
+  z.looseObject({ kind: z.literal("aborted"), reason: z.string(), usage: persistedUsageSchema }),
+  z.looseObject({ kind: z.literal("rejected"), nodeId: PersistedNodeIdSchema, reason: z.string() }),
+  z.looseObject({ kind: z.literal("invalid-reroute"), targetNodeId: PersistedNodeIdSchema, message: z.string() }),
+  z.looseObject({ kind: z.literal("transient"), nodeId: PersistedNodeIdSchema, message: z.string(), httpStatus: z.number().optional(), usage: persistedUsageSchema }),
+  z.looseObject({ kind: z.literal("missing-default-edge"), nodeId: PersistedNodeIdSchema }),
+  z.looseObject({ kind: z.literal("output-unreachable-under-routing"), outputNodeId: PersistedNodeIdSchema, missedFromNode: PersistedNodeIdSchema }),
+  z.looseObject({ kind: z.literal("predicate-malformed"), nodeId: PersistedNodeIdSchema, message: z.string() }),
+  z.looseObject({ kind: z.literal("duplicate-edge"), fromNodeId: PersistedNodeIdSchema, toNodeId: PersistedNodeIdSchema }),
+  z.looseObject({ kind: z.literal("root-expects-input"), nodeId: PersistedNodeIdSchema, message: z.string() }),
+  z.looseObject({ kind: z.literal("source-has-incoming"), nodeId: PersistedNodeIdSchema, message: z.string() }),
+  z.looseObject({ kind: z.literal("invalid-dag-input-edge"), edge: z.object({ from: z.string(), to: z.string() }), message: z.string() }),
+  z.looseObject({
+    kind: z.literal("missing-capability"),
+    missing: z.tuple(
+      [z.object({ nodeId: PersistedNodeIdSchema, capability: PersistedCapabilitySchema })],
+      z.object({ nodeId: PersistedNodeIdSchema, capability: PersistedCapabilitySchema }),
+    ),
+  }),
+  z.looseObject({ kind: z.literal("llm-budget-exceeded"), runId: PersistedRunIdSchema, nodeId: PersistedNodeIdSchema, cumulative: z.number(), budget: z.number() }),
+  z.looseObject({ kind: z.literal("infra-unreachable"), operation: z.enum(["mint", "exchange", "federation", "downstream"]), hop: z.string(), message: z.string() }),
+  z.looseObject({ kind: z.literal("policy-refusal"), scope: z.string(), agentClientId: z.string().optional() }),
+  z.looseObject({ kind: z.literal("downstream-denied"), resource: z.string(), reason: z.string() }),
+]);
+
+type MissingPersistedFrameworkErrorKind = Exclude<
+  FrameworkErrorKind,
+  z.output<typeof PersistedFrameworkErrorSchemaDefinition>["kind"]
+>;
+type ExhaustivePersistedFrameworkErrorSchema = [MissingPersistedFrameworkErrorKind] extends [never]
+  ? z.ZodType<FrameworkError>
+  : never;
+
+/**
+ * Re-correlate a parsed `checkpoint-write-failed` record.
+ *
+ * The wire record is four independent fields; the in-memory ADT is two
+ * correlated address arms. Routing the parsed record back through THE ONE
+ * construction path (`buildCheckpointWriteFailed`) rebuilds the correlation
+ * from the same rule the writer used, so a persisted record can never enter
+ * the process as a half-correlated value (a placeholder id with no
+ * `invalidRunId`, or a real id carrying one). The rebuild is idempotent on
+ * every record this framework writes.
+ */
+const correlateCheckpointAddresses = (
+  parsed: z.output<typeof PersistedFrameworkErrorSchemaDefinition>,
+): FrameworkError =>
+  parsed.kind === "checkpoint-write-failed"
+    ? buildCheckpointWriteFailed(
+        parsed.invalidRunId ?? parsed.runId,
+        parsed.invalidNodeId ?? parsed.nodeId,
+        parsed.message,
+      )
+    : parsed;
+
+/** Loose, exhaustive wire parser for persisted `FrameworkError` control-plane data. */
+export const PersistedFrameworkErrorSchema: ExhaustivePersistedFrameworkErrorSchema =
+  PersistedFrameworkErrorSchemaDefinition.transform(correlateCheckpointAddresses);
+
+/**
+ * Every `FrameworkError["kind"]` literal — the closed discriminant domain
+ * of `isFrameworkError` — as a Record indexed by the FULL union, so BOTH
+ * membership and coverage are compile-checked. A kind added to the
+ * `FrameworkError` union and omitted here is a compile error (TS2741) —
+ * not a silent registration miss that would make `isFrameworkError` fail
+ * closed on the new kind and let the boundary fences (resume.ts, job.ts
+ * `appendEvent`, atomic.ts `acquireFileLock`) re-tag it, silently losing
+ * its identity — and a key here the union no longer declares is a compile
+ * error too.
+ */
+const FRAMEWORK_ERROR_KINDS: Record<FrameworkErrorKind, true> = {
+  validation: true,
+  "retry-exhausted": true,
+  "checkpoint-missing": true,
+  "checkpoint-expired": true,
+  "checkpoint-corrupt": true,
+  "checkpoint-version-mismatch": true,
+  "checkpoint-write-failed": true,
+  "prompt-not-found": true,
+  "cache-error": true,
+  "node-crash": true,
+  "cycle-detected": true,
+  aborted: true,
+  rejected: true,
+  "invalid-reroute": true,
+  transient: true,
+  "missing-default-edge": true,
+  "output-unreachable-under-routing": true,
+  "predicate-malformed": true,
+  "duplicate-edge": true,
+  "root-expects-input": true,
+  "source-has-incoming": true,
+  "invalid-dag-input-edge": true,
+  "missing-capability": true,
+  "llm-budget-exceeded": true,
+  "infra-unreachable": true,
+  "policy-refusal": true,
+  "downstream-denied": true,
+};
+
+/** Derived membership set (string-keyed for the untyped `kind` probe). */
+const FRAMEWORK_ERROR_KIND_SET: ReadonlySet<string> = new Set(Object.keys(FRAMEWORK_ERROR_KINDS));
+
+/**
+ * Runtime type guard for `FrameworkError` — narrows an unknown value (a
+ * caught throw, a boundary-crossing payload) to the typed union by
+ * discriminant inspection: the value must be an object carrying a string
+ * `kind` that is a member of the CLOSED `FrameworkErrorKind` domain.
+ * Anything else — a plain `Error`, a hostile object carrying an off-union
+ * `kind` string — is NOT a typed framework error and must not be relabeled
+ * as one by a boundary that only ever throws typed values (e.g. the file
+ * journal's `readCheckpoint`, ADR-0080).
+ */
+export const isFrameworkError = (value: unknown): value is FrameworkError => {
+  try {
+    if (typeof value !== "object" || value === null || !("kind" in value)) return false;
+    const kind = Reflect.get(value, "kind");
+    return typeof kind === "string" && FRAMEWORK_ERROR_KIND_SET.has(kind);
+  } catch {
+    // A revoked/hostile Proxy is not safely inspectable and therefore cannot
+    // be admitted as a typed framework error.
+    return false;
+  }
+};
+
 /**
  * Extract the partial token usage carried by a failed call, if any. Only the
  * tool-use-loop error variants (`node-crash`, `transient`, `aborted`) carry
@@ -390,6 +583,11 @@ export const retriabilityOf = (e: FrameworkError): Retriability =>
       { kind: "downstream-denied" },
       { kind: "llm-budget-exceeded" },
       { kind: "missing-capability" },
+      // `cache-error` carries an explicit discriminant where the operation
+      // vocabulary mixes deterministic and environment failures: a
+      // `"permanent"` class is a deterministic failure like the kinds above
+      // (capacity, FR-015, losslessness — re-running reproduces it).
+      { kind: "cache-error", failureClass: "permanent" },
       () => "non-retriable" as const,
     )
     // Everything else goes through the standard backoff path. The graph-
@@ -423,7 +621,10 @@ export const retriabilityOf = (e: FrameworkError): Retriability =>
 /**
  * The human-readable summary threaded into `retry-exhausted.lastError`.
  * `node-crash`/`transient` carry a purpose-written `message` that IS the whole
- * human story (their other fields are just `nodeId`), so it is returned bare.
+ * human story (their other fields — `node-crash`'s `nodeId`/`retriability`/
+ * `httpStatus`/`usage`/`stack` and `transient`'s `httpStatus`/`usage` — are
+ * structured discriminants for programmatic branching, not part of the
+ * human failure story), so it is returned bare.
  * Every other kind is JSON-stringified: several DO carry a `message`/`reason`,
  * but alongside equally-load-bearing context (`checkpoint-corrupt` has `runId`,
  * `downstream-denied` has `resource`, …), so serialising the whole value loses
@@ -432,42 +633,56 @@ export const retriabilityOf = (e: FrameworkError): Retriability =>
  * new kind is a compile error here rather than silently inheriting the
  * JSON-stringify arm, and so this stays the single source of truth for the
  * retry-policy call sites (which would otherwise re-list the carrier set and drift).
+ *
+ * The runtime input is intentionally `unknown`: JavaScript callers and caught
+ * failures can bypass the static union. Hostile/cyclic values fall through to
+ * the independently guarded total formatter instead of throwing a second
+ * error while the first is being summarized.
  */
-export const messageOf = (e: FrameworkError): string =>
-  match(e)
-    .with({ kind: "node-crash" }, { kind: "transient" }, (c) => c.message)
-    // Every other kind: serialise the whole value so no context field is lost.
-    // Enumerated (not `.otherwise()`) so `.exhaustive()` turns a new kind into a
-    // compile error here rather than silently folding it into JSON-stringify.
-    .with(
-      { kind: "predicate-malformed" },
-      { kind: "validation" },
-      { kind: "checkpoint-write-failed" },
-      { kind: "aborted" },
-      { kind: "policy-refusal" },
-      { kind: "downstream-denied" },
-      { kind: "llm-budget-exceeded" },
-      { kind: "missing-capability" },
-      { kind: "retry-exhausted" },
-      { kind: "checkpoint-missing" },
-      { kind: "checkpoint-expired" },
-      { kind: "checkpoint-corrupt" },
-      { kind: "checkpoint-version-mismatch" },
-      { kind: "prompt-not-found" },
-      { kind: "cache-error" },
-      { kind: "cycle-detected" },
-      { kind: "rejected" },
-      { kind: "invalid-reroute" },
-      { kind: "missing-default-edge" },
-      { kind: "output-unreachable-under-routing" },
-      { kind: "duplicate-edge" },
-      { kind: "root-expects-input" },
-      { kind: "source-has-incoming" },
-      { kind: "invalid-dag-input-edge" },
-      { kind: "infra-unreachable" },
-      (rest) => JSON.stringify(rest),
-    )
-    .exhaustive();
+export const messageOf = (e: unknown): string => {
+  try {
+    return match(e as FrameworkError)
+      .with({ kind: "node-crash" }, { kind: "transient" }, (c) => c.message)
+      // Every other kind: serialise the whole value so no context field is lost.
+      // Enumerated (not `.otherwise()`) so `.exhaustive()` turns a new kind into a
+      // compile error here rather than silently folding it into JSON-stringify.
+      .with(
+        { kind: "predicate-malformed" },
+        { kind: "validation" },
+        { kind: "checkpoint-write-failed" },
+        { kind: "aborted" },
+        { kind: "policy-refusal" },
+        { kind: "downstream-denied" },
+        { kind: "llm-budget-exceeded" },
+        { kind: "missing-capability" },
+        { kind: "retry-exhausted" },
+        { kind: "checkpoint-missing" },
+        { kind: "checkpoint-expired" },
+        { kind: "checkpoint-corrupt" },
+        { kind: "checkpoint-version-mismatch" },
+        { kind: "prompt-not-found" },
+        { kind: "cache-error" },
+        { kind: "cycle-detected" },
+        { kind: "rejected" },
+        { kind: "invalid-reroute" },
+        { kind: "missing-default-edge" },
+        { kind: "output-unreachable-under-routing" },
+        { kind: "duplicate-edge" },
+        { kind: "root-expects-input" },
+        { kind: "source-has-incoming" },
+        { kind: "invalid-dag-input-edge" },
+        { kind: "infra-unreachable" },
+        (rest) => JSON.stringify(rest),
+      )
+      .exhaustive();
+  } catch {
+    // Exhaustive matching and JSON serialization are only total for values
+    // that truly satisfy FrameworkError. Runtime callers may still hand us a
+    // cyclic object or hostile Proxy; diagnostics must never throw while
+    // formatting the original failure.
+    return safeErrorMessage(e);
+  }
+};
 
 /**
  * Human-readable single-line summary of a FrameworkError. Exhaustive —
@@ -497,7 +712,15 @@ export const formatFrameworkError = (e: FrameworkError): string =>
     .with({ kind: "checkpoint-expired" }, (e) => `checkpoint for run '${e.runId}' expired at ${e.expiredAt}`)
     .with({ kind: "checkpoint-corrupt" }, (e) => `checkpoint corrupt for run '${e.runId}'${e.nodeId ? ` (node '${e.nodeId}')` : ""}: ${e.message}`)
     .with({ kind: "checkpoint-version-mismatch" }, (e) => `checkpoint version mismatch for run '${e.runId}': expected '${e.expected}', got '${e.actual ?? "undefined"}'`)
-    .with({ kind: "checkpoint-write-failed" }, (e) => `checkpoint write failed for run '${e.runId}' node '${e.nodeId}': ${e.message}`)
+    .with({ kind: "checkpoint-write-failed" }, (e) => {
+      // Additive invalid-id fields preserve the rejected RAW bytes for
+      // structured consumers, but the rendered message must stay bounded: a
+      // hostile multi-KB id must not flood the log line (the same module
+      // truncates hostile diagnostics everywhere else via safeDiagnosticRender).
+      const run = e.invalidRunId === undefined ? e.runId : safeDiagnosticRender(e.invalidRunId);
+      const node = e.invalidNodeId === undefined ? e.nodeId : safeDiagnosticRender(e.invalidNodeId);
+      return `checkpoint write failed for run '${run}' node '${node}': ${e.message}`;
+    })
     .with({ kind: "missing-capability" }, (e) => `missing capabilities: ${e.missing.map(m => `${m.capability} (node '${m.nodeId}')`).join(", ")}`)
     .with({ kind: "llm-budget-exceeded" }, (e) => `llm budget exceeded for run '${e.runId}' (node '${e.nodeId}'): cumulative ${e.cumulative} tokens reached budget ${e.budget}`)
     .with({ kind: "infra-unreachable" }, (e) => `capability provider unreachable during '${e.operation}' (hop '${e.hop}'): ${e.message}`)
@@ -527,3 +750,33 @@ export class FrameworkAugmentedError extends Error {
     this.frameworkErrorJson = JSON.stringify(error);
   }
 }
+
+
+/**
+ * Normalize an arbitrary caught value into a `FrameworkError` attributed to a
+ * node.
+ *
+ * ONE encoding of the "a node threw / returned a non-FrameworkError" rule, used
+ * by every site that converts a raw failure into the modeled node outcome
+ * (`run-node`'s throw and non-Result-error paths, `wave-execution`'s outer
+ * catch). Two decisions in here are easy to get subtly wrong in a copy:
+ *
+ *   - An ALREADY-typed `FrameworkError` passes through UNCHANGED. Re-wrapping it
+ *     would bury a precise `policy-refusal` or `infra-unreachable` — and its
+ *     retriability — under a generic node-crash.
+ *   - An untyped value becomes `non-retriable`. A throw we cannot classify is
+ *     assumed deterministic: replaying it would re-run the node's side effects
+ *     for a failure that will simply happen again.
+ *
+ * `safeErrorMessage` renders the value, so a hostile thrown object cannot throw
+ * again while being described.
+ */
+export const asNodeFrameworkError = (caught: unknown, nodeId: NodeId): FrameworkError =>
+  isFrameworkError(caught)
+    ? caught
+    : {
+        kind: "node-crash",
+        nodeId,
+        retriability: "non-retriable",
+        message: safeErrorMessage(caught),
+      };

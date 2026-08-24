@@ -3,7 +3,7 @@
  * pure lifecycle ADT (`worker-lifecycle.ts`), the `SpawnPort` / `ProcManagePort`
  * (`bun-spawn-adapter.ts`), the Redis `WorkerRegistry` (`worker-registry-redis.ts`),
  * a UDS liveness probe, and the tenant registry into a single
- * `WorkerLifecyclePort` the supervisor injects (FR-014/015/019/020, SC-006).
+ * `WorkerLifecyclePort` the supervisor injects (multi-tenant spec FR-014/015/019/020, SC-006).
  *
  * DESIGN (functional core / imperative shell):
  *   - ALL state-transition DECISIONS live in the pure ADT (`requestWorker`,
@@ -18,36 +18,24 @@
  *     injected `clock()`.
  *   - It is FAIL-CLOSED + per-tenant CONTAINED: any spawn/probe/registry failure
  *     for one tenant surfaces as that tenant's `worker-unavailable` (503) and
- *     never touches another tenant's entry (FR-015, AD-8).
+ *     never touches another tenant's entry (multi-tenant spec FR-015, AD-8).
  *
- * SECURITY (FR-004 one-tenant-one-socket): the udsPath a worker binds is a PURE
+ * SECURITY (multi-tenant spec FR-004 one-tenant-one-socket): the udsPath a worker binds is a PURE
  * function of its `TenantId` (`workerSocketPath(udsDir, tenant)`), derived HERE —
  * never taken from arbitrary input — so a worker can only ever own its own socket.
  *
- * SECURITY (FR-005 reference-only): the spawn forwards the tenant's `secretsRef`
+ * SECURITY (multi-tenant spec FR-005 reference-only): the spawn forwards the tenant's `secretsRef`
  * REFERENCE only; this module never dereferences a secret.
  */
 
-import { ok, err } from "@fuguejs/framework";
+import { ok, err, safeErrorMessage } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import { workerUnavailable, formatHostError } from "../../domain/host-error.js";
 import type { HostError } from "../../domain/host-error.js";
 import type { TenantId, SecretsRef } from "../../domain/tenant.js";
 import type { LogPort } from "../../ports.js";
 import { workerSocketPath } from "../../domain/config.js";
-import {
-  requestWorker,
-  workerLive,
-  adoptLive,
-  adoptDraining,
-  touch,
-  idleEvict,
-  isIdleEvictable,
-  beginDrain,
-  drainComplete,
-  crash,
-  occupiesSlot,
-} from "./worker-lifecycle.js";
+import * as lifecycleAdt from "./worker-lifecycle.js";
 import type { WorkerState } from "./worker-lifecycle.js";
 import { initialRestartBudget, decideSupervisorRestart } from "./thin-init.js";
 import type { RestartBudget } from "./thin-init.js";
@@ -142,7 +130,7 @@ export interface WorkerLifecycleConfig {
   readonly restartWindowMs: number;
 }
 
-export interface WorkerLifecycleDeps {
+interface WorkerLifecycleDeps {
   readonly spawn: SpawnPort;
   readonly proc: ProcManagePort;
   readonly registry: WorkerRegistry;
@@ -150,6 +138,16 @@ export interface WorkerLifecycleDeps {
   readonly probe: UdsLivenessProbe;
   /** Authoritative tenant spawn config (secretsRef + eagerPin). */
   readonly tenants: TenantSpawnConfigView;
+  /**
+   * The pure worker-lifecycle ADT, injectable so tests can force an ADT
+   * invariant violation (e.g. a `beginDrain` rejection on a confirmed-live
+   * worker) WITHOUT a process-global `mock.module` — bun 1.3.x module mocks
+   * are not reliably restorable and leak into other test files sharing the
+   * worker process (worker-lifecycle.test.ts failed intermittently with the
+   * manager test's fixture error). Production callers omit it: the real ADT
+   * is bound.
+   */
+  readonly lifecycle?: WorkerLifecycleAdt;
   /**
    * OPTIONAL per-tenant Redis-ACL provisioner (ADR-0067, AD-6). When wired (gated
    * by `SUPERVISOR_REDIS_ACL_ENABLED`), `lazySpawn` mints a FRESH scoped ACL
@@ -168,12 +166,15 @@ export interface WorkerLifecycleDeps {
   readonly logger: LogPort;
 }
 
+/** The pure worker-lifecycle ADT module shape (`worker-lifecycle.ts`). */
+export type WorkerLifecycleAdt = typeof import("./worker-lifecycle.js");
+
 // ── Manager ──────────────────────────────────────────────────────────────────
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecyclePort => {
-  const { spawn, proc, registry, probe, tenants, clock, config, logger, provisionRedisAcl } = deps;
+  const { spawn, proc, registry, probe, tenants, clock, config, logger, provisionRedisAcl, lifecycle = lifecycleAdt } = deps;
 
   // Per-tenant pure ADT state. The ONLY mutable state — every entry is an
   // immutable pure `WorkerState`; we replace (never mutate) entries.
@@ -220,7 +221,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
   /** Count of workers occupying a slot (spawning/live/draining) — T9 reads this. */
   const liveWorkerCount = (): number => {
     let n = 0;
-    for (const s of workers.values()) if (occupiesSlot(s)) n++;
+    for (const s of workers.values()) if (lifecycle.occupiesSlot(s)) n++;
     return n;
   };
 
@@ -233,7 +234,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
    * control flow), but a failure MUST be observable:
    *  - `orphanRisk: true` → the caller has already removed the map entry + registry
    *    record, so a failed SIGKILL leaves an orphaned worker still bound to its UDS
-   *    while the supervisor believes the slot is reclaimed (corrupts the FR-033
+   *    while the supervisor believes the slot is reclaimed (corrupts the multi-tenant spec FR-033
    *    live-worker count). Logged at `error`.
    *  - `orphanRisk: false` → the slot is not yet considered reclaimed (e.g. SIGTERM
    *    during drain); logged at `warn`.
@@ -257,25 +258,85 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     }
   };
 
-  /** Persist a record derived from a live/draining pure state (best-effort fail-closed). */
-  const persistRecord = async (state: WorkerState): Promise<void> => {
+  /**
+   * Persist a record derived from a live/draining pure state.
+   *
+   * Returns the write outcome instead of swallowing it: the registry record is
+   * the ONLY channel through which a restarted supervisor can rediscover a
+   * worker. `reconcileReadopt` rebuilds the in-memory map exclusively from
+   * `registry.reconcileReadopt()` — there is no independent scan of live pids or
+   * bound sockets — so a record that never lands makes its worker invisible to
+   * BOTH readoption and `evict` while it stays alive and bound to the tenant's
+   * UDS, still holding that tenant's credentials. The two call sites have
+   * genuinely different obligations here, so the decision belongs to them, not
+   * to a `warn` inside this helper.
+   *
+   * A phase with no durable record (anything but live/draining) is a no-op success.
+   */
+  const persistRecord = async (state: WorkerState): Promise<Result<void, HostError>> => {
     let record: WorkerRecord | undefined;
     if (state.phase === "live") {
       record = { tenant: state.tenant, pid: state.pid, udsPath: state.udsPath, startedAt: state.startedAt, health: "live", eagerPin: state.eagerPin };
     } else if (state.phase === "draining") {
       record = { tenant: state.tenant, pid: state.pid, udsPath: state.udsPath, startedAt: state.drainStartedAt, health: "draining", eagerPin: state.eagerPin };
     }
-    if (record === undefined) return;
-    const r = await registry.put(record);
-    if (!r.ok) {
-      logger.warn("[worker-lifecycle] registry put failed (continuing — routing uses in-memory state)", { tenant: state.tenant });
-    }
+    if (record === undefined) return ok(undefined);
+    return registry.put(record);
   };
 
   /** Remove a tenant's registry record (best-effort). */
   const removeRecord = async (tenant: TenantId): Promise<void> => {
     const r = await registry.remove(tenant);
     if (!r.ok) logger.warn("[worker-lifecycle] registry remove failed (continuing)", { tenant });
+  };
+
+  /**
+   * Abandon a spawn in progress: forget the map entry, then SIGKILL the process
+   * we started.
+   *
+   * ONE definition for `lazySpawn`'s abort branches (UDS never came up, the
+   * `spawning` entry vanished under us, the `workerLive` transition was rejected,
+   * the registry write failed). Deleting the entry BEFORE signalling is
+   * load-bearing: the crash-exit watcher keys on "is the map entry still THIS
+   * incarnation?", so a deliberate abort SIGKILL must not be readable as a crash
+   * and trigger a respawn.
+   *
+   * `orphanRisk` says whether a FAILED kill would leave a process still bound to
+   * the tenant's UDS while the slot already reads as reclaimed — true once a
+   * registry record existed, false while the spawn was never announced.
+   */
+  const abortSpawn = async (
+    tenant: TenantId,
+    pid: number,
+    orphanRisk: boolean,
+  ): Promise<Result<never, HostError>> => {
+    workers.delete(tenant);
+    await signalWorker(tenant, pid, "SIGKILL", orphanRisk);
+    return err(workerUnavailable(tenant));
+  };
+
+  /**
+   * Immediate revoke of a running worker: forget it, drop its registry record,
+   * then SIGTERM+SIGKILL back-to-back with NO intervening wait.
+   *
+   * ONE definition for `evict` (multi-tenant spec FR-029 / NFR-012) and
+   * `idleEvictSweep` (AD-7), which are the same teardown with different triggers.
+   * This is deliberately NOT graceful — that is `drain()`'s job (SIGTERM only,
+   * terminal cleanup deferred to `drainComplete` on actual exit). SIGTERM is the
+   * polite first signal; SIGKILL guarantees the slot is reclaimed even if the
+   * worker ignores it, so the live-worker count (FR-033) cannot under-count.
+   * Both are idempotent on a dead pid.
+   *
+   * Entry and record are removed FIRST (same crash-watcher reason as
+   * `abortSpawn`), which is exactly why a failed SIGKILL is orphan-risk: the slot
+   * reads as reclaimed while a process may still hold the UDS.
+   */
+  const hardStopAndForget = async (tenant: TenantId, pid: number | undefined): Promise<void> => {
+    workers.delete(tenant);
+    await removeRecord(tenant);
+    if (pid === undefined) return;
+    await signalWorker(tenant, pid, "SIGTERM", false);
+    await signalWorker(tenant, pid, "SIGKILL", true);
   };
 
   /** Wait, bounded, for a worker's UDS to become reachable via the probe. */
@@ -318,20 +379,20 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
       return err(workerUnavailable(tenant));
     }
 
-    // FR-004: the socket is a PURE function of the TenantId, derived here.
+    // multi-tenant spec FR-004: the socket is a PURE function of the TenantId, derived here.
     const udsPath = workerSocketPath(config.udsDir, tenant);
 
-    // CLAIM THE `spawning` SLOT NOW (FR-033) — synchronously, AFTER the admission
+    // CLAIM THE `spawning` SLOT NOW (multi-tenant spec FR-033) — synchronously, AFTER the admission
     // check above and BEFORE any `await`. `requestWorker` yields a `spawning` state
     // that `occupiesSlot` counts, so the check-then-reserve pair is atomic on Bun's
     // single thread. The single-flight only dedupes the SAME tenant; concurrent
     // FIRST requests for DISTINCT cold tenants each run their own `lazySpawn`, so if
     // the slot were claimed only AFTER the awaited ACL provisioning below, all of
     // them would read the same pre-commit `liveWorkerCount()`, all pass the cap and
-    // all overshoot it (`liveWorkerCount()` is the SOLE FR-033 enforcer). Reserving
+    // all overshoot it (`liveWorkerCount()` is the SOLE multi-tenant spec FR-033 enforcer). Reserving
     // here closes that TOCTOU; every failure path below unwinds this entry
     // (`workers.delete`) so the slot is released fail-closed.
-    workers.set(tenant, requestWorker(tenant, spawnCfg.eagerPin, clock()));
+    workers.set(tenant, lifecycle.requestWorker(tenant, spawnCfg.eagerPin, clock()));
 
     // Per-tenant Redis ACL (ADR-0067): when provisioning is wired, mint a FRESH
     // scoped credential and inject it into the worker env so the worker connects
@@ -375,7 +436,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
 
     const spawnResult = await spawn.spawn({
       tenant,
-      secretsRef: spawnCfg.secretsRef, // REFERENCE only (FR-005).
+      secretsRef: spawnCfg.secretsRef, // REFERENCE only (multi-tenant spec FR-005).
       workerEntry: config.workerEntry,
       udsPath,
       ...(config.heapCapMb !== undefined ? { heapCapMb: config.heapCapMb } : {}),
@@ -406,11 +467,8 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     const ready = await waitForUds(probeRecord);
     if (!ready) {
       logger.warn("[worker-lifecycle] worker UDS did not become ready in time — killing + worker-unavailable", { tenant, pid: handle.pid });
-      workers.delete(tenant);
-      // No live slot/registry record was ever taken for this incarnation, but a
-      // failed kill still leaks the spawned process — surface it (warn).
-      await signalWorker(tenant, handle.pid, "SIGKILL", false);
-      return err(workerUnavailable(tenant));
+      // No live slot/registry record was ever taken for this incarnation.
+      return abortSpawn(tenant, handle.pid, false);
     }
 
     // Pure transition spawning → live.
@@ -419,25 +477,36 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
       // The entry was concurrently replaced (e.g. an evict) — fail closed for
       // this request rather than resurrect a stale spawn.
       logger.warn("[worker-lifecycle] spawning state vanished before workerLive — refusing", { tenant });
-      await signalWorker(tenant, handle.pid, "SIGKILL", false);
-      return err(workerUnavailable(tenant));
+      return abortSpawn(tenant, handle.pid, false);
     }
-    const liveResult = workerLive(current, handle.pid, udsPath, clock());
+    const liveResult = lifecycle.workerLive(current, handle.pid, udsPath, clock());
     if (!liveResult.ok) {
       logger.error("[worker-lifecycle] workerLive transition rejected (invariant)", { tenant });
-      workers.delete(tenant);
-      await signalWorker(tenant, handle.pid, "SIGKILL", false);
-      return err(workerUnavailable(tenant));
+      return abortSpawn(tenant, handle.pid, false);
     }
     workers.set(tenant, liveResult.value);
-    await persistRecord(liveResult.value);
+    // FAIL CLOSED: a live worker with no durable registry record is a permanent
+    // split-brain — a supervisor restart could neither readopt nor evict it,
+    // while it keeps holding the tenant's UDS and credentials. Since the record
+    // is unwritable, the only state we can still guarantee is "no worker": tear
+    // this incarnation down and surface worker-unavailable, so the next request
+    // retries a clean spawn instead of routing to an unrecoverable orphan.
+    const persisted = await persistRecord(liveResult.value);
+    if (!persisted.ok) {
+      logger.error(
+        "[worker-lifecycle] registry put failed for a live worker — killing it rather than leaving an unreadoptable orphan",
+        { tenant, pid: handle.pid, error: formatHostError(persisted.error) },
+      );
+      // A registry record may exist, so a failed kill is orphan-risk (error).
+      return abortSpawn(tenant, handle.pid, true);
+    }
 
-    // EXIT WATCHER (FR-014/FR-015/FR-017/AD-8): `handle.exited` is the ONLY exit
+    // EXIT WATCHER (multi-tenant spec FR-014/FR-015/FR-017/AD-8): `handle.exited` is the ONLY exit
     // signal for a worker THIS process spawned. When it resolves, react ONLY if the
     // map entry is still THIS incarnation (same pid), then branch on phase:
     //   - `live`     → an UNEXPECTED exit is a crash; drive `onCrash` (respawn, AD-8).
     //   - `draining` → the worker was SIGTERM'd by `drain` and has now stopped; that
-    //     is the EXPECTED end of a graceful drain (FR-017), NOT a crash — drive the
+    //     is the EXPECTED end of a graceful drain (multi-tenant spec FR-017), NOT a crash — drive the
     //     pure `drainComplete` transition (→ terminal `evicted`), free the slot and
     //     remove the record. It must NOT be misread as a crash and respawned.
     // The pid+phase guard is REQUIRED so a deliberate evict/idle-evict (which DELETES
@@ -446,24 +515,35 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     // the entry as `draining` so the slot stays counted until the worker truly exits;
     // the drainComplete branch here is what frees it.
     watchedTenants.add(tenant); // this incarnation is watcher-covered (see set docs).
-    void handle.exited.then((code) => {
+    void handle.exited.then(async (code) => {
       const cur = workers.get(tenant);
       if (cur === undefined) return;
       if (cur.phase === "draining" && cur.pid === handle.pid) {
-        // Graceful drain completed (FR-017): land the pure draining → evicted
+        // Graceful drain completed (multi-tenant spec FR-017): land the pure draining → evicted
         // transition, then drop the entry + record to release the slot. No respawn.
-        const done = drainComplete(cur, clock());
+        const done = lifecycle.drainComplete(cur, clock());
         if (!done.ok) {
           logger.error("[worker-lifecycle] drainComplete rejected on draining exit (invariant)", { tenant });
         }
         workers.delete(tenant);
-        void removeRecord(tenant);
+        await removeRecord(tenant);
         return;
       }
       if (cur.phase === "live" && cur.pid === handle.pid) {
-        void onCrash(tenant, code).catch((e) =>
-          logger.error("[worker-lifecycle] onCrash threw", { tenant, error: e instanceof Error ? e.message : String(e) }),
-        );
+        await onCrash(tenant, code);
+      }
+    }).catch((error) => {
+      // This is the terminal promise boundary for every watcher effect,
+      // including graceful-drain registry removal. It must not throw even when
+      // the logger is broken, or the catch itself would create an unhandled
+      // rejection and lose the tenant attribution it exists to preserve.
+      try {
+        logger.error("[worker-lifecycle] exit watcher threw", {
+          tenant,
+          error: safeErrorMessage(error),
+        });
+      } catch {
+        // No further diagnostic seam is available here.
       }
     });
 
@@ -494,7 +574,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     const existing = workers.get(tenant);
     if (existing !== undefined && existing.phase === "live") {
       // Touch (refresh idle clock) and route to the existing socket.
-      const touched = touch(existing, clock());
+      const touched = lifecycle.touch(existing, clock());
       if (touched.ok) workers.set(tenant, touched.value);
       return ok({ udsPath: existing.udsPath });
     }
@@ -510,7 +590,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
       return ok(undefined);
     }
     // Pure crash transition (valid from live/draining). Contained to THIS tenant.
-    const crashed = crash(current, exitCode, clock());
+    const crashed = lifecycle.crash(current, exitCode, clock());
     if (!crashed.ok) {
       // Not in a crashable phase (spawning/crashed/evicted) — drop the entry so a
       // fresh request lazy-spawns. Still contained to this tenant.
@@ -522,7 +602,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     workers.set(tenant, crashed.value);
     await removeRecord(tenant);
 
-    // Restart ONLY this tenant's worker (AD-8/FR-015): re-run the spawn path.
+    // Restart ONLY this tenant's worker (AD-8/multi-tenant spec FR-015): re-run the spawn path.
     // Sync runs fail-fast (the crash already surfaced as 503 to in-flight
     // callers); HITL durability is handled by existing checkpoint machinery
     // (AD-8 — no new resume engine here).
@@ -548,7 +628,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
       return ok(undefined);
     }
 
-    // RESTART-AT-CAP (FR-015): we DELETE the crashed entry before respawning
+    // RESTART-AT-CAP (multi-tenant spec FR-015): we DELETE the crashed entry before respawning
     // rather than pre-setting `spawning` via `restart(...)`. lazySpawn's admission
     // check counts `spawning` (occupiesSlot) against SUPERVISOR_MAX_LIVE_WORKERS,
     // so a pre-set `spawning` would make the crashing tenant count its OWN
@@ -575,23 +655,37 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
       return ok(undefined);
     }
     // `current` was just confirmed `phase === "live"`, so `beginDrain` MUST yield a
-    // `draining` state. A rejection (or unexpected phase) here is a real ADT
-    // INVARIANT VIOLATION — NOT the legitimate "nothing live to drain" no-op above
-    // — so it must surface loudly rather than masquerade as success (mirrors the
-    // `workerLive` "transition rejected (invariant)" logging).
-    const draining = beginDrain(current, clock());
-    if (!draining.ok || draining.value.phase !== "draining") {
+    // `draining` state — its ok value hardcodes `phase: "draining"` (worker-lifecycle.ts),
+    // so a non-`draining` ok is unrepresentable and the guard collapses to the
+    // `!draining.ok` arm. A rejection here is a real ADT INVARIANT VIOLATION — NOT
+    // the legitimate "nothing live to drain" no-op above — so it must surface loudly
+    // rather than masquerade as success (mirrors the `workerLive` "transition
+    // rejected (invariant)" logging).
+    const draining = lifecycle.beginDrain(current, clock());
+    if (!draining.ok) {
       logger.error("[worker-lifecycle] beginDrain rejected for a confirmed-live worker (invariant)", {
         tenant,
-        ...(draining.ok ? { phase: draining.value.phase } : { error: draining.error.message }),
+        error: draining.error.message,
       });
       // A confirmed-live worker that cannot begin draining is a real invariant
       // violation — surface it as a worker-unavailable rather than silent success.
-      return draining.ok ? ok(undefined) : err(workerUnavailable(tenant));
+      return err(workerUnavailable(tenant));
     }
     const next = draining.value;
     workers.set(tenant, next);
-    await persistRecord(next);
+    // Best-effort by design, unlike the spawn path: the draining record is
+    // TRANSITIONAL. The worker has already been SIGTERM'd, and its exit drives
+    // `drainComplete` → `removeRecord`. A failed write leaves the prior `live`
+    // record behind; a restart re-adopts it as live and the liveness probe
+    // prunes it once the worker is gone. Killing the worker here to force
+    // consistency would discard the in-flight work `drain` exists to preserve.
+    const persistedDrain = await persistRecord(next);
+    if (!persistedDrain.ok) {
+      logger.warn(
+        "[worker-lifecycle] registry put failed for a draining worker (continuing — the drain exit path removes the record)",
+        { tenant, error: formatHostError(persistedDrain.error) },
+      );
+    }
     // Signal the worker to stop accepting new work (SIGTERM). In-flight work
     // finishes; the crash/exit path drives the terminal transition.
     await signalWorker(tenant, next.pid, "SIGTERM", false);
@@ -605,25 +699,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     // the field) for the deliberate stop signals.
     let pid: number | undefined;
     if (current.phase === "live" || current.phase === "draining") pid = current.pid;
-    // CRITICAL: remove the entry BEFORE signalling. The crash-exit watcher's
-    // guard keys on "is the map entry still THIS live/draining incarnation?";
-    // deleting first guarantees a deliberate evict SIGKILL — which resolves the
-    // worker's `handle.exited` — is NOT misread as a crash (no spurious restart).
-    workers.delete(tenant);
-    await removeRecord(tenant);
-    if (pid !== undefined) {
-      // Immediate revoke (FR-029 / NFR-012), NOT a graceful drain: SIGTERM and
-      // SIGKILL fire back-to-back with NO intervening wait — `signalWorker` returns
-      // once the signal is delivered, it does not await `exited` — so this is a HARD
-      // kill. (Graceful "let in-flight work finish" is `drain()`'s job: SIGTERM only,
-      // terminal cleanup deferred to `drainComplete` on actual exit.) SIGTERM is the
-      // polite first signal; SIGKILL guarantees the slot is reclaimed if the worker
-      // ignores it. Both are idempotent on a dead pid. The entry + registry record
-      // were ALREADY removed above, so a failed SIGKILL leaves an orphan still bound
-      // to the UDS while the slot reads as reclaimed — orphan-risk (error).
-      await signalWorker(tenant, pid, "SIGTERM", false);
-      await signalWorker(tenant, pid, "SIGKILL", true);
-    }
+    await hardStopAndForget(tenant, pid);
     return ok(undefined);
   };
 
@@ -637,7 +713,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
       // default to false.
       const spawnCfg = tenants.spawnConfigFor(record.tenant);
       const eagerPin = spawnCfg !== undefined ? spawnCfg.eagerPin : record.eagerPin;
-      // FR-017 fidelity: a record persisted as `draining` (it had been SIGTERM'd to
+      // multi-tenant spec FR-017 fidelity: a record persisted as `draining` (it had been SIGTERM'd to
       // drain) that still answers its UDS MUST be re-adopted as `draining`, NOT
       // forced to `live`. `adoptLive` would set `canServe` true and `ensureWorker`
       // would route NEW traffic to a worker we deliberately drained. `adoptDraining`
@@ -647,8 +723,8 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
       // for a draining record (see `persistRecord`).
       const state =
         record.health === "draining"
-          ? adoptDraining(record.tenant, eagerPin, record.pid, record.udsPath, record.startedAt)
-          : adoptLive(record.tenant, eagerPin, record.pid, record.udsPath, record.startedAt, clock());
+          ? lifecycle.adoptDraining(record.tenant, eagerPin, record.pid, record.udsPath, record.startedAt)
+          : lifecycle.adoptLive(record.tenant, eagerPin, record.pid, record.udsPath, record.startedAt, clock());
       workers.set(record.tenant, state);
       adoptedTenants.push(record.tenant);
     }
@@ -668,37 +744,25 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
    */
   const idleEvictSweep = async (): Promise<readonly TenantId[]> => {
     const now = clock();
-    const candidates: TenantId[] = [];
-    for (const [tenant, state] of workers) {
-      if (isIdleEvictable(state, config.idleEvictMs, now)) candidates.push(tenant);
-    }
+    const candidates = [...workers]
+      .filter(([, state]) => lifecycle.isIdleEvictable(state, config.idleEvictMs, now))
+      .map(([tenant]) => tenant);
     const evicted: TenantId[] = [];
     for (const tenant of candidates) {
       const state = workers.get(tenant);
       if (state === undefined || state.phase !== "live") continue;
       // Re-confirm via the pure transition (it re-checks eager-pin + TTL); a
       // pinned worker returns err here and is skipped (AD-7).
-      const result = idleEvict(state, config.idleEvictMs, clock());
+      const result = lifecycle.idleEvict(state, config.idleEvictMs, clock());
       if (!result.ok) continue;
-      const pid = state.pid;
-      // Remove the entry BEFORE signalling so the crash-exit watcher's guard sees
-      // this is no longer the live incarnation — a deliberate idle-evict SIGTERM
-      // that resolves `handle.exited` must not be misread as a crash (no respawn).
-      workers.delete(tenant);
-      await removeRecord(tenant);
-      // Drain then force-stop (mirrors `evict`): SIGTERM lets an idle worker exit
-      // cleanly, SIGKILL GUARANTEES the slot is reclaimed so the live-worker count
-      // (FR-033) cannot under-count a worker that ignores SIGTERM. Entry + record
-      // are already removed, so a failed SIGKILL leaves an orphan — orphan-risk.
-      await signalWorker(tenant, pid, "SIGTERM", false);
-      await signalWorker(tenant, pid, "SIGKILL", true);
+      await hardStopAndForget(tenant, state.pid);
       evicted.push(tenant);
     }
     return evicted;
   };
 
   /**
-   * Liveness sweep (FR-014/FR-015, SC-006): the crash-detection SAFETY NET for
+   * Liveness sweep (multi-tenant spec FR-014/FR-015, SC-006): the crash-detection SAFETY NET for
    * RE-ADOPTED workers. A worker spawned by THIS process carries a `handle.exited`
    * crash watcher (`watchedTenants`); a worker re-adopted across a supervisor
    * restart (`adoptLive`) does NOT — its process was re-parented, so we never own
@@ -749,12 +813,12 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
         if (cur === undefined || (cur.phase !== "live" && cur.phase !== "draining") || cur.pid !== pid) continue;
         if (cur.phase === "draining") {
           // A RE-ADOPTED draining worker (no exited watcher) has now exited — that
-          // is the EXPECTED end of a graceful drain (FR-017), NOT a crash. Mirror
+          // is the EXPECTED end of a graceful drain (multi-tenant spec FR-017), NOT a crash. Mirror
           // the spawned-worker exit watcher: land the pure `drainComplete` (→
           // terminal `evicted`), free the slot + record, and DO NOT restart it
           // (a worker SIGTERM'd to drain must not be resurrected).
           logger.info("[worker-lifecycle] re-adopted draining worker has exited — drain complete (no restart)", { tenant, pid });
-          const done = drainComplete(cur, clock());
+          const done = lifecycle.drainComplete(cur, clock());
           if (!done.ok) {
             logger.error("[worker-lifecycle] drainComplete rejected on draining liveness-death (invariant)", { tenant });
           }

@@ -13,27 +13,52 @@
  * @satisfies NFR-020 — Host MUST log startup/shutdown lifecycle events
  */
 
-import { ok, err, runId as makeRunId } from "@fuguejs/framework";
-import type { Result, DagId, GitSha, NodeContext, DagDef, FrameworkError, RunId } from "@fuguejs/framework";
+import { ok, err, runId as makeRunId, safeErrorMessage } from "@fuguejs/framework";
+import type { Result, DagId, NodeContext, DagDef, FrameworkError, RunId, CapabilityHandle } from "@fuguejs/framework";
 import { runDag } from "@fuguejs/framework";
 import type { HostConfig } from "./domain/config.js";
 import type { HostState } from "./domain/host-state.js";
 import { booting, bootComplete, beginDrain, drainComplete, redisDied, redisRecovered } from "./domain/host-state.js";
 import type { RegisteredDag } from "./domain/registry.js";
-import type { AuthIdentity } from "./domain/auth.js";
+import type { AuthIdentity, SubjectToken } from "./domain/auth.js";
 import { initConcurrency, reconcileDagLimits } from "./domain/concurrency.js";
 import type { CircuitState } from "./domain/circuit-breaker.js";
 import { initCircuit } from "./domain/circuit-breaker.js";
 import type { GitPort } from "./ports.js";
 import type { ModuleLoaderPort } from "./ports.js";
 import type { SharedInfra } from "./ports.js";
+import type { LogPort } from "./ports.js";
+
+/**
+ * Log a SHUTDOWN diagnostic without letting a broken logger stop cleanup.
+ *
+ * Teardown must always run to completion: the authoritative outcome is the
+ * `HostError`/`closeFailures` the caller already holds, and a logger that throws
+ * mid-shutdown must not strand a Redis connection or a live listener. Three
+ * teardown sites needed exactly this guard; expressing it once means a future
+ * teardown step cannot quietly omit it.
+ */
+const logSafely = <L extends "warn" | "error">(
+  logger: Pick<LogPort, L>,
+  level: L,
+  message: string,
+  data?: Record<string, unknown>,
+): void => {
+  try {
+    logger[level](message, data);
+  } catch {
+    // Deliberately contained — see above.
+  }
+};
 import type { RedisConnectivityPort } from "./ports.js";
+import { requireHitlRedisPort } from "./adapters/redis-connectivity.js";
 import { createNodeContextForDag } from "./adapters/node-context-factory.js";
 import type { NodeContextForDag } from "./domain/run-context.js";
 import { createRedisTokenStore } from "./adapters/token-store.js";
 import { tenantId } from "./domain/tenant.js";
 import type { TenantId } from "./domain/tenant.js";
 import { formatHostError } from "./domain/host-error.js";
+import type { HostError } from "./domain/host-error.js";
 import { verifyTenantHeader, TENANT_HEADER_NAME } from "./domain/tenant-header.js";
 import { createRealmJwtVerifier } from "./adapters/realm-jwt-verifier.js";
 import type { RealmJwtDeps } from "./http/middleware/auth.js";
@@ -64,6 +89,7 @@ import { createRedisDecisionStore } from "./hitl/adapters/decision-store.js";
 import { createRunExecutor } from "./hitl/adapters/run-executor.js";
 import { createRunQueue } from "./hitl/adapters/run-queue.js";
 import { createWebhookNotifier, fetchWebhookHttp } from "./hitl/adapters/webhook-notifier.js";
+import { createRunLeaseAuthority } from "./hitl/ports.js";
 import type { HumanReviewNotifierPort } from "./hitl/ports.js";
 import { createBotFrameworkNotifier } from "./hitl/adapters/bot/notifier.js";
 import { createBotConnector } from "./hitl/adapters/bot/connector.js";
@@ -73,10 +99,9 @@ import type { ConversationStorePort } from "./hitl/adapters/bot/ports.js";
 import { handleBotActivity } from "./hitl/adapters/bot/messages-handler.js";
 import type { BotResponse } from "./hitl/adapters/bot/messages-handler.js";
 import { startSyncLoop } from "./sync/sync-loop.js";
-import type { SyncLoopHandle, SyncLogger, SyncConfig } from "./sync/sync-loop.js";
+import type { SyncLoopHandle, SyncLogger } from "./sync/sync-loop.js";
 import { createSyncCallbacks } from "./sync/sync-callbacks.js";
 import { executeStartup } from "./lifecycle/startup.js";
-import type { StartupDeps } from "./lifecycle/startup.js";
 import { registerSignalHandlers } from "./lifecycle/signals.js";
 import type { SignalHandlerHandle } from "./lifecycle/signals.js";
 import { startRedisProbe } from "./lifecycle/redis-probe.js";
@@ -166,7 +191,31 @@ export interface HostInstance {
   readonly server: { port: number; stop: () => void } | null;
 }
 
-// ── Capability Broker selection (T8 / per-node minting, review C1) ─────────
+/**
+ * Stop a listener acquired before a later bind-finalization failure (notably
+ * UDS chmod). The returned diagnostic is evidence that the listener may still
+ * be live; logging is secondary and can never interrupt the remaining cleanup.
+ */
+export const stopBoundServerAfterBindFailure = (
+  server: { readonly stop: () => void } | undefined,
+  bindDescription: string,
+  logger: Pick<SyncLogger, "error">,
+): string | undefined => {
+  if (server === undefined) return undefined;
+  try {
+    server.stop();
+    return undefined;
+  } catch (error) {
+    const diagnostic = safeErrorMessage(error);
+    // The returned HostError remains the authoritative cleanup diagnostic.
+    logSafely(logger, "error",
+      "Failed to stop HTTP server after bind finalization failure — listener may still be live",
+      { bind: bindDescription, error: diagnostic });
+    return diagnostic;
+  }
+};
+
+// ── Capability Broker selection (T8 / per-node minting) ───────────────────
 
 /**
  * The fail-safe default `resolveSubjectToken`: resolves NO token for any run, so
@@ -178,8 +227,8 @@ export interface HostInstance {
  * fail-closed behaviour itself is unchanged).
  */
 const inertResolveSubjectToken = (
-  _runId: import("@fuguejs/framework").RunId,
-): import("./domain/auth.js").SubjectToken | undefined => undefined;
+  _runId: RunId,
+): SubjectToken | undefined => undefined;
 
 /**
  * Run `execute`, then ALWAYS `release(runId)` from the registry — on the normal
@@ -194,7 +243,7 @@ const inertResolveSubjectToken = (
  */
 export const withSubjectTokenRelease = async <T>(
   registry: Pick<SubjectTokenRegistry, "release">,
-  runId: import("@fuguejs/framework").RunId,
+  runId: RunId,
   execute: () => Promise<T>,
 ): Promise<T> => {
   try {
@@ -208,7 +257,7 @@ export const withSubjectTokenRelease = async <T>(
  * Select the capability broker for this boot — the per-invocation AUTHORITY
  * seam. Exported so the selection logic (config → broker, `AGENT_CLIENT_SCOPES`
  * → `assignedScopes` closure, unwired fail-closed endpoints) is testable
- * without booting a full host (review C7.5).
+ * without booting a full host.
  *
  * When the Keycloak realm config is present (`REALM_JWT_ISSUER` set) this
  * returns the live Keycloak-backed broker: it fails closed on an unassigned
@@ -247,7 +296,7 @@ export const selectCapabilityBroker = (
    * fails the user path CLOSED (no proof → no exchange) — never a proof-less
    * token. `createHost` passes the live registry's `resolve`.
    */
-  resolveSubjectToken: (runId: import("@fuguejs/framework").RunId) => import("./domain/auth.js").SubjectToken | undefined = inertResolveSubjectToken,
+  resolveSubjectToken: (runId: RunId) => SubjectToken | undefined = inertResolveSubjectToken,
 ): CapabilityBroker | undefined => {
   if (config.REALM_JWT_ISSUER === undefined) {
     // Operability (mirror of the empty-policy warning below): a scope POLICY is
@@ -367,15 +416,323 @@ export const selectCapabilityBroker = (
   });
 };
 
+// ── HITL notifier transport selection (ADR-0060) ──────────────────────────
+
+/**
+ * The boot-time HITL notifier transport selection (ADR-0060) — the pure
+ * AUTHORITY seam. Exported so the selection logic (config → transport, Bot
+ * precedence over webhook, the derived approval base URL, and the
+ * `BOT_APP_ID`-without-password classification) is testable without booting a
+ * full host — the sibling seam to `selectCapabilityBroker`.
+ *
+ * Precedence: the Bot Framework in-Teams transport requires the COMPLETE
+ * `BOT_APP_ID` + `BOT_APP_PASSWORD` pair and wins when both transports are
+ * configured; `TEAMS_WEBHOOK_URL` selects the link-out webhook transport
+ * (with the explicit or `http://localhost:<PORT>`-defaulted approval base
+ * URL) — a complete webhook therefore beats an INCOMPLETE bot pair, the
+ * pre-extraction chain's order, preserved; a lone `BOT_APP_ID` (password
+ * missing) classifies as `disabled/bot-password-missing` — the
+ * lowest-precedence arm, surfaced only when no webhook is configured, which
+ * is exactly when the shell emits its single boot warning; neither configures
+ * no transport (HITL stays off).
+ */
+export type HitlNotifierSelection =
+  | {
+      readonly kind: "bot-framework";
+      readonly appId: string;
+      readonly appPassword: string;
+      readonly tokenUrl?: string;
+    }
+  | {
+      readonly kind: "webhook";
+      readonly webhookUrl: string;
+      /** Resolved approval base — explicit `HITL_APPROVAL_BASE_URL` or the
+       * `http://localhost:<PORT>` default. */
+      readonly approvalBaseUrl: string;
+    }
+  | {
+      readonly kind: "disabled";
+      readonly reason: "bot-password-missing" | "unconfigured";
+    };
+
+export const selectHitlNotifierTransport = (
+  config: Pick<
+    HostConfig,
+    "BOT_APP_ID" | "BOT_APP_PASSWORD" | "BOT_TOKEN_URL" | "TEAMS_WEBHOOK_URL" | "HITL_APPROVAL_BASE_URL" | "PORT"
+  >,
+): HitlNotifierSelection => {
+  if (config.BOT_APP_ID !== undefined && config.BOT_APP_PASSWORD !== undefined) {
+    // Parse-don't-validate: lift the pair into ONE narrowed selection so the
+    // shell never needs a non-null assertion on the bot credentials.
+    return {
+      kind: "bot-framework",
+      appId: config.BOT_APP_ID,
+      appPassword: config.BOT_APP_PASSWORD,
+      ...(config.BOT_TOKEN_URL !== undefined ? { tokenUrl: config.BOT_TOKEN_URL } : {}),
+    };
+  }
+  if (config.TEAMS_WEBHOOK_URL !== undefined) {
+    return {
+      kind: "webhook",
+      webhookUrl: config.TEAMS_WEBHOOK_URL,
+      approvalBaseUrl: config.HITL_APPROVAL_BASE_URL ?? `http://localhost:${config.PORT}`,
+    };
+  }
+  if (config.BOT_APP_ID !== undefined) {
+    return { kind: "disabled", reason: "bot-password-missing" };
+  }
+  return { kind: "disabled", reason: "unconfigured" };
+};
+
 // ── Host Factory ───────────────────────────────────────────────────────────
+
+/** Stops the periodic HITL reconciliation sweep and awaits any in-flight one. */
+export interface HitlReconciliationHandle {
+  /** Stop scheduling further sweeps. Idempotent. */
+  readonly stop: () => void;
+  /** Resolve once the sweep currently in flight (if any) has finished. */
+  readonly settle: () => Promise<void>;
+}
+
+/** Everything the HITL durable run engine contributes to a booted host. */
+export interface HitlWiring {
+  readonly service: HitlRunService | undefined;
+  readonly worker: WorkerHandle | undefined;
+  readonly reconciliation: HitlReconciliationHandle | undefined;
+  readonly teamsBotHandle:
+    | ((input: { authHeader: string | undefined; activity: unknown }) => Promise<BotResponse>)
+    | undefined;
+  readonly notifier: HumanReviewNotifierPort | undefined;
+  readonly conversations: ConversationStorePort | undefined;
+}
+
+/**
+ * Wire the HITL durable run engine (ADR-0060).
+ *
+ * Extracted from `createHost`, which mixed this ~170-line subsystem in with
+ * capability wiring, HTTP bind and sync wiring at three different altitudes. The
+ * extraction is behavior-preserving with one deliberate improvement: the periodic
+ * reconciliation sweep is returned as an explicit `HitlReconciliationHandle`
+ * instead of two `let`s shared between this wiring and the teardown path. The
+ * sweep's in-flight promise is now owned by the closure that creates it, so
+ * teardown asks it to `stop()`/`settle()` rather than reaching into its state —
+ * which is what made "clear the timer, then await the task" easy to get wrong.
+ *
+ * `getHostState` is a thunk, not a value: the executor resolves DAGs through the
+ * registry at RUN time, long after boot, and must see the current state.
+ */
+const wireHitlRunEngine = async (args: {
+  readonly config: HostConfig;
+  readonly sharedInfra: SharedInfra;
+  readonly routedTenant: TenantId;
+  readonly logger: LogPort;
+  readonly broker: CapabilityBroker | undefined;
+  readonly queueBackend: QueueBackend | undefined;
+  readonly getHostState: () => HostState;
+}): Promise<HitlWiring> => {
+  const { config, sharedInfra, routedTenant, logger, broker, queueBackend, getHostState } = args;
+  // ── HITL durable run engine (ADR-0060) ──────────────────────────────────
+  // Enabled when a notifier transport is configured (Bot Framework cards, or
+  // the webhook smoke-test) AND a queue backend is wired. HITL DAGs (those
+  // declaring `humanReview`) run on this durable queue and park for human
+  // review; non-HITL DAGs keep the synchronous inline path.
+  let hitlService: HitlRunService | undefined;
+  let hitlWorker: WorkerHandle | undefined;
+  let reconciliation: HitlReconciliationHandle | undefined;
+  let teamsBotHandle: ((input: { authHeader: string | undefined; activity: unknown }) => Promise<BotResponse>) | undefined;
+
+  // Select the notifier transport via the pure seam
+  // (`selectHitlNotifierTransport`). Bot Framework (in-Teams buttons) takes
+  // precedence over the webhook (link-out) when both are configured.
+  const notifierSelection = selectHitlNotifierTransport(config);
+  const botConfigured = notifierSelection.kind === "bot-framework";
+  let notifier: HumanReviewNotifierPort | undefined;
+  let conversations: ConversationStorePort | undefined;
+  if (notifierSelection.kind === "bot-framework") {
+    // SECURITY (FR-013 / SC-001): the HITL conversation store is bound to the
+    // `routedTenant` so every `fugue:<tenant>:hitl:*` key is scoped under that
+    // tenant's Redis ACL. `routedTenant` is the worker's resolved `Tenant.id`
+    // when one is injected, falling back to the constant `default` only in the
+    // single-tenant `createHost`/main.ts path where no tenant is passed (FR-035).
+    conversations = createRedisConversationStore(sharedInfra.redis, routedTenant, sharedInfra.logger);
+    const connector = createBotConnector(
+      {
+        appId: notifierSelection.appId,
+        appPassword: notifierSelection.appPassword,
+        ...(notifierSelection.tokenUrl !== undefined ? { tokenUrl: notifierSelection.tokenUrl } : {}),
+      },
+      sharedInfra.logger,
+    );
+    notifier = createBotFrameworkNotifier({ connector, conversations });
+  } else if (notifierSelection.kind === "webhook") {
+    notifier = createWebhookNotifier(
+      {
+        webhookUrl: notifierSelection.webhookUrl,
+        approvalBaseUrl: notifierSelection.approvalBaseUrl,
+      },
+      fetchWebhookHttp(),
+    );
+  } else if (notifierSelection.reason === "bot-password-missing") {
+    logger.warn("BOT_APP_ID is set but BOT_APP_PASSWORD is not — Bot Framework transport disabled");
+  }
+
+  if (notifier !== undefined && queueBackend !== undefined) {
+    // Parse the generic Redis adapter once at composition. Every HITL adapter
+    // below receives a required transaction capability; incomplete wiring fails
+    // before a queue worker can acquire or execute any run.
+    const hitlRedis = requireHitlRedisPort(sharedInfra.redis);
+    const leaseAuthority = createRunLeaseAuthority();
+    // FR-013 / SC-001: bind the durable HITL stores to the `routedTenant` so
+    // every `fugue:<tenant>:hitl:*` key stays under that tenant's Redis ACL.
+    // `routedTenant` is the worker's resolved `Tenant.id`, or the constant
+    // `default` fallback in the single-tenant path where no tenant is injected.
+    const runStore = createRedisRunStore(
+      hitlRedis,
+      routedTenant,
+      { ttlSec: config.HITL_RUN_TTL_SEC },
+      leaseAuthority.verifier,
+      sharedInfra.logger,
+    );
+    const decisions = createRedisDecisionStore(hitlRedis, routedTenant, { ttlSec: config.HITL_RUN_TTL_SEC }, sharedInfra.logger);
+    const executor = createRunExecutor({
+      sharedInfra,
+      getRegisteredDag: (id) => {
+        const reg = getRegistry(getHostState());
+        return reg ? lookupDag(reg, id as DagId) : undefined;
+      },
+      broker,
+      agentClientMap: config.AGENT_CLIENT_MAP,
+      tenant: routedTenant,
+      logger: sharedInfra.logger,
+    });
+    const runQueue = createRunQueue({
+      backend: queueBackend,
+      redis: hitlRedis,
+      leaseIssuer: leaseAuthority.issuer,
+      // FR-013 / SC-001: scope the single-flight lock key to the `routedTenant`
+      // (`fugue:<tenant>:hitl:lock:*`) — the worker's resolved `Tenant.id`, or the
+      // constant `default` fallback in the single-tenant path.
+      tenant: routedTenant,
+      lockTtlSec: config.HITL_LOCK_TTL_SEC,
+      logger: sharedInfra.logger,
+    });
+    const service = createHitlRunService({
+      runStore,
+      runQueue: runQueue.queue,
+      decisions,
+      notifier,
+      executor,
+      clock: Date.now,
+      newRunId: () => makeRunId(crypto.randomUUID()),
+      // ADR-0074: gate per-tenant outstanding HITL runs at `startRun`. `tenant` is
+      // the worker's resolved id (names its OWN over-quota error); `maxQueuedRuns`
+      // arrives via the spawn env from the tenant registry config. Unset → unlimited
+      // (single-tenant `main.ts` path, or a worker spawned before the field is set).
+      tenant: routedTenant,
+      ...(config.FUGUE_MAX_QUEUED_RUNS !== undefined ? { maxQueuedRuns: config.FUGUE_MAX_QUEUED_RUNS } : {}),
+      logger: sharedInfra.logger,
+    });
+    hitlService = service;
+    hitlWorker = runQueue.startWorker(service.processRun, { concurrency: config.HITL_WORKER_CONCURRENCY });
+
+    // Durable queue delivery is a wakeup optimization, not the ownership source.
+    // Reconcile once AFTER the worker exists (restart recovery), then periodically
+    // for direct enqueue failures. Never overlap sweeps; one active-index walk is
+    // sufficient because every wakeup is idempotent at processRun + lock seams.
+    let inFlight: Promise<void> | undefined;
+    const reconcileHitlRuns = (): Promise<void> => {
+      if (inFlight !== undefined) return inFlight;
+      inFlight = (async () => {
+        try {
+          const reconciled = await service.reconcileActiveRuns();
+          if (!reconciled.ok) {
+            logger.error("HITL active-run reconciliation failed", {
+              error: reconciled.error.kind,
+            });
+          }
+        } catch (error) {
+          // Adapter contracts are no-throw, but lifecycle supervision must remain
+          // total if a non-conforming dependency rejects unexpectedly.
+          logger.error("HITL active-run reconciliation threw", {
+            error: safeErrorMessage(error),
+          });
+        } finally {
+          inFlight = undefined;
+        }
+      })();
+      return inFlight;
+    };
+    await reconcileHitlRuns();
+    const timer = setInterval(
+      () => { void reconcileHitlRuns(); },
+      config.HITL_RECONCILE_INTERVAL_MS,
+    );
+    reconciliation = {
+      stop: () => { clearInterval(timer); },
+      settle: async () => { await inFlight; },
+    };
+
+    // The in-Teams transport also needs its inbound endpoint: verify the Bot
+    // Framework token, then dispatch button clicks to the run service.
+    if (botConfigured && conversations !== undefined) {
+      const verify = createBotTokenVerifier({ appId: notifierSelection.appId });
+      const convs = conversations;
+      teamsBotHandle = (input) =>
+        handleBotActivity(
+          {
+            verify,
+            hitl: service,
+            conversations: convs,
+            // FR-041: authorize the Teams approver against the immutable owning
+            // team persisted on the run, at parity with the HTTP path.
+            approverTeams: config.HITL_APPROVER_TEAMS,
+            // FR-041 (confidentiality routing): on `conversationUpdate` map the
+            // Teams team `aadGroupId` to a fugue team so the captured reference is
+            // stored per team and the notifier routes that team's cards to its own
+            // channel. Unmapped → default reference only.
+            teamChannels: config.HITL_TEAM_CHANNELS,
+            logger: sharedInfra.logger,
+          },
+          input,
+        );
+      logger.info("HITL durable run engine enabled (Bot Framework in-Teams transport)");
+    } else if (notifierSelection.kind === "webhook") {
+      // The webhook branch is the only selection that reaches here: a
+      // `disabled` selection never defines `notifier`, so the outer
+      // `notifier !== undefined` guard is false for it (the former bare
+      // `else` was unreachable). Name the resolved approval base in the boot
+      // log — the one resolved HITL config value that was previously
+      // unlogged — and flag the DERIVED `http://localhost:<PORT>` default,
+      // whose card Review deep-link is unreachable outside the host machine;
+      // every sibling boot decision logs its resolution the same way.
+      logger.info(
+        `HITL durable run engine enabled (Teams webhook transport) — approval base ${notifierSelection.approvalBaseUrl}` +
+          (config.HITL_APPROVAL_BASE_URL === undefined
+            ? " (derived localhost default: HITL_APPROVAL_BASE_URL is unset — Review deep-links are unreachable outside the host machine)"
+            : ""),
+      );
+    }
+  } else if (notifier !== undefined && queueBackend === undefined) {
+    logger.warn("A HITL notifier is configured but no queue backend was wired — HITL is disabled");
+  }
+
+  return {
+    service: hitlService,
+    worker: hitlWorker,
+    reconciliation,
+    teamsBotHandle,
+    notifier,
+    conversations,
+  };
+};
 
 /**
  * Create and boot the Fugue host.
  *
- * This is the imperative shell — it constructs mutable state,
- * wires subsystems, and manages lifecycle.
+ * This is the imperative shell — it constructs mutable state, wires subsystems,
+ * and manages lifecycle.
  */
-export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, import("./domain/host-error.js").HostError>> => {
+export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, HostError>> => {
   const { config, git, loader, redis, sharedInfra, logger } = deps;
 
   // The tenant every per-tenant Redis key/ACL namespace is scoped under. T6: a
@@ -405,7 +762,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
   });
 
   if (!startupResult.ok) {
-    return startupResult as Result<never, import("./domain/host-error.js").HostError>;
+    return startupResult as Result<never, HostError>;
   }
 
   const { registry, sha, syncConfig } = startupResult.value;
@@ -415,11 +772,11 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
   // Failure here aborts boot — a missing capability at runtime is worse than
   // a clean boot failure.
   const capHandles = sharedInfra.capabilities;
-  let sortedHandles: readonly import("@fuguejs/framework").CapabilityHandle[] = [];
+  let sortedHandles: readonly CapabilityHandle[] = [];
   if (capHandles.length > 0) {
     const sortResult = topoSortHandles(capHandles);
     if (!sortResult.ok) {
-      return sortResult as Result<never, import("./domain/host-error.js").HostError>;
+      return sortResult as Result<never, HostError>;
     }
     sortedHandles = sortResult.value;
     const connectResult = await connectAll(sortedHandles, logger);
@@ -450,7 +807,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     Array.from(registry.dags.values(), (d) => ({ dagId: d.id, max: d.config.maxConcurrency })),
   );
 
-  // ── Capability Broker selection (T8 / per-node minting, review C1) ──────────
+  // ── Capability Broker selection (T8 / per-node minting) ───────────────────
   // See `selectCapabilityBroker` above: a live Keycloak broker is returned when
   // `REALM_JWT_ISSUER` is set, `undefined` otherwise (no minting authority wired
   // — the zero-regression static path). When the broker IS selected, each
@@ -513,135 +870,24 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
       : undefined;
 
   // ── HITL durable run engine (ADR-0060) ──────────────────────────────────
-  // Enabled when a notifier transport is configured (Bot Framework cards, or
-  // the webhook smoke-test) AND a queue backend is wired. HITL DAGs (those
-  // declaring `humanReview`) run on this durable queue and park for human
-  // review; non-HITL DAGs keep the synchronous inline path.
-  let hitlService: HitlRunService | undefined;
-  let hitlWorker: WorkerHandle | undefined;
-  let teamsBotHandle: ((input: { authHeader: string | undefined; activity: unknown }) => Promise<BotResponse>) | undefined;
-
-  // Select the notifier transport. Bot Framework (in-Teams buttons) takes
-  // precedence over the webhook (link-out) when both are configured.
-  const botConfigured = config.BOT_APP_ID !== undefined && config.BOT_APP_PASSWORD !== undefined;
-  let notifier: HumanReviewNotifierPort | undefined;
-  let conversations: ConversationStorePort | undefined;
-  // Resolve a run's DAG id to its OWNING team off the LIVE registry (the same
-  // `lookupDag` the HTTP path uses). Shared by the notifier (confidentiality
-  // routing — FR-041) and the inbound handler (authz parity — SC-006). `undefined`
-  // when the DAG is no longer registered.
-  const resolveDagTeam = (dagId: DagId): Team | undefined => {
-    const reg = getRegistry(hostState);
-    return reg ? lookupDag(reg, dagId)?.team : undefined;
-  };
-  if (botConfigured) {
-    // SECURITY (FR-013 / SC-001): the HITL conversation store is bound to the
-    // `routedTenant` so every `fugue:<tenant>:hitl:*` key is scoped under that
-    // tenant's Redis ACL. `routedTenant` is the worker's resolved `Tenant.id`
-    // when one is injected, falling back to the constant `default` only in the
-    // single-tenant `createHost`/main.ts path where no tenant is passed (FR-035).
-    conversations = createRedisConversationStore(sharedInfra.redis, routedTenant, sharedInfra.logger);
-    const connector = createBotConnector(
-      {
-        appId: config.BOT_APP_ID!,
-        appPassword: config.BOT_APP_PASSWORD!,
-        ...(config.BOT_TOKEN_URL !== undefined ? { tokenUrl: config.BOT_TOKEN_URL } : {}),
-      },
-      sharedInfra.logger,
-    );
-    notifier = createBotFrameworkNotifier({ connector, conversations, resolveDagTeam });
-  } else if (config.TEAMS_WEBHOOK_URL !== undefined) {
-    notifier = createWebhookNotifier(
-      {
-        webhookUrl: config.TEAMS_WEBHOOK_URL,
-        approvalBaseUrl: config.HITL_APPROVAL_BASE_URL ?? `http://localhost:${config.PORT}`,
-      },
-      fetchWebhookHttp(),
-    );
-  } else if (config.BOT_APP_ID !== undefined) {
-    logger.warn("BOT_APP_ID is set but BOT_APP_PASSWORD is not — Bot Framework transport disabled");
-  }
-
-  if (notifier !== undefined && deps.queueBackend !== undefined) {
-    // FR-013 / SC-001: bind the durable HITL stores to the `routedTenant` so
-    // every `fugue:<tenant>:hitl:*` key stays under that tenant's Redis ACL.
-    // `routedTenant` is the worker's resolved `Tenant.id`, or the constant
-    // `default` fallback in the single-tenant path where no tenant is injected.
-    const runStore = createRedisRunStore(sharedInfra.redis, routedTenant, { ttlSec: config.HITL_RUN_TTL_SEC }, sharedInfra.logger);
-    const decisions = createRedisDecisionStore(sharedInfra.redis, routedTenant, { ttlSec: config.HITL_RUN_TTL_SEC }, sharedInfra.logger);
-    const executor = createRunExecutor({
-      sharedInfra,
-      getRegisteredDag: (id) => {
-        const reg = getRegistry(hostState);
-        return reg ? lookupDag(reg, id as DagId) : undefined;
-      },
-      broker,
-      agentClientMap: config.AGENT_CLIENT_MAP,
-      tenant: routedTenant,
-      logger: sharedInfra.logger,
-    });
-    const runQueue = createRunQueue({
-      backend: deps.queueBackend,
-      redis: sharedInfra.redis,
-      // FR-013 / SC-001: scope the single-flight lock key to the `routedTenant`
-      // (`fugue:<tenant>:hitl:lock:*`) — the worker's resolved `Tenant.id`, or the
-      // constant `default` fallback in the single-tenant path.
-      tenant: routedTenant,
-      lockTtlSec: config.HITL_LOCK_TTL_SEC,
-      logger: sharedInfra.logger,
-    });
-    hitlService = createHitlRunService({
-      runStore,
-      runQueue: runQueue.queue,
-      decisions,
-      notifier,
-      executor,
-      clock: Date.now,
-      newRunId: () => makeRunId(crypto.randomUUID()),
-      // ADR-0074: gate per-tenant outstanding HITL runs at `startRun`. `tenant` is
-      // the worker's resolved id (names its OWN over-quota error); `maxQueuedRuns`
-      // arrives via the spawn env from the tenant registry config. Unset → unlimited
-      // (single-tenant `main.ts` path, or a worker spawned before the field is set).
-      tenant: routedTenant,
-      ...(config.FUGUE_MAX_QUEUED_RUNS !== undefined ? { maxQueuedRuns: config.FUGUE_MAX_QUEUED_RUNS } : {}),
-      logger: sharedInfra.logger,
-    });
-    hitlWorker = runQueue.startWorker(hitlService.processRun, { concurrency: config.HITL_WORKER_CONCURRENCY });
-
-    // The in-Teams transport also needs its inbound endpoint: verify the Bot
-    // Framework token, then dispatch button clicks to the run service.
-    if (botConfigured && conversations !== undefined) {
-      const verify = createBotTokenVerifier({ appId: config.BOT_APP_ID! });
-      const svc = hitlService;
-      const convs = conversations;
-      teamsBotHandle = (input) =>
-        handleBotActivity(
-          {
-            verify,
-            hitl: svc,
-            conversations: convs,
-            // FR-041: authorize the Teams approver against the run's DAG-owning
-            // team at parity with the HTTP path. The team is resolved from the
-            // live registry (same `lookupDag` the HTTP path + notifier use), and
-            // the approver's membership from `HITL_APPROVER_TEAMS`.
-            resolveDagTeam,
-            approverTeams: config.HITL_APPROVER_TEAMS,
-            // FR-041 (confidentiality routing): on `conversationUpdate` map the
-            // Teams team `aadGroupId` to a fugue team so the captured reference is
-            // stored per team and the notifier routes that team's cards to its own
-            // channel. Unmapped → default reference only.
-            teamChannels: config.HITL_TEAM_CHANNELS,
-            logger: sharedInfra.logger,
-          },
-          input,
-        );
-      logger.info("HITL durable run engine enabled (Bot Framework in-Teams transport)");
-    } else {
-      logger.info("HITL durable run engine enabled (Teams webhook transport)");
-    }
-  } else if (notifier !== undefined && deps.queueBackend === undefined) {
-    logger.warn("A HITL notifier is configured but no queue backend was wired — HITL is disabled");
-  }
+  // Enabled when a notifier transport is configured (Bot Framework cards, or the
+  // webhook smoke-test) AND a queue backend is wired. HITL DAGs (those declaring
+  // `humanReview`) run on this durable queue and park for human review; non-HITL
+  // DAGs keep the synchronous inline path. See `wireHitlRunEngine`.
+  const hitl = await wireHitlRunEngine({
+    config,
+    sharedInfra,
+    routedTenant,
+    logger,
+    broker,
+    queueBackend: deps.queueBackend,
+    getHostState: () => hostState,
+  });
+  const hitlService = hitl.service;
+  const teamsBotHandle = hitl.teamsBotHandle;
+  // Reassignable: teardown clears them once the engine is stopped.
+  let hitlWorker = hitl.worker;
+  let hitlReconciliation = hitl.reconciliation;
 
   // ── Router Dependencies ──────────────────────────────────────────────────
   // SECURITY (FR-013 / US2 / SC-001): the token store is bound to the
@@ -730,6 +976,10 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
       clock: Date.now,
       generateRandomBytes: () => crypto.getRandomValues(new Uint8Array(32)),
     },
+    // Read through a thunk, not by value: `sortedHandles` is still `[]` here and
+    // is assigned later in boot, once capabilities are connected and topologically
+    // sorted. Capturing it by value would freeze the diagnostic at "no capabilities".
+    capabilityHealthDeps: { getHandles: () => sortedHandles },
     logger,
   };
 
@@ -784,6 +1034,79 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
         }
       : app.fetch;
 
+  /**
+   * Tear down everything acquired after the HTTP server, in reverse acquisition
+   * order: server-owned reconciliation → HITL worker → capabilities →
+   * infrastructure (`deps.onShutdown`).
+   *
+   * ONE definition shared by the boot-abort path and `shutdown()`. The two used
+   * to open-code the same five steps and had already drifted on two points; this
+   * keeps the STRONGER behavior from each side, because each divergence had a
+   * correct half:
+   *   - Guarded logging + `safeErrorMessage` (from the boot-abort path). A
+   *     broken logger, or a hostile thrown value whose `toString` throws, must
+   *     never abort the remaining teardown — the resource leak that would cause
+   *     is worse than the lost log line.
+   *   - Surfacing `closeAll`'s failures (from `shutdown`). The boot-abort path
+   *     discarded the returned list, so a capability that failed to close during
+   *     a failed boot left no record of WHICH one.
+   *
+   * Stopping the server is deliberately NOT part of this: the two callers stop
+   * it differently on purpose (`shutdown` calls `server.stop()`; the boot-abort
+   * path uses `stopBoundServerAfterBindFailure`, whose failure string is folded
+   * into the returned error). Callers stop the server, then call this.
+   */
+  const teardownAfterServerStop = async (context: string): Promise<void> => {
+    // Diagnostics are secondary to completing teardown.
+    const logFailure = (message: string, error: unknown): void =>
+      logSafely(logger, "error", message, { error: safeErrorMessage(error) });
+
+    // Stop server-owned reconciliation before closing the worker/Redis it uses:
+    // stop scheduling, then let the sweep already in flight finish.
+    if (hitlReconciliation !== undefined) {
+      hitlReconciliation.stop();
+      await hitlReconciliation.settle();
+      hitlReconciliation = undefined;
+    }
+
+    // Stop the HITL worker (ADR-0060) — drains its in-flight job, then no more
+    // run slices are processed. The queue backend itself is closed by the binary
+    // via `onShutdown` (it owns the BullMQ/Redis connection).
+    if (hitlWorker) {
+      try {
+        await hitlWorker.close();
+      } catch (closeError) {
+        logFailure(`Failed to close HITL worker during ${context}`, closeError);
+      }
+      hitlWorker = undefined;
+    }
+
+    // Close connected capabilities (ADR-0051) in reverse topological order, then
+    // infrastructure. `closeAll` reports per-capability failures rather than
+    // throwing, so name them: "shutdown completed" with a silent failed close is
+    // exactly the state an operator needs to be able to see.
+    if (sortedHandles.length > 0) {
+      const closeFailures = await closeAll(sortedHandles, logger);
+      if (closeFailures.length > 0) {
+        logSafely(logger, "warn",
+          `Capability shutdown completed with ${closeFailures.length} failure(s)`,
+          { context, failures: closeFailures.map((f) => f.name) });
+      }
+    }
+
+    // Clean up infrastructure (e.g., close Redis connections).
+    if (deps.onShutdown) {
+      try {
+        await deps.onShutdown();
+      } catch (cleanupError) {
+        logFailure(
+          `Infrastructure cleanup failed during ${context} — resources may be leaked`,
+          cleanupError,
+        );
+      }
+    }
+  };
+
   // `| undefined` is type-honest: `Bun.serve` may throw before assigning (a bind
   // failure), and the catch below must be able to ask "did we bind?" via `?.`.
   let bunServer: { stop: () => void; port?: number } | undefined;
@@ -819,31 +1142,14 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
     // the default umask. Stop it (and the already-started HITL worker) explicitly —
     // depending only on the OPTIONAL `onShutdown` would otherwise leave a
     // mis-permissioned tenant socket listening, worse than a clean boot failure.
-    try {
-      bunServer?.stop();
-    } catch {
-      // never fully bound / already stopped — nothing to reclaim
-    }
-    if (hitlWorker) {
-      await hitlWorker.close().catch((closeErr) => {
-        logger.error("Failed to close HITL worker after server bind failure", {
-          error: closeErr instanceof Error ? closeErr.message : String(closeErr),
-        });
-      });
-      hitlWorker = undefined;
-    }
-    // Close connected capabilities (reverse topological order), then infrastructure.
-    if (sortedHandles.length > 0) await closeAll(sortedHandles, logger);
-    if (deps.onShutdown) {
-      await deps.onShutdown().catch((cleanupErr) => {
-        logger.error("Failed to clean up resources after server bind failure", {
-          error: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
-        });
-      });
-    }
+    const serverStopFailure = stopBoundServerAfterBindFailure(bunServer, bindDesc, logger);
+    await teardownAfterServerStop("boot abort after server bind failure");
+    const stopContext = serverStopFailure === undefined
+      ? ""
+      : `; failed to stop the bound server and the listener may still be live: ${serverStopFailure}`;
     return err({
       kind: "internal-invariant-violated",
-      message: `Failed to bind HTTP server on ${bindDesc}: ${e instanceof Error ? e.message : String(e)}`,
+      message: `Failed to bind HTTP server on ${bindDesc}: ${safeErrorMessage(e)}${stopContext}`,
       context: unixPath !== undefined ? { unix: unixPath } : { port: config.PORT },
     });
   }
@@ -977,38 +1283,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, i
       server = null;
     }
 
-    // Stop the HITL worker (ADR-0060) — drains its in-flight job, then no more
-    // run slices are processed. The queue backend itself is closed by the
-    // binary via `onShutdown` (it owns the BullMQ/Redis connection).
-    if (hitlWorker) {
-      try {
-        await hitlWorker.close();
-      } catch (e) {
-        logger.error("Error closing HITL worker", { error: e instanceof Error ? e.message : String(e) });
-      }
-      hitlWorker = undefined;
-    }
-
-    // Clean up external capabilities (ADR-0051) — close in reverse topological order
-    if (sortedHandles.length > 0) {
-      const closeFailures = await closeAll(sortedHandles, logger);
-      if (closeFailures.length > 0) {
-        logger.warn(`Capability shutdown completed with ${closeFailures.length} failure(s)`, {
-          failures: closeFailures.map((f) => f.name),
-        });
-      }
-    }
-
-    // Clean up infrastructure (e.g., close Redis connections)
-    if (deps.onShutdown) {
-      try {
-        await deps.onShutdown();
-      } catch (e) {
-        logger.error("Error during infrastructure cleanup — resources may be leaked", {
-          error: e instanceof Error ? e.message : String(e),
-        });
-      }
-    }
+    await teardownAfterServerStop("shutdown");
 
     // Transition to stopped
     const stoppedResult = drainComplete(hostState);

@@ -7,16 +7,16 @@
  * Illegal transitions return `err(invalidWorkerTransition(...))`, they never
  * throw and never silently no-op.
  *
- * The lifecycle (AD-7, AD-8, AD-9, FR-014..FR-021):
+ * The lifecycle (AD-7, AD-8, AD-9, multi-tenant spec FR-014..FR-021):
  *
  *   (none) --requestWorker--> spawning --workerLive--> live
  *
  *   live --idleEvict(now)--> evicted        (only when NOT eager-pinned, AD-7)
- *   live --beginDrain-------> draining --drainComplete--> evicted (AD-7/FR-017)
+ *   live --beginDrain-------> draining --drainComplete--> evicted (AD-7/multi-tenant spec FR-017)
  *   live --crash------------> crashed
  *   draining --crash--------> crashed        (a draining worker can still die)
  *
- *   crashed --restart-------> spawning       (AD-8/FR-015: restart the crashed
+ *   crashed --restart-------> spawning       (AD-8/multi-tenant spec FR-015: restart the crashed
  *                                             tenant's worker only)
  *
  * `evicted` and `crashed` are terminal-ISH: `evicted` is fully terminal for a
@@ -25,14 +25,14 @@
  * which `restart` is legal, modelling the supervisor's automatic restart of a
  * crashed tenant's worker without touching other tenants.
  *
- * @satisfies FR-014 — spawn / crash-detect+restart / drain transitions modelled.
- * @satisfies FR-015 — crash→restart is per-worker; nothing here references other tenants.
- * @satisfies FR-017 — drain (live→draining→evicted) lets in-flight work finish first.
+ * @satisfies multi-tenant spec FR-014 — spawn / crash-detect+restart / drain transitions modelled.
+ * @satisfies multi-tenant spec FR-015 — crash→restart is per-worker; nothing here references other tenants.
+ * @satisfies multi-tenant spec FR-017 — drain (live→draining→evicted) lets in-flight work finish first.
  * @satisfies AD-7   — lazy spawn (requestWorker→spawning→live); idle-evict honours eager-pin.
  * @satisfies AD-9   — OOM is just a `crash`; containment is structural (per-worker ADT).
  */
 
-import { match } from "ts-pattern";
+import { match, P } from "ts-pattern";
 import type { Result } from "@fuguejs/framework";
 import { ok, err } from "@fuguejs/framework";
 import type { TenantId } from "../../domain/tenant.js";
@@ -44,7 +44,7 @@ import type { TenantId } from "../../domain/tenant.js";
  * local to this module (mirrors `host-state.ts`'s `TransitionError`); callers
  * widen to `HostError` at the boundary if they need to.
  */
-export interface WorkerTransitionError {
+interface WorkerTransitionError {
   readonly kind: "invalid-worker-transition";
   readonly tenant: TenantId;
   readonly from: WorkerPhase | "none";
@@ -130,7 +130,7 @@ export const workerLive = (
 };
 
 /**
- * Re-adoption (SC-006, FR-019/FR-020): a supervisor restart found this tenant's
+ * Re-adoption (multi-tenant spec SC-006, FR-019/FR-020): a supervisor restart found this tenant's
  * worker still alive (registry entry + UDS liveness probe ok), so it is adopted
  * DIRECTLY into `live` without a spawn — the worker never stopped serving. This
  * is the constructor used by `reconcileReadopt`; modelled as a constructor (no
@@ -154,7 +154,7 @@ export const adoptLive = (
 });
 
 /**
- * Re-adoption of a DRAINING worker (SC-006, FR-017/FR-019/FR-020): a supervisor
+ * Re-adoption of a DRAINING worker (multi-tenant spec SC-006, FR-017/FR-019/FR-020): a supervisor
  * restart found this tenant's worker still alive AND its persisted record carried
  * `health: "draining"` — i.e. it had been SIGTERM'd to drain and is finishing its
  * in-flight work. It MUST be re-adopted as `draining`, NOT `live`: `canServe` is
@@ -232,14 +232,14 @@ export const isIdleEvictable = (state: WorkerState, idleTtlMs: number, now: numb
   state.phase === "live" && !state.eagerPin && now - state.lastActivityAt >= idleTtlMs;
 
 /**
- * Begin graceful drain (AD-7, FR-017): stop routing NEW work to this worker, let
+ * Begin graceful drain (AD-7, multi-tenant spec FR-017): stop routing NEW work to this worker, let
  * in-flight runs complete/checkpoint. Valid from: live. Reuses the drain SEMANTIC
  * of `host-state.ts`'s `beginDrain` (live → draining), scoped to one worker.
  */
 export const beginDrain = (
   state: WorkerState,
   now: number,
-): Result<WorkerState, WorkerTransitionError> => {
+): Result<Extract<WorkerState, { readonly phase: "draining" }>, WorkerTransitionError> => {
   if (state.phase !== "live") {
     return err(invalidWorkerTransition(state.tenant, state.phase, "draining"));
   }
@@ -254,7 +254,7 @@ export const beginDrain = (
 };
 
 /**
- * Drain complete (FR-017): all in-flight work finished/checkpointed; the worker
+ * Drain complete (multi-tenant spec FR-017): all in-flight work finished/checkpointed; the worker
  * can be stopped. Lands in `evicted` (terminal for this incarnation). Valid from:
  * draining.
  */
@@ -269,7 +269,7 @@ export const drainComplete = (
 };
 
 /**
- * Crash (AD-8/AD-9, FR-014/FR-015): the worker process exited unexpectedly (incl.
+ * Crash (AD-8/AD-9, multi-tenant spec FR-014/FR-015): the worker process exited unexpectedly (incl.
  * OOM). Contained to THIS tenant by construction — the state names only its own
  * tenant. Valid from: live OR draining (a draining worker can still die before it
  * finishes). `exitCode` is `null` for signal-kills (no numeric code).
@@ -280,19 +280,21 @@ export const crash = (
   now: number,
 ): Result<WorkerState, WorkerTransitionError> =>
   match<WorkerState, Result<WorkerState, WorkerTransitionError>>(state)
-    .with({ phase: "live" }, (s) => ok({ phase: "crashed", tenant: s.tenant, eagerPin: s.eagerPin, crashedAt: now, exitCode }))
-    .with({ phase: "draining" }, (s) => ok({ phase: "crashed", tenant: s.tenant, eagerPin: s.eagerPin, crashedAt: now, exitCode }))
+    .with(
+      { phase: P.union("live", "draining") },
+      (s) => ok({ phase: "crashed", tenant: s.tenant, eagerPin: s.eagerPin, crashedAt: now, exitCode }),
+    )
     .with({ phase: "spawning" }, (s) => err(invalidWorkerTransition(s.tenant, s.phase, "crashed")))
     .with({ phase: "crashed" }, (s) => err(invalidWorkerTransition(s.tenant, s.phase, "crashed")))
     .with({ phase: "evicted" }, (s) => err(invalidWorkerTransition(s.tenant, s.phase, "crashed")))
     .exhaustive();
 
 /**
- * Restart a crashed worker (AD-8, FR-015/FR-016): the supervisor automatically
+ * Restart a crashed worker (AD-8, multi-tenant spec FR-015/FR-016): the supervisor automatically
  * re-spawns the crashed tenant's worker (and only that one). Returns to
  * `spawning`. Best-effort resume of the crashed tenant's in-flight run from its
  * last durable checkpoint is the WORKER's job on boot (existing processRun
- * idempotency + SET NX EX lock, FR-016) — this transition only re-enters the
+ * idempotency + SET NX EX lock, multi-tenant spec FR-016) — this transition only re-enters the
  * spawn path. Valid from: crashed.
  *
  * NOT USED IN PRODUCTION (kept for the ADT's completeness + transition tests).
@@ -318,7 +320,7 @@ export const restart = (
 /**
  * Is this worker in a state that can serve requests? Only `live` workers route
  * traffic. `draining` is intentionally FALSE for NEW work (drain stops new
- * routing, FR-017) — in-flight runs already on the worker keep going, but the
+ * routing, multi-tenant spec FR-017) — in-flight runs already on the worker keep going, but the
  * supervisor does not route NEW requests to a draining worker.
  */
 export const canServe = (state: WorkerState): boolean => state.phase === "live";
@@ -338,9 +340,9 @@ export const occupiesSlot = (state: WorkerState): boolean =>
 /** The worker's UDS socket path, if it currently has one (live/draining only). */
 export const udsPathOf = (state: WorkerState): string | undefined =>
   match(state)
-    .with({ phase: "live" }, (s) => s.udsPath)
-    .with({ phase: "draining" }, (s) => s.udsPath)
-    .with({ phase: "spawning" }, () => undefined)
-    .with({ phase: "crashed" }, () => undefined)
-    .with({ phase: "evicted" }, () => undefined)
+    // Two arms, not five — the union arms group the phases that share a verdict,
+    // matching the idiom this file's own `crash` already uses. Still exhaustive:
+    // adding a phase remains a compile error.
+    .with({ phase: P.union("live", "draining") }, (s) => s.udsPath)
+    .with({ phase: P.union("spawning", "crashed", "evicted") }, () => undefined)
     .exhaustive();

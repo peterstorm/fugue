@@ -80,7 +80,7 @@ export type FetchLike = (
  * `AbortError` rejection is mapped by the caller's `try/catch` to the retriable
  * `infra-unreachable` — the same channel a DNS/socket fault uses (NFR-020).
  */
-export const DEFAULT_HTTP_POST_TIMEOUT_MS = 30_000;
+const DEFAULT_HTTP_POST_TIMEOUT_MS = 30_000;
 
 /**
  * Build the live `HttpPost` transport over an injected `fetch`. The default is

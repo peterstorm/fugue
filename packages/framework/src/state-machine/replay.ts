@@ -1,5 +1,4 @@
 // replayEvents — pure event-log fold for event-sourced replay
-// Event-log fold, deterministic state reconstruction
 //
 // All functions in this file are pure: no executor, no I/O, no side effects.
 // Replay reconstructs *machine state* from a recorded event log; it does NOT
@@ -8,13 +7,47 @@
 import type { Machine, RecordedEvent } from "./types.js";
 
 /**
+ * ONE fold step of an event-log replay: apply a single entry — a raw
+ * event `E` or a `RecordedEvent` envelope (unwrapped automatically, the
+ * timestamp metadata is irrelevant to the fold) — to a machine state
+ * through the pure transition function.
+ *
+ * This is the ONLY place where envelopes are unwrapped and the `E` cast
+ * is made: `replayEvents` and the resume agreement proof's strict-prefix
+ * scan (`resume-proof.ts` `proveResumeAgreement`) share this step, so the
+ * transition+unwrap implementation cannot drift between the full replay and
+ * the scan (and the `as E` cast lives in exactly one file).
+ *
+ * Unwrap narrowing (`isRecordedEvent`) is deliberately structural — an entry
+ * carrying `recordedAtMs` + `event` (+ optional `synthetic`) is treated as
+ * an envelope; a raw machine event payload that happens to match that exact
+ * shape is unwrapped too (in-scope consumers always pass real envelopes, so
+ * this remains a documented narrowing contract, not a reachable hazard).
+ *
+ * Pure — no executor, no I/O, no side effects. May throw only because
+ * `machine.transition` throws (hostile/version-drifted event payloads);
+ * callers at I/O boundaries use a total exception-to-`Result` mapper whose
+ * diagnostics are safe for arbitrary thrown values (FR-040).
+ */
+export const foldStep = <S, E, C>(
+  current: { state: S; context: C },
+  entry: E | RecordedEvent<unknown>,
+  machine: Machine<S, E, C>,
+): { state: S; context: C } => {
+  // Envelope or raw event — same machine API. The cast is confined to this
+  // one step; every replay consumer folds through it.
+  const event = (isRecordedEvent(entry) ? entry.event : entry) as E;
+  return machine.transition(current.state, event, current.context);
+};
+
+/**
  * Rebuild state by replaying a sequence of events through the pure
  * transition function starting from an initial checkpoint.
  *
- * Accepts either raw events `E[]` (legacy form, used internally by tests
- * and code that already stripped envelopes) or `RecordedEvent<E>[]` (the
- * shape returned by `EventLogReader.readEvents`). Envelopes are unwrapped
- * automatically — the timestamp metadata is irrelevant to the fold.
+ * Accepts either raw events `E[]` (callers that already stripped envelopes)
+ * or `RecordedEvent<E>[]` (the shape returned by `EventLogReader.readEvents`).
+ * Envelopes are unwrapped automatically — the timestamp metadata is
+ * irrelevant to the fold.
  */
 export function replayEvents<S, E, C>(
   events: readonly RecordedEvent<unknown>[],
@@ -33,9 +66,7 @@ export function replayEvents<S, E, C>(
 ): { state: S; context: C } {
   let current = initial;
   for (const entry of events) {
-    // Envelope or raw event — same machine API.
-    const event = (isRecordedEvent(entry) ? entry.event : entry) as E;
-    current = machine.transition(current.state, event, current.context);
+    current = foldStep(current, entry, machine);
   }
   return current;
 }
@@ -66,8 +97,8 @@ export const replayEventsUntil = <S, E, C>(
     );
   }
   const filtered = events.filter((e) => e.recordedAtMs < untilMs);
-  // Cast the inner event type at the boundary — the machine parameterization
-  // (E) is the source of truth. Same pattern as JSON.parse → cast → use.
+  // The envelope unwrap + `as E` cast lives in `foldStep` (its JSDoc marks
+  // it the single cast site); this boundary delegates to `replayEvents`.
   return replayEvents(filtered, machine, initial);
 };
 
@@ -119,12 +150,28 @@ export const replayEventSlice = <S, E, C>(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-function isRecordedEvent(v: unknown): v is RecordedEvent<unknown> {
+/**
+ * ONE encoding of RecordedEvent envelope discrimination, owned beside the
+ * `RecordedEvent` type it recognizes and shared by every reader seam — the
+ * file-backed replay fold (this module) and the BullMQ stream reader
+ * (queue-bullmq/event-log.ts) must agree on what "is an envelope", or the
+ * two encodings drift (round-22 atl-2).
+ *
+ * Envelope discrimination by shape: `RecordedEvent` is exactly
+ * `{ recordedAtMs, event, synthetic? }`. A raw event payload carrying the
+ * same keys cannot be distinguished structurally — the typed overloads
+ * keep envelope vs. raw-event callers apart at compile time; this runtime
+ * check only needs to agree with the envelope the readers construct.
+ */
+export function isRecordedEvent(v: unknown): v is RecordedEvent<unknown> {
   return (
     typeof v === "object" &&
     v !== null &&
     "recordedAtMs" in v &&
     typeof (v as { recordedAtMs: unknown }).recordedAtMs === "number" &&
-    "event" in v
+    "event" in v &&
+    ("synthetic" in v
+      ? typeof (v as { synthetic: unknown }).synthetic === "boolean"
+      : true)
   );
 }

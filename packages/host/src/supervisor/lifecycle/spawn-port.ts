@@ -11,8 +11,8 @@
  *                            get its UDS path; drain/evict/restart; reconcile on
  *                            restart; how many workers are live").
  *
- * All fallible operations return `Result<…, HostError>` — fail-closed, never throw
- * (the Bun adapter catches thrown spawn/kill errors and converts them).
+ * Spawn and signal failures return `Result<…, HostError>` — fail-closed, never
+ * throw. `isAlive` is intentionally a best-effort boolean liveness probe.
  */
 
 import type { Result } from "@fuguejs/framework";
@@ -23,7 +23,7 @@ import type { TenantId, SecretsRef } from "../../domain/tenant.js";
 
 /**
  * Everything needed to spawn one tenant's worker. The supervisor forwards the
- * tenant's secrets REFERENCE (never the secret itself — FR-005/FR-006): the
+ * tenant's secrets REFERENCE (never the secret itself — multi-tenant spec FR-005/FR-006): the
  * worker dereferences it inside its own process via the `SecretsSource` port.
  *
  * `heapCapMb` is the per-worker V8 heap ceiling (AD-9, `WORKER_HEAP_CAP_MB`).
@@ -103,15 +103,15 @@ export interface EnsuredWorker {
  * crash-restart, re-adoption) is owned HERE.
  *
  * SHARED CONTRACT — keep this shape stable (T7 codes against it):
- *   - `ensureWorker(tenant)` — lazy spawn-on-first-request (AD-7, NFR-003):
+ *   - `ensureWorker(tenant)` — lazy spawn-on-first-request (AD-7, multi-tenant spec NFR-003):
  *     returns the live worker's UDS path, spawning + waiting for readiness if
  *     none is live. Fail-closed `worker-unavailable` if the worker cannot be
  *     brought up.
- *   - `drain(tenant)` / `evict(tenant)` — graceful drain then stop (FR-017).
- *   - `onCrash(tenant, exitCode)` — record a crash and (per AD-8/FR-015) restart
+ *   - `drain(tenant)` / `evict(tenant)` — graceful drain then stop (multi-tenant spec FR-017).
+ *   - `onCrash(tenant, exitCode)` — record a crash and (per AD-8/multi-tenant spec FR-015) restart
  *     ONLY this tenant's worker; other tenants are untouched.
  *   - `reconcileReadopt()` — on supervisor restart, re-adopt still-live workers
- *     from the registry + UDS probe and resume routing (SC-006, FR-019/FR-020).
+ *     from the registry + UDS probe and resume routing (multi-tenant spec SC-006, FR-019/FR-020).
  *   - `liveWorkerCount()` — the count primitive T9's admission bound reads.
  */
 export interface WorkerLifecyclePort {
@@ -121,25 +121,25 @@ export interface WorkerLifecyclePort {
    * cannot be brought up (contained to this tenant only — AD-8).
    */
   readonly ensureWorker: (tenant: TenantId) => Promise<Result<EnsuredWorker, HostError>>;
-  /** Begin graceful drain of a tenant's worker (live → draining → stop, FR-017). */
+  /** Begin graceful drain of a tenant's worker (live → draining → stop, multi-tenant spec FR-017). */
   readonly drain: (tenant: TenantId) => Promise<Result<void, HostError>>;
   /** Evict a tenant's worker (drain then stop / reclaim its slot, AD-7). */
   readonly evict: (tenant: TenantId) => Promise<Result<void, HostError>>;
   /**
    * Record that a tenant's worker crashed and restart ONLY that worker
-   * (AD-8/FR-015). `exitCode` is `null` for a signal kill / OOM.
+   * (AD-8/multi-tenant spec FR-015). `exitCode` is `null` for a signal kill / OOM.
    */
   readonly onCrash: (tenant: TenantId, exitCode: number | null) => Promise<Result<void, HostError>>;
   /**
    * On supervisor restart: re-adopt still-live workers (registry + UDS probe) and
-   * prune dead entries (SC-006, FR-019/FR-020). Returns the set of tenants whose
+   * prune dead entries (multi-tenant spec SC-006, FR-019/FR-020). Returns the set of tenants whose
    * workers were adopted live.
    */
   readonly reconcileReadopt: () => Promise<Result<{ readonly adopted: readonly TenantId[]; readonly pruned: readonly TenantId[] }, HostError>>;
   /** Number of workers occupying a slot (spawning/live/draining) — T9 admission reads this. */
   readonly liveWorkerCount: () => number;
   /**
-   * Idle-evict sweep (AD-7/FR-017): evict every idle-evictable live worker,
+   * Idle-evict sweep (AD-7/multi-tenant spec FR-017): evict every idle-evictable live worker,
    * RESPECTING eager-pin. Driven by the supervisor binary on a timer (the binary
    * owns the interval; the policy lives here). Returns the evicted tenants.
    *
@@ -148,7 +148,7 @@ export interface WorkerLifecyclePort {
    */
   readonly idleEvictSweep: () => Promise<readonly TenantId[]>;
   /**
-   * Liveness sweep (FR-014/FR-015, SC-006): crash-detection SAFETY NET for
+   * Liveness sweep (multi-tenant spec FR-014/FR-015, SC-006): crash-detection SAFETY NET for
    * RE-ADOPTED workers. A worker spawned by this process carries a `handle.exited`
    * crash watcher; a worker re-adopted across a supervisor restart does NOT (its
    * process was re-parented — no handle to await). This sweep probes such workers'
@@ -159,3 +159,22 @@ export interface WorkerLifecyclePort {
    */
   readonly livenessSweep: () => Promise<readonly TenantId[]>;
 }
+
+/**
+ * Copy an inherited env into a clean `Record<string, string>`, dropping keys
+ * whose value is `undefined`.
+ *
+ * ONE definition shared by both spawn adapters (`bun-spawn-adapter` for
+ * workers, `bun-init-process-adapter` for the supervisor). `process.env` is
+ * typed with optional values but `Bun.spawn` wants a total string record, and
+ * the two adapters previously each open-coded this same narrowing loop.
+ */
+export const cleanEnvRecord = (
+  source: Record<string, string | undefined>,
+): Record<string, string> => {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (value !== undefined) out[key] = value;
+  }
+  return out;
+};

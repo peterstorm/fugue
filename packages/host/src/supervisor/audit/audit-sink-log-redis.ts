@@ -1,5 +1,5 @@
 /**
- * Audit sinks — the IMPERATIVE SHELL behind `AuditPort` (FR-028, SC-008).
+ * Audit sinks — the IMPERATIVE SHELL behind `AuditPort` (multi-tenant spec FR-028, SC-008).
  *
  * Two concrete sinks plus a compound sink that fans out to both:
  *   - `createLogAuditSink(logger)`        — structured-log sink. Emits one
@@ -15,7 +15,7 @@
  * propagated a Redis-stream outage — would turn a successful tenant op into a
  * failed request, which would be WORSE than a best-effort trail. So every sink
  * catches its own failure, logs it, and resolves. The audit trail is best-effort
- * AT THE INFRA LAYER; SC-008's "100% emit a record" is satisfied by the handler
+ * AT THE INFRA LAYER; multi-tenant spec SC-008's "100% emit a record" is satisfied by the handler
  * ALWAYS CALLING `record` for every op — the sink layer just must not crash.
  *
  * The Redis stream is a SUPERVISOR/admin keyspace (`fugue:supervisor:audit`),
@@ -25,6 +25,7 @@
  */
 
 import type { LogPort } from "../../ports.js";
+import { safeErrorMessage } from "@fuguejs/framework";
 import { match } from "ts-pattern";
 import type { AuditPort, AuditRecord } from "./audit-port.js";
 
@@ -77,13 +78,38 @@ const summarize = (rec: AuditRecord): string =>
     .with("partial", () => `[audit] PARTIAL ${rec.action} tenant='${rec.tenant}' by ${rec.actor.kind}${rec.detail ? ` (${rec.detail})` : ""}`)
     .exhaustive();
 
+const writeAuditFallback = (message: string): void => {
+  try {
+    process.stderr.write(`${message}\n`);
+  } catch {
+    // stderr itself is unavailable — nothing further is possible.
+  }
+};
+
+const logAuditFailureWithoutThrowing = (
+  logger: LogPort | undefined,
+  level: "warn" | "error",
+  message: string,
+  data: Record<string, unknown>,
+  fallback: string,
+): void => {
+  if (logger === undefined) return;
+  try {
+    logger[level](message, data);
+  } catch (loggerError) {
+    writeAuditFallback(`${fallback}; logger failure: ${safeErrorMessage(loggerError)}`);
+  }
+};
+
 // ── Log sink ──────────────────────────────────────────────────────────────────
 
 /**
  * Structured-log audit sink. Emits one `info` line per record with the full
  * record as structured data (so log aggregators capture actor/timestamp/tenant/
- * action). Never throws — a logger that threw is caught and dropped (a sink must
- * not crash the request path).
+ * action). Never throws — a logger that threw is caught and reported to stderr
+ * as a LAST RESORT (a sink must not crash the request path, but the floor must
+ * not be silent either: when the structured log is down AND the Redis stream is
+ * down, that breadcrumb is the only trace the record existed).
  */
 export const createLogAuditSink = (logger: LogPort): AuditPort => ({
   record: async (rec) => {
@@ -97,8 +123,13 @@ export const createLogAuditSink = (logger: LogPort): AuditPort => ({
         outcome: rec.outcome,
         ...(rec.detail !== undefined ? { detail: rec.detail } : {}),
       });
-    } catch {
-      // A logger that throws must not break the request path. Nothing else to do.
+    } catch (e) {
+      // A logger that threw must not break the request path — but the floor
+      // must not be SILENT: emit a last-resort breadcrumb that bypasses the
+      // host logger entirely.
+      writeAuditFallback(
+        `[audit] LOG SINK FAILURE — record not logged: ${rec.action} tenant='${rec.tenant}': ${safeErrorMessage(e)}`,
+      );
     }
   },
 });
@@ -120,11 +151,14 @@ export const createRedisStreamAuditSink = (
     try {
       await stream.xAdd(streamKey, auditRecordToFields(rec));
     } catch (e) {
-      logger?.warn("[audit] Redis stream XADD failed — audit record not persisted to stream", {
-        tenant: rec.tenant,
-        action: rec.action,
-        error: e instanceof Error ? e.message : String(e),
-      });
+      const error = safeErrorMessage(e);
+      logAuditFailureWithoutThrowing(
+        logger,
+        "warn",
+        "[audit] Redis stream XADD failed — audit record not persisted to stream",
+        { tenant: rec.tenant, action: rec.action, error },
+        `[audit] REDIS STREAM FAILURE — ${rec.action} tenant='${rec.tenant}': ${error}`,
+      );
     }
   },
 });
@@ -149,15 +183,19 @@ export const createCompoundAuditSink = (
   logger?: LogPort,
 ): AuditPort => ({
   record: async (rec) => {
-    const settled = await Promise.allSettled(sinks.map((s) => s.record(rec)));
+    const settled = await Promise.allSettled(
+      sinks.map((sink) => Promise.resolve().then(() => sink.record(rec))),
+    );
     settled.forEach((result, index) => {
       if (result.status === "rejected") {
-        logger?.error("[audit] compound sink: a sink violated the never-throw contract (rejected)", {
-          sinkIndex: index,
-          tenant: rec.tenant,
-          action: rec.action,
-          reason: result.reason instanceof Error ? result.reason.message : String(result.reason),
-        });
+        const reason = safeErrorMessage(result.reason);
+        logAuditFailureWithoutThrowing(
+          logger,
+          "error",
+          "[audit] compound sink: a sink violated the never-throw contract (rejected)",
+          { sinkIndex: index, tenant: rec.tenant, action: rec.action, reason },
+          `[audit] COMPOUND SINK FAILURE — sink=${index} ${rec.action} tenant='${rec.tenant}': ${reason}`,
+        );
       }
     });
   },
@@ -167,7 +205,7 @@ export const createCompoundAuditSink = (
 
 /**
  * In-memory audit sink for tests — captures every record in order so a test can
- * assert SC-008 (every op emitted a record with the required fields). Mirrors the
+ * assert multi-tenant spec SC-008 (every op emitted a record with the required fields). Mirrors the
  * recorded-call fake style used across the supervisor adapters.
  */
 export interface FakeAuditSink extends AuditPort {
@@ -190,7 +228,7 @@ export const createFakeAuditSink = (): FakeAuditSink => {
  * In-memory `AuditStreamPort` fake — records every `xAdd` (key + fields) and can
  * be flipped to throw, exercising the redis-stream sink's never-throw path.
  */
-export interface FakeAuditStream extends AuditStreamPort {
+interface FakeAuditStream extends AuditStreamPort {
   readonly entries: readonly { streamKey: string; fields: Record<string, string> }[];
   setFail: (fail: boolean) => void;
 }

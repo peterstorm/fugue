@@ -28,6 +28,12 @@ import { createSummaryDag } from "../src/dag/summary-dag.js";
 
 const MLFLOW_URI = process.env.MLFLOW_TRACKING_URI ?? "http://localhost:5000";
 const fixturesDir = resolve(import.meta.dir, "../fixtures/customers");
+const print = (message: string, detail?: unknown): void => {
+  const suffix = detail === undefined
+    ? ""
+    : ` ${typeof detail === "string" ? detail : JSON.stringify(detail)}`;
+  process.stdout.write(`${message}${suffix}\n`);
+};
 
 // 1. Init tracing with alwaysOn so every span exports
 const tracing = await initTracing({
@@ -39,6 +45,34 @@ const tracing = await initTracing({
 });
 
 const source = new JsonFixtureSource(fixturesDir);
+const dag = createSummaryDag(source);
+
+const runSmokeCase = async (testCase: Readonly<{
+  runId: NodeContext["runId"];
+  output: SynthesisOutput;
+  onSuccess: (response: SummaryResponse) => void;
+}>): Promise<void> => {
+  const ctx: NodeContext = {
+    runId: testCase.runId,
+    dagId: "customer-summary",
+    observer: new NoopObserver(),
+    cache: null,
+    logger: console,
+    prompts: { get: () => "synthesis prompt" },
+    llm: new FakeLlmClient(() => testCase.output),
+  };
+  const result = await runDag<{ customerId: string }, SummaryResponse>(
+    dag,
+    { customerId: "cust-001" },
+    ctx,
+  );
+
+  if (result.ok && result.value.status === "ok") {
+    testCase.onSuccess(result.value);
+  } else {
+    print("  Result:", JSON.stringify(result, null, 2));
+  }
+};
 
 // --- Case 1: Grounded summary (should pass guardrail) ---
 
@@ -52,28 +86,15 @@ const groundedOutput: SynthesisOutput = {
   customerSatisfaction: "satisfied",
 };
 
-console.log("Running DAG with grounded LLM output (cust-001)...");
-{
-  const llm = new FakeLlmClient(() => groundedOutput);
-  const ctx: NodeContext = {
-    runId: "guardrail-smoke-grounded",
-    dagId: "customer-summary",
-    observer: new NoopObserver(),
-    cache: null,
-    logger: console,
-    prompts: { get: () => "synthesis prompt" },
-    llm,
-  };
-  const dag = createSummaryDag(source, "cust-001");
-  const result = await runDag<{ customerId: string }, SummaryResponse>(dag, { customerId: "cust-001" }, ctx);
-
-  if (result.ok && result.value.status === "ok") {
-    console.log("  Status: ok");
-    console.log("  Grounding warnings:", result.value.groundingWarnings ?? "none");
-  } else {
-    console.log("  Result:", JSON.stringify(result, null, 2));
-  }
-}
+print("Running DAG with grounded LLM output (cust-001)...");
+await runSmokeCase({
+  runId: "guardrail-smoke-grounded",
+  output: groundedOutput,
+  onSuccess: (response) => {
+    print("  Status: ok");
+    print("  Grounding warnings:", response.groundingWarnings ?? "none");
+  },
+});
 
 // --- Case 2: Hallucinating summary (should fail guardrail) ---
 
@@ -87,35 +108,22 @@ const hallucinatingOutput: SynthesisOutput = {
   customerSatisfaction: "dissatisfied",
 };
 
-console.log("\nRunning DAG with hallucinating LLM output (cust-001)...");
-{
-  const llm = new FakeLlmClient(() => hallucinatingOutput);
-  const ctx: NodeContext = {
-    runId: "guardrail-smoke-hallucination",
-    dagId: "customer-summary",
-    observer: new NoopObserver(),
-    cache: null,
-    logger: console,
-    prompts: { get: () => "synthesis prompt" },
-    llm,
-  };
-  const dag = createSummaryDag(source, "cust-001");
-  const result = await runDag<{ customerId: string }, SummaryResponse>(dag, { customerId: "cust-001" }, ctx);
-
-  if (result.ok && result.value.status === "ok") {
-    console.log("  Status: ok");
-    console.log("  Summary:", result.value.summary.summary);
-    console.log("  Grounding warnings:", JSON.stringify(result.value.groundingWarnings, null, 2));
-  } else {
-    console.log("  Result:", JSON.stringify(result, null, 2));
-  }
-}
+print("\nRunning DAG with hallucinating LLM output (cust-001)...");
+await runSmokeCase({
+  runId: "guardrail-smoke-hallucination",
+  output: hallucinatingOutput,
+  onSuccess: (response) => {
+    print("  Status: ok");
+    print("  Summary:", response.summary.summary);
+    print("  Grounding warnings:", JSON.stringify(response.groundingWarnings, null, 2));
+  },
+});
 
 // 3. Flush to MLflow
-console.log(`\nFlushing spans to MLflow at ${MLFLOW_URI}...`);
+print(`\nFlushing spans to MLflow at ${MLFLOW_URI}...`);
 await tracing.flush();
 await tracing.shutdown();
-console.log("Done. Open MLflow UI → Traces tab.");
-console.log("You should see two traces:");
-console.log("  1. guardrail-smoke-grounded — grounding-guardrail node shows OK");
-console.log("  2. guardrail-smoke-hallucination — grounding-guardrail node shows ERROR (red)");
+print("Done. Open MLflow UI → Traces tab.");
+print("You should see two traces:");
+print("  1. guardrail-smoke-grounded — grounding-guardrail node shows OK");
+print("  2. guardrail-smoke-hallucination — grounding-guardrail node shows ERROR (red)");

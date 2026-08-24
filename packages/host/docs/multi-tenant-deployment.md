@@ -89,9 +89,10 @@ whole multi-team tree would let a compromised worker read another team's DAG cod
 and prompts (team-security-and-capabilities.md §2). Per-tenant `dagsRoot` closes
 that: a worker's filesystem view contains only its team's bundle.
 
-> `dagsRoot` is validated as a **confined absolute path** (leading `/`, no `..`
-> traversal, no NUL) at the `POST /admin/tenants` boundary — a registered tenant
-> always carries a usable, confined root.
+> `dagsRoot` is parsed as a **tenant-owned root** at registration: tenant `cx`
+> may use `/dags/cx` or a canonical descendant, never `/`, a host path, an alias,
+> or another tenant's subtree. The same rule binds `fsRoot` under `/srv/<tenantId>`
+> before that path can become a recursive purge target.
 
 ---
 
@@ -232,9 +233,9 @@ Field notes:
 
 | Field | Meaning |
 |-------|---------|
-| `dagsRoot` | **Required.** Confined absolute path; the worker's `DAGS_LOCAL_PATH`. Must match the subdir the team's initContainer staged into. |
+| `dagsRoot` | **Required.** Tenant-owned `/dags/<tenantId>` root or canonical descendant; the worker's `DAGS_LOCAL_PATH`. Must match the subdir the team's initContainer staged into. |
 | `secretsRef` | **Required.** The mounted env-file path the worker resolves its secrets from. |
-| `fsRoot` | Per-tenant documents mount (the `fs` documents adapter root); also the path the grace-window purge reclaims on deregister. Confined absolute path. |
+| `fsRoot` | Tenant-owned `/srv/<tenantId>` documents root or canonical descendant; also the recursive path the grace-window purge reclaims on deregister. |
 | `admission.maxConcurrentRuns` / `maxQueuedRuns` | Per-tenant ceilings. `maxQueuedRuns` is also the worker's HITL queue-depth gate (forwarded as `FUGUE_MAX_QUEUED_RUNS`). |
 | `keycloakClientMapping` | Per-tenant realm/clientId + `dagId → agent client id` for downstream capability minting. |
 | `eagerPin` | `true` keeps the worker hot (never idle-evicted) — use for latency-sensitive teams. |
@@ -406,7 +407,7 @@ team must not share a kernel/pod with any other.
 
 | Symptom | Likely cause |
 |---------|--------------|
-| Worker logs `dagsRoot must be a confined absolute path` at register | `dagsRoot` was relative or contained `..`. |
+| Registration reports `dagsRoot must be '/dags/<tenant>'…` or `fsRoot must be '/srv/<tenant>'…` | The path was non-canonical, outside the tenant-id subtree, or belonged to another tenant. |
 | Worker boots but `dagCount: 0` at `/readiness` | The team's initContainer staged into a different subdir than the registered `dagsRoot`. |
 | Worker exits 1 with `FUGUE_SECRETS_REF is required` / `env-file secrets source '…': …` | The tenant's secret isn't mounted at its `secretsRef` path, or the env-file is malformed. |
 | `503 worker-unavailable` on first request | Spawn failed (OOM / heap cap too low / ACL provisioning error). Check `oc logs` for the underlying cause. |

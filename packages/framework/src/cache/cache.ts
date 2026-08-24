@@ -4,6 +4,7 @@ import type { z } from "zod";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import { ok, err } from "../types/result.js";
+import { safeErrorMessage } from "../types/safe-error.js";
 
 const schemaMismatchError = (key: string, message: string): FrameworkError => ({
   kind: "cache-error",
@@ -22,7 +23,7 @@ export interface Cache {
   set<T>(key: string, value: T, ttlSec: number): Promise<Result<void, FrameworkError>>;
 }
 
-export interface InMemoryCacheOpts {
+interface InMemoryCacheOpts {
   /** Injectable clock; defaults to `Date.now`. Tests can supply a stub for deterministic TTL assertions. */
   readonly now?: () => number;
 }
@@ -36,10 +37,26 @@ export class InMemoryCache implements Cache {
     this.now = opts?.now ?? Date.now;
   }
 
+  private readClock(operation: "get" | "set", key: string): Result<number, FrameworkError> {
+    // The clock is a hostile seam: a throwing clock must surface as a typed
+    // cache-error, never a raw rejection, and a non-finite now must not make
+    // the TTL comparison silently meaningless.
+    try {
+      const nowMs = this.now();
+      return Number.isFinite(nowMs)
+        ? ok(nowMs)
+        : err({ kind: "cache-error", operation, message: `key="${key}": clock returned a non-finite timestamp` });
+    } catch (error) {
+      return err({ kind: "cache-error", operation, message: `key="${key}": clock failed: ${safeErrorMessage(error)}` });
+    }
+  }
+
   async get<T>(key: string, schema: z.ZodType<T>): Promise<Result<T | null, FrameworkError>> {
     const entry = this.store.get(key);
     if (!entry) return ok(null);
-    if (this.now() > entry.expiresAt) {
+    const now = this.readClock("get", key);
+    if (!now.ok) return now;
+    if (now.value > entry.expiresAt) {
       this.store.delete(key);
       return ok(null);
     }
@@ -47,7 +64,7 @@ export class InMemoryCache implements Cache {
     try {
       parsed = JSON.parse(entry.value);
     } catch (e) {
-      const message = `key="${key}": JSON.parse failed: ${e instanceof Error ? e.message : String(e)}`;
+      const message = `key="${key}": JSON.parse failed: ${safeErrorMessage(e)}`;
       return err({ kind: "cache-error", operation: "get", message });
     }
     const validated = schema.safeParse(parsed);
@@ -56,9 +73,20 @@ export class InMemoryCache implements Cache {
   }
 
   async set<T>(key: string, value: T, ttlSec: number): Promise<Result<void, FrameworkError>> {
+    // Mirror `get`'s guard: serialization and the clock are hostile seams and
+    // `set` documents `Result<void, FrameworkError>` — a cyclic value or a
+    // throwing clock must be a typed cache-error, never a raw rejection.
+    let json: string;
+    try {
+      json = JSON.stringify(value);
+    } catch (e) {
+      return err({ kind: "cache-error", operation: "set", message: `key="${key}": JSON.stringify failed: ${safeErrorMessage(e)}` });
+    }
+    const now = this.readClock("set", key);
+    if (!now.ok) return now;
     this.store.set(key, {
-      value: JSON.stringify(value),
-      expiresAt: this.now() + ttlSec * 1000,
+      value: json,
+      expiresAt: now.value + ttlSec * 1000,
     });
     return ok(undefined);
   }

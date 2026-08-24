@@ -8,10 +8,10 @@
  * this module (or any concrete `SecretsSource`) — enforced by convention today,
  * verified end-to-end in T11 — so no resolution path for this port exists
  * supervisor-side and the supervisor's inert `SecretsRef` is not dereferenced
- * there (FR-005, FR-006, SC-002). A future Vault adapter drops in behind the
+ * there (multi-tenant spec FR-005, FR-006, SC-002). A future Vault adapter drops in behind the
  * same `SecretsSource` port without changing any caller.
  *
- * ── Fail-closed (FR-006) ──────────────────────────────────────────────────────
+ * ── Fail-closed (multi-tenant spec FR-006) ──────────────────────────────────────────────────────
  *   - missing file            → `config-invalid` Left
  *   - unreadable file (perms, dir, …) → `config-invalid` Left
  *   - malformed line          → `config-invalid` Left (NEVER silently dropped —
@@ -22,13 +22,13 @@
  * map. An empty FILE is a valid empty map (the tenant declared zero secrets);
  * an empty map is distinct from a parse failure.
  *
- * ── Never log values (mirrors NFR-014) ────────────────────────────────────────
+ * ── Never log values (mirrors keycloak-entra spec NFR-014) ────────────────────────────────────────
  * No error message here interpolates a secret VALUE. The ref/path and offending
  * KEY name / line NUMBER are safe to surface; the VALUE never is. The adapter
  * performs no logging at all.
  *
- * @satisfies FR-031 — resolves the per-tenant secrets reference; wired only inside the owning worker.
- * @satisfies FR-006 — fail-closed: any read/parse problem is a Left, never a partial map.
+ * @satisfies multi-tenant spec FR-031 — resolves the per-tenant secrets reference; wired only inside the owning worker.
+ * @satisfies multi-tenant spec FR-006 — fail-closed: any read/parse problem is a Left, never a partial map.
  */
 
 import { readFileSync } from "node:fs";
@@ -167,7 +167,7 @@ export const parseEnvFile = (refPath: string, content: string): Result<ResolvedS
  * Construct the env-file `SecretsSource`. This is the concrete adapter a WORKER
  * wires at bootstrap (T6); the supervisor does not call it (it does not import
  * this module — convention today, verified e2e in T11). Invoking the constructor
- * is the seam that carries filesystem-read authority (FR-005, SC-002).
+ * is the seam that carries filesystem-read authority (multi-tenant spec FR-005, SC-002).
  *
  * The returned `SecretsSource` reads the file at the ref's path on each call and
  * parses it, failing closed on any read or parse problem. It is synchronous to

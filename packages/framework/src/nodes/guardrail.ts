@@ -1,11 +1,24 @@
 import type { z } from "zod";
-import type { NodeDef, NodeContext } from "../types/node.js";
+import type { NodeDef } from "../types/node.js";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import { ok } from "../types/result.js";
 import { nodeId } from "../types/ids.js";
 import type { NodeId } from "../types/ids.js";
 import { emit } from "../dag-runtime/emit.js";
+import { safeErrorMessage } from "../types/safe-error.js";
+
+/** Guardrail diagnostics are secondary to the modeled Result seam. */
+const reportWithoutThrowing = (
+  logger: { error: (message: string) => void },
+  message: string,
+): void => {
+  try {
+    logger.error(message);
+  } catch {
+    // The GuardrailResult remains authoritative when diagnostics fail.
+  }
+};
 
 /** Individual check detail. */
 export interface GuardrailCheck {
@@ -76,7 +89,8 @@ export interface GuardrailNodeConfig<I, T> {
  *
  * Guardrail nodes:
  * - Run a pure validation function against upstream outputs
- * - Always pass data through (never block the pipeline)
+ * - Always return `Ok<GuardrailResult<T>>` so the DAG can continue; only the
+ *   `validated` variant carries the original value
  * - Attach warnings when validation fails
  * - Emit as TOOL spans in MLflow (mapped by the executor via SPAN_TYPE_MAP)
  *
@@ -100,8 +114,8 @@ export const createGuardrailNode = <I, T>(
     try {
       result = config.validate(input);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      ctx.logger.error(`[guardrail:${config.id}] validate() threw: ${msg}`);
+      const msg = safeErrorMessage(e);
+      reportWithoutThrowing(ctx.logger, `[guardrail:${config.id}] validate() threw: ${msg}`);
       result = {
         kind: "failed",
         passed: false,
@@ -111,24 +125,32 @@ export const createGuardrailNode = <I, T>(
       };
     }
 
-    // Emit guardrail-specific sub-span attributes via observer
+    // Emit guardrail-specific sub-span attributes via observer. Telemetry is
+    // best-effort and cannot replace the already-decided GuardrailResult.
     if (!result.passed) {
-      emit(ctx, {
-        type: "sub-span",
-        runId: ctx.runId,
-        dagId: ctx.dagId,
-        nodeId: id,
-        parentSpanId: config.id,
-        kind: "GUARDRAIL",
-        timestamp: new Date(),
-        duration: 0,
-        attributes: {
-          "guardrail.passed": result.passed,
-          "guardrail.checks_total": result.checks.length,
-          "guardrail.checks_passed": result.checks.filter((c) => c.passed).length,
-          "guardrail.warnings": JSON.stringify(result.warnings),
-        },
-      });
+      try {
+        emit(ctx, {
+          type: "sub-span",
+          runId: ctx.runId,
+          dagId: ctx.dagId,
+          nodeId: id,
+          parentSpanId: config.id,
+          kind: "GUARDRAIL",
+          timestamp: ctx.eventTimestamp?.() ?? new Date(),
+          duration: 0,
+          attributes: {
+            "guardrail.passed": result.passed,
+            "guardrail.checks_total": result.checks.length,
+            "guardrail.checks_passed": result.checks.filter((c) => c.passed).length,
+            "guardrail.warnings": JSON.stringify(result.warnings),
+          },
+        });
+      } catch (diagnosticError) {
+        reportWithoutThrowing(
+          ctx.logger,
+          `[guardrail:${config.id}] failure telemetry threw: ${safeErrorMessage(diagnosticError)}`,
+        );
+      }
     }
 
     return ok(result);

@@ -1,7 +1,7 @@
 /**
  * Redis worker registry — the durable record of which tenant's worker is live,
  * its pid, UDS path, and health (AD-2). This is the source of truth a RESTARTED
- * supervisor reads to re-adopt still-live workers (SC-006, FR-019/FR-020): the
+ * supervisor reads to re-adopt still-live workers (multi-tenant spec SC-006, FR-019/FR-020): the
  * supervisor's in-memory lifecycle map does NOT survive its own restart, but the
  * workers (children of thin-init, not the supervisor — AD-2) keep running, so the
  * registry + a per-worker UDS liveness probe lets the new supervisor find them.
@@ -9,18 +9,18 @@
  * KEY LAYOUT (AD-2): `fugue:supervisor:workers:<tenant>` → JSON
  *   `{ pid, udsPath, startedAt, health, eagerPin }`.
  *
- * `reconcileReadopt()` is the deterministic SC-006 reconcile:
+ * `reconcileReadopt()` is the deterministic multi-tenant spec SC-006 reconcile:
  *   1. enumerate every registered worker entry,
  *   2. UDS-liveness-probe each one (injected `probe`),
  *   3. ADOPT the ones that answer (return their `AdoptableWorker` records), and
  *   4. PRUNE (delete) the dead entries so the registry self-heals.
  *
- * FAIL-CLOSED (reuse the established degraded semantics): on ANY Redis failure
- * (read/write/scan/del returning `!ok`, or a thrown client error) every method
- * returns the SAME `redis-unavailable` HostError every other Redis adapter
- * returns (→ 503) and invokes the optional `onRedisDead` hook so the host's
- * existing `redisDied` degraded machine drives the state — this adapter NEVER
- * builds a parallel degraded state and NEVER throws.
+ * FAIL-CLOSED (reuse the established degraded semantics): failures of mandatory
+ * Redis operations return the same `redis-unavailable` HostError as the other
+ * adapters (→ 503) and invoke `onRedisDead`, so the existing `redisDied` machine
+ * drives degraded state. Stale/corrupt-entry pruning during `get` and
+ * `reconcileReadopt` is deliberately best-effort: failures are warning-logged
+ * while the authoritative read/adoption result still succeeds.
  *
  * The enumeration uses `scan` over `fugue:supervisor:workers:*`, which is a
  * SUPERVISOR/admin keyspace (not tenant-scoped), so `scan` is permitted here
@@ -28,7 +28,7 @@
  * hydrate. Per-tenant worker ACLs never touch this prefix.
  */
 
-import { ok, err } from "@fuguejs/framework";
+import { ok, err, safeErrorMessage } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import { redisUnavailable } from "../../domain/host-error.js";
 import type { HostError } from "../../domain/host-error.js";
@@ -53,13 +53,14 @@ const workerKey = (tenant: TenantId): string => `${WORKER_KEY_PREFIX}${tenant}`;
  * `draining`) are persistable here. Adding/removing a lifecycle phase that should
  * be persisted is a single-edit change at the source of truth.
  */
-export type WorkerHealth = Extract<WorkerPhase, "live" | "draining">;
+type WorkerHealth = Extract<WorkerPhase, "live" | "draining">;
 
 /**
  * The persisted worker record. Carries ONLY routing/liveness metadata — never a
- * secret (the supervisor holds none; FR-005). `startedAt` lets the new supervisor
- * preserve the original worker uptime when it re-adopts (so idle-evict math stays
- * honest across a supervisor restart).
+ * secret (the supervisor holds none; multi-tenant spec FR-005). `startedAt` lets
+ * the new supervisor preserve original uptime and diagnostic continuity when it
+ * re-adopts. Idle eviction uses `lastActivityAt`, which adoption intentionally
+ * resets to the current clock.
  *
  * `eagerPin` (AD-7) is persisted as a BELT-AND-SUSPENDERS source for re-adoption:
  * the AUTHORITATIVE source on re-adoption is the live tenant registry config (so a
@@ -78,7 +79,7 @@ export interface WorkerRecord {
 }
 
 /** A registered worker the reconcile confirmed is still alive (probe ok). */
-export interface AdoptableWorker {
+interface AdoptableWorker {
   readonly record: WorkerRecord;
 }
 
@@ -126,10 +127,36 @@ const tenantFromKey = (key: string): TenantId | undefined => {
 
 // ── Degraded hook (reuse, don't reinvent) ──────────────────────────────────────
 
-export interface WorkerRegistryHooks {
+interface WorkerRegistryHooks {
   readonly onRedisDead?: () => void;
   readonly onRedisAlive?: () => void;
 }
+
+const warnWithoutThrowing = (
+  logger: LogPort | undefined,
+  message: string,
+  data?: Record<string, unknown>,
+): void => {
+  try {
+    logger?.warn(message, data);
+  } catch {
+    // Diagnostics must never replace a typed or best-effort registry outcome.
+  }
+};
+
+const invokeHookWithoutThrowing = (
+  logger: LogPort | undefined,
+  name: "onRedisDead" | "onRedisAlive",
+  hook: (() => void) | undefined,
+): void => {
+  try {
+    hook?.();
+  } catch (error) {
+    warnWithoutThrowing(logger, `[worker-registry] ${name} hook threw — preserving Redis outcome`, {
+      error: safeErrorMessage(error),
+    });
+  }
+};
 
 /**
  * A UDS liveness probe: "is the worker bound to `udsPath` answering?". Injected
@@ -148,7 +175,7 @@ export interface WorkerRegistry {
   /** Delete a tenant's worker record (on crash/evict/prune). Idempotent. */
   readonly remove: (tenant: TenantId) => Promise<Result<void, HostError>>;
   /**
-   * SC-006 reconcile on supervisor restart: enumerate all registered workers,
+   * multi-tenant spec SC-006 reconcile on supervisor restart: enumerate all registered workers,
    * UDS-probe each, adopt the live ones, prune the dead ones. Deterministic.
    * Returns the adoptable (still-live) workers + the pruned (dead) tenants.
    */
@@ -162,11 +189,11 @@ export const createWorkerRegistry = (
   logger?: LogPort,
 ): WorkerRegistry => {
   const dead = (op: string): HostError => {
-    hooks.onRedisDead?.();
+    invokeHookWithoutThrowing(logger, "onRedisDead", hooks.onRedisDead);
     return redisUnavailable(op);
   };
   const alive = (): void => {
-    hooks.onRedisAlive?.();
+    invokeHookWithoutThrowing(logger, "onRedisAlive", hooks.onRedisAlive);
   };
 
   return {
@@ -175,9 +202,9 @@ export const createWorkerRegistry = (
         const r = await redis.set(workerKey(record.tenant), serialize(record));
         if (!r.ok) return err(dead("worker-registry-put"));
       } catch (e) {
-        logger?.warn("[worker-registry] Redis set threw — treating as disconnected", {
+        warnWithoutThrowing(logger, "[worker-registry] Redis set threw — treating as disconnected", {
           tenant: record.tenant,
-          error: e instanceof Error ? e.message : String(e),
+          error: safeErrorMessage(e),
         });
         return err(dead("worker-registry-put"));
       }
@@ -190,9 +217,9 @@ export const createWorkerRegistry = (
       try {
         r = await redis.get(workerKey(tenant));
       } catch (e) {
-        logger?.warn("[worker-registry] Redis get threw — treating as disconnected", {
+        warnWithoutThrowing(logger, "[worker-registry] Redis get threw — treating as disconnected", {
           tenant,
-          error: e instanceof Error ? e.message : String(e),
+          error: safeErrorMessage(e),
         });
         return err(dead("worker-registry-get"));
       }
@@ -200,9 +227,41 @@ export const createWorkerRegistry = (
       alive();
       if (r.value === null || r.value === "") return ok(null);
       const record = deserialize(tenant, r.value);
-      // A corrupt record is treated as "no live worker" — fail-closed, the
-      // supervisor will lazy-spawn a fresh one.
-      return ok(record ?? null);
+      if (record === undefined) {
+        // Contract parity with `reconcileReadopt`: a corrupt persisted record is
+        // surfaced (warn) and pruned best-effort — never silently indistinguishable
+        // from a tenant that was never registered. The supervisor will lazy-spawn
+        // a fresh worker for the tenant either way; the log line is what lets an
+        // operator grep for WHY (truncated/half-written value, allocator fault).
+        const key = workerKey(tenant);
+        warnWithoutThrowing(logger, "[worker-registry] corrupt worker record — treating as absent, pruning", {
+          tenant,
+          key,
+        });
+        // Best-effort per the deserialize contract: a prune failure must not
+        // fail the read — the record stays corrupt-and-untreated until the next
+        // reconcile (which prunes on its own path). ONE log line per failed
+        // prune, whichever way it failed: the throw path previously logged here
+        // and again below, so a single fault read as two in the operator's log.
+        let pruneFailure: string | undefined;
+        try {
+          const prune = await redis.del(key);
+          if (!prune.ok) pruneFailure = "reported unavailable";
+        } catch (e) {
+          pruneFailure = `threw: ${safeErrorMessage(e)}`;
+        }
+        if (pruneFailure !== undefined) {
+          warnWithoutThrowing(logger, "[worker-registry] corrupt-record prune failed — leaving to reconcile", {
+            tenant,
+            key,
+            reason: pruneFailure,
+          });
+        }
+        return ok(null);
+      }
+      // A non-corrupt record is served as-is — the supervisor's lazy-spawn
+      // path is only for genuinely absent tenants.
+      return ok(record);
     },
 
     remove: async (tenant) => {
@@ -210,9 +269,9 @@ export const createWorkerRegistry = (
         const r = await redis.del(workerKey(tenant));
         if (!r.ok) return err(dead("worker-registry-remove"));
       } catch (e) {
-        logger?.warn("[worker-registry] Redis del threw — treating as disconnected", {
+        warnWithoutThrowing(logger, "[worker-registry] Redis del threw — treating as disconnected", {
           tenant,
-          error: e instanceof Error ? e.message : String(e),
+          error: safeErrorMessage(e),
         });
         return err(dead("worker-registry-remove"));
       }
@@ -234,8 +293,8 @@ export const createWorkerRegistry = (
         try {
           scanR = await redis.scan(pattern, cursor);
         } catch (e) {
-          logger?.warn("[worker-registry] Redis scan threw during reconcile — treating as disconnected", {
-            error: e instanceof Error ? e.message : String(e),
+          warnWithoutThrowing(logger, "[worker-registry] Redis scan threw during reconcile — treating as disconnected", {
+            error: safeErrorMessage(e),
           });
           return err(dead("worker-registry-reconcile"));
         }
@@ -243,7 +302,7 @@ export const createWorkerRegistry = (
         for (const key of scanR.value.keys) {
           const tenant = tenantFromKey(key);
           if (tenant === undefined) {
-            logger?.warn("[worker-registry] pruning unparseable worker key", { key });
+            warnWithoutThrowing(logger, "[worker-registry] pruning unparseable worker key", { key });
             corruptKeys.push(key);
             continue;
           }
@@ -251,9 +310,9 @@ export const createWorkerRegistry = (
           try {
             valR = await redis.get(key);
           } catch (e) {
-            logger?.warn("[worker-registry] Redis get threw during reconcile — treating as disconnected", {
+            warnWithoutThrowing(logger, "[worker-registry] Redis get threw during reconcile — treating as disconnected", {
               key,
-              error: e instanceof Error ? e.message : String(e),
+              error: safeErrorMessage(e),
             });
             return err(dead("worker-registry-reconcile"));
           }
@@ -261,7 +320,7 @@ export const createWorkerRegistry = (
           if (valR.value === null || valR.value === "") continue;
           const record = deserialize(tenant, valR.value);
           if (record === undefined) {
-            logger?.warn("[worker-registry] pruning corrupt worker record", { key });
+            warnWithoutThrowing(logger, "[worker-registry] pruning corrupt worker record", { key });
             corruptKeys.push(key);
             continue;
           }
@@ -280,9 +339,9 @@ export const createWorkerRegistry = (
         } catch (e) {
           // A probe error is treated as "not live" — fail-closed; the entry is
           // pruned and the supervisor lazy-spawns a fresh worker on next request.
-          logger?.warn("[worker-registry] UDS probe threw — treating worker as dead", {
+          warnWithoutThrowing(logger, "[worker-registry] UDS probe threw — treating worker as dead", {
             tenant: record.tenant,
-            error: e instanceof Error ? e.message : String(e),
+            error: safeErrorMessage(e),
           });
           live = false;
         }
@@ -295,7 +354,7 @@ export const createWorkerRegistry = (
 
       // 4. Prune dead + corrupt entries so the registry self-heals (best-effort:
       // a prune failure does NOT abort the reconcile — adopted workers must still
-      // be returned so live routing resumes, FR-020). A genuine Redis OUTAGE
+      // be returned so live routing resumes, multi-tenant spec FR-020). A genuine Redis OUTAGE
       // would already have failed above on scan/get.
       const deleteKeys = [
         ...pruned.map((t) => workerKey(t)),
@@ -305,12 +364,12 @@ export const createWorkerRegistry = (
         try {
           const delR = await redis.del(key);
           if (!delR.ok) {
-            logger?.warn("[worker-registry] prune del failed (continuing)", { key });
+            warnWithoutThrowing(logger, "[worker-registry] prune del failed (continuing)", { key });
           }
         } catch (e) {
-          logger?.warn("[worker-registry] prune del threw (continuing)", {
+          warnWithoutThrowing(logger, "[worker-registry] prune del threw (continuing)", {
             key,
-            error: e instanceof Error ? e.message : String(e),
+            error: safeErrorMessage(e),
           });
         }
       }
@@ -328,7 +387,7 @@ export const createWorkerRegistry = (
  * tenant-registry fake). Exposes the backing store and a `setFail` switch to
  * drive the fail-closed path without a real Redis.
  */
-export interface InMemoryWorkerRedisFake {
+interface InMemoryWorkerRedisFake {
   readonly redis: RedisPort;
   readonly store: Map<string, string>;
   setFail: (fail: boolean) => void;
@@ -362,6 +421,12 @@ export const createInMemoryWorkerRedisFake = (): InMemoryWorkerRedisFake => {
       if (failing) return failErr("setNx");
       if (store.has(key)) return ok(false);
       store.set(key, value);
+      return ok(true);
+    },
+    compareAndDelete: async (key, expected) => {
+      if (failing) return failErr("compareAndDelete");
+      if (store.get(key) !== expected) return ok(false);
+      store.delete(key);
       return ok(true);
     },
     sAdd: async () => (failing ? failErr("sAdd") : ok(1)),

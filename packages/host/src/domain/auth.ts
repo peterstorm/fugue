@@ -14,6 +14,7 @@
  * (middleware, handlers) calls these for decisions.
  */
 
+import { base64url } from "./base64url.js";
 import { match } from "ts-pattern";
 
 // ── Branded Types ──────────────────────────────────────────────────────────
@@ -178,7 +179,7 @@ export const agentClientIdForDag = (
   // (`__proto__`, `constructor`, `toString`, …) to a client id; an unmapped DAG
   // resolves to first-class ABSENCE (fail-closed), keeping the `AgentClientId`
   // brand honest. Matches the sibling guard in `approverTeamIdentity`.
-  const clientId = Object.prototype.hasOwnProperty.call(map, dagId) ? map[dagId] : undefined;
+  const clientId = Object.hasOwn(map, dagId) ? map[dagId] : undefined;
   return clientId === undefined ? undefined : (clientId as AgentClientId);
 };
 
@@ -302,7 +303,7 @@ export interface RealmJwtClaims {
   readonly teams: readonly Team[];
 }
 
-// ── Signature-verified claims & authenticated user (branded — review C5) ────
+// ── Signature-verified claims & authenticated user (branded) ──────────────
 
 declare const __sigVerifiedBrand: unique symbol;
 declare const __authUserBrand: unique symbol;
@@ -399,7 +400,7 @@ export const TOKEN_PREFIX = "fug_";
 export const TOKEN_MIN_LENGTH = TOKEN_PREFIX.length + 43;
 
 /** Required entropy for a team token — 32 bytes → 43 base64url chars. */
-export const TOKEN_RANDOM_BYTES = 32;
+const TOKEN_RANDOM_BYTES = 32;
 
 /**
  * Construct a TeamToken from a prefix + random bytes (base64url encoded).
@@ -408,7 +409,7 @@ export const TOKEN_RANDOM_BYTES = 32;
  * Enforces the 32-byte input: the `TeamToken` brand encodes "carries full
  * entropy", so producing one from short input would forge the brand at its
  * origin. A wrong length throws (a wiring bug, not a runtime input) rather than
- * silently minting a weak token (review suggestion).
+ * silently minting a weak token.
  *
  * @param randomBytes - exactly 32 bytes of cryptographic randomness
  */
@@ -450,12 +451,6 @@ export const hashToken = async (token: string): Promise<TokenHash> => {
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────────
-
-/** Encode bytes as base64url (no padding) */
-const base64url = (bytes: Uint8Array): string => {
-  const base64 = btoa(String.fromCharCode(...bytes));
-  return base64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-};
 
 /** Encode bytes as lowercase hex string */
 const hexEncode = (bytes: Uint8Array): string =>

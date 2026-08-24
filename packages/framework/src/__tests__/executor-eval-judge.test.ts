@@ -1,5 +1,5 @@
-import { NoopObserver } from "../observer/observer.js";
-import type { RunId, NodeId, DagId } from "../types/ids.js";
+import { testNodeContext } from "./_context-factories.js";
+import type { NodeId } from "../types/ids.js";
 import { describe, test, expect } from "bun:test";
 import { z } from "zod";
 import { runDag } from "../../src/executor/run-dag.js";
@@ -11,25 +11,13 @@ import type { DagDef } from "../../src/types/dag.js";
 import type { LlmClient } from "../../src/types/llm.js";
 import { ok, err } from "../../src/types/result.js";
 import { stubSendWithTools } from "./_llm-mocks.js";
-import { defineDag, defineDagFromArray } from "../executor/define-dag.js";
-import { N, R, D, nodeMap, nodeSet } from "./_id-helpers.js";
+import { defineDagFromArray } from "../executor/define-dag.js";
+import { N } from "./_id-helpers.js";
 import { DAG_INPUT } from "../types/ids.js";
 
 // --- Helpers ---
 
-const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
-  runId: "test-run" as RunId,
-  dagId: "test-dag" as DagId,
-  observer: new NoopObserver(),
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null,
-  cache: null,
-  prompts: null,
-  llm: null, http: null,
-  clock: null,
-  logger: { warn: () => {}, error: () => {} },
-  ...overrides,
-});
+const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => testNodeContext(overrides);
 
 const makeMockJudgeLlm = (response: EvalJudgeResponse): LlmClient => ({
   sendWithTools: stubSendWithTools,
@@ -100,22 +88,6 @@ describe("executor + eval-judge integration", () => {
   });
 
   test("multiple judges run in parallel", async () => {
-    const callOrder: string[] = [];
-
-    const llm1: LlmClient = {
-      sendWithTools: stubSendWithTools,
-      sendStructured: async () => {
-        callOrder.push("judge-1");
-        return ok({ output: { score: 0.9, criteria_scores: [{ name: "a", score: 0.9 }], failed_criteria: [], reason: "ok" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
-      },
-    };
-    const llm2: LlmClient = {
-      sendWithTools: stubSendWithTools,
-      sendStructured: async () => {
-        callOrder.push("judge-2");
-        return ok({ output: { score: 0.5, criteria_scores: [{ name: "b", score: 0.5 }], failed_criteria: ["b"], reason: "bad" }, tokensIn: 0, tokensOut: 0, rawText: "" }) as any;
-      },
-    };
 
     // Both judges share the same judgeLlm — we just need to check both run
     // Use a single LLM that tracks calls

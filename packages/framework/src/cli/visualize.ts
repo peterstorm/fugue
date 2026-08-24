@@ -16,7 +16,7 @@ import { LINE_TERMINATORS } from "./identifiers.js";
 import { DAG_INPUT } from "../types/ids.js";
 import { assertNever, type LintError } from "./types.js";
 
-export type VisualizeResult =
+type VisualizeResult =
   | {
       readonly ok: true;
       readonly path: string;
@@ -37,7 +37,7 @@ export type VisualizeResult =
 
 // Mermaid node ids must avoid `:`/`$` and other specials — map ids to safe
 // tokens. Two properties the encoding must hold:
-//   1. INJECTIVE — node ids may contain `_`, `:` and `-` (ID_REGEX), and
+//   1. INJECTIVE — node ids may contain `_`, `:` and `-` (ID_PATTERN), and
 //      distinct ids must map to distinct Mermaid tokens (`a:b` and `a_b` must
 //      never merge into one node). The escape scheme below (`_` doubles as
 //      the lead-in, `:`/`-` get fixed 2-char escapes, anything else a
@@ -46,8 +46,18 @@ export type VisualizeResult =
 //      `dag_input` / `dag_output` virtual tokens (a node literally named
 //      `dag_input` must not merge with the request node).
 // Rendered labels still show the original id; only the token is encoded.
-const escapeIdChar = (c: string): string =>
-  c === "_" ? "__" : c === ":" ? "_c" : c === "-" ? "_d" : `_x${c.charCodeAt(0).toString(16)}_`;
+const escapeIdChar = (c: string): string => {
+  switch (c) {
+    case "_":
+      return "__";
+    case ":":
+      return "_c";
+    case "-":
+      return "_d";
+    default:
+      return `_x${c.charCodeAt(0).toString(16)}_`;
+  }
+};
 const safeId = (id: string): string =>
   id === DAG_INPUT ? "dag_input" : `n_${id.replace(/[^A-Za-z0-9]/g, escapeIdChar)}`;
 

@@ -5,8 +5,8 @@
  * The standalone server.ts remains for backward compatibility during migration;
  * this module is the NEW contract consumed by the Fugue host.
  *
- * @satisfies SC-004 — Existing integration tests pass unchanged
- * @satisfies FR-011 — Custom route override (/summarize) for backward compatibility
+ * @satisfies host spec SC-004 — Existing integration tests pass unchanged
+ * @satisfies host spec FR-011 — Custom route override (/summarize) for backward compatibility
  */
 
 import { z } from "zod";
@@ -16,36 +16,33 @@ import { join } from "node:path";
 import { JsonFixtureSource } from "./sources/json-fixture-source.js";
 
 // ---------------------------------------------------------------------------
-// Input schema — extracted from server.ts SummarizeRequestSchema
+// Input boundary — preserve server.ts's snake-case /summarize wire contract,
+// then translate once into the DAG's camel-case domain input.
 // ---------------------------------------------------------------------------
 
 export const SummarizeInputSchema = z.object({
-  customerId: z.string().min(1),
+  customer_id: z.string().min(1),
   resume_run_id: z.string().optional(),
-});
+}).transform(({ customer_id, resume_run_id }) => ({
+  customerId: customer_id,
+  ...(resume_run_id !== undefined ? { resume_run_id } : {}),
+}));
 
 // ---------------------------------------------------------------------------
 // DAG factory — creates a summary DAG with a default fixture source.
 //
-// NOTE: The existing createSummaryDag requires a ConversationSource and
-// customerId at construction time (DAG nodes close over them). For the host
-// registration, we create the DAG with a placeholder source; the actual
-// source resolution happens per-request inside the node's execute() function
-// via NodeContext (the node already handles this pattern internally).
-//
-// In the host model, per-request parameters (customer_id) arrive via the
-// validated input payload and are threaded through node execution context.
-// The DAG structure itself is static.
+// The source is construction-scoped infrastructure. Customer identity is
+// request-scoped domain data: explicit DAG-input edges deliver the parsed
+// `customerId` to both fetching and response assembly, so every response
+// variant is correlated to the request that produced it.
 // ---------------------------------------------------------------------------
 
 const createRegisteredDag = () => {
-  // The fixture source is used as the default for standalone mode.
-  // When hosted, the source is injected per-request via NodeContext.
-  // Resolve fixtures relative to this module, not process CWD.
-  // Ensures the DAG works whether loaded by the standalone server or the Fugue host.
+  // Resolve fixtures relative to this module, not process CWD. This keeps the
+  // registration loadable by both the standalone server and Fugue host.
   const fixturesDir = join(import.meta.dir, "..", "fixtures", "customers");
   const defaultSource = new JsonFixtureSource(fixturesDir);
-  return createSummaryDag(defaultSource, "placeholder");
+  return createSummaryDag(defaultSource);
 };
 
 // ---------------------------------------------------------------------------

@@ -7,7 +7,7 @@
 //   5. SC-008 property test: 100 simulated lifecycles — total invocations
 //      equals the number of jobs that reached attempts >= maxAttempts
 
-import { describe, it, expect, beforeEach } from "bun:test";
+import { describe, it, expect } from "bun:test";
 import {
   attachDeadLetterHandler,
   type WorkerHandle,

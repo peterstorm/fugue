@@ -13,8 +13,9 @@ import type { FrameworkError } from "../types/errors.js";
 import { isConditionalEdge } from "../types/dag.js";
 import { decideRoute } from "./routing.js";
 import { expandActive, seedInitialActiveSet } from "./topology.js";
+import { waveIndexByNodeId } from "./wave-resolution.js";
 
-export type RerouteResult =
+type RerouteResult =
   | { readonly kind: "ok"; readonly activeSet: ReadonlySet<NodeId> }
   | { readonly kind: "invalid-target"; readonly targetNodeId: NodeId }
   | {
@@ -23,19 +24,18 @@ export type RerouteResult =
       readonly message: string;
     };
 
-export const computeRerouteActiveSet = (
+const computeRerouteActiveSet = (
   targetNodeId: NodeId,
   machineCtx: DagMachineContext,
 ): RerouteResult => {
+  // `findIndex` returns -1 or a valid index by contract, so "not found" is the
+  // ONLY reachable rejection here — an upper-bound disjunct could never fire.
   const targetWave = machineCtx.waves.findIndex((w) => w.includes(targetNodeId));
-  if (targetWave === -1 || targetWave > machineCtx.waves.length - 1) {
+  if (targetWave === -1) {
     return { kind: "invalid-target", targetNodeId };
   }
 
-  const waveByNodeId = new Map<NodeId, number>();
-  for (let w = 0; w < machineCtx.waves.length; w++) {
-    for (const id of machineCtx.waves[w]) waveByNodeId.set(id, w);
-  }
+  const waveByNodeId = waveIndexByNodeId(machineCtx);
   const beforeTargetWave = (nodeId: NodeId): boolean =>
     (waveByNodeId.get(nodeId) ?? -1) < targetWave;
 

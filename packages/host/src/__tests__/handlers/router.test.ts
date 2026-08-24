@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { gitSha } from "@fuguejs/framework";
-import type { NodeContext, DagId } from "@fuguejs/framework";
+import type { NodeContext, DagId, CapabilityHandle } from "@fuguejs/framework";
 import { createRouter } from "../../http/router.js";
 import type { RouterDeps } from "../../http/router.js";
 import type { RunDagDeps } from "../../http/handlers/run-dag.js";
@@ -46,6 +46,7 @@ const makeRouterDeps = (tokenStore: TokenStorePort): RouterDeps => {
     adminToken: ADMIN_TOKEN,
     tokenStore,
     adminHandlerDeps: { tokenStore, clock: Date.now, generateRandomBytes: () => new Uint8Array(32) },
+    capabilityHealthDeps: { getHandles: () => [] },
     logger: noopLogger,
   };
 };
@@ -228,5 +229,76 @@ describe("createRouter — custom route overrides", () => {
     // During boot, custom routes should signal "retry later" (503), not "no such route" (404)
     expect(res.status).toBe(503);
     expect((await res.json()).error).toBe("host-unavailable");
+  });
+});
+
+
+// ── Admin capability-health diagnostics ─────────────────────────────────────
+//
+// The report names every wired capability and echoes each failure reason, so the
+// route must be admin-gated like the rest of /admin/*. It deliberately does NOT
+// live on /health or /readiness: `healthCheck()` does real I/O per adapter, and
+// a slow dependency on the liveness path would get the pod restarted.
+describe("createRouter — GET /admin/capabilities/health", () => {
+  const handleFor = (
+    name: string,
+    healthCheck?: () => Promise<{ ok: true; value: void } | { ok: false; error: string }>,
+  ) =>
+    ({ name, client: {}, ...(healthCheck ? { healthCheck } : {}) }) as unknown as CapabilityHandle;
+
+  it("requires an admin token", async () => {
+    const deps: RouterDeps = makeRouterDeps(createInMemoryTokenStore());
+    const app = createRouter(deps);
+    const res = await app.request("/admin/capabilities/health");
+    expect(res.status).not.toBe(200);
+  });
+
+  it("aggregates each capability's health check under an admin token", async () => {
+    const deps: RouterDeps = {
+      ...makeRouterDeps(createInMemoryTokenStore()),
+      capabilityHealthDeps: {
+        getHandles: () => [
+          handleFor("pg", async () => ({ ok: true, value: undefined })),
+          handleFor("graph", async () => ({ ok: false, error: "token mint failed" })),
+          handleFor("fs-no-check"),
+        ],
+      },
+    };
+    const app = createRouter(deps);
+    const res = await app.request("/admin/capabilities/health", {
+      headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      overall: string;
+      capabilities: { status: string; name: string; reason?: string }[];
+    };
+    // One unhealthy dependency degrades the overall verdict without failing the
+    // request — the endpoint answering IS the successful outcome.
+    expect(body.overall).toBe("degraded");
+    expect(body.capabilities).toEqual([
+      { status: "healthy", name: "pg" },
+      { status: "unhealthy", name: "graph", reason: "token mint failed" },
+      { status: "no-check", name: "fs-no-check" },
+    ]);
+  });
+
+  it("reads handles at request time, not at wiring time", async () => {
+    // The host assigns `sortedHandles` AFTER the router is built, so capturing by
+    // value would freeze the diagnostic at "no capabilities" forever.
+    let handles: readonly CapabilityHandle[] = [];
+    const deps: RouterDeps = {
+      ...makeRouterDeps(createInMemoryTokenStore()),
+      capabilityHealthDeps: { getHandles: () => handles },
+    };
+    const app = createRouter(deps);
+    handles = [handleFor("late-bound", async () => ({ ok: true, value: undefined }))];
+
+    const res = await app.request("/admin/capabilities/health", {
+      headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
+    });
+    const body = (await res.json()) as { capabilities: { name: string }[] };
+    expect(body.capabilities.map((c) => c.name)).toEqual(["late-bound"]);
   });
 });

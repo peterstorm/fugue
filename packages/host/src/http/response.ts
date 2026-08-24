@@ -6,13 +6,15 @@
  */
 
 import type { Context } from "hono";
-import type { DescribedDag, DescribedEdge, DescribedNode } from "@fuguejs/framework";
+import type { DescribedDag } from "@fuguejs/framework";
+import type { HostState } from "../domain/host-state.js";
+import { canServeRequests } from "../domain/host-state.js";
 
 // ---------------------------------------------------------------------------
 // Response Types
 // ---------------------------------------------------------------------------
 
-export interface ErrorResponse {
+interface ErrorResponse {
   readonly ok: false;
   readonly error: string;
   readonly message: string;
@@ -21,7 +23,7 @@ export interface ErrorResponse {
   readonly runId?: string;
 }
 
-export interface SuccessResponse<T = unknown> {
+interface SuccessResponse<T = unknown> {
   readonly ok: true;
   readonly data: T;
   readonly runId?: string;
@@ -39,7 +41,7 @@ export interface DagListItem {
   readonly owner?: string;
 }
 
-export interface DagListResponse {
+interface DagListResponse {
   readonly dags: readonly DagListItem[];
   readonly count: number;
 }
@@ -53,8 +55,6 @@ export interface DagListResponse {
 // sha, loadedAt) is appended on top of that shape.
 // ---------------------------------------------------------------------------
 
-export type DagManifestNode = DescribedNode;
-export type DagManifestEdge = DescribedEdge;
 
 export interface DagManifestResponse extends DescribedDag {
   readonly team: string;
@@ -63,12 +63,12 @@ export interface DagManifestResponse extends DescribedDag {
   readonly loadedAt: number;
 }
 
-export interface HealthResponse {
+interface HealthResponse {
   readonly status: "ok" | "degraded" | "unavailable";
   readonly timestamp: string;
 }
 
-export interface ReadinessResponse {
+interface ReadinessResponse {
   readonly ready: boolean;
   readonly dagCount: number;
   readonly phase: string;
@@ -108,6 +108,14 @@ export const errorResponse = (
   return jsonWithStatus(c, body, status);
 };
 
+/** Return the canonical 503 response when the host lifecycle cannot serve. */
+export const hostUnavailableResponse = (c: Context, state: HostState): Response | null =>
+  canServeRequests(state)
+    ? null
+    : errorResponse(c, 503, "host-unavailable", `Host is ${state.phase} — not accepting requests`, {
+        details: { phase: state.phase },
+      });
+
 export const successResponse = <T>(
   c: Context,
   data: T,
@@ -130,9 +138,8 @@ export const dagListResponse = (c: Context, dags: readonly DagListItem[]): Respo
 export const healthResponse = (
   c: Context,
   status: "ok" | "degraded" | "unavailable",
-  timestamp?: string,
 ): Response => {
-  const body: HealthResponse = { status, timestamp: timestamp ?? new Date().toISOString() };
+  const body: HealthResponse = { status, timestamp: new Date().toISOString() };
   const httpStatus = status === "unavailable" ? 503 : 200;
   return jsonWithStatus(c, body, httpStatus);
 };

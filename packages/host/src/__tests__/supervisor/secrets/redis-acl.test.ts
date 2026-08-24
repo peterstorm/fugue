@@ -31,7 +31,10 @@ import {
   createFakeAclAdmin,
   ACL_PASSWORD_RANDOM_BYTES,
   type AclProvisionerDeps,
+  type RedisAclAdminPort,
 } from "../../../supervisor/secrets/redis-acl-provisioner.js";
+import { redisUnavailable } from "../../../domain/host-error.js";
+import { err as errResult } from "@fuguejs/framework";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -451,5 +454,58 @@ describe("revoke — removes the ACL user over the admin connection", () => {
     await revoke(admin, mkTenant("acme"));
     expect(admin.delUserCalls[0]!.username).toBe(aclUsername(mkTenant("acme")));
     expect(admin.delUserCalls[0]!.username).not.toBe(aclUsername(mkTenant("globex")));
+  });
+});
+
+// ── Provisioner: the admin port's diagnostic survives ────────────────────────
+//
+// silent-failure-hunter-1. `apply`/`revoke` used to discard the admin port's
+// `HostError` and manufacture `redisUnavailable("redis-acl-apply")`, collapsing
+// a transient outage, an admin-connection permission failure, and a CODE bug in
+// `buildAclSpec` (a malformed rule token Redis rejects on every call) into one
+// contentless operator log line. The production adapter builds its diagnostic
+// through `redisOperationFailure`, which has already redacted the credential —
+// so there is nothing to protect by dropping it, and everything to lose.
+
+/** An admin port that fails with one exact, already-redacted diagnostic. */
+const failingAdmin = (operation: string): RedisAclAdminPort => ({
+  setUser: async () => errResult(redisUnavailable(operation)),
+  delUser: async () => errResult(redisUnavailable(operation)),
+});
+
+describe("provisioner — preserves the admin port's own diagnostic", () => {
+  it("apply propagates the setUser failure verbatim instead of a generic literal", async () => {
+    const detail = "ACL SETUSER fugue-tenant-acme (ERR Error in ACL SETUSER modifier '+@all': Syntax error)";
+    const result = await apply(failingAdmin(detail), mkTenant("acme"), fixedRandomBytes());
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.error.kind).toBe("redis-unavailable");
+    // The exact operation string the adapter produced — NOT "redis-acl-apply".
+    expect(result.error).toEqual(redisUnavailable(detail));
+  });
+
+  it("revoke propagates the delUser failure verbatim instead of a generic literal", async () => {
+    const detail = "ACL DELUSER fugue-tenant-acme (NOPERM this user has no permissions to run the 'acl' command)";
+    const result = await revoke(failingAdmin(detail), mkTenant("acme"));
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.error).toEqual(redisUnavailable(detail));
+  });
+
+  it("two different root causes stay distinguishable in the returned error", async () => {
+    const outage = await apply(failingAdmin("ACL SETUSER (connection refused)"), mkTenant("acme"), fixedRandomBytes());
+    const codeBug = await apply(failingAdmin("ACL SETUSER (ERR syntax error)"), mkTenant("acme"), fixedRandomBytes());
+    if (outage.ok || codeBug.ok) throw new Error("unreachable");
+    expect(outage.error).not.toEqual(codeBug.error);
+  });
+
+  it("still returns NO credential when the admin port fails", async () => {
+    const result = await apply(failingAdmin("boom"), mkTenant("acme"), fixedRandomBytes());
+    expect(result.ok).toBe(false);
+    // A successful apply is the only path that yields a password.
+    const good = await apply(createFakeAclAdmin(), mkTenant("acme"), fixedRandomBytes());
+    expect(good.ok).toBe(true);
   });
 });

@@ -17,42 +17,157 @@ import type {
   JobLike,
   DagPhase,
   DagMachineContextPersisted,
+  NonEmptyString,
 } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
-import type { RunRecord, RunStatus, PersistedIdentity } from "./types.js";
+import type { QueuedRunRecord, RunMetadata, RunRecord, RunStatusUpdate, PersistedIdentity } from "./types.js";
+
+const RUN_LEASE: unique symbol = Symbol("RunLease");
+const RUN_EXECUTION_FENCE: unique symbol = Symbol("RunExecutionFence");
+
+/**
+ * Runtime-authenticated capability proving which queue worker owns a run's live
+ * Redis lease. The random owner token is deliberately absent from the value:
+ * only the adapter-internal WeakMap can recover it, so an aborted holder cannot
+ * copy the token into a fresh signal and reissue its authority. The WeakMap is
+ * also the runtime proof that an assertion-forged shape was never issued.
+ */
+export type RunLease = Readonly<{
+  runId: RunId;
+  signal: AbortSignal;
+  [RUN_LEASE]: true;
+}>;
+
+export type RunLeaseIssuer = Readonly<{
+  issue: (runId: RunId, ownerToken: string, signal: AbortSignal) => RunLease;
+}>;
+
+export type RunLeaseVerifier = Readonly<{
+  ownerToken: (lease: RunLease) => string | null;
+}>;
+
+/** Issuance and verification capabilities backed by one private proof registry. */
+export type RunLeaseAuthority = Readonly<{
+  issuer: RunLeaseIssuer;
+  verifier: RunLeaseVerifier;
+}>;
+
+/** Opaque, run-bound capability authorizing checkpoint commits for one slice. */
+export type RunExecutionFence = Readonly<{
+  runId: RunId;
+  [RUN_EXECUTION_FENCE]: true;
+}>;
+
+export type RunExecutionFenceAuthority = Readonly<{
+  issue: (runId: RunId, token: string) => RunExecutionFence;
+  token: (fence: RunExecutionFence) => string | null;
+}>;
+
+export const createRunExecutionFenceAuthority = (): RunExecutionFenceAuthority => {
+  const tokens = new WeakMap<object, string>();
+  return Object.freeze({
+    issue: (runId, token) => {
+      if (token.length === 0) throw new RangeError("RunExecutionFence token must be non-empty");
+      const fence: RunExecutionFence = Object.freeze({
+        runId,
+        [RUN_EXECUTION_FENCE]: true as const,
+      });
+      tokens.set(fence, token);
+      return fence;
+    },
+    token: (fence) => tokens.get(fence) ?? null,
+  });
+};
+
+/**
+ * Create one lease authority for a host composition. Queue code receives only
+ * `issuer`; stores receive only `verifier`. A different authority cannot project
+ * or reissue an existing lease because its WeakMap has never seen that value.
+ */
+export const createRunLeaseAuthority = (): RunLeaseAuthority => {
+  const owners = new WeakMap<object, string>();
+  const issue: RunLeaseIssuer["issue"] = (runId, ownerToken, signal) => {
+    if (ownerToken.length === 0) {
+      throw new RangeError("RunLease owner token must be non-empty");
+    }
+    const lease: RunLease = Object.freeze({
+      runId,
+      signal,
+      [RUN_LEASE]: true as const,
+    });
+    owners.set(lease, ownerToken);
+    return lease;
+  };
+  return Object.freeze({
+    issuer: Object.freeze({ issue }),
+    verifier: Object.freeze({
+      ownerToken: (lease: RunLease) =>
+        lease.signal.aborted ? null : owners.get(lease) ?? null,
+    }),
+  });
+};
 
 /**
  * Durable persistence for runs. `checkpoint` is updated on every state-machine
  * transition (via the run-store-backed `JobLike`), so a worker crash resumes
  * from the last persisted state.
  */
+export type RunCreationOutcome =
+  | { readonly kind: "created" }
+  | { readonly kind: "publication-uncertain" };
+
 export interface RunStorePort {
   /**
-   * Create a fresh run record. Errs if the run id already exists. Also joins the
-   * run to the per-tenant active-run index (ADR-0074) — a fresh run is non-terminal.
+   * Create a fresh run record and join the active index. Publication uncertainty
+   * is an accepted outcome, never an Err: Redis may have committed metadata even
+   * when its acknowledgement was lost, and reconciliation must remain allowed to
+   * discover that run.
    */
-  create(record: RunRecord): Promise<Result<void, HostError>>;
-  /** Fetch a run, or `ok(null)` if unknown. */
+  create(record: QueuedRunRecord): Promise<Result<RunCreationOutcome, HostError>>;
+  /** Fetch a complete execution record, requiring checkpoint bytes. */
   get(runId: RunId): Promise<Result<RunRecord | null, HostError>>;
-  /** Persist the serialized `{state, context}` checkpoint (per-transition). */
-  saveCheckpoint(runId: RunId, checkpoint: string): Promise<Result<void, HostError>>;
+  /** Fetch lifecycle/auth metadata without coupling status reads to checkpoint availability. */
+  getMetadata(runId: RunId): Promise<Result<RunMetadata | null, HostError>>;
+  /** Begin one deadline-bounded execution generation under the live run lease. */
+  beginExecution(
+    lease: RunLease,
+    timeoutMs: number,
+  ): Promise<Result<RunExecutionFence, HostError>>;
+  /** Persist only while both worker ownership and this execution generation remain live. */
+  saveCheckpoint(
+    lease: RunLease,
+    fence: RunExecutionFence,
+    checkpoint: string,
+  ): Promise<Result<void, HostError>>;
   /**
-   * Update the run's lifecycle status. A TERMINAL status (`completed`/`failed`)
+   * Update the run's lifecycle status only while `lease` is still owned. A
+   * TERMINAL status (`completed`/`failed`)
    * also removes the run from the per-tenant active-run index (ADR-0074); a
    * non-terminal status leaves the index untouched.
    */
-  setStatus(runId: RunId, status: RunStatus): Promise<Result<void, HostError>>;
+  setStatus(lease: RunLease, status: RunStatusUpdate): Promise<Result<void, HostError>>;
   /**
    * Count this tenant's NON-terminal (queued / running / suspended) runs — the
    * `maxQueuedRuns` admission axis (ADR-0074). Read from the per-tenant active-run
    * index SET (`fugue:<tenant>:hitl:active`) via `sMembers`, NOT `scan` (which the
    * per-tenant ACL denies, ADR-0067). SELF-HEALING: a member whose run record no
-   * longer exists (TTL-expired / hard-deleted) is pruned and excluded, so the
-   * count never inflates from leaked indices. Bounded O(N) in the set size (which
+   * longer exists (TTL-expired / hard-deleted) is pruned when possible.
+   * Successfully pruned missing/terminal members are excluded; checkpoint-only
+   * publication remnants, corrupt metadata, and members whose pruning fails are
+   * counted conservatively to avoid under-admission. Bounded O(N) in the set size (which
    * `maxQueuedRuns` itself bounds).
    */
   countActiveRuns(): Promise<Result<number, HostError>>;
+  /**
+   * Enumerate every recoverable NON-terminal run id for server-owned wakeup
+   * reconciliation. This includes published metadata, valid creation intents,
+   * and corrupt-metadata members so reconciliation can inspect and report them;
+   * raw checkpoint-only remnants remain omitted. The active index is the only
+   * tenant-safe enumeration source (Redis SCAN is denied); stale/terminal
+   * members are self-healed.
+   */
+  listActiveRunIds(): Promise<Result<readonly RunId[], HostError>>;
 }
 
 /**
@@ -79,26 +194,34 @@ export interface HumanReviewNotifierPort {
 
 /**
  * Records and resolves the human's decision for a parked review, keyed by
- * `(runId, nodeId)`. The `onHumanReview` hook reads it on each (re)dispatch:
- * a decision present resolves the gate; its absence parks the run. `markPending`
- * returns `true` only on the FIRST park for a gate, so a resume-then-re-park
- * loop never re-sends the notification.
+ * `(runId, nodeId)`. The pending marker carries durable notification-delivery
+ * state, so a failed first delivery remains retriable while a delivered review
+ * is deduplicated across ordinary re-parks.
  */
+export type PendingReview =
+  | { readonly kind: "notification-required"; readonly marker: string }
+  | { readonly kind: "notified" };
+
+export type DecisionResolution =
+  | { readonly kind: "accepted" }
+  | { readonly kind: "already-resolved" }
+  | { readonly kind: "not-pending" };
+
 export interface DecisionStorePort {
-  /** Mark a gate as pending review. Returns `true` if newly created (dedups notifications). */
-  markPending(runId: RunId, nodeId: NodeId): Promise<Result<boolean, HostError>>;
+  /** Create/read the durable pending + notification-delivery state for a gate. */
+  preparePending(runId: RunId, nodeId: NodeId): Promise<Result<PendingReview, HostError>>;
+  /** Atomically mark the matching pending marker notified after delivery succeeds. */
+  markNotified(runId: RunId, nodeId: NodeId, marker: string): Promise<Result<boolean, HostError>>;
   /**
-   * Is `(runId, nodeId)` currently the gate the run is parked at? The marker is
-   * written by the hook BEFORE it notifies and cleared when the gate resolves,
-   * so it is the authoritative "parked here right now" signal — present for the
-   * whole window a reviewer could respond, including the brief slice after the
-   * notification is delivered but before the worker has folded the `suspended`
-   * status back into the run store. Gating an approval on this (not the lagging
-   * run status) is what stops a fast approval being dropped and stranding the run.
+   * Resolve a pending gate with first-writer-wins semantics. `accepted` means
+   * this action won the atomic create; `already-resolved` preserves the winner;
+   * `not-pending` means this gate cannot currently accept a decision.
    */
-  isPending(runId: RunId, nodeId: NodeId): Promise<Result<boolean, HostError>>;
-  /** Record the human's decision for a parked gate. */
-  putDecision(runId: RunId, nodeId: NodeId, action: HumanAction): Promise<Result<void, HostError>>;
+  resolvePending(
+    runId: RunId,
+    nodeId: NodeId,
+    action: HumanAction,
+  ): Promise<Result<DecisionResolution, HostError>>;
   /** Fetch a recorded decision, or `ok(null)` if none yet. */
   getDecision(runId: RunId, nodeId: NodeId): Promise<Result<HumanAction | null, HostError>>;
   /** Remove the pending marker and any decision for a gate (after it resolves). */
@@ -108,13 +231,24 @@ export interface DecisionStorePort {
 /**
  * The outcome of executing (or resuming) a run: a settled result the service
  * folds into a `RunStatus`. `failed` carries the framework error so a status
- * poll surfaces the real cause; a transient infra failure to even start
- * executing is the `err` channel of the enclosing `Result`.
+ * poll surfaces the real cause. Host failures before an authoritative run
+ * outcome exists use the enclosing `Result`'s `err` channel for queue retry;
+ * post-transition checkpoint failures become terminal `failed` outcomes because
+ * replaying the prior checkpoint could duplicate already-completed side effects.
  */
 export type RunExecOutcome =
   | { readonly kind: "completed"; readonly output: unknown }
-  | { readonly kind: "suspended"; readonly nodeId: NodeId; readonly prompt: string }
+  | { readonly kind: "suspended"; readonly nodeId: NodeId; readonly prompt: NonEmptyString }
   | { readonly kind: "failed"; readonly error: FrameworkError };
+
+/** Durable job factory paired with the typed failure channel for its writes. */
+export interface RunExecutionJob {
+  /** Arm a fresh durable deadline fence before exposing the slice's JobLike. */
+  readonly startSlice: (
+    timeoutMs: number,
+  ) => Promise<Result<JobLike<DagPhase, unknown, DagMachineContextPersisted>, HostError>>;
+  readonly checkpointFailure: () => HostError | null;
+}
 
 /** Inputs the executor needs to run/resume one run. */
 export interface RunExecutionRequest {
@@ -122,8 +256,10 @@ export interface RunExecutionRequest {
   readonly dagId: DagId;
   readonly input: unknown;
   readonly identity: PersistedIdentity;
-  /** Run-store-backed durable job handle (carries + persists the checkpoint). */
-  readonly jobLike: JobLike<DagPhase, unknown, DagMachineContextPersisted>;
+  /** Aborted immediately when queue lease ownership can no longer be trusted. */
+  readonly signal: AbortSignal;
+  /** Run-store-backed durable job handle and its typed write-failure channel. */
+  readonly job: RunExecutionJob;
   /** The host's review hook (decision-store + notifier closure). Read-only: it
    * resolves a gate by READING the recorded decision; it does NOT consume it. */
   readonly onHumanReview: (req: {
@@ -157,8 +293,11 @@ export interface RunExecutorPort {
   seedCheckpoint(dagId: DagId, input: unknown): Promise<Result<string, HostError>>;
   /**
    * Run or resume a DAG through the framework's resumable kernel. Never throws:
-   * a framework run-failure is mapped onto the `failed` outcome; only a host
-   * infra failure (unknown DAG, context build) uses the `err` channel.
+   * permanent run failures — including context-build faults after the slice
+   * begins and a DAG removed after durable acceptance — map onto the `failed`
+   * outcome. The `err` channel carries pre-outcome host failures that require
+   * queue retry; post-transition checkpoint I/O failures are terminalized as a
+   * `failed` outcome to prevent unsafe replay.
    */
   run(req: RunExecutionRequest): Promise<Result<RunExecOutcome, HostError>>;
 }

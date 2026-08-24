@@ -24,7 +24,7 @@ import type { LogPort } from "../ports.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
-export interface SyncCallbackDeps {
+interface SyncCallbackDeps {
   readonly getState: () => HostState;
   readonly setState: (s: HostState) => void;
   readonly getCircuitBreakers: () => Map<DagId, CircuitState>;
@@ -34,7 +34,7 @@ export interface SyncCallbackDeps {
   readonly clock: () => number;
 }
 
-export interface SyncCallbacks {
+interface SyncCallbacks {
   readonly onStarted: () => void;
   readonly onComplete: (registry: Registry, sha: GitSha) => void;
   readonly onNoChange: (sha: GitSha) => void;
@@ -143,9 +143,16 @@ export const createSyncCallbacks = (deps: SyncCallbackDeps): SyncCallbacks => {
 
     onNoChange: (unchangedSha) => {
       if (isShuttingDown()) return;
-      const currentRegistry = getRegistry(getState());
-      if (!currentRegistry) return; // shouldn't happen from syncing state
-      const result = syncCompleted(getState(), currentRegistry, unchangedSha, clock());
+      const state = getState();
+      const currentRegistry = getRegistry(state);
+      if (!currentRegistry) {
+        logger.error("syncCompleted (no-change) invariant violated — current state has no registry", {
+          currentPhase: state.phase,
+          sha: unchangedSha,
+        });
+        return;
+      }
+      const result = syncCompleted(state, currentRegistry, unchangedSha, clock());
       if (result.ok) {
         setState(result.value);
       } else {

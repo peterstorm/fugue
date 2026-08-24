@@ -396,7 +396,7 @@ Set confidence by how much signal the input carries — never use a number.
 // The scaffold builder
 // ---------------------------------------------------------------------------
 
-export interface AuthoredScaffold {
+interface AuthoredScaffold {
   readonly dagTs: string;
   readonly prompts: readonly PromptFile[];
 }
@@ -701,9 +701,8 @@ const llmInputFields = (dag: AuthoredDag, p: NodePlan): readonly string[] => {
       if (p.node.id === s.assemble) return [s.join, "$input"];
       return []; // a source node consumes nothing
     default:
-      // `noImplicitReturns` is off, so without this a newly-added Shape would
-      // silently fall through to `undefined` and crash downstream on `.map`.
-      // Match every sibling walker in this file: fail exhaustively at compile time.
+      // Keep this switch exhaustive: a newly-added Shape must fail compilation
+      // here until its input-field semantics are explicitly implemented.
       return assertNever(s);
   }
 };

@@ -12,10 +12,31 @@ import type { Result } from "../types/result.js";
 import type { FrameworkError, Retriability } from "../types/errors.js";
 import type { NodeId } from "../types/ids.js";
 import { err } from "../types/result.js";
+import { safeErrorMessage, safeErrorStack } from "../types/safe-error.js";
+
+/** Total property probe for provider-controlled thrown values. */
+const probeProperty = (value: unknown, key: PropertyKey): unknown => {
+  if (!((typeof value === "object" && value !== null) || typeof value === "function")) {
+    return undefined;
+  }
+  try {
+    return Reflect.get(value, key);
+  } catch {
+    return undefined;
+  }
+};
+
+const isErrorValue = (value: unknown): value is Error => {
+  try {
+    return value instanceof Error;
+  } catch {
+    return false;
+  }
+};
 
 /** True when `e` is an AbortError (caller cancellation or timeout). */
 export const isAbort = (e: unknown): boolean =>
-  e instanceof Error && e.name === "AbortError";
+  isErrorValue(e) && probeProperty(e, "name") === "AbortError";
 
 /** Safely truncate API error body to prevent data leakage through error propagation paths. */
 export const truncateErrorBody = (body: string, maxLen = 200): string =>
@@ -39,12 +60,13 @@ type HttpErrorClass =
   | { readonly kind: "transient" }
   | { readonly kind: "node-crash"; readonly retriability: Retriability };
 
-const classifyHttpStatus = (status: number): HttpErrorClass =>
-  TRANSIENT_HTTP_STATUSES.has(status)
-    ? { kind: "transient" }
-    : status >= 400 && status < 500
-      ? { kind: "node-crash", retriability: "non-retriable" }
-      : { kind: "node-crash", retriability: "retriable" };
+const classifyHttpStatus = (status: number): HttpErrorClass => {
+  if (TRANSIENT_HTTP_STATUSES.has(status)) return { kind: "transient" };
+  // Everything else is a node crash; only its retriability differs, so the
+  // 4xx/5xx split picks that field rather than a whole second result shape.
+  const retriability = status >= 400 && status < 500 ? "non-retriable" : "retriable";
+  return { kind: "node-crash", retriability };
+};
 
 /**
  * The ONE HTTP failure policy for non-OK responses on the raw-HTTP path
@@ -99,21 +121,13 @@ export const validateTemperature = (
     : null;
 
 /**
- * Duck-typed 429 detection. The Anthropic SDK throws `RateLimitError` with
- * `.status === 429`; duck-typing avoids a class-hierarchy dependency.
- */
-export const isRateLimit = (e: unknown): boolean =>
-  typeof (e as { status?: unknown })?.status === "number" &&
-  (e as { status: number }).status === 429;
-
-/**
  * Detect a timeout-induced error. Uses standard `Error.cause` (set to
  * `"timeout"` by `createTimeoutSignal` / `postResponses`).
  */
 export const isTimeoutError = (e: unknown): boolean =>
-  e instanceof Error && (e as { cause?: unknown }).cause === "timeout";
+  isErrorValue(e) && probeProperty(e, "cause") === "timeout";
 
-export interface ClassifyOpts {
+interface ClassifyOpts {
   /** True when the request-level timeout fired. */
   readonly timedOut?: boolean;
   /** True when the caller's own signal was aborted (not our timeout). */
@@ -137,7 +151,13 @@ export const classifyLlmError = (
   nodeId: NodeId,
   opts?: ClassifyOpts,
 ): Result<never, FrameworkError> => {
-  const aborted = isAbort(e) || opts?.isAbortOverride?.(e);
+  let overrideAbort = false;
+  try {
+    overrideAbort = opts?.isAbortOverride?.(e) === true;
+  } catch {
+    // Provider-specific diagnostics are advisory; generic classification remains authoritative.
+  }
+  const aborted = isAbort(e) || overrideAbort;
   // Timeout-induced abort — retriable transient failure.
   if (aborted && opts?.timedOut && !opts?.callerAborted) {
     return err({
@@ -151,7 +171,7 @@ export const classifyLlmError = (
     return err({
       kind: "transient",
       nodeId,
-      message: e instanceof Error ? e.message : "request timed out",
+      message: safeErrorMessage(e),
     });
   }
   if (aborted) {
@@ -162,18 +182,16 @@ export const classifyLlmError = (
   // TRANSIENT_HTTP_STATUSES policy applies — 429 (rate limit), 408, and 409
   // classify as `transient`, any other 4xx as a deterministic non-retriable
   // client error, and everything else (5xx) as a retriable server-side crash —
-  // every arm carrying the typed `httpStatus`. (The 429 case was formerly
-  // a dedicated `isRateLimit` arm; it is fully subsumed here — same kind,
-  // message, and httpStatus — so the redundant arm and its `429` literal are
-  // gone. `isRateLimit` itself stays exported as a standalone predicate.)
-  const status = (e as { status?: unknown })?.status;
+  // every arm carrying the typed `httpStatus`; the former dedicated 429
+  // predicate is fully subsumed by this shared status policy.
+  const status = probeProperty(e, "status");
   if (typeof status === "number") {
     // Same shared `classifyHttpStatus` policy as httpFailureToError — 429/408/409
     // transient, other 4xx non-retriable, everything else (5xx, or an SDK oddity
     // outside 4xx) a retriable server-side crash — every arm carrying the typed
     // `httpStatus`. This path keeps the exception's own message and stack (the
     // transient arm carries neither retriability nor stack, as before).
-    const message = e instanceof Error ? e.message : String(e);
+    const message = safeErrorMessage(e);
     const cls = classifyHttpStatus(status);
     return cls.kind === "transient"
       ? err({ kind: "transient", nodeId, message, httpStatus: status })
@@ -182,7 +200,7 @@ export const classifyLlmError = (
           retriability: cls.retriability,
           nodeId,
           message,
-          stack: e instanceof Error ? e.stack : undefined,
+          stack: safeErrorStack(e),
           httpStatus: status,
         });
   }
@@ -190,7 +208,7 @@ export const classifyLlmError = (
     kind: "node-crash",
     retriability: "retriable",
     nodeId,
-    message: e instanceof Error ? e.message : String(e),
-    stack: e instanceof Error ? e.stack : undefined,
+    message: safeErrorMessage(e),
+    stack: safeErrorStack(e),
   });
 };

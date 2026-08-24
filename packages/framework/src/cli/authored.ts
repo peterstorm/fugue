@@ -85,7 +85,7 @@ const NO_FUGUE_BODY_MARKER = {
     "must not contain '@fugue-body' (the integrity-projection marker — it would poison the structural hash of the generated module)",
 } as const;
 
-export const FieldTypeSchema = z.discriminatedUnion("kind", [
+const FieldTypeSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("string") }).strict(),
   z.object({ kind: z.literal("number") }).strict(),
   z.object({ kind: z.literal("boolean") }).strict(),
@@ -114,7 +114,7 @@ export const FieldTypeSchema = z.discriminatedUnion("kind", [
 ]);
 export type FieldType = z.infer<typeof FieldTypeSchema>;
 
-export const FieldSpecSchema = z
+const FieldSpecSchema = z
   .object({
     name: z
       .string()
@@ -172,7 +172,7 @@ const schemaSpec = (missingMessage?: () => string) =>
       }
     });
 
-export const SchemaSpecSchema = schemaSpec();
+const SchemaSpecSchema = schemaSpec();
 export type SchemaSpec = z.infer<typeof SchemaSpecSchema>;
 
 // ---------------------------------------------------------------------------
@@ -180,13 +180,14 @@ export type SchemaSpec = z.infer<typeof SchemaSpecSchema>;
 // ---------------------------------------------------------------------------
 
 /**
- * A KEBAB_IDENT string field, parsed into the branded `KebabIdent` through
- * the single smart constructor — so every id/name on a parsed AuthoredDag is
- * PROOF the name constructors in `identifiers.ts` can safely emit from it.
+ * A string field parsed into a branded value through ONE smart constructor.
+ * Both kebab flavours below are this same transform — only the constructor and
+ * the message differ — so the "parse, don't validate" step that makes a parsed
+ * AuthoredDag PROOF for the name constructors in `identifiers.ts` exists once.
  */
-const kebabIdentField = (message: string) =>
+const brandedStringField = <T>(parse: (s: string) => T | null, message: string) =>
   z.string().transform((s, ctx) => {
-    const parsed = parseKebabIdent(s);
+    const parsed = parse(s);
     if (parsed === null) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message });
       return z.NEVER;
@@ -195,19 +196,16 @@ const kebabIdentField = (message: string) =>
   });
 
 /**
- * A plain-KEBAB string field, parsed into the branded `Kebab` through the
- * single smart constructor (mirrors `kebabIdentField`) — used where the value
- * never becomes a bare identifier (team, router case labels).
+ * A KEBAB_IDENT string field, parsed into the branded `KebabIdent` — so every
+ * id/name on a parsed AuthoredDag can safely become a bare identifier.
  */
-const kebabField = (message: string) =>
-  z.string().transform((s, ctx) => {
-    const parsed = parseKebab(s);
-    if (parsed === null) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message });
-      return z.NEVER;
-    }
-    return parsed;
-  });
+const kebabIdentField = (message: string) => brandedStringField(parseKebabIdent, message);
+
+/**
+ * A plain-KEBAB string field, parsed into the branded `Kebab` — used where the
+ * value never becomes a bare identifier (team, router case labels).
+ */
+const kebabField = (message: string) => brandedStringField(parseKebab, message);
 
 const nodeId = kebabIdentField("node id must be kebab-case starting with a letter");
 /** What this node is for — the authoring intent DescribedDag can't carry. */
@@ -297,7 +295,7 @@ const OUTPUT_NODE_KINDS = authoredNodeVariants
   .map((v) => v.shape.kind.value);
 const KIND_LIST = NODE_KINDS.map((k) => JSON.stringify(k)).join("|");
 
-export const AuthoredNodeSchema = z.discriminatedUnion("kind", authoredNodeVariants, {
+const AuthoredNodeSchema = z.discriminatedUnion("kind", authoredNodeVariants, {
   // Zod's default for an unknown or missing discriminator is a bare
   // "Invalid input" — useless to the compose repair loop. Name the full
   // vocabulary; every other issue code falls through to its own message.
@@ -316,7 +314,7 @@ export type AuthoredNode = z.infer<typeof AuthoredNodeSchema>;
 // unknown-node refinement.
 const nodeRef = kebabIdentField("node reference must be kebab-case starting with a letter");
 
-export const RouterCaseSchema = z
+const RouterCaseSchema = z
   .object({
     // Parsed into the branded `Kebab` (mirrors `team`'s treatment) — a parsed
     // case label carries the proof the KEBAB rule passed, not a bare string.
@@ -328,7 +326,7 @@ export const RouterCaseSchema = z
   .strict();
 export type RouterCase = z.infer<typeof RouterCaseSchema>;
 
-export const StructureSchema = z.discriminatedUnion("shape", [
+const StructureSchema = z.discriminatedUnion("shape", [
   z.object({ shape: z.literal("linear"), order: z.array(nodeRef).min(2) }).strict(),
   z
     .object({
@@ -363,7 +361,7 @@ export const StructureSchema = z.discriminatedUnion("shape", [
     })
     .strict(),
 ]);
-export type AuthoredStructure = z.infer<typeof StructureSchema>;
+type AuthoredStructure = z.infer<typeof StructureSchema>;
 
 // Compile-time proof that `StructureSchema`'s discriminated union covers exactly
 // the canonical `Shape` set (derived from the `DAG_SHAPES` tuple in
@@ -445,7 +443,7 @@ export const structureRefs = (s: AuthoredStructure): ReadonlyArray<readonly [Keb
   }
 };
 
-export const AuthoredDagSchema = BaseAuthoredDagSchema.superRefine((dag, ctx) => {
+const AuthoredDagSchema = BaseAuthoredDagSchema.superRefine((dag, ctx) => {
   const byId = new Map(dag.nodes.map((n) => [n.id, n] as const));
 
   // Identifier safety: every identifier codegen will emit for a node (const,
@@ -608,7 +606,7 @@ export const AuthoredDagSchema = BaseAuthoredDagSchema.superRefine((dag, ctx) =>
     // mistake, not a fallback.
     const predicates = new Set<string>();
     for (const [i, c] of s.cases.entries()) {
-      const p = `${c.when.field} ${c.when.equals}`;
+      const p = `${c.when.field}\u0000${c.when.equals}`;
       if (predicates.has(p)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -653,7 +651,7 @@ export type AuthoredDagInput = z.input<typeof AuthoredDagSchema>;
 // Parse entry points
 // ---------------------------------------------------------------------------
 
-export type AuthoredParseResult =
+type AuthoredParseResult =
   | { readonly ok: true; readonly dag: AuthoredDag }
   | { readonly ok: false; readonly problems: readonly string[] };
 

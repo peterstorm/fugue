@@ -18,7 +18,7 @@ import {
   buildForwardRequest,
   buildProbeRequest,
   proxyToWorker,
-  TENANT_HEADER,
+  makeBunUdsTransport,
 } from "../../supervisor/uds-proxy.js";
 import type { UdsTransport } from "../../supervisor/uds-proxy.js";
 // CANONICAL verifier — the worker side uses exactly this. The proxy stamps with
@@ -35,12 +35,6 @@ const makeTenant = (id: string, team = `${id}-team`): Tenant => {
   if (!r.ok) throw new Error(`bad id ${id}`);
   return markTenant(r.value, team);
 };
-
-describe("TENANT_HEADER re-export", () => {
-  it("is the canonical header name (no second definition)", () => {
-    expect(TENANT_HEADER).toBe(TENANT_HEADER_NAME);
-  });
-});
 
 describe("buildProbeRequest — UDS liveness probe (path + signed header)", () => {
   const tid = (id: string) => {
@@ -75,7 +69,7 @@ describe("buildForwardRequest — header signing + stripping", () => {
     const inbound = new Request("http://host/runs/dag1", {
       method: "POST",
       headers: {
-        [TENANT_HEADER]: "evil.deadbeef",
+        [TENANT_HEADER_NAME]: "evil.deadbeef",
         Authorization: "Bearer fug_abc",
         "Content-Type": "application/json",
       },
@@ -84,9 +78,9 @@ describe("buildForwardRequest — header signing + stripping", () => {
     const fwd = buildForwardRequest(inbound, tenant, KEY);
     // The forged header is replaced with a value the WORKER's canonical verifier
     // accepts as bound to acme — proving supervisor/worker agreement.
-    expect(verifyTenantHeader(KEY, "acme", fwd.headers.get(TENANT_HEADER)!)).toEqual({ kind: "ok" });
+    expect(verifyTenantHeader(KEY, "acme", fwd.headers.get(TENANT_HEADER_NAME)!)).toEqual({ kind: "ok" });
     // A DIFFERENT tenant's worker rejects the same stamped header (tenant-mismatch).
-    expect(verifyTenantHeader(KEY, "evil", fwd.headers.get(TENANT_HEADER)!)).toEqual({
+    expect(verifyTenantHeader(KEY, "evil", fwd.headers.get(TENANT_HEADER_NAME)!)).toEqual({
       kind: "tenant-mismatch",
     });
     // Authorization is forwarded unchanged (the worker re-validates the bearer).
@@ -102,17 +96,17 @@ describe("buildForwardRequest — header signing + stripping", () => {
     });
     const fwd = buildForwardRequest(inbound, tenant, KEY);
     // Exactly one header value remains, and it verifies as acme (not evil).
-    expect(verifyTenantHeader(KEY, "acme", fwd.headers.get(TENANT_HEADER)!)).toEqual({ kind: "ok" });
+    expect(verifyTenantHeader(KEY, "acme", fwd.headers.get(TENANT_HEADER_NAME)!)).toEqual({ kind: "ok" });
   });
 
   it("adds NO tenant header when the HMAC key is unset, but STILL strips the client's", () => {
     const tenant = makeTenant("acme");
     const inbound = new Request("http://host/runs/dag1", {
       method: "GET",
-      headers: { [TENANT_HEADER]: "evil.deadbeef" },
+      headers: { [TENANT_HEADER_NAME]: "evil.deadbeef" },
     });
     const fwd = buildForwardRequest(inbound, tenant, undefined);
-    expect(fwd.headers.get(TENANT_HEADER)).toBeNull();
+    expect(fwd.headers.get(TENANT_HEADER_NAME)).toBeNull();
   });
 });
 
@@ -122,7 +116,7 @@ describe("proxyToWorker — 200 contract preservation + fail-closed", () => {
   it("preserves the worker's status, headers, and body verbatim", async () => {
     const transport: UdsTransport = async (_sock, req) => {
       // assert the signed header reached the transport and verifies as acme
-      const seen = req.headers.get(TENANT_HEADER);
+      const seen = req.headers.get(TENANT_HEADER_NAME);
       expect(seen).not.toBeNull();
       expect(verifyTenantHeader(KEY, "acme", seen!)).toEqual({ kind: "ok" });
       return ok(
@@ -153,12 +147,12 @@ describe("proxyToWorker — 200 contract preservation + fail-closed", () => {
   it("succeeds with NO tenant header when the key is unset (still strips client's, 200 preserved)", async () => {
     const transport: UdsTransport = async (_sock, req) => {
       // No key configured → no stamped header, and the client's forged one is gone.
-      expect(req.headers.get(TENANT_HEADER)).toBeNull();
+      expect(req.headers.get(TENANT_HEADER_NAME)).toBeNull();
       return ok(new Response(JSON.stringify({ runId: "r2" }), { status: 200 }));
     };
     const inbound = new Request("http://host/runs/dag1", {
       method: "POST",
-      headers: { [TENANT_HEADER]: "evil.deadbeef" },
+      headers: { [TENANT_HEADER_NAME]: "evil.deadbeef" },
       body: "{}",
     });
     const res = await proxyToWorker({ hmacKey: undefined, transport }, inbound, tenant, "/run/fugue/acme.sock");
@@ -181,13 +175,13 @@ describe("proxyToWorker — 200 contract preservation + fail-closed", () => {
 
 describe("proxyToWorker — real fetch-over-UDS round trip (Bun transport)", () => {
   it("proxies over a real Unix-domain socket, preserving the 200 contract and a canonically-verifiable header", async () => {
-    const { bunUdsTransport } = await import("../../supervisor/uds-proxy.js");
+    const bunUdsTransport = makeBunUdsTransport(10_000);
     const tmpSock = `/tmp/fugue-test-${crypto.randomUUID()}.sock`;
     let seenHeader: string | null = null;
     const worker = Bun.serve({
       unix: tmpSock,
       fetch: (req) => {
-        seenHeader = req.headers.get(TENANT_HEADER);
+        seenHeader = req.headers.get(TENANT_HEADER_NAME);
         return new Response(JSON.stringify({ ok: true, path: new URL(req.url).pathname }), {
           status: 200,
           headers: { "Content-Type": "application/json" },

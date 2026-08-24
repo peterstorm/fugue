@@ -39,11 +39,12 @@ import {
 } from "./identifiers.js";
 
 /**
- * The topologies `fugue new --shape` can scaffold — one per DAG shape. Sourced
- * from the canonical `DAG_SHAPES` tuple so it cannot drift from `DagProvenance`.
+ * The topologies `fugue new --shape` can scaffold — one per DAG shape. These
+ * ARE `DAG_SHAPES`; the tuple is re-exported rather than aliased so there is
+ * one name for the concept and it cannot drift from `DagProvenance`.
  */
-export const SHAPES = DAG_SHAPES;
-export type Shape = (typeof SHAPES)[number];
+export { DAG_SHAPES } from "../types/dag.js";
+export type Shape = (typeof DAG_SHAPES)[number];
 
 /**
  * The sole `Shape` producer for raw CLI input: the membership check IS the
@@ -51,7 +52,7 @@ export type Shape = (typeof SHAPES)[number];
  * separate `as Shape` cast (parse, don't validate).
  */
 export const parseShape = (raw: string): Shape | null =>
-  (SHAPES as readonly string[]).includes(raw) ? (raw as Shape) : null;
+  (DAG_SHAPES as readonly string[]).includes(raw) ? (raw as Shape) : null;
 
 export interface TemplateCtx {
   /**

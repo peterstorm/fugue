@@ -66,6 +66,7 @@ import {
   type AuthedHttpCapability,
   type AuthedRequestOpts,
   type AuthedBodyRequestOpts,
+  isRetriableHttpStatus,
 } from "./client.js";
 
 // ---------------------------------------------------------------------------
@@ -166,7 +167,7 @@ const HEALTH_CHECK_TIMEOUT_MS = 5_000;
  *
  * Lifecycle:
  * - `connect()` mints the first token (fails boot if credentials are bad).
- * - `healthCheck()` does a token-mint round-trip, racing a 5s timeout.
+ * - `healthCheck()` does an uncached token probe under an independent 5s deadline.
  * - `close()` is a no-op (no pool to drain).
  *
  * The boot-scoped token cache means a steady-state request injects the cached
@@ -201,7 +202,7 @@ export const createHttpAuthAdapter = (config: HttpAuthConfig): CapabilityHandle<
       const minted = await tokens.get();
       if (!minted.ok) {
         // The error message is secret-free by construction (NFR-010).
-        throw new Error(`http-auth connect failed: ${describeError(minted.error)}`);
+        throw new Error(`http-auth connect failed: ${formatFrameworkError(minted.error)}`);
       }
     },
 
@@ -214,48 +215,45 @@ export const createHttpAuthAdapter = (config: HttpAuthConfig): CapabilityHandle<
 };
 
 /**
- * Render a FrameworkError to a short, secret-free string for boot diagnostics.
- * Delegates to the framework's exhaustive `formatFrameworkError` so a NEW
- * `FrameworkError` variant can never silently lose context here — adding a kind
- * without a case there is a compile error, which this inherits. (NFR-010: the
- * error variants this package emits never embed the token/credentials.)
- */
-const describeError = (error: FrameworkError): string => formatFrameworkError(error);
-
-/**
- * Run a fresh token mint against a deadline. A hung auth endpoint reports
- * unhealthy instead of stalling the caller, AND the underlying mint is actually
- * cancelled on timeout via an `AbortController` — so an orphaned mint cannot
- * later repopulate the cache (split-brain). Exported for testing.
+ * Run an uncached token probe against a hard deadline. The deadline settles
+ * independently of fetch cancellation, so a hostile or broken fetch that ignores
+ * `AbortSignal` cannot stall readiness. The probe never populates the request
+ * cache, making a late completion harmless. Exported for testing.
  */
 export const healthCheckWithTimeout = async (
   tokens: TokenProvider,
   timeoutMs: number,
 ): Promise<Result<void, string>> => {
-  // Drive the mint off this controller's signal so a deadline hit cancels the
-  // in-flight fetch rather than leaving it running detached.
   const controller = new AbortController();
-  let timer: ReturnType<typeof setTimeout> | undefined = setTimeout(
-    () => controller.abort(new Error(`health check timed out after ${timeoutMs}ms`)),
-    timeoutMs,
-  );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const deadline = new Promise<Result<void, string>>((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort(new Error(`health check timed out after ${timeoutMs}ms`));
+      resolve(err(`health check timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+  // `Promise.resolve().then(...)` rather than calling `probe` directly: a
+  // provider that throws SYNCHRONOUSLY (rather than returning a rejected
+  // promise) would otherwise escape before any handler is attached and take
+  // down the readiness endpoint that called this. Both failure modes are the
+  // same contract violation and must land on the same `Err`.
+  //
+  // The provider's own message is deliberately NOT interpolated: an
+  // implementation is free to put a credential in its error, and this string
+  // reaches an unauthenticated readiness response.
+  const probe = Promise.resolve()
+    .then(() => tokens.probe(controller.signal))
+    .then(
+      (result): Result<void, string> =>
+        result.ok ? ok(undefined) : err(formatFrameworkError(result.error)),
+      (): Result<void, string> => err("token provider probe failed outside its Result contract"),
+    );
+
   try {
-    // Force a mint round-trip so the check exercises the real auth path. The
-    // signal cancels that mint on timeout (no orphaned, cache-populating fetch).
-    tokens.invalidate();
-    const result = await tokens.get(controller.signal);
-    if (result.ok) return ok(undefined);
-    // A cancelled mint surfaces as a node-crash whose message names the deadline;
-    // formatFrameworkError keeps it secret-free.
-    return err(describeError(result.error));
-  } catch (e) {
-    // get() is Result-based and must not throw; this is defence-in-depth.
-    return err(e instanceof Error ? e.message : String(e));
+    return await Promise.race([probe, deadline]);
   } finally {
-    if (timer != null) {
-      clearTimeout(timer);
-      timer = undefined;
-    }
+    if (timer !== undefined) clearTimeout(timer);
   }
 };
 
@@ -265,15 +263,15 @@ export const healthCheckWithTimeout = async (
 
 /**
  * A canned response for one route in the fake capability. A `status` outside
- * 2xx produces the same error classification as the real client (5xx →
- * transient, other non-2xx → non-retriable node-crash); a `matchBody` that
+ * 2xx produces the same error classification as the real client (5xx/408/429
+ * → transient, other non-2xx → non-retriable node-crash); a `matchBody` that
  * returns `false` fails the route so a wrong-payload bug surfaces in tests.
  *
  * Construct one with {@link shapedRoute} — that brand is how the fake tells a
  * shaped route apart from a raw payload, so a raw payload that happens to carry
  * a `body`/`status` field is never misread as control metadata.
  */
-export interface FakeAuthedHttpRoute {
+interface FakeAuthedHttpRoute {
   readonly status?: number;
   readonly body: unknown;
   readonly matchBody?: (body: unknown) => boolean;
@@ -314,25 +312,9 @@ const isShapedRoute = (route: unknown): route is ShapedAuthedHttpRoute =>
   typeof route === "object" && route !== null && (route as Record<symbol, unknown>)[SHAPED_ROUTE] === true;
 
 /**
- * In-memory fake `AuthedHttpCapability` for testing DAG nodes that use
- * `ctx.authedHttp`. No network, no token machinery — routes match on
- * `"METHOD /path"` (or the bare path). Mirrors `createFakeHttpCapability`.
- *
- * @remarks
- * A route value is a *raw* payload (returned verbatim) unless it was built with
- * {@link shapedRoute}, which brands it as control metadata (`status`/`matchBody`/
- * explicit `body`). Detection is by that brand — NOT a `"body" in route` shape
- * heuristic — so a raw payload that legitimately carries a top-level `body`
- * field round-trips unchanged instead of being misread as a shaped route.
- *
- * @example
- * ```ts
- * const fake = createFakeAuthedHttpCapability({
- *   "GET /customers/123": { id: "123", name: "Alice" },               // raw
- *   "POST /orders": shapedRoute({ body: { orderId: "ord-1" } }),      // shaped
- *   "GET /customers/999": shapedRoute({ status: 404, body: "Not Found" }),
- * });
- * ```
+ * In-memory fake `AuthedHttpCapability` for DAG-node tests. Routes match on
+ * `"METHOD /path"` or the bare path; use {@link shapedRoute} for control
+ * metadata such as status and body matching.
  */
 export const createFakeAuthedHttpCapability = (
   routes: Readonly<Record<string, unknown>>,
@@ -373,7 +355,7 @@ const matchRoute = <T>(
     const status = route.status;
     if (status != null && (status < 200 || status >= 300)) {
       const bodyText = String(route.body ?? "");
-      if (status >= 500) {
+      if (isRetriableHttpStatus(status)) {
         return err({ kind: "transient", nodeId: FAKE_NODE_ID, message: `HTTP ${status}: ${bodyText.slice(0, 500)}`, httpStatus: status });
       }
       return err({ kind: FAKE_NODE_ID_KIND, nodeId: FAKE_NODE_ID, message: `HTTP ${status}: ${bodyText.slice(0, 500)}`, retriability: "non-retriable" });

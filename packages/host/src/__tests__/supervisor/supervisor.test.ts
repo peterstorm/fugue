@@ -30,7 +30,7 @@ import { gitSha } from "@fuguejs/framework";
 import type { AuthDeps, AdmissionPort, SupervisorDeps } from "../../supervisor/supervisor.js";
 import type { WorkerLifecyclePort, EnsuredWorker } from "../../supervisor/lifecycle/spawn-port.js";
 import { createSupervisor, createTerminationHandler } from "../../supervisor/supervisor.js";
-import { TENANT_HEADER } from "../../supervisor/uds-proxy.js";
+import { TENANT_HEADER_NAME } from "../../domain/tenant-header.js";
 import type { UdsTransport } from "../../supervisor/uds-proxy.js";
 // Canonical verifier (the proxy no longer re-implements one — it imports the
 // shared signer; the worker side uses exactly this verifier).
@@ -43,7 +43,7 @@ import type { HostError } from "../../domain/host-error.js";
 import type { HostConfig } from "../../domain/config.js";
 import type { TokenStorePort, LogPort, RedisConnectivityPort } from "../../ports.js";
 import { workerUnavailable } from "../../domain/host-error.js";
-import { markSignatureVerified } from "../../domain/auth.js";
+import { markSignatureVerified, hashToken } from "../../domain/auth.js";
 import type { RealmJwtClaims, SignatureVerifiedClaims } from "../../domain/auth.js";
 import type { RealmJwtDeps } from "../../http/middleware/auth.js";
 import { createRedisTenantRegistry, createInMemoryRedisFake } from "../../supervisor/registry/redis-registry-adapter.js";
@@ -480,13 +480,12 @@ describe("createSupervisor — unauthenticated health probes (Docker HEALTHCHECK
 describe("createSupervisor — routing + proxy with fakes", () => {
   it("authenticated KNOWN tenant routes + proxies, attaching a verifiable signed header", async () => {
     // team token 'fug_acme' → team 'acme-team' → tenant 'acme'
-    const { hashToken } = await import("../../domain/auth.js");
     const hash = (await hashToken("fug_acme")) as unknown as string;
     const tenant = makeTenant("acme");
     let proxiedHeader: string | null = null;
     const transport: UdsTransport = async (sock, req) => {
       expect(sock).toBe("/run/fugue/acme.sock");
-      proxiedHeader = req.headers.get(TENANT_HEADER);
+      proxiedHeader = req.headers.get(TENANT_HEADER_NAME);
       return ok(new Response(JSON.stringify({ runId: "r1" }), { status: 200, headers: { "Content-Type": "application/json" } }));
     };
     const deps = buildDeps({
@@ -513,7 +512,6 @@ describe("createSupervisor — routing + proxy with fakes", () => {
   });
 
   it("unknown identity (unresolvable tenant) → 404 with NO cross-tenant leakage", async () => {
-    const { hashToken } = await import("../../domain/auth.js");
     const hash = (await hashToken("fug_ghost")) as unknown as string;
     const acme = makeTenant("acme");
     // token resolves to team 'ghost-team' which owns NO registered tenant
@@ -537,7 +535,6 @@ describe("createSupervisor — routing + proxy with fakes", () => {
   });
 
   it("admission unknown (degraded registry, FR-022) → 404 for NEW runs", async () => {
-    const { hashToken } = await import("../../domain/auth.js");
     const hash = (await hashToken("fug_acme")) as unknown as string;
     const tenant = makeTenant("acme");
     const deps = buildDeps({
@@ -558,7 +555,6 @@ describe("createSupervisor — routing + proxy with fakes", () => {
   });
 
   it("worker down → 503 for THAT tenant only (contained, named only as own tenant)", async () => {
-    const { hashToken } = await import("../../domain/auth.js");
     const hash = (await hashToken("fug_acme")) as unknown as string;
     const tenant = makeTenant("acme");
     const deps = buildDeps({
@@ -579,7 +575,6 @@ describe("createSupervisor — routing + proxy with fakes", () => {
   });
 
   it("defensively refuses (503) if lifecycle returns a NON-owning socket (FR-004)", async () => {
-    const { hashToken } = await import("../../domain/auth.js");
     const hash = (await hashToken("fug_acme")) as unknown as string;
     const tenant = makeTenant("acme");
     let transportCalled = false;
@@ -614,7 +609,6 @@ describe("createSupervisor — routing + proxy with fakes", () => {
   });
 
   it("over-quota admission → 429 + Retry-After (per-tenant backoff), end-to-end (SC-012)", async () => {
-    const { hashToken } = await import("../../domain/auth.js");
     const hash = (await hashToken("fug_acme")) as unknown as string;
     const tenant = makeTenant("acme");
     let transportCalled = false;
@@ -640,7 +634,6 @@ describe("createSupervisor — routing + proxy with fakes", () => {
   });
 
   it("admitted request RELEASES the per-tenant slot after proxying (acquire-on-admit / release-on-completion)", async () => {
-    const { hashToken } = await import("../../domain/auth.js");
     const hash = (await hashToken("fug_acme")) as unknown as string;
     const tenant = makeTenant("acme");
     const tracked = admissionAlwaysTracked({ kind: "admitted" });
@@ -664,7 +657,6 @@ describe("createSupervisor — routing + proxy with fakes", () => {
   });
 
   it("admitted request RELEASES the slot even when the proxy THROWS (finally guarantees release)", async () => {
-    const { hashToken } = await import("../../domain/auth.js");
     const hash = (await hashToken("fug_acme")) as unknown as string;
     const tenant = makeTenant("acme");
     const tracked = admissionAlwaysTracked({ kind: "admitted" });
@@ -689,7 +681,6 @@ describe("createSupervisor — routing + proxy with fakes", () => {
   });
 
   it("admitted-but-worker-down refuse path RELEASES the acquired slot (no leak on 503)", async () => {
-    const { hashToken } = await import("../../domain/auth.js");
     const hash = (await hashToken("fug_acme")) as unknown as string;
     const tenant = makeTenant("acme");
     const tracked = admissionAlwaysTracked({ kind: "admitted" });
@@ -712,7 +703,6 @@ describe("createSupervisor — routing + proxy with fakes", () => {
   });
 
   it("REFUSED admit (over-quota) does NOT call release (nothing acquired)", async () => {
-    const { hashToken } = await import("../../domain/auth.js");
     const hash = (await hashToken("fug_acme")) as unknown as string;
     const tenant = makeTenant("acme");
     const tracked = admissionAlwaysTracked({ kind: "over-quota", retryAfterSeconds: 7 });
@@ -745,7 +735,6 @@ describe("createSupervisor — routing + proxy with fakes", () => {
   // produce the refusal WITHOUT spawning.
 
   it("admission unknown (degraded registry) → 404 WITHOUT cold-spawning a worker (no spawn storm)", async () => {
-    const { hashToken } = await import("../../domain/auth.js");
     const hash = (await hashToken("fug_acme")) as unknown as string;
     const tenant = makeTenant("acme");
     const recording = lifecycleRecording("/run/fugue/acme.sock");
@@ -769,7 +758,6 @@ describe("createSupervisor — routing + proxy with fakes", () => {
   });
 
   it("over-quota admission → 429 WITHOUT cold-spawning a worker", async () => {
-    const { hashToken } = await import("../../domain/auth.js");
     const hash = (await hashToken("fug_acme")) as unknown as string;
     const tenant = makeTenant("acme");
     const recording = lifecycleRecording("/run/fugue/acme.sock");
@@ -791,7 +779,6 @@ describe("createSupervisor — routing + proxy with fakes", () => {
   });
 
   it("admission unavailable → refused WITHOUT cold-spawning a worker", async () => {
-    const { hashToken } = await import("../../domain/auth.js");
     const hash = (await hashToken("fug_acme")) as unknown as string;
     const tenant = makeTenant("acme");
     const recording = lifecycleRecording("/run/fugue/acme.sock");
@@ -813,7 +800,6 @@ describe("createSupervisor — routing + proxy with fakes", () => {
   });
 
   it("ADMITTED request DOES cold-spawn the worker exactly once and routes (sanity for the refuse-path guard)", async () => {
-    const { hashToken } = await import("../../domain/auth.js");
     const hash = (await hashToken("fug_acme")) as unknown as string;
     const tenant = makeTenant("acme");
     const recording = lifecycleRecording("/run/fugue/acme.sock");
@@ -841,7 +827,6 @@ describe("createSupervisor — routing + proxy with fakes", () => {
 
 describe("FR-022 — probe→registry degraded gate (real registry + in-memory Redis)", () => {
   it("probe DOWN → NEW run refused (503/404) while in-flight lookup still resolves; recovery re-admits", async () => {
-    const { hashToken } = await import("../../domain/auth.js");
     const hash = (await hashToken("fug_acme")) as unknown as string;
 
     // A REAL Redis-backed tenant registry over the in-memory fake, with 'acme'

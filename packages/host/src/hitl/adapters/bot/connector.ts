@@ -10,14 +10,14 @@
  * logged.
  */
 
-import { ok, err } from "@fuguejs/framework";
+import { ok, err, safeErrorMessage } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../../../domain/host-error.js";
 import type { LogPort } from "../../../ports.js";
 import type { BotConnectorPort, ConversationReference } from "./ports.js";
 import { isTrustedBotServiceUrl } from "./trusted-host.js";
 
-export interface BotConnectorConfig {
+interface BotConnectorConfig {
   readonly appId: string;
   readonly appPassword: string;
   /**
@@ -57,7 +57,7 @@ export const createBotConnector = (config: BotConnectorConfig, logger?: LogPort)
         body: body.toString(),
       });
     } catch (e) {
-      return err({ kind: "notification-failed", operation: `bot token fetch: ${e instanceof Error ? e.message : String(e)}` });
+      return err({ kind: "notification-failed", operation: `bot token fetch: ${safeErrorMessage(e)}` });
     }
     if (!res.ok) return err({ kind: "notification-failed", operation: `bot token endpoint HTTP ${res.status}` });
     let json: { access_token?: unknown; expires_in?: unknown };
@@ -68,7 +68,7 @@ export const createBotConnector = (config: BotConnectorConfig, logger?: LogPort)
       // `onHumanReview` hook crash (which would burn the hook retry budget).
       json = (await res.json()) as { access_token?: unknown; expires_in?: unknown };
     } catch (e) {
-      return err({ kind: "notification-failed", operation: `bot token response not valid JSON: ${e instanceof Error ? e.message : String(e)}` });
+      return err({ kind: "notification-failed", operation: `bot token response not valid JSON: ${safeErrorMessage(e)}` });
     }
     if (typeof json.access_token !== "string" || typeof json.expires_in !== "number") {
       return err({ kind: "notification-failed", operation: "bot token response missing access_token/expires_in" });
@@ -104,7 +104,7 @@ export const createBotConnector = (config: BotConnectorConfig, logger?: LogPort)
           body: JSON.stringify(activity),
         });
       } catch (e) {
-        return err({ kind: "notification-failed", operation: `bot send: ${e instanceof Error ? e.message : String(e)}` });
+        return err({ kind: "notification-failed", operation: `bot send: ${safeErrorMessage(e)}` });
       }
       if (res.status < 200 || res.status >= 300) {
         logger?.error?.("hitl/bot: proactive send failed", { status: res.status, conversationId: ref.conversationId });

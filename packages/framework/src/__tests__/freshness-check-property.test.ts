@@ -1,4 +1,4 @@
-import { resourceName, witness, witnessValue, stampWitness, mkWitness, RN } from "./_freshness-helpers.js";
+import { FE, witness, witnessValue, stampWitness, RN } from "./_freshness-helpers.js";
 /**
  * Phase 3 property test — freshness conflict detection.
  *
@@ -7,7 +7,7 @@ import { resourceName, witness, witnessValue, stampWitness, mkWitness, RN } from
  * implementation. This pins the contract with fast-check.
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it } from "bun:test";
 import fc from "fast-check";
 import { N, R, D } from "./_id-helpers.js";
 import {
@@ -16,10 +16,9 @@ import {
 } from "../dag-runtime/freshness-check.js";
 import { unwrap } from "../types/result.js";
 import type {
-  WitnessCapturedEvent,
   WriteAttemptedEvent,
 } from "../types/events.js";
-import type { Witness, WitnessKind } from "../types/freshness.js";
+import type { WitnessKind } from "../types/freshness.js";
 import type { RunId, NodeId } from "../types/ids.js";
 
 const arbWitnessKind = fc.constantFrom<WitnessKind>(
@@ -49,7 +48,8 @@ const arbNodeId = fc.integer({ min: 1, max: 5 }).map((n) => N(`w${n}`));
 const arbWriteEvent = fc.record({
   runId: arbRunId,
   nodeId: arbNodeId,
-  resource: arbResource,
+  conditionedOnResource: arbResource,
+  newWitnessResource: arbResource,
   conditionedOnValue: arbWitnessValue,
   newWitnessValue: arbWitnessValue,
   succeededAtMs: fc.integer({ min: 1, max: 10_000 }),
@@ -58,7 +58,8 @@ const arbWriteEvent = fc.record({
 type WriteSpec = {
   runId: RunId;
   nodeId: NodeId;
-  resource: string;
+  conditionedOnResource: string;
+  newWitnessResource: string;
   conditionedOnValue: string;
   newWitnessValue: string;
   succeededAtMs: number;
@@ -69,8 +70,9 @@ const toWriteAttemptedEvent = (spec: WriteSpec): WriteAttemptedEvent => ({
   runId: spec.runId,
   dagId: D("d"),
   nodeId: spec.nodeId,
-  conditionedOn: witness("version", RN(spec.resource), spec.conditionedOnValue),
-  newWitness: witness("version", RN(spec.resource), spec.newWitnessValue),
+  executionEpoch: FE(),
+  conditionedOn: witness("version", RN(spec.conditionedOnResource), spec.conditionedOnValue),
+  newWitness: witness("version", RN(spec.newWitnessResource), spec.newWitnessValue),
   succeededAtMs: spec.succeededAtMs,
   timestamp: new Date(spec.succeededAtMs),
 });
@@ -98,15 +100,15 @@ const referenceConflictCount = (
   let conflicts = 0;
 
   for (const event of sorted) {
-    const resource = event.conditionedOn.resource;
-    const latest = latestWriteByResource.get(resource);
+    const latest = latestWriteByResource.get(event.conditionedOn.resource);
 
     if (latest && latest.newWitness.value !== event.conditionedOn.value) {
       conflicts++;
     }
 
-    // Always update — for same-timestamp writes, last-seen wins
-    latestWriteByResource.set(resource, event);
+    // Always update the resource actually written — for same-timestamp writes,
+    // last-seen wins.
+    latestWriteByResource.set(event.newWitness.resource, event);
   }
 
   return conflicts;
@@ -162,6 +164,47 @@ describe("freshness conflict detection — property tests (Phase 3)", () => {
     );
   });
 
+  it("InMemoryFreshnessIndex selects the greatest timestamp regardless of arrival order", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: 0, max: 9_000 }),
+        fc.integer({ min: 1, max: 1_000 }),
+        fc.boolean(),
+        async (olderAtMs, deltaMs, reverseArrival) => {
+          const newerAtMs = olderAtMs + deltaMs;
+          const older = toWriteAttemptedEvent({
+            runId: R("older"),
+            nodeId: N("older"),
+            conditionedOnResource: "postgres:orders",
+            newWitnessResource: "postgres:orders",
+            conditionedOnValue: "0",
+            newWitnessValue: "1",
+            succeededAtMs: olderAtMs,
+          });
+          const newer = toWriteAttemptedEvent({
+            runId: R("newer"),
+            nodeId: N("newer"),
+            conditionedOnResource: "postgres:orders",
+            newWitnessResource: "postgres:orders",
+            conditionedOnValue: "1",
+            newWitnessValue: "2",
+            succeededAtMs: newerAtMs,
+          });
+          const index = new InMemoryFreshnessIndex();
+          const arrival = reverseArrival ? [newer, older] : [older, newer];
+          for (const event of arrival) unwrap(await index.recordWrite(event));
+
+          const conflict = unwrap(await index.findConflict(
+            witness("version", RN("postgres:orders"), "0"),
+            newerAtMs,
+          ));
+          return conflict?.runId === R("newer") && conflict.succeededAtMs === newerAtMs;
+        },
+      ),
+      { numRuns: 300 },
+    );
+  });
+
   it("stampWitness yields the stamped resource and preserves (kind, value) for any input", () => {
     // Exercises the new resource-free → stamp path directly (the conflict
     // properties above build full Witness events and never reach stampWitness).
@@ -204,6 +247,7 @@ describe("freshness conflict detection — property tests (Phase 3)", () => {
               runId: R(`r${i}`),
               dagId: D("d"),
               nodeId: N(`w${i}`),
+              executionEpoch: FE(),
               conditionedOn: witness("version", RN(resource), String(currentVersion)),
               newWitness: witness("version", RN(resource), String(nextVersion)),
               succeededAtMs: (i + 1) * 1000,
