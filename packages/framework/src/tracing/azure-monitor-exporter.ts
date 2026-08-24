@@ -233,8 +233,25 @@ export class AzureMonitorExporter implements SpanExporter {
     });
   }
 
+  /**
+   * Failure contract: log-then-continue. `shutdown()` runs on the SDK's shutdown
+   * chain, where a rejection aborts the remaining exporters and makes a clean
+   * stop look like a crash to a process supervisor. A transport failure on the
+   * final flush is worth SEEING — hence the warn, matching `export()`'s
+   * discipline — but never worth propagating, because there is no retry left to
+   * inform and nothing the caller can do with it.
+   */
   async shutdown(): Promise<void> {
-    if (this.inner.shutdown) await this.inner.shutdown();
+    if (!this.inner.shutdown) return;
+    try {
+      await this.inner.shutdown();
+    } catch (e) {
+      fwLogger().warn(
+        `[AzureMonitorExporter] Inner exporter shutdown() failed: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+    }
   }
 
   async forceFlush(): Promise<void> {

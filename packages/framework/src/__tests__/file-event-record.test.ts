@@ -138,6 +138,22 @@ const expectRejected = (
   }
 };
 
+/**
+ * Run `fn`, expecting it to THROW, and hand back the error for inspection.
+ *
+ * Defined once instead of three times: every rejection test in this file is
+ * "the encoder must refuse this, and its message must name the kind and path",
+ * so the "it didn't throw" failure mode belongs in one place.
+ */
+const contextualError = (fn: () => string): Error => {
+  try {
+    fn();
+  } catch (error) {
+    return error as Error;
+  }
+  throw new Error("expected serializeFileEventRecord to throw");
+};
+
 describe("opaque durable event-record fields", () => {
   it("smart constructors preserve valid values and reject invalid runtime primitives", () => {
     const zero = parseJournalSequence(0);
@@ -235,15 +251,6 @@ describe("serializeFileEventRecord — round-trip losslessness (FR-009)", () => 
   // comparison sides. The round-trip check survives as the backstop for
   // the one coercion the pre-scan defers: JSON.stringify coerces
   // NaN/±Infinity to `null`.
-
-  const contextualError = (fn: () => string): Error => {
-    try {
-      fn();
-    } catch (error) {
-      return error as Error;
-    }
-    throw new Error("expected serializeFileEventRecord to throw");
-  };
 
   it("rejects a nested symbol-valued property, naming kind and path", () => {
     const error = contextualError(() => serializeFileEventRecord(0, "", 1, { a: 1, s: Symbol("x") }));
@@ -381,15 +388,6 @@ describe("assertLosslessEvent — write-boundary pre-scan rejection classes (a�
   // BOTH comparison sides, so the round-trip check could never see them.
   // Each rejection must name the offending kind and path, and must be
   // reachable at ANY depth.
-
-  const contextualError = (fn: () => string): Error => {
-    try {
-      fn();
-    } catch (error) {
-      return error as Error;
-    }
-    throw new Error("expected serializeFileEventRecord to throw");
-  };
 
   describe("(a) symbol-keyed own properties", () => {
     it("rejects a symbol key on a plain object, naming the path", () => {
@@ -810,15 +808,6 @@ describe("assertLosslessEvent — accessor properties are rejected BY INSPECTION
   // depth WITHOUT invoking the getter — a getter's value is
   // unverifiable, so even a getter that would return JSON-safe data is
   // refused (pinned in the control test below).
-
-  const contextualError = (fn: () => string): Error => {
-    try {
-      fn();
-    } catch (error) {
-      return error as Error;
-    }
-    throw new Error("expected serializeFileEventRecord to throw");
-  };
 
   it("rejects an enumerable getter returning a WeakMap — the verified loss — naming the path", () => {
     const error = contextualError(() =>

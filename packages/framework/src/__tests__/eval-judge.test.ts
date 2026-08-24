@@ -1,6 +1,7 @@
-import { NoopObserver, RecordingObserver } from "../observer/observer.js";
+import { RecordingObserver } from "../observer/observer.js";
+import { testNodeContext } from "./_context-factories.js";
 import { N } from "./_id-helpers.js";
-import type { RunId, NodeId, DagId } from "../types/ids.js";
+import type { NodeId } from "../types/ids.js";
 import { describe, test, expect } from "bun:test";
 import fc from "fast-check";
 import { judgePassed } from "../types/eval-judge.js";
@@ -18,19 +19,7 @@ import { stubSendWithTools } from "./_llm-mocks.js";
 
 // --- Helpers ---
 
-const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
-  runId: "test-run" as RunId,
-  dagId: "test-dag" as DagId,
-  observer: new NoopObserver(),
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null,
-  cache: null,
-  prompts: null,
-  llm: null, http: null,
-  clock: null,
-  logger: { warn: () => {}, error: () => {} },
-  ...overrides,
-});
+const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => testNodeContext(overrides);
 
 const makeMockLlm = (response: EvalJudgeResponse): LlmClient => ({
   sendWithTools: stubSendWithTools,
@@ -431,7 +420,12 @@ describe("createEvalJudgeNode", () => {
         reason: "unused",
       }) }));
 
-      expect(result.outcome).toBe("skipped-llm-failure");
+      // Orchestrator-side, not LLM-side: prompt assembly choked on the DAG's own
+      // data before any model was consulted. That is a bug in us, so it surfaces
+      // as `crash` — which is what makes it visible on `judgesCrashed` — rather
+      // than being merged into the "model was flaky" bucket. Both fail closed.
+      expect(result.outcome).toBe("crash");
+      expect(judgePassed(result)).toBe(false);
       expect(result.reason).toContain("Unexpected error");
     });
 
@@ -447,8 +441,14 @@ describe("createEvalJudgeNode", () => {
         prompts: { get: () => { throw new Error("prompt store unavailable"); } },
       }));
 
-      expect(result.outcome).toBe("skipped-llm-failure");
+      // The prompt store broke its contract — again orchestrator-side, so the
+      // outcome is `crash` and the cause survives on `crashMessage`.
+      expect(result.outcome).toBe("crash");
+      expect(judgePassed(result)).toBe(false);
       expect(result.reason).toContain("prompt store unavailable");
+      if (result.outcome === "crash") {
+        expect(result.crashMessage).toContain("prompt store unavailable");
+      }
     });
 
     test("a hostile LLM rejection is rendered safely and never rejects node.run", async () => {
@@ -462,7 +462,11 @@ describe("createEvalJudgeNode", () => {
 
       const result = await node.run("in", "out", makeCtx({ judgeLlm: llm }));
 
-      expect(result.outcome).toBe("skipped-llm-failure");
+      // An `LlmClient` that THROWS instead of returning `err(...)` has broken the
+      // port contract. The LLM's modeled failure mode (`!result.ok`) still maps
+      // to `skipped-llm-failure`; a contract violation is a `crash`.
+      expect(result.outcome).toBe("crash");
+      expect(judgePassed(result)).toBe(false);
       expect(result.reason).toContain("Unexpected error");
     });
 

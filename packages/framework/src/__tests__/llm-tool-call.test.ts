@@ -1,5 +1,5 @@
-import { NoopObserver } from "../observer/observer.js";
-import type { RunId, NodeId, DagId } from "../types/ids.js";
+import { testNodeContext } from "./_context-factories.js";
+import type { NodeId } from "../types/ids.js";
 import { describe, test, expect, beforeAll } from "bun:test";
 import { z } from "zod";
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api";
@@ -18,18 +18,8 @@ beforeAll(() => {
 
 const FinalSchema = z.object({ result: z.number() });
 
-const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
-  runId: "test-run" as RunId,
-  dagId: "test-dag" as DagId,
-  observer: new NoopObserver(),
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null,
-  cache: null,
-  prompts: null,
-  llm: stubLlmClient, http: null, clock: null,
-  logger: { warn: () => {}, error: () => {} },
-  ...overrides,
-});
+const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext =>
+  testNodeContext({ llm: stubLlmClient, ...overrides });
 
 const addNumbers: ToolDef<{ a: number; b: number }, { sum: number }> = tool({
   name: "add_numbers",

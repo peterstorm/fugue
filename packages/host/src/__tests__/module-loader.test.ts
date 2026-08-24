@@ -8,6 +8,7 @@ import {
   discoverDagPaths,
   loadAll,
   createModuleLoader,
+  loadPromptsForModule,
 } from "../adapters/module-loader.js";
 import type { ModuleLoaderPort, LoadResult, BulkLoadResult } from "../ports.js";
 import { mkdirSync, writeFileSync, rmSync, existsSync, chmodSync } from "fs";
@@ -498,7 +499,6 @@ describe("Module Loader", () => {
 
     it("calls onFileError callback for unreadable prompt files", async () => {
       // We test loadPromptsForModule directly for this case
-      const { loadPromptsForModule } = await import("../adapters/module-loader.js");
 
       const dagDir = join(TEST_DIR, "dags", "team-a", "unreadable-prompt");
       const promptsDir = join(dagDir, "prompts");
@@ -523,7 +523,6 @@ describe("Module Loader", () => {
     });
 
     it("contains a throwing prompt-error callback and preserves the typed read failure", async () => {
-      const { loadPromptsForModule } = await import("../adapters/module-loader.js");
       const dagDir = join(TEST_DIR, "dags", "team-a", "throwing-prompt-callback");
       const promptsDir = join(dagDir, "prompts");
       mkdirSync(promptsDir, { recursive: true });
@@ -547,7 +546,6 @@ describe("Module Loader", () => {
       // EVERY listing failure as "no prompts directory". Only ENOENT may mean
       // absence; an existing-but-unreadable prompts dir (EACCES) must surface
       // through onFileError instead of being silently treated as absent.
-      const { loadPromptsForModule } = await import("../adapters/module-loader.js");
 
       const dagDir = join(TEST_DIR, "dags", "team-a", "unlistable-prompts");
       const promptsDir = join(dagDir, "prompts");

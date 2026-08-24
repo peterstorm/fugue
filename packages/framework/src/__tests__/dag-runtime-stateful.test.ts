@@ -2,8 +2,9 @@
 // Covers: linear, fan-out, fan-in, diamond, retry transient, retry exhausted,
 //         HITL approve, approve-with-edit, reject, reroute-back, abort
 
-import { NoopObserver } from "../observer/observer.js";
-import type { RunId, NodeId, DagId } from "../types/ids.js";
+import type { RunId } from "../types/ids.js";
+import { testNodeContext } from "./_context-factories.js";
+import type { NodeId } from "../types/ids.js";
 import { DAG_INPUT } from "../types/ids.js";
 import { describe, it, expect, mock } from "bun:test";
 import { z } from "zod";
@@ -41,18 +42,7 @@ const makeNode = (
   ...brandedOverride(overrides),
 });
 
-const makeCtx = (): NodeContext => ({
-  runId: "test-run-id" as RunId,
-  dagId: "test-dag" as DagId,
-  observer: new NoopObserver(),
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null,
-  cache: null,
-  prompts: null,
-  llm: null, http: null,
-  clock: null,
-  logger: { warn: () => {}, error: () => {} },
-});
+const makeCtx = (): NodeContext => testNodeContext({ runId: "test-run-id" as RunId });
 
 interface MakeDagOverrides {
   readonly id?: string;
@@ -650,19 +640,9 @@ describe("runDagStateful — HITL reroute-back", () => {
 
 describe("runDagStateful — abort", () => {
   it("abort event delivered to machine produces err(aborted) (FR-033)", async () => {
-    // We test abort by providing a beforeExecute hook that aborts.
-    // The abort event itself is typically emitted externally; we simulate
-    // via the abort framing: the node throws and we pass an abort event type.
-    // More directly: test that a DAG whose node returns an abort-triggering error
-    // ends up as err(aborted). Since abort comes from the machine level, we verify
-    // via the transition layer rather than executor — the executor never sends "abort"
-    // directly; that is an external signal. Here we ensure that the error path works.
-
-    // The simplest way to verify abort behavior is to use a DAG with humanReview,
-    // provide an onHumanReview that never resolves, but the job emits an abort.
-    // Instead: verify that the DAG properly returns err when a node throws unexpectedly.
-
-    // Actually let's test it using the job directly with an aborted state pre-loaded.
+    // `abort` is an EXTERNAL signal — the executor never emits it — so this
+    // drives the machine directly with a pre-loaded aborted state rather than
+    // going through the executor.
     const dag = makeDag({
       nodes: [makeNode("a", { run: async () => ok("out") })],
       edges: [{ from: DAG_INPUT, to: "a" }],

@@ -50,6 +50,7 @@
 
 import { z } from "zod";
 import { encodePathSegments } from "./path-encoding.js";
+import { buildSignal } from "./request-signal.js";
 import { match } from "ts-pattern";
 import type { Result, FrameworkError, CapabilityHandle } from "@fuguejs/framework";
 import { ok, err, nodeId, frameworkError, safeErrorMessage } from "@fuguejs/framework";
@@ -157,15 +158,6 @@ export const mapGraphStatus = (status: number, url: string): FrameworkError => {
   return crashErr(`Graph ${status} for ${where}`);
 };
 
-/** Compose the caller signal with a per-request timeout. */
-const buildSignal = (opts: ReadOpts | undefined, timeoutMs: number): AbortSignal | undefined => {
-  const signals: AbortSignal[] = [];
-  if (opts?.signal) signals.push(opts.signal);
-  if (timeoutMs > 0) signals.push(AbortSignal.timeout(timeoutMs));
-  if (signals.length === 0) return undefined;
-  if (signals.length === 1) return signals[0];
-  return AbortSignal.any(signals);
-};
 
 /**
  * Encode a sharing URL into a Graph share token (`u!{base64url}`), per the

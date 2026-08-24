@@ -55,9 +55,19 @@ import {
 } from "./tenant-registry.js";
 import type {
   ActiveTenantConfig,
+  DeregisteredTenantConfig,
   TenantConfig,
   TenantRegistry,
 } from "./tenant-registry.js";
+
+/**
+ * What a compare-and-delete actually did. `superseded` is neither success nor
+ * failure: the tombstone the caller observed is no longer the live record (the
+ * tenant was revived, or re-deregistered), so the delete was correctly REFUSED
+ * and must not be retried. Modelling it as a third outcome rather than folding
+ * it into `ok(undefined)` keeps the refusal a reported fact.
+ */
+export type HardDeleteOutcome = "deleted" | "absent" | "superseded";
 
 // ── Redis key + channel layout (AD-5) ────────────────────────────────────────
 
@@ -326,8 +336,19 @@ export interface RedisTenantRegistry {
    * at all. Idempotent (deleting an absent record is a no-op success) and
    * fail-closed (a Redis failure does not advance the in-memory view). Announces a
    * `deregistered` event so subscribers re-read and observe the absence.
+   *
+   * COMPARE-AND-DELETE: the caller passes the TOMBSTONE IT OBSERVED, not a bare
+   * id, and the delete lands only if the live entry is still that same tombstone.
+   * `register` REVIVES a deregistered tenant, and the purge takes four awaited
+   * I/O steps before reaching here — so an id alone would let a sweep started
+   * before a revival delete the config record of a now-live tenant. Since
+   * `deregister` preserves the original `deregisteredAt` on repeat and mints a
+   * fresh one after a revival, comparing `status` + `deregisteredAt` catches both
+   * a revival and a revive-then-re-deregister. The comparison and the delete run
+   * in the SAME `serializeMutation` turn as `register`, so this is atomic rather
+   * than another check-then-act.
    */
-  readonly hardDelete: (id: TenantId) => Promise<Result<void, HostError>>;
+  readonly hardDelete: (tombstone: DeregisteredTenantConfig) => Promise<Result<HardDeleteOutcome, HostError>>;
   /** Re-read the whole registry from Redis (hydrate / resync). */
   readonly hydrate: () => Promise<Result<TenantRegistry, HostError>>;
 }
@@ -448,6 +469,34 @@ export const createRedisTenantRegistry = (
     return result;
   };
 
+  /**
+   * THE one commit sequence every registry transition follows: run the pure
+   * core, suppress a same-reference no-op, persist the entry the CORE committed
+   * (never the caller's raw input), fail closed without advancing memory, then
+   * advance. Three transitions differed only in which core function they call
+   * and how they name the event — the ordering, the no-op suppression, and the
+   * fail-closed rule are the parts that must never diverge, so they live here.
+   */
+  const commitTransition = async (
+    id: TenantId,
+    transition: () => Result<TenantRegistry, HostError>,
+    event: { readonly kind: "registered" | "deregistered" | "reconfigured"; readonly tenant: TenantId },
+    op: string,
+  ): Promise<Result<void, HostError>> => {
+    const next = transition();
+    if (!next.ok) return err(next.error);
+    // Idempotent no-op: the core returned the SAME registry reference (identical
+    // end state), so there is nothing new to persist. Suppressing the redundant
+    // re-persist also suppresses a duplicate event, which would otherwise be
+    // pure noise to every subscriber.
+    if (next.value === registry) return ok(undefined);
+    const committed = next.value.entries.get(id)!;
+    const persisted = await persistAndAnnounce(committed, event, op);
+    if (!persisted.ok) return persisted; // fail closed — memory NOT advanced
+    registry = next.value;
+    return ok(undefined);
+  };
+
   return {
     snapshot: () => registry,
 
@@ -477,61 +526,51 @@ export const createRedisTenantRegistry = (
     },
 
     register: (cfg, now) =>
-      serializeMutation(async () => {
-        // Pure core: validate + idempotent transition.
-        const next = coreRegister(registry, cfg, now);
-        if (!next.ok) return err(next.error);
-        // Idempotent no-op: the core returned the SAME registry reference (identical
-        // end state), so there is nothing new to persist. Suppress the redundant
-        // re-persist + duplicate `registered` event — mirrors how the absent-tenant
-        // deregister suppresses its no-op event. State stays idempotent.
-        if (next.value === registry) return ok(undefined);
-        // Persist the entry the core actually COMMITTED (always the active variant),
-        // never the raw caller input — so what lands in Redis is exactly the
-        // core-normalized record.
-        const committed = next.value.entries.get(cfg.id)!;
-        const persisted = await persistAndAnnounce(committed, { kind: "registered", tenant: cfg.id }, "tenant-register");
-        if (!persisted.ok) return persisted; // fail closed — memory NOT advanced
-        registry = next.value;
-        return ok(undefined);
-      }),
+      serializeMutation(() =>
+        commitTransition(
+          cfg.id,
+          () => coreRegister(registry, cfg, now),
+          { kind: "registered", tenant: cfg.id },
+          "tenant-register",
+        ),
+      ),
 
+    // Same-reference no-op here covers BOTH cases (absent tenant, and
+    // already-deregistered) — see `commitTransition`.
     deregister: (id, now) =>
-      serializeMutation(async () => {
-        const next = coreDeregister(registry, id, now);
-        if (!next.ok) return err(next.error);
-        // Same-reference return covers BOTH no-op cases (absent tenant, and
-        // already-deregistered): nothing changed, so no write and no event — there
-        // is nothing to persist or announce, and announcing a no-op would be noise.
-        if (next.value === registry) return ok(undefined);
-        // Persist the entry the core committed — the deregistered (tombstoned) variant.
-        const committed = next.value.entries.get(id)!;
-        const persisted = await persistAndAnnounce(committed, { kind: "deregistered", tenant: id }, "tenant-deregister");
-        if (!persisted.ok) return persisted;
-        registry = next.value;
-        return ok(undefined);
-      }),
+      serializeMutation(() =>
+        commitTransition(
+          id,
+          () => coreDeregister(registry, id, now),
+          { kind: "deregistered", tenant: id },
+          "tenant-deregister",
+        ),
+      ),
 
     reconfigure: (cfg, now) =>
-      serializeMutation(async () => {
-        const next = coreReconfigure(registry, cfg, now);
-        if (!next.ok) return err(next.error); // tenant-unknown (fail-closed) etc.
-        // Idempotent no-op: identical config → same reference → suppress re-persist
-        // + duplicate `reconfigured` event.
-        if (next.value === registry) return ok(undefined);
-        // Persist the committed (active) entry, not the raw input.
-        const committed = next.value.entries.get(cfg.id)!;
-        const persisted = await persistAndAnnounce(committed, { kind: "reconfigured", tenant: cfg.id }, "tenant-reconfigure");
-        if (!persisted.ok) return persisted;
-        registry = next.value;
-        return ok(undefined);
-      }),
+      serializeMutation(() =>
+        commitTransition(
+          cfg.id,
+          () => coreReconfigure(registry, cfg, now),
+          { kind: "reconfigured", tenant: cfg.id },
+          "tenant-reconfigure",
+        ),
+      ),
 
-    hardDelete: (id) =>
+    hardDelete: (tombstone) =>
       serializeMutation(async () => {
+        const id = tombstone.id;
         const existing = registry.entries.get(id);
         // Idempotent no-op: nothing to delete → success, no write, no event.
-        if (existing === undefined) return ok(undefined);
+        if (existing === undefined) return ok("absent" as const);
+        // Compare-and-delete against the observed tombstone. A revived tenant
+        // (now `active`) or one re-deregistered since the sweep sampled it is a
+        // DIFFERENT record — deleting it would destroy a live tenant's config.
+        // Report the supersession instead of silently succeeding, so the sweep
+        // can abandon the purge rather than retry it forever.
+        if (existing.status !== "deregistered" || existing.deregisteredAt !== tombstone.deregisteredAt) {
+          return ok("superseded" as const);
+        }
         // Delete the persisted record FIRST; fail closed (do NOT advance memory) on
         // any Redis failure so the in-memory view never diverges from a delete that
         // did not land.
@@ -554,7 +593,7 @@ export const createRedisTenantRegistry = (
         // runtime-read-only facade as every other registry transition.
         registry = removeRetainedEntry(registry, id);
         alive();
-        return ok(undefined);
+        return ok("deleted" as const);
       }),
 
     hydrate: () => serializeMutation(async () => {

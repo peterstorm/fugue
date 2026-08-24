@@ -85,6 +85,14 @@ const illFormedUtf16StringArbitrary = fc.oneof(
     .map(([loneLow, suffix]) => `${String.fromCharCode(loneLow)}${suffix}`),
 );
 
+/**
+ * The closed set of values that are NOT a non-negative safe integer: negative,
+ * fractional, NaN, Infinity, and past the safe-integer bound. Named once so both
+ * sequence guards probe the SAME corpus — a case added for one and not the other
+ * would leave a real hole while looking covered.
+ */
+const INVALID_SEQUENCES = [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1] as const;
+
 describe("layout constants — the on-disk contract", () => {
   it("names the journal/checkpointer layout exactly", () => {
     expect(EVENTS_DIR).toBe("events");
@@ -416,7 +424,7 @@ describe("eventFileName — pad6 zero-padding and shape (ADR-0076)", () => {
   });
 
   it("fails fast on invalid sequences (invariant guards)", () => {
-    for (const bad of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1]) {
+    for (const bad of INVALID_SEQUENCES) {
       expect(() => eventFileName(bad, d), `sequence ${bad}`).toThrow(/non-negative safe integer/);
     }
   });
@@ -502,7 +510,7 @@ describe("eventDigestOf — keyed vs keyless (ADR-0076)", () => {
     // fractional or negative sequence could never be named by eventFileName,
     // so hashing it would produce a digest for a record the layout contract
     // cannot represent.
-    for (const bad of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1]) {
+    for (const bad of INVALID_SEQUENCES) {
       expect(
         () => eventDigestOf({ dedupKey: "", sequence: bad, event }),
         `keyless sequence ${bad}`,

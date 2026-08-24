@@ -321,45 +321,60 @@ const depthExceeded = (walk: string, depth: number): never => {
   );
 };
 
+/**
+ * Descend into a container: enforce the ceiling and return the child depth.
+ *
+ * The check and the increment are the SAME step — "a container costs a hop" —
+ * so they are expressed once instead of as a guard line plus a `depth + 1` at
+ * every recursive call. Deliberately NOT hoisted above the type dispatch:
+ * primitive leaves do not cost a hop (matching `validateSerializedValueGrammar`
+ * exactly, so a writer can never emit a value the strict reader rejects on
+ * depth), and a guard before the dispatch would start charging them one.
+ */
+const descend = (walk: string, depth: number): number => {
+  if (depth > MAX_SAFE_RECORD_DEPTH) depthExceeded(walk, depth);
+  return depth + 1;
+};
+
 const serializeAt = (value: unknown, depth: number): unknown => {
   if (value === undefined) {
     return { [UNDEFINED_TAG]: true } satisfies SerializedUndefined;
   }
 
   if (value instanceof Date) {
-    if (depth > MAX_SAFE_RECORD_DEPTH) depthExceeded("serializeValue", depth);
+    descend("serializeValue", depth);
     return { [DATE_TAG]: value.toISOString() } satisfies SerializedDate;
   }
 
   if (value instanceof Map) {
-    if (depth > MAX_SAFE_RECORD_DEPTH) depthExceeded("serializeValue", depth);
+    const next = descend("serializeValue", depth);
     const entries: Array<[unknown, unknown]> = [];
     for (const [k, v] of value.entries()) {
-      entries.push([serializeAt(k, depth + 1), serializeAt(v, depth + 1)]);
+      entries.push([serializeAt(k, next), serializeAt(v, next)]);
     }
     return { [MAP_TAG]: entries } satisfies SerializedMap;
   }
 
   if (value instanceof Set) {
-    if (depth > MAX_SAFE_RECORD_DEPTH) depthExceeded("serializeValue", depth);
+    const next = descend("serializeValue", depth);
     const items: unknown[] = [];
     for (const item of value.values()) {
-      items.push(serializeAt(item, depth + 1));
+      items.push(serializeAt(item, next));
     }
     return { [SET_TAG]: items } satisfies SerializedSet;
   }
 
   if (Array.isArray(value)) {
-    if (depth > MAX_SAFE_RECORD_DEPTH) depthExceeded("serializeValue", depth);
-    return value.map((item) => serializeAt(item, depth + 1));
+    const next = descend("serializeValue", depth);
+    return value.map((item) => serializeAt(item, next));
   }
 
   if (value !== null && typeof value === "object") {
-    if (depth > MAX_SAFE_RECORD_DEPTH) depthExceeded("serializeValue", depth);
+    const next = descend("serializeValue", depth);
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
       if (POLLUTION_KEYS.has(k)) continue;
-      out[k] = serializeAt(v, depth + 1);
+      out[k] = serializeAt(v, next);
     }
     return out;
   }
@@ -433,14 +448,14 @@ const deserializeAt = (value: unknown, depth: number): unknown => {
   if (value === null || value === undefined) return value;
 
   if (Array.isArray(value)) {
-    if (depth > MAX_SAFE_RECORD_DEPTH) depthExceeded("deserializeValue", depth);
-    return value.map((item) => deserializeAt(item, depth + 1));
+    const next = descend("deserializeValue", depth);
+    return value.map((item) => deserializeAt(item, next));
   }
 
   if (typeof value === "object") {
     // Same counting as `validateSerializedValueGrammar`: the container costs
     // the hop, and a tag object is a container like any other.
-    if (depth > MAX_SAFE_RECORD_DEPTH) depthExceeded("deserializeValue", depth);
+    const next = descend("deserializeValue", depth);
     const obj = value as Record<string, unknown>;
 
     // Detect serialized undefined
@@ -461,7 +476,7 @@ const deserializeAt = (value: unknown, depth: number): unknown => {
     if (MAP_TAG in obj && Array.isArray(obj[MAP_TAG])) {
       const map = new Map<unknown, unknown>();
       for (const [k, v] of obj[MAP_TAG] as Array<[unknown, unknown]>) {
-        map.set(deserializeAt(k, depth + 1), deserializeAt(v, depth + 1));
+        map.set(deserializeAt(k, next), deserializeAt(v, next));
       }
       return map;
     }
@@ -470,7 +485,7 @@ const deserializeAt = (value: unknown, depth: number): unknown => {
     if (SET_TAG in obj && Array.isArray(obj[SET_TAG])) {
       const set = new Set<unknown>();
       for (const item of obj[SET_TAG] as unknown[]) {
-        set.add(deserializeAt(item, depth + 1));
+        set.add(deserializeAt(item, next));
       }
       return set;
     }
@@ -479,7 +494,7 @@ const deserializeAt = (value: unknown, depth: number): unknown => {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(obj)) {
       if (POLLUTION_KEYS.has(k)) continue;
-      out[k] = deserializeAt(v, depth + 1);
+      out[k] = deserializeAt(v, next);
     }
     return out;
   }

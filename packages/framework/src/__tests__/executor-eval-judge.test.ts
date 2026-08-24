@@ -1,5 +1,5 @@
-import { NoopObserver } from "../observer/observer.js";
-import type { RunId, NodeId, DagId } from "../types/ids.js";
+import { testNodeContext } from "./_context-factories.js";
+import type { NodeId } from "../types/ids.js";
 import { describe, test, expect } from "bun:test";
 import { z } from "zod";
 import { runDag } from "../../src/executor/run-dag.js";
@@ -17,19 +17,7 @@ import { DAG_INPUT } from "../types/ids.js";
 
 // --- Helpers ---
 
-const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
-  runId: "test-run" as RunId,
-  dagId: "test-dag" as DagId,
-  observer: new NoopObserver(),
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null,
-  cache: null,
-  prompts: null,
-  llm: null, http: null,
-  clock: null,
-  logger: { warn: () => {}, error: () => {} },
-  ...overrides,
-});
+const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => testNodeContext(overrides);
 
 const makeMockJudgeLlm = (response: EvalJudgeResponse): LlmClient => ({
   sendWithTools: stubSendWithTools,

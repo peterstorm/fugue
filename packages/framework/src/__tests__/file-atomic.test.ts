@@ -100,6 +100,22 @@ const deadPid = (): number =>
 // atomicWriteFile
 // ---------------------------------------------------------------------------
 
+/**
+ * Install a framework logger that records warnings into `warnings`.
+ *
+ * Seven tests hand-rolled this exact stub before the file grew a helper for it,
+ * and eleven used the helper — the same object written two ways in one file.
+ * One definition means a change to `Logger` breaks in one place, not eighteen.
+ */
+const recordingLogger = (warnings: string[]): void => {
+  setFrameworkLogger({
+    debug: () => {},
+    info: () => {},
+    warn: (message: string) => { warnings.push(message); },
+    error: () => {},
+  });
+};
+
 describe("atomicWriteFile", () => {
   test("rename replaces a symlink squatting at the target path — the symlink's target is untouched (POSIX rename semantics the journal's append/checkpoint commits rely on)", () => {
     const dir = tempDir();
@@ -237,14 +253,7 @@ describe("atomicWriteFile", () => {
 
   test("cleanup failure of the swallowed-as-absence class is WARNED, not skipped by an existsSync probe (ENOTDIR representative)", () => {
     const warnings: string[] = [];
-    setFrameworkLogger({
-      debug: () => {},
-      info: () => {},
-      warn: (msg: string) => {
-        warnings.push(msg);
-      },
-      error: () => {},
-    });
+    recordingLogger(warnings);
     try {
       const dir = tempDir();
       const target = join(dir, "checkpoint.json");
@@ -432,14 +441,7 @@ describe("withFileLock — stale steal and ownership", () => {
 
   test("releaseFileLock warns and removes an OWNED lock whose pid metadata is corrupt (foreign pid bytes + matching token)", async () => {
     const warnings: string[] = [];
-    setFrameworkLogger({
-      debug: () => {},
-      info: () => {},
-      warn: (msg: string) => {
-        warnings.push(msg);
-      },
-      error: () => {},
-    });
+    recordingLogger(warnings);
     try {
       const dir = tempDir();
       const lockPath = join(dir, "append.lock");
@@ -807,14 +809,7 @@ describe("withFileLock — stale steal and ownership", () => {
 
   test("releaseFileLock throws typed and logs a real owned cleanup failure", async () => {
     const warnings: string[] = [];
-    setFrameworkLogger({
-      debug: () => {},
-      info: () => {},
-      warn: (msg: string) => {
-        warnings.push(msg);
-      },
-      error: () => {},
-    });
+    recordingLogger(warnings);
     try {
       const dir = tempDir();
       const lockPath = join(dir, "append.lock");
@@ -854,14 +849,7 @@ describe("withFileLock — stale steal and ownership", () => {
 
   test("releaseFileLock stays a SILENT no-op for a foreign pid even when cleanup would fail", () => {
     const warnings: string[] = [];
-    setFrameworkLogger({
-      debug: () => {},
-      info: () => {},
-      warn: (msg: string) => {
-        warnings.push(msg);
-      },
-      error: () => {},
-    });
+    recordingLogger(warnings);
     try {
       const dir = tempDir();
       const lockPath = join(dir, "append.lock");
@@ -890,15 +878,6 @@ describe("withFileLock — stale steal and ownership", () => {
 // ---------------------------------------------------------------------------
 
 describe("file-lock diagnostics", () => {
-  const recordingLogger = (warnings: string[]): void => {
-    setFrameworkLogger({
-      debug: () => {},
-      info: () => {},
-      warn: (message: string) => { warnings.push(message); },
-      error: () => {},
-    });
-  };
-
   test("an EACCES owner-metadata read remains live and emits an actionable warning", async () => {
     const warnings: string[] = [];
     recordingLogger(warnings);
@@ -1189,14 +1168,7 @@ describe("file-lock diagnostics", () => {
 describe("cleanup-failure masking regressions", () => {
   test("a forced birth-staging cleanup failure is warned and the original ENOTEMPTY still surfaces as a retry (acquire completes)", async () => {
     const warnings: string[] = [];
-    setFrameworkLogger({
-      debug: () => {},
-      info: () => {},
-      warn: (msg: string) => {
-        warnings.push(msg);
-      },
-      error: () => {},
-    });
+    recordingLogger(warnings);
     try {
       const dir = tempDir();
       const lockPath = join(dir, "append.lock");
@@ -1246,14 +1218,7 @@ describe("cleanup-failure masking regressions", () => {
 
   test("a forced tomb-reap cleanup failure warns and keeps acquisition fail-closed", async () => {
     const warnings: string[] = [];
-    setFrameworkLogger({
-      debug: () => {},
-      info: () => {},
-      warn: (msg: string) => {
-        warnings.push(msg);
-      },
-      error: () => {},
-    });
+    recordingLogger(warnings);
     try {
       const dir = tempDir();
       const lockPath = join(dir, "append.lock");

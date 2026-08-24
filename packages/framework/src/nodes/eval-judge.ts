@@ -266,10 +266,20 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
 
         return toEvalJudgeResult(parsed.data, threshold, criteria);
       } catch (e) {
+        // A THROW here is not an LLM failure. The LLM's own failure mode is a
+        // `!result.ok` Result, handled above; anything that escapes as an
+        // exception came from orchestrator-side work — rubric resolution,
+        // message assembly on a non-serializable DAG output, a schema/encoder
+        // bug — or from an `LlmClient` breaking its Result contract. That is
+        // exactly what the `crash` outcome documents ("judge `run` threw past
+        // its outcome boundary"), and folding it into `skipped-llm-failure`
+        // merged "the model was flaky" with "we have a bug" into one bucket,
+        // making the `judgesCrashed` operational signal unreachable from inside
+        // a judge's own `run`. Both outcomes still fail closed for gating.
         const msg = `Unexpected error: ${safeErrorMessage(e)}`;
         warnWithoutThrowing(ctx, `[eval-judge:${brandedId}] ${msg}`);
         emitJudgeSkipped(ctx, brandedId, msg);
-        return llmFailureResult(msg);
+        return crashResult(msg);
       }
     },
   };

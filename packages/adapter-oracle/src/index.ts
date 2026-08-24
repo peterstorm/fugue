@@ -84,12 +84,8 @@ const ORACLE_NODE_ID = nodeId("oracle-capability");
  * and turn a deterministic contract violation into a retry storm against the
  * database.
  */
-const rowValidationError = (label: string, detail: string): FrameworkError => ({
-  kind: "node-crash",
-  nodeId: ORACLE_NODE_ID,
-  message: label + ": " + detail,
-  retriability: "non-retriable",
-});
+const rowValidationError = (label: string, detail: string): FrameworkError =>
+  oracleCrash(label + ": " + detail);
 
 declare const __oracleReadSqlBrand: unique symbol;
 export type OracleReadSql = string & { readonly [__oracleReadSqlBrand]: void };
@@ -120,24 +116,32 @@ const firstOracleStatementToken = (sql: string): string | undefined => {
   return undefined;
 };
 
+/**
+ * THE one non-retriable `node-crash` for this adapter. Every crash it reports is
+ * deterministic — a malformed statement, a schema mismatch, an Oracle error that
+ * is not in the transient set — so `retriability` is fixed here rather than
+ * repeated at each site, where an omission would silently fall back to retriable
+ * and turn a permanent failure into a retry storm against the database.
+ */
+const oracleCrash = (message: string): FrameworkError => ({
+  kind: "node-crash",
+  nodeId: ORACLE_NODE_ID,
+  message,
+  retriability: "non-retriable",
+});
+
 /** Parse caller SQL into the adapter's read-only statement domain. */
 export const parseOracleReadSql = (sql: string): Result<OracleReadSql, FrameworkError> => {
   if (typeof sql !== "string") {
-    return err({
-      kind: "node-crash",
-      nodeId: ORACLE_NODE_ID,
-      message: "Oracle capability accepts only string SELECT/WITH read statements",
-      retriability: "non-retriable",
-    });
+    return err(oracleCrash("Oracle capability accepts only string SELECT/WITH read statements"));
   }
   const token = firstOracleStatementToken(sql);
   if (token === "SELECT" || token === "WITH") return ok(sql as OracleReadSql);
-  return err({
-    kind: "node-crash",
-    nodeId: ORACLE_NODE_ID,
-    message: `Oracle capability accepts only SELECT/WITH read statements; received ${token ?? "no complete statement token"}`,
-    retriability: "non-retriable",
-  });
+  return err(
+    oracleCrash(
+      `Oracle capability accepts only SELECT/WITH read statements; received ${token ?? "no complete statement token"}`,
+    ),
+  );
 };
 
 /**
@@ -317,12 +321,7 @@ export const mapOracleError = (error: unknown, sql: string): FrameworkError => {
     return { kind: "transient", nodeId: ORACLE_NODE_ID, message: `Oracle transient: ${message} (${transientCode})` };
   }
 
-  return {
-    kind: "node-crash",
-    nodeId: ORACLE_NODE_ID,
-    message: `Oracle error: ${message} [sql: ${stripCredentials(sql).slice(0, 100)}]`,
-    retriability: "non-retriable",
-  };
+  return oracleCrash(`Oracle error: ${message} [sql: ${stripCredentials(sql).slice(0, 100)}]`);
 };
 
 /**
@@ -659,6 +658,12 @@ export const healthCheckWithTimeout = async (
   timeoutMs: number,
 ): Promise<Result<void, string>> => {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  // Set ONLY by the timer callback, so it is true exactly when the timeout won
+  // the race. The late-failure warning below is gated on it — an execute that
+  // simply rejects fast never timed out, and reporting it as a "late probe
+  // failure after timeout" would be a false claim on top of the real error the
+  // `catch` already returns. Mirrors `@fuguejs/pg`'s twin.
+  let timedOut = false;
   // Hold the execute promise so that, if the timeout wins the race, we can
   // still attach a catch to the (now losing) in-flight execute. Without this a
   // later rejection — a hung connection eventually erroring, or the production
@@ -671,16 +676,18 @@ export const healthCheckWithTimeout = async (
   // never throw: a failing log must not replace the decided verdict.
   const executePromise = queryable.execute("SELECT 1 FROM DUAL", {});
   executePromise.catch((lateError: unknown) => {
-    warnOracleWithoutThrowing("health check: late probe failure after timeout", lateError);
+    if (timedOut) {
+      warnOracleWithoutThrowing("health check: late probe failure after timeout", lateError);
+    }
   });
   try {
     await Promise.race([
       executePromise,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error(`health check timed out after ${timeoutMs}ms`)),
-          timeoutMs,
-        );
+        timer = setTimeout(() => {
+          timedOut = true;
+          reject(new Error(`health check timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
       }),
     ]);
     return ok(undefined);

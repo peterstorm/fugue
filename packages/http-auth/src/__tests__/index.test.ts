@@ -18,7 +18,7 @@ import {
   shapedRoute,
   type HttpAuthConfig,
 } from "../index.js";
-import { createTokenProvider, type FetchLike, type FetchResponseLike } from "../auth.js";
+import { createTokenProvider, type FetchLike, type FetchResponseLike, type TokenProvider } from "../auth.js";
 
 const jsonResponse = (status: number, payload: unknown): FetchResponseLike => ({
   ok: status >= 200 && status < 300,
@@ -77,6 +77,46 @@ describe("createHttpAuthAdapter — connect()", () => {
 // ---------------------------------------------------------------------------
 
 describe("healthCheckWithTimeout", () => {
+  /**
+   * A `TokenProvider` that breaks its own `Result` contract. `probe()` is
+   * declared to RETURN a `Result`, never to throw — but it is a port, and a
+   * third-party implementation can reject anyway. The health check must convert
+   * that into a plain `Err`, not let it escape and take down the readiness
+   * endpoint that called it. `get`/`invalidate` already have this proof; `probe`
+   * did not.
+   */
+  const contractBreakingProvider = (fail: () => Promise<never>): TokenProvider => ({
+    get: async () => { throw new Error("unused"); },
+    probe: fail,
+    invalidate: () => {},
+  });
+
+  it("converts a probe() that REJECTS outside its Result contract into an Err", async () => {
+    const tokens = contractBreakingProvider(() => Promise.reject(new Error("provider blew up")));
+    const result = await healthCheckWithTimeout(tokens, 1_000);
+    expect(isErr(result)).toBe(true);
+    if (!result.ok) expect(result.error).toContain("outside its Result contract");
+  });
+
+  it("converts a probe() that THROWS synchronously into an Err", async () => {
+    const tokens = contractBreakingProvider((): never => { throw new Error("sync blow-up"); });
+    const result = await healthCheckWithTimeout(tokens, 1_000);
+    expect(isErr(result)).toBe(true);
+    if (!result.ok) expect(result.error).toContain("outside its Result contract");
+  });
+
+  it("does not leak the provider's own message into the health-check error", async () => {
+    // The rejection reason is deliberately NOT interpolated: a provider is free
+    // to put a credential in its error, and this string reaches an unauthenticated
+    // readiness endpoint.
+    const tokens = contractBreakingProvider(() =>
+      Promise.reject(new Error("client_secret=super-secret-value")),
+    );
+    const result = await healthCheckWithTimeout(tokens, 1_000);
+    expect(isErr(result)).toBe(true);
+    if (!result.ok) expect(result.error).not.toContain("super-secret-value");
+  });
+
   it("returns ok when the mint resolves within the deadline", async () => {
     const fetch: FetchLike = async () => jsonResponse(200, { access_token: "tok-1", expires_in: 3600 });
     const tokens = createTokenProvider({ auth: baseConfig(fetch).auth, fetch });

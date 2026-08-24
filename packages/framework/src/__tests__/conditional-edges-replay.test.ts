@@ -5,9 +5,10 @@
 // is what this property test exercises by generating random predicates and
 // random outputs.
 
-import { NoopObserver } from "../observer/observer.js";
+import type { RunId } from "../types/ids.js";
+import { testNodeContext } from "./_context-factories.js";
 import { DAG_INPUT } from "../types/ids.js";
-import type { RunId, DagId } from "../types/ids.js";
+import type { DagId } from "../types/ids.js";
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
 import { compileDagToMachine } from "../dag-runtime/machine.js";
@@ -42,18 +43,8 @@ const makeNode = (
   ...overrides,
 });
 
-const makeCtx = (): NodeContext => ({
-  runId: "r" as RunId,
-  dagId: "d" as DagId,
-  observer: new NoopObserver(),
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null,
-  cache: null,
-  prompts: null,
-  llm: null, http: null,
-  clock: null,
-  logger: { warn: () => {}, error: () => {} },
-});
+const makeCtx = (): NodeContext =>
+  testNodeContext({ runId: "r" as RunId, dagId: "d" as DagId });
 
 const makeDag = (kind: "yes" | "no"): DagDef =>
   defineDag({

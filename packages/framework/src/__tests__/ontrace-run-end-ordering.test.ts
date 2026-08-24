@@ -12,7 +12,6 @@ import { describe, expect, it } from "bun:test";
 import { DAG_INPUT } from "../types/ids.js";
 import { z } from "zod";
 import type { NodeContext, NodeDef } from "../types/node.js";
-import type { ObserverEvent } from "../types/events.js";
 import { ok, err } from "../types/result.js";
 import { RecordingObserver } from "../observer/observer.js";
 import { defineDagFromArray } from "../executor/define-dag.js";
@@ -291,7 +290,3 @@ describe("ADR 0020: onTrace precedes run-end", () => {
     expect(lastTrace?.tag).toMatch(/^trace:failed/);
   });
 });
-
-// Keep the unused-import linter happy; ObserverEvent is the implicit base type
-// for the observer callbacks above.
-void ({} as ObserverEvent | undefined);

@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { isOk, isErr } from "@fuguejs/framework";
+import { isOk, isErr, formatFrameworkError } from "@fuguejs/framework";
 import { createTokenProvider, type FetchLike, type FetchResponseLike, type AuthConfig } from "../auth.js";
 
 // ---------------------------------------------------------------------------
@@ -574,6 +574,52 @@ describe("createTokenProvider — error mapping (no throw escapes)", () => {
     if (!result.ok) {
       const serialized = JSON.stringify(result.error);
       expect(serialized).not.toContain("super-secret-token");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Token-endpoint labelling in network diagnostics
+// ---------------------------------------------------------------------------
+
+describe("network-failure diagnostics label the token endpoint safely", () => {
+  const networkFailure = (): FetchLike => async () => { throw new Error("ECONNREFUSED"); };
+
+  it("names the endpoint ORIGIN — never its path, query, or user-info", async () => {
+    const provider = createTokenProvider({
+      auth: {
+        ...baseAuth,
+        // User-info and query carry credentials; the diagnostic must survive
+        // reaching a log without carrying them along.
+        tokenUrl: "https://user:hunter2@auth.example.com/oauth/token?client_secret=leak",
+      },
+      fetch: networkFailure(),
+    });
+
+    const result = await provider.get();
+    expect(isErr(result)).toBe(true);
+    if (!result.ok) {
+      const message = formatFrameworkError(result.error);
+      expect(message).toContain("https://auth.example.com");
+      expect(message).not.toContain("hunter2");
+      expect(message).not.toContain("leak");
+      expect(message).not.toContain("/oauth/token");
+    }
+  });
+
+  it("falls back to a constant label when the configured tokenUrl cannot be parsed", async () => {
+    // `AuthConfig.tokenUrl` is a plain string, so an unparseable value reaches
+    // this path. The diagnostic must degrade to a safe constant rather than
+    // throwing a second, unrelated error out of the failure path.
+    const provider = createTokenProvider({
+      auth: { ...baseAuth, tokenUrl: "not a url" },
+      fetch: networkFailure(),
+    });
+
+    const result = await provider.get();
+    expect(isErr(result)).toBe(true);
+    if (!result.ok) {
+      expect(formatFrameworkError(result.error)).toContain("configured token endpoint");
     }
   });
 });

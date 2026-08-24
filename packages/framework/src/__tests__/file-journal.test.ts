@@ -103,6 +103,33 @@ const eventsOf = (dir: string): readonly { type: string }[] => {
 // Closed typed factory/runtime boundary
 // ---------------------------------------------------------------------------
 
+/**
+ * Capture the value a rejecting promise / throwing call produces, so a test can
+ * ASSERT on it.
+ *
+ * This idiom appeared 20+ times in two spellings. Sharing it also removes the
+ * failure mode each hand-rolled copy had: forgetting to assert that anything
+ * threw at all, which turns a silently-succeeding call into a passing test.
+ */
+const captureRejection = async (promise: Promise<unknown>): Promise<unknown> => {
+  try {
+    await promise;
+  } catch (error) {
+    return error;
+  }
+  throw new Error("expected the operation to reject");
+};
+
+/** Synchronous twin of `captureRejection`, for constructor/parse boundaries. */
+const captureThrow = (fn: () => unknown): unknown => {
+  try {
+    fn();
+  } catch (error) {
+    return error;
+  }
+  throw new Error("expected the operation to throw");
+};
+
 describe("createFileJournal — closed typed throwing shell", () => {
   it("rejects invalid factory directory/options with cache-error(createFileJournal)", () => {
     for (const [directory, options] of [
@@ -113,30 +140,24 @@ describe("createFileJournal — closed typed throwing shell", () => {
       [tempDir(), { typo: true }],
       [tempDir(), new (class OptionsInstance {})()],
     ] as const) {
-      let failure: unknown;
-      try {
+      const failure: unknown = captureThrow(() => {
         createFileJournal(
           directory,
           options as unknown as Parameters<typeof createFileJournal>[1],
         );
-      } catch (error) {
-        failure = error;
-      }
+      });
       expect(asCacheError(failure, "createFileJournal").message.length).toBeGreaterThan(0);
     }
   });
 
   it("rejects a class-instance options bag on the PROTOTYPE branch (pinned by exact message)", () => {
     class OptionsInstance {}
-    let failure: unknown;
-    try {
+    const failure: unknown = captureThrow(() => {
       createFileJournal(
         tempDir(),
         new OptionsInstance() as unknown as Parameters<typeof createFileJournal>[1],
       );
-    } catch (error) {
-      failure = error;
-    }
+    });
     // The exact message isolates the prototype branch of
     // `parseFileFactoryClock`: `null` takes the first-check message ("options
     // must be a plain object, got …"), a class instance the bare branch
@@ -503,12 +524,7 @@ describe("createFileJournal — checkpoint/progress projections", () => {
     chmodSync(dir, 0o500); // read+execute, no write — mkdir no-ops, the tmp write fails
 
     try {
-      let error: unknown;
-      try {
-        await journal.writeCheckpoint(serializeFileCheckpoint({ state: "s2", context: null }));
-      } catch (e) {
-        error = e;
-      }
+      const error: unknown = await captureRejection(journal.writeCheckpoint(serializeFileCheckpoint({ state: "s2", context: null })));
       expect(error).toBeDefined();
       const typed = asCacheError(error as FrameworkError);
       expect(typed.operation).toBe("writeCheckpoint");
@@ -788,12 +804,7 @@ describe("createFileJournal.appendEvent — lock-acquire failures are typed (ADR
     writeFileSync(join(eventsDir, APPEND_LOCK), "squatter");
 
     const journal = createFileJournal(dir);
-    let error: unknown;
-    try {
-      await journal.appendEvent({ type: "X" }, "k1");
-    } catch (e) {
-      error = e;
-    }
+    const error: unknown = await captureRejection(journal.appendEvent({ type: "X" }, "k1"));
     expect(error).toBeDefined();
     expect((error as FrameworkError).kind).toBe("cache-error");
     // `asCacheError` narrows the union: it throws unless the error is the
@@ -822,12 +833,7 @@ describe("createFileJournal.appendEvent — writer-side listing contract", () =>
     const before = listEventFiles(dir);
     writeFileSync(join(dir, EVENTS_DIR, "README.json"), "{}");
 
-    let error: unknown;
-    try {
-      await journal.appendEvent({ type: "B" }, "k1");
-    } catch (e) {
-      error = e;
-    }
+    const error: unknown = await captureRejection(journal.appendEvent({ type: "B" }, "k1"));
     expect(error).toBeDefined();
     const typed = asCacheError(error as FrameworkError);
     expect(typed.operation).toBe("appendEvent");
@@ -851,12 +857,7 @@ describe("createFileJournal.appendEvent — writer-side listing contract", () =>
     const before = listEventFiles(dir);
     writeFileSync(join(dir, EVENTS_DIR, "000000-deadbeef.json"), "{}"); // digest too short
 
-    let error: unknown;
-    try {
-      await journal.appendEvent({ type: "B" }, "k1");
-    } catch (e) {
-      error = e;
-    }
+    const error: unknown = await captureRejection(journal.appendEvent({ type: "B" }, "k1"));
     expect(error).toBeDefined();
     const typed = asCacheError(error as FrameworkError);
     expect(typed.message).toContain("000000-deadbeef.json");
@@ -909,12 +910,7 @@ describe("createFileJournal.appendEvent — a directory squatting on a record na
     mkdirSync(join(eventsDir, squatName), { recursive: true });
     writeFileSync(join(eventsDir, squatName, "inner"), "x");
 
-    let error: unknown;
-    try {
-      await journal.appendEvent({ type: "X" }, "squat:k");
-    } catch (e) {
-      error = e;
-    }
+    const error: unknown = await captureRejection(journal.appendEvent({ type: "X" }, "squat:k"));
     expect(error).toBeDefined();
     const typed = asCacheError(error as FrameworkError);
     expect(typed.operation).toBe("appendEvent");
@@ -976,12 +972,7 @@ describe("createFileJournal.appendEvent — writer-side readdir failure (ADR-008
     // acquire (the 0o000 reader tests would fail earlier at the lock here).
     chmodSync(eventsDir, 0o300);
     try {
-      let error: unknown;
-      try {
-        await journal.appendEvent({ type: "B" }, "k1");
-      } catch (e) {
-        error = e;
-      }
+      const error: unknown = await captureRejection(journal.appendEvent({ type: "B" }, "k1"));
       expect(error).toBeDefined();
       const typed = asCacheError(error as FrameworkError);
       expect(typed.operation).toBe("appendEvent");
@@ -1010,12 +1001,7 @@ describe("createFileJournal.appendEvent — per-entry stat failure in the writer
     const dangling = join(eventsDir, `000001-${"a".repeat(64)}.json`);
     symlinkSync(join(eventsDir, "target-that-does-not-exist"), dangling);
 
-    let error: unknown;
-    try {
-      await journal.appendEvent({ type: "B" }, "k1");
-    } catch (e) {
-      error = e;
-    }
+    const error: unknown = await captureRejection(journal.appendEvent({ type: "B" }, "k1"));
 
     expect(error).toBeDefined();
     const typed = asCacheError(error as FrameworkError);
@@ -1046,12 +1032,7 @@ describe("createFileJournal.appendEvent — events-dir creation failure (ADR-008
     writeFileSync(join(dir, EVENTS_DIR), "squatter");
     const journal = createFileJournal(dir);
 
-    let error: unknown;
-    try {
-      await journal.appendEvent({ type: "A" }, "k0");
-    } catch (e) {
-      error = e;
-    }
+    const error: unknown = await captureRejection(journal.appendEvent({ type: "A" }, "k0"));
     expect(error).toBeDefined();
     const typed = asCacheError(error as FrameworkError);
     expect(typed.operation).toBe("appendEvent");
@@ -1066,12 +1047,7 @@ describe("createFileJournal.appendEvent — events-dir creation failure (ADR-008
     // EACCES — the create path of the append transaction, before the lock.
     chmodSync(dir, 0o500);
     try {
-      let error: unknown;
-      try {
-        await journal.appendEvent({ type: "A" }, "k0");
-      } catch (e) {
-        error = e;
-      }
+      const error: unknown = await captureRejection(journal.appendEvent({ type: "A" }, "k0"));
       expect(error).toBeDefined();
       const typed = asCacheError(error as FrameworkError);
       expect(typed.operation).toBe("appendEvent");
@@ -1102,12 +1078,7 @@ describe("createFileJournal.writeProgress — percent validated (0..100)", () =>
     const journal = createFileJournal(dir);
     await journal.writeProgress(42); // a good write first
     for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -1, 101, 100.5]) {
-      let error: unknown;
-      try {
-        await journal.writeProgress(bad);
-      } catch (e) {
-        error = e;
-      }
+      const error: unknown = await captureRejection(journal.writeProgress(bad));
       const typed = asCacheError(error, "writeProgress");
       expect(typed.message).toContain("percent");
       expect(typed.message).toMatch(/\[0, 100\]/);
@@ -1625,12 +1596,7 @@ describe("cache-error failure-class classification (permanent vs transient)", ()
     expect(retriabilityOf(appended)).toBe("non-retriable");
 
     // Invalid progress value — deterministic caller bug.
-    let progressFailure: unknown;
-    try {
-      await journal.writeProgress(101);
-    } catch (error) {
-      progressFailure = error;
-    }
+    const progressFailure: unknown = await captureRejection(journal.writeProgress(101));
     const progressed = asCacheError(progressFailure as FrameworkError, "writeProgress");
     expect(progressed.failureClass).toBe("permanent");
     expect(retriabilityOf(progressed)).toBe("non-retriable");

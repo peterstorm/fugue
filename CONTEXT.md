@@ -68,6 +68,7 @@ gates, freshness-aware state management, and production observability.
 | **Witness** | A token asserting the version of a resource at a point in time: `{ kind, resource, value }`. |
 | **Freshness Violation** | Detected when a write's `conditionedOn` witness has been superseded by a later write to the same resource. |
 | **FreshnessIndex** | Port interface for witness tracking. Three adapters: `InMemoryFreshnessIndex` (single-process), Redis-backed (distributed), file-backed (digest-addressed singletons, `file/` subpath). |
+| **`checkFreshness` (batch)** | The same stale-read rule in BATCH form over an event log. Off the runtime path — used for post-hoc forensics and as the differential oracle a property test checks `InMemoryFreshnessIndex` against, so the rule cannot drift between the two implementations. Not exported from the package barrel. |
 
 ### Human-in-the-Loop (HITL)
 

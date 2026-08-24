@@ -148,6 +148,25 @@ const collectLogs = () => {
 
 // ── resolveTtl ─────────────────────────────────────────────────────────────
 
+/**
+ * THE one shared-infra fixture. It was redefined verbatim in six places (plus
+ * two parameterized-but-identical copies) — every copy carrying the same stub
+ * llm/redis/tracer/logger — so a change to what `SharedInfra` requires had to be
+ * remembered eight times. `capabilities` defaults to none; the tests that care
+ * pass the handles they are actually asserting on.
+ */
+const baseSharedInfra = (
+  capabilities: SharedInfra["capabilities"] = [],
+): SharedInfra => ({
+  llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
+  redis: createMockRedis().redis,
+  tracer: noopTracer,
+  contentFilter: null,
+  prompts: null,
+  logger: { info: () => {}, warn: () => {}, error: () => {} },
+  capabilities,
+});
+
 describe("resolveTtl", () => {
   it("returns undefined for both when no TTL configured", () => {
     const dag = makeDag();
@@ -349,18 +368,6 @@ describe("createNamespacedCheckpointWriter", () => {
 // ── Built-in http capability wiring (ADR-0051) ──────────────────────────────
 
 describe("createNodeContextForDag — built-in http capability", () => {
-  const baseSharedInfra = (
-    capabilities: SharedInfra["capabilities"],
-  ): SharedInfra => ({
-    llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
-    redis: createMockRedis().redis,
-    tracer: noopTracer,
-    contentFilter: null,
-    prompts: null,
-    logger: { info: () => {}, warn: () => {}, error: () => {} },
-    capabilities,
-  });
-
   // Regression guard: main.ts wires `createHttpCapability()` into
   // `sharedInfra.capabilities`. If that wiring is dropped, `ctx.http` is null
   // and any `requires: ["http"]` DAG fails the boot-time capability check.
@@ -417,16 +424,6 @@ describe("createNodeContextForDag — built-in http capability", () => {
 // ACL-escaping key, so it must stay fail-closed.
 
 describe("createNodeContextForDag — fail-closed tenant derivation (AD-4 / US2 / SC-001)", () => {
-  const baseSharedInfra = (): SharedInfra => ({
-    llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
-    redis: createMockRedis().redis,
-    tracer: noopTracer,
-    contentFilter: null,
-    prompts: null,
-    logger: { info: () => {}, warn: () => {}, error: () => {} },
-    capabilities: [],
-  });
-
   it("REFUSES (throws) when the DAG's owning team contains a colon — never emits a key that escapes the tenant prefix", async () => {
     // A team with a `:` cannot be a TenantId (`:` is the key-segment delimiter);
     // interpolating it unchecked would forge a sibling namespace
@@ -511,18 +508,6 @@ describe("createNodeContextForDag — routed-tenant key namespacing (ADR-0067 / 
 // ── Static client wiring (SC-005 zero-regression) ───────────────────────────
 
 describe("createNodeContextForDag — static client wiring (SC-005)", () => {
-  const baseSharedInfra = (
-    capabilities: SharedInfra["capabilities"],
-  ): SharedInfra => ({
-    llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
-    redis: createMockRedis().redis,
-    tracer: noopTracer,
-    contentFilter: null,
-    prompts: null,
-    logger: { info: () => {}, warn: () => {}, error: () => {} },
-    capabilities,
-  });
-
   // Regression proof for the base-context wiring: the boot-scoped static client
   // must be reachable on the NodeContext BYTE-IDENTICAL to what `extractClients`
   // produces — the SAME reference, not a copy. Per-node minting layers OVER this
@@ -693,15 +678,6 @@ describe("invocationOriginForIdentity — user sub threading + real-client resol
   });
 
   it("the factory accepts a user identity and produces a usable NodeContext (sub threaded, no throw)", async () => {
-    const baseSharedInfra = (): SharedInfra => ({
-      llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
-      redis: createMockRedis().redis,
-      tracer: noopTracer,
-      contentFilter: null,
-      prompts: null,
-      logger: { info: () => {}, warn: () => {}, error: () => {} },
-      capabilities: [],
-    });
     const userIdentity: AuthIdentity = { kind: "user", sub: "user-xyz", azp: "fugue-frontend", canRunDag: () => true };
     const shared = baseSharedInfra();
 
@@ -724,15 +700,6 @@ describe("invocationOriginForIdentity — user sub threading + real-client resol
   });
 
   it("FR-040 fail-closed: the factory REFUSES (throws) a DAG with no agent client mapping when minting is ACTIVE — never mints an absent identity", async () => {
-    const baseSharedInfra = (): SharedInfra => ({
-      llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
-      redis: createMockRedis().redis,
-      tracer: noopTracer,
-      contentFilter: null,
-      prompts: null,
-      logger: { info: () => {}, warn: () => {}, error: () => {} },
-      capabilities: [],
-    });
     const shared = baseSharedInfra();
     // Empty map + minting ACTIVE (broker wired) → the DAG has no agent client →
     // fail closed (the origin WOULD be consumed by per-node minting).
@@ -749,15 +716,6 @@ describe("invocationOriginForIdentity — user sub threading + real-client resol
   });
 
   it("zero-regression no-realm baseline (SC-001/SC-005): an UNMAPPED dag with minting INACTIVE does NOT throw and yields origin `undefined` — a no-realm deployment must not 500 every run", async () => {
-    const baseSharedInfra = (): SharedInfra => ({
-      llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
-      redis: createMockRedis().redis,
-      tracer: noopTracer,
-      contentFilter: null,
-      prompts: null,
-      logger: { info: () => {}, warn: () => {}, error: () => {} },
-      capabilities: [],
-    });
     const shared = baseSharedInfra();
     // Empty map (the default) + minting INACTIVE (no broker) → origin is never
     // consumed, so the run proceeds on the static path with origin === undefined.
@@ -775,15 +733,6 @@ describe("invocationOriginForIdentity — user sub threading + real-client resol
   });
 
   it("FR-040 + NFR-014 ordering: a user run carrying a subject token on an UNMAPPED dag (minting active) throws BEFORE binding the token — no JWT retained under a non-proceeding run", async () => {
-    const baseSharedInfra = (): SharedInfra => ({
-      llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
-      redis: createMockRedis().redis,
-      tracer: noopTracer,
-      contentFilter: null,
-      prompts: null,
-      logger: { info: () => {}, warn: () => {}, error: () => {} },
-      capabilities: [],
-    });
     const shared = baseSharedInfra();
     const bound: RunId[] = [];
     const userWithProof: AuthIdentity = {
@@ -843,16 +792,6 @@ describe("subjectTokenForIdentity — pure host-side extraction (FR-030/FR-032)"
 });
 
 describe("createNodeContextForDag — binds the subject token host-side, NEVER on the origin (FR-032)", () => {
-  const baseSharedInfra = (): SharedInfra => ({
-    llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
-    redis: createMockRedis().redis,
-    tracer: noopTracer,
-    contentFilter: null,
-    prompts: null,
-    logger: { info: () => {}, warn: () => {}, error: () => {} },
-    capabilities: [],
-  });
-
   it("binds runId → subject token via the sink for a user run; the token is ABSENT from the string-only origin", async () => {
     const proof = markSubjectToken("verified.user.jwt-FR032");
     const userIdentity: AuthIdentity = {

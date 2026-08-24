@@ -761,17 +761,14 @@ describe("advanceToNextWave", () => {
   });
 
   it("fails when outputNodeId unset and last wave is empty (F3)", () => {
-    // waves has an empty last entry
-    // @ts-expect-error — branded ID test fixture
-    const ctx = makeCtx({ waves: [[] as any] as unknown as readonly (readonly string[])[], outputs: new Map() });
-    advanceToNextWave(-1, ctx); // nextWave = 0 >= waves.length=1? No. Need to reach terminal.
-    // Actually use makeCtx with waves so that nextWave >= waves.length
-    const ctx2 = makeCtx({ waves: [[]], outputs: new Map() });
-    const result2 = advanceToNextWave(0, ctx2);
-    // nextWave=1 >= waves.length=1 => terminal; last wave is [], so should fail
-    expect(result2.state.kind).toBe("failed");
-    if (result2.state.kind === "failed") {
-      expect(result2.state.error.kind).toBe("node-crash");
+    // Advancing FROM wave 0 makes nextWave (1) >= waves.length (1), so the run
+    // reaches terminal — and the last wave is empty, so there is no node to
+    // fall back to for the output.
+    const ctx = makeCtx({ waves: [[]], outputs: new Map() });
+    const result = advanceToNextWave(0, ctx);
+    expect(result.state.kind).toBe("failed");
+    if (result.state.kind === "failed") {
+      expect(result.state.error.kind).toBe("node-crash");
     }
   });
 

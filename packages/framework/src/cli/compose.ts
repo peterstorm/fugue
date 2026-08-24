@@ -490,6 +490,23 @@ export const classifyAnswer = (text: string): AnswerClass => {
  * caller bug (the CLI never sets these options), so the boundary throws
  * rather than returning a ComposeOutcome arm.
  */
+/**
+ * THE one "input stream died" outcome. Both prompt sites (question rounds and
+ * the accept prompt) hit the same wall and must report it identically — same
+ * cause, same rounds, and the most recent gauntlet-proven draft carried along
+ * so hitting the wall never discards proven work.
+ */
+const inputClosed = (
+  rounds: ComposeRounds,
+  lastProven: AuthoredDag | null,
+): ComposeOutcome => ({
+  ok: false,
+  reason: "aborted",
+  cause: "input-closed",
+  rounds,
+  ...(lastProven !== null ? { draft: lastProven } : {}),
+});
+
 const requireRoundBudget = (value: number, name: string): number => {
   if (!Number.isInteger(value) || value < 0) {
     throw new Error(`${name} must be a non-negative integer, got ${value}`);
@@ -626,15 +643,7 @@ export const runCompose = async (
         // spread is uniform with the accept-prompt site; here `lastProven` is
         // still null by construction (no draft has been proven yet), so
         // `draft` stays absent.
-        if (answer.kind === "closed") {
-          return {
-            ok: false,
-            reason: "aborted",
-            cause: "input-closed",
-            rounds,
-            ...(lastProven !== null ? { draft: lastProven } : {}),
-          };
-        }
+        if (answer.kind === "closed") return inputClosed(rounds, lastProven);
         conversation.push(`Q: ${q}\nA: ${answer.text}`);
       }
       continue;
@@ -733,15 +742,7 @@ export const runCompose = async (
       // explicit "abort" answer (a decision), a dead stream is a WALL: the
       // gauntlet-proven draft rides along as typed data (replayable via
       // `fugue new --from`) instead of vanishing with the terminal.
-      if (res.kind === "closed") {
-        return {
-          ok: false,
-          reason: "aborted",
-          cause: "input-closed",
-          rounds,
-          ...(lastProven !== null ? { draft: lastProven } : {}),
-        };
-      }
+      if (res.kind === "closed") return inputClosed(rounds, lastProven);
       answer = res.text.trim();
       if (answer.length > 0) break;
       io.say('Please answer "yes" to write, "abort" to quit, or describe a refinement.');

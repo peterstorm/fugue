@@ -28,6 +28,28 @@ import type { GitPort } from "./ports.js";
 import type { ModuleLoaderPort } from "./ports.js";
 import type { SharedInfra } from "./ports.js";
 import type { LogPort } from "./ports.js";
+
+/**
+ * Log a SHUTDOWN diagnostic without letting a broken logger stop cleanup.
+ *
+ * Teardown must always run to completion: the authoritative outcome is the
+ * `HostError`/`closeFailures` the caller already holds, and a logger that throws
+ * mid-shutdown must not strand a Redis connection or a live listener. Three
+ * teardown sites needed exactly this guard; expressing it once means a future
+ * teardown step cannot quietly omit it.
+ */
+const logSafely = <L extends "warn" | "error">(
+  logger: Pick<LogPort, L>,
+  level: L,
+  message: string,
+  data?: Record<string, unknown>,
+): void => {
+  try {
+    logger[level](message, data);
+  } catch {
+    // Deliberately contained — see above.
+  }
+};
 import type { RedisConnectivityPort } from "./ports.js";
 import { requireHitlRedisPort } from "./adapters/redis-connectivity.js";
 import { createNodeContextForDag } from "./adapters/node-context-factory.js";
@@ -184,14 +206,10 @@ export const stopBoundServerAfterBindFailure = (
     return undefined;
   } catch (error) {
     const diagnostic = safeErrorMessage(error);
-    try {
-      logger.error("Failed to stop HTTP server after bind finalization failure — listener may still be live", {
-        bind: bindDescription,
-        error: diagnostic,
-      });
-    } catch {
-      // The returned HostError remains the authoritative cleanup diagnostic.
-    }
+    // The returned HostError remains the authoritative cleanup diagnostic.
+    logSafely(logger, "error",
+      "Failed to stop HTTP server after bind finalization failure — listener may still be live",
+      { bind: bindDescription, error: diagnostic });
     return diagnostic;
   }
 };
@@ -1032,13 +1050,8 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
    */
   const teardownAfterServerStop = async (context: string): Promise<void> => {
     // Diagnostics are secondary to completing teardown.
-    const logFailure = (message: string, error: unknown): void => {
-      try {
-        logger.error(message, { error: safeErrorMessage(error) });
-      } catch {
-        // A broken logger must not stop the remaining cleanup.
-      }
-    };
+    const logFailure = (message: string, error: unknown): void =>
+      logSafely(logger, "error", message, { error: safeErrorMessage(error) });
 
     // Stop server-owned reconciliation before closing the worker/Redis it uses:
     // stop scheduling, then let the sweep already in flight finish.
@@ -1067,14 +1080,9 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
     if (sortedHandles.length > 0) {
       const closeFailures = await closeAll(sortedHandles, logger);
       if (closeFailures.length > 0) {
-        try {
-          logger.warn(`Capability shutdown completed with ${closeFailures.length} failure(s)`, {
-            context,
-            failures: closeFailures.map((f) => f.name),
-          });
-        } catch {
-          // A broken logger must not stop the remaining cleanup.
-        }
+        logSafely(logger, "warn",
+          `Capability shutdown completed with ${closeFailures.length} failure(s)`,
+          { context, failures: closeFailures.map((f) => f.name) });
       }
     }
 

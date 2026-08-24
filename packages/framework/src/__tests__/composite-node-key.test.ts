@@ -266,6 +266,17 @@ describe("parseCompositeNodeKey — classification", () => {
     expect(parseCompositeNodeKey("dag@read-node@01@0")).toBeNull(); // leading zero: never encoded
     expect(parseCompositeNodeKey("dag@read-node@0@ ")).toBeNull();
     expect(parseCompositeNodeKey(`dag@read-node@${MAX_SAFE + 1}@0`)).toBeNull(); // unsafe integer
+
+    // A pathologically long digit string is in strict decimal FORM, so the
+    // regex admits it and `Number()` saturates to Infinity. `MAX_SAFE + 1` only
+    // proves the boundary; this proves the safe-integer check is what rejects
+    // an overflowed value rather than the form check happening to catch it.
+    const overflowing = "9".repeat(400);
+    expect(Number(overflowing)).toBe(Number.POSITIVE_INFINITY);
+    expect(parseCompositeNodeKey(`dag@read-node@${overflowing}@0`)).toBeNull();
+    expect(parseCompositeNodeKey(`dag@read-node@0@${overflowing}`)).toBeNull();
+    // 1e309 in decimal form — the first magnitude past Number.MAX_VALUE.
+    expect(parseCompositeNodeKey(`dag@read-node@1${"0".repeat(309)}@0`)).toBeNull();
   });
 
   it("malformed canonical keys (0 separators but out-of-contract) ⇒ null", () => {

@@ -27,6 +27,23 @@ export type { FreshnessConflict, FreshnessCheckResult, FreshnessIndex, WriteEntr
  * freshness violations. A violation occurs when a write is conditioned on a
  * witness value that was superseded by a later write to the same resource.
  *
+ * NOT ON THE RUNTIME PATH. The runtime detects conflicts incrementally through
+ * `FreshnessIndex.findConflict` (`freshness-emission.ts` → `wave-execution.ts`);
+ * this is the BATCH form over a whole event log, and it exists for two jobs:
+ *
+ *  1. Forensics — answering "did this run have a stale-read hazard?" from an
+ *     exported log after the fact, where no live index is available.
+ *  2. The differential oracle for the incremental path. Two independent
+ *     implementations of one rule would normally be a drift risk; here the drift
+ *     is what a property test actively hunts —
+ *     `__tests__/freshness-check-property.test.ts` asserts
+ *     `InMemoryFreshnessIndex` and `checkFreshness` agree on random write
+ *     sequences (500 runs), so a change to the rule that lands in only one of
+ *     them fails the build.
+ *
+ * Deliberately NOT re-exported from the package barrel: it has no production
+ * caller, and exporting it invites use where the incremental index belongs.
+ *
  * The algorithm:
  * 1. Maintain a per-resource list of completed writes (from `WriteAttemptedEvent`).
  * 2. For each `WriteAttemptedEvent`, check if the latest recorded write to the

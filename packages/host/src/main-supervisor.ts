@@ -349,13 +349,26 @@ const main = async () => {
   }
   const { connectivity, redis, pubsub, aclAdmin, auditStream, disconnect } = redisResult.value;
 
+  /**
+   * THE one fail-closed exit for a boot step that cannot proceed. Every such
+   * step owes the SAME three things in the SAME order: say why, release the
+   * Redis connection, exit non-zero so thin-init restarts and retries. A site
+   * that skipped the disconnect would leak a connection on every restart loop.
+   * Only reachable once `disconnect` exists — the two earlier boot failures
+   * (config parse, Redis connect) have nothing to release.
+   */
+  const failClosed = async (message: string): Promise<never> => {
+    logger.error(message);
+    await disconnect();
+    process.exit(1);
+  };
+
   // Tenant registry (config + secrets REFERENCES only — never a secret value).
   const registry = createRedisTenantRegistry(redis, pubsub, {}, logger);
   const hydrateResult = await registry.hydrate();
   if (!hydrateResult.ok) {
-    logger.error(`[supervisor] tenant registry hydrate failed: ${formatHostError(hydrateResult.error)}`);
-    await disconnect();
-    process.exit(1);
+    await failClosed(`[supervisor] tenant registry hydrate failed: ${formatHostError(hydrateResult.error)}`);
+    return;
   }
 
   // NOTE (single-supervisor topology, ADR-0064): we hydrate the registry once at
@@ -603,9 +616,8 @@ const main = async () => {
     // abandons in-flight runs (violating SC-006's survival intent). Exit instead:
     // thin-init restarts the supervisor and retries the readopt once Redis is
     // healthy again, bounded by the supervisor restart budget.
-    logger.error(`[supervisor] worker re-adoption failed — exiting fail-closed (thin-init will restart and retry): ${formatHostError(readopt.error)}`);
-    await disconnect();
-    process.exit(1);
+    await failClosed(`[supervisor] worker re-adoption failed — exiting fail-closed (thin-init will restart and retry): ${formatHostError(readopt.error)}`);
+    return;
   }
   if (readopt.value.adopted.length > 0 || readopt.value.pruned.length > 0) {
     logger.info("[supervisor] worker re-adoption complete", {
@@ -621,9 +633,8 @@ const main = async () => {
   // re-authentication separately uses each tenant's scoped token store.
   const platformTenant = tenantId("platform");
   if (!platformTenant.ok) {
-    logger.error("[supervisor] unreachable: 'platform' failed tenant-id validation");
-    await disconnect();
-    process.exit(1);
+    await failClosed("[supervisor] unreachable: 'platform' failed tenant-id validation");
+    return;
   }
   const tokenStore: TokenStorePort = createRedisTokenStore(redis, platformTenant.value, logger);
 
@@ -666,9 +677,8 @@ const main = async () => {
     },
   );
   if (!bootstrapResult.ok) {
-    logger.error(`[supervisor] declarative bootstrap failed — exiting fail-closed: ${formatHostError(bootstrapResult.error)}`);
-    await disconnect();
-    process.exit(1);
+    await failClosed(`[supervisor] declarative bootstrap failed — exiting fail-closed: ${formatHostError(bootstrapResult.error)}`);
+    return;
   }
   if (bootstrapResult.value.tenantsApplied > 0 || bootstrapResult.value.teamTokensApplied > 0) {
     logger.info("[supervisor] declarative bootstrap complete", {
@@ -759,9 +769,13 @@ const main = async () => {
     // residual open slot a safe no-op the next sweep retries. Without this, the
     // per-tenant admission counters would leak one entry per purged tenant id.
     registry: {
-      hardDelete: async (tenant) => {
-        const r = await registry.hardDelete(tenant);
-        if (r.ok) tenantConc = forgetTenant(tenantConc, tenant);
+      snapshot: () => registry.snapshot(),
+      hardDelete: async (tombstone) => {
+        const r = await registry.hardDelete(tombstone);
+        // Reclaim admission state only when the record was genuinely removed —
+        // a `superseded` refusal means the tenant is live again and must KEEP
+        // its admission bookkeeping.
+        if (r.ok && r.value === "deleted") tenantConc = forgetTenant(tenantConc, tombstone.id);
         return r;
       },
     },
@@ -771,34 +785,33 @@ const main = async () => {
   // The binary owns the SCHEDULE; the policy (which tenants are due) lives in the
   // pure `selectPurgeable`. Each tick purges deregistered tenants whose grace
   // window elapsed. Idempotent, so a missed/coarse tick only delays reclamation.
-  const gracePurgeTimer = setInterval(() => {
-    void (async () => {
-      try {
-        const outcomes = await runGracePurgeSweep(
-          gracePurgeDeps,
-          registry.snapshot(),
-          config.SUPERVISOR_GRACE_WINDOW_MS,
-          Date.now(),
-          logger,
-        );
-        const purged = outcomes.filter(purgeSucceeded).length;
-        if (outcomes.length > 0) {
-          logger.info("[supervisor] grace-window purge sweep complete", {
-            attempted: outcomes.length,
-            purged,
-            partial: outcomes.length - purged,
-          });
-        }
-      } catch (e) {
-        logger.error("[supervisor] grace-window purge sweep threw", { error: e instanceof Error ? e.message : String(e) });
-      }
-    })();
-  }, config.SUPERVISOR_GRACE_PURGE_INTERVAL_MS);
-  if (typeof gracePurgeTimer.unref === "function") gracePurgeTimer.unref();
-  logger.info("[supervisor] grace-window purge sweep started", {
-    intervalMs: config.SUPERVISOR_GRACE_PURGE_INTERVAL_MS,
-    graceWindowMs: config.SUPERVISOR_GRACE_WINDOW_MS,
-  });
+  // Schedules go through `startSweep` — the ONE schedule skeleton (interval,
+  // unref so a timer never holds the process open, throw-to-log, start log) that
+  // every sweep in this binary shares.
+  const gracePurgeTimer = startSweep(
+    "grace-window purge sweep",
+    config.SUPERVISOR_GRACE_PURGE_INTERVAL_MS,
+    async () => {
+      const outcomes = await runGracePurgeSweep(
+        gracePurgeDeps,
+        registry.snapshot(),
+        config.SUPERVISOR_GRACE_WINDOW_MS,
+        Date.now(),
+        logger,
+      );
+      if (outcomes.length === 0) return;
+      const purged = outcomes.filter(purgeSucceeded).length;
+      const superseded = outcomes.filter((o) => o.kind === "superseded").length;
+      logger.info("[supervisor] grace-window purge sweep complete", {
+        attempted: outcomes.length,
+        purged,
+        // Revived mid-purge — abandoned on purpose, NOT a partial failure the
+        // next tick should retry.
+        superseded,
+        partial: outcomes.length - purged - superseded,
+      });
+    },
+  );
 
   const supervisorResult = await createSupervisor({
     config,
@@ -837,9 +850,8 @@ const main = async () => {
   });
 
   if (!supervisorResult.ok) {
-    logger.error(`[supervisor] failed to start: ${formatHostError(supervisorResult.error)}`);
-    await disconnect();
-    process.exit(1);
+    await failClosed(`[supervisor] failed to start: ${formatHostError(supervisorResult.error)}`);
+    return;
   }
 
   const supervisor = supervisorResult.value;

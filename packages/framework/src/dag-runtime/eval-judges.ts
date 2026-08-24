@@ -24,15 +24,17 @@ import { type DagRunMeta } from "./node-span.js";
 import { closeRootSpan, outcomeFromMeta } from "./run-telemetry.js";
 
 import type { NodeId } from "../types/ids.js";
+import { bestEffort as sharedBestEffort } from "./best-effort.js";
 
-/** Secondary diagnostics must never replace the primary modeled outcome. */
-const bestEffort = (action: () => void): void => {
-  try {
-    action();
-  } catch {
-    // Deliberately contained: the caller's Result/EvalJudgeResult is authoritative.
-  }
-};
+/**
+ * Secondary diagnostics must never replace the primary modeled outcome. Bound to
+ * the shared `bestEffort` (`best-effort.ts`) — the module that already exists to
+ * be the ONE encoding of this rule — so a change to it (e.g. counting suppressed
+ * diagnostics) reaches the judge path too. The scope/operation labels are fixed
+ * here because every site in this file is the same concern: judge telemetry.
+ */
+const bestEffort = (action: () => void): void =>
+  sharedBestEffort("[eval-judges]", "judge diagnostic", action);
 
 const reportJudgeCrash = (
   judge: EvalJudgeNodeDef,

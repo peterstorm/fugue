@@ -49,6 +49,7 @@
 
 import type { CapabilityHandle, FrameworkError, Result } from "@fuguejs/framework";
 import { encodePathSegments } from "./path-encoding.js";
+import { buildSignal } from "./request-signal.js";
 import { err, frameworkError, nodeId, ok, safeErrorMessage } from "@fuguejs/framework";
 import type { DocumentSource, FileRef, ReadOpts } from "@fuguejs/document-source";
 import {
@@ -186,13 +187,12 @@ export const createPathResolvingMsGraphAdapter = (
       res = await fetchImpl(url, {
         method: "GET",
         headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
-        // Bounded exactly like the stock adapter's `graphGet`: the DAG
-        // readers pass NO ReadOpts (no caller signal), so without this
-        // per-request timeout a hung Graph endpoint would hang the source
+        // Bounded exactly like the stock adapter's `graphGet` — the SAME
+        // `buildSignal`, so the knob cannot mean one thing here and another
+        // there. The DAG readers pass NO ReadOpts (no caller signal), so without
+        // this per-request timeout a hung Graph endpoint would hang the source
         // node forever.
-        signal: opts?.signal
-          ? AbortSignal.any([opts.signal, AbortSignal.timeout(requestTimeoutMs)])
-          : AbortSignal.timeout(requestTimeoutMs),
+        signal: buildSignal(opts, requestTimeoutMs),
         redirect: "follow",
       });
     } catch (e) {

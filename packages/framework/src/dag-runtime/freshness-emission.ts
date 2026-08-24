@@ -8,6 +8,12 @@
 // Fail-closed (ADR-0025): if any extractor throws OR the freshness index is
 // unavailable, the wave aborts. Synthesizing a fake conflict or proceeding
 // silently would allow undetectable stale writes.
+//
+// An abort is PARTIAL: nodes earlier in the wave may already have had their
+// witnesses recorded. That progress is returned as data on both branches of
+// `FreshnessEmissionOutcome`, so a wave retry can tell what it still owes
+// instead of inferring it from "does an output exist" — which would let a retry
+// close the wave with a write witness permanently missing.
 
 import { match } from "ts-pattern";
 import type { NodeId } from "../types/ids.js";
@@ -22,14 +28,28 @@ import { safeErrorMessage } from "../types/safe-error.js";
 import { buildNodeInput } from "../shared/build-input.js";
 import { emit } from "./emit.js";
 import type { PostWaveContext } from "./post-wave-context.js";
+import { nodeErrorEmitter } from "./post-wave-context.js";
 
 /** Extraction diagnostics are subordinate to the fail-closed `Result`. */
 const warnWithoutThrowing = (message: string): void => bestEffortLog("warn", message);
 
 /**
+ * The outcome of one wave's freshness emission.
+ *
+ * `witnessed` is present on BOTH variants: an abort still carries the nodes
+ * whose bookkeeping completed before it, so the caller can record that progress
+ * and a retry re-attempts only what is genuinely outstanding. Making the
+ * partial-progress set part of the failure variant is what keeps "aborted with
+ * unknown progress" unrepresentable.
+ */
+export type FreshnessEmissionOutcome =
+  | { readonly kind: "complete"; readonly witnessed: ReadonlySet<NodeId> }
+  | { readonly kind: "aborted"; readonly witnessed: ReadonlySet<NodeId>; readonly error: FrameworkError };
+
+/**
  * Emit freshness witness events for all reads/writes nodes in a wave.
  *
- * Fail-closed: extractor failures surface as `Err` and abort the wave.
+ * Fail-closed: extractor failures abort the wave with an `aborted` outcome.
  * The authoring bug (broken extractor) must be fixed before the DAG
  * can proceed — silently proceeding would allow downstream writes nodes
  * to operate without the witness data they need for conflict detection.
@@ -38,22 +58,12 @@ export async function emitFreshnessWitnessEvents(
   ctx: PostWaveContext,
   newOutputs: ReadonlyMap<NodeId, unknown>,
   skippedNodeIds: ReadonlySet<NodeId>,
-): Promise<Result<void, FrameworkError>> {
+): Promise<FreshnessEmissionOutcome> {
   const { waveNodeIds, nodeMap, nodeCtx, machineCtx, dagId, nowFn, freshnessIndex, witnessAccumulator } = ctx;
   const stamp = (): Date => new Date(nowFn());
   const priorOutputs = machineCtx.outputs;
-  const emitNodeError = (nodeId: NodeId, error: string, frameworkError: FrameworkError): void => {
-    emit(nodeCtx, {
-      type: "node-error",
-      runId: nodeCtx.runId,
-      dagId,
-      nodeId,
-      sideEffects: nodeMap.get(nodeId)?.sideEffects,
-      timestamp: stamp(),
-      error,
-      frameworkError,
-    });
-  };
+  const witnessed = new Set<NodeId>();
+  const emitNodeError = nodeErrorEmitter(ctx);
 
   for (const nodeId of waveNodeIds) {
     // Skip nodes that didn't actually execute (checkpoint-resumed or
@@ -204,7 +214,10 @@ export async function emitFreshnessWitnessEvents(
       )
       .exhaustive();
 
-    if (!branchResult.ok) return branchResult;
+    if (!branchResult.ok) return { kind: "aborted", witnessed, error: branchResult.error };
+    // Recorded only after the node's whole branch succeeded — a node that
+    // aborted mid-branch still owes its bookkeeping on the retry.
+    witnessed.add(nodeId);
   }
-  return ok(undefined);
+  return { kind: "complete", witnessed };
 }

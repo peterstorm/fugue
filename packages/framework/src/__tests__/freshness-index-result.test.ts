@@ -1,4 +1,4 @@
-import { resourceName, witness } from "./_freshness-helpers.js";
+import { mkWitness } from "./_freshness-helpers.js";
 /**
  * Tests for the FreshnessIndex Result-typed interface.
  *
@@ -12,11 +12,7 @@ import { describe, it, expect } from "bun:test";
 import { N, R, D } from "./_id-helpers.js";
 import { InMemoryFreshnessIndex } from "../dag-runtime/freshness-check.js";
 import type { WriteAttemptedEvent } from "../types/events.js";
-import type { Witness } from "../types/freshness.js";
 import { isOk, unwrap } from "../types/result.js";
-
-const mkWitness = (resource: string, value: string): Witness =>
-  witness("version", resourceName(resource), value);
 
 const mkWriteEvent = (
   runId: string,

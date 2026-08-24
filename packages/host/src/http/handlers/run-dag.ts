@@ -189,14 +189,16 @@ export const createRunDagHandler = (
 
     // Effective circuit config: per-DAG override (if declared) merged over the host
     // default. Each field the DAG omits falls back to the host-level config.
+    // No branch on whether an override EXISTS: each field already falls back to
+    // the host default on its own, so "no override" and "an override that sets
+    // nothing" are the same merge — writing it once removes the chance of the
+    // two arms drifting to different defaults.
     const cbOverride = registered.config.circuitBreaker;
-    const circuitConfig: CircuitConfig = cbOverride
-      ? {
-          threshold: cbOverride.failureThreshold ?? deps.circuitConfig.threshold,
-          windowMs: deps.circuitConfig.windowMs,
-          cooldownMs: cbOverride.resetTimeoutMs ?? deps.circuitConfig.cooldownMs,
-        }
-      : deps.circuitConfig;
+    const circuitConfig: CircuitConfig = {
+      threshold: cbOverride?.failureThreshold ?? deps.circuitConfig.threshold,
+      windowMs: deps.circuitConfig.windowMs,
+      cooldownMs: cbOverride?.resetTimeoutMs ?? deps.circuitConfig.cooldownMs,
+    };
 
     const concurrency = deps.getConcurrency();
     const acquireResult = acquire(concurrency, dagId, now);

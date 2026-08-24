@@ -19,6 +19,7 @@ import {
   isOk,
   setFrameworkLogger,
 } from "@fuguejs/framework";
+import type { FrameworkError } from "@fuguejs/framework";
 import { RedisCache, RedisCheckpointer } from "@fuguejs/framework/redis";
 import { DefaultAzureCredential } from "@azure/identity";
 import type { LlmClient, TracingHandle, Checkpointer, CheckpointWriter, Observer, FoundryTelemetrySink, PromptRegistry, RunId, NodeId } from "@fuguejs/framework";
@@ -267,15 +268,18 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
     // wired separately through the CheckpointWriter below.
     // get() returns a discriminated hit/miss so nullable values
     // are no longer ambiguous with cache misses.
+    // THE one rendering of a cache/checkpoint FrameworkError for these
+    // diagnostics: the kind always, plus the message only for `cache-error`
+    // (the sole variant that carries one). Three sites needed it and must agree,
+    // or the same backend failure reads differently depending on which call hit it.
+    const describe = (error: FrameworkError): string =>
+      `${error.kind}${error.kind === "cache-error" ? ` — ${error.message}` : ""}`;
+
     contextCache = {
       get: async (key: string) => {
         const r = await cache.get(key, z.unknown());
         if (!r.ok) {
-          log.warn(
-            `[cache] get failed for key=${key}: ${r.error.kind}${
-              r.error.kind === "cache-error" ? ` — ${r.error.message}` : ""
-            }`,
-          );
+          log.warn(`[cache] get failed for key=${key}: ${describe(r.error)}`);
           return { hit: false } as const;
         }
         // RedisCache.get returns ok(null) on miss, ok(value) on hit.
@@ -286,11 +290,7 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
       set: async (key: string, value: unknown) => {
         const r = await cache.set(key, value, LLM_CACHE_TTL);
         if (!r.ok) {
-          log.warn(
-            `[cache] set failed for key=${key}: ${r.error.kind}${
-              r.error.kind === "cache-error" ? ` — ${r.error.message}` : ""
-            }`,
-          );
+          log.warn(`[cache] set failed for key=${key}: ${describe(r.error)}`);
         }
         return r;
       },
@@ -307,9 +307,7 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
         });
         if (!r.ok) {
           throw new Error(
-            `checkpoint write failed for run=${runId} node=${nodeId}: ${r.error.kind}${
-              r.error.kind === "cache-error" ? ` — ${r.error.message}` : ""
-            }`,
+            `checkpoint write failed for run=${runId} node=${nodeId}: ${describe(r.error)}`,
           );
         }
       },

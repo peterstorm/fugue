@@ -37,7 +37,7 @@ import {
   makeNodeContext,
   ok,
 } from "@fuguejs/framework";
-import type { ToolDef, ToolCall, NodeContext, GuardrailResult } from "@fuguejs/framework";
+import type { ToolDef, ToolCall, NodeContext, GuardrailResult, Tracer } from "@fuguejs/framework";
 import { OpenAILlmClient } from "@fuguejs/framework";
 import { trace, SpanStatusCode } from "@opentelemetry/api";
 import { JsonFixtureSource } from "../src/sources/json-fixture-source.js";

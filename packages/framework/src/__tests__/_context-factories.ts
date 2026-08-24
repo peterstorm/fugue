@@ -21,6 +21,10 @@ import type {
 } from "../dag-runtime/types.js";
 import type { DagDef } from "../types/dag.js";
 import { dagId } from "../types/ids.js";
+import type { RunId } from "../types/ids.js";
+import type { DagId } from "../types/ids.js";
+import type { NodeContext } from "../types/node.js";
+import { NoopObserver } from "../types/observer.js";
 
 // ---------------------------------------------------------------------------
 // Per-slice factories
@@ -114,3 +118,34 @@ export const testRuntimeContext = (
     ...overrides,
   };
 };
+
+// ---------------------------------------------------------------------------
+// NodeContext fixture
+// ---------------------------------------------------------------------------
+
+/**
+ * A minimal, fully-null `NodeContext`: no LLM, no cache, no prompts, no clock,
+ * a no-op observer/tracer and a silent logger.
+ *
+ * The same 11-field literal was written out in seven test files, differing only
+ * in the run/dag id strings. Every field added to `NodeContext` had to be
+ * remembered in all seven — and a file that forgot one simply stopped compiling
+ * for reasons unrelated to what it was testing. Callers override exactly the
+ * seam they exercise.
+ */
+export const testNodeContext = (
+  overrides: Partial<NodeContext> = {},
+): NodeContext => ({
+  runId: "test-run" as RunId,
+  dagId: "test-dag" as DagId,
+  observer: new NoopObserver(),
+  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
+  judgeLlm: null,
+  cache: null,
+  prompts: null,
+  llm: null,
+  http: null,
+  clock: null,
+  logger: { warn: () => {}, error: () => {} },
+  ...overrides,
+});

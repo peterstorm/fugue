@@ -55,7 +55,13 @@ import type { RunMetadata, RunRecord, RunStatus, RunTimestampMs } from "../types
 // "parses" and "is a valid branded id".
 
 /** A zod string transformed by a framework id smart constructor (parse-don't-validate). */
-const brandedId = <T>(parse: (s: string) => Result<T, string>): z.ZodType<T> =>
+/**
+ * THE one branded-id Zod transform for persisted HITL records: parse through the
+ * smart constructor, reject anything it refuses. Exported because the decision
+ * store persists branded ids on the same resume path and must apply the same
+ * gate — a second copy could drift into `as`-casting a corrupt id back in.
+ */
+export const brandedId = <T>(parse: (s: string) => Result<T, string>): z.ZodType<T> =>
   z.string().transform((value, context) => {
     const parsed = parse(value);
     if (parsed.ok) return parsed.value;

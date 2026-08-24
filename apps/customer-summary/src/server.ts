@@ -277,21 +277,17 @@ export const createApp = (deps: AppDeps): Hono => {
       : null;
     const tracingDegraded =
       exporterFailures !== null && exporterFailures.some((f) => f.failures > 0);
-    const httpStatus = redisOk && llmOk ? 200 : 503;
     // Three outcomes, one level: redis or the LLM down gates readiness entirely
     // (either one means /summarize cannot serve traffic); with both up, any
     // degraded trace backend (MLflow or a secondary exporter) downgrades to
     // `ready-degraded` (observability spec FR-026: degrades the signal, never
     // gates readiness).
+    const notReady = !redisOk || !llmOk;
     const degraded = !mlflowOk || tracingDegraded;
-    let status: string;
-    if (!redisOk || !llmOk) {
-      status = "not-ready";
-    } else if (degraded) {
-      status = "ready-degraded";
-    } else {
-      status = "ready";
-    }
+    // Derived from the SAME predicate as `status`, so the HTTP code and the body
+    // can never disagree about whether this instance is ready.
+    const httpStatus = notReady ? 503 : 200;
+    const status = notReady ? "not-ready" : degraded ? "ready-degraded" : "ready";
     return { status, redis: redisOk, llm: llmOk, mlflow: mlflowOk, exporterFailures, httpStatus } as const;
   };
 

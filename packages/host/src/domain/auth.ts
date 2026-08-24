@@ -179,7 +179,7 @@ export const agentClientIdForDag = (
   // (`__proto__`, `constructor`, `toString`, …) to a client id; an unmapped DAG
   // resolves to first-class ABSENCE (fail-closed), keeping the `AgentClientId`
   // brand honest. Matches the sibling guard in `approverTeamIdentity`.
-  const clientId = Object.prototype.hasOwnProperty.call(map, dagId) ? map[dagId] : undefined;
+  const clientId = Object.hasOwn(map, dagId) ? map[dagId] : undefined;
   return clientId === undefined ? undefined : (clientId as AgentClientId);
 };
 

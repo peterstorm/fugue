@@ -88,7 +88,7 @@ const makePostWaveCtx = (
   nowFn: Date.now,
   freshnessIndex,
   witnessAccumulator,
-  priorOutputs: machineCtx.outputs,
+  witnessedNodeIds: new Set<any>(),
 });
 
 describe("emitFreshnessWitnessEvents", () => {
@@ -158,8 +158,8 @@ describe("emitFreshnessWitnessEvents", () => {
       const ctx = makePostWaveCtx([NID_WRITE], nodeMap as any, machineCtx, obs, index);
       const result = await emitFreshnessWitnessEvents(ctx, newOutputs, new Set());
 
-      expect(result.ok).toBe(false);
-      if (result.ok) throw new Error("unreachable");
+      expect(result.kind).toBe("aborted");
+      if (result.kind !== "aborted") throw new Error("unreachable");
       expect(result.error.kind).toBe("node-crash");
       if (result.error.kind !== "node-crash") throw new Error("unreachable");
       // Deterministic authoring bug — never burn the retry budget on it.
@@ -249,8 +249,8 @@ describe("emitFreshnessWitnessEvents", () => {
     const result = await emitFreshnessWitnessEvents(ctx, newOutputs, new Set());
 
     // Fail-closed: extractor failure aborts the wave
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
+    expect(result.kind).toBe("aborted");
+    if (result.kind === "aborted") {
       expect(result.error.kind).toBe("node-crash");
     }
     expect(obs.events.filter((e) => e.type === "witness-captured")).toHaveLength(0);
@@ -288,8 +288,8 @@ describe("emitFreshnessWitnessEvents", () => {
       new Set(),
     );
 
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
+    expect(result.kind).toBe("aborted");
+    if (result.kind === "aborted") {
       expect(result.error).toMatchObject({
         kind: "node-crash",
         message: expect.stringContaining("<unprintable error>"),
@@ -355,8 +355,8 @@ describe("emitFreshnessWitnessEvents", () => {
     const ctx = makePostWaveCtx([NID_WRITE], nodeMap as any, ctxWithOutput, obs, failingIndex);
     const result = await emitFreshnessWitnessEvents(ctx, newOutputs, new Set());
 
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
+    expect(result.kind).toBe("aborted");
+    if (result.kind === "aborted") {
       expect(result.error.kind).toBe("node-crash");
     }
     expect(obs.events.some((e) => e.type === "node-error")).toBe(true);
@@ -383,8 +383,8 @@ describe("emitFreshnessWitnessEvents", () => {
     const result = await emitFreshnessWitnessEvents(ctx, newOutputs, new Set());
 
     // Fail-closed: extractor failure aborts the wave
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
+    expect(result.kind).toBe("aborted");
+    if (result.kind === "aborted") {
       expect(result.error.kind).toBe("node-crash");
     }
     expect(obs.events.some((e) => e.type === "node-error")).toBe(true);
@@ -415,8 +415,8 @@ describe("emitFreshnessWitnessEvents", () => {
     const ctx = makePostWaveCtx([NID_WRITE], nodeMap as any, ctxWithOutput, obs, failingIndex);
     const result = await emitFreshnessWitnessEvents(ctx, newOutputs, new Set());
 
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
+    expect(result.kind).toBe("aborted");
+    if (result.kind === "aborted") {
       expect(result.error.kind).toBe("node-crash");
     }
     expect(obs.events.some((e) => e.type === "node-error")).toBe(true);

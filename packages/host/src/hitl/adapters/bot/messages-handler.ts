@@ -197,7 +197,7 @@ export const handleBotActivity = async (
       // never resolve a team (mirrors identity.ts, fail-closed).
       const { aadGroupId } = activity;
       const mappedTeam =
-        aadGroupId !== undefined && Object.prototype.hasOwnProperty.call(deps.teamChannels, aadGroupId)
+        aadGroupId !== undefined && Object.hasOwn(deps.teamChannels, aadGroupId)
           ? deps.teamChannels[aadGroupId]
           : undefined;
       if (mappedTeam !== undefined) {

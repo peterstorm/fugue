@@ -279,6 +279,24 @@ checkpointerSuite(
 // mismatch), and verdict construction — no storage, no adapter.
 // ---------------------------------------------------------------------------
 
+/**
+ * The canonical on-disk `meta.json` payload, as RAW bytes.
+ *
+ * Written by hand at four call sites in this file's clock tests, so a change to
+ * the record's required fields meant editing four literals that all had to stay
+ * in agreement with each other AND with the codec. Overrides cover the cases
+ * that genuinely differ (a specific `startedAt`, an extra forward-compat field).
+ */
+const rawCanonicalMetaJson = (overrides: Record<string, unknown> = {}): string =>
+  JSON.stringify({
+    dagId: "d",
+    startedAt: "2025-01-01T00:00:00.000Z",
+    nodeCount: 1,
+    createdAt: new Date().toISOString(),
+    frameworkVersion: FRAMEWORK_VERSION,
+    ...overrides,
+  });
+
 describe("evaluateCheckpointLoadGates — the one shared load-gate encoding", () => {
   const fresh = { runId: R("gates-run"), frameworkVersion: FRAMEWORK_VERSION, dagFingerprint: "fp-1", createdAt: new Date(1_000) };
   const healthyClock = () => ok(1_000 + TTL_SECONDS * 1000 - 1); // inside TTL
@@ -2307,13 +2325,7 @@ describe("FileCheckpointer — typed failure surface (FR-040)", () => {
       if (writeResult.error.kind !== "cache-error") throw new Error("unreachable");
       expect(writeResult.error.operation).toBe("setMeta");
 
-      writeRawMeta(directory, runId, JSON.stringify({
-        dagId: "d",
-        startedAt: "2025-01-01T00:00:00.000Z",
-        nodeCount: 1,
-        createdAt: new Date().toISOString(),
-        frameworkVersion: FRAMEWORK_VERSION,
-      }));
+      writeRawMeta(directory, runId, rawCanonicalMetaJson());
       const loadResult = await throwingClock.load(R(runId));
       expect(loadResult.ok).toBe(false);
       if (loadResult.ok) throw new Error("expected typed clock-load rejection");
@@ -2345,13 +2357,7 @@ describe("FileCheckpointer — typed failure surface (FR-040)", () => {
     expect(writeResult.error.failureClass).toBe("permanent");
     expect(retriabilityOf(writeResult.error)).toBe("non-retriable");
 
-    writeRawMeta(directory, runId, JSON.stringify({
-      dagId: "d",
-      startedAt: "2025-01-01T00:00:00.000Z",
-      nodeCount: 1,
-      createdAt: new Date().toISOString(),
-      frameworkVersion: FRAMEWORK_VERSION,
-    }));
+    writeRawMeta(directory, runId, rawCanonicalMetaJson());
     const loadResult = await nanClock.load(R(runId));
     expect(loadResult.ok).toBe(false);
     if (loadResult.ok) throw new Error("expected typed rejection");
@@ -2727,26 +2733,17 @@ describe("FileCheckpointer — typed failure surface (FR-040)", () => {
     writeRawMeta(
       directory,
       "run-clock",
-      JSON.stringify({
-        dagId: "d",
-        startedAt: new Date().toISOString(),
-        nodeCount: 1,
-        createdAt: new Date().toISOString(),
-        frameworkVersion: FRAMEWORK_VERSION,
-      }),
+      rawCanonicalMetaJson({ startedAt: new Date().toISOString() }),
     );
     const load = await failingClock.load(R("run-clock"));
     expect(load.ok).toBe(false);
     if (load.ok || load.error.kind !== "cache-error") throw new Error("expected cache-error");
     expect(load.error.operation).toBe("load");
 
-    const nonFiniteClock = createFileCheckpointer(directory, { now: () => Number.NaN });
-    const nonFiniteWrite = await nonFiniteClock.setMeta(R("run-clock-2"), META());
-    expect(nonFiniteWrite.ok).toBe(false);
-    if (nonFiniteWrite.ok || nonFiniteWrite.error.kind !== "cache-error") {
-      throw new Error("expected cache-error");
-    }
-    expect(nonFiniteWrite.error.operation).toBe("setMeta");
+    // The non-finite clock is NOT re-probed here: the dedicated
+    // "non-finite clock timestamps on setMeta and load are permanent
+    // cache-errors" test above covers it more thoroughly (both operations, plus
+    // failureClass/retriability). This test is about a clock that THROWS.
   });
 
   it("maps finite Date-unrepresentable clock values to cache-error", async () => {
@@ -2764,13 +2761,7 @@ describe("FileCheckpointer — typed failure surface (FR-040)", () => {
     writeRawMeta(
       directory,
       "run-clock-range",
-      JSON.stringify({
-        dagId: "d",
-        startedAt: new Date().toISOString(),
-        nodeCount: 1,
-        createdAt: new Date().toISOString(),
-        frameworkVersion: FRAMEWORK_VERSION,
-      }),
+      rawCanonicalMetaJson({ startedAt: new Date().toISOString() }),
     );
     const load = await cp.load(R("run-clock-range"));
     expect(load.ok).toBe(false);

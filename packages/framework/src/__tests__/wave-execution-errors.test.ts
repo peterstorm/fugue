@@ -78,7 +78,7 @@ const makeConfig = (nodeMap?: Map<string, NodeDef<unknown, unknown>>): WaveConfi
     : new Map([[N("a"), makeNode("a")]]),
   nodeCtx: makeValidatedCtx(),
   nowFn: Date.now,
-  freshnessIndex: new InMemoryFreshnessIndex(),
+  freshnessIndex: new InMemoryFreshnessIndex(), witnessedNodeIds: new Set(),
 });
 
 describe("executeWave — error paths", () => {
@@ -131,7 +131,7 @@ describe("executeWave — error paths", () => {
       nodeMap: new Map([[N("a"), makeNode("a")]]),
       nodeCtx: validCtx,
       nowFn: Date.now,
-      freshnessIndex: new InMemoryFreshnessIndex(),
+      freshnessIndex: new InMemoryFreshnessIndex(), witnessedNodeIds: new Set(),
     };
 
     const result = await executeWave(0, makeMachineCtx(), config);

@@ -233,11 +233,22 @@ export const healthCheckWithTimeout = async (
       resolve(err(`health check timed out after ${timeoutMs}ms`));
     }, timeoutMs);
   });
-  const probe = tokens.probe(controller.signal).then(
-    (result): Result<void, string> =>
-      result.ok ? ok(undefined) : err(formatFrameworkError(result.error)),
-    (): Result<void, string> => err("token provider probe failed outside its Result contract"),
-  );
+  // `Promise.resolve().then(...)` rather than calling `probe` directly: a
+  // provider that throws SYNCHRONOUSLY (rather than returning a rejected
+  // promise) would otherwise escape before any handler is attached and take
+  // down the readiness endpoint that called this. Both failure modes are the
+  // same contract violation and must land on the same `Err`.
+  //
+  // The provider's own message is deliberately NOT interpolated: an
+  // implementation is free to put a credential in its error, and this string
+  // reaches an unauthenticated readiness response.
+  const probe = Promise.resolve()
+    .then(() => tokens.probe(controller.signal))
+    .then(
+      (result): Result<void, string> =>
+        result.ok ? ok(undefined) : err(formatFrameworkError(result.error)),
+      (): Result<void, string> => err("token provider probe failed outside its Result contract"),
+    );
 
   try {
     return await Promise.race([probe, deadline]);

@@ -65,12 +65,22 @@ const PG_NODE_ID = nodeId("pg-capability");
  * and turn a deterministic contract violation into a retry storm against the
  * database.
  */
-const rowValidationError = (label: string, detail: string): FrameworkError => ({
+/**
+ * THE one non-retriable `node-crash` for this adapter. Every crash it reports is
+ * deterministic — a schema mismatch, a PG error outside the transient classes —
+ * so `retriability` is fixed here rather than repeated at each site, where an
+ * omission would silently fall back to retriable and turn a permanent failure
+ * into a retry storm against the database.
+ */
+const pgCrash = (message: string): FrameworkError => ({
   kind: "node-crash",
   nodeId: PG_NODE_ID,
-  message: label + ": " + detail,
+  message,
   retriability: "non-retriable",
 });
+
+const rowValidationError = (label: string, detail: string): FrameworkError =>
+  pgCrash(label + ": " + detail);
 
 /**
  * PostgreSQL capability interface — what nodes see on `ctx.db`.
@@ -162,12 +172,7 @@ export const mapPgError = (error: unknown, sql: string): FrameworkError => {
       return { kind: "transient", nodeId: PG_NODE_ID, message: `PG transient: ${message} (${pgCode})` };
     }
   }
-  return {
-    kind: "node-crash",
-    nodeId: PG_NODE_ID,
-    message: `PG error: ${message} [sql: ${sql.slice(0, 100)}]`,
-    retriability: "non-retriable",
-  };
+  return pgCrash(`PG error: ${message} [sql: ${sql.slice(0, 100)}]`);
 };
 
 /**

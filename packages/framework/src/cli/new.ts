@@ -308,6 +308,26 @@ const isDirNonEmpty = async (dir: string): Promise<boolean> => {
  * contract (mirrors `runNewFrom`'s write-failed arm). A malformed template is
  * a framework bug, not an author error, so it still propagates.
  */
+/**
+ * THE one scaffold writer: write a file under `dir` and record its path
+ * relative to `relDir`. Both scaffold paths (`runNew`, `writeAuthoredScaffold`)
+ * report written files the same way, so the pairing of "where bytes land" and
+ * "what the outcome reports" is expressed once and cannot drift.
+ */
+const createScaffoldWriter = (
+  dir: string,
+  relDir: string,
+): { readonly written: string[]; readonly write: (rel: string, content: string) => Promise<void> } => {
+  const written: string[] = [];
+  return {
+    written,
+    write: async (rel, content) => {
+      await writeFile(join(dir, rel), content, "utf-8");
+      written.push(join(relDir, rel));
+    },
+  };
+};
+
 export const runNew = async (options: NewOptions): Promise<NewResult> => {
   const cwd = process.cwd();
   const root = options.root ?? cwd;
@@ -344,11 +364,7 @@ export const runNew = async (options: NewOptions): Promise<NewResult> => {
   };
   const scaffold = buildScaffold(options.shape, ctx);
 
-  const written: string[] = [];
-  const write = async (rel: string, content: string): Promise<void> => {
-    await writeFile(join(dir, rel), content, "utf-8");
-    written.push(join(relDir, rel));
-  };
+  const { written, write } = createScaffoldWriter(dir, relDir);
 
   // The mkdir + write batch is an environment surface (ENOSPC/EACCES/EISDIR,
   // …) — fold a throw into the `{ ok: false, problems }` envelope (mirrors
@@ -583,11 +599,7 @@ export const writeAuthoredScaffold = async (
 
   await mkdir(dir, { recursive: true });
 
-  const written: string[] = [];
-  const write = async (rel: string, content: string): Promise<void> => {
-    await writeFile(join(dir, rel), content, "utf-8");
-    written.push(join(relDir, rel));
-  };
+  const { written, write } = createScaffoldWriter(dir, relDir);
 
   // Partial-write semantics: this batch is in-process ordering, NOT crash
   // atomicity — a mid-batch IO failure (ENOSPC/EACCES) propagates the real

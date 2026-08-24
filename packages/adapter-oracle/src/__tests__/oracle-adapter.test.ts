@@ -612,6 +612,29 @@ describe("@fuguejs/oracle — healthCheckWithTimeout", () => {
     }
   });
 
+  it("does NOT claim a 'late probe failure after timeout' when the probe simply failed fast", async () => {
+    // Regression: the late-cause handler used to be attached unconditionally, so
+    // EVERY execute rejection logged a post-timeout late failure — including
+    // ordinary probe failures that never lost a race. The verdict was right; the
+    // diagnostic beside it was a false claim.
+    const warns: string[] = [];
+    const original = console.warn;
+    console.warn = (msg?: unknown): void => { warns.push(String(msg)); };
+    try {
+      const result = await healthCheckWithTimeout(
+        queryableThatThrows(oraError("ORA-01017: invalid credential")),
+        10_000, // generous budget — the timeout can never win this race
+      );
+      expect(isErr(result)).toBe(true);
+      if (!result.ok) expect(result.error).toContain("ORA-01017");
+
+      await new Promise((r) => setTimeout(r, 20));
+      expect(warns.some((w) => w.includes("late probe failure after timeout"))).toBe(false);
+    } finally {
+      console.warn = original;
+    }
+  });
+
   it("strips credentials from a health-check error", async () => {
     const result = await healthCheckWithTimeout(
       queryableThatThrows(oraError("login failed scott/tiger@db:1521/ORCL")),

@@ -140,6 +140,21 @@ interface HostileThrownValue {
   readonly create: () => unknown;
 }
 
+/**
+ * An object whose `toString` AND `Symbol.toPrimitive` both throw on ACCESS — the
+ * hardest case for any diagnostic that tries to render an unknown value. Named
+ * once because it is used both as a matrix entry and directly by the hostile
+ * runId tests.
+ */
+const trapObject = (): unknown => Object.defineProperties({}, {
+  toString: {
+    get: () => { throw new Error("toString trap must stay contained"); },
+  },
+  [Symbol.toPrimitive]: {
+    get: () => { throw new Error("Symbol.toPrimitive trap must stay contained"); },
+  },
+});
+
 /** Every value is legal to throw in JavaScript and breaks at least one common
  * `try/catch` formatter (`instanceof Error`, `.message`, `String`, or tag
  * inspection). Factories keep revoked/stateful values isolated per seam. */
@@ -164,14 +179,7 @@ const hostileThrownValueMatrix = (): readonly HostileThrownValue[] => [
   },
   {
     label: "Symbol.toPrimitive/toString traps",
-    create: () => Object.defineProperties({}, {
-      toString: {
-        get: () => { throw new Error("toString trap must stay contained"); },
-      },
-      [Symbol.toPrimitive]: {
-        get: () => { throw new Error("Symbol.toPrimitive trap must stay contained"); },
-      },
-    }),
+    create: trapObject,
   },
   {
     label: "hostile instanceof/getPrototypeOf behavior",
@@ -404,17 +412,9 @@ describe("resumeFileJob — runId boundary re-validation", () => {
   });
 
   it("a hostile runId whose toString/toString-primitives throw ⇒ still the typed cache-error, never a raw rejection", async () => {
-    const hostile = Object.defineProperties(
-      {},
-      {
-        toString: {
-          get: () => { throw new Error("toString trap must stay contained"); },
-        },
-        [Symbol.toPrimitive]: {
-          get: () => { throw new Error("Symbol.toPrimitive trap must stay contained"); },
-        },
-      },
-    );
+    // The SAME trap object the shared matrix defines — reused rather than
+    // re-hand-rolled, so a trap added to the matrix is exercised here too.
+    const hostile = trapObject();
     const absent = join(tempDir(), "never-created");
     const resumed = await resumeWithRawRunId(hostile, absent);
     expect(resumed.ok).toBe(false);
@@ -483,17 +483,9 @@ describe("resumeFileJob — directory boundary re-validation", () => {
   });
 
   it("a hostile directory whose toString/toString-primitives throw ⇒ still the typed cache-error, never a raw rejection", async () => {
-    const hostile = Object.defineProperties(
-      {},
-      {
-        toString: {
-          get: () => { throw new Error("toString trap must stay contained"); },
-        },
-        [Symbol.toPrimitive]: {
-          get: () => { throw new Error("Symbol.toPrimitive trap must stay contained"); },
-        },
-      },
-    );
+    // The SAME trap object the shared matrix defines — reused rather than
+    // re-hand-rolled, so a trap added to the matrix is exercised here too.
+    const hostile = trapObject();
     const resumed = await resumeWithRawDirectory(hostile);
     expect(resumed.ok).toBe(false);
     if (resumed.ok) return;

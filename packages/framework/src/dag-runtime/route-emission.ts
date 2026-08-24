@@ -14,6 +14,7 @@ import { decideRoute } from "./routing.js";
 import { isConditionalEdge } from "../types/dag.js";
 import { emit } from "./emit.js";
 import type { PostWaveContext } from "./post-wave-context.js";
+import { nodeErrorEmitter } from "./post-wave-context.js";
 
 /**
  * Result of the routing-decision phase. Contains the per-source-node
@@ -43,26 +44,11 @@ export function emitRoutingDecisions(
   const confidenceValues = new Map<NodeId, Confidence | null>();
 
   /**
-   * THE one routing-failure emission (round-38 cs-2, replacing three
-   * near-copies). Each site differs only in the node it blames, the typed error
-   * and the display text.
+   * THE one node-error emission (round-38 cs-2, replacing three near-copies;
+   * now shared with the freshness step via `nodeErrorEmitter`). Each site
+   * differs only in the node it blames, the typed error and the display text.
    */
-  const emitNodeError = (
-    nodeId: NodeId,
-    error: string,
-    frameworkError: FrameworkError,
-  ): void => {
-    emit(nodeCtx, {
-      type: "node-error",
-      runId: nodeCtx.runId,
-      dagId,
-      nodeId,
-      sideEffects: nodeMap.get(nodeId)?.sideEffects,
-      timestamp: stamp(),
-      error,
-      frameworkError,
-    });
-  };
+  const emitNodeError = nodeErrorEmitter(ctx);
 
   for (const nodeId of waveNodeIds) {
     if (!newOutputs.has(nodeId)) continue;

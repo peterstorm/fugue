@@ -168,6 +168,29 @@ const defineGetter = (
   Object.defineProperty(target, property, { enumerable: true, configurable: true, get });
 };
 
+/**
+ * The on-disk path of a resource's freshness singleton. Re-derived inline at
+ * 16+ call sites before this — meaning the digest-addressing layout was
+ * effectively re-specified by every test that touched a file.
+ */
+const singletonPath = (directory: string, resource: string): string =>
+  join(directory, `${keyDigest(resource)}.json`);
+
+/**
+ * A getter that yields `first` on its FIRST read and `later` on every read
+ * after, recording the read count per name in `reads`.
+ *
+ * This is the snapshot-once probe: a boundary that re-reads a hostile input
+ * would observe `later` and can be caught doing it. Two tests defined this same
+ * closure under different names (`once`, `stateful`).
+ */
+const readOnceThen = <T>(reads: Map<string, number>) =>
+  (name: string, first: T, later: unknown): (() => unknown) => () => {
+    const count = (reads.get(name) ?? 0) + 1;
+    reads.set(name, count);
+    return count === 1 ? first : later;
+  };
+
 describe("createFileFreshnessIndex — public surface and durable singleton", () => {
   it("throws typed cache-error(createFileFreshnessIndex) for invalid factory configuration", () => {
     for (const [directory, options] of [
@@ -246,7 +269,7 @@ describe("createFileFreshnessIndex — public surface and durable singleton", ()
       await createFileFreshnessIndex(directory, { now: () => 2_000 }).recordWrite(event),
     ).toEqual({ ok: true, value: undefined });
 
-    const path = join(directory, `${keyDigest(resource)}.json`);
+    const path = singletonPath(directory, resource);
     expect(readSingleton(path)).toEqual(expectedSingleton(2_000, event));
     expect(Object.keys(readSingleton(path))).toEqual([
       "writtenAtMs",
@@ -295,7 +318,7 @@ describe("createFileFreshnessIndex — public surface and durable singleton", ()
       await createFileFreshnessIndex(directory, { now: () => 3_000 }).recordWrite(older),
     ).toEqual({ ok: true, value: undefined });
 
-    expect(readSingleton(join(directory, `${keyDigest(resource)}.json`))).toEqual(
+    expect(readSingleton(singletonPath(directory, resource))).toEqual(
       expectedSingleton(3_000, newer),
     );
     expect(
@@ -343,7 +366,7 @@ describe("createFileFreshnessIndex — public surface and durable singleton", ()
         ),
       ).toEqual({ ok: true, value: undefined });
 
-      expect(readSingleton(join(directory, `${keyDigest(resource)}.json`))).toEqual({
+      expect(readSingleton(singletonPath(directory, resource))).toEqual({
         writtenAtMs: 1_001,
         runId: winner.runId,
         nodeId: winner.nodeId,
@@ -365,7 +388,7 @@ describe("createFileFreshnessIndex — public surface and durable singleton", ()
     // `writtenAtMs` is refreshed (Redis EXPIRE parity on a no-op write).
     const directory = tempDirectory();
     const resource = "postgres:orders:identical-member";
-    const path = join(directory, `${keyDigest(resource)}.json`);
+    const path = singletonPath(directory, resource);
     const tie = { runId: "run-tie", nodeId: "writer-tie", kind: "version" as const, value: "v1" };
     expect(
       await createFileFreshnessIndex(directory, { now: () => 1_000 }).recordWrite(
@@ -417,7 +440,7 @@ describe("createFileFreshnessIndex — public surface and durable singleton", ()
           await createFileFreshnessIndex(directory, { now: () => 10_001 }).recordWrite(
             tieEvent("property:tie", order[1]),
           );
-          const stored = readSingleton(join(directory, `${keyDigest("property:tie")}.json`));
+          const stored = readSingleton(singletonPath(directory, "property:tie"));
           expect(stored.runId).toBe(winner.runId);
           expect(stored.nodeId).toBe(winner.nodeId);
           expect(stored.newWitness.kind).toBe(winner.kind);
@@ -445,7 +468,7 @@ describe("createFileFreshnessIndex — public surface and durable singleton", ()
     );
     expect(results.every((result) => result.ok)).toBe(true);
 
-    const stored = readSingleton(join(directory, `${keyDigest(resource)}.json`));
+    const stored = readSingleton(singletonPath(directory, resource));
     expect(stored).toMatchObject({
       runId: "run-1000",
       nodeId: "writer-1000",
@@ -461,7 +484,7 @@ describe("createFileFreshnessIndex — public surface and durable singleton", ()
   it("atomically replaces the singleton and ignores interrupted tmp litter", async () => {
     const directory = tempDirectory();
     const resource = "stripe:charge:ch_123";
-    const path = join(directory, `${keyDigest(resource)}.json`);
+    const path = singletonPath(directory, resource);
     let nowMs = 10;
     const index = createFileFreshnessIndex(directory, { now: () => nowMs });
     const oldEvent = writeEvent(resource, "old", 9, { runId: "run-old" });
@@ -531,7 +554,7 @@ describe("createFileFreshnessIndex — conflict semantics and TTL", () => {
   it("is live at exactly 24h, absent one millisecond later, and refreshes TTL on a losing older write", async () => {
     const directory = tempDirectory();
     const resource = "ttl:resource";
-    const path = join(directory, `${keyDigest(resource)}.json`);
+    const path = singletonPath(directory, resource);
     const ttlMs = TTL_SECONDS * 1_000;
     const winner = writeEvent(resource, "winner", 900, {
       runId: "run-winner",
@@ -575,7 +598,7 @@ describe("createFileFreshnessIndex — conflict semantics and TTL", () => {
 
     await createFileFreshnessIndex(directory, { now: () => 1_000 }).recordWrite(expired);
     await createFileFreshnessIndex(directory, { now: () => replacementNow }).recordWrite(replacement);
-    expect(readSingleton(join(directory, `${keyDigest(resource)}.json`))).toEqual(
+    expect(readSingleton(singletonPath(directory, resource))).toEqual(
       expectedSingleton(replacementNow, replacement),
     );
   });
@@ -591,11 +614,7 @@ describe("createFileFreshnessIndex — one-read runtime boundary snapshots", () 
       kind: "etag",
     });
     const reads = new Map<string, number>();
-    const once = <T>(name: string, first: T, later: unknown): (() => unknown) => () => {
-      const count = (reads.get(name) ?? 0) + 1;
-      reads.set(name, count);
-      return count === 1 ? first : later;
-    };
+    const once = readOnceThen(reads);
 
     const nested: Record<string, unknown> = {};
     defineGetter(nested, "kind", once("kind", valid.newWitness.kind, "invalid-kind"));
@@ -629,14 +648,14 @@ describe("createFileFreshnessIndex — one-read runtime boundary snapshots", () 
       value: 1,
     });
     expect(clockReads).toBe(1);
-    expect(readSingleton(join(directory, `${keyDigest(resource)}.json`))).toEqual({
+    expect(readSingleton(singletonPath(directory, resource))).toEqual({
       writtenAtMs: 1_000,
       runId: "run-snapshot",
       nodeId: "node-snapshot",
       newWitness: { kind: "etag", resource, value: "persisted" },
       succeededAtMs: 900,
     });
-    expect(existsSync(join(directory, `${keyDigest("snapshot:wrong-resource")}.json`))).toBe(false);
+    expect(existsSync(singletonPath(directory, "snapshot:wrong-resource"))).toBe(false);
   });
 
   it("findConflict reads conditionedOn accessors once and cannot switch resource or value after validation", async () => {
@@ -648,11 +667,7 @@ describe("createFileFreshnessIndex — one-read runtime boundary snapshots", () 
     await index.recordWrite(writeEvent(wrong, "wrong-current", 1_900, { runId: "run-wrong" }));
 
     const reads = new Map<string, number>();
-    const stateful = <T>(name: string, first: T, later: unknown): (() => unknown) => () => {
-      const count = (reads.get(name) ?? 0) + 1;
-      reads.set(name, count);
-      return count === 1 ? first : later;
-    };
+    const stateful = readOnceThen(reads);
     const firstValues: Readonly<Record<string, unknown>> = {
       kind: "version",
       resource: intended,
@@ -749,7 +764,7 @@ describe("createFileFreshnessIndex — symlinks (deliberate checkpointer diverge
     const index = createFileFreshnessIndex(directory, { now: () => 10 });
     expect(await index.recordWrite(event)).toEqual({ ok: true, value: undefined });
 
-    const recordPath = join(directory, `${keyDigest(resource)}.json`);
+    const recordPath = singletonPath(directory, resource);
     // Relocate the real singleton OUTSIDE the index directory and re-expose
     // the digest path as a symlink back to it.
     const outside = join(resolve(directory, ".."), "outside-singleton.json");
@@ -774,7 +789,7 @@ describe("createFileFreshnessIndex — symlinks (deliberate checkpointer diverge
     const first = writeEvent(resource, "v1", 9, { runId: "run-first" });
     expect(await index.recordWrite(first)).toEqual({ ok: true, value: undefined });
 
-    const recordPath = join(directory, `${keyDigest(resource)}.json`);
+    const recordPath = singletonPath(directory, resource);
     // A symlink wearing the digest name whose target is a valid sibling
     // singleton OUTSIDE the directory.
     const outside = join(resolve(directory, ".."), "outside-singleton.json");
@@ -954,7 +969,7 @@ describe("createFileFreshnessIndex — strict codec and typed failures", () => {
     });
     const directory = tempDirectory();
     const resource = "corrupt:double-fault";
-    const path = join(directory, `${keyDigest(resource)}.json`);
+    const path = singletonPath(directory, resource);
     const lockPath = join(directory, `${keyDigest(resource)}.lock`);
     // A corrupt singleton, then a write whose clock read tears the owned
     // lock's owner metadata mid-body: the body reaches its deterministic
@@ -989,7 +1004,7 @@ describe("createFileFreshnessIndex — strict codec and typed failures", () => {
   it("explicitly rejects append/member-set and extra-field persisted shapes", async () => {
     const directory = tempDirectory();
     const resource = "codec:singleton-only";
-    const path = join(directory, `${keyDigest(resource)}.json`);
+    const path = singletonPath(directory, resource);
     const index = createFileFreshnessIndex(directory, { now: () => 1_000 });
     await index.recordWrite(writeEvent(resource, "seed", 900));
 
@@ -1053,7 +1068,7 @@ describe("createFileFreshnessIndex — strict codec and typed failures", () => {
     // fail here.
     const directory = tempDirectory();
     const resource = "corrupt:recordwrite";
-    const path = join(directory, `${keyDigest(resource)}.json`);
+    const path = singletonPath(directory, resource);
     const index = createFileFreshnessIndex(directory, { now: () => 1_000 });
     await index.recordWrite(writeEvent(resource, "2", 900));
 
@@ -1078,7 +1093,7 @@ describe("createFileFreshnessIndex — strict codec and typed failures", () => {
   it("fails findConflict closed on malformed or digest/content-disagreeing singletons (ADR-0025/0079)", async () => {
     const directory = tempDirectory();
     const resource = "corrupt:resource";
-    const path = join(directory, `${keyDigest(resource)}.json`);
+    const path = singletonPath(directory, resource);
     const index = createFileFreshnessIndex(directory, { now: () => 1_000 });
     await index.recordWrite(writeEvent(resource, "2", 900));
 
@@ -1194,7 +1209,7 @@ describe("createFileFreshnessIndex — strict codec and typed failures", () => {
     const directory = tempDirectory();
     const resource = "squat:eisdir";
     mkdirSync(directory, { recursive: true });
-    mkdirSync(join(directory, `${keyDigest(resource)}.json`));
+    mkdirSync(singletonPath(directory, resource));
 
     const index = createFileFreshnessIndex(directory);
 

@@ -268,9 +268,16 @@ export const buildDagExecutor = (
   // tests, sort witnesses by capturedAtMs.
   const capturedWitnesses = new Map<string, Witness>();
 
+  // Run-scoped record of which nodes have already had their freshness
+  // bookkeeping completed. Lives for the lifetime of the executor because a
+  // wave RETRY is what consumes it: outputs carried across a retry prove the
+  // node ran, not that its witness landed. See `PostWaveContext.witnessedNodeIds`.
+  const witnessedNodeIds = new Set<NodeId>();
+
   const waveConfig: WaveConfig = {
     dag, nodeMap, nodeCtx, resumeCheckpoint, nowFn, freshnessIndex,
     witnessAccumulator: capturedWitnesses,
+    witnessedNodeIds,
     minting: hooks?.minting,
   };
 

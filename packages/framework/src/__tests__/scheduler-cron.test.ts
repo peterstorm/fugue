@@ -406,17 +406,29 @@ describe("createCronScheduler — stop()", () => {
   }, 500);
 });
 
+/**
+ * Capture `console.error` for one test and restore it afterwards.
+ *
+ * Five tests hand-rolled the save/spy/restore-in-finally triple; the restore is
+ * the part that must never be forgotten — a leaked spy silently swallows every
+ * later test's diagnostics in the same process.
+ */
+const captureConsoleError = (): { readonly errors: string[]; readonly restore: () => void } => {
+  const errors: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => { errors.push(String(args[0])); };
+  return { errors, restore: () => { console.error = original; } };
+};
+
 // ---------------------------------------------------------------------------
 // Error-path tests
 // ---------------------------------------------------------------------------
 
 describe("createCronScheduler — handleFire enqueue error path", () => {
   it("logs the enqueue failure, escalates into the backoff timer, and does not write the fired marker", async () => {
-    const errors: string[] = [];
+    const { errors, restore: restoreConsoleError } = captureConsoleError();
     const warnings: string[] = [];
-    const originalConsoleError = console.error;
     const originalConsoleWarn = console.warn;
-    console.error = (...args: unknown[]) => { errors.push(String(args[0])); };
     console.warn = (...args: unknown[]) => { warnings.push(String(args[0])); };
 
     let enqueueCallCount = 0;
@@ -458,7 +470,7 @@ describe("createCronScheduler — handleFire enqueue error path", () => {
       const firedMarkerExists = await markers.exists(markerFiredKey("A"));
       expect(firedMarkerExists).toBe(false);
     } finally {
-      console.error = originalConsoleError;
+      restoreConsoleError();
       console.warn = originalConsoleWarn;
       scheduler.stop();
     }
@@ -467,9 +479,7 @@ describe("createCronScheduler — handleFire enqueue error path", () => {
 
 describe("createCronScheduler — resolveDependents per-dependent error path", () => {
   it("continues processing remaining dependents when one enqueue throws", async () => {
-    const errors: string[] = [];
-    const originalConsoleError = console.error;
-    console.error = (...args: unknown[]) => { errors.push(String(args[0])); };
+    const { errors, restore: restoreConsoleError } = captureConsoleError();
 
     const enqueuedIds: string[] = [];
     let enqueueCallCount = 0;
@@ -508,7 +518,7 @@ describe("createCronScheduler — resolveDependents per-dependent error path", (
       const hasRetryError = errors.some((e) => e.includes("attempt 1/3 failed"));
       expect(hasRetryError).toBe(true);
     } finally {
-      console.error = originalConsoleError;
+      restoreConsoleError();
       scheduler.stop();
     }
   });
@@ -520,9 +530,7 @@ describe("createCronScheduler — resolveDependents per-dependent error path", (
 
 describe("createCronScheduler — markers.set(completed) failure in resolveDependents", () => {
   it("logs error and does not enqueue any dependents when completed marker write fails", async () => {
-    const errors: string[] = [];
-    const originalConsoleError = console.error;
-    console.error = (...args: unknown[]) => { errors.push(String(args[0])); };
+    const { errors, restore: restoreConsoleError } = captureConsoleError();
 
     const enqueuedIds: string[] = [];
     const fakeNow = new Date("2024-01-01T00:00:00.000Z");
@@ -553,7 +561,7 @@ describe("createCronScheduler — markers.set(completed) failure in resolveDepen
       // no dependents enqueued
       expect(enqueuedIds).toHaveLength(0);
     } finally {
-      console.error = originalConsoleError;
+      restoreConsoleError();
       scheduler.stop();
     }
   });
@@ -561,9 +569,7 @@ describe("createCronScheduler — markers.set(completed) failure in resolveDepen
 
 describe("createCronScheduler — markers.set(fired) failure in handleFire", () => {
   it("logs error but still enqueues the task when fired marker write fails (enqueue is idempotent)", async () => {
-    const errors: string[] = [];
-    const originalConsoleError = console.error;
-    console.error = (...args: unknown[]) => { errors.push(String(args[0])); };
+    const { errors, restore: restoreConsoleError } = captureConsoleError();
 
     const enqueuedIds: string[] = [];
 
@@ -591,7 +597,7 @@ describe("createCronScheduler — markers.set(fired) failure in handleFire", () 
       // enqueue WAS called — marker write happens after enqueue in the new ordering
       expect(enqueuedIds).toContain("A");
     } finally {
-      console.error = originalConsoleError;
+      restoreConsoleError();
       scheduler.stop();
     }
   }, 500);
@@ -599,9 +605,7 @@ describe("createCronScheduler — markers.set(fired) failure in handleFire", () 
 
 describe("createCronScheduler — dependent markers.set(fired) failure does not block enqueue", () => {
   it("logs error but still enqueues the dependent whose fired marker write fails (enqueue is idempotent)", async () => {
-    const errors: string[] = [];
-    const originalConsoleError = console.error;
-    console.error = (...args: unknown[]) => { errors.push(String(args[0])); };
+    const { errors, restore: restoreConsoleError } = captureConsoleError();
 
     const enqueuedIds: string[] = [];
     const fakeNow = new Date("2024-01-01T00:00:00.000Z");
@@ -639,7 +643,7 @@ describe("createCronScheduler — dependent markers.set(fired) failure does not 
       // C is also enqueued
       expect(enqueuedIds).toContain("C");
     } finally {
-      console.error = originalConsoleError;
+      restoreConsoleError();
       scheduler.stop();
     }
   });

@@ -180,13 +180,14 @@ export type SchemaSpec = z.infer<typeof SchemaSpecSchema>;
 // ---------------------------------------------------------------------------
 
 /**
- * A KEBAB_IDENT string field, parsed into the branded `KebabIdent` through
- * the single smart constructor — so every id/name on a parsed AuthoredDag is
- * PROOF the name constructors in `identifiers.ts` can safely emit from it.
+ * A string field parsed into a branded value through ONE smart constructor.
+ * Both kebab flavours below are this same transform — only the constructor and
+ * the message differ — so the "parse, don't validate" step that makes a parsed
+ * AuthoredDag PROOF for the name constructors in `identifiers.ts` exists once.
  */
-const kebabIdentField = (message: string) =>
+const brandedStringField = <T>(parse: (s: string) => T | null, message: string) =>
   z.string().transform((s, ctx) => {
-    const parsed = parseKebabIdent(s);
+    const parsed = parse(s);
     if (parsed === null) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message });
       return z.NEVER;
@@ -195,19 +196,16 @@ const kebabIdentField = (message: string) =>
   });
 
 /**
- * A plain-KEBAB string field, parsed into the branded `Kebab` through the
- * single smart constructor (mirrors `kebabIdentField`) — used where the value
- * never becomes a bare identifier (team, router case labels).
+ * A KEBAB_IDENT string field, parsed into the branded `KebabIdent` — so every
+ * id/name on a parsed AuthoredDag can safely become a bare identifier.
  */
-const kebabField = (message: string) =>
-  z.string().transform((s, ctx) => {
-    const parsed = parseKebab(s);
-    if (parsed === null) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message });
-      return z.NEVER;
-    }
-    return parsed;
-  });
+const kebabIdentField = (message: string) => brandedStringField(parseKebabIdent, message);
+
+/**
+ * A plain-KEBAB string field, parsed into the branded `Kebab` — used where the
+ * value never becomes a bare identifier (team, router case labels).
+ */
+const kebabField = (message: string) => brandedStringField(parseKebab, message);
 
 const nodeId = kebabIdentField("node id must be kebab-case starting with a letter");
 /** What this node is for — the authoring intent DescribedDag can't carry. */

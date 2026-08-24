@@ -33,7 +33,7 @@ import { applyJitter } from "../shared/jitter.js";
 import { diffRegistry } from "../scheduler/diff.js";
 import type { TaskRegistry } from "../scheduler/types.js";
 
-import { ok, err } from "../types/result.js";
+import { ok } from "../types/result.js";
 import { NoopObserver } from "../observer/observer.js";
 import type { NodeContext } from "../types/node.js";
 import { DAG_INPUT } from "../types/ids.js";
@@ -714,5 +714,3 @@ describe("Wave 4.1 — input-validation failure emits a node-error event", () =>
   });
 });
 
-// Suppress: defineDagFromArray import keeps tsc happy for downstream tests
-void err;

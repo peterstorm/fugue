@@ -36,6 +36,27 @@ import { emitFreshnessWitnessEvents } from "./freshness-emission.js";
 /** Sentinel for wave-level invariant violations. */
 const WAVE_NODE_ID: NodeId = nodeId("__wave__");
 
+/**
+ * THE one "which of this wave's outputs are new" computation, shared by every
+ * failure branch that must carry succeeded siblings forward so a retry does not
+ * re-execute their side effects.
+ */
+const carriedOutputs = (
+  newOutputs: ReadonlyMap<NodeId, unknown>,
+  alreadyInContext: ReadonlyMap<NodeId, unknown>,
+): ReadonlyMap<NodeId, unknown> => {
+  const carried = new Map<NodeId, unknown>();
+  for (const [id, val] of newOutputs) {
+    if (!alreadyInContext.has(id)) carried.set(id, val);
+  }
+  return carried;
+};
+
+/** `node-failed.partialOutputs` is absent, never empty — one encoding of "none". */
+const sizedOrUndefined = (
+  outputs: ReadonlyMap<NodeId, unknown>,
+): ReadonlyMap<NodeId, unknown> | undefined => (outputs.size > 0 ? outputs : undefined);
+
 // ---------------------------------------------------------------------------
 // WaveConfig — configuration object for executeWave
 // ---------------------------------------------------------------------------
@@ -48,6 +69,13 @@ export interface WaveConfig {
   readonly nowFn: () => number;
   readonly freshnessIndex: FreshnessIndex;
   readonly witnessAccumulator?: Map<string, Witness>;
+  /**
+   * Run-scoped set of nodes whose freshness bookkeeping already completed.
+   * Owned by the executor for the lifetime of one run and MUTATED here as waves
+   * complete their emission, so a wave retry re-attempts only what it still
+   * owes. See `PostWaveContext.witnessedNodeIds`.
+   */
+  readonly witnessedNodeIds: Set<NodeId>;
   /** Per-invocation minting authority (broker + origin) — resolves each node's `requires` at dispatch. */
   readonly minting?: MintingAuthority;
 }
@@ -83,7 +111,7 @@ export const executeWave = async (
   machineCtx: DagMachineContext,
   config: WaveConfig,
 ): Promise<WaveResult> => {
-  const { dag, nodeMap, nodeCtx, resumeCheckpoint, nowFn, freshnessIndex, witnessAccumulator, minting } = config;
+  const { dag, nodeMap, nodeCtx, resumeCheckpoint, nowFn, freshnessIndex, witnessAccumulator, witnessedNodeIds, minting } = config;
   const stamp = (): Date => new Date(nowFn());
 
   // An out-of-bounds waveIndex is an invariant violation.
@@ -203,12 +231,7 @@ export const executeWave = async (
       });
     }
 
-    const partialOutputs = new Map<NodeId, unknown>();
-    for (const [id, val] of newOutputs) {
-      if (!machineCtx.outputs.has(id)) {
-        partialOutputs.set(id, val);
-      }
-    }
+    const partialOutputs = carriedOutputs(newOutputs, machineCtx.outputs);
 
     const coFailedNodeIds = siblings.map((s) => s.nodeId);
 
@@ -217,7 +240,7 @@ export const executeWave = async (
         type: "node-failed",
         nodeId: primary.nodeId,
         error: primary.error,
-        partialOutputs: partialOutputs.size > 0 ? partialOutputs : undefined,
+        partialOutputs: sizedOrUndefined(partialOutputs),
         coFailedNodeIds: coFailedNodeIds.length > 0 ? coFailedNodeIds : undefined,
       },
       outcomes,
@@ -227,9 +250,15 @@ export const executeWave = async (
   // -------------------------------------------------------------------------
   // Freshness witness emission (Phase 3)
   // -------------------------------------------------------------------------
+  // A node is owed NO witness emission only when it did not perform its I/O in
+  // this process (checkpoint-resumed) or when its bookkeeping already completed
+  // (`witnessedNodeIds`). Deliberately NOT `priorOutputs.has(id)`: a node
+  // carried across a wave retry via `partialOutputs` has an output but may never
+  // have been witnessed, and skipping it there would silently drop a write
+  // witness the retry exists to record (ADR-0025).
   const skippedNodeIds = new Set<NodeId>();
   for (const nodeId of waveNodeIds) {
-    if (priorOutputs.has(nodeId) || resumeCheckpoint?.has(nodeId)) {
+    if (resumeCheckpoint?.has(nodeId) || witnessedNodeIds.has(nodeId)) {
       skippedNodeIds.add(nodeId);
     }
   }
@@ -237,18 +266,27 @@ export const executeWave = async (
   const postWaveCtx: PostWaveContext = {
     waveNodeIds, nodeMap, nodeCtx, machineCtx,
     dagId: dag.id, nowFn, freshnessIndex, witnessAccumulator,
-    resumeCheckpoint, priorOutputs,
+    witnessedNodeIds,
   };
 
-  const freshnessResult = await emitFreshnessWitnessEvents(
+  const freshness = await emitFreshnessWitnessEvents(
     postWaveCtx, newOutputs, skippedNodeIds,
   );
-  if (!freshnessResult.ok) {
+  // Record progress BEFORE branching: an abort's completed prefix must survive
+  // into the retry on exactly the same terms as a completed wave's.
+  for (const id of freshness.witnessed) witnessedNodeIds.add(id);
+  if (freshness.kind === "aborted") {
+    const { error } = freshness;
     return {
       event: {
         type: "node-failed",
-        nodeId: freshnessResult.error.kind === "node-crash" ? freshnessResult.error.nodeId : (waveNodeIds[0] ?? EXECUTOR_NODE_ID),
-        error: freshnessResult.error,
+        nodeId: error.kind === "node-crash" ? error.nodeId : (waveNodeIds[0] ?? EXECUTOR_NODE_ID),
+        error,
+        // Same carry as the in-dispatch failure path: every node in this wave
+        // already ran its side effect successfully, so a retry must not
+        // re-execute them. Freshness bookkeeping is what the retry re-attempts,
+        // and `witnessedNodeIds` is what tells it which nodes still owe it.
+        partialOutputs: sizedOrUndefined(carriedOutputs(newOutputs, machineCtx.outputs)),
       },
       outcomes,
     };

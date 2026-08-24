@@ -28,6 +28,7 @@ import type { HitlRedisPort, LogPort } from "../../ports.js";
 import type { DecisionResolution, DecisionStorePort, PendingReview } from "../ports.js";
 import { logWithoutThrowing } from "../diagnostic-logging.js";
 import { serializeLossless } from "./lossless-json.js";
+import { brandedId } from "./run-store.js";
 
 /**
  * Shape validator for a persisted `HumanAction` (ADR-0060). The decision is read
@@ -40,12 +41,7 @@ import { serializeLossless } from "./lossless-json.js";
  * constructor the ingress paths use, so a persisted reroute target outside
  * `ID_PATTERN` is rejected rather than flowing in as a branded `NodeId`.
  */
-const PersistedNodeIdSchema: z.ZodType<NodeId> = z.string().transform((value, context) => {
-  const parsed = tryNodeId(value);
-  if (parsed.ok) return parsed.value;
-  context.addIssue({ code: "custom", message: "value is not a valid branded id" });
-  return z.NEVER;
-});
+const PersistedNodeIdSchema: z.ZodType<NodeId> = brandedId(tryNodeId);
 
 const HumanActionSchemaDefinition = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("approve"), actor: z.string().optional() }),

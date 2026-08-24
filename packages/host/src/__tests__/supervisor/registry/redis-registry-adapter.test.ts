@@ -15,7 +15,9 @@ import type { TenantId } from "../../../domain/tenant.js";
 import { tenantConfig } from "../../../supervisor/registry/tenant-registry.js";
 import type {
   ActiveTenantConfig,
+  DeregisteredTenantConfig,
   TenantConfigBase,
+  TenantRegistry,
 } from "../../../supervisor/registry/tenant-registry.js";
 import {
   createRedisTenantRegistry,
@@ -717,10 +719,30 @@ describe("redis tenant registry — concurrent hydration", () => {
 });
 
 describe("redis tenant registry — hardDelete (grace-window purge, FR-030)", () => {
+  /**
+   * `hardDelete` is a compare-and-delete: it takes the tombstone the caller
+   * observed, not a bare id. Tenants are therefore deregistered (tombstoned)
+   * first — the real purge order — and the live tombstone is read back from the
+   * snapshot so the comparison is against exactly what the registry committed.
+   */
+  const tombstoneOf = (reg: { snapshot: () => TenantRegistry }, id: string): DeregisteredTenantConfig => {
+    const entry = reg.snapshot().entries.get(tid(id));
+    if (entry === undefined || entry.status !== "deregistered") {
+      throw new Error(`expected a deregistered tombstone for '${id}'`);
+    }
+    return entry;
+  };
+  /** A tombstone for a tenant the registry has never heard of. */
+  const ghostTombstone = (id: string): DeregisteredTenantConfig => ({
+    ...makeConfig(id),
+    status: "deregistered",
+    deregisteredAt: 1,
+  });
+
   it("(a) hardDelete on an ABSENT tenant is an idempotent no-op (no del/publish)", async () => {
     const fake = createInMemoryRedisFake();
     const reg = createRedisTenantRegistry(fake.redis, fake.pubsub);
-    const res = await reg.hardDelete(tid("ghost"));
+    const res = await reg.hardDelete(ghostTombstone("ghost"));
     expect(res.ok).toBe(true);
     // Nothing written, nothing announced — the early-return short-circuits all I/O.
     expect(fake.store.size).toBe(0);
@@ -732,11 +754,14 @@ describe("redis tenant registry — hardDelete (grace-window purge, FR-030)", ()
     const fake = createInMemoryRedisFake();
     const reg = createRedisTenantRegistry(fake.redis, fake.pubsub);
     await reg.register(makeConfig("acme"), 1000);
+    await reg.deregister(tid("acme"), 1500);
     expect(fake.store.has(`${TENANT_KEY_PREFIX}acme`)).toBe(true);
+    const tombstone = tombstoneOf(reg, "acme");
     fake.published.length = 0;
 
-    const res = await reg.hardDelete(tid("acme"));
+    const res = await reg.hardDelete(tombstone);
     expect(res.ok).toBe(true);
+    if (res.ok) expect(res.value).toBe("deleted");
     // The fugue:tenants:<id> key is removed from the backing store.
     expect(fake.store.has(`${TENANT_KEY_PREFIX}acme`)).toBe(false);
     // A `deregistered` event is announced so subscribers re-read and observe absence.
@@ -758,16 +783,18 @@ describe("redis tenant registry — hardDelete (grace-window purge, FR-030)", ()
     const fake = createInMemoryRedisFake();
     const reg = createRedisTenantRegistry(fake.redis, fake.pubsub);
     await reg.register(makeConfig("acme"), 1000);
+    await reg.deregister(tid("acme"), 1500);
+    const tombstone = tombstoneOf(reg, "acme");
 
     // Force Redis down AFTER a successful register; the del now fails.
     fake.setFail(true);
-    const res = await reg.hardDelete(tid("acme"));
+    const res = await reg.hardDelete(tombstone);
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.kind).toBe("redis-unavailable");
-    // Memory NOT advanced — the tenant is still present (mirrors the register/
+    // Memory NOT advanced — the tombstone is still retained (mirrors the register/
     // deregister "in-memory view NOT advanced on failure" assertions).
     expect(reg.snapshot().entries.has(tid("acme"))).toBe(true);
-    expect(reg.lookup(tid("acme")).ok).toBe(true);
+    expect(tombstoneOf(reg, "acme").deregisteredAt).toBe(1500);
   });
 
   it("(c') a publish failure (del landed, event did not) also fails closed, memory NOT advanced", async () => {
@@ -780,6 +807,7 @@ describe("redis tenant registry — hardDelete (grace-window purge, FR-030)", ()
     // publish-failure test's flaky-pubsub wrapper.
     const seedReg = createRedisTenantRegistry(fake.redis, fake.pubsub);
     await seedReg.register(makeConfig("acme"), 1000);
+    await seedReg.deregister(tid("acme"), 1500);
 
     const flakyPubsub = {
       publish: async () => ({ ok: false as const, error: { kind: "redis-unavailable" as const, operation: "publish" } }),
@@ -790,13 +818,13 @@ describe("redis tenant registry — hardDelete (grace-window purge, FR-030)", ()
     expect(hydrated.ok).toBe(true);
     expect(reg.snapshot().entries.has(tid("acme"))).toBe(true);
 
-    const res = await reg.hardDelete(tid("acme"));
+    const res = await reg.hardDelete(tombstoneOf(reg, "acme"));
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.kind).toBe("redis-unavailable");
     // The in-memory view is NOT advanced even though the del landed — fail-closed
     // keeps memory consistent with a delete that didn't fully announce.
     expect(reg.snapshot().entries.has(tid("acme"))).toBe(true);
-    expect(reg.lookup(tid("acme")).ok).toBe(true);
+    expect(tombstoneOf(reg, "acme").deregisteredAt).toBe(1500);
   });
 
   it("(d) a Redis client that THROWS on del is caught and converted to fail-closed (never propagates)", async () => {
@@ -805,6 +833,7 @@ describe("redis tenant registry — hardDelete (grace-window purge, FR-030)", ()
     const seedFake = createInMemoryRedisFake();
     const seedReg = createRedisTenantRegistry(seedFake.redis, seedFake.pubsub);
     await seedReg.register(makeConfig("acme"), 1000);
+    await seedReg.deregister(tid("acme"), 1500);
 
     const throwingRedis = {
       get: seedFake.redis.get,
@@ -824,11 +853,48 @@ describe("redis tenant registry — hardDelete (grace-window purge, FR-030)", ()
     expect(hydrated.ok).toBe(true);
     expect(reg.snapshot().entries.has(tid("acme"))).toBe(true);
 
-    const res = await reg.hardDelete(tid("acme"));
+    const res = await reg.hardDelete(tombstoneOf(reg, "acme"));
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.kind).toBe("redis-unavailable");
     expect(dead).toBe(1);
     // Memory NOT advanced — the throw is caught, converted, and the tenant remains.
     expect(reg.snapshot().entries.has(tid("acme"))).toBe(true);
+  });
+
+  it("(e) REFUSES to delete a tenant REVIVED after the tombstone was observed", async () => {
+    const fake = createInMemoryRedisFake();
+    const reg = createRedisTenantRegistry(fake.redis, fake.pubsub);
+    await reg.register(makeConfig("acme"), 1000);
+    await reg.deregister(tid("acme"), 1500);
+    // A sweep samples the tombstone…
+    const observed = tombstoneOf(reg, "acme");
+    // …and an admin revives the tenant before the sweep reaches its final step.
+    expect((await reg.register(makeConfig("acme"), 2000)).ok).toBe(true);
+
+    const res = await reg.hardDelete(observed);
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.value).toBe("superseded");
+    // The revived tenant's config record SURVIVES — key, memory, and lookup.
+    expect(fake.store.has(`${TENANT_KEY_PREFIX}acme`)).toBe(true);
+    expect(reg.snapshot().entries.has(tid("acme"))).toBe(true);
+    expect(reg.lookup(tid("acme")).ok).toBe(true);
+  });
+
+  it("(f) REFUSES to delete a tenant revived and re-deregistered (fresh tombstone)", async () => {
+    const fake = createInMemoryRedisFake();
+    const reg = createRedisTenantRegistry(fake.redis, fake.pubsub);
+    await reg.register(makeConfig("acme"), 1000);
+    await reg.deregister(tid("acme"), 1500);
+    const observed = tombstoneOf(reg, "acme");
+    // Revived, then tombstoned again: a NEW grace window that this stale sweep
+    // has no right to end early.
+    await reg.register(makeConfig("acme"), 2000);
+    await reg.deregister(tid("acme"), 2500);
+
+    const res = await reg.hardDelete(observed);
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.value).toBe("superseded");
+    expect(reg.snapshot().entries.has(tid("acme"))).toBe(true);
+    expect(tombstoneOf(reg, "acme").deregisteredAt).toBe(2500);
   });
 });

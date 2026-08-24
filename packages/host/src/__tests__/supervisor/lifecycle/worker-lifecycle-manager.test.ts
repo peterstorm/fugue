@@ -26,6 +26,7 @@ import {
   type TenantSpawnConfigView,
   type WorkerLifecycleConfig,
 } from "../../../supervisor/lifecycle/worker-lifecycle-manager.js";
+import { redisUnavailable } from "../../../domain/host-error.js";
 import {
   createWorkerRegistry,
   createInMemoryWorkerRedisFake,
@@ -1108,6 +1109,82 @@ describe("createWorkerLifecycle: beginDrain invariant rejection surfaces (T9 Fix
     // Never spawned → nothing live.
     const r = await lc.drain(tid("acme"));
     expect(r.ok).toBe(true);
+    expect(log.errors.length).toBe(0);
+  });
+});
+
+// ── persistRecord failure paths (registry write vs. worker lifetime) ──────────
+
+describe("createWorkerLifecycle: registry-write failures", () => {
+  /**
+   * A registry whose `put` fails only for records in the given health phase.
+   * The two phases are deliberately separable: a failed `live` put is
+   * FAIL-CLOSED (the worker is killed rather than left unreadoptable), while a
+   * failed `draining` put is BEST-EFFORT (the drain must not discard in-flight
+   * work). Nothing exercised either branch before.
+   */
+  const registryFailingPutFor = (
+    inner: WorkerRegistry,
+    health: "live" | "draining",
+  ): WorkerRegistry => ({
+    ...inner,
+    put: async (record) =>
+      record.health === health
+        ? { ok: false as const, error: redisUnavailable("worker-put") }
+        : inner.put(record),
+  });
+
+  test("a live-record put failure KILLS the just-spawned healthy worker rather than orphaning it", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    const reg = registryFailingPutFor(createWorkerRegistry(fake.redis, async () => true), "live");
+    const { spawn, proc, spawned, signalled } = makeSpawn();
+    const log = recordingLog();
+    const lc = createWorkerLifecycle({
+      spawn, proc, registry: reg,
+      // The health probe SUCCEEDS: the worker reached `live` and is answering.
+      // This is the post-live branch — distinct from the pre-live aborts
+      // (UDS-not-ready, health-check timeout) the existing tests cover.
+      probe: async () => true,
+      tenants: tenantsView({ acme: { eagerPin: false } }),
+      clock: fixedClock().clock, config: baseConfig(), logger: log,
+    });
+
+    const r = await lc.ensureWorker(tid("acme"));
+
+    // The caller gets a failure — never a socket pointing at an unreadoptable worker.
+    expect(r.ok).toBe(false);
+    // It WAS spawned and it WAS killed: leaving it alive is the orphan this
+    // branch exists to prevent.
+    expect(spawned.length).toBe(1);
+    expect(signalled.map((s) => s.pid)).toContain(spawned[0]!.pid);
+    // No live worker is tracked, so the next request retries a clean spawn.
+    expect(lc.liveWorkerCount()).toBe(0);
+    expect(log.errors.some((e) => e.msg.includes("registry put failed for a live worker"))).toBe(true);
+  });
+
+  test("a draining-record put failure is BEST-EFFORT: the worker is still SIGTERM'd and in-flight work survives", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    const inner = createWorkerRegistry(fake.redis, async () => true);
+    const { spawn, proc, spawned, signalled } = makeSpawn();
+    const log = recordingLog();
+    // Spawn succeeds (live put lands), then the DRAINING put fails.
+    const reg = registryFailingPutFor(inner, "draining");
+    const lc = createWorkerLifecycle({
+      spawn, proc, registry: reg, probe: async () => true,
+      tenants: tenantsView({ acme: { eagerPin: false } }),
+      clock: fixedClock().clock, config: baseConfig(), logger: log,
+    });
+
+    expect((await lc.ensureWorker(tid("acme"))).ok).toBe(true);
+    const r = await lc.drain(tid("acme"));
+
+    // The drain still SUCCEEDS — unlike the spawn path, a stale record is
+    // self-healing (restart re-adopts it; the liveness probe prunes it).
+    expect(r.ok).toBe(true);
+    // The worker was signalled, so in-flight work gets its chance to finish.
+    expect(signalled.some((sg) => sg.pid === spawned[0]!.pid && sg.sig === "SIGTERM")).toBe(true);
+    // Warned, not errored: this is a tolerated inconsistency, not a fail-closed.
+    expect(log.warns.some((w) => w.msg.includes("registry put failed for a draining worker"))).toBe(true);
     expect(log.errors.length).toBe(0);
   });
 });
