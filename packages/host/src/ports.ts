@@ -216,7 +216,10 @@ export type RedisPort = {
  * consumers; host composition parses it once so no HITL worker can start with
  * a partially implemented transaction surface.
  */
-export type HitlRedisPort = RedisPort & {
+export type HitlRedisPort = Pick<
+  RedisPort,
+  "get" | "del" | "sAdd" | "sRem" | "sMembers" | "setNx" | "compareAndDelete"
+> & {
   readonly compareAndExpire: NonNullable<RedisPort["compareAndExpire"]>;
   readonly setIfValue: NonNullable<RedisPort["setIfValue"]>;
   readonly setIfValues: NonNullable<RedisPort["setIfValues"]>;

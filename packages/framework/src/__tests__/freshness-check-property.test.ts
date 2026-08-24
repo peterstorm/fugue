@@ -48,7 +48,8 @@ const arbNodeId = fc.integer({ min: 1, max: 5 }).map((n) => N(`w${n}`));
 const arbWriteEvent = fc.record({
   runId: arbRunId,
   nodeId: arbNodeId,
-  resource: arbResource,
+  conditionedOnResource: arbResource,
+  newWitnessResource: arbResource,
   conditionedOnValue: arbWitnessValue,
   newWitnessValue: arbWitnessValue,
   succeededAtMs: fc.integer({ min: 1, max: 10_000 }),
@@ -57,7 +58,8 @@ const arbWriteEvent = fc.record({
 type WriteSpec = {
   runId: RunId;
   nodeId: NodeId;
-  resource: string;
+  conditionedOnResource: string;
+  newWitnessResource: string;
   conditionedOnValue: string;
   newWitnessValue: string;
   succeededAtMs: number;
@@ -69,8 +71,8 @@ const toWriteAttemptedEvent = (spec: WriteSpec): WriteAttemptedEvent => ({
   dagId: D("d"),
   nodeId: spec.nodeId,
   executionEpoch: FE(),
-  conditionedOn: witness("version", RN(spec.resource), spec.conditionedOnValue),
-  newWitness: witness("version", RN(spec.resource), spec.newWitnessValue),
+  conditionedOn: witness("version", RN(spec.conditionedOnResource), spec.conditionedOnValue),
+  newWitness: witness("version", RN(spec.newWitnessResource), spec.newWitnessValue),
   succeededAtMs: spec.succeededAtMs,
   timestamp: new Date(spec.succeededAtMs),
 });
@@ -98,15 +100,15 @@ const referenceConflictCount = (
   let conflicts = 0;
 
   for (const event of sorted) {
-    const resource = event.conditionedOn.resource;
-    const latest = latestWriteByResource.get(resource);
+    const latest = latestWriteByResource.get(event.conditionedOn.resource);
 
     if (latest && latest.newWitness.value !== event.conditionedOn.value) {
       conflicts++;
     }
 
-    // Always update — for same-timestamp writes, last-seen wins
-    latestWriteByResource.set(resource, event);
+    // Always update the resource actually written — for same-timestamp writes,
+    // last-seen wins.
+    latestWriteByResource.set(event.newWitness.resource, event);
   }
 
   return conflicts;
@@ -173,7 +175,8 @@ describe("freshness conflict detection — property tests (Phase 3)", () => {
           const older = toWriteAttemptedEvent({
             runId: R("older"),
             nodeId: N("older"),
-            resource: "postgres:orders",
+            conditionedOnResource: "postgres:orders",
+            newWitnessResource: "postgres:orders",
             conditionedOnValue: "0",
             newWitnessValue: "1",
             succeededAtMs: olderAtMs,
@@ -181,7 +184,8 @@ describe("freshness conflict detection — property tests (Phase 3)", () => {
           const newer = toWriteAttemptedEvent({
             runId: R("newer"),
             nodeId: N("newer"),
-            resource: "postgres:orders",
+            conditionedOnResource: "postgres:orders",
+            newWitnessResource: "postgres:orders",
             conditionedOnValue: "1",
             newWitnessValue: "2",
             succeededAtMs: newerAtMs,

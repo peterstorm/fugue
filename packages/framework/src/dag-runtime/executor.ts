@@ -223,15 +223,15 @@ export const buildDagExecutor = (
     random?: () => number;
     /**
      * Wall-clock source for observer-event `timestamp` fields. Threaded into
-     * `runWave`, `callHumanReviewHook`, and `runNodeShared`. Defaults to
+     * `executeWave`, `callHumanReviewHook`, and `runNodeShared`. Defaults to
      * `Date.now`; tests pass a deterministic clock so event ordering is
      * checkable via property tests.
      */
     now?: () => number;
     /**
-     * In-memory freshness index for single-process witness tracking. When
-     * omitted, a private instance is created per executor. Pass a shared
-     * instance to enable cross-DAG freshness detection within a process.
+     * FreshnessIndex port for witness tracking. When omitted, a private
+     * in-memory adapter is created per executor. Pass a shared or durable
+     * adapter to coordinate freshness detection beyond one executor.
      */
     freshnessIndex?: FreshnessIndex;
     /**

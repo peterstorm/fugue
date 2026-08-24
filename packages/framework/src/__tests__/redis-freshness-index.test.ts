@@ -74,6 +74,12 @@ describe("RedisFreshnessIndex encoding", () => {
     expect(decoded!.witnessValue).toBe('{"key":"val\\nue"}');
   });
 
+  it("cannot encode an empty witness value outside the persisted grammar", () => {
+    expect(() => encode(R("r"), N("n"), "version", "")).toThrow(
+      "Freshness member witness value must be a non-empty string",
+    );
+  });
+
   it("rejects empty and non-string witness values from persisted bytes", () => {
     expect(decode(JSON.stringify(["r", "n", validEpoch, "version", ""]))).toBeNull();
     expect(decode(JSON.stringify(["r", "n", validEpoch, "version", null]))).toBeNull();

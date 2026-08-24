@@ -34,7 +34,11 @@ export const freshRegistryEntry = (body: string): RegistryEntry => ({
  * — its answer depends on the host's ICU tables/locale, so two machines could
  * write byte-different registries for identical content.
  */
-const codepointCompare = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+const codepointCompare = (a: string, b: string): number => {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+};
 
 /**
  * The `prompts/registry.json` byte format: canonical 2-space JSON, keys in

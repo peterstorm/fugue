@@ -121,9 +121,9 @@ export interface DagRunOpts
    */
   readonly random?: () => number;
   /**
-   * In-memory freshness index for single-process witness tracking. When
-   * omitted, a private instance is created per executor. Pass a shared
-   * instance to enable cross-DAG freshness detection within a process.
+   * FreshnessIndex port for witness tracking. When omitted, a private in-memory
+   * adapter is created per executor. Pass a shared or durable adapter to
+   * coordinate freshness detection beyond one executor.
    */
   readonly freshnessIndex?: FreshnessIndex;
   /**

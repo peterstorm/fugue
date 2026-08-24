@@ -50,16 +50,13 @@ const fakeRedis = (preset: Record<string, string> = {}) => {
   const m = new Map<string, string>(Object.entries(preset));
   const calls = {
     setNx: [] as { key: string; value: string; opts?: { expiresInSec?: number } }[],
-    set: [] as string[],
     del: [] as string[],
     compareAndDelete: [] as { key: string; expected: string }[],
     compareAndExpire: [] as { key: string; expected: string; ttlSec: number }[],
   };
   const redis: HitlRedisPort = {
     async get(k) { return ok(m.get(k) ?? null); },
-    async set(k, v, _opts) { calls.set.push(k); m.set(k, v); return ok("OK"); },
     async del(k) { calls.del.push(k); const had = m.delete(k); return ok(had ? 1 : 0); },
-    async scan() { return ok({ cursor: "0", keys: [...m.keys()] }); },
     async setNx(k, v, opts) { calls.setNx.push({ key: k, value: v, opts }); if (m.has(k)) return ok(false); m.set(k, v); return ok(true); },
     async compareAndDelete(k, expected) { calls.compareAndDelete.push({ key: k, expected }); if (m.get(k) !== expected) return ok(false); m.delete(k); return ok(true); },
     async compareAndExpire(k, expected, ttlSec) { calls.compareAndExpire.push({ key: k, expected, ttlSec }); return ok(m.get(k) === expected); },
@@ -240,10 +237,10 @@ describe("createRunQueue — single-flight lock", () => {
 
     await fb.getWorker()(fb.job(RUN));
 
-    // The single setNx carries the TTL atomically…
+    // The single setNx carries the TTL atomically. HitlRedisPort deliberately
+    // exposes no separate `set`, making the old crash-prone two-call path
+    // unrepresentable to this adapter.
     expect(calls.setNx).toEqual([{ key: lockKey(RUN), value: "owner-1", opts: { expiresInSec: 300 } }]);
-    // …and there is NO separate `set` on the lock key (the old crash-prone path).
-    expect(calls.set).not.toContain(lockKey(RUN));
     // Release uses the same owner token in the atomic comparator.
     expect(calls.compareAndDelete).toEqual([{ key: lockKey(RUN), expected: "owner-1" }]);
   });
@@ -409,11 +406,19 @@ describe("createRunQueue — single-flight lock", () => {
     expect(fb.getQueueOpts()?.defaultAttempts).toBe(7);
   });
 
-  it("rejects missing HITL transaction capabilities at composition", () => {
+  it("rejects missing HITL transaction capabilities and narrows admin commands at composition", () => {
     const base = fakeRedis();
-    const incomplete: RedisPort = { ...base.redis, compareAndExpire: undefined };
+    const complete: RedisPort = {
+      ...base.redis,
+      async set(key, value) { base.m.set(key, value); return ok("OK"); },
+      async scan() { return ok({ cursor: "0", keys: [...base.m.keys()] }); },
+    };
+    const incomplete: RedisPort = { ...complete, compareAndExpire: undefined };
 
     expect(() => requireHitlRedisPort(incomplete)).toThrow("compareAndExpire");
+    const narrowed = requireHitlRedisPort(complete);
+    // @ts-expect-error — tenant-scoped HITL code cannot enumerate Redis keys.
+    void narrowed.scan;
     expect(base.calls.setNx).toHaveLength(0);
   });
 

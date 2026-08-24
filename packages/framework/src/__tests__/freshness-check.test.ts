@@ -11,7 +11,7 @@ import { describe, it, expect } from "bun:test";
 import { N, R, D } from "./_id-helpers.js";
 import { checkFreshness, InMemoryFreshnessIndex } from "../dag-runtime/freshness-check.js";
 import type { WriteAttemptedEvent } from "../types/events.js";
-import { FE, mkWitness } from "./_freshness-helpers.js";
+import { FE, mkWitness, RN } from "./_freshness-helpers.js";
 import { unwrap } from "../types/result.js";
 import { freshnessWriteIdentityOf } from "../types/freshness.js";
 
@@ -69,6 +69,45 @@ describe("checkFreshness — pure conflict detection", () => {
     expect(result.conflicts[0]!.conditionedOnWitness.value).toBe("42");
     expect(result.conflicts[0]!.conflictingWrite.newWitness.value).toBe("43");
     expect(result.conflicts[0]!.conflictingWrite.runId).toBe(R("r1"));
+  });
+
+  it("records a completed write under newWitness.resource, not conditionedOn.resource", () => {
+    const crossResourceWrite: WriteAttemptedEvent = {
+      type: "write-attempted",
+      runId: R("cross-resource"),
+      dagId: D("d1"),
+      nodeId: N("writer-b"),
+      executionEpoch: FE(),
+      conditionedOn: mkWitness("postgres:source-a", "a1"),
+      newWitness: mkWitness("postgres:target-b", "b2"),
+      succeededAtMs: 1000,
+      timestamp: new Date(1000),
+    };
+    const stillFreshOnA: WriteAttemptedEvent = {
+      ...crossResourceWrite,
+      runId: R("still-fresh-a"),
+      nodeId: N("writer-c"),
+      conditionedOn: mkWitness("postgres:source-a", "a1"),
+      newWitness: mkWitness("postgres:target-c", "c2"),
+      succeededAtMs: 2000,
+      timestamp: new Date(2000),
+    };
+    const staleOnB: WriteAttemptedEvent = {
+      ...crossResourceWrite,
+      runId: R("stale-b"),
+      nodeId: N("writer-d"),
+      conditionedOn: mkWitness("postgres:target-b", "b1"),
+      newWitness: mkWitness("postgres:target-d", "d2"),
+      succeededAtMs: 3000,
+      timestamp: new Date(3000),
+    };
+
+    const result = checkFreshness([], [crossResourceWrite, stillFreshOnA, staleOnB]);
+
+    expect(result.conflicts).toHaveLength(1);
+    expect(result.conflicts[0]?.writeRunId).toBe(R("stale-b"));
+    expect(result.conflicts[0]?.conflictingWrite.runId).toBe(R("cross-resource"));
+    expect(result.conflicts[0]?.conflictingWrite.newWitness.resource).toBe(RN("postgres:target-b"));
   });
 
   it("no conflict when different resources", () => {

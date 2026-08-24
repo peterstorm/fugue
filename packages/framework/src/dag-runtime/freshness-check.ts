@@ -57,10 +57,12 @@ export type {
  * caller, and exporting it invites use where the incremental index belongs.
  *
  * The algorithm:
- * 1. Maintain a per-resource list of completed writes (from `WriteAttemptedEvent`).
- * 2. For each `WriteAttemptedEvent`, check if the latest recorded write to the
- *    same resource produced a different witness value than `conditionedOn.value`.
- *    If so, the conditioned-on state is stale — record a conflict.
+ * 1. Maintain the latest completed write per resource (`WriteAttemptedEvent`).
+ * 2. For each `WriteAttemptedEvent`, check if the latest write recorded under
+ *    `conditionedOn.resource` produced a different witness value.
+ * 3. Record the completed write under `newWitness.resource`; a write may read A
+ *    while producing a witness for B.
+ *    If the prior value differs, the conditioned-on state is stale — record a conflict.
  *
  * Pure function — no I/O, no side effects.
  */
@@ -68,9 +70,8 @@ export const checkFreshness = (
   _witnessEvents: readonly WitnessCapturedEvent[],
   writeEvents: readonly WriteAttemptedEvent[],
 ): FreshnessCheckResult => {
-  // Build a time-ordered log of all writes per resource.
-  // Key: resource string → sorted array of writes.
-  const writesByResource = new Map<string, WriteEntry[]>();
+  // Key: resource string → latest completed write.
+  const latestWriteByResource = new Map<string, WriteEntry>();
 
   // Witness events remain part of the forensic API, but the conflict rule uses
   // only completed writes. Sort the data the algorithm actually consumes.
@@ -78,15 +79,11 @@ export const checkFreshness = (
   const conflicts: FreshnessConflict[] = [];
 
   for (const event of timeline) {
-    const resource = event.conditionedOn.resource;
-    const existingWrites = writesByResource.get(resource) ?? [];
+    const latest = latestWriteByResource.get(event.conditionedOn.resource);
 
-    // Check if the LATEST write to this resource produced a different
-    // witness value. Only the most recent write matters — older writes
-    // may have different values that were subsequently superseded.
-    const latest = existingWrites.at(-1) ?? null;
-
-    if (latest && latest.newWitness.value !== event.conditionedOn.value) {
+    // Only the most recent write matters — older writes may have different
+    // values that were subsequently superseded.
+    if (latest !== undefined && latest.newWitness.value !== event.conditionedOn.value) {
       conflicts.push({
         writeNodeId: event.nodeId,
         writeRunId: event.runId,
@@ -95,8 +92,7 @@ export const checkFreshness = (
       });
     }
 
-    existingWrites.push(writeEntryOf(event));
-    writesByResource.set(resource, existingWrites);
+    latestWriteByResource.set(event.newWitness.resource, writeEntryOf(event));
   }
 
   return { conflicts };

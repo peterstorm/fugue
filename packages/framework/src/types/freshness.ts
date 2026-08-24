@@ -123,13 +123,18 @@ export const freshnessMemberKey = (
   // tie-break grammar — round-22 tda-2).
   witnessKind: WitnessKind,
   witnessValue: string,
-): string => JSON.stringify([
-  runId,
-  nodeId,
-  freshnessExecutionEpochMember(executionEpoch),
-  witnessKind,
-  witnessValue,
-]);
+): string => {
+  if (typeof witnessValue !== "string" || witnessValue.length === 0) {
+    throw new TypeError("Freshness member witness value must be a non-empty string");
+  }
+  return JSON.stringify([
+    runId,
+    nodeId,
+    freshnessExecutionEpochMember(executionEpoch),
+    witnessKind,
+    witnessValue,
+  ]);
+};
 
 export interface FreshnessMemberIdentity {
   readonly runId: RunId;

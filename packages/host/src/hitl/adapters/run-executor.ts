@@ -154,19 +154,20 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
           throw new Error("HITL execution slice attempted durable work after its deadline");
         }
       };
-      const startedJob = await req.job.startSlice(registered.config.timeout);
-      if (!startedJob.ok) return err(startedJob.error);
-      const fencedJob = deadlineFencedJob(startedJob.value, assertExecutionAuthorized);
-
-      // `setup` = context build (host wiring), `execution` = the kernel slice.
-      // Both settle as the `failed` outcome below, but a setup fault is a
-      // PERMANENT host-wiring condition (invalid tenant team, FR-040 unmapped
-      // agent client) — not an in-DAG node crash — so the two phases log as
-      // different events, at ERROR with the actual message: neither may be a
-      // silent, detail-less warn.
+      // `setup` = execution-fence/context build (host wiring), `execution` =
+      // the kernel slice. Both settle as the `failed` outcome below, but a setup
+      // fault is a PERMANENT host-wiring condition (invalid tenant team, FR-040
+      // unmapped agent client) — not an in-DAG node crash — so the two phases
+      // log as different events, at ERROR with the actual message: neither may
+      // be a silent, detail-less warn.
       let phase: "setup" | "execution" = "setup";
 
       try {
+        // JobLike is an external shell port. Keep both its typed Err and any
+        // contract-violating throw inside run's never-throw boundary.
+        const startedJob = await req.job.startSlice(registered.config.timeout);
+        if (!startedJob.ok) return err(startedJob.error);
+        const fencedJob = deadlineFencedJob(startedJob.value, assertExecutionAuthorized);
         const slice = (async () => {
           const { ctx, origin } = await createNodeContextForDag(
             sharedInfra,
@@ -272,7 +273,7 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
         logWithoutThrowing(
           logger,
           "error",
-          phase === "setup" ? "hitl: context build failed" : "hitl: run slice failed",
+          phase === "setup" ? "hitl: run slice setup failed" : "hitl: run slice failed",
           {
             runId: req.runId,
             dagId: req.dagId,

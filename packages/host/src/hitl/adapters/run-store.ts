@@ -177,6 +177,25 @@ const readRunTimestamp = (now: () => number): Result<RunTimestampMs, HostError> 
   }
 };
 
+const readExecutionToken = (source: () => string): Result<string, HostError> => {
+  try {
+    const token = source();
+    return typeof token === "string" && token.length > 0
+      ? ok(token)
+      : err({
+          kind: "internal-invariant-violated",
+          message: "HITL execution token source returned an empty or non-string token",
+          context: {},
+        });
+  } catch (error) {
+    return err({
+      kind: "internal-invariant-violated",
+      message: `HITL execution token source threw: ${safeErrorMessage(error)}`,
+      context: {},
+    });
+  }
+};
+
 /**
  * Whether a PERSISTED run-meta JSON string carries a terminal status. Defensive
  * and TOTAL: a parse failure yields `{ kind: "corrupt" }` with the parse error
@@ -748,24 +767,18 @@ export const createRedisRunStore = (
       if (!parsedTimeout.ok) return parsedTimeout;
       const ownerToken = leases.ownerToken(lease);
       if (ownerToken === null) return leaseLost(lease);
-      const token = newExecutionToken();
-      if (token.length === 0) {
-        return err({
-          kind: "internal-invariant-violated",
-          message: "HITL execution token source returned an empty token",
-          context: {},
-        });
-      }
+      const token = readExecutionToken(newExecutionToken);
+      if (!token.ok) return token;
       const armed = await redis.setIfValue(
         leaseKey(tenant, lease.runId),
         ownerToken,
         executionKey(tenant, lease.runId),
-        token,
+        token.value,
         { expiresInMs: parsedTimeout.value },
       );
       if (!armed.ok) return err(armed.error);
       return armed.value
-        ? ok(executionFences.issue(lease.runId, token))
+        ? ok(executionFences.issue(lease.runId, token.value))
         : leaseLost(lease);
     },
 

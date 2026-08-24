@@ -35,8 +35,9 @@ import type {
   RunId,
   NodeId,
 } from "@fuguejs/framework";
-import { err, usageOfError } from "@fuguejs/framework";
+import { err, safeErrorMessage, usageOfError } from "@fuguejs/framework";
 import type { LogPort } from "../ports.js";
+import { logWithoutThrowing } from "../hitl/diagnostic-logging.js";
 import {
   emptyMeter,
   accumulate,
@@ -99,7 +100,7 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
   const admit = (nodeId: NodeId): { readonly error: FrameworkError } | { readonly release: () => void } => {
     const decision = admitWithReservation(meter, runId, reservation, budget);
     if (decision.kind === "refuse") {
-      logger.warn("LLM budget exceeded — refusing call", {
+      logWithoutThrowing(logger, "warn", "LLM budget exceeded — refusing call", {
         dagId: dagId as string,
         runId: runId as string,
         nodeId: nodeId as string,
@@ -139,7 +140,7 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
     reservation = learnObservedCall(reservation, tokensIn + tokensOut);
     meter = accumulate(meter, runId, { tokensIn, tokensOut });
     const cumulative = runTotal(usageFor(meter, runId));
-    logger.info("llm.metered", {
+    logWithoutThrowing(logger, "info", "llm.metered", {
       dagId: dagId as string,
       runId: runId as string,
       nodeId: nodeId as string,
@@ -178,7 +179,7 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
     if (partial !== undefined && (partial.tokensIn > 0 || partial.tokensOut > 0)) {
       record(nodeId, operation, partial.tokensIn, partial.tokensOut);
     }
-    logger.warn("llm.call-failed", {
+    logWithoutThrowing(logger, "warn", "llm.call-failed", {
       dagId: dagId as string,
       runId: runId as string,
       nodeId: nodeId as string,
@@ -199,13 +200,13 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
    * reservation either way.
    */
   const logThrown = (nodeId: NodeId, operation: "sendStructured" | "sendWithTools", e: unknown): void => {
-    logger.warn("llm.call-failed", {
+    logWithoutThrowing(logger, "warn", "llm.call-failed", {
       dagId: dagId as string,
       runId: runId as string,
       nodeId: nodeId as string,
       operation,
       errorKind: "thrown",
-      message: e instanceof Error ? e.message : String(e),
+      message: safeErrorMessage(e),
     });
   };
 

@@ -29,10 +29,12 @@ export const parseFileFactoryClock = (
     throw new Error("options must be a plain object");
   }
   const keys = Reflect.ownKeys(opts);
-  const unsupported = findUnsupportedKey(keys, ["now", ...extraOptionKeys]);
+  const supportedOptionKeys = ["now", ...extraOptionKeys];
+  const unsupported = findUnsupportedKey(keys, supportedOptionKeys);
   if (unsupported !== undefined) {
-    const supported = ["now", ...extraOptionKeys].join(" / ");
-    throw new Error(`unsupported option ${safeDiagnosticRender(unsupported)}; supported options are ${supported}`);
+    throw new Error(
+      `unsupported option ${safeDiagnosticRender(unsupported)}; supported options are ${supportedOptionKeys.join(" / ")}`,
+    );
   }
   const configuredNow = keys.includes("now")
     ? (opts as Record<string, unknown>).now

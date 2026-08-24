@@ -4,7 +4,7 @@
 import { describe, it, expect } from "bun:test";
 import { nonEmptyString, ok, err } from "@fuguejs/framework";
 import type { Result, RunId, NodeId, DagId, HumanAction } from "@fuguejs/framework";
-import type { HitlRedisPort, LogPort } from "../../../ports.js";
+import type { HitlRedisPort, LogPort, RedisExpiry } from "../../../ports.js";
 import type { HostError } from "../../../domain/host-error.js";
 import { markTeam } from "../../../domain/auth.js";
 import { tenantId } from "../../../domain/tenant.js";
@@ -35,17 +35,21 @@ const leaseAuthority = createRunLeaseAuthority();
 const createRedisRunStore = (
   redis: HitlRedisPort,
   tenant: TenantId,
-  config: { readonly ttlSec: number; readonly now?: () => number },
+  config: {
+    readonly ttlSec: number;
+    readonly now?: () => number;
+    readonly newExecutionToken?: () => string;
+  },
   logger?: LogPort,
 ): ReturnType<typeof createRedisRunStoreAdapter> =>
   createRedisRunStoreAdapter(redis, tenant, config, leaseAuthority.verifier, logger);
 
-/** A `set`/`setNx` opts record so a test can assert the TTL was passed (SET …EX). */
-type WriteOpts = { expiresInSec?: number } | undefined;
+/** Write opts record so tests can assert second- and millisecond-granularity TTLs. */
+type WriteOpts = RedisExpiry | { readonly expiresInSec?: number } | undefined;
 
 /**
- * A minimal in-memory RedisPort honoring get/set/del/setNx that ALSO records the
- * opts each write was given, keyed by key. The store layer must pass
+ * A minimal tenant-scoped Redis fake that records the opts each write was
+ * given, keyed by key. The store layer must pass
  * `{ expiresInSec: ttlSec }` on every key-creating write so a crash never leaves
  * a TTL-less key (mirrors the lock assertion in run-queue.test.ts).
  */
@@ -61,11 +65,9 @@ const fakeRedis = (): RecordingRedis => {
     setOpts,
     setNxOpts,
     async get(k): Promise<Result<string | null, HostError>> { return ok(m.get(k) ?? null); },
-    async set(k, v, opts): Promise<Result<string | null, HostError>> { setOpts.set(k, opts); m.set(k, v); return ok("OK"); },
     async del(k, ...additionalKeys): Promise<Result<number, HostError>> {
       return ok([k, ...additionalKeys].reduce((count, key) => count + (m.delete(key) ? 1 : 0), 0));
     },
-    async scan(): Promise<Result<{ cursor: string; keys: string[] }, HostError>> { return ok({ cursor: "0", keys: [...m.keys()] }); },
     async setNx(k, v, opts): Promise<Result<boolean, HostError>> { setNxOpts.set(k, opts); if (m.has(k)) return ok(false); m.set(k, v); return ok(true); },
     async compareAndDelete(k, expected): Promise<Result<boolean, HostError>> { if (m.get(k) !== expected) return ok(false); m.delete(k); return ok(true); },
     async compareAndExpire(k, expected): Promise<Result<boolean, HostError>> { return ok(m.get(k) === expected); },
@@ -100,11 +102,9 @@ const seedableRedis = (): { redis: HitlRedisPort; seed: (k: string, v: string) =
   const m = new Map<string, string>();
   const redis: HitlRedisPort = {
     async get(k) { return ok(m.get(k) ?? null); },
-    async set(k, v) { m.set(k, v); return ok("OK"); },
     async del(k, ...additionalKeys) {
       return ok([k, ...additionalKeys].reduce((count, key) => count + (m.delete(key) ? 1 : 0), 0));
     },
-    async scan() { return ok({ cursor: "0", keys: [...m.keys()] }); },
     async setNx(k, v) { if (m.has(k)) return ok(false); m.set(k, v); return ok(true); },
     async compareAndDelete(k, expected) { if (m.get(k) !== expected) return ok(false); m.delete(k); return ok(true); },
     async compareAndExpire(k, expected) { return ok(m.get(k) === expected); },
@@ -348,6 +348,65 @@ describe("RedisRunStore", () => {
     expect(redis.setOpts.get("fugue:tenant-a:hitl:run:run-1")).toEqual({ expiresInSec: 7 });
   });
 
+  it("arms the Redis execution generation with the slice TTL and rejects checkpoint commit after expiry", async () => {
+    let now = 100;
+    let executionExpiresAt: number | null = null;
+    const base = fakeRedis();
+    const redis: HitlRedisPort = {
+      ...base,
+      async setIfValue(guard, expected, key, value, opts) {
+        const result = await base.setIfValue(guard, expected, key, value, opts);
+        if (result.ok && result.value && key.includes(":hitl:exec:") && opts.expiresInMs !== undefined) {
+          executionExpiresAt = now + opts.expiresInMs;
+        }
+        return result;
+      },
+      async setIfValues(guards, key, value, opts) {
+        const executionGuarded = guards.some((guard) => guard.key.includes(":hitl:exec:"));
+        if (executionGuarded && executionExpiresAt !== null && now >= executionExpiresAt) {
+          return ok(false);
+        }
+        return base.setIfValues(guards, key, value, opts);
+      },
+    };
+    const store = createRedisRunStore(redis, TENANT, cfg);
+    const run = record();
+    await store.create(run);
+    const lease = await acquireLease(redis, run.runId);
+
+    const fence = await store.beginExecution(lease, 5);
+    if (!fence.ok) throw new Error("failed to arm Redis execution fence");
+    expect(base.setOpts.get("fugue:tenant-a:hitl:exec:run-1")).toEqual({ expiresInMs: 5 });
+
+    now = 105;
+    expect(await store.saveCheckpoint(lease, fence.value, "late-checkpoint")).toEqual(
+      err({ kind: "run-lease-lost", runId: run.runId }),
+    );
+    const persisted = await store.get(run.runId);
+    expect(persisted.ok && persisted.value?.checkpoint).toBe(run.checkpoint);
+  });
+
+  it("contains a throwing execution-token source inside the typed Result boundary", async () => {
+    const redis = fakeRedis();
+    const hostile = Object.create(null);
+    const store = createRedisRunStore(redis, TENANT, {
+      ...cfg,
+      newExecutionToken: () => { throw hostile; },
+    });
+    const lease = await acquireLease(redis, record().runId);
+
+    const result = await store.beginExecution(lease, 5);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("internal-invariant-violated");
+      if (result.error.kind === "internal-invariant-violated") {
+        expect(result.error.message).toContain("execution token source threw");
+        expect(typeof result.error.message).toBe("string");
+      }
+    }
+  });
+
   it("rejects checkpoint and terminal writes from an expired owner after a successor acquires", async () => {
     const redis = fakeRedis();
     const store = createRedisRunStore(redis, TENANT, cfg);
@@ -355,7 +414,13 @@ describe("RedisRunStore", () => {
     await store.create(r);
     const stale = await acquireLease(redis, r.runId, TENANT, "stale-owner");
     await store.setStatus(stale, { kind: "running" });
-    await redis.set(`fugue:${TENANT}:hitl:lock:${r.runId}`, "successor-owner", { expiresInSec: 60 });
+    expect(await redis.setIfValue(
+      `fugue:${TENANT}:hitl:lock:${r.runId}`,
+      "stale-owner",
+      `fugue:${TENANT}:hitl:lock:${r.runId}`,
+      "successor-owner",
+      { expiresInSec: 60 },
+    )).toEqual(ok(true));
 
     const checkpoint = await saveCheckpoint(store, stale, '{"state":{"kind":"succeeded"}}');
     const terminal = await store.setStatus(stale, { kind: "completed", output: "stale" });
@@ -787,11 +852,9 @@ const sharedRedis = (): HitlRedisPort & { readonly _keys: ReadonlyMap<string, st
   return {
     _keys: m,
     async get(k) { return ok(m.get(k) ?? null); },
-    async set(k, v) { m.set(k, v); return ok("OK"); },
     async del(k, ...additionalKeys) {
       return ok([k, ...additionalKeys].reduce((count, key) => count + (m.delete(key) ? 1 : 0), 0));
     },
-    async scan() { return ok({ cursor: "0", keys: [...m.keys()] }); },
     async setNx(k, v) { if (m.has(k)) return ok(false); m.set(k, v); return ok(true); },
     async compareAndDelete(k, expected) { if (m.get(k) !== expected) return ok(false); m.delete(k); return ok(true); },
     async compareAndExpire(k, expected) { return ok(m.get(k) === expected); },
@@ -908,11 +971,9 @@ const setBackedRedis = () => {
   const sets = new Map<string, Set<string>>();
   const redis: HitlRedisPort = {
     async get(k) { return ok(kv.get(k) ?? null); },
-    async set(k, v) { kv.set(k, v); return ok("OK"); },
     async del(k, ...additionalKeys) {
       return ok([k, ...additionalKeys].reduce((count, key) => count + (kv.delete(key) ? 1 : 0), 0));
     },
-    async scan() { return ok({ cursor: "0", keys: [...kv.keys()] }); },
     async setNx(k, v) { if (kv.has(k)) return ok(false); kv.set(k, v); return ok(true); },
     async compareAndDelete(k, expected) { if (kv.get(k) !== expected) return ok(false); kv.delete(k); return ok(true); },
     async compareAndExpire(k, expected) { return ok(kv.get(k) === expected); },

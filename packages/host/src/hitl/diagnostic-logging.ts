@@ -11,10 +11,10 @@ const renderDiagnosticData = (data: Record<string, unknown>): string => {
   }
 };
 
-/** Emit a HITL diagnostic without allowing logger failure to replace the modeled outcome. */
+/** Emit a host diagnostic without allowing logger failure to replace the modeled outcome. */
 export const logWithoutThrowing = (
   logger: LogPort | undefined,
-  level: "warn" | "error",
+  level: "info" | "warn" | "error",
   message: string,
   data: Record<string, unknown>,
   writeFallback: (diagnostic: string) => unknown = (diagnostic) => process.stderr.write(diagnostic),
@@ -26,7 +26,7 @@ export const logWithoutThrowing = (
     // attempt through a channel independent of the configured logger.
     try {
       writeFallback(
-        `[hitl diagnostic fallback] ${level} ${message}; ${renderDiagnosticData(data)}; ` +
+        `[host diagnostic fallback] ${level} ${message}; ${renderDiagnosticData(data)}; ` +
           `loggerError=${safeErrorMessage(loggerError)}\n`,
       );
     } catch {

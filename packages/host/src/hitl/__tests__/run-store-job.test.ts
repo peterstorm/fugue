@@ -289,7 +289,7 @@ describe("logWithoutThrowing", () => {
     );
 
     expect(diagnostics).toHaveLength(1);
-    expect(diagnostics[0]).toContain("[hitl diagnostic fallback] error checkpoint failed");
+    expect(diagnostics[0]).toContain("[host diagnostic fallback] error checkpoint failed");
     expect(diagnostics[0]).toContain("runId=run-1");
     expect(diagnostics[0]).toContain("loggerError=logger transport failed");
   });

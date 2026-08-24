@@ -251,6 +251,31 @@ describe("createRunExecutor — channel split (err vs failed)", () => {
     expect(v2Runs).toBe(0);
   });
 
+  it("contains a throwing startSlice port inside the never-throw run boundary", async () => {
+    const dag = singleNodeDag((async () => ok("unreachable")) as never);
+    const reg = registered(dag);
+    const exec = createRunExecutor({
+      sharedInfra: sharedInfra(),
+      getRegisteredDag: () => reg,
+      agentClientMap: { "exec-dag": "fugue-agent-exec" },
+    });
+    const jobLike = await seedJobLike(dag, null);
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    const throwingJob: RunExecutionJob = {
+      ...jobLike,
+      startSlice: async () => { throw revoked.proxy; },
+    };
+
+    const result = await exec.run(runReq(dag, throwingJob, null));
+
+    expect(result.ok && result.value.kind).toBe("failed");
+    if (result.ok && result.value.kind === "failed" && result.value.error.kind === "node-crash") {
+      expect(result.value.error.nodeId).toBe(EXECUTOR_NODE_ID);
+      expect(typeof result.value.error.message).toBe("string");
+    }
+  });
+
   it("a known dag that COMPLETES returns ok({ kind: 'completed' }) with the output", async () => {
     const dag = singleNodeDag((async () => ok("done")) as never);
     const reg = registered(dag);
