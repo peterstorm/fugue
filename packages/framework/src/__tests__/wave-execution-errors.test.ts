@@ -60,6 +60,7 @@ const makeMachineCtx = (waves: string[][] = [["a"]]): DagMachineContext => ({
   retryLimits: {},
   defaultRetryLimit: 0,
   confidenceByNode: new Map(),
+  freshnessCompletedNodeIds: new Set(),
   incomingByNode: new Map(),
   outputNodeId: undefined,
   edges: [],
@@ -79,7 +80,7 @@ const makeConfig = (nodeMap?: Map<string, NodeDef<unknown, unknown>>): WaveConfi
     : new Map([[N("a"), makeNode("a")]]),
   nodeCtx: makeValidatedCtx(),
   nowFn: Date.now,
-  freshnessIndex: new InMemoryFreshnessIndex(), witnessedNodeIds: new Set(),
+  freshnessIndex: new InMemoryFreshnessIndex(),
 });
 
 describe("executeWave — error paths", () => {
@@ -132,7 +133,7 @@ describe("executeWave — error paths", () => {
       nodeMap: new Map([[N("a"), makeNode("a")]]),
       nodeCtx: validCtx,
       nowFn: Date.now,
-      freshnessIndex: new InMemoryFreshnessIndex(), witnessedNodeIds: new Set(),
+      freshnessIndex: new InMemoryFreshnessIndex(),
     };
 
     const result = await executeWave(0, makeMachineCtx(), config);

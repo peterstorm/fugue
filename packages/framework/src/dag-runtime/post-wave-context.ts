@@ -27,19 +27,6 @@ export interface PostWaveContext {
   readonly nowFn: () => number;
   readonly freshnessIndex: FreshnessIndex;
   readonly witnessAccumulator?: Map<string, Witness>;
-  /**
-   * Run-scoped set of nodes whose freshness bookkeeping has already completed
-   * in THIS process. Owned by the executor (built once per run, beside
-   * `witnessAccumulator`) and read by the freshness step to decide what a wave
-   * retry still owes.
-   *
-   * It exists because "output already present" is NOT the same fact as "witness
-   * already recorded": a node carried across a wave retry via `partialOutputs`
-   * has produced its output but may never have had its write witness recorded.
-   * Conflating the two would let a retry close the wave while silently dropping
-   * a write witness (ADR-0025 fail-closed freshness).
-   */
-  readonly witnessedNodeIds: ReadonlySet<NodeId>;
 }
 
 /**

@@ -162,6 +162,8 @@ export type DagEvent =
       readonly confidenceValues?: ReadonlyMap<NodeId, import("../types/confidence.js").Confidence | null>;
       /** Latest captured read witness per resource, folded into durable run state. */
       readonly priorWitnesses?: ReadonlyMap<string, Witness>;
+      /** Nodes whose post-wave freshness bookkeeping is durably complete. */
+      readonly freshnessCompletedNodeIds?: ReadonlySet<NodeId>;
     }
   | {
       readonly type: "node-failed";
@@ -185,6 +187,11 @@ export type DagEvent =
        * emission began. Absent for dispatch/hook failures that captured none.
        */
       readonly priorWitnesses?: ReadonlyMap<string, Witness>;
+      /**
+       * Updated durable completion proof when failure occurred after freshness
+       * emission began. Absent for dispatch/hook failures.
+       */
+      readonly freshnessCompletedNodeIds?: ReadonlySet<NodeId>;
     }
   | {
       readonly type: "human-responded";
@@ -306,6 +313,12 @@ export interface DagMachineContextPersisted extends DagTopology, DagRetryState, 
   readonly initialInput: unknown;
   /** Latest captured read witness per resource; durable across HITL suspension. */
   readonly priorWitnesses: ReadonlyMap<string, Witness>;
+  /**
+   * Nodes whose post-wave freshness bookkeeping completed. This proof is
+   * distinct from `outputs`: an output can be checkpointed before its witness
+   * is emitted, while completed bookkeeping must survive worker replacement.
+   */
+  readonly freshnessCompletedNodeIds: ReadonlySet<NodeId>;
 }
 
 // ---------------------------------------------------------------------------

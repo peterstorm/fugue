@@ -71,14 +71,6 @@ const validateApproveEdit = (
 };
 
 /**
- * Shared body of the `awaiting-human`, `suspended`, and `retrying-hook`
- * executor branches. All three paths: check for a wired hook, invoke it, catch
- * exceptions into a `node-failed`, validate `approve-with-edit` output against
- * the node schema, and finally emit `human-responded` (or `human-suspend` when
- * the hook returns `pending`). Only the retrying-hook branch prepends a sleep —
- * that lives at the call site.
- */
-/**
  * The human-review hook the executor calls when a node's wave suspends. Declared
  * once (round-38 cs-3) rather than inlined at both the private helper and the
  * public `buildDagExecutor` signature, so the two can never drift.
@@ -89,6 +81,12 @@ export type OnHumanReviewHook = (req: {
   prompt: string;
 }) => Promise<import("./types.js").HumanReviewOutcome>;
 
+/**
+ * Shared body of the `awaiting-human`, `suspended`, and `retrying-hook`
+ * executor branches. All three paths check for a wired hook, invoke it, catch
+ * exceptions into `node-failed`, validate edited output, and emit the resulting
+ * response/suspend event. Retry sleep remains at the call site.
+ */
 const callHumanReviewHook = async (
   phaseKind: "awaiting-human" | "retrying-hook" | "suspended",
   nodeId: NodeId,
@@ -254,15 +252,8 @@ export const buildDagExecutor = (
   const nowFn = hooks?.now ?? Date.now;
   const freshnessIndex = hooks?.freshnessIndex ?? new InMemoryFreshnessIndex();
 
-  // Run-scoped record of which nodes have already had their freshness
-  // bookkeeping completed. Lives for the lifetime of the executor because a
-  // wave RETRY is what consumes it: outputs carried across a retry prove the
-  // node ran, not that its witness landed. See `PostWaveContext.witnessedNodeIds`.
-  const witnessedNodeIds = new Set<NodeId>();
-
   const waveConfig: WaveConfig = {
     dag, nodeMap, nodeCtx, resumeCheckpoint, nowFn, freshnessIndex,
-    witnessedNodeIds,
     minting: hooks?.minting,
   };
 

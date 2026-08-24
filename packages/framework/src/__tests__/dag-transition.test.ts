@@ -129,6 +129,7 @@ const makeCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext 
     confidenceByNode: new Map(),
     ...overrides,
     priorWitnesses: overrides.priorWitnesses ?? new Map(),
+    freshnessCompletedNodeIds: overrides.freshnessCompletedNodeIds ?? new Set(),
   };
 };
 
@@ -256,6 +257,24 @@ describe("dagTransition — running", () => {
     expect(result.context.priorWitnesses.get("postgres:orders")).toEqual(
       witness("version", RN("postgres:orders"), "42"),
     );
+  });
+
+  it("folds freshness-completion proof into an immutable durable set", () => {
+    const ctx = makeCtx({ freshnessCompletedNodeIds: new Set([N("a")]) });
+    const freshnessCompletedNodeIds = new Set([N("a"), N("b")]);
+    const event: DagEvent = {
+      type: "wave-done",
+      wave: 0,
+      outputs: new Map([[N("a"), 42]]),
+      routingDecisions: new Map(),
+      freshnessCompletedNodeIds,
+    };
+
+    const result = dagTransition(running(0), event, ctx);
+
+    expect(result.context.freshnessCompletedNodeIds).not.toBe(freshnessCompletedNodeIds);
+    expect(result.context.freshnessCompletedNodeIds).toEqual(new Set([N("a"), N("b")]));
+    expect(ctx.freshnessCompletedNodeIds).toEqual(new Set([N("a")]));
   });
 
   it("wave-done on last wave => succeeded", () => {

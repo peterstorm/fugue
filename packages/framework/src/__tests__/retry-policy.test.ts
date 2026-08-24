@@ -32,6 +32,7 @@ const mkCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext =>
     confidenceByNode: new Map(),
     ...overrides,
     priorWitnesses: overrides.priorWitnesses ?? new Map(),
+    freshnessCompletedNodeIds: overrides.freshnessCompletedNodeIds ?? new Set(),
   };
 };
 

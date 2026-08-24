@@ -486,13 +486,6 @@ export const selectHitlNotifierTransport = (
 
 // ── Host Factory ───────────────────────────────────────────────────────────
 
-/**
- * Create and boot the Fugue host.
- *
- * This is the imperative shell — it constructs mutable state,
- * wires subsystems, and manages lifecycle.
- */
-
 /** Stops the periodic HITL reconciliation sweep and awaits any in-flight one. */
 export interface HitlReconciliationHandle {
   /** Stop scheduling further sweeps. Idempotent. */
@@ -733,6 +726,12 @@ const wireHitlRunEngine = async (args: {
   };
 };
 
+/**
+ * Create and boot the Fugue host.
+ *
+ * This is the imperative shell — it constructs mutable state, wires subsystems,
+ * and manages lifecycle.
+ */
 export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, HostError>> => {
   const { config, git, loader, redis, sharedInfra, logger } = deps;
 

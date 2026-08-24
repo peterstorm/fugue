@@ -233,6 +233,7 @@ const VALID_PERSISTED_CONTEXT: DagMachineContextPersisted = {
     "postgres:orders",
     witness("version", resourceName("postgres:orders"), "42"),
   ]]),
+  freshnessCompletedNodeIds: new Set([CONTEXT_NODE]),
 };
 
 const REQUIRED_CONTEXT_FIELDS = [
@@ -251,6 +252,7 @@ const REQUIRED_CONTEXT_FIELDS = [
   "outputs",
   "initialInput",
   "priorWitnesses",
+  "freshnessCompletedNodeIds",
 ] as const satisfies readonly (keyof DagMachineContextPersisted)[];
 
 describe("parsePersistedDagContext", () => {

@@ -70,6 +70,7 @@ const makeMachineCtx = (): DagMachineContext => ({
   edges: [],
   confidenceByNode: new Map(),
   priorWitnesses: new Map(),
+  freshnessCompletedNodeIds: new Set(),
 });
 
 /** Build a PostWaveContext from test parameters. */
@@ -89,7 +90,6 @@ const makePostWaveCtx = (
   nowFn: Date.now,
   freshnessIndex,
   witnessAccumulator,
-  witnessedNodeIds: new Set<any>(),
 });
 
 describe("emitFreshnessWitnessEvents", () => {

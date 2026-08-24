@@ -71,6 +71,14 @@ export interface AppDeps {
 
 // --- Create Hono app ---
 
+type ReadinessStatus = "not-ready" | "ready-degraded" | "ready";
+
+const readinessStatus = (notReady: boolean, degraded: boolean): ReadinessStatus => {
+  if (notReady) return "not-ready";
+  if (degraded) return "ready-degraded";
+  return "ready";
+};
+
 export const createApp = (deps: AppDeps): Hono => {
   const app = new Hono();
   const log = deps.logger ?? consoleAppLogger;
@@ -287,7 +295,7 @@ export const createApp = (deps: AppDeps): Hono => {
     // Derived from the SAME predicate as `status`, so the HTTP code and the body
     // can never disagree about whether this instance is ready.
     const httpStatus = notReady ? 503 : 200;
-    const status = notReady ? "not-ready" : degraded ? "ready-degraded" : "ready";
+    const status = readinessStatus(notReady, degraded);
     return { status, redis: redisOk, llm: llmOk, mlflow: mlflowOk, exporterFailures, httpStatus } as const;
   };
 

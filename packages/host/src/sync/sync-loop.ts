@@ -101,17 +101,6 @@ export interface SyncLoopHandle {
 // ── Core Sync Logic (depends on ports) ─────────────────────────────────────
 
 /**
- * Execute a single sync cycle. This is the core logic without timer management.
- *
- * Steps:
- * 1. Pull changes in remote mode after the initial sync
- * 2. Get the current SHA
- * 3. Compare with the last SHA — skip if unchanged
- * 4. Check lockfile changes → bun install
- * 5. Discover + load all DAGs
- * 6. Build the new registry
- */
-/**
  * Load every DAG at `sha`, isolate per-DAG load failures, and freeze the result
  * into an immutable registry.
  *
@@ -163,6 +152,17 @@ const loadRegistryAt = async (
   return { registry, errors: bulkResult.errors };
 };
 
+/**
+ * Execute a single sync cycle. This is the core logic without timer management.
+ *
+ * Steps:
+ * 1. Pull changes in remote mode after the initial sync
+ * 2. Get the current SHA
+ * 3. Compare with the last SHA — skip if unchanged
+ * 4. Check lockfile changes → bun install
+ * 5. Discover + load all DAGs
+ * 6. Build the new registry
+ */
 export const executeSyncCycle = async (
   git: GitPort,
   loader: ModuleLoaderPort,

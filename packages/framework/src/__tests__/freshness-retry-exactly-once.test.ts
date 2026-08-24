@@ -18,7 +18,11 @@ import { witness, witnessValue, RN } from "./_freshness-helpers.js";
 import { InMemoryFreshnessIndex } from "../dag-runtime/freshness-check.js";
 import type { FreshnessIndex } from "../dag-runtime/freshness-check.js";
 import { RecordingObserver } from "../observer/observer.js";
-import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
+import { runDagStateful, runDagStatefulOutcome } from "../dag-runtime/run-dag-stateful.js";
+import { compileDagToMachine } from "../dag-runtime/machine.js";
+import { persistDagContext } from "../dag-runtime/persistence.js";
+import { createInMemoryJob } from "../queue/in-memory-job.js";
+import type { DagMachineContextPersisted, DagPhase } from "../dag-runtime/types.js";
 import { defineDag } from "../executor/define-dag.js";
 import { DAG_INPUT } from "../types/ids.js";
 import { makeNodeContext } from "../shared/make-node-context.js";
@@ -155,6 +159,80 @@ describe("retriable freshness failure — wave retry", () => {
     // alpha's witness is recorded once, not re-emitted by the retry.
     expect(writes.filter((w) => w.nodeId === N("alpha"))).toHaveLength(1);
     expect(writes.filter((w) => w.nodeId === N("beta"))).toHaveLength(1);
+  });
+
+  test("durable restart preserves partially completed freshness bookkeeping", async () => {
+    const sideEffectRuns = { alpha: 0, beta: 0 };
+    const dag = defineDag({
+      id: "durable-freshness-progress",
+      nodes: {
+        alpha: makeNode("alpha", {
+          sideEffects: writesTo("pg:alpha", "2"),
+          run: async () => {
+            sideEffectRuns.alpha += 1;
+            return ok({ charged: true });
+          },
+        }),
+        beta: makeNode("beta", {
+          sideEffects: writesTo("pg:beta", "2"),
+          run: async () => {
+            sideEffectRuns.beta += 1;
+            return ok({ notified: true });
+          },
+        }),
+      },
+      edges: [
+        { from: DAG_INPUT, to: "alpha" },
+        { from: DAG_INPUT, to: "beta" },
+      ],
+      outputNodeId: "beta",
+      defaultRetryLimit: 1,
+    });
+    const compiled = compileDagToMachine(dag, null);
+    if (!compiled.ok) throw new Error("compile failed");
+    const durableJob = createInMemoryJob<DagPhase, DagMachineContextPersisted>({
+      state: compiled.value.initialState,
+      context: persistDagContext(compiled.value.initialContext, dag),
+    });
+
+    const firstObserver = new RecordingObserver();
+    const interrupted = await runDagStatefulOutcome(dag, null, makeNodeContext({
+      runId: R("run-durable-freshness"),
+      dagId: D("durable-freshness-progress"),
+      observer: firstObserver,
+    }), {
+      jobLike: durableJob,
+      freshnessIndex: flakyOnce("pg:beta"),
+      // Abort the process slice after the retriable failure was checkpointed,
+      // before this executor can consume its own local retry state.
+      beforeExecute: (state) => state.kind !== "retrying",
+    });
+
+    expect(interrupted.ok).toBe(false);
+    expect(durableJob.data.state.kind).toBe("retrying");
+    expect(durableJob.data.context.freshnessCompletedNodeIds).toEqual(new Set([N("alpha")]));
+
+    // A second top-level invocation creates a new executor and a fresh default
+    // in-memory index, reproducing worker replacement after the checkpoint.
+    const resumedObserver = new RecordingObserver();
+    const resumed = await runDagStatefulOutcome(dag, null, makeNodeContext({
+      runId: R("run-durable-freshness"),
+      dagId: D("durable-freshness-progress"),
+      observer: resumedObserver,
+    }), {
+      jobLike: durableJob,
+    });
+
+    expect(resumed).toMatchObject({ ok: true, value: { kind: "completed" } });
+    expect(sideEffectRuns).toEqual({ alpha: 1, beta: 1 });
+    const writes = [...firstObserver.events, ...resumedObserver.events].filter(
+      (event): event is WriteAttemptedEvent => event.type === "write-attempted",
+    );
+    expect(writes.map(({ nodeId }) => nodeId).sort()).toEqual([N("alpha"), N("beta")]);
+    expect(writes.filter(({ nodeId }) => nodeId === N("alpha"))).toHaveLength(1);
+    expect(durableJob.data.context.freshnessCompletedNodeIds).toEqual(
+      new Set([N("alpha"), N("beta")]),
+    );
   });
 
   test("a checkpoint-resumed writer records the freshness witness owed after the node-output checkpoint", async () => {

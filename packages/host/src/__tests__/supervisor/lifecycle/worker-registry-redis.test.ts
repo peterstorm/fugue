@@ -242,6 +242,24 @@ describe("worker-registry: fail-closed on Redis error", () => {
     if (!result.ok) expect(result.error.kind).toBe("redis-unavailable");
   });
 
+  test("throwing degraded hooks cannot replace typed Redis outcomes", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    const { logger, logs } = capturingLogPort();
+    const reg = createWorkerRegistry(fake.redis, alwaysLive, {
+      onRedisDead: () => { throw new Error("dead hook failed"); },
+      onRedisAlive: () => { throw new Error("alive hook failed"); },
+    }, logger);
+
+    fake.setFail(true);
+    const failed = await reg.get(tid("acme"));
+    expect(failed.ok).toBe(false);
+    if (!failed.ok) expect(failed.error.kind).toBe("redis-unavailable");
+
+    fake.setFail(false);
+    expect(await reg.put(rec("acme", 1))).toEqual(ok(undefined));
+    expect(logs.filter(({ msg }) => msg.includes("hook threw"))).toHaveLength(2);
+  });
+
   test("reconcileReadopt fails closed if scan errors", async () => {
     const fake = createInMemoryWorkerRedisFake();
     const reg = createWorkerRegistry(fake.redis, alwaysLive);

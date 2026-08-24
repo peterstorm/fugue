@@ -433,7 +433,8 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     if (!result.ok) {
       expect(result.error.kind).toBe("internal-invariant-violated");
       if (result.error.kind === "internal-invariant-violated") {
-        expect(result.error.message).toContain("clock threw");
+        expect(result.error.message).toContain("clock unavailable");
+        expect(result.error.context).toEqual({ error: "clock unavailable" });
       }
     }
     expect(store.runs.size).toBe(0);

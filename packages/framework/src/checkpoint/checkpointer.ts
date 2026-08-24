@@ -40,13 +40,13 @@ export const TTL_SECONDS = 86_400;
 
 /**
  * The checkpoint load-gate DECISION, one encoding shared by the in-memory,
- * Redis, and file adapters (round-22 atl-1). A pure function owning the gate
+ * Redis, and file adapters. A pure function owns the gate
  * ORDER (framework version → DAG fingerprint → TTL expiry) and the verdict
  * construction — the three adapters previously re-encoded this identical
  * sequence interleaved with their storage reads; a change to gate order or
  * verdict semantics used to require three coordinated edits, and the per-
  * backend divergence was prevented only by the parity suite, not by
- * structure.
+ * structure. Centralizing it keeps backend failure precedence identical.
  *
  * Each adapter keeps its own storage read, its hostile-seam `opts`
  * snapshot-once guard, and its clock guard, then delegates here. The clock

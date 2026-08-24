@@ -290,6 +290,7 @@ export const parsePersistedDagContext = (value: unknown): Result<PersistedDagCon
     "outputs",
     "initialInput",
     "priorWitnesses",
+    "freshnessCompletedNodeIds",
   ] as const;
   const missing = requiredFields.find((field) => !hasOwn(value, field));
   if (missing !== undefined) return err(`context is missing required field '${missing}'`);
@@ -322,6 +323,11 @@ export const parsePersistedDagContext = (value: unknown): Result<PersistedDagCon
   if (!outputs.ok) return outputs;
   const priorWitnesses = parsePriorWitnesses(value.priorWitnesses);
   if (!priorWitnesses.ok) return priorWitnesses;
+  const freshnessCompletedNodeIds = parseNodeIdSet(
+    value.freshnessCompletedNodeIds,
+    "context.freshnessCompletedNodeIds",
+  );
+  if (!freshnessCompletedNodeIds.ok) return freshnessCompletedNodeIds;
 
   const fingerprint = value.__dagFingerprint;
   if (fingerprint !== undefined && (typeof fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(fingerprint))) {
@@ -344,6 +350,7 @@ export const parsePersistedDagContext = (value: unknown): Result<PersistedDagCon
     outputs: outputs.value,
     initialInput: value.initialInput,
     priorWitnesses: priorWitnesses.value,
+    freshnessCompletedNodeIds: freshnessCompletedNodeIds.value,
     ...(fingerprint === undefined ? {} : { __dagFingerprint: fingerprint }),
   });
 };
@@ -371,6 +378,7 @@ export const stripNonPersistable = (
   unconditionalAdj: ctx.unconditionalAdj,
   confidenceByNode: ctx.confidenceByNode,
   priorWitnesses: ctx.priorWitnesses,
+  freshnessCompletedNodeIds: ctx.freshnessCompletedNodeIds,
 });
 
 /**

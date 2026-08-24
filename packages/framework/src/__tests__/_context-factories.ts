@@ -71,6 +71,7 @@ export const testContext = (parts?: {
   outputs?: ReadonlyMap<NodeId, unknown>;
   initialInput?: unknown;
   priorWitnesses?: DagMachineContextPersisted["priorWitnesses"];
+  freshnessCompletedNodeIds?: DagMachineContextPersisted["freshnessCompletedNodeIds"];
 }): DagMachineContextPersisted => ({
   ...testTopology(parts?.topology),
   ...testRetryState(parts?.retry),
@@ -79,6 +80,7 @@ export const testContext = (parts?: {
   outputs: parts?.outputs ?? new Map(),
   initialInput: parts?.initialInput ?? {},
   priorWitnesses: parts?.priorWitnesses ?? new Map(),
+  freshnessCompletedNodeIds: parts?.freshnessCompletedNodeIds ?? new Set(),
 });
 
 /** Runtime context fixture: persisted state plus compiled DAG lookup tables. */
@@ -119,6 +121,7 @@ export const testRuntimeContext = (
     confidenceByNode: overrides.confidenceByNode ?? new Map(),
     ...overrides,
     priorWitnesses: overrides.priorWitnesses ?? new Map(),
+    freshnessCompletedNodeIds: overrides.freshnessCompletedNodeIds ?? new Set(),
   };
 };
 

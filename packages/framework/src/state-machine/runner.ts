@@ -67,6 +67,16 @@ export const runStateMachine = async <S, E, C>(
   const stamp = (): Date => new Date(nowFn());
   const dedupKeyFn = opts.computeDedupKey ?? fallbackDedupKey;
   const log = opts.logger ?? { warn: () => {}, error: () => {} };
+  const readTraceNow = (): number | undefined => {
+    try {
+      return nowFn();
+    } catch (error) {
+      reportWithoutThrowing(() =>
+        log.error("[runStateMachine] trace clock threw — ignoring diagnostic timing failure:", error),
+      );
+      return undefined;
+    }
+  };
 
   // FR-011: retry counters are per-invocation (fresh map = counters start
   // at 0 for every queue-level attempt).
@@ -99,7 +109,7 @@ export const runStateMachine = async <S, E, C>(
       }
     }
 
-    const start = nowFn();
+    const traceStartMs = opts.onTrace !== undefined ? readTraceNow() : undefined;
     let event: E;
 
     try {
@@ -116,8 +126,6 @@ export const runStateMachine = async <S, E, C>(
     const result = machine.transition(state, event, context);
     state = result.state;
     context = result.context;
-
-    const durationMs = nowFn() - start;
 
     const isFailed = machine.isFailed(state);
     const isTerminal = machine.isTerminal(state);
@@ -190,23 +198,29 @@ export const runStateMachine = async <S, E, C>(
     }
 
     if (opts.onTrace) {
-      const outcome = isFailed ? "failed" : isRetry ? "retry" : "success";
-      // A throwing onTrace must not escape: the transition is already persisted
-      // and surfacing the throw would surface a successful transition as a fatal
-      // executor crash via run-dag-stateful's outer catch.
-      try {
-        opts.onTrace({
-          state: prevState,
-          event,
-          nextState: state,
-          outcome,
-          durationMs,
-          timestamp: stamp(),
-        });
-      } catch (traceErr) {
-        reportWithoutThrowing(() =>
-          log.error("[runStateMachine] onTrace threw — ignoring to preserve durability:", traceErr),
-        );
+      // Trace timing is diagnostic-only and is read AFTER durability. A hostile
+      // clock can suppress this trace, but can never suppress or replay the
+      // transition whose checkpoint was already committed above.
+      const traceEndMs = readTraceNow();
+      if (traceEndMs !== undefined) {
+        const outcome = isFailed ? "failed" : isRetry ? "retry" : "success";
+        // A throwing onTrace must not escape: the transition is already persisted
+        // and surfacing the throw would surface a successful transition as a fatal
+        // executor crash via run-dag-stateful's outer catch.
+        try {
+          opts.onTrace({
+            state: prevState,
+            event,
+            nextState: state,
+            outcome,
+            durationMs: traceStartMs === undefined ? 0 : traceEndMs - traceStartMs,
+            timestamp: new Date(traceEndMs),
+          });
+        } catch (traceErr) {
+          reportWithoutThrowing(() =>
+            log.error("[runStateMachine] onTrace threw — ignoring to preserve durability:", traceErr),
+          );
+        }
       }
     }
 

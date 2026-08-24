@@ -55,17 +55,6 @@ import type { PoolConfig } from "pg";
 const PG_NODE_ID = nodeId("pg-capability");
 
 /**
- * The row-validation failure this adapter returns when a driver row does not
- * match the caller's schema.
- *
- * ONE constructor for all four sites (production + fake x query/queryOne). The
- * classification is the reason to share it: a schema mismatch is `non-retriable`
- * — the same query returns the same non-conforming row, so retrying only repeats
- * the round trip. A copy that omitted `retriability` would fall back to retriable
- * and turn a deterministic contract violation into a retry storm against the
- * database.
- */
-/**
  * THE one non-retriable `node-crash` for this adapter. Every crash it reports is
  * deterministic — a schema mismatch, a PG error outside the transient classes —
  * so `retriability` is fixed here rather than repeated at each site, where an
@@ -79,6 +68,11 @@ const pgCrash = (message: string): FrameworkError => ({
   retriability: "non-retriable",
 });
 
+/**
+ * The row-validation failure shared by production and fake query paths. Schema
+ * mismatch is deterministic, so the shared `pgCrash` classification prevents a
+ * missing retriability field from turning it into a database retry storm.
+ */
 const rowValidationError = (label: string, detail: string): FrameworkError =>
   pgCrash(label + ": " + detail);
 

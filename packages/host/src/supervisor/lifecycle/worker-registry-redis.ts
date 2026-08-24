@@ -144,6 +144,20 @@ const warnWithoutThrowing = (
   }
 };
 
+const invokeHookWithoutThrowing = (
+  logger: LogPort | undefined,
+  name: "onRedisDead" | "onRedisAlive",
+  hook: (() => void) | undefined,
+): void => {
+  try {
+    hook?.();
+  } catch (error) {
+    warnWithoutThrowing(logger, `[worker-registry] ${name} hook threw — preserving Redis outcome`, {
+      error: safeErrorMessage(error),
+    });
+  }
+};
+
 /**
  * A UDS liveness probe: "is the worker bound to `udsPath` answering?". Injected
  * so the registry stays pure-shell-over-port and the probe (an HTTP-over-UDS
@@ -175,11 +189,11 @@ export const createWorkerRegistry = (
   logger?: LogPort,
 ): WorkerRegistry => {
   const dead = (op: string): HostError => {
-    hooks.onRedisDead?.();
+    invokeHookWithoutThrowing(logger, "onRedisDead", hooks.onRedisDead);
     return redisUnavailable(op);
   };
   const alive = (): void => {
-    hooks.onRedisAlive?.();
+    invokeHookWithoutThrowing(logger, "onRedisAlive", hooks.onRedisAlive);
   };
 
   return {

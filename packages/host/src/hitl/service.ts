@@ -16,7 +16,7 @@
 
 import { match } from "ts-pattern";
 import type { DagId, RunId, NodeId, HumanAction, FrameworkError } from "@fuguejs/framework";
-import { ok, err, EXECUTOR_NODE_ID } from "@fuguejs/framework";
+import { ok, err, EXECUTOR_NODE_ID, safeErrorMessage } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
 import { formatHostError, tenantOverQuota } from "../domain/host-error.js";
@@ -103,11 +103,12 @@ const readRunTimestamp = (clock: () => number): Result<RunTimestampMs, HostError
           message: `HITL clock returned an invalid timestamp: ${timestamp.error}`,
           context: {},
         });
-  } catch {
+  } catch (error) {
+    const detail = safeErrorMessage(error);
     return err({
       kind: "internal-invariant-violated",
-      message: "HITL clock threw outside its port contract",
-      context: {},
+      message: `HITL clock threw outside its port contract: ${detail}`,
+      context: { error: detail },
     });
   }
 };

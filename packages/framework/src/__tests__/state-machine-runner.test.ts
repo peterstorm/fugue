@@ -427,6 +427,47 @@ describe("runStateMachine", () => {
     expect(Date.now() - startWall).toBeLessThan(500);
   });
 
+  it("commits a transition before a throwing post-execution trace clock can fail", async () => {
+    const job = makeJob({ kind: "running" });
+    let executorCalls = 0;
+    let clockCalls = 0;
+    const traceErrors: unknown[][] = [];
+    const executor: Executor<State, Event, Context> = async () => {
+      executorCalls += 1;
+      return { type: "DONE" };
+    };
+
+    const result = await runStateMachine(job, simpleMachine, executor, {
+      errorEventOf: defaultErrorEventOf,
+      onTrace: () => {
+        throw new Error("trace must be suppressed when its clock fails");
+      },
+      now: () => {
+        clockCalls += 1;
+        if (clockCalls === 2) throw new Error("trace clock unavailable");
+        return 1_000;
+      },
+      logger: {
+        warn: () => {},
+        error: (...args) => traceErrors.push(args),
+      },
+    });
+
+    expect(result.state.kind).toBe("succeeded");
+    expect(job.data.state.kind).toBe("succeeded");
+    expect(job.events.map(({ event }) => (event as Event).type)).toEqual(["DONE"]);
+    expect(executorCalls).toBe(1);
+    expect(traceErrors).toHaveLength(1);
+    expect(String(traceErrors[0]?.[0])).toContain("trace clock threw");
+
+    // A fresh kernel invocation observes the committed terminal checkpoint and
+    // cannot replay the executor work whose diagnostic timing failed.
+    await runStateMachine(job, simpleMachine, executor, {
+      errorEventOf: defaultErrorEventOf,
+    });
+    expect(executorCalls).toBe(1);
+  });
+
   // Gap-5 fix: simulated crash + restart test
   describe("crash + restart simulation (Gap-5)", () => {
     it("resumes from last checkpoint after mid-executor crash", async () => {

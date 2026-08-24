@@ -119,6 +119,7 @@ export const compileDagToMachine = (
     edges: dag.edges,
     confidenceByNode: new Map(),
     priorWitnesses: new Map(),
+    freshnessCompletedNodeIds: new Set(),
   };
 
   const machine: Machine<DagPhase, DagEvent, DagMachineContext> = {

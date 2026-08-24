@@ -118,13 +118,14 @@ work with one predicate and no extra bookkeeping.
 
 ### Durable intervention witness context (2026-08-24 amendment)
 
-The latest captured read witness per resource is part of
+The latest captured read witness per resource and the set of nodes whose
+post-wave freshness bookkeeping completed are part of
 `DagMachineContextPersisted`, not executor-local state. Every successful or
-post-wave-failed freshness pass carries the updated projection through the DAG
-event into the pure transition, and the checkpoint persists it before a run can
-park. A newly constructed executor resuming `suspended` therefore emits
-`HumanInterventionEvent.context.priorWitnesses` from the complete pre-suspension
-run context rather than an empty process-local map.
+post-wave-failed freshness pass carries both updated projections through the DAG
+event into the pure transition, and the checkpoint persists them before a run
+can park. A newly constructed executor therefore emits intervention context from
+the complete pre-suspension run history and cannot re-emit already-completed
+freshness bookkeeping merely because worker-local memory was replaced.
 
 ### Ownership-fenced execution slices (2026-08-22 amendment)
 

@@ -70,7 +70,6 @@ const makePostWaveCtx = (
   dagId: D("d1"),
   nowFn: Date.now,
   freshnessIndex: new InMemoryFreshnessIndex(),
-  witnessedNodeIds: new Set(),
 });
 
 // ---------------------------------------------------------------------------

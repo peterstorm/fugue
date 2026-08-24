@@ -63,6 +63,7 @@ const minimalCtx: DagMachineContext = {
   edges: minimalDag.edges,
   confidenceByNode: new Map(),
   priorWitnesses: new Map(),
+  freshnessCompletedNodeIds: new Set(),
 };
 
 // ---------------------------------------------------------------------------
@@ -146,6 +147,7 @@ const arbDagEvent: fc.Arbitrary<DagEvent> = fc.oneof(
     outputs: fc.constant(new Map<NodeId, unknown>()),
     routingDecisions: fc.constant(new Map()),
     priorWitnesses: fc.constant(new Map()),
+    freshnessCompletedNodeIds: fc.constant(new Set<NodeId>()),
   }),
   fc.record({
     type: fc.constant("node-failed" as const),

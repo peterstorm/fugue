@@ -214,7 +214,7 @@ to `witness(...)` (now `ResourceName`, not `string`), taken pre-1.0 while the
 only call sites were the `customer-summary` example app and the framework's own
 tests; no published DAG consumed them.
 
-## Amendment — durable prior-witness projection (2026-08-24)
+## Amendment — durable freshness projections (2026-08-24)
 
 `HumanInterventionEvent.context.priorWitnesses` is a run-history fact, not an
 executor-instance cache. The latest captured read witness per resource therefore
@@ -223,7 +223,15 @@ projection, freshness emission updates an invocation-local copy, and the
 resulting `wave-done` or post-wave `node-failed` event carries it into the pure
 transition. Human-intervention emission reads only from machine context.
 
-This keeps the projection bounded to one witness per resource while preserving
-it across durable HITL suspension, worker replacement, and requeue. Persisted
-context parsing requires a `Map` whose resource keys match each branded witness;
-corrupt or mismatched bytes fail closed before execution resumes.
+Freshness completion is a separate durable fact. A node output can be persisted
+before its post-wave witness bookkeeping runs, so output presence cannot prove
+that bookkeeping completed. `DagMachineContextPersisted.freshnessCompletedNodeIds`
+records the completed prefix explicitly. Every post-wave success or failure
+carries the updated set into the pure transition; a replacement executor starts
+from it and emits only the outstanding suffix.
+
+The witness projection remains bounded to one witness per resource and the
+completion proof to one node ID per DAG node while both survive durable HITL
+suspension, worker replacement, and requeue. Persisted context parsing requires
+a resource-consistent witness `Map` and a valid node-ID `Set`; corrupt bytes fail
+closed before execution resumes.
