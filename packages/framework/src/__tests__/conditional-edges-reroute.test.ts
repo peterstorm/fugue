@@ -13,6 +13,8 @@ import { type NodeOverride, brandedOverride } from "./_node-override.js";
 import type { HumanAction } from "../dag-runtime/types.js";
 import { ok } from "../types/result.js";
 import { N } from "./_id-helpers.js";
+import { RN, witnessValue } from "./_freshness-helpers.js";
+import { RecordingObserver } from "../observer/observer.js";
 
 const noop = async () => ok(undefined as unknown);
 
@@ -32,22 +34,33 @@ const makeNode = (
   ...brandedOverride(overrides),
 });
 
-const makeCtx = (): NodeContext =>
-  testNodeContext({ runId: "r" as RunId, dagId: "d" as DagId });
+const makeCtx = (observer?: RecordingObserver): NodeContext =>
+  testNodeContext({
+    runId: "r" as RunId,
+    dagId: "d" as DagId,
+    ...(observer ? { observer } : {}),
+  });
 
 describe("conditional edges — reroute", () => {
   it("reroute back to router re-decides; second decision picks the other branch", async () => {
     let routerRan = 0;
     const routerKinds = ["yes", "no"];
+    const observer = new RecordingObserver();
     // Defined without outputNodeId because the rerouted run prunes "no" and
     // we rely on the active-fallback path.
     const dag = defineDag({
       id: "reroute-conditional",
       nodes: {
         router: makeNode("router", {
+          sideEffects: {
+            kind: "reads",
+            resource: RN("routing:decision"),
+            extractWitness: (output) =>
+              witnessValue("version", String((output as { version: number }).version)),
+          },
           run: async () => {
             const k = routerKinds[routerRan++] ?? "no";
-            return ok({ kind: k });
+            return ok({ kind: k, version: routerRan });
           },
         }),
         yes: makeNode("yes", {
@@ -86,11 +99,13 @@ describe("conditional edges — reroute", () => {
     routerKinds[0] = "no";
     routerKinds[1] = "yes";
 
-    const result = await runDagStateful<unknown, string>(dag, null, makeCtx(), {
+    const result = await runDagStateful<unknown, string>(dag, null, makeCtx(observer), {
       onHumanReview,
     });
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value).toBe("Y");
     expect(onHumanReviewCalls).toBe(1);
+    const witnesses = observer.events.filter((event) => event.type === "witness-captured");
+    expect(witnesses.map((event) => event.witness.value)).toEqual(["1", "2"]);
   });
 });

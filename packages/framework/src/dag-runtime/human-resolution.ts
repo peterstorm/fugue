@@ -119,6 +119,11 @@ const handleReroute = (
     ...ctx,
     outputs: survivingOutputs,
     retries: new Map([...ctx.retries].filter(([nodeId]) => beforeTargetWave(nodeId))),
+    // Completion proof is valid only for work that survives the reroute.
+    // Target/later nodes execute again and therefore owe fresh bookkeeping.
+    freshnessCompletedNodeIds: new Set(
+      [...ctx.freshnessCompletedNodeIds].filter(beforeTargetWave),
+    ),
     activeNodeIds: reseededActive,
   };
 

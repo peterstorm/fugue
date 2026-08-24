@@ -110,6 +110,21 @@ const makeJob = (state: State = { kind: "pending" }, context: Context = { count:
 const defaultErrorEventOf = (c: { retriable: boolean; message: string }): Event =>
   ({ type: "ERROR", retriable: c.retriable, message: c.message });
 
+const hostileThrownValues: ReadonlyArray<readonly [string, () => unknown]> = [
+  ["throwing Error.message getter", () => {
+    const error = new Error("hidden");
+    Object.defineProperty(error, "message", {
+      get: () => { throw new Error("message getter trap"); },
+    });
+    return error;
+  }],
+  ["revoked Proxy", () => {
+    const { proxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+    return proxy;
+  }],
+];
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -207,6 +222,38 @@ describe("runStateMachine", () => {
       /failed terminal state/i,
     );
   });
+
+  for (const [caseName, makeThrown] of hostileThrownValues) {
+    it(`FR-006: default classifier delivers an ERROR event for ${caseName}`, async () => {
+      const job = createInMemoryJob<RetryState, RetryContext>({
+        state: { kind: "running" },
+        context: { count: 0, retries: 0 },
+      });
+      let calls = 0;
+      const executor: Executor<RetryState, RetryEvent, RetryContext> = async () => {
+        calls += 1;
+        if (calls === 1) throw makeThrown();
+        return { type: "DONE" };
+      };
+
+      const result = await runStateMachine(job, retryMachine, executor, {
+        errorEventOf: (classified) => ({
+          type: "ERROR" as const,
+          retriable: classified.retriable,
+          message: classified.message,
+        }),
+      });
+
+      expect(result.state.kind).toBe("succeeded");
+      expect(calls).toBe(2);
+      const firstEvent = job.events[0]?.event as RetryEvent | undefined;
+      expect(firstEvent?.type).toBe("ERROR");
+      if (firstEvent?.type === "ERROR") {
+        expect(firstEvent.retriable).toBe(true);
+        expect(firstEvent.message.length).toBeGreaterThan(0);
+      }
+    });
+  }
 
   it("US2 S2: error wrapped into ERROR event, machine transitions to retry state (NOT terminal-failed)", async () => {
     // retryMachine stays in "running" on ERROR when retries < 2

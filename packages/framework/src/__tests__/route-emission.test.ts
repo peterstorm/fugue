@@ -186,6 +186,35 @@ describe("emitRoutingDecisions", () => {
     expect(nodeErrors).toHaveLength(1);
   });
 
+  it("hostile confidence.extract throw remains a node-attributed failure", () => {
+    const obs = new RecordingObserver();
+    const hostile = {
+      [Symbol.toPrimitive]: () => { throw new Error("coercion trap"); },
+      toString: () => { throw new Error("toString trap"); },
+    };
+    const nodeDef = makeNodeDef({
+      confidence: {
+        mode: "value",
+        extract: () => { throw hostile; },
+      },
+    });
+    const ctx = makePostWaveCtx(
+      [N("a")],
+      new Map([[N("a"), nodeDef]]),
+      new Map([[N("a"), [conditionalEdge("a", "yes", () => true)]]]),
+      obs,
+    );
+
+    const result = emitRoutingDecisions(ctx, new Map([[N("a"), { value: 1 }]]));
+
+    expect(result.earlyFailure).toMatchObject({
+      type: "node-failed",
+      nodeId: N("a"),
+      error: { kind: "node-crash", nodeId: N("a") },
+    });
+    expect(obs.events.filter((event) => event.type === "node-error")).toHaveLength(1);
+  });
+
   it("predicate throws → predicate-malformed earlyFailure", () => {
     const obs = new RecordingObserver();
     const edges: EdgeDef[] = [

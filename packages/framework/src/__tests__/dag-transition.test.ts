@@ -390,6 +390,35 @@ describe("dagTransition — retrying", () => {
     }
   });
 
+  it("node-failed during retrying folds partial freshness progress before retry policy", () => {
+    const dag = makeDag({ defaultRetryLimit: 2 });
+    const originalWitnesses = new Map([[
+      "postgres:orders",
+      witness("version", RN("postgres:orders"), "41"),
+    ]]);
+    const ctx = makeCtx({ dag, priorWitnesses: originalWitnesses });
+    const phase: DagPhase = { kind: "retrying", wave: 0, nodeId: N("a"), attempt: 1, nextDelayMs: 1000 };
+    const event: DagEvent = {
+      type: "node-failed",
+      nodeId: N("a"),
+      error: nodeFailedError,
+      priorWitnesses: new Map([[
+        "postgres:orders",
+        witness("version", RN("postgres:orders"), "42"),
+      ]]),
+      freshnessCompletedNodeIds: new Set([N("b")]),
+    };
+
+    const result = dagTransition(phase, event, ctx);
+
+    expect(result.state.kind).toBe("retrying");
+    expect(result.context.priorWitnesses.get("postgres:orders")?.value).toBe("42");
+    expect(result.context.priorWitnesses).not.toBe(event.priorWitnesses);
+    expect(result.context.freshnessCompletedNodeIds).toEqual(new Set([N("b")]));
+    expect(result.context.freshnessCompletedNodeIds).not.toBe(event.freshnessCompletedNodeIds);
+    expect(originalWitnesses.get("postgres:orders")?.value).toBe("41");
+  });
+
   it("node-failed during retrying when exhausted => failed", () => {
     const dag = makeDag({ defaultRetryLimit: 1 });
     const ctx = makeCtx({ dag, retries: new Map([["a", 1]]) as any }); // at limit

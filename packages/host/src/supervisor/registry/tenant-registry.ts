@@ -282,9 +282,9 @@ const isTenantOwnedPath = (
  * `tenantId` / `markSecretsRef` are the seams that validate/brand them), so this
  * constructor's job is to validate the remaining INVARIANTS and reject illegal
  * states up front:
- *   - non-empty team and fsRoot,
+ *   - non-empty team and tenant-owned canonical fsRoot/dagsRoot paths,
  *   - non-negative INTEGER admission limits,
- *   - a non-empty realm/clientId in the keycloak mapping.
+ *   - a non-empty realm/clientId and non-empty per-DAG agent client ids.
  * Returns `Result` (never throws) since configs arrive from registration data.
  */
 export const tenantConfig = (input: TenantConfigBase): Result<ActiveTenantConfig, HostError> => {

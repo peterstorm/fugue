@@ -304,5 +304,6 @@ describe("retriable freshness failure — wave retry", () => {
       (event): event is FreshnessViolationEvent => event.type === "freshness-violation",
     );
     expect(violations).toHaveLength(0);
+    expect(observer.events.filter((event) => event.type === "write-attempted")).toHaveLength(1);
   });
 });

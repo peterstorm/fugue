@@ -15,6 +15,7 @@ import { isConditionalEdge } from "../types/dag.js";
 import { emit } from "./emit.js";
 import type { PostWaveContext } from "./post-wave-context.js";
 import { nodeErrorEmitter } from "./post-wave-context.js";
+import { safeErrorMessage } from "../types/safe-error.js";
 
 /**
  * Result of the routing-decision phase. Contains the per-source-node
@@ -82,7 +83,7 @@ export function emitRoutingDecisions(
       try {
         upstreamConfidence = nodeDef.confidence.extract(newOutputs.get(nodeId));
       } catch (e) {
-        const message = `confidence.extract failed for node '${nodeId}': ${e instanceof Error ? e.message : e}`;
+        const message = `confidence.extract failed for node '${nodeId}': ${safeErrorMessage(e)}`;
         const crashErr: FrameworkError = { kind: "node-crash", nodeId, retriability: "non-retriable", message };
         emitNodeError(nodeId, message, crashErr);
         return {

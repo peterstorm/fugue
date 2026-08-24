@@ -214,12 +214,12 @@ export async function emitFreshnessWitnessEvents(
           succeededAtMs: nowFn(),
           timestamp: stamp(),
         };
-        emit(nodeCtx, writeEvent);
-        // A prior attempt already committed this exact logical write. Treat the
-        // durable index entry as the acknowledgement and do not append a second
-        // in-memory history entry or refresh the persisted timestamp.
+        // A prior attempt already committed and observed this exact logical
+        // write. Treat the durable index entry as its acknowledgement: neither
+        // the index nor the observer receives a duplicate retry artifact.
         if (alreadyRecorded) return ok(undefined);
 
+        emit(nodeCtx, writeEvent);
         const writeResult = await freshnessIndex.recordWrite(writeEvent);
         if (!writeResult.ok) {
           const msg = formatFrameworkError(writeResult.error);

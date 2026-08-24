@@ -1281,14 +1281,8 @@ describe("§6.11 — BullMQ DAG resume reconstructs nodeMap via live dag", () =>
 
 // ---------------------------------------------------------------------------
 // SC-003: Crash-resume — real BullMQ job + adaptBullMQJob.
-//
-// The previous incarnation of this section held a 100-line `it.skip` block
-// that documented a stall-race against BullMQ's 30-second stalled-job timer.
-// A perpetually-skipped test for a critical invariant is a maintenance
-// hazard: future readers either trust the green CI run or rewrite the
-// architecture independently. Coverage for the resume contract now lives in
-// pass-4 follow-up §6.11 (single-worker re-entry that survives the phase-1
-// throw, no two-worker stall). Deleted here per pass-4 W5.8.
+// The executable single-worker re-entry scenario immediately above proves
+// resume after a mid-run throw without relying on BullMQ's stalled-job timer.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------

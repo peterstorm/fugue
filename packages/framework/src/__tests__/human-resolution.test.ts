@@ -146,6 +146,7 @@ describe("handleHumanResponse — reroute backward", () => {
       waves: [[N("a")], [N("b")], [N("c")]],
       outputs: nodeMap([["a", "A"], ["b", "B"], ["c", "C"]]),
       retries: nodeMap([["b", 1], ["c", 2]]),
+      freshnessCompletedNodeIds: nodeSet(["a", "b", "c"]),
       activeNodeIds: nodeSet(["a", "b", "c"]),
       outgoingByNode: new Map(), // no conditional edges
       nodeById: nodeMap([
@@ -175,6 +176,8 @@ describe("handleHumanResponse — reroute backward", () => {
     // Retries from wave >= target should be cleared
     expect(result.context.retries.has(N("b"))).toBe(false);
     expect(result.context.retries.has(N("c"))).toBe(false);
+    // Freshness completion is invalidated on the same target/later waves.
+    expect(result.context.freshnessCompletedNodeIds).toEqual(new Set());
   });
 
   it("preserves outputs from waves before target", () => {
@@ -182,6 +185,7 @@ describe("handleHumanResponse — reroute backward", () => {
       waves: [[N("a")], [N("b")], [N("c")]],
       outputs: nodeMap([["a", "A"], ["b", "B"]]),
       retries: new Map(),
+      freshnessCompletedNodeIds: nodeSet(["a", "b", "c"]),
       activeNodeIds: nodeSet(["a", "b", "c"]),
       outgoingByNode: new Map(),
       nodeById: nodeMap([
@@ -206,8 +210,9 @@ describe("handleHumanResponse — reroute backward", () => {
     }
     // wave 0 output should survive
     expect(result.context.outputs.get(N("a"))).toBe("A");
-    // wave 1+ outputs cleared
+    // wave 1+ outputs and freshness completion proof are cleared.
     expect(result.context.outputs.has(N("b"))).toBe(false);
+    expect(result.context.freshnessCompletedNodeIds).toEqual(new Set([N("a")]));
   });
 });
 

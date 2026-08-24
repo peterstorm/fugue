@@ -8,8 +8,16 @@ import { createSummaryDag } from "../dag/summary-dag.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { AppLogger } from "../logger.js";
 
 const fixturesDir = join(import.meta.dir, "../../fixtures/customers");
+
+const throwingDiagnosticsLogger: AppLogger = {
+  debug: () => { throw new Error("debug transport failed"); },
+  info: () => {},
+  warn: () => { throw new Error("warn transport failed"); },
+  error: () => {},
+};
 
 const makeSynthesisOutput = () => ({
   overallSentiment: "mixed" as const,
@@ -104,6 +112,24 @@ describe("POST /summarize", () => {
       }),
     );
     expect(res.status).toBe(400);
+  });
+
+  test("malformed JSON remains a 400 when diagnostic logging throws", async () => {
+    const source = new JsonFixtureSource(fixturesDir);
+    const app = createApp({
+      source,
+      llm: new FakeLlmClient(new Map()),
+      logger: throwingDiagnosticsLogger,
+    });
+
+    const res = await app.fetch(new Request("http://localhost/summarize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{not-json",
+    }));
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("Invalid JSON body");
   });
 
   test("empty resume_run_id returns 400", async () => {
@@ -506,6 +532,24 @@ describe("GET /readyz", () => {
       },
     });
     const res = await get(app, "/readyz");
+    expect(res.status).toBe(503);
+    expect((await res.json()).status).toBe("not-ready");
+  });
+
+  test("rejecting readiness probe remains not-ready when diagnostic logging throws", async () => {
+    const source = new JsonFixtureSource(fixturesDir);
+    const app = createApp({
+      source,
+      llm: new FakeLlmClient(new Map()),
+      logger: throwingDiagnosticsLogger,
+      health: {
+        checkRedis: async () => { throw new Error("redis probe failed"); },
+        checkMlflow: async () => true,
+      },
+    });
+
+    const res = await get(app, "/readyz");
+
     expect(res.status).toBe(503);
     expect((await res.json()).status).toBe("not-ready");
   });

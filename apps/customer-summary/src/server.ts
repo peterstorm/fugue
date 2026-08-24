@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
-import { runDag, dagFingerprint, FRAMEWORK_VERSION, makeNodeContext, runId as brandRunId, tryRunId, dagId as brandDagId } from "@fuguejs/framework";
+import { runDag, dagFingerprint, FRAMEWORK_VERSION, makeNodeContext, runId as brandRunId, tryRunId, dagId as brandDagId, safeErrorMessage } from "@fuguejs/framework";
 import type { NodeContext, LlmClient, Observer, Checkpointer, ContextCacheAdapter, CheckpointWriter, ContentFilter } from "@fuguejs/framework";
 import type { SummaryResponse } from "./schemas/index.js";
 import type { ConversationSource } from "./sources/conversation-source.js";
@@ -79,6 +79,15 @@ const readinessStatus = (notReady: boolean, degraded: boolean): ReadinessStatus 
   return "ready";
 };
 
+/** Diagnostics never replace the response or fallback they describe. */
+const reportWithoutThrowing = (report: () => void): void => {
+  try {
+    report();
+  } catch {
+    // The request/probe outcome remains authoritative.
+  }
+};
+
 export const createApp = (deps: AppDeps): Hono => {
   const app = new Hono();
   const log = deps.logger ?? consoleAppLogger;
@@ -88,7 +97,9 @@ export const createApp = (deps: AppDeps): Hono => {
     try {
       body = await c.req.json();
     } catch (e) {
-      log.warn(`[/summarize] Request body parse failed: ${e instanceof Error ? e.message : String(e)}`);
+      reportWithoutThrowing(() =>
+        log.warn(`[/summarize] Request body parse failed: ${safeErrorMessage(e)}`),
+      );
       return c.json({ error: "Invalid JSON body" }, 400);
     }
 
@@ -270,7 +281,7 @@ export const createApp = (deps: AppDeps): Hono => {
     const probe = async (check: (() => Promise<boolean>) | undefined, message: string): Promise<boolean> =>
       check
         ? check().catch((error) => {
-            log.debug(message, error);
+            reportWithoutThrowing(() => log.debug(message, error));
             return false;
           })
         : true;

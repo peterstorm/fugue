@@ -65,8 +65,11 @@ export const initCircuit = (now: number = 0): CircuitState => ({
  */
 export const recordSuccess = (s: CircuitState, now: number): CircuitState =>
   match(s)
-    .with({ state: "closed" }, () => ({ state: "closed" as const, failureCount: 0, windowStart: now }))
-    .with({ state: "half-open" }, () => ({ state: "closed" as const, failureCount: 0, windowStart: now }))
+    .with(
+      { state: "closed" },
+      { state: "half-open" },
+      () => ({ state: "closed" as const, failureCount: 0, windowStart: now }),
+    )
     .with({ state: "open" }, (current) => current)
     .exhaustive();
 
@@ -142,8 +145,11 @@ export const attemptReset = (
         ? { state: "half-open" as const, testRequestAllowed: true }
         : current,
     )
-    .with({ state: "closed" }, (current) => current)
-    .with({ state: "half-open" }, (current) => current)
+    .with(
+      { state: "closed" },
+      { state: "half-open" },
+      (current) => current,
+    )
     .exhaustive();
 
 /**

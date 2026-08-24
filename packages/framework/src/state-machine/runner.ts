@@ -2,10 +2,11 @@
 // Transition loop, event sourcing, checkpoint persistence, idempotency, trace emission
 
 import type { Machine, Executor, JobLike, KernelRunOpts } from "./types.js";
+import { safeErrorMessage } from "../types/safe-error.js";
 
 const defaultClassifyError = (error: unknown): { retriable: boolean; message: string } => ({
   retriable: true,
-  message: error instanceof Error ? error.message : String(error),
+  message: safeErrorMessage(error),
 });
 
 /** A diagnostic sink is subordinate to the durable transition outcome. */

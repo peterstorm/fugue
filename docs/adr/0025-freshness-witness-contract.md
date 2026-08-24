@@ -228,7 +228,15 @@ before its post-wave witness bookkeeping runs, so output presence cannot prove
 that bookkeeping completed. `DagMachineContextPersisted.freshnessCompletedNodeIds`
 records the completed prefix explicitly. Every post-wave success or failure
 carries the updated set into the pure transition; a replacement executor starts
-from it and emits only the outstanding suffix.
+from it and emits only the outstanding suffix. A backward/current-wave human
+reroute invalidates completion proof for the target wave and every later wave,
+just as it invalidates their outputs: those nodes execute again and therefore
+owe updated freshness bookkeeping.
+
+A committed-but-unacknowledged index write is recognized as the same logical
+write on retry. That durable acknowledgement suppresses both another index
+record and another `write-attempted` observer event, so bookkeeping retries do
+not fabricate duplicate node-side-effect observations.
 
 The witness projection remains bounded to one witness per resource and the
 completion proof to one node ID per DAG node while both survive durable HITL
