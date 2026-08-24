@@ -1128,6 +1128,31 @@ describe("createQueue / createWorker — RangeError guards (pure, no Redis neede
       __resetFrameworkLogger();
     }
   }, 15_000);
+
+  it("a throwing framework logger cannot reopen a contained Queue error event", async () => {
+    let errorCalls = 0;
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: () => {},
+      error: () => {
+        errorCalls += 1;
+        throw new Error("logger transport failed");
+      },
+    });
+    try {
+      const backend = createBullMQBackend(dummyConn);
+      backend.createQueue("throwing-logger-queue");
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline && errorCalls === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(errorCalls).toBeGreaterThan(0);
+      await expect(backend.close()).resolves.toBeUndefined();
+    } finally {
+      __resetFrameworkLogger();
+    }
+  }, 15_000);
 });
 
 // ---------------------------------------------------------------------------

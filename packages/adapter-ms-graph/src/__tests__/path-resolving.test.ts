@@ -187,6 +187,39 @@ describe("createPathResolvingMsGraphAdapter — resolution", () => {
 });
 
 describe("createPathResolvingMsGraphAdapter — request bounds", () => {
+  test("a hostile caller-signal accessor stays inside the Result boundary", async () => {
+    let tokenReads = 0;
+    let fetchCalls = 0;
+    const handle = createPathResolvingMsGraphAdapter({
+      getAccessToken: async () => {
+        tokenReads += 1;
+        return "tok";
+      },
+      fetchImpl: async () => {
+        fetchCalls += 1;
+        return Response.json({});
+      },
+    });
+    const opts = Object.defineProperty({}, "signal", {
+      get: () => { throw new Error("hostile signal getter"); },
+    }) as { readonly signal?: AbortSignal };
+
+    const result = await handle.client.getMetadata(
+      ref("/workbooks/Brancheliste.xlsx"),
+      opts,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.message).toContain("runtime contract");
+      }
+    }
+    expect(tokenReads).toBe(0);
+    expect(fetchCalls).toBe(0);
+  });
+
   test("a hung resolution request times out via requestTimeoutMs (bounded transient)", async () => {
     const handle = createPathResolvingMsGraphAdapter({
       getAccessToken: async () => "tok",

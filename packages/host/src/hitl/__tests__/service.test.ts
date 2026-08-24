@@ -414,6 +414,31 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     expect(baseDecisions.decisions.has(`${started.value.runId}:review`)).toBe(true);
   });
 
+  it("maps a throwing startRun clock into the typed HostError channel", async () => {
+    const store = inMemoryRunStore();
+    const service = createHitlRunService({
+      runStore: store.port,
+      runQueue: inMemoryRunQueue(store.acquireLease).port,
+      decisions: inMemoryDecisionStore().port,
+      tenant: TENANT,
+      notifier: recordingNotifier().port,
+      executor: realExecutor(oneNodeDag()),
+      clock: () => { throw new Error("clock unavailable"); },
+      newRunId: () => mkRunId("throwing-clock-run"),
+    });
+
+    const result = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("internal-invariant-violated");
+      if (result.error.kind === "internal-invariant-violated") {
+        expect(result.error.message).toContain("clock threw");
+      }
+    }
+    expect(store.runs.size).toBe(0);
+  });
+
   it("recordDecision for an unknown run errs run-not-found", async () => {
     const dag = twoWaveDag();
     const { service } = setup(dag);

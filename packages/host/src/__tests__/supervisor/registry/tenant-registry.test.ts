@@ -127,6 +127,22 @@ describe("tenantConfig parse boundary", () => {
     expect(isErr(tenantConfig({ ...makeConfig("a"), admission: { maxConcurrentRuns: 1.5, maxQueuedRuns: 0 } }))).toBe(true);
   });
 
+  it("does not allow an unparsed structural config to inhabit ActiveTenantConfig", () => {
+    const raw: TenantConfigBase = {
+      id: tid("unparsed"),
+      team: "unparsed-team",
+      keycloakClientMapping: { realm: "fugue", clientId: "client", agentClientIdsByDag: {} },
+      fsRoot: "/srv/unparsed",
+      dagsRoot: "/dags/unparsed",
+      secretsRef: markSecretsRef("vault://unparsed"),
+      admission: { maxConcurrentRuns: 1, maxQueuedRuns: 1 },
+      eagerPin: false,
+    };
+    // @ts-expect-error — only tenantConfig can mint the private validation brand.
+    const forged: ActiveTenantConfig = { ...raw, status: "active" };
+    expect(forged.status).toBe("active");
+  });
+
   it("produces an ACTIVE config — status:active, and the active variant carries no tombstone", () => {
     const r = tenantConfig({
       id: tid("a"),

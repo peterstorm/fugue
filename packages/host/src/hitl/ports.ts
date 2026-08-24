@@ -24,33 +24,42 @@ import type { HostError } from "../domain/host-error.js";
 import type { QueuedRunRecord, RunMetadata, RunRecord, RunStatusUpdate, PersistedIdentity } from "./types.js";
 
 const RUN_LEASE: unique symbol = Symbol("RunLease");
-declare const runLeaseOwnerTokenBrand: unique symbol;
-type RunLeaseOwnerToken = string & { readonly [runLeaseOwnerTokenBrand]: "RunLeaseOwnerToken" };
+const runLeaseOwners = new WeakMap<object, string>();
 
 /**
- * Opaque capability proving which queue worker owns a run's live Redis lease.
- * The random owner token is checked atomically by persistence adapters; the
- * signal aborts the active execution slice as soon as renewal becomes unsafe.
+ * Runtime-authenticated capability proving which queue worker owns a run's live
+ * Redis lease. The random owner token is deliberately absent from the value:
+ * only the adapter-internal WeakMap can recover it, so an aborted holder cannot
+ * copy the token into a fresh signal and reissue its authority. The WeakMap is
+ * also the runtime proof that an assertion-forged shape was never issued.
  */
 export type RunLease = Readonly<{
   runId: RunId;
-  ownerToken: RunLeaseOwnerToken;
   signal: AbortSignal;
   [RUN_LEASE]: true;
 }>;
 
-/** Queue-adapter capability constructor; callers cannot build a lease by shape. */
+/** Queue-adapter capability constructor; the owner token never leaves the issuer. */
 export const issueRunLease = (runId: RunId, ownerToken: string, signal: AbortSignal): RunLease => {
   if (ownerToken.length === 0) {
     throw new RangeError("RunLease owner token must be non-empty");
   }
-  return Object.freeze({
+  const lease: RunLease = Object.freeze({
     runId,
-    ownerToken: ownerToken as RunLeaseOwnerToken,
     signal,
     [RUN_LEASE]: true as const,
   });
+  runLeaseOwners.set(lease, ownerToken);
+  return lease;
 };
+
+/**
+ * Adapter-internal proof projection. `null` means the value was forged or
+ * copied rather than issued by `issueRunLease`; stores fail that case closed as
+ * `run-lease-lost`.
+ */
+export const runLeaseOwnerToken = (lease: RunLease): string | null =>
+  runLeaseOwners.get(lease) ?? null;
 
 /**
  * Durable persistence for runs. `checkpoint` is updated on every state-machine

@@ -51,6 +51,11 @@ import type { Team } from "../../domain/auth.js";
 
 // ── Per-tenant config value types ────────────────────────────────────────────
 
+const VALIDATED_TENANT_CONFIG: unique symbol = Symbol("ValidatedTenantConfig");
+type ValidatedTenantConfig = {
+  readonly [VALIDATED_TENANT_CONFIG]: true;
+};
+
 /**
  * A tenant's Keycloak client mapping: the realm the tenant authenticates
  * against, the supervisor-facing OIDC client id used to resolve identities for
@@ -117,7 +122,7 @@ export interface TenantConfigBase {
  * no tombstone — the type itself forbids a `deregisteredAt` here, so "an active
  * config carrying a deregistration instant" is not a representable value.
  */
-export type ActiveTenantConfig = TenantConfigBase & {
+export type ActiveTenantConfig = TenantConfigBase & ValidatedTenantConfig & {
   readonly status: "active";
 };
 
@@ -129,7 +134,7 @@ export type ActiveTenantConfig = TenantConfigBase & {
  * `deregisteredAt` is REQUIRED on this variant — the deregistered state always
  * carries its instant.
  */
-export type DeregisteredTenantConfig = TenantConfigBase & {
+export type DeregisteredTenantConfig = TenantConfigBase & ValidatedTenantConfig & {
   readonly status: "deregistered";
   readonly deregisteredAt: number;
 };
@@ -320,6 +325,7 @@ export const tenantConfig = (input: TenantConfigBase): Result<ActiveTenantConfig
     return err({ kind: "config-invalid", message: `tenant '${input.id}': admission limits must be non-negative integers` });
   }
   const active: ActiveTenantConfig = {
+    [VALIDATED_TENANT_CONFIG]: true,
     status: "active",
     id: input.id,
     team: input.team,

@@ -105,6 +105,33 @@ describe("Wave 1.1 — onTrace exceptions do not escape the kernel loop", () => 
     expect(result.state).toEqual({ kind: "succeeded" });
     expect(errors.some((e) => e.includes("onTrace threw"))).toBe(true);
   });
+
+  it("a throwing trace logger cannot replace an already-persisted transition", async () => {
+    const job = createInMemoryJob<S, null>({ state: { kind: "pending" }, context: null });
+    const events: readonly E[] = [{ type: "START" }, { type: "DONE" }] as const;
+    let index = 0;
+
+    const result = await runStateMachine(
+      job,
+      machine,
+      async () => events[index++]!,
+      {
+        errorEventOf: (classified): E => ({
+          type: "ERROR",
+          retriable: classified.retriable,
+          message: classified.message,
+        }),
+        onTrace: () => { throw new Error("trace failed"); },
+        logger: {
+          warn: () => {},
+          error: () => { throw new Error("logger failed"); },
+        },
+      },
+    );
+
+    expect(result.state).toEqual({ kind: "succeeded" });
+    expect(job.data.state).toEqual({ kind: "succeeded" });
+  });
 });
 
 // ===========================================================================

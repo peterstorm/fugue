@@ -78,10 +78,16 @@ gates, freshness-aware state management, and production observability.
 | **HumanAction** | The reviewer's response: `"approve"`, `"approve-with-edit"`, `"reject"`, `"reroute"`. |
 | **HumanInterventionEvent** | Phase 4 capstone: first-class telemetry capturing the full decision context (confidence, side-effects, prior witnesses). |
 | **Run Owner Team** | Immutable resource owner captured from the registered DAG when a durable HITL run is accepted. Historical status, approval authorization, and review routing use this persisted team; later DAG reassignment/removal cannot transfer access. |
-| **Run Lease** | Opaque, run-bound worker ownership capability carrying a random Redis token and cancellation signal. Every HITL checkpoint/status write atomically verifies it; renewal failure aborts the active slice. |
+| **Run Lease** | Runtime-authenticated, run-bound worker ownership capability. Its random Redis owner token is sealed in a WeakMap-backed issuer registry rather than exposed on the value; every HITL checkpoint/status write proves issuance and atomically verifies the hidden token, while renewal failure aborts the active slice. |
 | **Pending Review Delivery** | Durable gate-notification state: `notification-required` until delivery succeeds, then atomically `notified`. Failed delivery remains retriable and cannot produce a suspended but unnotified run. Team-routed delivery fails closed when the Run Owner Team has no stored conversation; it never falls back to another/default channel. |
 | **Run Publication Uncertainty** | A conservative accepted creation outcome used when Redis metadata acknowledgement is lost and exact removal/absence cannot be proved. Acceptance requires either published metadata or a confirmed **Run Creation Intent** in the active index, so wakeup/reconciliation can always reconstruct the queued run. |
 | **Run Creation Intent** | A losslessly serialized Redis checkpoint envelope containing the initial lifecycle metadata and framework checkpoint. It starts as a non-runnable preparation; only an explicitly promoted recovery intent may substitute for missing metadata after an ambiguous publication acknowledgement. |
+
+### Multi-Tenant Lifecycle
+
+| Term | Definition |
+|------|------------|
+| **Tenant Purge Lease** | Runtime-proven reservation of one exact deregistration tombstone. The registry refuses revival/reconfiguration while the lease is active; only its holder may hard-delete after all idempotent footprint steps succeed. Partial failure releases the lease but retains the tombstone for retry. |
 
 ### Observability
 

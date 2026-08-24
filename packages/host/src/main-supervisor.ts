@@ -769,15 +769,15 @@ const main = async () => {
     // residual open slot a safe no-op the next sweep retries. Without this, the
     // per-tenant admission counters would leak one entry per purged tenant id.
     registry: {
-      snapshot: () => registry.snapshot(),
-      hardDelete: async (tombstone) => {
-        const r = await registry.hardDelete(tombstone);
-        // Reclaim admission state only when the record was genuinely removed —
-        // a `superseded` refusal means the tenant is live again and must KEEP
-        // its admission bookkeeping.
-        if (r.ok && r.value === "deleted") tenantConc = forgetTenant(tenantConc, tombstone.id);
+      beginPurge: (tombstone) => registry.beginPurge(tombstone),
+      hardDelete: async (lease) => {
+        const r = await registry.hardDelete(lease);
+        // Reclaim admission state only when the fenced record was genuinely
+        // removed; a superseded refusal keeps the tenant's bookkeeping.
+        if (r.ok && r.value === "deleted") tenantConc = forgetTenant(tenantConc, lease.tenant);
         return r;
       },
+      releasePurge: (lease) => registry.releasePurge(lease),
     },
   };
 

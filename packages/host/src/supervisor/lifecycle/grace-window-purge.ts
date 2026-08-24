@@ -19,12 +19,12 @@
  *     and the final registry hard-delete through INJECTED ports, each returning
  *     `Result`. It NEVER calls `Date.now()`; the caller supplies `now`.
  *
- * IDEMPOTENT + FAIL-CLOSED: every footprint port is idempotent (deleting an
- * absent key/user/mount is a no-op success), so a retried purge of an already-
- * purged tenant is safe. Each step is `Result`-checked; the purge collects step
- * failures and reports them, so a partial failure (e.g. Redis briefly down) is
- * visible and the sweep can retry on the next tick rather than silently leaving a
- * half-purged footprint.
+ * FENCED, IDEMPOTENT + FAIL-CLOSED: the registry first reserves the exact
+ * tombstone with a runtime-proven purge lease and refuses revival while it is
+ * active. Every footprint port is idempotent (deleting an absent key/user/mount
+ * is a no-op success), so partial failure retains the tombstone and the next
+ * sweep safely retries. Hard deletion occurs only after every footprint step
+ * succeeds.
  */
 
 import type { Result } from "@fuguejs/framework";
@@ -32,8 +32,11 @@ import type { HostError } from "../../domain/host-error.js";
 import type { LogPort } from "../../ports.js";
 import type { TenantId } from "../../domain/tenant.js";
 import type { DeregisteredTenantConfig, TenantRegistry } from "../registry/tenant-registry.js";
-import { retainedEntry } from "../registry/tenant-registry.js";
-import type { HardDeleteOutcome } from "../registry/redis-registry-adapter.js";
+import type {
+  BeginPurgeOutcome,
+  HardDeleteOutcome,
+  TenantPurgeLease,
+} from "../registry/redis-registry-adapter.js";
 
 // ── Grace window default (multi-tenant spec FR-030) ─────────────────────────────────────────────
 
@@ -127,20 +130,14 @@ interface WorkerRegistryRemovePort {
 }
 
 /**
- * The registry seam the purge needs: hard-delete the tenant's RETAINED entry
- * (the deregistered tombstone) — the final step, run only after the data
- * footprint is gone — plus a live read so the purge can notice a tenant that
- * came back while it was working.
- *
- * `hardDelete` takes the OBSERVED TOMBSTONE, not a bare id: it is a
- * compare-and-delete, and a caller that cannot produce the tombstone it saw has
- * no business asking for the delete (see the adapter's contract for why an id
- * alone is unsafe here).
+ * The registry seam reserves the exact RETAINED tombstone before destructive
+ * work, then admits hard deletion only through the issued lease. Registry
+ * mutations are fenced for that tenant until release.
  */
 interface RegistryPurgePort {
-  readonly hardDelete: (tombstone: DeregisteredTenantConfig) => Promise<Result<HardDeleteOutcome, HostError>>;
-  /** Live registry view — used to re-check the tombstone between purge steps. */
-  readonly snapshot: () => TenantRegistry;
+  readonly beginPurge: (tombstone: DeregisteredTenantConfig) => Promise<Result<BeginPurgeOutcome, HostError>>;
+  readonly hardDelete: (lease: TenantPurgeLease) => Promise<Result<HardDeleteOutcome, HostError>>;
+  readonly releasePurge: (lease: TenantPurgeLease) => Promise<void>;
 }
 
 /**
@@ -165,6 +162,7 @@ export interface GracePurgeDeps {
  * sites — the failed-step surface can never silently drift from the purge body.
  */
 type PurgeStep =
+  | "registry-purge-fence"
   | "acl-revoke"
   | "worker-registry-remove"
   | "keyspace-purge"
@@ -214,7 +212,7 @@ export type PurgeOutcome =
  * hard-delete the registry tombstone (so the tenant only fully disappears once its
  * footprint is gone). Every step is idempotent and `Result`-checked; a step
  * failure is collected (not thrown, not short-circuited) so the purge reports a
- * complete picture and the sweep can retry.
+ * complete picture, retains the tombstone, and lets the sweep retry.
  *
  * The caller has ALREADY confirmed (via `isGraceWindowElapsed`) that the window
  * elapsed — this function does no time check itself (the clock stays in the pure
@@ -227,64 +225,61 @@ export const purgeTenantFootprint = async (
   const tenant = cfg.id;
   const failedSteps: PurgeStep[] = [];
   let keysDeleted = 0;
-
-  /**
-   * Is the tombstone this purge was launched against still the live record?
-   *
-   * `register` revives a deregistered tenant, so a sweep that sampled the
-   * registry before a revival would otherwise keep dismantling a tenant that is
-   * now serving traffic. Re-reading between steps NARROWS that window; it cannot
-   * close it, because each step is a separate await. The permanently destructive
-   * step — the registry hard-delete — does not rely on this check at all: it is a
-   * compare-and-delete inside the registry's own mutation turn, so it is atomic.
-   */
-  const superseded = (): boolean => {
-    const live = retainedEntry(deps.registry.snapshot(), tenant);
-    return (
-      live === undefined ||
-      live.status !== "deregistered" ||
-      live.deregisteredAt !== cfg.deregisteredAt
-    );
-  };
   const abandon = (abortedAt: PurgeStep): PurgeOutcome => ({
     kind: "superseded", tenant, keysDeleted, abortedAt,
   });
 
-  // 1. Revoke ACL — cut data-plane access before deleting data.
-  if (superseded()) return abandon("acl-revoke");
-  const aclR = await deps.acl.revokeAcl(tenant);
-  if (!aclR.ok) failedSteps.push("acl-revoke");
+  // Reserve the exact tombstone BEFORE any destructive I/O. The registry owns
+  // this fence and rejects revival/reconfiguration until release, so there is
+  // no check-to-action window between the steps below.
+  const acquired = await deps.registry.beginPurge(cfg);
+  if (!acquired.ok) {
+    return {
+      kind: "completed",
+      tenant,
+      keysDeleted,
+      failedSteps: ["registry-purge-fence"],
+    };
+  }
+  if (acquired.value.kind === "superseded") return abandon("registry-purge-fence");
+  const lease = acquired.value.lease;
 
-  // 2. Remove worker-registry record.
-  if (superseded()) return abandon("worker-registry-remove");
-  const wrR = await deps.workerRegistry.remove(tenant);
-  if (!wrR.ok) failedSteps.push("worker-registry-remove");
+  try {
+    // Revoke ACL first, then remove process/data footprints. Every operation is
+    // idempotent, so collect failures and retain the tombstone for a later retry.
+    const aclR = await deps.acl.revokeAcl(tenant);
+    if (!aclR.ok) failedSteps.push("acl-revoke");
 
-  // 3. Delete data keyspace (cache/checkpoint/token/team keys).
-  if (superseded()) return abandon("keyspace-purge");
-  const ksR = await deps.keyspace.purgeKeyspace(tenant);
-  if (!ksR.ok) failedSteps.push("keyspace-purge");
-  else keysDeleted = ksR.value;
+    const wrR = await deps.workerRegistry.remove(tenant);
+    if (!wrR.ok) failedSteps.push("worker-registry-remove");
 
-  // 4. Remove filesystem mount.
-  if (superseded()) return abandon("fs-remove");
-  const fsR = await deps.fs.removeMount(cfg.fsRoot);
-  if (!fsR.ok) failedSteps.push("fs-remove");
+    const ksR = await deps.keyspace.purgeKeyspace(tenant);
+    if (!ksR.ok) failedSteps.push("keyspace-purge");
+    else keysDeleted = ksR.value;
 
-  // 5. Hard-delete the registry tombstone — LAST, so the tenant only fully
-  //    vanishes once everything above is gone. Compare-and-delete against the
-  //    tombstone THIS purge observed: a revival that landed since step 4 makes
-  //    the delete a no-op `superseded` instead of destroying a live tenant.
-  const regR = await deps.registry.hardDelete(cfg);
-  if (!regR.ok) failedSteps.push("registry-hard-delete");
-  else if (regR.value === "superseded") return abandon("registry-hard-delete");
+    const fsR = await deps.fs.removeMount(cfg.fsRoot);
+    if (!fsR.ok) failedSteps.push("fs-remove");
 
-  // Always return the STRUCTURED outcome — on full success AND on partial
-  // failure. A non-empty `failedSteps` IS the fail-closed signal (the sweep
-  // retries on the next tick; every step is idempotent), and the genuine typed
-  // steps + `keysDeleted` are preserved losslessly for the caller's trail
-  // (multi-tenant spec SC-010 observability) — never collapsed into a stringly error.
-  return { kind: "completed", tenant, keysDeleted, failedSteps };
+    // A partial footprint must retain its tombstone; otherwise the next sweep
+    // cannot retry the failed idempotent step.
+    if (failedSteps.length > 0) {
+      return { kind: "completed", tenant, keysDeleted, failedSteps };
+    }
+
+    const regR = await deps.registry.hardDelete(lease);
+    if (!regR.ok) {
+      return {
+        kind: "completed",
+        tenant,
+        keysDeleted,
+        failedSteps: ["registry-hard-delete"],
+      };
+    }
+    if (regR.value === "superseded") return abandon("registry-hard-delete");
+    return { kind: "completed", tenant, keysDeleted, failedSteps };
+  } finally {
+    await deps.registry.releasePurge(lease);
+  }
 };
 
 /**

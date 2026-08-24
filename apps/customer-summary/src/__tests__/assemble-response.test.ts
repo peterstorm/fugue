@@ -1,6 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { createAssembleResponseNode } from "../dag/nodes/assemble-response.js";
-import { makeNodeContext } from "@fuguejs/framework";
+import { fwLogger, makeNodeContext, setFrameworkLogger } from "@fuguejs/framework";
 import type { SynthesisOutput } from "../schemas/summary.js";
 import type { GuardrailResult } from "@fuguejs/framework";
 
@@ -114,6 +114,30 @@ describe("assemble-response node", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.value.status).toBe("degraded");
+    }
+  });
+
+  test("degraded assembly is pure and cannot be replaced by a throwing logger", async () => {
+    const previous = fwLogger();
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: () => { throw new Error("logger unavailable"); },
+      error: () => {},
+    });
+    try {
+      const result = await createAssembleResponseNode().run(
+        {
+          $input: { customerId: "cust-001" },
+          "extract-features": { branch: "ok" as const, customer: { id: "cust-001", name: "Test", accountType: "personal" }, recentUtterances: [], scoredConversations: [] },
+          "grounding-guardrail": undefined,
+        },
+        makeCtx(),
+      );
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.value.status).toBe("degraded");
+    } finally {
+      setFrameworkLogger(previous);
     }
   });
 

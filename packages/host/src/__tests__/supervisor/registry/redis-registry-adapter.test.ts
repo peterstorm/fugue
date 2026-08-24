@@ -738,12 +738,22 @@ describe("redis tenant registry — hardDelete (grace-window purge, FR-030)", ()
     status: "deregistered",
     deregisteredAt: 1,
   });
+  const acquirePurge = async (
+    reg: ReturnType<typeof createRedisTenantRegistry>,
+    tombstone: DeregisteredTenantConfig,
+  ) => {
+    const begun = await reg.beginPurge(tombstone);
+    if (!begun.ok || begun.value.kind !== "acquired") {
+      throw new Error("expected purge lease acquisition");
+    }
+    return begun.value.lease;
+  };
 
   it("(a) hardDelete on an ABSENT tenant is an idempotent no-op (no del/publish)", async () => {
     const fake = createInMemoryRedisFake();
     const reg = createRedisTenantRegistry(fake.redis, fake.pubsub);
-    const res = await reg.hardDelete(ghostTombstone("ghost"));
-    expect(res.ok).toBe(true);
+    const res = await reg.beginPurge(ghostTombstone("ghost"));
+    expect(res).toEqual({ ok: true, value: { kind: "superseded" } });
     // Nothing written, nothing announced — the early-return short-circuits all I/O.
     expect(fake.store.size).toBe(0);
     expect(fake.published.length).toBe(0);
@@ -759,7 +769,8 @@ describe("redis tenant registry — hardDelete (grace-window purge, FR-030)", ()
     const tombstone = tombstoneOf(reg, "acme");
     fake.published.length = 0;
 
-    const res = await reg.hardDelete(tombstone);
+    const lease = await acquirePurge(reg, tombstone);
+    const res = await reg.hardDelete(lease);
     expect(res.ok).toBe(true);
     if (res.ok) expect(res.value).toBe("deleted");
     // The fugue:tenants:<id> key is removed from the backing store.
@@ -786,9 +797,10 @@ describe("redis tenant registry — hardDelete (grace-window purge, FR-030)", ()
     await reg.deregister(tid("acme"), 1500);
     const tombstone = tombstoneOf(reg, "acme");
 
-    // Force Redis down AFTER a successful register; the del now fails.
+    // Force Redis down AFTER acquiring the fence; the del now fails.
+    const lease = await acquirePurge(reg, tombstone);
     fake.setFail(true);
-    const res = await reg.hardDelete(tombstone);
+    const res = await reg.hardDelete(lease);
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.kind).toBe("redis-unavailable");
     // Memory NOT advanced — the tombstone is still retained (mirrors the register/
@@ -818,7 +830,8 @@ describe("redis tenant registry — hardDelete (grace-window purge, FR-030)", ()
     expect(hydrated.ok).toBe(true);
     expect(reg.snapshot().entries.has(tid("acme"))).toBe(true);
 
-    const res = await reg.hardDelete(tombstoneOf(reg, "acme"));
+    const lease = await acquirePurge(reg, tombstoneOf(reg, "acme"));
+    const res = await reg.hardDelete(lease);
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.kind).toBe("redis-unavailable");
     // The in-memory view is NOT advanced even though the del landed — fail-closed
@@ -853,7 +866,8 @@ describe("redis tenant registry — hardDelete (grace-window purge, FR-030)", ()
     expect(hydrated.ok).toBe(true);
     expect(reg.snapshot().entries.has(tid("acme"))).toBe(true);
 
-    const res = await reg.hardDelete(tombstoneOf(reg, "acme"));
+    const lease = await acquirePurge(reg, tombstoneOf(reg, "acme"));
+    const res = await reg.hardDelete(lease);
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.kind).toBe("redis-unavailable");
     expect(dead).toBe(1);
@@ -861,39 +875,37 @@ describe("redis tenant registry — hardDelete (grace-window purge, FR-030)", ()
     expect(reg.snapshot().entries.has(tid("acme"))).toBe(true);
   });
 
-  it("(e) REFUSES to delete a tenant REVIVED after the tombstone was observed", async () => {
+  it("(e) refuses revival while a purge lease fences destructive work", async () => {
     const fake = createInMemoryRedisFake();
     const reg = createRedisTenantRegistry(fake.redis, fake.pubsub);
     await reg.register(makeConfig("acme"), 1000);
     await reg.deregister(tid("acme"), 1500);
-    // A sweep samples the tombstone…
     const observed = tombstoneOf(reg, "acme");
-    // …and an admin revives the tenant before the sweep reaches its final step.
-    expect((await reg.register(makeConfig("acme"), 2000)).ok).toBe(true);
+    const lease = await acquirePurge(reg, observed);
 
-    const res = await reg.hardDelete(observed);
-    expect(res.ok).toBe(true);
-    if (res.ok) expect(res.value).toBe("superseded");
-    // The revived tenant's config record SURVIVES — key, memory, and lookup.
-    expect(fake.store.has(`${TENANT_KEY_PREFIX}acme`)).toBe(true);
-    expect(reg.snapshot().entries.has(tid("acme"))).toBe(true);
-    expect(reg.lookup(tid("acme")).ok).toBe(true);
+    const revival = await reg.register(makeConfig("acme"), 2000);
+    expect(revival.ok).toBe(false);
+
+    const res = await reg.hardDelete(lease);
+    expect(res).toEqual({ ok: true, value: "deleted" });
+    expect(fake.store.has(`${TENANT_KEY_PREFIX}acme`)).toBe(false);
+    expect(reg.snapshot().entries.has(tid("acme"))).toBe(false);
   });
 
-  it("(f) REFUSES to delete a tenant revived and re-deregistered (fresh tombstone)", async () => {
+  it("(f) release after partial work permits revival and invalidates the old tombstone", async () => {
     const fake = createInMemoryRedisFake();
     const reg = createRedisTenantRegistry(fake.redis, fake.pubsub);
     await reg.register(makeConfig("acme"), 1000);
     await reg.deregister(tid("acme"), 1500);
     const observed = tombstoneOf(reg, "acme");
-    // Revived, then tombstoned again: a NEW grace window that this stale sweep
-    // has no right to end early.
+    const lease = await acquirePurge(reg, observed);
+    await reg.releasePurge(lease);
+
     await reg.register(makeConfig("acme"), 2000);
     await reg.deregister(tid("acme"), 2500);
 
-    const res = await reg.hardDelete(observed);
-    expect(res.ok).toBe(true);
-    if (res.ok) expect(res.value).toBe("superseded");
+    const res = await reg.beginPurge(observed);
+    expect(res).toEqual({ ok: true, value: { kind: "superseded" } });
     expect(reg.snapshot().entries.has(tid("acme"))).toBe(true);
     expect(tombstoneOf(reg, "acme").deregisteredAt).toBe(2500);
   });

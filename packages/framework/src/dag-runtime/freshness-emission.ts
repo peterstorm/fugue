@@ -16,8 +16,8 @@
 // close the wave with a write witness permanently missing.
 
 import { match } from "ts-pattern";
-import type { NodeId } from "../types/ids.js";
-import type { Witness } from "../types/freshness.js";
+import type { NodeId, RunId } from "../types/ids.js";
+import type { Witness, WriteEntry } from "../types/freshness.js";
 import { stampWitness, writeEntryOf } from "../types/freshness.js";
 import type { FrameworkError } from "../types/errors.js";
 import { type Result, ok, err } from "../types/result.js";
@@ -32,6 +32,25 @@ import { nodeErrorEmitter } from "./post-wave-context.js";
 
 /** Extraction diagnostics are subordinate to the fail-closed `Result`. */
 const warnWithoutThrowing = (message: string): void => bestEffortLog("warn", message);
+
+/**
+ * Whether the latest indexed write is this node's own already-committed
+ * attempt. Redis/file writes can commit and still lose their acknowledgement;
+ * the retry must recognize that durable fact instead of reporting itself as a
+ * freshness violation. The identity excludes timestamps because a resumed
+ * bookkeeping attempt necessarily receives a new clock value.
+ */
+const isOwnRecordedWrite = (
+  entry: WriteEntry,
+  runId: RunId,
+  nodeId: NodeId,
+  newWitness: Witness,
+): boolean =>
+  entry.runId === runId &&
+  entry.nodeId === nodeId &&
+  entry.newWitness.kind === newWitness.kind &&
+  entry.newWitness.resource === newWitness.resource &&
+  entry.newWitness.value === newWitness.value;
 
 /**
  * The outcome of one wave's freshness emission.
@@ -170,7 +189,10 @@ export async function emitFreshnessWitnessEvents(
           return err(fwError);
         }
         const conflict = conflictResult.value;
-        if (conflict) {
+        const alreadyRecorded =
+          conflict !== null &&
+          isOwnRecordedWrite(conflict, nodeCtx.runId, nodeId, newWitness);
+        if (conflict !== null && !alreadyRecorded) {
           emit(nodeCtx, {
             type: "freshness-violation",
             runId: nodeCtx.runId,
@@ -195,6 +217,11 @@ export async function emitFreshnessWitnessEvents(
           timestamp: stamp(),
         };
         emit(nodeCtx, writeEvent);
+        // A prior attempt already committed this exact logical write. Treat the
+        // durable index entry as the acknowledgement and do not append a second
+        // in-memory history entry or refresh the persisted timestamp.
+        if (alreadyRecorded) return ok(undefined);
+
         const writeResult = await freshnessIndex.recordWrite(writeEvent);
         if (!writeResult.ok) {
           const msg = formatFrameworkError(writeResult.error);

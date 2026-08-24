@@ -36,7 +36,7 @@
 
 import { ok, err, safeErrorMessage } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
-import { redisUnavailable } from "../../domain/host-error.js";
+import { redisUnavailable, tenantConfigInvalid } from "../../domain/host-error.js";
 import type { HostError } from "../../domain/host-error.js";
 import { tenantId, markSecretsRef } from "../../domain/tenant.js";
 import type { TenantId } from "../../domain/tenant.js";
@@ -60,14 +60,20 @@ import type {
   TenantRegistry,
 } from "./tenant-registry.js";
 
-/**
- * What a compare-and-delete actually did. `superseded` is neither success nor
- * failure: the tombstone the caller observed is no longer the live record (the
- * tenant was revived, or re-deregistered), so the delete was correctly REFUSED
- * and must not be retried. Modelling it as a third outcome rather than folding
- * it into `ok(undefined)` keeps the refusal a reported fact.
- */
-export type HardDeleteOutcome = "deleted" | "absent" | "superseded";
+const TENANT_PURGE_LEASE: unique symbol = Symbol("TenantPurgeLease");
+
+/** Runtime-proven reservation that prevents tenant revival during destruction. */
+export type TenantPurgeLease = Readonly<{
+  readonly tenant: TenantId;
+  readonly [TENANT_PURGE_LEASE]: true;
+}>;
+
+export type BeginPurgeOutcome =
+  | { readonly kind: "acquired"; readonly lease: TenantPurgeLease }
+  | { readonly kind: "superseded" };
+
+/** What the final compare-and-delete under an authentic purge lease did. */
+export type HardDeleteOutcome = "deleted" | "superseded";
 
 // ── Redis key + channel layout (AD-5) ────────────────────────────────────────
 
@@ -329,6 +335,12 @@ export interface RedisTenantRegistry {
   readonly deregister: (id: TenantId, now: number) => Promise<Result<void, HostError>>;
   readonly reconfigure: (cfg: ActiveTenantConfig, now: number) => Promise<Result<void, HostError>>;
   /**
+   * Atomically reserve the exact observed tombstone for purge. While the lease
+   * is live, register/deregister/reconfigure/hydrate refuse to mutate that
+   * tenant, closing every check-to-destructive-operation revival window.
+   */
+  readonly beginPurge: (tombstone: DeregisteredTenantConfig) => Promise<Result<BeginPurgeOutcome, HostError>>;
+  /**
    * HARD-DELETE a tenant's retained (tombstoned) record — the FINAL step of the
    * grace-window purge (T10, multi-tenant spec FR-030). Distinct from `deregister`, which only
    * tombstones-and-retains: this REMOVES the `fugue:tenants:<id>` key entirely and
@@ -337,18 +349,16 @@ export interface RedisTenantRegistry {
    * fail-closed (a Redis failure does not advance the in-memory view). Announces a
    * `deregistered` event so subscribers re-read and observe the absence.
    *
-   * COMPARE-AND-DELETE: the caller passes the TOMBSTONE IT OBSERVED, not a bare
-   * id, and the delete lands only if the live entry is still that same tombstone.
-   * `register` REVIVES a deregistered tenant, and the purge takes four awaited
-   * I/O steps before reaching here — so an id alone would let a sweep started
-   * before a revival delete the config record of a now-live tenant. Since
-   * `deregister` preserves the original `deregisteredAt` on repeat and mints a
-   * fresh one after a revival, comparing `status` + `deregisteredAt` catches both
-   * a revival and a revive-then-re-deregister. The comparison and the delete run
-   * in the SAME `serializeMutation` turn as `register`, so this is atomic rather
-   * than another check-then-act.
+   * LEASED COMPARE-AND-DELETE: `beginPurge` first reserves the exact observed
+   * tombstone. Every registry mutation shares the same `serializeMutation` gate
+   * and refuses that tenant while the lease is active, so revival cannot land
+   * between the check and any destructive footprint operation. `hardDelete`
+   * accepts only the runtime-issued lease and rechecks the tombstone inside the
+   * final mutation turn before deleting.
    */
-  readonly hardDelete: (tombstone: DeregisteredTenantConfig) => Promise<Result<HardDeleteOutcome, HostError>>;
+  readonly hardDelete: (lease: TenantPurgeLease) => Promise<Result<HardDeleteOutcome, HostError>>;
+  /** Release a retained tombstone after partial purge failure. Idempotent. */
+  readonly releasePurge: (lease: TenantPurgeLease) => Promise<void>;
   /** Re-read the whole registry from Redis (hydrate / resync). */
   readonly hydrate: () => Promise<Result<TenantRegistry, HostError>>;
 }
@@ -361,6 +371,8 @@ export const createRedisTenantRegistry = (
   seed: TenantRegistry = emptyRegistry(),
 ): RedisTenantRegistry => {
   let registry = seed;
+  const purgeTombstones = new WeakMap<TenantPurgeLease, DeregisteredTenantConfig>();
+  const activePurgeLeases = new Map<TenantId, TenantPurgeLease>();
   // The host's degraded edge, mirrored here so `resolveForNewRun` can fail closed
   // (multi-tenant spec FR-022) WITHOUT reaching back into host-state.ts. It is split by SIGNAL SOURCE:
   //   - `writeDegraded` is SET by the write/hydrate path (`dead()`) on a Redis write
@@ -526,54 +538,78 @@ export const createRedisTenantRegistry = (
     },
 
     register: (cfg, now) =>
-      serializeMutation(() =>
-        commitTransition(
-          cfg.id,
-          () => coreRegister(registry, cfg, now),
-          { kind: "registered", tenant: cfg.id },
-          "tenant-register",
-        ),
+      serializeMutation(async () =>
+        activePurgeLeases.has(cfg.id)
+          ? err(tenantConfigInvalid(`tenant '${cfg.id}' is being purged; registration must retry`))
+          : commitTransition(
+              cfg.id,
+              () => coreRegister(registry, cfg, now),
+              { kind: "registered", tenant: cfg.id },
+              "tenant-register",
+            ),
       ),
 
     // Same-reference no-op here covers BOTH cases (absent tenant, and
     // already-deregistered) — see `commitTransition`.
     deregister: (id, now) =>
-      serializeMutation(() =>
-        commitTransition(
-          id,
-          () => coreDeregister(registry, id, now),
-          { kind: "deregistered", tenant: id },
-          "tenant-deregister",
-        ),
+      serializeMutation(async () =>
+        activePurgeLeases.has(id)
+          ? err(tenantConfigInvalid(`tenant '${id}' is being purged; deregistration must retry`))
+          : commitTransition(
+              id,
+              () => coreDeregister(registry, id, now),
+              { kind: "deregistered", tenant: id },
+              "tenant-deregister",
+            ),
       ),
 
     reconfigure: (cfg, now) =>
-      serializeMutation(() =>
-        commitTransition(
-          cfg.id,
-          () => coreReconfigure(registry, cfg, now),
-          { kind: "reconfigured", tenant: cfg.id },
-          "tenant-reconfigure",
-        ),
+      serializeMutation(async () =>
+        activePurgeLeases.has(cfg.id)
+          ? err(tenantConfigInvalid(`tenant '${cfg.id}' is being purged; reconfiguration must retry`))
+          : commitTransition(
+              cfg.id,
+              () => coreReconfigure(registry, cfg, now),
+              { kind: "reconfigured", tenant: cfg.id },
+              "tenant-reconfigure",
+            ),
       ),
 
-    hardDelete: (tombstone) =>
+    beginPurge: (tombstone) =>
       serializeMutation(async () => {
+        const existing = registry.entries.get(tombstone.id);
+        if (
+          existing === undefined ||
+          existing.status !== "deregistered" ||
+          existing.deregisteredAt !== tombstone.deregisteredAt ||
+          activePurgeLeases.has(tombstone.id)
+        ) {
+          return ok({ kind: "superseded" } as const);
+        }
+        const lease: TenantPurgeLease = Object.freeze({
+          tenant: tombstone.id,
+          [TENANT_PURGE_LEASE]: true as const,
+        });
+        purgeTombstones.set(lease, tombstone);
+        activePurgeLeases.set(tombstone.id, lease);
+        return ok({ kind: "acquired", lease } as const);
+      }),
+
+    hardDelete: (lease) =>
+      serializeMutation(async () => {
+        const tombstone = purgeTombstones.get(lease);
+        if (tombstone === undefined || activePurgeLeases.get(lease.tenant) !== lease) {
+          return err({
+            kind: "internal-invariant-violated",
+            message: "tenant hard-delete requires an authentic active purge lease",
+            context: { tenant: lease.tenant },
+          });
+        }
         const id = tombstone.id;
         const existing = registry.entries.get(id);
-        // Idempotent no-op: nothing to delete → success, no write, no event.
-        if (existing === undefined) return ok("absent" as const);
-        // Compare-and-delete against the observed tombstone. A revived tenant
-        // (now `active`) or one re-deregistered since the sweep sampled it is a
-        // DIFFERENT record — deleting it would destroy a live tenant's config.
-        // Report the supersession instead of silently succeeding, so the sweep
-        // can abandon the purge rather than retry it forever.
-        if (existing.status !== "deregistered" || existing.deregisteredAt !== tombstone.deregisteredAt) {
+        if (existing === undefined || existing.status !== "deregistered" || existing.deregisteredAt !== tombstone.deregisteredAt) {
           return ok("superseded" as const);
         }
-        // Delete the persisted record FIRST; fail closed (do NOT advance memory) on
-        // any Redis failure so the in-memory view never diverges from a delete that
-        // did not land.
         const delResult = await redisStep(
           "tenant-hard-delete",
           "[tenant-registry] Redis del threw during hardDelete — treating as disconnected",
@@ -581,7 +617,6 @@ export const createRedisTenantRegistry = (
           { tenant: id },
         );
         if (!delResult.ok) return delResult;
-        // Announce the absence so subscribers re-read (and observe the tenant gone).
         const pubResult = await redisStep(
           "tenant-hard-delete",
           "[tenant-registry] Redis publish threw during hardDelete — treating as disconnected",
@@ -589,14 +624,29 @@ export const createRedisTenantRegistry = (
           { tenant: id },
         );
         if (!pubResult.ok) return pubResult;
-        // Advance through the pure core so hard deletion preserves the same
-        // runtime-read-only facade as every other registry transition.
         registry = removeRetainedEntry(registry, id);
+        activePurgeLeases.delete(id);
+        purgeTombstones.delete(lease);
         alive();
         return ok("deleted" as const);
       }),
 
+    releasePurge: (lease) =>
+      serializeMutation(async () => {
+        if (activePurgeLeases.get(lease.tenant) === lease) {
+          activePurgeLeases.delete(lease.tenant);
+        }
+        purgeTombstones.delete(lease);
+      }),
+
     hydrate: () => serializeMutation(async () => {
+      if (activePurgeLeases.size > 0) {
+        return err({
+          kind: "internal-invariant-violated",
+          message: "tenant registry hydration cannot replace a snapshot during an active purge",
+          context: { activePurges: activePurgeLeases.size },
+        });
+      }
       const configs: TenantConfig[] = [];
       let cursor = "0";
       const pattern = `${TENANT_KEY_PREFIX}*`;

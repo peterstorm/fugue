@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { createTransformNode, ok, fwLogger } from "@fuguejs/framework";
+import { createTransformNode, ok } from "@fuguejs/framework";
 import { match } from "ts-pattern";
 import type { Result, FrameworkError, GuardrailResult } from "@fuguejs/framework";
 import { SummaryResponseSchema } from "../../schemas/response.js";
@@ -72,8 +72,8 @@ export const createAssembleResponseNode = () =>
         .with({ branch: "ok" }, () => {
           const guardrail = input["grounding-guardrail"];
           if (guardrail === undefined || guardrail.kind === "skipped" || guardrail.kind === "failed") {
-            // Guardrail output missing, skipped, or failed — degrade gracefully
-            fwLogger().warn(`[assemble-response] guardrail ${guardrail?.kind ?? "missing"} for customer ${customerId}`);
+            // Guardrail output missing, skipped, or failed — degrade gracefully.
+            // The transform is pure; diagnostics belong to the observer shell.
             return ok({ status: "degraded" as const, customerId, message: "Guardrail data unavailable" });
           }
           const synthesis = guardrail.value;

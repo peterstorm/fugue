@@ -115,6 +115,9 @@ const makeNodeCrashError = (message: string): FrameworkError => ({
   retriability: "non-retriable",
 });
 
+const requestOptionsContractError = (): FrameworkError =>
+  makeNodeCrashError("Authenticated request options violated their runtime contract");
+
 /**
  * The raw outcome of a single fetch attempt, before token-refresh logic. We
  * surface `401` distinctly so the caller can decide to invalidate + retry,
@@ -317,28 +320,56 @@ const execute = async <T>(
   payload: RequestBody,
   opts: AuthedRequestOpts<T>,
 ): Promise<Result<T, FrameworkError>> => {
-  const target = resolveRequestTarget(deps.config.baseUrl, path);
-  if (!target.ok) return err(target.error);
+  try {
+    const target = resolveRequestTarget(deps.config.baseUrl, path);
+    if (!target.ok) return err(target.error);
 
-  const first = await getToken(deps.tokens);
-  if (!first.ok) return err(first.error);
+    const first = await getToken(deps.tokens);
+    if (!first.ok) return err(first.error);
 
-  const outcome = await sendOnce(deps, method, target.value, first.value, payload, opts);
-  if (outcome.tag === "ok") return ok(outcome.value);
-  if (outcome.tag === "error") return err(outcome.error);
+    const outcome = await sendOnce(deps, method, target.value, first.value, payload, opts);
+    if (outcome.tag === "ok") return ok(outcome.value);
+    if (outcome.tag === "error") return err(outcome.error);
 
-  // outcome.tag === "unauthorized": invalidate, re-mint, retry exactly once.
-  const invalidated = invalidateToken(deps.tokens);
-  if (!invalidated.ok) return err(invalidated.error);
-  const second = await getToken(deps.tokens);
-  if (!second.ok) return err(second.error);
+    // outcome.tag === "unauthorized": invalidate, re-mint, retry exactly once.
+    const invalidated = invalidateToken(deps.tokens);
+    if (!invalidated.ok) return err(invalidated.error);
+    const second = await getToken(deps.tokens);
+    if (!second.ok) return err(second.error);
 
-  const retry = await sendOnce(deps, method, target.value, second.value, payload, opts);
-  if (retry.tag === "ok") return ok(retry.value);
-  if (retry.tag === "error") return err(retry.error);
-  // A second consecutive 401 — surface as a non-retriable auth failure rather
-  // than looping. The credentials/token are not included (NFR-010).
-  return err(makeNodeCrashError(`Authentication failed after token refresh: ${method} ${target.value.label} returned 401`));
+    const retry = await sendOnce(deps, method, target.value, second.value, payload, opts);
+    if (retry.tag === "ok") return ok(retry.value);
+    if (retry.tag === "error") return err(retry.error);
+    // A second consecutive 401 — surface as a non-retriable auth failure rather
+    // than looping. The credentials/token are not included (NFR-010).
+    return err(makeNodeCrashError(`Authentication failed after token refresh: ${method} ${target.value.label} returned 401`));
+  } catch {
+    // Request options are a public runtime boundary. A malformed JavaScript
+    // caller or hostile accessor must remain inside the Result channel, and its
+    // thrown text is deliberately discarded because it may contain a token or
+    // request payload.
+    return err(requestOptionsContractError());
+  }
+};
+
+/** Extract body-only options inside the same secret-free Result boundary. */
+const executeBodyRequest = async <T>(
+  deps: AuthedClientDeps,
+  method: "POST" | "PUT" | "PATCH",
+  path: string,
+  opts: AuthedBodyRequestOpts<T>,
+): Promise<Result<T, FrameworkError>> => {
+  try {
+    return await execute(
+      deps,
+      method,
+      path,
+      { body: opts.body, contentType: opts.contentType },
+      opts,
+    );
+  } catch {
+    return err(requestOptionsContractError());
+  }
 };
 
 // ---------------------------------------------------------------------------
@@ -354,11 +385,11 @@ export const createAuthedHttpClient = (deps: AuthedClientDeps): AuthedHttpCapabi
   get: <T>(path: string, opts: AuthedRequestOpts<T>) =>
     execute(deps, "GET", path, NO_BODY, opts),
   post: <T>(path: string, opts: AuthedBodyRequestOpts<T>) =>
-    execute(deps, "POST", path, { body: opts.body, contentType: opts.contentType }, opts),
+    executeBodyRequest(deps, "POST", path, opts),
   put: <T>(path: string, opts: AuthedBodyRequestOpts<T>) =>
-    execute(deps, "PUT", path, { body: opts.body, contentType: opts.contentType }, opts),
+    executeBodyRequest(deps, "PUT", path, opts),
   patch: <T>(path: string, opts: AuthedBodyRequestOpts<T>) =>
-    execute(deps, "PATCH", path, { body: opts.body, contentType: opts.contentType }, opts),
+    executeBodyRequest(deps, "PATCH", path, opts),
   delete: <T>(path: string, opts: AuthedRequestOpts<T>) =>
     execute(deps, "DELETE", path, NO_BODY, opts),
 });

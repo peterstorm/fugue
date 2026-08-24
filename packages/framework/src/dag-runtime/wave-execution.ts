@@ -250,18 +250,13 @@ export const executeWave = async (
   // -------------------------------------------------------------------------
   // Freshness witness emission (Phase 3)
   // -------------------------------------------------------------------------
-  // A node is owed NO witness emission only when it did not perform its I/O in
-  // this process (checkpoint-resumed) or when its bookkeeping already completed
-  // (`witnessedNodeIds`). Deliberately NOT `priorOutputs.has(id)`: a node
-  // carried across a wave retry via `partialOutputs` has an output but may never
-  // have been witnessed, and skipping it there would silently drop a write
-  // witness the retry exists to record (ADR-0025).
-  const skippedNodeIds = new Set<NodeId>();
-  for (const nodeId of waveNodeIds) {
-    if (resumeCheckpoint?.has(nodeId) || witnessedNodeIds.has(nodeId)) {
-      skippedNodeIds.add(nodeId);
-    }
-  }
+  // A node is owed NO witness emission only when this executor has proof that
+  // its bookkeeping completed. A node-output checkpoint proves only that the
+  // node result was persisted: `runNodeShared` writes it BEFORE this post-wave
+  // step, so a crash in that window must resume the owed freshness work.
+  // Deliberately NOT `priorOutputs.has(id)` either: a node carried across a wave
+  // retry has an output but may still owe its witness (ADR-0025).
+  const skippedNodeIds = new Set<NodeId>(witnessedNodeIds);
 
   const postWaveCtx: PostWaveContext = {
     waveNodeIds, nodeMap, nodeCtx, machineCtx,

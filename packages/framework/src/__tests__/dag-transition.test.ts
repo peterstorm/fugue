@@ -97,11 +97,19 @@ const makeDag = (overrides: MakeDagOverrides = {}): DagDef => {
   });
 };
 
+/** Build the retry policy projection used by runtime-context fixtures. */
+const retryConfigsFrom = (dag: DagDef): RetryConfigs =>
+  new Map(
+    dag.nodes
+      .filter((n) => n.retry)
+      .map((n) => [n.id, { backoffMs: n.retry!.backoffMs ?? [1000, 2000, 4000], jitterRatio: n.retry!.jitterRatio ?? 0.2 }] as const),
+  );
+
 const makeCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext => {
   const dag = overrides.dag ?? makeDag();
   return {
     dag,
-    waves: [dag.nodes.map(n => n.id)].length ? [[N("a")], [N("b")], [N("c")]] : [],
+    waves: [[N("a")], [N("b")], [N("c")]],
     outputs: new Map(),
     retries: new Map(),
     initialInput: null,
@@ -110,11 +118,7 @@ const makeCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext 
     unconditionalAdj: computeUnconditionalAdj(dag),
     incomingByNode: new Map(),
     nodeById: new Map(dag.nodes.map((n) => [n.id, n])),
-    retryConfigs: new Map(
-      dag.nodes
-        .filter((n) => n.retry)
-        .map((n) => [n.id, { backoffMs: n.retry!.backoffMs ?? [1000, 2000, 4000], jitterRatio: n.retry!.jitterRatio ?? 0.2 }] as const),
-    ),
+    retryConfigs: retryConfigsFrom(dag),
     outputNodeId: dag.outputNodeId,
     defaultRetryLimit: dag.defaultRetryLimit,
     retryLimits: dag.retryLimits,
@@ -848,14 +852,6 @@ describe("collectHumanReviewQueue", () => {
 // ---------------------------------------------------------------------------
 // computeBackoffMs — unit tests
 // ---------------------------------------------------------------------------
-
-/** Build a RetryConfigs map from a DagDef for use in computeBackoffMs tests. */
-const retryConfigsFrom = (dag: DagDef): RetryConfigs =>
-  new Map(
-    dag.nodes
-      .filter((n) => n.retry)
-      .map((n) => [n.id, { backoffMs: n.retry!.backoffMs ?? [1000, 2000, 4000], jitterRatio: n.retry!.jitterRatio ?? 0.2 }] as const),
-  );
 
 describe("computeBackoffMs", () => {
   it("returns base delay (no jitter) when no node retry config", () => {

@@ -25,7 +25,7 @@ import { makeNodeContext } from "../shared/make-node-context.js";
 import { ok, err } from "../types/result.js";
 import type { NodeDef } from "../types/node.js";
 import { type NodeOverride, brandedOverride } from "./_node-override.js";
-import type { WriteAttemptedEvent } from "../types/events.js";
+import type { FreshnessViolationEvent, WriteAttemptedEvent } from "../types/events.js";
 
 const makeNode = (id: string, overrides: NodeOverride = {}): NodeDef<unknown, unknown> => ({
   // @ts-expect-error — branded ID test fixture
@@ -68,6 +68,29 @@ const flakyOnce = (failFor: string): FreshnessIndex => {
       return inner.findConflict(w, sinceMs);
     },
     recordWrite: (event) => inner.recordWrite(event),
+  };
+};
+
+/** Commit the first write, then lose its acknowledgement. */
+const ambiguousCommitOnce = (): FreshnessIndex => {
+  const inner = new InMemoryFreshnessIndex();
+  let loseAcknowledgement = true;
+  return {
+    findConflict: (conditionedOn, sinceMs) =>
+      inner.findConflict(conditionedOn, sinceMs),
+    recordWrite: async (event) => {
+      const recorded = await inner.recordWrite(event);
+      if (!recorded.ok) return recorded;
+      if (loseAcknowledgement) {
+        loseAcknowledgement = false;
+        return err({
+          kind: "cache-error" as const,
+          operation: "recordWrite",
+          message: "acknowledgement lost after commit",
+        });
+      }
+      return ok(undefined);
+    },
   };
 };
 
@@ -132,5 +155,76 @@ describe("retriable freshness failure — wave retry", () => {
     // alpha's witness is recorded once, not re-emitted by the retry.
     expect(writes.filter((w) => w.nodeId === N("alpha"))).toHaveLength(1);
     expect(writes.filter((w) => w.nodeId === N("beta"))).toHaveLength(1);
+  });
+
+  test("a checkpoint-resumed writer records the freshness witness owed after the node-output checkpoint", async () => {
+    let nodeRuns = 0;
+    let recordWrites = 0;
+    const inner = new InMemoryFreshnessIndex();
+    const index: FreshnessIndex = {
+      findConflict: (conditionedOn, sinceMs) => inner.findConflict(conditionedOn, sinceMs),
+      recordWrite: async (event) => {
+        recordWrites += 1;
+        return inner.recordWrite(event);
+      },
+    };
+    const dag = defineDag({
+      id: "checkpoint-freshness-gap",
+      nodes: {
+        writer: makeNode("writer", {
+          sideEffects: writesTo("pg:checkpoint", "2"),
+          run: async () => {
+            nodeRuns += 1;
+            return ok({ committed: true });
+          },
+        }),
+      },
+      edges: [{ from: DAG_INPUT, to: "writer" }],
+      outputNodeId: "writer",
+    });
+    const observer = new RecordingObserver();
+    const ctx = makeNodeContext({ runId: R("run-checkpoint-gap"), dagId: D("checkpoint-freshness-gap"), observer });
+
+    const result = await runDagStateful(dag, null, ctx, {
+      resumeCheckpoint: new Map([["writer", { committed: true }]]),
+      freshnessIndex: index,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(nodeRuns).toBe(0);
+    expect(recordWrites).toBe(1);
+    expect(observer.events.filter((event) => event.type === "write-attempted")).toHaveLength(1);
+  });
+
+  test("an ambiguously committed write is acknowledged on retry and never conflicts with itself", async () => {
+    let nodeRuns = 0;
+    const observer = new RecordingObserver();
+    const dag = defineDag({
+      id: "ambiguous-freshness-commit",
+      nodes: {
+        writer: makeNode("writer", {
+          sideEffects: writesTo("pg:ambiguous", "2"),
+          run: async () => {
+            nodeRuns += 1;
+            return ok({ committed: true });
+          },
+        }),
+      },
+      edges: [{ from: DAG_INPUT, to: "writer" }],
+      outputNodeId: "writer",
+      defaultRetryLimit: 1,
+    });
+    const ctx = makeNodeContext({ runId: R("run-ambiguous"), dagId: D("ambiguous-freshness-commit"), observer });
+
+    const result = await runDagStateful(dag, null, ctx, {
+      freshnessIndex: ambiguousCommitOnce(),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(nodeRuns).toBe(1);
+    const violations = observer.events.filter(
+      (event): event is FreshnessViolationEvent => event.type === "freshness-violation",
+    );
+    expect(violations).toHaveLength(0);
   });
 });

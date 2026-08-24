@@ -30,7 +30,7 @@ import type { HostError } from "../../domain/host-error.js";
 import { markTeam } from "../../domain/auth.js";
 import type { TenantId } from "../../domain/tenant.js";
 import type { HitlRedisPort, LogPort } from "../../ports.js";
-import { issueRunLease } from "../ports.js";
+import { issueRunLease, runLeaseOwnerToken } from "../ports.js";
 import { logWithoutThrowing } from "../diagnostic-logging.js";
 import type { RunLease, RunStorePort } from "../ports.js";
 import { transitionRunStatus, tryRunTimestampMs } from "../types.js";
@@ -205,7 +205,8 @@ export const createInMemoryRunLeaseAuthority = (
       return issueRunLease(runId, ownerToken, signal);
     },
     owns(lease) {
-      return !lease.signal.aborted && owners.get(lease.runId) === lease.ownerToken;
+      const ownerToken = runLeaseOwnerToken(lease);
+      return ownerToken !== null && !lease.signal.aborted && owners.get(lease.runId) === ownerToken;
     },
   };
 };
@@ -386,11 +387,13 @@ export const createRedisRunStore = (
   const now = config.now ?? Date.now;
 
   const writeMeta = async (lease: RunLease, meta: RunMeta): Promise<Result<void, HostError>> => {
+    const ownerToken = runLeaseOwnerToken(lease);
+    if (ownerToken === null) return leaseLost(lease);
     const encoded = serializeRunMeta(meta);
     if (!encoded.ok) return encoded;
     const res = await redis.setIfValue(
       leaseKey(tenant, lease.runId),
-      lease.ownerToken,
+      ownerToken,
       runKey(tenant, lease.runId),
       encoded.value,
       expiry,
@@ -665,9 +668,11 @@ export const createRedisRunStore = (
 
     async saveCheckpoint(lease, checkpoint) {
       if (lease.signal.aborted) return leaseLost(lease);
+      const ownerToken = runLeaseOwnerToken(lease);
+      if (ownerToken === null) return leaseLost(lease);
       const res = await redis.setIfValue(
         leaseKey(tenant, lease.runId),
-        lease.ownerToken,
+        ownerToken,
         ckptKey(tenant, lease.runId),
         checkpoint,
         expiry,

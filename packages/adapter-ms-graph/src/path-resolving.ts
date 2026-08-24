@@ -154,12 +154,23 @@ export const createPathResolvingMsGraphAdapter = (
     opts: ReadOpts | undefined,
   ): Promise<Result<unknown, FrameworkError>> => {
     const url = base + path;
-    // Fail fast on an already-aborted caller signal — a non-retriable
-    // `aborted` (mirroring the stock adapter's `graphGet`): retrying a
-    // deliberate cancel is wrong.
-    if (opts?.signal?.aborted) {
-      return err(frameworkError.aborted(`SharePoint path resolution aborted: ${url.split("?")[0]}`));
+    // Capture the caller signal inside the Result boundary. `ReadOpts` is a
+    // public JavaScript seam, so accessor-backed or proxy values must not throw
+    // past the adapter's "nothing throws" contract.
+    let callerSignal: AbortSignal | undefined;
+    try {
+      callerSignal = opts?.signal;
+      if (callerSignal?.aborted) {
+        return err(frameworkError.aborted(`SharePoint path resolution aborted: ${url.split("?")[0]}`));
+      }
+    } catch {
+      return err(frameworkError.nodeCrash(
+        SP_RESOLVE_NODE_ID,
+        "SharePoint path resolution options violated their runtime contract",
+        { retriability: "non-retriable" },
+      ));
     }
+    const capturedOpts = callerSignal === undefined ? undefined : { signal: callerSignal };
     let tokenError: string | null = null;
     const token = await (async () => {
       try {
@@ -192,7 +203,7 @@ export const createPathResolvingMsGraphAdapter = (
         // there. The DAG readers pass NO ReadOpts (no caller signal), so without
         // this per-request timeout a hung Graph endpoint would hang the source
         // node forever.
-        signal: buildSignal(opts, requestTimeoutMs),
+        signal: buildSignal(capturedOpts, requestTimeoutMs),
         redirect: "follow",
       });
     } catch (e) {
@@ -200,8 +211,16 @@ export const createPathResolvingMsGraphAdapter = (
       // the composed signal aborts on BOTH the caller signal and the timeout, so
       // discriminate on the caller's *own* signal — retrying a deliberate cancel
       // is wrong (a timeout, by contrast, stays a retriable `transient`).
-      if (opts?.signal?.aborted) {
-        return err(frameworkError.aborted(`SharePoint path resolution aborted: ${url.split("?")[0]}`));
+      try {
+        if (callerSignal?.aborted) {
+          return err(frameworkError.aborted(`SharePoint path resolution aborted: ${url.split("?")[0]}`));
+        }
+      } catch {
+        return err(frameworkError.nodeCrash(
+          SP_RESOLVE_NODE_ID,
+          "SharePoint path resolution signal violated its runtime contract",
+          { retriability: "non-retriable" },
+        ));
       }
       return err(
         frameworkError.transient(

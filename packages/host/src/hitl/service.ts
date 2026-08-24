@@ -32,7 +32,7 @@ import type {
   RunLease,
 } from "./ports.js";
 import { tryRunTimestampMs } from "./types.js";
-import type { QueuedRunRecord, RunMetadata } from "./types.js";
+import type { QueuedRunRecord, RunMetadata, RunTimestampMs } from "./types.js";
 import { makeRunStoreJobLike } from "./run-store-job.js";
 import { makeOnHumanReview, makeOnDecisionConsumed } from "./human-review-hook.js";
 import { toPersistedIdentity } from "./identity.js";
@@ -91,6 +91,26 @@ const asRunFailure = (hostError: HostError): FrameworkError => ({
 
 const isTerminalRunStatus = (status: RunMetadata["status"]): boolean =>
   status.kind === "completed" || status.kind === "failed";
+
+/** Clock adapters are untrusted I/O seams; keep both throws and bad values typed. */
+const readRunTimestamp = (clock: () => number): Result<RunTimestampMs, HostError> => {
+  try {
+    const timestamp = tryRunTimestampMs(clock());
+    return timestamp.ok
+      ? timestamp
+      : err({
+          kind: "internal-invariant-violated",
+          message: `HITL clock returned an invalid timestamp: ${timestamp.error}`,
+          context: {},
+        });
+  } catch {
+    return err({
+      kind: "internal-invariant-violated",
+      message: "HITL clock threw outside its port contract",
+      context: {},
+    });
+  }
+};
 
 export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService => {
   const { runStore, runQueue, decisions, notifier, executor, clock, newRunId, tenant, maxQueuedRuns, logger } = deps;
@@ -151,14 +171,8 @@ export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService =
     }
 
     const runId = newRunId();
-    const timestamp = tryRunTimestampMs(clock());
-    if (!timestamp.ok) {
-      return err({
-        kind: "internal-invariant-violated",
-        message: `HITL clock returned an invalid timestamp: ${timestamp.error}`,
-        context: {},
-      });
-    }
+    const timestamp = readRunTimestamp(clock);
+    if (!timestamp.ok) return timestamp;
     const record: QueuedRunRecord = {
       runId,
       dagId,

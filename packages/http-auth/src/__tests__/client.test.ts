@@ -18,6 +18,8 @@ import {
   createAuthedHttpClient,
   buildUrl,
   type AuthedHttpCapability,
+  type AuthedRequestOpts,
+  type AuthedBodyRequestOpts,
 } from "../client.js";
 import { createFakeAuthedHttpCapability, shapedRoute } from "../index.js";
 import type { FetchLike, FetchResponseLike, TokenProvider, BearerToken } from "../auth.js";
@@ -361,6 +363,34 @@ describe("createAuthedHttpClient — error mapping", () => {
       const result = await op();
       expect(isErr(result)).toBe(true);
     }
+  });
+
+  it("contains hostile request-option accessors in a secret-free Result", async () => {
+    const { fetch, calls } = recordingFetch(() => jsonResponse(200, { id: "1", name: "unused" }));
+    const client = makeClient(fetch, fakeTokens(["managed-secret"]));
+
+    const common = Object.defineProperty(
+      { schema: PayloadSchema },
+      "headers",
+      { get: () => { throw new Error("header getter leaked managed-secret"); } },
+    ) as AuthedRequestOpts<z.output<typeof PayloadSchema>>;
+    const commonResult = await client.get("/x", common);
+
+    const body = Object.defineProperty(
+      { schema: PayloadSchema },
+      "body",
+      { get: () => { throw new Error("body getter leaked managed-secret"); } },
+    ) as AuthedBodyRequestOpts<z.output<typeof PayloadSchema>>;
+    const bodyResult = await client.post("/x", body);
+
+    for (const result of [commonResult, bodyResult]) {
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("node-crash");
+        expect(JSON.stringify(result.error)).not.toContain("managed-secret");
+      }
+    }
+    expect(calls).toHaveLength(0);
   });
 
   it("normalizes a rejecting initial token lookup into a secret-free Result", async () => {

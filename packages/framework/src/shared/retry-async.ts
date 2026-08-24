@@ -6,6 +6,15 @@
 
 import { fwLogger } from "../logger.js";
 
+/** Retry control flow must not depend on the diagnostic sink. */
+const reportAttemptFailure = (message: string, error: unknown): void => {
+  try {
+    fwLogger().error(message, error);
+  } catch {
+    // The operation failure remains authoritative and retry continues.
+  }
+};
+
 interface RetryOpts {
   /** Maximum number of attempts (including the first). */
   readonly maxAttempts: number;
@@ -34,7 +43,7 @@ export const retryAsync = async <T>(
       return await fn();
     } catch (e) {
       lastError = e;
-      fwLogger().error(
+      reportAttemptFailure(
         `[${opts.label}] attempt ${attempt + 1}/${opts.maxAttempts} failed:`,
         e,
       );

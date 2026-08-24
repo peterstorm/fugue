@@ -8,6 +8,15 @@ const defaultClassifyError = (error: unknown): { retriable: boolean; message: st
   message: error instanceof Error ? error.message : String(error),
 });
 
+/** A diagnostic sink is subordinate to the durable transition outcome. */
+const reportWithoutThrowing = (report: () => void): void => {
+  try {
+    report();
+  } catch {
+    // The transition or callback failure being diagnosed remains authoritative.
+  }
+};
+
 /**
  * The event's `type` discriminant, or a fixed placeholder for an event that has
  * none. ONE encoding: both the fallback checkpoint key and the retry dedup slot
@@ -81,7 +90,9 @@ export const runStateMachine = async <S, E, C>(
               timestamp: stamp(),
             });
           } catch (traceErr) {
-            log.error("[runStateMachine] onTrace threw — ignoring to preserve durability:", traceErr);
+            reportWithoutThrowing(() =>
+              log.error("[runStateMachine] onTrace threw — ignoring to preserve durability:", traceErr),
+            );
           }
         }
         throw new Error("runStateMachine: aborted by beforeExecute hook");
@@ -193,7 +204,9 @@ export const runStateMachine = async <S, E, C>(
           timestamp: stamp(),
         });
       } catch (traceErr) {
-        log.error("[runStateMachine] onTrace threw — ignoring to preserve durability:", traceErr);
+        reportWithoutThrowing(() =>
+          log.error("[runStateMachine] onTrace threw — ignoring to preserve durability:", traceErr),
+        );
       }
     }
 

@@ -56,6 +56,15 @@ export const __parseConnection = (connection: ConnectionInput): RedisOptions => 
   };
 };
 
+/** Error-event handlers exist to contain failures; logging cannot reopen them. */
+const logErrorWithoutThrowing = (message: string, error: unknown): void => {
+  try {
+    fwLogger().error(message, error);
+  } catch {
+    // Infrastructure event remains contained even when diagnostics fail.
+  }
+};
+
 /**
  * Invoke a user failure handler inside a promise boundary. Deferring the call
  * is load-bearing: `Promise.resolve(handler())` evaluates `handler()` first, so
@@ -101,7 +110,7 @@ export function createBullMQBackend(
   // default error listener: an unhandled ioredis "error" rejection would crash
   // the process; log it instead
   redis.on("error", (err) => {
-    fwLogger().error("[BullMQ] Shared Redis connection error:", err);
+    logErrorWithoutThrowing("[BullMQ] Shared Redis connection error:", err);
   });
 
   const bullConnection: ConnectionOptions = redisConnection;
@@ -144,7 +153,7 @@ export function createBullMQBackend(
     // listeners above defend against; log it instead (with the queue name for
     // correlation).
     queue.on("error", (err) => {
-      fwLogger().error(`[BullMQ] Queue "${name}" error:`, err);
+      logErrorWithoutThrowing(`[BullMQ] Queue "${name}" error:`, err);
     });
     queues.add(queue);
 
@@ -204,7 +213,7 @@ export function createBullMQBackend(
     // Attach default worker error listener so internal worker errors don't crash
     // the process when callers have not registered an onError handler.
     worker.on("error", (err) => {
-      fwLogger().error("[BullMQ] Worker internal error:", err);
+      logErrorWithoutThrowing("[BullMQ] Worker internal error:", err);
     });
 
     // Single `worker.on("failed")` listener with internal dispatch.

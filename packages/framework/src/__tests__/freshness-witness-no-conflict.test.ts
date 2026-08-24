@@ -131,7 +131,7 @@ describe("freshness witness — no conflict (Phase 3)", () => {
     expect(witnessCaptured).toHaveLength(0);
   });
 
-  it("reads node skipped via checkpoint does NOT emit witness-captured", async () => {
+  it("reads node resumed from a node-output checkpoint still completes owed freshness bookkeeping", async () => {
     const observer = new RecordingObserver();
     const readNode: NodeDef<unknown, { version: number }> = {
       id: N("reader"),
@@ -149,13 +149,15 @@ describe("freshness witness — no conflict (Phase 3)", () => {
     const checkpoint = new Map<string, unknown>([["reader", { version: 99 }]]);
     await runDagStateful(dag, null, mkCtx(observer), { resumeCheckpoint: checkpoint });
 
-    // Node was skipped — extractWitness should NOT have been called
+    // The computation was skipped, but the node-output checkpoint is written
+    // before post-wave freshness. Resume must therefore reconstruct the witness.
     const witnessCaptured = observer.events.filter(
       (e): e is WitnessCapturedEvent => e.type === "witness-captured",
     );
-    expect(witnessCaptured).toHaveLength(0);
+    expect(witnessCaptured).toHaveLength(1);
+    expect(witnessCaptured[0]?.nodeId).toBe(N("reader"));
 
-    // Verify the node was actually skipped
+    // Verify only the node computation was skipped.
     const skipped = observer.events.filter(
       (e) => e.type === "node-skipped",
     );

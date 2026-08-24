@@ -21,7 +21,8 @@ import { requireHitlRedisPort } from "../../../adapters/redis-connectivity.js";
 import type { HostError } from "../../../domain/host-error.js";
 import { tenantId } from "../../../domain/tenant.js";
 import type { TenantId } from "../../../domain/tenant.js";
-import { issueRunLease } from "../../ports.js";
+import { issueRunLease, runLeaseOwnerToken } from "../../ports.js";
+import type { RunLease } from "../../ports.js";
 import { createRunQueue, hitlQueueName, parseRunTrigger } from "../run-queue.js";
 
 /** Build a `TenantId` for a test from a known-good literal via the canonical constructor. */
@@ -198,6 +199,17 @@ describe("createRunQueue — enqueue boundary", () => {
 
   it("rejects an empty lease owner token at the capability constructor", () => {
     expect(() => issueRunLease(RUN, "", new AbortController().signal)).toThrow("non-empty");
+  });
+
+  it("keeps the owner token secret and rejects copied/assertion-forged lease shapes", () => {
+    const lease = issueRunLease(RUN, "owner-secret", new AbortController().signal);
+    expect("ownerToken" in lease).toBe(false);
+    expect(runLeaseOwnerToken(lease)).toBe("owner-secret");
+
+    const forged = { ...lease } as RunLease;
+    expect(runLeaseOwnerToken(forged)).toBeNull();
+    // @ts-expect-error — owner authority is not exposed on the capability.
+    void lease.ownerToken;
   });
 });
 
