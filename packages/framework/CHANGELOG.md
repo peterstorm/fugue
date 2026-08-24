@@ -2,9 +2,36 @@
 
 All notable changes to `@fuguejs/framework` are documented here. The framework
 and its lockstep packages (`@fuguejs/host`, `@fuguejs/fs`, `@fuguejs/ms-graph`,
-`@fuguejs/pg`, `@fuguejs/document-source`, `@fuguejs/xlsx`) are versioned
-together. Format follows [Keep a Changelog](https://keepachangelog.com/); this
-project is pre-1.0, so a minor bump may carry breaking changes.
+`@fuguejs/pg`, `@fuguejs/oracle`, `@fuguejs/http-auth`,
+`@fuguejs/document-source`, `@fuguejs/xlsx`) are versioned together. Format
+follows [Keep a Changelog](https://keepachangelog.com/); this project is
+pre-1.0, so a minor bump may carry breaking changes.
+
+## [0.5.0] — 2026-08-24
+
+### Added
+
+- **File-backed durable runtime.** The dependency-free
+  `@fuguejs/framework/file` subpath now provides an append-only event journal,
+  checkpoint projection, durable `JobLike`, freshness index, atomic file
+  operations, and crash-safe resume with checkpoint/log agreement proofs.
+- **Durable HITL execution fencing.** Run leases, execution generations,
+  notification delivery, creation intents, and freshness completion state are
+  persisted so retries, reroutes, replacement workers, and expired slices fail
+  closed without losing progress or duplicating acknowledged writes.
+- **Production adapter capabilities.** The host can wire Microsoft Graph
+  document access with optional path resolution, Oracle thin-mode access, and
+  reusable HTTP authentication through the lockstep adapter packages.
+
+### Changed
+
+- Checkpoint, witness, freshness, and execution identifiers use stricter branded
+  and correlated types across persistence boundaries.
+- Multi-tenant host registration, purge, worker lifecycle, diagnostics, and
+  timeout cleanup now enforce tenant ownership and preserve typed failure
+  outcomes under hostile infrastructure behavior.
+
+[0.5.0]: https://github.com/peterstorm/fugue/releases/tag/v0.5.0
 
 ## [0.2.0] — 2026-06-14
 
