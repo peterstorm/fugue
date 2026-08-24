@@ -327,15 +327,23 @@ describe("broadcastSignalToWorkers (pod-shutdown worker drain)", () => {
     expect(errLog?.data).toMatchObject({ error: "EACCES: /proc not readable" });
   });
 
-  test("a systematic kill failure (EPERM) signals ZERO workers but is distinguishable from success via the summary (signalled=0)", () => {
+  test("signal failures retain each worker pid and errno while the broadcast continues", () => {
     const { logger, logs } = capturingLogger();
     broadcastSignalToWorkers("SIGINT", {
       selfPid: 1,
       enumerate: () => ["2", "3"],
-      kill: () => {
-        throw new Error("EPERM");
+      kill: (pid) => {
+        throw new Error(pid === 2 ? "EPERM" : "EINVAL");
       },
       logger,
+    });
+    const warning = logs.find((l) => l.level === "warn");
+    expect(warning?.data).toEqual({
+      sig: "SIGINT",
+      failures: [
+        { pid: 2, error: "EPERM" },
+        { pid: 3, error: "EINVAL" },
+      ],
     });
     const summary = logs.find((l) => l.level === "info");
     expect(summary?.data).toMatchObject({ sig: "SIGINT", enumerated: 2, signalled: 0 });

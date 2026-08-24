@@ -31,6 +31,7 @@ const mkCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext =>
     edges: dag.edges ?? [],
     confidenceByNode: new Map(),
     ...overrides,
+    priorWitnesses: overrides.priorWitnesses ?? new Map(),
   };
 };
 

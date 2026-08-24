@@ -149,9 +149,7 @@ const reconcileInto = async (
     logger?.info("[bootstrap] rotating team token (team already had a different token)", { team: seed.team });
     const revoked = await store.revoke(seed.team);
     if (!revoked.ok) return err(revoked.error);
-    const reStored = await store.store(seed.team, hash, grant);
-    if (!reStored.ok) return err(reStored.error);
-    return ok(undefined);
+    return store.store(seed.team, hash, grant);
   }
   return err(stored.error);
 };

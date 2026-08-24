@@ -634,8 +634,8 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
   });
 
   it("settles a corrupt-checkpoint run `failed` and returns ok (no infinite retry)", async () => {
-    // service.ts:174-183 — a structurally-corrupt checkpoint cannot heal on
-    // retry, so processRun settles the run terminal `failed` (a status poll
+    // The corrupt-checkpoint branch cannot heal on retry, so processRun settles
+    // the run terminal `failed` (a status poll
     // surfaces it) and returns OK so the worker acks the job rather than
     // re-processing the same corrupt state forever. The unit boundary
     // (makeRunStoreJobLike rejecting the checkpoint) is covered in
@@ -728,8 +728,8 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
   });
 
   it("returns err (queue retry) when folding a `completed` outcome into the store fails", async () => {
-    // service.ts:230-231 — the executor completed, but writing the `completed`
-    // status fails; the outcome is not durably recorded, so processRun surfaces
+    // The completed-outcome fold fails while writing `completed`; the outcome is
+    // not durably recorded, so processRun surfaces
     // the err for the worker to retry rather than silently losing the result.
     const dag = oneNodeDag();
     const store = inMemoryRunStore();

@@ -69,6 +69,7 @@ const makeMachineCtx = (): DagMachineContext => ({
   humanReviewPrompts: new Map(),
   edges: [],
   confidenceByNode: new Map(),
+  priorWitnesses: new Map(),
 });
 
 /** Build a PostWaveContext from test parameters. */

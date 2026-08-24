@@ -13,7 +13,7 @@
  */
 
 import { join } from "node:path";
-import { ok, err, gitSha as brandGitSha } from "@fuguejs/framework";
+import { ok, err, gitSha as brandGitSha, safeErrorMessage } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { GitPort } from "../ports.js";
@@ -49,14 +49,21 @@ interface SpawnResult {
  * `forceKill`) must not escape as a process-level unhandled rejection with no
  * operator breadcrumb: terminal catch, logged, done.
  */
-const cleanupTimedOutChild = (
+/** @internal Exported for hostile child-exit promise regression tests. */
+export const cleanupTimedOutChild = (
   terminate: () => void,
   forceKill: () => void,
   exited: Promise<number>,
   drainStreams: () => Promise<unknown>,
 ): void => {
   terminate();
-  const settled = exited.catch(() => 0);
+  const settled = exited.catch((error) => {
+    console.warn(
+      `[git-sync] timed-out child exit wait failed; forcing SIGKILL: ${safeErrorMessage(error)}`,
+    );
+    forceKill();
+    return "exit-wait-failed" as const;
+  });
   void (async () => {
     try {
       const winner = await Promise.race([

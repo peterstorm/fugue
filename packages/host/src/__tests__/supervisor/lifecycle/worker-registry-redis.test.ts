@@ -320,6 +320,21 @@ describe("worker-registry: reconcileReadopt (SC-006, FR-019/FR-020)", () => {
     expect(fake.store.has(`${WORKER_KEY_PREFIX}acme`)).toBe(true);
   });
 
+  test("a throwing corrupt-record logger cannot block reconciliation pruning", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    fake.store.set(`${WORKER_KEY_PREFIX}acme`, "garbage{");
+    const reg = createWorkerRegistry(fake.redis, alwaysLive, {}, {
+      info() {},
+      warn() { throw new Error("logger transport failed"); },
+      error() {},
+    });
+
+    const result = await reg.reconcileReadopt();
+
+    expect(result).toEqual(ok({ adopted: [], pruned: [] }));
+    expect(fake.store.has(`${WORKER_KEY_PREFIX}acme`)).toBe(false);
+  });
+
   test("partitions mixed live/dead deterministically", async () => {
     const fake = createInMemoryWorkerRedisFake();
     // Probe: acme is live, everyone else is dead.

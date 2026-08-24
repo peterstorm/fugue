@@ -14,6 +14,7 @@ import { handleHumanResponse } from "./human-resolution.js";
 import { EXECUTOR_NODE_ID } from "./types.js";
 import type { Confidence } from "../types/confidence.js";
 import type { NodeId } from "../types/ids.js";
+import type { Witness } from "../types/witness.js";
 
 type TransitionResult = { state: DagPhase; context: DagMachineContextPersisted };
 const stay = (phase: DagPhase, ctx: DagMachineContextPersisted): TransitionResult => ({ state: phase, context: ctx });
@@ -49,6 +50,13 @@ const mergeConfidence = (
   for (const [k, v] of values) merged.set(k, v);
   return { ...ctx, confidenceByNode: merged };
 };
+
+/** Replace the durable latest-witness projection when an executor event carries it. */
+const mergePriorWitnesses = (
+  ctx: DagMachineContextPersisted,
+  values: ReadonlyMap<string, Witness> | undefined,
+): DagMachineContextPersisted =>
+  values === undefined ? ctx : { ...ctx, priorWitnesses: new Map(values) };
 
 const executorCrash = (event: { error: string; retriable: boolean }, ctx: DagMachineContextPersisted): TransitionResult => ({
   state: {
@@ -91,12 +99,16 @@ export const dagTransition = (
 
     // ─── running ────────────────────────────────────────────────────────
     .with([{ kind: "running" }, { type: "wave-done" }], ([, e]) => {
-      const updatedCtx = mergeConfidence(ctx, e.confidenceValues);
+      const updatedCtx = mergeConfidence(
+        mergePriorWitnesses(ctx, e.priorWitnesses),
+        e.confidenceValues,
+      );
       const r = handleWaveDone(e.wave, e.outputs, updatedCtx, e.routingDecisions);
       return { state: r.state, context: r.context };
     })
     .with([{ kind: "running" }, { type: "node-failed" }], ([p, e]) => {
-      const r = handleNodeFailed(p.wave, e.nodeId, e.error, ctx, e.partialOutputs, e.coFailedNodeIds);
+      const updatedCtx = mergePriorWitnesses(ctx, e.priorWitnesses);
+      const r = handleNodeFailed(p.wave, e.nodeId, e.error, updatedCtx, e.partialOutputs, e.coFailedNodeIds);
       return { state: r.state, context: r.context };
     })
     .with([{ kind: "running" }, { type: "executor-error" }], ([, e]) => executorCrash(e, ctx))
@@ -104,12 +116,16 @@ export const dagTransition = (
 
     // ─── retrying ───────────────────────────────────────────────────────
     .with([{ kind: "retrying" }, { type: "wave-done" }], ([, e]) => {
-      const updatedCtx = mergeConfidence(ctx, e.confidenceValues);
+      const updatedCtx = mergeConfidence(
+        mergePriorWitnesses(ctx, e.priorWitnesses),
+        e.confidenceValues,
+      );
       const r = handleWaveDone(e.wave, e.outputs, updatedCtx, e.routingDecisions);
       return { state: r.state, context: r.context };
     })
     .with([{ kind: "retrying" }, { type: "node-failed" }], ([p, e]) => {
-      const r = handleNodeFailed(p.wave, e.nodeId, e.error, ctx, e.partialOutputs, e.coFailedNodeIds);
+      const updatedCtx = mergePriorWitnesses(ctx, e.priorWitnesses);
+      const r = handleNodeFailed(p.wave, e.nodeId, e.error, updatedCtx, e.partialOutputs, e.coFailedNodeIds);
       return { state: r.state, context: r.context };
     })
     .with([{ kind: "retrying" }, { type: "executor-error" }], ([, e]) => executorCrash(e, ctx))

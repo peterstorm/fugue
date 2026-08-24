@@ -119,7 +119,7 @@ describe("RedisFreshnessIndex decodeMember — rejection", () => {
 // ---------------------------------------------------------------------------
 
 import { RedisFreshnessIndex } from "../checkpoint/redis-freshness-index.js";
-import { witness, resourceName } from "../types/freshness.js";
+import { FRESHNESS_TTL_SECONDS, witness, resourceName } from "../types/freshness.js";
 
 const fakeFindConflictRedis = (members: readonly string[]): {
   redis: ConstructorParameters<typeof RedisFreshnessIndex>[0];
@@ -134,6 +134,51 @@ const fakeFindConflictRedis = (members: readonly string[]): {
   };
   return { redis: redis as unknown as ConstructorParameters<typeof RedisFreshnessIndex>[0], state };
 };
+
+describe("RedisFreshnessIndex recordWrite — atomic TTL contract", () => {
+  it("loads and executes the atomic ZADD+EXPIRE script with the port TTL", async () => {
+    const calls: Array<{ readonly method: string; readonly args: readonly unknown[] }> = [];
+    const redis = {
+      script: async (...args: unknown[]) => {
+        calls.push({ method: "script", args });
+        return "sha-1";
+      },
+      evalsha: async (...args: unknown[]) => {
+        calls.push({ method: "evalsha", args });
+        return 1;
+      },
+    } as unknown as ConstructorParameters<typeof RedisFreshnessIndex>[0];
+    const index = new RedisFreshnessIndex(redis);
+
+    const result = await index.recordWrite({
+      type: "write-attempted",
+      runId: R("run-ttl"),
+      dagId: D("dag-ttl"),
+      nodeId: N("writer"),
+      conditionedOn: witness("version", resourceName("postgres:orders"), "41"),
+      newWitness: witness("version", resourceName("postgres:orders"), "42"),
+      succeededAtMs: 1234,
+      timestamp: new Date(1234),
+    });
+
+    expect(result).toEqual({ ok: true, value: undefined });
+    expect(calls[0]?.method).toBe("script");
+    expect(calls[0]?.args[0]).toBe("LOAD");
+    expect(calls[0]?.args[1]).toContain('redis.call("EXPIRE"');
+    expect(calls[1]).toEqual({
+      method: "evalsha",
+      args: [
+        "sha-1",
+        1,
+        "fugue:freshness:postgres:orders",
+        "1234",
+        encode(R("run-ttl"), N("writer"), "version", "42"),
+        String(FRESHNESS_TTL_SECONDS),
+      ],
+    });
+    expect(index.consecutiveFailures).toBe(0);
+  });
+});
 
 describe("RedisFreshnessIndex findConflict — corrupt-member verdict (ADR-0025)", () => {
   it("preserves the typed freshness failure when the degradation logger throws", async () => {

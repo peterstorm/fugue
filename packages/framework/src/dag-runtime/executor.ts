@@ -26,7 +26,6 @@ import { applyJitter, DEFAULT_JITTER_RATIO } from "../shared/jitter.js";
 import { emitHumanIntervention } from "./human-emission.js";
 import { executeWave, type WaveConfig } from "./wave-execution.js";
 import { enrichHumanRespondedEvent, type UnenrichedDagEvent } from "./reroute.js";
-import type { Witness } from "../types/freshness.js";
 import { type FreshnessIndex, InMemoryFreshnessIndex } from "./freshness-check.js";
 import { type NodeSpanOutcome } from "./node-span.js";
 import { safeErrorMessage, safeErrorStack } from "../types/safe-error.js";
@@ -255,19 +254,6 @@ export const buildDagExecutor = (
   const nowFn = hooks?.now ?? Date.now;
   const freshnessIndex = hooks?.freshnessIndex ?? new InMemoryFreshnessIndex();
 
-  // Track captured witnesses for HumanInterventionEvent context.
-  // Keyed by resource so only the latest witness per resource is retained—
-  // prevents unbounded growth for long-running DAGs with many reads nodes.
-  // Witnesses accumulate across all waves for the lifetime of the executor,
-  // so a human gate in a later wave sees all prior reads.
-  //
-  // Concurrent reads within the same wave: when multiple nodes in one wave
-  // read the same resource, the last to complete wins (Map.set semantics).
-  // This is safe because same-wave nodes execute at the same logical instant;
-  // the latest witness value is the freshest. For deterministic ordering in
-  // tests, sort witnesses by capturedAtMs.
-  const capturedWitnesses = new Map<string, Witness>();
-
   // Run-scoped record of which nodes have already had their freshness
   // bookkeeping completed. Lives for the lifetime of the executor because a
   // wave RETRY is what consumes it: outputs carried across a retry prove the
@@ -276,7 +262,6 @@ export const buildDagExecutor = (
 
   const waveConfig: WaveConfig = {
     dag, nodeMap, nodeCtx, resumeCheckpoint, nowFn, freshnessIndex,
-    witnessAccumulator: capturedWitnesses,
     witnessedNodeIds,
     minting: hooks?.minting,
   };
@@ -332,7 +317,7 @@ export const buildDagExecutor = (
         dag.id,
         nowFn,
         awaitStartMs,
-        [...capturedWitnesses.values()],
+        [...machineCtx.priorWitnesses.values()],
       );
       if (!emitResult.ok) {
         return { type: "node-failed", nodeId, error: emitResult.error } satisfies DagEvent;

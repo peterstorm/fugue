@@ -117,7 +117,7 @@ describe("redis tenant registry — pub/sub emission (AD-5)", () => {
     const reg = createRedisTenantRegistry(fake.redis, fake.pubsub);
     await reg.register(makeConfig("acme"), 1000);
     fake.published.length = 0;
-    const res = await reg.reconfigure(makeConfig("acme", { fsRoot: "/srv/acme2" }), 2000);
+    const res = await reg.reconfigure(makeConfig("acme", { fsRoot: "/srv/acme/v2" }), 2000);
     expect(res.ok).toBe(true);
     expect(JSON.parse(fake.published[0].message)).toEqual({ kind: "reconfigured", tenant: "acme" });
   });
@@ -315,10 +315,10 @@ describe("redis tenant registry — persists the CORE-NORMALIZED entry (CRITICAL
     const fake = createInMemoryRedisFake();
     const reg = createRedisTenantRegistry(fake.redis, fake.pubsub);
     await reg.register(makeConfig("acme"), 1000);
-    await reg.reconfigure(makeConfig("acme", { fsRoot: "/srv/acme2" }), 2000);
+    await reg.reconfigure(makeConfig("acme", { fsRoot: "/srv/acme/v2" }), 2000);
     const parsed = JSON.parse(fake.store.get(`${TENANT_KEY_PREFIX}acme`)!);
     expect(parsed.status).toBe("active");
-    expect(parsed.fsRoot).toBe("/srv/acme2");
+    expect(parsed.fsRoot).toBe("/srv/acme/v2");
     expect("deregisteredAt" in parsed).toBe(false);
   });
 
@@ -383,7 +383,7 @@ describe("redis tenant registry — resolveForNewRun fail-closed seam (FR-022 / 
 
     // Drive the adapter into the degraded edge via a failed write.
     fake.setFail(true);
-    const down = await reg.register(makeConfig("acme", { fsRoot: "/srv/acme-x" }), 1100);
+    const down = await reg.register(makeConfig("acme", { fsRoot: "/srv/acme/x" }), 1100);
     expect(down.ok).toBe(false);
 
     // NEW-run resolution fails closed…
@@ -403,16 +403,16 @@ describe("redis tenant registry — resolveForNewRun fail-closed seam (FR-022 / 
     await reg.register(makeConfig("acme"), 1000);
 
     fake.setFail(true);
-    await reg.register(makeConfig("acme", { fsRoot: "/srv/acme-x" }), 1100);
+    await reg.register(makeConfig("acme", { fsRoot: "/srv/acme/x" }), 1100);
     expect(reg.resolveForNewRun(tid("acme")).ok).toBe(false);
 
     // Recover: a successful op flips degraded back off.
     fake.setFail(false);
-    const ok2 = await reg.reconfigure(makeConfig("acme", { fsRoot: "/srv/acme2" }), 2000);
+    const ok2 = await reg.reconfigure(makeConfig("acme", { fsRoot: "/srv/acme/v2" }), 2000);
     expect(ok2.ok).toBe(true);
     const newRun = reg.resolveForNewRun(tid("acme"));
     expect(newRun.ok).toBe(true);
-    if (newRun.ok) expect(newRun.value.fsRoot).toBe("/srv/acme2");
+    if (newRun.ok) expect(newRun.value.fsRoot).toBe("/srv/acme/v2");
   });
 
   it("a successful hydrate clears degraded so resolveForNewRun works", async () => {
@@ -421,7 +421,7 @@ describe("redis tenant registry — resolveForNewRun fail-closed seam (FR-022 / 
     await reg.register(makeConfig("acme"), 1000);
 
     fake.setFail(true);
-    await reg.register(makeConfig("acme", { fsRoot: "/srv/acme-x" }), 1100);
+    await reg.register(makeConfig("acme", { fsRoot: "/srv/acme/x" }), 1100);
     expect(reg.resolveForNewRun(tid("acme")).ok).toBe(false);
 
     fake.setFail(false);
@@ -612,7 +612,7 @@ describe("redis tenant registry — probe-recovery clears the write-leg latch (F
 
     // Force a WRITE failure → latches `writeDegraded` (the write leg of the gate).
     fake.setFail(true);
-    const down = await reg.register(makeConfig("acme", { fsRoot: "/srv/acme-x" }), 1100);
+    const down = await reg.register(makeConfig("acme", { fsRoot: "/srv/acme/x" }), 1100);
     expect(down.ok).toBe(false);
     if (!down.ok) expect(down.error.kind).toBe("redis-unavailable");
     // The write-leg latch now fails NEW-run resolution closed.

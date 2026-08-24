@@ -77,14 +77,22 @@ describe("tenantConfig parse boundary", () => {
     expect(isErr(r)).toBe(true);
   });
 
-  it("rejects a non-absolute or traversing fsRoot (purge-confinement)", () => {
-    // Relative path, `..` traversal, and NUL byte are all refused so the grace
-    // purge can never delete outside the tenant's confined mount root.
-    expect(isErr(tenantConfig({ ...makeConfig("a"), fsRoot: "srv/a" }))).toBe(true);
-    expect(isErr(tenantConfig({ ...makeConfig("a"), fsRoot: "/srv/../etc" }))).toBe(true);
-    expect(isErr(tenantConfig({ ...makeConfig("a"), fsRoot: "/srv/a\0/etc" }))).toBe(true);
-    // A confined absolute path is accepted.
-    expect(isOk(tenantConfig({ ...makeConfig("a"), fsRoot: "/srv/tenant-a" }))).toBe(true);
+  it("accepts only this tenant's canonical /srv subtree as fsRoot", () => {
+    for (const fsRoot of [
+      "srv/a",
+      "/",
+      "/etc",
+      "/srv",
+      "/srv/b",
+      "/srv/ab",
+      "/srv/a/../b",
+      "/srv//a",
+      "/srv/a\0/etc",
+    ]) {
+      expect(isErr(tenantConfig({ ...makeConfig("a"), fsRoot }))).toBe(true);
+    }
+    expect(isOk(tenantConfig({ ...makeConfig("a"), fsRoot: "/srv/a" }))).toBe(true);
+    expect(isOk(tenantConfig({ ...makeConfig("a"), fsRoot: "/srv/a/documents" }))).toBe(true);
   });
 
   it("rejects empty dagsRoot", () => {
@@ -92,33 +100,52 @@ describe("tenantConfig parse boundary", () => {
     expect(isErr(r)).toBe(true);
   });
 
-  it("rejects a non-absolute or traversing dagsRoot (DAG-isolation confinement)", () => {
-    // dagsRoot becomes the worker's DAGS_LOCAL_PATH; a relative path, `..`
-    // traversal, or NUL byte could point DAG discovery outside the tenant's
-    // staged bundle and read another team's code/prompts — refuse all three.
-    expect(isErr(tenantConfig({ ...makeConfig("a"), dagsRoot: "dags/a" }))).toBe(true);
-    expect(isErr(tenantConfig({ ...makeConfig("a"), dagsRoot: "/dags/../etc" }))).toBe(true);
-    expect(isErr(tenantConfig({ ...makeConfig("a"), dagsRoot: "/dags/a\0/etc" }))).toBe(true);
-    // A confined absolute path is accepted.
-    expect(isOk(tenantConfig({ ...makeConfig("a"), dagsRoot: "/dags/tenant-a" }))).toBe(true);
+  it("accepts only this tenant's canonical /dags subtree as dagsRoot", () => {
+    for (const dagsRoot of [
+      "dags/a",
+      "/",
+      "/tmp/code",
+      "/dags",
+      "/dags/b",
+      "/dags/ab",
+      "/dags/a/../b",
+      "/dags//a",
+      "/dags/a\0/etc",
+    ]) {
+      expect(isErr(tenantConfig({ ...makeConfig("a"), dagsRoot }))).toBe(true);
+    }
+    expect(isOk(tenantConfig({ ...makeConfig("a"), dagsRoot: "/dags/a" }))).toBe(true);
+    expect(isOk(tenantConfig({ ...makeConfig("a"), dagsRoot: "/dags/a/releases/current" }))).toBe(true);
+  });
+
+  it("property: a tenant can never claim another tenant's fs or DAG subtree", () => {
+    fc.assert(fc.property(
+      fc.constantFrom("a", "b", "c"),
+      fc.constantFrom("a", "b", "c"),
+      (owner, other) => {
+        fc.pre(owner !== other);
+        expect(isErr(tenantConfig({ ...makeConfig(owner), fsRoot: `/srv/${other}` }))).toBe(true);
+        expect(isErr(tenantConfig({ ...makeConfig(owner), dagsRoot: `/dags/${other}` }))).toBe(true);
+      },
+    ));
   });
 
   it("carries dagsRoot onto the constructed active config", () => {
-    const r = tenantConfig({ ...makeConfig("a"), dagsRoot: "/dags/tenant-a" });
+    const r = tenantConfig({ ...makeConfig("a"), dagsRoot: "/dags/a/releases/current" });
     expect(isOk(r)).toBe(true);
-    if (r.ok) expect(r.value.dagsRoot).toBe("/dags/tenant-a");
+    if (r.ok) expect(r.value.dagsRoot).toBe("/dags/a/releases/current");
   });
 
   it("treats dagsRoot as identity-config — a changed dagsRoot is NOT idempotent", () => {
     // configEquals drives register/reconfigure idempotency; dagsRoot must be part
     // of it, else moving a tenant onto a different DAG bundle would be a silent
     // no-op (the worker would keep serving the old team's DAGs).
-    const reg = register(emptyRegistry(), makeConfig("a", { dagsRoot: "/dags/a1" }), 1000);
+    const reg = register(emptyRegistry(), makeConfig("a", { dagsRoot: "/dags/a/bundle-1" }), 1000);
     expect(isOk(reg)).toBe(true);
     if (!reg.ok) return;
-    const same = register(reg.value, makeConfig("a", { dagsRoot: "/dags/a1" }), 1000);
+    const same = register(reg.value, makeConfig("a", { dagsRoot: "/dags/a/bundle-1" }), 1000);
     expect(same.ok && same.value === reg.value).toBe(true); // identical → same reference
-    const moved = register(reg.value, makeConfig("a", { dagsRoot: "/dags/a2" }), 1000);
+    const moved = register(reg.value, makeConfig("a", { dagsRoot: "/dags/a/bundle-2" }), 1000);
     expect(moved.ok && moved.value !== reg.value).toBe(true); // changed → new registry
   });
 
@@ -247,11 +274,11 @@ describe("register", () => {
     const cfg = makeConfig("a");
     const r1 = register(emptyRegistry(), cfg, 1000);
     if (!r1.ok) throw new Error("setup");
-    const changed = makeConfig("a", { fsRoot: "/srv/a-new" });
+    const changed = makeConfig("a", { fsRoot: "/srv/a/new" });
     const r2 = register(r1.value, changed, 2000);
     if (!r2.ok) throw new Error("register");
     const look = lookup(r2.value, cfg.id);
-    expect(look.ok && look.value.fsRoot).toBe("/srv/a-new");
+    expect(look.ok && look.value.fsRoot).toBe("/srv/a/new");
   });
 
   it("revives a deregistered tenant (back to status:active, no tombstone)", () => {
@@ -292,7 +319,7 @@ describe("team uniqueness (team↔tenant is 1:1)", () => {
     const r1 = register(emptyRegistry(), a, 1000);
     if (!r1.ok) throw new Error("setup");
     // Same id + team, a different config field — must still succeed.
-    const changed = makeConfig("a", { team: "shared", fsRoot: "/srv/a2" });
+    const changed = makeConfig("a", { team: "shared", fsRoot: "/srv/a/2" });
     const r2 = register(r1.value, changed, 2000);
     expect(isOk(r2)).toBe(true);
   });
@@ -428,7 +455,7 @@ describe("reconfigure", () => {
     if (!r1.ok) throw new Error("setup");
     const d = deregister(r1.value, cfg.id, 1500);
     if (!d.ok) throw new Error("deregister");
-    const r = reconfigure(d.value, makeConfig("a", { fsRoot: "/srv/new" }), 2000);
+    const r = reconfigure(d.value, makeConfig("a", { fsRoot: "/srv/a/new" }), 2000);
     expect(isErr(r)).toBe(true);
     if (!r.ok) expect(r.error.kind).toBe("tenant-unknown");
   });

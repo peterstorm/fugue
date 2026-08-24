@@ -70,6 +70,7 @@ export const testContext = (parts?: {
   routing?: Partial<DagRoutingState>;
   outputs?: ReadonlyMap<NodeId, unknown>;
   initialInput?: unknown;
+  priorWitnesses?: DagMachineContextPersisted["priorWitnesses"];
 }): DagMachineContextPersisted => ({
   ...testTopology(parts?.topology),
   ...testRetryState(parts?.retry),
@@ -77,6 +78,7 @@ export const testContext = (parts?: {
   ...testRoutingState(parts?.routing),
   outputs: parts?.outputs ?? new Map(),
   initialInput: parts?.initialInput ?? {},
+  priorWitnesses: parts?.priorWitnesses ?? new Map(),
 });
 
 /** Runtime context fixture: persisted state plus compiled DAG lookup tables. */
@@ -116,6 +118,7 @@ export const testRuntimeContext = (
     edges: dag.edges,
     confidenceByNode: overrides.confidenceByNode ?? new Map(),
     ...overrides,
+    priorWitnesses: overrides.priorWitnesses ?? new Map(),
   };
 };
 

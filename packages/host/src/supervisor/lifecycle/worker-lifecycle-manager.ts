@@ -281,9 +281,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
       record = { tenant: state.tenant, pid: state.pid, udsPath: state.udsPath, startedAt: state.drainStartedAt, health: "draining", eagerPin: state.eagerPin };
     }
     if (record === undefined) return ok(undefined);
-    const r = await registry.put(record);
-    if (!r.ok) return err(r.error);
-    return ok(undefined);
+    return registry.put(record);
   };
 
   /** Remove a tenant's registry record (best-effort). */

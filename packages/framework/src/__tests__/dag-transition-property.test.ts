@@ -62,6 +62,7 @@ const minimalCtx: DagMachineContext = {
   humanReviewPrompts: new Map(),
   edges: minimalDag.edges,
   confidenceByNode: new Map(),
+  priorWitnesses: new Map(),
 };
 
 // ---------------------------------------------------------------------------
@@ -144,6 +145,7 @@ const arbDagEvent: fc.Arbitrary<DagEvent> = fc.oneof(
     wave: fc.nat(5),
     outputs: fc.constant(new Map<NodeId, unknown>()),
     routingDecisions: fc.constant(new Map()),
+    priorWitnesses: fc.constant(new Map()),
   }),
   fc.record({
     type: fc.constant("node-failed" as const),

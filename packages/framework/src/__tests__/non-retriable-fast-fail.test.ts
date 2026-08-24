@@ -26,6 +26,7 @@ const makeCtx = (retryLimits: Record<string, number> = {}): DagMachineContextPer
   unconditionalAdj: new Map(),
   humanReviewNodeIds: new Set(),
   humanReviewPrompts: new Map(),
+  priorWitnesses: new Map(),
 });
 
 describe("dagTransition — non-retriable fast-fail", () => {

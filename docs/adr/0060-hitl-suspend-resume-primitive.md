@@ -116,6 +116,16 @@ work with one predicate and no extra bookkeeping.
 4. Worker resumes at `suspended` → hook finds the decision → returns the
    `HumanAction` → run proceeds (or re-parks if more gates remain).
 
+### Durable intervention witness context (2026-08-24 amendment)
+
+The latest captured read witness per resource is part of
+`DagMachineContextPersisted`, not executor-local state. Every successful or
+post-wave-failed freshness pass carries the updated projection through the DAG
+event into the pure transition, and the checkpoint persists it before a run can
+park. A newly constructed executor resuming `suspended` therefore emits
+`HumanInterventionEvent.context.priorWitnesses` from the complete pre-suspension
+run context rather than an empty process-local map.
+
 ### Ownership-fenced execution slices (2026-08-22 amendment)
 
 Every queue acquisition now produces an opaque, run-bound `RunLease` carrying

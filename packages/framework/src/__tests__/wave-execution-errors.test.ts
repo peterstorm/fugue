@@ -66,6 +66,7 @@ const makeMachineCtx = (waves: string[][] = [["a"]]): DagMachineContext => ({
   unconditionalAdj: new Map(),
   humanReviewNodeIds: new Set(),
   humanReviewPrompts: new Map(),
+  priorWitnesses: new Map(),
   dag: makeDag(),
   outgoingByNode: new Map(),
   nodeById: new Map([[N("a"), makeNode("a")]]),

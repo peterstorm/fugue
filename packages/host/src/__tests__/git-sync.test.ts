@@ -6,7 +6,7 @@ import { ok, err, gitSha } from "@fuguejs/framework";
 import type { Result, GitSha } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
 import type { GitPort } from "../ports.js";
-import { createBunGitAdapter, createLocalGitAdapter, runBunInstall } from "../adapters/git-sync.js";
+import { cleanupTimedOutChild, createBunGitAdapter, createLocalGitAdapter, runBunInstall } from "../adapters/git-sync.js";
 
 // ── Fake GitPort for Unit Tests ────────────────────────────────────────────
 
@@ -241,6 +241,23 @@ describe("GitPort interface", () => {
   });
 
   describe("BunGitAdapter timeout branches (round-21 pta-1 — error-first delivery + bounded termination)", () => {
+    it("forces SIGKILL and drains streams when the child exit promise rejects", async () => {
+      let terminated = 0;
+      let forceKilled = 0;
+      let drained = 0;
+      cleanupTimedOutChild(
+        () => { terminated += 1; },
+        () => { forceKilled += 1; },
+        Promise.reject(new Error("waitpid failed")),
+        async () => { drained += 1; },
+      );
+
+      await Bun.sleep(10);
+
+      expect(terminated).toBe(1);
+      expect(forceKilled).toBe(1);
+      expect(drained).toBe(1);
+    });
     // Bun resolves the `git` and `bun` binary NAMES itself (empirically: a
     // PATH shim named `git`/`bun` is never consulted by Bun.spawn), so a
     // TERM-ignoring stand-in cannot be injected under those names. Instead

@@ -109,6 +109,9 @@ const enc = encodeURIComponent;
 
 const normPath = (p: string): string => p.replace(/\/+/g, "/").replace(/^\/+|\/+$/g, "");
 
+const pathSegments = (path: string): readonly string[] =>
+  normPath(path).split("/").filter((segment) => segment.length > 0);
+
 const itemCacheKey = (driveId: string, filePath: string): string => `${driveId}\n${normPath(filePath)}`;
 
 const notFoundInFolder = (driveId: string, folderItem: string, segment: string): FrameworkError =>
@@ -311,7 +314,7 @@ export const createPathResolvingMsGraphAdapter = (
     path: string,
     opts?: ReadOpts,
   ): Promise<Result<ResolvedItem, FrameworkError>> => {
-    const segments = normPath(path).split("/").filter((s) => s.length > 0);
+    const segments = pathSegments(path);
     let current = drive.rootItemId;
     for (let i = 0; i < segments.length; i += 1) {
       const seg = segments[i];
@@ -352,7 +355,7 @@ export const createPathResolvingMsGraphAdapter = (
 
   /** Drop every cached id for `path` and its folder prefixes (self-heal on 404). */
   const dropPathCaches = (driveId: string, path: string): void => {
-    const segments = normPath(path).split("/").filter((s) => s.length > 0);
+    const segments = pathSegments(path);
     itemCache.delete(itemCacheKey(driveId, path));
     for (let i = 1; i < segments.length; i += 1) {
       prefixCache.delete(itemCacheKey(driveId, segments.slice(0, i).join("/")));

@@ -48,6 +48,7 @@ const VALID_CONTEXT: DagMachineContextPersisted = {
   confidenceByNode: new Map(),
   outputs: new Map(),
   initialInput: null,
+  priorWitnesses: new Map(),
 };
 const VALID_PHASES: Record<DagPhase["kind"], DagPhase> = {
   pending: { kind: "pending" },
@@ -231,6 +232,7 @@ describe("makeRunStoreJobLike", () => {
       ["humanReviewPrompts", {}],
       ["unconditionalAdj", {}],
       ["confidenceByNode", {}],
+      ["priorWitnesses", {}],
     ];
     for (const [field, value] of corruptions) {
       const result = makeRunStoreJobLike(port, LEASE, toJson({

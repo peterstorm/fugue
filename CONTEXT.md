@@ -88,6 +88,7 @@ gates, freshness-aware state management, and production observability.
 | Term | Definition |
 |------|------------|
 | **Tenant Purge Lease** | Runtime-proven reservation of one exact deregistration tombstone. The registry refuses revival/reconfiguration while the lease is active; only its holder may hard-delete after all idempotent footprint steps succeed. Partial failure releases the lease but retains the tombstone for retry. |
+| **Tenant-Owned Root** | A canonical filesystem path rooted at the tenant-id namespace: `fsRoot` is `/srv/<tenantId>` or a descendant; `dagsRoot` is `/dags/<tenantId>` or a descendant. Registration rejects host paths, aliases, and sibling-tenant roots before either recursive purge or DAG discovery can receive them. |
 
 ### Observability
 

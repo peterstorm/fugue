@@ -6,6 +6,7 @@ import { describe, it, expect } from "bun:test";
 import type { NodeId } from "../types/ids.js";
 import { DAG_INPUT } from "../types/ids.js";
 import { N, NO_SIDE_EFFECTS, NO_CONFIDENCE } from "./_id-helpers.js";
+import { RN, witness } from "./_freshness-helpers.js";
 import { dagTransition } from "../dag-runtime/transition.js";
 import { computeOutgoingByNode, computeUnconditionalAdj } from "../dag-runtime/topology.js";
 import {
@@ -127,6 +128,7 @@ const makeCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext 
     edges: dag.edges,
     confidenceByNode: new Map(),
     ...overrides,
+    priorWitnesses: overrides.priorWitnesses ?? new Map(),
   };
 };
 
@@ -232,6 +234,28 @@ describe("dagTransition — running", () => {
     const result = dagTransition(running(0), event, ctx);
     expect(result.state).toEqual({ kind: "running", wave: 1 });
     expect(result.context.outputs.get(N("a"))).toBe(42);
+  });
+
+  it("folds the executor's latest-witness projection into durable context", () => {
+    const ctx = makeCtx();
+    const priorWitnesses = new Map([[
+      "postgres:orders",
+      witness("version", RN("postgres:orders"), "42"),
+    ]]);
+    const event: DagEvent = {
+      type: "wave-done",
+      wave: 0,
+      outputs: new Map([[N("a"), 42]]),
+      routingDecisions: new Map(),
+      priorWitnesses,
+    };
+
+    const result = dagTransition(running(0), event, ctx);
+
+    expect(result.context.priorWitnesses).not.toBe(priorWitnesses);
+    expect(result.context.priorWitnesses.get("postgres:orders")).toEqual(
+      witness("version", RN("postgres:orders"), "42"),
+    );
   });
 
   it("wave-done on last wave => succeeded", () => {

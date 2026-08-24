@@ -29,7 +29,6 @@ import { type NodeSpanOutcome, EMPTY_OUTCOME } from "./node-span.js";
 import { emit } from "./emit.js";
 import { fwLogger } from "../logger.js";
 import { emitRoutingDecisions } from "./route-emission.js";
-import type { Witness } from "../types/freshness.js";
 import { type FreshnessIndex } from "./freshness-check.js";
 import { emitFreshnessWitnessEvents } from "./freshness-emission.js";
 
@@ -68,7 +67,6 @@ export interface WaveConfig {
   readonly resumeCheckpoint?: Map<string, unknown>;
   readonly nowFn: () => number;
   readonly freshnessIndex: FreshnessIndex;
-  readonly witnessAccumulator?: Map<string, Witness>;
   /**
    * Run-scoped set of nodes whose freshness bookkeeping already completed.
    * Owned by the executor for the lifetime of one run and MUTATED here as waves
@@ -111,7 +109,7 @@ export const executeWave = async (
   machineCtx: DagMachineContext,
   config: WaveConfig,
 ): Promise<WaveResult> => {
-  const { dag, nodeMap, nodeCtx, resumeCheckpoint, nowFn, freshnessIndex, witnessAccumulator, witnessedNodeIds, minting } = config;
+  const { dag, nodeMap, nodeCtx, resumeCheckpoint, nowFn, freshnessIndex, witnessedNodeIds, minting } = config;
   const stamp = (): Date => new Date(nowFn());
 
   // An out-of-bounds waveIndex is an invariant violation.
@@ -134,6 +132,9 @@ export const executeWave = async (
   // Snapshot prior-wave outputs so concurrent nodes in this wave can't
   // observe each other's results mid-execution.
   const priorOutputs: ReadonlyMap<NodeId, unknown> = machineCtx.outputs;
+  // Durable resource→latest-witness projection. Freshness emission mutates this
+  // invocation-local copy; the resulting event moves it into the pure transition.
+  const priorWitnesses = new Map(machineCtx.priorWitnesses);
 
   // Run all wave nodes concurrently
   const settled = await Promise.all(
@@ -260,7 +261,7 @@ export const executeWave = async (
 
   const postWaveCtx: PostWaveContext = {
     waveNodeIds, nodeMap, nodeCtx, machineCtx,
-    dagId: dag.id, nowFn, freshnessIndex, witnessAccumulator,
+    dagId: dag.id, nowFn, freshnessIndex, witnessAccumulator: priorWitnesses,
     witnessedNodeIds,
   };
 
@@ -282,6 +283,7 @@ export const executeWave = async (
         // re-execute them. Freshness bookkeeping is what the retry re-attempts,
         // and `witnessedNodeIds` is what tells it which nodes still owe it.
         partialOutputs: sizedOrUndefined(carriedOutputs(newOutputs, machineCtx.outputs)),
+        priorWitnesses,
       },
       outcomes,
     };
@@ -294,7 +296,10 @@ export const executeWave = async (
     postWaveCtx, newOutputs,
   );
   if (routing.earlyFailure) {
-    return { event: routing.earlyFailure, outcomes };
+    return {
+      event: { ...routing.earlyFailure, priorWitnesses },
+      outcomes,
+    };
   }
 
   return {
@@ -304,6 +309,7 @@ export const executeWave = async (
       outputs: newOutputs,
       routingDecisions: routing.decisions,
       confidenceValues: routing.confidenceValues.size > 0 ? routing.confidenceValues : undefined,
+      priorWitnesses,
     },
     outcomes,
   };

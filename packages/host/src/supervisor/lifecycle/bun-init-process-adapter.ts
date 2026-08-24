@@ -30,6 +30,7 @@
  * non-reaping PID 1.
  */
 
+import { safeErrorMessage } from "@fuguejs/framework";
 import { cleanEnvRecord } from "./spawn-port.js";
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import { readdirSync } from "node:fs";
@@ -232,6 +233,7 @@ export const broadcastSignalToWorkers = (sig: "SIGTERM" | "SIGINT", seams: Worke
   }
   let enumerated = 0;
   let signalled = 0;
+  const failures: Array<{ readonly pid: number; readonly error: string }> = [];
   for (const entry of entries) {
     if (!/^\d+$/.test(entry)) continue;
     const pid = Number(entry);
@@ -240,9 +242,17 @@ export const broadcastSignalToWorkers = (sig: "SIGTERM" | "SIGINT", seams: Worke
     try {
       seams.kill(pid, sig);
       signalled++;
-    } catch {
-      // gone (ESRCH) / not permitted (EPERM) — best-effort drain broadcast.
+    } catch (error) {
+      // Best-effort broadcast continues, but retain pid + errno/message so a
+      // missed drain is attributable rather than visible only as a count gap.
+      failures.push({ pid, error: safeErrorMessage(error) });
     }
+  }
+  if (failures.length > 0) {
+    seams.logger?.warn?.("[thin-init] pod shutdown: worker drain signals failed", {
+      sig,
+      failures,
+    });
   }
   seams.logger?.info?.("[thin-init] pod shutdown: broadcast drain signal to workers", {
     sig,

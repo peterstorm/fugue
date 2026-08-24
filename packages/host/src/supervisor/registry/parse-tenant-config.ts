@@ -114,7 +114,7 @@ export const parseTenantConfigBody = (id: TenantId, body: unknown): Result<Activ
   // DAGS_LOCAL_PATH (the per-tenant directory it globs `dags/**​/dag.ts` under, so
   // the worker discovers ONLY this team's DAGs). Reject a blank/absent one HERE at
   // the trust boundary rather than letting it reach the registry; the registry
-  // smart constructor (`tenantConfig`) is the final confined-absolute-path
+  // smart constructor (`tenantConfig`) is the final tenant-owned `/dags/<id>`
   // assertion. Parse-don't-validate: a registered tenant always carries a usable
   // dagsRoot.
   const rawDagsRoot = normalizedField(o.dagsRoot);
@@ -135,7 +135,7 @@ export const parseTenantConfigBody = (id: TenantId, body: unknown): Result<Activ
   // Every tenant requires a per-tenant on-disk mount (`fsRoot`) — the directory the
   // grace-window purge reclaims and the worker's confined filesystem root. Reject a
   // blank/absent one HERE, symmetric with dagsRoot/secretsRef; the registry
-  // `tenantConfig` is the final confined-absolute-path authority over this value.
+  // `tenantConfig` is the final tenant-owned `/srv/<id>` authority over this value.
   const rawFsRoot = normalizedField(o.fsRoot);
   if (rawFsRoot === "") {
     return err(tenantConfigInvalid(`tenant '${id}': fsRoot is required (the per-tenant on-disk mount the worker is confined to)`));

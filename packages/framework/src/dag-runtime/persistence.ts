@@ -30,6 +30,8 @@ import type {
 import type { DagDef } from "../types/dag.js";
 import type { Confidence } from "../types/confidence.js";
 import { tryConfidence } from "../types/confidence.js";
+import type { Witness } from "../types/witness.js";
+import { __brandWitness, isWitnessKind } from "../types/witness.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeId, RunId } from "../types/ids.js";
 import { DAG_INPUT, tryNodeId } from "../types/ids.js";
@@ -178,6 +180,41 @@ const parseConfidenceValue = (
   return parsed.ok ? parsed : err(`${path}: ${parsed.error}`);
 };
 
+const parseWitness = (value: unknown, path: string): Result<Witness, string> => {
+  if (!isRecord(value)) return err(`${path} must be a witness record`);
+  if (!isWitnessKind(value.kind)) return err(`${path}.kind is invalid`);
+  if (typeof value.resource !== "string" || value.resource.length === 0) {
+    return err(`${path}.resource must be a non-empty string`);
+  }
+  if (typeof value.value !== "string" || value.value.length === 0) {
+    return err(`${path}.value must be a non-empty string`);
+  }
+  return ok(__brandWitness({
+    kind: value.kind,
+    resource: value.resource,
+    value: value.value,
+  }));
+};
+
+const parsePriorWitnesses = (value: unknown): Result<ReadonlyMap<string, Witness>, string> => {
+  if (!(value instanceof Map)) return err("context.priorWitnesses must be a Map");
+  const parsed = new Map<string, Witness>();
+  let index = 0;
+  for (const [rawResource, rawWitness] of value) {
+    if (typeof rawResource !== "string" || rawResource.length === 0) {
+      return err(`context.priorWitnesses.key[${index}] must be a non-empty string`);
+    }
+    const witness = parseWitness(rawWitness, `context.priorWitnesses.value[${index}]`);
+    if (!witness.ok) return witness;
+    if (witness.value.resource !== rawResource) {
+      return err(`context.priorWitnesses.value[${index}].resource must match its map key`);
+    }
+    parsed.set(rawResource, witness.value);
+    index += 1;
+  }
+  return ok(parsed);
+};
+
 const parseWaves = (value: unknown): Result<readonly (readonly NodeId[])[], string> => {
   if (!Array.isArray(value)) return err("context.waves must be an array");
   const waves: Array<readonly NodeId[]> = [];
@@ -252,6 +289,7 @@ export const parsePersistedDagContext = (value: unknown): Result<PersistedDagCon
     "confidenceByNode",
     "outputs",
     "initialInput",
+    "priorWitnesses",
   ] as const;
   const missing = requiredFields.find((field) => !hasOwn(value, field));
   if (missing !== undefined) return err(`context is missing required field '${missing}'`);
@@ -282,6 +320,8 @@ export const parsePersistedDagContext = (value: unknown): Result<PersistedDagCon
   if (!confidenceByNode.ok) return confidenceByNode;
   const outputs = parseNodeIdMap(value.outputs, "context.outputs", (raw) => ok(raw), true);
   if (!outputs.ok) return outputs;
+  const priorWitnesses = parsePriorWitnesses(value.priorWitnesses);
+  if (!priorWitnesses.ok) return priorWitnesses;
 
   const fingerprint = value.__dagFingerprint;
   if (fingerprint !== undefined && (typeof fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(fingerprint))) {
@@ -303,6 +343,7 @@ export const parsePersistedDagContext = (value: unknown): Result<PersistedDagCon
     confidenceByNode: confidenceByNode.value,
     outputs: outputs.value,
     initialInput: value.initialInput,
+    priorWitnesses: priorWitnesses.value,
     ...(fingerprint === undefined ? {} : { __dagFingerprint: fingerprint }),
   });
 };
@@ -329,6 +370,7 @@ export const stripNonPersistable = (
   edges: ctx.edges.map(({ from, to, kind }) => ({ from, to, kind })),
   unconditionalAdj: ctx.unconditionalAdj,
   confidenceByNode: ctx.confidenceByNode,
+  priorWitnesses: ctx.priorWitnesses,
 });
 
 /**

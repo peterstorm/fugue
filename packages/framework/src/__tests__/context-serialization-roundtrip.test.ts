@@ -15,6 +15,7 @@ import { parsePersistedDagContext } from "../dag-runtime/persistence.js";
 import { N } from "./_id-helpers.js";
 import type { DagMachineContextPersisted } from "../dag-runtime/types.js";
 import type { NodeId } from "../types/ids.js";
+import { resourceName, witness } from "../types/witness.js";
 
 // ---------------------------------------------------------------------------
 // Arbitraries for serializable primitives and containers
@@ -228,6 +229,10 @@ const VALID_PERSISTED_CONTEXT: DagMachineContextPersisted = {
   confidenceByNode: new Map([[CONTEXT_NODE, null]]),
   outputs: new Map([[CONTEXT_NODE, { answer: 42 }]]),
   initialInput: { request: true },
+  priorWitnesses: new Map([[
+    "postgres:orders",
+    witness("version", resourceName("postgres:orders"), "42"),
+  ]]),
 };
 
 const REQUIRED_CONTEXT_FIELDS = [
@@ -245,6 +250,7 @@ const REQUIRED_CONTEXT_FIELDS = [
   "confidenceByNode",
   "outputs",
   "initialInput",
+  "priorWitnesses",
 ] as const satisfies readonly (keyof DagMachineContextPersisted)[];
 
 describe("parsePersistedDagContext", () => {
@@ -274,5 +280,18 @@ describe("parsePersistedDagContext", () => {
       delete candidate[field];
       expect(parsePersistedDagContext(candidate).ok).toBe(false);
     }));
+  });
+
+  it("rejects a prior-witness map whose resource key disagrees with its witness", () => {
+    const candidate = {
+      ...VALID_PERSISTED_CONTEXT,
+      priorWitnesses: new Map([[
+        "postgres:orders",
+        witness("version", resourceName("postgres:customers"), "42"),
+      ]]),
+    };
+    const parsed = parsePersistedDagContext(candidate);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toContain("must match its map key");
   });
 });

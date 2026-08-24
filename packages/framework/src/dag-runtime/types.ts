@@ -7,6 +7,7 @@ import type { Decision } from "./routing.js";
 import type { IncomingSources } from "./topology.js";
 import type { NodeId } from "../types/ids.js";
 import { nodeId } from "../types/ids.js";
+import type { Witness } from "../types/witness.js";
 
 /**
  * Sentinel node id used by the executor/runner when an ERROR event arrives
@@ -159,6 +160,8 @@ export type DagEvent =
        * `decideRoute` on fallback paths without calling closures.
        */
       readonly confidenceValues?: ReadonlyMap<NodeId, import("../types/confidence.js").Confidence | null>;
+      /** Latest captured read witness per resource, folded into durable run state. */
+      readonly priorWitnesses?: ReadonlyMap<string, Witness>;
     }
   | {
       readonly type: "node-failed";
@@ -177,6 +180,11 @@ export type DagEvent =
        * preventing off-by-one retry accounting when multiple nodes fail together.
        */
       readonly coFailedNodeIds?: ReadonlyArray<NodeId>;
+      /**
+       * Updated witness projection when failure occurred after freshness
+       * emission began. Absent for dispatch/hook failures that captured none.
+       */
+      readonly priorWitnesses?: ReadonlyMap<string, Witness>;
     }
   | {
       readonly type: "human-responded";
@@ -296,6 +304,8 @@ export interface DagRoutingState {
 export interface DagMachineContextPersisted extends DagTopology, DagRetryState, DagHumanGateConfig, DagRoutingState {
   readonly outputs: ReadonlyMap<NodeId, unknown>;
   readonly initialInput: unknown;
+  /** Latest captured read witness per resource; durable across HITL suspension. */
+  readonly priorWitnesses: ReadonlyMap<string, Witness>;
 }
 
 // ---------------------------------------------------------------------------

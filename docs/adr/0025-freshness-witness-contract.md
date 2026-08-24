@@ -213,3 +213,17 @@ This is a breaking change to the two self-referential extractor signatures and
 to `witness(...)` (now `ResourceName`, not `string`), taken pre-1.0 while the
 only call sites were the `customer-summary` example app and the framework's own
 tests; no published DAG consumed them.
+
+## Amendment — durable prior-witness projection (2026-08-24)
+
+`HumanInterventionEvent.context.priorWitnesses` is a run-history fact, not an
+executor-instance cache. The latest captured read witness per resource therefore
+lives in `DagMachineContextPersisted`. Wave execution starts from that immutable
+projection, freshness emission updates an invocation-local copy, and the
+resulting `wave-done` or post-wave `node-failed` event carries it into the pure
+transition. Human-intervention emission reads only from machine context.
+
+This keeps the projection bounded to one witness per resource while preserving
+it across durable HITL suspension, worker replacement, and requeue. Persisted
+context parsing requires a `Map` whose resource keys match each branded witness;
+corrupt or mismatched bytes fail closed before execution resumes.
