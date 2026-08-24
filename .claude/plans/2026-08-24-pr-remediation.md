@@ -72,7 +72,13 @@ None. Both critical findings were upheld by all three registered panel lenses. T
 - `packages/host/src/hitl/adapters/__tests__/run-executor.test.ts`
 - `packages/host/src/hitl/__tests__/run-store-job.test.ts`
 
-Every planned path is inside the frozen review scope; no additional remediation support path is required.
+Every planned path except `packages/host/src/__tests__/metered-llm.test.ts` is inside the frozen review scope. The accepted logger regression required that existing out-of-scope test path as a remediation support path.
+
+## Registered remediation evidence
+
+- Retired blocked run: `.claude/reviews/review-and-fix-runs/remediation-20260824T185312Z-01a034fa` — blocked because the first immutable start input omitted `packages/host/src/__tests__/metered-llm.test.ts`; explicitly abandoned in favor of the superseding run.
+- Installed run: `.claude/reviews/review-and-fix-runs/remediation-20260824T185312Z-01a034fa-02` — registered the test support path and installed the verified index.
+- Installation receipt: effect `effect:remediation-install:ae08d6cc2f20f8b935dbc2ccd68bc0350686bd6f2bc3f39597195194e386ec4a`, index digest `d1935178541012e88074803729e1e1f742a7e90d91f7ff52d1a13cd8bf6ad343`, witness digest `75819f5a1fcc78834ad5139583ef5186764764972687d0d48133a2a195f7f3d2`.
 
 ## Validation evidence
 
