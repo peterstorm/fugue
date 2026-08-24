@@ -28,6 +28,7 @@ import { witness, resourceName, type Witness } from "../types/freshness.js";
 import { __brandNodeIdUnchecked, __brandRunIdUnchecked } from "../types/ids.js";
 import { isFrameworkError } from "../types/errors.js";
 import { D, N, R } from "./_id-helpers.js";
+import { FE } from "./_freshness-helpers.js";
 
 const roots: string[] = [];
 afterAll(() => {
@@ -45,6 +46,7 @@ const freshnessEvent = (resource: string, value: string): WriteAttemptedEvent =>
   runId: R("boundary-run"),
   dagId: D("boundary-dag"),
   nodeId: N("boundary-node"),
+  executionEpoch: FE(),
   conditionedOn: witness("version", resourceName(resource), "old"),
   newWitness: witness("version", resourceName(resource), value),
   succeededAtMs: 100,
@@ -119,6 +121,7 @@ describe("file backend hostile identifier/resource boundary", () => {
     const cases: ReadonlyArray<{ readonly label: string; readonly event: unknown; readonly expectMessage: string }> = [
       { label: "wrong event type", event: { ...base, type: "write-completed" }, expectMessage: 'write event type must be exactly "write-attempted"' },
       { label: "non-object event", event: 42, expectMessage: "write event must be an object" },
+      { label: "invalid execution epoch", event: { ...base, executionEpoch: -1 }, expectMessage: "executionEpoch must be a non-negative safe integer" },
       { label: "non-object newWitness", event: { ...base, newWitness: "oops" }, expectMessage: "newWitness must be an object" },
       { label: "off-contract witness kind", event: { ...base, newWitness: { kind: "bogus", resource: "r", value: "v" } }, expectMessage: "newWitness.kind is not a WitnessKind" },
       { label: "empty witness resource", event: { ...base, newWitness: { kind: "version", resource: "", value: "v" } }, expectMessage: "newWitness.resource must be non-empty" },

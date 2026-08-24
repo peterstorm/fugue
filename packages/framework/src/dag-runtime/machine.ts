@@ -13,6 +13,7 @@ import { topoSort } from "../shared/topo.js";
 import { DEFAULT_JITTER_RATIO } from "../shared/jitter.js";
 import { computeIncomingByNode, computeOutgoingByNode, computeUnconditionalAdj, seedInitialActiveSet } from "./topology.js";
 import { match } from "ts-pattern";
+import { freshnessExecutionEpoch } from "../types/witness.js";
 
 // ---------------------------------------------------------------------------
 // stateProgress — maps DagPhase to a 0–100 progress value
@@ -120,6 +121,7 @@ export const compileDagToMachine = (
     confidenceByNode: new Map(),
     priorWitnesses: new Map(),
     freshnessCompletedNodeIds: new Set(),
+    freshnessExecutionEpoch: freshnessExecutionEpoch(0),
   };
 
   const machine: Machine<DagPhase, DagEvent, DagMachineContext> = {

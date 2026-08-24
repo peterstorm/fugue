@@ -5,7 +5,7 @@
  *   Key:    `fugue:freshness:{resource}`
  *   Score:  `succeededAtMs`
  *   Member: `freshnessMemberKey` — the port-owned
- *           `[runId, nodeId, witnessKind, witnessValue]` JSON array
+ *           `[runId, nodeId, executionEpoch, witnessKind, witnessValue]` JSON array
  *           (types/freshness.js), shared with the file backend's
  *           equal-score tie-break (ADR-0079).
  *
@@ -23,12 +23,13 @@
 
 import type Redis from "ioredis";
 import type { WriteAttemptedEvent } from "../types/events.js";
-import type { FreshnessIndex, WriteEntry, WitnessKind } from "../types/freshness.js";
+import type { FreshnessExecutionEpoch, FreshnessIndex, WriteEntry, WitnessKind } from "../types/freshness.js";
 import {
   FRESHNESS_TTL_SECONDS,
   __brandWitness,
   freshnessMemberKey,
   isWitnessKind,
+  __brandFreshnessExecutionEpoch,
 } from "../types/freshness.js";
 import type { RunId, NodeId } from "../types/ids.js";
 import type { Result } from "../types/result.js";
@@ -46,28 +47,34 @@ const KEY_PREFIX = "fugue:freshness:";
  */
 const decodeMember = (
   member: string,
-): { runId: RunId; nodeId: NodeId; witnessKind: WitnessKind; witnessValue: string } | null => {
+): { runId: RunId; nodeId: NodeId; executionEpoch: FreshnessExecutionEpoch; witnessKind: WitnessKind; witnessValue: string } | null => {
   try {
     const parsed = JSON.parse(member);
-    if (!Array.isArray(parsed) || parsed.length !== 4) {
+    if (!Array.isArray(parsed) || parsed.length !== 5) {
       logFrameworkWithoutThrowing(
         "warn",
         `[RedisFreshnessIndex] decodeMember: unexpected shape (length=${Array.isArray(parsed) ? parsed.length : "not-array"}): ${member.slice(0, 100)}`,
       );
       return null;
     }
-    // Persisted bytes are untrusted: an off-contract kind must not flow into
-    // conflict decisions (the file adapter enforces the same gate; the
-    // in-memory adapter mints through the kind-checked constructors). An
-    // off-contract kind is a corrupt entry, exactly like a shape failure.
-    if (!isWitnessKind(parsed[2])) {
+    // Persisted bytes are untrusted: an invalid execution epoch or off-contract
+    // witness kind must not flow into conflict decisions. The file adapter
+    // enforces the same gates; either defect is corrupt persisted state.
+    if (!Number.isSafeInteger(parsed[2]) || parsed[2] < 0) {
       logFrameworkWithoutThrowing(
         "warn",
-        `[RedisFreshnessIndex] decodeMember: unknown witnessKind ${String(parsed[2]).slice(0, 100)}: ${member.slice(0, 100)}`,
+        `[RedisFreshnessIndex] decodeMember: executionEpoch must be a non-negative safe integer: ${member.slice(0, 100)}`,
       );
       return null;
     }
-    if (typeof parsed[3] !== "string" || parsed[3].length === 0) {
+    if (!isWitnessKind(parsed[3])) {
+      logFrameworkWithoutThrowing(
+        "warn",
+        `[RedisFreshnessIndex] decodeMember: unknown witnessKind ${String(parsed[3]).slice(0, 100)}: ${member.slice(0, 100)}`,
+      );
+      return null;
+    }
+    if (typeof parsed[4] !== "string" || parsed[4].length === 0) {
       logFrameworkWithoutThrowing(
         "warn",
         `[RedisFreshnessIndex] decodeMember: witnessValue must be a non-empty string: ${member.slice(0, 100)}`,
@@ -77,8 +84,9 @@ const decodeMember = (
     return {
       runId: __brandRunId(parsed[0]),
       nodeId: __brandNodeId(parsed[1]),
-      witnessKind: parsed[2],
-      witnessValue: parsed[3],
+      executionEpoch: __brandFreshnessExecutionEpoch(parsed[2]),
+      witnessKind: parsed[3],
+      witnessValue: parsed[4],
     };
   } catch (e) {
     // This catch spans BOTH `JSON.parse` and the `__brandRunId`/`__brandNodeId`
@@ -144,6 +152,7 @@ export class RedisFreshnessIndex implements FreshnessIndex {
     const member = freshnessMemberKey(
       event.runId,
       event.nodeId,
+      event.executionEpoch,
       event.newWitness.kind,
       event.newWitness.value,
     );
@@ -242,6 +251,7 @@ export class RedisFreshnessIndex implements FreshnessIndex {
           return ok({
             runId: decoded.runId,
             nodeId: decoded.nodeId,
+            executionEpoch: decoded.executionEpoch,
             newWitness: __brandWitness({
               kind: decoded.witnessKind as WitnessKind,
               resource,

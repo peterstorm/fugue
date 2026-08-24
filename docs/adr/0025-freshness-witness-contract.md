@@ -238,8 +238,17 @@ write on retry. That durable acknowledgement suppresses both another index
 record and another `write-attempted` observer event, so bookkeeping retries do
 not fabricate duplicate node-side-effect observations.
 
+Logical write identity includes a durable **Freshness Execution Epoch**. Epoch 0
+is created with the run; ordinary node and bookkeeping retries preserve it. A
+valid backward/current-wave HITL reroute increments the epoch in the pure
+transition before the replacement wave is checkpointed. `WriteAttemptedEvent`,
+`WriteEntry`, Redis members, and file singletons all carry the epoch. The own-
+write acknowledgement therefore requires `(runId, nodeId, executionEpoch,
+newWitness)` equality: a lost acknowledgement deduplicates, while a rerouted
+same-valued write remains a distinct observed and indexed execution.
+
 The witness projection remains bounded to one witness per resource and the
 completion proof to one node ID per DAG node while both survive durable HITL
 suspension, worker replacement, and requeue. Persisted context parsing requires
-a resource-consistent witness `Map` and a valid node-ID `Set`; corrupt bytes fail
-closed before execution resumes.
+a resource-consistent witness `Map`, a valid node-ID `Set`, and a non-negative
+safe-integer execution epoch; corrupt bytes fail closed before execution resumes.

@@ -30,7 +30,7 @@
  * non-reaping PID 1.
  */
 
-import { safeErrorMessage } from "@fuguejs/framework";
+import { probeErrorCode, safeErrorMessage } from "@fuguejs/framework";
 import { cleanEnvRecord } from "./spawn-port.js";
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import { readdirSync } from "node:fs";
@@ -291,6 +291,8 @@ interface BunInitAdapterConfig {
    * fork-failure branch be exercised without a real resource-exhaustion fork.
    */
   readonly spawn?: SpawnSupervisorFn;
+  /** Supervisor-signal seam; production delegates to `process.kill`. */
+  readonly kill?: (pid: number, sig: "SIGTERM" | "SIGINT") => void;
 }
 
 /**
@@ -362,6 +364,7 @@ export const createBunInitProcessAdapter = (
   );
   const reapZombies: ReapFn = () => reapFaults.runCycle(rawReap);
   const spawn: SpawnSupervisorFn = cfg.spawn ?? ((command, options) => Bun.spawn([...command], options));
+  const killSupervisor = cfg.kill ?? ((pid: number, sig: "SIGTERM" | "SIGINT") => process.kill(pid, sig));
   let terminating = false;
   let currentPid: number | undefined;
 
@@ -434,9 +437,28 @@ export const createBunInitProcessAdapter = (
       // supervisor's drain handler is idempotent.
       if (currentPid !== undefined) {
         try {
-          process.kill(currentPid, sig);
-        } catch {
-          // Already gone — the supervisor exited on its own; nothing to forward.
+          killSupervisor(currentPid, sig);
+        } catch (error) {
+          const code = probeErrorCode(error);
+          // Only ESRCH proves the child is already gone. EPERM/EINVAL/runtime
+          // faults mean the sole non-PID-1 drain signal was not delivered.
+          if (!(code.kind === "code" && code.code === "ESRCH")) {
+            const data = {
+              pid: currentPid,
+              sig,
+              code: code.kind === "code" ? code.code : undefined,
+              error: safeErrorMessage(error),
+            };
+            try {
+              if (logger !== undefined) {
+                logger.error("[thin-init] failed to signal supervisor during termination", data);
+              } else {
+                process.stderr.write(`[thin-init] failed to signal supervisor during termination: ${JSON.stringify(data)}\n`);
+              }
+            } catch {
+              // Shutdown progression remains authoritative if diagnostics fail.
+            }
+          }
         }
       }
       // POD SHUTDOWN: broadcast to the per-tenant WORKERS so they drain too (PID-1

@@ -44,7 +44,9 @@
  * Errors: resolution failures use the stock adapter's status mapping
  * (`mapGraphStatus` — 401/408/429/5xx → transient, 4xx → non-retriable
  * node-crash); a segment missing from its folder is a non-retriable
- * node-crash naming the folder + segment. Nothing throws.
+ * node-crash naming the folder + segment. Resolution and read methods return
+ * `Result`; lifecycle `connect` retains the stock adapter contract and may throw
+ * for invalid startup credentials.
  */
 
 import type { CapabilityHandle, FrameworkError, Result } from "@fuguejs/framework";
@@ -159,7 +161,7 @@ export const createPathResolvingMsGraphAdapter = (
     const url = base + path;
     // Capture the caller signal inside the Result boundary. `ReadOpts` is a
     // public JavaScript seam, so accessor-backed or proxy values must not throw
-    // past the adapter's "nothing throws" contract.
+    // past the resolution/read `Result` contract.
     let callerSignal: AbortSignal | undefined;
     try {
       callerSignal = opts?.signal;

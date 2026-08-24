@@ -89,7 +89,8 @@ export interface GuardrailNodeConfig<I, T> {
  *
  * Guardrail nodes:
  * - Run a pure validation function against upstream outputs
- * - Always pass data through (never block the pipeline)
+ * - Always return `Ok<GuardrailResult<T>>` so the DAG can continue; only the
+ *   `validated` variant carries the original value
  * - Attach warnings when validation fails
  * - Emit as TOOL spans in MLflow (mapped by the executor via SPAN_TYPE_MAP)
  *

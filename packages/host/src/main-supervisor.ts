@@ -27,7 +27,7 @@ import { parseHostConfig } from "./domain/config.js";
 import { formatHostError, fsPurgeFailed } from "./domain/host-error.js";
 import type { HostError } from "./domain/host-error.js";
 import type { Result } from "@fuguejs/framework";
-import { ok, err } from "@fuguejs/framework";
+import { ok, err, safeErrorMessage } from "@fuguejs/framework";
 import type { RedisConnectivityPort, RedisPort, RedisPubSubPort, TokenStorePort } from "./ports.js";
 import { createSupervisor, createTerminationHandler } from "./supervisor/supervisor.js";
 import type { AdmissionPort, AdmissionOutcome, AuthDeps } from "./supervisor/supervisor.js";
@@ -438,8 +438,12 @@ const main = async () => {
     sweep: () => Promise<unknown>,
   ): ReturnType<typeof setInterval> => {
     const timer = setInterval(() => {
-      void sweep().catch((e) => {
-        logger.error(`[supervisor] ${label} threw`, { error: e instanceof Error ? e.message : String(e) });
+      void sweep().catch((error) => {
+        try {
+          logger.error(`[supervisor] ${label} threw`, { error: safeErrorMessage(error) });
+        } catch {
+          // The sweep rejection remains contained when diagnostics fail.
+        }
       });
     }, intervalMs);
     if (typeof timer.unref === "function") timer.unref();

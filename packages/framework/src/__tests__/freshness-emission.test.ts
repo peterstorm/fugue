@@ -1,4 +1,4 @@
-import { witness, witnessValue, RN } from "./_freshness-helpers.js";
+import { witness, witnessValue, RN, FE } from "./_freshness-helpers.js";
 import { afterEach, describe, it, expect } from "bun:test";
 import { emitFreshnessWitnessEvents } from "../dag-runtime/freshness-emission.js";
 import { InMemoryFreshnessIndex, type FreshnessIndex } from "../dag-runtime/freshness-check.js";
@@ -71,6 +71,7 @@ const makeMachineCtx = (): DagMachineContext => ({
   confidenceByNode: new Map(),
   priorWitnesses: new Map(),
   freshnessCompletedNodeIds: new Set(),
+  freshnessExecutionEpoch: FE(),
 });
 
 /** Build a PostWaveContext from test parameters. */
@@ -190,6 +191,7 @@ describe("emitFreshnessWitnessEvents", () => {
       runId: runId("other-run"),
       dagId: DID,
       nodeId: nodeId("other-writer"),
+      executionEpoch: FE(),
       conditionedOn: witness("version", RN("pg:orders"), "41"),
       newWitness: witness("version", RN("pg:orders"), "43"),
       succeededAtMs: Date.now() - 1000,

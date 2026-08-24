@@ -69,6 +69,7 @@ gates, freshness-aware state management, and production observability.
 | **Freshness Violation** | Detected when a write's `conditionedOn` witness has been superseded by a later write to the same resource. |
 | **FreshnessIndex** | Port interface for witness tracking. Three adapters: `InMemoryFreshnessIndex` (single-process), Redis-backed (distributed), file-backed (digest-addressed singletons, `file/` subpath). |
 | **Freshness Completion Proof** | Durable set of node IDs whose post-wave freshness bookkeeping completed. It is distinct from node outputs because output persistence can precede witness emission; retries and replacement workers use this proof to emit only genuinely outstanding bookkeeping. |
+| **Freshness Execution Epoch** | Durable non-negative generation stamped onto every write witness. Bookkeeping retries preserve the epoch; each valid HITL reroute increments it before replacement work executes, so a same-valued re-execution is distinct from an ambiguously acknowledged retry. |
 | **`checkFreshness` (batch)** | The same stale-read rule in BATCH form over an event log. Off the runtime path — used for post-hoc forensics and as the differential oracle a property test checks `InMemoryFreshnessIndex` against, so the rule cannot drift between the two implementations. Not exported from the package barrel. |
 
 ### Human-in-the-Loop (HITL)

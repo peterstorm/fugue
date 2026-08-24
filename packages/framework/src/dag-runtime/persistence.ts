@@ -31,7 +31,7 @@ import type { DagDef } from "../types/dag.js";
 import type { Confidence } from "../types/confidence.js";
 import { tryConfidence } from "../types/confidence.js";
 import type { Witness } from "../types/witness.js";
-import { __brandWitness, isWitnessKind } from "../types/witness.js";
+import { __brandFreshnessExecutionEpoch, __brandWitness, isWitnessKind } from "../types/witness.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeId, RunId } from "../types/ids.js";
 import { DAG_INPUT, tryNodeId } from "../types/ids.js";
@@ -291,6 +291,7 @@ export const parsePersistedDagContext = (value: unknown): Result<PersistedDagCon
     "initialInput",
     "priorWitnesses",
     "freshnessCompletedNodeIds",
+    "freshnessExecutionEpoch",
   ] as const;
   const missing = requiredFields.find((field) => !hasOwn(value, field));
   if (missing !== undefined) return err(`context is missing required field '${missing}'`);
@@ -328,6 +329,11 @@ export const parsePersistedDagContext = (value: unknown): Result<PersistedDagCon
     "context.freshnessCompletedNodeIds",
   );
   if (!freshnessCompletedNodeIds.ok) return freshnessCompletedNodeIds;
+  const freshnessExecutionEpoch = parseRetryCount(
+    value.freshnessExecutionEpoch,
+    "context.freshnessExecutionEpoch",
+  );
+  if (!freshnessExecutionEpoch.ok) return freshnessExecutionEpoch;
 
   const fingerprint = value.__dagFingerprint;
   if (fingerprint !== undefined && (typeof fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(fingerprint))) {
@@ -351,6 +357,7 @@ export const parsePersistedDagContext = (value: unknown): Result<PersistedDagCon
     initialInput: value.initialInput,
     priorWitnesses: priorWitnesses.value,
     freshnessCompletedNodeIds: freshnessCompletedNodeIds.value,
+    freshnessExecutionEpoch: __brandFreshnessExecutionEpoch(freshnessExecutionEpoch.value),
     ...(fingerprint === undefined ? {} : { __dagFingerprint: fingerprint }),
   });
 };
@@ -379,6 +386,7 @@ export const stripNonPersistable = (
   confidenceByNode: ctx.confidenceByNode,
   priorWitnesses: ctx.priorWitnesses,
   freshnessCompletedNodeIds: ctx.freshnessCompletedNodeIds,
+  freshnessExecutionEpoch: ctx.freshnessExecutionEpoch,
 });
 
 /**

@@ -4,6 +4,7 @@ import type { DagMachineContext } from "../dag-runtime/types.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { DagDef } from "../types/dag.js";
 import { N, D, nodeMap } from "./_id-helpers.js";
+import { FE } from "./_freshness-helpers.js";
 
 // ---------------------------------------------------------------------------
 // Minimal context factory
@@ -33,6 +34,7 @@ const mkCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext =>
     ...overrides,
     priorWitnesses: overrides.priorWitnesses ?? new Map(),
     freshnessCompletedNodeIds: overrides.freshnessCompletedNodeIds ?? new Set(),
+    freshnessExecutionEpoch: overrides.freshnessExecutionEpoch ?? FE(),
   };
 };
 

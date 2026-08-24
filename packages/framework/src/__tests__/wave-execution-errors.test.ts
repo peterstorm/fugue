@@ -11,6 +11,7 @@ import { describe, it, expect } from "bun:test";
 import { executeWave, type WaveConfig } from "../dag-runtime/wave-execution.js";
 import { InMemoryFreshnessIndex } from "../dag-runtime/freshness-check.js";
 import { N, R, D } from "./_id-helpers.js";
+import { FE } from "./_freshness-helpers.js";
 import { makeNodeContext } from "../shared/make-node-context.js";
 import { RecordingObserver } from "../observer/observer.js";
 import { brandAsValidatedNodeContext } from "../types/node.js";
@@ -61,6 +62,7 @@ const makeMachineCtx = (waves: string[][] = [["a"]]): DagMachineContext => ({
   defaultRetryLimit: 0,
   confidenceByNode: new Map(),
   freshnessCompletedNodeIds: new Set(),
+  freshnessExecutionEpoch: FE(),
   incomingByNode: new Map(),
   outputNodeId: undefined,
   edges: [],

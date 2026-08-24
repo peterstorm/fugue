@@ -1,4 +1,4 @@
-import { mkWitness } from "./_freshness-helpers.js";
+import { FE, mkWitness } from "./_freshness-helpers.js";
 /**
  * Tests for the FreshnessIndex Result-typed interface.
  *
@@ -26,6 +26,7 @@ const mkWriteEvent = (
   runId: R(runId),
   dagId: D("d"),
   nodeId: N(nodeId),
+  executionEpoch: FE(),
   conditionedOn: mkWitness(resource, conditionedOnValue),
   newWitness: mkWitness(resource, newValue),
   succeededAtMs,

@@ -81,6 +81,19 @@ import { formatHostError } from "../domain/host-error.js";
  * of that rule could drift to three different thresholds — and a counter that a
  * copy forgot to RESET on success would escalate forever after one bad minute.
  */
+const reportWithoutThrowing = (
+  logger: LogPort,
+  level: "warn" | "error",
+  message: string,
+  context: Record<string, unknown>,
+): void => {
+  try {
+    logger[level](message, context);
+  } catch {
+    // The cache/checkpoint outcome remains authoritative over diagnostics.
+  }
+};
+
 const failureEscalator = (opts: {
   readonly threshold: number;
   /** Logged while the failure still looks transient. */
@@ -125,13 +138,13 @@ export const createNamespacedCache = (
     threshold: FAILURE_ESCALATION_THRESHOLD,
     warnMessage: "Cache get failed — graceful degradation to miss",
     errorMessage: "Cache get failures exceeded threshold — Redis may be degraded",
-    report: (level, message, context) => { logger[level](message, context); },
+    report: (level, message, context) => reportWithoutThrowing(logger, level, message, context),
   });
   const setFailures = failureEscalator({
     threshold: FAILURE_ESCALATION_THRESHOLD,
     warnMessage: "Cache set failed — Redis error",
     errorMessage: "Cache set failures exceeded threshold — Redis may be degraded",
-    report: (level, message, context) => { logger[level](message, context); },
+    report: (level, message, context) => reportWithoutThrowing(logger, level, message, context),
   });
 
   return {
@@ -149,11 +162,11 @@ export const createNamespacedCache = (
         return { hit: true, value: JSON.parse(raw) };
       } catch (e) {
         // Corrupted entry — treat as miss
-        logger.warn("Cache entry corrupted — treating as miss", {
+        reportWithoutThrowing(logger, "warn", "Cache entry corrupted — treating as miss", {
           key: fullKey,
           dagId,
           rawPreview: raw?.slice(0, 100),
-          parseError: e instanceof Error ? e.message : String(e),
+          parseError: safeErrorMessage(e),
         });
         return { hit: false };
       }
@@ -178,7 +191,11 @@ export const createNamespacedCache = (
       try {
         serialized = JSON.stringify(value);
       } catch (e) {
-        logger.warn("Cache set failed — value not serializable", { key: fullKey, dagId, error: e instanceof Error ? e.message : String(e) });
+        reportWithoutThrowing(logger, "warn", "Cache set failed — value not serializable", {
+          key: fullKey,
+          dagId,
+          error: safeErrorMessage(e),
+        });
         return ok(undefined); // Don't kill the request for a cache write failure
       }
       const effectiveTtl = ttlSec ?? defaultTtlSec;
@@ -214,13 +231,7 @@ export const createNamespacedCheckpointWriter = (
     level: "warn" | "error",
     message: string,
     context: Record<string, unknown>,
-  ): void => {
-    try {
-      logger[level](message, context);
-    } catch {
-      // Checkpoint durability failure remains authoritative over diagnostics.
-    }
-  };
+  ): void => reportWithoutThrowing(logger, level, message, context);
 
   const writeFailures = failureEscalator({
     threshold: FAILURE_ESCALATION_THRESHOLD,

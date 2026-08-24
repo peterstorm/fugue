@@ -6,7 +6,7 @@ import { describe, it, expect } from "bun:test";
 import type { NodeId } from "../types/ids.js";
 import { DAG_INPUT } from "../types/ids.js";
 import { N, NO_SIDE_EFFECTS, NO_CONFIDENCE } from "./_id-helpers.js";
-import { RN, witness } from "./_freshness-helpers.js";
+import { FE, RN, witness } from "./_freshness-helpers.js";
 import { dagTransition } from "../dag-runtime/transition.js";
 import { computeOutgoingByNode, computeUnconditionalAdj } from "../dag-runtime/topology.js";
 import {
@@ -130,6 +130,7 @@ const makeCtx = (overrides: Partial<DagMachineContext> = {}): DagMachineContext 
     ...overrides,
     priorWitnesses: overrides.priorWitnesses ?? new Map(),
     freshnessCompletedNodeIds: overrides.freshnessCompletedNodeIds ?? new Set(),
+    freshnessExecutionEpoch: overrides.freshnessExecutionEpoch ?? FE(),
   };
 };
 
@@ -586,6 +587,7 @@ describe("dagTransition — reroute backward (FR-031)", () => {
     expect(result.context.outputs.has(N("c"))).toBe(false);
     // Wave 0 outputs preserved
     expect(result.context.outputs.get(N("a"))).toBe(N("a-out"));
+    expect(Number(result.context.freshnessExecutionEpoch)).toBe(1);
   });
 
   it("reroute to current wave => allowed (FR-031 — same wave counts as backward)", () => {
@@ -598,6 +600,7 @@ describe("dagTransition — reroute backward (FR-031)", () => {
     const event: DagEvent = { type: "human-responded", nodeId: "b" as NodeId, action, rerouteActiveSet: new Set<NodeId>() };
     const result = dagTransition(phase, event, ctx);
     expect(result.state).toMatchObject({ kind: "running", wave: 1 });
+    expect(Number(result.context.freshnessExecutionEpoch)).toBe(1);
   });
 });
 

@@ -1,4 +1,4 @@
-import { witness, witnessValue, RN } from "./_freshness-helpers.js";
+import { FE, witness, witnessValue, RN } from "./_freshness-helpers.js";
 /**
  * Wave 6 — Test gap coverage for review remediation.
  *
@@ -74,6 +74,7 @@ describe("checkFreshness with witness events in timeline", () => {
         runId: R("r1"),
         dagId: D("d"),
         nodeId: N("writer1"),
+        executionEpoch: FE(),
         conditionedOn: witness("version", RN("postgres:orders"), "1"),
         newWitness: witness("version", RN("postgres:orders"), "2"),
         succeededAtMs: 200,
@@ -84,6 +85,7 @@ describe("checkFreshness with witness events in timeline", () => {
         runId: R("r2"),
         dagId: D("d"),
         nodeId: N("writer2"),
+        executionEpoch: FE(),
         conditionedOn: witness("version", RN("postgres:orders"), "2"),
         newWitness: witness("version", RN("postgres:orders"), "3"),
         succeededAtMs: 400,
@@ -115,6 +117,7 @@ describe("checkFreshness with witness events in timeline", () => {
         runId: R("r1"),
         dagId: D("d"),
         nodeId: N("writer1"),
+        executionEpoch: FE(),
         conditionedOn: witness("version", RN("postgres:orders"), "1"),
         newWitness: witness("version", RN("postgres:orders"), "2"),
         succeededAtMs: 100,
@@ -125,6 +128,7 @@ describe("checkFreshness with witness events in timeline", () => {
         runId: R("r2"),
         dagId: D("d"),
         nodeId: N("writer2"),
+        executionEpoch: FE(),
         // Stale! Conditioned on "1" but "2" already written
         conditionedOn: witness("version", RN("postgres:orders"), "1"),
         newWitness: witness("version", RN("postgres:orders"), "3"),
@@ -154,6 +158,7 @@ describe("Full pipeline: reads → freshness violation → human intervention", 
       runId: R("other-run"),
       dagId: D("pipeline"),
       nodeId: N("other-writer"),
+      executionEpoch: FE(),
       conditionedOn: witness("version", RN("postgres:orders"), "42"),
       newWitness: witness("version", RN("postgres:orders"), "43"),
       succeededAtMs: 500,

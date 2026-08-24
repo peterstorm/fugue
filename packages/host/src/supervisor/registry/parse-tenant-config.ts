@@ -31,14 +31,6 @@ import { tenantConfigInvalid } from "../../domain/host-error.js";
 import type { HostError } from "../../domain/host-error.js";
 
 /**
- * Parse the optional `agentClientIdsByDag` map from an untrusted body.
- * Fail-closed: a non-object resolves to an empty map (the registry smart
- * constructor is the authority on whether an empty map is acceptable), but a
- * present map with ANY non-string value is REJECTED — a malformed value must
- * never be cast through as a client id. Iterates OWN enumerable properties only,
- * so a prototype key cannot smuggle a value in.
- */
-/**
  * Normalize a required string field from an untrusted config object, or `""`
  * when it is absent or not a string.
  *
@@ -58,6 +50,11 @@ const normalizedField = (
   normalize: (value: string) => string = (value) => value.trim(),
 ): string => (typeof raw === "string" ? normalize(raw) : "");
 
+/**
+ * Parse the optional `agentClientIdsByDag` map from an untrusted body.
+ * Fail-closed: a non-object resolves to an empty map, while any present
+ * non-string value is rejected. Only own enumerable properties are read.
+ */
 const parseAgentClientIdsByDag = (
   id: TenantId,
   raw: unknown,

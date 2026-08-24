@@ -3,7 +3,7 @@ import type { FrameworkError } from "./errors.js";
 import type { RunId, NodeId, DagId } from "./ids.js";
 import type { SideEffectProfile } from "./side-effects.js";
 import type { Confidence } from "./confidence.js";
-import type { Witness, ResourceName, WriteEntry } from "./witness.js";
+import type { Witness, ResourceName, WriteEntry, FreshnessExecutionEpoch } from "./witness.js";
 import type { SideEffectKind } from "./side-effects.js";
 import type { JsonPatch } from "./json-patch.js";
 
@@ -150,6 +150,8 @@ export interface WriteAttemptedEvent {
   readonly runId: RunId;
   readonly dagId: DagId;
   readonly nodeId: NodeId;
+  /** Durable identity of this logical execution; stable across bookkeeping retries. */
+  readonly executionEpoch: FreshnessExecutionEpoch;
   readonly conditionedOn: Witness;
   readonly newWitness: Witness;
   readonly succeededAtMs: number;

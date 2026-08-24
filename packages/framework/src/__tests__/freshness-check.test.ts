@@ -11,7 +11,7 @@ import { describe, it, expect } from "bun:test";
 import { N, R, D } from "./_id-helpers.js";
 import { checkFreshness, InMemoryFreshnessIndex } from "../dag-runtime/freshness-check.js";
 import type { WriteAttemptedEvent } from "../types/events.js";
-import { mkWitness } from "./_freshness-helpers.js";
+import { FE, mkWitness } from "./_freshness-helpers.js";
 import { unwrap } from "../types/result.js";
 
 describe("checkFreshness — pure conflict detection", () => {
@@ -26,6 +26,7 @@ describe("checkFreshness — pure conflict detection", () => {
       runId: R("r1"),
       dagId: D("d1"),
       nodeId: N("writer"),
+      executionEpoch: FE(),
       conditionedOn: mkWitness("postgres:orders", "42"),
       newWitness: mkWitness("postgres:orders", "43"),
       succeededAtMs: 1000,
@@ -42,6 +43,7 @@ describe("checkFreshness — pure conflict detection", () => {
       runId: R("r1"),
       dagId: D("d1"),
       nodeId: N("writer-1"),
+      executionEpoch: FE(),
       conditionedOn: mkWitness("postgres:orders", "42"),
       newWitness: mkWitness("postgres:orders", "43"),
       succeededAtMs: 1000,
@@ -53,6 +55,7 @@ describe("checkFreshness — pure conflict detection", () => {
       runId: R("r2"),
       dagId: D("d1"),
       nodeId: N("writer-2"),
+      executionEpoch: FE(),
       conditionedOn: mkWitness("postgres:orders", "42"), // stale!
       newWitness: mkWitness("postgres:orders", "44"),
       succeededAtMs: 2000,
@@ -73,6 +76,7 @@ describe("checkFreshness — pure conflict detection", () => {
       runId: R("r1"),
       dagId: D("d1"),
       nodeId: N("writer-1"),
+      executionEpoch: FE(),
       conditionedOn: mkWitness("postgres:orders", "42"),
       newWitness: mkWitness("postgres:orders", "43"),
       succeededAtMs: 1000,
@@ -84,6 +88,7 @@ describe("checkFreshness — pure conflict detection", () => {
       runId: R("r2"),
       dagId: D("d1"),
       nodeId: N("writer-2"),
+      executionEpoch: FE(),
       conditionedOn: mkWitness("postgres:users", "1"), // different resource
       newWitness: mkWitness("postgres:users", "2"),
       succeededAtMs: 2000,
@@ -108,6 +113,7 @@ describe("InMemoryFreshnessIndex", () => {
       runId: R("r1"),
       dagId: D("d"),
       nodeId: N("w"),
+      executionEpoch: FE(),
       conditionedOn: mkWitness("postgres:orders", "41"),
       newWitness: mkWitness("postgres:orders", "42"),
       succeededAtMs: 1000,
@@ -125,6 +131,7 @@ describe("InMemoryFreshnessIndex", () => {
       runId: R("r1"),
       dagId: D("d"),
       nodeId: N("w"),
+      executionEpoch: FE(),
       conditionedOn: mkWitness("postgres:orders", "41"),
       newWitness: mkWitness("postgres:orders", "42"),
       succeededAtMs: 1000,
@@ -145,6 +152,7 @@ describe("InMemoryFreshnessIndex", () => {
       runId: R("r1"),
       dagId: D("d"),
       nodeId: N("w"),
+      executionEpoch: FE(),
       conditionedOn: mkWitness("postgres:orders", "41"),
       newWitness: mkWitness("postgres:orders", "42"),
       succeededAtMs: 1000,
@@ -165,6 +173,7 @@ describe("InMemoryFreshnessIndex", () => {
       runId: R("newer"),
       dagId: D("d"),
       nodeId: N("newer-writer"),
+      executionEpoch: FE(),
       conditionedOn: mkWitness("postgres:orders", "41"),
       newWitness: mkWitness("postgres:orders", "43"),
       succeededAtMs: 2000,
@@ -195,6 +204,7 @@ describe("InMemoryFreshnessIndex", () => {
       runId: R("r1"),
       dagId: D("d"),
       nodeId: N("w"),
+      executionEpoch: FE(),
       conditionedOn: mkWitness("postgres:orders", "41"),
       newWitness: mkWitness("postgres:orders", "42"),
       succeededAtMs: 1000,

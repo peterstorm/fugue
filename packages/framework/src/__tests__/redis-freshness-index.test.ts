@@ -12,6 +12,7 @@
 
 import { afterEach, describe, it, expect } from "bun:test";
 import { D, N, R } from "./_id-helpers.js";
+import { FE } from "./_freshness-helpers.js";
 import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
 
 afterEach(() => __resetFrameworkLogger());
@@ -20,7 +21,12 @@ import {
   __testDecodeMember,
 } from "../checkpoint/redis-freshness-index.js";
 
-const encode = __testEncodeMember;
+const encode = (
+  run: Parameters<typeof __testEncodeMember>[0],
+  node: Parameters<typeof __testEncodeMember>[1],
+  kind: Parameters<typeof __testEncodeMember>[3],
+  value: Parameters<typeof __testEncodeMember>[4],
+): string => __testEncodeMember(run, node, FE(), kind, value);
 const decode = __testDecodeMember;
 
 describe("RedisFreshnessIndex encoding", () => {
@@ -30,6 +36,7 @@ describe("RedisFreshnessIndex encoding", () => {
     expect(decoded).not.toBeNull();
     expect(decoded!.runId).toBe(R("run-1"));
     expect(decoded!.nodeId).toBe(N("writer"));
+    expect(decoded!.executionEpoch).toBe(FE());
     expect(decoded!.witnessKind).toBe("version");
     expect(decoded!.witnessValue).toBe("42");
   });
@@ -66,9 +73,9 @@ describe("RedisFreshnessIndex encoding", () => {
   });
 
   it("rejects empty and non-string witness values from persisted bytes", () => {
-    expect(decode(JSON.stringify(["r", "n", "version", ""]))).toBeNull();
-    expect(decode(JSON.stringify(["r", "n", "version", null]))).toBeNull();
-    expect(decode(JSON.stringify(["r", "n", "version", 42]))).toBeNull();
+    expect(decode(JSON.stringify(["r", "n", 0, "version", ""]))).toBeNull();
+    expect(decode(JSON.stringify(["r", "n", 0, "version", null]))).toBeNull();
+    expect(decode(JSON.stringify(["r", "n", 0, "version", 42]))).toBeNull();
   });
 
   it("handles unicode witness values", () => {
@@ -94,7 +101,7 @@ describe("RedisFreshnessIndex decodeMember — rejection", () => {
 
   it("returns null for JSON array with wrong length", () => {
     expect(decode('["a","b"]')).toBeNull();
-    expect(decode('["a","b","c","d","e"]')).toBeNull();
+    expect(decode('["a","b","c","d","e","f"]')).toBeNull();
   });
 
   it("returns null for JSON number", () => {
@@ -105,9 +112,10 @@ describe("RedisFreshnessIndex decodeMember — rejection", () => {
   // must not flow into conflict decisions. Unknown kinds are corrupt entries
   // (null), exactly like shape failures.
   it("returns null for an off-contract witnessKind (closed-union gate)", () => {
-    expect(decode(JSON.stringify(["r", "n", "bogus-kind", "v"]))).toBeNull();
-    expect(decode(JSON.stringify(["r", "n", "", "v"]))).toBeNull();
-    expect(decode(JSON.stringify(["r", "n", 42, "v"]))).toBeNull();
+    expect(decode(JSON.stringify(["r", "n", 0, "bogus-kind", "v"]))).toBeNull();
+    expect(decode(JSON.stringify(["r", "n", 0, "", "v"]))).toBeNull();
+    expect(decode(JSON.stringify(["r", "n", 0, 42, "v"]))).toBeNull();
+    expect(decode(JSON.stringify(["r", "n", -1, "version", "v"]))).toBeNull();
   });
 });
 
@@ -155,6 +163,7 @@ describe("RedisFreshnessIndex recordWrite — atomic TTL contract", () => {
       runId: R("run-ttl"),
       dagId: D("dag-ttl"),
       nodeId: N("writer"),
+      executionEpoch: FE(),
       conditionedOn: witness("version", resourceName("postgres:orders"), "41"),
       newWitness: witness("version", resourceName("postgres:orders"), "42"),
       succeededAtMs: 1234,
@@ -219,6 +228,7 @@ describe("RedisFreshnessIndex findConflict — corrupt-member verdict (ADR-0025)
       runId: R("run-hostile"),
       dagId: D("dag-hostile"),
       nodeId: N("writer"),
+      executionEpoch: FE(),
       conditionedOn: witness("version", resourceName("res:hostile"), "1"),
       newWitness: witness("version", resourceName("res:hostile"), "2"),
       succeededAtMs: 1,
@@ -266,9 +276,9 @@ describe("RedisFreshnessIndex findConflict — corrupt-member verdict (ADR-0025)
 
   it("fails closed on off-contract kind or witness-value members", async () => {
     const corruptMembers = [
-      JSON.stringify(["run-9", "writer", "bogus-kind", "v"]),
-      JSON.stringify(["run-9", "writer", "version", ""]),
-      JSON.stringify(["run-9", "writer", "version", null]),
+      JSON.stringify(["run-9", "writer", 0, "bogus-kind", "v"]),
+      JSON.stringify(["run-9", "writer", 0, "version", ""]),
+      JSON.stringify(["run-9", "writer", 0, "version", null]),
     ];
 
     for (const corruptMember of corruptMembers) {
@@ -287,7 +297,7 @@ describe("RedisFreshnessIndex findConflict — corrupt-member verdict (ADR-0025)
   });
 
   it("still returns ok(null) when the latest member decodes and does not conflict", async () => {
-    const member = __testEncodeMember(R("run-9"), N("writer"), "version", "1");
+    const member = encode(R("run-9"), N("writer"), "version", "1");
     const { redis } = fakeFindConflictRedis([member, "900"]);
     const index = new RedisFreshnessIndex(redis);
 
@@ -297,7 +307,7 @@ describe("RedisFreshnessIndex findConflict — corrupt-member verdict (ADR-0025)
   });
 
   it("returns the conflicting write when the latest member decodes to a different value", async () => {
-    const member = __testEncodeMember(R("run-9"), N("writer"), "version", "2");
+    const member = encode(R("run-9"), N("writer"), "version", "2");
     const { redis } = fakeFindConflictRedis([member, "900"]);
     const index = new RedisFreshnessIndex(redis);
 
@@ -306,6 +316,7 @@ describe("RedisFreshnessIndex findConflict — corrupt-member verdict (ADR-0025)
     if (result.ok) {
       expect(result.value).not.toBeNull();
       expect(result.value?.runId).toBe(R("run-9"));
+      expect(result.value?.executionEpoch).toBe(FE());
       expect(result.value?.succeededAtMs).toBe(900);
     }
   });

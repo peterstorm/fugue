@@ -266,6 +266,35 @@ describe("createNamespacedCache", () => {
     expect(logs.some(l => l.level === "warn" && l.msg.includes("Cache set failed"))).toBe(true);
   });
 
+  it("cache fallback outcomes survive a throwing diagnostic logger", async () => {
+    const throwingLogger: LogPort = {
+      info: () => {},
+      warn: () => { throw new Error("logger failed"); },
+      error: () => { throw new Error("logger failed"); },
+    };
+    const failed = createNamespacedCache(
+      failingRedis(), testTenant, testDagId, undefined, throwingLogger,
+    );
+    expect(await failed.get("missing")).toEqual({ hit: false });
+    expect((await failed.set("key", "value")).ok).toBe(true);
+
+    const corruptedStore = new Map([
+      [buildCacheKey(testTenant, testDagId, "corrupt"), "not-json{{{"],
+    ]);
+    const corrupted = createNamespacedCache(
+      createMockRedis(corruptedStore).redis,
+      testTenant,
+      testDagId,
+      undefined,
+      throwingLogger,
+    );
+    expect(await corrupted.get("corrupt")).toEqual({ hit: false });
+
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    expect((await corrupted.set("cyclic", cyclic)).ok).toBe(true);
+  });
+
   it("set handles non-serializable values gracefully", async () => {
     const { redis } = createMockRedis();
     const { logger, logs } = collectLogs();

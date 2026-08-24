@@ -84,7 +84,7 @@ interface ComposedObservability {
  * event via `mapEventToFoundry`, which for `run-end` emits only the BARE summary
  * (duration + status — the fields the bare event guarantees). To satisfy observability spec SC-008
  * (every completed run produces a summary carrying nodeCount / retryCount /
- * cacheHitCount / totalCost) we bridge here:
+ * cacheHitCount on this domain-event channel) we bridge here:
  *
  *   - non-`run-end` events: forward to the wrapped `AiFoundryObserver`
  *     (route-decision, node-pruned, node-latency / cache-hit metrics) AND record
@@ -95,14 +95,12 @@ interface ComposedObservability {
  *     forward `run-end` to `AiFoundryObserver`, so the run-summary event is
  *     emitted exactly ONCE (the full one), never the bare one too.
  *
- * `totalCostUsd` is not knowable from observer events (it lives on OTel spans),
- * so it is omitted from the BufferedObserver path. Cost and token totals are
- * span-resident — they are carried on OTel spans (`ai.llm.cost_usd`,
- * `gen_ai.usage.*`), NOT on observer events — and are simply NOT re-emitted on
- * this domain-event channel here: `mapRunSummaryToFoundry` drops them when
- * undefined (which they always are on this observer-derived path).
- * `cacheHitCount` IS knowable here and is always supplied so the observability spec SC-008 guarantee
- * holds.
+ * Cost and token totals are span-only because observer events do not carry
+ * them (`ai.llm.cost_usd` / `gen_ai.usage.*` live on OTel spans). This channel
+ * therefore emits node/retry/cache summary metrics and intentionally omits
+ * `totalCostUsd`; `mapRunSummaryToFoundry` drops the absent value.
+ * `cacheHitCount` is knowable here and is always supplied so the observability
+ * spec SC-008 domain-event guarantee holds.
  *
  * This observer is fail-tolerant in the same spirit as `AiFoundryObserver`: it
  * is invoked inside `BufferedObserver`'s guarded replay loop, and it forwards

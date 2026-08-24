@@ -563,6 +563,37 @@ describe("createBunInitProcessAdapter (real spawn/exit/terminate)", () => {
     expect(() => adapter.beginTermination("SIGTERM")).not.toThrow();
   });
 
+  test("a non-ESRCH supervisor signal failure is observable without escaping shutdown", () => {
+    const { logger, logs } = capturingLogger();
+    const failure = Object.assign(new Error("operation not permitted"), { code: "EPERM" });
+    const adapter = createBunInitProcessAdapter({
+      supervisorEntry: "/irrelevant/main-supervisor.ts",
+      spawn: () => ({ pid: 4242, exited: new Promise<number | null>(() => {}) }),
+      kill: () => { throw failure; },
+    }, logger);
+    adapter.spawnSupervisor();
+
+    expect(() => adapter.beginTermination("SIGTERM")).not.toThrow();
+    const signalFailure = logs.find((log) => log.msg.includes("failed to signal supervisor"));
+    expect(signalFailure).toMatchObject({
+      level: "error",
+      data: { pid: 4242, sig: "SIGTERM", code: "EPERM", error: "operation not permitted" },
+    });
+  });
+
+  test("ESRCH from supervisor signalling is the silent already-exited case", () => {
+    const { logger, logs } = capturingLogger();
+    const adapter = createBunInitProcessAdapter({
+      supervisorEntry: "/irrelevant/main-supervisor.ts",
+      spawn: () => ({ pid: 4242, exited: new Promise<number | null>(() => {}) }),
+      kill: () => { throw Object.assign(new Error("no such process"), { code: "ESRCH" }); },
+    }, logger);
+    adapter.spawnSupervisor();
+
+    expect(() => adapter.beginTermination("SIGINT")).not.toThrow();
+    expect(logs.some((log) => log.msg.includes("failed to signal supervisor"))).toBe(false);
+  });
+
   test("after beginTermination, spawnSupervisor PARKS instead of respawning (no shutdown spawn-storm)", async () => {
     const adapter = createBunInitProcessAdapter({ supervisorEntry: fakeExit7 });
     adapter.beginTermination("SIGTERM");

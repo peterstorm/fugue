@@ -17,6 +17,33 @@
 
 import type { RunId, NodeId } from "./ids.js";
 
+// ---------------------------------------------------------------------------
+// FreshnessExecutionEpoch — durable identity of one logical execution suffix
+// ---------------------------------------------------------------------------
+
+declare const __freshnessExecutionEpochBrand: unique symbol;
+
+/**
+ * Non-negative generation of freshness-producing node executions within one
+ * run. Ordinary bookkeeping retries preserve it; every valid HITL reroute
+ * increments it before replacement work executes.
+ */
+export type FreshnessExecutionEpoch = number & {
+  readonly [__freshnessExecutionEpochBrand]: void;
+};
+
+/** Smart constructor for the durable execution epoch. */
+export const freshnessExecutionEpoch = (value: number): FreshnessExecutionEpoch => {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new TypeError("FreshnessExecutionEpoch must be a non-negative safe integer");
+  }
+  return value as FreshnessExecutionEpoch;
+};
+
+/** @internal — use only after a persistence boundary validated the number. */
+export const __brandFreshnessExecutionEpoch = (value: number): FreshnessExecutionEpoch =>
+  value as FreshnessExecutionEpoch;
+
 export type WitnessKind =
   | "version"          // monotonic integer (Hibernate @Version, Mongo __v)
   | "etag"             // hash-based (HTTP, S3, DynamoDB)
@@ -200,12 +227,14 @@ export const __brandWitness = (w: {
 export interface WriteEntry {
   readonly runId: RunId;
   readonly nodeId: NodeId;
+  /** Distinguishes a replacement execution from a retry of its bookkeeping. */
+  readonly executionEpoch: FreshnessExecutionEpoch;
   readonly newWitness: Witness;
   readonly succeededAtMs: number;
 }
 
 /**
- * Project a `WriteEntry` out of any value that already carries the four
+ * Project a `WriteEntry` out of any value that already carries the five
  * fields — a `write-attempted` event, a stored freshness singleton, or another
  * `WriteEntry`.
  *
@@ -219,6 +248,7 @@ export interface WriteEntry {
 export const writeEntryOf = (source: WriteEntry): WriteEntry => ({
   runId: source.runId,
   nodeId: source.nodeId,
+  executionEpoch: source.executionEpoch,
   newWitness: source.newWitness,
   succeededAtMs: source.succeededAtMs,
 });

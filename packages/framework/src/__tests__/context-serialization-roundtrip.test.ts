@@ -15,7 +15,7 @@ import { parsePersistedDagContext } from "../dag-runtime/persistence.js";
 import { N } from "./_id-helpers.js";
 import type { DagMachineContextPersisted } from "../dag-runtime/types.js";
 import type { NodeId } from "../types/ids.js";
-import { resourceName, witness } from "../types/witness.js";
+import { freshnessExecutionEpoch, resourceName, witness } from "../types/witness.js";
 
 // ---------------------------------------------------------------------------
 // Arbitraries for serializable primitives and containers
@@ -234,6 +234,7 @@ const VALID_PERSISTED_CONTEXT: DagMachineContextPersisted = {
     witness("version", resourceName("postgres:orders"), "42"),
   ]]),
   freshnessCompletedNodeIds: new Set([CONTEXT_NODE]),
+  freshnessExecutionEpoch: freshnessExecutionEpoch(3),
 };
 
 const REQUIRED_CONTEXT_FIELDS = [
@@ -253,6 +254,7 @@ const REQUIRED_CONTEXT_FIELDS = [
   "initialInput",
   "priorWitnesses",
   "freshnessCompletedNodeIds",
+  "freshnessExecutionEpoch",
 ] as const satisfies readonly (keyof DagMachineContextPersisted)[];
 
 describe("parsePersistedDagContext", () => {
@@ -283,6 +285,18 @@ describe("parsePersistedDagContext", () => {
       expect(parsePersistedDagContext(candidate).ok).toBe(false);
     }));
   });
+
+  it.each([Number.NaN, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects malformed freshness execution epoch %s",
+    (freshnessExecutionEpoch) => {
+      const parsed = parsePersistedDagContext({
+        ...VALID_PERSISTED_CONTEXT,
+        freshnessExecutionEpoch,
+      });
+      expect(parsed.ok).toBe(false);
+      if (!parsed.ok) expect(parsed.error).toContain("context.freshnessExecutionEpoch");
+    },
+  );
 
   it("rejects a prior-witness map whose resource key disagrees with its witness", () => {
     const candidate = {

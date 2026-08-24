@@ -5,9 +5,9 @@
  * module and `side-effects.ts` sit above. They are re-exported here so every
  * existing `from "./freshness.js"` import site is unchanged.
  */
-export type { WitnessKind, ResourceName, Witness, WitnessValue } from "./witness.js";
-export { resourceName, __brandResourceName, witnessValue, witness, stampWitness, __brandWitness, isWitnessKind } from "./witness.js";
-import type { Witness, WitnessKind } from "./witness.js";
+export type { WitnessKind, ResourceName, Witness, WitnessValue, FreshnessExecutionEpoch } from "./witness.js";
+export { resourceName, __brandResourceName, witnessValue, witness, stampWitness, __brandWitness, isWitnessKind, freshnessExecutionEpoch, __brandFreshnessExecutionEpoch } from "./witness.js";
+import type { Witness, WitnessKind, FreshnessExecutionEpoch } from "./witness.js";
 // ---------------------------------------------------------------------------
 // FreshnessIndex port + supporting types
 //
@@ -70,7 +70,7 @@ export type { WitnessCapturedEvent, WriteAttemptedEvent };
 
 /**
  * Port-level ZSET member grammar for the FreshnessIndex port (ADR-0079).
- * Redis stores `[runId, nodeId, witnessKind, witnessValue]` as the member of
+ * Redis stores `[runId, nodeId, executionEpoch, witnessKind, witnessValue]` as the member of
  * the per-resource ZSET; the file backend compares equal-score conflict
  * winners byte-for-byte against these SAME bytes. ONE encoding, owned by the
  * port that specifies the tie-break: both adapters consume it, so a change
@@ -80,13 +80,14 @@ export type { WitnessCapturedEvent, WriteAttemptedEvent };
 export const freshnessMemberKey = (
   runId: RunId,
   nodeId: NodeId,
+  executionEpoch: FreshnessExecutionEpoch,
   // The CLOSED `WitnessKind` union, not `string`: a misspelled kind would
   // otherwise compile into member bytes that can never match a real member,
   // silently skewing the equal-score winner comparison (ONE encoding of the
   // tie-break grammar — round-22 tda-2).
   witnessKind: WitnessKind,
   witnessValue: string,
-): string => JSON.stringify([runId, nodeId, witnessKind, witnessValue]);
+): string => JSON.stringify([runId, nodeId, executionEpoch, witnessKind, witnessValue]);
 
 /**
  * Redis compares equal-score ZSET members as unsigned byte strings; the

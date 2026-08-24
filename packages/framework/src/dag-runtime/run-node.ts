@@ -78,11 +78,9 @@ export const runNodeShared = async (
   const stamp = (): Date => new Date(nowFn());
 
   /**
-   * THE one `node-error` emission for this node (round-38 cs-1, replacing eight
-   * near-copies). `sideEffects` is a static property of the node, so it is
-   * carried on EVERY failure event — two of the eight copies omitted it, which
-   * left a buffered-observer post-mortem unable to tell whether a node that
-   * failed input validation was a writer.
+   * THE one `node-error` emission for this node. `sideEffects` is a static
+   * property of the node, so it is carried on EVERY failure event; buffered
+   * post-mortems can identify a writer even when input validation failed.
    */
   const emitNodeError = (
     error: string,

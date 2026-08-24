@@ -25,6 +25,7 @@ import type { RunId } from "../types/ids.js";
 import type { DagId } from "../types/ids.js";
 import type { NodeContext } from "../types/node.js";
 import { NoopObserver } from "../types/observer.js";
+import { freshnessExecutionEpoch } from "../types/witness.js";
 
 // ---------------------------------------------------------------------------
 // Per-slice factories
@@ -72,6 +73,7 @@ export const testContext = (parts?: {
   initialInput?: unknown;
   priorWitnesses?: DagMachineContextPersisted["priorWitnesses"];
   freshnessCompletedNodeIds?: DagMachineContextPersisted["freshnessCompletedNodeIds"];
+  freshnessExecutionEpoch?: DagMachineContextPersisted["freshnessExecutionEpoch"];
 }): DagMachineContextPersisted => ({
   ...testTopology(parts?.topology),
   ...testRetryState(parts?.retry),
@@ -81,6 +83,7 @@ export const testContext = (parts?: {
   initialInput: parts?.initialInput ?? {},
   priorWitnesses: parts?.priorWitnesses ?? new Map(),
   freshnessCompletedNodeIds: parts?.freshnessCompletedNodeIds ?? new Set(),
+  freshnessExecutionEpoch: parts?.freshnessExecutionEpoch ?? freshnessExecutionEpoch(0),
 });
 
 /** Runtime context fixture: persisted state plus compiled DAG lookup tables. */
@@ -122,6 +125,7 @@ export const testRuntimeContext = (
     ...overrides,
     priorWitnesses: overrides.priorWitnesses ?? new Map(),
     freshnessCompletedNodeIds: overrides.freshnessCompletedNodeIds ?? new Set(),
+    freshnessExecutionEpoch: overrides.freshnessExecutionEpoch ?? freshnessExecutionEpoch(0),
   };
 };
 

@@ -4,6 +4,7 @@
 import { match } from "ts-pattern";
 import type { DagPhase, DagMachineContextPersisted, HumanAction } from "./types.js";
 import type { NodeId } from "../types/ids.js";
+import { freshnessExecutionEpoch } from "../types/witness.js";
 import {
   type WaveDoneResult,
   advanceToNextWave,
@@ -110,6 +111,21 @@ const handleReroute = (
     [...ctx.outputs].filter(([nodeId]) => beforeTargetWave(nodeId)),
   );
 
+  if (ctx.freshnessExecutionEpoch === Number.MAX_SAFE_INTEGER) {
+    return {
+      state: {
+        kind: "failed",
+        error: {
+          kind: "node-crash",
+          nodeId: currentState.nodeId,
+          retriability: "non-retriable",
+          message: "freshness execution epoch exhausted; reroute refused",
+        },
+      },
+      context: ctx,
+    };
+  }
+
   // The executor precomputes the active set by re-evaluating predicates for
   // prior waves. If not provided (shouldn't happen in normal operation),
   // fall back to the current active set (safe but imprecise).
@@ -124,6 +140,9 @@ const handleReroute = (
     freshnessCompletedNodeIds: new Set(
       [...ctx.freshnessCompletedNodeIds].filter(beforeTargetWave),
     ),
+    // The checkpoint lands before replacement work starts. Bookkeeping retries
+    // retain this epoch; another reroute creates a new logical execution.
+    freshnessExecutionEpoch: freshnessExecutionEpoch(ctx.freshnessExecutionEpoch + 1),
     activeNodeIds: reseededActive,
   };
 

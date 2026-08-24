@@ -29,6 +29,7 @@ import type { PreparedFreshnessWrite, StoredFreshnessEntry } from "../file/fresh
 const writeEvent = (opts: {
   runId?: string;
   nodeId?: string;
+  executionEpoch?: number;
   resource?: string;
   value?: string;
   succeededAtMs?: number;
@@ -36,6 +37,7 @@ const writeEvent = (opts: {
   type: "write-attempted",
   runId: opts.runId ?? "run-1",
   nodeId: opts.nodeId ?? "node-1",
+  executionEpoch: opts.executionEpoch ?? 0,
   newWitness: { kind: "version", resource: opts.resource ?? "res-a", value: opts.value ?? "v1" },
   succeededAtMs: opts.succeededAtMs ?? 1_000,
 });
@@ -67,6 +69,7 @@ describe("prepareFreshnessWrite — the write-boundary parser", () => {
     expect(p.resource).toBe("res-a");
     expect(String(p.runId)).toBe("run-1");
     expect(String(p.nodeId)).toBe("node-1");
+    expect(Number(p.executionEpoch)).toBe(0);
     expect(p.newWitness.value).toBe("v1");
   });
 
@@ -76,6 +79,8 @@ describe("prepareFreshnessWrite — the write-boundary parser", () => {
       [{ ...(writeEvent({}) as object), type: "other" }, 'write event type must be exactly "write-attempted"'],
       [{ ...(writeEvent({}) as object), runId: "not a valid id!" }, "runId does not match the framework ID boundary"],
       [{ ...(writeEvent({}) as object), nodeId: "not a valid id!" }, "nodeId does not match the framework ID boundary"],
+      [{ ...(writeEvent({}) as object), executionEpoch: -1 }, "executionEpoch must be a non-negative safe integer"],
+      [{ ...(writeEvent({}) as object), executionEpoch: 1.5 }, "executionEpoch must be a non-negative safe integer"],
       [{ ...(writeEvent({}) as object), newWitness: 7 }, "newWitness must be an object"],
       [{ ...(writeEvent({}) as object), newWitness: { kind: "nope", resource: "r", value: "v" } }, "newWitness.kind is not a WitnessKind"],
       [{ ...(writeEvent({}) as object), newWitness: { kind: "version", resource: "", value: "v" } }, "newWitness.resource must be non-empty"],
@@ -96,6 +101,7 @@ describe("prepareFreshnessWrite — the write-boundary parser", () => {
       type: "write-attempted",
       get runId() { reads += 1; return "run-1"; },
       nodeId: "node-1",
+      executionEpoch: 0,
       newWitness: { kind: "version", resource: "res-a", value: "v1" },
       succeededAtMs: 1,
     };

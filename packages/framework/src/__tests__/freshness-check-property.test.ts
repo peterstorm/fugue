@@ -1,4 +1,4 @@
-import { witness, witnessValue, stampWitness, RN } from "./_freshness-helpers.js";
+import { FE, witness, witnessValue, stampWitness, RN } from "./_freshness-helpers.js";
 /**
  * Phase 3 property test — freshness conflict detection.
  *
@@ -68,6 +68,7 @@ const toWriteAttemptedEvent = (spec: WriteSpec): WriteAttemptedEvent => ({
   runId: spec.runId,
   dagId: D("d"),
   nodeId: spec.nodeId,
+  executionEpoch: FE(),
   conditionedOn: witness("version", RN(spec.resource), spec.conditionedOnValue),
   newWitness: witness("version", RN(spec.resource), spec.newWitnessValue),
   succeededAtMs: spec.succeededAtMs,
@@ -242,6 +243,7 @@ describe("freshness conflict detection — property tests (Phase 3)", () => {
               runId: R(`r${i}`),
               dagId: D("d"),
               nodeId: N(`w${i}`),
+              executionEpoch: FE(),
               conditionedOn: witness("version", RN(resource), String(currentVersion)),
               newWitness: witness("version", RN(resource), String(nextVersion)),
               succeededAtMs: (i + 1) * 1000,

@@ -274,6 +274,54 @@ describe("retriable freshness failure — wave retry", () => {
     expect(observer.events.filter((event) => event.type === "write-attempted")).toHaveLength(1);
   });
 
+  test("a same-valued writer reroute records a distinct logical execution", async () => {
+    let nodeRuns = 0;
+    let reviews = 0;
+    const observer = new RecordingObserver();
+    const dag = defineDag({
+      id: "same-valued-freshness-reroute",
+      nodes: {
+        writer: makeNode("writer", {
+          sideEffects: writesTo("pg:reroute", "2"),
+          humanReview: { prompt: "Review write" },
+          run: async () => {
+            nodeRuns += 1;
+            return ok({ committed: true });
+          },
+        }),
+      },
+      edges: [{ from: DAG_INPUT, to: "writer" }],
+      outputNodeId: "writer",
+    });
+
+    const result = await runDagStateful(
+      dag,
+      null,
+      makeNodeContext({
+        runId: R("run-same-valued-reroute"),
+        dagId: D("same-valued-freshness-reroute"),
+        observer,
+      }),
+      {
+        onHumanReview: async () => {
+          reviews += 1;
+          return reviews === 1
+            ? { kind: "reroute" as const, targetNodeId: N("writer") }
+            : { kind: "approve" as const };
+        },
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(nodeRuns).toBe(2);
+    const writes = observer.events.filter(
+      (event): event is WriteAttemptedEvent => event.type === "write-attempted",
+    );
+    expect(writes).toHaveLength(2);
+    expect(writes.map(({ executionEpoch }) => Number(executionEpoch))).toEqual([0, 1]);
+    expect(writes.map(({ newWitness }) => newWitness.value)).toEqual(["2", "2"]);
+  });
+
   test("an ambiguously committed write is acknowledged on retry and never conflicts with itself", async () => {
     let nodeRuns = 0;
     const observer = new RecordingObserver();
@@ -304,6 +352,10 @@ describe("retriable freshness failure — wave retry", () => {
       (event): event is FreshnessViolationEvent => event.type === "freshness-violation",
     );
     expect(violations).toHaveLength(0);
-    expect(observer.events.filter((event) => event.type === "write-attempted")).toHaveLength(1);
+    const writes = observer.events.filter(
+      (event): event is WriteAttemptedEvent => event.type === "write-attempted",
+    );
+    expect(writes).toHaveLength(1);
+    expect(Number(writes[0]!.executionEpoch)).toBe(0);
   });
 });

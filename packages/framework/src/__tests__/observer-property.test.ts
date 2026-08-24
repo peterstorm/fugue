@@ -1,4 +1,4 @@
-import { witness, RN } from "./_freshness-helpers.js";
+import { FE, witness, RN } from "./_freshness-helpers.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import fc from "fast-check";
 import { RecordingObserver, createObserver } from "../observer/observer.js";
@@ -43,14 +43,14 @@ const arbEventType: fc.Arbitrary<ObserverEvent> = fc.oneof(
   }),
   fc.constant<ObserverEvent>({
     type: "write-attempted", runId: rid, dagId: did, nodeId: nid,
-    conditionedOn: witness("version", RN("r"), "1"),
+    executionEpoch: FE(), conditionedOn: witness("version", RN("r"), "1"),
     newWitness: witness("version", RN("r"), "2"),
     succeededAtMs: 0, timestamp: ts,
   }),
   fc.constant<ObserverEvent>({
     type: "freshness-violation", runId: rid, dagId: did, nodeId: nid,
     resource: RN("r"), conditionedOnWitness: witness("version", RN("r"), "1"),
-    conflictingWrite: { runId: rid, nodeId: nid, newWitness: witness("version", RN("r"), "2"), succeededAtMs: 0 },
+    conflictingWrite: { runId: rid, nodeId: nid, executionEpoch: FE(), newWitness: witness("version", RN("r"), "2"), succeededAtMs: 0 },
     detectedAtMs: 0, timestamp: ts,
   }),
   fc.constant<ObserverEvent>({

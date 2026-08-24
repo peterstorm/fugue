@@ -40,10 +40,12 @@ const isOwnRecordedWrite = (
   entry: WriteEntry,
   runId: RunId,
   nodeId: NodeId,
+  executionEpoch: WriteEntry["executionEpoch"],
   newWitness: Witness,
 ): boolean =>
   entry.runId === runId &&
   entry.nodeId === nodeId &&
+  entry.executionEpoch === executionEpoch &&
   entry.newWitness.kind === newWitness.kind &&
   entry.newWitness.resource === newWitness.resource &&
   entry.newWitness.value === newWitness.value;
@@ -189,7 +191,13 @@ export async function emitFreshnessWitnessEvents(
         const conflict = conflictResult.value;
         const alreadyRecorded =
           conflict !== null &&
-          isOwnRecordedWrite(conflict, nodeCtx.runId, nodeId, newWitness);
+          isOwnRecordedWrite(
+            conflict,
+            nodeCtx.runId,
+            nodeId,
+            machineCtx.freshnessExecutionEpoch,
+            newWitness,
+          );
         if (conflict !== null && !alreadyRecorded) {
           emit(nodeCtx, {
             type: "freshness-violation",
@@ -209,6 +217,7 @@ export async function emitFreshnessWitnessEvents(
           runId: nodeCtx.runId,
           dagId,
           nodeId,
+          executionEpoch: machineCtx.freshnessExecutionEpoch,
           conditionedOn,
           newWitness,
           succeededAtMs: nowFn(),

@@ -3,7 +3,7 @@
 // ADR-0079 stores exactly one bounded latest-write singleton per resource:
 //
 //   <directory>/<sha256hex(resource)>.json
-//   { writtenAtMs, runId, nodeId, newWitness, succeededAtMs }
+//   { writtenAtMs, runId, nodeId, executionEpoch, newWitness, succeededAtMs }
 //
 // History belongs to the event log; this index deliberately persists neither
 // an append log nor a Redis member set. Writes for one digest are serialized,

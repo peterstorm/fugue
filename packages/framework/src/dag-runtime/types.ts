@@ -7,7 +7,7 @@ import type { Decision } from "./routing.js";
 import type { IncomingSources } from "./topology.js";
 import type { NodeId } from "../types/ids.js";
 import { nodeId } from "../types/ids.js";
-import type { Witness } from "../types/witness.js";
+import type { Witness, FreshnessExecutionEpoch } from "../types/witness.js";
 
 /**
  * Sentinel node id used by the executor/runner when an ERROR event arrives
@@ -319,6 +319,11 @@ export interface DagMachineContextPersisted extends DagTopology, DagRetryState, 
    * is emitted, while completed bookkeeping must survive worker replacement.
    */
   readonly freshnessCompletedNodeIds: ReadonlySet<NodeId>;
+  /**
+   * Logical execution generation stamped onto freshness writes. Stable across
+   * bookkeeping retries; incremented before replacement work after a reroute.
+   */
+  readonly freshnessExecutionEpoch: FreshnessExecutionEpoch;
 }
 
 // ---------------------------------------------------------------------------

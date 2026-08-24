@@ -11,7 +11,7 @@
 //      exhaustive transition with a NonExhaustiveError.
 
 import { describe, it, expect } from "bun:test";
-import { ok, err, toJson, fromJson } from "@fuguejs/framework";
+import { ok, err, toJson, fromJson, freshnessExecutionEpoch } from "@fuguejs/framework";
 import type { RunId, NodeId, DagPhase, DagMachineContextPersisted, Result } from "@fuguejs/framework";
 import { createRunLeaseAuthority } from "../ports.js";
 import type { RunExecutionJob, RunStorePort } from "../ports.js";
@@ -50,6 +50,7 @@ const VALID_CONTEXT: DagMachineContextPersisted = {
   initialInput: null,
   priorWitnesses: new Map(),
   freshnessCompletedNodeIds: new Set(),
+  freshnessExecutionEpoch: freshnessExecutionEpoch(0),
 };
 const VALID_PHASES: Record<DagPhase["kind"], DagPhase> = {
   pending: { kind: "pending" },
@@ -235,6 +236,7 @@ describe("makeRunStoreJobLike", () => {
       ["confidenceByNode", {}],
       ["priorWitnesses", {}],
       ["freshnessCompletedNodeIds", []],
+      ["freshnessExecutionEpoch", -1],
     ];
     for (const [field, value] of corruptions) {
       const result = makeRunStoreJobLike(port, LEASE, toJson({

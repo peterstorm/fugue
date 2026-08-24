@@ -16,6 +16,7 @@ import type { FrameworkError } from "../types/errors.js";
 import type { NodeId } from "../types/ids.js";
 import type { DagDef } from "../types/dag.js";
 import { N, D } from "./_id-helpers.js";
+import { FE } from "./_freshness-helpers.js";
 import { z } from "zod";
 
 // ---------------------------------------------------------------------------
@@ -64,6 +65,7 @@ const minimalCtx: DagMachineContext = {
   confidenceByNode: new Map(),
   priorWitnesses: new Map(),
   freshnessCompletedNodeIds: new Set(),
+  freshnessExecutionEpoch: FE(),
 };
 
 // ---------------------------------------------------------------------------

@@ -41,6 +41,7 @@ import type {
 } from "../types/freshness.js";
 import { resourceName, witness, FRESHNESS_TTL_SECONDS, compareFreshnessMemberKeys } from "../types/freshness.js";
 import { D, N, R } from "./_id-helpers.js";
+import { FE } from "./_freshness-helpers.js";
 import { isFrameworkError, retriabilityOf } from "../types/errors.js";
 
 const cleanup: string[] = [];
@@ -68,6 +69,7 @@ const writeEvent = (
   ids: {
     readonly runId?: string;
     readonly nodeId?: string;
+    readonly executionEpoch?: number;
     readonly kind?: WitnessKind;
   } = {},
 ): WriteAttemptedEvent => ({
@@ -75,6 +77,7 @@ const writeEvent = (
   runId: R(ids.runId ?? "run-1"),
   dagId: D("dag-1"),
   nodeId: N(ids.nodeId ?? "writer"),
+  executionEpoch: FE(ids.executionEpoch ?? 0),
   conditionedOn: W(resource, "conditioned", ids.kind),
   newWitness: W(resource, value, ids.kind),
   succeededAtMs,
@@ -96,6 +99,7 @@ const comparable = (entry: WriteEntry | null): unknown =>
     : {
         runId: entry.runId,
         nodeId: entry.nodeId,
+        executionEpoch: entry.executionEpoch,
         newWitness: {
           kind: entry.newWitness.kind,
           resource: entry.newWitness.resource,
@@ -108,6 +112,7 @@ type PersistedSingleton = Readonly<{
   writtenAtMs: number;
   runId: string;
   nodeId: string;
+  executionEpoch: number;
   newWitness: Readonly<{
     kind: WitnessKind;
     resource: string;
@@ -126,6 +131,7 @@ const expectedSingleton = (
   writtenAtMs,
   runId: event.runId,
   nodeId: event.nodeId,
+  executionEpoch: event.executionEpoch,
   newWitness: {
     kind: event.newWitness.kind,
     resource: event.newWitness.resource,
@@ -142,7 +148,7 @@ type TieWrite = Readonly<{
 }>;
 
 const redisMemberOf = (write: TieWrite): string =>
-  encodeRedisMember(R(write.runId), N(write.nodeId), write.kind, write.value);
+  encodeRedisMember(R(write.runId), N(write.nodeId), FE(), write.kind, write.value);
 
 const redisTieWinner = (left: TieWrite, right: TieWrite): TieWrite =>
   compareFreshnessMemberKeys(redisMemberOf(left), redisMemberOf(right)) >= 0
@@ -275,6 +281,7 @@ describe("createFileFreshnessIndex — public surface and durable singleton", ()
       "writtenAtMs",
       "runId",
       "nodeId",
+      "executionEpoch",
       "newWitness",
       "succeededAtMs",
     ]);
@@ -294,6 +301,7 @@ describe("createFileFreshnessIndex — public surface and durable singleton", ()
     expect(comparable(conflict)).toEqual({
       runId: "run-a",
       nodeId: "update-order",
+      executionEpoch: FE(),
       newWitness: { kind: "version", resource, value: "v2" },
       succeededAtMs: 1_900,
     });
@@ -370,6 +378,7 @@ describe("createFileFreshnessIndex — public surface and durable singleton", ()
         writtenAtMs: 1_001,
         runId: winner.runId,
         nodeId: winner.nodeId,
+        executionEpoch: FE(),
         newWitness: {
           kind: winner.kind,
           resource,
@@ -405,6 +414,7 @@ describe("createFileFreshnessIndex — public surface and durable singleton", ()
       writtenAtMs: 1_500,
       runId: "run-tie",
       nodeId: "writer-tie",
+      executionEpoch: FE(),
       newWitness: { kind: "version", resource, value: "v1" },
       succeededAtMs: 900,
     });
@@ -625,6 +635,7 @@ describe("createFileFreshnessIndex — one-read runtime boundary snapshots", () 
     defineGetter(runtimeEvent, "type", once("type", "write-attempted", "wrong-type"));
     defineGetter(runtimeEvent, "runId", once("runId", valid.runId, "../wrong"));
     defineGetter(runtimeEvent, "nodeId", once("nodeId", valid.nodeId, "../wrong"));
+    defineGetter(runtimeEvent, "executionEpoch", once("executionEpoch", valid.executionEpoch, -1));
     defineGetter(runtimeEvent, "newWitness", once("newWitness", nested, null));
     defineGetter(runtimeEvent, "succeededAtMs", once("succeededAtMs", 900, Number.NaN));
 
@@ -641,6 +652,7 @@ describe("createFileFreshnessIndex — one-read runtime boundary snapshots", () 
       type: 1,
       runId: 1,
       nodeId: 1,
+      executionEpoch: 1,
       newWitness: 1,
       succeededAtMs: 1,
       kind: 1,
@@ -652,6 +664,7 @@ describe("createFileFreshnessIndex — one-read runtime boundary snapshots", () 
       writtenAtMs: 1_000,
       runId: "run-snapshot",
       nodeId: "node-snapshot",
+      executionEpoch: FE(),
       newWitness: { kind: "etag", resource, value: "persisted" },
       succeededAtMs: 900,
     });
@@ -1104,6 +1117,7 @@ describe("createFileFreshnessIndex — strict codec and typed failures", () => {
         writtenAtMs: 900,
         runId: "../escape",
         nodeId: "writer",
+        executionEpoch: 0,
         newWitness: { kind: "version", resource, value: "2" },
         succeededAtMs: 900,
       }),
@@ -1111,6 +1125,7 @@ describe("createFileFreshnessIndex — strict codec and typed failures", () => {
         writtenAtMs: 900,
         runId: "run-1",
         nodeId: "writer",
+        executionEpoch: 0,
         newWitness: { kind: "unknown", resource, value: "2" },
         succeededAtMs: 900,
       }),
@@ -1118,6 +1133,7 @@ describe("createFileFreshnessIndex — strict codec and typed failures", () => {
         writtenAtMs: 900,
         runId: "run-1",
         nodeId: "writer",
+        executionEpoch: 0,
         newWitness: { kind: "version", resource: "crossed:resource", value: "2" },
         succeededAtMs: 900,
       }),
@@ -1145,6 +1161,7 @@ describe("createFileFreshnessIndex — strict codec and typed failures", () => {
         writtenAtMs: 900,
         runId: "run-1",
         nodeId: "writer",
+        executionEpoch: 0,
         newWitness: { kind: "version", resource: "crossed:resource", value: "2" },
         succeededAtMs: 900,
       }));
@@ -1237,11 +1254,12 @@ describe("createFileFreshnessIndex — strict codec and typed failures", () => {
       resource: "tie:serialization",
       runId: R("run-a"),
       nodeId: N("node-a"),
+      executionEpoch: FE(),
       newWitness: W("tie:serialization", "日本語", "custom"),
       succeededAtMs: 100,
     };
     expect(__testSerializeRedisFreshnessMember(entry)).toBe(
-      encodeRedisMember(entry.runId, entry.nodeId, "custom", "日本語"),
+      encodeRedisMember(entry.runId, entry.nodeId, entry.executionEpoch, "custom", "日本語"),
     );
   });
 });
@@ -1281,6 +1299,7 @@ describe("createFileFreshnessIndex — cross-process singleton convergence (ADR-
         `    runId: \`run-\${id}\`,` ,
         `    dagId: "dag-1",`,
         `    nodeId: \`writer-\${id}\`,` ,
+        `    executionEpoch: 0,`,
         `    conditionedOn: { kind: "version", resource: "cp:resource", value: "none" },`,
         `    newWitness: { kind: "version", resource: "cp:resource", value: \`\${id}:\${i}\` },`,
         `    succeededAtMs,`,
@@ -1337,5 +1356,6 @@ describe("createFileFreshnessIndex — cross-process singleton convergence (ADR-
     expect(winner.newWitness.value).toBe("2:4");
     expect(String(winner.runId)).toBe("run-2");
     expect(String(winner.nodeId)).toBe("writer-2");
+    expect(winner.executionEpoch).toBe(FE());
   }, 30_000);
 });

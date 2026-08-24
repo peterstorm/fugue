@@ -7,6 +7,7 @@ import type { NodeDef } from "../types/node.js";
 import { nonEmptyString } from "../types/non-empty-string.js";
 import { N, D, nodeMap, nodeSet } from "./_id-helpers.js";
 import { testRuntimeContext as mkCtx } from "./_context-factories.js";
+import { FE } from "./_freshness-helpers.js";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -178,6 +179,28 @@ describe("handleHumanResponse — reroute backward", () => {
     expect(result.context.retries.has(N("c"))).toBe(false);
     // Freshness completion is invalidated on the same target/later waves.
     expect(result.context.freshnessCompletedNodeIds).toEqual(new Set());
+    expect(Number(result.context.freshnessExecutionEpoch)).toBe(1);
+  });
+
+  it("fails closed rather than throwing when the execution epoch is exhausted", () => {
+    const ctx = mkCtx({
+      waves: [[N("a")]],
+      outputs: nodeMap([["a", "A"]]),
+      freshnessExecutionEpoch: FE(Number.MAX_SAFE_INTEGER),
+      activeNodeIds: nodeSet(["a"]),
+    });
+
+    const result = handleHumanResponse(
+      mkAwaitingHuman("a"),
+      { kind: "reroute", targetNodeId: N("a") },
+      ctx,
+    );
+
+    expect(result.state).toMatchObject({
+      kind: "failed",
+      error: { kind: "node-crash", retriability: "non-retriable" },
+    });
+    expect(result.context).toBe(ctx);
   });
 
   it("preserves outputs from waves before target", () => {
@@ -213,6 +236,7 @@ describe("handleHumanResponse — reroute backward", () => {
     // wave 1+ outputs and freshness completion proof are cleared.
     expect(result.context.outputs.has(N("b"))).toBe(false);
     expect(result.context.freshnessCompletedNodeIds).toEqual(new Set([N("a")]));
+    expect(Number(result.context.freshnessExecutionEpoch)).toBe(1);
   });
 });
 
