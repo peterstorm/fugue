@@ -362,6 +362,59 @@ describe("emitFreshnessWitnessEvents", () => {
     expect(obs.events.some((e) => e.type === "node-error")).toBe(true);
   });
 
+  it("preserves witnessed partial progress when index diagnostics throw", async () => {
+    setFrameworkLogger({
+      debug() {},
+      info() {},
+      warn() {},
+      error() { throw new Error("logger transport failed"); },
+    });
+    const pureNode = makeNodeDef("pure-node");
+    const writeNode = makeNodeDef("write-node", {
+      sideEffects: {
+        kind: "writes",
+        resource: RN("pg:orders"),
+        extractConditionedOn: () => witness("version", RN("pg:orders"), "1"),
+        extractNewWitness: () => witnessValue("version", "2"),
+      },
+    });
+    const machineCtx = {
+      ...makeMachineCtx(),
+      outputs: new Map([[NID_READ, { version: 1 }]]),
+    };
+
+    for (const failingIndex of [
+      {
+        findConflict: async () => err({ kind: "cache-error" as const, operation: "findConflict", message: "Redis down" }),
+        recordWrite: async () => ok(undefined),
+      },
+      {
+        findConflict: async () => ok(null),
+        recordWrite: async () => err({ kind: "cache-error" as const, operation: "recordWrite", message: "Redis down" }),
+      },
+    ] satisfies readonly FreshnessIndex[]) {
+      const ctx = makePostWaveCtx(
+        [NID_PURE, NID_WRITE],
+        new Map([[NID_PURE, pureNode], [NID_WRITE, writeNode]]) as any,
+        machineCtx,
+        new RecordingObserver(),
+        failingIndex,
+      );
+
+      const result = await emitFreshnessWitnessEvents(
+        ctx,
+        new Map([[NID_PURE, null], [NID_WRITE, {}]]),
+        new Set(),
+      );
+
+      expect(result.kind).toBe("aborted");
+      if (result.kind === "aborted") {
+        expect(result.witnessed).toEqual(new Set([NID_PURE]));
+        expect(result.error.kind).toBe("node-crash");
+      }
+    }
+  });
+
   it("returns Err when writes extractor throws (fail-closed)", async () => {
     const obs = new RecordingObserver();
     const writeNode = makeNodeDef("write-node", {

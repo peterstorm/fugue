@@ -11,7 +11,7 @@
  */
 
 import { afterEach, describe, it, expect } from "bun:test";
-import { N, R } from "./_id-helpers.js";
+import { D, N, R } from "./_id-helpers.js";
 import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
 
 afterEach(() => __resetFrameworkLogger());
@@ -162,6 +162,42 @@ describe("RedisFreshnessIndex findConflict — corrupt-member verdict (ADR-0025)
       }
     }
     expect(index.consecutiveFailures).toBe(5);
+  });
+
+  it("contains hostile non-Error Redis rejections inside both Result-bearing methods", async () => {
+    const hostile = Object.create(null);
+    const recordIndex = new RedisFreshnessIndex({
+      script: async () => { throw hostile; },
+    } as unknown as ConstructorParameters<typeof RedisFreshnessIndex>[0]);
+    const write = await recordIndex.recordWrite({
+      type: "write-attempted",
+      runId: R("run-hostile"),
+      dagId: D("dag-hostile"),
+      nodeId: N("writer"),
+      conditionedOn: witness("version", resourceName("res:hostile"), "1"),
+      newWitness: witness("version", resourceName("res:hostile"), "2"),
+      succeededAtMs: 1,
+      timestamp: new Date(1),
+    });
+
+    const conflictIndex = new RedisFreshnessIndex({
+      zrevrangebyscore: async () => { throw hostile; },
+    } as unknown as ConstructorParameters<typeof RedisFreshnessIndex>[0]);
+    const conflict = await conflictIndex.findConflict(
+      witness("version", resourceName("res:hostile"), "1"),
+      0,
+    );
+
+    for (const result of [write, conflict]) {
+      expect(result.ok).toBe(false);
+      if (!result.ok && result.error.kind === "cache-error") {
+        expect(typeof result.error.message).toBe("string");
+      }
+    }
+    expect(recordIndex.lastError).toBeInstanceOf(Error);
+    expect(conflictIndex.lastError).toBeInstanceOf(Error);
+    expect(typeof recordIndex.lastError?.message).toBe("string");
+    expect(typeof conflictIndex.lastError?.message).toBe("string");
   });
 
   it("fails closed on an undecodable (non-JSON) latest member instead of returning ok(null)", async () => {

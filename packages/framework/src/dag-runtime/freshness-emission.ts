@@ -21,7 +21,6 @@ import type { Witness, WriteEntry } from "../types/freshness.js";
 import { stampWitness, writeEntryOf } from "../types/freshness.js";
 import type { FrameworkError } from "../types/errors.js";
 import { type Result, ok, err } from "../types/result.js";
-import { fwLogger } from "../logger.js";
 import { bestEffortLog } from "./best-effort.js";
 import { formatFrameworkError } from "../types/errors.js";
 import { safeErrorMessage } from "../types/safe-error.js";
@@ -29,9 +28,6 @@ import { buildNodeInput } from "../shared/build-input.js";
 import { emit } from "./emit.js";
 import type { PostWaveContext } from "./post-wave-context.js";
 import { nodeErrorEmitter } from "./post-wave-context.js";
-
-/** Extraction diagnostics are subordinate to the fail-closed `Result`. */
-const warnWithoutThrowing = (message: string): void => bestEffortLog("warn", message);
 
 /**
  * Whether the latest indexed write is this node's own already-committed
@@ -116,7 +112,8 @@ export async function emitFreshnessWitnessEvents(
           witnessAccumulator?.set(capturedWitness.resource, capturedWitness);
         } catch (e) {
           const msg = safeErrorMessage(e);
-          warnWithoutThrowing(
+          bestEffortLog(
+            "warn",
             `[emitFreshnessWitnessEvents] extractWitness failed for node '${nodeId}': ${msg}`,
           );
           const fwError: FrameworkError = { kind: "node-crash", nodeId, retriability: "non-retriable", message: `extractWitness threw: ${msg}` };
@@ -137,7 +134,7 @@ export async function emitFreshnessWitnessEvents(
         if (!se.extractConditionedOn || !se.extractNewWitness) {
           const message = `writes node '${nodeId}' declares only one of extractConditionedOn/extractNewWitness — both are required for freshness tracking`;
           const fwError: FrameworkError = { kind: "node-crash", nodeId, retriability: "non-retriable", message };
-          fwLogger().error(`[emitFreshnessWitnessEvents] ${message}`);
+          bestEffortLog("error", `[emitFreshnessWitnessEvents] ${message}`);
           emitNodeError(nodeId, message, fwError);
           return err(fwError);
         }
@@ -147,7 +144,7 @@ export async function emitFreshnessWitnessEvents(
         const inputResult = buildNodeInput(priorOutputs, incoming, nodeId);
         if (!inputResult.ok) {
           const message = `BUG: input reconstruction failed for writes node '${nodeId}': ${inputResult.error.kind === "node-crash" ? inputResult.error.message : "unknown"}`;
-          fwLogger().error(`[emitFreshnessWitnessEvents] ${message}`);
+          bestEffortLog("error", `[emitFreshnessWitnessEvents] ${message}`);
           emitNodeError(nodeId, message, inputResult.error);
           return err(inputResult.error);
         }
@@ -164,7 +161,7 @@ export async function emitFreshnessWitnessEvents(
           newWitness = stampWitness(se.resource, se.extractNewWitness(output));
         } catch (e) {
           const msg = `extractConditionedOn/extractNewWitness failed for node '${nodeId}': ${safeErrorMessage(e)}`;
-          warnWithoutThrowing(`[emitFreshnessWitnessEvents] ${msg}`);
+          bestEffortLog("warn", `[emitFreshnessWitnessEvents] ${msg}`);
           const fwError: FrameworkError = { kind: "node-crash", nodeId, retriability: "non-retriable", message: `freshness extractor threw: ${msg}` };
           emitNodeError(nodeId, `freshness extractor failed: ${msg}`, fwError);
           // Fail-closed: broken extractors are an authoring bug that must be fixed.
@@ -178,7 +175,8 @@ export async function emitFreshnessWitnessEvents(
         const conflictResult = await freshnessIndex.findConflict(conditionedOn, 0);
         if (!conflictResult.ok) {
           const msg = formatFrameworkError(conflictResult.error);
-          fwLogger().error(
+          bestEffortLog(
+            "error",
             `[emitFreshnessWitnessEvents] freshnessIndex.findConflict failed for node '${nodeId}', resource '${conditionedOn.resource}': ${msg}`,
           );
           // Fail-closed: index unavailable → abort the wave. Proceeding without
@@ -225,7 +223,8 @@ export async function emitFreshnessWitnessEvents(
         const writeResult = await freshnessIndex.recordWrite(writeEvent);
         if (!writeResult.ok) {
           const msg = formatFrameworkError(writeResult.error);
-          fwLogger().error(
+          bestEffortLog(
+            "error",
             `[emitFreshnessWitnessEvents] freshnessIndex.recordWrite failed for node '${nodeId}': ${msg}`,
           );
           const fwError: FrameworkError = { kind: "node-crash", nodeId, retriability: "retriable", message: `freshness recordWrite failed: ${msg}` };

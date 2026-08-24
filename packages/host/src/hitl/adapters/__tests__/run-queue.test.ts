@@ -213,11 +213,12 @@ describe("createRunQueue — enqueue boundary", () => {
     expect("ownerToken" in lease).toBe(false);
     expect(leaseAuthority.verifier.ownerToken(lease)).toBe("owner-secret");
 
-    controller.abort();
-    expect(leaseAuthority.verifier.ownerToken(lease)).toBeNull();
     const forged = { ...lease } as RunLease;
     expect(leaseAuthority.verifier.ownerToken(forged)).toBeNull();
     expect(unrelatedAuthority.verifier.ownerToken(lease)).toBeNull();
+
+    controller.abort();
+    expect(leaseAuthority.verifier.ownerToken(lease)).toBeNull();
     // @ts-expect-error — owner authority is not exposed on the capability.
     void lease.ownerToken;
   });

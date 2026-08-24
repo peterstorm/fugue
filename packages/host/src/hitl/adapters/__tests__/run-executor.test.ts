@@ -45,8 +45,7 @@ import { createRunExecutor } from "../run-executor.js";
 
 // ── in-memory SharedInfra ─────────────────────────────────────────────────────
 
-const stubRedis = (): RedisPort => {
-  const m = new Map<string, string>();
+const stubRedis = (m = new Map<string, string>()): RedisPort => {
   return {
     async get(k) { return ok(m.get(k) ?? null); },
     async set(k, v) { m.set(k, v); return ok("OK"); },
@@ -547,26 +546,13 @@ const mkTenant = (s: string) => {
   return r.value;
 };
 
-/** A Map-backed RedisPort that RECORDS every key written, for namespace assertions. */
-const capturingRedis = (store: Map<string, string>): RedisPort => ({
-  async get(k) { return ok(store.get(k) ?? null); },
-  async set(k, v) { store.set(k, v); return ok("OK"); },
-  async del(k) { const had = store.delete(k); return ok(had ? 1 : 0); },
-  async scan() { return ok({ cursor: "0", keys: [...store.keys()] }); },
-  async setNx(k, v) { if (store.has(k)) return ok(false); store.set(k, v); return ok(true); },
-  async compareAndDelete(k, expected) { if (store.get(k) !== expected) return ok(false); store.delete(k); return ok(true); },
-  async sAdd() { return ok(1); },
-  async sRem() { return ok(1); },
-  async sMembers() { return ok([]); },
-});
-
 describe("createRunExecutor — forwards deps.tenant as routedTenant (SC-001)", () => {
   it("namespaces a resumed run's keys under deps.tenant, NEVER the DAG's owning team (id != team)", async () => {
     // The DAG is owned by team "eng" (see `registered`); the worker is routed for
     // tenant "acme-prod". A node writes a cache key during the run — it must land
     // under fugue:acme-prod:, proving deps.tenant flowed into the node context.
     const store = new Map<string, string>();
-    const infra: SharedInfra = { ...sharedInfra(), redis: capturingRedis(store) };
+    const infra: SharedInfra = { ...sharedInfra(), redis: stubRedis(store) };
     const dag = singleNodeDag((async (_i: unknown, ctx: NodeContext) => {
       if (!ctx.cache) throw new Error("expected a namespaced cache on the node context");
       await ctx.cache.set("probe", { v: 1 });
@@ -592,7 +578,7 @@ describe("createRunExecutor — forwards deps.tenant as routedTenant (SC-001)", 
 
   it("OMITTING deps.tenant falls back to the dag.team derivation (single-tenant parity)", async () => {
     const store = new Map<string, string>();
-    const infra: SharedInfra = { ...sharedInfra(), redis: capturingRedis(store) };
+    const infra: SharedInfra = { ...sharedInfra(), redis: stubRedis(store) };
     const dag = singleNodeDag((async (_i: unknown, ctx: NodeContext) => {
       if (!ctx.cache) throw new Error("expected a namespaced cache on the node context");
       await ctx.cache.set("probe", { v: 1 });

@@ -130,7 +130,7 @@ export class RedisFreshnessIndex implements FreshnessIndex {
 
   private onFailure(e: unknown): void {
     this._consecutiveFailures++;
-    this._lastError = e instanceof Error ? e : new Error(String(e));
+    this._lastError = e instanceof Error ? e : new Error(safeErrorMessage(e));
     if (this._consecutiveFailures >= 5) {
       logFrameworkWithoutThrowing(
         "warn",

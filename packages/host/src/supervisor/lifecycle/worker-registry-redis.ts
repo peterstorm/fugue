@@ -132,6 +132,18 @@ interface WorkerRegistryHooks {
   readonly onRedisAlive?: () => void;
 }
 
+const warnWithoutThrowing = (
+  logger: LogPort | undefined,
+  message: string,
+  data?: Record<string, unknown>,
+): void => {
+  try {
+    logger?.warn(message, data);
+  } catch {
+    // Diagnostics must never replace a typed or best-effort registry outcome.
+  }
+};
+
 /**
  * A UDS liveness probe: "is the worker bound to `udsPath` answering?". Injected
  * so the registry stays pure-shell-over-port and the probe (an HTTP-over-UDS
@@ -176,9 +188,9 @@ export const createWorkerRegistry = (
         const r = await redis.set(workerKey(record.tenant), serialize(record));
         if (!r.ok) return err(dead("worker-registry-put"));
       } catch (e) {
-        logger?.warn("[worker-registry] Redis set threw — treating as disconnected", {
+        warnWithoutThrowing(logger, "[worker-registry] Redis set threw — treating as disconnected", {
           tenant: record.tenant,
-          error: e instanceof Error ? e.message : String(e),
+          error: safeErrorMessage(e),
         });
         return err(dead("worker-registry-put"));
       }
@@ -191,9 +203,9 @@ export const createWorkerRegistry = (
       try {
         r = await redis.get(workerKey(tenant));
       } catch (e) {
-        logger?.warn("[worker-registry] Redis get threw — treating as disconnected", {
+        warnWithoutThrowing(logger, "[worker-registry] Redis get threw — treating as disconnected", {
           tenant,
-          error: e instanceof Error ? e.message : String(e),
+          error: safeErrorMessage(e),
         });
         return err(dead("worker-registry-get"));
       }
@@ -208,7 +220,7 @@ export const createWorkerRegistry = (
         // a fresh worker for the tenant either way; the log line is what lets an
         // operator grep for WHY (truncated/half-written value, allocator fault).
         const key = workerKey(tenant);
-        logger?.warn("[worker-registry] corrupt worker record — treating as absent, pruning", {
+        warnWithoutThrowing(logger, "[worker-registry] corrupt worker record — treating as absent, pruning", {
           tenant,
           key,
         });
@@ -225,7 +237,7 @@ export const createWorkerRegistry = (
           pruneFailure = `threw: ${safeErrorMessage(e)}`;
         }
         if (pruneFailure !== undefined) {
-          logger?.warn("[worker-registry] corrupt-record prune failed — leaving to reconcile", {
+          warnWithoutThrowing(logger, "[worker-registry] corrupt-record prune failed — leaving to reconcile", {
             tenant,
             key,
             reason: pruneFailure,
@@ -243,9 +255,9 @@ export const createWorkerRegistry = (
         const r = await redis.del(workerKey(tenant));
         if (!r.ok) return err(dead("worker-registry-remove"));
       } catch (e) {
-        logger?.warn("[worker-registry] Redis del threw — treating as disconnected", {
+        warnWithoutThrowing(logger, "[worker-registry] Redis del threw — treating as disconnected", {
           tenant,
-          error: e instanceof Error ? e.message : String(e),
+          error: safeErrorMessage(e),
         });
         return err(dead("worker-registry-remove"));
       }
@@ -267,8 +279,8 @@ export const createWorkerRegistry = (
         try {
           scanR = await redis.scan(pattern, cursor);
         } catch (e) {
-          logger?.warn("[worker-registry] Redis scan threw during reconcile — treating as disconnected", {
-            error: e instanceof Error ? e.message : String(e),
+          warnWithoutThrowing(logger, "[worker-registry] Redis scan threw during reconcile — treating as disconnected", {
+            error: safeErrorMessage(e),
           });
           return err(dead("worker-registry-reconcile"));
         }
@@ -276,7 +288,7 @@ export const createWorkerRegistry = (
         for (const key of scanR.value.keys) {
           const tenant = tenantFromKey(key);
           if (tenant === undefined) {
-            logger?.warn("[worker-registry] pruning unparseable worker key", { key });
+            warnWithoutThrowing(logger, "[worker-registry] pruning unparseable worker key", { key });
             corruptKeys.push(key);
             continue;
           }
@@ -284,9 +296,9 @@ export const createWorkerRegistry = (
           try {
             valR = await redis.get(key);
           } catch (e) {
-            logger?.warn("[worker-registry] Redis get threw during reconcile — treating as disconnected", {
+            warnWithoutThrowing(logger, "[worker-registry] Redis get threw during reconcile — treating as disconnected", {
               key,
-              error: e instanceof Error ? e.message : String(e),
+              error: safeErrorMessage(e),
             });
             return err(dead("worker-registry-reconcile"));
           }
@@ -294,7 +306,7 @@ export const createWorkerRegistry = (
           if (valR.value === null || valR.value === "") continue;
           const record = deserialize(tenant, valR.value);
           if (record === undefined) {
-            logger?.warn("[worker-registry] pruning corrupt worker record", { key });
+            warnWithoutThrowing(logger, "[worker-registry] pruning corrupt worker record", { key });
             corruptKeys.push(key);
             continue;
           }
@@ -313,9 +325,9 @@ export const createWorkerRegistry = (
         } catch (e) {
           // A probe error is treated as "not live" — fail-closed; the entry is
           // pruned and the supervisor lazy-spawns a fresh worker on next request.
-          logger?.warn("[worker-registry] UDS probe threw — treating worker as dead", {
+          warnWithoutThrowing(logger, "[worker-registry] UDS probe threw — treating worker as dead", {
             tenant: record.tenant,
-            error: e instanceof Error ? e.message : String(e),
+            error: safeErrorMessage(e),
           });
           live = false;
         }
@@ -338,12 +350,12 @@ export const createWorkerRegistry = (
         try {
           const delR = await redis.del(key);
           if (!delR.ok) {
-            logger?.warn("[worker-registry] prune del failed (continuing)", { key });
+            warnWithoutThrowing(logger, "[worker-registry] prune del failed (continuing)", { key });
           }
         } catch (e) {
-          logger?.warn("[worker-registry] prune del threw (continuing)", {
+          warnWithoutThrowing(logger, "[worker-registry] prune del threw (continuing)", {
             key,
-            error: e instanceof Error ? e.message : String(e),
+            error: safeErrorMessage(e),
           });
         }
       }

@@ -1,5 +1,5 @@
 /**
- * ioredis-backed Redis connectivity adapter — SHARED by both binaries.
+ * ioredis-backed Redis connectivity adapter — SHARED by Redis-using entrypoints.
  *
  * The single-tenant binary (`main.ts`), per-tenant worker (`worker-main.ts`),
  * and supervisor (`main-supervisor.ts`) need the SAME `RedisPort` over ioredis.
@@ -281,12 +281,18 @@ export const createRedisConnectivity = async (
 export const disconnectRedisQuietly = async (
   disconnect: () => Promise<void>,
 ): Promise<void> => {
-  await disconnect().catch((disconnectErr: unknown) => {
-    console.error(JSON.stringify({
-      level: "error",
-      msg: "Failed to disconnect Redis during error cleanup",
-      error: disconnectErr instanceof Error ? disconnectErr.message : String(disconnectErr),
-      ts: new Date().toISOString(),
-    }));
-  });
+  try {
+    await disconnect();
+  } catch (disconnectErr) {
+    try {
+      console.error(JSON.stringify({
+        level: "error",
+        msg: "Failed to disconnect Redis during error cleanup",
+        error: safeErrorMessage(disconnectErr),
+        ts: new Date().toISOString(),
+      }));
+    } catch {
+      // Cleanup diagnostics must never replace the authoritative startup error.
+    }
+  }
 };

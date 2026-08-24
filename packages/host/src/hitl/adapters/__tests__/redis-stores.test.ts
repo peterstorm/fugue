@@ -382,6 +382,28 @@ describe("RedisRunStore", () => {
     expect(got.value.createdAtMs).toBe(timestamp(100));
   });
 
+  it("contains a throwing status clock inside the typed Result boundary", async () => {
+    const redis = fakeRedis();
+    const store = createRedisRunStore(redis, TENANT, {
+      ...cfg,
+      now: () => { throw Object.create(null); },
+    });
+    const run = record();
+    await store.create(run);
+    const lease = await acquireLease(redis, run.runId);
+
+    const result = await store.setStatus(lease, { kind: "running" });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("internal-invariant-violated");
+      if (result.error.kind === "internal-invariant-violated") {
+        expect(result.error.message).toContain("clock threw");
+        expect(typeof result.error.message).toBe("string");
+      }
+    }
+  });
+
   it("setStatus on an unknown run errs run-not-found", async () => {
     const redis = fakeRedis();
     const store = createRedisRunStore(redis, TENANT, cfg);
@@ -439,6 +461,35 @@ describe("RedisRunStore", () => {
     const res = await store.get("run-1" as RunId);
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.kind).toBe("internal-invariant-violated");
+  });
+
+  it("rejects malformed stored checkpoint bytes with a guarded corruption diagnostic", async () => {
+    const { redis, seed } = seedableRedis();
+    const diagnostics: Array<{ readonly message: string; readonly data?: Record<string, unknown> }> = [];
+    seed("fugue:tenant-a:hitl:run:run-1", JSON.stringify({
+      runId: "run-1",
+      dagId: "d",
+      ownerTeam: "sales",
+      input: {},
+      identity: { kind: "admin" },
+      status: { kind: "queued" },
+      createdAtMs: 1,
+      updatedAtMs: 1,
+    }));
+    seed("fugue:tenant-a:hitl:ckpt:run-1", "{not-json");
+    const store = createRedisRunStore(redis, TENANT, cfg, {
+      info() {},
+      warn() {},
+      error(message, data) { diagnostics.push({ message, data }); },
+    });
+
+    const result = await store.get("run-1" as RunId);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("internal-invariant-violated");
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]?.message).toContain("corrupt stored checkpoint");
+    expect(diagnostics[0]?.data).toMatchObject({ runId: "run-1" });
   });
 
   it("rejects failed metadata whose FrameworkError is missing required fields", async () => {
@@ -1016,6 +1067,29 @@ describe("RedisRunStore — active-run index (ADR-0074)", () => {
     expect(base.kv.has("fugue:tenant-a:hitl:run:run-1")).toBe(false);
     expect((await store.listActiveRunIds())).toEqual(ok([]));
     expect(base.sets.get("fugue:tenant-a:hitl:active")?.has("run-1") ?? false).toBe(false);
+  });
+
+  it("fails closed with a corruption diagnostic when metadata is absent and checkpoint bytes are malformed", async () => {
+    const { redis, kv, sets } = setBackedRedis();
+    const diagnostics: Array<{ readonly message: string; readonly data?: Record<string, unknown> }> = [];
+    const logger: LogPort = {
+      info() {},
+      warn() {},
+      error(message, data) { diagnostics.push({ message, data }); },
+    };
+    const store = createRedisRunStore(redis, TENANT, cfg, logger);
+    await store.create(record({ runId: "r1" as RunId }));
+    kv.delete("fugue:tenant-a:hitl:run:r1");
+    kv.set("fugue:tenant-a:hitl:ckpt:r1", "{not-json");
+
+    const count = await store.countActiveRuns();
+
+    expect(count.ok).toBe(false);
+    if (!count.ok) expect(count.error.kind).toBe("internal-invariant-violated");
+    expect(sets.get("fugue:tenant-a:hitl:active")?.has("r1")).toBe(true);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]?.message).toContain("corrupt stored checkpoint");
+    expect(diagnostics[0]?.data).toMatchObject({ runId: "r1" });
   });
 
   it("create joins the active index; countActiveRuns reflects it", async () => {

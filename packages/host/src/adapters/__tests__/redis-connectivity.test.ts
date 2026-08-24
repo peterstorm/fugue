@@ -13,7 +13,11 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { createRedisConnectivity, type RedisClientFactory } from "../redis-connectivity.js";
+import {
+  createRedisConnectivity,
+  disconnectRedisQuietly,
+  type RedisClientFactory,
+} from "../redis-connectivity.js";
 import { isOk, isErr } from "@fuguejs/framework";
 import type { Redis as IoRedis } from "ioredis";
 
@@ -92,7 +96,7 @@ class FakeRedis {
     let operation:
       | { readonly kind: "delete"; readonly key: string }
       | { readonly kind: "expire"; readonly key: string }
-      | { readonly kind: "set"; readonly key: string; readonly value: string }
+      | { readonly kind: "set"; readonly key: string; readonly value: string; readonly onlyIfAbsent: boolean }
       | undefined;
     const chain = {
       del: (key: string) => {
@@ -107,7 +111,7 @@ class FakeRedis {
       },
       set: (key: string, value: string, ...args: unknown[]) => {
         this.rec("multi.set", [key, value, ...args]);
-        operation = { kind: "set", key, value };
+        operation = { kind: "set", key, value, onlyIfAbsent: args.includes("NX") };
         return chain;
       },
       exec: async () => {
@@ -126,6 +130,9 @@ class FakeRedis {
           return [[null, this.values.has(operation.key) ? 1 : 0]] as [Error | null, unknown][];
         }
         if (operation?.kind === "set") {
+          if (operation.onlyIfAbsent && this.values.has(operation.key)) {
+            return [[null, null]] as [Error | null, unknown][];
+          }
           this.values.set(operation.key, operation.value);
           return [[null, "OK"]] as [Error | null, unknown][];
         }
@@ -415,6 +422,43 @@ describe("createRedisConnectivity — data port", () => {
     expect(successor.calls.some((c) => c.m === "multi.set")).toBe(false);
   });
 
+  it("setNxIfPresent distinguishes missing guards, creation, existing targets, and WATCH retries", async () => {
+    const missing = new FakeRedis();
+    const missingResult = await (await wire(missing)).bundle.redis.setNxIfPresent?.(
+      "pending", "decision", "approve", { expiresInSec: 60 },
+    );
+    expect(missingResult && isOk(missingResult) && missingResult.value).toBe("not-present");
+    expect(missing.calls.map((call) => call.m)).toEqual(["watch", "get", "unwatch"]);
+
+    const created = new FakeRedis();
+    created.seed("pending", "marker");
+    const createdResult = await (await wire(created)).bundle.redis.setNxIfPresent?.(
+      "pending", "decision", "approve", { expiresInSec: 60 },
+    );
+    expect(createdResult && isOk(createdResult) && createdResult.value).toBe("created");
+    expect(await created.get("decision")).toBe("approve");
+    expect(created.calls.find((call) => call.m === "multi.set")?.args).toEqual([
+      "decision", "approve", "EX", 60, "NX",
+    ]);
+
+    const existing = new FakeRedis();
+    existing.seed("pending", "marker");
+    existing.seed("decision", "reject");
+    const existingResult = await (await wire(existing)).bundle.redis.setNxIfPresent?.(
+      "pending", "decision", "approve", { expiresInSec: 60 },
+    );
+    expect(existingResult && isOk(existingResult) && existingResult.value).toBe("exists");
+    expect(await existing.get("decision")).toBe("reject");
+
+    const conflicted = new FakeRedis({ execNullOnce: true });
+    conflicted.seed("pending", "marker");
+    const retried = await (await wire(conflicted)).bundle.redis.setNxIfPresent?.(
+      "pending", "decision", "approve", { expiresInSec: 60 },
+    );
+    expect(retried && isOk(retried) && retried.value).toBe("created");
+    expect(conflicted.calls.filter((call) => call.m === "multi.exec")).toHaveLength(2);
+  });
+
   it("a revoked proxy thrown by the client stays inside redisErr's typed boundary", async () => {
     const revoked = Proxy.revocable({}, {});
     revoked.revoke();
@@ -455,6 +499,18 @@ describe("createRedisConnectivity — data port", () => {
     const { bundle } = await wire(fake);
     await bundle.disconnect();
     expect(fake.calls.some((c) => c.m === "quit")).toBe(true);
+  });
+
+  it("quiet disconnect contains hostile cleanup failures and fallback logger throws", async () => {
+    const originalConsoleError = console.error;
+    console.error = () => { throw new Error("console unavailable"); };
+    try {
+      await expect(disconnectRedisQuietly((() => {
+        throw Object.create(null);
+      }) as () => Promise<void>)).resolves.toBeUndefined();
+    } finally {
+      console.error = originalConsoleError;
+    }
   });
 });
 

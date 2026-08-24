@@ -149,14 +149,22 @@ const leaseLost = (lease: RunLease): Result<never, HostError> =>
   err({ kind: "run-lease-lost", runId: lease.runId });
 
 const readRunTimestamp = (now: () => number): Result<RunTimestampMs, HostError> => {
-  const timestamp = tryRunTimestampMs(now());
-  return timestamp.ok
-    ? timestamp
-    : err({
-        kind: "internal-invariant-violated",
-        message: `HITL clock returned an invalid timestamp: ${timestamp.error}`,
-        context: {},
-      });
+  try {
+    const timestamp = tryRunTimestampMs(now());
+    return timestamp.ok
+      ? timestamp
+      : err({
+          kind: "internal-invariant-violated",
+          message: `HITL clock returned an invalid timestamp: ${timestamp.error}`,
+          context: {},
+        });
+  } catch (error) {
+    return err({
+      kind: "internal-invariant-violated",
+      message: `HITL clock threw while stamping run status: ${safeErrorMessage(error)}`,
+      context: {},
+    });
+  }
 };
 
 /**
@@ -353,12 +361,24 @@ type DecodedCheckpoint =
     };
 
 /** Recognize the adapter-owned creation-intent envelope; ordinary checkpoints pass through. */
-const decodeStoredCheckpoint = (raw: string): Result<DecodedCheckpoint, HostError> => {
+const decodeStoredCheckpoint = (
+  runId: RunId,
+  raw: string,
+  logger?: LogPort,
+): Result<DecodedCheckpoint, HostError> => {
   let decoded: unknown;
   try {
     decoded = fromJson(raw);
-  } catch {
-    return ok({ kind: "checkpoint", checkpoint: raw });
+  } catch (error) {
+    logWithoutThrowing(logger, "error", "hitl: corrupt stored checkpoint (malformed or non-canonical serialization)", {
+      runId,
+      error: safeErrorMessage(error),
+    });
+    return err({
+      kind: "internal-invariant-violated",
+      message: `corrupt checkpoint for '${runId}'`,
+      context: {},
+    });
   }
   if (
     typeof decoded !== "object" ||
@@ -370,9 +390,13 @@ const decodeStoredCheckpoint = (raw: string): Result<DecodedCheckpoint, HostErro
   }
   const intent = RunCreationIntentSchema.safeParse(decoded);
   if (!intent.success) {
+    logWithoutThrowing(logger, "error", "hitl: corrupt stored run creation intent", {
+      runId,
+      error: intent.error.message,
+    });
     return err({
       kind: "internal-invariant-violated",
-      message: "corrupt HITL run creation intent",
+      message: `corrupt HITL run creation intent for '${runId}'`,
       context: {},
     });
   }
@@ -474,7 +498,7 @@ export const createRedisRunStore = (
       const checkpoint = await redis.get(ckptKey(tenant, runId));
       if (!checkpoint.ok) return err(checkpoint.error);
       if (checkpoint.value === null) return ok(null);
-      const decoded = decodeStoredCheckpoint(checkpoint.value);
+      const decoded = decodeStoredCheckpoint(runId, checkpoint.value, logger);
       if (!decoded.ok) return decoded;
       return ok(decoded.value.kind === "recoverable-intent" ? decoded.value.metadata : null);
     }
@@ -537,7 +561,7 @@ export const createRedisRunStore = (
         const checkpoint = await redis.get(ckptKey(tenant, parsedId.value));
         if (!checkpoint.ok) return err(checkpoint.error);
         if (checkpoint.value !== null) {
-          const decoded = decodeStoredCheckpoint(checkpoint.value);
+          const decoded = decodeStoredCheckpoint(parsedId.value, checkpoint.value, logger);
           if (!decoded.ok) return decoded;
           if (decoded.value.kind === "recoverable-intent") {
             runIds.push(parsedId.value);
@@ -668,7 +692,7 @@ export const createRedisRunStore = (
         // rather than resuming from a missing state.
         return err({ kind: "internal-invariant-violated", message: `run '${runId}' has metadata but no checkpoint`, context: {} });
       }
-      const decoded = decodeStoredCheckpoint(ckptRes.value);
+      const decoded = decodeStoredCheckpoint(runId, ckptRes.value, logger);
       if (!decoded.ok) return decoded;
       return ok({ ...metaRes.value, checkpoint: decoded.value.checkpoint });
     },

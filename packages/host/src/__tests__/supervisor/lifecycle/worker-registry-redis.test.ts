@@ -224,6 +224,24 @@ describe("worker-registry: fail-closed on Redis error", () => {
     expect(deadCalls).toBe(3);
   });
 
+  test("a throwing failure logger cannot replace the typed Redis error", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    const throwingRedis: RedisPort = {
+      ...fake.redis,
+      get: async () => { throw Object.create(null); },
+    };
+    const reg = createWorkerRegistry(throwingRedis, alwaysLive, {}, {
+      info() {},
+      warn() { throw new Error("logger transport failed"); },
+      error() {},
+    });
+
+    const result = await reg.get(tid("acme"));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("redis-unavailable");
+  });
+
   test("reconcileReadopt fails closed if scan errors", async () => {
     const fake = createInMemoryWorkerRedisFake();
     const reg = createWorkerRegistry(fake.redis, alwaysLive);
@@ -281,6 +299,25 @@ describe("worker-registry: reconcileReadopt (SC-006, FR-019/FR-020)", () => {
     // Dead entries are pruned from Redis (self-healing registry).
     expect(fake.store.has(`${WORKER_KEY_PREFIX}acme`)).toBe(false);
     expect(fake.store.has(`${WORKER_KEY_PREFIX}globex`)).toBe(false);
+  });
+
+  test("a throwing prune logger cannot abort best-effort reconciliation", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    await createWorkerRegistry(fake.redis, alwaysLive).put(rec("acme", 1));
+    const pruneFailing: RedisPort = {
+      ...fake.redis,
+      del: async () => err(redisUnavailable("del")),
+    };
+    const reg = createWorkerRegistry(pruneFailing, alwaysDead, {}, {
+      info() {},
+      warn() { throw new Error("logger transport failed"); },
+      error() {},
+    });
+
+    const result = await reg.reconcileReadopt();
+
+    expect(result).toEqual(ok({ adopted: [], pruned: [tid("acme")] }));
+    expect(fake.store.has(`${WORKER_KEY_PREFIX}acme`)).toBe(true);
   });
 
   test("partitions mixed live/dead deterministically", async () => {
