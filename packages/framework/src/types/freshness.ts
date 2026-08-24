@@ -8,6 +8,7 @@
 export type { WitnessKind, ResourceName, Witness, WitnessValue, FreshnessExecutionEpoch } from "./witness.js";
 export { resourceName, __brandResourceName, witnessValue, witness, stampWitness, __brandWitness, isWitnessKind, freshnessExecutionEpoch, __brandFreshnessExecutionEpoch } from "./witness.js";
 import type { Witness, WitnessKind, FreshnessExecutionEpoch } from "./witness.js";
+import { isWitnessKind, __brandFreshnessExecutionEpoch } from "./witness.js";
 // ---------------------------------------------------------------------------
 // FreshnessIndex port + supporting types
 //
@@ -19,6 +20,7 @@ import type { Witness, WitnessKind, FreshnessExecutionEpoch } from "./witness.js
 // ---------------------------------------------------------------------------
 
 import type { RunId, NodeId } from "./ids.js";
+import { __brandRunId, __brandNodeId } from "./ids.js";
 import type { Result } from "./result.js";
 import type { FrameworkError } from "./errors.js";
 import type { WitnessCapturedEvent, WriteAttemptedEvent } from "./events.js";
@@ -47,9 +49,33 @@ export interface FreshnessCheckResult {
 export type { WriteEntry } from "./witness.js";
 export { writeEntryOf } from "./witness.js";
 
+export interface FreshnessWriteIdentity {
+  readonly runId: RunId;
+  readonly nodeId: NodeId;
+  readonly executionEpoch: FreshnessExecutionEpoch;
+  readonly newWitness: Witness;
+}
+
+export const freshnessWriteIdentityOf = (
+  event: WriteAttemptedEvent,
+): FreshnessWriteIdentity => ({
+  runId: event.runId,
+  nodeId: event.nodeId,
+  executionEpoch: event.executionEpoch,
+  newWitness: event.newWitness,
+});
+
 export interface FreshnessIndex {
   /** Record a successful write for future conflict detection. */
   recordWrite(event: WriteAttemptedEvent): Promise<Result<void, FrameworkError>>;
+  /**
+   * Ask whether this exact logical write was durably recorded. This is a
+   * separate question from conflict selection: a newer write may supersede the
+   * requested write without erasing its acknowledgement.
+   */
+  hasRecordedWrite(
+    identity: FreshnessWriteIdentity,
+  ): Promise<Result<boolean, FrameworkError>>;
   /**
    * Check if `conditionedOn` has been superseded by a write that completed
    * after `sinceMs`. Returns the first conflicting write, or `null`.
@@ -70,13 +96,23 @@ export type { WitnessCapturedEvent, WriteAttemptedEvent };
 
 /**
  * Port-level ZSET member grammar for the FreshnessIndex port (ADR-0079).
- * Redis stores `[runId, nodeId, executionEpoch, witnessKind, witnessValue]` as the member of
- * the per-resource ZSET; the file backend compares equal-score conflict
+ * Redis stores `[runId, nodeId, fixedWidthExecutionEpoch, witnessKind, witnessValue]`
+ * as the member of the per-resource ZSET; the file backend compares equal-score conflict
  * winners byte-for-byte against these SAME bytes. ONE encoding, owned by the
  * port that specifies the tie-break: both adapters consume it, so a change
  * to the member tuple (order, fields, representation) can no longer silently
  * diverge the file backend's conflict winners from the Redis adapter's.
  */
+const FRESHNESS_EXECUTION_EPOCH_WIDTH = String(Number.MAX_SAFE_INTEGER).length;
+const FRESHNESS_EXECUTION_EPOCH_PATTERN = new RegExp(
+  `^[0-9]{${FRESHNESS_EXECUTION_EPOCH_WIDTH}}$`,
+);
+
+/** Fixed-width decimal keeps Redis's equal-score byte order aligned with numeric epoch order. */
+export const freshnessExecutionEpochMember = (
+  executionEpoch: FreshnessExecutionEpoch,
+): string => String(executionEpoch).padStart(FRESHNESS_EXECUTION_EPOCH_WIDTH, "0");
+
 export const freshnessMemberKey = (
   runId: RunId,
   nodeId: NodeId,
@@ -87,7 +123,62 @@ export const freshnessMemberKey = (
   // tie-break grammar — round-22 tda-2).
   witnessKind: WitnessKind,
   witnessValue: string,
-): string => JSON.stringify([runId, nodeId, executionEpoch, witnessKind, witnessValue]);
+): string => JSON.stringify([
+  runId,
+  nodeId,
+  freshnessExecutionEpochMember(executionEpoch),
+  witnessKind,
+  witnessValue,
+]);
+
+export interface FreshnessMemberIdentity {
+  readonly runId: RunId;
+  readonly nodeId: NodeId;
+  readonly executionEpoch: FreshnessExecutionEpoch;
+  readonly witnessKind: WitnessKind;
+  readonly witnessValue: string;
+}
+
+/** Strict parser for the one persisted Redis-member grammar shared by adapters. */
+export const parseFreshnessMemberKey = (
+  member: string,
+): FreshnessMemberIdentity | null => {
+  try {
+    const parsed: unknown = JSON.parse(member);
+    if (!Array.isArray(parsed) || parsed.length !== 5) return null;
+    const [rawRunId, rawNodeId, rawEpoch, rawKind, rawValue] = parsed;
+    if (
+      typeof rawEpoch !== "string" ||
+      !FRESHNESS_EXECUTION_EPOCH_PATTERN.test(rawEpoch) ||
+      !isWitnessKind(rawKind) ||
+      typeof rawValue !== "string" ||
+      rawValue.length === 0
+    ) {
+      return null;
+    }
+    const numericEpoch = Number(rawEpoch);
+    if (!Number.isSafeInteger(numericEpoch)) return null;
+    return {
+      runId: __brandRunId(rawRunId),
+      nodeId: __brandNodeId(rawNodeId),
+      executionEpoch: __brandFreshnessExecutionEpoch(numericEpoch),
+      witnessKind: rawKind,
+      witnessValue: rawValue,
+    };
+  } catch {
+    return null;
+  }
+};
+
+export const freshnessWriteKey = (
+  identity: FreshnessWriteIdentity,
+): string => freshnessMemberKey(
+  identity.runId,
+  identity.nodeId,
+  identity.executionEpoch,
+  identity.newWitness.kind,
+  identity.newWitness.value,
+);
 
 /**
  * Redis compares equal-score ZSET members as unsigned byte strings; the

@@ -8,6 +8,7 @@ import { freshnessExecutionEpoch } from "../types/witness.js";
 import {
   type WaveDoneResult,
   advanceToNextWave,
+  waveIndexByNodeId,
   waveIndexOf,
 } from "./wave-resolution.js";
 
@@ -100,10 +101,7 @@ const handleReroute = (
   // FR-031: backward (or current wave) reroute — reset completed and resume from target wave.
   // Pre-build the nodeId → waveIndex map so the two filters below are O(N)
   // per pass instead of repeating ctx.waves.findIndex per node (O(N²)).
-  const waveByNodeId = new Map<NodeId, number>();
-  for (let w = 0; w < ctx.waves.length; w++) {
-    for (const id of ctx.waves[w]) waveByNodeId.set(id, w);
-  }
+  const waveByNodeId = waveIndexByNodeId(ctx);
   const beforeTargetWave = (nodeId: NodeId): boolean =>
     (waveByNodeId.get(nodeId) ?? -1) < targetWave;
 

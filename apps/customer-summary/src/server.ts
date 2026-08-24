@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
-import { runDag, dagFingerprint, FRAMEWORK_VERSION, makeNodeContext, runId as brandRunId, tryRunId, dagId as brandDagId, safeErrorMessage } from "@fuguejs/framework";
+import { runDag, dagFingerprint, FRAMEWORK_VERSION, formatFrameworkError, makeNodeContext, runId as brandRunId, tryRunId, dagId as brandDagId, safeErrorMessage } from "@fuguejs/framework";
 import type { NodeContext, LlmClient, Observer, Checkpointer, ContextCacheAdapter, CheckpointWriter, ContentFilter } from "@fuguejs/framework";
 import type { SummaryResponse } from "./schemas/index.js";
 import type { ConversationSource } from "./sources/conversation-source.js";
@@ -67,6 +67,8 @@ export interface AppDeps {
   readonly contentFilter?: ContentFilter | null;
   /** Application logger. Defaults to console-backed logger when omitted. */
   readonly logger?: AppLogger;
+  /** Request-owned DAG timeout. Production defaults to 60 seconds. */
+  readonly requestTimeoutMs?: number;
 }
 
 // --- Create Hono app ---
@@ -88,8 +90,20 @@ const reportWithoutThrowing = (report: () => void): void => {
   }
 };
 
+const isAbortThrow = (error: unknown): boolean =>
+  error instanceof Error &&
+  (error.name === "AbortError" || error.name === "APIUserAbortError");
+
+const parseRequestTimeoutMs = (value: number): number => {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new RangeError("requestTimeoutMs must be a positive safe integer");
+  }
+  return value;
+};
+
 export const createApp = (deps: AppDeps): Hono => {
   const app = new Hono();
+  const timeoutMs = parseRequestTimeoutMs(deps.requestTimeoutMs ?? 60_000);
   const log = deps.logger ?? consoleAppLogger;
 
   app.post("/summarize", async (c) => {
@@ -213,7 +227,6 @@ export const createApp = (deps: AppDeps): Hono => {
         }
       }
 
-      const timeoutMs = 60_000; // 60s request timeout
       const abortController = new AbortController();
       const timeout = setTimeout(() => abortController.abort("timeout"), timeoutMs);
 
@@ -237,8 +250,10 @@ export const createApp = (deps: AppDeps): Hono => {
           : undefined;
         result = await runDag<{ customerId: string }, SummaryResponse>(dag, { customerId: customer_id }, ctx, runOpts);
       } catch (e) {
-        if (abortController.signal.aborted) {
-          log.warn(`[/summarize] Request timed out after ${timeoutMs}ms for customer=${customer_id} run=${runId}`);
+        if (abortController.signal.aborted && isAbortThrow(e)) {
+          reportWithoutThrowing(() => log.warn(
+            `[/summarize] Request timed out after ${timeoutMs}ms for customer=${customer_id} run=${runId}; cause=${safeErrorMessage(e)}`,
+          ));
           return c.json({ error: "Request timeout", requestId: runId }, 504);
         }
         throw e;
@@ -250,14 +265,18 @@ export const createApp = (deps: AppDeps): Hono => {
         return c.json(result.value, 200);
       }
 
-      // Result is err — determine whether it was timeout-caused:
-      if (abortController.signal.aborted) {
-        log.warn(`[/summarize] Request timed out after ${timeoutMs}ms for customer=${customer_id} run=${runId}`);
+      // Only the framework's explicit abort result can be classified as the
+      // request-owned timeout. A different failure racing with the timer keeps
+      // its real classification and diagnostic.
+      if (abortController.signal.aborted && result.error.kind === "aborted") {
+        reportWithoutThrowing(() => log.warn(
+          `[/summarize] Request timed out after ${timeoutMs}ms for customer=${customer_id} run=${runId}; cause=${formatFrameworkError(result.error)}`,
+        ));
         return c.json({ error: "Request timeout", requestId: runId }, 504);
       }
 
       // Framework error — 500 (log detail server-side, return generic message)
-      log.error("[/summarize] DAG error:", JSON.stringify(result.error));
+      log.error("[/summarize] DAG error:", formatFrameworkError(result.error));
       return c.json({ error: "Internal server error", requestId: runId }, 500);
     } catch (e) {
       log.error("[/summarize] Unexpected error:", e);
@@ -278,24 +297,37 @@ export const createApp = (deps: AppDeps): Hono => {
     // here so the seam is safe-by-construction: a future probe that throws
     // WITHOUT its own internal logging still leaves an operator breadcrumb rather
     // than flipping readiness silently.
-    const probe = async (check: (() => Promise<boolean>) | undefined, message: string): Promise<boolean> =>
-      check
-        ? check().catch((error) => {
-            reportWithoutThrowing(() => log.debug(message, error));
-            return false;
-          })
-        : true;
+    const probe = async (
+      check: (() => Promise<boolean>) | undefined,
+      message: string,
+    ): Promise<boolean> => {
+      if (!check) return true;
+      try {
+        return await check();
+      } catch (error) {
+        reportWithoutThrowing(() => log.debug(message, error));
+        return false;
+      }
+    };
     const redisOk = await probe(deps.health?.checkRedis, "[/readyz] checkRedis probe threw — treating Redis as not-ready:");
     const llmOk = await probe(deps.health?.checkLlm, "[/readyz] checkLlm probe threw — treating the LLM as unavailable:");
     const mlflowOk = await probe(deps.health?.checkMlflow, "[/readyz] checkMlflow probe threw — treating MLflow as unavailable:");
     // Cumulative per-backend export failures (multi-backend fan-out only).
     // Informational: a failing SECONDARY trace backend degrades the signal but
     // never gates readiness (observability spec FR-026) — exactly like MLflow above.
-    const exporterFailures = deps.health?.tracingExporterFailures
-      ? (deps.health.tracingExporterFailures() ?? null)
-      : null;
+    let exporterFailures: ReadonlyArray<{ readonly index: number; readonly failures: number }> | null = null;
+    let exporterProbeFailed = false;
+    try {
+      exporterFailures = deps.health?.tracingExporterFailures?.() ?? null;
+    } catch (error) {
+      exporterProbeFailed = true;
+      reportWithoutThrowing(() =>
+        log.debug("[/readyz] tracingExporterFailures probe threw — treating tracing as degraded:", error),
+      );
+    }
     const tracingDegraded =
-      exporterFailures !== null && exporterFailures.some((f) => f.failures > 0);
+      exporterProbeFailed ||
+      (exporterFailures !== null && exporterFailures.some((f) => f.failures > 0));
     // Three outcomes, one level: redis or the LLM down gates readiness entirely
     // (either one means /summarize cannot serve traffic); with both up, any
     // degraded trace backend (MLflow or a secondary exporter) downgrades to

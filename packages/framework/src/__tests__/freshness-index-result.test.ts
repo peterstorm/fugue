@@ -12,6 +12,7 @@ import { describe, it, expect } from "bun:test";
 import { N, R, D } from "./_id-helpers.js";
 import { InMemoryFreshnessIndex } from "../dag-runtime/freshness-check.js";
 import type { WriteAttemptedEvent } from "../types/events.js";
+import { freshnessWriteIdentityOf } from "../types/freshness.js";
 import { isOk, unwrap } from "../types/result.js";
 
 const mkWriteEvent = (
@@ -41,6 +42,19 @@ describe("InMemoryFreshnessIndex — Result interface", () => {
     );
     expect(isOk(result)).toBe(true);
     expect(unwrap(result)).toBeUndefined();
+  });
+
+  it("retains acknowledgement after a later write becomes latest", async () => {
+    const index = new InMemoryFreshnessIndex();
+    const first = mkWriteEvent("r1", "w1", "pg:orders", "1", "2", 1000);
+    const later = mkWriteEvent("r2", "w2", "pg:orders", "2", "3", 2000);
+    await index.recordWrite(first);
+    await index.recordWrite(later);
+
+    expect(await index.hasRecordedWrite(freshnessWriteIdentityOf(first))).toEqual({
+      ok: true,
+      value: true,
+    });
   });
 
   it("findConflict returns ok(null) when no writes", async () => {

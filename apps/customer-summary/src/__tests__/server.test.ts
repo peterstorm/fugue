@@ -1,7 +1,7 @@
 import { describe, test, expect, afterEach } from "bun:test";
 import { createApp } from "../server.js";
 import { JsonFixtureSource } from "../sources/json-fixture-source.js";
-import { FakeLlmClient, InMemoryCheckpointer, dagFingerprint, FRAMEWORK_VERSION, ok, runId as mkRunId, nodeId as N, dagId as D, type Checkpointer } from "@fuguejs/framework";
+import { FakeLlmClient, InMemoryCheckpointer, dagFingerprint, FRAMEWORK_VERSION, err, ok, runId as mkRunId, nodeId as N, dagId as D, type Checkpointer, type FrameworkError } from "@fuguejs/framework";
 import { createFileCheckpointer } from "@fuguejs/framework/file";
 import { SummaryResponseSchema } from "../schemas/response.js";
 import { createSummaryDag } from "../dag/summary-dag.js";
@@ -17,6 +17,17 @@ const throwingDiagnosticsLogger: AppLogger = {
   info: () => {},
   warn: () => { throw new Error("warn transport failed"); },
   error: () => {},
+};
+
+const recordingLogger = () => {
+  const entries: Array<{ readonly level: string; readonly args: readonly unknown[] }> = [];
+  const logger: AppLogger = {
+    debug: (...args) => { entries.push({ level: "debug", args }); },
+    info: (...args) => { entries.push({ level: "info", args }); },
+    warn: (...args) => { entries.push({ level: "warn", args }); },
+    error: (...args) => { entries.push({ level: "error", args }); },
+  };
+  return { logger, entries };
 };
 
 const makeSynthesisOutput = () => ({
@@ -49,6 +60,31 @@ const createTestApp = (cp: Checkpointer = new InMemoryCheckpointer()) => {
         if (!saved.ok) throw new Error(`test checkpoint write failed: ${saved.error.kind}`);
       },
     },
+  });
+};
+
+const createDelayedFailureApp = (
+  failure: FrameworkError,
+  logger: AppLogger,
+) => {
+  const cp = new InMemoryCheckpointer();
+  return createApp({
+    source: {
+      fetchCustomer: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return err(failure);
+      },
+    },
+    llm: new FakeLlmClient(new Map()),
+    checkpointer: cp,
+    checkpointWriter: {
+      async write(runId, nodeId, output) {
+        const saved = await cp.saveNode(runId, { nodeId, output, completedAt: new Date() });
+        if (!saved.ok) throw new Error(`test checkpoint write failed: ${saved.error.kind}`);
+      },
+    },
+    requestTimeoutMs: 1,
+    logger,
   });
 };
 
@@ -435,6 +471,52 @@ describe("POST /summarize", () => {
 
   });
 
+  test("rejects an invalid request timeout at app construction", () => {
+    for (const invalid of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => createApp({
+        source: new JsonFixtureSource(fixturesDir),
+        llm: new FakeLlmClient(new Map()),
+        requestTimeoutMs: invalid,
+      })).toThrow("requestTimeoutMs must be a positive safe integer");
+    }
+  });
+
+  test("an explicit aborted result after the request timer returns 504 and logs its cause", async () => {
+    const { logger, entries } = recordingLogger();
+    const app = createDelayedFailureApp(
+      { kind: "aborted", reason: "signal" },
+      logger,
+    );
+
+    const response = await post(app, "/summarize", { customer_id: "cust-timeout" });
+
+    expect(response.status).toBe(504);
+    expect(entries.some(({ level, args }) =>
+      level === "warn" && String(args[0]).includes("cause=run aborted: signal")
+    )).toBe(true);
+  });
+
+  test("a non-abort failure racing with the timer remains a logged 500", async () => {
+    const { logger, entries } = recordingLogger();
+    const app = createDelayedFailureApp(
+      {
+        kind: "node-crash",
+        nodeId: N("fetch-crm"),
+        retriability: "non-retriable",
+        message: "checkpoint writer exploded after timeout",
+      },
+      logger,
+    );
+
+    const response = await post(app, "/summarize", { customer_id: "cust-race" });
+
+    expect(response.status).toBe(500);
+    expect(entries.some(({ level, args }) =>
+      level === "error" && args.some((arg) => String(arg).includes("checkpoint writer exploded after timeout"))
+    )).toBe(true);
+    expect(entries.some(({ level }) => level === "warn")).toBe(false);
+  });
+
   test("all response variants match SummaryResponseSchema", async () => {
     const app = createTestApp();
 
@@ -536,6 +618,27 @@ describe("GET /readyz", () => {
     expect((await res.json()).status).toBe("not-ready");
   });
 
+  test("a synchronous readiness probe throw is contained and logged", async () => {
+    const { logger, entries } = recordingLogger();
+    const app = createApp({
+      source: new JsonFixtureSource(fixturesDir),
+      llm: new FakeLlmClient(new Map()),
+      logger,
+      health: {
+        checkRedis: () => { throw new Error("synchronous redis probe fault"); },
+        checkMlflow: async () => true,
+      },
+    });
+
+    const response = await get(app, "/readyz");
+
+    expect(response.status).toBe(503);
+    expect((await response.json()).status).toBe("not-ready");
+    expect(entries.some(({ level, args }) =>
+      level === "debug" && args.some((arg) => String(arg).includes("synchronous redis probe fault"))
+    )).toBe(true);
+  });
+
   test("rejecting readiness probe remains not-ready when diagnostic logging throws", async () => {
     const source = new JsonFixtureSource(fixturesDir);
     const app = createApp({
@@ -625,6 +728,48 @@ describe("GET /readyz", () => {
       { index: 0, failures: 0 },
       { index: 1, failures: 42 },
     ]);
+  });
+
+  test("a synchronous tracing counter throw returns structured ready-degraded", async () => {
+    const { logger, entries } = recordingLogger();
+    const app = createApp({
+      source: new JsonFixtureSource(fixturesDir),
+      llm: new FakeLlmClient(new Map()),
+      logger,
+      health: {
+        checkRedis: async () => true,
+        checkMlflow: async () => true,
+        tracingExporterFailures: () => { throw new Error("counter getter fault"); },
+      },
+    });
+
+    const response = await get(app, "/readyz");
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.status).toBe("ready-degraded");
+    expect(body.tracingExporterFailures).toBeUndefined();
+    expect(entries.some(({ level, args }) =>
+      level === "debug" && args.some((arg) => String(arg).includes("counter getter fault"))
+    )).toBe(true);
+  });
+
+  test("a synchronous tracing counter throw stays structured when diagnostic logging throws", async () => {
+    const app = createApp({
+      source: new JsonFixtureSource(fixturesDir),
+      llm: new FakeLlmClient(new Map()),
+      logger: throwingDiagnosticsLogger,
+      health: {
+        checkRedis: async () => true,
+        checkMlflow: async () => true,
+        tracingExporterFailures: () => { throw new Error("counter getter fault"); },
+      },
+    });
+
+    const response = await get(app, "/readyz");
+
+    expect(response.status).toBe(200);
+    expect((await response.json()).status).toBe("ready-degraded");
   });
 
   test("multi-backend with zero failures stays fully ready and reports the counts", async () => {

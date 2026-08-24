@@ -5,11 +5,12 @@
  *   Key:    `fugue:freshness:{resource}`
  *   Score:  `succeededAtMs`
  *   Member: `freshnessMemberKey` — the port-owned
- *           `[runId, nodeId, executionEpoch, witnessKind, witnessValue]` JSON array
+ *           `[runId, nodeId, fixedWidthExecutionEpoch, witnessKind, witnessValue]` JSON array
  *           (types/freshness.js), shared with the file backend's
  *           equal-score tie-break (ADR-0079).
  *
- * `recordWrite` is an atomic ZADD + EXPIRE (Lua script). `findConflict`
+ * `recordWrite` is an atomic ZADD + EXPIRE (Lua script). `hasRecordedWrite`
+ * uses exact-member ZSCORE for durable logical acknowledgement. `findConflict`
  * uses `ZREVRANGEBYSCORE ... LIMIT 0 1` to fetch the latest write only.
  * Both operations are O(log N).
  *
@@ -23,19 +24,22 @@
 
 import type Redis from "ioredis";
 import type { WriteAttemptedEvent } from "../types/events.js";
-import type { FreshnessExecutionEpoch, FreshnessIndex, WriteEntry, WitnessKind } from "../types/freshness.js";
+import type {
+  FreshnessIndex,
+  FreshnessWriteIdentity,
+  WriteEntry,
+  WitnessKind,
+} from "../types/freshness.js";
 import {
   FRESHNESS_TTL_SECONDS,
   __brandWitness,
   freshnessMemberKey,
-  isWitnessKind,
-  __brandFreshnessExecutionEpoch,
+  freshnessWriteKey,
+  parseFreshnessMemberKey,
 } from "../types/freshness.js";
-import type { RunId, NodeId } from "../types/ids.js";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import { ok, err } from "../types/result.js";
-import { __brandRunId, __brandNodeId } from "../types/ids.js";
 import { logFrameworkWithoutThrowing } from "../logger.js";
 import { safeErrorMessage } from "../types/safe-error.js";
 
@@ -45,63 +49,15 @@ const KEY_PREFIX = "fugue:freshness:";
  * Decode a ZSET member back to its components. Returns `null` on parse
  * failure (corrupt entry or format change).
  */
-const decodeMember = (
-  member: string,
-): { runId: RunId; nodeId: NodeId; executionEpoch: FreshnessExecutionEpoch; witnessKind: WitnessKind; witnessValue: string } | null => {
-  try {
-    const parsed = JSON.parse(member);
-    if (!Array.isArray(parsed) || parsed.length !== 5) {
-      logFrameworkWithoutThrowing(
-        "warn",
-        `[RedisFreshnessIndex] decodeMember: unexpected shape (length=${Array.isArray(parsed) ? parsed.length : "not-array"}): ${member.slice(0, 100)}`,
-      );
-      return null;
-    }
-    // Persisted bytes are untrusted: an invalid execution epoch or off-contract
-    // witness kind must not flow into conflict decisions. The file adapter
-    // enforces the same gates; either defect is corrupt persisted state.
-    if (!Number.isSafeInteger(parsed[2]) || parsed[2] < 0) {
-      logFrameworkWithoutThrowing(
-        "warn",
-        `[RedisFreshnessIndex] decodeMember: executionEpoch must be a non-negative safe integer: ${member.slice(0, 100)}`,
-      );
-      return null;
-    }
-    if (!isWitnessKind(parsed[3])) {
-      logFrameworkWithoutThrowing(
-        "warn",
-        `[RedisFreshnessIndex] decodeMember: unknown witnessKind ${String(parsed[3]).slice(0, 100)}: ${member.slice(0, 100)}`,
-      );
-      return null;
-    }
-    if (typeof parsed[4] !== "string" || parsed[4].length === 0) {
-      logFrameworkWithoutThrowing(
-        "warn",
-        `[RedisFreshnessIndex] decodeMember: witnessValue must be a non-empty string: ${member.slice(0, 100)}`,
-      );
-      return null;
-    }
-    return {
-      runId: __brandRunId(parsed[0]),
-      nodeId: __brandNodeId(parsed[1]),
-      executionEpoch: __brandFreshnessExecutionEpoch(parsed[2]),
-      witnessKind: parsed[3],
-      witnessValue: parsed[4],
-    };
-  } catch (e) {
-    // This catch spans BOTH `JSON.parse` and the `__brandRunId`/`__brandNodeId`
-    // smart constructors below it, which throw on a grammar-invalid id. Naming
-    // it unconditionally "JSON parse failed" sent whoever was debugging a
-    // corrupt freshness entry after the wrong root cause. Report what actually
-    // failed instead; either way the entry is dropped and the read fails closed.
+const decodeMember = (member: string) => {
+  const decoded = parseFreshnessMemberKey(member);
+  if (decoded === null) {
     logFrameworkWithoutThrowing(
       "warn",
-      `[RedisFreshnessIndex] decodeMember: ${
-        e instanceof SyntaxError ? "JSON parse failed" : "entry rejected"
-      }: ${safeErrorMessage(e)}: ${member.slice(0, 100)}`,
+      `[RedisFreshnessIndex] decodeMember: entry rejected: ${member.slice(0, 100)}`,
     );
-    return null;
   }
+  return decoded;
 };
 
 /**
@@ -198,6 +154,28 @@ export class RedisFreshnessIndex implements FreshnessIndex {
         kind: "cache-error",
         operation: "freshness:recordWrite",
         message: `resource '${event.newWitness.resource}': ${safeErrorMessage(e)}`,
+      });
+    }
+  }
+
+  async hasRecordedWrite(
+    identity: FreshnessWriteIdentity,
+  ): Promise<Result<boolean, FrameworkError>> {
+    let resource = "<unavailable>";
+    try {
+      resource = identity.newWitness.resource;
+      const score = await this.redis.zscore(
+        KEY_PREFIX + resource,
+        freshnessWriteKey(identity),
+      );
+      this.onSuccess();
+      return ok(score !== null);
+    } catch (e) {
+      this.onFailure(e);
+      return err({
+        kind: "cache-error",
+        operation: "freshness:hasRecordedWrite",
+        message: `resource '${resource}': ${safeErrorMessage(e)}`,
       });
     }
   }

@@ -1,56 +1,56 @@
-# PR Remediation Plan — Adjudicated Standalone Review (round 46)
+# PR Remediation Plan — Adjudicated Standalone Review (round 47)
 
 **Branch:** `feat/f6-file-durable-runtime`
 
-**Review HEAD (frozen source):** `09fda55649c085cd1e50546f5b2e692100392aaa`
+**Review HEAD (frozen source):** `5b228720e68be741e39e5fe15af89d303bd8d42a`
 
-**Exact scope:** the complete canonical `result.json.scope` array (all 490 paths frozen by the engine)
+**Exact scope:** the complete canonical `result.json.scope` array (all 491 paths frozen by the engine)
 
-**Review Run Directory:** `.claude/reviews/review-and-fix-runs/review-20260824T124639Z-53ecda6a`
+**Review Run Directory:** `.claude/reviews/review-and-fix-runs/standalone-review-20260824T133648Z-01a033fc`
 
-**Canonical result:** `<review-run>/result.json` (digest `19e604dcccbd5800d8d73fb865c0fdfc8b94caff377c34fbda2914f52cc1443c`, 40,775 bytes)
+**Canonical result:** `<review-run>/result.json` (digest `513476fa054c5e543d1c21159425a8b69afb9e273b5e8a390224be4a73fa4206`, 39,667 bytes)
 
-**Adjudication:** 7 reviewers → 2 critical findings → registered 3-lens Refutation Panel (`reproduction`, `intent`, `blast-radius`) → **2 surviving / 0 refuted**; 13 advisories dispositioned independently below.
+**Adjudication:** 7 reviewers → 3 critical findings → registered 3-lens Refutation Panel (`reproduction`, `intent`, `security`) → **3 surviving / 0 refuted**; 7 advisories dispositioned independently below.
 
 The canonical `result.json` is the sole remediation authority. Findings, scope, and panel outcomes were not reconstructed by the parent.
 
 ## Mandatory surviving critical findings
 
-1. **`code-reviewer-1` — same-valued reroute is mistaken for an acknowledgement retry**
-   `packages/framework/src/dag-runtime/freshness-emission.ts:220`
-   Introduce a durable non-negative freshness execution epoch on machine context. Initial execution uses epoch 0; a valid backward/current-wave reroute increments it in the pure transition before the replacement wave is checkpointed; ordinary node/freshness retries preserve it. Carry the epoch on `WriteAttemptedEvent`, `WriteEntry`, Redis members, and file singletons, and include it in own-write acknowledgement identity. This gives the index an explicit logical execution identity without timestamps or randomness: an ambiguously acknowledged bookkeeping retry deduplicates, while a same-valued reroute records and observes a distinct write. Update strict persistence/index codecs and ADRs. Add regressions for same-valued writer reroute, ambiguous acknowledgement, epoch persistence, and malformed durable epochs.
+1. **`silent-failure-hunter-1` — aborted summarize failures discard their real cause**
+   `apps/customer-summary/src/server.ts:239`
+   Classify a timeout only when the run failure is explicitly abort-shaped and the request-owned timeout signal fired. Always include the underlying thrown/typed failure in the server-side timeout diagnostic. A non-abort failure racing with the timeout remains an internal failure, is logged with its real detail, and returns the generic 500 response. Add short injected-timeout regressions for typed abort and non-abort failures.
 
-2. **`silent-failure-hunter-1` — termination swallows every supervisor signal failure**
-   `packages/host/src/supervisor/lifecycle/bun-init-process-adapter.ts:438`
-   Inject the supervisor-signal seam into the private adapter config. Treat only an `ESRCH` code as the benign already-exited case; report every other failure with PID, signal, and a total error diagnostic while continuing the bounded shutdown path. Add focused tests proving `ESRCH` is silent and `EPERM`/hostile failures are observable without escaping `beginTermination`.
+2. **`silent-failure-hunter-2` — synchronous readiness diagnostics escape the structured response**
+   `apps/customer-summary/src/server.ts:281`
+   Make the readiness probe shell catch both synchronous throws and rejected promises through one `try/await/catch` helper. Guard the synchronous tracing-exporter counter getter too; a getter failure becomes an observable degraded tracing signal rather than an unstructured handler rejection. Preserve readiness policy: Redis/LLM failures gate with 503, MLflow/exporter failures only degrade at 200. Add synchronous-throw and throwing-logger regressions.
+
+3. **`architecture-tech-lead-1` — freshness retry acknowledgement is inferred from conflict lookup**
+   `packages/framework/src/dag-runtime/freshness-emission.ts:177`
+   Deepen `FreshnessIndex` with an explicit logical-write acknowledgement query keyed by `(runId, nodeId, executionEpoch, newWitness)`. Query acknowledgement before conflict detection; an acknowledged write suppresses duplicate observer/index work, while a missing acknowledgement follows the normal conflict-and-record path. Implement the contract in all three adapters: an exact member lookup for Redis, an indexed identity ledger for memory, and an acknowledgement-key set committed atomically inside the file resource singleton. Keep conflict selection latest-write-only. Extend the strict file codec and ADR-0079/CONTEXT contracts. Add the decisive interleaving regression: write A commits, acknowledgement is lost, write B supersedes A, retry A must be recognized and must not re-stamp itself as latest.
 
 ## Advisory dispositions
 
 ### Accepted
 
-- **`silent-failure-hunter-2` — sweep failure logging can create an unhandled rejection.** Sound shell-boundary defect. Guard the catch-path logger so the original sweep failure remains contained even when diagnostics fail.
-- **`silent-failure-hunter-3` — cache fallback diagnostics can replace graceful degradation.** Sound cache-contract defect. Reuse one local non-throwing reporter for escalated get/set failures, corrupt reads, and serialization failures; add throwing-logger regressions.
-- **`comment-analyzer-1` — guardrail comment incorrectly promises value pass-through.** Correct the comment to state that the node always returns `Ok<GuardrailResult>`, while only validated results carry the original value.
-- **`comment-analyzer-2` — Foundry summary comment contradicts cost behavior.** State that this channel carries node/retry/cache metrics and cost remains span-only.
-- **`comment-analyzer-3` — MS Graph path-resolving header overstates non-throwing behavior.** Scope the guarantee to resolution/read methods and explicitly retain the stock adapter lifecycle contract.
-- **`comment-analyzer-4` — run-node comment contains remediation archaeology.** Keep the one-emission/side-effect invariant and remove round/copy-count history.
-- **`code-simplifier-1` — running/retrying transition branches duplicate wave handling.** Match the shared phase union once while preserving exact event behavior and exhaustive fallback.
-- **`code-simplifier-2` — gate executor-error mapping is triplicated.** Extract one pure helper that maps executor errors through `handleHookCrash`; retain phase-local guards and behavior.
-- **`code-simplifier-4` — parser JSDoc is attached to the wrong helper.** Remove/move the stale block so each helper has only its own contract.
+- **`code-reviewer-1` — multi-digit execution epochs sort incorrectly at equal timestamps.** Sound cross-adapter correctness bug. Encode execution epochs in Redis member bytes as fixed-width safe-integer decimal strings, strictly decode that grammar, and add 9→10 plus property coverage for numeric/lexicographic agreement.
+- **`pr-test-analyzer-1` — no direct `buildRuntimeCapabilities` behavior test.** Sound shared-wiring gap. Add a focused plain-fake test proving always-on `http` and `clock` handles are present when optional adapters are unconfigured.
+- **`type-design-analyzer-1` — tenant ceilings can store invalid numbers.** Sound illegal-state issue. Parse raw ceilings through a non-negative-safe-integer smart constructor before constructing `TenantConcurrencyState`; brand the stored ceiling type and add rejection/property coverage while retaining zero and drain-down behavior.
+- **`type-design-analyzer-2` — Retry-After can store invalid numbers.** Sound HTTP-domain issue. Parse and brand `retryAfterSeconds` as a non-negative safe integer in the `tenantOverQuota` smart constructor, so malformed values cannot inhabit `HostError`; add rejection/property coverage.
+- **`comment-analyzer-1` — bootstrap prompt regression comment embeds transient review metadata.** Keep the behavioral invariant and remove reviewer/run archaeology.
+- **`code-simplifier-1` — Graph token acquisition uses nullable error state plus an empty-token sentinel.** Extract a private Result-returning token helper that preserves thrown causes and treats an empty token as a typed transient failure; keep `graphJson` at one orchestration altitude and pin both failure forms.
+- **`code-simplifier-2` — reroute modules duplicate wave-index construction/filtering.** Reuse one pure `waveIndexByNodeId` helper from the existing wave-resolution module while preserving the current unknown-node filtering semantics; cover both reroute paths with existing behavior tests.
 
 ### Deferred
 
-- **`type-design-analyzer-1` — side-effect profiles omit explicit replay-safety acknowledgement.** Sound but requires a public authoring ADT and a runtime guarantee for each variant. The existing `idempotencyKey` is metadata, not enforced replay safety. Defer to a dedicated ADR/type-design cycle rather than encode a promise the executor cannot uphold.
-- **`architecture-tech-lead-1` — broad vendor-shaped `RedisPort`.** Sound deepening opportunity but spans unrelated host bounded capabilities, adapters, wiring, and fakes. Defer to a dedicated interface-segregation migration; combining it with two mandatory correctness fixes would increase blast radius without helping either invariant.
-- **`architecture-tech-lead-2` — HITL lifecycle policy remains interleaved with I/O.** Sound FC/IS opportunity but requires designing a command-plan ADT and migrating service tests. Defer to a dedicated HITL planner deepening round under ADR-0060 rather than redesign lifecycle orchestration inside this remediation.
+None.
 
 ### Dismissed
 
-- **`code-simplifier-3` — tenant equality redundantly rechecks both discriminants.** The suggested removal was tested and rejected: TypeScript does not correlate `a.status === b.status` strongly enough to narrow `b`, so accessing `b.deregisteredAt` fails typecheck. Keeping the explicit second discriminant guard is clearer and assertion-free.
+None.
 
 ## Refuted critical findings audit
 
-None. Both critical findings survived unanimously under reproduction, intent, and blast-radius. The authoritative panel outcomes and captured `refutation-slot:*` transcripts remain under the Review Run Directory.
+None. All three critical findings survived unanimously under reproduction, intent, and security. The authoritative panel outcomes and captured `refutation-slot:*` transcripts remain under the Review Run Directory.
 
 ## Planned files
 
@@ -58,64 +58,59 @@ None. Both critical findings survived unanimously under reproduction, intent, an
 - `CONTEXT.md`
 - `docs/adr/0025-freshness-witness-contract.md`
 - `docs/adr/0079-file-freshness-index-digest-addressed-latest-write-files-with-lazy-ttl-parity.md`
-- `apps/customer-summary/src/observability-composition.ts`
-- `packages/adapter-ms-graph/src/path-resolving.ts`
-- `packages/framework/src/types/events.ts`
+- `docs/adr/0080-failure-surface-result-everywhere-the-port-allows-typed-throwing-inside-the-joblike-shell.md`
+- `apps/customer-summary/src/server.ts`
+- `apps/customer-summary/src/__tests__/server.test.ts`
+- `apps/customer-summary/src/__tests__/bootstrap-prompts.test.ts`
 - `packages/framework/src/types/freshness.ts`
 - `packages/framework/src/types/index.ts`
-- `packages/framework/src/types/witness.ts`
-- `packages/framework/src/dag-runtime/types.ts`
-- `packages/framework/src/dag-runtime/machine.ts`
-- `packages/framework/src/dag-runtime/persistence.ts`
-- `packages/framework/src/dag-runtime/human-resolution.ts`
+- `packages/framework/src/dag-runtime/index.ts`
+- `packages/framework/src/dag-runtime/freshness-check.ts`
 - `packages/framework/src/dag-runtime/freshness-emission.ts`
-- `packages/framework/src/dag-runtime/transition.ts`
-- `packages/framework/src/dag-runtime/run-node.ts`
-- `packages/framework/src/nodes/guardrail.ts`
 - `packages/framework/src/checkpoint/redis-freshness-index.ts`
+- `packages/framework/src/file/boundary-error.ts`
 - `packages/framework/src/file/freshness-codec.ts`
 - `packages/framework/src/file/freshness-index.ts`
-- `packages/framework/src/__tests__/_context-factories.ts`
-- `packages/framework/src/__tests__/_freshness-helpers.ts`
-- `packages/framework/src/__tests__/context-serialization-roundtrip.test.ts`
-- `packages/framework/src/__tests__/dag-transition-property.test.ts`
-- `packages/framework/src/__tests__/dag-transition.test.ts`
-- `packages/framework/src/__tests__/file-boundary.test.ts`
+- `packages/framework/src/dag-runtime/wave-resolution.ts`
+- `packages/framework/src/dag-runtime/reroute.ts`
+- `packages/framework/src/dag-runtime/human-resolution.ts`
+- `packages/framework/src/__tests__/freshness-check.test.ts`
+- `packages/framework/src/__tests__/freshness-index-result.test.ts`
+- `packages/framework/src/__tests__/freshness-emission.test.ts`
+- `packages/framework/src/__tests__/freshness-retry-exactly-once.test.ts`
+- `packages/framework/src/__tests__/redis-freshness-index.test.ts`
 - `packages/framework/src/__tests__/file-freshness-codec.test.ts`
 - `packages/framework/src/__tests__/file-freshness-index.test.ts`
+- `packages/framework/src/__tests__/file-boundary.test.ts`
 - `packages/framework/src/__tests__/freshness-check-property.test.ts`
-- `packages/framework/src/__tests__/freshness-check.test.ts`
-- `packages/framework/src/__tests__/freshness-emission.test.ts`
-- `packages/framework/src/__tests__/freshness-full-pipeline.test.ts`
-- `packages/framework/src/__tests__/freshness-index-result.test.ts`
-- `packages/framework/src/__tests__/freshness-retry-exactly-once.test.ts`
 - `packages/framework/src/__tests__/human-resolution.test.ts`
-- `packages/framework/src/__tests__/non-retriable-fast-fail.test.ts`
-- `packages/framework/src/__tests__/observer-property.test.ts`
-- `packages/framework/src/__tests__/redis-freshness-index.test.ts`
-- `packages/framework/src/__tests__/retry-policy.test.ts`
-- `packages/framework/src/__tests__/wave-execution-errors.test.ts`
-- `packages/framework/src/observer/foundry-event-mapping.test.ts`
-- `packages/host/src/supervisor/lifecycle/bun-init-process-adapter.ts`
-- `packages/host/src/__tests__/supervisor/lifecycle/bun-init-process-adapter.test.ts`
-- `packages/host/src/main-supervisor.ts`
-- `packages/host/src/adapters/node-context-factory.ts`
-- `packages/host/src/__tests__/node-context-factory.test.ts`
-- `packages/host/src/hitl/__tests__/run-store-job.test.ts`
-- `packages/host/src/supervisor/registry/parse-tenant-config.ts`
+- `packages/framework/src/__tests__/conditional-edges-reroute.test.ts`
+- `packages/host/src/adapters/runtime-capabilities.ts`
+- `packages/host/src/supervisor/admission.ts`
+- `packages/host/src/domain/host-error.ts`
+- `packages/host/src/__tests__/supervisor/admission.test.ts`
+- `packages/host/src/__tests__/domain/tenant-error-taxonomy.test.ts`
+- `packages/adapter-ms-graph/src/path-resolving.ts`
+- `packages/adapter-ms-graph/src/__tests__/path-resolving.test.ts`
 
-One remediation-owned regression-support path is outside the frozen review scope and must be registered at remediation start:
+Four remediation-owned support paths are outside the frozen review scope and must be registered at remediation start:
 
-- `packages/framework/src/__tests__/_freshness-helpers.ts` — adds the branded epoch fixture used by the mandatory freshness regressions.
+- `packages/framework/src/dag-runtime/wave-resolution.ts`
+- `packages/host/src/__tests__/adapters/runtime-capabilities.test.ts`
+- `packages/host/src/__tests__/domain/tenant-error-taxonomy.test.ts`
+- `packages/host/src/__tests__/supervisor/admission.test.ts`
 
 Every other planned path, including the plan, is inside the frozen review scope.
 
 ## Baseline evidence
 
-Before editing production code:
+Before production edits, **237 tests passed / 0 failed** across the focused app, framework freshness/reroute, host admission/error/wiring, and MS Graph suites:
 
-- Framework freshness/reroute/persistence baseline: **247 passed, 0 failed** across 10 files.
-- Host lifecycle/cache/parser baseline: **170 passed, 0 failed** across 4 files.
+- app server + prompt bootstrap: 43 passed
+- framework freshness adapters/emission/retry: 116 passed
+- framework human reroute: 14 passed
+- host admission/error/entrypoint wiring: 42 passed
+- MS Graph path resolution: 22 passed
 
 ## Validation
 
@@ -123,20 +118,23 @@ Focused regression gate:
 
 ```bash
 bun test \
+  apps/customer-summary/src/__tests__/server.test.ts \
+  apps/customer-summary/src/__tests__/bootstrap-prompts.test.ts \
   packages/framework/src/__tests__/freshness-retry-exactly-once.test.ts \
-  packages/framework/src/__tests__/conditional-edges-reroute.test.ts \
   packages/framework/src/__tests__/freshness-emission.test.ts \
   packages/framework/src/__tests__/freshness-check.test.ts \
+  packages/framework/src/__tests__/freshness-check-property.test.ts \
+  packages/framework/src/__tests__/freshness-index-result.test.ts \
+  packages/framework/src/__tests__/redis-freshness-index.test.ts \
   packages/framework/src/__tests__/file-freshness-codec.test.ts \
   packages/framework/src/__tests__/file-freshness-index.test.ts \
-  packages/framework/src/__tests__/redis-freshness-index.test.ts \
-  packages/framework/src/__tests__/context-serialization-roundtrip.test.ts \
+  packages/framework/src/__tests__/file-boundary.test.ts \
   packages/framework/src/__tests__/human-resolution.test.ts \
-  packages/framework/src/__tests__/dag-transition.test.ts \
-  packages/host/src/__tests__/supervisor/lifecycle/bun-init-process-adapter.test.ts \
-  packages/host/src/__tests__/node-context-factory.test.ts \
-  packages/host/src/__tests__/supervisor/registry/tenant-registry.test.ts \
-  packages/host/src/__tests__/supervisor/registry/parse-tenant-config.test.ts
+  packages/framework/src/__tests__/conditional-edges-reroute.test.ts \
+  packages/host/src/__tests__/supervisor/admission.test.ts \
+  packages/host/src/__tests__/domain/tenant-error-taxonomy.test.ts \
+  packages/host/src/__tests__/adapters/runtime-capabilities.test.ts \
+  packages/adapter-ms-graph/src/__tests__/path-resolving.test.ts
 ```
 
 Full validation before registered remediation:

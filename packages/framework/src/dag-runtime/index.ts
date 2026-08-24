@@ -39,7 +39,13 @@ export { buildDagExecutor } from "./executor.js";
 // of the rule the runtime applies incrementally via `InMemoryFreshnessIndex`,
 // kept as the differential oracle for the property test (see its module header).
 export { InMemoryFreshnessIndex } from "./freshness-check.js";
-export type { FreshnessIndex, FreshnessConflict, FreshnessCheckResult, WriteEntry } from "./freshness-check.js";
+export type {
+  FreshnessCheckResult,
+  FreshnessConflict,
+  FreshnessIndex,
+  FreshnessWriteIdentity,
+  WriteEntry,
+} from "./freshness-check.js";
 
 // Routing decision logic (ADR 0015)
 export {

@@ -17,10 +17,22 @@ import type { WitnessCapturedEvent, WriteAttemptedEvent } from "../types/events.
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import { ok } from "../types/result.js";
-import { writeEntryOf } from "../types/freshness.js";
-import type { FreshnessConflict, FreshnessCheckResult, FreshnessIndex, WriteEntry } from "../types/freshness.js";
+import { freshnessWriteKey, writeEntryOf } from "../types/freshness.js";
+import type {
+  FreshnessConflict,
+  FreshnessCheckResult,
+  FreshnessIndex,
+  FreshnessWriteIdentity,
+  WriteEntry,
+} from "../types/freshness.js";
 
-export type { FreshnessConflict, FreshnessCheckResult, FreshnessIndex, WriteEntry };
+export type {
+  FreshnessConflict,
+  FreshnessCheckResult,
+  FreshnessIndex,
+  FreshnessWriteIdentity,
+  WriteEntry,
+};
 
 /**
  * Scan a sequence of witness-captured and write-attempted events to detect
@@ -126,6 +138,7 @@ export const checkFreshness = (
  */
 export class InMemoryFreshnessIndex implements FreshnessIndex {
   private readonly writes = new Map<string, WriteEntry[]>();
+  private readonly recordedWriteKeys = new Map<string, Set<string>>();
   private readonly latest = new Map<string, WriteEntry>();
   private readonly maxEntries: number;
   private readonly maxResources: number;
@@ -165,6 +178,7 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
           this.evictCursor++;
           if (this.writes.has(candidate)) {
             this.writes.delete(candidate);
+            this.recordedWriteKeys.delete(candidate);
             this.latest.delete(candidate);
             this.resourceSet.delete(candidate);
             evicted = true;
@@ -176,6 +190,7 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
           const firstKey = this.writes.keys().next().value;
           if (firstKey !== undefined) {
             this.writes.delete(firstKey);
+            this.recordedWriteKeys.delete(firstKey);
             this.latest.delete(firstKey);
             this.resourceSet.delete(firstKey);
           }
@@ -202,8 +217,21 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
       entries.splice(0, entries.length - this.maxEntries);
     }
     this.writes.set(resource, entries);
+    const recorded = this.recordedWriteKeys.get(resource) ?? new Set<string>();
+    recorded.add(freshnessWriteKey(event));
+    this.recordedWriteKeys.set(resource, recorded);
     this.latest.set(resource, entries[entries.length - 1]!);
     return ok(undefined);
+  }
+
+  async hasRecordedWrite(
+    identity: FreshnessWriteIdentity,
+  ): Promise<Result<boolean, FrameworkError>> {
+    return ok(
+      this.recordedWriteKeys
+        .get(identity.newWitness.resource)
+        ?.has(freshnessWriteKey(identity)) ?? false,
+    );
   }
 
   /**
@@ -243,6 +271,7 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
   /** Clear all entries. Useful for testing. */
   clear(): void {
     this.writes.clear();
+    this.recordedWriteKeys.clear();
     this.latest.clear();
     this.resourceOrder.length = 0;
     this.resourceSet.clear();

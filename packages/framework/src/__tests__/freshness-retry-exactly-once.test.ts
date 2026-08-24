@@ -60,6 +60,7 @@ const flakyOnce = (failFor: string): FreshnessIndex => {
   const inner = new InMemoryFreshnessIndex();
   let failed = false;
   return {
+    hasRecordedWrite: (identity) => inner.hasRecordedWrite(identity),
     findConflict: async (w, sinceMs) => {
       if (!failed && w.resource === RN(failFor)) {
         failed = true;
@@ -80,6 +81,7 @@ const ambiguousCommitOnce = (): FreshnessIndex => {
   const inner = new InMemoryFreshnessIndex();
   let loseAcknowledgement = true;
   return {
+    hasRecordedWrite: (identity) => inner.hasRecordedWrite(identity),
     findConflict: (conditionedOn, sinceMs) =>
       inner.findConflict(conditionedOn, sinceMs),
     recordWrite: async (event) => {
@@ -96,6 +98,36 @@ const ambiguousCommitOnce = (): FreshnessIndex => {
       return ok(undefined);
     },
   };
+};
+
+const ambiguousCommitThenInterveningWrite = (): {
+  readonly index: FreshnessIndex;
+  readonly inner: InMemoryFreshnessIndex;
+} => {
+  const inner = new InMemoryFreshnessIndex();
+  let first = true;
+  const index: FreshnessIndex = {
+    hasRecordedWrite: (identity) => inner.hasRecordedWrite(identity),
+    findConflict: (conditionedOn, sinceMs) => inner.findConflict(conditionedOn, sinceMs),
+    recordWrite: async (event) => {
+      const recorded = await inner.recordWrite(event);
+      if (!recorded.ok || !first) return recorded;
+      first = false;
+      await inner.recordWrite({
+        ...event,
+        runId: R("run-intervening"),
+        nodeId: N("intervening-writer"),
+        newWitness: witness("version", event.newWitness.resource, "3"),
+        succeededAtMs: event.succeededAtMs + 1,
+      });
+      return err({
+        kind: "cache-error",
+        operation: "recordWrite",
+        message: "acknowledgement lost after commit",
+      });
+    },
+  };
+  return { index, inner };
 };
 
 describe("retriable freshness failure — wave retry", () => {
@@ -240,6 +272,7 @@ describe("retriable freshness failure — wave retry", () => {
     let recordWrites = 0;
     const inner = new InMemoryFreshnessIndex();
     const index: FreshnessIndex = {
+      hasRecordedWrite: (identity) => inner.hasRecordedWrite(identity),
       findConflict: (conditionedOn, sinceMs) => inner.findConflict(conditionedOn, sinceMs),
       recordWrite: async (event) => {
         recordWrites += 1;
@@ -357,5 +390,43 @@ describe("retriable freshness failure — wave retry", () => {
     );
     expect(writes).toHaveLength(1);
     expect(Number(writes[0]!.executionEpoch)).toBe(0);
+  });
+
+  test("a lost acknowledgement remains discoverable after an intervening write supersedes it", async () => {
+    const observer = new RecordingObserver();
+    const { index, inner } = ambiguousCommitThenInterveningWrite();
+    const dag = defineDag({
+      id: "intervening-freshness-write",
+      nodes: {
+        writer: makeNode("writer", {
+          sideEffects: writesTo("pg:interleaving", "2"),
+          run: async () => ok({ committed: true }),
+        }),
+      },
+      edges: [{ from: DAG_INPUT, to: "writer" }],
+      outputNodeId: "writer",
+      defaultRetryLimit: 1,
+    });
+
+    const result = await runDagStateful(
+      dag,
+      null,
+      makeNodeContext({
+        runId: R("run-interleaving"),
+        dagId: D("intervening-freshness-write"),
+        observer,
+      }),
+      { freshnessIndex: index },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(observer.events.filter((event) => event.type === "write-attempted")).toHaveLength(1);
+    expect(observer.events.filter((event) => event.type === "freshness-violation")).toHaveLength(0);
+    expect(
+      await inner.findConflict(
+        witness("version", RN("pg:interleaving"), "3"),
+        0,
+      ),
+    ).toEqual({ ok: true, value: null });
   });
 });

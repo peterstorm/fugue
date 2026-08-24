@@ -50,7 +50,14 @@ const prepared = (opts: Parameters<typeof writeEvent>[0] = {}): PreparedFreshnes
 
 const stored = (
   opts: Parameters<typeof writeEvent>[0] & { writtenAtMs: number },
-): StoredFreshnessEntry => ({ writtenAtMs: opts.writtenAtMs, ...prepared(opts) });
+): StoredFreshnessEntry => {
+  const write = prepared(opts);
+  return {
+    writtenAtMs: opts.writtenAtMs,
+    ...write,
+    acknowledgedWriteKeys: [write.writeKey],
+  };
+};
 
 describe("isExpired — the ONE lazy 24h TTL rule (FR-032)", () => {
   it("is not expired at exactly the TTL boundary, and is one millisecond past it", () => {
@@ -160,8 +167,16 @@ describe("selectLatestWrite — ADR-0079 score monotonicity and tie order", () =
   it("breaks an equal-score tie by the Redis member byte order, independent of arrival order", () => {
     const a = prepared({ nodeId: "node-a", value: "va", succeededAtMs: 1_000 });
     const b = prepared({ nodeId: "node-b", value: "vb", succeededAtMs: 1_000 });
-    const aFirst = selectLatestWrite({ writtenAtMs: 0, ...a }, b, 10);
-    const bFirst = selectLatestWrite({ writtenAtMs: 0, ...b }, a, 10);
+    const aFirst = selectLatestWrite(
+      { writtenAtMs: 0, ...a, acknowledgedWriteKeys: [a.writeKey] },
+      b,
+      10,
+    );
+    const bFirst = selectLatestWrite(
+      { writtenAtMs: 0, ...b, acknowledgedWriteKeys: [b.writeKey] },
+      a,
+      10,
+    );
     expect(aFirst.newWitness.value).toBe(bFirst.newWitness.value);
     // …and the winner is the one the member grammar orders higher.
     expect(serializeRedisFreshnessMember(aFirst)).not.toBe("");

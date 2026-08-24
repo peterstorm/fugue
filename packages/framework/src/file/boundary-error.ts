@@ -39,6 +39,7 @@ export type FileOperation =
   | "eventDigestOf"
   | "eventFileName"
   | "freshness:findConflict"
+  | "freshness:hasRecordedWrite"
   | "freshness:recordWrite"
   | "keyDigest"
   | "load"

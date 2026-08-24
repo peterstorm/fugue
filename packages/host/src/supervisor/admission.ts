@@ -36,10 +36,11 @@
 import type { Result } from "@fuguejs/framework";
 import { ok, err } from "@fuguejs/framework";
 import type { TenantId } from "../domain/tenant.js";
-import type { HostError } from "../domain/host-error.js";
+import type { HostError, RetryAfterSeconds } from "../domain/host-error.js";
 import {
   tenantOverQuota,
   internalInvariantViolated,
+  retryAfterSeconds,
 } from "../domain/host-error.js";
 import {
   type ConcurrencyState,
@@ -67,9 +68,22 @@ import {
  * `domain/concurrency.ts`, a constructor rejecting `current > max` would
  * contradict the intentional, documented drain-down behaviour.
  */
+declare const __tenantConcurrencyLimitBrand: unique symbol;
+export type TenantConcurrencyLimit = number & {
+  readonly [__tenantConcurrencyLimitBrand]: "TenantConcurrencyLimit";
+};
+
+/** Parse the non-negative safe-integer ceiling before it can enter admission state. */
+export const tenantConcurrencyLimit = (value: number): TenantConcurrencyLimit => {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError("tenant concurrency limit must be a non-negative safe integer");
+  }
+  return value as TenantConcurrencyLimit;
+};
+
 interface TenantConcurrency {
   readonly current: number;
-  readonly max: number;
+  readonly max: TenantConcurrencyLimit;
 }
 
 /**
@@ -87,13 +101,13 @@ interface TenantConcurrency {
 export interface TenantConcurrencyState {
   readonly inner: ConcurrencyState<TenantId>;
   readonly perTenant: ReadonlyMap<TenantId, TenantConcurrency>;
-  readonly defaultTenantMax: number;
+  readonly defaultTenantMax: TenantConcurrencyLimit;
   /**
    * Retry-After (seconds) advertised when a tenant is over its OWN ceiling
    * (multi-tenant spec FR-038). Carried on state (config), surfaced on the `tenant-over-quota`
    * error so the HTTP layer reads it from the error, never a hardcoded header.
    */
-  readonly retryAfterSeconds: number;
+  readonly retryAfterSeconds: RetryAfterSeconds;
 }
 
 /** @internal Unique symbol for type-level branding — prevents external forgery. */
@@ -176,12 +190,12 @@ const INNER_GLOBAL_HEADROOM = 1_000_000;
 export const initTenantConcurrency = (
   config: AdmissionConfig = {},
 ): TenantConcurrencyState => {
-  const defaultTenantMax = config.defaultTenantMax ?? 10;
+  const defaultTenantMax = tenantConcurrencyLimit(config.defaultTenantMax ?? 10);
   return {
     inner: initConcurrency<TenantId>(INNER_GLOBAL_HEADROOM, defaultTenantMax),
     perTenant: new Map(),
     defaultTenantMax,
-    retryAfterSeconds: config.retryAfterSeconds ?? 5,
+    retryAfterSeconds: retryAfterSeconds(config.retryAfterSeconds ?? 5),
   };
 };
 
@@ -196,10 +210,11 @@ export const withTenantLimit = (
   tenant: TenantId,
   max: number,
 ): TenantConcurrencyState => {
+  const limit = tenantConcurrencyLimit(max);
   const existing = state.perTenant.get(tenant);
   const perTenant = new Map(state.perTenant);
-  perTenant.set(tenant, { current: existing?.current ?? 0, max });
-  return { ...state, perTenant, inner: withDagLimit(state.inner, tenant, max) };
+  perTenant.set(tenant, { current: existing?.current ?? 0, max: limit });
+  return { ...state, perTenant, inner: withDagLimit(state.inner, tenant, limit) };
 };
 
 /**

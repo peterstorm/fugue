@@ -3,11 +3,14 @@
 // ADR-0079 stores exactly one bounded latest-write singleton per resource:
 //
 //   <directory>/<sha256hex(resource)>.json
-//   { writtenAtMs, runId, nodeId, executionEpoch, newWitness, succeededAtMs }
+//   { writtenAtMs, runId, nodeId, executionEpoch, newWitness, succeededAtMs,
+//     acknowledgedWriteKeys }
 //
-// History belongs to the event log; this index deliberately persists neither
-// an append log nor a Redis member set. Writes for one digest are serialized,
-// compared, and atomically replaced. While the current singleton is within
+// Conflict history belongs to the event log; this index persists only the
+// latest conflict candidate plus a TTL-bounded logical-write acknowledgement
+// key set. The set cannot answer historical conflict queries; it exists so a
+// committed write remains recognizable after a newer write supersedes it.
+// Writes for one digest are serialized, compared, and atomically replaced. While the current singleton is within
 // TTL, a lower succeededAtMs cannot overwrite a newer singleton; an expired
 // singleton is replaced by any incoming write (lazy supersede,
 // `selectLatestWrite`). Equal scores use Redis's reverse unsigned-binary
@@ -46,9 +49,11 @@ import type { AtomicWriteFileTestHooks } from "./atomic.js";
 import { keyDigest } from "./layout.js";
 import {
   decideConflict,
+  isExpired,
   isFiniteNumber,
   parseConditionedOn,
   prepareFreshnessWrite,
+  prepareFreshnessWriteIdentity,
   parseStoredFreshnessEntry,
   selectLatestWrite,
   serializeRedisFreshnessMember,
@@ -56,7 +61,12 @@ import {
 } from "./freshness-codec.js";
 import type { StoredFreshnessEntry } from "./freshness-codec.js";
 import type { WriteAttemptedEvent } from "../types/events.js";
-import type { FreshnessIndex, Witness, WriteEntry } from "../types/freshness.js";
+import type {
+  FreshnessIndex,
+  FreshnessWriteIdentity,
+  Witness,
+  WriteEntry,
+} from "../types/freshness.js";
 import { parseFileFactoryClock } from "./options.js";
 import { isFrameworkError, type FrameworkError } from "../types/errors.js";
 import { __brandNodeId, __brandRunId } from "../types/ids.js";
@@ -82,7 +92,9 @@ import {
 
 type FreshnessOperation = Extract<
   FileOperation,
-  "freshness:recordWrite" | "freshness:findConflict"
+  | "freshness:recordWrite"
+  | "freshness:hasRecordedWrite"
+  | "freshness:findConflict"
 >;
 
 const cacheFailure = (
@@ -202,7 +214,10 @@ const createFileFreshnessIndexUnchecked = (
    * from silently drifting when clock sites are added or removed.
    */
   const readClock = (
-    operation: "freshness:recordWrite" | "freshness:findConflict",
+    operation:
+      | "freshness:recordWrite"
+      | "freshness:hasRecordedWrite"
+      | "freshness:findConflict",
     digest: string,
     clockFailedContext: "stamping the write" | "evaluating the freshness TTL",
   ): Result<number, FrameworkError> => {
@@ -306,6 +321,69 @@ const createFileFreshnessIndexUnchecked = (
         // lock-protocol operations name THIS port call, other typed
         // failures keep their own operation, untyped throws are wrapped.
         return err(surfaceFailure("freshness:recordWrite", digest, error));
+      }
+    },
+
+    async hasRecordedWrite(
+      identity: FreshnessWriteIdentity,
+    ): Promise<Result<boolean, FrameworkError>> {
+      let digest: string | null = null;
+      try {
+        const parsedIdentity = prepareFreshnessWriteIdentity(identity);
+        if (!parsedIdentity.ok) {
+          return err(
+            cacheFailure(
+              "freshness:hasRecordedWrite",
+              null,
+              parsedIdentity.error,
+              undefined,
+              "permanent",
+            ),
+          );
+        }
+        digest = keyDigest(parsedIdentity.value.newWitness.resource);
+        const recordPath = join(directory, `${digest}.json`);
+        let text: string;
+        try {
+          text = readFileSync(recordPath, "utf-8");
+        } catch (error) {
+          if (isMissingPathError(error)) return ok(false);
+          return err(
+            cacheFailure(
+              "freshness:hasRecordedWrite",
+              digest,
+              error,
+              probeErrorCode(error),
+            ),
+          );
+        }
+        const parsed = parseStoredFreshnessEntry(
+          text,
+          parsedIdentity.value.newWitness.resource,
+        );
+        if (!parsed.ok) {
+          return err(
+            cacheFailure(
+              "freshness:hasRecordedWrite",
+              digest,
+              `stored freshness record is corrupt ${corruptRecordContext(directory, recordPath, digest, parsed.error)} — acknowledgement verdict withheld (fail closed)`,
+              undefined,
+              "permanent",
+            ),
+          );
+        }
+        const clocked = readClock(
+          "freshness:hasRecordedWrite",
+          digest,
+          "evaluating the freshness TTL",
+        );
+        if (!clocked.ok) return clocked;
+        return ok(
+          !isExpired(parsed.value.writtenAtMs, clocked.value) &&
+          parsed.value.acknowledgedWriteKeys.includes(parsedIdentity.value.writeKey),
+        );
+      } catch (error) {
+        return err(surfaceFailure("freshness:hasRecordedWrite", digest, error));
       }
     },
 

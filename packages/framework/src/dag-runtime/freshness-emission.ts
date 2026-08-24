@@ -16,8 +16,8 @@
 // close the wave with a write witness permanently missing.
 
 import { match } from "ts-pattern";
-import type { NodeId, RunId } from "../types/ids.js";
-import type { Witness, WriteEntry } from "../types/freshness.js";
+import type { NodeId } from "../types/ids.js";
+import type { Witness } from "../types/freshness.js";
 import { stampWitness, writeEntryOf } from "../types/freshness.js";
 import type { FrameworkError } from "../types/errors.js";
 import { type Result, ok, err } from "../types/result.js";
@@ -28,27 +28,6 @@ import { buildNodeInput } from "../shared/build-input.js";
 import { emit } from "./emit.js";
 import type { PostWaveContext } from "./post-wave-context.js";
 import { nodeErrorEmitter } from "./post-wave-context.js";
-
-/**
- * Whether the latest indexed write is this node's own already-committed
- * attempt. Redis/file writes can commit and still lose their acknowledgement;
- * the retry must recognize that durable fact instead of reporting itself as a
- * freshness violation. The identity excludes timestamps because a resumed
- * bookkeeping attempt necessarily receives a new clock value.
- */
-const isOwnRecordedWrite = (
-  entry: WriteEntry,
-  runId: RunId,
-  nodeId: NodeId,
-  executionEpoch: WriteEntry["executionEpoch"],
-  newWitness: Witness,
-): boolean =>
-  entry.runId === runId &&
-  entry.nodeId === nodeId &&
-  entry.executionEpoch === executionEpoch &&
-  entry.newWitness.kind === newWitness.kind &&
-  entry.newWitness.resource === newWitness.resource &&
-  entry.newWitness.value === newWitness.value;
 
 /**
  * The outcome of one wave's freshness emission.
@@ -170,7 +149,33 @@ export async function emitFreshnessWitnessEvents(
           return err(fwError);
         }
 
-        // Step 3: Freshness conflict check + event emission
+        // Step 3: Ask the acknowledgement question directly. Conflict lookup
+        // cannot answer it once another write has become latest.
+        const identity = {
+          runId: nodeCtx.runId,
+          nodeId,
+          executionEpoch: machineCtx.freshnessExecutionEpoch,
+          newWitness,
+        };
+        const acknowledgement = await freshnessIndex.hasRecordedWrite(identity);
+        if (!acknowledgement.ok) {
+          const msg = formatFrameworkError(acknowledgement.error);
+          bestEffortLog(
+            "error",
+            `[emitFreshnessWitnessEvents] freshnessIndex.hasRecordedWrite failed for node '${nodeId}': ${msg}`,
+          );
+          const fwError: FrameworkError = {
+            kind: "node-crash",
+            nodeId,
+            retriability: "retriable",
+            message: `freshness acknowledgement unavailable: ${msg}`,
+          };
+          emitNodeError(nodeId, `freshness acknowledgement check failed: ${msg}`, fwError);
+          return err(fwError);
+        }
+        if (acknowledgement.value) return ok(undefined);
+
+        // Step 4: Freshness conflict check + event emission.
         // sinceMs: 0 is intentional — within a run, all prior writes are relevant
         // because topological ordering guarantees the read witness was captured
         // before any writes in later waves.
@@ -189,16 +194,7 @@ export async function emitFreshnessWitnessEvents(
           return err(fwError);
         }
         const conflict = conflictResult.value;
-        const alreadyRecorded =
-          conflict !== null &&
-          isOwnRecordedWrite(
-            conflict,
-            nodeCtx.runId,
-            nodeId,
-            machineCtx.freshnessExecutionEpoch,
-            newWitness,
-          );
-        if (conflict !== null && !alreadyRecorded) {
+        if (conflict !== null) {
           emit(nodeCtx, {
             type: "freshness-violation",
             runId: nodeCtx.runId,
@@ -223,11 +219,6 @@ export async function emitFreshnessWitnessEvents(
           succeededAtMs: nowFn(),
           timestamp: stamp(),
         };
-        // A prior attempt already committed and observed this exact logical
-        // write. Treat the durable index entry as its acknowledgement: neither
-        // the index nor the observer receives a duplicate retry artifact.
-        if (alreadyRecorded) return ok(undefined);
-
         emit(nodeCtx, writeEvent);
         const writeResult = await freshnessIndex.recordWrite(writeEvent);
         if (!writeResult.ok) {

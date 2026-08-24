@@ -11,6 +11,7 @@
  */
 
 import { afterEach, describe, it, expect } from "bun:test";
+import fc from "fast-check";
 import { D, N, R } from "./_id-helpers.js";
 import { FE } from "./_freshness-helpers.js";
 import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
@@ -84,6 +85,29 @@ describe("RedisFreshnessIndex encoding", () => {
     expect(decoded).not.toBeNull();
     expect(decoded!.witnessValue).toBe("日本語テスト🎉");
   });
+
+  it("orders epoch 10 after epoch 9 at equal scores", () => {
+    const epoch9 = __testEncodeMember(R("r"), N("n"), FE(9), "version", "v");
+    const epoch10 = __testEncodeMember(R("r"), N("n"), FE(10), "version", "v");
+    expect(compareFreshnessMemberKeys(epoch9, epoch10)).toBeLessThan(0);
+    expect(decode(epoch10)?.executionEpoch).toBe(FE(10));
+  });
+
+  it("property: member byte order agrees with numeric execution-epoch order", () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 0, max: Number.MAX_SAFE_INTEGER }),
+        fc.integer({ min: 0, max: Number.MAX_SAFE_INTEGER }),
+        (left, right) => {
+          const leftKey = __testEncodeMember(R("r"), N("n"), FE(left), "version", "v");
+          const rightKey = __testEncodeMember(R("r"), N("n"), FE(right), "version", "v");
+          expect(Math.sign(compareFreshnessMemberKeys(leftKey, rightKey))).toBe(
+            Math.sign(left - right),
+          );
+        },
+      ),
+    );
+  });
 });
 
 describe("RedisFreshnessIndex decodeMember — rejection", () => {
@@ -127,7 +151,13 @@ describe("RedisFreshnessIndex decodeMember — rejection", () => {
 // ---------------------------------------------------------------------------
 
 import { RedisFreshnessIndex } from "../checkpoint/redis-freshness-index.js";
-import { FRESHNESS_TTL_SECONDS, witness, resourceName } from "../types/freshness.js";
+import {
+  compareFreshnessMemberKeys,
+  FRESHNESS_TTL_SECONDS,
+  freshnessWriteIdentityOf,
+  witness,
+  resourceName,
+} from "../types/freshness.js";
 
 const fakeFindConflictRedis = (members: readonly string[]): {
   redis: ConstructorParameters<typeof RedisFreshnessIndex>[0];
@@ -186,6 +216,37 @@ describe("RedisFreshnessIndex recordWrite — atomic TTL contract", () => {
       ],
     });
     expect(index.consecutiveFailures).toBe(0);
+  });
+});
+
+describe("RedisFreshnessIndex logical-write acknowledgement", () => {
+  it("queries the exact member without conflating it with the latest conflict", async () => {
+    const calls: unknown[][] = [];
+    const index = new RedisFreshnessIndex({
+      zscore: async (...args: unknown[]) => {
+        calls.push(args);
+        return "900";
+      },
+    } as unknown as ConstructorParameters<typeof RedisFreshnessIndex>[0]);
+    const event = {
+      type: "write-attempted" as const,
+      runId: R("run-ack"),
+      dagId: D("dag-ack"),
+      nodeId: N("writer"),
+      executionEpoch: FE(10),
+      conditionedOn: witness("version", resourceName("res:ack"), "1"),
+      newWitness: witness("version", resourceName("res:ack"), "2"),
+      succeededAtMs: 900,
+      timestamp: new Date(900),
+    };
+
+    expect(await index.hasRecordedWrite(freshnessWriteIdentityOf(event))).toEqual({
+      ok: true,
+      value: true,
+    });
+    expect(calls).toEqual([
+      ["fugue:freshness:res:ack", __testEncodeMember(R("run-ack"), N("writer"), FE(10), "version", "2")],
+    ]);
   });
 });
 

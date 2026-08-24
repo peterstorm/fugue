@@ -252,3 +252,19 @@ completion proof to one node ID per DAG node while both survive durable HITL
 suspension, worker replacement, and requeue. Persisted context parsing requires
 a resource-consistent witness `Map`, a valid node-ID `Set`, and a non-negative
 safe-integer execution epoch; corrupt bytes fail closed before execution resumes.
+
+A later write can supersede the latest conflict candidate without erasing the
+acknowledgement of an earlier logical write. `FreshnessIndex` therefore exposes
+`hasRecordedWrite(identity)` separately from `findConflict(conditionedOn,
+sinceMs)`. Emission asks the acknowledgement question first and suppresses both
+observer and index duplication when it is true. Redis answers with exact-member
+`ZSCORE`; the in-memory adapter keeps an identity-key ledger; the file singleton
+atomically carries a TTL-bounded `acknowledgedWriteKeys` set alongside its one
+latest conflict candidate. The file set is not conflict history and is never
+used by `findConflict`.
+
+The shared Redis member grammar encodes the execution epoch as a fixed-width
+16-digit decimal string. Equal-score unsigned-byte ordering therefore agrees
+with numeric epoch ordering across the `9 → 10` boundary and through
+`Number.MAX_SAFE_INTEGER`; strict decoders reject numeric or non-canonical epoch
+fields.

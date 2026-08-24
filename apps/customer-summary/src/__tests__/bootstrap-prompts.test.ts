@@ -1,7 +1,6 @@
 /**
- * Regression pin for the surviving critical `silent-failure-hunter-1`
- * (standalone review run `run.vtN26syQLu`): pipeline-fatal prompt loads
- * (synthesis / synthesis-system) MUST fail bootstrap loudly instead of
+ * Pipeline-fatal prompt loads (synthesis / synthesis-system) MUST fail
+ * bootstrap loudly instead of
  * log-and-continue — a missing system prompt cannot be detected per-request
  * (the LLM node silently falls back to its generic default system prompt and
  * every /summarize completes 200 degraded). The post-hoc eval rubric stays
@@ -57,7 +56,7 @@ const allPrompts: Record<string, string> = {
   "summary-eval-rubric": "Rubric",
 };
 
-describe("loadAppPrompts (surviving critical silent-failure-hunter-1)", () => {
+describe("loadAppPrompts fatal and best-effort policy", () => {
   it("all loads ok → the map carries all three texts", async () => {
     const { log } = recordingLogger();
     const prompts = await loadAppPrompts(fakeRegistry(allPrompts), log);

@@ -154,6 +154,23 @@ export const createPathResolvingMsGraphAdapter = (
   /** Intermediate folder segments: (driveId, prefixPath) → folder itemId. */
   const prefixCache = new Map<string, string>();
 
+  const getPathResolutionToken = async (): Promise<Result<string, FrameworkError>> => {
+    try {
+      const token = await config.getAccessToken();
+      return token.length > 0
+        ? ok(token)
+        : err(frameworkError.transient(
+            SP_RESOLVE_NODE_ID,
+            "token acquisition failed for SharePoint path resolution",
+          ));
+    } catch (error) {
+      return err(frameworkError.transient(
+        SP_RESOLVE_NODE_ID,
+        `token acquisition failed for SharePoint path resolution: ${safeErrorMessage(error)}`,
+      ));
+    }
+  };
+
   const graphJson = async (
     path: string,
     opts: ReadOpts | undefined,
@@ -176,33 +193,13 @@ export const createPathResolvingMsGraphAdapter = (
       ));
     }
     const capturedOpts = callerSignal === undefined ? undefined : { signal: callerSignal };
-    let tokenError: string | null = null;
-    const token = await (async () => {
-      try {
-        return await config.getAccessToken();
-      } catch (e) {
-        // Preserve the provider's cause: the standard token provider throws
-        // precise, actionable messages (endpoint host, HTTP status, missing
-        // access_token) — collapsing them into a constant would force the
-        // operator to re-derive the cause by hand. The stock adapter's twin
-        // preserves the cause the same way.
-        tokenError = safeErrorMessage(e);
-        return "";
-      }
-    })();
-    if (token.length === 0) {
-      return err(
-        frameworkError.transient(
-          SP_RESOLVE_NODE_ID,
-          `token acquisition failed for SharePoint path resolution${tokenError !== null ? `: ${tokenError}` : ""}`,
-        ),
-      );
-    }
+    const token = await getPathResolutionToken();
+    if (!token.ok) return token;
     let res: Response;
     try {
       res = await fetchImpl(url, {
         method: "GET",
-        headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+        headers: { Authorization: `Bearer ${token.value}`, Accept: "application/json" },
         // Bounded exactly like the stock adapter's `graphGet` — the SAME
         // `buildSignal`, so the knob cannot mean one thing here and another
         // there. The DAG readers pass NO ReadOpts (no caller signal), so without

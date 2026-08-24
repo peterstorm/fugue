@@ -14,13 +14,20 @@
 // Imports no Node built-ins (FR-041).
 
 import { isBoundaryIdString, isPlainRecord } from "./layout.js";
-import type { Witness, WitnessKind, WriteEntry } from "../types/freshness.js";
+import type {
+  FreshnessWriteIdentity,
+  Witness,
+  WitnessKind,
+  WriteEntry,
+} from "../types/freshness.js";
 import {
   FRESHNESS_TTL_SECONDS,
   __brandWitness,
   compareFreshnessMemberKeys,
   freshnessMemberKey,
+  freshnessWriteKey,
   isWitnessKind,
+  parseFreshnessMemberKey,
   __brandFreshnessExecutionEpoch,
 } from "../types/freshness.js";
 import { __brandNodeId, __brandRunId } from "../types/ids.js";
@@ -46,11 +53,13 @@ export interface PreparedFreshnessWrite {
   readonly nodeId: WriteEntry["nodeId"];
   readonly executionEpoch: WriteEntry["executionEpoch"];
   readonly newWitness: Witness;
+  readonly writeKey: string;
   readonly succeededAtMs: number;
 }
 
 export interface StoredFreshnessEntry extends PreparedFreshnessWrite {
   readonly writtenAtMs: number;
+  readonly acknowledgedWriteKeys: readonly string[];
 }
 
 export type ConditionedOnSnapshot = Readonly<{
@@ -59,12 +68,15 @@ export type ConditionedOnSnapshot = Readonly<{
   value: string;
 }>;
 
-type RawWriteSnapshot = Readonly<{
-  type: unknown;
+type RawWriteIdentitySnapshot = Readonly<{
   runId: unknown;
   nodeId: unknown;
   executionEpoch: unknown;
   newWitness: unknown;
+}>;
+
+type RawWriteSnapshot = RawWriteIdentitySnapshot & Readonly<{
+  type: unknown;
   succeededAtMs: unknown;
 }>;
 
@@ -118,13 +130,20 @@ const hasExactKeys = (
     actual.every((key, index) => key === canonical[index]);
 };
 
+/** Snapshot each accessor-backed logical-identity field once. */
+const snapshotWriteIdentity = (
+  identity: Record<string, unknown>,
+): RawWriteIdentitySnapshot => ({
+  runId: identity.runId,
+  nodeId: identity.nodeId,
+  executionEpoch: identity.executionEpoch,
+  newWitness: identity.newWitness,
+});
+
 /** Snapshot each accessor-backed event field once before validating any value. */
 const snapshotWriteEvent = (event: Record<string, unknown>): RawWriteSnapshot => ({
   type: event.type,
-  runId: event.runId,
-  nodeId: event.nodeId,
-  executionEpoch: event.executionEpoch,
-  newWitness: event.newWitness,
+  ...snapshotWriteIdentity(event),
   succeededAtMs: event.succeededAtMs,
 });
 
@@ -165,8 +184,7 @@ export const prepareFreshnessWrite = (
     return err("succeededAtMs must be finite");
   }
 
-  return ok({
-    resource: parsedWitness.value.resource,
+  const identity: FreshnessWriteIdentity = {
     runId: __brandRunId(rawEvent.runId),
     nodeId: __brandNodeId(rawEvent.nodeId),
     executionEpoch: __brandFreshnessExecutionEpoch(rawEvent.executionEpoch as number),
@@ -175,8 +193,36 @@ export const prepareFreshnessWrite = (
       resource: parsedWitness.value.resource,
       value: parsedWitness.value.value,
     }),
+  };
+  return ok({
+    resource: parsedWitness.value.resource,
+    ...identity,
+    writeKey: freshnessWriteKey(identity),
     succeededAtMs: rawEvent.succeededAtMs,
   });
+};
+
+/** Parse the exact logical-write identity used by the acknowledgement query. */
+export const prepareFreshnessWriteIdentity = (
+  identity: unknown,
+): Result<FreshnessWriteIdentity & { readonly writeKey: string }, string> => {
+  if (!isPlainRecord(identity)) return err("write identity must be an object");
+  const raw = snapshotWriteIdentity(identity);
+  if (!isBoundaryIdString(raw.runId)) return err("runId does not match the framework ID boundary");
+  if (!isBoundaryIdString(raw.nodeId)) return err("nodeId does not match the framework ID boundary");
+  if (!Number.isSafeInteger(raw.executionEpoch) || (raw.executionEpoch as number) < 0) {
+    return err("executionEpoch must be a non-negative safe integer");
+  }
+  if (!isPlainRecord(raw.newWitness)) return err("newWitness must be an object");
+  const parsedWitness = parseWitnessFields(snapshotWitness(raw.newWitness), "newWitness");
+  if (!parsedWitness.ok) return parsedWitness;
+  const parsed: FreshnessWriteIdentity = {
+    runId: __brandRunId(raw.runId),
+    nodeId: __brandNodeId(raw.nodeId),
+    executionEpoch: __brandFreshnessExecutionEpoch(raw.executionEpoch as number),
+    newWitness: __brandWitness(parsedWitness.value),
+  };
+  return ok({ ...parsed, writeKey: freshnessWriteKey(parsed) });
 };
 
 /** Boundary/snapshotting parser: untrusted getters and proxy traps run while snapshotting; post-snapshot validation and construction are deterministic. */
@@ -195,7 +241,7 @@ export const parseConditionedOn = (value: unknown): Result<ConditionedOnSnapshot
 /** Exact Redis member bytes used solely for equal-score winner parity —
  * delegated to the port-owned grammar (`freshnessMemberKey`) so the file
  * backend can never drift from the Redis adapter's member tuple (ADR-0079). */
-export const serializeRedisFreshnessMember = (entry: PreparedFreshnessWrite): string =>
+export const serializeRedisFreshnessMember = (entry: FreshnessWriteIdentity): string =>
   freshnessMemberKey(
     entry.runId,
     entry.nodeId,
@@ -216,6 +262,7 @@ export const serializeStoredFreshnessEntry = (entry: StoredFreshnessEntry): stri
       value: entry.newWitness.value,
     },
     succeededAtMs: entry.succeededAtMs,
+    acknowledgedWriteKeys: entry.acknowledgedWriteKeys,
   });
 
 /** Strict pure parser for the one ADR-0079 persisted singleton shape. */
@@ -230,7 +277,7 @@ export const parseStoredFreshnessEntry = (
     return err(`not valid JSON: ${safeErrorMessage(error)}`);
   }
   if (!isPlainRecord(raw)) return err("entry must be a JSON object");
-  if (!hasExactKeys(raw, ["writtenAtMs", "runId", "nodeId", "executionEpoch", "newWitness", "succeededAtMs"])) {
+  if (!hasExactKeys(raw, ["writtenAtMs", "runId", "nodeId", "executionEpoch", "newWitness", "succeededAtMs", "acknowledgedWriteKeys"])) {
     return err("entry must contain exactly the ADR-0079 singleton fields");
   }
 
@@ -238,7 +285,7 @@ export const parseStoredFreshnessEntry = (
   // (unlike the caller-owned objects the `snapshot*` helpers guard) — so the
   // exact-key gate above is the single shape fact; read the fields directly
   // instead of mirroring them into a shadow record.
-  const { writtenAtMs, runId, nodeId, executionEpoch, newWitness, succeededAtMs } = raw;
+  const { writtenAtMs, runId, nodeId, executionEpoch, newWitness, succeededAtMs, acknowledgedWriteKeys } = raw;
   if (!isFiniteNumber(writtenAtMs)) return err("writtenAtMs must be finite");
   if (!isBoundaryIdString(runId)) return err("runId does not match the framework ID boundary");
   if (!isBoundaryIdString(nodeId)) return err("nodeId does not match the framework ID boundary");
@@ -261,10 +308,18 @@ export const parseStoredFreshnessEntry = (
   );
   if (!parsedWitness.ok) return parsedWitness;
   if (!isFiniteNumber(succeededAtMs)) return err("succeededAtMs must be finite");
+  if (
+    !Array.isArray(acknowledgedWriteKeys) ||
+    acknowledgedWriteKeys.length === 0 ||
+    acknowledgedWriteKeys.some(
+      (key) => typeof key !== "string" || parseFreshnessMemberKey(key) === null,
+    ) ||
+    new Set(acknowledgedWriteKeys).size !== acknowledgedWriteKeys.length
+  ) {
+    return err("acknowledgedWriteKeys must be a non-empty unique array of freshness member keys");
+  }
 
-  return ok({
-    writtenAtMs: writtenAtMs,
-    resource: parsedWitness.value.resource,
+  const identity: FreshnessWriteIdentity = {
     runId: __brandRunId(runId),
     nodeId: __brandNodeId(nodeId),
     executionEpoch: __brandFreshnessExecutionEpoch(executionEpoch as number),
@@ -273,7 +328,19 @@ export const parseStoredFreshnessEntry = (
       resource: parsedWitness.value.resource,
       value: parsedWitness.value.value,
     }),
+  };
+  const writeKey = freshnessWriteKey(identity);
+  if (!acknowledgedWriteKeys.includes(writeKey)) {
+    return err("acknowledgedWriteKeys must contain the latest write identity");
+  }
+
+  return ok({
+    writtenAtMs: writtenAtMs,
+    resource: parsedWitness.value.resource,
+    ...identity,
+    writeKey,
     succeededAtMs: succeededAtMs,
+    acknowledgedWriteKeys,
   });
 };
 
@@ -283,7 +350,13 @@ export const selectLatestWrite = (
   writtenAtMs: number,
 ): StoredFreshnessEntry => {
   const currentIsExpired = current === null || isExpired(current.writtenAtMs, writtenAtMs);
-  if (currentIsExpired) return { writtenAtMs, ...incoming };
+  if (currentIsExpired) {
+    return {
+      writtenAtMs,
+      ...incoming,
+      acknowledgedWriteKeys: [incoming.writeKey],
+    };
+  }
 
   const incomingWins =
     incoming.succeededAtMs > current.succeededAtMs ||
@@ -300,7 +373,11 @@ export const selectLatestWrite = (
     nodeId: winner.nodeId,
     executionEpoch: winner.executionEpoch,
     newWitness: winner.newWitness,
+    writeKey: winner.writeKey,
     succeededAtMs: winner.succeededAtMs,
+    acknowledgedWriteKeys: current.acknowledgedWriteKeys.includes(incoming.writeKey)
+      ? current.acknowledgedWriteKeys
+      : [...current.acknowledgedWriteKeys, incoming.writeKey],
   };
 };
 

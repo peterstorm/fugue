@@ -13,6 +13,7 @@ import type { FrameworkError } from "../types/errors.js";
 import { isConditionalEdge } from "../types/dag.js";
 import { decideRoute } from "./routing.js";
 import { expandActive, seedInitialActiveSet } from "./topology.js";
+import { waveIndexByNodeId } from "./wave-resolution.js";
 
 type RerouteResult =
   | { readonly kind: "ok"; readonly activeSet: ReadonlySet<NodeId> }
@@ -34,10 +35,7 @@ const computeRerouteActiveSet = (
     return { kind: "invalid-target", targetNodeId };
   }
 
-  const waveByNodeId = new Map<NodeId, number>();
-  for (let w = 0; w < machineCtx.waves.length; w++) {
-    for (const id of machineCtx.waves[w]) waveByNodeId.set(id, w);
-  }
+  const waveByNodeId = waveIndexByNodeId(machineCtx);
   const beforeTargetWave = (nodeId: NodeId): boolean =>
     (waveByNodeId.get(nodeId) ?? -1) < targetWave;
 

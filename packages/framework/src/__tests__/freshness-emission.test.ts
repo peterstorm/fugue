@@ -333,6 +333,47 @@ describe("emitFreshnessWitnessEvents", () => {
     expect(accumulator.get("pg:orders")!.value).toBe("99");
   });
 
+  it("fails closed when logical-write acknowledgement lookup fails", async () => {
+    const obs = new RecordingObserver();
+    const writeNode = makeNodeDef("write-node", {
+      sideEffects: {
+        kind: "writes",
+        resource: RN("pg:orders"),
+        extractConditionedOn: () => witness("version", RN("pg:orders"), "1"),
+        extractNewWitness: () => witnessValue("version", "2"),
+      },
+    });
+    const failingIndex: FreshnessIndex = {
+      hasRecordedWrite: async () => err({
+        kind: "cache-error",
+        operation: "freshness:hasRecordedWrite",
+        message: "Redis down",
+      }),
+      findConflict: async () => ok(null),
+      recordWrite: async () => ok(undefined),
+    };
+    const machineCtx = {
+      ...makeMachineCtx(),
+      outputs: new Map([[NID_READ, { version: 1 }]]),
+    };
+
+    const result = await emitFreshnessWitnessEvents(
+      makePostWaveCtx(
+        [NID_WRITE],
+        new Map([[NID_WRITE, writeNode]]) as any,
+        machineCtx,
+        obs,
+        failingIndex,
+      ),
+      new Map([[NID_WRITE, {}]]),
+      new Set(),
+    );
+
+    expect(result.kind).toBe("aborted");
+    expect(obs.events.some((event) => event.type === "write-attempted")).toBe(false);
+    expect(obs.events.some((event) => event.type === "freshness-violation")).toBe(false);
+  });
+
   it("returns Err when freshnessIndex.recordWrite fails", async () => {
     const obs = new RecordingObserver();
     const writeNode = makeNodeDef("write-node", {
@@ -351,6 +392,7 @@ describe("emitFreshnessWitnessEvents", () => {
 
     // Failing freshness index — recordWrite returns Err
     const failingIndex: FreshnessIndex = {
+      hasRecordedWrite: async () => ok(false),
       recordWrite: async () => err({ kind: "cache-error", operation: "recordWrite", message: "Redis down" }),
       findConflict: async () => ok(null),
     };
@@ -388,10 +430,12 @@ describe("emitFreshnessWitnessEvents", () => {
 
     for (const failingIndex of [
       {
+        hasRecordedWrite: async () => ok(false),
         findConflict: async () => err({ kind: "cache-error" as const, operation: "findConflict", message: "Redis down" }),
         recordWrite: async () => ok(undefined),
       },
       {
+        hasRecordedWrite: async () => ok(false),
         findConflict: async () => ok(null),
         recordWrite: async () => err({ kind: "cache-error" as const, operation: "recordWrite", message: "Redis down" }),
       },
@@ -464,6 +508,7 @@ describe("emitFreshnessWitnessEvents", () => {
     // findConflict fails (e.g. a Redis outage). Fail-closed: the wave must
     // abort rather than synthesize a fake conflict with succeededAtMs: 0.
     const failingIndex: FreshnessIndex = {
+      hasRecordedWrite: async () => ok(false),
       recordWrite: async () => ok(undefined),
       findConflict: async () => err({ kind: "cache-error", operation: "findConflict", message: "Redis down" }),
     };

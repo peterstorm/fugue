@@ -16,6 +16,19 @@ import type { TenantId } from "./tenant.js";
 // Zod 4 re-exports $ZodIssue as the canonical issue type
 type ZodIssue = z.core.$ZodIssue;
 
+declare const __retryAfterSecondsBrand: unique symbol;
+export type RetryAfterSeconds = number & {
+  readonly [__retryAfterSecondsBrand]: "RetryAfterSeconds";
+};
+
+/** HTTP Retry-After delay-seconds grammar (RFC integer form). */
+export const retryAfterSeconds = (value: number): RetryAfterSeconds => {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError("retryAfterSeconds must be a non-negative safe integer");
+  }
+  return value as RetryAfterSeconds;
+};
+
 export type HostError =
   | { readonly kind: "git-clone-failed"; readonly url: string; readonly message: string }
   | { readonly kind: "git-pull-failed"; readonly message: string }
@@ -70,7 +83,7 @@ export type HostError =
   // the error (data, not a hardcoded header) so admission can compute a tenant-
   // specific backoff. It names no other tenant — one tenant's saturation can
   // never surface as another tenant's error (FR-041).
-  | { readonly kind: "tenant-over-quota"; readonly tenant: TenantId; readonly retryAfterSeconds: number }
+  | { readonly kind: "tenant-over-quota"; readonly tenant: TenantId; readonly retryAfterSeconds: RetryAfterSeconds }
   // `worker-unavailable` (SC-012, FR-041, AD-8): the owning tenant's worker is
   // crashed/draining/unreachable. 503 for THAT tenant only — a worker fault is
   // contained to its tenant and never bleeds into another's request path.
@@ -214,10 +227,10 @@ export const tenantUnknown = (): HostError => ({ kind: "tenant-unknown" });
  * hit and the backoff to advertise are both carried on the error — the
  * Retry-After header is derived from `retryAfterSeconds`, not hardcoded.
  */
-export const tenantOverQuota = (tenant: TenantId, retryAfterSeconds: number): HostError => ({
+export const tenantOverQuota = (tenant: TenantId, rawRetryAfterSeconds: number): HostError => ({
   kind: "tenant-over-quota",
   tenant,
-  retryAfterSeconds,
+  retryAfterSeconds: retryAfterSeconds(rawRetryAfterSeconds),
 });
 
 /** Producer of `worker-unavailable` (SC-012, AD-8) for THIS tenant only. */

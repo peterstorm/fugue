@@ -39,7 +39,13 @@ import type {
   WitnessKind,
   WriteEntry,
 } from "../types/freshness.js";
-import { resourceName, witness, FRESHNESS_TTL_SECONDS, compareFreshnessMemberKeys } from "../types/freshness.js";
+import {
+  compareFreshnessMemberKeys,
+  FRESHNESS_TTL_SECONDS,
+  freshnessWriteIdentityOf,
+  resourceName,
+  witness,
+} from "../types/freshness.js";
 import { D, N, R } from "./_id-helpers.js";
 import { FE } from "./_freshness-helpers.js";
 import { isFrameworkError, retriabilityOf } from "../types/errors.js";
@@ -119,6 +125,7 @@ type PersistedSingleton = Readonly<{
     value: string;
   }>;
   succeededAtMs: number;
+  acknowledgedWriteKeys: readonly string[];
 }>;
 
 const readSingleton = (path: string): PersistedSingleton =>
@@ -127,6 +134,7 @@ const readSingleton = (path: string): PersistedSingleton =>
 const expectedSingleton = (
   writtenAtMs: number,
   event: WriteAttemptedEvent,
+  acknowledged: readonly WriteAttemptedEvent[] = [event],
 ): PersistedSingleton => ({
   writtenAtMs,
   runId: event.runId,
@@ -138,6 +146,15 @@ const expectedSingleton = (
     value: event.newWitness.value,
   },
   succeededAtMs: event.succeededAtMs,
+  acknowledgedWriteKeys: acknowledged.map((write) =>
+    encodeRedisMember(
+      write.runId,
+      write.nodeId,
+      write.executionEpoch,
+      write.newWitness.kind,
+      write.newWitness.value,
+    )
+  ),
 });
 
 type TieWrite = Readonly<{
@@ -284,6 +301,7 @@ describe("createFileFreshnessIndex — public surface and durable singleton", ()
       "executionEpoch",
       "newWitness",
       "succeededAtMs",
+      "acknowledgedWriteKeys",
     ]);
     expect(readdirSync(directory).filter((name) => name.endsWith(".json"))).toEqual([
       `${keyDigest(resource)}.json`,
@@ -327,7 +345,7 @@ describe("createFileFreshnessIndex — public surface and durable singleton", ()
     ).toEqual({ ok: true, value: undefined });
 
     expect(readSingleton(singletonPath(directory, resource))).toEqual(
-      expectedSingleton(3_000, newer),
+      expectedSingleton(3_000, newer, [newer, older]),
     );
     expect(
       comparable(
@@ -343,6 +361,25 @@ describe("createFileFreshnessIndex — public surface and durable singleton", ()
       newWitness: { value: "newest" },
       succeededAtMs: 1_900,
     });
+  });
+
+  it("retains an earlier logical-write acknowledgement after a later write wins", async () => {
+    const directory = tempDirectory();
+    const resource = "postgres:orders:acknowledgement";
+    const first = writeEvent(resource, "2", 1_000, { runId: "run-first", nodeId: "writer-first" });
+    const later = writeEvent(resource, "3", 2_000, { runId: "run-later", nodeId: "writer-later" });
+    const writer = createFileFreshnessIndex(directory, { now: () => 3_000 });
+    await writer.recordWrite(first);
+    await writer.recordWrite(later);
+
+    const restarted = createFileFreshnessIndex(directory, { now: () => 3_001 });
+    expect(await restarted.hasRecordedWrite(freshnessWriteIdentityOf(first))).toEqual({
+      ok: true,
+      value: true,
+    });
+    expect(await restarted.hasRecordedWrite(freshnessWriteIdentityOf(
+      writeEvent(resource, "missing", 2_500, { runId: "run-missing", nodeId: "writer-missing" }),
+    ))).toEqual({ ok: true, value: false });
   });
 
   it("uses Redis-compatible reverse binary member ordering for equal scores in both arrival orders", async () => {
@@ -385,6 +422,7 @@ describe("createFileFreshnessIndex — public surface and durable singleton", ()
           value: winner.value,
         },
         succeededAtMs: 900,
+        acknowledgedWriteKeys: order.map(redisMemberOf),
       });
     }
   });
@@ -417,6 +455,7 @@ describe("createFileFreshnessIndex — public surface and durable singleton", ()
       executionEpoch: FE(),
       newWitness: { kind: "version", resource, value: "v1" },
       succeededAtMs: 900,
+      acknowledgedWriteKeys: [redisMemberOf(tie)],
     });
   });
 
@@ -509,7 +548,9 @@ describe("createFileFreshnessIndex — public surface and durable singleton", ()
 
     nowMs = 20;
     expect(await index.recordWrite(newEvent)).toEqual({ ok: true, value: undefined });
-    expect(readSingleton(path)).toEqual(expectedSingleton(20, newEvent));
+    expect(readSingleton(path)).toEqual(
+      expectedSingleton(20, newEvent, [oldEvent, newEvent]),
+    );
     expect(readdirSync(directory).filter((name) => name.endsWith(".json"))).toEqual([
       `${keyDigest(resource)}.json`,
     ]);
@@ -577,7 +618,9 @@ describe("createFileFreshnessIndex — conflict semantics and TTL", () => {
 
     await createFileFreshnessIndex(directory, { now: () => 1_000 }).recordWrite(winner);
     await createFileFreshnessIndex(directory, { now: () => 1_000 + ttlMs }).recordWrite(loser);
-    expect(readSingleton(path)).toEqual(expectedSingleton(1_000 + ttlMs, winner));
+    expect(readSingleton(path)).toEqual(
+      expectedSingleton(1_000 + ttlMs, winner, [winner, loser]),
+    );
 
     expect(
       unwrap(
@@ -667,6 +710,9 @@ describe("createFileFreshnessIndex — one-read runtime boundary snapshots", () 
       executionEpoch: FE(),
       newWitness: { kind: "etag", resource, value: "persisted" },
       succeededAtMs: 900,
+      acknowledgedWriteKeys: [
+        encodeRedisMember(R("run-snapshot"), N("node-snapshot"), FE(), "etag", "persisted"),
+      ],
     });
     expect(existsSync(singletonPath(directory, "snapshot:wrong-resource"))).toBe(false);
   });
@@ -818,7 +864,9 @@ describe("createFileFreshnessIndex — symlinks (deliberate checkpointer diverge
     // The symlink is GONE — the atomic rename replaced the path itself:
     expect(lstatSync(recordPath).isSymbolicLink()).toBe(false);
     // …with the NEW singleton's bytes:
-    expect(readSingleton(recordPath)).toEqual(expectedSingleton(20, second));
+    expect(readSingleton(recordPath)).toEqual(
+      expectedSingleton(20, second, [first, second]),
+    );
     // …and the link's target was NOT written through — it still holds the
     // pre-write bytes.
     expect(readFileSync(outside, "utf-8")).toBe(outsideBytes);
@@ -1110,6 +1158,13 @@ describe("createFileFreshnessIndex — strict codec and typed failures", () => {
     const index = createFileFreshnessIndex(directory, { now: () => 1_000 });
     await index.recordWrite(writeEvent(resource, "2", 900));
 
+    const validAcknowledgement = encodeRedisMember(
+      R("run-1"),
+      N("writer"),
+      FE(),
+      "version",
+      "2",
+    );
     const corruptRecords = [
       "not-json",
       JSON.stringify({}),
@@ -1120,6 +1175,7 @@ describe("createFileFreshnessIndex — strict codec and typed failures", () => {
         executionEpoch: 0,
         newWitness: { kind: "version", resource, value: "2" },
         succeededAtMs: 900,
+        acknowledgedWriteKeys: [validAcknowledgement],
       }),
       JSON.stringify({
         writtenAtMs: 900,
@@ -1128,6 +1184,7 @@ describe("createFileFreshnessIndex — strict codec and typed failures", () => {
         executionEpoch: 0,
         newWitness: { kind: "unknown", resource, value: "2" },
         succeededAtMs: 900,
+        acknowledgedWriteKeys: [validAcknowledgement],
       }),
       JSON.stringify({
         writtenAtMs: 900,
@@ -1136,6 +1193,7 @@ describe("createFileFreshnessIndex — strict codec and typed failures", () => {
         executionEpoch: 0,
         newWitness: { kind: "version", resource: "crossed:resource", value: "2" },
         succeededAtMs: 900,
+        acknowledgedWriteKeys: [validAcknowledgement],
       }),
     ];
 
@@ -1164,6 +1222,7 @@ describe("createFileFreshnessIndex — strict codec and typed failures", () => {
         executionEpoch: 0,
         newWitness: { kind: "version", resource: "crossed:resource", value: "2" },
         succeededAtMs: 900,
+        acknowledgedWriteKeys: [validAcknowledgement],
       }));
       const r = await index.findConflict(W(resource, "1"), 0);
       if (r.ok) return null;
