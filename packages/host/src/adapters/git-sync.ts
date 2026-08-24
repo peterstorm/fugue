@@ -85,7 +85,30 @@ const runBoundedProcess = async (
   cwd: string | undefined,
   timeoutMs: number,
 ): Promise<SpawnResult | "timeout"> => {
-  const proc = Bun.spawn([...command], { cwd, stdout: "pipe", stderr: "pipe" });
+  // A package manager or git transport may spawn descendants. Give the command
+  // its own process group so timeout cleanup cannot leave those descendants
+  // holding sockets or stdio open after the direct child exits.
+  const proc = Bun.spawn([...command], {
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+    detached: true,
+  });
+  const killProcessGroup = (signal: NodeJS.Signals = "SIGTERM"): void => {
+    if (process.platform !== "win32") {
+      try {
+        process.kill(-proc.pid, signal);
+        return;
+      } catch {
+        // The group may already be gone; fall back to the direct child.
+      }
+    }
+    try {
+      proc.kill(signal);
+    } catch {
+      // Timeout cleanup is best-effort and must preserve the typed timeout.
+    }
+  };
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<"timeout">((resolve) => {
     timeoutId = setTimeout(() => resolve("timeout"), timeoutMs);
@@ -99,8 +122,8 @@ const runBoundedProcess = async (
 
   if (result === "timeout") {
     cleanupTimedOutChild(
-      () => proc.kill(),
-      () => proc.kill("SIGKILL"),
+      killProcessGroup,
+      () => killProcessGroup("SIGKILL"),
       proc.exited,
       drainStreams,
     );

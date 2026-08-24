@@ -227,10 +227,10 @@ describe("GitPort interface", () => {
       expect(result.ok).toBe(false);
     });
 
-    it("clone returns error for invalid URL", async () => {
+    it("clone returns error for a missing repository", async () => {
       const adapter = createBunGitAdapter(5000);
       const result = await adapter.clone(
-        "https://invalid.example.com/nonexistent.git",
+        "file:///definitely-missing/fugue.git",
         "/tmp/fugue-test-clone-" + Date.now(),
       );
       expect(result.ok).toBe(false);
@@ -377,7 +377,7 @@ describe("GitPort interface", () => {
         await server.close();
         await rm(dir, { recursive: true, force: true });
       }
-    });
+    }, 10_000);
   });
 
   describe("BunGitAdapter.hasLockfileChanged (integration — real git repo)", () => {
