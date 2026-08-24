@@ -30,6 +30,7 @@ import { DAG_INPUT } from "../types/ids.js";
 import { N } from "./_id-helpers.js";
 import { setFrameworkTracer, __resetFrameworkTracer } from "../tracing/global-tracer.js";
 import { setFrameworkLogger, __resetFrameworkLogger } from "../logger.js";
+import { nonEmptyString } from "../types/non-empty-string.js";
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -867,7 +868,7 @@ describe("Wave 6.12 — buildDagExecutor without onHumanReview hook", () => {
         kind: "awaiting-human",
         nodeId: "a" as NodeId,
         output: "a-out",
-        prompt: "approve?",
+        prompt: nonEmptyString("approve?"),
         pendingReviews: [],
         wave: 0,
       },

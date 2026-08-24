@@ -76,7 +76,7 @@ gates, freshness-aware state management, and production observability.
 
 | Term | Definition |
 |------|-----------|
-| **Human Review Gate** | A node declares `humanReview: { prompt }`. After execution, the run pauses in `awaiting-human`. |
+| **Human Review Gate** | A node declares `humanReview: { prompt }`. The prompt is parsed once as a `NonEmptyString` and remains non-blank through compiled context, durable gate phases, resume parsing, and worker outcomes. After execution, the run pauses in `awaiting-human`. |
 | **HumanAction** | The reviewer's response: `"approve"`, `"approve-with-edit"`, `"reject"`, `"reroute"`. |
 | **HumanInterventionEvent** | Phase 4 capstone: first-class telemetry capturing the full decision context (confidence, side-effects, prior witnesses). |
 | **Run Owner Team** | Immutable resource owner captured from the registered DAG when a durable HITL run is accepted. Historical status, approval authorization, and review routing use this persisted team; later DAG reassignment/removal cannot transfer access. |

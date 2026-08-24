@@ -29,6 +29,7 @@ const encode = (
   value: Parameters<typeof __testEncodeMember>[4],
 ): string => __testEncodeMember(run, node, FE(), kind, value);
 const decode = __testDecodeMember;
+const validEpoch = freshnessExecutionEpochMember(FE());
 
 describe("RedisFreshnessIndex encoding", () => {
   it("roundtrips basic values", () => {
@@ -74,9 +75,9 @@ describe("RedisFreshnessIndex encoding", () => {
   });
 
   it("rejects empty and non-string witness values from persisted bytes", () => {
-    expect(decode(JSON.stringify(["r", "n", 0, "version", ""]))).toBeNull();
-    expect(decode(JSON.stringify(["r", "n", 0, "version", null]))).toBeNull();
-    expect(decode(JSON.stringify(["r", "n", 0, "version", 42]))).toBeNull();
+    expect(decode(JSON.stringify(["r", "n", validEpoch, "version", ""]))).toBeNull();
+    expect(decode(JSON.stringify(["r", "n", validEpoch, "version", null]))).toBeNull();
+    expect(decode(JSON.stringify(["r", "n", validEpoch, "version", 42]))).toBeNull();
   });
 
   it("handles unicode witness values", () => {
@@ -135,11 +136,24 @@ describe("RedisFreshnessIndex decodeMember — rejection", () => {
   // Round-18 tda-2: persisted bytes are untrusted — an off-contract kind
   // must not flow into conflict decisions. Unknown kinds are corrupt entries
   // (null), exactly like shape failures.
+  it("returns null for invalid runId or nodeId fields", () => {
+    for (const [runId, nodeId] of [
+      ["", "n"],
+      ["contains spaces", "n"],
+      [42, "n"],
+      ["r", ""],
+      ["r", "contains spaces"],
+      ["r", null],
+    ] as const) {
+      expect(decode(JSON.stringify([runId, nodeId, validEpoch, "version", "v"]))).toBeNull();
+    }
+  });
+
   it("returns null for an off-contract witnessKind (closed-union gate)", () => {
-    expect(decode(JSON.stringify(["r", "n", 0, "bogus-kind", "v"]))).toBeNull();
-    expect(decode(JSON.stringify(["r", "n", 0, "", "v"]))).toBeNull();
-    expect(decode(JSON.stringify(["r", "n", 0, 42, "v"]))).toBeNull();
-    expect(decode(JSON.stringify(["r", "n", -1, "version", "v"]))).toBeNull();
+    expect(decode(JSON.stringify(["r", "n", validEpoch, "bogus-kind", "v"]))).toBeNull();
+    expect(decode(JSON.stringify(["r", "n", validEpoch, "", "v"]))).toBeNull();
+    expect(decode(JSON.stringify(["r", "n", validEpoch, 42, "v"]))).toBeNull();
+    expect(decode(JSON.stringify(["r", "n", "-000000000000000001", "version", "v"]))).toBeNull();
   });
 });
 
@@ -154,6 +168,7 @@ import { RedisFreshnessIndex } from "../checkpoint/redis-freshness-index.js";
 import {
   compareFreshnessMemberKeys,
   FRESHNESS_TTL_SECONDS,
+  freshnessExecutionEpochMember,
   freshnessWriteIdentityOf,
   witness,
   resourceName,
@@ -337,9 +352,9 @@ describe("RedisFreshnessIndex findConflict — corrupt-member verdict (ADR-0025)
 
   it("fails closed on off-contract kind or witness-value members", async () => {
     const corruptMembers = [
-      JSON.stringify(["run-9", "writer", 0, "bogus-kind", "v"]),
-      JSON.stringify(["run-9", "writer", 0, "version", ""]),
-      JSON.stringify(["run-9", "writer", 0, "version", null]),
+      JSON.stringify(["run-9", "writer", validEpoch, "bogus-kind", "v"]),
+      JSON.stringify(["run-9", "writer", validEpoch, "version", ""]),
+      JSON.stringify(["run-9", "writer", validEpoch, "version", null]),
     ];
 
     for (const corruptMember of corruptMembers) {

@@ -6,6 +6,7 @@ import type { FrameworkError } from "../types/errors.js";
 import { messageOf, retriabilityOf } from "../types/errors.js";
 import type { NodeId } from "../types/ids.js";
 import type { WaveDoneResult } from "./wave-resolution.js";
+import type { NonEmptyString } from "../types/non-empty-string.js";
 
 // ---------------------------------------------------------------------------
 // Retry config resolution (FR-026, FR-027)
@@ -175,7 +176,7 @@ export const handleNodeFailed = (
 export const handleHookCrash = (
   nodeId: NodeId,
   output: unknown,
-  prompt: string,
+  prompt: NonEmptyString,
   error: FrameworkError,
   ctx: DagMachineContextPersisted,
   pendingReviews: readonly NodeId[] = [],

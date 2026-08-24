@@ -288,29 +288,32 @@ const isTenantOwnedPath = (
  * Returns `Result` (never throws) since configs arrive from registration data.
  */
 export const tenantConfig = (input: TenantConfigBase): Result<ActiveTenantConfig, HostError> => {
+  const invalid = (message: string): Result<never, HostError> =>
+    err({ kind: "config-invalid", message: `tenant '${input.id}': ${message}` });
+
   if (input.team.length === 0) {
-    return err({ kind: "config-invalid", message: `tenant '${input.id}': team must be non-empty` });
+    return invalid("team must be non-empty");
   }
   if (input.fsRoot.length === 0) {
-    return err({ kind: "config-invalid", message: `tenant '${input.id}': fsRoot must be non-empty` });
+    return invalid("fsRoot must be non-empty");
   }
   // fsRoot is the recursive purge target. Parse-don't-validate it into the
   // tenant-owned `/srv/<tenantId>` subtree so arbitrary host and sibling-tenant
   // deletion targets are impossible after registration.
   if (!isTenantOwnedPath(input.fsRoot, "/srv", input.id)) {
-    return err({ kind: "config-invalid", message: `tenant '${input.id}': fsRoot must be '/srv/${input.id}' or a canonical descendant` });
+    return invalid(`fsRoot must be '/srv/${input.id}' or a canonical descendant`);
   }
   if (input.dagsRoot.length === 0) {
-    return err({ kind: "config-invalid", message: `tenant '${input.id}': dagsRoot must be non-empty` });
+    return invalid("dagsRoot must be non-empty");
   }
   // dagsRoot becomes DAGS_LOCAL_PATH and therefore code-loading authority.
   // Restrict it to this tenant's `/dags/<tenantId>` subtree so a worker cannot
   // discover host code or another tenant's staged bundle.
   if (!isTenantOwnedPath(input.dagsRoot, "/dags", input.id)) {
-    return err({ kind: "config-invalid", message: `tenant '${input.id}': dagsRoot must be '/dags/${input.id}' or a canonical descendant` });
+    return invalid(`dagsRoot must be '/dags/${input.id}' or a canonical descendant`);
   }
   if (input.keycloakClientMapping.realm.length === 0 || input.keycloakClientMapping.clientId.length === 0) {
-    return err({ kind: "config-invalid", message: `tenant '${input.id}': keycloak realm and clientId must be non-empty` });
+    return invalid("keycloak realm and clientId must be non-empty");
   }
   // Per-DAG agent-client ids must be non-empty — same invariant the env-side
   // `AGENT_CLIENT_MAP` enforces (`domain/config.ts`, `z.string().min(1)`: "dagId →
@@ -319,12 +322,12 @@ export const tenantConfig = (input: TenantConfigBase): Result<ActiveTenantConfig
   // rather than letting a blank client id surface as a fail-open later.
   for (const [dagId, clientId] of Object.entries(input.keycloakClientMapping.agentClientIdsByDag)) {
     if (clientId.length === 0) {
-      return err({ kind: "config-invalid", message: `tenant '${input.id}': agentClientIdsByDag['${dagId}'] must be a non-empty client id` });
+      return invalid(`agentClientIdsByDag['${dagId}'] must be a non-empty client id`);
     }
   }
   const { maxConcurrentRuns, maxQueuedRuns } = input.admission;
   if (!Number.isInteger(maxConcurrentRuns) || maxConcurrentRuns < 0 || !Number.isInteger(maxQueuedRuns) || maxQueuedRuns < 0) {
-    return err({ kind: "config-invalid", message: `tenant '${input.id}': admission limits must be non-negative integers` });
+    return invalid("admission limits must be non-negative integers");
   }
   const active: ActiveTenantConfig = {
     [VALIDATED_TENANT_CONFIG]: true,
@@ -353,9 +356,17 @@ export const tenantConfig = (input: TenantConfigBase): Result<ActiveTenantConfig
  * makes `register`/`reconfigure` idempotent: a re-apply of a structurally
  * identical config is a no-op (same-reference return, multi-tenant spec FR-027 / SC-009).
  */
+const sameLifecycle = (a: TenantConfig, b: TenantConfig): boolean =>
+  match<[TenantConfig, TenantConfig]>([a, b])
+    .with([{ status: "active" }, { status: "active" }], () => true)
+    .with(
+      [{ status: "deregistered" }, { status: "deregistered" }],
+      ([left, right]) => left.deregisteredAt === right.deregisteredAt,
+    )
+    .otherwise(() => false);
+
 const configEquals = (a: TenantConfig, b: TenantConfig): boolean =>
-  a.status === b.status &&
-  (a.status !== "deregistered" || b.status !== "deregistered" || a.deregisteredAt === b.deregisteredAt) &&
+  sameLifecycle(a, b) &&
   a.id === b.id &&
   a.team === b.team &&
   a.fsRoot === b.fsRoot &&

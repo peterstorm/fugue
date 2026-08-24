@@ -157,7 +157,9 @@ export const createApp = (deps: AppDeps): Hono => {
           expectedDagFingerprint: fingerprint,
         });
         if (!loaded.ok) {
-          log.warn(`[/summarize] checkpoint load failed for run=${resume_run_id}: ${JSON.stringify(loaded.error)}`);
+          reportWithoutThrowing(() =>
+            log.warn(`[/summarize] checkpoint load failed for run=${resume_run_id}: ${JSON.stringify(loaded.error)}`),
+          );
           // checkpoint-version-mismatch and checkpoint-expired are *semantic*
           // failures (the stored checkpoint is incompatible with the current
           // DAG / framework / TTL); callers must start fresh, not retry. 409
@@ -192,19 +194,24 @@ export const createApp = (deps: AppDeps): Hono => {
           // written. Replaying cached node outputs into the current shape would
           // skip validation against evolved schemas. 409 so callers know to
           // start a fresh run, not retry the same id.
-          log.warn(
-            `[/summarize] checkpoint identity mismatch run=${resume_run_id} ` +
-            `meta.dagId=${meta.dagId} dag.id=${dag.id} ` +
-            `meta.nodeCount=${meta.nodeCount} dag.nodeCount=${dag.nodes.length} ` +
-            `meta.fingerprint=${meta.dagFingerprint} expected=${fingerprint} ` +
-            `meta.frameworkVersion=${meta.frameworkVersion} expected=${FRAMEWORK_VERSION}`,
+          reportWithoutThrowing(() =>
+            log.warn(
+              `[/summarize] checkpoint identity mismatch run=${resume_run_id} ` +
+              `meta.dagId=${meta.dagId} dag.id=${dag.id} ` +
+              `meta.nodeCount=${meta.nodeCount} dag.nodeCount=${dag.nodes.length} ` +
+              `meta.fingerprint=${meta.dagFingerprint} expected=${fingerprint} ` +
+              `meta.frameworkVersion=${meta.frameworkVersion} expected=${FRAMEWORK_VERSION}`,
+            ),
           );
           return c.json({ error: "Checkpoint incompatible with current DAG" }, 409);
         }
         if (loaded.value.corruptNodeAddresses.length > 0) {
-          log.error(
-            `[/summarize] checkpoint contains corrupt node entries for run=${resume_run_id}: ` +
-            JSON.stringify(loaded.value.corruptNodeAddresses),
+          const corruptNodeAddresses = loaded.value.corruptNodeAddresses;
+          reportWithoutThrowing(() =>
+            log.error(
+              `[/summarize] checkpoint contains corrupt node entries for run=${resume_run_id}: ` +
+              JSON.stringify(corruptNodeAddresses),
+            ),
           );
           return c.json({ error: "Resume failed" }, 500);
         }
@@ -222,7 +229,9 @@ export const createApp = (deps: AppDeps): Hono => {
           frameworkVersion: FRAMEWORK_VERSION,
         });
         if (!metaResult.ok) {
-          log.error(`[/summarize] checkpoint setMeta failed for run=${runId}: ${JSON.stringify(metaResult.error)}`);
+          reportWithoutThrowing(() =>
+            log.error(`[/summarize] checkpoint setMeta failed for run=${runId}: ${JSON.stringify(metaResult.error)}`),
+          );
           return c.json({ error: "Checkpoint store unavailable", requestId: runId }, 503);
         }
       }
@@ -276,10 +285,12 @@ export const createApp = (deps: AppDeps): Hono => {
       }
 
       // Framework error — 500 (log detail server-side, return generic message)
-      log.error("[/summarize] DAG error:", formatFrameworkError(result.error));
+      reportWithoutThrowing(() =>
+        log.error("[/summarize] DAG error:", formatFrameworkError(result.error)),
+      );
       return c.json({ error: "Internal server error", requestId: runId }, 500);
     } catch (e) {
-      log.error("[/summarize] Unexpected error:", e);
+      reportWithoutThrowing(() => log.error("[/summarize] Unexpected error:", e));
       return c.json({ error: "Internal server error" }, 500);
     }
   });

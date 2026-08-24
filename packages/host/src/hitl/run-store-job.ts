@@ -33,6 +33,7 @@ import {
   toJson,
   tryFromJson,
   tryNodeId,
+  asNonEmptyString,
 } from "@fuguejs/framework";
 import { parsePersistedDagContext } from "@fuguejs/framework/advanced";
 import type {
@@ -86,6 +87,8 @@ const parseHumanGatePayload = (
   ) {
     return null;
   }
+  const prompt = asNonEmptyString(state.prompt);
+  if (prompt === undefined) return null;
   const pendingReviews: NodeId[] = [];
   for (const rawNodeId of state.pendingReviews) {
     const parsed = parseNodeId(rawNodeId);
@@ -95,7 +98,7 @@ const parseHumanGatePayload = (
   return {
     nodeId,
     output: state.output,
-    prompt: state.prompt,
+    prompt,
     pendingReviews,
     wave: state.wave,
   };

@@ -5,6 +5,7 @@ import type { FrameworkError } from "../types/errors.js";
 import type { DagDef } from "../types/dag.js";
 import { N, D, nodeMap } from "./_id-helpers.js";
 import { FE } from "./_freshness-helpers.js";
+import { nonEmptyString } from "../types/non-empty-string.js";
 
 // ---------------------------------------------------------------------------
 // Minimal context factory
@@ -164,12 +165,12 @@ describe("handleHookCrash", () => {
       dag: { id: D("test"), nodes: [], edges: [], retryLimits: { [N("n")]: 2 }, defaultRetryLimit: 0 } as unknown as DagDef,
     });
     const error: FrameworkError = { kind: "node-crash", nodeId: N("n"), message: "hook threw", retriability: "retriable" };
-    const result = handleHookCrash(N("n"), "output", "prompt", error, ctx);
+    const result = handleHookCrash(N("n"), "output", nonEmptyString("prompt"), error, ctx);
     expect(result.state.kind).toBe("retrying-hook");
     if (result.state.kind === "retrying-hook") {
       expect(result.state.attempt).toBe(1);
       expect(result.state.output).toBe("output");
-      expect(result.state.prompt).toBe("prompt");
+      expect(result.state.prompt).toBe(nonEmptyString("prompt"));
     }
     expect(result.context.retries.get(N("n"))).toBe(1);
   });
@@ -180,7 +181,7 @@ describe("handleHookCrash", () => {
       dag: { id: D("test"), nodes: [], edges: [], retryLimits: { [N("n")]: 1 }, defaultRetryLimit: 0 } as unknown as DagDef,
     });
     const error: FrameworkError = { kind: "node-crash", nodeId: N("n"), message: "hook threw", retriability: "retriable" };
-    const result = handleHookCrash(N("n"), "output", "prompt", error, ctx);
+    const result = handleHookCrash(N("n"), "output", nonEmptyString("prompt"), error, ctx);
     expect(result.state.kind).toBe("failed");
     if (result.state.kind === "failed" && result.state.error.kind === "retry-exhausted") {
       expect(result.state.error.attempts).toBe(2);

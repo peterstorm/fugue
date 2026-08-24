@@ -142,7 +142,21 @@ export const handleWaveDone = (
     // is valid per DagPhase.awaiting-human.output: unknown. The human reviewer
     // receives whatever the node produced, including undefined.
     const nodeOutput = newOutputs.get(firstNodeId);
-    const prompt = newCtx.humanReviewPrompts.get(firstNodeId) ?? "";
+    const prompt = newCtx.humanReviewPrompts.get(firstNodeId);
+    if (prompt === undefined) {
+      return {
+        state: {
+          kind: "failed",
+          error: {
+            kind: "node-crash",
+            retriability: "retriable",
+            nodeId: firstNodeId,
+            message: `node '${firstNodeId}' missing humanReview prompt`,
+          },
+        },
+        context: newCtx,
+      };
+    }
 
     return {
       state: {

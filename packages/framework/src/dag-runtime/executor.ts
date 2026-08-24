@@ -29,6 +29,7 @@ import { enrichHumanRespondedEvent, type UnenrichedDagEvent } from "./reroute.js
 import { type FreshnessIndex, InMemoryFreshnessIndex } from "./freshness-check.js";
 import { type NodeSpanOutcome } from "./node-span.js";
 import { safeErrorMessage, safeErrorStack } from "../types/safe-error.js";
+import type { NonEmptyString } from "../types/non-empty-string.js";
 
 // ---------------------------------------------------------------------------
 // Backoff + jitter
@@ -78,7 +79,7 @@ const validateApproveEdit = (
 export type OnHumanReviewHook = (req: {
   nodeId: NodeId;
   output: unknown;
-  prompt: string;
+  prompt: NonEmptyString;
 }) => Promise<import("./types.js").HumanReviewOutcome>;
 
 /**
@@ -91,7 +92,7 @@ const callHumanReviewHook = async (
   phaseKind: "awaiting-human" | "retrying-hook" | "suspended",
   nodeId: NodeId,
   output: unknown,
-  prompt: string,
+  prompt: NonEmptyString,
   hooks: { onHumanReview?: OnHumanReviewHook } | undefined,
   nodeMap: Map<NodeId, NodeDef<unknown, unknown>>,
   nodeCtx: NodeContext,
@@ -282,7 +283,7 @@ export const buildDagExecutor = (
     phaseKind: "awaiting-human" | "retrying-hook" | "suspended",
     nodeId: NodeId,
     output: unknown,
-    prompt: string,
+    prompt: NonEmptyString,
     machineCtx: DagMachineContext,
     delayMs?: number,
   ): Promise<DagEvent> => {

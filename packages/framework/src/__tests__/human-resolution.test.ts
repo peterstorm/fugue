@@ -32,7 +32,7 @@ const mkAwaitingHuman = (
   kind: "awaiting-human",
   nodeId: N(nodeId),
   output: opts?.output ?? `output-${nodeId}`,
-  prompt: `review ${nodeId}`,
+  prompt: nonEmptyString(`review ${nodeId}`),
   pendingReviews: (opts?.pendingReviews ?? []).map(N),
   wave: opts?.wave ?? 0,
 });
@@ -300,7 +300,10 @@ describe("handleHumanResponse — pending reviews", () => {
       outputs: nodeMap([["a", "A"], ["b", "B"]]),
       activeNodeIds: nodeSet(["a", "b"]),
       humanReviewNodeIds: new Set([N("a"), N("b")]),
-      humanReviewPrompts: new Map([[N("a"), "review a"], [N("b"), "review b"]]),
+      humanReviewPrompts: new Map([
+        [N("a"), nonEmptyString("review a")],
+        [N("b"), nonEmptyString("review b")],
+      ]),
       nodeById: nodeMap([
         ["a", mkNodeDef("a", { humanReview: { prompt: "review a" } })],
         ["b", mkNodeDef("b", { humanReview: { prompt: "review b" } })],
@@ -313,7 +316,7 @@ describe("handleHumanResponse — pending reviews", () => {
     if (result.state.kind === "awaiting-human") {
       expect(result.state.nodeId).toBe(N("b"));
       expect(result.state.output).toBe("B");
-      expect(result.state.prompt).toBe("review b");
+      expect(result.state.prompt).toBe(nonEmptyString("review b"));
       expect(result.state.pendingReviews).toEqual([]);
     }
   });
@@ -344,7 +347,7 @@ describe("handleHumanResponse — pending reviews", () => {
       outputs: nodeMap([["a", "A"], ["b", "B"]]),
       activeNodeIds: nodeSet(["a", "b"]),
       humanReviewNodeIds: new Set([N("a")]),
-      humanReviewPrompts: new Map([[N("a"), "r"]]),
+      humanReviewPrompts: new Map([[N("a"), nonEmptyString("r")]]),
       nodeById: nodeMap([
         ["a", mkNodeDef("a", { humanReview: { prompt: "r" } })],
         // "b" intentionally not in humanReviewNodeIds

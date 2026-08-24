@@ -17,8 +17,9 @@ import type { Result } from "../types/result.js";
 import { ok, err } from "../types/result.js";
 import type { FrameworkError, PartialTokenUsage } from "../types/errors.js";
 import { usageOfError } from "../types/errors.js";
-import { fwLogger } from "../logger.js";
+import { logFrameworkWithoutThrowing } from "../logger.js";
 import type { NodeId, RunId, DagId } from "../types/ids.js";
+import { safeErrorMessage } from "../types/safe-error.js";
 import type { LlmResponse, ToolDef } from "../types/llm.js";
 import type { NodeContext } from "../types/node.js";
 import { ensureToolNames } from "./tools.js";
@@ -113,7 +114,7 @@ const withAccumulatedUsage = (
     // This error kind has nowhere to carry usage. If real tokens were burned
     // before it, surface them so a budget reconciler isn't silently under-counted.
     if (priorIn > 0 || priorOut > 0) {
-      fwLogger().warn("llm.usage-unattributed", {
+      logFrameworkWithoutThrowing("warn", "llm.usage-unattributed", {
         errorKind: e.kind,
         tokensIn: priorIn,
         tokensOut: priorOut,
@@ -245,7 +246,7 @@ export const toolUseLoop = async <O>(
             kind: "node-crash",
             retriability: "non-retriable",
             nodeId: config.nodeId,
-            message: `tool dispatch threw: ${e instanceof Error ? e.message : String(e)}`,
+            message: `tool dispatch threw: ${safeErrorMessage(e)}`,
           },
           totalTokensIn,
           totalTokensOut,
@@ -253,7 +254,23 @@ export const toolUseLoop = async <O>(
         ),
       );
     }
-    provider.appendToolResults(results);
+    try {
+      provider.appendToolResults(results);
+    } catch (e) {
+      return err(
+        withAccumulatedUsage(
+          {
+            kind: "node-crash",
+            retriability: "non-retriable",
+            nodeId: config.nodeId,
+            message: `provider.appendToolResults threw: ${safeErrorMessage(e)}`,
+          },
+          totalTokensIn,
+          totalTokensOut,
+          corr,
+        ),
+      );
+    }
   }
 
   // Iteration limit exhausted — non-retriable. Tokens burned across every turn

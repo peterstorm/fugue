@@ -13,6 +13,7 @@ import { checkFreshness, InMemoryFreshnessIndex } from "../dag-runtime/freshness
 import type { WriteAttemptedEvent } from "../types/events.js";
 import { FE, mkWitness } from "./_freshness-helpers.js";
 import { unwrap } from "../types/result.js";
+import { freshnessWriteIdentityOf } from "../types/freshness.js";
 
 describe("checkFreshness — pure conflict detection", () => {
   it("returns empty conflicts when no writes exist", () => {
@@ -195,6 +196,31 @@ describe("InMemoryFreshnessIndex", () => {
     expect(conflict?.runId).toBe(R("newer"));
     expect(conflict?.succeededAtMs).toBe(2000);
     expect(unwrap(await index.findConflict(mkWitness("postgres:orders", "43"), 0))).toBeNull();
+  });
+
+  it("evicts acknowledgement identities with the bounded write window", async () => {
+    const index = new InMemoryFreshnessIndex({ maxEntriesPerResource: 2 });
+    const event = (sequence: number): WriteAttemptedEvent => ({
+      type: "write-attempted",
+      runId: R(`r${sequence}`),
+      dagId: D("d"),
+      nodeId: N(`w${sequence}`),
+      executionEpoch: FE(sequence),
+      conditionedOn: mkWitness("postgres:orders", String(sequence)),
+      newWitness: mkWitness("postgres:orders", String(sequence + 1)),
+      succeededAtMs: sequence,
+      timestamp: new Date(sequence),
+    });
+    const oldest = event(1);
+    const retained = [event(2), event(3)] as const;
+
+    await index.recordWrite(oldest);
+    for (const write of retained) await index.recordWrite(write);
+
+    expect(unwrap(await index.hasRecordedWrite(freshnessWriteIdentityOf(oldest)))).toBe(false);
+    for (const write of retained) {
+      expect(unwrap(await index.hasRecordedWrite(freshnessWriteIdentityOf(write)))).toBe(true);
+    }
   });
 
   it("clear empties the index", async () => {

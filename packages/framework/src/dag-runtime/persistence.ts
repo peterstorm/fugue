@@ -38,6 +38,8 @@ import { DAG_INPUT, tryNodeId } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
 import { dagFingerprint } from "../checkpoint/fingerprint.js";
 import { computeIncomingByNode, computeOutgoingByNode, computeUnconditionalAdj } from "./topology.js";
+import { asNonEmptyString } from "../types/non-empty-string.js";
+import type { NonEmptyString } from "../types/non-empty-string.js";
 
 /**
  * The persisted shape plus an optional fingerprint stamp. This is the type
@@ -161,8 +163,11 @@ const parseRetryCount = (value: unknown, path: string): Result<number, string> =
     ? ok(value)
     : err(`${path} must be a non-negative safe integer`);
 
-const parseString = (value: unknown, path: string): Result<string, string> =>
-  typeof value === "string" ? ok(value) : err(`${path} must be a string`);
+const parseNonEmptyString = (value: unknown, path: string): Result<NonEmptyString, string> => {
+  if (typeof value !== "string") return err(`${path} must be a string`);
+  const parsed = asNonEmptyString(value);
+  return parsed === undefined ? err(`${path} must be non-blank`) : ok(parsed);
+};
 
 const parseConfidenceValue = (
   value: unknown,
@@ -314,7 +319,11 @@ export const parsePersistedDagContext = (value: unknown): Result<PersistedDagCon
   if (!retryLimits.ok) return retryLimits;
   const humanReviewNodeIds = parseNodeIdSet(value.humanReviewNodeIds, "context.humanReviewNodeIds");
   if (!humanReviewNodeIds.ok) return humanReviewNodeIds;
-  const humanReviewPrompts = parseNodeIdMap(value.humanReviewPrompts, "context.humanReviewPrompts", parseString);
+  const humanReviewPrompts = parseNodeIdMap(
+    value.humanReviewPrompts,
+    "context.humanReviewPrompts",
+    parseNonEmptyString,
+  );
   if (!humanReviewPrompts.ok) return humanReviewPrompts;
   const activeNodeIds = parseNodeIdSet(value.activeNodeIds, "context.activeNodeIds");
   if (!activeNodeIds.ok) return activeNodeIds;

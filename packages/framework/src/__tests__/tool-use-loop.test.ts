@@ -11,6 +11,7 @@ import { z } from "zod";
 import { ok, err } from "../types/result.js";
 import { N } from "./_id-helpers.js";
 import { makeNodeContext } from "../shared/make-node-context.js";
+import type { NodeContext } from "../types/node.js";
 import { stubLlmClient } from "./_llm-mocks.js";
 import { setFrameworkLogger, __resetFrameworkLogger } from "../logger.js";
 
@@ -392,6 +393,133 @@ describe("toolUseLoop", () => {
       expect(w?.data.dagId).toBe("test-dag");
     } finally {
       __resetFrameworkLogger();
+    }
+  });
+
+  test("throwing usage diagnostics preserve the original validation Result", async () => {
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: () => { throw new Error("logger transport failed"); },
+      error: () => {},
+    });
+    try {
+      let calls = 0;
+      const provider: ToolLoopProvider = {
+        call: async () => {
+          calls += 1;
+          return calls === 1
+            ? ok({
+                toolCalls: [{ id: "c", name: "tool", input: {} }],
+                textContent: undefined,
+                tokensIn: 10,
+                tokensOut: 15,
+              })
+            : err({ kind: "validation", nodeId: N("n1"), message: "bad schema" });
+        },
+        appendToolResults: () => {},
+      };
+
+      const result = await toolUseLoop(
+        provider,
+        {
+          nodeId: N("n1"),
+          model: "m",
+          schema,
+          tools: [{ name: toolName("tool"), description: "t", inputSchema: z.object({}), outputSchema: z.string(), run: async () => ok("r") }],
+          maxIterations: 3,
+        },
+        makeCtx(),
+      );
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.kind).toBe("validation");
+    } finally {
+      __resetFrameworkLogger();
+    }
+  });
+
+  test("a hostile tool-dispatch throw remains a typed non-retriable error", async () => {
+    const hostile = {
+      [Symbol.toPrimitive](): never { throw new Error("coercion escaped"); },
+      toString(): never { throw new Error("toString escaped"); },
+    };
+    const base = makeCtx();
+    const hostileCtx = {
+      ...base,
+      get llm(): never { throw hostile; },
+    } as NodeContext;
+    const provider: ToolLoopProvider = {
+      call: async () => ok({
+        toolCalls: [{ id: "c", name: "tool", input: {} }],
+        textContent: undefined,
+        tokensIn: 4,
+        tokensOut: 6,
+      }),
+      appendToolResults: () => {},
+    };
+
+    const result = await toolUseLoop(
+      provider,
+      {
+        nodeId: N("n1"),
+        model: "m",
+        schema,
+        tools: [{ name: toolName("tool"), description: "t", inputSchema: z.object({}), outputSchema: z.string(), run: async () => ok("r") }],
+        maxIterations: 2,
+      },
+      hostileCtx,
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "node-crash") {
+      expect(result.error.retriability).toBe("non-retriable");
+      expect(result.error.message).toContain("tool dispatch threw");
+      expect(result.error.usage).toEqual({ tokensIn: 4, tokensOut: 6 });
+    }
+  });
+
+  test("appendToolResults failures are typed after tool side effects", async () => {
+    let providerCalls = 0;
+    let toolCalls = 0;
+    const provider: ToolLoopProvider = {
+      call: async () => {
+        providerCalls += 1;
+        return ok({
+          toolCalls: [{ id: "c", name: "tool", input: {} }],
+          textContent: undefined,
+          tokensIn: 7,
+          tokensOut: 9,
+        });
+      },
+      appendToolResults: () => { throw new Error("conversation serialization failed"); },
+    };
+
+    const result = await toolUseLoop(
+      provider,
+      {
+        nodeId: N("n1"),
+        model: "m",
+        schema,
+        tools: [{
+          name: toolName("tool"),
+          description: "t",
+          inputSchema: z.object({}),
+          outputSchema: z.string(),
+          run: async () => { toolCalls += 1; return ok("r"); },
+        }],
+        maxIterations: 3,
+      },
+      makeCtx(),
+    );
+
+    expect(providerCalls).toBe(1);
+    expect(toolCalls).toBe(1);
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "node-crash") {
+      expect(result.error.retriability).toBe("non-retriable");
+      expect(result.error.message).toContain("provider.appendToolResults threw");
+      expect(result.error.usage).toEqual({ tokensIn: 7, tokensOut: 9 });
     }
   });
 

@@ -35,6 +35,7 @@ import type { FreshnessIndex } from "./freshness-check.js";
 import { sha256DedupKey } from "../shared/dedup-key.js";
 import { fwLogger } from "../logger.js";
 import type { CompiledDagMachine } from "./machine.js";
+import type { NonEmptyString } from "../types/non-empty-string.js";
 
 // ---------------------------------------------------------------------------
 // DagRunOpts — caller-supplied options for runDagStateful
@@ -52,7 +53,7 @@ export type StatefulOutcome<O> =
   | {
       readonly kind: "suspended";
       readonly nodeId: NodeId;
-      readonly prompt: string;
+      readonly prompt: NonEmptyString;
       readonly output: unknown;
     };
 
@@ -80,7 +81,7 @@ export interface DagRunOpts
   readonly onHumanReview?: (req: {
     nodeId: NodeId;
     output: unknown;
-    prompt: string;
+    prompt: NonEmptyString;
   }) => Promise<HumanReviewOutcome>;
   /**
    * ADR-0060: effectively-once decision consumption. Called with the gate's

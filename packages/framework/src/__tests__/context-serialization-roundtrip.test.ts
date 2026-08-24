@@ -16,6 +16,7 @@ import { N } from "./_id-helpers.js";
 import type { DagMachineContextPersisted } from "../dag-runtime/types.js";
 import type { NodeId } from "../types/ids.js";
 import { freshnessExecutionEpoch, resourceName, witness } from "../types/witness.js";
+import { nonEmptyString } from "../types/non-empty-string.js";
 
 // ---------------------------------------------------------------------------
 // Arbitraries for serializable primitives and containers
@@ -224,7 +225,7 @@ const VALID_PERSISTED_CONTEXT: DagMachineContextPersisted = {
   defaultRetryLimit: 1,
   retryLimits: { [CONTEXT_NODE]: 2 },
   humanReviewNodeIds: new Set([CONTEXT_NODE]),
-  humanReviewPrompts: new Map([[CONTEXT_NODE, "Approve?"]]),
+  humanReviewPrompts: new Map([[CONTEXT_NODE, nonEmptyString("Approve?")]]),
   activeNodeIds: new Set([CONTEXT_NODE]),
   confidenceByNode: new Map([[CONTEXT_NODE, null]]),
   outputs: new Map([[CONTEXT_NODE, { answer: 42 }]]),

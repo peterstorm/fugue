@@ -16,7 +16,7 @@ const throwingDiagnosticsLogger: AppLogger = {
   debug: () => { throw new Error("debug transport failed"); },
   info: () => {},
   warn: () => { throw new Error("warn transport failed"); },
-  error: () => {},
+  error: () => { throw new Error("error transport failed"); },
 };
 
 const recordingLogger = () => {
@@ -148,6 +148,30 @@ describe("POST /summarize", () => {
       }),
     );
     expect(res.status).toBe(400);
+  });
+
+  test("an unexpected dependency failure remains a structured 500 when error logging throws", async () => {
+    const source = new JsonFixtureSource(fixturesDir);
+    const checkpointer: Checkpointer = {
+      load: async () => { throw new Error("checkpoint transport rejected"); },
+      saveNode: async () => ok(undefined),
+      setMeta: async () => ok(undefined),
+    };
+    const app = createApp({
+      source,
+      llm: new FakeLlmClient(new Map()),
+      checkpointer,
+      checkpointWriter: { write: async () => {} },
+      logger: throwingDiagnosticsLogger,
+    });
+
+    const res = await post(app, "/summarize", {
+      customer_id: "cust-001",
+      resume_run_id: "existing-run",
+    });
+
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "Internal server error" });
   });
 
   test("malformed JSON remains a 400 when diagnostic logging throws", async () => {

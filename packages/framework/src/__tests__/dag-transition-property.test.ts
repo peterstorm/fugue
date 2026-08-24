@@ -18,6 +18,7 @@ import type { DagDef } from "../types/dag.js";
 import { N, D } from "./_id-helpers.js";
 import { FE } from "./_freshness-helpers.js";
 import { z } from "zod";
+import { nonEmptyString } from "../types/non-empty-string.js";
 
 // ---------------------------------------------------------------------------
 // Minimal DagDef + DagMachineContext fixture for transitions
@@ -73,6 +74,9 @@ const minimalCtx: DagMachineContext = {
 // ---------------------------------------------------------------------------
 
 const arbNodeId = fc.constantFrom(N("a"), N("b"), N("unknown"));
+const arbPrompt = fc.string({ minLength: 1, maxLength: 20 })
+  .filter((value) => value.trim() !== "")
+  .map(nonEmptyString);
 
 const arbFrameworkError: fc.Arbitrary<FrameworkError> = fc.oneof(
   fc.record({
@@ -107,7 +111,7 @@ const arbDagPhase: fc.Arbitrary<DagPhase> = fc.oneof(
     kind: fc.constant("awaiting-human" as const),
     nodeId: arbNodeId,
     output: fc.oneof(fc.constant(null), fc.string(), fc.integer()),
-    prompt: fc.string({ maxLength: 20 }),
+    prompt: arbPrompt,
     pendingReviews: fc.array(arbNodeId, { maxLength: 3 }),
     wave: fc.nat(5),
   }),
@@ -117,7 +121,7 @@ const arbDagPhase: fc.Arbitrary<DagPhase> = fc.oneof(
     kind: fc.constant("suspended" as const),
     nodeId: arbNodeId,
     output: fc.oneof(fc.constant(null), fc.string(), fc.integer()),
-    prompt: fc.string({ maxLength: 20 }),
+    prompt: arbPrompt,
     pendingReviews: fc.array(arbNodeId, { maxLength: 3 }),
     wave: fc.nat(5),
   }),
@@ -125,7 +129,7 @@ const arbDagPhase: fc.Arbitrary<DagPhase> = fc.oneof(
     kind: fc.constant("retrying-hook" as const),
     nodeId: arbNodeId,
     output: fc.oneof(fc.constant(null), fc.string()),
-    prompt: fc.string({ maxLength: 20 }),
+    prompt: arbPrompt,
     attempt: fc.integer({ min: 1, max: 5 }),
     nextDelayMs: fc.integer({ min: 100, max: 5000 }),
     pendingReviews: fc.array(arbNodeId, { maxLength: 3 }),

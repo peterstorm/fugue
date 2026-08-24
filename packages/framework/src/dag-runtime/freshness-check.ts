@@ -217,9 +217,10 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
       entries.splice(0, entries.length - this.maxEntries);
     }
     this.writes.set(resource, entries);
-    const recorded = this.recordedWriteKeys.get(resource) ?? new Set<string>();
-    recorded.add(freshnessWriteKey(event));
-    this.recordedWriteKeys.set(resource, recorded);
+    // Acknowledgements retain the same bounded timestamp-newest window as
+    // conflict entries. Rebuilding from the retained entries prevents the
+    // identity set from growing without limit while preserving exact lookup.
+    this.recordedWriteKeys.set(resource, new Set(entries.map(freshnessWriteKey)));
     this.latest.set(resource, entries[entries.length - 1]!);
     return ok(undefined);
   }

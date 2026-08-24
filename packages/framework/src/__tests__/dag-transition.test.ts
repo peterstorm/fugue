@@ -26,6 +26,7 @@ import { type NodeOverride, brandedOverride } from "./_node-override.js";
 import type { FrameworkError } from "../types/errors.js";
 import { defineDag, defineDagFromArray } from "../executor/define-dag.js";
 import { z } from "zod";
+import { nonEmptyString } from "../types/non-empty-string.js";
 
 // ---------------------------------------------------------------------------
 // Helpers / fixtures
@@ -155,7 +156,7 @@ const awaitingHuman = (
   // @ts-expect-error — branded ID test fixture
   nodeId,
   output: { result: "some-output" },
-  prompt: "Please review",
+  prompt: nonEmptyString("Please review"),
   // @ts-expect-error — branded ID test fixture
   pendingReviews,
   wave,
@@ -1077,7 +1078,7 @@ describe("compileDagToMachine", () => {
     expect(machine.stateProgress({ kind: "pending" })).toBe(0);
     expect(machine.stateProgress({ kind: "running", wave: 0 })).toBe(10);
     expect(machine.stateProgress({ kind: "retrying", wave: 0, nodeId: "a" as NodeId, attempt: 1, nextDelayMs: 1000 })).toBe(10);
-    expect(machine.stateProgress({ kind: "awaiting-human", nodeId: "a" as NodeId, output: null, prompt: "", pendingReviews: [], wave: 0 })).toBe(50);
+    expect(machine.stateProgress({ kind: "awaiting-human", nodeId: "a" as NodeId, output: null, prompt: nonEmptyString("review"), pendingReviews: [], wave: 0 })).toBe(50);
     expect(machine.stateProgress({ kind: "succeeded", output: null })).toBe(100);
     expect(machine.stateProgress({ kind: "failed", error: nodeFailedError })).toBe(100);
   });
@@ -1164,7 +1165,7 @@ describe("dagTransition — awaiting-human hook-crash retry (FR-029a)", () => {
     // @ts-expect-error — branded ID test fixture
     nodeId,
     output: { result: "preserved-output" },
-    prompt: "original-prompt",
+    prompt: nonEmptyString("original-prompt"),
     // @ts-expect-error — branded ID test fixture
     pendingReviews,
     wave,
@@ -1181,7 +1182,7 @@ describe("dagTransition — awaiting-human hook-crash retry (FR-029a)", () => {
     if (result.state.kind === "retrying-hook") {
       expect(result.state.nodeId).toBe(N("a"));
       expect(result.state.output).toEqual({ result: "preserved-output" });
-      expect(result.state.prompt).toBe("original-prompt");
+      expect(result.state.prompt).toBe(nonEmptyString("original-prompt"));
       expect(result.state.attempt).toBe(1);
       expect(result.state.nextDelayMs).toBeGreaterThan(0);
       expect(result.state.pendingReviews).toEqual([]);
@@ -1275,7 +1276,7 @@ describe("dagTransition — retrying-hook (FR-029a)", () => {
     kind: "retrying-hook",
     nodeId: "a" as NodeId,
     output: { result: "preserved-output" },
-    prompt: "original-prompt",
+    prompt: nonEmptyString("original-prompt"),
     attempt,
     nextDelayMs: 1000,
     // @ts-expect-error — branded ID test fixture
@@ -1422,7 +1423,7 @@ describe("dagTransition — suspended (ADR-0060)", () => {
     // @ts-expect-error — branded ID test fixture
     nodeId,
     output: { result: "preserved-output" },
-    prompt: "original-prompt",
+    prompt: nonEmptyString("original-prompt"),
     // @ts-expect-error — branded ID test fixture
     pendingReviews,
     wave,
@@ -1435,7 +1436,7 @@ describe("dagTransition — suspended (ADR-0060)", () => {
       kind: "awaiting-human",
       nodeId: "a" as NodeId,
       output: { result: "preserved-output" },
-      prompt: "original-prompt",
+      prompt: nonEmptyString("original-prompt"),
       pendingReviews: [],
       wave: 0,
     };
@@ -1446,7 +1447,7 @@ describe("dagTransition — suspended (ADR-0060)", () => {
       kind: "suspended",
       nodeId: N("a"),
       output: { result: "preserved-output" },
-      prompt: "original-prompt",
+      prompt: nonEmptyString("original-prompt"),
       wave: 0,
     });
   });
@@ -1457,7 +1458,7 @@ describe("dagTransition — suspended (ADR-0060)", () => {
       kind: "awaiting-human",
       nodeId: "a" as NodeId,
       output: { result: "preserved-output" },
-      prompt: "original-prompt",
+      prompt: nonEmptyString("original-prompt"),
       pendingReviews: [],
       wave: 0,
     };
@@ -1570,7 +1571,7 @@ describe("dagTransition — suspended (ADR-0060)", () => {
     if (result.state.kind === "retrying-hook") {
       expect(result.state.nodeId).toBe(N("a"));
       expect(result.state.output).toEqual({ result: "preserved-output" });
-      expect(result.state.prompt).toBe("original-prompt");
+      expect(result.state.prompt).toBe(nonEmptyString("original-prompt"));
       expect(result.state.attempt).toBe(1);
       expect(result.state.pendingReviews).toEqual([N("b"), N("c")]);
       expect(result.state.wave).toBe(2);
@@ -1622,7 +1623,7 @@ describe("dagTransition — suspended (ADR-0060)", () => {
       kind: "retrying-hook",
       nodeId: "a" as NodeId,
       output: { result: "preserved-output" },
-      prompt: "original-prompt",
+      prompt: nonEmptyString("original-prompt"),
       attempt: 2,
       nextDelayMs: 1000,
       pendingReviews: ["b" as NodeId],
@@ -1643,7 +1644,7 @@ describe("dagTransition — suspended (ADR-0060)", () => {
       kind: "retrying-hook",
       nodeId: "a" as NodeId,
       output: { result: "preserved-output" },
-      prompt: "original-prompt",
+      prompt: nonEmptyString("original-prompt"),
       attempt: 2,
       nextDelayMs: 1000,
       pendingReviews: [],
@@ -1671,7 +1672,7 @@ describe("compileDagToMachine — retrying-hook predicates", () => {
       kind: "retrying-hook",
       nodeId: "a" as NodeId,
       output: "out",
-      prompt: "p",
+      prompt: nonEmptyString("p"),
       attempt: 1,
       nextDelayMs: 1000,
       pendingReviews: [],

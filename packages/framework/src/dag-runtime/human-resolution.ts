@@ -177,7 +177,21 @@ const resolveHumanApproved = (
       };
     }
     const nodeOutput = ctx.outputs.get(nextNodeId);
-    const prompt = ctx.humanReviewPrompts.get(nextNodeId) ?? "";
+    const prompt = ctx.humanReviewPrompts.get(nextNodeId);
+    if (prompt === undefined) {
+      return {
+        state: {
+          kind: "failed",
+          error: {
+            kind: "node-crash",
+            retriability: "retriable",
+            nodeId: nextNodeId,
+            message: `node '${nextNodeId}' missing humanReview prompt`,
+          },
+        },
+        context: ctx,
+      };
+    }
 
     return {
       state: {

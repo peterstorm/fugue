@@ -8,6 +8,7 @@ import type { IncomingSources } from "./topology.js";
 import type { NodeId } from "../types/ids.js";
 import { nodeId } from "../types/ids.js";
 import type { Witness, FreshnessExecutionEpoch } from "../types/witness.js";
+import type { NonEmptyString } from "../types/non-empty-string.js";
 
 /**
  * Sentinel node id used by the executor/runner when an ERROR event arrives
@@ -56,7 +57,7 @@ export interface HumanGatePayload {
   /** The gated node's already-produced output — what is under review. */
   readonly output: unknown;
   /** The review prompt shown to the human. */
-  readonly prompt: string;
+  readonly prompt: NonEmptyString;
   /** Remaining review queue: node ids to review after the current one (ascending order). */
   readonly pendingReviews: readonly NodeId[];
   /** Wave index we paused on. */
@@ -277,7 +278,7 @@ export interface DagHumanGateConfig {
   /** Node IDs that declare human review (data only — no closures). */
   readonly humanReviewNodeIds: ReadonlySet<NodeId>;
   /** Human review prompts by node ID (plain data, extracted at compile time). */
-  readonly humanReviewPrompts: ReadonlyMap<NodeId, string>;
+  readonly humanReviewPrompts: ReadonlyMap<NodeId, NonEmptyString>;
 }
 
 /** Routing/active-set state that evolves per wave. */

@@ -11,7 +11,7 @@
 //      exhaustive transition with a NonExhaustiveError.
 
 import { describe, it, expect } from "bun:test";
-import { ok, err, toJson, fromJson, freshnessExecutionEpoch } from "@fuguejs/framework";
+import { ok, err, toJson, fromJson, freshnessExecutionEpoch, nonEmptyString } from "@fuguejs/framework";
 import type { RunId, NodeId, DagPhase, DagMachineContextPersisted, Result } from "@fuguejs/framework";
 import { createRunLeaseAuthority } from "../ports.js";
 import type { RunExecutionJob, RunStorePort } from "../ports.js";
@@ -29,7 +29,7 @@ type Envelope = { state: DagPhase; context: DagMachineContextPersisted };
 const GATE = {
   nodeId: "review" as NodeId,
   output: null,
-  prompt: "Approve?",
+  prompt: nonEmptyString("Approve?"),
   pendingReviews: [],
   wave: 1,
 } as const;
@@ -197,6 +197,17 @@ describe("makeRunStoreJobLike", () => {
     for (const state of invalidStates) {
       const result = makeRunStoreJobLike(port, LEASE, toJson({ state, context: VALID_CONTEXT }));
       expect(result.ok, `invalid numeric phase payload was accepted: ${JSON.stringify(state)}`).toBe(false);
+    }
+  });
+
+  it("REJECTS gate phases carrying a blank review prompt", () => {
+    const { port } = fakeStore(() => Promise.resolve(ok(undefined)));
+    for (const prompt of ["", "   \n\t"]) {
+      const result = makeRunStoreJobLike(port, LEASE, toJson({
+        state: { ...VALID_PHASES.suspended, prompt },
+        context: VALID_CONTEXT,
+      }));
+      expect(result.ok, `blank prompt was accepted: ${JSON.stringify(prompt)}`).toBe(false);
     }
   });
 
