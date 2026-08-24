@@ -1,51 +1,61 @@
-# PR Remediation Plan — Adjudicated Standalone Review (round 48)
+# PR Remediation Plan — Adjudicated Standalone Review (round 49)
 
 **Branch:** `feat/f6-file-durable-runtime`
 
-**Review HEAD (frozen source):** `566421738ea0ca4332e30f432b5ce6898f2b952a`
+**Review HEAD (frozen source):** `8d125a1a75991c6a69906f4da4fc9cc7857e40a1`
 
-**Exact scope:** the complete canonical `result.json.scope` array (all 495 paths frozen by the engine)
+**Exact scope:** the complete canonical `result.json.scope` array (all 500 paths frozen by the engine)
 
-**Review Run Directory:** `.claude/reviews/review-and-fix-runs/review-20260824T153149Z-01a03465`
+**Review Run Directory:** `.claude/reviews/review-and-fix-runs/20260824T161536Z-01a0348e-review`
 
-**Canonical result:** `<review-run>/result.json` (digest `fb8cd9f5ba475dfdffdae8d1e4b215820b04c8b9409a40ef37403d82a46e1926`, 40,636 bytes)
+**Canonical result:** `<review-run>/result.json` (digest `ab94571708b864426f9a337fb86e035f3122ddca443e54d12389bf918f9df2fe`, 42,970 bytes)
 
-**Adjudication:** 7 reviewers → 4 critical findings → registered 3-lens Refutation Panel (`reproduction`, `intent`, `security`) → **4 surviving / 0 refuted**; 7 advisories dispositioned independently below.
+**Adjudication:** 7 reviewers → 6 critical findings → registered 3-lens Refutation Panel (`reproduction`, `intent`, `security`) → **6 surviving / 0 refuted**; 8 advisories dispositioned independently below.
 
 The canonical `result.json` is the sole remediation authority. Findings, scope, and panel outcomes were not reconstructed by the parent.
 
 ## Mandatory surviving critical findings
 
-1. **`code-reviewer-1` — throwing application logger escapes `/summarize` outer catch**
-   `apps/customer-summary/src/server.ts:282`
-   Route the final unexpected-error diagnostic through `reportWithoutThrowing`, preserving the structured JSON 500 even when a custom logger transport throws. Add a regression whose checkpointer fails while the error logger throws.
+1. **`code-reviewer-1` — typed host timeout abort maps to HTTP 500**
+   `packages/host/src/http/handlers/run-dag.ts:290`
+   Classify a settled framework `aborted` result as the request-owned timeout when the host timeout sentinel fired, mark the circuit failure, and return the same typed HTTP 408 response as the thrown-abort path. Add a regression using the real `Result.err({ kind: "aborted" })` shape.
 
-2. **`silent-failure-hunter-1` — usage attribution logger replaces the modeled error**
-   `packages/framework/src/llm/tool-use-loop.ts:116`
-   Reuse `logFrameworkWithoutThrowing` for `llm.usage-unattributed`, so a diagnostic transport failure cannot replace the original `Result.err`. Add a prior-turn usage regression with a throwing framework logger.
+2. **`code-reviewer-2` — synchronous host timeout is cooperative-only**
+   `packages/host/src/http/handlers/run-dag.ts:269`
+   Race DAG execution against a hard settlement deadline in the HTTP imperative shell. On deadline, abort cooperatively, return 408, resolve the circuit permit, and release the concurrency token without awaiting an abort-insensitive execution promise. Add a never-settling executor regression proving bounded response and token release.
 
-3. **`silent-failure-hunter-2` — hostile thrown values escape tool-dispatch conversion**
-   `packages/framework/src/llm/tool-use-loop.ts:248`
-   Render caught tool-dispatch values with total `safeErrorMessage` rather than executable `String` coercion. Add a hostile `Symbol.toPrimitive` regression that remains a non-retriable typed node crash with accumulated usage.
+3. **`code-reviewer-3` — HITL execution slice can wedge its worker**
+   `packages/host/src/hitl/adapters/run-executor.ts:157`
+   Race the resumable kernel slice against its configured hard deadline, preserving cooperative abort while terminalizing a never-settling slice as a typed failed outcome. Fence the durable `JobLike` and post-checkpoint decision callback once the deadline expires so late kernel continuation cannot advance durable state or consume a decision. Add regressions for bounded settlement and late-write rejection.
 
-4. **`silent-failure-hunter-3` — `appendToolResults` can throw after side effects**
-   `packages/framework/src/llm/tool-use-loop.ts:256`
-   Fence provider conversation mutation after dispatch and convert failures into a non-retriable `node-crash` carrying accumulated usage. Add a regression proving the loop returns an error instead of rejecting and does not continue to another provider turn.
+4. **`code-reviewer-4` — kernel error conversion is partial over unknown throws**
+   `packages/framework/src/dag-runtime/run-dag-stateful.ts:278`
+   Replace direct `instanceof`, `cause`, `message`, and coercion operations with total probes plus `safeErrorMessage`. Preserve an attached failed `DagPhase` only when safely recoverable. Add throwing-`cause`, hostile coercion, and revoked-proxy regressions.
+
+5. **`silent-failure-hunter-1` — LLM error classification can throw**
+   `packages/framework/src/llm/llm-errors.ts:170`
+   Make abort override invocation, abort detection, timeout-cause inspection, HTTP-status probing, message rendering, and stack extraction total over arbitrary provider-thrown values. Reuse the established safe-error helpers and add direct hostile getter/proxy/coercion regressions.
+
+6. **`silent-failure-hunter-2` — duplicate evidence for partial kernel conversion**
+   `packages/framework/src/dag-runtime/run-dag-stateful.ts:278`
+   Covered by mandatory fix 4. Its dedicated regressions will prove that neither failed-state recovery nor fallback node-crash conversion can throw while handling the original failure.
 
 ## Advisory dispositions
 
 ### Accepted
 
-- **`code-reviewer-2` — in-memory freshness acknowledgement identities are unbounded.** Sound resource-exhaustion issue that contradicts the adapter's documented per-resource cap. Prune acknowledgement keys in lockstep with the retained timestamp-newest write window, and add an overflow regression proving both entry and identity eviction semantics.
-- **`pr-test-analyzer-1` — malformed persisted run/node IDs lack direct negative coverage.** Sound persistence-boundary gap. Add strict decoder cases for malformed and non-string `runId`/`nodeId` while keeping every other tuple field valid.
-- **`pr-test-analyzer-2` — Redis value/kind rejection fixtures fail first on epoch shape.** Sound false-positive test issue. Rebuild those fixtures with valid fixed-width epochs so each test reaches the field it names; consolidate the strict field matrix to make this explicit.
-- **`type-design-analyzer-1` — durable human-gate phases can represent blank prompts.** Sound illegal-state issue. Carry `NonEmptyString` from authored node config through compiled prompt maps, gate phases, callbacks, worker outcomes, and persisted parse seams. Reject blank durable prompt bytes and update affected tests/fixtures to construct valid branded prompts.
-- **`code-simplifier-1` — `tenantConfig` repeats the config-invalid envelope.** Sound local simplification. Add a private tenant-bound invalid-result helper and leave each validation branch focused on its invariant.
-- **`code-simplifier-2` — lifecycle equality is encoded as a compound negative boolean.** Sound ADT readability issue. Extract exhaustive discriminant-shaped lifecycle equality and keep `configEquals` at one structural-comparison altitude.
+- **`code-reviewer-5` — customer-summary timeout is cooperative-only.** Sound availability defect at the same request boundary and a complete in-scope fix is practical. Race `runDag` against the request deadline, abort cooperatively, and return 504 without awaiting an abort-insensitive source. Add a never-settling run regression.
+- **`silent-failure-hunter-3` — tool-name validation diagnostics can throw.** Sound total-boundary issue with a local fix. Reuse `safeErrorMessage` and add a hostile thrown-value regression.
+- **`pr-test-analyzer-1` — no setMeta-error/throwing-logger regression.** Production already uses `reportWithoutThrowing`; add the missing route regression proving a typed 503 survives logger failure.
+- **`pr-test-analyzer-2` — persisted `humanReviewPrompts` blank-value coverage.** The parser already uses `parseNonEmptyString`; add direct empty and whitespace persisted-context cases so the boundary invariant cannot regress.
+- **`type-design-analyzer-1` — write freshness extractors can be partially configured.** Sound illegal-state issue. Refine the `writes` side-effect variant into an ADT with either both extractors absent or both required, while retaining runtime validation for untyped/forged callers. Add compile-time rejection fixtures.
+- **`type-design-analyzer-2` — freshness-violation resource identity is duplicated.** Sound illegal-state issue. Remove the independently writable `resource` field and derive the identity from `conditionedOnWitness.resource`; update event construction and observer fixtures so drift is unrepresentable.
+- **`comment-analyzer-1` — historical “slow path” label contradicts O(1) behavior.** Rename the inline label to the actual `sinceMs` threshold branch.
+- **`code-simplifier-1` — nullable node-directory branch needlessly nests the scan.** Return the empty collection early when no node directory exists, leaving the read/parse loop at one altitude.
 
 ### Deferred
 
-- **`architecture-tech-lead-1` — `/summarize` embeds checkpoint identity/resume policy.** The diagnosis is sound, but this is a behavior-preserving seam redesign spanning route orchestration, pure policy result types, and handler test ownership. It is not required for the four correctness fixes and should be performed as a dedicated deepen session rather than mixed into a security/error-boundary remediation, where the broad movement would increase review and regression risk without changing a current incorrect outcome.
+None.
 
 ### Dismissed
 
@@ -53,70 +63,73 @@ None.
 
 ## Refuted critical findings audit
 
-None. All four critical findings survived unanimously under reproduction, intent, and security. The authoritative panel outcomes and captured `refutation-slot:*` transcripts remain under the Review Run Directory.
+None. All six critical entries survived unanimously under reproduction, intent, and security. The authoritative panel outcomes and captured `refutation-slot:*` transcripts remain under the Review Run Directory.
 
 ## Planned files
 
 - `.claude/plans/2026-08-24-pr-remediation.md`
 - `CONTEXT.md`
+- `docs/adr/0025-freshness-witness-contract.md`
+- `docs/features.md`
 - `apps/customer-summary/src/server.ts`
 - `apps/customer-summary/src/__tests__/server.test.ts`
 - `packages/framework/src/llm/tool-use-loop.ts`
 - `packages/framework/src/__tests__/tool-use-loop.test.ts`
-- `packages/framework/src/dag-runtime/freshness-check.ts`
-- `packages/framework/src/__tests__/freshness-check.test.ts`
-- `packages/framework/src/__tests__/redis-freshness-index.test.ts`
-- `packages/framework/src/dag-runtime/types.ts`
-- `packages/framework/src/dag-runtime/persistence.ts`
-- `packages/framework/src/dag-runtime/run-dag-stateful.ts`
-- `packages/framework/src/dag-runtime/executor.ts`
-- `packages/framework/src/dag-runtime/retry-policy.ts`
-- `packages/framework/src/executor/run-dag.ts`
-- `packages/framework/src/dag-runtime/wave-resolution.ts`
-- `packages/framework/src/dag-runtime/human-resolution.ts`
-- `packages/framework/src/__tests__/dag-transition.test.ts`
-- `packages/framework/src/__tests__/dag-transition-property.test.ts`
 - `packages/framework/src/__tests__/context-serialization-roundtrip.test.ts`
-- `packages/framework/src/__tests__/wave-resolution.test.ts`
-- `packages/framework/src/__tests__/human-resolution.test.ts`
-- `packages/framework/src/__tests__/retry-policy.test.ts`
-- `packages/framework/src/__tests__/hitl-suspend-resume.test.ts`
-- `packages/framework/src/__tests__/pass-3-remediation.test.ts`
-- `packages/host/src/hitl/run-store-job.ts`
-- `packages/host/src/hitl/__tests__/run-store-job.test.ts`
-- `packages/host/src/supervisor/registry/tenant-registry.ts`
-- `packages/host/src/__tests__/supervisor/registry/tenant-registry.test.ts`
-
-Four remediation-owned paths are outside the frozen review scope and must be registered as support paths at remediation start:
-
-- `packages/framework/src/__tests__/hitl-suspend-resume.test.ts`
-- `packages/framework/src/dag-runtime/retry-policy.ts`
+- `packages/framework/src/types/side-effects.ts`
+- `packages/framework/src/__tests__/freshness-extraction-types.test.ts`
+- `packages/framework/src/types/events.ts`
+- `packages/framework/src/dag-runtime/freshness-emission.ts`
+- `packages/framework/src/__tests__/freshness-file-dag-integration.test.ts`
+- `packages/framework/src/__tests__/freshness-full-pipeline.test.ts`
+- `packages/framework/src/__tests__/freshness-witness-conflict-detected.test.ts`
+- `packages/framework/src/observer/foundry-event-mapping.test.ts`
+- `packages/framework/src/__tests__/observer-property.test.ts`
+- `packages/framework/src/dag-runtime/freshness-check.ts`
+- `packages/framework/src/file/checkpointer.ts`
+- `packages/host/src/http/handlers/run-dag.ts`
+- `packages/host/src/__tests__/handlers/run-dag.test.ts`
+- `packages/host/src/hitl/adapters/run-executor.ts`
+- `packages/host/src/hitl/adapters/__tests__/run-executor.test.ts`
+- `packages/host/src/adapters/settle-before-deadline.ts`
 - `packages/framework/src/dag-runtime/run-dag-stateful.ts`
-- `packages/framework/src/executor/run-dag.ts`
+- `packages/framework/src/__tests__/dag-runtime-stateful.test.ts`
+- `packages/framework/src/llm/llm-errors.ts`
+- `packages/framework/src/__tests__/llm-errors.test.ts`
+
+Three remediation-owned paths are outside the frozen review scope and must be registered as support paths:
+
+- `docs/features.md`
+- `packages/framework/src/__tests__/llm-errors.test.ts`
+- `packages/host/src/adapters/settle-before-deadline.ts`
 
 Every other planned path, including the plan, is inside the frozen review scope.
 
 ## Baseline evidence
 
-Before production edits, **149 tests passed / 0 failed** across the app server, framework tool-loop/freshness/Redis decoder, host tenant registry, and durable run-store checkpoint parser suites.
+Before production edits, the focused 12-file gate passed **375 tests / 0 failures**. After implementation and the distill pass, the expanded 15-file gate passed **397 tests / 0 failures**. Final workspace validation passed **6,171 tests / 0 failures**, all package typechecks, shipped-document link checks, and `git diff --check`.
 
 ## Validation
 
-Focused regression gate:
+Baseline and focused regression gate:
 
 ```bash
 bun test \
   apps/customer-summary/src/__tests__/server.test.ts \
   packages/framework/src/__tests__/tool-use-loop.test.ts \
-  packages/framework/src/__tests__/freshness-check.test.ts \
-  packages/framework/src/__tests__/redis-freshness-index.test.ts \
-  packages/framework/src/__tests__/dag-transition.test.ts \
-  packages/framework/src/__tests__/dag-transition-property.test.ts \
   packages/framework/src/__tests__/context-serialization-roundtrip.test.ts \
-  packages/framework/src/__tests__/wave-resolution.test.ts \
-  packages/framework/src/__tests__/human-resolution.test.ts \
-  packages/host/src/hitl/__tests__/run-store-job.test.ts \
-  packages/host/src/__tests__/supervisor/registry/tenant-registry.test.ts
+  packages/framework/src/__tests__/freshness-extraction-types.test.ts \
+  packages/framework/src/__tests__/freshness-emission.test.ts \
+  packages/framework/src/__tests__/observer-property.test.ts \
+  packages/framework/src/observer/foundry-event-mapping.test.ts \
+  packages/framework/src/__tests__/freshness-file-dag-integration.test.ts \
+  packages/framework/src/__tests__/freshness-full-pipeline.test.ts \
+  packages/framework/src/__tests__/freshness-witness-conflict-detected.test.ts \
+  packages/framework/src/__tests__/file-checkpointer.test.ts \
+  packages/framework/src/__tests__/dag-runtime-stateful.test.ts \
+  packages/framework/src/__tests__/llm-errors.test.ts \
+  packages/host/src/__tests__/handlers/run-dag.test.ts \
+  packages/host/src/hitl/adapters/__tests__/run-executor.test.ts
 ```
 
 Full validation before registered remediation:

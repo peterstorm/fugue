@@ -492,6 +492,33 @@ describe("createRunExecutor — slice timeout (AbortController wiring)", () => {
     if (res.ok) expect(res.value.kind).toBe("failed");
   });
 
+  it("hard-bounds an abort-insensitive node and fences late durable progress", async () => {
+    const dag = singleNodeDag((async () => {
+      await Bun.sleep(40); // deliberately ignores ctx.signal
+      return ok("late-success");
+    }) as never);
+    const reg = registered(dag, 5);
+    const exec = createRunExecutor({
+      sharedInfra: sharedInfra(),
+      getRegisteredDag: () => reg,
+      agentClientMap: { "exec-dag": "fugue-agent-exec" },
+    });
+    const job = await seedJobLike(dag, null);
+
+    const result = await Promise.race([
+      exec.run(runReq(dag, job, null)),
+      Bun.sleep(250).then(() => { throw new Error("worker slice remained wedged"); }),
+    ]);
+
+    expect(result.ok && result.value.kind).toBe("failed");
+    if (result.ok && result.value.kind === "failed") {
+      expect(result.value.error.kind).toBe("aborted");
+    }
+    const checkpointAtTimeout = toJson(job.jobLike.data);
+    await Bun.sleep(60);
+    expect(toJson(job.jobLike.data)).toBe(checkpointAtTimeout);
+  });
+
   it("aborts the node context immediately when the queue lease signal aborts", async () => {
     let observedAbort = false;
     let markStarted: () => void = () => {};

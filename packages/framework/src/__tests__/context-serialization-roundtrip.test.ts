@@ -299,6 +299,19 @@ describe("parsePersistedDagContext", () => {
     },
   );
 
+  it.each(["", "   \t\n"])(
+    "rejects a blank persisted human-review prompt %j",
+    (prompt) => {
+      const parsed = parsePersistedDagContext({
+        ...VALID_PERSISTED_CONTEXT,
+        humanReviewPrompts: new Map([[CONTEXT_NODE, prompt]]),
+      });
+
+      expect(parsed.ok).toBe(false);
+      if (!parsed.ok) expect(parsed.error).toContain("context.humanReviewPrompts.value[0] must be non-blank");
+    },
+  );
+
   it("rejects a prior-witness map whose resource key disagrees with its witness", () => {
     const candidate = {
       ...VALID_PERSISTED_CONTEXT,

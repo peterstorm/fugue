@@ -74,6 +74,28 @@ const errorOnTurn = (errorTurn: number): ToolLoopProvider => {
 };
 
 describe("toolUseLoop", () => {
+  test("hostile tool-name validation failures remain typed", async () => {
+    const hostile = {
+      get message(): never { throw new Error("message getter escaped"); },
+      [Symbol.toPrimitive](): never { throw new Error("coercion escaped"); },
+    };
+    const tools = [{
+      get name(): never { throw hostile; },
+    }] as never;
+
+    const result = await toolUseLoop(
+      immediateProvider('{"answer":"unreachable"}'),
+      { nodeId: N("n1"), model: "m", schema, tools, maxIterations: 1 },
+      makeCtx(),
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("validation");
+      if (result.error.kind === "validation") expect(typeof result.error.message).toBe("string");
+    }
+  });
+
   test("immediate final answer — parses JSON and validates schema", async () => {
     const result = await toolUseLoop(
       immediateProvider('{"answer":"hello"}'),

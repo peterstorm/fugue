@@ -21,6 +21,7 @@ import type {
   Result,
   FrameworkError,
   CapabilityBroker,
+  JobLike,
 } from "@fuguejs/framework";
 import { compileDagToMachine, persistDagContext } from "@fuguejs/framework/advanced";
 import { toJson } from "@fuguejs/framework";
@@ -34,6 +35,28 @@ import type { TenantId } from "../../domain/tenant.js";
 import type { RunExecutorPort, RunExecOutcome, RunExecutionRequest } from "../ports.js";
 import { toExecIdentity } from "../identity.js";
 import { logWithoutThrowing } from "../diagnostic-logging.js";
+import { settleBeforeDeadline } from "../../adapters/settle-before-deadline.js";
+
+const deadlineFencedJob = <S, E, C>(
+  job: JobLike<S, E, C>,
+  assertAuthorized: () => void,
+): JobLike<S, E, C> => ({
+  get data() {
+    return job.data;
+  },
+  updateData: async (data) => {
+    assertAuthorized();
+    await job.updateData(data);
+  },
+  updateProgress: async (progress) => {
+    assertAuthorized();
+    await job.updateProgress(progress);
+  },
+  appendEvent: async (event, dedupKey) => {
+    assertAuthorized();
+    await job.appendEvent(event, dedupKey);
+  },
+});
 
 interface RunExecutorDeps {
   readonly sharedInfra: SharedInfra;
@@ -125,7 +148,13 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
       if (req.signal.aborted) abortForLeaseLoss();
       else req.signal.addEventListener("abort", abortForLeaseLoss, { once: true });
       const SLICE_TIMEOUT = Symbol("hitl-slice-timeout");
-      const timeoutId = setTimeout(() => controller.abort(SLICE_TIMEOUT), registered.config.timeout);
+      let executionAuthorized = true;
+      const assertExecutionAuthorized = (): void => {
+        if (!executionAuthorized) {
+          throw new Error("HITL execution slice attempted durable work after its deadline");
+        }
+      };
+      const fencedJob = deadlineFencedJob(req.job.jobLike, assertExecutionAuthorized);
 
       // `setup` = context build (host wiring), `execution` = the kernel slice.
       // Both settle as the `failed` outcome below, but a setup fault is a
@@ -136,31 +165,61 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
       let phase: "setup" | "execution" = "setup";
 
       try {
-        const { ctx, origin } = await createNodeContextForDag(
-          sharedInfra,
-          registered,
-          req.runId,
-          controller.signal,
-          toExecIdentity(req.identity),
-          agentClientMap ?? {},
-          broker !== undefined,
-          // bindSubjectToken: intentionally omitted on the resume path. A user
-          // run's verified `subject_token` is bound at INITIATION (sync path);
-          // across a HITL park/resume it is not re-presented, so a user-path
-          // capability mint fails closed (no proof) rather than reusing a stale
-          // token — correct, not a leak.
-          undefined,
-          tenant,
+        const slice = (async () => {
+          const { ctx, origin } = await createNodeContextForDag(
+            sharedInfra,
+            registered,
+            req.runId,
+            controller.signal,
+            toExecIdentity(req.identity),
+            agentClientMap ?? {},
+            broker !== undefined,
+            // bindSubjectToken: intentionally omitted on the resume path. A user
+            // run's verified `subject_token` is bound at INITIATION (sync path);
+            // across a HITL park/resume it is not re-presented, so a user-path
+            // capability mint fails closed (no proof) rather than reusing a stale
+            // token — correct, not a leak.
+            undefined,
+            tenant,
+          );
+          phase = "execution";
+
+          return runResumableDagJob<unknown, unknown>(registered.dag, req.input, ctx, {
+            jobLike: fencedJob,
+            onHumanReview: async (review) => {
+              assertExecutionAuthorized();
+              return req.onHumanReview(review);
+            },
+            onDecisionConsumed: async (nodeId) => {
+              assertExecutionAuthorized();
+              await req.onDecisionConsumed(nodeId);
+            },
+            ...(broker !== undefined && origin !== undefined ? { minting: { broker, origin } } : {}),
+          });
+        })();
+
+        const completion = await settleBeforeDeadline(
+          slice,
+          registered.config.timeout,
+          () => {
+            executionAuthorized = false;
+            controller.abort(SLICE_TIMEOUT);
+          },
         );
-        phase = "execution";
+        if (completion.kind === "timed-out") {
+          const error: FrameworkError = {
+            kind: "aborted",
+            reason: `execution slice timed out after ${registered.config.timeout}ms`,
+          };
+          logWithoutThrowing(logger, "error", "hitl: run slice timed out", {
+            runId: req.runId,
+            dagId: req.dagId,
+            timeoutMs: registered.config.timeout,
+          });
+          return ok({ kind: "failed", error });
+        }
 
-        const outcome = await runResumableDagJob<unknown, unknown>(registered.dag, req.input, ctx, {
-          jobLike: req.job.jobLike,
-          onHumanReview: req.onHumanReview,
-          onDecisionConsumed: req.onDecisionConsumed,
-          ...(broker !== undefined && origin !== undefined ? { minting: { broker, origin } } : {}),
-        });
-
+        const outcome = completion.value;
         if (outcome.kind === "suspended") {
           const prompt = asNonEmptyString(outcome.prompt);
           if (prompt === undefined) {
@@ -200,7 +259,6 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
         );
         return ok({ kind: "failed", error: toFrameworkError(e) });
       } finally {
-        clearTimeout(timeoutId);
         req.signal.removeEventListener("abort", abortForLeaseLoss);
       }
     },

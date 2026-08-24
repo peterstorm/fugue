@@ -20,6 +20,8 @@ import { withRetryLimits } from "../types/dag.js";
 import type { NodeContext, ValidatedNodeContext } from "../types/node.js";
 import type { MintingAuthority } from "../types/capability-broker.js";
 import type { FrameworkError } from "../types/errors.js";
+import { isFrameworkError } from "../types/errors.js";
+import { safeErrorMessage } from "../types/safe-error.js";
 import type { NodeId } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
 import { createInMemoryJob } from "../queue/in-memory-job.js";
@@ -262,28 +264,56 @@ const handleTerminalState = <O>(
 // handleKernelError — catch block: abort vs terminal-failed
 // ---------------------------------------------------------------------------
 
+const isBeforeExecuteAbort = (error: unknown): boolean => {
+  try {
+    return error instanceof Error && safeErrorMessage(error).includes("aborted by beforeExecute");
+  } catch {
+    return false;
+  }
+};
+
+/** Parse the kernel's attached terminal state without trusting any property access. */
+const frameworkErrorFromKernelCause = (error: unknown): FrameworkError | undefined => {
+  if (!((typeof error === "object" && error !== null) || typeof error === "function")) {
+    return undefined;
+  }
+
+  try {
+    const cause = Reflect.get(error, "cause");
+    if (!((typeof cause === "object" && cause !== null) || typeof cause === "function")) {
+      return undefined;
+    }
+    const state = Reflect.get(cause, "state");
+    if (!((typeof state === "object" && state !== null) || typeof state === "function")) {
+      return undefined;
+    }
+    if (Reflect.get(state, "kind") !== "failed") return undefined;
+    const attachedError = Reflect.get(state, "error");
+    return isFrameworkError(attachedError) ? attachedError : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
 const handleKernelError = <O>(
   e: unknown,
   rootSpan: Span,
   emitRunEnd: (status: "ok" | "error") => void,
 ): Result<StatefulOutcome<O>, FrameworkError> => {
-  const isAbort = e instanceof Error && e.message.includes("aborted by beforeExecute");
-  if (isAbort) {
+  if (isBeforeExecuteAbort(e)) {
     const error: FrameworkError = { kind: "aborted", reason: "beforeExecute hook returned false" };
     closeRootSpan(rootSpan, { kind: "error", error });
     emitRunEnd("error");
     return err(error);
   }
+
   // Terminal-failed: the kernel attaches { state, context } to Error.cause.
-  const cause = (e as Error)?.cause as { state?: DagPhase } | undefined;
-  const failedState = cause?.state?.kind === "failed"
-    ? (cause.state as Extract<DagPhase, { kind: "failed" }>)
-    : undefined;
-  const error: FrameworkError = failedState?.error ?? {
+  // The attachment crosses a throwing boundary, so parse it rather than cast it.
+  const error: FrameworkError = frameworkErrorFromKernelCause(e) ?? {
     kind: "node-crash",
     nodeId: EXECUTOR_NODE_ID,
     retriability: "retriable",
-    message: e instanceof Error ? e.message : String(e),
+    message: safeErrorMessage(e),
   };
   closeRootSpan(rootSpan, { kind: "error", error });
   emitRunEnd("error");

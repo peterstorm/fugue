@@ -132,7 +132,7 @@ describe("file FreshnessIndex wired into runDagStateful", () => {
       (e): e is FreshnessViolationEvent => e.type === "freshness-violation",
     );
     expect(violation).toBeDefined();
-    expect(violation!.resource).toBe(RN(RESOURCE));
+    expect(violation!.conditionedOnWitness.resource).toBe(RN(RESOURCE));
     expect(violation!.conditionedOnWitness.value).toBe("42");
     // The conflicting write is the one the PREVIOUS process durably recorded.
     expect(violation!.conflictingWrite.newWitness.value).toBe("43");

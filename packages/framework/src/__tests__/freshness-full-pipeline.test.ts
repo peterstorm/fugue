@@ -213,7 +213,7 @@ describe("Full pipeline: reads → freshness violation → human intervention", 
       (e) => e.type === "freshness-violation",
     ) as FreshnessViolationEvent | undefined;
     expect(violation).toBeDefined();
-    expect(violation!.resource).toBe(RN("postgres:orders"));
+    expect(violation!.conditionedOnWitness.resource).toBe(RN("postgres:orders"));
     expect(violation!.conditionedOnWitness.value).toBe("42");
     expect(violation!.conflictingWrite.newWitness.value).toBe("43");
 

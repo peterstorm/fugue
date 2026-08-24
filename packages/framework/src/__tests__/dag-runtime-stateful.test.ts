@@ -639,6 +639,36 @@ describe("runDagStateful — HITL reroute-back", () => {
 // ---------------------------------------------------------------------------
 
 describe("runDagStateful — abort", () => {
+  it("contains hostile values thrown by the kernel while converting its failure", async () => {
+    const throwingCause = new Error("kernel failed");
+    Object.defineProperty(throwingCause, "cause", {
+      get(): never { throw new Error("cause getter escaped"); },
+    });
+    const hostileCoercion = {
+      get cause(): never { throw new Error("cause getter escaped"); },
+      get message(): never { throw new Error("message getter escaped"); },
+      [Symbol.toPrimitive](): never { throw new Error("coercion escaped"); },
+    };
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    const dag = makeDag({
+      nodes: [makeNode("a", { run: async () => ok("out") })],
+      edges: [{ from: DAG_INPUT, to: "a" }],
+    });
+
+    for (const thrown of [throwingCause, hostileCoercion, revoked.proxy]) {
+      const result = await runDagStateful(dag, null, makeCtx(), {
+        beforeExecute: () => { throw thrown; },
+      });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok && result.error.kind === "node-crash") {
+        expect(result.error.nodeId).toBe(N("__executor__"));
+        expect(typeof result.error.message).toBe("string");
+      }
+    }
+  });
+
   it("abort event delivered to machine produces err(aborted) (FR-033)", async () => {
     // `abort` is an EXTERNAL signal — the executor never emits it — so this
     // drives the machine directly with a pre-loaded aborted state rather than

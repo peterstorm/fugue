@@ -200,7 +200,6 @@ export async function emitFreshnessWitnessEvents(
             runId: nodeCtx.runId,
             dagId,
             nodeId,
-            resource: conditionedOn.resource,
             conditionedOnWitness: conditionedOn,
             conflictingWrite: writeEntryOf(conflict),
             detectedAtMs: nowFn(),

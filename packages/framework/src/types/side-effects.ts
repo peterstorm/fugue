@@ -20,6 +20,22 @@ import type { Witness, WitnessValue, ResourceName } from "./witness.js";
 
 export type SideEffectKind = "none" | "reads" | "writes" | "external-call";
 
+type WriteFreshnessExtractors<I, O> =
+  | {
+      readonly extractConditionedOn?: never;
+      readonly extractNewWitness?: never;
+    }
+  | {
+      /**
+       * Declare which witness this write is conditioned on. A write may be
+       * conditioned on a different upstream resource, so this returns a full
+       * witness including that resource identity.
+       */
+      readonly extractConditionedOn: (input: I) => Witness;
+      /** The framework stamps the write node's resource onto this value. */
+      readonly extractNewWitness: (output: O) => WitnessValue;
+    };
+
 export type SideEffectProfile<I = unknown, O = unknown> =
   | { readonly kind: "none"; readonly resource?: never }
   | {
@@ -36,29 +52,11 @@ export type SideEffectProfile<I = unknown, O = unknown> =
        */
       readonly extractWitness?: (output: O) => WitnessValue;
     }
-  | {
+  | ({
       readonly kind: "writes";
       readonly resource: ResourceName;
       readonly idempotencyKey?: (input: I) => string;
-      /**
-       * Declare which witness this write is conditioned on. Called after the
-       * node completes, with its assembled input (which carries the upstream
-       * read's version this write assumed was still current). Returns a full
-       * `Witness`
-       * (including `resource`) because a write may be conditioned on a
-       * *different* resource it read upstream — that resource is a genuine
-       * free variable the author must name.
-       */
-      readonly extractConditionedOn?: (input: I) => Witness;
-      /**
-       * Extract the new witness value after a successful write. Returns only
-       * `(kind, value)`; the framework stamps this node's `resource` (a write
-       * always produces the new version of the resource it writes).
-       *
-       * Example: `(output) => witnessValue("version", String(output.newXmin))`
-       */
-      readonly extractNewWitness?: (output: O) => WitnessValue;
-    }
+    } & WriteFreshnessExtractors<I, O>)
   | {
       readonly kind: "external-call";
       readonly resource: ResourceName;

@@ -259,7 +259,7 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
       if (entry && entry.newWitness.value !== conditionedOnValue) return ok(entry);
       return ok(null);
     }
-    // Slow path: entries are timestamp-ordered; the latest is the last element.
+    // sinceMs threshold branch: the timestamp-ordered latest is the last entry.
     const entries = this.writes.get(resource) ?? [];
     if (entries.length === 0) return ok(null);
     const latest = entries[entries.length - 1]!;

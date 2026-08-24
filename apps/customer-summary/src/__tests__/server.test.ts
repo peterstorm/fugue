@@ -66,6 +66,7 @@ const createTestApp = (cp: Checkpointer = new InMemoryCheckpointer()) => {
 const createDelayedFailureApp = (
   failure: FrameworkError,
   logger: AppLogger,
+  requestTimeoutMs = 1,
 ) => {
   const cp = new InMemoryCheckpointer();
   return createApp({
@@ -83,7 +84,7 @@ const createDelayedFailureApp = (
         if (!saved.ok) throw new Error(`test checkpoint write failed: ${saved.error.kind}`);
       },
     },
-    requestTimeoutMs: 1,
+    requestTimeoutMs,
     logger,
   });
 };
@@ -172,6 +173,32 @@ describe("POST /summarize", () => {
 
     expect(res.status).toBe(500);
     expect(await res.json()).toEqual({ error: "Internal server error" });
+  });
+
+  test("setMeta failure remains a structured 503 when error logging throws", async () => {
+    const checkpointer: Checkpointer = {
+      load: async () => ok(null),
+      saveNode: async () => ok(undefined),
+      setMeta: async () => err({
+        kind: "cache-error",
+        operation: "setMeta",
+        message: "checkpoint unavailable",
+      }),
+    };
+    const app = createApp({
+      source: new JsonFixtureSource(fixturesDir),
+      llm: new FakeLlmClient(new Map()),
+      checkpointer,
+      checkpointWriter: { write: async () => {} },
+      logger: throwingDiagnosticsLogger,
+    });
+
+    const response = await post(app, "/summarize", { customer_id: "cust-001" });
+    const body = await response.json();
+
+    expect(response.status).toBe(503);
+    expect(body.error).toBe("Checkpoint store unavailable");
+    expect(typeof body.requestId).toBe("string");
   });
 
   test("malformed JSON remains a 400 when diagnostic logging throws", async () => {
@@ -505,7 +532,7 @@ describe("POST /summarize", () => {
     }
   });
 
-  test("an explicit aborted result after the request timer returns 504 and logs its cause", async () => {
+  test("the hard request deadline returns 504 and logs its cause", async () => {
     const { logger, entries } = recordingLogger();
     const app = createDelayedFailureApp(
       { kind: "aborted", reason: "signal" },
@@ -516,11 +543,11 @@ describe("POST /summarize", () => {
 
     expect(response.status).toBe(504);
     expect(entries.some(({ level, args }) =>
-      level === "warn" && String(args[0]).includes("cause=run aborted: signal")
+      level === "warn" && String(args[0]).includes("cause=hard request deadline expired")
     )).toBe(true);
   });
 
-  test("a non-abort failure racing with the timer remains a logged 500", async () => {
+  test("a non-abort failure settling before the deadline remains a logged 500", async () => {
     const { logger, entries } = recordingLogger();
     const app = createDelayedFailureApp(
       {
@@ -530,6 +557,7 @@ describe("POST /summarize", () => {
         message: "checkpoint writer exploded after timeout",
       },
       logger,
+      50,
     );
 
     const response = await post(app, "/summarize", { customer_id: "cust-race" });
@@ -539,6 +567,25 @@ describe("POST /summarize", () => {
       level === "error" && args.some((arg) => String(arg).includes("checkpoint writer exploded after timeout"))
     )).toBe(true);
     expect(entries.some(({ level }) => level === "warn")).toBe(false);
+  });
+
+  test("an abort-insensitive source cannot hold the request past its deadline", async () => {
+    const cp = new InMemoryCheckpointer();
+    const app = createApp({
+      source: { fetchCustomer: () => new Promise(() => {}) },
+      llm: new FakeLlmClient(new Map()),
+      checkpointer: cp,
+      checkpointWriter: { write: async () => {} },
+      requestTimeoutMs: 5,
+    });
+
+    const response = await Promise.race([
+      post(app, "/summarize", { customer_id: "cust-hung" }),
+      Bun.sleep(250).then(() => { throw new Error("request remained wedged"); }),
+    ]);
+
+    expect(response.status).toBe(504);
+    expect((await response.json()).error).toBe("Request timeout");
   });
 
   test("all response variants match SummaryResponseSchema", async () => {

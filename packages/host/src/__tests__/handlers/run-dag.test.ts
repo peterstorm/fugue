@@ -371,8 +371,8 @@ describe("run-dag handler", () => {
   });
 
   it("returns 500 and releases the concurrency token when createContext throws", async () => {
-    // Exercises the setup-guard branch: createContext throwing must clear the timeout timer,
-    // mark the circuit, rethrow → 500, and the outer finally must still release the slot.
+    // Exercises the setup-guard branch: createContext throwing must mark the
+    // circuit, rethrow → 500, and still release the slot in the outer finally.
     let concurrency = initConcurrency(50, 10);
     const deps = defaultDeps({
       getConcurrency: () => concurrency,
@@ -407,7 +407,7 @@ describe("run-dag handler", () => {
     // Async sibling of the sync-throw setup-guard test above. The async migration introduced
     // a new failure mode: `await deps.createContext(...)` resolving to a REJECTED promise (how a
     // failing broker surfaces in Wave 4). The setup-guard catch must handle it identically to a
-    // sync throw — clear the timer, mark the circuit, 500, and the outer finally releases the slot.
+    // sync throw — mark the circuit, return 500, and release the slot.
     let concurrency = initConcurrency(50, 10);
     const deps = defaultDeps({
       getConcurrency: () => concurrency,
@@ -625,6 +625,48 @@ describe("run-dag handler", () => {
     const res = await post(app, "slow-dag", { query: "hi" });
     expect(res.status).toBe(408);
     expect((await res.json()).error).toBe("timeout");
+  });
+
+  it("maps the framework's typed aborted Result to 408 when the host deadline fires", async () => {
+    const base = makeDag("typed-timeout-dag");
+    const timedDag: RegisteredDag = { ...base, config: { ...base.config, timeout: 5 } };
+    const reg = freeze([timedDag], sha, Date.now());
+    const executeDag = (async (_dag: unknown, _input: unknown, ctx: NodeContext) => {
+      await new Promise<void>((resolve) => {
+        if (ctx.signal?.aborted) return resolve();
+        ctx.signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+      return err({ kind: "aborted", reason: "signal" });
+    }) as RunDagDeps["executeDag"];
+
+    const response = await post(
+      createTestApp(defaultDeps({ executeDag }), makeReadyState(reg)),
+      "typed-timeout-dag",
+      { query: "hi" },
+    );
+
+    expect(response.status).toBe(408);
+    expect((await response.json()).error).toBe("timeout");
+  });
+
+  it("hard-bounds abort-insensitive execution and releases its concurrency token", async () => {
+    const base = makeDag("wedged-dag");
+    const timedDag: RegisteredDag = { ...base, config: { ...base.config, timeout: 5 } };
+    const reg = freeze([timedDag], sha, Date.now());
+    let concurrency = initConcurrency(50, 10);
+    const deps = defaultDeps({
+      getConcurrency: () => concurrency,
+      setConcurrency: (next) => { concurrency = next; },
+      executeDag: (() => new Promise(() => {})) as RunDagDeps["executeDag"],
+    });
+
+    const response = await Promise.race([
+      post(createTestApp(deps, makeReadyState(reg)), "wedged-dag", { query: "hi" }),
+      Bun.sleep(250).then(() => { throw new Error("host request remained wedged"); }),
+    ]);
+
+    expect(response.status).toBe(408);
+    expect(concurrency.global.current).toBe(0);
   });
 
   it("honors a per-DAG circuitBreaker.failureThreshold (opens sooner than the host default)", async () => {

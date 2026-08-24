@@ -127,6 +127,7 @@ describe("freshness extraction types (Phase 3)", () => {
     const se: Extract<SideEffectProfile, { kind: "writes" }> = {
       kind: "writes",
       resource: RN("postgres:orders"),
+      extractConditionedOn: () => witness("version", RN("postgres:orders"), "0"),
       // @ts-expect-error — extractNewWitness is the symmetric resource-free slot:
       // it returns WitnessValue (`resource: never`), so a full Witness is
       // unassignable here too. Same guarantee as extractWitness above; if this
@@ -134,6 +135,26 @@ describe("freshness extraction types (Phase 3)", () => {
       extractNewWitness: () => witness("version", RN("wrong:resource"), "1"),
     };
     expect(se.extractNewWitness).toBeDefined();
+  });
+
+  test("writes freshness extractors are an all-or-none pair", () => {
+    // @ts-expect-error — a conditioned-on witness without the produced witness
+    // cannot perform freshness bookkeeping and is excluded by the ADT.
+    const missingNewWitness: SideEffectProfile = {
+      kind: "writes",
+      resource: RN("postgres:orders"),
+      extractConditionedOn: () => witness("version", RN("postgres:orders"), "1"),
+    };
+    // @ts-expect-error — a produced witness without its conditioned-on witness
+    // cannot perform conflict detection and is excluded by the ADT.
+    const missingConditionedOn: SideEffectProfile = {
+      kind: "writes",
+      resource: RN("postgres:orders"),
+      extractNewWitness: () => witnessValue("version", "2"),
+    };
+
+    expect(missingNewWitness.kind).toBe("writes");
+    expect(missingConditionedOn.kind).toBe("writes");
   });
 
   test("stampWitness produces the same full Witness as the witness constructor (roundtrip)", () => {

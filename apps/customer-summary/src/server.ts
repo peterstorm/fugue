@@ -90,9 +90,52 @@ const reportWithoutThrowing = (report: () => void): void => {
   }
 };
 
-const isAbortThrow = (error: unknown): boolean =>
-  error instanceof Error &&
-  (error.name === "AbortError" || error.name === "APIUserAbortError");
+const isAbortThrow = (error: unknown): boolean => {
+  try {
+    return error instanceof Error &&
+      (error.name === "AbortError" || error.name === "APIUserAbortError");
+  } catch {
+    return false;
+  }
+};
+
+type DeadlineResult<T> =
+  | { readonly kind: "settled"; readonly value: T }
+  | { readonly kind: "timed-out" };
+
+const settleBeforeDeadline = <T>(
+  operation: PromiseLike<T>,
+  timeoutMs: number,
+  onTimeout: () => void,
+): Promise<DeadlineResult<T>> =>
+  new Promise((resolve, reject) => {
+    let settled = false;
+    const timeoutId = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try {
+        onTimeout();
+      } catch {
+        // The hard response deadline does not depend on cancellation signaling.
+      }
+      resolve({ kind: "timed-out" });
+    }, timeoutMs);
+
+    void operation.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
+        resolve({ kind: "settled", value });
+      },
+      (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
+        reject(error);
+      },
+    );
+  });
 
 const parseRequestTimeoutMs = (value: number): number => {
   if (!Number.isSafeInteger(value) || value <= 0) {
@@ -237,7 +280,6 @@ export const createApp = (deps: AppDeps): Hono => {
       }
 
       const abortController = new AbortController();
-      const timeout = setTimeout(() => abortController.abort("timeout"), timeoutMs);
 
       const ctx: NodeContext = makeNodeContext({
         runId,
@@ -252,22 +294,32 @@ export const createApp = (deps: AppDeps): Hono => {
         contentFilter: deps.contentFilter,
       });
 
+      const timeoutResponse = (cause: string): Response => {
+        reportWithoutThrowing(() => log.warn(
+          `[/summarize] Request timed out after ${timeoutMs}ms for customer=${customer_id} run=${runId}; cause=${cause}`,
+        ));
+        return c.json({ error: "Request timeout", requestId: runId }, 504);
+      };
+
       let result: Awaited<ReturnType<typeof runDag<{ customerId: string }, SummaryResponse>>>;
       try {
         const runOpts = resumeCheckpoint
           ? { resume: { runId, checkpoint: resumeCheckpoint } }
           : undefined;
-        result = await runDag<{ customerId: string }, SummaryResponse>(dag, { customerId: customer_id }, ctx, runOpts);
+        const completion = await settleBeforeDeadline(
+          runDag<{ customerId: string }, SummaryResponse>(dag, { customerId: customer_id }, ctx, runOpts),
+          timeoutMs,
+          () => abortController.abort("timeout"),
+        );
+        if (completion.kind === "timed-out") {
+          return timeoutResponse("hard request deadline expired");
+        }
+        result = completion.value;
       } catch (e) {
         if (abortController.signal.aborted && isAbortThrow(e)) {
-          reportWithoutThrowing(() => log.warn(
-            `[/summarize] Request timed out after ${timeoutMs}ms for customer=${customer_id} run=${runId}; cause=${safeErrorMessage(e)}`,
-          ));
-          return c.json({ error: "Request timeout", requestId: runId }, 504);
+          return timeoutResponse(safeErrorMessage(e));
         }
         throw e;
-      } finally {
-        clearTimeout(timeout);
       }
 
       if (result.ok) {
@@ -278,10 +330,7 @@ export const createApp = (deps: AppDeps): Hono => {
       // request-owned timeout. A different failure racing with the timer keeps
       // its real classification and diagnostic.
       if (abortController.signal.aborted && result.error.kind === "aborted") {
-        reportWithoutThrowing(() => log.warn(
-          `[/summarize] Request timed out after ${timeoutMs}ms for customer=${customer_id} run=${runId}; cause=${formatFrameworkError(result.error)}`,
-        ));
-        return c.json({ error: "Request timeout", requestId: runId }, 504);
+        return timeoutResponse(formatFrameworkError(result.error));
       }
 
       // Framework error — 500 (log detail server-side, return generic message)

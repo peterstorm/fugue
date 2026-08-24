@@ -104,7 +104,7 @@ describe("freshness witness — conflict detected (Phase 3)", () => {
     );
     expect(violations2).toHaveLength(1);
     expect(violations2[0]!.nodeId).toBe(N("writer"));
-    expect(violations2[0]!.resource).toBe(RN("postgres:orders"));
+    expect(violations2[0]!.conditionedOnWitness.resource).toBe(RN("postgres:orders"));
     expect(violations2[0]!.conditionedOnWitness.value).toBe("42");
     expect(violations2[0]!.conflictingWrite.newWitness.value).toBe("43");
     expect(violations2[0]!.conflictingWrite.runId).toBe(R("run-1"));

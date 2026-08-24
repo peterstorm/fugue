@@ -29,6 +29,7 @@ import { checkCircuit, markSuccess, markFailure } from "../../domain/circuit-gua
 import type { CircuitPort, CircuitConfig } from "../../domain/circuit-guard.js";
 import { classifyFrameworkError } from "../../domain/framework-error-http.js";
 import type { HitlRunService } from "../../hitl/service.js";
+import { settleBeforeDeadline } from "../../adapters/settle-before-deadline.js";
 
 // ---------------------------------------------------------------------------
 // Types for the handler's dependencies (injectable for testing)
@@ -235,18 +236,14 @@ export const createRunDagHandler = (
 
     const { permit } = circuitCheck;
 
-    // 5. Execute DAG with timeout
-    // INVARIANT: The outer try/finally guarantees token release.
-    // The setup guard (above) clears the timer if createContext throws.
-    // The inner try/catch handles execution-level errors.
+    // 5. Execute DAG with a cooperative signal AND a hard settlement deadline.
+    // INVARIANT: the outer finally releases the token even when execution never
+    // observes cancellation; the deadline race itself never awaits late work.
     try {
       const timeoutMs = registered.config.timeout;
       const HOST_TIMEOUT = Symbol("host-timeout");
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(HOST_TIMEOUT), timeoutMs);
 
-      // Declare ctx before the execution try so it's accessible in the catch block.
-      // Guard the createContext call so the timer is cleared if it throws (leak prevention).
       let ctx: NodeContext;
       let origin: InvocationOrigin | undefined;
       try {
@@ -259,22 +256,42 @@ export const createRunDagHandler = (
         ctx = built.ctx;
         origin = built.origin;
       } catch (setupErr) {
-        clearTimeout(timeoutId);
         markFailure(permit, deps.clock(), circuitConfig);
         throw setupErr;
       }
       const startTime = deps.clock();
+      const timeoutResponse = (): Response => {
+        markFailure(permit, deps.clock(), circuitConfig);
+        const timeoutErr: HostError = {
+          kind: "timeout",
+          dagId,
+          runId: ctx.runId,
+          timeoutMs,
+        };
+        return errorResponse(c, 408, timeoutErr.kind, formatHostError(timeoutErr), {
+          dagId,
+          runId: ctx.runId,
+          details: { timeoutMs },
+        });
+      };
 
       try {
-        const result = await deps.executeDag(
-          registered.dag,
-          parseResult.data,
-          ctx,
-          origin,
+        const completion = await settleBeforeDeadline(
+          deps.executeDag(registered.dag, parseResult.data, ctx, origin),
+          timeoutMs,
+          () => controller.abort(HOST_TIMEOUT),
         );
+        if (completion.kind === "timed-out") return timeoutResponse();
 
-        clearTimeout(timeoutId);
+        const result = completion.value;
         const durationMs = deps.clock() - startTime;
+
+        // A cooperative runtime usually settles cancellation as Result.err,
+        // rather than throwing AbortError. The host-owned sentinel distinguishes
+        // this timeout from caller cancellation and preserves FR-028's HTTP 408.
+        if (!result.ok && result.error.kind === "aborted" && controller.signal.reason === HOST_TIMEOUT) {
+          return timeoutResponse();
+        }
 
         // 6. Map Result to HTTP response (review I4). A settled authorization
         // "no" (policy-refusal / downstream-denied → 403) and a per-run usage
@@ -286,39 +303,32 @@ export const createRunDagHandler = (
         if (result.ok) {
           markSuccess(permit, deps.clock());
           return successResponse(c, result.value, { runId: ctx.runId, durationMs });
-        } else {
-          const cls = classifyFrameworkError(result.error);
-          if (cls.countsAsCircuitFailure) {
-            markFailure(permit, deps.clock(), circuitConfig);
-          } else {
-            markSuccess(permit, deps.clock());
-          }
-          const msg = formatFrameworkError(result.error);
-          return errorResponse(c, cls.status, result.error.kind, msg, {
-            dagId,
-            runId: ctx.runId,
-            ...(cls.retryAfterSeconds !== undefined
-              ? { headers: { "Retry-After": String(cls.retryAfterSeconds) } }
-              : {}),
-          });
         }
-      } catch (e: unknown) {
-        clearTimeout(timeoutId);
 
-        // Handle abort (timeout) — only if caused by HOST_TIMEOUT sentinel
-        if (e instanceof Error && e.name === "AbortError" && controller.signal.reason === HOST_TIMEOUT) {
+        const cls = classifyFrameworkError(result.error);
+        if (cls.countsAsCircuitFailure) {
           markFailure(permit, deps.clock(), circuitConfig);
-          const timeoutErr: HostError = {
-            kind: "timeout",
-            dagId,
-            runId: ctx.runId,
-            timeoutMs,
-          };
-          return errorResponse(c, 408, timeoutErr.kind, formatHostError(timeoutErr), {
-            dagId,
-            runId: ctx.runId,
-            details: { timeoutMs },
-          });
+        } else {
+          markSuccess(permit, deps.clock());
+        }
+        const msg = formatFrameworkError(result.error);
+        return errorResponse(c, cls.status, result.error.kind, msg, {
+          dagId,
+          runId: ctx.runId,
+          ...(cls.retryAfterSeconds !== undefined
+            ? { headers: { "Retry-After": String(cls.retryAfterSeconds) } }
+            : {}),
+        });
+      } catch (e: unknown) {
+        // Thrown cooperative aborts share the same host-owned timeout response.
+        let isAbortError = false;
+        try {
+          isAbortError = e instanceof Error && e.name === "AbortError";
+        } catch {
+          // Hostile thrown values continue through the generic error boundary.
+        }
+        if (isAbortError && controller.signal.reason === HOST_TIMEOUT) {
+          return timeoutResponse();
         }
 
         markFailure(permit, deps.clock(), circuitConfig);

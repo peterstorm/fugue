@@ -66,7 +66,7 @@ gates, freshness-aware state management, and production observability.
 |------|-----------|
 | **Side-Effect Profile** | Declared on every node: `"none"`, `"reads"`, `"writes"`, `"external-call"`. Determines freshness tracking behavior. |
 | **Witness** | A token asserting the version of a resource at a point in time: `{ kind, resource, value }`. |
-| **Freshness Violation** | Detected when a write's `conditionedOn` witness has been superseded by a later write to the same resource. |
+| **Freshness Violation** | Detected when a write's `conditionedOn` witness has been superseded by a later write to the same resource. Its event derives the resource solely from `conditionedOnWitness.resource`; no duplicate resource field can drift. |
 | **FreshnessIndex** | Port interface for witness tracking. Conflict lookup and durable logical-write acknowledgement are separate questions: `findConflict` selects the latest write, while `hasRecordedWrite` addresses `(runId, nodeId, executionEpoch, newWitness)` even after supersession. Three adapters: `InMemoryFreshnessIndex` (single-process), Redis-backed (distributed), file-backed (digest-addressed singletons, `file/` subpath). |
 | **Freshness Completion Proof** | Durable set of node IDs whose post-wave freshness bookkeeping completed. It is distinct from node outputs because output persistence can precede witness emission; retries and replacement workers use this proof to emit only genuinely outstanding bookkeeping. |
 | **Freshness Execution Epoch** | Durable non-negative generation stamped onto every write witness. Bookkeeping retries preserve the epoch; each valid HITL reroute increments it before replacement work executes, so a same-valued re-execution is distinct from an ambiguously acknowledged retry. |

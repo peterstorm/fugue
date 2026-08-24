@@ -214,6 +214,21 @@ to `witness(...)` (now `ResourceName`, not `string`), taken pre-1.0 while the
 only call sites were the `customer-summary` example app and the framework's own
 tests; no published DAG consumed them.
 
+## Amendment — paired write extractors and single violation identity (2026-08-24)
+
+A `writes` side-effect profile now represents freshness extraction as an
+all-or-none pair: either both `extractConditionedOn` and `extractNewWitness` are
+absent, or both are required. A partially configured write cannot perform a
+conflict check and was already rejected by runtime validation; excluding that
+state from `SideEffectProfile` moves the same invariant to authoring time while
+retaining the runtime guard for forged JavaScript values.
+
+`FreshnessViolationEvent` also no longer stores a second `resource` field. The
+conditioned-on witness already owns the resource being checked, so consumers
+read `conditionedOnWitness.resource`. Removing the duplicate makes disagreement
+between the event resource and its witness unrepresentable rather than relying
+on every producer to stamp matching values.
+
 ## Amendment — durable freshness projections (2026-08-24)
 
 `HumanInterventionEvent.context.priorWitnesses` is a run-history fact, not an

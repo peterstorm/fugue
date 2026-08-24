@@ -355,6 +355,46 @@ describe("classifyLlmError", () => {
     }
   });
 
+  test("hostile provider diagnostics cannot escape classification", () => {
+    const throwingStatus = {
+      message: "provider failed",
+      get status(): never { throw new Error("status getter escaped"); },
+    };
+    const hostileCoercion = {
+      get message(): never { throw new Error("message getter escaped"); },
+      [Symbol.toPrimitive](): never { throw new Error("coercion escaped"); },
+      toString(): never { throw new Error("toString escaped"); },
+    };
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+
+    for (const value of [throwingStatus, hostileCoercion, revoked.proxy]) {
+      const result = classifyLlmError(value, nodeId);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("node-crash");
+        if (result.error.kind === "node-crash") {
+          expect(typeof result.error.message).toBe("string");
+        }
+      }
+    }
+
+    expect(isAbort(revoked.proxy)).toBe(false);
+    expect(isRateLimit(throwingStatus)).toBe(false);
+    expect(isTimeoutError(revoked.proxy)).toBe(false);
+  });
+
+  test("a throwing provider abort override is advisory and falls back to generic classification", () => {
+    const result = classifyLlmError(new Error("provider failed"), nodeId, {
+      isAbortOverride: () => { throw new Error("override escaped"); },
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "node-crash") {
+      expect(result.error.message).toBe("provider failed");
+    }
+  });
+
   test("timeout without abort error falls through to generic crash", () => {
     // timedOut is true but the error is NOT an AbortError (shouldn't happen in practice)
     const e = new Error("connection reset");

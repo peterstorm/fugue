@@ -161,7 +161,7 @@ export const toolUseLoop = async <O>(
     return err({
       kind: "validation",
       nodeId: config.nodeId,
-      message: e instanceof Error ? e.message : String(e),
+      message: safeErrorMessage(e),
     });
   }
 

@@ -49,7 +49,7 @@ const arbEventType: fc.Arbitrary<ObserverEvent> = fc.oneof(
   }),
   fc.constant<ObserverEvent>({
     type: "freshness-violation", runId: rid, dagId: did, nodeId: nid,
-    resource: RN("r"), conditionedOnWitness: witness("version", RN("r"), "1"),
+    conditionedOnWitness: witness("version", RN("r"), "1"),
     conflictingWrite: { runId: rid, nodeId: nid, executionEpoch: FE(), newWitness: witness("version", RN("r"), "2"), succeededAtMs: 0 },
     detectedAtMs: 0, timestamp: ts,
   }),
