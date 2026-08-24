@@ -13,6 +13,7 @@
  *                                        initially a complete creation intent
  *   fugue:<tenant>:hitl:active        →  SET of non-terminal run ids
  *   fugue:<tenant>:hitl:lock:<runId>  →  queue-worker lease-fence token
+ *   fugue:<tenant>:hitl:exec:<runId>  →  TTL-bound execution-generation token
  *
  * SECURITY INVARIANT (load-bearing for AD-4 / FR-013 / SC-001):
  *   The Redis store is constructed bound to ONE `TenantId`, so a single store
@@ -30,9 +31,9 @@ import type { HostError } from "../../domain/host-error.js";
 import { markTeam } from "../../domain/auth.js";
 import type { TenantId } from "../../domain/tenant.js";
 import type { HitlRedisPort, LogPort } from "../../ports.js";
-import { createRunLeaseAuthority } from "../ports.js";
+import { createRunExecutionFenceAuthority, createRunLeaseAuthority } from "../ports.js";
 import { logWithoutThrowing } from "../diagnostic-logging.js";
-import type { RunLease, RunLeaseVerifier, RunStorePort } from "../ports.js";
+import type { RunExecutionFence, RunLease, RunLeaseVerifier, RunStorePort } from "../ports.js";
 import { transitionRunStatus, tryRunTimestampMs } from "../types.js";
 import type { RunMetadata, RunRecord, RunStatus, RunTimestampMs } from "../types.js";
 
@@ -148,6 +149,15 @@ const metadataOf = (record: RunRecord): RunMetadata => ({
 const leaseLost = (lease: RunLease): Result<never, HostError> =>
   err({ kind: "run-lease-lost", runId: lease.runId });
 
+const parseExecutionTimeout = (timeoutMs: number): Result<number, HostError> =>
+  Number.isSafeInteger(timeoutMs) && timeoutMs > 0
+    ? ok(timeoutMs)
+    : err({
+        kind: "internal-invariant-violated",
+        message: "HITL execution timeout must be a positive safe integer",
+        context: {},
+      });
+
 const readRunTimestamp = (now: () => number): Result<RunTimestampMs, HostError> => {
   try {
     const timestamp = tryRunTimestampMs(now());
@@ -240,6 +250,8 @@ export const createInMemoryRunStore = (
   readonly _active: ReadonlySet<string>;
 } => {
   const runs = new Map<string, RunRecord>();
+  const executionFences = createRunExecutionFenceAuthority();
+  const executionDeadlines = new WeakMap<RunExecutionFence, number>();
   // Mirrors the Redis active-run index SET (ADR-0074): run ids of non-terminal runs.
   const active = new Set<string>();
   const inspectActiveIndex = (): readonly RunId[] => {
@@ -267,8 +279,35 @@ export const createInMemoryRunStore = (
       const record = runs.get(runId);
       return ok(record === undefined ? null : metadataOf(record));
     },
-    async saveCheckpoint(lease, checkpoint) {
+    async beginExecution(lease, timeoutMs) {
       if (!leases.owns(lease)) return leaseLost(lease);
+      const parsedTimeout = parseExecutionTimeout(timeoutMs);
+      if (!parsedTimeout.ok) return parsedTimeout;
+      const startedAt = readRunTimestamp(now);
+      if (!startedAt.ok) return startedAt;
+      const deadline = startedAt.value + parsedTimeout.value;
+      if (!Number.isSafeInteger(deadline)) {
+        return err({
+          kind: "internal-invariant-violated",
+          message: "HITL execution deadline exceeds the safe timestamp domain",
+          context: {},
+        });
+      }
+      const fence = executionFences.issue(lease.runId, crypto.randomUUID());
+      executionDeadlines.set(fence, deadline);
+      return ok(fence);
+    },
+    async saveCheckpoint(lease, fence, checkpoint) {
+      if (!leases.owns(lease)) return leaseLost(lease);
+      const committedAt = readRunTimestamp(now);
+      if (!committedAt.ok) return committedAt;
+      if (
+        fence.runId !== lease.runId ||
+        executionFences.token(fence) === null ||
+        (executionDeadlines.get(fence) ?? -1) <= committedAt.value
+      ) {
+        return leaseLost(lease);
+      }
       const r = runs.get(lease.runId);
       if (!r) return err({ kind: "run-not-found", runId: lease.runId });
       runs.set(lease.runId, { ...r, checkpoint });
@@ -309,6 +348,7 @@ export const createInMemoryRunStore = (
 const runKey = (tenant: TenantId, runId: RunId): string => `fugue:${tenant}:hitl:run:${runId}`;
 const ckptKey = (tenant: TenantId, runId: RunId): string => `fugue:${tenant}:hitl:ckpt:${runId}`;
 const leaseKey = (tenant: TenantId, runId: RunId): string => `fugue:${tenant}:hitl:lock:${runId}`;
+const executionKey = (tenant: TenantId, runId: RunId): string => `fugue:${tenant}:hitl:exec:${runId}`;
 /**
  * The per-tenant active-run index SET (ADR-0074). Holds the run ids of all
  * non-terminal runs. Read via `sMembers` (NOT `scan`, which the per-tenant ACL
@@ -325,6 +365,8 @@ interface RedisRunStoreConfig {
   readonly ttlSec: number;
   /** Wall-clock source (injected for tests). Defaults to `Date.now`. */
   readonly now?: () => number;
+  /** Fresh unguessable execution-generation token. */
+  readonly newExecutionToken?: () => string;
 }
 
 const serializeRunMeta = (meta: RunMeta): Result<string, HostError> =>
@@ -418,6 +460,8 @@ export const createRedisRunStore = (
 ): RunStorePort => {
   const expiry = { expiresInSec: config.ttlSec };
   const now = config.now ?? Date.now;
+  const newExecutionToken = config.newExecutionToken ?? (() => crypto.randomUUID());
+  const executionFences = createRunExecutionFenceAuthority();
 
   const writeMeta = async (lease: RunLease, meta: RunMeta): Promise<Result<void, HostError>> => {
     const ownerToken = leases.ownerToken(lease);
@@ -699,13 +743,42 @@ export const createRedisRunStore = (
 
     getMetadata: readMeta,
 
-    async saveCheckpoint(lease, checkpoint) {
-      if (lease.signal.aborted) return leaseLost(lease);
+    async beginExecution(lease, timeoutMs) {
+      const parsedTimeout = parseExecutionTimeout(timeoutMs);
+      if (!parsedTimeout.ok) return parsedTimeout;
       const ownerToken = leases.ownerToken(lease);
       if (ownerToken === null) return leaseLost(lease);
-      const res = await redis.setIfValue(
+      const token = newExecutionToken();
+      if (token.length === 0) {
+        return err({
+          kind: "internal-invariant-violated",
+          message: "HITL execution token source returned an empty token",
+          context: {},
+        });
+      }
+      const armed = await redis.setIfValue(
         leaseKey(tenant, lease.runId),
         ownerToken,
+        executionKey(tenant, lease.runId),
+        token,
+        { expiresInMs: parsedTimeout.value },
+      );
+      if (!armed.ok) return err(armed.error);
+      return armed.value
+        ? ok(executionFences.issue(lease.runId, token))
+        : leaseLost(lease);
+    },
+
+    async saveCheckpoint(lease, fence, checkpoint) {
+      if (lease.signal.aborted || fence.runId !== lease.runId) return leaseLost(lease);
+      const ownerToken = leases.ownerToken(lease);
+      const executionToken = executionFences.token(fence);
+      if (ownerToken === null || executionToken === null) return leaseLost(lease);
+      const res = await redis.setIfValues(
+        [
+          { key: leaseKey(tenant, lease.runId), expectedValue: ownerToken },
+          { key: executionKey(tenant, lease.runId), expectedValue: executionToken },
+        ],
         ckptKey(tenant, lease.runId),
         checkpoint,
         expiry,

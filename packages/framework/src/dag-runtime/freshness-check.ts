@@ -65,59 +65,38 @@ export type {
  * Pure function — no I/O, no side effects.
  */
 export const checkFreshness = (
-  witnessEvents: readonly WitnessCapturedEvent[],
+  _witnessEvents: readonly WitnessCapturedEvent[],
   writeEvents: readonly WriteAttemptedEvent[],
 ): FreshnessCheckResult => {
   // Build a time-ordered log of all writes per resource.
   // Key: resource string → sorted array of writes.
   const writesByResource = new Map<string, WriteEntry[]>();
 
-  // Merge events into a single time-ordered stream
-  type TaggedEvent =
-    | { readonly kind: "witness"; readonly event: WitnessCapturedEvent }
-    | { readonly kind: "write"; readonly event: WriteAttemptedEvent };
-
-  const timeline: TaggedEvent[] = [
-    ...witnessEvents.map((e) => ({ kind: "witness" as const, event: e })),
-    ...writeEvents.map((e) => ({ kind: "write" as const, event: e })),
-  ].sort((a, b) => {
-    const aMs = a.kind === "witness" ? a.event.capturedAtMs : a.event.succeededAtMs;
-    const bMs = b.kind === "witness" ? b.event.capturedAtMs : b.event.succeededAtMs;
-    return aMs - bMs;
-  });
-
+  // Witness events remain part of the forensic API, but the conflict rule uses
+  // only completed writes. Sort the data the algorithm actually consumes.
+  const timeline = [...writeEvents].sort((a, b) => a.succeededAtMs - b.succeededAtMs);
   const conflicts: FreshnessConflict[] = [];
 
-  for (const entry of timeline) {
-    if (entry.kind === "write") {
-      const e = entry.event;
-      const resource = e.conditionedOn.resource;
-      const existingWrites = writesByResource.get(resource) ?? [];
+  for (const event of timeline) {
+    const resource = event.conditionedOn.resource;
+    const existingWrites = writesByResource.get(resource) ?? [];
 
-      // Check if the LATEST write to this resource produced a different
-      // witness value. Only the most recent write matters — older writes
-      // may have different values that were subsequently superseded.
-      // A conflict means: the current state of the resource has moved past
-      // what this write believes it's updating.
-      const latest = existingWrites.length > 0
-        ? existingWrites[existingWrites.length - 1]!
-        : null;
+    // Check if the LATEST write to this resource produced a different
+    // witness value. Only the most recent write matters — older writes
+    // may have different values that were subsequently superseded.
+    const latest = existingWrites.at(-1) ?? null;
 
-      if (latest && latest.newWitness.value !== e.conditionedOn.value) {
-        conflicts.push({
-          writeNodeId: e.nodeId,
-          writeRunId: e.runId,
-          conditionedOnWitness: e.conditionedOn,
-          conflictingWrite: writeEntryOf(latest),
-        });
-      }
-
-      // Record this write
-      existingWrites.push(writeEntryOf(e));
-      writesByResource.set(resource, existingWrites);
+    if (latest && latest.newWitness.value !== event.conditionedOn.value) {
+      conflicts.push({
+        writeNodeId: event.nodeId,
+        writeRunId: event.runId,
+        conditionedOnWitness: event.conditionedOn,
+        conflictingWrite: writeEntryOf(latest),
+      });
     }
-    // witness-captured events don't need tracking for the basic algorithm;
-    // they are recorded in the event log for forensic queries.
+
+    existingWrites.push(writeEntryOf(event));
+    writesByResource.set(resource, existingWrites);
   }
 
   return { conflicts };

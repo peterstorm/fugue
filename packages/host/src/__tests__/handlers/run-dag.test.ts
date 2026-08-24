@@ -4,6 +4,7 @@ import { dagId, gitSha, ok, err, runDag, defineDagFromArray, createFetchNode, ma
 import type { NodeContext, FrameworkError, DagId, Capability, CapabilityBroker, InvocationOrigin } from "@fuguejs/framework";
 import { z } from "zod";
 import { createRunDagHandler } from "../../http/handlers/run-dag.js";
+import { settleBeforeDeadline } from "../../adapters/settle-before-deadline.js";
 import type { RunDagDeps } from "../../http/handlers/run-dag.js";
 import type { RegisteredDag } from "../../domain/registry.js";
 import type { HostState } from "../../domain/host-state.js";
@@ -621,10 +622,24 @@ describe("run-dag handler", () => {
       e.name = "AbortError";
       throw e;
     }) as RunDagDeps["executeDag"];
-    const app = createTestApp(defaultDeps({ executeDag: timeoutExecute }), makeReadyState(reg));
+    const diagnostics: Array<{ readonly message: string; readonly data?: Record<string, unknown> }> = [];
+    const app = createTestApp(defaultDeps({
+      executeDag: timeoutExecute,
+      logger: {
+        info() {},
+        warn() {},
+        error(message, data) { diagnostics.push({ message, data }); },
+      },
+    }), makeReadyState(reg));
     const res = await post(app, "slow-dag", { query: "hi" });
     expect(res.status).toBe(408);
     expect((await res.json()).error).toBe("timeout");
+
+    await Bun.sleep(60);
+    expect(diagnostics).toContainEqual({
+      message: "host: DAG execution rejected after request deadline",
+      data: { dagId: "slow-dag", runId: "test-run-id", error: "aborted" },
+    });
   });
 
   it("maps the framework's typed aborted Result to 408 when the host deadline fires", async () => {
@@ -729,5 +744,36 @@ describe("run-dag handler", () => {
     const app = createTestApp(defaultDeps({ executeDag: okDag }), readyState, identity);
     const res = await post(app, "test-dag", { query: "hi" });
     expect(res.status).toBe(200);
+  });
+});
+
+describe("settleBeforeDeadline diagnostics", () => {
+  it("reports timeout-cancellation failure without replacing hard settlement", async () => {
+    const failures: unknown[] = [];
+    const result = await settleBeforeDeadline(
+      new Promise<never>(() => {}),
+      1,
+      () => { throw new Error("abort transport failed"); },
+      { onTimeoutCancellationFailure: (error) => failures.push(error) },
+    );
+
+    expect(result).toEqual({ kind: "timed-out" });
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toBeInstanceOf(Error);
+  });
+
+  it("contains a throwing late-rejection diagnostic", async () => {
+    const operation = new Promise<never>((_resolve, reject) => {
+      setTimeout(() => reject(new Error("late failure")), 10);
+    });
+    const result = await settleBeforeDeadline(
+      operation,
+      1,
+      () => {},
+      { onLateRejection: () => { throw new Error("logger failed"); } },
+    );
+
+    expect(result).toEqual({ kind: "timed-out" });
+    await expect(Bun.sleep(20)).resolves.toBeUndefined();
   });
 });

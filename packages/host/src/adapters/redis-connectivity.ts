@@ -12,7 +12,7 @@
  * module graph for tests that never connect.
  */
 
-import type { HitlRedisPort, RedisConnectivityPort, RedisPort } from "../ports.js";
+import type { HitlRedisPort, RedisConnectivityPort, RedisExpiry, RedisPort } from "../ports.js";
 import type { HostError } from "../domain/host-error.js";
 import { ok, err, safeErrorMessage } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
@@ -61,6 +61,7 @@ export const createIoredisRedisPort = (
   redisFailure: RedisFailure = redisErr,
 ): RedisPort => {
   let watchTail: Promise<void> = Promise.resolve();
+  let poisonedWatchFailure: HostError | null = null;
   const serializeWatch = async <T,>(
     work: () => Promise<Result<T, HostError>>,
   ): Promise<Result<T, HostError>> => {
@@ -81,13 +82,32 @@ export const createIoredisRedisPort = (
     body: () => Promise<Result<T, HostError>>,
   ): Promise<Result<T, HostError>> =>
     serializeWatch(async () => {
+      if (poisonedWatchFailure !== null) return err(poisonedWatchFailure);
       try {
         return await body();
       } catch (error) {
-        try { await client.unwatch(); } catch { /* primary error is authoritative */ }
+        try {
+          await client.unwatch();
+        } catch (cleanupError) {
+          poisonedWatchFailure = redisFailure(
+            `${operation}; primary failure: ${safeErrorMessage(error)}; UNWATCH cleanup failure: ${safeErrorMessage(cleanupError)}; optimistic transactions disabled on this connection`,
+            cleanupError,
+          );
+          return err(poisonedWatchFailure);
+        }
         return err(redisFailure(operation, error));
       }
     });
+
+  const stageExpiringSet = (
+    multi: ReturnType<typeof client.multi>,
+    key: string,
+    value: string,
+    opts: RedisExpiry,
+  ): ReturnType<typeof client.multi> =>
+    opts.expiresInMs !== undefined
+      ? multi.set(key, value, "PX", opts.expiresInMs)
+      : multi.set(key, value, "EX", opts.expiresInSec);
 
   const compareAndRun = (
     operation: string,
@@ -152,7 +172,23 @@ export const createIoredisRedisPort = (
             await client.unwatch();
             return ok(false);
           }
-          const executed = await client.multi().set(key, value, "EX", opts.expiresInSec).exec();
+          const executed = await stageExpiringSet(client.multi(), key, value, opts).exec();
+          if (executed === null) continue;
+          const [commandError, written] = executed[0] ?? [];
+          if (commandError !== null) throw commandError;
+          return ok(written === "OK");
+        }
+      }),
+    setIfValues: (guards, key, value, opts) =>
+      watchGuarded(`SET-IF-VALUES ${guards.map((guard) => guard.key).join(",")} -> ${key}`, async () => {
+        for (;;) {
+          await client.watch(...guards.map((guard) => guard.key));
+          const actual = await Promise.all(guards.map((guard) => client.get(guard.key)));
+          if (actual.some((value, index) => value !== guards[index]!.expectedValue)) {
+            await client.unwatch();
+            return ok(false);
+          }
+          const executed = await stageExpiringSet(client.multi(), key, value, opts).exec();
           if (executed === null) continue;
           const [commandError, written] = executed[0] ?? [];
           if (commandError !== null) throw commandError;
@@ -192,7 +228,7 @@ export const createIoredisRedisPort = (
 export type RedisClientFactory = (redisUrl: string, options: RedisOptions) => IoRedis;
 
 export const requireHitlRedisPort = (redis: RedisPort): HitlRedisPort => {
-  const missing = (["compareAndExpire", "setIfValue", "setNxIfPresent"] as const)
+  const missing = (["compareAndExpire", "setIfValue", "setIfValues", "setNxIfPresent"] as const)
     .filter((capability) => redis[capability] === undefined);
   if (missing.length > 0) {
     throw new Error(`hitl: Redis transaction capabilities unavailable: ${missing.join(", ")}`);

@@ -584,15 +584,6 @@ const createFileCheckpointerUnchecked = (
 };
 
 /**
- * Typed factory shell: converts the unchecked body's raw configuration
- * diagnostics into typed `FrameworkError` values before any rejection leaks —
- * configuration/runtime inspection never leaks raw.
- *
- * @throws {FrameworkError} `cache-error(createFileCheckpointer)` when
- * `directory` or the complete own-property options grammar cannot be parsed.
- */
-
-/**
  * Read, verify and parse every node entry under a run's `nodes/` directory.
  *
  * Extracted from `load`, which had dropped from orchestration altitude (gate
@@ -700,6 +691,13 @@ const collectNodeEntries = (args: {
   return ok({ nodes, corruptNodeAddresses });
 };
 
+/**
+ * Typed factory shell: converts the unchecked body's raw configuration
+ * diagnostics into typed `FrameworkError` values before any rejection leaks.
+ *
+ * @throws {FrameworkError} `cache-error(createFileCheckpointer)` when
+ * `directory` or the complete own-property options grammar cannot be parsed.
+ */
 export const createFileCheckpointer = (
   directory: string,
   opts?: FileCheckpointerOptions,

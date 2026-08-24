@@ -83,8 +83,8 @@ class FakeRedis {
     this.rec("setnx", args);
     return "setnxResult" in this.o ? this.o.setnxResult : 1;
   }
-  async watch(key: string): Promise<string> {
-    this.rec("watch", [key]);
+  async watch(...keys: string[]): Promise<string> {
+    this.rec("watch", keys);
     return "OK";
   }
   async unwatch(): Promise<string> {
@@ -353,15 +353,22 @@ describe("createRedisConnectivity — data port", () => {
     ]);
   });
 
-  it("clears WATCH after a command throw without allowing UNWATCH failure to replace it", async () => {
+  it("surfaces primary + UNWATCH cleanup failures and poisons later WATCH transactions", async () => {
     const fake = new FakeRedis({ throwOn: ["get", "unwatch"] });
+    const { bundle } = await wire(fake);
 
-    const result = await (await wire(fake)).bundle.redis.compareAndDelete("lease", "owner-a");
+    const first = await bundle.redis.compareAndDelete("lease", "owner-a");
+    const callsAfterFailure = [...fake.calls];
+    const second = await bundle.redis.compareAndDelete("another-lease", "owner-b");
 
-    expect(isErr(result)).toBe(true);
-    if (isErr(result) && result.error.kind === "redis-unavailable") {
-      expect(result.error.operation).toContain("get boom");
+    expect(isErr(first)).toBe(true);
+    if (isErr(first) && first.error.kind === "redis-unavailable") {
+      expect(first.error.operation).toContain("primary failure: get boom");
+      expect(first.error.operation).toContain("UNWATCH cleanup failure: unwatch boom");
+      expect(first.error.operation).toContain("optimistic transactions disabled");
     }
+    expect(second).toEqual(first);
+    expect(fake.calls).toEqual(callsAfterFailure);
     expect(fake.calls.map((call) => call.m)).toEqual(["watch", "get", "unwatch"]);
   });
 
@@ -420,6 +427,41 @@ describe("createRedisConnectivity — data port", () => {
     expect(rejected && isOk(rejected) && rejected.value).toBe(false);
     expect(await successor.get("checkpoint")).toBeNull();
     expect(successor.calls.some((c) => c.m === "multi.set")).toBe(false);
+  });
+
+  it("setIfValues requires every guard and supports millisecond execution-fence expiry", async () => {
+    const matching = new FakeRedis();
+    matching.seed("lease", "owner-a");
+    matching.seed("execution", "generation-1");
+    const written = await (await wire(matching)).bundle.redis.setIfValues?.(
+      [
+        { key: "lease", expectedValue: "owner-a" },
+        { key: "execution", expectedValue: "generation-1" },
+      ],
+      "checkpoint",
+      "next",
+      { expiresInMs: 5 },
+    );
+
+    expect(written && isOk(written) && written.value).toBe(true);
+    expect(matching.calls.find((call) => call.m === "watch")?.args).toEqual(["lease", "execution"]);
+    expect(matching.calls.find((call) => call.m === "multi.set")?.args).toEqual([
+      "checkpoint", "next", "PX", 5,
+    ]);
+
+    const expired = new FakeRedis();
+    expired.seed("lease", "owner-a");
+    const rejected = await (await wire(expired)).bundle.redis.setIfValues?.(
+      [
+        { key: "lease", expectedValue: "owner-a" },
+        { key: "execution", expectedValue: "generation-1" },
+      ],
+      "checkpoint",
+      "late",
+      { expiresInSec: 60 },
+    );
+    expect(rejected && isOk(rejected) && rejected.value).toBe(false);
+    expect(expired.calls.some((call) => call.m === "multi")).toBe(false);
   });
 
   it("setNxIfPresent distinguishes missing guards, creation, existing targets, and WATCH retries", async () => {

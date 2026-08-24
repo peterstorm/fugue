@@ -545,6 +545,11 @@ describe("POST /summarize", () => {
     expect(entries.some(({ level, args }) =>
       level === "warn" && String(args[0]).includes("cause=hard request deadline expired")
     )).toBe(true);
+
+    await Bun.sleep(20);
+    expect(entries.some(({ level, args }) =>
+      level === "error" && String(args[0]).includes("DAG failed after timeout")
+    )).toBe(true);
   });
 
   test("a non-abort failure settling before the deadline remains a logged 500", async () => {

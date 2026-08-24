@@ -69,10 +69,35 @@ type BudgetDecision =
 // Builders
 // ---------------------------------------------------------------------------
 
-const ZERO_USAGE: RunUsage = { tokensIn: 0, tokensOut: 0 };
+const ZERO_USAGE: RunUsage = Object.freeze({ tokensIn: 0, tokensOut: 0 });
+
+/** Runtime-read-only snapshot; no mutable `Map` methods escape the ADT. */
+const meterOf = (entries: ReadonlyMap<RunId, RunUsage>): LlmMeter => {
+  const snapshot = new Map(
+    Array.from(entries, ([runId, usage]) => [runId, Object.freeze({ ...usage })] as const),
+  );
+  let view: ReadonlyMap<RunId, RunUsage>;
+  const facade = {
+    get size(): number { return snapshot.size; },
+    get: (runId: RunId): RunUsage | undefined => snapshot.get(runId),
+    has: (runId: RunId): boolean => snapshot.has(runId),
+    entries: (): MapIterator<[RunId, RunUsage]> => snapshot.entries(),
+    keys: (): MapIterator<RunId> => snapshot.keys(),
+    values: (): MapIterator<RunUsage> => snapshot.values(),
+    [Symbol.iterator]: (): MapIterator<[RunId, RunUsage]> => snapshot[Symbol.iterator](),
+    forEach(
+      callback: (usage: RunUsage, runId: RunId, map: ReadonlyMap<RunId, RunUsage>) => void,
+      thisArg?: unknown,
+    ): void {
+      for (const [runId, usage] of snapshot) callback.call(thisArg, usage, runId, view);
+    },
+  } satisfies ReadonlyMap<RunId, RunUsage>;
+  view = Object.freeze(facade);
+  return Object.freeze({ usageByRun: view });
+};
 
 /** The empty meter — no runs have consumed any tokens yet. */
-export const emptyMeter = (): LlmMeter => ({ usageByRun: new Map() });
+export const emptyMeter = (): LlmMeter => meterOf(new Map());
 
 // ---------------------------------------------------------------------------
 // Queries (pure)
@@ -120,7 +145,7 @@ export const accumulate = (meter: LlmMeter, runId: RunId, delta: TokenDelta): Ll
   };
   const usageByRun = new Map(meter.usageByRun);
   usageByRun.set(runId, next);
-  return { usageByRun };
+  return meterOf(usageByRun);
 };
 
 /**

@@ -105,6 +105,15 @@ export type GitPort = {
  * Redis-like interface for cache/checkpoint operations.
  * Returns Result to make failures explicit — no try/catch required at call sites.
  */
+export type RedisExpiry =
+  | { readonly expiresInSec: number; readonly expiresInMs?: never }
+  | { readonly expiresInMs: number; readonly expiresInSec?: never };
+
+export type RedisValueGuard = {
+  readonly key: string;
+  readonly expectedValue: string;
+};
+
 export type RedisPort = {
   readonly get: (key: string) => Promise<Result<string | null, HostError>>;
   readonly set: (key: string, value: string, opts?: { expiresInSec?: number }) => Promise<Result<string | null, HostError>>;
@@ -179,7 +188,14 @@ export type RedisPort = {
     expectedValue: string,
     key: string,
     value: string,
-    opts: { expiresInSec: number },
+    opts: RedisExpiry,
+  ) => Promise<Result<boolean, HostError>>;
+  /** Atomically set a value only while every supplied guard still matches. */
+  readonly setIfValues?: (
+    guards: readonly [RedisValueGuard, ...RedisValueGuard[]],
+    key: string,
+    value: string,
+    opts: RedisExpiry,
   ) => Promise<Result<boolean, HostError>>;
   /**
    * Atomically verify that `guardKey` exists and create `key` only if absent.
@@ -203,6 +219,7 @@ export type RedisPort = {
 export type HitlRedisPort = RedisPort & {
   readonly compareAndExpire: NonNullable<RedisPort["compareAndExpire"]>;
   readonly setIfValue: NonNullable<RedisPort["setIfValue"]>;
+  readonly setIfValues: NonNullable<RedisPort["setIfValues"]>;
   readonly setNxIfPresent: NonNullable<RedisPort["setNxIfPresent"]>;
 };
 

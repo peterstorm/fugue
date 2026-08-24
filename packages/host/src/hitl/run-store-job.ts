@@ -47,7 +47,7 @@ import type { Result } from "@fuguejs/framework";
 import { ok, err } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
 import { internalInvariantViolated } from "../domain/host-error.js";
-import type { RunExecutionJob, RunLease, RunStorePort } from "./ports.js";
+import type { RunExecutionFence, RunExecutionJob, RunLease, RunStorePort } from "./ports.js";
 
 type Envelope = { state: DagPhase; context: DagMachineContextPersisted };
 type DagPhaseParserMap = {
@@ -213,14 +213,16 @@ export const makeRunStoreJobLike = (
   let envelope = initialEnvelope;
   let failure: HostError | null = null;
 
-  const jobLike: JobLike<DagPhase, unknown, DagMachineContextPersisted> = {
+  const jobLikeFor = (
+    fence: RunExecutionFence,
+  ): JobLike<DagPhase, unknown, DagMachineContextPersisted> => ({
     get data(): { state: DagPhase; context: DagMachineContextPersisted } {
       return envelopeSnapshot(toJson(envelope));
     },
     async updateData(d: { state: DagPhase; context: DagMachineContextPersisted }): Promise<void> {
       const serialized = toJson(d);
       const nextEnvelope = envelopeSnapshot(serialized);
-      const persisted = await runStore.saveCheckpoint(lease, serialized);
+      const persisted = await runStore.saveCheckpoint(lease, fence, serialized);
       if (!persisted.ok) {
         failure = persisted.error;
         // JobLike has no Result channel. Throw only to abort the kernel; the
@@ -241,7 +243,14 @@ export const makeRunStoreJobLike = (
       // is a tracked follow-up (ADR-0060 Consequences); it is not required for
       // suspend/resume correctness.
     },
-  };
+  });
 
-  return ok({ jobLike, checkpointFailure: () => failure });
+  return ok({
+    startSlice: async (timeoutMs) => {
+      failure = null;
+      const fence = await runStore.beginExecution(lease, timeoutMs);
+      return fence.ok ? ok(jobLikeFor(fence.value)) : fence;
+    },
+    checkpointFailure: () => failure,
+  });
 };

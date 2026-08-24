@@ -24,6 +24,7 @@ import type { HostError } from "../domain/host-error.js";
 import type { QueuedRunRecord, RunMetadata, RunRecord, RunStatusUpdate, PersistedIdentity } from "./types.js";
 
 const RUN_LEASE: unique symbol = Symbol("RunLease");
+const RUN_EXECUTION_FENCE: unique symbol = Symbol("RunExecutionFence");
 
 /**
  * Runtime-authenticated capability proving which queue worker owns a run's live
@@ -51,6 +52,33 @@ export type RunLeaseAuthority = Readonly<{
   issuer: RunLeaseIssuer;
   verifier: RunLeaseVerifier;
 }>;
+
+/** Opaque, run-bound capability authorizing checkpoint commits for one slice. */
+export type RunExecutionFence = Readonly<{
+  runId: RunId;
+  [RUN_EXECUTION_FENCE]: true;
+}>;
+
+export type RunExecutionFenceAuthority = Readonly<{
+  issue: (runId: RunId, token: string) => RunExecutionFence;
+  token: (fence: RunExecutionFence) => string | null;
+}>;
+
+export const createRunExecutionFenceAuthority = (): RunExecutionFenceAuthority => {
+  const tokens = new WeakMap<object, string>();
+  return Object.freeze({
+    issue: (runId, token) => {
+      if (token.length === 0) throw new RangeError("RunExecutionFence token must be non-empty");
+      const fence: RunExecutionFence = Object.freeze({
+        runId,
+        [RUN_EXECUTION_FENCE]: true as const,
+      });
+      tokens.set(fence, token);
+      return fence;
+    },
+    token: (fence) => tokens.get(fence) ?? null,
+  });
+};
 
 /**
  * Create one lease authority for a host composition. Queue code receives only
@@ -101,8 +129,17 @@ export interface RunStorePort {
   get(runId: RunId): Promise<Result<RunRecord | null, HostError>>;
   /** Fetch lifecycle/auth metadata without coupling status reads to checkpoint availability. */
   getMetadata(runId: RunId): Promise<Result<RunMetadata | null, HostError>>;
-  /** Persist a checkpoint only while this worker still owns the run lease. */
-  saveCheckpoint(lease: RunLease, checkpoint: string): Promise<Result<void, HostError>>;
+  /** Begin one deadline-bounded execution generation under the live run lease. */
+  beginExecution(
+    lease: RunLease,
+    timeoutMs: number,
+  ): Promise<Result<RunExecutionFence, HostError>>;
+  /** Persist only while both worker ownership and this execution generation remain live. */
+  saveCheckpoint(
+    lease: RunLease,
+    fence: RunExecutionFence,
+    checkpoint: string,
+  ): Promise<Result<void, HostError>>;
   /**
    * Update the run's lifecycle status only while `lease` is still owned. A
    * TERMINAL status (`completed`/`failed`)
@@ -204,9 +241,12 @@ export type RunExecOutcome =
   | { readonly kind: "suspended"; readonly nodeId: NodeId; readonly prompt: NonEmptyString }
   | { readonly kind: "failed"; readonly error: FrameworkError };
 
-/** Durable JobLike paired with the typed failure channel for its writes. */
+/** Durable job factory paired with the typed failure channel for its writes. */
 export interface RunExecutionJob {
-  readonly jobLike: JobLike<DagPhase, unknown, DagMachineContextPersisted>;
+  /** Arm a fresh durable deadline fence before exposing the slice's JobLike. */
+  readonly startSlice: (
+    timeoutMs: number,
+  ) => Promise<Result<JobLike<DagPhase, unknown, DagMachineContextPersisted>, HostError>>;
   readonly checkpointFailure: () => HostError | null;
 }
 

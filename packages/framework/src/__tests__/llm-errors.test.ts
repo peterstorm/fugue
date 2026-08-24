@@ -4,7 +4,6 @@ import {
   classifyLlmError,
   httpFailureToError,
   isAbort,
-  isRateLimit,
   isTimeoutError,
   truncateErrorBody,
 } from "../llm/llm-errors.js";
@@ -27,27 +26,6 @@ describe("isAbort", () => {
     expect(isAbort("not an error")).toBe(false);
     expect(isAbort(null)).toBe(false);
     expect(isAbort(undefined)).toBe(false);
-  });
-});
-
-describe("isRateLimit", () => {
-  test("returns true for status 429", () => {
-    const e = Object.assign(new Error("rate limited"), { status: 429 });
-    expect(isRateLimit(e)).toBe(true);
-  });
-
-  test("returns true for plain object with status 429", () => {
-    expect(isRateLimit({ status: 429 })).toBe(true);
-  });
-
-  test("returns false for other status codes", () => {
-    expect(isRateLimit({ status: 500 })).toBe(false);
-    expect(isRateLimit({ status: 200 })).toBe(false);
-  });
-
-  test("returns false for missing status", () => {
-    expect(isRateLimit(new Error("no status"))).toBe(false);
-    expect(isRateLimit({})).toBe(false);
   });
 });
 
@@ -380,7 +358,6 @@ describe("classifyLlmError", () => {
     }
 
     expect(isAbort(revoked.proxy)).toBe(false);
-    expect(isRateLimit(throwingStatus)).toBe(false);
     expect(isTimeoutError(revoked.proxy)).toBe(false);
   });
 

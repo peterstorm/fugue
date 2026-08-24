@@ -13,13 +13,14 @@
 import { describe, it, expect } from "bun:test";
 import { ok, err, toJson, fromJson, freshnessExecutionEpoch, nonEmptyString } from "@fuguejs/framework";
 import type { RunId, NodeId, DagPhase, DagMachineContextPersisted, Result } from "@fuguejs/framework";
-import { createRunLeaseAuthority } from "../ports.js";
+import { createRunExecutionFenceAuthority, createRunLeaseAuthority } from "../ports.js";
 import type { RunExecutionJob, RunStorePort } from "../ports.js";
 import type { RunRecord } from "../types.js";
 import { logWithoutThrowing } from "../diagnostic-logging.js";
 import { makeRunStoreJobLike } from "../run-store-job.js";
 
 const RUN = "run-1" as RunId;
+const EXECUTION_FENCES = createRunExecutionFenceAuthority();
 const LEASE = createRunLeaseAuthority().issuer.issue(
   RUN,
   "test-owner",
@@ -74,6 +75,12 @@ const expectJob = (r: Result<RunExecutionJob, unknown>): RunExecutionJob => {
   return r.value;
 };
 
+const startJob = async (job: RunExecutionJob) => {
+  const started = await job.startSlice(30_000);
+  if (!started.ok) throw new Error(`expected slice start, got ${started.error.kind}`);
+  return started.value;
+};
+
 /** A run store whose saveCheckpoint outcome is configurable; records the last persisted string. */
 const fakeStore = (saveResult: () => ReturnType<RunStorePort["saveCheckpoint"]>) => {
   const saved: string[] = [];
@@ -81,7 +88,10 @@ const fakeStore = (saveResult: () => ReturnType<RunStorePort["saveCheckpoint"]>)
     async create() { return ok({ kind: "created" }); },
     async get() { return ok(null as RunRecord | null); },
     async getMetadata() { return ok(null); },
-    async saveCheckpoint(_lease, checkpoint) { saved.push(checkpoint); return saveResult(); },
+    async beginExecution(lease) {
+      return ok(EXECUTION_FENCES.issue(lease.runId, "test-execution"));
+    },
+    async saveCheckpoint(_lease, _fence, checkpoint) { saved.push(checkpoint); return saveResult(); },
     async setStatus() { return ok(undefined); },
     async countActiveRuns() { return ok(0); },
     async listActiveRunIds() { return ok([]); },
@@ -90,15 +100,15 @@ const fakeStore = (saveResult: () => ReturnType<RunStorePort["saveCheckpoint"]>)
 };
 
 describe("makeRunStoreJobLike", () => {
-  it("exposes the initial checkpoint via the sync data getter", () => {
+  it("exposes the initial checkpoint via the sync data getter", async () => {
     const { port } = fakeStore(() => Promise.resolve(ok(undefined)));
-    const { jobLike } = expectJob(makeRunStoreJobLike(port, LEASE, initial));
+    const jobLike = await startJob(expectJob(makeRunStoreJobLike(port, LEASE, initial)));
     expect(jobLike.data).toEqual(fromJson(initial) as Envelope);
   });
 
   it("persists each updateData (serialized) and reflects it in data", async () => {
     const { port, saved } = fakeStore(() => Promise.resolve(ok(undefined)));
-    const { jobLike } = expectJob(makeRunStoreJobLike(port, LEASE, initial));
+    const jobLike = await startJob(expectJob(makeRunStoreJobLike(port, LEASE, initial)));
     const next = envelope("awaiting-human");
 
     await jobLike.updateData(next);
@@ -107,9 +117,9 @@ describe("makeRunStoreJobLike", () => {
     expect(jobLike.data).toEqual(next);
   });
 
-  it("returns detached checkpoint snapshots from data", () => {
+  it("returns detached checkpoint snapshots from data", async () => {
     const { port } = fakeStore(() => Promise.resolve(ok(undefined)));
-    const { jobLike } = expectJob(makeRunStoreJobLike(port, LEASE, initial));
+    const jobLike = await startJob(expectJob(makeRunStoreJobLike(port, LEASE, initial)));
     const exposed = jobLike.data as { state: { kind: string } };
 
     exposed.state.kind = "failed";
@@ -119,7 +129,7 @@ describe("makeRunStoreJobLike", () => {
 
   it("detaches the live checkpoint from the updateData caller after persistence", async () => {
     const { port } = fakeStore(() => Promise.resolve(ok(undefined)));
-    const { jobLike } = expectJob(makeRunStoreJobLike(port, LEASE, initial));
+    const jobLike = await startJob(expectJob(makeRunStoreJobLike(port, LEASE, initial)));
     const next = envelope("awaiting-human") as Envelope & { state: { kind: string } };
 
     await jobLike.updateData(next);
@@ -131,8 +141,9 @@ describe("makeRunStoreJobLike", () => {
   it("THROWS on a persist failure without advancing the local checkpoint", async () => {
     const { port } = fakeStore(() => Promise.resolve(err({ kind: "redis-unavailable", operation: "saveCheckpoint" })));
     const job = expectJob(makeRunStoreJobLike(port, LEASE, initial));
-    await expect(job.jobLike.updateData(envelope("awaiting-human"))).rejects.toThrow(/failed to persist checkpoint/);
-    expect(job.jobLike.data).toEqual(fromJson(initial) as Envelope);
+    const jobLike = await startJob(job);
+    await expect(jobLike.updateData(envelope("awaiting-human"))).rejects.toThrow(/failed to persist checkpoint/);
+    expect(jobLike.data).toEqual(fromJson(initial) as Envelope);
     expect(job.checkpointFailure()).toEqual({ kind: "redis-unavailable", operation: "saveCheckpoint" });
   });
 

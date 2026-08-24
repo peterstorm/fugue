@@ -194,8 +194,10 @@ const realExecutor = (dag: DagDef): RunExecutorPort => ({
   },
   async run(req: RunExecutionRequest): Promise<Result<RunExecOutcome, HostError>> {
     try {
+      const startedJob = await req.job.startSlice(30_000);
+      if (!startedJob.ok) return startedJob;
       const outcome = await runResumableDagJob<unknown, unknown>(dag, req.input, makeCtx(), {
-        jobLike: req.job.jobLike,
+        jobLike: startedJob.value,
         onHumanReview: req.onHumanReview,
         onDecisionConsumed: req.onDecisionConsumed,
       });

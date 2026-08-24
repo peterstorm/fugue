@@ -70,6 +70,11 @@ export const fakeRedis = (): { port: RedisConnectivityPort; redis: RedisPort } =
         store.set(key, value);
         return ok(true);
       },
+      setIfValues: async (guards, key, value) => {
+        if (guards.some((guard) => store.get(guard.key) !== guard.expectedValue)) return ok(false);
+        store.set(key, value);
+        return ok(true);
+      },
       setNxIfPresent: async (guard, key, value) => {
         if (!store.has(guard)) return ok("not-present" as const);
         if (store.has(key)) return ok("exists" as const);

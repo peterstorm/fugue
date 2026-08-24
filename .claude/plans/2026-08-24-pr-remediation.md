@@ -1,61 +1,55 @@
-# PR Remediation Plan — Adjudicated Standalone Review (round 49)
+# PR Remediation Plan — Adjudicated Standalone Review (round 50)
 
 **Branch:** `feat/f6-file-durable-runtime`
 
-**Review HEAD (frozen source):** `8d125a1a75991c6a69906f4da4fc9cc7857e40a1`
+**Review HEAD (frozen source):** `ec785e79a17e21816cdd3febe253efcccf32a5fe`
 
-**Exact scope:** the complete canonical `result.json.scope` array (all 500 paths frozen by the engine)
+**Exact scope:** the complete canonical `result.json.scope` array (all 503 paths frozen by the engine)
 
-**Review Run Directory:** `.claude/reviews/review-and-fix-runs/20260824T161536Z-01a0348e-review`
+**Review Run Directory:** `.claude/reviews/review-and-fix-runs/raf-20260824-170514-01a034bb-review`
 
-**Canonical result:** `<review-run>/result.json` (digest `ab94571708b864426f9a337fb86e035f3122ddca443e54d12389bf918f9df2fe`, 42,970 bytes)
+**Canonical result:** `<review-run>/result.json` (digest `1b843e88a13e54b99421157905c42058a190503688089255a7aa26bdb2739f29`, 42,767 bytes)
 
-**Adjudication:** 7 reviewers → 6 critical findings → registered 3-lens Refutation Panel (`reproduction`, `intent`, `security`) → **6 surviving / 0 refuted**; 8 advisories dispositioned independently below.
+**Adjudication:** 7 reviewers → 4 critical findings → registered 3-lens Refutation Panel (`reproduction`, `intent`, `security`) → **4 surviving / 0 refuted**; 11 advisories dispositioned independently below.
 
 The canonical `result.json` is the sole remediation authority. Findings, scope, and panel outcomes were not reconstructed by the parent.
 
 ## Mandatory surviving critical findings
 
-1. **`code-reviewer-1` — typed host timeout abort maps to HTTP 500**
-   `packages/host/src/http/handlers/run-dag.ts:290`
-   Classify a settled framework `aborted` result as the request-owned timeout when the host timeout sentinel fired, mark the circuit failure, and return the same typed HTTP 408 response as the thrown-abort path. Add a regression using the real `Result.err({ kind: "aborted" })` shape.
+1. **`code-reviewer-1` — in-flight HITL checkpoint writes outlive the deadline fence**
+   `packages/host/src/hitl/adapters/run-executor.ts:48`
+   Replace the pre-call-only Boolean fence with persistence-bound execution authorization. A timeout must revoke the execution generation at the durable commit seam, so an update admitted before the deadline cannot commit afterward. Preserve the hard slice bound and the existing run lease as the outer ownership fence. Add a deterministic delayed-write regression proving that a write started before timeout cannot alter the durable checkpoint after timeout terminalization.
 
-2. **`code-reviewer-2` — synchronous host timeout is cooperative-only**
-   `packages/host/src/http/handlers/run-dag.ts:269`
-   Race DAG execution against a hard settlement deadline in the HTTP imperative shell. On deadline, abort cooperatively, return 408, resolve the circuit permit, and release the concurrency token without awaiting an abort-insensitive execution promise. Add a never-settling executor regression proving bounded response and token release.
+2. **`silent-failure-hunter-1` — failed `UNWATCH` cleanup poisons a shared Redis connection silently**
+   `packages/host/src/adapters/redis-connectivity.ts:87`
+   Preserve both the primary transaction error and the cleanup failure in the typed `redis-unavailable` diagnostic, mark the optimistic-transaction capability poisoned, and reject later WATCH transactions without reusing uncertain connection state. Add regressions for combined diagnostics and fail-closed subsequent transactions.
 
-3. **`code-reviewer-3` — HITL execution slice can wedge its worker**
-   `packages/host/src/hitl/adapters/run-executor.ts:157`
-   Race the resumable kernel slice against its configured hard deadline, preserving cooperative abort while terminalizing a never-settling slice as a typed failed outcome. Fence the durable `JobLike` and post-checkpoint decision callback once the deadline expires so late kernel continuation cannot advance durable state or consume a decision. Add regressions for bounded settlement and late-write rejection.
+3. **`silent-failure-hunter-2` — shared hard-deadline helper swallows late rejections**
+   `packages/host/src/adapters/settle-before-deadline.ts:35`
+   Deepen the helper with explicit, non-throwing diagnostic callbacks for late operation rejection and timeout-cancellation failure. Thread structured run/DAG context from the host HTTP and HITL callers. Add regressions proving the original timeout outcome remains authoritative even when the late operation or diagnostic transport fails.
 
-4. **`code-reviewer-4` — kernel error conversion is partial over unknown throws**
-   `packages/framework/src/dag-runtime/run-dag-stateful.ts:278`
-   Replace direct `instanceof`, `cause`, `message`, and coercion operations with total probes plus `safeErrorMessage`. Preserve an attached failed `DagPhase` only when safely recoverable. Add throwing-`cause`, hostile coercion, and revoked-proxy regressions.
-
-5. **`silent-failure-hunter-1` — LLM error classification can throw**
-   `packages/framework/src/llm/llm-errors.ts:170`
-   Make abort override invocation, abort detection, timeout-cause inspection, HTTP-status probing, message rendering, and stack extraction total over arbitrary provider-thrown values. Reuse the established safe-error helpers and add direct hostile getter/proxy/coercion regressions.
-
-6. **`silent-failure-hunter-2` — duplicate evidence for partial kernel conversion**
-   `packages/framework/src/dag-runtime/run-dag-stateful.ts:278`
-   Covered by mandatory fix 4. Its dedicated regressions will prove that neither failed-state recovery nor fallback node-crash conversion can throw while handling the original failure.
+4. **`silent-failure-hunter-3` — customer-summary hard deadline swallows late DAG failures**
+   `apps/customer-summary/src/server.ts:131`
+   Apply the same explicit diagnostic policy to the app-local deadline shell, logging the late failure with customer/run context through `reportWithoutThrowing`. Add a route regression where the response is already 504 and the delayed DAG failure is still observable.
 
 ## Advisory dispositions
 
 ### Accepted
 
-- **`code-reviewer-5` — customer-summary timeout is cooperative-only.** Sound availability defect at the same request boundary and a complete in-scope fix is practical. Race `runDag` against the request deadline, abort cooperatively, and return 504 without awaiting an abort-insensitive source. Add a never-settling run regression.
-- **`silent-failure-hunter-3` — tool-name validation diagnostics can throw.** Sound total-boundary issue with a local fix. Reuse `safeErrorMessage` and add a hostile thrown-value regression.
-- **`pr-test-analyzer-1` — no setMeta-error/throwing-logger regression.** Production already uses `reportWithoutThrowing`; add the missing route regression proving a typed 503 survives logger failure.
-- **`pr-test-analyzer-2` — persisted `humanReviewPrompts` blank-value coverage.** The parser already uses `parseNonEmptyString`; add direct empty and whitespace persisted-context cases so the boundary invariant cannot regress.
-- **`type-design-analyzer-1` — write freshness extractors can be partially configured.** Sound illegal-state issue. Refine the `writes` side-effect variant into an ADT with either both extractors absent or both required, while retaining runtime validation for untyped/forged callers. Add compile-time rejection fixtures.
-- **`type-design-analyzer-2` — freshness-violation resource identity is duplicated.** Sound illegal-state issue. Remove the independently writable `resource` field and derive the identity from `conditionedOnWitness.resource`; update event construction and observer fixtures so drift is unrepresentable.
-- **`comment-analyzer-1` — historical “slow path” label contradicts O(1) behavior.** Rename the inline label to the actual `sinceMs` threshold branch.
-- **`code-simplifier-1` — nullable node-directory branch needlessly nests the scan.** Return the empty collection early when no node directory exists, leaving the read/parse loop at one altitude.
+- **`silent-failure-hunter-4` — timeout cancellation callback failures are invisible.** Sound and shares the critical deadline-helper seam. Route the caught callback failure through the new timeout-cancellation diagnostic without allowing it to replace hard settlement.
+- **`pr-test-analyzer-1` — no late `onDecisionConsumed` fence regression.** Sound safety gap. Add an abort-insensitive HITL gate continuation that reaches decision consumption after timeout and prove the callback is fenced.
+- **`type-design-analyzer-1` — `LlmMeter` exposes a runtime-mutable `Map`.** Sound immutability breach with a local fix. Return a frozen runtime `ReadonlyMap` facade from meter constructors/transitions and add a mutation-bypass regression.
+- **`comment-analyzer-1` — OAuth provider header is password-grant-only.** Correct the module description to cover generic form-encoded grants and optional resource-owner credentials.
+- **`comment-analyzer-2` — freshness corruption comment says “BOTH” methods.** Correct it to all three freshness-index methods.
+- **`comment-analyzer-3` — freshness clock comment omits `hasRecordedWrite`.** Name all TTL/read clock consumers and remove the stale two-site wording.
+- **`code-simplifier-1` — batch freshness check sorts unused witness events.** Keep the public signature but sort/scan write events directly; the witness argument remains forensic input compatibility and is explicitly unused.
+- **`code-simplifier-2` — exported `isRateLimit` is dead after shared status classification.** Remove the predicate, its stale commentary, and dedicated tests; retain behavior coverage through `classifyLlmError`.
+- **`code-simplifier-3` — repeated executor-owned non-terminal match arms.** Combine identical `ts-pattern` arms while leaving `retrying-hook` node attribution separate.
+- **`code-simplifier-4` — `createFileCheckpointer` JSDoc is orphaned.** Move the factory contract directly above the factory declaration.
 
 ### Deferred
 
-None.
+- **`type-design-analyzer-2` — `deregisteredAt` is an unbranded number.** The claim is sound, but a complete fix is not local: the timestamp crosses registry transition, Redis hydration/serialization, grace-window arithmetic, admin fixtures, and purge APIs. None of those paths is part of a surviving defect, and branding only the field would create casts rather than a parsed invariant. Defer to a bounded tenant-lifecycle timestamp migration that introduces one smart constructor and retypes every producer/consumer together.
 
 ### Dismissed
 
@@ -63,73 +57,82 @@ None.
 
 ## Refuted critical findings audit
 
-None. All six critical entries survived unanimously under reproduction, intent, and security. The authoritative panel outcomes and captured `refutation-slot:*` transcripts remain under the Review Run Directory.
+None. All four critical entries reached the panel threshold. `code-reviewer-1` was refuted by the reproduction lens because Redis WATCH serialization orders the current checkpoint and terminal metadata writes, but it was upheld by intent and security because authorization is still checked only before asynchronous persistence. The other three findings were upheld by all lenses. The authoritative panel outcomes and captured `refutation-slot:*` transcripts remain under the Review Run Directory.
 
 ## Planned files
 
 - `.claude/plans/2026-08-24-pr-remediation.md`
 - `CONTEXT.md`
-- `docs/adr/0025-freshness-witness-contract.md`
-- `docs/features.md`
+- `docs/adr/0060-hitl-suspend-resume-primitive.md`
 - `apps/customer-summary/src/server.ts`
 - `apps/customer-summary/src/__tests__/server.test.ts`
-- `packages/framework/src/llm/tool-use-loop.ts`
-- `packages/framework/src/__tests__/tool-use-loop.test.ts`
-- `packages/framework/src/__tests__/context-serialization-roundtrip.test.ts`
-- `packages/framework/src/types/side-effects.ts`
-- `packages/framework/src/__tests__/freshness-extraction-types.test.ts`
-- `packages/framework/src/types/events.ts`
-- `packages/framework/src/dag-runtime/freshness-emission.ts`
-- `packages/framework/src/__tests__/freshness-file-dag-integration.test.ts`
-- `packages/framework/src/__tests__/freshness-full-pipeline.test.ts`
-- `packages/framework/src/__tests__/freshness-witness-conflict-detected.test.ts`
-- `packages/framework/src/observer/foundry-event-mapping.test.ts`
-- `packages/framework/src/__tests__/observer-property.test.ts`
 - `packages/framework/src/dag-runtime/freshness-check.ts`
-- `packages/framework/src/file/checkpointer.ts`
-- `packages/host/src/http/handlers/run-dag.ts`
-- `packages/host/src/__tests__/handlers/run-dag.test.ts`
-- `packages/host/src/hitl/adapters/run-executor.ts`
-- `packages/host/src/hitl/adapters/__tests__/run-executor.test.ts`
-- `packages/host/src/adapters/settle-before-deadline.ts`
 - `packages/framework/src/dag-runtime/run-dag-stateful.ts`
-- `packages/framework/src/__tests__/dag-runtime-stateful.test.ts`
+- `packages/framework/src/file/checkpointer.ts`
+- `packages/framework/src/file/freshness-index.ts`
 - `packages/framework/src/llm/llm-errors.ts`
+- `packages/framework/src/__tests__/freshness-check.test.ts`
 - `packages/framework/src/__tests__/llm-errors.test.ts`
-
-Three remediation-owned paths are outside the frozen review scope and must be registered as support paths:
-
-- `docs/features.md`
-- `packages/framework/src/__tests__/llm-errors.test.ts`
+- `packages/host/src/ports.ts`
+- `packages/host/src/adapters/redis-connectivity.ts`
 - `packages/host/src/adapters/settle-before-deadline.ts`
+- `packages/host/src/adapters/__tests__/redis-connectivity.test.ts`
+- `packages/host/src/domain/llm-meter.ts`
+- `packages/host/src/__tests__/llm-meter.test.ts`
+- `packages/host/src/http/handlers/run-dag.ts`
+- `packages/host/src/__tests__/fixtures/host-boot-fakes.ts`
+- `packages/host/src/__tests__/handlers/run-dag.test.ts`
+- `packages/host/src/hitl/ports.ts`
+- `packages/host/src/hitl/run-store-job.ts`
+- `packages/host/src/hitl/adapters/run-executor.ts`
+- `packages/host/src/hitl/adapters/run-store.ts`
+- `packages/host/src/hitl/adapters/__tests__/redis-stores.test.ts`
+- `packages/host/src/hitl/adapters/__tests__/run-executor.test.ts`
+- `packages/host/src/hitl/adapters/__tests__/run-queue.test.ts`
+- `packages/host/src/hitl/__tests__/run-store-job.test.ts`
+- `packages/host/src/hitl/__tests__/service.test.ts`
+- `packages/http-auth/src/auth.ts`
 
-Every other planned path, including the plan, is inside the frozen review scope.
+All planned paths except one are inside the frozen review scope. The accepted `LlmMeter` mutation-bypass regression requires this remediation support path:
 
-## Baseline evidence
+- `packages/host/src/__tests__/llm-meter.test.ts`
 
-Before production edits, the focused 12-file gate passed **375 tests / 0 failures**. After implementation and the distill pass, the expanded 15-file gate passed **397 tests / 0 failures**. Final workspace validation passed **6,171 tests / 0 failures**, all package typechecks, shipped-document link checks, and `git diff --check`.
+The first remediation registration omitted it and blocked without staging; the superseding registration included it explicitly.
 
-## Validation
+## Validation evidence
+
+- Pre-production-edit focused baseline: **250 tests passed / 0 failed** across 9 files.
+- Post-implementation focused gate: **338 tests passed / 0 failed** across 11 files.
+- Workspace typecheck: all 12 workspace packages passed.
+- Workspace test: **6,174 tests passed / 0 failed** (plus the repository's environment-gated skips).
+- Shipped-document links and `git diff --check`: passed.
+
+## Validation commands
 
 Baseline and focused regression gate:
 
 ```bash
 bun test \
   apps/customer-summary/src/__tests__/server.test.ts \
-  packages/framework/src/__tests__/tool-use-loop.test.ts \
-  packages/framework/src/__tests__/context-serialization-roundtrip.test.ts \
-  packages/framework/src/__tests__/freshness-extraction-types.test.ts \
-  packages/framework/src/__tests__/freshness-emission.test.ts \
-  packages/framework/src/__tests__/observer-property.test.ts \
-  packages/framework/src/observer/foundry-event-mapping.test.ts \
-  packages/framework/src/__tests__/freshness-file-dag-integration.test.ts \
-  packages/framework/src/__tests__/freshness-full-pipeline.test.ts \
-  packages/framework/src/__tests__/freshness-witness-conflict-detected.test.ts \
-  packages/framework/src/__tests__/file-checkpointer.test.ts \
-  packages/framework/src/__tests__/dag-runtime-stateful.test.ts \
+  packages/framework/src/__tests__/freshness-check.test.ts \
   packages/framework/src/__tests__/llm-errors.test.ts \
+  packages/host/src/adapters/__tests__/redis-connectivity.test.ts \
+  packages/host/src/__tests__/llm-meter.test.ts \
   packages/host/src/__tests__/handlers/run-dag.test.ts \
-  packages/host/src/hitl/adapters/__tests__/run-executor.test.ts
+  packages/host/src/hitl/adapters/__tests__/redis-stores.test.ts \
+  packages/host/src/hitl/adapters/__tests__/run-executor.test.ts \
+  packages/host/src/hitl/adapters/__tests__/run-queue.test.ts \
+  packages/host/src/hitl/__tests__/run-store-job.test.ts \
+  packages/host/src/hitl/__tests__/service.test.ts
+```
+
+Focused typecheck:
+
+```bash
+bun run --filter @fuguejs/framework typecheck
+bun run --filter @fuguejs/host typecheck
+bun run --filter @fuguejs/http-auth typecheck
+bun run --filter @fuguejs/customer-summary typecheck
 ```
 
 Full validation before registered remediation:

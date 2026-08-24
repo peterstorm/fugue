@@ -103,10 +103,17 @@ type DeadlineResult<T> =
   | { readonly kind: "settled"; readonly value: T }
   | { readonly kind: "timed-out" };
 
+type DeadlineDiagnostics<T> = {
+  readonly onLateFulfillment: (value: T) => void;
+  readonly onLateRejection: (error: unknown) => void;
+  readonly onTimeoutCancellationFailure: (error: unknown) => void;
+};
+
 const settleBeforeDeadline = <T>(
   operation: PromiseLike<T>,
   timeoutMs: number,
   onTimeout: () => void,
+  diagnostics: DeadlineDiagnostics<T>,
 ): Promise<DeadlineResult<T>> =>
   new Promise((resolve, reject) => {
     let settled = false;
@@ -115,21 +122,27 @@ const settleBeforeDeadline = <T>(
       settled = true;
       try {
         onTimeout();
-      } catch {
-        // The hard response deadline does not depend on cancellation signaling.
+      } catch (error) {
+        reportWithoutThrowing(() => diagnostics.onTimeoutCancellationFailure(error));
       }
       resolve({ kind: "timed-out" });
     }, timeoutMs);
 
     void operation.then(
       (value) => {
-        if (settled) return;
+        if (settled) {
+          reportWithoutThrowing(() => diagnostics.onLateFulfillment(value));
+          return;
+        }
         settled = true;
         clearTimeout(timeoutId);
         resolve({ kind: "settled", value });
       },
       (error: unknown) => {
-        if (settled) return;
+        if (settled) {
+          reportWithoutThrowing(() => diagnostics.onLateRejection(error));
+          return;
+        }
         settled = true;
         clearTimeout(timeoutId);
         reject(error);
@@ -310,6 +323,21 @@ export const createApp = (deps: AppDeps): Hono => {
           runDag<{ customerId: string }, SummaryResponse>(dag, { customerId: customer_id }, ctx, runOpts),
           timeoutMs,
           () => abortController.abort("timeout"),
+          {
+            onLateFulfillment: (lateResult) => {
+              if (!lateResult.ok) {
+                log.error(
+                  `[/summarize] DAG failed after timeout for customer=${customer_id} run=${runId}: ${formatFrameworkError(lateResult.error)}`,
+                );
+              }
+            },
+            onLateRejection: (error) => log.error(
+              `[/summarize] DAG rejected after timeout for customer=${customer_id} run=${runId}: ${safeErrorMessage(error)}`,
+            ),
+            onTimeoutCancellationFailure: (error) => log.error(
+              `[/summarize] timeout cancellation failed for customer=${customer_id} run=${runId}: ${safeErrorMessage(error)}`,
+            ),
+          },
         );
         if (completion.kind === "timed-out") {
           return timeoutResponse("hard request deadline expired");

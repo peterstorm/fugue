@@ -135,9 +135,15 @@ composition-owned authority exposes separately narrowed issuer and verifier
 capabilities backed by a private WeakMap: the queue receives only issuance,
 stores receive only verification, and a fresh authority cannot recognize or
 reissue another authority's lease. The lease is threaded through `processRun`,
-the run-store-backed `JobLike`, and the executor. Checkpoint and status writes
-atomically compare the live lock token before committing, so an expired worker
-cannot overwrite a successor's checkpoint or terminal state.
+the run-store-backed `JobLike`, and the executor. Status writes atomically compare the live lock token before committing. Each
+execution slice additionally starts an opaque **Run Execution Fence**: Redis
+stores an unguessable generation token under a millisecond-TTL key, and every
+checkpoint transaction atomically compares both that token and the live Run
+Lease token before writing. A checkpoint call that began before the deadline
+but reaches its commit seam afterward therefore fails closed; a replacement
+slice publishes a fresh generation, so a stale in-flight write cannot overwrite
+its checkpoint. The in-memory adapter applies the same commit-time deadline
+verdict against its injected clock.
 
 Lease renewal returning false, returning a typed error, or throwing aborts the
 active node-context signal immediately and makes the queue job retry. The

@@ -248,16 +248,20 @@ const handleTerminalState = <O>(
       closeRootSpan(deps.rootSpan, { kind: "ok" });
       return ok({ kind: "suspended", nodeId: s.nodeId, prompt: s.prompt, output: s.output });
     })
-    .with({ kind: "pending" }, async (s) =>
-      unexpectedNonTerminal(deps.rootSpan, deps.emitRunEnd, s.kind, EXECUTOR_NODE_ID))
-    .with({ kind: "running" }, async (s) =>
-      unexpectedNonTerminal(deps.rootSpan, deps.emitRunEnd, s.kind, EXECUTOR_NODE_ID))
-    .with({ kind: "retrying" }, async (s) =>
-      unexpectedNonTerminal(deps.rootSpan, deps.emitRunEnd, s.kind, EXECUTOR_NODE_ID))
+    .with(
+      { kind: "pending" },
+      { kind: "running" },
+      { kind: "retrying" },
+      { kind: "awaiting-human" },
+      async (s) => unexpectedNonTerminal(
+        deps.rootSpan,
+        deps.emitRunEnd,
+        s.kind,
+        EXECUTOR_NODE_ID,
+      ),
+    )
     .with({ kind: "retrying-hook" }, async (s) =>
       unexpectedNonTerminal(deps.rootSpan, deps.emitRunEnd, s.kind, s.nodeId))
-    .with({ kind: "awaiting-human" }, async (s) =>
-      unexpectedNonTerminal(deps.rootSpan, deps.emitRunEnd, s.kind, EXECUTOR_NODE_ID))
     .exhaustive();
 
 // ---------------------------------------------------------------------------

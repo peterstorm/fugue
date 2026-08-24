@@ -64,6 +64,7 @@ const fakeRedis = (preset: Record<string, string> = {}) => {
     async compareAndDelete(k, expected) { calls.compareAndDelete.push({ key: k, expected }); if (m.get(k) !== expected) return ok(false); m.delete(k); return ok(true); },
     async compareAndExpire(k, expected, ttlSec) { calls.compareAndExpire.push({ key: k, expected, ttlSec }); return ok(m.get(k) === expected); },
     async setIfValue(guard, expected, key, value) { if (m.get(guard) !== expected) return ok(false); m.set(key, value); return ok(true); },
+    async setIfValues(guards, key, value) { if (guards.some((guard) => m.get(guard.key) !== guard.expectedValue)) return ok(false); m.set(key, value); return ok(true); },
     async setNxIfPresent(guard, key, value) { if (!m.has(guard)) return ok("not-present"); if (m.has(key)) return ok("exists"); m.set(key, value); return ok("created"); },
     async sAdd() { return ok(1); },
     async sRem() { return ok(1); },

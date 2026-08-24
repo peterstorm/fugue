@@ -121,13 +121,6 @@ export const validateTemperature = (
     : null;
 
 /**
- * Duck-typed 429 detection. The Anthropic SDK throws `RateLimitError` with
- * `.status === 429`; duck-typing avoids a class-hierarchy dependency.
- */
-export const isRateLimit = (e: unknown): boolean =>
-  probeProperty(e, "status") === 429;
-
-/**
  * Detect a timeout-induced error. Uses standard `Error.cause` (set to
  * `"timeout"` by `createTimeoutSignal` / `postResponses`).
  */
@@ -189,10 +182,8 @@ export const classifyLlmError = (
   // TRANSIENT_HTTP_STATUSES policy applies — 429 (rate limit), 408, and 409
   // classify as `transient`, any other 4xx as a deterministic non-retriable
   // client error, and everything else (5xx) as a retriable server-side crash —
-  // every arm carrying the typed `httpStatus`. (The 429 case was formerly
-  // a dedicated `isRateLimit` arm; it is fully subsumed here — same kind,
-  // message, and httpStatus — so the redundant arm and its `429` literal are
-  // gone. `isRateLimit` itself stays exported as a standalone predicate.)
+  // every arm carrying the typed `httpStatus`; the former dedicated 429
+  // predicate is fully subsumed by this shared status policy.
   const status = probeProperty(e, "status");
   if (typeof status === "number") {
     // Same shared `classifyHttpStatus` policy as httpFailureToError — 429/408/409

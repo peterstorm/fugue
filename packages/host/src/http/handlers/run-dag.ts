@@ -11,7 +11,7 @@
 
 import type { Context } from "hono";
 import type { Result, NodeContext, FrameworkError, InvocationOrigin } from "@fuguejs/framework";
-import { formatFrameworkError, tryDagId } from "@fuguejs/framework";
+import { formatFrameworkError, safeErrorMessage, tryDagId } from "@fuguejs/framework";
 import type { DagDef } from "@fuguejs/framework";
 import type { HostEnv } from "../env.js";
 import type { NodeContextForDag } from "../../domain/run-context.js";
@@ -30,6 +30,8 @@ import type { CircuitPort, CircuitConfig } from "../../domain/circuit-guard.js";
 import { classifyFrameworkError } from "../../domain/framework-error-http.js";
 import type { HitlRunService } from "../../hitl/service.js";
 import { settleBeforeDeadline } from "../../adapters/settle-before-deadline.js";
+import { logWithoutThrowing } from "../../hitl/diagnostic-logging.js";
+import type { LogPort } from "../../ports.js";
 
 // ---------------------------------------------------------------------------
 // Types for the handler's dependencies (injectable for testing)
@@ -73,6 +75,8 @@ export interface RunDagDeps {
     origin: InvocationOrigin | undefined,
   ) => Promise<Result<O, FrameworkError>>;
   readonly clock: () => number;
+  /** Optional structured diagnostics for failures settling after a hard deadline. */
+  readonly logger?: LogPort;
 }
 
 /**
@@ -280,6 +284,30 @@ export const createRunDagHandler = (
           deps.executeDag(registered.dag, parseResult.data, ctx, origin),
           timeoutMs,
           () => controller.abort(HOST_TIMEOUT),
+          {
+            onLateFulfillment: (lateResult) => {
+              if (!lateResult.ok) {
+                logWithoutThrowing(
+                  deps.logger,
+                  "error",
+                  "host: DAG execution failed after request deadline",
+                  { dagId, runId: ctx.runId, error: formatFrameworkError(lateResult.error) },
+                );
+              }
+            },
+            onLateRejection: (error) => logWithoutThrowing(
+              deps.logger,
+              "error",
+              "host: DAG execution rejected after request deadline",
+              { dagId, runId: ctx.runId, error: safeErrorMessage(error) },
+            ),
+            onTimeoutCancellationFailure: (error) => logWithoutThrowing(
+              deps.logger,
+              "error",
+              "host: request timeout cancellation failed",
+              { dagId, runId: ctx.runId, error: safeErrorMessage(error) },
+            ),
+          },
         );
         if (completion.kind === "timed-out") return timeoutResponse();
 

@@ -18,7 +18,7 @@ import {
 } from "../run-store.js";
 import { createRedisDecisionStore } from "../decision-store.js";
 import { createRunLeaseAuthority } from "../../ports.js";
-import type { RunLease } from "../../ports.js";
+import type { RunLease, RunStorePort } from "../../ports.js";
 
 /** Build a `TenantId` for a test from a known-good literal via the canonical constructor. */
 const mkTenant = (s: string): TenantId => {
@@ -75,6 +75,12 @@ const fakeRedis = (): RecordingRedis => {
       m.set(key, value);
       return ok(true);
     },
+    async setIfValues(guards, key, value, opts): Promise<Result<boolean, HostError>> {
+      if (guards.some((guard) => m.get(guard.key) !== guard.expectedValue)) return ok(false);
+      setOpts.set(key, opts);
+      m.set(key, value);
+      return ok(true);
+    },
     async setNxIfPresent(guard, key, value, opts): Promise<Result<"not-present" | "created" | "exists", HostError>> {
       if (!m.has(guard)) return ok("not-present");
       if (m.has(key)) return ok("exists");
@@ -103,6 +109,7 @@ const seedableRedis = (): { redis: HitlRedisPort; seed: (k: string, v: string) =
     async compareAndDelete(k, expected) { if (m.get(k) !== expected) return ok(false); m.delete(k); return ok(true); },
     async compareAndExpire(k, expected) { return ok(m.get(k) === expected); },
     async setIfValue(guard, expected, key, value) { if (m.get(guard) !== expected) return ok(false); m.set(key, value); return ok(true); },
+    async setIfValues(guards, key, value) { if (guards.some((guard) => m.get(guard.key) !== guard.expectedValue)) return ok(false); m.set(key, value); return ok(true); },
     async setNxIfPresent(guard, key, value) { if (!m.has(guard)) return ok("not-present"); if (m.has(key)) return ok("exists"); m.set(key, value); return ok("created"); },
     async sAdd() { return ok(1); },
     async sRem() { return ok(1); },
@@ -126,6 +133,15 @@ const acquireLease = async (
   const acquired = await redis.setNx(`fugue:${tenant}:hitl:lock:${runId}`, ownerToken, { expiresInSec: 60 });
   if (!acquired.ok || !acquired.value) throw new Error(`failed to acquire test lease for ${runId}`);
   return leaseAuthority.issuer.issue(runId, ownerToken, new AbortController().signal);
+};
+
+const saveCheckpoint = async (
+  store: Pick<RunStorePort, "beginExecution" | "saveCheckpoint">,
+  lease: RunLease,
+  checkpoint: string,
+): ReturnType<RunStorePort["saveCheckpoint"]> => {
+  const fence = await store.beginExecution(lease, 30_000);
+  return fence.ok ? store.saveCheckpoint(lease, fence.value, checkpoint) : fence;
 };
 
 const record = (overrides: Partial<QueuedRunRecord> = {}): QueuedRunRecord => ({
@@ -194,7 +210,7 @@ describe("InMemoryRunStore — lease parity", () => {
     const successor = leases.acquire(run.runId, "successor-owner");
     expect((await store.setStatus(successor, { kind: "running" })).ok).toBe(true);
 
-    expect(await store.saveCheckpoint(stale, "stale-checkpoint")).toEqual(
+    expect(await saveCheckpoint(store, stale, "stale-checkpoint")).toEqual(
       err({ kind: "run-lease-lost", runId: run.runId }),
     );
     expect(await store.setStatus(stale, { kind: "completed", output: "stale" })).toEqual(
@@ -205,6 +221,26 @@ describe("InMemoryRunStore — lease parity", () => {
     const persisted = await store.get(run.runId);
     expect(persisted.ok && persisted.value?.checkpoint).toBe(run.checkpoint);
     expect(persisted.ok && persisted.value?.status).toEqual({ kind: "completed", output: "successor" });
+  });
+});
+
+describe("InMemoryRunStore — execution deadline fence", () => {
+  it("rejects a checkpoint whose execution generation expires before commit", async () => {
+    let now = 100;
+    const leases = createInMemoryRunLeaseAuthority();
+    const store = createInMemoryRunStore(leases, () => now);
+    const run = record();
+    await store.create(run);
+    const lease = leases.acquire(run.runId);
+    const fence = await store.beginExecution(lease, 5);
+    if (!fence.ok) throw new Error("failed to arm execution fence");
+
+    now = 106;
+    expect(await store.saveCheckpoint(lease, fence.value, "late-checkpoint")).toEqual(
+      err({ kind: "run-lease-lost", runId: run.runId }),
+    );
+    const persisted = await store.get(run.runId);
+    expect(persisted.ok && persisted.value?.checkpoint).toBe(run.checkpoint);
   });
 });
 
@@ -304,7 +340,7 @@ describe("RedisRunStore", () => {
     await store.create(r);
     const lease = await acquireLease(redis, r.runId);
 
-    await store.saveCheckpoint(lease, '{"state":{"kind":"suspended"}}');
+    await saveCheckpoint(store, lease, '{"state":{"kind":"suspended"}}');
     expect(redis.setOpts.get("fugue:tenant-a:hitl:ckpt:run-1")).toEqual({ expiresInSec: 7 });
 
     await store.setStatus(lease, { kind: "running" });
@@ -321,7 +357,7 @@ describe("RedisRunStore", () => {
     await store.setStatus(stale, { kind: "running" });
     await redis.set(`fugue:${TENANT}:hitl:lock:${r.runId}`, "successor-owner", { expiresInSec: 60 });
 
-    const checkpoint = await store.saveCheckpoint(stale, '{"state":{"kind":"succeeded"}}');
+    const checkpoint = await saveCheckpoint(store, stale, '{"state":{"kind":"succeeded"}}');
     const terminal = await store.setStatus(stale, { kind: "completed", output: "stale" });
 
     expect(checkpoint).toEqual(err({ kind: "run-lease-lost", runId: r.runId }));
@@ -354,7 +390,7 @@ describe("RedisRunStore", () => {
     await store.create(r);
     const lease = await acquireLease(redis, r.runId);
 
-    await store.saveCheckpoint(lease, '{"state":{"kind":"suspended"}}');
+    await saveCheckpoint(store, lease, '{"state":{"kind":"suspended"}}');
     await store.setStatus(lease, { kind: "running" });
     await store.setStatus(lease, { kind: "suspended", nodeId: "review" as NodeId, prompt: nonEmptyString("ok?") });
 
@@ -760,6 +796,7 @@ const sharedRedis = (): HitlRedisPort & { readonly _keys: ReadonlyMap<string, st
     async compareAndDelete(k, expected) { if (m.get(k) !== expected) return ok(false); m.delete(k); return ok(true); },
     async compareAndExpire(k, expected) { return ok(m.get(k) === expected); },
     async setIfValue(guard, expected, key, value) { if (m.get(guard) !== expected) return ok(false); m.set(key, value); return ok(true); },
+    async setIfValues(guards, key, value) { if (guards.some((guard) => m.get(guard.key) !== guard.expectedValue)) return ok(false); m.set(key, value); return ok(true); },
     async setNxIfPresent(guard, key, value) { if (!m.has(guard)) return ok("not-present"); if (m.has(key)) return ok("exists"); m.set(key, value); return ok("created"); },
     async sAdd() { return ok(1); },
     async sRem() { return ok(1); },
@@ -795,7 +832,7 @@ describe("HITL stores — cross-tenant isolation (SECURITY: AD-4 / FR-013 / SC-0
 
     // A mutation in one tenant is invisible to the other.
     const leaseA = await acquireLease(redis, recA.runId, TENANT);
-    await a.saveCheckpoint(leaseA, '{"state":{"kind":"A-edited"}}');
+    await saveCheckpoint(a, leaseA, '{"state":{"kind":"A-edited"}}');
     const stillB = await b.get(recB.runId);
     expect(stillB.ok && stillB.value?.checkpoint).toBe('{"state":{"kind":"B"}}');
 
@@ -880,6 +917,7 @@ const setBackedRedis = () => {
     async compareAndDelete(k, expected) { if (kv.get(k) !== expected) return ok(false); kv.delete(k); return ok(true); },
     async compareAndExpire(k, expected) { return ok(kv.get(k) === expected); },
     async setIfValue(guard, expected, key, value) { if (kv.get(guard) !== expected) return ok(false); kv.set(key, value); return ok(true); },
+    async setIfValues(guards, key, value) { if (guards.some((guard) => kv.get(guard.key) !== guard.expectedValue)) return ok(false); kv.set(key, value); return ok(true); },
     async setNxIfPresent(guard, key, value) { if (!kv.has(guard)) return ok("not-present"); if (kv.has(key)) return ok("exists"); kv.set(key, value); return ok("created"); },
     async sAdd(k, m) { const s = sets.get(k) ?? new Set<string>(); const had = s.has(m); s.add(m); sets.set(k, s); return ok(had ? 0 : 1); },
     async sRem(k, m) { const s = sets.get(k); if (!s || !s.has(m)) return ok(0); s.delete(m); if (s.size === 0) sets.delete(k); return ok(1); },

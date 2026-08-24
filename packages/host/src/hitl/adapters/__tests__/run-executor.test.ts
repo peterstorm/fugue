@@ -39,6 +39,7 @@ import type { RedisPort, SharedInfra } from "../../../ports.js";
 import type { RegisteredDag } from "../../../domain/registry.js";
 import { tryRunTimestampMs } from "../../types.js";
 import type { PersistedIdentity, QueuedRunRecord, RunTimestampMs } from "../../types.js";
+import type { RunExecutionJob } from "../../ports.js";
 import { makeRunStoreJobLike } from "../../run-store-job.js";
 import { createInMemoryRunLeaseAuthority, createInMemoryRunStore } from "../run-store.js";
 import { createRunExecutor } from "../run-executor.js";
@@ -122,7 +123,14 @@ const timestamp = (value: number): RunTimestampMs => {
 };
 
 /** Seed a real checkpoint for `dag`+`input` and wrap it in a run-store-backed jobLike. */
-const seedJobLike = async (dag: DagDef, input: unknown, failCheckpoint = false) => {
+const seedJobLike = async (
+  dag: DagDef,
+  input: unknown,
+  opts: {
+    readonly failCheckpoint?: boolean;
+    readonly beforeCheckpointCommit?: () => Promise<void>;
+  } = {},
+) => {
   const compiled = compileDagToMachine(dag, input);
   if (!compiled.ok) throw new Error("compile failed");
   const checkpoint = toJson({
@@ -144,15 +152,26 @@ const seedJobLike = async (dag: DagDef, input: unknown, failCheckpoint = false) 
   };
   await store.create(record);
   const lease = leases.acquire(record.runId, "test-owner");
-  const runStore = failCheckpoint
+  const runStore = opts.failCheckpoint
     ? { ...store, saveCheckpoint: async () => err({ kind: "redis-unavailable" as const, operation: "saveCheckpoint" }) }
-    : store;
+    : opts.beforeCheckpointCommit !== undefined
+      ? {
+          ...store,
+          saveCheckpoint: async (...args: Parameters<typeof store.saveCheckpoint>) => {
+            await opts.beforeCheckpointCommit?.();
+            return store.saveCheckpoint(...args);
+          },
+        }
+      : store;
   const jl = makeRunStoreJobLike(runStore, lease, checkpoint);
   if (!jl.ok) throw new Error("jobLike build failed");
-  return jl.value;
+  return {
+    ...jl.value,
+    persistedCheckpoint: () => store._runs.get(record.runId)?.checkpoint ?? "",
+  };
 };
 
-const runReq = (dag: DagDef, jobLike: Awaited<ReturnType<typeof seedJobLike>>, input: unknown) => ({
+const runReq = (dag: DagDef, jobLike: RunExecutionJob, input: unknown) => ({
   runId: "run-1" as never,
   dagId: dag.id as DagId,
   input,
@@ -249,7 +268,7 @@ describe("createRunExecutor — channel split (err vs failed)", () => {
     const dag = singleNodeDag((async () => ok("done")) as never);
     const reg = registered(dag);
     const exec = createRunExecutor({ sharedInfra: sharedInfra(), getRegisteredDag: () => reg, agentClientMap: { "exec-dag": "fugue-agent-exec" } });
-    const jobLike = await seedJobLike(dag, null, true);
+    const jobLike = await seedJobLike(dag, null, { failCheckpoint: true });
 
     const result = await exec.run(runReq(dag, jobLike, null));
 
@@ -514,9 +533,93 @@ describe("createRunExecutor — slice timeout (AbortController wiring)", () => {
     if (result.ok && result.value.kind === "failed") {
       expect(result.value.error.kind).toBe("aborted");
     }
-    const checkpointAtTimeout = toJson(job.jobLike.data);
+    const checkpointAtTimeout = job.persistedCheckpoint();
     await Bun.sleep(60);
-    expect(toJson(job.jobLike.data)).toBe(checkpointAtTimeout);
+    expect(job.persistedCheckpoint()).toBe(checkpointAtTimeout);
+  });
+
+  it("rejects a checkpoint write that started before but reaches commit after the deadline", async () => {
+    const dag = singleNodeDag((async () => ok("done")) as never);
+    const reg = registered(dag, 5);
+    let markWriteStarted!: () => void;
+    let releaseWrite!: () => void;
+    const writeStarted = new Promise<void>((resolve) => { markWriteStarted = resolve; });
+    const writeBlocked = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    const job = await seedJobLike(dag, null, {
+      beforeCheckpointCommit: async () => {
+        markWriteStarted();
+        await writeBlocked;
+      },
+    });
+    const exec = createRunExecutor({
+      sharedInfra: sharedInfra(),
+      getRegisteredDag: () => reg,
+      agentClientMap: { "exec-dag": "fugue-agent-exec" },
+    });
+    const checkpointBefore = job.persistedCheckpoint();
+
+    const execution = exec.run(runReq(dag, job, null));
+    await writeStarted;
+    const result = await execution;
+    expect(result.ok && result.value.kind).toBe("failed");
+
+    releaseWrite();
+    await Bun.sleep(20);
+    expect(job.persistedCheckpoint()).toBe(checkpointBefore);
+  });
+
+  it("does not consume a decision when its post-gate checkpoint reaches commit after timeout", async () => {
+    const dag = defineDag({
+      id: "exec-dag",
+      nodes: {
+        only: makeNode("only", {
+          humanReview: { prompt: "Approve?" } as never,
+          run: (async () => ok("reviewed")) as never,
+        }),
+      },
+      edges: [{ from: DAG_INPUT, to: "only" }],
+      outputNodeId: "only",
+    });
+    let blockCheckpoint = false;
+    let markWriteStarted!: () => void;
+    let releaseWrite!: () => void;
+    const writeStarted = new Promise<void>((resolve) => { markWriteStarted = resolve; });
+    const writeBlocked = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    const job = await seedJobLike(dag, null, {
+      beforeCheckpointCommit: async () => {
+        if (!blockCheckpoint) return;
+        markWriteStarted();
+        await writeBlocked;
+      },
+    });
+    let live = registered(dag, 60_000);
+    const exec = createRunExecutor({
+      sharedInfra: sharedInfra(),
+      getRegisteredDag: () => live,
+      agentClientMap: { "exec-dag": "fugue-agent-exec" },
+    });
+
+    const parked = await exec.run({
+      ...runReq(dag, job, null),
+      onHumanReview: async () => ({ kind: "pending" }),
+    });
+    expect(parked.ok && parked.value.kind).toBe("suspended");
+
+    live = registered(dag, 5);
+    blockCheckpoint = true;
+    let consumed = 0;
+    const resumed = exec.run({
+      ...runReq(dag, job, null),
+      onHumanReview: async () => ({ kind: "approve" }),
+      onDecisionConsumed: async () => { consumed += 1; },
+    });
+    await writeStarted;
+    const timedOut = await resumed;
+    expect(timedOut.ok && timedOut.value.kind).toBe("failed");
+
+    releaseWrite();
+    await Bun.sleep(20);
+    expect(consumed).toBe(0);
   });
 
   it("aborts the node context immediately when the queue lease signal aborts", async () => {

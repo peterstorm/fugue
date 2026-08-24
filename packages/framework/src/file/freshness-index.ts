@@ -23,11 +23,11 @@
 // The resource is intentionally unbounded by the port and is never a path
 // component: only its sha256 digest reaches the filename. Persisted bytes pass
 // through a strict singleton codec and a digest/content resource check.
-// Corrupt singletons fail BOTH port methods closed (typed cache-error naming
+// Corrupt singletons fail all three port methods closed (typed cache-error naming
 // the corrupt record — parity with the Redis twin's undecodable-member
 // verdict, ADR-0025); logger, filesystem, clock, and hostile runtime-accessor
 // failures become typed freshness cache-errors. No raw exception crosses
-// either port method.
+// any port method.
 //
 // Symlink policy — a DELIBERATE divergence from the file checkpointer: the
 // digest-addressed singletons are read with plain `readFileSync`, which
@@ -202,16 +202,12 @@ const createFileFreshnessIndexUnchecked = (
   const now = parseFileFactoryClock(opts, allowTestHooks ? ["atomicWriteFileHooks"] : []);
 
   /**
-   * Clock read + representability gate, shared by `recordWrite` (write
-   * stamp) and `findConflict` (lazy TTL evaluation). Both rejections are
+   * Clock read + representability gate shared by the write stamp and both
+   * lazy-TTL queries (`hasRecordedWrite` / `findConflict`). Rejections are
    * code-constructed and deterministic — a throwing or non-finite injected
-   * clock fails identically on every retry — so both are pinned
-   * "permanent". The checkpointer backends consolidate the same pair the
-   * same way (file/checkpointer.ts `readClock`, checkpoint/checkpointer.ts
-   * `readClock`); this module keeps that same guard shape for its own two
-   * clock sites (`recordWrite`, `findConflict`) — the shared invariant is
-   * the guard shape, not a site count, which is what keeps this comment
-   * from silently drifting when clock sites are added or removed.
+   * clock fails identically on every retry — so they are pinned "permanent".
+   * The checkpointer backends consolidate the same guard shape in their own
+   * `readClock` helpers; the invariant is the guard shape, not a site count.
    */
   const readClock = (
     operation:

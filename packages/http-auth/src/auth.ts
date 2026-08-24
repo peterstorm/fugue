@@ -1,8 +1,10 @@
 /**
  * Generic OAuth2-style token provider for `@fuguejs/http-auth`.
  *
- * Mints a single boot-scoped bearer token via an `application/x-www-form-urlencoded`
- * password/operator grant and caches it. The token is shared across every request;
+ * Mints a single boot-scoped bearer token via an OAuth2-style,
+ * `application/x-www-form-urlencoded` grant and caches it. Resource-owner
+ * credentials are optional, so two-legged `client_credentials` is supported.
+ * The token is shared across every request;
  * it is minted lazily on first use, refreshed when absent or expired, and
  * invalidated on a `401` so the next `get()` re-mints.
  *

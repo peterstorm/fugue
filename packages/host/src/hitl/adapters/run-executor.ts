@@ -154,7 +154,9 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
           throw new Error("HITL execution slice attempted durable work after its deadline");
         }
       };
-      const fencedJob = deadlineFencedJob(req.job.jobLike, assertExecutionAuthorized);
+      const startedJob = await req.job.startSlice(registered.config.timeout);
+      if (!startedJob.ok) return err(startedJob.error);
+      const fencedJob = deadlineFencedJob(startedJob.value, assertExecutionAuthorized);
 
       // `setup` = context build (host wiring), `execution` = the kernel slice.
       // Both settle as the `failed` outcome below, but a setup fault is a
@@ -204,6 +206,26 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
           () => {
             executionAuthorized = false;
             controller.abort(SLICE_TIMEOUT);
+          },
+          {
+            onLateFulfillment: (outcome) => logWithoutThrowing(
+              logger,
+              "error",
+              "hitl: run slice settled after its deadline",
+              { runId: req.runId, dagId: req.dagId, outcome: outcome.kind },
+            ),
+            onLateRejection: (error) => logWithoutThrowing(
+              logger,
+              "error",
+              "hitl: run slice rejected after its deadline",
+              { runId: req.runId, dagId: req.dagId, error: safeErrorMessage(error) },
+            ),
+            onTimeoutCancellationFailure: (error) => logWithoutThrowing(
+              logger,
+              "error",
+              "hitl: run slice timeout cancellation failed",
+              { runId: req.runId, dagId: req.dagId, error: safeErrorMessage(error) },
+            ),
           },
         );
         if (completion.kind === "timed-out") {
