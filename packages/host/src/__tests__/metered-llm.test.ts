@@ -701,3 +701,95 @@ describe("metered-llm: a THROWING inner client releases its reservation and is l
     expect(metered_log?.data?.cumulative).toBe(15);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Prompt-cache split on the structured log lines
+//
+// The cache figures are why two runs with identical token totals can differ by
+// an order of magnitude in spend, so an operator reading `llm.metered` needs
+// them. They are also the fields most likely to be silently dropped: they were
+// added to two separate log calls, and nothing else asserts either one.
+// ---------------------------------------------------------------------------
+
+/** An inner client whose successful response carries a provider cache split. */
+const cachingInner = (usage: {
+  tokensIn: number;
+  tokensOut: number;
+  cacheWriteTokens: number;
+  cacheReadTokens: number;
+}): LlmClient => ({
+  sendStructured: async <O>() =>
+    ok({ output: {} as O, ...usage, rawText: "" }) as Result<LlmResponse<O>, FrameworkError>,
+  sendWithTools: async <O>() =>
+    ok({ output: {} as O, ...usage, rawText: "" }) as Result<LlmResponse<O>, FrameworkError>,
+});
+
+describe("metered-llm: prompt-cache split on log lines", () => {
+  const cachedUsage = {
+    tokensIn: 1000,
+    tokensOut: 50,
+    cacheWriteTokens: 200,
+    cacheReadTokens: 700,
+  };
+
+  it("carries the cache split on the llm.metered success line", async () => {
+    const { logger, logs } = collectLogs();
+    const metered = createMeteredLlm(cachingInner(cachedUsage), { dagId, runId, logger });
+
+    await metered.sendStructured(structuredReq(nodeA));
+
+    const log = logs.find((l) => l.msg === "llm.metered");
+    expect(log).toBeDefined();
+    expect(log?.data?.cacheWriteTokens).toBe(200);
+    expect(log?.data?.cacheReadTokens).toBe(700);
+    // `tokensIn` stays the INCLUSIVE prompt total, so the cumulative a budget
+    // reads is unchanged by the split.
+    expect(log?.data?.tokensIn).toBe(1000);
+    expect(log?.data?.cumulative).toBe(1050);
+  });
+
+  it("reports zeroes rather than omitting the fields for an uncached call", async () => {
+    const { inner } = fakeInner(100, 50);
+    const { logger, logs } = collectLogs();
+    const metered = createMeteredLlm(inner, { dagId, runId, logger });
+
+    await metered.sendStructured(structuredReq(nodeA));
+
+    const log = logs.find((l) => l.msg === "llm.metered");
+    expect(log?.data?.cacheWriteTokens).toBe(0);
+    expect(log?.data?.cacheReadTokens).toBe(0);
+  });
+
+  it("carries the cache split on the llm.call-failed partial-usage line", async () => {
+    const failing: LlmClient = {
+      sendStructured: async (req) =>
+        err({
+          kind: "node-crash",
+          nodeId: req.nodeId,
+          message: "iteration limit",
+          retriability: "non-retriable",
+          usage: cachedUsage,
+        }) as Result<LlmResponse<unknown>, FrameworkError>,
+      sendWithTools: async (req) =>
+        err({
+          kind: "node-crash",
+          nodeId: req.nodeId,
+          message: "iteration limit",
+          retriability: "non-retriable",
+          usage: cachedUsage,
+        }) as Result<LlmResponse<unknown>, FrameworkError>,
+    };
+    const { logger, logs } = collectLogs();
+    const metered = createMeteredLlm(failing, { dagId, runId, logger });
+
+    await metered.sendStructured(structuredReq(nodeA));
+
+    const failed = logs.find((l) => l.msg === "llm.call-failed");
+    expect(failed).toBeDefined();
+    expect(failed?.data?.cacheWriteTokens).toBe(200);
+    expect(failed?.data?.cacheReadTokens).toBe(700);
+    // And the failed call's cached tokens were still metered against the run.
+    const metered_log = logs.find((l) => l.msg === "llm.metered");
+    expect(metered_log?.data?.cacheReadTokens).toBe(700);
+  });
+});

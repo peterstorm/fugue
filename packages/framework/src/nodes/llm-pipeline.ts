@@ -138,7 +138,7 @@ export const runLlmCallPipeline = async <O>(
   // The TTL comes from the plan rather than from an `in` check on the policy —
   // `prompt-cache.ts` owns the policy-to-placement mapping, and re-deriving it
   // here is how the two would drift.
-  const cacheWriteTtl = planPromptCache(config.cache).ttl ?? undefined;
+  const cacheWriteTtl = planPromptCache(config.cache).ttl;
   enrichLlmSpan({
     model: config.model,
     promptName: config.promptName,

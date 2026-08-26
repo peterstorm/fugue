@@ -94,6 +94,20 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
   let reservation: ReservationState = emptyReservation;
 
   /**
+   * The correlation triple every structured line in this adapter carries.
+   *
+   * Extracted because a metering or failure line that is MISSING one of these
+   * is unjoinable to the run that produced it — the figure becomes a number
+   * nobody can reconcile against a budget. One definition means the four call
+   * sites cannot drift apart by hand-editing.
+   */
+  const attribution = (nodeId: NodeId): Record<string, string> => ({
+    dagId: dagId as string,
+    runId: runId as string,
+    nodeId: nodeId as string,
+  });
+
+  /**
    * Pre-call gate. Returns either a budget-refusal error, or a `release` thunk to
    * call once the admitted call settles (which frees its reservation). Reserving
    * BEFORE the call and releasing AFTER is what makes the gate concurrency-safe.
@@ -102,9 +116,7 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
     const decision = admitWithReservation(meter, runId, reservation, budget);
     if (decision.kind === "refuse") {
       logWithoutThrowing(logger, "warn", "LLM budget exceeded — refusing call", {
-        dagId: dagId as string,
-        runId: runId as string,
-        nodeId: nodeId as string,
+        ...attribution(nodeId),
         cumulative: decision.cumulative,
         reservedInFlight: decision.reservedInFlight,
         budget: decision.budget,
@@ -145,9 +157,7 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
     // at ~0.1x and a write at a premium, so two runs with identical totals can
     // differ by an order of magnitude in spend.
     logWithoutThrowing(logger, "info", "llm.metered", {
-      dagId: dagId as string,
-      runId: runId as string,
-      nodeId: nodeId as string,
+      ...attribution(nodeId),
       operation,
       tokensIn: usage.tokensIn,
       tokensOut: usage.tokensOut,
@@ -187,9 +197,7 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
       record(nodeId, operation, partial);
     }
     logWithoutThrowing(logger, "warn", "llm.call-failed", {
-      dagId: dagId as string,
-      runId: runId as string,
-      nodeId: nodeId as string,
+      ...attribution(nodeId),
       operation,
       errorKind: result.error.kind,
       ...(partial !== undefined
@@ -215,9 +223,7 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
    */
   const logThrown = (nodeId: NodeId, operation: "sendStructured" | "sendWithTools", e: unknown): void => {
     logWithoutThrowing(logger, "warn", "llm.call-failed", {
-      dagId: dagId as string,
-      runId: runId as string,
-      nodeId: nodeId as string,
+      ...attribution(nodeId),
       operation,
       errorKind: "thrown",
       message: safeErrorMessage(e),

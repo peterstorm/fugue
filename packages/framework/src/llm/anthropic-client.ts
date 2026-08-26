@@ -29,6 +29,7 @@ import type {
 } from "../types/llm.js";
 import type { NodeContext } from "../types/node.js";
 import type { TokenUsage } from "../types/token-usage.js";
+import { sanitizeCount } from "../types/token-usage.js";
 import type { ToolCall, ToolDispatchResult } from "./tool-dispatch.js";
 import { planPromptCache, type PromptCachePlan } from "./prompt-cache.js";
 import { zodToJsonSchema } from "./zod-schema.js";
@@ -40,7 +41,7 @@ import {
 } from "./spans.js";
 import { classifyLlmError, truncateErrorBody, validateTemperature } from "./llm-errors.js";
 import { createTimeoutSignal } from "./with-timeout.js";
-import { toolUseLoop } from "./tool-use-loop.js";
+import { toolUseLoop, type ToolLoopProvider } from "./tool-use-loop.js";
 
 const ANTHROPIC_MAX_TOKENS = 16384;
 
@@ -115,11 +116,14 @@ const systemParamFor = (
  * token total.
  */
 const anthropicUsage = (usage: AnthropicResponse["usage"]): TokenUsage => {
-  const cacheWriteTokens = usage.cache_creation_input_tokens ?? 0;
-  const cacheReadTokens = usage.cache_read_input_tokens ?? 0;
+  // Every component is sanitized before it is summed: the SDK types say
+  // `number`, but the values are decoded JSON, and one negative or non-finite
+  // figure here would propagate through `tokensIn` into the run's budget.
+  const cacheWriteTokens = sanitizeCount(usage.cache_creation_input_tokens ?? 0);
+  const cacheReadTokens = sanitizeCount(usage.cache_read_input_tokens ?? 0);
   return {
-    tokensIn: usage.input_tokens + cacheWriteTokens + cacheReadTokens,
-    tokensOut: usage.output_tokens,
+    tokensIn: sanitizeCount(usage.input_tokens) + cacheWriteTokens + cacheReadTokens,
+    tokensOut: sanitizeCount(usage.output_tokens),
     cacheWriteTokens,
     cacheReadTokens,
   };
@@ -348,7 +352,7 @@ export class AnthropicLlmClient implements LlmClient {
     const systemParam = systemParamFor(system, plan);
     const turnCacheControl = plan.turnBreakpoint ? cacheControlOf(plan) : undefined;
 
-    const provider: import("./tool-use-loop.js").ToolLoopProvider = {
+    const provider: ToolLoopProvider = {
       call: async (_turn: number) => {
         const turnCallerSignal = req.signal ?? ctx.signal;
         const t = createTimeoutSignal(this.requestTimeoutMs, turnCallerSignal);

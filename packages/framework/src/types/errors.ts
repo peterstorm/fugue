@@ -32,6 +32,11 @@ export type MissingCapability = {
  * representable on the `Err` path and can be metered UNCONDITIONALLY (FR-W0-001:
  * 100% attribution). Absent (`undefined`) means the failure consumed no
  * attributable tokens (e.g. an upfront validation error before any turn ran).
+ *
+ * An ALIAS, not a distinct brand: partiality is expressed by the OPTIONALITY of
+ * each variant's `usage` field, never by this type. A value here is
+ * structurally a complete `TokenUsage` — it is simply the share of one that a
+ * failed call burned.
  */
 export type PartialTokenUsage = TokenUsage;
 

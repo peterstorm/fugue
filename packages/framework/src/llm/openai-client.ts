@@ -1,3 +1,4 @@
+import { match } from "ts-pattern";
 import { z } from "zod";
 import { ok, err } from "../types/result.js";
 import type { Result } from "../types/result.js";
@@ -12,7 +13,7 @@ import type {
 } from "../types/llm.js";
 import type { NodeContext } from "../types/node.js";
 import type { TokenUsage } from "../types/token-usage.js";
-import { NO_TOKENS } from "../types/token-usage.js";
+import { NO_TOKENS, sanitizeCount } from "../types/token-usage.js";
 import { withLlmSpan, setLlmUsageAttributes, setLlmResponseAttributes } from "./spans.js";
 import { zodToJsonSchema, withAdditionalPropertiesFalse } from "./zod-schema.js";
 import {
@@ -22,7 +23,7 @@ import {
   validateTemperature,
 } from "./llm-errors.js";
 import { createTimeoutSignal } from "./with-timeout.js";
-import { toolUseLoop } from "./tool-use-loop.js";
+import { toolUseLoop, type ToolLoopProvider } from "./tool-use-loop.js";
 import type {
   ResponsesOutputItem,
   ConversationItem,
@@ -61,14 +62,20 @@ const buildJsonSchema = (schema: z.ZodType<any>): Record<string, unknown> => {
  * @satisfies FR-PC-010 — OpenAI reports `cached_tokens` as `cacheReadTokens`
  */
 const openAiUsage = (usage: ResponsesApiResponse["usage"]): TokenUsage => {
-  const tokensIn = usage?.input_tokens ?? 0;
-  const reported = usage?.input_tokens_details?.cached_tokens ?? 0;
-  const cacheReadTokens = Number.isFinite(reported)
-    ? Math.min(Math.max(0, reported), Math.max(0, tokensIn))
-    : 0;
+  // Same sanitization as the Anthropic client — every producer of a
+  // `TokenUsage` clamps every field, so the invariant holds at construction
+  // rather than being re-defended inconsistently downstream.
+  const tokensIn = sanitizeCount(usage?.input_tokens ?? 0);
+  // Additionally capped at the prompt total: unlike a write, a read is a SHARE
+  // of `tokensIn`, so a report claiming more cached tokens than the prompt held
+  // would make the derived uncached remainder negative.
+  const cacheReadTokens = Math.min(
+    sanitizeCount(usage?.input_tokens_details?.cached_tokens ?? 0),
+    tokensIn,
+  );
   return {
     tokensIn,
-    tokensOut: usage?.output_tokens ?? 0,
+    tokensOut: sanitizeCount(usage?.output_tokens ?? 0),
     cacheWriteTokens: 0,
     cacheReadTokens,
   };
@@ -121,8 +128,6 @@ const toolToOpenAiSpec = (tool: ToolDef<any, any>): Record<string, unknown> => (
   parameters: buildJsonSchema(tool.inputSchema as z.ZodType<any>),
   strict: false,
 });
-
-import { match } from "ts-pattern";
 
 const toolChoiceToOpenAi = (
   choice: SendWithToolsRequest<any>["toolChoice"],
@@ -445,7 +450,7 @@ export class OpenAILlmClient implements LlmClient {
       { role: "user", content: req.user },
     ];
 
-    const provider: import("./tool-use-loop.js").ToolLoopProvider = {
+    const provider: ToolLoopProvider = {
       call: async (_turn: number) => {
         const body: Record<string, unknown> = {
           model: this.modelOverride ?? req.model,

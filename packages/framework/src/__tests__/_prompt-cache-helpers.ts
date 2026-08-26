@@ -110,3 +110,57 @@ export const breakpointsIn = (params: Anthropic.MessageCreateParams): unknown[] 
   }
   return found;
 };
+
+// ---------------------------------------------------------------------------
+// OpenAI — request capture
+// ---------------------------------------------------------------------------
+
+/** One captured outbound Responses-API call. */
+export interface CapturedRequest {
+  readonly url: string;
+  readonly body: Record<string, unknown>;
+}
+
+/**
+ * Run `fn` with `globalThis.fetch` stubbed to return `bodies` in order (the
+ * last repeating), capturing every outgoing request.
+ *
+ * Captures the REQUEST as well as stubbing the response because the OpenAI
+ * client's prompt-cache contract is about what it does NOT send: the policy is
+ * a no-op on request construction there, and the only way to pin a no-op is to
+ * compare the bodies it produced with and without a policy declared.
+ */
+export const withStubbedFetch = async <T>(
+  bodies: readonly unknown[],
+  fn: (captured: CapturedRequest[]) => Promise<T>,
+): Promise<T> => {
+  const captured: CapturedRequest[] = [];
+  const original = globalThis.fetch;
+  let call = 0;
+  globalThis.fetch = (async (input: unknown, init?: { body?: unknown }) => {
+    captured.push({
+      url: String(input),
+      body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+    });
+    const body = bodies[Math.min(call, bodies.length - 1)];
+    call += 1;
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as unknown as typeof globalThis.fetch;
+  try {
+    return await fn(captured);
+  } finally {
+    globalThis.fetch = original;
+  }
+};
+
+/** A completed Responses-API body carrying `usage` and a parseable answer. */
+export const openAiResponseBody = (usage: unknown, text = '{"answer":"hi"}'): unknown => ({
+  id: "resp_1",
+  model: "gpt-test",
+  status: "completed",
+  output: [{ type: "message", content: [{ type: "output_text", text }] }],
+  usage,
+});

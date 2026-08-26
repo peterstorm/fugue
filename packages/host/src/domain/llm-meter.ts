@@ -15,7 +15,7 @@
  */
 
 import { match } from "ts-pattern";
-import type { RunId } from "@fuguejs/framework";
+import type { RunId, TokenUsage } from "@fuguejs/framework";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -76,6 +76,26 @@ interface TokenDelta {
   readonly cacheWriteTokens: number;
   readonly cacheReadTokens: number;
 }
+
+/**
+ * Compile-time proof that `TokenDelta` and the framework's `TokenUsage` are the
+ * same shape in BOTH directions.
+ *
+ * The host declares its own delta type so this pure domain module owns its
+ * vocabulary rather than importing the framework's at the FC/IS boundary — but
+ * structural typing means a field ADDED to `TokenUsage` would otherwise be
+ * silently dropped here (excess-property checking does not fire on a value
+ * passed by variable), which is exactly the "silently forgotten field" failure
+ * the shared value type exists to prevent. `TokenUsage` has already grown once.
+ * This makes the next growth a build error instead of a lost figure.
+ */
+type _TokenDeltaMatchesFrameworkUsage = [TokenDelta] extends [TokenUsage]
+  ? [TokenUsage] extends [TokenDelta]
+    ? true
+    : never
+  : never;
+const _tokenDeltaShapeProof: _TokenDeltaMatchesFrameworkUsage = true;
+void _tokenDeltaShapeProof;
 
 /**
  * Outcome of a pre-call budget check — discriminated union so an `allow` can

@@ -58,6 +58,20 @@ export interface TokenUsage {
   readonly cacheReadTokens: number;
 }
 
+/**
+ * Coerce one provider-reported count into a usable non-negative finite number.
+ *
+ * A provider count is untrusted JSON even when the SDK types say `number`: a
+ * negative figure would read as a token refund, and a non-finite one would
+ * poison every later sum (`NaN` propagates, and `NaN >= budget` is false
+ * forever, so a budget would fail OPEN). Both read as "no attributable tokens".
+ *
+ * Every `TokenUsage` producer routes through this, so the invariant holds at
+ * CONSTRUCTION rather than being re-defended by each downstream consumer.
+ */
+export const sanitizeCount = (n: number): number =>
+  Number.isFinite(n) ? Math.max(0, n) : 0;
+
 /** The additive identity — a call that consumed nothing. */
 export const NO_TOKENS: TokenUsage = Object.freeze({
   tokensIn: 0,

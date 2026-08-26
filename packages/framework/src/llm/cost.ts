@@ -72,11 +72,6 @@ export const CACHE_WRITE_MULTIPLIER: Readonly<Record<CacheTtl, number>> = Object
  * every cost caller reads. Deriving both here means they cannot drift apart.
  *
  * @satisfies FR-PC-008 — cache-write weighted by TTL, cache-read at 0.1x
- *
- * Emitted on the `llm.cost` span event so an operator can see what caching
- * actually saved rather than only the net figure. Derived here, beside the
- * pricing rules, rather than reconstructed by the caller from synthetic usage
- * values — the components and the total cannot drift apart.
  */
 export interface CostBreakdownUsd {
   readonly uncachedInput: number;
@@ -108,20 +103,7 @@ export const costBreakdownUsd = (
   };
 };
 
-/**
- * THE cost calculation — every USD figure the framework emits comes from here.
- *
- * The three prompt-token classes are priced separately; that is the whole point
- * of the breakdown. Charging cache reads at the full input rate would overstate
- * a cached run's cost by ~10x and make caching look like it did nothing.
- *
- * `writeTtl` is a PARAMETER rather than a field on `TokenUsage`: the TTL is
- * fixed per request and every caller already knows it, so passing it here keeps
- * the usage value four plain numbers with a trivially total monoid instead of
- * splitting the write count per TTL. It only affects calls that wrote an entry.
- *
- * @satisfies FR-PC-008 — cache-write weighted by TTL, cache-read at 0.1x
- */
+/** The total from {@link costBreakdownUsd}, for callers that need only the figure. */
 export const costUsd = (
   rates: CostRates,
   usage: TokenUsage,
