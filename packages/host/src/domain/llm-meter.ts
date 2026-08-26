@@ -50,12 +50,6 @@ interface RunUsage {
  */
 export const runTotal = (u: RunUsage): number => u.tokensIn + u.tokensOut;
 
-/**
- * Prompt tokens this run had served from cache rather than processed fresh.
- * Reported alongside the budget figures so an operator can see WHY a run's
- * token total moved — cost per token is not uniform once caching is on.
- */
-export const runCacheReadTokens = (u: RunUsage): number => u.cacheReadTokens;
 
 /**
  * Immutable per-`runId` token counter. The map is treated as frozen — every

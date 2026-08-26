@@ -733,3 +733,65 @@ describe("FakeLlmClient — unconfigured-seam diagnostics", () => {
     }
   });
 });
+
+describe("FakeLlmClient: scripted prompt-cache figures", () => {
+  // These fields exist so DAG-level tests can exercise cache accounting without
+  // reaching a provider. That makes the fake a shared test utility: if its
+  // accumulation broke, every downstream suite relying on it would quietly
+  // assert against wrong numbers, and nothing else would catch it.
+
+  test("accumulates the per-turn cache split across a multi-turn script", async () => {
+    // Array form: played back in order, one entry per turn.
+    const script: FakeWithToolsScript = [
+      {
+        type: "tool_use",
+        calls: [{ id: "c1", name: "noop", input: {} }],
+        tokensIn: 100,
+        tokensOut: 10,
+        cacheWriteTokens: 60,
+        cacheReadTokens: 0,
+      },
+      {
+        type: "final",
+        content: { result: 1 },
+        tokensIn: 50,
+        tokensOut: 5,
+        cacheWriteTokens: 0,
+        cacheReadTokens: 40,
+      },
+    ];
+
+    const noop: ToolDef<unknown, unknown> = {
+      name: "noop" as ToolDef<unknown, unknown>["name"],
+      description: "d",
+      inputSchema: z.object({}),
+      outputSchema: z.object({}),
+      run: async () => ({}),
+    };
+
+    const client = new FakeLlmClient(new Map(), { withToolsScript: script });
+    const result = await client.sendWithTools(
+      toolsReq({ schema: FinalSchema, tools: [noop] }),
+      makeCtx(),
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.tokensIn).toBe(150);
+    expect(result.value.tokensOut).toBe(15);
+    expect(result.value.cacheWriteTokens).toBe(60);
+    expect(result.value.cacheReadTokens).toBe(40);
+  });
+
+  test("defaults both cache figures to zero, so an existing script is unchanged", async () => {
+    const client = new FakeLlmClient(new Map(), {
+      withToolsScript: () => ({ type: "final", content: { result: 1 } }),
+    });
+    const result = await client.sendWithTools(toolsReq({ schema: FinalSchema }), makeCtx());
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.cacheWriteTokens).toBe(0);
+    expect(result.value.cacheReadTokens).toBe(0);
+  });
+});

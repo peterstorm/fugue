@@ -148,3 +148,91 @@ describe("conversation policy — FR-PC-003 / INV-PC-5", () => {
     expect(uncachedInputTokens(res)).toBe(20);
   });
 });
+
+describe("conversation policy — blocks that cannot carry a breakpoint", () => {
+  // Anthropic rejects `cache_control` on thinking and redacted_thinking blocks,
+  // and the SDK's union encodes that — the compiler surfaced it while this
+  // feature was being built. The rolling breakpoint therefore SKIPS annotation
+  // when the latest block is one of those, rather than emitting a 400. The same
+  // goes for an empty content array, which has no block to annotate at all.
+  // `sendWithTools` does not send a `thinking` param today, so this guard is
+  // defensive — which is exactly why it needs a test: nothing else would notice
+  // if it broke before the day thinking is enabled on the loop.
+  const thinkingTurn = (usage: Anthropic.Message["usage"]): Anthropic.Message =>
+    ({
+      id: "msg_thinking",
+      type: "message",
+      role: "assistant",
+      model: "claude-test",
+      stop_reason: "tool_use",
+      stop_sequence: null,
+      content: [
+        { type: "tool_use", id: "call_1", name: "lookup", input: { id: "x" } },
+        { type: "thinking", thinking: "still pondering", signature: "sig" },
+      ],
+      usage,
+      container: null,
+      context_management: null,
+    }) as unknown as Anthropic.Message;
+
+  const emptyTurn = (usage: Anthropic.Message["usage"]): Anthropic.Message =>
+    ({
+      id: "msg_empty",
+      type: "message",
+      role: "assistant",
+      model: "claude-test",
+      stop_reason: "tool_use",
+      stop_sequence: null,
+      content: [],
+      usage,
+      container: null,
+      context_management: null,
+    }) as unknown as Anthropic.Message;
+
+  /** Two turns where the FIRST assistant turn ends with an unannotatable block. */
+  const loopEndingWith = (first: Anthropic.Message) => {
+    const seen: Anthropic.MessageCreateParams[] = [];
+    let turn = 0;
+    const create: CreateFn = async (params) => {
+      seen.push(structuredClone(params));
+      turn += 1;
+      return turn === 1
+        ? first
+        : textResponse('{"answer":"done"}', anthropicUsageBlock(10, 5));
+    };
+    return { client: new AnthropicLlmClient({ messages: { create } } as never), seen };
+  };
+
+  it("omits the turn breakpoint when the newest block is a thinking block", async () => {
+    const { client, seen } = loopEndingWith(thinkingTurn(anthropicUsageBlock(10, 5)));
+    await runLoop(client, { kind: "conversation", ttl: "5m" });
+
+    // Turn 2 renders the history whose last assistant block is `thinking`.
+    const second = seen[1]!;
+    for (const message of second.messages) {
+      if (typeof message.content === "string") continue;
+      for (const block of message.content) {
+        if (block.type !== "thinking" && block.type !== "redacted_thinking") continue;
+        expect((block as { cache_control?: unknown }).cache_control).toBeUndefined();
+      }
+    }
+    // The system-prefix breakpoint still stands — skipping the turn annotation
+    // degrades the plan, it does not abandon it.
+    expect(breakpointsIn(second).length).toBeGreaterThanOrEqual(1);
+    expect(breakpointsIn(second).length).toBeLessThanOrEqual(2);
+  });
+
+  it("never renders a second request at all for an empty assistant turn", async () => {
+    // The empty-content arm of the guard is not reachable through this seam:
+    // a turn with neither tool calls nor text is a malformed success, so the
+    // loop returns a typed error instead of rendering another request. Assert
+    // the behaviour that actually occurs rather than contriving a call that
+    // cannot happen — the guard remains as defence for a future caller that
+    // hands `withTurnBreakpoint` a history the loop did not build.
+    const { client, seen } = loopEndingWith(emptyTurn(anthropicUsageBlock(10, 5)));
+    const result = await runLoop(client, { kind: "conversation", ttl: "5m" });
+
+    expect(result.ok).toBe(false);
+    expect(seen.length).toBe(1);
+  });
+});

@@ -3,6 +3,7 @@ import type { RunId, DagId } from "../types/ids.js";
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
 import { createLlmWithToolsNode } from "../nodes/llm-with-tools.js";
+import { createLlmNode } from "../nodes/llm.js";
 import { ok } from "../types/result.js";
 import type { NodeContext } from "../types/node.js";
 import type { LlmClient, ToolDef } from "../types/llm.js";
@@ -124,5 +125,105 @@ describe("createLlmWithToolsNode — factory", () => {
     expect(toolCalls).toBe(1);
     expect(setCalls).toBe(1);
     expect(stored.size).toBe(1);
+  });
+});
+
+describe("node factories — the `cache` config reaches the request (FR-PC-001)", () => {
+  // This is the surface a node AUTHOR touches. Everything else in the
+  // prompt-cache suite drives the client or the pipeline directly, so nothing
+  // pinned that the field survives the one-line passthrough in either factory —
+  // a silent drop here would disable caching for every DAG while every other
+  // test stayed green.
+  const policy = { kind: "conversation", ttl: "1h" } as const;
+
+  const captureCtx = (
+    seen: { cache?: unknown }[],
+  ): NodeContext =>
+    ({
+      runId: "r1" as RunId,
+      dagId: "d1" as DagId,
+      observer: new NoopObserver(),
+      tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
+      judgeLlm: null,
+      http: null,
+      clock: null,
+      cache: null,
+      prompts: null,
+      logger: { warn: () => {}, error: () => {} },
+      llm: {
+        sendStructured: async (req: { cache?: unknown }) => {
+          seen.push({ cache: req.cache });
+          return ok({
+            output: { greeting: "hi" },
+            tokensIn: 1,
+            tokensOut: 1,
+            cacheWriteTokens: 0,
+            cacheReadTokens: 0,
+            rawText: "",
+          });
+        },
+        sendWithTools: async (req: { cache?: unknown }) => {
+          seen.push({ cache: req.cache });
+          return ok({
+            output: { greeting: "hi" },
+            tokensIn: 1,
+            tokensOut: 1,
+            cacheWriteTokens: 0,
+            cacheReadTokens: 0,
+            rawText: "",
+          });
+        },
+      },
+    }) as unknown as NodeContext;
+
+  it("threads it through createLlmWithToolsNode", async () => {
+    const seen: { cache?: unknown }[] = [];
+    const node = createLlmWithToolsNode<{ customerId: string }, { greeting: string }>({
+      id: N("greet"),
+      inputSchema: InputSchema,
+      outputSchema: OutputSchema,
+      model: "fake-model",
+      tools: [makeTool()],
+      system: "You are a greeter.",
+      buildUser: (input) => `say hi to ${input.customerId}`,
+      cache: policy,
+    });
+
+    await node.run({ customerId: "abc" }, captureCtx(seen) as never);
+    expect(seen[0]?.cache).toEqual(policy);
+  });
+
+  it("omits it entirely when the node declares none", async () => {
+    const seen: { cache?: unknown }[] = [];
+    const node = createLlmWithToolsNode<{ customerId: string }, { greeting: string }>({
+      id: N("greet"),
+      inputSchema: InputSchema,
+      outputSchema: OutputSchema,
+      model: "fake-model",
+      tools: [makeTool()],
+      system: "You are a greeter.",
+      buildUser: (input) => `say hi to ${input.customerId}`,
+    });
+
+    await node.run({ customerId: "abc" }, captureCtx(seen) as never);
+    expect(seen[0]?.cache).toBeUndefined();
+  });
+
+  it("threads it through createLlmNode", async () => {
+    const seen: { cache?: unknown }[] = [];
+    const node = createLlmNode<{ customerId: string }, { greeting: string }>({
+      id: "greet-single",
+      inputSchema: InputSchema,
+      outputSchema: OutputSchema,
+      model: "fake-model",
+      promptName: "greet",
+      buildInput: (input) => ({ customerId: input.customerId }),
+      cache: { kind: "static-prefix", ttl: "5m" },
+    });
+
+    const ctx = captureCtx(seen) as unknown as Record<string, unknown>;
+    ctx["prompts"] = { get: () => "say hi to {{customerId}}" };
+    await node.run({ customerId: "abc" }, ctx as never);
+    expect(seen[0]?.cache).toEqual({ kind: "static-prefix", ttl: "5m" });
   });
 });

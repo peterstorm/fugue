@@ -490,3 +490,69 @@ describe("reservation transitions (admitWithReservation / release / learn)", () 
     );
   });
 });
+
+describe("llm-meter: cache-split accumulation", () => {
+  it("sums each cache field independently across sequential calls", () => {
+    // The hostile-input property test next door only proves the TOTAL stays
+    // finite. This proves the split itself is right — the figures an operator
+    // reads to tell a cheap cached run from an expensive uncached one.
+    let m: LlmMeter = emptyMeter();
+    m = accumulate(m, runA, {
+      tokensIn: 1000,
+      tokensOut: 50,
+      cacheWriteTokens: 400,
+      cacheReadTokens: 200,
+    });
+    m = accumulate(m, runA, {
+      tokensIn: 500,
+      tokensOut: 25,
+      cacheWriteTokens: 0,
+      cacheReadTokens: 300,
+    });
+
+    const u = usageFor(m, runA);
+    expect(u.tokensIn).toBe(1500);
+    expect(u.tokensOut).toBe(75);
+    expect(u.cacheWriteTokens).toBe(400);
+    expect(u.cacheReadTokens).toBe(500);
+    // `tokensIn` stays INCLUSIVE, so the budget total is unaffected by the split.
+    expect(runTotal(u)).toBe(1575);
+  });
+
+  it("keeps the cache split per-run, never bleeding across runs", () => {
+    let m: LlmMeter = emptyMeter();
+    m = accumulate(m, runA, {
+      tokensIn: 100,
+      tokensOut: 10,
+      cacheWriteTokens: 60,
+      cacheReadTokens: 40,
+    });
+    m = accumulate(m, runB, {
+      tokensIn: 200,
+      tokensOut: 20,
+      cacheWriteTokens: 0,
+      cacheReadTokens: 0,
+    });
+
+    expect(usageFor(m, runA).cacheWriteTokens).toBe(60);
+    expect(usageFor(m, runA).cacheReadTokens).toBe(40);
+    expect(usageFor(m, runB).cacheWriteTokens).toBe(0);
+    expect(usageFor(m, runB).cacheReadTokens).toBe(0);
+  });
+
+  it("sanitizes a hostile cache figure without disturbing the other fields", () => {
+    let m: LlmMeter = emptyMeter();
+    m = accumulate(m, runA, {
+      tokensIn: 100,
+      tokensOut: 10,
+      cacheWriteTokens: Number.NaN,
+      cacheReadTokens: -50,
+    });
+
+    const u = usageFor(m, runA);
+    expect(u.cacheWriteTokens).toBe(0);
+    expect(u.cacheReadTokens).toBe(0);
+    expect(u.tokensIn).toBe(100);
+    expect(u.tokensOut).toBe(10);
+  });
+});

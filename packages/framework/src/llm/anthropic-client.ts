@@ -1,20 +1,5 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { APIUserAbortError } from "@anthropic-ai/sdk";
-
-/**
- * Structural interface for the Anthropic SDK client. Accepts any object with
- * a `messages.create` method matching the Anthropic SDK shape. This avoids
- * TypeScript's `#private` incompatibility when the SDK is resolved under
- * different module resolution modes (e.g., app vs framework workspace).
- */
-export interface AnthropicSdkLike {
-  messages: {
-    create(
-      body: Anthropic.MessageCreateParamsNonStreaming,
-      options?: { signal?: AbortSignal | null },
-    ): Promise<Anthropic.Message>;
-  };
-}
 import { match } from "ts-pattern";
 import { z } from "zod";
 import { ok, err } from "../types/result.js";
@@ -42,6 +27,21 @@ import {
 import { classifyLlmError, truncateErrorBody, validateTemperature } from "./llm-errors.js";
 import { createTimeoutSignal } from "./with-timeout.js";
 import { toolUseLoop, type ToolLoopProvider } from "./tool-use-loop.js";
+
+/**
+ * Structural interface for the Anthropic SDK client. Accepts any object with
+ * a `messages.create` method matching the Anthropic SDK shape. This avoids
+ * TypeScript's `#private` incompatibility when the SDK is resolved under
+ * different module resolution modes (e.g., app vs framework workspace).
+ */
+export interface AnthropicSdkLike {
+  messages: {
+    create(
+      body: Anthropic.MessageCreateParamsNonStreaming,
+      options?: { signal?: AbortSignal | null },
+    ): Promise<Anthropic.Message>;
+  };
+}
 
 const ANTHROPIC_MAX_TOKENS = 16384;
 

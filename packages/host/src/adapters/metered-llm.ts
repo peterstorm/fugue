@@ -159,10 +159,12 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
     logWithoutThrowing(logger, "info", "llm.metered", {
       ...attribution(nodeId),
       operation,
-      tokensIn: usage.tokensIn,
-      tokensOut: usage.tokensOut,
-      cacheWriteTokens: usage.cacheWriteTokens,
-      cacheReadTokens: usage.cacheReadTokens,
+      // Spread rather than re-listed field by field: `TokenUsage`'s own header
+      // warns that hand-listing is how a field added to it later gets silently
+      // dropped from a consumer, and the metering line is exactly such a
+      // consumer. `budget` below CANNOT use the same shortcut — it is a bare
+      // number, and `{...5}` spreads nothing, so its guard is load-bearing.
+      ...usage,
       cumulative,
       ...(budget !== undefined ? { budget } : {}),
     });
@@ -200,14 +202,9 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
       ...attribution(nodeId),
       operation,
       errorKind: result.error.kind,
-      ...(partial !== undefined
-        ? {
-            tokensIn: partial.tokensIn,
-            tokensOut: partial.tokensOut,
-            cacheWriteTokens: partial.cacheWriteTokens,
-            cacheReadTokens: partial.cacheReadTokens,
-          }
-        : {}),
+      // Spreading `undefined` is a no-op, not a throw, so the absent-usage case
+      // needs no guard — and the fields stay in sync with `TokenUsage` for free.
+      ...partial,
     });
     return result;
   };
