@@ -25,58 +25,71 @@ import {
   type ReservationState,
 } from "../domain/llm-meter.js";
 
+/**
+ * A call delta with no provider-side cache activity — the shape every one of
+ * these cases had before prompt caching existed, so the arithmetic they assert
+ * is unchanged.
+ */
+const tokenDelta = (tokensIn: number, tokensOut: number) => ({
+  tokensIn,
+  tokensOut,
+  cacheWriteTokens: 0,
+  cacheReadTokens: 0,
+});
+
+
 const runA = makeRunId("run-a");
 const runB = makeRunId("run-b");
 
 describe("llm-meter: accumulate + usageFor", () => {
   it("reads an unmetered run as all-zero", () => {
     const usage = usageFor(emptyMeter(), runA);
-    expect(usage).toEqual({ tokensIn: 0, tokensOut: 0 });
+    expect(usage).toEqual(tokenDelta(0, 0));
     expect(runTotal(usage)).toBe(0);
   });
 
   it("sums tokensIn / tokensOut and keeps runTotal = in + out", () => {
     let m = emptyMeter();
-    m = accumulate(m, runA, { tokensIn: 100, tokensOut: 50 });
-    m = accumulate(m, runA, { tokensIn: 10, tokensOut: 5 });
-    expect(usageFor(m, runA)).toEqual({ tokensIn: 110, tokensOut: 55 });
+    m = accumulate(m, runA, tokenDelta(100, 50));
+    m = accumulate(m, runA, tokenDelta(10, 5));
+    expect(usageFor(m, runA)).toEqual(tokenDelta(110, 55));
     expect(runTotal(usageFor(m, runA))).toBe(165);
   });
 
   it("isolates usage per runId", () => {
     let m = emptyMeter();
-    m = accumulate(m, runA, { tokensIn: 100, tokensOut: 50 });
-    m = accumulate(m, runB, { tokensIn: 1, tokensOut: 2 });
+    m = accumulate(m, runA, tokenDelta(100, 50));
+    m = accumulate(m, runB, tokenDelta(1, 2));
     expect(runTotal(usageFor(m, runA))).toBe(150);
     expect(runTotal(usageFor(m, runB))).toBe(3);
   });
 
   it("does not mutate the input meter (immutability)", () => {
     const m0 = emptyMeter();
-    const m1 = accumulate(m0, runA, { tokensIn: 100, tokensOut: 50 });
+    const m1 = accumulate(m0, runA, tokenDelta(100, 50));
     expect(runTotal(usageFor(m0, runA))).toBe(0); // m0 untouched
     expect(runTotal(usageFor(m1, runA))).toBe(150);
     expect(m1).not.toBe(m0);
   });
 
   it("does not expose runtime Map mutation methods", () => {
-    const meter = accumulate(emptyMeter(), runA, { tokensIn: 7, tokensOut: 3 });
+    const meter = accumulate(emptyMeter(), runA, tokenDelta(7, 3));
     const escaped = meter.usageByRun as Map<RunId, { tokensIn: number; tokensOut: number }>;
 
-    expect(() => escaped.set(runB, { tokensIn: 1_000, tokensOut: 1_000 })).toThrow();
-    expect(usageFor(meter, runB)).toEqual({ tokensIn: 0, tokensOut: 0 });
+    expect(() => escaped.set(runB, tokenDelta(1_000, 1_000))).toThrow();
+    expect(usageFor(meter, runB)).toEqual(tokenDelta(0, 0));
     expect(() => { (usageFor(meter, runA) as { tokensIn: number }).tokensIn = 999; }).toThrow();
     expect(runTotal(usageFor(meter, runA))).toBe(10);
   });
 
   it("clamps negative deltas to zero (no budget refunds)", () => {
     let m = emptyMeter();
-    m = accumulate(m, runA, { tokensIn: -100, tokensOut: -50 });
+    m = accumulate(m, runA, tokenDelta(-100, -50));
     expect(runTotal(usageFor(m, runA))).toBe(0);
   });
 
   it("runTotal is unrepresentable-illegal-state-free: always equals in + out", () => {
-    const u = usageFor(accumulate(emptyMeter(), runA, { tokensIn: 7, tokensOut: 13 }), runA);
+    const u = usageFor(accumulate(emptyMeter(), runA, tokenDelta(7, 13)), runA);
     // No stored `total` field exists to disagree with the derived figure.
     expect(u).not.toHaveProperty("total");
     expect(runTotal(u)).toBe(20);
@@ -86,19 +99,19 @@ describe("llm-meter: accumulate + usageFor", () => {
 describe("llm-meter: non-finite delta hardening (NaN/Infinity read as 0)", () => {
   it("treats a NaN delta component as 0 — cumulative stays finite (10, not NaN)", () => {
     let m = emptyMeter();
-    m = accumulate(m, runA, { tokensIn: Number.NaN, tokensOut: 10 });
+    m = accumulate(m, runA, tokenDelta(Number.NaN, 10));
     const u = usageFor(m, runA);
-    expect(u).toEqual({ tokensIn: 0, tokensOut: 10 });
+    expect(u).toEqual(tokenDelta(0, 10));
     expect(runTotal(u)).toBe(10);
     expect(Number.isFinite(runTotal(u))).toBe(true);
   });
 
   it("treats an Infinity delta component as 0 — no never-refusing poisoned cumulative", () => {
     let m = emptyMeter();
-    m = accumulate(m, runA, { tokensIn: Number.POSITIVE_INFINITY, tokensOut: 5 });
-    m = accumulate(m, runA, { tokensIn: 5, tokensOut: Number.NEGATIVE_INFINITY });
+    m = accumulate(m, runA, tokenDelta(Number.POSITIVE_INFINITY, 5));
+    m = accumulate(m, runA, tokenDelta(5, Number.NEGATIVE_INFINITY));
     const u = usageFor(m, runA);
-    expect(u).toEqual({ tokensIn: 5, tokensOut: 5 });
+    expect(u).toEqual(tokenDelta(5, 5));
     expect(runTotal(u)).toBe(10);
   });
 
@@ -111,7 +124,18 @@ describe("llm-meter: non-finite delta hardening (NaN/Infinity read as 0)", () =>
     );
     fc.assert(
       fc.property(
-        fc.array(fc.record({ tokensIn: weirdNumber, tokensOut: weirdNumber }), { maxLength: 50 }),
+        // Every component is fuzzed, cache figures included: they reach
+        // `accumulate` on the same path as the raw counts, so a missing
+        // sanitize on one of them would poison the cumulative just as surely.
+        fc.array(
+          fc.record({
+            tokensIn: weirdNumber,
+            tokensOut: weirdNumber,
+            cacheWriteTokens: weirdNumber,
+            cacheReadTokens: weirdNumber,
+          }),
+          { maxLength: 50 },
+        ),
         (deltas) => {
           let m: LlmMeter = emptyMeter();
           for (const d of deltas) {
@@ -130,7 +154,7 @@ describe("llm-meter: non-finite delta hardening (NaN/Infinity read as 0)", () =>
     // hand-building one — exactly the defense-in-depth scenario the refusal guards.
     for (const poison of [Number.NaN, Number.POSITIVE_INFINITY]) {
       const poisoned: LlmMeter = {
-        usageByRun: new Map([[runA, { tokensIn: poison, tokensOut: 0 }]]),
+        usageByRun: new Map([[runA, tokenDelta(poison, 0)]]),
       };
       const d = budgetDecision(poisoned, runA, 1000);
       expect(d.kind).toBe("refuse"); // fail closed, not fail open forever
@@ -139,7 +163,7 @@ describe("llm-meter: non-finite delta hardening (NaN/Infinity read as 0)", () =>
     // An ABSENT budget still allows (FR-W1-006 outranks the guard — no budget,
     // no enforcement, even on a poisoned meter).
     const poisoned: LlmMeter = {
-      usageByRun: new Map([[runA, { tokensIn: Number.NaN, tokensOut: 0 }]]),
+      usageByRun: new Map([[runA, tokenDelta(Number.NaN, 0)]]),
     };
     expect(budgetDecision(poisoned, runA, undefined).kind).toBe("allow");
   });
@@ -148,14 +172,14 @@ describe("llm-meter: non-finite delta hardening (NaN/Infinity read as 0)", () =>
 describe("llm-meter: budgetDecision", () => {
   it("allows every call when budget is undefined (FR-W1-006)", () => {
     let m = emptyMeter();
-    m = accumulate(m, runA, { tokensIn: 1_000_000, tokensOut: 0 });
+    m = accumulate(m, runA, tokenDelta(1_000_000, 0));
     const d = budgetDecision(m, runA, undefined);
     expect(d.kind).toBe("allow");
   });
 
   it("allows while cumulative < budget", () => {
     let m = emptyMeter();
-    m = accumulate(m, runA, { tokensIn: 400, tokensOut: 100 }); // 500
+    m = accumulate(m, runA, tokenDelta(400, 100)); // 500
     const d = budgetDecision(m, runA, 1000);
     expect(d.kind).toBe("allow");
     if (d.kind === "allow") expect(d.cumulative).toBe(500);
@@ -163,7 +187,7 @@ describe("llm-meter: budgetDecision", () => {
 
   it("refuses once cumulative >= budget", () => {
     let m = emptyMeter();
-    m = accumulate(m, runA, { tokensIn: 600, tokensOut: 400 }); // 1000
+    m = accumulate(m, runA, tokenDelta(600, 400)); // 1000
     const d = budgetDecision(m, runA, 1000);
     expect(d.kind).toBe("refuse");
     if (d.kind === "refuse") {
@@ -191,12 +215,12 @@ describe("llm-meter: overshoot-by-one (FR-W1-004 / SC-003)", () => {
     const budget = 1000;
     let m = emptyMeter();
     // Establish cumulative-so-far at 900 (under budget).
-    m = accumulate(m, runA, { tokensIn: 900, tokensOut: 0 });
+    m = accumulate(m, runA, tokenDelta(900, 0));
 
     // Cumulative 900 < 1000 → this call is allowed (pre-call check).
     expect(budgetDecision(m, runA, budget).kind).toBe("allow");
     // The call returns and overshoots to 1100.
-    m = accumulate(m, runA, { tokensIn: 200, tokensOut: 0 }); // 900 -> 1100
+    m = accumulate(m, runA, tokenDelta(200, 0)); // 900 -> 1100
 
     // Now cumulative 1100 >= 1000 → the NEXT call is refused (single overshoot).
     const next = budgetDecision(m, runA, budget);
@@ -222,7 +246,7 @@ describe("llm-meter: overshoot-by-one (FR-W1-004 / SC-003)", () => {
             expect(d.cumulative).toBeLessThan(budget);
             const before = runTotal(usageFor(m, runA));
             expect(d.cumulative).toBe(before); // decision reflects cumulative-so-far
-            m = accumulate(m, runA, { tokensIn: costs[i]!, tokensOut: 0 });
+            m = accumulate(m, runA, tokenDelta(costs[i]!, 0));
             if (before < budget && runTotal(usageFor(m, runA)) >= budget && crossedAt === -1) {
               crossedAt = i;
             }
@@ -275,7 +299,7 @@ describe("llm-meter: property — total is always in + out and monotonic", () =>
         fc.integer({ min: 0, max: 100_000 }), // cumulative
         fc.integer({ min: 1, max: 100_000 }), // budget
         (cumulative, budget) => {
-          const m = accumulate(emptyMeter(), runA, { tokensIn: cumulative, tokensOut: 0 });
+          const m = accumulate(emptyMeter(), runA, tokenDelta(cumulative, 0));
           const d = budgetDecision(m, runA, budget);
           if (cumulative >= budget) {
             expect(d.kind).toBe("refuse");
@@ -299,7 +323,7 @@ describe("llm-meter: formatBudgetDecision", () => {
 
 describe("reservation transitions (admitWithReservation / release / learn)", () => {
   const meterAt = (total: number): LlmMeter =>
-    total === 0 ? emptyMeter() : accumulate(emptyMeter(), runA, { tokensIn: total, tokensOut: 0 });
+    total === 0 ? emptyMeter() : accumulate(emptyMeter(), runA, tokenDelta(total, 0));
 
   it("admits with zero reservation when no estimate is learned (the documented first-burst allowance)", () => {
     const d = admitWithReservation(meterAt(0), runA, emptyReservation, 100);
@@ -464,5 +488,71 @@ describe("reservation transitions (admitWithReservation / release / learn)", () 
         expect(state.reservedInFlight).toBe(0);
       }),
     );
+  });
+});
+
+describe("llm-meter: cache-split accumulation", () => {
+  it("sums each cache field independently across sequential calls", () => {
+    // The hostile-input property test next door only proves the TOTAL stays
+    // finite. This proves the split itself is right — the figures an operator
+    // reads to tell a cheap cached run from an expensive uncached one.
+    let m: LlmMeter = emptyMeter();
+    m = accumulate(m, runA, {
+      tokensIn: 1000,
+      tokensOut: 50,
+      cacheWriteTokens: 400,
+      cacheReadTokens: 200,
+    });
+    m = accumulate(m, runA, {
+      tokensIn: 500,
+      tokensOut: 25,
+      cacheWriteTokens: 0,
+      cacheReadTokens: 300,
+    });
+
+    const u = usageFor(m, runA);
+    expect(u.tokensIn).toBe(1500);
+    expect(u.tokensOut).toBe(75);
+    expect(u.cacheWriteTokens).toBe(400);
+    expect(u.cacheReadTokens).toBe(500);
+    // `tokensIn` stays INCLUSIVE, so the budget total is unaffected by the split.
+    expect(runTotal(u)).toBe(1575);
+  });
+
+  it("keeps the cache split per-run, never bleeding across runs", () => {
+    let m: LlmMeter = emptyMeter();
+    m = accumulate(m, runA, {
+      tokensIn: 100,
+      tokensOut: 10,
+      cacheWriteTokens: 60,
+      cacheReadTokens: 40,
+    });
+    m = accumulate(m, runB, {
+      tokensIn: 200,
+      tokensOut: 20,
+      cacheWriteTokens: 0,
+      cacheReadTokens: 0,
+    });
+
+    expect(usageFor(m, runA).cacheWriteTokens).toBe(60);
+    expect(usageFor(m, runA).cacheReadTokens).toBe(40);
+    expect(usageFor(m, runB).cacheWriteTokens).toBe(0);
+    expect(usageFor(m, runB).cacheReadTokens).toBe(0);
+  });
+
+  it("sanitizes a hostile cache figure without disturbing the other fields", () => {
+    let m: LlmMeter = emptyMeter();
+    m = accumulate(m, runA, {
+      tokensIn: 100,
+      tokensOut: 10,
+      cacheWriteTokens: Number.NaN,
+      cacheReadTokens: -50,
+    });
+
+    const u = usageFor(m, runA);
+    expect(u.cacheWriteTokens).toBe(0);
+    expect(u.cacheReadTokens).toBe(0);
+    expect(u.tokensIn).toBe(100);
+    expect(u.tokensOut).toBe(10);
   });
 });

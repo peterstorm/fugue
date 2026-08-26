@@ -13,6 +13,7 @@ import type { Result } from "./result.js";
 import type { FrameworkError } from "./errors.js";
 import type { NodeContext, TypedNodeContext } from "./node.js";
 import type { NodeId } from "./ids.js";
+import type { TokenUsage } from "./token-usage.js";
 import type { Tracer } from "./tracer.js";
 
 // ---------------------------------------------------------------------------
@@ -27,6 +28,54 @@ import type { Tracer } from "./tracer.js";
 
 declare const __toolNameBrand: unique symbol;
 export type ToolName = string & { readonly [__toolNameBrand]: void };
+
+// ---------------------------------------------------------------------------
+// Prompt caching
+//
+// The caller declares WHAT IS STABLE; the framework derives WHERE the
+// breakpoints go (`llm/prompt-cache.ts`). Callers never write a breakpoint
+// index, never count against the provider's four-slot cap, and cannot place a
+// breakpoint after volatile content — the types give them no way to say it.
+// ---------------------------------------------------------------------------
+
+/**
+ * Provider-side prompt-cache lifetime. Not a raw string: the provider accepts
+ * exactly two values, priced differently — a 5-minute entry costs 1.25x the
+ * base input rate to write, a 1-hour entry 2x. Reads are ~0.1x either way, so
+ * `5m` breaks even at two requests and `1h` at three.
+ */
+export type CacheTtl = "5m" | "1h";
+
+/**
+ * Cache policy for a single-shot call.
+ *
+ * `static-prefix` asserts that the tools and system prompt are stable across
+ * calls, which is what the provider needs to reuse them: caching is a PREFIX
+ * match over the rendered `tools → system → messages` order, so one breakpoint
+ * at the end of `system` covers both.
+ *
+ * Omitted or `none` emits no `cache_control` at all — byte-identical to the
+ * pre-caching request (FR-PC-004). Caching is opt-in everywhere because a
+ * single call over a large UNIQUE prefix pays the write premium and never
+ * reads it back.
+ */
+export type SingleShotCachePolicy =
+  | { readonly kind: "none" }
+  | { readonly kind: "static-prefix"; readonly ttl: CacheTtl };
+
+/**
+ * Cache policy for a tool-use loop, which additionally offers `conversation`:
+ * roll a breakpoint onto the last block of each completed turn so turn N reads
+ * the prefix turn N-1 wrote. A loop re-sends its whole accumulated history
+ * every turn, so this is where caching pays most.
+ *
+ * `conversation` is deliberately ABSENT from `SingleShotCachePolicy`: a single
+ * call has no second turn to read what the first wrote, so asking for it is a
+ * compile error rather than a silently wasted write premium.
+ */
+export type ConversationCachePolicy =
+  | SingleShotCachePolicy
+  | { readonly kind: "conversation"; readonly ttl: CacheTtl };
 
 // ---------------------------------------------------------------------------
 // Single-shot structured responses
@@ -56,6 +105,22 @@ export interface LlmRequest<O> {
   readonly temperature?: number;
   readonly signal?: AbortSignal;
   /**
+   * Provider-side prompt caching. Omitted ≡ `{ kind: "none" }` ≡ no
+   * `cache_control` on the wire.
+   *
+   * Anthropic honours it. **OpenAI ignores this field entirely** — it caches
+   * automatically and exposes no request-side control, so declaring a policy
+   * changes neither what that client sends nor what it reports. Its
+   * `cacheReadTokens` reflects whatever the provider did on its own, with or
+   * without a policy here.
+   *
+   * The field is still meaningful on an OpenAI-backed node, one layer up: the
+   * pipeline compares the DECLARED policy against the usage that actually came
+   * back to detect an inert policy (FR-PC-009) and to stamp
+   * `ai.prompt_cache.policy` on the span. That check is provider-agnostic.
+   */
+  readonly cache?: SingleShotCachePolicy;
+  /**
    * DAG node identifier for error reporting. Required so failures attribute
    * to the right place in the DAG.
    */
@@ -67,10 +132,16 @@ export interface LlmRequest<O> {
   readonly tracer?: Tracer | null;
 }
 
-export interface LlmResponse<O> {
+/**
+ * A completed LLM call: the parsed output plus the call's `TokenUsage`.
+ *
+ * Extends `TokenUsage` rather than nesting it: `tokensIn`/`tokensOut` already
+ * lived here with exactly that meaning, so existing readers keep working, and
+ * a response can be handed directly to `addUsage`/`computeCostUsd` without an
+ * unpacking step.
+ */
+export interface LlmResponse<O> extends TokenUsage {
   readonly output: O;
-  readonly tokensIn: number;
-  readonly tokensOut: number;
   readonly thinking?: string;
   readonly rawText: string;
 }
@@ -147,6 +218,13 @@ export interface SendWithToolsRequest<O> {
   readonly thinking?: { type: "enabled"; budgetTokens: number };
   /** Cancellation. Aborted mid-loop returns Err({ kind: "aborted" }). */
   readonly signal?: AbortSignal;
+  /**
+   * Provider-side prompt caching. Accepts `conversation` in addition to the
+   * single-shot policies: a loop re-sends its whole accumulated history every
+   * turn, so a rolling per-turn breakpoint is what makes turn N read the
+   * prefix turn N-1 wrote. Omitted ≡ `{ kind: "none" }`.
+   */
+  readonly cache?: ConversationCachePolicy;
   /**
    * Tool-choice hint. Default `auto` (model decides).
    * `any` forces a tool call on the first turn; `none` disables tools.

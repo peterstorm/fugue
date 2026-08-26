@@ -35,7 +35,8 @@ import type {
   RunId,
   NodeId,
 } from "@fuguejs/framework";
-import { err, safeErrorMessage, usageOfError } from "@fuguejs/framework";
+import { err, safeErrorMessage, totalTokens, usageOfError } from "@fuguejs/framework";
+import type { TokenUsage } from "@fuguejs/framework";
 import type { LogPort } from "../ports.js";
 import { logWithoutThrowing } from "../hitl/diagnostic-logging.js";
 import {
@@ -93,6 +94,20 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
   let reservation: ReservationState = emptyReservation;
 
   /**
+   * The correlation triple every structured line in this adapter carries.
+   *
+   * Extracted because a metering or failure line that is MISSING one of these
+   * is unjoinable to the run that produced it — the figure becomes a number
+   * nobody can reconcile against a budget. One definition means the four call
+   * sites cannot drift apart by hand-editing.
+   */
+  const attribution = (nodeId: NodeId): Record<string, string> => ({
+    dagId: dagId as string,
+    runId: runId as string,
+    nodeId: nodeId as string,
+  });
+
+  /**
    * Pre-call gate. Returns either a budget-refusal error, or a `release` thunk to
    * call once the admitted call settles (which frees its reservation). Reserving
    * BEFORE the call and releasing AFTER is what makes the gate concurrency-safe.
@@ -101,9 +116,7 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
     const decision = admitWithReservation(meter, runId, reservation, budget);
     if (decision.kind === "refuse") {
       logWithoutThrowing(logger, "warn", "LLM budget exceeded — refusing call", {
-        dagId: dagId as string,
-        runId: runId as string,
-        nodeId: nodeId as string,
+        ...attribution(nodeId),
         cumulative: decision.cumulative,
         reservedInFlight: decision.reservedInFlight,
         budget: decision.budget,
@@ -133,20 +146,25 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
   const record = (
     nodeId: NodeId,
     operation: "sendStructured" | "sendWithTools",
-    tokensIn: number,
-    tokensOut: number,
+    usage: TokenUsage,
   ): void => {
     // Learn the per-call estimate the concurrency reservation uses (I1).
-    reservation = learnObservedCall(reservation, tokensIn + tokensOut);
-    meter = accumulate(meter, runId, { tokensIn, tokensOut });
+    reservation = learnObservedCall(reservation, totalTokens(usage));
+    meter = accumulate(meter, runId, usage);
     const cumulative = runTotal(usageFor(meter, runId));
+    // The cache split rides on the metering line so an operator can see what a
+    // run's tokens COST, not just how many there were: a cache read is billed
+    // at ~0.1x and a write at a premium, so two runs with identical totals can
+    // differ by an order of magnitude in spend.
     logWithoutThrowing(logger, "info", "llm.metered", {
-      dagId: dagId as string,
-      runId: runId as string,
-      nodeId: nodeId as string,
+      ...attribution(nodeId),
       operation,
-      tokensIn,
-      tokensOut,
+      // Spread rather than re-listed field by field: `TokenUsage`'s own header
+      // warns that hand-listing is how a field added to it later gets silently
+      // dropped from a consumer, and the metering line is exactly such a
+      // consumer. `budget` below CANNOT use the same shortcut — it is a bare
+      // number, and `{...5}` spreads nothing, so its guard is load-bearing.
+      ...usage,
       cumulative,
       ...(budget !== undefined ? { budget } : {}),
     });
@@ -171,21 +189,22 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
       // `sendWithTools` aggregates tokens across all turns of its loop into a
       // single LlmResponse — one accumulate per outer call matches the
       // overshoot-by-one semantics (the whole loop is the in-flight "call").
-      record(nodeId, operation, result.value.tokensIn, result.value.tokensOut);
+      // `LlmResponse` extends `TokenUsage`, so the response IS the delta.
+      record(nodeId, operation, result.value);
       return result;
     }
     // Failure path: attribute any tokens the failed call consumed, then log.
     const partial = usageOfError(result.error);
-    if (partial !== undefined && (partial.tokensIn > 0 || partial.tokensOut > 0)) {
-      record(nodeId, operation, partial.tokensIn, partial.tokensOut);
+    if (partial !== undefined && totalTokens(partial) > 0) {
+      record(nodeId, operation, partial);
     }
     logWithoutThrowing(logger, "warn", "llm.call-failed", {
-      dagId: dagId as string,
-      runId: runId as string,
-      nodeId: nodeId as string,
+      ...attribution(nodeId),
       operation,
       errorKind: result.error.kind,
-      ...(partial !== undefined ? { tokensIn: partial.tokensIn, tokensOut: partial.tokensOut } : {}),
+      // Spreading `undefined` is a no-op, not a throw, so the absent-usage case
+      // needs no guard — and the fields stay in sync with `TokenUsage` for free.
+      ...partial,
     });
     return result;
   };
@@ -201,9 +220,7 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
    */
   const logThrown = (nodeId: NodeId, operation: "sendStructured" | "sendWithTools", e: unknown): void => {
     logWithoutThrowing(logger, "warn", "llm.call-failed", {
-      dagId: dagId as string,
-      runId: runId as string,
-      nodeId: nodeId as string,
+      ...attribution(nodeId),
       operation,
       errorKind: "thrown",
       message: safeErrorMessage(e),

@@ -10,6 +10,8 @@ import type {
   LlmResponse,
   SendWithToolsRequest,
 } from "../types/llm.js";
+import type { TokenUsage } from "../types/token-usage.js";
+import { NO_TOKENS, addUsage, tokensOnly } from "../types/token-usage.js";
 import type { NodeContext } from "../types/node.js";
 import { ensureToolNames } from "./tools.js";
 import {
@@ -54,6 +56,14 @@ export type FakeToolUseTurn = {
   readonly calls: readonly ToolCall[];
   readonly tokensIn?: number;
   readonly tokensOut?: number;
+  /**
+   * Scripted provider-side cache split for this turn. Lets a DAG-level test
+   * exercise cache accounting — accumulation, cost weighting, the inert-policy
+   * warning — without reaching a provider. Both default to 0, so an existing
+   * script keeps reporting exactly what it did before.
+   */
+  readonly cacheWriteTokens?: number;
+  readonly cacheReadTokens?: number;
   readonly responseId?: string;
   readonly responseModel?: string;
   readonly finishReason?: string;
@@ -65,6 +75,10 @@ export type FakeFinalTurn = {
   readonly content: unknown;
   readonly tokensIn?: number;
   readonly tokensOut?: number;
+  /** See {@link FakeToolUseTurn.cacheWriteTokens}. */
+  readonly cacheWriteTokens?: number;
+  /** See {@link FakeToolUseTurn.cacheReadTokens}. */
+  readonly cacheReadTokens?: number;
   readonly thinking?: string;
   readonly responseId?: string;
   readonly responseModel?: string;
@@ -275,8 +289,7 @@ export class FakeLlmClient implements LlmClient {
 
     return ok({
       output,
-      tokensIn: 100,
-      tokensOut: 50,
+      ...tokensOnly(100, 50),
       rawText,
     });
   }
@@ -314,8 +327,7 @@ export class FakeLlmClient implements LlmClient {
       });
     }
 
-    let totalTokensIn = 0;
-    let totalTokensOut = 0;
+    let accumulated: TokenUsage = NO_TOKENS;
     let lastThinking: string | undefined;
     let lastToolResults: readonly ToolDispatchResult[] = [];
     const arrayScript = Array.isArray(this.withToolsScript)
@@ -369,8 +381,7 @@ export class FakeLlmClient implements LlmClient {
       // total/guarded; this seam's field reads were the remaining raw hole).
       let turnType: FakeTurn["type"] | undefined;
       let turnThinking: string | undefined;
-      let tokensIn: number;
-      let tokensOut: number;
+      let turnUsage: TokenUsage;
       try {
         turnType = turnSpec.type;
         // `thinking` is final-turn-only on the union; read it through the
@@ -378,8 +389,12 @@ export class FakeLlmClient implements LlmClient {
         // construction, and this read is what keeps a hostile getter on the
         // field inside the guarded block.
         turnThinking = (turnSpec as { thinking?: string }).thinking;
-        tokensIn = turnSpec.tokensIn ?? 10;
-        tokensOut = turnSpec.tokensOut ?? 5;
+        turnUsage = {
+          tokensIn: turnSpec.tokensIn ?? 10,
+          tokensOut: turnSpec.tokensOut ?? 5,
+          cacheWriteTokens: turnSpec.cacheWriteTokens ?? 0,
+          cacheReadTokens: turnSpec.cacheReadTokens ?? 0,
+        };
       } catch (error) {
         return err(
           crash(
@@ -393,9 +408,8 @@ export class FakeLlmClient implements LlmClient {
           ctx.tracer ?? null,
           { provider: "fake", model: req.model, operation: "chat" },
           async () => {
-            totalTokensIn += tokensIn;
-            totalTokensOut += tokensOut;
-            setLlmUsageAttributes(tokensIn, tokensOut);
+            accumulated = addUsage(accumulated, turnUsage);
+            setLlmUsageAttributes(turnUsage);
             if (
               turnSpec.responseId ||
               turnSpec.responseModel ||
@@ -438,8 +452,7 @@ export class FakeLlmClient implements LlmClient {
           }
           return ok({
             output: parsed.data as O,
-            tokensIn: totalTokensIn,
-            tokensOut: totalTokensOut,
+            ...accumulated,
             thinking: lastThinking,
             rawText,
           });

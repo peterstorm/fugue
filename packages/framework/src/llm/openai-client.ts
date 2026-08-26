@@ -1,3 +1,4 @@
+import { match } from "ts-pattern";
 import { z } from "zod";
 import { ok, err } from "../types/result.js";
 import type { Result } from "../types/result.js";
@@ -11,6 +12,8 @@ import type {
   ToolDef,
 } from "../types/llm.js";
 import type { NodeContext } from "../types/node.js";
+import type { TokenUsage } from "../types/token-usage.js";
+import { NO_TOKENS, sanitizeCount } from "../types/token-usage.js";
 import { withLlmSpan, setLlmUsageAttributes, setLlmResponseAttributes } from "./spans.js";
 import { zodToJsonSchema, withAdditionalPropertiesFalse } from "./zod-schema.js";
 import {
@@ -20,7 +23,7 @@ import {
   validateTemperature,
 } from "./llm-errors.js";
 import { createTimeoutSignal } from "./with-timeout.js";
-import { toolUseLoop } from "./tool-use-loop.js";
+import { toolUseLoop, type ToolLoopProvider } from "./tool-use-loop.js";
 import type {
   ResponsesOutputItem,
   ConversationItem,
@@ -41,6 +44,44 @@ const buildJsonSchema = (schema: z.ZodType<any>): Record<string, unknown> => {
 };
 
 /**
+ * Normalise a Responses `usage` block into the framework's `TokenUsage`.
+ *
+ * The mirror image of `anthropicUsage`, and the asymmetry is the point:
+ * OpenAI's `input_tokens` ALREADY INCLUDES cached tokens, so this passes the
+ * total through unchanged where the Anthropic client sums. Getting this
+ * backwards would double-count every cached prompt token and inflate every
+ * budget — hence a dedicated regression test per client.
+ *
+ * OpenAI caches automatically and exposes no write/read distinction, so
+ * `cacheWriteTokens` is always 0: reporting a write we cannot observe would be
+ * a fabricated figure, and cost weights writes differently from reads.
+ *
+ * `cached_tokens` is untrusted JSON — clamped into `[0, tokensIn]` so a
+ * malformed report cannot break the `TokenUsage` invariant downstream.
+ *
+ * @satisfies FR-PC-010 — OpenAI reports `cached_tokens` as `cacheReadTokens`
+ */
+const openAiUsage = (usage: ResponsesApiResponse["usage"]): TokenUsage => {
+  // Same sanitization as the Anthropic client — every producer of a
+  // `TokenUsage` clamps every field, so the invariant holds at construction
+  // rather than being re-defended inconsistently downstream.
+  const tokensIn = sanitizeCount(usage?.input_tokens ?? 0);
+  // Additionally capped at the prompt total: unlike a write, a read is a SHARE
+  // of `tokensIn`, so a report claiming more cached tokens than the prompt held
+  // would make the derived uncached remainder negative.
+  const cacheReadTokens = Math.min(
+    sanitizeCount(usage?.input_tokens_details?.cached_tokens ?? 0),
+    tokensIn,
+  );
+  return {
+    tokensIn,
+    tokensOut: sanitizeCount(usage?.output_tokens ?? 0),
+    cacheWriteTokens: 0,
+    cacheReadTokens,
+  };
+};
+
+/**
  * Classify a `response.status === "failed"` Responses body. The API populates
  * `error.code` / `error.message` on this arm; without an explicit check it
  * would sail past the `incomplete` short-circuit into the generic no-text /
@@ -56,7 +97,7 @@ const buildJsonSchema = (schema: z.ZodType<any>): Record<string, unknown> => {
 function responseFailedError(
   response: ResponsesApiResponse,
   nodeId: NodeId,
-  usage?: { readonly tokensIn: number; readonly tokensOut: number },
+  usage?: TokenUsage,
 ): Result<never, FrameworkError> {
   const code = response.error?.code;
   const detail = truncateErrorBody(response.error?.message ?? JSON.stringify(response));
@@ -87,8 +128,6 @@ const toolToOpenAiSpec = (tool: ToolDef<any, any>): Record<string, unknown> => (
   parameters: buildJsonSchema(tool.inputSchema as z.ZodType<any>),
   strict: false,
 });
-
-import { match } from "ts-pattern";
 
 const toolChoiceToOpenAi = (
   choice: SendWithToolsRequest<any>["toolChoice"],
@@ -275,9 +314,7 @@ export class OpenAILlmClient implements LlmClient {
         async () => {
           const r = await this.postResponses(body, req.signal);
           if (r.ok) {
-            const tIn = r.response.usage?.input_tokens ?? 0;
-            const tOut = r.response.usage?.output_tokens ?? 0;
-            setLlmUsageAttributes(tIn, tOut);
+            setLlmUsageAttributes(openAiUsage(r.response.usage));
             setLlmResponseAttributes({
               model: r.response.model,
               id: r.response.id,
@@ -305,12 +342,7 @@ export class OpenAILlmClient implements LlmClient {
         return responseFailedError(
           response,
           req.nodeId,
-          response.usage
-            ? {
-                tokensIn: response.usage.input_tokens ?? 0,
-                tokensOut: response.usage.output_tokens ?? 0,
-              }
-            : undefined,
+          response.usage ? openAiUsage(response.usage) : undefined,
         );
       }
 
@@ -329,12 +361,7 @@ export class OpenAILlmClient implements LlmClient {
       // malformed success / parse failure still attributes the burned tokens
       // (FR-W0-001) — threaded only when the body actually reports one
       // ("absent means no attributable tokens", types/errors.ts).
-      const usage = response.usage
-        ? {
-            tokensIn: response.usage.input_tokens ?? 0,
-            tokensOut: response.usage.output_tokens ?? 0,
-          }
-        : undefined;
+      const usage = response.usage ? openAiUsage(response.usage) : undefined;
 
       const messageBlock = output.find(isMessageBlock);
       const textPart = messageBlock?.content.find(isOutputTextPart);
@@ -382,8 +409,9 @@ export class OpenAILlmClient implements LlmClient {
 
       return ok({
         output: parsed.data as O,
-        tokensIn: usage?.tokensIn ?? 0,
-        tokensOut: usage?.tokensOut ?? 0,
+        // A body without a `usage` block reported no tokens at all — the same
+        // "absent means nothing attributable" contract the error arms use.
+        ...(usage ?? NO_TOKENS),
         thinking,
         rawText,
       });
@@ -422,7 +450,7 @@ export class OpenAILlmClient implements LlmClient {
       { role: "user", content: req.user },
     ];
 
-    const provider: import("./tool-use-loop.js").ToolLoopProvider = {
+    const provider: ToolLoopProvider = {
       call: async (_turn: number) => {
         const body: Record<string, unknown> = {
           model: this.modelOverride ?? req.model,
@@ -451,9 +479,7 @@ export class OpenAILlmClient implements LlmClient {
             async () => {
               const r = await this.postResponses(body, req.signal ?? ctx.signal);
               if (r.ok) {
-                const tokensIn = r.response.usage?.input_tokens ?? 0;
-                const tokensOut = r.response.usage?.output_tokens ?? 0;
-                setLlmUsageAttributes(tokensIn, tokensOut);
+                setLlmUsageAttributes(openAiUsage(r.response.usage));
                 setLlmResponseAttributes({
                   model: r.response.model,
                   id: r.response.id,
@@ -477,8 +503,7 @@ export class OpenAILlmClient implements LlmClient {
 
         const response = httpResult.response;
         const output: readonly ResponsesOutputItem[] = response.output ?? [];
-        const tokensIn = response.usage?.input_tokens ?? 0;
-        const tokensOut = response.usage?.output_tokens ?? 0;
+        const turnUsage = openAiUsage(response.usage);
 
         // `response.status === "failed"` carries the API's own error.code /
         // error.message — classify it explicitly (retriability from the code)
@@ -491,7 +516,7 @@ export class OpenAILlmClient implements LlmClient {
           return responseFailedError(
             response,
             req.nodeId,
-            response.usage ? { tokensIn, tokensOut } : undefined,
+            response.usage ? turnUsage : undefined,
           );
         }
 
@@ -511,7 +536,7 @@ export class OpenAILlmClient implements LlmClient {
             retriability: "non-retriable",
             nodeId: req.nodeId,
             message: `Responses API returned an incomplete (truncated) response (${incompleteDetail(response)}): ${truncateErrorBody(JSON.stringify(response))}`,
-            usage: { tokensIn, tokensOut },
+            usage: turnUsage,
           });
         }
 
@@ -537,15 +562,14 @@ export class OpenAILlmClient implements LlmClient {
             retriability: "retriable",
             nodeId: req.nodeId,
             message: `Responses API returned no tool calls and no text output (response.status: ${response.status ?? "unknown"}): ${truncateErrorBody(JSON.stringify(response))}`,
-            ...(response.usage ? { usage: { tokensIn, tokensOut } } : {}),
+            ...(response.usage ? { usage: turnUsage } : {}),
           });
         }
 
         return ok({
           toolCalls,
           textContent,
-          tokensIn,
-          tokensOut,
+          ...turnUsage,
           thinking: reasoning,
         });
       },

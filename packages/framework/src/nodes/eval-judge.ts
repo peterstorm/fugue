@@ -20,6 +20,7 @@ import { JUDGE_SYSTEM_FRAME, resolveRubric, assembleJudgeUserMessage } from "./e
 import { enrichLlmSpan } from "../tracing/index.js";
 import { dispatchEvent } from "../observer/dispatch.js";
 import { safeErrorMessage } from "../types/safe-error.js";
+import { logFrameworkWithoutThrowing } from "../logger.js";
 
 // Re-export types from their canonical home in `types/`.
 export type { EvalJudgeResult, EvalJudgeNodeDef, EvalJudgeNodeConfig, EvalJudgeRubric } from "../types/eval-judge.js";
@@ -53,12 +54,25 @@ const parseEvalJudgeThreshold = (threshold: number | undefined): number => {
 /** Default model for eval-judge (GPT-4o-mini). */
 const DEFAULT_JUDGE_MODEL = "gpt-4o-mini";
 
-/** Judge diagnostics are secondary to the promised total result seam. */
+/**
+ * Judge diagnostics are secondary to the promised total result seam — but they
+ * must not VANISH.
+ *
+ * A throwing `ctx.logger` is a caller-supplied hazard (a hostile or misconfigured
+ * sink), and swallowing it outright would erase the only record that the judge
+ * degraded. Fall back to the framework logger, which is a different sink and
+ * itself total: the breadcrumb survives unless both sinks fail, and the caller
+ * still receives the already-decided `EvalJudgeResult` either way.
+ */
 const warnWithoutThrowing = (ctx: NodeContext, message: string): void => {
   try {
     ctx.logger.warn(message);
-  } catch {
-    // The caller still receives the already-decided EvalJudgeResult.
+  } catch (loggerError) {
+    logFrameworkWithoutThrowing(
+      "warn",
+      `[eval-judge] ctx.logger.warn threw; original warning: ${message}`,
+      { loggerError: safeErrorMessage(loggerError) },
+    );
   }
 };
 
@@ -244,8 +258,8 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
             model,
             system: JUDGE_SYSTEM_FRAME,
             user: userMessage,
-            tokensIn: result.value.tokensIn,
-            tokensOut: result.value.tokensOut,
+            // `LlmResponse` extends `TokenUsage`, so the response IS the usage.
+            usage: result.value,
             thinking: result.value.thinking,
             contentFilter: ctx.contentFilter,
           });

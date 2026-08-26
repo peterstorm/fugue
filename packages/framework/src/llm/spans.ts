@@ -17,9 +17,12 @@ import {
   GEN_AI_TOOL_CALL_RESULT,
   GEN_AI_TOOL_NAME,
   GEN_AI_TOOL_TYPE,
+  GEN_AI_USAGE_CACHE_READ_TOKENS,
+  GEN_AI_USAGE_CACHE_WRITE_TOKENS,
   GEN_AI_USAGE_INPUT_TOKENS,
   GEN_AI_USAGE_OUTPUT_TOKENS,
 } from "../tracing/semantic-conventions.js";
+import type { TokenUsage } from "../types/token-usage.js";
 
 export interface LlmSpanMeta {
   readonly provider: string;
@@ -93,12 +96,23 @@ export async function withToolSpan<T>(
   });
 }
 
-/** Set token-usage attributes on the currently-active LLM span. */
-export const setLlmUsageAttributes = (tokensIn: number, tokensOut: number): void => {
+/**
+ * Set token-usage attributes on the currently-active LLM span.
+ *
+ * Takes the whole `TokenUsage` rather than two counts so a provider adapter
+ * cannot report raw tokens to a span while dropping the cache split. The two
+ * cache attributes are emitted UNCONDITIONALLY, including as zeroes: a query
+ * for "calls where caching did nothing" needs the attribute present to be
+ * answerable, and an absent attribute is indistinguishable from an old
+ * exporter.
+ */
+export const setLlmUsageAttributes = (usage: TokenUsage): void => {
   const span = trace.getActiveSpan();
   if (!span) return;
-  span.setAttribute(GEN_AI_USAGE_INPUT_TOKENS, tokensIn);
-  span.setAttribute(GEN_AI_USAGE_OUTPUT_TOKENS, tokensOut);
+  span.setAttribute(GEN_AI_USAGE_INPUT_TOKENS, usage.tokensIn);
+  span.setAttribute(GEN_AI_USAGE_OUTPUT_TOKENS, usage.tokensOut);
+  span.setAttribute(GEN_AI_USAGE_CACHE_WRITE_TOKENS, usage.cacheWriteTokens);
+  span.setAttribute(GEN_AI_USAGE_CACHE_READ_TOKENS, usage.cacheReadTokens);
 };
 
 export interface LlmRequestParams {

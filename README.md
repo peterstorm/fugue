@@ -4,7 +4,7 @@ DAG-shaped, durable runtime for LLM-bearing workflows. Typed orchestration of mu
 
 ## Packages
 
-The framework and its adapters version in lockstep (currently **0.2.0**) and publish under the `@fuguejs/*` scope.
+The framework and its adapters version in lockstep (currently **0.5.1**) and publish under the `@fuguejs/*` scope.
 
 | Package | Name | Description |
 |---------|------|-------------|
