@@ -71,7 +71,7 @@ type ConversationCachePolicy =
 - Enabling caching can no longer corrupt budget accounting, because the figure the budget reads is the complete prompt count on both providers.
 - The two-number token pair is gone from the framework's vocabulary; adding a further usage dimension is a change to one value type rather than to fourteen call sites.
 - Usage records written before this change parse into a complete `TokenUsage` with zeroed cache fields (the wire schema defaults them). No checkpoint migration, no format version bump.
-- OpenAI honours the policy only in what it *reports*: the provider offers no request-side cache control, so the policy is a no-op on request construction there. This asymmetry is pinned by a regression test in each client.
+- **OpenAI ignores the policy entirely.** The provider offers no request-side cache control and caches automatically, so a declared policy changes neither what that client sends nor what it reports — `cacheReadTokens` reflects whatever the provider did on its own, independent of the field. These are two separate facts, not one causal one: the policy is a request-construction no-op there, *and* the client reports `cached_tokens` regardless. Both halves are pinned by regression tests (request-body identity with and without a policy; usage normalisation with no policy declared).
 - Placements fugue does not emit today (multiple independent cached prefixes; a breakpoint mid-history) require a new union member. Accepted: the two shapes cover the framework's node kinds, and a third can be added without touching any caller.
 - A turn that appends more than 20 content blocks breaks the provider's lookback chain. Documented, and it surfaces as an inert-policy warning rather than as silence.
 

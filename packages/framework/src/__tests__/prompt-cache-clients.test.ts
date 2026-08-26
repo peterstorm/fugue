@@ -28,6 +28,7 @@ import {
 import { makeNodeContext } from "../shared/index.js";
 import { usageOfError } from "../types/errors.js";
 import type { ConversationCachePolicy, SingleShotCachePolicy } from "../types/llm.js";
+import type { FrameworkError } from "../types/errors.js";
 import type { DagId, RunId } from "../types/ids.js";
 
 /** Tool loops need a NodeContext; nothing in these tests reaches its llm field. */
@@ -193,6 +194,68 @@ describe("Anthropic usage normalisation — FR-PC-005", () => {
       cacheWriteTokens: 0,
       cacheReadTokens: 0,
     });
+  });
+});
+
+
+describe("Anthropic error arms carry the cache split — FR-PC-006", () => {
+  // The OpenAI mirror of this lives in the usage-normalisation block below.
+  // Both matter for the same reason: a failed turn's cached tokens were still
+  // billed, so dropping them from the error is the budget under-count this
+  // whole normalisation exists to prevent.
+  const cachedUsage = anthropicUsageBlock(10, 5, 300, 600);
+
+  const failing = (response: Anthropic.Message) => {
+    const create: CreateFn = async () => response;
+    return new AnthropicLlmClient({ messages: { create } } as never);
+  };
+
+  const send = async (client: AnthropicLlmClient) =>
+    client.sendStructured({
+      system: "SYS",
+      user: "hello",
+      model: "claude-test",
+      schema,
+      nodeId: N("n1"),
+      cache: { kind: "static-prefix", ttl: "5m" },
+    });
+
+  const expectCacheSplitOnError = (error: FrameworkError): void => {
+    const usage = usageOfError(error);
+    expect(usage).toBeDefined();
+    if (usage === undefined) return;
+    // 10 uncached + 300 written + 600 read — the INCLUSIVE total, as on success.
+    expect(usage.tokensIn).toBe(910);
+    expect(usage.cacheWriteTokens).toBe(300);
+    expect(usage.cacheReadTokens).toBe(600);
+  };
+
+  it("reports it on the missing-tool_use arm", async () => {
+    const textOnly = {
+      id: "msg_1",
+      type: "message",
+      role: "assistant",
+      model: "claude-test",
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      content: [{ type: "text", text: "no tool call here", citations: null }],
+      usage: cachedUsage,
+      container: null,
+      context_management: null,
+    } as unknown as Anthropic.Message;
+
+    const result = await send(failing(textOnly));
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expectCacheSplitOnError(result.error);
+  });
+
+  it("reports it on the schema-validation-failure arm", async () => {
+    // A tool_use block whose input does not match the schema.
+    const result = await send(failing(structuredOutputResponse(cachedUsage, { wrong: 1 })));
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expectCacheSplitOnError(result.error);
   });
 });
 

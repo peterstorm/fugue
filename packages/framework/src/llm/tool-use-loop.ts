@@ -178,27 +178,30 @@ export const toolUseLoop = async <O>(
   // Correlation triple for usage attribution: stamped onto every error and onto
   // the `llm.usage-unattributed` warning, so burned tokens are joinable to a run.
   const corr = { nodeId: config.nodeId, runId: ctx.runId, dagId: ctx.dagId } as const;
+  /**
+   * Every terminal error the loop produces carries the same two things: the
+   * cross-turn usage accumulated so far, and the correlation triple. Wrapping
+   * once means the seven exit paths below differ only in WHAT went wrong —
+   * and a future change to the wrapping contract is one edit, not seven.
+   *
+   * `accumulated` is read at call time, so each site still attributes exactly
+   * the tokens burned when it fires.
+   */
+  const fail = (error: FrameworkError): Result<never, FrameworkError> =>
+    err(withAccumulatedUsage(error, accumulated, corr));
 
   for (let turn = 0; turn < config.maxIterations; turn++) {
     // Deadline check
     if (nowFn() >= deadline) {
-      return err(
-        withAccumulatedUsage(
-          {
-            kind: "transient",
-            nodeId: config.nodeId,
-            message: `Total deadline of ${config.deadlineMs}ms exceeded after ${turn} turns`,
-          },
-          accumulated,
-          corr,
-        ),
-      );
+      return fail({
+        kind: "transient",
+        nodeId: config.nodeId,
+        message: `Total deadline of ${config.deadlineMs}ms exceeded after ${turn} turns`,
+      });
     }
     // Abort check
     if (config.signal?.aborted || ctx.signal?.aborted) {
-      return err(
-        withAccumulatedUsage({ kind: "aborted", reason: "signal" }, accumulated, corr),
-      );
+      return fail({ kind: "aborted", reason: "signal" });
     }
 
     // Call provider for one turn
@@ -206,7 +209,7 @@ export const toolUseLoop = async <O>(
     if (!turnResult.ok) {
       // The provider's error is for the in-flight turn — its own `usage` (if
       // any) covers that turn, and we add the prior-turn totals on top.
-      return err(withAccumulatedUsage(turnResult.error, accumulated, corr));
+      return fail(turnResult.error);
     }
 
     const t = turnResult.value;
@@ -216,18 +219,12 @@ export const toolUseLoop = async <O>(
     // No tool calls = final answer
     if (t.toolCalls.length === 0) {
       if (t.textContent === undefined) {
-        return err(
-          withAccumulatedUsage(
-            {
-              kind: "node-crash",
-              retriability: "retriable",
-              nodeId: config.nodeId,
-              message: "Final turn had no text content to parse",
-            },
-            accumulated,
-            corr,
-          ),
-        );
+        return fail({
+          kind: "node-crash",
+          retriability: "retriable",
+          nodeId: config.nodeId,
+          message: "Final turn had no text content to parse",
+        });
       }
       return parseFinalAnswer(t.textContent, config, accumulated, lastThinking);
     }
@@ -242,51 +239,33 @@ export const toolUseLoop = async <O>(
     try {
       results = await dispatchToolCallsWithSpans(t.toolCalls, config.tools, ctx, { model: config.model });
     } catch (e) {
-      return err(
-        withAccumulatedUsage(
-          {
-            kind: "node-crash",
-            retriability: "non-retriable",
-            nodeId: config.nodeId,
-            message: `tool dispatch threw: ${safeErrorMessage(e)}`,
-          },
-          accumulated,
-          corr,
-        ),
-      );
+      return fail({
+        kind: "node-crash",
+        retriability: "non-retriable",
+        nodeId: config.nodeId,
+        message: `tool dispatch threw: ${safeErrorMessage(e)}`,
+      });
     }
     try {
       provider.appendToolResults(results);
     } catch (e) {
-      return err(
-        withAccumulatedUsage(
-          {
-            kind: "node-crash",
-            retriability: "non-retriable",
-            nodeId: config.nodeId,
-            message: `provider.appendToolResults threw: ${safeErrorMessage(e)}`,
-          },
-          accumulated,
-          corr,
-        ),
-      );
+      return fail({
+        kind: "node-crash",
+        retriability: "non-retriable",
+        nodeId: config.nodeId,
+        message: `provider.appendToolResults threw: ${safeErrorMessage(e)}`,
+      });
     }
   }
 
   // Iteration limit exhausted — non-retriable. Tokens burned across every turn
   // of the (now-exhausted) loop must still be attributed (FR-W0-001).
-  return err(
-    withAccumulatedUsage(
-      {
-        kind: "node-crash",
-        nodeId: config.nodeId,
-        message: `Tool-call iteration limit (${config.maxIterations}) reached`,
-        retriability: "non-retriable",
-      },
-      accumulated,
-      corr,
-    ),
-  );
+  return fail({
+    kind: "node-crash",
+    nodeId: config.nodeId,
+    message: `Tool-call iteration limit (${config.maxIterations}) reached`,
+    retriability: "non-retriable",
+  });
 };
 
 // ---------------------------------------------------------------------------

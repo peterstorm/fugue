@@ -106,9 +106,18 @@ export interface LlmRequest<O> {
   readonly signal?: AbortSignal;
   /**
    * Provider-side prompt caching. Omitted ≡ `{ kind: "none" }` ≡ no
-   * `cache_control` on the wire. Anthropic honours it; OpenAI caches
-   * automatically with no request-side control, so the policy only shapes
-   * what that client REPORTS (`cacheReadTokens`), never what it sends.
+   * `cache_control` on the wire.
+   *
+   * Anthropic honours it. **OpenAI ignores this field entirely** — it caches
+   * automatically and exposes no request-side control, so declaring a policy
+   * changes neither what that client sends nor what it reports. Its
+   * `cacheReadTokens` reflects whatever the provider did on its own, with or
+   * without a policy here.
+   *
+   * The field is still meaningful on an OpenAI-backed node, one layer up: the
+   * pipeline compares the DECLARED policy against the usage that actually came
+   * back to detect an inert policy (FR-PC-009) and to stamp
+   * `ai.prompt_cache.policy` on the span. That check is provider-agnostic.
    */
   readonly cache?: SingleShotCachePolicy;
   /**

@@ -33,21 +33,39 @@ import type { CacheTtl, ConversationCachePolicy } from "../types/llm.js";
 export const MAX_CACHE_BREAKPOINTS = 4;
 
 /**
- * Where a request's breakpoints go. Deliberately not a list of indices: the
- * two placements fugue emits are structural (end of system, end of the latest
- * turn), so booleans keep an out-of-range or out-of-order index unrepresentable.
+ * Where a request's breakpoints go.
+ *
+ * Deliberately not a list of indices: the two placements fugue emits are
+ * structural (end of system, end of the latest turn), so booleans keep an
+ * out-of-range or out-of-order index unrepresentable.
+ *
+ * Deliberately a UNION rather than three independent fields: a TTL belongs to
+ * the breakpoints that carry it, so "no breakpoints but a TTL" and "a
+ * breakpoint with no TTL to put on it" are both nonsense. Splitting on
+ * `systemBreakpoint` makes each unrepresentable instead of merely unproduced —
+ * the same treatment `BudgetDecision` and `AdmitDecision` get in the host meter.
+ * A turn breakpoint without a system one is also excluded: the system prefix is
+ * the cheapest and largest cacheable span, so caching a turn while leaving it
+ * uncached is never the intent.
  */
-export interface PromptCachePlan {
-  /** Emit a breakpoint at the end of the system block — caches tools + system. */
-  readonly systemBreakpoint: boolean;
-  /**
-   * Roll a breakpoint onto the last block of each completed turn, so the next
-   * turn reads the prefix this one wrote. Tool loops only.
-   */
-  readonly turnBreakpoint: boolean;
-  /** TTL carried by every breakpoint this plan emits; `null` when it emits none. */
-  readonly ttl: CacheTtl | null;
-}
+export type PromptCachePlan =
+  | {
+      /** Emit a breakpoint at the end of the system block — caches tools + system. */
+      readonly systemBreakpoint: false;
+      readonly turnBreakpoint: false;
+      /** No breakpoints, so there is no lifetime to carry. */
+      readonly ttl: null;
+    }
+  | {
+      readonly systemBreakpoint: true;
+      /**
+       * Roll a breakpoint onto the last block of each completed turn, so the
+       * next turn reads the prefix this one wrote. Tool loops only.
+       */
+      readonly turnBreakpoint: boolean;
+      /** TTL carried by every breakpoint this plan emits. */
+      readonly ttl: CacheTtl;
+    };
 
 /** The plan that emits nothing — today's behaviour, and the default. */
 export const NO_CACHE_PLAN: PromptCachePlan = Object.freeze({
@@ -66,14 +84,15 @@ export const planPromptCache = (
   policy === undefined
     ? NO_CACHE_PLAN
     : match(policy)
+        .returnType<PromptCachePlan>()
         .with({ kind: "none" }, () => NO_CACHE_PLAN)
         .with({ kind: "static-prefix" }, ({ ttl }) => ({
-          systemBreakpoint: true,
+          systemBreakpoint: true as const,
           turnBreakpoint: false,
           ttl,
         }))
         .with({ kind: "conversation" }, ({ ttl }) => ({
-          systemBreakpoint: true,
+          systemBreakpoint: true as const,
           turnBreakpoint: true,
           ttl,
         }))

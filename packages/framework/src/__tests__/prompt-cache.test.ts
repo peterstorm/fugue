@@ -80,14 +80,11 @@ describe("INV-PC-5 — a plan never approaches the provider's breakpoint cap", (
     );
   });
 
-  it("emits a TTL exactly when it emits a breakpoint", () => {
-    fc.assert(
-      fc.property(fc.option(arbPolicy, { nil: undefined }), (policy) => {
-        const plan = planPromptCache(policy);
-        expect(plan.ttl !== null).toBe(planRequestsCaching(plan));
-      }),
-    );
-  });
+  // "A TTL is emitted exactly when a breakpoint is" used to be a property test
+  // here. It is now a property of the TYPE: `PromptCachePlan` is a union whose
+  // no-breakpoint arm fixes `ttl: null` and whose breakpoint arm fixes
+  // `ttl: CacheTtl`, so a plan that disagrees cannot be constructed. A test that
+  // can no longer fail is noise — the guarantee moved up, it did not disappear.
 });
 
 describe("cachePolicyLabel", () => {

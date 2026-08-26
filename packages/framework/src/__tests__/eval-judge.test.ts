@@ -16,6 +16,7 @@ import type { NodeContext } from "../../src/types/node.js";
 import type { LlmClient } from "../../src/types/llm.js";
 import { ok, err } from "../../src/types/result.js";
 import { stubSendWithTools } from "./_llm-mocks.js";
+import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
 
 // --- Helpers ---
 
@@ -406,6 +407,35 @@ describe("createEvalJudgeNode", () => {
 
       expect(result.outcome).toBe("skipped-llm-failure");
       expect(result.reason).toContain("No LLM client available");
+    });
+
+    test("a throwing logger does not ERASE the warning — it falls back to the framework logger", async () => {
+      // The result seam surviving (above) is only half the contract. If the
+      // diagnostic vanished with it, a judge could degrade silently and the
+      // only record of it would be gone — which is why the fallback exists.
+      const frameworkWarnings: string[] = [];
+      setFrameworkLogger({
+        debug: () => {},
+        info: () => {},
+        warn: (message: string) => { frameworkWarnings.push(message); },
+        error: () => {},
+      });
+      try {
+        const node = createEvalJudgeNode({ id: N("j"), criteria: [N("x")] });
+        await node.run("in", "out", makeCtx({
+          logger: {
+            warn: () => { throw new Error("logger transport down"); },
+            error: () => {},
+          },
+        }));
+
+        const breadcrumb = frameworkWarnings.find((m) => m.includes("ctx.logger.warn threw"));
+        expect(breadcrumb).toBeDefined();
+        // The ORIGINAL message rides along, not just the fact that logging failed.
+        expect(breadcrumb).toContain("No LLM client available");
+      } finally {
+        __resetFrameworkLogger();
+      }
     });
 
     test("cyclic DAG data cannot escape during prompt assembly", async () => {
