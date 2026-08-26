@@ -103,6 +103,20 @@ gates, freshness-aware state management, and production observability.
 | **PersistencePolicy** | Combinable predicates (`alwaysOn`, `errorOnly`, `ratio`, `hadRetry`, `anyOf`, `allOf`, `custom`) that decide whether a run's events are flushed to the exporter. |
 | **Tracer** | OTel trace interface. Carries infrastructure telemetry (latency, token costs) — separate from Observer domain events. |
 
+### LLM Token Usage & Prompt Caching
+
+**Two different caches, and the distinction is load-bearing.** The `cache` capability is fugue's own **Response Cache** — it stores a node's parsed *output* keyed by cache key + prompt fingerprint, and a hit means no LLM call happens at all. The **Prompt Cache** below is the *provider's*, stores a request *prefix*, and a hit still makes the call — it just bills most of the prompt at a tenth of the rate. They are independent: a run can hit both, either, or neither.
+
+| Term | Definition |
+|------|-----------|
+| **Token Usage** | The four figures every LLM call reports: `tokensIn`, `tokensOut`, `cacheWriteTokens`, `cacheReadTokens`. One value type (`types/token-usage.ts`) shared by `LlmResponse`, the error `usage` field, the tool loop's cross-turn accumulator, span enrichment, cost and the host meter. Combined with `addUsage` (a monoid over `NO_TOKENS`). |
+| **`tokensIn`** | ALL prompt tokens — uncached + cache-write + cache-read — normalised across providers. Anthropic reports its `input_tokens` as the UNCACHED REMAINDER and is summed; OpenAI's is already inclusive and passes through. The uncached remainder is DERIVED (`uncachedInputTokens`), never stored, so `total !== sum(parts)` is unrepresentable. |
+| **Prompt Cache** | The provider-side cache of a request prefix. A prefix match over the rendered `tools → system → messages` order: any byte change in the prefix invalidates everything after it. Distinct from the Response Cache (see above). |
+| **Prompt Cache Policy** | What the caller declares is stable: `none` \| `static-prefix` \| `conversation`. `conversation` is available only on a tool-loop request — a single-shot call has no second turn to read what the first wrote, so asking for it is a compile error. Opt-in everywhere; omitted ≡ `none` ≡ byte-identical to a pre-caching request. |
+| **Cache Breakpoint** | A `cache_control` marker ending a cacheable prefix. The framework derives placement from the policy (ADR-0081); callers never place one. `static-prefix` emits one (end of system, which caches the tool specs with it); `conversation` adds a ROLLING one on the latest turn, applied to a copy on the way to the wire so the stored history never carries it. Provider cap: 4 per request; fugue emits at most 2. |
+| **Cache TTL** | `"5m"` (the provider default, expressed by omitting `ttl`) or `"1h"`. Sets the write premium: 1.25x and 2.0x of the base input rate. Reads are ~0.1x either way, so `5m` breaks even at two requests and `1h` at three. |
+| **Inert Cache Policy** | A call that DECLARED a policy and came back reporting neither a write nor a read. The provider caches nothing and raises nothing when the prefix is below the model's minimum cacheable size (512–4096 tokens, model-dependent) or when a volatile byte breaks the prefix match, so the pipeline warns once per node and stamps `ai.prompt_cache.effective=false` on the span. "Caching is on" and "caching is working" are different claims. |
+
 ### Queue & Scheduling
 
 | Term | Definition |

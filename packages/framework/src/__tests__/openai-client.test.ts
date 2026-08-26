@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { tokensOnly } from "../types/token-usage.js";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { z } from "zod";
 import { OpenAILlmClient } from "../llm/openai-client.js";
@@ -283,7 +284,7 @@ describe("OpenAILlmClient.sendStructured", () => {
         expect(result.error.retriability).toBe("non-retriable");
         // Fb: the malformed success still burned tokens — the in-scope
         // response.usage must ride the error (FR-W0-001), not be dropped.
-        expect(result.error.usage).toEqual({ tokensIn: 3, tokensOut: 0 });
+        expect(result.error.usage).toEqual({ ...tokensOnly(3, 0) });
       }
     }
   });
@@ -313,7 +314,7 @@ describe("OpenAILlmClient.sendStructured", () => {
         expect(result.error.message).toContain("prompt was rejected");
         // The failed body reported usage — it rides the error so the burned
         // tokens stay attributable (FR-W0-001).
-        expect(result.error.usage).toEqual({ tokensIn: 3, tokensOut: 0 });
+        expect(result.error.usage).toEqual({ ...tokensOnly(3, 0) });
       }
     }
   });
@@ -369,7 +370,7 @@ describe("OpenAILlmClient.sendStructured", () => {
       if (result.error.kind === "transient") {
         // A rate-limited turn still burned tokens — the transient arm must
         // carry them so budget settlement sees them (FR-W0-001).
-        expect(result.error.usage).toEqual({ tokensIn: 5, tokensOut: 1 });
+        expect(result.error.usage).toEqual({ ...tokensOnly(5, 1) });
       }
     }
   });
@@ -612,7 +613,7 @@ describe("OpenAILlmClient.sendStructured", () => {
       expect(result.error.message).toMatch(/Not valid JSON/);
       // Fb: the failed parse still burned tokens — the in-scope
       // response.usage rides the error (FR-W0-001).
-      expect(result.error.usage).toEqual({ tokensIn: 1, tokensOut: 1 });
+      expect(result.error.usage).toEqual({ ...tokensOnly(1, 1) });
     }
 
     // …and when the body omits usage entirely, none is fabricated ("absent
@@ -650,7 +651,7 @@ describe("OpenAILlmClient.sendStructured", () => {
       expect(result.error.message).toMatch(/Schema validation failed/);
       // Fb: the failed validation still burned tokens — the in-scope
       // response.usage rides the error (FR-W0-001).
-      expect(result.error.usage).toEqual({ tokensIn: 1, tokensOut: 1 });
+      expect(result.error.usage).toEqual({ ...tokensOnly(1, 1) });
     }
   });
 
@@ -844,7 +845,7 @@ describe("OpenAILlmClient.sendWithTools", () => {
         expect(result.error.message).toContain("response.status: failed");
         expect(result.error.message).toContain("error.code: invalid_prompt");
         expect(result.error.message).toContain("prompt was rejected");
-        expect(result.error.usage).toEqual({ tokensIn: 7, tokensOut: 2 });
+        expect(result.error.usage).toEqual({ ...tokensOnly(7, 2) });
       }
     }
   });
@@ -920,7 +921,7 @@ describe("OpenAILlmClient.sendWithTools", () => {
         expect(result.error.message).toContain("error.code: rate_limit_exceeded");
         // The rate-limited turn's tokens must not escape budget accounting —
         // the transient arm carries them through the loop (FR-W0-001).
-        expect(result.error.usage).toEqual({ tokensIn: 4, tokensOut: 1 });
+        expect(result.error.usage).toEqual({ ...tokensOnly(4, 1) });
       }
     }
   });
@@ -950,7 +951,7 @@ describe("OpenAILlmClient.sendWithTools", () => {
         // The truncated body snapshot rides along for diagnosis…
         expect(result.error.message).toContain('"status":"cancelled"');
         // …and the turn's usage stays attributed (FR-W0-001).
-        expect(result.error.usage).toEqual({ tokensIn: 3, tokensOut: 0 });
+        expect(result.error.usage).toEqual({ ...tokensOnly(3, 0) });
       }
     }
   });
@@ -1013,7 +1014,7 @@ describe("OpenAILlmClient.sendWithTools", () => {
         // token cap from a content filter without a body dump.
         expect(result.error.message).toContain("reason: max_output_tokens");
         // The truncated turn still burned tokens — they must be attributed.
-        expect(result.error.usage).toEqual({ tokensIn: 9, tokensOut: 4 });
+        expect(result.error.usage).toEqual({ ...tokensOnly(9, 4) });
       }
     }
   });

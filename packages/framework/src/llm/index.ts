@@ -1,12 +1,26 @@
 export type {
+  CacheTtl,
+  ConversationCachePolicy,
   LlmClient,
   LlmRequest,
   LlmResponse,
   SendWithToolsRequest,
+  SingleShotCachePolicy,
   ToolDef,
   ToolContext,
   ToolName,
 } from "../types/llm.js";
+// Prompt-cache placement. Node authors only need the policy types above; these
+// are for adapters translating a plan into a provider's wire format.
+export type { PromptCachePlan } from "./prompt-cache.js";
+export {
+  MAX_CACHE_BREAKPOINTS,
+  NO_CACHE_PLAN,
+  cachePolicyLabel,
+  planPromptCache,
+  planRequestsCaching,
+  plannedBreakpointCount,
+} from "./prompt-cache.js";
 export type { ToolDefInput } from "./tools.js";
 export { assertValidToolName, ensureToolNames, tool, toolName } from "./tools.js";
 export {
@@ -33,5 +47,13 @@ export type {
   FakeFinalTurn,
   FakeWithToolsScript,
 } from "./fake-client.js";
-export { computeCostUsd, PRICE_TABLE } from "./cost.js";
+export {
+  CACHE_READ_MULTIPLIER,
+  CACHE_WRITE_MULTIPLIER,
+  computeCostUsd,
+  costRatesFor,
+  costUsd,
+  PRICE_TABLE,
+} from "./cost.js";
+export type { CostRates } from "./cost.js";
 export { zodToJsonSchema } from "./zod-schema.js";

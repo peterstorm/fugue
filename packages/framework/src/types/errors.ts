@@ -13,6 +13,7 @@ import type { RunId, NodeId } from "./ids.js";
 // `FrameworkError` from this module) — safe: type imports erase at compile
 // time, so no runtime cycle exists.
 import type { Capability } from "./node.js";
+import type { TokenUsage } from "./token-usage.js";
 import { safeDiagnosticRender, safeErrorMessage } from "./safe-error.js";
 
 /** A single unsatisfied capability declaration: which node required which capability. */
@@ -32,10 +33,7 @@ export type MissingCapability = {
  * 100% attribution). Absent (`undefined`) means the failure consumed no
  * attributable tokens (e.g. an upfront validation error before any turn ran).
  */
-export type PartialTokenUsage = {
-  readonly tokensIn: number;
-  readonly tokensOut: number;
-};
+export type PartialTokenUsage = TokenUsage;
 
 // The `checkpoint-write-failed` address ADTs are re-exported here so consumers
 // keep reaching the whole error vocabulary through this module.
@@ -358,7 +356,20 @@ const persistedBrandedId = <T>(parse: (raw: string) => { readonly ok: true; read
 
 const PersistedNodeIdSchema = persistedBrandedId(tryNodeId);
 const PersistedRunIdSchema = persistedBrandedId(tryRunId);
-const persistedUsageSchema = z.object({ tokensIn: z.number(), tokensOut: z.number() }).optional();
+// Parse, don't validate: a usage record written before prompt caching existed
+// carries only the two token counts. The cache figures default to zero on the
+// WIRE schema only — which is exactly what their absence means — so the parsed
+// value is a complete `TokenUsage` and no in-memory consumer needs an
+// `undefined` branch. The in-memory type keeps all four fields REQUIRED, so no
+// construction site can silently omit one (NFR-PC-001).
+const persistedUsageSchema = z
+  .object({
+    tokensIn: z.number(),
+    tokensOut: z.number(),
+    cacheWriteTokens: z.number().optional().default(0),
+    cacheReadTokens: z.number().optional().default(0),
+  })
+  .optional();
 const persistedRetriabilitySchema = z.enum(["retriable", "non-retriable"]);
 const PersistedCapabilitySchema: z.ZodType<Capability> = z.string().transform((value) => value as Capability);
 const persistedFrameworkErrorKinds = z.enum([

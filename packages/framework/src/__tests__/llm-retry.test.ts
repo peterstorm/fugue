@@ -1,4 +1,5 @@
 import { NoopObserver } from "../observer/observer.js";
+import { tokensOnly } from "../types/token-usage.js";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { DAG_INPUT } from "../types/ids.js";
 import { describe, expect, it } from "bun:test";
@@ -33,8 +34,7 @@ const mkLlmCtx = (outputs: unknown[]): NodeContext => {
         const output = outputs[callCount++];
         return ok({
           output,
-          tokensIn: 10,
-          tokensOut: 5,
+          ...tokensOnly(10, 5),
           rawText: JSON.stringify(output),
         });
       },

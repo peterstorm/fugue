@@ -2,7 +2,12 @@ import type { z } from "zod";
 import type { NodeDef } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeId } from "../types/ids.js";
-import type { LlmClient, SendWithToolsRequest, ToolDef } from "../types/llm.js";
+import type {
+  ConversationCachePolicy,
+  LlmClient,
+  SendWithToolsRequest,
+  ToolDef,
+} from "../types/llm.js";
 import { type Result, ok } from "../types/result.js";
 import { resourceName } from "../types/freshness.js";
 import { stableHash } from "../shared/hash.js";
@@ -57,6 +62,18 @@ interface LlmWithToolsNodeConfigBase<I, O> {
   readonly computeCacheKey?: (input: I) => string;
   /** Disable the FR-021 validation retry. Default `false` (one retry). */
   readonly disableValidationRetry?: boolean;
+  /**
+   * Provider-side prompt caching. Opt-in: omitted ≡ `{ kind: "none" }` ≡ no
+   * `cache_control` on the wire, so adding this field is the only thing that
+   * can change what a DAG costs.
+   *
+   * A tool loop re-sends its system prompt, tool specs and whole accumulated
+   * history on every turn, so `{ kind: "conversation", ttl: "5m" }` is the
+   * usual choice here — it pays for itself from the second turn. Use
+   * `static-prefix` when the loop reliably answers in one turn but the prefix
+   * is shared across many calls.
+   */
+  readonly cache?: ConversationCachePolicy;
 }
 
 export type LlmWithToolsNodeConfig<I, O> =
@@ -139,6 +156,7 @@ export const createLlmWithToolsNode = <I, O>(
         promptName: config.promptName,
         promptFingerprint,
         thinking: config.thinking,
+        cache: config.cache,
       },
       () => {
         const req: SendWithToolsRequest<O> = {
@@ -151,6 +169,7 @@ export const createLlmWithToolsNode = <I, O>(
           toolChoice: config.toolChoice,
           nodeId: id,
           ...(config.thinking ? { thinking: config.thinking } : {}),
+          ...(config.cache ? { cache: config.cache } : {}),
           ...(ctx.signal ? { signal: ctx.signal } : {}),
         };
         return llmClient.sendWithTools(req, ctx);

@@ -6,6 +6,7 @@
 // it, and a draft the gauntlet rejects is repaired or the run fails closed.
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { tokensOnly } from "../../types/token-usage.js";
 import { existsSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -58,7 +59,7 @@ const scriptedLlm = (turns: readonly ComposeTurn[]): { client: LlmClient; reques
       // scripted turn that wouldn't survive the API boundary fails the test.
       const parsed = req.schema.safeParse(turn);
       if (!parsed.success) throw new Error(`scripted turn failed schema: ${parsed.error.message}`);
-      return ok({ output: parsed.data, tokensIn: 0, tokensOut: 0, rawText: JSON.stringify(turn) });
+      return ok({ output: parsed.data, ...tokensOnly(0, 0), rawText: JSON.stringify(turn) });
     },
     async sendWithTools(): Promise<never> {
       throw new Error("compose never uses tools");
@@ -185,7 +186,7 @@ describe("runCompose", () => {
         if (turn === undefined) throw new Error("scripted LLM ran out of turns");
         const parsed = req.schema.safeParse(turn);
         if (!parsed.success) throw new Error(`scripted turn failed schema: ${parsed.error.message}`);
-        return ok({ output: parsed.data, tokensIn: 0, tokensOut: 0, rawText: JSON.stringify(turn) });
+        return ok({ output: parsed.data, ...tokensOnly(0, 0), rawText: JSON.stringify(turn) });
       },
       async sendWithTools(): Promise<never> {
         throw new Error("compose never uses tools");
@@ -643,7 +644,7 @@ describe("runCompose", () => {
         }
         const parsed = req.schema.safeParse(turn);
         if (!parsed.success) throw new Error(`scripted turn failed schema: ${parsed.error.message}`);
-        return ok({ output: parsed.data, tokensIn: 0, tokensOut: 0, rawText: JSON.stringify(turn) });
+        return ok({ output: parsed.data, ...tokensOnly(0, 0), rawText: JSON.stringify(turn) });
       },
       async sendWithTools(): Promise<never> {
         throw new Error("compose never uses tools");

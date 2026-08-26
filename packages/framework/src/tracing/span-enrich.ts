@@ -6,7 +6,10 @@
  * Backend-specific exporters (e.g., MLflow) transform these into their format.
  */
 import { trace } from "@opentelemetry/api";
-import { PRICE_TABLE } from "../llm/cost.js";
+import { costBreakdownUsd, costRatesFor } from "../llm/cost.js";
+import type { CacheTtl, ConversationCachePolicy } from "../types/llm.js";
+import type { TokenUsage } from "../types/token-usage.js";
+import { isCacheInert } from "../types/token-usage.js";
 import type { ContentFilter } from "./content-filter.js";
 import { resolveContentFilter } from "./content-filter.js";
 import {
@@ -14,6 +17,10 @@ import {
   AI_LLM_HAS_THINKING,
   GEN_AI_REQUEST_MODEL,
   GEN_AI_SYSTEM,
+  AI_PROMPT_CACHE_EFFECTIVE,
+  AI_PROMPT_CACHE_POLICY,
+  GEN_AI_USAGE_CACHE_READ_TOKENS,
+  GEN_AI_USAGE_CACHE_WRITE_TOKENS,
   GEN_AI_USAGE_INPUT_TOKENS,
   GEN_AI_USAGE_OUTPUT_TOKENS,
   EVENT_GEN_AI_ASSISTANT_MESSAGE,
@@ -22,8 +29,6 @@ import {
   EVENT_LLM_COST,
 } from "./semantic-conventions.js";
 
-const getCostRates = (model: string) => PRICE_TABLE[model] ?? { inputPer1M: 0, outputPer1M: 0 };
-
 export interface EnrichLlmSpanOpts {
   readonly model: string;
   readonly promptName?: string;
@@ -31,8 +36,16 @@ export interface EnrichLlmSpanOpts {
   readonly promptHash?: string;
   readonly system: string;
   readonly user: string;
-  readonly tokensIn: number;
-  readonly tokensOut: number;
+  /** The call's token consumption, including its provider-side cache split. */
+  readonly usage: TokenUsage;
+  /**
+   * The declared cache policy's discriminant, when the call declared one. Drives
+   * `ai.prompt_cache.policy` and, with the usage, `ai.prompt_cache.effective` —
+   * the pair that makes a policy which quietly did nothing visible in a trace.
+   */
+  readonly cachePolicy?: ConversationCachePolicy["kind"];
+  /** TTL of any cache entry this call wrote — sets the write premium in the cost. */
+  readonly cacheWriteTtl?: CacheTtl;
   readonly thinking?: string;
   readonly provider?: string;
   /**
@@ -48,17 +61,28 @@ export const enrichLlmSpan = (opts: EnrichLlmSpanOpts): void => {
   const otelSpan = trace.getActiveSpan();
   if (!otelSpan) return;
 
-  const inputCost = (opts.tokensIn * getCostRates(opts.model).inputPer1M) / 1_000_000;
-  const outputCost = (opts.tokensOut * getCostRates(opts.model).outputPer1M) / 1_000_000;
-  const totalCost = inputCost + outputCost;
+  // One cost implementation, shared with `computeCostUsd` — a second copy here
+  // would have kept charging cache reads at the full input rate while the other
+  // learned the multipliers, and no test would have caught the divergence.
+  const cost = costBreakdownUsd(costRatesFor(opts.model), opts.usage, opts.cacheWriteTtl);
 
   // Flat attributes — OTel GenAI semconv for model/provider/usage, framework-owned
   // ai.llm.cost_usd for cost (not covered by the spec).
   otelSpan.setAttribute(GEN_AI_REQUEST_MODEL, opts.model);
   otelSpan.setAttribute(GEN_AI_SYSTEM, opts.provider ?? "unknown");
-  otelSpan.setAttribute(GEN_AI_USAGE_INPUT_TOKENS, opts.tokensIn);
-  otelSpan.setAttribute(GEN_AI_USAGE_OUTPUT_TOKENS, opts.tokensOut);
-  otelSpan.setAttribute(AI_LLM_COST_USD, totalCost);
+  otelSpan.setAttribute(GEN_AI_USAGE_INPUT_TOKENS, opts.usage.tokensIn);
+  otelSpan.setAttribute(GEN_AI_USAGE_OUTPUT_TOKENS, opts.usage.tokensOut);
+  otelSpan.setAttribute(GEN_AI_USAGE_CACHE_WRITE_TOKENS, opts.usage.cacheWriteTokens);
+  otelSpan.setAttribute(GEN_AI_USAGE_CACHE_READ_TOKENS, opts.usage.cacheReadTokens);
+  otelSpan.setAttribute(AI_LLM_COST_USD, cost.total);
+  if (opts.cachePolicy !== undefined) {
+    otelSpan.setAttribute(AI_PROMPT_CACHE_POLICY, opts.cachePolicy);
+    // Only meaningful for a call that ASKED for caching: for `none` there is
+    // nothing to be effective or ineffective about.
+    if (opts.cachePolicy !== "none") {
+      otelSpan.setAttribute(AI_PROMPT_CACHE_EFFECTIVE, !isCacheInert(opts.usage));
+    }
+  }
   if (opts.promptHash !== undefined) otelSpan.setAttribute("ai.prompt_hash", opts.promptHash);
 
   const filter = resolveContentFilter(opts);
@@ -90,10 +114,14 @@ export const enrichLlmSpan = (opts: EnrichLlmSpanOpts): void => {
   );
 
   // Structured event: cost breakdown (framework-specific — not in GenAI spec).
+  // `input_cost` stays the whole prompt side so existing consumers are
+  // unaffected; the two cache components refine it.
   otelSpan.addEvent(EVENT_LLM_COST, {
-    input_cost: inputCost,
-    output_cost: outputCost,
-    total_cost: totalCost,
+    input_cost: cost.uncachedInput + cost.cacheWrite + cost.cacheRead,
+    output_cost: cost.output,
+    cache_write_cost: cost.cacheWrite,
+    cache_read_cost: cost.cacheRead,
+    total_cost: cost.total,
   });
 
   // Thinking/reasoning — emit as a `gen_ai.assistant.message` event with a

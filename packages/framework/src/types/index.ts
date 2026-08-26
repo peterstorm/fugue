@@ -31,6 +31,20 @@ export type { FrameworkError, FrameworkErrorKind, MissingCapability, PartialToke
 export { formatFrameworkError, isFrameworkError, PersistedFrameworkErrorSchema, FrameworkAugmentedError, usageOfError } from "./errors.js";
 export { frameworkError } from "./error-factories.js";
 
+// ── Token usage ───────────────────────────────────────────────────────────
+// One vocabulary for LLM token consumption, shared by the clients, the
+// tool-use loop, tracing, cost, and the host's per-run meter.
+export type { TokenUsage } from "./token-usage.js";
+export {
+  NO_TOKENS,
+  addUsage,
+  cacheHitRatio,
+  isCacheInert,
+  tokensOnly,
+  totalTokens,
+  uncachedInputTokens,
+} from "./token-usage.js";
+
 // ── Total error diagnostics ───────────────────────────────────────────────
 // Total (never-throwing) inspection helpers for values caught at an `unknown`
 // boundary — safe to run while handling an earlier failure. Exported for

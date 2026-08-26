@@ -35,7 +35,8 @@ import type {
   RunId,
   NodeId,
 } from "@fuguejs/framework";
-import { err, safeErrorMessage, usageOfError } from "@fuguejs/framework";
+import { err, safeErrorMessage, totalTokens, usageOfError } from "@fuguejs/framework";
+import type { TokenUsage } from "@fuguejs/framework";
 import type { LogPort } from "../ports.js";
 import { logWithoutThrowing } from "../hitl/diagnostic-logging.js";
 import {
@@ -133,20 +134,25 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
   const record = (
     nodeId: NodeId,
     operation: "sendStructured" | "sendWithTools",
-    tokensIn: number,
-    tokensOut: number,
+    usage: TokenUsage,
   ): void => {
     // Learn the per-call estimate the concurrency reservation uses (I1).
-    reservation = learnObservedCall(reservation, tokensIn + tokensOut);
-    meter = accumulate(meter, runId, { tokensIn, tokensOut });
+    reservation = learnObservedCall(reservation, totalTokens(usage));
+    meter = accumulate(meter, runId, usage);
     const cumulative = runTotal(usageFor(meter, runId));
+    // The cache split rides on the metering line so an operator can see what a
+    // run's tokens COST, not just how many there were: a cache read is billed
+    // at ~0.1x and a write at a premium, so two runs with identical totals can
+    // differ by an order of magnitude in spend.
     logWithoutThrowing(logger, "info", "llm.metered", {
       dagId: dagId as string,
       runId: runId as string,
       nodeId: nodeId as string,
       operation,
-      tokensIn,
-      tokensOut,
+      tokensIn: usage.tokensIn,
+      tokensOut: usage.tokensOut,
+      cacheWriteTokens: usage.cacheWriteTokens,
+      cacheReadTokens: usage.cacheReadTokens,
       cumulative,
       ...(budget !== undefined ? { budget } : {}),
     });
@@ -171,13 +177,14 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
       // `sendWithTools` aggregates tokens across all turns of its loop into a
       // single LlmResponse — one accumulate per outer call matches the
       // overshoot-by-one semantics (the whole loop is the in-flight "call").
-      record(nodeId, operation, result.value.tokensIn, result.value.tokensOut);
+      // `LlmResponse` extends `TokenUsage`, so the response IS the delta.
+      record(nodeId, operation, result.value);
       return result;
     }
     // Failure path: attribute any tokens the failed call consumed, then log.
     const partial = usageOfError(result.error);
-    if (partial !== undefined && (partial.tokensIn > 0 || partial.tokensOut > 0)) {
-      record(nodeId, operation, partial.tokensIn, partial.tokensOut);
+    if (partial !== undefined && totalTokens(partial) > 0) {
+      record(nodeId, operation, partial);
     }
     logWithoutThrowing(logger, "warn", "llm.call-failed", {
       dagId: dagId as string,
@@ -185,7 +192,14 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
       nodeId: nodeId as string,
       operation,
       errorKind: result.error.kind,
-      ...(partial !== undefined ? { tokensIn: partial.tokensIn, tokensOut: partial.tokensOut } : {}),
+      ...(partial !== undefined
+        ? {
+            tokensIn: partial.tokensIn,
+            tokensOut: partial.tokensOut,
+            cacheWriteTokens: partial.cacheWriteTokens,
+            cacheReadTokens: partial.cacheReadTokens,
+          }
+        : {}),
     });
     return result;
   };

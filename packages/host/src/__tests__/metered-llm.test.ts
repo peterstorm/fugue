@@ -15,6 +15,7 @@ import {
   dagId as makeDagId,
   runId as makeRunId,
   nodeId as makeNodeId,
+  tokensOnly,
 } from "@fuguejs/framework";
 import type {
   LlmClient,
@@ -53,7 +54,7 @@ const collectLogs = () => {
 const fakeInner = (tokensIn: number, tokensOut: number) => {
   const calls: { op: string; nodeId: NodeId }[] = [];
   const respond = <O>(req: { nodeId: NodeId }, output: O): Result<LlmResponse<O>, FrameworkError> =>
-    ok({ output, tokensIn, tokensOut, rawText: "" });
+    ok({ output, ...tokensOnly(tokensIn, tokensOut), rawText: "" });
   const inner: LlmClient = {
     sendStructured: async <O>(req: LlmRequest<O>) => {
       calls.push({ op: "sendStructured", nodeId: req.nodeId });
@@ -312,15 +313,20 @@ describe("metered-llm: failed calls still burn budget (CRITICAL-1 / FR-W0-001)",
   ): LlmClient => {
     const makeErr = (nodeId: NodeId): FrameworkError =>
       kind === "aborted"
-        ? { kind: "aborted", reason: "signal", usage: { tokensIn, tokensOut } }
+        ? { kind: "aborted", reason: "signal", usage: tokensOnly(tokensIn, tokensOut) }
         : kind === "transient"
-          ? { kind: "transient", nodeId, message: "deadline", usage: { tokensIn, tokensOut } }
+          ? {
+              kind: "transient",
+              nodeId,
+              message: "deadline",
+              usage: tokensOnly(tokensIn, tokensOut),
+            }
           : {
               kind: "node-crash",
               nodeId,
               message: "iteration limit",
               retriability: "non-retriable",
-              usage: { tokensIn, tokensOut },
+              usage: tokensOnly(tokensIn, tokensOut),
             };
     return {
       sendStructured: async (req) =>

@@ -11,7 +11,9 @@
 import type { z } from "zod";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeId } from "../types/ids.js";
-import type { LlmResponse } from "../types/llm.js";
+import type { ConversationCachePolicy, LlmResponse } from "../types/llm.js";
+import { isCacheInert } from "../types/token-usage.js";
+import { cachePolicyLabel, planPromptCache } from "../llm/prompt-cache.js";
 import type { NodeContext } from "../types/node.js";
 import { type Result, ok, err } from "../types/result.js";
 import { enrichLlmSpan } from "../tracing/index.js";
@@ -35,6 +37,13 @@ export interface LlmPipelineConfig<O> {
    */
   readonly promptFingerprint?: string;
   readonly thinking?: { type: "enabled"; budgetTokens: number };
+  /**
+   * The prompt-cache policy the node declared, threaded here so the pipeline
+   * can stamp it on the span and detect an INERT policy — one that asked the
+   * provider to cache and got neither a write nor a read back. Omitted ≡ no
+   * policy declared.
+   */
+  readonly cache?: ConversationCachePolicy;
 }
 
 /**
@@ -125,17 +134,39 @@ export const runLlmCallPipeline = async <O>(
   const llmResponse = result.value;
 
   // 4. Span enrichment
+  const cachePolicy = cachePolicyLabel(config.cache);
+  // The TTL comes from the plan rather than from an `in` check on the policy —
+  // `prompt-cache.ts` owns the policy-to-placement mapping, and re-deriving it
+  // here is how the two would drift.
+  const cacheWriteTtl = planPromptCache(config.cache).ttl ?? undefined;
   enrichLlmSpan({
     model: config.model,
     promptName: config.promptName,
     promptHash: config.promptFingerprint,
     system: config.prompts.system,
     user: config.prompts.user,
-    tokensIn: llmResponse.tokensIn,
-    tokensOut: llmResponse.tokensOut,
+    usage: llmResponse,
+    cachePolicy,
+    ...(cacheWriteTtl ? { cacheWriteTtl } : {}),
     thinking: llmResponse.thinking,
     contentFilter: ctx.contentFilter,
   });
+
+  // 4b. A declared cache policy that neither wrote nor read an entry did
+  // NOTHING, and the provider says so by omission: it caches nothing and
+  // raises nothing when the prefix sits below the model's minimum cacheable
+  // size (512-4096 tokens, model-dependent) or when a volatile byte broke the
+  // prefix match. Announcing it is the difference between "caching is on" and
+  // "caching is working" — the same silent-success rule the framework applies
+  // to dropped checkpoint entries.
+  if (cachePolicy !== "none" && isCacheInert(llmResponse)) {
+    ctx.logger.warn(
+      `[${config.nodeId}] Prompt cache policy "${cachePolicy}" was declared but the provider ` +
+        `reported no cache write and no cache read (${llmResponse.tokensIn} prompt tokens). ` +
+        `Likely causes: the cacheable prefix is below this model's minimum, or content before ` +
+        `the breakpoint changes between calls.`,
+    );
+  }
 
   const output = llmResponse.output as O;
 

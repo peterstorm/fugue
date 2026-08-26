@@ -57,6 +57,21 @@ export const GEN_AI_RESPONSE_ID = "gen_ai.response.id";
 export const GEN_AI_RESPONSE_FINISH_REASONS = "gen_ai.response.finish_reasons";
 export const GEN_AI_USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens";
 export const GEN_AI_USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens";
+// Prompt-cache usage. The OTel GenAI semantic conventions define no cache
+// attribute as of this writing, so these follow the `gen_ai.usage.*` shape and
+// borrow Anthropic's field names — the vocabulary an operator reading a trace
+// already has from the provider's own usage block. Framework-owned: expect to
+// re-point them at the spec names once GenAI standardises them.
+export const GEN_AI_USAGE_CACHE_WRITE_TOKENS = "gen_ai.usage.cache_creation_input_tokens";
+export const GEN_AI_USAGE_CACHE_READ_TOKENS = "gen_ai.usage.cache_read_input_tokens";
+/** Declared prompt-cache policy for this call: `none` | `static-prefix` | `conversation`. */
+export const AI_PROMPT_CACHE_POLICY = "ai.prompt_cache.policy";
+/**
+ * False when a call DECLARED a cache policy and the provider reported neither
+ * a write nor a read — the prefix sat below the model's minimum cacheable size,
+ * or a volatile byte broke the prefix match. Absent when no policy was declared.
+ */
+export const AI_PROMPT_CACHE_EFFECTIVE = "ai.prompt_cache.effective";
 export const GEN_AI_TOOL_NAME = "gen_ai.tool.name";
 export const GEN_AI_TOOL_CALL_ID = "gen_ai.tool.call.id";
 export const GEN_AI_TOOL_TYPE = "gen_ai.tool.type";

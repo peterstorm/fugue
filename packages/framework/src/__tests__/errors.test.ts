@@ -18,6 +18,7 @@
  */
 
 import { describe, it, expect } from "bun:test";
+import { tokensOnly } from "../types/token-usage.js";
 import { match } from "ts-pattern";
 import { runId as makeRunId, nodeId as makeNodeId } from "../types/ids.js";
 import {
@@ -420,7 +421,7 @@ describe("retriabilityOf — single source of truth for the retry fast-fail fork
 describe("usageOfError — FR-W0-001 token-attribution contract", () => {
   const nid = makeNodeId("node-u");
   const rid2 = makeRunId("run-u");
-  const used = { tokensIn: 7, tokensOut: 3 };
+  const used = { ...tokensOnly(7, 3) };
 
   // The contract: ONLY `node-crash`, `transient`, and `aborted` carry `usage`
   // (the tool-use-loop variants that can burn tokens before failing); every

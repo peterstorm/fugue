@@ -1,4 +1,5 @@
 import { describe, it, expect } from "bun:test";
+import { tokensOnly } from "../types/token-usage.js";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { z } from "zod";
 import { APIUserAbortError } from "@anthropic-ai/sdk";
@@ -168,7 +169,7 @@ describe("AnthropicLlmClient.sendStructured", () => {
         // Fb: the malformed success still burned tokens — the in-scope
         // response.usage rides the error (FR-W0-001), mirroring the
         // sendWithTools terminal arms. makeTextResponse uses baseUsage().
-        expect(result.error.usage).toEqual({ tokensIn: 100, tokensOut: 50 });
+        expect(result.error.usage).toEqual({ ...tokensOnly(100, 50) });
       }
     }
   });
@@ -291,7 +292,7 @@ describe("AnthropicLlmClient.sendStructured", () => {
       expect(result.error.message).toMatch(/Schema validation failed/);
       // Fb: the failed validation still burned tokens — the in-scope
       // response.usage rides the error (FR-W0-001).
-      expect(result.error.usage).toEqual({ tokensIn: 12, tokensOut: 7 });
+      expect(result.error.usage).toEqual({ ...tokensOnly(12, 7) });
     }
   });
 
@@ -589,7 +590,7 @@ describe("AnthropicLlmClient.sendWithTools", () => {
         expect(result.error.retriability).toBe("non-retriable");
         expect(result.error.message).toContain("stop_reason: max_tokens");
         // The truncated turn still burned tokens — they must be attributed.
-        expect(result.error.usage).toEqual({ tokensIn: 100, tokensOut: 50 });
+        expect(result.error.usage).toEqual({ ...tokensOnly(100, 50) });
       }
     }
   });
@@ -614,7 +615,7 @@ describe("AnthropicLlmClient.sendWithTools", () => {
       if (result.error.kind === "node-crash") {
         expect(result.error.retriability).toBe("non-retriable");
         expect(result.error.message).toContain("stop_reason: refusal");
-        expect(result.error.usage).toEqual({ tokensIn: 100, tokensOut: 50 });
+        expect(result.error.usage).toEqual({ ...tokensOnly(100, 50) });
       }
     }
   });
@@ -641,7 +642,7 @@ describe("AnthropicLlmClient.sendWithTools", () => {
         expect(result.error.retriability).toBe("retriable");
         expect(result.error.message).toContain("stop_reason: pause_turn");
         // The turn's usage stays attributed even on the residual arm.
-        expect(result.error.usage).toEqual({ tokensIn: 100, tokensOut: 50 });
+        expect(result.error.usage).toEqual({ ...tokensOnly(100, 50) });
       }
     }
   });

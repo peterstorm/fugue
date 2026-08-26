@@ -26,6 +26,7 @@ Fugue is a DAG-shaped, durable runtime for LLM-bearing workflows. This document 
 18. [Durable Queue Integration (BullMQ)](#18-durable-queue-integration-bullmq)
 19. [Cron Scheduler with Dependencies](#19-cron-scheduler-with-dependencies)
 20. [Architecture Enforcement](#20-architecture-enforcement)
+21. [Prompt Caching](#21-prompt-caching)
 
 ---
 
@@ -922,6 +923,95 @@ Architecture degrades over time without enforcement. Import boundaries are the m
 
 ---
 
+## 21. Prompt Caching
+
+### What It Does
+
+Lets a node declare which part of its prompt is **stable**, and caches that prefix provider-side. The framework derives where the cache breakpoints go — callers never place one.
+
+```typescript
+// Single-shot: the system prompt and tool spec are shared by every call to
+// this node; the per-input user message renders after the breakpoint.
+createLlmNode({
+  id: "classify",
+  model: "claude-sonnet-4-20250514",
+  promptName: "classify",
+  system: LONG_SHARED_FRAME,
+  cache: { kind: "static-prefix", ttl: "5m" },
+  // ...
+});
+
+// Tool loop: every turn re-sends the system prompt, the tool specs AND the
+// whole accumulated history. `conversation` adds a rolling breakpoint on the
+// latest turn, so turn N reads the prefix turn N-1 wrote.
+createLlmWithToolsNode({
+  id: "triage",
+  model: "claude-sonnet-4-20250514",
+  tools: [lookupTool, escalateTool],
+  cache: { kind: "conversation", ttl: "5m" },
+  // ...
+});
+```
+
+Caching is **opt-in everywhere**. Omitting `cache` produces a request byte-identical to one built before the feature existed — adding that field is the only thing that can change what a DAG costs.
+
+### What It Catches
+
+```typescript
+// ❌ CAUGHT AT COMPILE TIME: conversation caching on a single-shot call.
+// A single call has no second turn to read what the first wrote — asking for
+// it would silently pay the write premium and never read it back.
+createLlmNode({
+  cache: { kind: "conversation", ttl: "5m" },
+  //      ^^^ Type '"conversation"' is not assignable to
+  //          '"none" | "static-prefix"'
+});
+
+// ❌ UNREPRESENTABLE: exceeding the provider's 4-breakpoint cap.
+// The two placements are structural (end of system, end of the latest turn),
+// and the conversation breakpoint ROLLS rather than accumulating — so a
+// 50-turn loop still emits exactly 2, not 51.
+
+// ❌ UNREPRESENTABLE: a breakpoint after volatile content.
+// Caching is a prefix match; anything after the last breakpoint is never
+// cached. The per-call user message renders into `messages`, which the
+// provider renders last — so this holds by construction, not by convention.
+
+// ⚠️ CAUGHT AT RUNTIME, LOUDLY: caching that silently did nothing.
+// Below the model's minimum cacheable prefix (512-4096 tokens, model-
+// dependent) the provider caches nothing, reads nothing, and raises nothing.
+[classify] Prompt cache policy "static-prefix" was declared but the provider
+reported no cache write and no cache read (310 prompt tokens). Likely causes:
+the cacheable prefix is below this model's minimum, or content before the
+breakpoint changes between calls.
+```
+
+### The Accounting Trap It Closes
+
+Anthropic reports `usage.input_tokens` as the **uncached remainder** — cached prompt tokens are excluded and reported separately. OpenAI does the opposite: its `input_tokens` **includes** them. Before this feature, `tokensIn` was assigned straight from `input_tokens`, and the host's per-run token budget derives its cumulative from that field:
+
+```typescript
+// ❌ WITHOUT NORMALISATION: enabling caching shrinks a run's apparent usage.
+// A 10,000-token prompt served 90% from cache reports input_tokens: 1000 on
+// Anthropic. The budget under-counts by 9,000 tokens per call — silently,
+// with no error raised, until the run overruns its ceiling.
+
+// ✅ WITH IT: `tokensIn` is ALWAYS the complete prompt count, on both
+// providers. The uncached remainder is derived, never stored, so a total that
+// disagrees with its parts is unrepresentable.
+usage.tokensIn            // 10_000  — every prompt token
+usage.cacheReadTokens     //  9_000  — billed at ~0.1x
+uncachedInputTokens(usage)//  1_000  — derived
+```
+
+Cost weights the three classes separately: uncached at 1.0x, cache-write at 1.25x (`5m`) or 2.0x (`1h`), cache-read at 0.1x. Traces carry `gen_ai.usage.cache_read_input_tokens`, `ai.prompt_cache.policy` and `ai.prompt_cache.effective`.
+
+### Why It Matters
+
+A ten-turn tool loop pays for its system prompt, tool specs and history ten times. Cache reads cost roughly a tenth of base input, so the break-even is two requests — but the write premium means always-on caching is *worse* for a single call over a large unique prefix. Making it a declared policy keeps the choice explicit and the cost predictable, while keeping the provider's rules (four-slot cap, prefix ordering, TTL vocabulary) out of every call site. See ADR-0081.
+
+---
+
 ## Quick Reference: Error → Feature Mapping
 
 | Failure Mode | Feature That Catches It |
@@ -946,3 +1036,7 @@ Architecture degrades over time without enforcement. Import boundaries are the m
 | Worker crash loses in-flight work | Durable queue + checkpoint resume |
 | Circular task dependency hangs scheduler | Cycle detection at reconcile |
 | `ioredis` leaks into consumer bundles | Automated import boundary enforcement |
+| Conversation caching on a single-shot call | Split single-shot / conversation policy types |
+| Cache breakpoints accumulating past the provider cap | Rolling breakpoint, applied to a copy |
+| Enabling caching silently shrinks a run's metered tokens | Provider-normalised inclusive `tokensIn` |
+| A cache policy that quietly does nothing | Inert-policy warning + `ai.prompt_cache.effective` |

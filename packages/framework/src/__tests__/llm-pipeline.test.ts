@@ -1,4 +1,5 @@
 import { describe, it, expect } from "bun:test";
+import { tokensOnly } from "../types/token-usage.js";
 import { testNodeContext } from "./_context-factories.js";
 import { z } from "zod";
 import { runLlmCallPipeline } from "../nodes/llm-pipeline.js";
@@ -28,8 +29,7 @@ const baseConfig: LlmPipelineConfig<Output> = {
 const makeLlmResponse = (output: Output): LlmResponse<Output> => ({
   output,
   rawText: JSON.stringify(output),
-  tokensIn: 10,
-  tokensOut: 20,
+  ...tokensOnly(10, 20),
 });
 
 const makeCallFn = (output: Output): LlmCallFn<Output> =>

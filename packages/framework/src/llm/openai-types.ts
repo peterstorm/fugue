@@ -73,6 +73,17 @@ export type ConversationItem =
 interface ResponsesUsage {
   readonly input_tokens?: number;
   readonly output_tokens?: number;
+  /**
+   * OpenAI caches prompt prefixes AUTOMATICALLY — there is no request-side
+   * control to mirror Anthropic's `cache_control`. The only surface is this
+   * report, and unlike Anthropic's, `input_tokens` above is INCLUSIVE of
+   * `cached_tokens`. `openAiUsage` relies on that: it passes the total through
+   * unchanged rather than summing, so the same `TokenUsage` invariant
+   * (`cacheWrite + cacheRead <= tokensIn`) holds for both providers.
+   */
+  readonly input_tokens_details?: {
+    readonly cached_tokens?: number;
+  };
 }
 
 /** The `error` object a `status: "failed"` Responses body carries. */

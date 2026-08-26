@@ -15,6 +15,7 @@ export interface AnthropicSdkLike {
     ): Promise<Anthropic.Message>;
   };
 }
+import { match } from "ts-pattern";
 import { z } from "zod";
 import { ok, err } from "../types/result.js";
 import type { Result } from "../types/result.js";
@@ -27,7 +28,9 @@ import type {
   ToolDef,
 } from "../types/llm.js";
 import type { NodeContext } from "../types/node.js";
+import type { TokenUsage } from "../types/token-usage.js";
 import type { ToolCall, ToolDispatchResult } from "./tool-dispatch.js";
+import { planPromptCache, type PromptCachePlan } from "./prompt-cache.js";
 import { zodToJsonSchema } from "./zod-schema.js";
 import {
   withLlmSpan,
@@ -61,16 +64,110 @@ const toolToAnthropicSpec = (tool: ToolDef<any, any>): Anthropic.Tool => {
 
 const toolChoiceToAnthropic = (
   choice: SendWithToolsRequest<any>["toolChoice"],
-): Anthropic.ToolChoice | undefined => {
-  switch (choice) {
-    case "any":
-      return { type: "any" };
-    case "none":
-      return { type: "none" };
-    case "auto":
-    case undefined:
-      return { type: "auto" };
+): Anthropic.ToolChoice | undefined =>
+  match(choice)
+    .with("any", () => ({ type: "any" }) as const)
+    .with("none", () => ({ type: "none" }) as const)
+    .with("auto", undefined, () => ({ type: "auto" }) as const)
+    .exhaustive();
+
+/**
+ * The `cache_control` value a plan's breakpoints carry, or `undefined` when the
+ * plan emits none. A 5-minute entry is the provider's default and omits `ttl`;
+ * a 1-hour entry names it explicitly.
+ */
+const cacheControlOf = (plan: PromptCachePlan): Anthropic.CacheControlEphemeral | undefined =>
+  match(plan.ttl)
+    .with(null, () => undefined)
+    // 5 minutes is the provider default, expressed by OMITTING `ttl` — sending
+    // it explicitly would be a different request body for no benefit.
+    .with("5m", () => ({ type: "ephemeral" }) as const)
+    .with("1h", () => ({ type: "ephemeral", ttl: "1h" }) as const)
+    .exhaustive();
+
+/**
+ * Render the system prompt, carrying the prefix breakpoint when the plan asks
+ * for one.
+ *
+ * Without caching the system prompt stays a bare string — byte-identical to the
+ * pre-caching request (FR-PC-004). With caching it becomes a single text block
+ * so `cache_control` has somewhere to live; because the provider renders
+ * `tools → system → messages`, that one breakpoint caches the tool specs too
+ * (FR-PC-002).
+ */
+const systemParamFor = (
+  system: string,
+  plan: PromptCachePlan,
+): Anthropic.MessageCreateParams["system"] => {
+  const cacheControl = plan.systemBreakpoint ? cacheControlOf(plan) : undefined;
+  return cacheControl === undefined
+    ? system
+    : [{ type: "text", text: system, cache_control: cacheControl }];
+};
+
+/**
+ * Normalise an Anthropic `usage` block into the framework's `TokenUsage`.
+ *
+ * Anthropic reports `input_tokens` as the UNCACHED REMAINDER — cached prompt
+ * tokens are excluded from it and reported separately. Summing all three is
+ * what keeps `tokensIn` the complete prompt count across providers (FR-PC-005),
+ * and is why enabling a cache policy cannot silently shrink a run's metered
+ * token total.
+ */
+const anthropicUsage = (usage: AnthropicResponse["usage"]): TokenUsage => {
+  const cacheWriteTokens = usage.cache_creation_input_tokens ?? 0;
+  const cacheReadTokens = usage.cache_read_input_tokens ?? 0;
+  return {
+    tokensIn: usage.input_tokens + cacheWriteTokens + cacheReadTokens,
+    tokensOut: usage.output_tokens,
+    cacheWriteTokens,
+    cacheReadTokens,
+  };
+};
+
+/**
+ * Render the message history with a rolling breakpoint on its final content
+ * block, for a `conversation` plan.
+ *
+ * The annotation is a RENDERING concern, applied to a copy on the way to the
+ * wire — the accumulated history itself never carries `cache_control`. That is
+ * what makes the breakpoint rolling without a "strip the previous one" step,
+ * and keeps the emitted count at exactly one no matter how long the loop runs
+ * (FR-PC-003, INV-PC-5). Without a plan this is the identity function, so the
+ * request stays byte-identical to the pre-caching one.
+ */
+const withTurnBreakpoint = (
+  messages: readonly AnthropicMessage[],
+  cacheControl: Anthropic.CacheControlEphemeral | undefined,
+): readonly AnthropicMessage[] => {
+  if (cacheControl === undefined) return messages;
+  const lastMessage = messages[messages.length - 1];
+  if (lastMessage === undefined) return messages;
+
+  // A bare-string content is the first user turn; promote it to a single text
+  // block so the breakpoint has somewhere to attach.
+  const blocks: Anthropic.ContentBlockParam[] =
+    typeof lastMessage.content === "string"
+      ? [{ type: "text", text: lastMessage.content }]
+      : [...lastMessage.content];
+
+  const lastBlock = blocks[blocks.length - 1];
+  // Two blocks cannot carry a breakpoint: an absent one (empty content array),
+  // and a thinking block — the provider rejects `cache_control` on thinking and
+  // redacted_thinking, which is why the SDK's union excludes it there. Skipping
+  // the turn annotation is the honest outcome in both cases: the system-prefix
+  // breakpoint still stands, and a chain that never forms surfaces as an inert
+  // policy (FR-PC-009) rather than as a 400 or as silence.
+  if (
+    lastBlock === undefined ||
+    lastBlock.type === "thinking" ||
+    lastBlock.type === "redacted_thinking"
+  ) {
+    return messages;
   }
+
+  blocks[blocks.length - 1] = { ...lastBlock, cache_control: cacheControl };
+  return [...messages.slice(0, -1), { ...lastMessage, content: blocks }];
 };
 
 const parseToolCalls = (response: AnthropicResponse): ToolCall[] =>
@@ -137,10 +234,15 @@ export class AnthropicLlmClient implements LlmClient {
         input_schema: jsonSchema as Anthropic.Tool["input_schema"],
       };
 
+      // The per-call user message renders after the system block, so a prefix
+      // breakpoint never traps volatile content behind it (rule 3 in
+      // `prompt-cache.ts`) — this holds by construction, not by convention.
+      const plan = planPromptCache(req.cache);
+
       const params: Anthropic.MessageCreateParams = {
         model: req.model,
         max_tokens: ANTHROPIC_MAX_TOKENS,
-        system: req.system,
+        system: systemParamFor(req.system, plan),
         messages: [{ role: "user", content: req.user }],
         tools: [toolDef],
         tool_choice: { type: "tool", name: "structured_output" },
@@ -152,7 +254,7 @@ export class AnthropicLlmClient implements LlmClient {
         { provider: "anthropic", model: req.model, operation: "chat" },
         async () => {
           const r = await this.anthropic.messages.create(params, { signal: t.signal });
-          setLlmUsageAttributes(r.usage.input_tokens, r.usage.output_tokens);
+          setLlmUsageAttributes(anthropicUsage(r.usage));
           setLlmResponseAttributes({ model: r.model, id: r.id });
           return r;
         },
@@ -174,11 +276,9 @@ export class AnthropicLlmClient implements LlmClient {
 
       // The turn's usage rides along on both terminal error arms below so a
       // malformed success / schema failure still attributes the burned tokens
-      // (FR-W0-001) — mirrors the sendWithTools arms.
-      const usage = {
-        tokensIn: response.usage.input_tokens,
-        tokensOut: response.usage.output_tokens,
-      };
+      // (FR-W0-001, extended to cached tokens by FR-PC-006) — mirrors the
+      // sendWithTools arms.
+      const usage = anthropicUsage(response.usage);
 
       const toolUseBlock = response.content.find((b) => b.type === "tool_use");
       if (!toolUseBlock || toolUseBlock.type !== "tool_use") {
@@ -206,8 +306,7 @@ export class AnthropicLlmClient implements LlmClient {
 
       return ok({
         output: parsed.data as O,
-        tokensIn: response.usage.input_tokens,
-        tokensOut: response.usage.output_tokens,
+        ...usage,
         thinking,
         rawText,
       });
@@ -245,6 +344,9 @@ export class AnthropicLlmClient implements LlmClient {
     }
     const toolChoice = toolChoiceToAnthropic(req.toolChoice);
     const messages: AnthropicMessage[] = [{ role: "user", content: req.user }];
+    const plan = planPromptCache(req.cache);
+    const systemParam = systemParamFor(system, plan);
+    const turnCacheControl = plan.turnBreakpoint ? cacheControlOf(plan) : undefined;
 
     const provider: import("./tool-use-loop.js").ToolLoopProvider = {
       call: async (_turn: number) => {
@@ -259,10 +361,17 @@ export class AnthropicLlmClient implements LlmClient {
             async () => {
               setLlmRequestAttributes({ maxTokens: ANTHROPIC_MAX_TOKENS });
               const r = await this.anthropic.messages.create(
-                { model: req.model, max_tokens: ANTHROPIC_MAX_TOKENS, system, messages, tools: toolSpecs, tool_choice: toolChoice },
+                {
+                  model: req.model,
+                  max_tokens: ANTHROPIC_MAX_TOKENS,
+                  system: systemParam,
+                  messages: [...withTurnBreakpoint(messages, turnCacheControl)],
+                  tools: toolSpecs,
+                  tool_choice: toolChoice,
+                },
                 { signal: t.signal },
               );
-              setLlmUsageAttributes(r.usage.input_tokens, r.usage.output_tokens);
+              setLlmUsageAttributes(anthropicUsage(r.usage));
               setLlmResponseAttributes({ model: r.model, id: r.id, finishReasons: r.stop_reason ? [r.stop_reason] : undefined });
               return r;
             },
@@ -290,10 +399,7 @@ export class AnthropicLlmClient implements LlmClient {
             retriability: "non-retriable",
             nodeId: req.nodeId,
             message: `Anthropic response truncated at the ${ANTHROPIC_MAX_TOKENS}-token cap (stop_reason: max_tokens)`,
-            usage: {
-              tokensIn: response.usage.input_tokens,
-              tokensOut: response.usage.output_tokens,
-            },
+            usage: anthropicUsage(response.usage),
           });
         }
 
@@ -308,10 +414,7 @@ export class AnthropicLlmClient implements LlmClient {
             retriability: "non-retriable",
             nodeId: req.nodeId,
             message: `Anthropic declined to generate a response (stop_reason: refusal)`,
-            usage: {
-              tokensIn: response.usage.input_tokens,
-              tokensOut: response.usage.output_tokens,
-            },
+            usage: anthropicUsage(response.usage),
           });
         }
 
@@ -337,18 +440,14 @@ export class AnthropicLlmClient implements LlmClient {
             retriability: "retriable",
             nodeId: req.nodeId,
             message: `Anthropic response contained no tool_use and no text block (stop_reason: ${response.stop_reason ?? "unknown"}): ${truncateErrorBody(JSON.stringify(response.content))}`,
-            usage: {
-              tokensIn: response.usage.input_tokens,
-              tokensOut: response.usage.output_tokens,
-            },
+            usage: anthropicUsage(response.usage),
           });
         }
 
         return ok({
           toolCalls,
           textContent,
-          tokensIn: response.usage.input_tokens,
-          tokensOut: response.usage.output_tokens,
+          ...anthropicUsage(response.usage),
           thinking,
         });
       },

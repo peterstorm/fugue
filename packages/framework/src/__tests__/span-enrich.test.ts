@@ -2,6 +2,7 @@
 // Finding #18: cost calculation had no unit test.
 
 import { describe, it, expect } from "bun:test";
+import { tokensOnly } from "../types/token-usage.js";
 import { computeCostUsd, PRICE_TABLE } from "../llm/cost.js";
 import { resolveContentFilter, IDENTITY_FILTER } from "../tracing/content-filter.js";
 
@@ -15,7 +16,7 @@ describe("computeCostUsd", () => {
     const tokensIn = 1000;
     const tokensOut = 500;
     const expected = (tokensIn * rates.inputPer1M + tokensOut * rates.outputPer1M) / 1_000_000;
-    expect(computeCostUsd("gpt-4o", tokensIn, tokensOut)).toBeCloseTo(expected, 10);
+    expect(computeCostUsd("gpt-4o", tokensOnly(tokensIn,tokensOut))).toBeCloseTo(expected, 10);
   });
 
   it("computes correct cost for Anthropic model", () => {
@@ -23,15 +24,15 @@ describe("computeCostUsd", () => {
     const tokensIn = 2000;
     const tokensOut = 1000;
     const expected = (tokensIn * rates.inputPer1M + tokensOut * rates.outputPer1M) / 1_000_000;
-    expect(computeCostUsd("claude-sonnet-4-20250514", tokensIn, tokensOut)).toBeCloseTo(expected, 10);
+    expect(computeCostUsd("claude-sonnet-4-20250514", tokensOnly(tokensIn,tokensOut))).toBeCloseTo(expected, 10);
   });
 
   it("returns 0 for unknown model", () => {
-    expect(computeCostUsd("unknown-model-xyz", 5000, 2000)).toBe(0);
+    expect(computeCostUsd("unknown-model-xyz", tokensOnly(5000,2000))).toBe(0);
   });
 
   it("returns 0 for zero tokens on known model", () => {
-    expect(computeCostUsd("gpt-4o", 0, 0)).toBe(0);
+    expect(computeCostUsd("gpt-4o", tokensOnly(0,0))).toBe(0);
   });
 
   it("handles large token counts correctly", () => {
@@ -39,14 +40,14 @@ describe("computeCostUsd", () => {
     const tokensIn = 1_000_000;
     const tokensOut = 500_000;
     const expected = (tokensIn * rates.inputPer1M + tokensOut * rates.outputPer1M) / 1_000_000;
-    expect(computeCostUsd("gpt-4o", tokensIn, tokensOut)).toBeCloseTo(expected, 10);
+    expect(computeCostUsd("gpt-4o", tokensOnly(tokensIn,tokensOut))).toBeCloseTo(expected, 10);
     // Sanity: 1M input tokens at $2.5/M + 500K output at $10/M = $7.50
-    expect(computeCostUsd("gpt-4o", tokensIn, tokensOut)).toBeCloseTo(7.5, 2);
+    expect(computeCostUsd("gpt-4o", tokensOnly(tokensIn,tokensOut))).toBeCloseTo(7.5, 2);
   });
 
   it("all PRICE_TABLE models produce non-negative costs", () => {
     for (const [model, rates] of Object.entries(PRICE_TABLE)) {
-      const cost = computeCostUsd(model, 100, 100);
+      const cost = computeCostUsd(model, tokensOnly(100,100));
       expect(cost).toBeGreaterThanOrEqual(0);
       // Every model should have a positive rate for at least one direction
       expect(rates.inputPer1M + rates.outputPer1M).toBeGreaterThan(0);

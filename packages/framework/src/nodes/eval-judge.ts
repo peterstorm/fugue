@@ -244,8 +244,8 @@ export const createEvalJudgeNode = (config: EvalJudgeNodeConfig): EvalJudgeNodeD
             model,
             system: JUDGE_SYSTEM_FRAME,
             user: userMessage,
-            tokensIn: result.value.tokensIn,
-            tokensOut: result.value.tokensOut,
+            // `LlmResponse` extends `TokenUsage`, so the response IS the usage.
+            usage: result.value,
             thinking: result.value.thinking,
             contentFilter: ctx.contentFilter,
           });

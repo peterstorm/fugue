@@ -5,6 +5,7 @@
  */
 
 import { describe, test, expect } from "bun:test";
+import { tokensOnly } from "../types/token-usage.js";
 import { toolUseLoop, type ToolLoopProvider } from "../llm/tool-use-loop.js";
 import { toolName } from "../llm/tools.js";
 import { z } from "zod";
@@ -22,7 +23,7 @@ const makeCtx = () =>
 
 /** Create a simple provider that returns a final answer on the first call. */
 const immediateProvider = (text: string): ToolLoopProvider => ({
-  call: async () => ok({ toolCalls: [], textContent: text, tokensIn: 10, tokensOut: 20 }),
+  call: async () => ok({ toolCalls: [], textContent: text, ...tokensOnly(10, 20) }),
   appendToolResults: () => {},
 });
 
@@ -33,13 +34,12 @@ const multiTurnProvider = (turns: number, finalText: string): ToolLoopProvider =
     call: async () => {
       callCount++;
       if (callCount > turns) {
-        return ok({ toolCalls: [], textContent: finalText, tokensIn: 5, tokensOut: 10 });
+        return ok({ toolCalls: [], textContent: finalText, ...tokensOnly(5, 10) });
       }
       return ok({
         toolCalls: [{ id: `call-${callCount}`, name: "test_tool", input: {} }],
         textContent: undefined,
-        tokensIn: 10,
-        tokensOut: 15,
+        ...tokensOnly(10, 15),
       });
     },
     appendToolResults: () => {},
@@ -52,8 +52,7 @@ const infiniteToolProvider = (): ToolLoopProvider => ({
     ok({
       toolCalls: [{ id: "call-loop", name: "tool", input: {} }],
       textContent: undefined,
-      tokensIn: 5,
-      tokensOut: 5,
+      ...tokensOnly(5, 5),
     }),
   appendToolResults: () => {},
 });
@@ -67,7 +66,7 @@ const errorOnTurn = (errorTurn: number): ToolLoopProvider => {
       if (callCount === errorTurn) {
         return err({ kind: "transient", nodeId: N("test"), message: "rate limit" });
       }
-      return ok({ toolCalls: [], textContent: '{"answer":"ok"}', tokensIn: 5, tokensOut: 5 });
+      return ok({ toolCalls: [], textContent: '{"answer":"ok"}', ...tokensOnly(5, 5) });
     },
     appendToolResults: () => {},
   };
@@ -133,7 +132,7 @@ describe("toolUseLoop", () => {
         expect(result.error.retriability).toBe("non-retriable");
         expect(result.error.message).toContain("iteration limit");
         // FR-W0-001: tokens burned across all 3 turns are attributed on the Err.
-        expect(result.error.usage).toEqual({ tokensIn: 15, tokensOut: 15 });
+        expect(result.error.usage).toEqual({ ...tokensOnly(15, 15) });
       }
     }
   });
@@ -149,8 +148,7 @@ describe("toolUseLoop", () => {
         return ok({
           toolCalls: [{ id: "c", name: "tool", input: {} }],
           textContent: undefined,
-          tokensIn: 1,
-          tokensOut: 1,
+          ...tokensOnly(1, 1),
         });
       },
       appendToolResults: () => {},
@@ -274,15 +272,14 @@ describe("toolUseLoop", () => {
           return ok({
             toolCalls: [{ id: "c", name: "tool", input: {} }],
             textContent: undefined,
-            tokensIn: 10,
-            tokensOut: 15,
+            ...tokensOnly(10, 15),
           });
         }
         return err({
           kind: "transient",
           nodeId: N("n1"),
           message: "rate limit",
-          usage: { tokensIn: 3, tokensOut: 4 },
+          usage: { ...tokensOnly(3, 4) },
         });
       },
       appendToolResults: () => {},
@@ -301,7 +298,7 @@ describe("toolUseLoop", () => {
     expect(result.ok).toBe(false);
     if (!result.ok && result.error.kind === "transient") {
       // Prior turn (10/15) + the in-flight turn's own reported usage (3/4).
-      expect(result.error.usage).toEqual({ tokensIn: 13, tokensOut: 19 });
+      expect(result.error.usage).toEqual({ ...tokensOnly(13, 19) });
     }
   });
 
@@ -314,8 +311,7 @@ describe("toolUseLoop", () => {
         return ok({
           toolCalls: [{ id: "c", name: "tool", input: {} }],
           textContent: undefined,
-          tokensIn: 7,
-          tokensOut: 3,
+          ...tokensOnly(7, 3),
         });
       },
       appendToolResults: () => {},
@@ -337,13 +333,13 @@ describe("toolUseLoop", () => {
     if (!result.ok && result.error.kind === "transient") {
       // deadline=1700: turn0 (1000<1700) burns 7/3 →1500; turn1 (1500<1700)
       // burns 7/3 →2000; turn2 check 2000>=1700 trips. Two turns completed.
-      expect(result.error.usage).toEqual({ tokensIn: 14, tokensOut: 6 });
+      expect(result.error.usage).toEqual({ ...tokensOnly(14, 6) });
     }
   });
 
   test("final turn with no text content → retriable error", async () => {
     const provider: ToolLoopProvider = {
-      call: async () => ok({ toolCalls: [], textContent: undefined, tokensIn: 1, tokensOut: 1 }),
+      call: async () => ok({ toolCalls: [], textContent: undefined, ...tokensOnly(1, 1) }),
       appendToolResults: () => {},
     };
     const result = await toolUseLoop(
@@ -381,8 +377,7 @@ describe("toolUseLoop", () => {
             return ok({
               toolCalls: [{ id: "c", name: "tool", input: {} }],
               textContent: undefined,
-              tokensIn: 10,
-              tokensOut: 15,
+              ...tokensOnly(10, 15),
             });
           }
           // Turn 2 fails with a kind that cannot carry usage.
@@ -434,8 +429,7 @@ describe("toolUseLoop", () => {
             ? ok({
                 toolCalls: [{ id: "c", name: "tool", input: {} }],
                 textContent: undefined,
-                tokensIn: 10,
-                tokensOut: 15,
+                ...tokensOnly(10, 15),
               })
             : err({ kind: "validation", nodeId: N("n1"), message: "bad schema" });
         },
@@ -475,8 +469,7 @@ describe("toolUseLoop", () => {
       call: async () => ok({
         toolCalls: [{ id: "c", name: "tool", input: {} }],
         textContent: undefined,
-        tokensIn: 4,
-        tokensOut: 6,
+        ...tokensOnly(4, 6),
       }),
       appendToolResults: () => {},
     };
@@ -497,7 +490,7 @@ describe("toolUseLoop", () => {
     if (!result.ok && result.error.kind === "node-crash") {
       expect(result.error.retriability).toBe("non-retriable");
       expect(result.error.message).toContain("tool dispatch threw");
-      expect(result.error.usage).toEqual({ tokensIn: 4, tokensOut: 6 });
+      expect(result.error.usage).toEqual({ ...tokensOnly(4, 6) });
     }
   });
 
@@ -510,8 +503,7 @@ describe("toolUseLoop", () => {
         return ok({
           toolCalls: [{ id: "c", name: "tool", input: {} }],
           textContent: undefined,
-          tokensIn: 7,
-          tokensOut: 9,
+          ...tokensOnly(7, 9),
         });
       },
       appendToolResults: () => { throw new Error("conversation serialization failed"); },
@@ -541,7 +533,7 @@ describe("toolUseLoop", () => {
     if (!result.ok && result.error.kind === "node-crash") {
       expect(result.error.retriability).toBe("non-retriable");
       expect(result.error.message).toContain("provider.appendToolResults threw");
-      expect(result.error.usage).toEqual({ tokensIn: 7, tokensOut: 9 });
+      expect(result.error.usage).toEqual({ ...tokensOnly(7, 9) });
     }
   });
 
@@ -557,8 +549,7 @@ describe("toolUseLoop", () => {
         ok({
           toolCalls: [{ id: "c1", name: "tool", input: {} }],
           textContent: undefined,
-          tokensIn: 10,
-          tokensOut: 15,
+          ...tokensOnly(10, 15),
         }),
       appendToolResults: () => {},
     };
@@ -585,7 +576,7 @@ describe("toolUseLoop", () => {
         expect(result.error.message).toContain("tool dispatch threw");
         // The turn that produced the tool calls completed before the throw —
         // its 10/15 are accumulated and attributed on the Err.
-        expect(result.error.usage).toEqual({ tokensIn: 10, tokensOut: 15 });
+        expect(result.error.usage).toEqual({ ...tokensOnly(10, 15) });
       }
     }
   });
@@ -596,9 +587,9 @@ describe("toolUseLoop", () => {
       call: async () => {
         callCount++;
         if (callCount === 1) {
-          return ok({ toolCalls: [{ id: "c", name: "tool", input: {} }], textContent: undefined, tokensIn: 1, tokensOut: 1, thinking: "step 1" });
+          return ok({ toolCalls: [{ id: "c", name: "tool", input: {} }], textContent: undefined, ...tokensOnly(1, 1), thinking: "step 1" });
         }
-        return ok({ toolCalls: [], textContent: '{"answer":"done"}', tokensIn: 1, tokensOut: 1, thinking: "final thought" });
+        return ok({ toolCalls: [], textContent: '{"answer":"done"}', ...tokensOnly(1, 1), thinking: "final thought" });
       },
       appendToolResults: () => {},
     };

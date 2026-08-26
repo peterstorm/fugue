@@ -29,8 +29,19 @@ import type { RunId } from "@fuguejs/framework";
  * feeds the budget check directly. Dropping the field makes it unrepresentable.
  */
 interface RunUsage {
+  /**
+   * ALL prompt tokens — uncached, cache-write and cache-read — as normalised by
+   * the framework's provider clients. This is what keeps the budget honest once
+   * a DAG enables prompt caching: Anthropic reports `input_tokens` as the
+   * UNCACHED REMAINDER, so a meter that stored the provider's raw figure would
+   * silently shrink a cached run's total and let it overrun its budget.
+   */
   readonly tokensIn: number;
   readonly tokensOut: number;
+  /** Prompt tokens this run wrote to a provider-side cache entry. */
+  readonly cacheWriteTokens: number;
+  /** Prompt tokens this run served from a provider-side cache entry. */
+  readonly cacheReadTokens: number;
 }
 
 /**
@@ -38,6 +49,13 @@ interface RunUsage {
  * stored, so it cannot disagree with the breakdown (`tokensIn + tokensOut`).
  */
 export const runTotal = (u: RunUsage): number => u.tokensIn + u.tokensOut;
+
+/**
+ * Prompt tokens this run had served from cache rather than processed fresh.
+ * Reported alongside the budget figures so an operator can see WHY a run's
+ * token total moved — cost per token is not uniform once caching is on.
+ */
+export const runCacheReadTokens = (u: RunUsage): number => u.cacheReadTokens;
 
 /**
  * Immutable per-`runId` token counter. The map is treated as frozen — every
@@ -48,10 +66,15 @@ export interface LlmMeter {
   readonly usageByRun: ReadonlyMap<RunId, RunUsage>;
 }
 
-/** A single LLM call's token delta. */
+/**
+ * A single LLM call's token delta — structurally the framework's `TokenUsage`,
+ * so an `LlmResponse` (or an error's partial usage) can be handed over whole.
+ */
 interface TokenDelta {
   readonly tokensIn: number;
   readonly tokensOut: number;
+  readonly cacheWriteTokens: number;
+  readonly cacheReadTokens: number;
 }
 
 /**
@@ -69,7 +92,12 @@ type BudgetDecision =
 // Builders
 // ---------------------------------------------------------------------------
 
-const ZERO_USAGE: RunUsage = Object.freeze({ tokensIn: 0, tokensOut: 0 });
+const ZERO_USAGE: RunUsage = Object.freeze({
+  tokensIn: 0,
+  tokensOut: 0,
+  cacheWriteTokens: 0,
+  cacheReadTokens: 0,
+});
 
 /** Runtime-read-only snapshot; no mutable `Map` methods escape the ADT. */
 const meterOf = (entries: ReadonlyMap<RunId, RunUsage>): LlmMeter => {
@@ -139,9 +167,15 @@ export const accumulate = (meter: LlmMeter, runId: RunId, delta: TokenDelta): Ll
   const prev = usageFor(meter, runId);
   const addIn = sanitizeDeltaComponent(delta.tokensIn);
   const addOut = sanitizeDeltaComponent(delta.tokensOut);
+  // The cache figures are a BREAKDOWN of `tokensIn`, not an addition to it, so
+  // they are sanitized the same way but never widen the budget total.
+  const addCacheWrite = sanitizeDeltaComponent(delta.cacheWriteTokens);
+  const addCacheRead = sanitizeDeltaComponent(delta.cacheReadTokens);
   const next: RunUsage = {
     tokensIn: prev.tokensIn + addIn,
     tokensOut: prev.tokensOut + addOut,
+    cacheWriteTokens: prev.cacheWriteTokens + addCacheWrite,
+    cacheReadTokens: prev.cacheReadTokens + addCacheRead,
   };
   const usageByRun = new Map(meter.usageByRun);
   usageByRun.set(runId, next);

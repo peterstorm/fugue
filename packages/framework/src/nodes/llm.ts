@@ -2,7 +2,7 @@ import type { z } from "zod";
 import type { NodeDef } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeId } from "../types/ids.js";
-import type { LlmRequest } from "../types/llm.js";
+import type { LlmRequest, SingleShotCachePolicy } from "../types/llm.js";
 import { type Result, ok, err } from "../types/result.js";
 import { resourceName } from "../types/freshness.js";
 import { stableHash } from "../shared/hash.js";
@@ -35,6 +35,19 @@ interface LlmNodeConfigBase<I, O> {
    * user-template prompt can stay focused on the task input.
    */
   readonly system?: string;
+  /**
+   * Provider-side prompt caching. Opt-in: omitted ≡ `{ kind: "none" }` ≡ no
+   * `cache_control` on the wire, so adding this field is the only thing that
+   * can change what a DAG costs.
+   *
+   * `{ kind: "static-prefix", ttl: "5m" }` caches the system prompt and tool
+   * spec shared by every call to this node; the per-input user message renders
+   * after the breakpoint and stays uncached. Worth it when the node runs
+   * repeatedly within the TTL and the shared prefix clears the model's minimum
+   * cacheable size — a single call over a large unique prefix pays the write
+   * premium and never reads it back.
+   */
+  readonly cache?: SingleShotCachePolicy;
 }
 
 export type LlmNodeConfig<I, O> =
@@ -103,6 +116,7 @@ export const createLlmNode = <I, O>(
         promptName: config.promptName,
         promptFingerprint,
         thinking: config.thinking,
+        cache: config.cache,
       },
       () => {
         const req: LlmRequest<O> = {
@@ -112,6 +126,7 @@ export const createLlmNode = <I, O>(
           schema: config.outputSchema,
           nodeId: id,
           ...(config.thinking ? { thinking: config.thinking } : {}),
+          ...(config.cache ? { cache: config.cache } : {}),
           ...(ctx.signal ? { signal: ctx.signal } : {}),
         };
         return ctx.llm.sendStructured(req);

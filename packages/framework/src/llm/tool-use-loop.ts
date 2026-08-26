@@ -21,6 +21,8 @@ import { logFrameworkWithoutThrowing } from "../logger.js";
 import type { NodeId, RunId, DagId } from "../types/ids.js";
 import { safeErrorMessage } from "../types/safe-error.js";
 import type { LlmResponse, ToolDef } from "../types/llm.js";
+import type { TokenUsage } from "../types/token-usage.js";
+import { NO_TOKENS, addUsage, totalTokens } from "../types/token-usage.js";
 import type { NodeContext } from "../types/node.js";
 import { ensureToolNames } from "./tools.js";
 import {
@@ -33,16 +35,19 @@ import {
 // ToolLoopProvider — the seam each provider adapter implements
 // ---------------------------------------------------------------------------
 
-/** Result of one LLM turn, normalized across providers. */
-interface TurnResult {
+/**
+ * Result of one LLM turn, normalized across providers.
+ *
+ * Extends `TokenUsage`, so a turn reports its provider-side cache split as
+ * well as its raw counts. That is what lets the loop fold turns with
+ * `addUsage` (FR-PC-007) and stops a provider adapter from quietly dropping a
+ * cache figure it received.
+ */
+interface TurnResult extends TokenUsage {
   /** Tool calls requested by the model. Empty array = final answer turn. */
   readonly toolCalls: readonly ToolCall[];
   /** Text content from the model (present on final-answer turns). */
   readonly textContent: string | undefined;
-  /** Tokens consumed this turn (input). */
-  readonly tokensIn: number;
-  /** Tokens produced this turn (output). */
-  readonly tokensOut: number;
   /** Extended thinking content (if model supports it). */
   readonly thinking?: string;
 }
@@ -103,8 +108,7 @@ const stripCodeFences = (text: string): string =>
  */
 const withAccumulatedUsage = (
   e: FrameworkError,
-  priorIn: number,
-  priorOut: number,
+  prior: TokenUsage,
   corr: { readonly nodeId: NodeId; readonly runId: RunId; readonly dagId: DagId },
 ): FrameworkError => {
   const own = usageOfError(e);
@@ -113,11 +117,13 @@ const withAccumulatedUsage = (
   if (e.kind !== "node-crash" && e.kind !== "transient" && e.kind !== "aborted") {
     // This error kind has nowhere to carry usage. If real tokens were burned
     // before it, surface them so a budget reconciler isn't silently under-counted.
-    if (priorIn > 0 || priorOut > 0) {
+    if (totalTokens(prior) > 0) {
       logFrameworkWithoutThrowing("warn", "llm.usage-unattributed", {
         errorKind: e.kind,
-        tokensIn: priorIn,
-        tokensOut: priorOut,
+        tokensIn: prior.tokensIn,
+        tokensOut: prior.tokensOut,
+        cacheWriteTokens: prior.cacheWriteTokens,
+        cacheReadTokens: prior.cacheReadTokens,
         nodeId: corr.nodeId,
         runId: corr.runId,
         dagId: corr.dagId,
@@ -129,11 +135,8 @@ const withAccumulatedUsage = (
   // ABSENT. The errors.ts contract is "absent means the failure consumed no
   // attributable tokens" — stamping `{0, 0}` here would make that state
   // representable two ways.
-  if (own === undefined && priorIn === 0 && priorOut === 0) return e;
-  const usage: PartialTokenUsage = {
-    tokensIn: priorIn + (own?.tokensIn ?? 0),
-    tokensOut: priorOut + (own?.tokensOut ?? 0),
-  };
+  if (own === undefined && totalTokens(prior) === 0) return e;
+  const usage: PartialTokenUsage = addUsage(prior, own ?? NO_TOKENS);
   return { ...e, usage };
 };
 
@@ -165,8 +168,10 @@ export const toolUseLoop = async <O>(
     });
   }
 
-  let totalTokensIn = 0;
-  let totalTokensOut = 0;
+  // One folded value rather than a pair of counters: `addUsage` carries the
+  // cache split across turns for free, so a long loop's cache reads land in the
+  // same place its raw counts do (FR-PC-007).
+  let accumulated: TokenUsage = NO_TOKENS;
   let lastThinking: string | undefined;
   const nowFn = config.now ?? Date.now;
   const deadline = config.deadlineMs ? nowFn() + config.deadlineMs : Infinity;
@@ -184,8 +189,7 @@ export const toolUseLoop = async <O>(
             nodeId: config.nodeId,
             message: `Total deadline of ${config.deadlineMs}ms exceeded after ${turn} turns`,
           },
-          totalTokensIn,
-          totalTokensOut,
+          accumulated,
           corr,
         ),
       );
@@ -193,7 +197,7 @@ export const toolUseLoop = async <O>(
     // Abort check
     if (config.signal?.aborted || ctx.signal?.aborted) {
       return err(
-        withAccumulatedUsage({ kind: "aborted", reason: "signal" }, totalTokensIn, totalTokensOut, corr),
+        withAccumulatedUsage({ kind: "aborted", reason: "signal" }, accumulated, corr),
       );
     }
 
@@ -202,12 +206,11 @@ export const toolUseLoop = async <O>(
     if (!turnResult.ok) {
       // The provider's error is for the in-flight turn — its own `usage` (if
       // any) covers that turn, and we add the prior-turn totals on top.
-      return err(withAccumulatedUsage(turnResult.error, totalTokensIn, totalTokensOut, corr));
+      return err(withAccumulatedUsage(turnResult.error, accumulated, corr));
     }
 
     const t = turnResult.value;
-    totalTokensIn += t.tokensIn;
-    totalTokensOut += t.tokensOut;
+    accumulated = addUsage(accumulated, t);
     if (t.thinking) lastThinking = t.thinking;
 
     // No tool calls = final answer
@@ -221,13 +224,12 @@ export const toolUseLoop = async <O>(
               nodeId: config.nodeId,
               message: "Final turn had no text content to parse",
             },
-            totalTokensIn,
-            totalTokensOut,
+            accumulated,
             corr,
           ),
         );
       }
-      return parseFinalAnswer(t.textContent, config, totalTokensIn, totalTokensOut, lastThinking);
+      return parseFinalAnswer(t.textContent, config, accumulated, lastThinking);
     }
 
     // Dispatch tools and feed results back to provider. Fenced: a throw here
@@ -248,8 +250,7 @@ export const toolUseLoop = async <O>(
             nodeId: config.nodeId,
             message: `tool dispatch threw: ${safeErrorMessage(e)}`,
           },
-          totalTokensIn,
-          totalTokensOut,
+          accumulated,
           corr,
         ),
       );
@@ -265,8 +266,7 @@ export const toolUseLoop = async <O>(
             nodeId: config.nodeId,
             message: `provider.appendToolResults threw: ${safeErrorMessage(e)}`,
           },
-          totalTokensIn,
-          totalTokensOut,
+          accumulated,
           corr,
         ),
       );
@@ -283,8 +283,7 @@ export const toolUseLoop = async <O>(
         message: `Tool-call iteration limit (${config.maxIterations}) reached`,
         retriability: "non-retriable",
       },
-      totalTokensIn,
-      totalTokensOut,
+      accumulated,
       corr,
     ),
   );
@@ -297,8 +296,7 @@ export const toolUseLoop = async <O>(
 const parseFinalAnswer = <O>(
   text: string,
   config: ToolUseLoopConfig<O>,
-  tokensIn: number,
-  tokensOut: number,
+  usage: TokenUsage,
   thinking: string | undefined,
 ): Result<LlmResponse<O>, FrameworkError> => {
   const stripped = stripCodeFences(text);
@@ -314,7 +312,7 @@ const parseFinalAnswer = <O>(
       message: `Not valid JSON (${msg}): ${text.slice(0, 200)}`,
       // The whole loop's tokens were consumed to produce this final (unparseable)
       // turn — attribute them even though parsing failed (FR-W0-001).
-      usage: { tokensIn, tokensOut },
+      usage,
     });
   }
   const validated = config.schema.safeParse(parsed);
@@ -324,13 +322,12 @@ const parseFinalAnswer = <O>(
       retriability: "retriable",
       nodeId: config.nodeId,
       message: `Schema validation failed: ${validated.error.message}`,
-      usage: { tokensIn, tokensOut },
+      usage,
     });
   }
   return ok({
     output: validated.data as O,
-    tokensIn,
-    tokensOut,
+    ...usage,
     thinking,
     rawText: text,
   });
