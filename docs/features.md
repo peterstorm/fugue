@@ -1012,6 +1012,46 @@ A ten-turn tool loop pays for its system prompt, tool specs and history ten time
 
 ---
 
+## 22. Per-Run Spend Budget
+
+### What It Does
+
+Refuses an LLM call **before** it happens once a run has reached a declared ceiling. Ceilings are declared per DAG, on any combination of three axes:
+
+```yaml
+# fugue.yaml
+llmBudget:
+  usd: 2.50      # dollars — the axis that means what you meant
+  tokens: 500000 # every token, both directions
+  calls: 40      # settled provider round trips
+```
+
+```typescript
+// dag.ts — the same block, or the legacy scalar
+export default {
+  config: { llmBudget: { usd: 2.5 } },
+  // `llmBudgetTokens: 500000` still works; it is sugar for `{ tokens: 500000 }`
+};
+```
+
+A run is refused when **any** declared axis is reached. The refusal is a `llm-budget-exceeded` `FrameworkError` (HTTP 429 with `Retry-After`) whose `cause` names the ceiling, the observed figure, and whether the **settled** total or the **projection** including in-flight concurrent calls drove the decision.
+
+Cost is computed from the prompt-cache split, so a cached run and an uncached one are priced differently even at identical token counts — the reason the budget is denominated in money at all.
+
+**Unpriced models fail closed.** `PRICE_TABLE` is hand-maintained; a model with no entry has an unknown cost, and a `usd` ceiling refuses rather than treating unknown as free. The refusal names the model so the fix is obvious. Token and call ceilings are unaffected — they are perfectly evaluable on any model.
+
+Omitting every ceiling means no enforcement: calls are still metered and logged (`llm.metered`), never refused.
+
+### Why It Matters
+
+Before prompt caching, a token count was a serviceable proxy for money. It no longer is: a cache read bills at 0.1x and a write at up to 2.0x, so three runs reporting the same 110,000 tokens can span **13.8x** in real cost. A ceiling that cannot see that difference is not protecting a budget.
+
+Overshoot is bounded rather than eliminated: the check runs before the call against spend that settles after it, so exactly one call passes a reached ceiling in the sequential case, and a concurrency reservation bounds the parallel case. See ADR-0082.
+
+**Known gap:** the accumulator is per-NodeContext, and a resumable run builds a fresh one per execution slice — so a run that parks for a human decision and resumes starts from zero spend. Durability is tracked in `docs/plans/2026-08-27-f3-budget-capability.md`.
+
+---
+
 ## Quick Reference: Error → Feature Mapping
 
 | Failure Mode | Feature That Catches It |

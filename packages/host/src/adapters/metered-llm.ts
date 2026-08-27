@@ -3,19 +3,26 @@
  *
  * Wraps the host `LlmClient` so that every node-facing call is:
  *   1. attributed with the run's `(dagId, runId, nodeId)` triple (FR-W0-001),
- *   2. budget-checked BEFORE the call against the in-process cumulative counter
- *      (FR-W1-002, FR-W1-004) — refusing with `Err(llm-budget-exceeded)`,
- *   3. accumulated into the meter AFTER the call, then logged as a structured
- *      line carrying the attribution triple + token deltas (FR-W0-002).
+ *   2. admitted or refused BEFORE the call, against the in-process spend
+ *      accumulator (FR-W1-002, FR-W1-004) — refusing with
+ *      `Err(llm-budget-exceeded)` naming the ceiling that was reached,
+ *   3. PRICED and accumulated AFTER the call, then logged as a structured line
+ *      carrying the attribution triple + the call's consumption (FR-W0-002).
  *
- * Zero network round trips are added: the meter and budget decision are pure
- * in-process operations (FR-W1-005, SC-002, SC-004). One decorator instance is
- * constructed per NodeContext (per run), so its meter is naturally run-scoped —
- * `budgetDecision` is keyed by `runId` for defence in depth but a given
- * decorator only ever sees one run.
+ * Zero network round trips are added: pricing, the meter, and the admission
+ * decision are pure in-process operations (FR-W1-005, SC-002, SC-004). One
+ * decorator instance is constructed per NodeContext (per run), so its meter is
+ * naturally run-scoped — the pure functions are keyed by `runId` for defence in
+ * depth but a given decorator only ever sees one run.
+ *
+ * NOTE (F3, known gap): because the meter is per-NodeContext and a resumable
+ * run builds a fresh NodeContext per execution slice, a run that parks and
+ * resumes starts from zero spend. Durability is a separate change (a spend
+ * ledger port); this decorator is where it will hydrate.
  *
  * @satisfies FR-W0-001 FR-W0-002 FR-W0-004 FR-W1-002 FR-W1-003 FR-W1-004
  * @satisfies FR-W1-005 FR-W1-006 SC-001 SC-002 SC-003 SC-004
+ * @satisfies FR-B-002 FR-B-003 FR-B-013
  *
  * FR-W2-009 groundwork — run-scoped LLM authority, NOT yet on the broker's
  * `mintFor` seam: this decorator is per-run NodeContext wiring, and the runtime
@@ -24,28 +31,40 @@
  */
 
 import type {
+  CacheTtl,
+  Ceilings,
+  ConversationCachePolicy,
+  DagId,
+  FrameworkError,
   LlmClient,
   LlmRequest,
   LlmResponse,
-  SendWithToolsRequest,
   NodeContext,
-  Result,
-  FrameworkError,
-  DagId,
-  RunId,
   NodeId,
+  Result,
+  RunId,
+  SendWithToolsRequest,
+  SingleShotCachePolicy,
+  Spend,
+  TokenUsage,
 } from "@fuguejs/framework";
-import { err, safeErrorMessage, totalTokens, usageOfError } from "@fuguejs/framework";
-import type { TokenUsage } from "@fuguejs/framework";
+import {
+  err,
+  formatBreach,
+  pickUsage,
+  safeErrorMessage,
+  spendOfCall,
+  totalTokens,
+  usageOfError,
+} from "@fuguejs/framework";
 import type { LogPort } from "../ports.js";
 import { logWithoutThrowing } from "../hitl/diagnostic-logging.js";
 import {
   emptyMeter,
   accumulate,
-  usageFor,
-  runTotal,
+  spendFor,
   emptyReservation,
-  admitWithReservation,
+  admit,
   releaseReservation,
   learnObservedCall,
   type LlmMeter,
@@ -58,16 +77,57 @@ import {
 
 /**
  * Construction-time dependencies for the metered decorator. `dagId`/`runId`
- * bind the decorator to a single run; `budget` is the optional per-run token
- * budget (`llmBudgetTokens`) — when `undefined`, metering still happens but no
- * call is ever refused (FR-W1-006).
+ * bind the decorator to a single run; `limits` are the optional per-run
+ * ceilings — when `undefined`, metering still happens but no call is ever
+ * refused (FR-W1-006).
  */
 interface MeteredLlmDeps {
   readonly dagId: DagId;
   readonly runId: RunId;
-  readonly budget?: number;
+  readonly limits?: Ceilings;
   readonly logger: LogPort;
 }
+
+/** The two node-facing operations, named identically in every log line. */
+type Operation = "sendStructured" | "sendWithTools";
+
+/**
+ * The request fields metering needs, and only those: who to attribute the call
+ * to, and what it costs. Declared structurally rather than as a union of the
+ * two concrete request types so the unified path below is agnostic to which
+ * operation produced it.
+ */
+interface MeteredRequest {
+  readonly nodeId: NodeId;
+  readonly model: string;
+  readonly cache?: SingleShotCachePolicy | ConversationCachePolicy;
+}
+
+/**
+ * The TTL a cache WRITE on this request would be billed at.
+ *
+ * Defaults to `5m` when no policy is declared, matching `costBreakdownUsd`'s
+ * own default. A request with caching off writes nothing, so the multiplier is
+ * applied to zero tokens and the default is unobservable — it matters only for
+ * a request that declared a policy, where the real TTL is right there.
+ */
+const writeTtlOf = (cache: MeteredRequest["cache"]): CacheTtl =>
+  cache === undefined || cache.kind === "none" ? "5m" : cache.ttl;
+
+/**
+ * A `Spend` flattened for a structured log line.
+ *
+ * The scalar axes are SPREAD rather than re-listed, so an axis added to `Spend`
+ * later rides along instead of being silently dropped from the operator's view.
+ * The cost axis cannot be spread — it is a union, and "unknown cost" has to
+ * reach the log as something other than a number.
+ */
+const spendFields = ({ usd, ...axes }: Spend): Record<string, unknown> => ({
+  ...axes,
+  ...(usd.kind === "priced"
+    ? { usdMicros: usd.micros }
+    : { usdMicros: usd.knownMicros, unpricedModels: [...usd.models] }),
+});
 
 // ---------------------------------------------------------------------------
 // Decorator
@@ -81,16 +141,16 @@ interface MeteredLlmDeps {
  * metered.
  */
 export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmClient => {
-  // In-process, run-scoped counter. Mutated only here, behind the pure
+  // In-process, run-scoped accumulator. Mutated only here, behind the pure
   // `accumulate` transition — the meter value itself is immutable.
   let meter: LlmMeter = emptyMeter();
-  const { dagId, runId, budget, logger } = deps;
+  const { dagId, runId, limits, logger } = deps;
 
   // Concurrency reservation (review I1 / SC-003). The DECISION logic is pure —
-  // `admitWithReservation` / `releaseReservation` / `learnObservedCall` in
-  // llm-meter.ts (see its ReservationState doc for the overshoot bound) — and
-  // this shell holds the one mutable cell, the same shape as the broker's cells
-  // over the pure token-cache.
+  // `admit` / `releaseReservation` / `learnObservedCall` in llm-meter.ts (see
+  // its ReservationState doc for the overshoot bound) — and this shell holds
+  // the one mutable cell, the same shape as the broker's cells over the pure
+  // token-cache.
   let reservation: ReservationState = emptyReservation;
 
   /**
@@ -98,8 +158,8 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
    *
    * Extracted because a metering or failure line that is MISSING one of these
    * is unjoinable to the run that produced it — the figure becomes a number
-   * nobody can reconcile against a budget. One definition means the four call
-   * sites cannot drift apart by hand-editing.
+   * nobody can reconcile against a budget. One definition means the call sites
+   * cannot drift apart by hand-editing.
    */
   const attribution = (nodeId: NodeId): Record<string, string> => ({
     dagId: dagId as string,
@@ -108,98 +168,100 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
   });
 
   /**
-   * Pre-call gate. Returns either a budget-refusal error, or a `release` thunk to
-   * call once the admitted call settles (which frees its reservation). Reserving
-   * BEFORE the call and releasing AFTER is what makes the gate concurrency-safe.
+   * Pre-call gate. Returns either a budget-refusal error, or a `release` thunk
+   * to call once the admitted call settles. Reserving BEFORE the call and
+   * releasing AFTER is what makes the gate concurrency-safe.
    */
-  const admit = (nodeId: NodeId): { readonly error: FrameworkError } | { readonly release: () => void } => {
-    const decision = admitWithReservation(meter, runId, reservation, budget);
+  const gate = (
+    nodeId: NodeId,
+  ): { readonly error: FrameworkError } | { readonly release: () => void } => {
+    const decision = admit(meter, runId, reservation, limits);
     if (decision.kind === "refuse") {
       logWithoutThrowing(logger, "warn", "LLM budget exceeded — refusing call", {
         ...attribution(nodeId),
-        cumulative: decision.cumulative,
-        reservedInFlight: decision.reservedInFlight,
-        budget: decision.budget,
+        reason: formatBreach(decision.breach),
+        basis: decision.breach.basis,
+        ceiling: decision.breach.ceiling.kind,
+        // The projection that may have triggered this refusal is reported HERE,
+        // never on the error's settled figures, so an operator reconciling
+        // `llm.metered` totals against the error never sees a phantom gap.
+        inFlight: decision.inFlight,
+        settled: spendFields(decision.settled),
       });
       return {
         error: {
           kind: "llm-budget-exceeded",
           runId,
           nodeId,
-          // SETTLED cumulative only (the errors.ts contract): the in-flight
-          // reservation that may have triggered this refusal is reported in the
-          // warn log above (`reservedInFlight`), never in the error figure, so
-          // `cumulative` always reconciles against the `llm.metered` totals.
-          cumulative: decision.cumulative,
-          budget: decision.budget,
+          cause: decision.breach,
         },
       };
     }
-    // Admit: the pure transition already reserved this call's learned estimate;
-    // `decision.reserved` captures the exact amount so the release frees
-    // precisely what was reserved even if the estimate has since grown.
     reservation = decision.state;
-    return { release: () => { reservation = releaseReservation(reservation, decision.reserved); } };
+    return { release: () => { reservation = releaseReservation(reservation); } };
   };
 
-  /** Post-call bookkeeping — accumulate the delta and emit the metering log. */
-  const record = (
-    nodeId: NodeId,
-    operation: "sendStructured" | "sendWithTools",
-    usage: TokenUsage,
-  ): void => {
+  /** Post-call bookkeeping — price the call, accumulate it, emit the metering log. */
+  const record = (req: MeteredRequest, operation: Operation, usage: TokenUsage): void => {
+    const call = spendOfCall(req.model, usage, writeTtlOf(req.cache));
     // Learn the per-call estimate the concurrency reservation uses (I1).
-    reservation = learnObservedCall(reservation, totalTokens(usage));
-    meter = accumulate(meter, runId, usage);
-    const cumulative = runTotal(usageFor(meter, runId));
-    // The cache split rides on the metering line so an operator can see what a
-    // run's tokens COST, not just how many there were: a cache read is billed
-    // at ~0.1x and a write at a premium, so two runs with identical totals can
-    // differ by an order of magnitude in spend.
+    reservation = learnObservedCall(reservation, call);
+    meter = accumulate(meter, runId, call);
+    // The cache split rides on the metering line beside the price so an operator
+    // can see what a run's tokens COST, not just how many there were: a cache
+    // read is billed at ~0.1x and a write at a premium, so two runs with
+    // identical totals can differ by an order of magnitude in spend.
     logWithoutThrowing(logger, "info", "llm.metered", {
-      ...attribution(nodeId),
+      ...attribution(req.nodeId),
       operation,
+      model: req.model,
       // Spread rather than re-listed field by field: `TokenUsage`'s own header
       // warns that hand-listing is how a field added to it later gets silently
       // dropped from a consumer, and the metering line is exactly such a
-      // consumer. `budget` below CANNOT use the same shortcut — it is a bare
-      // number, and `{...5}` spreads nothing, so its guard is load-bearing.
+      // consumer.
       ...usage,
-      cumulative,
-      ...(budget !== undefined ? { budget } : {}),
+      call: spendFields(call),
+      cumulative: spendFields(spendFor(meter, runId)),
+      ...(limits !== undefined ? { limits: limits.map((c) => `${c.kind}:${c.limit}`) } : {}),
     });
   };
 
   /**
    * Settle one node-facing call's accounting, UNCONDITIONALLY (FR-W0-001).
    *
-   * On `ok` the response's token deltas are metered. On `err` any partial usage
-   * the failure carries (tokens burned across already-completed turns of a
-   * multi-turn `sendWithTools` loop, or a final-answer parse failure) is ALSO
-   * metered — so a failed call can never bypass the per-run budget — and a
-   * structured `llm.call-failed` line is emitted (FR-W0-002). The `result` is
-   * returned untouched so the decorator stays a transparent pass-through.
+   * On `ok` the response's token figures are priced and metered. On `err` any
+   * partial usage the failure carries (tokens burned across already-completed
+   * turns of a multi-turn `sendWithTools` loop, or a final-answer parse failure)
+   * is ALSO priced and metered — so a failed call can never bypass the per-run
+   * budget — and a structured `llm.call-failed` line is emitted (FR-W0-002).
+   * The `result` is returned untouched so the decorator stays a transparent
+   * pass-through.
    */
   const settle = <O>(
-    nodeId: NodeId,
-    operation: "sendStructured" | "sendWithTools",
+    req: MeteredRequest,
+    operation: Operation,
     result: Result<LlmResponse<O>, FrameworkError>,
   ): Result<LlmResponse<O>, FrameworkError> => {
     if (result.ok) {
       // `sendWithTools` aggregates tokens across all turns of its loop into a
       // single LlmResponse — one accumulate per outer call matches the
       // overshoot-by-one semantics (the whole loop is the in-flight "call").
-      // `LlmResponse` extends `TokenUsage`, so the response IS the delta.
-      record(nodeId, operation, result.value);
+      // `LlmResponse` extends `TokenUsage`, so the response IS a valid usage
+      // value — but it also carries `output`, `thinking`, and `rawText`, and
+      // `record` SPREADS what it is given onto an info-level log line. Passing
+      // the response whole put generated content and chain-of-thought into the
+      // metering log, with none of the redaction the span path applies.
+      // `pickUsage` narrows it to exactly the four figures.
+      record(req, operation, pickUsage(result.value));
       return result;
     }
-    // Failure path: attribute any tokens the failed call consumed, then log.
+    // Failure path: attribute any consumption the failed call incurred, then log.
     const partial = usageOfError(result.error);
     if (partial !== undefined && totalTokens(partial) > 0) {
-      record(nodeId, operation, partial);
+      record(req, operation, partial);
     }
     logWithoutThrowing(logger, "warn", "llm.call-failed", {
-      ...attribution(nodeId),
+      ...attribution(req.nodeId),
       operation,
       errorKind: result.error.kind,
       // Spreading `undefined` is a no-op, not a throw, so the absent-usage case
@@ -214,11 +276,11 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
    * contract is a settled `Result`) — the error itself still surfaces via
    * run-node's catch as `node-crash`, but without this log the decorator's
    * accounting contract would be skipped silently (no `llm.call-failed` line,
-   * nothing metered — tokens for a throwing call are unknowable). Log with
+   * nothing metered — consumption for a throwing call is unknowable). Log with
    * `errorKind: "thrown"` and rethrow; the `finally` still releases the
    * reservation either way.
    */
-  const logThrown = (nodeId: NodeId, operation: "sendStructured" | "sendWithTools", e: unknown): void => {
+  const logThrown = (nodeId: NodeId, operation: Operation, e: unknown): void => {
     logWithoutThrowing(logger, "warn", "llm.call-failed", {
       ...attribution(nodeId),
       operation,
@@ -227,36 +289,41 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
     });
   };
 
-  return {
-    sendStructured: async <O>(
-      req: LlmRequest<O>,
-    ): Promise<Result<LlmResponse<O>, FrameworkError>> => {
-      const gate = admit(req.nodeId);
-      if ("error" in gate) return err(gate.error);
-      try {
-        return settle(req.nodeId, "sendStructured", await inner.sendStructured(req));
-      } catch (e) {
-        logThrown(req.nodeId, "sendStructured", e);
-        throw e;
-      } finally {
-        gate.release();
-      }
-    },
+  /**
+   * The whole accounting contract, once.
+   *
+   * Both public methods differ only in which inner function they invoke; every
+   * accounting step — admit, settle, log-on-throw, release — is identical. They
+   * used to be two copies of that sequence, which was survivable when the
+   * sequence was four lines and is not now that each path must additionally
+   * price the response and evaluate several ceilings. One copy means the two
+   * operations cannot drift into disagreeing about what gets metered.
+   */
+  const metered = async <O>(
+    operation: Operation,
+    req: MeteredRequest,
+    call: () => Promise<Result<LlmResponse<O>, FrameworkError>>,
+  ): Promise<Result<LlmResponse<O>, FrameworkError>> => {
+    const admission = gate(req.nodeId);
+    if ("error" in admission) return err(admission.error);
+    try {
+      return settle(req, operation, await call());
+    } catch (e) {
+      logThrown(req.nodeId, operation, e);
+      throw e;
+    } finally {
+      admission.release();
+    }
+  };
 
-    sendWithTools: async <O>(
+  return {
+    sendStructured: <O>(req: LlmRequest<O>): Promise<Result<LlmResponse<O>, FrameworkError>> =>
+      metered("sendStructured", req, () => inner.sendStructured(req)),
+
+    sendWithTools: <O>(
       req: SendWithToolsRequest<O>,
       ctx: NodeContext,
-    ): Promise<Result<LlmResponse<O>, FrameworkError>> => {
-      const gate = admit(req.nodeId);
-      if ("error" in gate) return err(gate.error);
-      try {
-        return settle(req.nodeId, "sendWithTools", await inner.sendWithTools(req, ctx));
-      } catch (e) {
-        logThrown(req.nodeId, "sendWithTools", e);
-        throw e;
-      } finally {
-        gate.release();
-      }
-    },
+    ): Promise<Result<LlmResponse<O>, FrameworkError>> =>
+      metered("sendWithTools", req, () => inner.sendWithTools(req, ctx)),
   };
 };

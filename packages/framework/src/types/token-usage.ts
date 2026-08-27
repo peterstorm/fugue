@@ -94,6 +94,35 @@ export const tokensOnly = (tokensIn: number, tokensOut: number): TokenUsage => (
 });
 
 /**
+ * Narrow a value that CARRIES usage down to exactly its usage.
+ *
+ * `LlmResponse extends TokenUsage`, so a response is structurally a valid
+ * `TokenUsage` and can be passed wherever one is expected — but it also carries
+ * `output`, `thinking`, and `rawText`. A consumer that SPREADS what it was
+ * handed therefore spreads model output and chain-of-thought too, which is how
+ * generated content reaches places that were only ever meant to see numbers
+ * (a metering log line, a metrics label, a persisted counter).
+ *
+ * Note the deliberate inversion of the advice in this module's header: fields
+ * are listed rather than spread precisely because the goal here is to EXCLUDE
+ * everything else, which spreading cannot do. Completeness stays
+ * compiler-enforced in both directions by the return annotation — a field
+ * dropped from the literal fails to satisfy `TokenUsage`, and a field added to
+ * `TokenUsage` fails for the same reason.
+ */
+export const pickUsage = ({
+  tokensIn,
+  tokensOut,
+  cacheWriteTokens,
+  cacheReadTokens,
+}: TokenUsage): TokenUsage => ({
+  tokensIn,
+  tokensOut,
+  cacheWriteTokens,
+  cacheReadTokens,
+});
+
+/**
  * Monoid append over `NO_TOKENS`. The tool-use loop folds one of these per
  * turn to produce the call's cross-turn total (FR-PC-007); the host meter
  * folds one per call to produce the run total.

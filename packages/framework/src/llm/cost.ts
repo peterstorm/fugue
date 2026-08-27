@@ -1,7 +1,9 @@
 import { fwLogger } from "../logger.js";
 import type { CacheTtl } from "../types/llm.js";
+import type { Spend } from "../types/spend.js";
+import { pricedCall, unpricedCall, usdToMicros } from "../types/spend.js";
 import type { TokenUsage } from "../types/token-usage.js";
-import { uncachedInputTokens } from "../types/token-usage.js";
+import { totalTokens, uncachedInputTokens } from "../types/token-usage.js";
 
 const PRICE_TABLE: Record<string, { readonly inputPer1M: number; readonly outputPer1M: number }> = {
   // Anthropic
@@ -118,6 +120,37 @@ export const costUsd = (
  * every call, and an unpriced model would otherwise emit a log line per span.
  * The arithmetic is the same either way — only the unknown-model policy differs.
  */
+/**
+ * One settled call, measured on every axis a budget can limit — the bridge from
+ * "how many tokens" to "what did it cost".
+ *
+ * This is the ONLY producer of budget-facing cost, so the cache multipliers
+ * above reach the budget through exactly one path and cannot be reimplemented
+ * slightly differently by a second caller.
+ *
+ * Unlike `computeCostUsd`, an unknown model does NOT log and does NOT return
+ * zero. It returns an `unpriced` spend, which carries the model name to
+ * whoever refuses the run. That is strictly better on both counts: this runs on
+ * every call (so a warn would be one line per call), and a zero would make an
+ * unpriced model free — the cheapest possible way past a dollar budget.
+ *
+ * `calls` is 1 for a `sendWithTools` loop as much as for a single-shot call: a
+ * loop's turns are already folded into one `TokenUsage` before it settles, and
+ * one settled call is the granularity the overshoot-by-one guarantee is stated
+ * at.
+ */
+export const spendOfCall = (
+  model: string,
+  usage: TokenUsage,
+  writeTtl: CacheTtl = "5m",
+): Spend => {
+  const tokens = totalTokens(usage);
+  const rates = PRICE_TABLE[model];
+  return rates === undefined
+    ? unpricedCall(tokens, model)
+    : pricedCall(tokens, usdToMicros(costUsd(rates, usage, writeTtl)));
+};
+
 export function computeCostUsd(
   model: string,
   usage: TokenUsage,

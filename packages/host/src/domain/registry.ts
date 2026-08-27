@@ -13,6 +13,7 @@
 import type { DagId, DagDef, GitSha } from "@fuguejs/framework";
 import type { z } from "zod";
 import type { Team } from "./auth.js";
+import type { LlmBudgetConfig } from "./llm-budget.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -37,6 +38,12 @@ export interface ResolvedDagConfig {
    * construction.
    */
   readonly llmBudgetTokens?: number;
+  /**
+   * Per-run LLM budget on any combination of axes (FR-B-001). Present only when
+   * declared; absent means no enforcement on that axis. Translated to
+   * `Ceilings` by `ceilingsOf` at NodeContext construction.
+   */
+  readonly llmBudget?: LlmBudgetConfig;
   readonly circuitBreaker?: {
     readonly failureThreshold?: number;
     readonly resetTimeoutMs?: number;

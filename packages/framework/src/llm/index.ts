@@ -53,6 +53,7 @@ export {
   computeCostUsd,
   costRatesFor,
   costUsd,
+  spendOfCall,
   PRICE_TABLE,
 } from "./cost.js";
 export type { CostRates } from "./cost.js";

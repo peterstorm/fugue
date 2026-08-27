@@ -529,7 +529,7 @@ describe("run-dag handler", () => {
 
   it("maps an llm-budget-exceeded to 429 with Retry-After", async () => {
     const deps = defaultDeps({
-      executeDag: failWith({ kind: "llm-budget-exceeded", runId: "r" as never, nodeId: "n" as never, cumulative: 10, budget: 5 }),
+      executeDag: failWith({ kind: "llm-budget-exceeded", runId: "r" as never, nodeId: "n" as never, cause: { kind: "reached", ceiling: { kind: "tokens", limit: 5 }, basis: "settled", observed: 10 } }),
     });
     const res = await post(createTestApp(deps, readyState), "test-dag", { query: "hi" });
     expect(res.status).toBe(429);

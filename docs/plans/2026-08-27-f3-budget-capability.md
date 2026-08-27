@@ -465,3 +465,43 @@ Each is independently shippable and independently revertible.
 - The `metered-llm.ts` round-trip claim matches what the code actually does.
 - The 08-02 spike carries its superseding note.
 - A round of `/review-and-fix` to zero surviving criticals, as F4 had.
+
+---
+
+## 12. Deviations from this plan, as built
+
+**PR-A and PR-B were merged into one change.** §7 split them so that PR-A carried
+"pure framework types and the cost bridge, no behaviour change beyond the error
+shape". Building it that way would have landed `Spend`, `Ceiling` and
+`spendOfCall` with no production caller until the following PR — four dead
+exports, which is the exact smell the F4 round-3 review flagged and which the
+typescript rules name as the pool `tsc` cannot catch. The shipped change is the
+whole in-process, cost-denominated budget: every symbol it adds has a caller.
+PR-C (the ledger) and PR-D (the capability) stand as planned.
+
+**`scaleSpend` / `maxSpend` replaced the reserved-amount sum.** D3 assumed the
+reservation would keep summing reserved amounts. It cannot: `Spend` has no
+honest subtraction once an `unpriced` call is in the sum, so releasing exactly
+what was reserved is not expressible. The reservation counts in-flight calls
+instead and projects `inFlight x maxObservedCall`. This is marginally more
+conservative than the previous sum of older, smaller estimates — the fail-closed
+direction — and it deleted the release bookkeeping entirely.
+
+**`reachedBy` also guards a non-finite LIMIT.** The plan only anticipated a
+non-finite observation. A test written for the sanitizing constructor exposed
+that a `Ceiling` bypassing `ceilings()` with a `NaN` limit never refuses:
+`observed >= NaN` is false forever. `Ceiling` is a plain structural type, so
+nothing prevents such a value reaching the comparison. Both sides are now
+guarded.
+
+**One fix outside the plan's scope: `llm.metered` was logging model output.**
+`record` spreads what it is handed, and `settle` handed it the whole
+`LlmResponse` — which extends `TokenUsage` but also carries `output`,
+`thinking`, and `rawText`. Model output and chain-of-thought were reaching an
+info-level log line with none of the redaction the span path applies to the same
+content. Pre-existing, unrelated to budgets, and inside the function this change
+rewrites, so it was fixed here rather than filed: `pickUsage` narrows a response
+to exactly its four figures, with a regression test.
+
+**ADR-0083 was not written.** It records a decision about the ledger port, which
+this change does not build. It belongs with PR-C.

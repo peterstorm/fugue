@@ -18,6 +18,8 @@ import type { DagId } from "@fuguejs/framework";
 import { z } from "zod";
 import type { HostError } from "./host-error.js";
 import type { FugueYaml } from "./config.js";
+import type { LlmBudgetConfig } from "./llm-budget.js";
+import { LlmBudgetConfigSchema } from "./llm-budget.js";
 
 // ---------------------------------------------------------------------------
 // Config defaults — FR-013: sensible defaults when omitted
@@ -54,6 +56,8 @@ export interface DagRegistrationConfig {
    * (FR-W1-006).
    */
   readonly llmBudgetTokens?: number;
+  /** Per-run LLM budget on any combination of axes (FR-B-001). See `llm-budget.ts`. */
+  readonly llmBudget?: LlmBudgetConfig;
   /**
    * Per-DAG circuit-breaker override. Each subfield falls back INDEPENDENTLY to the host
    * config when omitted: `failureThreshold` → CIRCUIT_BREAKER_THRESHOLD, `resetTimeoutMs`
@@ -101,6 +105,8 @@ export interface ResolvedDagRegistration {
     readonly checkpointTtlMs?: number;
     /** Per-run LLM token budget (FR-W1-001) — preserved untouched (no host default). */
     readonly llmBudgetTokens?: number;
+    /** Per-run LLM budget on any combination of axes — preserved untouched. */
+    readonly llmBudget?: LlmBudgetConfig;
     readonly circuitBreaker?: {
       readonly failureThreshold?: number;
       readonly resetTimeoutMs?: number;
@@ -128,6 +134,7 @@ export const applyFugueYaml = (registration: DagRegistration, yaml: FugueYaml): 
     ...(yaml.cacheTtlMs !== undefined ? { cacheTtlMs: yaml.cacheTtlMs } : {}),
     ...(yaml.checkpointTtlMs !== undefined ? { checkpointTtlMs: yaml.checkpointTtlMs } : {}),
     ...(yaml.llmBudgetTokens !== undefined ? { llmBudgetTokens: yaml.llmBudgetTokens } : {}),
+    ...(yaml.llmBudget !== undefined ? { llmBudget: yaml.llmBudget } : {}),
   };
   return {
     ...registration,
@@ -159,6 +166,7 @@ export const resolveDefaults = (reg: DagRegistration): ResolvedDagRegistration =
     ...(reg.config?.cacheTtlMs !== undefined ? { cacheTtlMs: reg.config.cacheTtlMs } : {}),
     ...(reg.config?.checkpointTtlMs !== undefined ? { checkpointTtlMs: reg.config.checkpointTtlMs } : {}),
     ...(reg.config?.llmBudgetTokens !== undefined ? { llmBudgetTokens: reg.config.llmBudgetTokens } : {}),
+    ...(reg.config?.llmBudget !== undefined ? { llmBudget: reg.config.llmBudget } : {}),
     ...(reg.config?.circuitBreaker !== undefined ? { circuitBreaker: reg.config.circuitBreaker } : {}),
   },
   meta: {
@@ -215,6 +223,7 @@ export const DagRegistrationSchema = z
         cacheTtlMs: z.number().positive().optional(),
         checkpointTtlMs: z.number().positive().optional(),
         llmBudgetTokens: z.number().int().positive().optional(),
+        llmBudget: LlmBudgetConfigSchema.optional(),
         circuitBreaker: z
           .object({
             failureThreshold: z.number().int().positive().optional(),

@@ -16,10 +16,12 @@ import {
   computeCostUsd,
   costRatesFor,
   costUsd,
+  spendOfCall,
 } from "../llm/cost.js";
 import { NO_TOKENS, tokensOnly } from "../types/token-usage.js";
 import type { TokenUsage } from "../types/token-usage.js";
 import type { CacheTtl } from "../types/llm.js";
+import { usdToMicros } from "../types/spend.js";
 
 const MODEL = "gpt-4o"; // 2.5 in / 10.0 out per 1M
 const RATES = costRatesFor(MODEL);
@@ -137,5 +139,70 @@ describe("costUsd / computeCostUsd share one implementation", () => {
     const usage = usageOf({ tokensIn: 1000, cacheReadTokens: 500, tokensOut: 100 });
     expect(computeCostUsd("no-such-model", usage)).toBe(0);
     expect(costUsd(costRatesFor("no-such-model"), usage)).toBe(0);
+  });
+});
+
+describe("spendOfCall: the budget-facing bridge from tokens to money", () => {
+  it("measures one call on every axis a ceiling can limit", () => {
+    const usage = usageOf({ tokensIn: 1000, tokensOut: 200 });
+    const spend = spendOfCall(MODEL, usage);
+    expect(spend.tokens).toBe(1200);
+    expect(spend.calls).toBe(1);
+    expect(spend.usd).toEqual({ kind: "priced", micros: usdToMicros(computeCostUsd(MODEL, usage)) });
+  });
+
+  it("prices a cached run FAR below an uncached one at identical token counts", () => {
+    // This is the regression the whole cost-denominated budget exists for. A
+    // token ceiling sees these two runs as identical; a dollar ceiling sees an
+    // order of magnitude. If cache reads ever go back to being billed at the
+    // full input rate, this fails.
+    const cold = usageOf({ tokensIn: 100_000, tokensOut: 10_000 });
+    const warm = usageOf({ tokensIn: 100_000, tokensOut: 10_000, cacheReadTokens: 95_000 });
+
+    const coldSpend = spendOfCall(MODEL, cold);
+    const warmSpend = spendOfCall(MODEL, warm);
+
+    expect(warmSpend.tokens).toBe(coldSpend.tokens); // indistinguishable to a token budget
+    if (coldSpend.usd.kind !== "priced" || warmSpend.usd.kind !== "priced") throw new Error("priced");
+    expect(warmSpend.usd.micros).toBeLessThan(coldSpend.usd.micros);
+    // 95k read at 0.1x + 5k at 1.0x = 14.5k input-equivalents vs 100k.
+    expect(coldSpend.usd.micros / warmSpend.usd.micros).toBeGreaterThan(2);
+  });
+
+  it("charges the write premium at the TTL the request declared", () => {
+    const usage = usageOf({ tokensIn: 50_000, cacheWriteTokens: 50_000 });
+    const short = spendOfCall(MODEL, usage, "5m");
+    const long = spendOfCall(MODEL, usage, "1h");
+    if (short.usd.kind !== "priced" || long.usd.kind !== "priced") throw new Error("priced");
+    expect(long.usd.micros).toBeGreaterThan(short.usd.micros);
+    expect(long.usd.micros / short.usd.micros).toBeCloseTo(
+      CACHE_WRITE_MULTIPLIER["1h"] / CACHE_WRITE_MULTIPLIER["5m"],
+      5,
+    );
+  });
+
+  it("returns `unpriced` — never zero — for a model with no price-table entry", () => {
+    // `computeCostUsd` returns 0 and warns; that is right for a display figure
+    // and wrong for a budget, where zero means FREE and an unpriced model would
+    // be the cheapest possible way past a dollar ceiling.
+    const spend = spendOfCall("no-such-model", usageOf({ tokensIn: 1000, tokensOut: 100 }));
+    expect(spend.usd.kind).toBe("unpriced");
+    if (spend.usd.kind !== "unpriced") return;
+    expect([...spend.usd.models]).toEqual(["no-such-model"]);
+    expect(spend.usd.knownMicros).toBe(usdToMicros(0));
+    // The token axis is still exact — only cost is unknown.
+    expect(spend.tokens).toBe(1100);
+  });
+
+  it("agrees with computeCostUsd for every priced model and TTL", () => {
+    const ttls: readonly CacheTtl[] = ["5m", "1h"];
+    fc.assert(
+      fc.property(count, count, count, fc.constantFrom(...ttls), (uncached, w, r, ttl) => {
+        const usage = usageOf({ tokensIn: uncached + w + r, cacheWriteTokens: w, cacheReadTokens: r });
+        const spend = spendOfCall(MODEL, usage, ttl);
+        if (spend.usd.kind !== "priced") throw new Error("priced");
+        expect(spend.usd.micros).toBe(usdToMicros(computeCostUsd(MODEL, usage, ttl)));
+      }),
+    );
   });
 });

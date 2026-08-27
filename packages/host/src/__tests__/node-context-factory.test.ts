@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { fromJson, ok, err, isOk, dagId, runId as makeRunId, nodeId as makeNodeId, gitSha, noopTracer, createHttpCapability, systemClock } from "@fuguejs/framework";
+import { fromJson, ok, err, isOk, dagId, runId as makeRunId, nodeId as makeNodeId, gitSha, noopTracer, createHttpCapability, systemClock, observedOf } from "@fuguejs/framework";
 import type {
   Result,
   DagId,
@@ -625,8 +625,9 @@ describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..0
     if (!r2.ok) {
       expect(r2.error.kind).toBe("llm-budget-exceeded");
       if (r2.error.kind === "llm-budget-exceeded") {
-        expect(r2.error.budget).toBe(1); // the dag.config value, threaded through
-        expect(r2.error.cumulative).toBe(15); // settled tokens from call 1
+        expect(r2.error.cause.ceiling).toEqual({ kind: "tokens", limit: 1 }); // the dag.config value
+        expect(r2.error.cause.basis).toBe("settled");
+        expect(observedOf(r2.error.cause)).toBe(15); // settled tokens from call 1
         expect(r2.error.runId).toBe(testRunId);
       }
     }

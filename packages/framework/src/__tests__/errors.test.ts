@@ -19,6 +19,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { tokensOnly } from "../types/token-usage.js";
+import { observedOf } from "../types/budget.js";
 import { match } from "ts-pattern";
 import { runId as makeRunId, nodeId as makeNodeId } from "../types/ids.js";
 import {
@@ -57,8 +58,12 @@ const budgetError: FrameworkError = {
   kind: "llm-budget-exceeded",
   runId: rid,
   nodeId: nid,
-  cumulative: 1200,
-  budget: 1000,
+  cause: {
+    kind: "reached",
+    ceiling: { kind: "tokens", limit: 1000 },
+    basis: "settled",
+    observed: 1200,
+  },
 };
 
 describe("FrameworkError: checkpoint-write-failed diagnostics", () => {
@@ -151,12 +156,14 @@ describe("FrameworkError: llm-budget-exceeded", () => {
     if (budgetError.kind === "llm-budget-exceeded") {
       expect(budgetError.runId).toBe(rid);
       expect(budgetError.nodeId).toBe(nid);
-      expect(budgetError.cumulative).toBe(1200);
-      expect(budgetError.budget).toBe(1000);
+      expect(budgetError.cause.kind).toBe("reached");
+      expect(budgetError.cause.ceiling).toEqual({ kind: "tokens", limit: 1000 });
+      expect(budgetError.cause.basis).toBe("settled");
+      expect(observedOf(budgetError.cause)).toBe(1200);
     }
   });
 
-  it("formats to a legible single line naming run, node, cumulative, and budget", () => {
+  it("formats to a legible single line naming run, node, observed figure, and limit", () => {
     const msg = formatFrameworkError(budgetError);
     expect(msg).toContain("llm budget exceeded");
     expect(msg).toContain("run-budget");
@@ -175,8 +182,8 @@ describe("FrameworkError: llm-budget-exceeded", () => {
     const parsed = JSON.parse(augmented.frameworkErrorJson) as FrameworkError;
     expect(parsed.kind).toBe("llm-budget-exceeded");
     if (parsed.kind === "llm-budget-exceeded") {
-      expect(parsed.cumulative).toBe(1200);
-      expect(parsed.budget).toBe(1000);
+      expect(parsed.cause.ceiling).toEqual({ kind: "tokens", limit: 1000 });
+      expect(observedOf(parsed.cause)).toBe(1200);
     }
     expect(augmented.cause).toBe(budgetError);
   });
@@ -360,7 +367,7 @@ describe("retriabilityOf — single source of truth for the retry fast-fail fork
     [{ kind: "aborted", reason: "caller cancelled" }, "non-retriable"],
     [{ kind: "policy-refusal", scope: "msgraph:mail.send" }, "non-retriable"],
     [{ kind: "downstream-denied", resource: "https://graph", reason: "FIC mismatch" }, "non-retriable"],
-    [{ kind: "llm-budget-exceeded", runId: rid2, nodeId: nid, cumulative: 10, budget: 5 }, "non-retriable"],
+    [{ kind: "llm-budget-exceeded", runId: rid2, nodeId: nid, cause: { kind: "reached", ceiling: { kind: "tokens", limit: 5 }, basis: "settled", observed: 10 } }, "non-retriable"],
     [{ kind: "missing-capability", missing: [{ nodeId: nid, capability: "llm" as Capability }] }, "non-retriable"],
     // node-crash carries its own discriminant — both directions honored.
     [{ kind: "node-crash", nodeId: nid, message: "boom", retriability: "non-retriable" }, "non-retriable"],
@@ -445,7 +452,7 @@ describe("usageOfError — FR-W0-001 token-attribution contract", () => {
     [{ kind: "checkpoint-write-failed", runId: rid2, nodeId: nid, message: "disk full" }, undefined],
     [{ kind: "policy-refusal", scope: "msgraph:mail.send" }, undefined],
     [{ kind: "downstream-denied", resource: "https://graph", reason: "FIC mismatch" }, undefined],
-    [{ kind: "llm-budget-exceeded", runId: rid2, nodeId: nid, cumulative: 10, budget: 5 }, undefined],
+    [{ kind: "llm-budget-exceeded", runId: rid2, nodeId: nid, cause: { kind: "reached", ceiling: { kind: "tokens", limit: 5 }, basis: "settled", observed: 10 } }, undefined],
     [{ kind: "missing-capability", missing: [{ nodeId: nid, capability: "llm" as Capability }] }, undefined],
     [{ kind: "retry-exhausted", nodeId: nid, attempts: 3, lastError: "x", rootErrorKind: "transient" }, undefined],
     [{ kind: "checkpoint-missing", runId: rid2 }, undefined],

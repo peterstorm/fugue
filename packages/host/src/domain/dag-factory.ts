@@ -128,6 +128,7 @@ export const loadResultToRegisteredDag = (
       ...(regConfig?.llmBudgetTokens !== undefined
         ? { llmBudgetTokens: regConfig.llmBudgetTokens }
         : {}),
+      ...(regConfig?.llmBudget !== undefined ? { llmBudget: regConfig.llmBudget } : {}),
       // Per-DAG circuit-breaker override is only set when the DAG declares one;
       // run-dag merges it over the host-level CIRCUIT_BREAKER_* config (a partial
       // override — any field the DAG omits falls back to the host default).
