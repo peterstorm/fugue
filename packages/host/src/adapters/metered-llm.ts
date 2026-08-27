@@ -49,6 +49,7 @@ import type {
   TokenUsage,
 } from "@fuguejs/framework";
 import {
+  DEFAULT_CACHE_TTL,
   err,
   formatBreach,
   pickUsage,
@@ -106,13 +107,15 @@ interface MeteredRequest {
 /**
  * The TTL a cache WRITE on this request would be billed at.
  *
- * Defaults to `5m` when no policy is declared, matching `costBreakdownUsd`'s
- * own default. A request with caching off writes nothing, so the multiplier is
- * applied to zero tokens and the default is unobservable — it matters only for
- * a request that declared a policy, where the real TTL is right there.
+ * Falls back to the framework's `DEFAULT_CACHE_TTL` when no policy is declared
+ * — the same constant `costBreakdownUsd` defaults to, referenced rather than
+ * re-typed so the two cannot drift. A request with caching off writes nothing,
+ * so the multiplier is applied to zero tokens and the default is unobservable;
+ * it matters only for a request that declared a policy, where the real TTL is
+ * right there.
  */
 const writeTtlOf = (cache: MeteredRequest["cache"]): CacheTtl =>
-  cache === undefined || cache.kind === "none" ? "5m" : cache.ttl;
+  cache === undefined || cache.kind === "none" ? DEFAULT_CACHE_TTL : cache.ttl;
 
 /**
  * A `Spend` flattened for a structured log line.

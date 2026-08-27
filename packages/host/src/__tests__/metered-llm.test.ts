@@ -998,21 +998,18 @@ describe("metered-llm: the metering log carries figures, never content", () => {
     // usage value — and passing it whole to a function that SPREADS it put the
     // model's output and chain-of-thought onto an info-level log line, with
     // none of the redaction the span path applies to the same content.
+    // One definition of "a response carrying content", so the two arms cannot
+    // drift and leave one of them asserting against a different payload.
+    const leakyResponse = <O>(): Result<LlmResponse<O>, FrameworkError> =>
+      ok({
+        output: { secret: "PII-BEARING-OUTPUT" } as O,
+        thinking: "CHAIN-OF-THOUGHT",
+        rawText: "RAW-MODEL-TEXT",
+        ...tokensOnly(10, 5),
+      });
     const leaky: LlmClient = {
-      sendStructured: async <O>() =>
-        ok({
-          output: { secret: "PII-BEARING-OUTPUT" } as O,
-          thinking: "CHAIN-OF-THOUGHT",
-          rawText: "RAW-MODEL-TEXT",
-          ...tokensOnly(10, 5),
-        }) as Result<LlmResponse<O>, FrameworkError>,
-      sendWithTools: async <O>() =>
-        ok({
-          output: { secret: "PII-BEARING-OUTPUT" } as O,
-          thinking: "CHAIN-OF-THOUGHT",
-          rawText: "RAW-MODEL-TEXT",
-          ...tokensOnly(10, 5),
-        }) as Result<LlmResponse<O>, FrameworkError>,
+      sendStructured: async <O>() => leakyResponse<O>(),
+      sendWithTools: async <O>() => leakyResponse<O>(),
     };
 
     const { logger, logs } = collectLogs();

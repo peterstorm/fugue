@@ -57,7 +57,16 @@ export const LlmBudgetConfigSchema = z
     message: "llmBudget must declare at least one of tokens, usd, calls",
   });
 
-/** The two config surfaces a run's ceilings can be declared on. */
+/**
+ * The two config surfaces a run's ceilings can be declared on.
+ *
+ * Every layer of the registration chain that carries a budget declaration
+ * EXTENDS this interface rather than restating its fields, and both Zod schemas
+ * merge `LlmBudgetDeclarationSchema` below. That is what makes the one-module
+ * claim in this file's header real rather than aspirational: adding an axis
+ * here becomes a compile error at any layer not updated with it, instead of a
+ * field that silently reaches three of the five surfaces.
+ */
 export interface LlmBudgetDeclaration {
   /**
    * Legacy scalar (FR-W1-001), shipped in v0.5.1 and still honoured. Sugar for
@@ -89,3 +98,33 @@ export const ceilingsOf = (declared: LlmBudgetDeclaration): Ceilings | undefined
   if (budget?.usd !== undefined) axes.push({ kind: "usd", limit: usdToMicros(budget.usd) });
   return ceilings(axes);
 };
+
+/**
+ * Carry a budget declaration from one config layer to the next, omitting the
+ * keys the source did not set.
+ *
+ * The three merge points on the registration chain (`applyFugueYaml`,
+ * `resolveDefaults`, and the resolved-config build in `dag-factory`) each
+ * hand-listed the same conditional spreads. Absence has to stay absence rather
+ * than becoming an explicit `undefined` — `exactOptionalPropertyTypes` aside,
+ * a present-but-undefined key would make "declared no budget" and "declared a
+ * budget of nothing" different values of the same shape. One carrier means a
+ * field added to `LlmBudgetDeclaration` reaches all three sites at once instead
+ * of two of them.
+ */
+export const carryLlmBudget = (source: LlmBudgetDeclaration): LlmBudgetDeclaration => ({
+  ...(source.llmBudgetTokens !== undefined ? { llmBudgetTokens: source.llmBudgetTokens } : {}),
+  ...(source.llmBudget !== undefined ? { llmBudget: source.llmBudget } : {}),
+});
+
+/**
+ * The declaration pair as a Zod object, for the config surfaces that parse it.
+ *
+ * Merged into `FugueYamlSchema` and the `DagRegistrationSchema` config
+ * sub-schema rather than re-typed in each, so the wire shape cannot drift from
+ * the TS shape or from `LlmBudgetDeclaration`.
+ */
+export const LlmBudgetDeclarationSchema = z.object({
+  llmBudgetTokens: z.number().int().positive().optional(),
+  llmBudget: LlmBudgetConfigSchema.optional(),
+});

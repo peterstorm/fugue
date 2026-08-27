@@ -49,6 +49,7 @@ export type {
 } from "./fake-client.js";
 export {
   CACHE_READ_MULTIPLIER,
+  DEFAULT_CACHE_TTL,
   CACHE_WRITE_MULTIPLIER,
   computeCostUsd,
   costRatesFor,

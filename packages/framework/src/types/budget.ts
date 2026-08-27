@@ -60,8 +60,17 @@ export type CeilingKind = Ceiling["kind"];
  * - **Canonically ordered** so the ceiling reported in a refusal is stable
  *   across restarts, rather than reflecting the order a config file happened to
  *   list them in.
+ *
+ * BRANDED so those properties are enforced by the compiler rather than by
+ * convention. Without the brand this is a plain structural tuple: any module
+ * could assign an array literal carrying two `tokens` entries, an unsanitized
+ * limit, or the wrong order, and `firstBreach` would faithfully evaluate it.
+ * The brand makes `ceilings()` the only way to obtain the type, which is the
+ * same technique `MicroUsd` and the branded identifiers already use here.
  */
-export type Ceilings = readonly [Ceiling, ...Ceiling[]];
+export type Ceilings = readonly [Ceiling, ...Ceiling[]] & {
+  readonly __brand: "Ceilings";
+};
 
 /**
  * Report order when several ceilings are breached at once.
@@ -111,7 +120,9 @@ export const ceilings = (declared: readonly Ceiling[]): Ceilings | undefined => 
     return c === undefined ? [] : [c];
   });
   const [head, ...rest] = ordered;
-  return head === undefined ? undefined : [head, ...rest];
+  // The one cast that mints the brand — every invariant above was just
+  // established, which is precisely what the brand attests to.
+  return head === undefined ? undefined : ([head, ...rest] as unknown as Ceilings);
 };
 
 // ---------------------------------------------------------------------------

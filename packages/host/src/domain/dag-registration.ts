@@ -18,8 +18,8 @@ import type { DagId } from "@fuguejs/framework";
 import { z } from "zod";
 import type { HostError } from "./host-error.js";
 import type { FugueYaml } from "./config.js";
-import type { LlmBudgetConfig } from "./llm-budget.js";
-import { LlmBudgetConfigSchema } from "./llm-budget.js";
+import type { LlmBudgetDeclaration } from "./llm-budget.js";
+import { LlmBudgetDeclarationSchema, carryLlmBudget } from "./llm-budget.js";
 
 // ---------------------------------------------------------------------------
 // Config defaults — FR-013: sensible defaults when omitted
@@ -40,24 +40,13 @@ export const DEFAULT_MAX_CONCURRENT = 10;
 // DagRegistration interface — FR-010, FR-011, FR-012
 // ---------------------------------------------------------------------------
 
-export interface DagRegistrationConfig {
+export interface DagRegistrationConfig extends LlmBudgetDeclaration {
   readonly timeoutMs?: number;
   readonly maxConcurrent?: number;
   /** Per-DAG cache TTL override (ms). Falls back to host DEFAULT_CACHE_TTL_MS. (FR-041) */
   readonly cacheTtlMs?: number;
   /** Per-DAG checkpoint TTL override (ms). Falls back to host DEFAULT_CHECKPOINT_TTL_MS. (FR-041) */
   readonly checkpointTtlMs?: number;
-  /**
-   * Per-run LLM token budget (FR-W1-001). When set, the metered-llm decorator
-   * refuses calls once a run's cumulative tokens reach this value. Overshoot is
-   * bounded (FR-W1-004 generalised): ~one call in steady state; an initial
-   * parallel burst (per-call estimate still unlearned) may exceed by its call
-   * count — see llm-meter.ts `ReservationState`. Absent means no enforcement
-   * (FR-W1-006).
-   */
-  readonly llmBudgetTokens?: number;
-  /** Per-run LLM budget on any combination of axes (FR-B-001). See `llm-budget.ts`. */
-  readonly llmBudget?: LlmBudgetConfig;
   /**
    * Per-DAG circuit-breaker override. Each subfield falls back INDEPENDENTLY to the host
    * config when omitted: `failureThreshold` → CIRCUIT_BREAKER_THRESHOLD, `resetTimeoutMs`
@@ -91,7 +80,7 @@ export interface ResolvedDagRegistration {
   readonly dag: DagDef;
   readonly inputSchema: z.ZodType<unknown>;
   readonly route: string;
-  readonly config: {
+  readonly config: LlmBudgetDeclaration & {
     readonly timeoutMs: number;
     readonly maxConcurrent: number;
     /**
@@ -103,10 +92,6 @@ export interface ResolvedDagRegistration {
      */
     readonly cacheTtlMs?: number;
     readonly checkpointTtlMs?: number;
-    /** Per-run LLM token budget (FR-W1-001) — preserved untouched (no host default). */
-    readonly llmBudgetTokens?: number;
-    /** Per-run LLM budget on any combination of axes — preserved untouched. */
-    readonly llmBudget?: LlmBudgetConfig;
     readonly circuitBreaker?: {
       readonly failureThreshold?: number;
       readonly resetTimeoutMs?: number;
@@ -133,8 +118,7 @@ export const applyFugueYaml = (registration: DagRegistration, yaml: FugueYaml): 
     ...(yaml.maxConcurrent !== undefined ? { maxConcurrent: yaml.maxConcurrent } : {}),
     ...(yaml.cacheTtlMs !== undefined ? { cacheTtlMs: yaml.cacheTtlMs } : {}),
     ...(yaml.checkpointTtlMs !== undefined ? { checkpointTtlMs: yaml.checkpointTtlMs } : {}),
-    ...(yaml.llmBudgetTokens !== undefined ? { llmBudgetTokens: yaml.llmBudgetTokens } : {}),
-    ...(yaml.llmBudget !== undefined ? { llmBudget: yaml.llmBudget } : {}),
+    ...carryLlmBudget(yaml),
   };
   return {
     ...registration,
@@ -165,8 +149,7 @@ export const resolveDefaults = (reg: DagRegistration): ResolvedDagRegistration =
     // Preserved untouched — host-level TTL defaulting happens in dag-factory.
     ...(reg.config?.cacheTtlMs !== undefined ? { cacheTtlMs: reg.config.cacheTtlMs } : {}),
     ...(reg.config?.checkpointTtlMs !== undefined ? { checkpointTtlMs: reg.config.checkpointTtlMs } : {}),
-    ...(reg.config?.llmBudgetTokens !== undefined ? { llmBudgetTokens: reg.config.llmBudgetTokens } : {}),
-    ...(reg.config?.llmBudget !== undefined ? { llmBudget: reg.config.llmBudget } : {}),
+    ...carryLlmBudget(reg.config ?? {}),
     ...(reg.config?.circuitBreaker !== undefined ? { circuitBreaker: reg.config.circuitBreaker } : {}),
   },
   meta: {
@@ -216,14 +199,12 @@ export const DagRegistrationSchema = z
       { message: "inputSchema must be a Zod schema (object with .parse method)" },
     ),
     route: z.string().optional(),
-    config: z
-      .object({
+    config: LlmBudgetDeclarationSchema
+      .extend({
         timeoutMs: z.number().positive().optional(),
         maxConcurrent: z.number().int().positive().optional(),
         cacheTtlMs: z.number().positive().optional(),
         checkpointTtlMs: z.number().positive().optional(),
-        llmBudgetTokens: z.number().int().positive().optional(),
-        llmBudget: LlmBudgetConfigSchema.optional(),
         circuitBreaker: z
           .object({
             failureThreshold: z.number().int().positive().optional(),

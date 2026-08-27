@@ -44,8 +44,8 @@ describe("ceilings: the smart constructor", () => {
   });
 
   it("collapses duplicate axes to the TIGHTER limit", () => {
-    expect(limitsOf([tokens(1000), tokens(400)])).toEqual([tokens(400)]);
-    expect(limitsOf([tokens(400), tokens(1000)])).toEqual([tokens(400)]);
+    expect([...limitsOf([tokens(1000), tokens(400)])]).toEqual([tokens(400)]);
+    expect([...limitsOf([tokens(400), tokens(1000)])]).toEqual([tokens(400)]);
   });
 
   it("cannot relax a limit, whatever order the declarations arrive in (FR-B-009)", () => {
@@ -84,8 +84,8 @@ describe("ceilings: the smart constructor", () => {
     // A NaN limit would make `observed >= limit` false forever — a budget that
     // never refuses. Zero grants nothing instead, which is the safe reading of
     // "we could not understand your limit".
-    expect(limitsOf([tokens(Number.NaN)])).toEqual([tokens(0)]);
-    expect(limitsOf([tokens(-100)])).toEqual([tokens(0)]);
+    expect([...limitsOf([tokens(Number.NaN)])]).toEqual([tokens(0)]);
+    expect([...limitsOf([tokens(-100)])]).toEqual([tokens(0)]);
     expect(breachOf(NO_SPEND, tokens(Number.NaN), "settled")).toBeDefined();
   });
 });

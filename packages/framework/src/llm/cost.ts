@@ -43,6 +43,17 @@ export const costRatesFor = (model: string): CostRates =>
   PRICE_TABLE[model] ?? { inputPer1M: 0, outputPer1M: 0 };
 
 /**
+ * The TTL a cache write is billed at when a caller does not name one.
+ *
+ * Exported and referenced rather than re-typed at each default: the same
+ * literal previously appeared as five independent `"5m"`s across this module
+ * and the host's metered decorator, held in sync only by a comment saying so.
+ * A domain default reachable from two packages is exactly the kind of constant
+ * that drifts when one of its copies is edited.
+ */
+export const DEFAULT_CACHE_TTL: CacheTtl = "5m";
+
+/**
  * Price multipliers applied to the base INPUT rate, by how the prompt tokens
  * were billed. Cached reads are the reason prompt caching pays; the write
  * premium is the reason it is opt-in.
@@ -86,7 +97,7 @@ export interface CostBreakdownUsd {
 export const costBreakdownUsd = (
   rates: CostRates,
   usage: TokenUsage,
-  writeTtl: CacheTtl = "5m",
+  writeTtl: CacheTtl = DEFAULT_CACHE_TTL,
 ): CostBreakdownUsd => {
   const perMillion = (tokens: number, rate: number): number => (tokens * rate) / 1_000_000;
   const uncachedInput = perMillion(uncachedInputTokens(usage), rates.inputPer1M);
@@ -109,17 +120,9 @@ export const costBreakdownUsd = (
 export const costUsd = (
   rates: CostRates,
   usage: TokenUsage,
-  writeTtl: CacheTtl = "5m",
+  writeTtl: CacheTtl = DEFAULT_CACHE_TTL,
 ): number => costBreakdownUsd(rates, usage, writeTtl).total;
 
-/**
- * Cost of one call (or of an accumulated run) in USD, warning once when the
- * model has no price-table entry.
- *
- * Per-span enrichment uses `costUsd(costRatesFor(model), …)` instead: it runs on
- * every call, and an unpriced model would otherwise emit a log line per span.
- * The arithmetic is the same either way — only the unknown-model policy differs.
- */
 /**
  * One settled call, measured on every axis a budget can limit — the bridge from
  * "how many tokens" to "what did it cost".
@@ -142,19 +145,35 @@ export const costUsd = (
 export const spendOfCall = (
   model: string,
   usage: TokenUsage,
-  writeTtl: CacheTtl = "5m",
+  writeTtl: CacheTtl = DEFAULT_CACHE_TTL,
 ): Spend => {
   const tokens = totalTokens(usage);
   const rates = PRICE_TABLE[model];
-  return rates === undefined
-    ? unpricedCall(tokens, model)
-    : pricedCall(tokens, usdToMicros(costUsd(rates, usage, writeTtl)));
+  if (rates === undefined) return unpricedCall(tokens, model);
+  const usd = costUsd(rates, usage, writeTtl);
+  // A non-finite figure here means the usage was self-inconsistent — a provider
+  // (or a fixture) that omitted one of the four fields, so a subtraction inside
+  // `costBreakdownUsd` produced NaN. Handing that to `usdToMicros` sanitizes it
+  // to ZERO, and zero on the cost axis means FREE: the call would consume no
+  // dollar budget at all and could never be refused. `unpriced` is the honest
+  // answer to "we could not compute a cost", and the one that fails closed.
+  return Number.isFinite(usd)
+    ? pricedCall(tokens, usdToMicros(usd))
+    : unpricedCall(tokens, model);
 };
 
+/**
+ * Cost of one call (or of an accumulated run) in USD, warning once when the
+ * model has no price-table entry.
+ *
+ * Per-span enrichment uses `costUsd(costRatesFor(model), …)` instead: it runs on
+ * every call, and an unpriced model would otherwise emit a log line per span.
+ * The arithmetic is the same either way — only the unknown-model policy differs.
+ */
 export function computeCostUsd(
   model: string,
   usage: TokenUsage,
-  writeTtl: CacheTtl = "5m",
+  writeTtl: CacheTtl = DEFAULT_CACHE_TTL,
 ): number {
   const entry = PRICE_TABLE[model];
   if (!entry) {

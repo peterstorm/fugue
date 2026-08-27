@@ -23,7 +23,7 @@ import { ok, err } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { HostError } from "./host-error.js";
 import type { TenantId } from "./tenant.js";
-import { LlmBudgetConfigSchema } from "./llm-budget.js";
+import { LlmBudgetDeclarationSchema } from "./llm-budget.js";
 import { parseScope } from "./capability-scope.js";
 
 // ---------------------------------------------------------------------------
@@ -943,7 +943,7 @@ export type HostConfig = z.infer<typeof HostConfigSchema>;
 // Per-DAG config — parsed from fugue.yaml (FR-100, FR-041)
 // ---------------------------------------------------------------------------
 
-export const FugueYamlSchema = z.object({
+export const FugueYamlSchema = LlmBudgetDeclarationSchema.extend({
   /** Team owning this DAG (required, non-empty — drives authorization isolation) */
   team: z.string().min(1),
   /** Individual owner within the team */
@@ -964,31 +964,6 @@ export const FugueYamlSchema = z.object({
   cacheTtlMs: z.number().int().positive().optional(),
   /** Per-DAG checkpoint TTL override (FR-041) */
   checkpointTtlMs: z.number().int().positive().optional(),
-  /**
-   * Per-run LLM token budget (FR-W1-001) — enforced per runId by the
-   * metered-llm decorator.
-   *
-   * Sugar for `llmBudget: { tokens: N }`, kept because it shipped in v0.5.1 and
-   * live deployments set it. It normalises into the same `Ceilings` value as
-   * the block below rather than following a second code path, so there is one
-   * enforcement mechanism and one place a bug could live. Declaring both is
-   * legal and takes the tighter token limit (see `ceilingsOf`).
-   */
-  llmBudgetTokens: z.number().int().positive().optional(),
-  /**
-   * Per-run LLM budget, on any combination of axes (FR-B-001).
-   *
-   * `usd` is the axis that means what an operator actually meant, and after
-   * prompt caching it is the only one that tracks money: a cache read bills at
-   * 0.1x and a write at 1.25-2.0x, so equal token counts can differ by an order
-   * of magnitude in spend. `calls` is the cheap circuit-breaker for a tool loop
-   * stuck retrying. A run is refused when ANY declared axis is reached.
-   *
-   * An empty block is rejected rather than silently meaning "no budget":
-   * writing `llmBudget: {}` reads as an intent to limit something, and honouring
-   * it as "unlimited" would be the most expensive possible misreading.
-   */
-  llmBudget: LlmBudgetConfigSchema.optional(),
 });
 
 export type FugueYaml = z.infer<typeof FugueYamlSchema>;

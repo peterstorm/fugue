@@ -20,6 +20,7 @@
 import { describe, it, expect } from "bun:test";
 import { tokensOnly } from "../types/token-usage.js";
 import { observedOf } from "../types/budget.js";
+import type { MicroUsd } from "../types/spend.js";
 import { match } from "ts-pattern";
 import { runId as makeRunId, nodeId as makeNodeId } from "../types/ids.js";
 import {
@@ -707,5 +708,105 @@ describe("safeDiagnosticString — total, non-truncated rendering for known stri
     expect(safeDiagnosticString("")).toBe('""');
     expect(() => safeDiagnosticString("a")).not.toThrow();
     expect(safeDiagnosticString("a")).toBe('"a"');
+  });
+});
+
+describe("PersistedFrameworkErrorSchema: llm-budget-exceeded round-trips through the WIRE parser", () => {
+  // The existing coverage round-tripped this error through `JSON.stringify` /
+  // `JSON.parse` via FrameworkAugmentedError — which never touches the Zod
+  // schema. This change rewrote that schema (`persistedBreachSchema`,
+  // `persistedCeilingSchema`, the MicroUsd brand restore), so the boundary a
+  // resumed run actually reads a persisted error back through was untested.
+
+  it("parses a `reached` cause, restoring the branded ids", () => {
+    const wire = JSON.parse(
+      JSON.stringify({
+        kind: "llm-budget-exceeded",
+        runId: "run-budget",
+        nodeId: "node-x",
+        cause: {
+          kind: "reached",
+          ceiling: { kind: "usd", limit: 1_500_000 },
+          basis: "projected",
+          observed: 2_000_000,
+        },
+      }),
+    ) as unknown;
+
+    const parsed = PersistedFrameworkErrorSchema.safeParse(wire);
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    expect(parsed.data.kind).toBe("llm-budget-exceeded");
+    if (parsed.data.kind !== "llm-budget-exceeded") return;
+    expect(parsed.data.runId).toBe(rid);
+    expect(parsed.data.cause.basis).toBe("projected");
+    expect(parsed.data.cause.ceiling).toEqual({ kind: "usd", limit: 1_500_000 as MicroUsd });
+    expect(observedOf(parsed.data.cause)).toBe(2_000_000);
+  });
+
+  it("parses an `unpriced` cause, keeping the model list non-empty", () => {
+    const wire = JSON.parse(
+      JSON.stringify({
+        kind: "llm-budget-exceeded",
+        runId: "run-budget",
+        nodeId: "node-x",
+        cause: {
+          kind: "unpriced",
+          ceiling: { kind: "usd", limit: 1_000_000 },
+          basis: "settled",
+          models: ["brand-new-model"],
+          observedAtLeast: 250_000,
+        },
+      }),
+    ) as unknown;
+
+    const parsed = PersistedFrameworkErrorSchema.safeParse(wire);
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    if (parsed.data.kind !== "llm-budget-exceeded") return;
+    expect(parsed.data.cause.kind).toBe("unpriced");
+    if (parsed.data.cause.kind !== "unpriced") return;
+    expect([...parsed.data.cause.models]).toEqual(["brand-new-model"]);
+    expect(parsed.data.cause.observedAtLeast).toBe(250_000 as MicroUsd);
+    // The formatter is total over anything the parser admits.
+    expect(() => formatFrameworkError(parsed.data)).not.toThrow();
+  });
+
+  it("REJECTS an unpriced cause naming no model", () => {
+    // "Unknown cost, caused by nothing" is unrepresentable in memory (the
+    // models list is a non-empty tuple); the wire schema has to agree, or a
+    // persisted record could reintroduce the state the type forbids.
+    const parsed = PersistedFrameworkErrorSchema.safeParse({
+      kind: "llm-budget-exceeded",
+      runId: "run-budget",
+      nodeId: "node-x",
+      cause: {
+        kind: "unpriced",
+        ceiling: { kind: "usd", limit: 1_000_000 },
+        basis: "settled",
+        models: [],
+        observedAtLeast: 0,
+      },
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it("REJECTS a cause with an unknown discriminant or a missing ceiling", () => {
+    expect(
+      PersistedFrameworkErrorSchema.safeParse({
+        kind: "llm-budget-exceeded",
+        runId: "run-budget",
+        nodeId: "node-x",
+        cause: { kind: "exploded", basis: "settled", observed: 1 },
+      }).success,
+    ).toBe(false);
+    expect(
+      PersistedFrameworkErrorSchema.safeParse({
+        kind: "llm-budget-exceeded",
+        runId: "run-budget",
+        nodeId: "node-x",
+        cause: { kind: "reached", basis: "settled", observed: 1 },
+      }).success,
+    ).toBe(false);
   });
 });

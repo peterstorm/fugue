@@ -162,3 +162,34 @@ describe("TokenUsage — constructors", () => {
     expect(Object.isFrozen(NO_TOKENS)).toBe(true);
   });
 });
+
+describe("tokensOnly: sanitizes, like every other producer in the module", () => {
+  // The module header promises "Every `TokenUsage` producer routes through
+  // [sanitizeCount], so the invariant holds at CONSTRUCTION". `tokensOnly` is
+  // the constructor MOST call sites use, so it opting out made that promise
+  // false exactly where it mattered: a malformed provider count reached the
+  // host's structured metering log verbatim.
+  it("reads a non-finite count as zero rather than propagating NaN", () => {
+    expect(tokensOnly(Number.NaN, 5)).toEqual({
+      tokensIn: 0,
+      tokensOut: 5,
+      cacheWriteTokens: 0,
+      cacheReadTokens: 0,
+    });
+    expect(tokensOnly(10, Number.POSITIVE_INFINITY).tokensOut).toBe(0);
+  });
+
+  it("clamps a negative count — a provider can only ever ADD consumption", () => {
+    expect(tokensOnly(-100, -5)).toEqual({
+      tokensIn: 0,
+      tokensOut: 0,
+      cacheWriteTokens: 0,
+      cacheReadTokens: 0,
+    });
+  });
+
+  it("leaves an honest count untouched", () => {
+    expect(tokensOnly(1234, 56).tokensIn).toBe(1234);
+    expect(tokensOnly(1234, 56).tokensOut).toBe(56);
+  });
+});

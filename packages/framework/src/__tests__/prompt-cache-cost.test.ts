@@ -206,3 +206,30 @@ describe("spendOfCall: the budget-facing bridge from tokens to money", () => {
     );
   });
 });
+
+describe("spendOfCall: a cost that cannot be computed is unpriced, never free", () => {
+  it("returns `unpriced` when the usage is self-inconsistent enough to produce NaN", () => {
+    // Surfaced by an integration test whose fake client omitted the cache
+    // fields: `uncachedInputTokens` subtracted `undefined`, the cost came out
+    // NaN, and `usdToMicros` sanitized NaN to ZERO — so every call on a priced
+    // model cost $0.00 and a dollar ceiling could never refuse one. Sanitizing
+    // to zero is right for a token COUNT and wrong for a cost, because zero
+    // cost means free.
+    const malformed = {
+      tokensIn: 400_000,
+      tokensOut: 0,
+    } as unknown as TokenUsage;
+
+    const spend = spendOfCall(MODEL, malformed);
+    expect(spend.usd.kind).toBe("unpriced");
+    if (spend.usd.kind !== "unpriced") return;
+    expect([...spend.usd.models]).toEqual([MODEL]);
+    // The token axis is still exact — only the cost was unknowable.
+    expect(spend.tokens).toBe(400_000);
+  });
+
+  it("still prices a well-formed call on the same model", () => {
+    const spend = spendOfCall(MODEL, usageOf({ tokensIn: 400_000, tokensOut: 0 }));
+    expect(spend.usd.kind).toBe("priced");
+  });
+});

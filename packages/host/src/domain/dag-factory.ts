@@ -11,6 +11,7 @@ import type { LoadResult } from "../ports.js";
 import type { DagSnapshot } from "./dag-diff.js";
 import type { GitSha } from "@fuguejs/framework";
 import { resolveDefaults } from "./dag-registration.js";
+import { carryLlmBudget } from "./llm-budget.js";
 
 // ── Host-level timeout defaults (threaded from HostConfig) ─────────────────
 
@@ -125,10 +126,7 @@ export const loadResultToRegisteredDag = (
       checkpointTtlMs,
       // Per-run LLM budget (FR-W1-001) — preserved untouched (no host default);
       // absent means no enforcement (FR-W1-006).
-      ...(regConfig?.llmBudgetTokens !== undefined
-        ? { llmBudgetTokens: regConfig.llmBudgetTokens }
-        : {}),
-      ...(regConfig?.llmBudget !== undefined ? { llmBudget: regConfig.llmBudget } : {}),
+      ...carryLlmBudget(regConfig ?? {}),
       // Per-DAG circuit-breaker override is only set when the DAG declares one;
       // run-dag merges it over the host-level CIRCUIT_BREAKER_* config (a partial
       // override — any field the DAG omits falls back to the host default).

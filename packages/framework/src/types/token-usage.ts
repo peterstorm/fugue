@@ -85,10 +85,18 @@ export const NO_TOKENS: TokenUsage = Object.freeze({
  * billed at the base input rate. Keeps the ~60 existing two-number
  * construction sites honest without spreading `cacheWriteTokens: 0,
  * cacheReadTokens: 0` across all of them.
+ *
+ * Sanitizes, like every other producer in this module. It is the constructor
+ * MOST call sites use, so it opting out would have made this module's
+ * construction-time guarantee false where it matters most: a malformed
+ * provider count would reach the host's structured metering log verbatim (the
+ * budget itself re-sanitizes at the `Spend` boundary, so the figure never
+ * reached a decision — but "the invariant holds at construction" has to be
+ * true of the constructor, not merely of the consumer).
  */
 export const tokensOnly = (tokensIn: number, tokensOut: number): TokenUsage => ({
-  tokensIn,
-  tokensOut,
+  tokensIn: sanitizeCount(tokensIn),
+  tokensOut: sanitizeCount(tokensOut),
   cacheWriteTokens: 0,
   cacheReadTokens: 0,
 });

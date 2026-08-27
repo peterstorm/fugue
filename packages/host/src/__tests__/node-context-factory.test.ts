@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { fromJson, ok, err, isOk, dagId, runId as makeRunId, nodeId as makeNodeId, gitSha, noopTracer, createHttpCapability, systemClock, observedOf } from "@fuguejs/framework";
+import { fromJson, ok, err, isOk, dagId, runId as makeRunId, nodeId as makeNodeId, gitSha, noopTracer, createHttpCapability, systemClock, observedOf, usdToMicros, tokensOnly } from "@fuguejs/framework";
 import type {
   Result,
   DagId,
@@ -569,11 +569,11 @@ describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..0
     const llm: LlmClient = {
       sendStructured: async <O>(req: LlmRequest<O>): Promise<Result<LlmResponse<O>, FrameworkError>> => {
         calls.push(req.nodeId);
-        return ok({ output: {} as O, tokensIn, tokensOut, rawText: "" });
+        return ok({ output: {} as O, ...tokensOnly(tokensIn, tokensOut), rawText: "" });
       },
       sendWithTools: async <O>(req: SendWithToolsRequest<O>, _ctx: NodeContext): Promise<Result<LlmResponse<O>, FrameworkError>> => {
         calls.push(req.nodeId);
-        return ok({ output: {} as O, tokensIn, tokensOut, rawText: "" });
+        return ok({ output: {} as O, ...tokensOnly(tokensIn, tokensOut), rawText: "" });
       },
     };
     return { llm, calls };
@@ -596,6 +596,9 @@ describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..0
     schema: z.unknown(),
     nodeId: testNodeId,
   });
+
+  /** Same request on a PRICED model, so a usd ceiling compares a real cost. */
+  const pricedReq = (): LlmRequest<unknown> => ({ ...structuredReq(), model: "gpt-4o" });
 
   it("wraps the shared LLM client — ctx.llm is the metered decorator, NOT the shared reference", async () => {
     const { llm } = fakeLlm(10, 5);
@@ -632,6 +635,82 @@ describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..0
       }
     }
     // The refused call never reached the inner client (no network round trip).
+    expect(calls.length).toBe(1);
+  });
+
+  it("threads dag.config.llmBudget.usd into the decorator: a dollar ceiling refuses on COST", async () => {
+    // The legacy `llmBudgetTokens` scalar is covered above. This is the axis F3
+    // actually added, and the seam it crosses is the one nothing else pins:
+    // `ceilingsOf` is unit-tested and `createMeteredLlm` is unit-tested with
+    // hand-built ceilings, but only this proves that what an operator writes in
+    // `fugue.yaml` is what the decorator ends up enforcing.
+    //
+    // 400k prompt tokens on gpt-4o = $1.00. Budget $1.50: call 1 settles at
+    // $1.00, call 2 is the single overshoot at $2.00, call 3 is refused.
+    const { llm, calls } = fakeLlm(400_000, 0);
+    const shared = sharedWithLlm(llm);
+    const dag = makeDag({ llmBudget: { usd: 1.5 } });
+
+    const { ctx } = await createNodeContextForDag(shared, dag, testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
+    if (ctx.llm === null) throw new Error("expected wired llm");
+
+    expect((await ctx.llm.sendStructured(pricedReq())).ok).toBe(true);
+    expect((await ctx.llm.sendStructured(pricedReq())).ok).toBe(true);
+    const refused = await ctx.llm.sendStructured(pricedReq());
+
+    expect(refused.ok).toBe(false);
+    if (!refused.ok && refused.error.kind === "llm-budget-exceeded") {
+      expect(refused.error.cause.ceiling.kind).toBe("usd");
+      expect(refused.error.cause.ceiling.limit).toBe(usdToMicros(1.5));
+      expect(observedOf(refused.error.cause)).toBe(usdToMicros(2));
+    } else {
+      throw new Error("expected a usd budget refusal");
+    }
+    expect(calls.length).toBe(2); // the refused call never reached the client
+  });
+
+  it("threads dag.config.llmBudget.calls: a call ceiling refuses on ROUND TRIPS, not size", async () => {
+    // The cheap circuit-breaker axis. Two tiny calls trip it where neither a
+    // token nor a dollar ceiling would notice.
+    const { llm, calls } = fakeLlm(1, 1);
+    const shared = sharedWithLlm(llm);
+    const dag = makeDag({ llmBudget: { calls: 2 } });
+
+    const { ctx } = await createNodeContextForDag(shared, dag, testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
+    if (ctx.llm === null) throw new Error("expected wired llm");
+
+    expect((await ctx.llm.sendStructured(pricedReq())).ok).toBe(true);
+    expect((await ctx.llm.sendStructured(pricedReq())).ok).toBe(true);
+    const refused = await ctx.llm.sendStructured(pricedReq());
+
+    expect(refused.ok).toBe(false);
+    if (!refused.ok && refused.error.kind === "llm-budget-exceeded") {
+      expect(refused.error.cause.ceiling.kind).toBe("calls");
+    } else {
+      throw new Error("expected a calls budget refusal");
+    }
+    expect(calls.length).toBe(2);
+  });
+
+  it("takes the TIGHTER limit when both the legacy scalar and the block declare tokens", async () => {
+    // `ceilings()` collapses duplicate axes to their minimum, so the two
+    // spellings compose rather than one winning by declaration order. Pinned
+    // through the factory because that is where both reach the same value.
+    const { llm, calls } = fakeLlm(10, 5); // 15 tokens/call
+    const shared = sharedWithLlm(llm);
+    const dag = makeDag({ llmBudgetTokens: 100_000, llmBudget: { tokens: 1 } });
+
+    const { ctx } = await createNodeContextForDag(shared, dag, testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
+    if (ctx.llm === null) throw new Error("expected wired llm");
+
+    expect((await ctx.llm.sendStructured(structuredReq())).ok).toBe(true); // the overshoot
+    const refused = await ctx.llm.sendStructured(structuredReq());
+    expect(refused.ok).toBe(false);
+    if (!refused.ok && refused.error.kind === "llm-budget-exceeded") {
+      expect(refused.error.cause.ceiling).toEqual({ kind: "tokens", limit: 1 });
+    } else {
+      throw new Error("expected a tokens budget refusal");
+    }
     expect(calls.length).toBe(1);
   });
 
