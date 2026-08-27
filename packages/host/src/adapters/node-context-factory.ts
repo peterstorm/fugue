@@ -40,6 +40,7 @@ import type { NodeContextForDag } from "../domain/run-context.js";
 import type { SubjectToken } from "../domain/auth.js";
 import { createMeteredLlm } from "./metered-llm.js";
 import { ceilingsOf } from "../domain/llm-budget.js";
+import { createRedisSpendLedger, spendLedgerRedis } from "./spend-ledger-redis.js";
 
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -428,10 +429,54 @@ export const createNodeContextForDag = async (
   // LLM authority is deliberately run-scoped here — the metered decorator is
   // the per-run budget authority; see keycloak-broker.ts)
   const limits = ceilingsOf(dag.config);
+
+  // The DURABLE half of the budget. The meter itself is per-NodeContext, and a
+  // resumable run builds a fresh NodeContext per execution slice, so without a
+  // ledger a run that parks for a human decision and resumes would start from
+  // zero spend — five parks, six budgets. The ledger is read ONCE here and
+  // appended to as calls settle.
+  //
+  // Redis-backed when the adapter offers the primitives; otherwise the
+  // process-wide in-memory ledger from SharedInfra, which still carries spend
+  // across the slices of one process (the whole HITL park/resume path in a
+  // single-process deployment) and is honest about not surviving a restart.
+  const ledgerRedis = spendLedgerRedis(shared.redis);
+  const spendLedger = ledgerRedis.ok
+    ? createRedisSpendLedger({
+        redis: ledgerRedis.value,
+        tenant,
+        dagId,
+        ...(ttl.checkpointTtlSec !== undefined ? { ttlSec: ttl.checkpointTtlSec } : {}),
+      })
+    : shared.spendLedger;
+
+  const hydrated = await spendLedger.read(runId);
+  // FAIL CLOSED (FR-B-007). An unreadable ledger is indistinguishable from a
+  // spent one, and assuming zero is exactly the refill-on-resume bug the ledger
+  // exists to close — so a BUDGETED run refuses to start a slice it cannot
+  // account for. An UNBUDGETED run carries on: there is no ceiling to protect,
+  // and failing it would turn a metering outage into an availability outage.
+  if (!hydrated.ok && limits !== undefined) {
+    throw new Error(
+      `createNodeContextForDag: DAG '${dagId}' declares an LLM budget but its spend ledger ` +
+        `could not be read for run '${runId}' — refusing to run a budgeted slice with ` +
+        `unknown prior spend: ${formatHostError(hydrated.error)}`,
+    );
+  }
+  if (!hydrated.ok) {
+    reportWithoutThrowing(shared.logger, "warn", "Spend ledger unreadable — metering from zero", {
+      dagId: dagId as string,
+      runId: runId as string,
+      error: formatHostError(hydrated.error),
+    });
+  }
+
   const llm = createMeteredLlm(shared.llm, {
     dagId,
     runId,
     ...(limits !== undefined ? { limits } : {}),
+    ...(hydrated.ok ? { hydrated: hydrated.value } : {}),
+    ledger: spendLedger,
     logger: shared.logger,
   });
 

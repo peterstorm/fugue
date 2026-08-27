@@ -1048,7 +1048,11 @@ Before prompt caching, a token count was a serviceable proxy for money. It no lo
 
 Overshoot is bounded rather than eliminated: the check runs before the call against spend that settles after it, so exactly one call passes a reached ceiling in the sequential case, and a concurrency reservation bounds the parallel case. See ADR-0082.
 
-**Known gap:** the accumulator is per-NodeContext, and a resumable run builds a fresh one per execution slice — so a run that parks for a human decision and resumes starts from zero spend. Durability is tracked in `docs/plans/2026-08-27-f3-budget-capability.md`.
+**Spend is durable.** A resumable run builds a fresh NodeContext per execution slice, so the in-process counter alone would let a run that parks for a human decision resume with its budget refilled — five parks, six budgets. A spend ledger (Redis, or in-process for a single-process deployment) is hydrated once when a slice starts and appended to as calls settle, so a run that parked already over its ceiling refuses immediately on resume.
+
+A budgeted run whose ledger cannot be READ refuses the slice: an unreadable ledger is indistinguishable from a spent one, and assuming zero is the refill bug by another name. An unbudgeted run carries on — there is no ceiling to protect. A failed ledger WRITE never fails the call, because the tokens are already spent; it is logged at `error` under a declared budget.
+
+**Known gaps:** an LLM client reaching a node through the capabilities bag (rather than `ctx.llm`) is unmetered — no deployment wires one today. And an F6 file-durable deployment gets the in-process ledger, so its spend survives parks but not process restarts. Both are tracked in `docs/plans/2026-08-27-f3-budget-capability.md`.
 
 ---
 

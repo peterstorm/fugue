@@ -9,16 +9,26 @@
  *   3. PRICED and accumulated AFTER the call, then logged as a structured line
  *      carrying the attribution triple + the call's consumption (FR-W0-002).
  *
- * Zero network round trips are added: pricing, the meter, and the admission
- * decision are pure in-process operations (FR-W1-005, SC-002, SC-004). One
- * decorator instance is constructed per NodeContext (per run), so its meter is
- * naturally run-scoped — the pure functions are keyed by `runId` for defence in
- * depth but a given decorator only ever sees one run.
+ * The ADMISSION decision adds zero network round trips: pricing, the meter, and
+ * the comparison are pure in-process operations against a counter hydrated ONCE
+ * per slice (FR-W1-005, SC-002, SC-004). The SETTLE path adds one ledger append
+ * per provider call, sequenced after a call that already cost seconds — a
+ * sub-millisecond write against a multi-second request. That distinction is the
+ * honest restatement of what was previously a blanket "zero network round trips
+ * are added"; the guarantee that matters (an LLM call is never delayed by
+ * budget bookkeeping BEFORE it is made) is unchanged.
  *
- * NOTE (F3, known gap): because the meter is per-NodeContext and a resumable
- * run builds a fresh NodeContext per execution slice, a run that parks and
- * resumes starts from zero spend. Durability is a separate change (a spend
- * ledger port); this decorator is where it will hydrate.
+ * One decorator instance is constructed per NodeContext (per run), so its meter
+ * is naturally run-scoped — the pure functions are keyed by `runId` for defence
+ * in depth but a given decorator only ever sees one run. The LEDGER is what
+ * makes spend outlive that context: a resumable run builds a fresh NodeContext
+ * per execution slice, and without the hydrate-and-append pair a run that parks
+ * for a human decision would resume with its budget refilled.
+ *
+ * LOSS WINDOW: a crash between a provider call settling and its ledger append
+ * loses that one call's spend. Bounded by one call — the same magnitude as the
+ * documented overshoot-by-one allowance, and for the same structural reason
+ * (the record is written after the fact it records).
  *
  * @satisfies FR-W0-001 FR-W0-002 FR-W0-004 FR-W1-002 FR-W1-003 FR-W1-004
  * @satisfies FR-W1-005 FR-W1-006 SC-001 SC-002 SC-003 SC-004
@@ -58,7 +68,8 @@ import {
   totalTokens,
   usageOfError,
 } from "@fuguejs/framework";
-import type { LogPort } from "../ports.js";
+import type { LogPort, SpendLedgerPort } from "../ports.js";
+import { formatHostError } from "../domain/host-error.js";
 import { logWithoutThrowing } from "../hitl/diagnostic-logging.js";
 import {
   emptyMeter,
@@ -86,6 +97,15 @@ interface MeteredLlmDeps {
   readonly dagId: DagId;
   readonly runId: RunId;
   readonly limits?: Ceilings;
+  /**
+   * Spend this run had already settled before this slice began, read from the
+   * ledger. Absent means a fresh run — or an unreadable ledger on an UNBUDGETED
+   * run, which meters from zero rather than failing (a budgeted run never gets
+   * here; the factory refuses the slice).
+   */
+  readonly hydrated?: Spend;
+  /** Where settled spend is appended so it outlives this NodeContext. */
+  readonly ledger: SpendLedgerPort;
   readonly logger: LogPort;
 }
 
@@ -144,10 +164,13 @@ const spendFields = ({ usd, ...axes }: Spend): Record<string, unknown> => ({
  * metered.
  */
 export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmClient => {
-  // In-process, run-scoped accumulator. Mutated only here, behind the pure
+  const { dagId, runId, limits, hydrated, ledger, logger } = deps;
+
+  // In-process, run-scoped accumulator, SEEDED with what the ledger says this
+  // run already spent in earlier slices. Mutated only here, behind the pure
   // `accumulate` transition — the meter value itself is immutable.
-  let meter: LlmMeter = emptyMeter();
-  const { dagId, runId, limits, logger } = deps;
+  let meter: LlmMeter =
+    hydrated === undefined ? emptyMeter() : accumulate(emptyMeter(), runId, hydrated);
 
   // Concurrency reservation (review I1 / SC-003). The DECISION logic is pure —
   // `admit` / `releaseReservation` / `learnObservedCall` in llm-meter.ts (see
@@ -204,8 +227,28 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
     return { release: () => { reservation = releaseReservation(reservation); } };
   };
 
+  /**
+   * Persist one settled call's spend so it outlives this NodeContext.
+   *
+   * A failure here does NOT fail the call: the provider has already run and the
+   * tokens are already spent, so refusing the result would waste them and lose
+   * the output too. What it costs is DURABILITY — that call will not be visible
+   * to the next slice — so it is logged at `error` under a declared budget (a
+   * budget-integrity event an operator must see) and at `warn` without one,
+   * where nothing is being protected.
+   */
+  const persist = async (nodeId: NodeId, call: Spend): Promise<void> => {
+    const appended = await ledger.add(runId, call);
+    if (appended.ok) return;
+    logWithoutThrowing(logger, limits === undefined ? "warn" : "error", "llm.ledger-write-failed", {
+      ...attribution(nodeId),
+      reason: formatHostError(appended.error),
+      unrecorded: spendFields(call),
+    });
+  };
+
   /** Post-call bookkeeping — price the call, accumulate it, emit the metering log. */
-  const record = (req: MeteredRequest, operation: Operation, usage: TokenUsage): void => {
+  const record = (req: MeteredRequest, operation: Operation, usage: TokenUsage): Spend => {
     const call = spendOfCall(req.model, usage, writeTtlOf(req.cache));
     // Learn the per-call estimate the concurrency reservation uses (I1).
     reservation = learnObservedCall(reservation, call);
@@ -227,6 +270,7 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
       cumulative: spendFields(spendFor(meter, runId)),
       ...(limits !== undefined ? { limits: limits.map((c) => `${c.kind}:${c.limit}`) } : {}),
     });
+    return call;
   };
 
   /**
@@ -240,11 +284,11 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
    * The `result` is returned untouched so the decorator stays a transparent
    * pass-through.
    */
-  const settle = <O>(
+  const settle = async <O>(
     req: MeteredRequest,
     operation: Operation,
     result: Result<LlmResponse<O>, FrameworkError>,
-  ): Result<LlmResponse<O>, FrameworkError> => {
+  ): Promise<Result<LlmResponse<O>, FrameworkError>> => {
     if (result.ok) {
       // `sendWithTools` aggregates tokens across all turns of its loop into a
       // single LlmResponse — one accumulate per outer call matches the
@@ -255,13 +299,15 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
       // the response whole put generated content and chain-of-thought into the
       // metering log, with none of the redaction the span path applies.
       // `pickUsage` narrows it to exactly the four figures.
-      record(req, operation, pickUsage(result.value));
+      await persist(req.nodeId, record(req, operation, pickUsage(result.value)));
       return result;
     }
     // Failure path: attribute any consumption the failed call incurred, then log.
     const partial = usageOfError(result.error);
     if (partial !== undefined && totalTokens(partial) > 0) {
-      record(req, operation, partial);
+      // A failed call's burned tokens are durable too — otherwise a crash-loop
+      // could bypass the budget by never settling successfully.
+      await persist(req.nodeId, record(req, operation, partial));
     }
     logWithoutThrowing(logger, "warn", "llm.call-failed", {
       ...attribution(req.nodeId),
@@ -310,7 +356,7 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
     const admission = gate(req.nodeId);
     if ("error" in admission) return err(admission.error);
     try {
-      return settle(req, operation, await call());
+      return await settle(req, operation, await call());
     } catch (e) {
       logThrown(req.nodeId, operation, e);
       throw e;

@@ -210,6 +210,13 @@ export const createIoredisRedisPort = (
           return ok(created === "OK" ? "created" : "exists");
         }
       }),
+    hIncrBy: (key, field, by) =>
+      redisCall(() => `HINCRBY ${key} ${field}`, () => client.hincrby(key, field, by)),
+    hGetAll: (key) => redisCall(() => `HGETALL ${key}`, () => client.hgetall(key)),
+    expire: async (key, seconds) => {
+      const applied = await redisCall(() => `EXPIRE ${key}`, () => client.expire(key, seconds));
+      return applied.ok ? ok(applied.value === 1) : applied;
+    },
     sAdd: (key, member) => redisCall(() => `SADD ${key}`, () => client.sadd(key, member)),
     sRem: (key, member) => redisCall(() => `SREM ${key}`, () => client.srem(key, member)),
     sMembers: (key) => redisCall(() => `SMEMBERS ${key}`, () => client.smembers(key)),

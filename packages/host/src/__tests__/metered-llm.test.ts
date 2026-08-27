@@ -36,6 +36,7 @@ import type {
 } from "@fuguejs/framework";
 import type { LogPort } from "../ports.js";
 import { createMeteredLlm } from "../adapters/metered-llm.js";
+import { createInMemorySpendLedger } from "../adapters/spend-ledger-memory.js";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -118,7 +119,7 @@ describe("metered-llm: no budget (FR-W1-006 passthrough)", () => {
   it("delegates and never refuses when budget is undefined", async () => {
     const { inner, calls } = fakeInner(1_000_000, 0);
     const { logger } = collectLogs();
-    const metered = createMeteredLlm(inner, { dagId, runId, logger });
+    const metered = createMeteredLlm(inner, { dagId, runId, ledger: createInMemorySpendLedger(), logger });
 
     for (let i = 0; i < 5; i++) {
       const res = await metered.sendStructured(structuredReq(nodeA));
@@ -140,6 +141,7 @@ describe("metered-llm: diagnostic failures never replace LLM outcomes", () => {
     const metered = createMeteredLlm(inner, {
       dagId,
       runId,
+      ledger: createInMemorySpendLedger(),
       limits: tokenBudget(10),
       logger: throwingLogger,
     });
@@ -163,7 +165,7 @@ describe("metered-llm: diagnostic failures never replace LLM outcomes", () => {
       sendStructured: async () => err(expected),
       sendWithTools: async () => err(expected),
     };
-    const metered = createMeteredLlm(inner, { dagId, runId, logger: throwingLogger });
+    const metered = createMeteredLlm(inner, { dagId, runId, ledger: createInMemorySpendLedger(), logger: throwingLogger });
 
     expect(await metered.sendStructured(structuredReq(nodeA))).toEqual(err(expected));
   });
@@ -175,7 +177,7 @@ describe("metered-llm: diagnostic failures never replace LLM outcomes", () => {
       sendStructured: async () => { throw revoked.proxy; },
       sendWithTools: async () => { throw revoked.proxy; },
     };
-    const metered = createMeteredLlm(inner, { dagId, runId, logger: throwingLogger });
+    const metered = createMeteredLlm(inner, { dagId, runId, ledger: createInMemorySpendLedger(), logger: throwingLogger });
 
     let caught: unknown;
     try {
@@ -191,7 +193,7 @@ describe("metered-llm: attribution stamp (FR-W0-001 / SC-001)", () => {
   it("emits a structured metering log with (dagId, runId, nodeId) on every successful call", async () => {
     const { inner } = fakeInner(100, 50);
     const { logger, logs } = collectLogs();
-    const metered = createMeteredLlm(inner, { dagId, runId, logger });
+    const metered = createMeteredLlm(inner, { dagId, runId, ledger: createInMemorySpendLedger(), logger });
 
     await metered.sendStructured(structuredReq(nodeA));
     await metered.sendWithTools(toolsReq(nodeA), fakeCtx);
@@ -212,7 +214,7 @@ describe("metered-llm: attribution stamp (FR-W0-001 / SC-001)", () => {
   it("aggregates cumulative tokens across calls (FR-W0-004)", async () => {
     const { inner } = fakeInner(100, 50); // 150/call
     const { logger, logs } = collectLogs();
-    const metered = createMeteredLlm(inner, { dagId, runId, logger });
+    const metered = createMeteredLlm(inner, { dagId, runId, ledger: createInMemorySpendLedger(), logger });
 
     await metered.sendStructured(structuredReq(nodeA));
     await metered.sendStructured(structuredReq(nodeA));
@@ -229,7 +231,7 @@ describe("metered-llm: pre-call refusal (FR-W1-002 / FR-W1-003)", () => {
     // Call 3 → cumulative 300 >= 200 refuse.
     const { inner, calls } = fakeInner(100, 50);
     const { logger, logs } = collectLogs();
-    const metered = createMeteredLlm(inner, { dagId, runId, limits: tokenBudget(200), logger });
+    const metered = createMeteredLlm(inner, { dagId, runId, ledger: createInMemorySpendLedger(), limits: tokenBudget(200), logger });
 
     const r1 = await metered.sendStructured(structuredReq(nodeA));
     const r2 = await metered.sendStructured(structuredReq(nodeA));
@@ -256,7 +258,7 @@ describe("metered-llm: pre-call refusal (FR-W1-002 / FR-W1-003)", () => {
   it("overshoots by at most one (SC-003): allows the boundary call, refuses the next", async () => {
     const { inner, calls } = fakeInner(1000, 0); // one call exceeds any small budget
     const { logger } = collectLogs();
-    const metered = createMeteredLlm(inner, { dagId, runId, limits: tokenBudget(500), logger });
+    const metered = createMeteredLlm(inner, { dagId, runId, ledger: createInMemorySpendLedger(), limits: tokenBudget(500), logger });
 
     const r1 = await metered.sendStructured(structuredReq(nodeA)); // 0 < 500 → allow, → 1000
     const r2 = await metered.sendStructured(structuredReq(nodeA)); // 1000 >= 500 → refuse
@@ -280,7 +282,7 @@ describe("metered-llm: pre-call refusal (FR-W1-002 / FR-W1-003)", () => {
         >,
     };
     const { logger, logs } = collectLogs();
-    const metered = createMeteredLlm(failing, { dagId, runId, limits: tokenBudget(100), logger });
+    const metered = createMeteredLlm(failing, { dagId, runId, ledger: createInMemorySpendLedger(), limits: tokenBudget(100), logger });
 
     const r1 = await metered.sendStructured(structuredReq(nodeA));
     expect(r1.ok).toBe(false);
@@ -313,7 +315,7 @@ describe("metered-llm: pre-call refusal (FR-W1-002 / FR-W1-003)", () => {
         >,
     };
     const { logger, logs } = collectLogs();
-    const metered = createMeteredLlm(failing, { dagId, runId, limits: tokenBudget(100), logger });
+    const metered = createMeteredLlm(failing, { dagId, runId, ledger: createInMemorySpendLedger(), limits: tokenBudget(100), logger });
 
     const r1 = await metered.sendWithTools(toolsReq(nodeA), fakeCtx);
     expect(r1.ok).toBe(false);
@@ -364,7 +366,7 @@ describe("metered-llm: failed calls still burn budget (CRITICAL-1 / FR-W0-001)",
   it("accumulates the consumed tokens of a FAILED multi-turn sendWithTools into the meter", async () => {
     const inner = failingWithUsage("node-crash", 400, 200); // 600 burned
     const { logger, logs } = collectLogs();
-    const metered = createMeteredLlm(inner, { dagId, runId, logger });
+    const metered = createMeteredLlm(inner, { dagId, runId, ledger: createInMemorySpendLedger(), logger });
 
     const r = await metered.sendWithTools(toolsReq(nodeA), fakeCtx);
     expect(r.ok).toBe(false);
@@ -388,7 +390,7 @@ describe("metered-llm: failed calls still burn budget (CRITICAL-1 / FR-W0-001)",
     // budget 500; a single failed loop burns 600 → cumulative 600 >= 500.
     const inner = failingWithUsage("node-crash", 600, 0);
     const { logger } = collectLogs();
-    const metered = createMeteredLlm(inner, { dagId, runId, limits: tokenBudget(500), logger });
+    const metered = createMeteredLlm(inner, { dagId, runId, ledger: createInMemorySpendLedger(), limits: tokenBudget(500), logger });
 
     // First (failing) call is allowed: cumulative 0 < 500. It burns 600.
     const r1 = await metered.sendWithTools(toolsReq(nodeA), fakeCtx);
@@ -412,7 +414,7 @@ describe("metered-llm: failed calls still burn budget (CRITICAL-1 / FR-W0-001)",
     for (const kind of ["transient", "aborted"] as const) {
       const inner = failingWithUsage(kind, 50, 25);
       const { logger, logs } = collectLogs();
-      const metered = createMeteredLlm(inner, { dagId, runId, logger });
+      const metered = createMeteredLlm(inner, { dagId, runId, ledger: createInMemorySpendLedger(), logger });
       const r = await metered.sendWithTools(toolsReq(nodeA), fakeCtx);
       expect(r.ok).toBe(false);
       const metered_log = logs.find((l) => l.msg === "llm.metered");
@@ -427,7 +429,7 @@ describe("metered-llm: failed calls still burn budget (CRITICAL-1 / FR-W0-001)",
     // and stamped with operation "sendStructured".
     const inner = failingWithUsage("transient", 80, 40); // 120 burned
     const { logger, logs } = collectLogs();
-    const metered = createMeteredLlm(inner, { dagId, runId, logger });
+    const metered = createMeteredLlm(inner, { dagId, runId, ledger: createInMemorySpendLedger(), logger });
 
     const r = await metered.sendStructured(structuredReq(nodeA));
     expect(r.ok).toBe(false);
@@ -454,7 +456,7 @@ describe("metered-llm: failed calls still burn budget (CRITICAL-1 / FR-W0-001)",
     // refused — a crashing structured call cannot bypass the per-run budget.
     const inner = failingWithUsage("node-crash", 600, 0);
     const { logger } = collectLogs();
-    const metered = createMeteredLlm(inner, { dagId, runId, limits: tokenBudget(500), logger });
+    const metered = createMeteredLlm(inner, { dagId, runId, ledger: createInMemorySpendLedger(), limits: tokenBudget(500), logger });
 
     const r1 = await metered.sendStructured(structuredReq(nodeA));
     expect(r1.ok).toBe(false);
@@ -477,13 +479,13 @@ describe("metered-llm: metering log limits field (advisory)", () => {
     const { inner } = fakeInner(10, 5);
 
     const withBudget = collectLogs();
-    const m1 = createMeteredLlm(inner, { dagId, runId, limits: tokenBudget(1000), logger: withBudget.logger });
+    const m1 = createMeteredLlm(inner, { dagId, runId, ledger: createInMemorySpendLedger(), limits: tokenBudget(1000), logger: withBudget.logger });
     await m1.sendStructured(structuredReq(nodeA));
     const l1 = withBudget.logs.find((l) => l.msg === "llm.metered");
     expect(l1?.data).toHaveProperty("limits", ["tokens:1000"]);
 
     const noBudget = collectLogs();
-    const m2 = createMeteredLlm(inner, { dagId, runId, logger: noBudget.logger });
+    const m2 = createMeteredLlm(inner, { dagId, runId, ledger: createInMemorySpendLedger(), logger: noBudget.logger });
     await m2.sendStructured(structuredReq(nodeA));
     const l2 = noBudget.logs.find((l) => l.msg === "llm.metered");
     // Absent, not `undefined`: an operator filtering on the field must be able
@@ -521,7 +523,7 @@ describe("metered-llm: the refusal names its ceiling and its basis (errors.ts co
     // makes the figure usable for reconciliation at all.
     const { inner } = fakeInner(100, 50);
     const { logger, logs } = collectLogs();
-    const metered = createMeteredLlm(inner, { dagId, runId, limits: tokenBudget(200), logger });
+    const metered = createMeteredLlm(inner, { dagId, runId, ledger: createInMemorySpendLedger(), limits: tokenBudget(200), logger });
 
     await metered.sendStructured(structuredReq(nodeA));
     await metered.sendStructured(structuredReq(nodeA));
@@ -554,7 +556,7 @@ describe("metered-llm: the refusal names its ceiling and its basis (errors.ts co
     // and refuses 3: settled 100 + 2 in flight x 100 projects to 300 >= 250.
     const { inner } = delayedInner(100, 0, 10);
     const { logger, logs } = collectLogs();
-    const metered = createMeteredLlm(inner, { dagId, runId, limits: tokenBudget(250), logger });
+    const metered = createMeteredLlm(inner, { dagId, runId, ledger: createInMemorySpendLedger(), limits: tokenBudget(250), logger });
 
     expect((await metered.sendStructured(structuredReq(nodeA))).ok).toBe(true); // settled 100
 
@@ -589,7 +591,7 @@ describe("metered-llm: concurrency reservation bounds overshoot (I1/SC-003)", ()
     // until cumulative+reserved reaches budget — overshoot ≈ one call, not N.
     const { inner, calls } = delayedInner(100, 0, 10);
     const { logger } = collectLogs();
-    const metered = createMeteredLlm(inner, { dagId, runId, limits: tokenBudget(250), logger });
+    const metered = createMeteredLlm(inner, { dagId, runId, ledger: createInMemorySpendLedger(), limits: tokenBudget(250), logger });
 
     // Warm up: one settled call so the reservation estimate is learned.
     expect((await metered.sendStructured(structuredReq(nodeA))).ok).toBe(true); // cumulative 100
@@ -641,7 +643,7 @@ describe("metered-llm: a THROWING inner client releases its reservation and is l
       sendWithTools: (req, ctx) => good.sendWithTools(req, ctx),
     };
 
-    const metered = createMeteredLlm(composite, { dagId, runId, limits: tokenBudget(30), logger });
+    const metered = createMeteredLlm(composite, { dagId, runId, ledger: createInMemorySpendLedger(), limits: tokenBudget(30), logger });
 
     // Learn the estimate with a settled call (uses sendWithTools → good inner).
     expect((await metered.sendWithTools(toolsReq(nodeA), fakeCtx)).ok).toBe(true); // cumulative 15
@@ -681,7 +683,7 @@ describe("metered-llm: a THROWING inner client releases its reservation and is l
           : throwing.sendWithTools(req, ctx),
     };
 
-    const metered = createMeteredLlm(composite, { dagId, runId, limits: tokenBudget(30), logger });
+    const metered = createMeteredLlm(composite, { dagId, runId, ledger: createInMemorySpendLedger(), limits: tokenBudget(30), logger });
 
     // Learn the estimate with a settled structured call.
     expect((await metered.sendStructured(structuredReq(nodeA))).ok).toBe(true); // cumulative 15
@@ -719,7 +721,7 @@ describe("metered-llm: a THROWING inner client releases its reservation and is l
           : throwing.sendStructured(req),
       sendWithTools: (req, ctx) => good.sendWithTools(req, ctx),
     };
-    const metered = createMeteredLlm(composite, { dagId, runId, logger });
+    const metered = createMeteredLlm(composite, { dagId, runId, ledger: createInMemorySpendLedger(), logger });
 
     await expect(metered.sendStructured(structuredReq(nodeA))).rejects.toThrow("inner client exploded");
 
@@ -768,7 +770,7 @@ describe("metered-llm: prompt-cache split on log lines", () => {
 
   it("carries the cache split on the llm.metered success line", async () => {
     const { logger, logs } = collectLogs();
-    const metered = createMeteredLlm(cachingInner(cachedUsage), { dagId, runId, logger });
+    const metered = createMeteredLlm(cachingInner(cachedUsage), { dagId, runId, ledger: createInMemorySpendLedger(), logger });
 
     await metered.sendStructured(structuredReq(nodeA));
 
@@ -785,7 +787,7 @@ describe("metered-llm: prompt-cache split on log lines", () => {
   it("reports zeroes rather than omitting the fields for an uncached call", async () => {
     const { inner } = fakeInner(100, 50);
     const { logger, logs } = collectLogs();
-    const metered = createMeteredLlm(inner, { dagId, runId, logger });
+    const metered = createMeteredLlm(inner, { dagId, runId, ledger: createInMemorySpendLedger(), logger });
 
     await metered.sendStructured(structuredReq(nodeA));
 
@@ -814,7 +816,7 @@ describe("metered-llm: prompt-cache split on log lines", () => {
         }) as Result<LlmResponse<unknown>, FrameworkError>,
     };
     const { logger, logs } = collectLogs();
-    const metered = createMeteredLlm(failing, { dagId, runId, logger });
+    const metered = createMeteredLlm(failing, { dagId, runId, ledger: createInMemorySpendLedger(), logger });
 
     await metered.sendStructured(structuredReq(nodeA));
 
@@ -861,14 +863,14 @@ describe("metered-llm: a dollar ceiling sees what a token ceiling cannot (F3/P1)
     const budget = usdBudget(1.5);
 
     const cold = createMeteredLlm(cachingInner(UNCACHED), {
-      dagId, runId, limits: budget, logger: collectLogs().logger,
+      dagId, runId, ledger: createInMemorySpendLedger(), limits: budget, logger: collectLogs().logger,
     });
     expect((await cold.sendStructured(pricedReq(nodeA))).ok).toBe(true); // → $1.00 settled
     expect((await cold.sendStructured(pricedReq(nodeA))).ok).toBe(true); // → $2.00, the overshoot
     expect((await cold.sendStructured(pricedReq(nodeA))).ok).toBe(false); // $2.00 >= $1.50
 
     const warm = createMeteredLlm(cachingInner(CACHED), {
-      dagId, runId, limits: budget, logger: collectLogs().logger,
+      dagId, runId, ledger: createInMemorySpendLedger(), limits: budget, logger: collectLogs().logger,
     });
     // Ten cached calls cost $1.00 in total and stay under the same ceiling that
     // the uncached client reached in two.
@@ -880,7 +882,7 @@ describe("metered-llm: a dollar ceiling sees what a token ceiling cannot (F3/P1)
   it("names the usd ceiling and the dollar figures on the refusal", async () => {
     const { logger } = collectLogs();
     const metered = createMeteredLlm(cachingInner(UNCACHED), {
-      dagId, runId, limits: usdBudget(0.5), logger,
+      dagId, runId, ledger: createInMemorySpendLedger(), limits: usdBudget(0.5), logger,
     });
 
     expect((await metered.sendStructured(pricedReq(nodeA))).ok).toBe(true); // $1.00, the overshoot
@@ -900,7 +902,7 @@ describe("metered-llm: a dollar ceiling sees what a token ceiling cannot (F3/P1)
     const writeUsage = { tokensIn: 400_000, tokensOut: 0, cacheWriteTokens: 400_000, cacheReadTokens: 0 };
     const priceOf = async (cache: SingleShotCachePolicy): Promise<number> => {
       const { logger, logs } = collectLogs();
-      const metered = createMeteredLlm(cachingInner(writeUsage), { dagId, runId, logger });
+      const metered = createMeteredLlm(cachingInner(writeUsage), { dagId, runId, ledger: createInMemorySpendLedger(), logger });
       await metered.sendStructured(pricedReq(nodeA, cache));
       const log = logs.find((l) => l.msg === "llm.metered");
       return (log?.data?.["call"] as { usdMicros?: number } | undefined)?.usdMicros ?? 0;
@@ -920,7 +922,7 @@ describe("metered-llm: an unpriced model fails closed under a dollar ceiling (FR
     // possible way past a dollar budget.
     const { inner, calls } = fakeInner(10, 5); // model "m" — no price-table entry
     const { logger, logs } = collectLogs();
-    const metered = createMeteredLlm(inner, { dagId, runId, limits: usdBudget(100), logger });
+    const metered = createMeteredLlm(inner, { dagId, runId, ledger: createInMemorySpendLedger(), limits: usdBudget(100), logger });
 
     // The first call still runs: nothing has settled, so there is no unpriced
     // spend yet. It is the SECOND that cannot be evaluated.
@@ -943,7 +945,7 @@ describe("metered-llm: an unpriced model fails closed under a dollar ceiling (FR
     // perfectly evaluable on an unpriced model.
     const { inner } = fakeInner(10, 5);
     const { logger } = collectLogs();
-    const metered = createMeteredLlm(inner, { dagId, runId, limits: tokenBudget(10_000), logger });
+    const metered = createMeteredLlm(inner, { dagId, runId, ledger: createInMemorySpendLedger(), limits: tokenBudget(10_000), logger });
     for (let i = 0; i < 5; i += 1) {
       expect((await metered.sendStructured(structuredReq(nodeA))).ok).toBe(true);
     }
@@ -957,7 +959,7 @@ describe("metered-llm: both operations share one accounting path", () => {
     // asserted through BOTH entry points rather than either alone.
     const { inner, calls } = fakeInner(100, 0);
     const { logger, logs } = collectLogs();
-    const metered = createMeteredLlm(inner, { dagId, runId, limits: tokenBudget(250), logger });
+    const metered = createMeteredLlm(inner, { dagId, runId, ledger: createInMemorySpendLedger(), limits: tokenBudget(250), logger });
 
     expect((await metered.sendStructured(structuredReq(nodeA))).ok).toBe(true); // 100
     expect((await metered.sendWithTools(toolsReq(nodeA), fakeCtx)).ok).toBe(true); // 200
@@ -978,7 +980,7 @@ describe("metered-llm: both operations share one accounting path", () => {
     const { logger, logs } = collectLogs();
     const metered = createMeteredLlm(
       cachingInner({ tokensIn: 400_000, tokensOut: 0, cacheWriteTokens: 0, cacheReadTokens: 0 }),
-      { dagId, runId, logger },
+      { dagId, runId, ledger: createInMemorySpendLedger(), logger },
     );
 
     await metered.sendStructured(pricedReq(nodeA));
@@ -1013,7 +1015,7 @@ describe("metered-llm: the metering log carries figures, never content", () => {
     };
 
     const { logger, logs } = collectLogs();
-    const metered = createMeteredLlm(leaky, { dagId, runId, logger });
+    const metered = createMeteredLlm(leaky, { dagId, runId, ledger: createInMemorySpendLedger(), logger });
     await metered.sendStructured(structuredReq(nodeA));
     await metered.sendWithTools(toolsReq(nodeA), fakeCtx);
 

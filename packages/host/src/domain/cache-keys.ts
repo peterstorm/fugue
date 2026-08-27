@@ -76,3 +76,20 @@ export const buildCheckpointKey = (
   runId: RunId,
   nodeId: NodeId,
 ): string => `${checkpointKeyPrefix(tenant, dagId, runId)}${nodeId}`;
+
+/**
+ * Build the Redis keys holding a run's durable spend.
+ *
+ * Two keys, because the record's four fields split by the Redis type that makes
+ * each of them atomically appendable: three numeric sums live in a HASH, the
+ * unpriced-model names in a SET. Both sit beneath the same tenant prefix, so
+ * the per-tenant ACL (`~fugue:<tenant>:*`) scopes them exactly as it does every
+ * other key built here.
+ *
+ * Format: `fugue:<tenant>:<dagId>:<runId>:spend` and `…:spend:unpriced`
+ */
+export const buildSpendKey = (tenant: TenantId, dagId: DagId, runId: RunId): string =>
+  `${checkpointKeyPrefix(tenant, dagId, runId)}spend`;
+
+export const buildSpendUnpricedKey = (tenant: TenantId, dagId: DagId, runId: RunId): string =>
+  `${buildSpendKey(tenant, dagId, runId)}:unpriced`;

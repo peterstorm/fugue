@@ -12,6 +12,7 @@
 //     `registered.config.timeout`; an over-long slice aborts and maps to `failed`.
 
 import { describe, it, expect } from "bun:test";
+import { createInMemorySpendLedger } from "../../../adapters/spend-ledger-memory.js";
 import { z } from "zod";
 import { markTeam } from "../../../domain/auth.js";
 import {
@@ -67,6 +68,7 @@ const stubLlm: LlmClient = {
 const sharedInfra = (): SharedInfra => ({
   llm: stubLlm,
   redis: stubRedis(),
+  spendLedger: createInMemorySpendLedger(),
   tracer: noopTracer,
   contentFilter: null,
   prompts: null,
