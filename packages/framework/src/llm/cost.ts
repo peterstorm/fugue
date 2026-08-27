@@ -1,7 +1,9 @@
 import { fwLogger } from "../logger.js";
 import type { CacheTtl } from "../types/llm.js";
+import type { Spend } from "../types/spend.js";
+import { pricedCall, unpricedCall, usdToMicros } from "../types/spend.js";
 import type { TokenUsage } from "../types/token-usage.js";
-import { uncachedInputTokens } from "../types/token-usage.js";
+import { totalTokens, uncachedInputTokens } from "../types/token-usage.js";
 
 const PRICE_TABLE: Record<string, { readonly inputPer1M: number; readonly outputPer1M: number }> = {
   // Anthropic
@@ -39,6 +41,17 @@ export interface CostRates {
  */
 export const costRatesFor = (model: string): CostRates =>
   PRICE_TABLE[model] ?? { inputPer1M: 0, outputPer1M: 0 };
+
+/**
+ * The TTL a cache write is billed at when a caller does not name one.
+ *
+ * Exported and referenced rather than re-typed at each default: the same
+ * literal previously appeared as five independent `"5m"`s across this module
+ * and the host's metered decorator, held in sync only by a comment saying so.
+ * A domain default reachable from two packages is exactly the kind of constant
+ * that drifts when one of its copies is edited.
+ */
+export const DEFAULT_CACHE_TTL: CacheTtl = "5m";
 
 /**
  * Price multipliers applied to the base INPUT rate, by how the prompt tokens
@@ -84,7 +97,7 @@ export interface CostBreakdownUsd {
 export const costBreakdownUsd = (
   rates: CostRates,
   usage: TokenUsage,
-  writeTtl: CacheTtl = "5m",
+  writeTtl: CacheTtl = DEFAULT_CACHE_TTL,
 ): CostBreakdownUsd => {
   const perMillion = (tokens: number, rate: number): number => (tokens * rate) / 1_000_000;
   const uncachedInput = perMillion(uncachedInputTokens(usage), rates.inputPer1M);
@@ -107,8 +120,47 @@ export const costBreakdownUsd = (
 export const costUsd = (
   rates: CostRates,
   usage: TokenUsage,
-  writeTtl: CacheTtl = "5m",
+  writeTtl: CacheTtl = DEFAULT_CACHE_TTL,
 ): number => costBreakdownUsd(rates, usage, writeTtl).total;
+
+/**
+ * One settled call, measured on every axis a budget can limit — the bridge from
+ * "how many tokens" to "what did it cost".
+ *
+ * This is the ONLY producer of budget-facing cost, so the cache multipliers
+ * above reach the budget through exactly one path and cannot be reimplemented
+ * slightly differently by a second caller.
+ *
+ * Unlike `computeCostUsd`, an unknown model does NOT log and does NOT return
+ * zero. It returns an `unpriced` spend, which carries the model name to
+ * whoever refuses the run. That is strictly better on both counts: this runs on
+ * every call (so a warn would be one line per call), and a zero would make an
+ * unpriced model free — the cheapest possible way past a dollar budget.
+ *
+ * `calls` is 1 for a `sendWithTools` loop as much as for a single-shot call: a
+ * loop's turns are already folded into one `TokenUsage` before it settles, and
+ * one settled call is the granularity the overshoot-by-one guarantee is stated
+ * at.
+ */
+export const spendOfCall = (
+  model: string,
+  usage: TokenUsage,
+  writeTtl: CacheTtl = DEFAULT_CACHE_TTL,
+): Spend => {
+  const tokens = totalTokens(usage);
+  const rates = PRICE_TABLE[model];
+  if (rates === undefined) return unpricedCall(tokens, model);
+  const usd = costUsd(rates, usage, writeTtl);
+  // A non-finite figure here means the usage was self-inconsistent — a provider
+  // (or a fixture) that omitted one of the four fields, so a subtraction inside
+  // `costBreakdownUsd` produced NaN. Handing that to `usdToMicros` sanitizes it
+  // to ZERO, and zero on the cost axis means FREE: the call would consume no
+  // dollar budget at all and could never be refused. `unpriced` is the honest
+  // answer to "we could not compute a cost", and the one that fails closed.
+  return Number.isFinite(usd)
+    ? pricedCall(tokens, usdToMicros(usd))
+    : unpricedCall(tokens, model);
+};
 
 /**
  * Cost of one call (or of an accumulated run) in USD, warning once when the
@@ -121,7 +173,7 @@ export const costUsd = (
 export function computeCostUsd(
   model: string,
   usage: TokenUsage,
-  writeTtl: CacheTtl = "5m",
+  writeTtl: CacheTtl = DEFAULT_CACHE_TTL,
 ): number {
   const entry = PRICE_TABLE[model];
   if (!entry) {

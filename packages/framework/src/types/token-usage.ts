@@ -85,12 +85,49 @@ export const NO_TOKENS: TokenUsage = Object.freeze({
  * billed at the base input rate. Keeps the ~60 existing two-number
  * construction sites honest without spreading `cacheWriteTokens: 0,
  * cacheReadTokens: 0` across all of them.
+ *
+ * Sanitizes, like every other producer in this module. It is the constructor
+ * MOST call sites use, so it opting out would have made this module's
+ * construction-time guarantee false where it matters most: a malformed
+ * provider count would reach the host's structured metering log verbatim (the
+ * budget itself re-sanitizes at the `Spend` boundary, so the figure never
+ * reached a decision — but "the invariant holds at construction" has to be
+ * true of the constructor, not merely of the consumer).
  */
 export const tokensOnly = (tokensIn: number, tokensOut: number): TokenUsage => ({
-  tokensIn,
-  tokensOut,
+  tokensIn: sanitizeCount(tokensIn),
+  tokensOut: sanitizeCount(tokensOut),
   cacheWriteTokens: 0,
   cacheReadTokens: 0,
+});
+
+/**
+ * Narrow a value that CARRIES usage down to exactly its usage.
+ *
+ * `LlmResponse extends TokenUsage`, so a response is structurally a valid
+ * `TokenUsage` and can be passed wherever one is expected — but it also carries
+ * `output`, `thinking`, and `rawText`. A consumer that SPREADS what it was
+ * handed therefore spreads model output and chain-of-thought too, which is how
+ * generated content reaches places that were only ever meant to see numbers
+ * (a metering log line, a metrics label, a persisted counter).
+ *
+ * Note the deliberate inversion of the advice in this module's header: fields
+ * are listed rather than spread precisely because the goal here is to EXCLUDE
+ * everything else, which spreading cannot do. Completeness stays
+ * compiler-enforced in both directions by the return annotation — a field
+ * dropped from the literal fails to satisfy `TokenUsage`, and a field added to
+ * `TokenUsage` fails for the same reason.
+ */
+export const pickUsage = ({
+  tokensIn,
+  tokensOut,
+  cacheWriteTokens,
+  cacheReadTokens,
+}: TokenUsage): TokenUsage => ({
+  tokensIn,
+  tokensOut,
+  cacheWriteTokens,
+  cacheReadTokens,
 });
 
 /**

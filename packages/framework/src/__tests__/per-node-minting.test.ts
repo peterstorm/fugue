@@ -254,8 +254,12 @@ describe("per-node capability minting (C1)", () => {
           kind: "llm-budget-exceeded",
           runId: ctx.runId,
           nodeId: N("budgeted"),
-          cumulative: 1200,
-          budget: 1000,
+          cause: {
+            kind: "reached",
+            ceiling: { kind: "tokens", limit: 1000 },
+            basis: "settled",
+            observed: 1200,
+          },
         });
       },
     });
@@ -273,8 +277,8 @@ describe("per-node capability minting (C1)", () => {
     if (!result.ok) {
       expect(result.error.kind).toBe("llm-budget-exceeded");
       if (result.error.kind === "llm-budget-exceeded") {
-        expect(result.error.cumulative).toBe(1200);
-        expect(result.error.budget).toBe(1000);
+        expect(result.error.cause.ceiling).toEqual({ kind: "tokens", limit: 1000 });
+        expect(result.error.cause.basis).toBe("settled");
       }
     }
     expect(fetchRuns).toBe(1); // the node ran exactly once — fast-fail, no retry

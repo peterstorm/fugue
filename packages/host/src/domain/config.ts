@@ -23,6 +23,7 @@ import { ok, err } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { HostError } from "./host-error.js";
 import type { TenantId } from "./tenant.js";
+import { LlmBudgetDeclarationSchema } from "./llm-budget.js";
 import { parseScope } from "./capability-scope.js";
 
 // ---------------------------------------------------------------------------
@@ -942,7 +943,7 @@ export type HostConfig = z.infer<typeof HostConfigSchema>;
 // Per-DAG config — parsed from fugue.yaml (FR-100, FR-041)
 // ---------------------------------------------------------------------------
 
-export const FugueYamlSchema = z.object({
+export const FugueYamlSchema = LlmBudgetDeclarationSchema.extend({
   /** Team owning this DAG (required, non-empty — drives authorization isolation) */
   team: z.string().min(1),
   /** Individual owner within the team */
@@ -963,8 +964,6 @@ export const FugueYamlSchema = z.object({
   cacheTtlMs: z.number().int().positive().optional(),
   /** Per-DAG checkpoint TTL override (FR-041) */
   checkpointTtlMs: z.number().int().positive().optional(),
-  /** Per-run LLM token budget (FR-W1-001) — enforced per runId by the metered-llm decorator. */
-  llmBudgetTokens: z.number().int().positive().optional(),
 });
 
 export type FugueYaml = z.infer<typeof FugueYamlSchema>;

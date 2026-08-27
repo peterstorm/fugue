@@ -2,9 +2,10 @@
  * Tests for the metered-llm decorator (adapters/metered-llm.ts).
  *
  * Covers: attribution stamp present on every call, no-budget passthrough,
- * token aggregation across calls, pre-call refusal once cumulative >= budget,
- * the overshoot-by-one rule (SC-003), structured metering log lines, and the
- * "no network round trip" guarantee (the decorator never calls inner on refusal).
+ * spend aggregation across calls, pre-call refusal once a ceiling is reached,
+ * the overshoot-by-one rule (SC-003), cost-denominated ceilings, structured
+ * metering log lines, and the "no network round trip" guarantee (the decorator
+ * never calls inner on refusal).
  */
 
 import { describe, it, expect } from "bun:test";
@@ -16,6 +17,9 @@ import {
   runId as makeRunId,
   nodeId as makeNodeId,
   tokensOnly,
+  ceilings,
+  observedOf,
+  usdToMicros,
 } from "@fuguejs/framework";
 import type {
   LlmClient,
@@ -26,6 +30,9 @@ import type {
   Result,
   FrameworkError,
   NodeId,
+  Ceiling,
+  Ceilings,
+  SingleShotCachePolicy,
 } from "@fuguejs/framework";
 import type { LogPort } from "../ports.js";
 import { createMeteredLlm } from "../adapters/metered-llm.js";
@@ -35,6 +42,24 @@ import { createMeteredLlm } from "../adapters/metered-llm.js";
 const dagId = makeDagId("test-dag");
 const runId = makeRunId("run-001");
 const nodeA = makeNodeId("node-a");
+
+/**
+ * A token-only budget, in the shape the decorator now takes.
+ *
+ * Every case below predates cost-denominated ceilings and asserts token
+ * arithmetic, so they all declare a `tokens` ceiling — the axis whose behaviour
+ * they were written to pin. The dollar and call axes get their own coverage
+ * against the pure meter (`llm-meter.test.ts`).
+ */
+const tokenBudget = (limit: number): Ceilings => {
+  const c = ceilings([{ kind: "tokens", limit } as Ceiling]);
+  if (c === undefined) throw new Error("expected non-empty ceilings");
+  return c;
+};
+
+/** The cumulative token figure from an `llm.metered` log line. */
+const cumulativeTokens = (data?: Record<string, unknown>): number | undefined =>
+  (data?.["cumulative"] as { tokens?: number } | undefined)?.tokens;
 
 const collectLogs = () => {
   const logs: { level: string; msg: string; data?: Record<string, unknown> }[] = [];
@@ -115,7 +140,7 @@ describe("metered-llm: diagnostic failures never replace LLM outcomes", () => {
     const metered = createMeteredLlm(inner, {
       dagId,
       runId,
-      budget: 10,
+      limits: tokenBudget(10),
       logger: throwingLogger,
     });
 
@@ -192,7 +217,7 @@ describe("metered-llm: attribution stamp (FR-W0-001 / SC-001)", () => {
     await metered.sendStructured(structuredReq(nodeA));
     await metered.sendStructured(structuredReq(nodeA));
 
-    const cumulatives = logs.filter((l) => l.msg === "llm.metered").map((l) => l.data?.cumulative);
+    const cumulatives = logs.filter((l) => l.msg === "llm.metered").map((l) => cumulativeTokens(l.data));
     expect(cumulatives).toEqual([150, 300]);
   });
 });
@@ -204,7 +229,7 @@ describe("metered-llm: pre-call refusal (FR-W1-002 / FR-W1-003)", () => {
     // Call 3 → cumulative 300 >= 200 refuse.
     const { inner, calls } = fakeInner(100, 50);
     const { logger, logs } = collectLogs();
-    const metered = createMeteredLlm(inner, { dagId, runId, budget: 200, logger });
+    const metered = createMeteredLlm(inner, { dagId, runId, limits: tokenBudget(200), logger });
 
     const r1 = await metered.sendStructured(structuredReq(nodeA));
     const r2 = await metered.sendStructured(structuredReq(nodeA));
@@ -218,8 +243,8 @@ describe("metered-llm: pre-call refusal (FR-W1-002 / FR-W1-003)", () => {
       if (r3.error.kind === "llm-budget-exceeded") {
         expect(r3.error.runId).toBe(runId);
         expect(r3.error.nodeId).toBe(nodeA);
-        expect(r3.error.cumulative).toBe(300);
-        expect(r3.error.budget).toBe(200);
+        expect(observedOf(r3.error.cause)).toBe(300);
+        expect(r3.error.cause.ceiling.limit).toBe(200);
       }
     }
 
@@ -231,7 +256,7 @@ describe("metered-llm: pre-call refusal (FR-W1-002 / FR-W1-003)", () => {
   it("overshoots by at most one (SC-003): allows the boundary call, refuses the next", async () => {
     const { inner, calls } = fakeInner(1000, 0); // one call exceeds any small budget
     const { logger } = collectLogs();
-    const metered = createMeteredLlm(inner, { dagId, runId, budget: 500, logger });
+    const metered = createMeteredLlm(inner, { dagId, runId, limits: tokenBudget(500), logger });
 
     const r1 = await metered.sendStructured(structuredReq(nodeA)); // 0 < 500 → allow, → 1000
     const r2 = await metered.sendStructured(structuredReq(nodeA)); // 1000 >= 500 → refuse
@@ -255,7 +280,7 @@ describe("metered-llm: pre-call refusal (FR-W1-002 / FR-W1-003)", () => {
         >,
     };
     const { logger, logs } = collectLogs();
-    const metered = createMeteredLlm(failing, { dagId, runId, budget: 100, logger });
+    const metered = createMeteredLlm(failing, { dagId, runId, limits: tokenBudget(100), logger });
 
     const r1 = await metered.sendStructured(structuredReq(nodeA));
     expect(r1.ok).toBe(false);
@@ -288,7 +313,7 @@ describe("metered-llm: pre-call refusal (FR-W1-002 / FR-W1-003)", () => {
         >,
     };
     const { logger, logs } = collectLogs();
-    const metered = createMeteredLlm(failing, { dagId, runId, budget: 100, logger });
+    const metered = createMeteredLlm(failing, { dagId, runId, limits: tokenBudget(100), logger });
 
     const r1 = await metered.sendWithTools(toolsReq(nodeA), fakeCtx);
     expect(r1.ok).toBe(false);
@@ -349,7 +374,7 @@ describe("metered-llm: failed calls still burn budget (CRITICAL-1 / FR-W0-001)",
     expect(metered_log).toBeDefined();
     expect(metered_log?.data?.tokensIn).toBe(400);
     expect(metered_log?.data?.tokensOut).toBe(200);
-    expect(metered_log?.data?.cumulative).toBe(600);
+    expect(cumulativeTokens(metered_log?.data)).toBe(600);
     expect(metered_log?.data?.operation).toBe("sendWithTools");
 
     // And the failure is logged with the deltas present (CRITICAL-2).
@@ -363,7 +388,7 @@ describe("metered-llm: failed calls still burn budget (CRITICAL-1 / FR-W0-001)",
     // budget 500; a single failed loop burns 600 → cumulative 600 >= 500.
     const inner = failingWithUsage("node-crash", 600, 0);
     const { logger } = collectLogs();
-    const metered = createMeteredLlm(inner, { dagId, runId, budget: 500, logger });
+    const metered = createMeteredLlm(inner, { dagId, runId, limits: tokenBudget(500), logger });
 
     // First (failing) call is allowed: cumulative 0 < 500. It burns 600.
     const r1 = await metered.sendWithTools(toolsReq(nodeA), fakeCtx);
@@ -377,8 +402,8 @@ describe("metered-llm: failed calls still burn budget (CRITICAL-1 / FR-W0-001)",
     if (!r2.ok) {
       expect(r2.error.kind).toBe("llm-budget-exceeded");
       if (r2.error.kind === "llm-budget-exceeded") {
-        expect(r2.error.cumulative).toBe(600);
-        expect(r2.error.budget).toBe(500);
+        expect(observedOf(r2.error.cause)).toBe(600);
+        expect(r2.error.cause.ceiling.limit).toBe(500);
       }
     }
   });
@@ -391,7 +416,7 @@ describe("metered-llm: failed calls still burn budget (CRITICAL-1 / FR-W0-001)",
       const r = await metered.sendWithTools(toolsReq(nodeA), fakeCtx);
       expect(r.ok).toBe(false);
       const metered_log = logs.find((l) => l.msg === "llm.metered");
-      expect(metered_log?.data?.cumulative).toBe(75);
+      expect(cumulativeTokens(metered_log?.data)).toBe(75);
     }
   });
 
@@ -413,7 +438,7 @@ describe("metered-llm: failed calls still burn budget (CRITICAL-1 / FR-W0-001)",
     expect(metered_log?.data?.operation).toBe("sendStructured");
     expect(metered_log?.data?.tokensIn).toBe(80);
     expect(metered_log?.data?.tokensOut).toBe(40);
-    expect(metered_log?.data?.cumulative).toBe(120);
+    expect(cumulativeTokens(metered_log?.data)).toBe(120);
 
     // The failure line carries the same deltas and the structured operation.
     const failLog = logs.find((l) => l.msg === "llm.call-failed");
@@ -429,7 +454,7 @@ describe("metered-llm: failed calls still burn budget (CRITICAL-1 / FR-W0-001)",
     // refused — a crashing structured call cannot bypass the per-run budget.
     const inner = failingWithUsage("node-crash", 600, 0);
     const { logger } = collectLogs();
-    const metered = createMeteredLlm(inner, { dagId, runId, budget: 500, logger });
+    const metered = createMeteredLlm(inner, { dagId, runId, limits: tokenBudget(500), logger });
 
     const r1 = await metered.sendStructured(structuredReq(nodeA));
     expect(r1.ok).toBe(false);
@@ -440,28 +465,30 @@ describe("metered-llm: failed calls still burn budget (CRITICAL-1 / FR-W0-001)",
     if (!r2.ok) {
       expect(r2.error.kind).toBe("llm-budget-exceeded");
       if (r2.error.kind === "llm-budget-exceeded") {
-        expect(r2.error.cumulative).toBe(600);
-        expect(r2.error.budget).toBe(500);
+        expect(observedOf(r2.error.cause)).toBe(600);
+        expect(r2.error.cause.ceiling.limit).toBe(500);
       }
     }
   });
 });
 
-describe("metered-llm: metering log budget field (advisory)", () => {
-  it("carries `budget` when set and omits it when unset", async () => {
+describe("metered-llm: metering log limits field (advisory)", () => {
+  it("carries the declared ceilings when set and omits the field when unset", async () => {
     const { inner } = fakeInner(10, 5);
 
     const withBudget = collectLogs();
-    const m1 = createMeteredLlm(inner, { dagId, runId, budget: 1000, logger: withBudget.logger });
+    const m1 = createMeteredLlm(inner, { dagId, runId, limits: tokenBudget(1000), logger: withBudget.logger });
     await m1.sendStructured(structuredReq(nodeA));
     const l1 = withBudget.logs.find((l) => l.msg === "llm.metered");
-    expect(l1?.data).toHaveProperty("budget", 1000);
+    expect(l1?.data).toHaveProperty("limits", ["tokens:1000"]);
 
     const noBudget = collectLogs();
     const m2 = createMeteredLlm(inner, { dagId, runId, logger: noBudget.logger });
     await m2.sendStructured(structuredReq(nodeA));
     const l2 = noBudget.logs.find((l) => l.msg === "llm.metered");
-    expect(l2?.data).not.toHaveProperty("budget");
+    // Absent, not `undefined`: an operator filtering on the field must be able
+    // to tell "no budget declared" from "budget declared as nothing".
+    expect(l2?.data).not.toHaveProperty("limits");
   });
 });
 
@@ -486,14 +513,15 @@ const delayedInner = (tokensIn: number, tokensOut: number, delayMs: number) => {
   return { inner, calls };
 };
 
-describe("metered-llm: budget-refusal error reports SETTLED cumulative only (errors.ts contract)", () => {
-  it("a sequential refusal's `cumulative` equals the settled total from the llm.metered log, and `budget` is the configured budget", async () => {
-    // budget 200; each call costs 150. Call 1 settles at 150; call 2 is the
-    // single overshoot settling at 300; call 3 is refused. The error's
-    // `cumulative` must reconcile EXACTLY against the last `llm.metered` line.
+describe("metered-llm: the refusal names its ceiling and its basis (errors.ts contract)", () => {
+  it("a sequential refusal reports `basis: settled` and a figure that reconciles against the llm.metered log", async () => {
+    // Budget 200; each call costs 150. Call 1 settles at 150; call 2 is the
+    // single overshoot settling at 300; call 3 is refused. A `settled` refusal
+    // must reconcile EXACTLY against the last `llm.metered` line — that is what
+    // makes the figure usable for reconciliation at all.
     const { inner } = fakeInner(100, 50);
     const { logger, logs } = collectLogs();
-    const metered = createMeteredLlm(inner, { dagId, runId, budget: 200, logger });
+    const metered = createMeteredLlm(inner, { dagId, runId, limits: tokenBudget(200), logger });
 
     await metered.sendStructured(structuredReq(nodeA));
     await metered.sendStructured(structuredReq(nodeA));
@@ -501,28 +529,32 @@ describe("metered-llm: budget-refusal error reports SETTLED cumulative only (err
 
     const settledCumulatives = logs
       .filter((l) => l.msg === "llm.metered")
-      .map((l) => l.data?.cumulative);
+      .map((l) => cumulativeTokens(l.data));
     expect(settledCumulatives).toEqual([150, 300]);
 
     expect(refused.ok).toBe(false);
     if (!refused.ok && refused.error.kind === "llm-budget-exceeded") {
-      expect(refused.error.cumulative).toBe(300); // the SETTLED total — reconciles with the log
-      expect(refused.error.budget).toBe(200); // the configured budget, from the refuse branch
+      expect(refused.error.cause.basis).toBe("settled");
+      expect(observedOf(refused.error.cause)).toBe(300); // reconciles with the log
+      expect(refused.error.cause.ceiling).toEqual({ kind: "tokens", limit: 200 });
     } else {
       throw new Error("expected llm-budget-exceeded");
     }
   });
 
-  it("a RESERVATION-triggered refusal still reports settled-only cumulative — the in-flight reservation never leaks into the error figure", async () => {
-    // budget 250, each call 100 tokens, calls take a tick to settle. Warm-up
-    // settles 100 and teaches the reservation estimate. A burst of 5 then admits
-    // 2 (cumulative 100 + reserved 0/100 < 250) and refuses 3 with the settled
-    // cumulative still 100 — NOT 100 + the 200 reserved in flight. Reporting
-    // settled + reservation here would make `cumulative` irreconcilable against
-    // the `llm.metered` totals (the errors.ts contract).
+  it("a RESERVATION-triggered refusal says so — `basis: projected`, with the settled figure in the log", async () => {
+    // The contract this replaces reported a SETTLED figure on an error the
+    // PROJECTION had caused, reconciled only by a comment: an operator seeing
+    // `cumulative 100 >= budget 250` had no way to tell why it refused, because
+    // on its face it had not. The error now states its basis, so the figure and
+    // the reason agree by construction.
+    //
+    // Budget 250, each call 100 tokens, calls take a tick to settle. The warm-up
+    // settles 100 and teaches the per-call estimate. A burst of 5 then admits 2
+    // and refuses 3: settled 100 + 2 in flight x 100 projects to 300 >= 250.
     const { inner } = delayedInner(100, 0, 10);
     const { logger, logs } = collectLogs();
-    const metered = createMeteredLlm(inner, { dagId, runId, budget: 250, logger });
+    const metered = createMeteredLlm(inner, { dagId, runId, limits: tokenBudget(250), logger });
 
     expect((await metered.sendStructured(structuredReq(nodeA))).ok).toBe(true); // settled 100
 
@@ -535,16 +567,18 @@ describe("metered-llm: budget-refusal error reports SETTLED cumulative only (err
       if (r.ok) continue;
       expect(r.error.kind).toBe("llm-budget-exceeded");
       if (r.error.kind === "llm-budget-exceeded") {
-        // Settled at refusal time was exactly the warm-up call: 100. The 200
-        // reserved by the two admitted-but-unsettled calls is excluded.
-        expect(r.error.cumulative).toBe(100);
-        expect(r.error.budget).toBe(250);
+        expect(r.error.cause.basis).toBe("projected");
+        expect(observedOf(r.error.cause)).toBe(300);
+        expect(r.error.cause.ceiling.limit).toBe(250);
       }
     }
-    // The reservation IS reported — but in the warn log, never the error figure.
+    // The SETTLED figure — the one that reconciles against the `llm.metered`
+    // totals — is in the warn log alongside the in-flight count that explains
+    // the gap between it and the projection.
     const warn = logs.find((l) => l.level === "warn" && l.msg.includes("budget exceeded"));
-    expect(warn?.data?.cumulative).toBe(100);
-    expect(warn?.data?.reservedInFlight).toBe(200);
+    expect((warn?.data?.["settled"] as { tokens?: number } | undefined)?.tokens).toBe(100);
+    expect(warn?.data?.["inFlight"]).toBe(2);
+    expect(warn?.data?.["basis"]).toBe("projected");
   });
 });
 
@@ -555,7 +589,7 @@ describe("metered-llm: concurrency reservation bounds overshoot (I1/SC-003)", ()
     // until cumulative+reserved reaches budget — overshoot ≈ one call, not N.
     const { inner, calls } = delayedInner(100, 0, 10);
     const { logger } = collectLogs();
-    const metered = createMeteredLlm(inner, { dagId, runId, budget: 250, logger });
+    const metered = createMeteredLlm(inner, { dagId, runId, limits: tokenBudget(250), logger });
 
     // Warm up: one settled call so the reservation estimate is learned.
     expect((await metered.sendStructured(structuredReq(nodeA))).ok).toBe(true); // cumulative 100
@@ -607,7 +641,7 @@ describe("metered-llm: a THROWING inner client releases its reservation and is l
       sendWithTools: (req, ctx) => good.sendWithTools(req, ctx),
     };
 
-    const metered = createMeteredLlm(composite, { dagId, runId, budget: 30, logger });
+    const metered = createMeteredLlm(composite, { dagId, runId, limits: tokenBudget(30), logger });
 
     // Learn the estimate with a settled call (uses sendWithTools → good inner).
     expect((await metered.sendWithTools(toolsReq(nodeA), fakeCtx)).ok).toBe(true); // cumulative 15
@@ -647,7 +681,7 @@ describe("metered-llm: a THROWING inner client releases its reservation and is l
           : throwing.sendWithTools(req, ctx),
     };
 
-    const metered = createMeteredLlm(composite, { dagId, runId, budget: 30, logger });
+    const metered = createMeteredLlm(composite, { dagId, runId, limits: tokenBudget(30), logger });
 
     // Learn the estimate with a settled structured call.
     expect((await metered.sendStructured(structuredReq(nodeA))).ok).toBe(true); // cumulative 15
@@ -698,7 +732,7 @@ describe("metered-llm: a THROWING inner client releases its reservation and is l
     const after = await metered.sendStructured(structuredReq(nodeA));
     expect(after.ok).toBe(true);
     const metered_log = logs.find((l) => l.msg === "llm.metered");
-    expect(metered_log?.data?.cumulative).toBe(15);
+    expect(cumulativeTokens(metered_log?.data)).toBe(15);
   });
 });
 
@@ -745,7 +779,7 @@ describe("metered-llm: prompt-cache split on log lines", () => {
     // `tokensIn` stays the INCLUSIVE prompt total, so the cumulative a budget
     // reads is unchanged by the split.
     expect(log?.data?.tokensIn).toBe(1000);
-    expect(log?.data?.cumulative).toBe(1050);
+    expect(cumulativeTokens(log?.data)).toBe(1050);
   });
 
   it("reports zeroes rather than omitting the fields for an uncached call", async () => {
@@ -791,5 +825,212 @@ describe("metered-llm: prompt-cache split on log lines", () => {
     // And the failed call's cached tokens were still metered against the run.
     const metered_log = logs.find((l) => l.msg === "llm.metered");
     expect(metered_log?.data?.cacheReadTokens).toBe(700);
+  });
+});
+
+// ── Cost-denominated ceilings (F3) ──────────────────────────────────────────
+
+/** A priced model, so the decorator can compute a real dollar figure. */
+const PRICED_MODEL = "gpt-4o"; // 2.5 in / 10.0 out per 1M
+
+const pricedReq = (nodeId: NodeId, cache?: SingleShotCachePolicy): LlmRequest<unknown> => ({
+  system: "s",
+  user: "u",
+  model: PRICED_MODEL,
+  schema: z.unknown(),
+  nodeId,
+  ...(cache !== undefined ? { cache } : {}),
+});
+
+const usdBudget = (dollars: number): Ceilings => {
+  const c = ceilings([{ kind: "usd", limit: usdToMicros(dollars) } as Ceiling]);
+  if (c === undefined) throw new Error("expected non-empty ceilings");
+  return c;
+};
+
+describe("metered-llm: a dollar ceiling sees what a token ceiling cannot (F3/P1)", () => {
+  // 400k prompt tokens per call on gpt-4o = $1.00 uncached.
+  const UNCACHED = { tokensIn: 400_000, tokensOut: 0, cacheWriteTokens: 0, cacheReadTokens: 0 };
+  // The same 400k tokens, served from cache at 0.1x = $0.10.
+  const CACHED = { tokensIn: 400_000, tokensOut: 0, cacheWriteTokens: 0, cacheReadTokens: 400_000 };
+
+  it("refuses an expensive run and admits a cached one at IDENTICAL token counts", async () => {
+    // This is the whole reason the budget is denominated in money. Both clients
+    // report the same `tokensIn`, so a token ceiling treats them identically —
+    // and one costs ten times the other.
+    const budget = usdBudget(1.5);
+
+    const cold = createMeteredLlm(cachingInner(UNCACHED), {
+      dagId, runId, limits: budget, logger: collectLogs().logger,
+    });
+    expect((await cold.sendStructured(pricedReq(nodeA))).ok).toBe(true); // → $1.00 settled
+    expect((await cold.sendStructured(pricedReq(nodeA))).ok).toBe(true); // → $2.00, the overshoot
+    expect((await cold.sendStructured(pricedReq(nodeA))).ok).toBe(false); // $2.00 >= $1.50
+
+    const warm = createMeteredLlm(cachingInner(CACHED), {
+      dagId, runId, limits: budget, logger: collectLogs().logger,
+    });
+    // Ten cached calls cost $1.00 in total and stay under the same ceiling that
+    // the uncached client reached in two.
+    for (let i = 0; i < 10; i += 1) {
+      expect((await warm.sendStructured(pricedReq(nodeA))).ok).toBe(true);
+    }
+  });
+
+  it("names the usd ceiling and the dollar figures on the refusal", async () => {
+    const { logger } = collectLogs();
+    const metered = createMeteredLlm(cachingInner(UNCACHED), {
+      dagId, runId, limits: usdBudget(0.5), logger,
+    });
+
+    expect((await metered.sendStructured(pricedReq(nodeA))).ok).toBe(true); // $1.00, the overshoot
+    const refused = await metered.sendStructured(pricedReq(nodeA));
+
+    expect(refused.ok).toBe(false);
+    if (refused.ok || refused.error.kind !== "llm-budget-exceeded") throw new Error("expected refusal");
+    expect(refused.error.cause.ceiling.kind).toBe("usd");
+    expect(refused.error.cause.ceiling.limit).toBe(usdToMicros(0.5));
+    expect(observedOf(refused.error.cause)).toBe(usdToMicros(1));
+  });
+
+  it("charges the 1h write premium when the request declared it", async () => {
+    // The TTL is read off the request the node actually sent, not assumed: a 1h
+    // entry costs 2.0x where a 5m one costs 1.25x, and at a dollar ceiling that
+    // difference decides whether the next call runs.
+    const writeUsage = { tokensIn: 400_000, tokensOut: 0, cacheWriteTokens: 400_000, cacheReadTokens: 0 };
+    const priceOf = async (cache: SingleShotCachePolicy): Promise<number> => {
+      const { logger, logs } = collectLogs();
+      const metered = createMeteredLlm(cachingInner(writeUsage), { dagId, runId, logger });
+      await metered.sendStructured(pricedReq(nodeA, cache));
+      const log = logs.find((l) => l.msg === "llm.metered");
+      return (log?.data?.["call"] as { usdMicros?: number } | undefined)?.usdMicros ?? 0;
+    };
+
+    const short = await priceOf({ kind: "static-prefix", ttl: "5m" });
+    const long = await priceOf({ kind: "static-prefix", ttl: "1h" });
+    expect(long).toBeGreaterThan(short);
+    expect(long / short).toBeCloseTo(2.0 / 1.25, 5);
+  });
+});
+
+describe("metered-llm: an unpriced model fails closed under a dollar ceiling (FR-B-004)", () => {
+  it("refuses on the FIRST call and names the model to price", async () => {
+    // Cost cannot be evaluated, so it cannot be shown to be under the limit.
+    // Treating it as zero would make "use a model nobody priced" the cheapest
+    // possible way past a dollar budget.
+    const { inner, calls } = fakeInner(10, 5); // model "m" — no price-table entry
+    const { logger, logs } = collectLogs();
+    const metered = createMeteredLlm(inner, { dagId, runId, limits: usdBudget(100), logger });
+
+    // The first call still runs: nothing has settled, so there is no unpriced
+    // spend yet. It is the SECOND that cannot be evaluated.
+    expect((await metered.sendStructured(structuredReq(nodeA))).ok).toBe(true);
+    const refused = await metered.sendStructured(structuredReq(nodeA));
+
+    expect(refused.ok).toBe(false);
+    if (refused.ok || refused.error.kind !== "llm-budget-exceeded") throw new Error("expected refusal");
+    expect(refused.error.cause.kind).toBe("unpriced");
+    if (refused.error.cause.kind !== "unpriced") return;
+    expect([...refused.error.cause.models]).toEqual(["m"]);
+    expect(calls.length).toBe(1); // the refused call never reached the inner client
+
+    const warn = logs.find((l) => l.level === "warn" && l.msg.includes("budget exceeded"));
+    expect(warn?.data?.["reason"]).toContain("no price-table entry");
+  });
+
+  it("runs an unpriced model normally under token-only ceilings (FR-B-005)", async () => {
+    // Fail-closed applies where something is unknown. A token ceiling is
+    // perfectly evaluable on an unpriced model.
+    const { inner } = fakeInner(10, 5);
+    const { logger } = collectLogs();
+    const metered = createMeteredLlm(inner, { dagId, runId, limits: tokenBudget(10_000), logger });
+    for (let i = 0; i < 5; i += 1) {
+      expect((await metered.sendStructured(structuredReq(nodeA))).ok).toBe(true);
+    }
+  });
+});
+
+describe("metered-llm: both operations share one accounting path", () => {
+  it("draws sendStructured and sendWithTools on the same run budget", async () => {
+    // The two used to be separate copies of the admit/settle/release sequence.
+    // A budget one operation can bypass is not a budget, so the shared meter is
+    // asserted through BOTH entry points rather than either alone.
+    const { inner, calls } = fakeInner(100, 0);
+    const { logger, logs } = collectLogs();
+    const metered = createMeteredLlm(inner, { dagId, runId, limits: tokenBudget(250), logger });
+
+    expect((await metered.sendStructured(structuredReq(nodeA))).ok).toBe(true); // 100
+    expect((await metered.sendWithTools(toolsReq(nodeA), fakeCtx)).ok).toBe(true); // 200
+    expect((await metered.sendStructured(structuredReq(nodeA))).ok).toBe(true); // 300, the overshoot
+    const refused = await metered.sendWithTools(toolsReq(nodeA), fakeCtx);
+
+    expect(refused.ok).toBe(false);
+    expect(calls.length).toBe(3);
+    // Both operations appear on the metering lines under one cumulative.
+    const ops = logs.filter((l) => l.msg === "llm.metered").map((l) => l.data?.["operation"]);
+    expect(ops).toEqual(["sendStructured", "sendWithTools", "sendStructured"]);
+    expect(logs.filter((l) => l.msg === "llm.metered").map((l) => cumulativeTokens(l.data))).toEqual([
+      100, 200, 300,
+    ]);
+  });
+
+  it("carries the call price and the running cost on every metering line", async () => {
+    const { logger, logs } = collectLogs();
+    const metered = createMeteredLlm(
+      cachingInner({ tokensIn: 400_000, tokensOut: 0, cacheWriteTokens: 0, cacheReadTokens: 0 }),
+      { dagId, runId, logger },
+    );
+
+    await metered.sendStructured(pricedReq(nodeA));
+    await metered.sendStructured(pricedReq(nodeA));
+
+    const lines = logs.filter((l) => l.msg === "llm.metered");
+    const costs = lines.map((l) => (l.data?.["cumulative"] as { usdMicros?: number }).usdMicros);
+    expect(costs).toEqual([usdToMicros(1), usdToMicros(2)]);
+    expect((lines[0]?.data?.["call"] as { usdMicros?: number }).usdMicros).toBe(usdToMicros(1));
+    expect(lines[0]?.data?.["model"]).toBe(PRICED_MODEL);
+  });
+});
+
+describe("metered-llm: the metering log carries figures, never content", () => {
+  it("never puts model output, thinking, or raw text on the llm.metered line", async () => {
+    // `LlmResponse extends TokenUsage`, so a response is structurally a valid
+    // usage value — and passing it whole to a function that SPREADS it put the
+    // model's output and chain-of-thought onto an info-level log line, with
+    // none of the redaction the span path applies to the same content.
+    // One definition of "a response carrying content", so the two arms cannot
+    // drift and leave one of them asserting against a different payload.
+    const leakyResponse = <O>(): Result<LlmResponse<O>, FrameworkError> =>
+      ok({
+        output: { secret: "PII-BEARING-OUTPUT" } as O,
+        thinking: "CHAIN-OF-THOUGHT",
+        rawText: "RAW-MODEL-TEXT",
+        ...tokensOnly(10, 5),
+      });
+    const leaky: LlmClient = {
+      sendStructured: async <O>() => leakyResponse<O>(),
+      sendWithTools: async <O>() => leakyResponse<O>(),
+    };
+
+    const { logger, logs } = collectLogs();
+    const metered = createMeteredLlm(leaky, { dagId, runId, logger });
+    await metered.sendStructured(structuredReq(nodeA));
+    await metered.sendWithTools(toolsReq(nodeA), fakeCtx);
+
+    const metering = logs.filter((l) => l.msg === "llm.metered");
+    expect(metering).toHaveLength(2);
+    for (const line of metering) {
+      expect(line.data).not.toHaveProperty("output");
+      expect(line.data).not.toHaveProperty("thinking");
+      expect(line.data).not.toHaveProperty("rawText");
+      expect(JSON.stringify(line.data)).not.toContain("PII-BEARING-OUTPUT");
+      expect(JSON.stringify(line.data)).not.toContain("CHAIN-OF-THOUGHT");
+      expect(JSON.stringify(line.data)).not.toContain("RAW-MODEL-TEXT");
+      // The figures it exists to carry are still all there.
+      expect(line.data?.["tokensIn"]).toBe(10);
+      expect(line.data?.["tokensOut"]).toBe(5);
+      expect(line.data?.["cacheWriteTokens"]).toBe(0);
+      expect(line.data?.["cacheReadTokens"]).toBe(0);
+    }
   });
 });

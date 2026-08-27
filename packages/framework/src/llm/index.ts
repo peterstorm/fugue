@@ -49,10 +49,12 @@ export type {
 } from "./fake-client.js";
 export {
   CACHE_READ_MULTIPLIER,
+  DEFAULT_CACHE_TTL,
   CACHE_WRITE_MULTIPLIER,
   computeCostUsd,
   costRatesFor,
   costUsd,
+  spendOfCall,
   PRICE_TABLE,
 } from "./cost.js";
 export type { CostRates } from "./cost.js";

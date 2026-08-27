@@ -1,558 +1,360 @@
 /**
  * Tests for the pure llm-meter ADT (domain/llm-meter.ts).
  *
- * Covers accumulation, per-run isolation, immutability, the budget decision
- * (allow/refuse), the overshoot-by-one rule (FR-W1-004 / SC-003), the
- * no-budget passthrough (FR-W1-006), and property-based invariants.
+ * Covers accumulation, per-run isolation, immutability, the admission decision,
+ * the overshoot-by-one rule (FR-W1-004 / SC-003), the no-budget passthrough
+ * (FR-W1-006), the multi-ceiling decision (FR-B-002), the settled-vs-projected
+ * basis (FR-B-013), and property-based invariants.
+ *
+ * The meter accumulates `Spend`, not tokens. The value algebra itself is tested
+ * in the framework (`spend.test.ts`, `budget.test.ts`); what is tested here is
+ * the per-run bookkeeping and the admission decision built on it.
  */
 
 import { describe, it, expect } from "bun:test";
 import * as fc from "fast-check";
 import { runId as makeRunId } from "@fuguejs/framework";
-import type { RunId } from "@fuguejs/framework";
+import type { Ceiling, MicroUsd, RunId, Spend } from "@fuguejs/framework";
+import {
+  NO_SPEND,
+  addSpend,
+  ceilings,
+  pricedCall,
+  unpricedCall,
+  usdToMicros,
+} from "@fuguejs/framework";
 import {
   emptyMeter,
   accumulate,
-  budgetDecision,
-  usageFor,
-  runTotal,
-  formatBudgetDecision,
+  spendFor,
   emptyReservation,
-  admitWithReservation,
+  admit,
   releaseReservation,
   learnObservedCall,
   type LlmMeter,
   type ReservationState,
 } from "../domain/llm-meter.js";
 
-/**
- * A call delta with no provider-side cache activity — the shape every one of
- * these cases had before prompt caching existed, so the arithmetic they assert
- * is unchanged.
- */
-const tokenDelta = (tokensIn: number, tokensOut: number) => ({
-  tokensIn,
-  tokensOut,
-  cacheWriteTokens: 0,
-  cacheReadTokens: 0,
-});
+const micros = (n: number): MicroUsd => n as MicroUsd;
+const tokens = (limit: number): Ceiling => ({ kind: "tokens", limit });
+const callsCeiling = (limit: number): Ceiling => ({ kind: "calls", limit });
+const usd = (dollars: number): Ceiling => ({ kind: "usd", limit: usdToMicros(dollars) });
 
+/** `ceilings` returns undefined only for an empty list; unwrap for tests. */
+const limitsOf = (declared: readonly Ceiling[]) => {
+  const c = ceilings(declared);
+  if (c === undefined) throw new Error("expected non-empty ceilings");
+  return c;
+};
+
+/** A free call of `n` tokens — isolates the token axis from cost. */
+const freeCall = (n: number): Spend => pricedCall(n, micros(0));
 
 const runA = makeRunId("run-a");
 const runB = makeRunId("run-b");
 
-describe("llm-meter: accumulate + usageFor", () => {
-  it("reads an unmetered run as all-zero", () => {
-    const usage = usageFor(emptyMeter(), runA);
-    expect(usage).toEqual(tokenDelta(0, 0));
-    expect(runTotal(usage)).toBe(0);
+// ---------------------------------------------------------------------------
+// Accumulation
+// ---------------------------------------------------------------------------
+
+describe("llm-meter: accumulate + spendFor", () => {
+  it("reads an unmetered run as NO_SPEND rather than undefined", () => {
+    // "Never seen" and "seen, spent nothing" must be indistinguishable to the
+    // budget check (FR-W1-002) — otherwise every read site needs an absent
+    // branch that means the same thing as zero.
+    expect(spendFor(emptyMeter(), runA)).toEqual(NO_SPEND);
   });
 
-  it("sums tokensIn / tokensOut and keeps runTotal = in + out", () => {
-    let m = emptyMeter();
-    m = accumulate(m, runA, tokenDelta(100, 50));
-    m = accumulate(m, runA, tokenDelta(10, 5));
-    expect(usageFor(m, runA)).toEqual(tokenDelta(110, 55));
-    expect(runTotal(usageFor(m, runA))).toBe(165);
+  it("adds a settled call to a run's running total", () => {
+    const meter = accumulate(emptyMeter(), runA, pricedCall(150, micros(2_000)));
+    expect(spendFor(meter, runA)).toEqual({
+      tokens: 150,
+      calls: 1,
+      usd: { kind: "priced", micros: micros(2_000) },
+    });
   });
 
-  it("isolates usage per runId", () => {
-    let m = emptyMeter();
-    m = accumulate(m, runA, tokenDelta(100, 50));
-    m = accumulate(m, runB, tokenDelta(1, 2));
-    expect(runTotal(usageFor(m, runA))).toBe(150);
-    expect(runTotal(usageFor(m, runB))).toBe(3);
-  });
-
-  it("does not mutate the input meter (immutability)", () => {
-    const m0 = emptyMeter();
-    const m1 = accumulate(m0, runA, tokenDelta(100, 50));
-    expect(runTotal(usageFor(m0, runA))).toBe(0); // m0 untouched
-    expect(runTotal(usageFor(m1, runA))).toBe(150);
-    expect(m1).not.toBe(m0);
-  });
-
-  it("does not expose runtime Map mutation methods", () => {
-    const meter = accumulate(emptyMeter(), runA, tokenDelta(7, 3));
-    const escaped = meter.usageByRun as Map<RunId, { tokensIn: number; tokensOut: number }>;
-
-    expect(() => escaped.set(runB, tokenDelta(1_000, 1_000))).toThrow();
-    expect(usageFor(meter, runB)).toEqual(tokenDelta(0, 0));
-    expect(() => { (usageFor(meter, runA) as { tokensIn: number }).tokensIn = 999; }).toThrow();
-    expect(runTotal(usageFor(meter, runA))).toBe(10);
-  });
-
-  it("clamps negative deltas to zero (no budget refunds)", () => {
-    let m = emptyMeter();
-    m = accumulate(m, runA, tokenDelta(-100, -50));
-    expect(runTotal(usageFor(m, runA))).toBe(0);
-  });
-
-  it("runTotal is unrepresentable-illegal-state-free: always equals in + out", () => {
-    const u = usageFor(accumulate(emptyMeter(), runA, tokenDelta(7, 13)), runA);
-    // No stored `total` field exists to disagree with the derived figure.
-    expect(u).not.toHaveProperty("total");
-    expect(runTotal(u)).toBe(20);
-  });
-});
-
-describe("llm-meter: non-finite delta hardening (NaN/Infinity read as 0)", () => {
-  it("treats a NaN delta component as 0 — cumulative stays finite (10, not NaN)", () => {
-    let m = emptyMeter();
-    m = accumulate(m, runA, tokenDelta(Number.NaN, 10));
-    const u = usageFor(m, runA);
-    expect(u).toEqual(tokenDelta(0, 10));
-    expect(runTotal(u)).toBe(10);
-    expect(Number.isFinite(runTotal(u))).toBe(true);
-  });
-
-  it("treats an Infinity delta component as 0 — no never-refusing poisoned cumulative", () => {
-    let m = emptyMeter();
-    m = accumulate(m, runA, tokenDelta(Number.POSITIVE_INFINITY, 5));
-    m = accumulate(m, runA, tokenDelta(5, Number.NEGATIVE_INFINITY));
-    const u = usageFor(m, runA);
-    expect(u).toEqual(tokenDelta(5, 5));
-    expect(runTotal(u)).toBe(10);
-  });
-
-  it("cumulative can never go non-finite through accumulate, for any delta sequence (property)", () => {
-    const weirdNumber = fc.oneof(
-      fc.integer({ min: -10_000, max: 10_000 }),
-      fc.constant(Number.NaN),
-      fc.constant(Number.POSITIVE_INFINITY),
-      fc.constant(Number.NEGATIVE_INFINITY),
+  it("accumulates across calls on every axis", () => {
+    const meter = [1, 2, 3].reduce(
+      (m) => accumulate(m, runA, pricedCall(100, micros(500))),
+      emptyMeter(),
     );
-    fc.assert(
-      fc.property(
-        // Every component is fuzzed, cache figures included: they reach
-        // `accumulate` on the same path as the raw counts, so a missing
-        // sanitize on one of them would poison the cumulative just as surely.
-        fc.array(
-          fc.record({
-            tokensIn: weirdNumber,
-            tokensOut: weirdNumber,
-            cacheWriteTokens: weirdNumber,
-            cacheReadTokens: weirdNumber,
-          }),
-          { maxLength: 50 },
-        ),
-        (deltas) => {
-          let m: LlmMeter = emptyMeter();
-          for (const d of deltas) {
-            m = accumulate(m, runA, d);
-            const total = runTotal(usageFor(m, runA));
-            expect(Number.isFinite(total)).toBe(true);
-            expect(total).toBeGreaterThanOrEqual(0);
-          }
-        },
-      ),
+    expect(spendFor(meter, runA)).toEqual({
+      tokens: 300,
+      calls: 3,
+      usd: { kind: "priced", micros: micros(1_500) },
+    });
+  });
+
+  it("keeps runs isolated", () => {
+    const meter = accumulate(accumulate(emptyMeter(), runA, freeCall(100)), runB, freeCall(7));
+    expect(spendFor(meter, runA).tokens).toBe(100);
+    expect(spendFor(meter, runB).tokens).toBe(7);
+  });
+
+  it("never mutates the input meter", () => {
+    const first = accumulate(emptyMeter(), runA, freeCall(10));
+    const second = accumulate(first, runA, freeCall(90));
+    expect(spendFor(first, runA).tokens).toBe(10);
+    expect(spendFor(second, runA).tokens).toBe(100);
+  });
+
+  it("exposes a read-only view — no mutable Map methods escape the ADT", () => {
+    const meter: LlmMeter = accumulate(emptyMeter(), runA, freeCall(10));
+    expect(meter.spendByRun.size).toBe(1);
+    expect(meter.spendByRun.has(runA)).toBe(true);
+    expect((meter.spendByRun as unknown as Record<string, unknown>)["set"]).toBeUndefined();
+    expect(Object.isFrozen(meter)).toBe(true);
+  });
+
+  it("carries an unpriced call into the run total, absorbing", () => {
+    // Once a run has touched a model with no price, no dollar figure for that
+    // run can be trusted again — and the stored value says so.
+    const meter = accumulate(
+      accumulate(emptyMeter(), runA, pricedCall(10, micros(999))),
+      runA,
+      unpricedCall(5, "mystery"),
     );
-  });
-
-  it("budgetDecision FAILS CLOSED on a non-finite cumulative (defense in depth): a hand-built poisoned meter REFUSES, never `NaN >= budget` → allow", () => {
-    // `accumulate` sanitizes its inputs, so a poisoned meter is only reachable by
-    // hand-building one — exactly the defense-in-depth scenario the refusal guards.
-    for (const poison of [Number.NaN, Number.POSITIVE_INFINITY]) {
-      const poisoned: LlmMeter = {
-        usageByRun: new Map([[runA, tokenDelta(poison, 0)]]),
-      };
-      const d = budgetDecision(poisoned, runA, 1000);
-      expect(d.kind).toBe("refuse"); // fail closed, not fail open forever
-      if (d.kind === "refuse") expect(d.budget).toBe(1000);
-    }
-    // An ABSENT budget still allows (FR-W1-006 outranks the guard — no budget,
-    // no enforcement, even on a poisoned meter).
-    const poisoned: LlmMeter = {
-      usageByRun: new Map([[runA, tokenDelta(Number.NaN, 0)]]),
-    };
-    expect(budgetDecision(poisoned, runA, undefined).kind).toBe("allow");
+    const spend = spendFor(meter, runA);
+    expect(spend.usd.kind).toBe("unpriced");
+    if (spend.usd.kind !== "unpriced") return;
+    expect([...spend.usd.models]).toEqual(["mystery"]);
+    expect(spend.usd.knownMicros).toBe(999);
   });
 });
 
-describe("llm-meter: budgetDecision", () => {
-  it("allows every call when budget is undefined (FR-W1-006)", () => {
-    let m = emptyMeter();
-    m = accumulate(m, runA, tokenDelta(1_000_000, 0));
-    const d = budgetDecision(m, runA, undefined);
-    expect(d.kind).toBe("allow");
+// ---------------------------------------------------------------------------
+// Admission — no budget
+// ---------------------------------------------------------------------------
+
+describe("llm-meter: admit with no ceilings (FR-W1-006)", () => {
+  it("never refuses, however much has been spent", () => {
+    const meter = accumulate(emptyMeter(), runA, pricedCall(10_000_000, micros(999_999_999)));
+    expect(admit(meter, runA, emptyReservation).kind).toBe("admit");
   });
 
-  it("allows while cumulative < budget", () => {
-    let m = emptyMeter();
-    m = accumulate(m, runA, tokenDelta(400, 100)); // 500
-    const d = budgetDecision(m, runA, 1000);
-    expect(d.kind).toBe("allow");
-    if (d.kind === "allow") expect(d.cumulative).toBe(500);
-  });
-
-  it("refuses once cumulative >= budget", () => {
-    let m = emptyMeter();
-    m = accumulate(m, runA, tokenDelta(600, 400)); // 1000
-    const d = budgetDecision(m, runA, 1000);
-    expect(d.kind).toBe("refuse");
-    if (d.kind === "refuse") {
-      expect(d.cumulative).toBe(1000);
-      expect(d.budget).toBe(1000);
-    }
-  });
-
-  it("refuses the first call for a non-positive budget", () => {
-    expect(budgetDecision(emptyMeter(), runA, 0).kind).toBe("refuse");
-  });
-
-  it("refuses the first call for a negative budget (cumulative 0 >= negative)", () => {
-    const d = budgetDecision(emptyMeter(), runA, -50);
-    expect(d.kind).toBe("refuse");
-    if (d.kind === "refuse") {
-      expect(d.cumulative).toBe(0);
-      expect(d.budget).toBe(-50);
-    }
+  it("still reserves, so the accounting stays consistent when a budget appears", () => {
+    const decision = admit(emptyMeter(), runA, emptyReservation);
+    if (decision.kind !== "admit") throw new Error("expected admit");
+    expect(decision.state.inFlight).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Admission — the overshoot-by-one contract
+// ---------------------------------------------------------------------------
 
 describe("llm-meter: overshoot-by-one (FR-W1-004 / SC-003)", () => {
-  it("allows the boundary-crossing call, then refuses the next", () => {
-    const budget = 1000;
-    let m = emptyMeter();
-    // Establish cumulative-so-far at 900 (under budget).
-    m = accumulate(m, runA, tokenDelta(900, 0));
-
-    // Cumulative 900 < 1000 → this call is allowed (pre-call check).
-    expect(budgetDecision(m, runA, budget).kind).toBe("allow");
-    // The call returns and overshoots to 1100.
-    m = accumulate(m, runA, tokenDelta(200, 0)); // 900 -> 1100
-
-    // Now cumulative 1100 >= 1000 → the NEXT call is refused (single overshoot).
-    const next = budgetDecision(m, runA, budget);
-    expect(next.kind).toBe("refuse");
+  it("admits the call that crosses the boundary and refuses the next one", () => {
+    // The check is BEFORE the call and against settled spend, so exactly one
+    // call runs past the ceiling. That single overshoot is the documented
+    // guarantee, not an accident of the implementation.
+    const limits = limitsOf([tokens(1000)]);
+    let meter = emptyMeter();
+    let admitted = 0;
+    for (let i = 0; i < 10; i += 1) {
+      if (admit(meter, runA, emptyReservation, limits).kind === "refuse") break;
+      admitted += 1;
+      meter = accumulate(meter, runA, freeCall(400));
+    }
+    expect(admitted).toBe(3); // 0, 400, 800 admitted; 1200 refuses
+    expect(spendFor(meter, runA).tokens).toBe(1200);
   });
 
-  it("allows at most one call past budget B regardless of step sizes", () => {
-    fc.assert(
-      fc.property(
-        fc.integer({ min: 1, max: 5000 }), // budget B
-        fc.array(fc.integer({ min: 1, max: 1000 }), { minLength: 1, maxLength: 200 }), // per-call costs
-        (budget, costs) => {
-          let m = emptyMeter();
-          let allowedCount = 0;
-          let crossedAt = -1;
-          for (let i = 0; i < costs.length; i++) {
-            const d = budgetDecision(m, runA, budget);
-            if (d.kind === "refuse") break; // refusal halts the run
-            allowedCount++;
-            // Every allowed call must have been under budget at decision time
-            // (the overshoot invariant: the boundary-crossing call is the LAST
-            // call permitted). This was previously only described in a comment.
-            expect(d.cumulative).toBeLessThan(budget);
-            const before = runTotal(usageFor(m, runA));
-            expect(d.cumulative).toBe(before); // decision reflects cumulative-so-far
-            m = accumulate(m, runA, tokenDelta(costs[i]!, 0));
-            if (before < budget && runTotal(usageFor(m, runA)) >= budget && crossedAt === -1) {
-              crossedAt = i;
-            }
-          }
-          const finalTotal = runTotal(usageFor(m, runA));
-          // If we ever crossed the budget, no further call was allowed after the
-          // crossing call (at most one call past B).
-          if (crossedAt !== -1) {
-            // allowedCount counts calls that ran; the crossing call is the last allowed one.
-            expect(allowedCount).toBe(crossedAt + 1);
-            expect(finalTotal).toBeGreaterThanOrEqual(budget);
-          }
-          return true;
-        },
-      ),
-    );
+  it("refuses the first call at a zero ceiling", () => {
+    const decision = admit(emptyMeter(), runA, emptyReservation, limitsOf([tokens(0)]));
+    expect(decision.kind).toBe("refuse");
+  });
+
+  it("reports the SETTLED spend on a refusal, so it reconciles against the metered totals", () => {
+    const meter = accumulate(emptyMeter(), runA, freeCall(1200));
+    const decision = admit(meter, runA, emptyReservation, limitsOf([tokens(1000)]));
+    if (decision.kind !== "refuse") throw new Error("expected refuse");
+    expect(decision.settled.tokens).toBe(1200);
+    expect(decision.breach.basis).toBe("settled");
   });
 });
 
-describe("llm-meter: property — total is always in + out and monotonic", () => {
-  it("total equals tokensIn + tokensOut after any sequence of accumulates", () => {
-    fc.assert(
-      fc.property(
-        fc.array(
-          fc.record({
-            tokensIn: fc.integer({ min: 0, max: 10_000 }),
-            tokensOut: fc.integer({ min: 0, max: 10_000 }),
-          }),
-          { maxLength: 100 },
-        ),
-        (deltas) => {
-          let m: LlmMeter = emptyMeter();
-          let prevTotal = 0;
-          for (const d of deltas) {
-            m = accumulate(m, runA, d);
-            const u = usageFor(m, runA);
-            const total = runTotal(u);
-            expect(total).toBe(u.tokensIn + u.tokensOut);
-            expect(total).toBeGreaterThanOrEqual(prevTotal); // monotonic non-decreasing
-            prevTotal = total;
-          }
-        },
-      ),
-    );
+// ---------------------------------------------------------------------------
+// Admission — multi-axis
+// ---------------------------------------------------------------------------
+
+describe("llm-meter: any declared ceiling refuses (FR-B-002)", () => {
+  const limits = limitsOf([tokens(10_000), callsCeiling(3), usd(1)]);
+
+  it("refuses on the call axis while tokens and dollars are still fine", () => {
+    // Three tiny calls trip a call ceiling that neither of the other axes
+    // notices — the circuit-breaker for a tool loop stuck retrying.
+    const meter = [1, 2, 3].reduce((m) => accumulate(m, runA, pricedCall(1, micros(1))), emptyMeter());
+    const decision = admit(meter, runA, emptyReservation, limits);
+    if (decision.kind !== "refuse") throw new Error("expected refuse");
+    expect(decision.breach.ceiling.kind).toBe("calls");
   });
 
-  it("budget decision is purely a function of cumulative vs budget", () => {
-    fc.assert(
-      fc.property(
-        fc.integer({ min: 0, max: 100_000 }), // cumulative
-        fc.integer({ min: 1, max: 100_000 }), // budget
-        (cumulative, budget) => {
-          const m = accumulate(emptyMeter(), runA, tokenDelta(cumulative, 0));
-          const d = budgetDecision(m, runA, budget);
-          if (cumulative >= budget) {
-            expect(d.kind).toBe("refuse");
-          } else {
-            expect(d.kind).toBe("allow");
-          }
-        },
-      ),
-    );
+  it("refuses on the dollar axis while tokens are still fine", () => {
+    const meter = accumulate(emptyMeter(), runA, pricedCall(10, usdToMicros(1.5)));
+    const decision = admit(meter, runA, emptyReservation, limits);
+    if (decision.kind !== "refuse") throw new Error("expected refuse");
+    expect(decision.breach.ceiling.kind).toBe("usd");
   });
-});
 
-describe("llm-meter: formatBudgetDecision", () => {
-  it("formats both branches without throwing", () => {
-    expect(formatBudgetDecision({ kind: "allow", cumulative: 5 })).toContain("allow");
-    expect(formatBudgetDecision({ kind: "refuse", cumulative: 10, budget: 8 })).toContain("refuse");
+  it("admits while under every axis", () => {
+    const meter = accumulate(emptyMeter(), runA, pricedCall(500, usdToMicros(0.1)));
+    expect(admit(meter, runA, emptyReservation, limits).kind).toBe("admit");
+  });
+
+  it("refuses an unpriced model under a dollar ceiling, naming the model (FR-B-004)", () => {
+    // Fail closed: an unknown cost cannot be shown to be under a limit, and
+    // treating it as zero would make the cheapest route past a dollar budget
+    // "use a model we forgot to price".
+    const meter = accumulate(emptyMeter(), runA, unpricedCall(10, "brand-new"));
+    const decision = admit(meter, runA, emptyReservation, limitsOf([usd(100)]));
+    if (decision.kind !== "refuse") throw new Error("expected refuse");
+    expect(decision.breach.kind).toBe("unpriced");
+    if (decision.breach.kind !== "unpriced") return;
+    expect([...decision.breach.models]).toEqual(["brand-new"]);
+  });
+
+  it("does NOT refuse an unpriced model when only token/call ceilings are declared (FR-B-005)", () => {
+    const meter = accumulate(emptyMeter(), runA, unpricedCall(10, "brand-new"));
+    expect(admit(meter, runA, emptyReservation, limitsOf([tokens(1000)])).kind).toBe("admit");
   });
 });
 
-// ── Concurrency reservation transitions (pure core of I1 / SC-003) ──────────
+// ---------------------------------------------------------------------------
+// Admission — the concurrency reservation
+// ---------------------------------------------------------------------------
 
-describe("reservation transitions (admitWithReservation / release / learn)", () => {
-  const meterAt = (total: number): LlmMeter =>
-    total === 0 ? emptyMeter() : accumulate(emptyMeter(), runA, tokenDelta(total, 0));
-
-  it("admits with zero reservation when no estimate is learned (the documented first-burst allowance)", () => {
-    const d = admitWithReservation(meterAt(0), runA, emptyReservation, 100);
-    expect(d.kind).toBe("admit");
-    if (d.kind === "admit") {
-      expect(d.reserved).toBe(0);
-      expect(d.state.reservedInFlight).toBe(0);
+describe("llm-meter: reservation bounds concurrent overshoot (SC-003)", () => {
+  it("lets the first parallel burst through while no estimate has been learned", () => {
+    // The documented FR-W1-004 allowance, generalised: with no settled call yet
+    // there is nothing to estimate a concurrent call's size from.
+    const limits = limitsOf([tokens(1000)]);
+    let state: ReservationState = emptyReservation;
+    for (let i = 0; i < 5; i += 1) {
+      const decision = admit(emptyMeter(), runA, state, limits);
+      if (decision.kind !== "admit") throw new Error("expected admit");
+      state = decision.state;
     }
+    expect(state.inFlight).toBe(5);
   });
 
-  it("reserves the learned estimate on admit and frees exactly it on release", () => {
-    const learned = learnObservedCall(emptyReservation, 40);
-    const d = admitWithReservation(meterAt(10), runA, learned, 100);
-    expect(d.kind).toBe("admit");
-    if (d.kind !== "admit") return;
-    expect(d.reserved).toBe(40);
-    expect(d.state.reservedInFlight).toBe(40);
-    const released = releaseReservation(d.state, d.reserved);
-    expect(released.reservedInFlight).toBe(0);
-    expect(released.maxObservedCall).toBe(40); // learning survives release
+  it("refuses on the PROJECTION once an estimate exists and calls are in flight", () => {
+    const limits = limitsOf([tokens(1000)]);
+    const meter = accumulate(emptyMeter(), runA, freeCall(600));
+    // One 600-token call settled, one more of the same size in flight:
+    // 600 + 600 projects past 1000 even though settled spend is still under.
+    const state = { inFlight: 1, maxObservedCall: freeCall(600) };
+    const decision = admit(meter, runA, state, limits);
+    if (decision.kind !== "refuse") throw new Error("expected refuse");
+    expect(decision.breach.basis).toBe("projected");
+    // The SETTLED figure is what the refusal reports, so an operator
+    // reconciling `llm.metered` totals never sees a phantom gap.
+    expect(decision.settled.tokens).toBe(600);
+    expect(decision.inFlight).toBe(1);
   });
 
-  it("refuses when settled cumulative plus the in-flight reservation projects past the budget", () => {
-    const state: ReservationState = { reservedInFlight: 40, maxObservedCall: 40 };
-    const d = admitWithReservation(meterAt(70), runA, state, 100); // 70 + 40 ≥ 100
-    expect(d.kind).toBe("refuse");
-    if (d.kind === "refuse") {
-      expect(d.cumulative).toBe(70); // SETTLED only — the errors.ts contract
-      expect(d.reservedInFlight).toBe(40); // log-only figure
-      expect(d.budget).toBe(100);
-    }
+  it("prefers the SETTLED reason when both bases breach", () => {
+    // A ceiling spend has actually reached is a stronger statement than one an
+    // estimate says it is about to.
+    const meter = accumulate(emptyMeter(), runA, freeCall(5000));
+    const state = { inFlight: 3, maxObservedCall: freeCall(5000) };
+    const decision = admit(meter, runA, state, limitsOf([tokens(1000)]));
+    if (decision.kind !== "refuse") throw new Error("expected refuse");
+    expect(decision.breach.basis).toBe("settled");
   });
 
-  it("refuses on settled cumulative alone (delegates to budgetDecision) regardless of reservation", () => {
-    const d = admitWithReservation(meterAt(100), runA, emptyReservation, 100);
-    expect(d.kind).toBe("refuse");
+  it("does not refuse on a projection when nothing is in flight", () => {
+    // With `inFlight: 0` the projection equals settled spend, so a run that is
+    // within budget and has nothing outstanding is never refused by the
+    // estimate — even a large learned one.
+    const meter = accumulate(emptyMeter(), runA, freeCall(100));
+    const state = { inFlight: 0, maxObservedCall: freeCall(999_999) };
+    expect(admit(meter, runA, state, limitsOf([tokens(1000)])).kind).toBe("admit");
   });
 
-  it("no budget never refuses, whatever the reservation", () => {
-    const state: ReservationState = { reservedInFlight: 10_000, maxObservedCall: 10_000 };
-    const d = admitWithReservation(meterAt(999_999), runA, state, undefined);
-    expect(d.kind).toBe("admit");
+  it("releases by decrementing, clamped at zero on a double release", () => {
+    const state = releaseReservation({ inFlight: 1, maxObservedCall: NO_SPEND });
+    expect(state.inFlight).toBe(0);
+    // A double release is a contract breach; clamping keeps the projection sane
+    // rather than letting a negative count grant free headroom.
+    expect(releaseReservation(state).inFlight).toBe(0);
   });
 
-  it("learnObservedCall is a monotone max", () => {
-    const s1 = learnObservedCall(emptyReservation, 30);
-    const s2 = learnObservedCall(s1, 10); // smaller call never lowers the estimate
-    expect(s2.maxObservedCall).toBe(30);
-    const s3 = learnObservedCall(s2, 55);
-    expect(s3.maxObservedCall).toBe(55);
-  });
-
-  // ── Regression: provider-sourced callTotal is sanitized (NaN/Infinity/negative → 0),
-  // and releaseReservation clamps at 0 — the SC-003 gate can never be poisoned
-  // or handed free headroom via a contract breach. ──────────────────────────
-
-  it("learnObservedCall sanitizes a NaN/Infinity/negative callTotal — maxObservedCall stays finite and never lowers", () => {
-    const learned = learnObservedCall(emptyReservation, 40);
-    for (const poison of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -123]) {
-      const after = learnObservedCall(learned, poison);
-      // The poison reads as 0 — it neither poisons the max nor lowers it.
-      expect(after.maxObservedCall).toBe(40);
-      expect(Number.isFinite(after.maxObservedCall)).toBe(true);
-    }
-    // From an empty state, a NaN callTotal reads as 0, not NaN.
-    const fromEmpty = learnObservedCall(emptyReservation, Number.NaN);
-    expect(fromEmpty.maxObservedCall).toBe(0);
-    expect(Number.isFinite(fromEmpty.maxObservedCall)).toBe(true);
-  });
-
-  it("after a NaN callTotal, the budgeted gate still refuses and admits correctly (SC-003 not disabled)", () => {
-    // Learn a real estimate, then feed the poison the provider contract breach
-    // would deliver. The gate's projected comparison must keep working.
-    let state = learnObservedCall(emptyReservation, 40);
-    state = learnObservedCall(state, Number.NaN);
-    expect(state.maxObservedCall).toBe(40); // not NaN — the estimate survives
-
-    // Refusal path: settled 70 + reserved 40 projects past budget 100.
-    const reserving = admitWithReservation(meterAt(10), runA, state, 100);
-    expect(reserving.kind).toBe("admit");
-    if (reserving.kind !== "admit") return;
-    expect(reserving.state.reservedInFlight).toBe(40);
-    const refused = admitWithReservation(meterAt(70), runA, reserving.state, 100);
-    expect(refused.kind).toBe("refuse"); // NaN would have read `projected >= budget` as false forever
-    if (refused.kind === "refuse") {
-      expect(refused.cumulative).toBe(70);
-      expect(refused.reservedInFlight).toBe(40);
-      expect(refused.budget).toBe(100);
-    }
-
-    // Admit path still works too: well under budget admits and reserves 40.
-    const admitted = admitWithReservation(meterAt(10), runA, state, 1000);
-    expect(admitted.kind).toBe("admit");
-    if (admitted.kind === "admit") expect(admitted.reserved).toBe(40);
-  });
-
-  it("releaseReservation clamps at 0 — a double release never drives reservedInFlight negative", () => {
-    const learned = learnObservedCall(emptyReservation, 40);
-    const d = admitWithReservation(meterAt(0), runA, learned, 1000);
-    expect(d.kind).toBe("admit");
-    if (d.kind !== "admit") return;
-    const once = releaseReservation(d.state, d.reserved);
-    expect(once.reservedInFlight).toBe(0);
-    // Contract breach: release the same reservation again.
-    const twice = releaseReservation(once, d.reserved);
-    expect(twice.reservedInFlight).toBe(0); // clamped — no free budget headroom
-    // And the negative state can never grant an over-budget admit it shouldn't:
-    // settled 999 >= budget 1000 - anything reserved must still refuse at 1000.
-    const gate = admitWithReservation(meterAt(1000), runA, twice, 1000);
-    expect(gate.kind).toBe("refuse");
-  });
-
-  it("property: reservedInFlight never goes below 0 under arbitrary interleaved release/learn sequences", () => {
-    const weirdAmount = fc.oneof(
-      fc.integer({ min: -1000, max: 1000 }),
-      fc.constant(Number.NaN),
-      fc.constant(Number.POSITIVE_INFINITY),
+  it("widens the learned estimate monotonically, per axis", () => {
+    const learned = [freeCall(100), freeCall(50), pricedCall(10, micros(9_000))].reduce(
+      learnObservedCall,
+      emptyReservation,
     );
-    fc.assert(
-      fc.property(
-        fc.array(
-          fc.oneof(
-            fc.record({ op: fc.constant("admit" as const) }),
-            fc.record({ op: fc.constant("release" as const), amount: fc.nat({ max: 500 }) }),
-            fc.record({ op: fc.constant("learn" as const), amount: weirdAmount }),
-          ),
-          { maxLength: 50 },
-        ),
-        (ops) => {
-          let state = emptyReservation;
-          for (const o of ops) {
-            if (o.op === "admit") {
-              const d = admitWithReservation(emptyMeter(), runA, state, undefined);
-              if (d.kind !== "admit") throw new Error("unbudgeted admit refused");
-              state = d.state;
-            } else if (o.op === "release") {
-              state = releaseReservation(state, o.amount);
-            } else {
-              state = learnObservedCall(state, o.amount);
-            }
-            expect(state.reservedInFlight).toBeGreaterThanOrEqual(0);
-            expect(Number.isFinite(state.maxObservedCall)).toBe(true);
-          }
-        },
-      ),
-    );
+    expect(learned.maxObservedCall.tokens).toBe(100);
+    if (learned.maxObservedCall.usd.kind !== "priced") throw new Error("priced");
+    expect(learned.maxObservedCall.usd.micros).toBe(9_000);
   });
+});
 
-  it("property: interleaved admit/release sequences never strand reservation (balanced ops return to zero)", () => {
+// ---------------------------------------------------------------------------
+// Properties
+// ---------------------------------------------------------------------------
+
+describe("llm-meter: properties", () => {
+  const arbCall = fc.oneof(
+    fc.tuple(fc.nat({ max: 5_000 }), fc.nat({ max: 5_000 })).map(([t, m]) => pricedCall(t, micros(m))),
+    fc.nat({ max: 5_000 }).map((t) => unpricedCall(t, "unpriced-model")),
+  );
+
+  it("a run's total equals the fold of its calls, in any order", () => {
     fc.assert(
-      fc.property(fc.array(fc.nat({ max: 500 }), { maxLength: 30 }), (callSizes) => {
-        let state = emptyReservation;
-        const reservedAmounts: number[] = [];
-        for (const size of callSizes) {
-          const d = admitWithReservation(emptyMeter(), runA, state, undefined);
-          if (d.kind !== "admit") throw new Error("unbudgeted admit refused");
-          state = d.state;
-          reservedAmounts.push(d.reserved);
-          state = learnObservedCall(state, size);
-        }
-        for (const r of reservedAmounts) state = releaseReservation(state, r);
-        expect(state.reservedInFlight).toBe(0);
+      fc.property(fc.array(arbCall, { maxLength: 20 }), (calls) => {
+        const metered = calls.reduce((m, c) => accumulate(m, runA, c), emptyMeter());
+        const folded = calls.reduce(addSpend, NO_SPEND);
+        expect(spendFor(metered, runA)).toEqual(folded);
       }),
     );
   });
-});
 
-describe("llm-meter: cache-split accumulation", () => {
-  it("sums each cache field independently across sequential calls", () => {
-    // The hostile-input property test next door only proves the TOTAL stays
-    // finite. This proves the split itself is right — the figures an operator
-    // reads to tell a cheap cached run from an expensive uncached one.
-    let m: LlmMeter = emptyMeter();
-    m = accumulate(m, runA, {
-      tokensIn: 1000,
-      tokensOut: 50,
-      cacheWriteTokens: 400,
-      cacheReadTokens: 200,
-    });
-    m = accumulate(m, runA, {
-      tokensIn: 500,
-      tokensOut: 25,
-      cacheWriteTokens: 0,
-      cacheReadTokens: 300,
-    });
-
-    const u = usageFor(m, runA);
-    expect(u.tokensIn).toBe(1500);
-    expect(u.tokensOut).toBe(75);
-    expect(u.cacheWriteTokens).toBe(400);
-    expect(u.cacheReadTokens).toBe(500);
-    // `tokensIn` stays INCLUSIVE, so the budget total is unaffected by the split.
-    expect(runTotal(u)).toBe(1575);
+  it("is monotone — no sequence of calls ever decreases any axis", () => {
+    fc.assert(
+      fc.property(fc.array(arbCall, { minLength: 1, maxLength: 20 }), (calls) => {
+        let meter = emptyMeter();
+        let previous = spendFor(meter, runA);
+        for (const call of calls) {
+          meter = accumulate(meter, runA, call);
+          const next = spendFor(meter, runA);
+          expect(next.tokens).toBeGreaterThanOrEqual(previous.tokens);
+          expect(next.calls).toBeGreaterThanOrEqual(previous.calls);
+          previous = next;
+        }
+      }),
+    );
   });
 
-  it("keeps the cache split per-run, never bleeding across runs", () => {
-    let m: LlmMeter = emptyMeter();
-    m = accumulate(m, runA, {
-      tokensIn: 100,
-      tokensOut: 10,
-      cacheWriteTokens: 60,
-      cacheReadTokens: 40,
-    });
-    m = accumulate(m, runB, {
-      tokensIn: 200,
-      tokensOut: 20,
-      cacheWriteTokens: 0,
-      cacheReadTokens: 0,
-    });
-
-    expect(usageFor(m, runA).cacheWriteTokens).toBe(60);
-    expect(usageFor(m, runA).cacheReadTokens).toBe(40);
-    expect(usageFor(m, runB).cacheWriteTokens).toBe(0);
-    expect(usageFor(m, runB).cacheReadTokens).toBe(0);
+  it("refuses IFF some declared ceiling is reached — neither over- nor under-refusal", () => {
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.tuple(fc.nat({ max: 400 }), fc.nat({ max: 400 })).map(([t, m]) => pricedCall(t, micros(m))),
+          { maxLength: 15 },
+        ),
+        (calls) => {
+          const limits = limitsOf([tokens(2000), callsCeiling(8), { kind: "usd", limit: micros(2000) }]);
+          const meter = calls.reduce((m, c) => accumulate(m, runA, c), emptyMeter());
+          const spend = spendFor(meter, runA);
+          const over =
+            spend.tokens >= 2000 ||
+            spend.calls >= 8 ||
+            (spend.usd.kind === "priced" && spend.usd.micros >= 2000);
+          expect(admit(meter, runA, emptyReservation, limits).kind).toBe(over ? "refuse" : "admit");
+        },
+      ),
+    );
   });
 
-  it("sanitizes a hostile cache figure without disturbing the other fields", () => {
-    let m: LlmMeter = emptyMeter();
-    m = accumulate(m, runA, {
-      tokensIn: 100,
-      tokensOut: 10,
-      cacheWriteTokens: Number.NaN,
-      cacheReadTokens: -50,
-    });
-
-    const u = usageFor(m, runA);
-    expect(u.cacheWriteTokens).toBe(0);
-    expect(u.cacheReadTokens).toBe(0);
-    expect(u.tokensIn).toBe(100);
-    expect(u.tokensOut).toBe(10);
+  it("admitting never refuses a run whose spend is strictly under every ceiling", () => {
+    fc.assert(
+      fc.property(fc.nat({ max: 999 }), (spent) => {
+        const meter = accumulate(emptyMeter(), runA, freeCall(spent));
+        expect(admit(meter, runA, emptyReservation, limitsOf([tokens(1000)])).kind).toBe("admit");
+      }),
+    );
   });
 });

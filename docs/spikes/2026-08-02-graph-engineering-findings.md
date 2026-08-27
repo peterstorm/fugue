@@ -165,6 +165,15 @@ instead of a billing surprise.
 
 This is a **precondition for F1**, not a follow-up.
 
+> **Superseded, 2026-08-27.** The premise above ("There is **no** token or cost
+> budget") was already wrong when written: `llmBudgetTokens` had shipped in W1,
+> enforced per-run by the metered-llm decorator. The real gaps were narrower and
+> different — a ceiling denominated in tokens rather than money (which prompt
+> caching made actively misleading), no durability across a park/resume, no
+> node-visible capability, and coverage of only one LLM client. See
+> `docs/plans/2026-08-27-f3-budget-capability.md` §1 and ADR-0082. The proposed
+> `spend()` was deliberately not built; see ADR-0082 for why.
+
 ### F4 — Prompt caching is entirely absent (10× economics gap)
 
 **Gap.** Grepping `packages/framework/src` and `packages/host/src` for

@@ -13,6 +13,9 @@ import type { RunId, NodeId } from "./ids.js";
 // `FrameworkError` from this module) — safe: type imports erase at compile
 // time, so no runtime cycle exists.
 import type { Capability } from "./node.js";
+import type { Breach } from "./budget.js";
+import { formatBreach } from "./budget.js";
+import type { MicroUsd } from "./spend.js";
 import type { TokenUsage } from "./token-usage.js";
 import { safeDiagnosticRender, safeErrorMessage } from "./safe-error.js";
 
@@ -231,28 +234,23 @@ export type FrameworkError =
   | {
       /**
        * Emitted by the host's metered LLM decorator (FR-W1-003) when a per-run
-       * token budget is reached. The admission check runs BEFORE the call:
-       * it refuses when the SETTLED cumulative has reached `budget`, or when
-       * settled cumulative plus the learned reservation for admitted-but-
-       * unsettled concurrent calls projects past it — so a refusal can fire
-       * while `cumulative` is still below `budget`. Concurrent overshoot is
-       * bounded (FR-W1-004): the first parallel burst (reservation estimate
-       * still unlearned) may overshoot by up to that burst's call count;
-       * thereafter the per-call reservation bounds it.
+       * budget is reached. The admission check runs BEFORE the call, so at most
+       * one call passes a reached ceiling (FR-W1-004); the first parallel burst
+       * may overshoot by its call count while the per-call reservation estimate
+       * is still unlearned, and the reservation bounds it thereafter.
+       *
+       * `cause` says WHICH ceiling and on WHAT figure, because a run may declare
+       * several (tokens, calls, dollars) and "budget exceeded" alone is not
+       * actionable when it could mean any of them. It also states outright
+       * whether the SETTLED spend or the PROJECTION including in-flight
+       * reservations drove the refusal — previously a single `cumulative` field
+       * carried the settled figure while the decision might have come from the
+       * projection, reconciled only by a comment.
        */
       readonly kind: "llm-budget-exceeded";
       readonly runId: RunId;
       readonly nodeId: NodeId;
-      /**
-       * Cumulative tokens already SETTLED (consumed) by this run before the
-       * refused call. Excludes the in-flight reservation estimate that may
-       * have triggered the refusal — that projection lives in the host's
-       * `llm.metered` warn log, not here, so this figure always reconciles
-       * against the metered totals.
-       */
-      readonly cumulative: number;
-      /** Configured per-run budget (`llmBudgetTokens`) that was reached. */
-      readonly budget: number;
+      readonly cause: Breach;
     }
   | {
       /**
@@ -376,6 +374,39 @@ const persistedUsageSchema = z
   })
   .optional();
 const persistedRetriabilitySchema = z.enum(["retriable", "non-retriable"]);
+// A budget breach on the wire. `MicroUsd` is an integer brand, so the parse
+// re-establishes the domain the same way `PersistedCapabilitySchema` does —
+// the brand declares the domain, deserialization restores it.
+const PersistedMicroUsdSchema: z.ZodType<MicroUsd> = z
+  .number()
+  .transform((value) => value as MicroUsd);
+const persistedUsdCeilingSchema = z.object({
+  kind: z.literal("usd"),
+  limit: PersistedMicroUsdSchema,
+});
+const persistedCeilingSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("tokens"), limit: z.number() }),
+  z.object({ kind: z.literal("calls"), limit: z.number() }),
+  persistedUsdCeilingSchema,
+]);
+const persistedBasisSchema = z.enum(["settled", "projected"]);
+const persistedBreachSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("reached"),
+    ceiling: persistedCeilingSchema,
+    basis: persistedBasisSchema,
+    observed: z.number(),
+  }),
+  z.object({
+    kind: z.literal("unpriced"),
+    ceiling: persistedUsdCeilingSchema,
+    basis: persistedBasisSchema,
+    // Non-empty on the wire too: an `unpriced` breach naming no model would be
+    // a record asserting "unknown cost, caused by nothing".
+    models: z.tuple([z.string()], z.string()),
+    observedAtLeast: PersistedMicroUsdSchema,
+  }),
+]);
 const PersistedCapabilitySchema: z.ZodType<Capability> = z.string().transform((value) => value as Capability);
 const persistedFrameworkErrorKinds = z.enum([
   "validation", "retry-exhausted", "checkpoint-missing", "checkpoint-expired",
@@ -418,7 +449,7 @@ const PersistedFrameworkErrorSchemaDefinition = z.discriminatedUnion("kind", [
       z.object({ nodeId: PersistedNodeIdSchema, capability: PersistedCapabilitySchema }),
     ),
   }),
-  z.looseObject({ kind: z.literal("llm-budget-exceeded"), runId: PersistedRunIdSchema, nodeId: PersistedNodeIdSchema, cumulative: z.number(), budget: z.number() }),
+  z.looseObject({ kind: z.literal("llm-budget-exceeded"), runId: PersistedRunIdSchema, nodeId: PersistedNodeIdSchema, cause: persistedBreachSchema }),
   z.looseObject({ kind: z.literal("infra-unreachable"), operation: z.enum(["mint", "exchange", "federation", "downstream"]), hop: z.string(), message: z.string() }),
   z.looseObject({ kind: z.literal("policy-refusal"), scope: z.string(), agentClientId: z.string().optional() }),
   z.looseObject({ kind: z.literal("downstream-denied"), resource: z.string(), reason: z.string() }),
@@ -738,7 +769,7 @@ export const formatFrameworkError = (e: FrameworkError): string =>
       return `checkpoint write failed for run '${run}' node '${node}': ${e.message}`;
     })
     .with({ kind: "missing-capability" }, (e) => `missing capabilities: ${e.missing.map(m => `${m.capability} (node '${m.nodeId}')`).join(", ")}`)
-    .with({ kind: "llm-budget-exceeded" }, (e) => `llm budget exceeded for run '${e.runId}' (node '${e.nodeId}'): cumulative ${e.cumulative} tokens reached budget ${e.budget}`)
+    .with({ kind: "llm-budget-exceeded" }, (e) => `llm budget exceeded for run '${e.runId}' (node '${e.nodeId}'): ${formatBreach(e.cause)}`)
     .with({ kind: "infra-unreachable" }, (e) => `capability provider unreachable during '${e.operation}' (hop '${e.hop}'): ${e.message}`)
     .with({ kind: "policy-refusal" }, (e) =>
       e.agentClientId !== undefined

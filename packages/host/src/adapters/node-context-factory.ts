@@ -39,6 +39,7 @@ import { invocationOriginForIdentity, subjectTokenForIdentity } from "../domain/
 import type { NodeContextForDag } from "../domain/run-context.js";
 import type { SubjectToken } from "../domain/auth.js";
 import { createMeteredLlm } from "./metered-llm.js";
+import { ceilingsOf } from "../domain/llm-budget.js";
 
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -426,10 +427,11 @@ export const createNodeContextForDag = async (
   // counter. @satisfies FR-W0-001 FR-W0-004 FR-W1-001..006 (FR-W2-009:
   // LLM authority is deliberately run-scoped here — the metered decorator is
   // the per-run budget authority; see keycloak-broker.ts)
+  const limits = ceilingsOf(dag.config);
   const llm = createMeteredLlm(shared.llm, {
     dagId,
     runId,
-    ...(dag.config.llmBudgetTokens !== undefined ? { budget: dag.config.llmBudgetTokens } : {}),
+    ...(limits !== undefined ? { limits } : {}),
     logger: shared.logger,
   });
 

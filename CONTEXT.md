@@ -117,6 +117,22 @@ gates, freshness-aware state management, and production observability.
 | **Cache TTL** | `"5m"` (the provider default, expressed by omitting `ttl`) or `"1h"`. Sets the write premium: 1.25x and 2.0x of the base input rate. Reads are ~0.1x either way, so `5m` breaks even at two requests and `1h` at three. |
 | **Inert Cache Policy** | A call that DECLARED a policy and came back reporting neither a write nor a read. The provider caches nothing and raises nothing when the prefix is below the model's minimum cacheable size (512–4096 tokens, model-dependent) or when a volatile byte breaks the prefix match, so the pipeline warns once per node and stamps `ai.prompt_cache.effective=false` on the span. "Caching is on" and "caching is working" are different claims. |
 
+### LLM Spend & Budgets
+
+**A budget is denominated in what a run COSTS, not in how many tokens it moved.** Prompt caching severed the link between the two: a cache read bills at 0.1x and a write at 1.25–2.0x, so runs with identical `tokensIn` can differ by better than an order of magnitude in money (ADR-0082).
+
+| Term | Definition |
+|------|-----------|
+| **Spend** | What a run has consumed, on every axis a ceiling can limit: `tokens` (all wire traffic, both directions), `calls` (settled provider round trips — a `sendWithTools` loop is ONE), and `usd`. Combined with `addSpend`, a commutative monoid over `NO_SPEND`. `types/spend.ts`. |
+| **MicroUsd** | Integer 1e-6 USD, branded. What ceilings compare against; the raw USD float from `costBreakdownUsd` stays display-only. A run's total is an unbounded sum and float addition is not associative, so two operators reconciling the same run must not be able to disagree. |
+| **PricedSpend** | `priced` \| `unpriced`. `PRICE_TABLE` is hand-maintained, so cost is not always knowable, and a plain number cannot say "unknown" — while zero would say FREE. `unpriced` ABSORBS under `addSpend` (a run that touched one unpriced model can never report a trustworthy total again) and carries both the offending model names and `knownMicros`, the priced portion, as a genuine lower bound. |
+| **Ceiling** | One limit, on one axis: `tokens` \| `calls` \| `usd`. |
+| **Ceilings** | A run's declared limits: non-empty, at most one per kind, canonically ordered (`usd` first). Produced only by `ceilings()`, which collapses duplicate kinds to their MINIMUM — so composing a DAG's limits with a caller-supplied set is the same operation as construction, and relaxing a limit is not expressible. "No budget" is spelled `undefined`, never an empty list. |
+| **Breach** | Why a run may not make another call: `reached` (a ceiling was met) or `unpriced` (a `usd` ceiling could not be EVALUATED because a model in use has no price). Two members because the operator response differs — the first means the budget worked, the second means go add a `PRICE_TABLE` entry. |
+| **Basis** | `settled` (spend the provider has reported) or `projected` (settled plus the reservation for admitted-but-unsettled concurrent calls). Carried on every `Breach`, so the figure in a refusal and the reason for it can never disagree. |
+| **Reservation** | The in-flight accounting that bounds concurrent overshoot: `inFlight` (count of admitted, unsettled calls) x `maxObservedCall` (the per-axis learned estimate). Counted rather than summed, because `Spend` cannot be subtracted honestly once an `unpriced` call is in it. |
+| **Fail closed** | A `usd` ceiling against unpriced spend ALWAYS breaches; a malformed limit clamps to zero (granting nothing); a non-finite figure on either side of a comparison refuses. In every case the alternative reads as "unlimited". |
+
 ### Queue & Scheduling
 
 | Term | Definition |

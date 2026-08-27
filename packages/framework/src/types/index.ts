@@ -40,10 +40,41 @@ export {
   addUsage,
   cacheHitRatio,
   isCacheInert,
+  pickUsage,
   tokensOnly,
   totalTokens,
   uncachedInputTokens,
 } from "./token-usage.js";
+
+// ── Spend & budget ────────────────────────────────────────────────────────
+// What a run COSTS, and what limits it. Separate from `TokenUsage` because
+// prompt caching severed the link between token count and money: a cache read
+// bills at 0.1x and a write at 1.25-2.0x, so a token ceiling can no longer see
+// an order-of-magnitude difference in spend.
+export type { MicroUsd, PricedSpend, Spend, UnpricedModels } from "./spend.js";
+export {
+  NO_MICROS,
+  NO_SPEND,
+  addSpend,
+  costFloor,
+  maxSpend,
+  microsToUsd,
+  pricedCall,
+  unpricedCall,
+  scaleSpend,
+  usdToMicros,
+} from "./spend.js";
+export type {
+  Basis,
+  Breach,
+  Ceiling,
+  CeilingKind,
+  Ceilings,
+  CallsCeiling,
+  TokensCeiling,
+  UsdCeiling,
+} from "./budget.js";
+export { breachOf, ceilings, firstBreach, formatBreach, observedOf } from "./budget.js";
 
 // ── Total error diagnostics ───────────────────────────────────────────────
 // Total (never-throwing) inspection helpers for values caught at an `unknown`

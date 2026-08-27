@@ -13,6 +13,7 @@
 import type { DagId, DagDef, GitSha } from "@fuguejs/framework";
 import type { z } from "zod";
 import type { Team } from "./auth.js";
+import type { LlmBudgetDeclaration } from "./llm-budget.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -25,18 +26,11 @@ import type { Team } from "./auth.js";
  * `circuitBreaker` is a PARTIAL override, present only when the DAG declares one;
  * run-dag merges each declared field over the host-level CIRCUIT_BREAKER_* config.
  */
-export interface ResolvedDagConfig {
+export interface ResolvedDagConfig extends LlmBudgetDeclaration {
   readonly timeout: number;
   readonly maxConcurrency: number;
   readonly cacheTtlMs: number;
   readonly checkpointTtlMs: number;
-  /**
-   * Per-run LLM token budget (FR-W1-001). Present only when the DAG (or a merged
-   * fugue.yaml) declares `llmBudgetTokens`; absent means no budget enforcement
-   * (FR-W1-006). Threaded into the metered-llm decorator at NodeContext
-   * construction.
-   */
-  readonly llmBudgetTokens?: number;
   readonly circuitBreaker?: {
     readonly failureThreshold?: number;
     readonly resetTimeoutMs?: number;
