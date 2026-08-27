@@ -1148,3 +1148,154 @@ describe("createNodeContextForDag — spend survives a park/resume (FR-B-006)", 
     expect(calls.length).toBe(1);
   });
 });
+
+// ── The ledger BACKEND selection (round-2 RC2) ──────────────────────────────
+//
+// `spendLedgerRedis` decides whether a run gets the durable Redis ledger or the
+// process-local fallback, and the fallback costs budget durability across
+// restarts. Before these tests neither branch was exercised: every fixture in
+// this file omits `hIncrBy`/`hGetAll`/`expire` (they are OPTIONAL on
+// `RedisPort`), so the downgrade fired on every single test, unasserted, into a
+// no-op logger — and the Redis-backed branch was reached by nothing at all.
+describe("createNodeContextForDag — which spend ledger a run actually gets", () => {
+  /**
+   * A `RedisPort` that CAN back the ledger. The default `createMockRedis`
+   * deliberately cannot, so the two fixtures together cover both branches.
+   */
+  const capableRedis = () => {
+    const hashes = new Map<string, Map<string, number>>();
+    const sets = new Map<string, Set<string>>();
+    const seen: string[] = [];
+    const base = createMockRedis().redis;
+    const redis = {
+      ...base,
+      hIncrBy: async (key: string, field: string, by: number) => {
+        seen.push(key);
+        const hash = hashes.get(key) ?? new Map<string, number>();
+        hash.set(field, (hash.get(field) ?? 0) + by);
+        hashes.set(key, hash);
+        return ok(hash.get(field) ?? 0);
+      },
+      hGetAll: async (key: string) =>
+        ok(Object.fromEntries([...(hashes.get(key) ?? new Map())].map(([f, v]) => [f, String(v)]))),
+      expire: async () => ok(true),
+      sAdd: async (key: string, member: string) => {
+        const set = sets.get(key) ?? new Set<string>();
+        set.add(member);
+        sets.set(key, set);
+        return ok(1);
+      },
+      sMembers: async (key: string) => ok([...(sets.get(key) ?? new Set<string>())]),
+    } as unknown as RedisPort;
+    return { redis, hashes, seen };
+  };
+
+  const fakeLlm = (tokensIn: number, tokensOut: number) => {
+    const calls: NodeId[] = [];
+    const respond = <O,>(req: { nodeId: NodeId }) => {
+      calls.push(req.nodeId);
+      return ok({ output: {} as O, ...tokensOnly(tokensIn, tokensOut), rawText: "" });
+    };
+    const llm = {
+      sendStructured: async <O,>(req: LlmRequest<O>) => respond<O>(req),
+      sendWithTools: async <O,>(req: SendWithToolsRequest<O>) => respond<O>(req),
+    } as unknown as LlmClient;
+    return { llm, calls };
+  };
+
+  const structuredReq = (): LlmRequest<unknown> => ({
+    system: "s", user: "u", model: "m", schema: z.unknown(), nodeId: testNodeId,
+  });
+
+  const sharedWithRedis = (llm: LlmClient, redis: RedisPort, logger: LogPort): SharedInfra => ({
+    llm,
+    redis,
+    spendLedger: createInMemorySpendLedger(),
+    tracer: noopTracer,
+    contentFilter: null,
+    prompts: null,
+    logger,
+    capabilities: [],
+  });
+
+  it("DOWNGRADES loudly when the Redis adapter cannot back the ledger", async () => {
+    // The C2 fix. Its whole point is that this fact exists in exactly one place
+    // — this log line — so an unasserted version of it is worth very little.
+    const { llm } = fakeLlm(10, 5);
+    const captured = collectLogs();
+    const shared = sharedWithRedis(llm, createMockRedis().redis, captured.logger);
+
+    await createNodeContextForDag(
+      shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP,
+    );
+
+    const line = captured.logs.find((l) => l.msg.includes("Spend ledger is NOT durable"));
+    expect(line).toBeDefined();
+    expect(line?.level).toBe("error");
+    const reason = String(line?.data?.["reason"] ?? "");
+    for (const primitive of ["hIncrBy", "hGetAll", "expire"]) {
+      expect(reason).toContain(primitive);
+    }
+    expect(String(line?.data?.["consequence"] ?? "")).toContain("restart");
+    expect(line?.data?.["dagId"]).toBe(testDagId as string);
+  });
+
+  it("uses the REDIS-backed ledger when the adapter offers the primitives", async () => {
+    // The `ok` branch, previously reached by no test anywhere. Asserting the
+    // spend lands in Redis also proves the tenant/dag namespace was threaded
+    // correctly into `createRedisSpendLedger` — a swapped argument there would
+    // be invisible to every other test in this file.
+    const { llm } = fakeLlm(10, 5);
+    const captured = collectLogs();
+    const capable = capableRedis();
+    const shared = sharedWithRedis(llm, capable.redis, captured.logger);
+
+    const { ctx } = await createNodeContextForDag(
+      shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP,
+    );
+    if (ctx.llm === null) throw new Error("expected wired llm");
+    await ctx.llm.sendStructured(structuredReq());
+
+    expect(captured.logs.some((l) => l.msg.includes("NOT durable"))).toBe(false);
+    // The spend reached REDIS, not the SharedInfra fallback.
+    expect(capable.seen.length).toBeGreaterThan(0);
+    for (const key of capable.seen) {
+      expect(key.startsWith("fugue:eng:test-dag:")).toBe(true);
+      expect(key.endsWith("$spend")).toBe(true);
+    }
+    expect((await shared.spendLedger.read(testRunId)).ok && (await shared.spendLedger.read(testRunId)).ok).toBe(true);
+  });
+
+  it("hydrates a resumed slice from the REDIS ledger, not from zero", async () => {
+    // The park/resume guarantee, over the durable backend rather than the
+    // in-process stand-in the other durability tests use.
+    const { llm, calls } = fakeLlm(10, 5); // 15 tokens/call
+    const capable = capableRedis();
+    const shared = sharedWithRedis(llm, capable.redis, collectLogs().logger);
+    const dag = makeDag({ llmBudget: { tokens: 40 } });
+
+    const slice = async () => {
+      const { ctx } = await createNodeContextForDag(
+        shared, dag, testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP,
+      );
+      if (ctx.llm === null) throw new Error("expected wired llm");
+      return ctx.llm;
+    };
+
+    const first = await slice();
+    expect((await first.sendStructured(structuredReq())).ok).toBe(true);
+    expect((await first.sendStructured(structuredReq())).ok).toBe(true);
+    expect((await first.sendStructured(structuredReq())).ok).toBe(true); // 45, the overshoot
+    expect(calls.length).toBe(3);
+
+    const second = await slice();
+    const refused = await second.sendStructured(structuredReq());
+    expect(refused.ok).toBe(false);
+    if (!refused.ok && refused.error.kind === "llm-budget-exceeded") {
+      expect(observedOf(refused.error.cause)).toBe(45);
+    } else {
+      throw new Error("expected the resumed slice to refuse from Redis-held spend");
+    }
+    expect(calls.length).toBe(3);
+  });
+});

@@ -208,8 +208,8 @@ describe("spend keys are disjoint from the checkpoint NodeId namespace (C1)", ()
   });
 
   it("NO valid node id can produce either spend key, for any tenant/dag/run", () => {
-    // The general statement. `idArb` generates the `ID_PATTERN` domain, and the
-    // property is that the spend keys sit outside the image of
+    // The general statement: `anyNodeId` generates the `ID_PATTERN` domain, and
+    // the property is that the spend keys sit outside the image of
     // `buildCheckpointKey` entirely — not merely that a few names differ.
     fc.assert(
       fc.property(anyTenant, colonFree, colonFree, anyNodeId, (t, d, r, n) => {

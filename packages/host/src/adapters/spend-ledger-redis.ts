@@ -36,10 +36,16 @@ import { parseFigure, recordOf, spendOfRecord } from "../domain/spend-record.js"
 /**
  * The Redis surface a ledger needs, proven present at CONSTRUCTION.
  *
- * `hIncrBy`/`hGetAll` are optional on `RedisPort` so unrelated fakes stay
- * valid. Parsing them once here — rather than null-checking per call — means a
- * host wired with a Redis adapter that cannot increment fails at boot with a
- * clear message, instead of at the first LLM call of the first budgeted run.
+ * `hIncrBy`/`hGetAll`/`expire` are optional on `RedisPort` so unrelated fakes
+ * stay valid. Parsing them once here — rather than null-checking per call —
+ * means the missing-primitive case is decided in ONE place, and the resulting
+ * error names exactly which methods are absent.
+ *
+ * It does NOT abort anything. The sole caller (`createNodeContextForDag`) logs
+ * that error and DOWNGRADES to the in-process ledger, because refusing every
+ * run over a metering capability would turn a configuration gap into an
+ * outage. An earlier version of this comment claimed the host "fails at boot",
+ * which was never what any caller did.
  */
 export type SpendLedgerRedis = Pick<RedisPort, "sAdd" | "sMembers"> & {
   readonly hIncrBy: NonNullable<RedisPort["hIncrBy"]>;
@@ -54,11 +60,17 @@ export type SpendLedgerRedis = Pick<RedisPort, "sAdd" | "sMembers"> & {
  * adapter below never re-checks.
  */
 export const spendLedgerRedis = (redis: RedisPort): Result<SpendLedgerRedis, HostError> => {
-  // ONE list. The required set was previously spelled three times — in a
-  // `missing` array, in the guarding condition, and again by field name in the
-  // returned literal — so adding a fourth primitive meant three edits, and
-  // missing one either narrowed the type without erroring or errored without
-  // naming the field. Deriving all three from this list makes that impossible.
+  // The DIAGNOSTIC is derived from this list; the GUARD below is not, and
+  // cannot be. TypeScript will not narrow `redis.hIncrBy` to non-`undefined`
+  // from a computed `missing` array, so the explicit `||` chain is what earns
+  // the assertion-free return literal underneath it — collapsing the two would
+  // require a type assertion, which this codebase avoids precisely here.
+  //
+  // So adding a fourth primitive is TWO edits, not one: this list (for the
+  // message) and the guard (for the decision). Missing the guard is caught by
+  // the compiler at the return literal, which is a confusing place to learn it
+  // but not a silent failure. An earlier version of this comment claimed one
+  // edit sufficed; it did not.
   const required = [
     ["hIncrBy", redis.hIncrBy],
     ["hGetAll", redis.hGetAll],

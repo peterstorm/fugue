@@ -63,14 +63,26 @@ export const recordOf = (spend: Spend): SpendRecord => ({
  * Parse a stored record back into a `Spend`.
  *
  * Total rather than `Result`-returning: every field is independently coerced to
- * a usable value, so there is no input for which this fails. A backend that
- * returns a malformed figure yields a SAFE spend, not an error — and "safe"
- * here means erring toward MORE spend recorded, never less, because a budget
- * that under-counts is a budget that fails open.
+ * a usable value, so there is no input for which this fails.
  *
- * Non-finite and negative figures read as zero, exactly as `sanitizeCount` does
- * at the provider boundary and for the same reason: a `NaN` would poison every
- * later sum and make `NaN >= limit` false forever.
+ * Non-finite and negative figures read as ZERO. Be clear about what that costs:
+ * for a genuinely corrupted figure this UNDER-reports — a `micros` field
+ * holding `"1e999"` or `"corrupt"` becomes `0`, and the run looks cheaper than
+ * it was. That is a bounded loss of one field of one record, and it is chosen
+ * deliberately over the alternative, which is unbounded: a `NaN` propagates
+ * into every later sum, `observed >= limit` is false forever after, and the
+ * budget stops refusing anything on EVERY axis for the rest of the run.
+ *
+ * A bounded under-report beats a permanently disabled budget. (An earlier
+ * version of this comment claimed the clamp errs toward MORE spend recorded,
+ * "never less" — the opposite of what `safeFigure` does.)
+ *
+ * Note the residual exposure this leaves, since it is not obvious: because this
+ * function is total, a corrupted figure never surfaces as a read failure, so
+ * FR-B-007's fail-closed check in `createNodeContextForDag` does not engage.
+ * A budgeted run proceeds on an under-reported total. Closing that would mean
+ * distinguishing "absent" from "unparseable" at the adapter boundary, which is
+ * tracked with the ledger's remaining work rather than papered over here.
  *
  * Model names are sorted and de-duplicated so a hydrated `Spend` is structurally
  * equal to the one that was stored, whatever order the backend enumerated them

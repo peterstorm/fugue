@@ -136,17 +136,28 @@ export const createNamespacedCache = (
   defaultTtlSec: number | undefined,
   logger: LogPort,
 ): ContextCacheAdapter => {
+  // One binding for the three sites that log from this factory, matching the
+  // idiom `createNamespacedCheckpointWriter` below already uses. Two of them
+  // previously wrote the same closure inline and the third called through
+  // differently-shaped, so a reader had to re-derive that all three were the
+  // same thing.
+  const report = (
+    level: "warn" | "error",
+    message: string,
+    context: Record<string, unknown>,
+  ): void => reportWithoutThrowing(logger, level, message, context);
+
   const getFailures = failureEscalator({
     threshold: FAILURE_ESCALATION_THRESHOLD,
     warnMessage: "Cache get failed — graceful degradation to miss",
     errorMessage: "Cache get failures exceeded threshold — Redis may be degraded",
-    report: (level, message, context) => reportWithoutThrowing(logger, level, message, context),
+    report,
   });
   const setFailures = failureEscalator({
     threshold: FAILURE_ESCALATION_THRESHOLD,
     warnMessage: "Cache set failed — Redis error",
     errorMessage: "Cache set failures exceeded threshold — Redis may be degraded",
-    report: (level, message, context) => reportWithoutThrowing(logger, level, message, context),
+    report,
   });
 
   return {
@@ -164,7 +175,7 @@ export const createNamespacedCache = (
         return { hit: true, value: JSON.parse(raw) };
       } catch (e) {
         // Corrupted entry — treat as miss
-        reportWithoutThrowing(logger, "warn", "Cache entry corrupted — treating as miss", {
+        report("warn", "Cache entry corrupted — treating as miss", {
           key: fullKey,
           dagId,
           rawPreview: raw?.slice(0, 100),
@@ -486,16 +497,21 @@ export const createNodeContextForDag = async (
     });
   }
 
-  const llm = createMeteredLlm(shared.llm, {
-    dagId,
-    runId,
-    ...(limits !== undefined ? { limits } : {}),
-    hydrated: hydrated.ok
-      ? { kind: "known", spend: hydrated.value }
-      : { kind: "unknown" },
-    ledger: spendLedger,
-    logger: shared.logger,
-  });
+  // Two arms because `MeteredLlmDeps` couples them: a declared budget obliges a
+  // KNOWN prior spend, which the fail-closed throw above has already guaranteed.
+  // The compiler now enforces what that throw establishes.
+  const meterBase = { dagId, runId, ledger: spendLedger, logger: shared.logger };
+  const llm =
+    limits !== undefined && hydrated.ok
+      ? createMeteredLlm(shared.llm, {
+          ...meterBase,
+          limits,
+          hydrated: { kind: "known", spend: hydrated.value },
+        })
+      : createMeteredLlm(shared.llm, {
+          ...meterBase,
+          hydrated: hydrated.ok ? { kind: "known", spend: hydrated.value } : { kind: "unknown" },
+        });
 
   const cache = createNamespacedCache(shared.redis, tenant, dagId, ttl.cacheTtlSec, shared.logger);
   const checkpointWriter = createNamespacedCheckpointWriter(

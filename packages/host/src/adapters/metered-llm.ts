@@ -93,25 +93,46 @@ import {
  * ceilings — when `undefined`, metering still happens but no call is ever
  * refused (FR-W1-006).
  */
-interface MeteredLlmDeps {
+/** What every metered client needs, budget or no budget. */
+interface MeteredLlmBase {
   readonly dagId: DagId;
   readonly runId: RunId;
-  readonly limits?: Ceilings;
-  /**
-   * What this run had already settled before the current slice began.
-   *
-   * A UNION rather than an optional `Spend`, because absence meant two
-   * different facts: "a fresh run, definitely zero" and "an unbudgeted run
-   * whose ledger could not be read, so genuinely unknown". Both meter from zero
-   * today — a budgeted run never reaches here, the factory refuses the slice —
-   * but they are not the same claim, and anything that reads this for reporting
-   * rather than for admission would have to treat unknown as zero to compile.
-   */
-  readonly hydrated: HydratedSpend;
   /** Where settled spend is appended so it outlives this NodeContext. */
   readonly ledger: SpendLedgerPort;
   readonly logger: LogPort;
 }
+
+/**
+ * Construction-time dependencies, with the budget and the prior spend COUPLED.
+ *
+ * FR-B-007 says a budgeted run must never be metered from a guess: if its
+ * ledger could not be read, the factory refuses the slice rather than starting
+ * from zero. That rule was previously enforced only by control flow at the one
+ * call site — `limits` and `hydrated` were independent fields, so
+ * `{ limits, hydrated: { kind: "unknown" } }` compiled fine and would have
+ * silently metered a budgeted run from zero, which is the refill-on-resume bug
+ * this whole feature exists to close.
+ *
+ * As a union, that combination is unrepresentable: declaring `limits` obliges
+ * the caller to produce a KNOWN prior spend. The `unknown` case survives only
+ * on the unbudgeted arm, where there is no ceiling to be wrong about.
+ */
+type MeteredLlmDeps = MeteredLlmBase &
+  (
+    | {
+        readonly limits?: undefined;
+        /**
+         * Prior spend, or an explicit admission that it is unknown — reachable
+         * only here, because nothing is being protected.
+         */
+        readonly hydrated: HydratedSpend;
+      }
+    | {
+        readonly limits: Ceilings;
+        /** A budgeted run's prior spend is always KNOWN. See above. */
+        readonly hydrated: { readonly kind: "known"; readonly spend: Spend };
+      }
+  );
 
 /** The two node-facing operations, named identically in every log line. */
 type Operation = "sendStructured" | "sendWithTools";

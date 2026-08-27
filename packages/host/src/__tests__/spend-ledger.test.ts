@@ -14,7 +14,7 @@
 
 import { describe, it, expect } from "bun:test";
 import * as fc from "fast-check";
-import { runId as makeRunId, dagId as makeDagId, ok } from "@fuguejs/framework";
+import { runId as makeRunId, dagId as makeDagId, ok, err } from "@fuguejs/framework";
 import type { MicroUsd, RunId, Spend } from "@fuguejs/framework";
 import { NO_SPEND, addSpend, pricedCall, unpricedCall } from "@fuguejs/framework";
 import type { RedisPort, SpendLedgerPort } from "../ports.js";
@@ -25,6 +25,21 @@ import { tenantId } from "../domain/tenant.js";
 const micros = (n: number): MicroUsd => n as MicroUsd;
 const runA = makeRunId("run-a");
 const runB = makeRunId("run-b");
+
+/**
+ * A capturing logger, so the TTL-refresh warn path can be asserted rather than
+ * assumed. `RedisSpendLedgerDeps.logger` is REQUIRED — the field exists so an
+ * `EXPIRE` failure is never silently lost — and every construction below
+ * supplies one. It was previously omitted at all four sites, which typechecked
+ * only because this package excludes `src/__tests__` from `tsc`.
+ */
+const collectLogs = () => {
+  const logs: { level: string; msg: string; data?: Record<string, unknown> }[] = [];
+  const record = (level: string) => (msg: string, data?: Record<string, unknown>) => {
+    logs.push({ level, msg, ...(data !== undefined ? { data } : {}) });
+  };
+  return { logger: { info: record("info"), warn: record("warn"), error: record("error") }, logs };
+};
 
 const mkTenant = (raw: string) => {
   const parsed = tenantId(raw);
@@ -72,6 +87,7 @@ const redisLedger = (): SpendLedgerPort => {
   if (!parsed.ok) throw new Error("fake redis should satisfy the ledger surface");
   return createRedisSpendLedger({
     redis: parsed.value,
+    logger: collectLogs().logger,
     tenant: mkTenant("acme"),
     dagId: makeDagId("test-dag"),
     ttlSec: 3600,
@@ -192,8 +208,10 @@ for (const [name, build] of BACKENDS) {
 
 describe("spendLedgerRedis: the construction-time surface check", () => {
   it("refuses a Redis adapter that cannot increment, naming what is missing", async () => {
-    // Failing at boot beats failing at the first LLM call of the first budgeted
-    // run, which is where a per-call null check would have surfaced it.
+    // Deciding this ONCE, here, beats a per-call null check — the error names
+    // exactly which primitives are absent, and the caller turns that into a
+    // single loud downgrade rather than a surprise on the first budgeted call.
+    // Note it returns a Result and never throws: nothing "fails at boot".
     const parsed = spendLedgerRedis({ get: async () => ok(null) } as unknown as RedisPort);
     expect(parsed.ok).toBe(false);
     if (parsed.ok) return;
@@ -219,6 +237,7 @@ describe("Redis ledger: key layout and TTL", () => {
     if (!parsed.ok) throw new Error("surface");
     const ledger = createRedisSpendLedger({
       redis: parsed.value,
+      logger: collectLogs().logger,
       tenant: mkTenant("acme"),
       dagId: makeDagId("test-dag"),
       ttlSec: 900,
@@ -241,6 +260,7 @@ describe("Redis ledger: key layout and TTL", () => {
     if (!parsed.ok) throw new Error("surface");
     const ledger = createRedisSpendLedger({
       redis: parsed.value,
+      logger: collectLogs().logger,
       tenant: mkTenant("acme"),
       dagId: makeDagId("test-dag"),
     });
@@ -249,12 +269,45 @@ describe("Redis ledger: key layout and TTL", () => {
     expect(fake.expiries.size).toBe(0);
   });
 
+  it("LOGS a TTL-refresh failure instead of discarding it (A1)", async () => {
+    // The whole reason `logger` is a required dep. An EXPIRE that quietly stops
+    // working lets a live run's spend record expire underneath it — the
+    // refill-on-resume bug again, with nothing to grep for. The append itself
+    // still succeeds: the spend IS recorded, only its idle TTL was not renewed.
+    const fake = fakeRedis();
+    const failing = {
+      ...fake.redis,
+      expire: async () => err({ kind: "redis-unavailable" as const, operation: "EXPIRE" }),
+    } as unknown as RedisPort;
+    const parsed = spendLedgerRedis(failing);
+    if (!parsed.ok) throw new Error("surface");
+    const captured = collectLogs();
+    const ledger = createRedisSpendLedger({
+      redis: parsed.value,
+      logger: captured.logger,
+      tenant: mkTenant("acme"),
+      dagId: makeDagId("test-dag"),
+      ttlSec: 900,
+    });
+
+    const appended = await ledger.add(runA, pricedCall(10, micros(1)));
+    expect(appended.ok).toBe(true); // the spend is recorded regardless
+
+    const warned = captured.logs.filter((l) => l.msg === "spend-ledger.ttl-refresh-failed");
+    expect(warned.length).toBe(2); // both keys
+    expect(warned[0]?.level).toBe("warn");
+    expect(String(warned[0]?.data?.["key"] ?? "")).toContain("fugue:acme:");
+    expect(warned[0]?.data?.["ttlSec"]).toBe(900);
+    expect(String(warned[0]?.data?.["consequence"] ?? "")).toContain("expire");
+  });
+
   it("does not spend a round trip on a zero increment", async () => {
     const fake = fakeRedis();
     const parsed = spendLedgerRedis(fake.redis);
     if (!parsed.ok) throw new Error("surface");
     const ledger = createRedisSpendLedger({
       redis: parsed.value,
+      logger: collectLogs().logger,
       tenant: mkTenant("acme"),
       dagId: makeDagId("test-dag"),
     });

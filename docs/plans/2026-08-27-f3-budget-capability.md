@@ -532,7 +532,9 @@ already knows the figure.
 
 **`RedisPort` grew three methods** (`hIncrBy`, `hGetAll`, `expire`), all generic
 Redis primitives rather than domain-shaped ones, parsed once at construction so
-a misconfigured adapter fails at boot rather than at the first budgeted call.
+a misconfigured adapter is detected in ONE place and DOWNGRADES loudly (an
+`error` log naming the missing primitives) rather than failing — refusing every
+run over a metering capability would turn a configuration gap into an outage.
 
 **The file adapter did not ship.** D3 named Redis and file. Redis and in-process
 shipped; the in-process one is a real backend for a single-process deployment,
