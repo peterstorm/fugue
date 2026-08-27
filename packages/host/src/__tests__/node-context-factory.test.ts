@@ -170,6 +170,39 @@ const baseSharedInfra = (
   capabilities,
 });
 
+/**
+ * ONE client fake and ONE request shape for the file.
+ *
+ * These were defined three times in three describe blocks — the third copy
+ * added while closing a round-2 finding, in a file whose own fixture comment
+ * already flagged the duplication once. Nothing about them is block-specific.
+ */
+const fakeLlm = (tokensIn: number, tokensOut: number) => {
+  const calls: NodeId[] = [];
+  const llm: LlmClient = {
+    sendStructured: async <O>(req: LlmRequest<O>): Promise<Result<LlmResponse<O>, FrameworkError>> => {
+      calls.push(req.nodeId);
+      return ok({ output: {} as O, ...tokensOnly(tokensIn, tokensOut), rawText: "" });
+    },
+    sendWithTools: async <O>(req: SendWithToolsRequest<O>, _ctx: NodeContext): Promise<Result<LlmResponse<O>, FrameworkError>> => {
+      calls.push(req.nodeId);
+      return ok({ output: {} as O, ...tokensOnly(tokensIn, tokensOut), rawText: "" });
+    },
+  };
+  return { llm, calls };
+};
+
+const structuredReq = (): LlmRequest<unknown> => ({
+  system: "s",
+  user: "u",
+  model: "m",
+  schema: z.unknown(),
+  nodeId: testNodeId,
+});
+
+/** Same request on a PRICED model, so a usd ceiling compares a real cost. */
+const pricedReq = (): LlmRequest<unknown> => ({ ...structuredReq(), model: "gpt-4o" });
+
 describe("resolveTtl", () => {
   it("returns undefined for both when no TTL configured", () => {
     const dag = makeDag();
@@ -485,14 +518,8 @@ describe("createNodeContextForDag — fail-closed tenant derivation (AD-4 / US2 
 
 describe("createNodeContextForDag — routed-tenant key namespacing (ADR-0067 / SC-001)", () => {
   const sharedWithStore = (store: Map<string, string>): SharedInfra => ({
-    llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
+    ...baseSharedInfra(),
     redis: createMockRedis(store).redis,
-    spendLedger: createInMemorySpendLedger(),
-    tracer: noopTracer,
-    contentFilter: null,
-    prompts: null,
-    logger: { info: () => {}, warn: () => {}, error: () => {} },
-    capabilities: [],
   });
 
   it("namespaces cache keys under `routedTenant` — never the DAG's owning team (id != team)", async () => {
@@ -568,42 +595,9 @@ describe("createNodeContextForDag — static client wiring (SC-005)", () => {
 
 describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..006)", () => {
   /** A fake inner LlmClient reporting fixed usage per call — call-recording, no mocks. */
-  const fakeLlm = (tokensIn: number, tokensOut: number) => {
-    const calls: NodeId[] = [];
-    const llm: LlmClient = {
-      sendStructured: async <O>(req: LlmRequest<O>): Promise<Result<LlmResponse<O>, FrameworkError>> => {
-        calls.push(req.nodeId);
-        return ok({ output: {} as O, ...tokensOnly(tokensIn, tokensOut), rawText: "" });
-      },
-      sendWithTools: async <O>(req: SendWithToolsRequest<O>, _ctx: NodeContext): Promise<Result<LlmResponse<O>, FrameworkError>> => {
-        calls.push(req.nodeId);
-        return ok({ output: {} as O, ...tokensOnly(tokensIn, tokensOut), rawText: "" });
-      },
-    };
-    return { llm, calls };
-  };
 
-  const sharedWithLlm = (llm: LlmClient): SharedInfra => ({
-    llm,
-    redis: createMockRedis().redis,
-    spendLedger: createInMemorySpendLedger(),
-    tracer: noopTracer,
-    contentFilter: null,
-    prompts: null,
-    logger: { info: () => {}, warn: () => {}, error: () => {} },
-    capabilities: [],
-  });
+  const sharedWithLlm = (llm: LlmClient): SharedInfra => ({ ...baseSharedInfra(), llm });
 
-  const structuredReq = (): LlmRequest<unknown> => ({
-    system: "s",
-    user: "u",
-    model: "m",
-    schema: z.unknown(),
-    nodeId: testNodeId,
-  });
-
-  /** Same request on a PRICED model, so a usd ceiling compares a real cost. */
-  const pricedReq = (): LlmRequest<unknown> => ({ ...structuredReq(), model: "gpt-4o" });
 
   it("wraps the shared LLM client — ctx.llm is the metered decorator, NOT the shared reference", async () => {
     const { llm } = fakeLlm(10, 5);
@@ -982,42 +976,10 @@ describe("createNodeContextForDag — binds the subject token host-side, NEVER o
 // exactly the shape of a park/resume. The first of them fails on a build
 // without the ledger.
 describe("createNodeContextForDag — spend survives a park/resume (FR-B-006)", () => {
-  /**
-   * A client that always reports the same usage, and records who called it.
-   * Local to this block: the equivalent helper in the metered-wiring describe
-   * above is scoped to it, and duplicating four lines beats widening that
-   * scope for one consumer.
-   */
-  const fakeLlm = (tokensIn: number, tokensOut: number) => {
-    const calls: NodeId[] = [];
-    const respond = <O,>(req: { nodeId: NodeId }) => {
-      calls.push(req.nodeId);
-      return ok({ output: {} as O, ...tokensOnly(tokensIn, tokensOut), rawText: "" });
-    };
-    const llm = {
-      sendStructured: async <O,>(req: LlmRequest<O>) => respond<O>(req),
-      sendWithTools: async <O,>(req: SendWithToolsRequest<O>) => respond<O>(req),
-    } as unknown as LlmClient;
-    return { llm, calls };
-  };
-
-  const structuredReq = (): LlmRequest<unknown> => ({
-    system: "s",
-    user: "u",
-    model: "m",
-    schema: z.unknown(),
-    nodeId: testNodeId,
-  });
-
   const sharedWith = (llm: LlmClient, ledger: SpendLedgerPort): SharedInfra => ({
+    ...baseSharedInfra(),
     llm,
-    redis: createMockRedis().redis,
     spendLedger: ledger,
-    tracer: noopTracer,
-    contentFilter: null,
-    prompts: null,
-    logger: { info: () => {}, warn: () => {}, error: () => {} },
-    capabilities: [],
   });
 
   const sliceFor = async (shared: SharedInfra, dag: RegisteredDag) => {
@@ -1126,10 +1088,20 @@ describe("createNodeContextForDag — spend survives a park/resume (FR-B-006)", 
       add: async () => ok(undefined),
     };
     const { llm, calls } = fakeLlm(10, 5);
-    const shared = sharedWith(llm, broken);
+    const captured = collectLogs();
+    const shared = { ...sharedWith(llm, broken), logger: captured.logger };
 
     const slice = await sliceFor(shared, makeDag());
     expect((await slice.sendStructured(structuredReq())).ok).toBe(true);
+
+    // Degrading is not the same as staying quiet. This is the fail-OPEN branch
+    // of FR-B-007, and it was the last diagnostic in this feature that nothing
+    // asserted — a future refactor could have dropped it silently.
+    const warned = captured.logs.find((l) => l.msg.includes("Spend ledger unreadable"));
+    expect(warned).toBeDefined();
+    expect(warned?.level).toBe("warn");
+    expect(warned?.data?.["runId"]).toBe(testRunId as string);
+    expect(String(warned?.data?.["error"] ?? "")).toContain("spend-ledger read");
     expect(calls.length).toBe(1);
   });
 
@@ -1190,32 +1162,11 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
     return { redis, hashes, seen };
   };
 
-  const fakeLlm = (tokensIn: number, tokensOut: number) => {
-    const calls: NodeId[] = [];
-    const respond = <O,>(req: { nodeId: NodeId }) => {
-      calls.push(req.nodeId);
-      return ok({ output: {} as O, ...tokensOnly(tokensIn, tokensOut), rawText: "" });
-    };
-    const llm = {
-      sendStructured: async <O,>(req: LlmRequest<O>) => respond<O>(req),
-      sendWithTools: async <O,>(req: SendWithToolsRequest<O>) => respond<O>(req),
-    } as unknown as LlmClient;
-    return { llm, calls };
-  };
-
-  const structuredReq = (): LlmRequest<unknown> => ({
-    system: "s", user: "u", model: "m", schema: z.unknown(), nodeId: testNodeId,
-  });
-
   const sharedWithRedis = (llm: LlmClient, redis: RedisPort, logger: LogPort): SharedInfra => ({
+    ...baseSharedInfra(),
     llm,
     redis,
-    spendLedger: createInMemorySpendLedger(),
-    tracer: noopTracer,
-    contentFilter: null,
-    prompts: null,
     logger,
-    capabilities: [],
   });
 
   it("DOWNGRADES loudly when the Redis adapter cannot back the ledger", async () => {
@@ -1263,7 +1214,14 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
       expect(key.startsWith("fugue:eng:test-dag:")).toBe(true);
       expect(key.endsWith("$spend")).toBe(true);
     }
-    expect((await shared.spendLedger.read(testRunId)).ok && (await shared.spendLedger.read(testRunId)).ok).toBe(true);
+    // And NOT the fallback: an in-memory ledger's `read` never errs, so
+    // asserting `.ok` here would have been vacuous. What distinguishes the two
+    // backends is the VALUE — the fallback must still hold NO_SPEND, because
+    // every append went to Redis.
+    const fallback = await shared.spendLedger.read(testRunId);
+    expect(fallback.ok).toBe(true);
+    if (!fallback.ok) return;
+    expect(fallback.value).toEqual(NO_SPEND);
   });
 
   it("hydrates a resumed slice from the REDIS ledger, not from zero", async () => {

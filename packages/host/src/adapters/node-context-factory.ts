@@ -39,6 +39,7 @@ import { invocationOriginForIdentity, subjectTokenForIdentity } from "../domain/
 import type { NodeContextForDag } from "../domain/run-context.js";
 import type { SubjectToken } from "../domain/auth.js";
 import { createMeteredLlm } from "./metered-llm.js";
+import type { HydratedSpend } from "./metered-llm.js";
 import { ceilingsOf } from "../domain/llm-budget.js";
 import { createRedisSpendLedger, spendLedgerRedis } from "./spend-ledger-redis.js";
 
@@ -501,6 +502,9 @@ export const createNodeContextForDag = async (
   // KNOWN prior spend, which the fail-closed throw above has already guaranteed.
   // The compiler now enforces what that throw establishes.
   const meterBase = { dagId, runId, ledger: spendLedger, logger: shared.logger };
+  const priorSpend: HydratedSpend = hydrated.ok
+    ? { kind: "known", spend: hydrated.value }
+    : { kind: "unknown" };
   const llm =
     limits !== undefined && hydrated.ok
       ? createMeteredLlm(shared.llm, {
@@ -508,10 +512,7 @@ export const createNodeContextForDag = async (
           limits,
           hydrated: { kind: "known", spend: hydrated.value },
         })
-      : createMeteredLlm(shared.llm, {
-          ...meterBase,
-          hydrated: hydrated.ok ? { kind: "known", spend: hydrated.value } : { kind: "unknown" },
-        });
+      : createMeteredLlm(shared.llm, { ...meterBase, hydrated: priorSpend });
 
   const cache = createNamespacedCache(shared.redis, tenant, dagId, ttl.cacheTtlSec, shared.logger);
   const checkpointWriter = createNamespacedCheckpointWriter(

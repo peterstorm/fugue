@@ -228,20 +228,32 @@ describe("spendLedgerRedis: the construction-time surface check", () => {
 });
 
 describe("Redis ledger: key layout and TTL", () => {
+  /**
+   * Build a Redis-backed ledger over a controllable fake, returning both so a
+   * test can inspect what actually reached Redis. The four cases below each
+   * repeated this same narrow-then-construct sequence; only the TTL and the
+   * fake's behaviour ever differ.
+   */
+  const ledgerOver = (redis: RedisPort, ttlSec?: number) => {
+    const parsed = spendLedgerRedis(redis);
+    if (!parsed.ok) throw new Error("fake redis should satisfy the ledger surface");
+    const captured = collectLogs();
+    const ledger = createRedisSpendLedger({
+      redis: parsed.value,
+      logger: captured.logger,
+      tenant: mkTenant("acme"),
+      dagId: makeDagId("test-dag"),
+      ...(ttlSec !== undefined ? { ttlSec } : {}),
+    });
+    return { ledger, logs: captured.logs };
+  };
+
   it("namespaces both keys under the tenant prefix and refreshes their TTL", async () => {
     // The per-tenant Redis ACL is scoped to `~fugue:<tenant>:*`. A spend key
     // that escaped that prefix would be unreachable by the worker that wrote
     // it — and, worse, reachable by one that should not see it.
     const fake = fakeRedis();
-    const parsed = spendLedgerRedis(fake.redis);
-    if (!parsed.ok) throw new Error("surface");
-    const ledger = createRedisSpendLedger({
-      redis: parsed.value,
-      logger: collectLogs().logger,
-      tenant: mkTenant("acme"),
-      dagId: makeDagId("test-dag"),
-      ttlSec: 900,
-    });
+    const { ledger } = ledgerOver(fake.redis, 900);
 
     await ledger.add(runA, unpricedCall(10, "mystery"));
 
@@ -256,14 +268,7 @@ describe("Redis ledger: key layout and TTL", () => {
     // that expired while its checkpoint survived would resume the run with a
     // refilled budget — the exact bug the ledger closes.
     const fake = fakeRedis();
-    const parsed = spendLedgerRedis(fake.redis);
-    if (!parsed.ok) throw new Error("surface");
-    const ledger = createRedisSpendLedger({
-      redis: parsed.value,
-      logger: collectLogs().logger,
-      tenant: mkTenant("acme"),
-      dagId: makeDagId("test-dag"),
-    });
+    const { ledger } = ledgerOver(fake.redis);
 
     await ledger.add(runA, pricedCall(10, micros(1)));
     expect(fake.expiries.size).toBe(0);
@@ -279,21 +284,12 @@ describe("Redis ledger: key layout and TTL", () => {
       ...fake.redis,
       expire: async () => err({ kind: "redis-unavailable" as const, operation: "EXPIRE" }),
     } as unknown as RedisPort;
-    const parsed = spendLedgerRedis(failing);
-    if (!parsed.ok) throw new Error("surface");
-    const captured = collectLogs();
-    const ledger = createRedisSpendLedger({
-      redis: parsed.value,
-      logger: captured.logger,
-      tenant: mkTenant("acme"),
-      dagId: makeDagId("test-dag"),
-      ttlSec: 900,
-    });
+    const { ledger, logs } = ledgerOver(failing, 900);
 
     const appended = await ledger.add(runA, pricedCall(10, micros(1)));
     expect(appended.ok).toBe(true); // the spend is recorded regardless
 
-    const warned = captured.logs.filter((l) => l.msg === "spend-ledger.ttl-refresh-failed");
+    const warned = logs.filter((l) => l.msg === "spend-ledger.ttl-refresh-failed");
     expect(warned.length).toBe(2); // both keys
     expect(warned[0]?.level).toBe("warn");
     expect(String(warned[0]?.data?.["key"] ?? "")).toContain("fugue:acme:");
@@ -303,14 +299,7 @@ describe("Redis ledger: key layout and TTL", () => {
 
   it("does not spend a round trip on a zero increment", async () => {
     const fake = fakeRedis();
-    const parsed = spendLedgerRedis(fake.redis);
-    if (!parsed.ok) throw new Error("surface");
-    const ledger = createRedisSpendLedger({
-      redis: parsed.value,
-      logger: collectLogs().logger,
-      tenant: mkTenant("acme"),
-      dagId: makeDagId("test-dag"),
-    });
+    const { ledger } = ledgerOver(fake.redis);
 
     // A free call still counts one CALL, but writes no tokens or micros field.
     await ledger.add(runA, pricedCall(0, micros(0)));
