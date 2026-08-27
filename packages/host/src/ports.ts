@@ -282,8 +282,13 @@ export type SharedInfra = {
   readonly llm: LlmClient;
   readonly redis: RedisPort;
   /**
-   * Durable per-run spend. Hydrated once per execution slice at NodeContext
-   * construction and appended to as calls settle.
+   * FALLBACK per-run spend ledger — not usually the one that gets used.
+   *
+   * `createNodeContextForDag` builds a Redis-backed ledger per NodeContext
+   * whenever the wired `RedisPort` offers `hIncrBy`/`hGetAll`/`expire`, and only
+   * falls back to this one when it does not (loudly: that downgrade costs
+   * durability across process restarts and is logged at `error`). A reader of
+   * this field alone would otherwise assume it is what a run consults.
    */
   readonly spendLedger: SpendLedgerPort;
   readonly tracer: Tracer;

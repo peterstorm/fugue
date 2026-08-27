@@ -1114,7 +1114,7 @@ describe("createNodeContextForDag — spend survives a park/resume (FR-B-006)", 
 
     await expect(
       sliceFor(shared, makeDag({ llmBudget: { tokens: 1000 } })),
-    ).rejects.toThrow(/spend ledger could not be read|could not be read/);
+    ).rejects.toThrow(/could not be read/);
   });
 
   it("RUNS an UNBUDGETED run whose ledger cannot be read", async () => {

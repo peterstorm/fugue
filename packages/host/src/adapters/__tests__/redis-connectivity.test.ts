@@ -34,6 +34,7 @@ interface FakeOverrides {
   readonly execCommandError?: Error;
   readonly throwOn?: readonly string[];
   readonly thrownValue?: unknown;
+  readonly expireResult?: number;
 }
 
 class FakeRedis {
@@ -160,6 +161,20 @@ class FakeRedis {
   async smembers(key: string): Promise<string[]> {
     this.rec("smembers", [key]);
     return ["a", "b"];
+  }
+  async hincrby(...args: unknown[]): Promise<number> {
+    this.rec("hincrby", args);
+    return 7;
+  }
+  async hgetall(key: string): Promise<Record<string, string>> {
+    this.rec("hgetall", [key]);
+    return { tokens: "10", micros: "5" };
+  }
+  // EXPIRE answers 1 when the key existed and the TTL was set, 0 when it did
+  // not — the adapter's job is to turn that into a boolean.
+  async expire(...args: unknown[]): Promise<number> {
+    this.rec("expire", args);
+    return "expireResult" in this.o ? (this.o.expireResult as number) : 1;
   }
   async quit(): Promise<string> {
     this.rec("quit", []);
@@ -568,5 +583,71 @@ describe("createRedisConnectivity — initialization failure", () => {
     if (isErr(r) && r.error.kind === "redis-unavailable") {
       expect(r.error.operation).toMatch(/initialization/i);
     }
+  });
+});
+
+describe("createRedisConnectivity — spend-ledger primitives", () => {
+  // These three were added to `RedisPort` for the durable spend ledger and were
+  // only ever exercised through a hand-rolled fake in `spend-ledger.test.ts`,
+  // which never touches the real `redisCall` error-wrapping path. `expire` in
+  // particular does a genuine 1/0 → boolean transform that nothing pinned.
+
+  it("hIncrBy issues HINCRBY and returns the new field value", async () => {
+    const fake = new FakeRedis();
+    const { bundle } = await wire(fake);
+    const result = await bundle.redis.hIncrBy?.("run:spend", "tokens", 150);
+    expect(result !== undefined && isOk(result) && result.value).toBe(7);
+    expect(fake.calls.find((c) => c.m === "hincrby")?.args).toEqual(["run:spend", "tokens", 150]);
+  });
+
+  it("hGetAll issues HGETALL and returns every field", async () => {
+    const fake = new FakeRedis();
+    const { bundle } = await wire(fake);
+    const result = await bundle.redis.hGetAll?.("run:spend");
+    expect(result !== undefined && isOk(result) && result.value).toEqual({ tokens: "10", micros: "5" });
+    expect(fake.calls.find((c) => c.m === "hgetall")?.args).toEqual(["run:spend"]);
+  });
+
+  it("expire maps Redis's 1 to true and 0 to false", async () => {
+    // The whole point of the coercion: 0 means "no such key", which is a real
+    // answer a caller may act on, not a failure.
+    const applied = await (await wire(new FakeRedis({ expireResult: 1 }))).bundle.redis.expire?.("k", 60);
+    expect(applied !== undefined && isOk(applied) && applied.value).toBe(true);
+
+    const absent = await (await wire(new FakeRedis({ expireResult: 0 }))).bundle.redis.expire?.("k", 60);
+    expect(absent !== undefined && isOk(absent) && absent.value).toBe(false);
+  });
+
+  it("expire issues EXPIRE with the key and seconds", async () => {
+    const fake = new FakeRedis();
+    const { bundle } = await wire(fake);
+    await bundle.redis.expire?.("run:spend", 900);
+    expect(fake.calls.find((c) => c.m === "expire")?.args).toEqual(["run:spend", 900]);
+  });
+
+  it("wraps a thrown hIncrBy as Err(redis-unavailable) naming the command", async () => {
+    // Same contract every other primitive on this port keeps: a driver throw
+    // never escapes as an exception, it becomes a typed Result the ledger can
+    // fail closed on.
+    const { bundle } = await wire(new FakeRedis({ throwOn: ["hincrby"] }));
+    const result = await bundle.redis.hIncrBy?.("k", "f", 1);
+    expect(result !== undefined && isErr(result)).toBe(true);
+    if (result !== undefined && isErr(result) && result.error.kind === "redis-unavailable") {
+      expect(result.error.operation).toMatch(/HINCRBY/);
+    }
+  });
+
+  it("wraps a thrown hGetAll as Err(redis-unavailable)", async () => {
+    const { bundle } = await wire(new FakeRedis({ throwOn: ["hgetall"] }));
+    const result = await bundle.redis.hGetAll?.("k");
+    expect(result !== undefined && isErr(result)).toBe(true);
+  });
+
+  it("wraps a thrown expire as Err(redis-unavailable) — never a bare false", async () => {
+    // The coercion must not swallow a failure into the `false` that legitimately
+    // means "no such key"; those are different answers.
+    const { bundle } = await wire(new FakeRedis({ throwOn: ["expire"] }));
+    const result = await bundle.redis.expire?.("k", 1);
+    expect(result !== undefined && isErr(result)).toBe(true);
   });
 });

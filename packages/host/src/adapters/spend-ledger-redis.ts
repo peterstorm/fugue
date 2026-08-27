@@ -26,6 +26,9 @@ import { err, ok } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { RedisPort, SpendLedgerPort } from "../ports.js";
 import type { HostError } from "../domain/host-error.js";
+import { formatHostError } from "../domain/host-error.js";
+import type { LogPort } from "../ports.js";
+import { logWithoutThrowing } from "../hitl/diagnostic-logging.js";
 import type { TenantId } from "../domain/tenant.js";
 import { buildSpendKey, buildSpendUnpricedKey } from "../domain/cache-keys.js";
 import { parseFigure, recordOf, spendOfRecord } from "../domain/spend-record.js";
@@ -51,11 +54,17 @@ export type SpendLedgerRedis = Pick<RedisPort, "sAdd" | "sMembers"> & {
  * adapter below never re-checks.
  */
 export const spendLedgerRedis = (redis: RedisPort): Result<SpendLedgerRedis, HostError> => {
-  const missing = [
-    redis.hIncrBy === undefined ? "hIncrBy" : null,
-    redis.hGetAll === undefined ? "hGetAll" : null,
-    redis.expire === undefined ? "expire" : null,
-  ].filter((name): name is string => name !== null);
+  // ONE list. The required set was previously spelled three times — in a
+  // `missing` array, in the guarding condition, and again by field name in the
+  // returned literal — so adding a fourth primitive meant three edits, and
+  // missing one either narrowed the type without erroring or errored without
+  // naming the field. Deriving all three from this list makes that impossible.
+  const required = [
+    ["hIncrBy", redis.hIncrBy],
+    ["hGetAll", redis.hGetAll],
+    ["expire", redis.expire],
+  ] as const;
+  const missing = required.filter(([, method]) => method === undefined).map(([name]) => name);
   if (redis.hIncrBy === undefined || redis.hGetAll === undefined || redis.expire === undefined) {
     return err({
       kind: "config-invalid",
@@ -81,6 +90,16 @@ export interface RedisSpendLedgerDeps {
   readonly tenant: TenantId;
   readonly dagId: DagId;
   /**
+   * Where a best-effort failure goes.
+   *
+   * The TTL refresh below deliberately does not fail the append — but "does not
+   * fail" is not "is not worth knowing about". Without a logger this adapter was
+   * structurally incapable of reporting an EXPIRE failure, and an EXPIRE that
+   * quietly stops working lets a live run's spend record expire underneath it,
+   * which reopens the refill-on-resume bug with no diagnostic trail at all.
+   */
+  readonly logger: LogPort;
+  /**
    * How long a run's spend record outlives its last write.
    *
    * Bounded for the same reason the checkpoint is: a run that finished and will
@@ -104,7 +123,7 @@ export interface RedisSpendLedgerDeps {
  * to every call.
  */
 export const createRedisSpendLedger = (deps: RedisSpendLedgerDeps): SpendLedgerPort => {
-  const { redis, tenant, dagId, ttlSec } = deps;
+  const { redis, tenant, dagId, ttlSec, logger } = deps;
   const keys = (runId: RunId) => ({
     hash: buildSpendKey(tenant, dagId, runId),
     unpriced: buildSpendUnpricedKey(tenant, dagId, runId),
@@ -154,12 +173,24 @@ export const createRedisSpendLedger = (deps: RedisSpendLedgerDeps): SpendLedgerP
         if (!added.ok) return err(added.error);
       }
 
-      // Refresh idleness on both keys. A failure here does NOT fail the append:
+      // Refresh idleness on both keys. A failure here does NOT fail the append —
       // the spend is already recorded, and the only consequence is a key that
-      // expires earlier than intended — which loses durability, not money.
+      // expires earlier than intended, which loses durability rather than money.
+      // It IS logged: an EXPIRE that silently stops working lets a live run's
+      // record expire underneath it, and that is the refill-on-resume bug again
+      // with nothing to grep for. `warn`, matching the severity of what is lost.
       if (ttlSec !== undefined) {
-        await redis.expire(hash, ttlSec);
-        await redis.expire(unpriced, ttlSec);
+        for (const key of [hash, unpriced]) {
+          const refreshed = await redis.expire(key, ttlSec);
+          if (!refreshed.ok) {
+            logWithoutThrowing(logger, "warn", "spend-ledger.ttl-refresh-failed", {
+              key,
+              ttlSec,
+              reason: formatHostError(refreshed.error),
+              consequence: "this run's spend record may expire while the run is still active",
+            });
+          }
+        }
       }
       return ok(undefined);
     },

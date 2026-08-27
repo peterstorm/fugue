@@ -153,7 +153,11 @@ to zero would make an unpriced model **free**, which fails open. So:
 ```ts
 export type PricedSpend =
   | { readonly kind: "priced";   readonly micros: MicroUsd }
-  | { readonly kind: "unpriced"; readonly models: ReadonlySet<string> };  // non-empty
+  | { readonly kind: "unpriced"; readonly models: UnpricedModels; readonly knownMicros: MicroUsd };
+// As shipped (`framework/src/types/spend.ts`): `UnpricedModels` is a NON-EMPTY
+// readonly ARRAY, not a Set — sorted and de-duplicated so `addSpend` stays
+// commutative under structural equality — and `knownMicros` carries the priced
+// portion as a lower bound, which is what makes a refusal message actionable.
 ```
 
 `unpriced` is absorbing under addition: `priced + unpriced = unpriced`, carrying the union

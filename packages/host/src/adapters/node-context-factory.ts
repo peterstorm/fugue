@@ -65,13 +65,6 @@ import { formatHostError } from "../domain/host-error.js";
 // ── Adapters (wrap Redis with namespacing) ─────────────────────────────────
 
 /**
- * Create a ContextCacheAdapter that prefixes all keys with the tenant + DAG
- * namespace. Applies per-DAG TTL override when set is called without an explicit TTL.
- *
- * @satisfies FR-013 — Keys prefixed with tenant + DAG namespace
- * @satisfies FR-041 — Per-DAG TTL override applied
- */
-/**
  * Track consecutive failures of one Redis-backed operation and escalate the log
  * level once they stop looking like a blip.
  *
@@ -129,6 +122,13 @@ const failureEscalator = (opts: {
 /** Consecutive Redis failures before a warn becomes an error (see `failureEscalator`). */
 const FAILURE_ESCALATION_THRESHOLD = 10;
 
+/**
+ * Create a ContextCacheAdapter that prefixes all keys with the tenant + DAG
+ * namespace. Applies per-DAG TTL override when set is called without an explicit TTL.
+ *
+ * @satisfies FR-013 — Keys prefixed with tenant + DAG namespace
+ * @satisfies FR-041 — Per-DAG TTL override applied
+ */
 export const createNamespacedCache = (
   redis: RedisPort,
   tenant: TenantId,
@@ -441,11 +441,26 @@ export const createNodeContextForDag = async (
   // across the slices of one process (the whole HITL park/resume path in a
   // single-process deployment) and is honest about not surviving a restart.
   const ledgerRedis = spendLedgerRedis(shared.redis);
+  if (!ledgerRedis.ok) {
+    // NOT silent. Falling back trades durable, cross-process spend for a
+    // process-local map, so a budgeted run silently regains its full ceiling on
+    // every restart — the refill bug this whole feature closes, reintroduced by
+    // configuration rather than by code. `error`, because an operator who set a
+    // budget is relying on a guarantee that is no longer being provided, and
+    // the only place that fact exists is this line.
+    reportWithoutThrowing(shared.logger, "error", "Spend ledger is NOT durable — falling back to the in-process backend", {
+      dagId: dagId as string,
+      runId: runId as string,
+      reason: formatHostError(ledgerRedis.error),
+      consequence: "per-run LLM budgets reset when this process restarts",
+    });
+  }
   const spendLedger = ledgerRedis.ok
     ? createRedisSpendLedger({
         redis: ledgerRedis.value,
         tenant,
         dagId,
+        logger: shared.logger,
         ...(ttl.checkpointTtlSec !== undefined ? { ttlSec: ttl.checkpointTtlSec } : {}),
       })
     : shared.spendLedger;
@@ -475,7 +490,9 @@ export const createNodeContextForDag = async (
     dagId,
     runId,
     ...(limits !== undefined ? { limits } : {}),
-    ...(hydrated.ok ? { hydrated: hydrated.value } : {}),
+    hydrated: hydrated.ok
+      ? { kind: "known", spend: hydrated.value }
+      : { kind: "unknown" },
     ledger: spendLedger,
     logger: shared.logger,
   });

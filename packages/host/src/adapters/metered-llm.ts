@@ -98,12 +98,16 @@ interface MeteredLlmDeps {
   readonly runId: RunId;
   readonly limits?: Ceilings;
   /**
-   * Spend this run had already settled before this slice began, read from the
-   * ledger. Absent means a fresh run — or an unreadable ledger on an UNBUDGETED
-   * run, which meters from zero rather than failing (a budgeted run never gets
-   * here; the factory refuses the slice).
+   * What this run had already settled before the current slice began.
+   *
+   * A UNION rather than an optional `Spend`, because absence meant two
+   * different facts: "a fresh run, definitely zero" and "an unbudgeted run
+   * whose ledger could not be read, so genuinely unknown". Both meter from zero
+   * today — a budgeted run never reaches here, the factory refuses the slice —
+   * but they are not the same claim, and anything that reads this for reporting
+   * rather than for admission would have to treat unknown as zero to compile.
    */
-  readonly hydrated?: Spend;
+  readonly hydrated: HydratedSpend;
   /** Where settled spend is appended so it outlives this NodeContext. */
   readonly ledger: SpendLedgerPort;
   readonly logger: LogPort;
@@ -111,6 +115,17 @@ interface MeteredLlmDeps {
 
 /** The two node-facing operations, named identically in every log line. */
 type Operation = "sendStructured" | "sendWithTools";
+
+/**
+ * Prior spend for this run, or an explicit admission that it is unknown.
+ *
+ * `unknown` is only reachable for an UNBUDGETED run whose ledger read failed: a
+ * budgeted one is refused at context construction rather than metered from a
+ * guess (FR-B-007).
+ */
+export type HydratedSpend =
+  | { readonly kind: "known"; readonly spend: Spend }
+  | { readonly kind: "unknown" };
 
 /**
  * The request fields metering needs, and only those: who to attribute the call
@@ -170,7 +185,7 @@ export const createMeteredLlm = (inner: LlmClient, deps: MeteredLlmDeps): LlmCli
   // run already spent in earlier slices. Mutated only here, behind the pure
   // `accumulate` transition — the meter value itself is immutable.
   let meter: LlmMeter =
-    hydrated === undefined ? emptyMeter() : accumulate(emptyMeter(), runId, hydrated);
+    hydrated.kind === "known" ? accumulate(emptyMeter(), runId, hydrated.spend) : emptyMeter();
 
   // Concurrency reservation (review I1 / SC-003). The DECISION logic is pure —
   // `admit` / `releaseReservation` / `learnObservedCall` in llm-meter.ts (see

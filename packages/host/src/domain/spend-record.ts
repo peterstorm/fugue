@@ -1,9 +1,15 @@
 /**
  * The durable encoding of a run's `Spend`, and the parse back out of it.
  *
- * Functional core: two pure total functions, no I/O. Every `SpendLedgerPort`
- * adapter shares them, so a run's spend means the same thing whichever backend
- * stored it — and a backend cannot invent an encoding the others cannot read.
+ * Functional core: two pure total functions, no I/O.
+ *
+ * Used by the REDIS adapter, which is the one that has to flatten a `Spend`
+ * into storage. The in-process adapter holds `Spend` values directly and folds
+ * them with `addSpend`, so it never encodes anything. The two therefore agree
+ * because both implement the same monoid — which the parameterised contract
+ * suite in `spend-ledger.test.ts` proves — and NOT because they share this
+ * encoding. (An earlier version of this header claimed the stronger, structural
+ * guarantee; it was never true of the in-process backend.)
  *
  * WHY THIS SHAPE: the encoding is chosen so that appending to it is the SAME
  * operation as `addSpend`. `Spend`'s monoid is (sum, sum, sum, set-union), and
@@ -72,13 +78,12 @@ export const recordOf = (spend: Spend): SpendRecord => ({
  * across a resume.
  */
 export const spendOfRecord = (record: SpendRecord): Spend => {
-  const figure = (n: number): number => (Number.isFinite(n) ? Math.max(0, n) : 0);
   const models = [...new Set(record.unpricedModels.filter((m) => m.length > 0))].sort();
-  const micros = figure(record.micros) as MicroUsd;
+  const micros = safeFigure(record.micros) as MicroUsd;
   const [head, ...rest] = models;
   return {
-    tokens: figure(record.tokens),
-    calls: figure(record.calls),
+    tokens: safeFigure(record.tokens),
+    calls: safeFigure(record.calls),
     usd:
       head === undefined
         ? { kind: "priced", micros }
@@ -91,6 +96,13 @@ export const spendOfRecord = (record: SpendRecord): Spend => {
 };
 
 /**
+ * THE clamp. One definition site, because "a malformed figure reads as a safe
+ * zero" is a single rule and it was previously spelled twice — here and inside
+ * `spendOfRecord` — so a change to one was not guaranteed to reach the other.
+ */
+const safeFigure = (n: number): number => (Number.isFinite(n) ? Math.max(0, n) : 0);
+
+/**
  * Parse one stored numeric field.
  *
  * Absent reads as zero — a hash field a run never wrote is a run that never
@@ -98,8 +110,5 @@ export const spendOfRecord = (record: SpendRecord): Spend => {
  * as zero rather than failing the read: see `spendOfRecord` on why a malformed
  * figure must not become an error at this boundary.
  */
-export const parseFigure = (raw: string | null | undefined): number => {
-  if (raw === null || raw === undefined) return 0;
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
-};
+export const parseFigure = (raw: string | null | undefined): number =>
+  raw === null || raw === undefined ? 0 : safeFigure(Number(raw));
