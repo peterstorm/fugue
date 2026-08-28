@@ -16,6 +16,7 @@
  * - gen_ai.request.model → mlflow.llm.model
  * - gen_ai.system → mlflow.llm.provider
  * - gen_ai.usage.input_tokens / gen_ai.usage.output_tokens → mlflow.chat.tokenUsage
+ * - gen_ai.usage.cache_{creation,read}_input_tokens → mlflow.chat.tokenUsage (the cache split)
  *
  * Derived MLflow attributes are computed inline at export time and merged
  * onto spans via a Proxy wrapper — the original span object stays untouched,
@@ -43,6 +44,8 @@ import {
   GEN_AI_SYSTEM,
   GEN_AI_USAGE_INPUT_TOKENS,
   GEN_AI_USAGE_OUTPUT_TOKENS,
+  GEN_AI_USAGE_CACHE_WRITE_TOKENS,
+  GEN_AI_USAGE_CACHE_READ_TOKENS,
   EVENT_NODE_INPUT,
   EVENT_NODE_OUTPUT,
   EVENT_GEN_AI_SYSTEM_MESSAGE,
@@ -384,10 +387,19 @@ export class MlflowOtlpExporter implements SpanExporter {
 
     const tokensIn = attrs[GEN_AI_USAGE_INPUT_TOKENS] as number | undefined;
     const tokensOut = attrs[GEN_AI_USAGE_OUTPUT_TOKENS] as number | undefined;
+    // The provider-side cache split rides alongside the three original figures —
+    // the same figures the span carries as `gen_ai.usage.cache_*` attributes.
+    // Absent defaults to 0, which is exactly what absence means: the enrichment
+    // layer writes the cache attributes unconditionally (zeroes included), so a
+    // pre-caching span and a cache-inert span produce the identical tokenUsage.
+    const cacheWriteTokens = attrs[GEN_AI_USAGE_CACHE_WRITE_TOKENS] as number | undefined;
+    const cacheReadTokens = attrs[GEN_AI_USAGE_CACHE_READ_TOKENS] as number | undefined;
     if (tokensIn !== undefined || tokensOut !== undefined) {
       out["mlflow.chat.tokenUsage"] = {
         input_tokens: tokensIn ?? 0,
         output_tokens: tokensOut ?? 0,
+        cache_write_tokens: cacheWriteTokens ?? 0,
+        cache_read_tokens: cacheReadTokens ?? 0,
         total_tokens: (tokensIn ?? 0) + (tokensOut ?? 0),
       };
     }

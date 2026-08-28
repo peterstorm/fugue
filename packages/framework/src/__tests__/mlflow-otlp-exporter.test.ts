@@ -8,6 +8,8 @@ import {
   GEN_AI_SYSTEM,
   GEN_AI_USAGE_INPUT_TOKENS,
   GEN_AI_USAGE_OUTPUT_TOKENS,
+  GEN_AI_USAGE_CACHE_WRITE_TOKENS,
+  GEN_AI_USAGE_CACHE_READ_TOKENS,
   EVENT_NODE_INPUT,
   EVENT_NODE_OUTPUT,
   EVENT_LLM_COST,
@@ -105,7 +107,31 @@ describe("MlflowOtlpExporter", () => {
     expect(attrs["mlflow.chat.tokenUsage"]).toEqual({
       input_tokens: 100,
       output_tokens: 50,
+      cache_write_tokens: 0,
+      cache_read_tokens: 0,
       total_tokens: 150,
+    });
+  });
+
+  it("carries the cache split in mlflow.chat.tokenUsage when the span reports it", async () => {
+    const span = fakeSpan({
+      attributes: {
+        [GEN_AI_USAGE_INPUT_TOKENS]: 910,
+        [GEN_AI_USAGE_OUTPUT_TOKENS]: 7,
+        [GEN_AI_USAGE_CACHE_WRITE_TOKENS]: 900,
+        [GEN_AI_USAGE_CACHE_READ_TOKENS]: 0,
+      },
+    });
+    await collectExport(exporter, [span]);
+    const attrs = exported[0].attributes as Record<string, unknown>;
+    expect(attrs["mlflow.chat.tokenUsage"]).toEqual({
+      input_tokens: 910,
+      output_tokens: 7,
+      cache_write_tokens: 900,
+      cache_read_tokens: 0,
+      // `tokensIn` is inclusive of cache tokens, so the total is every token
+      // that crossed the wire — the cache figures refine it, never add to it.
+      total_tokens: 917,
     });
   });
 

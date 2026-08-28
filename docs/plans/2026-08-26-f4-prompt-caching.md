@@ -359,3 +359,10 @@ Recorded so the plan and the code agree rather than diverging quietly.
 
 New tests: 46 across seven files — `token-usage-property`, `prompt-cache`, `prompt-cache-clients`,
 `prompt-cache-conversation`, `prompt-cache-cost`, `prompt-cache-inert`, `prompt-cache-persistence`.
+
+**Follow-up (2026-08-28):** §7 step 8 committed to the MLflow exporter gaining the two cache
+figures, but the diff above never touched `mlflow-otlp-exporter.ts` and §14 did not record the
+drop — a review finding. Closed: `mlflow.chat.tokenUsage` now carries `cache_write_tokens` and
+`cache_read_tokens` alongside the three original figures, absent attributes defaulting to 0
+(exactly what the enrichment layer's unconditional emission means), with the pinned test updated
+and a cache-split regression test added.
