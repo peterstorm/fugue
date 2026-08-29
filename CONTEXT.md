@@ -41,9 +41,9 @@ gates, freshness-aware state management, and production observability.
 | **Required Corruption Observability** | Persisted Checkpointer adapters must emit a warning before reporting a corrupt-entry drop as successful. `reportCorruptCheckpointEntry` owns the policy: a logger failure becomes typed `cache-error(load)` for both Redis and file; it never rejects raw or disappears. |
 | **Result\<T, E\>** | Either-style type: `Ok<T>` or `Err<E>`. No exceptions cross module boundaries. |
 | **FrameworkError** | Discriminated union of 27 error kinds, exhaustively formatted via `formatFrameworkError`. The framework also owns `PersistedFrameworkErrorSchema`, the loose exhaustive wire parser composed by persistence adapters; adapters do not redeclare the error ADT. |
-| **Capability** | A resource a node requires. Derived from `keyof CapabilityRegistry`. Built-ins: `"llm"`, `"cache"`, `"prompts"`, `"judgeLlm"`, `"http"`, `"clock"`. Extensible via module augmentation (ADR-0051). Validated at run start before any node executes. |
+| **Capability** | A resource a node requires. Derived from `keyof CapabilityRegistry`. Built-ins: `"llm"`, `"cache"`, `"prompts"`, `"judgeLlm"`, `"http"`, `"clock"`, `"budget"`. Extensible via module augmentation (ADR-0051). Validated at run start before any node executes. |
 | **CapabilityRegistry** | Extensible interface mapping capability names to client types. Adapter packages augment it via `declare module "@fuguejs/framework"`. |
-| **CapabilityHandle\<K\>** | Runtime lifecycle wrapper: `{ name, client, connect?, close?, healthCheck? }`. Adapters produce these; runtime manages lifecycle. |
+| **CapabilityHandle\<K\>** | Runtime lifecycle wrapper: `{ name, client, connect?, close?, healthCheck? }`. A handle whose registered client extends `LlmClient` also requires `clientKind: "llm"`; this explicit adapter intent routes every boot-scoped LLM through spend metering without duck typing. |
 | **AdapterFactory\<K, C\>** | `(config: C) => CapabilityHandle<K>`. Standard factory shape for adapter packages. |
 | **HttpCapability** | Built-in capability for HTTP API calls. Returns `Result`, validates responses against Zod schemas. |
 | **ClockCapability** | Built-in `"clock"` capability. Nodes read time through `ctx.clock` instead of ambient `Date`; `systemClock` is the production default, `fixedClock` pins time for deterministic tests. |
@@ -131,7 +131,9 @@ gates, freshness-aware state management, and production observability.
 | **Breach** | Why a run may not make another call: `reached` (a ceiling was met) or `unpriced` (a `usd` ceiling could not be EVALUATED because a model in use has no price). Two members because the operator response differs — the first means the budget worked, the second means go add a `PRICE_TABLE` entry. |
 | **Basis** | `settled` (spend the provider has reported) or `projected` (settled plus the reservation for admitted-but-unsettled concurrent calls). Carried on every `Breach`, so the figure in a refusal and the reason for it can never disagree. |
 | **Reservation** | The in-flight accounting that bounds concurrent overshoot: `inFlight` (count of admitted, unsettled calls) x `maxObservedCall` (the per-axis learned estimate). Counted rather than summed, because `Spend` cannot be subtracted honestly once an `unpriced` call is in it. |
-| **Spend Ledger** | Port holding a run's DURABLE spend, keyed by `runId`. The in-process meter is the authority WITHIN an execution slice; the ledger is what carries spend BETWEEN them. Hydrated once when a slice starts, appended once per settled call. Redis and in-process adapters (ADR-0083). |
+| **Run Spend Authority** | The one mutable accounting cell for an execution slice. Main `llm`, `judgeLlm`, and every `clientKind: "llm"` capability-bag client share its meter, reservations, ledger, logs, and Budget Capability. |
+| **Budget Capability** | Seventh built-in capability. Read-only `spent()` returns settled spend; `remaining()` returns admission-safe projected headroom (`settled + inFlight × maxObservedCall`). An unpriced USD projection is explicit domain data, never zero. |
+| **Spend Ledger** | Port holding a run's DURABLE spend, keyed by `runId`. The Run Spend Authority is authoritative WITHIN an execution slice; the ledger carries spend BETWEEN slices. Hydrated once at slice start, appended once per settled call. In-process, Redis, and file adapters (ADR-0083). |
 | **Spend Record** | The ledger's storage encoding: three numeric sums plus a set of unpriced model names. Chosen so that appending IS `addSpend` — every field is a sum or a union, each has an atomic Redis primitive, so concurrent appends need no lock. The `priced`/`unpriced` discriminant is DERIVED from the set's emptiness, never stored beside it. |
 | **Execution slice** | One `createNodeContextForDag` → run → settle cycle. A resumable run has several: it parks for a human decision and resumes into a FRESH NodeContext. Every per-context thing (the meter, the decorator) restarts; only what the ledger holds carries over. |
 | **Fail closed** | A `usd` ceiling against unpriced spend ALWAYS breaches; a malformed limit clamps to zero (granting nothing); a non-finite figure on either side of a comparison refuses. In every case the alternative reads as "unlimited". |
@@ -159,6 +161,7 @@ The F6 feature (ADRs 0075–0080) adds a self-contained durable filesystem backe
 | **Digest Addressing** | Record and node filenames are sha256 hex digests: keyed `sha256(dedupKey)` vs keyless `sha256(sequence ‖ eventJson)` — structurally disjoint by the `|` exclusion; 6-digit lexicographic sequence ceiling (ADR-0076). |
 | **Composite Node Address** | `namespace@nodeId@index@attempt` checkpoint addressing with canonical folding; canonical IDs and composite keys are disjoint because `@` is outside the ID charset (ADR-0075). |
 | **Freshness Singleton (file)** | Exactly one resource file, `<sha256(resource)>.json`: score-monotonic latest-conflict candidate (max `succeededAtMs`, Redis reverse-binary tie order) plus a TTL-bounded logical-write acknowledgement key set committed in the same atomic replacement. It uses a 24h lazy TTL and refresh-on-every-success (ADR-0079). |
+| **File Spend Store** | High-level `@fuguejs/framework/file` store: one strict V1 whole-spend snapshot at `<sha256(runId)>.json`, serialized per run by the F6 lock and committed by atomic rename. The host's file Spend Ledger is a thin typed-error adapter over it. |
 | **FileOperation** | The closed `cache-error` operation vocabulary of the file backend; every file failure is a typed `FrameworkError` whose operation comes from this set (ADR-0080). |
 
 **Deepening-round decisions (2026-08-18).** The interface advisories deferred across review rounds 10–16 were adjudicated once, in a `file/` + `Checkpointer`-port deepening round (plan: `.claude/plans/2026-08-18-file-port-deepening-round.md`):
@@ -197,7 +200,7 @@ The F6 feature (ADRs 0075–0080) adds a self-contained durable filesystem backe
 | `llm/` | `types/` | LLM client implementations |
 | `observer/` | `types/` | Observer implementations |
 | `checkpoint/` | `types/` | Checkpoint persistence — in-memory + Redis adapter |
-| `file/` | `types/`, `checkpoint/`, `state-machine/` | Durable file backend: event journal, checkpointer, freshness index, job, resume (subpath `@fuguejs/framework/file`) |
+| `file/` | `types/`, `checkpoint/`, `state-machine/` | Durable file backend: event journal, checkpointer, freshness index, spend store, job, resume (subpath `@fuguejs/framework/file`) |
 | `cache/` | `types/` | Response caching — in-memory + Redis adapter |
 | `queue/` | `types/`, `state-machine/` | Queue abstractions |
 | `queue-bullmq/` | `queue/`, `state-machine/` | BullMQ adapter |
@@ -267,5 +270,5 @@ The host is the **imperative shell** that wires the framework into a production 
 | `adapters/keycloak-broker.ts` / `keycloak-token-endpoint.ts` | Mint a downscoped per-identity token via Keycloak Standard Token Exchange |
 | `adapters/entra-wif.ts` | Entra workload-identity-federation exchange for MS Graph access |
 | `adapters/graph-capability.ts` | Identity-scoped MS Graph document capability |
-| `adapters/metered-llm.ts` | LLM capability wrapper that meters token usage per identity |
+| `adapters/run-spend-authority.ts` / `metered-llm.ts` | One run-scoped spend authority shared by every marked LLM client; thin client decorators delegate to it |
 | `adapters/broker-audit.ts` | Audit trail for brokered capability grants |

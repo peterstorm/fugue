@@ -297,7 +297,8 @@ describe("runCapabilities", () => {
     expect(result.ok).toBe(true);
 
     const names = result.builtin.map((c) => c.name);
-    // Must match the registry's single source of truth — no more, no less.
+    // Must match the registry's single source of truth — exactly seven.
+    expect(result.builtin).toHaveLength(7);
     expect([...names].sort()).toEqual([...BUILTIN_CAPABILITY_KEYS].sort());
 
     // Every entry carries non-empty metadata.
@@ -312,6 +313,9 @@ describe("runCapabilities", () => {
     expect(http?.clientType).toBe("HttpCapability");
     const judge = result.builtin.find((c) => c.name === "judgeLlm");
     expect(judge?.clientType).toBe("LlmClient");
+    const budget = result.builtin.find((c) => c.name === "budget");
+    expect(budget?.clientType).toBe("BudgetCapability");
+    expect(budget?.description).toContain("Read-only");
   });
 
   it("explains how to obtain custom (adapter-provided) capabilities", () => {

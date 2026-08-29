@@ -49,7 +49,7 @@ const makeBaseCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
   tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
   logger: { warn: () => {}, error: () => {} },
   cache: null,
-  llm: null, http: null, clock: null,
+  llm: null, http: null, clock: null, budget: null,
   prompts: null,
   judgeLlm: null,
   ...overrides,

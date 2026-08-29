@@ -19,6 +19,9 @@ const FILE_OPERATION_TYPECHECK_COVERAGE = [
   "createFileFreshnessIndex",
   "createFileJob",
   "createFileJournal",
+  "spendStore:create",
+  "spendStore:read",
+  "spendStore:add",
   "data",
   "eventDigestOf",
   "eventFileName",
@@ -71,7 +74,7 @@ void compileTimeTypoPin;
 
 describe("file boundary error operation vocabulary", () => {
   it("contains every file-backend operation used by the implementation", () => {
-    expect(FILE_OPERATION_TYPECHECK_COVERAGE).toHaveLength(31);
+    expect(FILE_OPERATION_TYPECHECK_COVERAGE).toHaveLength(34);
     expect(new Set(FILE_OPERATION_TYPECHECK_COVERAGE).size).toBe(
       FILE_OPERATION_TYPECHECK_COVERAGE.length,
     );

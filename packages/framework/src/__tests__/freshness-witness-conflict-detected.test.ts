@@ -33,6 +33,7 @@ const mkCtx = (observer: RecordingObserver, runId: string): NodeContext => ({
   prompts: null,
   llm: null, http: null,
   clock: null,
+  budget: null,
   logger: { warn: () => {}, error: () => {} },
 });
 

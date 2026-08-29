@@ -7,6 +7,27 @@ and its lockstep packages (`@fuguejs/host`, `@fuguejs/fs`, `@fuguejs/ms-graph`,
 follows [Keep a Changelog](https://keepachangelog.com/); this project is
 pre-1.0, so a minor bump may carry breaking changes.
 
+## [Unreleased]
+
+### Added
+
+- **Budget capability.** `budget` is the seventh built-in capability. Its
+  read-only `spent()` and `remaining()` views expose settled spend and
+  admission-safe projected headroom. `fixedBudgetCapability` is available from
+  `@fuguejs/framework/testing`.
+- **File spend store.** `@fuguejs/framework/file` exports
+  `createFileSpendStore`, a digest-addressed, locked, atomic whole-snapshot
+  persistence surface for host spend-ledger adapters.
+
+### Changed
+
+- **Breaking (source):** `BaseNodeContext` / explicit `NodeContext` literals now
+  require `budget: null` when no budget capability is wired. Prefer
+  `makeNodeContext`, whose `NodeContextInit.budget` remains optional.
+- **Breaking (source):** a `CapabilityHandle<K>` whose registered client extends
+  `LlmClient` must declare `clientKind: "llm"`. Non-LLM handles cannot declare
+  this field. This closes custom-client budget bypasses by construction.
+
 ## [0.5.1] — 2026-08-24
 
 ### Fixed

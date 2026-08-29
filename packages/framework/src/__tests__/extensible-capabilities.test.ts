@@ -21,8 +21,10 @@ import { createFetchNode } from "../nodes/fetch.js";
 import { createTransformNode } from "../nodes/transform.js";
 import { makeNodeContext } from "../shared/make-node-context.js";
 import type { NodeDef, BaseNodeContext, Capability } from "../types/node.js";
+import type { LlmClient } from "../types/llm.js";
 import type { FrameworkError } from "../types/errors.js";
 import { ok, err, isOk, isErr } from "../types/result.js";
+import { NO_SPEND } from "../types/spend.js";
 import type { Result } from "../types/result.js";
 import type { CapabilityHandle } from "../types/capability-handle.js";
 import { createFakeHttpCapability } from "../http/http-capability.js";
@@ -40,8 +42,26 @@ interface TestDbCapability {
 declare module "../types/node.js" {
   interface CapabilityRegistry {
     db: TestDbCapability;
+    criticLlm: LlmClient;
   }
 }
+
+const capabilityHandleKindTypePins = (llm: LlmClient, db: TestDbCapability): void => {
+  const marked: CapabilityHandle<"criticLlm"> = {
+    name: "criticLlm",
+    client: llm,
+    clientKind: "llm",
+  };
+  void marked;
+
+  // @ts-expect-error -- every registry client extending LlmClient must opt into metering.
+  const bypass: CapabilityHandle<"criticLlm"> = { name: "criticLlm", client: llm };
+  // @ts-expect-error -- non-LLM handles cannot accidentally opt into LLM decoration.
+  const falseMarker: CapabilityHandle<"db"> = { name: "db", client: db, clientKind: "llm" };
+  void bypass;
+  void falseMarker;
+};
+void capabilityHandleKindTypePins;
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -73,6 +93,7 @@ const makeCtx = (overrides: Partial<BaseNodeContext> = {}): BaseNodeContext => (
   judgeLlm: null,
   http: null,
   clock: null,
+  budget: null,
   ...overrides,
 });
 
@@ -160,13 +181,17 @@ describe("extensible capability registry (ADR-0051)", () => {
     it("top-level fields take precedence over capabilities record", () => {
       const httpDirect = createFakeHttpCapability({}).client;
       const httpBag = createFakeHttpCapability({}).client;
+      const budgetDirect = { spent: () => NO_SPEND, remaining: () => ({ kind: "unbudgeted" as const }) };
+      const budgetBag = { spent: () => NO_SPEND, remaining: () => ({ kind: "unbudgeted" as const }) };
       const ctx = makeNodeContext({
         runId: "r1",
         dagId: "d1",
         http: httpDirect,
-        capabilities: { http: httpBag },
+        budget: budgetDirect,
+        capabilities: { http: httpBag, budget: budgetBag },
       });
       expect(ctx.http).toBe(httpDirect);
+      expect(ctx.budget).toBe(budgetDirect);
     });
 
     it("built-in capability sourced from the bag lands on the named field", () => {

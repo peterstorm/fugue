@@ -14,7 +14,7 @@
 
 import type { Result } from "@fuguejs/framework";
 import { ok, err, safeErrorMessage } from "@fuguejs/framework";
-import type { CapabilityHandle, Capability, CapabilityRegistry } from "@fuguejs/framework";
+import type { CapabilityHandle, Capability, CapabilityRegistry, LlmClient } from "@fuguejs/framework";
 import type { HostError } from "./host-error.js";
 
 // ---------------------------------------------------------------------------
@@ -345,8 +345,13 @@ export const checkHealth = async (
  * dropping a handle (last-writer-wins) and surfacing later as a phantom
  * `missing-capability`.
  */
+export type CapabilityClientDecorators = {
+  readonly llm?: (name: Capability, client: LlmClient) => LlmClient;
+};
+
 export const extractClients = (
   handles: readonly CapabilityHandle[],
+  decorators: CapabilityClientDecorators = {},
 ): Partial<{ readonly [K in Capability]: CapabilityRegistry[K] }> => {
   const clients: Partial<Record<Capability, unknown>> = {};
   for (const handle of handles) {
@@ -356,7 +361,12 @@ export const extractClients = (
           `topoSortHandles should have rejected this at boot. This is a wiring bug.`,
       );
     }
-    clients[handle.name] = handle.client;
+    // This remains inside the existing name↔client correlation trust boundary:
+    // adapter metadata says the client is an LLM, and the decorator restores
+    // the same registry-shaped record rather than introducing another cast seam.
+    clients[handle.name] = handle.clientKind === "llm" && decorators.llm !== undefined
+      ? decorators.llm(handle.name, handle.client)
+      : handle.client;
   }
   return clients as Partial<{ [K in Capability]: CapabilityRegistry[K] }>;
 };

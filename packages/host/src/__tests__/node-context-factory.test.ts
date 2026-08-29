@@ -6,6 +6,9 @@
  */
 
 import { describe, it, expect } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createInMemorySpendLedger } from "../adapters/spend-ledger-memory.js";
 import { fromJson, ok, err, isOk, dagId, runId as makeRunId, nodeId as makeNodeId, gitSha, noopTracer, createHttpCapability, systemClock, observedOf, usdToMicros, tokensOnly, NO_SPEND } from "@fuguejs/framework";
 import type {
@@ -37,6 +40,13 @@ import { subjectTokenForIdentity, invocationOriginForIdentity } from "../domain/
 import { markSubjectToken, type AuthIdentity, type SubjectToken } from "../domain/auth.js";
 import { tenantId } from "../domain/tenant.js";
 import type { TenantId } from "../domain/tenant.js";
+import { createFileSpendLedger } from "../adapters/spend-ledger-file.js";
+
+declare module "@fuguejs/framework" {
+  interface CapabilityRegistry {
+    criticLlm: LlmClient;
+  }
+}
 
 /** Build a `TenantId` for a test from a known-good literal via the canonical constructor. */
 const mkTenant = (s: string): TenantId => {
@@ -724,6 +734,122 @@ describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..0
       expect((await ctx.llm.sendStructured(structuredReq())).ok).toBe(true);
     }
     expect(calls.length).toBe(3); // all delegated — no budget, no refusal
+  });
+});
+
+describe("createNodeContextForDag — one authority across main/judge/custom LLM clients", () => {
+  it("accumulates every marked client into one budget view and one ceiling", async () => {
+    const main = fakeLlm(10, 5);
+    const judge = fakeLlm(10, 5);
+    const critic = fakeLlm(10, 5);
+    const captured = collectLogs();
+    const shared: SharedInfra = {
+      ...baseSharedInfra([
+        { name: "judgeLlm", client: judge.llm, clientKind: "llm" },
+        { name: "criticLlm", client: critic.llm, clientKind: "llm" },
+      ]),
+      llm: main.llm,
+      logger: captured.logger,
+    };
+    const { ctx } = await createNodeContextForDag(
+      shared,
+      makeDag({ llmBudgetTokens: 45 }),
+      testRunId,
+      new AbortController().signal,
+      adminIdentity,
+      FACTORY_AGENT_MAP,
+    );
+    if (ctx.llm === null || ctx.judgeLlm === null || ctx.budget === null) {
+      throw new Error("expected all built-in clients");
+    }
+    const criticClient = (ctx as NodeContext & { readonly criticLlm: LlmClient }).criticLlm;
+
+    expect(ctx.judgeLlm).not.toBe(judge.llm);
+    expect(criticClient).not.toBe(critic.llm);
+    expect((await ctx.llm.sendStructured(structuredReq())).ok).toBe(true);
+    expect((await ctx.judgeLlm.sendStructured(structuredReq())).ok).toBe(true);
+    expect((await criticClient.sendStructured(structuredReq())).ok).toBe(true);
+    expect(ctx.budget.spent().tokens).toBe(45);
+    expect(ctx.budget.remaining()).toEqual({
+      kind: "budgeted",
+      basis: "projected",
+      headroom: [{
+        kind: "available",
+        ceiling: { kind: "tokens", limit: 45 },
+        amount: 0,
+      }],
+    });
+
+    const refused = await ctx.llm.sendStructured(structuredReq());
+    expect(refused.ok).toBe(false);
+    expect(main.calls).toHaveLength(1);
+    expect(judge.calls).toHaveLength(1);
+    expect(critic.calls).toHaveLength(1);
+    expect(
+      captured.logs
+        .filter((line) => line.msg === "llm.metered")
+        .map((line) => line.data?.clientKey),
+    ).toEqual(["llm", "judgeLlm", "criticLlm"]);
+  });
+
+  it("rehydrates a main+judge total from a fresh file ledger/context and refuses the next call", async () => {
+    const root = mkdtempSync(join(tmpdir(), "fugue-context-file-ledger-"));
+    try {
+      const fileLedger = createFileSpendLedger(root);
+      if (!fileLedger.ok) throw new Error("expected file ledger");
+      const main = fakeLlm(10, 5);
+      const judge = fakeLlm(10, 5);
+      const shared: SharedInfra = {
+        ...baseSharedInfra([{ name: "judgeLlm", client: judge.llm, clientKind: "llm" }]),
+        llm: main.llm,
+        spendLedger: fileLedger.value,
+      };
+      const dag = makeDag({ llmBudgetTokens: 30 });
+      const first = await createNodeContextForDag(
+        shared,
+        dag,
+        testRunId,
+        new AbortController().signal,
+        adminIdentity,
+        FACTORY_AGENT_MAP,
+      );
+      if (first.ctx.llm === null || first.ctx.judgeLlm === null) throw new Error("expected LLMs");
+      expect((await first.ctx.llm.sendStructured(structuredReq())).ok).toBe(true);
+      expect((await first.ctx.judgeLlm.sendStructured(structuredReq())).ok).toBe(true);
+
+      const freshLedger = createFileSpendLedger(root);
+      if (!freshLedger.ok) throw new Error("expected fresh file ledger");
+      const resumed = await createNodeContextForDag(
+        { ...shared, spendLedger: freshLedger.value },
+        dag,
+        testRunId,
+        new AbortController().signal,
+        adminIdentity,
+        FACTORY_AGENT_MAP,
+      );
+      if (resumed.ctx.llm === null || resumed.ctx.budget === null) throw new Error("expected context");
+      expect(resumed.ctx.budget.spent().tokens).toBe(30);
+      expect((await resumed.ctx.llm.sendStructured(structuredReq())).ok).toBe(false);
+      expect(main.calls).toHaveLength(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("always injects an unbudgeted read view when no ceilings are declared", async () => {
+    const main = fakeLlm(2, 1);
+    const { ctx } = await createNodeContextForDag(
+      { ...baseSharedInfra(), llm: main.llm },
+      makeDag(),
+      testRunId,
+      new AbortController().signal,
+      adminIdentity,
+      FACTORY_AGENT_MAP,
+    );
+    if (ctx.llm === null || ctx.budget === null) throw new Error("expected metered context");
+    expect(ctx.budget.remaining()).toEqual({ kind: "unbudgeted" });
+    await ctx.llm.sendStructured(structuredReq());
+    expect(ctx.budget.spent().tokens).toBe(3);
   });
 });
 

@@ -72,7 +72,18 @@ export type { SyncConfig, SyncLogger, SyncLoopHandle } from "./sync/sync-loop.js
 
 export { createBunGitAdapter, createLocalGitAdapter } from "./adapters/git-sync.js";
 export { createModuleLoader } from "./adapters/module-loader.js";
-export type { GitPort, ModuleLoaderPort, LoadResult, BulkLoadResult, LoadError, SharedInfra, RedisPort, LogPort } from "./ports.js";
+export type {
+  GitPort,
+  ModuleLoaderPort,
+  LoadResult,
+  BulkLoadResult,
+  LoadError,
+  SharedInfra,
+  RedisPort,
+  LogPort,
+  SpendLedgerPort,
+} from "./ports.js";
+export { createFileSpendLedger } from "./adapters/spend-ledger-file.js";
 
 // Capability builders — the host's own boot-wiring primitives. Exported so an
 // out-of-tree consumer (e.g. a live smoke harness) can wire the SAME capabilities

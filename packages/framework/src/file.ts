@@ -17,6 +17,7 @@
  * - `createFileFreshnessIndex`, backed by one digest-addressed atomic
  *   latest-write singleton per resource, with deterministic Redis-compatible
  *   tie-breaking and lazy 24h TTL;
+ * - `createFileSpendStore`, a locked whole-snapshot store keyed by run digest;
  * - the journal and record codecs used by hosts that need forensic reads —
  *   `parseStoredEventRecord` is the text entry point (the full raw-seam →
  *   strict-parser composition); `parseFileEventRecord` remains exported as
@@ -72,5 +73,8 @@ export { META_RECORD_NODE_ID } from "./file/checkpointer-codec.js";
 // singleton per resource and lazy TTL (ADR-0079).
 export { createFileFreshnessIndex } from "./file/freshness-index.js";
 export type { FileFreshnessIndexOptions } from "./file/freshness-index.js";
+// Atomic spend snapshots for host ledger adapters.
+export { createFileSpendStore } from "./file/spend-store.js";
+export type { FileSpendStore } from "./file/spend-store.js";
 // Kernel envelope type consumed by `readFileEvents` / `replayEvents`.
 export type { RecordedEvent } from "./state-machine/types.js";

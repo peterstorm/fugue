@@ -11,6 +11,7 @@ import type { Confidence } from "./confidence.js";
 import type { HttpCapability } from "./http-capability.js";
 import type { ClockCapability } from "./clock.js";
 import type { NonEmptyString } from "./non-empty-string.js";
+import type { BudgetCapability } from "./budget-capability.js";
 
 export type { Tracer };
 export type { HttpCapability } from "./http-capability.js";
@@ -156,6 +157,7 @@ export interface CapabilityRegistry {
   readonly judgeLlm: LlmClient;
   readonly http: HttpCapability;
   readonly clock: ClockCapability;
+  readonly budget: BudgetCapability;
 }
 
 /**
@@ -193,6 +195,7 @@ export const BUILTIN_CAPABILITY_KEYS = [
   "judgeLlm",
   "http",
   "clock",
+  "budget",
 ] as const satisfies readonly Capability[];
 
 export type BuiltinCapabilityKey = (typeof BUILTIN_CAPABILITY_KEYS)[number];
@@ -254,6 +257,12 @@ export const BUILTIN_CAPABILITY_INFO = {
     clientType: "ClockCapability",
     reference: "any node factory (createFetchNode/createSourceNode/createTransformNode) with requires: ['clock']",
   },
+  budget: {
+    description:
+      "Read-only settled spend and admission-safe projected headroom for the run. Reads can affect retry-time decisions, so tests should inject a fixed budget capability.",
+    clientType: "BudgetCapability",
+    reference: "any node factory with requires: ['budget']",
+  },
 } as const satisfies Record<BuiltinCapabilityKey, CapabilityInfo>;
 
 /**
@@ -282,6 +291,7 @@ export interface BaseNodeContext {
   readonly judgeLlm: LlmClient | null;
   readonly http: HttpCapability | null;
   readonly clock: ClockCapability | null;
+  readonly budget: BudgetCapability | null;
   /**
    * Runtime-owned observer timestamp seam. `runNodeShared` replaces this for
    * each invocation from `RunOptions.now`; built-in nodes use it for sub-spans.
@@ -483,6 +493,7 @@ export type NodeContextInit = {
   readonly judgeLlm?: LlmClient | null;
   readonly http?: HttpCapability | null;
   readonly clock?: ClockCapability | null;
+  readonly budget?: BudgetCapability | null;
   readonly signal?: AbortSignal;
   readonly contentFilter?: ContentFilter | null;
   /**
@@ -490,7 +501,7 @@ export type NodeContextInit = {
    * entries. Values are the capability client instances.
    *
    * Built-in capabilities (`llm`, `cache`, `prompts`, `judgeLlm`, `http`,
-   * `clock`) can also be passed here instead of as top-level fields.
+   * `clock`, `budget`) can also be passed here instead of as top-level fields.
    */
   readonly capabilities?: Partial<{ readonly [K in Capability]: CapabilityRegistry[K] | null }>;
 };

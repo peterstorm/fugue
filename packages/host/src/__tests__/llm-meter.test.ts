@@ -22,6 +22,8 @@ import {
   pricedCall,
   unpricedCall,
   usdToMicros,
+  firstBreach,
+  remainingFor,
 } from "@fuguejs/framework";
 import {
   emptyMeter,
@@ -31,6 +33,7 @@ import {
   admit,
   releaseReservation,
   learnObservedCall,
+  projectedSpend,
   type LlmMeter,
   type ReservationState,
 } from "../domain/llm-meter.js";
@@ -295,6 +298,55 @@ describe("llm-meter: reservation bounds concurrent overshoot (SC-003)", () => {
 // ---------------------------------------------------------------------------
 // Properties
 // ---------------------------------------------------------------------------
+
+describe("llm-meter: projection/read-model agreement", () => {
+  it("a projected breach exists iff remaining has an exhausted or unpriced axis (property)", () => {
+    fc.assert(fc.property(
+      fc.nat({ max: 10_000 }),
+      fc.nat({ max: 100 }),
+      fc.nat({ max: 2_000 }),
+      fc.nat({ max: 8 }),
+      fc.nat({ max: 20_000 }),
+      (settledTokens, inFlight, maxCallTokens, callLimit, tokenLimit) => {
+        const meter = accumulate(emptyMeter(), runA, {
+          tokens: settledTokens,
+          calls: 0,
+          usd: { kind: "priced", micros: micros(0) },
+        });
+        const state: ReservationState = {
+          inFlight,
+          maxObservedCall: freeCall(maxCallTokens),
+        };
+        const limits = limitsOf([tokens(tokenLimit), callsCeiling(callLimit)]);
+        const projected = projectedSpend(meter, runA, state);
+        const breach = firstBreach(projected, limits, "projected");
+        const remaining = remainingFor(limits, projected);
+        if (remaining.kind !== "budgeted") throw new Error("limits are present");
+        const exhausted = remaining.headroom.some(
+          (headroom) => headroom.kind === "unpriced" || headroom.amount === 0,
+        );
+        expect(breach !== undefined).toBe(exhausted);
+      },
+    ));
+  });
+
+  it("projection is monotone in inFlight for a learned non-negative call (property)", () => {
+    fc.assert(fc.property(
+      fc.nat({ max: 10_000 }),
+      fc.nat({ max: 1_000 }),
+      fc.nat({ max: 50 }),
+      fc.nat({ max: 50 }),
+      (settledTokens, callTokens, first, extra) => {
+        const meter = accumulate(emptyMeter(), runA, freeCall(settledTokens));
+        const maxObservedCall = freeCall(callTokens);
+        const lower = projectedSpend(meter, runA, { inFlight: first, maxObservedCall });
+        const upper = projectedSpend(meter, runA, { inFlight: first + extra, maxObservedCall });
+        expect(upper.tokens).toBeGreaterThanOrEqual(lower.tokens);
+        expect(upper.calls).toBeGreaterThanOrEqual(lower.calls);
+      },
+    ));
+  });
+});
 
 describe("llm-meter: properties", () => {
   const arbCall = fc.oneof(

@@ -49,6 +49,7 @@ const makeCtx = (overrides: Partial<BaseNodeContext> = {}): BaseNodeContext => (
   prompts: null,
   judgeLlm: null,
   clock: null,
+  budget: null,
   ...overrides,
 });
 
@@ -63,6 +64,18 @@ describe("validateCapabilities", () => {
     });
     const result = validateCapabilities(dag, makeCtx());
     expect(isOk(result)).toBe(true);
+  });
+
+  it("budget is the seventh built-in: missing fails and a read-only client satisfies it", () => {
+    const dag = defineDagFromArray({
+      id: "d",
+      nodes: [makeNode("a", ["budget"])],
+      edges: [{ from: DAG_INPUT, to: "a" }],
+    });
+    expect(isErr(validateCapabilities(dag, makeCtx()))).toBe(true);
+    expect(isOk(validateCapabilities(dag, makeCtx({
+      budget: { spent: () => ({ tokens: 0, calls: 0, usd: { kind: "priced", micros: 0 as never } }), remaining: () => ({ kind: "unbudgeted" }) },
+    })))).toBe(true);
   });
 
   it("all required capabilities present → Ok", () => {
@@ -175,7 +188,7 @@ describe("validateCapabilities", () => {
     }
   });
 
-  it("each built-in capability key claimed by a broker is rejected (llm/cache/prompts/judgeLlm/http/clock)", () => {
+  it("each built-in capability key claimed by a broker is rejected (including budget)", () => {
     for (const builtin of BUILTIN_CAPABILITY_KEYS) {
       const broker: CapabilityBroker = {
         mintFor: async () => ok({} as ScopedCapabilityHandle),

@@ -43,6 +43,12 @@ export type HostError =
   | { readonly kind: "dag-concurrency-exceeded"; readonly dagId: DagId }
   | { readonly kind: "timeout"; readonly dagId: DagId; readonly runId: RunId; readonly timeoutMs: number }
   | { readonly kind: "redis-unavailable"; readonly operation: string }
+  | {
+      readonly kind: "spend-ledger-unavailable";
+      readonly backend: "file";
+      readonly operation: "create" | "read" | "add";
+      readonly message: string;
+    }
   | { readonly kind: "bun-install-failed"; readonly message: string }
   | { readonly kind: "config-invalid"; readonly message: string }
   // A CLIENT-SUPPLIED tenant register/reconfigure body that is semantically
@@ -114,6 +120,7 @@ export const httpStatusFor = (error: HostError): number =>
     .with({ kind: "timeout" }, () => 408)
     .with({ kind: "dag-disabled" }, () => 503)
     .with({ kind: "redis-unavailable" }, () => 503)
+    .with({ kind: "spend-ledger-unavailable" }, () => 500)
     .with({ kind: "async-result-expired" }, () => 410)
     .with({ kind: "run-not-found" }, () => 404)
     .with({ kind: "run-lease-lost" }, () => 503)
@@ -168,6 +175,10 @@ export const formatHostError = (error: HostError): string =>
     .with({ kind: "dag-concurrency-exceeded" }, (e) => `concurrency limit exceeded for DAG '${e.dagId}'`)
     .with({ kind: "timeout" }, (e) => `DAG '${e.dagId}' run '${e.runId}' timed out after ${e.timeoutMs}ms`)
     .with({ kind: "redis-unavailable" }, (e) => `Redis unavailable during '${e.operation}'`)
+    .with(
+      { kind: "spend-ledger-unavailable" },
+      (e) => `file spend ledger unavailable during '${e.operation}': ${e.message}`,
+    )
     .with({ kind: "bun-install-failed" }, (e) => `bun install failed: ${e.message}`)
     .with({ kind: "config-invalid" }, (e) => `host configuration invalid: ${e.message}`)
     .with({ kind: "tenant-config-invalid" }, (e) => `tenant configuration invalid: ${e.message}`)
@@ -199,6 +210,10 @@ export const formatHostError = (error: HostError): string =>
 // ── Smart Constructors ─────────────────────────────────────────────────────
 
 export const redisUnavailable = (operation: string): HostError => ({ kind: "redis-unavailable", operation });
+export const spendLedgerUnavailable = (
+  operation: "create" | "read" | "add",
+  message: string,
+): HostError => ({ kind: "spend-ledger-unavailable", backend: "file", operation, message });
 /** Producer of `fs-purge-failed` — a local filesystem fault during grace-window mount reclamation (NOT a Redis outage). */
 export const fsPurgeFailed = (message: string): HostError => ({ kind: "fs-purge-failed", message });
 export const teamAlreadyExists = (team: string): HostError => ({ kind: "team-already-exists", team });
@@ -272,6 +287,7 @@ export const retryAfterSecondsFor = (error: HostError): number | undefined =>
         { kind: "dag-disabled" },
         { kind: "timeout" },
         { kind: "redis-unavailable" },
+        { kind: "spend-ledger-unavailable" },
         { kind: "bun-install-failed" },
         { kind: "config-invalid" },
         { kind: "tenant-config-invalid" },

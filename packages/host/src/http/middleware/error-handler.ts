@@ -53,6 +53,7 @@ const detailsFor = (error: HostError): unknown =>
           "import-failed",
           "no-default-export",
           "redis-unavailable",
+          "spend-ledger-unavailable",
           "bun-install-failed",
           "config-invalid",
           "tenant-config-invalid",

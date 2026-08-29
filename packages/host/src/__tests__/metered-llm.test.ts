@@ -37,7 +37,11 @@ import type {
   SingleShotCachePolicy,
 } from "@fuguejs/framework";
 import type { LogPort } from "../ports.js";
-import { createMeteredLlm } from "../adapters/metered-llm.js";
+import { createMeteredLlm as createMeteredLlmClient } from "../adapters/metered-llm.js";
+import {
+  createRunSpendAuthority,
+  type RunSpendAuthorityDeps,
+} from "../adapters/run-spend-authority.js";
 import { createInMemorySpendLedger } from "../adapters/spend-ledger-memory.js";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -128,6 +132,12 @@ const freshLedger = () => ({
   ledger: createInMemorySpendLedger(),
   hydrated: { kind: "known" as const, spend: NO_SPEND },
 });
+
+/** Tests the public decorator through the real shared authority. */
+const createMeteredLlm = (
+  inner: LlmClient,
+  deps: RunSpendAuthorityDeps,
+): LlmClient => createMeteredLlmClient(inner, "llm", createRunSpendAuthority(deps));
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 

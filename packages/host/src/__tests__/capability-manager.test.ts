@@ -12,7 +12,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { ok, err, isOk, isErr } from "@fuguejs/framework";
-import type { Capability, CapabilityHandle } from "@fuguejs/framework";
+import type { Capability, CapabilityHandle, LlmClient } from "@fuguejs/framework";
 import {
   topoSortHandles,
   connectAll,
@@ -392,6 +392,29 @@ describe("capability-manager", () => {
 
     it("empty handles → empty record", () => {
       expect(extractClients([])).toEqual({});
+    });
+
+    it("decorates each explicitly marked LLM once and preserves non-LLM identity", () => {
+      const llm = {} as LlmClient;
+      const plain = { query: "same-reference" };
+      const replacement = {} as LlmClient;
+      const seen: Capability[] = [];
+      const handles = [
+        { name: "judgeLlm", client: llm, clientKind: "llm" },
+        makeHandle("db", { client: plain }),
+      ] as readonly CapabilityHandle[];
+
+      const clients = extractClients(handles, {
+        llm: (name, client) => {
+          seen.push(name);
+          expect(client).toBe(llm);
+          return replacement;
+        },
+      });
+
+      expect(seen).toEqual(["judgeLlm"]);
+      expect(clients.judgeLlm).toBe(replacement);
+      expect((clients as Record<string, unknown>).db).toBe(plain);
     });
 
     it("throws on duplicate handle names (defence-in-depth past topoSort)", () => {

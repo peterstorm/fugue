@@ -75,6 +75,8 @@ export type {
   UsdCeiling,
 } from "./budget.js";
 export { breachOf, ceilings, firstBreach, formatBreach, observedOf } from "./budget.js";
+export type { BudgetCapability, CeilingHeadroom, Remaining } from "./budget-capability.js";
+export { remainingFor, snapshotSpend } from "./budget-capability.js";
 
 // ── Total error diagnostics ───────────────────────────────────────────────
 // Total (never-throwing) inspection helpers for values caught at an `unknown`

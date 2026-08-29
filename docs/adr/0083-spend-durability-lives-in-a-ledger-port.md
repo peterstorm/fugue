@@ -1,4 +1,4 @@
-# ADR-0083: Spend durability lives in a ledger port, appended lock-free
+# ADR-0083: Spend durability lives in a ledger port; Redis appends lock-free
 
 ## Status
 Accepted
@@ -57,7 +57,28 @@ type SpendLedgerPort = {
 
 **Write failures never fail the call.** The provider has already run and the tokens are already spent; refusing the result would waste them and lose the output too. What is lost is durability, so it is logged at `error` under a declared budget and `warn` without one.
 
-**Two adapters.** Redis for durability across process death; in-process for a single-process deployment, where it still carries spend across the slices of one process — the whole HITL park/resume path — and is documented as not surviving a restart.
+**Three adapters.** Redis for distributed durability; file for the F6 single-writer file runtime; in-process for a single-process deployment, where it still carries spend across the slices of one process and is documented as not surviving a restart.
+
+The file adapter is deliberately split at the ownership seam. The framework's
+high-level `createFileSpendStore` owns F6 locking, verified-directory checks,
+digest addressing, strict V1 parsing, and atomic rename. The host's
+`createFileSpendLedger(root)` only translates `FrameworkError` into the
+`spend-ledger-unavailable` HostError and satisfies `SpendLedgerPort`. It stores:
+
+```text
+<root>/<sha256(runId)>.json
+<root>/<sha256(runId)>.lock/        # transient owner
+<root>/<sha256(runId)>.lock.fence/  # lock protocol metadata
+```
+
+Unlike Redis's independently atomic field algebra, file `add` takes the per-run
+F6 lock, strictly reads the prior complete snapshot, folds `addSpend`, and
+atomically renames one replacement record. Lock-free reads therefore observe
+either the complete prior snapshot or the complete next snapshot. Corruption,
+non-integer/negative figures, crossed embedded run IDs, and symlink substitution
+are typed failures, never zero. No adapter retries `add`: its additive contract
+cannot distinguish a lost acknowledgement from a lost commit, so a blind retry
+could double-count.
 
 ## Consequences
 
@@ -69,8 +90,9 @@ type SpendLedgerPort = {
 - **An adapter that cannot increment DOWNGRADES; it does not refuse.** `createNodeContextForDag` falls back to the in-process ledger, because refusing every run over a metering capability would turn a configuration gap into an outage. The downgrade is logged at `error` naming the missing primitives and the consequence (`per-run LLM budgets reset when this process restarts`), which is the only place that fact exists — an earlier draft of this ADR claimed the host "fails at boot", which was never what the code did.
 - **Spend keys are spelled `$spend` / `$spend:unpriced`, and the `$` is load-bearing.** They share `checkpointKeyPrefix` with `buildCheckpointKey`, whose final segment is a caller-supplied `NodeId` — and `ID_PATTERN` admits the literal `spend`. A plain segment collided with the checkpoint of a node named `spend`, letting the checkpoint writer's `SET` destroy the ledger's `HASH` (Redis `SET` is type-agnostic), which silently zeroed a run's recorded spend and then permanently refused every later slice of a budgeted run on `WRONGTYPE`. `$` is outside `ID_PATTERN`, the same technique `DAG_INPUT = "$input"` uses, and `cache-keys.test.ts` proves the disjointness over arbitrary node ids rather than trusting a comment. **Any future key added beneath the checkpoint prefix inherits this constraint.**
 - Spend keys live under the same `fugue:<tenant>:` prefix as every other key, so the per-tenant ACL scopes them unchanged. Their TTL follows the checkpoint TTL and is refreshed on every append, so it measures idleness rather than age. **No configured checkpoint TTL means no spend expiry** — a record that expired while its checkpoint survived would resume the run with a refilled budget.
-- Still open: **`judgeLlm` and any other LLM client reaching a node through the capabilities bag are unmetered.** No deployment wires one today, so implementing it now would be speculative; it is tracked with the `budget` capability work.
-- Still open: **no file-backed adapter.** An F6 file-durable deployment gets the in-process ledger, so its spend survives parks but not restarts. The port is the seam that makes adding one a contained change.
+- One Run Spend Authority now owns the slice's meter and reservations. The main client, `judgeLlm`, and every boot-scoped capability-bag client explicitly marked `clientKind: "llm"` delegate to it, so client choice cannot bypass the ceiling.
+- The file adapter closes F6 restart durability without changing stock selection: the stock host remains Redis-first with its in-process fallback; a file-runtime embedder explicitly injects `createFileSpendLedger(root)` as `SharedInfra.spendLedger`.
+- File roots and retention are embedder-owned. No backend selector is inferred from `DAGS_LOCAL_PATH`, and no fsync/network-filesystem guarantee is claimed.
 
 ## Related
 

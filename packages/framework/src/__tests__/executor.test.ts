@@ -23,6 +23,7 @@ const mkCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
   prompts: null,
   llm: null, http: null,
   clock: null,
+  budget: null,
   logger: { warn: () => {}, error: () => {} },
   ...overrides,
 });

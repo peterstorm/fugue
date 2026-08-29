@@ -1,7 +1,7 @@
 # Plan: F3 — The Budget Capability
 
-**Status:** proposed
-**Branch:** `feat/f3-budget-capability`
+**Status:** complete (PR-A/B/C/D shipped in implementation branches)
+**Branch:** `feat/f3-budget-capability-surface` (PR-D completion)
 **Predecessor:** F4 (prompt caching, PR #38, merged `6b41c6e`)
 **Successor it unblocks:** F1 (dynamic fan-out)
 
@@ -536,18 +536,45 @@ a misconfigured adapter is detected in ONE place and DOWNGRADES loudly (an
 `error` log naming the missing primitives) rather than failing — refusing every
 run over a metering capability would turn a configuration gap into an outage.
 
-**The file adapter did not ship.** D3 named Redis and file. Redis and in-process
-shipped; the in-process one is a real backend for a single-process deployment,
-not a test fake. An F6 file-durable deployment therefore gets spend that
-survives parks but not restarts. The port is the seam that makes adding one
-contained.
+**The file adapter did not ship in PR-C.** D3 named Redis and file. Redis and
+in-process shipped first; PR-D subsequently added the framework File Spend
+Store and host adapter described in §14.
 
-**P4 (metering every client) stayed out.** `judgeLlm` reaching a node through
-the capabilities bag would bypass the meter — but nothing wires one today, so
-building it now would be speculative. It travels with PR-D.
+**P4 (metering every client) stayed out of PR-C.** PR-D subsequently closed it
+with typed `clientKind: "llm"` metadata and one Run Spend Authority (§14).
 
 **One test-infrastructure finding, worth recording.** `packages/host/tsconfig.json`
 excludes `src/__tests__`, so those files are NEVER typechecked. Adding a
 required field to `SharedInfra` compiled cleanly and then failed at runtime in
 six fixtures. Out of scope to fix here, but it means the host's largest test
 directory has no compile-time contract with the code it tests.
+
+---
+
+## 14. PR-D, as built — F3 complete
+
+PR-D shipped the seventh built-in, read-only `budget` capability. `spent()`
+returns a fresh deeply immutable settled snapshot; `remaining()` returns
+admission-safe projected headroom using the same `projectedSpend` function as
+the next admission gate. Reached numeric axes clamp to zero and unknown USD
+cost remains an explicit `unpriced` union member.
+
+The mutable accounting cell moved from each decorator into one
+`RunSpendAuthority` per execution slice. `ctx.llm`, `judgeLlm`, and every custom
+boot-scoped LLM handle marked `clientKind: "llm"` delegate to that authority and
+therefore share one meter, reservation state, ledger, ceiling, budget view, and
+client-key-attributed logs. The conditional `CapabilityHandle` type requires the
+marker for LLM clients and forbids it for non-LLM clients; no structural runtime
+detection was introduced.
+
+File durability shipped as a high-level `createFileSpendStore` on
+`@fuguejs/framework/file`, with strict V1 records, digest ownership,
+verified-directory/symlink checks, one F6 lock domain per run, and whole-record
+atomic replacement. The host's `createFileSpendLedger` is a thin
+`FrameworkError` → `spend-ledger-unavailable` adapter. Stock Redis-first wiring
+and the in-process fallback remain unchanged; file-runtime embedders inject the
+adapter explicitly.
+
+This closes P3, P4, and the PR-C file gap. The remaining deferred work in §9
+(concurrency slots, non-LLM registered meters, cross-run budgets, live pricing,
+and retry-policy unification) remains intentionally out of scope.

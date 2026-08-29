@@ -77,6 +77,19 @@ describe("mergeScopedCapabilities — reserved keys never clobbered (A11)", () =
     expect(merged.llm).toBe(base.llm);
   });
 
+  test("a minted 'budget' cannot replace the runtime-owned read authority", () => {
+    const budget = {
+      spent: () => ({ tokens: 0, calls: 0, usd: { kind: "priced" as const, micros: 0 as never } }),
+      remaining: () => ({ kind: "unbudgeted" as const }),
+    };
+    const base = makeNodeContext({ runId: "run-merge", dagId: "dag-merge", budget });
+    const merged = mergeScopedCapabilities(
+      base,
+      { budget: { poisoned: true } } as unknown as ScopedCapabilityHandle,
+    );
+    expect(merged.budget).toBe(budget);
+  });
+
   test("an empty (or all-null) mint result returns the base context BY REFERENCE (byte-identical no-op)", () => {
     const base = makeBase();
     expect(mergeScopedCapabilities(base, {} as ScopedCapabilityHandle)).toBe(base);

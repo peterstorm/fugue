@@ -30,7 +30,7 @@ const mkCtx = (): NodeContext => ({
   judgeLlm: null,
   cache: null,
   prompts: null,
-  llm: null, http: null, clock: null,
+  llm: null, http: null, clock: null, budget: null,
   logger: { warn: () => {}, error: () => {} },
 });
 

@@ -183,7 +183,7 @@ Exceptions are **invisible in the type system**. Any function can throw anything
 
 Each node declares `requires: readonly Capability[]` (e.g., `["llm", "prompts"]`). At run start — **before any node executes** — the runtime validates that the wired context satisfies all declared capabilities. The node's `run` function receives a narrowed `TypedNodeContext<R>` where required fields are guaranteed non-null.
 
-The capability set is **extensible** (ADR-0051): beyond the built-ins (`llm`, `cache`, `prompts`, `judgeLlm`, `http`, `clock`), adapter packages register new capabilities — e.g. `documents` (file I/O), `db` (Postgres) — by augmenting `CapabilityRegistry`. A node then declares `requires: ["db"] as const` and gets a typed, non-null `ctx.db`. Run `fugue capabilities` for the live built-in list; see `adapter-authoring.md` to write an adapter and `llm-document-source.md` for reading files.
+The capability set is **extensible** (ADR-0051): beyond the built-ins (`llm`, `cache`, `prompts`, `judgeLlm`, `http`, `clock`, `budget`), adapter packages register new capabilities — e.g. `documents` (file I/O), `db` (Postgres) — by augmenting `CapabilityRegistry`. A node then declares `requires: ["db"] as const` and gets a typed, non-null `ctx.db`. Run `fugue capabilities` for the live built-in list; see `adapter-authoring.md` to write an adapter and `llm-document-source.md` for reading files.
 
 ### What It Catches
 
@@ -1042,17 +1042,45 @@ Cost is computed from the prompt-cache split, so a cached run and an uncached on
 
 Omitting every ceiling means no enforcement: calls are still metered and logged (`llm.metered`), never refused.
 
+Nodes can declare the read-only Budget Capability and adapt before they fan out:
+
+```ts
+const plan = createFetchNode({
+  id: "plan",
+  requires: ["budget"] as const,
+  // `remaining()` uses the SAME projection as admission, including reservations.
+  fetch: async (_input, ctx) => {
+    const remaining = ctx.budget.remaining();
+    const spent = ctx.budget.spent(); // settled, deeply immutable snapshot
+    return ok({ remaining, spent });
+  },
+  // ...schemas/side effects...
+});
+```
+
+`remaining()` returns `{ kind: "unbudgeted" }` when no ceiling exists. Otherwise
+it returns canonical per-axis headroom with `basis: "projected"`; numeric
+headroom clamps at zero, while unknown cost under a USD ceiling is an explicit
+`{ kind: "unpriced", models, observedAtLeast }` member. Budget reads can affect
+retry-time decisions, just like clock reads can affect time-dependent nodes, so
+node tests should inject `fixedBudgetCapability` from
+`@fuguejs/framework/testing`.
+
 ### Why It Matters
 
 Before prompt caching, a token count was a serviceable proxy for money. It no longer is: a cache read bills at 0.1x and a write at up to 2.0x, so three runs reporting the same 110,000 tokens can span **13.8x** in real cost. A ceiling that cannot see that difference is not protecting a budget.
 
 Overshoot is bounded rather than eliminated: the check runs before the call against spend that settles after it, so exactly one call passes a reached ceiling in the sequential case, and a concurrency reservation bounds the parallel case. See ADR-0082.
 
-**Spend is durable.** A resumable run builds a fresh NodeContext per execution slice, so the in-process counter alone would let a run that parks for a human decision resume with its budget refilled — five parks, six budgets. A spend ledger (Redis, or in-process for a single-process deployment) is hydrated once when a slice starts and appended to as calls settle, so a run that parked already over its ceiling refuses immediately on resume.
+**Spend is durable.** A resumable run builds a fresh NodeContext per execution slice, so the in-process counter alone would let a run that parks for a human decision resume with its budget refilled — five parks, six budgets. A spend ledger (Redis, file, or in-process for a single-process deployment) is hydrated once when a slice starts and appended to as calls settle, so a run that parked already over its ceiling refuses immediately on resume.
 
 A budgeted run whose ledger cannot be READ refuses the slice: an unreadable ledger is indistinguishable from a spent one, and assuming zero is the refill bug by another name. An unbudgeted run carries on — there is no ceiling to protect. A failed ledger WRITE never fails the call, because the tokens are already spent; it is logged at `error` under a declared budget.
 
-**Known gaps:** an LLM client reaching a node through the capabilities bag (rather than `ctx.llm`) is unmetered — no deployment wires one today. And an F6 file-durable deployment gets the in-process ledger, so its spend survives parks but not process restarts. Both are tracked in `docs/plans/2026-08-27-f3-budget-capability.md`.
+One Run Spend Authority meters `ctx.llm`, `judgeLlm`, and every custom
+boot-scoped `CapabilityHandle` marked `clientKind: "llm"`. They share one
+reservation gate, spent view, ceiling, and ledger. File-durable embedders can
+inject the host's `createFileSpendLedger(root)` adapter; the stock host remains
+Redis-first and retains its in-process fallback.
 
 ---
 

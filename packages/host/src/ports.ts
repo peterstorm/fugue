@@ -321,9 +321,9 @@ export type SharedInfra = {
  * decision and resumes starts from zero — five parks, six budgets.
  *
  * Two operations, deliberately: hydrate once when a slice starts, append once
- * per settled call. `add` is not a read-modify-write, so it needs no lock and
- * no compare-and-swap — see `domain/spend-record.ts` for why the encoding makes
- * that true.
+ * per settled call. The seam requires monotone commutative append semantics,
+ * not one persistence protocol: Redis maps the algebra to lock-free atomic
+ * fields; the file adapter serializes whole-snapshot replacement per run.
  */
 export type SpendLedgerPort = {
   /**
@@ -338,9 +338,8 @@ export type SpendLedgerPort = {
    */
   readonly read: (runId: RunId) => Promise<Result<Spend, HostError>>;
   /**
-   * Append one settled call's spend. Monotone and commutative — the stored
-   * figures are sums and a set union, so concurrent appends cannot corrupt the
-   * record whatever order they land in.
+   * Append one settled call's spend. Monotone and commutative — adapters must
+   * preserve every delta under concurrent calls, whatever settlement order.
    *
    * Returns no total: the in-process meter already knows the run's figure, and
    * a total assembled from several independent atomic commands could disagree

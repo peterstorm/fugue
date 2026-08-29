@@ -39,7 +39,8 @@ import { invocationOriginForIdentity, subjectTokenForIdentity } from "../domain/
 import type { NodeContextForDag } from "../domain/run-context.js";
 import type { SubjectToken } from "../domain/auth.js";
 import { createMeteredLlm } from "./metered-llm.js";
-import type { HydratedSpend } from "./metered-llm.js";
+import { createRunSpendAuthority } from "./run-spend-authority.js";
+import type { HydratedSpend } from "./run-spend-authority.js";
 import { ceilingsOf } from "../domain/llm-budget.js";
 import { createRedisSpendLedger, spendLedgerRedis } from "./spend-ledger-redis.js";
 
@@ -433,13 +434,12 @@ export const createNodeContextForDag = async (
     tenant = tenantResult.value;
   }
 
-  // Wrap the shared LLM client in a per-run metered decorator: every call is
-  // attributed (dagId, runId, nodeId), aggregated, and budget-checked in-process
-  // (no network round trip). When `llmBudgetTokens` is unset the decorator meters
-  // but never refuses (FR-W1-006). One decorator per NodeContext → run-scoped
-  // counter. @satisfies FR-W0-001 FR-W0-004 FR-W1-001..006 (FR-W2-009:
-  // LLM authority is deliberately run-scoped here — the metered decorator is
-  // the per-run budget authority; see keycloak-broker.ts)
+  // Create one Run Spend Authority per execution slice. The main client and
+  // every capability-bag client explicitly marked `clientKind: "llm"` receive
+  // thin decorators delegating to this same meter/reservation/ledger cell.
+  // When no ceiling exists the authority still meters and exposes an
+  // unbudgeted read view, but never refuses (FR-W1-006).
+  // @satisfies FR-W0-001 FR-W0-004 FR-W1-001..006 FR-B-010 FR-B-012
   const limits = ceilingsOf(dag.config);
 
   // The DURABLE half of the budget. The meter itself is per-NodeContext, and a
@@ -498,21 +498,25 @@ export const createNodeContextForDag = async (
     });
   }
 
-  // Two arms because `MeteredLlmDeps` couples them: a declared budget obliges a
+  // Two arms because `RunSpendAuthorityDeps` couples them: a declared budget obliges a
   // KNOWN prior spend, which the fail-closed throw above has already guaranteed.
   // The compiler now enforces what that throw establishes.
   const meterBase = { dagId, runId, ledger: spendLedger, logger: shared.logger };
   const priorSpend: HydratedSpend = hydrated.ok
     ? { kind: "known", spend: hydrated.value }
     : { kind: "unknown" };
-  const llm =
+  const authority =
     limits !== undefined && hydrated.ok
-      ? createMeteredLlm(shared.llm, {
+      ? createRunSpendAuthority({
           ...meterBase,
           limits,
           hydrated: { kind: "known", spend: hydrated.value },
         })
-      : createMeteredLlm(shared.llm, { ...meterBase, hydrated: priorSpend });
+      : createRunSpendAuthority({ ...meterBase, hydrated: priorSpend });
+  const llm = createMeteredLlm(shared.llm, "llm", authority);
+  const capabilities = extractClients(shared.capabilities, {
+    llm: (clientKey, client) => createMeteredLlm(client, clientKey, authority),
+  });
 
   const cache = createNamespacedCache(shared.redis, tenant, dagId, ttl.cacheTtlSec, shared.logger);
   const checkpointWriter = createNamespacedCheckpointWriter(
@@ -571,6 +575,7 @@ export const createNodeContextForDag = async (
     dagId,
     tracer: shared.tracer,
     llm,
+    budget: authority.budget,
     cache,
     checkpointWriter,
     signal,
@@ -578,7 +583,7 @@ export const createNodeContextForDag = async (
     prompts: promptAccess,
     // The boot-scoped static client set. Per-node minted scope handles (when a
     // broker is wired) are merged OVER this by the framework at dispatch.
-    capabilities: extractClients(shared.capabilities),
+    capabilities,
   });
 
   return { ctx, origin };

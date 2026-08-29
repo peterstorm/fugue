@@ -1,0 +1,107 @@
+import { describe, expect, it } from "bun:test";
+import {
+  ceilings,
+  dagId,
+  nodeId,
+  ok,
+  runId,
+  tokensOnly,
+  type LlmResponse,
+  type Result,
+  type FrameworkError,
+} from "@fuguejs/framework";
+import { createRunSpendAuthority } from "../adapters/run-spend-authority.js";
+import { createInMemorySpendLedger } from "../adapters/spend-ledger-memory.js";
+
+const limits = ceilings([{ kind: "tokens", limit: 30 }])!;
+const request = { nodeId: nodeId("authority-node"), model: "m" };
+const response = (): Result<LlmResponse<unknown>, FrameworkError> =>
+  ok({ output: {}, ...tokensOnly(10, 0), rawText: "" });
+const logger = { info: () => {}, warn: () => {}, error: () => {} };
+
+const deferred = <T>() => {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+};
+
+describe("RunSpendAuthority", () => {
+  it("remaining includes every shared in-flight reservation and agrees with admission", async () => {
+    const authority = createRunSpendAuthority({
+      dagId: dagId("authority-dag"),
+      runId: runId("authority-run"),
+      limits,
+      hydrated: { kind: "known", spend: { tokens: 0, calls: 0, usd: { kind: "priced", micros: 0 as never } } },
+      ledger: createInMemorySpendLedger(),
+      logger,
+    });
+
+    // Learn a 10-token estimate before exercising concurrent reservations.
+    await authority.execute({
+      clientKey: "llm",
+      operation: "sendStructured",
+      request,
+      call: async () => response(),
+    });
+
+    const main = deferred<Result<LlmResponse<unknown>, FrameworkError>>();
+    const judge = deferred<Result<LlmResponse<unknown>, FrameworkError>>();
+    const mainCall = authority.execute({
+      clientKey: "llm",
+      operation: "sendStructured",
+      request,
+      call: () => main.promise,
+    });
+    await Promise.resolve();
+    expect(authority.budget.remaining()).toMatchObject({
+      kind: "budgeted",
+      headroom: [{ kind: "available", amount: 10 }],
+    });
+
+    const judgeCall = authority.execute({
+      clientKey: "judgeLlm",
+      operation: "sendStructured",
+      request,
+      call: () => judge.promise,
+    });
+    await Promise.resolve();
+    expect(authority.budget.remaining()).toMatchObject({
+      kind: "budgeted",
+      headroom: [{ kind: "available", amount: 0 }],
+    });
+
+    let providerCalls = 0;
+    const refused = await authority.execute({
+      clientKey: "llm",
+      operation: "sendStructured",
+      request,
+      call: async () => {
+        providerCalls += 1;
+        return response();
+      },
+    });
+    expect(refused.ok).toBe(false);
+    expect(providerCalls).toBe(0);
+
+    main.resolve(response());
+    judge.resolve(response());
+    expect((await mainCall).ok).toBe(true);
+    expect((await judgeCall).ok).toBe(true);
+    expect(authority.budget.spent().tokens).toBe(30);
+  });
+
+  it("spent returns fresh deeply immutable snapshots", async () => {
+    const authority = createRunSpendAuthority({
+      dagId: dagId("authority-dag"),
+      runId: runId("snapshot-run"),
+      hydrated: { kind: "known", spend: { tokens: 0, calls: 0, usd: { kind: "priced", micros: 0 as never } } },
+      ledger: createInMemorySpendLedger(),
+      logger,
+    });
+    const first = authority.budget.spent();
+    const second = authority.budget.spent();
+    expect(first).not.toBe(second);
+    expect(Object.isFrozen(first)).toBe(true);
+    expect(Object.isFrozen(first.usd)).toBe(true);
+  });
+});

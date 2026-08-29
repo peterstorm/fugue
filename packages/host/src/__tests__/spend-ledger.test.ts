@@ -12,14 +12,18 @@
  * command semantics Redis guarantees.
  */
 
-import { describe, it, expect } from "bun:test";
+import { afterAll, describe, it, expect } from "bun:test";
 import * as fc from "fast-check";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { runId as makeRunId, dagId as makeDagId, ok, err } from "@fuguejs/framework";
 import type { MicroUsd, RunId, Spend } from "@fuguejs/framework";
 import { NO_SPEND, addSpend, pricedCall, unpricedCall } from "@fuguejs/framework";
 import type { RedisPort, SpendLedgerPort } from "../ports.js";
 import { createInMemorySpendLedger } from "../adapters/spend-ledger-memory.js";
 import { createRedisSpendLedger, spendLedgerRedis } from "../adapters/spend-ledger-redis.js";
+import { createFileSpendLedger } from "../adapters/spend-ledger-file.js";
 import { tenantId } from "../domain/tenant.js";
 
 const micros = (n: number): MicroUsd => n as MicroUsd;
@@ -94,9 +98,22 @@ const redisLedger = (): SpendLedgerPort => {
   });
 };
 
+const fileRoots: string[] = [];
+afterAll(() => {
+  for (const root of fileRoots) rmSync(root, { recursive: true, force: true });
+});
+const fileLedger = (): SpendLedgerPort => {
+  const root = mkdtempSync(join(tmpdir(), "fugue-host-spend-"));
+  fileRoots.push(root);
+  const created = createFileSpendLedger(root);
+  if (!created.ok) throw new Error("temp directory should construct a file ledger");
+  return created.value;
+};
+
 const BACKENDS: readonly (readonly [string, () => SpendLedgerPort])[] = [
   ["in-memory", () => createInMemorySpendLedger()],
   ["redis", redisLedger],
+  ["file", fileLedger],
 ];
 
 const readOrThrow = async (ledger: SpendLedgerPort, runId: RunId): Promise<Spend> => {
@@ -185,6 +202,14 @@ for (const [name, build] of BACKENDS) {
         ),
         { numRuns: 25 },
       );
+    });
+
+    it("concurrent appends preserve every delta", async () => {
+      const ledger = build();
+      const deltas = Array.from({ length: 12 }, (_, index) => pricedCall(index + 1, micros(index + 2)));
+      const results = await Promise.all(deltas.map((delta) => ledger.add(runA, delta)));
+      expect(results.every((result) => result.ok)).toBe(true);
+      expect(await readOrThrow(ledger, runA)).toEqual(deltas.reduce(addSpend, NO_SPEND));
     });
 
     it("agrees with addSpend — the ledger cannot disagree with the in-process meter", async () => {

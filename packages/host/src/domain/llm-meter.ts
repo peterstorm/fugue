@@ -145,6 +145,17 @@ export const emptyReservation: ReservationState = {
 };
 
 /**
+ * Admission-safe spend projection shared by enforcement and the budget read
+ * model. One formula prevents concurrent reservations from being presented as
+ * available headroom while the next call's gate already considers them spent.
+ */
+export const projectedSpend = (
+  meter: LlmMeter,
+  runId: RunId,
+  state: ReservationState,
+): Spend => addSpend(spendFor(meter, runId), scaleSpend(state.maxObservedCall, state.inFlight));
+
+/**
  * Outcome of the reservation-aware pre-call gate. An `admit` carries the next
  * reservation state; a `refuse` carries the breach that caused it plus the
  * figures the shell logs. Illegal blends are unrepresentable.
@@ -207,8 +218,7 @@ export const admit = (
   const settledBreach = firstBreach(settled, limits, "settled");
   if (settledBreach !== undefined) return refusal(settledBreach);
 
-  const projected = addSpend(settled, scaleSpend(state.maxObservedCall, state.inFlight));
-  const projectedBreach = firstBreach(projected, limits, "projected");
+  const projectedBreach = firstBreach(projectedSpend(meter, runId, state), limits, "projected");
   if (projectedBreach !== undefined) return refusal(projectedBreach);
 
   return { kind: "admit", state: reserve(state) };

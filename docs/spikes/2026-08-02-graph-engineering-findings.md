@@ -173,6 +173,12 @@ This is a **precondition for F1**, not a follow-up.
 > node-visible capability, and coverage of only one LLM client. See
 > `docs/plans/2026-08-27-f3-budget-capability.md` §1 and ADR-0082. The proposed
 > `spend()` was deliberately not built; see ADR-0082 for why.
+>
+> **Completed, 2026-08-30.** F3 now ships the seventh built-in `budget`
+> capability (`spent()` / admission-safe projected `remaining()`), one Run
+> Spend Authority shared by main, judge, and explicitly marked custom LLM
+> clients, plus Redis/in-process/file ledger adapters. ADR-0083 records the
+> durability and settled-call error policy.
 
 ### F4 — Prompt caching is entirely absent (10× economics gap)
 

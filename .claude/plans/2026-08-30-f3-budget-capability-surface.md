@@ -4,6 +4,7 @@
 **Authoritative decisions:** `docs/adr/0082-budgets-are-denominated-in-spend-not-tokens.md`, `docs/adr/0083-spend-durability-lives-in-a-ledger-port.md`, `CONTEXT.md`
 **Branch:** `feat/f3-budget-capability-surface`
 **Created:** 2026-08-30
+**Status:** Implemented — all four phases complete (2026-08-30)
 
 ## Summary
 
@@ -579,3 +580,15 @@ The existing host test-directory typecheck exclusion remains out of scope (remov
 8. Confirm `fugue capabilities` lists exactly seven built-ins and describes `budget` as read-only.
 9. Run a temp-directory restart scenario: settle through main and judge/custom clients, create a fresh file ledger/context for the same `runId`, and verify `spent()` rehydrates and the next call is refused at the shared ceiling.
 10. Run dead-export/reference checks for the replaced decorator-local dependency types; do not leave compatibility aliases for internal unshipped symbols.
+
+## Completion Record
+
+All four phases shipped together on the planned branch. The implementation kept
+ADR-0082/0083's settled-call policy, extracted the shared Run Spend Authority,
+added typed LLM-handle metadata and the seventh built-in, and added the locked
+atomic framework File Spend Store plus host adapter. Focused property/unit/
+integration/contract tests cover projection agreement, shared main/judge/custom
+accounting, strict file corruption/symlink handling, concurrent adds, and fresh
+file-ledger rehydration. Product docs, ADR-0083, `CONTEXT.md`, migration docs,
+changelog, original F3 plan, and the superseded spike were updated in the same
+change.
