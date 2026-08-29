@@ -8,7 +8,7 @@
  * for operations that can fail, making failure explicit at the type level.
  */
 
-import type { Result, DagId, GitSha, LlmClient, Tracer, PromptAccess } from "@fuguejs/framework";
+import type { Result, DagId, GitSha, LlmClient, Tracer, PromptAccess, RunId, Spend } from "@fuguejs/framework";
 import type { CapabilityHandle } from "@fuguejs/framework";
 import type { HostError } from "./domain/host-error.js";
 import type { DagRegistration } from "./domain/dag-registration.js";
@@ -208,6 +208,24 @@ export type RedisPort = {
     value: string,
     opts: { expiresInSec: number },
   ) => Promise<Result<"not-present" | "created" | "exists", HostError>>;
+  /**
+   * Atomically add `by` to a hash field, creating the key and field at zero
+   * first. Optional so existing `RedisPort` fakes stay valid; the spend ledger
+   * parses it once at construction rather than null-checking per call.
+   *
+   * This is the primitive that lets a run's durable spend be appended without a
+   * read-modify-write: the stored figures are sums, `HINCRBY` is an atomic sum,
+   * so two concurrent writers cannot lose an increment between them.
+   */
+  readonly hIncrBy?: (key: string, field: string, by: number) => Promise<Result<number, HostError>>;
+  /** Read every field of a hash. An absent key yields an empty record, not an error. */
+  readonly hGetAll?: (key: string) => Promise<Result<Readonly<Record<string, string>>, HostError>>;
+  /**
+   * Set a key's idle TTL. Distinct from `compareAndExpire`, which guards on a
+   * value first: the ledger has no value to guard on because it never reads
+   * before writing, and refreshing a TTL it just appended to needs no guard.
+   */
+  readonly expire?: (key: string, seconds: number) => Promise<Result<boolean, HostError>>;
 }
 
 /**
@@ -263,6 +281,16 @@ export type RedisPubSubPort = {
 export type SharedInfra = {
   readonly llm: LlmClient;
   readonly redis: RedisPort;
+  /**
+   * FALLBACK per-run spend ledger — not usually the one that gets used.
+   *
+   * `createNodeContextForDag` builds a Redis-backed ledger per NodeContext
+   * whenever the wired `RedisPort` offers `hIncrBy`/`hGetAll`/`expire`, and only
+   * falls back to this one when it does not (loudly: that downgrade costs
+   * durability across process restarts and is logged at `error`). A reader of
+   * this field alone would otherwise assume it is what a run consults.
+   */
+  readonly spendLedger: SpendLedgerPort;
   readonly tracer: Tracer;
   readonly contentFilter: ContentFilter | null;
   readonly prompts: PromptAccess | null;
@@ -281,6 +309,45 @@ export type SharedInfra = {
 // NOT here. They are domain concepts (a handle over the circuit ADT + its thresholds),
 // so keeping them in domain preserves the ports → domain dependency direction rather
 // than inverting it. See circuit-guard.ts.
+
+// ── Spend Ledger ────────────────────────────────────────────────────────────
+
+/**
+ * Durable per-run LLM spend.
+ *
+ * The in-process meter is the authority WITHIN one execution slice; this port
+ * is what makes a run's spend survive BETWEEN them. A resumable run builds a
+ * fresh NodeContext per slice, so without it a run that parks for a human
+ * decision and resumes starts from zero — five parks, six budgets.
+ *
+ * Two operations, deliberately: hydrate once when a slice starts, append once
+ * per settled call. `add` is not a read-modify-write, so it needs no lock and
+ * no compare-and-swap — see `domain/spend-record.ts` for why the encoding makes
+ * that true.
+ */
+export type SpendLedgerPort = {
+  /**
+   * Spend already recorded for a run. An unknown run reads as `NO_SPEND`, not
+   * an error — "never seen" and "seen, spent nothing" are the same fact, and
+   * the budget check treats them identically.
+   *
+   * An infrastructure failure IS an error, and the caller must fail closed on
+   * it: an unreadable ledger is indistinguishable from a spent one, and
+   * guessing zero is precisely the refill-on-resume bug this port exists to
+   * close.
+   */
+  readonly read: (runId: RunId) => Promise<Result<Spend, HostError>>;
+  /**
+   * Append one settled call's spend. Monotone and commutative — the stored
+   * figures are sums and a set union, so concurrent appends cannot corrupt the
+   * record whatever order they land in.
+   *
+   * Returns no total: the in-process meter already knows the run's figure, and
+   * a total assembled from several independent atomic commands could disagree
+   * with a concurrent writer's view. Nothing would be able to trust it.
+   */
+  readonly add: (runId: RunId, delta: Spend) => Promise<Result<void, HostError>>;
+};
 
 // ── Token Store ─────────────────────────────────────────────────────────────
 

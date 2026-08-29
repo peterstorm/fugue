@@ -153,7 +153,11 @@ to zero would make an unpriced model **free**, which fails open. So:
 ```ts
 export type PricedSpend =
   | { readonly kind: "priced";   readonly micros: MicroUsd }
-  | { readonly kind: "unpriced"; readonly models: ReadonlySet<string> };  // non-empty
+  | { readonly kind: "unpriced"; readonly models: UnpricedModels; readonly knownMicros: MicroUsd };
+// As shipped (`framework/src/types/spend.ts`): `UnpricedModels` is a NON-EMPTY
+// readonly ARRAY, not a Set — sorted and de-duplicated so `addSpend` stays
+// commutative under structural equality — and `knownMicros` carries the priced
+// portion as a lower bound, which is what makes a refusal message actionable.
 ```
 
 `unpriced` is absorbing under addition: `priced + unpriced = unpriced`, carrying the union
@@ -505,3 +509,45 @@ to exactly its four figures, with a regression test.
 
 **ADR-0083 was not written.** It records a decision about the ledger port, which
 this change does not build. It belongs with PR-C.
+
+---
+
+## 13. PR-C, as built
+
+The durable ledger shipped. Deviations from §D3:
+
+**The encoding, not a lock, is what makes appends safe.** D3 assumed `add` would
+be an atomic increment and left it there. Working through it surfaced that
+`Spend` is not purely numeric — `unpriced` carries a SET of model names — so a
+single `HINCRBY` could not express it. The record is three sums plus a set
+union, which is exactly `Spend`'s monoid, and Redis has an atomic primitive for
+each. Concurrent appends therefore need no lock, no CAS, and no transaction.
+That property is now the reason the design is what it is, and it is pinned by an
+order-independence property test run against both adapters.
+
+**`add` returns nothing**, where D3 had it return the new total. A total
+assembled from several independent atomic commands can disagree with a
+concurrent writer's view, so nothing could trust it — and the in-process meter
+already knows the figure.
+
+**`RedisPort` grew three methods** (`hIncrBy`, `hGetAll`, `expire`), all generic
+Redis primitives rather than domain-shaped ones, parsed once at construction so
+a misconfigured adapter is detected in ONE place and DOWNGRADES loudly (an
+`error` log naming the missing primitives) rather than failing — refusing every
+run over a metering capability would turn a configuration gap into an outage.
+
+**The file adapter did not ship.** D3 named Redis and file. Redis and in-process
+shipped; the in-process one is a real backend for a single-process deployment,
+not a test fake. An F6 file-durable deployment therefore gets spend that
+survives parks but not restarts. The port is the seam that makes adding one
+contained.
+
+**P4 (metering every client) stayed out.** `judgeLlm` reaching a node through
+the capabilities bag would bypass the meter — but nothing wires one today, so
+building it now would be speculative. It travels with PR-D.
+
+**One test-infrastructure finding, worth recording.** `packages/host/tsconfig.json`
+excludes `src/__tests__`, so those files are NEVER typechecked. Adding a
+required field to `SharedInfra` compiled cleanly and then failed at runtime in
+six fixtures. Out of scope to fix here, but it means the host's largest test
+directory has no compile-time contract with the code it tests.

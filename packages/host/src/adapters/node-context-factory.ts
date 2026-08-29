@@ -39,7 +39,9 @@ import { invocationOriginForIdentity, subjectTokenForIdentity } from "../domain/
 import type { NodeContextForDag } from "../domain/run-context.js";
 import type { SubjectToken } from "../domain/auth.js";
 import { createMeteredLlm } from "./metered-llm.js";
+import type { HydratedSpend } from "./metered-llm.js";
 import { ceilingsOf } from "../domain/llm-budget.js";
+import { createRedisSpendLedger, spendLedgerRedis } from "./spend-ledger-redis.js";
 
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -63,13 +65,6 @@ import { formatHostError } from "../domain/host-error.js";
 
 // ── Adapters (wrap Redis with namespacing) ─────────────────────────────────
 
-/**
- * Create a ContextCacheAdapter that prefixes all keys with the tenant + DAG
- * namespace. Applies per-DAG TTL override when set is called without an explicit TTL.
- *
- * @satisfies FR-013 — Keys prefixed with tenant + DAG namespace
- * @satisfies FR-041 — Per-DAG TTL override applied
- */
 /**
  * Track consecutive failures of one Redis-backed operation and escalate the log
  * level once they stop looking like a blip.
@@ -128,6 +123,13 @@ const failureEscalator = (opts: {
 /** Consecutive Redis failures before a warn becomes an error (see `failureEscalator`). */
 const FAILURE_ESCALATION_THRESHOLD = 10;
 
+/**
+ * Create a ContextCacheAdapter that prefixes all keys with the tenant + DAG
+ * namespace. Applies per-DAG TTL override when set is called without an explicit TTL.
+ *
+ * @satisfies FR-013 — Keys prefixed with tenant + DAG namespace
+ * @satisfies FR-041 — Per-DAG TTL override applied
+ */
 export const createNamespacedCache = (
   redis: RedisPort,
   tenant: TenantId,
@@ -135,17 +137,28 @@ export const createNamespacedCache = (
   defaultTtlSec: number | undefined,
   logger: LogPort,
 ): ContextCacheAdapter => {
+  // One binding for the three sites that log from this factory, matching the
+  // idiom `createNamespacedCheckpointWriter` below already uses. Two of them
+  // previously wrote the same closure inline and the third called through
+  // differently-shaped, so a reader had to re-derive that all three were the
+  // same thing.
+  const report = (
+    level: "warn" | "error",
+    message: string,
+    context: Record<string, unknown>,
+  ): void => reportWithoutThrowing(logger, level, message, context);
+
   const getFailures = failureEscalator({
     threshold: FAILURE_ESCALATION_THRESHOLD,
     warnMessage: "Cache get failed — graceful degradation to miss",
     errorMessage: "Cache get failures exceeded threshold — Redis may be degraded",
-    report: (level, message, context) => reportWithoutThrowing(logger, level, message, context),
+    report,
   });
   const setFailures = failureEscalator({
     threshold: FAILURE_ESCALATION_THRESHOLD,
     warnMessage: "Cache set failed — Redis error",
     errorMessage: "Cache set failures exceeded threshold — Redis may be degraded",
-    report: (level, message, context) => reportWithoutThrowing(logger, level, message, context),
+    report,
   });
 
   return {
@@ -163,7 +176,7 @@ export const createNamespacedCache = (
         return { hit: true, value: JSON.parse(raw) };
       } catch (e) {
         // Corrupted entry — treat as miss
-        reportWithoutThrowing(logger, "warn", "Cache entry corrupted — treating as miss", {
+        report("warn", "Cache entry corrupted — treating as miss", {
           key: fullKey,
           dagId,
           rawPreview: raw?.slice(0, 100),
@@ -428,12 +441,78 @@ export const createNodeContextForDag = async (
   // LLM authority is deliberately run-scoped here — the metered decorator is
   // the per-run budget authority; see keycloak-broker.ts)
   const limits = ceilingsOf(dag.config);
-  const llm = createMeteredLlm(shared.llm, {
-    dagId,
-    runId,
-    ...(limits !== undefined ? { limits } : {}),
-    logger: shared.logger,
-  });
+
+  // The DURABLE half of the budget. The meter itself is per-NodeContext, and a
+  // resumable run builds a fresh NodeContext per execution slice, so without a
+  // ledger a run that parks for a human decision and resumes would start from
+  // zero spend — five parks, six budgets. The ledger is read ONCE here and
+  // appended to as calls settle.
+  //
+  // Redis-backed when the adapter offers the primitives; otherwise the
+  // process-wide in-memory ledger from SharedInfra, which still carries spend
+  // across the slices of one process (the whole HITL park/resume path in a
+  // single-process deployment) and is honest about not surviving a restart.
+  const ledgerRedis = spendLedgerRedis(shared.redis);
+  if (!ledgerRedis.ok) {
+    // NOT silent. Falling back trades durable, cross-process spend for a
+    // process-local map, so a budgeted run silently regains its full ceiling on
+    // every restart — the refill bug this whole feature closes, reintroduced by
+    // configuration rather than by code. `error`, because an operator who set a
+    // budget is relying on a guarantee that is no longer being provided, and
+    // the only place that fact exists is this line.
+    reportWithoutThrowing(shared.logger, "error", "Spend ledger is NOT durable — falling back to the in-process backend", {
+      dagId: dagId as string,
+      runId: runId as string,
+      reason: formatHostError(ledgerRedis.error),
+      consequence: "per-run LLM budgets reset when this process restarts",
+    });
+  }
+  const spendLedger = ledgerRedis.ok
+    ? createRedisSpendLedger({
+        redis: ledgerRedis.value,
+        tenant,
+        dagId,
+        logger: shared.logger,
+        ...(ttl.checkpointTtlSec !== undefined ? { ttlSec: ttl.checkpointTtlSec } : {}),
+      })
+    : shared.spendLedger;
+
+  const hydrated = await spendLedger.read(runId);
+  // FAIL CLOSED (FR-B-007). An unreadable ledger is indistinguishable from a
+  // spent one, and assuming zero is exactly the refill-on-resume bug the ledger
+  // exists to close — so a BUDGETED run refuses to start a slice it cannot
+  // account for. An UNBUDGETED run carries on: there is no ceiling to protect,
+  // and failing it would turn a metering outage into an availability outage.
+  if (!hydrated.ok && limits !== undefined) {
+    throw new Error(
+      `createNodeContextForDag: DAG '${dagId}' declares an LLM budget but its spend ledger ` +
+        `could not be read for run '${runId}' — refusing to run a budgeted slice with ` +
+        `unknown prior spend: ${formatHostError(hydrated.error)}`,
+    );
+  }
+  if (!hydrated.ok) {
+    reportWithoutThrowing(shared.logger, "warn", "Spend ledger unreadable — metering from zero", {
+      dagId: dagId as string,
+      runId: runId as string,
+      error: formatHostError(hydrated.error),
+    });
+  }
+
+  // Two arms because `MeteredLlmDeps` couples them: a declared budget obliges a
+  // KNOWN prior spend, which the fail-closed throw above has already guaranteed.
+  // The compiler now enforces what that throw establishes.
+  const meterBase = { dagId, runId, ledger: spendLedger, logger: shared.logger };
+  const priorSpend: HydratedSpend = hydrated.ok
+    ? { kind: "known", spend: hydrated.value }
+    : { kind: "unknown" };
+  const llm =
+    limits !== undefined && hydrated.ok
+      ? createMeteredLlm(shared.llm, {
+          ...meterBase,
+          limits,
+          hydrated: { kind: "known", spend: hydrated.value },
+        })
+      : createMeteredLlm(shared.llm, { ...meterBase, hydrated: priorSpend });
 
   const cache = createNamespacedCache(shared.redis, tenant, dagId, ttl.cacheTtlSec, shared.logger);
   const checkpointWriter = createNamespacedCheckpointWriter(

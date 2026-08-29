@@ -12,6 +12,7 @@
  */
 
 import { describe, test, expect, afterEach } from "bun:test";
+import { createInMemorySpendLedger } from "../../adapters/spend-ledger-memory.js";
 import { ok, err, noopTracer, gitSha } from "@fuguejs/framework";
 import type { Result, DagId, DagDef, NodeContext, FrameworkError, RunOptions } from "@fuguejs/framework";
 import { z } from "zod";
@@ -167,6 +168,7 @@ const createFakeSharedInfra = (
   redis: RedisPort,
   capabilities: SharedInfra["capabilities"] = [],
 ): SharedInfra => ({
+  spendLedger: createInMemorySpendLedger(),
   llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
   redis,
   tracer: noopTracer,

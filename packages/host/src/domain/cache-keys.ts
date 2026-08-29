@@ -76,3 +76,36 @@ export const buildCheckpointKey = (
   runId: RunId,
   nodeId: NodeId,
 ): string => `${checkpointKeyPrefix(tenant, dagId, runId)}${nodeId}`;
+
+/**
+ * Build the Redis keys holding a run's durable spend.
+ *
+ * Two keys, because the record's four fields split by the Redis type that makes
+ * each of them atomically appendable: three numeric sums live in a HASH, the
+ * unpriced-model names in a SET. Both sit beneath the same tenant prefix, so
+ * the per-tenant ACL (`~fugue:<tenant>:*`) scopes them exactly as it does every
+ * other key built here.
+ *
+ * THE `$` IS LOAD-BEARING. These keys share `checkpointKeyPrefix` with
+ * `buildCheckpointKey`, whose final segment is a caller-supplied `NodeId` — and
+ * `ID_PATTERN` (`/^[A-Za-z0-9_:-]{1,128}$/`) happily admits the literal
+ * `"spend"`. A plain `spend` segment therefore COLLIDES with the checkpoint of
+ * a node named `spend`, which is a completely natural name in this very domain.
+ * The consequence is not a near-miss: the checkpoint writer's `SET` (a STRING)
+ * lands on the ledger's HASH, Redis destroys it type-agnostically, and every
+ * later `HINCRBY`/`HGETALL` returns `WRONGTYPE` — silently zeroing a run's
+ * recorded spend, and permanently refusing every later slice of a BUDGETED run
+ * once the read starts failing.
+ *
+ * `$` is outside `ID_PATTERN`, so no valid `NodeId` can produce these strings.
+ * This is the same technique `DAG_INPUT = "$input"` uses in `types/ids.ts`, and
+ * for the same reason. `cache-keys.test.ts` proves the disjointness over
+ * arbitrary node ids rather than leaving it to this comment.
+ *
+ * Format: `fugue:<tenant>:<dagId>:<runId>:$spend` and `…:$spend:unpriced`
+ */
+export const buildSpendKey = (tenant: TenantId, dagId: DagId, runId: RunId): string =>
+  `${checkpointKeyPrefix(tenant, dagId, runId)}$spend`;
+
+export const buildSpendUnpricedKey = (tenant: TenantId, dagId: DagId, runId: RunId): string =>
+  `${buildSpendKey(tenant, dagId, runId)}:unpriced`;

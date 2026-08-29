@@ -19,6 +19,7 @@ import type { CapabilityHandle } from "@fuguejs/framework";
 import { createHttpCapability, systemClock, noopTracer } from "@fuguejs/framework";
 import type { HostConfig } from "../domain/config.js";
 import type { LogPort, SharedInfra } from "../ports.js";
+import { createInMemorySpendLedger } from "./spend-ledger-memory.js";
 import { buildDocumentsCapability, describeDocumentsAdapter } from "./documents-capability.js";
 import { buildCdratorCapability } from "./cdrator-capability.js";
 import { buildOracleCapability, connectStringHost } from "./oracle-capability.js";
@@ -104,6 +105,11 @@ export const buildRuntimeDeps = async (
   const sharedInfra: SharedInfra = {
     llm: await createHostLlmClient(config),
     redis,
+    // The ledger is constructed PER NODE CONTEXT (it binds a tenant + DAG
+    // namespace), so what SharedInfra carries is the process-wide fallback used
+    // when a Redis adapter cannot back one. `createNodeContextForDag` replaces
+    // it with the Redis-backed ledger whenever the primitives are available.
+    spendLedger: createInMemorySpendLedger(),
     tracer: noopTracer,
     contentFilter: null,
     prompts: null,
