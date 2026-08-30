@@ -14,6 +14,11 @@ import { N } from "./_id-helpers.js";
 
 const noop = async () => ok(undefined as unknown);
 
+const recordOf = (value: unknown): Readonly<Record<string, unknown>> =>
+  typeof value === "object" && value !== null
+    ? value as Readonly<Record<string, unknown>>
+    : {};
+
 const makeNode = (
   id: string,
   overrides: Partial<NodeDef<unknown, unknown>> = {},
@@ -42,39 +47,43 @@ const ctx = (observer?: RecordingObserver): NodeContext => ({
   logger: { warn: () => {}, error: () => {} },
 });
 
+const twoWayRoutingDag = (routerOutput: unknown) => defineDag({
+  id: "two-way",
+  nodes: {
+    router: makeNode("router", { run: async () => ok(routerOutput) }),
+    "yes-branch": makeNode("yes-branch", {
+      inputSchema: z.object({ router: z.any().optional() }),
+      run: async () => ok("yes"),
+    }),
+    "no-branch": makeNode("no-branch", {
+      inputSchema: z.any(),
+      run: async () => ok("no"),
+    }),
+    merge: makeNode("merge", {
+      inputSchema: z.object({
+        "yes-branch": z.string().optional(),
+        "no-branch": z.string().optional(),
+      }),
+      run: async (input: unknown) => {
+        const branches = recordOf(input);
+        return ok(branches["yes-branch"] ?? branches["no-branch"] ?? "neither");
+      },
+    }),
+  },
+  edges: [
+    { from: DAG_INPUT, to: "router" },
+    { from: "router", to: "yes-branch", when: { label: "kind-is-yes", version: 1, check: (value: unknown) => recordOf(value).kind === "yes" } },
+    { from: "router", to: "no-branch", kind: "default" },
+    { from: "yes-branch", to: "merge" },
+    { from: "no-branch", to: "merge" },
+  ],
+  outputNodeId: "merge",
+  defaultRetryLimit: 0,
+});
+
 describe("conditional edges — 2-way routing", () => {
   it("predicate matches: conditional branch picked; default skipped", async () => {
-    const dag = defineDag({
-      id: "two-way",
-      nodes: {
-        router: makeNode("router", { run: async () => ok({ kind: "yes" }) }),
-        "yes-branch": makeNode("yes-branch", {
-          inputSchema: z.object({ router: z.any().optional() }),
-          run: async () => ok("yes"),
-        }),
-        "no-branch": makeNode("no-branch", {
-          inputSchema: z.any(),
-          run: async () => ok("no"),
-        }),
-        merge: makeNode("merge", {
-          inputSchema: z.object({
-            "yes-branch": z.string().optional(),
-            "no-branch": z.string().optional(),
-          }),
-          run: async (input: any) =>
-            ok(input["yes-branch"] ?? input["no-branch"] ?? "neither"),
-        }),
-      },
-      edges: [
-        { from: DAG_INPUT, to: "router" },
-        { from: "router", to: "yes-branch", when: { label: "kind-is-yes", version: 1, check: (v: any) => v?.kind === "yes" } as any },
-        { from: "router", to: "no-branch", kind: "default" },
-        { from: "yes-branch", to: "merge" },
-        { from: "no-branch", to: "merge" },
-      ],
-      outputNodeId: "merge",
-      defaultRetryLimit: 0,
-    });
+    const dag = twoWayRoutingDag({ kind: "yes" });
 
     const obs = new RecordingObserver();
     const result = await runDagStateful<unknown, string>(dag, null, ctx(obs));
@@ -102,37 +111,7 @@ describe("conditional edges — 2-way routing", () => {
   });
 
   it("default fires when no predicate matches; all predicateResults show matched: false", async () => {
-    const dag = defineDag({
-      id: "default-fires",
-      nodes: {
-        router: makeNode("router", { run: async () => ok({ kind: "other" }) }),
-        "yes-branch": makeNode("yes-branch", {
-          inputSchema: z.object({ router: z.any().optional() }),
-          run: async () => ok("yes"),
-        }),
-        "no-branch": makeNode("no-branch", {
-          inputSchema: z.any(),
-          run: async () => ok("no"),
-        }),
-        merge: makeNode("merge", {
-          inputSchema: z.object({
-            "yes-branch": z.string().optional(),
-            "no-branch": z.string().optional(),
-          }),
-          run: async (input: any) =>
-            ok(input["yes-branch"] ?? input["no-branch"] ?? "neither"),
-        }),
-      },
-      edges: [
-        { from: DAG_INPUT, to: "router" },
-        { from: "router", to: "yes-branch", when: { label: "kind-is-yes", version: 1, check: (v: any) => v?.kind === "yes" } as any },
-        { from: "router", to: "no-branch", kind: "default" },
-        { from: "yes-branch", to: "merge" },
-        { from: "no-branch", to: "merge" },
-      ],
-      outputNodeId: "merge",
-      defaultRetryLimit: 0,
-    });
+    const dag = twoWayRoutingDag({ kind: "other" });
 
     const obs = new RecordingObserver();
     const result = await runDagStateful<unknown, string>(dag, null, ctx(obs));
@@ -177,15 +156,17 @@ describe("conditional edges — 3-way routing", () => {
             c: z.string().optional(),
             d: z.string().optional(),
           }),
-          run: async (input: any) =>
-            ok(input.a ?? input.b ?? input.c ?? input.d ?? "none"),
+          run: async (input: unknown) => {
+            const branches = recordOf(input);
+            return ok(branches.a ?? branches.b ?? branches.c ?? branches.d ?? "none");
+          },
         }),
       },
       edges: [
         { from: DAG_INPUT, to: "router" },
-        { from: "router", to: "a", when: { label: "kind-is-a", version: 1, check: (v: any) => v?.kind === "a" } as any },
-        { from: "router", to: "b", when: { label: "kind-is-b", version: 1, check: (v: any) => v?.kind === "b" } as any },
-        { from: "router", to: "c", when: { label: "kind-is-c", version: 1, check: (v: any) => v?.kind === "c" } as any },
+        { from: "router", to: "a", when: { label: "kind-is-a", version: 1, check: (value: unknown) => recordOf(value).kind === "a" } },
+        { from: "router", to: "b", when: { label: "kind-is-b", version: 1, check: (value: unknown) => recordOf(value).kind === "b" } },
+        { from: "router", to: "c", when: { label: "kind-is-c", version: 1, check: (value: unknown) => recordOf(value).kind === "c" } },
         { from: "router", to: "d", kind: "default" },
         { from: "a", to: "merge" },
         { from: "b", to: "merge" },
@@ -223,8 +204,9 @@ describe("conditional edges — 3-way routing", () => {
           when: {
             label: "kind-in-alpha-beta-gamma",
             version: 1,
-            check: (v: any) => ["alpha", "beta", "gamma"].includes(v?.kind),
-          } as any,
+            check: (value: unknown) =>
+              ["alpha", "beta", "gamma"].includes(String(recordOf(value).kind)),
+          },
         },
         { from: "router", to: "fallback", kind: "default" },
       ],
@@ -260,8 +242,11 @@ describe("conditional edges — 3-way routing", () => {
           when: {
             label: "kind-ok-tier-gold",
             version: 1,
-            check: (v: any) => v?.kind === "ok" && v?.tier === "gold",
-          } as any,
+            check: (value: unknown) => {
+              const routed = recordOf(value);
+              return routed.kind === "ok" && routed.tier === "gold";
+            },
+          },
         },
         { from: "router", to: "other", kind: "default" },
       ],
@@ -301,12 +286,15 @@ describe("conditional edges — branch-then-rejoin via optionalDeps", () => {
             yes: z.string().optional(),
             no: z.string().optional(),
           }),
-          run: async (input: any) => ok({ yes: input.yes, no: input.no }),
+          run: async (input: unknown) => {
+            const branches = recordOf(input);
+            return ok({ yes: branches.yes, no: branches.no });
+          },
         }),
       },
       edges: [
         { from: DAG_INPUT, to: "router" },
-        { from: "router", to: "yes", when: { label: "kind-is-yes", version: 1, check: (v: any) => v?.kind === "yes" } as any },
+        { from: "router", to: "yes", when: { label: "kind-is-yes", version: 1, check: (value: unknown) => recordOf(value).kind === "yes" } },
         { from: "router", to: "no", kind: "default" },
         { from: "yes", to: "merge" },
         { from: "no", to: "merge" },

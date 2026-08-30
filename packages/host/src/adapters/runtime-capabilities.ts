@@ -26,6 +26,7 @@ import { buildOracleCapability, connectStringHost } from "./oracle-capability.js
 import { createHostLlmClient } from "../entrypoint-wiring.js";
 import { createLocalGitAdapter, createBunGitAdapter } from "./git-sync.js";
 import { createModuleLoader } from "./module-loader.js";
+import { logWithoutThrowing } from "../hitl/diagnostic-logging.js";
 
 /**
  * Build the capability array for a host.
@@ -56,7 +57,12 @@ export const buildRuntimeCapabilities = async (
   const documents = await buildDocumentsCapability(config);
   if (documents !== undefined) {
     capabilities.push(documents);
-    logger.info(`documents capability: ${describeDocumentsAdapter(config)}`, logContext);
+    logWithoutThrowing(
+      logger,
+      "info",
+      `documents capability: ${describeDocumentsAdapter(config)}`,
+      logContext,
+    );
   }
 
   // FR-060: `authedHttp` — the generic @fuguejs/http-auth adapter configured for
@@ -65,7 +71,12 @@ export const buildRuntimeCapabilities = async (
   const cdrator = buildCdratorCapability(config);
   if (cdrator !== undefined) {
     capabilities.push(cdrator);
-    logger.info(`authedHttp capability: @fuguejs/http-auth targeting ${config.CDRATOR_URL}`, logContext);
+    logWithoutThrowing(
+      logger,
+      "info",
+      `authedHttp capability: @fuguejs/http-auth targeting ${config.CDRATOR_URL}`,
+      logContext,
+    );
   }
 
   // FR-031/FR-033: `oracle` — a read-only oracledb pool wired from ORACLE_* env.
@@ -74,7 +85,9 @@ export const buildRuntimeCapabilities = async (
   const oracle = buildOracleCapability(config, logger);
   if (oracle !== undefined) {
     capabilities.push(oracle);
-    logger.info(
+    logWithoutThrowing(
+      logger,
+      "info",
       `oracle capability: @fuguejs/oracle targeting ${connectStringHost(config.ORACLE_CONNECT_STRING!)}`,
       logContext,
     );

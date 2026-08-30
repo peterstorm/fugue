@@ -38,6 +38,7 @@ import { createFetchNode } from "../nodes/fetch.js";
 import { defineDagFromArray } from "../executor/define-dag.js";
 import { N } from "./_id-helpers.js";
 import { DAG_INPUT } from "../types/ids.js";
+import { RecordingObserver } from "../observer/observer.js";
 
 // A scope-shaped capability the broker mints, and a plain static one it doesn't.
 const SCOPE = "svc:opA" as Capability;
@@ -380,7 +381,58 @@ describe("per-node capability minting (C1)", () => {
 // ── Port-contract enforcement at the dispatch seam (pass-4) ─────────────────
 
 describe("per-node minting — broker port-contract enforcement", () => {
-  it("a broker that THROWS from mintFor is fenced to infra-unreachable — never reclassified as a retriable node-crash", async () => {
+  it("fences hostile mintFor accessors and proxies as validation with balanced run telemetry", async () => {
+    let accessorReads = 0;
+    const accessorBroker = Object.defineProperty({
+      provides: (c: Capability) => (c as string).includes(":"),
+    }, "mintFor", {
+      get: () => {
+        accessorReads += 1;
+        throw new Error("hostile mintFor getter");
+      },
+    }) as CapabilityBroker;
+    const revoked = Proxy.revocable({
+      mintFor: async () => ok({} as ScopedCapabilityHandle),
+      provides: (c: Capability) => (c as string).includes(":"),
+    }, {});
+    revoked.revoke();
+
+    for (const broker of [accessorBroker, revoked.proxy]) {
+      const observer = new RecordingObserver();
+      const node = createFetchNode({
+        id: N("gated"),
+        inputSchema: z.object({}),
+        outputSchema: z.object({ ok: z.boolean() }),
+        requires: [SCOPE] as unknown as readonly Capability[],
+        fetch: async () => ok({ ok: true }),
+      });
+      const dag = defineDagFromArray({
+        id: "dag-1",
+        nodes: [node],
+        edges: [{ from: DAG_INPUT, to: "gated" }],
+      });
+      const ctx = makeNodeContext({
+        runId: "run-1",
+        dagId: "dag-1",
+        observer,
+        http: staticHttp as unknown as NodeContext["http"],
+      });
+
+      const result = await runDag(dag, {}, ctx, {
+        minting: { broker, origin: agentOrigin },
+      });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.kind).toBe("validation");
+      expect(observer.events.map((event) => event.type)).toEqual(["run-start", "run-end"]);
+      const runEnd = observer.events[1];
+      expect(runEnd?.type).toBe("run-end");
+      if (runEnd?.type === "run-end") expect(runEnd.status).toBe("error");
+    }
+    expect(accessorReads).toBe(1);
+  });
+
+  it("a broker mintFor contract throw is non-retriable and invoked once with retry budget", async () => {
     let mintCalls = 0;
     const throwingBroker: CapabilityBroker = {
       mintFor: async () => {
@@ -396,20 +448,25 @@ describe("per-node minting — broker port-contract enforcement", () => {
       requires: [SCOPE] as unknown as readonly Capability[],
       fetch: async () => ok({ ok: true }), // never reached
     });
-    const dag = defineDagFromArray({ id: "dag-1", nodes: [node], edges: [{ from: DAG_INPUT, to: "gated" }] });
+    const dag = defineDagFromArray({
+      id: "dag-1",
+      nodes: [node],
+      edges: [{ from: DAG_INPUT, to: "gated" }],
+      defaultRetryLimit: 2,
+    });
     const result = await runDag(dag, {}, baseCtx(), {
       minting: { broker: throwingBroker, origin: agentOrigin },
+      suppressRoutingWarnings: true,
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      // The fence maps the contract violation onto the Result channel as the
-      // named reach-failure kind — NOT a generic node-crash, which would lose
-      // the 403/503 taxonomy and read as "unexpected executor error".
-      const root =
-        result.error.kind === "retry-exhausted" ? result.error.rootErrorKind : result.error.kind;
-      expect(root).toBe("infra-unreachable");
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("non-retriable");
+        expect(result.error.message).toContain("broker.mintFor threw across the port boundary");
+      }
     }
-    expect(mintCalls).toBeGreaterThanOrEqual(1);
+    expect(mintCalls).toBe(1);
   });
 
   it("a broker claiming provides(cap) but omitting it from ok() fails the node with missing-capability — run never sees an undefined handle", async () => {

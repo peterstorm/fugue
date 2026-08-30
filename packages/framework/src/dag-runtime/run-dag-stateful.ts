@@ -171,8 +171,29 @@ const snapshotMintingAuthority = (
 ): Result<MintingAuthority | undefined, FrameworkError> => {
   if (authority === undefined) return ok(undefined);
 
-  const source = authority.broker;
-  const mintFor = source.mintFor;
+  const snapshotNodeId = dag.nodes[0]?.id ?? EXECUTOR_NODE_ID;
+  let source: CapabilityBroker;
+  let mintFor: CapabilityBroker["mintFor"];
+  try {
+    source = authority.broker;
+    mintFor = source.mintFor;
+    if (typeof mintFor !== "function") {
+      return err({
+        kind: "validation",
+        nodeId: snapshotNodeId,
+        message: "broker.mintFor must be a function while snapshotting run authority",
+      });
+    }
+  } catch (error) {
+    return err({
+      kind: "validation",
+      nodeId: snapshotNodeId,
+      message:
+        "broker.mintFor threw while snapshotting run authority: " +
+        safeErrorMessage(error),
+    });
+  }
+
   const provided = new Set<Capability>();
   const observed = new Set<Capability>();
 

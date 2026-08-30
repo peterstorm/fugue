@@ -306,6 +306,14 @@ describe("error-handler middleware", () => {
         [{ ...base, code: "too_big", origin: "number" }],
         [{ ...base, code: "too_small", minimum: 1 }],
         [{ ...base, code: "invalid_format" }],
+        [{ ...base, code: "invalid_format", format: "regex" }],
+        [{ ...base, code: "invalid_format", format: "starts_with" }],
+        [{ ...base, code: "invalid_format", format: "ends_with" }],
+        [{ ...base, code: "invalid_format", format: "includes" }],
+        [{ ...base, code: "invalid_format", format: "regex", pattern: 42 }],
+        [{ ...base, code: "invalid_format", format: "starts_with", prefix: 42 }],
+        [{ ...base, code: "invalid_format", format: "ends_with", suffix: 42 }],
+        [{ ...base, code: "invalid_format", format: "includes", includes: 42 }],
         [{ ...base, code: "not_multiple_of" }],
         [{ ...base, code: "unrecognized_keys", keys: ["ok", 1] }],
         [{ ...base, code: "invalid_union", errors: [[{ ...base, code: "too_big" }]] }],
@@ -320,6 +328,104 @@ describe("error-handler middleware", () => {
         expect(parseHostError({ kind: "input-validation-failed", dagId: "dag", issues }))
           .toBeUndefined();
       }
+    });
+
+    it("accepts every canonical Zod issue discriminant and specialized format payload", () => {
+      const custom = {
+        code: "custom",
+        message: "custom failed",
+        path: [],
+        params: { threshold: 3n },
+      };
+      const issues = [
+        { code: "invalid_type", message: "type", path: ["value"], expected: "string" },
+        { code: "too_big", message: "big", path: ["value"], origin: "bigint", maximum: 10n, inclusive: true },
+        { code: "too_small", message: "small", path: ["value"], origin: "bigint", minimum: 1n, exact: false },
+        { code: "invalid_format", message: "email", path: ["email"], format: "email" },
+        { code: "invalid_format", message: "regex", path: [], format: "regex", pattern: "^[a-z]+$" },
+        { code: "invalid_format", message: "prefix", path: [], format: "starts_with", prefix: "pre" },
+        { code: "invalid_format", message: "suffix", path: [], format: "ends_with", suffix: "post" },
+        { code: "invalid_format", message: "includes", path: [], format: "includes", includes: "middle" },
+        { code: "not_multiple_of", message: "multiple", path: [], divisor: 3 },
+        { code: "unrecognized_keys", message: "keys", path: [], keys: ["extra"] },
+        { code: "invalid_union", message: "union", path: [], errors: [[custom]] },
+        { code: "invalid_key", message: "key", path: [], origin: "record", issues: [custom] },
+        { code: "invalid_element", message: "element", path: [], origin: "map", key: 2n, issues: [custom] },
+        { code: "invalid_value", message: "literal", path: [], values: [1n, "one", true, null] },
+        custom,
+      ];
+
+      const parsed = parseHostError({
+        kind: "validation-failed",
+        path: "/dag",
+        issues,
+      });
+
+      expect(parsed?.kind).toBe("validation-failed");
+      if (parsed?.kind !== "validation-failed") return;
+      expect(parsed.issues.map((issue) => issue.code)).toEqual([
+        "invalid_type",
+        "too_big",
+        "too_small",
+        "invalid_format",
+        "invalid_format",
+        "invalid_format",
+        "invalid_format",
+        "invalid_format",
+        "not_multiple_of",
+        "unrecognized_keys",
+        "invalid_union",
+        "invalid_key",
+        "invalid_element",
+        "invalid_value",
+        "custom",
+      ]);
+      expect(Object.isFrozen(parsed.issues)).toBe(true);
+      expect(Object.isFrozen(parsed.issues[10])).toBe(true);
+      const parsedCustom = parsed.issues.at(-1);
+      expect(parsedCustom?.code).toBe("custom");
+      if (parsedCustom?.code === "custom") {
+        expect(Object.isFrozen(parsedCustom.params)).toBe(true);
+        expect(parsedCustom.params?.threshold).toBe(3n);
+      }
+    });
+
+    it("preserves bigint Zod issues internally and returns immutable JSON-safe 400 details", async () => {
+      const issues = [
+        { code: "too_small", message: "minimum", path: ["minimum"], origin: "bigint", minimum: 1n },
+        { code: "too_big", message: "maximum", path: ["maximum"], origin: "bigint", maximum: 99n },
+        { code: "invalid_value", message: "literal", path: ["literal"], values: [7n, 8n] },
+      ];
+      const hostErr = {
+        kind: "input-validation-failed",
+        dagId: "bigint-dag",
+        issues,
+      };
+      const parsed = parseHostError(hostErr);
+      expect(parsed?.kind).toBe("input-validation-failed");
+      if (parsed?.kind !== "input-validation-failed") return;
+      expect((parsed.issues[0] as { minimum: unknown }).minimum).toBe(1n);
+      expect((parsed.issues[1] as { maximum: unknown }).maximum).toBe(99n);
+      expect(Object.isFrozen(parsed.issues)).toBe(true);
+
+      const { logger } = createTestLogger();
+      const app = createApp(logger, () => {
+        throw Object.assign(new Error("bigint validation"), hostErr);
+      });
+      const res = await app.request("/throw");
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body).toMatchObject({
+        ok: false,
+        error: "input-validation-failed",
+        details: {
+          issues: [
+            { code: "too_small", minimum: "1" },
+            { code: "too_big", maximum: "99" },
+            { code: "invalid_value", values: ["7", "8"] },
+          ],
+        },
+      });
     });
 
     it("parses canonical recursively nested Zod issues into one frozen snapshot", () => {

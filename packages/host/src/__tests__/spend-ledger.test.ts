@@ -303,6 +303,12 @@ describe("Redis ledger: key layout and TTL", () => {
     return { ledger, logs: captured.logs };
   };
 
+  const orderedDelta: Spend = {
+    tokens: 10,
+    calls: 1,
+    usd: { kind: "unpriced", models: ["mystery"], knownMicros: micros(7) },
+  };
+
   it("namespaces both keys under the tenant prefix and refreshes their TTL", async () => {
     // The per-tenant Redis ACL is scoped to `~fugue:<tenant>:*`. A spend key
     // that escaped that prefix would be unreachable by the worker that wrote
@@ -350,6 +356,58 @@ describe("Redis ledger: key layout and TTL", () => {
     expect(String(warned[0]?.data?.["key"] ?? "")).toContain("fugue:acme:");
     expect(warned[0]?.data?.["ttlSec"]).toBe(900);
     expect(String(warned[0]?.data?.["consequence"] ?? "")).toContain("expire");
+  });
+
+  it("writes each append cost-first before tokens, calls, and unpriced models", async () => {
+    const fake = fakeRedis();
+    const operations: string[] = [];
+    const recording = {
+      ...fake.redis,
+      hIncrBy: async (key: string, field: string, by: number) => {
+        operations.push(`HINCRBY:${field}`);
+        return fake.redis.hIncrBy!(key, field, by);
+      },
+      sAdd: async (key: string, member: string) => {
+        operations.push("SADD:unpriced");
+        return fake.redis.sAdd(key, member);
+      },
+    } as RedisPort;
+    const { ledger } = ledgerOver(recording);
+
+    expect((await ledger.add(runA, orderedDelta)).ok).toBe(true);
+    expect(operations).toEqual([
+      "HINCRBY:micros",
+      "HINCRBY:tokens",
+      "HINCRBY:calls",
+      "SADD:unpriced",
+    ]);
+  });
+
+  it("stops at the first failed increment and preserves the cost-first partial append", async () => {
+    const fake = fakeRedis();
+    const operations: string[] = [];
+    const failing = {
+      ...fake.redis,
+      hIncrBy: async (key: string, field: string, by: number) => {
+        operations.push(`HINCRBY:${field}`);
+        return field === "tokens"
+          ? err({ kind: "redis-unavailable" as const, operation: "HINCRBY tokens" })
+          : fake.redis.hIncrBy!(key, field, by);
+      },
+      sAdd: async (key: string, member: string) => {
+        operations.push("SADD:unpriced");
+        return fake.redis.sAdd(key, member);
+      },
+    } as RedisPort;
+    const { ledger } = ledgerOver(failing);
+
+    expect((await ledger.add(runA, orderedDelta)).ok).toBe(false);
+    expect(operations).toEqual(["HINCRBY:micros", "HINCRBY:tokens"]);
+    const stored = [...fake.hashes.values()][0];
+    expect(stored?.get("micros")).toBe(7);
+    expect(stored?.has("tokens")).toBe(false);
+    expect(stored?.has("calls")).toBe(false);
+    expect(fake.sets.size).toBe(0);
   });
 
   it("does not spend a round trip on a zero increment", async () => {

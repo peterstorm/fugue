@@ -48,6 +48,49 @@ describe("makeNodeContext built-in capability ownership", () => {
     }
   });
 
+  test("ignores a capabilities bag inherited by the init object", () => {
+    const inheritedHttp = { tag: "inherited-http" };
+    const inheritedCustom = { tag: "inherited-custom" };
+    const init = Object.assign(Object.create({
+      capabilities: {
+        http: inheritedHttp,
+        "svc:inherited": inheritedCustom,
+      },
+    }), {
+      runId: "run-inherited-init",
+      dagId: "dag-inherited-init",
+    });
+
+    const ctx = makeNodeContext(init);
+    expect(ctx.http).toBeNull();
+    expect((ctx as unknown as Record<string, unknown>)["svc:inherited"]).toBeUndefined();
+  });
+
+  test("ignores an Object.prototype capabilities bag", () => {
+    const prior = Object.getOwnPropertyDescriptor(Object.prototype, "capabilities");
+    Object.defineProperty(Object.prototype, "capabilities", {
+      value: {
+        http: { tag: "prototype-http" },
+        "svc:prototype": { tag: "prototype-custom" },
+      },
+      configurable: true,
+    });
+    try {
+      const ctx = makeNodeContext({
+        runId: "run-prototype-init",
+        dagId: "dag-prototype-init",
+      });
+      expect(ctx.http).toBeNull();
+      expect((ctx as unknown as Record<string, unknown>)["svc:prototype"]).toBeUndefined();
+    } finally {
+      if (prior === undefined) {
+        delete (Object.prototype as Record<string, unknown>).capabilities;
+      } else {
+        Object.defineProperty(Object.prototype, "capabilities", prior);
+      }
+    }
+  });
+
   test("accepts only own values from a custom-prototype bag and preserves top-level precedence", () => {
     const inherited = { tag: "inherited-http" };
     const own = { tag: "own-http" };

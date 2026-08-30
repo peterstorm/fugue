@@ -10,14 +10,12 @@
  *
  * The three increments and the set-add are separately atomic but not atomic
  * TOGETHER. Writes are cost-first (`micros`, then tokens, calls, and unpriced
- * model names), so a crash after cost may under-record one or more later axes
- * of that call. A partial append never over-reports and never corrupts. The
- * window is bounded
- * by one call, the same magnitude as the documented overshoot-by-one allowance,
- * and erring toward under-reporting a single call is the correct direction for
- * a partial write: the alternative (a transaction) buys exactness at the price
- * of a round trip on every call and a failure mode — a half-applied MULTI — that
- * is strictly worse to reason about.
+ * model names), so an interrupted append may under-record one or more later
+ * axes of that call. Each individual partial append is therefore directional:
+ * it never over-reports and never corrupts. A process crash can interrupt every
+ * concurrently pending append, so the aggregate loss window is not bounded to
+ * one call. A transaction would buy per-append exactness at the price of a
+ * round trip on every call and a harder acknowledgement/retry ambiguity.
  *
  * @satisfies FR-B-006 — spend is durable per runId
  */

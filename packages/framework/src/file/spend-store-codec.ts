@@ -17,7 +17,9 @@ interface FileSpendRecordV1 {
   readonly unpricedModels: readonly string[];
 }
 
-const codecError = (operation: "spendStore:read" | "spendStore:add", message: string): FrameworkError =>
+type SpendStoreOperation = "spendStore:read" | "spendStore:add";
+
+const codecError = (operation: SpendStoreOperation, message: string): FrameworkError =>
   fileCacheError(operation, message, "permanent");
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -37,7 +39,7 @@ const canonicalModels = (value: unknown): value is readonly string[] => {
 const parseRecord = (
   value: unknown,
   expectedRunId: RunId,
-  operation: "spendStore:read" | "spendStore:add",
+  operation: SpendStoreOperation,
 ): Result<FileSpendRecordV1, FrameworkError> => {
   if (!isRecord(value)) return err(codecError(operation, "spend record must be an object"));
   const expectedKeys = ["calls", "micros", "runId", "schemaVersion", "tokens", "unpricedModels"];

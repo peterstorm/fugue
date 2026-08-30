@@ -3,30 +3,16 @@ import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { DAG_INPUT } from "../types/ids.js";
 import { z } from "zod";
 import { ok, err } from "../types/result.js";
-import type { NodeContext, NodeDef } from "../types/node.js";
+import type { NodeDef } from "../types/node.js";
 import type { DagDef } from "../types/dag.js";
 import type { HumanAction } from "../dag-runtime/types.js";
 import { runDag } from "../executor/run-dag.js";
 import { topoSort } from "../shared/topo.js";
 import { createTransformNode } from "../nodes/transform.js";
-import { RecordingObserver, NoopObserver } from "../observer/observer.js";
+import { RecordingObserver } from "../observer/observer.js";
 import { defineDagFromArray } from "../executor/define-dag.js";
 import { N } from "./_id-helpers.js";
-
-const mkCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
-  runId: "test-run" as RunId,
-  dagId: "test-dag" as DagId,
-  observer: new NoopObserver(),
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null,
-  cache: null,
-  prompts: null,
-  llm: null, http: null,
-  clock: null,
-  budget: null,
-  logger: { warn: () => {}, error: () => {} },
-  ...overrides,
-});
+import { testNodeContext as mkCtx } from "./_context-factories.js";
 
 /**
  * A node that fails `failuresBeforeSuccess` times with a RETRIABLE crash and

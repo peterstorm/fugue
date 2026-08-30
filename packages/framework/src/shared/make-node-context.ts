@@ -68,7 +68,9 @@ const contextWithOwnCapabilities = (
 export const makeNodeContext = (init: NodeContextInit): NodeContext => {
   // A present non-undefined top-level value wins, including explicit `null`;
   // absent or `undefined` falls back to the capabilities record.
-  const caps = init.capabilities ?? {};
+  const caps = Object.hasOwn(init, "capabilities")
+    ? init.capabilities ?? {}
+    : {};
 
   const base = contextWithOwnCapabilities({
     runId: asRunId(init.runId),

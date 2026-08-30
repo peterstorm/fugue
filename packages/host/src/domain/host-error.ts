@@ -188,6 +188,22 @@ const isIssueMatrix = (value: unknown): value is readonly (readonly ZodIssue[])[
 
 type IssuePayloadParser = (value: Record<string, unknown>) => boolean;
 
+const isInvalidFormatPayload = (value: Record<string, unknown>): boolean => {
+  if (!isString(value.format)) return false;
+  switch (value.format) {
+    case "regex":
+      return isString(value.pattern);
+    case "starts_with":
+      return isString(value.prefix);
+    case "ends_with":
+      return isString(value.suffix);
+    case "includes":
+      return isString(value.includes);
+    default:
+      return isOptionalString(value.pattern);
+  }
+};
+
 /** Exhaustive parser table for Zod 4's closed `$ZodIssue` discriminants. */
 const ISSUE_PAYLOAD_PARSERS = Object.freeze({
   invalid_type: (value) => isString(value.expected),
@@ -197,8 +213,7 @@ const ISSUE_PAYLOAD_PARSERS = Object.freeze({
   too_small: (value) =>
     isString(value.origin) && isNumberOrBigInt(value.minimum) &&
     isOptionalBoolean(value.inclusive) && isOptionalBoolean(value.exact),
-  invalid_format: (value) =>
-    isString(value.format) && isOptionalString(value.pattern),
+  invalid_format: isInvalidFormatPayload,
   not_multiple_of: (value) => typeof value.divisor === "number",
   unrecognized_keys: (value) => isStringArray(value.keys),
   invalid_union: (value) =>

@@ -15,12 +15,13 @@
  * ceiling can be denominated in, and the framework's `spendOfCall` is the one
  * place a call is priced.
  *
- * @satisfies FR-W0-004 — aggregate consumption per (dagId,runId,nodeId)
+ * @satisfies FR-W0-004 — aggregate consumption by runId; DAG/node attribution
+ *   belongs to Run Spend Authority diagnostics
  * @satisfies FR-W1-002 — pre-call comparison of cumulative vs budget
- * @satisfies FR-W1-004 — overshoot-by-one rule (the check is BEFORE the call)
+ * @satisfies FR-W1-004 — sequential pre-call admission permits the crossing call
  * @satisfies FR-W1-005 — in-memory counter, no network
  * @satisfies FR-W1-006 — absent budget never refuses
- * @satisfies SC-003 — at most one call allowed past a reached ceiling
+ * @satisfies SC-003 — concurrent admission accounts for a learned call estimate
  * @satisfies FR-B-002 — refuse when ANY declared ceiling is reached
  * @satisfies FR-B-013 — the refusal names the ceiling, basis, and observed figure
  */
@@ -196,11 +197,12 @@ const reserve = (state: ReservationState): ReservationState =>
 /**
  * Decide whether the NEXT call for `runId` may proceed under `limits`.
  *
- * The comparison is BEFORE the call, against settled-so-far (FR-W1-002). The
- * overshoot-by-one rule (FR-W1-004) falls out directly: while spend is below
- * every ceiling each call is allowed — so the call that crosses a boundary, the
- * single overshoot, runs — and only once a ceiling is reached is the next call
- * refused.
+ * The comparison is BEFORE the call, against settled-so-far (FR-W1-002). In a
+ * sequential flow, while spend is below every ceiling the crossing call is
+ * admitted and the following call is refused (FR-W1-004). Concurrent admission
+ * additionally projects `inFlight × maxObservedCall`; that estimate limits a
+ * learned-size burst but cannot promise one-call overshoot for a first or larger
+ * concurrent burst.
  *
  * Absent `limits` always admits (FR-W1-006: no budget means no enforcement,
  * though metering still happens). A ceiling of zero refuses the first call, as

@@ -3,13 +3,13 @@
  *
  * Key responsibilities:
  * - Tenant-and-DAG-namespaced Redis key prefixes for cache and checkpoint isolation (FR-013)
- * - Fresh runId + independent AbortSignal per request (FR-032)
+ * - Caller-supplied run identity + AbortSignal threaded into each context (FR-032)
  * - Per-DAG TTL overrides for cache/checkpoint entries (FR-041)
  * - Shared infrastructure (LLM, tracer) passed through without per-request init
  *
  * @satisfies FR-013 — Cache keys prefixed fugue:<tenant>:<dagId>:cache:<key>
  * @satisfies FR-013 — Checkpoint keys prefixed fugue:<tenant>:<dagId>:<runId>:<nodeId>
- * @satisfies FR-032 — Each request gets unique runId and independent AbortSignal
+ * @satisfies FR-032 — Caller-created runId and AbortSignal are threaded unchanged
  * @satisfies FR-041 — Per-DAG TTL overrides apply to cache/checkpoint entries
  * @satisfies SC-008 (host spec: cross-DAG cache isolation) — Two DAGs using the
  *   same cache key string are isolated. NOT the identity-scoped-capabilities
@@ -498,7 +498,7 @@ const resolveOriginAndBindSubjectToken = (args: {
  *
  * @satisfies FR-013 — Cache key isolation
  * @satisfies FR-013 — Checkpoint key isolation
- * @satisfies FR-032 — Per-request runId + AbortSignal
+ * @satisfies FR-032 — Caller-supplied runId + AbortSignal
  * @satisfies FR-041 — Per-DAG TTL overrides
  * @satisfies SC-008 (host spec: cross-DAG cache isolation — not the
  *   identity-scoped-capabilities token-dedup SC-008)

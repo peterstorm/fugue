@@ -58,11 +58,37 @@ const logErrorWithoutThrowing = (
   }
 };
 
+type JsonSafeTree =
+  | null
+  | boolean
+  | number
+  | string
+  | readonly JsonSafeTree[]
+  | { readonly [key: string]: JsonSafeTree };
+
+/** Convert trusted snapshotted details into a deeply immutable JSON wire tree. */
+const immutableJsonSafeTree = (value: unknown): JsonSafeTree => {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "bigint") return value.toString();
+  if (typeof value === "symbol") return String(value);
+  if (value === undefined) return null;
+  if (Array.isArray(value)) return Object.freeze(value.map(immutableJsonSafeTree));
+  if (typeof value === "object") {
+    const copy = Object.create(null) as Record<string, JsonSafeTree>;
+    for (const [key, property] of Object.entries(value)) {
+      copy[key] = immutableJsonSafeTree(property);
+    }
+    return Object.freeze(copy);
+  }
+  return String(value);
+};
+
 /**
  * Extract details from a HostError for the response body.
  * Exhaustive — adding a new HostError kind without a case here is a compile error.
  */
-const detailsFor = (error: HostError): unknown =>
+const rawDetailsFor = (error: HostError): unknown =>
   match(error)
     .with({ kind: "dag-not-found" }, (e) => ({ available: e.available }))
     .with({ kind: "input-validation-failed" }, (e) => ({ issues: e.issues }))
@@ -110,6 +136,11 @@ const detailsFor = (error: HostError): unknown =>
     .with({ kind: "internal-invariant-violated" }, () => undefined)
     .with({ kind: "fs-purge-failed" }, () => undefined)
     .exhaustive();
+
+const detailsFor = (error: HostError): JsonSafeTree | undefined => {
+  const details = rawDetailsFor(error);
+  return details === undefined ? undefined : immutableJsonSafeTree(details);
+};
 
 /**
  * Extract dagId if present on the error.
