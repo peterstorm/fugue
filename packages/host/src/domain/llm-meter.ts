@@ -25,8 +25,17 @@
  * @satisfies FR-B-013 — the refusal names the ceiling, basis, and observed figure
  */
 
-import type { Breach, Ceilings, RunId, Spend } from "@fuguejs/framework";
-import { NO_SPEND, addSpend, firstBreach, maxSpend, scaleSpend } from "@fuguejs/framework";
+import type { Breach, Ceilings, Result, RunId, Spend } from "@fuguejs/framework";
+import {
+  NO_SPEND,
+  addSpend,
+  err,
+  firstBreach,
+  maxSpend,
+  ok,
+  scaleSpend,
+  snapshotSpend,
+} from "@fuguejs/framework";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -44,7 +53,7 @@ export interface LlmMeter {
 /** Runtime-read-only snapshot; no mutable `Map` methods escape the ADT. */
 const meterOf = (entries: ReadonlyMap<RunId, Spend>): LlmMeter => {
   const snapshot = new Map(
-    Array.from(entries, ([runId, spend]) => [runId, Object.freeze({ ...spend })] as const),
+    Array.from(entries, ([runId, spend]) => [runId, snapshotSpend(spend)] as const),
   );
   let view: ReadonlyMap<RunId, Spend>;
   const facade = {
@@ -139,10 +148,10 @@ export interface ReservationState {
 }
 
 /** No calls admitted, no per-call estimate learned yet. */
-export const emptyReservation: ReservationState = {
+export const emptyReservation: ReservationState = Object.freeze({
   inFlight: 0,
   maxObservedCall: NO_SPEND,
-};
+});
 
 /**
  * Admission-safe spend projection shared by enforcement and the budget read
@@ -224,18 +233,24 @@ export const admit = (
   return { kind: "admit", state: reserve(state) };
 };
 
+export type ReservationInvariantError = {
+  readonly kind: "reservation-underflow";
+  readonly inFlight: number;
+};
+
 /**
  * Release one admitted call's reservation (call once, on settle).
  *
- * Clamped at zero: `inFlight` counts outstanding admissions, so a negative
- * value is reachable only through a contract breach (a double release), and
- * clamping keeps the projection sane rather than letting a negative count grant
- * free headroom.
+ * Underflow is a typed invariant failure, never a clamped success. The input is
+ * immutable and the Err carries no replacement state, so a caller cannot
+ * accidentally install a lower count and grant headroom after a double release.
  */
-export const releaseReservation = (state: ReservationState): ReservationState => ({
-  ...state,
-  inFlight: Math.max(0, state.inFlight - 1),
-});
+export const releaseReservation = (
+  state: ReservationState,
+): Result<ReservationState, ReservationInvariantError> =>
+  state.inFlight <= 0
+    ? err({ kind: "reservation-underflow", inFlight: state.inFlight })
+    : ok(Object.freeze({ ...state, inFlight: state.inFlight - 1 }));
 
 /** Widen the per-call estimate from a settled call (per-axis monotone max). */
 export const learnObservedCall = (state: ReservationState, call: Spend): ReservationState => ({

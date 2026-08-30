@@ -9,7 +9,12 @@
 import { match, P } from "ts-pattern";
 import type { Context } from "hono";
 import type { HostError } from "../../domain/host-error.js";
-import { httpStatusFor, formatHostError, retryAfterSecondsFor } from "../../domain/host-error.js";
+import {
+  formatHostError,
+  httpStatusFor,
+  isHostError,
+  retryAfterSecondsFor,
+} from "../../domain/host-error.js";
 import { errorResponse } from "../response.js";
 
 /**
@@ -19,14 +24,18 @@ export interface ErrorHandlerLogger {
   readonly error: (msg: string, data?: Record<string, unknown>) => void;
 }
 
-/**
- * Determine if an unknown value is a HostError by checking for the `kind` discriminant.
- */
-const isHostError = (e: unknown): e is HostError =>
-  e != null &&
-  typeof e === "object" &&
-  "kind" in e &&
-  typeof (e as Record<string, unknown>).kind === "string";
+/** Diagnostics are secondary: logger failure must never replace the response. */
+const logErrorWithoutThrowing = (
+  logger: ErrorHandlerLogger,
+  message: string,
+  data: Record<string, unknown>,
+): void => {
+  try {
+    logger.error(message, data);
+  } catch {
+    // The already-selected HTTP response remains authoritative.
+  }
+};
 
 /**
  * Extract details from a HostError for the response body.
@@ -141,7 +150,7 @@ const respondWithHostError = (
 
   if (status >= 500) {
     // Log full detail server-side; return a generic message to the client.
-    logger.error("Host error in request handler", {
+    logErrorWithoutThrowing(logger, "Host error in request handler", {
       kind: hostErr.kind,
       detail: formatHostError(hostErr),
       ...("context" in hostErr ? { context: hostErr.context } : {}),
@@ -184,7 +193,7 @@ export const createErrorHandler = (logger: ErrorHandlerLogger) => (thrown: Error
   // Check for FrameworkError (has `kind` field from the framework)
   if (thrown instanceof Error && "frameworkErrorKind" in thrown) {
     const kind = (thrown as unknown as { frameworkErrorKind: string }).frameworkErrorKind;
-    logger.error("Framework error in request handler", {
+    logErrorWithoutThrowing(logger, "Framework error in request handler", {
       kind,
       error: thrown.message,
       stack: thrown.stack,
@@ -199,7 +208,7 @@ export const createErrorHandler = (logger: ErrorHandlerLogger) => (thrown: Error
   // Full details are logged server-side only.
   const internalMessage = thrown instanceof Error ? thrown.message : String(thrown);
   const cause = thrown instanceof Error && thrown.cause instanceof Error ? thrown.cause : undefined;
-  logger.error("Unhandled error in request handler", {
+  logErrorWithoutThrowing(logger, "Unhandled error in request handler", {
     error: internalMessage,
     stack: thrown instanceof Error ? thrown.stack : undefined,
     causeMessage: cause?.message,

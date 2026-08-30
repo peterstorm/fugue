@@ -194,6 +194,71 @@ describe("error-handler middleware", () => {
     });
   });
 
+  describe("HostError runtime recognition", () => {
+    it("routes unknown and incomplete discriminated shapes to the generic path", async () => {
+      for (const hostile of [
+        { kind: "made-up-kind" },
+        { kind: "dag-not-found" },
+        { kind: "dag-not-found", dagId: "dag", available: { join: 42 } },
+        { kind: "timeout", dagId: "dag", runId: "run", timeoutMs: Number.NaN },
+        { kind: "tenant-over-quota", tenant: "acme", retryAfterSeconds: -1 },
+      ]) {
+        const { logger } = createTestLogger();
+        const app = createApp(logger, () => {
+          throw Object.assign(new Error("hostile"), hostile);
+        });
+        const res = await app.request("/throw");
+        expect(res.status).toBe(500);
+        expect(await res.json()).toMatchObject({ error: "internal-error" });
+      }
+    });
+
+    it("rejects a hostile HostError-shaped cause without throwing in an exhaustive matcher", async () => {
+      const { logger } = createTestLogger();
+      const wrapped = new Error("wrapped", {
+        cause: { kind: "validation-failed", path: "/tmp/dag", issues: null },
+      });
+      const app = createApp(logger, () => { throw wrapped; });
+
+      const res = await app.request("/throw");
+      expect(res.status).toBe(500);
+      expect(await res.json()).toMatchObject({ error: "internal-error" });
+    });
+  });
+
+  describe("logger failure isolation", () => {
+    const throwingLogger: ErrorHandlerLogger = {
+      error: () => { throw new Error("logger unavailable"); },
+    };
+
+    it("preserves HostError, framework-error, and generic HTTP responses", async () => {
+      const cases = [
+        {
+          thrown: Object.assign(new Error("host"), {
+            kind: "internal-invariant-violated",
+            message: "invariant",
+            context: {},
+          }),
+          expectedError: "internal-invariant-violated",
+        },
+        {
+          thrown: Object.assign(new Error("framework"), {
+            frameworkErrorKind: "node-execution-error",
+          }),
+          expectedError: "node-execution-error",
+        },
+        { thrown: new Error("generic"), expectedError: "internal-error" },
+      ] as const;
+
+      for (const testCase of cases) {
+        const app = createApp(throwingLogger, () => { throw testCase.thrown; });
+        const res = await app.request("/throw");
+        expect(res.status).toBe(500);
+        expect(await res.json()).toMatchObject({ error: testCase.expectedError });
+      }
+    });
+  });
+
   describe("Path 4: Generic unhandled Error", () => {
     it("returns 500 with sanitized message (never leaks internals)", async () => {
       const { logger, logs } = createTestLogger();

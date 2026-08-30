@@ -105,10 +105,10 @@ export const buildRuntimeDeps = async (
   const sharedInfra: SharedInfra = {
     llm: await createHostLlmClient(config),
     redis,
-    // The ledger is constructed PER NODE CONTEXT (it binds a tenant + DAG
-    // namespace), so what SharedInfra carries is the process-wide fallback used
-    // when a Redis adapter cannot back one. `createNodeContextForDag` replaces
-    // it with the Redis-backed ledger whenever the primitives are available.
+    // STOCK SELECTION IS EXPLICITLY REDIS-FIRST: the memory adapter carries
+    // metadata role `redis-fallback`, so `createNodeContextForDag` selects a
+    // namespaced Redis ledger whenever its primitives are available and uses
+    // this process-only backend only on a loud downgrade.
     spendLedger: createInMemorySpendLedger(),
     tracer: noopTracer,
     contentFilter: null,

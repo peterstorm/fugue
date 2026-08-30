@@ -100,6 +100,13 @@ const fakeInner = (tokensIn: number, tokensOut: number) => {
   return { inner, calls };
 };
 
+const failingWithoutUsage = (): LlmClient => ({
+  sendStructured: async (req) =>
+    err({ kind: "transient", nodeId: req.nodeId, message: "boom" }),
+  sendWithTools: async (req) =>
+    err({ kind: "transient", nodeId: req.nodeId, message: "boom" }),
+});
+
 const structuredReq = (nodeId: NodeId): LlmRequest<unknown> => ({
   system: "s",
   user: "u",
@@ -133,6 +140,12 @@ const freshLedger = () => ({
   hydrated: { kind: "known" as const, spend: NO_SPEND },
 });
 
+const memoryLedgerMetadata = Object.freeze({
+  role: "redis-fallback" as const,
+  backend: "memory" as const,
+  durability: "process" as const,
+});
+
 /** Tests the public decorator through the real shared authority. */
 const createMeteredLlm = (
   inner: LlmClient,
@@ -152,6 +165,47 @@ describe("metered-llm: no budget (FR-W1-006 passthrough)", () => {
       expect(res.ok).toBe(true);
     }
     expect(calls.length).toBe(5); // all delegated, none refused
+  });
+});
+
+describe("metered-llm: augmented subtype preservation", () => {
+  it("keeps subtype-only methods and private receiver state while metering provider calls", async () => {
+    class AugmentedClient implements LlmClient {
+      #label = "initial";
+      #calls = 0;
+
+      rename(label: string): void { this.#label = label; }
+      summary(): string { return `${this.#label}:${this.#calls}`; }
+
+      async sendStructured<O>(_req: LlmRequest<O>): Promise<Result<LlmResponse<O>, FrameworkError>> {
+        this.#calls += 1;
+        return ok({ output: {} as O, ...tokensOnly(2, 1), rawText: "" });
+      }
+
+      async sendWithTools<O>(
+        _req: SendWithToolsRequest<O>,
+        _ctx: NodeContext,
+      ): Promise<Result<LlmResponse<O>, FrameworkError>> {
+        this.#calls += 1;
+        return ok({ output: {} as O, ...tokensOnly(2, 1), rawText: "" });
+      }
+    }
+
+    const inner = new AugmentedClient();
+    const { logger, logs } = collectLogs();
+    const metered = createMeteredLlmClient(
+      inner,
+      "llm",
+      createRunSpendAuthority({ dagId, runId, ...freshLedger(), logger }),
+    );
+
+    metered.rename("metered");
+    expect(metered.summary()).toBe("metered:0");
+    expect(metered.summary).toBe(metered.summary);
+    expect((await metered.sendStructured(structuredReq(nodeA))).ok).toBe(true);
+    expect((await metered.sendWithTools(toolsReq(nodeA), fakeCtx)).ok).toBe(true);
+    expect(metered.summary()).toBe("metered:2");
+    expect(logs.filter((line) => line.msg === "llm.metered")).toHaveLength(2);
   });
 });
 
@@ -295,20 +349,8 @@ describe("metered-llm: pre-call refusal (FR-W1-002 / FR-W1-003)", () => {
   });
 
   it("does not accumulate tokens for a failed inner call carrying no usage", async () => {
-    const failing: LlmClient = {
-      sendStructured: async (req) =>
-        err({ kind: "transient", nodeId: req.nodeId, message: "boom" }) as Result<
-          LlmResponse<unknown>,
-          FrameworkError
-        >,
-      sendWithTools: async (req) =>
-        err({ kind: "transient", nodeId: req.nodeId, message: "boom" }) as Result<
-          LlmResponse<unknown>,
-          FrameworkError
-        >,
-    };
     const { logger, logs } = collectLogs();
-    const metered = createMeteredLlm(failing, { dagId, runId, ...freshLedger(), limits: tokenBudget(100), logger });
+    const metered = createMeteredLlm(failingWithoutUsage(), { dagId, runId, ...freshLedger(), limits: tokenBudget(100), logger });
 
     const r1 = await metered.sendStructured(structuredReq(nodeA));
     expect(r1.ok).toBe(false);
@@ -328,20 +370,8 @@ describe("metered-llm: pre-call refusal (FR-W1-002 / FR-W1-003)", () => {
   });
 
   it("does not accumulate tokens for a failed sendWithTools carrying no usage (duplicate guard)", async () => {
-    const failing: LlmClient = {
-      sendStructured: async (req) =>
-        err({ kind: "transient", nodeId: req.nodeId, message: "boom" }) as Result<
-          LlmResponse<unknown>,
-          FrameworkError
-        >,
-      sendWithTools: async (req) =>
-        err({ kind: "transient", nodeId: req.nodeId, message: "boom" }) as Result<
-          LlmResponse<unknown>,
-          FrameworkError
-        >,
-    };
     const { logger, logs } = collectLogs();
-    const metered = createMeteredLlm(failing, { dagId, runId, ...freshLedger(), limits: tokenBudget(100), logger });
+    const metered = createMeteredLlm(failingWithoutUsage(), { dagId, runId, ...freshLedger(), limits: tokenBudget(100), logger });
 
     const r1 = await metered.sendWithTools(toolsReq(nodeA), fakeCtx);
     expect(r1.ok).toBe(false);
@@ -1072,6 +1102,7 @@ describe("metered-llm: a failed ledger append is LOUD, and its severity says why
   // production call site — so a swapped condition or a dropped log would have
   // been invisible.
   const brokenLedger: SpendLedgerPort = {
+    metadata: memoryLedgerMetadata,
     read: async () => ok(NO_SPEND),
     add: async () => err({ kind: "redis-unavailable", operation: "spend-ledger add" }),
   };

@@ -27,6 +27,11 @@ export const createFileSpendLedger = (
   }
 
   return ok(Object.freeze({
+    metadata: Object.freeze({
+      role: "authoritative",
+      backend: "file",
+      durability: "restart",
+    }),
     read: async (runId) => {
       const result = await store.read(runId);
       return result.ok

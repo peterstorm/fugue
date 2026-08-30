@@ -57,7 +57,7 @@ type SpendLedgerPort = {
 
 **Write failures never fail the call.** The provider has already run and the tokens are already spent; refusing the result would waste them and lose the output too. What is lost is durability, so it is logged at `error` under a declared budget and `warn` without one.
 
-**Three adapters.** Redis for distributed durability; file for the F6 single-writer file runtime; in-process for a single-process deployment, where it still carries spend across the slices of one process and is documented as not surviving a restart.
+**Three adapters.** Redis for distributed durability; file for the F6 single-writer file runtime; in-process for a single-process deployment, where it still carries spend across the slices of one process and is documented as not surviving a restart. Every adapter carries closed backend/durability/role metadata. Stock memory is `redis-fallback`; file and Redis are restart-durable `authoritative` bindings.
 
 The file adapter is deliberately split at the ownership seam. The framework's
 high-level `createFileSpendStore` owns F6 locking, verified-directory checks,
@@ -91,7 +91,7 @@ could double-count.
 - **Spend keys are spelled `$spend` / `$spend:unpriced`, and the `$` is load-bearing.** They share `checkpointKeyPrefix` with `buildCheckpointKey`, whose final segment is a caller-supplied `NodeId` — and `ID_PATTERN` admits the literal `spend`. A plain segment collided with the checkpoint of a node named `spend`, letting the checkpoint writer's `SET` destroy the ledger's `HASH` (Redis `SET` is type-agnostic), which silently zeroed a run's recorded spend and then permanently refused every later slice of a budgeted run on `WRONGTYPE`. `$` is outside `ID_PATTERN`, the same technique `DAG_INPUT = "$input"` uses, and `cache-keys.test.ts` proves the disjointness over arbitrary node ids rather than trusting a comment. **Any future key added beneath the checkpoint prefix inherits this constraint.**
 - Spend keys live under the same `fugue:<tenant>:` prefix as every other key, so the per-tenant ACL scopes them unchanged. Their TTL follows the checkpoint TTL and is refreshed on every append, so it measures idleness rather than age. **No configured checkpoint TTL means no spend expiry** — a record that expired while its checkpoint survived would resume the run with a refilled budget.
 - One Run Spend Authority now owns the slice's meter and reservations. The main client, `judgeLlm`, and every boot-scoped capability-bag client explicitly marked `clientKind: "llm"` delegate to it, so client choice cannot bypass the ceiling.
-- The file adapter closes F6 restart durability without changing stock selection: the stock host remains Redis-first with its in-process fallback; a file-runtime embedder explicitly injects `createFileSpendLedger(root)` as `SharedInfra.spendLedger`.
+- The file adapter closes F6 restart durability without changing stock selection: the stock host explicitly wires a Redis-first in-process fallback; a file-runtime embedder injects `createFileSpendLedger(root)` as authoritative `SharedInfra.spendLedger`. Redis capability detection cannot silently displace that injected file authority, and only an actually selected memory fallback logs “NOT durable.”
 - File roots and retention are embedder-owned. No backend selector is inferred from `DAGS_LOCAL_PATH`, and no fsync/network-filesystem guarantee is claimed.
 
 ## Related

@@ -36,6 +36,11 @@ export const createInMemorySpendLedger = (
 ): SpendLedgerPort => {
   const spendByRun = new Map<RunId, Spend>(seed);
   return {
+    metadata: Object.freeze({
+      role: "redis-fallback",
+      backend: "memory",
+      durability: "process",
+    }),
     read: async (runId: RunId): Promise<Result<Spend, HostError>> =>
       ok(spendByRun.get(runId) ?? NO_SPEND),
     add: async (runId: RunId, delta: Spend): Promise<Result<void, HostError>> => {

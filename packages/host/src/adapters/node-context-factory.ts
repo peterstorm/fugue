@@ -43,13 +43,13 @@ import { createRunSpendAuthority } from "./run-spend-authority.js";
 import type { HydratedSpend } from "./run-spend-authority.js";
 import { ceilingsOf } from "../domain/llm-budget.js";
 import { createRedisSpendLedger, spendLedgerRedis } from "./spend-ledger-redis.js";
+import { logWithoutThrowing } from "../hitl/diagnostic-logging.js";
 
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
 /**
- * TTL configuration resolved for a specific DAG — combines host defaults
- * with per-DAG overrides from fugue.yaml.
+ * TTL configuration resolved solely from one DAG's fugue.yaml overrides.
  */
 interface ResolvedTtl {
   readonly cacheTtlSec: number | undefined;
@@ -84,11 +84,7 @@ const reportWithoutThrowing = (
   message: string,
   context: Record<string, unknown>,
 ): void => {
-  try {
-    logger[level](message, context);
-  } catch {
-    // The cache/checkpoint outcome remains authoritative over diagnostics.
-  }
+  logWithoutThrowing(logger, level, message, context);
 };
 
 const failureEscalator = (opts: {
@@ -362,10 +358,11 @@ export const createNodeContextForDag = async (
    * The DAG-id → REAL Keycloak agent-client-id map (FR-040, `AGENT_CLIENT_MAP`),
    * INJECTED from host config. Threaded into `invocationOriginForIdentity` so the
    * run `origin` carries the DAG's real agent client. A DAG id with NO mapping
-   * resolves to `undefined` and FAILS CLOSED here (throws a wiring-defect error
-   * caught by both run paths) rather than minting as an absent/wrong client.
-   * Defaults to the empty map (every DAG fails closed) so an un-threaded caller is
-   * safe-by-default.
+   * resolves to `undefined` and FAILS CLOSED here only while `mintingActive` is
+   * true, rather than minting as an absent/wrong client. With minting disabled,
+   * the origin is unused and an unmapped DAG follows the static-client path.
+   * Defaults to the empty map; the separate `mintingActive` flag determines
+   * whether that empty mapping refuses the run.
    */
   agentClientMap: AgentClientMap = {},
   /**
@@ -448,34 +445,34 @@ export const createNodeContextForDag = async (
   // zero spend — five parks, six budgets. The ledger is read ONCE here and
   // appended to as calls settle.
   //
-  // Redis-backed when the adapter offers the primitives; otherwise the
-  // process-wide in-memory ledger from SharedInfra, which still carries spend
-  // across the slices of one process (the whole HITL park/resume path in a
-  // single-process deployment) and is honest about not surviving a restart.
-  const ledgerRedis = spendLedgerRedis(shared.redis);
-  if (!ledgerRedis.ok) {
-    // NOT silent. Falling back trades durable, cross-process spend for a
-    // process-local map, so a budgeted run silently regains its full ceiling on
-    // every restart — the refill bug this whole feature closes, reintroduced by
-    // configuration rather than by code. `error`, because an operator who set a
-    // budget is relying on a guarantee that is no longer being provided, and
-    // the only place that fact exists is this line.
-    reportWithoutThrowing(shared.logger, "error", "Spend ledger is NOT durable — falling back to the in-process backend", {
-      dagId: dagId as string,
-      runId: runId as string,
-      reason: formatHostError(ledgerRedis.error),
-      consequence: "per-run LLM budgets reset when this process restarts",
-    });
-  }
-  const spendLedger = ledgerRedis.ok
-    ? createRedisSpendLedger({
+  // Stock wiring marks its memory ledger as `redis-fallback`: Redis remains the
+  // first choice when its primitives are available. An embedder-injected file
+  // ledger is marked `authoritative` and is selected directly; dependency
+  // injection is an authority decision, not a hint Redis may silently override.
+  let spendLedger = shared.spendLedger;
+  if (shared.spendLedger.metadata.role === "redis-fallback") {
+    const ledgerRedis = spendLedgerRedis(shared.redis);
+    if (ledgerRedis.ok) {
+      spendLedger = createRedisSpendLedger({
         redis: ledgerRedis.value,
         tenant,
         dagId,
         logger: shared.logger,
         ...(ttl.checkpointTtlSec !== undefined ? { ttlSec: ttl.checkpointTtlSec } : {}),
-      })
-    : shared.spendLedger;
+      });
+    } else {
+      // Only this actual memory fallback is NOT durable across restarts. A file
+      // ledger never reaches this branch and is never falsely labelled.
+      reportWithoutThrowing(shared.logger, "error", "Spend ledger is NOT durable — falling back to the in-process backend", {
+        dagId: dagId as string,
+        runId: runId as string,
+        backend: shared.spendLedger.metadata.backend,
+        durability: shared.spendLedger.metadata.durability,
+        reason: formatHostError(ledgerRedis.error),
+        consequence: "per-run LLM budgets reset when this process restarts",
+      });
+    }
+  }
 
   const hydrated = await spendLedger.read(runId);
   // FAIL CLOSED (FR-B-007). An unreadable ledger is indistinguishable from a

@@ -346,7 +346,7 @@ export const checkHealth = async (
  * `missing-capability`.
  */
 export type CapabilityClientDecorators = {
-  readonly llm?: (name: Capability, client: LlmClient) => LlmClient;
+  readonly llm?: <T extends LlmClient>(name: Capability, client: T) => T;
 };
 
 export const extractClients = (

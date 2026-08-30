@@ -10,7 +10,11 @@ import {
   type Result,
   type FrameworkError,
 } from "@fuguejs/framework";
-import { createRunSpendAuthority } from "../adapters/run-spend-authority.js";
+import {
+  createRunSpendAuthority,
+  releaseAuthorityReservation,
+} from "../adapters/run-spend-authority.js";
+import type { LogPort } from "../ports.js";
 import { createInMemorySpendLedger } from "../adapters/spend-ledger-memory.js";
 
 const limits = ceilings([{ kind: "tokens", limit: 30 }])!;
@@ -88,6 +92,30 @@ describe("RunSpendAuthority", () => {
     expect((await mainCall).ok).toBe(true);
     expect((await judgeCall).ok).toBe(true);
     expect(authority.budget.spent().tokens).toBe(30);
+  });
+
+  it("logs reservation underflow and retains state without granting more headroom", () => {
+    const logs: { readonly msg: string; readonly data?: Record<string, unknown> }[] = [];
+    const capturingLogger: LogPort = {
+      info: () => {},
+      warn: () => {},
+      error: (msg, data) => { logs.push({ msg, data }); },
+    };
+    const state = { inFlight: 0, maxObservedCall: { tokens: 10, calls: 1, usd: { kind: "priced" as const, micros: 0 as never } } };
+
+    const retained = releaseAuthorityReservation(state, capturingLogger, {
+      dagId: "authority-dag",
+      runId: "authority-run",
+      nodeId: "authority-node",
+      clientKey: "llm",
+    });
+
+    expect(retained).toBe(state);
+    expect(retained.inFlight).toBe(0);
+    expect(logs).toHaveLength(1);
+    expect(logs[0]?.msg).toBe("llm.reservation-release-failed");
+    expect(logs[0]?.data?.errorKind).toBe("reservation-underflow");
+    expect(logs[0]?.data?.consequence).toContain("no additional budget headroom");
   });
 
   it("spent returns fresh deeply immutable snapshots", async () => {

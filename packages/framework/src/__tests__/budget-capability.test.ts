@@ -46,8 +46,40 @@ describe("remainingFor", () => {
     })).toEqual({
       kind: "budgeted",
       basis: "projected",
-      headroom: [{ kind: "available", ceiling: { kind: "tokens", limit: 10 }, amount: 0 }],
+      headroom: [{ kind: "available", unit: "tokens", ceiling: { kind: "tokens", limit: 10 }, amount: 0 }],
     });
+  });
+
+  it("returns fresh deeply frozen snapshots with MicroUsd monetary headroom", () => {
+    const limits = ceilings([
+      { kind: "tokens", limit: 10 },
+      { kind: "usd", limit: 500 as MicroUsd },
+    ])!;
+    const projected: Spend = {
+      tokens: 3,
+      calls: 1,
+      usd: { kind: "priced", micros: 20 as MicroUsd },
+    };
+    const first = remainingFor(limits, projected);
+    const second = remainingFor(limits, projected);
+
+    expect(first).not.toBe(second);
+    expect(Object.isFrozen(first)).toBe(true);
+    if (first.kind !== "budgeted" || second.kind !== "budgeted") {
+      throw new Error("expected budgeted snapshots");
+    }
+    expect(first.headroom).not.toBe(second.headroom);
+    expect(Object.isFrozen(first.headroom)).toBe(true);
+    for (const headroom of first.headroom) {
+      expect(Object.isFrozen(headroom)).toBe(true);
+      expect(Object.isFrozen(headroom.ceiling)).toBe(true);
+      if (headroom.kind === "available" && headroom.unit === "usd") {
+        const amount: MicroUsd = headroom.amount;
+        expect(amount).toBe(480 as MicroUsd);
+      }
+    }
+    expect(() => (first.headroom as unknown as Ceiling[]).push({ kind: "calls", limit: 1 })).toThrow();
+    expect(second.headroom).toEqual(first.headroom);
   });
 
   it("reports unpriced USD headroom as domain data, never a number", () => {

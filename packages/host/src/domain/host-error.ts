@@ -1,8 +1,9 @@
 /**
  * HostError — Discriminated union for all host-level errors.
  *
- * Each variant maps to a specific HTTP status code. All domain functions
- * return Result<T, HostError> — no thrown exceptions.
+ * Each variant maps to a specific HTTP status code. Expected domain failures
+ * use Result<T, HostError>; value-object smart constructors may throw when a
+ * caller attempts to forge an invalid invariant (for example Retry-After).
  */
 
 import { match, P } from "ts-pattern";
@@ -104,6 +105,89 @@ export type HostError =
   | { readonly kind: "fs-purge-failed"; readonly message: string };
 
 export type HostErrorKind = HostError["kind"];
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object";
+const isString = (value: unknown): value is string => typeof value === "string";
+const isStringArray = (value: unknown): value is readonly string[] =>
+  Array.isArray(value) && value.every(isString);
+const isIssueArray = (value: unknown): value is readonly ZodIssue[] => Array.isArray(value);
+const hasStrings = (value: Record<string, unknown>, ...keys: readonly string[]): boolean =>
+  keys.every((key) => isString(value[key]));
+
+/** Runtime parser/narrower for errors crossing the throwing HTTP seam. */
+export const isHostError = (value: unknown): value is HostError => {
+  if (!isRecord(value) || !isString(value.kind)) return false;
+  switch (value.kind) {
+    case "git-clone-failed":
+      return hasStrings(value, "url", "message");
+    case "git-pull-failed":
+    case "bun-install-failed":
+    case "config-invalid":
+    case "tenant-config-invalid":
+    case "fs-purge-failed":
+      return hasStrings(value, "message");
+    case "git-timeout":
+    case "redis-unavailable":
+    case "notification-failed":
+      return hasStrings(value, "operation");
+    case "git-spawn-failed":
+      return hasStrings(value, "operation", "message");
+    case "import-failed":
+      return hasStrings(value, "path", "message") &&
+        (value.stack === undefined || isString(value.stack));
+    case "validation-failed":
+      return hasStrings(value, "path") && isIssueArray(value.issues);
+    case "no-default-export":
+      return hasStrings(value, "path");
+    case "dag-not-found":
+      return hasStrings(value, "dagId") && isStringArray(value.available);
+    case "dag-disabled":
+      return hasStrings(value, "dagId", "reason");
+    case "global-concurrency-exceeded":
+    case "tenant-unknown":
+      return true;
+    case "dag-concurrency-exceeded":
+      return hasStrings(value, "dagId");
+    case "timeout":
+      return hasStrings(value, "dagId", "runId") &&
+        typeof value.timeoutMs === "number" && Number.isFinite(value.timeoutMs);
+    case "spend-ledger-unavailable":
+      return value.backend === "file" &&
+        (value.operation === "create" || value.operation === "read" || value.operation === "add") &&
+        hasStrings(value, "message");
+    case "input-validation-failed":
+      return hasStrings(value, "dagId") && isIssueArray(value.issues);
+    case "dag-validation-failed":
+      return hasStrings(value, "dagId", "reason", "message");
+    case "body-parse-failed":
+      return hasStrings(value, "dagId", "message");
+    case "discovery-failed":
+      return hasStrings(value, "dagsRoot", "message");
+    case "async-result-expired":
+    case "run-not-found":
+    case "run-lease-lost":
+      return hasStrings(value, "runId");
+    case "run-not-suspended":
+      return hasStrings(value, "runId", "status");
+    case "unauthorized":
+      return hasStrings(value, "reason");
+    case "forbidden":
+      return hasStrings(value, "dagId", "callerTeam", "dagTeam");
+    case "team-already-exists":
+    case "team-not-found":
+      return hasStrings(value, "team");
+    case "tenant-over-quota":
+      return hasStrings(value, "tenant") && typeof value.retryAfterSeconds === "number" &&
+        Number.isSafeInteger(value.retryAfterSeconds) && value.retryAfterSeconds >= 0;
+    case "worker-unavailable":
+      return hasStrings(value, "tenant");
+    case "internal-invariant-violated":
+      return hasStrings(value, "message") && isRecord(value.context);
+    default:
+      return false;
+  }
+};
 
 /**
  * Maps each HostError kind to its corresponding HTTP status code.

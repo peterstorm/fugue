@@ -142,6 +142,11 @@ export const createRedisSpendLedger = (deps: RedisSpendLedgerDeps): SpendLedgerP
   });
 
   return {
+    metadata: Object.freeze({
+      role: "authoritative",
+      backend: "redis",
+      durability: "restart",
+    }),
     read: async (runId: RunId): Promise<Result<Spend, HostError>> => {
       const { hash, unpriced } = keys(runId);
       const figures = await redis.hGetAll(hash);

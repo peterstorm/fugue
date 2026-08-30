@@ -42,9 +42,15 @@ import { tenantId } from "../domain/tenant.js";
 import type { TenantId } from "../domain/tenant.js";
 import { createFileSpendLedger } from "../adapters/spend-ledger-file.js";
 
+interface AugmentedLlmClient extends LlmClient {
+  readonly rename: (label: string) => void;
+  readonly summary: () => string;
+}
+
 declare module "@fuguejs/framework" {
   interface CapabilityRegistry {
     criticLlm: LlmClient;
+    augmentedLlm: AugmentedLlmClient;
   }
 }
 
@@ -74,6 +80,11 @@ const testTenant = mkTenant("eng");
 // the wiring/metering tests below (these exercise context construction, not the
 // FR-040 fail-closed path, which has its own dedicated tests).
 const FACTORY_AGENT_MAP = { [testDagId as string]: "fugue-agent-test" };
+const memoryLedgerMetadata = Object.freeze({
+  role: "redis-fallback" as const,
+  backend: "memory" as const,
+  durability: "process" as const,
+});
 
 const makeDag = (overrides?: Partial<RegisteredDag["config"]>): RegisteredDag => ({
   id: testDagId,
@@ -312,33 +323,45 @@ describe("createNamespacedCache", () => {
     expect(logs.some(l => l.level === "warn" && l.msg.includes("Cache set failed"))).toBe(true);
   });
 
-  it("cache fallback outcomes survive a throwing diagnostic logger", async () => {
-    const throwingLogger: LogPort = {
-      info: () => {},
-      warn: () => { throw new Error("logger failed"); },
-      error: () => { throw new Error("logger failed"); },
-    };
-    const failed = createNamespacedCache(
-      failingRedis(), testTenant, testDagId, undefined, throwingLogger,
-    );
-    expect(await failed.get("missing")).toEqual({ hit: false });
-    expect((await failed.set("key", "value")).ok).toBe(true);
+  it("cache fallback outcomes survive a throwing logger and report through guarded stderr", async () => {
+    const diagnostics: string[] = [];
+    const originalWrite = process.stderr.write;
+    process.stderr.write = ((chunk: unknown): boolean => {
+      diagnostics.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const throwingLogger: LogPort = {
+        info: () => {},
+        warn: () => { throw new Error("logger failed"); },
+        error: () => { throw new Error("logger failed"); },
+      };
+      const failed = createNamespacedCache(
+        failingRedis(), testTenant, testDagId, undefined, throwingLogger,
+      );
+      expect(await failed.get("missing")).toEqual({ hit: false });
+      expect((await failed.set("key", "value")).ok).toBe(true);
 
-    const corruptedStore = new Map([
-      [buildCacheKey(testTenant, testDagId, "corrupt"), "not-json{{{"],
-    ]);
-    const corrupted = createNamespacedCache(
-      createMockRedis(corruptedStore).redis,
-      testTenant,
-      testDagId,
-      undefined,
-      throwingLogger,
-    );
-    expect(await corrupted.get("corrupt")).toEqual({ hit: false });
+      const corruptedStore = new Map([
+        [buildCacheKey(testTenant, testDagId, "corrupt"), "not-json{{{"],
+      ]);
+      const corrupted = createNamespacedCache(
+        createMockRedis(corruptedStore).redis,
+        testTenant,
+        testDagId,
+        undefined,
+        throwingLogger,
+      );
+      expect(await corrupted.get("corrupt")).toEqual({ hit: false });
 
-    const cyclic: Record<string, unknown> = {};
-    cyclic.self = cyclic;
-    expect((await corrupted.set("cyclic", cyclic)).ok).toBe(true);
+      const cyclic: Record<string, unknown> = {};
+      cyclic.self = cyclic;
+      expect((await corrupted.set("cyclic", cyclic)).ok).toBe(true);
+      expect(diagnostics.some((line) => line.includes("[host diagnostic fallback]"))).toBe(true);
+      expect(diagnostics.some((line) => line.includes("logger failed"))).toBe(true);
+    } finally {
+      process.stderr.write = originalWrite;
+    }
   });
 
   it("set handles non-serializable values gracefully", async () => {
@@ -775,6 +798,7 @@ describe("createNodeContextForDag — one authority across main/judge/custom LLM
       basis: "projected",
       headroom: [{
         kind: "available",
+        unit: "tokens",
         ceiling: { kind: "tokens", limit: 45 },
         amount: 0,
       }],
@@ -790,6 +814,45 @@ describe("createNodeContextForDag — one authority across main/judge/custom LLM
         .filter((line) => line.msg === "llm.metered")
         .map((line) => line.data?.clientKey),
     ).toEqual(["llm", "judgeLlm", "criticLlm"]);
+  });
+
+  it("preserves an augmented custom LLM subtype and its receiver-sensitive API", async () => {
+    class StatefulAugmentedClient implements AugmentedLlmClient {
+      #label = "boot";
+      #calls = 0;
+
+      rename(label: string): void { this.#label = label; }
+      summary(): string { return `${this.#label}:${this.#calls}`; }
+      async sendStructured<O>(): Promise<Result<LlmResponse<O>, FrameworkError>> {
+        this.#calls += 1;
+        return ok({ output: {} as O, ...tokensOnly(3, 2), rawText: "" });
+      }
+      async sendWithTools<O>(): Promise<Result<LlmResponse<O>, FrameworkError>> {
+        this.#calls += 1;
+        return ok({ output: {} as O, ...tokensOnly(3, 2), rawText: "" });
+      }
+    }
+
+    const augmented = new StatefulAugmentedClient();
+    const shared = baseSharedInfra([
+      { name: "augmentedLlm", client: augmented, clientKind: "llm" },
+    ]);
+    const { ctx } = await createNodeContextForDag(
+      shared,
+      makeDag(),
+      testRunId,
+      new AbortController().signal,
+      adminIdentity,
+      FACTORY_AGENT_MAP,
+    );
+    const metered = (ctx as NodeContext & { readonly augmentedLlm: AugmentedLlmClient }).augmentedLlm;
+
+    expect(metered).not.toBe(augmented);
+    metered.rename("runtime");
+    expect(metered.summary()).toBe("runtime:0");
+    expect((await metered.sendStructured(structuredReq())).ok).toBe(true);
+    expect(metered.summary()).toBe("runtime:1");
+    expect(augmented.summary()).toBe("runtime:1");
   });
 
   it("rehydrates a main+judge total from a fresh file ledger/context and refuses the next call", async () => {
@@ -1194,6 +1257,7 @@ describe("createNodeContextForDag — spend survives a park/resume (FR-B-006)", 
     // An unreadable ledger is indistinguishable from a spent one. Assuming zero
     // would be the refill bug, deliberately reintroduced.
     const broken: SpendLedgerPort = {
+      metadata: memoryLedgerMetadata,
       read: async () => err({ kind: "redis-unavailable", operation: "spend-ledger read" }),
       add: async () => ok(undefined),
     };
@@ -1210,6 +1274,7 @@ describe("createNodeContextForDag — spend survives a park/resume (FR-B-006)", 
     // metering outage into an availability outage. Metering degrades; the run
     // proceeds.
     const broken: SpendLedgerPort = {
+      metadata: memoryLedgerMetadata,
       read: async () => err({ kind: "redis-unavailable", operation: "spend-ledger read" }),
       add: async () => ok(undefined),
     };
@@ -1235,6 +1300,7 @@ describe("createNodeContextForDag — spend survives a park/resume (FR-B-006)", 
     // Refusing the result would waste the call and lose the output too. What is
     // lost is durability, and that is what gets logged.
     const writeOnlyFailure: SpendLedgerPort = {
+      metadata: memoryLedgerMetadata,
       read: async () => ok(NO_SPEND),
       add: async () => err({ kind: "redis-unavailable", operation: "spend-ledger add" }),
     };
@@ -1315,6 +1381,40 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
     }
     expect(String(line?.data?.["consequence"] ?? "")).toContain("restart");
     expect(line?.data?.["dagId"]).toBe(testDagId as string);
+  });
+
+  it("keeps an explicitly injected file ledger authoritative even when Redis is capable", async () => {
+    const root = mkdtempSync(join(tmpdir(), "fugue-authoritative-file-ledger-"));
+    try {
+      const fileLedger = createFileSpendLedger(root);
+      if (!fileLedger.ok) throw new Error("expected file ledger");
+      const { llm } = fakeLlm(10, 5);
+      const captured = collectLogs();
+      const capable = capableRedis();
+      const shared: SharedInfra = {
+        ...sharedWithRedis(llm, capable.redis, captured.logger),
+        spendLedger: fileLedger.value,
+      };
+
+      const { ctx } = await createNodeContextForDag(
+        shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP,
+      );
+      if (ctx.llm === null) throw new Error("expected wired llm");
+      expect((await ctx.llm.sendStructured(structuredReq())).ok).toBe(true);
+
+      expect(capable.seen).toHaveLength(0);
+      expect(captured.logs.some((line) => line.msg.includes("NOT durable"))).toBe(false);
+      const recorded = await fileLedger.value.read(testRunId);
+      expect(recorded.ok).toBe(true);
+      if (recorded.ok) expect(recorded.value.tokens).toBe(15);
+      expect(fileLedger.value.metadata).toEqual({
+        role: "authoritative",
+        backend: "file",
+        durability: "restart",
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("uses the REDIS-backed ledger when the adapter offers the primitives", async () => {

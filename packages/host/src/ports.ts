@@ -282,13 +282,10 @@ export type SharedInfra = {
   readonly llm: LlmClient;
   readonly redis: RedisPort;
   /**
-   * FALLBACK per-run spend ledger — not usually the one that gets used.
-   *
-   * `createNodeContextForDag` builds a Redis-backed ledger per NodeContext
-   * whenever the wired `RedisPort` offers `hIncrBy`/`hGetAll`/`expire`, and only
-   * falls back to this one when it does not (loudly: that downgrade costs
-   * durability across process restarts and is logged at `error`). A reader of
-   * this field alone would otherwise assume it is what a run consults.
+   * Selected ledger binding. Stock wiring supplies a `redis-fallback` memory
+   * ledger, making Redis-first selection explicit. Embedders may inject an
+   * `authoritative` durable ledger (for example file), which is never displaced
+   * merely because Redis exposes ledger primitives.
    */
   readonly spendLedger: SpendLedgerPort;
   readonly tracer: Tracer;
@@ -325,7 +322,21 @@ export type SharedInfra = {
  * not one persistence protocol: Redis maps the algebra to lock-free atomic
  * fields; the file adapter serializes whole-snapshot replacement per run.
  */
+export type SpendLedgerMetadata =
+  | {
+      readonly role: "redis-fallback";
+      readonly backend: "memory";
+      readonly durability: "process";
+    }
+  | {
+      readonly role: "authoritative";
+      readonly backend: "file" | "redis";
+      readonly durability: "restart";
+    };
+
 export type SpendLedgerPort = {
+  /** Selection and durability facts travel with the adapter they describe. */
+  readonly metadata: SpendLedgerMetadata;
   /**
    * Spend already recorded for a run. An unknown run reads as `NO_SPEND`, not
    * an error — "never seen" and "seen, spent nothing" are the same fact, and

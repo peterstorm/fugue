@@ -110,6 +110,21 @@ describe("llm-meter: accumulate + spendFor", () => {
     expect(Object.isFrozen(meter)).toBe(true);
   });
 
+  it("deeply freezes nested spend snapshots at the meter seam", () => {
+    const meter = accumulate(emptyMeter(), runA, unpricedCall(5, "nested-model"));
+    const exposed = meter.spendByRun.get(runA);
+    expect(exposed).toBeDefined();
+    if (exposed === undefined || exposed.usd.kind !== "unpriced") return;
+
+    expect(Object.isFrozen(exposed)).toBe(true);
+    expect(Object.isFrozen(exposed.usd)).toBe(true);
+    expect(Object.isFrozen(exposed.usd.models)).toBe(true);
+    expect(() => (exposed.usd.models as unknown as string[]).push("poison")).toThrow();
+    const later = spendFor(meter, runA);
+    if (later.usd.kind !== "unpriced") throw new Error("expected unpriced spend");
+    expect([...later.usd.models]).toEqual(["nested-model"]);
+  });
+
   it("carries an unpriced call into the run total, absorbing", () => {
     // Once a run has touched a model with no price, no dollar figure for that
     // run can be trusted again — and the stored value says so.
@@ -276,12 +291,20 @@ describe("llm-meter: reservation bounds concurrent overshoot (SC-003)", () => {
     expect(admit(meter, runA, state, limitsOf([tokens(1000)])).kind).toBe("admit");
   });
 
-  it("releases by decrementing, clamped at zero on a double release", () => {
-    const state = releaseReservation({ inFlight: 1, maxObservedCall: NO_SPEND });
-    expect(state.inFlight).toBe(0);
-    // A double release is a contract breach; clamping keeps the projection sane
-    // rather than letting a negative count grant free headroom.
-    expect(releaseReservation(state).inFlight).toBe(0);
+  it("returns a typed underflow failure and leaves state unchanged on double release", () => {
+    const initial = { inFlight: 1, maxObservedCall: NO_SPEND };
+    const released = releaseReservation(initial);
+    expect(released.ok).toBe(true);
+    if (!released.ok) return;
+    expect(released.value.inFlight).toBe(0);
+    expect(initial.inFlight).toBe(1);
+
+    const underflow = releaseReservation(released.value);
+    expect(underflow).toEqual({
+      ok: false,
+      error: { kind: "reservation-underflow", inFlight: 0 },
+    });
+    expect(released.value.inFlight).toBe(0);
   });
 
   it("widens the learned estimate monotonically, per axis", () => {

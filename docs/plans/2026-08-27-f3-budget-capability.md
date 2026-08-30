@@ -252,6 +252,9 @@ export interface BudgetCapability {
 export type Remaining =
   | { readonly kind: "unbudgeted" }
   | { readonly kind: "budgeted"; readonly headroom: readonly CeilingHeadroom[] };
+
+// Available token/call amounts remain numbers; available USD amounts are
+// MicroUsd. Unpriced USD remains its own explicit headroom member.
 ```
 
 Adding a key to `BUILTIN_CAPABILITY_KEYS` requires a matching `BaseNodeContext` field and

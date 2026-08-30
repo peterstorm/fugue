@@ -1059,8 +1059,10 @@ const plan = createFetchNode({
 ```
 
 `remaining()` returns `{ kind: "unbudgeted" }` when no ceiling exists. Otherwise
-it returns canonical per-axis headroom with `basis: "projected"`; numeric
-headroom clamps at zero, while unknown cost under a USD ceiling is an explicit
+it returns canonical per-axis headroom with `basis: "projected"`; each available
+member carries a `unit` discriminant, token/call amounts are numbers, USD amounts
+are branded `MicroUsd`, and all clamp at zero,
+while unknown cost under a USD ceiling is an explicit
 `{ kind: "unpriced", models, observedAtLeast }` member. Budget reads can affect
 retry-time decisions, just like clock reads can affect time-dependent nodes, so
 node tests should inject `fixedBudgetCapability` from
@@ -1079,8 +1081,10 @@ A budgeted run whose ledger cannot be READ refuses the slice: an unreadable ledg
 One Run Spend Authority meters `ctx.llm`, `judgeLlm`, and every custom
 boot-scoped `CapabilityHandle` marked `clientKind: "llm"`. They share one
 reservation gate, spent view, ceiling, and ledger. File-durable embedders can
-inject the host's `createFileSpendLedger(root)` adapter; the stock host remains
-Redis-first and retains its in-process fallback.
+inject the host's `createFileSpendLedger(root)` adapter as authoritative; Redis
+capability detection does not override it. Ledger metadata carries backend,
+durability, and role so only the actually selected memory fallback logs “NOT
+durable.” The stock host remains explicitly Redis-first with that memory fallback.
 
 ---
 

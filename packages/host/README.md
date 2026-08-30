@@ -17,7 +17,9 @@ For authoring DAGs themselves, see [`@fuguejs/framework/docs/llm-dag-authoring.m
 
 The stock host remains Redis-first. An embedder running the framework's F6 file
 runtime can explicitly install the durable file adapter instead of relying on
-the in-process fallback:
+the in-process fallback. The adapter carries `authoritative`/`file`/`restart`
+metadata, so capable Redis does not override this injection and only a selected
+memory fallback is reported as not durable:
 
 ```ts
 import { createFileSpendLedger, formatHostError } from "@fuguejs/host";

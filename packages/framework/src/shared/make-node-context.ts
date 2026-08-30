@@ -11,12 +11,13 @@
 // exclusively via the `capabilities` record.
 
 import type { NodeContext, NodeContextInit } from "../types/node.js";
+import type { Result } from "../types/result.js";
+import { err, ok } from "../types/result.js";
 import type { ScopedCapabilityHandle } from "../types/capability-broker.js";
 import { BUILTIN_CAPABILITY_KEYS, RESERVED_NON_CAPABILITY_KEYS } from "../types/node.js";
 import { runId as brandRunId, dagId as brandDagId } from "../types/ids.js";
 import type { RunId, DagId } from "../types/ids.js";
 import { consoleLogger, noopObserver, noopTracer } from "./defaults.js";
-import { fwLogger } from "../logger.js";
 
 // `NodeContextInit.runId` / `.dagId` accept either a raw string (which we
 // validate + brand here) or an already-branded id (passed through). Branding
@@ -86,49 +87,37 @@ export const makeNodeContext = (init: NodeContextInit): NodeContext => {
  * already carries — broker-resolvable `"<provider>:<operation>"` names get their
  * minted handle, every plain capability keeps its static client.
  *
- * Minted handles take precedence on collision. Reserved infrastructure keys
- * (`logger`/`tracer`/…) and built-in capability keys are never overwritten — a
- * broker could only mint a key colliding with those by augmenting the registry
- * with a reserved name, which the runtime forbids elsewhere; guarding here keeps
- * the merge total and framework infrastructure intact. `null`/absent minted
- * entries are dropped (a broker that resolved nothing leaves the base untouched),
- * so an empty mint result returns the base context by reference — preserving the
- * byte-identical no-op when a node declares no broker-resolvable scopes.
+ * Minted handles take precedence on collision. A non-null reserved
+ * infrastructure or built-in key is a typed failure: continuing with the static
+ * client would hide authority divergence. `null`/absent minted entries are
+ * dropped (a broker that resolved nothing leaves the base untouched), so an
+ * empty mint result returns the base context by reference inside `Ok`.
  *
  * SEAM CONTRACT with `validateCapabilities`: everything `provides()` exempts
  * from run-start validation must survive this merge. Because the guard below
- * silently drops BUILT-IN capability keys, `validateCapabilities` REJECTS a
- * broker that claims `provides()` for one (a loud wiring error instead of a
- * silently-dropped handle). If broker-minted built-ins ever land (FR-W2-009),
+ * rejects BUILT-IN capability keys, `validateCapabilities` also REJECTS a
+ * broker that claims `provides()` for one. If broker-minted built-ins ever land
+ * (FR-W2-009),
  * change this guard to filter only `RESERVED_NON_CAPABILITY_KEYS` in the same
  * commit that lifts that rejection.
  */
+export type CapabilityMergeError = {
+  readonly kind: "reserved-capability";
+  readonly key: string;
+};
+
 export const mergeScopedCapabilities = (
   base: NodeContext,
   scoped: ScopedCapabilityHandle,
-): NodeContext => {
+): Result<NodeContext, CapabilityMergeError> => {
   const entries: [string, unknown][] = [];
   for (const [k, v] of Object.entries(scoped)) {
     if (v == null) continue;
     if (RESERVED_CONTEXT_KEYS.has(k)) {
-      // A NON-NULL broker-minted entry under a reserved/built-in key is being
-      // discarded. `validateCapabilities` rejects a broker that CLAIMS a
-      // built-in via `provides()`, but `provides` is optional — a broker
-      // without it (e.g. a passthrough constructed with a built-in key) reaches
-      // this guard unannounced, and the node would silently run against the
-      // static client while the embedder believes the broker's is in effect.
-      // Warn (mirrors the `llm.usage-unattributed` precedent) so the wiring
-      // mistake is debuggable instead of an invisible authority divergence.
-      fwLogger().warn("capability.merge.dropped", {
-        key: k,
-        runId: base.runId as string,
-        dagId: base.dagId as string,
-        reason: "broker-minted entry under a reserved/built-in context key is never merged",
-      });
-      continue;
+      return err({ kind: "reserved-capability", key: k });
     }
     entries.push([k, v]);
   }
-  if (entries.length === 0) return base;
-  return Object.assign({}, base, Object.fromEntries(entries)) as NodeContext;
+  if (entries.length === 0) return ok(base);
+  return ok(Object.assign({}, base, Object.fromEntries(entries)) as NodeContext);
 };

@@ -11,14 +11,23 @@ import { snapshotSpend } from "./types/budget-capability.js";
 import type { Spend } from "./types/spend.js";
 import { NO_SPEND } from "./types/spend.js";
 
-const snapshotHeadroom = (headroom: CeilingHeadroom): CeilingHeadroom =>
-  headroom.kind === "available"
-    ? Object.freeze({ ...headroom, ceiling: Object.freeze({ ...headroom.ceiling }) })
-    : Object.freeze({
-        ...headroom,
-        ceiling: Object.freeze({ ...headroom.ceiling }),
-        models: Object.freeze([...headroom.models]) as typeof headroom.models,
-      });
+const snapshotHeadroom = (headroom: CeilingHeadroom): CeilingHeadroom => {
+  if (headroom.kind === "unpriced") {
+    return Object.freeze({
+      ...headroom,
+      ceiling: Object.freeze({ ...headroom.ceiling }),
+      models: Object.freeze([...headroom.models]) as typeof headroom.models,
+    });
+  }
+  switch (headroom.unit) {
+    case "tokens":
+      return Object.freeze({ ...headroom, ceiling: Object.freeze({ ...headroom.ceiling }) });
+    case "calls":
+      return Object.freeze({ ...headroom, ceiling: Object.freeze({ ...headroom.ceiling }) });
+    case "usd":
+      return Object.freeze({ ...headroom, ceiling: Object.freeze({ ...headroom.ceiling }) });
+  }
+};
 
 const snapshotRemaining = (remaining: Remaining): Remaining =>
   remaining.kind === "unbudgeted"

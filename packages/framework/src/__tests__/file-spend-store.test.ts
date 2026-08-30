@@ -2,9 +2,11 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fc from "fast-check";
 import { createHash } from "node:crypto";
 import {
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -121,6 +123,21 @@ describe("createFileSpendStore", () => {
     }));
     expect((await store.read(rid)).ok).toBe(false);
     expect((await store.add(rid, pricedCall(1, 1 as MicroUsd))).ok).toBe(false);
+  });
+
+  it("rechecks root identity after the verified directory is replaced", async () => {
+    const root = tempRoot();
+    const displaced = `${root}-displaced`;
+    roots.push(displaced);
+    const store = createFileSpendStore(root);
+    renameSync(root, displaced);
+    mkdirSync(root);
+
+    const read = await store.read(rid);
+    const add = await store.add(rid, pricedCall(1, 1 as MicroUsd));
+    expect(read.ok).toBe(false);
+    expect(add.ok).toBe(false);
+    expect(readdirSync(root).some((name) => name.endsWith(".json"))).toBe(false);
   });
 
   it("refuses symlinked roots and record files", async () => {

@@ -1,13 +1,31 @@
 import { match } from "ts-pattern";
-import type { Ceiling, Ceilings, UsdCeiling } from "./budget.js";
+import type {
+  CallsCeiling,
+  Ceilings,
+  TokensCeiling,
+  UsdCeiling,
+} from "./budget.js";
 import type { MicroUsd, Spend, UnpricedModels } from "./spend.js";
 
 export type CeilingHeadroom =
   | {
       readonly kind: "available";
-      readonly ceiling: Ceiling;
-      /** Non-negative headroom in the ceiling's own unit. */
+      readonly unit: "tokens";
+      readonly ceiling: TokensCeiling;
       readonly amount: number;
+    }
+  | {
+      readonly kind: "available";
+      readonly unit: "calls";
+      readonly ceiling: CallsCeiling;
+      readonly amount: number;
+    }
+  | {
+      readonly kind: "available";
+      readonly unit: "usd";
+      readonly ceiling: UsdCeiling;
+      /** Non-negative monetary headroom; never interchangeable with raw USD. */
+      readonly amount: MicroUsd;
     }
   | {
       readonly kind: "unpriced";
@@ -47,13 +65,28 @@ export const snapshotSpend = (spend: Spend): Spend =>
         }),
   });
 
-const snapshotCeiling = (ceiling: Ceiling): Ceiling => Object.freeze({ ...ceiling });
-
-const available = (ceiling: Ceiling, observed: number): CeilingHeadroom =>
+const availableTokens = (ceiling: TokensCeiling, observed: number): CeilingHeadroom =>
   Object.freeze({
     kind: "available",
-    ceiling: snapshotCeiling(ceiling),
+    unit: "tokens",
+    ceiling: Object.freeze({ ...ceiling }),
     amount: Math.max(0, ceiling.limit - observed),
+  });
+
+const availableCalls = (ceiling: CallsCeiling, observed: number): CeilingHeadroom =>
+  Object.freeze({
+    kind: "available",
+    unit: "calls",
+    ceiling: Object.freeze({ ...ceiling }),
+    amount: Math.max(0, ceiling.limit - observed),
+  });
+
+const availableUsd = (ceiling: UsdCeiling, observed: MicroUsd): CeilingHeadroom =>
+  Object.freeze({
+    kind: "available",
+    unit: "usd",
+    ceiling: Object.freeze({ ...ceiling }),
+    amount: Math.max(0, ceiling.limit - observed) as MicroUsd,
   });
 
 /**
@@ -69,14 +102,14 @@ export const remainingFor = (
   const headroom = limits.map((ceiling): CeilingHeadroom =>
     match(ceiling)
       .returnType<CeilingHeadroom>()
-      .with({ kind: "tokens" }, (c) => available(c, projected.tokens))
-      .with({ kind: "calls" }, (c) => available(c, projected.calls))
+      .with({ kind: "tokens" }, (c) => availableTokens(c, projected.tokens))
+      .with({ kind: "calls" }, (c) => availableCalls(c, projected.calls))
       .with({ kind: "usd" }, (c) =>
         projected.usd.kind === "priced"
-          ? available(c, projected.usd.micros)
+          ? availableUsd(c, projected.usd.micros)
           : Object.freeze({
               kind: "unpriced",
-              ceiling: snapshotCeiling(c) as UsdCeiling,
+              ceiling: Object.freeze({ ...c }),
               models: snapshotModels(projected.usd.models),
               observedAtLeast: projected.usd.knownMicros,
             }),

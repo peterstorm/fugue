@@ -147,6 +147,39 @@ describe("per-node capability minting (C1)", () => {
     expect(result.ok).toBe(true);
   });
 
+  it("fails closed when broker output contains a non-null built-in without claiming it", async () => {
+    let ran = false;
+    const broker: CapabilityBroker = {
+      mintFor: async () => ok({ http: { tag: "broker-http" } } as unknown as ScopedCapabilityHandle),
+    };
+    const node = createFetchNode({
+      id: N("reserved-output"),
+      inputSchema: z.object({}),
+      outputSchema: z.object({ ok: z.boolean() }),
+      requires: [],
+      fetch: async () => {
+        ran = true;
+        return ok({ ok: true });
+      },
+    });
+    const dag = defineDagFromArray({
+      id: "dag-1",
+      nodes: [node],
+      edges: [{ from: DAG_INPUT, to: "reserved-output" }],
+    });
+
+    const result = await runDag(dag, {}, baseCtx(), { minting: { broker, origin: agentOrigin } });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("validation");
+      if (result.error.kind === "validation") {
+        expect(result.error.message).toContain("non-null reserved/built-in key 'http'");
+      }
+    }
+    expect(ran).toBe(false);
+    expect(baseCtx().http as unknown).toBe(staticHttp);
+  });
+
   it("fails the node fail-closed when its mint is refused — the broker's error propagates UNWRAPPED", async () => {
     const { broker } = recordingBroker({ refuse: true });
     const node = createFetchNode({

@@ -1,7 +1,8 @@
 /**
  * Transparent LlmClient decorator. All mutable accounting, enforcement,
  * logging, and ledger sequencing live in the shared `RunSpendAuthority`; this
- * module only adapts the two client operations to that deep interface.
+ * module only intercepts the two provider-call operations. Every other runtime
+ * property remains available on the original subtype with `inner` as receiver.
  */
 
 import type {
@@ -16,20 +17,22 @@ import type {
 } from "@fuguejs/framework";
 import type { RunSpendAuthority } from "./run-spend-authority.js";
 
-export const createMeteredLlm = (
-  inner: LlmClient,
+export const createMeteredLlm = <T extends LlmClient>(
+  inner: T,
   clientKey: Capability,
   authority: RunSpendAuthority,
-): LlmClient => ({
-  sendStructured: <O>(req: LlmRequest<O>): Promise<Result<LlmResponse<O>, FrameworkError>> =>
+): T => {
+  const sendStructured: LlmClient["sendStructured"] = <O>(
+    req: LlmRequest<O>,
+  ): Promise<Result<LlmResponse<O>, FrameworkError>> =>
     authority.execute({
       clientKey,
       operation: "sendStructured",
       request: req,
       call: () => inner.sendStructured(req),
-    }),
+    });
 
-  sendWithTools: <O>(
+  const sendWithTools: LlmClient["sendWithTools"] = <O>(
     req: SendWithToolsRequest<O>,
     ctx: NodeContext,
   ): Promise<Result<LlmResponse<O>, FrameworkError>> =>
@@ -38,5 +41,24 @@ export const createMeteredLlm = (
       operation: "sendWithTools",
       request: req,
       call: () => inner.sendWithTools(req, ctx),
-    }),
-});
+    });
+
+  // Calling a class method with the Proxy as `this` breaks private fields and
+  // receiver-sensitive accessors. Cache target-bound delegates so subtype-only
+  // methods retain both correct receiver semantics and stable identity.
+  const boundMethods = new WeakMap<Function, Function>();
+  return new Proxy(inner, {
+    get(target, property) {
+      if (property === "sendStructured") return sendStructured;
+      if (property === "sendWithTools") return sendWithTools;
+      const value = Reflect.get(target, property, target);
+      if (typeof value !== "function") return value;
+      const cached = boundMethods.get(value);
+      if (cached !== undefined) return cached;
+      const bound = value.bind(target);
+      boundMethods.set(value, bound);
+      return bound;
+    },
+    set: (target, property, value) => Reflect.set(target, property, value, target),
+  });
+};

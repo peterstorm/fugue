@@ -100,8 +100,10 @@ falls back to the process-local ledger; budgets then survive parks in that
 process but not restarts.
 
 Embedders using the F6 file runtime may instead construct
-`createFileSpendLedger(root)` and inject it as `SharedInfra.spendLedger`. The
-root must be a persistent, non-symlink directory owned by the runtime user. Keep
+`createFileSpendLedger(root)` and inject it as `SharedInfra.spendLedger`. Its
+backend metadata marks it authoritative and restart-durable, so Redis capability
+detection does not displace it and no in-process “NOT durable” warning is emitted.
+The root must be a persistent, non-symlink directory owned by the runtime user. Keep
 it for at least as long as resumable run state; deleting a run's durable state
 must delete its spend record in the same lifecycle operation. The backend uses
 per-run lock directories and atomic rename, and is intended for F6's local

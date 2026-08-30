@@ -33,9 +33,10 @@ const digestOf = (runId: RunId): string =>
 
 const pathsFor = (root: VerifiedDirectory, runId: RunId) => {
   const digest = digestOf(runId);
+  const fileName = `${digest}.json`;
   return {
-    fileName: `${digest}.json`,
-    recordPath: join(root.path, `${digest}.json`),
+    fileName,
+    recordPath: join(root.path, fileName),
     lockPath: join(root.path, `${digest}.lock`),
   };
 };

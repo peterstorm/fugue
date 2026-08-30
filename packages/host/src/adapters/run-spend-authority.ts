@@ -97,6 +97,23 @@ const spendFields = ({ usd, ...axes }: Spend): Record<string, unknown> => ({
     : { usdMicros: usd.knownMicros, unpricedModels: [...usd.models] }),
 });
 
+/** Authority-shell policy for a typed reservation invariant failure. */
+export const releaseAuthorityReservation = (
+  state: ReservationState,
+  logger: LogPort,
+  context: Record<string, string>,
+): ReservationState => {
+  const released = releaseReservation(state);
+  if (released.ok) return released.value;
+  logWithoutThrowing(logger, "error", "llm.reservation-release-failed", {
+    ...context,
+    errorKind: released.error.kind,
+    inFlight: released.error.inFlight,
+    consequence: "reservation state retained; no additional budget headroom granted",
+  });
+  return state;
+};
+
 export const createRunSpendAuthority = (
   deps: RunSpendAuthorityDeps,
 ): RunSpendAuthority => {
@@ -142,7 +159,11 @@ export const createRunSpendAuthority = (
     reservation = decision.state;
     return {
       release: () => {
-        reservation = releaseReservation(reservation);
+        reservation = releaseAuthorityReservation(
+          reservation,
+          logger,
+          attribution(nodeId, clientKey),
+        );
       },
     };
   };

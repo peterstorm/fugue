@@ -185,7 +185,19 @@ export const runNodeShared = async (
         emitNodeError(`capability minting refused: ${messageOf(minted.error)}`, minted.error);
         return err(minted.error);
       }
-      runCtx = mergeScopedCapabilities(ctx, minted.value);
+      const merged = mergeScopedCapabilities(ctx, minted.value);
+      if (!merged.ok) {
+        const mergeError: FrameworkError = {
+          kind: "validation",
+          nodeId,
+          message:
+            `capability broker returned non-null reserved/built-in key ` +
+            `'${merged.error.key}'; static built-in authority remains authoritative`,
+        };
+        emitNodeError(`capability merge refused: ${messageOf(mergeError)}`, mergeError);
+        return err(mergeError);
+      }
+      runCtx = merged.value;
 
       // Seam-contract enforcement (claims-without-delivery): run-start
       // validation exempted every `provides()`-claimed capability from the
