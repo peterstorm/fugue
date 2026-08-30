@@ -4,6 +4,7 @@ import { describe, expect, test } from "bun:test";
 import { makeNodeContext, mergeScopedCapabilities } from "../shared/make-node-context.js";
 import type { ScopedCapabilityHandle } from "../types/capability-broker.js";
 import type { Logger } from "../types/node.js";
+import type { DagId, RunId } from "../types/ids.js";
 import type { Tracer } from "../types/tracer.js";
 
 const baseLogger: Logger = { warn: () => {}, error: () => {} };
@@ -27,6 +28,17 @@ const mergeOk = (
 };
 
 describe("makeNodeContext built-in capability ownership", () => {
+  test("revalidates forged branded identifiers because brands erase at runtime", () => {
+    expect(() => makeNodeContext({
+      runId: "bad run" as RunId,
+      dagId: "valid-dag",
+    })).toThrow(/Invalid runId/);
+    expect(() => makeNodeContext({
+      runId: "valid-run",
+      dagId: "bad:dag" as DagId,
+    })).toThrow(/Invalid dagId/);
+  });
+
   test("ignores Object.prototype pollution instead of satisfying a built-in", () => {
     const inherited = { request: async () => ({ ok: true }) };
     const prior = Object.getOwnPropertyDescriptor(Object.prototype, "http");

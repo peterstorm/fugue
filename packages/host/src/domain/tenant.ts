@@ -45,29 +45,30 @@ import { match } from "ts-pattern";
 import type { AuthIdentity, Team } from "./auth.js";
 import type { HostError } from "./host-error.js";
 import { tenantUnknown, internalInvariantViolated } from "./host-error.js";
+import {
+  TENANT_ID_REGEX,
+  isReservedTenantId,
+  type TenantId,
+} from "./tenant-id.js";
 import type { Result } from "@fuguejs/framework";
 import { ok, err } from "@fuguejs/framework";
 
+export type { TenantId, TenantIdParseError } from "./tenant-id.js";
+export {
+  tenantId,
+  TENANT_ID_REGEX,
+  RESERVED_TENANT_IDS,
+  isReservedTenantId,
+} from "./tenant-id.js";
+
 // ── Branded types ───────────────────────────────────────────────────────────
 
-declare const __tenantIdBrand: unique symbol;
 declare const __tenantBrand: unique symbol;
 declare const __secretsRefBrand: unique symbol;
 
-/**
- * A registered tenant's stable identifier. Hard-branded (a `unique symbol`,
- * like `RunId`/`DagId`): a plain `string` does NOT inhabit it, so an arbitrary
- * caller-supplied string can never be routed as a tenant id. Its sole producer
- * is `tenantId`, which validates the SHAPE (see `TENANT_ID_REGEX`); the brand
- * additionally encodes "passed shape validation at a parse boundary".
- *
- * The shape is deliberately Redis-key-safe: a `TenantId` becomes the
- * `fugue:<tenant>:*` key prefix and the `~fugue:<tenant>:*` Redis-ACL pattern
- * (AD-4), so it MUST NOT contain `:` (the key delimiter) or any glob
- * metacharacter — otherwise one tenant's id could be crafted to widen its own
- * ACL pattern over another tenant's keyspace.
- */
-export type TenantId = string & { readonly [__tenantIdBrand]: void };
+// TenantId and its only grammar constructor live in `tenant-id.ts`, a pure
+// value-object module that HostError parsing can consume without importing this
+// registration/principal module back into the error taxonomy.
 
 /**
  * The registered tenant security principal. Hard-branded so it cannot be
@@ -133,71 +134,6 @@ export interface TenantRegistryView {
 }
 
 // ── Smart constructors ──────────────────────────────────────────────────────
-
-/**
- * Shape of a tenant id. Stricter than the general framework id regex: NO `:`
- * (Redis key delimiter) and NO glob metacharacters (`*`, `?`, `[`, `]`), so a
- * `TenantId` is always safe to interpolate into both a `fugue:<tenant>:*` key
- * and a `~fugue:<tenant>:*` Redis-ACL pattern without escaping. Lowercasing is
- * NOT enforced here (registration owns canonicalization); the regex only
- * guarantees the value can never widen a key/ACL namespace.
- */
-export const TENANT_ID_REGEX = /^[A-Za-z0-9_-]{1,64}$/;
-
-/**
- * Control-plane namespace segments that appear immediately after `fugue:` in
- * NON-tenant-scoped keys/channels: the tenant registry (`fugue:tenants:*` —
- * `TENANT_KEY_PREFIX` / `TENANT_EVENTS_CHANNEL`) and the supervisor's own state
- * (`fugue:supervisor:*` — the worker registry `WORKER_KEY_PREFIX` and the audit
- * stream `AUDIT_STREAM_KEY`). These are RESERVED: a tenant whose id equalled one
- * would be granted the ACL pattern `~fugue:<id>:*` (see `buildAclSpec`) that
- * OVERLAPS that control-plane keyspace — e.g. id `tenants` → `~fugue:tenants:*`
- * matches `fugue:tenants:<other>`, letting a scoped worker READ every other
- * tenant's config record (`secretsRef`, owning team, Keycloak mapping), WRITE to
- * the supervisor's registries, or publish on the lifecycle channel. That silently
- * defeats the cross-tenant isolation the whole feature rests on (ADR-0067, FR-040).
- *
- * Compared case-INSENSITIVELY: Redis keys are case-sensitive, so only an
- * exact-case id truly collides, but reserving the whole case-fold costs nothing
- * and removes any doubt (and any future `fugue:Supervisor:`-style key). Keep this
- * set in sync with the `fugue:<segment>:` prefixes the supervisor adapters own —
- * `import-boundaries.test.ts` (boundary E) pins that every such prefix is covered.
- */
-export const RESERVED_TENANT_IDS: ReadonlySet<string> = new Set(["tenants", "supervisor"]);
-
-/**
- * True iff `s` collides (case-insensitively) with a reserved control-plane
- * namespace segment — see `RESERVED_TENANT_IDS`. A reserved id passes
- * `TENANT_ID_REGEX` (it is shape-valid) but must never become a `TenantId`, so
- * this is checked alongside the regex at every parse/brand/ACL boundary.
- */
-export const isReservedTenantId = (s: string): boolean => RESERVED_TENANT_IDS.has(s.toLowerCase());
-
-/**
- * Parse-don't-validate constructor for `TenantId`. Returns a `Result` rather
- * than throwing, since tenant ids arrive from config/registration data at a
- * parse boundary. REJECTS two classes of value, each of which could widen one
- * tenant's `~fugue:<tenant>:*` ACL pattern over another's keyspace (AD-4, SC-001):
- *   - a `:` or glob metacharacter in the id (`TENANT_ID_REGEX`), and
- *   - a reserved control-plane namespace segment (`isReservedTenantId`) whose
- *     pattern would overlap the supervisor's own keys.
- * Both invariants are enforced in types here, never assumed downstream.
- */
-export const tenantId = (s: string): Result<TenantId, HostError> => {
-  if (!TENANT_ID_REGEX.test(s)) {
-    return err({
-      kind: "config-invalid",
-      message: `invalid tenant id "${s}": must match ${TENANT_ID_REGEX.source} (no ':' or glob metacharacters — required for Redis key/ACL scoping)`,
-    });
-  }
-  if (isReservedTenantId(s)) {
-    return err({
-      kind: "config-invalid",
-      message: `invalid tenant id "${s}": reserved control-plane namespace — its ~fugue:${s}:* ACL pattern would overlap the supervisor's own fugue:${s}:* keyspace`,
-    });
-  }
-  return ok(s as TenantId);
-};
 
 /**
  * @internal Brand a tenant principal. The single PRODUCER of `Tenant`, called at

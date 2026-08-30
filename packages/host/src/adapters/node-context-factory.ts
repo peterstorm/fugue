@@ -126,11 +126,7 @@ export const createNamespacedCache = (
   defaultTtlSec: number | undefined,
   logger: LogPort,
 ): ContextCacheAdapter => {
-  // One binding for the three sites that log from this factory, matching the
-  // idiom `createNamespacedCheckpointWriter` below already uses. Two of them
-  // previously wrote the same closure inline and the third called through
-  // differently-shaped, so a reader had to re-derive that all three were the
-  // same thing.
+  // All cache diagnostics use one guarded logger binding.
   const report = (
     level: "warn" | "error",
     message: string,

@@ -777,9 +777,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
   });
 
   it("onBackground on state-machine path: caller resolves before background promise; promise resolves later", async () => {
-    // codex finding #3: SM path now supports onBackground for parity with the
-    // legacy fast path. Caller-bound timeouts (HTTP request signal) no longer
-    // block on judges + span finalization.
+    // The hook receives the guarded finalize promise without delaying the caller.
     const dag = mkSimpleDag("onbg-jl");
     let bgCaptured: Promise<any> | undefined;
     const result = await runDag(dag, {}, mkCtx(), {
@@ -831,8 +829,9 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
     expect(callCount).toBe(2);
   });
 
-  it("DagDef.retryLimits = {} (empty) does NOT route to state-machine path", async () => {
-    // Empty retryLimits is meaningless; should stay on legacy fast path.
+  it("DagDef.retryLimits = {} contributes no retry configuration", async () => {
+    // An empty retry-limit map contributes no retries, so the node runs once
+    // through the same single stateful runtime path.
     let callCount = 0;
     // Never succeeds, and declares no retry config of its own.
     const flakyNode = makeFlakyNode({
@@ -849,7 +848,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
     });
     const result = await runDag(dag, {}, mkCtx());
     expect(result.ok).toBe(false);
-    // Legacy path = single attempt, no retry
+    // No configured retry means one attempt.
     expect(callCount).toBe(1);
   });
 

@@ -258,6 +258,29 @@ describe("error-handler middleware", () => {
       }
     });
 
+    it.each([
+      ["dag-not-found.dagId", { kind: "dag-not-found", dagId: "bad id", available: ["other"] }],
+      ["dag-not-found.available", { kind: "dag-not-found", dagId: "dag", available: ["bad id"] }],
+      ["dag-disabled.dagId", { kind: "dag-disabled", dagId: "bad id", reason: "disabled" }],
+      ["dag-concurrency-exceeded.dagId", { kind: "dag-concurrency-exceeded", dagId: "bad id" }],
+      ["timeout.dagId", { kind: "timeout", dagId: "bad id", runId: "run", timeoutMs: 10 }],
+      ["timeout.runId", { kind: "timeout", dagId: "dag", runId: "bad id", timeoutMs: 10 }],
+      ["input-validation-failed.dagId", { kind: "input-validation-failed", dagId: "bad id", issues: [issue] }],
+      ["dag-validation-failed.dagId", { kind: "dag-validation-failed", dagId: "bad id", reason: "shape", message: "failed" }],
+      ["body-parse-failed.dagId", { kind: "body-parse-failed", dagId: "bad id", message: "failed" }],
+      ["async-result-expired.runId", { kind: "async-result-expired", runId: "bad id" }],
+      ["run-not-found.runId", { kind: "run-not-found", runId: "bad id" }],
+      ["run-lease-lost.runId", { kind: "run-lease-lost", runId: "bad id" }],
+      ["run-not-suspended.runId", { kind: "run-not-suspended", runId: "bad id", status: "running" }],
+      ["forbidden.dagId", { kind: "forbidden", dagId: "bad id", callerTeam: "a", dagTeam: "b" }],
+      ["tenant-over-quota.tenant malformed", { kind: "tenant-over-quota", tenant: "bad id", retryAfterSeconds: 7 }],
+      ["tenant-over-quota.tenant reserved", { kind: "tenant-over-quota", tenant: "tenants", retryAfterSeconds: 7 }],
+      ["worker-unavailable.tenant malformed", { kind: "worker-unavailable", tenant: "bad id" }],
+      ["worker-unavailable.tenant reserved", { kind: "worker-unavailable", tenant: "supervisor" }],
+    ])("rejects an invalid identifier-bearing variant: %s", (_field, candidate) => {
+      expect(parseHostError(candidate)).toBeUndefined();
+    });
+
     it("is total for throwing getters and revoked proxies", async () => {
       const throwingGetter = Object.defineProperty({}, "kind", {
         enumerable: true,

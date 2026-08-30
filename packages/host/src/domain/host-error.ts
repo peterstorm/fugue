@@ -9,10 +9,8 @@
 import { match, P } from "ts-pattern";
 import type { z } from "zod";
 import type { DagId, RunId } from "@fuguejs/framework";
-// Type-only import — `TenantId` is a branded string used in the tenant error
-// payloads below. `tenant.ts` imports the VALUE `tenantUnknown` from this
-// module; this back-reference is type-only, so there is no runtime import cycle.
-import type { TenantId } from "./tenant.js";
+import { tryDagId, tryRunId } from "@fuguejs/framework";
+import { tenantId, type TenantId } from "./tenant-id.js";
 
 // Zod 4 re-exports $ZodIssue as the canonical issue type
 type ZodIssue = z.core.$ZodIssue;
@@ -245,10 +243,42 @@ function isIssue(value: unknown): value is ZodIssue {
   return ISSUE_PAYLOAD_PARSERS[value.code](value);
 }
 
+const parseDagId = (value: unknown): DagId | undefined => {
+  if (!isString(value)) return undefined;
+  const parsed = tryDagId(value);
+  return parsed.ok ? parsed.value : undefined;
+};
+
+const parseDagIds = (value: unknown): readonly DagId[] | undefined => {
+  if (!Array.isArray(value)) return undefined;
+  const parsed: DagId[] = [];
+  for (const candidate of value) {
+    const id = parseDagId(candidate);
+    if (id === undefined) return undefined;
+    parsed.push(id);
+  }
+  return Object.freeze(parsed);
+};
+
+const parseRunId = (value: unknown): RunId | undefined => {
+  if (!isString(value)) return undefined;
+  const parsed = tryRunId(value);
+  return parsed.ok ? parsed.value : undefined;
+};
+
+const parseTenantId = (value: unknown): TenantId | undefined => {
+  if (!isString(value)) return undefined;
+  const parsed = tenantId(value);
+  return parsed.ok ? parsed.value : undefined;
+};
+
+const frozenHostError = <E extends HostError>(error: E): E => Object.freeze(error);
+
 /**
  * Total parser for errors crossing the throwing HTTP seam. Every source value
- * is read once into a fresh deeply frozen snapshot before variant checks, so
- * getters, proxies, and later mutation cannot drift response policy.
+ * is read once into a deeply frozen snapshot before variant checks. Identifier
+ * fields are then rebuilt through their smart constructors into a fresh frozen
+ * HostError, so erased brands cannot be forged at this authority boundary.
  */
 export const parseHostError = (value: unknown): HostError | undefined => {
   const snapshotted = snapshotUnknown(value);
@@ -286,65 +316,117 @@ export const parseHostError = (value: unknown): HostError | undefined => {
     case "no-default-export":
       valid = hasStrings(snapshot, "path");
       break;
-    case "dag-not-found":
-      valid = hasStrings(snapshot, "dagId") && isStringArray(snapshot.available);
-      break;
-    case "dag-disabled":
-      valid = hasStrings(snapshot, "dagId", "reason");
-      break;
+    case "dag-not-found": {
+      const dagId = parseDagId(snapshot.dagId);
+      const available = parseDagIds(snapshot.available);
+      return dagId === undefined || available === undefined
+        ? undefined
+        : frozenHostError({ kind: "dag-not-found", dagId, available });
+    }
+    case "dag-disabled": {
+      const dagId = parseDagId(snapshot.dagId);
+      return dagId === undefined || !isString(snapshot.reason)
+        ? undefined
+        : frozenHostError({ kind: "dag-disabled", dagId, reason: snapshot.reason });
+    }
     case "global-concurrency-exceeded":
     case "tenant-unknown":
       valid = true;
       break;
-    case "dag-concurrency-exceeded":
-      valid = hasStrings(snapshot, "dagId");
-      break;
-    case "timeout":
-      valid = hasStrings(snapshot, "dagId", "runId") &&
-        typeof snapshot.timeoutMs === "number" && Number.isFinite(snapshot.timeoutMs);
-      break;
+    case "dag-concurrency-exceeded": {
+      const dagId = parseDagId(snapshot.dagId);
+      return dagId === undefined
+        ? undefined
+        : frozenHostError({ kind: "dag-concurrency-exceeded", dagId });
+    }
+    case "timeout": {
+      const dagId = parseDagId(snapshot.dagId);
+      const runId = parseRunId(snapshot.runId);
+      return dagId === undefined || runId === undefined ||
+          typeof snapshot.timeoutMs !== "number" || !Number.isFinite(snapshot.timeoutMs)
+        ? undefined
+        : frozenHostError({ kind: "timeout", dagId, runId, timeoutMs: snapshot.timeoutMs });
+    }
     case "spend-ledger-unavailable":
       valid = snapshot.backend === "file" &&
         (snapshot.operation === "create" || snapshot.operation === "read" || snapshot.operation === "add") &&
         hasStrings(snapshot, "message");
       break;
-    case "input-validation-failed":
-      valid = hasStrings(snapshot, "dagId") && isIssueArray(snapshot.issues);
-      break;
-    case "dag-validation-failed":
-      valid = hasStrings(snapshot, "dagId", "reason", "message");
-      break;
-    case "body-parse-failed":
-      valid = hasStrings(snapshot, "dagId", "message");
-      break;
+    case "input-validation-failed": {
+      const dagId = parseDagId(snapshot.dagId);
+      return dagId === undefined || !isIssueArray(snapshot.issues)
+        ? undefined
+        : frozenHostError({ kind: "input-validation-failed", dagId, issues: snapshot.issues });
+    }
+    case "dag-validation-failed": {
+      const dagId = parseDagId(snapshot.dagId);
+      return dagId === undefined || !isString(snapshot.reason) || !isString(snapshot.message)
+        ? undefined
+        : frozenHostError({
+            kind: "dag-validation-failed",
+            dagId,
+            reason: snapshot.reason,
+            message: snapshot.message,
+          });
+    }
+    case "body-parse-failed": {
+      const dagId = parseDagId(snapshot.dagId);
+      return dagId === undefined || !isString(snapshot.message)
+        ? undefined
+        : frozenHostError({ kind: "body-parse-failed", dagId, message: snapshot.message });
+    }
     case "discovery-failed":
       valid = hasStrings(snapshot, "dagsRoot", "message");
       break;
     case "async-result-expired":
     case "run-not-found":
-    case "run-lease-lost":
-      valid = hasStrings(snapshot, "runId");
-      break;
-    case "run-not-suspended":
-      valid = hasStrings(snapshot, "runId", "status");
-      break;
+    case "run-lease-lost": {
+      const runId = parseRunId(snapshot.runId);
+      return runId === undefined
+        ? undefined
+        : frozenHostError({ kind: snapshot.kind, runId });
+    }
+    case "run-not-suspended": {
+      const runId = parseRunId(snapshot.runId);
+      return runId === undefined || !isString(snapshot.status)
+        ? undefined
+        : frozenHostError({ kind: "run-not-suspended", runId, status: snapshot.status });
+    }
     case "unauthorized":
       valid = hasStrings(snapshot, "reason");
       break;
-    case "forbidden":
-      valid = hasStrings(snapshot, "dagId", "callerTeam", "dagTeam");
-      break;
+    case "forbidden": {
+      const dagId = parseDagId(snapshot.dagId);
+      return dagId === undefined || !isString(snapshot.callerTeam) || !isString(snapshot.dagTeam)
+        ? undefined
+        : frozenHostError({
+            kind: "forbidden",
+            dagId,
+            callerTeam: snapshot.callerTeam,
+            dagTeam: snapshot.dagTeam,
+          });
+    }
     case "team-already-exists":
     case "team-not-found":
       valid = hasStrings(snapshot, "team");
       break;
-    case "tenant-over-quota":
-      valid = hasStrings(snapshot, "tenant") && typeof snapshot.retryAfterSeconds === "number" &&
-        Number.isSafeInteger(snapshot.retryAfterSeconds) && snapshot.retryAfterSeconds >= 0;
-      break;
-    case "worker-unavailable":
-      valid = hasStrings(snapshot, "tenant");
-      break;
+    case "tenant-over-quota": {
+      const tenant = parseTenantId(snapshot.tenant);
+      return tenant === undefined || typeof snapshot.retryAfterSeconds !== "number" ||
+          !Number.isSafeInteger(snapshot.retryAfterSeconds) || snapshot.retryAfterSeconds < 0
+        ? undefined
+        : frozenHostError({
+            kind: "tenant-over-quota",
+            tenant,
+            retryAfterSeconds: retryAfterSeconds(snapshot.retryAfterSeconds),
+          });
+    }
+    case "worker-unavailable": {
+      const tenant = parseTenantId(snapshot.tenant);
+      return tenant === undefined
+        ? undefined
+        : frozenHostError({ kind: "worker-unavailable", tenant });
+    }
     case "internal-invariant-violated":
       valid = hasStrings(snapshot, "message") && isRecord(snapshot.context);
       break;
@@ -352,7 +434,9 @@ export const parseHostError = (value: unknown): HostError | undefined => {
       valid = false;
   }
 
-  return valid ? snapshot as HostError : undefined;
+  // `snapshotUnknown` already froze every descendant. Spreading creates a new
+  // outer value so no accepted HostError is the string-only parser snapshot.
+  return valid ? Object.freeze({ ...snapshot }) as HostError : undefined;
 };
 
 /**
