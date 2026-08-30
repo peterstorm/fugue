@@ -1072,15 +1072,18 @@ node tests should inject `fixedBudgetCapability` from
 
 Before prompt caching, a token count was a serviceable proxy for money. It no longer is: a cache read bills at 0.1x and a write at up to 2.0x, so three runs reporting the same 110,000 tokens can span **13.8x** in real cost. A ceiling that cannot see that difference is not protecting a budget.
 
-Overshoot is bounded rather than eliminated: the check runs before the call against spend that settles after it, so exactly one call passes a reached ceiling in the sequential case, and a concurrency reservation bounds the parallel case. See ADR-0082.
+Overshoot is bounded rather than eliminated: the check runs before the call against spend that settles after it, so exactly one call passes a reached ceiling in the sequential case. Concurrency reservations constrain warm bursts using the largest settled call learned so far; a cold first burst, or concurrent calls larger than that projection, can exceed the learned estimate until settlement widens it. See ADR-0082.
 
 **Spend is durable.** A resumable run builds a fresh NodeContext per execution slice, so the in-process counter alone would let a run that parks for a human decision resume with its budget refilled — five parks, six budgets. A spend ledger (Redis, file, or in-process for a single-process deployment) is hydrated once when a slice starts and appended to as calls settle, so a run that parked already over its ceiling refuses immediately on resume.
 
 A budgeted run whose ledger cannot be READ refuses the slice: an unreadable ledger is indistinguishable from a spent one, and assuming zero is the refill bug by another name. An unbudgeted run carries on — there is no ceiling to protect. A failed ledger WRITE never fails the call, because the tokens are already spent; it is logged at `error` under a declared budget.
 
 One Run Spend Authority meters `ctx.llm`, `judgeLlm`, and every custom
-boot-scoped `CapabilityHandle` marked `clientKind: "llm"`. They share one
-reservation gate, spent view, ceiling, and ledger. File-durable embedders can
+boot-scoped `CapabilityHandle` marked `clientKind: "llm"`. Augmented LLM
+subtypes additionally compose a run-scoped facade from the metered standard
+surface, so subtype aliases cannot bypass the authority through target-bound
+self-calls. All clients share one reservation gate, spent view, ceiling, and
+ledger. File-durable embedders can
 inject the host's `createFileSpendLedger(root)` adapter as authoritative; Redis
 capability detection does not override it. Ledger metadata carries backend,
 durability, and role so only the actually selected memory fallback logs “NOT

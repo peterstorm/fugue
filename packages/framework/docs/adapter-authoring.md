@@ -146,6 +146,35 @@ custom boot-scoped LLM clients through one Run Spend Authority. It never duck
 types method names. Omitting the marker is a compile error; adding it to a
 non-LLM handle is also a compile error. Existing non-LLM adapters do not change.
 
+An augmented registry client (a strict subtype with provider-specific aliases)
+also requires `composeRunClient`. The hook receives the narrow, run-scoped
+metered `LlmClient` and returns the augmented facade. Every alias that performs
+an LLM operation must delegate through that supplied surface; do not bind the
+alias to the boot client, because a `this.sendStructured(...)` self-call there
+would execute behind the run authority:
+
+```ts
+interface AugmentedCritic extends LlmClient {
+  critique(req: LlmRequest<Critique>): Promise<Result<LlmResponse<Critique>, FrameworkError>>;
+}
+
+export const createAugmentedCriticAdapter = (
+  provider: AugmentedCritic,
+): CapabilityHandle<"augmentedCritic"> => ({
+  name: "augmentedCritic",
+  client: provider,
+  clientKind: "llm",
+  composeRunClient: (metered) => ({
+    sendStructured: (req) => metered.sendStructured(req),
+    sendWithTools: (req, ctx) => metered.sendWithTools(req, ctx),
+    critique: (req) => metered.sendStructured(req),
+  }),
+});
+```
+
+This explicit composition seam keeps boot-scoped provider resources reusable
+while allocating the authority-bearing facade per run.
+
 Lifecycle contract (`CapabilityHandle`):
 - `connect()` once at boot — throwing aborts startup.
 - `close()` at shutdown — awaited before exit.
@@ -193,6 +222,7 @@ Tests use `bun:test`, live in `src/__tests__/`, and assert on `Result` via
 
 - [ ] `name` matches the `CapabilityRegistry` key exactly.
 - [ ] A client extending `LlmClient` declares `clientKind: "llm"`.
+- [ ] An augmented LLM subtype implements `composeRunClient`, and every provider alias delegates through the supplied metered client.
 - [ ] No exceptions escape `client` methods — everything is `Result`.
 - [ ] Errors classified transient vs non-retriable correctly.
 - [ ] `connect`/`close` manage all external resources; boot fails loudly.

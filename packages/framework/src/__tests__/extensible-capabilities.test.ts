@@ -39,10 +39,15 @@ interface TestDbCapability {
   queryOne<T>(schema: z.ZodType<T>, sql: string, params?: unknown[]): Promise<Result<T | null, FrameworkError>>;
 }
 
+interface AugmentedCritic extends LlmClient {
+  readonly critique: LlmClient["sendStructured"];
+}
+
 declare module "../types/node.js" {
   interface CapabilityRegistry {
     db: TestDbCapability;
     criticLlm: LlmClient;
+    augmentedCritic: AugmentedCritic;
   }
 }
 
@@ -58,8 +63,28 @@ const capabilityHandleKindTypePins = (llm: LlmClient, db: TestDbCapability): voi
   const bypass: CapabilityHandle<"criticLlm"> = { name: "criticLlm", client: llm };
   // @ts-expect-error -- non-LLM handles cannot accidentally opt into LLM decoration.
   const falseMarker: CapabilityHandle<"db"> = { name: "db", client: db, clientKind: "llm" };
+
+  const augmented = llm as AugmentedCritic;
+  const composed: CapabilityHandle<"augmentedCritic"> = {
+    name: "augmentedCritic",
+    client: augmented,
+    clientKind: "llm",
+    composeRunClient: (metered) => ({
+      sendStructured: (req) => metered.sendStructured(req),
+      sendWithTools: (req, ctx) => metered.sendWithTools(req, ctx),
+      critique: (req) => metered.sendStructured(req),
+    }),
+  };
+  // @ts-expect-error -- augmented aliases require explicit run-scoped composition.
+  const uncomposed: CapabilityHandle<"augmentedCritic"> = {
+    name: "augmentedCritic",
+    client: augmented,
+    clientKind: "llm",
+  };
   void bypass;
   void falseMarker;
+  void composed;
+  void uncomposed;
 };
 void capabilityHandleKindTypePins;
 

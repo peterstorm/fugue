@@ -26,7 +26,9 @@ pre-1.0, so a minor bump may carry breaking changes.
   `makeNodeContext`, whose `NodeContextInit.budget` remains optional.
 - **Breaking (source):** a `CapabilityHandle<K>` whose registered client extends
   `LlmClient` must declare `clientKind: "llm"`. Non-LLM handles cannot declare
-  this field. This closes custom-client budget bypasses by construction.
+  this field. An augmented LLM subtype must additionally provide
+  `composeRunClient(metered)`, constructing its run-scoped facade from the narrow
+  metered standard surface so provider aliases cannot bypass shared budgets.
 
 ## [0.5.1] — 2026-08-24
 

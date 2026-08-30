@@ -3,8 +3,11 @@
  *
  * `clientKind` is explicit adapter intent, not runtime duck typing. Any registry
  * client assignable to `LlmClient` must be marked `"llm"`; non-LLM handles
- * cannot carry the marker. The distributive conditional preserves that rule
- * after heterogeneous handles widen to `CapabilityHandle[]`.
+ * cannot carry the marker. An augmented LLM subtype must also author a
+ * run-scoped composition hook: the host supplies the metered standard surface,
+ * and the hook builds the subtype facade around that authority-bearing client.
+ * The distributive conditional preserves both rules after heterogeneous handles
+ * widen to `CapabilityHandle[]`.
  */
 
 import type { LlmClient } from "./llm.js";
@@ -23,12 +26,30 @@ type CapabilityHandleBase<K extends Capability> = {
   readonly dependsOn?: readonly Capability[];
 };
 
+export type RunScopedLlmComposer<T extends LlmClient> = (
+  metered: LlmClient,
+) => T;
+
+type LlmHandleMetadata<K extends Capability> =
+  CapabilityRegistry[K] extends LlmClient
+    ? LlmClient extends CapabilityRegistry[K]
+      ? {
+          readonly clientKind: "llm";
+          /** Optional for the exact standard surface; required for strict subtypes. */
+          readonly composeRunClient?: RunScopedLlmComposer<LlmClient>;
+        }
+      : {
+          readonly clientKind: "llm";
+          readonly composeRunClient: RunScopedLlmComposer<CapabilityRegistry[K]>;
+        }
+    : {
+        readonly clientKind?: never;
+        readonly composeRunClient?: never;
+      };
+
 export type CapabilityHandle<K extends Capability = Capability> =
   K extends Capability
-    ? CapabilityHandleBase<K> &
-        (CapabilityRegistry[K] extends LlmClient
-          ? { readonly clientKind: "llm" }
-          : { readonly clientKind?: never })
+    ? CapabilityHandleBase<K> & LlmHandleMetadata<K>
     : never;
 
 /** Standard adapter factory shape. */

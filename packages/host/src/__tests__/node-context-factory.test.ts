@@ -37,14 +37,18 @@ import {
   buildCheckpointKey,
 } from "../adapters/node-context-factory.js";
 import { subjectTokenForIdentity, invocationOriginForIdentity } from "../domain/run-context.js";
-import { markSubjectToken, type AuthIdentity, type SubjectToken } from "../domain/auth.js";
+import {
+  markSubjectToken,
+  type AgentClientMap,
+  type AuthIdentity,
+  type SubjectToken,
+} from "../domain/auth.js";
 import { tenantId } from "../domain/tenant.js";
 import type { TenantId } from "../domain/tenant.js";
 import { createFileSpendLedger } from "../adapters/spend-ledger-file.js";
 
 interface AugmentedLlmClient extends LlmClient {
-  readonly rename: (label: string) => void;
-  readonly summary: () => string;
+  readonly sendAlias: LlmClient["sendStructured"];
 }
 
 declare module "@fuguejs/framework" {
@@ -191,6 +195,26 @@ const baseSharedInfra = (
   capabilities,
 });
 
+type TestContextOptions = {
+  readonly shared?: SharedInfra;
+  readonly dag?: RegisteredDag;
+  readonly run?: RunId;
+  readonly signal?: AbortSignal;
+  readonly identity?: AuthIdentity;
+  readonly agentClientMap?: AgentClientMap;
+};
+
+/** Defaults the run identity and wiring; focused cases vary only their seam. */
+const createTestContext = (opts: TestContextOptions = {}) =>
+  createNodeContextForDag(
+    opts.shared ?? baseSharedInfra(),
+    opts.dag ?? makeDag(),
+    opts.run ?? testRunId,
+    opts.signal ?? new AbortController().signal,
+    opts.identity ?? adminIdentity,
+    opts.agentClientMap ?? FACTORY_AGENT_MAP,
+  );
+
 /**
  * ONE client fake and ONE request shape for the file.
  *
@@ -290,6 +314,26 @@ describe("createNamespacedCache", () => {
     expect(logs.some(l => l.level === "warn" && l.msg.includes("Cache get failed"))).toBe(true);
   });
 
+  it.each(["throw", "reject"] as const)(
+    "gracefully degrades to miss when Redis get %ss",
+    async (mode) => {
+      const base = createMockRedis().redis;
+      const redis: RedisPort = {
+        ...base,
+        get: mode === "throw"
+          ? () => { throw new Error("get invocation escaped"); }
+          : async () => Promise.reject(new Error("get await escaped")),
+      };
+      const { logger, logs } = collectLogs();
+      const cache = createNamespacedCache(redis, testTenant, testDagId, undefined, logger);
+
+      expect(await cache.get("hostile-get")).toEqual({ hit: false });
+      const line = logs.find((entry) => entry.msg.includes("Cache get failed"));
+      expect(line?.level).toBe("warn");
+      expect(String(line?.data?.["error"])).toContain(mode === "throw" ? "invocation" : "await");
+    },
+  );
+
   it("treats corrupted JSON as cache miss", async () => {
     const store = new Map([
       [buildCacheKey(testTenant, testDagId, "bad"), "not-json{{{"],
@@ -322,6 +366,26 @@ describe("createNamespacedCache", () => {
     expect(result.ok).toBe(true);
     expect(logs.some(l => l.level === "warn" && l.msg.includes("Cache set failed"))).toBe(true);
   });
+
+  it.each(["throw", "reject"] as const)(
+    "keeps cache writes best-effort when Redis set %ss",
+    async (mode) => {
+      const base = createMockRedis().redis;
+      const redis: RedisPort = {
+        ...base,
+        set: mode === "throw"
+          ? () => { throw new Error("set invocation escaped"); }
+          : async () => Promise.reject(new Error("set await escaped")),
+      };
+      const { logger, logs } = collectLogs();
+      const cache = createNamespacedCache(redis, testTenant, testDagId, undefined, logger);
+
+      expect(await cache.set("hostile-set", { safe: true })).toEqual(ok(undefined));
+      const line = logs.find((entry) => entry.msg.includes("Cache set failed"));
+      expect(line?.level).toBe("warn");
+      expect(String(line?.data?.["error"])).toContain(mode === "throw" ? "invocation" : "await");
+    },
+  );
 
   it("cache fallback outcomes survive a throwing logger and report through guarded stderr", async () => {
     const diagnostics: string[] = [];
@@ -491,7 +555,7 @@ describe("createNodeContextForDag — built-in http capability", () => {
   // and any `requires: ["http"]` DAG fails the boot-time capability check.
   it("surfaces a usable http client when the handle is wired into capabilities", async () => {
     const shared = baseSharedInfra([createHttpCapability()]);
-    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
+    const { ctx } = await createTestContext({ shared });
 
     expect(ctx.http).not.toBeNull();
     // The presence check `ctx.http != null` is exactly what
@@ -502,7 +566,7 @@ describe("createNodeContextForDag — built-in http capability", () => {
 
   it("leaves http null when no http handle is wired (documents the gap the wiring closes)", async () => {
     const shared = baseSharedInfra([]);
-    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
+    const { ctx } = await createTestContext({ shared });
 
     expect(ctx.http).toBeNull();
   });
@@ -514,7 +578,7 @@ describe("createNodeContextForDag — built-in http capability", () => {
   // migrated the clock from a factory seam to a capability without host wiring.
   it("surfaces a usable clock when the handle is wired into capabilities", async () => {
     const shared = baseSharedInfra([{ name: "clock", client: systemClock }]);
-    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
+    const { ctx } = await createTestContext({ shared });
 
     expect(ctx.clock).not.toBeNull();
     // The presence check `ctx.clock != null` is what `validateCapabilities`
@@ -525,7 +589,7 @@ describe("createNodeContextForDag — built-in http capability", () => {
 
   it("leaves clock null when no clock handle is wired (documents the gap the wiring closes)", async () => {
     const shared = baseSharedInfra([]);
-    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
+    const { ctx } = await createTestContext({ shared });
 
     expect(ctx.clock).toBeNull();
   });
@@ -656,7 +720,7 @@ describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..0
     const { llm } = fakeLlm(10, 5);
     const shared = sharedWithLlm(llm);
 
-    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
+    const { ctx } = await createTestContext({ shared });
 
     // If the factory ever stops wrapping (handing the shared client through
     // unmetered), this reference check is the loudest possible regression guard.
@@ -669,7 +733,7 @@ describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..0
     const shared = sharedWithLlm(llm);
     const dag = makeDag({ llmBudgetTokens: 1 }); // budget 1: call 1 is the single overshoot
 
-    const { ctx } = await createNodeContextForDag(shared, dag, testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
+    const { ctx } = await createTestContext({ shared, dag });
     if (ctx.llm === null) throw new Error("expected wired llm");
 
     const r1 = await ctx.llm.sendStructured(structuredReq()); // 0 < 1 → allowed, settles 15
@@ -703,7 +767,7 @@ describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..0
     const shared = sharedWithLlm(llm);
     const dag = makeDag({ llmBudget: { usd: 1.5 } });
 
-    const { ctx } = await createNodeContextForDag(shared, dag, testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
+    const { ctx } = await createTestContext({ shared, dag });
     if (ctx.llm === null) throw new Error("expected wired llm");
 
     expect((await ctx.llm.sendStructured(pricedReq())).ok).toBe(true);
@@ -728,7 +792,7 @@ describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..0
     const shared = sharedWithLlm(llm);
     const dag = makeDag({ llmBudget: { calls: 2 } });
 
-    const { ctx } = await createNodeContextForDag(shared, dag, testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
+    const { ctx } = await createTestContext({ shared, dag });
     if (ctx.llm === null) throw new Error("expected wired llm");
 
     expect((await ctx.llm.sendStructured(pricedReq())).ok).toBe(true);
@@ -752,7 +816,7 @@ describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..0
     const shared = sharedWithLlm(llm);
     const dag = makeDag({ llmBudgetTokens: 100_000, llmBudget: { tokens: 1 } });
 
-    const { ctx } = await createNodeContextForDag(shared, dag, testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
+    const { ctx } = await createTestContext({ shared, dag });
     if (ctx.llm === null) throw new Error("expected wired llm");
 
     expect((await ctx.llm.sendStructured(structuredReq())).ok).toBe(true); // the overshoot
@@ -770,7 +834,7 @@ describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..0
     const { llm, calls } = fakeLlm(1_000_000, 0);
     const shared = sharedWithLlm(llm);
 
-    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
+    const { ctx } = await createTestContext({ shared });
     if (ctx.llm === null) throw new Error("expected wired llm");
 
     for (let i = 0; i < 3; i++) {
@@ -836,43 +900,49 @@ describe("createNodeContextForDag — one authority across main/judge/custom LLM
     ).toEqual(["llm", "judgeLlm", "criticLlm"]);
   });
 
-  it("preserves an augmented custom LLM subtype and its receiver-sensitive API", async () => {
-    class StatefulAugmentedClient implements AugmentedLlmClient {
-      #label = "boot";
-      #calls = 0;
-
-      rename(label: string): void { this.#label = label; }
-      summary(): string { return `${this.#label}:${this.#calls}`; }
-      async sendStructured<O>(): Promise<Result<LlmResponse<O>, FrameworkError>> {
-        this.#calls += 1;
+  it("composes an augmented alias from the metered surface and enforces the shared gate", async () => {
+    let providerCalls = 0;
+    const augmented: AugmentedLlmClient = {
+      sendStructured: async <O>(): Promise<Result<LlmResponse<O>, FrameworkError>> => {
+        providerCalls += 1;
         return ok({ output: {} as O, ...tokensOnly(3, 2), rawText: "" });
-      }
-      async sendWithTools<O>(): Promise<Result<LlmResponse<O>, FrameworkError>> {
-        this.#calls += 1;
+      },
+      sendWithTools: async <O>(): Promise<Result<LlmResponse<O>, FrameworkError>> => {
+        providerCalls += 1;
         return ok({ output: {} as O, ...tokensOnly(3, 2), rawText: "" });
-      }
-    }
+      },
+      // This boot-scoped self-call is exactly what a transparent target-bound
+      // Proxy failed to intercept. The run facade below must not expose it.
+      sendAlias(req) { return this.sendStructured(req); },
+    };
+    const shared = baseSharedInfra([{
+      name: "augmentedLlm",
+      client: augmented,
+      clientKind: "llm",
+      composeRunClient: (metered): AugmentedLlmClient => ({
+        sendStructured: (req) => metered.sendStructured(req),
+        sendWithTools: (req, ctx) => metered.sendWithTools(req, ctx),
+        sendAlias: (req) => metered.sendStructured(req),
+      }),
+    }]);
+    const captured = collectLogs();
+    const { ctx } = await createTestContext({
+      shared: { ...shared, logger: captured.logger },
+      dag: makeDag({ llmBudget: { tokens: 5 } }),
+    });
+    const runClient = (ctx as NodeContext & { readonly augmentedLlm: AugmentedLlmClient })
+      .augmentedLlm;
 
-    const augmented = new StatefulAugmentedClient();
-    const shared = baseSharedInfra([
-      { name: "augmentedLlm", client: augmented, clientKind: "llm" },
-    ]);
-    const { ctx } = await createNodeContextForDag(
-      shared,
-      makeDag(),
-      testRunId,
-      new AbortController().signal,
-      adminIdentity,
-      FACTORY_AGENT_MAP,
-    );
-    const metered = (ctx as NodeContext & { readonly augmentedLlm: AugmentedLlmClient }).augmentedLlm;
-
-    expect(metered).not.toBe(augmented);
-    metered.rename("runtime");
-    expect(metered.summary()).toBe("runtime:0");
-    expect((await metered.sendStructured(structuredReq())).ok).toBe(true);
-    expect(metered.summary()).toBe("runtime:1");
-    expect(augmented.summary()).toBe("runtime:1");
+    expect(runClient).not.toBe(augmented);
+    expect((await runClient.sendAlias(structuredReq())).ok).toBe(true);
+    const refused = await runClient.sendAlias(structuredReq());
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.error.kind).toBe("llm-budget-exceeded");
+    expect(providerCalls).toBe(1);
+    expect(ctx.budget?.spent().tokens).toBe(5);
+    expect(
+      captured.logs.filter((line) => line.msg === "llm.metered")[0]?.data?.["clientKey"],
+    ).toBe("augmentedLlm");
   });
 
   it("rehydrates a main+judge total from a fresh file ledger/context and refuses the next call", async () => {

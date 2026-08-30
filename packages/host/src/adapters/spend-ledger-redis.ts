@@ -9,10 +9,11 @@
  * Nothing here does a read-modify-write, so there is nothing to race on.
  *
  * The three increments and the set-add are separately atomic but not atomic
- * TOGETHER. Writes are cost-first (`micros`, then tokens, calls, and unpriced
- * model names), so an interrupted append may under-record one or more later
- * axes of that call. Each individual partial append is therefore directional:
- * it never over-reports and never corrupts. A process crash can interrupt every
+ * TOGETHER. Unpriced model markers are written before every numeric increment;
+ * an interrupted unpriced append may therefore conservatively retain an unknown-
+ * price marker while under-recording later numeric axes, but can never rehydrate
+ * unknown cost as a trustworthy priced figure. Priced appends remain cost-first
+ * (`micros`, then tokens and calls). A process crash can interrupt every
  * concurrently pending append, so the aggregate loss window is not bounded to
  * one call. A transaction would buy per-append exactness at the price of a
  * round trip on every call and a harder acknowledgement/retry ambiguity.
@@ -65,18 +66,26 @@ export const spendLedgerRedis = (redis: RedisPort): Result<SpendLedgerRedis, Hos
   // the assertion-free return literal underneath it — collapsing the two would
   // require a type assertion, which this codebase avoids precisely here.
   //
-  // So adding a fourth primitive is TWO edits, not one: this list (for the
+  // So adding another primitive is TWO edits, not one: this list (for the
   // message) and the guard (for the decision). Missing the guard is caught by
   // the compiler at the return literal, which is a confusing place to learn it
   // but not a silent failure. An earlier version of this comment claimed one
   // edit sufficed; it did not.
   const required = [
+    ["sAdd", redis.sAdd],
+    ["sMembers", redis.sMembers],
     ["hIncrBy", redis.hIncrBy],
     ["hGetAll", redis.hGetAll],
     ["expire", redis.expire],
   ] as const;
   const missing = required.filter(([, method]) => method === undefined).map(([name]) => name);
-  if (redis.hIncrBy === undefined || redis.hGetAll === undefined || redis.expire === undefined) {
+  if (
+    redis.sAdd === undefined ||
+    redis.sMembers === undefined ||
+    redis.hIncrBy === undefined ||
+    redis.hGetAll === undefined ||
+    redis.expire === undefined
+  ) {
     return err({
       kind: "config-invalid",
       message:
@@ -171,8 +180,16 @@ export const createRedisSpendLedger = (deps: RedisSpendLedgerDeps): SpendLedgerP
       const { hash, unpriced } = keys(runId);
       const record = recordOf(delta);
 
-      // Ordered cost-first: if the process dies mid-append, the axis most
-      // likely to be under a tight ceiling is the one already recorded.
+      // Persist every unknown-price witness before numeric spend. If a marker
+      // commit is acknowledged as failed, fail fast before any increment; a
+      // later read may conservatively remain unpriced, but never priced-open.
+      for (const model of record.unpricedModels) {
+        const added = await redis.sAdd(unpriced, model);
+        if (!added.ok) return err(added.error);
+      }
+
+      // Priced axes remain cost-first: if the process dies mid-append, the axis
+      // most likely to be under a tight ceiling is the first numeric one stored.
       for (const [field, by] of [
         [FIELD.micros, record.micros],
         [FIELD.tokens, record.tokens],
@@ -182,11 +199,6 @@ export const createRedisSpendLedger = (deps: RedisSpendLedgerDeps): SpendLedgerP
         if (by === 0) continue;
         const incremented = await redis.hIncrBy(hash, field, by);
         if (!incremented.ok) return err(incremented.error);
-      }
-
-      for (const model of record.unpricedModels) {
-        const added = await redis.sAdd(unpriced, model);
-        if (!added.ok) return err(added.error);
       }
 
       // Refresh idleness on both keys. A failure here does NOT fail the append —

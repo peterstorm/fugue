@@ -173,7 +173,11 @@ export type {
 // not re-exported — only `validateCapabilities` constructs them.
 
 // ── Capability lifecycle ──────────────────────────────────────────────────
-export type { CapabilityHandle, AdapterFactory } from "./capability-handle.js";
+export type {
+  CapabilityHandle,
+  AdapterFactory,
+  RunScopedLlmComposer,
+} from "./capability-handle.js";
 
 // ── Capability authority (per-invocation broker seam) ─────────────────────
 export type {

@@ -51,9 +51,9 @@ const builtInCapability = <K extends (typeof BUILTIN_CAPABILITY_KEYS)[number]>(
   caps: NonNullable<NodeContextInit["capabilities"]>,
   key: K,
 ): NodeContext[K] => {
-  const direct = init[key];
+  const direct = Object.hasOwn(init, key) ? init[key] : undefined;
   const bagValue = Object.hasOwn(caps, key) ? caps[key] : null;
-  return (Object.hasOwn(init, key) && direct !== undefined ? direct : bagValue ?? null) as NodeContext[K];
+  return (direct !== undefined ? direct : bagValue ?? null) as NodeContext[K];
 };
 
 /** Create a null-prototype context of own data properties only. */

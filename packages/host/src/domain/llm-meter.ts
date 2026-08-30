@@ -42,14 +42,18 @@ import {
 // Types
 // ---------------------------------------------------------------------------
 
+declare const __llmMeterBrand: unique symbol;
+
 /**
- * Immutable per-`runId` spend accumulator. The map is treated as frozen — every
- * mutation produces a new `LlmMeter` via `accumulate`. An absent `runId` means
- * zero spend (no entry is materialised until the first `accumulate`).
+ * Immutable per-`runId` spend accumulator. The private brand confines
+ * construction to `meterOf`; every legal mutation produces a new value via
+ * `accumulate`. An absent `runId` means zero spend (no entry is materialised
+ * until the first `accumulate`).
  */
-export interface LlmMeter {
+export type LlmMeter = Readonly<{
   readonly spendByRun: ReadonlyMap<RunId, Spend>;
-}
+  readonly [__llmMeterBrand]: "LlmMeter";
+}>;
 
 /** Runtime-read-only snapshot; no mutable `Map` methods escape the ADT. */
 const meterOf = (entries: ReadonlyMap<RunId, Spend>): LlmMeter => {
@@ -73,7 +77,7 @@ const meterOf = (entries: ReadonlyMap<RunId, Spend>): LlmMeter => {
     },
   } satisfies ReadonlyMap<RunId, Spend>;
   view = Object.freeze(facade);
-  return Object.freeze({ spendByRun: view });
+  return Object.freeze({ spendByRun: view }) as LlmMeter;
 };
 
 /** The empty meter — no runs have consumed anything yet. */

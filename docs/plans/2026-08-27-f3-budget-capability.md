@@ -237,9 +237,11 @@ path. The honest restatement, which goes in the header and in the requirements:
 A ~0.5 ms `HINCRBY` after a multi-second LLM call is noise. Silently invalidating a
 documented success criterion would not be.
 
-**The loss window, stated rather than hidden.** A crash between provider-settle and
-ledger-write loses at most one call's spend. That is the same magnitude as the existing
-overshoot-by-one allowance and is documented as such — not discovered later.
+**The loss window, stated rather than hidden.** A crash between provider settlement and
+ledger completion can lose every concurrently settled append that has not started and can
+leave every append already in progress partially recorded. Unpriced model markers are
+written before numeric axes, so those partial records fail closed for unknown pricing; the
+aggregate loss window is not bounded to one call.
 
 ### D4 — `budget` as the seventh built-in capability
 

@@ -262,22 +262,22 @@ describe("in-memory ledger defensive snapshots", () => {
 });
 
 describe("spendLedgerRedis: the construction-time surface check", () => {
-  it("refuses a Redis adapter that cannot increment, naming what is missing", async () => {
-    // Deciding this ONCE, here, beats a per-call null check — the error names
-    // exactly which primitives are absent, and the caller turns that into a
-    // single loud downgrade rather than a surprise on the first budgeted call.
-    // Note it returns a Result and never throws: nothing "fails at boot".
-    const parsed = spendLedgerRedis({ get: async () => ok(null) } as unknown as RedisPort);
-    expect(parsed.ok).toBe(false);
-    if (parsed.ok) return;
-    expect(parsed.error.kind).toBe("config-invalid");
-    const message = "message" in parsed.error ? parsed.error.message : "";
-    expect(message).toContain("hIncrBy");
-    expect(message).toContain("hGetAll");
-    expect(message).toContain("expire");
-  });
+  it.each(["sAdd", "sMembers", "hIncrBy", "hGetAll", "expire"] as const)(
+    "refuses an adapter missing %s and names that primitive",
+    (primitive) => {
+      // Parse once at construction: malformed JavaScript adapters cannot defer
+      // a missing set/hash primitive until the first budgeted provider call.
+      const malformed = { ...fakeRedis().redis, [primitive]: undefined } as unknown as RedisPort;
+      const parsed = spendLedgerRedis(malformed);
+      expect(parsed.ok).toBe(false);
+      if (parsed.ok) return;
+      expect(parsed.error.kind).toBe("config-invalid");
+      const message = "message" in parsed.error ? parsed.error.message : "";
+      expect(message).toContain(primitive);
+    },
+  );
 
-  it("accepts an adapter that offers all three", () => {
+  it("accepts an adapter that offers all five required primitives", () => {
     expect(spendLedgerRedis(fakeRedis().redis).ok).toBe(true);
   });
 });
@@ -358,7 +358,7 @@ describe("Redis ledger: key layout and TTL", () => {
     expect(String(warned[0]?.data?.["consequence"] ?? "")).toContain("expire");
   });
 
-  it("writes each append cost-first before tokens, calls, and unpriced models", async () => {
+  it("writes unpriced evidence before every numeric axis", async () => {
     const fake = fakeRedis();
     const operations: string[] = [];
     const recording = {
@@ -376,14 +376,46 @@ describe("Redis ledger: key layout and TTL", () => {
 
     expect((await ledger.add(runA, orderedDelta)).ok).toBe(true);
     expect(operations).toEqual([
+      "SADD:unpriced",
       "HINCRBY:micros",
       "HINCRBY:tokens",
       "HINCRBY:calls",
-      "SADD:unpriced",
     ]);
   });
 
-  it("stops at the first failed increment and preserves the cost-first partial append", async () => {
+  it("fails before numeric writes when SADD loses acknowledgement and rehydrates unpriced", async () => {
+    const fake = fakeRedis();
+    const operations: string[] = [];
+    const failing = {
+      ...fake.redis,
+      hIncrBy: async (key: string, field: string, by: number) => {
+        operations.push(`HINCRBY:${field}`);
+        return fake.redis.hIncrBy!(key, field, by);
+      },
+      sAdd: async (key: string, member: string) => {
+        operations.push("SADD:unpriced");
+        // Model Redis committing the marker while its acknowledgement is lost.
+        await fake.redis.sAdd(key, member);
+        return err({ kind: "redis-unavailable" as const, operation: "SADD acknowledgement" });
+      },
+    } as RedisPort;
+    const { ledger } = ledgerOver(failing);
+
+    expect((await ledger.add(runA, orderedDelta)).ok).toBe(false);
+    expect(operations).toEqual(["SADD:unpriced"]);
+    expect(fake.hashes.size).toBe(0);
+
+    const hydrated = await readOrThrow(ledger, runA);
+    expect(hydrated.tokens).toBe(0);
+    expect(hydrated.calls).toBe(0);
+    expect(hydrated.usd.kind).toBe("unpriced");
+    if (hydrated.usd.kind === "unpriced") {
+      expect([...hydrated.usd.models]).toEqual(["mystery"]);
+      expect(hydrated.usd.knownMicros).toBe(micros(0));
+    }
+  });
+
+  it("stops at the first failed increment after preserving the unpriced marker", async () => {
     const fake = fakeRedis();
     const operations: string[] = [];
     const failing = {
@@ -402,12 +434,12 @@ describe("Redis ledger: key layout and TTL", () => {
     const { ledger } = ledgerOver(failing);
 
     expect((await ledger.add(runA, orderedDelta)).ok).toBe(false);
-    expect(operations).toEqual(["HINCRBY:micros", "HINCRBY:tokens"]);
+    expect(operations).toEqual(["SADD:unpriced", "HINCRBY:micros", "HINCRBY:tokens"]);
     const stored = [...fake.hashes.values()][0];
     expect(stored?.get("micros")).toBe(7);
     expect(stored?.has("tokens")).toBe(false);
     expect(stored?.has("calls")).toBe(false);
-    expect(fake.sets.size).toBe(0);
+    expect([...fake.sets.values()][0]).toEqual(new Set(["mystery"]));
   });
 
   it("does not spend a round trip on a zero increment", async () => {

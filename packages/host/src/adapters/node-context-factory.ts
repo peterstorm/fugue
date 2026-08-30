@@ -5,7 +5,7 @@
  * - Tenant-and-DAG-namespaced Redis key prefixes for cache and checkpoint isolation (FR-013)
  * - Caller-supplied run identity + AbortSignal threaded into each context (FR-032)
  * - Per-DAG TTL overrides for cache/checkpoint entries (FR-041)
- * - Shared infrastructure (LLM, tracer) passed through without per-request init
+ * - Shared underlying clients reused; per-run metering decorators and budget state allocated
  *
  * @satisfies FR-013 — Cache keys prefixed fugue:<tenant>:<dagId>:cache:<key>
  * @satisfies FR-013 — Checkpoint keys prefixed fugue:<tenant>:<dagId>:<runId>:<nodeId>
@@ -153,7 +153,13 @@ export const createNamespacedCache = (
   return {
     get: async (key: string): Promise<CacheLookup> => {
       const fullKey = buildCacheKey(tenant, dagId, key);
-      const result = await redis.get(fullKey);
+      let result: Awaited<ReturnType<RedisPort["get"]>>;
+      try {
+        result = await redis.get(fullKey);
+      } catch (error) {
+        getFailures.failed({ key: fullKey, dagId, error: safeErrorMessage(error) });
+        return { hit: false };
+      }
       if (!result.ok) {
         getFailures.failed({ key: fullKey, dagId, error: result.error.kind });
         return { hit: false };
@@ -209,9 +215,15 @@ export const createNamespacedCache = (
         return ok(undefined); // Don't kill the request for a cache write failure
       }
       const effectiveTtl = ttlSec ?? defaultTtlSec;
-      const setResult = effectiveTtl !== undefined
-        ? await redis.set(fullKey, serialized, { expiresInSec: effectiveTtl })
-        : await redis.set(fullKey, serialized);
+      let setResult: Awaited<ReturnType<RedisPort["set"]>>;
+      try {
+        setResult = effectiveTtl !== undefined
+          ? await redis.set(fullKey, serialized, { expiresInSec: effectiveTtl })
+          : await redis.set(fullKey, serialized);
+      } catch (error) {
+        setFailures.failed({ key: fullKey, error: safeErrorMessage(error) });
+        return ok(undefined);
+      }
       if (!setResult.ok) {
         setFailures.failed({ key: fullKey, error: setResult.error.kind });
       } else {

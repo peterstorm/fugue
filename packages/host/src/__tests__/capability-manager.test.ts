@@ -13,6 +13,16 @@
 import { describe, it, expect } from "bun:test";
 import { ok, err, isOk, isErr } from "@fuguejs/framework";
 import type { Capability, CapabilityHandle, LlmClient } from "@fuguejs/framework";
+interface ComposedLlm extends LlmClient {
+  readonly alias: LlmClient["sendStructured"];
+}
+
+declare module "@fuguejs/framework" {
+  interface CapabilityRegistry {
+    composedLlm: ComposedLlm;
+  }
+}
+
 import {
   topoSortHandles,
   connectAll,
@@ -444,6 +454,27 @@ describe("capability-manager", () => {
       expect(seen).toEqual(["judgeLlm"]);
       expect(clients.judgeLlm).toBe(replacement);
       expect((clients as Record<string, unknown>).db).toBe(plain);
+    });
+
+    it("composes an augmented facade from the decorated standard surface", () => {
+      const boot = {} as ComposedLlm;
+      const metered = {} as LlmClient;
+      let supplied: LlmClient | undefined;
+      const facade = { alias: async () => ok({}) } as unknown as ComposedLlm;
+      const handles: readonly CapabilityHandle[] = [{
+        name: "composedLlm",
+        client: boot,
+        clientKind: "llm",
+        composeRunClient: (standard) => {
+          supplied = standard;
+          return facade;
+        },
+      }];
+
+      const clients = extractClients(handles, { llm: () => metered });
+
+      expect(supplied).toBe(metered);
+      expect(clients.composedLlm).toBe(facade);
     });
 
     it("throws on duplicate handle names (defence-in-depth past topoSort)", () => {

@@ -11,6 +11,7 @@ import type { RunId } from "../../types/ids.js";
 import { DAG_INPUT } from "../../types/ids.js";
 import { describe, it, expect, afterEach } from "bun:test";
 import Redis from "ioredis";
+import type { Job } from "bullmq";
 import type { JobLike } from "../../state-machine/types.js";
 import type { Machine } from "../../state-machine/types.js";
 import { replayEvents, replayEventsUntil, replayEventSlice } from "../../state-machine/replay.js";
@@ -85,6 +86,33 @@ afterEach(async () => {
 type S = { kind: "pending" } | { kind: "running" } | { kind: "succeeded" } | { kind: "failed"; reason: string };
 type E = { type: "START" } | { type: "DONE" } | { type: "FAIL"; reason: string } | { type: "ERROR"; retriable: boolean; message: string };
 type C = { value: number };
+
+type BullJobData<S, Ctx> = { state: S; context: Ctx };
+
+type MinimalBullJobOptions<S, Ctx> = {
+  readonly id: string | undefined;
+  readonly data: () => BullJobData<S, Ctx>;
+  readonly updateData?: (data: BullJobData<S, Ctx>) => Promise<void>;
+  readonly updateProgress?: (progress: number) => Promise<void>;
+};
+
+/** Centralized third-party fixture cast; each test supplies only observed behavior. */
+const minimalBullJob = <S, Ctx>(opts: MinimalBullJobOptions<S, Ctx>): Job<BullJobData<S, Ctx>> => ({
+  id: opts.id,
+  get data() { return opts.data(); },
+  updateData: opts.updateData ?? (async () => {}),
+  updateProgress: opts.updateProgress ?? (async () => {}),
+}) as unknown as Job<BullJobData<S, Ctx>>;
+
+type ScriptRedisMethods = {
+  readonly script?: (...args: unknown[]) => Promise<unknown>;
+  readonly evalsha?: (...args: unknown[]) => Promise<unknown>;
+  readonly eval?: (...args: unknown[]) => Promise<unknown>;
+};
+
+/** Minimal Redis script fixture; script methods are the only observable surface. */
+const scriptRedis = (methods: ScriptRedisMethods = {}): Redis =>
+  methods as unknown as Redis;
 
 // ---------------------------------------------------------------------------
 // createRedisMarkerStore — FR-043
@@ -674,14 +702,16 @@ describe("adaptBullMQJob — Map/Set round-trip (pure)", () => {
   it("data getter restores Map written via updateData (round-trip)", async () => {
     // BullMQ's real Job.updateData persists `d` to Redis; here we mimic that by
     // capturing the last-written value in a closure and exposing it via .data.
-    let stored: unknown = { state: { kind: "pending" }, context: { value: 0 } };
-    const stubJob = {
+    let stored: BullJobData<{ k: string }, { outputs: Map<string, number> }> = {
+      state: { k: "pending" },
+      context: { outputs: new Map() },
+    };
+    const stubJob = minimalBullJob({
       id: "j-map",
-      get data() { return stored; },
-      updateData: async (d: unknown) => { stored = d; },
-      updateProgress: async () => {},
-    } as unknown as import("bullmq").Job<{ state: { k: string }; context: { outputs: Map<string, number> } }>;
-    const stubRedis = {} as import("ioredis").default;
+      data: () => stored,
+      updateData: async (data) => { stored = data; },
+    });
+    const stubRedis = scriptRedis();
 
     const jobLike = adaptBullMQJob<{ k: string }, { outputs: Map<string, number> }>(
       stubJob,
@@ -707,15 +737,13 @@ describe("adaptBullMQJob — Map/Set round-trip (pure)", () => {
 describe("adaptBullMQJob — pure unit tests", () => {
   it("throws when bullJob.id is undefined", () => {
     // Construct a minimal stub that satisfies the shape but has no id
-    const stubJob = {
+    const stubJob = minimalBullJob({
       id: undefined,
-      data: { state: {}, context: {} },
-      updateData: async () => {},
-      updateProgress: async () => {},
-    } as unknown as import("bullmq").Job<{ state: unknown; context: unknown }>;
+      data: () => ({ state: {}, context: {} }),
+    });
 
     // Provide a stub Redis (never called since we expect a throw before any I/O)
-    const stubRedis = {} as import("ioredis").default;
+    const stubRedis = scriptRedis();
 
     expect(() => adaptBullMQJob(stubJob, stubRedis, "test-queue")).toThrow(
       /test-queue/,
@@ -724,14 +752,13 @@ describe("adaptBullMQJob — pure unit tests", () => {
 
   it("updateProgress delegates to bullJob.updateProgress", async () => {
     let capturedPct: number | undefined;
-    const stubJob = {
+    const stubJob = minimalBullJob({
       id: "job-42",
-      data: { state: {}, context: {} },
-      updateData: async () => {},
-      updateProgress: async (pct: number) => { capturedPct = pct; },
-    } as unknown as import("bullmq").Job<{ state: unknown; context: unknown }>;
+      data: () => ({ state: {}, context: {} }),
+      updateProgress: async (pct) => { capturedPct = pct; },
+    });
 
-    const stubRedis = {} as import("ioredis").default;
+    const stubRedis = scriptRedis();
 
     const jobLike = adaptBullMQJob(stubJob, stubRedis, "test-queue");
     await jobLike.updateProgress(50);
@@ -740,14 +767,13 @@ describe("adaptBullMQJob — pure unit tests", () => {
   });
 
   it("updateProgress wraps error with queue name and job id", async () => {
-    const stubJob = {
+    const stubJob = minimalBullJob({
       id: "job-99",
-      data: { state: {}, context: {} },
-      updateData: async () => {},
+      data: () => ({ state: {}, context: {} }),
       updateProgress: async () => { throw new Error("redis gone"); },
-    } as unknown as import("bullmq").Job<{ state: unknown; context: unknown }>;
+    });
 
-    const stubRedis = {} as import("ioredis").default;
+    const stubRedis = scriptRedis();
 
     const jobLike = adaptBullMQJob(stubJob, stubRedis, "my-queue");
     await expect(jobLike.updateProgress(75)).rejects.toThrow(/my-queue/);
@@ -760,18 +786,16 @@ describe("adaptBullMQJob — pure unit tests", () => {
 
   it("appendEvent wraps eval error with queue, job id, stream key, and cause", async () => {
     const boom = new Error("boom");
-    const stubJob = {
+    const stubJob = minimalBullJob({
       id: "j-x",
-      data: { state: {}, context: {} },
-      updateData: async () => {},
-      updateProgress: async () => {},
-    } as unknown as import("bullmq").Job<{ state: unknown; context: unknown }>;
+      data: () => ({ state: {}, context: {} }),
+    });
 
-    const stubRedis = {
+    const stubRedis = scriptRedis({
       script: async (..._args: unknown[]) => "stub-sha",
       evalsha: async (..._args: unknown[]) => { throw boom; },
       eval: async (..._args: unknown[]) => { throw boom; },
-    } as unknown as import("ioredis").default;
+    });
 
     const jobLike = adaptBullMQJob(stubJob, stubRedis, "q-test", { maxLen: 100, approximate: true });
 
@@ -790,13 +814,11 @@ describe("adaptBullMQJob — pure unit tests", () => {
 
   it("appendEvent stamps recordedAtMs and pins entryId hint to the Lua script ARGV", async () => {
     const captured: { keys: unknown[]; argv: unknown[] }[] = [];
-    const stubJob = {
+    const stubJob = minimalBullJob({
       id: "j-now",
-      data: { state: {}, context: {} },
-      updateData: async () => {},
-      updateProgress: async () => {},
-    } as unknown as import("bullmq").Job<{ state: unknown; context: unknown }>;
-    const stubRedis = {
+      data: () => ({ state: {}, context: {} }),
+    });
+    const stubRedis = scriptRedis({
       script: async (..._args: unknown[]) => "stub-sha",
       // evalsha signature: (sha, numKeys, ...keysAndArgs)
       evalsha: async (...args: unknown[]) => {
@@ -808,7 +830,7 @@ describe("adaptBullMQJob — pure unit tests", () => {
         });
         return "1715200000123-0";
       },
-    } as unknown as import("ioredis").default;
+    });
 
     const jobLike = adaptBullMQJob(stubJob, stubRedis, "q-now", {
       maxLen: 100,
@@ -836,20 +858,18 @@ describe("adaptBullMQJob — pure unit tests", () => {
 
   it("appendEvent passes dedupKey through to Lua script ARGV[4]", async () => {
     const captured: { argv: unknown[] }[] = [];
-    const stubJob = {
+    const stubJob = minimalBullJob({
       id: "j-d",
-      data: { state: {}, context: {} },
-      updateData: async () => {},
-      updateProgress: async () => {},
-    } as unknown as import("bullmq").Job<{ state: unknown; context: unknown }>;
-    const stubRedis = {
+      data: () => ({ state: {}, context: {} }),
+    });
+    const stubRedis = scriptRedis({
       script: async (..._args: unknown[]) => "stub-sha",
       evalsha: async (...args: unknown[]) => {
         const numKeys = args[1] as number;
         captured.push({ argv: args.slice(2 + numKeys) });
         return "0-0";
       },
-    } as unknown as import("ioredis").default;
+    });
 
     const jobLike = adaptBullMQJob(stubJob, stubRedis, "q-d", { maxLen: 100, approximate: true });
 
@@ -862,13 +882,11 @@ describe("adaptBullMQJob — pure unit tests", () => {
   it("appendEvent falls back to inline EVAL on NOSCRIPT error", async () => {
     let evalshaCalls = 0;
     let evalCalls = 0;
-    const stubJob = {
+    const stubJob = minimalBullJob({
       id: "j-ns",
-      data: { state: {}, context: {} },
-      updateData: async () => {},
-      updateProgress: async () => {},
-    } as unknown as import("bullmq").Job<{ state: unknown; context: unknown }>;
-    const stubRedis = {
+      data: () => ({ state: {}, context: {} }),
+    });
+    const stubRedis = scriptRedis({
       script: async (..._args: unknown[]) => "stub-sha",
       evalsha: async () => {
         evalshaCalls++;
@@ -878,7 +896,7 @@ describe("adaptBullMQJob — pure unit tests", () => {
         evalCalls++;
         return "0-0";
       },
-    } as unknown as import("ioredis").default;
+    });
 
     const jobLike = adaptBullMQJob(stubJob, stubRedis, "q-ns", { maxLen: 100, approximate: true });
     await expect(jobLike.appendEvent({ type: "X" })).resolves.toBeUndefined();
@@ -894,13 +912,11 @@ describe("adaptBullMQJob — pure unit tests", () => {
 describe("adaptBullMQJob — validateData hook", () => {
   it("invokes validateData on every read of job.data", () => {
     const calls: unknown[] = [];
-    const stubJob = {
+    const stubJob = minimalBullJob({
       id: "j-validate",
-      data: { state: { k: "running" }, context: { v: 1 } },
-      updateData: async () => {},
-      updateProgress: async () => {},
-    } as unknown as import("bullmq").Job<{ state: { k: string }; context: { v: number } }>;
-    const stubRedis = {} as import("ioredis").default;
+      data: () => ({ state: { k: "running" }, context: { v: 1 } }),
+    });
+    const stubRedis = scriptRedis();
 
     const jobLike = adaptBullMQJob<{ k: string }, { v: number }>(
       stubJob,
@@ -925,13 +941,11 @@ describe("adaptBullMQJob — validateData hook", () => {
   });
 
   it("failing validator surfaces as a thrown error referencing checkpoint-corrupt", () => {
-    const stubJob = {
+    const stubJob = minimalBullJob({
       id: "j-corrupt",
-      data: { garbage: true },
-      updateData: async () => {},
-      updateProgress: async () => {},
-    } as unknown as import("bullmq").Job<{ state: unknown; context: unknown }>;
-    const stubRedis = {} as import("ioredis").default;
+      data: () => ({ state: undefined, context: { garbage: true } }),
+    });
+    const stubRedis = scriptRedis();
 
     const jobLike = adaptBullMQJob(stubJob, stubRedis, "q-corrupt", {
       validateData: () => ({
@@ -1548,12 +1562,10 @@ describe("Forensic replay-to-timestamp via Redis Streams", () => {
 
       // Build a job-less adaptBullMQJob using a minimal Job stub. We're testing
       // the appendEvent → readEvents pipeline, not full BullMQ orchestration.
-      const stubJob = {
+      const stubJob = minimalBullJob<ForS, ForC>({
         id: jobId,
-        data: { state: { kind: "idle" } as ForS, context: { steps: 0 } as ForC },
-        updateData: async () => {},
-        updateProgress: async () => {},
-      } as unknown as import("bullmq").Job<{ state: ForS; context: ForC }>;
+        data: () => ({ state: { kind: "idle" }, context: { steps: 0 } }),
+      });
 
       // Inject a controlled clock so the forensic timestamps are deterministic.
       let nowMs = 1_700_000_000_000;

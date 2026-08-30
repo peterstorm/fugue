@@ -41,6 +41,7 @@ import { beginRunTelemetry, closeRootSpan, startRunSpan } from "./run-telemetry.
 import type { FreshnessIndex } from "./freshness-check.js";
 import { sha256DedupKey } from "../shared/dedup-key.js";
 import { fwLogger } from "../logger.js";
+import { bestEffortLog } from "./best-effort.js";
 import type { CompiledDagMachine } from "./machine.js";
 import type { NonEmptyString } from "../types/non-empty-string.js";
 
@@ -167,16 +168,27 @@ const snapshotOrigin = (origin: InvocationOrigin): InvocationOrigin =>
  */
 const snapshotMintingAuthority = (
   dag: DagDef,
-  authority: MintingAuthority | undefined,
+  opts: Pick<DagRunOpts, "minting"> | undefined,
 ): Result<MintingAuthority | undefined, FrameworkError> => {
-  if (authority === undefined) return ok(undefined);
-
   const snapshotNodeId = dag.nodes[0]?.id ?? EXECUTOR_NODE_ID;
-  let source: CapabilityBroker;
-  let mintFor: CapabilityBroker["mintFor"];
+  let boundary: {
+    readonly source: CapabilityBroker;
+    readonly mintFor: CapabilityBroker["mintFor"];
+    readonly provides: CapabilityBroker["provides"];
+    readonly origin: InvocationOrigin;
+  };
+
   try {
-    source = authority.broker;
-    mintFor = source.mintFor;
+    // Read the complete authority graph exactly once inside one parse fence.
+    // Accessors on opts, authority, broker, origin, or any origin field all
+    // become the same typed validation failure instead of escaping after
+    // run-start and leaving telemetry unbalanced.
+    const authority = opts?.minting;
+    if (authority === undefined) return ok(undefined);
+    const source = authority.broker;
+    const mintFor = source.mintFor;
+    const provides = source.provides;
+    const origin = snapshotOrigin(authority.origin);
     if (typeof mintFor !== "function") {
       return err({
         kind: "validation",
@@ -184,16 +196,18 @@ const snapshotMintingAuthority = (
         message: "broker.mintFor must be a function while snapshotting run authority",
       });
     }
+    boundary = { source, mintFor, provides, origin };
   } catch (error) {
     return err({
       kind: "validation",
       nodeId: snapshotNodeId,
       message:
-        "broker.mintFor threw while snapshotting run authority: " +
+        "minting authority accessor threw while snapshotting run authority: " +
         safeErrorMessage(error),
     });
   }
 
+  const { source, mintFor, provides, origin } = boundary;
   const provided = new Set<Capability>();
   const observed = new Set<Capability>();
 
@@ -202,7 +216,7 @@ const snapshotMintingAuthority = (
       if (observed.has(capability)) continue;
       observed.add(capability);
       try {
-        if (source.provides?.(capability) === true) provided.add(capability);
+        if (provides?.call(source, capability) === true) provided.add(capability);
       } catch (error) {
         return err({
           kind: "validation",
@@ -220,7 +234,7 @@ const snapshotMintingAuthority = (
       mintFor.call(source, inv, requires),
     provides: (capability: Capability) => provided.has(capability),
   });
-  return ok(Object.freeze({ broker, origin: snapshotOrigin(authority.origin) }));
+  return ok(Object.freeze({ broker, origin }));
 };
 
 interface PreparedRun {
@@ -245,7 +259,7 @@ const prepareDagRun = (
   // Snapshot the broker's answers once per distinct required capability, then
   // use that same immutable facade for validation and every dispatch. Authority
   // cannot drift between the proof that waived static validation and delivery.
-  const mintingSnapshot = snapshotMintingAuthority(effectiveDag, opts?.minting);
+  const mintingSnapshot = snapshotMintingAuthority(effectiveDag, opts);
   if (!mintingSnapshot.ok) {
     emitRunEnd("error");
     return err(mintingSnapshot.error);
@@ -323,7 +337,25 @@ const handleTerminalState = <O>(
         );
 
       if (deps.opts?.onBackground) {
-        deps.opts.onBackground(runFinalizeInBackground(finalize, deps.rootSpan, deps.emitRunEnd));
+        const background = runFinalizeInBackground(finalize, deps.rootSpan, deps.emitRunEnd);
+        // Observe the guarded promise before handing it to caller code. The
+        // finalizer is designed to resolve every outcome, but this rejection
+        // observer keeps a future regression from becoming unhandled when the
+        // hook itself throws and discards its argument.
+        void background.catch((error) => {
+          bestEffortLog(
+            "error",
+            `[runDagStateful] background finalize escaped its guard: ${safeErrorMessage(error)}`,
+          );
+        });
+        try {
+          deps.opts.onBackground(background);
+        } catch (error) {
+          bestEffortLog(
+            "error",
+            `[runDagStateful] onBackground hook threw after DAG completion: ${safeErrorMessage(error)}`,
+          );
+        }
       } else {
         await finalize();
       }

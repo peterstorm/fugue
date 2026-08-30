@@ -6,6 +6,7 @@ import { ok, err } from "../types/result.js";
 import type { NodeDef } from "../types/node.js";
 import type { DagDef } from "../types/dag.js";
 import type { HumanAction } from "../dag-runtime/types.js";
+import type { MintingAuthority } from "../types/capability-broker.js";
 import { runDag } from "../executor/run-dag.js";
 import { topoSort } from "../shared/topo.js";
 import { createTransformNode } from "../nodes/transform.js";
@@ -597,6 +598,44 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
     });
     expect(result.ok).toBe(true);
     expect(backgroundCalled).toBe(true);
+  });
+
+  it("a throwing onBackground hook cannot reject a completed DAG", async () => {
+    const dag = mkSimpleDag("onbg-throw");
+    const result = await runDag(dag, { value: 1 }, mkCtx(), {
+      onBackground: () => { throw new Error("hook observer down"); },
+    });
+
+    expect(result).toEqual(ok({ value: 1 }));
+  });
+
+  it("hostile origin accessors become validation errors with balanced run telemetry", async () => {
+    const dag = mkSimpleDag("hostile-origin");
+    const broker = { mintFor: async () => ok({}) };
+    const originAccessor = Object.defineProperty({ broker }, "origin", {
+      get() { throw new Error("hostile origin getter"); },
+    }) as unknown as MintingAuthority;
+    const originField = Object.defineProperty({ kind: "agent" }, "agentClientId", {
+      get() { throw new Error("hostile agentClientId getter"); },
+    });
+    const originFieldAccessor = { broker, origin: originField } as unknown as MintingAuthority;
+
+    for (const minting of [originAccessor, originFieldAccessor]) {
+      const observer = new RecordingObserver();
+      const result = await runDag(dag, { value: 1 }, mkCtx({ observer }), { minting });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("validation");
+        if (result.error.kind === "validation") {
+          expect(result.error.message).toContain("snapshotting run authority");
+        }
+      }
+      expect(observer.events.map((event) => event.type)).toEqual(["run-start", "run-end"]);
+      const runEnd = observer.events[1];
+      expect(runEnd?.type).toBe("run-end");
+      if (runEnd?.type === "run-end") expect(runEnd.status).toBe("error");
+    }
   });
 
   // Shared: a DAG with a single humanReview node, used to exercise the new

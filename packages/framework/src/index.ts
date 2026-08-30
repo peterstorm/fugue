@@ -103,7 +103,11 @@ export { createCronScheduler } from "./scheduler/scheduler.js";
 // ---------------------------------------------------------------------------
 export { makeNodeContext, consoleLogger, noopTracer, noopObserver, createPassthroughBroker } from "./shared/index.js";
 export type { Capability, CapabilityRegistry, BaseNodeContext, TypedNodeContext, NodeContextInit, HttpCapability } from "./types/node.js";
-export type { CapabilityHandle, AdapterFactory } from "./types/capability-handle.js";
+export type {
+  CapabilityHandle,
+  AdapterFactory,
+  RunScopedLlmComposer,
+} from "./types/capability-handle.js";
 // Per-invocation authority seam — the broker port + scoped-handle shape, and
 // the `MintingAuthority` pair (`broker` + `origin`) `runDag` consumes. The
 // pass-through broker (`createPassthroughBroker`, above) is an optional

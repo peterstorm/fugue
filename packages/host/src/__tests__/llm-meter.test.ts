@@ -66,6 +66,13 @@ const reservationWith = (inFlight: number, maxObservedCall: Spend): ReservationS
   return state;
 };
 
+const meterTypePins = (): void => {
+  // @ts-expect-error — only emptyMeter/accumulate can construct the branded meter.
+  const forged: LlmMeter = { spendByRun: new Map([[runA, NO_SPEND]]) };
+  void forged;
+};
+void meterTypePins;
+
 const reservationTypePins = (): void => {
   // @ts-expect-error — callers cannot forge structural or negative reservation states.
   const invalid: ReservationState = { inFlight: -1, maxObservedCall: NO_SPEND };

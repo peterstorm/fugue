@@ -200,4 +200,34 @@ describe("RunSpendAuthority", () => {
     expect(Object.isFrozen(first)).toBe(true);
     expect(Object.isFrozen(first.usd)).toBe(true);
   });
+
+  it("remaining returns fresh deeply frozen snapshots isolated from mutation", () => {
+    const authority = createRunSpendAuthority({
+      dagId: dagId("authority-dag"),
+      runId: runId("remaining-snapshot-run"),
+      limits,
+      hydrated: { kind: "known", spend: { tokens: 10, calls: 1, usd: { kind: "priced", micros: 0 as never } } },
+      ledger: createInMemorySpendLedger(),
+      logger,
+    });
+
+    const first = authority.budget.remaining();
+    const second = authority.budget.remaining();
+    expect(first).not.toBe(second);
+    expect(first).toEqual(second);
+    expect(Object.isFrozen(first)).toBe(true);
+    if (first.kind !== "budgeted" || second.kind !== "budgeted") {
+      throw new Error("expected budgeted snapshots");
+    }
+    expect(first.headroom).not.toBe(second.headroom);
+    expect(Object.isFrozen(first.headroom)).toBe(true);
+    expect(Object.isFrozen(first.headroom[0])).toBe(true);
+    expect(Object.isFrozen(first.headroom[0]?.ceiling)).toBe(true);
+    expect(() => (first.headroom as unknown as unknown[]).push({ poisoned: true })).toThrow();
+    expect(() => {
+      (first.headroom[0]!.ceiling as unknown as { limit: number }).limit = -1;
+    }).toThrow();
+
+    expect(authority.budget.remaining()).toEqual(second);
+  });
 });

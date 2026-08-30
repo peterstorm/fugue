@@ -173,7 +173,7 @@ The existing ADR-0083 behavior remains authoritative:
 - failed hydration + declared ceilings: fail the slice closed before a node runs;
 - failed hydration + no ceilings: warn and start from unknown/zero;
 - failed append after provider settle: keep the provider result, log `error` for budgeted runs and `warn` for unbudgeted runs;
-- crash between provider settle and append: at most one call's spend is lost;
+- crash between provider settle and append: every concurrently settled append still pending can be lost or partially recorded;
 - no retry inside the ledger adapter (automatic retry can double-append an operation whose commit acknowledgement was lost).
 
 **Why:** Call spend cannot be undone after provider settlement. Returning an error instead would discard paid-for output without restoring budget integrity. A dedicated typed error keeps filesystem failures observable without lying about their subsystem.
@@ -192,7 +192,7 @@ The existing ADR-0083 behavior remains authoritative:
 ```text
 packages/framework/src/types/budget-capability.ts                 — BudgetCapability, Remaining, CeilingHeadroom, pure remainingFor/snapshot construction
 packages/framework/src/types/node.ts                              — seventh built-in registry/context field and catalogue metadata
-packages/framework/src/types/capability-handle.ts                 — conditional clientKind:"llm" handle contract
+packages/framework/src/types/capability-handle.ts                 — conditional clientKind:"llm" contract plus explicit augmented-client composition
 packages/framework/src/types/index.ts                             — export budget capability types/functions
 packages/framework/src/index.ts                                   — public capability exports
 packages/framework/src/shared/make-node-context.ts                — merge top-level/bag budget field with existing precedence
@@ -219,7 +219,7 @@ packages/framework/src/__tests__/boundary-imports.test.ts    — file-subpath ze
 
 ```text
 packages/host/src/adapters/run-spend-authority.ts             — one run-scoped imperative authority and BudgetCapability view
-packages/host/src/adapters/metered-llm.ts                     — thin transparent LlmClient decorator delegating to the authority
+packages/host/src/adapters/metered-llm.ts                     — narrow standard LlmClient decorator delegating to the authority
 packages/host/src/adapters/spend-ledger-file.ts               — FileSpendStore → SpendLedgerPort/HostError adapter
 packages/host/src/adapters/node-context-factory.ts            — hydrate once, create authority, meter main + marked bag clients, inject budget
 packages/host/src/domain/llm-meter.ts                         — pure projectedSpend query shared by admit and remaining
@@ -228,7 +228,7 @@ packages/host/src/domain/host-error.ts                        — spend-ledger-u
 packages/host/src/ports.ts                                    — authority/adapter contract documentation; no ledger signature change
 packages/host/src/index.ts                                    — export createFileSpendLedger and relevant public types
 packages/host/src/__tests__/llm-meter.test.ts                 — projection/admission agreement properties
-packages/host/src/__tests__/metered-llm.test.ts               — transparent operation delegation and authority accounting tests
+packages/host/src/__tests__/metered-llm.test.ts               — narrow operation delegation and authority accounting tests
 packages/host/src/__tests__/node-context-factory.test.ts      — main/judge/custom bag clients share one meter/ledger and budget view
 packages/host/src/__tests__/capability-manager.test.ts        — marked-client decoration and untouched non-LLM clients
 packages/host/src/__tests__/spend-ledger.test.ts              — shared memory/Redis/file contract, including concurrent adds
@@ -360,7 +360,7 @@ export const createMeteredLlm = (
 ): LlmClient;
 ```
 
-Protocol remains one implementation: gate/reserve → invoke provider → price success or partial-error usage → synchronously update meter/estimate → emit `llm.metered`/failure logs with `clientKey` → await ledger append → release in `finally`. A throwing inner client is logged and rethrown as today; unknown usage is never fabricated. `spent()` reads settled meter state; `remaining()` calls `projectedSpend` and `remainingFor` synchronously.
+Protocol remains one implementation: gate/reserve → invoke provider → price success or partial-error usage → synchronously record meter/estimate and emit `llm.metered`/failure logs with `clientKey` → release the reservation → await ledger append. Admission headroom does not wait for durability I/O: settled spend is already authoritative within the execution slice, while the append carries that fact to later slices. The idempotent `finally` release remains the safety net for thrown provider/settlement paths. A throwing inner client is logged and rethrown as today; unknown usage is never fabricated. `spent()` reads settled meter state; `remaining()` calls `projectedSpend` and `remainingFor` synchronously.
 
 **Depends on:** Budget core, pure projection, `SpendLedgerPort`, existing pricing/error-usage helpers.
 

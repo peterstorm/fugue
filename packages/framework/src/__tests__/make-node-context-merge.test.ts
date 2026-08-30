@@ -48,6 +48,24 @@ describe("makeNodeContext built-in capability ownership", () => {
     }
   });
 
+  test("checks ownership before evaluating an inherited built-in getter", () => {
+    let reads = 0;
+    const prototype = Object.defineProperty({}, "http", {
+      get() {
+        reads += 1;
+        throw new Error("inherited built-in getter must not run");
+      },
+    });
+    const init = Object.assign(Object.create(prototype), {
+      runId: "run-hostile-built-in",
+      dagId: "dag-hostile-built-in",
+    });
+
+    const ctx = makeNodeContext(init);
+    expect(ctx.http).toBeNull();
+    expect(reads).toBe(0);
+  });
+
   test("ignores a capabilities bag inherited by the init object", () => {
     const inheritedHttp = { tag: "inherited-http" };
     const inheritedCustom = { tag: "inherited-custom" };

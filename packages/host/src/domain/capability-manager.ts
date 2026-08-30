@@ -379,7 +379,7 @@ export const checkHealth = async (
  * `missing-capability`.
  */
 export type CapabilityClientDecorators = {
-  readonly llm?: <T extends LlmClient>(name: Capability, client: T) => T;
+  readonly llm?: (name: Capability, client: LlmClient) => LlmClient;
 };
 
 export const extractClients = (
@@ -394,12 +394,20 @@ export const extractClients = (
           `topoSortHandles should have rejected this at boot. This is a wiring bug.`,
       );
     }
-    // This remains inside the existing name↔client correlation trust boundary:
-    // adapter metadata says the client is an LLM, and the decorator restores
-    // the same registry-shaped record rather than introducing another cast seam.
-    clients[handle.name] = handle.clientKind === "llm" && decorators.llm !== undefined
-      ? decorators.llm(handle.name, handle.client)
-      : handle.client;
+    // This remains inside the existing name↔client correlation trust boundary.
+    // Standard LLMs receive the narrow metered surface directly. An augmented
+    // subtype can recover its wider registry shape only through its adapter-
+    // authored run composer, which receives that metered surface; aliases must
+    // therefore delegate explicitly through the shared authority rather than
+    // target-bound self-calls hidden behind a generic Proxy.
+    if (handle.clientKind === "llm" && decorators.llm !== undefined) {
+      const metered = decorators.llm(handle.name, handle.client);
+      clients[handle.name] = handle.composeRunClient === undefined
+        ? metered
+        : handle.composeRunClient(metered);
+    } else {
+      clients[handle.name] = handle.client;
+    }
   }
   return clients as Partial<{ [K in Capability]: CapabilityRegistry[K] }>;
 };
