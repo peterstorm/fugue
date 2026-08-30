@@ -27,13 +27,14 @@ import type {
   NodeId,
   Result,
   FrameworkError,
+  Ceilings,
+  InvocationOrigin,
 } from "@fuguejs/framework";
-import type { InvocationOrigin } from "@fuguejs/framework";
 import { fromJson, makeNodeContext, ok, isErr, safeErrorMessage, toJson } from "@fuguejs/framework";
 import { assertLosslessEvent } from "@fuguejs/framework/file";
 import type { RegisteredDag } from "../domain/registry.js";
 import type { AuthIdentity, AgentClientMap } from "../domain/auth.js";
-import type { RedisPort, SharedInfra, LogPort } from "../ports.js";
+import type { RedisPort, SharedInfra, LogPort, SpendLedgerPort } from "../ports.js";
 import { extractClients } from "../domain/capability-manager.js";
 import { invocationOriginForIdentity, subjectTokenForIdentity } from "../domain/run-context.js";
 import type { NodeContextForDag } from "../domain/run-context.js";
@@ -198,14 +199,21 @@ export const createNamespacedCache = (
       ttlSec?: number,
     ): Promise<Result<void, FrameworkError>> => {
       const fullKey = buildCacheKey(tenant, dagId, key);
-      let serialized: string;
+      let serialized: string | undefined;
+      let serializationError: string | undefined;
       try {
         serialized = JSON.stringify(value);
-      } catch (e) {
+        if (serialized === undefined) {
+          serializationError = "JSON.stringify returned undefined for the top-level value";
+        }
+      } catch (error) {
+        serializationError = safeErrorMessage(error);
+      }
+      if (serialized === undefined) {
         reportWithoutThrowing(logger, "warn", "Cache set failed — value not serializable", {
           key: fullKey,
           dagId,
-          error: safeErrorMessage(e),
+          error: serializationError ?? "unknown serialization failure",
         });
         return ok(undefined); // Don't kill the request for a cache write failure
       }
@@ -307,6 +315,146 @@ export const resolveTtl = (dag: RegisteredDag): ResolvedTtl => {
   };
 };
 
+const resolveTenantForDag = (
+  dag: RegisteredDag,
+  routedTenant: TenantId | undefined,
+): TenantId => {
+  if (routedTenant !== undefined) return routedTenant;
+  const parsed = tenantId(dag.team);
+  if (isErr(parsed)) {
+    throw new Error(
+      `createNodeContextForDag: DAG "${dag.id}" has an invalid owning team ` +
+        `"${dag.team}" that cannot be used as a tenant key namespace: ${formatHostError(parsed.error)}`,
+    );
+  }
+  return parsed.value;
+};
+
+type HydratedLedger =
+  | {
+      readonly ledger: SpendLedgerPort;
+      readonly limits?: undefined;
+      readonly hydrated: HydratedSpend;
+    }
+  | {
+      readonly ledger: SpendLedgerPort;
+      readonly limits: Ceilings;
+      readonly hydrated: Extract<HydratedSpend, { readonly kind: "known" }>;
+    };
+
+const selectAndHydrateSpendLedger = async (args: {
+  readonly shared: SharedInfra;
+  readonly tenant: TenantId;
+  readonly dagId: DagId;
+  readonly runId: RunId;
+  readonly ttl: ResolvedTtl;
+  readonly limits: Ceilings | undefined;
+}): Promise<HydratedLedger> => {
+  const { shared, tenant, dagId, runId, ttl, limits } = args;
+  let ledger = shared.spendLedger;
+  if (ledger.metadata.role === "redis-fallback") {
+    const ledgerRedis = spendLedgerRedis(shared.redis);
+    if (ledgerRedis.ok) {
+      ledger = createRedisSpendLedger({
+        redis: ledgerRedis.value,
+        tenant,
+        dagId,
+        logger: shared.logger,
+        ...(ttl.checkpointTtlSec !== undefined ? { ttlSec: ttl.checkpointTtlSec } : {}),
+      });
+    } else {
+      reportWithoutThrowing(
+        shared.logger,
+        "error",
+        "Spend ledger is NOT durable — falling back to the in-process backend",
+        {
+          dagId: dagId as string,
+          runId: runId as string,
+          backend: shared.spendLedger.metadata.backend,
+          durability: shared.spendLedger.metadata.durability,
+          reason: formatHostError(ledgerRedis.error),
+          consequence: "per-run LLM budgets reset when this process restarts",
+        },
+      );
+    }
+  }
+
+  const prior = await ledger.read(runId);
+  if (!prior.ok && limits !== undefined) {
+    throw new Error(
+      `createNodeContextForDag: DAG '${dagId}' declares an LLM budget but its spend ledger ` +
+        `could not be read for run '${runId}' — refusing to run a budgeted slice with ` +
+        `unknown prior spend: ${formatHostError(prior.error)}`,
+    );
+  }
+  if (!prior.ok) {
+    reportWithoutThrowing(shared.logger, "warn", "Spend ledger unreadable — metering from zero", {
+      dagId: dagId as string,
+      runId: runId as string,
+      error: formatHostError(prior.error),
+    });
+    return { ledger, hydrated: { kind: "unknown" } };
+  }
+
+  const hydrated = { kind: "known" as const, spend: prior.value };
+  return limits === undefined
+    ? { ledger, hydrated }
+    : { ledger, limits, hydrated };
+};
+
+const createSpendBindings = (
+  shared: SharedInfra,
+  dagId: DagId,
+  runId: RunId,
+  selection: HydratedLedger,
+) => {
+  const meterBase = {
+    dagId,
+    runId,
+    ledger: selection.ledger,
+    logger: shared.logger,
+  };
+  const authority = selection.limits === undefined
+    ? createRunSpendAuthority({ ...meterBase, hydrated: selection.hydrated })
+    : createRunSpendAuthority({
+        ...meterBase,
+        limits: selection.limits,
+        hydrated: selection.hydrated,
+      });
+
+  return {
+    authority,
+    llm: createMeteredLlm(shared.llm, "llm", authority),
+    capabilities: extractClients(shared.capabilities, {
+      llm: (clientKey, client) => createMeteredLlm(client, clientKey, authority),
+    }),
+  };
+};
+
+const resolveOriginAndBindSubjectToken = (args: {
+  readonly agentClientMap: AgentClientMap;
+  readonly identity: AuthIdentity;
+  readonly dagId: DagId;
+  readonly runId: RunId;
+  readonly mintingActive: boolean;
+  readonly bindSubjectToken?: (runId: RunId, token: SubjectToken) => void;
+}): InvocationOrigin | undefined => {
+  const { agentClientMap, identity, dagId, runId, mintingActive, bindSubjectToken } = args;
+  const origin = invocationOriginForIdentity(agentClientMap, identity, dagId);
+  if (origin === undefined && mintingActive) {
+    throw new Error(
+      `createNodeContextForDag: DAG '${dagId}' has no agent client mapping in AGENT_CLIENT_MAP ` +
+        `(FR-040 fail-closed) — refusing to run with an absent/fabricated agent identity`,
+    );
+  }
+
+  if (bindSubjectToken !== undefined) {
+    const subjectToken = subjectTokenForIdentity(identity);
+    if (subjectToken !== undefined) bindSubjectToken(runId, subjectToken);
+  }
+  return origin;
+};
+
 // `NodeContextForDag` and the pure `invocationOriginForIdentity` live in
 // `domain/run-context.ts` — the contract of the `createContext` port belongs to
 // the domain, not this adapter (the HTTP layer names it without importing
@@ -401,119 +549,22 @@ export const createNodeContextForDag = async (
   const dagId = dag.id;
   const ttl = resolveTtl(dag);
 
-  // SECURITY (FR-013 / US2 / SC-001 / ADR-0067): the tenant axis for EVERY Redis
-  // key this context produces. The supervisor resolves the routed `Tenant`
-  // principal at the request boundary and threads its already-branded `id` here
-  // as `routedTenant` (the SAME value the token / HITL / run-lock stores key on
-  // in `host.ts`), so every host-produced key shares ONE `fugue:<tenant>:`
-  // namespace. A branded `TenantId` is shape-validated by construction, so no
-  // re-parse is needed.
-  //
-  // FALLBACK (no `routedTenant`): the single-tenant `main.ts` entrypoint and the
-  // derivation unit tests omit it; the tenant is then derived from the DAG's
-  // owning `team` and parsed through the canonical `tenantId` smart constructor —
-  // the SINGLE source of the namespace invariant (`:` and glob metacharacters
-  // rejected, so no key/ACL-namespace escape). FAIL-CLOSED: `dag.team` is
-  // path-/config-derived data, not a known-good literal, so a `Left` is possible
-  // (a team segment with a `:` or over 64 chars); we REFUSE rather than emit an
-  // unscoped key — same discipline as the unmapped-agent-client check below.
-  let tenant: TenantId;
-  if (routedTenant !== undefined) {
-    tenant = routedTenant;
-  } else {
-    const tenantResult = tenantId(dag.team);
-    if (isErr(tenantResult)) {
-      throw new Error(
-        `createNodeContextForDag: DAG "${dagId}" has an invalid owning team ` +
-          `"${dag.team}" that cannot be used as a tenant key namespace: ${formatHostError(tenantResult.error)}`,
-      );
-    }
-    tenant = tenantResult.value;
-  }
-
-  // Create one Run Spend Authority per execution slice. The main client and
-  // every capability-bag client explicitly marked `clientKind: "llm"` receive
-  // thin decorators delegating to this same meter/reservation/ledger cell.
-  // When no ceiling exists the authority still meters and exposes an
-  // unbudgeted read view, but never refuses (FR-W1-006).
-  // @satisfies FR-W0-001 FR-W0-004 FR-W1-001..006 FR-B-010 FR-B-012
+  const tenant = resolveTenantForDag(dag, routedTenant);
   const limits = ceilingsOf(dag.config);
-
-  // The DURABLE half of the budget. The meter itself is per-NodeContext, and a
-  // resumable run builds a fresh NodeContext per execution slice, so without a
-  // ledger a run that parks for a human decision and resumes would start from
-  // zero spend — five parks, six budgets. The ledger is read ONCE here and
-  // appended to as calls settle.
-  //
-  // Stock wiring marks its memory ledger as `redis-fallback`: Redis remains the
-  // first choice when its primitives are available. An embedder-injected file
-  // ledger is marked `authoritative` and is selected directly; dependency
-  // injection is an authority decision, not a hint Redis may silently override.
-  let spendLedger = shared.spendLedger;
-  if (shared.spendLedger.metadata.role === "redis-fallback") {
-    const ledgerRedis = spendLedgerRedis(shared.redis);
-    if (ledgerRedis.ok) {
-      spendLedger = createRedisSpendLedger({
-        redis: ledgerRedis.value,
-        tenant,
-        dagId,
-        logger: shared.logger,
-        ...(ttl.checkpointTtlSec !== undefined ? { ttlSec: ttl.checkpointTtlSec } : {}),
-      });
-    } else {
-      // Only this actual memory fallback is NOT durable across restarts. A file
-      // ledger never reaches this branch and is never falsely labelled.
-      reportWithoutThrowing(shared.logger, "error", "Spend ledger is NOT durable — falling back to the in-process backend", {
-        dagId: dagId as string,
-        runId: runId as string,
-        backend: shared.spendLedger.metadata.backend,
-        durability: shared.spendLedger.metadata.durability,
-        reason: formatHostError(ledgerRedis.error),
-        consequence: "per-run LLM budgets reset when this process restarts",
-      });
-    }
-  }
-
-  const hydrated = await spendLedger.read(runId);
-  // FAIL CLOSED (FR-B-007). An unreadable ledger is indistinguishable from a
-  // spent one, and assuming zero is exactly the refill-on-resume bug the ledger
-  // exists to close — so a BUDGETED run refuses to start a slice it cannot
-  // account for. An UNBUDGETED run carries on: there is no ceiling to protect,
-  // and failing it would turn a metering outage into an availability outage.
-  if (!hydrated.ok && limits !== undefined) {
-    throw new Error(
-      `createNodeContextForDag: DAG '${dagId}' declares an LLM budget but its spend ledger ` +
-        `could not be read for run '${runId}' — refusing to run a budgeted slice with ` +
-        `unknown prior spend: ${formatHostError(hydrated.error)}`,
-    );
-  }
-  if (!hydrated.ok) {
-    reportWithoutThrowing(shared.logger, "warn", "Spend ledger unreadable — metering from zero", {
-      dagId: dagId as string,
-      runId: runId as string,
-      error: formatHostError(hydrated.error),
-    });
-  }
-
-  // Two arms because `RunSpendAuthorityDeps` couples them: a declared budget obliges a
-  // KNOWN prior spend, which the fail-closed throw above has already guaranteed.
-  // The compiler now enforces what that throw establishes.
-  const meterBase = { dagId, runId, ledger: spendLedger, logger: shared.logger };
-  const priorSpend: HydratedSpend = hydrated.ok
-    ? { kind: "known", spend: hydrated.value }
-    : { kind: "unknown" };
-  const authority =
-    limits !== undefined && hydrated.ok
-      ? createRunSpendAuthority({
-          ...meterBase,
-          limits,
-          hydrated: { kind: "known", spend: hydrated.value },
-        })
-      : createRunSpendAuthority({ ...meterBase, hydrated: priorSpend });
-  const llm = createMeteredLlm(shared.llm, "llm", authority);
-  const capabilities = extractClients(shared.capabilities, {
-    llm: (clientKey, client) => createMeteredLlm(client, clientKey, authority),
+  const hydratedLedger = await selectAndHydrateSpendLedger({
+    shared,
+    tenant,
+    dagId,
+    runId,
+    ttl,
+    limits,
   });
+  const { authority, llm, capabilities } = createSpendBindings(
+    shared,
+    dagId,
+    runId,
+    hydratedLedger,
+  );
 
   const cache = createNamespacedCache(shared.redis, tenant, dagId, ttl.cacheTtlSec, shared.logger);
   const checkpointWriter = createNamespacedCheckpointWriter(
@@ -531,41 +582,14 @@ export const createNodeContextForDag = async (
     ? { get: (name: string) => dagPrompts.get(name) ?? null }
     : shared.prompts ?? { get: () => null };
 
-  // FAIL CLOSED (FR-040): resolve the DAG's REAL agent client via AGENT_CLIENT_MAP.
-  // An unmapped DAG id yields `undefined` — the run has no agent identity. When
-  // per-node minting IS wired (`mintingActive`) we refuse here rather than mint as
-  // a fabricated/absent client. When minting is NOT wired the `origin` is never
-  // consumed by the caller (the framework skips minting), so an unmapped DAG runs
-  // the zero-regression static path instead of throwing — a no-realm deployment
-  // (`AGENT_CLIENT_MAP` defaults to `{}`) must not 500 every run (SC-001/SC-005).
-  // This throw is an adapter-boundary wiring-defect surface (like `wifTokenEndpoint`
-  // / `formatToken`); both run paths (`run-dag.ts`, `run-executor.ts`) fence the
-  // `createNodeContextForDag` call, so it never escapes as an unhandled rejection.
-  const origin: InvocationOrigin | undefined = invocationOriginForIdentity(
+  const origin = resolveOriginAndBindSubjectToken({
     agentClientMap,
     identity,
     dagId,
-  );
-  if (origin === undefined && mintingActive) {
-    throw new Error(
-      `createNodeContextForDag: DAG '${dagId}' has no agent client mapping in AGENT_CLIENT_MAP ` +
-        `(FR-040 fail-closed) — refusing to run with an absent/fabricated agent identity`,
-    );
-  }
-
-  // Thread the user's verified subject token HOST-SIDE (FR-032), but ONLY after
-  // the fail-closed origin check above has passed — so a minting-wired,
-  // registered-but-unmapped DAG throws BEFORE any token is bound, and we never
-  // retain a JWT under a runId whose run will not proceed (the run-dag setup-error
-  // path does not release; only `withSubjectTokenRelease` around `executeDag`
-  // does, NFR-014). Read it off the identity via the pure seam (never off
-  // `InvocationOrigin`); an agent/team/admin run has no subject token, so nothing
-  // is bound and the broker's user exchange fails closed for any illegitimate user
-  // hop claiming this runId. The raw token is carried only through this sink.
-  if (bindSubjectToken !== undefined) {
-    const subjectToken = subjectTokenForIdentity(identity);
-    if (subjectToken !== undefined) bindSubjectToken(runId, subjectToken);
-  }
+    runId,
+    mintingActive,
+    ...(bindSubjectToken !== undefined ? { bindSubjectToken } : {}),
+  });
 
   const ctx = makeNodeContext({
     runId,

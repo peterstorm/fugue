@@ -151,6 +151,23 @@ describe("validateCapabilities", () => {
     }
   });
 
+  it("prototype-meta names cannot be satisfied by inherited context properties", () => {
+    const ctx = makeNodeContext({ runId: "r1", dagId: "d1" });
+    for (const key of ["__proto__", "prototype", "constructor"] as const) {
+      const capability = key as Capability;
+      const dag = defineDagFromArray({
+        id: "d",
+        nodes: [makeNode("a", [capability])],
+        edges: [{ from: DAG_INPUT, to: "a" }],
+      });
+      const result = validateCapabilities(dag, ctx);
+      expect(result.ok).toBe(false);
+      if (!result.ok && result.error.kind === "missing-capability") {
+        expect(result.error.missing[0]).toEqual({ nodeId: N("a"), capability });
+      }
+    }
+  });
+
   it("a broker claiming provides() for a BUILT-IN capability key → Err kind 'validation' (wiring error, not a silent drop)", () => {
     // SEAM CONTRACT with `mergeScopedCapabilities`: the merge refuses to overlay
     // built-in keys (`llm`/`http`/…), so a broker claiming one contradicts the

@@ -142,16 +142,23 @@ export const accumulate = (meter: LlmMeter, runId: RunId, delta: Spend): LlmMete
  * additionally cannot be subtracted honestly: once an `unpriced` call is in the
  * sum there is no way to take it back out.
  */
-export interface ReservationState {
+declare const __reservationStateBrand: unique symbol;
+
+/** Opaque state: only this module's legal transitions can construct it. */
+export type ReservationState = Readonly<{
   readonly inFlight: number;
   readonly maxObservedCall: Spend;
-}
+  readonly [__reservationStateBrand]: "ReservationState";
+}>;
+
+const reservationState = (inFlight: number, maxObservedCall: Spend): ReservationState =>
+  Object.freeze({
+    inFlight,
+    maxObservedCall: snapshotSpend(maxObservedCall),
+  }) as ReservationState;
 
 /** No calls admitted, no per-call estimate learned yet. */
-export const emptyReservation: ReservationState = Object.freeze({
-  inFlight: 0,
-  maxObservedCall: NO_SPEND,
-});
+export const emptyReservation: ReservationState = reservationState(0, NO_SPEND);
 
 /**
  * Admission-safe spend projection shared by enforcement and the budget read
@@ -181,10 +188,8 @@ export type AdmitDecision =
       readonly inFlight: number;
     };
 
-const reserve = (state: ReservationState): ReservationState => ({
-  ...state,
-  inFlight: state.inFlight + 1,
-});
+const reserve = (state: ReservationState): ReservationState =>
+  reservationState(state.inFlight + 1, state.maxObservedCall);
 
 /**
  * Decide whether the NEXT call for `runId` may proceed under `limits`.
@@ -250,10 +255,8 @@ export const releaseReservation = (
 ): Result<ReservationState, ReservationInvariantError> =>
   state.inFlight <= 0
     ? err({ kind: "reservation-underflow", inFlight: state.inFlight })
-    : ok(Object.freeze({ ...state, inFlight: state.inFlight - 1 }));
+    : ok(reservationState(state.inFlight - 1, state.maxObservedCall));
 
 /** Widen the per-call estimate from a settled call (per-axis monotone max). */
-export const learnObservedCall = (state: ReservationState, call: Spend): ReservationState => ({
-  ...state,
-  maxObservedCall: maxSpend(state.maxObservedCall, call),
-});
+export const learnObservedCall = (state: ReservationState, call: Spend): ReservationState =>
+  reservationState(state.inFlight, maxSpend(state.maxObservedCall, call));

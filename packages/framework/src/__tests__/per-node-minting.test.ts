@@ -415,8 +415,8 @@ describe("per-node minting — broker port-contract enforcement", () => {
   it("a broker claiming provides(cap) but omitting it from ok() fails the node with missing-capability — run never sees an undefined handle", async () => {
     // The seam contract: run-start validation exempted the scope on the strength
     // of provides(); a broker that then fails to deliver would put `undefined`
-    // behind the validated-context cast and crash inside `run`. The post-merge
-    // presence check fails closed with the run-start error vocabulary instead.
+    // behind the validated-context cast and crash inside `run`. The minted-record
+    // delivery proof fails closed before the static base enters the merge.
     let runReached = false;
     const lyingBroker: CapabilityBroker = {
       mintFor: async () => ok({} as ScopedCapabilityHandle), // claims below, delivers nothing
@@ -446,6 +446,49 @@ describe("per-node minting — broker port-contract enforcement", () => {
       if (bare) {
         expect(bare.missing[0]).toEqual({ nodeId: N("undelivered"), capability: SCOPE });
       }
+    }
+  });
+
+  it("a static base capability cannot mask a claimed handle omitted by the broker", async () => {
+    const staticScope = { tag: "static-authority-must-not-run" };
+    let runReached = false;
+    const broker: CapabilityBroker = {
+      mintFor: async () => ok({} as ScopedCapabilityHandle),
+      provides: (capability: Capability) => capability === SCOPE,
+    };
+    const node = createFetchNode({
+      id: N("masked-omission"),
+      inputSchema: z.object({}),
+      outputSchema: z.object({ ok: z.boolean() }),
+      requires: [SCOPE] as unknown as readonly Capability[],
+      fetch: async () => {
+        runReached = true;
+        return ok({ ok: true });
+      },
+    });
+    const dag = defineDagFromArray({
+      id: "dag-1",
+      nodes: [node],
+      edges: [{ from: DAG_INPUT, to: "masked-omission" }],
+    });
+    const ctx = makeNodeContext({
+      runId: "run-1",
+      dagId: "dag-1",
+      capabilities: { [SCOPE]: staticScope } as never,
+    });
+
+    const result = await runDag(dag, {}, ctx, {
+      minting: { broker, origin: agentOrigin },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(runReached).toBe(false);
+    expect((ctx as unknown as Record<string, unknown>)[SCOPE]).toBe(staticScope);
+    if (!result.ok) {
+      const root = result.error.kind === "retry-exhausted"
+        ? result.error.rootErrorKind
+        : result.error.kind;
+      expect(root).toBe("missing-capability");
     }
   });
 });

@@ -178,7 +178,7 @@ describe("extensible capability registry (ADR-0051)", () => {
       expect(ctx.http).toBe(fakeHttp.client);
     });
 
-    it("top-level fields take precedence over capabilities record", () => {
+    it("defined top-level fields take precedence over the capabilities record", () => {
       const httpDirect = createFakeHttpCapability({}).client;
       const httpBag = createFakeHttpCapability({}).client;
       const budgetDirect = { spent: () => NO_SPEND, remaining: () => ({ kind: "unbudgeted" as const }) };
@@ -192,6 +192,28 @@ describe("extensible capability registry (ADR-0051)", () => {
       });
       expect(ctx.http).toBe(httpDirect);
       expect(ctx.budget).toBe(budgetDirect);
+    });
+
+    it("explicit top-level null overrides a non-null capability bag value", () => {
+      const bagHttp = createFakeHttpCapability({}).client;
+      const ctx = makeNodeContext({
+        runId: "r1",
+        dagId: "d1",
+        http: null,
+        capabilities: { http: bagHttp },
+      });
+      expect(ctx.http).toBeNull();
+    });
+
+    it("an explicitly undefined top-level capability falls back to the bag", () => {
+      const bagHttp = createFakeHttpCapability({}).client;
+      const ctx = makeNodeContext({
+        runId: "r1",
+        dagId: "d1",
+        http: undefined,
+        capabilities: { http: bagHttp },
+      });
+      expect(ctx.http).toBe(bagHttp);
     });
 
     it("built-in capability sourced from the bag lands on the named field", () => {
@@ -223,6 +245,27 @@ describe("extensible capability registry (ADR-0051)", () => {
       if (!result.ok && result.error.kind === "missing-capability") {
         expect(result.error.missing[0].capability).toBe("db");
       }
+    });
+
+    it("prototype-meta capability input cannot alter the context prototype or inject inherited capabilities", () => {
+      const capabilities = JSON.parse(
+        '{"__proto__":{"db":{"polluted":true}},"constructor":{"polluted":true},"prototype":{"polluted":true}}',
+      );
+      const ctx = makeNodeContext({
+        runId: "r1",
+        dagId: "d1",
+        capabilities,
+      });
+
+      expect(Object.getPrototypeOf(ctx)).toBeNull();
+      expect(Object.hasOwn(ctx, "__proto__")).toBe(false);
+      expect(Object.hasOwn(ctx, "constructor")).toBe(false);
+      expect(Object.hasOwn(ctx, "prototype")).toBe(false);
+      expect((ctx as unknown as Record<string, unknown>).__proto__).toBeUndefined();
+      expect((ctx as unknown as Record<string, unknown>).constructor).toBeUndefined();
+      expect((ctx as unknown as Record<string, unknown>).prototype).toBeUndefined();
+      expect((ctx as unknown as Record<string, unknown>).db).toBeUndefined();
+      expect(({} as Record<string, unknown>).polluted).toBeUndefined();
     });
 
     it("a custom capability named like a reserved field cannot shadow framework infrastructure", () => {

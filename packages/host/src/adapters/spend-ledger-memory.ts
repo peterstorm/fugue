@@ -19,7 +19,7 @@
  */
 
 import type { RunId, Spend } from "@fuguejs/framework";
-import { NO_SPEND, addSpend } from "@fuguejs/framework";
+import { NO_SPEND, addSpend, snapshotSpend } from "@fuguejs/framework";
 import { ok } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { SpendLedgerPort } from "../ports.js";
@@ -34,7 +34,9 @@ import type { HostError } from "../domain/host-error.js";
 export const createInMemorySpendLedger = (
   seed: ReadonlyMap<RunId, Spend> = new Map(),
 ): SpendLedgerPort => {
-  const spendByRun = new Map<RunId, Spend>(seed);
+  const spendByRun = new Map<RunId, Spend>(
+    Array.from(seed, ([runId, spend]) => [runId, snapshotSpend(spend)] as const),
+  );
   return {
     metadata: Object.freeze({
       role: "redis-fallback",
@@ -42,11 +44,14 @@ export const createInMemorySpendLedger = (
       durability: "process",
     }),
     read: async (runId: RunId): Promise<Result<Spend, HostError>> =>
-      ok(spendByRun.get(runId) ?? NO_SPEND),
+      ok(snapshotSpend(spendByRun.get(runId) ?? NO_SPEND)),
     add: async (runId: RunId, delta: Spend): Promise<Result<void, HostError>> => {
       // The same monoid the meter folds with, so this adapter cannot disagree
       // with the in-process figure it is mirroring.
-      spendByRun.set(runId, addSpend(spendByRun.get(runId) ?? NO_SPEND, delta));
+      spendByRun.set(
+        runId,
+        snapshotSpend(addSpend(spendByRun.get(runId) ?? NO_SPEND, delta)),
+      );
       return ok(undefined);
     },
   };

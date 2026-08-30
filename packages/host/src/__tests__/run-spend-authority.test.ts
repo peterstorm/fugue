@@ -14,8 +14,9 @@ import {
   createRunSpendAuthority,
   releaseAuthorityReservation,
 } from "../adapters/run-spend-authority.js";
-import type { LogPort } from "../ports.js";
+import type { LogPort, SpendLedgerPort } from "../ports.js";
 import { createInMemorySpendLedger } from "../adapters/spend-ledger-memory.js";
+import { emptyReservation, learnObservedCall } from "../domain/llm-meter.js";
 
 const limits = ceilings([{ kind: "tokens", limit: 30 }])!;
 const request = { nodeId: nodeId("authority-node"), model: "m" };
@@ -94,6 +95,70 @@ describe("RunSpendAuthority", () => {
     expect(authority.budget.spent().tokens).toBe(30);
   });
 
+  it("releases settled reservations before pending ledger I/O without skipping persistence", async () => {
+    const pendingAppend = deferred<Awaited<ReturnType<SpendLedgerPort["add"]>>>();
+    const appendedTokens: number[] = [];
+    const ledger: SpendLedgerPort = {
+      metadata: Object.freeze({
+        role: "redis-fallback",
+        backend: "memory",
+        durability: "process",
+      }),
+      read: async () => ok({ tokens: 0, calls: 0, usd: { kind: "priced", micros: 0 as never } }),
+      add: async (_runId, delta) => {
+        appendedTokens.push(delta.tokens);
+        if (appendedTokens.length === 2) return pendingAppend.promise;
+        return ok(undefined);
+      },
+    };
+    const authority = createRunSpendAuthority({
+      dagId: dagId("authority-dag"),
+      runId: runId("pending-ledger-run"),
+      limits,
+      hydrated: { kind: "known", spend: { tokens: 0, calls: 0, usd: { kind: "priced", micros: 0 as never } } },
+      ledger,
+      logger,
+    });
+
+    await authority.execute({
+      clientKey: "llm",
+      operation: "sendStructured",
+      request,
+      call: async () => response(),
+    });
+    const pendingCall = authority.execute({
+      clientKey: "llm",
+      operation: "sendStructured",
+      request,
+      call: async () => response(),
+    });
+    await Promise.resolve();
+
+    expect(authority.budget.spent().tokens).toBe(20);
+    expect(authority.budget.remaining()).toMatchObject({
+      kind: "budgeted",
+      headroom: [{ kind: "available", amount: 10 }],
+    });
+
+    let thirdProviderCalls = 0;
+    const admitted = await authority.execute({
+      clientKey: "judgeLlm",
+      operation: "sendStructured",
+      request,
+      call: async () => {
+        thirdProviderCalls += 1;
+        return response();
+      },
+    });
+    expect(admitted.ok).toBe(true);
+    expect(thirdProviderCalls).toBe(1);
+    expect(appendedTokens).toEqual([10, 10, 10]);
+
+    pendingAppend.resolve(ok(undefined));
+    expect((await pendingCall).ok).toBe(true);
+    expect(appendedTokens).toHaveLength(3);
+  });
+
   it("logs reservation underflow and retains state without granting more headroom", () => {
     const logs: { readonly msg: string; readonly data?: Record<string, unknown> }[] = [];
     const capturingLogger: LogPort = {
@@ -101,7 +166,10 @@ describe("RunSpendAuthority", () => {
       warn: () => {},
       error: (msg, data) => { logs.push({ msg, data }); },
     };
-    const state = { inFlight: 0, maxObservedCall: { tokens: 10, calls: 1, usd: { kind: "priced" as const, micros: 0 as never } } };
+    const state = learnObservedCall(
+      emptyReservation,
+      { tokens: 10, calls: 1, usd: { kind: "priced", micros: 0 as never } },
+    );
 
     const retained = releaseAuthorityReservation(state, capturingLogger, {
       dagId: "authority-dag",

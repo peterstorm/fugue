@@ -34,33 +34,58 @@ const asDagId = (s: string | DagId): DagId =>
 // fields (`RESERVED_NON_CAPABILITY_KEYS`, the single source of truth shared with
 // `validateCapabilities`). A same-named augmented capability spread would clobber
 // framework-guaranteed infrastructure, so both groups are excluded below.
+const PROTOTYPE_META_KEYS = [
+  "__proto__",
+  "prototype",
+  "constructor",
+] as const;
+
 const RESERVED_CONTEXT_KEYS: ReadonlySet<string> = new Set<string>([
   ...BUILTIN_CAPABILITY_KEYS,
   ...RESERVED_NON_CAPABILITY_KEYS,
+  ...PROTOTYPE_META_KEYS,
 ]);
 
+const builtInCapability = <K extends (typeof BUILTIN_CAPABILITY_KEYS)[number]>(
+  init: NodeContextInit,
+  caps: NonNullable<NodeContextInit["capabilities"]>,
+  key: K,
+): NodeContext[K] => {
+  const direct = init[key];
+  return (Object.hasOwn(init, key) && direct !== undefined ? direct : caps[key] ?? null) as NodeContext[K];
+};
+
+/** Create a null-prototype context of own data properties only. */
+const contextWithOwnCapabilities = (
+  base: NodeContext,
+  entries: readonly (readonly [string, unknown])[],
+): NodeContext => Object.setPrototypeOf(
+  { ...base, ...Object.fromEntries(entries) },
+  null,
+);
+
 export const makeNodeContext = (init: NodeContextInit): NodeContext => {
-  // Merge capabilities from both top-level fields and the capabilities record.
-  // Top-level fields take precedence (explicit > bag).
+  // A present non-undefined top-level value wins, including explicit `null`;
+  // absent or `undefined` falls back to the capabilities record.
   const caps = init.capabilities ?? {};
 
-  const base: NodeContext = {
+  const base = contextWithOwnCapabilities({
     runId: asRunId(init.runId),
     dagId: asDagId(init.dagId),
     logger: init.logger ?? consoleLogger,
     tracer: init.tracer ?? noopTracer,
     observer: init.observer ?? noopObserver,
-    cache: init.cache ?? (caps.cache as NodeContext["cache"]) ?? null,
+    cache: builtInCapability(init, caps, "cache"),
     checkpointWriter: init.checkpointWriter ?? null,
-    llm: init.llm ?? (caps.llm as NodeContext["llm"]) ?? null,
-    prompts: init.prompts ?? (caps.prompts as NodeContext["prompts"]) ?? null,
-    judgeLlm: init.judgeLlm ?? (caps.judgeLlm as NodeContext["judgeLlm"]) ?? null,
-    http: init.http ?? (caps.http as NodeContext["http"]) ?? null,
-    clock: init.clock ?? (caps.clock as NodeContext["clock"]) ?? null,
-    budget: init.budget ?? (caps.budget as NodeContext["budget"]) ?? null,
+    llm: builtInCapability(init, caps, "llm"),
+    prompts: builtInCapability(init, caps, "prompts"),
+    judgeLlm: builtInCapability(init, caps, "judgeLlm"),
+    http: builtInCapability(init, caps, "http"),
+    clock: builtInCapability(init, caps, "clock"),
+    budget: builtInCapability(init, caps, "budget"),
     ...(init.signal !== undefined ? { signal: init.signal } : {}),
     ...(init.contentFilter !== undefined ? { contentFilter: init.contentFilter } : {}),
-  };
+  } as NodeContext, []);
 
   // Spread custom (non-built-in) capabilities onto the context object.
   // Built-in capabilities are already handled above. We filter against the
@@ -75,7 +100,7 @@ export const makeNodeContext = (init: NodeContextInit): NodeContext => {
 
   if (customEntries.length === 0) return base;
 
-  return Object.assign({}, base, Object.fromEntries(customEntries)) as NodeContext;
+  return contextWithOwnCapabilities(base, customEntries);
 };
 
 /**
@@ -119,5 +144,5 @@ export const mergeScopedCapabilities = (
     entries.push([k, v]);
   }
   if (entries.length === 0) return ok(base);
-  return ok(Object.assign({}, base, Object.fromEntries(entries)) as NodeContext);
+  return ok(contextWithOwnCapabilities(base, entries));
 };

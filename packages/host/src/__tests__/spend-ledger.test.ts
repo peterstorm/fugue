@@ -231,6 +231,36 @@ for (const [name, build] of BACKENDS) {
   });
 }
 
+describe("in-memory ledger defensive snapshots", () => {
+  it("isolates seeded, stored, and returned Spend values from caller mutation", async () => {
+    const sourceModels = ["seed-model"];
+    const seeded: Spend = {
+      tokens: 5,
+      calls: 1,
+      usd: {
+        kind: "unpriced",
+        models: sourceModels,
+        knownMicros: micros(7),
+      },
+    };
+    const ledger = createInMemorySpendLedger(new Map([[runA, seeded]]));
+
+    sourceModels.push("source-poison");
+    const first = await readOrThrow(ledger, runA);
+    expect(Object.isFrozen(first)).toBe(true);
+    expect(Object.isFrozen(first.usd)).toBe(true);
+    if (first.usd.kind !== "unpriced") throw new Error("expected unpriced seed");
+    expect(Object.isFrozen(first.usd.models)).toBe(true);
+    expect([...first.usd.models]).toEqual(["seed-model"]);
+    expect(() => (first.usd.models as unknown as string[]).push("read-poison")).toThrow();
+
+    const later = await readOrThrow(ledger, runA);
+    if (later.usd.kind !== "unpriced") throw new Error("expected unpriced seed");
+    expect([...later.usd.models]).toEqual(["seed-model"]);
+    expect(later).not.toBe(first);
+  });
+});
+
 describe("spendLedgerRedis: the construction-time surface check", () => {
   it("refuses a Redis adapter that cannot increment, naming what is missing", async () => {
     // Deciding this ONCE, here, beats a per-call null check — the error names

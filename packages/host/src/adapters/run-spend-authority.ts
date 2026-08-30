@@ -157,8 +157,11 @@ export const createRunSpendAuthority = (
       };
     }
     reservation = decision.state;
+    let active = true;
     return {
       release: () => {
+        if (!active) return;
+        active = false;
         reservation = releaseAuthorityReservation(
           reservation,
           logger,
@@ -173,18 +176,27 @@ export const createRunSpendAuthority = (
     clientKey: Capability,
     call: Spend,
   ): Promise<void> => {
-    const appended = await ledger.add(runId, call);
-    if (appended.ok) return;
-    logWithoutThrowing(
-      logger,
-      limits === undefined ? "warn" : "error",
-      "llm.ledger-write-failed",
-      {
-        ...attribution(nodeId, clientKey),
-        reason: formatHostError(appended.error),
-        unrecorded: spendFields(call),
-      },
-    );
+    const reportFailure = (reason: string): void => {
+      logWithoutThrowing(
+        logger,
+        limits === undefined ? "warn" : "error",
+        "llm.ledger-write-failed",
+        {
+          ...attribution(nodeId, clientKey),
+          reason,
+          unrecorded: spendFields(call),
+        },
+      );
+    };
+
+    try {
+      const appended = await ledger.add(runId, call);
+      if (!appended.ok) reportFailure(formatHostError(appended.error));
+    } catch (error) {
+      reportFailure(
+        `SpendLedgerPort.add threw across the port boundary: ${safeErrorMessage(error)}`,
+      );
+    }
   };
 
   const record = (
@@ -213,15 +225,22 @@ export const createRunSpendAuthority = (
     clientKey: Capability,
     operation: MeteredLlmOperation,
     result: Result<LlmResponse<O>, FrameworkError>,
+    releaseReservationForCall: () => void,
   ): Promise<Result<LlmResponse<O>, FrameworkError>> => {
     if (result.ok) {
-      await persist(req.nodeId, clientKey, record(req, clientKey, operation, pickUsage(result.value)));
+      const settledCall = record(req, clientKey, operation, pickUsage(result.value));
+      releaseReservationForCall();
+      await persist(req.nodeId, clientKey, settledCall);
       return result;
     }
 
     const partial = usageOfError(result.error);
     if (partial !== undefined && totalTokens(partial) > 0) {
-      await persist(req.nodeId, clientKey, record(req, clientKey, operation, partial));
+      const settledCall = record(req, clientKey, operation, partial);
+      releaseReservationForCall();
+      await persist(req.nodeId, clientKey, settledCall);
+    } else {
+      releaseReservationForCall();
     }
     logWithoutThrowing(logger, "warn", "llm.call-failed", {
       ...attribution(req.nodeId, clientKey),
@@ -241,7 +260,7 @@ export const createRunSpendAuthority = (
     const admission = gate(request.nodeId, clientKey);
     if ("error" in admission) return err(admission.error);
     try {
-      return await settle(request, clientKey, operation, await call());
+      return await settle(request, clientKey, operation, await call(), admission.release);
     } catch (error) {
       logWithoutThrowing(logger, "warn", "llm.call-failed", {
         ...attribution(request.nodeId, clientKey),

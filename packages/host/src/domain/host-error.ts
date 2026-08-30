@@ -6,7 +6,7 @@
  * caller attempts to forge an invalid invariant (for example Retry-After).
  */
 
-import { match, P } from "ts-pattern";
+import { match } from "ts-pattern";
 import type { z } from "zod";
 import type { DagId, RunId } from "@fuguejs/framework";
 // Type-only import — `TenantId` is a branded string used in the tenant error
@@ -106,87 +106,200 @@ export type HostError =
 
 export type HostErrorKind = HostError["kind"];
 
+type SnapshotResult =
+  | { readonly ok: true; readonly value: unknown }
+  | { readonly ok: false };
+
+const snapshotUnknown = (
+  value: unknown,
+  ancestors: WeakSet<object> = new WeakSet(),
+  depth = 0,
+): SnapshotResult => {
+  if (
+    value === null || value === undefined || typeof value === "string" ||
+    typeof value === "number" || typeof value === "boolean" ||
+    typeof value === "bigint" || typeof value === "symbol"
+  ) return { ok: true, value };
+  if (typeof value !== "object" || depth > 32) return { ok: false };
+
+  try {
+    if (ancestors.has(value)) return { ok: false };
+    ancestors.add(value);
+    if (Array.isArray(value)) {
+      const copy: unknown[] = [];
+      for (let index = 0; index < value.length; index += 1) {
+        const item = snapshotUnknown(value[index], ancestors, depth + 1);
+        if (!item.ok) return item;
+        copy.push(item.value);
+      }
+      return { ok: true, value: Object.freeze(copy) };
+    }
+
+    const copy = Object.create(null) as Record<string, unknown>;
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== "string") continue;
+      const property = snapshotUnknown(
+        (value as Record<string, unknown>)[key],
+        ancestors,
+        depth + 1,
+      );
+      if (!property.ok) return property;
+      Object.defineProperty(copy, key, {
+        value: property.value,
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      });
+    }
+    return { ok: true, value: Object.freeze(copy) };
+  } catch {
+    return { ok: false };
+  } finally {
+    ancestors.delete(value);
+  }
+};
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
-  value !== null && typeof value === "object";
+  value !== null && typeof value === "object" && !Array.isArray(value);
 const isString = (value: unknown): value is string => typeof value === "string";
 const isStringArray = (value: unknown): value is readonly string[] =>
   Array.isArray(value) && value.every(isString);
-const isIssueArray = (value: unknown): value is readonly ZodIssue[] => Array.isArray(value);
 const hasStrings = (value: Record<string, unknown>, ...keys: readonly string[]): boolean =>
   keys.every((key) => isString(value[key]));
 
-/** Runtime parser/narrower for errors crossing the throwing HTTP seam. */
-export const isHostError = (value: unknown): value is HostError => {
-  if (!isRecord(value) || !isString(value.kind)) return false;
-  switch (value.kind) {
+const ZOD_ISSUE_CODES: ReadonlySet<string> = new Set([
+  "invalid_type",
+  "too_big",
+  "too_small",
+  "invalid_format",
+  "not_multiple_of",
+  "unrecognized_keys",
+  "invalid_union",
+  "invalid_key",
+  "invalid_element",
+  "invalid_value",
+  "custom",
+]);
+
+const isIssue = (value: unknown): value is ZodIssue =>
+  isRecord(value) &&
+  isString(value.code) && ZOD_ISSUE_CODES.has(value.code) &&
+  isString(value.message) &&
+  Array.isArray(value.path) &&
+  value.path.every((part) =>
+    typeof part === "string" || typeof part === "number" || typeof part === "symbol"
+  );
+const isIssueArray = (value: unknown): value is readonly ZodIssue[] =>
+  Array.isArray(value) && value.every(isIssue);
+
+/**
+ * Total parser for errors crossing the throwing HTTP seam. Every source value
+ * is read once into a fresh deeply frozen snapshot before variant checks, so
+ * getters, proxies, and later mutation cannot drift response policy.
+ */
+export const parseHostError = (value: unknown): HostError | undefined => {
+  const snapshotted = snapshotUnknown(value);
+  if (!snapshotted.ok || !isRecord(snapshotted.value)) return undefined;
+  const snapshot = snapshotted.value;
+  if (!isString(snapshot.kind)) return undefined;
+
+  let valid: boolean;
+  switch (snapshot.kind) {
     case "git-clone-failed":
-      return hasStrings(value, "url", "message");
+      valid = hasStrings(snapshot, "url", "message");
+      break;
     case "git-pull-failed":
     case "bun-install-failed":
     case "config-invalid":
     case "tenant-config-invalid":
     case "fs-purge-failed":
-      return hasStrings(value, "message");
+      valid = hasStrings(snapshot, "message");
+      break;
     case "git-timeout":
     case "redis-unavailable":
     case "notification-failed":
-      return hasStrings(value, "operation");
+      valid = hasStrings(snapshot, "operation");
+      break;
     case "git-spawn-failed":
-      return hasStrings(value, "operation", "message");
+      valid = hasStrings(snapshot, "operation", "message");
+      break;
     case "import-failed":
-      return hasStrings(value, "path", "message") &&
-        (value.stack === undefined || isString(value.stack));
+      valid = hasStrings(snapshot, "path", "message") &&
+        (snapshot.stack === undefined || isString(snapshot.stack));
+      break;
     case "validation-failed":
-      return hasStrings(value, "path") && isIssueArray(value.issues);
+      valid = hasStrings(snapshot, "path") && isIssueArray(snapshot.issues);
+      break;
     case "no-default-export":
-      return hasStrings(value, "path");
+      valid = hasStrings(snapshot, "path");
+      break;
     case "dag-not-found":
-      return hasStrings(value, "dagId") && isStringArray(value.available);
+      valid = hasStrings(snapshot, "dagId") && isStringArray(snapshot.available);
+      break;
     case "dag-disabled":
-      return hasStrings(value, "dagId", "reason");
+      valid = hasStrings(snapshot, "dagId", "reason");
+      break;
     case "global-concurrency-exceeded":
     case "tenant-unknown":
-      return true;
+      valid = true;
+      break;
     case "dag-concurrency-exceeded":
-      return hasStrings(value, "dagId");
+      valid = hasStrings(snapshot, "dagId");
+      break;
     case "timeout":
-      return hasStrings(value, "dagId", "runId") &&
-        typeof value.timeoutMs === "number" && Number.isFinite(value.timeoutMs);
+      valid = hasStrings(snapshot, "dagId", "runId") &&
+        typeof snapshot.timeoutMs === "number" && Number.isFinite(snapshot.timeoutMs);
+      break;
     case "spend-ledger-unavailable":
-      return value.backend === "file" &&
-        (value.operation === "create" || value.operation === "read" || value.operation === "add") &&
-        hasStrings(value, "message");
+      valid = snapshot.backend === "file" &&
+        (snapshot.operation === "create" || snapshot.operation === "read" || snapshot.operation === "add") &&
+        hasStrings(snapshot, "message");
+      break;
     case "input-validation-failed":
-      return hasStrings(value, "dagId") && isIssueArray(value.issues);
+      valid = hasStrings(snapshot, "dagId") && isIssueArray(snapshot.issues);
+      break;
     case "dag-validation-failed":
-      return hasStrings(value, "dagId", "reason", "message");
+      valid = hasStrings(snapshot, "dagId", "reason", "message");
+      break;
     case "body-parse-failed":
-      return hasStrings(value, "dagId", "message");
+      valid = hasStrings(snapshot, "dagId", "message");
+      break;
     case "discovery-failed":
-      return hasStrings(value, "dagsRoot", "message");
+      valid = hasStrings(snapshot, "dagsRoot", "message");
+      break;
     case "async-result-expired":
     case "run-not-found":
     case "run-lease-lost":
-      return hasStrings(value, "runId");
+      valid = hasStrings(snapshot, "runId");
+      break;
     case "run-not-suspended":
-      return hasStrings(value, "runId", "status");
+      valid = hasStrings(snapshot, "runId", "status");
+      break;
     case "unauthorized":
-      return hasStrings(value, "reason");
+      valid = hasStrings(snapshot, "reason");
+      break;
     case "forbidden":
-      return hasStrings(value, "dagId", "callerTeam", "dagTeam");
+      valid = hasStrings(snapshot, "dagId", "callerTeam", "dagTeam");
+      break;
     case "team-already-exists":
     case "team-not-found":
-      return hasStrings(value, "team");
+      valid = hasStrings(snapshot, "team");
+      break;
     case "tenant-over-quota":
-      return hasStrings(value, "tenant") && typeof value.retryAfterSeconds === "number" &&
-        Number.isSafeInteger(value.retryAfterSeconds) && value.retryAfterSeconds >= 0;
+      valid = hasStrings(snapshot, "tenant") && typeof snapshot.retryAfterSeconds === "number" &&
+        Number.isSafeInteger(snapshot.retryAfterSeconds) && snapshot.retryAfterSeconds >= 0;
+      break;
     case "worker-unavailable":
-      return hasStrings(value, "tenant");
+      valid = hasStrings(snapshot, "tenant");
+      break;
     case "internal-invariant-violated":
-      return hasStrings(value, "message") && isRecord(value.context);
+      valid = hasStrings(snapshot, "message") && isRecord(snapshot.context);
+      break;
     default:
-      return false;
+      valid = false;
   }
+
+  return valid ? snapshot as HostError : undefined;
 };
 
 /**
@@ -349,49 +462,48 @@ export const workerUnavailable = (tenant: TenantId): HostError => ({ kind: "work
  * `classifyHostError` read it from here, so a 503 worker-unavailable advertises
  * the SAME Retry-After through every path (no divergent hardcoded sources).
  */
-export const retryAfterSecondsFor = (error: HostError): number | undefined =>
-  match(error)
-    .with({ kind: "tenant-over-quota" }, (e) => e.retryAfterSeconds)
-    .with({ kind: "global-concurrency-exceeded" }, () => 5)
-    .with({ kind: "dag-concurrency-exceeded" }, () => 5)
-    .with({ kind: "worker-unavailable" }, () => 5)
-    // EXHAUSTIVE (not `.otherwise()`): every non-retriable kind is listed, so a
-    // NEW error kind added to the union is a COMPILE error here until its retry
-    // semantics are decided — it cannot silently default to "no Retry-After".
-    .with(
-      P.union(
-        { kind: "git-clone-failed" },
-        { kind: "git-pull-failed" },
-        { kind: "git-timeout" },
-        { kind: "git-spawn-failed" },
-        { kind: "import-failed" },
-        { kind: "validation-failed" },
-        { kind: "no-default-export" },
-        { kind: "dag-not-found" },
-        { kind: "dag-disabled" },
-        { kind: "timeout" },
-        { kind: "redis-unavailable" },
-        { kind: "spend-ledger-unavailable" },
-        { kind: "bun-install-failed" },
-        { kind: "config-invalid" },
-        { kind: "tenant-config-invalid" },
-        { kind: "input-validation-failed" },
-        { kind: "dag-validation-failed" },
-        { kind: "body-parse-failed" },
-        { kind: "discovery-failed" },
-        { kind: "async-result-expired" },
-        { kind: "run-not-found" },
-        { kind: "run-lease-lost" },
-        { kind: "run-not-suspended" },
-        { kind: "notification-failed" },
-        { kind: "unauthorized" },
-        { kind: "forbidden" },
-        { kind: "team-already-exists" },
-        { kind: "team-not-found" },
-        { kind: "tenant-unknown" },
-        { kind: "internal-invariant-violated" },
-        { kind: "fs-purge-failed" },
-      ),
-      () => undefined,
-    )
-    .exhaustive();
+type RetryAfterPolicy = number | undefined | ((error: HostError) => number | undefined);
+
+const RETRY_AFTER_POLICY = Object.freeze({
+  "git-clone-failed": undefined,
+  "git-pull-failed": undefined,
+  "git-timeout": undefined,
+  "git-spawn-failed": undefined,
+  "import-failed": undefined,
+  "validation-failed": undefined,
+  "no-default-export": undefined,
+  "dag-not-found": undefined,
+  "dag-disabled": undefined,
+  "global-concurrency-exceeded": 5,
+  "dag-concurrency-exceeded": 5,
+  timeout: undefined,
+  "redis-unavailable": undefined,
+  "spend-ledger-unavailable": undefined,
+  "bun-install-failed": undefined,
+  "config-invalid": undefined,
+  "tenant-config-invalid": undefined,
+  "input-validation-failed": undefined,
+  "dag-validation-failed": undefined,
+  "body-parse-failed": undefined,
+  "discovery-failed": undefined,
+  "async-result-expired": undefined,
+  "run-not-found": undefined,
+  "run-lease-lost": undefined,
+  "run-not-suspended": undefined,
+  "notification-failed": undefined,
+  unauthorized: undefined,
+  forbidden: undefined,
+  "team-already-exists": undefined,
+  "team-not-found": undefined,
+  "tenant-unknown": undefined,
+  "tenant-over-quota": (error: HostError) =>
+    error.kind === "tenant-over-quota" ? error.retryAfterSeconds : undefined,
+  "worker-unavailable": 5,
+  "internal-invariant-violated": undefined,
+  "fs-purge-failed": undefined,
+} satisfies Record<HostErrorKind, RetryAfterPolicy>);
+
+export const retryAfterSecondsFor = (error: HostError): number | undefined => {
+  const policy = RETRY_AFTER_POLICY[error.kind];
+  return typeof policy === "function" ? policy(error) : policy;
+};

@@ -376,6 +376,26 @@ describe("createNamespacedCache", () => {
     expect(logs.some(l => l.msg.includes("not serializable"))).toBe(true);
   });
 
+  it("rejects top-level undefined, function, and symbol before calling Redis", async () => {
+    const { redis, calls } = createMockRedis();
+    const { logger, logs } = collectLogs();
+    const cache = createNamespacedCache(redis, testTenant, testDagId, undefined, logger);
+
+    for (const [key, value] of [
+      ["undefined", undefined],
+      ["function", () => "not-json"],
+      ["symbol", Symbol("not-json")],
+    ] as const) {
+      expect((await cache.set(key, value)).ok).toBe(true);
+    }
+
+    expect(calls.filter((call) => call.op === "set")).toHaveLength(0);
+    const diagnostics = logs.filter((line) => line.msg.includes("not serializable"));
+    expect(diagnostics).toHaveLength(3);
+    expect(diagnostics.every((line) => String(line.data?.["error"]).includes("returned undefined")))
+      .toBe(true);
+  });
+
   it("escalates to error level after consecutive failures", async () => {
     const { logger, logs } = collectLogs();
     const cache = createNamespacedCache(failingRedis(), testTenant, testDagId, undefined, logger);
@@ -1313,14 +1333,11 @@ describe("createNodeContextForDag — spend survives a park/resume (FR-B-006)", 
   });
 });
 
-// ── The ledger BACKEND selection (round-2 RC2) ──────────────────────────────
+// ── Spend-ledger backend authority and fallback invariants ──────────────────
 //
-// `spendLedgerRedis` decides whether a run gets the durable Redis ledger or the
-// process-local fallback, and the fallback costs budget durability across
-// restarts. Before these tests neither branch was exercised: every fixture in
-// this file omits `hIncrBy`/`hGetAll`/`expire` (they are OPTIONAL on
-// `RedisPort`), so the downgrade fired on every single test, unasserted, into a
-// no-op logger — and the Redis-backed branch was reached by nothing at all.
+// An explicitly injected authoritative ledger is never displaced. Stock memory
+// wiring selects Redis when its complete append surface is available; otherwise
+// it remains an honest process-local fallback and emits the durability loss.
 describe("createNodeContextForDag — which spend ledger a run actually gets", () => {
   /**
    * A `RedisPort` that CAN back the ledger. The default `createMockRedis`

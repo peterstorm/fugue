@@ -36,7 +36,7 @@ import type {
   Ceilings,
   SingleShotCachePolicy,
 } from "@fuguejs/framework";
-import type { LogPort } from "../ports.js";
+import type { LogPort, SpendLedgerPort } from "../ports.js";
 import { createMeteredLlm as createMeteredLlmClient } from "../adapters/metered-llm.js";
 import {
   createRunSpendAuthority,
@@ -205,6 +205,40 @@ describe("metered-llm: augmented subtype preservation", () => {
     expect((await metered.sendStructured(structuredReq(nodeA))).ok).toBe(true);
     expect((await metered.sendWithTools(toolsReq(nodeA), fakeCtx)).ok).toBe(true);
     expect(metered.summary()).toBe("metered:2");
+    expect(logs.filter((line) => line.msg === "llm.metered")).toHaveLength(2);
+  });
+
+  it("meters a frozen object-literal client through a separate facade", async () => {
+    let providerCalls = 0;
+    const inner = Object.freeze({
+      label: "frozen-client",
+      summary(): string { return `${this.label}:${providerCalls}`; },
+      async sendStructured<O>(_req: LlmRequest<O>): Promise<Result<LlmResponse<O>, FrameworkError>> {
+        providerCalls += 1;
+        return ok({ output: {} as O, ...tokensOnly(2, 1), rawText: "" });
+      },
+      async sendWithTools<O>(
+        _req: SendWithToolsRequest<O>,
+        _ctx: NodeContext,
+      ): Promise<Result<LlmResponse<O>, FrameworkError>> {
+        providerCalls += 1;
+        return ok({ output: {} as O, ...tokensOnly(2, 1), rawText: "" });
+      },
+    });
+    const { logger, logs } = collectLogs();
+    const metered = createMeteredLlmClient(
+      inner,
+      "llm",
+      createRunSpendAuthority({ dagId, runId, ...freshLedger(), logger }),
+    );
+
+    expect(Object.isFrozen(inner)).toBe(true);
+    expect(metered.label).toBe("frozen-client");
+    expect(metered.summary).toBe(metered.summary);
+    expect(metered.summary()).toBe("frozen-client:0");
+    expect((await metered.sendStructured(structuredReq(nodeA))).ok).toBe(true);
+    expect((await metered.sendWithTools(toolsReq(nodeA), fakeCtx)).ok).toBe(true);
+    expect(metered.summary()).toBe("frozen-client:2");
     expect(logs.filter((line) => line.msg === "llm.metered")).toHaveLength(2);
   });
 });
@@ -1151,6 +1185,32 @@ describe("metered-llm: a failed ledger append is LOUD, and its severity says why
     expect(line?.data?.["nodeId"]).toBe(nodeA as string);
     expect(String(line?.data?.["reason"] ?? "")).toContain("spend-ledger add");
     expect((line?.data?.["unrecorded"] as { tokens?: number } | undefined)?.tokens).toBe(150);
+  });
+
+  it("fences a throwing ledger append as durability loss and preserves paid provider output", async () => {
+    const throwingLedger: SpendLedgerPort = {
+      metadata: memoryLedgerMetadata,
+      read: async () => ok(NO_SPEND),
+      add: async () => { throw new Error("adapter rejected append"); },
+    };
+    const { inner } = fakeInner(100, 50);
+    const { logger, logs } = collectLogs();
+    const metered = createMeteredLlm(inner, {
+      dagId,
+      runId,
+      ledger: throwingLedger,
+      hydrated: { kind: "known", spend: NO_SPEND },
+      limits: tokenBudget(1_000),
+      logger,
+    });
+
+    const result = await metered.sendStructured(structuredReq(nodeA));
+
+    expect(result.ok).toBe(true);
+    expect(logs.filter((line) => line.msg === "llm.ledger-write-failed")).toHaveLength(1);
+    expect(logs.some((line) => line.msg === "llm.call-failed")).toBe(false);
+    expect(String(logs.find((line) => line.msg === "llm.ledger-write-failed")?.data?.["reason"]))
+      .toContain("SpendLedgerPort.add threw");
   });
 
   it("still meters IN PROCESS when the append fails — the budget holds for this slice", async () => {

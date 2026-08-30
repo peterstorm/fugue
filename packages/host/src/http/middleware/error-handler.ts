@@ -8,11 +8,12 @@
 
 import { match, P } from "ts-pattern";
 import type { Context } from "hono";
+import { safeErrorMessage } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import {
   formatHostError,
   httpStatusFor,
-  isHostError,
+  parseHostError,
   retryAfterSecondsFor,
 } from "../../domain/host-error.js";
 import { errorResponse } from "../response.js";
@@ -24,16 +25,36 @@ export interface ErrorHandlerLogger {
   readonly error: (msg: string, data?: Record<string, unknown>) => void;
 }
 
-/** Diagnostics are secondary: logger failure must never replace the response. */
+export type ErrorHandlerFallback = (diagnostic: string) => unknown;
+
+const renderDiagnosticData = (data: Record<string, unknown>): string => {
+  try {
+    return Object.entries(data)
+      .map(([key, value]) => `${key}=${safeErrorMessage(value)}`)
+      .join(" ");
+  } catch {
+    return "<unrenderable diagnostic data>";
+  }
+};
+
+/** Diagnostics are secondary: neither logger nor stderr may replace the response. */
 const logErrorWithoutThrowing = (
   logger: ErrorHandlerLogger,
   message: string,
   data: Record<string, unknown>,
+  writeFallback: ErrorHandlerFallback,
 ): void => {
   try {
     logger.error(message, data);
-  } catch {
-    // The already-selected HTTP response remains authoritative.
+  } catch (loggerError) {
+    try {
+      writeFallback(
+        `[host error-handler fallback] ${message}; ${renderDiagnosticData(data)}; ` +
+          `loggerError=${safeErrorMessage(loggerError)}\n`,
+      );
+    } catch {
+      // The already-selected HTTP response remains authoritative.
+    }
   }
 };
 
@@ -143,6 +164,7 @@ const headersFor = (error: HostError): Record<string, string> | undefined => {
  */
 const respondWithHostError = (
   logger: ErrorHandlerLogger,
+  writeFallback: ErrorHandlerFallback,
   c: Context,
   hostErr: HostError,
 ): Response => {
@@ -156,7 +178,7 @@ const respondWithHostError = (
       ...("context" in hostErr ? { context: hostErr.context } : {}),
       dagId: dagIdFor(hostErr),
       runId: runIdFor(hostErr),
-    });
+    }, writeFallback);
     return errorResponse(c, status, hostErr.kind, "An unexpected error occurred", {
       // No `details` — the 5xx body must not echo internal state. Headers (e.g.
       // Retry-After for worker-unavailable 503) are still safe to advertise.
@@ -179,40 +201,61 @@ const respondWithHostError = (
  * Create a Hono error handler with injected logger.
  * Registered via `app.onError(createErrorHandler(logger))`.
  */
-export const createErrorHandler = (logger: ErrorHandlerLogger) => (thrown: Error | HostError, c: Context): Response => {
-  // If it's a HostError (thrown directly or wrapped)
-  if (isHostError(thrown)) {
-    return respondWithHostError(logger, c, thrown);
+const asError = (value: unknown): Error | undefined => {
+  try {
+    return value instanceof Error ? value : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+const readErrorField = (error: Error, key: "cause" | "message" | "stack" | "frameworkErrorKind"): unknown => {
+  try {
+    return (error as unknown as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
+};
+
+export const createErrorHandler = (
+  logger: ErrorHandlerLogger,
+  writeFallback: ErrorHandlerFallback = (diagnostic) => process.stderr.write(diagnostic),
+) => (thrown: unknown, c: Context): Response => {
+  const directHostError = parseHostError(thrown);
+  if (directHostError !== undefined) {
+    return respondWithHostError(logger, writeFallback, c, directHostError);
   }
 
-  // Check if the Error has a HostError as cause
-  if (thrown instanceof Error && isHostError(thrown.cause)) {
-    return respondWithHostError(logger, c, thrown.cause);
+  const thrownError = asError(thrown);
+  const causeValue = thrownError === undefined ? undefined : readErrorField(thrownError, "cause");
+  const causeHostError = parseHostError(causeValue);
+  if (causeHostError !== undefined) {
+    return respondWithHostError(logger, writeFallback, c, causeHostError);
   }
 
-  // Check for FrameworkError (has `kind` field from the framework)
-  if (thrown instanceof Error && "frameworkErrorKind" in thrown) {
-    const kind = (thrown as unknown as { frameworkErrorKind: string }).frameworkErrorKind;
+  const frameworkErrorKind = thrownError === undefined
+    ? undefined
+    : readErrorField(thrownError, "frameworkErrorKind");
+  if (thrownError !== undefined && typeof frameworkErrorKind === "string") {
     logErrorWithoutThrowing(logger, "Framework error in request handler", {
-      kind,
-      error: thrown.message,
-      stack: thrown.stack,
-    });
-    // FrameworkErrors have controlled messages (e.g., "LLM unavailable") — safe to expose kind.
-    // But message may contain internal details, so use a generic message.
-    return errorResponse(c, 500, kind, `Framework error: ${kind}`);
+      kind: frameworkErrorKind,
+      error: readErrorField(thrownError, "message"),
+      stack: readErrorField(thrownError, "stack"),
+    }, writeFallback);
+    return errorResponse(
+      c,
+      500,
+      frameworkErrorKind,
+      `Framework error: ${frameworkErrorKind}`,
+    );
   }
 
-  // Generic unhandled error — MUST be logged for observability
-  // SECURITY: Never expose internal error messages to clients.
-  // Full details are logged server-side only.
-  const internalMessage = thrown instanceof Error ? thrown.message : String(thrown);
-  const cause = thrown instanceof Error && thrown.cause instanceof Error ? thrown.cause : undefined;
+  const causeError = asError(causeValue);
   logErrorWithoutThrowing(logger, "Unhandled error in request handler", {
-    error: internalMessage,
-    stack: thrown instanceof Error ? thrown.stack : undefined,
-    causeMessage: cause?.message,
-    causeStack: cause?.stack,
-  });
+    error: safeErrorMessage(thrown),
+    stack: thrownError === undefined ? undefined : readErrorField(thrownError, "stack"),
+    causeMessage: causeError === undefined ? undefined : readErrorField(causeError, "message"),
+    causeStack: causeError === undefined ? undefined : readErrorField(causeError, "stack"),
+  }, writeFallback);
   return errorResponse(c, 500, "internal-error", "An unexpected error occurred");
 };

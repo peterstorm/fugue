@@ -9,9 +9,10 @@
  * Nothing here does a read-modify-write, so there is nothing to race on.
  *
  * The three increments and the set-add are separately atomic but not atomic
- * TOGETHER. A crash between them leaves a run recorded as having spent tokens
- * without the matching cost, or vice versa — always UNDER-reporting one axis of
- * one call, never over-reporting and never corrupting. That window is bounded
+ * TOGETHER. Writes are cost-first (`micros`, then tokens, calls, and unpriced
+ * model names), so a crash after cost may under-record one or more later axes
+ * of that call. A partial append never over-reports and never corrupts. The
+ * window is bounded
  * by one call, the same magnitude as the documented overshoot-by-one allowance,
  * and erring toward under-reporting a single call is the correct direction for
  * a partial write: the alternative (a transaction) buys exactness at the price

@@ -260,24 +260,19 @@ export const closeAll = async (
 };
 
 // ---------------------------------------------------------------------------
-// Health Check (effectful — aggregation only; periodic host polling is a
-// follow-up, see capability-handle.ts)
+// Health Check (effectful aggregation)
 // ---------------------------------------------------------------------------
 
 /**
  * Run health checks on all capabilities that declare one.
  * Returns aggregated report. Best-effort — never throws.
  *
- * Consumed by `GET /admin/capabilities/health` (see
- * `http/handlers/admin/capabilities.ts`, which documents why this is an
- * operator-driven admin route rather than a kubelet probe). Feeding the host's
- * degraded state from a periodic poll remains a separate, unbuilt feature.
+ * Consumed by the operator-driven `GET /admin/capabilities/health` route.
  */
 export const checkHealth = async (
   handles: readonly CapabilityHandle[],
 ): Promise<CapabilityHealthReport> => {
   const results: CapabilityHealth[] = [];
-  let hasUnhealthy = false;
 
   for (const handle of handles) {
     if (!handle.healthCheck) {
@@ -290,7 +285,6 @@ export const checkHealth = async (
         results.push({ status: "healthy", name: handle.name });
       } else {
         results.push({ status: "unhealthy", name: handle.name, reason: result.error });
-        hasUnhealthy = true;
       }
     } catch (e) {
       results.push({
@@ -298,12 +292,11 @@ export const checkHealth = async (
         name: handle.name,
         reason: safeErrorMessage(e),
       });
-      hasUnhealthy = true;
     }
   }
 
   return {
-    overall: hasUnhealthy ? "degraded" : "healthy",
+    overall: results.some(({ status }) => status === "unhealthy") ? "degraded" : "healthy",
     capabilities: results,
   };
 };

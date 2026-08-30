@@ -47,18 +47,19 @@ export const createMeteredLlm = <T extends LlmClient>(
   // receiver-sensitive accessors. Cache target-bound delegates so subtype-only
   // methods retain both correct receiver semantics and stable identity.
   const boundMethods = new WeakMap<Function, Function>();
-  return new Proxy(inner, {
-    get(target, property) {
+  const facade = Object.create(Object.getPrototypeOf(inner)) as object;
+  return new Proxy(facade, {
+    get(_target, property) {
       if (property === "sendStructured") return sendStructured;
       if (property === "sendWithTools") return sendWithTools;
-      const value = Reflect.get(target, property, target);
+      const value = Reflect.get(inner, property, inner);
       if (typeof value !== "function") return value;
       const cached = boundMethods.get(value);
       if (cached !== undefined) return cached;
-      const bound = value.bind(target);
+      const bound = value.bind(inner);
       boundMethods.set(value, bound);
       return bound;
     },
-    set: (target, property, value) => Reflect.set(target, property, value, target),
-  });
+    set: (_target, property, value) => Reflect.set(inner, property, value, inner),
+  }) as T;
 };

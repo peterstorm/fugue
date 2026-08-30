@@ -56,6 +56,23 @@ const freeCall = (n: number): Spend => pricedCall(n, micros(0));
 const runA = makeRunId("run-a");
 const runB = makeRunId("run-b");
 
+const reservationWith = (inFlight: number, maxObservedCall: Spend): ReservationState => {
+  let state = learnObservedCall(emptyReservation, maxObservedCall);
+  for (let index = 0; index < inFlight; index += 1) {
+    const decision = admit(emptyMeter(), runA, state);
+    if (decision.kind !== "admit") throw new Error("unbudgeted reservation must admit");
+    state = decision.state;
+  }
+  return state;
+};
+
+const reservationTypePins = (): void => {
+  // @ts-expect-error — callers cannot forge structural or negative reservation states.
+  const invalid: ReservationState = { inFlight: -1, maxObservedCall: NO_SPEND };
+  void invalid;
+};
+void reservationTypePins;
+
 // ---------------------------------------------------------------------------
 // Accumulation
 // ---------------------------------------------------------------------------
@@ -262,7 +279,7 @@ describe("llm-meter: reservation bounds concurrent overshoot (SC-003)", () => {
     const meter = accumulate(emptyMeter(), runA, freeCall(600));
     // One 600-token call settled, one more of the same size in flight:
     // 600 + 600 projects past 1000 even though settled spend is still under.
-    const state = { inFlight: 1, maxObservedCall: freeCall(600) };
+    const state = reservationWith(1, freeCall(600));
     const decision = admit(meter, runA, state, limits);
     if (decision.kind !== "refuse") throw new Error("expected refuse");
     expect(decision.breach.basis).toBe("projected");
@@ -276,7 +293,7 @@ describe("llm-meter: reservation bounds concurrent overshoot (SC-003)", () => {
     // A ceiling spend has actually reached is a stronger statement than one an
     // estimate says it is about to.
     const meter = accumulate(emptyMeter(), runA, freeCall(5000));
-    const state = { inFlight: 3, maxObservedCall: freeCall(5000) };
+    const state = reservationWith(3, freeCall(5000));
     const decision = admit(meter, runA, state, limitsOf([tokens(1000)]));
     if (decision.kind !== "refuse") throw new Error("expected refuse");
     expect(decision.breach.basis).toBe("settled");
@@ -287,12 +304,12 @@ describe("llm-meter: reservation bounds concurrent overshoot (SC-003)", () => {
     // within budget and has nothing outstanding is never refused by the
     // estimate — even a large learned one.
     const meter = accumulate(emptyMeter(), runA, freeCall(100));
-    const state = { inFlight: 0, maxObservedCall: freeCall(999_999) };
+    const state = reservationWith(0, freeCall(999_999));
     expect(admit(meter, runA, state, limitsOf([tokens(1000)])).kind).toBe("admit");
   });
 
   it("returns a typed underflow failure and leaves state unchanged on double release", () => {
-    const initial = { inFlight: 1, maxObservedCall: NO_SPEND };
+    const initial = reservationWith(1, NO_SPEND);
     const released = releaseReservation(initial);
     expect(released.ok).toBe(true);
     if (!released.ok) return;
@@ -336,10 +353,7 @@ describe("llm-meter: projection/read-model agreement", () => {
           calls: 0,
           usd: { kind: "priced", micros: micros(0) },
         });
-        const state: ReservationState = {
-          inFlight,
-          maxObservedCall: freeCall(maxCallTokens),
-        };
+        const state = reservationWith(inFlight, freeCall(maxCallTokens));
         const limits = limitsOf([tokens(tokenLimit), callsCeiling(callLimit)]);
         const projected = projectedSpend(meter, runA, state);
         const breach = firstBreach(projected, limits, "projected");
@@ -353,6 +367,24 @@ describe("llm-meter: projection/read-model agreement", () => {
     ));
   });
 
+  it("legal reservation transitions never produce a negative in-flight count (property)", () => {
+    fc.assert(fc.property(fc.nat({ max: 100 }), (admissions) => {
+      let state = reservationWith(admissions, freeCall(1));
+      expect(state.inFlight).toBe(admissions);
+      for (let released = 0; released < admissions; released += 1) {
+        const transition = releaseReservation(state);
+        expect(transition.ok).toBe(true);
+        if (!transition.ok) return;
+        state = transition.value;
+        expect(state.inFlight).toBeGreaterThanOrEqual(0);
+      }
+      expect(releaseReservation(state)).toEqual({
+        ok: false,
+        error: { kind: "reservation-underflow", inFlight: 0 },
+      });
+    }));
+  });
+
   it("projection is monotone in inFlight for a learned non-negative call (property)", () => {
     fc.assert(fc.property(
       fc.nat({ max: 10_000 }),
@@ -362,8 +394,8 @@ describe("llm-meter: projection/read-model agreement", () => {
       (settledTokens, callTokens, first, extra) => {
         const meter = accumulate(emptyMeter(), runA, freeCall(settledTokens));
         const maxObservedCall = freeCall(callTokens);
-        const lower = projectedSpend(meter, runA, { inFlight: first, maxObservedCall });
-        const upper = projectedSpend(meter, runA, { inFlight: first + extra, maxObservedCall });
+        const lower = projectedSpend(meter, runA, reservationWith(first, maxObservedCall));
+        const upper = projectedSpend(meter, runA, reservationWith(first + extra, maxObservedCall));
         expect(upper.tokens).toBeGreaterThanOrEqual(lower.tokens);
         expect(upper.calls).toBeGreaterThanOrEqual(lower.calls);
       },

@@ -5,7 +5,11 @@
 import { describe, it, expect } from "bun:test";
 import { Hono } from "hono";
 import { createErrorHandler } from "../../http/middleware/error-handler.js";
-import type { ErrorHandlerLogger } from "../../http/middleware/error-handler.js";
+import type {
+  ErrorHandlerFallback,
+  ErrorHandlerLogger,
+} from "../../http/middleware/error-handler.js";
+import { parseHostError } from "../../domain/host-error.js";
 import type { HostError } from "../../domain/host-error.js";
 
 // ── Test Logger ────────────────────────────────────────────────────────────
@@ -23,9 +27,10 @@ const createTestLogger = () => {
 const createApp = (
   logger: ErrorHandlerLogger,
   throwFn: () => never,
+  writeFallback?: ErrorHandlerFallback,
 ) => {
   const app = new Hono();
-  app.onError(createErrorHandler(logger));
+  app.onError(createErrorHandler(logger, writeFallback));
   app.get("/throw", () => { throwFn(); });
   return app;
 };
@@ -195,6 +200,116 @@ describe("error-handler middleware", () => {
   });
 
   describe("HostError runtime recognition", () => {
+    const issue = { code: "custom", message: "invalid", path: ["field"] } as never;
+    const validVariants: readonly HostError[] = [
+      { kind: "git-clone-failed", url: "repo", message: "failed" },
+      { kind: "git-pull-failed", message: "failed" },
+      { kind: "git-timeout", operation: "pull" },
+      { kind: "git-spawn-failed", operation: "clone", message: "failed" },
+      { kind: "import-failed", path: "/dag", message: "failed", stack: "stack" },
+      { kind: "validation-failed", path: "/dag", issues: [issue] },
+      { kind: "no-default-export", path: "/dag" },
+      { kind: "dag-not-found", dagId: "dag" as never, available: ["other" as never] },
+      { kind: "dag-disabled", dagId: "dag" as never, reason: "disabled" },
+      { kind: "global-concurrency-exceeded" },
+      { kind: "dag-concurrency-exceeded", dagId: "dag" as never },
+      { kind: "timeout", dagId: "dag" as never, runId: "run" as never, timeoutMs: 10 },
+      { kind: "redis-unavailable", operation: "get" },
+      { kind: "spend-ledger-unavailable", backend: "file", operation: "read", message: "failed" },
+      { kind: "bun-install-failed", message: "failed" },
+      { kind: "config-invalid", message: "failed" },
+      { kind: "tenant-config-invalid", message: "failed" },
+      { kind: "input-validation-failed", dagId: "dag" as never, issues: [issue] },
+      { kind: "dag-validation-failed", dagId: "dag" as never, reason: "shape", message: "failed" },
+      { kind: "body-parse-failed", dagId: "dag" as never, message: "failed" },
+      { kind: "discovery-failed", dagsRoot: "/dags", message: "failed" },
+      { kind: "async-result-expired", runId: "run" as never },
+      { kind: "run-not-found", runId: "run" as never },
+      { kind: "run-lease-lost", runId: "run" as never },
+      { kind: "run-not-suspended", runId: "run" as never, status: "running" },
+      { kind: "notification-failed", operation: "send" },
+      { kind: "unauthorized", reason: "missing" },
+      { kind: "forbidden", dagId: "dag" as never, callerTeam: "a", dagTeam: "b" },
+      { kind: "team-already-exists", team: "a" },
+      { kind: "team-not-found", team: "a" },
+      { kind: "tenant-unknown" },
+      { kind: "tenant-over-quota", tenant: "tenant" as never, retryAfterSeconds: 7 as never },
+      { kind: "worker-unavailable", tenant: "tenant" as never },
+      { kind: "internal-invariant-violated", message: "failed", context: { nested: { value: [1] } } },
+      { kind: "fs-purge-failed", message: "failed" },
+    ];
+
+    it("parses every valid variant into a fresh deeply immutable snapshot", () => {
+      for (const source of validVariants) {
+        const parsed = parseHostError(source);
+        expect(parsed).toBeDefined();
+        expect(parsed).not.toBe(source);
+        expect(parsed?.kind).toBe(source.kind);
+        expect(Object.isFrozen(parsed)).toBe(true);
+      }
+
+      const parsed = parseHostError(validVariants.at(-2));
+      expect(parsed?.kind).toBe("internal-invariant-violated");
+      if (parsed?.kind === "internal-invariant-violated") {
+        const nested = parsed.context.nested as { readonly value: readonly number[] };
+        expect(Object.isFrozen(parsed.context)).toBe(true);
+        expect(Object.isFrozen(nested)).toBe(true);
+        expect(Object.isFrozen(nested.value)).toBe(true);
+      }
+    });
+
+    it("is total for throwing getters and revoked proxies", async () => {
+      const throwingGetter = Object.defineProperty({}, "kind", {
+        enumerable: true,
+        get: () => { throw new Error("getter trap"); },
+      });
+      const revoked = Proxy.revocable({ kind: "tenant-unknown" }, {});
+      revoked.revoke();
+
+      expect(parseHostError(throwingGetter)).toBeUndefined();
+      expect(parseHostError(revoked.proxy)).toBeUndefined();
+
+      for (const hostile of [throwingGetter, revoked.proxy]) {
+        const { logger } = createTestLogger();
+        const wrapped = new Error("wrapped hostile cause", { cause: hostile });
+        const app = createApp(logger, () => { throw wrapped; });
+        const res = await app.request("/throw");
+        expect(res.status).toBe(500);
+        expect(await res.json()).toMatchObject({ error: "internal-error" });
+      }
+    });
+
+    it("snapshots each field once so later mutation and getter drift cannot change policy", () => {
+      let reads = 0;
+      const source = {
+        kind: "tenant-config-invalid",
+        get message() {
+          reads += 1;
+          return reads === 1 ? "first" : "drifted";
+        },
+      };
+
+      const parsed = parseHostError(source);
+      expect(parsed).toEqual({ kind: "tenant-config-invalid", message: "first" });
+      expect(reads).toBe(1);
+      expect(Object.isFrozen(parsed)).toBe(true);
+    });
+
+    it("rejects malformed issue elements for both validation variants", () => {
+      const malformedIssues = [
+        [null],
+        [{ code: "custom", message: "missing path" }],
+        [{ code: "custom", message: "bad path", path: {} }],
+        [{ code: "not-a-zod-code", message: "bad code", path: [] }],
+      ];
+      for (const issues of malformedIssues) {
+        expect(parseHostError({ kind: "validation-failed", path: "/dag", issues }))
+          .toBeUndefined();
+        expect(parseHostError({ kind: "input-validation-failed", dagId: "dag", issues }))
+          .toBeUndefined();
+      }
+    });
+
     it("routes unknown and incomplete discriminated shapes to the generic path", async () => {
       for (const hostile of [
         { kind: "made-up-kind" },
@@ -251,11 +366,39 @@ describe("error-handler middleware", () => {
       ] as const;
 
       for (const testCase of cases) {
-        const app = createApp(throwingLogger, () => { throw testCase.thrown; });
+        const app = createApp(throwingLogger, () => { throw testCase.thrown; }, () => {});
         const res = await app.request("/throw");
         expect(res.status).toBe(500);
         expect(await res.json()).toMatchObject({ error: testCase.expectedError });
       }
+    });
+
+    it("attempts a separately guarded safe fallback when the logger throws", async () => {
+      const fallback: string[] = [];
+      const app = createApp(
+        throwingLogger,
+        () => { throw new Error("generic secret"); },
+        (diagnostic) => { fallback.push(diagnostic); },
+      );
+
+      const res = await app.request("/throw");
+      expect(res.status).toBe(500);
+      expect(await res.json()).toMatchObject({ error: "internal-error" });
+      expect(fallback).toHaveLength(1);
+      expect(fallback[0]).toContain("host error-handler fallback");
+      expect(fallback[0]).toContain("logger unavailable");
+    });
+
+    it("keeps the selected response authoritative when logger and fallback both throw", async () => {
+      const app = createApp(
+        throwingLogger,
+        () => { throw new Error("generic secret"); },
+        () => { throw new Error("stderr unavailable"); },
+      );
+
+      const res = await app.request("/throw");
+      expect(res.status).toBe(500);
+      expect(await res.json()).toMatchObject({ error: "internal-error" });
     });
   });
 

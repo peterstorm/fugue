@@ -185,31 +185,13 @@ export const runNodeShared = async (
         emitNodeError(`capability minting refused: ${messageOf(minted.error)}`, minted.error);
         return err(minted.error);
       }
-      const merged = mergeScopedCapabilities(ctx, minted.value);
-      if (!merged.ok) {
-        const mergeError: FrameworkError = {
-          kind: "validation",
-          nodeId,
-          message:
-            `capability broker returned non-null reserved/built-in key ` +
-            `'${merged.error.key}'; static built-in authority remains authoritative`,
-        };
-        emitNodeError(`capability merge refused: ${messageOf(mergeError)}`, mergeError);
-        return err(mergeError);
-      }
-      runCtx = merged.value;
-
-      // Seam-contract enforcement (claims-without-delivery): run-start
-      // validation exempted every `provides()`-claimed capability from the
-      // base-context check on the promise it would be minted here. A broker
-      // that claims a capability but omits it from its `ok()` record would
-      // otherwise put an `undefined` handle behind the validated-context cast
-      // below and crash inside `node.run`. Fail closed with the same error
-      // vocabulary run-start validation uses.
+      // Validate delivery against the broker result itself, before the static
+      // base can participate in a merge. A base client must never satisfy a
+      // capability that `provides()` promised to mint for this invocation.
       const undelivered = node.requires.filter(
         (cap) =>
           opts.minting?.broker.provides?.(cap) === true &&
-          (runCtx as unknown as Record<string, unknown>)[cap] == null,
+          (!Object.hasOwn(minted.value, cap) || minted.value[cap] == null),
       );
       const [firstUndelivered, ...restUndelivered] = undelivered;
       if (firstUndelivered !== undefined) {
@@ -223,6 +205,20 @@ export const runNodeShared = async (
         emitNodeError(`broker claimed but did not deliver capabilities: ${messageOf(missingErr)}`, missingErr);
         return err(missingErr);
       }
+
+      const merged = mergeScopedCapabilities(ctx, minted.value);
+      if (!merged.ok) {
+        const mergeError: FrameworkError = {
+          kind: "validation",
+          nodeId,
+          message:
+            `capability broker returned non-null reserved/built-in key ` +
+            `'${merged.error.key}'; static built-in authority remains authoritative`,
+        };
+        emitNodeError(`capability merge refused: ${messageOf(mergeError)}`, mergeError);
+        return err(mergeError);
+      }
+      runCtx = merged.value;
     }
 
     // Built-in nodes can emit sub-spans while executing. Bind those timestamps

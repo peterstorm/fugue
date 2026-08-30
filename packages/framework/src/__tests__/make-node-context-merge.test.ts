@@ -63,6 +63,31 @@ describe("mergeScopedCapabilities", () => {
     expect(base.budget).toBe(budget);
   });
 
+  test("rejects prototype-meta keys from parsed broker output without prototype or inherited injection", () => {
+    const base = makeBase();
+    const parsed = JSON.parse(
+      '{"__proto__":{"injectedCapability":true},"constructor":{"polluted":true},"prototype":{"polluted":true}}',
+    ) as ScopedCapabilityHandle;
+
+    for (const key of ["__proto__", "constructor", "prototype"] as const) {
+      const single = JSON.parse(JSON.stringify({ [key]: { polluted: true } })) as ScopedCapabilityHandle;
+      expect(mergeScopedCapabilities(base, single)).toEqual({
+        ok: false,
+        error: { kind: "reserved-capability", key },
+      });
+    }
+
+    const merged = mergeScopedCapabilities(base, parsed);
+    expect(merged.ok).toBe(false);
+    expect(Object.getPrototypeOf(base)).toBeNull();
+    expect(Object.hasOwn(base, "__proto__")).toBe(false);
+    expect((base as unknown as Record<string, unknown>).__proto__).toBeUndefined();
+    expect((base as unknown as Record<string, unknown>).constructor).toBeUndefined();
+    expect((base as unknown as Record<string, unknown>).prototype).toBeUndefined();
+    expect((base as unknown as Record<string, unknown>).injectedCapability).toBeUndefined();
+    expect(({} as Record<string, unknown>).injectedCapability).toBeUndefined();
+  });
+
   test("merges a non-reserved minted key over a new context", () => {
     const base = makeBase();
     const handle = { sendMail: async () => ({ ok: true as const, value: { messageId: "m-1" } }) };
