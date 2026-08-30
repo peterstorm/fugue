@@ -1,7 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import type { RunId, DagId } from "../types/ids.js";
 import { z } from "zod";
-import { NoopObserver } from "../observer/observer.js";
 import { dispatchToolCall, dispatchToolCallsWithSpans } from "../llm/tool-dispatch.js";
 import type { ToolDef } from "../types/llm.js";
 import { tool } from "../llm/tools.js";
@@ -9,19 +7,10 @@ import type { NodeContext } from "../types/node.js";
 import type { Tracer } from "../tracing/tracer.js";
 import type { ToolCall } from "../llm/tool-dispatch.js";
 import { stubLlmClient } from "./_llm-mocks.js";
+import { testNodeContext } from "./_context-factories.js";
 
-const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
-  runId: "test-run" as RunId,
-  dagId: "test-dag" as DagId,
-  observer: new NoopObserver(),
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null,
-  cache: null,
-  prompts: null,
-  llm: stubLlmClient, http: null, clock: null, budget: null,
-  logger: { warn: () => {}, error: () => {} },
-  ...overrides,
-});
+const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext =>
+  testNodeContext({ llm: stubLlmClient, ...overrides });
 
 const echoTool: ToolDef<{ msg: string }, { echo: string }> = tool({
   name: "echo",

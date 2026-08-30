@@ -229,8 +229,10 @@ export const runNodeShared = async (
     try {
       // Capability erasure boundary: the node's `run` is typed against the
       // narrow `TypedNodeContext<R>` derived from its `requires`, but the
-      // runtime carries the wide `BaseNodeContext`. Capability presence was
-      // validated at run start (`validateCapabilities`), so this cast is
+      // runtime carries the wide `BaseNodeContext`. Static/base capabilities
+      // were proved present at run start by `validateCapabilities`; broker-
+      // provided capabilities were proved by dispatch-time mint delivery and
+      // reserved-key merge validation. Together those checks make this cast
       // sound — the runtime is the oracle for which fields are non-null.
       const runFn = node.run as (
         input: unknown,

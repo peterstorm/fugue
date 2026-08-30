@@ -6,7 +6,7 @@
  * caller attempts to forge an invalid invariant (for example Retry-After).
  */
 
-import { match } from "ts-pattern";
+import { match, P } from "ts-pattern";
 import type { z } from "zod";
 import type { DagId, RunId } from "@fuguejs/framework";
 // Type-only import — `TenantId` is a branded string used in the tenant error
@@ -360,49 +360,63 @@ export const parseHostError = (value: unknown): HostError | undefined => {
  */
 export const httpStatusFor = (error: HostError): number =>
   match(error)
-    .with({ kind: "dag-not-found" }, () => 404)
-    .with({ kind: "input-validation-failed" }, () => 400)
-    .with({ kind: "validation-failed" }, () => 400)
-    .with({ kind: "dag-validation-failed" }, () => 400)
-    .with({ kind: "body-parse-failed" }, () => 400)
-    .with({ kind: "global-concurrency-exceeded" }, () => 429)
-    .with({ kind: "dag-concurrency-exceeded" }, () => 429)
-    .with({ kind: "timeout" }, () => 408)
-    .with({ kind: "dag-disabled" }, () => 503)
-    .with({ kind: "redis-unavailable" }, () => 503)
-    .with({ kind: "spend-ledger-unavailable" }, () => 500)
-    .with({ kind: "async-result-expired" }, () => 410)
-    .with({ kind: "run-not-found" }, () => 404)
-    .with({ kind: "run-lease-lost" }, () => 503)
-    .with({ kind: "run-not-suspended" }, () => 409)
-    .with({ kind: "notification-failed" }, () => 502)
-    .with({ kind: "git-clone-failed" }, () => 500)
-    .with({ kind: "git-pull-failed" }, () => 500)
-    .with({ kind: "git-timeout" }, () => 500)
-    .with({ kind: "git-spawn-failed" }, () => 500)
-    .with({ kind: "import-failed" }, () => 500)
-    .with({ kind: "no-default-export" }, () => 500)
-    .with({ kind: "bun-install-failed" }, () => 500)
-    .with({ kind: "config-invalid" }, () => 500)
-    .with({ kind: "tenant-config-invalid" }, () => 400)
-    .with({ kind: "discovery-failed" }, () => 500)
-    .with({ kind: "unauthorized" }, () => 401)
-    .with({ kind: "forbidden" }, () => 403)
-    .with({ kind: "team-already-exists" }, () => 409)
-    .with({ kind: "team-not-found" }, () => 404)
     // tenant-unknown → 404 (FR-040, US3). 404 is chosen over 401 deliberately:
     // a not-found response does NOT confirm the tenant exists, so a caller can
     // never distinguish "no such tenant" from "not authorized for it" and so
     // cannot probe other tenants' existence/state. (Spec allows 404 OR 401; the
     // non-leakage requirement makes 404 the safer of the two.)
-    .with({ kind: "tenant-unknown" }, () => 404)
+    .with(
+      { kind: P.union("dag-not-found", "run-not-found", "team-not-found", "tenant-unknown") },
+      () => 404,
+    )
+    .with(
+      {
+        kind: P.union(
+          "input-validation-failed",
+          "validation-failed",
+          "dag-validation-failed",
+          "body-parse-failed",
+          "tenant-config-invalid",
+        ),
+      },
+      () => 400,
+    )
     // tenant-over-quota → 429 (SC-012). Retry-After comes from the error's own
     // `retryAfterSeconds` (see `retryAfterSecondsFor` below).
-    .with({ kind: "tenant-over-quota" }, () => 429)
+    .with(
+      { kind: P.union("global-concurrency-exceeded", "dag-concurrency-exceeded", "tenant-over-quota") },
+      () => 429,
+    )
+    .with({ kind: "timeout" }, () => 408)
     // worker-unavailable → 503 (SC-012, AD-8). Contained to this tenant.
-    .with({ kind: "worker-unavailable" }, () => 503)
-    .with({ kind: "internal-invariant-violated" }, () => 500)
-    .with({ kind: "fs-purge-failed" }, () => 500)
+    .with(
+      { kind: P.union("dag-disabled", "redis-unavailable", "run-lease-lost", "worker-unavailable") },
+      () => 503,
+    )
+    .with(
+      {
+        kind: P.union(
+          "spend-ledger-unavailable",
+          "git-clone-failed",
+          "git-pull-failed",
+          "git-timeout",
+          "git-spawn-failed",
+          "import-failed",
+          "no-default-export",
+          "bun-install-failed",
+          "config-invalid",
+          "discovery-failed",
+          "internal-invariant-violated",
+          "fs-purge-failed",
+        ),
+      },
+      () => 500,
+    )
+    .with({ kind: "async-result-expired" }, () => 410)
+    .with({ kind: P.union("run-not-suspended", "team-already-exists") }, () => 409)
+    .with({ kind: "notification-failed" }, () => 502)
+    .with({ kind: "unauthorized" }, () => 401)
+    .with({ kind: "forbidden" }, () => 403)
     .exhaustive();
 
 /**

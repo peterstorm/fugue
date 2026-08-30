@@ -335,6 +335,28 @@ describe("Redis ledger: key layout and TTL", () => {
     expect(fake.expiries.size).toBe(0);
   });
 
+  it("returns Err when unpriced-model markers are unreadable instead of hydrating priced spend", async () => {
+    const fake = fakeRedis();
+    let modelReads = 0;
+    const failing = {
+      ...fake.redis,
+      sMembers: async () => {
+        modelReads += 1;
+        return err({ kind: "redis-unavailable" as const, operation: "SMEMBERS" });
+      },
+    } as RedisPort;
+    const { ledger } = ledgerOver(failing);
+    expect((await ledger.add(runA, pricedCall(10, micros(7)))).ok).toBe(true);
+
+    const hydrated = await ledger.read(runA);
+
+    expect(hydrated).toEqual({
+      ok: false,
+      error: { kind: "redis-unavailable", operation: "SMEMBERS" },
+    });
+    expect(modelReads).toBe(1);
+  });
+
   it("LOGS a TTL-refresh failure instead of discarding it (A1)", async () => {
     // The whole reason `logger` is a required dep. An EXPIRE that quietly stops
     // working lets a live run's spend record expire underneath it — the

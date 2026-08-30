@@ -92,6 +92,11 @@ packages/host/src/ports.ts
 The eight surviving finding IDs map to seven remediation moves. `code-reviewer-1` and `type-design-analyzer-1` are deliberately deduplicated into one subtype-preserving decorator fix while retaining both IDs.
 
 1. **`code-reviewer-1` + `type-design-analyzer-1` — one fix:** Preserve the complete runtime API of custom `T extends LlmClient` when metering. Intercept only `sendStructured` and `sendWithTools`; delegate all other properties/methods to the original custom client with correct receiver behavior. Ensure both the direct decorator and shared-capability installation retain the augmented subtype. Add a custom-client regression that invokes subtype-only stateful methods.
+
+   **Round-6 historical correction:** this proposed transparent subtype-preservation
+   shape was superseded. Direct metering intentionally exposes the narrow standard
+   `LlmClient`; augmented APIs are adapter-authored through `composeRunClient`, whose
+   aliases delegate through the supplied metered standard surface.
 2. **`silent-failure-hunter-1`:** Replace the permissive `{ kind: string }` HostError check with exact discriminant-and-payload recognition for every `HostError` member, so hostile objects cannot reach exhaustive matchers. Add hostile-shape and valid-shape tests.
 3. **`silent-failure-hunter-2`:** Guard every error-handler logging attempt. Logger failure must never replace the intended mapped or generic HTTP response. Add regressions for HostError and unknown-error paths with throwing loggers.
 4. **`silent-failure-hunter-3`:** Make `mergeScopedCapabilities` fail closed when a broker returns a non-null reserved/built-in capability. Preserve the documented contract that built-ins remain statically authoritative; malformed broker output becomes a typed merge failure rather than a warning-and-continue path. Update merge/context tests.

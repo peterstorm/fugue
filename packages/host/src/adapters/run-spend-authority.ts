@@ -239,35 +239,34 @@ export const createRunSpendAuthority = (
     result: Result<LlmResponse<O>, FrameworkError>,
     releaseReservationForCall: () => void,
   ): Promise<Result<LlmResponse<O>, FrameworkError>> => {
+    const partial = result.ok ? undefined : usageOfError(result.error);
+    let recordableUsage: TokenUsage | undefined;
     if (result.ok) {
-      await recordReleasePersist(
-        req,
-        clientKey,
-        operation,
-        pickUsage(result.value),
-        releaseReservationForCall,
-      );
-      return result;
+      recordableUsage = pickUsage(result.value);
+    } else if (partial !== undefined && totalTokens(partial) > 0) {
+      recordableUsage = partial;
     }
 
-    const partial = usageOfError(result.error);
-    if (partial !== undefined && totalTokens(partial) > 0) {
+    if (recordableUsage !== undefined) {
       await recordReleasePersist(
         req,
         clientKey,
         operation,
-        partial,
+        recordableUsage,
         releaseReservationForCall,
       );
     } else {
       releaseReservationForCall();
     }
-    logWithoutThrowing(logger, "warn", "llm.call-failed", {
-      ...attribution(req.nodeId, clientKey),
-      operation,
-      errorKind: result.error.kind,
-      ...partial,
-    });
+
+    if (!result.ok) {
+      logWithoutThrowing(logger, "warn", "llm.call-failed", {
+        ...attribution(req.nodeId, clientKey),
+        operation,
+        errorKind: result.error.kind,
+        ...partial,
+      });
+    }
     return result;
   };
 

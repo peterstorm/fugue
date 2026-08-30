@@ -6,7 +6,7 @@ import { join } from "node:path";
 import type { FrameworkError } from "../types/errors.js";
 import type { Result } from "../types/result.js";
 import { err, ok } from "../types/result.js";
-import type { RunId } from "../types/ids.js";
+import { tryRunId, type RunId } from "../types/ids.js";
 import type { Spend } from "../types/spend.js";
 import { NO_SPEND, addSpend } from "../types/spend.js";
 import { isMissingPathError } from "../types/safe-error.js";
@@ -28,10 +28,23 @@ export interface FileSpendStore {
   readonly add: (runId: RunId, delta: Spend) => Promise<Result<void, FrameworkError>>;
 }
 
+interface SpendStorePaths {
+  readonly fileName: string;
+  readonly recordPath: string;
+  readonly lockPath: string;
+}
+
+const parseRuntimeRunId = (candidate: RunId): Result<RunId, string> => {
+  const raw: unknown = candidate;
+  return typeof raw === "string"
+    ? tryRunId(raw)
+    : err("Invalid runId: expected a string matching the RunId grammar");
+};
+
 const digestOf = (runId: RunId): string =>
   createHash("sha256").update(runId as string, "utf8").digest("hex");
 
-const pathsFor = (root: VerifiedDirectory, runId: RunId) => {
+const pathsFor = (root: VerifiedDirectory, runId: RunId): SpendStorePaths => {
   const digest = digestOf(runId);
   const fileName = `${digest}.json`;
   return {
@@ -44,19 +57,21 @@ const pathsFor = (root: VerifiedDirectory, runId: RunId) => {
 const readSnapshot = (
   root: VerifiedDirectory,
   runId: RunId,
+  paths: SpendStorePaths,
 ): Result<Spend, FrameworkError> => {
-  const { fileName } = pathsFor(root, runId);
   assertDirectoryIdentity(root);
   let recordPath: string;
   try {
-    recordPath = verifyExistingFile(root, fileName);
+    recordPath = verifyExistingFile(root, paths.fileName);
   } catch (error) {
     if (isMissingPathError(error)) return ok(NO_SPEND);
     throw error;
   }
   const parsed = parseFileSpendRecord(readFileSync(recordPath, "utf8"), runId);
   assertDirectoryIdentity(root);
-  return parsed;
+  return parsed.ok
+    ? parsed
+    : err(fileOperationError("spendStore:read", paths.recordPath, parsed.error));
 };
 
 /**
@@ -75,29 +90,45 @@ export const createFileSpendStore = (rootPath: string): FileSpendStore => {
   }
 
   return Object.freeze({
-    read: async (runId: RunId): Promise<Result<Spend, FrameworkError>> => {
+    read: async (candidate: RunId): Promise<Result<Spend, FrameworkError>> => {
+      let location = root.path;
       try {
-        return readSnapshot(root, runId);
+        const parsedRunId = parseRuntimeRunId(candidate);
+        if (!parsedRunId.ok) {
+          return err(fileOperationError("spendStore:read", location, parsedRunId.error, "permanent"));
+        }
+        const paths = pathsFor(root, parsedRunId.value);
+        location = paths.recordPath;
+        return readSnapshot(root, parsedRunId.value, paths);
       } catch (error) {
-        return err(fileOperationError("spendStore:read", root.path, error));
+        return err(fileOperationError("spendStore:read", location, error));
       }
     },
 
-    add: async (runId: RunId, delta: Spend): Promise<Result<void, FrameworkError>> => {
-      const { recordPath, lockPath } = pathsFor(root, runId);
+    add: async (candidate: RunId, delta: Spend): Promise<Result<void, FrameworkError>> => {
+      let location = root.path;
       try {
-        await withFileLock(lockPath, () => {
+        const parsedRunId = parseRuntimeRunId(candidate);
+        if (!parsedRunId.ok) {
+          return err(fileOperationError("spendStore:add", location, parsedRunId.error, "permanent"));
+        }
+        const paths = pathsFor(root, parsedRunId.value);
+        location = paths.recordPath;
+        await withFileLock(paths.lockPath, () => {
           assertDirectoryIdentity(root);
-          const prior = readSnapshot(root, runId);
+          const prior = readSnapshot(root, parsedRunId.value, paths);
           if (!prior.ok) throw prior.error;
-          const serialized = serializeFileSpendRecord(runId, addSpend(prior.value, delta));
+          const serialized = serializeFileSpendRecord(
+            parsedRunId.value,
+            addSpend(prior.value, delta),
+          );
           if (!serialized.ok) throw serialized.error;
-          atomicWriteFile(recordPath, serialized.value);
+          atomicWriteFile(paths.recordPath, serialized.value);
           assertDirectoryIdentity(root);
         });
         return ok(undefined);
       } catch (error) {
-        return err(fileOperationError("spendStore:add", root.path, error));
+        return err(fileOperationError("spendStore:add", location, error));
       }
     },
   });

@@ -17,7 +17,7 @@ import { createFileSpendStore } from "../file/spend-store.js";
 import { parseFileSpendRecord, serializeFileSpendRecord } from "../file/spend-store-codec.js";
 import { addSpend, NO_SPEND, pricedCall, unpricedCall } from "../types/spend.js";
 import type { MicroUsd, Spend } from "../types/spend.js";
-import { runId } from "../types/ids.js";
+import { runId, type RunId } from "../types/ids.js";
 
 const roots: string[] = [];
 const tempRoot = (): string => {
@@ -110,10 +110,21 @@ describe("createFileSpendStore", () => {
   it("treats corrupt and crossed records as errors, never zero", async () => {
     const root = tempRoot();
     const store = createFileSpendStore(root);
-    writeFileSync(recordPath(root, rid), "{torn");
-    expect((await store.read(rid)).ok).toBe(false);
+    const persistedRecordPath = recordPath(root, rid);
+    writeFileSync(persistedRecordPath, "{torn");
+    const corrupt = await store.read(rid);
+    expect(corrupt.ok).toBe(false);
+    if (!corrupt.ok) {
+      expect(corrupt.error).toMatchObject({
+        kind: "cache-error",
+        operation: "spendStore:read",
+      });
+      if (corrupt.error.kind === "cache-error") {
+        expect(corrupt.error.message).toContain(persistedRecordPath);
+      }
+    }
 
-    writeFileSync(recordPath(root, rid), JSON.stringify({
+    writeFileSync(persistedRecordPath, JSON.stringify({
       schemaVersion: 1,
       runId: "other-run",
       tokens: 0,
@@ -123,6 +134,37 @@ describe("createFileSpendStore", () => {
     }));
     expect((await store.read(rid)).ok).toBe(false);
     expect((await store.add(rid, pricedCall(1, 1 as MicroUsd))).ok).toBe(false);
+  });
+
+  it("returns typed operation-specific errors for malformed and hostile runtime runIds", async () => {
+    const root = tempRoot();
+    const store = createFileSpendStore(root);
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+
+    for (const candidate of ["../escape", 42, null, revoked.proxy] as readonly unknown[]) {
+      const read = await store.read(candidate as RunId);
+      expect(read.ok).toBe(false);
+      if (!read.ok) {
+        expect(read.error).toMatchObject({
+          kind: "cache-error",
+          operation: "spendStore:read",
+          failureClass: "permanent",
+        });
+      }
+
+      const add = await store.add(candidate as RunId, pricedCall(1, 1 as MicroUsd));
+      expect(add.ok).toBe(false);
+      if (!add.ok) {
+        expect(add.error).toMatchObject({
+          kind: "cache-error",
+          operation: "spendStore:add",
+          failureClass: "permanent",
+        });
+      }
+    }
+
+    expect(readdirSync(root)).toEqual([]);
   });
 
   it("rechecks root identity after the verified directory is replaced", async () => {

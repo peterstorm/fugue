@@ -19,14 +19,9 @@ const snapshotHeadroom = (headroom: CeilingHeadroom): CeilingHeadroom => {
       models: Object.freeze([...headroom.models]) as typeof headroom.models,
     });
   }
-  switch (headroom.unit) {
-    case "tokens":
-      return Object.freeze({ ...headroom, ceiling: Object.freeze({ ...headroom.ceiling }) });
-    case "calls":
-      return Object.freeze({ ...headroom, ceiling: Object.freeze({ ...headroom.ceiling }) });
-    case "usd":
-      return Object.freeze({ ...headroom, ceiling: Object.freeze({ ...headroom.ceiling }) });
-  }
+  const snapshot = structuredClone(headroom);
+  Object.freeze(snapshot.ceiling);
+  return Object.freeze(snapshot);
 };
 
 const snapshotRemaining = (remaining: Remaining): Remaining =>
