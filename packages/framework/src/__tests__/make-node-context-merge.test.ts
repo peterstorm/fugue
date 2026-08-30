@@ -26,6 +26,58 @@ const mergeOk = (
   return merged.value;
 };
 
+describe("makeNodeContext built-in capability ownership", () => {
+  test("ignores Object.prototype pollution instead of satisfying a built-in", () => {
+    const inherited = { request: async () => ({ ok: true }) };
+    const prior = Object.getOwnPropertyDescriptor(Object.prototype, "http");
+    Object.defineProperty(Object.prototype, "http", {
+      value: inherited,
+      configurable: true,
+    });
+    try {
+      const ctx = makeNodeContext({
+        runId: "run-polluted",
+        dagId: "dag-polluted",
+        capabilities: {},
+      });
+      expect(ctx.http).toBeNull();
+      expect(Object.hasOwn(ctx, "http")).toBe(true);
+    } finally {
+      if (prior === undefined) delete (Object.prototype as Record<string, unknown>).http;
+      else Object.defineProperty(Object.prototype, "http", prior);
+    }
+  });
+
+  test("accepts only own values from a custom-prototype bag and preserves top-level precedence", () => {
+    const inherited = { tag: "inherited-http" };
+    const own = { tag: "own-http" };
+    const bag = Object.assign(Object.create({ http: inherited }), { http: own });
+
+    const fromBag = makeNodeContext({
+      runId: "run-own",
+      dagId: "dag-own",
+      capabilities: bag,
+    });
+    expect(fromBag.http as unknown).toBe(own);
+
+    delete bag.http;
+    const inheritedOnly = makeNodeContext({
+      runId: "run-inherited",
+      dagId: "dag-inherited",
+      capabilities: bag,
+    });
+    expect(inheritedOnly.http).toBeNull();
+
+    const explicitNull = makeNodeContext({
+      runId: "run-null",
+      dagId: "dag-null",
+      http: null,
+      capabilities: Object.assign(Object.create({ http: inherited }), { http: own }),
+    });
+    expect(explicitNull.http).toBeNull();
+  });
+});
+
 describe("mergeScopedCapabilities", () => {
   test("fails closed for every non-null reserved infrastructure key", () => {
     const base = makeBase();

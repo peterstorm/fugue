@@ -153,18 +153,30 @@ type LifecycleLogger = {
 };
 type ConnectLogger = Required<Pick<LifecycleLogger, "info" | "error">>;
 type CloseLogger = Required<Pick<LifecycleLogger, "info" | "warn">>;
+type LifecycleDiagnosticFallback = (diagnostic: string) => unknown;
+
+const writeLifecycleFallback: LifecycleDiagnosticFallback = (diagnostic) =>
+  process.stderr.write(diagnostic);
 
 /** Lifecycle diagnostics are secondary and must not alter control flow. */
 const logLifecycleWithoutThrowing = (
   logger: LifecycleLogger,
   level: "info" | "warn" | "error",
   message: string,
-  data?: Record<string, unknown>,
+  data: Record<string, unknown> | undefined,
+  writeFallback: LifecycleDiagnosticFallback,
 ): void => {
   try {
     logger[level]?.(message, data);
-  } catch {
-    // Continue with the already-decided lifecycle or cleanup outcome.
+  } catch (loggerError) {
+    try {
+      writeFallback(
+        `[host lifecycle diagnostic fallback] ${level} ${message}; ` +
+          `data=${safeErrorMessage(data)}; loggerError=${safeErrorMessage(loggerError)}\n`,
+      );
+    } catch {
+      // The already-decided lifecycle or cleanup outcome remains authoritative.
+    }
   }
 };
 
@@ -176,17 +188,36 @@ const logLifecycleWithoutThrowing = (
 export const connectAll = async (
   handles: readonly CapabilityHandle[],
   logger: ConnectLogger,
+  writeFallback: LifecycleDiagnosticFallback = writeLifecycleFallback,
 ): Promise<Result<void, ConnectFailure>> => {
   const connected: CapabilityHandle[] = [];
   for (const handle of handles) {
     if (handle.connect) {
-      logLifecycleWithoutThrowing(logger, "info", `Connecting capability '${handle.name}'...`);
+      logLifecycleWithoutThrowing(
+        logger,
+        "info",
+        `Connecting capability '${handle.name}'...`,
+        undefined,
+        writeFallback,
+      );
       try {
         await handle.connect();
-        logLifecycleWithoutThrowing(logger, "info", `Capability '${handle.name}' connected`);
+        logLifecycleWithoutThrowing(
+          logger,
+          "info",
+          `Capability '${handle.name}' connected`,
+          undefined,
+          writeFallback,
+        );
       } catch (e) {
         const message = safeErrorMessage(e);
-        logLifecycleWithoutThrowing(logger, "error", `Capability '${handle.name}' failed to connect`, { error: message });
+        logLifecycleWithoutThrowing(
+          logger,
+          "error",
+          `Capability '${handle.name}' failed to connect`,
+          { error: message },
+          writeFallback,
+        );
         // The failing handle's adapter may have constructed resources at
         // factory time (e.g. a pg Pool opens sockets before connect() runs).
         // Close it best-effort so an aborted boot doesn't orphan them — the
@@ -201,6 +232,7 @@ export const connectAll = async (
               "error",
               `Capability '${handle.name}' failed to close after connect failure`,
               { error: safeErrorMessage(closeError) },
+              writeFallback,
             );
           }
         }
@@ -234,6 +266,7 @@ interface CloseFailure {
 export const closeAll = async (
   handles: readonly CapabilityHandle[],
   logger: CloseLogger,
+  writeFallback: LifecycleDiagnosticFallback = writeLifecycleFallback,
 ): Promise<readonly CloseFailure[]> => {
   const failures: CloseFailure[] = [];
   // Close in reverse order (dependents close before dependencies)
@@ -243,7 +276,13 @@ export const closeAll = async (
 
     try {
       await handle.close();
-      logLifecycleWithoutThrowing(logger, "info", `Capability '${handle.name}' closed`);
+      logLifecycleWithoutThrowing(
+        logger,
+        "info",
+        `Capability '${handle.name}' closed`,
+        undefined,
+        writeFallback,
+      );
     } catch (caught) {
       const error = safeErrorMessage(caught);
       // Record the close outcome before attempting secondary diagnostics.
@@ -253,6 +292,7 @@ export const closeAll = async (
         "warn",
         `Capability '${handle.name}' failed to close`,
         { error },
+        writeFallback,
       );
     }
   }

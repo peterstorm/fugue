@@ -17,8 +17,13 @@ import type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted,
 import { EXECUTOR_NODE_ID } from "./types.js";
 import type { DagDef } from "../types/dag.js";
 import { withRetryLimits } from "../types/dag.js";
-import type { NodeContext, ValidatedNodeContext } from "../types/node.js";
-import type { MintingAuthority } from "../types/capability-broker.js";
+import type { Capability, NodeContext, ValidatedNodeContext } from "../types/node.js";
+import type {
+  CapabilityBroker,
+  Invocation,
+  InvocationOrigin,
+  MintingAuthority,
+} from "../types/capability-broker.js";
 import type { FrameworkError } from "../types/errors.js";
 import { isFrameworkError } from "../types/errors.js";
 import { safeErrorMessage } from "../types/safe-error.js";
@@ -144,10 +149,64 @@ export interface DagRunOpts
 // prepareDagRun — pre-flight: merge retry limits, emit run-start, validate capabilities
 // ---------------------------------------------------------------------------
 
+const snapshotOrigin = (origin: InvocationOrigin): InvocationOrigin =>
+  origin.kind === "agent"
+    ? Object.freeze({ kind: "agent", agentClientId: origin.agentClientId })
+    : Object.freeze({
+        kind: "user",
+        sub: origin.sub,
+        agentClientId: origin.agentClientId,
+      });
+
+/**
+ * Observe broker authority once per distinct capability required by this DAG.
+ * The returned facade is the sole broker view used by both run-start validation
+ * and dispatch, so a stateful `provides` predicate cannot waive validation and
+ * later permit static fallback. The source broker keeps receiver identity for
+ * `mintFor`; only its capability claims and invocation origin are snapshotted.
+ */
+const snapshotMintingAuthority = (
+  dag: DagDef,
+  authority: MintingAuthority | undefined,
+): Result<MintingAuthority | undefined, FrameworkError> => {
+  if (authority === undefined) return ok(undefined);
+
+  const source = authority.broker;
+  const mintFor = source.mintFor;
+  const provided = new Set<Capability>();
+  const observed = new Set<Capability>();
+
+  for (const node of dag.nodes) {
+    for (const capability of node.requires) {
+      if (observed.has(capability)) continue;
+      observed.add(capability);
+      try {
+        if (source.provides?.(capability) === true) provided.add(capability);
+      } catch (error) {
+        return err({
+          kind: "validation",
+          nodeId: node.id,
+          message:
+            `broker.provides("${capability}") threw while snapshotting run authority: ` +
+            safeErrorMessage(error),
+        });
+      }
+    }
+  }
+
+  const broker: CapabilityBroker = Object.freeze({
+    mintFor: (inv: Invocation, requires: readonly Capability[]) =>
+      mintFor.call(source, inv, requires),
+    provides: (capability: Capability) => provided.has(capability),
+  });
+  return ok(Object.freeze({ broker, origin: snapshotOrigin(authority.origin) }));
+};
+
 interface PreparedRun {
   readonly effectiveDag: DagDef;
   readonly validatedCtx: ValidatedNodeContext;
   readonly emitRunEnd: (status: "ok" | "error") => void;
+  readonly minting?: MintingAuthority;
 }
 
 const prepareDagRun = (
@@ -162,17 +221,32 @@ const prepareDagRun = (
   // run-start/run-end pair.
   const { emitRunEnd } = beginRunTelemetry(nodeCtx, dag, { now: opts?.now });
 
+  // Snapshot the broker's answers once per distinct required capability, then
+  // use that same immutable facade for validation and every dispatch. Authority
+  // cannot drift between the proof that waived static validation and delivery.
+  const mintingSnapshot = snapshotMintingAuthority(effectiveDag, opts?.minting);
+  if (!mintingSnapshot.ok) {
+    emitRunEnd("error");
+    return err(mintingSnapshot.error);
+  }
+
   // Capability validation. On success, hands back a phantom-branded token.
-  // A minting broker's `provides()` capabilities are resolved at dispatch, so
-  // the run-start check treats them as satisfied rather than demanding them on
-  // the boot-scoped base context.
-  const capCheck = validateCapabilities(effectiveDag, nodeCtx, opts?.minting?.broker);
+  // A minting broker's snapshotted `provides()` capabilities are resolved at
+  // dispatch, so the run-start check treats them as satisfied rather than
+  // demanding them on the boot-scoped base context.
+  const minting = mintingSnapshot.value;
+  const capCheck = validateCapabilities(effectiveDag, nodeCtx, minting?.broker);
   if (!capCheck.ok) {
     emitRunEnd("error");
     return err(capCheck.error);
   }
 
-  return ok({ effectiveDag, validatedCtx: capCheck.value, emitRunEnd });
+  return ok({
+    effectiveDag,
+    validatedCtx: capCheck.value,
+    emitRunEnd,
+    ...(minting !== undefined ? { minting } : {}),
+  });
 };
 
 // ---------------------------------------------------------------------------
@@ -357,7 +431,7 @@ export const runDagStatefulOutcome = async <I, O>(
   // 1. Pre-flight
   const prepared = prepareDagRun(dag, nodeCtx, opts);
   if (!prepared.ok) return prepared;
-  const { effectiveDag, validatedCtx, emitRunEnd } = prepared.value;
+  const { effectiveDag, validatedCtx, emitRunEnd, minting } = prepared.value;
 
   // 2. OTel root span wraps compilation + execution
   return startRunSpan(dag, nodeCtx, async (rootSpan): Promise<Result<StatefulOutcome<O>, FrameworkError>> => {
@@ -391,7 +465,7 @@ export const runDagStatefulOutcome = async <I, O>(
       random: opts?.random,
       now: opts?.now,
       freshnessIndex: opts?.freshnessIndex,
-      minting: opts?.minting,
+      minting,
     });
 
     const errorEventOf = (classified: { retriable: boolean; message: string }): DagEvent => ({

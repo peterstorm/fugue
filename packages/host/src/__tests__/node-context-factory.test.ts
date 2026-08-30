@@ -1289,6 +1289,19 @@ describe("createNodeContextForDag — spend survives a park/resume (FR-B-006)", 
     ).rejects.toThrow(/could not be read/);
   });
 
+  it("REFUSES a BUDGETED slice when the ledger rejects across its Result boundary", async () => {
+    const rejecting: SpendLedgerPort = {
+      metadata: memoryLedgerMetadata,
+      read: async () => { throw new Error("ledger transport rejected"); },
+      add: async () => ok(undefined),
+    };
+    const { llm } = fakeLlm(10, 5);
+
+    await expect(
+      sliceFor(sharedWith(llm, rejecting), makeDag({ llmBudget: { tokens: 1000 } })),
+    ).rejects.toThrow(/SpendLedgerPort\.read threw.*ledger transport rejected/);
+  });
+
   it("RUNS an UNBUDGETED run whose ledger cannot be read", async () => {
     // There is no ceiling to protect, so failing the slice would turn a
     // metering outage into an availability outage. Metering degrades; the run
@@ -1314,6 +1327,26 @@ describe("createNodeContextForDag — spend survives a park/resume (FR-B-006)", 
     expect(warned?.data?.["runId"]).toBe(testRunId as string);
     expect(String(warned?.data?.["error"] ?? "")).toContain("spend-ledger read");
     expect(calls.length).toBe(1);
+  });
+
+  it("RUNS an UNBUDGETED slice when the ledger rejects and reports metering-from-zero", async () => {
+    const rejecting: SpendLedgerPort = {
+      metadata: memoryLedgerMetadata,
+      read: async () => { throw new Error("ledger transport rejected"); },
+      add: async () => ok(undefined),
+    };
+    const { llm, calls } = fakeLlm(10, 5);
+    const captured = collectLogs();
+    const shared = { ...sharedWith(llm, rejecting), logger: captured.logger };
+
+    const slice = await sliceFor(shared, makeDag());
+    expect((await slice.sendStructured(structuredReq())).ok).toBe(true);
+    expect(calls).toHaveLength(1);
+
+    const warned = captured.logs.find((line) => line.msg.includes("Spend ledger unreadable"));
+    expect(warned?.level).toBe("warn");
+    expect(String(warned?.data?.["error"] ?? "")).toContain("SpendLedgerPort.read threw");
+    expect(String(warned?.data?.["error"] ?? "")).toContain("ledger transport rejected");
   });
 
   it("does not fail a call when the ledger APPEND fails — the tokens are already spent", async () => {

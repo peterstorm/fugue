@@ -128,9 +128,11 @@ export const accumulate = (meter: LlmMeter, runId: RunId, delta: Spend): LlmMete
  * single call seen so far) and `inFlight` counts the calls currently holding a
  * reservation, so the projection is `settled + inFlight x maxObservedCall`.
  *
- * Steady-state overshoot is bounded to ~one call; the very first parallel burst
- * (estimate still zero) can overshoot by its call count — the documented
- * FR-W1-004 allowance, generalised.
+ * Admission reserves the largest settled call observed so far. That estimate
+ * limits bursts whose calls are no larger than what the authority has learned,
+ * but it is not a one-call bound: a later concurrent burst of larger calls can
+ * exceed the estimate. Settlement learns the larger per-axis size, tightening
+ * subsequent admissions monotonically.
  *
  * `inFlight` is a COUNT rather than a running sum of reserved amounts. The sum
  * form required each release to free exactly what its matching admit reserved,

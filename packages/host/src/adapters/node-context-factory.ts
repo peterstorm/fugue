@@ -30,7 +30,7 @@ import type {
   Ceilings,
   InvocationOrigin,
 } from "@fuguejs/framework";
-import { fromJson, makeNodeContext, ok, isErr, safeErrorMessage, toJson } from "@fuguejs/framework";
+import { err, fromJson, makeNodeContext, ok, isErr, safeErrorMessage, toJson } from "@fuguejs/framework";
 import { assertLosslessEvent } from "@fuguejs/framework/file";
 import type { RegisteredDag } from "../domain/registry.js";
 import type { AuthIdentity, AgentClientMap } from "../domain/auth.js";
@@ -79,15 +79,6 @@ import { formatHostError } from "../domain/host-error.js";
  * of that rule could drift to three different thresholds — and a counter that a
  * copy forgot to RESET on success would escalate forever after one bad minute.
  */
-const reportWithoutThrowing = (
-  logger: LogPort,
-  level: "warn" | "error",
-  message: string,
-  context: Record<string, unknown>,
-): void => {
-  logWithoutThrowing(logger, level, message, context);
-};
-
 const failureEscalator = (opts: {
   readonly threshold: number;
   /** Logged while the failure still looks transient. */
@@ -144,7 +135,7 @@ export const createNamespacedCache = (
     level: "warn" | "error",
     message: string,
     context: Record<string, unknown>,
-  ): void => reportWithoutThrowing(logger, level, message, context);
+  ): void => logWithoutThrowing(logger, level, message, context);
 
   const getFailures = failureEscalator({
     threshold: FAILURE_ESCALATION_THRESHOLD,
@@ -210,7 +201,7 @@ export const createNamespacedCache = (
         serializationError = safeErrorMessage(error);
       }
       if (serialized === undefined) {
-        reportWithoutThrowing(logger, "warn", "Cache set failed — value not serializable", {
+        logWithoutThrowing(logger, "warn", "Cache set failed — value not serializable", {
           key: fullKey,
           dagId,
           error: serializationError ?? "unknown serialization failure",
@@ -250,7 +241,7 @@ export const createNamespacedCheckpointWriter = (
     level: "warn" | "error",
     message: string,
     context: Record<string, unknown>,
-  ): void => reportWithoutThrowing(logger, level, message, context);
+  ): void => logWithoutThrowing(logger, level, message, context);
 
   const writeFailures = failureEscalator({
     threshold: FAILURE_ESCALATION_THRESHOLD,
@@ -330,6 +321,25 @@ const resolveTenantForDag = (
   return parsed.value;
 };
 
+type LedgerReadResult = Awaited<ReturnType<SpendLedgerPort["read"]>>;
+
+/** Enforce the ledger's Result policy at the injected I/O boundary. */
+const readSpendLedger = async (
+  ledger: SpendLedgerPort,
+  runId: RunId,
+): Promise<LedgerReadResult> => {
+  try {
+    return await ledger.read(runId);
+  } catch (error) {
+    const message = safeErrorMessage(error);
+    return err({
+      kind: "internal-invariant-violated",
+      message: `SpendLedgerPort.read threw across the port boundary: ${message}`,
+      context: { operation: "spend-ledger read", error: message },
+    });
+  }
+};
+
 type HydratedLedger =
   | {
       readonly ledger: SpendLedgerPort;
@@ -363,7 +373,7 @@ const selectAndHydrateSpendLedger = async (args: {
         ...(ttl.checkpointTtlSec !== undefined ? { ttlSec: ttl.checkpointTtlSec } : {}),
       });
     } else {
-      reportWithoutThrowing(
+      logWithoutThrowing(
         shared.logger,
         "error",
         "Spend ledger is NOT durable — falling back to the in-process backend",
@@ -379,7 +389,7 @@ const selectAndHydrateSpendLedger = async (args: {
     }
   }
 
-  const prior = await ledger.read(runId);
+  const prior = await readSpendLedger(ledger, runId);
   if (!prior.ok && limits !== undefined) {
     throw new Error(
       `createNodeContextForDag: DAG '${dagId}' declares an LLM budget but its spend ledger ` +
@@ -388,7 +398,7 @@ const selectAndHydrateSpendLedger = async (args: {
     );
   }
   if (!prior.ok) {
-    reportWithoutThrowing(shared.logger, "warn", "Spend ledger unreadable — metering from zero", {
+    logWithoutThrowing(shared.logger, "warn", "Spend ledger unreadable — metering from zero", {
       dagId: dagId as string,
       runId: runId as string,
       error: formatHostError(prior.error),

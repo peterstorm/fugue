@@ -259,6 +259,15 @@ const setup = (dag: DagDef) => {
   return { service, store, queue, dec, notif };
 };
 
+const startRunOrThrow = async (
+  service: HitlRunService,
+  input: unknown = null,
+): Promise<RunId> => {
+  const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, input, ADMIN);
+  if (!started.ok) throw new Error(`startRun failed: ${started.error.kind}`);
+  return started.value.runId;
+};
+
 // draft (no review) -> review (humanReview) ; output = review
 const twoWaveDag = (drafts: { onDraft?: () => void; onReview?: () => void } = {}): DagDef =>
   defineDag({
@@ -295,10 +304,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const { service, store, queue, notif } = setup(dag);
 
     // 1. start → queued
-    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, { x: 1 }, ADMIN);
-    expect(started.ok).toBe(true);
-    if (!started.ok) return;
-    const runId = started.value.runId;
+    const runId = await startRunOrThrow(service, { x: 1 });
     expect(store.runs.get(runId)?.status.kind).toBe("queued");
     expect(store.runs.get(runId)?.ownerTeam).toBe(OWNER_TEAM);
 
@@ -337,9 +343,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const dag = twoWaveDag();
     const { service, store, queue, notif } = setup(dag);
 
-    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
-    if (!started.ok) throw new Error("startRun failed");
-    const runId = started.value.runId;
+    const runId = await startRunOrThrow(service);
 
     await queue.drain(); // park + notify (1)
     // Re-enqueue WITHOUT recording a decision (e.g. a spurious wake-up).
@@ -354,9 +358,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const dag = twoWaveDag();
     const { service, store, queue } = setup(dag);
 
-    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
-    if (!started.ok) throw new Error("startRun failed");
-    const runId = started.value.runId;
+    const runId = await startRunOrThrow(service);
 
     await queue.drain();
     await service.recordDecision(runId, "review" as NodeId, { kind: "approve-with-edit", newOutput: "edited!" });
@@ -371,9 +373,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const dag = twoWaveDag();
     const { service, store, queue } = setup(dag);
 
-    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
-    if (!started.ok) throw new Error("startRun failed");
-    const runId = started.value.runId;
+    const runId = await startRunOrThrow(service);
 
     await queue.drain();
     await service.recordDecision(runId, "review" as NodeId, { kind: "reject", reason: "not good enough" });
@@ -405,16 +405,15 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     });
     queue.setProcessor(service.processRun);
 
-    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
-    if (!started.ok) throw new Error("startRun failed");
+    const runId = await startRunOrThrow(service);
     await queue.drain();
-    await service.recordDecision(started.value.runId, "review" as NodeId, { kind: "approve" });
+    await service.recordDecision(runId, "review" as NodeId, { kind: "approve" });
     await queue.drain();
 
-    const persisted = store.runs.get(started.value.runId);
+    const persisted = store.runs.get(runId);
     expect(persisted?.status.kind).toBe("failed");
-    expect(store.active.has(started.value.runId)).toBe(false);
-    expect(baseDecisions.decisions.has(`${started.value.runId}:review`)).toBe(true);
+    expect(store.active.has(runId)).toBe(false);
+    expect(baseDecisions.decisions.has(`${runId}:review`)).toBe(true);
   });
 
   it("maps a throwing startRun clock into the typed HostError channel", async () => {
@@ -455,9 +454,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const dag = twoWaveDag();
     const { service, store, queue } = setup(dag);
 
-    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
-    if (!started.ok) throw new Error("startRun failed");
-    const runId = started.value.runId;
+    const runId = await startRunOrThrow(service);
 
     // The run is `queued` (worker hasn't run) — nothing to decide yet.
     const tooEarly = await service.recordDecision(runId, "review" as NodeId, { kind: "approve" });
@@ -511,9 +508,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     });
     queue.setProcessor(service.processRun);
 
-    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
-    if (!started.ok) throw new Error("startRun failed");
-    const runId = started.value.runId;
+    const runId = await startRunOrThrow(service);
 
     // park (notify fires + records the decision mid-flight, re-enqueuing) → resume → complete
     await queue.drain();
@@ -532,9 +527,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const dag = twoWaveDag({ onDraft: () => { draftRuns++; }, onReview: () => { reviewRuns++; } });
     const { service, store, queue, dec, notif } = setup(dag);
 
-    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
-    if (!started.ok) throw new Error("startRun failed");
-    const runId = started.value.runId;
+    const runId = await startRunOrThrow(service);
 
     await queue.drain(); // park at the review gate + notify (1)
     expect(store.runs.get(runId)!.status.kind).toBe("suspended");
@@ -572,9 +565,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const dag = twoWaveDag({ onDraft: () => { draftRuns++; }, onReview: () => { reviewRuns++; } });
     const { service, store, queue } = setup(dag);
 
-    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
-    if (!started.ok) throw new Error("startRun failed");
-    const runId = started.value.runId;
+    const runId = await startRunOrThrow(service);
 
     await queue.drain(); // park
     await service.recordDecision(runId, "review" as NodeId, { kind: "approve" });
@@ -628,13 +619,12 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
       newRunId: () => mkRunId("run-running-write-failure"),
     });
 
-    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
-    if (!started.ok) throw new Error("startRun failed");
-    const result = await service.processRun(store.acquireLease(started.value.runId));
+    const runId = await startRunOrThrow(service);
+    const result = await service.processRun(store.acquireLease(runId));
 
     expect(result).toEqual(err({ kind: "redis-unavailable", operation: "setStatus(running)" }));
     expect(runCalls).toBe(0);
-    expect(store.runs.get(started.value.runId)?.status.kind).toBe("queued");
+    expect(store.runs.get(runId)?.status.kind).toBe("queued");
   });
 
   it("settles a corrupt-checkpoint run `failed` and returns ok (no infinite retry)", async () => {
@@ -647,9 +637,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const dag = twoWaveDag();
     const { service, store } = setup(dag);
 
-    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
-    if (!started.ok) throw new Error("startRun failed");
-    const runId = started.value.runId;
+    const runId = await startRunOrThrow(service);
 
     // Corrupt the persisted checkpoint in place (torn / garbage Redis value).
     const rec = store.runs.get(runId)!;
@@ -684,12 +672,11 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
       clock: () => 1_000,
       newRunId: () => mkRunId("removed-dag-run"),
     });
-    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
-    if (!started.ok) throw new Error("startRun failed");
+    const runId = await startRunOrThrow(service);
 
-    expect(await service.processRun(store.acquireLease(started.value.runId))).toEqual(ok(undefined));
-    expect(store.runs.get(started.value.runId)?.status).toEqual({ kind: "failed", error: permanent });
-    expect(store.active.has(started.value.runId)).toBe(false);
+    expect(await service.processRun(store.acquireLease(runId))).toEqual(ok(undefined));
+    expect(store.runs.get(runId)?.status).toEqual({ kind: "failed", error: permanent });
+    expect(store.active.has(runId)).toBe(false);
     expect(await service.reconcileActiveRuns()).toEqual(ok([]));
   });
 
@@ -723,12 +710,11 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
       notifier: notif.port, executor, clock: () => 1_000, newRunId: () => mkRunId(`run-${++counter}`),
     });
 
-    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
-    if (!started.ok) throw new Error("startRun failed");
-    const res = await service.processRun(store.acquireLease(started.value.runId));
+    const runId = await startRunOrThrow(service);
+    const res = await service.processRun(store.acquireLease(runId));
     expect(res).toEqual(err({ kind: "internal-invariant-violated", message: "infra boom", context: {} }));
     expect(terminalWrites).toBe(0);
-    expect(store.runs.get(started.value.runId)?.status.kind).toBe("running");
+    expect(store.runs.get(runId)?.status.kind).toBe("running");
   });
 
   it("returns err (queue retry) when folding a `completed` outcome into the store fails", async () => {
@@ -753,9 +739,8 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
       notifier: notif.port, executor: realExecutor(dag), clock: () => 1_000, newRunId: () => mkRunId(`run-${++counter}`),
     });
 
-    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
-    if (!started.ok) throw new Error("startRun failed");
-    const res = await service.processRun(store.acquireLease(started.value.runId));
+    const runId = await startRunOrThrow(service);
+    const res = await service.processRun(store.acquireLease(runId));
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.kind).toBe("redis-unavailable");
   });
@@ -920,10 +905,9 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
   it("reconciliation skips a suspended run with no durable decision", async () => {
     const dag = twoWaveDag();
     const { service, queue, store } = setup(dag);
-    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
-    if (!started.ok) throw new Error("startRun failed");
+    const runId = await startRunOrThrow(service);
     await queue.drain();
-    expect(store.runs.get(started.value.runId)?.status.kind).toBe("suspended");
+    expect(store.runs.get(runId)?.status.kind).toBe("suspended");
     expect(queue.pending).toHaveLength(0);
 
     expect(await service.reconcileActiveRuns()).toEqual(ok([]));
@@ -954,9 +938,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     });
     baseQueue.setProcessor(service.processRun);
 
-    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
-    if (!started.ok) throw new Error("startRun failed");
-    const runId = started.value.runId;
+    const runId = await startRunOrThrow(service);
     await baseQueue.drain(); // park at the review gate
     expect(store.runs.get(runId)!.status.kind).toBe("suspended");
 
@@ -986,14 +968,13 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
       newRunId: () => mkRunId("reconcile-logger-run"),
       logger: THROWING_ERROR_LOGGER,
     });
-    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
-    if (!started.ok) throw new Error("startRun failed");
+    const runId = await startRunOrThrow(service);
 
     const result = await service.reconcileActiveRuns();
 
     expect(result.ok && result.value).toEqual([{
       kind: "wakeup-failed",
-      runId: started.value.runId,
+      runId,
       error: { kind: "redis-unavailable", operation: "enqueue" },
     }]);
   });
@@ -1002,9 +983,7 @@ describe("HITL run service (ADR-0060) — durable requeue loop", () => {
     const dag = twoWaveDag();
     const { service, queue } = setup(dag);
 
-    const started = await service.startRun("test-dag" as DagId, OWNER_TEAM, null, ADMIN);
-    if (!started.ok) throw new Error("startRun failed");
-    const runId = started.value.runId;
+    const runId = await startRunOrThrow(service);
 
     const q = await service.getRun(runId);
     expect(q.ok && q.value?.status.kind).toBe("queued");

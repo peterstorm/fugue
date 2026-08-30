@@ -449,6 +449,63 @@ describe("per-node minting — broker port-contract enforcement", () => {
     }
   });
 
+  it("snapshots each distinct capability claim once so a drifting broker cannot expose static authority", async () => {
+    const staticScope = { tag: "static-authority-must-not-run" };
+    let providesCalls = 0;
+    let runReached = false;
+    const broker: CapabilityBroker = {
+      mintFor: async () => ok({} as ScopedCapabilityHandle),
+      // The first answer waives static validation. Every later answer would
+      // revoke that claim and let the old dispatch path fall back to the static
+      // client. Run preparation must observe this predicate exactly once.
+      provides: () => {
+        providesCalls += 1;
+        return providesCalls === 1;
+      },
+    };
+    const first = createFetchNode({
+      id: N("first"),
+      inputSchema: z.object({}),
+      outputSchema: z.object({ ok: z.boolean() }),
+      requires: [SCOPE] as unknown as readonly Capability[],
+      fetch: async () => {
+        runReached = true;
+        return ok({ ok: true });
+      },
+    });
+    const second = createFetchNode({
+      id: N("second"),
+      inputSchema: z.object({ ok: z.boolean() }),
+      outputSchema: z.object({ ok: z.boolean() }),
+      requires: [SCOPE] as unknown as readonly Capability[],
+      fetch: async () => ok({ ok: true }),
+    });
+    const dag = defineDagFromArray({
+      id: "dag-1",
+      nodes: [first, second],
+      edges: [{ from: DAG_INPUT, to: "first" }, { from: "first", to: "second" }],
+    });
+    const ctx = makeNodeContext({
+      runId: "run-1",
+      dagId: "dag-1",
+      capabilities: { [SCOPE]: staticScope } as never,
+    });
+
+    const result = await runDag(dag, {}, ctx, {
+      minting: { broker, origin: agentOrigin },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(providesCalls).toBe(1);
+    expect(runReached).toBe(false);
+    if (!result.ok) {
+      const root = result.error.kind === "retry-exhausted"
+        ? result.error.rootErrorKind
+        : result.error.kind;
+      expect(root).toBe("missing-capability");
+    }
+  });
+
   it("a static base capability cannot mask a claimed handle omitted by the broker", async () => {
     const staticScope = { tag: "static-authority-must-not-run" };
     let runReached = false;

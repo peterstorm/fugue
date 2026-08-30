@@ -296,11 +296,23 @@ describe("error-handler middleware", () => {
     });
 
     it("rejects malformed issue elements for both validation variants", () => {
+      const base = { message: "invalid", path: [] };
       const malformedIssues = [
         [null],
         [{ code: "custom", message: "missing path" }],
         [{ code: "custom", message: "bad path", path: {} }],
         [{ code: "not-a-zod-code", message: "bad code", path: [] }],
+        [{ ...base, code: "invalid_type" }],
+        [{ ...base, code: "too_big", origin: "number" }],
+        [{ ...base, code: "too_small", minimum: 1 }],
+        [{ ...base, code: "invalid_format" }],
+        [{ ...base, code: "not_multiple_of" }],
+        [{ ...base, code: "unrecognized_keys", keys: ["ok", 1] }],
+        [{ ...base, code: "invalid_union", errors: [[{ ...base, code: "too_big" }]] }],
+        [{ ...base, code: "invalid_key", origin: "record" }],
+        [{ ...base, code: "invalid_element", origin: "set", issues: [] }],
+        [{ ...base, code: "invalid_value", values: [{}] }],
+        [{ ...base, code: "custom", params: [] }],
       ];
       for (const issues of malformedIssues) {
         expect(parseHostError({ kind: "validation-failed", path: "/dag", issues }))
@@ -308,6 +320,50 @@ describe("error-handler middleware", () => {
         expect(parseHostError({ kind: "input-validation-failed", dagId: "dag", issues }))
           .toBeUndefined();
       }
+    });
+
+    it("parses canonical recursively nested Zod issues into one frozen snapshot", () => {
+      const nested = {
+        code: "invalid_union",
+        message: "union failed",
+        path: ["payload"],
+        errors: [[{
+          code: "invalid_key",
+          message: "key failed",
+          path: [],
+          origin: "record",
+          issues: [{
+            code: "invalid_element",
+            message: "element failed",
+            path: [0],
+            origin: "map",
+            key: "customer-id",
+            issues: [{
+              code: "too_big",
+              message: "too large",
+              path: ["amount"],
+              origin: "number",
+              maximum: 10,
+              inclusive: true,
+            }],
+          }],
+        }]],
+      };
+
+      const parsed = parseHostError({
+        kind: "validation-failed",
+        path: "/dag",
+        issues: [nested],
+      });
+
+      expect(parsed?.kind).toBe("validation-failed");
+      if (parsed?.kind !== "validation-failed") return;
+      const union = parsed.issues[0] as Extract<(typeof parsed.issues)[number], { code: "invalid_union" }>;
+      expect(union.errors[0]?.[0]?.code).toBe("invalid_key");
+      expect(Object.isFrozen(union)).toBe(true);
+      expect(Object.isFrozen(union.errors)).toBe(true);
+      expect(Object.isFrozen(union.errors[0])).toBe(true);
+      expect(Object.isFrozen(union.errors[0]?.[0])).toBe(true);
     });
 
     it("routes unknown and incomplete discriminated shapes to the generic path", async () => {

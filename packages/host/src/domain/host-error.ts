@@ -167,30 +167,68 @@ const isStringArray = (value: unknown): value is readonly string[] =>
 const hasStrings = (value: Record<string, unknown>, ...keys: readonly string[]): boolean =>
   keys.every((key) => isString(value[key]));
 
-const ZOD_ISSUE_CODES: ReadonlySet<string> = new Set([
-  "invalid_type",
-  "too_big",
-  "too_small",
-  "invalid_format",
-  "not_multiple_of",
-  "unrecognized_keys",
-  "invalid_union",
-  "invalid_key",
-  "invalid_element",
-  "invalid_value",
-  "custom",
-]);
+const isOptionalBoolean = (value: unknown): boolean =>
+  value === undefined || typeof value === "boolean";
+const isOptionalString = (value: unknown): boolean =>
+  value === undefined || isString(value);
+const isNumberOrBigInt = (value: unknown): value is number | bigint =>
+  typeof value === "number" || typeof value === "bigint";
+const isPrimitive = (value: unknown): boolean =>
+  value === null || value === undefined ||
+  typeof value === "string" || typeof value === "number" ||
+  typeof value === "symbol" || typeof value === "bigint" ||
+  typeof value === "boolean";
 
-const isIssue = (value: unknown): value is ZodIssue =>
-  isRecord(value) &&
-  isString(value.code) && ZOD_ISSUE_CODES.has(value.code) &&
-  isString(value.message) &&
-  Array.isArray(value.path) &&
-  value.path.every((part) =>
-    typeof part === "string" || typeof part === "number" || typeof part === "symbol"
-  );
-const isIssueArray = (value: unknown): value is readonly ZodIssue[] =>
-  Array.isArray(value) && value.every(isIssue);
+function isIssueArray(value: unknown): value is readonly ZodIssue[] {
+  return Array.isArray(value) && value.every(isIssue);
+}
+
+const isIssueMatrix = (value: unknown): value is readonly (readonly ZodIssue[])[] =>
+  Array.isArray(value) && value.every(isIssueArray);
+
+type IssuePayloadParser = (value: Record<string, unknown>) => boolean;
+
+/** Exhaustive parser table for Zod 4's closed `$ZodIssue` discriminants. */
+const ISSUE_PAYLOAD_PARSERS = Object.freeze({
+  invalid_type: (value) => isString(value.expected),
+  too_big: (value) =>
+    isString(value.origin) && isNumberOrBigInt(value.maximum) &&
+    isOptionalBoolean(value.inclusive) && isOptionalBoolean(value.exact),
+  too_small: (value) =>
+    isString(value.origin) && isNumberOrBigInt(value.minimum) &&
+    isOptionalBoolean(value.inclusive) && isOptionalBoolean(value.exact),
+  invalid_format: (value) =>
+    isString(value.format) && isOptionalString(value.pattern),
+  not_multiple_of: (value) => typeof value.divisor === "number",
+  unrecognized_keys: (value) => isStringArray(value.keys),
+  invalid_union: (value) =>
+    isIssueMatrix(value.errors) && isOptionalString(value.discriminator) &&
+    (value.inclusive === undefined || value.inclusive === true ||
+      (value.inclusive === false && value.errors.length === 0)),
+  invalid_key: (value) =>
+    (value.origin === "map" || value.origin === "record") &&
+    isIssueArray(value.issues),
+  invalid_element: (value) =>
+    (value.origin === "map" || value.origin === "set") &&
+    Object.hasOwn(value, "key") && isIssueArray(value.issues),
+  invalid_value: (value) => Array.isArray(value.values) && value.values.every(isPrimitive),
+  custom: (value) => value.params === undefined || isRecord(value.params),
+} satisfies Record<ZodIssue["code"], IssuePayloadParser>);
+
+type ZodIssueCode = keyof typeof ISSUE_PAYLOAD_PARSERS;
+const isIssueCode = (value: unknown): value is ZodIssueCode =>
+  isString(value) && Object.hasOwn(ISSUE_PAYLOAD_PARSERS, value);
+
+function isIssue(value: unknown): value is ZodIssue {
+  if (
+    !isRecord(value) || !isIssueCode(value.code) || !isString(value.message) ||
+    !Array.isArray(value.path) ||
+    !value.path.every((part) =>
+      typeof part === "string" || typeof part === "number" || typeof part === "symbol"
+    )
+  ) return false;
+  return ISSUE_PAYLOAD_PARSERS[value.code](value);
+}
 
 /**
  * Total parser for errors crossing the throwing HTTP seam. Every source value

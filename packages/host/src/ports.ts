@@ -342,10 +342,10 @@ export type SpendLedgerPort = {
    * an error — "never seen" and "seen, spent nothing" are the same fact, and
    * the budget check treats them identically.
    *
-   * An infrastructure failure IS an error, and the caller must fail closed on
-   * it: an unreadable ledger is indistinguishable from a spent one, and
-   * guessing zero is precisely the refill-on-resume bug this port exists to
-   * close.
+   * An infrastructure failure IS an error. Budget-enforcing callers must fail
+   * closed because an unreadable ledger is indistinguishable from a spent one;
+   * non-enforcing callers may explicitly degrade to metering from zero so a
+   * metering outage does not become an availability outage.
    */
   readonly read: (runId: RunId) => Promise<Result<Spend, HostError>>;
   /**

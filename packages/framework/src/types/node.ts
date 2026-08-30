@@ -477,8 +477,9 @@ export interface NodeDef<
  * `observer` are optional — when omitted the runtime injects no-op defaults.
  * Capability fields stay as in `BaseNodeContext`.
  *
- * Custom capabilities can be passed via the `capabilities` record or as
- * top-level fields (built-in capabilities remain top-level for backward compat).
+ * Custom capabilities must be passed via the `capabilities` record. Only
+ * built-in capabilities retain top-level compatibility fields; they may also be
+ * supplied in the record.
  */
 export type NodeContextInit = {
   readonly runId: string | RunId;

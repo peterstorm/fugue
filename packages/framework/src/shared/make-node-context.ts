@@ -52,7 +52,8 @@ const builtInCapability = <K extends (typeof BUILTIN_CAPABILITY_KEYS)[number]>(
   key: K,
 ): NodeContext[K] => {
   const direct = init[key];
-  return (Object.hasOwn(init, key) && direct !== undefined ? direct : caps[key] ?? null) as NodeContext[K];
+  const bagValue = Object.hasOwn(caps, key) ? caps[key] : null;
+  return (Object.hasOwn(init, key) && direct !== undefined ? direct : bagValue ?? null) as NodeContext[K];
 };
 
 /** Create a null-prototype context of own data properties only. */
@@ -93,7 +94,7 @@ export const makeNodeContext = (init: NodeContextInit): NodeContext => {
   // infrastructure fields. `Capability = keyof CapabilityRegistry` is open to
   // consumer module augmentation, so a custom capability could collide with a
   // reserved name (`tracer`, `logger`, `observer`, …); without this guard the
-  // `Object.assign` below would clobber framework-guaranteed infrastructure.
+  // own-property merge path would clobber framework-guaranteed infrastructure.
   const customEntries = Object.entries(caps).filter(
     ([k, v]) => !RESERVED_CONTEXT_KEYS.has(k) && v != null,
   );

@@ -203,8 +203,9 @@ describe("capability-manager", () => {
       }
     });
 
-    it("a throwing error logger cannot mask the connect failure or skip failing-handle cleanup", async () => {
+    it("a throwing error logger cannot mask the connect failure and emits a fallback breadcrumb", async () => {
       let failingClosed = false;
+      const fallback: string[] = [];
       const handles = [
         makeHandle("b", {
           connect: async () => { throw new Error("connect-boom"); },
@@ -216,10 +217,34 @@ describe("capability-manager", () => {
         error: () => { throw new Error("logger transport down"); },
       };
 
-      const result = await connectAll(handles, logger);
+      const result = await connectAll(handles, logger, (diagnostic) => {
+        fallback.push(diagnostic);
+      });
 
       expect(isErr(result)).toBe(true);
       expect(failingClosed).toBe(true);
+      expect(fallback.some((line) =>
+        line.includes("host lifecycle diagnostic fallback") &&
+        line.includes("failed to connect") &&
+        line.includes("logger transport down")
+      )).toBe(true);
+      if (!result.ok) expect(result.error.error.message).toContain("connect-boom");
+    });
+
+    it("keeps the connect Result authoritative when logger and stderr fallback both throw", async () => {
+      let closed = false;
+      const result = await connectAll([
+        makeHandle("broken", {
+          connect: async () => { throw new Error("connect-boom"); },
+          close: async () => { closed = true; },
+        }),
+      ], {
+        info: () => { throw new Error("logger down"); },
+        error: () => { throw new Error("logger down"); },
+      }, () => { throw new Error("stderr down"); });
+
+      expect(result.ok).toBe(false);
+      expect(closed).toBe(true);
       if (!result.ok) expect(result.error.error.message).toContain("connect-boom");
     });
 
@@ -315,7 +340,7 @@ describe("capability-manager", () => {
       expect(order).toEqual(["b", "a"]);
     });
 
-    it("a throwing warn logger cannot mask a close failure or stop later closes", async () => {
+    it("a throwing warn logger and stderr fallback cannot mask a close failure or stop later closes", async () => {
       const order: string[] = [];
       const hostile = Object.create(null) as Record<string, unknown>;
       Object.defineProperty(hostile, "message", { get: () => { throw new Error("message getter"); } });
@@ -330,7 +355,11 @@ describe("capability-manager", () => {
         warn: () => { throw new Error("logger transport down"); },
       };
 
-      const failures = await closeAll(handles, logger);
+      const failures = await closeAll(
+        handles,
+        logger,
+        () => { throw new Error("stderr transport down"); },
+      );
 
       expect(order).toEqual(["c", "a"]);
       expect(failures).toEqual([{ name: "b", error: "[object Object]" }]);

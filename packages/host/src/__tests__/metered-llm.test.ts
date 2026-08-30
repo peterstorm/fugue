@@ -208,6 +208,72 @@ describe("metered-llm: augmented subtype preservation", () => {
     expect(logs.filter((line) => line.msg === "llm.metered")).toHaveLength(2);
   });
 
+  it("forwards reflective subtype properties for frozen and extensible clients", () => {
+    for (const frozen of [false, true]) {
+      const source = {
+        label: frozen ? "frozen" : "extensible",
+        summary(): string { return this.label; },
+        async sendStructured<O>(): Promise<Result<LlmResponse<O>, FrameworkError>> {
+          return ok({ output: {} as O, ...tokensOnly(2, 1), rawText: "" });
+        },
+        async sendWithTools<O>(): Promise<Result<LlmResponse<O>, FrameworkError>> {
+          return ok({ output: {} as O, ...tokensOnly(2, 1), rawText: "" });
+        },
+      };
+      const inner = frozen ? Object.freeze(source) : source;
+      const { logger } = collectLogs();
+      const metered = createMeteredLlmClient(
+        inner,
+        "llm",
+        createRunSpendAuthority({ dagId, runId, ...freshLedger(), logger }),
+      );
+
+      expect("label" in metered).toBe(true);
+      expect("summary" in metered).toBe(true);
+      expect(Object.keys(metered)).toEqual(Object.keys(inner));
+
+      const spread = { ...metered };
+      expect(spread.label).toBe(source.label);
+      expect(spread.summary()).toBe(source.label);
+      expect(spread.sendStructured).toBe(metered.sendStructured);
+
+      const labelDescriptor = Object.getOwnPropertyDescriptor(metered, "label");
+      expect(labelDescriptor).toMatchObject({
+        enumerable: true,
+        configurable: true,
+        writable: !frozen,
+        value: source.label,
+      });
+      const methodDescriptor = Object.getOwnPropertyDescriptor(metered, "summary");
+      expect(methodDescriptor?.value).toBe(metered.summary);
+      expect(methodDescriptor?.value()).toBe(source.label);
+
+      const refusedLockedProperty = Reflect.defineProperty(metered, "locked", {
+        value: "cannot-be-represented-by-the-facade",
+      });
+      expect(refusedLockedProperty).toBe(false);
+      expect("locked" in inner).toBe(false);
+
+      const defined = Reflect.defineProperty(metered, "reflected", {
+        value: "defined-through-facade",
+        enumerable: true,
+        configurable: true,
+      });
+      expect(defined).toBe(!frozen);
+      if (!frozen) {
+        expect(Object.keys(metered)).toContain("reflected");
+        expect(Reflect.deleteProperty(metered, "reflected")).toBe(true);
+        expect("reflected" in metered).toBe(false);
+
+        (source as Record<string, unknown>).later = "added-after-decoration";
+        expect("later" in metered).toBe(true);
+        expect(Object.keys(metered)).toContain("later");
+        expect(Object.getOwnPropertyDescriptor(metered, "later")?.value)
+          .toBe("added-after-decoration");
+      }
+    }
+  });
+
   it("meters a frozen object-literal client through a separate facade", async () => {
     let providerCalls = 0;
     const inner = Object.freeze({

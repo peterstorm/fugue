@@ -147,12 +147,13 @@ export const runNodeShared = async (
     // scope names get their narrowed handle, plain capabilities keep their static
     // client. A refusal fails the node fail-closed before `run` is ever called.
     let runCtx: NodeContext = ctx;
-    if (opts.minting) {
+    const minting = opts.minting;
+    if (minting) {
       // Derive the Invocation's origin from the authority (single construction
       // site) so the node is always minted AS the origin the authority gates
       // against — the half-consistent "origin Y on an authority-X mint" state
       // is unrepresentable here.
-      const inv = invocationFor(opts.minting, { runId: ctx.runId, dagId, nodeId });
+      const inv = invocationFor(minting, { runId: ctx.runId, dagId, nodeId });
       // The port contract says errors flow on the Result channel, never thrown
       // — but the broker is a public extension seam, so the contract is
       // enforced here rather than assumed. An unfenced throw would escape to
@@ -172,7 +173,7 @@ export const runNodeShared = async (
       // classification is not overwritten by the general default.
       let minted: Result<ScopedCapabilityHandle, FrameworkError>;
       try {
-        minted = await opts.minting.broker.mintFor(inv, node.requires);
+        minted = await minting.broker.mintFor(inv, node.requires);
       } catch (e) {
         minted = err({
           kind: "infra-unreachable" as const,
@@ -190,7 +191,7 @@ export const runNodeShared = async (
       // capability that `provides()` promised to mint for this invocation.
       const undelivered = node.requires.filter(
         (cap) =>
-          opts.minting?.broker.provides?.(cap) === true &&
+          minting.broker.provides?.(cap) === true &&
           (!Object.hasOwn(minted.value, cap) || minted.value[cap] == null),
       );
       const [firstUndelivered, ...restUndelivered] = undelivered;

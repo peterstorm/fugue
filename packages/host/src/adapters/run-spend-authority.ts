@@ -220,6 +220,18 @@ export const createRunSpendAuthority = (
     return call;
   };
 
+  const recordReleasePersist = async (
+    req: MeteredRequest,
+    clientKey: Capability,
+    operation: MeteredLlmOperation,
+    usage: TokenUsage,
+    releaseReservationForCall: () => void,
+  ): Promise<void> => {
+    const settledCall = record(req, clientKey, operation, usage);
+    releaseReservationForCall();
+    await persist(req.nodeId, clientKey, settledCall);
+  };
+
   const settle = async <O>(
     req: MeteredRequest,
     clientKey: Capability,
@@ -228,17 +240,25 @@ export const createRunSpendAuthority = (
     releaseReservationForCall: () => void,
   ): Promise<Result<LlmResponse<O>, FrameworkError>> => {
     if (result.ok) {
-      const settledCall = record(req, clientKey, operation, pickUsage(result.value));
-      releaseReservationForCall();
-      await persist(req.nodeId, clientKey, settledCall);
+      await recordReleasePersist(
+        req,
+        clientKey,
+        operation,
+        pickUsage(result.value),
+        releaseReservationForCall,
+      );
       return result;
     }
 
     const partial = usageOfError(result.error);
     if (partial !== undefined && totalTokens(partial) > 0) {
-      const settledCall = record(req, clientKey, operation, partial);
-      releaseReservationForCall();
-      await persist(req.nodeId, clientKey, settledCall);
+      await recordReleasePersist(
+        req,
+        clientKey,
+        operation,
+        partial,
+        releaseReservationForCall,
+      );
     } else {
       releaseReservationForCall();
     }
