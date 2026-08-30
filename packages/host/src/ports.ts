@@ -295,7 +295,9 @@ export type SharedInfra = {
   /**
    * External capability handles registered at host creation.
    * Connected during boot, closed during shutdown.
-   * Clients are injected into per-request NodeContexts.
+   * Non-LLM clients may be injected directly into per-request NodeContexts;
+   * boot-scoped LLM clients are transformed into run-scoped metered or
+   * composed facades first.
    *
    * @satisfies ADR-0051 — Extensible capability registry
    */

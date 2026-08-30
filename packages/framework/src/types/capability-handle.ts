@@ -17,7 +17,11 @@ import type { CapabilityRegistry, Capability } from "./node.js";
 type CapabilityHandleBase<K extends Capability> = {
   /** Capability name — must match a key in `CapabilityRegistry`. */
   readonly name: K;
-  /** The boot-scoped client injected into `NodeContext`. */
+  /**
+   * Boot-scoped client. Non-LLM clients may be injected directly into a
+   * `NodeContext`; LLM clients are transformed into run-scoped metered or
+   * composed facades before injection.
+   */
   readonly client: CapabilityRegistry[K];
   readonly connect?: () => Promise<void>;
   readonly close?: () => Promise<void>;

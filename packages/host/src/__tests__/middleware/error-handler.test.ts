@@ -38,7 +38,7 @@ const createApp = (
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 describe("error-handler middleware", () => {
-  describe("Path 1: Direct HostError thrown", () => {
+  describe("Path 1: Canonical HostError at the throwing seam", () => {
     it("maps to structured response with correct status", async () => {
       const { logger } = createTestLogger();
       const hostErr: HostError = {
@@ -46,8 +46,7 @@ describe("error-handler middleware", () => {
         dagId: "my-dag" as any,
         available: [],
       };
-      // Hono requires Error instances. Wrap with cause pattern (production path).
-      const app = createApp(logger, () => { throw Object.assign(new Error("dag-not-found"), hostErr); });
+      const app = createApp(logger, () => { throw new Error("dag-not-found", { cause: hostErr }); });
 
       const res = await app.request("/throw");
       expect(res.status).toBe(404);
@@ -64,7 +63,7 @@ describe("error-handler middleware", () => {
         dagId: "test" as any,
         issues: [{ message: "required", path: ["name"], code: "custom" } as any],
       };
-      const app = createApp(logger, () => { throw Object.assign(new Error("validation"), hostErr); });
+      const app = createApp(logger, () => { throw new Error("validation", { cause: hostErr }); });
 
       const res = await app.request("/throw");
       expect(res.status).toBe(400);
@@ -136,7 +135,7 @@ describe("error-handler middleware", () => {
         message: "secret internal detail",
         context: { forged: "forged-tenant-id-xyz" },
       };
-      const app = createApp(logger, () => { throw Object.assign(new Error("invariant"), hostErr); });
+      const app = createApp(logger, () => { throw new Error("invariant", { cause: hostErr }); });
 
       const res = await app.request("/throw");
 
@@ -255,6 +254,27 @@ describe("error-handler middleware", () => {
         expect(Object.isFrozen(parsed.context)).toBe(true);
         expect(Object.isFrozen(nested)).toBe(true);
         expect(Object.isFrozen(nested.value)).toBe(true);
+      }
+    });
+
+    it("canonicalizes an explicitly undefined optional import stack to absence", () => {
+      expect(parseHostError({
+        kind: "import-failed",
+        path: "/dag",
+        message: "failed",
+        stack: undefined,
+      })).toEqual({ kind: "import-failed", path: "/dag", message: "failed" });
+    });
+
+    it("rejects non-canonical extra dagId, runId, and neutral fields across every variant", () => {
+      for (const source of validVariants) {
+        expect(parseHostError({ ...source, neutralExtra: "must-reject" })).toBeUndefined();
+        if (!Object.hasOwn(source, "dagId")) {
+          expect(parseHostError({ ...source, dagId: "extra-dag" })).toBeUndefined();
+        }
+        if (!Object.hasOwn(source, "runId")) {
+          expect(parseHostError({ ...source, runId: "extra-run" })).toBeUndefined();
+        }
       }
     });
 
@@ -433,7 +453,7 @@ describe("error-handler middleware", () => {
 
       const { logger } = createTestLogger();
       const app = createApp(logger, () => {
-        throw Object.assign(new Error("bigint validation"), hostErr);
+        throw new Error("bigint validation", { cause: hostErr });
       });
       const res = await app.request("/throw");
       expect(res.status).toBe(400);
@@ -524,6 +544,31 @@ describe("error-handler middleware", () => {
       expect(res.status).toBe(500);
       expect(await res.json()).toMatchObject({ error: "internal-error" });
     });
+
+    it("routes a 4xx HostError lookalike with extras through the logged generic 500 path", async () => {
+      const { logger, logs } = createTestLogger();
+      const extraRunId = "extra-run-must-not-leak";
+      const app = createApp(logger, () => {
+        throw new Error("host error lookalike", {
+          cause: {
+            kind: "dag-not-found",
+            dagId: "dag",
+            available: [],
+            runId: extraRunId,
+            neutralExtra: "extra-detail-must-not-leak",
+          },
+        });
+      });
+
+      const res = await app.request("/throw");
+      const raw = await res.text();
+      expect(res.status).toBe(500);
+      expect(JSON.parse(raw)).toMatchObject({ error: "internal-error" });
+      expect(raw).not.toContain(extraRunId);
+      expect(raw).not.toContain("extra-detail-must-not-leak");
+      expect(logs).toHaveLength(1);
+      expect(logs[0]?.msg).toBe("Unhandled error in request handler");
+    });
   });
 
   describe("logger failure isolation", () => {
@@ -534,10 +579,12 @@ describe("error-handler middleware", () => {
     it("preserves HostError, framework-error, and generic HTTP responses", async () => {
       const cases = [
         {
-          thrown: Object.assign(new Error("host"), {
-            kind: "internal-invariant-violated",
-            message: "invariant",
-            context: {},
+          thrown: new Error("host", {
+            cause: {
+              kind: "internal-invariant-violated",
+              message: "invariant",
+              context: {},
+            },
           }),
           expectedError: "internal-invariant-violated",
         },

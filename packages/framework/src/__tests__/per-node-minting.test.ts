@@ -463,10 +463,162 @@ describe("per-node minting — broker port-contract enforcement", () => {
       expect(result.error.kind).toBe("node-crash");
       if (result.error.kind === "node-crash") {
         expect(result.error.retriability).toBe("non-retriable");
-        expect(result.error.message).toContain("broker.mintFor threw across the port boundary");
+        expect(result.error.message).toContain("broker.mintFor violated the port contract");
       }
     }
     expect(mintCalls).toBe(1);
+  });
+
+  it("treats hostile ok() capability bags as one-shot non-retriable contract failures", async () => {
+    const revoked = Proxy.revocable({ [SCOPE]: { tag: "revoked" } }, {});
+    revoked.revoke();
+    const hostileOwnKeys = new Proxy({ [SCOPE]: { tag: "trapped" } }, {
+      ownKeys: () => { throw new Error("hostile ownKeys trap"); },
+    });
+    const accessorBacked = Object.defineProperty({}, SCOPE, {
+      enumerable: true,
+      get: () => { throw new Error("capability getter must not run"); },
+    });
+
+    for (const [label, capabilityBag] of [
+      ["null", null],
+      ["primitive", 7],
+      ["array", []],
+      ["revoked proxy", revoked.proxy],
+      ["throwing property trap", hostileOwnKeys],
+      ["accessor-backed property", accessorBacked],
+    ] as const) {
+      let mintCalls = 0;
+      let nodeRuns = 0;
+      const observer = new RecordingObserver();
+      const broker: CapabilityBroker = {
+        mintFor: async () => {
+          mintCalls += 1;
+          return ok(capabilityBag as ScopedCapabilityHandle);
+        },
+        provides: (capability: Capability) => capability === SCOPE,
+      };
+      const node = createFetchNode({
+        id: N("hostile-success"),
+        inputSchema: z.object({}),
+        outputSchema: z.object({ ok: z.boolean() }),
+        requires: [SCOPE] as unknown as readonly Capability[],
+        fetch: async () => {
+          nodeRuns += 1;
+          return ok({ ok: true });
+        },
+      });
+      const dag = defineDagFromArray({
+        id: "dag-1",
+        nodes: [node],
+        edges: [{ from: DAG_INPUT, to: "hostile-success" }],
+        defaultRetryLimit: 2,
+      });
+      const ctx = makeNodeContext({
+        runId: "run-1",
+        dagId: "dag-1",
+        observer,
+        http: staticHttp as unknown as NodeContext["http"],
+      });
+
+      const result = await runDag(dag, {}, ctx, {
+        minting: { broker, origin: agentOrigin },
+        suppressRoutingWarnings: true,
+      });
+
+      expect(result.ok, label).toBe(false);
+      if (!result.ok) {
+        expect(result.error.kind, label).toBe("node-crash");
+        if (result.error.kind === "node-crash") {
+          expect(result.error.retriability, label).toBe("non-retriable");
+          expect(result.error.message, label).toContain("broker.mintFor violated the port contract");
+        }
+      }
+      expect(mintCalls, label).toBe(1);
+      expect(nodeRuns, label).toBe(0);
+      const nodeErrors = observer.events.filter((event) => event.type === "node-error");
+      expect(nodeErrors, label).toHaveLength(1);
+      expect(nodeErrors[0]?.frameworkError.kind, label).toBe("node-crash");
+    }
+  });
+
+  it("snapshots or rejects hostile Result envelopes before retry classification", async () => {
+    const revoked = Proxy.revocable({ ok: true, value: { [SCOPE]: { tag: "revoked" } } }, {});
+    revoked.revoke();
+    let discriminantReads = 0;
+    const statefulDiscriminant = Object.defineProperties({}, {
+      ok: {
+        enumerable: true,
+        get: () => {
+          discriminantReads += 1;
+          return discriminantReads > 1;
+        },
+      },
+      value: { enumerable: true, value: { [SCOPE]: { tag: "bypass" } } },
+      error: { enumerable: true, value: { kind: "policy-refusal", scope: SCOPE } },
+    });
+    const throwingError = Object.defineProperties({}, {
+      ok: { enumerable: true, value: false },
+      error: {
+        enumerable: true,
+        get: () => { throw new Error("hostile error getter"); },
+      },
+    });
+
+    for (const [label, envelope] of [
+      ["null envelope", null],
+      ["primitive envelope", 7],
+      ["array envelope", []],
+      ["revoked envelope", revoked.proxy],
+      ["stateful discriminant", statefulDiscriminant],
+      ["throwing error accessor", throwingError],
+      ["truthy discriminant", { ok: "yes", value: { [SCOPE]: {} } }],
+      ["missing Err payload", { ok: false }],
+      ["extra Result field", { ok: true, value: { [SCOPE]: {} }, extra: true }],
+    ] as const) {
+      let mintCalls = 0;
+      let nodeRuns = 0;
+      const broker: CapabilityBroker = {
+        mintFor: async () => {
+          mintCalls += 1;
+          return envelope as unknown as Result<ScopedCapabilityHandle, FrameworkError>;
+        },
+        provides: (capability: Capability) => capability === SCOPE,
+      };
+      const node = createFetchNode({
+        id: N("hostile-envelope"),
+        inputSchema: z.object({}),
+        outputSchema: z.object({ ok: z.boolean() }),
+        requires: [SCOPE] as unknown as readonly Capability[],
+        fetch: async () => {
+          nodeRuns += 1;
+          return ok({ ok: true });
+        },
+      });
+      const dag = defineDagFromArray({
+        id: "dag-1",
+        nodes: [node],
+        edges: [{ from: DAG_INPUT, to: "hostile-envelope" }],
+        defaultRetryLimit: 2,
+      });
+
+      const result = await runDag(dag, {}, baseCtx(), {
+        minting: { broker, origin: agentOrigin },
+        suppressRoutingWarnings: true,
+      });
+
+      expect(result.ok, label).toBe(false);
+      if (!result.ok) {
+        expect(result.error.kind, label).toBe("node-crash");
+        if (result.error.kind === "node-crash") {
+          expect(result.error.retriability, label).toBe("non-retriable");
+          expect(result.error.message, label).toContain("broker.mintFor violated the port contract");
+        }
+      }
+      expect(mintCalls, label).toBe(1);
+      expect(nodeRuns, label).toBe(0);
+    }
+    expect(discriminantReads).toBe(0);
   });
 
   it("a broker claiming provides(cap) but omitting it from ok() fails the node with missing-capability — run never sees an undefined handle", async () => {

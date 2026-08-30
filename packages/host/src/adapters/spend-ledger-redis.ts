@@ -41,11 +41,9 @@ import { parseFigure, recordOf, spendOfRecord } from "../domain/spend-record.js"
  * means the missing-primitive case is decided in ONE place, and the resulting
  * error names exactly which methods are absent.
  *
- * It does NOT abort anything. The sole caller (`createNodeContextForDag`) logs
- * that error and DOWNGRADES to the in-process ledger, because refusing every
- * run over a metering capability would turn a configuration gap into an
- * outage. An earlier version of this comment claimed the host "fails at boot",
- * which was never what any caller did.
+ * A missing primitive is a construction-time downgrade signal. The sole
+ * caller (`createNodeContextForDag`) logs it and selects the in-process ledger
+ * rather than turning a metering configuration gap into an outage.
  */
 export type SpendLedgerRedis = Pick<RedisPort, "sAdd" | "sMembers"> & {
   readonly hIncrBy: NonNullable<RedisPort["hIncrBy"]>;
@@ -66,11 +64,9 @@ export const spendLedgerRedis = (redis: RedisPort): Result<SpendLedgerRedis, Hos
   // the assertion-free return literal underneath it — collapsing the two would
   // require a type assertion, which this codebase avoids precisely here.
   //
-  // So adding another primitive is TWO edits, not one: this list (for the
-  // message) and the guard (for the decision). Missing the guard is caught by
-  // the compiler at the return literal, which is a confusing place to learn it
-  // but not a silent failure. An earlier version of this comment claimed one
-  // edit sufficed; it did not.
+  // Adding a primitive therefore requires TWO edits: this diagnostic list and
+  // the narrowing guard. The compiler rejects an incomplete guard at the
+  // assertion-free return literal below.
   const required = [
     ["sAdd", redis.sAdd],
     ["sMembers", redis.sMembers],

@@ -114,6 +114,9 @@ export const createFileSpendStore = (rootPath: string): FileSpendStore => {
         }
         const paths = pathsFor(root, parsedRunId.value);
         location = paths.recordPath;
+        // Re-prove the trust anchor before the lock protocol can create its
+        // owner, staging, intent, or fence artifacts in this directory.
+        assertDirectoryIdentity(root);
         await withFileLock(paths.lockPath, () => {
           assertDirectoryIdentity(root);
           const prior = readSnapshot(root, parsedRunId.value, paths);

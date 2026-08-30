@@ -179,7 +179,7 @@ describe("createFileSpendStore", () => {
     const add = await store.add(rid, pricedCall(1, 1 as MicroUsd));
     expect(read.ok).toBe(false);
     expect(add.ok).toBe(false);
-    expect(readdirSync(root).some((name) => name.endsWith(".json"))).toBe(false);
+    expect(readdirSync(root)).toEqual([]);
   });
 
   it("refuses symlinked roots and record files", async () => {

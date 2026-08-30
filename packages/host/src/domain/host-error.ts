@@ -162,8 +162,16 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const isString = (value: unknown): value is string => typeof value === "string";
 const isStringArray = (value: unknown): value is readonly string[] =>
   Array.isArray(value) && value.every(isString);
-const hasStrings = (value: Record<string, unknown>, ...keys: readonly string[]): boolean =>
-  keys.every((key) => isString(value[key]));
+const hasExactOwnStringKeys = (
+  value: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[] = [],
+): boolean => {
+  const allowed = new Set([...required, ...optional]);
+  const actual = Object.keys(value);
+  return required.every((key) => Object.hasOwn(value, key)) &&
+    actual.every((key) => allowed.has(key));
+};
 
 const isOptionalBoolean = (value: unknown): boolean =>
   value === undefined || typeof value === "boolean";
@@ -275,10 +283,11 @@ const parseTenantId = (value: unknown): TenantId | undefined => {
 const frozenHostError = <E extends HostError>(error: E): E => Object.freeze(error);
 
 /**
- * Total parser for errors crossing the throwing HTTP seam. Every source value
- * is read once into a deeply frozen snapshot before variant checks. Identifier
- * fields are then rebuilt through their smart constructors into a fresh frozen
- * HostError, so erased brands cannot be forged at this authority boundary.
+ * Total parser for errors crossing the throwing HTTP seam. It snapshots each
+ * source field once, requires the variant's exact own string-key set, and
+ * reconstructs a fresh deeply immutable HostError from canonical fields.
+ * Branded values are rebuilt through their smart constructors, so erased brands
+ * cannot be forged at this authority boundary.
  */
 export const parseHostError = (value: unknown): HostError | undefined => {
   const snapshotted = snapshotUnknown(value);
@@ -286,37 +295,63 @@ export const parseHostError = (value: unknown): HostError | undefined => {
   const snapshot = snapshotted.value;
   if (!isString(snapshot.kind)) return undefined;
 
-  let valid: boolean;
   switch (snapshot.kind) {
     case "git-clone-failed":
-      valid = hasStrings(snapshot, "url", "message");
-      break;
+      return hasExactOwnStringKeys(snapshot, ["kind", "url", "message"]) &&
+          isString(snapshot.url) && isString(snapshot.message)
+        ? frozenHostError({ kind: "git-clone-failed", url: snapshot.url, message: snapshot.message })
+        : undefined;
     case "git-pull-failed":
     case "bun-install-failed":
     case "config-invalid":
     case "tenant-config-invalid":
     case "fs-purge-failed":
-      valid = hasStrings(snapshot, "message");
-      break;
+      return hasExactOwnStringKeys(snapshot, ["kind", "message"]) && isString(snapshot.message)
+        ? frozenHostError({ kind: snapshot.kind, message: snapshot.message })
+        : undefined;
     case "git-timeout":
     case "redis-unavailable":
     case "notification-failed":
-      valid = hasStrings(snapshot, "operation");
-      break;
+      return hasExactOwnStringKeys(snapshot, ["kind", "operation"]) && isString(snapshot.operation)
+        ? frozenHostError({ kind: snapshot.kind, operation: snapshot.operation })
+        : undefined;
     case "git-spawn-failed":
-      valid = hasStrings(snapshot, "operation", "message");
-      break;
-    case "import-failed":
-      valid = hasStrings(snapshot, "path", "message") &&
-        (snapshot.stack === undefined || isString(snapshot.stack));
-      break;
+      return hasExactOwnStringKeys(snapshot, ["kind", "operation", "message"]) &&
+          isString(snapshot.operation) && isString(snapshot.message)
+        ? frozenHostError({
+            kind: "git-spawn-failed",
+            operation: snapshot.operation,
+            message: snapshot.message,
+          })
+        : undefined;
+    case "import-failed": {
+      if (
+        !hasExactOwnStringKeys(snapshot, ["kind", "path", "message"], ["stack"]) ||
+        !isString(snapshot.path) || !isString(snapshot.message)
+      ) return undefined;
+      if (!Object.hasOwn(snapshot, "stack") || snapshot.stack === undefined) {
+        return frozenHostError({ kind: "import-failed", path: snapshot.path, message: snapshot.message });
+      }
+      return isString(snapshot.stack)
+        ? frozenHostError({
+            kind: "import-failed",
+            path: snapshot.path,
+            message: snapshot.message,
+            stack: snapshot.stack,
+          })
+        : undefined;
+    }
     case "validation-failed":
-      valid = hasStrings(snapshot, "path") && isIssueArray(snapshot.issues);
-      break;
+      return hasExactOwnStringKeys(snapshot, ["kind", "path", "issues"]) &&
+          isString(snapshot.path) && isIssueArray(snapshot.issues)
+        ? frozenHostError({ kind: "validation-failed", path: snapshot.path, issues: snapshot.issues })
+        : undefined;
     case "no-default-export":
-      valid = hasStrings(snapshot, "path");
-      break;
+      return hasExactOwnStringKeys(snapshot, ["kind", "path"]) && isString(snapshot.path)
+        ? frozenHostError({ kind: "no-default-export", path: snapshot.path })
+        : undefined;
     case "dag-not-found": {
+      if (!hasExactOwnStringKeys(snapshot, ["kind", "dagId", "available"])) return undefined;
       const dagId = parseDagId(snapshot.dagId);
       const available = parseDagIds(snapshot.available);
       return dagId === undefined || available === undefined
@@ -324,6 +359,7 @@ export const parseHostError = (value: unknown): HostError | undefined => {
         : frozenHostError({ kind: "dag-not-found", dagId, available });
     }
     case "dag-disabled": {
+      if (!hasExactOwnStringKeys(snapshot, ["kind", "dagId", "reason"])) return undefined;
       const dagId = parseDagId(snapshot.dagId);
       return dagId === undefined || !isString(snapshot.reason)
         ? undefined
@@ -331,15 +367,20 @@ export const parseHostError = (value: unknown): HostError | undefined => {
     }
     case "global-concurrency-exceeded":
     case "tenant-unknown":
-      valid = true;
-      break;
+      return hasExactOwnStringKeys(snapshot, ["kind"])
+        ? frozenHostError({ kind: snapshot.kind })
+        : undefined;
     case "dag-concurrency-exceeded": {
+      if (!hasExactOwnStringKeys(snapshot, ["kind", "dagId"])) return undefined;
       const dagId = parseDagId(snapshot.dagId);
       return dagId === undefined
         ? undefined
         : frozenHostError({ kind: "dag-concurrency-exceeded", dagId });
     }
     case "timeout": {
+      if (!hasExactOwnStringKeys(snapshot, ["kind", "dagId", "runId", "timeoutMs"])) {
+        return undefined;
+      }
       const dagId = parseDagId(snapshot.dagId);
       const runId = parseRunId(snapshot.runId);
       return dagId === undefined || runId === undefined ||
@@ -348,17 +389,28 @@ export const parseHostError = (value: unknown): HostError | undefined => {
         : frozenHostError({ kind: "timeout", dagId, runId, timeoutMs: snapshot.timeoutMs });
     }
     case "spend-ledger-unavailable":
-      valid = snapshot.backend === "file" &&
-        (snapshot.operation === "create" || snapshot.operation === "read" || snapshot.operation === "add") &&
-        hasStrings(snapshot, "message");
-      break;
+      return hasExactOwnStringKeys(snapshot, ["kind", "backend", "operation", "message"]) &&
+          snapshot.backend === "file" &&
+          (snapshot.operation === "create" || snapshot.operation === "read" || snapshot.operation === "add") &&
+          isString(snapshot.message)
+        ? frozenHostError({
+            kind: "spend-ledger-unavailable",
+            backend: "file",
+            operation: snapshot.operation,
+            message: snapshot.message,
+          })
+        : undefined;
     case "input-validation-failed": {
+      if (!hasExactOwnStringKeys(snapshot, ["kind", "dagId", "issues"])) return undefined;
       const dagId = parseDagId(snapshot.dagId);
       return dagId === undefined || !isIssueArray(snapshot.issues)
         ? undefined
         : frozenHostError({ kind: "input-validation-failed", dagId, issues: snapshot.issues });
     }
     case "dag-validation-failed": {
+      if (!hasExactOwnStringKeys(snapshot, ["kind", "dagId", "reason", "message"])) {
+        return undefined;
+      }
       const dagId = parseDagId(snapshot.dagId);
       return dagId === undefined || !isString(snapshot.reason) || !isString(snapshot.message)
         ? undefined
@@ -370,32 +422,45 @@ export const parseHostError = (value: unknown): HostError | undefined => {
           });
     }
     case "body-parse-failed": {
+      if (!hasExactOwnStringKeys(snapshot, ["kind", "dagId", "message"])) return undefined;
       const dagId = parseDagId(snapshot.dagId);
       return dagId === undefined || !isString(snapshot.message)
         ? undefined
         : frozenHostError({ kind: "body-parse-failed", dagId, message: snapshot.message });
     }
     case "discovery-failed":
-      valid = hasStrings(snapshot, "dagsRoot", "message");
-      break;
+      return hasExactOwnStringKeys(snapshot, ["kind", "dagsRoot", "message"]) &&
+          isString(snapshot.dagsRoot) && isString(snapshot.message)
+        ? frozenHostError({
+            kind: "discovery-failed",
+            dagsRoot: snapshot.dagsRoot,
+            message: snapshot.message,
+          })
+        : undefined;
     case "async-result-expired":
     case "run-not-found":
     case "run-lease-lost": {
+      if (!hasExactOwnStringKeys(snapshot, ["kind", "runId"])) return undefined;
       const runId = parseRunId(snapshot.runId);
       return runId === undefined
         ? undefined
         : frozenHostError({ kind: snapshot.kind, runId });
     }
     case "run-not-suspended": {
+      if (!hasExactOwnStringKeys(snapshot, ["kind", "runId", "status"])) return undefined;
       const runId = parseRunId(snapshot.runId);
       return runId === undefined || !isString(snapshot.status)
         ? undefined
         : frozenHostError({ kind: "run-not-suspended", runId, status: snapshot.status });
     }
     case "unauthorized":
-      valid = hasStrings(snapshot, "reason");
-      break;
+      return hasExactOwnStringKeys(snapshot, ["kind", "reason"]) && isString(snapshot.reason)
+        ? frozenHostError({ kind: "unauthorized", reason: snapshot.reason })
+        : undefined;
     case "forbidden": {
+      if (!hasExactOwnStringKeys(snapshot, ["kind", "dagId", "callerTeam", "dagTeam"])) {
+        return undefined;
+      }
       const dagId = parseDagId(snapshot.dagId);
       return dagId === undefined || !isString(snapshot.callerTeam) || !isString(snapshot.dagTeam)
         ? undefined
@@ -408,9 +473,13 @@ export const parseHostError = (value: unknown): HostError | undefined => {
     }
     case "team-already-exists":
     case "team-not-found":
-      valid = hasStrings(snapshot, "team");
-      break;
+      return hasExactOwnStringKeys(snapshot, ["kind", "team"]) && isString(snapshot.team)
+        ? frozenHostError({ kind: snapshot.kind, team: snapshot.team })
+        : undefined;
     case "tenant-over-quota": {
+      if (!hasExactOwnStringKeys(snapshot, ["kind", "tenant", "retryAfterSeconds"])) {
+        return undefined;
+      }
       const tenant = parseTenantId(snapshot.tenant);
       return tenant === undefined || typeof snapshot.retryAfterSeconds !== "number" ||
           !Number.isSafeInteger(snapshot.retryAfterSeconds) || snapshot.retryAfterSeconds < 0
@@ -422,21 +491,24 @@ export const parseHostError = (value: unknown): HostError | undefined => {
           });
     }
     case "worker-unavailable": {
+      if (!hasExactOwnStringKeys(snapshot, ["kind", "tenant"])) return undefined;
       const tenant = parseTenantId(snapshot.tenant);
       return tenant === undefined
         ? undefined
         : frozenHostError({ kind: "worker-unavailable", tenant });
     }
     case "internal-invariant-violated":
-      valid = hasStrings(snapshot, "message") && isRecord(snapshot.context);
-      break;
+      return hasExactOwnStringKeys(snapshot, ["kind", "message", "context"]) &&
+          isString(snapshot.message) && isRecord(snapshot.context)
+        ? frozenHostError({
+            kind: "internal-invariant-violated",
+            message: snapshot.message,
+            context: snapshot.context,
+          })
+        : undefined;
     default:
-      valid = false;
+      return undefined;
   }
-
-  // `snapshotUnknown` already froze every descendant. Spreading creates a new
-  // outer value so no accepted HostError is the string-only parser snapshot.
-  return valid ? Object.freeze({ ...snapshot }) as HostError : undefined;
 };
 
 /**

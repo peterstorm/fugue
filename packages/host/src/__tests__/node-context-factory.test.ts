@@ -1261,6 +1261,15 @@ describe("createNodeContextForDag — spend survives a park/resume (FR-B-006)", 
     spendLedger: ledger,
   });
 
+  const ledgerFailureFixture = (behavior: {
+    readonly read?: SpendLedgerPort["read"];
+    readonly add?: SpendLedgerPort["add"];
+  }): SpendLedgerPort => ({
+    metadata: memoryLedgerMetadata,
+    read: behavior.read ?? (async () => ok(NO_SPEND)),
+    add: behavior.add ?? (async () => ok(undefined)),
+  });
+
   const sliceFor = async (shared: SharedInfra, dag: RegisteredDag) => {
     const { ctx } = await createNodeContextForDag(
       shared, dag, testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP,
@@ -1346,11 +1355,9 @@ describe("createNodeContextForDag — spend survives a park/resume (FR-B-006)", 
   it("REFUSES the slice when a BUDGETED run's ledger cannot be read (FR-B-007)", async () => {
     // An unreadable ledger is indistinguishable from a spent one. Assuming zero
     // would be the refill bug, deliberately reintroduced.
-    const broken: SpendLedgerPort = {
-      metadata: memoryLedgerMetadata,
+    const broken = ledgerFailureFixture({
       read: async () => err({ kind: "redis-unavailable", operation: "spend-ledger read" }),
-      add: async () => ok(undefined),
-    };
+    });
     const { llm } = fakeLlm(10, 5);
     const shared = sharedWith(llm, broken);
 
@@ -1360,11 +1367,9 @@ describe("createNodeContextForDag — spend survives a park/resume (FR-B-006)", 
   });
 
   it("REFUSES a BUDGETED slice when the ledger rejects across its Result boundary", async () => {
-    const rejecting: SpendLedgerPort = {
-      metadata: memoryLedgerMetadata,
+    const rejecting = ledgerFailureFixture({
       read: async () => { throw new Error("ledger transport rejected"); },
-      add: async () => ok(undefined),
-    };
+    });
     const { llm } = fakeLlm(10, 5);
 
     await expect(
@@ -1376,11 +1381,9 @@ describe("createNodeContextForDag — spend survives a park/resume (FR-B-006)", 
     // There is no ceiling to protect, so failing the slice would turn a
     // metering outage into an availability outage. Metering degrades; the run
     // proceeds.
-    const broken: SpendLedgerPort = {
-      metadata: memoryLedgerMetadata,
+    const broken = ledgerFailureFixture({
       read: async () => err({ kind: "redis-unavailable", operation: "spend-ledger read" }),
-      add: async () => ok(undefined),
-    };
+    });
     const { llm, calls } = fakeLlm(10, 5);
     const captured = collectLogs();
     const shared = { ...sharedWith(llm, broken), logger: captured.logger };
@@ -1400,11 +1403,9 @@ describe("createNodeContextForDag — spend survives a park/resume (FR-B-006)", 
   });
 
   it("RUNS an UNBUDGETED slice when the ledger rejects and reports metering-from-zero", async () => {
-    const rejecting: SpendLedgerPort = {
-      metadata: memoryLedgerMetadata,
+    const rejecting = ledgerFailureFixture({
       read: async () => { throw new Error("ledger transport rejected"); },
-      add: async () => ok(undefined),
-    };
+    });
     const { llm, calls } = fakeLlm(10, 5);
     const captured = collectLogs();
     const shared = { ...sharedWith(llm, rejecting), logger: captured.logger };
@@ -1422,11 +1423,9 @@ describe("createNodeContextForDag — spend survives a park/resume (FR-B-006)", 
   it("does not fail a call when the ledger APPEND fails — the tokens are already spent", async () => {
     // Refusing the result would waste the call and lose the output too. What is
     // lost is durability, and that is what gets logged.
-    const writeOnlyFailure: SpendLedgerPort = {
-      metadata: memoryLedgerMetadata,
-      read: async () => ok(NO_SPEND),
+    const writeOnlyFailure = ledgerFailureFixture({
       add: async () => err({ kind: "redis-unavailable", operation: "spend-ledger add" }),
-    };
+    });
     const { llm, calls } = fakeLlm(10, 5);
     const shared = sharedWith(llm, writeOnlyFailure);
 
@@ -1482,8 +1481,7 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
   });
 
   it("DOWNGRADES loudly when the Redis adapter cannot back the ledger", async () => {
-    // The C2 fix. Its whole point is that this fact exists in exactly one place
-    // — this log line — so an unasserted version of it is worth very little.
+    // A durability downgrade is observable through exactly one asserted error log.
     const { llm } = fakeLlm(10, 5);
     const captured = collectLogs();
     const shared = sharedWithRedis(llm, createMockRedis().redis, captured.logger);

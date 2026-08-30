@@ -22,7 +22,11 @@
 import type { Result } from "../types/result.js";
 import { ok, err } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
-import { messageOf, asNodeFrameworkError } from "../types/errors.js";
+import {
+  messageOf,
+  asNodeFrameworkError,
+  PersistedFrameworkErrorSchema,
+} from "../types/errors.js";
 import { safeErrorMessage } from "../types/safe-error.js";
 import type { NodeContext, NodeDef, ValidatedNodeContext } from "../types/node.js";
 import type { MintingAuthority, ScopedCapabilityHandle } from "../types/capability-broker.js";
@@ -35,6 +39,110 @@ import { buildNodeInput } from "../shared/build-input.js";
 import { withTracedNodeSpan, EMPTY_OUTCOME, type NodeSpanOutcome } from "./node-span.js";
 import { resolveContentFilter } from "../tracing/content-filter.js";
 import type { IncomingSources } from "../shared/incoming.js";
+
+const brokerContractViolation = (
+  nodeId: NodeId,
+  detail: string,
+): FrameworkError => ({
+  kind: "node-crash",
+  nodeId,
+  retriability: "non-retriable",
+  message: `broker.mintFor violated the port contract: ${detail}`,
+});
+
+/**
+ * Parse the untrusted outer capability bag without reading any capability value.
+ * Opaque clients stay reference-identical; only their container is rebuilt as a
+ * frozen null-prototype record of own string data properties.
+ */
+const snapshotScopedCapabilities = (
+  value: unknown,
+): Result<ScopedCapabilityHandle, string> => {
+  if (value === null || typeof value !== "object") {
+    return err("ok(value) must contain a non-null object capability bag");
+  }
+
+  try {
+    if (Array.isArray(value)) {
+      return err("ok(value) must not contain an array capability bag");
+    }
+
+    const snapshot = Object.create(null) as Record<string, unknown>;
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== "string") {
+        return err("capability bag keys must be strings");
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (descriptor === undefined) {
+        return err(`capability bag property '${key}' disappeared during inspection`);
+      }
+      if (!Object.hasOwn(descriptor, "value")) {
+        return err(`capability bag property '${key}' must be a data property`);
+      }
+      Object.defineProperty(snapshot, key, {
+        value: descriptor.value,
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      });
+    }
+    return ok(Object.freeze(snapshot) as ScopedCapabilityHandle);
+  } catch (caught) {
+    return err(`capability bag could not be inspected safely: ${safeErrorMessage(caught)}`);
+  }
+};
+
+/** Parse the broker's whole Result envelope once; no hostile object escapes. */
+const parseBrokerResult = (
+  value: unknown,
+  nodeId: NodeId,
+): Result<ScopedCapabilityHandle, FrameworkError> => {
+  const violation = (detail: string): Result<ScopedCapabilityHandle, FrameworkError> =>
+    err(brokerContractViolation(nodeId, detail));
+
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return violation("return value must be a Result object");
+  }
+
+  try {
+    const keys = Reflect.ownKeys(value);
+    if (keys.some((key) => typeof key !== "string")) {
+      return violation("Result keys must be strings");
+    }
+
+    const okDescriptor = Object.getOwnPropertyDescriptor(value, "ok");
+    if (okDescriptor === undefined || !Object.hasOwn(okDescriptor, "value")) {
+      return violation("Result.ok must be an own data property");
+    }
+
+    let payloadKey: "value" | "error";
+    if (okDescriptor.value === true) payloadKey = "value";
+    else if (okDescriptor.value === false) payloadKey = "error";
+    else return violation("Result.ok must be exactly true or false");
+    if (keys.length !== 2 || !keys.includes("ok") || !keys.includes(payloadKey)) {
+      return violation(`Result must contain exactly 'ok' and '${payloadKey}'`);
+    }
+
+    const payloadDescriptor = Object.getOwnPropertyDescriptor(value, payloadKey);
+    if (payloadDescriptor === undefined || !Object.hasOwn(payloadDescriptor, "value")) {
+      return violation(`Result.${payloadKey} must be an own data property`);
+    }
+
+    if (payloadKey === "value") {
+      const capabilities = snapshotScopedCapabilities(payloadDescriptor.value);
+      return capabilities.ok
+        ? ok(capabilities.value)
+        : violation(capabilities.error);
+    }
+
+    const frameworkError = PersistedFrameworkErrorSchema.safeParse(payloadDescriptor.value);
+    return frameworkError.success
+      ? err(frameworkError.data)
+      : violation("err(error) must contain a valid FrameworkError");
+  } catch (caught) {
+    return violation(`Result could not be inspected safely: ${safeErrorMessage(caught)}`);
+  }
+};
 
 interface RunNodeOpts {
   /**
@@ -171,14 +279,15 @@ export const runNodeShared = async (
       // be returned as typed `infra-unreachable`, which remains retriable.
       let minted: Result<ScopedCapabilityHandle, FrameworkError>;
       try {
-        minted = await minting.broker.mintFor(inv, node.requires);
-      } catch (e) {
-        minted = err({
-          kind: "node-crash" as const,
+        minted = parseBrokerResult(
+          await minting.broker.mintFor(inv, node.requires),
           nodeId,
-          retriability: "non-retriable" as const,
-          message: `broker.mintFor threw across the port boundary (contract violation): ${safeErrorMessage(e)}`,
-        });
+        );
+      } catch (caught) {
+        minted = err(brokerContractViolation(
+          nodeId,
+          `call/result inspection threw: ${safeErrorMessage(caught)}`,
+        ));
       }
       if (!minted.ok) {
         emitNodeError(`capability minting refused: ${messageOf(minted.error)}`, minted.error);

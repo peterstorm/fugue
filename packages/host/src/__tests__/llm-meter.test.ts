@@ -2,9 +2,11 @@
  * Tests for the pure llm-meter ADT (domain/llm-meter.ts).
  *
  * Covers accumulation, per-run isolation, immutability, the admission decision,
- * the overshoot-by-one rule (FR-W1-004 / SC-003), the no-budget passthrough
+ * the sequential crossing-call allowance (FR-W1-004), learned estimate-based
+ * reservation accounting for concurrency (SC-003), the no-budget passthrough
  * (FR-W1-006), the multi-ceiling decision (FR-B-002), the settled-vs-projected
- * basis (FR-B-013), and property-based invariants.
+ * basis (FR-B-013), and property-based invariants. SC-003 does not promise a
+ * one-call bound for a first burst or for later calls larger than the estimate.
  *
  * The meter accumulates `Spend`, not tokens. The value algebra itself is tested
  * in the framework (`spend.test.ts`, `budget.test.ts`); what is tested here is
@@ -183,10 +185,10 @@ describe("llm-meter: admit with no ceilings (FR-W1-006)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Admission — the overshoot-by-one contract
+// Admission — the sequential crossing-call allowance
 // ---------------------------------------------------------------------------
 
-describe("llm-meter: overshoot-by-one (FR-W1-004 / SC-003)", () => {
+describe("llm-meter: sequential crossing call (FR-W1-004)", () => {
   it("admits the call that crosses the boundary and refuses the next one", () => {
     // The check is BEFORE the call and against settled spend, so exactly one
     // call runs past the ceiling. That single overshoot is the documented
@@ -269,8 +271,8 @@ describe("llm-meter: any declared ceiling refuses (FR-B-002)", () => {
 
 describe("llm-meter: reservation bounds concurrent overshoot (SC-003)", () => {
   it("lets the first parallel burst through while no estimate has been learned", () => {
-    // The documented FR-W1-004 allowance, generalised: with no settled call yet
-    // there is nothing to estimate a concurrent call's size from.
+    // With no settled call yet there is nothing from which SC-003 can estimate
+    // a concurrent call's size; this first burst has no one-call bound.
     const limits = limitsOf([tokens(1000)]);
     let state: ReservationState = emptyReservation;
     for (let i = 0; i < 5; i += 1) {
