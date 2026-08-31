@@ -12,8 +12,9 @@
  * discovered: an operator running a single process with a per-run budget gets
  * durability across parks and not across restarts.
  *
- * The store is keyed by `runId` and never evicted. A `Spend` is four numbers
- * and a small string set, and a host process's lifetime bounds the number of
+ * The store is keyed by `runId` and never evicted. A `Spend` carries token and
+ * call counters plus a priced micro-USD value or known floor with an optional
+ * unpriced-model set; a host process's lifetime bounds the number of
  * runs it can have seen — the Redis adapter, which outlives any one process,
  * is the one that needs a TTL.
  */

@@ -100,7 +100,7 @@ Start with these to understand the runtime as it stands today:
 | [0080](0080-failure-surface-result-everywhere-the-port-allows-typed-throwing-inside-the-joblike-shell.md) | Failure surface — Result everywhere the port allows; typed throwing inside the JobLike shell | Accepted |
 | [0081](0081-prompt-caching-as-a-declared-policy.md) | Prompt caching as a declared policy, not a placement API | Accepted |
 | [0082](0082-budgets-are-denominated-in-spend-not-tokens.md) | Budgets are denominated in spend, and an unpriced model fails closed | Accepted |
-| [0083](0083-spend-durability-lives-in-a-ledger-port.md) | Spend durability lives in a ledger port, appended lock-free | Accepted |
+| [0083](0083-spend-durability-lives-in-a-ledger-port.md) | Spend durability lives in a ledger port; Redis uses one strict non-replayed hash transaction | Accepted |
 
 ## Conventions
 

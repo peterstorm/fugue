@@ -30,8 +30,8 @@
  *     `SubjectToken` pattern), so "this object is a REGISTERED tenant principal"
  *     is unforgeable: a plain object cannot be passed where a routed `Tenant`
  *     principal is required. The SOLE producer is `markTenant`, and the trust
- *     seam where principals are MINTED is registry CONSTRUCTION — the T3 registry
- *     adapter (and the test fakes that stand in for it today) call `markTenant`
+ *     seam where principals are MINTED is registry CONSTRUCTION — the shipped
+ *     Redis registry adapter and focused test fakes call `markTenant`
  *     once per registered tenant when they build the `TenantRegistryView`.
  *     `resolveTenant` does NOT mint principals: it is a pure boundary LOOKUP that
  *     hands back an already-branded `Tenant` from that view (or fails closed).
@@ -73,8 +73,8 @@ declare const __secretsRefBrand: unique symbol;
 /**
  * The registered tenant security principal. Hard-branded so it cannot be
  * constructed by widening a plain object — only `markTenant` produces it, and
- * `markTenant` is called at registry CONSTRUCTION (the T3 registry adapter, and
- * test fakes today), once per registered tenant. That makes "this object is a
+ * `markTenant` is called at registry CONSTRUCTION (the shipped Redis registry
+ * adapter and focused test fakes), once per registered tenant. That makes "this object is a
  * tenant that was admitted to the registry under a shape-validated id" an
  * unforgeable, single-producer guarantee (FR-002, FR-003). `resolveTenant`
  * consumes these principals; it never mints them.
@@ -104,18 +104,17 @@ export type SecretsRef = string & { readonly [__secretsRefBrand]: void };
 // ── Registry view (injected, read-only) ─────────────────────────────────────
 
 /**
- * The minimal, READ-ONLY projection of the tenant registry that resolution
- * needs. The full registry ADT (register/deregister/reconfigure, Redis
- * adapter, pub/sub) lands in a later task (T3); `resolveTenant` depends only on
- * this narrow view so it stays a pure lookup and so the registry implementation
- * can evolve without touching the boundary parse.
+ * The minimal, READ-ONLY projection of the shipped tenant registry that
+ * resolution needs. `resolveTenant` depends only on this narrow view so it
+ * stays a pure lookup and register/deregister/reconfigure, Redis persistence,
+ * and pub/sub can evolve without touching the boundary parse.
  *
  * `tenantForTeam(team)` returns the registered principal for that owning team,
  * or `undefined` for an unknown team — first-class ABSENCE, never a thrown error
  * or a fabricated principal (fail-closed). The principals it returns were minted
  * by `markTenant` at registry construction.
  *
- * SECURITY CONTRACT for implementations (T3 adapter + test fakes):
+ * SECURITY CONTRACT for implementations (Redis adapter + test fakes):
  *   - `tenantForTeam` MUST resolve against OWN properties only. If the registry
  *     is backed by a plain object keyed on team, it MUST guard every lookup with
  *     `Object.prototype.hasOwnProperty.call(...)` (mirroring `agentClientIdForDag`
@@ -137,8 +136,8 @@ export interface TenantRegistryView {
 
 /**
  * @internal Brand a tenant principal. The single PRODUCER of `Tenant`, called at
- * registry construction — the T3 registry adapter (and the test fakes that stand
- * in for it today) invoke it once per registered tenant while building the
+ * registry construction — the shipped Redis registry adapter and focused test
+ * fakes invoke it once per registered tenant while building the
  * `TenantRegistryView`. `resolveTenant` does NOT call it; it only LOOKS UP
  * already-branded principals. Calling it on an arbitrary pair is a deliberate
  * forgery of the brand — visible in review, never accidental (mirrors
@@ -151,7 +150,7 @@ export interface TenantRegistryView {
  * error. We THROW (not `Result`) because, like every other post-brand violation
  * in the host (e.g. `host.ts` / `graph-capability.ts`), it is unrecoverable
  * programmer error, not a parse outcome. This closes the fail-open gate for the
- * T3 registry: a malformed id can never become a branded principal that would
+ * registry: a malformed id can never become a branded principal that would
  * widen its own `fugue:<tenant>:*` key / `~fugue:<tenant>:*` ACL namespace.
  */
 export const markTenant = (id: TenantId, team: Team): Tenant => {
@@ -172,7 +171,7 @@ export const markTenant = (id: TenantId, team: Team): Tenant => {
 
 /**
  * @internal Brand an opaque secrets reference. Producer of `SecretsRef` — the
- * registry adapter (T3) calls it when reading a tenant config's stored
+ * registry adapter calls it when reading a tenant config's stored
  * reference. Branding a plain string here does NOT grant the holder the
  * authority to dereference it; that authority lives in the worker's
  * `SecretsSource` (AD-6). Kept as a single named seam so every place a raw

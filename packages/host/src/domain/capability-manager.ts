@@ -382,6 +382,30 @@ export type CapabilityClientDecorators = {
   readonly llm?: (name: Capability, client: LlmClient) => LlmClient;
 };
 
+const runScopedLlmFacade = (
+  metered: LlmClient,
+  aliases: Readonly<Record<string, unknown>>,
+): LlmClient => {
+  const facade: Record<string, unknown> = Object.create(null);
+  const bind = (operation: "sendStructured" | "sendWithTools"): unknown =>
+    metered[operation].bind(metered);
+
+  facade.sendStructured = bind("sendStructured");
+  facade.sendWithTools = bind("sendWithTools");
+  for (const [alias, operation] of Object.entries(aliases)) {
+    if (alias === "sendStructured" || alias === "sendWithTools") {
+      throw new Error(`runScopedOperations cannot replace standard operation '${alias}'`);
+    }
+    if (operation !== "sendStructured" && operation !== "sendWithTools") {
+      throw new Error(
+        `runScopedOperations alias '${alias}' names unknown operation '${String(operation)}'`,
+      );
+    }
+    facade[alias] = bind(operation);
+  }
+  return Object.freeze(facade) as unknown as LlmClient;
+};
+
 export const extractClients = (
   handles: readonly CapabilityHandle[],
   decorators: CapabilityClientDecorators = {},
@@ -395,16 +419,14 @@ export const extractClients = (
       );
     }
     // This remains inside the existing name↔client correlation trust boundary.
-    // Standard LLMs receive the narrow metered surface directly. An augmented
-    // subtype can recover its wider registry shape only through its adapter-
-    // authored run composer, which receives that metered surface; aliases must
-    // therefore delegate explicitly through the shared authority rather than
-    // target-bound self-calls hidden behind a generic Proxy.
+    // Standard LLMs receive the narrow metered surface directly. Augmented
+    // aliases are declarative data interpreted here; adapter code never gets a
+    // run-scoped composition callback in which it could retain the boot client.
     if (handle.clientKind === "llm" && decorators.llm !== undefined) {
       const metered = decorators.llm(handle.name, handle.client);
-      clients[handle.name] = handle.composeRunClient === undefined
+      clients[handle.name] = handle.runScopedOperations === undefined
         ? metered
-        : handle.composeRunClient(metered);
+        : runScopedLlmFacade(metered, handle.runScopedOperations);
     } else {
       clients[handle.name] = handle.client;
     }

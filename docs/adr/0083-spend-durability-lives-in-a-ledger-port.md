@@ -1,4 +1,4 @@
-# ADR-0083: Spend durability lives in a ledger port; Redis appends lock-free
+# ADR-0083: Spend durability lives in a ledger port; Redis appends transactionally
 
 ## Status
 Accepted
@@ -18,9 +18,9 @@ The hard part is not storage. It is that spend accrues **per call**, concurrentl
 
 ## Options Considered
 
-1. **A ledger port storing spend as independently-appendable fields**
-   - Pros: `Spend`'s monoid is (sum, sum, sum, set-union), and every one of those has an atomic Redis primitive (`HINCRBY`, `SADD`); appends need no lock, no CAS, and no transaction, because each command is individually correct under any interleaving; the storage shape is derived from the value's algebra rather than invented beside it.
-   - Cons: the three increments and the set-add are not atomic *together*, so a crash mid-append can record one axis of one call without the others.
+1. **A ledger port storing spend across a hash plus set**
+   - Pros: `Spend`'s monoid is (sum, sum, sum, set-union), mapped directly to `HINCRBY` and `SADD`.
+   - Cons: the two keys cannot be read as one snapshot. Independent expiry can erase unpriced evidence while numeric spend survives, and `HGETALL` followed by `SMEMBERS` has an expiry-between-reads race even if writes use one transaction. Rejected.
 
 2. **Store spend in the checkpoint (`RunMeta`)**
    - Pros: no new port, no new key, no new TTL; resume already reads it.
@@ -30,9 +30,9 @@ The hard part is not storage. It is that spend accrues **per call**, concurrentl
    - Pros: two round trips per slice instead of two per call; no concurrency question at all.
    - Cons: a crash mid-slice loses the *entire slice's* spend, which is precisely the crash-loop case the budget most needs to survive. It fixes park/resume and leaves the worse hole open. Rejected.
 
-4. **A transactional append (`MULTI`/`WATCH`)**
-   - Pros: the four fields move together, so a partial record is impossible.
-   - Cons: buys exactness at the price of a round trip on every call plus a retry loop, and introduces a half-applied-transaction failure mode that is harder to reason about than the partial write it prevents. The partial write is bounded and directional (see below); this is not obviously better and is definitely more machinery. Rejected.
+4. **One-hash complete transactional append (`MULTI`/`EXEC`, without `WATCH`)**
+   - Pros: reserved marker fields, numeric fields, and one retention deadline share one aggregate key. Appends commit together and hydration is one `HGETALL`, eliminating both split expiry and split read races. Commutative increments and marker-field union need no lock, optimistic conflict retry, or Lua.
+   - Cons: one transaction per delegated LLM attempt settled by the authority. A lost transaction acknowledgement cannot distinguish committed from uncommitted, so neither the adapter nor ioredis may retry/replay it. **Selected.**
 
 5. **Fail the slice OPEN when the ledger cannot be read** (assume zero)
    - Pros: a Redis outage never stops a run.
@@ -40,7 +40,9 @@ The hard part is not storage. It is that spend accrues **per call**, concurrentl
 
 ## Decision
 
-**A `SpendLedgerPort` with two operations: hydrate once per slice, append once per settled call.**
+**A `SpendLedgerPort` with two operations: hydrate once per slice, append once per delegated LLM attempt settled by the authority.**
+
+Every delegated attempt consumes the `calls` axis, including typed failures, malformed returns, and throws. When no trustworthy usage exists it contributes zero tokens but still one call, so a calls ceiling remains a retry-amplification circuit breaker. Malformed runtime `Result` values are parsed at the authority shell and returned as typed non-retriable `node-crash` errors after settlement.
 
 ```ts
 type SpendLedgerPort = {
@@ -49,9 +51,9 @@ type SpendLedgerPort = {
 };
 ```
 
-**The encoding is chosen so that appending IS `addSpend`.** `domain/spend-record.ts` flattens a `Spend` to three numeric sums plus a set of model names, and the `priced`/`unpriced` discriminant is **derived from the set's emptiness** rather than stored beside it — a stored discriminant could contradict the set it describes. Redis then gets `HINCRBY` ×3 and `SADD`, all atomic and commutative, so concurrent appends cannot lose an increment or corrupt the record. No lock, no CAS, no transaction.
+**The encoding is chosen so that appending IS `addSpend`.** `domain/spend-record.ts` flattens a `Spend` into ONE Redis hash: three established numeric fields plus reserved `$unpriced:<canonical-encoded-model>` fields whose value is exactly `1`. The `priced`/`unpriced` discriminant is **derived from marker-field presence** rather than stored beside it. Redis queues all marker `HSET`s first, nonzero `HINCRBY` fields cost-first (`micros`, `tokens`, `calls`), then ONE `EXPIRE` on that hash. Hydration performs ONE `HGETALL` and strictly rejects unknown fields, malformed marker fields/values, and any present numeric value that is not a canonical non-negative safe integer. Corruption is a typed read failure, never zero. Concurrent transactions remain correct because sums and marker-field union commute. No lock, `WATCH`, retry loop, Lua, second key, or second read is used.
 
-**`add` returns nothing.** The in-process meter already knows the run's figure, and a total assembled from several independent atomic commands could disagree with a concurrent writer's view — nothing would be able to trust it.
+**`add` returns nothing.** The in-process meter already knows the run's figure, and the durability port only acknowledges whether the append transaction was observed as successful. Returning a total would add an unused read-model contract to a write seam and still could not resolve a lost acknowledgement.
 
 **Reads fail closed under a declared budget, open without one.** An unreadable ledger refuses a *budgeted* slice at context construction; an unbudgeted one logs and meters from zero.
 
@@ -71,26 +73,24 @@ digest addressing, strict V1 parsing, and atomic rename. The host's
 <root>/<sha256(runId)>.lock.fence/  # lock protocol metadata
 ```
 
-Unlike Redis's independently atomic field algebra, file `add` takes the per-run
-F6 lock, strictly reads the prior complete snapshot, folds `addSpend`, and
+Unlike Redis's atomic additive transaction, file `add` takes the per-run F6
+lock, strictly reads the prior complete snapshot, folds `addSpend`, and
 atomically renames one replacement record. Lock-free reads therefore observe
 either the complete prior snapshot or the complete next snapshot. Corruption,
 non-integer/negative figures, crossed embedded run IDs, and symlink substitution
-are typed failures, never zero. No adapter retries `add`: its additive contract
-cannot distinguish a lost acknowledgement from a lost commit, so a blind retry
-could double-count.
+are typed failures, never zero. No adapter retries `add`: its additive contract cannot distinguish a lost acknowledgement from a lost commit, so a blind retry could double-count. Production ioredis construction also sets `autoResendUnfulfilledCommands: false`; an unfulfilled additive `EXEC` is never automatically replayed after reconnect.
 
 ## Consequences
 
 - The park/resume hole is closed. A run that parks with 45 of a 40-token budget spent resumes already over and refuses immediately, and there is a test that fails without the ledger.
 - **The "zero network round trips" claim in `metered-llm.ts` is now false as stated and has been restated rather than deleted.** The ADMISSION decision still adds none — it is a pure comparison against a counter hydrated once per slice. The SETTLE path adds one append per call, sequenced after a call that already cost seconds. The guarantee that mattered (an LLM call is never delayed by budget bookkeeping *before* it is made) is unchanged.
-- **Loss window: every concurrently settled append still pending.** A crash between provider settlement and ledger completion can lose every call whose append has not started, and can leave every append already in progress partially recorded. With concurrent calls this is not bounded to one call; the record necessarily follows the facts it records.
-- **Each individual partial append fails closed for unknown pricing.** Unpriced model markers are persisted before any numeric increment, so an interrupted append may conservatively retain unknown pricing while under-reporting later numeric axes, but can never rehydrate unpriced spend as priced. Priced appends remain cost-first (`micros` before tokens and calls), and every command fails fast.
-- `RedisPort` gained `hIncrBy`, `hGetAll`, and `expire`. All three are generic Redis primitives rather than domain-shaped methods, and none is on the per-tenant ACL's denied list. The ledger parses them once at construction (`spendLedgerRedis`), so the missing-primitive case is detected in one place rather than null-checked per call.
+- **Loss window: every concurrently settled append still pending.** A crash between provider settlement and acknowledged ledger completion can lose every call whose transaction is not known committed. With concurrent calls this is not bounded to one call; the record necessarily follows the facts it records.
+- **Each acknowledged Redis append is complete.** Marker fields, nonzero numeric axes, and the configured single-key TTL refresh commit together. If `EXEC` aborts, reports any command error, returns a malformed result list, or its acknowledgement is thrown/lost, the adapter returns one typed append failure. It does not retry or permit ioredis to automatically replay an additive delta that may already have committed.
+- `RedisPort` gained the optional consumer-owned `appendSpend` transaction operation plus `hGetAll` for the sole read. The ledger parses and receiver-binds exactly those capabilities once at construction (`spendLedgerRedis`). The production operation inspects every `EXEC` result and uses no Lua or command on the per-tenant ACL's denied list.
 - **An adapter that cannot increment DOWNGRADES; it does not refuse.** `createNodeContextForDag` falls back to the in-process ledger, because refusing every run over a metering capability would turn a configuration gap into an outage. The downgrade is logged at `error` naming the missing primitives and the consequence (`per-run LLM budgets reset when this process restarts`), which is the only place that fact exists — an earlier draft of this ADR claimed the host "fails at boot", which was never what the code did.
-- **Spend keys are spelled `$spend` / `$spend:unpriced`, and the `$` is load-bearing.** They share `checkpointKeyPrefix` with `buildCheckpointKey`, whose final segment is a caller-supplied `NodeId` — and `ID_PATTERN` admits the literal `spend`. A plain segment collided with the checkpoint of a node named `spend`, letting the checkpoint writer's `SET` destroy the ledger's `HASH` (Redis `SET` is type-agnostic), which silently zeroed a run's recorded spend and then permanently refused every later slice of a budgeted run on `WRONGTYPE`. `$` is outside `ID_PATTERN`, the same technique `DAG_INPUT = "$input"` uses, and `cache-keys.test.ts` proves the disjointness over arbitrary node ids rather than trusting a comment. **Any future key added beneath the checkpoint prefix inherits this constraint.**
-- Spend keys live under the same `fugue:<tenant>:` prefix as every other key, so the per-tenant ACL scopes them unchanged. Their TTL follows the checkpoint TTL and is refreshed on every append, so it measures idleness rather than age. **No configured checkpoint TTL means no spend expiry** — a record that expired while its checkpoint survived would resume the run with a refilled budget.
-- One Run Spend Authority now owns the slice's meter and reservations. The main client, `judgeLlm`, and every boot-scoped capability-bag client explicitly marked `clientKind: "llm"` delegate to it, so client choice cannot bypass the ceiling.
+- **The sole spend key is spelled `$spend`, and the `$` is load-bearing.** It shares `checkpointKeyPrefix` with `buildCheckpointKey`, whose final segment is a caller-supplied `NodeId`; `$` is outside `ID_PATTERN`, so a node checkpoint cannot collide with and type-destroy the hash. `cache-keys.test.ts` proves this over arbitrary node ids. **Any future key added beneath the checkpoint prefix inherits this constraint.**
+- The spend hash lives under the same `fugue:<tenant>:` prefix as every other key, so the per-tenant ACL scopes it unchanged. Its one TTL follows the checkpoint TTL and refreshes inside the append transaction; marker and numeric evidence cannot expire separately. **No configured checkpoint TTL means no spend expiry** — a record that expired while its checkpoint survived would resume the run with a refilled budget.
+- One Run Spend Authority now owns the slice's meter and reservations. The main client, `judgeLlm`, and every boot-scoped capability-bag client explicitly marked `clientKind: "llm"` delegate to it. Augmented subtypes declare `runScopedOperations`; the host, not adapter code, binds those aliases to the metered surface, so client choice cannot bypass the ceiling.
 - The file adapter closes F6 restart durability without changing stock selection: the stock host explicitly wires a Redis-first in-process fallback; a file-runtime embedder injects `createFileSpendLedger(root)` as authoritative `SharedInfra.spendLedger`. Redis capability detection cannot silently displace that injected file authority, and only an actually selected memory fallback logs “NOT durable.”
 - File roots and retention are embedder-owned. No backend selector is inferred from `DAGS_LOCAL_PATH`, and no fsync/network-filesystem guarantee is claimed.
 

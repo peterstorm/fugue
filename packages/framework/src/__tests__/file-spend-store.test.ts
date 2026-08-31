@@ -30,6 +30,9 @@ afterEach(() => {
 });
 
 const rid = runId("run-file-spend");
+const modelName = fc
+  .array(fc.integer({ min: 0, max: 0xffff }), { maxLength: 12 })
+  .map((codeUnits) => String.fromCharCode(...codeUnits));
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
 const recordPath = (root: string, value: string): string => join(root, `${digest(value)}.json`);
 
@@ -49,7 +52,28 @@ describe("file spend codec", () => {
     ));
   });
 
-  it("rejects malformed figures, models, extra fields, and crossed run ownership", () => {
+  it("round-trips arbitrary UTF-16 unpriced model names", () => {
+    fc.assert(fc.property(
+      fc.uniqueArray(modelName, { minLength: 1, maxLength: 4 }),
+      (models) => {
+        const [head, ...rest] = [...models].sort();
+        const spend: Spend = {
+          tokens: 0,
+          calls: 1,
+          usd: {
+            kind: "unpriced",
+            models: [head!, ...rest],
+            knownMicros: 0 as MicroUsd,
+          },
+        };
+        const encoded = serializeFileSpendRecord(rid, spend);
+        expect(encoded.ok).toBe(true);
+        if (encoded.ok) expect(parseFileSpendRecord(encoded.value, rid)).toEqual({ ok: true, value: spend });
+      },
+    ));
+  });
+
+  it("rejects malformed figures, model ordering, extra fields, and crossed run ownership", () => {
     const valid = {
       schemaVersion: 1,
       runId: rid,
@@ -62,7 +86,6 @@ describe("file spend codec", () => {
       { ...valid, tokens: -1 },
       { ...valid, calls: 1.5 },
       { ...valid, micros: "1" },
-      { ...valid, unpricedModels: [""] },
       { ...valid, unpricedModels: ["z", "a"] },
       { ...valid, extra: true },
       { ...valid, runId: "another-run" },

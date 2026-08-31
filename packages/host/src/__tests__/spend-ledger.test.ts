@@ -7,9 +7,8 @@
  * matters most — what a resumed slice reads.
  *
  * The Redis adapter is exercised over an in-memory fake of the Redis
- * primitives, not a live server: what is under test is the ENCODING (three
- * sums and a set union) and the read-back, and a fake proves that with the
- * command semantics Redis guarantees.
+ * primitives, not a live server: what is under test is the one-HASH encoding
+ * (three sums and reserved membership fields) and strict one-read hydration.
  */
 
 import { afterAll, describe, it, expect } from "bun:test";
@@ -20,30 +19,21 @@ import { join } from "node:path";
 import { runId as makeRunId, dagId as makeDagId, ok, err } from "@fuguejs/framework";
 import type { MicroUsd, RunId, Spend } from "@fuguejs/framework";
 import { NO_SPEND, addSpend, pricedCall, unpricedCall } from "@fuguejs/framework";
-import type { RedisPort, SpendLedgerPort } from "../ports.js";
+import type { RedisPort, RedisSpendAppend, SpendLedgerPort } from "../ports.js";
 import { createInMemorySpendLedger } from "../adapters/spend-ledger-memory.js";
 import { createRedisSpendLedger, spendLedgerRedis } from "../adapters/spend-ledger-redis.js";
 import { createFileSpendLedger } from "../adapters/spend-ledger-file.js";
 import { tenantId } from "../domain/tenant.js";
+import {
+  recordOf,
+  SPEND_HASH_FIELDS,
+  SPEND_UNPRICED_MARKER_VALUE,
+  unpricedModelHashField,
+} from "../domain/spend-record.js";
 
 const micros = (n: number): MicroUsd => n as MicroUsd;
 const runA = makeRunId("run-a");
 const runB = makeRunId("run-b");
-
-/**
- * A capturing logger, so the TTL-refresh warn path can be asserted rather than
- * assumed. `RedisSpendLedgerDeps.logger` is REQUIRED — the field exists so an
- * `EXPIRE` failure is never silently lost — and every construction below
- * supplies one. It was previously omitted at all four sites, which typechecked
- * only because this package excludes `src/__tests__` from `tsc`.
- */
-const collectLogs = () => {
-  const logs: { level: string; msg: string; data?: Record<string, unknown> }[] = [];
-  const record = (level: string) => (msg: string, data?: Record<string, unknown>) => {
-    logs.push({ level, msg, ...(data !== undefined ? { data } : {}) });
-  };
-  return { logger: { info: record("info"), warn: record("warn"), error: record("error") }, logs };
-};
 
 const mkTenant = (raw: string) => {
   const parsed = tenantId(raw);
@@ -52,38 +42,43 @@ const mkTenant = (raw: string) => {
 };
 
 /**
- * A fake of exactly the Redis commands the ledger uses, with the semantics
- * Redis guarantees: `HINCRBY` creates-then-adds, `SADD` is a set union,
- * `HGETALL`/`SMEMBERS` read an absent key as empty.
+ * A fake of the ledger's one-hash Redis capability. `appendSpend` assigns
+ * idempotent marker fields, adds numeric axes, and refreshes retention as one
+ * operation; `HGETALL` reads an absent hash as an empty record.
  */
-const fakeRedis = (): { redis: RedisPort; hashes: Map<string, Map<string, number>>; sets: Map<string, Set<string>>; expiries: Map<string, number> } => {
-  const hashes = new Map<string, Map<string, number>>();
-  const sets = new Map<string, Set<string>>();
+const fakeRedis = (): {
+  redis: RedisPort;
+  hashes: Map<string, Map<string, string>>;
+  expiries: Map<string, number>;
+  appends: RedisSpendAppend[];
+} => {
+  const hashes = new Map<string, Map<string, string>>();
   const expiries = new Map<string, number>();
+  const appends: RedisSpendAppend[] = [];
   const redis = {
-    hIncrBy: async (key: string, field: string, by: number) => {
-      const hash = hashes.get(key) ?? new Map<string, number>();
-      const next = (hash.get(field) ?? 0) + by;
-      hash.set(field, next);
-      hashes.set(key, hash);
-      return ok(next);
+    hGetAll: async (key: string) => ok(Object.fromEntries(hashes.get(key) ?? new Map())),
+    appendSpend: async (append: RedisSpendAppend) => {
+      appends.push(append);
+      const record = recordOf(append.delta);
+      const hash = hashes.get(append.key) ?? new Map<string, string>();
+      for (const model of record.unpricedModels) {
+        hash.set(unpricedModelHashField(model), SPEND_UNPRICED_MARKER_VALUE);
+      }
+      for (const [field, by] of [
+        [SPEND_HASH_FIELDS.micros, record.micros],
+        [SPEND_HASH_FIELDS.tokens, record.tokens],
+        [SPEND_HASH_FIELDS.calls, record.calls],
+      ] as const) {
+        if (by !== 0) hash.set(field, String(Number(hash.get(field) ?? "0") + by));
+      }
+      if (hash.size > 0) hashes.set(append.key, hash);
+      if (append.ttlSec !== undefined && hashes.has(append.key)) {
+        expiries.set(append.key, append.ttlSec);
+      }
+      return ok(undefined);
     },
-    hGetAll: async (key: string) =>
-      ok(Object.fromEntries([...(hashes.get(key) ?? new Map())].map(([f, v]) => [f, String(v)]))),
-    expire: async (key: string, seconds: number) => {
-      expiries.set(key, seconds);
-      return ok(hashes.has(key) || sets.has(key));
-    },
-    sAdd: async (key: string, member: string) => {
-      const set = sets.get(key) ?? new Set<string>();
-      const added = set.has(member) ? 0 : 1;
-      set.add(member);
-      sets.set(key, set);
-      return ok(added);
-    },
-    sMembers: async (key: string) => ok([...(sets.get(key) ?? new Set<string>())]),
   } as unknown as RedisPort;
-  return { redis, hashes, sets, expiries };
+  return { redis, hashes, expiries, appends };
 };
 
 const redisLedger = (): SpendLedgerPort => {
@@ -91,7 +86,6 @@ const redisLedger = (): SpendLedgerPort => {
   if (!parsed.ok) throw new Error("fake redis should satisfy the ledger surface");
   return createRedisSpendLedger({
     redis: parsed.value,
-    logger: collectLogs().logger,
     tenant: mkTenant("acme"),
     dagId: makeDagId("test-dag"),
     ttlSec: 3600,
@@ -173,7 +167,7 @@ for (const [name, build] of BACKENDS) {
       const ledger = build();
       await ledger.add(runA, unpricedCall(1, "model-z"));
       await ledger.add(runA, unpricedCall(1, "model-a"));
-      await ledger.add(runA, unpricedCall(1, "model-z")); // repeat is a no-op
+      await ledger.add(runA, unpricedCall(1, "model-z")); // repeat is a no-op for the model-name set
       const spend = await readOrThrow(ledger, runA);
       if (spend.usd.kind !== "unpriced") throw new Error("expected unpriced");
       expect([...spend.usd.models]).toEqual(["model-a", "model-z"]);
@@ -262,217 +256,218 @@ describe("in-memory ledger defensive snapshots", () => {
 });
 
 describe("spendLedgerRedis: the construction-time surface check", () => {
-  it.each(["sAdd", "sMembers", "hIncrBy", "hGetAll", "expire"] as const)(
-    "refuses an adapter missing %s and names that primitive",
-    (primitive) => {
-      // Parse once at construction: malformed JavaScript adapters cannot defer
-      // a missing set/hash primitive until the first budgeted provider call.
-      const malformed = { ...fakeRedis().redis, [primitive]: undefined } as unknown as RedisPort;
+  it.each(["hGetAll", "appendSpend"] as const)(
+    "refuses an adapter missing %s and names that capability",
+    (capability) => {
+      const malformed = { ...fakeRedis().redis, [capability]: undefined } as unknown as RedisPort;
       const parsed = spendLedgerRedis(malformed);
       expect(parsed.ok).toBe(false);
       if (parsed.ok) return;
       expect(parsed.error.kind).toBe("config-invalid");
       const message = "message" in parsed.error ? parsed.error.message : "";
-      expect(message).toContain(primitive);
+      expect(message).toContain(capability);
     },
   );
 
-  it("accepts an adapter that offers all five required primitives", () => {
+  it("accepts the complete read/append capability", () => {
     expect(spendLedgerRedis(fakeRedis().redis).ok).toBe(true);
+  });
+
+  it("receiver-binds every copied method", async () => {
+    const state = fakeRedis();
+    const receiverDependent = {
+      ...state.redis,
+      marker: "receiver",
+      hGetAll(this: { marker: string }, key: string) {
+        if (this.marker !== "receiver") throw new Error("hGetAll lost receiver");
+        return state.redis.hGetAll!(key);
+      },
+      appendSpend(this: { marker: string }, append: RedisSpendAppend) {
+        if (this.marker !== "receiver") throw new Error("appendSpend lost receiver");
+        return state.redis.appendSpend!(append);
+      },
+    } as RedisPort & { readonly marker: string };
+    const parsed = spendLedgerRedis(receiverDependent);
+    if (!parsed.ok) throw new Error("expected receiver-dependent adapter to parse");
+    const ledger = createRedisSpendLedger({
+      redis: parsed.value,
+      tenant: mkTenant("acme"),
+      dagId: makeDagId("test-dag"),
+      ttlSec: 30,
+    });
+
+    expect((await ledger.add(runA, unpricedCall(3, "mystery"))).ok).toBe(true);
+    expect((await ledger.read(runA)).ok).toBe(true);
   });
 });
 
-describe("Redis ledger: key layout and TTL", () => {
-  /**
-   * Build a Redis-backed ledger over a controllable fake, returning both so a
-   * test can inspect what actually reached Redis. The four cases below each
-   * repeated this same narrow-then-construct sequence; only the TTL and the
-   * fake's behaviour ever differ.
-   */
+describe("Redis ledger: complete transactional append", () => {
   const ledgerOver = (redis: RedisPort, ttlSec?: number) => {
     const parsed = spendLedgerRedis(redis);
     if (!parsed.ok) throw new Error("fake redis should satisfy the ledger surface");
-    const captured = collectLogs();
-    const ledger = createRedisSpendLedger({
+    return createRedisSpendLedger({
       redis: parsed.value,
-      logger: captured.logger,
       tenant: mkTenant("acme"),
       dagId: makeDagId("test-dag"),
       ...(ttlSec !== undefined ? { ttlSec } : {}),
     });
-    return { ledger, logs: captured.logs };
   };
 
   const orderedDelta: Spend = {
     tokens: 10,
     calls: 1,
-    usd: { kind: "unpriced", models: ["mystery"], knownMicros: micros(7) },
+    usd: { kind: "unpriced", models: ["model-a", "model-z"], knownMicros: micros(7) },
   };
 
-  it("namespaces both keys under the tenant prefix and refreshes their TTL", async () => {
-    // The per-tenant Redis ACL is scoped to `~fugue:<tenant>:*`. A spend key
-    // that escaped that prefix would be unreachable by the worker that wrote
-    // it — and, worse, reachable by one that should not see it.
+  it("delegates the complete append once with one namespaced key and one TTL", async () => {
     const fake = fakeRedis();
-    const { ledger } = ledgerOver(fake.redis, 900);
+    const ledger = ledgerOver(fake.redis, 900);
 
-    await ledger.add(runA, unpricedCall(10, "mystery"));
+    expect((await ledger.add(runA, orderedDelta)).ok).toBe(true);
 
-    for (const key of [...fake.hashes.keys(), ...fake.sets.keys()]) {
-      expect(key.startsWith("fugue:acme:")).toBe(true);
-      expect(fake.expiries.get(key)).toBe(900);
-    }
+    expect(fake.appends).toEqual([{
+      key: "fugue:acme:test-dag:run-a:$spend",
+      delta: orderedDelta,
+      ttlSec: 900,
+    }]);
+    expect([...fake.expiries.entries()]).toEqual([
+      ["fugue:acme:test-dag:run-a:$spend", 900],
+    ]);
+    expect((await readOrThrow(ledger, runA)).usd.kind).toBe("unpriced");
   });
 
-  it("skips the TTL entirely when none is configured, matching the checkpoint writer", async () => {
-    // A deployment with no checkpoint TTL keeps durable state. A spend record
-    // that expired while its checkpoint survived would resume the run with a
-    // refilled budget — the exact bug the ledger closes.
+  it("uses no standalone marker, value, or expiry command path", async () => {
     const fake = fakeRedis();
-    const { ledger } = ledgerOver(fake.redis);
+    let standaloneCalls = 0;
+    const redis = {
+      ...fake.redis,
+      sAdd: async () => { standaloneCalls += 1; return ok(1); },
+      hIncrBy: async () => { standaloneCalls += 1; return ok(1); },
+      expire: async () => { standaloneCalls += 1; return ok(true); },
+    } as unknown as RedisPort;
+    const ledger = ledgerOver(redis, 900);
 
-    await ledger.add(runA, pricedCall(10, micros(1)));
+    expect((await ledger.add(runA, orderedDelta)).ok).toBe(true);
+    expect(standaloneCalls).toBe(0);
+    expect(fake.appends).toHaveLength(1);
+  });
+
+  it("omits retention from the atomic append when no TTL is configured", async () => {
+    const fake = fakeRedis();
+    const ledger = ledgerOver(fake.redis);
+
+    expect((await ledger.add(runA, pricedCall(10, micros(1)))).ok).toBe(true);
+    expect(fake.appends[0]).not.toHaveProperty("ttlSec");
     expect(fake.expiries.size).toBe(0);
   });
 
-  it("returns Err when unpriced-model markers are unreadable instead of hydrating priced spend", async () => {
+  it("hydrates with exactly one HGETALL, so expiry cannot split marker and figures", async () => {
     const fake = fakeRedis();
-    let modelReads = 0;
-    const failing = {
+    let reads = 0;
+    const redis = {
       ...fake.redis,
+      hGetAll: async (key: string) => {
+        reads += 1;
+        return fake.redis.hGetAll!(key);
+      },
       sMembers: async () => {
-        modelReads += 1;
-        return err({ kind: "redis-unavailable" as const, operation: "SMEMBERS" });
+        throw new Error("a split second read must never occur");
       },
     } as RedisPort;
-    const { ledger } = ledgerOver(failing);
-    expect((await ledger.add(runA, pricedCall(10, micros(7)))).ok).toBe(true);
-
-    const hydrated = await ledger.read(runA);
-
-    expect(hydrated).toEqual({
-      ok: false,
-      error: { kind: "redis-unavailable", operation: "SMEMBERS" },
-    });
-    expect(modelReads).toBe(1);
-  });
-
-  it("LOGS a TTL-refresh failure instead of discarding it (A1)", async () => {
-    // The whole reason `logger` is a required dep. An EXPIRE that quietly stops
-    // working lets a live run's spend record expire underneath it — the
-    // refill-on-resume bug again, with nothing to grep for. The append itself
-    // still succeeds: the spend IS recorded, only its idle TTL was not renewed.
-    const fake = fakeRedis();
-    const failing = {
-      ...fake.redis,
-      expire: async () => err({ kind: "redis-unavailable" as const, operation: "EXPIRE" }),
-    } as unknown as RedisPort;
-    const { ledger, logs } = ledgerOver(failing, 900);
-
-    const appended = await ledger.add(runA, pricedCall(10, micros(1)));
-    expect(appended.ok).toBe(true); // the spend is recorded regardless
-
-    const warned = logs.filter((l) => l.msg === "spend-ledger.ttl-refresh-failed");
-    expect(warned.length).toBe(2); // both keys
-    expect(warned[0]?.level).toBe("warn");
-    expect(String(warned[0]?.data?.["key"] ?? "")).toContain("fugue:acme:");
-    expect(warned[0]?.data?.["ttlSec"]).toBe(900);
-    expect(String(warned[0]?.data?.["consequence"] ?? "")).toContain("expire");
-  });
-
-  it("writes unpriced evidence before every numeric axis", async () => {
-    const fake = fakeRedis();
-    const operations: string[] = [];
-    const recording = {
-      ...fake.redis,
-      hIncrBy: async (key: string, field: string, by: number) => {
-        operations.push(`HINCRBY:${field}`);
-        return fake.redis.hIncrBy!(key, field, by);
-      },
-      sAdd: async (key: string, member: string) => {
-        operations.push("SADD:unpriced");
-        return fake.redis.sAdd(key, member);
-      },
-    } as RedisPort;
-    const { ledger } = ledgerOver(recording);
-
+    const ledger = ledgerOver(redis);
     expect((await ledger.add(runA, orderedDelta)).ok).toBe(true);
-    expect(operations).toEqual([
-      "SADD:unpriced",
-      "HINCRBY:micros",
-      "HINCRBY:tokens",
-      "HINCRBY:calls",
-    ]);
+
+    const spend = await ledger.read(runA);
+    expect(spend.ok && spend.value.usd.kind).toBe("unpriced");
+    expect(reads).toBe(1);
   });
 
-  it("fails before numeric writes when SADD loses acknowledgement and rehydrates unpriced", async () => {
+  it.each([
+    ["unknown field", { tokens: "10", shadowCalls: "99" }],
+    ["negative integer", { tokens: "-1" }],
+    ["unsafe integer", { tokens: "9007199254740992" }],
+    ["non-canonical integer", { tokens: "01" }],
+    ["malformed marker field", { "$unpriced:%ZZ": "1" }],
+    ["malformed marker value", { "$unpriced:model-a": "0" }],
+  ])("refuses a malformed hash (%s) instead of hydrating undercounted spend", async (_label, stored) => {
     const fake = fakeRedis();
-    const operations: string[] = [];
+    const ledger = ledgerOver({
+      ...fake.redis,
+      hGetAll: async () => ok(stored),
+    } as RedisPort);
+
+    const result = await ledger.read(runA);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("internal-invariant-violated");
+  });
+
+  it("returns a typed append failure without claiming a committed transaction", async () => {
+    const fake = fakeRedis();
     const failing = {
       ...fake.redis,
-      hIncrBy: async (key: string, field: string, by: number) => {
-        operations.push(`HINCRBY:${field}`);
-        return fake.redis.hIncrBy!(key, field, by);
-      },
-      sAdd: async (key: string, member: string) => {
-        operations.push("SADD:unpriced");
-        // Model Redis committing the marker while its acknowledgement is lost.
-        await fake.redis.sAdd(key, member);
-        return err({ kind: "redis-unavailable" as const, operation: "SADD acknowledgement" });
-      },
+      appendSpend: async () =>
+        err({ kind: "redis-unavailable" as const, operation: "spend append EXEC failed" }),
     } as RedisPort;
-    const { ledger } = ledgerOver(failing);
+    const ledger = ledgerOver(failing, 900);
 
-    expect((await ledger.add(runA, orderedDelta)).ok).toBe(false);
-    expect(operations).toEqual(["SADD:unpriced"]);
+    expect(await ledger.add(runA, orderedDelta)).toEqual({
+      ok: false,
+      error: { kind: "redis-unavailable", operation: "spend append EXEC failed" },
+    });
     expect(fake.hashes.size).toBe(0);
+  });
 
-    const hydrated = await readOrThrow(ledger, runA);
-    expect(hydrated.tokens).toBe(0);
-    expect(hydrated.calls).toBe(0);
-    expect(hydrated.usd.kind).toBe("unpriced");
-    if (hydrated.usd.kind === "unpriced") {
-      expect([...hydrated.usd.models]).toEqual(["mystery"]);
-      expect(hydrated.usd.knownMicros).toBe(micros(0));
+  it("rehydrates lone-surrogate model spend into a fresh ledger instance", async () => {
+    const fake = fakeRedis();
+    const firstSlice = ledgerOver(fake.redis, 900);
+    const model = `hostile-${String.fromCharCode(0xd800)}-model`;
+
+    expect((await firstSlice.add(runA, unpricedCall(3, model))).ok).toBe(true);
+
+    const resumedSlice = ledgerOver(fake.redis, 900);
+    const resumed = await resumedSlice.read(runA);
+    expect(resumed.ok).toBe(true);
+    if (!resumed.ok || resumed.value.usd.kind !== "unpriced") {
+      throw new Error("expected durable unpriced spend");
     }
+    expect(resumed.value.usd.models).toEqual([model]);
+    expect(resumed.value.calls).toBe(1);
   });
 
-  it("stops at the first failed increment after preserving the unpriced marker", async () => {
+  it("fences a throwing HGETALL implementation as one typed read failure", async () => {
     const fake = fakeRedis();
-    const operations: string[] = [];
-    const failing = {
+    const ledger = ledgerOver({
       ...fake.redis,
-      hIncrBy: async (key: string, field: string, by: number) => {
-        operations.push(`HINCRBY:${field}`);
-        return field === "tokens"
-          ? err({ kind: "redis-unavailable" as const, operation: "HINCRBY tokens" })
-          : fake.redis.hIncrBy!(key, field, by);
-      },
-      sAdd: async (key: string, member: string) => {
-        operations.push("SADD:unpriced");
-        return fake.redis.sAdd(key, member);
-      },
-    } as RedisPort;
-    const { ledger } = ledgerOver(failing);
+      hGetAll: async () => { throw new Error("read transport escaped"); },
+    } as RedisPort);
 
-    expect((await ledger.add(runA, orderedDelta)).ok).toBe(false);
-    expect(operations).toEqual(["SADD:unpriced", "HINCRBY:micros", "HINCRBY:tokens"]);
-    const stored = [...fake.hashes.values()][0];
-    expect(stored?.get("micros")).toBe(7);
-    expect(stored?.has("tokens")).toBe(false);
-    expect(stored?.has("calls")).toBe(false);
-    expect([...fake.sets.values()][0]).toEqual(new Set(["mystery"]));
+    const result = await ledger.read(runA);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("internal-invariant-violated");
+    expect("message" in result.error ? result.error.message : "").toContain(
+      "hGetAll threw across the port boundary: read transport escaped",
+    );
   });
 
-  it("does not spend a round trip on a zero increment", async () => {
+  it("fences a throwing transaction implementation as one typed append failure", async () => {
     const fake = fakeRedis();
-    const { ledger } = ledgerOver(fake.redis);
+    const throwing = {
+      ...fake.redis,
+      appendSpend: async () => { throw new Error("transaction acknowledgement lost"); },
+    } as RedisPort;
+    const ledger = ledgerOver(throwing, 900);
 
-    // A free call still counts one CALL, but writes no tokens or micros field.
-    await ledger.add(runA, pricedCall(0, micros(0)));
-    const hash = [...fake.hashes.values()][0];
-    expect(hash?.has("calls")).toBe(true);
-    expect(hash?.has("tokens")).toBe(false);
-    expect(hash?.has("micros")).toBe(false);
+    const result = await ledger.add(runA, orderedDelta);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("internal-invariant-violated");
+    expect("message" in result.error ? result.error.message : "").toContain(
+      "appendSpend threw across the port boundary: transaction acknowledgement lost",
+    );
+    expect(fake.hashes.size).toBe(0);
   });
 });

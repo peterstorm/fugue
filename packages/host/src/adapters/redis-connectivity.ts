@@ -20,6 +20,12 @@ import type { Result } from "@fuguejs/framework";
 // at runtime. The driver is pulled by the dynamic `import("ioredis")` in the
 // default factory ONLY, never for a caller that injects its own client factory.
 import type { Redis as IoRedis, RedisOptions } from "ioredis";
+import {
+  recordOf,
+  SPEND_HASH_FIELDS,
+  SPEND_UNPRICED_MARKER_VALUE,
+  unpricedModelHashField,
+} from "../domain/spend-record.js";
 
 /**
  * A Redis ACL credential pair. STRUCTURAL on purpose — any `{ username, password }`
@@ -210,13 +216,59 @@ export const createIoredisRedisPort = (
           return ok(created === "OK" ? "created" : "exists");
         }
       }),
-    hIncrBy: (key, field, by) =>
-      redisCall(() => `HINCRBY ${key} ${field}`, () => client.hincrby(key, field, by)),
     hGetAll: (key) => redisCall(() => `HGETALL ${key}`, () => client.hgetall(key)),
-    expire: async (key, seconds) => {
-      const applied = await redisCall(() => `EXPIRE ${key}`, () => client.expire(key, seconds));
-      return applied.ok ? ok(applied.value === 1) : applied;
-    },
+    appendSpend: (append) =>
+      redisCall(
+        () => `MULTI SPEND-APPEND ${append.key}`,
+        async () => {
+          const record = recordOf(append.delta);
+          const numericEntries = [
+            [SPEND_HASH_FIELDS.micros, record.micros],
+            [SPEND_HASH_FIELDS.tokens, record.tokens],
+            [SPEND_HASH_FIELDS.calls, record.calls],
+          ] as const;
+          if (numericEntries.some(([, value]) => !Number.isSafeInteger(value) || value < 0)) {
+            throw new Error("Redis spend append rejected a non-negative-safe-integer invariant violation");
+          }
+          // Encode every marker before MULTI so hostile model text cannot leave
+          // a partially queued transaction object in the adapter.
+          const markerFields = record.unpricedModels.map(unpricedModelHashField);
+          const transaction = client.multi();
+          let queuedCommands = 0;
+
+          for (const field of markerFields) {
+            transaction.hset(
+              append.key,
+              field,
+              SPEND_UNPRICED_MARKER_VALUE,
+            );
+            queuedCommands += 1;
+          }
+          for (const [field, by] of numericEntries) {
+            if (by === 0) continue;
+            transaction.hincrby(append.key, field, by);
+            queuedCommands += 1;
+          }
+          if (append.ttlSec !== undefined) {
+            transaction.expire(append.key, append.ttlSec);
+            queuedCommands += 1;
+          }
+
+          const executed = await transaction.exec();
+          if (executed === null) {
+            throw new Error("Redis spend append EXEC unexpectedly aborted without WATCH");
+          }
+          if (executed.length !== queuedCommands) {
+            throw new Error(
+              `Redis spend append EXEC returned ${executed.length} results for ` +
+                `${queuedCommands} queued commands`,
+            );
+          }
+          for (const [commandError] of executed) {
+            if (commandError !== null) throw commandError;
+          }
+        },
+      ),
     sAdd: (key, member) => redisCall(() => `SADD ${key}`, () => client.sadd(key, member)),
     sRem: (key, member) => redisCall(() => `SREM ${key}`, () => client.srem(key, member)),
     sMembers: (key) => redisCall(() => `SMEMBERS ${key}`, () => client.smembers(key)),
@@ -272,6 +324,8 @@ export const createRedisConnectivity = async (
     const makeClient = createClient ?? (await defaultIoredisFactory());
     const client = makeClient(redisUrl, {
       maxRetriesPerRequest: 3,
+      // Additive MULTI/EXEC acknowledgement is ambiguous: replay can double spend.
+      autoResendUnfulfilledCommands: false,
       lazyConnect: true,
       ...(aclCredential !== undefined
         ? { username: aclCredential.username, password: aclCredential.password }

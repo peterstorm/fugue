@@ -1023,7 +1023,7 @@ Refuses an LLM call **before** it happens once a run has reached a declared ceil
 llmBudget:
   usd: 2.50      # dollars — the axis that means what you meant
   tokens: 500000 # every token, both directions
-  calls: 40      # settled provider round trips
+  calls: 40      # delegated LLM attempts, including failed/malformed outcomes
 ```
 
 ```typescript
@@ -1040,7 +1040,7 @@ Cost is computed from the prompt-cache split, so a cached run and an uncached on
 
 **Unpriced models fail closed.** `PRICE_TABLE` is hand-maintained; a model with no entry has an unknown cost, and a `usd` ceiling refuses rather than treating unknown as free. The refusal names the model so the fix is obvious. Token and call ceilings are unaffected — they are perfectly evaluable on any model.
 
-Omitting every ceiling means no enforcement: calls are still metered and logged (`llm.metered`), never refused.
+Omitting every ceiling means no enforcement: calls are still metered and logged (`llm.metered`), never refused. Every delegated LLM attempt consumes the calls axis even when it returns a typed failure, malformed `Result`, or throws; without trustworthy usage it consumes zero tokens but cannot retry forever under a calls ceiling.
 
 Nodes can declare the read-only Budget Capability and adapt before they fan out:
 
@@ -1080,9 +1080,9 @@ A budgeted run whose ledger cannot be READ refuses the slice: an unreadable ledg
 
 One Run Spend Authority meters `ctx.llm`, `judgeLlm`, and every custom
 boot-scoped `CapabilityHandle` marked `clientKind: "llm"`. Augmented LLM
-subtypes additionally compose a run-scoped facade from the metered standard
-surface, so subtype aliases cannot bypass the authority through target-bound
-self-calls. All clients share one reservation gate, spent view, ceiling, and
+subtypes declare a `runScopedOperations` alias map; the host interprets it into
+a frozen facade bound to the metered standard surface, so adapter code cannot
+retain a boot client or bypass the authority through target-bound self-calls. All clients share one reservation gate, spent view, ceiling, and
 ledger. File-durable embedders can
 inject the host's `createFileSpendLedger(root)` adapter as authoritative; Redis
 capability detection does not override it. Ledger metadata carries backend,

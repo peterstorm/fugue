@@ -4,6 +4,7 @@ import {
   err,
   formatFrameworkError,
   isFrameworkError,
+  mapErr,
   ok,
   safeErrorMessage,
   type Result,
@@ -32,17 +33,15 @@ export const createFileSpendLedger = (
       backend: "file",
       durability: "restart",
     }),
-    read: async (runId) => {
-      const result = await store.read(runId);
-      return result.ok
-        ? ok(result.value)
-        : err(spendLedgerUnavailable("read", formatFrameworkError(result.error)));
-    },
-    add: async (runId, delta) => {
-      const result = await store.add(runId, delta);
-      return result.ok
-        ? ok(undefined)
-        : err(spendLedgerUnavailable("add", formatFrameworkError(result.error)));
-    },
+    read: async (runId) =>
+      mapErr(
+        await store.read(runId),
+        (error) => spendLedgerUnavailable("read", formatFrameworkError(error)),
+      ),
+    add: async (runId, delta) =>
+      mapErr(
+        await store.add(runId, delta),
+        (error) => spendLedgerUnavailable("add", formatFrameworkError(error)),
+      ),
   }));
 };

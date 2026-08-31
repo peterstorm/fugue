@@ -8,7 +8,8 @@
 
 import { match, P } from "ts-pattern";
 import type { Context } from "hono";
-import { safeErrorMessage } from "@fuguejs/framework";
+import { isFrameworkError, safeErrorMessage } from "@fuguejs/framework";
+import type { FrameworkErrorKind } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import {
   formatHostError,
@@ -240,9 +241,21 @@ const asError = (value: unknown): Error | undefined => {
   }
 };
 
-const readErrorField = (error: Error, key: "cause" | "message" | "stack" | "frameworkErrorKind"): unknown => {
+const readErrorField = (error: Error, key: "cause" | "message" | "stack"): unknown => {
   try {
     return (error as unknown as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
+};
+
+/** Accept only an own data property from the framework's closed vocabulary. */
+const readFrameworkErrorKind = (error: Error): FrameworkErrorKind | undefined => {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(error, "frameworkErrorKind");
+    if (descriptor === undefined || !("value" in descriptor)) return undefined;
+    const marker = { kind: descriptor.value };
+    return isFrameworkError(marker) ? marker.kind : undefined;
   } catch {
     return undefined;
   }
@@ -266,8 +279,8 @@ export const createErrorHandler = (
 
   const frameworkErrorKind = thrownError === undefined
     ? undefined
-    : readErrorField(thrownError, "frameworkErrorKind");
-  if (thrownError !== undefined && typeof frameworkErrorKind === "string") {
+    : readFrameworkErrorKind(thrownError);
+  if (thrownError !== undefined && frameworkErrorKind !== undefined) {
     logErrorWithoutThrowing(logger, "Framework error in request handler", {
       kind: frameworkErrorKind,
       error: readErrorField(thrownError, "message"),

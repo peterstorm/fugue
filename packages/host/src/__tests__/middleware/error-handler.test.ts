@@ -9,7 +9,18 @@ import type {
   ErrorHandlerFallback,
   ErrorHandlerLogger,
 } from "../../http/middleware/error-handler.js";
-import { parseHostError } from "../../domain/host-error.js";
+import {
+  fsPurgeFailed,
+  internalInvariantViolated,
+  parseHostError,
+  redisUnavailable,
+  spendLedgerUnavailable,
+  teamAlreadyExists,
+  tenantConfigInvalid,
+  tenantOverQuota,
+  tenantUnknown,
+  workerUnavailable,
+} from "../../domain/host-error.js";
 import type { HostError } from "../../domain/host-error.js";
 
 // ── Test Logger ────────────────────────────────────────────────────────────
@@ -108,7 +119,7 @@ describe("error-handler middleware", () => {
     it("returns 500 with the framework error kind", async () => {
       const { logger, logs } = createTestLogger();
       const err = Object.assign(new Error("node execution failed"), {
-        frameworkErrorKind: "node-execution-error",
+        frameworkErrorKind: "node-crash",
       });
       const app = createApp(logger, () => { throw err; });
 
@@ -116,14 +127,35 @@ describe("error-handler middleware", () => {
       expect(res.status).toBe(500);
 
       const body = await res.json();
-      expect(body.error).toBe("node-execution-error");
+      expect(body.error).toBe("node-crash");
       // Message is sanitized to kind-based template (not raw thrown.message)
-      expect(body.message).toBe("Framework error: node-execution-error");
+      expect(body.message).toBe("Framework error: node-crash");
 
       // Must be logged
       expect(logs.length).toBeGreaterThan(0);
       expect(logs[0].msg).toBe("Framework error in request handler");
-      expect(logs[0].data?.kind).toBe("node-execution-error");
+      expect(logs[0].data?.kind).toBe("node-crash");
+    });
+
+    it("does not reflect malformed, accessor-backed, or off-union markers", async () => {
+      const accessorBacked = new Error("accessor marker");
+      Object.defineProperty(accessorBacked, "frameworkErrorKind", {
+        get: () => "node-crash",
+      });
+      const cases = [
+        Object.assign(new Error("off union"), { frameworkErrorKind: "node-execution-error" }),
+        Object.assign(new Error("malformed"), { frameworkErrorKind: 42 }),
+        accessorBacked,
+      ];
+
+      for (const thrown of cases) {
+        const { logger, logs } = createTestLogger();
+        const res = await createApp(logger, () => { throw thrown; }).request("/throw");
+        expect(res.status).toBe(500);
+        expect(await res.json()).toMatchObject({ error: "internal-error" });
+        expect(logs).toHaveLength(1);
+        expect(logs[0]?.msg).toBe("Unhandled error in request handler");
+      }
     });
   });
 
@@ -195,6 +227,60 @@ describe("error-handler middleware", () => {
       expect(logs[0].msg).toBe("Host error in request handler");
       expect(logs[0].data?.kind).toBe("worker-unavailable");
       expect(logs[0].data?.detail).toContain("acme-secret-tenant");
+    });
+  });
+
+  describe("first-party HostError smart constructors", () => {
+    it("return frozen records and deeply snapshot owned context", () => {
+      const nested = { values: ["initial"] };
+      const sourceContext: Record<string, unknown> = { operation: "initial", nested };
+      const invariant = internalInvariantViolated("failed", sourceContext);
+      sourceContext.operation = "mutated";
+      nested.values.push("mutated");
+
+      const constructed: readonly HostError[] = [
+        redisUnavailable("get"),
+        spendLedgerUnavailable("read", "failed"),
+        fsPurgeFailed("failed"),
+        teamAlreadyExists("eng"),
+        tenantConfigInvalid("invalid"),
+        tenantUnknown(),
+        tenantOverQuota("tenant" as never, 7),
+        workerUnavailable("tenant" as never),
+        invariant,
+      ];
+
+      expect(constructed.every(Object.isFrozen)).toBe(true);
+      expect(invariant.kind).toBe("internal-invariant-violated");
+      if (invariant.kind === "internal-invariant-violated") {
+        expect(invariant.context).toEqual({
+          operation: "initial",
+          nested: { values: ["initial"] },
+        });
+        expect(invariant.context).not.toBe(sourceContext);
+        expect(Object.isFrozen(invariant.context)).toBe(true);
+        const snapshottedNested = invariant.context.nested as { readonly values: readonly string[] };
+        expect(snapshottedNested).not.toBe(nested);
+        expect(Object.isFrozen(snapshottedNested)).toBe(true);
+        expect(Object.isFrozen(snapshottedNested.values)).toBe(true);
+      }
+    });
+
+    it("fails closed to a frozen non-sensitive context for cyclic or hostile input", () => {
+      const cyclic: Record<string, unknown> = { secret: "must-not-retain" };
+      cyclic.self = cyclic;
+      const hostile = Object.defineProperty({}, "secret", {
+        enumerable: true,
+        get: () => { throw new Error("hostile getter secret"); },
+      }) as Record<string, unknown>;
+
+      for (const source of [cyclic, hostile]) {
+        const invariant = internalInvariantViolated("failed", source);
+        if (invariant.kind !== "internal-invariant-violated") throw new Error("expected invariant");
+        expect(invariant.context).toEqual({ contextSnapshot: "unavailable" });
+        expect(Object.isFrozen(invariant.context)).toBe(true);
+        expect(JSON.stringify(invariant.context)).not.toContain("secret");
+      }
     });
   });
 
@@ -590,9 +676,9 @@ describe("error-handler middleware", () => {
         },
         {
           thrown: Object.assign(new Error("framework"), {
-            frameworkErrorKind: "node-execution-error",
+            frameworkErrorKind: "node-crash",
           }),
-          expectedError: "node-execution-error",
+          expectedError: "node-crash",
         },
         { thrown: new Error("generic"), expectedError: "internal-error" },
       ] as const;

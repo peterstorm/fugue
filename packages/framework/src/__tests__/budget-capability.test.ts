@@ -82,13 +82,14 @@ describe("remainingFor", () => {
     expect(second.headroom).toEqual(first.headroom);
   });
 
-  it("reports unpriced USD headroom as domain data, never a number", () => {
+  it("reports deeply frozen unpriced USD headroom as domain data, never a number", () => {
     const limits = ceilings([{ kind: "usd", limit: 500 as MicroUsd }])!;
-    expect(remainingFor(limits, {
+    const remaining = remainingFor(limits, {
       tokens: 3,
       calls: 1,
       usd: { kind: "unpriced", models: ["new-model"], knownMicros: 20 as MicroUsd },
-    })).toEqual({
+    });
+    expect(remaining).toEqual({
       kind: "budgeted",
       basis: "projected",
       headroom: [{
@@ -98,6 +99,12 @@ describe("remainingFor", () => {
         observedAtLeast: 20 as MicroUsd,
       }],
     });
+    const unpriced = remaining.kind === "budgeted" ? remaining.headroom[0] : undefined;
+    if (unpriced?.kind !== "unpriced") throw new Error("expected unpriced budget headroom");
+    expect(Object.isFrozen(unpriced.models)).toBe(true);
+    expect(() => {
+      (unpriced.models as unknown as string[]).push("poison");
+    }).toThrow();
   });
 
   it("preserves canonical axes and never exposes negative headroom (property)", () => {

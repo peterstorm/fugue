@@ -24,7 +24,7 @@ import type {
   FrameworkError,
 } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
-import type { RedisPort, LogPort, SharedInfra } from "../ports.js";
+import type { RedisPort, RedisSpendAppend, LogPort, SharedInfra } from "../ports.js";
 import type { SpendLedgerPort } from "../ports.js";
 import type { RegisteredDag } from "../domain/registry.js";
 import { z } from "zod";
@@ -46,6 +46,12 @@ import {
 import { tenantId } from "../domain/tenant.js";
 import type { TenantId } from "../domain/tenant.js";
 import { createFileSpendLedger } from "../adapters/spend-ledger-file.js";
+import {
+  recordOf,
+  SPEND_HASH_FIELDS,
+  SPEND_UNPRICED_MARKER_VALUE,
+  unpricedModelHashField,
+} from "../domain/spend-record.js";
 
 interface AugmentedLlmClient extends LlmClient {
   readonly sendAlias: LlmClient["sendStructured"];
@@ -494,8 +500,74 @@ describe("createNamespacedCheckpointWriter", () => {
     const { logger, logs } = collectLogs();
     const writer = createNamespacedCheckpointWriter(failingRedis(), testTenant, testDagId, testRunId, undefined, logger);
 
-    await expect(writer.write(testRunId, testNodeId, { data: 1 })).rejects.toThrow(/Checkpoint write failed/);
+    await expect(writer.write(testRunId, testNodeId, { data: 1 })).rejects.toThrow(
+      /^Checkpoint persistence failed$/,
+    );
     expect(logs.some(l => l.msg.includes("Checkpoint write failed"))).toBe(true);
+  });
+
+  it("routes thrown Redis writes through contextual threshold escalation", async () => {
+    const redis: RedisPort = {
+      ...createMockRedis().redis,
+      set: async () => { throw new Error("socket reset during checkpoint"); },
+    };
+    const { logger, logs } = collectLogs();
+    const writer = createNamespacedCheckpointWriter(
+      redis,
+      testTenant,
+      testDagId,
+      testRunId,
+      undefined,
+      logger,
+    );
+
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      await expect(writer.write(testRunId, testNodeId, { attempt })).rejects.toThrow(
+        /^Checkpoint persistence failed$/,
+      );
+    }
+
+    const escalated = logs.find((line) => line.level === "error");
+    expect(escalated?.msg).toContain("Checkpoint write failures exceeded threshold");
+    expect(escalated?.data).toMatchObject({
+      key: buildCheckpointKey(testTenant, testDagId, testRunId, testNodeId),
+      dagId: testDagId,
+      runId: testRunId,
+      nodeId: testNodeId,
+      error: "socket reset during checkpoint",
+      consecutiveFailures: 10,
+    });
+  });
+
+  it("logs full typed Redis diagnostics server-side but throws no key or driver detail", async () => {
+    const sensitiveKey = buildCheckpointKey(testTenant, testDagId, testRunId, testNodeId);
+    const redis: RedisPort = {
+      ...createMockRedis().redis,
+      set: async () => err({
+        kind: "redis-unavailable",
+        operation: `SET ${sensitiveKey}: NOPERM raw-driver-secret`,
+      }),
+    };
+    const { logger, logs } = collectLogs();
+    const writer = createNamespacedCheckpointWriter(
+      redis, testTenant, testDagId, testRunId, undefined, logger,
+    );
+
+    let boundaryMessage = "";
+    try {
+      await writer.write(testRunId, testNodeId, { data: 1 });
+    } catch (error) {
+      boundaryMessage = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(boundaryMessage).toBe("Checkpoint persistence failed");
+    expect(boundaryMessage).not.toContain(String(testTenant));
+    expect(boundaryMessage).not.toContain(String(testDagId));
+    expect(boundaryMessage).not.toContain(String(testRunId));
+    expect(boundaryMessage).not.toContain(String(testNodeId));
+    expect(boundaryMessage).not.toContain("raw-driver-secret");
+    expect(String(logs[0]?.data?.["error"])).toContain(sensitiveKey);
+    expect(String(logs[0]?.data?.["error"])).toContain("raw-driver-secret");
   });
 
   it.each([
@@ -543,7 +615,9 @@ describe("createNamespacedCheckpointWriter", () => {
       failingRedis(), testTenant, testDagId, testRunId, undefined, throwingLogger,
     );
 
-    await expect(writer.write(testRunId, testNodeId, { data: 1 })).rejects.toThrow(/Checkpoint write failed/);
+    await expect(writer.write(testRunId, testNodeId, { data: 1 })).rejects.toThrow(
+      /^Checkpoint persistence failed$/,
+    );
   });
 });
 
@@ -900,8 +974,9 @@ describe("createNodeContextForDag — one authority across main/judge/custom LLM
     ).toEqual(["llm", "judgeLlm", "criticLlm"]);
   });
 
-  it("composes an augmented alias from the metered surface and enforces the shared gate", async () => {
+  it("interprets an augmented alias through the metered surface and enforces the shared gate", async () => {
     let providerCalls = 0;
+    let bootAliasCalls = 0;
     const augmented: AugmentedLlmClient = {
       sendStructured: async <O>(): Promise<Result<LlmResponse<O>, FrameworkError>> => {
         providerCalls += 1;
@@ -913,17 +988,16 @@ describe("createNodeContextForDag — one authority across main/judge/custom LLM
       },
       // This boot-scoped self-call is exactly what a transparent target-bound
       // Proxy failed to intercept. The run facade below must not expose it.
-      sendAlias(req) { return this.sendStructured(req); },
+      sendAlias(req) {
+        bootAliasCalls += 1;
+        return this.sendStructured(req);
+      },
     };
     const shared = baseSharedInfra([{
       name: "augmentedLlm",
       client: augmented,
       clientKind: "llm",
-      composeRunClient: (metered): AugmentedLlmClient => ({
-        sendStructured: (req) => metered.sendStructured(req),
-        sendWithTools: (req, ctx) => metered.sendWithTools(req, ctx),
-        sendAlias: (req) => metered.sendStructured(req),
-      }),
+      runScopedOperations: { sendAlias: "sendStructured" },
     }]);
     const captured = collectLogs();
     const { ctx } = await createTestContext({
@@ -939,6 +1013,7 @@ describe("createNodeContextForDag — one authority across main/judge/custom LLM
     expect(refused.ok).toBe(false);
     if (!refused.ok) expect(refused.error.kind).toBe("llm-budget-exceeded");
     expect(providerCalls).toBe(1);
+    expect(bootAliasCalls).toBe(0);
     expect(ctx.budget?.spent().tokens).toBe(5);
     expect(
       captured.logs.filter((line) => line.msg === "llm.metered")[0]?.data?.["clientKey"],
@@ -1446,29 +1521,29 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
    * deliberately cannot, so the two fixtures together cover both branches.
    */
   const capableRedis = () => {
-    const hashes = new Map<string, Map<string, number>>();
-    const sets = new Map<string, Set<string>>();
+    const hashes = new Map<string, Map<string, string>>();
     const seen: string[] = [];
     const base = createMockRedis().redis;
     const redis = {
       ...base,
-      hIncrBy: async (key: string, field: string, by: number) => {
-        seen.push(key);
-        const hash = hashes.get(key) ?? new Map<string, number>();
-        hash.set(field, (hash.get(field) ?? 0) + by);
-        hashes.set(key, hash);
-        return ok(hash.get(field) ?? 0);
+      hGetAll: async (key: string) => ok(Object.fromEntries(hashes.get(key) ?? new Map())),
+      appendSpend: async (append: RedisSpendAppend) => {
+        seen.push(append.key);
+        const record = recordOf(append.delta);
+        const hash = hashes.get(append.key) ?? new Map<string, string>();
+        for (const model of record.unpricedModels) {
+          hash.set(unpricedModelHashField(model), SPEND_UNPRICED_MARKER_VALUE);
+        }
+        for (const [field, by] of [
+          [SPEND_HASH_FIELDS.micros, record.micros],
+          [SPEND_HASH_FIELDS.tokens, record.tokens],
+          [SPEND_HASH_FIELDS.calls, record.calls],
+        ] as const) {
+          if (by !== 0) hash.set(field, String(Number(hash.get(field) ?? "0") + by));
+        }
+        hashes.set(append.key, hash);
+        return ok(undefined);
       },
-      hGetAll: async (key: string) =>
-        ok(Object.fromEntries([...(hashes.get(key) ?? new Map())].map(([f, v]) => [f, String(v)]))),
-      expire: async () => ok(true),
-      sAdd: async (key: string, member: string) => {
-        const set = sets.get(key) ?? new Set<string>();
-        set.add(member);
-        sets.set(key, set);
-        return ok(1);
-      },
-      sMembers: async (key: string) => ok([...(sets.get(key) ?? new Set<string>())]),
     } as unknown as RedisPort;
     return { redis, hashes, seen };
   };
@@ -1494,7 +1569,7 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
     expect(line).toBeDefined();
     expect(line?.level).toBe("error");
     const reason = String(line?.data?.["reason"] ?? "");
-    for (const primitive of ["hIncrBy", "hGetAll", "expire"]) {
+    for (const primitive of ["hGetAll", "appendSpend"]) {
       expect(reason).toContain(primitive);
     }
     expect(String(line?.data?.["consequence"] ?? "")).toContain("restart");

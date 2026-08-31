@@ -109,6 +109,19 @@ export type RedisExpiry =
   | { readonly expiresInSec: number; readonly expiresInMs?: never }
   | { readonly expiresInMs: number; readonly expiresInSec?: never };
 
+/**
+ * Complete Redis spend append owned by the Spend Ledger consumer.
+ *
+ * The adapter commits marker fields, numeric sums, and optional retention in
+ * one `MULTI`/`EXEC` against ONE hash key. Keeping the complete delta in this
+ * request makes split-key marker/value races unrepresentable to the caller.
+ */
+export type RedisSpendAppend = {
+  readonly key: string;
+  readonly delta: Spend;
+  readonly ttlSec?: number;
+};
+
 export type RedisValueGuard = {
   readonly key: string;
   readonly expectedValue: string;
@@ -208,24 +221,20 @@ export type RedisPort = {
     value: string,
     opts: { expiresInSec: number },
   ) => Promise<Result<"not-present" | "created" | "exists", HostError>>;
-  /**
-   * Atomically add `by` to a hash field, creating the key and field at zero
-   * first. Optional so existing `RedisPort` fakes stay valid; the spend ledger
-   * parses it once at construction rather than null-checking per call.
-   *
-   * This is the primitive that lets a run's durable spend be appended without a
-   * read-modify-write: the stored figures are sums, `HINCRBY` is an atomic sum,
-   * so two concurrent writers cannot lose an increment between them.
-   */
-  readonly hIncrBy?: (key: string, field: string, by: number) => Promise<Result<number, HostError>>;
   /** Read every field of a hash. An absent key yields an empty record, not an error. */
   readonly hGetAll?: (key: string) => Promise<Result<Readonly<Record<string, string>>, HostError>>;
   /**
-   * Set a key's idle TTL. Distinct from `compareAndExpire`, which guards on a
-   * value first: the ledger has no value to guard on because it never reads
-   * before writing, and refreshing a TTL it just appended to needs no guard.
+   * Atomically append one complete Spend Record in a single `MULTI`/`EXEC`.
+   *
+   * The transaction queues every unpriced-model marker `HSET` first, then
+   * nonzero `HINCRBY` values cost-first (`micros`, `tokens`, `calls`), then ONE
+   * `EXPIRE` when `ttlSec` is configured. Implementations inspect every EXEC
+   * result and return one typed failure for an aborted, malformed,
+   * command-failed, or ambiguously acknowledged transaction. Callers and the
+   * Redis driver must not retry/replay because acknowledgement loss cannot
+   * prove absence of commit.
    */
-  readonly expire?: (key: string, seconds: number) => Promise<Result<boolean, HostError>>;
+  readonly appendSpend?: (append: RedisSpendAppend) => Promise<Result<void, HostError>>;
 }
 
 /**
@@ -321,8 +330,8 @@ export type SharedInfra = {
  *
  * Two operations, deliberately: hydrate once when a slice starts, append once
  * per settled call. The seam requires monotone commutative append semantics,
- * not one persistence protocol: Redis maps the algebra to lock-free atomic
- * fields; the file adapter serializes whole-snapshot replacement per run.
+ * not one persistence protocol: Redis commits one complete additive
+ * transaction; the file adapter serializes whole-snapshot replacement per run.
  */
 export type SpendLedgerMetadata =
   | {
@@ -354,9 +363,9 @@ export type SpendLedgerPort = {
    * Append one settled call's spend. Monotone and commutative — adapters must
    * preserve every delta under concurrent calls, whatever settlement order.
    *
-   * Returns no total: the in-process meter already knows the run's figure, and
-   * a total assembled from several independent atomic commands could disagree
-   * with a concurrent writer's view. Nothing would be able to trust it.
+   * Returns no total: the in-process meter already knows the run's figure and
+   * this write seam only acknowledges persistence. A lost acknowledgement may
+   * be ambiguous, so adapters must not retry additive writes.
    */
   readonly add: (runId: RunId, delta: Spend) => Promise<Result<void, HostError>>;
 };

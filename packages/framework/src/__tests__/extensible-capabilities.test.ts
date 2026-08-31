@@ -69,21 +69,27 @@ const capabilityHandleKindTypePins = (llm: LlmClient, db: TestDbCapability): voi
     name: "augmentedCritic",
     client: augmented,
     clientKind: "llm",
-    composeRunClient: (metered) => ({
-      sendStructured: (req) => metered.sendStructured(req),
-      sendWithTools: (req, ctx) => metered.sendWithTools(req, ctx),
-      critique: (req) => metered.sendStructured(req),
-    }),
+    runScopedOperations: {
+      critique: "sendStructured",
+    },
   };
-  // @ts-expect-error -- augmented aliases require explicit run-scoped composition.
+  // @ts-expect-error -- augmented aliases require an explicit declarative operation map.
   const uncomposed: CapabilityHandle<"augmentedCritic"> = {
     name: "augmentedCritic",
     client: augmented,
     clientKind: "llm",
   };
+  const executableComposer: CapabilityHandle<"augmentedCritic"> = {
+    name: "augmentedCritic",
+    client: augmented,
+    clientKind: "llm",
+    // @ts-expect-error -- executable composition callbacks are not an authority proof.
+    composeRunClient: () => augmented,
+  };
   void bypass;
   void falseMarker;
   void composed;
+  void executableComposer;
   void uncomposed;
 };
 void capabilityHandleKindTypePins;

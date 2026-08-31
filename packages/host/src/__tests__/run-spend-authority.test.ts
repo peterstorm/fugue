@@ -2,10 +2,13 @@ import { describe, expect, it } from "bun:test";
 import {
   ceilings,
   dagId,
+  err,
   nodeId,
+  NO_SPEND,
   ok,
   runId,
   tokensOnly,
+  unpricedCall,
   type LlmResponse,
   type Result,
   type FrameworkError,
@@ -19,6 +22,7 @@ import { createInMemorySpendLedger } from "../adapters/spend-ledger-memory.js";
 import { emptyReservation, learnObservedCall } from "../domain/llm-meter.js";
 
 const limits = ceilings([{ kind: "tokens", limit: 30 }])!;
+const oneCallLimit = ceilings([{ kind: "calls", limit: 1 }])!;
 const request = { nodeId: nodeId("authority-node"), model: "m" };
 const response = (): Result<LlmResponse<unknown>, FrameworkError> =>
   ok({ output: {}, ...tokensOnly(10, 0), rawText: "" });
@@ -36,7 +40,7 @@ describe("RunSpendAuthority", () => {
       dagId: dagId("authority-dag"),
       runId: runId("authority-run"),
       limits,
-      hydrated: { kind: "known", spend: { tokens: 0, calls: 0, usd: { kind: "priced", micros: 0 as never } } },
+      hydrated: { kind: "known", spend: NO_SPEND },
       ledger: createInMemorySpendLedger(),
       logger,
     });
@@ -104,7 +108,7 @@ describe("RunSpendAuthority", () => {
         backend: "memory",
         durability: "process",
       }),
-      read: async () => ok({ tokens: 0, calls: 0, usd: { kind: "priced", micros: 0 as never } }),
+      read: async () => ok(NO_SPEND),
       add: async (_runId, delta) => {
         appendedTokens.push(delta.tokens);
         if (appendedTokens.length === 2) return pendingAppend.promise;
@@ -115,7 +119,7 @@ describe("RunSpendAuthority", () => {
       dagId: dagId("authority-dag"),
       runId: runId("pending-ledger-run"),
       limits,
-      hydrated: { kind: "known", spend: { tokens: 0, calls: 0, usd: { kind: "priced", micros: 0 as never } } },
+      hydrated: { kind: "known", spend: NO_SPEND },
       ledger,
       logger,
     });
@@ -159,6 +163,81 @@ describe("RunSpendAuthority", () => {
     expect(appendedTokens).toHaveLength(3);
   });
 
+  it("counts a typed failure without usage and refuses the next calls-limited attempt", async () => {
+    const ledger = createInMemorySpendLedger();
+    const authorityRunId = runId("calls-only-run");
+    const authority = createRunSpendAuthority({
+      dagId: dagId("authority-dag"),
+      runId: authorityRunId,
+      limits: oneCallLimit,
+      hydrated: { kind: "known", spend: NO_SPEND },
+      ledger,
+      logger,
+    });
+    let providerAttempts = 0;
+    const failingCall = async (): Promise<Result<LlmResponse<unknown>, FrameworkError>> => {
+      providerAttempts += 1;
+      return err({
+        kind: "transient",
+        nodeId: request.nodeId,
+        message: "provider unavailable",
+      });
+    };
+
+    const first = await authority.execute({
+      clientKey: "llm",
+      operation: "sendStructured",
+      request,
+      call: failingCall,
+    });
+    const refused = await authority.execute({
+      clientKey: "llm",
+      operation: "sendStructured",
+      request,
+      call: failingCall,
+    });
+
+    expect(first.ok).toBe(false);
+    if (!first.ok) expect(first.error.kind).toBe("transient");
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.error.kind).toBe("llm-budget-exceeded");
+    expect(providerAttempts).toBe(1);
+    expect(authority.budget.spent()).toEqual(unpricedCall(0, "m"));
+    expect(await ledger.read(authorityRunId)).toEqual(ok(unpricedCall(0, "m")));
+  });
+
+  it("turns an accessor-throwing Result into a typed settled failure", async () => {
+    const ledger = createInMemorySpendLedger();
+    const authorityRunId = runId("hostile-result-run");
+    const authority = createRunSpendAuthority({
+      dagId: dagId("authority-dag"),
+      runId: authorityRunId,
+      hydrated: { kind: "known", spend: NO_SPEND },
+      ledger,
+      logger,
+    });
+    const hostile = Object.defineProperty({}, "ok", {
+      get: () => { throw new Error("ok accessor escaped"); },
+    });
+
+    const settled = await authority.execute({
+      clientKey: "llm",
+      operation: "sendStructured",
+      request,
+      call: async () => hostile as never,
+    });
+
+    expect(settled.ok).toBe(false);
+    if (!settled.ok) {
+      expect(settled.error.kind).toBe("node-crash");
+      if (settled.error.kind === "node-crash") {
+        expect(settled.error.message).toContain("malformed Result");
+      }
+    }
+    expect(authority.budget.spent()).toEqual(unpricedCall(0, "m"));
+    expect(await ledger.read(authorityRunId)).toEqual(ok(unpricedCall(0, "m")));
+  });
+
   it("logs reservation underflow and retains state without granting more headroom", () => {
     const logs: { readonly msg: string; readonly data?: Record<string, unknown> }[] = [];
     const capturingLogger: LogPort = {
@@ -190,7 +269,7 @@ describe("RunSpendAuthority", () => {
     const authority = createRunSpendAuthority({
       dagId: dagId("authority-dag"),
       runId: runId("snapshot-run"),
-      hydrated: { kind: "known", spend: { tokens: 0, calls: 0, usd: { kind: "priced", micros: 0 as never } } },
+      hydrated: { kind: "known", spend: NO_SPEND },
       ledger: createInMemorySpendLedger(),
       logger,
     });
@@ -206,7 +285,7 @@ describe("RunSpendAuthority", () => {
       dagId: dagId("authority-dag"),
       runId: runId("remaining-snapshot-run"),
       limits,
-      hydrated: { kind: "known", spend: { tokens: 10, calls: 1, usd: { kind: "priced", micros: 0 as never } } },
+      hydrated: { kind: "known", spend: { ...NO_SPEND, tokens: 10, calls: 1 } },
       ledger: createInMemorySpendLedger(),
       logger,
     });

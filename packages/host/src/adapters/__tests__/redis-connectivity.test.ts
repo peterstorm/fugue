@@ -20,6 +20,7 @@ import {
 } from "../redis-connectivity.js";
 import { isOk, isErr } from "@fuguejs/framework";
 import type { Redis as IoRedis } from "ioredis";
+import { unpricedModelHashField } from "../../domain/spend-record.js";
 
 // ── Controllable fake ioredis client ─────────────────────────────────────────
 // Only the methods the adapter drives are implemented. Cast to the ioredis type
@@ -32,9 +33,9 @@ interface FakeOverrides {
   readonly getResult?: string | null;
   readonly execNullOnce?: boolean;
   readonly execCommandError?: Error;
+  readonly execCommandErrorAt?: number;
   readonly throwOn?: readonly string[];
   readonly thrownValue?: unknown;
-  readonly expireResult?: number;
 }
 
 class FakeRedis {
@@ -94,25 +95,37 @@ class FakeRedis {
   }
   multi() {
     this.rec("multi", []);
-    let operation:
+    const operations: Array<
       | { readonly kind: "delete"; readonly key: string }
       | { readonly kind: "expire"; readonly key: string }
+      | { readonly kind: "hash-increment" }
+      | { readonly kind: "hash-set" }
       | { readonly kind: "set"; readonly key: string; readonly value: string; readonly onlyIfAbsent: boolean }
-      | undefined;
+    > = [];
     const chain = {
       del: (key: string) => {
         this.rec("multi.del", [key]);
-        operation = { kind: "delete", key };
+        operations.push({ kind: "delete", key });
         return chain;
       },
       expire: (key: string, seconds: number) => {
         this.rec("multi.expire", [key, seconds]);
-        operation = { kind: "expire", key };
+        operations.push({ kind: "expire", key });
+        return chain;
+      },
+      hset: (key: string, field: string, value: string) => {
+        this.rec("multi.hset", [key, field, value]);
+        operations.push({ kind: "hash-set" });
+        return chain;
+      },
+      hincrby: (key: string, field: string, by: number) => {
+        this.rec("multi.hincrby", [key, field, by]);
+        operations.push({ kind: "hash-increment" });
         return chain;
       },
       set: (key: string, value: string, ...args: unknown[]) => {
         this.rec("multi.set", [key, value, ...args]);
-        operation = { kind: "set", key, value, onlyIfAbsent: args.includes("NX") };
+        operations.push({ kind: "set", key, value, onlyIfAbsent: args.includes("NX") });
         return chain;
       },
       exec: async () => {
@@ -121,23 +134,27 @@ class FakeRedis {
           this.execNullRemaining -= 1;
           return null;
         }
-        if (this.o.execCommandError !== undefined) {
-          return [[this.o.execCommandError, null]] as [Error | null, unknown][];
-        }
-        if (operation?.kind === "delete") {
-          return [[null, this.values.delete(operation.key) ? 1 : 0]] as [Error | null, unknown][];
-        }
-        if (operation?.kind === "expire") {
-          return [[null, this.values.has(operation.key) ? 1 : 0]] as [Error | null, unknown][];
-        }
-        if (operation?.kind === "set") {
+        return operations.map((operation, index): [Error | null, unknown] => {
+          if (
+            this.o.execCommandError !== undefined &&
+            index === (this.o.execCommandErrorAt ?? 0)
+          ) {
+            return [this.o.execCommandError, null];
+          }
+          if (operation.kind === "delete") {
+            return [null, this.values.delete(operation.key) ? 1 : 0];
+          }
+          if (operation.kind === "expire") {
+            return [null, this.values.has(operation.key) ? 1 : 0];
+          }
+          if (operation.kind === "hash-set") return [null, 1];
+          if (operation.kind === "hash-increment") return [null, 7];
           if (operation.onlyIfAbsent && this.values.has(operation.key)) {
-            return [[null, null]] as [Error | null, unknown][];
+            return [null, null];
           }
           this.values.set(operation.key, operation.value);
-          return [[null, "OK"]] as [Error | null, unknown][];
-        }
-        return [] as [Error | null, unknown][];
+          return [null, "OK"];
+        });
       },
     };
     return chain;
@@ -162,19 +179,9 @@ class FakeRedis {
     this.rec("smembers", [key]);
     return ["a", "b"];
   }
-  async hincrby(...args: unknown[]): Promise<number> {
-    this.rec("hincrby", args);
-    return 7;
-  }
   async hgetall(key: string): Promise<Record<string, string>> {
     this.rec("hgetall", [key]);
     return { tokens: "10", micros: "5" };
-  }
-  // EXPIRE answers 1 when the key existed and the TTL was set, 0 when it did
-  // not — the adapter's job is to turn that into a boolean.
-  async expire(...args: unknown[]): Promise<number> {
-    this.rec("expire", args);
-    return "expireResult" in this.o ? (this.o.expireResult as number) : 1;
   }
   async quit(): Promise<string> {
     this.rec("quit", []);
@@ -252,6 +259,7 @@ describe("createRedisConnectivity — per-tenant ACL credential override", () =>
     expect(opts().username).toBe("fugue-tenant-acme");
     expect(opts().password).toBe("s3cret");
     expect(opts().lazyConnect).toBe(true);
+    expect(opts().autoResendUnfulfilledCommands).toBe(false);
   });
 
   it("passes NO username/password when no ACL credential is supplied (inherit REDIS_URL auth)", async () => {
@@ -586,55 +594,23 @@ describe("createRedisConnectivity — initialization failure", () => {
   });
 });
 
-describe("createRedisConnectivity — spend-ledger primitives", () => {
-  // These three were added to `RedisPort` for the durable spend ledger and were
-  // only ever exercised through a hand-rolled fake in `spend-ledger.test.ts`,
-  // which never touches the real `redisCall` error-wrapping path. `expire` in
-  // particular does a genuine 1/0 → boolean transform that nothing pinned.
-
-  it("hIncrBy issues HINCRBY and returns the new field value", async () => {
-    const fake = new FakeRedis();
-    const { bundle } = await wire(fake);
-    const result = await bundle.redis.hIncrBy?.("run:spend", "tokens", 150);
-    expect(result !== undefined && isOk(result) && result.value).toBe(7);
-    expect(fake.calls.find((c) => c.m === "hincrby")?.args).toEqual(["run:spend", "tokens", 150]);
-  });
+describe("createRedisConnectivity — spend-ledger capability", () => {
+  const completeAppend = {
+    key: "run:spend",
+    delta: {
+      tokens: 10,
+      calls: 1,
+      usd: { kind: "unpriced" as const, models: ["model-a", "model-z"] as const, knownMicros: 7 as never },
+    },
+    ttlSec: 900,
+  };
 
   it("hGetAll issues HGETALL and returns every field", async () => {
     const fake = new FakeRedis();
     const { bundle } = await wire(fake);
     const result = await bundle.redis.hGetAll?.("run:spend");
     expect(result !== undefined && isOk(result) && result.value).toEqual({ tokens: "10", micros: "5" });
-    expect(fake.calls.find((c) => c.m === "hgetall")?.args).toEqual(["run:spend"]);
-  });
-
-  it("expire maps Redis's 1 to true and 0 to false", async () => {
-    // The whole point of the coercion: 0 means "no such key", which is a real
-    // answer a caller may act on, not a failure.
-    const applied = await (await wire(new FakeRedis({ expireResult: 1 }))).bundle.redis.expire?.("k", 60);
-    expect(applied !== undefined && isOk(applied) && applied.value).toBe(true);
-
-    const absent = await (await wire(new FakeRedis({ expireResult: 0 }))).bundle.redis.expire?.("k", 60);
-    expect(absent !== undefined && isOk(absent) && absent.value).toBe(false);
-  });
-
-  it("expire issues EXPIRE with the key and seconds", async () => {
-    const fake = new FakeRedis();
-    const { bundle } = await wire(fake);
-    await bundle.redis.expire?.("run:spend", 900);
-    expect(fake.calls.find((c) => c.m === "expire")?.args).toEqual(["run:spend", 900]);
-  });
-
-  it("wraps a thrown hIncrBy as Err(redis-unavailable) naming the command", async () => {
-    // Same contract every other primitive on this port keeps: a driver throw
-    // never escapes as an exception, it becomes a typed Result the ledger can
-    // fail closed on.
-    const { bundle } = await wire(new FakeRedis({ throwOn: ["hincrby"] }));
-    const result = await bundle.redis.hIncrBy?.("k", "f", 1);
-    expect(result !== undefined && isErr(result)).toBe(true);
-    if (result !== undefined && isErr(result) && result.error.kind === "redis-unavailable") {
-      expect(result.error.operation).toMatch(/HINCRBY/);
-    }
+    expect(fake.calls.find((call) => call.m === "hgetall")?.args).toEqual(["run:spend"]);
   });
 
   it("wraps a thrown hGetAll as Err(redis-unavailable)", async () => {
@@ -643,11 +619,69 @@ describe("createRedisConnectivity — spend-ledger primitives", () => {
     expect(result !== undefined && isErr(result)).toBe(true);
   });
 
-  it("wraps a thrown expire as Err(redis-unavailable) — never a bare false", async () => {
-    // The coercion must not swallow a failure into the `false` that legitimately
-    // means "no such key"; those are different answers.
-    const { bundle } = await wire(new FakeRedis({ throwOn: ["expire"] }));
-    const result = await bundle.redis.expire?.("k", 1);
+  it("queues hash markers -> micros -> tokens -> calls -> one expiry on one key", async () => {
+    const fake = new FakeRedis();
+    const { bundle } = await wire(fake);
+
+    const result = await bundle.redis.appendSpend?.(completeAppend);
+
+    expect(result !== undefined && isOk(result)).toBe(true);
+    expect(fake.calls).toEqual([
+      { m: "multi", args: [] },
+      { m: "multi.hset", args: ["run:spend", unpricedModelHashField("model-a"), "1"] },
+      { m: "multi.hset", args: ["run:spend", unpricedModelHashField("model-z"), "1"] },
+      { m: "multi.hincrby", args: ["run:spend", "micros", 7] },
+      { m: "multi.hincrby", args: ["run:spend", "tokens", 10] },
+      { m: "multi.hincrby", args: ["run:spend", "calls", 1] },
+      { m: "multi.expire", args: ["run:spend", 900] },
+      { m: "multi.exec", args: [] },
+    ]);
+    expect(fake.calls.some((call) => ["hset", "hincrby", "expire"].includes(call.m))).toBe(false);
+    expect(fake.calls.some((call) => call.m.toLowerCase().includes("eval"))).toBe(false);
+  });
+
+  it("omits zero HINCRBY fields and expiry while retaining one MULTI/EXEC", async () => {
+    const fake = new FakeRedis();
+    const { bundle } = await wire(fake);
+
+    const result = await bundle.redis.appendSpend?.({
+      key: "run:spend",
+      delta: { tokens: 0, calls: 1, usd: { kind: "priced", micros: 0 as never } },
+    });
+
+    expect(result !== undefined && isOk(result)).toBe(true);
+    expect(fake.calls).toEqual([
+      { m: "multi", args: [] },
+      { m: "multi.hincrby", args: ["run:spend", "calls", 1] },
+      { m: "multi.exec", args: [] },
+    ]);
+  });
+
+  it("inspects every EXEC result and returns a typed failure from the final EXPIRE", async () => {
+    const fake = new FakeRedis({
+      execCommandError: new Error("second EXPIRE failed"),
+      execCommandErrorAt: 5,
+    });
+    const { bundle } = await wire(fake);
+
+    const result = await bundle.redis.appendSpend?.(completeAppend);
+
     expect(result !== undefined && isErr(result)).toBe(true);
+    if (result !== undefined && isErr(result) && result.error.kind === "redis-unavailable") {
+      expect(result.error.operation).toContain("second EXPIRE failed");
+    }
+  });
+
+  it("returns typed failures for aborted and thrown transaction acknowledgements", async () => {
+    const aborted = await (await wire(new FakeRedis({ execNullOnce: true }))).bundle.redis
+      .appendSpend?.(completeAppend);
+    expect(aborted !== undefined && isErr(aborted)).toBe(true);
+
+    const thrown = await (await wire(new FakeRedis({ throwOn: ["multi.exec"] }))).bundle.redis
+      .appendSpend?.(completeAppend);
+    expect(thrown !== undefined && isErr(thrown)).toBe(true);
+    if (thrown !== undefined && isErr(thrown) && thrown.error.kind === "redis-unavailable") {
+      expect(thrown.error.operation).toContain("SPEND-APPEND");
+    }
   });
 });

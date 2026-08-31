@@ -173,8 +173,8 @@ The existing ADR-0083 behavior remains authoritative:
 - failed hydration + declared ceilings: fail the slice closed before a node runs;
 - failed hydration + no ceilings: warn and start from unknown/zero;
 - failed append after provider settle: keep the provider result, log `error` for budgeted runs and `warn` for unbudgeted runs;
-- crash between provider settle and append: every concurrently settled append still pending can be lost or partially recorded;
-- no retry inside the ledger adapter (automatic retry can double-append an operation whose commit acknowledgement was lost).
+- crash between provider settle and acknowledged append: every concurrently settled transaction not known committed can be lost; each acknowledged Redis append is complete;
+- no retry inside the ledger adapter and `autoResendUnfulfilledCommands: false` in ioredis construction; neither application code nor the driver replays an additive operation whose commit acknowledgement was lost.
 
 **Why:** Call spend cannot be undone after provider settlement. Returning an error instead would discard paid-for output without restoring budget integrity. A dedicated typed error keeps filesystem failures observable without lying about their subsystem.
 
@@ -360,7 +360,7 @@ export const createMeteredLlm = (
 ): LlmClient;
 ```
 
-Protocol remains one implementation: gate/reserve → invoke provider → price success or partial-error usage → synchronously record meter/estimate and emit `llm.metered`/failure logs with `clientKey` → release the reservation → await ledger append. Admission headroom does not wait for durability I/O: settled spend is already authoritative within the execution slice, while the append carries that fact to later slices. The idempotent `finally` release remains the safety net for thrown provider/settlement paths. A throwing inner client is logged and rethrown as today; unknown usage is never fabricated. `spent()` reads settled meter state; `remaining()` calls `projectedSpend` and `remainingFor` synchronously.
+Protocol remains one implementation: gate/reserve → invoke provider → price success or partial-error usage → synchronously record meter/estimate and emit `llm.metered`/failure logs with `clientKey` → release the reservation → await ledger append. Admission headroom does not wait for durability I/O: settled spend is already authoritative within the execution slice, while the append carries that fact to later slices. The idempotent `finally` release remains the safety net for provider/settlement paths. A throwing inner client is converted at the authority seam to a typed non-retriable `node-crash` and follows normal settlement logging; unknown usage is never fabricated. `spent()` reads settled meter state; `remaining()` calls `projectedSpend` and `remainingFor` synchronously.
 
 **Depends on:** Budget core, pure projection, `SpendLedgerPort`, existing pricing/error-usage helpers.
 
@@ -536,9 +536,9 @@ The existing host test-directory typecheck exclusion remains out of scope (remov
 ## Security & NFR Notes
 
 - **Primary NFR — budget integrity:** unknown price, unreadable budgeted ledger, malformed file record, non-finite figure, and substituted/symlinked ledger path all fail closed. Unbudgeted hydration remains availability-first per ADR-0083.
-- **Concurrency:** one JavaScript authority serializes synchronous meter/reservation transitions within a slice. Redis remains distributed/lock-free by field algebra; file adds serialize per run with F6's cross-process lock and publish complete snapshots by rename.
+- **Concurrency:** one JavaScript authority serializes synchronous meter/reservation transitions within a slice. Redis commits marker fields, numeric sums, and one expiry against ONE hash in one lock-free `MULTI`/`EXEC`; one strict `HGETALL` hydrates it. Commutative sums/marker union preserve concurrent order-independence. File adds serialize per run with F6's cross-process lock and publish complete snapshots by rename.
 - **Performance:** admission and `spent()`/`remaining()` add no I/O. Each settle keeps one ledger append. The file append adds one lock/read/write/rename sequence; appropriate for F6's single-writer file deployment, not a replacement for Redis throughput.
-- **Trust boundary:** `CapabilityHandle.clientKind` is trusted at the same adapter-authoring boundary as `name ↔ client`; no runtime duck typing or new cast point. Broker-minted built-in LLMs remain prohibited by the existing validation contract.
+- **Trust boundary:** `CapabilityHandle.clientKind` is trusted at the same adapter-authoring boundary as `name ↔ client`; no runtime duck typing or new cast point. Broker-minted built-in LLMs remain prohibited by the existing validation contract. The framework's readonly `PRICE_TABLE` is deeply frozen at definition; pre-call authority and `spendOfCall` share it.
 - **Path safety:** raw run IDs never form path components; the digest owns the filename and embedded run ID verification catches crossed files. Verified-directory checks reject pre-existing symlink/non-directory substitution and recheck identity, while honestly not claiming portable Node eliminates concurrent ancestor rename races.
 - **Sensitive data:** spend files/logs contain counts, limits, client keys, and unpriced model IDs only—never prompts, outputs, thinking, raw provider responses, credentials, or subject tokens.
 - **Observability:** retain `llm.metered`, `llm.call-failed`, budget refusal, hydration failure, ledger-write failure, and TTL diagnostics; add `clientKey`. File adapter itself returns typed errors and does not double-log. No new Observer domain event or metric is required.
@@ -559,8 +559,8 @@ The existing host test-directory typecheck exclusion remains out of scope (remov
 
 ## Backwards Compatibility & Migration
 
-1. **Budget configuration and persisted errors:** unchanged. `llmBudgetTokens`, `llmBudget`, `Ceilings`, Redis spend keys/encoding, 429 mapping, and persisted `llm-budget-exceeded` schema retain current behavior.
-2. **Existing ledgers:** no data migration. Memory/Redis adapters and `SpendLedgerPort` signatures are unchanged. A new file root starts empty; an embedder must not switch an active resumable run from Redis/memory to file without an explicit one-time copy (tooling is out of scope).
+1. **Budget configuration and persisted errors:** unchanged. `llmBudgetTokens`, `llmBudget`, `Ceilings`, 429 mapping, and persisted `llm-budget-exceeded` schema retain current behavior. The unshipped Redis ledger encoding is corrected from hash+set to one hash; no legacy second key is read.
+2. **Existing ledgers:** no migration is provided for the pre-release two-key Redis encoding. Memory/file adapters and `SpendLedgerPort` signatures are unchanged. A new file root starts empty; an embedder must not switch an active resumable run from Redis/memory to file without an explicit one-time copy (tooling is out of scope).
 3. **NodeContext source compatibility:** adding the seventh required nullable `BaseNodeContext` field breaks hand-authored `NodeContext` object literals at compile time. Migration: use `makeNodeContext`, or add `budget: null`. `NodeContextInit` remains optional/additive.
 4. **CapabilityHandle source compatibility:** custom capability types extending `LlmClient` must add `clientKind: "llm"`. Non-LLM handles are byte-identical. No deprecated alias or permissive fallback is added because that would preserve the bypass.
 5. **Runtime rollout:** no feature flag. The capability is always injected by the host, including unbudgeted runs. Existing DAGs that do not require/read `budget` observe only the intended expansion of metering to marked clients.
@@ -592,3 +592,9 @@ accounting, strict file corruption/symlink handling, concurrent adds, and fresh
 file-ledger rehydration. Product docs, ADR-0083, `CONTEXT.md`, migration docs,
 changelog, original F3 plan, and the superseded spike were updated in the same
 change.
+
+A post-review correction replaced the Redis hash+set record with one strict hash,
+disabled ioredis unfulfilled-command replay, deeply froze the framework price
+table, sanitized checkpoint persistence throws while retaining server details,
+and made invariant-error context snapshots deeply immutable with a fail-closed
+fallback.

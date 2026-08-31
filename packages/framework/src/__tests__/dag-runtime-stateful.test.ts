@@ -669,6 +669,27 @@ describe("runDagStateful — abort", () => {
     }
   });
 
+  it("does not classify unrelated error text as beforeExecute control flow", async () => {
+    const dag = makeDag({
+      nodes: [makeNode("a", { run: async () => ok("out") })],
+      edges: [{ from: DAG_INPUT, to: "a" }],
+    });
+
+    const result = await runDagStateful(dag, null, makeCtx(), {
+      beforeExecute: () => {
+        throw new Error("database aborted by beforeExecute cleanup failed");
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.message).toContain("database aborted by beforeExecute");
+      }
+    }
+  });
+
   it("abort event delivered to machine produces err(aborted) (FR-033)", async () => {
     // `abort` is an EXTERNAL signal — the executor never emits it — so this
     // drives the machine directly with a pre-loaded aborted state rather than

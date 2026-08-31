@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { tokensOnly } from "../types/token-usage.js";
-import { computeCostUsd, PRICE_TABLE } from "../llm/cost.js";
+import { computeCostUsd, PRICE_TABLE, spendOfCall } from "../llm/cost.js";
 
 describe("computeCostUsd", () => {
   it("returns correct cost for a known model", () => {
@@ -47,5 +47,22 @@ describe("computeCostUsd", () => {
       const cost = computeCostUsd(model, tokensOnly(0,0));
       expect(cost).toBeGreaterThanOrEqual(0);
     }
+  });
+
+  it("deeply freezes the shared pricing authority against tenant/DAG mutation", () => {
+    const original = PRICE_TABLE["gpt-4o"];
+    if (original === undefined) throw new Error("expected gpt-4o pricing");
+    const before = spendOfCall("gpt-4o", tokensOnly(1_000_000, 0));
+
+    expect(Object.isFrozen(PRICE_TABLE)).toBe(true);
+    expect(Object.isFrozen(original)).toBe(true);
+    expect(Reflect.set(PRICE_TABLE, "gpt-4o", { inputPer1M: 0, outputPer1M: 0 })).toBe(false);
+    expect(Reflect.set(original, "inputPer1M", 0)).toBe(false);
+    expect(Reflect.deleteProperty(PRICE_TABLE, "gpt-4o")).toBe(false);
+    expect(Reflect.set(PRICE_TABLE, "attacker-model", { inputPer1M: 0, outputPer1M: 0 })).toBe(false);
+
+    expect(PRICE_TABLE["gpt-4o"]).toBe(original);
+    expect(PRICE_TABLE["attacker-model"]).toBeUndefined();
+    expect(spendOfCall("gpt-4o", tokensOnly(1_000_000, 0))).toEqual(before);
   });
 });

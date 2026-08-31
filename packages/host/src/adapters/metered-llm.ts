@@ -4,8 +4,8 @@
  * All mutable accounting, enforcement, logging, and ledger sequencing live in
  * the shared `RunSpendAuthority`; this module exposes only the two standard
  * provider operations and delegates both through that authority. It deliberately
- * does not proxy subtype methods: an augmented capability must author its
- * run-scoped facade via `CapabilityHandle.composeRunClient`, receiving this
+ * does not proxy subtype methods: an augmented capability declares aliases in
+ * `CapabilityHandle.runScopedOperations`, and the host binds them to this
  * metered surface so provider aliases cannot self-call behind the budget gate.
  */
 

@@ -456,25 +456,36 @@ describe("capability-manager", () => {
       expect((clients as Record<string, unknown>).db).toBe(plain);
     });
 
-    it("composes an augmented facade from the decorated standard surface", () => {
-      const boot = {} as ComposedLlm;
-      const metered = {} as LlmClient;
-      let supplied: LlmClient | undefined;
-      const facade = { alias: async () => ok({}) } as unknown as ComposedLlm;
+    it("interprets augmented aliases through the metered surface only", async () => {
+      let bootCalls = 0;
+      let meteredCalls = 0;
+      const result = ok({ output: {}, tokensIn: 0, tokensOut: 0, cacheWriteTokens: 0, cacheReadTokens: 0, rawText: "" });
+      const boot: ComposedLlm = {
+        sendStructured: async () => { bootCalls += 1; return result; },
+        sendWithTools: async () => { bootCalls += 1; return result; },
+        alias: async () => { bootCalls += 1; return result; },
+      };
+      const metered: LlmClient = {
+        sendStructured: async () => { meteredCalls += 1; return result; },
+        sendWithTools: async () => { meteredCalls += 1; return result; },
+      };
       const handles: readonly CapabilityHandle[] = [{
         name: "composedLlm",
         client: boot,
         clientKind: "llm",
-        composeRunClient: (standard) => {
-          supplied = standard;
-          return facade;
-        },
+        runScopedOperations: { alias: "sendStructured" },
       }];
 
       const clients = extractClients(handles, { llm: () => metered });
+      const facade = clients.composedLlm;
+      if (facade === undefined) throw new Error("expected composed client");
+      await facade.alias({} as never);
+      await facade.sendWithTools({} as never, {} as never);
 
-      expect(supplied).toBe(metered);
-      expect(clients.composedLlm).toBe(facade);
+      expect(bootCalls).toBe(0);
+      expect(meteredCalls).toBe(2);
+      expect(Object.getPrototypeOf(facade)).toBeNull();
+      expect(Object.isFrozen(facade)).toBe(true);
     });
 
     it("throws on duplicate handle names (defence-in-depth past topoSort)", () => {

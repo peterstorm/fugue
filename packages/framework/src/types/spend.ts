@@ -97,7 +97,7 @@ export type PricedSpend =
 export interface Spend {
   /** Every token that crossed the wire, in either direction. */
   readonly tokens: number;
-  /** Settled provider calls. */
+  /** Delegated LLM attempts settled by the run authority, including failures. */
   readonly calls: number;
   readonly usd: PricedSpend;
 }
@@ -170,7 +170,7 @@ export const addSpend = (a: Spend, b: Spend): Spend => ({
 /**
  * A single call whose cost is known.
  *
- * Counts as one call: `calls` measures round trips, and a `sendWithTools` loop
+ * Counts as one call: `calls` measures settled delegated attempts, and a `sendWithTools` loop
  * settles as ONE call for budget purposes (its turns are already folded into a
  * single `TokenUsage` by the loop) — the same granularity the overshoot-by-one
  * guarantee is stated at.

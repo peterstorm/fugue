@@ -26,9 +26,10 @@ pre-1.0, so a minor bump may carry breaking changes.
   `makeNodeContext`, whose `NodeContextInit.budget` remains optional.
 - **Breaking (source):** a `CapabilityHandle<K>` whose registered client extends
   `LlmClient` must declare `clientKind: "llm"`. Non-LLM handles cannot declare
-  this field. An augmented LLM subtype must additionally provide
-  `composeRunClient(metered)`, constructing its run-scoped facade from the narrow
-  metered standard surface so provider aliases cannot bypass shared budgets.
+  this field. An augmented LLM subtype must additionally provide a declarative
+  `runScopedOperations` alias map. The host interprets that map into a frozen
+  run-scoped facade, so adapter code cannot retain a boot client and bypass the
+  shared Run Spend Authority.
 
 ## [0.5.1] — 2026-08-24
 

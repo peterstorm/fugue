@@ -109,7 +109,7 @@ const failureEscalator = (opts: {
   };
 };
 
-/** Consecutive Redis failures before a warn becomes an error (see `failureEscalator`). */
+/** Failure count at which consecutive Redis diagnostics escalate from warn to error. */
 const FAILURE_ESCALATION_THRESHOLD = 10;
 
 /**
@@ -276,20 +276,33 @@ export const createNamespacedCheckpointWriter = (
         report("warn", "Checkpoint write failed — value not serializable", {
           key: fullKey, dagId, runId, nodeId: nodeId as string, error: message,
         });
-        throw new Error(`Checkpoint write failed for ${fullKey}: value not serializable (${message})`);
+        throw new Error("Checkpoint value is not serializable");
       }
-      const setResult = checkpointTtlSec !== undefined
-        ? await redis.set(fullKey, serialized, { expiresInSec: checkpointTtlSec })
-        : await redis.set(fullKey, serialized);
+      let setResult: Awaited<ReturnType<RedisPort["set"]>>;
+      try {
+        setResult = checkpointTtlSec !== undefined
+          ? await redis.set(fullKey, serialized, { expiresInSec: checkpointTtlSec })
+          : await redis.set(fullKey, serialized);
+      } catch (error) {
+        const message = safeErrorMessage(error);
+        writeFailures.failed({
+          key: fullKey,
+          dagId,
+          runId,
+          nodeId: nodeId as string,
+          error: message,
+        });
+        throw new Error("Checkpoint persistence failed");
+      }
       if (!setResult.ok) {
         writeFailures.failed({
           key: fullKey,
           dagId,
           runId,
           nodeId: nodeId as string,
-          error: setResult.error.kind,
+          error: formatHostError(setResult.error),
         });
-        throw new Error(`Checkpoint write failed for ${fullKey}: ${setResult.error.kind}`);
+        throw new Error("Checkpoint persistence failed");
       }
       writeFailures.succeeded();
     },
@@ -377,7 +390,6 @@ const selectAndHydrateSpendLedger = async (args: {
         redis: ledgerRedis.value,
         tenant,
         dagId,
-        logger: shared.logger,
         ...(ttl.checkpointTtlSec !== undefined ? { ttlSec: ttl.checkpointTtlSec } : {}),
       });
     } else {

@@ -98,25 +98,9 @@ export type { CronScheduler, CronSchedulerOpts } from "./scheduler/scheduler.js"
 export { createCronScheduler } from "./scheduler/scheduler.js";
 
 // ---------------------------------------------------------------------------
-// Capability-typed NodeContext helpers — public surface for constructing
-// NodeContexts and the always-present field defaults.
+// Capability helpers not already supplied by the leading types barrel.
 // ---------------------------------------------------------------------------
 export { makeNodeContext, consoleLogger, noopTracer, noopObserver, createPassthroughBroker } from "./shared/index.js";
-export type { Capability, CapabilityRegistry, BaseNodeContext, TypedNodeContext, NodeContextInit, HttpCapability } from "./types/node.js";
-export type {
-  CapabilityHandle,
-  AdapterFactory,
-  RunScopedLlmComposer,
-} from "./types/capability-handle.js";
-// Per-invocation authority seam — the broker port + scoped-handle shape, and
-// the `MintingAuthority` pair (`broker` + `origin`) `runDag` consumes. The
-// pass-through broker (`createPassthroughBroker`, above) is an optional
-// embedder convenience equivalent to omitting the broker; host-side brokers
-// (Keycloak/Entra) live in the host.
-export type { CapabilityBroker, Invocation, InvocationCorrelation, InvocationOrigin, MintingAuthority, ScopedCapabilityHandle } from "./types/capability-broker.js";
-// `invocationFor` — the sole `Invocation` constructor, deriving `origin` from the
-// `MintingAuthority` so a node's invocation can't disagree with the authority minting it.
-export { invocationFor } from "./types/capability-broker.js";
 // Built-in capability catalogue — runtime values consumed by `fugue capabilities`
 // and any tooling that needs the authoritative built-in set + its metadata.
 export { BUILTIN_CAPABILITY_KEYS, BUILTIN_CAPABILITY_INFO } from "./types/node.js";

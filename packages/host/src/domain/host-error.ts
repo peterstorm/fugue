@@ -104,6 +104,49 @@ export type HostError =
 
 export type HostErrorKind = HostError["kind"];
 
+const HOST_ERROR_KINDS = Object.freeze({
+  "git-clone-failed": true,
+  "git-pull-failed": true,
+  "git-timeout": true,
+  "git-spawn-failed": true,
+  "import-failed": true,
+  "validation-failed": true,
+  "no-default-export": true,
+  "dag-not-found": true,
+  "dag-disabled": true,
+  "global-concurrency-exceeded": true,
+  "dag-concurrency-exceeded": true,
+  timeout: true,
+  "redis-unavailable": true,
+  "spend-ledger-unavailable": true,
+  "bun-install-failed": true,
+  "config-invalid": true,
+  "tenant-config-invalid": true,
+  "input-validation-failed": true,
+  "dag-validation-failed": true,
+  "body-parse-failed": true,
+  "discovery-failed": true,
+  "async-result-expired": true,
+  "run-not-found": true,
+  "run-lease-lost": true,
+  "run-not-suspended": true,
+  "notification-failed": true,
+  unauthorized: true,
+  forbidden: true,
+  "team-already-exists": true,
+  "team-not-found": true,
+  "tenant-unknown": true,
+  "tenant-over-quota": true,
+  "worker-unavailable": true,
+  "internal-invariant-violated": true,
+  "fs-purge-failed": true,
+} satisfies Record<HostErrorKind, true>);
+
+const hostErrorKindOf = (value: string): HostErrorKind | undefined =>
+  Object.hasOwn(HOST_ERROR_KINDS, value) ? value as HostErrorKind : undefined;
+
+const exhaustiveHostErrorKind = (_kind: never): undefined => undefined;
+
 type SnapshotResult =
   | { readonly ok: true; readonly value: unknown }
   | { readonly ok: false };
@@ -294,8 +337,10 @@ export const parseHostError = (value: unknown): HostError | undefined => {
   if (!snapshotted.ok || !isRecord(snapshotted.value)) return undefined;
   const snapshot = snapshotted.value;
   if (!isString(snapshot.kind)) return undefined;
+  const kind = hostErrorKindOf(snapshot.kind);
+  if (kind === undefined) return undefined;
 
-  switch (snapshot.kind) {
+  switch (kind) {
     case "git-clone-failed":
       return hasExactOwnStringKeys(snapshot, ["kind", "url", "message"]) &&
           isString(snapshot.url) && isString(snapshot.message)
@@ -307,13 +352,13 @@ export const parseHostError = (value: unknown): HostError | undefined => {
     case "tenant-config-invalid":
     case "fs-purge-failed":
       return hasExactOwnStringKeys(snapshot, ["kind", "message"]) && isString(snapshot.message)
-        ? frozenHostError({ kind: snapshot.kind, message: snapshot.message })
+        ? frozenHostError({ kind, message: snapshot.message })
         : undefined;
     case "git-timeout":
     case "redis-unavailable":
     case "notification-failed":
       return hasExactOwnStringKeys(snapshot, ["kind", "operation"]) && isString(snapshot.operation)
-        ? frozenHostError({ kind: snapshot.kind, operation: snapshot.operation })
+        ? frozenHostError({ kind, operation: snapshot.operation })
         : undefined;
     case "git-spawn-failed":
       return hasExactOwnStringKeys(snapshot, ["kind", "operation", "message"]) &&
@@ -368,7 +413,7 @@ export const parseHostError = (value: unknown): HostError | undefined => {
     case "global-concurrency-exceeded":
     case "tenant-unknown":
       return hasExactOwnStringKeys(snapshot, ["kind"])
-        ? frozenHostError({ kind: snapshot.kind })
+        ? frozenHostError({ kind })
         : undefined;
     case "dag-concurrency-exceeded": {
       if (!hasExactOwnStringKeys(snapshot, ["kind", "dagId"])) return undefined;
@@ -444,7 +489,7 @@ export const parseHostError = (value: unknown): HostError | undefined => {
       const runId = parseRunId(snapshot.runId);
       return runId === undefined
         ? undefined
-        : frozenHostError({ kind: snapshot.kind, runId });
+        : frozenHostError({ kind, runId });
     }
     case "run-not-suspended": {
       if (!hasExactOwnStringKeys(snapshot, ["kind", "runId", "status"])) return undefined;
@@ -474,7 +519,7 @@ export const parseHostError = (value: unknown): HostError | undefined => {
     case "team-already-exists":
     case "team-not-found":
       return hasExactOwnStringKeys(snapshot, ["kind", "team"]) && isString(snapshot.team)
-        ? frozenHostError({ kind: snapshot.kind, team: snapshot.team })
+        ? frozenHostError({ kind, team: snapshot.team })
         : undefined;
     case "tenant-over-quota": {
       if (!hasExactOwnStringKeys(snapshot, ["kind", "tenant", "retryAfterSeconds"])) {
@@ -507,7 +552,7 @@ export const parseHostError = (value: unknown): HostError | undefined => {
           })
         : undefined;
     default:
-      return undefined;
+      return exhaustiveHostErrorKind(kind);
   }
 };
 
@@ -629,22 +674,50 @@ export const formatHostError = (error: HostError): string =>
 
 // ── Smart Constructors ─────────────────────────────────────────────────────
 
-export const redisUnavailable = (operation: string): HostError => ({ kind: "redis-unavailable", operation });
+export const redisUnavailable = (operation: string): HostError =>
+  frozenHostError({ kind: "redis-unavailable", operation });
 export const spendLedgerUnavailable = (
   operation: "create" | "read" | "add",
   message: string,
-): HostError => ({ kind: "spend-ledger-unavailable", backend: "file", operation, message });
+): HostError => frozenHostError({
+  kind: "spend-ledger-unavailable",
+  backend: "file",
+  operation,
+  message,
+});
 /** Producer of `fs-purge-failed` — a local filesystem fault during grace-window mount reclamation (NOT a Redis outage). */
-export const fsPurgeFailed = (message: string): HostError => ({ kind: "fs-purge-failed", message });
-export const teamAlreadyExists = (team: string): HostError => ({ kind: "team-already-exists", team });
-export const internalInvariantViolated = (message: string, context: Record<string, unknown>): HostError => ({ kind: "internal-invariant-violated", message, context });
+export const fsPurgeFailed = (message: string): HostError =>
+  frozenHostError({ kind: "fs-purge-failed", message });
+export const teamAlreadyExists = (team: string): HostError =>
+  frozenHostError({ kind: "team-already-exists", team });
+const UNSNAPSHOTABLE_INVARIANT_CONTEXT: Readonly<Record<string, unknown>> =
+  Object.freeze({ contextSnapshot: "unavailable" });
+
+const snapshotInvariantContext = (
+  context: Record<string, unknown>,
+): Record<string, unknown> => {
+  const snapshot = snapshotUnknown(context);
+  return snapshot.ok && isRecord(snapshot.value)
+    ? snapshot.value
+    : UNSNAPSHOTABLE_INVARIANT_CONTEXT;
+};
+
+export const internalInvariantViolated = (
+  message: string,
+  context: Record<string, unknown>,
+): HostError => frozenHostError({
+  kind: "internal-invariant-violated",
+  message,
+  context: snapshotInvariantContext(context),
+});
 
 /**
  * Producer of `tenant-config-invalid` (400). The single seam where a client-
  * supplied register/reconfigure body is rejected as a CALLER error (vs a host
  * config-load fault). Keeps the 4xx boundary translation greppable.
  */
-export const tenantConfigInvalid = (message: string): HostError => ({ kind: "tenant-config-invalid", message });
+export const tenantConfigInvalid = (message: string): HostError =>
+  frozenHostError({ kind: "tenant-config-invalid", message });
 
 // ── Multi-tenant supervisor smart constructors (AD-10) ───────────────────────
 
@@ -655,21 +728,25 @@ export const tenantConfigInvalid = (message: string): HostError => ({ kind: "ten
  * (FR-040, non-leakage). Using a constructor (not an inline literal) keeps the
  * boundary's fail-closed return a single, greppable seam.
  */
-export const tenantUnknown = (): HostError => ({ kind: "tenant-unknown" });
+export const tenantUnknown = (): HostError => frozenHostError({ kind: "tenant-unknown" });
 
 /**
  * Producer of `tenant-over-quota` (SC-012). The tenant whose OWN ceiling was
  * hit and the backoff to advertise are both carried on the error — the
  * Retry-After header is derived from `retryAfterSeconds`, not hardcoded.
  */
-export const tenantOverQuota = (tenant: TenantId, rawRetryAfterSeconds: number): HostError => ({
+export const tenantOverQuota = (
+  tenant: TenantId,
+  rawRetryAfterSeconds: number,
+): HostError => frozenHostError({
   kind: "tenant-over-quota",
   tenant,
   retryAfterSeconds: retryAfterSeconds(rawRetryAfterSeconds),
 });
 
 /** Producer of `worker-unavailable` (SC-012, AD-8) for THIS tenant only. */
-export const workerUnavailable = (tenant: TenantId): HostError => ({ kind: "worker-unavailable", tenant });
+export const workerUnavailable = (tenant: TenantId): HostError =>
+  frozenHostError({ kind: "worker-unavailable", tenant });
 
 /**
  * The Retry-After (seconds) a HostError advertises, if any. Centralizes the

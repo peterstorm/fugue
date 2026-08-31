@@ -109,10 +109,10 @@ Everything below was read, not recalled.
 
 ## 3. Constraints the design must respect
 
-- **The overshoot-by-one contract is a published guarantee** (FR-W1-004 / SC-003, and
-  the `errors.ts` doc comment). Whatever F3 changes, at most one call may pass a reached
-  ceiling in the sequential case, and the concurrent case stays bounded by the learned
-  reservation.
+- **Sequential crossing is a published guarantee** (FR-W1-004 and the
+  `errors.ts` doc comment): at most one call may pass a reached ceiling in the
+  sequential case. Separately, SC-003 bounds concurrency with the learned
+  reservation; it makes no one-call claim for a cold or larger first burst.
 - **`llmBudgetTokens` has shipped** (v0.5.1) and may be set in live deployments. It gets
   a normalizing parse into the new representation, not a breaking rename. This is the one
   place the "no backwards compatibility for unshipped code" rule does not apply, because
@@ -211,7 +211,7 @@ existing checkpointer, file for F6 parity):
 export interface SpendLedgerPort {
   /** Durable spend for a run. Absent ⇒ zero. */
   read(runId: RunId): Promise<Result<Spend, HostError>>;
-  /** Monotone accumulate. Must be atomic per key (Redis: HINCRBY; file: journal append). */
+  /** Monotone accumulate. Redis commits one complete MULTI/EXEC; file replaces one snapshot. */
   add(runId: RunId, delta: Spend): Promise<Result<Spend, HostError>>;
 }
 ```
@@ -234,14 +234,14 @@ path. The honest restatement, which goes in the header and in the requirements:
 > in-process meter hydrated once per slice. The **settle** path adds one ledger write per
 > provider call, sequenced after a call that already cost seconds.
 
-A ~0.5 ms `HINCRBY` after a multi-second LLM call is noise. Silently invalidating a
-documented success criterion would not be.
+One small Redis `MULTI`/`EXEC` after a multi-second LLM call is noise. Silently
+invalidating a documented success criterion would not be.
 
 **The loss window, stated rather than hidden.** A crash between provider settlement and
-ledger completion can lose every concurrently settled append that has not started and can
-leave every append already in progress partially recorded. Unpriced model markers are
-written before numeric axes, so those partial records fail closed for unknown pricing; the
-aggregate loss window is not bounded to one call.
+acknowledged ledger completion can lose every concurrently settled append whose transaction
+is not known committed. Each acknowledged Redis append is complete; a lost acknowledgement
+is one typed append failure and is never retried because commit is ambiguous. The aggregate
+loss window is not bounded to one call.
 
 ### D4 — `budget` as the seventh built-in capability
 
@@ -349,9 +349,9 @@ metering line gains the client's capability key so an operator can still see the
 | FR-B-011 | Absent ceilings never refuse — metering and ledger writes still happen (FR-W1-006 preserved). |
 | FR-B-012 | Every LLM client on the context shares one run-scoped meter. |
 | FR-B-013 | `llm-budget-exceeded` names the ceiling, the basis, and the observed figure. |
-| SC-B-001 | Sequential overshoot past a reached ceiling stays at most one call (SC-003 preserved). |
+| SC-B-001 | Sequential overshoot past a reached ceiling stays at most one crossing call (FR-W1-004); SC-003 remains the learned concurrent-reservation rule. |
 | SC-B-002 | The **admission** decision adds zero network round trips (restated SC-002/SC-004). |
-| SC-B-003 | A park/resume cycle does not increase total spend beyond the ceiling by more than the documented one-call loss window. |
+| SC-B-003 | Park/resume carries recorded spend forward; after a crash, every concurrently settled append still pending at process death can be lost, so aggregate crash loss is not bounded to one call (ADR-0083). |
 
 ---
 
@@ -448,7 +448,7 @@ Each is independently shippable and independently revertible.
 | Concurrency slots / rate ceilings | Different semantics (gauge, queues rather than refuses) and nothing unbounded to constrain until dynamic width exists → **F1**. See D2. |
 | Node-callable `spend()` for non-LLM cost | Needs a registered-meter design, not a raw mutator; would let the ledger disagree with provider truth. See D4. |
 | Cross-run / per-tenant budgets | A different aggregate with a different lifetime; the ledger port is the right seam to add it behind later. |
-| A live price feed | `PRICE_TABLE` stays static and hand-maintained. `unpriced` is what makes that safe. |
+| A live price feed | `PRICE_TABLE` stays static, hand-maintained, deeply frozen, and readonly. Pre-call authority and `spendOfCall` share it; `unpriced` makes missing entries safe. |
 | Budget-aware retry policy | Retry currently has its own budget (`retryLimits`); unifying the two is a real deepening and deserves its own session. |
 
 ---
@@ -521,25 +521,27 @@ this change does not build. It belongs with PR-C.
 
 The durable ledger shipped. Deviations from §D3:
 
-**The encoding, not a lock, is what makes appends safe.** D3 assumed `add` would
-be an atomic increment and left it there. Working through it surfaced that
-`Spend` is not purely numeric — `unpriced` carries a SET of model names — so a
-single `HINCRBY` could not express it. The record is three sums plus a set
-union, which is exactly `Spend`'s monoid, and Redis has an atomic primitive for
-each. Concurrent appends therefore need no lock, no CAS, and no transaction.
-That property is now the reason the design is what it is, and it is pinned by an
-order-independence property test run against both adapters.
+**The encoding and one complete one-hash transaction make appends safe.** D3
+assumed `add` would be an atomic increment and left it there. Redis stores the
+three sums plus reserved unpriced-model marker fields in ONE hash. The adapter
+queues every call's marker `HSET`s first, nonzero numeric fields cost-first, and
+one optional hash `EXPIRE` in one `MULTI`/`EXEC`. Hydration is one strict
+`HGETALL`; unknown/malformed fields and non-canonical, negative, unsafe, or
+non-integer figures fail closed rather than parse as zero. Commutativity
+preserves concurrent order-independence without a lock, `WATCH`, retry loop, or
+Lua. ioredis automatic unfulfilled-command replay is disabled because a lost
+additive `EXEC` acknowledgement cannot safely be replayed.
 
-**`add` returns nothing**, where D3 had it return the new total. A total
-assembled from several independent atomic commands can disagree with a
-concurrent writer's view, so nothing could trust it — and the in-process meter
-already knows the figure.
+**`add` returns nothing**, where D3 had it return the new total. The in-process
+meter already knows the figure, while the durability seam can only acknowledge
+whether the transaction was observed as successful; a lost acknowledgement
+cannot truthfully return a total.
 
-**`RedisPort` grew three methods** (`hIncrBy`, `hGetAll`, `expire`), all generic
-Redis primitives rather than domain-shaped ones, parsed once at construction so
-a misconfigured adapter is detected in ONE place and DOWNGRADES loudly (an
-`error` log naming the missing primitives) rather than failing — refusing every
-run over a metering capability would turn a configuration gap into an outage.
+**`RedisPort` gained one read and one consumer-owned append capability.**
+`hGetAll` hydrates the sole hash; optional `appendSpend` owns its complete Redis
+transaction. They are parsed and receiver-bound once at construction so a
+misconfigured adapter is detected in ONE place and DOWNGRADES loudly rather
+than failing on the first provider settlement.
 
 **The file adapter did not ship in PR-C.** D3 named Redis and file. Redis and
 in-process shipped first; PR-D subsequently added the framework File Spend

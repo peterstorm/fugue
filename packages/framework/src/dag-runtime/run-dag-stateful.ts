@@ -30,7 +30,10 @@ import { safeErrorMessage } from "../types/safe-error.js";
 import type { NodeId } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
 import { createInMemoryJob } from "../queue/in-memory-job.js";
-import { runStateMachine } from "../state-machine/runner.js";
+import {
+  isBeforeExecuteAbortError,
+  runStateMachine,
+} from "../state-machine/runner.js";
 import { compileDagToMachine } from "./machine.js";
 import { buildDagExecutor } from "./executor.js";
 import { finalizeRunWithJudges, runFinalizeInBackground } from "./eval-judges.js";
@@ -395,14 +398,6 @@ const handleTerminalState = <O>(
 // handleKernelError — catch block: abort vs terminal-failed
 // ---------------------------------------------------------------------------
 
-const isBeforeExecuteAbort = (error: unknown): boolean => {
-  try {
-    return error instanceof Error && safeErrorMessage(error).includes("aborted by beforeExecute");
-  } catch {
-    return false;
-  }
-};
-
 /** Parse the kernel's attached terminal state without trusting any property access. */
 const frameworkErrorFromKernelCause = (error: unknown): FrameworkError | undefined => {
   if (!((typeof error === "object" && error !== null) || typeof error === "function")) {
@@ -431,7 +426,7 @@ const handleKernelError = <O>(
   rootSpan: Span,
   emitRunEnd: (status: "ok" | "error") => void,
 ): Result<StatefulOutcome<O>, FrameworkError> => {
-  if (isBeforeExecuteAbort(e)) {
+  if (isBeforeExecuteAbortError(e)) {
     const error: FrameworkError = { kind: "aborted", reason: "beforeExecute hook returned false" };
     closeRootSpan(rootSpan, { kind: "error", error });
     emitRunEnd("error");

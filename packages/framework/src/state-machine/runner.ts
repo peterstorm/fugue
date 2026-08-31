@@ -9,6 +9,24 @@ const defaultClassifyError = (error: unknown): { retriable: boolean; message: st
   message: safeErrorMessage(error),
 });
 
+/** Dedicated kernel control flow for a `beforeExecute` refusal. */
+export class BeforeExecuteAbortError extends Error {
+  constructor() {
+    super("runStateMachine: aborted by beforeExecute hook");
+    this.name = "BeforeExecuteAbortError";
+  }
+}
+
+export const isBeforeExecuteAbortError = (
+  value: unknown,
+): value is BeforeExecuteAbortError => {
+  try {
+    return value instanceof BeforeExecuteAbortError;
+  } catch {
+    return false;
+  }
+};
+
 /** A diagnostic sink is subordinate to the durable transition outcome. */
 const reportWithoutThrowing = (report: () => void): void => {
   try {
@@ -106,7 +124,7 @@ export const runStateMachine = async <S, E, C>(
             );
           }
         }
-        throw new Error("runStateMachine: aborted by beforeExecute hook");
+        throw new BeforeExecuteAbortError();
       }
     }
 

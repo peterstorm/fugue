@@ -176,7 +176,8 @@ export type {
 export type {
   CapabilityHandle,
   AdapterFactory,
-  RunScopedLlmComposer,
+  RunScopedLlmOperation,
+  RunScopedLlmOperations,
 } from "./capability-handle.js";
 
 // ── Capability authority (per-invocation broker seam) ─────────────────────

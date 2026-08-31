@@ -3,9 +3,9 @@
  *
  * `clientKind` is explicit adapter intent, not runtime duck typing. Any registry
  * client assignable to `LlmClient` must be marked `"llm"`; non-LLM handles
- * cannot carry the marker. An augmented LLM subtype must also author a
- * run-scoped composition hook: the host supplies the metered standard surface,
- * and the hook builds the subtype facade around that authority-bearing client.
+ * cannot carry the marker. An augmented LLM subtype must declare how each
+ * additional provider-operation alias maps to the standard LLM surface. The
+ * host interprets that data into a facade around the authority-bearing client.
  * The distributive conditional preserves both rules after heterogeneous handles
  * widen to `CapabilityHandle[]`.
  */
@@ -30,25 +30,38 @@ type CapabilityHandleBase<K extends Capability> = {
   readonly dependsOn?: readonly Capability[];
 };
 
-export type RunScopedLlmComposer<T extends LlmClient> = (
-  metered: LlmClient,
-) => T;
+export type RunScopedLlmOperation = "sendStructured" | "sendWithTools";
+
+type RunScopedOperationFor<F> =
+  F extends LlmClient["sendStructured"] ? "sendStructured"
+    : F extends LlmClient["sendWithTools"] ? "sendWithTools"
+      : never;
+
+/**
+ * Declarative aliases for an augmented LLM subtype.
+ *
+ * Extra fields must be operation-compatible functions. Adapters provide no
+ * executable composition callback, so ignoring the metered client or closing
+ * over a boot-scoped provider is not representable at this seam.
+ */
+export type RunScopedLlmOperations<T extends LlmClient> = {
+  readonly [K in Exclude<keyof T, keyof LlmClient>]: RunScopedOperationFor<T[K]>;
+};
 
 type LlmHandleMetadata<K extends Capability> =
   CapabilityRegistry[K] extends LlmClient
     ? LlmClient extends CapabilityRegistry[K]
       ? {
           readonly clientKind: "llm";
-          /** Optional for the exact standard surface; required for strict subtypes. */
-          readonly composeRunClient?: RunScopedLlmComposer<LlmClient>;
+          readonly runScopedOperations?: never;
         }
       : {
           readonly clientKind: "llm";
-          readonly composeRunClient: RunScopedLlmComposer<CapabilityRegistry[K]>;
+          readonly runScopedOperations: RunScopedLlmOperations<CapabilityRegistry[K]>;
         }
     : {
         readonly clientKind?: never;
-        readonly composeRunClient?: never;
+        readonly runScopedOperations?: never;
       };
 
 export type CapabilityHandle<K extends Capability = Capability> =

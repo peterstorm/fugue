@@ -2,7 +2,7 @@
 
 import type { FrameworkError } from "../types/errors.js";
 import type { Result } from "../types/result.js";
-import { err, ok } from "../types/result.js";
+import { err, map, ok } from "../types/result.js";
 import type { MicroUsd, Spend, UnpricedModels } from "../types/spend.js";
 import { costFloor } from "../types/spend.js";
 import type { RunId } from "../types/ids.js";
@@ -29,7 +29,7 @@ const isFigure = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 
 const canonicalModels = (value: unknown): value is readonly string[] => {
-  if (!Array.isArray(value) || !value.every((model) => typeof model === "string" && model.length > 0)) {
+  if (!Array.isArray(value) || !value.every((model) => typeof model === "string")) {
     return false;
   }
   const canonical = [...new Set(value)].sort();
@@ -54,7 +54,7 @@ const parseRecord = (
     return err(codecError(operation, "spend figures must be non-negative safe integers"));
   }
   if (!canonicalModels(value.unpricedModels)) {
-    return err(codecError(operation, "unpricedModels must be sorted, unique, non-empty strings"));
+    return err(codecError(operation, "unpricedModels must be sorted unique strings"));
   }
   return ok(Object.freeze({
     schemaVersion: 1,
@@ -92,8 +92,10 @@ export const parseFileSpendRecord = (
   } catch {
     return err(codecError("spendStore:read", "spend record is not valid JSON"));
   }
-  const parsed = parseRecord(decoded, expectedRunId, "spendStore:read");
-  return parsed.ok ? ok(spendOfFileRecord(parsed.value)) : parsed;
+  return map(
+    parseRecord(decoded, expectedRunId, "spendStore:read"),
+    spendOfFileRecord,
+  );
 };
 
 export const serializeFileSpendRecord = (
@@ -109,6 +111,8 @@ export const serializeFileSpendRecord = (
     micros: costFloor(spend.usd),
     unpricedModels: models,
   };
-  const parsed = parseRecord(candidate, runId, "spendStore:add");
-  return parsed.ok ? ok(JSON.stringify(parsed.value)) : parsed;
+  return map(
+    parseRecord(candidate, runId, "spendStore:add"),
+    (record) => JSON.stringify(record),
+  );
 };
