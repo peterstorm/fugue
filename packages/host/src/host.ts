@@ -114,6 +114,31 @@ import type { RedisProbeHandle } from "./lifecycle/redis-probe.js";
 import type { ConcurrencyState } from "./domain/concurrency.js";
 import { topoSortHandles, connectAll, closeAll } from "./domain/capability-manager.js";
 
+/** Preserve a boot failure and every subordinate cleanup failure in one HostError. */
+const bootAbortWithCleanup = (
+  primary: HostError,
+  cleanupFailures: readonly unknown[],
+): HostError => {
+  if (cleanupFailures.length === 0) return primary;
+  const diagnostics = cleanupFailures.map(safeErrorMessage);
+  return {
+    kind: "internal-invariant-violated",
+    message:
+      `${formatHostError(primary)}; boot-abort cleanup also failed: ` +
+      diagnostics.join("; "),
+    context: {
+      primary: formatHostError(primary),
+      cleanupFailures: diagnostics,
+    },
+  };
+};
+
+const capabilityCleanupErrors = (
+  failures: readonly { readonly name: string; readonly error: string }[],
+  context: string,
+): readonly Error[] => failures.map((failure) =>
+  new Error(`Capability '${failure.name}' failed to close during ${context}: ${failure.error}`));
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /**
@@ -790,9 +815,17 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
     const connectResult = await connectAll(sortedHandles, logger);
     if (!connectResult.ok) {
       // Boot aborts — close the handles that already connected so a
-      // crash-loop boot doesn't leak pools/sockets on every restart.
-      await closeAll(connectResult.error.connected, logger);
-      return err(connectResult.error.error);
+      // crash-loop boot doesn't leak pools/sockets on every restart. Cleanup
+      // failures remain subordinate to, but cannot disappear behind, the
+      // authoritative connect failure.
+      const prefixCleanup = await closeAll(connectResult.error.connected, logger);
+      return err(bootAbortWithCleanup(connectResult.error.error, [
+        ...capabilityCleanupErrors(
+          connectResult.error.cleanupFailures,
+          "failed capability connect",
+        ),
+        ...capabilityCleanupErrors(prefixCleanup, "failed capability connect"),
+      ]));
     }
     logger.info(`${sortedHandles.length} external capabilities connected`);
   }
@@ -803,8 +836,18 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
     // Capabilities already connected — close them before aborting boot so a
     // crash-loop boot doesn't leak pools/sockets (same guarantee as the
     // connect-failure path above).
-    if (sortedHandles.length > 0) await closeAll(sortedHandles, logger);
-    return err({ kind: "internal-invariant-violated", message: "Boot → ready transition failed", context: { from: readyResult.error.from, to: readyResult.error.to } });
+    const cleanupFailures = sortedHandles.length > 0
+      ? await closeAll(sortedHandles, logger)
+      : [];
+    const primary: HostError = {
+      kind: "internal-invariant-violated",
+      message: "Boot → ready transition failed",
+      context: { from: readyResult.error.from, to: readyResult.error.to },
+    };
+    return err(bootAbortWithCleanup(
+      primary,
+      capabilityCleanupErrors(cleanupFailures, "failed ready transition"),
+    ));
   }
   hostState = readyResult.value;
 
@@ -1073,8 +1116,9 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
   const teardownAfterServerStop = async (context: string): Promise<readonly unknown[]> => {
     const failures: unknown[] = [];
     const recordFailure = (message: string, error: unknown): void => {
-      failures.push(new Error(message, { cause: error }));
-      logSafely(logger, "error", message, { error: safeErrorMessage(error) });
+      const diagnostic = safeErrorMessage(error);
+      failures.push(new Error(`${message}: ${diagnostic}`, { cause: error }));
+      logSafely(logger, "error", message, { error: diagnostic });
     };
 
     // Clear ownership before each operation so teardown remains idempotent even
@@ -1169,15 +1213,22 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
     // depending only on the OPTIONAL `onShutdown` would otherwise leave a
     // mis-permissioned tenant socket listening, worse than a clean boot failure.
     const serverStopFailure = stopBoundServerAfterBindFailure(bunServer, bindDesc, logger);
-    await teardownAfterServerStop("boot abort after server bind failure");
-    const stopContext = serverStopFailure === undefined
-      ? ""
-      : `; failed to stop the bound server and the listener may still be live: ${serverStopFailure}`;
-    return err({
+    const teardownFailures = await teardownAfterServerStop(
+      "boot abort after server bind failure",
+    );
+    const primary: HostError = {
       kind: "internal-invariant-violated",
-      message: `Failed to bind HTTP server on ${bindDesc}: ${safeErrorMessage(e)}${stopContext}`,
+      message: `Failed to bind HTTP server on ${bindDesc}: ${safeErrorMessage(e)}`,
       context: unixPath !== undefined ? { unix: unixPath } : { port: config.PORT },
-    });
+    };
+    return err(bootAbortWithCleanup(primary, [
+      ...(serverStopFailure === undefined
+        ? []
+        : [new Error(
+            `Failed to stop the bound server; listener may still be live: ${serverStopFailure}`,
+          )]),
+      ...teardownFailures,
+    ]));
   }
   // The catch above returns on any bind/chmod failure, so reaching here means the
   // server is bound and `bunServer` is assigned.

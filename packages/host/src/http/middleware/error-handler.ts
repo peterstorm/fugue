@@ -8,7 +8,7 @@
 
 import { match, P } from "ts-pattern";
 import type { Context } from "hono";
-import { isFrameworkError, safeErrorMessage } from "@fuguejs/framework";
+import { isFrameworkErrorKind, safeErrorMessage } from "@fuguejs/framework";
 import type { FrameworkErrorKind } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import {
@@ -251,8 +251,7 @@ const readFrameworkErrorKind = (error: Error): FrameworkErrorKind | undefined =>
   try {
     const descriptor = Object.getOwnPropertyDescriptor(error, "frameworkErrorKind");
     if (descriptor === undefined || !("value" in descriptor)) return undefined;
-    const marker = { kind: descriptor.value };
-    return isFrameworkError(marker) ? marker.kind : undefined;
+    return isFrameworkErrorKind(descriptor.value) ? descriptor.value : undefined;
   } catch {
     return undefined;
   }

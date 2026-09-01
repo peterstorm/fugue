@@ -932,6 +932,31 @@ const usdBudget = (dollars: number): Ceilings => {
   return c;
 };
 
+describe("metered-llm: composition owns fixed pricing identity", () => {
+  it("retains the composed model when the caller mutates its original policy object", async () => {
+    const { inner, calls } = fakeInner(1, 0);
+    const fixedPricing = { kind: "fixed" as const, model: PRICED_MODEL };
+    const metered = createMeteredLlmClient(
+      inner,
+      "llm",
+      createTestAuthority({ logger: collectLogs().logger }),
+      fixedPricing,
+    );
+
+    fixedPricing.model = "gpt-4o-mini";
+    const conflicting = await metered.sendStructured({
+      ...pricedReq(nodeA),
+      model: fixedPricing.model,
+    });
+
+    expect(conflicting.ok).toBe(false);
+    if (!conflicting.ok) expect(conflicting.error.kind).toBe("validation");
+    expect(calls).toHaveLength(0);
+    expect((await metered.sendStructured(pricedReq(nodeA))).ok).toBe(true);
+    expect(calls).toHaveLength(1);
+  });
+});
+
 describe("metered-llm: a dollar ceiling sees what a token ceiling cannot (F3/P1)", () => {
   // 400k prompt tokens per call on gpt-4o = $1.00 uncached.
   const UNCACHED = { tokensIn: 400_000, tokensOut: 0, cacheWriteTokens: 0, cacheReadTokens: 0 };

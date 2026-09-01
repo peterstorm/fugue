@@ -32,6 +32,7 @@ import type {
   CapabilityBroker,
   Invocation,
   InvocationOrigin,
+  MintingAuthority,
   ScopedCapabilityHandle,
 } from "../types/capability-broker.js";
 import { runDag } from "../executor/run-dag.js";
@@ -95,6 +96,17 @@ const baseCtx = (): NodeContext =>
 
 const agentOrigin: InvocationOrigin = { kind: "agent", agentClientId: "agent-x" };
 
+/** Non-LLM broker tests still carry the mandatory metering authority. */
+const testMinting = (broker: CapabilityBroker): MintingAuthority => ({
+  broker,
+  origin: agentOrigin,
+  meterLlm: (_capability, _binding, nodeId) => err({
+    kind: "validation",
+    nodeId,
+    message: "test broker unexpectedly delivered an LLM binding",
+  }),
+});
+
 describe("per-node capability minting (C1)", () => {
   it("mints each node's declared scope at dispatch, merged over the static base; mintFor sees the REAL node id", async () => {
     const { broker, calls } = recordingBroker();
@@ -130,7 +142,7 @@ describe("per-node capability minting (C1)", () => {
       edges: [{ from: DAG_INPUT, to: "nodeA" }, { from: "nodeA", to: "nodeB" }],
     });
 
-    const result = await runDag(dag, {}, baseCtx(), { minting: { broker, origin: agentOrigin } });
+    const result = await runDag(dag, {}, baseCtx(), { minting: testMinting(broker) });
     expect(result.ok).toBe(true);
 
     // mintFor was called PER NODE with that node's requires and its REAL id.
@@ -301,16 +313,20 @@ describe("per-node capability minting (C1)", () => {
     expect(providerCalls).toBe(1);
   });
 
-  it("fails closed when a broker-minted LLM has no run meter", async () => {
+  it("rejects a runtime-forged minting authority with no run meter before dispatch", async () => {
+    let mintCalls = 0;
     const broker: CapabilityBroker = {
-      mintFor: async () => ok({
-        brokerLlm: {
-          clientKind: "llm",
-          client: {} as LlmClient,
-          pricingModel: { kind: "request" },
-          runScopedOperations: {},
-        },
-      }),
+      mintFor: async () => {
+        mintCalls += 1;
+        return ok({
+          brokerLlm: {
+            clientKind: "llm",
+            client: {} as LlmClient,
+            pricingModel: { kind: "request" },
+            runScopedOperations: {},
+          },
+        });
+      },
       provides: (capability) => capability === "brokerLlm",
     };
     const node = createFetchNode({
@@ -326,14 +342,14 @@ describe("per-node capability minting (C1)", () => {
       edges: [{ from: DAG_INPUT, to: "unmetered-broker-llm" }],
     });
 
-    const result = await runDag(dag, {}, baseCtx(), {
-      minting: { broker, origin: agentOrigin },
-    });
+    const forged = { broker, origin: agentOrigin } as unknown as MintingAuthority;
+    const result = await runDag(dag, {}, baseCtx(), { minting: forged });
 
     expect(result.ok).toBe(false);
-    if (!result.ok && result.error.kind === "node-crash") {
-      expect(result.error.message).toContain("without a run spend authority");
+    if (!result.ok && result.error.kind === "validation") {
+      expect(result.error.message).toContain("meterLlm must be a function");
     }
+    expect(mintCalls).toBe(0);
   });
 
   it("rejects an untagged broker LLM instead of passing it through unmetered", async () => {
@@ -391,7 +407,7 @@ describe("per-node capability minting (C1)", () => {
     });
     const dag = defineDagFromArray({ id: "dag-1", nodes: [node], edges: [{ from: DAG_INPUT, to: "only" }] });
     // Base context has NO `svc:opA` — only the broker can supply it at dispatch.
-    const result = await runDag(dag, {}, baseCtx(), { minting: { broker, origin: agentOrigin } });
+    const result = await runDag(dag, {}, baseCtx(), { minting: testMinting(broker) });
     expect(result.ok).toBe(true);
   });
 
@@ -418,7 +434,7 @@ describe("per-node capability minting (C1)", () => {
       edges: [{ from: DAG_INPUT, to: "reserved-output" }],
     });
 
-    const result = await runDag(dag, {}, baseCtx(), { minting: { broker, origin: agentOrigin } });
+    const result = await runDag(dag, {}, baseCtx(), { minting: testMinting(broker) });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("node-crash");
@@ -441,7 +457,7 @@ describe("per-node capability minting (C1)", () => {
       fetch: async () => ok({ ok: true }), // never reached
     });
     const dag = defineDagFromArray({ id: "dag-1", nodes: [node], edges: [{ from: DAG_INPUT, to: "gated" }] });
-    const result = await runDag(dag, {}, baseCtx(), { minting: { broker, origin: agentOrigin } });
+    const result = await runDag(dag, {}, baseCtx(), { minting: testMinting(broker) });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       // A settled refusal is terminal (ADR-0059): it fast-fails the DAG with the
@@ -471,7 +487,7 @@ describe("per-node capability minting (C1)", () => {
       defaultRetryLimit: 2,
     });
     const result = await runDag(dag, {}, baseCtx(), {
-      minting: { broker, origin: agentOrigin },
+      minting: testMinting(broker),
       suppressRoutingWarnings: true,
     });
     expect(result.ok).toBe(false);
@@ -506,7 +522,7 @@ describe("per-node capability minting (C1)", () => {
       defaultRetryLimit: 2, // budget present — a retriable error would mint 3 times
     });
     const result = await runDag(dag, {}, baseCtx(), {
-      minting: { broker, origin: agentOrigin },
+      minting: testMinting(broker),
       suppressRoutingWarnings: true,
     });
     expect(result.ok).toBe(false);
@@ -554,7 +570,7 @@ describe("per-node capability minting (C1)", () => {
       defaultRetryLimit: 2, // budget present — a retriable error would run 3 times
     });
     const result = await runDag(dag, {}, baseCtx(), {
-      minting: { broker, origin: agentOrigin },
+      minting: testMinting(broker),
       suppressRoutingWarnings: true,
     });
     expect(result.ok).toBe(false);
@@ -598,7 +614,7 @@ describe("per-node capability minting (C1)", () => {
     // Resume with nodeA's output already checkpointed → nodeA is skipped/replayed.
     const checkpoint = new Map<string, unknown>([["nodeA", { ok: true }]]);
     const result = await runDag(dag, {}, baseCtx(), {
-      minting: { broker, origin: agentOrigin },
+      minting: testMinting(broker),
       resume: { runId: "run-1", checkpoint },
     });
 
@@ -669,7 +685,7 @@ describe("per-node minting — broker port-contract enforcement", () => {
       });
 
       const result = await runDag(dag, {}, ctx, {
-        minting: { broker, origin: agentOrigin },
+        minting: testMinting(broker),
       });
 
       expect(result.ok).toBe(false);
@@ -715,7 +731,7 @@ describe("per-node minting — broker port-contract enforcement", () => {
     });
 
     const result = await runDag(dag, {}, baseCtx(), {
-      minting: { broker, origin: agentOrigin },
+      minting: testMinting(broker),
     });
 
     expect(mutationBlocked).toBe(true);
@@ -750,7 +766,7 @@ describe("per-node minting — broker port-contract enforcement", () => {
       defaultRetryLimit: 2,
     });
     const result = await runDag(dag, {}, baseCtx(), {
-      minting: { broker: throwingBroker, origin: agentOrigin },
+      minting: testMinting(throwingBroker),
       suppressRoutingWarnings: true,
     });
     expect(result.ok).toBe(false);
@@ -817,7 +833,7 @@ describe("per-node minting — broker port-contract enforcement", () => {
       });
 
       const result = await runDag(dag, {}, ctx, {
-        minting: { broker, origin: agentOrigin },
+        minting: testMinting(broker),
         suppressRoutingWarnings: true,
       });
 
@@ -898,7 +914,7 @@ describe("per-node minting — broker port-contract enforcement", () => {
       });
 
       const result = await runDag(dag, {}, baseCtx(), {
-        minting: { broker, origin: agentOrigin },
+        minting: testMinting(broker),
         suppressRoutingWarnings: true,
       });
 
@@ -938,7 +954,7 @@ describe("per-node minting — broker port-contract enforcement", () => {
     });
     const dag = defineDagFromArray({ id: "dag-1", nodes: [node], edges: [{ from: DAG_INPUT, to: "undelivered" }] });
     const result = await runDag(dag, {}, baseCtx(), {
-      minting: { broker: lyingBroker, origin: agentOrigin },
+      minting: testMinting(lyingBroker),
     });
     expect(result.ok).toBe(false);
     expect(runReached).toBe(false);
@@ -996,7 +1012,7 @@ describe("per-node minting — broker port-contract enforcement", () => {
     });
 
     const result = await runDag(dag, {}, ctx, {
-      minting: { broker, origin: agentOrigin },
+      minting: testMinting(broker),
     });
 
     expect(result.ok).toBe(false);
@@ -1039,7 +1055,7 @@ describe("per-node minting — broker port-contract enforcement", () => {
     });
 
     const result = await runDag(dag, {}, ctx, {
-      minting: { broker, origin: agentOrigin },
+      minting: testMinting(broker),
     });
 
     expect(result.ok).toBe(false);

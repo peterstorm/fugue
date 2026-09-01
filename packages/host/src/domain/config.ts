@@ -950,7 +950,52 @@ export const HostConfigSchema = z.object({
 export const workerSocketPath = (udsDir: string, tenant: TenantId): string =>
   `${udsDir.replace(/\/+$/, "")}/${tenant}.sock`;
 
-export type HostConfig = z.infer<typeof HostConfigSchema>;
+type ParsedHostConfig = z.infer<typeof HostConfigSchema>;
+
+type HostLlmConfig =
+  | { readonly LLM_PROVIDER: "anthropic"; readonly ANTHROPIC_API_KEY: string }
+  | { readonly LLM_PROVIDER: "openai"; readonly OPENAI_API_KEY: string }
+  | {
+      readonly LLM_PROVIDER: "azure";
+      readonly AZURE_OPENAI_ENDPOINT: string;
+      readonly AZURE_OPENAI_API_KEY: string;
+      readonly AZURE_OPENAI_DEPLOYMENT: string;
+      readonly AZURE_OPENAI_MODEL: string;
+    };
+
+/** Parsed host configuration with provider-specific LLM requirements encoded. */
+export type HostConfig = ParsedHostConfig & HostLlmConfig;
+
+const withLlmPostcondition = (config: ParsedHostConfig): HostConfig | undefined => {
+  if (config.LLM_PROVIDER === "anthropic") {
+    return config.ANTHROPIC_API_KEY !== undefined && config.ANTHROPIC_API_KEY.length > 0
+      ? { ...config, LLM_PROVIDER: "anthropic", ANTHROPIC_API_KEY: config.ANTHROPIC_API_KEY }
+      : undefined;
+  }
+  if (config.LLM_PROVIDER === "openai") {
+    return config.OPENAI_API_KEY !== undefined && config.OPENAI_API_KEY.length > 0
+      ? { ...config, LLM_PROVIDER: "openai", OPENAI_API_KEY: config.OPENAI_API_KEY }
+      : undefined;
+  }
+
+  const endpoint = config.AZURE_OPENAI_ENDPOINT;
+  const apiKey = config.AZURE_OPENAI_API_KEY;
+  const deployment = config.AZURE_OPENAI_DEPLOYMENT;
+  const model = config.AZURE_OPENAI_MODEL;
+  return endpoint !== undefined && endpoint.length > 0 &&
+      apiKey !== undefined && apiKey.length > 0 &&
+      deployment !== undefined && deployment.length > 0 &&
+      model !== undefined && model.length > 0
+    ? {
+        ...config,
+        LLM_PROVIDER: "azure",
+        AZURE_OPENAI_ENDPOINT: endpoint,
+        AZURE_OPENAI_API_KEY: apiKey,
+        AZURE_OPENAI_DEPLOYMENT: deployment,
+        AZURE_OPENAI_MODEL: model,
+      }
+    : undefined;
+};
 
 // ---------------------------------------------------------------------------
 // Per-DAG config — parsed from fugue.yaml (FR-100, FR-041)
@@ -992,7 +1037,13 @@ export type FugueYaml = z.infer<typeof FugueYamlSchema>;
 export const parseHostConfig = (env: Record<string, string | undefined>): Result<HostConfig, HostError> => {
   const result = HostConfigSchema.safeParse(env);
   if (result.success) {
-    return ok(result.data);
+    const config = withLlmPostcondition(result.data);
+    return config === undefined
+      ? err({
+          kind: "config-invalid",
+          message: "LLM provider configuration did not satisfy its parsed postcondition",
+        })
+      : ok(config);
   }
   const message = result.error.issues
     .map((i) => `${i.path.join(".")}: ${i.message}`)

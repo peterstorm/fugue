@@ -149,6 +149,8 @@ interface ConnectFailure {
   readonly error: HostError;
   /** Handles whose `connect()` completed before the failure, in connect order. */
   readonly connected: readonly CapabilityHandle[];
+  /** Cleanup failures already observed on the handle whose connect failed. */
+  readonly cleanupFailures: readonly { readonly name: string; readonly error: string }[];
 }
 
 type LifecycleLogMethod = (msg: string, data?: Record<string, unknown>) => void;
@@ -228,16 +230,20 @@ export const connectAll = async (
         // factory time (e.g. a pg Pool opens sockets before connect() runs).
         // Close it best-effort so an aborted boot doesn't orphan them — the
         // caller only closes the *connected prefix*, which excludes this
-        // handle. A close failure is logged, never masks the connect error.
+        // handle. A close failure remains subordinate to the connect error but
+        // is returned as cleanup evidence instead of existing only in logs.
+        const cleanupFailures: Array<{ readonly name: string; readonly error: string }> = [];
         if (handle.close) {
           try {
             await handle.close();
           } catch (closeError) {
+            const cleanupError = safeErrorMessage(closeError);
+            cleanupFailures.push({ name: handle.name, error: cleanupError });
             logLifecycleWithoutThrowing(
               logger,
               "error",
               `Capability '${handle.name}' failed to close after connect failure`,
-              { error: safeErrorMessage(closeError) },
+              { error: cleanupError },
               writeFallback,
             );
           }
@@ -249,6 +255,7 @@ export const connectAll = async (
             context: { capability: handle.name },
           },
           connected,
+          cleanupFailures,
         });
       }
     }

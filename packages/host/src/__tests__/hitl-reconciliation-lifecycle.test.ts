@@ -17,7 +17,10 @@ import {
 
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-const lifecycleQueue = (events: string[]): QueueBackend => ({
+const lifecycleQueue = (
+  events: string[],
+  options: { readonly failWorkerClose?: boolean } = {},
+): QueueBackend => ({
   createQueue() {
     return {
       async enqueue() {},
@@ -31,7 +34,12 @@ const lifecycleQueue = (events: string[]): QueueBackend => ({
       onFailed() {},
       onExhausted() {},
       onError() {},
-      async close() { events.push("worker-closed"); },
+      async close() {
+        events.push("worker-closed");
+        if (options.failWorkerClose === true) {
+          throw new Error("HITL worker refused to close");
+        }
+      },
     } as WorkerHandle;
   },
   async close() {},
@@ -150,6 +158,45 @@ describe("createHost — HITL reconciliation lifecycle", () => {
     expect(logger.logs.some(
       (entry) => entry.level === "error" && entry.msg.includes("stop HTTP server"),
     )).toBe(true);
+    host = undefined;
+  });
+
+  it("continues teardown and rejects when the HITL worker refuses to close", async () => {
+    socketPath = join(tmpdir(), `fugue-hitl-close-fails-${crypto.randomUUID()}.sock`);
+    const base = fakeRedis();
+    const events: string[] = [];
+    let infrastructureClosed = 0;
+    const booted = await createHost({
+      config: makeConfig({ TEAMS_WEBHOOK_URL: "https://teams.example.test/hook" }),
+      git: fakeGit(),
+      loader: fakeLoader(),
+      redis: base.port,
+      sharedInfra: fakeInfra(base.redis),
+      logger: testLogger(),
+      tenant: mkTenant("acme"),
+      bind: { unix: socketPath },
+      queueBackend: lifecycleQueue(events, { failWorkerClose: true }),
+      onShutdown: async () => { infrastructureClosed += 1; },
+    });
+
+    expect(booted.ok).toBe(true);
+    if (!booted.ok) return;
+    host = booted.value;
+    let failure: unknown;
+    try {
+      await host.shutdown();
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(AggregateError);
+    const aggregate = failure as AggregateError;
+    expect(aggregate.errors).toHaveLength(1);
+    expect((aggregate.errors[0] as Error).message).toContain("HITL worker");
+    expect((aggregate.errors[0] as Error).message).toContain("refused to close");
+    expect(events).toContain("worker-closed");
+    expect(infrastructureClosed).toBe(1);
+    expect(host.getState().phase).toBe("stopped");
     host = undefined;
   });
 

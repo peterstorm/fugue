@@ -276,7 +276,22 @@ describe("createHost broker-LLM composition", () => {
     host = booted.value;
 
     const firstShutdown = host.shutdown();
-    await expect(firstShutdown).rejects.toThrow("Host shutdown completed with failures");
+    let firstFailure: unknown;
+    try {
+      await firstShutdown;
+    } catch (error) {
+      firstFailure = error;
+    }
+    expect(firstFailure).toBeInstanceOf(AggregateError);
+    const failures = (firstFailure as AggregateError).errors as readonly Error[];
+    expect(failures.map((failure) => failure.message)).toEqual([
+      "Shutdown step failed: log shutdown start",
+      "Infrastructure cleanup failed during shutdown — resources may be leaked: Redis disconnect failed",
+    ]);
+    expect(failures[0]?.cause).toBeInstanceOf(Error);
+    expect((failures[0]?.cause as Error).message).toBe("shutdown logger unavailable");
+    expect(failures[1]?.cause).toBeInstanceOf(Error);
+    expect((failures[1]?.cause as Error).message).toBe("Redis disconnect failed");
     expect(infrastructureCleanupCalls).toBe(1);
     expect(host.server).toBeNull();
 

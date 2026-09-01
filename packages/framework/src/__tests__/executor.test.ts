@@ -638,6 +638,37 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
     }
   });
 
+  it("rejects every malformed origin variant before minting with balanced run telemetry", async () => {
+    const dag = mkSimpleDag("malformed-origin");
+    let mints = 0;
+    const broker = { mintFor: async () => { mints += 1; return ok({}); } };
+    const meterLlm: MintingAuthority["meterLlm"] = (_capability, _binding, nodeId) =>
+      err({ kind: "validation", nodeId, message: "unexpected LLM binding" });
+    const malformedOrigins: readonly unknown[] = [
+      { kind: "service", agentClientId: "agent-x" },
+      { kind: "agent", agentClientId: 42 },
+      { kind: "user", agentClientId: "agent-x" },
+      { kind: "user", sub: "subject-x", agentClientId: "agent-x", extra: true },
+    ];
+
+    for (const origin of malformedOrigins) {
+      const observer = new RecordingObserver();
+      const minting = { broker, origin, meterLlm } as unknown as MintingAuthority;
+      const result = await runDag(dag, { value: 1 }, mkCtx({ observer }), { minting });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok && result.error.kind === "validation") {
+        expect(result.error.message).toContain("minting authority origin invalid");
+      } else {
+        throw new Error("expected origin validation failure");
+      }
+      expect(observer.events.map((event) => event.type)).toEqual(["run-start", "run-end"]);
+      const runEnd = observer.events[1];
+      if (runEnd?.type === "run-end") expect(runEnd.status).toBe("error");
+    }
+    expect(mints).toBe(0);
+  });
+
   // Shared: a DAG with a single humanReview node, used to exercise the new
   // node-config-driven routing and validation rules.
   const mkHitlDag = (id: string): DagDef =>

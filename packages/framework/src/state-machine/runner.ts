@@ -9,6 +9,23 @@ const defaultClassifyError = (error: unknown): { retriable: boolean; message: st
   message: safeErrorMessage(error),
 });
 
+/** Keep the executor failure authoritative when a caller classifier is broken. */
+const classifyExecutorError = (
+  error: unknown,
+  classify: (error: unknown) => { retriable: boolean; message: string },
+): { retriable: boolean; message: string } => {
+  try {
+    return classify(error);
+  } catch (classificationError) {
+    return {
+      retriable: false,
+      message:
+        `executor failed: ${safeErrorMessage(error)}; ` +
+        `error classifier also failed: ${safeErrorMessage(classificationError)}`,
+    };
+  }
+};
+
 /** Dedicated kernel control flow for a `beforeExecute` refusal. */
 export class BeforeExecuteAbortError extends Error {
   constructor() {
@@ -137,8 +154,17 @@ export const runStateMachine = async <S, E, C>(
       // FR-006: ALWAYS catch executor exceptions and deliver them to the machine
       // as a typed ERROR event. errorEventOf is required by the type system —
       // callers without one cannot construct a valid `RunOptions`.
-      const classified = classify(raw);
-      event = opts.errorEventOf(classified);
+      const classified = classifyExecutorError(raw, classify);
+      try {
+        event = opts.errorEventOf(classified);
+      } catch (mappingError) {
+        throw new AggregateError(
+          [raw, mappingError],
+          `Executor failed (${safeErrorMessage(raw)}), then errorEventOf failed ` +
+            `(${safeErrorMessage(mappingError)})`,
+          { cause: raw },
+        );
+      }
     }
 
     const prevState = state;

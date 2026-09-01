@@ -124,9 +124,13 @@ const safeZodToJsonSchema = (
   try {
     return zodToJsonSchema(schema);
   } catch (e) {
-    // Surface the failure to the caller — describe stays best-effort but
-    // never silently swallows the error.
-    onError(e);
+    // Warning delivery is diagnostic-only. A broken sink cannot replace the
+    // schema failure or break describe's best-effort Result boundary.
+    try {
+      onError(e);
+    } catch {
+      // No secondary channel exists here; the null schema remains authoritative.
+    }
     return null;
   }
 };

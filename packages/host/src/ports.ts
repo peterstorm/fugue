@@ -366,10 +366,12 @@ export type SpendLedgerMetadata =
     };
 
 /**
- * Durable per-run LLM spend.
+ * Per-run LLM spend persistence seam.
  *
- * The in-process meter is the authority WITHIN one execution slice; this port
- * is what makes a run's spend survive BETWEEN them. A resumable run builds a
+ * The in-process meter is the authority WITHIN one execution slice. Whether
+ * this seam survives a process restart is explicit in `metadata.durability`:
+ * the memory adapter is process-local, while authoritative adapters survive
+ * restart. A resumable run builds a
  * fresh NodeContext per slice, so without it a run that parks for a human
  * decision and resumes starts from zero — five parks, six budgets.
  *

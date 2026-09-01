@@ -297,11 +297,15 @@ export const createNamespacedCheckpointWriter = (
       }
       let setResult: Awaited<ReturnType<RedisPort["set"]>>;
       try {
-        setResult = commitCheckpointAndRetainSpend !== undefined
-          ? await commitCheckpointAndRetainSpend(fullKey, serialized)
-          : checkpointTtlSec !== undefined
-            ? await redis.set(fullKey, serialized, { expiresInSec: checkpointTtlSec })
-            : await redis.set(fullKey, serialized);
+        if (commitCheckpointAndRetainSpend !== undefined) {
+          setResult = await commitCheckpointAndRetainSpend(fullKey, serialized);
+        } else if (checkpointTtlSec !== undefined) {
+          setResult = await redis.set(fullKey, serialized, {
+            expiresInSec: checkpointTtlSec,
+          });
+        } else {
+          setResult = await redis.set(fullKey, serialized);
+        }
       } catch (error) {
         const message = safeErrorMessage(error);
         writeFailures.failed({

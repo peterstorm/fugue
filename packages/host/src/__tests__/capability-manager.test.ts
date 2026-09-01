@@ -293,10 +293,14 @@ describe("capability-manager", () => {
       const result = await connectAll(handles, logger);
       expect(isErr(result)).toBe(true);
       if (!result.ok) {
-        // The surfaced error is the connect failure, not the close failure.
+        // The surfaced primary is still the connect failure, while cleanup
+        // evidence remains structured for the host's boot-abort aggregate.
         expect(result.error.error.message).toContain("connect-boom");
+        expect(result.error.cleanupFailures).toEqual([
+          { name: "b", error: "close-boom" },
+        ]);
       }
-      // The close failure is logged, not swallowed.
+      // The close failure is logged as well as returned.
       expect(errorLogs.some((m) => m.includes("failed to close after connect failure"))).toBe(true);
     });
   });

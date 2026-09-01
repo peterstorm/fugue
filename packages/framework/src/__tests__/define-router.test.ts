@@ -93,7 +93,7 @@ describe("defineRouter", () => {
     expect(cond?.when.version).toBe(1);
   });
 
-  it("passes through whenPredicate unchanged (advanced form)", () => {
+  it("snapshots whenPredicate metadata while preserving its validated check (advanced form)", () => {
     const customPredicate = {
       label: "custom-label",
       version: 7,
@@ -113,11 +113,16 @@ describe("defineRouter", () => {
       default: fallback,
     });
 
+    customPredicate.label = "mutated-after-definition";
+    customPredicate.version = 99;
+
     const cond = dag.edges.find(isConditionalEdge);
-    expect(cond?.when).toBe(customPredicate);
+    expect(cond?.when).not.toBe(customPredicate);
     expect(cond?.when.label).toBe("custom-label");
     expect(cond?.when.version).toBe(7);
     expect(cond?.when.minConfidence).toBe("high");
+    expect(cond?.when.check).toBe(customPredicate.check);
+    expect(Object.isFrozen(cond?.when)).toBe(true);
   });
 
   it("throws a structured DagDefinitionError on empty cases", () => {

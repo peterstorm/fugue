@@ -89,12 +89,22 @@ describe("MicroUsd: money as an integer", () => {
 
   it("maps invalid non-positive inputs to zero and positive overflow to saturation", () => {
     // NaN must not poison comparisons and negative values cannot be refunds.
-    // Positive infinity/overflow is cost, so it saturates fail-closed.
+    // Positive infinity/overflow is cost, so both money constructors saturate fail-closed.
+    expect(microUsd(Number.NaN)).toBe(micros(0));
+    expect(microUsd(Number.NEGATIVE_INFINITY)).toBe(micros(0));
+    expect(microUsd(Number.POSITIVE_INFINITY)).toBe(microUsd(Number.MAX_SAFE_INTEGER));
     expect(usdToMicros(Number.NaN)).toBe(micros(0));
     expect(usdToMicros(Number.POSITIVE_INFINITY)).toBe(microUsd(Number.MAX_SAFE_INTEGER));
     expect(usdToMicros(Number.NEGATIVE_INFINITY)).toBe(micros(0));
     expect(usdToMicros(-5)).toBe(micros(0));
     expect(usdToMicros(Number.MAX_VALUE)).toBe(microUsd(Number.MAX_SAFE_INTEGER));
+  });
+
+  it("saturates every generated positive unsafe micro-USD input", () => {
+    fc.assert(fc.property(
+      fc.double({ min: Number.MAX_SAFE_INTEGER, noNaN: true, noDefaultInfinity: true }),
+      (value) => microUsd(value) === microUsd(Number.MAX_SAFE_INTEGER),
+    ));
   });
 
   it("stays exact under repeated addition where a float would drift", () => {

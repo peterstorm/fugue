@@ -129,6 +129,7 @@ const createMockRedis = (): { port: RedisPort; store: Map<string, string> } => {
 const createMockSharedInfra = (redis: RedisPort): SharedInfra => ({
   spendLedger: createInMemorySpendLedger(),
   llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as unknown as import("@fuguejs/framework").LlmClient,
+  llmPricingModel: { kind: "request" },
   redis,
   tracer: noopTracer,
   contentFilter: null,

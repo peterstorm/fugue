@@ -50,6 +50,49 @@ describe("validateDagShape", () => {
     expect(Object.isFrozen(validatedNode?.retry?.backoffMs)).toBe(true);
   });
 
+  it("snapshots conditional predicates so caller mutation cannot change routing policy", () => {
+    const originalCheck = (value: unknown): boolean => value === "route-b";
+    const predicate: {
+      label: string;
+      version: number;
+      check: (value: unknown) => boolean;
+      minConfidence: "high" | "medium" | "low" | "unknown";
+    } = {
+      label: "choose-b",
+      version: 1,
+      check: originalCheck,
+      minConfidence: "medium",
+    };
+    const parsed = validateDagShape({
+      id: "immutable-predicate",
+      nodes: { A: mkNode("A"), B: mkNode("B"), C: mkNode("C") },
+      edges: [
+        { from: DAG_INPUT, to: "A" },
+        { from: "A", to: "B", when: predicate },
+        { from: "A", to: "C", kind: "default" },
+      ],
+    });
+    if (!parsed.ok) throw new Error(parsed.error.kind);
+
+    predicate.label = "mutated";
+    predicate.version = 99;
+    predicate.check = () => false;
+    predicate.minConfidence = "low";
+
+    const conditional = parsed.value.edges.find((edge) => edge.kind === "conditional");
+    expect(conditional?.kind).toBe("conditional");
+    if (conditional?.kind !== "conditional") return;
+    expect(conditional.when).not.toBe(predicate);
+    expect(conditional.when).toEqual({
+      label: "choose-b",
+      version: 1,
+      check: originalCheck,
+      minConfidence: "medium",
+    });
+    expect(conditional.when.check("route-b", {} as never)).toBe(true);
+    expect(Object.isFrozen(conditional.when)).toBe(true);
+  });
+
   it("rejects empty nodes", () => {
     const dag: DagDefInput = { id: "empty", nodes: {}, edges: [] };
     const r = validateDagShape(dag);

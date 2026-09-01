@@ -118,40 +118,78 @@ const snapshotToolsRequest = <O>(
   ["tools"],
 );
 
+/** Own the deployment's pricing identity before issuing a run-scoped client. */
+const snapshotPricingModel = (pricingModel: LlmPricingModel): LlmPricingModel => {
+  let descriptors: Record<PropertyKey, PropertyDescriptor>;
+  try {
+    descriptors = Object.getOwnPropertyDescriptors(pricingModel) as Record<
+      PropertyKey,
+      PropertyDescriptor
+    >;
+  } catch {
+    throw new TypeError("LLM pricing model could not be inspected safely");
+  }
+
+  const keys = Reflect.ownKeys(descriptors);
+  const hasExactly = (expected: readonly string[]): boolean =>
+    keys.length === expected.length &&
+    keys.every((key) => typeof key === "string" && expected.includes(key));
+  const dataValue = (key: string): unknown => {
+    const descriptor = descriptors[key];
+    if (descriptor === undefined || !("value" in descriptor)) {
+      throw new TypeError(`LLM pricing model ${key} must be an own data property`);
+    }
+    return descriptor.value;
+  };
+
+  const kind = dataValue("kind");
+  if (kind === "request" && hasExactly(["kind"])) {
+    return Object.freeze({ kind: "request" });
+  }
+  if (kind === "fixed" && hasExactly(["kind", "model"])) {
+    const model = dataValue("model");
+    if (typeof model === "string") return Object.freeze({ kind: "fixed", model });
+  }
+  throw new TypeError("LLM pricing model must be exactly request or fixed with a string model");
+};
+
 export const createMeteredLlm = (
   inner: LlmClient,
   clientKey: Capability,
   authority: RunSpendAuthority,
   pricingModel: LlmPricingModel,
-): LlmClient => Object.freeze({
-  sendStructured: <O>(
-    req: LlmRequest<O>,
-  ): Promise<Result<LlmResponse<O>, FrameworkError>> => {
-    const request = snapshotStructuredRequest(req);
-    return request.ok
-      ? authority.execute({
-          clientKey,
-          operation: "sendStructured",
-          pricingModel,
-          request: request.value,
-          call: () => inner.sendStructured(request.value),
-        })
-      : Promise.resolve(request);
-  },
+): LlmClient => {
+  const boundPricingModel = snapshotPricingModel(pricingModel);
+  return Object.freeze({
+    sendStructured: <O>(
+      req: LlmRequest<O>,
+    ): Promise<Result<LlmResponse<O>, FrameworkError>> => {
+      const request = snapshotStructuredRequest(req);
+      return request.ok
+        ? authority.execute({
+            clientKey,
+            operation: "sendStructured",
+            pricingModel: boundPricingModel,
+            request: request.value,
+            call: () => inner.sendStructured(request.value),
+          })
+        : Promise.resolve(request);
+    },
 
-  sendWithTools: <O>(
-    req: SendWithToolsRequest<O>,
-    ctx: NodeContext,
-  ): Promise<Result<LlmResponse<O>, FrameworkError>> => {
-    const request = snapshotToolsRequest(req);
-    return request.ok
-      ? authority.execute({
-          clientKey,
-          operation: "sendWithTools",
-          pricingModel,
-          request: request.value,
-          call: () => inner.sendWithTools(request.value, ctx),
-        })
-      : Promise.resolve(request);
-  },
-});
+    sendWithTools: <O>(
+      req: SendWithToolsRequest<O>,
+      ctx: NodeContext,
+    ): Promise<Result<LlmResponse<O>, FrameworkError>> => {
+      const request = snapshotToolsRequest(req);
+      return request.ok
+        ? authority.execute({
+            clientKey,
+            operation: "sendWithTools",
+            pricingModel: boundPricingModel,
+            request: request.value,
+            call: () => inner.sendWithTools(request.value, ctx),
+          })
+        : Promise.resolve(request);
+    },
+  });
+};

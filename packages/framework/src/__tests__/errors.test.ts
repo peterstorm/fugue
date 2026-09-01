@@ -31,6 +31,7 @@ import {
 import {
   formatFrameworkError,
   isFrameworkError,
+  isFrameworkErrorKind,
   PersistedFrameworkErrorSchema,
   messageOf,
   retriabilityOf,
@@ -147,6 +148,64 @@ describe("PersistedFrameworkErrorSchema", () => {
       message: "boom",
       retriability: "retriable",
     }).success).toBe(false);
+  });
+
+  it("admits only complete variants through isFrameworkError and is total for hostile input", () => {
+    for (const malformed of [
+      { kind: "node-crash" },
+      { kind: "validation", nodeId: "node-x" },
+      { kind: "policy-refusal" },
+      { kind: "infra-unreachable", operation: "mint" },
+    ]) {
+      expect(isFrameworkError(malformed)).toBe(false);
+    }
+    expect(isFrameworkError({
+      kind: "node-crash",
+      nodeId: "node-x",
+      message: "boom",
+      retriability: "non-retriable",
+    })).toBe(true);
+
+    // A parser repair/canonicalization proves only its OUTPUT. The original
+    // object remains malformed and must not be narrowed by a type guard.
+    expect(PersistedFrameworkErrorSchema.safeParse({
+      kind: "checkpoint-write-failed",
+      runId: "run-x",
+      nodeId: "node-x",
+      invalidRunId: "../escape",
+      message: "bad address",
+    }).success).toBe(true);
+    expect(isFrameworkError({
+      kind: "checkpoint-write-failed",
+      runId: "run-x",
+      nodeId: "node-x",
+      invalidRunId: "../escape",
+      message: "bad address",
+    })).toBe(false);
+    expect(isFrameworkError({
+      kind: "llm-budget-exceeded",
+      runId: "run-x",
+      nodeId: "node-x",
+      cause: {
+        kind: "unpriced",
+        ceiling: { kind: "usd", limit: 10 },
+        basis: "settled",
+        models: ["z-model", "a-model"],
+        observedAtLeast: 0,
+      },
+    })).toBe(false);
+
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    expect(() => isFrameworkError(revoked.proxy)).not.toThrow();
+    expect(isFrameworkError(revoked.proxy)).toBe(false);
+  });
+
+  it("parses a standalone augmented-error kind without pretending it is a full error", () => {
+    expect(isFrameworkErrorKind("node-crash")).toBe(true);
+    expect(isFrameworkErrorKind("policy-refusal")).toBe(true);
+    expect(isFrameworkErrorKind("made-up-kind")).toBe(false);
+    expect(isFrameworkError({ kind: "node-crash" })).toBe(false);
   });
 });
 
@@ -413,11 +472,9 @@ describe("retriabilityOf — single source of truth for the retry fast-fail fork
   });
 
   it("recognizes every table-constructed kind as a typed framework error (identity survives the guard)", () => {
-    // The closed kind domain in types/errors.ts is compiler-checked for
-    // COVERAGE (a kind added to the union and omitted from the
-    // `Record<FrameworkErrorKind, true>` table is a compile error); this pins
-    // the consumer-side contract from the other side: no kind this file
-    // constructs is dropped by `isFrameworkError`, so the boundary fences that
+    // PersistedFrameworkErrorSchema is compiler-checked for complete kind
+    // coverage; this pins the consumer-side contract from the other side: no
+    // complete kind this file constructs is dropped by `isFrameworkError`, so the boundary fences that
     // branch on it (resume.ts, job.ts appendEvent, atomic.ts acquireFileLock)
     // can never re-tag a kind that lost its identity.
     for (const [error] of cases) {

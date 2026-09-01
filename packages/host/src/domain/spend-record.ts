@@ -126,7 +126,6 @@ export const spendOfHash = (
     models.push(model);
   }
 
-  models.sort();
   const canonicalModels = unpricedModels(models);
   const micros = microUsd(figures.micros);
   return ok(makeSpend({

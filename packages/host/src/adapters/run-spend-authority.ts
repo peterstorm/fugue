@@ -190,10 +190,6 @@ const settledLlmResult = <O>(
       if (usage === undefined) return malformed("successful response has invalid token usage");
       const output = ownDataValue(response, "output");
       if (!output.ok) return malformed(`successful response ${output.error}`);
-      const parsedOutput = request.schema.safeParse(output.value);
-      if (!parsedOutput.success) {
-        return malformed("successful response output does not match the request schema");
-      }
       const rawText = ownDataValue(response, "rawText");
       if (!rawText.ok || typeof rawText.value !== "string") {
         return malformed("successful response rawText must be an own string data property");
@@ -208,7 +204,10 @@ const settledLlmResult = <O>(
       }
       return {
         result: ok({
-          output: parsedOutput.data,
+          // LlmClient owns the one schema parse. Re-parsing its typed output
+          // here would apply Zod transforms twice (and can reject output types
+          // that intentionally differ from their input types).
+          output: output.value as O,
           rawText: rawText.value,
           ...(thinking !== undefined ? { thinking } : {}),
           ...usage,
@@ -342,6 +341,7 @@ export const createRunSpendAuthority = (
     nodeId: NodeId,
     clientKey: Capability,
     call: Spend,
+    providerOutcome: "success" | FrameworkError["kind"],
   ): Promise<Result<void, string>> => {
     const reportFailure = (reason: string): Result<void, string> => {
       logWithoutThrowing(
@@ -351,6 +351,7 @@ export const createRunSpendAuthority = (
         {
           ...attribution(nodeId, clientKey),
           reason,
+          providerOutcome,
           unrecorded: spendFields(call),
         },
       );
@@ -405,22 +406,32 @@ export const createRunSpendAuthority = (
     const { result, usage } = settledLlmResult<O>(rawResult, req, operation);
     const settledCall = record(req, clientKey, operation, effectiveModel, usage);
     releaseReservationForCall();
-    const persisted = await persist(req.nodeId, clientKey, settledCall);
-    if (!persisted.ok && limits !== undefined) {
-      return err({
-        kind: "node-crash",
-        nodeId: req.nodeId,
-        retriability: "non-retriable",
-        message: `LLM spend could not be durably recorded: ${persisted.error}`,
-      });
-    }
-
+    const providerOutcome = result.ok ? "success" : result.error.kind;
     if (!result.ok) {
+      // Provider outcome is authoritative evidence even when the subsequent
+      // durability write fails and becomes the returned budget-enforcement error.
       logWithoutThrowing(logger, "warn", "llm.call-failed", {
         ...attribution(req.nodeId, clientKey),
         operation,
         errorKind: result.error.kind,
         ...(usage.kind === "known" ? usage.usage : { ...NO_TOKENS, usage: "unknown" }),
+      });
+    }
+
+    const persisted = await persist(
+      req.nodeId,
+      clientKey,
+      settledCall,
+      providerOutcome,
+    );
+    if (!persisted.ok && limits !== undefined) {
+      return err({
+        kind: "node-crash",
+        nodeId: req.nodeId,
+        retriability: "non-retriable",
+        message:
+          `LLM spend could not be durably recorded after provider outcome ` +
+          `'${providerOutcome}': ${persisted.error}`,
       });
     }
     return result;

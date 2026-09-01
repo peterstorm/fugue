@@ -448,6 +448,10 @@ const persistedFrameworkErrorKinds = z.enum([
   "policy-refusal", "downstream-denied",
 ]);
 
+/** Parse the standalone serialized kind marker carried by FrameworkAugmentedError. */
+export const isFrameworkErrorKind = (value: unknown): value is FrameworkErrorKind =>
+  persistedFrameworkErrorKinds.safeParse(value).success;
+
 const PersistedFrameworkErrorSchemaDefinition = z.discriminatedUnion("kind", [
   z.looseObject({ kind: z.literal("validation"), nodeId: PersistedNodeIdSchema, message: z.string(), path: z.string().optional() }),
   z.looseObject({ kind: z.literal("retry-exhausted"), nodeId: PersistedNodeIdSchema, attempts: z.number(), lastError: z.string(), rootErrorKind: persistedFrameworkErrorKinds.exclude(["retry-exhausted"]) }),
@@ -518,68 +522,58 @@ const correlateCheckpointAddresses = (
 export const PersistedFrameworkErrorSchema: ExhaustivePersistedFrameworkErrorSchema =
   PersistedFrameworkErrorSchemaDefinition.transform(correlateCheckpointAddresses);
 
-/**
- * Every `FrameworkError["kind"]` literal — the closed discriminant domain
- * of `isFrameworkError` — as a Record indexed by the FULL union, so BOTH
- * membership and coverage are compile-checked. A kind added to the
- * `FrameworkError` union and omitted here is a compile error (TS2741) —
- * not a silent registration miss that would make `isFrameworkError` fail
- * closed on the new kind and let the boundary fences (resume.ts, job.ts
- * `appendEvent`, atomic.ts `acquireFileLock`) re-tag it, silently losing
- * its identity — and a key here the union no longer declares is a compile
- * error too.
- */
-const FRAMEWORK_ERROR_KINDS: Record<FrameworkErrorKind, true> = {
-  validation: true,
-  "retry-exhausted": true,
-  "checkpoint-missing": true,
-  "checkpoint-expired": true,
-  "checkpoint-corrupt": true,
-  "checkpoint-version-mismatch": true,
-  "checkpoint-write-failed": true,
-  "prompt-not-found": true,
-  "cache-error": true,
-  "node-crash": true,
-  "cycle-detected": true,
-  aborted: true,
-  rejected: true,
-  "invalid-reroute": true,
-  transient: true,
-  "missing-default-edge": true,
-  "output-unreachable-under-routing": true,
-  "predicate-malformed": true,
-  "duplicate-edge": true,
-  "root-expects-input": true,
-  "source-has-incoming": true,
-  "invalid-dag-input-edge": true,
-  "missing-capability": true,
-  "llm-budget-exceeded": true,
-  "infra-unreachable": true,
-  "policy-refusal": true,
-  "downstream-denied": true,
+/** Compare an unknown source with its canonical parser output using data properties only. */
+const isSameOwnData = (
+  source: unknown,
+  canonical: unknown,
+  seen: WeakMap<object, object> = new WeakMap(),
+): boolean => {
+  if (Object.is(source, canonical)) return true;
+  if (typeof source !== "object" || source === null ||
+      typeof canonical !== "object" || canonical === null) return false;
+  if (Array.isArray(source) !== Array.isArray(canonical)) return false;
+
+  const observed = seen.get(source);
+  if (observed !== undefined) return observed === canonical;
+  seen.set(source, canonical);
+
+  const sourceDescriptors = Object.getOwnPropertyDescriptors(source) as Record<
+    PropertyKey,
+    PropertyDescriptor
+  >;
+  const canonicalDescriptors = Object.getOwnPropertyDescriptors(canonical) as Record<
+    PropertyKey,
+    PropertyDescriptor
+  >;
+  const sourceKeys = Reflect.ownKeys(sourceDescriptors);
+  const canonicalKeys = new Set(Reflect.ownKeys(canonicalDescriptors));
+  if (sourceKeys.length !== canonicalKeys.size) return false;
+
+  return sourceKeys.every((key) => {
+    if (!canonicalKeys.has(key)) return false;
+    const sourceProperty = sourceDescriptors[key];
+    const canonicalProperty = canonicalDescriptors[key];
+    return sourceProperty !== undefined && canonicalProperty !== undefined &&
+      Object.hasOwn(sourceProperty, "value") &&
+      Object.hasOwn(canonicalProperty, "value") &&
+      isSameOwnData(sourceProperty.value, canonicalProperty.value, seen);
+  });
 };
 
-/** Derived membership set (string-keyed for the untyped `kind` probe). */
-const FRAMEWORK_ERROR_KIND_SET: ReadonlySet<string> = new Set(Object.keys(FRAMEWORK_ERROR_KINDS));
-
 /**
- * Runtime type guard for `FrameworkError` — narrows an unknown value (a
- * caught throw, a boundary-crossing payload) to the typed union by
- * discriminant inspection: the value must be an object carrying a string
- * `kind` that is a member of the CLOSED `FrameworkErrorKind` domain.
- * Anything else — a plain `Error`, a hostile object carrying an off-union
- * `kind` string — is NOT a typed framework error and must not be relabeled
- * as one by a boundary that only ever throws typed values (e.g. the file
- * journal's `readCheckpoint`, ADR-0080).
+ * Runtime type guard for `FrameworkError` at unknown exception boundaries.
+ * The exhaustive wire parser validates the complete selected variant, not
+ * merely its discriminant, so `{ kind: "node-crash" }` cannot acquire typed
+ * retry/authorization authority without the required payload. The original
+ * value must also equal the canonical parsed data: a wire migration/default or
+ * correlation repair proves the parser output, not the source object narrowed
+ * by this predicate. Parsing and comparison are fenced for hostile proxies.
  */
 export const isFrameworkError = (value: unknown): value is FrameworkError => {
   try {
-    if (typeof value !== "object" || value === null || !("kind" in value)) return false;
-    const kind = Reflect.get(value, "kind");
-    return typeof kind === "string" && FRAMEWORK_ERROR_KIND_SET.has(kind);
+    const parsed = PersistedFrameworkErrorSchema.safeParse(value);
+    return parsed.success && isSameOwnData(value, parsed.data);
   } catch {
-    // A revoked/hostile Proxy is not safely inspectable and therefore cannot
-    // be admitted as a typed framework error.
     return false;
   }
 };

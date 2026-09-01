@@ -109,8 +109,8 @@ export const createJsonConsoleLogger = (
 });
 
 export type HostLlmPlan =
-  | { readonly provider: "anthropic"; readonly apiKey: string | undefined }
-  | { readonly provider: "openai"; readonly apiKey: string | undefined; readonly baseUrl: string }
+  | { readonly provider: "anthropic"; readonly apiKey: string }
+  | { readonly provider: "openai"; readonly apiKey: string; readonly baseUrl: string }
   | {
       readonly provider: "azure";
       readonly apiKey: string;
@@ -126,15 +126,15 @@ export const planHostLlm = (config: HostConfig): HostLlmPlan => {
     return { provider: "anthropic", apiKey: config.ANTHROPIC_API_KEY };
   }
   if (config.LLM_PROVIDER === "azure") {
-    const endpoint = (config.AZURE_OPENAI_ENDPOINT ?? "").replace(/\/$/, "");
-    const deployment = config.AZURE_OPENAI_DEPLOYMENT ?? "";
+    const endpoint = config.AZURE_OPENAI_ENDPOINT.replace(/\/$/, "");
+    const deployment = config.AZURE_OPENAI_DEPLOYMENT;
     return {
       provider: "azure",
-      apiKey: config.AZURE_OPENAI_API_KEY ?? "",
+      apiKey: config.AZURE_OPENAI_API_KEY,
       baseUrl: `${endpoint}/openai/deployments/${deployment}`,
       apiVersion: config.AZURE_OPENAI_API_VERSION,
       deployment,
-      model: config.AZURE_OPENAI_MODEL ?? "",
+      model: config.AZURE_OPENAI_MODEL,
     };
   }
   return {
@@ -152,7 +152,7 @@ export const hostLlmPricingModel = (config: HostConfig): LlmPricingModel => {
     : { kind: "request" };
 };
 
-type LoadAnthropicClient = (apiKey: string | undefined) => Promise<LlmClient>;
+type LoadAnthropicClient = (apiKey: string) => Promise<LlmClient>;
 
 const loadAnthropicClient: LoadAnthropicClient = async (apiKey) => {
   const { default: Anthropic } = await import("@anthropic-ai/sdk");
@@ -176,6 +176,6 @@ export const createHostLlmClient = async (
         modelOverride: plan.deployment,
       });
     case "openai":
-      return new OpenAILlmClient({ apiKey: plan.apiKey ?? "", baseUrl: plan.baseUrl });
+      return new OpenAILlmClient({ apiKey: plan.apiKey, baseUrl: plan.baseUrl });
   }
 };

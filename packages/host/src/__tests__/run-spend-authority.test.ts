@@ -361,62 +361,108 @@ describe("RunSpendAuthority", () => {
     },
   );
 
-  it("parses successful output through the request schema before returning it", async () => {
+  it("preserves an already transformed provider output without applying the schema twice", async () => {
     const authority = createRunSpendAuthority({
       dagId: dagId("authority-dag"),
-      runId: runId("parsed-output-run"),
+      runId: runId("transformed-output-run"),
       hydrated: { kind: "known", spend: NO_SPEND },
       ledger: createInMemorySpendLedger(),
       logger,
     });
-    const parsed = await authority.execute({
+    const schema = z.string().transform((value) => `${value}!`);
+    const providerOutput = schema.parse("once");
+    const settled = await authority.execute({
       clientKey: "llm",
       operation: "sendStructured",
-      request: {
-        ...request,
-        schema: z.object({ answer: z.string() }),
-      },
+      request: { ...request, schema },
       call: async () => ok({
-        output: { answer: "ok", untrusted: true },
+        output: providerOutput,
         rawText: "raw",
         ...tokensOnly(1, 0),
       }),
     });
 
-    expect(parsed).toEqual(ok({
-      output: { answer: "ok" },
+    expect(settled).toEqual(ok({
+      output: "once!",
       rawText: "raw",
       ...tokensOnly(1, 0),
     }));
   });
 
-  it("settles a schema-invalid successful output as unknown usage", async () => {
+  it("accepts a provider output whose schema output type differs from its input type", async () => {
     const authority = createRunSpendAuthority({
       dagId: dagId("authority-dag"),
-      runId: runId("invalid-output-run"),
+      runId: runId("different-output-type-run"),
       hydrated: { kind: "known", spend: NO_SPEND },
       ledger: createInMemorySpendLedger(),
       logger,
     });
-    const malformed = await authority.execute({
+    const schema = z.string().transform((value) => value.length);
+    const providerOutput = schema.parse("abc");
+    const settled = await authority.execute({
       clientKey: "llm",
       operation: "sendStructured",
-      request: {
-        ...request,
-        schema: z.object({ answer: z.string() }),
-      },
+      request: { ...request, schema },
       call: async () => ok({
-        output: {},
+        output: providerOutput,
         rawText: "raw",
         ...tokensOnly(1, 0),
       }),
     });
 
-    expect(malformed.ok).toBe(false);
-    if (!malformed.ok && malformed.error.kind === "node-crash") {
-      expect(malformed.error.message).toContain("output does not match");
+    expect(settled).toEqual(ok({
+      output: 3,
+      rawText: "raw",
+      ...tokensOnly(1, 0),
+    }));
+    expect(authority.budget.spent().usage).toBe("known");
+  });
+
+  it("logs a failed provider outcome before a budgeted ledger failure masks its return", async () => {
+    const events: Array<{ readonly msg: string; readonly data?: Record<string, unknown> }> = [];
+    const capturingLogger: LogPort = {
+      info: (msg, data) => { events.push({ msg, data }); },
+      warn: (msg, data) => { events.push({ msg, data }); },
+      error: (msg, data) => { events.push({ msg, data }); },
+    };
+    const failingLedger: SpendLedgerPort = {
+      metadata: { role: "redis-fallback", backend: "memory", durability: "process" },
+      read: async () => ok(NO_SPEND),
+      add: async () => err({
+        kind: "internal-invariant-violated",
+        message: "ledger unavailable",
+        context: {},
+      }),
+    };
+    const authority = createRunSpendAuthority({
+      dagId: dagId("authority-dag"),
+      runId: runId("provider-and-ledger-failure"),
+      limits: oneCallLimit,
+      hydrated: { kind: "known", spend: NO_SPEND },
+      ledger: failingLedger,
+      logger: capturingLogger,
+    });
+
+    const settled = await authority.execute({
+      clientKey: "llm",
+      operation: "sendStructured",
+      request,
+      call: async () => err({
+        kind: "transient",
+        nodeId: request.nodeId,
+        message: "provider unavailable",
+      }),
+    });
+
+    expect(settled.ok).toBe(false);
+    if (!settled.ok && settled.error.kind === "node-crash") {
+      expect(settled.error.message).toContain("provider outcome 'transient'");
     }
-    expect(authority.budget.spent().usage).toBe("unknown");
+    const providerIndex = events.findIndex((entry) => entry.msg === "llm.call-failed");
+    const ledgerIndex = events.findIndex((entry) => entry.msg === "llm.ledger-write-failed");
+    expect(providerIndex).toBeGreaterThanOrEqual(0);
+    expect(ledgerIndex).toBeGreaterThan(providerIndex);
+    expect(events[ledgerIndex]?.data?.providerOutcome).toBe("transient");
   });
 
   it("treats cache parts exceeding inclusive tokensIn as unknown and closes token admission", async () => {

@@ -64,20 +64,20 @@ export const unpricedModel = (model: string): UnpricedModels =>
 declare const microUsdBrand: unique symbol;
 export type MicroUsd = number & { readonly [microUsdBrand]: void };
 
-const toNonNegativeSafeInteger = (value: number): number =>
-  Number.isFinite(value)
-    ? Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, Math.ceil(value)))
-    : 0;
+const toNonNegativeSafeInteger = (value: number): number => {
+  if (Number.isNaN(value) || value <= 0) return 0;
+  if (!Number.isFinite(value)) return Number.MAX_SAFE_INTEGER;
+  return Math.min(Number.MAX_SAFE_INTEGER, Math.ceil(value));
+};
 
 const addSafeIntegers = (a: number, b: number): number =>
   Math.min(Number.MAX_SAFE_INTEGER, a + b);
 
-const multiplySafeIntegers = (value: number, times: number): number =>
-  value === 0 || times === 0
-    ? 0
-    : value > Number.MAX_SAFE_INTEGER / times
-      ? Number.MAX_SAFE_INTEGER
-      : value * times;
+const multiplySafeIntegers = (value: number, times: number): number => {
+  if (value === 0 || times === 0) return 0;
+  if (value > Number.MAX_SAFE_INTEGER / times) return Number.MAX_SAFE_INTEGER;
+  return value * times;
+};
 
 /** Construct a non-negative safe-integer micro-USD amount. */
 export const microUsd = (value: number): MicroUsd =>

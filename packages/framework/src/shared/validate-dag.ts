@@ -48,6 +48,15 @@ const normalizeEdge = (e: EdgeDefRawInput): EdgeDef => {
   });
 };
 
+/** Own the validated routing policy instead of retaining caller-owned state. */
+const snapshotEdge = (edge: EdgeDef): EdgeDef =>
+  isConditionalEdge(edge)
+    ? Object.freeze({
+        ...edge,
+        when: Object.freeze({ ...edge.when }),
+      })
+    : edge;
+
 const validationErr = (nodeId: NodeId, message: string): FrameworkError => ({
   kind: "validation" as const,
   nodeId,
@@ -518,10 +527,13 @@ export const validateDagShape = (
 
   // This parser is the sole brand issuer. Snapshot every validated collection
   // first so caller-owned objects cannot mutate the proof after it is issued.
+  // Predicate functions remain the validated executable values, but their
+  // metadata container is parser-owned and frozen.
+  const validatedEdges = edges.map(snapshotEdge);
   const validated = Object.freeze({
     id: dagId(input.id),
     nodes: Object.freeze(entries.map(([, node]) => snapshotNode(node))),
-    edges: Object.freeze([...edges]),
+    edges: Object.freeze(validatedEdges),
     ...(input.outputNodeId !== undefined ? { outputNodeId: nodeId(input.outputNodeId) } : {}),
     ...(input.evalJudges !== undefined
       ? { evalJudges: Object.freeze([...input.evalJudges]) }

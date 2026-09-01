@@ -727,6 +727,36 @@ describe("Full Host Lifecycle", () => {
     expect(events).toEqual(["connect:db", "close:queue", "close:db"]);
   });
 
+  test("ADR-0051: capability-connect abort reports failing-handle and connected-prefix cleanup failures", async () => {
+    const events: string[] = [];
+    const capabilities = [
+      fakeCapability("db", events, { failClose: true }),
+      fakeCapability("queue", events, { failConnect: true, failClose: true }),
+    ];
+    const { port, redis } = createFakeRedis();
+
+    const result = await createHost({
+      config: testConfig(),
+      git: createFakeGitPort(),
+      loader: createFakeModuleLoader([]),
+      redis: port,
+      sharedInfra: createFakeSharedInfra(redis, capabilities),
+      logger: createTestLogger(),
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "internal-invariant-violated") {
+      expect(result.error.message).toContain("queue refused to connect");
+      expect(result.error.message).toContain("queue refused to close");
+      expect(result.error.message).toContain("db refused to close");
+      expect(result.error.context.cleanupFailures).toEqual([
+        "Capability 'queue' failed to close during failed capability connect: queue refused to close",
+        "Capability 'db' failed to close during failed capability connect: db refused to close",
+      ]);
+    }
+    expect(events).toEqual(["connect:db", "close:queue", "close:db"]);
+  });
+
   test("ADR-0051: shutdown reports a non-clean close when a capability fails to close", async () => {
     const events: string[] = [];
     const capabilities = [
@@ -792,6 +822,39 @@ describe("Full Host Lifecycle", () => {
       // aborted boot doesn't leak pools/sockets; infra cleanup also runs.
       expect(events).toEqual(["connect:db", "connect:cache", "close:cache", "close:db"]);
       expect(infraClosed).toBe(true);
+    } finally {
+      blocker.stop();
+    }
+  });
+
+  test("ADR-0051: bind abort returns capability and infrastructure cleanup failures", async () => {
+    const blocker = Bun.serve({ port: 0, fetch: () => new Response("busy") });
+    try {
+      const events: string[] = [];
+      const capabilities = [fakeCapability("db", events, { failClose: true })];
+      const { port, redis } = createFakeRedis();
+
+      const result = await createHost({
+        config: testConfig({ PORT: blocker.port }),
+        git: createFakeGitPort(),
+        loader: createFakeModuleLoader([]),
+        redis: port,
+        sharedInfra: createFakeSharedInfra(redis, capabilities),
+        logger: createTestLogger(),
+        onShutdown: async () => { throw new Error("infrastructure refused to close"); },
+      });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok && result.error.kind === "internal-invariant-violated") {
+        expect(result.error.message).toContain("bind HTTP server");
+        expect(result.error.message).toContain("db refused to close");
+        expect(result.error.message).toContain("infrastructure refused to close");
+        expect(result.error.context.cleanupFailures).toEqual([
+          "Capability 'db' failed to close during boot abort after server bind failure: db refused to close",
+          "Infrastructure cleanup failed during boot abort after server bind failure — resources may be leaked: infrastructure refused to close",
+        ]);
+      }
+      expect(events).toEqual(["connect:db", "close:db"]);
     } finally {
       blocker.stop();
     }

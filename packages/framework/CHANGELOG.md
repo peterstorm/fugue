@@ -41,8 +41,9 @@ pre-1.0, so a minor bump may carry breaking changes.
 - **Breaking (source):** every broker capability value is a tagged `llm` or
   `non-llm` binding. Scoped LLM bindings always carry `runScopedOperations`;
   augmented clients cannot omit their aliases, narrow a standard operation's
-  contract, or promise a narrower alias result. Untagged and over-delivered
-  runtime values are rejected before merge.
+  contract, or promise a narrower alias result. `MintingAuthority` requires its
+  host-owned LLM meter, making broker-without-meter wiring unrepresentable.
+  Untagged and over-delivered runtime values are rejected before merge.
 - **Breaking (source):** directly annotated `NodeDef` values now default their
   capability generic to `readonly []`; only capabilities named by an explicit
   requirement tuple are non-null in `run`.
@@ -62,17 +63,24 @@ pre-1.0, so a minor bump may carry breaking changes.
   are diagnosed after a terminal 408.
 - Redis spend retention now outlives shorter checkpoint TTLs for resumable HITL
   runs, with real-Redis transaction coverage.
-- Successful provider results are parsed as complete `LlmResponse` values,
-  including schema-validated output, before settlement returns them.
+- Successful provider results are parsed as complete own-data `LlmResponse`
+  envelopes before settlement. Their already schema-parsed output is preserved
+  exactly, so transforming schemas are never applied twice by spend authority.
 - Listener-stop and hostile Keycloak diagnostic failures can no longer abort
   later teardown or escape typed Result boundaries.
 - Every positive priced call consumes at least one micro-USD; positive overflow
   saturates, so sub-micro calls and infinity cannot create budget headroom.
-- Metered LLM requests, node requirements, and broker claims are snapshotted
-  before crossing authority seams, preventing stateful accessors or broker
-  mutation from making provider egress differ from metering/authorization.
-- Host shutdown attempts all teardown steps and rejects with aggregated failure
-  evidence instead of reporting incomplete cleanup as success.
+- Metered LLM requests, fixed pricing policies, node requirements, broker
+  claims, and invocation origins are parsed into immutable snapshots before
+  crossing authority seams. Caller aliases, malformed discriminants, and
+  stateful accessors cannot make provider egress differ from pricing or identity
+  authorization.
+- Host shutdown and every post-acquisition boot abort attempt all teardown
+  steps and preserve primary plus cleanup failures instead of reporting
+  incomplete cleanup as success.
+- Unknown errors must satisfy the complete `FrameworkError` variant parser;
+  known discriminants with missing payload can no longer select retry or
+  authorization handling.
 - Hostile request-body, confidence-extractor, checkpoint-inspection, logger, and
   wrapped-cause values preserve their original typed failure boundaries.
 

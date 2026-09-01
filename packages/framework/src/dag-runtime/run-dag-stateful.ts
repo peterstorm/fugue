@@ -153,14 +153,67 @@ export interface DagRunOpts
 // prepareDagRun — pre-flight: merge retry limits, emit run-start, validate capabilities
 // ---------------------------------------------------------------------------
 
-const snapshotOrigin = (origin: InvocationOrigin): InvocationOrigin =>
-  origin.kind === "agent"
-    ? Object.freeze({ kind: "agent", agentClientId: origin.agentClientId })
-    : Object.freeze({
-        kind: "user",
-        sub: origin.sub,
-        agentClientId: origin.agentClientId,
-      });
+const snapshotOrigin = (
+  origin: unknown,
+  nodeId: NodeId,
+): Result<InvocationOrigin, FrameworkError> => {
+  const invalid = (message: string): Result<InvocationOrigin, FrameworkError> => err({
+    kind: "validation",
+    nodeId,
+    message: `minting authority origin invalid while snapshotting run authority: ${message}`,
+  });
+
+  let descriptors: Record<PropertyKey, PropertyDescriptor>;
+  try {
+    descriptors = Object.getOwnPropertyDescriptors(origin) as Record<
+      PropertyKey,
+      PropertyDescriptor
+    >;
+  } catch (error) {
+    return invalid(`could not be inspected safely: ${safeErrorMessage(error)}`);
+  }
+
+  const keys = Reflect.ownKeys(descriptors);
+  const hasExactly = (expected: readonly string[]): boolean =>
+    keys.length === expected.length &&
+    keys.every((key) => typeof key === "string" && expected.includes(key));
+  const dataValue = (key: string): Result<unknown, FrameworkError> => {
+    const descriptor = descriptors[key];
+    return descriptor !== undefined && "value" in descriptor
+      ? ok(descriptor.value)
+      : invalid(`${key} must be an own data property`);
+  };
+
+  const kind = dataValue("kind");
+  if (!kind.ok) return kind;
+  if (kind.value === "agent") {
+    if (!hasExactly(["kind", "agentClientId"])) {
+      return invalid("agent variant must contain exactly kind and agentClientId");
+    }
+    const agentClientId = dataValue("agentClientId");
+    if (!agentClientId.ok) return agentClientId;
+    return typeof agentClientId.value === "string"
+      ? ok(Object.freeze({ kind: "agent", agentClientId: agentClientId.value }))
+      : invalid("agentClientId must be a string");
+  }
+  if (kind.value === "user") {
+    if (!hasExactly(["kind", "sub", "agentClientId"])) {
+      return invalid("user variant must contain exactly kind, sub, and agentClientId");
+    }
+    const sub = dataValue("sub");
+    if (!sub.ok) return sub;
+    const agentClientId = dataValue("agentClientId");
+    if (!agentClientId.ok) return agentClientId;
+    return typeof sub.value === "string" && typeof agentClientId.value === "string"
+      ? ok(Object.freeze({
+          kind: "user",
+          sub: sub.value,
+          agentClientId: agentClientId.value,
+        }))
+      : invalid("sub and agentClientId must be strings");
+  }
+  return invalid('kind must be exactly "agent" or "user"');
+};
 
 /**
  * Observe broker authority once per distinct capability required by this DAG.
@@ -192,7 +245,8 @@ const snapshotMintingAuthority = (
     const source = authority.broker;
     const mintFor = source.mintFor;
     const provides = source.provides;
-    const origin = snapshotOrigin(authority.origin);
+    const origin = snapshotOrigin(authority.origin, snapshotNodeId);
+    if (!origin.ok) return err(origin.error);
     const meterLlm = authority.meterLlm;
     if (typeof mintFor !== "function") {
       return err({
@@ -201,14 +255,14 @@ const snapshotMintingAuthority = (
         message: "broker.mintFor must be a function while snapshotting run authority",
       });
     }
-    if (meterLlm !== undefined && typeof meterLlm !== "function") {
+    if (typeof meterLlm !== "function") {
       return err({
         kind: "validation",
         nodeId: snapshotNodeId,
-        message: "minting authority meterLlm must be a function when provided",
+        message: "minting authority meterLlm must be a function",
       });
     }
-    boundary = { source, mintFor, provides, origin, meterLlm };
+    boundary = { source, mintFor, provides, origin: origin.value, meterLlm };
   } catch (error) {
     return err({
       kind: "validation",
@@ -246,11 +300,7 @@ const snapshotMintingAuthority = (
       mintFor.call(source, inv, requires),
     provides: (capability: Capability) => provided.has(capability),
   });
-  return ok(Object.freeze({
-    broker,
-    origin,
-    ...(meterLlm !== undefined ? { meterLlm } : {}),
-  }));
+  return ok(Object.freeze({ broker, origin, meterLlm }));
 };
 
 interface PreparedRun {

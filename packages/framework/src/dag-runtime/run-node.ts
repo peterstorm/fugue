@@ -244,12 +244,6 @@ const meterScopedLlmCapabilities = (
         resolved[key] = parsed.value.client;
         continue;
       }
-      if (minting.meterLlm === undefined) {
-        return err(brokerContractViolation(
-          nodeId,
-          `broker delivered LLM capability '${key}' without a run spend authority`,
-        ));
-      }
       const decorated = minting.meterLlm(
         key as Capability,
         parsed.value,

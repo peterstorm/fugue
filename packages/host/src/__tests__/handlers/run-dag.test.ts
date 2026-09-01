@@ -632,7 +632,15 @@ describe("run-dag handler", () => {
       // broker + per-run origin as one MintingAuthority.
       executeDag: (async <I, O>(d: unknown, input: I, ctx: NodeContext, origin: InvocationOrigin) =>
         runDag<I, O>(d as never, input, ctx, {
-          minting: { broker: refusingBroker, origin },
+          minting: {
+            broker: refusingBroker,
+            origin,
+            meterLlm: (_capability, _binding, nodeId) => err({
+              kind: "validation",
+              nodeId,
+              message: "refusing broker unexpectedly delivered an LLM binding",
+            }),
+          },
           suppressRoutingWarnings: true,
         })) as unknown as RunDagDeps["executeDag"],
       circuitConfig: { threshold: 1, windowMs: 60_000 },

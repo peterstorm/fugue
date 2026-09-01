@@ -241,7 +241,7 @@ export const BUILTIN_CAPABILITY_INFO = {
   },
   judgeLlm: {
     description:
-      "Separate LLM client used by eval-judge nodes, kept distinct from the main `llm` client so judging never contends with generation.",
+      "Distinct LLM capability binding for eval-judge nodes; it still shares the run's spend admission, budget, and ledger with generation.",
     clientType: "LlmClient",
     reference: "createEvalJudgeNode (DagDef.evalJudges)",
   },
