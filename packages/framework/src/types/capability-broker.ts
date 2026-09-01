@@ -35,7 +35,7 @@ import type { Result } from "./result.js";
 import type { FrameworkError } from "./errors.js";
 import type { Capability, CapabilityRegistry } from "./node.js";
 import type { LlmClient, LlmPricingModel } from "./llm.js";
-import type { RunScopedLlmOperation } from "./capability-handle.js";
+import type { RunScopedLlmOperations } from "./capability-handle.js";
 import type { RunId, DagId, NodeId } from "./ids.js";
 
 /**
@@ -50,12 +50,17 @@ export type ScopedLlmCapability<T extends LlmClient = LlmClient> = {
   readonly clientKind: "llm";
   readonly client: T;
   readonly pricingModel: LlmPricingModel;
-  readonly runScopedOperations?: Readonly<Record<string, RunScopedLlmOperation>>;
+  readonly runScopedOperations: RunScopedLlmOperations<T>;
+};
+
+export type ScopedNonLlmCapability<T> = {
+  readonly clientKind: "non-llm";
+  readonly client: T;
 };
 
 type ScopedCapabilityValue<T> =
   [Extract<T, LlmClient>] extends [never]
-    ? T
+    ? ScopedNonLlmCapability<T>
     : [Exclude<T, LlmClient>] extends [never]
       ? ScopedLlmCapability<Extract<T, LlmClient>>
       : never;

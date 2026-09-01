@@ -8,7 +8,7 @@ import type { Result } from "../types/result.js";
 import { err, ok } from "../types/result.js";
 import { tryRunId, type RunId } from "../types/ids.js";
 import type { Spend } from "../types/spend.js";
-import { NO_SPEND, addSpend } from "../types/spend.js";
+import { NO_SPEND, addSpend, parseSpend } from "../types/spend.js";
 import { isMissingPathError } from "../types/safe-error.js";
 import { atomicWriteFile, withFileLock } from "./atomic.js";
 import {
@@ -112,6 +112,15 @@ export const createFileSpendStore = (rootPath: string): FileSpendStore => {
         if (!parsedRunId.ok) {
           return err(fileOperationError("spendStore:add", location, parsedRunId.error, "permanent"));
         }
+        const parsedDelta = parseSpend(delta);
+        if (!parsedDelta.ok) {
+          return err(fileOperationError(
+            "spendStore:add",
+            location,
+            parsedDelta.error,
+            "permanent",
+          ));
+        }
         const paths = pathsFor(root, parsedRunId.value);
         location = paths.recordPath;
         // Re-prove the trust anchor before the lock protocol can create its
@@ -123,7 +132,7 @@ export const createFileSpendStore = (rootPath: string): FileSpendStore => {
           if (!prior.ok) throw prior.error;
           const serialized = serializeFileSpendRecord(
             parsedRunId.value,
-            addSpend(prior.value, delta),
+            addSpend(prior.value, parsedDelta.value),
           );
           if (!serialized.ok) throw serialized.error;
           atomicWriteFile(paths.recordPath, serialized.value);

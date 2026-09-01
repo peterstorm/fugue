@@ -137,7 +137,8 @@ export type RedisCheckpointSpendCommit = {
   readonly checkpointKey: string;
   readonly checkpointValue: string;
   readonly spendKey: string;
-  readonly ttlSec: number;
+  readonly checkpointTtlSec: number;
+  readonly spendTtlSec: number;
 };
 
 export type RedisValueGuard = {
@@ -254,8 +255,9 @@ export type RedisPort = {
    */
   readonly appendSpend?: (append: RedisSpendAppend) => Promise<Result<void, HostError>>;
   /**
-   * Atomically write one checkpoint and extend the corresponding spend hash to
-   * the same retention deadline. An absent spend hash is valid before the
+   * Atomically write one checkpoint and extend the corresponding spend hash.
+   * The two explicit TTLs preserve their independent DAG-checkpoint and
+   * resumable-run lifecycles. An absent spend hash is valid before the
    * run's first LLM call; EXPIRE then reports zero without aborting the write.
    */
   readonly commitCheckpointAndRetainSpend?: (

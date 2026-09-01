@@ -14,7 +14,7 @@
 // in tokens cannot see that difference; one denominated in `Spend` can.
 
 import { match } from "ts-pattern";
-import { sanitizeCount } from "./token-usage.js";
+import { err, ok, type Result } from "./result.js";
 
 /**
  * A non-empty, canonically-ordered list of model names.
@@ -25,24 +25,66 @@ import { sanitizeCount } from "./token-usage.js";
  * so that `addSpend` is genuinely commutative under structural equality rather
  * than only up to a permutation.
  */
-export type UnpricedModels = readonly [string, ...string[]];
+declare const unpricedModelsBrand: unique symbol;
+
+export type UnpricedModels = readonly [string, ...string[]] & {
+  readonly [unpricedModelsBrand]: void;
+};
+
+const canonicalModelNames = (models: readonly string[]): UnpricedModels | undefined => {
+  const sorted = [...new Set(models)].sort();
+  const [head, ...tail] = sorted;
+  return head === undefined
+    ? undefined
+    : ([head, ...tail] as unknown as UnpricedModels);
+};
+
+/** Canonical smart constructor. Empty input has no honest unpriced meaning. */
+export const unpricedModels = (models: readonly string[]): UnpricedModels | undefined =>
+  canonicalModelNames(models);
+
+const UNKNOWN_UNPRICED_MODELS = ["<unknown>"] as unknown as UnpricedModels;
+
+/** Canonical non-empty constructor for one offending model name. */
+export const unpricedModel = (model: string): UnpricedModels =>
+  canonicalModelNames([model]) ?? UNKNOWN_UNPRICED_MODELS;
 
 /**
  * Integer micro-USD (1e-6 USD).
  *
- * Money is an integer here, not a float, because this figure is compared
- * against a ceiling after an unbounded number of additions. Float addition is
- * not associative, so a run's total would depend on the order its calls
- * settled — and two operators reconciling the same run against the same budget
- * could legitimately disagree. Integers make the comparison exact.
+ * Money is an integer here, not a float, so settlement order cannot introduce
+ * floating-point drift. JavaScript's exact integer domain is bounded: every
+ * constructor and aggregate operation therefore clamps to
+ * `Number.MAX_SAFE_INTEGER`. Saturation is deliberately fail-closed — once the
+ * representable maximum is reached, every valid USD ceiling is reached too.
  *
  * Branded so it cannot be swapped with the raw-USD floats that `llm/cost.ts`
  * returns for display.
  */
-export type MicroUsd = number & { readonly __brand: "MicroUsd" };
+declare const microUsdBrand: unique symbol;
+export type MicroUsd = number & { readonly [microUsdBrand]: void };
+
+const toNonNegativeSafeInteger = (value: number): number =>
+  Number.isFinite(value)
+    ? Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, Math.ceil(value)))
+    : 0;
+
+const addSafeIntegers = (a: number, b: number): number =>
+  Math.min(Number.MAX_SAFE_INTEGER, a + b);
+
+const multiplySafeIntegers = (value: number, times: number): number =>
+  value === 0 || times === 0
+    ? 0
+    : value > Number.MAX_SAFE_INTEGER / times
+      ? Number.MAX_SAFE_INTEGER
+      : value * times;
+
+/** Construct a non-negative safe-integer micro-USD amount. */
+export const microUsd = (value: number): MicroUsd =>
+  toNonNegativeSafeInteger(value) as MicroUsd;
 
 /** Zero, in micro-USD. */
-export const NO_MICROS: MicroUsd = 0 as MicroUsd;
+export const NO_MICROS: MicroUsd = microUsd(0);
 
 /**
  * Convert a raw USD float (what `costBreakdownUsd` produces) into the integer
@@ -53,8 +95,13 @@ export const NO_MICROS: MicroUsd = 0 as MicroUsd;
  * `sanitizeCount` clamps token counts: a `NaN` would propagate through every
  * later sum and `NaN >= limit` is false forever, which fails the budget OPEN.
  */
-export const usdToMicros = (usd: number): MicroUsd =>
-  Math.round(sanitizeCount(usd) * 1_000_000) as MicroUsd;
+export const usdToMicros = (usd: number): MicroUsd => {
+  if (!Number.isFinite(usd) || usd < 0) return NO_MICROS;
+  const scaled = usd * 1_000_000;
+  return Number.isFinite(scaled)
+    ? microUsd(Math.round(scaled))
+    : microUsd(Number.MAX_SAFE_INTEGER);
+};
 
 /** Back to a raw USD float. Display only — never a ceiling comparison. */
 export const microsToUsd = (micros: MicroUsd): number => micros / 1_000_000;
@@ -96,7 +143,7 @@ export type PricedSpend =
  */
 export type UsageKnowledge = "known" | "unknown";
 
-export interface Spend {
+export interface SpendInput {
   /**
    * Whether every settled attempt contributed trustworthy token usage.
    * `unknown` is absorbing: known figures remain lower bounds, but token and
@@ -110,13 +157,118 @@ export interface Spend {
   readonly usd: PricedSpend;
 }
 
+declare const spendBrand: unique symbol;
+export type Spend = SpendInput & { readonly [spendBrand]: void };
+
+const normalizePricedSpend = (usd: PricedSpend): PricedSpend =>
+  usd.kind === "priced"
+    ? { kind: "priced", micros: microUsd(usd.micros) }
+    : {
+        kind: "unpriced",
+        models: canonicalModelNames(usd.models) ?? UNKNOWN_UNPRICED_MODELS,
+        knownMicros: microUsd(usd.knownMicros),
+      };
+
+/** Smart constructor for trusted domain inputs; every numeric axis is safe. */
+export const makeSpend = (input: SpendInput): Spend => ({
+  usage: input.usage,
+  tokens: toNonNegativeSafeInteger(input.tokens),
+  calls: toNonNegativeSafeInteger(input.calls),
+  usd: normalizePricedSpend(input.usd),
+}) as Spend;
+
+const isObjectLike = (value: unknown): value is Record<PropertyKey, unknown> =>
+  (typeof value === "object" && value !== null) || typeof value === "function";
+
+const ownValue = (value: object, key: PropertyKey): Result<unknown, string> => {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor !== undefined && Object.hasOwn(descriptor, "value")
+      ? ok(descriptor.value)
+      : err(`Spend.${String(key)} must be an own data property`);
+  } catch {
+    return err(`Spend.${String(key)} could not be inspected`);
+  }
+};
+
+const parseSafeInteger = (value: unknown, path: string): Result<number, string> =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? ok(value)
+    : err(`${path} must be a non-negative safe integer`);
+
+/** Parse an adapter-supplied value before it enters budget arithmetic. */
+export const parseSpend = (value: unknown): Result<Spend, string> => {
+  if (!isObjectLike(value) || Array.isArray(value)) return err("Spend must be an object");
+  const usage = ownValue(value, "usage");
+  const tokens = ownValue(value, "tokens");
+  const calls = ownValue(value, "calls");
+  const usd = ownValue(value, "usd");
+  if (!usage.ok) return usage;
+  if (usage.value !== "known" && usage.value !== "unknown") {
+    return err("Spend.usage must be 'known' or 'unknown'");
+  }
+  if (!tokens.ok) return tokens;
+  const parsedTokens = parseSafeInteger(tokens.value, "Spend.tokens");
+  if (!parsedTokens.ok) return parsedTokens;
+  if (!calls.ok) return calls;
+  const parsedCalls = parseSafeInteger(calls.value, "Spend.calls");
+  if (!parsedCalls.ok) return parsedCalls;
+  if (!usd.ok) return usd;
+  if (!isObjectLike(usd.value) || Array.isArray(usd.value)) {
+    return err("Spend.usd must be an object");
+  }
+  const kind = ownValue(usd.value, "kind");
+  if (!kind.ok) return kind;
+  if (kind.value === "priced") {
+    const micros = ownValue(usd.value, "micros");
+    if (!micros.ok) return micros;
+    const parsedMicros = parseSafeInteger(micros.value, "Spend.usd.micros");
+    return parsedMicros.ok
+      ? ok(makeSpend({
+          usage: usage.value,
+          tokens: parsedTokens.value,
+          calls: parsedCalls.value,
+          usd: { kind: "priced", micros: microUsd(parsedMicros.value) },
+        }))
+      : parsedMicros;
+  }
+  if (kind.value !== "unpriced") return err("Spend.usd.kind is invalid");
+  const models = ownValue(usd.value, "models");
+  const knownMicros = ownValue(usd.value, "knownMicros");
+  if (!models.ok) return models;
+  const rawModels = models.value;
+  if (!Array.isArray(rawModels) || rawModels.length === 0 ||
+      !rawModels.every((model) => typeof model === "string")) {
+    return err("Spend.usd.models must be a non-empty string array");
+  }
+  const canonical = canonicalModelNames(rawModels);
+  if (canonical === undefined || canonical.length !== rawModels.length ||
+      canonical.some((model, index) => model !== rawModels[index])) {
+    return err("Spend.usd.models must be sorted and deduplicated");
+  }
+  if (!knownMicros.ok) return knownMicros;
+  const parsedMicros = parseSafeInteger(knownMicros.value, "Spend.usd.knownMicros");
+  return parsedMicros.ok
+    ? ok(makeSpend({
+        usage: usage.value,
+        tokens: parsedTokens.value,
+        calls: parsedCalls.value,
+        usd: {
+          kind: "unpriced",
+          models: canonical,
+          knownMicros: microUsd(parsedMicros.value),
+        },
+      }))
+    : parsedMicros;
+};
+
 /** The additive identity — a run that has consumed nothing. */
-export const NO_SPEND: Spend = Object.freeze({
+export const NO_SPEND: Spend = Object.freeze(makeSpend({
   usage: "known",
   tokens: 0,
   calls: 0,
   usd: Object.freeze({ kind: "priced", micros: NO_MICROS }),
-} as const);
+}));
 
 /**
  * Merge two canonically-ordered model lists into one.
@@ -126,10 +278,8 @@ export const NO_SPEND: Spend = Object.freeze({
  * the compiler without a cast or a non-null assertion. Cheap, and the
  * alternative is an assertion that would be load-bearing for correctness.
  */
-const unionModels = (a: UnpricedModels, b: UnpricedModels): UnpricedModels => {
-  const sorted = [...new Set([...a, ...b])].sort();
-  return [sorted[0] ?? a[0], ...sorted.slice(1)];
-};
+const unionModels = (a: UnpricedModels, b: UnpricedModels): UnpricedModels =>
+  canonicalModelNames([...a, ...b]) ?? a;
 
 /**
  * The known-cost portion of either variant — the priced total, or the priced
@@ -143,7 +293,7 @@ export const costFloor = (p: PricedSpend): MicroUsd =>
  * union of the offending model names alongside the sum of whatever was priced.
  */
 const addPriced = (a: PricedSpend, b: PricedSpend): PricedSpend => {
-  const micros = (costFloor(a) + costFloor(b)) as MicroUsd;
+  const micros = microUsd(addSafeIntegers(costFloor(a), costFloor(b)));
   return match([a, b] as const)
     .returnType<PricedSpend>()
     .with([{ kind: "unpriced" }, { kind: "unpriced" }], ([x, y]) => ({
@@ -170,10 +320,10 @@ const addPriced = (a: PricedSpend, b: PricedSpend): PricedSpend => {
  * identity. The host meter folds one of these per settled call to produce a
  * run's cumulative.
  */
-export const addSpend = (a: Spend, b: Spend): Spend => ({
+export const addSpend = (a: Spend, b: Spend): Spend => makeSpend({
   usage: a.usage === "unknown" || b.usage === "unknown" ? "unknown" : "known",
-  tokens: a.tokens + b.tokens,
-  calls: a.calls + b.calls,
+  tokens: addSafeIntegers(a.tokens, b.tokens),
+  calls: addSafeIntegers(a.calls, b.calls),
   usd: addPriced(a.usd, b.usd),
 });
 
@@ -185,19 +335,23 @@ export const addSpend = (a: Spend, b: Spend): Spend => ({
  * single `TokenUsage` by the loop) — the same granularity the overshoot-by-one
  * guarantee is stated at.
  */
-export const pricedCall = (tokens: number, micros: MicroUsd): Spend => ({
+export const pricedCall = (tokens: number, micros: MicroUsd): Spend => makeSpend({
   usage: "known",
-  tokens: sanitizeCount(tokens),
+  tokens,
   calls: 1,
   usd: { kind: "priced", micros },
 });
 
 /** A single call on a model with no price-table entry. */
-export const unpricedCall = (tokens: number, model: string): Spend => ({
+export const unpricedCall = (tokens: number, model: string): Spend => makeSpend({
   usage: "known",
-  tokens: sanitizeCount(tokens),
+  tokens,
   calls: 1,
-  usd: { kind: "unpriced", models: [model], knownMicros: NO_MICROS },
+  usd: {
+    kind: "unpriced",
+    models: unpricedModel(model),
+    knownMicros: NO_MICROS,
+  },
 });
 
 /**
@@ -205,7 +359,7 @@ export const unpricedCall = (tokens: number, model: string): Spend => ({
  * Known figures remain explicit lower bounds; admission decides which ceiling
  * axes can still be evaluated.
  */
-export const unknownUsageCall = (usd: PricedSpend): Spend => ({
+export const unknownUsageCall = (usd: PricedSpend): Spend => makeSpend({
   usage: "unknown",
   tokens: 0,
   calls: 1,
@@ -222,21 +376,21 @@ export const unknownUsageCall = (usd: PricedSpend): Spend => ({
  * at all and refuse a run that has nothing in flight.
  */
 export const scaleSpend = (s: Spend, n: number): Spend => {
-  const times = Math.max(0, Math.floor(sanitizeCount(n)));
+  const times = toNonNegativeSafeInteger(n);
   if (times === 0) return NO_SPEND;
-  return {
+  return makeSpend({
     usage: s.usage,
-    tokens: s.tokens * times,
-    calls: s.calls * times,
+    tokens: multiplySafeIntegers(s.tokens, times),
+    calls: multiplySafeIntegers(s.calls, times),
     usd:
       s.usd.kind === "priced"
-        ? { kind: "priced", micros: (s.usd.micros * times) as MicroUsd }
+        ? { kind: "priced", micros: microUsd(multiplySafeIntegers(s.usd.micros, times)) }
         : {
             kind: "unpriced",
             models: s.usd.models,
-            knownMicros: (s.usd.knownMicros * times) as MicroUsd,
+            knownMicros: microUsd(multiplySafeIntegers(s.usd.knownMicros, times)),
           },
-  };
+  });
 };
 
 /**
@@ -247,7 +401,7 @@ export const scaleSpend = (s: Spend, n: number): Spend => {
  * `addSpend`: once a call of unknown cost has been seen, the estimate for the
  * next one cannot honestly be a number.
  */
-export const maxSpend = (a: Spend, b: Spend): Spend => ({
+export const maxSpend = (a: Spend, b: Spend): Spend => makeSpend({
   usage: a.usage === "unknown" || b.usage === "unknown" ? "unknown" : "known",
   tokens: Math.max(a.tokens, b.tokens),
   calls: Math.max(a.calls, b.calls),
@@ -255,22 +409,22 @@ export const maxSpend = (a: Spend, b: Spend): Spend => ({
     .returnType<PricedSpend>()
     .with([{ kind: "priced" }, { kind: "priced" }], ([x, y]) => ({
       kind: "priced",
-      micros: Math.max(x.micros, y.micros) as MicroUsd,
+      micros: microUsd(Math.max(x.micros, y.micros)),
     }))
     .with([{ kind: "unpriced" }, { kind: "unpriced" }], ([x, y]) => ({
       kind: "unpriced",
       models: unionModels(x.models, y.models),
-      knownMicros: Math.max(x.knownMicros, y.knownMicros) as MicroUsd,
+      knownMicros: microUsd(Math.max(x.knownMicros, y.knownMicros)),
     }))
     .with([{ kind: "unpriced" }, { kind: "priced" }], ([x, y]) => ({
       kind: "unpriced",
       models: x.models,
-      knownMicros: Math.max(x.knownMicros, y.micros) as MicroUsd,
+      knownMicros: microUsd(Math.max(x.knownMicros, y.micros)),
     }))
     .with([{ kind: "priced" }, { kind: "unpriced" }], ([x, y]) => ({
       kind: "unpriced",
       models: y.models,
-      knownMicros: Math.max(x.micros, y.knownMicros) as MicroUsd,
+      knownMicros: microUsd(Math.max(x.micros, y.knownMicros)),
     }))
     .exhaustive(),
 });

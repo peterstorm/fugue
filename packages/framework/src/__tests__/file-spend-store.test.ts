@@ -15,8 +15,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFileSpendStore } from "../file/spend-store.js";
 import { parseFileSpendRecord, serializeFileSpendRecord } from "../file/spend-store-codec.js";
-import { addSpend, NO_SPEND, pricedCall, unpricedCall } from "../types/spend.js";
-import type { MicroUsd, Spend } from "../types/spend.js";
+import {
+  addSpend,
+  makeSpend,
+  NO_SPEND,
+  pricedCall,
+  unpricedCall,
+  unpricedModels,
+} from "../types/spend.js";
+import type { MicroUsd } from "../types/spend.js";
 import { runId, type RunId } from "../types/ids.js";
 
 const roots: string[] = [];
@@ -43,12 +50,12 @@ describe("file spend codec", () => {
       fc.integer({ min: 0, max: 100_000 }),
       fc.integer({ min: 0, max: 100_000 }),
       (tokens, calls, micros) => {
-        const spend: Spend = {
+        const spend = makeSpend({
           usage: "known",
           tokens,
           calls,
           usd: { kind: "priced", micros: micros as MicroUsd },
-        };
+        });
         const encoded = serializeFileSpendRecord(rid, spend);
         expect(encoded.ok).toBe(true);
         if (!encoded.ok) return;
@@ -61,17 +68,18 @@ describe("file spend codec", () => {
     fc.assert(fc.property(
       fc.uniqueArray(modelName, { minLength: 1, maxLength: 4 }),
       (models) => {
-        const [head, ...rest] = [...models].sort();
-        const spend: Spend = {
+        const canonicalModels = unpricedModels(models);
+        if (canonicalModels === undefined) throw new Error("generated models are non-empty");
+        const spend = makeSpend({
           usage: "known",
           tokens: 0,
           calls: 1,
           usd: {
             kind: "unpriced",
-            models: [head!, ...rest],
+            models: canonicalModels,
             knownMicros: 0 as MicroUsd,
           },
-        };
+        });
         const encoded = serializeFileSpendRecord(rid, spend);
         expect(encoded.ok).toBe(true);
         if (encoded.ok) expect(parseFileSpendRecord(encoded.value, rid)).toEqual({ ok: true, value: spend });

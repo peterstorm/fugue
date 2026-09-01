@@ -79,6 +79,39 @@ describe("createHost — HITL reconciliation lifecycle", () => {
     expect(logger.logs.some((entry) => entry.msg === "HITL active-run reconciliation failed")).toBe(true);
   });
 
+  it("a throwing reconciliation logger cannot reject host startup", async () => {
+    socketPath = join(tmpdir(), `fugue-hitl-reconcile-logger-${crypto.randomUUID()}.sock`);
+    const base = fakeRedis();
+    const redis = {
+      ...base.redis,
+      async sMembers(key: string) {
+        if (key.endsWith(":hitl:active")) {
+          return err({ kind: "redis-unavailable" as const, operation: "SMEMBERS active" });
+        }
+        return base.redis.sMembers(key);
+      },
+    };
+    const logger = testLogger();
+    const booted = await createHost({
+      config: makeConfig({ TEAMS_WEBHOOK_URL: "https://teams.example.test/hook" }),
+      git: fakeGit(),
+      loader: fakeLoader(),
+      redis: base.port,
+      sharedInfra: fakeInfra(redis),
+      logger: {
+        ...logger,
+        error: () => { throw new Error("diagnostic sink failed"); },
+      },
+      tenant: mkTenant("acme"),
+      bind: { unix: socketPath },
+      queueBackend: lifecycleQueue([]),
+    });
+
+    expect(booted.ok).toBe(true);
+    if (!booted.ok) return;
+    host = booted.value;
+  });
+
   it("reconciles after worker startup, repeats, and clears the interval on shutdown", async () => {
     socketPath = join(tmpdir(), `fugue-hitl-reconcile-${crypto.randomUUID()}.sock`);
     const base = fakeRedis();

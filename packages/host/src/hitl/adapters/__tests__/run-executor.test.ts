@@ -26,6 +26,7 @@ import {
   gitSha,
   nodeId,
   EXECUTOR_NODE_ID,
+  tokensOnly,
 } from "@fuguejs/framework";
 import { compileDagToMachine, persistDagContext } from "@fuguejs/framework/advanced";
 import type {
@@ -34,6 +35,7 @@ import type {
   NodeContext,
   NodeDef,
   LlmClient,
+  Capability,
   CapabilityBroker,
 } from "@fuguejs/framework";
 import type { RedisPort, SharedInfra } from "../../../ports.js";
@@ -510,6 +512,94 @@ describe("createRunExecutor — fail-closed on an empty AGENT_CLIENT_MAP (FR-040
     const jobLike = await seedJobLike(dag, null);
     const res = await exec.run(runReq(dag, jobLike, null));
     expect(res.ok && res.value.kind).toBe("completed");
+  });
+});
+
+describe("createRunExecutor — broker LLM metering survives HITL resume", () => {
+  it("hydrates the first slice's broker call and refuses provider egress after approval", async () => {
+    let providerCalls = 0;
+    const brokerLlm: LlmClient = {
+      sendStructured: async <O>() => {
+        providerCalls += 1;
+        return ok({ output: "ok" as O, rawText: "", ...tokensOnly(1, 0) });
+      },
+      sendWithTools: async <O>() => {
+        providerCalls += 1;
+        return ok({ output: "ok" as O, rawText: "", ...tokensOnly(1, 0) });
+      },
+    };
+    const capability = "resumeBrokerLlm" as Capability;
+    const broker: CapabilityBroker = {
+      mintFor: async () => ok({
+        [capability]: {
+          clientKind: "llm",
+          client: brokerLlm,
+          pricingModel: { kind: "fixed", model: "gpt-4o" },
+          runScopedOperations: {},
+        },
+      } as never),
+      provides: (candidate) => candidate === capability,
+    };
+    const callBroker = (async (_input: unknown, ctx: NodeContext) => {
+      const client = (ctx as unknown as Record<string, LlmClient>)[capability];
+      if (client === undefined) throw new Error("broker LLM was not merged");
+      const result = await client.sendStructured({
+        system: "s",
+        user: "u",
+        model: "gpt-4o",
+        schema: z.string(),
+        nodeId: nodeId("broker-call"),
+      });
+      return result.ok ? ok(result.value.output) : result;
+    }) as never;
+    const dag = defineDag({
+      id: "exec-dag",
+      nodes: {
+        beforeReview: makeNode("beforeReview", {
+          run: callBroker,
+          requires: [capability],
+          humanReview: { prompt: "Approve?" } as never,
+        }),
+        afterReview: makeNode("afterReview", {
+          run: callBroker,
+          requires: [capability],
+        }),
+      },
+      edges: [
+        { from: DAG_INPUT, to: "beforeReview" },
+        { from: "beforeReview", to: "afterReview" },
+      ],
+      outputNodeId: "afterReview",
+    });
+    const baseRegistration = registered(dag);
+    const reg: RegisteredDag = {
+      ...baseRegistration,
+      config: { ...baseRegistration.config, llmBudget: { calls: 1 } },
+    };
+    const exec = createRunExecutor({
+      sharedInfra: sharedInfra(),
+      getRegisteredDag: () => reg,
+      broker,
+      agentClientMap: { "exec-dag": "fugue-agent-exec" },
+    });
+    const job = await seedJobLike(dag, null);
+
+    const parked = await exec.run({
+      ...runReq(dag, job, null),
+      onHumanReview: async () => ({ kind: "pending" }),
+    });
+    expect(parked.ok && parked.value.kind).toBe("suspended");
+    expect(providerCalls).toBe(1);
+
+    const resumed = await exec.run({
+      ...runReq(dag, job, null),
+      onHumanReview: async () => ({ kind: "approve" }),
+    });
+    expect(resumed.ok && resumed.value.kind).toBe("failed");
+    if (resumed.ok && resumed.value.kind === "failed") {
+      expect(resumed.value.error.kind).toBe("llm-budget-exceeded");
+    }
+    expect(providerCalls).toBe(1);
   });
 });
 

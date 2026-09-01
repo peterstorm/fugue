@@ -16,6 +16,7 @@ import type { Capability } from "./node.js";
 import type { Breach } from "./budget.js";
 import { formatBreach } from "./budget.js";
 import type { MicroUsd } from "./spend.js";
+import { microUsd, unpricedModels } from "./spend.js";
 import type { TokenUsage } from "./token-usage.js";
 import { safeDiagnosticRender, safeErrorMessage } from "./safe-error.js";
 
@@ -379,41 +380,60 @@ const persistedRetriabilitySchema = z.enum(["retriable", "non-retriable"]);
 // the brand declares the domain, deserialization restores it.
 const PersistedMicroUsdSchema: z.ZodType<MicroUsd> = z
   .number()
-  .transform((value) => value as MicroUsd);
+  .int()
+  .nonnegative()
+  .max(Number.MAX_SAFE_INTEGER)
+  .transform(microUsd);
 const persistedUsdCeilingSchema = z.object({
   kind: z.literal("usd"),
   limit: PersistedMicroUsdSchema,
 });
-const persistedCeilingSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("tokens"), limit: z.number() }),
-  z.object({ kind: z.literal("calls"), limit: z.number() }),
-  persistedUsdCeilingSchema,
-]);
 const persistedBasisSchema = z.enum(["settled", "projected"]);
-const persistedBreachSchema = z.discriminatedUnion("kind", [
+const persistedTokensCeilingSchema = z.object({ kind: z.literal("tokens"), limit: z.number() });
+const persistedCallsCeilingSchema = z.object({ kind: z.literal("calls"), limit: z.number() });
+const persistedUnpricedModelsSchema = z.array(z.string()).min(1).transform((models, context) => {
+  const canonical = unpricedModels(models);
+  if (canonical !== undefined) return canonical;
+  context.addIssue({ code: "custom", message: "unpriced breach requires a model" });
+  return z.NEVER;
+});
+const persistedBreachSchema = z.union([
   z.object({
     kind: z.literal("reached"),
-    ceiling: persistedCeilingSchema,
+    ceiling: persistedTokensCeilingSchema,
     basis: persistedBasisSchema,
     observed: z.number(),
+  }),
+  z.object({
+    kind: z.literal("reached"),
+    ceiling: persistedCallsCeilingSchema,
+    basis: persistedBasisSchema,
+    observed: z.number(),
+  }),
+  z.object({
+    kind: z.literal("reached"),
+    ceiling: persistedUsdCeilingSchema,
+    basis: persistedBasisSchema,
+    observed: PersistedMicroUsdSchema,
   }),
   z.object({
     kind: z.literal("unpriced"),
     ceiling: persistedUsdCeilingSchema,
     basis: persistedBasisSchema,
-    // Non-empty on the wire too: an `unpriced` breach naming no model would be
-    // a record asserting "unknown cost, caused by nothing".
-    models: z.tuple([z.string()], z.string()),
+    models: persistedUnpricedModelsSchema,
     observedAtLeast: PersistedMicroUsdSchema,
   }),
   z.object({
     kind: z.literal("unknown-usage"),
-    ceiling: z.discriminatedUnion("kind", [
-      z.object({ kind: z.literal("tokens"), limit: z.number() }),
-      persistedUsdCeilingSchema,
-    ]),
+    ceiling: persistedTokensCeilingSchema,
     basis: persistedBasisSchema,
     observedAtLeast: z.number(),
+  }),
+  z.object({
+    kind: z.literal("unknown-usage"),
+    ceiling: persistedUsdCeilingSchema,
+    basis: persistedBasisSchema,
+    observedAtLeast: PersistedMicroUsdSchema,
   }),
 ]);
 const PersistedCapabilitySchema: z.ZodType<Capability> = z.string().transform((value) => value as Capability);

@@ -160,71 +160,77 @@ const ownDataValue = (
   const descriptor = Object.getOwnPropertyDescriptor(value, key);
   return descriptor !== undefined && Object.hasOwn(descriptor, "value")
     ? ok(descriptor.value)
-    : err(`LLM binding '${String(key)}' must be an own data property`);
+    : err(`scoped binding '${String(key)}' must be an own data property`);
 };
 
-const scopedLlmBinding = (
-  value: unknown,
-): Result<ScopedLlmCapability | undefined, string> => {
+type ParsedScopedBinding =
+  | { readonly kind: "non-llm"; readonly client: unknown }
+  | { readonly kind: "llm"; readonly binding: ScopedLlmCapability };
+
+const parseScopedBinding = (value: unknown): Result<ParsedScopedBinding, string> => {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return ok(undefined);
+    return err("scoped capability must be a tagged binding object");
   }
   try {
     const kind = ownDataValue(value, "clientKind");
-    if (!kind.ok) return ok(undefined);
-    if (kind.value !== "llm") return ok(undefined);
-
+    if (!kind.ok) return kind;
     const client = ownDataValue(value, "client");
     if (!client.ok || client.value == null) {
-      return err("LLM binding requires a non-null own client data property");
+      return err("scoped binding requires a non-null own client data property");
     }
+    if (kind.value === "non-llm") {
+      return ok({ kind: "non-llm", client: client.value });
+    }
+    if (kind.value !== "llm") return err("scoped binding clientKind is invalid");
+
     const rawPricing = ownDataValue(value, "pricingModel");
     if (!rawPricing.ok || rawPricing.value === null || typeof rawPricing.value !== "object") {
       return err("LLM binding requires an own pricingModel data property");
     }
     const pricingKind = ownDataValue(rawPricing.value, "kind");
     if (!pricingKind.ok) return err("LLM pricingModel requires an own kind data property");
-    const pricingModel = pricingKind.value === "request"
-      ? { kind: "request" as const }
-      : pricingKind.value === "fixed"
-        ? (() => {
-            const model = ownDataValue(rawPricing.value as object, "model");
-            return model.ok && typeof model.value === "string" && model.value.length > 0
-              ? { kind: "fixed" as const, model: model.value }
-              : undefined;
-          })()
-        : undefined;
-    if (pricingModel === undefined) return err("LLM pricingModel is malformed");
-
-    const aliases = ownDataValue(value, "runScopedOperations");
-    let runScopedOperations: Readonly<Record<string, "sendStructured" | "sendWithTools">> |
-      undefined;
-    if (aliases.ok && aliases.value !== undefined) {
-      const snapshot = snapshotScopedCapabilities(aliases.value);
-      if (!snapshot.ok) return err(`LLM alias map is malformed: ${snapshot.error}`);
-      const parsed: Record<string, "sendStructured" | "sendWithTools"> = Object.create(null);
-      for (const [alias, operation] of Object.entries(
-        snapshot.value as Readonly<Record<string, unknown>>,
-      )) {
-        if (alias === "sendStructured" || alias === "sendWithTools") {
-          return err(`LLM alias '${alias}' cannot replace a standard operation`);
-        }
-        if (operation !== "sendStructured" && operation !== "sendWithTools") {
-          return err(`LLM alias '${alias}' names an unknown operation`);
-        }
-        parsed[alias] = operation;
+    let pricingModel: ScopedLlmCapability["pricingModel"];
+    if (pricingKind.value === "request") {
+      pricingModel = { kind: "request" };
+    } else if (pricingKind.value === "fixed") {
+      const model = ownDataValue(rawPricing.value, "model");
+      if (!model.ok || typeof model.value !== "string" || model.value.length === 0) {
+        return err("fixed LLM pricingModel requires a non-empty model");
       }
-      runScopedOperations = Object.freeze(parsed);
+      pricingModel = { kind: "fixed", model: model.value };
+    } else {
+      return err("LLM pricingModel is malformed");
     }
 
-    return ok(Object.freeze({
-      clientKind: "llm" as const,
-      client: client.value as ScopedLlmCapability["client"],
-      pricingModel,
-      ...(runScopedOperations !== undefined ? { runScopedOperations } : {}),
-    }));
+    const aliases = ownDataValue(value, "runScopedOperations");
+    if (!aliases.ok) return err("LLM binding requires an own runScopedOperations map");
+    const snapshot = snapshotScopedCapabilities(aliases.value);
+    if (!snapshot.ok) return err(`LLM alias map is malformed: ${snapshot.error}`);
+    const runScopedOperations: Record<string, "sendStructured" | "sendWithTools"> =
+      Object.create(null);
+    for (const [alias, operation] of Object.entries(
+      snapshot.value as Readonly<Record<string, unknown>>,
+    )) {
+      if (alias === "sendStructured" || alias === "sendWithTools") {
+        return err(`LLM alias '${alias}' cannot replace a standard operation`);
+      }
+      if (operation !== "sendStructured" && operation !== "sendWithTools") {
+        return err(`LLM alias '${alias}' names an unknown operation`);
+      }
+      runScopedOperations[alias] = operation;
+    }
+
+    return ok({
+      kind: "llm",
+      binding: Object.freeze({
+        clientKind: "llm",
+        client: client.value as ScopedLlmCapability["client"],
+        pricingModel,
+        runScopedOperations: Object.freeze(runScopedOperations),
+      }),
+    });
   } catch (caught) {
-    return err(`LLM binding could not be inspected safely: ${safeErrorMessage(caught)}`);
+    return err(`scoped binding could not be inspected safely: ${safeErrorMessage(caught)}`);
   }
 };
 
@@ -232,14 +238,14 @@ const meterScopedLlmCapabilities = (
   scoped: ScopedCapabilityHandle,
   minting: MintingAuthority,
   nodeId: NodeId,
-): Result<ScopedCapabilityHandle, FrameworkError> => {
-  const metered: Record<string, unknown> = Object.create(null);
+): Result<Readonly<Record<string, unknown>>, FrameworkError> => {
+  const resolved: Record<string, unknown> = Object.create(null);
   try {
     for (const [key, value] of Object.entries(scoped)) {
-      const binding = scopedLlmBinding(value);
-      if (!binding.ok) return err(brokerContractViolation(nodeId, binding.error));
-      if (binding.value === undefined) {
-        metered[key] = value;
+      const parsed = parseScopedBinding(value);
+      if (!parsed.ok) return err(brokerContractViolation(nodeId, parsed.error));
+      if (parsed.value.kind === "non-llm") {
+        resolved[key] = parsed.value.client;
         continue;
       }
       if (minting.meterLlm === undefined) {
@@ -250,13 +256,13 @@ const meterScopedLlmCapabilities = (
       }
       const decorated = minting.meterLlm(
         key as Capability,
-        binding.value,
+        parsed.value.binding,
         nodeId,
       );
       if (!decorated.ok) return decorated;
-      metered[key] = decorated.value;
+      resolved[key] = decorated.value;
     }
-    return ok(Object.freeze(metered) as ScopedCapabilityHandle);
+    return ok(Object.freeze(resolved));
   } catch (caught) {
     return err(brokerContractViolation(
       nodeId,

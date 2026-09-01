@@ -50,7 +50,7 @@ A third: `PRICE_TABLE` is hand-maintained, and `computeCostUsd` returns **0** fo
 
 **Spend, not tokens.** The meter accumulates a `Spend` — `{ tokens, calls, usd }` — and `llm/cost.ts` gains `spendOfCall`, the single producer of budget-facing cost. It reuses the same cache-weighted arithmetic ADR-0081 established, so the multipliers reach the budget through exactly one path.
 
-**Money is an integer.** `MicroUsd` (1e-6 USD, branded) is what ceilings compare against; the raw USD float stays display-only. A run's total is an unbounded sum, float addition is not associative, and two operators reconciling the same run must not be able to disagree.
+**Money is a bounded exact integer.** `MicroUsd` (1e-6 USD, branded) is what ceilings compare against; the raw USD float stays display-only. Every in-memory value is a non-negative safe integer. Addition and projection saturate at `Number.MAX_SAFE_INTEGER`, which is fail-closed because every valid monetary ceiling is then reached. Within that domain, settlement order cannot introduce float drift or operator disagreement.
 
 **Unknown cost is a union member, not a sentinel.**
 
@@ -72,7 +72,7 @@ type PricedSpend =
 
 ```ts
 kind: "llm-budget-exceeded";
-cause: Breach;   // { reached | unpriced }, each carrying `ceiling` and `basis: "settled" | "projected"`
+cause: Breach;   // { reached | unpriced | unknown-usage }, each carrying `ceiling` and `basis: "settled" | "projected"`
 ```
 
 The basis is correct **by construction**: the admission gate evaluates settled spend and the projection as two separate calls to `firstBreach`, each told which figure it was handed. Nothing infers afterwards which one drove the decision.

@@ -34,8 +34,23 @@ pre-1.0, so a minor bump may carry breaking changes.
 - **Breaking (source/wire):** `Spend` now carries `usage: "known" | "unknown"`.
   Unknown usage is durable and absorbing; token/USD admission fails closed,
   while call-only ceilings remain evaluable.
-- Broker-delivered custom LLM capabilities use explicit scoped LLM metadata and
-  must pass through the host-owned run meter before dispatch-time merge.
+- **Breaking (source):** `Spend`, `MicroUsd`, and `UnpricedModels` are opaque
+  smart-constructed values. Spend arithmetic saturates at
+  `Number.MAX_SAFE_INTEGER` so overflow fails closed instead of poisoning or
+  creating budget headroom.
+- **Breaking (source):** every broker capability value is a tagged `llm` or
+  `non-llm` binding. Scoped LLM bindings always carry `runScopedOperations`;
+  augmented clients cannot omit their aliases, and untagged runtime values are
+  rejected before merge.
+
+### Fixed
+
+- Malformed provider cache parts can no longer exceed inclusive `tokensIn` and
+  bypass token budgets; violations settle as durable unknown usage.
+- HTTP hard deadlines include context construction, and late successful effects
+  are diagnosed after a terminal 408.
+- Redis spend retention now outlives shorter checkpoint TTLs for resumable HITL
+  runs, with real-Redis transaction coverage.
 
 ## [0.5.1] — 2026-08-24
 

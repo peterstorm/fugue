@@ -1005,7 +1005,7 @@ usage.cacheReadTokens     //  9_000  — billed at ~0.1x
 uncachedInputTokens(usage)//  1_000  — derived
 ```
 
-Cost weights the three classes separately: uncached at 1.0x, cache-write at 1.25x (`5m`) or 2.0x (`1h`), cache-read at 0.1x. Traces carry `gen_ai.usage.cache_read_input_tokens`, `ai.prompt_cache.policy` and `ai.prompt_cache.effective`.
+Cost weights the three classes separately: uncached at 1.0x, cache-write at 1.25x (`5m`) or 2.0x (`1h`), cache-read at 0.1x. Traces carry `gen_ai.usage.cache_read_input_tokens`, `ai.prompt_cache.policy`, `ai.prompt_cache.effective`, and `ai.llm.cost_priced`; an unknown model's zero display estimate is therefore distinguishable from genuinely priced/free telemetry.
 
 ### Why It Matters
 
@@ -1062,8 +1062,9 @@ const plan = createFetchNode({
 `remaining()` returns `{ kind: "unbudgeted" }` when no ceiling exists. Otherwise
 it returns canonical per-axis headroom with `basis: "projected"`; each available
 member carries a `unit` discriminant, token/call amounts are numbers, USD amounts
-are branded `MicroUsd`, and all clamp at zero,
-while an unpriced model or unknown provider usage is explicit domain data
+are branded `MicroUsd`, and all clamp at zero. Spend axes are opaque
+non-negative safe integers; aggregation saturates at `Number.MAX_SAFE_INTEGER`,
+which fails closed against every valid ceiling. An unpriced model or unknown provider usage is explicit domain data
 (`unpriced` or `unknown-usage`), never fictional numeric availability. Budget reads can affect
 retry-time decisions, just like clock reads can affect time-dependent nodes, so
 node tests should inject `fixedBudgetCapability` from
@@ -1075,14 +1076,16 @@ Before prompt caching, a token count was a serviceable proxy for money. It no lo
 
 Overshoot is bounded rather than eliminated: the check runs before the call against spend that settles after it, so exactly one call passes a reached ceiling in the sequential case. Concurrency reservations constrain warm bursts using the largest settled call learned so far; a cold first burst, or concurrent calls larger than that projection, can exceed the learned estimate until settlement widens it. See ADR-0082.
 
-**Spend is durable.** A resumable run builds a fresh NodeContext per execution slice, so the in-process counter alone would let a run that parks for a human decision resume with its budget refilled — five parks, six budgets. A spend ledger (Redis, file, or in-process for a single-process deployment) is hydrated once when a slice starts and appended to as calls settle, so a run that parked already over its ceiling refuses immediately on resume.
+**Spend durability depends on the selected ledger.** A resumable run builds a fresh NodeContext per execution slice, so a slice-local counter alone would refill the budget after a park. Redis and file ledgers survive process replacement; the in-process ledger carries spend only across slices in the same process and resets on restart. Every selected ledger is hydrated once per slice and appended as calls settle. Redis spend has no expiry when checkpoints have none; otherwise its retention is at least both the checkpoint TTL and the authoritative HITL run TTL, so a resumable run cannot outlive its accounting.
 
 A budgeted run whose ledger cannot be READ refuses the slice: an unreadable ledger is indistinguishable from a spent one, and assuming zero is the refill bug by another name. An unbudgeted run carries on — there is no ceiling to protect. If a budgeted call's ledger WRITE is not acknowledged, the paid provider attempt remains counted in-process but the run fails non-retriably; continuing would let a later slice hydrate stale spend. Unbudgeted calls preserve their provider outcome and log the durability loss.
 
 One Run Spend Authority meters `ctx.llm`, `judgeLlm`, every custom
-boot-scoped `CapabilityHandle` marked `clientKind: "llm"`, and explicitly marked
-broker-delivered LLM bindings before they enter a node context. Augmented LLM
-subtypes declare a `runScopedOperations` alias map; the host interprets it into
+boot-scoped `CapabilityHandle` marked `clientKind: "llm"`, and tagged
+broker-delivered LLM bindings before they enter a node context. Broker results
+form a closed `llm | non-llm` ADT, so an untagged client is rejected rather than
+passed through. Every scoped LLM carries a required `runScopedOperations` alias
+map; augmented subtypes derive its required keys from their client type, and the host interprets it into
 a frozen facade bound to the metered standard surface, so adapter code cannot
 retain a boot client or bypass the authority through target-bound self-calls. All clients share one reservation gate, spent view, ceiling, and
 ledger. File-durable embedders can

@@ -37,6 +37,7 @@ import {
   ok,
   scaleSpend,
   snapshotSpend,
+  unpricedModel,
 } from "@fuguejs/framework";
 
 // ---------------------------------------------------------------------------
@@ -265,13 +266,14 @@ export const admitCandidate = (
   const usdCeiling = limits?.find((ceiling) => ceiling.kind === "usd");
   if (candidate.kind === "unpriced" && usdCeiling?.kind === "usd") {
     const settled = spendFor(meter, runId);
+    const models = unpricedModel(candidate.model);
     return {
       kind: "refuse",
       breach: {
         kind: "unpriced",
         ceiling: usdCeiling,
         basis: "projected",
-        models: [candidate.model],
+        models,
         observedAtLeast: costFloor(settled.usd),
       },
       settled,

@@ -87,6 +87,7 @@ import { getRegistry } from "./domain/host-state.js";
 import { lookupDag } from "./domain/registry.js";
 import type { QueueBackend, WorkerHandle } from "@fuguejs/framework";
 import { createHitlRunService } from "./hitl/service.js";
+import { logWithoutThrowing } from "./hitl/diagnostic-logging.js";
 import type { HitlRunService } from "./hitl/service.js";
 import { createRedisRunStore } from "./hitl/adapters/run-store.js";
 import { createRedisDecisionStore } from "./hitl/adapters/decision-store.js";
@@ -158,6 +159,8 @@ export interface HostDeps {
    * pair); absent either, HITL is off and a `humanReview` DAG is refused with 501.
    */
   readonly queueBackend?: QueueBackend;
+  /** Optional embedder/test authority; production defaults to config selection. */
+  readonly capabilityBroker?: CapabilityBroker;
   /** Called during graceful shutdown to clean up infrastructure (e.g., close Redis). */
   readonly onShutdown?: () => Promise<void>;
   /**
@@ -607,6 +610,7 @@ const wireHitlRunEngine = async (args: {
       broker,
       agentClientMap: config.AGENT_CLIENT_MAP,
       tenant: routedTenant,
+      runRetentionTtlSec: config.HITL_RUN_TTL_SEC,
       logger: sharedInfra.logger,
     });
     const runQueue = createRunQueue({
@@ -650,14 +654,14 @@ const wireHitlRunEngine = async (args: {
         try {
           const reconciled = await service.reconcileActiveRuns();
           if (!reconciled.ok) {
-            logger.error("HITL active-run reconciliation failed", {
+            logWithoutThrowing(logger, "error", "HITL active-run reconciliation failed", {
               error: reconciled.error.kind,
             });
           }
         } catch (error) {
           // Adapter contracts are no-throw, but lifecycle supervision must remain
           // total if a non-conforming dependency rejects unexpectedly.
-          logger.error("HITL active-run reconciliation threw", {
+          logWithoutThrowing(logger, "error", "HITL active-run reconciliation threw", {
             error: safeErrorMessage(error),
           });
         } finally {
@@ -830,13 +834,14 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
   // dispatch) — FR-030/FR-032. The raw token travels ONLY through here; it never
   // crosses `InvocationOrigin` (string-only) nor reaches a capability handle.
   const subjectTokens = createSubjectTokenRegistry();
-  const broker: CapabilityBroker | undefined = selectCapabilityBroker(
-    config,
-    sharedInfra,
-    logger,
-    Date.now,
-    subjectTokens.resolve,
-  );
+  const broker: CapabilityBroker | undefined = deps.capabilityBroker ??
+    selectCapabilityBroker(
+      config,
+      sharedInfra,
+      logger,
+      Date.now,
+      subjectTokens.resolve,
+    );
 
   // ── Inbound user (OIDC) JWT path (FR-020/021/022/023, SC-005) ────────────
   // Wired LIVE as ONE inseparable group (verifier + iss/aud policy + run-auth
@@ -914,6 +919,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
     },
     createContext: (
       registered: RegisteredDag,
+      rid: RunId,
       signal: AbortSignal,
       // The resolved inbound identity is threaded through to the NodeContext
       // factory (FR-W3-007), which derives `Invocation.origin` from it: an OIDC
@@ -924,7 +930,6 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
       // at boot) can authorize each node against it.
       identity: AuthIdentity,
     ): Promise<NodeContextForDag> => {
-      const rid = makeRunId(crypto.randomUUID());
       // Bind the user run's verified subject token host-side (FR-030/FR-032): the
       // factory reads it off the identity via the pure seam and stores it under
       // `rid` so the broker can resolve it for the RFC 8693 exchange. Non-user
@@ -959,6 +964,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
       );
     },
     clock: Date.now,
+    newRunId: () => makeRunId(crypto.randomUUID()),
     circuitConfig: {
       threshold: config.CIRCUIT_BREAKER_THRESHOLD,
       windowMs: config.CIRCUIT_BREAKER_WINDOW_MS,

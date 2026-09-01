@@ -10,7 +10,7 @@
 
 import { match, P } from "ts-pattern";
 import type { MicroUsd, Spend, UnpricedModels } from "./spend.js";
-import { costFloor, microsToUsd } from "./spend.js";
+import { costFloor, microUsd, microsToUsd } from "./spend.js";
 import { sanitizeCount } from "./token-usage.js";
 
 // ---------------------------------------------------------------------------
@@ -89,7 +89,7 @@ const limitOf = (c: Ceiling): number => c.limit;
 const withLimit = (c: Ceiling, limit: number): Ceiling =>
   match(c)
     .returnType<Ceiling>()
-    .with({ kind: "usd" }, () => ({ kind: "usd", limit: limit as MicroUsd }))
+    .with({ kind: "usd" }, () => ({ kind: "usd", limit: microUsd(limit) }))
     .with({ kind: "tokens" }, () => ({ kind: "tokens", limit }))
     .with({ kind: "calls" }, () => ({ kind: "calls", limit }))
     .exhaustive();
@@ -159,10 +159,15 @@ export type Basis = "settled" | "projected";
 export type Breach =
   | {
       readonly kind: "reached";
-      readonly ceiling: Ceiling;
+      readonly ceiling: TokensCeiling | CallsCeiling;
       readonly basis: Basis;
-      /** The figure compared, in the ceiling's own unit. */
       readonly observed: number;
+    }
+  | {
+      readonly kind: "reached";
+      readonly ceiling: UsdCeiling;
+      readonly basis: Basis;
+      readonly observed: MicroUsd;
     }
   | {
       readonly kind: "unpriced";
@@ -175,10 +180,15 @@ export type Breach =
     }
   | {
       readonly kind: "unknown-usage";
-      readonly ceiling: TokensCeiling | UsdCeiling;
+      readonly ceiling: TokensCeiling;
       readonly basis: Basis;
-      /** Trustworthy consumption observed before usage became unknowable. */
       readonly observedAtLeast: number;
+    }
+  | {
+      readonly kind: "unknown-usage";
+      readonly ceiling: UsdCeiling;
+      readonly basis: Basis;
+      readonly observedAtLeast: MicroUsd;
     };
 
 /**
@@ -267,7 +277,7 @@ export const firstBreach = (
 };
 
 /** Micro-USD rendered as dollars, for human-facing text only. */
-const dollars = (micros: number): string => `$${microsToUsd(micros as MicroUsd).toFixed(6)}`;
+const dollars = (micros: MicroUsd): string => `$${microsToUsd(micros).toFixed(6)}`;
 
 /** Human-readable one-liner for a breach — for logs and error messages. */
 export const formatBreach = (b: Breach): string =>

@@ -284,9 +284,9 @@ export const createIoredisRedisPort = (
               commit.checkpointKey,
               commit.checkpointValue,
               "EX",
-              commit.ttlSec,
+              commit.checkpointTtlSec,
             )
-            .expire(commit.spendKey, commit.ttlSec)
+            .expire(commit.spendKey, commit.spendTtlSec)
             .exec();
           if (executed === null) {
             throw new Error(

@@ -3,8 +3,8 @@
 import type { FrameworkError } from "../types/errors.js";
 import type { Result } from "../types/result.js";
 import { err, map, ok } from "../types/result.js";
-import type { MicroUsd, Spend, UnpricedModels } from "../types/spend.js";
-import { costFloor } from "../types/spend.js";
+import type { Spend } from "../types/spend.js";
+import { costFloor, makeSpend, microUsd, unpricedModels } from "../types/spend.js";
 import type { RunId } from "../types/ids.js";
 import { fileCacheError } from "./boundary-error.js";
 
@@ -80,20 +80,16 @@ const parseRecord = (
 };
 
 const spendOfFileRecord = (record: FileSpendRecordV1): Spend => {
-  const [head, ...rest] = record.unpricedModels;
-  const micros = record.micros as MicroUsd;
-  return {
+  const models = unpricedModels(record.unpricedModels);
+  const micros = microUsd(record.micros);
+  return makeSpend({
     usage: record.usage,
     tokens: record.tokens,
     calls: record.calls,
-    usd: head === undefined
+    usd: models === undefined
       ? { kind: "priced", micros }
-      : {
-          kind: "unpriced",
-          models: [head, ...rest] as UnpricedModels,
-          knownMicros: micros,
-        },
-  };
+      : { kind: "unpriced", models, knownMicros: micros },
+  });
 };
 
 export const parseFileSpendRecord = (

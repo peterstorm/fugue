@@ -61,7 +61,7 @@ export const redisUrlRedactions = (redisUrl: string): readonly string[] => {
 export const redisOperationFailure = (
   operation: string,
   error: unknown,
-  redactions: readonly string[] = [],
+  redactions: readonly string[],
 ): HostError => {
   let diagnostic = safeErrorMessage(error);
   for (const secret of redactions) {
@@ -84,7 +84,10 @@ export const disconnectRedisClients = async (
   );
   const failures = outcomes.flatMap((outcome, index) =>
     outcome.status === "rejected"
-      ? [new Error(`${targets[index]!.name}: ${safeErrorMessage(outcome.reason)}`)]
+      ? [new Error(
+          `${targets[index]!.name}: ${safeErrorMessage(outcome.reason)}`,
+          { cause: outcome.reason },
+        )]
       : [],
   );
   if (failures.length > 0) {

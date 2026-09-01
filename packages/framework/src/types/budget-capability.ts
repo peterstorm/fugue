@@ -6,7 +6,7 @@ import type {
   UsdCeiling,
 } from "./budget.js";
 import type { MicroUsd, Spend, UnpricedModels } from "./spend.js";
-import { costFloor } from "./spend.js";
+import { costFloor, makeSpend, microUsd } from "./spend.js";
 
 export type CeilingHeadroom =
   | {
@@ -36,8 +36,13 @@ export type CeilingHeadroom =
     }
   | {
       readonly kind: "unknown-usage";
-      readonly ceiling: TokensCeiling | UsdCeiling;
+      readonly ceiling: TokensCeiling;
       readonly observedAtLeast: number;
+    }
+  | {
+      readonly kind: "unknown-usage";
+      readonly ceiling: UsdCeiling;
+      readonly observedAtLeast: MicroUsd;
     };
 
 export type Remaining =
@@ -58,19 +63,23 @@ const snapshotModels = (models: UnpricedModels): UnpricedModels =>
   Object.freeze([...models]) as unknown as UnpricedModels;
 
 /** Fresh, deeply frozen spend snapshot suitable for crossing a capability seam. */
-export const snapshotSpend = (spend: Spend): Spend =>
-  Object.freeze({
+export const snapshotSpend = (spend: Spend): Spend => {
+  const snapshot = makeSpend({
     usage: spend.usage,
     tokens: spend.tokens,
     calls: spend.calls,
     usd: spend.usd.kind === "priced"
-      ? Object.freeze({ kind: "priced", micros: spend.usd.micros })
-      : Object.freeze({
+      ? { kind: "priced", micros: spend.usd.micros }
+      : {
           kind: "unpriced",
           models: snapshotModels(spend.usd.models),
           knownMicros: spend.usd.knownMicros,
-        }),
+        },
   });
+  if (snapshot.usd.kind === "unpriced") Object.freeze(snapshot.usd.models);
+  Object.freeze(snapshot.usd);
+  return Object.freeze(snapshot);
+};
 
 const availableTokens = (ceiling: TokensCeiling, observed: number): CeilingHeadroom =>
   Object.freeze({
@@ -93,7 +102,7 @@ const availableUsd = (ceiling: UsdCeiling, observed: MicroUsd): CeilingHeadroom 
     kind: "available",
     unit: "usd",
     ceiling: Object.freeze({ ...ceiling }),
-    amount: Math.max(0, ceiling.limit - observed) as MicroUsd,
+    amount: microUsd(Math.max(0, ceiling.limit - observed)),
   });
 
 /**

@@ -55,6 +55,7 @@ export {
   computeCostUsd,
   costRatesFor,
   costUsd,
+  isPricedModel,
   spendOfCall,
   spendOfUnknownCall,
   PRICE_TABLE,

@@ -6,13 +6,14 @@
  * Backend-specific exporters (e.g., MLflow) transform these into their format.
  */
 import { trace } from "@opentelemetry/api";
-import { costBreakdownUsd, costRatesFor } from "../llm/cost.js";
+import { costBreakdownUsd, costRatesFor, isPricedModel } from "../llm/cost.js";
 import type { CacheTtl, ConversationCachePolicy } from "../types/llm.js";
 import type { TokenUsage } from "../types/token-usage.js";
 import { isCacheInert } from "../types/token-usage.js";
 import type { ContentFilter } from "./content-filter.js";
 import { resolveContentFilter } from "./content-filter.js";
 import {
+  AI_LLM_COST_PRICED,
   AI_LLM_COST_USD,
   AI_LLM_HAS_THINKING,
   GEN_AI_REQUEST_MODEL,
@@ -75,6 +76,7 @@ export const enrichLlmSpan = (opts: EnrichLlmSpanOpts): void => {
   otelSpan.setAttribute(GEN_AI_USAGE_CACHE_WRITE_TOKENS, opts.usage.cacheWriteTokens);
   otelSpan.setAttribute(GEN_AI_USAGE_CACHE_READ_TOKENS, opts.usage.cacheReadTokens);
   otelSpan.setAttribute(AI_LLM_COST_USD, cost.total);
+  otelSpan.setAttribute(AI_LLM_COST_PRICED, isPricedModel(opts.model));
   if (opts.cachePolicy !== undefined) {
     otelSpan.setAttribute(AI_PROMPT_CACHE_POLICY, opts.cachePolicy);
     // Only meaningful for a call that ASKED for caching: for `none` there is

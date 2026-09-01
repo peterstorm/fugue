@@ -8,8 +8,8 @@
  * accounting state that admission relies on.
  */
 
-import type { MicroUsd, Result, Spend, UnpricedModels } from "@fuguejs/framework";
-import { costFloor, err, ok } from "@fuguejs/framework";
+import type { Result, Spend } from "@fuguejs/framework";
+import { costFloor, err, makeSpend, microUsd, ok, unpricedModels } from "@fuguejs/framework";
 
 interface SpendRecord {
   readonly usageUnknown: boolean;
@@ -127,18 +127,14 @@ export const spendOfHash = (
   }
 
   models.sort();
-  const [head, ...rest] = models;
-  const micros = figures.micros as MicroUsd;
-  return ok({
+  const canonicalModels = unpricedModels(models);
+  const micros = microUsd(figures.micros);
+  return ok(makeSpend({
     usage,
     tokens: figures.tokens,
     calls: figures.calls,
-    usd: head === undefined
+    usd: canonicalModels === undefined
       ? { kind: "priced", micros }
-      : {
-          kind: "unpriced",
-          models: [head, ...rest] as UnpricedModels,
-          knownMicros: micros,
-        },
-  });
+      : { kind: "unpriced", models: canonicalModels, knownMicros: micros },
+  }));
 };

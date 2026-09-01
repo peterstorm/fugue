@@ -1,6 +1,17 @@
 import { describe, it, expect } from "bun:test";
 import { Hono } from "hono";
-import { dagId, gitSha, ok, err, runDag, defineDagFromArray, createFetchNode, makeNodeContext, DAG_INPUT } from "@fuguejs/framework";
+import {
+  dagId,
+  gitSha,
+  ok,
+  err,
+  runDag,
+  runId,
+  defineDagFromArray,
+  createFetchNode,
+  makeNodeContext,
+  DAG_INPUT,
+} from "@fuguejs/framework";
 import type { NodeContext, FrameworkError, DagId, Capability, CapabilityBroker, InvocationOrigin } from "@fuguejs/framework";
 import { z } from "zod";
 import { createRunDagHandler } from "../../http/handlers/run-dag.js";
@@ -74,13 +85,14 @@ const defaultDeps = (overrides?: Partial<RunDagDeps>): RunDagDeps => {
       set: (id, s) => { circuits.set(id, s); },
     },
     circuitConfig: { threshold: 5, windowMs: 60_000 },
-    createContext: (() =>
+    createContext: ((_registered, requestedRunId) =>
       Promise.resolve({
-        ctx: { runId: "test-run-id" } as unknown as NodeContext,
+        ctx: { runId: requestedRunId } as unknown as NodeContext,
         origin: { kind: "agent", agentClientId: "test-dag" },
       })) as unknown as RunDagDeps["createContext"],
     executeDag: successExecuteDag,
     clock: () => Date.now(),
+    newRunId: () => runId("test-run-id"),
     ...overrides,
   };
 };
@@ -232,7 +244,7 @@ describe("run-dag handler", () => {
     const runWith = async (identity: AuthIdentity) => {
       const captured: AuthIdentity[] = [];
       const deps = defaultDeps({
-        createContext: (async (_reg, _sig, id: AuthIdentity) => {
+        createContext: (async (_reg, _runId, _sig, id: AuthIdentity) => {
           captured.push(id);
           return {
             ctx: { runId: "test-run-id" } as unknown as NodeContext,
@@ -609,6 +621,69 @@ describe("run-dag handler", () => {
     expect(mintCalls).toHaveLength(4);
   });
 
+  it("hard-bounds a context-construction hang and releases concurrency", async () => {
+    const base = makeDag("setup-wedged-dag");
+    const timedDag: RegisteredDag = { ...base, config: { ...base.config, timeout: 5 } };
+    const reg = freeze([timedDag], sha, Date.now());
+    let concurrency = initConcurrency(50, 10);
+    const deps = defaultDeps({
+      getConcurrency: () => concurrency,
+      setConcurrency: (next) => { concurrency = next; },
+      createContext: (() => new Promise(() => {})) as RunDagDeps["createContext"],
+    });
+
+    const response = await Promise.race([
+      post(createTestApp(deps, makeReadyState(reg)), "setup-wedged-dag", { query: "hi" }),
+      Bun.sleep(250).then(() => { throw new Error("context setup remained wedged"); }),
+    ]);
+
+    expect(response.status).toBe(408);
+    expect((await response.json()).runId).toBe("test-run-id");
+    expect(concurrency.global.current).toBe(0);
+  });
+
+  it("warns when successful effects complete after the terminal 408", async () => {
+    const base = makeDag("late-success-dag");
+    const timedDag: RegisteredDag = { ...base, config: { ...base.config, timeout: 1 } };
+    const reg = freeze([timedDag], sha, Date.now());
+    let resolveExecution!: (value: ReturnType<typeof ok<{ done: boolean }>>) => void;
+    const pending = new Promise<ReturnType<typeof ok<{ done: boolean }>>>((resolve) => {
+      resolveExecution = resolve;
+    });
+    const diagnostics: Array<{
+      readonly level: string;
+      readonly message: string;
+      readonly data?: Record<string, unknown>;
+    }> = [];
+    const deps = defaultDeps({
+      executeDag: (() => pending) as RunDagDeps["executeDag"],
+      logger: {
+        info(message, data) { diagnostics.push({ level: "info", message, data }); },
+        warn(message, data) { diagnostics.push({ level: "warn", message, data }); },
+        error(message, data) { diagnostics.push({ level: "error", message, data }); },
+      },
+    });
+
+    const response = await post(
+      createTestApp(deps, makeReadyState(reg)),
+      "late-success-dag",
+      { query: "hi" },
+    );
+    expect(response.status).toBe(408);
+    resolveExecution(ok({ done: true }));
+    await Bun.sleep(5);
+
+    expect(diagnostics).toContainEqual({
+      level: "warn",
+      message: "host: DAG execution completed after request deadline",
+      data: {
+        dagId: "late-success-dag",
+        runId: "test-run-id",
+        consequence: "effects completed after HTTP 408; client retry may duplicate work",
+      },
+    });
+  });
+
   it("returns 408 when execution exceeds the host timeout (cooperative abort surfaces)", async () => {
     // Tiny per-DAG timeout; execution outlives it and then surfaces the abort the way
     // the framework would (a thrown AbortError once ctx.signal fires). Confirms the
@@ -637,7 +712,7 @@ describe("run-dag handler", () => {
 
     await Bun.sleep(60);
     expect(diagnostics).toContainEqual({
-      message: "host: DAG execution rejected after request deadline",
+      message: "host: DAG pipeline rejected after request deadline",
       data: { dagId: "slow-dag", runId: "test-run-id", error: "aborted" },
     });
   });

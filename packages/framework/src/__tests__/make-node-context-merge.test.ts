@@ -2,7 +2,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { makeNodeContext, mergeScopedCapabilities } from "../shared/make-node-context.js";
-import type { ScopedCapabilityHandle } from "../types/capability-broker.js";
+import { NO_SPEND } from "../types/spend.js";
 import type { Logger } from "../types/node.js";
 import type { DagId, RunId } from "../types/ids.js";
 import type { Tracer } from "../types/tracer.js";
@@ -19,7 +19,7 @@ const makeBase = () => makeNodeContext({
 
 const mergeOk = (
   base: ReturnType<typeof makeBase>,
-  scoped: ScopedCapabilityHandle,
+  scoped: Readonly<Record<string, unknown>>,
 ) => {
   const merged = mergeScopedCapabilities(base, scoped);
   expect(merged.ok).toBe(true);
@@ -158,7 +158,7 @@ describe("mergeScopedCapabilities", () => {
     for (const key of ["logger", "tracer", "observer"] as const) {
       const merged = mergeScopedCapabilities(
         base,
-        { [key]: evil } as unknown as ScopedCapabilityHandle,
+        { [key]: evil },
       );
       expect(merged).toEqual({
         ok: false,
@@ -171,12 +171,7 @@ describe("mergeScopedCapabilities", () => {
 
   test("fails closed for broker-minted built-ins while the static client stays authoritative", () => {
     const budget = {
-      spent: () => ({
-        usage: "known" as const,
-        tokens: 0,
-        calls: 0,
-        usd: { kind: "priced" as const, micros: 0 as never },
-      }),
+      spent: () => NO_SPEND,
       remaining: () => ({ kind: "unbudgeted" as const }),
     };
     const base = makeNodeContext({ runId: "run-merge", dagId: "dag-merge", budget });
@@ -184,7 +179,7 @@ describe("mergeScopedCapabilities", () => {
     for (const key of ["llm", "budget", "http"] as const) {
       expect(mergeScopedCapabilities(
         base,
-        { [key]: { poisoned: true } } as unknown as ScopedCapabilityHandle,
+        { [key]: { poisoned: true } },
       )).toEqual({
         ok: false,
         error: { kind: "reserved-capability", key },
@@ -197,10 +192,10 @@ describe("mergeScopedCapabilities", () => {
     const base = makeBase();
     const parsed = JSON.parse(
       '{"__proto__":{"injectedCapability":true},"constructor":{"polluted":true},"prototype":{"polluted":true}}',
-    ) as ScopedCapabilityHandle;
+    ) as Readonly<Record<string, unknown>>;
 
     for (const key of ["__proto__", "constructor", "prototype"] as const) {
-      const single = JSON.parse(JSON.stringify({ [key]: { polluted: true } })) as ScopedCapabilityHandle;
+      const single = JSON.parse(JSON.stringify({ [key]: { polluted: true } })) as Readonly<Record<string, unknown>>;
       expect(mergeScopedCapabilities(base, single)).toEqual({
         ok: false,
         error: { kind: "reserved-capability", key },
@@ -223,7 +218,7 @@ describe("mergeScopedCapabilities", () => {
     const handle = { sendMail: async () => ({ ok: true as const, value: { messageId: "m-1" } }) };
     const merged = mergeOk(
       base,
-      { "msgraph:mail.send": handle } as unknown as ScopedCapabilityHandle,
+      { "msgraph:mail.send": handle },
     );
 
     expect((merged as unknown as Record<string, unknown>)["msgraph:mail.send"]).toBe(handle);
@@ -232,10 +227,10 @@ describe("mergeScopedCapabilities", () => {
 
   test("empty and all-null mint results return the base context by reference", () => {
     const base = makeBase();
-    expect(mergeOk(base, {} as ScopedCapabilityHandle)).toBe(base);
+    expect(mergeOk(base, {})).toBe(base);
     expect(mergeOk(
       base,
-      { logger: null } as unknown as ScopedCapabilityHandle,
+      { logger: null },
     )).toBe(base);
   });
 });

@@ -18,7 +18,14 @@
 
 import { describe, it, expect } from "bun:test";
 import { runId as makeRunId, nodeId as makeNodeId, err } from "@fuguejs/framework";
-import type { Capability, Invocation, InvocationOrigin, Tracer, RunId } from "@fuguejs/framework";
+import type {
+  Capability,
+  Invocation,
+  InvocationOrigin,
+  ScopedCapabilityHandle,
+  Tracer,
+  RunId,
+} from "@fuguejs/framework";
 import type { LogPort } from "../../ports.js";
 import { createKeycloakBroker, scopeName, audienceForScope } from "../keycloak-broker.js";
 import type {
@@ -161,6 +168,17 @@ const invocationFor = (origin: InvocationOrigin): Invocation => ({
 });
 
 const cap = (name: string): Capability => name as Capability;
+
+const mintedClient = (
+  scoped: ScopedCapabilityHandle,
+  capability: Capability,
+): unknown => {
+  const binding = scoped[capability];
+  if (binding?.clientKind !== "non-llm") {
+    throw new Error(`expected non-LLM scoped binding for '${capability}'`);
+  }
+  return binding.client;
+};
 
 /**
  * Construct a broker, defaulting the two T10 egress ports (`entraWif`,
@@ -331,7 +349,10 @@ describe("keycloak-broker — operation narrowing (US4/SC-007)", () => {
 
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error("expected mint");
-    const handle = result.value["msgraph:mail.send" as Capability] as unknown as Record<string, unknown>;
+    const handle = mintedClient(
+      result.value,
+      cap("msgraph:mail.send"),
+    ) as Record<string, unknown>;
     expect(typeof handle.sendMail).toBe("function");
     // SC-007: no raw client / token / apiKey field is reachable on the handle.
     expect(handle.client).toBeUndefined();
@@ -721,7 +742,10 @@ describe("keycloak-broker — NFR-011: no raw subject_token reachable from a ret
     );
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error("expected mint");
-    const handle = result.value["msgraph:mail.send" as Capability] as unknown as Record<string, unknown>;
+    const handle = mintedClient(
+      result.value,
+      cap("msgraph:mail.send"),
+    ) as Record<string, unknown>;
     // Only the operation method — no raw authority of ANY kind on the handle.
     expect(Object.keys(handle)).toEqual(["sendMail"]);
     expect(handle.token).toBeUndefined();
@@ -897,7 +921,10 @@ describe("keycloak-broker — Entra WIF second egress after the Keycloak mint (T
     );
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error("expected mint");
-    const handle = result.value["msgraph:mail.send" as Capability] as unknown as Record<string, unknown>;
+    const handle = mintedClient(
+      result.value,
+      cap("msgraph:mail.send"),
+    ) as Record<string, unknown>;
     // SC-007: only the operation method — no client/token/apiKey field.
     expect(Object.keys(handle)).toEqual(["sendMail"]);
 
@@ -1051,7 +1078,10 @@ describe("keycloak-broker — a throwing audit sink never breaks mintFor's Resul
     // The minted token survives: mintFor resolves to the ok handle, not a reject.
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error("expected mint despite throwing tracer");
-    const handle = result.value["msgraph:mail.send" as Capability] as unknown as Record<string, unknown>;
+    const handle = mintedClient(
+      result.value,
+      cap("msgraph:mail.send"),
+    ) as Record<string, unknown>;
     expect(typeof handle.sendMail).toBe("function");
   });
 
@@ -1141,8 +1171,12 @@ describe("keycloak-broker — cache keyed by IDENTITY, not just scope (C7.2)", (
     expect(exCalls.map((c) => c.userSub).sort()).toEqual(["user-A", "user-B"]);
 
     // And the bearer each user's handle presents downstream is DISTINCT.
-    await (a.value["msgraph:mail.send" as Capability] as { sendMail: (m: { from: string; to: string; subject: string; body: string }) => Promise<unknown> }).sendMail({ from: "a@x", to: "t@x", subject: "s", body: "b" });
-    await (b.value["msgraph:mail.send" as Capability] as { sendMail: (m: { from: string; to: string; subject: string; body: string }) => Promise<unknown> }).sendMail({ from: "b@x", to: "t@x", subject: "s", body: "b" });
+    const sendMailA = mintedClient(a.value, cap("msgraph:mail.send")) as {
+      sendMail: (m: { from: string; to: string; subject: string; body: string }) => Promise<unknown>;
+    };
+    const sendMailB = mintedClient(b.value, cap("msgraph:mail.send")) as typeof sendMailA;
+    await sendMailA.sendMail({ from: "a@x", to: "t@x", subject: "s", body: "b" });
+    await sendMailB.sendMail({ from: "b@x", to: "t@x", subject: "s", body: "b" });
     expect(requests).toHaveLength(2);
     expect(requests[0]?.bearer).not.toBe(requests[1]?.bearer);
   });
@@ -1517,7 +1551,9 @@ describe("keycloak-broker — Dynamics targets the configured per-org host (FR-0
     const result = await broker.mintFor(invocationFor(agentOrigin("fugue-agent-crm")), [cap("dynamics:read")]);
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error("expected ok");
-    const handle = (result.value as Record<string, { read: (q: { entity: string }) => Promise<unknown> }>)["dynamics:read"]!;
+    const handle = mintedClient(result.value, cap("dynamics:read")) as {
+      read: (q: { entity: string }) => Promise<unknown>;
+    };
     await handle.read({ entity: "accounts" });
     expect(graphRequests[0]?.url).toBe(`https://${DYN_HOST}/api/data/v9.2/accounts`);
   });

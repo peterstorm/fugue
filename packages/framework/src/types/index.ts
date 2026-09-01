@@ -55,6 +55,7 @@ export type {
   MicroUsd,
   PricedSpend,
   Spend,
+  SpendInput,
   UnpricedModels,
   UsageKnowledge,
 } from "./spend.js";
@@ -63,11 +64,16 @@ export {
   NO_SPEND,
   addSpend,
   costFloor,
+  makeSpend,
   maxSpend,
+  microUsd,
   microsToUsd,
+  parseSpend,
   pricedCall,
   unknownUsageCall,
   unpricedCall,
+  unpricedModel,
+  unpricedModels,
   scaleSpend,
   usdToMicros,
 } from "./spend.js";
@@ -196,6 +202,7 @@ export type {
   MintingAuthority,
   ScopedCapabilityHandle,
   ScopedLlmCapability,
+  ScopedNonLlmCapability,
   ScopedLlmMeter,
 } from "./capability-broker.js";
 export { invocationFor } from "./capability-broker.js";

@@ -19,6 +19,7 @@ import {
   ceilings,
   firstBreach,
   formatBreach,
+  makeSpend,
   observedOf,
   pricedCall,
   unknownUsageCall,
@@ -167,12 +168,12 @@ describe("firstBreach: any ceiling refuses", () => {
         fc.nat({ max: 20 }),
         fc.nat({ max: 5000 }),
         (tokenSpend, callCount, costMicros) => {
-          const spend = {
-            usage: "known" as const,
+          const spend = makeSpend({
+            usage: "known",
             tokens: tokenSpend,
             calls: callCount,
-            usd: { kind: "priced" as const, micros: micros(costMicros) },
-          };
+            usd: { kind: "priced", micros: micros(costMicros) },
+          });
           const limits = limitsOf([tokens(2000), calls(10), { kind: "usd", limit: micros(2000) }]);
           const over =
             tokenSpend >= 2000 || callCount >= 10 || costMicros >= 2000;
@@ -184,12 +185,12 @@ describe("firstBreach: any ceiling refuses", () => {
   });
 
   it("reports the usd ceiling first when several are breached at once", () => {
-    const spend = {
-      usage: "known" as const,
+    const spend = makeSpend({
+      usage: "known",
       tokens: 10_000,
       calls: 99,
-      usd: { kind: "priced" as const, micros: micros(10_000) },
-    };
+      usd: { kind: "priced", micros: micros(10_000) },
+    });
     const breach = firstBreach(spend, limitsOf([tokens(10), calls(1), { kind: "usd", limit: micros(10) }]), "settled");
     expect(breach?.ceiling.kind).toBe("usd");
   });

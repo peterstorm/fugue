@@ -12,13 +12,19 @@
  * plus the typed-`Result` error wrapping every method does, and init failure.
  */
 
-import { describe, it, expect } from "bun:test";
+import { afterAll, beforeAll, describe, it, expect } from "bun:test";
 import {
   createRedisConnectivity,
   disconnectRedisQuietly,
   type RedisClientFactory,
 } from "../redis-connectivity.js";
-import { isOk, isErr } from "@fuguejs/framework";
+import {
+  isOk,
+  isErr,
+  makeSpend,
+  unpricedModels,
+} from "@fuguejs/framework";
+import type { RedisSpendAppend } from "../../ports.js";
 import type { Redis as IoRedis } from "ioredis";
 import { unpricedModelHashField } from "../../domain/spend-record.js";
 
@@ -595,14 +601,18 @@ describe("createRedisConnectivity — initialization failure", () => {
 });
 
 describe("createRedisConnectivity — spend-ledger capability", () => {
-  const completeAppend = {
+  const completeAppend: RedisSpendAppend = {
     key: "run:spend",
-    delta: {
-      usage: "known" as const,
+    delta: makeSpend({
+      usage: "known",
       tokens: 10,
       calls: 1,
-      usd: { kind: "unpriced" as const, models: ["model-a", "model-z"] as const, knownMicros: 7 as never },
-    },
+      usd: {
+        kind: "unpriced",
+        models: unpricedModels(["model-a", "model-z"])!,
+        knownMicros: 7 as never,
+      },
+    }),
     ttlSec: 900,
   };
 
@@ -628,13 +638,14 @@ describe("createRedisConnectivity — spend-ledger capability", () => {
       checkpointKey: "run:node",
       checkpointValue: "checkpoint",
       spendKey: "run:spend",
-      ttlSec: 900,
+      checkpointTtlSec: 300,
+      spendTtlSec: 900,
     });
 
     expect(result !== undefined && isOk(result)).toBe(true);
     expect(fake.calls).toEqual([
       { m: "multi", args: [] },
-      { m: "multi.set", args: ["run:node", "checkpoint", "EX", 900] },
+      { m: "multi.set", args: ["run:node", "checkpoint", "EX", 300] },
       { m: "multi.expire", args: ["run:spend", 900] },
       { m: "multi.exec", args: [] },
     ]);
@@ -651,7 +662,8 @@ describe("createRedisConnectivity — spend-ledger capability", () => {
       checkpointKey: "run:node",
       checkpointValue: "checkpoint",
       spendKey: "run:spend",
-      ttlSec: 900,
+      checkpointTtlSec: 300,
+      spendTtlSec: 900,
     });
 
     expect(result !== undefined && isErr(result)).toBe(true);
@@ -684,12 +696,12 @@ describe("createRedisConnectivity — spend-ledger capability", () => {
 
     const result = await bundle.redis.appendSpend?.({
       key: "run:spend",
-      delta: {
+      delta: makeSpend({
         usage: "known",
         tokens: 0,
         calls: 1,
         usd: { kind: "priced", micros: 0 as never },
-      },
+      }),
     });
 
     expect(result !== undefined && isOk(result)).toBe(true);
@@ -728,3 +740,82 @@ describe("createRedisConnectivity — spend-ledger capability", () => {
     }
   });
 });
+
+const liveRedisUrl = process.env.REDIS_URL;
+
+describe.skipIf(liveRedisUrl === undefined)(
+  "createIoredisRedisPort — real Redis spend transactions",
+  () => {
+    let bundle: Extract<
+      Awaited<ReturnType<typeof createRedisConnectivity>>,
+      { readonly ok: true }
+    >["value"];
+    let observer: IoRedis;
+    const prefix = `fugue:test:spend:${crypto.randomUUID()}`;
+
+    beforeAll(async () => {
+      if (liveRedisUrl === undefined) return;
+      const connected = await createRedisConnectivity(liveRedisUrl);
+      if (!connected.ok) throw new Error(`Redis test connection failed: ${connected.error.kind}`);
+      bundle = connected.value;
+      const { Redis } = await import("ioredis");
+      observer = new Redis(liveRedisUrl);
+    });
+
+    afterAll(async () => {
+      if (liveRedisUrl === undefined) return;
+      await observer.del(`${prefix}:spend`, `${prefix}:checkpoint`);
+      await observer.quit();
+      await bundle.disconnect();
+    });
+
+    it("commits concurrent additive deltas, marker union, and one spend TTL", async () => {
+      const key = `${prefix}:spend`;
+      const append = bundle.redis.appendSpend;
+      if (append === undefined) throw new Error("appendSpend is not wired");
+      const models = unpricedModels(["model-a", "model-z"]);
+      if (models === undefined) throw new Error("expected canonical models");
+      const delta = makeSpend({
+        usage: "unknown",
+        tokens: 3,
+        calls: 1,
+        usd: { kind: "unpriced", models, knownMicros: 2 as never },
+      });
+      const outcomes = await Promise.all(
+        Array.from({ length: 8 }, () => append({ key, delta, ttlSec: 30 })),
+      );
+      expect(outcomes.every(isOk)).toBe(true);
+      expect(await observer.hgetall(key)).toEqual({
+        "$unpriced:006d006f00640065006c002d0061": "1",
+        "$unpriced:006d006f00640065006c002d007a": "1",
+        "$usage:unknown": "1",
+        calls: "8",
+        micros: "16",
+        tokens: "24",
+      });
+      expect(await observer.ttl(key)).toBeGreaterThan(0);
+    });
+
+    it("atomically writes a checkpoint while retaining spend longer", async () => {
+      const spendKey = `${prefix}:spend`;
+      const checkpointKey = `${prefix}:checkpoint`;
+      const commit = bundle.redis.commitCheckpointAndRetainSpend;
+      if (commit === undefined) throw new Error("checkpoint/spend commit is not wired");
+      const result = await commit({
+        checkpointKey,
+        checkpointValue: "checkpoint",
+        spendKey,
+        checkpointTtlSec: 5,
+        spendTtlSec: 30,
+      });
+      expect(result.ok).toBe(true);
+      expect(await observer.get(checkpointKey)).toBe("checkpoint");
+      const [checkpointTtl, spendTtl] = await Promise.all([
+        observer.ttl(checkpointKey),
+        observer.ttl(spendKey),
+      ]);
+      expect(checkpointTtl).toBeGreaterThan(0);
+      expect(spendTtl).toBeGreaterThan(checkpointTtl);
+    });
+  },
+);

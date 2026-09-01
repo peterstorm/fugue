@@ -20,6 +20,7 @@ export const AI_DAG_ID = "ai.dag.id";
 export const AI_RUN_ID = "ai.run.id";
 
 export const AI_LLM_COST_USD = "ai.llm.cost_usd";
+export const AI_LLM_COST_PRICED = "ai.llm.cost_priced";
 export const AI_LLM_HAS_THINKING = "ai.llm.has_thinking";
 
 export const AI_GUARDRAIL_PASSED = "ai.guardrail.passed";

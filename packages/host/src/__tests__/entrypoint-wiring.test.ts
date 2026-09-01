@@ -1,4 +1,7 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
+import { existsSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { parseHostConfig } from "../domain/config.js";
 import {
   createHostLlmClient,
@@ -9,7 +12,46 @@ import {
   redisOperationFailure,
   redisUrlRedactions,
 } from "../entrypoint-wiring.js";
-import type { LlmClient } from "@fuguejs/framework";
+import {
+  createFetchNode,
+  DAG_INPUT,
+  defineDagFromArray,
+  gitSha,
+  ok,
+  tokensOnly,
+} from "@fuguejs/framework";
+import type {
+  CapabilityBroker,
+  DagId,
+  FrameworkError,
+  LlmClient,
+  LlmResponse,
+  Result,
+} from "@fuguejs/framework";
+import { z } from "zod";
+import { createHost, type HostInstance } from "../host.js";
+import type { DagRegistration } from "../domain/dag-registration.js";
+import type { BulkLoadResult, LoadResult, ModuleLoaderPort } from "../ports.js";
+import {
+  fakeGit,
+  fakeInfra,
+  fakeRedis,
+  makeConfig,
+  mkTenant,
+  testLogger,
+} from "./fixtures/host-boot-fakes.js";
+
+declare module "@fuguejs/framework" {
+  interface CapabilityRegistry {
+    shellBrokerLlm: LlmClient;
+  }
+}
+
+const redisFailureTypePin = (): void => {
+  // @ts-expect-error -- callers must explicitly supply configured secret spellings.
+  redisOperationFailure("PING", new Error("secret-bearing diagnostic"));
+};
+void redisFailureTypePin;
 
 const config = (provider: "anthropic" | "openai" | "azure") => {
   const result = parseHostConfig({
@@ -95,6 +137,23 @@ describe("Redis entrypoint cleanup", () => {
     expect(attempted).toEqual(["command", "subscriber"]);
   });
 
+  it("preserves each original cleanup rejection as Error.cause", async () => {
+    const original = new Error("socket closed");
+    try {
+      await disconnectRedisClients([{
+        name: "command",
+        quit: async () => { throw original; },
+      }]);
+      throw new Error("expected disconnect failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(AggregateError);
+      if (!(error instanceof AggregateError)) return;
+      expect(error.errors).toHaveLength(1);
+      expect(error.errors[0]).toBeInstanceOf(Error);
+      expect((error.errors[0] as Error).cause).toBe(original);
+    }
+  });
+
   it("still attempts later clients when an earlier quit throws synchronously", async () => {
     const attempted: string[] = [];
 
@@ -167,5 +226,121 @@ describe("host LLM entrypoint wiring", () => {
 
     expect(client).toBe(fake);
     expect(keys).toEqual(["anthropic-key"]);
+  });
+});
+
+describe("createHost broker-LLM composition", () => {
+  let host: HostInstance | undefined;
+  let socketPath: string | undefined;
+
+  afterEach(async () => {
+    if (host !== undefined) await host.shutdown();
+    host = undefined;
+    if (socketPath !== undefined && existsSync(socketPath)) rmSync(socketPath, { force: true });
+    socketPath = undefined;
+  });
+
+  it("threads the run spend meter into synchronous broker dispatch", async () => {
+    let providerCalls = 0;
+    const provider: LlmClient = {
+      sendStructured: async <O>(): Promise<Result<LlmResponse<O>, FrameworkError>> => {
+        providerCalls += 1;
+        return ok({ output: {} as O, rawText: "", ...tokensOnly(1, 0) });
+      },
+      sendWithTools: async <O>(): Promise<Result<LlmResponse<O>, FrameworkError>> => {
+        providerCalls += 1;
+        return ok({ output: {} as O, rawText: "", ...tokensOnly(1, 0) });
+      },
+    };
+    const broker: CapabilityBroker = {
+      mintFor: async () => ok({
+        shellBrokerLlm: {
+          clientKind: "llm",
+          client: provider,
+          pricingModel: { kind: "fixed", model: "gpt-4o" },
+          runScopedOperations: {},
+        },
+      }),
+      provides: (capability) => capability === "shellBrokerLlm",
+    };
+    const node = createFetchNode({
+      id: "call-broker" as never,
+      inputSchema: z.object({ query: z.string() }),
+      outputSchema: z.object({ done: z.boolean() }),
+      requires: ["shellBrokerLlm"] as const,
+      fetch: async (_input, ctx) => {
+        const request = {
+          system: "s",
+          user: "u",
+          model: "gpt-4o",
+          schema: z.object({}),
+          nodeId: "call-broker" as never,
+        };
+        const first = await ctx.shellBrokerLlm.sendStructured(request);
+        if (!first.ok) return first;
+        const second = await ctx.shellBrokerLlm.sendStructured(request);
+        return second.ok ? ok({ done: true }) : second;
+      },
+    });
+    const dag = defineDagFromArray({
+      id: "shell-meter-dag",
+      nodes: [node],
+      edges: [{ from: DAG_INPUT, to: "call-broker" }],
+      outputNodeId: "call-broker",
+    });
+    const registration: DagRegistration = {
+      dag,
+      inputSchema: z.object({ query: z.string() }),
+      config: {
+        timeoutMs: 5_000,
+        maxConcurrent: 2,
+        llmBudget: { calls: 1 },
+      },
+      meta: { description: "shell meter", version: "1.0.0" },
+    };
+    const loaded: LoadResult = {
+      id: dag.id as DagId,
+      registration,
+      modulePath: "/tmp/test-dags/dags/eng/shell-meter-dag/dag.ts",
+      prompts: new Map(),
+      team: "eng",
+    };
+    const loader: ModuleLoaderPort = {
+      loadDagModule: async () => ok(loaded),
+      discoverDagPaths: async () => ok([loaded.modulePath]),
+      loadAll: async (): Promise<BulkLoadResult> => ({ loaded: [loaded], errors: [] }),
+    };
+    const redis = fakeRedis();
+    const hostConfig = makeConfig({
+      AGENT_CLIENT_MAP: JSON.stringify({ "shell-meter-dag": "fugue-agent-shell" }),
+    });
+    socketPath = join(tmpdir(), `fugue-shell-meter-${crypto.randomUUID()}.sock`);
+    const booted = await createHost({
+      config: hostConfig,
+      git: fakeGit(),
+      loader,
+      redis: redis.port,
+      sharedInfra: fakeInfra(redis.redis),
+      logger: testLogger(),
+      tenant: mkTenant("acme"),
+      bind: { unix: socketPath },
+      capabilityBroker: broker,
+    });
+    expect(booted.ok).toBe(true);
+    if (!booted.ok) return;
+    host = booted.value;
+
+    const executed = await fetch("http://uds.fugue.internal/dags/shell-meter-dag/run", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${hostConfig.ADMIN_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ query: "go" }),
+      unix: socketPath,
+    } as RequestInit & { unix: string });
+
+    expect(executed.status).toBe(429);
+    expect(providerCalls).toBe(1);
   });
 });

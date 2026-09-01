@@ -4,14 +4,22 @@ import { ceilings } from "../types/budget.js";
 import { remainingFor, snapshotSpend } from "../types/budget-capability.js";
 import { fixedBudgetCapability } from "../testing.js";
 import type { Ceiling } from "../types/budget.js";
-import type { MicroUsd, Spend } from "../types/spend.js";
+import type { MicroUsd, Spend, SpendInput } from "../types/spend.js";
+import { makeSpend, unpricedModels } from "../types/spend.js";
+
+const spendOf = (input: SpendInput): Spend => makeSpend(input);
+const modelsOf = (names: readonly string[]) => {
+  const models = unpricedModels(names);
+  if (models === undefined) throw new Error("expected non-empty models");
+  return models;
+};
 
 const nonNegativeInteger = fc.integer({ min: 0, max: 1_000_000 });
 const pricedSpend = fc.record({
   tokens: nonNegativeInteger,
   calls: nonNegativeInteger,
   micros: nonNegativeInteger,
-}).map(({ tokens, calls, micros }): Spend => ({
+}).map(({ tokens, calls, micros }): Spend => spendOf({
   usage: "known",
   tokens,
   calls,
@@ -31,22 +39,22 @@ const declaredCeilings = fc
 
 describe("remainingFor", () => {
   it("an unbudgeted run remains total and distinct", () => {
-    expect(remainingFor(undefined, {
+    expect(remainingFor(undefined, spendOf({
       usage: "known",
       tokens: 99,
       calls: 2,
       usd: { kind: "priced", micros: 30 as MicroUsd },
-    })).toEqual({ kind: "unbudgeted" });
+    }))).toEqual({ kind: "unbudgeted" });
   });
 
   it("clamps reached numeric ceilings to zero", () => {
     const limits = ceilings([{ kind: "tokens", limit: 10 }])!;
-    expect(remainingFor(limits, {
+    expect(remainingFor(limits, spendOf({
       usage: "known",
       tokens: 12,
       calls: 1,
       usd: { kind: "priced", micros: 0 as MicroUsd },
-    })).toEqual({
+    }))).toEqual({
       kind: "budgeted",
       basis: "projected",
       headroom: [{ kind: "available", unit: "tokens", ceiling: { kind: "tokens", limit: 10 }, amount: 0 }],
@@ -58,12 +66,12 @@ describe("remainingFor", () => {
       { kind: "tokens", limit: 10 },
       { kind: "usd", limit: 500 as MicroUsd },
     ])!;
-    const projected: Spend = {
+    const projected = spendOf({
       usage: "known",
       tokens: 3,
       calls: 1,
       usd: { kind: "priced", micros: 20 as MicroUsd },
-    };
+    });
     const first = remainingFor(limits, projected);
     const second = remainingFor(limits, projected);
 
@@ -92,12 +100,12 @@ describe("remainingFor", () => {
       { kind: "calls", limit: 5 },
       { kind: "usd", limit: 500 as MicroUsd },
     ])!;
-    const remaining = remainingFor(limits, {
+    const remaining = remainingFor(limits, spendOf({
       usage: "unknown",
       tokens: 3,
       calls: 1,
       usd: { kind: "priced", micros: 20 as MicroUsd },
-    });
+    }));
 
     if (remaining.kind !== "budgeted") throw new Error("expected budgeted");
     expect(remaining.headroom.map((headroom) => headroom.kind)).toEqual([
@@ -109,19 +117,23 @@ describe("remainingFor", () => {
 
   it("reports deeply frozen unpriced USD headroom as domain data, never a number", () => {
     const limits = ceilings([{ kind: "usd", limit: 500 as MicroUsd }])!;
-    const remaining = remainingFor(limits, {
+    const remaining = remainingFor(limits, spendOf({
       usage: "known",
       tokens: 3,
       calls: 1,
-      usd: { kind: "unpriced", models: ["new-model"], knownMicros: 20 as MicroUsd },
-    });
+      usd: {
+        kind: "unpriced",
+        models: modelsOf(["new-model"]),
+        knownMicros: 20 as MicroUsd,
+      },
+    }));
     expect(remaining).toEqual({
       kind: "budgeted",
       basis: "projected",
       headroom: [{
         kind: "unpriced",
         ceiling: { kind: "usd", limit: 500 as MicroUsd },
-        models: ["new-model"],
+        models: modelsOf(["new-model"]),
         observedAtLeast: 20 as MicroUsd,
       }],
     });
@@ -152,17 +164,16 @@ describe("remainingFor", () => {
       fc.uniqueArray(fc.string({ minLength: 1, maxLength: 12 }), { minLength: 1, maxLength: 4 }),
       nonNegativeInteger,
       (limits, names, knownMicros) => {
-        const [head, ...rest] = [...names].sort();
-        const remaining = remainingFor(limits, {
+        const remaining = remainingFor(limits, spendOf({
           usage: "known",
           tokens: 0,
           calls: 1,
           usd: {
             kind: "unpriced",
-            models: [head!, ...rest],
+            models: modelsOf(names),
             knownMicros: knownMicros as MicroUsd,
           },
-        });
+        }));
         if (remaining.kind !== "budgeted") throw new Error("generated limits are non-empty");
         expect(remaining.headroom.some((h) => h.kind === "unpriced"))
           .toBe(limits.some((c) => c.kind === "usd"));
@@ -173,18 +184,18 @@ describe("remainingFor", () => {
 
 describe("fixedBudgetCapability", () => {
   it("provides deterministic fresh snapshots for node tests", () => {
-    const fake = fixedBudgetCapability({
+    const fake = fixedBudgetCapability(spendOf({
       usage: "known",
       tokens: 7,
       calls: 1,
       usd: { kind: "priced", micros: 3 as MicroUsd },
-    });
-    expect(fake.spent()).toEqual({
+    }));
+    expect(fake.spent()).toEqual(spendOf({
       usage: "known",
       tokens: 7,
       calls: 1,
       usd: { kind: "priced", micros: 3 as MicroUsd },
-    });
+    }));
     expect(fake.spent()).not.toBe(fake.spent());
     expect(fake.remaining()).toEqual({ kind: "unbudgeted" });
   });
@@ -192,12 +203,16 @@ describe("fixedBudgetCapability", () => {
 
 describe("snapshotSpend", () => {
   it("returns fresh deeply frozen snapshots isolated from consumer mutation", () => {
-    const source: Spend = {
+    const source = spendOf({
       usage: "known",
       tokens: 4,
       calls: 1,
-      usd: { kind: "unpriced", models: ["x"], knownMicros: 2 as MicroUsd },
-    };
+      usd: {
+        kind: "unpriced",
+        models: modelsOf(["x"]),
+        knownMicros: 2 as MicroUsd,
+      },
+    });
     const first = snapshotSpend(source);
     const second = snapshotSpend(source);
 

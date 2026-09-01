@@ -23,6 +23,7 @@ import { BUILTIN_CAPABILITY_KEYS, RESERVED_NON_CAPABILITY_KEYS } from "../types/
 import type { LlmClient } from "../types/llm.js";
 import type { CapabilityBroker, ScopedCapabilityHandle } from "../types/capability-broker.js";
 import { isOk, isErr, ok } from "../types/result.js";
+import { NO_SPEND } from "../types/spend.js";
 
 const noop = async () => ({ ok: true as const, value: undefined });
 
@@ -66,12 +67,7 @@ describe("validateCapabilities", () => {
     expect(isErr(validateCapabilities(dag, makeCtx()))).toBe(true);
     expect(isOk(validateCapabilities(dag, makeCtx({
       budget: {
-        spent: () => ({
-          usage: "known",
-          tokens: 0,
-          calls: 0,
-          usd: { kind: "priced", micros: 0 as never },
-        }),
+        spent: () => NO_SPEND,
         remaining: () => ({ kind: "unbudgeted" }),
       },
     })))).toBe(true);

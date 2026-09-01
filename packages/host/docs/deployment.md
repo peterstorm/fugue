@@ -76,9 +76,13 @@ oc new-project fugue-cx --display-name="Fugue Host — CX Team"
 
 ## Deploy Redis
 
-All Fugue host instances can share a single Redis instance. Keys are namespaced by prefix, so there are no collisions.
+Every key is tenant-prefixed, but this guide's standalone `main.ts` topology uses
+the fixed tenant id `default`. Two standalone hosts pointed at one Redis would
+therefore share `fugue:default:*` and are **not isolated**. Deploy one Redis per
+standalone host. The multi-tenant supervisor topology may share Redis because it
+routes each worker with its real tenant id and tenant-scoped ACL.
 
-### Deploy shared Redis (recommended)
+### Deploy Redis for this host (recommended)
 
 ```bash
 helm install platform-redis bitnami/redis \
@@ -89,12 +93,15 @@ helm install platform-redis bitnami/redis \
 
 Note the connection URL: `redis://:password@platform-redis-master:6379`
 
-Use this same URL for all host instances.
+Use this URL only for this standalone host instance. Use a separate Redis URL
+for another standalone team host.
 
 ### Spend-ledger backend
 
-Stock host wiring is Redis-first and unchanged. Redis spend records follow the
-checkpoint TTL and survive process replacement. If the configured Redis adapter
+Stock host wiring is Redis-first and unchanged. Redis spend records survive
+process replacement. They have no expiry when checkpoints have no expiry;
+otherwise their TTL is at least the checkpoint TTL and, for resumable HITL
+slices, at least `HITL_RUN_TTL_SEC`. If the configured Redis adapter
 cannot provide the increment/read/expiry primitives, the host logs an error and
 falls back to the process-local ledger; budgets then survive parks in that
 process but not restarts.
@@ -113,25 +120,23 @@ rename/lock semantics. No automatic TTL, GC, or backend selection from
 
 ### Key namespacing
 
-Multiple hosts use the same Redis with no conflicts:
+The tenant is always the first namespace segment:
 
 ```
-Host instance "cx"        Host instance "leads"       Host instance "billing"
-       │                          │                           │
-       └─ fugue:tokens:<hash>     ├─ fugue:tokens:<hash>      ├─ fugue:tokens:<hash>
-       ├─ fugue:teams:cx          ├─ fugue:teams:leads        ├─ fugue:teams:billing
-       ├─ fugue:customer-summary: ├─ fugue:lead-scoring:      ├─ fugue:invoice-processor:
-       │  cache:<key>             │  cache:<key>              │  cache:<key>
-       └─ fugue:customer-summary: └─ fugue:lead-scoring:      └─ fugue:invoice-processor:
-          <runId>:<nodeId>           <runId>:<nodeId>            <runId>:<nodeId>
-                                                                    ↓
-                                              [Single Shared Redis Instance]
+Standalone host (`main.ts`)                 Routed multi-tenant worker (`acme`)
+        │                                              │
+        ├─ fugue:default:tokens:<hash>                 ├─ fugue:acme:tokens:<hash>
+        ├─ fugue:default:teams:<team>                  ├─ fugue:acme:teams:<team>
+        ├─ fugue:default:teams-index                   ├─ fugue:acme:teams-index
+        ├─ fugue:default:<dagId>:cache:<key>           ├─ fugue:acme:<dagId>:cache:<key>
+        ├─ fugue:default:<dagId>:<runId>:<nodeId>      ├─ fugue:acme:<dagId>:<runId>:<nodeId>
+        └─ fugue:default:<dagId>:<runId>:$spend        └─ fugue:acme:<dagId>:<runId>:$spend
 ```
 
-All keys are prefixed with their scope:
-- `fugue:tokens:*` — team tokens (all teams)
-- `fugue:teams:*` — team metadata (all teams)
-- `fugue:<dagId>:*` — per-DAG cache and checkpoints (team-scoped by DAG ownership)
+All host data keys therefore begin `fugue:<tenant>:`. Redis ACL patterns for a
+routed worker must grant only `~fugue:<tenant>:*`; never derive an ACL from the
+obsolete unscoped `fugue:<dagId>:*`, `fugue:tokens:*`, or `fugue:teams:*`
+patterns.
 
 ### Sizing the shared Redis
 
@@ -151,7 +156,9 @@ helm install platform-redis bitnami/redis \
   --set redis.masterConfiguration.maxmemoryPolicy=allkeys-lru
 ```
 
-> **Optional: Separate Redis per team** — If you need complete isolation (e.g., one team's high cache usage shouldn't evict another's), deploy independent Redis instances. But shared Redis is simpler and more resource-efficient.
+> **Standalone topology:** separate Redis per host is required for isolation.
+> **Multi-tenant supervisor topology:** one shared Redis is supported because
+> tenant-prefixed keys and per-tenant ACL users are wired by the supervisor.
 
 ---
 

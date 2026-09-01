@@ -117,7 +117,9 @@ const tokenUsageOf = (value: unknown): TokenUsage | undefined => {
     return isNonNegativeSafeInteger(usage.tokensIn) &&
         isNonNegativeSafeInteger(usage.tokensOut) &&
         isNonNegativeSafeInteger(usage.cacheWriteTokens) &&
-        isNonNegativeSafeInteger(usage.cacheReadTokens)
+        isNonNegativeSafeInteger(usage.cacheReadTokens) &&
+        usage.cacheWriteTokens <= usage.tokensIn &&
+        usage.cacheReadTokens <= usage.tokensIn - usage.cacheWriteTokens
       ? usage
       : undefined;
   } catch {
@@ -230,7 +232,7 @@ export const createRunSpendAuthority = (
     breach: Breach,
     settled: Spend,
     inFlight: number,
-  ): { readonly error: FrameworkError } => {
+  ): FrameworkError => {
     logWithoutThrowing(logger, "warn", "LLM budget exceeded — refusing call", {
       ...attribution(nodeId, clientKey),
       reason: formatBreach(breach),
@@ -240,12 +242,10 @@ export const createRunSpendAuthority = (
       settled: spendFields(settled),
     });
     return {
-      error: {
-        kind: "llm-budget-exceeded",
-        runId,
-        nodeId,
-        cause: breach,
-      },
+      kind: "llm-budget-exceeded",
+      runId,
+      nodeId,
+      cause: breach,
     };
   };
 
@@ -253,7 +253,7 @@ export const createRunSpendAuthority = (
     request: MeteredRequest,
     clientKey: Capability,
     effectiveModel: string,
-  ): { readonly error: FrameworkError } | { readonly release: () => void } => {
+  ): Result<() => void, FrameworkError> => {
     const decision = admitCandidate(
       meter,
       runId,
@@ -264,27 +264,25 @@ export const createRunSpendAuthority = (
         : { kind: "unpriced", model: effectiveModel },
     );
     if (decision.kind === "refuse") {
-      return refusal(
+      return err(refusal(
         request.nodeId,
         clientKey,
         decision.breach,
         decision.settled,
         decision.inFlight,
-      );
+      ));
     }
     reservation = decision.state;
     let active = true;
-    return {
-      release: () => {
-        if (!active) return;
-        active = false;
-        reservation = releaseAuthorityReservation(
-          reservation,
-          logger,
-          attribution(request.nodeId, clientKey),
-        );
-      },
-    };
+    return ok(() => {
+      if (!active) return;
+      active = false;
+      reservation = releaseAuthorityReservation(
+        reservation,
+        logger,
+        attribution(request.nodeId, clientKey),
+      );
+    });
   };
 
   const persist = async (
@@ -395,7 +393,8 @@ export const createRunSpendAuthority = (
       });
     }
     const admission = gate(request, clientKey, effectiveModel);
-    if ("error" in admission) return err(admission.error);
+    if (!admission.ok) return admission;
+    const release = admission.value;
     try {
       let result: Result<LlmResponse<O>, FrameworkError>;
       try {
@@ -416,10 +415,10 @@ export const createRunSpendAuthority = (
         operation,
         effectiveModel,
         result,
-        admission.release,
+        release,
       );
     } finally {
-      admission.release();
+      release();
     }
   };
 

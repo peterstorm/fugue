@@ -13,7 +13,6 @@
 import type { NodeContext, NodeContextInit } from "../types/node.js";
 import type { Result } from "../types/result.js";
 import { err, ok } from "../types/result.js";
-import type { ScopedCapabilityHandle } from "../types/capability-broker.js";
 import { BUILTIN_CAPABILITY_KEYS, RESERVED_NON_CAPABILITY_KEYS } from "../types/node.js";
 import { runId as brandRunId, dagId as brandDagId } from "../types/ids.js";
 import { consoleLogger, noopObserver, noopTracer } from "./defaults.js";
@@ -100,7 +99,7 @@ export const makeNodeContext = (init: NodeContextInit): NodeContext => {
 };
 
 /**
- * Merge per-node minted capability handles over a base NodeContext, producing a
+ * Merge authority-resolved per-node capability clients over a base NodeContext, producing a
  * NEW context the node's `run` is invoked with. Used by the runtime when a
  * minting `CapabilityBroker` is wired: the broker resolves a node's declared
  * scopes into narrowed handles at dispatch, and those handles are layered over
@@ -131,7 +130,7 @@ export type CapabilityMergeError = {
 
 export const mergeScopedCapabilities = (
   base: NodeContext,
-  scoped: ScopedCapabilityHandle,
+  scoped: Readonly<Record<string, unknown>>,
 ): Result<NodeContext, CapabilityMergeError> => {
   const entries: [string, unknown][] = [];
   for (const [k, v] of Object.entries(scoped)) {

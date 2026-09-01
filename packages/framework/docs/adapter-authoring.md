@@ -178,6 +178,14 @@ every exposed provider operation authority-bearing by construction. Additional
 fields on an augmented subtype must be operation-compatible aliases; arbitrary
 adapter-authored facade functions are intentionally unsupported.
 
+A per-invocation `CapabilityBroker` returns tagged bindings, not raw clients.
+Non-LLM clients use `{ clientKind: "non-llm", client }`. LLM clients use
+`{ clientKind: "llm", client, pricingModel, runScopedOperations }`; the alias
+map is required even for the standard `LlmClient` (`{}`), and augmented client
+keys are derived into the map's type. Untagged broker values are rejected before
+context merge, so a contract-violating broker cannot smuggle an LLM around the
+Run Spend Authority.
+
 Lifecycle contract (`CapabilityHandle`):
 - `connect()` once at boot — throwing aborts startup.
 - `close()` at shutdown — awaited before exit.
@@ -226,6 +234,7 @@ Tests use `bun:test`, live in `src/__tests__/`, and assert on `Result` via
 - [ ] `name` matches the `CapabilityRegistry` key exactly.
 - [ ] A client extending `LlmClient` declares `clientKind: "llm"` and `pricingModel`.
 - [ ] An augmented LLM subtype declares every string-keyed provider alias in `runScopedOperations`; symbol aliases are rejected.
+- [ ] A broker returns only tagged `non-llm` or `llm` bindings; every scoped LLM includes `runScopedOperations`.
 - [ ] No exceptions escape `client` methods — everything is `Result`.
 - [ ] Errors classified transient vs non-retriable correctly.
 - [ ] `connect`/`close` manage all external resources; boot fails loudly.

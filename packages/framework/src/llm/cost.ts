@@ -50,6 +50,9 @@ export const PRICE_TABLE: Readonly<Record<string, Readonly<CostRates>>> = Object
  * the span enricher, which computes a cost per call and must not emit a log
  * line per span.
  */
+export const isPricedModel = (model: string): boolean =>
+  Object.hasOwn(PRICE_TABLE, model);
+
 export const costRatesFor = (model: string): CostRates =>
   PRICE_TABLE[model] ?? { inputPer1M: 0, outputPer1M: 0 };
 
@@ -153,14 +156,6 @@ export const costUsd = (
  * one settled call is the granularity the overshoot-by-one guarantee is stated
  * at.
  */
-/** One attempted call whose provider did not report trustworthy usage. */
-export const spendOfUnknownCall = (model: string): Spend =>
-  unknownUsageCall(
-    Object.hasOwn(PRICE_TABLE, model)
-      ? { kind: "priced", micros: NO_MICROS }
-      : { kind: "unpriced", models: [model], knownMicros: NO_MICROS },
-  );
-
 export const spendOfCall = (
   model: string,
   usage: TokenUsage,
@@ -180,6 +175,17 @@ export const spendOfCall = (
     ? pricedCall(tokens, usdToMicros(usd))
     : unpricedCall(tokens, model);
 };
+
+/**
+ * One attempted call whose provider did not report trustworthy usage.
+ * The call axis remains exact; token and USD admission become fail-closed.
+ */
+export const spendOfUnknownCall = (model: string): Spend =>
+  unknownUsageCall(
+    Object.hasOwn(PRICE_TABLE, model)
+      ? { kind: "priced", micros: NO_MICROS }
+      : unpricedCall(0, model).usd,
+  );
 
 /**
  * Cost of one call (or of an accumulated run) in USD, warning once when the

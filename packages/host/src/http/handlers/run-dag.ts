@@ -16,8 +16,14 @@ import type {
   FrameworkError,
   InvocationOrigin,
   ScopedLlmMeter,
+  RunId,
 } from "@fuguejs/framework";
-import { formatFrameworkError, safeErrorMessage, tryDagId } from "@fuguejs/framework";
+import {
+  formatFrameworkError,
+  runId as makeRunId,
+  safeErrorMessage,
+  tryDagId,
+} from "@fuguejs/framework";
 import type { DagDef } from "@fuguejs/framework";
 import type { HostEnv } from "../env.js";
 import type { NodeContextForDag } from "../../domain/run-context.js";
@@ -64,6 +70,7 @@ export interface RunDagDeps {
    */
   readonly createContext: (
     registered: RegisteredDag,
+    runId: RunId,
     signal: AbortSignal,
     identity: AuthIdentity,
   ) => Promise<NodeContextForDag>;
@@ -82,6 +89,7 @@ export interface RunDagDeps {
     meterMintedLlm: ScopedLlmMeter,
   ) => Promise<Result<O, FrameworkError>>;
   readonly clock: () => number;
+  readonly newRunId?: () => RunId;
   /** Optional structured diagnostics for failures settling after a hard deadline. */
   readonly logger?: LogPort;
 }
@@ -255,78 +263,88 @@ export const createRunDagHandler = (
       const HOST_TIMEOUT = Symbol("host-timeout");
       const controller = new AbortController();
 
-      let ctx: NodeContext;
-      let origin: InvocationOrigin | undefined;
-      let meterMintedLlm: ScopedLlmMeter;
-      try {
-        // `await` preserves the setup-guard semantics: a synchronous throw or a
-        // rejected promise from `createContext` both land in this catch.
-        // Thread the resolved inbound identity (user `sub`/`azp`, or admin/team)
-        // into context creation so user-initiated runs are attributable and the
-        // broker builds a per-node `Invocation` carrying the run `origin`.
-        const built = await deps.createContext(registered, controller.signal, identity);
-        ctx = built.ctx;
-        origin = built.origin;
-        meterMintedLlm = built.meterMintedLlm;
-      } catch (setupErr) {
-        markFailure(permit, deps.clock(), circuitConfig);
-        throw setupErr;
-      }
+      const requestRunId = deps.newRunId?.() ?? makeRunId(crypto.randomUUID());
       const startTime = deps.clock();
       const timeoutResponse = (): Response => {
         markFailure(permit, deps.clock(), circuitConfig);
         const timeoutErr: HostError = {
           kind: "timeout",
           dagId,
-          runId: ctx.runId,
+          runId: requestRunId,
           timeoutMs,
         };
         return errorResponse(c, 408, timeoutErr.kind, formatHostError(timeoutErr), {
           dagId,
-          runId: ctx.runId,
+          runId: requestRunId,
           details: { timeoutMs },
         });
       };
 
       try {
-        const completion = await settleBeforeDeadline(
-          deps.executeDag(
+        const pipeline = (async () => {
+          const built = await deps.createContext(
+            registered,
+            requestRunId,
+            controller.signal,
+            identity,
+          );
+          const result = await deps.executeDag(
             registered.dag,
             parseResult.data,
-            ctx,
-            origin,
-            meterMintedLlm,
-          ),
+            built.ctx,
+            built.origin,
+            built.meterMintedLlm,
+          );
+          return { built, result };
+        })();
+        const completion = await settleBeforeDeadline(
+          pipeline,
           timeoutMs,
           () => controller.abort(HOST_TIMEOUT),
           {
-            onLateFulfillment: (lateResult) => {
-              if (!lateResult.ok) {
+            onLateFulfillment: ({ result: lateResult }) => {
+              if (lateResult.ok) {
+                logWithoutThrowing(
+                  deps.logger,
+                  "warn",
+                  "host: DAG execution completed after request deadline",
+                  {
+                    dagId,
+                    runId: requestRunId,
+                    consequence: "effects completed after HTTP 408; client retry may duplicate work",
+                  },
+                );
+              } else {
                 logWithoutThrowing(
                   deps.logger,
                   "error",
                   "host: DAG execution failed after request deadline",
-                  { dagId, runId: ctx.runId, error: formatFrameworkError(lateResult.error) },
+                  {
+                    dagId,
+                    runId: requestRunId,
+                    error: formatFrameworkError(lateResult.error),
+                  },
                 );
               }
             },
             onLateRejection: (error) => logWithoutThrowing(
               deps.logger,
               "error",
-              "host: DAG execution rejected after request deadline",
-              { dagId, runId: ctx.runId, error: safeErrorMessage(error) },
+              "host: DAG pipeline rejected after request deadline",
+              { dagId, runId: requestRunId, error: safeErrorMessage(error) },
             ),
             onTimeoutCancellationFailure: (error) => logWithoutThrowing(
               deps.logger,
               "error",
               "host: request timeout cancellation failed",
-              { dagId, runId: ctx.runId, error: safeErrorMessage(error) },
+              { dagId, runId: requestRunId, error: safeErrorMessage(error) },
             ),
           },
         );
         if (completion.kind === "timed-out") return timeoutResponse();
 
-        const result = completion.value;
+        const { built, result } = completion.value;
+        const ctx = built.ctx;
         const durationMs = deps.clock() - startTime;
 
         // A cooperative runtime usually settles cancellation as Result.err,

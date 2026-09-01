@@ -63,7 +63,12 @@ const recordingBroker = (opts?: { refuse?: boolean }) => {
       }
       const out: Record<string, unknown> = {};
       for (const r of requires) {
-        if ((r as string).includes(":")) out[r] = { tag: `minted:${r}:${inv.nodeId as string}` };
+        if ((r as string).includes(":")) {
+          out[r] = {
+            clientKind: "non-llm",
+            client: { tag: `minted:${r}:${inv.nodeId as string}` },
+          };
+        }
       }
       return ok(out as ScopedCapabilityHandle);
     },
@@ -165,6 +170,7 @@ describe("per-node capability minting (C1)", () => {
           clientKind: "llm",
           client: inner,
           pricingModel: { kind: "request" },
+          runScopedOperations: {},
         },
       }),
       provides: (capability) => capability === "brokerLlm",
@@ -220,6 +226,7 @@ describe("per-node capability minting (C1)", () => {
           clientKind: "llm",
           client: {} as LlmClient,
           pricingModel: { kind: "request" },
+          runScopedOperations: {},
         },
       }),
       provides: (capability) => capability === "brokerLlm",
@@ -245,7 +252,50 @@ describe("per-node capability minting (C1)", () => {
     if (!result.ok && result.error.kind === "node-crash") {
       expect(result.error.message).toContain("without a run spend authority");
     }
+  });
+
+  it("rejects an untagged broker LLM instead of passing it through unmetered", async () => {
+    let nodeRuns = 0;
+    let meterCalls = 0;
+    const broker: CapabilityBroker = {
+      mintFor: async () => ok({
+        brokerLlm: {} as LlmClient,
+      } as unknown as ScopedCapabilityHandle),
+      provides: (capability) => capability === "brokerLlm",
+    };
+    const node = createFetchNode({
+      id: N("untagged-broker-llm"),
+      inputSchema: z.object({}),
+      outputSchema: z.object({ ok: z.boolean() }),
+      requires: ["brokerLlm"] as const,
+      fetch: async () => {
+        nodeRuns += 1;
+        return ok({ ok: true });
+      },
+    });
+    const dag = defineDagFromArray({
+      id: "dag-1",
+      nodes: [node],
+      edges: [{ from: DAG_INPUT, to: "untagged-broker-llm" }],
+    });
+
+    const result = await runDag(dag, {}, baseCtx(), {
+      minting: {
+        broker,
+        origin: agentOrigin,
+        meterLlm: () => {
+          meterCalls += 1;
+          return ok({} as LlmClient);
+        },
+      },
+    });
+
     expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "node-crash") {
+      expect(result.error.message).toContain("clientKind");
+    }
+    expect(nodeRuns).toBe(0);
+    expect(meterCalls).toBe(0);
   });
 
   it("run-start validation passes a scope the broker provides() even though it is absent from the base context", async () => {
@@ -266,7 +316,9 @@ describe("per-node capability minting (C1)", () => {
   it("fails closed when broker output contains a non-null built-in without claiming it", async () => {
     let ran = false;
     const broker: CapabilityBroker = {
-      mintFor: async () => ok({ http: { tag: "broker-http" } } as unknown as ScopedCapabilityHandle),
+      mintFor: async () => ok({
+        http: { clientKind: "non-llm", client: { tag: "broker-http" } },
+      } as unknown as ScopedCapabilityHandle),
     };
     const node = createFetchNode({
       id: N("reserved-output"),

@@ -1046,6 +1046,7 @@ describe("createNodeContextForDag — one authority across main/judge/custom LLM
         clientKind: "llm",
         client: brokerLlm.llm,
         pricingModel: { kind: "request" },
+        runScopedOperations: {},
       },
       testNodeId,
     );
@@ -1498,6 +1499,22 @@ describe("createNodeContextForDag — spend survives a park/resume (FR-B-006)", 
     ).rejects.toThrow(/SpendLedgerPort\.read threw.*ledger transport rejected/);
   });
 
+  it("refuses forged negative hydrated spend before budget arithmetic", async () => {
+    const forged = ledgerFailureFixture({
+      read: async () => ok({
+        usage: "known",
+        tokens: -100,
+        calls: -1,
+        usd: { kind: "priced", micros: -50 },
+      } as never),
+    });
+    const { llm } = fakeLlm(10, 5);
+
+    await expect(
+      sliceFor(sharedWith(llm, forged), makeDag({ llmBudget: { tokens: 1000 } })),
+    ).rejects.toThrow(/returned invalid Spend.*non-negative safe integer/);
+  });
+
   it("RUNS an UNBUDGETED run whose ledger cannot be read", async () => {
     // There is no ceiling to protect, so failing the slice would turn a
     // metering outage into an availability outage. Metering degrades; the run
@@ -1575,7 +1592,8 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
     const commits: Array<{
       readonly checkpointKey: string;
       readonly spendKey: string;
-      readonly ttlSec: number;
+      readonly checkpointTtlSec: number;
+      readonly spendTtlSec: number;
     }> = [];
     const base = createMockRedis().redis;
     const redis = {
@@ -1585,12 +1603,13 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
         commits.push({
           checkpointKey: commit.checkpointKey,
           spendKey: commit.spendKey,
-          ttlSec: commit.ttlSec,
+          checkpointTtlSec: commit.checkpointTtlSec,
+          spendTtlSec: commit.spendTtlSec,
         });
         return base.set(
           commit.checkpointKey,
           commit.checkpointValue,
-          { expiresInSec: commit.ttlSec },
+          { expiresInSec: commit.checkpointTtlSec },
         );
       },
       appendSpend: async (append: RedisSpendAppend) => {
@@ -1714,7 +1733,7 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
     expect(fallback.value).toEqual(NO_SPEND);
   });
 
-  it("atomically refreshes spend retention when a later checkpoint is written", async () => {
+  it("retains spend for the resumable run TTL when it exceeds checkpoint TTL", async () => {
     const { llm } = fakeLlm(10, 5);
     const capable = capableRedis();
     const shared = sharedWithRedis(llm, capable.redis, collectLogs().logger);
@@ -1725,6 +1744,10 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
       new AbortController().signal,
       adminIdentity,
       FACTORY_AGENT_MAP,
+      false,
+      undefined,
+      undefined,
+      60,
     );
     if (ctx.llm === null || ctx.checkpointWriter === null) {
       throw new Error("expected metered LLM and checkpoint writer");
@@ -1736,7 +1759,8 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
     expect(capable.commits).toEqual([{
       checkpointKey: buildCheckpointKey(testTenant, testDagId, testRunId, testNodeId),
       spendKey: `fugue:${testTenant}:${testDagId}:${testRunId}:$spend`,
-      ttlSec: 9,
+      checkpointTtlSec: 9,
+      spendTtlSec: 60,
     }]);
   });
 

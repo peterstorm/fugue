@@ -8,8 +8,18 @@ export { createFakeHttpCapability, type FakeHttpRoute } from "./http/http-capabi
 
 import type { BudgetCapability, CeilingHeadroom, Remaining } from "./types/budget-capability.js";
 import { snapshotSpend } from "./types/budget-capability.js";
-import type { Spend } from "./types/spend.js";
+import type { MicroUsd, Spend } from "./types/spend.js";
 import { NO_SPEND } from "./types/spend.js";
+
+type UnknownUsdHeadroom = Extract<CeilingHeadroom, {
+  readonly kind: "unknown-usage";
+}> & {
+  readonly ceiling: { readonly kind: "usd" };
+  readonly observedAtLeast: MicroUsd;
+};
+
+const isUnknownUsdHeadroom = (headroom: CeilingHeadroom): headroom is UnknownUsdHeadroom =>
+  headroom.kind === "unknown-usage" && headroom.ceiling.kind === "usd";
 
 const snapshotHeadroom = (headroom: CeilingHeadroom): CeilingHeadroom => {
   if (headroom.kind === "unpriced") {
@@ -19,10 +29,18 @@ const snapshotHeadroom = (headroom: CeilingHeadroom): CeilingHeadroom => {
       models: Object.freeze([...headroom.models]) as typeof headroom.models,
     });
   }
+  if (isUnknownUsdHeadroom(headroom)) {
+    return Object.freeze({
+      kind: "unknown-usage",
+      ceiling: Object.freeze({ ...headroom.ceiling }),
+      observedAtLeast: headroom.observedAtLeast,
+    });
+  }
   if (headroom.kind === "unknown-usage") {
     return Object.freeze({
-      ...headroom,
+      kind: "unknown-usage",
       ceiling: Object.freeze({ ...headroom.ceiling }),
+      observedAtLeast: headroom.observedAtLeast,
     });
   }
   switch (headroom.unit) {

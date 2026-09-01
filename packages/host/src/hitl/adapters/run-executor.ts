@@ -79,6 +79,8 @@ interface RunExecutorDeps {
    * single-tenant path (the factory then falls back to the `dag.team` derivation).
    */
   readonly tenant?: TenantId;
+  /** TTL of the durable HITL run record this slice may resume from. */
+  readonly runRetentionTtlSec?: number;
   readonly logger?: LogPort;
 }
 
@@ -108,7 +110,15 @@ const checkpointWriteFailure = (failure: HostError): FrameworkError => ({
 });
 
 export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
-  const { sharedInfra, getRegisteredDag, broker, agentClientMap, tenant, logger } = deps;
+  const {
+    sharedInfra,
+    getRegisteredDag,
+    broker,
+    agentClientMap,
+    tenant,
+    runRetentionTtlSec,
+    logger,
+  } = deps;
 
   return {
     async seedCheckpoint(dagId, input): Promise<Result<string, HostError>> {
@@ -184,6 +194,7 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
             // token — correct, not a leak.
             undefined,
             tenant,
+            runRetentionTtlSec,
           );
           phase = "execution";
 

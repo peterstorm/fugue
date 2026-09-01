@@ -27,6 +27,10 @@ import { ok, err, isOk, isErr } from "../types/result.js";
 import { NO_SPEND } from "../types/spend.js";
 import type { Result } from "../types/result.js";
 import type { CapabilityHandle } from "../types/capability-handle.js";
+import type {
+  ScopedCapabilityHandle,
+  ScopedLlmCapability,
+} from "../types/capability-broker.js";
 import { createFakeHttpCapability } from "../http/http-capability.js";
 import { NoopObserver } from "../observer/observer.js";
 
@@ -121,6 +125,28 @@ const capabilityHandleKindTypePins = (llm: LlmClient, db: TestDbCapability): voi
   void uncomposed;
 };
 void capabilityHandleKindTypePins;
+
+const scopedCapabilityTypePins = (llm: LlmClient, db: TestDbCapability): void => {
+  const augmented = llm as AugmentedCritic;
+  const scoped: ScopedLlmCapability<AugmentedCritic> = {
+    clientKind: "llm",
+    client: augmented,
+    pricingModel: { kind: "request" },
+    runScopedOperations: { critique: "sendStructured" },
+  };
+  // @ts-expect-error -- augmented scoped clients cannot omit required aliases.
+  const missingAliases: ScopedLlmCapability<AugmentedCritic> = {
+    clientKind: "llm",
+    client: augmented,
+    pricingModel: { kind: "request" },
+  };
+  // @ts-expect-error -- every non-LLM scoped client requires the non-llm envelope.
+  const untagged: ScopedCapabilityHandle = { db };
+  void scoped;
+  void missingAliases;
+  void untagged;
+};
+void scopedCapabilityTypePins;
 
 // ---------------------------------------------------------------------------
 // Test helpers

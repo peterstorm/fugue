@@ -344,6 +344,48 @@ describe("RunSpendAuthority", () => {
     },
   );
 
+  it("treats cache parts exceeding inclusive tokensIn as unknown and closes token admission", async () => {
+    const ledger = createInMemorySpendLedger();
+    const authorityRunId = runId("invalid-cache-breakdown");
+    const authority = createRunSpendAuthority({
+      dagId: dagId("authority-dag"),
+      runId: authorityRunId,
+      limits,
+      hydrated: { kind: "known", spend: NO_SPEND },
+      ledger,
+      logger,
+    });
+    let providerCalls = 0;
+    const invoke = () => authority.execute({
+      clientKey: "llm",
+      operation: "sendStructured",
+      request,
+      call: async () => {
+        providerCalls += 1;
+        return ok({
+          output: {},
+          rawText: "",
+          tokensIn: 1,
+          tokensOut: 0,
+          cacheWriteTokens: 1,
+          cacheReadTokens: 1,
+        });
+      },
+    });
+
+    const malformed = await invoke();
+    const refused = await invoke();
+
+    expect(malformed.ok).toBe(false);
+    if (!malformed.ok) expect(malformed.error.kind).toBe("node-crash");
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.error.kind).toBe("llm-budget-exceeded");
+    expect(providerCalls).toBe(1);
+    const stored = await ledger.read(authorityRunId);
+    expect(stored.ok).toBe(true);
+    if (stored.ok) expect(stored.value.usage).toBe("unknown");
+  });
+
   it("accepts non-negative safe-integer usage at the parser boundary", async () => {
     const authority = createRunSpendAuthority({
       dagId: dagId("authority-dag"),

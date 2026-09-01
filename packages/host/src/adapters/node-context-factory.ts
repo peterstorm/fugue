@@ -30,7 +30,16 @@ import type {
   Ceilings,
   InvocationOrigin,
 } from "@fuguejs/framework";
-import { err, fromJson, makeNodeContext, ok, isErr, safeErrorMessage, toJson } from "@fuguejs/framework";
+import {
+  err,
+  fromJson,
+  makeNodeContext,
+  ok,
+  isErr,
+  parseSpend,
+  safeErrorMessage,
+  toJson,
+} from "@fuguejs/framework";
 import { assertLosslessEvent } from "@fuguejs/framework/file";
 import type { RegisteredDag } from "../domain/registry.js";
 import type { AuthIdentity, AgentClientMap } from "../domain/auth.js";
@@ -360,7 +369,16 @@ const readSpendLedger = async (
   runId: RunId,
 ): Promise<LedgerReadResult> => {
   try {
-    return await ledger.read(runId);
+    const read = await ledger.read(runId);
+    if (!read.ok) return read;
+    const parsed = parseSpend(read.value);
+    return parsed.ok
+      ? ok(parsed.value)
+      : err({
+          kind: "internal-invariant-violated",
+          message: `SpendLedgerPort.read returned invalid Spend: ${parsed.error}`,
+          context: { operation: "spend-ledger read", error: parsed.error },
+        });
   } catch (error) {
     const message = safeErrorMessage(error);
     return err({
@@ -396,28 +414,33 @@ const selectAndHydrateSpendLedger = async (args: {
   readonly runId: RunId;
   readonly ttl: ResolvedTtl;
   readonly limits: Ceilings | undefined;
+  readonly resumableRunTtlSec?: number;
 }): Promise<HydratedLedger> => {
-  const { shared, tenant, dagId, runId, ttl, limits } = args;
+  const { shared, tenant, dagId, runId, ttl, limits, resumableRunTtlSec } = args;
   let ledger = shared.spendLedger;
   let checkpointCommit: CheckpointCommit | undefined;
   if (ledger.metadata.role === "redis-fallback") {
     const ledgerRedis = spendLedgerRedis(shared.redis);
     if (ledgerRedis.ok) {
+      const checkpointTtlSec = ttl.checkpointTtlSec;
+      const spendTtlSec = checkpointTtlSec === undefined
+        ? undefined
+        : Math.max(checkpointTtlSec, resumableRunTtlSec ?? checkpointTtlSec);
       ledger = createRedisSpendLedger({
         redis: ledgerRedis.value,
         tenant,
         dagId,
-        ...(ttl.checkpointTtlSec !== undefined ? { ttlSec: ttl.checkpointTtlSec } : {}),
+        ...(spendTtlSec !== undefined ? { ttlSec: spendTtlSec } : {}),
       });
-      const checkpointTtlSec = ttl.checkpointTtlSec;
-      if (checkpointTtlSec !== undefined) {
+      if (checkpointTtlSec !== undefined && spendTtlSec !== undefined) {
         const spendKey = buildSpendKey(tenant, dagId, runId);
         checkpointCommit = (checkpointKey, checkpointValue) =>
           ledgerRedis.value.commitCheckpointAndRetainSpend({
             checkpointKey,
             checkpointValue,
             spendKey,
-            ttlSec: checkpointTtlSec,
+            checkpointTtlSec,
+            spendTtlSec,
           });
       }
     } else {
@@ -505,11 +528,7 @@ const createSpendBindings = (
         authority,
         binding.pricingModel,
       );
-      return ok(
-        binding.runScopedOperations === undefined
-          ? metered
-          : runScopedLlmFacade(metered, binding.runScopedOperations),
-      );
+      return ok(runScopedLlmFacade(metered, binding.runScopedOperations));
     } catch (error) {
       return err({
         kind: "validation",
@@ -651,6 +670,8 @@ export const createNodeContextForDag = async (
    * behaviour for those callers.
    */
   routedTenant?: TenantId,
+  /** Retention of authoritative resumable state (for example HITL run TTL). */
+  resumableRunTtlSec?: number,
 ): Promise<NodeContextForDag> => {
   const dagId = dag.id;
   const ttl = resolveTtl(dag);
@@ -664,6 +685,7 @@ export const createNodeContextForDag = async (
     runId,
     ttl,
     limits,
+    ...(resumableRunTtlSec !== undefined ? { resumableRunTtlSec } : {}),
   });
   const { authority, meterMintedLlm, llm, capabilities } = createSpendBindings(
     shared,

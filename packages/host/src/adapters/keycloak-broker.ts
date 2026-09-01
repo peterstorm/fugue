@@ -46,6 +46,7 @@ import type {
   Invocation,
   InvocationOrigin,
   ScopedCapabilityHandle,
+  ScopedNonLlmCapability,
 } from "@fuguejs/framework";
 import type { Tracer } from "@fuguejs/framework";
 import type { LogPort } from "../ports.js";
@@ -610,9 +611,15 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
     // that same handle type — so a scope key can never be augmented with a
     // mismatched client without failing compilation there. This stays the SINGLE
     // broker-side trust-boundary cast (the other is `extractClients`).
-    const handleRecord: Record<string, OperationNarrowedHandle> = {};
+    const handleRecord: Record<
+      string,
+      ScopedNonLlmCapability<OperationNarrowedHandle>
+    > = {};
     for (const r of resolved) {
-      handleRecord[r.capability] = r.handle;
+      handleRecord[r.capability] = {
+        clientKind: "non-llm",
+        client: r.handle,
+      };
     }
     return ok(handleRecord as ScopedCapabilityHandle);
   };

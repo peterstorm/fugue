@@ -16,16 +16,25 @@ import {
   NO_SPEND,
   addSpend,
   costFloor,
+  makeSpend,
   maxSpend,
+  microUsd,
   microsToUsd,
+  parseSpend,
   pricedCall,
   scaleSpend,
   unknownUsageCall,
   unpricedCall,
+  unpricedModels,
   usdToMicros,
 } from "../types/spend.js";
 
-const micros = (n: number): MicroUsd => n as MicroUsd;
+const micros = (n: number): MicroUsd => microUsd(n);
+const modelsOf = (models: readonly string[]) => {
+  const canonical = unpricedModels(models);
+  if (canonical === undefined) throw new Error("expected non-empty model names");
+  return canonical;
+};
 
 /** Arbitrary spends, both priced and unpriced, with realistic magnitudes. */
 const arbSpend: fc.Arbitrary<Spend> = fc.oneof(
@@ -36,7 +45,7 @@ const arbSpend: fc.Arbitrary<Spend> = fc.oneof(
     usd: fc.nat({ max: 10_000_000 }).map(
       (m): PricedSpend => ({ kind: "priced", micros: micros(m) }),
     ),
-  }),
+  }).map(makeSpend),
   fc.record({
     usage: fc.constant("known" as const),
     tokens: fc.nat({ max: 1_000_000 }),
@@ -50,10 +59,10 @@ const arbSpend: fc.Arbitrary<Spend> = fc.oneof(
         kind: "unpriced",
         // The type guarantees non-emptiness; `uniqueArray` guarantees it at
         // runtime, and sorting matches the canonical form `unionModels` keeps.
-        models: [...models].sort() as unknown as readonly [string, ...string[]],
+        models: modelsOf(models),
         knownMicros: micros(m),
       })),
-  }),
+  }).map(makeSpend),
 );
 
 describe("MicroUsd: money as an integer", () => {
@@ -74,14 +83,41 @@ describe("MicroUsd: money as an integer", () => {
     expect(usdToMicros(Number.NaN)).toBe(micros(0));
     expect(usdToMicros(Number.POSITIVE_INFINITY)).toBe(micros(0));
     expect(usdToMicros(-5)).toBe(micros(0));
+    expect(usdToMicros(Number.MAX_VALUE)).toBe(microUsd(Number.MAX_SAFE_INTEGER));
   });
 
   it("stays exact under repeated addition where a float would drift", () => {
-    // 0.1 + 0.2 !== 0.3 in binary floating point. In micro-USD it is exact, and
-    // exactness is what lets two operators reconcile the same run identically.
     const tenth = usdToMicros(0.1);
-    const total = [tenth, tenth, tenth].reduce((a, b) => (a + b) as MicroUsd, NO_MICROS);
-    expect(total).toBe(usdToMicros(0.3));
+    const total = [tenth, tenth, tenth]
+      .map((amount) => pricedCall(0, amount))
+      .reduce(addSpend, NO_SPEND);
+    expect(costFloor(total.usd)).toBe(usdToMicros(0.3));
+  });
+
+  it("saturates overflowing money and counts at MAX_SAFE_INTEGER (fail closed)", () => {
+    const max = pricedCall(Number.MAX_SAFE_INTEGER, microUsd(Number.MAX_SAFE_INTEGER));
+    const saturated = addSpend(max, pricedCall(1, microUsd(1)));
+    expect(saturated.tokens).toBe(Number.MAX_SAFE_INTEGER);
+    expect(saturated.calls).toBe(2);
+    expect(costFloor(saturated.usd)).toBe(microUsd(Number.MAX_SAFE_INTEGER));
+    expect(scaleSpend(max, 2).tokens).toBe(Number.MAX_SAFE_INTEGER);
+  });
+
+  it("rejects forged negative, unsafe, and non-canonical adapter values", () => {
+    for (const value of [
+      { ...NO_SPEND, tokens: -1 },
+      { ...NO_SPEND, calls: Number.MAX_SAFE_INTEGER + 1 },
+      {
+        ...NO_SPEND,
+        usd: { kind: "unpriced", models: ["z", "a"], knownMicros: 0 },
+      },
+      {
+        ...NO_SPEND,
+        usd: { kind: "unpriced", models: ["a", "a"], knownMicros: 0 },
+      },
+    ]) {
+      expect(parseSpend(value).ok).toBe(false);
+    }
   });
 });
 
@@ -184,12 +220,12 @@ describe("per-call constructors", () => {
 describe("scaleSpend: the in-flight projection", () => {
   it("multiplies every axis", () => {
     const scaled = scaleSpend(pricedCall(100, micros(2_000)), 3);
-    expect(scaled).toEqual({
+    expect(scaled).toEqual(makeSpend({
       usage: "known",
       tokens: 300,
       calls: 3,
       usd: { kind: "priced", micros: micros(6_000) },
-    });
+    }));
   });
 
   it("yields a PRICED zero for zero calls, even from an unpriced estimate", () => {
@@ -212,24 +248,24 @@ describe("scaleSpend: the in-flight projection", () => {
 
 describe("maxSpend: the learned per-call estimate", () => {
   it("takes the per-axis maximum", () => {
-    const a = {
+    const a = makeSpend({
       usage: "known",
       tokens: 10,
       calls: 1,
       usd: { kind: "priced", micros: micros(500) },
-    } as const;
-    const b = {
+    });
+    const b = makeSpend({
       usage: "known",
       tokens: 4,
       calls: 3,
       usd: { kind: "priced", micros: micros(900) },
-    } as const;
-    expect(maxSpend(a, b)).toEqual({
+    });
+    expect(maxSpend(a, b)).toEqual(makeSpend({
       usage: "known",
       tokens: 10,
       calls: 3,
       usd: { kind: "priced", micros: micros(900) },
-    });
+    }));
   });
 
   it("prefers unpriced on the cost axis", () => {
