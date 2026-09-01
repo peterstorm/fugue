@@ -1,12 +1,13 @@
-# PR Remediation Plan — r8 adjudicated review
+# PR Remediation Plan — 2026-09-01 r9
 
 ## Authority
 
 - Branch: `feat/f3-budget-capability-surface`
-- Review HEAD: `297e28e8c2a935608a8b113c62dadc93d7985f01`
-- Review Run Directory: `.claude/reviews/review-and-fix-runs/2026-09-01T13-39-55Z-standalone-review-01a05b28-r8`
-- Canonical result: `.claude/reviews/review-and-fix-runs/2026-09-01T13-39-55Z-standalone-review-01a05b28-r8/result.json`
-- Canonical result digest: `11559416026dba83ec79057953a7777d50056c7f50d5d8f095e668720cd5fc14`
+- Reviewed HEAD: `d3dd54978450c7d75097989aed9c505e9761970f`
+- Review Run Directory: `.claude/reviews/review-and-fix-runs/2026-09-01T14-54-55Z-standalone-review-01a05b28-r9`
+- Canonical result: `.claude/reviews/review-and-fix-runs/2026-09-01T14-54-55Z-standalone-review-01a05b28-r9/result.json`
+- Result digest: `e139db63edca312e92408628141596ad23b5094c689b229097624efd956d8738`
+- Policy: `all`, no file filter, not dry-run.
 
 ## Exact frozen scope (162 paths)
 
@@ -173,104 +174,86 @@
 - `packages/host/src/index.ts`
 - `packages/host/src/ports.ts`
 
-## Surviving critical findings (5)
+## Mandatory surviving critical findings (2)
 
-### `silent-failure-hunter-1` — silent-failure-hunter
-
-- Location: `packages/host/src/adapters/metered-llm.ts:100`
-- Canonical claim: The request snapshot casts required fields without parsing their runtime types, so malformed model values can let provider egress occur and then crash spend settlement before the attempt is persisted.
-- Fix: replace presence-only request casting with a total parser for required strings, branded node IDs, schema-like values, optional numeric/discriminated fields, and safely snapshotted arrays before provider egress; add malformed/stateful model regressions for both LLM operations and prove no provider call or untyped rejection occurs.
-
-### `type-design-analyzer-1` — type-design-analyzer
-
-- Location: `packages/framework/src/types/capability-broker.ts:47`
-- Canonical claim: `ScopedLlmCapability` does not reject symbol-keyed augmented LLM members, so a fully well-typed broker can return an empty alias map while dispatch installs a facade without the symbol method guaranteed by the node context type.
-- Fix: make `ScopedLlmCapability<T>` uninhabitable when `T` adds symbol-keyed operations, matching `CapabilityHandle<T>` and the string-enumerated runtime facade; add a compile-time type pin.
-
-### `comment-analyzer-1` — comment-analyzer
-
-- Location: `packages/framework/src/tracing/semantic-conventions.ts:4`
-- Canonical claim: The header says OTel GenAI names are not re-exported, but this module exports GEN_AI_* constants for those names.
-- Fix: correct the semantic-conventions header to state that standardized GenAI names are centralized and exported here for call-site use.
-
-### `comment-analyzer-2` — comment-analyzer
-
-- Location: `packages/framework/src/index.ts:5`
-- Canonical claim: The barrel header says JSON serialization is not re-exported, but the same barrel publicly exports toJson, fromJson, and tryFromJson.
-- Fix: clarify that documented JSON wrappers are public while low-level serialization primitives remain internal.
-
-### `comment-analyzer-3` — comment-analyzer
-
-- Location: `packages/host/src/domain/llm-meter.ts:5`
-- Canonical claim: The LLM meter header assigns live meter ownership to metered-llm.ts, but createRunSpendAuthority now owns and threads both meter and reservation state.
-- Fix: name `RunSpendAuthority` as the live meter/reservation owner and `metered-llm.ts` as its request-snapshotting decorator.
-
-## Advisory dispositions (11)
-
-### Accepted
-
-- `code-reviewer-1` — duplicate manifestation of `silent-failure-hunter-1`; the mandatory total request parser will reject non-string/stateful models before egress and return typed validation.
-- `code-reviewer-2` — Redis cumulative overflow violates the ledger domain ceiling and can make durable state unreadable. Replace uncapped increments with optimistic atomic read/saturate/write transactions.
-- `silent-failure-hunter-2` — hostile/revoked arrays can escape the `Result` boundary. Snapshot arrays from own data descriptors inside the inspection fence and reject sparse/accessor/extra-key shapes.
-- `pr-test-analyzer-1` — add shared-ledger and real Redis regressions proving cumulative overflow saturates identically and remains hydratable.
-- `type-design-analyzer-2` — introduce a branded non-empty `LlmModelId` with a smart constructor and require it in fixed pricing policies, then migrate all trusted construction sites through the parser.
-- `code-simplifier-1` — extract one internal Redis transaction-result checker parameterized by operation and expected command count after the saturating transaction is implemented.
-- `code-simplifier-2` — pass `NodeId` directly to `settledLlmResult`; normalization needs no authority over the full metered request.
-- `code-simplifier-3` — define the close-failure structure once and reuse it for failed-connect cleanup and shutdown cleanup.
-
-### Deferred
-
-- `architecture-tech-lead-1` — a typed context-setup ADT requires coordinated HTTP, HITL, circuit-breaker, and composition contract migration; it is an interface redesign rather than a local remediation.
-- `architecture-tech-lead-2` — extracting a pure setup planner changes the ten-parameter context-factory seam and must be designed together with the typed setup result.
-- `architecture-tech-lead-3` — consumer-owned Redis ports require coordinated adapter, fake, HITL, cache, and spend protocol migration; the accepted atomic saturation repair is achievable without widening this redesign.
-
-### Dismissed
-
-- None.
+- **code-reviewer-1** — `packages/host/src/adapters/redis-connectivity.ts:303` — commitCheckpointAndRetainSpend can clear an in-flight appendSpend WATCH on the shared Redis connection, allowing the append to overwrite a concurrent ledger update.
+  - Fix: run checkpoint/retention MULTI/EXEC through the same per-connection transaction serializer as WATCH-based operations; add a deterministic real-Redis interleaving regression proving an external mutation forces retry and both deltas survive.
+- **comment-analyzer-1** — `packages/host/src/adapters/spend-ledger-redis.ts:10` — The Redis spend-ledger header says concurrent appends are lock-free and require no WATCH or retry loop, but `appendSpend` is serialized through `watchTail` and uses a WATCH/MULTI retry loop.
+  - Fix: replace the stale lock-free/no-WATCH description with the actual locally serialized WATCH/read/MULTI/EXEC retry protocol and its cross-process conflict semantics.
 
 ## Refuted critical audit
 
-- None. The registered panel published zero `refuted_critical_findings`; all five critical findings reached the canonical surviving set.
+None. All two panel-routed criticals were upheld by reproduction, intent, and blast-radius lenses.
 
-## Implementation order
+## Advisory dispositions (14)
 
-1. Make fixed model identity a parsed branded value and close the scoped symbol-operation type hole.
-2. Replace presence-only LLM request snapshots with total pre-egress parsing and hostile-array fencing; add both-operation regressions.
-3. Make Redis spend accumulation atomically saturating, share transaction-result validation, and add shared/real-adapter overflow regressions.
-4. Apply the remaining accepted dependency/representation distillations.
-5. Correct all three mandatory documentation headers and update the public changelog/context where the new model-id invariant lives.
-6. Run focused tests after each move, then final `distill` apply mode and full workspace validation.
-7. Start registered remediation with every changed path outside the frozen scope listed as a support path; install only the verified index, commit, and push without force.
+### Accepted (8)
+- **pr-test-analyzer-1** — `packages/host/src/__tests__/metered-llm.test.ts:116` — No metered-boundary test proves that a valid non-empty ToolDef array reaches the inner sendWithTools client.
+  - Disposition: Add a valid non-empty ToolDef boundary test that proves the immutable snapshot reaches the provider and settles.
+- **pr-test-analyzer-2** — `packages/framework/src/__tests__/spend.test.ts:127` — No regression test requires parseSpend to keep revoked unpriced-model arrays inside its Result boundary.
+  - Disposition: Make parseSpend own-data-array inspection total and add revoked/accessor-array regressions inside its Result boundary.
+- **comment-analyzer-2** — `packages/framework/src/llm/cost.ts:157` — The `spendOfCall` comment calls the crossing behavior an unqualified "overshoot-by-one guarantee," although the one-call bound applies only to sequential admission.
+  - Disposition: Qualify spendOfCall crossing behavior as sequential.
+- **comment-analyzer-3** — `packages/framework/src/types/spend.ts:337` — The `pricedCall` comment calls the crossing behavior an unqualified "overshoot-by-one guarantee," although the one-call bound applies only to sequential admission.
+  - Disposition: Qualify pricedCall crossing behavior as sequential.
+- **comment-analyzer-4** — `packages/host/src/__tests__/spend-ledger.test.ts:193` — The order-independence test comment incorrectly says commutativity makes the append lock-free; commutativity guarantees order-independent totals, not safe concurrent read-modify-write behavior.
+  - Disposition: Replace the false lock-free rationale with order-independent-total wording.
+- **code-simplifier-1** — `packages/host/src/adapters/metered-llm.ts:36` — The private `snapshotDataObject` helper discards the record type it establishes, forcing four downstream type assertions.
+  - Disposition: Give snapshotDataObject the record Result type it already proves and remove compensating assertions.
+- **code-simplifier-2** — `packages/framework/src/dag-runtime/run-node.ts:69` — The generic own-data snapshot in `snapshotScopedCapabilities` is prematurely typed as `ScopedCapabilityHandle`, forcing alias parsing to cast it back to a raw record.
+  - Disposition: Keep the capability-bag snapshot raw until every binding is parsed; introduce ScopedCapabilityHandle only after proof.
+- **code-simplifier-3** — `packages/host/src/adapters/node-context-factory.ts:95` — `failureEscalator` exposes an unused per-instance threshold even though every caller supplies the same module constant.
+  - Disposition: Close failureEscalator over the sole module policy constant and remove unused configurability.
 
-## Authorized support paths outside frozen scope
+### Deferred (3)
+- **architecture-tech-lead-1** — `packages/host/src/adapters/node-context-factory.ts:469` — Node-context construction exposes a throwing Promise seam, so setup failures lose their typed domain identity before HTTP and HITL policy can classify them.
+  - Disposition: Requires coordinated HTTP, HITL, composition, and error-classification contract migration; design together with the context-setup planner rather than partially changing the seam.
+- **architecture-tech-lead-2** — `packages/framework/src/dag-runtime/run-node.ts:294` — Per-node broker contract enforcement is embedded in the execution shell, making authority invariants testable only through full node/DAG execution.
+  - Disposition: A worthwhile deepening, but extracting the broker authority module changes a security-sensitive seam and its broad test surface; it needs a dedicated property-tested refactor rather than mixing with the Redis correctness repair.
+- **architecture-tech-lead-3** — `packages/host/src/ports.ts:150` — The shared RedisPort is a wide vendor-shaped seam whose optional protocol clusters force consumers to perform runtime capability narrowing.
+  - Disposition: Requires coordinated adapter, cache, HITL, spend, checkpoint, fake, and wiring migration; partial port splitting would increase rather than reduce coupling.
 
-- None planned. The plan, implementation files, regressions, changelog, and context documentation are all in the frozen r8 scope. Recompute before remediation and register any genuinely necessary support path explicitly.
+### Dismissed (3)
+- **silent-failure-hunter-1** — `packages/host/src/adapters/node-context-factory.ts:224` — createNamespacedCache.set reports serialization and Redis write failures as ok, so callers cannot observe a failed cache write through its declared Result channel.
+  - Disposition: Cache writes are explicitly best-effort: failures are guarded and logged, while propagating err would abort a DAG for a non-critical cache miss. The Result shape is framework-owned and documented as never producing an error branch here.
+- **silent-failure-hunter-2** — `packages/framework/src/describe/build-described-dag.ts:126` — buildDescribedDag converts schema-serialization exceptions into a successful null schema, so clients cannot distinguish a broken schema from an absent schema.
+  - Disposition: Describe intentionally has a best-effort schema surface: null is authoritative and the optional warningSink is the explicit diagnostic channel. Making schema serialization fatal would violate that established contract.
+- **silent-failure-hunter-3** — `packages/framework/src/state-machine/runner.ts:105` — runStateMachine's no-op default logger silently discards callback diagnostics when callers omit logger.
+  - Disposition: Logging is embedder-owned and optional; an implicit console fallback would violate ownership, while propagating diagnostic callback failures would alter state-machine control flow. Omitted logger deliberately means no diagnostics.
 
-## Validation
+## Implementation sequence
+
+1. Serialize checkpoint/retention transactions with all connection-scoped WATCH protocols and pin the cross-process interleaving on real Redis.
+2. Make `parseSpend` total for hostile unpriced-model arrays and add parser regressions.
+3. Add the non-empty ToolDef metered-boundary regression.
+4. Correct the Redis, sequential-overshoot, and commutativity comments.
+5. Apply the three behavior-preserving type/configuration simplifications.
+6. Update durable concurrency documentation/changelog if needed to keep the shipped contract synchronized.
+7. Run focused gates, full relevant suites, workspace typecheck, documentation validation, `git diff --check`, and final `distill` apply mode from green.
+
+## Validation commands
 
 - `bun run typecheck`
-- Focused framework extensible-capability tests.
-- Focused host metered-LLM, spend-ledger, Redis-connectivity, Run Spend Authority, and capability lifecycle tests.
-- Full framework and host suites with real Redis coverage.
-- Remaining workspace package tests.
+- `bun test packages/framework/src/__tests__/spend.test.ts`
+- `bun test packages/host/src/__tests__/metered-llm.test.ts`
+- `REDIS_URL=redis://127.0.0.1:6380 bun test packages/host/src/adapters/__tests__/redis-connectivity.test.ts`
+- Full `@fuguejs/framework` and `@fuguejs/host` suites with Redis available.
+- Remaining workspace package test suites.
 - `bun scripts/check-doc-links.ts`
 - `git diff --check`
-- Final `distill` apply-mode pass from a green baseline.
 
-### Completed evidence
+## Completed validation evidence
 
 - All 12 workspace package typechecks passed.
-- Redis-backed framework suite: 3,422 passed, 0 failed across 189 files.
-- Host suite: 2,520 passed, 1 external live-Entra test skipped, 0 failed; isolated signal lifecycle: 10 passed, 0 failed.
-- Real ioredis transaction suite: 37 passed, 0 failed, including concurrent append and cumulative saturation at `Number.MAX_SAFE_INTEGER`.
-- Shared memory/Redis/file Spend Ledger contract: 53 passed, 0 failed, including cross-adapter saturation parity.
+- Framework suite: 3,423 passed, 0 failed across 189 files.
+- Host suite: 2,522 passed, 1 external live-Entra test skipped, 0 failed; isolated signal lifecycle: 10 passed, 0 failed.
+- Real/fake Redis transaction suite: 38 passed, 0 failed, including the deterministic checkpoint/WATCH/second-client interleaving.
+- Focused `Spend` parser: 28 passed; metered LLM boundary: 49 passed.
 - Remaining packages passed: http-auth 90, hitl-smoke 10, document-source 18, pg 73, oracle 79, fs 25, examples 23, ms-graph 142, xlsx 20, customer-summary 243.
-- Documentation validation checked 19 shipped files; all relative links resolve and remain shipped.
+- Documentation validation checked 19 shipped files; all links resolve and remain shipped.
 - `git diff --check` passed.
-- Final `distill` apply mode replaced Redis parallel-array/index coupling with field/delta/total tuples; real-Redis tests and host typecheck remained green. Interface-level context/Redis-port redesigns remained deferred as planned.
+- Final `distill` apply mode completed from the green baseline. The final parse-object compression retained 28/28 focused tests and framework typecheck; interface-level deepenings remain deferred as dispositioned.
 
 ## Installation
 
-- Start a fresh registered remediation run with `2026-09-01T13-39-55Z-standalone-review-01a05b28-r8` as immutable `sourceRun`.
-- Let the engine audit paths and atomically install the verified Git index.
-- Commit the installed index and push without force.
+The plan is already inside the frozen scope. Regressions are planned inside reviewed test paths, so no support paths are currently expected. The registered remediation run remains the sole authority for path audit, temporary-index staging, verification, and index installation.

@@ -14,6 +14,7 @@
 
 import { afterAll, beforeAll, describe, it, expect } from "bun:test";
 import {
+  createIoredisRedisPort,
   createRedisConnectivity,
   disconnectRedisQuietly,
   type RedisClientFactory,
@@ -871,6 +872,91 @@ describe.skipIf(liveRedisUrl === undefined)(
         micros: String(Number.MAX_SAFE_INTEGER),
         tokens: String(Number.MAX_SAFE_INTEGER),
       });
+    });
+
+    it("keeps checkpoint EXEC behind WATCH and retries after a second-client mutation", async () => {
+      if (liveRedisUrl === undefined) return;
+      const { Redis } = await import("ioredis");
+      const primary = new Redis(liveRedisUrl);
+      const competitor = new Redis(liveRedisUrl);
+      const spendKey = `${prefix}:interleaved-spend`;
+      const checkpointKey = `${prefix}:interleaved-checkpoint`;
+      let releaseReads: () => void = () => {};
+      const readsReleased = new Promise<void>((resolve) => { releaseReads = resolve; });
+      let reportReadsCaptured: () => void = () => {};
+      const readsCaptured = new Promise<void>((resolve) => { reportReadsCaptured = resolve; });
+      let hgetReads = 0;
+      let multiCalls = 0;
+      const client = new Proxy(primary, {
+        get(target, property) {
+          if (property === "hget") {
+            return async (key: string, field: string) => {
+              const value = await target.hget(key, field);
+              hgetReads += 1;
+              if (hgetReads === 3) {
+                reportReadsCaptured();
+                await readsReleased;
+              }
+              return value;
+            };
+          }
+          if (property === "multi") {
+            return (...args: Parameters<IoRedis["multi"]>) => {
+              multiCalls += 1;
+              return target.multi(...args);
+            };
+          }
+          const member = Reflect.get(target, property, target) as unknown;
+          return typeof member === "function" ? member.bind(target) : member;
+        },
+      }) as IoRedis;
+      const redis = createIoredisRedisPort(client);
+      const append = redis.appendSpend;
+      const commit = redis.commitCheckpointAndRetainSpend;
+      if (append === undefined || commit === undefined) {
+        throw new Error("spend transaction operations are not wired");
+      }
+
+      try {
+        await competitor.del(spendKey, checkpointKey);
+        await competitor.hset(spendKey, "micros", "10", "tokens", "10", "calls", "10");
+        const appended = append({
+          key: spendKey,
+          delta: makeSpend({
+            usage: "known",
+            tokens: 2,
+            calls: 1,
+            usd: { kind: "priced", micros: 1 as never },
+          }),
+        });
+        await readsCaptured;
+
+        const checkpointed = commit({
+          checkpointKey,
+          checkpointValue: "checkpoint",
+          spendKey,
+          checkpointTtlSec: 30,
+          spendTtlSec: 60,
+        });
+        expect(multiCalls).toBe(0);
+        await competitor.hincrby(spendKey, "tokens", 5);
+        releaseReads();
+
+        const [appendResult, checkpointResult] = await Promise.all([appended, checkpointed]);
+        expect(appendResult.ok).toBe(true);
+        expect(checkpointResult.ok).toBe(true);
+        expect(hgetReads).toBe(6);
+        expect(await competitor.hgetall(spendKey)).toEqual({
+          calls: "11",
+          micros: "11",
+          tokens: "17",
+        });
+        expect(await competitor.get(checkpointKey)).toBe("checkpoint");
+      } finally {
+        releaseReads();
+        await competitor.del(spendKey, checkpointKey);
+        await Promise.all([primary.quit(), competitor.quit()]);
+      }
     });
 
     it("atomically writes a checkpoint while retaining spend longer", async () => {

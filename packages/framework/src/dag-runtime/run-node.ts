@@ -36,7 +36,6 @@ import type {
 } from "../types/node.js";
 import type {
   MintingAuthority,
-  ScopedCapabilityHandle,
   ScopedLlmCapability,
   ScopedNonLlmCapability,
 } from "../types/capability-broker.js";
@@ -66,9 +65,11 @@ const brokerContractViolation = (
  * Opaque clients stay reference-identical; only their container is rebuilt as a
  * frozen null-prototype record of own string data properties.
  */
+type CapabilityBagSnapshot = Readonly<Record<string, unknown>>;
+
 const snapshotScopedCapabilities = (
   value: unknown,
-): Result<ScopedCapabilityHandle, string> => {
+): Result<CapabilityBagSnapshot, string> => {
   if (value === null || typeof value !== "object") {
     return err("ok(value) must contain a non-null object capability bag");
   }
@@ -97,7 +98,7 @@ const snapshotScopedCapabilities = (
         writable: false,
       });
     }
-    return ok(Object.freeze(snapshot) as ScopedCapabilityHandle);
+    return ok(Object.freeze(snapshot));
   } catch (caught) {
     return err(`capability bag could not be inspected safely: ${safeErrorMessage(caught)}`);
   }
@@ -107,8 +108,8 @@ const snapshotScopedCapabilities = (
 const parseBrokerResult = (
   value: unknown,
   nodeId: NodeId,
-): Result<ScopedCapabilityHandle, FrameworkError> => {
-  const violation = (detail: string): Result<ScopedCapabilityHandle, FrameworkError> =>
+): Result<CapabilityBagSnapshot, FrameworkError> => {
+  const violation = (detail: string): Result<CapabilityBagSnapshot, FrameworkError> =>
     err(brokerContractViolation(nodeId, detail));
 
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -208,9 +209,7 @@ const parseScopedBinding = (
     if (!snapshot.ok) return err(`LLM alias map is malformed: ${snapshot.error}`);
     const runScopedOperations: Record<string, "sendStructured" | "sendWithTools"> =
       Object.create(null);
-    for (const [alias, operation] of Object.entries(
-      snapshot.value as Readonly<Record<string, unknown>>,
-    )) {
+    for (const [alias, operation] of Object.entries(snapshot.value)) {
       if (alias === "sendStructured" || alias === "sendWithTools") {
         return err(`LLM alias '${alias}' cannot replace a standard operation`);
       }
@@ -232,7 +231,7 @@ const parseScopedBinding = (
 };
 
 const meterScopedLlmCapabilities = (
-  scoped: ScopedCapabilityHandle,
+  scoped: CapabilityBagSnapshot,
   minting: MintingAuthority,
   nodeId: NodeId,
 ): Result<Readonly<Record<string, unknown>>, FrameworkError> => {
@@ -416,7 +415,7 @@ export const runNodeShared = async (
       // repeating the same invocation only repeats that deterministic
       // violation and any egress before it. A real transient broker outage must
       // be returned as typed `infra-unreachable`, which remains retriable.
-      let minted: Result<ScopedCapabilityHandle, FrameworkError>;
+      let minted: Result<CapabilityBagSnapshot, FrameworkError>;
       try {
         minted = parseBrokerResult(
           await minting.broker.mintFor(inv, requiredCapabilities),

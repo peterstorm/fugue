@@ -190,9 +190,9 @@ for (const [name, build] of BACKENDS) {
     });
 
     it("is order-independent — appends commute, as the monoid does", async () => {
-      // The property that makes the append lock-free. If the stored encoding
-      // ever stopped being (sum, sum, sum, union), concurrent writers could
-      // produce a total depending on arrival order and this would fail.
+      // The stored encoding is (sum, sum, sum, union), so the final total is
+      // independent of append order. Transaction isolation is a separate
+      // adapter responsibility.
       await fc.assert(
         fc.asyncProperty(
           fc.array(

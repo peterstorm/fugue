@@ -91,15 +91,15 @@ export const createIoredisRedisPort = (
   client: IoRedis,
   redisFailure: RedisFailure = redisErr,
 ): RedisPort => {
-  let watchTail: Promise<void> = Promise.resolve();
+  let transactionTail: Promise<void> = Promise.resolve();
   let poisonedWatchFailure: HostError | null = null;
-  const serializeWatch = async <T,>(
+  const serializeTransaction = async <T,>(
     work: () => Promise<Result<T, HostError>>,
   ): Promise<Result<T, HostError>> => {
     let releaseTurn: () => void = () => {};
     const turn = new Promise<void>((resolve) => { releaseTurn = resolve; });
-    const previous = watchTail;
-    watchTail = previous.then(() => turn);
+    const previous = transactionTail;
+    transactionTail = previous.then(() => turn);
     await previous;
     try {
       return await work();
@@ -112,7 +112,7 @@ export const createIoredisRedisPort = (
     operation: string,
     body: () => Promise<Result<T, HostError>>,
   ): Promise<Result<T, HostError>> =>
-    serializeWatch(async () => {
+    serializeTransaction(async () => {
       if (poisonedWatchFailure !== null) return err(poisonedWatchFailure);
       try {
         return await body();
@@ -301,26 +301,28 @@ export const createIoredisRedisPort = (
         }
       }),
     commitCheckpointAndRetainSpend: (commit) =>
-      redisCall(
-        () =>
-          `MULTI CHECKPOINT-SPEND-RETENTION ${commit.checkpointKey} ${commit.spendKey}`,
-        async () => {
-          const executed = requireTransactionResults(
-            "Redis checkpoint/spend retention",
-            await client
-              .multi()
-              .set(
-                commit.checkpointKey,
-                commit.checkpointValue,
-                "EX",
-                commit.checkpointTtlSec,
-              )
-              .expire(commit.spendKey, commit.spendTtlSec)
-              .exec(),
-            2,
-          );
-          return (executed[0]?.[1] ?? null) as string | null;
-        },
+      serializeTransaction(() =>
+        redisCall(
+          () =>
+            `MULTI CHECKPOINT-SPEND-RETENTION ${commit.checkpointKey} ${commit.spendKey}`,
+          async () => {
+            const executed = requireTransactionResults(
+              "Redis checkpoint/spend retention",
+              await client
+                .multi()
+                .set(
+                  commit.checkpointKey,
+                  commit.checkpointValue,
+                  "EX",
+                  commit.checkpointTtlSec,
+                )
+                .expire(commit.spendKey, commit.spendTtlSec)
+                .exec(),
+              2,
+            );
+            return (executed[0]?.[1] ?? null) as string | null;
+          },
+        ),
       ),
     sAdd: (key, member) => redisCall(() => `SADD ${key}`, () => client.sadd(key, member)),
     sRem: (key, member) => redisCall(() => `SREM ${key}`, () => client.srem(key, member)),

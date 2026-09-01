@@ -80,6 +80,9 @@ import type { HostError } from "../domain/host-error.js";
 
 // ── Adapters (wrap Redis with namespacing) ─────────────────────────────────
 
+/** Failure count at which consecutive Redis diagnostics escalate from warn to error. */
+const FAILURE_ESCALATION_THRESHOLD = 10;
+
 /**
  * Track consecutive failures of one Redis-backed operation and escalate the log
  * level once they stop looking like a blip.
@@ -93,10 +96,9 @@ import type { HostError } from "../domain/host-error.js";
  * copy forgot to RESET on success would escalate forever after one bad minute.
  */
 const failureEscalator = (opts: {
-  readonly threshold: number;
   /** Logged while the failure still looks transient. */
   readonly warnMessage: string;
-  /** Logged once `threshold` consecutive failures say the dependency is down. */
+  /** Logged once consecutive failures say the dependency is down. */
   readonly errorMessage: string;
   readonly report: (
     level: "warn" | "error",
@@ -109,7 +111,7 @@ const failureEscalator = (opts: {
     /** Record a failure and report it at the level the current run length earns. */
     failed: (context: Record<string, unknown>): void => {
       consecutiveFailures++;
-      const escalated = consecutiveFailures >= opts.threshold;
+      const escalated = consecutiveFailures >= FAILURE_ESCALATION_THRESHOLD;
       opts.report(escalated ? "error" : "warn", escalated ? opts.errorMessage : opts.warnMessage, {
         ...context,
         consecutiveFailures,
@@ -121,9 +123,6 @@ const failureEscalator = (opts: {
     },
   };
 };
-
-/** Failure count at which consecutive Redis diagnostics escalate from warn to error. */
-const FAILURE_ESCALATION_THRESHOLD = 10;
 
 /**
  * Create a ContextCacheAdapter that prefixes all keys with the tenant + DAG
@@ -147,13 +146,11 @@ export const createNamespacedCache = (
   ): void => logWithoutThrowing(logger, level, message, context);
 
   const getFailures = failureEscalator({
-    threshold: FAILURE_ESCALATION_THRESHOLD,
     warnMessage: "Cache get failed — graceful degradation to miss",
     errorMessage: "Cache get failures exceeded threshold — Redis may be degraded",
     report,
   });
   const setFailures = failureEscalator({
-    threshold: FAILURE_ESCALATION_THRESHOLD,
     warnMessage: "Cache set failed — Redis error",
     errorMessage: "Cache set failures exceeded threshold — Redis may be degraded",
     report,
@@ -269,7 +266,6 @@ export const createNamespacedCheckpointWriter = (
   ): void => logWithoutThrowing(logger, level, message, context);
 
   const writeFailures = failureEscalator({
-    threshold: FAILURE_ESCALATION_THRESHOLD,
     warnMessage: "Checkpoint write failed — Redis error",
     errorMessage: "Checkpoint write failures exceeded threshold — Redis may be degraded",
     report,

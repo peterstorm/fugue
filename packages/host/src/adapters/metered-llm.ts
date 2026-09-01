@@ -36,7 +36,7 @@ const requestBoundaryError = (message: string): FrameworkError => ({
 const snapshotDataObject = (
   value: unknown,
   label: string,
-): Result<unknown, FrameworkError> => {
+): Result<Readonly<Record<PropertyKey, unknown>>, FrameworkError> => {
   if ((typeof value !== "object" || value === null) && typeof value !== "function") {
     return err(requestBoundaryError(`${label} must be an object`));
   }
@@ -132,7 +132,7 @@ const parseSchema = (value: unknown): Result<unknown, FrameworkError> => {
 const parseThinking = (value: unknown): Result<unknown, FrameworkError> => {
   const parsed = snapshotDataObject(value, "request.thinking");
   if (!parsed.ok) return parsed;
-  const thinking = parsed.value as Readonly<Record<PropertyKey, unknown>>;
+  const thinking = parsed.value;
   return Reflect.ownKeys(thinking).length === 2 &&
       thinking.type === "enabled" &&
       Number.isSafeInteger(thinking.budgetTokens) &&
@@ -149,7 +149,7 @@ const parseCache = (
 ): Result<unknown, FrameworkError> => {
   const parsed = snapshotDataObject(value, "request.cache");
   if (!parsed.ok) return parsed;
-  const cache = parsed.value as Readonly<Record<PropertyKey, unknown>>;
+  const cache = parsed.value;
   const keys = Reflect.ownKeys(cache);
   if (cache.kind === "none" && keys.length === 1) return parsed;
   const allowedKind = cache.kind === "static-prefix" ||
@@ -163,7 +163,7 @@ const parseTool = (value: unknown, index: number): Result<unknown, FrameworkErro
   const label = `request.tools[${index}]`;
   const parsed = snapshotDataObject(value, label);
   if (!parsed.ok) return parsed;
-  const tool = parsed.value as Readonly<Record<PropertyKey, unknown>>;
+  const tool = parsed.value;
   const expected = ["name", "description", "inputSchema", "outputSchema", "run"] as const;
   const keys = Reflect.ownKeys(tool);
   if (keys.length !== expected.length || keys.some(
@@ -192,7 +192,7 @@ const snapshotRequest = <T extends LlmRequest<unknown> | SendWithToolsRequest<un
 ): Result<T, FrameworkError> => {
   const outer = snapshotDataObject(request, "request");
   if (!outer.ok) return outer;
-  const source = outer.value as Readonly<Record<PropertyKey, unknown>>;
+  const source = outer.value;
   const replacements = new Map<PropertyKey, unknown>();
 
   for (const key of ["system", "user", "model"] as const) {

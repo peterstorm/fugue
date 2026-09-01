@@ -154,8 +154,8 @@ export const costUsd = (
  *
  * `calls` is 1 for a `sendWithTools` loop as much as for a single-shot call: a
  * loop's turns are already folded into one `TokenUsage` before it settles, and
- * one settled call is the granularity the overshoot-by-one guarantee is stated
- * at.
+ * one settled call is the granularity of the sequential overshoot-by-one
+ * behavior.
  */
 export const spendOfCall = (
   model: string,

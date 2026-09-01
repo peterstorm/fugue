@@ -65,7 +65,9 @@ pre-1.0, so a minor bump may carry breaking changes.
   throw during post-provider settlement.
 - Redis spend appends atomically saturate cumulative axes at
   `Number.MAX_SAFE_INTEGER`; resumed runs remain readable after overflow and
-  match memory/file ledger semantics.
+  match memory/file ledger semantics. Every transaction on the shared command
+  connection now serializes behind active WATCH state, so checkpoint commits
+  cannot clear an append's conflict guard and cause durable undercounting.
 - HTTP hard deadlines include context construction, and late successful effects
   are diagnosed after a terminal 408.
 - Redis spend retention now outlives shorter checkpoint TTLs for resumable HITL

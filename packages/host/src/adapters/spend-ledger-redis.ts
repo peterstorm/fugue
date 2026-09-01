@@ -7,9 +7,11 @@
  * refresh when `ttlSec` is configured. Marker and values share one key, so split-read/expiry races and
  * standalone append command paths are unrepresentable.
  *
- * Concurrent appends remain lock-free: sums and set union commute across Redis
- * transactions, so no WATCH, retry loop, or Lua is needed. A process crash can
- * still lose every provider-settled append not acknowledged before death, and
+ * Concurrent appends use a locally serialized WATCH/read/MULTI/EXEC loop.
+ * Serialization prevents commands sharing this connection from consuming one
+ * another's WATCH state; WATCH still detects cross-process writers, and a null
+ * EXEC retries from a fresh read. A process crash can still lose every
+ * provider-settled append not acknowledged before death, and
  * a thrown/failed transaction acknowledgement is ambiguous. This adapter
  * returns one typed append failure and never claims that values committed or
  * retries an additive delta that may already have committed.

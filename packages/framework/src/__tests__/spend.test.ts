@@ -140,6 +140,28 @@ describe("MicroUsd: money as an integer", () => {
       expect(parseSpend(value).ok).toBe(false);
     }
   });
+
+  it("keeps revoked and accessor-backed model arrays inside the Result boundary", () => {
+    const revoked = Proxy.revocable(["model-a"], {});
+    revoked.revoke();
+    let reads = 0;
+    const accessorModels = ["placeholder"];
+    Object.defineProperty(accessorModels, "0", {
+      enumerable: true,
+      get: () => {
+        reads += 1;
+        return "model-a";
+      },
+    });
+    const spendWith = (models: unknown) => ({
+      ...NO_SPEND,
+      usd: { kind: "unpriced", models, knownMicros: 0 },
+    });
+
+    expect(parseSpend(spendWith(revoked.proxy)).ok).toBe(false);
+    expect(parseSpend(spendWith(accessorModels)).ok).toBe(false);
+    expect(reads).toBe(0);
+  });
 });
 
 describe("UnpricedModels canonicalization", () => {

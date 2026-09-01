@@ -21,6 +21,7 @@ import {
   observedOf,
   NO_SPEND,
   pricedCall,
+  tool,
   usdToMicros,
 } from "@fuguejs/framework";
 import type {
@@ -283,6 +284,35 @@ describe("metered-llm: request boundary snapshots", () => {
     }
     expect(reads).toBe(0);
     expect(calls).toHaveLength(0);
+  });
+
+  it("passes a valid non-empty frozen tool snapshot to the provider and settles", async () => {
+    let received: SendWithToolsRequest<unknown> | undefined;
+    const inner: LlmClient = {
+      sendStructured: async () => ok({ output: null, rawText: "", ...tokensOnly(1, 0) }),
+      sendWithTools: async (request) => {
+        received = request;
+        return ok({ output: null, rawText: "", ...tokensOnly(1, 0) });
+      },
+    };
+    const metered = createMeteredLlm(inner, { logger: collectLogs().logger });
+    const echo = tool({
+      name: "echo",
+      description: "Echo input",
+      inputSchema: z.object({ text: z.string() }),
+      outputSchema: z.object({ text: z.string() }),
+      run: async ({ text }) => ({ text }),
+    });
+    const source = { ...toolsReq(nodeA), tools: [echo] };
+
+    expect((await metered.sendWithTools(source, fakeCtx)).ok).toBe(true);
+    expect(received).not.toBe(source);
+    expect(Object.isFrozen(received)).toBe(true);
+    expect(Object.isFrozen(received?.tools)).toBe(true);
+    expect(Object.isFrozen(received?.tools[0])).toBe(true);
+    expect(received?.tools[0]).not.toBe(echo);
+    expect(received?.tools[0]?.name).toBe(echo.name);
+    expect(received?.tools[0]?.run).toBe(echo.run);
   });
 
   it("passes one frozen own-data snapshot to pricing and the provider", async () => {

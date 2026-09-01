@@ -198,13 +198,69 @@ const parseSafeInteger = (value: unknown, path: string): Result<number, string> 
     ? ok(value)
     : err(`${path} must be a non-negative safe integer`);
 
+const parseObject = (
+  value: unknown,
+  path: string,
+): Result<Readonly<Record<PropertyKey, unknown>>, string> => {
+  if (!isObjectLike(value)) return err(`${path} must be an object`);
+  try {
+    return Array.isArray(value)
+      ? err(`${path} must be an object`)
+      : ok(value);
+  } catch {
+    return err(`${path} could not be inspected`);
+  }
+};
+
+const parseModelArray = (value: unknown): Result<readonly string[], string> => {
+  try {
+    if (!Array.isArray(value)) {
+      return err("Spend.usd.models must be a non-empty string array");
+    }
+    const descriptors = Object.getOwnPropertyDescriptors(value) as unknown as Record<
+      PropertyKey,
+      PropertyDescriptor
+    >;
+    const lengthDescriptor = descriptors.length;
+    if (lengthDescriptor === undefined || !("value" in lengthDescriptor)) {
+      return err("Spend.usd.models.length must be an own data property");
+    }
+    const length = lengthDescriptor.value;
+    if (!Number.isSafeInteger(length) || length <= 0) {
+      return err("Spend.usd.models must be a non-empty string array");
+    }
+    const keys = Reflect.ownKeys(descriptors);
+    const canonicalIndices = keys.every((key) => {
+      if (key === "length") return true;
+      if (typeof key !== "string" || !/^(0|[1-9][0-9]*)$/.test(key)) return false;
+      return Number(key) < length;
+    });
+    if (keys.length !== length + 1 || !canonicalIndices) {
+      return err("Spend.usd.models must be a dense own-data array");
+    }
+    const models: string[] = [];
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = descriptors[String(index)];
+      if (descriptor === undefined || !("value" in descriptor) ||
+          typeof descriptor.value !== "string") {
+        return err("Spend.usd.models must be a non-empty string array");
+      }
+      models.push(descriptor.value);
+    }
+    return ok(models);
+  } catch {
+    return err("Spend.usd.models could not be inspected");
+  }
+};
+
 /** Parse an adapter-supplied value before it enters budget arithmetic. */
 export const parseSpend = (value: unknown): Result<Spend, string> => {
-  if (!isObjectLike(value) || Array.isArray(value)) return err("Spend must be an object");
-  const usage = ownValue(value, "usage");
-  const tokens = ownValue(value, "tokens");
-  const calls = ownValue(value, "calls");
-  const usd = ownValue(value, "usd");
+  const spend = parseObject(value, "Spend");
+  if (!spend.ok) return spend;
+  const usage = ownValue(spend.value, "usage");
+  const tokens = ownValue(spend.value, "tokens");
+  const calls = ownValue(spend.value, "calls");
+  const usd = ownValue(spend.value, "usd");
   if (!usage.ok) return usage;
   if (usage.value !== "known" && usage.value !== "unknown") {
     return err("Spend.usage must be 'known' or 'unknown'");
@@ -216,13 +272,12 @@ export const parseSpend = (value: unknown): Result<Spend, string> => {
   const parsedCalls = parseSafeInteger(calls.value, "Spend.calls");
   if (!parsedCalls.ok) return parsedCalls;
   if (!usd.ok) return usd;
-  if (!isObjectLike(usd.value) || Array.isArray(usd.value)) {
-    return err("Spend.usd must be an object");
-  }
-  const kind = ownValue(usd.value, "kind");
+  const usdObject = parseObject(usd.value, "Spend.usd");
+  if (!usdObject.ok) return usdObject;
+  const kind = ownValue(usdObject.value, "kind");
   if (!kind.ok) return kind;
   if (kind.value === "priced") {
-    const micros = ownValue(usd.value, "micros");
+    const micros = ownValue(usdObject.value, "micros");
     if (!micros.ok) return micros;
     const parsedMicros = parseSafeInteger(micros.value, "Spend.usd.micros");
     return parsedMicros.ok
@@ -235,17 +290,14 @@ export const parseSpend = (value: unknown): Result<Spend, string> => {
       : parsedMicros;
   }
   if (kind.value !== "unpriced") return err("Spend.usd.kind is invalid");
-  const models = ownValue(usd.value, "models");
-  const knownMicros = ownValue(usd.value, "knownMicros");
+  const models = ownValue(usdObject.value, "models");
+  const knownMicros = ownValue(usdObject.value, "knownMicros");
   if (!models.ok) return models;
-  const rawModels = models.value;
-  if (!Array.isArray(rawModels) || rawModels.length === 0 ||
-      !rawModels.every((model) => typeof model === "string")) {
-    return err("Spend.usd.models must be a non-empty string array");
-  }
-  const canonical = canonicalModelNames(rawModels);
-  if (canonical === undefined || canonical.length !== rawModels.length ||
-      canonical.some((model, index) => model !== rawModels[index])) {
+  const rawModels = parseModelArray(models.value);
+  if (!rawModels.ok) return rawModels;
+  const canonical = canonicalModelNames(rawModels.value);
+  if (canonical === undefined || canonical.length !== rawModels.value.length ||
+      canonical.some((model, index) => model !== rawModels.value[index])) {
     return err("Spend.usd.models must be sorted and deduplicated");
   }
   if (!knownMicros.ok) return knownMicros;
@@ -334,8 +386,8 @@ export const addSpend = (a: Spend, b: Spend): Spend => makeSpend({
  *
  * Counts as one call: `calls` measures settled delegated attempts, and a `sendWithTools` loop
  * settles as ONE call for budget purposes (its turns are already folded into a
- * single `TokenUsage` by the loop) — the same granularity the overshoot-by-one
- * guarantee is stated at.
+ * single `TokenUsage` by the loop) — the same granularity as the sequential
+ * overshoot-by-one behavior.
  */
 export const pricedCall = (tokens: number, micros: MicroUsd): Spend => makeSpend({
   usage: "known",
