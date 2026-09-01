@@ -10,7 +10,7 @@
  * widen to `CapabilityHandle[]`.
  */
 
-import type { LlmClient } from "./llm.js";
+import type { LlmClient, LlmPricingModel } from "./llm.js";
 import type { Result } from "./result.js";
 import type { CapabilityRegistry, Capability } from "./node.js";
 
@@ -45,24 +45,51 @@ type RunScopedOperationFor<F> =
  * over a boot-scoped provider is not representable at this seam.
  */
 export type RunScopedLlmOperations<T extends LlmClient> = {
-  readonly [K in Exclude<keyof T, keyof LlmClient>]: RunScopedOperationFor<T[K]>;
+  readonly [K in Extract<Exclude<keyof T, keyof LlmClient>, string>]:
+    RunScopedOperationFor<T[K]>;
 };
 
-type LlmHandleMetadata<K extends Capability> =
-  CapabilityRegistry[K] extends LlmClient
-    ? LlmClient extends CapabilityRegistry[K]
+type LlmHandleFields<T extends LlmClient> =
+  [Extract<Exclude<keyof T, keyof LlmClient>, symbol>] extends [never]
+    ? LlmClient extends T
       ? {
           readonly clientKind: "llm";
+          readonly pricingModel: LlmPricingModel;
           readonly runScopedOperations?: never;
         }
       : {
           readonly clientKind: "llm";
-          readonly runScopedOperations: RunScopedLlmOperations<CapabilityRegistry[K]>;
+          readonly pricingModel: LlmPricingModel;
+          readonly runScopedOperations: RunScopedLlmOperations<T>;
         }
-    : {
-        readonly clientKind?: never;
-        readonly runScopedOperations?: never;
-      };
+    : never;
+
+type IsAny<T> = 0 extends (1 & T) ? true : false;
+
+type UnclassifiedHandleMetadata =
+  | {
+      readonly clientKind?: never;
+      readonly pricingModel?: never;
+      readonly runScopedOperations?: never;
+    }
+  | {
+      readonly clientKind: "llm";
+      readonly pricingModel: LlmPricingModel;
+      readonly runScopedOperations?: Readonly<Record<string, RunScopedLlmOperation>>;
+    };
+
+type LlmHandleMetadata<K extends Capability> =
+  IsAny<CapabilityRegistry[K]> extends true
+    ? UnclassifiedHandleMetadata
+    : [Extract<CapabilityRegistry[K], LlmClient>] extends [never]
+      ? {
+          readonly clientKind?: never;
+          readonly pricingModel?: never;
+          readonly runScopedOperations?: never;
+        }
+      : [Exclude<CapabilityRegistry[K], LlmClient>] extends [never]
+        ? LlmHandleFields<Extract<CapabilityRegistry[K], LlmClient>>
+        : never;
 
 export type CapabilityHandle<K extends Capability = Capability> =
   K extends Capability

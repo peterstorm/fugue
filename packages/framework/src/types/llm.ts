@@ -77,6 +77,15 @@ export type ConversationCachePolicy =
   | SingleShotCachePolicy
   | { readonly kind: "conversation"; readonly ttl: CacheTtl };
 
+/**
+ * Which model identity an LLM binding authorizes for pricing and egress.
+ * Dynamic providers use the request model; fixed deployments bind one model
+ * during composition and reject conflicting requests before provider egress.
+ */
+export type LlmPricingModel =
+  | { readonly kind: "request" }
+  | { readonly kind: "fixed"; readonly model: string };
+
 // ---------------------------------------------------------------------------
 // Single-shot structured responses
 // ---------------------------------------------------------------------------

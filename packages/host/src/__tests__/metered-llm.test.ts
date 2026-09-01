@@ -128,6 +128,7 @@ const toolsReq = (nodeId: NodeId): SendWithToolsRequest<unknown> => ({
 });
 
 const fakeCtx = {} as NodeContext;
+const REQUEST_PRICING = { kind: "request" } as const;
 
 const memoryLedgerMetadata = Object.freeze({
   role: "redis-fallback" as const,
@@ -155,12 +156,14 @@ const createTestAuthority = ({ logger, limits }: TestAuthorityOptions) =>
 const createMeteredLlm = (
   inner: LlmClient,
   opts: TestAuthorityOptions,
-): LlmClient => createMeteredLlmClient(inner, "llm", createTestAuthority(opts));
+): LlmClient =>
+  createMeteredLlmClient(inner, "llm", createTestAuthority(opts), REQUEST_PRICING);
 
 const createMeteredLlmWithDeps = (
   inner: LlmClient,
   deps: RunSpendAuthorityDeps,
-): LlmClient => createMeteredLlmClient(inner, "llm", createRunSpendAuthority(deps));
+): LlmClient =>
+  createMeteredLlmClient(inner, "llm", createRunSpendAuthority(deps), REQUEST_PRICING);
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
@@ -190,6 +193,7 @@ describe("metered-llm: narrow standard surface", () => {
       augmented,
       "llm",
       createTestAuthority({ logger }),
+      REQUEST_PRICING,
     );
 
     expect(Object.keys(metered).sort()).toEqual(["sendStructured", "sendWithTools"]);
@@ -352,10 +356,10 @@ describe("metered-llm: pre-call refusal (FR-W1-002 / FR-W1-003)", () => {
     expect(failLog?.data?.errorKind).toBe("transient");
     expect(failLog?.data?.operation).toBe("sendStructured");
 
-    // Budget remains intact: the next call is still allowed (cumulative still 0).
+    // Token usage is unknowable, so the next token-budgeted attempt fails closed.
     const r2 = await metered.sendStructured(structuredReq(nodeA));
-    expect(r2.ok).toBe(false); // still the inner error, NOT a budget refusal
-    if (!r2.ok) expect(r2.error.kind).toBe("transient");
+    expect(r2.ok).toBe(false);
+    if (!r2.ok) expect(r2.error.kind).toBe("llm-budget-exceeded");
   });
 
   it("records the call but no tokens for failed sendWithTools without usage", async () => {
@@ -369,10 +373,10 @@ describe("metered-llm: pre-call refusal (FR-W1-002 / FR-W1-003)", () => {
     expect(cumulativeCalls(meteredLog?.data)).toBe(1);
     expect(logs.some((l) => l.msg === "llm.call-failed" && l.data?.operation === "sendWithTools")).toBe(true);
 
-    // Budget intact — next call still allowed (cumulative still 0), not refused.
+    // Unknown usage closes the token-budgeted run before another provider call.
     const r2 = await metered.sendWithTools(toolsReq(nodeA), fakeCtx);
     expect(r2.ok).toBe(false);
-    if (!r2.ok) expect(r2.error.kind).toBe("transient");
+    if (!r2.ok) expect(r2.error.kind).toBe("llm-budget-exceeded");
   });
 });
 
@@ -718,7 +722,8 @@ describe("metered-llm: a THROWING inner client returns a typed error and release
         },
       };
       const { logger, logs } = collectLogs();
-      const metered = createMeteredLlm(composite, { limits: tokenBudget(30), logger });
+      const callLimits = ceilings([{ kind: "calls", limit: 10 }])!;
+      const metered = createMeteredLlm(composite, { limits: callLimits, logger });
 
       expect((await warmUp(metered)).ok).toBe(true);
       const failed = await invoke(metered);
@@ -1054,7 +1059,7 @@ describe("metered-llm: both operations share one accounting path", () => {
     const costs = lines.map((l) => (l.data?.["cumulative"] as { usdMicros?: number }).usdMicros);
     expect(costs).toEqual([usdToMicros(1), usdToMicros(2)]);
     expect((lines[0]?.data?.["call"] as { usdMicros?: number }).usdMicros).toBe(usdToMicros(1));
-    expect(lines[0]?.data?.["model"]).toBe(PRICED_MODEL);
+    expect(lines[0]?.data?.["effectiveModel"]).toBe(PRICED_MODEL);
   });
 });
 
@@ -1129,9 +1134,11 @@ describe("metered-llm: a failed ledger append is LOUD, and its severity says why
     return { metered, logs };
   };
 
-  it("logs at ERROR under a declared budget — the guarantee stopped holding", async () => {
+  it("logs at ERROR and fails non-retriably under a declared budget", async () => {
     const { metered, logs } = meteredWith(tokenBudget(1_000_000));
-    expect((await metered.sendStructured(structuredReq(nodeA))).ok).toBe(true);
+    const result = await metered.sendStructured(structuredReq(nodeA));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("node-crash");
 
     const line = logs.find((l) => l.msg === "llm.ledger-write-failed");
     expect(line).toBeDefined();
@@ -1161,7 +1168,7 @@ describe("metered-llm: a failed ledger append is LOUD, and its severity says why
     expect((line?.data?.["unrecorded"] as { tokens?: number } | undefined)?.tokens).toBe(150);
   });
 
-  it("fences a throwing ledger append as durability loss and preserves paid provider output", async () => {
+  it("fences a throwing ledger append as a non-retriable budgeted failure", async () => {
     const throwingLedger: SpendLedgerPort = {
       metadata: memoryLedgerMetadata,
       read: async () => ok(NO_SPEND),
@@ -1180,7 +1187,10 @@ describe("metered-llm: a failed ledger append is LOUD, and its severity says why
 
     const result = await metered.sendStructured(structuredReq(nodeA));
 
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
+    if (result.ok || result.error.kind !== "node-crash") throw new Error("expected node-crash");
+    expect(result.error.retriability).toBe("non-retriable");
+    expect(result.error.message).toContain("could not be durably recorded");
     expect(logs.filter((line) => line.msg === "llm.ledger-write-failed")).toHaveLength(1);
     expect(logs.some((line) => line.msg === "llm.call-failed")).toBe(false);
     expect(String(logs.find((line) => line.msg === "llm.ledger-write-failed")?.data?.["reason"]))
@@ -1198,11 +1208,11 @@ describe("metered-llm: a failed ledger append is LOUD, and its severity says why
       limits: tokenBudget(200), logger,
     });
 
-    expect((await metered.sendStructured(structuredReq(nodeA))).ok).toBe(true); // 150
-    expect((await metered.sendStructured(structuredReq(nodeA))).ok).toBe(true); // 300, overshoot
-    expect((await metered.sendStructured(structuredReq(nodeA))).ok).toBe(false);
-    expect(calls.length).toBe(2);
-    expect(logs.filter((l) => l.msg === "llm.ledger-write-failed").length).toBe(2);
+    const failed = await metered.sendStructured(structuredReq(nodeA));
+    expect(failed.ok).toBe(false);
+    if (!failed.ok) expect(failed.error.kind).toBe("node-crash");
+    expect(calls.length).toBe(1);
+    expect(logs.filter((l) => l.msg === "llm.ledger-write-failed").length).toBe(1);
   });
 
   it("appends the SETTLED spend to the ledger on the happy path", async () => {

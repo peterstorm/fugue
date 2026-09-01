@@ -2,6 +2,7 @@ export type {
   CacheTtl,
   ConversationCachePolicy,
   LlmClient,
+  LlmPricingModel,
   LlmRequest,
   LlmResponse,
   SendWithToolsRequest,
@@ -55,6 +56,7 @@ export {
   costRatesFor,
   costUsd,
   spendOfCall,
+  spendOfUnknownCall,
   PRICE_TABLE,
 } from "./cost.js";
 export type { CostRates } from "./cost.js";

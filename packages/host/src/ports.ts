@@ -8,7 +8,17 @@
  * for operations that can fail, making failure explicit at the type level.
  */
 
-import type { Result, DagId, GitSha, LlmClient, Tracer, PromptAccess, RunId, Spend } from "@fuguejs/framework";
+import type {
+  Result,
+  DagId,
+  GitSha,
+  LlmClient,
+  LlmPricingModel,
+  Tracer,
+  PromptAccess,
+  RunId,
+  Spend,
+} from "@fuguejs/framework";
 import type { CapabilityHandle } from "@fuguejs/framework";
 import type { HostError } from "./domain/host-error.js";
 import type { DagRegistration } from "./domain/dag-registration.js";
@@ -120,6 +130,14 @@ export type RedisSpendAppend = {
   readonly key: string;
   readonly delta: Spend;
   readonly ttlSec?: number;
+};
+
+/** One atomic checkpoint write plus retention refresh for its run spend hash. */
+export type RedisCheckpointSpendCommit = {
+  readonly checkpointKey: string;
+  readonly checkpointValue: string;
+  readonly spendKey: string;
+  readonly ttlSec: number;
 };
 
 export type RedisValueGuard = {
@@ -235,6 +253,14 @@ export type RedisPort = {
    * prove absence of commit.
    */
   readonly appendSpend?: (append: RedisSpendAppend) => Promise<Result<void, HostError>>;
+  /**
+   * Atomically write one checkpoint and extend the corresponding spend hash to
+   * the same retention deadline. An absent spend hash is valid before the
+   * run's first LLM call; EXPIRE then reports zero without aborting the write.
+   */
+  readonly commitCheckpointAndRetainSpend?: (
+    commit: RedisCheckpointSpendCommit,
+  ) => Promise<Result<string | null, HostError>>;
 }
 
 /**
@@ -284,11 +310,14 @@ export type RedisPubSubPort = {
 // ── Shared Infrastructure ────────────────────────────────────────────────────
 
 /**
- * Shared infrastructure singletons — initialized once at host startup.
- * Passed by reference into every NodeContext (no per-request allocation).
+ * Shared boot resources initialized once at host startup. Their underlying
+ * clients are reused; each run allocates its own authority, metered facades,
+ * capability map, cache adapter, and checkpoint adapter.
  */
 export type SharedInfra = {
   readonly llm: LlmClient;
+  /** Composition-owned model policy used for both provider egress and pricing. */
+  readonly llmPricingModel: LlmPricingModel;
   readonly redis: RedisPort;
   /**
    * Selected ledger binding. Stock wiring supplies a `redis-fallback` memory

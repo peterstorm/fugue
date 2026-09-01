@@ -43,7 +43,12 @@ describe("file spend codec", () => {
       fc.integer({ min: 0, max: 100_000 }),
       fc.integer({ min: 0, max: 100_000 }),
       (tokens, calls, micros) => {
-        const spend: Spend = { tokens, calls, usd: { kind: "priced", micros: micros as MicroUsd } };
+        const spend: Spend = {
+          usage: "known",
+          tokens,
+          calls,
+          usd: { kind: "priced", micros: micros as MicroUsd },
+        };
         const encoded = serializeFileSpendRecord(rid, spend);
         expect(encoded.ok).toBe(true);
         if (!encoded.ok) return;
@@ -58,6 +63,7 @@ describe("file spend codec", () => {
       (models) => {
         const [head, ...rest] = [...models].sort();
         const spend: Spend = {
+          usage: "known",
           tokens: 0,
           calls: 1,
           usd: {
@@ -77,6 +83,7 @@ describe("file spend codec", () => {
     const valid = {
       schemaVersion: 1,
       runId: rid,
+      usage: "known",
       tokens: 1,
       calls: 1,
       micros: 1,
@@ -150,6 +157,7 @@ describe("createFileSpendStore", () => {
     writeFileSync(persistedRecordPath, JSON.stringify({
       schemaVersion: 1,
       runId: "other-run",
+      usage: "known",
       tokens: 0,
       calls: 0,
       micros: 0,

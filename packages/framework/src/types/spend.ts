@@ -94,8 +94,16 @@ export type PricedSpend =
  * loop stuck retrying), and `usd` answers "what did it cost". A budget may
  * limit any subset of them.
  */
+export type UsageKnowledge = "known" | "unknown";
+
 export interface Spend {
-  /** Every token that crossed the wire, in either direction. */
+  /**
+   * Whether every settled attempt contributed trustworthy token usage.
+   * `unknown` is absorbing: known figures remain lower bounds, but token and
+   * USD ceilings can no longer be evaluated safely.
+   */
+  readonly usage: UsageKnowledge;
+  /** Every trustworthy reported token, or a lower bound when usage is unknown. */
   readonly tokens: number;
   /** Delegated LLM attempts settled by the run authority, including failures. */
   readonly calls: number;
@@ -104,6 +112,7 @@ export interface Spend {
 
 /** The additive identity — a run that has consumed nothing. */
 export const NO_SPEND: Spend = Object.freeze({
+  usage: "known",
   tokens: 0,
   calls: 0,
   usd: Object.freeze({ kind: "priced", micros: NO_MICROS }),
@@ -162,6 +171,7 @@ const addPriced = (a: PricedSpend, b: PricedSpend): PricedSpend => {
  * run's cumulative.
  */
 export const addSpend = (a: Spend, b: Spend): Spend => ({
+  usage: a.usage === "unknown" || b.usage === "unknown" ? "unknown" : "known",
   tokens: a.tokens + b.tokens,
   calls: a.calls + b.calls,
   usd: addPriced(a.usd, b.usd),
@@ -176,6 +186,7 @@ export const addSpend = (a: Spend, b: Spend): Spend => ({
  * guarantee is stated at.
  */
 export const pricedCall = (tokens: number, micros: MicroUsd): Spend => ({
+  usage: "known",
   tokens: sanitizeCount(tokens),
   calls: 1,
   usd: { kind: "priced", micros },
@@ -183,9 +194,22 @@ export const pricedCall = (tokens: number, micros: MicroUsd): Spend => ({
 
 /** A single call on a model with no price-table entry. */
 export const unpricedCall = (tokens: number, model: string): Spend => ({
+  usage: "known",
   tokens: sanitizeCount(tokens),
   calls: 1,
   usd: { kind: "unpriced", models: [model], knownMicros: NO_MICROS },
+});
+
+/**
+ * One settled attempt whose provider usage cannot be trusted.
+ * Known figures remain explicit lower bounds; admission decides which ceiling
+ * axes can still be evaluated.
+ */
+export const unknownUsageCall = (usd: PricedSpend): Spend => ({
+  usage: "unknown",
+  tokens: 0,
+  calls: 1,
+  usd,
 });
 
 /**
@@ -201,6 +225,7 @@ export const scaleSpend = (s: Spend, n: number): Spend => {
   const times = Math.max(0, Math.floor(sanitizeCount(n)));
   if (times === 0) return NO_SPEND;
   return {
+    usage: s.usage,
     tokens: s.tokens * times,
     calls: s.calls * times,
     usd:
@@ -223,6 +248,7 @@ export const scaleSpend = (s: Spend, n: number): Spend => {
  * next one cannot honestly be a number.
  */
 export const maxSpend = (a: Spend, b: Spend): Spend => ({
+  usage: a.usage === "unknown" || b.usage === "unknown" ? "unknown" : "known",
   tokens: Math.max(a.tokens, b.tokens),
   calls: Math.max(a.calls, b.calls),
   usd: match([a.usd, b.usd] as const)

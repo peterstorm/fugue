@@ -4,6 +4,7 @@ import {
   createHostLlmClient,
   createJsonConsoleLogger,
   disconnectRedisClients,
+  hostLlmPricingModel,
   planHostLlm,
   redisOperationFailure,
   redisUrlRedactions,
@@ -145,6 +146,15 @@ describe("host LLM entrypoint wiring", () => {
       apiVersion: "2025-03-01-preview",
       deployment: "deployment-a",
     });
+  });
+
+  it("binds Azure pricing to its fixed provider override", () => {
+    expect(hostLlmPricingModel(config("azure"))).toEqual({
+      kind: "fixed",
+      model: "deployment-a",
+    });
+    expect(hostLlmPricingModel(config("openai"))).toEqual({ kind: "request" });
+    expect(hostLlmPricingModel(config("anthropic"))).toEqual({ kind: "request" });
   });
 
   it("keeps the Anthropic SDK behind the injected lazy loader", async () => {

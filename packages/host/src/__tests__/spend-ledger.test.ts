@@ -18,7 +18,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runId as makeRunId, dagId as makeDagId, ok, err } from "@fuguejs/framework";
 import type { MicroUsd, RunId, Spend } from "@fuguejs/framework";
-import { NO_SPEND, addSpend, pricedCall, unpricedCall } from "@fuguejs/framework";
+import {
+  NO_MICROS,
+  NO_SPEND,
+  addSpend,
+  pricedCall,
+  unknownUsageCall,
+  unpricedCall,
+} from "@fuguejs/framework";
 import type { RedisPort, RedisSpendAppend, SpendLedgerPort } from "../ports.js";
 import { createInMemorySpendLedger } from "../adapters/spend-ledger-memory.js";
 import { createRedisSpendLedger, spendLedgerRedis } from "../adapters/spend-ledger-redis.js";
@@ -27,7 +34,8 @@ import { tenantId } from "../domain/tenant.js";
 import {
   recordOf,
   SPEND_HASH_FIELDS,
-  SPEND_UNPRICED_MARKER_VALUE,
+  SPEND_MARKER_VALUE,
+  SPEND_USAGE_UNKNOWN_FIELD,
   unpricedModelHashField,
 } from "../domain/spend-record.js";
 
@@ -57,12 +65,14 @@ const fakeRedis = (): {
   const appends: RedisSpendAppend[] = [];
   const redis = {
     hGetAll: async (key: string) => ok(Object.fromEntries(hashes.get(key) ?? new Map())),
+    commitCheckpointAndRetainSpend: async () => ok("OK"),
     appendSpend: async (append: RedisSpendAppend) => {
       appends.push(append);
       const record = recordOf(append.delta);
       const hash = hashes.get(append.key) ?? new Map<string, string>();
+      if (record.usageUnknown) hash.set(SPEND_USAGE_UNKNOWN_FIELD, SPEND_MARKER_VALUE);
       for (const model of record.unpricedModels) {
-        hash.set(unpricedModelHashField(model), SPEND_UNPRICED_MARKER_VALUE);
+        hash.set(unpricedModelHashField(model), SPEND_MARKER_VALUE);
       }
       for (const [field, by] of [
         [SPEND_HASH_FIELDS.micros, record.micros],
@@ -135,6 +145,7 @@ for (const [name, build] of BACKENDS) {
       const ledger = build();
       for (const _ of [1, 2, 3]) await ledger.add(runA, pricedCall(100, micros(500)));
       expect(await readOrThrow(ledger, runA)).toEqual({
+        usage: "known",
         tokens: 300,
         calls: 3,
         usd: { kind: "priced", micros: micros(1_500) },
@@ -161,6 +172,15 @@ for (const [name, build] of BACKENDS) {
       if (spend.usd.kind !== "unpriced") return;
       expect([...spend.usd.models]).toEqual(["mystery"]);
       expect(spend.usd.knownMicros).toBe(micros(999));
+    });
+
+    it("persists unknown usage across slices and append order", async () => {
+      const ledger = build();
+      const unknown = unknownUsageCall({ kind: "priced", micros: NO_MICROS });
+      await ledger.add(runA, pricedCall(3, micros(2)));
+      await ledger.add(runA, unknown);
+      await ledger.add(runA, pricedCall(4, micros(3)));
+      expect((await readOrThrow(ledger, runA)).usage).toBe("unknown");
     });
 
     it("unions unpriced model names rather than keeping the last", async () => {
@@ -229,6 +249,7 @@ describe("in-memory ledger defensive snapshots", () => {
   it("isolates seeded, stored, and returned Spend values from caller mutation", async () => {
     const sourceModels = ["seed-model"];
     const seeded: Spend = {
+      usage: "known",
       tokens: 5,
       calls: 1,
       usd: {
@@ -256,7 +277,11 @@ describe("in-memory ledger defensive snapshots", () => {
 });
 
 describe("spendLedgerRedis: the construction-time surface check", () => {
-  it.each(["hGetAll", "appendSpend"] as const)(
+  it.each([
+    "hGetAll",
+    "appendSpend",
+    "commitCheckpointAndRetainSpend",
+  ] as const)(
     "refuses an adapter missing %s and names that capability",
     (capability) => {
       const malformed = { ...fakeRedis().redis, [capability]: undefined } as unknown as RedisPort;
@@ -286,6 +311,12 @@ describe("spendLedgerRedis: the construction-time surface check", () => {
         if (this.marker !== "receiver") throw new Error("appendSpend lost receiver");
         return state.redis.appendSpend!(append);
       },
+      commitCheckpointAndRetainSpend(this: { marker: string }) {
+        if (this.marker !== "receiver") {
+          throw new Error("commitCheckpointAndRetainSpend lost receiver");
+        }
+        return Promise.resolve(ok("OK"));
+      },
     } as RedisPort & { readonly marker: string };
     const parsed = spendLedgerRedis(receiverDependent);
     if (!parsed.ok) throw new Error("expected receiver-dependent adapter to parse");
@@ -314,6 +345,7 @@ describe("Redis ledger: complete transactional append", () => {
   };
 
   const orderedDelta: Spend = {
+    usage: "known",
     tokens: 10,
     calls: 1,
     usd: { kind: "unpriced", models: ["model-a", "model-z"], knownMicros: micros(7) },

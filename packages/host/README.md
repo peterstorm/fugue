@@ -30,6 +30,7 @@ if (!ledger.ok) throw new Error(formatHostError(ledger.error));
 
 const shared: SharedInfra = {
   // ...llm, redis, tracer, logger, capabilities...
+  llmPricingModel: { kind: "request" },
   spendLedger: ledger.value,
 };
 ```
@@ -303,7 +304,7 @@ Different nodes in the same DAG can use different models. The `model` string is 
 |----------|--------------|
 | **OpenAI** | Per-node `model` sent directly. Teams use any model their key has access to: `gpt-4o`, `gpt-4o-mini`, `o4-mini`, etc. |
 | **Anthropic** | Per-node `model` sent directly: `claude-sonnet-4-6`, `claude-haiku-4-5`, etc. (use current ids, not the dated form). |
-| **Azure** | `AZURE_OPENAI_DEPLOYMENT` overrides per-node model. All calls route through one deployment. Deploy multiple host instances for multiple Azure models. |
+| **Azure** | `AZURE_OPENAI_DEPLOYMENT` is the fixed provider and pricing model. A per-node model that differs is rejected before egress. Deploy multiple host instances for multiple Azure models. |
 
 ---
 

@@ -23,7 +23,8 @@ import type { Redis as IoRedis, RedisOptions } from "ioredis";
 import {
   recordOf,
   SPEND_HASH_FIELDS,
-  SPEND_UNPRICED_MARKER_VALUE,
+  SPEND_MARKER_VALUE,
+  SPEND_USAGE_UNKNOWN_FIELD,
   unpricedModelHashField,
 } from "../domain/spend-record.js";
 
@@ -232,7 +233,10 @@ export const createIoredisRedisPort = (
           }
           // Encode every marker before MULTI so hostile model text cannot leave
           // a partially queued transaction object in the adapter.
-          const markerFields = record.unpricedModels.map(unpricedModelHashField);
+          const markerFields = [
+            ...(record.usageUnknown ? [SPEND_USAGE_UNKNOWN_FIELD] : []),
+            ...record.unpricedModels.map(unpricedModelHashField),
+          ];
           const transaction = client.multi();
           let queuedCommands = 0;
 
@@ -240,7 +244,7 @@ export const createIoredisRedisPort = (
             transaction.hset(
               append.key,
               field,
-              SPEND_UNPRICED_MARKER_VALUE,
+              SPEND_MARKER_VALUE,
             );
             queuedCommands += 1;
           }
@@ -267,6 +271,37 @@ export const createIoredisRedisPort = (
           for (const [commandError] of executed) {
             if (commandError !== null) throw commandError;
           }
+        },
+      ),
+    commitCheckpointAndRetainSpend: (commit) =>
+      redisCall(
+        () =>
+          `MULTI CHECKPOINT-SPEND-RETENTION ${commit.checkpointKey} ${commit.spendKey}`,
+        async () => {
+          const executed = await client
+            .multi()
+            .set(
+              commit.checkpointKey,
+              commit.checkpointValue,
+              "EX",
+              commit.ttlSec,
+            )
+            .expire(commit.spendKey, commit.ttlSec)
+            .exec();
+          if (executed === null) {
+            throw new Error(
+              "Redis checkpoint/spend retention EXEC unexpectedly aborted without WATCH",
+            );
+          }
+          if (executed.length !== 2) {
+            throw new Error(
+              `Redis checkpoint/spend retention EXEC returned ${executed.length} results for 2 queued commands`,
+            );
+          }
+          for (const [commandError] of executed) {
+            if (commandError !== null) throw commandError;
+          }
+          return (executed[0]?.[1] ?? null) as string | null;
         },
       ),
     sAdd: (key, member) => redisCall(() => `SADD ${key}`, () => client.sadd(key, member)),

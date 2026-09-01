@@ -14,7 +14,13 @@
 
 import type { Result } from "@fuguejs/framework";
 import { ok, err, safeErrorMessage } from "@fuguejs/framework";
-import type { CapabilityHandle, Capability, CapabilityRegistry, LlmClient } from "@fuguejs/framework";
+import type {
+  CapabilityHandle,
+  Capability,
+  CapabilityRegistry,
+  LlmClient,
+  LlmPricingModel,
+} from "@fuguejs/framework";
 import type { HostError } from "./host-error.js";
 
 // ---------------------------------------------------------------------------
@@ -315,12 +321,13 @@ export const checkHealth = async (
   const results: CapabilityHealth[] = [];
 
   for (const handle of handles) {
-    if (!handle.healthCheck) {
-      results.push({ status: "no-check", name: handle.name });
-      continue;
-    }
     try {
-      const result = await handle.healthCheck();
+      const healthCheck = handle.healthCheck;
+      if (healthCheck === undefined) {
+        results.push({ status: "no-check", name: handle.name });
+        continue;
+      }
+      const result = await healthCheck();
       if (result.ok) {
         results.push({ status: "healthy", name: handle.name });
       } else {
@@ -379,10 +386,14 @@ export const checkHealth = async (
  * `missing-capability`.
  */
 export type CapabilityClientDecorators = {
-  readonly llm?: (name: Capability, client: LlmClient) => LlmClient;
+  readonly llm?: (
+    name: Capability,
+    client: LlmClient,
+    pricingModel: LlmPricingModel,
+  ) => LlmClient;
 };
 
-const runScopedLlmFacade = (
+export const runScopedLlmFacade = (
   metered: LlmClient,
   aliases: Readonly<Record<string, unknown>>,
 ): LlmClient => {
@@ -423,7 +434,11 @@ export const extractClients = (
     // aliases are declarative data interpreted here; adapter code never gets a
     // run-scoped composition callback in which it could retain the boot client.
     if (handle.clientKind === "llm" && decorators.llm !== undefined) {
-      const metered = decorators.llm(handle.name, handle.client);
+      const metered = decorators.llm(
+        handle.name,
+        handle.client,
+        handle.pricingModel,
+      );
       clients[handle.name] = handle.runScopedOperations === undefined
         ? metered
         : runScopedLlmFacade(metered, handle.runScopedOperations);

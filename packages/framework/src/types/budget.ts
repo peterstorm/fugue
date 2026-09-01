@@ -10,7 +10,7 @@
 
 import { match, P } from "ts-pattern";
 import type { MicroUsd, Spend, UnpricedModels } from "./spend.js";
-import { microsToUsd } from "./spend.js";
+import { costFloor, microsToUsd } from "./spend.js";
 import { sanitizeCount } from "./token-usage.js";
 
 // ---------------------------------------------------------------------------
@@ -69,8 +69,10 @@ export type CeilingKind = Ceiling["kind"];
  * The brand makes `ceilings()` the only way to obtain the type, which is the
  * same technique `MicroUsd` and the branded identifiers already use here.
  */
+declare const ceilingsBrand: unique symbol;
+
 export type Ceilings = readonly [Ceiling, ...Ceiling[]] & {
-  readonly __brand: "Ceilings";
+  readonly [ceilingsBrand]: void;
 };
 
 /**
@@ -170,6 +172,13 @@ export type Breach =
       readonly models: UnpricedModels;
       /** Cost of the calls that WERE priced — a genuine lower bound. */
       readonly observedAtLeast: MicroUsd;
+    }
+  | {
+      readonly kind: "unknown-usage";
+      readonly ceiling: TokensCeiling | UsdCeiling;
+      readonly basis: Basis;
+      /** Trustworthy consumption observed before usage became unknowable. */
+      readonly observedAtLeast: number;
     };
 
 /**
@@ -200,17 +209,27 @@ export const breachOf = (spend: Spend, ceiling: Ceiling, basis: Basis): Breach |
   match(ceiling)
     .returnType<Breach | undefined>()
     .with({ kind: "tokens" }, (c) =>
-      reachedBy(spend.tokens, c.limit)
-        ? { kind: "reached", ceiling: c, basis, observed: spend.tokens }
-        : undefined,
+      spend.usage === "unknown"
+        ? { kind: "unknown-usage", ceiling: c, basis, observedAtLeast: spend.tokens }
+        : reachedBy(spend.tokens, c.limit)
+          ? { kind: "reached", ceiling: c, basis, observed: spend.tokens }
+          : undefined,
     )
     .with({ kind: "calls" }, (c) =>
       reachedBy(spend.calls, c.limit)
         ? { kind: "reached", ceiling: c, basis, observed: spend.calls }
         : undefined,
     )
-    .with({ kind: "usd" }, (c) =>
-      match(spend.usd)
+    .with({ kind: "usd" }, (c) => {
+      if (spend.usage === "unknown") {
+        return {
+          kind: "unknown-usage",
+          ceiling: c,
+          basis,
+          observedAtLeast: costFloor(spend.usd),
+        };
+      }
+      return match(spend.usd)
         .returnType<Breach | undefined>()
         .with({ kind: "unpriced" }, (u) => ({
           kind: "unpriced",
@@ -224,8 +243,8 @@ export const breachOf = (spend: Spend, ceiling: Ceiling, basis: Basis): Breach |
             ? { kind: "reached", ceiling: c, basis, observed: p.micros }
             : undefined,
         )
-        .exhaustive(),
-    )
+        .exhaustive();
+    })
     .exhaustive();
 
 /**
@@ -263,6 +282,14 @@ export const formatBreach = (b: Breach): string =>
       `cost cannot be evaluated against a ${dollars(x.ceiling.limit)} budget: ` +
       `no price-table entry for ${x.models.join(", ")} ` +
       `(priced calls so far: ${dollars(x.observedAtLeast)})`,
+    )
+    .with({ kind: "unknown-usage", ceiling: { kind: "tokens" } }, (x) =>
+      `token usage is unknown against the ${x.ceiling.limit} budget ` +
+      `(trustworthy tokens observed before uncertainty: ${x.observedAtLeast})`,
+    )
+    .with({ kind: "unknown-usage", ceiling: { kind: "usd" } }, (x) =>
+      `cost is unknown against the ${dollars(x.ceiling.limit)} budget ` +
+      `(priced lower bound before uncertainty: ${dollars(x.observedAtLeast)})`,
     )
     .exhaustive();
 

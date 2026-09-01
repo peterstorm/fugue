@@ -19,6 +19,12 @@ const snapshotHeadroom = (headroom: CeilingHeadroom): CeilingHeadroom => {
       models: Object.freeze([...headroom.models]) as typeof headroom.models,
     });
   }
+  if (headroom.kind === "unknown-usage") {
+    return Object.freeze({
+      ...headroom,
+      ceiling: Object.freeze({ ...headroom.ceiling }),
+    });
+  }
   switch (headroom.unit) {
     case "tokens":
       return Object.freeze({

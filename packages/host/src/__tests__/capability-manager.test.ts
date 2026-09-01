@@ -408,6 +408,21 @@ describe("capability-manager", () => {
       expect(report.capabilities[0]?.status).toBe("no-check");
     });
 
+    it("a throwing healthCheck accessor is contained as unhealthy", async () => {
+      const hostile = Object.defineProperty(makeHandle("a"), "healthCheck", {
+        get: () => { throw new Error("accessor failed"); },
+      });
+
+      const report = await checkHealth([hostile]);
+
+      expect(report.overall).toBe("degraded");
+      expect(report.capabilities).toEqual([{
+        status: "unhealthy",
+        name: "a",
+        reason: "accessor failed",
+      }]);
+    });
+
     it("healthCheck that throws → unhealthy", async () => {
       const handles = [
         makeHandle("a", { healthCheck: async () => { throw new Error("timeout"); } }),
@@ -439,7 +454,12 @@ describe("capability-manager", () => {
       const replacement = {} as LlmClient;
       const seen: Capability[] = [];
       const handles = [
-        { name: "judgeLlm", client: llm, clientKind: "llm" },
+        {
+          name: "judgeLlm",
+          client: llm,
+          clientKind: "llm",
+          pricingModel: { kind: "request" },
+        },
         makeHandle("db", { client: plain }),
       ] as readonly CapabilityHandle[];
 
@@ -473,6 +493,7 @@ describe("capability-manager", () => {
         name: "composedLlm",
         client: boot,
         clientKind: "llm",
+        pricingModel: { kind: "request" },
         runScopedOperations: { alias: "sendStructured" },
       }];
 

@@ -13,6 +13,7 @@ import type {
   Capability,
   FrameworkError,
   LlmClient,
+  LlmPricingModel,
   LlmRequest,
   LlmResponse,
   NodeContext,
@@ -25,6 +26,7 @@ export const createMeteredLlm = (
   inner: LlmClient,
   clientKey: Capability,
   authority: RunSpendAuthority,
+  pricingModel: LlmPricingModel,
 ): LlmClient => Object.freeze({
   sendStructured: <O>(
     req: LlmRequest<O>,
@@ -32,6 +34,7 @@ export const createMeteredLlm = (
     authority.execute({
       clientKey,
       operation: "sendStructured",
+      pricingModel,
       request: req,
       call: () => inner.sendStructured(req),
     }),
@@ -43,6 +46,7 @@ export const createMeteredLlm = (
     authority.execute({
       clientKey,
       operation: "sendWithTools",
+      pricingModel,
       request: req,
       call: () => inner.sendWithTools(req, ctx),
     }),

@@ -171,7 +171,12 @@ describe("mergeScopedCapabilities", () => {
 
   test("fails closed for broker-minted built-ins while the static client stays authoritative", () => {
     const budget = {
-      spent: () => ({ tokens: 0, calls: 0, usd: { kind: "priced" as const, micros: 0 as never } }),
+      spent: () => ({
+        usage: "known" as const,
+        tokens: 0,
+        calls: 0,
+        usd: { kind: "priced" as const, micros: 0 as never },
+      }),
       remaining: () => ({ kind: "unbudgeted" as const }),
     };
     const base = makeNodeContext({ runId: "run-merge", dagId: "dag-merge", budget });

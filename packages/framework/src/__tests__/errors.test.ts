@@ -772,6 +772,32 @@ describe("PersistedFrameworkErrorSchema: llm-budget-exceeded round-trips through
     expect(() => formatFrameworkError(parsed.data)).not.toThrow();
   });
 
+  it("parses unknown usage for token/USD ceilings and rejects it for calls", () => {
+    const unknown = (ceiling: unknown) => ({
+      kind: "llm-budget-exceeded",
+      runId: "run-budget",
+      nodeId: "node-x",
+      cause: {
+        kind: "unknown-usage",
+        ceiling,
+        basis: "settled",
+        observedAtLeast: 12,
+      },
+    });
+
+    for (const ceiling of [
+      { kind: "tokens", limit: 100 },
+      { kind: "usd", limit: 100 },
+    ]) {
+      const parsed = PersistedFrameworkErrorSchema.safeParse(unknown(ceiling));
+      expect(parsed.success).toBe(true);
+      if (parsed.success) expect(() => formatFrameworkError(parsed.data)).not.toThrow();
+    }
+    expect(PersistedFrameworkErrorSchema.safeParse(
+      unknown({ kind: "calls", limit: 100 }),
+    ).success).toBe(false);
+  });
+
   it("REJECTS an unpriced cause naming no model", () => {
     // "Unknown cost, caused by nothing" is unrepresentable in memory (the
     // models list is a non-empty tuple); the wire schema has to agree, or a

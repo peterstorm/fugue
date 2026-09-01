@@ -62,9 +62,11 @@ type PricedSpend =
 
 `unpriced` **absorbs** under `addSpend`: once any call in a run was unpriced, no total for that run is trustworthy, and the type says so instead of a comment saying so. It carries the offending model names — so the refusal message names what to add to `PRICE_TABLE` — and `knownMicros`, the priced portion, which is a genuine lower bound and turns "unknown" into "at least $1.23, plus model X".
 
-**A `usd` ceiling against unpriced spend always breaches.** Token and call ceilings do not: they are perfectly evaluable on an unpriced model, and refusing there would apply fail-closed where nothing is unknown.
+**A `usd` ceiling against unpriced spend always breaches.** Token and call ceilings do not: they are perfectly evaluable on an unpriced model, and refusing there would apply fail-closed where nothing is unknown. Provider usage uncertainty is separate: a call with no trustworthy usage persists an absorbing unknown marker, after which token and USD ceilings are unevaluable and fail closed while call ceilings remain exact.
 
 **Ceilings are a non-empty, one-per-kind, canonically-ordered list.** `ceilings()` is the only constructor; duplicates collapse to their **minimum**. Composing a DAG's limits with a caller-supplied set is therefore just `ceilings([...dag, ...request])`, and "raise my budget" is not expressible — deny-by-default falls out of the data structure rather than out of a check somebody must remember to write.
+
+**Pricing follows the provider-effective model.** Every LLM binding carries a composition-owned policy: request-selected providers price the request model, while fixed deployments bind one model and reject conflicting requests before egress. Admission and settlement consume the same resolved model identity, so caller-controlled request metadata cannot price a different route.
 
 **A refusal names its ceiling and its basis.**
 

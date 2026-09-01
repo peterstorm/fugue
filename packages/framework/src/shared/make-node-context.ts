@@ -120,7 +120,9 @@ export const makeNodeContext = (init: NodeContextInit): NodeContext => {
  * broker that claims `provides()` for one. If broker-minted built-ins ever land
  * (FR-W2-009),
  * change this guard to filter only `RESERVED_NON_CAPABILITY_KEYS` in the same
- * commit that lifts that rejection.
+ * commit that lifts that rejection. Custom broker-delivered LLM capabilities
+ * are supported separately: run-node parses their explicit metadata and applies
+ * the host-owned meter before this raw merge sees the decorated client.
  */
 export type CapabilityMergeError = {
   readonly kind: "reserved-capability";

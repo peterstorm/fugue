@@ -28,8 +28,17 @@ import {
   PersistedFrameworkErrorSchema,
 } from "../types/errors.js";
 import { safeErrorMessage } from "../types/safe-error.js";
-import type { NodeContext, NodeDef, ValidatedNodeContext } from "../types/node.js";
-import type { MintingAuthority, ScopedCapabilityHandle } from "../types/capability-broker.js";
+import type {
+  Capability,
+  NodeContext,
+  NodeDef,
+  ValidatedNodeContext,
+} from "../types/node.js";
+import type {
+  MintingAuthority,
+  ScopedCapabilityHandle,
+  ScopedLlmCapability,
+} from "../types/capability-broker.js";
 import { invocationFor } from "../types/capability-broker.js";
 import { mergeScopedCapabilities } from "../shared/make-node-context.js";
 import type { NodeId, DagId } from "../types/ids.js";
@@ -141,6 +150,118 @@ const parseBrokerResult = (
       : violation("err(error) must contain a valid FrameworkError");
   } catch (caught) {
     return violation(`Result could not be inspected safely: ${safeErrorMessage(caught)}`);
+  }
+};
+
+const ownDataValue = (
+  value: object,
+  key: PropertyKey,
+): Result<unknown, string> => {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  return descriptor !== undefined && Object.hasOwn(descriptor, "value")
+    ? ok(descriptor.value)
+    : err(`LLM binding '${String(key)}' must be an own data property`);
+};
+
+const scopedLlmBinding = (
+  value: unknown,
+): Result<ScopedLlmCapability | undefined, string> => {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return ok(undefined);
+  }
+  try {
+    const kind = ownDataValue(value, "clientKind");
+    if (!kind.ok) return ok(undefined);
+    if (kind.value !== "llm") return ok(undefined);
+
+    const client = ownDataValue(value, "client");
+    if (!client.ok || client.value == null) {
+      return err("LLM binding requires a non-null own client data property");
+    }
+    const rawPricing = ownDataValue(value, "pricingModel");
+    if (!rawPricing.ok || rawPricing.value === null || typeof rawPricing.value !== "object") {
+      return err("LLM binding requires an own pricingModel data property");
+    }
+    const pricingKind = ownDataValue(rawPricing.value, "kind");
+    if (!pricingKind.ok) return err("LLM pricingModel requires an own kind data property");
+    const pricingModel = pricingKind.value === "request"
+      ? { kind: "request" as const }
+      : pricingKind.value === "fixed"
+        ? (() => {
+            const model = ownDataValue(rawPricing.value as object, "model");
+            return model.ok && typeof model.value === "string" && model.value.length > 0
+              ? { kind: "fixed" as const, model: model.value }
+              : undefined;
+          })()
+        : undefined;
+    if (pricingModel === undefined) return err("LLM pricingModel is malformed");
+
+    const aliases = ownDataValue(value, "runScopedOperations");
+    let runScopedOperations: Readonly<Record<string, "sendStructured" | "sendWithTools">> |
+      undefined;
+    if (aliases.ok && aliases.value !== undefined) {
+      const snapshot = snapshotScopedCapabilities(aliases.value);
+      if (!snapshot.ok) return err(`LLM alias map is malformed: ${snapshot.error}`);
+      const parsed: Record<string, "sendStructured" | "sendWithTools"> = Object.create(null);
+      for (const [alias, operation] of Object.entries(
+        snapshot.value as Readonly<Record<string, unknown>>,
+      )) {
+        if (alias === "sendStructured" || alias === "sendWithTools") {
+          return err(`LLM alias '${alias}' cannot replace a standard operation`);
+        }
+        if (operation !== "sendStructured" && operation !== "sendWithTools") {
+          return err(`LLM alias '${alias}' names an unknown operation`);
+        }
+        parsed[alias] = operation;
+      }
+      runScopedOperations = Object.freeze(parsed);
+    }
+
+    return ok(Object.freeze({
+      clientKind: "llm" as const,
+      client: client.value as ScopedLlmCapability["client"],
+      pricingModel,
+      ...(runScopedOperations !== undefined ? { runScopedOperations } : {}),
+    }));
+  } catch (caught) {
+    return err(`LLM binding could not be inspected safely: ${safeErrorMessage(caught)}`);
+  }
+};
+
+const meterScopedLlmCapabilities = (
+  scoped: ScopedCapabilityHandle,
+  minting: MintingAuthority,
+  nodeId: NodeId,
+): Result<ScopedCapabilityHandle, FrameworkError> => {
+  const metered: Record<string, unknown> = Object.create(null);
+  try {
+    for (const [key, value] of Object.entries(scoped)) {
+      const binding = scopedLlmBinding(value);
+      if (!binding.ok) return err(brokerContractViolation(nodeId, binding.error));
+      if (binding.value === undefined) {
+        metered[key] = value;
+        continue;
+      }
+      if (minting.meterLlm === undefined) {
+        return err(brokerContractViolation(
+          nodeId,
+          `broker delivered LLM capability '${key}' without a run spend authority`,
+        ));
+      }
+      const decorated = minting.meterLlm(
+        key as Capability,
+        binding.value,
+        nodeId,
+      );
+      if (!decorated.ok) return decorated;
+      metered[key] = decorated.value;
+    }
+    return ok(Object.freeze(metered) as ScopedCapabilityHandle);
+  } catch (caught) {
+    return err(brokerContractViolation(
+      nodeId,
+      `LLM metering failed across the authority boundary: ${safeErrorMessage(caught)}`,
+    ));
   }
 };
 
@@ -314,7 +435,13 @@ export const runNodeShared = async (
         return err(missingErr);
       }
 
-      const merged = mergeScopedCapabilities(ctx, minted.value);
+      const metered = meterScopedLlmCapabilities(minted.value, minting, nodeId);
+      if (!metered.ok) {
+        emitNodeError(`capability metering refused: ${messageOf(metered.error)}`, metered.error);
+        return err(metered.error);
+      }
+
+      const merged = mergeScopedCapabilities(ctx, metered.value);
       if (!merged.ok) {
         const mergeError: FrameworkError = {
           kind: "validation",

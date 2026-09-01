@@ -67,6 +67,7 @@ const stubLlm: LlmClient = {
 
 const sharedInfra = (): SharedInfra => ({
   llm: stubLlm,
+  llmPricingModel: { kind: "request" },
   redis: stubRedis(),
   spendLedger: createInMemorySpendLedger(),
   tracer: noopTracer,

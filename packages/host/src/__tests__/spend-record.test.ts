@@ -1,12 +1,20 @@
 import { describe, it, expect } from "bun:test";
 import * as fc from "fast-check";
 import type { MicroUsd, PricedSpend, Spend } from "@fuguejs/framework";
-import { NO_SPEND, addSpend, pricedCall, unpricedCall } from "@fuguejs/framework";
+import {
+  NO_MICROS,
+  NO_SPEND,
+  addSpend,
+  pricedCall,
+  unknownUsageCall,
+  unpricedCall,
+} from "@fuguejs/framework";
 import {
   recordOf,
   spendOfHash,
   SPEND_HASH_FIELDS,
-  SPEND_UNPRICED_MARKER_VALUE,
+  SPEND_MARKER_VALUE,
+  SPEND_USAGE_UNKNOWN_FIELD,
   unpricedModelHashField,
 } from "../domain/spend-record.js";
 
@@ -16,11 +24,13 @@ const modelName = fc
   .map((codeUnits) => String.fromCharCode(...codeUnits));
 const arbSpend: fc.Arbitrary<Spend> = fc.oneof(
   fc.record({
+    usage: fc.constantFrom("known" as const, "unknown" as const),
     tokens: fc.nat({ max: 1_000_000 }),
     calls: fc.nat({ max: 100 }),
     usd: fc.nat({ max: 10_000_000 }).map((m): PricedSpend => ({ kind: "priced", micros: micros(m) })),
   }),
   fc.record({
+    usage: fc.constantFrom("known" as const, "unknown" as const),
     tokens: fc.nat({ max: 1_000_000 }),
     calls: fc.nat({ max: 100 }),
     usd: fc
@@ -36,12 +46,13 @@ const arbSpend: fc.Arbitrary<Spend> = fc.oneof(
 const hashOf = (spend: Spend): Readonly<Record<string, string>> => {
   const record = recordOf(spend);
   return {
+    ...(record.usageUnknown ? { [SPEND_USAGE_UNKNOWN_FIELD]: SPEND_MARKER_VALUE } : {}),
     [SPEND_HASH_FIELDS.micros]: String(record.micros),
     [SPEND_HASH_FIELDS.tokens]: String(record.tokens),
     [SPEND_HASH_FIELDS.calls]: String(record.calls),
     ...Object.fromEntries(record.unpricedModels.map((model) => [
       unpricedModelHashField(model),
-      SPEND_UNPRICED_MARKER_VALUE,
+      SPEND_MARKER_VALUE,
     ])),
   };
 };
@@ -91,6 +102,7 @@ describe("spend-record: strict controlled-field grammar", () => {
     ["marker field", { "$unpriced:000": "1" }, "invalid-marker-field"],
     ["non-canonical marker field", { "$unpriced:004A": "1" }, "invalid-marker-field"],
     ["marker value", { [unpricedModelHashField("model")]: "2" }, "invalid-marker-value"],
+    ["usage marker value", { [SPEND_USAGE_UNKNOWN_FIELD]: "2" }, "invalid-marker-value"],
   ] as const)("rejects %s data", (_label, hash, reason) => {
     const parsed = spendOfHash(hash);
     expect(parsed.ok).toBe(false);
@@ -107,10 +119,17 @@ describe("spend-record: append algebra", () => {
       expect(summed.tokens).toBe(ra.tokens + rb.tokens);
       expect(summed.calls).toBe(ra.calls + rb.calls);
       expect(summed.micros).toBe(ra.micros + rb.micros);
+      expect(summed.usageUnknown).toBe(ra.usageUnknown || rb.usageUnknown);
       expect([...summed.unpricedModels].sort()).toEqual(
         [...new Set([...ra.unpricedModels, ...rb.unpricedModels])].sort(),
       );
     }));
+  });
+
+  it("persists unknown usage as an absorbing marker", () => {
+    const unknown = unknownUsageCall({ kind: "priced", micros: NO_MICROS });
+    expect(parseOrThrow(hashOf(unknown))).toEqual(unknown);
+    expect(recordOf(addSpend(pricedCall(1, micros(1)), unknown)).usageUnknown).toBe(true);
   });
 
   it("keeps the priced floor when an unpriced call joins a priced total", () => {

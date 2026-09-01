@@ -27,6 +27,7 @@ Fugue is a DAG-shaped, durable runtime for LLM-bearing workflows. This document 
 19. [Cron Scheduler with Dependencies](#19-cron-scheduler-with-dependencies)
 20. [Architecture Enforcement](#20-architecture-enforcement)
 21. [Prompt Caching](#21-prompt-caching)
+22. [Per-Run Spend Budget](#22-per-run-spend-budget)
 
 ---
 
@@ -1040,7 +1041,7 @@ Cost is computed from the prompt-cache split, so a cached run and an uncached on
 
 **Unpriced models fail closed.** `PRICE_TABLE` is hand-maintained; a model with no entry has an unknown cost, and a `usd` ceiling refuses rather than treating unknown as free. The refusal names the model so the fix is obvious. Token and call ceilings are unaffected — they are perfectly evaluable on any model.
 
-Omitting every ceiling means no enforcement: calls are still metered and logged (`llm.metered`), never refused. Every delegated LLM attempt consumes the calls axis even when it returns a typed failure, malformed `Result`, or throws; without trustworthy usage it consumes zero tokens but cannot retry forever under a calls ceiling.
+Omitting every ceiling means no enforcement: calls are still metered and logged (`llm.metered`), never refused. Every delegated LLM attempt consumes the calls axis even when it returns a typed failure, malformed `Result`, or throws. Missing trustworthy usage is persisted as explicit uncertainty: call-only ceilings remain evaluable, while token and USD ceilings fail closed before another provider attempt.
 
 Nodes can declare the read-only Budget Capability and adapt before they fan out:
 
@@ -1062,8 +1063,8 @@ const plan = createFetchNode({
 it returns canonical per-axis headroom with `basis: "projected"`; each available
 member carries a `unit` discriminant, token/call amounts are numbers, USD amounts
 are branded `MicroUsd`, and all clamp at zero,
-while unknown cost under a USD ceiling is an explicit
-`{ kind: "unpriced", models, observedAtLeast }` member. Budget reads can affect
+while an unpriced model or unknown provider usage is explicit domain data
+(`unpriced` or `unknown-usage`), never fictional numeric availability. Budget reads can affect
 retry-time decisions, just like clock reads can affect time-dependent nodes, so
 node tests should inject `fixedBudgetCapability` from
 `@fuguejs/framework/testing`.
@@ -1076,10 +1077,11 @@ Overshoot is bounded rather than eliminated: the check runs before the call agai
 
 **Spend is durable.** A resumable run builds a fresh NodeContext per execution slice, so the in-process counter alone would let a run that parks for a human decision resume with its budget refilled — five parks, six budgets. A spend ledger (Redis, file, or in-process for a single-process deployment) is hydrated once when a slice starts and appended to as calls settle, so a run that parked already over its ceiling refuses immediately on resume.
 
-A budgeted run whose ledger cannot be READ refuses the slice: an unreadable ledger is indistinguishable from a spent one, and assuming zero is the refill bug by another name. An unbudgeted run carries on — there is no ceiling to protect. A failed ledger WRITE never fails the call, because the tokens are already spent; it is logged at `error` under a declared budget.
+A budgeted run whose ledger cannot be READ refuses the slice: an unreadable ledger is indistinguishable from a spent one, and assuming zero is the refill bug by another name. An unbudgeted run carries on — there is no ceiling to protect. If a budgeted call's ledger WRITE is not acknowledged, the paid provider attempt remains counted in-process but the run fails non-retriably; continuing would let a later slice hydrate stale spend. Unbudgeted calls preserve their provider outcome and log the durability loss.
 
-One Run Spend Authority meters `ctx.llm`, `judgeLlm`, and every custom
-boot-scoped `CapabilityHandle` marked `clientKind: "llm"`. Augmented LLM
+One Run Spend Authority meters `ctx.llm`, `judgeLlm`, every custom
+boot-scoped `CapabilityHandle` marked `clientKind: "llm"`, and explicitly marked
+broker-delivered LLM bindings before they enter a node context. Augmented LLM
 subtypes declare a `runScopedOperations` alias map; the host interprets it into
 a frozen facade bound to the metered standard surface, so adapter code cannot
 retain a boot client or bypass the authority through target-bound self-calls. All clients share one reservation gate, spent view, ceiling, and

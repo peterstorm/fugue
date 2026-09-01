@@ -23,7 +23,10 @@ import { createInMemorySpendLedger } from "./spend-ledger-memory.js";
 import { buildDocumentsCapability, describeDocumentsAdapter } from "./documents-capability.js";
 import { buildCdratorCapability } from "./cdrator-capability.js";
 import { buildOracleCapability, connectStringHost } from "./oracle-capability.js";
-import { createHostLlmClient } from "../entrypoint-wiring.js";
+import {
+  createHostLlmClient,
+  hostLlmPricingModel,
+} from "../entrypoint-wiring.js";
 import { createLocalGitAdapter, createBunGitAdapter } from "./git-sync.js";
 import { createModuleLoader } from "./module-loader.js";
 import { logWithoutThrowing } from "../hitl/diagnostic-logging.js";
@@ -117,6 +120,7 @@ export const buildRuntimeDeps = async (
   const capabilities = await buildRuntimeCapabilities(config, logger, logContext);
   const sharedInfra: SharedInfra = {
     llm: await createHostLlmClient(config),
+    llmPricingModel: hostLlmPricingModel(config),
     redis,
     // STOCK SELECTION IS EXPLICITLY REDIS-FIRST: the memory adapter carries
     // metadata role `redis-fallback`, so `createNodeContextForDag` selects a

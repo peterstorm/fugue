@@ -12,6 +12,7 @@ const pricedSpend = fc.record({
   calls: nonNegativeInteger,
   micros: nonNegativeInteger,
 }).map(({ tokens, calls, micros }): Spend => ({
+  usage: "known",
   tokens,
   calls,
   usd: { kind: "priced", micros: micros as MicroUsd },
@@ -31,6 +32,7 @@ const declaredCeilings = fc
 describe("remainingFor", () => {
   it("an unbudgeted run remains total and distinct", () => {
     expect(remainingFor(undefined, {
+      usage: "known",
       tokens: 99,
       calls: 2,
       usd: { kind: "priced", micros: 30 as MicroUsd },
@@ -40,6 +42,7 @@ describe("remainingFor", () => {
   it("clamps reached numeric ceilings to zero", () => {
     const limits = ceilings([{ kind: "tokens", limit: 10 }])!;
     expect(remainingFor(limits, {
+      usage: "known",
       tokens: 12,
       calls: 1,
       usd: { kind: "priced", micros: 0 as MicroUsd },
@@ -56,6 +59,7 @@ describe("remainingFor", () => {
       { kind: "usd", limit: 500 as MicroUsd },
     ])!;
     const projected: Spend = {
+      usage: "known",
       tokens: 3,
       calls: 1,
       usd: { kind: "priced", micros: 20 as MicroUsd },
@@ -82,9 +86,31 @@ describe("remainingFor", () => {
     expect(second.headroom).toEqual(first.headroom);
   });
 
+  it("reports unknown token and USD headroom without inventing availability", () => {
+    const limits = ceilings([
+      { kind: "tokens", limit: 500 },
+      { kind: "calls", limit: 5 },
+      { kind: "usd", limit: 500 as MicroUsd },
+    ])!;
+    const remaining = remainingFor(limits, {
+      usage: "unknown",
+      tokens: 3,
+      calls: 1,
+      usd: { kind: "priced", micros: 20 as MicroUsd },
+    });
+
+    if (remaining.kind !== "budgeted") throw new Error("expected budgeted");
+    expect(remaining.headroom.map((headroom) => headroom.kind)).toEqual([
+      "unknown-usage",
+      "unknown-usage",
+      "available",
+    ]);
+  });
+
   it("reports deeply frozen unpriced USD headroom as domain data, never a number", () => {
     const limits = ceilings([{ kind: "usd", limit: 500 as MicroUsd }])!;
     const remaining = remainingFor(limits, {
+      usage: "known",
       tokens: 3,
       calls: 1,
       usd: { kind: "unpriced", models: ["new-model"], knownMicros: 20 as MicroUsd },
@@ -128,6 +154,7 @@ describe("remainingFor", () => {
       (limits, names, knownMicros) => {
         const [head, ...rest] = [...names].sort();
         const remaining = remainingFor(limits, {
+          usage: "known",
           tokens: 0,
           calls: 1,
           usd: {
@@ -147,11 +174,13 @@ describe("remainingFor", () => {
 describe("fixedBudgetCapability", () => {
   it("provides deterministic fresh snapshots for node tests", () => {
     const fake = fixedBudgetCapability({
+      usage: "known",
       tokens: 7,
       calls: 1,
       usd: { kind: "priced", micros: 3 as MicroUsd },
     });
     expect(fake.spent()).toEqual({
+      usage: "known",
       tokens: 7,
       calls: 1,
       usd: { kind: "priced", micros: 3 as MicroUsd },
@@ -164,6 +193,7 @@ describe("fixedBudgetCapability", () => {
 describe("snapshotSpend", () => {
   it("returns fresh deeply frozen snapshots isolated from consumer mutation", () => {
     const source: Spend = {
+      usage: "known",
       tokens: 4,
       calls: 1,
       usd: { kind: "unpriced", models: ["x"], knownMicros: 2 as MicroUsd },

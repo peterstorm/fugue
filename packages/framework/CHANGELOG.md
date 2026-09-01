@@ -25,11 +25,17 @@ pre-1.0, so a minor bump may carry breaking changes.
   require `budget: null` when no budget capability is wired. Prefer
   `makeNodeContext`, whose `NodeContextInit.budget` remains optional.
 - **Breaking (source):** a `CapabilityHandle<K>` whose registered client extends
-  `LlmClient` must declare `clientKind: "llm"`. Non-LLM handles cannot declare
-  this field. An augmented LLM subtype must additionally provide a declarative
-  `runScopedOperations` alias map. The host interprets that map into a frozen
-  run-scoped facade, so adapter code cannot retain a boot client and bypass the
-  shared Run Spend Authority.
+  `LlmClient` must declare `clientKind: "llm"` and a `pricingModel` policy.
+  Non-LLM handles cannot declare these fields, and mixed LLM/non-LLM registry
+  unions are rejected. An augmented LLM subtype must additionally provide a
+  declarative string-keyed `runScopedOperations` alias map. The host interprets
+  that map into a frozen run-scoped facade, so adapter code cannot retain a boot
+  client and bypass the shared Run Spend Authority.
+- **Breaking (source/wire):** `Spend` now carries `usage: "known" | "unknown"`.
+  Unknown usage is durable and absorbing; token/USD admission fails closed,
+  while call-only ceilings remain evaluable.
+- Broker-delivered custom LLM capabilities use explicit scoped LLM metadata and
+  must pass through the host-owned run meter before dispatch-time merge.
 
 ## [0.5.1] — 2026-08-24
 

@@ -169,7 +169,7 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
         if (!startedJob.ok) return err(startedJob.error);
         const fencedJob = deadlineFencedJob(startedJob.value, assertExecutionAuthorized);
         const slice = (async () => {
-          const { ctx, origin } = await createNodeContextForDag(
+          const { ctx, origin, meterMintedLlm } = await createNodeContextForDag(
             sharedInfra,
             registered,
             req.runId,
@@ -197,7 +197,9 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
               assertExecutionAuthorized();
               await req.onDecisionConsumed(nodeId);
             },
-            ...(broker !== undefined && origin !== undefined ? { minting: { broker, origin } } : {}),
+            ...(broker !== undefined && origin !== undefined
+              ? { minting: { broker, origin, meterLlm: meterMintedLlm } }
+              : {}),
           });
         })();
 

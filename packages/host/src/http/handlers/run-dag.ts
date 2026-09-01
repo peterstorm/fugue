@@ -10,7 +10,13 @@
  */
 
 import type { Context } from "hono";
-import type { Result, NodeContext, FrameworkError, InvocationOrigin } from "@fuguejs/framework";
+import type {
+  Result,
+  NodeContext,
+  FrameworkError,
+  InvocationOrigin,
+  ScopedLlmMeter,
+} from "@fuguejs/framework";
 import { formatFrameworkError, safeErrorMessage, tryDagId } from "@fuguejs/framework";
 import type { DagDef } from "@fuguejs/framework";
 import type { HostEnv } from "../env.js";
@@ -73,6 +79,7 @@ export interface RunDagDeps {
     input: I,
     ctx: NodeContext,
     origin: InvocationOrigin | undefined,
+    meterMintedLlm: ScopedLlmMeter,
   ) => Promise<Result<O, FrameworkError>>;
   readonly clock: () => number;
   /** Optional structured diagnostics for failures settling after a hard deadline. */
@@ -250,6 +257,7 @@ export const createRunDagHandler = (
 
       let ctx: NodeContext;
       let origin: InvocationOrigin | undefined;
+      let meterMintedLlm: ScopedLlmMeter;
       try {
         // `await` preserves the setup-guard semantics: a synchronous throw or a
         // rejected promise from `createContext` both land in this catch.
@@ -259,6 +267,7 @@ export const createRunDagHandler = (
         const built = await deps.createContext(registered, controller.signal, identity);
         ctx = built.ctx;
         origin = built.origin;
+        meterMintedLlm = built.meterMintedLlm;
       } catch (setupErr) {
         markFailure(permit, deps.clock(), circuitConfig);
         throw setupErr;
@@ -281,7 +290,13 @@ export const createRunDagHandler = (
 
       try {
         const completion = await settleBeforeDeadline(
-          deps.executeDag(registered.dag, parseResult.data, ctx, origin),
+          deps.executeDag(
+            registered.dag,
+            parseResult.data,
+            ctx,
+            origin,
+            meterMintedLlm,
+          ),
           timeoutMs,
           () => controller.abort(HOST_TIMEOUT),
           {

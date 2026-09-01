@@ -21,7 +21,7 @@
 import type { DagId, RunId, NodeId } from "@fuguejs/framework";
 
 // `TenantId` is the SINGLE canonical, hard-branded tenant identifier defined in
-// `./tenant` (the supervisor's resolved security principal). Importing the type
+// `./tenant-id` (the supervisor's resolved security principal). Importing the type
 // here — rather than re-declaring a structurally-identical brand — keeps exactly
 // one `unique symbol` brand in the codebase, so the routed `Tenant.id` the
 // supervisor resolves at the boundary is the SAME type the key builders demand.

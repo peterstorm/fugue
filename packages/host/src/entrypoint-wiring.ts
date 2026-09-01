@@ -3,7 +3,7 @@ import {
   OpenAILlmClient,
   safeErrorMessage,
 } from "@fuguejs/framework";
-import type { LlmClient } from "@fuguejs/framework";
+import type { LlmClient, LlmPricingModel } from "@fuguejs/framework";
 import type { HostConfig } from "./domain/config.js";
 import type { HostError } from "./domain/host-error.js";
 import type { LogPort } from "./ports.js";
@@ -137,6 +137,14 @@ export const planHostLlm = (config: HostConfig): HostLlmPlan => {
     apiKey: config.OPENAI_API_KEY,
     baseUrl: "https://api.openai.com/v1",
   };
+};
+
+/** Bind the provider's effective model policy at host composition. */
+export const hostLlmPricingModel = (config: HostConfig): LlmPricingModel => {
+  const plan = planHostLlm(config);
+  return plan.provider === "azure"
+    ? { kind: "fixed", model: plan.deployment }
+    : { kind: "request" };
 };
 
 type LoadAnthropicClient = (apiKey: string | undefined) => Promise<LlmClient>;

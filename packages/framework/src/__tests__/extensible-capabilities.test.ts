@@ -43,11 +43,18 @@ interface AugmentedCritic extends LlmClient {
   readonly critique: LlmClient["sendStructured"];
 }
 
+declare const symbolAlias: unique symbol;
+interface SymbolCritic extends LlmClient {
+  readonly [symbolAlias]: LlmClient["sendStructured"];
+}
+
 declare module "../types/node.js" {
   interface CapabilityRegistry {
     db: TestDbCapability;
     criticLlm: LlmClient;
     augmentedCritic: AugmentedCritic;
+    mixedCritic: LlmClient | TestDbCapability;
+    symbolCritic: SymbolCritic;
   }
 }
 
@@ -56,6 +63,7 @@ const capabilityHandleKindTypePins = (llm: LlmClient, db: TestDbCapability): voi
     name: "criticLlm",
     client: llm,
     clientKind: "llm",
+    pricingModel: { kind: "request" },
   };
   void marked;
 
@@ -69,6 +77,7 @@ const capabilityHandleKindTypePins = (llm: LlmClient, db: TestDbCapability): voi
     name: "augmentedCritic",
     client: augmented,
     clientKind: "llm",
+    pricingModel: { kind: "request" },
     runScopedOperations: {
       critique: "sendStructured",
     },
@@ -78,17 +87,36 @@ const capabilityHandleKindTypePins = (llm: LlmClient, db: TestDbCapability): voi
     name: "augmentedCritic",
     client: augmented,
     clientKind: "llm",
+    pricingModel: { kind: "request" },
+  };
+  // @ts-expect-error -- a registry union mixing LLM and non-LLM clients is forbidden.
+  const mixed: CapabilityHandle<"mixedCritic"> = {
+    name: "mixedCritic",
+    client: llm,
+    clientKind: "llm",
+    pricingModel: { kind: "request" },
+  };
+  // @ts-expect-error -- runtime facades enumerate string aliases only.
+  const symbolKeyed: CapabilityHandle<"symbolCritic"> = {
+    name: "symbolCritic",
+    client: llm as SymbolCritic,
+    clientKind: "llm",
+    pricingModel: { kind: "request" },
+    runScopedOperations: {},
   };
   const executableComposer: CapabilityHandle<"augmentedCritic"> = {
     name: "augmentedCritic",
     client: augmented,
     clientKind: "llm",
+    pricingModel: { kind: "request" },
     // @ts-expect-error -- executable composition callbacks are not an authority proof.
     composeRunClient: () => augmented,
   };
   void bypass;
   void falseMarker;
   void composed;
+  void mixed;
+  void symbolKeyed;
   void executableComposer;
   void uncomposed;
 };

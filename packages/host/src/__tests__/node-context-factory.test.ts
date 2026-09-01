@@ -49,7 +49,8 @@ import { createFileSpendLedger } from "../adapters/spend-ledger-file.js";
 import {
   recordOf,
   SPEND_HASH_FIELDS,
-  SPEND_UNPRICED_MARKER_VALUE,
+  SPEND_MARKER_VALUE,
+  SPEND_USAGE_UNKNOWN_FIELD,
   unpricedModelHashField,
 } from "../domain/spend-record.js";
 
@@ -192,6 +193,7 @@ const baseSharedInfra = (
   capabilities: SharedInfra["capabilities"] = [],
 ): SharedInfra => ({
   llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
+  llmPricingModel: { kind: "request" },
   redis: createMockRedis().redis,
   spendLedger: createInMemorySpendLedger(),
   tracer: noopTracer,
@@ -926,8 +928,18 @@ describe("createNodeContextForDag — one authority across main/judge/custom LLM
     const captured = collectLogs();
     const shared: SharedInfra = {
       ...baseSharedInfra([
-        { name: "judgeLlm", client: judge.llm, clientKind: "llm" },
-        { name: "criticLlm", client: critic.llm, clientKind: "llm" },
+        {
+          name: "judgeLlm",
+          client: judge.llm,
+          clientKind: "llm",
+          pricingModel: { kind: "request" },
+        },
+        {
+          name: "criticLlm",
+          client: critic.llm,
+          clientKind: "llm",
+          pricingModel: { kind: "request" },
+        },
       ]),
       llm: main.llm,
       logger: captured.logger,
@@ -997,6 +1009,7 @@ describe("createNodeContextForDag — one authority across main/judge/custom LLM
       name: "augmentedLlm",
       client: augmented,
       clientKind: "llm",
+      pricingModel: { kind: "request" },
       runScopedOperations: { sendAlias: "sendStructured" },
     }]);
     const captured = collectLogs();
@@ -1020,6 +1033,34 @@ describe("createNodeContextForDag — one authority across main/judge/custom LLM
     ).toBe("augmentedLlm");
   });
 
+  it("meters a broker-delivered custom LLM through the same authority and ledger", async () => {
+    const brokerLlm = fakeLlm(2, 1);
+    const ledger = createInMemorySpendLedger();
+    const built = await createTestContext({
+      shared: { ...baseSharedInfra(), spendLedger: ledger },
+      dag: makeDag({ llmBudget: { calls: 1 } }),
+    });
+    const decorated = built.meterMintedLlm(
+      "criticLlm",
+      {
+        clientKind: "llm",
+        client: brokerLlm.llm,
+        pricingModel: { kind: "request" },
+      },
+      testNodeId,
+    );
+    if (!decorated.ok) throw new Error("expected broker LLM decoration");
+
+    expect((await decorated.value.sendStructured(structuredReq())).ok).toBe(true);
+    const refused = await decorated.value.sendStructured(structuredReq());
+
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.error.kind).toBe("llm-budget-exceeded");
+    expect(brokerLlm.calls).toHaveLength(1);
+    const stored = await ledger.read(testRunId);
+    expect(stored.ok && stored.value.calls).toBe(1);
+  });
+
   it("rehydrates a main+judge total from a fresh file ledger/context and refuses the next call", async () => {
     const root = mkdtempSync(join(tmpdir(), "fugue-context-file-ledger-"));
     try {
@@ -1028,7 +1069,12 @@ describe("createNodeContextForDag — one authority across main/judge/custom LLM
       const main = fakeLlm(10, 5);
       const judge = fakeLlm(10, 5);
       const shared: SharedInfra = {
-        ...baseSharedInfra([{ name: "judgeLlm", client: judge.llm, clientKind: "llm" }]),
+        ...baseSharedInfra([{
+          name: "judgeLlm",
+          client: judge.llm,
+          clientKind: "llm",
+          pricingModel: { kind: "request" },
+        }]),
         llm: main.llm,
         spendLedger: fileLedger.value,
       };
@@ -1495,9 +1541,9 @@ describe("createNodeContextForDag — spend survives a park/resume (FR-B-006)", 
     expect(String(warned?.data?.["error"] ?? "")).toContain("ledger transport rejected");
   });
 
-  it("does not fail a call when the ledger APPEND fails — the tokens are already spent", async () => {
-    // Refusing the result would waste the call and lose the output too. What is
-    // lost is durability, and that is what gets logged.
+  it("fails a budgeted call non-retriably when the ledger append is not acknowledged", async () => {
+    // Provider spend happened, but a resumable budget cannot continue from a
+    // stale durable total. The slice stops without retrying the additive write.
     const writeOnlyFailure = ledgerFailureFixture({
       add: async () => err({ kind: "redis-unavailable", operation: "spend-ledger add" }),
     });
@@ -1505,7 +1551,10 @@ describe("createNodeContextForDag — spend survives a park/resume (FR-B-006)", 
     const shared = sharedWith(llm, writeOnlyFailure);
 
     const slice = await sliceFor(shared, makeDag({ llmBudget: { tokens: 1000 } }));
-    expect((await slice.sendStructured(structuredReq())).ok).toBe(true);
+    const result = await slice.sendStructured(structuredReq());
+    expect(result.ok).toBe(false);
+    if (result.ok || result.error.kind !== "node-crash") throw new Error("expected node-crash");
+    expect(result.error.retriability).toBe("non-retriable");
     expect(calls.length).toBe(1);
   });
 });
@@ -1523,16 +1572,34 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
   const capableRedis = () => {
     const hashes = new Map<string, Map<string, string>>();
     const seen: string[] = [];
+    const commits: Array<{
+      readonly checkpointKey: string;
+      readonly spendKey: string;
+      readonly ttlSec: number;
+    }> = [];
     const base = createMockRedis().redis;
     const redis = {
       ...base,
       hGetAll: async (key: string) => ok(Object.fromEntries(hashes.get(key) ?? new Map())),
+      commitCheckpointAndRetainSpend: async (commit) => {
+        commits.push({
+          checkpointKey: commit.checkpointKey,
+          spendKey: commit.spendKey,
+          ttlSec: commit.ttlSec,
+        });
+        return base.set(
+          commit.checkpointKey,
+          commit.checkpointValue,
+          { expiresInSec: commit.ttlSec },
+        );
+      },
       appendSpend: async (append: RedisSpendAppend) => {
         seen.push(append.key);
         const record = recordOf(append.delta);
         const hash = hashes.get(append.key) ?? new Map<string, string>();
+        if (record.usageUnknown) hash.set(SPEND_USAGE_UNKNOWN_FIELD, SPEND_MARKER_VALUE);
         for (const model of record.unpricedModels) {
-          hash.set(unpricedModelHashField(model), SPEND_UNPRICED_MARKER_VALUE);
+          hash.set(unpricedModelHashField(model), SPEND_MARKER_VALUE);
         }
         for (const [field, by] of [
           [SPEND_HASH_FIELDS.micros, record.micros],
@@ -1545,7 +1612,7 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
         return ok(undefined);
       },
     } as unknown as RedisPort;
-    return { redis, hashes, seen };
+    return { redis, hashes, seen, commits };
   };
 
   const sharedWithRedis = (llm: LlmClient, redis: RedisPort, logger: LogPort): SharedInfra => ({
@@ -1569,7 +1636,11 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
     expect(line).toBeDefined();
     expect(line?.level).toBe("error");
     const reason = String(line?.data?.["reason"] ?? "");
-    for (const primitive of ["hGetAll", "appendSpend"]) {
+    for (const primitive of [
+      "hGetAll",
+      "appendSpend",
+      "commitCheckpointAndRetainSpend",
+    ]) {
       expect(reason).toContain(primitive);
     }
     expect(String(line?.data?.["consequence"] ?? "")).toContain("restart");
@@ -1641,6 +1712,32 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
     expect(fallback.ok).toBe(true);
     if (!fallback.ok) return;
     expect(fallback.value).toEqual(NO_SPEND);
+  });
+
+  it("atomically refreshes spend retention when a later checkpoint is written", async () => {
+    const { llm } = fakeLlm(10, 5);
+    const capable = capableRedis();
+    const shared = sharedWithRedis(llm, capable.redis, collectLogs().logger);
+    const { ctx } = await createNodeContextForDag(
+      shared,
+      makeDag({ checkpointTtlMs: 9_000 }),
+      testRunId,
+      new AbortController().signal,
+      adminIdentity,
+      FACTORY_AGENT_MAP,
+    );
+    if (ctx.llm === null || ctx.checkpointWriter === null) {
+      throw new Error("expected metered LLM and checkpoint writer");
+    }
+
+    expect((await ctx.llm.sendStructured(structuredReq())).ok).toBe(true);
+    await ctx.checkpointWriter.write(testRunId, testNodeId, { after: "llm" });
+
+    expect(capable.commits).toEqual([{
+      checkpointKey: buildCheckpointKey(testTenant, testDagId, testRunId, testNodeId),
+      spendKey: `fugue:${testTenant}:${testDagId}:${testRunId}:$spend`,
+      ttlSec: 9,
+    }]);
   });
 
   it("hydrates a resumed slice from the REDIS ledger, not from zero", async () => {

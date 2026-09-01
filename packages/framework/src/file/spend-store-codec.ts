@@ -11,6 +11,7 @@ import { fileCacheError } from "./boundary-error.js";
 interface FileSpendRecordV1 {
   readonly schemaVersion: 1;
   readonly runId: RunId;
+  readonly usage: "known" | "unknown";
   readonly tokens: number;
   readonly calls: number;
   readonly micros: number;
@@ -42,7 +43,15 @@ const parseRecord = (
   operation: SpendStoreOperation,
 ): Result<FileSpendRecordV1, FrameworkError> => {
   if (!isRecord(value)) return err(codecError(operation, "spend record must be an object"));
-  const expectedKeys = ["calls", "micros", "runId", "schemaVersion", "tokens", "unpricedModels"];
+  const expectedKeys = [
+    "calls",
+    "micros",
+    "runId",
+    "schemaVersion",
+    "tokens",
+    "unpricedModels",
+    "usage",
+  ];
   if (Object.keys(value).sort().join("\u0000") !== expectedKeys.join("\u0000")) {
     return err(codecError(operation, "spend record fields do not match schema V1"));
   }
@@ -53,12 +62,16 @@ const parseRecord = (
   if (!isFigure(value.tokens) || !isFigure(value.calls) || !isFigure(value.micros)) {
     return err(codecError(operation, "spend figures must be non-negative safe integers"));
   }
+  if (value.usage !== "known" && value.usage !== "unknown") {
+    return err(codecError(operation, "spend usage must be known or unknown"));
+  }
   if (!canonicalModels(value.unpricedModels)) {
     return err(codecError(operation, "unpricedModels must be sorted unique strings"));
   }
   return ok(Object.freeze({
     schemaVersion: 1,
     runId: expectedRunId,
+    usage: value.usage,
     tokens: value.tokens,
     calls: value.calls,
     micros: value.micros,
@@ -70,6 +83,7 @@ const spendOfFileRecord = (record: FileSpendRecordV1): Spend => {
   const [head, ...rest] = record.unpricedModels;
   const micros = record.micros as MicroUsd;
   return {
+    usage: record.usage,
     tokens: record.tokens,
     calls: record.calls,
     usd: head === undefined
@@ -106,6 +120,7 @@ export const serializeFileSpendRecord = (
   const candidate = {
     schemaVersion: 1,
     runId,
+    usage: spend.usage,
     tokens: spend.tokens,
     calls: spend.calls,
     micros: costFloor(spend.usd),

@@ -406,6 +406,15 @@ const persistedBreachSchema = z.discriminatedUnion("kind", [
     models: z.tuple([z.string()], z.string()),
     observedAtLeast: PersistedMicroUsdSchema,
   }),
+  z.object({
+    kind: z.literal("unknown-usage"),
+    ceiling: z.discriminatedUnion("kind", [
+      z.object({ kind: z.literal("tokens"), limit: z.number() }),
+      persistedUsdCeilingSchema,
+    ]),
+    basis: persistedBasisSchema,
+    observedAtLeast: z.number(),
+  }),
 ]);
 const PersistedCapabilitySchema: z.ZodType<Capability> = z.string().transform((value) => value as Capability);
 const persistedFrameworkErrorKinds = z.enum([

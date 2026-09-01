@@ -30,6 +30,7 @@ import type { Breach, Ceilings, Result, RunId, Spend } from "@fuguejs/framework"
 import {
   NO_SPEND,
   addSpend,
+  costFloor,
   err,
   firstBreach,
   maxSpend,
@@ -244,6 +245,40 @@ export const admit = (
   if (projectedBreach !== undefined) return refusal(projectedBreach);
 
   return { kind: "admit", state: reserve(state) };
+};
+
+export type CandidatePricing =
+  | { readonly kind: "priced"; readonly model: string }
+  | { readonly kind: "unpriced"; readonly model: string };
+
+/**
+ * Model-aware admission command. The shell resolves provider composition into
+ * candidate pricing data; this pure core owns the fail-closed USD rule.
+ */
+export const admitCandidate = (
+  meter: LlmMeter,
+  runId: RunId,
+  state: ReservationState,
+  limits: Ceilings | undefined,
+  candidate: CandidatePricing,
+): AdmitDecision => {
+  const usdCeiling = limits?.find((ceiling) => ceiling.kind === "usd");
+  if (candidate.kind === "unpriced" && usdCeiling?.kind === "usd") {
+    const settled = spendFor(meter, runId);
+    return {
+      kind: "refuse",
+      breach: {
+        kind: "unpriced",
+        ceiling: usdCeiling,
+        basis: "projected",
+        models: [candidate.model],
+        observedAtLeast: costFloor(settled.usd),
+      },
+      settled,
+      inFlight: state.inFlight,
+    };
+  }
+  return admit(meter, runId, state, limits);
 };
 
 export type ReservationInvariantError = {

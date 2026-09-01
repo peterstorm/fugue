@@ -35,7 +35,10 @@ import { assertLosslessEvent } from "@fuguejs/framework/file";
 import type { RegisteredDag } from "../domain/registry.js";
 import type { AuthIdentity, AgentClientMap } from "../domain/auth.js";
 import type { RedisPort, SharedInfra, LogPort, SpendLedgerPort } from "../ports.js";
-import { extractClients } from "../domain/capability-manager.js";
+import {
+  extractClients,
+  runScopedLlmFacade,
+} from "../domain/capability-manager.js";
 import { invocationOriginForIdentity, subjectTokenForIdentity } from "../domain/run-context.js";
 import type { NodeContextForDag } from "../domain/run-context.js";
 import type { SubjectToken } from "../domain/auth.js";
@@ -60,10 +63,11 @@ interface ResolvedTtl {
 // ── Key Prefixing (delegated to domain/cache-keys.ts) ─────────────────────
 
 export { cacheKeyPrefix, buildCacheKey, checkpointKeyPrefix, buildCheckpointKey } from "../domain/cache-keys.js";
-import { buildCacheKey, buildCheckpointKey } from "../domain/cache-keys.js";
+import { buildCacheKey, buildCheckpointKey, buildSpendKey } from "../domain/cache-keys.js";
 import type { TenantId } from "../domain/cache-keys.js";
 import { tenantId } from "../domain/tenant.js";
 import { formatHostError } from "../domain/host-error.js";
+import type { HostError } from "../domain/host-error.js";
 
 // ── Adapters (wrap Redis with namespacing) ─────────────────────────────────
 
@@ -244,6 +248,10 @@ export const createNamespacedCheckpointWriter = (
   runId: RunId,
   checkpointTtlSec: number | undefined,
   logger: LogPort,
+  commitCheckpointAndRetainSpend?: (
+    checkpointKey: string,
+    checkpointValue: string,
+  ) => Promise<Result<string | null, HostError>>,
 ): CheckpointWriter => {
   const report = (
     level: "warn" | "error",
@@ -280,9 +288,11 @@ export const createNamespacedCheckpointWriter = (
       }
       let setResult: Awaited<ReturnType<RedisPort["set"]>>;
       try {
-        setResult = checkpointTtlSec !== undefined
-          ? await redis.set(fullKey, serialized, { expiresInSec: checkpointTtlSec })
-          : await redis.set(fullKey, serialized);
+        setResult = commitCheckpointAndRetainSpend !== undefined
+          ? await commitCheckpointAndRetainSpend(fullKey, serialized)
+          : checkpointTtlSec !== undefined
+            ? await redis.set(fullKey, serialized, { expiresInSec: checkpointTtlSec })
+            : await redis.set(fullKey, serialized);
       } catch (error) {
         const message = safeErrorMessage(error);
         writeFailures.failed({
@@ -361,7 +371,12 @@ const readSpendLedger = async (
   }
 };
 
-type HydratedLedger =
+type CheckpointCommit = (
+  checkpointKey: string,
+  checkpointValue: string,
+) => Promise<Result<string | null, HostError>>;
+
+type HydratedLedger = (
   | {
       readonly ledger: SpendLedgerPort;
       readonly limits?: undefined;
@@ -371,7 +386,8 @@ type HydratedLedger =
       readonly ledger: SpendLedgerPort;
       readonly limits: Ceilings;
       readonly hydrated: Extract<HydratedSpend, { readonly kind: "known" }>;
-    };
+    }
+) & { readonly checkpointCommit?: CheckpointCommit };
 
 const selectAndHydrateSpendLedger = async (args: {
   readonly shared: SharedInfra;
@@ -383,6 +399,7 @@ const selectAndHydrateSpendLedger = async (args: {
 }): Promise<HydratedLedger> => {
   const { shared, tenant, dagId, runId, ttl, limits } = args;
   let ledger = shared.spendLedger;
+  let checkpointCommit: CheckpointCommit | undefined;
   if (ledger.metadata.role === "redis-fallback") {
     const ledgerRedis = spendLedgerRedis(shared.redis);
     if (ledgerRedis.ok) {
@@ -392,6 +409,17 @@ const selectAndHydrateSpendLedger = async (args: {
         dagId,
         ...(ttl.checkpointTtlSec !== undefined ? { ttlSec: ttl.checkpointTtlSec } : {}),
       });
+      const checkpointTtlSec = ttl.checkpointTtlSec;
+      if (checkpointTtlSec !== undefined) {
+        const spendKey = buildSpendKey(tenant, dagId, runId);
+        checkpointCommit = (checkpointKey, checkpointValue) =>
+          ledgerRedis.value.commitCheckpointAndRetainSpend({
+            checkpointKey,
+            checkpointValue,
+            spendKey,
+            ttlSec: checkpointTtlSec,
+          });
+      }
     } else {
       logWithoutThrowing(
         shared.logger,
@@ -423,13 +451,26 @@ const selectAndHydrateSpendLedger = async (args: {
       runId: runId as string,
       error: formatHostError(prior.error),
     });
-    return { ledger, hydrated: { kind: "unknown" } };
+    return {
+      ledger,
+      hydrated: { kind: "unknown" },
+      ...(checkpointCommit !== undefined ? { checkpointCommit } : {}),
+    };
   }
 
   const hydrated = { kind: "known" as const, spend: prior.value };
   return limits === undefined
-    ? { ledger, hydrated }
-    : { ledger, limits, hydrated };
+    ? {
+        ledger,
+        hydrated,
+        ...(checkpointCommit !== undefined ? { checkpointCommit } : {}),
+      }
+    : {
+        ledger,
+        limits,
+        hydrated,
+        ...(checkpointCommit !== undefined ? { checkpointCommit } : {}),
+      };
 };
 
 const createSpendBindings = (
@@ -452,11 +493,46 @@ const createSpendBindings = (
         hydrated: selection.hydrated,
       });
 
+  const meterMintedLlm: NodeContextForDag["meterMintedLlm"] = (
+    clientKey,
+    binding,
+    nodeId,
+  ) => {
+    try {
+      const metered = createMeteredLlm(
+        binding.client,
+        clientKey,
+        authority,
+        binding.pricingModel,
+      );
+      return ok(
+        binding.runScopedOperations === undefined
+          ? metered
+          : runScopedLlmFacade(metered, binding.runScopedOperations),
+      );
+    } catch (error) {
+      return err({
+        kind: "validation",
+        nodeId,
+        message:
+          `broker-delivered LLM capability '${clientKey}' could not be metered: ` +
+          safeErrorMessage(error),
+      });
+    }
+  };
+
   return {
     authority,
-    llm: createMeteredLlm(shared.llm, "llm", authority),
+    meterMintedLlm,
+    llm: createMeteredLlm(
+      shared.llm,
+      "llm",
+      authority,
+      shared.llmPricingModel,
+    ),
     capabilities: extractClients(shared.capabilities, {
-      llm: (clientKey, client) => createMeteredLlm(client, clientKey, authority),
+      llm: (clientKey, client, pricingModel) =>
+        createMeteredLlm(client, clientKey, authority, pricingModel),
     }),
   };
 };
@@ -589,7 +665,7 @@ export const createNodeContextForDag = async (
     ttl,
     limits,
   });
-  const { authority, llm, capabilities } = createSpendBindings(
+  const { authority, meterMintedLlm, llm, capabilities } = createSpendBindings(
     shared,
     dagId,
     runId,
@@ -604,6 +680,7 @@ export const createNodeContextForDag = async (
     runId,
     ttl.checkpointTtlSec,
     shared.logger,
+    hydratedLedger.checkpointCommit,
   );
 
   // Per-DAG prompts take precedence; fall back to shared (host-level) prompts.
@@ -637,5 +714,5 @@ export const createNodeContextForDag = async (
     capabilities,
   });
 
-  return { ctx, origin };
+  return { ctx, origin, meterMintedLlm };
 };

@@ -1,7 +1,13 @@
 import { fwLogger } from "../logger.js";
 import type { CacheTtl } from "../types/llm.js";
 import type { Spend } from "../types/spend.js";
-import { pricedCall, unpricedCall, usdToMicros } from "../types/spend.js";
+import {
+  NO_MICROS,
+  pricedCall,
+  unknownUsageCall,
+  unpricedCall,
+  usdToMicros,
+} from "../types/spend.js";
 import type { TokenUsage } from "../types/token-usage.js";
 import { totalTokens, uncachedInputTokens } from "../types/token-usage.js";
 
@@ -147,6 +153,14 @@ export const costUsd = (
  * one settled call is the granularity the overshoot-by-one guarantee is stated
  * at.
  */
+/** One attempted call whose provider did not report trustworthy usage. */
+export const spendOfUnknownCall = (model: string): Spend =>
+  unknownUsageCall(
+    Object.hasOwn(PRICE_TABLE, model)
+      ? { kind: "priced", micros: NO_MICROS }
+      : { kind: "unpriced", models: [model], knownMicros: NO_MICROS },
+  );
+
 export const spendOfCall = (
   model: string,
   usage: TokenUsage,

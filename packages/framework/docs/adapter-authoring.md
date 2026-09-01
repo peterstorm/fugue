@@ -131,13 +131,14 @@ export const createVectorAdapter = (config: VectorConfig): CapabilityHandle<"vec
 ### LLM clients must opt into shared metering
 
 If the registry client extends `LlmClient`, the conditional handle type requires
-`clientKind: "llm"`:
+`clientKind: "llm"` plus a composition-owned `pricingModel` policy:
 
 ```ts
 export const createCriticAdapter = (client: LlmClient): CapabilityHandle<"criticLlm"> => ({
   name: "criticLlm",
   client,
   clientKind: "llm",
+  pricingModel: { kind: "request" },
 });
 ```
 
@@ -162,13 +163,17 @@ export const createAugmentedCriticAdapter = (
   name: "augmentedCritic",
   client: provider,
   clientKind: "llm",
+  pricingModel: { kind: "fixed", model: "gpt-4o" },
   runScopedOperations: {
     critique: "sendStructured",
   },
 });
 ```
 
-The host-owned facade keeps boot-scoped provider resources reusable while making
+Use `{ kind: "request" }` only when the provider sends the request's model.
+A deployment that routes every call to one model uses `{ kind: "fixed", model }`;
+a conflicting request is refused before egress, and settlement prices the fixed
+model. The host-owned facade keeps boot-scoped provider resources reusable while making
 every exposed provider operation authority-bearing by construction. Additional
 fields on an augmented subtype must be operation-compatible aliases; arbitrary
 adapter-authored facade functions are intentionally unsupported.
@@ -219,8 +224,8 @@ Tests use `bun:test`, live in `src/__tests__/`, and assert on `Result` via
 ## 7. Checklist
 
 - [ ] `name` matches the `CapabilityRegistry` key exactly.
-- [ ] A client extending `LlmClient` declares `clientKind: "llm"`.
-- [ ] An augmented LLM subtype declares every provider alias in `runScopedOperations`.
+- [ ] A client extending `LlmClient` declares `clientKind: "llm"` and `pricingModel`.
+- [ ] An augmented LLM subtype declares every string-keyed provider alias in `runScopedOperations`; symbol aliases are rejected.
 - [ ] No exceptions escape `client` methods — everything is `Result`.
 - [ ] Errors classified transient vs non-retriable correctly.
 - [ ] `connect`/`close` manage all external resources; boot fails loudly.

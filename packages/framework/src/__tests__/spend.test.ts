@@ -20,6 +20,7 @@ import {
   microsToUsd,
   pricedCall,
   scaleSpend,
+  unknownUsageCall,
   unpricedCall,
   usdToMicros,
 } from "../types/spend.js";
@@ -29,6 +30,7 @@ const micros = (n: number): MicroUsd => n as MicroUsd;
 /** Arbitrary spends, both priced and unpriced, with realistic magnitudes. */
 const arbSpend: fc.Arbitrary<Spend> = fc.oneof(
   fc.record({
+    usage: fc.constant("known" as const),
     tokens: fc.nat({ max: 1_000_000 }),
     calls: fc.nat({ max: 100 }),
     usd: fc.nat({ max: 10_000_000 }).map(
@@ -36,6 +38,7 @@ const arbSpend: fc.Arbitrary<Spend> = fc.oneof(
     ),
   }),
   fc.record({
+    usage: fc.constant("known" as const),
     tokens: fc.nat({ max: 1_000_000 }),
     calls: fc.nat({ max: 100 }),
     usd: fc
@@ -123,6 +126,16 @@ describe("addSpend: a commutative monoid", () => {
   });
 });
 
+describe("addSpend: unknown usage absorbs", () => {
+  it("cannot become known again under either append order", () => {
+    fc.assert(fc.property(arbSpend, (known) => {
+      const unknown = unknownUsageCall({ kind: "priced", micros: NO_MICROS });
+      expect(addSpend(known, unknown).usage).toBe("unknown");
+      expect(addSpend(unknown, known).usage).toBe("unknown");
+    }));
+  });
+});
+
 describe("addSpend: `unpriced` absorbs", () => {
   it("makes any total containing an unpriced call unpriced", () => {
     fc.assert(
@@ -172,6 +185,7 @@ describe("scaleSpend: the in-flight projection", () => {
   it("multiplies every axis", () => {
     const scaled = scaleSpend(pricedCall(100, micros(2_000)), 3);
     expect(scaled).toEqual({
+      usage: "known",
       tokens: 300,
       calls: 3,
       usd: { kind: "priced", micros: micros(6_000) },
@@ -198,9 +212,20 @@ describe("scaleSpend: the in-flight projection", () => {
 
 describe("maxSpend: the learned per-call estimate", () => {
   it("takes the per-axis maximum", () => {
-    const a = { tokens: 10, calls: 1, usd: { kind: "priced", micros: micros(500) } } as const;
-    const b = { tokens: 4, calls: 3, usd: { kind: "priced", micros: micros(900) } } as const;
+    const a = {
+      usage: "known",
+      tokens: 10,
+      calls: 1,
+      usd: { kind: "priced", micros: micros(500) },
+    } as const;
+    const b = {
+      usage: "known",
+      tokens: 4,
+      calls: 3,
+      usd: { kind: "priced", micros: micros(900) },
+    } as const;
     expect(maxSpend(a, b)).toEqual({
+      usage: "known",
       tokens: 10,
       calls: 3,
       usd: { kind: "priced", micros: micros(900) },

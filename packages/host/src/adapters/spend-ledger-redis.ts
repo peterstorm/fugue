@@ -42,6 +42,9 @@ import { spendOfHash } from "../domain/spend-record.js";
 export type SpendLedgerRedis = {
   readonly hGetAll: NonNullable<RedisPort["hGetAll"]>;
   readonly appendSpend: NonNullable<RedisPort["appendSpend"]>;
+  readonly commitCheckpointAndRetainSpend: NonNullable<
+    RedisPort["commitCheckpointAndRetainSpend"]
+  >;
 };
 
 /**
@@ -57,9 +60,14 @@ export const spendLedgerRedis = (redis: RedisPort): Result<SpendLedgerRedis, Hos
   const required = [
     ["hGetAll", redis.hGetAll],
     ["appendSpend", redis.appendSpend],
+    ["commitCheckpointAndRetainSpend", redis.commitCheckpointAndRetainSpend],
   ] as const;
   const missing = required.filter(([, method]) => method === undefined).map(([name]) => name);
-  if (redis.hGetAll === undefined || redis.appendSpend === undefined) {
+  if (
+    redis.hGetAll === undefined ||
+    redis.appendSpend === undefined ||
+    redis.commitCheckpointAndRetainSpend === undefined
+  ) {
     return err({
       kind: "config-invalid",
       message:
@@ -70,6 +78,8 @@ export const spendLedgerRedis = (redis: RedisPort): Result<SpendLedgerRedis, Hos
   return ok({
     hGetAll: redis.hGetAll.bind(redis),
     appendSpend: redis.appendSpend.bind(redis),
+    commitCheckpointAndRetainSpend:
+      redis.commitCheckpointAndRetainSpend.bind(redis),
   });
 };
 

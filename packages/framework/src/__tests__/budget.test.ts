@@ -12,6 +12,7 @@ import { describe, it, expect } from "bun:test";
 import * as fc from "fast-check";
 import type { Ceiling, MicroUsd } from "../types/index.js";
 import {
+  NO_MICROS,
   NO_SPEND,
   addSpend,
   breachOf,
@@ -20,6 +21,7 @@ import {
   formatBreach,
   observedOf,
   pricedCall,
+  unknownUsageCall,
   unpricedCall,
   usdToMicros,
 } from "../types/index.js";
@@ -116,6 +118,20 @@ describe("breachOf: token and call axes", () => {
   });
 });
 
+describe("breachOf: unknown usage fails closed only on unevaluable axes", () => {
+  const unknown = unknownUsageCall({ kind: "priced", micros: NO_MICROS });
+
+  it("refuses token and USD ceilings with an explicit unknown-usage reason", () => {
+    expect(breachOf(unknown, tokens(1_000), "settled")?.kind).toBe("unknown-usage");
+    expect(breachOf(unknown, usd(1_000), "settled")?.kind).toBe("unknown-usage");
+  });
+
+  it("keeps the calls axis evaluable", () => {
+    expect(breachOf(unknown, calls(2), "settled")).toBeUndefined();
+    expect(breachOf(unknown, calls(1), "settled")?.kind).toBe("reached");
+  });
+});
+
 describe("breachOf: the usd axis fails closed on an unpriced model", () => {
   it("refuses when cost cannot be evaluated, whatever the priced portion", () => {
     // Treating an unknown cost as zero would make the cheapest way past a
@@ -151,7 +167,12 @@ describe("firstBreach: any ceiling refuses", () => {
         fc.nat({ max: 20 }),
         fc.nat({ max: 5000 }),
         (tokenSpend, callCount, costMicros) => {
-          const spend = { tokens: tokenSpend, calls: callCount, usd: { kind: "priced" as const, micros: micros(costMicros) } };
+          const spend = {
+            usage: "known" as const,
+            tokens: tokenSpend,
+            calls: callCount,
+            usd: { kind: "priced" as const, micros: micros(costMicros) },
+          };
           const limits = limitsOf([tokens(2000), calls(10), { kind: "usd", limit: micros(2000) }]);
           const over =
             tokenSpend >= 2000 || callCount >= 10 || costMicros >= 2000;
@@ -163,7 +184,12 @@ describe("firstBreach: any ceiling refuses", () => {
   });
 
   it("reports the usd ceiling first when several are breached at once", () => {
-    const spend = { tokens: 10_000, calls: 99, usd: { kind: "priced" as const, micros: micros(10_000) } };
+    const spend = {
+      usage: "known" as const,
+      tokens: 10_000,
+      calls: 99,
+      usd: { kind: "priced" as const, micros: micros(10_000) },
+    };
     const breach = firstBreach(spend, limitsOf([tokens(10), calls(1), { kind: "usd", limit: micros(10) }]), "settled");
     expect(breach?.ceiling.kind).toBe("usd");
   });

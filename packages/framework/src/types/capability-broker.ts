@@ -34,6 +34,8 @@
 import type { Result } from "./result.js";
 import type { FrameworkError } from "./errors.js";
 import type { Capability, CapabilityRegistry } from "./node.js";
+import type { LlmClient, LlmPricingModel } from "./llm.js";
+import type { RunScopedLlmOperation } from "./capability-handle.js";
 import type { RunId, DagId, NodeId } from "./ids.js";
 
 /**
@@ -44,7 +46,30 @@ import type { RunId, DagId, NodeId } from "./ids.js";
  * A capability key is present iff the broker resolved a client for it. The
  * pass-through broker returns exactly the configured set unchanged.
  */
-export type ScopedCapabilityHandle = Partial<{ readonly [K in Capability]: CapabilityRegistry[K] }>;
+export type ScopedLlmCapability<T extends LlmClient = LlmClient> = {
+  readonly clientKind: "llm";
+  readonly client: T;
+  readonly pricingModel: LlmPricingModel;
+  readonly runScopedOperations?: Readonly<Record<string, RunScopedLlmOperation>>;
+};
+
+type ScopedCapabilityValue<T> =
+  [Extract<T, LlmClient>] extends [never]
+    ? T
+    : [Exclude<T, LlmClient>] extends [never]
+      ? ScopedLlmCapability<Extract<T, LlmClient>>
+      : never;
+
+export type ScopedCapabilityHandle = Partial<{
+  readonly [K in Capability]: ScopedCapabilityValue<CapabilityRegistry[K]>;
+}>;
+
+/** Host-owned decorator for a broker-delivered LLM binding. */
+export type ScopedLlmMeter = (
+  capability: Capability,
+  binding: ScopedLlmCapability,
+  nodeId: NodeId,
+) => Result<LlmClient, FrameworkError>;
 
 /**
  * Who initiated an invocation — a discriminated union, not optional fields. An
@@ -76,6 +101,8 @@ export type InvocationOrigin =
 export interface MintingAuthority {
   readonly broker: CapabilityBroker;
   readonly origin: InvocationOrigin;
+  /** Required at dispatch only when the broker returns an LLM binding. */
+  readonly meterLlm?: ScopedLlmMeter;
 }
 
 /**
@@ -137,16 +164,12 @@ export const invocationFor = (
  * Errors flow on the `Result` channel (`FrameworkError`), never thrown across
  * the boundary. The pass-through broker never produces an `Err`.
  *
- * @satisfies FR-W2-009 — the LLM handle is expressible as the first
- *   invocation-scoped capability over this same `mintFor` seam (no OIDC
- *   required): `"llm"` is a `Capability`, so a future broker can resolve it here
- *   without any change to THIS PORT. (Not migrated in this wave — the
- *   metered-llm wiring stays.) NOTE the RUNTIME is not yet ready for that
- *   future: `mergeScopedCapabilities` deliberately refuses to overlay built-in
- *   capability keys (`llm`/`http`/…), and `validateCapabilities` therefore
- *   REJECTS a broker claiming `provides()` for one as a wiring error. Migrating
- *   a built-in onto this seam means lifting both guards in the same commit —
- *   the port itself needs no change.
+ * @satisfies FR-W2-009 — custom registry LLM capabilities are expressible on
+ *   this seam as explicit `ScopedLlmCapability` bindings. Dispatch requires the
+ *   run's host-owned meter before merge, so broker authority cannot create an
+ *   unmetered provider path. Built-in keys (`llm`/`http`/…) remain static and
+ *   are still rejected by validation/merge; only custom scoped LLMs use this
+ *   path.
  */
 export interface CapabilityBroker {
   mintFor(

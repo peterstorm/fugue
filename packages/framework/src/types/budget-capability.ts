@@ -6,6 +6,7 @@ import type {
   UsdCeiling,
 } from "./budget.js";
 import type { MicroUsd, Spend, UnpricedModels } from "./spend.js";
+import { costFloor } from "./spend.js";
 
 export type CeilingHeadroom =
   | {
@@ -32,6 +33,11 @@ export type CeilingHeadroom =
       readonly ceiling: UsdCeiling;
       readonly models: UnpricedModels;
       readonly observedAtLeast: MicroUsd;
+    }
+  | {
+      readonly kind: "unknown-usage";
+      readonly ceiling: TokensCeiling | UsdCeiling;
+      readonly observedAtLeast: number;
     };
 
 export type Remaining =
@@ -54,6 +60,7 @@ const snapshotModels = (models: UnpricedModels): UnpricedModels =>
 /** Fresh, deeply frozen spend snapshot suitable for crossing a capability seam. */
 export const snapshotSpend = (spend: Spend): Spend =>
   Object.freeze({
+    usage: spend.usage,
     tokens: spend.tokens,
     calls: spend.calls,
     usd: spend.usd.kind === "priced"
@@ -102,18 +109,33 @@ export const remainingFor = (
   const headroom = limits.map((ceiling): CeilingHeadroom =>
     match(ceiling)
       .returnType<CeilingHeadroom>()
-      .with({ kind: "tokens" }, (c) => availableTokens(c, projected.tokens))
+      .with({ kind: "tokens" }, (c) =>
+        projected.usage === "unknown"
+          ? Object.freeze({
+              kind: "unknown-usage",
+              ceiling: Object.freeze({ ...c }),
+              observedAtLeast: projected.tokens,
+            })
+          : availableTokens(c, projected.tokens),
+      )
       .with({ kind: "calls" }, (c) => availableCalls(c, projected.calls))
-      .with({ kind: "usd" }, (c) =>
-        projected.usd.kind === "priced"
+      .with({ kind: "usd" }, (c) => {
+        if (projected.usage === "unknown") {
+          return Object.freeze({
+            kind: "unknown-usage",
+            ceiling: Object.freeze({ ...c }),
+            observedAtLeast: costFloor(projected.usd),
+          });
+        }
+        return projected.usd.kind === "priced"
           ? availableUsd(c, projected.usd.micros)
           : Object.freeze({
               kind: "unpriced",
               ceiling: Object.freeze({ ...c }),
               models: snapshotModels(projected.usd.models),
               observedAtLeast: projected.usd.knownMicros,
-            }),
-      )
+            });
+      })
       .exhaustive(),
   );
 

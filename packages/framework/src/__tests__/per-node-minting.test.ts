@@ -26,6 +26,7 @@ import { ok, err } from "../types/result.js";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { Capability, NodeContext } from "../types/node.js";
+import type { LlmClient } from "../types/llm.js";
 import { makeNodeContext } from "../shared/make-node-context.js";
 import type {
   CapabilityBroker,
@@ -41,6 +42,12 @@ import { DAG_INPUT } from "../types/ids.js";
 import { RecordingObserver } from "../observer/observer.js";
 
 // A scope-shaped capability the broker mints, and a plain static one it doesn't.
+declare module "../types/node.js" {
+  interface CapabilityRegistry {
+    brokerLlm: LlmClient;
+  }
+}
+
 const SCOPE = "svc:opA" as Capability;
 const cap = (s: string) => s as Capability;
 
@@ -131,6 +138,114 @@ describe("per-node capability minting (C1)", () => {
     // NOT receive nodeA's minted scope handle (per-node narrowing).
     expect(seen.B_http).toBe(staticHttp);
     expect(seen.B_scope).toBeUndefined();
+  });
+
+  it("routes a broker-minted custom LLM through the run-owned meter before merge", async () => {
+    let providerCalls = 0;
+    let meteredCalls = 0;
+    const inner: LlmClient = {
+      sendStructured: async <O>() => {
+        providerCalls += 1;
+        return ok({
+          output: { answer: "ok" } as O,
+          rawText: "",
+          tokensIn: 1,
+          tokensOut: 1,
+          cacheWriteTokens: 0,
+          cacheReadTokens: 0,
+        });
+      },
+      sendWithTools: async () => {
+        throw new Error("unused");
+      },
+    };
+    const broker: CapabilityBroker = {
+      mintFor: async () => ok({
+        brokerLlm: {
+          clientKind: "llm",
+          client: inner,
+          pricingModel: { kind: "request" },
+        },
+      }),
+      provides: (capability) => capability === "brokerLlm",
+    };
+    const node = createFetchNode({
+      id: N("broker-llm-node"),
+      inputSchema: z.object({}),
+      outputSchema: z.object({ answer: z.string() }),
+      requires: ["brokerLlm"] as const,
+      fetch: async (_input, ctx) => {
+        const result = await ctx.brokerLlm.sendStructured({
+          system: "s",
+          user: "u",
+          model: "gpt-4o",
+          schema: z.object({ answer: z.string() }),
+          nodeId: N("broker-llm-node"),
+        });
+        return result.ok ? ok(result.value.output) : result;
+      },
+    });
+    const dag = defineDagFromArray({
+      id: "dag-1",
+      nodes: [node],
+      edges: [{ from: DAG_INPUT, to: "broker-llm-node" }],
+    });
+
+    const result = await runDag(dag, {}, baseCtx(), {
+      minting: {
+        broker,
+        origin: agentOrigin,
+        meterLlm: (_capability, binding) => ok({
+          sendStructured: (request) => {
+            meteredCalls += 1;
+            return binding.client.sendStructured(request);
+          },
+          sendWithTools: (request, ctx) => {
+            meteredCalls += 1;
+            return binding.client.sendWithTools(request, ctx);
+          },
+        }),
+      },
+    });
+
+    expect(result).toEqual(ok({ answer: "ok" }));
+    expect(meteredCalls).toBe(1);
+    expect(providerCalls).toBe(1);
+  });
+
+  it("fails closed when a broker-minted LLM has no run meter", async () => {
+    const broker: CapabilityBroker = {
+      mintFor: async () => ok({
+        brokerLlm: {
+          clientKind: "llm",
+          client: {} as LlmClient,
+          pricingModel: { kind: "request" },
+        },
+      }),
+      provides: (capability) => capability === "brokerLlm",
+    };
+    const node = createFetchNode({
+      id: N("unmetered-broker-llm"),
+      inputSchema: z.object({}),
+      outputSchema: z.object({ ok: z.boolean() }),
+      requires: ["brokerLlm"] as const,
+      fetch: async () => ok({ ok: true }),
+    });
+    const dag = defineDagFromArray({
+      id: "dag-1",
+      nodes: [node],
+      edges: [{ from: DAG_INPUT, to: "unmetered-broker-llm" }],
+    });
+
+    const result = await runDag(dag, {}, baseCtx(), {
+      minting: { broker, origin: agentOrigin },
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "node-crash") {
+      expect(result.error.message).toContain("without a run spend authority");
+    }
+    expect(result.ok).toBe(false);
   });
 
   it("run-start validation passes a scope the broker provides() even though it is absent from the base context", async () => {

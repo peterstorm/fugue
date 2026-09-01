@@ -16,6 +16,7 @@ import type { SyncLogger } from "../../sync/sync-loop.js";
 import type { HostConfig } from "../../domain/config.js";
 import { parseHostConfig } from "../../domain/config.js";
 import { tenantId } from "../../domain/tenant.js";
+import { createInMemorySpendLedger } from "../../adapters/spend-ledger-memory.js";
 
 export const makeConfig = (overrides?: Record<string, string | undefined>): HostConfig => {
   const r = parseHostConfig({
@@ -94,7 +95,9 @@ export const fakeRedis = (): { port: RedisConnectivityPort; redis: RedisPort } =
 
 export const fakeInfra = (redis: RedisPort): SharedInfra => ({
   llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as never,
+  llmPricingModel: { kind: "request" },
   redis,
+  spendLedger: createInMemorySpendLedger(),
   tracer: noopTracer,
   contentFilter: null,
   prompts: null,

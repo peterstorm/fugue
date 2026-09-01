@@ -2,16 +2,17 @@
  * Pure Redis Spend Record encoding.
  *
  * One Redis HASH is the aggregate: numeric axes use their established fields,
- * while unpriced-model membership uses reserved, encoded hash fields. Appends
- * are sums plus set-union-by-field, exactly matching `addSpend`; hydration
- * strictly parses the complete hash so a partial/unknown runtime result can
- * never become undercounted spend.
+ * while unknown-usage and unpriced-model membership use reserved marker fields.
+ * One HGETALL prevents split-key reads; strict parsing protects every present
+ * field. Transactional append plus the monotone unknown marker preserves the
+ * accounting state that admission relies on.
  */
 
 import type { MicroUsd, Result, Spend, UnpricedModels } from "@fuguejs/framework";
 import { costFloor, err, ok } from "@fuguejs/framework";
 
 interface SpendRecord {
+  readonly usageUnknown: boolean;
   readonly tokens: number;
   readonly calls: number;
   readonly micros: number;
@@ -27,7 +28,8 @@ export const SPEND_HASH_FIELDS = Object.freeze({
 
 /** `$` cannot start a numeric axis; fixed-width UTF-16 hex makes each model one field. */
 const SPEND_UNPRICED_FIELD_PREFIX = "$unpriced:";
-export const SPEND_UNPRICED_MARKER_VALUE = "1";
+export const SPEND_MARKER_VALUE = "1";
+export const SPEND_USAGE_UNKNOWN_FIELD = "$usage:unknown";
 
 type SpendHashParseError = Readonly<{
   kind: "malformed-spend-hash";
@@ -37,6 +39,7 @@ type SpendHashParseError = Readonly<{
 
 /** Flatten a trusted domain Spend for the transactional writer. */
 export const recordOf = (spend: Spend): SpendRecord => ({
+  usageUnknown: spend.usage === "unknown",
   tokens: spend.tokens,
   calls: spend.calls,
   micros: costFloor(spend.usd),
@@ -73,7 +76,7 @@ const modelOfMarkerField = (field: string): string | undefined => {
   for (let index = 0; index < encoded.length; index += 4) {
     model += String.fromCharCode(Number.parseInt(encoded.slice(index, index + 4), 16));
   }
-  return unpricedModelHashField(model) === field ? model : undefined;
+  return model;
 };
 
 /**
@@ -88,6 +91,7 @@ export const spendOfHash = (
   hash: Readonly<Record<string, string>>,
 ): Result<Spend, SpendHashParseError> => {
   const figures = { micros: 0, tokens: 0, calls: 0 };
+  let usage: Spend["usage"] = "known";
   const models: string[] = [];
 
   for (const [field, raw] of Object.entries(hash)) {
@@ -102,6 +106,13 @@ export const spendOfHash = (
       continue;
     }
 
+    if (field === SPEND_USAGE_UNKNOWN_FIELD) {
+      if (raw !== SPEND_MARKER_VALUE) {
+        return err({ kind: "malformed-spend-hash", field, reason: "invalid-marker-value" });
+      }
+      usage = "unknown";
+      continue;
+    }
     if (!field.startsWith(SPEND_UNPRICED_FIELD_PREFIX)) {
       return err({ kind: "malformed-spend-hash", field, reason: "unknown-field" });
     }
@@ -109,16 +120,17 @@ export const spendOfHash = (
     if (model === undefined) {
       return err({ kind: "malformed-spend-hash", field, reason: "invalid-marker-field" });
     }
-    if (raw !== SPEND_UNPRICED_MARKER_VALUE) {
+    if (raw !== SPEND_MARKER_VALUE) {
       return err({ kind: "malformed-spend-hash", field, reason: "invalid-marker-value" });
     }
     models.push(model);
   }
 
-  const canonicalModels = [...new Set(models)].sort();
-  const [head, ...rest] = canonicalModels;
+  models.sort();
+  const [head, ...rest] = models;
   const micros = figures.micros as MicroUsd;
   return ok({
+    usage,
     tokens: figures.tokens,
     calls: figures.calls,
     usd: head === undefined

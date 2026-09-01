@@ -179,6 +179,7 @@ const snapshotMintingAuthority = (
     readonly mintFor: CapabilityBroker["mintFor"];
     readonly provides: CapabilityBroker["provides"];
     readonly origin: InvocationOrigin;
+    readonly meterLlm: MintingAuthority["meterLlm"];
   };
 
   try {
@@ -192,6 +193,7 @@ const snapshotMintingAuthority = (
     const mintFor = source.mintFor;
     const provides = source.provides;
     const origin = snapshotOrigin(authority.origin);
+    const meterLlm = authority.meterLlm;
     if (typeof mintFor !== "function") {
       return err({
         kind: "validation",
@@ -199,7 +201,14 @@ const snapshotMintingAuthority = (
         message: "broker.mintFor must be a function while snapshotting run authority",
       });
     }
-    boundary = { source, mintFor, provides, origin };
+    if (meterLlm !== undefined && typeof meterLlm !== "function") {
+      return err({
+        kind: "validation",
+        nodeId: snapshotNodeId,
+        message: "minting authority meterLlm must be a function when provided",
+      });
+    }
+    boundary = { source, mintFor, provides, origin, meterLlm };
   } catch (error) {
     return err({
       kind: "validation",
@@ -210,7 +219,7 @@ const snapshotMintingAuthority = (
     });
   }
 
-  const { source, mintFor, provides, origin } = boundary;
+  const { source, mintFor, provides, origin, meterLlm } = boundary;
   const provided = new Set<Capability>();
   const observed = new Set<Capability>();
 
@@ -237,7 +246,11 @@ const snapshotMintingAuthority = (
       mintFor.call(source, inv, requires),
     provides: (capability: Capability) => provided.has(capability),
   });
-  return ok(Object.freeze({ broker, origin }));
+  return ok(Object.freeze({
+    broker,
+    origin,
+    ...(meterLlm !== undefined ? { meterLlm } : {}),
+  }));
 };
 
 interface PreparedRun {

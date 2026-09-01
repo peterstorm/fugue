@@ -13,6 +13,7 @@ import type {
   ConversationCachePolicy,
   DagId,
   FrameworkError,
+  LlmPricingModel,
   LlmResponse,
   NodeId,
   Result,
@@ -26,13 +27,14 @@ import {
   NO_TOKENS,
   PRICE_TABLE,
   PersistedFrameworkErrorSchema,
-  costFloor,
   err,
   formatBreach,
+  ok,
   remainingFor,
   safeErrorMessage,
   snapshotSpend,
   spendOfCall,
+  spendOfUnknownCall,
   usageOfError,
 } from "@fuguejs/framework";
 import type { LogPort, SpendLedgerPort } from "../ports.js";
@@ -40,7 +42,7 @@ import { formatHostError } from "../domain/host-error.js";
 import { logWithoutThrowing } from "../hitl/diagnostic-logging.js";
 import {
   accumulate,
-  admit,
+  admitCandidate,
   emptyMeter,
   emptyReservation,
   learnObservedCall,
@@ -83,6 +85,7 @@ export type RunSpendAuthorityDeps = RunSpendAuthorityBase &
 type RunSpendExecution<O> = {
   readonly clientKey: Capability;
   readonly operation: MeteredLlmOperation;
+  readonly pricingModel?: LlmPricingModel;
   readonly request: MeteredRequest;
   readonly call: () => Promise<Result<LlmResponse<O>, FrameworkError>>;
 };
@@ -99,6 +102,9 @@ const writeTtlOf = (cache: MeteredRequest["cache"]): CacheTtl =>
 const isObjectLike = (value: unknown): value is object =>
   (typeof value === "object" && value !== null) || typeof value === "function";
 
+const isNonNegativeSafeInteger = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+
 const tokenUsageOf = (value: unknown): TokenUsage | undefined => {
   if (!isObjectLike(value)) return undefined;
   try {
@@ -108,23 +114,24 @@ const tokenUsageOf = (value: unknown): TokenUsage | undefined => {
       cacheWriteTokens: Reflect.get(value, "cacheWriteTokens"),
       cacheReadTokens: Reflect.get(value, "cacheReadTokens"),
     };
-    if (
-      typeof usage.tokensIn !== "number" || !Number.isFinite(usage.tokensIn) || usage.tokensIn < 0 ||
-      typeof usage.tokensOut !== "number" || !Number.isFinite(usage.tokensOut) || usage.tokensOut < 0 ||
-      typeof usage.cacheWriteTokens !== "number" ||
-        !Number.isFinite(usage.cacheWriteTokens) || usage.cacheWriteTokens < 0 ||
-      typeof usage.cacheReadTokens !== "number" ||
-        !Number.isFinite(usage.cacheReadTokens) || usage.cacheReadTokens < 0
-    ) return undefined;
-    return usage;
+    return isNonNegativeSafeInteger(usage.tokensIn) &&
+        isNonNegativeSafeInteger(usage.tokensOut) &&
+        isNonNegativeSafeInteger(usage.cacheWriteTokens) &&
+        isNonNegativeSafeInteger(usage.cacheReadTokens)
+      ? usage
+      : undefined;
   } catch {
     return undefined;
   }
 };
 
+type SettledUsage =
+  | { readonly kind: "known"; readonly usage: TokenUsage }
+  | { readonly kind: "unknown" };
+
 type SettledLlmResult<O> = {
   readonly result: Result<LlmResponse<O>, FrameworkError>;
-  readonly usage: TokenUsage;
+  readonly usage: SettledUsage;
 };
 
 /** Parse one runtime client outcome before accounting or returning it. */
@@ -140,7 +147,7 @@ const settledLlmResult = <O>(
       retriability: "non-retriable",
       message: `LlmClient.${operation} returned a malformed Result: ${detail}`,
     }),
-    usage: NO_TOKENS,
+    usage: { kind: "unknown" },
   });
 
   if (!isObjectLike(raw)) return malformed("expected an object");
@@ -151,16 +158,22 @@ const settledLlmResult = <O>(
       const usage = tokenUsageOf(response);
       return usage === undefined
         ? malformed("successful response has invalid token usage")
-        : { result: { ok: true, value: response as LlmResponse<O> }, usage };
+        : {
+            result: { ok: true, value: response as LlmResponse<O> },
+            usage: { kind: "known", usage },
+          };
     }
     if (outcome === false) {
       const parsed = PersistedFrameworkErrorSchema.safeParse(Reflect.get(raw, "error"));
       if (!parsed.success) return malformed("error payload is not a FrameworkError");
       const partial = usageOfError(parsed.data);
-      const usage = partial === undefined ? NO_TOKENS : tokenUsageOf(partial);
+      if (partial === undefined) {
+        return { result: err(parsed.data), usage: { kind: "unknown" } };
+      }
+      const usage = tokenUsageOf(partial);
       return usage === undefined
         ? malformed("error payload has invalid token usage")
-        : { result: err(parsed.data), usage };
+        : { result: err(parsed.data), usage: { kind: "known", usage } };
     }
     return malformed("the 'ok' discriminant is not boolean");
   } catch (error) {
@@ -239,30 +252,17 @@ export const createRunSpendAuthority = (
   const gate = (
     request: MeteredRequest,
     clientKey: Capability,
+    effectiveModel: string,
   ): { readonly error: FrameworkError } | { readonly release: () => void } => {
-    const settled = spendFor(meter, runId);
-    const usdCeiling = limits?.find((ceiling) => ceiling.kind === "usd");
-    if (
-      usdCeiling?.kind === "usd" &&
-      !Object.hasOwn(PRICE_TABLE, request.model)
-    ) {
-      const observedAtLeast = costFloor(settled.usd);
-      return refusal(
-        request.nodeId,
-        clientKey,
-        {
-          kind: "unpriced",
-          ceiling: usdCeiling,
-          basis: "projected",
-          models: [request.model],
-          observedAtLeast,
-        },
-        settled,
-        reservation.inFlight,
-      );
-    }
-
-    const decision = admit(meter, runId, reservation, limits);
+    const decision = admitCandidate(
+      meter,
+      runId,
+      reservation,
+      limits,
+      Object.hasOwn(PRICE_TABLE, effectiveModel)
+        ? { kind: "priced", model: effectiveModel }
+        : { kind: "unpriced", model: effectiveModel },
+    );
     if (decision.kind === "refuse") {
       return refusal(
         request.nodeId,
@@ -291,8 +291,8 @@ export const createRunSpendAuthority = (
     nodeId: NodeId,
     clientKey: Capability,
     call: Spend,
-  ): Promise<void> => {
-    const reportFailure = (reason: string): void => {
+  ): Promise<Result<void, string>> => {
+    const reportFailure = (reason: string): Result<void, string> => {
       logWithoutThrowing(
         logger,
         limits === undefined ? "warn" : "error",
@@ -303,13 +303,14 @@ export const createRunSpendAuthority = (
           unrecorded: spendFields(call),
         },
       );
+      return err(reason);
     };
 
     try {
       const appended = await ledger.add(runId, call);
-      if (!appended.ok) reportFailure(formatHostError(appended.error));
+      return appended.ok ? ok(undefined) : reportFailure(formatHostError(appended.error));
     } catch (error) {
-      reportFailure(
+      return reportFailure(
         `SpendLedgerPort.add threw across the port boundary: ${safeErrorMessage(error)}`,
       );
     }
@@ -319,16 +320,22 @@ export const createRunSpendAuthority = (
     req: MeteredRequest,
     clientKey: Capability,
     operation: MeteredLlmOperation,
-    usage: TokenUsage,
+    effectiveModel: string,
+    settledUsage: SettledUsage,
   ): Spend => {
-    const call = spendOfCall(req.model, usage, writeTtlOf(req.cache));
+    const call = settledUsage.kind === "known"
+      ? spendOfCall(effectiveModel, settledUsage.usage, writeTtlOf(req.cache))
+      : spendOfUnknownCall(effectiveModel);
     reservation = learnObservedCall(reservation, call);
     meter = accumulate(meter, runId, call);
     logWithoutThrowing(logger, "info", "llm.metered", {
       ...attribution(req.nodeId, clientKey),
       operation,
-      model: req.model,
-      ...usage,
+      requestedModel: req.model,
+      effectiveModel,
+      ...(settledUsage.kind === "known"
+        ? settledUsage.usage
+        : { ...NO_TOKENS, usage: "unknown" }),
       call: spendFields(call),
       cumulative: spendFields(spendFor(meter, runId)),
       ...(limits !== undefined ? { limits: limits.map((c) => `${c.kind}:${c.limit}`) } : {}),
@@ -340,20 +347,29 @@ export const createRunSpendAuthority = (
     req: MeteredRequest,
     clientKey: Capability,
     operation: MeteredLlmOperation,
+    effectiveModel: string,
     rawResult: unknown,
     releaseReservationForCall: () => void,
   ): Promise<Result<LlmResponse<O>, FrameworkError>> => {
     const { result, usage } = settledLlmResult<O>(rawResult, req.nodeId, operation);
-    const settledCall = record(req, clientKey, operation, usage);
+    const settledCall = record(req, clientKey, operation, effectiveModel, usage);
     releaseReservationForCall();
-    await persist(req.nodeId, clientKey, settledCall);
+    const persisted = await persist(req.nodeId, clientKey, settledCall);
+    if (!persisted.ok && limits !== undefined) {
+      return err({
+        kind: "node-crash",
+        nodeId: req.nodeId,
+        retriability: "non-retriable",
+        message: `LLM spend could not be durably recorded: ${persisted.error}`,
+      });
+    }
 
     if (!result.ok) {
       logWithoutThrowing(logger, "warn", "llm.call-failed", {
         ...attribution(req.nodeId, clientKey),
         operation,
         errorKind: result.error.kind,
-        ...(usage === NO_TOKENS ? {} : usage),
+        ...(usage.kind === "known" ? usage.usage : { ...NO_TOKENS, usage: "unknown" }),
       });
     }
     return result;
@@ -362,10 +378,23 @@ export const createRunSpendAuthority = (
   const execute = async <O>({
     clientKey,
     operation,
+    pricingModel = { kind: "request" },
     request,
     call,
   }: RunSpendExecution<O>): Promise<Result<LlmResponse<O>, FrameworkError>> => {
-    const admission = gate(request, clientKey);
+    const effectiveModel = pricingModel.kind === "request"
+      ? request.model
+      : pricingModel.model;
+    if (pricingModel.kind === "fixed" && request.model !== pricingModel.model) {
+      return err({
+        kind: "validation",
+        nodeId: request.nodeId,
+        message:
+          `LLM capability '${clientKey}' is bound to model '${pricingModel.model}' ` +
+          `but the request named '${request.model}'`,
+      });
+    }
+    const admission = gate(request, clientKey, effectiveModel);
     if ("error" in admission) return err(admission.error);
     try {
       let result: Result<LlmResponse<O>, FrameworkError>;
@@ -381,7 +410,14 @@ export const createRunSpendAuthority = (
             safeErrorMessage(error),
         });
       }
-      return await settle(request, clientKey, operation, result, admission.release);
+      return await settle(
+        request,
+        clientKey,
+        operation,
+        effectiveModel,
+        result,
+        admission.release,
+      );
     } finally {
       admission.release();
     }

@@ -97,6 +97,7 @@ describe("llm-meter: accumulate + spendFor", () => {
   it("adds a settled call to a run's running total", () => {
     const meter = accumulate(emptyMeter(), runA, pricedCall(150, micros(2_000)));
     expect(spendFor(meter, runA)).toEqual({
+      usage: "known",
       tokens: 150,
       calls: 1,
       usd: { kind: "priced", micros: micros(2_000) },
@@ -109,6 +110,7 @@ describe("llm-meter: accumulate + spendFor", () => {
       emptyMeter(),
     );
     expect(spendFor(meter, runA)).toEqual({
+      usage: "known",
       tokens: 300,
       calls: 3,
       usd: { kind: "priced", micros: micros(1_500) },
@@ -358,6 +360,7 @@ describe("llm-meter: projection/read-model agreement", () => {
       fc.nat({ max: 20_000 }),
       (settledTokens, inFlight, maxCallTokens, callLimit, tokenLimit) => {
         const meter = accumulate(emptyMeter(), runA, {
+          usage: "known",
           tokens: settledTokens,
           calls: 0,
           usd: { kind: "priced", micros: micros(0) },
@@ -368,8 +371,10 @@ describe("llm-meter: projection/read-model agreement", () => {
         const breach = firstBreach(projected, limits, "projected");
         const remaining = remainingFor(limits, projected);
         if (remaining.kind !== "budgeted") throw new Error("limits are present");
-        const exhausted = remaining.headroom.some(
-          (headroom) => headroom.kind === "unpriced" || headroom.amount === 0,
+        const exhausted = remaining.headroom.some((headroom) =>
+          headroom.kind === "unpriced" ||
+          headroom.kind === "unknown-usage" ||
+          headroom.amount === 0
         );
         expect(breach !== undefined).toBe(exhausted);
       },

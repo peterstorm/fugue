@@ -65,7 +65,15 @@ describe("validateCapabilities", () => {
     });
     expect(isErr(validateCapabilities(dag, makeCtx()))).toBe(true);
     expect(isOk(validateCapabilities(dag, makeCtx({
-      budget: { spent: () => ({ tokens: 0, calls: 0, usd: { kind: "priced", micros: 0 as never } }), remaining: () => ({ kind: "unbudgeted" }) },
+      budget: {
+        spent: () => ({
+          usage: "known",
+          tokens: 0,
+          calls: 0,
+          usd: { kind: "priced", micros: 0 as never },
+        }),
+        remaining: () => ({ kind: "unbudgeted" }),
+      },
     })))).toBe(true);
   });
 

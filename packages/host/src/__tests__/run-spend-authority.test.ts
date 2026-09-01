@@ -7,8 +7,8 @@ import {
   NO_SPEND,
   ok,
   runId,
+  spendOfUnknownCall,
   tokensOnly,
-  unpricedCall,
   type LlmResponse,
   type Result,
   type FrameworkError,
@@ -163,6 +163,34 @@ describe("RunSpendAuthority", () => {
     expect(appendedTokens).toHaveLength(3);
   });
 
+  it("rejects a caller model that conflicts with the composition-owned fixed model", async () => {
+    const authority = createRunSpendAuthority({
+      dagId: dagId("authority-dag"),
+      runId: runId("fixed-model-run"),
+      limits: ceilings([{ kind: "usd", limit: 10_000 as never }])!,
+      hydrated: { kind: "known", spend: NO_SPEND },
+      ledger: createInMemorySpendLedger(),
+      logger,
+    });
+    let providerCalls = 0;
+
+    const result = await authority.execute({
+      clientKey: "llm",
+      operation: "sendStructured",
+      pricingModel: { kind: "fixed", model: "gpt-4o" },
+      request: { ...request, model: "gpt-4o-mini" },
+      call: async () => {
+        providerCalls += 1;
+        return response();
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("validation");
+    expect(providerCalls).toBe(0);
+    expect(authority.budget.spent()).toEqual(NO_SPEND);
+  });
+
   it("counts a typed failure without usage and refuses the next calls-limited attempt", async () => {
     const ledger = createInMemorySpendLedger();
     const authorityRunId = runId("calls-only-run");
@@ -202,8 +230,9 @@ describe("RunSpendAuthority", () => {
     expect(refused.ok).toBe(false);
     if (!refused.ok) expect(refused.error.kind).toBe("llm-budget-exceeded");
     expect(providerAttempts).toBe(1);
-    expect(authority.budget.spent()).toEqual(unpricedCall(0, "m"));
-    expect(await ledger.read(authorityRunId)).toEqual(ok(unpricedCall(0, "m")));
+    const unknown = spendOfUnknownCall("m");
+    expect(authority.budget.spent()).toEqual(unknown);
+    expect(await ledger.read(authorityRunId)).toEqual(ok(unknown));
   });
 
   it("turns an accessor-throwing Result into a typed settled failure", async () => {
@@ -234,8 +263,113 @@ describe("RunSpendAuthority", () => {
         expect(settled.error.message).toContain("malformed Result");
       }
     }
-    expect(authority.budget.spent()).toEqual(unpricedCall(0, "m"));
-    expect(await ledger.read(authorityRunId)).toEqual(ok(unpricedCall(0, "m")));
+    const unknown = spendOfUnknownCall("m");
+    expect(authority.budget.spent()).toEqual(unknown);
+    expect(await ledger.read(authorityRunId)).toEqual(ok(unknown));
+  });
+
+  it.each([
+    ["primitive", 7],
+    ["invalid discriminant", { ok: "yes", value: {} }],
+    [
+      "malformed success usage",
+      {
+        ok: true,
+        value: {
+          output: {},
+          rawText: "",
+          tokensIn: 0.5,
+          tokensOut: 0,
+          cacheWriteTokens: 0,
+          cacheReadTokens: 0,
+        },
+      },
+    ],
+    ["malformed error payload", { ok: false, error: { nope: true } }],
+    [
+      "malformed error usage",
+      {
+        ok: false,
+        error: {
+          kind: "transient",
+          nodeId: request.nodeId,
+          message: "provider failed",
+          usage: {
+            tokensIn: Number.MAX_SAFE_INTEGER + 1,
+            tokensOut: 0,
+            cacheWriteTokens: 0,
+            cacheReadTokens: 0,
+          },
+        },
+      },
+    ],
+  ] as const)(
+    "settles %s as one durable unknown call before calls-ceiling refusal",
+    async (_label, raw) => {
+      const ledger = createInMemorySpendLedger();
+      const authorityRunId = runId(`malformed-${_label.replaceAll(" ", "-")}`);
+      const authority = createRunSpendAuthority({
+        dagId: dagId("authority-dag"),
+        runId: authorityRunId,
+        limits: oneCallLimit,
+        hydrated: { kind: "known", spend: NO_SPEND },
+        ledger,
+        logger,
+      });
+      let providerCalls = 0;
+      const invoke = () => authority.execute({
+        clientKey: "llm",
+        operation: "sendStructured",
+        request,
+        call: async () => {
+          providerCalls += 1;
+          return raw as never;
+        },
+      });
+
+      const malformed = await invoke();
+      const refused = await invoke();
+
+      expect(malformed.ok).toBe(false);
+      if (!malformed.ok) expect(malformed.error.kind).toBe("node-crash");
+      expect(refused.ok).toBe(false);
+      if (!refused.ok) expect(refused.error.kind).toBe("llm-budget-exceeded");
+      expect(providerCalls).toBe(1);
+      const stored = await ledger.read(authorityRunId);
+      expect(stored.ok).toBe(true);
+      if (stored.ok) {
+        expect(stored.value.calls).toBe(1);
+        expect(stored.value.usage).toBe("unknown");
+      }
+    },
+  );
+
+  it("accepts non-negative safe-integer usage at the parser boundary", async () => {
+    const authority = createRunSpendAuthority({
+      dagId: dagId("authority-dag"),
+      runId: runId("max-safe-usage"),
+      hydrated: { kind: "known", spend: NO_SPEND },
+      ledger: createInMemorySpendLedger(),
+      logger,
+    });
+
+    const result = await authority.execute({
+      clientKey: "llm",
+      operation: "sendStructured",
+      request,
+      call: async () => ok({
+        output: {},
+        rawText: "",
+        tokensIn: Number.MAX_SAFE_INTEGER,
+        tokensOut: 0,
+        cacheWriteTokens: 0,
+        cacheReadTokens: 0,
+      }),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(authority.budget.spent().usage).toBe("known");
+    expect(authority.budget.spent().tokens).toBe(Number.MAX_SAFE_INTEGER);
   });
 
   it("logs reservation underflow and retains state without granting more headroom", () => {

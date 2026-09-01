@@ -598,6 +598,7 @@ describe("createRedisConnectivity — spend-ledger capability", () => {
   const completeAppend = {
     key: "run:spend",
     delta: {
+      usage: "known" as const,
       tokens: 10,
       calls: 1,
       usd: { kind: "unpriced" as const, models: ["model-a", "model-z"] as const, knownMicros: 7 as never },
@@ -616,6 +617,43 @@ describe("createRedisConnectivity — spend-ledger capability", () => {
   it("wraps a thrown hGetAll as Err(redis-unavailable)", async () => {
     const { bundle } = await wire(new FakeRedis({ throwOn: ["hgetall"] }));
     const result = await bundle.redis.hGetAll?.("k");
+    expect(result !== undefined && isErr(result)).toBe(true);
+  });
+
+  it("atomically writes a checkpoint and refreshes spend retention", async () => {
+    const fake = new FakeRedis();
+    const { bundle } = await wire(fake);
+
+    const result = await bundle.redis.commitCheckpointAndRetainSpend?.({
+      checkpointKey: "run:node",
+      checkpointValue: "checkpoint",
+      spendKey: "run:spend",
+      ttlSec: 900,
+    });
+
+    expect(result !== undefined && isOk(result)).toBe(true);
+    expect(fake.calls).toEqual([
+      { m: "multi", args: [] },
+      { m: "multi.set", args: ["run:node", "checkpoint", "EX", 900] },
+      { m: "multi.expire", args: ["run:spend", 900] },
+      { m: "multi.exec", args: [] },
+    ]);
+  });
+
+  it("fails the atomic checkpoint when spend retention reports a command error", async () => {
+    const fake = new FakeRedis({
+      execCommandError: new Error("spend retention failed"),
+      execCommandErrorAt: 1,
+    });
+    const { bundle } = await wire(fake);
+
+    const result = await bundle.redis.commitCheckpointAndRetainSpend?.({
+      checkpointKey: "run:node",
+      checkpointValue: "checkpoint",
+      spendKey: "run:spend",
+      ttlSec: 900,
+    });
+
     expect(result !== undefined && isErr(result)).toBe(true);
   });
 
@@ -646,7 +684,12 @@ describe("createRedisConnectivity — spend-ledger capability", () => {
 
     const result = await bundle.redis.appendSpend?.({
       key: "run:spend",
-      delta: { tokens: 0, calls: 1, usd: { kind: "priced", micros: 0 as never } },
+      delta: {
+        usage: "known",
+        tokens: 0,
+        calls: 1,
+        usd: { kind: "priced", micros: 0 as never },
+      },
     });
 
     expect(result !== undefined && isOk(result)).toBe(true);

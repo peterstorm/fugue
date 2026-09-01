@@ -51,7 +51,13 @@ export {
 // prompt caching severed the link between token count and money: a cache read
 // bills at 0.1x and a write at 1.25-2.0x, so a token ceiling can no longer see
 // an order-of-magnitude difference in spend.
-export type { MicroUsd, PricedSpend, Spend, UnpricedModels } from "./spend.js";
+export type {
+  MicroUsd,
+  PricedSpend,
+  Spend,
+  UnpricedModels,
+  UsageKnowledge,
+} from "./spend.js";
 export {
   NO_MICROS,
   NO_SPEND,
@@ -60,6 +66,7 @@ export {
   maxSpend,
   microsToUsd,
   pricedCall,
+  unknownUsageCall,
   unpricedCall,
   scaleSpend,
   usdToMicros,
@@ -188,6 +195,8 @@ export type {
   InvocationOrigin,
   MintingAuthority,
   ScopedCapabilityHandle,
+  ScopedLlmCapability,
+  ScopedLlmMeter,
 } from "./capability-broker.js";
 export { invocationFor } from "./capability-broker.js";
 

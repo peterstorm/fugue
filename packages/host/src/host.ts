@@ -63,7 +63,11 @@ import { verifyTenantHeader, TENANT_HEADER_NAME } from "./domain/tenant-header.j
 import { createRealmJwtVerifier } from "./adapters/realm-jwt-verifier.js";
 import type { RealmJwtDeps } from "./http/middleware/auth.js";
 import type { AuthenticatedUser, Team } from "./domain/auth.js";
-import type { CapabilityBroker, InvocationOrigin } from "@fuguejs/framework";
+import type {
+  CapabilityBroker,
+  InvocationOrigin,
+  ScopedLlmMeter,
+} from "@fuguejs/framework";
 import { createKeycloakBroker } from "./adapters/keycloak-broker.js";
 import { createSubjectTokenRegistry } from "./adapters/subject-token-registry.js";
 import type { SubjectTokenRegistry } from "./adapters/subject-token-registry.js";
@@ -932,6 +936,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
       input: I,
       ctx: NodeContext,
       origin: InvocationOrigin | undefined,
+      meterMintedLlm: ScopedLlmMeter,
     ): Promise<Result<O, FrameworkError>> => {
       // Inject the boot-selected broker + run origin (as one MintingAuthority —
       // the framework's option type makes broker-without-origin unrepresentable)
@@ -947,7 +952,9 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
       // without copy-drift from this call site.
       return withSubjectTokenRelease(subjectTokens, ctx.runId, () =>
         runDag<I, O>(dag, input, ctx, {
-          minting: broker !== undefined && origin !== undefined ? { broker, origin } : undefined,
+          minting: broker !== undefined && origin !== undefined
+            ? { broker, origin, meterLlm: meterMintedLlm }
+            : undefined,
         }),
       );
     },
