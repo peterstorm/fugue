@@ -32,10 +32,22 @@ type CapabilityHandleBase<K extends Capability> = {
 
 export type RunScopedLlmOperation = "sendStructured" | "sendWithTools";
 
+type IsMutuallyAssignable<A, B> =
+  [A] extends [B]
+    ? [B] extends [A] ? true : false
+    : false;
+
 type RunScopedOperationFor<F> =
-  F extends LlmClient["sendStructured"] ? "sendStructured"
-    : F extends LlmClient["sendWithTools"] ? "sendWithTools"
+  IsMutuallyAssignable<F, LlmClient["sendStructured"]> extends true
+    ? "sendStructured"
+    : IsMutuallyAssignable<F, LlmClient["sendWithTools"]> extends true
+      ? "sendWithTools"
       : never;
+
+type HasCompatibleStandardOperations<T extends LlmClient> =
+  IsMutuallyAssignable<T["sendStructured"], LlmClient["sendStructured"]> extends true
+    ? IsMutuallyAssignable<T["sendWithTools"], LlmClient["sendWithTools"]>
+    : false;
 
 /**
  * Declarative aliases for an augmented LLM subtype.
@@ -50,18 +62,20 @@ export type RunScopedLlmOperations<T extends LlmClient> = {
 };
 
 type LlmHandleFields<T extends LlmClient> =
-  [Extract<Exclude<keyof T, keyof LlmClient>, symbol>] extends [never]
-    ? LlmClient extends T
-      ? {
-          readonly clientKind: "llm";
-          readonly pricingModel: LlmPricingModel;
-          readonly runScopedOperations?: never;
-        }
-      : {
-          readonly clientKind: "llm";
-          readonly pricingModel: LlmPricingModel;
-          readonly runScopedOperations: RunScopedLlmOperations<T>;
-        }
+  HasCompatibleStandardOperations<T> extends true
+    ? [Extract<Exclude<keyof T, keyof LlmClient>, symbol>] extends [never]
+      ? LlmClient extends T
+        ? {
+            readonly clientKind: "llm";
+            readonly pricingModel: LlmPricingModel;
+            readonly runScopedOperations?: never;
+          }
+        : {
+            readonly clientKind: "llm";
+            readonly pricingModel: LlmPricingModel;
+            readonly runScopedOperations: RunScopedLlmOperations<T>;
+          }
+      : never
     : never;
 
 type IsAny<T> = 0 extends (1 & T) ? true : false;

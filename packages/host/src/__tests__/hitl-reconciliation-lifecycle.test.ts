@@ -112,6 +112,47 @@ describe("createHost — HITL reconciliation lifecycle", () => {
     host = booted.value;
   });
 
+  it("continues all teardown when the HTTP listener stop throws", async () => {
+    socketPath = join(tmpdir(), `fugue-stop-throws-${crypto.randomUUID()}.sock`);
+    const base = fakeRedis();
+    const logger = testLogger();
+    let infrastructureClosed = 0;
+    const booted = await createHost({
+      config: makeConfig(),
+      git: fakeGit(),
+      loader: fakeLoader(),
+      redis: base.port,
+      sharedInfra: fakeInfra(base.redis),
+      logger,
+      tenant: mkTenant("acme"),
+      bind: { unix: socketPath },
+      onShutdown: async () => { infrastructureClosed += 1; },
+    });
+
+    expect(booted.ok).toBe(true);
+    if (!booted.ok) return;
+    host = booted.value;
+    const listener = host.server;
+    if (listener === null) throw new Error("expected a bound listener");
+    const realStop = listener.stop;
+    Object.defineProperty(listener, "stop", {
+      value: () => {
+        realStop();
+        throw new Error("listener stop acknowledgement failed");
+      },
+    });
+
+    await expect(host.shutdown()).rejects.toThrow("Host shutdown completed with failures");
+
+    expect(host.getState().phase).toBe("stopped");
+    expect(host.server).toBeNull();
+    expect(infrastructureClosed).toBe(1);
+    expect(logger.logs.some(
+      (entry) => entry.level === "error" && entry.msg.includes("stop HTTP server"),
+    )).toBe(true);
+    host = undefined;
+  });
+
   it("reconciles after worker startup, repeats, and clears the interval on shutdown", async () => {
     socketPath = join(tmpdir(), `fugue-hitl-reconcile-${crypto.randomUUID()}.sock`);
     const base = fakeRedis();

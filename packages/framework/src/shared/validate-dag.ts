@@ -1,0 +1,563 @@
+import type {
+  DagDef,
+  DagDefInput,
+  EdgeDef,
+  EdgeDefRawInput,
+} from "../types/dag.js";
+import type { NodesRecord } from "../types/dag-internals.js";
+import { isConditionalEdge, isDefaultEdge } from "../types/dag.js";
+import type { Capability, NodeDef } from "../types/node.js";
+import type { FrameworkError } from "../types/errors.js";
+import { frameworkError } from "../types/error-factories.js";
+import type { NodeId } from "../types/ids.js";
+import { nodeId, tryNodeId, dagId, DAG_INPUT, isDagInput } from "../types/ids.js";
+import { type Result, ok, err } from "../types/result.js";
+import { CONFIDENCE_ORDER, type ConfidenceBucket } from "../types/confidence.js";
+
+/**
+ * Normalize a raw input edge into the tagged-discriminant `EdgeDef`. Private
+ * to this module — only called after `validateDagShape` has confirmed that
+ * `from`/`to` reference known node IDs.
+ */
+// Brand an edge endpoint. `$input` (the virtual request source) bypasses the
+// `nodeId()` regex — `$` is not a legal id char by construction — and brands to
+// the reserved `DAG_INPUT` constant instead. Only ever legal on an edge `from`;
+// the validator rejects `$input` as a `to` before this is reached for targets.
+const brandEndpoint = (s: string): NodeId => (isDagInput(s) ? DAG_INPUT : nodeId(s));
+
+const normalizeEdge = (e: EdgeDefRawInput): EdgeDef => {
+  if ("kind" in e && e.kind === "default") {
+    return Object.freeze({
+      from: brandEndpoint(e.from),
+      to: brandEndpoint(e.to),
+      kind: "default" as const,
+    });
+  }
+  if ("when" in e) {
+    return Object.freeze({
+      from: brandEndpoint(e.from),
+      to: brandEndpoint(e.to),
+      kind: "conditional" as const,
+      when: e.when,
+    });
+  }
+  return Object.freeze({
+    from: brandEndpoint(e.from),
+    to: brandEndpoint(e.to),
+    kind: "unconditional" as const,
+  });
+};
+
+const validationErr = (nodeId: NodeId, message: string): FrameworkError => ({
+  kind: "validation" as const,
+  nodeId,
+  message,
+});
+
+/** Defensive immutable copy issued only after the node has passed validation. */
+const snapshotNode = (
+  node: NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>,
+): NodeDef<unknown, unknown, FrameworkError, readonly Capability[]> => Object.freeze({
+  ...node,
+  requires: Object.freeze([...node.requires]),
+  sideEffects: Object.freeze({ ...node.sideEffects }),
+  confidence: Object.freeze({ ...node.confidence }),
+  ...(node.humanReview !== undefined
+    ? { humanReview: Object.freeze({ ...node.humanReview }) }
+    : {}),
+  ...(node.retry !== undefined
+    ? {
+        retry: Object.freeze({
+          ...node.retry,
+          ...(node.retry.backoffMs !== undefined
+            ? {
+                backoffMs: Object.freeze([
+                  node.retry.backoffMs[0],
+                  ...node.retry.backoffMs.slice(1),
+                ] as [number, ...number[]]),
+              }
+            : {}),
+        }),
+      }
+    : {}),
+});
+
+/**
+ * Structural validation of a `DagDefInput`. On success, brands the input as
+ * a runtime-shaped `DagDef` (nodes-as-array). The brand is the only path by
+ * which `runDag` / `runDagStateful` accept a DAG, so calling this (or
+ * `defineDag`) is the single, mandatory soundness gate.
+ *
+ * Topology rules (ADR 0015 + ADR 0017):
+ *   - Edges are the single source of truth for wiring. `deps` /
+ *     `optionalDeps` no longer exist on `NodeDef`; the runtime derives
+ *     `{ required, optional }` per node at compile time.
+ *   - Every node with at least one conditional out-edge MUST have exactly
+ *     one `kind: "default"` out-edge (else-totality).
+ *   - At most one edge per `(from, to)` pair.
+ *   - Conditional `when` must be a well-formed function-based predicate
+ *     with `{ label, version, check, minConfidence? }`.
+ *   - `outputNodeId` (when set) must be reachable along unconditional +
+ *     default edges only — predicates may bypass nodes, never the output.
+ *
+ * Record/key invariant:
+ *   - Every record key matches its node's `id`. This is the only discrepancy
+ *     possible when authors construct nodes via factory helpers that take
+ *     `id` explicitly.
+ */
+export const validateDagShape = (
+  input: DagDefInput,
+  provenance?: DagDef["provenance"],
+): Result<DagDef, FrameworkError> => {
+  const entries = Object.entries(input.nodes) as [
+    string,
+    NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>,
+  ][];
+
+  if (entries.length === 0) {
+    return err(validationErr(nodeId("__dag__"), `DAG '${input.id}' has no nodes`));
+  }
+
+  // Record-key vs node.id consistency + key format validation.
+  for (const [key, node] of entries) {
+    const keyValid = tryNodeId(key);
+    if (!keyValid.ok) {
+      return err(
+        validationErr(
+          nodeId("__dag__"),
+          `nodes['${key}'] has invalid id: ${keyValid.error}`,
+        ),
+      );
+    }
+    if (node.id !== key) {
+      return err(
+        validationErr(
+          node.id,
+          `nodes['${key}'] has id '${node.id}' — record key and node.id must match`,
+        ),
+      );
+    }
+
+    // Retry-config numeric domains (NodeRetryConfig): backoff delays must be
+    // finite non-negative milliseconds, the ladder must NOT be empty (an
+    // empty ladder has no attempt-0 delay — `every` would pass it vacuously
+    // and the compiled `?? [1000, 2000, 4000]` default never fires for `[]`),
+    // and the jitter ratio a finite value in [0, 1]. A NaN/negative delay or
+    // out-of-range jitter would otherwise flow unvalidated into `applyJitter`
+    // retry scheduling (a NaN/negative delay collapses `setTimeout` to an
+    // immediate retry spin; jitter > 1 can invert the delay sign). Validation
+    // lives at the single mandatory soundness gate with the same
+    // `validation`-kind error naming the offending node.
+    if (node.retry !== undefined) {
+      const { backoffMs, jitterRatio } = node.retry;
+      if (
+        backoffMs !== undefined &&
+        (backoffMs.length === 0 ||
+          !backoffMs.every((ms) => Number.isFinite(ms) && ms >= 0))
+      ) {
+        return err(
+          validationErr(
+            node.id,
+            `node '${node.id}' retry.backoffMs must be a non-empty ladder of finite non-negative numbers`,
+          ),
+        );
+      }
+      if (
+        jitterRatio !== undefined &&
+        !(Number.isFinite(jitterRatio) && jitterRatio >= 0 && jitterRatio <= 1)
+      ) {
+        return err(
+          validationErr(
+            node.id,
+            `node '${node.id}' retry.jitterRatio must be a finite number in [0, 1]`,
+          ),
+        );
+      }
+    }
+  }
+
+  // DAG-level retry budgets (retryLimits / defaultRetryLimit): per-node
+  // retry counts are compared against attempt counters, so the domain is the
+  // same non-negative-safe-integer class as the node-level numeric gates
+  // above. A bare `as Readonly<Record<string, number>>` pass-through (the
+  // pre-fix shape) let NaN/negative/infinite limits flow into `getRetryLimit`
+  // and corrupt the budget. Same single gate, same `validation`-kind error.
+  if (input.retryLimits !== undefined) {
+    for (const [key, limit] of Object.entries(input.retryLimits)) {
+      // The key must NAME a node in this DAG. `retryLimits` is a raw
+      // string-keyed record on the authoring surface — TypeScript erases a
+      // branded key type on `Record<NodeId, number>` back to a string index
+      // signature, so the only place a typo can be caught is here. Left
+      // unchecked it silently no-ops: `getRetryLimit` never finds the entry
+      // and the node quietly runs on `defaultRetryLimit ?? 0` instead of the
+      // budget its author configured.
+      if (!Object.hasOwn(input.nodes, key)) {
+        return err(
+          validationErr(
+            nodeId("__dag__"),
+            `retryLimits['${key}'] names no node in DAG '${input.id}' — a retry budget for an unknown node would be silently ignored`,
+          ),
+        );
+      }
+      if (limit === undefined) {
+        return err(
+          validationErr(
+            nodeId("__dag__"),
+            `retryLimits['${key}'] must be a non-negative safe integer, got undefined`,
+          ),
+        );
+      }
+      if (!Number.isSafeInteger(limit) || limit < 0) {
+        return err(
+          validationErr(
+            nodeId("__dag__"),
+            `retryLimits['${key}'] must be a non-negative safe integer, got ${String(limit)}`,
+          ),
+        );
+      }
+    }
+  }
+  if (
+    input.defaultRetryLimit !== undefined &&
+    (!Number.isSafeInteger(input.defaultRetryLimit) || input.defaultRetryLimit < 0)
+  ) {
+    return err(
+      validationErr(
+        nodeId("__dag__"),
+        `defaultRetryLimit must be a non-negative safe integer, got ${String(input.defaultRetryLimit)}`,
+      ),
+    );
+  }
+
+  const nodeIds = new Set(entries.map(([id]) => nodeId(id)));
+
+  // DAG_INPUT-edge well-formedness (C0). `$input` is the virtual request
+  // source: legal only as an unconditional `from`. Checked on the RAW edges,
+  // before `normalizeEdge` would brand a `$input` `to` through `nodeId()` and
+  // throw on the illegal `$` character.
+  const rawEdges = input.edges as readonly EdgeDefRawInput[];
+  for (const e of rawEdges) {
+    if (isDagInput(e.to)) {
+      return err(
+        frameworkError.invalidDagInputEdge(
+          { from: e.from, to: e.to },
+          `DAG_INPUT ('$input') cannot be an edge target — it is the virtual request source, never a node`,
+        ),
+      );
+    }
+    if (isDagInput(e.from)) {
+      const conditionalOrDefault =
+        ("when" in e) || ("kind" in e && e.kind === "default");
+      if (conditionalOrDefault) {
+        return err(
+          frameworkError.invalidDagInputEdge(
+            { from: e.from, to: e.to },
+            `DAG_INPUT ('$input') edge to '${e.to}' must be unconditional — it carries no routing semantics (no \`when\`, no \`default\`)`,
+          ),
+        );
+      }
+    }
+  }
+
+  // Normalize edges into the tagged-discriminant runtime form. The input may
+  // carry the implicit-unconditional or implicit-conditional (`when`-only)
+  // shape per `EdgeDefRawInput`; downstream code reads exclusively from the
+  // normalized array.
+  const edges: readonly EdgeDef[] = rawEdges.map(normalizeEdge);
+
+  // Edge endpoints reference known nodes (the literal-typed input guards
+  // this at edit time, but defensive at runtime for `as DagDefInput` casts).
+  // `DAG_INPUT` is the one legal non-node source.
+  for (const e of edges) {
+    if (!isDagInput(e.from) && !nodeIds.has(e.from)) {
+      return err(validationErr(e.from, `Edge references unknown source node '${e.from}'`));
+    }
+    if (!nodeIds.has(e.to)) {
+      return err(validationErr(e.to, `Edge references unknown target node '${e.to}'`));
+    }
+  }
+
+  // Edge uniqueness: at most one EdgeDef per (from, to) pair across all variants.
+  const seenPairs = new Set<string>();
+  for (const e of edges) {
+    const key = `${e.from} ${e.to}`;
+    if (seenPairs.has(key)) {
+      return err({
+        kind: "duplicate-edge",
+        fromNodeId: e.from,
+        toNodeId: e.to,
+      });
+    }
+    seenPairs.add(key);
+  }
+
+  // Conditional edges must carry a well-formed function-based predicate with
+  // a non-empty `label` and a `check` function.
+  for (const e of edges) {
+    if (!isConditionalEdge(e)) continue;
+    const pred = e.when;
+    if (pred === null || typeof pred !== "object" || Array.isArray(pred)) {
+      return err(
+        validationErr(
+          e.from,
+          `Edge '${e.from}' -> '${e.to}' has a malformed predicate — expected an object with { label, check }`,
+        ),
+      );
+    }
+    const p = pred as { label?: unknown; check?: unknown; version?: unknown; minConfidence?: unknown };
+    if (typeof p.label !== "string" || p.label.length === 0) {
+      return err(
+        validationErr(
+          e.from,
+          `Edge '${e.from}' -> '${e.to}' predicate is missing a non-empty 'label'`,
+        ),
+      );
+    }
+    if (typeof p.version !== "number" || !Number.isInteger(p.version) || p.version < 0) {
+      return err(
+        validationErr(
+          e.from,
+          `Edge '${e.from}' -> '${e.to}' predicate is missing a valid 'version' (non-negative integer)`,
+        ),
+      );
+    }
+    if (typeof p.check !== "function") {
+      return err(
+        validationErr(
+          e.from,
+          `Edge '${e.from}' -> '${e.to}' predicate is missing a 'check' function`,
+        ),
+      );
+    }
+    if (p.minConfidence !== undefined) {
+      // Derive from CONFIDENCE_ORDER so adding a new ConfidenceBucket variant
+      // automatically widens the accepted set without manual updates here.
+      const validBuckets = Object.keys(CONFIDENCE_ORDER) as readonly ConfidenceBucket[];
+      const minConfidence = p.minConfidence;
+      if (typeof minConfidence !== "string" || !(validBuckets as readonly string[]).includes(minConfidence)) {
+        return err({
+          kind: "predicate-malformed",
+          nodeId: e.from,
+          message: `Edge '${e.from}' -> '${e.to}' predicate has invalid minConfidence '${String(minConfidence)}' — must be one of: ${validBuckets.join(", ")}`,
+        });
+      }
+    }
+  }
+
+  // Source / root structural invariant (C0 / 0.2.0). No node implicitly
+  // receives the DAG input: a node with zero incoming edges is a *source*
+  // (built via `createSourceNode`, which sets `isSource: true`), and
+  // a source must be a root. `DAG_INPUT` edges count as incoming here — a node
+  // fed by `$input` is consuming the request and is therefore not a root.
+  const incomingCount = new Map<NodeId, number>();
+  for (const id of nodeIds) incomingCount.set(id, 0);
+  for (const e of edges) {
+    incomingCount.set(e.to, (incomingCount.get(e.to) ?? 0) + 1);
+  }
+  for (const [, node] of entries) {
+    const inDeg = incomingCount.get(node.id) ?? 0;
+    if (node.isSource === true && inDeg > 0) {
+      return err(
+        frameworkError.sourceHasIncoming(
+          node.id,
+          `Source node '${node.id}' has ${inDeg} incoming edge(s) — a source produces from the context alone and consumes no input. Remove the incoming edge(s), or drop the source form and declare an inputSchema`,
+        ),
+      );
+    }
+    // A source consumes no DAG input, so its run always receives `undefined`.
+    // The `isSource` flag and the input schema are correlated but not coupled in
+    // the `NodeDef` type — `createSourceNode` sets `inputSchema: z.void()`, but a
+    // hand- or dynamically-built node could pair `isSource: true` with a non-unit
+    // schema that rejects `undefined`. Reject that here so the illegal state
+    // fails at definition time instead of surfacing as a confusing runtime parse.
+    if (node.isSource === true && !node.inputSchema.safeParse(undefined).success) {
+      return err(
+        validationErr(
+          node.id,
+          `Source node '${node.id}' has an inputSchema that rejects \`undefined\` — a source consumes no DAG input, so its inputSchema must be the unit schema (z.void()). Build it with createSourceNode`,
+        ),
+      );
+    }
+    if (node.isSource !== true && inDeg === 0) {
+      return err(
+        frameworkError.rootExpectsInput(
+          node.id,
+          `Node '${node.id}' has no incoming edges but is not a source node — under 0.2.0 no node implicitly receives the DAG input. Make it a source (build it with createSourceNode) if it needs none, or feed the request explicitly with a { from: DAG_INPUT, to: '${node.id}' } edge`,
+        ),
+      );
+    }
+  }
+
+  // Else-totality: every node with any conditional out-edge must have exactly
+  // one default out-edge.
+  const outgoingByNode = new Map<NodeId, EdgeDef[]>();
+  for (const id of nodeIds) outgoingByNode.set(id, []);
+  for (const e of edges) {
+    const list = outgoingByNode.get(e.from);
+    if (list) list.push(e);
+  }
+  for (const id of nodeIds) {
+    const out = outgoingByNode.get(id) ?? [];
+    const guarded = out.filter(isConditionalEdge);
+    const defaults = out.filter(isDefaultEdge);
+    if (guarded.length === 0) {
+      if (defaults.length > 0) {
+        return err(
+          validationErr(
+            id,
+            `Node '${id}' has a default edge but no conditional out-edges — drop the default`,
+          ),
+        );
+      }
+      continue;
+    }
+    if (defaults.length !== 1) {
+      return err({ kind: "missing-default-edge", nodeId: id });
+    }
+  }
+
+  if (input.outputNodeId !== undefined && !nodeIds.has(nodeId(input.outputNodeId))) {
+    return err(
+      validationErr(
+        nodeId(input.outputNodeId),
+        `outputNodeId '${input.outputNodeId}' is not a node in DAG '${input.id}'`,
+      ),
+    );
+  }
+
+  // Freshness extractor consistency: writes nodes that declare extractNewWitness
+  // must also have extractConditionedOn (partial config is a bug). Reads nodes
+  // without extractWitness simply opt out of freshness tracking (valid for
+  // non-freshness-participating fetch nodes).
+  for (const [, node] of entries) {
+    const se = node.sideEffects;
+    if (se.kind !== "writes") continue;
+    // One XOR, stated once: whichever extractor is present without its twin
+    // names itself in the message.
+    const missing = se.extractNewWitness && !se.extractConditionedOn
+      ? { declared: "extractNewWitness", absent: "extractConditionedOn" }
+      : se.extractConditionedOn && !se.extractNewWitness
+        ? { declared: "extractConditionedOn", absent: "extractNewWitness" }
+        : null;
+    if (missing !== null) {
+      return err(
+        validationErr(
+          node.id,
+          `Node '${node.id}' declares ${missing.declared} but is missing ${missing.absent}`,
+        ),
+      );
+    }
+  }
+
+  if (input.outputNodeId !== undefined) {
+    // `DAG_INPUT` is a virtual wave-(-1) source: always satisfied, imposing no
+    // ordering. A node whose only inbound is a `$input` edge is therefore an
+    // entry for reachability purposes (skip `$input` edges when counting
+    // inbound), and the request flows in regardless of routing.
+    const incomingAny = new Map<string, EdgeDef[]>();
+    for (const id of nodeIds) incomingAny.set(id, []);
+    for (const e of edges) {
+      if (isDagInput(e.from)) continue;
+      const list = incomingAny.get(e.to);
+      if (list) list.push(e);
+    }
+    const entryIds = [...nodeIds].filter(
+      (id) => (incomingAny.get(id)?.length ?? 0) === 0,
+    );
+
+    const reachable = new Set<NodeId>(entryIds);
+    const stack = [...reachable];
+    while (stack.length > 0) {
+      const cur = stack.pop()!;
+      for (const e of outgoingByNode.get(cur) ?? []) {
+        if (isConditionalEdge(e)) continue;
+        if (!reachable.has(e.to)) {
+          reachable.add(e.to);
+          stack.push(e.to);
+        }
+      }
+    }
+
+    if (!reachable.has(nodeId(input.outputNodeId))) {
+      // Walk backward from the output along unconditional + default edges to
+      // find the first node that has no unconditional/default inbound. That
+      // node is the actual frontier — the place where routing diverged from
+      // the output. Reporting the output node itself (the prior behaviour)
+      // sent every consumer chasing the symptom rather than the cause.
+      const incomingNonConditional = new Map<string, EdgeDef[]>();
+      for (const id of nodeIds) incomingNonConditional.set(id, []);
+      for (const e of edges) {
+        if (isConditionalEdge(e)) continue;
+        if (isDagInput(e.from)) continue;
+        const list = incomingNonConditional.get(e.to);
+        if (list) list.push(e);
+      }
+      const visited = new Set<string>();
+      const queue: string[] = [input.outputNodeId];
+      let frontier: string = input.outputNodeId;
+      while (queue.length > 0) {
+        const cur = queue.shift()!;
+        if (visited.has(cur)) continue;
+        visited.add(cur);
+        const ins = incomingNonConditional.get(cur) ?? [];
+        if (ins.length === 0) {
+          frontier = cur;
+          break;
+        }
+        for (const e of ins) {
+          if (!visited.has(e.from)) queue.push(e.from);
+        }
+      }
+      return err({
+        kind: "output-unreachable-under-routing",
+        outputNodeId: nodeId(input.outputNodeId),
+        missedFromNode: nodeId(frontier),
+      });
+    }
+  }
+
+  // This parser is the sole brand issuer. Snapshot every validated collection
+  // first so caller-owned objects cannot mutate the proof after it is issued.
+  const validated = Object.freeze({
+    id: dagId(input.id),
+    nodes: Object.freeze(entries.map(([, node]) => snapshotNode(node))),
+    edges: Object.freeze([...edges]),
+    ...(input.outputNodeId !== undefined ? { outputNodeId: nodeId(input.outputNodeId) } : {}),
+    ...(input.evalJudges !== undefined
+      ? { evalJudges: Object.freeze([...input.evalJudges]) }
+      : {}),
+    ...(input.retryLimits !== undefined
+      ? { retryLimits: Object.freeze({ ...input.retryLimits }) }
+      : {}),
+    ...(input.defaultRetryLimit !== undefined
+      ? { defaultRetryLimit: input.defaultRetryLimit }
+      : {}),
+    ...(provenance !== undefined ? { provenance } : {}),
+  }) as DagDef;
+  return ok(validated);
+};
+
+// Re-export so test helpers building array-shape inputs can convert.
+export const recordFromNodeArray = (
+  nodes: readonly NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>[],
+): NodesRecord => Object.fromEntries(nodes.map((node) => [node.id, node]));
+
+/**
+ * Re-parse retry overrides through the one DagDef soundness gate. Invalid node
+ * names or counts remain typed validation failures; no unchecked rebranding
+ * seam exists for callers to bypass the invariant.
+ */
+export const withRetryLimits = (
+  dag: DagDef,
+  limits: Readonly<Record<string, number>>,
+): Result<DagDef, FrameworkError> => validateDagShape({
+  id: dag.id,
+  nodes: recordFromNodeArray(dag.nodes),
+  edges: dag.edges,
+  ...(dag.outputNodeId !== undefined ? { outputNodeId: dag.outputNodeId } : {}),
+  ...(dag.evalJudges !== undefined ? { evalJudges: dag.evalJudges } : {}),
+  retryLimits: { ...(dag.retryLimits ?? {}), ...limits },
+  ...(dag.defaultRetryLimit !== undefined
+    ? { defaultRetryLimit: dag.defaultRetryLimit }
+    : {}),
+}, dag.provenance);

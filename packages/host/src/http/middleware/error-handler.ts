@@ -229,10 +229,7 @@ const respondWithHostError = (
   });
 };
 
-/**
- * Create a Hono error handler with injected logger.
- * Registered via `app.onError(createErrorHandler(logger))`.
- */
+/** Narrow an arbitrary throw to an Error without trusting prototype traps. */
 const asError = (value: unknown): Error | undefined => {
   try {
     return value instanceof Error ? value : undefined;
@@ -261,6 +258,10 @@ const readFrameworkErrorKind = (error: Error): FrameworkErrorKind | undefined =>
   }
 };
 
+/**
+ * Create a Hono error handler with injected logger.
+ * Registered via `app.onError(createErrorHandler(logger))`.
+ */
 export const createErrorHandler = (
   logger: ErrorHandlerLogger,
   writeFallback: ErrorHandlerFallback = (diagnostic) => process.stderr.write(diagnostic),
@@ -298,7 +299,7 @@ export const createErrorHandler = (
   logErrorWithoutThrowing(logger, "Unhandled error in request handler", {
     error: safeErrorMessage(thrown),
     stack: thrownError === undefined ? undefined : readErrorField(thrownError, "stack"),
-    causeMessage: causeError === undefined ? undefined : readErrorField(causeError, "message"),
+    causeMessage: causeValue === undefined ? undefined : safeErrorMessage(causeValue),
     causeStack: causeError === undefined ? undefined : readErrorField(causeError, "stack"),
   }, writeFallback);
   return errorResponse(c, 500, "internal-error", "An unexpected error occurred");

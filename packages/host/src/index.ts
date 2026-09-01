@@ -47,7 +47,7 @@ export { parseHostConfig, parseFugueYaml, HostConfigSchema, FugueYamlSchema, wor
 
 // ── Multi-tenant: tenant + worker UDS + supervisor header contract ──────────
 export type { TenantId, Tenant, SecretsRef, TenantRegistryView } from "./domain/tenant.js";
-export { tenantId, markTenant, markSecretsRef, resolveTenant, TENANT_ID_REGEX } from "./domain/tenant.js";
+export { tenantId, markSecretsRef, resolveTenant, TENANT_ID_REGEX } from "./domain/tenant.js";
 export type { TenantHeaderVerification } from "./domain/tenant-header.js";
 export { TENANT_HEADER_NAME, signTenantHeader, verifyTenantHeader } from "./domain/tenant-header.js";
 

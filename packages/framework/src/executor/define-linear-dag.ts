@@ -7,7 +7,7 @@
 // same branded result.
 
 import type { DagDef } from "../types/dag.js";
-import type { NodeDef } from "../types/node.js";
+import type { Capability, NodeDef } from "../types/node.js";
 import type { EvalJudgeNodeDef } from "../nodes/eval-judge.js";
 import { DagDefinitionError, defineDagFromArray } from "./define-dag.js";
 import { nodeId } from "../types/ids.js";
@@ -16,7 +16,7 @@ import { dagInputEdgeFor } from "./dag-input-edge.js";
 export interface LinearDagConfig {
   readonly id: string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional
-  readonly nodes: readonly NodeDef<any, any, any>[];
+  readonly nodes: readonly NodeDef<any, any, any, readonly Capability[]>[];
   readonly evalJudges?: readonly EvalJudgeNodeDef[];
   readonly defaultRetryLimit?: number;
   readonly retryLimits?: Readonly<Record<string, number>>;

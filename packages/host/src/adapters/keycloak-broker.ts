@@ -40,7 +40,7 @@
 
 import { match } from "ts-pattern";
 import type { Result, FrameworkError, Capability } from "@fuguejs/framework";
-import { ok, err } from "@fuguejs/framework";
+import { ok, err, safeErrorMessage } from "@fuguejs/framework";
 import type {
   CapabilityBroker,
   Invocation,
@@ -453,7 +453,7 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
         kind: "infra-unreachable",
         operation: hopInFlight.operation,
         hop: hopInFlight.hop,
-        message: `capability port threw across the boundary: ${e instanceof Error ? e.message : String(e)}`,
+        message: `capability port threw across the boundary: ${safeErrorMessage(e)}`,
       });
     }
   };
@@ -488,7 +488,7 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
           kind: "infra-unreachable",
           operation: "mint",
           hop: "broker-internal",
-          message: `app-token acquisition threw across the in-flight boundary: ${e instanceof Error ? e.message : String(e)}`,
+          message: `app-token acquisition threw across the in-flight boundary: ${safeErrorMessage(e)}`,
         }),
     );
     inFlight.set(cacheK, p);
@@ -645,7 +645,7 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
         kind: "infra-unreachable",
         operation: "mint",
         hop: "broker-internal",
-        message: `broker dependency threw across the boundary: ${e instanceof Error ? e.message : String(e)}`,
+        message: `broker dependency threw across the boundary: ${safeErrorMessage(e)}`,
       };
       // The scope is unknown at this fence (the throw may precede scope
       // parsing); `"*"` keeps the SC-009 record correlated without inventing

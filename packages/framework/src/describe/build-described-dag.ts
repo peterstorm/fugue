@@ -10,7 +10,7 @@
 import { match } from "ts-pattern";
 import type { z } from "zod";
 import type { DagDef } from "../types/dag.js";
-import type { NodeDef } from "../types/node.js";
+import type { Capability, NodeDef } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import { type Result, ok, err } from "../types/result.js";
 import { topoSort } from "../shared/topo.js";
@@ -131,7 +131,9 @@ const safeZodToJsonSchema = (
   }
 };
 
-const describeNode = (node: NodeDef<unknown, unknown>): DescribedNode => ({
+const describeNode = (
+  node: NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>,
+): DescribedNode => ({
   id: node.id as string,
   kind: node.kind,
   sideEffects: node.sideEffects.kind,
@@ -174,7 +176,9 @@ const collectCapabilities = (dag: DagDef): string[] => {
  * name as a typed field; this predicate makes the read safe without an
  * `as unknown` cast at the call site.
  */
-const readNodePromptName = (node: NodeDef<unknown, unknown>): string | null => {
+const readNodePromptName = (
+  node: NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>,
+): string | null => {
   if (node.kind !== "llm") return null;
   const candidate = (node as { readonly promptName?: unknown }).promptName;
   return typeof candidate === "string" && candidate.length > 0

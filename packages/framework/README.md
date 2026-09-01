@@ -31,7 +31,7 @@ Types and entry points that workflow authors touch.
 
 ### `types/`
 
-- `DagDef`, `DagDefInput`, `EdgeDef`, `EdgeDefInput`, `EdgeDefRawInput`, `Predicate`, `withRetryLimits` — the DAG shape, edge-predicate vocabulary (ADR 0015, ADR 0016), and the retry-limit helper.
+- `DagDef`, `DagDefInput`, `EdgeDef`, `EdgeDefInput`, `EdgeDefRawInput`, `Predicate` — the validated DAG shape and edge-predicate vocabulary (ADR 0015, ADR 0016).
 - `NodeDef`, `NodeKind`, `NodeRetryConfig`, `NodeHumanReviewConfig` — node authoring contract.
 - `Capability`, `BaseNodeContext`, `NodeContext`, `TypedNodeContext`, `NodeContextInit` — capability-typed `NodeContext`. Declare `requires` on a `NodeDef` and the `ctx` parameter is typed accordingly — `requires: ["llm"]` yields `ctx.llm: LlmClient` (non-null).
 - `ClockCapability` plus the `systemClock` / `fixedClock` constructors — the `clock` capability (`requires: ["clock"]`); `fixedClock` pins time for deterministic tests, `systemClock` is the production default.
@@ -47,7 +47,7 @@ Internal inference helpers (`ConsistentNodes`, `OutputOf`, `OutputsByNodeId`, `N
 
 - `defineDag`, `defineDagFromArray`, `DagDefinitionError` — type-driven DAG constructor(s) with `outputNodeId` enforcement.
 - `defineSources`, `SourcesDagConfig` — constructor for source-rooted DAGs; validates fan-in keys against source-node ids at definition time.
-- `validateDagShape`, `recordFromNodeArray` — pure validation utilities.
+- `validateDagShape`, `recordFromNodeArray`, `withRetryLimits` — pure validation utilities. `withRetryLimits` returns `Result<DagDef, FrameworkError>` and re-enters the same parser, so unknown node IDs and invalid counts cannot launder the validation brand.
 - `runDag`, `resumeRun`, `RunOptions` — execution entry points. Always route through the durable state machine (ADR 0021). `RunOptions` includes `jobLike`, `onHumanReview`, `onBackground`, `retryLimits`, and the ADR 0019 routing advisory toggle `suppressRoutingWarnings`. (`onTrace` is available on `RunOptions`.)
 
 ### `nodes/`

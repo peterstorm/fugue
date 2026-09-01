@@ -66,22 +66,33 @@ const arbSpend: fc.Arbitrary<Spend> = fc.oneof(
 );
 
 describe("MicroUsd: money as an integer", () => {
-  it("rounds a USD float to whole micro-dollars", () => {
+  it("rounds every positive USD amount upward so billable calls cannot disappear", () => {
     expect(usdToMicros(1.5)).toBe(micros(1_500_000));
-    expect(usdToMicros(0.0000004)).toBe(micros(0));
+    expect(usdToMicros(0.0000004)).toBe(micros(1));
     expect(usdToMicros(0.0000006)).toBe(micros(1));
+
+    const repeated = Array.from({ length: 10 }, () => pricedCall(0, usdToMicros(0.0000001)))
+      .reduce(addSpend, NO_SPEND);
+    expect(costFloor(repeated.usd)).toBe(micros(10));
+  });
+
+  it("maps every generated positive sub-micro-dollar charge to nonzero spend", () => {
+    fc.assert(fc.property(
+      fc.integer({ min: 1, max: 999 }),
+      (nanoUsd) => usdToMicros(nanoUsd / 1_000_000_000) >= micros(1),
+    ));
   });
 
   it("round-trips through the display conversion", () => {
     expect(microsToUsd(usdToMicros(2.5))).toBeCloseTo(2.5, 10);
   });
 
-  it("reads a non-finite or negative figure as zero rather than poisoning every later sum", () => {
-    // A NaN would propagate through the run total, and `NaN >= limit` is false
-    // forever — the budget would fail OPEN permanently. Negative would be a
-    // refund, which a provider cannot issue.
+  it("maps invalid non-positive inputs to zero and positive overflow to saturation", () => {
+    // NaN must not poison comparisons and negative values cannot be refunds.
+    // Positive infinity/overflow is cost, so it saturates fail-closed.
     expect(usdToMicros(Number.NaN)).toBe(micros(0));
-    expect(usdToMicros(Number.POSITIVE_INFINITY)).toBe(micros(0));
+    expect(usdToMicros(Number.POSITIVE_INFINITY)).toBe(microUsd(Number.MAX_SAFE_INTEGER));
+    expect(usdToMicros(Number.NEGATIVE_INFINITY)).toBe(micros(0));
     expect(usdToMicros(-5)).toBe(micros(0));
     expect(usdToMicros(Number.MAX_VALUE)).toBe(microUsd(Number.MAX_SAFE_INTEGER));
   });
@@ -118,6 +129,24 @@ describe("MicroUsd: money as an integer", () => {
     ]) {
       expect(parseSpend(value).ok).toBe(false);
     }
+  });
+});
+
+describe("UnpricedModels canonicalization", () => {
+  it("sorts, deduplicates, and is idempotent for arbitrary non-empty inputs", () => {
+    fc.assert(fc.property(
+      fc.array(fc.string({ minLength: 1, maxLength: 24 }), {
+        minLength: 1,
+        maxLength: 40,
+      }),
+      (input) => {
+        const canonical = unpricedModels(input);
+        expect(canonical).toBeDefined();
+        if (canonical === undefined) return;
+        expect([...canonical]).toEqual([...new Set(input)].sort());
+        expect(unpricedModels(canonical)).toEqual(canonical);
+      },
+    ));
   });
 });
 

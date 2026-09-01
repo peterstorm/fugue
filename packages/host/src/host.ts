@@ -38,7 +38,7 @@ import type { LogPort } from "./ports.js";
  * teardown sites needed exactly this guard; expressing it once means a future
  * teardown step cannot quietly omit it.
  */
-const logSafely = <L extends "warn" | "error">(
+const logSafely = <L extends "info" | "warn" | "error">(
   logger: Pick<LogPort, L>,
   level: L,
   message: string,
@@ -1065,59 +1065,72 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
    *     a failed boot left no record of WHICH one.
    *
    * Stopping the server is deliberately NOT part of this: the two callers stop
-   * it differently on purpose (`shutdown` calls `server.stop()`; the boot-abort
-   * path uses `stopBoundServerAfterBindFailure`, whose failure string is folded
-   * into the returned error). Callers stop the server, then call this.
+   * it differently on purpose (`shutdown` fences `server.stop()` and continues;
+   * the boot-abort path uses `stopBoundServerAfterBindFailure`, whose failure
+   * string is folded into the returned error). Callers stop the server, then
+   * call this.
    */
-  const teardownAfterServerStop = async (context: string): Promise<void> => {
-    // Diagnostics are secondary to completing teardown.
-    const logFailure = (message: string, error: unknown): void =>
+  const teardownAfterServerStop = async (context: string): Promise<readonly unknown[]> => {
+    const failures: unknown[] = [];
+    const recordFailure = (message: string, error: unknown): void => {
+      failures.push(new Error(message, { cause: error }));
       logSafely(logger, "error", message, { error: safeErrorMessage(error) });
+    };
 
-    // Stop server-owned reconciliation before closing the worker/Redis it uses:
-    // stop scheduling, then let the sweep already in flight finish.
-    if (hitlReconciliation !== undefined) {
-      hitlReconciliation.stop();
-      await hitlReconciliation.settle();
-      hitlReconciliation = undefined;
-    }
-
-    // Stop the HITL worker (ADR-0060) — drains its in-flight job, then no more
-    // run slices are processed. The queue backend itself is closed by the binary
-    // via `onShutdown` (it owns the BullMQ/Redis connection).
-    if (hitlWorker) {
+    // Clear ownership before each operation so teardown remains idempotent even
+    // when a non-conforming port throws. Every later resource is still attempted.
+    const reconciliation = hitlReconciliation;
+    hitlReconciliation = undefined;
+    if (reconciliation !== undefined) {
       try {
-        await hitlWorker.close();
-      } catch (closeError) {
-        logFailure(`Failed to close HITL worker during ${context}`, closeError);
+        reconciliation.stop();
+      } catch (error) {
+        recordFailure(`Failed to stop HITL reconciliation during ${context}`, error);
       }
-      hitlWorker = undefined;
-    }
-
-    // Close connected capabilities (ADR-0051) in reverse topological order, then
-    // infrastructure. `closeAll` reports per-capability failures rather than
-    // throwing, so name them: "shutdown completed" with a silent failed close is
-    // exactly the state an operator needs to be able to see.
-    if (sortedHandles.length > 0) {
-      const closeFailures = await closeAll(sortedHandles, logger);
-      if (closeFailures.length > 0) {
-        logSafely(logger, "warn",
-          `Capability shutdown completed with ${closeFailures.length} failure(s)`,
-          { context, failures: closeFailures.map((f) => f.name) });
+      try {
+        await reconciliation.settle();
+      } catch (error) {
+        recordFailure(`Failed to settle HITL reconciliation during ${context}`, error);
       }
     }
 
-    // Clean up infrastructure (e.g., close Redis connections).
+    const worker = hitlWorker;
+    hitlWorker = undefined;
+    if (worker !== undefined) {
+      try {
+        await worker.close();
+      } catch (error) {
+        recordFailure(`Failed to close HITL worker during ${context}`, error);
+      }
+    }
+
+    const handles = sortedHandles;
+    sortedHandles = [];
+    if (handles.length > 0) {
+      try {
+        const closeFailures = await closeAll(handles, logger);
+        for (const failure of closeFailures) {
+          recordFailure(
+            `Capability '${failure.name}' failed to close during ${context}`,
+            new Error(failure.error),
+          );
+        }
+      } catch (error) {
+        recordFailure(`Capability shutdown threw during ${context}`, error);
+      }
+    }
+
     if (deps.onShutdown) {
       try {
         await deps.onShutdown();
-      } catch (cleanupError) {
-        logFailure(
+      } catch (error) {
+        recordFailure(
           `Infrastructure cleanup failed during ${context} — resources may be leaked`,
-          cleanupError,
+          error,
         );
       }
     }
+    return failures;
   };
 
   // `| undefined` is type-honest: `Bun.serve` may throw before assigning (a bind
@@ -1253,63 +1266,84 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
   );
 
   // ── Shutdown Logic ───────────────────────────────────────────────────────
-  const shutdown = async () => {
-    logger.info("Shutdown initiated — draining in-flight requests...");
+  let shutdownPromise: Promise<void> | undefined;
+  const performShutdown = async (): Promise<void> => {
+    const failures: unknown[] = [];
+    const recordFailure = (operation: string, error: unknown): void => {
+      failures.push(new Error(`Shutdown step failed: ${operation}`, { cause: error }));
+      logSafely(logger, "error", `Shutdown step failed: ${operation}`, {
+        error: safeErrorMessage(error),
+      });
+    };
+    const attempt = (operation: string, effect: () => void): void => {
+      try {
+        effect();
+      } catch (error) {
+        recordFailure(operation, error);
+      }
+    };
 
-    // Stop sync loop
-    if (syncLoop) {
-      syncLoop.stop();
-      syncLoop = null;
+    attempt("log shutdown start", () =>
+      logger.info("Shutdown initiated — draining in-flight requests..."));
+
+    const stoppingSyncLoop = syncLoop;
+    syncLoop = null;
+    if (stoppingSyncLoop !== null) {
+      attempt("stop sync loop", () => stoppingSyncLoop.stop());
     }
 
-    // Stop Redis liveness probe — no more degraded/recovered transitions during drain
-    if (redisProbe) {
-      redisProbe.stop();
-      redisProbe = null;
+    const stoppingRedisProbe = redisProbe;
+    redisProbe = null;
+    if (stoppingRedisProbe !== null) {
+      attempt("stop Redis liveness probe", () => stoppingRedisProbe.stop());
     }
 
-    // Transition to draining
     const inflightCount = concurrency.global.current;
     const drainResult = beginDrain(hostState, inflightCount, Date.now());
     if (drainResult.ok) {
       hostState = drainResult.value;
     } else {
-      logger.warn("Cannot transition to draining", {
-        currentPhase: hostState.phase,
-        error: drainResult.error.message,
-      });
+      const transitionError = new Error(drainResult.error.message);
+      recordFailure("transition host to draining", transitionError);
     }
 
-    // Wait for in-flight requests to drain (up to DRAIN_TIMEOUT_MS)
     const drainDeadline = Date.now() + config.DRAIN_TIMEOUT_MS;
     while (concurrency.global.current > 0 && Date.now() < drainDeadline) {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-
     if (concurrency.global.current > 0) {
-      logger.warn(`Drain timeout — ${concurrency.global.current} requests still in-flight`);
+      attempt("log drain timeout", () =>
+        logger.warn(`Drain timeout — ${concurrency.global.current} requests still in-flight`));
     }
 
-    // Stop HTTP server
-    if (server) {
-      server.stop();
-      server = null;
+    const stoppingServer = server;
+    server = null;
+    if (stoppingServer !== null) {
+      attempt("stop HTTP server", () => stoppingServer.stop());
     }
 
-    await teardownAfterServerStop("shutdown");
+    failures.push(...await teardownAfterServerStop("shutdown"));
 
-    // Transition to stopped
     const stoppedResult = drainComplete(hostState);
     if (stoppedResult.ok) {
       hostState = stoppedResult.value;
     } else {
-      logger.warn("Cannot transition to stopped", {
-        currentPhase: hostState.phase,
-        error: stoppedResult.error.message,
-      });
+      recordFailure("transition host to stopped", new Error(stoppedResult.error.message));
     }
 
-    logger.info("Host stopped");
+    if (failures.length === 0) {
+      attempt("log host stopped", () => logger.info("Host stopped"));
+    } else {
+      logSafely(logger, "warn", `Host stopped with ${failures.length} shutdown failure(s)`);
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(failures, "Host shutdown completed with failures");
+    }
+  };
+
+  const shutdown = (): Promise<void> => {
+    shutdownPromise ??= performShutdown();
+    return shutdownPromise;
   };
 
   // ── Signal Handlers ──────────────────────────────────────────────────────
@@ -1331,12 +1365,12 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
     getState: () => hostState,
     getConcurrency: () => concurrency,
     getCircuitBreakers: () => circuitBreakers as ReadonlyMap<DagId, CircuitState>,
-    shutdown: async () => {
+    shutdown: () => {
       if (signalHandle) {
         signalHandle.unregister();
         signalHandle = null;
       }
-      await shutdown();
+      return shutdown();
     },
     triggerSync: async () => {
       if (syncLoop) {

@@ -35,6 +35,7 @@ import type { BulkLoadResult, LoadResult, ModuleLoaderPort } from "../ports.js";
 import {
   fakeGit,
   fakeInfra,
+  fakeLoader,
   fakeRedis,
   makeConfig,
   mkTenant,
@@ -63,6 +64,7 @@ const config = (provider: "anthropic" | "openai" | "azure") => {
     OPENAI_API_KEY: "openai-key",
     AZURE_OPENAI_ENDPOINT: "https://example.openai.azure.com/",
     AZURE_OPENAI_DEPLOYMENT: "deployment-a",
+    AZURE_OPENAI_MODEL: "gpt-4o-mini",
     AZURE_OPENAI_API_KEY: "azure-key",
   });
   if (!result.ok) throw new Error("invalid test configuration");
@@ -204,13 +206,14 @@ describe("host LLM entrypoint wiring", () => {
       baseUrl: "https://example.openai.azure.com/openai/deployments/deployment-a",
       apiVersion: "2025-03-01-preview",
       deployment: "deployment-a",
+      model: "gpt-4o-mini",
     });
   });
 
   it("binds Azure pricing to its fixed provider override", () => {
     expect(hostLlmPricingModel(config("azure"))).toEqual({
       kind: "fixed",
-      model: "deployment-a",
+      model: "gpt-4o-mini",
     });
     expect(hostLlmPricingModel(config("openai"))).toEqual({ kind: "request" });
     expect(hostLlmPricingModel(config("anthropic"))).toEqual({ kind: "request" });
@@ -238,6 +241,50 @@ describe("createHost broker-LLM composition", () => {
     host = undefined;
     if (socketPath !== undefined && existsSync(socketPath)) rmSync(socketPath, { force: true });
     socketPath = undefined;
+  });
+
+  it("attempts every teardown step and rejects when shutdown is not clean", async () => {
+    const redis = fakeRedis();
+    const baseLogger = testLogger();
+    let infrastructureCleanupCalls = 0;
+    const logger = {
+      ...baseLogger,
+      info: (message: string, data?: Record<string, unknown>) => {
+        if (message.startsWith("Shutdown initiated")) {
+          throw new Error("shutdown logger unavailable");
+        }
+        baseLogger.info(message, data);
+      },
+    };
+    socketPath = join(tmpdir(), `fugue-shutdown-${crypto.randomUUID()}.sock`);
+    const booted = await createHost({
+      config: makeConfig(),
+      git: fakeGit(),
+      loader: fakeLoader(),
+      redis: redis.port,
+      sharedInfra: fakeInfra(redis.redis),
+      logger,
+      tenant: mkTenant("acme"),
+      bind: { unix: socketPath },
+      onShutdown: async () => {
+        infrastructureCleanupCalls += 1;
+        throw new Error("Redis disconnect failed");
+      },
+    });
+    expect(booted.ok).toBe(true);
+    if (!booted.ok) return;
+    host = booted.value;
+
+    const firstShutdown = host.shutdown();
+    await expect(firstShutdown).rejects.toThrow("Host shutdown completed with failures");
+    expect(infrastructureCleanupCalls).toBe(1);
+    expect(host.server).toBeNull();
+
+    const secondShutdown = host.shutdown();
+    expect(secondShutdown).toBe(firstShutdown);
+    await expect(secondShutdown).rejects.toBeInstanceOf(AggregateError);
+    expect(infrastructureCleanupCalls).toBe(1);
+    host = undefined;
   });
 
   it("threads the run spend meter into synchronous broker dispatch", async () => {

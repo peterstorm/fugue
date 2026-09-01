@@ -43,6 +43,7 @@ import {
   type RunSpendAuthorityDeps,
 } from "../adapters/run-spend-authority.js";
 import { createInMemorySpendLedger } from "../adapters/spend-ledger-memory.js";
+import { collectLogs } from "../adapters/__tests__/fixtures/log-capture.js";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -70,16 +71,6 @@ const cumulativeTokens = (data?: Record<string, unknown>): number | undefined =>
 
 const cumulativeCalls = (data?: Record<string, unknown>): number | undefined =>
   (data?.["cumulative"] as { calls?: number } | undefined)?.calls;
-
-const collectLogs = () => {
-  const logs: { level: string; msg: string; data?: Record<string, unknown> }[] = [];
-  const logger: LogPort = {
-    info: (msg, data) => logs.push({ level: "info", msg, data }),
-    warn: (msg, data) => logs.push({ level: "warn", msg, data }),
-    error: (msg, data) => logs.push({ level: "error", msg, data }),
-  };
-  return { logger, logs };
-};
 
 /**
  * Fake inner LlmClient: records every request it receives and returns a
@@ -201,6 +192,54 @@ describe("metered-llm: narrow standard surface", () => {
     expect((await metered.sendStructured(structuredReq(nodeA))).ok).toBe(true);
     expect((await metered.sendWithTools(toolsReq(nodeA), fakeCtx)).ok).toBe(true);
     expect(logs.filter((line) => line.msg === "llm.metered")).toHaveLength(2);
+  });
+});
+
+describe("metered-llm: request boundary snapshots", () => {
+  it("rejects stateful request accessors before admission or provider egress", async () => {
+    const { inner, calls } = fakeInner(1, 0);
+    const metered = createMeteredLlm(inner, { logger: collectLogs().logger });
+    let reads = 0;
+    const hostileStructured = { ...structuredReq(nodeA) };
+    Object.defineProperty(hostileStructured, "model", {
+      enumerable: true,
+      get: () => (++reads % 2 === 1 ? "gpt-4o" : "gpt-4o-mini"),
+    });
+    const hostileTools = { ...toolsReq(nodeA) };
+    Object.defineProperty(hostileTools, "cache", {
+      enumerable: true,
+      get: () => ({ kind: "conversation", ttl: "1h" }),
+    });
+
+    const structured = await metered.sendStructured(hostileStructured);
+    const tools = await metered.sendWithTools(hostileTools, fakeCtx);
+
+    expect(structured.ok).toBe(false);
+    expect(tools.ok).toBe(false);
+    if (!structured.ok) expect(structured.error.kind).toBe("validation");
+    if (!tools.ok) expect(tools.error.kind).toBe("validation");
+    expect(reads).toBe(0);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("passes one frozen own-data snapshot to pricing and the provider", async () => {
+    let received: LlmRequest<unknown> | undefined;
+    const inner: LlmClient = {
+      sendStructured: async (request) => {
+        received = request;
+        return ok({ output: null, rawText: "", ...tokensOnly(1, 0) });
+      },
+      sendWithTools: async (request) =>
+        ok({ output: null, rawText: "", ...tokensOnly(1, 0) }),
+    };
+    const metered = createMeteredLlm(inner, { logger: collectLogs().logger });
+    const source = pricedReq(nodeA, { kind: "static-prefix", ttl: "1h" });
+
+    expect((await metered.sendStructured(source)).ok).toBe(true);
+    expect(received).not.toBe(source);
+    expect(Object.isFrozen(received)).toBe(true);
+    expect(Object.isFrozen(received?.cache)).toBe(true);
+    expect(received?.model).toBe(PRICED_MODEL);
   });
 });
 

@@ -16,7 +16,7 @@ import type { JobLike, KernelRunOpts } from "../state-machine/types.js";
 import type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, HumanReviewOutcome } from "./types.js";
 import { EXECUTOR_NODE_ID } from "./types.js";
 import type { DagDef } from "../types/dag.js";
-import { withRetryLimits } from "../types/dag.js";
+import { withRetryLimits } from "../shared/validate-dag.js";
 import type { Capability, NodeContext, ValidatedNodeContext } from "../types/node.js";
 import type {
   CapabilityBroker,
@@ -265,8 +265,11 @@ const prepareDagRun = (
   nodeCtx: NodeContext,
   opts?: Pick<DagRunOpts, "retryLimits" | "now" | "minting">,
 ): Result<PreparedRun, FrameworkError> => {
-  const effectiveDag: DagDef =
-    opts?.retryLimits !== undefined ? withRetryLimits(dag, opts.retryLimits) : dag;
+  const derivedDag = opts?.retryLimits !== undefined
+    ? withRetryLimits(dag, opts.retryLimits)
+    : ok(dag);
+  if (!derivedDag.ok) return derivedDag;
+  const effectiveDag = derivedDag.value;
 
   // Emit run-start BEFORE compile so a malformed DAG still produces a balanced
   // run-start/run-end pair.

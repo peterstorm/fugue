@@ -91,15 +91,17 @@ export const NO_MICROS: MicroUsd = microUsd(0);
  * domain, at the ONE boundary where money stops being a display figure and
  * starts being budget input.
  *
- * Non-finite and negative inputs read as zero, for the same reason
- * `sanitizeCount` clamps token counts: a `NaN` would propagate through every
- * later sum and `NaN >= limit` is false forever, which fails the budget OPEN.
+ * `NaN`, zero, and negative inputs read as zero. Every positive amount rounds
+ * UP so a billable call can never disappear at this precision; repeated
+ * sub-micro-dollar calls therefore still consume the USD budget. Positive
+ * overflow saturates fail-closed at the largest representable amount.
  */
 export const usdToMicros = (usd: number): MicroUsd => {
-  if (!Number.isFinite(usd) || usd < 0) return NO_MICROS;
+  if (Number.isNaN(usd) || usd <= 0) return NO_MICROS;
+  if (!Number.isFinite(usd)) return microUsd(Number.MAX_SAFE_INTEGER);
   const scaled = usd * 1_000_000;
   return Number.isFinite(scaled)
-    ? microUsd(Math.round(scaled))
+    ? microUsd(scaled)
     : microUsd(Number.MAX_SAFE_INTEGER);
 };
 

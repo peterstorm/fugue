@@ -119,8 +119,10 @@ export const HostConfigSchema = z.object({
   AZURE_OPENAI_ENDPOINT: z.string().optional(),
   /** Azure OpenAI API key */
   AZURE_OPENAI_API_KEY: z.string().optional(),
-  /** Azure OpenAI deployment name */
+  /** Azure OpenAI deployment name used only for provider routing. */
   AZURE_OPENAI_DEPLOYMENT: z.string().optional(),
+  /** Underlying Azure OpenAI model SKU used for pricing and request authority. */
+  AZURE_OPENAI_MODEL: z.string().optional(),
   /** Azure OpenAI API version (defaults to 2025-03-01-preview) */
   AZURE_OPENAI_API_VERSION: z.string().default("2025-03-01-preview"),
   /** Admin bearer token for provisioning teams and full access (required) */
@@ -715,8 +717,19 @@ export const HostConfigSchema = z.object({
   if (c.LLM_PROVIDER === "openai" && !c.OPENAI_API_KEY) {
     ctx.addIssue({ code: "custom", path: ["OPENAI_API_KEY"], message: "Required when LLM_PROVIDER is 'openai'" });
   }
-  if (c.LLM_PROVIDER === "azure" && (!c.AZURE_OPENAI_ENDPOINT || !c.AZURE_OPENAI_API_KEY || !c.AZURE_OPENAI_DEPLOYMENT)) {
-    ctx.addIssue({ code: "custom", path: ["AZURE_OPENAI_ENDPOINT"], message: "AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY, and AZURE_OPENAI_DEPLOYMENT required when LLM_PROVIDER is 'azure'" });
+  if (
+    c.LLM_PROVIDER === "azure" &&
+    (!c.AZURE_OPENAI_ENDPOINT ||
+      !c.AZURE_OPENAI_API_KEY ||
+      !c.AZURE_OPENAI_DEPLOYMENT ||
+      !c.AZURE_OPENAI_MODEL)
+  ) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["AZURE_OPENAI_ENDPOINT"],
+      message:
+        "AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY, AZURE_OPENAI_DEPLOYMENT, and AZURE_OPENAI_MODEL required when LLM_PROVIDER is 'azure'",
+    });
   }
   if (c.DOCUMENTS_ADAPTER === "fs" && !c.DOCUMENTS_FS_ROOT) {
     ctx.addIssue({ code: "custom", path: ["DOCUMENTS_FS_ROOT"], message: "Required when DOCUMENTS_ADAPTER is 'fs'" });

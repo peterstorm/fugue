@@ -1,5 +1,5 @@
 /**
- * One mutable spend/reservation cell for every LLM client in an execution slice.
+ * One mutable spend/reservation cell shared by every LLM client in an execution slice.
  * Pure accounting remains in `domain/llm-meter`; this shell sequences provider
  * settlement, logging, and one awaited ledger append (ADR-0082/0083).
  */
@@ -14,6 +14,7 @@ import type {
   DagId,
   FrameworkError,
   LlmPricingModel,
+  LlmRequest,
   LlmResponse,
   NodeId,
   Result,
@@ -25,10 +26,10 @@ import type {
 import {
   DEFAULT_CACHE_TTL,
   NO_TOKENS,
-  PRICE_TABLE,
   PersistedFrameworkErrorSchema,
   err,
   formatBreach,
+  isPricedModel,
   ok,
   remainingFor,
   safeErrorMessage,
@@ -55,10 +56,14 @@ import {
 
 export type MeteredLlmOperation = "sendStructured" | "sendWithTools";
 
-export interface MeteredRequest {
+interface MeteredRequestBase {
   readonly nodeId: NodeId;
   readonly model: string;
   readonly cache?: SingleShotCachePolicy | ConversationCachePolicy;
+}
+
+export interface MeteredRequest<O> extends MeteredRequestBase {
+  readonly schema: LlmRequest<O>["schema"];
 }
 
 export type HydratedSpend =
@@ -86,7 +91,7 @@ type RunSpendExecution<O> = {
   readonly clientKey: Capability;
   readonly operation: MeteredLlmOperation;
   readonly pricingModel?: LlmPricingModel;
-  readonly request: MeteredRequest;
+  readonly request: MeteredRequest<O>;
   readonly call: () => Promise<Result<LlmResponse<O>, FrameworkError>>;
 };
 
@@ -96,7 +101,7 @@ export interface RunSpendAuthority {
     Promise<Result<LlmResponse<O>, FrameworkError>>;
 }
 
-const writeTtlOf = (cache: MeteredRequest["cache"]): CacheTtl =>
+const writeTtlOf = (cache: MeteredRequestBase["cache"]): CacheTtl =>
   cache === undefined || cache.kind === "none" ? DEFAULT_CACHE_TTL : cache.ttl;
 
 const isObjectLike = (value: unknown): value is object =>
@@ -105,20 +110,38 @@ const isObjectLike = (value: unknown): value is object =>
 const isNonNegativeSafeInteger = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 
+const ownDataValue = (value: object, key: PropertyKey): Result<unknown, string> => {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  return descriptor !== undefined && Object.hasOwn(descriptor, "value")
+    ? ok(descriptor.value)
+    : err(`'${String(key)}' must be an own data property`);
+};
+
 const tokenUsageOf = (value: unknown): TokenUsage | undefined => {
   if (!isObjectLike(value)) return undefined;
   try {
-    const usage = {
-      tokensIn: Reflect.get(value, "tokensIn"),
-      tokensOut: Reflect.get(value, "tokensOut"),
-      cacheWriteTokens: Reflect.get(value, "cacheWriteTokens"),
-      cacheReadTokens: Reflect.get(value, "cacheReadTokens"),
+    const tokensIn = ownDataValue(value, "tokensIn");
+    const tokensOut = ownDataValue(value, "tokensOut");
+    const cacheWriteTokens = ownDataValue(value, "cacheWriteTokens");
+    const cacheReadTokens = ownDataValue(value, "cacheReadTokens");
+    if (!tokensIn.ok || !tokensOut.ok || !cacheWriteTokens.ok || !cacheReadTokens.ok) {
+      return undefined;
+    }
+    if (
+      !isNonNegativeSafeInteger(tokensIn.value) ||
+      !isNonNegativeSafeInteger(tokensOut.value) ||
+      !isNonNegativeSafeInteger(cacheWriteTokens.value) ||
+      !isNonNegativeSafeInteger(cacheReadTokens.value)
+    ) {
+      return undefined;
+    }
+    const usage: TokenUsage = {
+      tokensIn: tokensIn.value,
+      tokensOut: tokensOut.value,
+      cacheWriteTokens: cacheWriteTokens.value,
+      cacheReadTokens: cacheReadTokens.value,
     };
-    return isNonNegativeSafeInteger(usage.tokensIn) &&
-        isNonNegativeSafeInteger(usage.tokensOut) &&
-        isNonNegativeSafeInteger(usage.cacheWriteTokens) &&
-        isNonNegativeSafeInteger(usage.cacheReadTokens) &&
-        usage.cacheWriteTokens <= usage.tokensIn &&
+    return usage.cacheWriteTokens <= usage.tokensIn &&
         usage.cacheReadTokens <= usage.tokensIn - usage.cacheWriteTokens
       ? usage
       : undefined;
@@ -139,9 +162,10 @@ type SettledLlmResult<O> = {
 /** Parse one runtime client outcome before accounting or returning it. */
 const settledLlmResult = <O>(
   raw: unknown,
-  nodeId: NodeId,
+  request: MeteredRequest<O>,
   operation: MeteredLlmOperation,
 ): SettledLlmResult<O> => {
+  const nodeId = request.nodeId;
   const malformed = (detail: string): SettledLlmResult<O> => ({
     result: err({
       kind: "node-crash",
@@ -154,19 +178,48 @@ const settledLlmResult = <O>(
 
   if (!isObjectLike(raw)) return malformed("expected an object");
   try {
-    const outcome = Reflect.get(raw, "ok");
-    if (outcome === true) {
-      const response = Reflect.get(raw, "value");
+    const outcome = ownDataValue(raw, "ok");
+    if (!outcome.ok) return malformed(outcome.error);
+    if (outcome.value === true) {
+      const responseValue = ownDataValue(raw, "value");
+      if (!responseValue.ok || !isObjectLike(responseValue.value)) {
+        return malformed("successful Result.value must be an own response object");
+      }
+      const response = responseValue.value;
       const usage = tokenUsageOf(response);
-      return usage === undefined
-        ? malformed("successful response has invalid token usage")
-        : {
-            result: { ok: true, value: response as LlmResponse<O> },
-            usage: { kind: "known", usage },
-          };
+      if (usage === undefined) return malformed("successful response has invalid token usage");
+      const output = ownDataValue(response, "output");
+      if (!output.ok) return malformed(`successful response ${output.error}`);
+      const parsedOutput = request.schema.safeParse(output.value);
+      if (!parsedOutput.success) {
+        return malformed("successful response output does not match the request schema");
+      }
+      const rawText = ownDataValue(response, "rawText");
+      if (!rawText.ok || typeof rawText.value !== "string") {
+        return malformed("successful response rawText must be an own string data property");
+      }
+      const thinkingDescriptor = Object.getOwnPropertyDescriptor(response, "thinking");
+      if (thinkingDescriptor !== undefined && !Object.hasOwn(thinkingDescriptor, "value")) {
+        return malformed("successful response thinking must be an own data property when present");
+      }
+      const thinking = thinkingDescriptor?.value;
+      if (thinking !== undefined && typeof thinking !== "string") {
+        return malformed("successful response thinking must be a string when present");
+      }
+      return {
+        result: ok({
+          output: parsedOutput.data,
+          rawText: rawText.value,
+          ...(thinking !== undefined ? { thinking } : {}),
+          ...usage,
+        }),
+        usage: { kind: "known", usage },
+      };
     }
-    if (outcome === false) {
-      const parsed = PersistedFrameworkErrorSchema.safeParse(Reflect.get(raw, "error"));
+    if (outcome.value === false) {
+      const errorValue = ownDataValue(raw, "error");
+      if (!errorValue.ok) return malformed(errorValue.error);
+      const parsed = PersistedFrameworkErrorSchema.safeParse(errorValue.value);
       if (!parsed.success) return malformed("error payload is not a FrameworkError");
       const partial = usageOfError(parsed.data);
       if (partial === undefined) {
@@ -250,7 +303,7 @@ export const createRunSpendAuthority = (
   };
 
   const gate = (
-    request: MeteredRequest,
+    request: MeteredRequestBase,
     clientKey: Capability,
     effectiveModel: string,
   ): Result<() => void, FrameworkError> => {
@@ -259,7 +312,7 @@ export const createRunSpendAuthority = (
       runId,
       reservation,
       limits,
-      Object.hasOwn(PRICE_TABLE, effectiveModel)
+      isPricedModel(effectiveModel)
         ? { kind: "priced", model: effectiveModel }
         : { kind: "unpriced", model: effectiveModel },
     );
@@ -315,7 +368,7 @@ export const createRunSpendAuthority = (
   };
 
   const record = (
-    req: MeteredRequest,
+    req: MeteredRequestBase,
     clientKey: Capability,
     operation: MeteredLlmOperation,
     effectiveModel: string,
@@ -342,14 +395,14 @@ export const createRunSpendAuthority = (
   };
 
   const settle = async <O>(
-    req: MeteredRequest,
+    req: MeteredRequest<O>,
     clientKey: Capability,
     operation: MeteredLlmOperation,
     effectiveModel: string,
     rawResult: unknown,
     releaseReservationForCall: () => void,
   ): Promise<Result<LlmResponse<O>, FrameworkError>> => {
-    const { result, usage } = settledLlmResult<O>(rawResult, req.nodeId, operation);
+    const { result, usage } = settledLlmResult<O>(rawResult, req, operation);
     const settledCall = record(req, clientKey, operation, effectiveModel, usage);
     releaseReservationForCall();
     const persisted = await persist(req.nodeId, clientKey, settledCall);

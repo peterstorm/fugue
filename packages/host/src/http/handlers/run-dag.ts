@@ -152,7 +152,7 @@ export const createRunDagHandler = (
     try {
       input = await c.req.json();
     } catch (e: unknown) {
-      const errorMsg = e instanceof Error ? e.message : String(e);
+      const errorMsg = safeErrorMessage(e);
       const parseErr: HostError = {
         kind: "body-parse-failed",
         dagId,

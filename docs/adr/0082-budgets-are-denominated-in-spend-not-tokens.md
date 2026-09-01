@@ -50,7 +50,7 @@ A third: `PRICE_TABLE` is hand-maintained, and `computeCostUsd` returns **0** fo
 
 **Spend, not tokens.** The meter accumulates a `Spend` — `{ tokens, calls, usd }` — and `llm/cost.ts` gains `spendOfCall`, the single producer of budget-facing cost. It reuses the same cache-weighted arithmetic ADR-0081 established, so the multipliers reach the budget through exactly one path.
 
-**Money is a bounded exact integer.** `MicroUsd` (1e-6 USD, branded) is what ceilings compare against; the raw USD float stays display-only. Every in-memory value is a non-negative safe integer. Addition and projection saturate at `Number.MAX_SAFE_INTEGER`, which is fail-closed because every valid monetary ceiling is then reached. Within that domain, settlement order cannot introduce float drift or operator disagreement.
+**Money is a bounded exact integer.** `MicroUsd` (1e-6 USD, branded) is what ceilings compare against; the raw USD float stays display-only. Every in-memory value is a non-negative safe integer. Every positive per-call cost rounds upward at the float→integer boundary, so repeated sub-micro-dollar calls cannot disappear from the USD total. Positive overflow, including infinity, saturates at `Number.MAX_SAFE_INTEGER`, which is fail-closed because every valid monetary ceiling is then reached. Within that domain, settlement order cannot introduce float drift or operator disagreement.
 
 **Unknown cost is a union member, not a sentinel.**
 
@@ -66,7 +66,7 @@ type PricedSpend =
 
 **Ceilings are a non-empty, one-per-kind, canonically-ordered list.** `ceilings()` is the only constructor; duplicates collapse to their **minimum**. Composing a DAG's limits with a caller-supplied set is therefore just `ceilings([...dag, ...request])`, and "raise my budget" is not expressible — deny-by-default falls out of the data structure rather than out of a check somebody must remember to write.
 
-**Pricing follows the provider-effective model.** Every LLM binding carries a composition-owned policy: request-selected providers price the request model, while fixed deployments bind one model and reject conflicting requests before egress. Admission and settlement consume the same resolved model identity, so caller-controlled request metadata cannot price a different route.
+**Pricing follows the provider-effective model.** Every LLM binding carries a composition-owned policy: request-selected providers price the request model, while fixed deployments bind one model and reject conflicting requests before egress. The metered boundary parses each request into one immutable own-data snapshot and passes that exact value to both admission and provider egress. Stateful accessors therefore cannot expose one model/cache policy to pricing and another to the provider.
 
 **A refusal names its ceiling and its basis.**
 

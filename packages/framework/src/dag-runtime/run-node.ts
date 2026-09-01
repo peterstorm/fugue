@@ -38,6 +38,7 @@ import type {
   MintingAuthority,
   ScopedCapabilityHandle,
   ScopedLlmCapability,
+  ScopedNonLlmCapability,
 } from "../types/capability-broker.js";
 import { invocationFor } from "../types/capability-broker.js";
 import { mergeScopedCapabilities } from "../shared/make-node-context.js";
@@ -163,11 +164,9 @@ const ownDataValue = (
     : err(`scoped binding '${String(key)}' must be an own data property`);
 };
 
-type ParsedScopedBinding =
-  | { readonly kind: "non-llm"; readonly client: unknown }
-  | { readonly kind: "llm"; readonly binding: ScopedLlmCapability };
-
-const parseScopedBinding = (value: unknown): Result<ParsedScopedBinding, string> => {
+const parseScopedBinding = (
+  value: unknown,
+): Result<ScopedNonLlmCapability<unknown> | ScopedLlmCapability, string> => {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return err("scoped capability must be a tagged binding object");
   }
@@ -179,7 +178,7 @@ const parseScopedBinding = (value: unknown): Result<ParsedScopedBinding, string>
       return err("scoped binding requires a non-null own client data property");
     }
     if (kind.value === "non-llm") {
-      return ok({ kind: "non-llm", client: client.value });
+      return ok(Object.freeze({ clientKind: "non-llm", client: client.value }));
     }
     if (kind.value !== "llm") return err("scoped binding clientKind is invalid");
 
@@ -220,15 +219,12 @@ const parseScopedBinding = (value: unknown): Result<ParsedScopedBinding, string>
       runScopedOperations[alias] = operation;
     }
 
-    return ok({
-      kind: "llm",
-      binding: Object.freeze({
-        clientKind: "llm",
-        client: client.value as ScopedLlmCapability["client"],
-        pricingModel,
-        runScopedOperations: Object.freeze(runScopedOperations),
-      }),
-    });
+    return ok(Object.freeze({
+      clientKind: "llm",
+      client: client.value as ScopedLlmCapability["client"],
+      pricingModel,
+      runScopedOperations: Object.freeze(runScopedOperations),
+    }));
   } catch (caught) {
     return err(`scoped binding could not be inspected safely: ${safeErrorMessage(caught)}`);
   }
@@ -244,7 +240,7 @@ const meterScopedLlmCapabilities = (
     for (const [key, value] of Object.entries(scoped)) {
       const parsed = parseScopedBinding(value);
       if (!parsed.ok) return err(brokerContractViolation(nodeId, parsed.error));
-      if (parsed.value.kind === "non-llm") {
+      if (parsed.value.clientKind === "non-llm") {
         resolved[key] = parsed.value.client;
         continue;
       }
@@ -256,7 +252,7 @@ const meterScopedLlmCapabilities = (
       }
       const decorated = minting.meterLlm(
         key as Capability,
-        parsed.value.binding,
+        parsed.value,
         nodeId,
       );
       if (!decorated.ok) return decorated;
@@ -301,7 +297,7 @@ interface RunNodeOpts {
 }
 
 export const runNodeShared = async (
-  node: NodeDef<unknown, unknown>,
+  node: NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>,
   ctx: ValidatedNodeContext,
   dagId: DagId,
   outputs: ReadonlyMap<NodeId, unknown>,
@@ -389,6 +385,27 @@ export const runNodeShared = async (
       // against — the half-consistent "origin Y on an authority-X mint" state
       // is unrepresentable here.
       const inv = invocationFor(minting, { runId: ctx.runId, dagId, nodeId });
+      // Snapshot both sides of the broker claim before crossing the awaited
+      // extension seam. A broker must not be able to mutate the caller-owned
+      // requirements or change `provides()` answers and thereby rewrite the
+      // authority proof after minting has begun.
+      let requiredCapabilities: readonly Capability[];
+      let brokerClaims: ReadonlySet<Capability>;
+      try {
+        requiredCapabilities = Object.freeze([...node.requires]);
+        brokerClaims = new Set(
+          requiredCapabilities.filter(
+            (capability) => minting.broker.provides?.(capability) === true,
+          ),
+        );
+      } catch (caught) {
+        const violation = brokerContractViolation(
+          nodeId,
+          `requirements/claims snapshot threw: ${safeErrorMessage(caught)}`,
+        );
+        emitNodeError(`capability minting refused: ${messageOf(violation)}`, violation);
+        return err(violation);
+      }
       // The port contract says errors flow on the Result channel, never thrown
       // — but the broker is a public extension seam, so the contract is
       // enforced here rather than assumed. An unfenced throw would escape to
@@ -407,7 +424,7 @@ export const runNodeShared = async (
       let minted: Result<ScopedCapabilityHandle, FrameworkError>;
       try {
         minted = parseBrokerResult(
-          await minting.broker.mintFor(inv, node.requires),
+          await minting.broker.mintFor(inv, requiredCapabilities),
           nodeId,
         );
       } catch (caught) {
@@ -420,12 +437,33 @@ export const runNodeShared = async (
         emitNodeError(`capability minting refused: ${messageOf(minted.error)}`, minted.error);
         return err(minted.error);
       }
+      // Validate the broker's authority before either metering or merge. A
+      // returned key must be both declared by this node and claimed by the
+      // snapshotted `provides` view; otherwise the broker could inject authority
+      // the DAG never requested.
+      const overdelivered = Object.keys(minted.value).filter(
+        (key) =>
+          !requiredCapabilities.includes(key as Capability) ||
+          !brokerClaims.has(key as Capability),
+      );
+      if (overdelivered.length > 0) {
+        const overdeliveryError = brokerContractViolation(
+          nodeId,
+          `returned undeclared or unclaimed capabilities: ${overdelivered.sort().join(", ")}`,
+        );
+        emitNodeError(
+          `capability minting refused: ${messageOf(overdeliveryError)}`,
+          overdeliveryError,
+        );
+        return err(overdeliveryError);
+      }
+
       // Validate delivery against the broker result itself, before the static
       // base can participate in a merge. A base client must never satisfy a
       // capability that `provides()` promised to mint for this invocation.
-      const undelivered = node.requires.filter(
+      const undelivered = requiredCapabilities.filter(
         (cap) =>
-          minting.broker.provides?.(cap) === true &&
+          brokerClaims.has(cap) &&
           (!Object.hasOwn(minted.value, cap) || minted.value[cap] == null),
       );
       const [firstUndelivered, ...restUndelivered] = undelivered;

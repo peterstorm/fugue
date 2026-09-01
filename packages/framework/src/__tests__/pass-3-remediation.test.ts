@@ -962,27 +962,33 @@ describe("Wave 4.10 — DeadLetterOpts.formatMessage receives raw err", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Wave 3.5 — withRetryLimits derives a new DagDef without laundering the brand
+// Wave 3.5 — withRetryLimits derives only through the DagDef parser
 // ---------------------------------------------------------------------------
 
-describe("Wave 3.5 — withRetryLimits sanctioned DagDef derivation", () => {
-  it("merges call-time limits on top of dag.retryLimits with call-time taking precedence", async () => {
-    const { withRetryLimits } = await import("../types/dag.js");
+describe("Wave 3.5 — withRetryLimits revalidates DagDef derivation", () => {
+  it("merges valid call-time limits and returns a freshly validated DagDef", async () => {
+    const { withRetryLimits } = await import("../executor/validate-dag.js");
     const dag = makeDag([makeNode("a"), makeNode("b")], [{ from: DAG_INPUT, to: "a" }, { from: "a", to: "b" }], {
       retryLimits: { a: 2, b: 3 },
     });
-    const out = withRetryLimits(dag, { b: 99, c: 7 });
-    expect(out.retryLimits).toEqual({ a: 2, b: 99, c: 7 });
-    // The returned value is still a branded DagDef — usable wherever DagDef is.
-    expect(out.id).toBe(dag.id);
-    expect(out.nodes.length).toBe(dag.nodes.length);
+    const out = withRetryLimits(dag, { b: 99 });
+    expect(out.ok).toBe(true);
+    if (!out.ok) throw new Error(out.error.kind);
+    expect(out.value.retryLimits).toEqual({ a: 2, b: 99 });
+    expect(out.value.id).toBe(dag.id);
+    expect(out.value.nodes.length).toBe(dag.nodes.length);
   });
 
-  it("works when the original dag has no retryLimits set", async () => {
-    const { withRetryLimits } = await import("../types/dag.js");
+  it("rejects unknown nodes and invalid counts instead of laundering the brand", async () => {
+    const { withRetryLimits } = await import("../executor/validate-dag.js");
     const dag = makeDag([makeNode("a")], [{ from: DAG_INPUT, to: "a" }]);
-    const out = withRetryLimits(dag, { a: 5 });
-    expect(out.retryLimits).toEqual({ a: 5 });
+
+    const unknown = withRetryLimits(dag, { typo: 5 });
+    const negative = withRetryLimits(dag, { a: -1 });
+    expect(unknown.ok).toBe(false);
+    expect(negative.ok).toBe(false);
+    if (!unknown.ok) expect(unknown.error.kind).toBe("validation");
+    if (!negative.ok) expect(negative.error.kind).toBe("validation");
   });
 });
 

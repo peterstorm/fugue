@@ -20,7 +20,7 @@
 // Sugar over `defineDagFromArray`: same module-load validation, same brand.
 
 import type { DagDef } from "../types/dag.js";
-import type { NodeDef } from "../types/node.js";
+import type { Capability, NodeDef } from "../types/node.js";
 import type { EvalJudgeNodeDef } from "../nodes/eval-judge.js";
 import { DagDefinitionError, defineDagFromArray } from "./define-dag.js";
 import { nodeId, DAG_INPUT } from "../types/ids.js";
@@ -34,10 +34,10 @@ export interface SourcesDagConfig {
   readonly sources: NonEmptyNodeList;
   /** Fan-in node keyed by the source node ids. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional: `run`'s contravariant input rejects NodeDef<unknown> for concrete-input nodes
-  readonly join: NodeDef<any, any, any>;
+  readonly join: NodeDef<any, any, any, readonly Capability[]>;
   /** Optional second-stage fan-in over the join. When present, it is the output node. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional: see `join`
-  readonly assemble?: NodeDef<any, any, any>;
+  readonly assemble?: NodeDef<any, any, any, readonly Capability[]>;
   readonly evalJudges?: readonly EvalJudgeNodeDef[];
   readonly defaultRetryLimit?: number;
   readonly retryLimits?: Readonly<Record<string, number>>;

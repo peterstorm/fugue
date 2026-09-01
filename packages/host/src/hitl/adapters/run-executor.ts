@@ -265,7 +265,26 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
         }
         return ok({ kind: "completed", output: outcome.output });
       } catch (e) {
-        const checkpointFailure = req.job.checkpointFailure();
+        let checkpointFailure: HostError | null;
+        try {
+          checkpointFailure = req.job.checkpointFailure();
+        } catch (inspectionError) {
+          const error: FrameworkError = {
+            kind: "node-crash",
+            retriability: "non-retriable",
+            nodeId: EXECUTOR_NODE_ID,
+            message:
+              `run slice failed: ${safeErrorMessage(e)}; ` +
+              `checkpoint failure inspection also failed: ${safeErrorMessage(inspectionError)}`,
+          };
+          logWithoutThrowing(
+            logger,
+            "error",
+            "hitl: run slice and checkpoint failure inspection both failed — failing closed",
+            { runId: req.runId, dagId: req.dagId, error: error.message },
+          );
+          return ok({ kind: "failed", error });
+        }
         if (checkpointFailure !== null) {
           logWithoutThrowing(
             logger,

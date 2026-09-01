@@ -1,7 +1,5 @@
-// Types barrel — explicit named exports. Internal helpers (`brandAsDagDef`,
-// `isUnconditionalEdge`) are reachable from their concrete file paths for
-// any caller with a documented need, but the barrel mirrors the README
-// "Authoring surface" section.
+// Types barrel — explicit named exports. Runtime parsers and derivations live
+// on the executor surface; this barrel mirrors the README authoring types.
 
 // ── Result (Either) ────────────────────────────────────────────────────────
 export type { Result, Ok, Err } from "./result.js";
@@ -217,10 +215,7 @@ export type {
   Predicate,
   PredicateResult,
 } from "./dag.js";
-export { withRetryLimits } from "./dag.js";
-// `brandAsDagDef`, `isUnconditionalEdge`, `isConditionalEdge`,
-// `isDefaultEdge`, and `DagDefShape` are internal — imported directly
-// from `./types/dag.js` where needed.
+// Edge narrowing helpers remain internal to the runtime.
 
 // ── Branded identifiers ───────────────────────────────────────────────────
 export type { RunId, NodeId, DagId, GitSha, DagInputId } from "./ids.js";

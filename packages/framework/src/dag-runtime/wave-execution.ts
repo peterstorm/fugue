@@ -16,7 +16,7 @@
 //   FR-029  → ADR-0029 (routing decisions pre-computed by executor, carried on wave-done)
 
 import type { DagDef } from "../types/dag.js";
-import type { NodeDef, ValidatedNodeContext } from "../types/node.js";
+import type { Capability, NodeDef, ValidatedNodeContext } from "../types/node.js";
 import type { MintingAuthority } from "../types/capability-broker.js";
 import { messageOf, asNodeFrameworkError, type FrameworkError } from "../types/errors.js";
 import type { NodeId } from "../types/ids.js";
@@ -27,7 +27,7 @@ import { EXECUTOR_NODE_ID } from "./types.js";
 import { runNodeShared } from "./run-node.js";
 import { type NodeSpanOutcome, EMPTY_OUTCOME } from "./node-span.js";
 import { emit } from "./emit.js";
-import { fwLogger } from "../logger.js";
+import { bestEffortLog } from "./best-effort.js";
 import { emitRoutingDecisions } from "./route-emission.js";
 import { type FreshnessIndex } from "./freshness-check.js";
 import { emitFreshnessWitnessEvents } from "./freshness-emission.js";
@@ -62,7 +62,10 @@ const sizedOrUndefined = (
 
 export interface WaveConfig {
   readonly dag: DagDef;
-  readonly nodeMap: Map<NodeId, NodeDef<unknown, unknown>>;
+  readonly nodeMap: Map<
+    NodeId,
+    NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>
+  >;
   readonly nodeCtx: ValidatedNodeContext;
   readonly resumeCheckpoint?: Map<string, unknown>;
   readonly nowFn: () => number;
@@ -108,7 +111,7 @@ export const executeWave = async (
   // An out-of-bounds waveIndex is an invariant violation.
   if (waveIndex < 0 || waveIndex >= machineCtx.waves.length) {
     const message = `out-of-bounds waveIndex: ${waveIndex} (have ${machineCtx.waves.length} waves)`;
-    fwLogger().error(`[executeWave] ${message}`);
+    bestEffortLog("error", `[executeWave] ${message}`);
     return {
       event: {
         type: "node-failed",

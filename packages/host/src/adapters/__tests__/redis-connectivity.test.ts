@@ -799,8 +799,23 @@ describe.skipIf(liveRedisUrl === undefined)(
     it("atomically writes a checkpoint while retaining spend longer", async () => {
       const spendKey = `${prefix}:spend`;
       const checkpointKey = `${prefix}:checkpoint`;
+      await observer.del(spendKey, checkpointKey);
+      const append = bundle.redis.appendSpend;
       const commit = bundle.redis.commitCheckpointAndRetainSpend;
-      if (commit === undefined) throw new Error("checkpoint/spend commit is not wired");
+      if (append === undefined || commit === undefined) {
+        throw new Error("checkpoint/spend operations are not wired");
+      }
+      const seeded = await append({
+        key: spendKey,
+        delta: makeSpend({
+          usage: "known",
+          tokens: 1,
+          calls: 1,
+          usd: { kind: "priced", micros: 1 as never },
+        }),
+        ttlSec: 5,
+      });
+      expect(seeded.ok).toBe(true);
       const result = await commit({
         checkpointKey,
         checkpointValue: "checkpoint",

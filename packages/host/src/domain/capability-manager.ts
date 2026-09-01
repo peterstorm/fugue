@@ -352,7 +352,7 @@ export const checkHealth = async (
 // Utility: extract client map from handles
 // ---------------------------------------------------------------------------
 
-/**
+/*
  * Extract a capabilities record from a set of handles.
  *
  * This record is the BOOT-SCOPED static client set: it is passed directly to
@@ -385,6 +385,7 @@ export const checkHealth = async (
  * dropping a handle (last-writer-wins) and surfacing later as a phantom
  * `missing-capability`.
  */
+/** Run-scoped transformations applied while extracting boot capability clients. */
 export type CapabilityClientDecorators = {
   readonly llm?: (
     name: Capability,
@@ -417,6 +418,11 @@ export const runScopedLlmFacade = (
   return Object.freeze(facade) as unknown as LlmClient;
 };
 
+/**
+ * Restore the validated handle-name/client correlation into a capability map.
+ * This is the boot-time trust boundary described above; duplicate names fail
+ * loudly and LLM handles are transformed into run-scoped metered facades.
+ */
 export const extractClients = (
   handles: readonly CapabilityHandle[],
   decorators: CapabilityClientDecorators = {},

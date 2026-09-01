@@ -629,22 +629,17 @@ export const usageOfError = (e: FrameworkError): PartialTokenUsage | undefined =
     )
     .exhaustive();
 
-/**
- * Retriability of a `FrameworkError` — the SINGLE source of truth for the DAG
- * retry machinery's fast-fail-vs-retry fork (`handleNodeFailed`). Retriability
- * is the defining behavioral axis of the whole taxonomy, so it lives here, on
- * the type's own module, as a TOTAL function the compiler forces to be
- * exhaustive: adding a new error kind without classifying it is a compile
- * error, and a new kind can never silently default to "retriable" (the unsafe,
- * non-fail-closed direction that a hand-maintained boolean disjunction allowed).
- *
- * `"non-retriable"` = a deterministic failure that re-running cannot clear;
- * `handleNodeFailed` fast-fails it, preserving the retry budget for genuinely
- * transient kinds. See that function for the per-kind rationale (settled auth
- * denials, tool-loop exhaustion, schema mismatches, budget exhaustion, …).
- */
+/** Whether replay may clear a failure or must fast-fail deterministically. */
 export type Retriability = "retriable" | "non-retriable";
 
+/**
+ * The single total classification used by the DAG retry machinery. Adding a
+ * FrameworkError kind without classifying it is a compile error, so a new kind
+ * can never silently default to the unsafe retriable direction.
+ *
+ * `non-retriable` means replay cannot clear the failure; `handleNodeFailed`
+ * fast-fails it and preserves retry budget for genuinely transient failures.
+ */
 export const retriabilityOf = (e: FrameworkError): Retriability =>
   match(e)
     // `node-crash` carries its own explicit retriability discriminant.

@@ -235,6 +235,28 @@ describe("HostConfigSchema", () => {
     expect(result.value.LLM_PROVIDER).toBe("openai");
   });
 
+  it("requires an Azure model SKU separately from its routing deployment", () => {
+    const azure = {
+      ...validEnv,
+      LLM_PROVIDER: "azure",
+      AZURE_OPENAI_ENDPOINT: "https://myoai.openai.azure.com",
+      AZURE_OPENAI_API_KEY: "key",
+      AZURE_OPENAI_DEPLOYMENT: "team-chat-production",
+    };
+    const missingModel = parseHostConfig(azure);
+    expect(missingModel.ok).toBe(false);
+    if (!missingModel.ok && missingModel.error.kind === "config-invalid") {
+      expect(missingModel.error.message).toContain("AZURE_OPENAI_MODEL");
+    }
+
+    const complete = parseHostConfig({ ...azure, AZURE_OPENAI_MODEL: "gpt-4o-mini" });
+    expect(complete.ok).toBe(true);
+    if (complete.ok) {
+      expect(complete.value.AZURE_OPENAI_DEPLOYMENT).toBe("team-chat-production");
+      expect(complete.value.AZURE_OPENAI_MODEL).toBe("gpt-4o-mini");
+    }
+  });
+
   it("rejects invalid LLM provider value", () => {
     const result = parseHostConfig({ ...validEnv, LLM_PROVIDER: "gemini" });
     expect(result.ok).toBe(false);
@@ -250,7 +272,8 @@ describe("HostConfigSchema", () => {
       OPENAI_API_KEY: "sk-xxx",
       AZURE_OPENAI_ENDPOINT: "https://myoai.openai.azure.com",
       AZURE_OPENAI_API_KEY: "key",
-      AZURE_OPENAI_DEPLOYMENT: "gpt-4",
+      AZURE_OPENAI_DEPLOYMENT: "team-chat-production",
+      AZURE_OPENAI_MODEL: "gpt-4o-mini",
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://localhost:4317",
       MLFLOW_TRACKING_URI: "http://localhost:5000",
       MLFLOW_EXPERIMENT_ID: "123",

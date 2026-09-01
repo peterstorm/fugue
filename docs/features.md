@@ -130,7 +130,7 @@ Without branded IDs, argument-swap bugs are **invisible at compile time**. A fun
 
 ### What It Does
 
-Every function that can fail returns `Result<T, FrameworkError>` instead of throwing. The `FrameworkError` is a discriminated union of 27 kinds, each with typed fields. A `never` guard in `formatFrameworkError` ensures adding a new error kind without handling it is a **compile error**.
+Runtime operation seams return `Result<T, FrameworkError>` instead of throwing. Smart constructors may throw when a caller violates a construction invariant, and the host's imperative-shell setup factories may reject on infrastructure failure; those exceptions are contained and translated at their outer shell. The `FrameworkError` is a discriminated union of 27 kinds, each with typed fields. A `never` guard in `formatFrameworkError` ensures adding a new error kind without handling it is a **compile error**.
 
 ### What It Catches
 

@@ -21,6 +21,7 @@ import type { DagDef } from "../types/dag.js";
 import type { FrameworkError } from "../types/errors.js";
 import { z } from "zod";
 import { err, ok } from "../types/result.js";
+import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
 
 const makeNode = (id: string): NodeDef<unknown, unknown> => ({
   id: N(id),
@@ -96,6 +97,25 @@ describe("executeWave — error paths", () => {
         expect(result.event.error.retriability).toBe("non-retriable");
         expect(result.event.error.message).toContain("out-of-bounds");
       }
+    }
+  });
+
+  it("a throwing logger cannot replace the out-of-bounds invariant failure", async () => {
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: () => {},
+      error: () => { throw new Error("logger failed"); },
+    });
+    try {
+      const result = await executeWave(99, makeMachineCtx(), makeConfig());
+      expect(result.event.type).toBe("node-failed");
+      if (result.event.type === "node-failed" && result.event.error.kind === "node-crash") {
+        expect(result.event.error.message).toContain("out-of-bounds");
+        expect(result.event.error.retriability).toBe("non-retriable");
+      }
+    } finally {
+      __resetFrameworkLogger();
     }
   });
 

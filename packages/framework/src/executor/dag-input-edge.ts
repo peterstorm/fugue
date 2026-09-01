@@ -8,7 +8,7 @@
 // `isSource: true`) consumes no input, so it gets no `$input` edge.
 
 import { DAG_INPUT, type DagInputId, type NodeId } from "../types/ids.js";
-import type { NodeDef } from "../types/node.js";
+import type { Capability, NodeDef } from "../types/node.js";
 
 /**
  * The `{ from: DAG_INPUT, to: node }` edge feeding the request to a shape
@@ -16,6 +16,6 @@ import type { NodeDef } from "../types/node.js";
  */
 export const dagInputEdgeFor = (
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional: `run`'s contravariant input rejects NodeDef<unknown> for concrete-input nodes
-  node: NodeDef<any, any, any>,
+  node: NodeDef<any, any, any, readonly Capability[]>,
 ): readonly { readonly from: DagInputId; readonly to: NodeId }[] =>
   node.isSource === true ? [] : [{ from: DAG_INPUT, to: node.id }];

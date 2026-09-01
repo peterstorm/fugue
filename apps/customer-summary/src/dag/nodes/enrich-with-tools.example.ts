@@ -8,8 +8,7 @@ import { z } from "zod";
 import {
   createLlmWithToolsNode,
   toolName,
-  type FrameworkError,
-  type NodeDef,
+  type LlmWithToolsNodeDef,
   type ToolDef,
 } from "@fuguejs/framework";
 import type { CrmRecord } from "../../schemas/crm.js";
@@ -85,7 +84,7 @@ type Output = z.infer<typeof EnrichedSummarySchema>;
 export const createEnrichWithToolsNode = (
   deals: DealsClient,
   model = "claude-sonnet-4-5",
-): NodeDef<Input, Output, FrameworkError> => {
+): LlmWithToolsNodeDef<Input, Output> => {
   const lookupDealsTool = makeLookupDealsTool(deals);
 
   return createLlmWithToolsNode<Input, Output>({

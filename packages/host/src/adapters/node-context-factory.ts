@@ -591,9 +591,10 @@ const resolveOriginAndBindSubjectToken = (args: {
  * Construct the BASE NodeContext for a specific DAG execution, plus the run's
  * `origin`.
  *
- * The base context carries the BOOT-SCOPED static capability clients
- * (`extractClients` over the registered handles — the single trust-boundary
- * cast; see capability-manager.ts) exactly as before. Per-invocation AUTHORITY
+ * The base context carries boot-scoped static non-LLM clients plus run-scoped
+ * metered facades built from boot-scoped LLM authority (`extractClients` over
+ * registered handles is the single trust-boundary cast; see
+ * capability-manager.ts). Per-invocation AUTHORITY
  * is layered on TOP of this base, per node, by the framework when a minting
  * broker is wired into `runDag` (the host selects the live Keycloak broker when
  * realm config is present): each node's declared `"<provider>:<operation>"`

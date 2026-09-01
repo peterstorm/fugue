@@ -46,13 +46,8 @@ import {
 import { tenantId } from "../domain/tenant.js";
 import type { TenantId } from "../domain/tenant.js";
 import { createFileSpendLedger } from "../adapters/spend-ledger-file.js";
-import {
-  recordOf,
-  SPEND_HASH_FIELDS,
-  SPEND_MARKER_VALUE,
-  SPEND_USAGE_UNKNOWN_FIELD,
-  unpricedModelHashField,
-} from "../domain/spend-record.js";
+import { applyRedisSpendAppend } from "./fixtures/redis-spend-fake.js";
+import { collectLogs } from "../adapters/__tests__/fixtures/log-capture.js";
 
 interface AugmentedLlmClient extends LlmClient {
   readonly sendAlias: LlmClient["sendStructured"];
@@ -169,16 +164,6 @@ const failingRedis = (): RedisPort => ({
   sRem: async () => err({ kind: "redis-unavailable", operation: "srem" } as HostError),
   sMembers: async () => err({ kind: "redis-unavailable", operation: "smembers" } as HostError),
 });
-
-const collectLogs = () => {
-  const logs: { level: string; msg: string; data?: Record<string, unknown> }[] = [];
-  const logger: LogPort = {
-    info: (msg, data) => logs.push({ level: "info", msg, data }),
-    warn: (msg, data) => logs.push({ level: "warn", msg, data }),
-    error: (msg, data) => logs.push({ level: "error", msg, data }),
-  };
-  return { logger, logs };
-};
 
 // ── resolveTtl ─────────────────────────────────────────────────────────────
 
@@ -1614,20 +1599,7 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
       },
       appendSpend: async (append: RedisSpendAppend) => {
         seen.push(append.key);
-        const record = recordOf(append.delta);
-        const hash = hashes.get(append.key) ?? new Map<string, string>();
-        if (record.usageUnknown) hash.set(SPEND_USAGE_UNKNOWN_FIELD, SPEND_MARKER_VALUE);
-        for (const model of record.unpricedModels) {
-          hash.set(unpricedModelHashField(model), SPEND_MARKER_VALUE);
-        }
-        for (const [field, by] of [
-          [SPEND_HASH_FIELDS.micros, record.micros],
-          [SPEND_HASH_FIELDS.tokens, record.tokens],
-          [SPEND_HASH_FIELDS.calls, record.calls],
-        ] as const) {
-          if (by !== 0) hash.set(field, String(Number(hash.get(field) ?? "0") + by));
-        }
-        hashes.set(append.key, hash);
+        applyRedisSpendAppend(hashes, append);
         return ok(undefined);
       },
     } as unknown as RedisPort;

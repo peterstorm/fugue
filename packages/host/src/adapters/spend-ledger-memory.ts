@@ -15,8 +15,10 @@
  * The store is keyed by `runId` and never evicted. A `Spend` carries token and
  * call counters plus a priced micro-USD value or known floor with an optional
  * unpriced-model set; a host process's lifetime bounds the number of
- * runs it can have seen — the Redis adapter, which outlives any one process,
- * is the one that needs a TTL.
+ * runs it can have seen. That is adequate only for bounded/small hosts: a
+ * long-lived process with an unbounded stream of run ids grows this map without
+ * limit. Deployments needing retention or bounded memory must use a durable
+ * adapter with lifecycle/TTL ownership rather than this fallback.
  */
 
 import type { RunId, Spend } from "@fuguejs/framework";

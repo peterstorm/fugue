@@ -1,4 +1,4 @@
-import type { NodeDef } from "./node.js";
+import type { Capability, NodeDef } from "./node.js";
 import type { EvalJudgeNodeDef } from "./eval-judge.js";
 import type {
   NodesRecord,
@@ -193,7 +193,8 @@ export type DagProvenance = (typeof DAG_SHAPES)[number];
 
 export interface DagDef {
   readonly id: DagId;
-  readonly nodes: readonly NodeDef<unknown, unknown>[];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- validated DAGs erase heterogeneous input/output/error generics at this runtime seam
+  readonly nodes: readonly NodeDef<any, any, any, readonly Capability[]>[];
   readonly edges: readonly EdgeDef[];
   readonly outputNodeId?: NodeId;
   readonly evalJudges?: readonly EvalJudgeNodeDef[];
@@ -206,34 +207,7 @@ export interface DagDef {
 }
 
 /**
- * The structural shape of a `DagDef` minus its brand. Exposed for internal
- * builders (`validateDagShape`) so they can construct the object with full
- * field-shape checking, then apply the brand via `brandAsDagDef` — replacing
- * the prior `as unknown as DagDef` cast that bypassed structural checks.
+ * `DagDef` construction is intentionally confined to `validateDagShape`.
+ * Derivations such as retry overrides must re-enter that parser rather than
+ * exporting an unchecked brand cast from the type module.
  */
-export type DagDefShape = Omit<DagDef, typeof __dagValidated>;
-
-/**
- * Apply the `DagDef` brand to a structurally-valid shape. The brand is a
- * module-private unique symbol — only this function can construct it — so
- * callers can NOT hand-roll a branded value by spread or cast. Intended for
- * use by `validateDagShape` exclusively.
- */
-export const brandAsDagDef = (shape: DagDefShape): DagDef =>
-  shape as DagDef;
-
-/**
- * Sanctioned derivation: produce a new `DagDef` with overridden retry limits
- * while preserving the validation brand. Use this instead of a raw spread
- * (`{ ...dag, retryLimits: ... }`) — spread does not re-validate, and the
- * brand was specifically introduced to prevent silent post-validation
- * mutation. Per-node entries in `limits` override the original `dag.retryLimits`.
- */
-export const withRetryLimits = (
-  dag: DagDef,
-  limits: Readonly<Record<string, number>>,
-): DagDef =>
-  brandAsDagDef({
-    ...(dag as DagDefShape),
-    retryLimits: { ...(dag.retryLimits ?? {}), ...limits },
-  });

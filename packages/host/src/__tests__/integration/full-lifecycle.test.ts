@@ -749,16 +749,16 @@ describe("Full Host Lifecycle", () => {
     if (!result.ok) return;
     host = result.value;
 
-    await host.shutdown();
+    await expect(host.shutdown()).rejects.toThrow("Host shutdown completed with failures");
     host = null;
 
-    // Both close attempts are made (best-effort), and the failure is surfaced
-    // as a warning rather than silently swallowed.
+    // Both close attempts are made, and the incomplete cleanup is observable
+    // to the caller as rejection as well as in lifecycle diagnostics.
     expect(events).toEqual(["connect:db", "connect:cache", "close:cache", "close:db"]);
     const warnLogs = logger.logs.filter((l) => l.level === "warn");
-    const closeWarn = warnLogs.find((l) => l.msg.includes("Capability shutdown completed with"));
-    expect(closeWarn).toBeDefined();
-    expect((closeWarn?.data as { failures: string[] }).failures).toContain("cache");
+    expect(warnLogs.some((line) => line.msg.includes("Capability 'cache' failed to close")))
+      .toBe(true);
+    expect(warnLogs.some((line) => line.msg.includes("Host stopped with"))).toBe(true);
   });
 
   test("ADR-0051: a post-connect boot failure (HTTP bind) closes the already-connected capabilities", async () => {

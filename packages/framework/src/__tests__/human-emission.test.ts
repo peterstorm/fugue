@@ -9,6 +9,7 @@ import type { HumanAction } from "../dag-runtime/types.js";
 import type { HumanInterventionEvent } from "../types/events.js";
 import { z } from "zod";
 import { ok } from "../types/result.js";
+import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
 
 const NID = nodeId("test-node");
 const RID = runId("run-1");
@@ -156,6 +157,45 @@ describe("emitHumanIntervention", () => {
     expect(errEvt).toBeDefined();
     const intervention = obs.events.find((e) => e.type === "human-intervention");
     expect(intervention).toBeUndefined();
+  });
+
+  it("keeps the typed confidence failure authoritative under hostile diagnostics", () => {
+    const obs = new RecordingObserver();
+    const hostile = { toString: () => { throw new Error("hostile coercion"); } };
+    const nodeDef = makeNodeDef({
+      confidence: {
+        mode: "value",
+        extract: () => { throw hostile; },
+      },
+    });
+    setFrameworkLogger({
+      debug: () => { throw new Error("logger failed"); },
+      info: () => {},
+      warn: () => {},
+      error: () => { throw new Error("logger failed"); },
+    });
+
+    try {
+      const result = emitHumanIntervention(
+        { nodeId: NID, output: {} },
+        { kind: "approve" },
+        new Map([[NID, nodeDef]]),
+        makeCtx(obs) as any,
+        DID,
+        () => { throw new Error("clock failed"); },
+        Date.now(),
+        [],
+      );
+
+      expect(result.ok).toBe(false);
+      if (!result.ok && result.error.kind === "node-crash") {
+        expect(result.error.message).toContain("confidence.extract failed");
+        expect(result.error.retriability).toBe("non-retriable");
+      }
+      expect(obs.events).toHaveLength(0);
+    } finally {
+      __resetFrameworkLogger();
+    }
   });
 
   it("fail-closed: returns Err when nodeDef is missing (framework-bug guard)", () => {

@@ -9,15 +9,18 @@
 // Tests and consumers that genuinely need them can import directly from this
 // file; that opt-in stays available without polluting the package barrel.
 
-import type { NodeDef } from "./node.js";
+import type { Capability, NodeDef } from "./node.js";
 import type { NodeId } from "./ids.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak: nodes are heterogeneous
-export type NodesRecord = { readonly [id: string]: NodeDef<any, any, any> };
+export type NodesRecord = {
+  readonly [id: string]: NodeDef<any, any, any, readonly Capability[]>;
+};
 
 /** Extract the output type of a `NodeDef`, or `unknown` if it isn't one. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak: nodes are heterogeneous
-export type OutputOf<N> = N extends NodeDef<unknown, infer O, any> ? O : unknown;
+export type OutputOf<N> =
+  N extends NodeDef<unknown, infer O, any, readonly Capability[]> ? O : unknown;
 
 /** Map each node id in `Nodes` to its output type — feeds `EdgeDefInput`. */
 export type OutputsByNodeId<Nodes extends NodesRecord> = {

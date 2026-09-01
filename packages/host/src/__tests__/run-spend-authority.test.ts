@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { z } from "zod";
 import {
   ceilings,
   dagId,
@@ -23,7 +24,11 @@ import { emptyReservation, learnObservedCall } from "../domain/llm-meter.js";
 
 const limits = ceilings([{ kind: "tokens", limit: 30 }])!;
 const oneCallLimit = ceilings([{ kind: "calls", limit: 1 }])!;
-const request = { nodeId: nodeId("authority-node"), model: "m" };
+const request = {
+  nodeId: nodeId("authority-node"),
+  model: "m",
+  schema: z.unknown(),
+};
 const response = (): Result<LlmResponse<unknown>, FrameworkError> =>
   ok({ output: {}, ...tokensOnly(10, 0), rawText: "" });
 const logger = { info: () => {}, warn: () => {}, error: () => {} };
@@ -285,6 +290,18 @@ describe("RunSpendAuthority", () => {
         },
       },
     ],
+    [
+      "missing successful output",
+      { ok: true, value: { rawText: "", ...tokensOnly(1, 0) } },
+    ],
+    [
+      "missing successful rawText",
+      { ok: true, value: { output: {}, ...tokensOnly(1, 0) } },
+    ],
+    [
+      "malformed successful thinking",
+      { ok: true, value: { output: {}, rawText: "", thinking: 7, ...tokensOnly(1, 0) } },
+    ],
     ["malformed error payload", { ok: false, error: { nope: true } }],
     [
       "malformed error usage",
@@ -343,6 +360,64 @@ describe("RunSpendAuthority", () => {
       }
     },
   );
+
+  it("parses successful output through the request schema before returning it", async () => {
+    const authority = createRunSpendAuthority({
+      dagId: dagId("authority-dag"),
+      runId: runId("parsed-output-run"),
+      hydrated: { kind: "known", spend: NO_SPEND },
+      ledger: createInMemorySpendLedger(),
+      logger,
+    });
+    const parsed = await authority.execute({
+      clientKey: "llm",
+      operation: "sendStructured",
+      request: {
+        ...request,
+        schema: z.object({ answer: z.string() }),
+      },
+      call: async () => ok({
+        output: { answer: "ok", untrusted: true },
+        rawText: "raw",
+        ...tokensOnly(1, 0),
+      }),
+    });
+
+    expect(parsed).toEqual(ok({
+      output: { answer: "ok" },
+      rawText: "raw",
+      ...tokensOnly(1, 0),
+    }));
+  });
+
+  it("settles a schema-invalid successful output as unknown usage", async () => {
+    const authority = createRunSpendAuthority({
+      dagId: dagId("authority-dag"),
+      runId: runId("invalid-output-run"),
+      hydrated: { kind: "known", spend: NO_SPEND },
+      ledger: createInMemorySpendLedger(),
+      logger,
+    });
+    const malformed = await authority.execute({
+      clientKey: "llm",
+      operation: "sendStructured",
+      request: {
+        ...request,
+        schema: z.object({ answer: z.string() }),
+      },
+      call: async () => ok({
+        output: {},
+        rawText: "raw",
+        ...tokensOnly(1, 0),
+      }),
+    });
+
+    expect(malformed.ok).toBe(false);
+    if (!malformed.ok && malformed.error.kind === "node-crash") {
+      expect(malformed.error.message).toContain("output does not match");
+    }
+    expect(authority.budget.spent().usage).toBe("unknown");
+  });
 
   it("treats cache parts exceeding inclusive tokensIn as unknown and closes token admission", async () => {
     const ledger = createInMemorySpendLedger();

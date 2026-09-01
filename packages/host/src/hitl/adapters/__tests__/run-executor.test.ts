@@ -36,6 +36,7 @@ import type {
   NodeDef,
   LlmClient,
   Capability,
+  FrameworkError,
   CapabilityBroker,
 } from "@fuguejs/framework";
 import type { RedisPort, SharedInfra } from "../../../ports.js";
@@ -83,7 +84,14 @@ const sharedInfra = (): SharedInfra => ({
 
 const noopRun = async (_i: unknown, _c: NodeContext) => ok(undefined as unknown);
 
-const makeNode = (id: string, overrides: Partial<NodeDef<unknown, unknown>> = {}): NodeDef<unknown, unknown> => ({
+type TestNodeDef = NodeDef<
+  unknown,
+  unknown,
+  FrameworkError,
+  readonly Capability[]
+>;
+
+const makeNode = (id: string, overrides: Partial<TestNodeDef> = {}): TestNodeDef => ({
   // @ts-expect-error — branded id test fixture
   id,
   kind: "transform",
@@ -96,7 +104,7 @@ const makeNode = (id: string, overrides: Partial<NodeDef<unknown, unknown>> = {}
   ...overrides,
 });
 
-const singleNodeDag = (run: NodeDef<unknown, unknown>["run"]): DagDef =>
+const singleNodeDag = (run: TestNodeDef["run"]): DagDef =>
   defineDag({
     id: "exec-dag",
     nodes: { only: makeNode("only", { run }) },
@@ -278,6 +286,34 @@ describe("createRunExecutor — channel split (err vs failed)", () => {
     if (result.ok && result.value.kind === "failed" && result.value.error.kind === "node-crash") {
       expect(result.value.error.nodeId).toBe(EXECUTOR_NODE_ID);
       expect(typeof result.value.error.message).toBe("string");
+    }
+  });
+
+  it("preserves the slice failure when checkpointFailure inspection also throws", async () => {
+    const dag = singleNodeDag((async () => ok("unreachable")) as never);
+    const reg = registered(dag);
+    const throwingInfra: SharedInfra = {
+      ...sharedInfra(),
+      get capabilities(): never { throw new Error("original context failure"); },
+    };
+    const exec = createRunExecutor({
+      sharedInfra: throwingInfra,
+      getRegisteredDag: () => reg,
+      agentClientMap: { "exec-dag": "fugue-agent-exec" },
+    });
+    const job = await seedJobLike(dag, null);
+    const hostileJob: RunExecutionJob = {
+      ...job,
+      checkpointFailure: () => { throw new Error("checkpoint inspection failure"); },
+    };
+
+    const result = await exec.run(runReq(dag, hostileJob, null));
+
+    expect(result.ok && result.value.kind).toBe("failed");
+    if (result.ok && result.value.kind === "failed" && result.value.error.kind === "node-crash") {
+      expect(result.value.error.retriability).toBe("non-retriable");
+      expect(result.value.error.message).toContain("original context failure");
+      expect(result.value.error.message).toContain("checkpoint inspection failure");
     }
   });
 

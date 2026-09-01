@@ -21,7 +21,7 @@ import { createFetchNode } from "../nodes/fetch.js";
 import { createTransformNode } from "../nodes/transform.js";
 import { makeNodeContext } from "../shared/make-node-context.js";
 import type { NodeDef, BaseNodeContext, Capability } from "../types/node.js";
-import type { LlmClient } from "../types/llm.js";
+import type { LlmClient, LlmRequest, LlmResponse } from "../types/llm.js";
 import type { FrameworkError } from "../types/errors.js";
 import { ok, err, isOk, isErr } from "../types/result.js";
 import { NO_SPEND } from "../types/spend.js";
@@ -47,6 +47,18 @@ interface AugmentedCritic extends LlmClient {
   readonly critique: LlmClient["sendStructured"];
 }
 
+interface NarrowedAliasCritic extends LlmClient {
+  readonly critique: <O>(
+    request: LlmRequest<O>,
+  ) => Promise<Result<LlmResponse<O & { readonly refined: true }>, FrameworkError>>;
+}
+
+interface NarrowedStandardCritic extends LlmClient {
+  readonly sendStructured: <O>(
+    request: LlmRequest<O>,
+  ) => Promise<Result<LlmResponse<O & { readonly refined: true }>, FrameworkError>>;
+}
+
 declare const symbolAlias: unique symbol;
 interface SymbolCritic extends LlmClient {
   readonly [symbolAlias]: LlmClient["sendStructured"];
@@ -59,6 +71,8 @@ declare module "../types/node.js" {
     augmentedCritic: AugmentedCritic;
     mixedCritic: LlmClient | TestDbCapability;
     symbolCritic: SymbolCritic;
+    narrowedAliasCritic: NarrowedAliasCritic;
+    narrowedStandardCritic: NarrowedStandardCritic;
   }
 }
 
@@ -108,6 +122,22 @@ const capabilityHandleKindTypePins = (llm: LlmClient, db: TestDbCapability): voi
     pricingModel: { kind: "request" },
     runScopedOperations: {},
   };
+  const narrowedAlias: CapabilityHandle<"narrowedAliasCritic"> = {
+    name: "narrowedAliasCritic",
+    client: llm as NarrowedAliasCritic,
+    clientKind: "llm",
+    pricingModel: { kind: "request" },
+    // @ts-expect-error -- the facade's base operation cannot promise a narrowed alias result.
+    runScopedOperations: { critique: "sendStructured" },
+  };
+  // @ts-expect-error -- overriding a standard operation with a narrower result is unsound.
+  const narrowedStandard: CapabilityHandle<"narrowedStandardCritic"> = {
+    name: "narrowedStandardCritic",
+    client: llm as NarrowedStandardCritic,
+    clientKind: "llm",
+    pricingModel: { kind: "request" },
+    runScopedOperations: {},
+  };
   const executableComposer: CapabilityHandle<"augmentedCritic"> = {
     name: "augmentedCritic",
     client: augmented,
@@ -122,6 +152,8 @@ const capabilityHandleKindTypePins = (llm: LlmClient, db: TestDbCapability): voi
   void mixed;
   void symbolKeyed;
   void executableComposer;
+  void narrowedAlias;
+  void narrowedStandard;
   void uncomposed;
 };
 void capabilityHandleKindTypePins;
@@ -147,6 +179,12 @@ const scopedCapabilityTypePins = (llm: LlmClient, db: TestDbCapability): void =>
   void untagged;
 };
 void scopedCapabilityTypePins;
+
+const nodeDefDefaultCapabilityTypePin = (_node: NodeDef): void => {
+  // @ts-expect-error -- direct NodeDef annotation keeps undeclared llm nullable.
+  void ({} as Parameters<NodeDef["run"]>[1]).llm.sendStructured;
+};
+void nodeDefDefaultCapabilityTypePin;
 
 // ---------------------------------------------------------------------------
 // Test helpers

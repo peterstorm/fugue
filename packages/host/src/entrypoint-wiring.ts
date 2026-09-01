@@ -117,6 +117,7 @@ export type HostLlmPlan =
       readonly baseUrl: string;
       readonly apiVersion: string;
       readonly deployment: string;
+      readonly model: string;
     };
 
 /** Pure provider selection; `parseHostConfig` has already enforced required keys. */
@@ -133,6 +134,7 @@ export const planHostLlm = (config: HostConfig): HostLlmPlan => {
       baseUrl: `${endpoint}/openai/deployments/${deployment}`,
       apiVersion: config.AZURE_OPENAI_API_VERSION,
       deployment,
+      model: config.AZURE_OPENAI_MODEL ?? "",
     };
   }
   return {
@@ -146,7 +148,7 @@ export const planHostLlm = (config: HostConfig): HostLlmPlan => {
 export const hostLlmPricingModel = (config: HostConfig): LlmPricingModel => {
   const plan = planHostLlm(config);
   return plan.provider === "azure"
-    ? { kind: "fixed", model: plan.deployment }
+    ? { kind: "fixed", model: plan.model }
     : { kind: "request" };
 };
 

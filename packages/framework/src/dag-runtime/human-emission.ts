@@ -10,7 +10,7 @@
 // silently producing a misleading observer event.
 
 import { match } from "ts-pattern";
-import type { NodeDef, NodeContext } from "../types/node.js";
+import type { Capability, NodeDef, NodeContext } from "../types/node.js";
 import type { NodeId, DagId } from "../types/ids.js";
 import type { HumanAction } from "./types.js";
 import type { HumanActionDetailed } from "../types/events.js";
@@ -21,12 +21,17 @@ import type { FrameworkError } from "../types/errors.js";
 import { type Result, ok, err } from "../types/result.js";
 import { computeJsonPatch } from "../shared/json-patch.js";
 import { fwLogger } from "../logger.js";
+import { safeErrorMessage } from "../types/safe-error.js";
+import { bestEffort, bestEffortLog } from "./best-effort.js";
 import { emit } from "./emit.js";
 
 export const emitHumanIntervention = (
   phase: { nodeId: NodeId; output: unknown },
   action: HumanAction,
-  nodeMap: ReadonlyMap<NodeId, NodeDef<unknown, unknown>>,
+  nodeMap: ReadonlyMap<
+    NodeId,
+    NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>
+  >,
   nodeCtx: NodeContext,
   dagId: DagId,
   nowFn: () => number,
@@ -73,19 +78,25 @@ export const emitHumanIntervention = (
     try {
       nodeConfidence = nodeDef.confidence.extract(phase.output);
     } catch (e) {
-      const msg = `confidence.extract failed for node '${phase.nodeId}': ${e instanceof Error ? e.message : e}`;
-      fwLogger().error(`[emitHumanIntervention] ${msg}`);
-      const fwError: FrameworkError = { kind: "node-crash", nodeId: phase.nodeId, retriability: "non-retriable", message: msg };
-      emit(nodeCtx, {
-        type: "node-error",
-        runId: nodeCtx.runId,
-        dagId,
+      const msg = `confidence.extract failed for node '${phase.nodeId}': ${safeErrorMessage(e)}`;
+      const fwError: FrameworkError = {
+        kind: "node-crash",
         nodeId: phase.nodeId,
-        sideEffects: nodeDef.sideEffects,
-        timestamp: stamp(),
-        error: msg,
-        frameworkError: fwError,
-      });
+        retriability: "non-retriable",
+        message: msg,
+      };
+      bestEffortLog("error", `[emitHumanIntervention] ${msg}`);
+      bestEffort("emitHumanIntervention", "node-error emission", () =>
+        emit(nodeCtx, {
+          type: "node-error",
+          runId: nodeCtx.runId,
+          dagId,
+          nodeId: phase.nodeId,
+          sideEffects: nodeDef.sideEffects,
+          timestamp: stamp(),
+          error: msg,
+          frameworkError: fwError,
+        }));
       return err(fwError);
     }
   }

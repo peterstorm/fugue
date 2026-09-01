@@ -58,9 +58,9 @@ export interface NodeHumanReviewConfig {
    * Prompt shown to the reviewer — the gate's entire human-facing payload.
    * Branded `NonEmptyString`: a blank prompt (a gate that asks nothing) is
    * unrepresentable by construction, so the invariant lives in the type, not in
-   * a runtime guard. The only gateway is `withHumanReview` (which parses a raw
-   * string into the brand), so attaching this field with a bare `""` literal is
-   * a compile error — the validation choke point cannot be bypassed.
+   * a runtime guard. `withHumanReview`, `nonEmptyString`, and
+   * `asNonEmptyString` are the public parsing gateways, so attaching this field
+   * with a bare `""` literal is a compile error.
    */
   readonly prompt: NonEmptyString;
 }
@@ -409,7 +409,7 @@ export interface NodeDef<
   I = unknown,
   O = unknown,
   E extends FrameworkError = FrameworkError,
-  R extends readonly Capability[] = readonly Capability[],
+  R extends readonly Capability[] = readonly [],
 > {
   readonly id: NodeId;
   readonly kind: NodeKind;

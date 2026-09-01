@@ -4,7 +4,7 @@
  * Appends are one atomic `MULTI`/`EXEC` owned by the Redis adapter. The
  * transaction queues every unpriced-model hash marker first, then nonzero
  * numeric sums cost-first (`micros`, `tokens`, `calls`), then one retention
- * refresh. Marker and values share one key, so split-read/expiry races and
+ * refresh when `ttlSec` is configured. Marker and values share one key, so split-read/expiry races and
  * standalone append command paths are unrepresentable.
  *
  * Concurrent appends remain lock-free: sums and set union commute across Redis

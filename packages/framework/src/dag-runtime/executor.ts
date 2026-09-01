@@ -17,7 +17,7 @@ import { match, P } from "ts-pattern";
 import type { Executor } from "../state-machine/types.js";
 import type { DagPhase, DagEvent, DagMachineContext } from "./types.js";
 import type { DagDef } from "../types/dag.js";
-import type { NodeDef, NodeContext, ValidatedNodeContext } from "../types/node.js";
+import type { Capability, NodeDef, NodeContext, ValidatedNodeContext } from "../types/node.js";
 import type { MintingAuthority } from "../types/capability-broker.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeId, DagId } from "../types/ids.js";
@@ -57,7 +57,10 @@ const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
 const validateApproveEdit = (
   action: import("./types.js").HumanAction,
   nodeId: NodeId,
-  nodeMap: Map<NodeId, NodeDef<unknown, unknown>>,
+  nodeMap: Map<
+    NodeId,
+    NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>
+  >,
 ): string | null => {
   if (action.kind !== "approve-with-edit") return null;
   const nodeDef = nodeMap.get(nodeId);
@@ -73,8 +76,8 @@ const validateApproveEdit = (
 
 /**
  * The human-review hook the executor calls when a node's wave suspends. Declared
- * once (round-38 cs-3) rather than inlined at both the private helper and the
- * public `buildDagExecutor` signature, so the two can never drift.
+ * once rather than inlined at both the private helper and the public
+ * `buildDagExecutor` signature, so the two can never drift.
  */
 export type OnHumanReviewHook = (req: {
   nodeId: NodeId;
@@ -94,12 +97,33 @@ const callHumanReviewHook = async (
   output: unknown,
   prompt: NonEmptyString,
   hooks: { onHumanReview?: OnHumanReviewHook } | undefined,
-  nodeMap: Map<NodeId, NodeDef<unknown, unknown>>,
+  nodeMap: Map<
+    NodeId,
+    NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>
+  >,
   nodeCtx: NodeContext,
   dagId: DagId,
   nowFn: () => number,
 ): Promise<UnenrichedDagEvent> => {
   const stamp = (): Date => new Date(nowFn());
+  const emitFailure = (
+    frameworkError: FrameworkError,
+    message: string,
+    stack?: string,
+  ): UnenrichedDagEvent => {
+    emit(nodeCtx, {
+      type: "node-error",
+      runId: nodeCtx.runId,
+      dagId,
+      nodeId,
+      sideEffects: nodeMap.get(nodeId)?.sideEffects,
+      timestamp: stamp(),
+      error: message,
+      ...(stack !== undefined ? { stack } : {}),
+      frameworkError,
+    });
+    return { type: "node-failed", nodeId, error: frameworkError };
+  };
   if (!hooks?.onHumanReview) {
     return {
       type: "node-failed",
@@ -119,23 +143,14 @@ const callHumanReviewHook = async (
   } catch (e) {
     const message = safeErrorMessage(e);
     const stack = safeErrorStack(e);
-    const crash: FrameworkError = { kind: "node-crash", nodeId, retriability: "retriable", message, ...(stack !== undefined ? { stack } : {}) };
-    emit(nodeCtx, {
-      type: "node-error",
-      runId: nodeCtx.runId,
-      dagId,
+    const crash: FrameworkError = {
+      kind: "node-crash",
       nodeId,
-      sideEffects: nodeMap.get(nodeId)?.sideEffects,
-      timestamp: stamp(),
-      error: message,
-      stack,
-      frameworkError: crash,
-    });
-    return {
-      type: "node-failed",
-      nodeId,
-      error: crash,
-    } satisfies DagEvent;
+      retriability: "retriable",
+      message,
+      ...(stack !== undefined ? { stack } : {}),
+    };
+    return emitFailure(crash, message, stack);
   }
 
   // ADR-0060: hook declined to decide → park the run. `human-suspend` drives
@@ -155,21 +170,7 @@ const callHumanReviewHook = async (
       nodeId,
       message: validationFailure,
     };
-    emit(nodeCtx, {
-      type: "node-error",
-      runId: nodeCtx.runId,
-      dagId,
-      nodeId,
-      sideEffects: nodeMap.get(nodeId)?.sideEffects,
-      timestamp: stamp(),
-      error: validationFailure,
-      frameworkError: valErr,
-    });
-    return {
-      type: "node-failed",
-      nodeId,
-      error: valErr,
-    } satisfies DagEvent;
+    return emitFailure(valErr, validationFailure);
   }
 
   return { type: "human-responded", nodeId, action } satisfies UnenrichedDagEvent;
@@ -198,9 +199,9 @@ const callHumanReviewHook = async (
  * `isTerminal` guard stops the loop first — so those branches throw.
  *
  * The executor never performs state transitions — it only produces DagEvents.
- * Observer events (node-start, node-end, node-error, run-start, run-end) are
- * emitted here so consumers see the full run-start / node-start / node-end /
- * run-end stream regardless of the execution path.
+ * Node observer events are emitted by the wave/node helpers and the human-gate
+ * path. Run-start/run-end belong to `run-dag-stateful.ts`, which wraps this
+ * executor so run telemetry remains balanced across compile and setup failures.
  */
 export const buildDagExecutor = (
   dag: DagDef,
@@ -244,7 +245,10 @@ export const buildDagExecutor = (
     minting?: MintingAuthority;
   },
 ): Executor<DagPhase, DagEvent, DagMachineContext> => {
-  const nodeMap = new Map<NodeId, NodeDef<unknown, unknown>>(
+  const nodeMap = new Map<
+    NodeId,
+    NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>
+  >(
     dag.nodes.map((n) => [n.id, n]),
   );
   const recordOutcomes = hooks?.recordOutcomes;

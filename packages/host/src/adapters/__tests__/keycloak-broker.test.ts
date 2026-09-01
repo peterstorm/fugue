@@ -37,6 +37,7 @@ import type { EntraWifExchange, WifExchangeRequest } from "../entra-wif.js";
 import type { GraphHttp, GraphRequest } from "../graph-capability.js";
 import { parseScope } from "../../domain/capability-scope.js";
 import { markSubjectToken, type SubjectToken } from "../../domain/auth.js";
+import { collectLogs } from "./fixtures/log-capture.js";
 
 // ── Test spine ──────────────────────────────────────────────────────────────
 
@@ -45,16 +46,6 @@ const nodeId = makeNodeId("node-a");
 
 /** A tracer that just runs the span body — enough to exercise the audit path. */
 const passTracer: Tracer = { withSpan: async (_n, _t, fn) => fn() };
-
-const collectLogs = () => {
-  const logs: { level: string; msg: string; data?: Record<string, unknown> }[] = [];
-  const logger: LogPort = {
-    info: (msg, data) => logs.push({ level: "info", msg, data }),
-    warn: (msg, data) => logs.push({ level: "warn", msg, data }),
-    error: (msg, data) => logs.push({ level: "error", msg, data }),
-  };
-  return { logger, logs };
-};
 
 /**
  * A call-recording fake token endpoint. Every method push-logs its inputs so a
@@ -1460,6 +1451,36 @@ describe("keycloak-broker — throw fence attributes the hop actually in flight"
 });
 
 describe("keycloak-broker — mintFor is fenced end-to-end (never rejects, SC-009 holds)", () => {
+  it("a hostile thrown value whose coercion throws still resolves to a typed error", async () => {
+    const { endpoint, egressCount } = recordingEndpoint();
+    const { logger, logs } = collectLogs();
+    const hostile = {
+      toString(): string {
+        throw new Error("hostile coercion");
+      },
+    };
+    const broker = mkBroker({
+      endpoint,
+      assignedScopes: () => { throw hostile; },
+      tracer: passTracer,
+      logger,
+      now: () => 0,
+    });
+
+    const result = await broker.mintFor(
+      invocationFor(agentOrigin("fugue-agent-mail")),
+      [cap("msgraph:mail.send")],
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "infra-unreachable") {
+      expect(typeof result.error.message).toBe("string");
+      expect(result.error.message.length).toBeGreaterThan(0);
+    }
+    expect(egressCount()).toBe(0);
+    expect(logs.filter((entry) => entry.data?.result === "refusal")).toHaveLength(1);
+  });
+
   it("a THROWING AssignedScopes port resolves to infra-unreachable AND emits a mint-failed refusal audit", async () => {
     const { endpoint, egressCount } = recordingEndpoint();
     const { logger, logs } = collectLogs();

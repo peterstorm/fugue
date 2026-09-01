@@ -43,6 +43,10 @@ export const PRICE_TABLE: Readonly<Record<string, Readonly<CostRates>>> = Object
   "gpt-5-mini": rates(0.3, 1.25),
 });
 
+/** Whether the framework pricing authority has an entry for `model`. */
+export const isPricedModel = (model: string): boolean =>
+  Object.hasOwn(PRICE_TABLE, model);
+
 /**
  * Rates for a model, or zeroes when the model is unpriced.
  *
@@ -50,9 +54,6 @@ export const PRICE_TABLE: Readonly<Record<string, Readonly<CostRates>>> = Object
  * the span enricher, which computes a cost per call and must not emit a log
  * line per span.
  */
-export const isPricedModel = (model: string): boolean =>
-  Object.hasOwn(PRICE_TABLE, model);
-
 export const costRatesFor = (model: string): CostRates =>
   PRICE_TABLE[model] ?? { inputPer1M: 0, outputPer1M: 0 };
 
@@ -182,7 +183,7 @@ export const spendOfCall = (
  */
 export const spendOfUnknownCall = (model: string): Spend =>
   unknownUsageCall(
-    Object.hasOwn(PRICE_TABLE, model)
+    isPricedModel(model)
       ? { kind: "priced", micros: NO_MICROS }
       : unpricedCall(0, model).usd,
   );

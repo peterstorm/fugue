@@ -111,10 +111,7 @@ export type GitPort = {
 
 // ── Redis ────────────────────────────────────────────────────────────────────
 
-/**
- * Redis-like interface for cache/checkpoint operations.
- * Returns Result to make failures explicit — no try/catch required at call sites.
- */
+/** Mutually exclusive Redis expiry units for atomic write operations. */
 export type RedisExpiry =
   | { readonly expiresInSec: number; readonly expiresInMs?: never }
   | { readonly expiresInMs: number; readonly expiresInSec?: never };
@@ -146,6 +143,10 @@ export type RedisValueGuard = {
   readonly expectedValue: string;
 };
 
+/**
+ * Redis-like interface for cache/checkpoint operations.
+ * Returns Result to make failures explicit — no try/catch required at call sites.
+ */
 export type RedisPort = {
   readonly get: (key: string) => Promise<Result<string | null, HostError>>;
   readonly set: (key: string, value: string, opts?: { expiresInSec?: number }) => Promise<Result<string | null, HostError>>;
@@ -351,6 +352,19 @@ export type SharedInfra = {
 
 // ── Spend Ledger ────────────────────────────────────────────────────────────
 
+/** Selection and durability facts carried by a spend-ledger adapter. */
+export type SpendLedgerMetadata =
+  | {
+      readonly role: "redis-fallback";
+      readonly backend: "memory";
+      readonly durability: "process";
+    }
+  | {
+      readonly role: "authoritative";
+      readonly backend: "file" | "redis";
+      readonly durability: "restart";
+    };
+
 /**
  * Durable per-run LLM spend.
  *
@@ -364,18 +378,6 @@ export type SharedInfra = {
  * not one persistence protocol: Redis commits one complete additive
  * transaction; the file adapter serializes whole-snapshot replacement per run.
  */
-export type SpendLedgerMetadata =
-  | {
-      readonly role: "redis-fallback";
-      readonly backend: "memory";
-      readonly durability: "process";
-    }
-  | {
-      readonly role: "authoritative";
-      readonly backend: "file" | "redis";
-      readonly durability: "restart";
-    };
-
 export type SpendLedgerPort = {
   /** Selection and durability facts travel with the adapter they describe. */
   readonly metadata: SpendLedgerMetadata;

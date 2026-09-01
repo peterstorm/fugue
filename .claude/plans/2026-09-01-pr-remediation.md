@@ -1,12 +1,14 @@
-# PR Remediation Plan — 2026-09-01 (round 2)
+# PR Remediation Plan — 2026-09-01
 
-- **Branch:** `feat/f3-budget-capability-surface`
-- **Reviewed HEAD:** `9c287c917c414d1ce6c07dc0acad536c5839607c`
-- **Review run:** `.claude/reviews/review-and-fix-runs/2026-09-01T07-04-18Z-standalone-review-01a05b28-r2`
-- **Canonical result:** `.claude/reviews/review-and-fix-runs/2026-09-01T07-04-18Z-standalone-review-01a05b28-r2/result.json`
-- **Result digest:** `5cd2a7c5a26e78428a39cd9524d1f25aa3b1d0b692179242f7eaa30d6d78ef7e`
+## Authority
 
-## Exact Frozen Scope
+- Branch: `feat/f3-budget-capability-surface`
+- Reviewed HEAD: `8ab1870870beaf0539d60d7ecaf8406bc3cd9e32`
+- Standalone review Run Directory: `.claude/reviews/review-and-fix-runs/2026-09-01T09-16-20Z-standalone-review-01a05b28-r4`
+- Canonical result digest: `960af11fdf5ac0d068cc94ec0290ea086a531b6651506d9f366f21e5f98f6a22`
+- Arguments: default `all`; not dry-run; push enabled.
+
+## Exact frozen review scope
 
 - `.claude/plans/2026-08-30-f3-budget-capability-remediation.md`
 - `.claude/plans/2026-08-30-f3-budget-capability-surface.md`
@@ -64,10 +66,25 @@
 - `packages/framework/src/__tests__/run-dag-as-worker-job.test.ts`
 - `packages/framework/src/__tests__/run-telemetry-ordering.test.ts`
 - `packages/framework/src/__tests__/second-dag.test.ts`
+- `packages/framework/src/__tests__/span-enrich.test.ts`
 - `packages/framework/src/__tests__/spend.test.ts`
 - `packages/framework/src/__tests__/tool-dispatch.test.ts`
+- `packages/framework/src/dag-runtime/executor.ts`
+- `packages/framework/src/dag-runtime/human-emission.ts`
+- `packages/framework/src/dag-runtime/post-wave-context.ts`
 - `packages/framework/src/dag-runtime/run-dag-stateful.ts`
 - `packages/framework/src/dag-runtime/run-node.ts`
+- `packages/framework/src/dag-runtime/types.ts`
+- `packages/framework/src/dag-runtime/wave-execution.ts`
+- `packages/framework/src/describe/build-described-dag.ts`
+- `packages/framework/src/executor/dag-input-edge.ts`
+- `packages/framework/src/executor/define-dag.ts`
+- `packages/framework/src/executor/define-diamond.ts`
+- `packages/framework/src/executor/define-fan-out.ts`
+- `packages/framework/src/executor/define-linear-dag.ts`
+- `packages/framework/src/executor/define-router.ts`
+- `packages/framework/src/executor/define-sources.ts`
+- `packages/framework/src/executor/validate-dag.ts`
 - `packages/framework/src/file.ts`
 - `packages/framework/src/file/boundary-error.ts`
 - `packages/framework/src/file/spend-store-codec.ts`
@@ -79,10 +96,14 @@
 - `packages/framework/src/shared/make-node-context.ts`
 - `packages/framework/src/state-machine/runner.ts`
 - `packages/framework/src/testing.ts`
+- `packages/framework/src/tracing/semantic-conventions.ts`
+- `packages/framework/src/tracing/span-enrich.ts`
 - `packages/framework/src/types/budget-capability.ts`
 - `packages/framework/src/types/budget.ts`
 - `packages/framework/src/types/capability-broker.ts`
 - `packages/framework/src/types/capability-handle.ts`
+- `packages/framework/src/types/dag-internals.ts`
+- `packages/framework/src/types/dag.ts`
 - `packages/framework/src/types/errors.ts`
 - `packages/framework/src/types/index.ts`
 - `packages/framework/src/types/llm.ts`
@@ -90,10 +111,15 @@
 - `packages/framework/src/types/spend.ts`
 - `packages/host/README.md`
 - `packages/host/docs/deployment.md`
+- `packages/host/docs/multi-tenant-deployment.md`
 - `packages/host/src/__tests__/capability-manager.test.ts`
+- `packages/host/src/__tests__/config.test.ts`
 - `packages/host/src/__tests__/domain/cache-keys.test.ts`
 - `packages/host/src/__tests__/entrypoint-wiring.test.ts`
 - `packages/host/src/__tests__/fixtures/host-boot-fakes.ts`
+- `packages/host/src/__tests__/fixtures/redis-spend-fake.ts`
+- `packages/host/src/__tests__/handlers/run-dag.test.ts`
+- `packages/host/src/__tests__/hitl-reconciliation-lifecycle.test.ts`
 - `packages/host/src/__tests__/llm-meter.test.ts`
 - `packages/host/src/__tests__/metered-llm.test.ts`
 - `packages/host/src/__tests__/middleware/error-handler.test.ts`
@@ -103,7 +129,10 @@
 - `packages/host/src/__tests__/spend-ledger-file.test.ts`
 - `packages/host/src/__tests__/spend-ledger.test.ts`
 - `packages/host/src/__tests__/spend-record.test.ts`
+- `packages/host/src/adapters/__tests__/fixtures/log-capture.ts`
+- `packages/host/src/adapters/__tests__/keycloak-broker.test.ts`
 - `packages/host/src/adapters/__tests__/redis-connectivity.test.ts`
+- `packages/host/src/adapters/keycloak-broker.ts`
 - `packages/host/src/adapters/metered-llm.ts`
 - `packages/host/src/adapters/node-context-factory.ts`
 - `packages/host/src/adapters/redis-connectivity.ts`
@@ -114,6 +143,7 @@
 - `packages/host/src/adapters/spend-ledger-redis.ts`
 - `packages/host/src/domain/cache-keys.ts`
 - `packages/host/src/domain/capability-manager.ts`
+- `packages/host/src/domain/config.ts`
 - `packages/host/src/domain/host-error.ts`
 - `packages/host/src/domain/llm-meter.ts`
 - `packages/host/src/domain/run-context.ts`
@@ -130,146 +160,163 @@
 - `packages/host/src/index.ts`
 - `packages/host/src/ports.ts`
 
-## Mandatory Surviving Critical Findings
+## Surviving critical findings — mandatory
 
-### `code-reviewer-1` — packages/host/src/adapters/node-context-factory.ts:410
-- **Finding:** Redis spend TTL is based on DAG node-checkpoint TTL, so a HITL run retained by longer HITL_RUN_TTL_SEC can resume after spend expires with a refilled budget.
-- **Fix:** Thread the durable HITL run retention into context construction; use a spend TTL at least as long as every resumable HITL record while preserving the DAG checkpoint TTL as its own deadline. Add unit and Redis-backed expiry regressions.
+### `code-reviewer-1` — `packages/framework/src/types/spend.ts:102`
 
-### `code-reviewer-2` — packages/host/src/adapters/run-spend-authority.ts:117
-- **Finding:** tokenUsageOf accepts cacheWriteTokens plus cacheReadTokens greater than tokensIn as known, allowing malformed clients to under-report token spend and keep token-only budgets open.
-- **Fix:** Parse provider usage with the inclusive-input invariant `cacheWriteTokens + cacheReadTokens <= tokensIn` using subtraction to avoid overflow. Settle violations as durable unknown usage and prove token-budget refusal on the next call.
+**Finding:** Per-call rounding can record a positive-cost LLM call as zero USD, allowing repeated sub-micro-dollar calls to bypass USD ceilings.
 
-### `silent-failure-hunter-1` — packages/host/src/http/handlers/run-dag.ts:267
-- **Finding:** The request deadline starts only after createContext resolves, so a hung Redis spend-ledger/context setup can hold the HTTP request and concurrency permit indefinitely without returning the configured timeout.
-- **Fix:** Create the run identity in the HTTP shell and race one pipeline containing context construction plus DAG execution against the configured hard deadline, so setup hangs abort and release concurrency too.
+**Fix:** Round every positive priced call upward at the USD→micro-USD settlement boundary, saturate positive overflow, and add a repeated sub-micro-call budget regression.
 
-### `silent-failure-hunter-2` — packages/host/src/http/handlers/run-dag.ts:303
-- **Finding:** Late successful DAG completion after HTTP 408 is discarded without diagnostics, hiding completed side effects and making client retries prone to duplication.
-- **Fix:** Emit a guarded warning when a DAG fulfills successfully after HTTP 408, naming the run and duplicate-side-effect/retry consequence; retain existing late error/rejection diagnostics.
+### `code-reviewer-2` — `packages/host/src/adapters/metered-llm.ts:39`
 
-### `silent-failure-hunter-3` — packages/host/src/host.ts:653
-- **Finding:** A throwing logger escapes the reconciliation catch, so startup can reject or periodic void promises can become unhandled while the original reconciliation failure is lost.
-- **Fix:** Route reconciliation diagnostics through the total logger helper so a throwing logger cannot reject startup or an interval-owned promise. Add startup and periodic regressions.
+**Finding:** The spend authority prices request fields separately from the original request sent to the provider, so stateful accessors can make the provider use a different model or cache policy than the one metered.
 
-### `pr-test-analyzer-1` — packages/host/src/adapters/__tests__/redis-connectivity.test.ts:597
-- **Finding:** No real-Redis integration test exercises appendSpend or commitCheckpointAndRetainSpend; the durability/retention proof relies only on FakeRedis transaction behavior.
-- **Fix:** Add `REDIS_URL`-gated tests against real ioredis/Redis for additive hash appends, marker union, TTL, and atomic checkpoint-write/spend-retention behavior.
+**Fix:** Parse and snapshot every LLM request field once into an immutable own-data request before admission and provider dispatch; add hostile accessor regressions for both operations.
 
-### `type-design-analyzer-1` — packages/framework/src/types/capability-broker.ts:53
-- **Finding:** `ScopedLlmCapability<T>` makes `runScopedOperations` optional and unrelated to `T`, so a type-correct broker can deliver an augmented LLM without its required aliases and the runtime installs a plain `LlmClient` behind the augmented context type.
-- **Fix:** Make every scoped LLM envelope carry a required alias map derived from its concrete client type; standard clients use an empty map and augmented clients cannot omit required aliases.
+### `code-reviewer-3` — `packages/framework/src/dag-runtime/run-node.ts:406`
 
-### `type-design-analyzer-2` — packages/framework/src/types/capability-broker.ts:56
-- **Finding:** The raw non-LLM branch of `ScopedCapabilityHandle` has no discriminator, so a contract-violating broker can return an untagged `LlmClient` that `meterScopedLlmCapabilities` passes through unchanged, bypassing run spend metering.
-- **Fix:** Replace raw broker values with a closed `llm | non-llm` scoped binding ADT. Parse and unwrap every binding at dispatch; reject untagged values before context merge.
+**Finding:** The broker receives the live mutable node.requires array and the over-delivery check reuses it afterward, allowing the broker to add a capability declared by another node and inject it into this node.
 
-### `type-design-analyzer-3` — packages/framework/src/types/spend.ts:99
-- **Finding:** `Spend` permits negative or unsafe token and call counts, so a type-correct `SpendLedgerPort` can hydrate budget enforcement with a negative total and grant consumption beyond declared ceilings.
-- **Fix:** Make `Spend` opaque and smart-constructed, add a hostile-value parser at ledger hydration, and use saturating non-negative safe-integer arithmetic so forged or overflowing totals cannot create budget headroom.
+**Fix:** Snapshot/freeze node requirements and broker provides claims before the awaited broker call, then validate returned authority only against those snapshots.
 
-### `comment-analyzer-1` — packages/host/docs/deployment.md:116
-- **Finding:** The deployment guide documents obsolete unscoped Redis key prefixes instead of the implemented `fugue:<tenant>:` namespace.
-- **Fix:** Rewrite deployment Redis examples and ACL guidance to the implemented `fugue:<tenant>:` namespace.
+### `silent-failure-hunter-1` — `packages/host/src/host.ts:1258`
 
-### `comment-analyzer-2` — packages/framework/src/types/spend.ts:33
-- **Finding:** `MicroUsd` documentation promises exact unbounded aggregation even though it is backed by JavaScript `number` and loses integer exactness beyond `Number.MAX_SAFE_INTEGER`.
-- **Fix:** Replace the false unbounded-number claim with the enforced safe-integer/saturating fail-closed contract in code, ADR, and ubiquitous language.
+**Finding:** shutdown() performs unguarded logger and supervisor-stop calls before listener/resource teardown, so one throw aborts the remaining cleanup.
 
-### `comment-analyzer-3` — packages/framework/src/llm/cost.ts:137
-- **Finding:** The settled-call JSDoc is attached to `spendOfUnknownCall` even though its claims and parameters describe `spendOfCall`.
-- **Fix:** Attach settled-call documentation to `spendOfCall` and give `spendOfUnknownCall` its own accurate contract.
+**Fix:** Fence logging, sync-loop stop, probe stop, state transitions, draining diagnostics, and listener stop independently so teardown always reaches every acquired resource.
 
-### `comment-analyzer-4` — packages/host/src/entrypoint-wiring.ts:60
-- **Finding:** `redisOperationFailure` is documented as preventing configured-secret leakage even though its public default performs no redaction.
-- **Fix:** Remove the unsafe empty-redaction default; require callers to pass derived Redis secret spellings and pin compile/runtime behavior.
+### `silent-failure-hunter-2` — `packages/host/src/host.ts:1090`
 
-## Advisory Dispositions
+**Finding:** shutdown() catches listener, HITL worker, capability, and infrastructure cleanup failures but still resolves successfully, falsely reporting a clean shutdown.
 
-- **DISMISSED `silent-failure-hunter-4`** — Tracing hook and clock failures are silently discarded when the optional logger is absent or throws.
-  - **Reason:** Observer/clock isolation is deliberate; when the optional diagnostic sink is absent or itself broken there is no trustworthy reporting channel, and allowing telemetry faults to alter execution would violate observer isolation.
-- **DISMISSED `silent-failure-hunter-5`** — Shutdown logging failures are silently discarded by logSafely, making worker and infrastructure cleanup failures unobservable when the primary logger is broken.
-  - **Reason:** `logSafely` deliberately makes cleanup total. A broken sole logger cannot reliably report its own failure; propagating it would strand later teardown and reduce correctness.
-- **ACCEPTED `silent-failure-hunter-6`** — costRatesFor encodes an unknown model price as zero without warning, making unpriced span telemetry indistinguishable from genuinely free usage.
-  - **Reason:** Unpriced span cost currently aliases free cost. Add an explicit priced/unpriced span attribute while retaining no-per-span-warning policy.
-- **ACCEPTED `pr-test-analyzer-2`** — No synchronous createHost execution test proves meterMintedLlm reaches runDag for a broker-delivered custom LLM.
-  - **Reason:** A shell-level createHost regression is practical and closes the composition proof for broker LLM metering.
-- **ACCEPTED `pr-test-analyzer-3`** — No HITL resume test executes a broker-delivered custom LLM and proves it uses the resumed run's spend authority.
-  - **Reason:** A resumed HITL broker-LLM regression is practical and validates fresh-slice authority wiring.
-- **ACCEPTED `pr-test-analyzer-4`** — buildRuntimeDeps has no behavioral test for local/remote Git selection or assembled spend-ledger/pricing dependencies.
-  - **Reason:** The existing runtime composition seam can be tested behaviorally with injected factories, covering Git selection and spend/pricing assembly without mocks.
-- **ACCEPTED `type-design-analyzer-4`** — `UnpricedModels` guarantees only non-emptiness, not its documented sorted and deduplicated canonical form, so exported constructors accept values that violate the stated invariant.
-  - **Reason:** Make `UnpricedModels` opaque and construct it only through canonical sort/dedup logic.
-- **ACCEPTED `type-design-analyzer-5`** — `Breach` does not correlate USD ceilings with `MicroUsd` observations, so consumers lose unit safety when formatting or persisting breach data.
-  - **Reason:** Split breach members by ceiling kind so USD observations are `MicroUsd` and token/call observations remain counts.
-- **ACCEPTED `comment-analyzer-5`** — `disconnectRedisClients` says all failures are preserved, but it replaces each rejection with a new message-only `Error` and drops the original value, cause, and stack.
-  - **Reason:** Preserve each rejection as `Error.cause` while retaining the aggregate human-readable message.
-- **ACCEPTED `comment-analyzer-6`** — `UnpricedModels` is documented as canonically sorted and deduplicated, but its exported tuple type permits arbitrary order and duplicates.
-  - **Reason:** Duplicate of type-design-analyzer-4; one opaque smart-constructor fix disposes both findings.
-- **ACCEPTED `comment-analyzer-7`** — ADR-0082 documents `Breach` as only `reached | unpriced`, omitting the current `unknown-usage` variant.
-  - **Reason:** Update ADR-0082 to include the later `unknown-usage` amendment.
-- **ACCEPTED `comment-analyzer-8`** — The feature guide calls spend durable without distinguishing the in-process ledger, which survives slice resumes but not process restarts.
-  - **Reason:** Qualify durability by Redis/file/process backends in the feature guide.
-- **DEFERRED `architecture-tech-lead-1`** — NodeContext construction crosses its consumer seam as Promise<NodeContextForDag> while domain/setup failures are thrown as untyped Error values.
-  - **Reason:** A typed context-construction Result requires coordinated HTTP, HITL, and composition API redesign beyond this correctness remediation; current setup/deadline failures remain contained at the shell.
-- **DEFERRED `architecture-tech-lead-2`** — RedisPort exposes a vendor-shaped, cross-subsystem command surface instead of consumer-owned capability ports, forcing unrelated consumers and fakes to depend on commands they do not use.
-  - **Reason:** Consumer-owned Redis port decomposition spans cache, checkpoint, spend, leases, sets, and HITL transactions; it warrants a dedicated deepening with conformance suites rather than an inline interface migration.
-- **ACCEPTED `code-simplifier-1`** — The hostile LLM pricing parser uses a nested ternary and IIFE where explicit branches preserve the same validation behavior with less control-flow nesting.
-  - **Reason:** Flatten the pricing parser into explicit branches while preserving the hostile-boundary contract.
-- **ACCEPTED `code-simplifier-2`** — The run spend gate invents a private error/release union instead of using the project's existing Result type.
-  - **Reason:** Use the project Result ADT for admission instead of a private error/release union.
-- **ACCEPTED `code-simplifier-3`** — The unmetered broker LLM test asserts result.ok is false twice, so the final assertion is dead duplication.
-  - **Reason:** Delete the duplicate assertion; no evidence is lost.
+**Fix:** Collect every shutdown failure while attempting all cleanup, transition to stopped only after teardown attempts, and reject with AggregateError when shutdown was not clean.
 
-## Refuted Critical Audit
+### `silent-failure-hunter-3` — `packages/host/src/hitl/adapters/run-executor.ts:268`
 
-No canonical critical findings were refuted.
+**Finding:** The HITL run error handler calls checkpointFailure() without a fence, so a port throw masks the original slice failure and escapes the promised Result boundary.
 
-## Implementation Order
+**Fix:** Fence checkpointFailure inspection in the HITL catch path and preserve both the original slice failure and inspection failure in the returned terminal FrameworkError.
 
-1. Close domain state spaces: opaque/canonical `Spend`, `MicroUsd`, `UnpricedModels`, unit-correlated breaches, and scoped broker binding ADTs.
-2. Harden authority and shell boundaries: usage parsing, ledger hydration, HTTP whole-pipeline deadline, late completion diagnostics, reconciliation logging, Redis redaction.
-3. Couple HITL/spend retention and prove Redis transactions against a real server.
-4. Add host/HITL/runtime composition tests and accepted documentation corrections.
-5. Run focused tests, full package tests, workspace typecheck/tests, documentation checks, `git diff --check`, then the required distill apply-mode pass one move at a time.
+### `type-design-analyzer-1` — `packages/framework/src/types/dag.ts:223`
 
-## Validation Commands
+**Finding:** The DagDef brand does not prove validation because exported brandAsDagDef is a zero-check cast and barrel-exported withRetryLimits uses it to brand arbitrary retry keys and values.
 
-```bash
-bun run --filter @fuguejs/framework typecheck
-bun run --filter @fuguejs/host typecheck
-bun test packages/framework/src/__tests__/spend.test.ts packages/framework/src/__tests__/budget.test.ts packages/framework/src/__tests__/per-node-minting.test.ts
-bun test packages/host/src/__tests__/run-spend-authority.test.ts packages/host/src/__tests__/node-context-factory.test.ts packages/host/src/__tests__/hitl-reconciliation-lifecycle.test.ts packages/host/src/__tests__/entrypoint-wiring.test.ts
-bun run --filter @fuguejs/framework test
-bun run --filter @fuguejs/host test
-bun run typecheck
-REDIS_URL=redis://127.0.0.1:<ephemeral-port> bun run test
-bun scripts/check-doc-links.ts
-git diff --check
-```
+**Fix:** Remove the exported unchecked DagDef branding seam and make retry-limit changes flow through full DAG validation with typed failure.
 
-## Remediation Support Paths Outside Frozen Scope
+### `type-design-analyzer-2` — `packages/framework/src/executor/validate-dag.ts:492`
 
-- `packages/framework/src/__tests__/span-enrich.test.ts`
-- `packages/framework/src/tracing/semantic-conventions.ts`
-- `packages/framework/src/tracing/span-enrich.ts`
-- `packages/host/src/__tests__/handlers/run-dag.test.ts`
-- `packages/host/src/__tests__/hitl-reconciliation-lifecycle.test.ts`
-- `packages/host/src/adapters/__tests__/keycloak-broker.test.ts`
-- `packages/host/src/adapters/keycloak-broker.ts`
+**Finding:** validateDagShape retains caller-owned NodeDef objects by reference, so a type-correct mutation through the original mutable object can invalidate a DagDef after it is branded.
 
-## Final Validation Evidence
+**Fix:** Snapshot validated node definitions and their mutable arrays before branding so caller-owned post-validation mutation cannot change the DagDef.
 
-- Workspace typecheck: all 12 packages passed.
-- Framework package: 3,355 passed, 52 Redis-gated skipped, 0 failed.
-- Host package after final fix: covered again by the Redis-backed workspace run.
-- Redis-backed workspace: 6,632 passed, 1 external live-Entra test skipped, 0 failed.
-- Real Redis spend adapter: 35 passed, including concurrent append/marker/TTL and checkpoint-retention transactions.
-- Documentation links: 19 shipped files checked.
-- `git diff --check`: passed.
+### `comment-analyzer-1` — `packages/framework/src/dag-runtime/executor.ts:207`
 
-## Distill / Deepen Final Pass
+**Finding:** buildDagExecutor's JSDoc falsely says it emits run-start and run-end observer events; those events are emitted by run-dag-stateful.ts, not executor.ts.
 
-- Applied: flattened hostile pricing parsing; reused the project `Result` ADT for admission; deleted the duplicate assertion; centralized single-model canonicalization; made huge finite USD conversion saturate rather than pass through intermediate `Infinity` to zero.
-- Wrongness discovered and fixed: the initial safe-integer conversion would have mapped `Number.MAX_VALUE * 1_000_000` to zero. A regression now pins saturation at `Number.MAX_SAFE_INTEGER`.
-- Deepening lens: new seams have production and test adapters (broker injection, run-id source, Redis transaction port), and the opaque Spend parser concentrates rather than redistributes invariants. The broader typed context-construction and RedisPort decomposition remain deliberately deferred as dispositioned above.
+**Fix:** Move/correct buildDagExecutor JSDoc so it describes only executor-owned events.
+
+### `comment-analyzer-2` — `packages/framework/src/llm/cost.ts:46`
+
+**Finding:** JSDoc describing rate lookup is attached to isPricedModel, so API documentation describes a boolean predicate as returning rates or zeroes.
+
+**Fix:** Attach rate-lookup JSDoc to costRatesFor and give isPricedModel predicate-specific documentation.
+
+### `comment-analyzer-3` — `packages/host/src/ports.ts:114`
+
+**Finding:** The RedisPort overview JSDoc is attached to RedisExpiry, so RedisExpiry is documented as a Result-returning cache/checkpoint interface.
+
+**Fix:** Attach Redis port overview JSDoc to RedisPort, not RedisExpiry.
+
+### `comment-analyzer-4` — `packages/host/src/ports.ts:354`
+
+**Finding:** The SpendLedgerPort overview JSDoc is attached to SpendLedgerMetadata, so metadata is documented as the two-operation durability port.
+
+**Fix:** Attach spend-ledger overview JSDoc to SpendLedgerPort, not SpendLedgerMetadata.
+
+### `comment-analyzer-5` — `packages/host/src/domain/capability-manager.ts:355`
+
+**Finding:** The extractClients trust-boundary JSDoc is attached to CapabilityClientDecorators, so the decorator type is documented as an extraction function.
+
+**Fix:** Attach trust-boundary documentation to extractClients, not CapabilityClientDecorators.
+
+### `comment-analyzer-6` — `packages/host/src/http/middleware/error-handler.ts:232`
+
+**Finding:** The createErrorHandler JSDoc is attached to asError, so asError is documented as a Hono error-handler factory.
+
+**Fix:** Attach Hono factory documentation to createErrorHandler, not asError.
+
+### `code-simplifier-1` — `packages/host/src/http/handlers/run-dag.ts:155`
+
+**Finding:** The body-parse catch bypasses the imported safeErrorMessage helper, so a thrown value with hostile string coercion escapes instead of producing the intended 400 HostError.
+
+**Fix:** Use total safeErrorMessage normalization in the body-parse catch and add a hostile-coercion regression.
+
+### `code-simplifier-2` — `packages/framework/src/dag-runtime/human-emission.ts:79`
+
+**Finding:** The confidence-extractor catch interpolates the thrown value directly, so hostile coercion can make error handling throw instead of returning the typed node-crash Result.
+
+**Fix:** Use total error normalization and guarded diagnostics in confidence extraction so the typed node-crash Result cannot be replaced.
+
+## Advisory dispositions
+
+- **DEFERRED — `silent-failure-hunter-4`** (`packages/framework/src/describe/build-described-dag.ts:255`): An omitted describe warning sink silently converts schema-serialization failures into null schemas. **Reason:** The claim is sound, but making an omitted sink observable requires a public describe-result/warning-channel redesign; null remains the conservative schema value and explicit sinks already receive the warning.
+- **ACCEPTED — `silent-failure-hunter-5`** (`packages/host/src/http/middleware/error-handler.ts:301`): The HTTP error handler omits wrapped non-Error causes from operator diagnostics. **Reason:** Total cause rendering is local, preserves diagnostics for primitive/cross-realm failures, and is covered by the existing error boundary suite.
+- **DISMISSED — `silent-failure-hunter-6`** (`packages/framework/src/state-machine/runner.ts:88`): The state-machine runner installs a no-op logger that silently discards caught telemetry failures. **Reason:** The logger is intentionally optional for library embedders; implicit console/stderr output would violate host ownership, while requiring a logger is a breaking API change without a correctness failure in transitions.
+- **ACCEPTED — `silent-failure-hunter-7`** (`packages/framework/src/dag-runtime/human-emission.ts:79`): The human-intervention confidence catch can throw during error formatting or diagnostics before returning its typed failure. **Reason:** This overlaps mandatory code-simplifier-2 and will be fixed with total formatting plus best-effort diagnostics.
+- **ACCEPTED — `silent-failure-hunter-8`** (`packages/host/src/http/handlers/run-dag.ts:155`): The request-body parse catch can throw while formatting a hostile non-Error value. **Reason:** This overlaps mandatory code-simplifier-1 and will be fixed at the same boundary.
+- **ACCEPTED — `silent-failure-hunter-9`** (`packages/framework/src/dag-runtime/wave-execution.ts:114`): Wave invariant logging can throw before the intended non-retriable failure is returned. **Reason:** Guarding secondary invariant logging is local and preserves the authoritative non-retriable failure.
+- **ACCEPTED — `type-design-analyzer-3`** (`packages/framework/src/types/spend.ts:99`): usdToMicros maps positive infinity to zero spend, so the money boundary conflates an overflowing positive cost with no cost instead of saturating or returning a typed parse failure. **Reason:** Positive infinity is positive overflow, not zero cost; saturating is the fail-closed money invariant and is a local fix.
+- **ACCEPTED — `comment-analyzer-7`** (`packages/framework/src/types/node.ts:61`): The prompt comment's claim that withHumanReview is the only gateway is false because types/index.ts publicly exports nonEmptyString and asNonEmptyString. **Reason:** Correct the gateway claim to name the smart constructors actually exported.
+- **ACCEPTED — `comment-analyzer-8`** (`packages/framework/src/types/errors.ts:632`): Function-specific retriabilityOf behavior is documented on the Retriability type alias rather than on the function. **Reason:** Move function behavior documentation onto retriabilityOf and leave the alias with type-level semantics.
+- **ACCEPTED — `comment-analyzer-9`** (`packages/framework/src/dag-runtime/post-wave-context.ts:4`): The PostWaveContext rationale depends on temporary deepening-plan.md Step 3 provenance instead of remaining self-contained. **Reason:** Replace temporary-plan provenance with a self-contained locality rationale.
+- **ACCEPTED — `comment-analyzer-10`** (`packages/framework/src/dag-runtime/executor.ts:79`): The OnHumanReviewHook comment retains the opaque round-38 cs-3 review identifier, which adds no durable rationale. **Reason:** Remove remediation archaeology while retaining the durable shared-hook rationale.
+- **ACCEPTED — `comment-analyzer-11`** (`packages/host/src/adapters/redis-connectivity.ts:407`): The disconnectRedisQuietly comment retains the opaque round-38 cs-19 review identifier, which adds no durable rationale. **Reason:** Remove the opaque review identifier while retaining the cleanup rationale.
+- **DEFERRED — `architecture-tech-lead-1`** (`packages/host/src/adapters/node-context-factory.ts:349`): Node-context setup failures cross a throwing seam and are classified differently by synchronous and HITL callers. **Reason:** A ContextSetupError Result requires coordinated HTTP, HITL, composition-root, and public contract migration; it is a dedicated architecture change, not a safe local remediation.
+- **DEFERRED — `architecture-tech-lead-2`** (`packages/host/src/ports.ts:149`): RedisPort is a vendor-shaped 16-operation superset that couples unrelated consumers and forces optional-method capability probing. **Reason:** Splitting the 16-operation Redis seam requires coordinated adapter, consumer, fake, and conformance-suite migration across subsystems.
+- **DEFERRED — `architecture-tech-lead-3`** (`packages/host/src/adapters/node-context-factory.ts:625`): createNodeContextForDag combines storage, durability policy, metering, identity, and context assembly behind a ten-parameter interface. **Reason:** Decomposing the context factory and replacing its positional contract should be done together with typed setup results and focused consumer-owned ports.
+- **ACCEPTED — `code-simplifier-3`** (`packages/framework/src/dag-runtime/executor.ts:129`): The human-review hook failure and edit-validation failure duplicate the same node-error event assembly inside callHumanReviewHook. **Reason:** A local node-error event helper removes duplicated policy without widening interfaces.
+- **ACCEPTED — `code-simplifier-4`** (`packages/framework/src/dag-runtime/executor.ts:79`): The OnHumanReviewHook documentation contains a review-round identifier that carries no durable constraint. **Reason:** Duplicate of comment-analyzer-10; one comment edit resolves both advisories.
+
+## Refuted critical audit
+
+- None. The registered panel published zero refuted critical findings.
+
+## Planned support paths outside frozen scope
+
+- `apps/customer-summary/src/dag/nodes/enrich-with-tools.example.ts` — updates the worked LLM-tools example to the explicit `LlmWithToolsNodeDef` capability-bearing return type required by the safer `NodeDef` default.
+- `packages/framework/README.md` — updates the shipped public-surface reference for the typed `withRetryLimits` Result contract and executor export.
+- `packages/framework/src/__tests__/file-journal.test.ts` — removes a pre-lock readiness race exposed by full-suite validation so the crashed-writer stale-lock regression kills only after lock acquisition.
+- `packages/framework/src/__tests__/human-emission.test.ts` — pins hostile confidence errors, logger failures, and clock failures without losing the typed result.
+- `packages/framework/src/__tests__/validate-dag.test.ts` — pins immutable post-validation node/retry snapshots.
+- `packages/framework/src/__tests__/wave-execution-errors.test.ts` — pins invariant failure authority under a throwing logger.
+- `packages/framework/src/executor/index.ts` — publishes the validated `withRetryLimits` Result from the executor surface.
+- `packages/framework/src/shared/validate-dag.ts` — moves the pure DagDef parser behind the shared inward-facing layer so `dag-runtime` can revalidate retry derivations without reversing the enforced dependency direction; `executor/validate-dag.ts` remains the public façade.
+- `packages/host/src/__tests__/integration/full-lifecycle.test.ts` — updates the established capability-close lifecycle regression to require the new aggregated shutdown rejection while still proving all closes run.
+
+## Validation
+
+- All workspace package typechecks.
+- Full Redis-backed workspace test suite.
+- Framework standalone test suite for Redis-gated coverage accounting.
+- Real Redis spend adapter transaction/TTL suite.
+- Documentation link validation.
+- `git diff --check`.
+- Final `distill` apply-mode pass after a green baseline.
+
+### Completed evidence
+
+- All 12 workspace package typechecks passed.
+- Redis-backed framework suite: 3,413 passed, 0 failed.
+- Host suite excluding the process-exit signal file: 2,507 passed, 1 external live-Entra test skipped, 0 failed; the isolated signal suite added 10 passed, 0 failed.
+- Real Redis spend-ledger/transaction suite: 85 passed, 0 failed.
+- Remaining workspace packages passed in the workspace run: http-auth 90, hitl-smoke 10, document-source 18, pg 73, oracle 79, fs 25, examples 23, ms-graph 142, xlsx 20, customer-summary 243.
+- Documentation validation checked 19 shipped files; all relative links resolve and remain shipped.
+- `git diff --check` passed.
+- `distill` apply mode reused the first captured property-descriptor map at the LLM request boundary, eliminating a second hostile-object observation; 44 metered-LLM regressions and host typecheck remained green. Interface-level context/Redis deepenings were skipped as explicitly deferred advisories.
+
+## Installation
+
+- Start registered remediation from the immutable standalone review run.
+- Register every observed out-of-scope support path at remediation start.
+- Resume until `verified-index-installed`, commit the installed index, and push without force.

@@ -147,13 +147,13 @@ patterns.
 | Checkpoints | Depends on DAG complexity; TTL auto-cleanup |
 | **Total** (3 teams, light usage) | ~500MB—1GB |
 
-Monitor Redis memory with `redis-cli INFO memory`. Set `maxmemory` and eviction policy:
+Monitor Redis memory with `redis-cli INFO memory` and alert before capacity is exhausted. Accounting Redis must use `noeviction`: an LRU policy can evict a live `$spend` hash independently of its checkpoint, and an absent hash is the valid zero-spend representation for a new run. Eviction would therefore refill a resumed run's budget. Size persistent storage and `maxmemory` with headroom instead of relying on key eviction:
 
 ```bash
 helm install platform-redis bitnami/redis \
   --set master.persistence.size=5Gi \
   --set redis.masterConfiguration.maxmemory=4gb \
-  --set redis.masterConfiguration.maxmemoryPolicy=allkeys-lru
+  --set redis.masterConfiguration.maxmemoryPolicy=noeviction
 ```
 
 > **Standalone topology:** separate Redis per host is required for isolation.
@@ -195,7 +195,8 @@ oc create secret generic fugue-host-secrets \
   --from-literal=REDIS_URL="redis://:password@fugue-redis-master:6379" \
   --from-literal=AZURE_OPENAI_API_KEY="team-azure-key" \
   --from-literal=AZURE_OPENAI_ENDPOINT="https://team-resource.openai.azure.com" \
-  --from-literal=AZURE_OPENAI_DEPLOYMENT="gpt-4o-mini"
+  --from-literal=AZURE_OPENAI_DEPLOYMENT="team-chat-production" \
+  --from-literal=AZURE_OPENAI_MODEL="gpt-4o-mini"
 ```
 
 ### (Optional) Git credentials for private DAG repos

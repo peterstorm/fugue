@@ -17,7 +17,7 @@
 // Sugar over `defineDagFromArray`. Same module-load validation, same brand.
 
 import type { DagDef, Predicate } from "../types/dag.js";
-import type { NodeDef } from "../types/node.js";
+import type { Capability, NodeDef } from "../types/node.js";
 import type { EvalJudgeNodeDef } from "../nodes/eval-judge.js";
 import { DagDefinitionError, defineDagFromArray } from "./define-dag.js";
 import { nodeId } from "../types/ids.js";
@@ -35,22 +35,22 @@ export type RouterCase =
       readonly when: (output: unknown) => boolean;
       readonly whenPredicate?: never;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional
-      readonly to: NodeDef<any, any, any>;
+      readonly to: NodeDef<any, any, any, readonly Capability[]>;
     }
   | {
       readonly whenPredicate: Predicate<unknown>;
       readonly when?: never;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional
-      readonly to: NodeDef<any, any, any>;
+      readonly to: NodeDef<any, any, any, readonly Capability[]>;
     };
 
 export interface RouterDagConfig {
   readonly id: string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional
-  readonly classifier: NodeDef<any, any, any>;
+  readonly classifier: NodeDef<any, any, any, readonly Capability[]>;
   readonly cases: Readonly<Record<string, RouterCase>>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional
-  readonly default: NodeDef<any, any, any>;
+  readonly default: NodeDef<any, any, any, readonly Capability[]>;
   /**
    * Explicit output node. If omitted, the runtime uses the last-active-node
    * fallback — the node that produced output last in the executed waves.

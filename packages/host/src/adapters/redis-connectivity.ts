@@ -404,8 +404,8 @@ export const createRedisConnectivity = async (
 /**
  * Best-effort Redis disconnect on an entrypoint's error path.
  *
- * ONE encoding (round-38 cs-19) of the cleanup both `main.ts` and
- * `worker-main.ts` need on their startup-failure path. It goes to `console`
+ * The single cleanup encoding both `main.ts` and `worker-main.ts` use on their
+ * startup-failure path. It goes to `console`
  * rather than the structured logger deliberately: the logger may itself be part
  * of the failed bootstrap, and this diagnostic must not be able to displace the
  * original error being rethrown.

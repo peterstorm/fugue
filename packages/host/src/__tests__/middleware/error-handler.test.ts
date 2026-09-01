@@ -748,6 +748,18 @@ describe("error-handler middleware", () => {
       expect(logs[0].data?.stack).toBeDefined();
     });
 
+    it("logs a wrapped non-Error cause through total diagnostics", async () => {
+      const { logger, logs } = createTestLogger();
+      const wrapped = new Error("wrapper", { cause: "primitive root cause" });
+      const app = createApp(logger, () => { throw wrapped; });
+
+      const response = await app.request("/throw");
+
+      expect(response.status).toBe(500);
+      expect(logs[0]?.data?.causeMessage).toBe("primitive root cause");
+      expect(logs[0]?.data?.causeStack).toBeUndefined();
+    });
+
     it("logs cause chain when present", async () => {
       const { logger, logs } = createTestLogger();
       const cause = new Error("root cause");

@@ -24,7 +24,7 @@ import type {
   EdgeDefRawInput,
 } from "../types/dag.js";
 import type { NodesRecord } from "../types/dag-internals.js";
-import type { NodeDef } from "../types/node.js";
+import type { Capability, NodeDef } from "../types/node.js";
 import type { EvalJudgeNodeDef } from "../nodes/eval-judge.js";
 import type { FrameworkError } from "../types/errors.js";
 import { formatFrameworkError } from "../types/errors.js";
@@ -71,7 +71,7 @@ export const defineDag = <const Nodes extends NodesRecord>(
 export const defineDagFromArray = (input: {
   readonly id: string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional
-  readonly nodes: readonly NodeDef<any, any, any>[];
+  readonly nodes: readonly NodeDef<any, any, any, readonly Capability[]>[];
   readonly edges: readonly EdgeDefRawInput[];
   readonly outputNodeId?: string;
   readonly evalJudges?: readonly EvalJudgeNodeDef[];

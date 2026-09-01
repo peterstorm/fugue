@@ -42,9 +42,14 @@ import { DAG_INPUT } from "../types/ids.js";
 import { RecordingObserver } from "../observer/observer.js";
 
 // A scope-shaped capability the broker mints, and a plain static one it doesn't.
+interface BrokerLlmWithAlias extends LlmClient {
+  readonly critique: LlmClient["sendStructured"];
+}
+
 declare module "../types/node.js" {
   interface CapabilityRegistry {
     brokerLlm: LlmClient;
+    brokerLlmWithAlias: BrokerLlmWithAlias;
   }
 }
 
@@ -219,6 +224,83 @@ describe("per-node capability minting (C1)", () => {
     expect(providerCalls).toBe(1);
   });
 
+  it("executes a non-empty broker LLM alias through the run-owned meter", async () => {
+    let providerCalls = 0;
+    let meteredCalls = 0;
+    let observedAliasMap: Readonly<Record<string, unknown>> | undefined;
+    const inner: BrokerLlmWithAlias = {
+      sendStructured: async <O>() => {
+        providerCalls += 1;
+        return ok({
+          output: { answer: "aliased" } as O,
+          rawText: "",
+          tokensIn: 1,
+          tokensOut: 1,
+          cacheWriteTokens: 0,
+          cacheReadTokens: 0,
+        });
+      },
+      sendWithTools: async () => { throw new Error("unused"); },
+      critique: async () => { throw new Error("boot-scoped alias must never run"); },
+    };
+    const broker: CapabilityBroker = {
+      mintFor: async () => ok({
+        brokerLlmWithAlias: {
+          clientKind: "llm",
+          client: inner,
+          pricingModel: { kind: "request" },
+          runScopedOperations: { critique: "sendStructured" },
+        },
+      }),
+      provides: (capability) => capability === "brokerLlmWithAlias",
+    };
+    const node = createFetchNode({
+      id: N("broker-alias-node"),
+      inputSchema: z.object({}),
+      outputSchema: z.object({ answer: z.string() }),
+      requires: ["brokerLlmWithAlias"] as const,
+      fetch: async (_input, ctx) => {
+        const result = await ctx.brokerLlmWithAlias.critique({
+          system: "s",
+          user: "u",
+          model: "gpt-4o",
+          schema: z.object({ answer: z.string() }),
+          nodeId: N("broker-alias-node"),
+        });
+        return result.ok ? ok(result.value.output) : result;
+      },
+    });
+    const dag = defineDagFromArray({
+      id: "dag-1",
+      nodes: [node],
+      edges: [{ from: DAG_INPUT, to: "broker-alias-node" }],
+    });
+
+    const result = await runDag(dag, {}, baseCtx(), {
+      minting: {
+        broker,
+        origin: agentOrigin,
+        meterLlm: (_capability, binding) => {
+          observedAliasMap = binding.runScopedOperations;
+          const sendStructured: LlmClient["sendStructured"] = (request) => {
+            meteredCalls += 1;
+            return binding.client.sendStructured(request);
+          };
+          return ok({
+            sendStructured,
+            sendWithTools: binding.client.sendWithTools.bind(binding.client),
+            critique: sendStructured,
+          } as BrokerLlmWithAlias);
+        },
+      },
+    });
+
+    expect(result).toEqual(ok({ answer: "aliased" }));
+    expect(observedAliasMap).toEqual({ critique: "sendStructured" });
+    expect(meteredCalls).toBe(1);
+    expect(providerCalls).toBe(1);
+  });
+
   it("fails closed when a broker-minted LLM has no run meter", async () => {
     const broker: CapabilityBroker = {
       mintFor: async () => ok({
@@ -313,7 +395,7 @@ describe("per-node capability minting (C1)", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("fails closed when broker output contains a non-null built-in without claiming it", async () => {
+  it("rejects a broker key that the node neither declared nor claimed", async () => {
     let ran = false;
     const broker: CapabilityBroker = {
       mintFor: async () => ok({
@@ -339,9 +421,10 @@ describe("per-node capability minting (C1)", () => {
     const result = await runDag(dag, {}, baseCtx(), { minting: { broker, origin: agentOrigin } });
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.error.kind).toBe("validation");
-      if (result.error.kind === "validation") {
-        expect(result.error.message).toContain("non-null reserved/built-in key 'http'");
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("non-retriable");
+        expect(result.error.message).toContain("returned undeclared or unclaimed capabilities: http");
       }
     }
     expect(ran).toBe(false);
@@ -597,6 +680,51 @@ describe("per-node minting — broker port-contract enforcement", () => {
       if (runEnd?.type === "run-end") expect(runEnd.status).toBe("error");
     }
     expect(accessorReads).toBe(1);
+  });
+
+  it("cannot mutate a node's requirements to authorize an overdelivered capability", async () => {
+    let mutationBlocked = false;
+    let nodeRuns = 0;
+    const broker: CapabilityBroker = {
+      mintFor: async (_inv, requires) => {
+        try {
+          (requires as Capability[]).push(cap("http"));
+        } catch {
+          mutationBlocked = true;
+        }
+        return ok({
+          http: { clientKind: "non-llm", client: { tag: "injected" } },
+        } as unknown as ScopedCapabilityHandle);
+      },
+      provides: (capability) => capability === SCOPE || capability === cap("http"),
+    };
+    const node = createFetchNode({
+      id: N("immutable-requires"),
+      inputSchema: z.object({}),
+      outputSchema: z.object({ ok: z.boolean() }),
+      requires: [SCOPE] as unknown as readonly Capability[],
+      fetch: async () => {
+        nodeRuns += 1;
+        return ok({ ok: true });
+      },
+    });
+    const dag = defineDagFromArray({
+      id: "dag-1",
+      nodes: [node],
+      edges: [{ from: DAG_INPUT, to: "immutable-requires" }],
+    });
+
+    const result = await runDag(dag, {}, baseCtx(), {
+      minting: { broker, origin: agentOrigin },
+    });
+
+    expect(mutationBlocked).toBe(true);
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "node-crash") {
+      expect(result.error.message).toContain("returned undeclared or unclaimed capabilities: http");
+    }
+    expect(nodeRuns).toBe(0);
+    expect(dag.nodes[0]?.requires).toEqual([SCOPE]);
   });
 
   it("a broker mintFor contract throw is non-retriable and invoked once with retry budget", async () => {

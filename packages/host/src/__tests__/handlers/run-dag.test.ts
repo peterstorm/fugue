@@ -339,6 +339,34 @@ describe("run-dag handler", () => {
     expect(body.error).toBe("body-parse-failed");
   });
 
+  it("returns 400 when request JSON parsing throws a hostile non-Error", async () => {
+    const hostile = { toString: () => { throw new Error("coercion must not run"); } };
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("hostState" as never, readyState as never);
+      c.set("authIdentity" as never, { kind: "admin" } as never);
+      Object.defineProperty(c.req, "json", {
+        value: async () => { throw hostile; },
+      });
+      await next();
+    });
+    app.post(
+      "/dags/:id/run",
+      createRunDagHandler(defaultDeps()) as unknown as (c: unknown) => Promise<Response>,
+    );
+
+    const response = await app.request("/dags/test-dag/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: "hi" }),
+    });
+
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.error).toBe("body-parse-failed");
+    expect(typeof body.details.message).toBe("string");
+  });
+
   it("returns 400 for input validation failure", async () => {
     const app = createTestApp(defaultDeps(), readyState);
     const res = await post(app, "test-dag", { wrong: "field" });

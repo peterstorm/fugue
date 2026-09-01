@@ -27,9 +27,9 @@ export interface TokensCeiling {
  * Limit on delegated LLM attempts settled by the run authority. Failures with
  * no trustworthy usage still count, so retry amplification cannot bypass it.
  *
- * The cheapest available circuit-breaker for retry amplification: a tool that
- * always errors burns turns until its iteration cap, and a call ceiling catches
- * that immediately where a token ceiling only catches it expensively.
+ * The cheapest available circuit-breaker for retry amplification across outer
+ * delegated attempts. A complete multi-turn `sendWithTools` loop is one call;
+ * use its `maxIterations` limit to bound individual tool-loop turns.
  */
 export interface CallsCeiling {
   readonly kind: "calls";
