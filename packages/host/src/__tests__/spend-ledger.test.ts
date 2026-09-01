@@ -22,6 +22,7 @@ import {
   NO_MICROS,
   NO_SPEND,
   addSpend,
+  makeSpend,
   pricedCall,
   unknownUsageCall,
   unpricedCall,
@@ -131,6 +132,20 @@ for (const [name, build] of BACKENDS) {
         calls: 3,
         usd: { kind: "priced", micros: micros(1_500) },
       });
+    });
+
+    it("saturates cumulative axes at the safe-integer ceiling", async () => {
+      const ledger = build();
+      const amount = (value: number): Spend => makeSpend({
+        usage: "known",
+        tokens: value,
+        calls: value,
+        usd: { kind: "priced", micros: micros(value) },
+      });
+
+      expect((await ledger.add(runA, amount(Number.MAX_SAFE_INTEGER - 5))).ok).toBe(true);
+      expect((await ledger.add(runA, amount(10))).ok).toBe(true);
+      expect(await readOrThrow(ledger, runA)).toEqual(amount(Number.MAX_SAFE_INTEGER));
     });
 
     it("keeps runs isolated", async () => {

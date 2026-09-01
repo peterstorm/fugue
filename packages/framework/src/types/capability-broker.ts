@@ -44,12 +44,15 @@ import type { RunId, DagId, NodeId } from "./ids.js";
  * broker resolved that capability; the pass-through broker preserves its
  * configured binding map unchanged.
  */
-export type ScopedLlmCapability<T extends LlmClient = LlmClient> = {
-  readonly clientKind: "llm";
-  readonly client: T;
-  readonly pricingModel: LlmPricingModel;
-  readonly runScopedOperations: RunScopedLlmOperations<T>;
-};
+export type ScopedLlmCapability<T extends LlmClient = LlmClient> =
+  [Extract<Exclude<keyof T, keyof LlmClient>, symbol>] extends [never]
+    ? {
+        readonly clientKind: "llm";
+        readonly client: T;
+        readonly pricingModel: LlmPricingModel;
+        readonly runScopedOperations: RunScopedLlmOperations<T>;
+      }
+    : never;
 
 export type ScopedNonLlmCapability<T> = {
   readonly clientKind: "non-llm";

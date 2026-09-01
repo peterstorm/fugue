@@ -21,7 +21,8 @@ import { createFetchNode } from "../nodes/fetch.js";
 import { createTransformNode } from "../nodes/transform.js";
 import { makeNodeContext } from "../shared/make-node-context.js";
 import type { NodeDef, BaseNodeContext, Capability } from "../types/node.js";
-import type { LlmClient, LlmRequest, LlmResponse } from "../types/llm.js";
+import { llmModelId } from "../types/llm.js";
+import type { LlmClient, LlmPricingModel, LlmRequest, LlmResponse } from "../types/llm.js";
 import type { FrameworkError } from "../types/errors.js";
 import { ok, err, isOk, isErr } from "../types/result.js";
 import { NO_SPEND } from "../types/spend.js";
@@ -172,13 +173,30 @@ const scopedCapabilityTypePins = (llm: LlmClient, db: TestDbCapability): void =>
     client: augmented,
     pricingModel: { kind: "request" },
   };
+  // @ts-expect-error -- runtime facades cannot materialize symbol-keyed operations.
+  const symbolScoped: ScopedLlmCapability<SymbolCritic> = {
+    clientKind: "llm",
+    client: llm as SymbolCritic,
+    pricingModel: { kind: "request" },
+    runScopedOperations: {},
+  };
   // @ts-expect-error -- every non-LLM scoped client requires the non-llm envelope.
   const untagged: ScopedCapabilityHandle = { db };
   void scoped;
   void missingAliases;
+  void symbolScoped;
   void untagged;
 };
 void scopedCapabilityTypePins;
+
+const pricingModelTypePins = (): void => {
+  const fixed: LlmPricingModel = { kind: "fixed", model: llmModelId("gpt-4o") };
+  // @ts-expect-error -- fixed pricing requires a parsed non-empty model identity.
+  const raw: LlmPricingModel = { kind: "fixed", model: "gpt-4o" };
+  void fixed;
+  void raw;
+};
+void pricingModelTypePins;
 
 const nodeDefDefaultCapabilityTypePin = (_node: NodeDef): void => {
   // @ts-expect-error -- direct NodeDef annotation keeps undeclared llm nullable.
@@ -225,6 +243,11 @@ const makeCtx = (overrides: Partial<BaseNodeContext> = {}): BaseNodeContext => (
 // ---------------------------------------------------------------------------
 
 describe("extensible capability registry (ADR-0051)", () => {
+  it("constructs only non-empty fixed model identities", () => {
+    expect(String(llmModelId("gpt-4o"))).toBe("gpt-4o");
+    expect(() => llmModelId("")).toThrow("LLM model identity must be a non-empty string");
+  });
+
   describe("custom capability validation", () => {
     it("custom capability 'db' missing → Err with missing-capability", () => {
       const dag = defineDagFromArray({

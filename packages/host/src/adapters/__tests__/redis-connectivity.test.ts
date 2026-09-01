@@ -51,6 +51,7 @@ class FakeRedis {
   private readonly throwOn: Set<string>;
   private readonly o: FakeOverrides;
   private readonly values = new Map<string, string>();
+  private readonly hashes = new Map<string, Map<string, string>>();
   private execNullRemaining: number;
 
   constructor(o: FakeOverrides = {}) {
@@ -77,6 +78,9 @@ class FakeRedis {
     return "PONG";
   }
   seed(key: string, value: string): void { this.values.set(key, value); }
+  seedHash(key: string, values: Readonly<Record<string, string>>): void {
+    this.hashes.set(key, new Map(Object.entries(values)));
+  }
   async get(key: string): Promise<string | null> {
     this.rec("get", [key]);
     return "getResult" in this.o ? this.o.getResult ?? null : this.values.get(key) ?? null;
@@ -105,7 +109,7 @@ class FakeRedis {
       | { readonly kind: "delete"; readonly key: string }
       | { readonly kind: "expire"; readonly key: string }
       | { readonly kind: "hash-increment" }
-      | { readonly kind: "hash-set" }
+      | { readonly kind: "hash-set"; readonly key: string; readonly field: string; readonly value: string }
       | { readonly kind: "set"; readonly key: string; readonly value: string; readonly onlyIfAbsent: boolean }
     > = [];
     const chain = {
@@ -119,9 +123,9 @@ class FakeRedis {
         operations.push({ kind: "expire", key });
         return chain;
       },
-      hset: (key: string, field: string, value: string) => {
+      hset: (key: string, field: string, value: string | number) => {
         this.rec("multi.hset", [key, field, value]);
-        operations.push({ kind: "hash-set" });
+        operations.push({ kind: "hash-set", key, field, value: String(value) });
         return chain;
       },
       hincrby: (key: string, field: string, by: number) => {
@@ -153,7 +157,12 @@ class FakeRedis {
           if (operation.kind === "expire") {
             return [null, this.values.has(operation.key) ? 1 : 0];
           }
-          if (operation.kind === "hash-set") return [null, 1];
+          if (operation.kind === "hash-set") {
+            const hash = this.hashes.get(operation.key) ?? new Map<string, string>();
+            hash.set(operation.field, operation.value);
+            this.hashes.set(operation.key, hash);
+            return [null, 1];
+          }
           if (operation.kind === "hash-increment") return [null, 7];
           if (operation.onlyIfAbsent && this.values.has(operation.key)) {
             return [null, null];
@@ -185,9 +194,14 @@ class FakeRedis {
     this.rec("smembers", [key]);
     return ["a", "b"];
   }
+  async hget(key: string, field: string): Promise<string | null> {
+    this.rec("hget", [key, field]);
+    return this.hashes.get(key)?.get(field) ?? null;
+  }
   async hgetall(key: string): Promise<Record<string, string>> {
     this.rec("hgetall", [key]);
-    return { tokens: "10", micros: "5" };
+    const hash = this.hashes.get(key);
+    return hash === undefined ? { tokens: "10", micros: "5" } : Object.fromEntries(hash);
   }
   async quit(): Promise<string> {
     this.rec("quit", []);
@@ -669,7 +683,7 @@ describe("createRedisConnectivity — spend-ledger capability", () => {
     expect(result !== undefined && isErr(result)).toBe(true);
   });
 
-  it("queues hash markers -> micros -> tokens -> calls -> one expiry on one key", async () => {
+  it("atomically reads, saturates, and writes markers -> micros -> tokens -> calls -> expiry", async () => {
     const fake = new FakeRedis();
     const { bundle } = await wire(fake);
 
@@ -677,12 +691,16 @@ describe("createRedisConnectivity — spend-ledger capability", () => {
 
     expect(result !== undefined && isOk(result)).toBe(true);
     expect(fake.calls).toEqual([
+      { m: "watch", args: ["run:spend"] },
+      { m: "hget", args: ["run:spend", "micros"] },
+      { m: "hget", args: ["run:spend", "tokens"] },
+      { m: "hget", args: ["run:spend", "calls"] },
       { m: "multi", args: [] },
       { m: "multi.hset", args: ["run:spend", unpricedModelHashField("model-a"), "1"] },
       { m: "multi.hset", args: ["run:spend", unpricedModelHashField("model-z"), "1"] },
-      { m: "multi.hincrby", args: ["run:spend", "micros", 7] },
-      { m: "multi.hincrby", args: ["run:spend", "tokens", 10] },
-      { m: "multi.hincrby", args: ["run:spend", "calls", 1] },
+      { m: "multi.hset", args: ["run:spend", "micros", 7] },
+      { m: "multi.hset", args: ["run:spend", "tokens", 10] },
+      { m: "multi.hset", args: ["run:spend", "calls", 1] },
       { m: "multi.expire", args: ["run:spend", 900] },
       { m: "multi.exec", args: [] },
     ]);
@@ -690,7 +708,7 @@ describe("createRedisConnectivity — spend-ledger capability", () => {
     expect(fake.calls.some((call) => call.m.toLowerCase().includes("eval"))).toBe(false);
   });
 
-  it("omits zero HINCRBY fields and expiry while retaining one MULTI/EXEC", async () => {
+  it("omits zero numeric writes and expiry while retaining one optimistic transaction", async () => {
     const fake = new FakeRedis();
     const { bundle } = await wire(fake);
 
@@ -706,10 +724,48 @@ describe("createRedisConnectivity — spend-ledger capability", () => {
 
     expect(result !== undefined && isOk(result)).toBe(true);
     expect(fake.calls).toEqual([
+      { m: "watch", args: ["run:spend"] },
+      { m: "hget", args: ["run:spend", "micros"] },
+      { m: "hget", args: ["run:spend", "tokens"] },
+      { m: "hget", args: ["run:spend", "calls"] },
       { m: "multi", args: [] },
-      { m: "multi.hincrby", args: ["run:spend", "calls", 1] },
+      { m: "multi.hset", args: ["run:spend", "calls", 1] },
       { m: "multi.exec", args: [] },
     ]);
+  });
+
+  it("saturates every cumulative axis at the safe-integer ceiling", async () => {
+    const fake = new FakeRedis();
+    const almostMax = String(Number.MAX_SAFE_INTEGER - 5);
+    fake.seedHash("run:spend", {
+      micros: almostMax,
+      tokens: almostMax,
+      calls: almostMax,
+    });
+    const { bundle } = await wire(fake);
+
+    const result = await bundle.redis.appendSpend?.({
+      key: "run:spend",
+      delta: makeSpend({
+        usage: "known",
+        tokens: 10,
+        calls: 10,
+        usd: { kind: "priced", micros: 10 as never },
+      }),
+    });
+
+    expect(result !== undefined && isOk(result)).toBe(true);
+    expect(await fake.hgetall("run:spend")).toEqual({
+      micros: String(Number.MAX_SAFE_INTEGER),
+      tokens: String(Number.MAX_SAFE_INTEGER),
+      calls: String(Number.MAX_SAFE_INTEGER),
+    });
+    expect(fake.calls.filter((call) => call.m === "multi.hset").map((call) => call.args))
+      .toEqual([
+        ["run:spend", "micros", Number.MAX_SAFE_INTEGER],
+        ["run:spend", "tokens", Number.MAX_SAFE_INTEGER],
+        ["run:spend", "calls", Number.MAX_SAFE_INTEGER],
+      ]);
   });
 
   it("inspects every EXEC result and returns a typed failure from the final EXPIRE", async () => {
@@ -727,10 +783,11 @@ describe("createRedisConnectivity — spend-ledger capability", () => {
     }
   });
 
-  it("returns typed failures for aborted and thrown transaction acknowledgements", async () => {
-    const aborted = await (await wire(new FakeRedis({ execNullOnce: true }))).bundle.redis
-      .appendSpend?.(completeAppend);
-    expect(aborted !== undefined && isErr(aborted)).toBe(true);
+  it("retries definite WATCH conflicts but returns typed failures for thrown acknowledgements", async () => {
+    const conflicted = new FakeRedis({ execNullOnce: true });
+    const retried = await (await wire(conflicted)).bundle.redis.appendSpend?.(completeAppend);
+    expect(retried !== undefined && isOk(retried)).toBe(true);
+    expect(conflicted.calls.filter((call) => call.m === "multi.exec")).toHaveLength(2);
 
     const thrown = await (await wire(new FakeRedis({ throwOn: ["multi.exec"] }))).bundle.redis
       .appendSpend?.(completeAppend);
@@ -764,7 +821,7 @@ describe.skipIf(liveRedisUrl === undefined)(
 
     afterAll(async () => {
       if (liveRedisUrl === undefined) return;
-      await observer.del(`${prefix}:spend`, `${prefix}:checkpoint`);
+      await observer.del(`${prefix}:spend`, `${prefix}:saturated`, `${prefix}:checkpoint`);
       await observer.quit();
       await bundle.disconnect();
     });
@@ -794,6 +851,26 @@ describe.skipIf(liveRedisUrl === undefined)(
         tokens: "24",
       });
       expect(await observer.ttl(key)).toBeGreaterThan(0);
+    });
+
+    it("keeps cumulative overflow readable by saturating all axes", async () => {
+      const key = `${prefix}:saturated`;
+      const append = bundle.redis.appendSpend;
+      if (append === undefined) throw new Error("appendSpend is not wired");
+      const amount = (value: number) => makeSpend({
+        usage: "known",
+        tokens: value,
+        calls: value,
+        usd: { kind: "priced", micros: value as never },
+      });
+
+      expect((await append({ key, delta: amount(Number.MAX_SAFE_INTEGER - 5) })).ok).toBe(true);
+      expect((await append({ key, delta: amount(10) })).ok).toBe(true);
+      expect(await observer.hgetall(key)).toEqual({
+        calls: String(Number.MAX_SAFE_INTEGER),
+        micros: String(Number.MAX_SAFE_INTEGER),
+        tokens: String(Number.MAX_SAFE_INTEGER),
+      });
     });
 
     it("atomically writes a checkpoint while retaining spend longer", async () => {

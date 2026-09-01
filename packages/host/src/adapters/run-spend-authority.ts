@@ -162,10 +162,9 @@ type SettledLlmResult<O> = {
 /** Parse one runtime client outcome before accounting or returning it. */
 const settledLlmResult = <O>(
   raw: unknown,
-  request: MeteredRequest<O>,
+  nodeId: NodeId,
   operation: MeteredLlmOperation,
 ): SettledLlmResult<O> => {
-  const nodeId = request.nodeId;
   const malformed = (detail: string): SettledLlmResult<O> => ({
     result: err({
       kind: "node-crash",
@@ -403,7 +402,7 @@ export const createRunSpendAuthority = (
     rawResult: unknown,
     releaseReservationForCall: () => void,
   ): Promise<Result<LlmResponse<O>, FrameworkError>> => {
-    const { result, usage } = settledLlmResult<O>(rawResult, req, operation);
+    const { result, usage } = settledLlmResult<O>(rawResult, req.nodeId, operation);
     const settledCall = record(req, clientKey, operation, effectiveModel, usage);
     releaseReservationForCall();
     const providerOutcome = result.ok ? "success" : result.error.kind;

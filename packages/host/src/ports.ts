@@ -119,8 +119,8 @@ export type RedisExpiry =
 /**
  * Complete Redis spend append owned by the Spend Ledger consumer.
  *
- * The adapter commits marker fields, numeric sums, and optional retention in
- * one `MULTI`/`EXEC` against ONE hash key. Keeping the complete delta in this
+ * The adapter commits marker fields, saturated numeric totals, and optional
+ * retention in one optimistic transaction against ONE hash key. Keeping the complete delta in this
  * request makes split-key marker/value races unrepresentable to the caller.
  */
 export type RedisSpendAppend = {
@@ -244,15 +244,14 @@ export type RedisPort = {
   /** Read every field of a hash. An absent key yields an empty record, not an error. */
   readonly hGetAll?: (key: string) => Promise<Result<Readonly<Record<string, string>>, HostError>>;
   /**
-   * Atomically append one complete Spend Record in a single `MULTI`/`EXEC`.
+   * Atomically append one complete Spend Record with optimistic `WATCH`/`MULTI`.
    *
-   * The transaction queues every unpriced-model marker `HSET` first, then
-   * nonzero `HINCRBY` values cost-first (`micros`, `tokens`, `calls`), then ONE
-   * `EXPIRE` when `ttlSec` is configured. Implementations inspect every EXEC
-   * result and return one typed failure for an aborted, malformed,
-   * command-failed, or ambiguously acknowledged transaction. Callers and the
-   * Redis driver must not retry/replay because acknowledgement loss cannot
-   * prove absence of commit.
+   * The transaction reads and saturates numeric axes, then queues every
+   * unpriced-model marker `HSET`, nonzero numeric `HSET`s cost-first (`micros`,
+   * `tokens`, `calls`), and one optional `EXPIRE`. A proven WATCH conflict may
+   * retry; command failure or ambiguous acknowledgement returns one typed
+   * failure. Callers and the Redis driver never replay a transaction that may
+   * already have committed.
    */
   readonly appendSpend?: (append: RedisSpendAppend) => Promise<Result<void, HostError>>;
   /**
@@ -400,7 +399,8 @@ export type SpendLedgerPort = {
    *
    * Returns no total: the in-process meter already knows the run's figure and
    * this write seam only acknowledges persistence. A lost acknowledgement may
-   * be ambiguous, so adapters must not retry additive writes.
+   * be ambiguous, so adapters must not replay a write that may have committed;
+   * an optimistic conflict proven not to have committed may retry internally.
    */
   readonly add: (runId: RunId, delta: Spend) => Promise<Result<void, HostError>>;
 };

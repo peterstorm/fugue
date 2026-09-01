@@ -2,9 +2,10 @@
  * Pure LLM spend meter — per-`runId` accumulator + budget decision.
  *
  * Functional core: no I/O, no clocks, no network. Every operation is a pure
- * function over an immutable `LlmMeter` value. The metered-llm adapter (the
- * imperative shell) holds the live meter and threads it through these
- * functions; this module never touches the wire.
+ * function over an immutable `LlmMeter` value. `RunSpendAuthority` owns and
+ * threads the live meter plus reservation state; the metered-llm decorator
+ * snapshots requests and delegates into that imperative shell. This module
+ * never touches the wire.
  *
  * WHY SPEND AND NOT TOKENS: the meter used to accumulate `tokensIn + tokensOut`
  * and compare that against a single token ceiling. Prompt caching (F4) severed

@@ -43,6 +43,7 @@ import type {
 import { invocationFor } from "../types/capability-broker.js";
 import { mergeScopedCapabilities } from "../shared/make-node-context.js";
 import type { NodeId, DagId } from "../types/ids.js";
+import { tryLlmModelId } from "../types/llm.js";
 import { emit } from "./emit.js";
 import { validateInput, validateOutput } from "../shared/validate.js";
 import { buildNodeInput } from "../shared/build-input.js";
@@ -193,10 +194,10 @@ const parseScopedBinding = (
       pricingModel = { kind: "request" };
     } else if (pricingKind.value === "fixed") {
       const model = ownDataValue(rawPricing.value, "model");
-      if (!model.ok || typeof model.value !== "string" || model.value.length === 0) {
-        return err("fixed LLM pricingModel requires a non-empty model");
-      }
-      pricingModel = { kind: "fixed", model: model.value };
+      if (!model.ok) return err("fixed LLM pricingModel requires an own model data property");
+      const parsedModel = tryLlmModelId(model.value);
+      if (!parsedModel.ok) return err("fixed LLM pricingModel requires a non-empty model");
+      pricingModel = { kind: "fixed", model: parsedModel.value };
     } else {
       return err("LLM pricingModel is malformed");
     }

@@ -21,6 +21,8 @@ import type { Result } from "@fuguejs/framework";
 // default factory ONLY, never for a caller that injects its own client factory.
 import type { Redis as IoRedis, RedisOptions } from "ioredis";
 import {
+  addSpendRecordInteger,
+  parseSpendRecordInteger,
   recordOf,
   SPEND_HASH_FIELDS,
   SPEND_MARKER_VALUE,
@@ -57,6 +59,28 @@ const redisErr = (operation: string, e: unknown): HostError => ({
 });
 
 type RedisFailure = (operation: string, error: unknown) => HostError;
+type RedisExecResults = ReadonlyArray<readonly [Error | null, unknown]> | null;
+
+/** Prove one MULTI result list is complete and free of queued command errors. */
+const requireTransactionResults = (
+  operation: string,
+  executed: RedisExecResults,
+  expectedCommands: number,
+): Exclude<RedisExecResults, null> => {
+  if (executed === null) {
+    throw new Error(`${operation} EXEC unexpectedly aborted without WATCH`);
+  }
+  if (executed.length !== expectedCommands) {
+    throw new Error(
+      `${operation} EXEC returned ${executed.length} results for ` +
+        `${expectedCommands} queued commands`,
+    );
+  }
+  for (const [commandError] of executed) {
+    if (commandError !== null) throw commandError;
+  }
+  return executed;
+};
 
 /**
  * Adapt one ioredis command connection to the complete host `RedisPort`.
@@ -219,38 +243,50 @@ export const createIoredisRedisPort = (
       }),
     hGetAll: (key) => redisCall(() => `HGETALL ${key}`, () => client.hgetall(key)),
     appendSpend: (append) =>
-      redisCall(
-        () => `MULTI SPEND-APPEND ${append.key}`,
-        async () => {
-          const record = recordOf(append.delta);
-          const numericEntries = [
-            [SPEND_HASH_FIELDS.micros, record.micros],
-            [SPEND_HASH_FIELDS.tokens, record.tokens],
-            [SPEND_HASH_FIELDS.calls, record.calls],
-          ] as const;
-          if (numericEntries.some(([, value]) => !Number.isSafeInteger(value) || value < 0)) {
-            throw new Error("Redis spend append rejected a non-negative-safe-integer invariant violation");
-          }
-          // Encode every marker before MULTI so hostile model text cannot leave
-          // a partially queued transaction object in the adapter.
-          const markerFields = [
-            ...(record.usageUnknown ? [SPEND_USAGE_UNKNOWN_FIELD] : []),
-            ...record.unpricedModels.map(unpricedModelHashField),
-          ];
+      watchGuarded(`MULTI SPEND-APPEND ${append.key}`, async () => {
+        const record = recordOf(append.delta);
+        const numericEntries = [
+          [SPEND_HASH_FIELDS.micros, record.micros],
+          [SPEND_HASH_FIELDS.tokens, record.tokens],
+          [SPEND_HASH_FIELDS.calls, record.calls],
+        ] as const;
+        if (numericEntries.some(([, value]) => !Number.isSafeInteger(value) || value < 0)) {
+          throw new Error("Redis spend append rejected a non-negative-safe-integer invariant violation");
+        }
+        // Encode every marker before WATCH so hostile model text cannot leave
+        // optimistic transaction state on the shared command connection.
+        const markerFields = [
+          ...(record.usageUnknown ? [SPEND_USAGE_UNKNOWN_FIELD] : []),
+          ...record.unpricedModels.map(unpricedModelHashField),
+        ];
+
+        for (;;) {
+          await client.watch(append.key);
+          const currentValues = await Promise.all(
+            numericEntries.map(([field]) => client.hget(append.key, field)),
+          );
+          const totals = numericEntries.map(([field, delta], index) => {
+            const raw = currentValues[index];
+            const current = raw === null ? 0 : parseSpendRecordInteger(raw);
+            if (current === undefined) {
+              throw new Error(`Redis spend append found malformed ${field} value '${raw}'`);
+            }
+            return [
+              field,
+              delta,
+              delta === 0 ? current : addSpendRecordInteger(current, delta),
+            ] as const;
+          });
+
           const transaction = client.multi();
           let queuedCommands = 0;
-
           for (const field of markerFields) {
-            transaction.hset(
-              append.key,
-              field,
-              SPEND_MARKER_VALUE,
-            );
+            transaction.hset(append.key, field, SPEND_MARKER_VALUE);
             queuedCommands += 1;
           }
-          for (const [field, by] of numericEntries) {
-            if (by === 0) continue;
-            transaction.hincrby(append.key, field, by);
+          for (const [field, delta, total] of totals) {
+            if (delta === 0) continue;
+            transaction.hset(append.key, field, total);
             queuedCommands += 1;
           }
           if (append.ttlSec !== undefined) {
@@ -259,48 +295,30 @@ export const createIoredisRedisPort = (
           }
 
           const executed = await transaction.exec();
-          if (executed === null) {
-            throw new Error("Redis spend append EXEC unexpectedly aborted without WATCH");
-          }
-          if (executed.length !== queuedCommands) {
-            throw new Error(
-              `Redis spend append EXEC returned ${executed.length} results for ` +
-                `${queuedCommands} queued commands`,
-            );
-          }
-          for (const [commandError] of executed) {
-            if (commandError !== null) throw commandError;
-          }
-        },
-      ),
+          if (executed === null) continue;
+          requireTransactionResults("Redis spend append", executed, queuedCommands);
+          return ok(undefined);
+        }
+      }),
     commitCheckpointAndRetainSpend: (commit) =>
       redisCall(
         () =>
           `MULTI CHECKPOINT-SPEND-RETENTION ${commit.checkpointKey} ${commit.spendKey}`,
         async () => {
-          const executed = await client
-            .multi()
-            .set(
-              commit.checkpointKey,
-              commit.checkpointValue,
-              "EX",
-              commit.checkpointTtlSec,
-            )
-            .expire(commit.spendKey, commit.spendTtlSec)
-            .exec();
-          if (executed === null) {
-            throw new Error(
-              "Redis checkpoint/spend retention EXEC unexpectedly aborted without WATCH",
-            );
-          }
-          if (executed.length !== 2) {
-            throw new Error(
-              `Redis checkpoint/spend retention EXEC returned ${executed.length} results for 2 queued commands`,
-            );
-          }
-          for (const [commandError] of executed) {
-            if (commandError !== null) throw commandError;
-          }
+          const executed = requireTransactionResults(
+            "Redis checkpoint/spend retention",
+            await client
+              .multi()
+              .set(
+                commit.checkpointKey,
+                commit.checkpointValue,
+                "EX",
+                commit.checkpointTtlSec,
+              )
+              .expire(commit.spendKey, commit.spendTtlSec)
+              .exec(),
+            2,
+          );
           return (executed[0]?.[1] ?? null) as string | null;
         },
       ),

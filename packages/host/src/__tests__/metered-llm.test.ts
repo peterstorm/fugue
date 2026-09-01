@@ -222,6 +222,69 @@ describe("metered-llm: request boundary snapshots", () => {
     expect(calls).toHaveLength(0);
   });
 
+  it.each([
+    [
+      "sendStructured",
+      (client: LlmClient, model: unknown) => client.sendStructured({
+        ...structuredReq(nodeA),
+        model,
+      } as LlmRequest<unknown>),
+    ],
+    [
+      "sendWithTools",
+      (client: LlmClient, model: unknown) => client.sendWithTools({
+        ...toolsReq(nodeA),
+        model,
+      } as SendWithToolsRequest<unknown>, fakeCtx),
+    ],
+  ] as const)("rejects malformed models before %s provider egress", async (_operation, invoke) => {
+    const { inner, calls } = fakeInner(1, 0);
+    const metered = createMeteredLlm(inner, { logger: collectLogs().logger });
+    let coercions = 0;
+    const statefulModel = {
+      [Symbol.toPrimitive]: () => {
+        coercions += 1;
+        if (coercions > 1) throw new Error("second model coercion escaped settlement");
+        return "gpt-4o";
+      },
+    };
+
+    for (const model of [Symbol("model"), statefulModel]) {
+      const result = await invoke(metered, model);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.kind).toBe("validation");
+    }
+    expect(coercions).toBe(0);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("rejects revoked and accessor-backed tool arrays without invoking them", async () => {
+    const { inner, calls } = fakeInner(1, 0);
+    const metered = createMeteredLlm(inner, { logger: collectLogs().logger });
+    const revoked = Proxy.revocable([], {});
+    revoked.revoke();
+    let reads = 0;
+    const accessorTools: unknown[] = [];
+    Object.defineProperty(accessorTools, "0", {
+      enumerable: true,
+      get: () => {
+        reads += 1;
+        return {};
+      },
+    });
+
+    for (const tools of [revoked.proxy, accessorTools]) {
+      const result = await metered.sendWithTools({
+        ...toolsReq(nodeA),
+        tools,
+      } as SendWithToolsRequest<unknown>, fakeCtx);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.kind).toBe("validation");
+    }
+    expect(reads).toBe(0);
+    expect(calls).toHaveLength(0);
+  });
+
   it("passes one frozen own-data snapshot to pricing and the provider", async () => {
     let received: LlmRequest<unknown> | undefined;
     const inner: LlmClient = {

@@ -1,6 +1,7 @@
 import {
   AnthropicLlmClient,
   OpenAILlmClient,
+  llmModelId,
   safeErrorMessage,
 } from "@fuguejs/framework";
 import type { LlmClient, LlmPricingModel } from "@fuguejs/framework";
@@ -148,7 +149,7 @@ export const planHostLlm = (config: HostConfig): HostLlmPlan => {
 export const hostLlmPricingModel = (config: HostConfig): LlmPricingModel => {
   const plan = planHostLlm(config);
   return plan.provider === "azure"
-    ? { kind: "fixed", model: plan.model }
+    ? { kind: "fixed", model: llmModelId(plan.model) }
     : { kind: "request" };
 };
 

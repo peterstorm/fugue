@@ -61,11 +61,17 @@ export const unpricedModelHashField = (model: string): string => {
   return `${SPEND_UNPRICED_FIELD_PREFIX}${encoded}`;
 };
 
-const parseNonNegativeSafeInteger = (raw: string): number | undefined => {
+export const parseSpendRecordInteger = (raw: string): number | undefined => {
   if (!/^(0|[1-9][0-9]*)$/.test(raw)) return undefined;
   const parsed = Number(raw);
   return Number.isSafeInteger(parsed) ? parsed : undefined;
 };
+
+/** Add two parsed record axes without leaving JavaScript's exact integer domain. */
+export const addSpendRecordInteger = (current: number, delta: number): number =>
+  current > Number.MAX_SAFE_INTEGER - delta
+    ? Number.MAX_SAFE_INTEGER
+    : current + delta;
 
 const modelOfMarkerField = (field: string): string | undefined => {
   if (!field.startsWith(SPEND_UNPRICED_FIELD_PREFIX)) return undefined;
@@ -98,7 +104,7 @@ export const spendOfHash = (
     if (field === SPEND_HASH_FIELDS.micros ||
         field === SPEND_HASH_FIELDS.tokens ||
         field === SPEND_HASH_FIELDS.calls) {
-      const parsed = parseNonNegativeSafeInteger(raw);
+      const parsed = parseSpendRecordInteger(raw);
       if (parsed === undefined) {
         return err({ kind: "malformed-spend-hash", field, reason: "invalid-numeric-value" });
       }

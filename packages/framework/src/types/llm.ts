@@ -9,7 +9,7 @@
 // on `types/node.ts` and are reachable from the `llm/` barrel.
 
 import type { z } from "zod";
-import type { Result } from "./result.js";
+import { err, ok, type Result } from "./result.js";
 import type { FrameworkError } from "./errors.js";
 import type { NodeContext, TypedNodeContext } from "./node.js";
 import type { NodeId } from "./ids.js";
@@ -77,6 +77,24 @@ export type ConversationCachePolicy =
   | SingleShotCachePolicy
   | { readonly kind: "conversation"; readonly ttl: CacheTtl };
 
+declare const __llmModelIdBrand: unique symbol;
+
+/** Non-empty provider model identity used by fixed pricing policies. */
+export type LlmModelId = string & { readonly [__llmModelIdBrand]: void };
+
+/** Total parser for model identities crossing an untrusted boundary. */
+export const tryLlmModelId = (value: unknown): Result<LlmModelId, string> =>
+  typeof value === "string" && value.length > 0
+    ? ok(value as LlmModelId)
+    : err("LLM model identity must be a non-empty string");
+
+/** Smart constructor for trusted authoring/composition sites. */
+export const llmModelId = (value: string): LlmModelId => {
+  const parsed = tryLlmModelId(value);
+  if (!parsed.ok) throw new TypeError(parsed.error);
+  return parsed.value;
+};
+
 /**
  * Which model identity an LLM binding authorizes for pricing and egress.
  * Dynamic providers use the request model; fixed deployments bind one model
@@ -84,7 +102,7 @@ export type ConversationCachePolicy =
  */
 export type LlmPricingModel =
   | { readonly kind: "request" }
-  | { readonly kind: "fixed"; readonly model: string };
+  | { readonly kind: "fixed"; readonly model: LlmModelId };
 
 // ---------------------------------------------------------------------------
 // Single-shot structured responses

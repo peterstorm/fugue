@@ -2,10 +2,10 @@
 //
 // Public surface: authoring-facing types, runtime entry points, and the
 // pluggable seams (Observer, Cache, LLM, JobLike, Scheduler) consumers
-// implement. Pure-internal helpers (transition primitives, JSON
-// serialization, scheduler internals) are intentionally NOT re-exported
-// here. Direct imports from their concrete paths remain available for tests
-// and any consumer that genuinely needs them.
+// implement. Documented JSON wrappers are public for custom durable backends;
+// low-level serialization and transition primitives plus scheduler internals
+// remain internal. Direct concrete-path imports remain available for tests and
+// consumers that genuinely need those internals.
 
 export * from "./types/index.js";
 export * from "./executor/index.js";

@@ -26,6 +26,7 @@ pre-1.0, so a minor bump may carry breaking changes.
   `makeNodeContext`, whose `NodeContextInit.budget` remains optional.
 - **Breaking (source):** a `CapabilityHandle<K>` whose registered client extends
   `LlmClient` must declare `clientKind: "llm"` and a `pricingModel` policy.
+  Fixed policies require a smart-constructed, non-empty `LlmModelId`.
   Non-LLM handles cannot declare these fields, and mixed LLM/non-LLM registry
   unions are rejected. An augmented LLM subtype must additionally provide a
   declarative string-keyed `runScopedOperations` alias map. The host interprets
@@ -59,6 +60,12 @@ pre-1.0, so a minor bump may carry breaking changes.
 
 - Malformed provider cache parts can no longer exceed inclusive `tokensIn` and
   bypass token budgets; violations settle as durable unknown usage.
+- Metered LLM requests now parse required runtime fields and hostile tool arrays
+  before admission, so malformed model values cannot reach provider egress or
+  throw during post-provider settlement.
+- Redis spend appends atomically saturate cumulative axes at
+  `Number.MAX_SAFE_INTEGER`; resumed runs remain readable after overflow and
+  match memory/file ledger semantics.
 - HTTP hard deadlines include context construction, and late successful effects
   are diagnosed after a terminal 408.
 - Redis spend retention now outlives shorter checkpoint TTLs for resumable HITL

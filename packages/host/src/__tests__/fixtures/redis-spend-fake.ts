@@ -1,5 +1,6 @@
 import type { RedisSpendAppend } from "../../ports.js";
 import {
+  addSpendRecordInteger,
   recordOf,
   SPEND_HASH_FIELDS,
   SPEND_MARKER_VALUE,
@@ -23,7 +24,9 @@ export const applyRedisSpendAppend = (
     [SPEND_HASH_FIELDS.tokens, record.tokens],
     [SPEND_HASH_FIELDS.calls, record.calls],
   ] as const) {
-    if (by !== 0) hash.set(field, String(Number(hash.get(field) ?? "0") + by));
+    if (by !== 0) {
+      hash.set(field, String(addSpendRecordInteger(Number(hash.get(field) ?? "0"), by)));
+    }
   }
   if (hash.size > 0) hashes.set(append.key, hash);
 };

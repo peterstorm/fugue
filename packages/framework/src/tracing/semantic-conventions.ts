@@ -2,10 +2,8 @@
  * Framework-level semantic conventions for span attributes and events.
  *
  * Source of truth split (ADR-0023):
- * - For anything covered by the OTel GenAI semantic conventions, we emit the
- *   spec attribute (`gen_ai.*`) directly at the call site. Those names are
- *   not re-exported here — call sites use string literals matching the spec
- *   so a grep for `gen_ai.usage.input_tokens` lands on the emission point.
+ * - OTel GenAI semantic-convention names (`gen_ai.*`) are centralized and
+ *   exported here as `GEN_AI_*` constants so every call site uses one spelling.
  * - The constants below cover framework concerns the spec does NOT address:
  *   DAG/run/node identity, cost in USD, guardrail outcomes, and the
  *   thinking-presence boolean. These keep the framework-owned `ai.*` prefix.

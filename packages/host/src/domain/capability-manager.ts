@@ -140,6 +140,12 @@ export const topoSortHandles = (
 // Connect / Close (effectful — called by the imperative shell)
 // ---------------------------------------------------------------------------
 
+/** A single capability that failed to close during lifecycle cleanup. */
+interface CloseFailure {
+  readonly name: string;
+  readonly error: string;
+}
+
 /**
  * A connect failure paired with the handles that successfully connected
  * before it — the caller MUST close that prefix to avoid leaking pools and
@@ -150,7 +156,7 @@ interface ConnectFailure {
   /** Handles whose `connect()` completed before the failure, in connect order. */
   readonly connected: readonly CapabilityHandle[];
   /** Cleanup failures already observed on the handle whose connect failed. */
-  readonly cleanupFailures: readonly { readonly name: string; readonly error: string }[];
+  readonly cleanupFailures: readonly CloseFailure[];
 }
 
 type LifecycleLogMethod = (msg: string, data?: Record<string, unknown>) => void;
@@ -232,7 +238,7 @@ export const connectAll = async (
         // caller only closes the *connected prefix*, which excludes this
         // handle. A close failure remains subordinate to the connect error but
         // is returned as cleanup evidence instead of existing only in logs.
-        const cleanupFailures: Array<{ readonly name: string; readonly error: string }> = [];
+        const cleanupFailures: CloseFailure[] = [];
         if (handle.close) {
           try {
             await handle.close();
@@ -263,12 +269,6 @@ export const connectAll = async (
   }
   return ok(undefined);
 };
-
-/** A single capability that failed to close during shutdown. */
-interface CloseFailure {
-  readonly name: string;
-  readonly error: string;
-}
 
 /**
  * Close all capability handles in reverse order (dependencies close last).
