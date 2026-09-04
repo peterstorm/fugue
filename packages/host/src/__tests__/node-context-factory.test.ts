@@ -1736,6 +1736,71 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
     }]);
   });
 
+  // The retention floor is `max(checkpointTtlSec, resumableRunTtlSec ?? checkpointTtlSec)`.
+  // The case above pins the direction where the resumable TTL wins. These two pin
+  // the FLOOR itself: drop the `Math.max` and a resumed run's spend record can
+  // expire before the checkpoint that resumes it, silently restarting budget
+  // accounting from zero.
+  it("floors spend retention at the checkpoint TTL when it exceeds the resumable run TTL", async () => {
+    const { llm } = fakeLlm(10, 5);
+    const capable = capableRedis();
+    const shared = sharedWithRedis(llm, capable.redis, collectLogs().logger);
+    const { ctx } = await createNodeContextForDag(
+      shared,
+      makeDag({ checkpointTtlMs: 90_000 }),
+      testRunId,
+      new AbortController().signal,
+      adminIdentity,
+      FACTORY_AGENT_MAP,
+      false,
+      undefined,
+      undefined,
+      30,
+    );
+    if (ctx.llm === null || ctx.checkpointWriter === null) {
+      throw new Error("expected metered LLM and checkpoint writer");
+    }
+
+    expect((await ctx.llm.sendStructured(structuredReq())).ok).toBe(true);
+    await ctx.checkpointWriter.write(testRunId, testNodeId, { after: "llm" });
+
+    expect(capable.commits).toEqual([{
+      checkpointKey: buildCheckpointKey(testTenant, testDagId, testRunId, testNodeId),
+      spendKey: `fugue:${testTenant}:${testDagId}:${testRunId}:$spend`,
+      checkpointTtlSec: 90,
+      // NOT 30: the shorter resumable TTL must not shorten spend retention.
+      spendTtlSec: 90,
+    }]);
+  });
+
+  it("retains spend for the checkpoint TTL when no resumable run TTL is configured", async () => {
+    const { llm } = fakeLlm(10, 5);
+    const capable = capableRedis();
+    const shared = sharedWithRedis(llm, capable.redis, collectLogs().logger);
+    const { ctx } = await createNodeContextForDag(
+      shared,
+      makeDag({ checkpointTtlMs: 45_000 }),
+      testRunId,
+      new AbortController().signal,
+      adminIdentity,
+      FACTORY_AGENT_MAP,
+      // resumableRunTtlSec omitted entirely — the `?? checkpointTtlSec` arm.
+    );
+    if (ctx.llm === null || ctx.checkpointWriter === null) {
+      throw new Error("expected metered LLM and checkpoint writer");
+    }
+
+    expect((await ctx.llm.sendStructured(structuredReq())).ok).toBe(true);
+    await ctx.checkpointWriter.write(testRunId, testNodeId, { after: "llm" });
+
+    expect(capable.commits).toEqual([{
+      checkpointKey: buildCheckpointKey(testTenant, testDagId, testRunId, testNodeId),
+      spendKey: `fugue:${testTenant}:${testDagId}:${testRunId}:$spend`,
+      checkpointTtlSec: 45,
+      spendTtlSec: 45,
+    }]);
+  });
+
   it("hydrates a resumed slice from the REDIS ledger, not from zero", async () => {
     // The park/resume guarantee, over the durable backend rather than the
     // in-process stand-in the other durability tests use.

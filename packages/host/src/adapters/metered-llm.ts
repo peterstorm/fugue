@@ -25,7 +25,7 @@ import {
   type Result,
   type SendWithToolsRequest,
 } from "@fuguejs/framework";
-import type { RunSpendAuthority } from "./run-spend-authority.js";
+import { isObjectLike, type RunSpendAuthority } from "./run-spend-authority.js";
 
 const requestBoundaryError = (message: string): FrameworkError => ({
   kind: "validation",
@@ -37,7 +37,7 @@ const snapshotDataObject = (
   value: unknown,
   label: string,
 ): Result<Readonly<Record<PropertyKey, unknown>>, FrameworkError> => {
-  if ((typeof value !== "object" || value === null) && typeof value !== "function") {
+  if (!isObjectLike(value)) {
     return err(requestBoundaryError(`${label} must be an object`));
   }
   try {
@@ -116,16 +116,24 @@ const requiredData = (
     ? ok(source[key])
     : err(requestBoundaryError(`request.${String(key)} is required`));
 
-const parseSchema = (value: unknown): Result<unknown, FrameworkError> => {
-  if ((typeof value !== "object" || value === null) && typeof value !== "function") {
-    return err(requestBoundaryError("request.schema must be a schema object"));
+/**
+ * `label` names the offending path so a tool schema rejection is not reported
+ * as a top-level `request.schema` failure, and so callers can propagate the
+ * specific reason (not an object / no safeParse / not inspectable) verbatim.
+ */
+const parseSchema = (
+  value: unknown,
+  label = "request.schema",
+): Result<unknown, FrameworkError> => {
+  if (!isObjectLike(value)) {
+    return err(requestBoundaryError(`${label} must be a schema object`));
   }
   try {
     return typeof Reflect.get(value, "safeParse") === "function"
       ? ok(value)
-      : err(requestBoundaryError("request.schema must expose safeParse"));
+      : err(requestBoundaryError(`${label} must expose safeParse`));
   } catch {
-    return err(requestBoundaryError("request.schema could not be inspected safely"));
+    return err(requestBoundaryError(`${label} could not be inspected safely`));
   }
 };
 
@@ -177,10 +185,10 @@ const parseTool = (value: unknown, index: number): Result<unknown, FrameworkErro
   if (typeof tool.description !== "string" || typeof tool.run !== "function") {
     return err(requestBoundaryError(`${label} requires a string description and function run`));
   }
-  const inputSchema = parseSchema(tool.inputSchema);
-  if (!inputSchema.ok) return err(requestBoundaryError(`${label}.inputSchema must expose safeParse`));
-  const outputSchema = parseSchema(tool.outputSchema);
-  if (!outputSchema.ok) return err(requestBoundaryError(`${label}.outputSchema must expose safeParse`));
+  const inputSchema = parseSchema(tool.inputSchema, `${label}.inputSchema`);
+  if (!inputSchema.ok) return inputSchema;
+  const outputSchema = parseSchema(tool.outputSchema, `${label}.outputSchema`);
+  if (!outputSchema.ok) return outputSchema;
   return parsed;
 };
 

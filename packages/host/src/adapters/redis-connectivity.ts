@@ -12,7 +12,13 @@
  * module graph for tests that never connect.
  */
 
-import type { HitlRedisPort, RedisConnectivityPort, RedisExpiry, RedisPort } from "../ports.js";
+import type {
+  HitlRedisPort,
+  RedisConnectivityPort,
+  RedisExpiry,
+  RedisPort,
+  RedisValueGuard,
+} from "../ports.js";
 import type { HostError } from "../domain/host-error.js";
 import { ok, err, safeErrorMessage } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
@@ -140,6 +146,33 @@ export const createIoredisRedisPort = (
       ? multi.set(key, value, "PX", opts.expiresInMs)
       : multi.set(key, value, "EX", opts.expiresInSec);
 
+  /**
+   * WATCH the guard keys, abort unless every one still holds its expected
+   * value, then stage the SET in a MULTI. A null EXEC means a guard changed
+   * under us, so the whole check-and-set retries. Shared by `setIfValue`
+   * (one guard) and `setIfValues` (many); each keeps its own operation label.
+   */
+  const setIfGuardsHold = (
+    guards: readonly RedisValueGuard[],
+    key: string,
+    value: string,
+    opts: RedisExpiry,
+  ) => async (): Promise<Result<boolean, HostError>> => {
+    for (;;) {
+      await client.watch(...guards.map((guard) => guard.key));
+      const actual = await Promise.all(guards.map((guard) => client.get(guard.key)));
+      if (actual.some((observed, index) => observed !== guards[index]!.expectedValue)) {
+        await client.unwatch();
+        return ok(false);
+      }
+      const executed = await stageExpiringSet(client.multi(), key, value, opts).exec();
+      if (executed === null) continue;
+      const [commandError, written] = executed[0] ?? [];
+      if (commandError !== null) throw commandError;
+      return ok(written === "OK");
+    }
+  };
+
   const compareAndRun = (
     operation: string,
     key: string,
@@ -196,36 +229,15 @@ export const createIoredisRedisPort = (
     compareAndExpire: (key, expectedValue, expiresInSec) =>
       compareAndRun("COMPARE-AND-EXPIRE", key, expectedValue, (multi) => multi.expire(key, expiresInSec)),
     setIfValue: (guardKey, expectedValue, key, value, opts) =>
-      watchGuarded(`SET-IF-VALUE ${guardKey} -> ${key}`, async () => {
-        for (;;) {
-          await client.watch(guardKey);
-          if (await client.get(guardKey) !== expectedValue) {
-            await client.unwatch();
-            return ok(false);
-          }
-          const executed = await stageExpiringSet(client.multi(), key, value, opts).exec();
-          if (executed === null) continue;
-          const [commandError, written] = executed[0] ?? [];
-          if (commandError !== null) throw commandError;
-          return ok(written === "OK");
-        }
-      }),
+      watchGuarded(
+        `SET-IF-VALUE ${guardKey} -> ${key}`,
+        setIfGuardsHold([{ key: guardKey, expectedValue }], key, value, opts),
+      ),
     setIfValues: (guards, key, value, opts) =>
-      watchGuarded(`SET-IF-VALUES ${guards.map((guard) => guard.key).join(",")} -> ${key}`, async () => {
-        for (;;) {
-          await client.watch(...guards.map((guard) => guard.key));
-          const actual = await Promise.all(guards.map((guard) => client.get(guard.key)));
-          if (actual.some((value, index) => value !== guards[index]!.expectedValue)) {
-            await client.unwatch();
-            return ok(false);
-          }
-          const executed = await stageExpiringSet(client.multi(), key, value, opts).exec();
-          if (executed === null) continue;
-          const [commandError, written] = executed[0] ?? [];
-          if (commandError !== null) throw commandError;
-          return ok(written === "OK");
-        }
-      }),
+      watchGuarded(
+        `SET-IF-VALUES ${guards.map((guard) => guard.key).join(",")} -> ${key}`,
+        setIfGuardsHold(guards, key, value, opts),
+      ),
     setNxIfPresent: (guardKey, key, value, opts) =>
       watchGuarded(`SETNX-IF-PRESENT ${guardKey} -> ${key}`, async () => {
         for (;;) {

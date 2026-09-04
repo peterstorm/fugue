@@ -29,6 +29,7 @@ import {
   closeAll,
   checkHealth,
   extractClients,
+  runScopedLlmFacade,
 } from "../domain/capability-manager.js";
 
 // ---------------------------------------------------------------------------
@@ -511,6 +512,34 @@ describe("capability-manager", () => {
       expect(meteredCalls).toBe(2);
       expect(Object.getPrototypeOf(facade)).toBeNull();
       expect(Object.isFrozen(facade)).toBe(true);
+    });
+
+    // The facade is what binds an augmented capability's aliases to the metered
+    // surface. Both guards below keep an alias from shadowing or forging a
+    // provider operation — the only two ways an alias map could open a path
+    // around the budget gate.
+    it("refuses an alias that would replace a standard operation", () => {
+      const metered = {
+        sendStructured: async () => ok({}) as never,
+        sendWithTools: async () => ok({}) as never,
+      } as unknown as LlmClient;
+
+      for (const standard of ["sendStructured", "sendWithTools"] as const) {
+        expect(() => runScopedLlmFacade(metered, { [standard]: "sendStructured" }))
+          .toThrow(`runScopedOperations cannot replace standard operation '${standard}'`);
+      }
+    });
+
+    it("refuses an alias naming an operation that does not exist", () => {
+      const metered = {
+        sendStructured: async () => ok({}) as never,
+        sendWithTools: async () => ok({}) as never,
+      } as unknown as LlmClient;
+
+      for (const bogus of ["sendRaw", "", "constructor", undefined, 7]) {
+        expect(() => runScopedLlmFacade(metered, { critique: bogus }))
+          .toThrow(`runScopedOperations alias 'critique' names unknown operation '${String(bogus)}'`);
+      }
     });
 
     it("throws on duplicate handle names (defence-in-depth past topoSort)", () => {

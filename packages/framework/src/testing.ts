@@ -11,6 +11,15 @@ import { snapshotSpend } from "./types/budget-capability.js";
 import type { MicroUsd, Spend } from "./types/spend.js";
 import { NO_SPEND } from "./types/spend.js";
 
+/**
+ * `CeilingHeadroom`'s `unknown-usage` arm is a CORRELATED union: `TokensCeiling`
+ * pairs with a plain `number` `observedAtLeast`, `UsdCeiling` with a branded
+ * `MicroUsd`. TypeScript will not narrow `headroom` from a nested discriminant
+ * (`headroom.ceiling.kind`), so this predicate is the narrowing that keeps the
+ * two members apart. The USD and tokens branches below therefore read as
+ * duplicates but are not interchangeable — collapsing them de-correlates
+ * `ceiling` from `observedAtLeast` and fails the build.
+ */
 type UnknownUsdHeadroom = Extract<CeilingHeadroom, {
   readonly kind: "unknown-usage";
 }> & {

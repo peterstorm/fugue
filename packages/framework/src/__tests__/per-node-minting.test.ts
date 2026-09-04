@@ -780,6 +780,105 @@ describe("per-node minting — broker port-contract enforcement", () => {
     expect(mintCalls).toBe(1);
   });
 
+  // Run-start snapshots every node's `requires` and every `provides()` answer
+  // once, and reuses that frozen facade for validation and every dispatch. Both
+  // halves must be fenced: a throw from either has to come back on the Result
+  // channel with the broker never reached, not escape runDag as an exception
+  // and not re-fire broker egress on a retry.
+  it("a throwing requires iterable refuses on the Result channel, before any egress", async () => {
+    let mintCalls = 0;
+    const broker: CapabilityBroker = {
+      mintFor: async () => {
+        mintCalls++;
+        return ok({} as ScopedCapabilityHandle);
+      },
+      provides: (c: Capability) => (c as string).includes(":"),
+    };
+    let nodeRuns = 0;
+    const node = createFetchNode({
+      id: N("gated"),
+      inputSchema: z.object({}),
+      outputSchema: z.object({ ok: z.boolean() }),
+      requires: [SCOPE] as unknown as readonly Capability[],
+      fetch: async () => { nodeRuns++; return ok({ ok: true }); },
+    });
+    const built = defineDagFromArray({
+      id: "dag-1",
+      nodes: [node],
+      edges: [{ from: DAG_INPUT, to: "gated" }],
+      defaultRetryLimit: 2,
+    });
+    // `defineDagFromArray` snapshots `requires` into a frozen array, so the
+    // hostile iterable is only reachable on a hand-assembled DagDef — which is
+    // exactly the input `runDag` must not crash on.
+    const hostileDag = {
+      ...built,
+      nodes: [{
+        ...built.nodes[0]!,
+        requires: {
+          [Symbol.iterator]: () => { throw new Error("hostile requires iterator"); },
+        } as unknown as readonly Capability[],
+      }],
+    } as unknown as typeof built;
+
+    const result = await runDag(hostileDag, {}, baseCtx(), {
+      minting: testMinting(broker),
+      suppressRoutingWarnings: true,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "validation") {
+      expect(result.error.message).toContain("node.requires threw while snapshotting run authority");
+      expect(result.error.message).toContain("hostile requires iterator");
+    } else {
+      throw new Error("expected a validation refusal on the Result channel");
+    }
+    // Refused before the broker was ever consulted, and the node never ran.
+    expect(mintCalls).toBe(0);
+    expect(nodeRuns).toBe(0);
+  });
+
+  it("a throwing broker provides() refuses on the Result channel, before any egress", async () => {
+    let mintCalls = 0;
+    const broker: CapabilityBroker = {
+      mintFor: async () => {
+        mintCalls++;
+        return ok({} as ScopedCapabilityHandle);
+      },
+      provides: () => { throw new Error("hostile provides"); },
+    };
+    let nodeRuns = 0;
+    const node = createFetchNode({
+      id: N("gated"),
+      inputSchema: z.object({}),
+      outputSchema: z.object({ ok: z.boolean() }),
+      requires: [SCOPE] as unknown as readonly Capability[],
+      fetch: async () => { nodeRuns++; return ok({ ok: true }); },
+    });
+    const dag = defineDagFromArray({
+      id: "dag-1",
+      nodes: [node],
+      edges: [{ from: DAG_INPUT, to: "gated" }],
+      defaultRetryLimit: 2,
+    });
+
+    const result = await runDag(dag, {}, baseCtx(), {
+      minting: testMinting(broker),
+      suppressRoutingWarnings: true,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "validation") {
+      expect(result.error.nodeId).toBe(N("gated"));
+      expect(result.error.message).toContain('broker.provides("svc:opA") threw');
+      expect(result.error.message).toContain("hostile provides");
+    } else {
+      throw new Error("expected a validation refusal on the Result channel");
+    }
+    expect(mintCalls).toBe(0);
+    expect(nodeRuns).toBe(0);
+  });
+
   it("treats hostile ok() capability bags as one-shot non-retriable contract failures", async () => {
     const revoked = Proxy.revocable({ [SCOPE]: { tag: "revoked" } }, {});
     revoked.revoke();

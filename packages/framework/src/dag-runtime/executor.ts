@@ -376,11 +376,8 @@ export const buildDagExecutor = (
       // Terminal states — unreachable per runner's isTerminal guard.
       // Throw to surface the invariant violation.
       // -----------------------------------------------------------------------
-      .with({ kind: "succeeded" }, () => {
-        throw new Error("buildDagExecutor: unreachable — terminal succeeded");
-      })
-      .with({ kind: "failed" }, () => {
-        throw new Error("buildDagExecutor: unreachable — terminal failed");
+      .with({ kind: "succeeded" }, { kind: "failed" }, (p) => {
+        throw new Error(`buildDagExecutor: unreachable — terminal ${p.kind}`);
       })
       .exhaustive();
 };

@@ -144,23 +144,17 @@ const detailsFor = (error: HostError): JsonSafeTree | undefined => {
 };
 
 /**
- * Extract dagId if present on the error.
+ * The correlation ids this HostError variant carries, if any. Every caller
+ * below wants the pair, so it is resolved once rather than field by field.
  */
-const dagIdFor = (error: HostError): string | undefined => {
-  if ("dagId" in error && typeof error.dagId === "string") {
-    return error.dagId;
-  }
-  return undefined;
-};
-
-/**
- * Extract runId if present on the error.
- */
-const runIdFor = (error: HostError): string | undefined => {
-  if ("runId" in error && typeof error.runId === "string") {
-    return error.runId;
-  }
-  return undefined;
+const correlationFor = (
+  error: HostError,
+): { readonly dagId?: string; readonly runId?: string } => {
+  const stringField = (field: "dagId" | "runId"): string | undefined => {
+    const value: unknown = Reflect.get(error, field);
+    return typeof value === "string" ? value : undefined;
+  };
+  return { dagId: stringField("dagId"), runId: stringField("runId") };
 };
 
 /**
@@ -208,14 +202,12 @@ const respondWithHostError = (
       kind: hostErr.kind,
       detail: formatHostError(hostErr),
       ...("context" in hostErr ? { context: hostErr.context } : {}),
-      dagId: dagIdFor(hostErr),
-      runId: runIdFor(hostErr),
+      ...correlationFor(hostErr),
     }, writeFallback);
     return errorResponse(c, status, hostErr.kind, "An unexpected error occurred", {
       // No `details` — the 5xx body must not echo internal state. Headers (e.g.
       // Retry-After for worker-unavailable 503) are still safe to advertise.
-      dagId: dagIdFor(hostErr),
-      runId: runIdFor(hostErr),
+      ...correlationFor(hostErr),
       headers: headersFor(hostErr),
     });
   }
@@ -223,8 +215,7 @@ const respondWithHostError = (
   // 4xx — curated, safe, caller-facing messages + details.
   return errorResponse(c, status, hostErr.kind, formatHostError(hostErr), {
     details: detailsFor(hostErr),
-    dagId: dagIdFor(hostErr),
-    runId: runIdFor(hostErr),
+    ...correlationFor(hostErr),
     headers: headersFor(hostErr),
   });
 };

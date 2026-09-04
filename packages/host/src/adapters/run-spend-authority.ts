@@ -104,7 +104,11 @@ export interface RunSpendAuthority {
 const writeTtlOf = (cache: MeteredRequestBase["cache"]): CacheTtl =>
   cache === undefined || cache.kind === "none" ? DEFAULT_CACHE_TTL : cache.ttl;
 
-const isObjectLike = (value: unknown): value is object =>
+/**
+ * Shared with `metered-llm.ts`: both modules parse untrusted request/response
+ * objects at the same boundary and must treat callable objects as object-like.
+ */
+export const isObjectLike = (value: unknown): value is object =>
   (typeof value === "object" && value !== null) || typeof value === "function";
 
 const isNonNegativeSafeInteger = (value: unknown): value is number =>

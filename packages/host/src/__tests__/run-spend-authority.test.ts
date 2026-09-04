@@ -10,6 +10,7 @@ import {
   runId,
   spendOfUnknownCall,
   tokensOnly,
+  type Ceilings,
   type LlmResponse,
   type Result,
   type FrameworkError,
@@ -39,15 +40,31 @@ const deferred = <T>() => {
   return { promise, resolve };
 };
 
+/**
+ * Every test drives the real authority over the same fixed DAG identity and a
+ * fully-hydrated zero ledger; only the run, the ceilings, the ledger and the
+ * logger vary. Mirrors `createTestAuthority` in `metered-llm.test.ts`.
+ */
+const testAuthority = (opts: {
+  readonly run: string;
+  readonly limits?: Ceilings;
+  readonly ledger?: SpendLedgerPort;
+  readonly logger?: LogPort;
+}) =>
+  createRunSpendAuthority({
+    dagId: dagId("authority-dag"),
+    runId: runId(opts.run),
+    hydrated: { kind: "known", spend: NO_SPEND },
+    ledger: opts.ledger ?? createInMemorySpendLedger(),
+    logger: opts.logger ?? logger,
+    ...(opts.limits !== undefined ? { limits: opts.limits } : {}),
+  });
+
 describe("RunSpendAuthority", () => {
   it("remaining includes every shared in-flight reservation and agrees with admission", async () => {
-    const authority = createRunSpendAuthority({
-      dagId: dagId("authority-dag"),
-      runId: runId("authority-run"),
+    const authority = testAuthority({
+      run: "authority-run",
       limits,
-      hydrated: { kind: "known", spend: NO_SPEND },
-      ledger: createInMemorySpendLedger(),
-      logger,
     });
 
     // Learn a 10-token estimate before exercising concurrent reservations.
@@ -120,13 +137,10 @@ describe("RunSpendAuthority", () => {
         return ok(undefined);
       },
     };
-    const authority = createRunSpendAuthority({
-      dagId: dagId("authority-dag"),
-      runId: runId("pending-ledger-run"),
+    const authority = testAuthority({
+      run: "pending-ledger-run",
       limits,
-      hydrated: { kind: "known", spend: NO_SPEND },
       ledger,
-      logger,
     });
 
     await authority.execute({
@@ -169,13 +183,9 @@ describe("RunSpendAuthority", () => {
   });
 
   it("rejects a caller model that conflicts with the composition-owned fixed model", async () => {
-    const authority = createRunSpendAuthority({
-      dagId: dagId("authority-dag"),
-      runId: runId("fixed-model-run"),
+    const authority = testAuthority({
+      run: "fixed-model-run",
       limits: ceilings([{ kind: "usd", limit: 10_000 as never }])!,
-      hydrated: { kind: "known", spend: NO_SPEND },
-      ledger: createInMemorySpendLedger(),
-      logger,
     });
     let providerCalls = 0;
 
@@ -199,13 +209,10 @@ describe("RunSpendAuthority", () => {
   it("counts a typed failure without usage and refuses the next calls-limited attempt", async () => {
     const ledger = createInMemorySpendLedger();
     const authorityRunId = runId("calls-only-run");
-    const authority = createRunSpendAuthority({
-      dagId: dagId("authority-dag"),
-      runId: authorityRunId,
+    const authority = testAuthority({
+      run: authorityRunId,
       limits: oneCallLimit,
-      hydrated: { kind: "known", spend: NO_SPEND },
       ledger,
-      logger,
     });
     let providerAttempts = 0;
     const failingCall = async (): Promise<Result<LlmResponse<unknown>, FrameworkError>> => {
@@ -243,12 +250,9 @@ describe("RunSpendAuthority", () => {
   it("turns an accessor-throwing Result into a typed settled failure", async () => {
     const ledger = createInMemorySpendLedger();
     const authorityRunId = runId("hostile-result-run");
-    const authority = createRunSpendAuthority({
-      dagId: dagId("authority-dag"),
-      runId: authorityRunId,
-      hydrated: { kind: "known", spend: NO_SPEND },
+    const authority = testAuthority({
+      run: authorityRunId,
       ledger,
-      logger,
     });
     const hostile = Object.defineProperty({}, "ok", {
       get: () => { throw new Error("ok accessor escaped"); },
@@ -325,13 +329,10 @@ describe("RunSpendAuthority", () => {
     async (_label, raw) => {
       const ledger = createInMemorySpendLedger();
       const authorityRunId = runId(`malformed-${_label.replaceAll(" ", "-")}`);
-      const authority = createRunSpendAuthority({
-        dagId: dagId("authority-dag"),
-        runId: authorityRunId,
+      const authority = testAuthority({
+        run: authorityRunId,
         limits: oneCallLimit,
-        hydrated: { kind: "known", spend: NO_SPEND },
         ledger,
-        logger,
       });
       let providerCalls = 0;
       const invoke = () => authority.execute({
@@ -362,12 +363,8 @@ describe("RunSpendAuthority", () => {
   );
 
   it("preserves an already transformed provider output without applying the schema twice", async () => {
-    const authority = createRunSpendAuthority({
-      dagId: dagId("authority-dag"),
-      runId: runId("transformed-output-run"),
-      hydrated: { kind: "known", spend: NO_SPEND },
-      ledger: createInMemorySpendLedger(),
-      logger,
+    const authority = testAuthority({
+      run: "transformed-output-run",
     });
     const schema = z.string().transform((value) => `${value}!`);
     const providerOutput = schema.parse("once");
@@ -390,12 +387,8 @@ describe("RunSpendAuthority", () => {
   });
 
   it("accepts a provider output whose schema output type differs from its input type", async () => {
-    const authority = createRunSpendAuthority({
-      dagId: dagId("authority-dag"),
-      runId: runId("different-output-type-run"),
-      hydrated: { kind: "known", spend: NO_SPEND },
-      ledger: createInMemorySpendLedger(),
-      logger,
+    const authority = testAuthority({
+      run: "different-output-type-run",
     });
     const schema = z.string().transform((value) => value.length);
     const providerOutput = schema.parse("abc");
@@ -434,11 +427,9 @@ describe("RunSpendAuthority", () => {
         context: {},
       }),
     };
-    const authority = createRunSpendAuthority({
-      dagId: dagId("authority-dag"),
-      runId: runId("provider-and-ledger-failure"),
+    const authority = testAuthority({
+      run: "provider-and-ledger-failure",
       limits: oneCallLimit,
-      hydrated: { kind: "known", spend: NO_SPEND },
       ledger: failingLedger,
       logger: capturingLogger,
     });
@@ -468,13 +459,10 @@ describe("RunSpendAuthority", () => {
   it("treats cache parts exceeding inclusive tokensIn as unknown and closes token admission", async () => {
     const ledger = createInMemorySpendLedger();
     const authorityRunId = runId("invalid-cache-breakdown");
-    const authority = createRunSpendAuthority({
-      dagId: dagId("authority-dag"),
-      runId: authorityRunId,
+    const authority = testAuthority({
+      run: authorityRunId,
       limits,
-      hydrated: { kind: "known", spend: NO_SPEND },
       ledger,
-      logger,
     });
     let providerCalls = 0;
     const invoke = () => authority.execute({
@@ -508,12 +496,8 @@ describe("RunSpendAuthority", () => {
   });
 
   it("accepts non-negative safe-integer usage at the parser boundary", async () => {
-    const authority = createRunSpendAuthority({
-      dagId: dagId("authority-dag"),
-      runId: runId("max-safe-usage"),
-      hydrated: { kind: "known", spend: NO_SPEND },
-      ledger: createInMemorySpendLedger(),
-      logger,
+    const authority = testAuthority({
+      run: "max-safe-usage",
     });
 
     const result = await authority.execute({
@@ -563,12 +547,8 @@ describe("RunSpendAuthority", () => {
   });
 
   it("spent returns fresh deeply immutable snapshots", async () => {
-    const authority = createRunSpendAuthority({
-      dagId: dagId("authority-dag"),
-      runId: runId("snapshot-run"),
-      hydrated: { kind: "known", spend: NO_SPEND },
-      ledger: createInMemorySpendLedger(),
-      logger,
+    const authority = testAuthority({
+      run: "snapshot-run",
     });
     const first = authority.budget.spent();
     const second = authority.budget.spent();

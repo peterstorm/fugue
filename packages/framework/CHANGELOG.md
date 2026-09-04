@@ -77,6 +77,16 @@ pre-1.0, so a minor bump may carry breaking changes.
   exactly, so transforming schemas are never applied twice by spend authority.
 - Listener-stop and hostile Keycloak diagnostic failures can no longer abort
   later teardown or escape typed Result boundaries.
+- Run-start authority snapshotting now fences its `node.requires` iteration, so
+  a hand-assembled `DagDef` carrying a hostile `requires` is refused on
+  `runDag`'s Result channel instead of escaping as an uncaught exception. The
+  broker is never consulted for such a run.
+- Tool schema rejections report the offending path and the actual reason
+  (`request.tools[i].inputSchema …`) instead of a fixed
+  `must expose safeParse` message.
+- A non-terminal `retrying` or `awaiting-human` phase reaching the terminal
+  handler now attributes its invariant-violation error to the node it parked
+  on rather than to the executor.
 - Every positive priced call consumes at least one micro-USD; positive overflow
   saturates, so sub-micro calls and infinity cannot create budget headroom.
 - Metered LLM requests, fixed pricing policies, node requirements, broker

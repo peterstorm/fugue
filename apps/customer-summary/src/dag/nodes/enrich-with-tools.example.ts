@@ -11,8 +11,6 @@ import {
   type LlmWithToolsNodeDef,
   type ToolDef,
 } from "@fuguejs/framework";
-import type { CrmRecord } from "../../schemas/crm.js";
-
 // --- Tool definition ---------------------------------------------------------
 
 interface DealsClient {
@@ -104,13 +102,3 @@ export const createEnrichWithToolsNode = (
       "activity over the last 12 months.",
   });
 };
-
-// --- Helpers used in tests / docs (kept exported for the example test) -------
-
-export const __forExample = {
-  makeLookupDealsTool,
-  EnrichedSummarySchema,
-};
-
-// Suppress unused import warnings for reference types.
-export type _Reference = CrmRecord;

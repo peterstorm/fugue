@@ -460,6 +460,10 @@ const selectAndHydrateSpendLedger = async (args: {
     }
   }
 
+  // One binding for the optional field: all three exits below carry it
+  // identically, and `checkpointCommit` is fully resolved by this point.
+  const commit = checkpointCommit !== undefined ? { checkpointCommit } : {};
+
   const prior = await readSpendLedger(ledger, runId);
   if (!prior.ok && limits !== undefined) {
     throw new Error(
@@ -474,26 +478,13 @@ const selectAndHydrateSpendLedger = async (args: {
       runId: runId as string,
       error: formatHostError(prior.error),
     });
-    return {
-      ledger,
-      hydrated: { kind: "unknown" },
-      ...(checkpointCommit !== undefined ? { checkpointCommit } : {}),
-    };
+    return { ledger, hydrated: { kind: "unknown" }, ...commit };
   }
 
   const hydrated = { kind: "known" as const, spend: prior.value };
   return limits === undefined
-    ? {
-        ledger,
-        hydrated,
-        ...(checkpointCommit !== undefined ? { checkpointCommit } : {}),
-      }
-    : {
-        ledger,
-        limits,
-        hydrated,
-        ...(checkpointCommit !== undefined ? { checkpointCommit } : {}),
-      };
+    ? { ledger, hydrated, ...commit }
+    : { ledger, limits, hydrated, ...commit };
 };
 
 const createSpendBindings = (

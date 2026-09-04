@@ -278,7 +278,23 @@ const snapshotMintingAuthority = (
   const observed = new Set<Capability>();
 
   for (const node of dag.nodes) {
-    for (const capability of node.requires) {
+    // `node.requires` is a frozen array for any DAG built by `defineDag*`, but
+    // `runDag` accepts a `DagDef` value — a hand-assembled one can carry a
+    // hostile iterable. Fence the spread too, not just `provides()`: an unfenced
+    // throw here escapes runDag's Result contract as an uncaught exception.
+    let required: readonly Capability[];
+    try {
+      required = [...node.requires];
+    } catch (error) {
+      return err({
+        kind: "validation",
+        nodeId: node.id,
+        message:
+          "node.requires threw while snapshotting run authority: " +
+          safeErrorMessage(error),
+      });
+    }
+    for (const capability of required) {
       if (observed.has(capability)) continue;
       observed.add(capability);
       try {
@@ -444,11 +460,10 @@ const handleTerminalState = <O>(
       closeRootSpan(deps.rootSpan, { kind: "ok" });
       return ok({ kind: "suspended", nodeId: s.nodeId, prompt: s.prompt, output: s.output });
     })
+    // Phases that carry no node identity: the violation is the executor's.
     .with(
       { kind: "pending" },
       { kind: "running" },
-      { kind: "retrying" },
-      { kind: "awaiting-human" },
       async (s) => unexpectedNonTerminal(
         deps.rootSpan,
         deps.emitRunEnd,
@@ -456,8 +471,14 @@ const handleTerminalState = <O>(
         EXECUTOR_NODE_ID,
       ),
     )
-    .with({ kind: "retrying-hook" }, async (s) =>
-      unexpectedNonTerminal(deps.rootSpan, deps.emitRunEnd, s.kind, s.nodeId))
+    // Phases that name the node they are parked on: attribute the violation
+    // there, so the diagnostic points at the node instead of the executor.
+    .with(
+      { kind: "retrying" },
+      { kind: "awaiting-human" },
+      { kind: "retrying-hook" },
+      async (s) => unexpectedNonTerminal(deps.rootSpan, deps.emitRunEnd, s.kind, s.nodeId),
+    )
     .exhaustive();
 
 // ---------------------------------------------------------------------------

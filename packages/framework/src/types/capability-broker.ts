@@ -137,11 +137,17 @@ export const invocationFor = (
  *   are still rejected by validation/merge; only custom scoped LLMs use this
  *   path.
  */
-export interface CapabilityBroker {
-  mintFor(
+export type CapabilityBroker = {
+  /**
+   * Declared as a readonly function property rather than method shorthand:
+   * method shorthand is checked bivariantly even under `strictFunctionTypes`,
+   * and this port resolves per-invocation authority — an implementation that
+   * narrowed `inv` or `requires` must not type-check.
+   */
+  readonly mintFor: (
     inv: Invocation,
     requires: readonly Capability[],
-  ): Promise<Result<ScopedCapabilityHandle, FrameworkError>>;
+  ) => Promise<Result<ScopedCapabilityHandle, FrameworkError>>;
 
   /**
    * Does this broker resolve `cap` per-invocation (minting it at node dispatch)
@@ -161,5 +167,5 @@ export interface CapabilityBroker {
    * broker) implements it to claim the `"<provider>:<operation>"` scope names it
    * resolves at dispatch.
    */
-  provides?(cap: Capability): boolean;
-}
+  readonly provides?: (cap: Capability) => boolean;
+};
