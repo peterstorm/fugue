@@ -159,6 +159,44 @@ describe("emitHumanIntervention", () => {
     expect(intervention).toBeUndefined();
   });
 
+  // Mirror of the hostile-diagnostics test below, for the OTHER fail-closed
+  // branch. `stamp()` runs `nowFn()` as an argument to `emit`, so a throwing
+  // clock fires before dispatchEvent is entered and no observer-side guard can
+  // catch it. This branch must still return its typed Err, never throw.
+  it("keeps the typed missing-nodeDef failure authoritative under hostile diagnostics", () => {
+    const obs = new RecordingObserver();
+    setFrameworkLogger({
+      debug: () => { throw new Error("logger failed"); },
+      info: () => {},
+      warn: () => {},
+      error: () => { throw new Error("logger failed"); },
+    });
+
+    try {
+      const result = emitHumanIntervention(
+        { nodeId: NID, output: {} },
+        { kind: "approve" },
+        new Map(), // node absent → the missing-nodeDef branch
+        makeCtx(obs) as any,
+        DID,
+        () => { throw new Error("clock failed"); },
+        Date.now(),
+        [],
+      );
+
+      expect(result.ok).toBe(false);
+      if (!result.ok && result.error.kind === "node-crash") {
+        expect(result.error.message).toContain("missing from nodeMap");
+        expect(result.error.retriability).toBe("non-retriable");
+      } else {
+        throw new Error("expected a typed non-retriable node-crash Err");
+      }
+      expect(obs.events).toHaveLength(0);
+    } finally {
+      __resetFrameworkLogger();
+    }
+  });
+
   it("keeps the typed confidence failure authoritative under hostile diagnostics", () => {
     const obs = new RecordingObserver();
     const hostile = { toString: () => { throw new Error("hostile coercion"); } };

@@ -49,17 +49,24 @@ export class DagDefinitionError extends Error {
  * `<const Nodes>` infers the literal record so `edges[].from` / `edges[].to`
  * and `outputNodeId` are constrained to known node ids at edit time.
  */
+/**
+ * Both entry points fail the same way — a shape violation is an authoring
+ * error, thrown rather than returned, because a malformed DAG has no valid
+ * runtime. Sharing the unwrap keeps the two from drifting to different error
+ * types or swallowing one of them.
+ */
+const orThrow = (id: string, result: ReturnType<typeof validateDagShape>): DagDef => {
+  if (!result.ok) throw new DagDefinitionError(id, result.error);
+  return result.value;
+};
+
 export const defineDag = <const Nodes extends NodesRecord>(
   input: DagDefInput<Nodes>,
 ): DagDef => {
   // Drop the literal-typed `Nodes` constraint at this single seam so
   // `validateDagShape` operates on the base type. Edit-time constraints from
   // `DagDefInput<Nodes>` were already enforced at the call site.
-  const result = validateDagShape(input as DagDefInput);
-  if (!result.ok) {
-    throw new DagDefinitionError(input.id, result.error);
-  }
-  return result.value;
+  return orThrow(input.id, validateDagShape(input as DagDefInput));
 };
 
 /**
@@ -92,8 +99,5 @@ export const defineDagFromArray = (input: {
     retryLimits: input.retryLimits,
     defaultRetryLimit: input.defaultRetryLimit,
   }, input.provenance);
-  if (!result.ok) {
-    throw new DagDefinitionError(input.id, result.error);
-  }
-  return result.value;
+  return orThrow(input.id, result);
 };

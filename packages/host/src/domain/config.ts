@@ -84,6 +84,17 @@ const jsonObjectEnv = <T>(
 // Host Config — parsed from environment variables
 // ---------------------------------------------------------------------------
 
+/**
+ * A boolean env flag. Env vars arrive as strings, so the accepted spellings are
+ * fixed here once — an enum, not a loose `truthy` coercion, so a typo fails the
+ * parse loudly instead of silently reading as `false`.
+ */
+const booleanEnvFlag = () =>
+  z
+    .union([z.boolean(), z.enum(["true", "false", "1", "0"])])
+    .transform((v) => v === true || v === "true" || v === "1")
+    .default(false);
+
 export const HostConfigSchema = z.object({
   /** Git URL for the DAGs repository */
   DAGS_REPO_URL: z.string(),
@@ -427,10 +438,7 @@ export const HostConfigSchema = z.object({
    * tenants whose Graph backend rejects the documented item-path URL forms
    * tenant-wide. Default `false` — standard tenants keep the stock URL shape.
    */
-  MSGRAPH_RESOLVE_PATHS: z
-    .union([z.boolean(), z.enum(["true", "false", "1", "0"])])
-    .transform((v) => v === true || v === "true" || v === "1")
-    .default(false),
+  MSGRAPH_RESOLVE_PATHS: booleanEnvFlag(),
   // ── CDRator / Oister authenticated-REST capability (`authedHttp`, FR-060/NFR-010) ──
   /**
    * Base URL of the CDRator/Oister core REST API the `authedHttp` capability
@@ -629,10 +637,7 @@ export const HostConfigSchema = z.object({
   // unrecognised string (a typo'd `yes`/`on`/`enabled`) is REJECTED at boot
   // rather than silently coerced to `false` — silently disabling a data-plane
   // security control on a typo is the wrong fail direction (fail-closed-loud).
-  SUPERVISOR_REDIS_ACL_ENABLED: z
-    .union([z.boolean(), z.enum(["true", "false", "1", "0"])])
-    .transform((v) => v === true || v === "true" || v === "1")
-    .default(false),
+  SUPERVISOR_REDIS_ACL_ENABLED: booleanEnvFlag(),
   /**
    * Idle duration (ms) after which the supervisor may evict a worker with no
    * in-flight work (T8). Default 15 min. Eviction is graceful (drain then stop).
@@ -1008,10 +1013,17 @@ export const FugueYamlSchema = LlmBudgetDeclarationSchema.extend({
   owner: z.string().optional(),
   /** Environment variable names this DAG requires at runtime */
   env: z.array(z.string()).default([]),
-  // NOTE: these numeric overrides MUST mirror the constraints on DagRegistrationSchema.config
-  // (int + positive). applyFugueYaml merges them straight into the resolved DagRegistration,
-  // bypassing the dag.ts schema — so a zero/negative here would otherwise reach runtime
-  // (maxConcurrent: 0 wedges the DAG at 429 forever; negative TTL → bad Redis expiry).
+  // applyFugueYaml merges these straight into the resolved DagRegistration,
+  // bypassing the dag.ts schema, so whatever passes here reaches runtime —
+  // a zero/negative would wedge the DAG (maxConcurrent: 0 → 429 forever) or
+  // produce a bad Redis expiry (negative TTL).
+  //
+  // The invariant that MUST hold against DagRegistrationSchema.config is
+  // `.positive()` on all four, plus `.int()` on maxConcurrent (a fractional
+  // slot count is meaningless). The `.int()` on the three ms fields below is
+  // STRICTER than DagRegistrationSchema.config, which leaves them
+  // `.positive()` only — deliberate here, not required parity, so do not
+  // "restore" symmetry by loosening them.
   /** Per-DAG concurrency limit override */
   maxConcurrent: z.number().int().positive().optional(),
   /** Per-DAG timeout override (ms) */

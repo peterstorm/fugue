@@ -441,7 +441,11 @@ describe("run-dag handler", () => {
     expect((await post(app, "ctx-throw-dag", { query: "x" })).status).toBe(500); // failure 2 → opens
     const r3 = await post(app, "ctx-throw-dag", { query: "x" });
     expect(r3.status).toBe(503);                                                  // circuit now open
-    expect((await r3.json()).error).toBe("dag-disabled");
+    // Its own kind — NOT `dag-disabled`, which is the administrative state a
+    // client cannot wait out. An open circuit clears after the cooldown, so it
+    // also advertises a Retry-After derived from that cooldown.
+    expect((await r3.json()).error).toBe("circuit-open");
+    expect(r3.headers.get("Retry-After")).toBe("30");
   });
 
   it("returns 500 and releases the concurrency token when createContext rejects (async)", async () => {
@@ -476,7 +480,11 @@ describe("run-dag handler", () => {
     expect((await post(app, "ctx-reject-dag", { query: "x" })).status).toBe(500); // failure 2 → opens
     const r3 = await post(app, "ctx-reject-dag", { query: "x" });
     expect(r3.status).toBe(503);                                                  // circuit now open
-    expect((await r3.json()).error).toBe("dag-disabled");
+    // Its own kind — NOT `dag-disabled`, which is the administrative state a
+    // client cannot wait out. An open circuit clears after the cooldown, so it
+    // also advertises a Retry-After derived from that cooldown.
+    expect((await r3.json()).error).toBe("circuit-open");
+    expect(r3.headers.get("Retry-After")).toBe("30");
   });
 
   it("does not consume the half-open circuit probe when concurrency rejects (no wedge)", async () => {
@@ -525,7 +533,7 @@ describe("run-dag handler", () => {
     const res = await post(app, "test-dag", { query: "hi" });
 
     expect(res.status).toBe(503);
-    expect((await res.json()).error).toBe("dag-disabled");
+    expect((await res.json()).error).toBe("circuit-open");
     // The slot acquired before the circuit check must be released — no leak.
     expect(concurrency.global.current).toBe(0);
   });
@@ -795,6 +803,53 @@ describe("run-dag handler", () => {
     expect(concurrency.global.current).toBe(0);
   });
 
+  // The heart of the circuit-open fix: the advertised Retry-After is DERIVED
+  // from the breaker's effective cooldown, not a hardcoded constant. A DAG that
+  // overrides `resetTimeoutMs` must see its own value in the header.
+  it("derives Retry-After from the DAG's configured circuit-breaker cooldown", async () => {
+    const base = makeDag("cb-cooldown-dag");
+    const cbDag: RegisteredDag = {
+      ...base,
+      config: {
+        ...base.config,
+        circuitBreaker: { failureThreshold: 1, resetTimeoutMs: 90_000 },
+      },
+    };
+    const reg = freeze([cbDag], sha, Date.now());
+    const app = createTestApp(defaultDeps({ executeDag: failExecuteDag }), makeReadyState(reg));
+
+    expect((await post(app, "cb-cooldown-dag", { query: "x" })).status).toBe(500);
+    expect((await post(app, "cb-cooldown-dag", { query: "x" })).status).toBe(500);
+    const denied = await post(app, "cb-cooldown-dag", { query: "x" });
+
+    expect(denied.status).toBe(503);
+    expect((await denied.json()).error).toBe("circuit-open");
+    // 90s, not the 30s default — proves the value is read from config.
+    expect(denied.headers.get("Retry-After")).toBe("90");
+  });
+
+  // Sub-second cooldowns must still round UP to a whole second: advertising 0
+  // would tell the client to retry immediately, before the breaker resets.
+  it("rounds a sub-second circuit cooldown up to a 1s Retry-After", async () => {
+    const base = makeDag("cb-fast-dag");
+    const cbDag: RegisteredDag = {
+      ...base,
+      config: {
+        ...base.config,
+        circuitBreaker: { failureThreshold: 1, resetTimeoutMs: 250 },
+      },
+    };
+    const reg = freeze([cbDag], sha, Date.now());
+    const app = createTestApp(defaultDeps({ executeDag: failExecuteDag }), makeReadyState(reg));
+
+    expect((await post(app, "cb-fast-dag", { query: "x" })).status).toBe(500);
+    expect((await post(app, "cb-fast-dag", { query: "x" })).status).toBe(500);
+    const denied = await post(app, "cb-fast-dag", { query: "x" });
+
+    expect(denied.status).toBe(503);
+    expect(denied.headers.get("Retry-After")).toBe("1");
+  });
+
   it("honors a per-DAG circuitBreaker.failureThreshold (opens sooner than the host default)", async () => {
     // threshold 1 → recordFailure opens once count > 1, i.e. after the 2nd failure.
     const base = makeDag("cb-dag");
@@ -807,7 +862,7 @@ describe("run-dag handler", () => {
     expect((await post(app, "cb-dag", { query: "x" })).status).toBe(500); // failure 2 → opens
     const r3 = await post(app, "cb-dag", { query: "x" });
     expect(r3.status).toBe(503);                                          // circuit now open
-    expect((await r3.json()).error).toBe("dag-disabled");
+    expect((await r3.json()).error).toBe("circuit-open");
   });
 
   it("uses the host default threshold when the DAG declares no circuitBreaker (no early open)", async () => {

@@ -1120,32 +1120,37 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
       failures.push(new Error(`${message}: ${diagnostic}`, { cause: error }));
       logSafely(logger, "error", message, { error: diagnostic });
     };
+    // Sibling of `performShutdown`'s `attempt`, but awaiting: each teardown step
+    // must record its own failure and let EVERY later resource still be
+    // attempted, so no step may propagate. Hand-rolling the try/catch per step
+    // is how one of them would eventually be written without the fence.
+    const attempt = async (message: string, effect: () => unknown): Promise<void> => {
+      try {
+        await effect();
+      } catch (error) {
+        recordFailure(message, error);
+      }
+    };
 
     // Clear ownership before each operation so teardown remains idempotent even
     // when a non-conforming port throws. Every later resource is still attempted.
     const reconciliation = hitlReconciliation;
     hitlReconciliation = undefined;
     if (reconciliation !== undefined) {
-      try {
-        reconciliation.stop();
-      } catch (error) {
-        recordFailure(`Failed to stop HITL reconciliation during ${context}`, error);
-      }
-      try {
-        await reconciliation.settle();
-      } catch (error) {
-        recordFailure(`Failed to settle HITL reconciliation during ${context}`, error);
-      }
+      await attempt(
+        `Failed to stop HITL reconciliation during ${context}`,
+        () => reconciliation.stop(),
+      );
+      await attempt(
+        `Failed to settle HITL reconciliation during ${context}`,
+        () => reconciliation.settle(),
+      );
     }
 
     const worker = hitlWorker;
     hitlWorker = undefined;
     if (worker !== undefined) {
-      try {
-        await worker.close();
-      } catch (error) {
-        recordFailure(`Failed to close HITL worker during ${context}`, error);
-      }
+      await attempt(`Failed to close HITL worker during ${context}`, () => worker.close());
     }
 
     const handles = sortedHandles;
@@ -1164,15 +1169,14 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
       }
     }
 
-    if (deps.onShutdown) {
-      try {
-        await deps.onShutdown();
-      } catch (error) {
-        recordFailure(
-          `Infrastructure cleanup failed during ${context} — resources may be leaked`,
-          error,
-        );
-      }
+    // Captured so the closure keeps the narrowing — a property access would
+    // need a non-null assertion here, which the type rules rule out.
+    const onShutdown = deps.onShutdown;
+    if (onShutdown) {
+      await attempt(
+        `Infrastructure cleanup failed during ${context} — resources may be leaked`,
+        () => onShutdown(),
+      );
     }
     return failures;
   };

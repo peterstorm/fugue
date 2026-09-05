@@ -61,9 +61,22 @@ export type RunScopedLlmOperations<T extends LlmClient> = {
     RunScopedOperationFor<T[K]>;
 };
 
+/**
+ * True when `T` adds no symbol-keyed members beyond `LlmClient`.
+ *
+ * A symbol-keyed extra cannot be named in a `runScopedOperations` alias map
+ * (alias keys are strings), so such a client could smuggle an operation past
+ * the run-scoped facade the host builds — it must be rejected at the type
+ * level. Shared with `capability-broker.ts`'s `ScopedLlmCapability`: both
+ * gates guard the SAME hole, and spelling the predicate twice is how they
+ * would drift apart.
+ */
+export type HasNoExtraSymbolMembers<T extends LlmClient> =
+  [Extract<Exclude<keyof T, keyof LlmClient>, symbol>] extends [never] ? true : false;
+
 type LlmHandleFields<T extends LlmClient> =
   HasCompatibleStandardOperations<T> extends true
-    ? [Extract<Exclude<keyof T, keyof LlmClient>, symbol>] extends [never]
+    ? HasNoExtraSymbolMembers<T> extends true
       ? LlmClient extends T
         ? {
             readonly clientKind: "llm";

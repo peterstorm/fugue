@@ -173,6 +173,57 @@ describe("metered-llm: no budget (FR-W1-006 passthrough)", () => {
   });
 });
 
+// `createMeteredLlm` THROWS on a malformed pricing model rather than returning
+// a Result: it is a boot/mint-time authoring fault, not a per-call outcome. The
+// host's `meterMintedLlm` converts that throw into a typed `validation` error so
+// a broker-delivered LLM capability fails closed instead of crashing the node —
+// see `node-context-factory.test.ts`. Pin the throw itself here so the two
+// halves of that contract cannot drift apart.
+describe("metered-llm: a malformed pricing model is rejected at construction", () => {
+  const malformed: ReadonlyArray<readonly [string, unknown]> = [
+    ["unknown kind", { kind: "per-token" }],
+    ["fixed without a model", { kind: "fixed" }],
+    ["fixed with an empty model", { kind: "fixed", model: "" }],
+    ["request with an extra own key", { kind: "request", model: PRICED_MODEL }],
+    ["fixed with an extra own key", { kind: "fixed", model: PRICED_MODEL, extra: 1 }],
+    ["a non-object", "request"],
+    ["null", null],
+  ];
+
+  for (const [label, pricingModel] of malformed) {
+    it(`throws a TypeError for ${label}`, () => {
+      const { inner } = fakeInner(1, 0);
+      const { logger } = collectLogs();
+      expect(() =>
+        createMeteredLlmClient(
+          inner,
+          "llm",
+          createTestAuthority({ logger }),
+          pricingModel as never,
+        )).toThrow(TypeError);
+    });
+  }
+
+  it("rejects an accessor-backed pricing model without invoking the getter", () => {
+    const { inner } = fakeInner(1, 0);
+    const { logger } = collectLogs();
+    let reads = 0;
+    const hostile = Object.defineProperty({}, "kind", {
+      enumerable: true,
+      get: () => { reads += 1; return "request"; },
+    });
+
+    expect(() =>
+      createMeteredLlmClient(
+        inner,
+        "llm",
+        createTestAuthority({ logger }),
+        hostile as never,
+      )).toThrow(/must be an own data property/);
+    expect(reads).toBe(0);
+  });
+});
+
 describe("metered-llm: narrow standard surface", () => {
   it("exposes only authority-bearing provider operations for an augmented inner client", async () => {
     const augmented = {

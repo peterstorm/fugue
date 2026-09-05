@@ -117,6 +117,15 @@ const TOKEN_REFRESH_SKEW_MS = 60_000;
  * own `expires_in` is below `2 × skew` still caches for a useful window instead
  * of being born stale). Pure.
  */
+/**
+ * The `via` a resolution reports when NO branch was forced this time round (a
+ * cache hit): it is a function of the invocation origin alone. Both cache-hit
+ * paths witness it from here so the audit can never name two different
+ * strategies for the same origin.
+ */
+const viaForOrigin = (origin: Invocation["origin"]): "token-exchange-v2" | "client_credentials" =>
+  origin.kind === "user" ? "token-exchange-v2" : "client_credentials";
+
 const effectiveTtlMs = (expiresInSec: number): number => {
   const lifetimeMs = expiresInSec * 1000;
   const margin = Math.min(TOKEN_REFRESH_SKEW_MS, Math.floor(lifetimeMs / 2));
@@ -368,6 +377,19 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
   // of triple B (lost update). And concurrent mints of the SAME triple are
   // single-flighted below, so SC-008's "≤1 token request per triple per TTL"
   // holds under concurrency, not just single-threaded.
+  // One stamp-and-store for both token cells: `now()` is read once per store so
+  // the entry's stored-at and the sweep's cutoff agree, and the cell is passed
+  // in / returned rather than captured, so callers keep the re-read discipline.
+  const storeFreshToken = (
+    cell: TokenCache,
+    key: string,
+    token: string,
+    expiresInSec: number,
+  ): TokenCache => {
+    const storedAt = deps.now();
+    return store(cell, key, cacheToken(token, storedAt, effectiveTtlMs(expiresInSec)), storedAt);
+  };
+
   let saCache: TokenCache = emptyCache;
   let appOnlyCache: TokenCache = emptyCache;
 
@@ -406,7 +428,7 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
       // concurrent acquisition of this same triple may have populated it.
       const cachedApp = lookup(appOnlyCache, cacheK, deps.now());
       if (cachedApp !== undefined) {
-        const via = inv.origin.kind === "user" ? "token-exchange-v2" : "client_credentials";
+        const via = viaForOrigin(inv.origin);
         return ok({ token: cachedApp.token, via, acquisition: "cache-reuse" });
       }
 
@@ -421,16 +443,11 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
         const mintResult = await dispatch.mint();
         if (!mintResult.ok) return err(mintResult.error);
         saToken = mintResult.value.accessToken;
-        // Early-refresh margin (I2); re-read the live cell so a concurrent mint of a
-        // DIFFERENT triple isn't clobbered (no lost update). The store-time sweep
-        // (token-cache.ts) drops already-stale entries, bounding the cell.
-        const saStoredAt = deps.now();
-        saCache = store(
-          saCache,
-          cacheK,
-          cacheToken(saToken, saStoredAt, effectiveTtlMs(mintResult.value.expiresInSec)),
-          saStoredAt,
-        );
+        // Early-refresh margin (I2); the live cell is passed in and the result
+        // assigned back, so a concurrent mint of a DIFFERENT triple isn't
+        // clobbered (no lost update). The store-time sweep (token-cache.ts)
+        // drops already-stale entries, bounding the cell.
+        saCache = storeFreshToken(saCache, cacheK, saToken, mintResult.value.expiresInSec);
       }
 
       // WIF exchange — present the SA token as the Entra `client_assertion`.
@@ -438,12 +455,11 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
       const wif = await deps.entraWif.exchange({ clientAssertion: saToken, scope, audience });
       if (!wif.ok) return err(wif.error);
 
-      const appStoredAt = deps.now();
-      appOnlyCache = store(
+      appOnlyCache = storeFreshToken(
         appOnlyCache,
         cacheK,
-        cacheToken(wif.value.accessToken, appStoredAt, effectiveTtlMs(wif.value.expiresInSec)),
-        appStoredAt,
+        wif.value.accessToken,
+        wif.value.expiresInSec,
       );
       return ok({ token: wif.value.accessToken, via: dispatch.via, acquisition: "minted" });
     } catch (e) {
@@ -568,7 +584,7 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
         // The `via` is a function of origin alone here (no branch was forced this
         // resolution); witness it from the origin so the audit names the strategy.
         // `acquisition: "cache-reuse"` witnesses that no egress happened.
-        const via = inv.origin.kind === "user" ? "token-exchange-v2" : "client_credentials";
+        const via = viaForOrigin(inv.origin);
         await audit.mint(auditFields(inv, scopeStr), via, "cache-reuse");
         resolved.push({
           capability,

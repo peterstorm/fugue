@@ -134,6 +134,9 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
     },
 
     async run(req: RunExecutionRequest): Promise<Result<RunExecOutcome, HostError>> {
+      // Every diagnostic from this slice is attributed to the same run; naming
+      // it once keeps a later log line from silently omitting half the pair.
+      const attribution = { runId: req.runId, dagId: req.dagId } as const;
       const registered = getRegisteredDag(req.dagId);
       if (!registered) {
         // The DAG existed when seedCheckpoint accepted this durable run but was
@@ -226,19 +229,19 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
               logger,
               "error",
               "hitl: run slice settled after its deadline",
-              { runId: req.runId, dagId: req.dagId, outcome: outcome.kind },
+              { ...attribution, outcome: outcome.kind },
             ),
             onLateRejection: (error) => logWithoutThrowing(
               logger,
               "error",
               "hitl: run slice rejected after its deadline",
-              { runId: req.runId, dagId: req.dagId, error: safeErrorMessage(error) },
+              { ...attribution, error: safeErrorMessage(error) },
             ),
             onTimeoutCancellationFailure: (error) => logWithoutThrowing(
               logger,
               "error",
               "hitl: run slice timeout cancellation failed",
-              { runId: req.runId, dagId: req.dagId, error: safeErrorMessage(error) },
+              { ...attribution, error: safeErrorMessage(error) },
             ),
           },
         );
@@ -281,7 +284,7 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
             logger,
             "error",
             "hitl: run slice and checkpoint failure inspection both failed — failing closed",
-            { runId: req.runId, dagId: req.dagId, error: error.message },
+            { ...attribution, error: error.message },
           );
           return ok({ kind: "failed", error });
         }
@@ -290,7 +293,7 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
             logger,
             "error",
             "hitl: checkpoint persistence failed — failing run closed to avoid replay",
-            { runId: req.runId, dagId: req.dagId, error: checkpointFailure.kind },
+            { ...attribution, error: checkpointFailure.kind },
           );
           return ok({ kind: "failed", error: checkpointWriteFailure(checkpointFailure) });
         }
@@ -306,11 +309,7 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
           logger,
           "error",
           phase === "setup" ? "hitl: run slice setup failed" : "hitl: run slice failed",
-          {
-            runId: req.runId,
-            dagId: req.dagId,
-            error: safeErrorMessage(e),
-          },
+          { ...attribution, error: safeErrorMessage(e) },
         );
         return ok({ kind: "failed", error: toFrameworkError(e) });
       } finally {

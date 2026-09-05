@@ -81,11 +81,14 @@ export const snapshotSpend = (spend: Spend): Spend => {
   return Object.freeze(snapshot);
 };
 
+/** Defensive copy for a value crossing the capability seam. */
+const frozenCopy = <T extends object>(value: T): T => Object.freeze({ ...value }) as T;
+
 const availableTokens = (ceiling: TokensCeiling, observed: number): CeilingHeadroom =>
   Object.freeze({
     kind: "available",
     unit: "tokens",
-    ceiling: Object.freeze({ ...ceiling }),
+    ceiling: frozenCopy(ceiling),
     amount: Math.max(0, ceiling.limit - observed),
   });
 
@@ -93,7 +96,7 @@ const availableCalls = (ceiling: CallsCeiling, observed: number): CeilingHeadroo
   Object.freeze({
     kind: "available",
     unit: "calls",
-    ceiling: Object.freeze({ ...ceiling }),
+    ceiling: frozenCopy(ceiling),
     amount: Math.max(0, ceiling.limit - observed),
   });
 
@@ -101,7 +104,7 @@ const availableUsd = (ceiling: UsdCeiling, observed: MicroUsd): CeilingHeadroom 
   Object.freeze({
     kind: "available",
     unit: "usd",
-    ceiling: Object.freeze({ ...ceiling }),
+    ceiling: frozenCopy(ceiling),
     amount: microUsd(Math.max(0, ceiling.limit - observed)),
   });
 
@@ -122,7 +125,7 @@ export const remainingFor = (
         projected.usage === "unknown"
           ? Object.freeze({
               kind: "unknown-usage",
-              ceiling: Object.freeze({ ...c }),
+              ceiling: frozenCopy(c),
               observedAtLeast: projected.tokens,
             })
           : availableTokens(c, projected.tokens),
@@ -132,7 +135,7 @@ export const remainingFor = (
         if (projected.usage === "unknown") {
           return Object.freeze({
             kind: "unknown-usage",
-            ceiling: Object.freeze({ ...c }),
+            ceiling: frozenCopy(c),
             observedAtLeast: costFloor(projected.usd),
           });
         }
@@ -140,7 +143,7 @@ export const remainingFor = (
           ? availableUsd(c, projected.usd.micros)
           : Object.freeze({
               kind: "unpriced",
-              ceiling: Object.freeze({ ...c }),
+              ceiling: frozenCopy(c),
               models: snapshotModels(projected.usd.models),
               observedAtLeast: projected.usd.knownMicros,
             });

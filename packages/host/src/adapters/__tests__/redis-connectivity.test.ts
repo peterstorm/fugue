@@ -23,6 +23,7 @@ import {
   isOk,
   isErr,
   makeSpend,
+  microUsd,
   unpricedModels,
 } from "@fuguejs/framework";
 import type { RedisSpendAppend } from "../../ports.js";
@@ -796,6 +797,81 @@ describe("createRedisConnectivity — spend-ledger capability", () => {
     if (thrown !== undefined && isErr(thrown) && thrown.error.kind === "redis-unavailable") {
       expect(thrown.error.operation).toContain("SPEND-APPEND");
     }
+  });
+});
+
+// ── Transaction serialization (no live Redis required) ──────────────────────
+// The invariant that a checkpoint commit cannot interleave with an in-flight
+// spend append is what stops a commit's EXEC from clearing the append's WATCH
+// guard and silently undercounting spend. It was pinned ONLY by the REDIS_URL-
+// gated suite below, so a bare `bun test` never exercised it. `serializeTransaction`
+// is pure promise-chaining over the injected client, so a fake proves the
+// ordering everywhere.
+describe("createIoredisRedisPort — transaction serialization (fake client)", () => {
+  it("holds a checkpoint commit behind an in-flight spend append", async () => {
+    const calls: string[] = [];
+    let releaseAppend: () => void = () => {};
+    const appendReachedRead = Promise.withResolvers<void>();
+    const appendMayProceed = new Promise<void>((resolve) => { releaseAppend = resolve; });
+
+    const multi = () => {
+      const queued: unknown[] = [];
+      const chain = {
+        hset: (...a: unknown[]) => { queued.push(a); return chain; },
+        expire: (...a: unknown[]) => { queued.push(a); return chain; },
+        set: (...a: unknown[]) => { queued.push(a); return chain; },
+        exec: async () => queued.map(() => [null, "OK"] as const),
+      };
+      return chain;
+    };
+
+    const client = {
+      watch: async () => { calls.push("append:watch"); return "OK"; },
+      unwatch: async () => "OK",
+      hget: async () => {
+        // Park the append mid-transaction, after WATCH and before EXEC.
+        appendReachedRead.resolve();
+        await appendMayProceed;
+        return null;
+      },
+      multi: () => { calls.push("multi"); return multi(); },
+    } as unknown as IoRedis;
+
+    const port = createIoredisRedisPort(client);
+
+    const append = port.appendSpend!({
+      key: "spend",
+      delta: makeSpend({
+        usage: "known",
+        tokens: 1,
+        calls: 1,
+        usd: { kind: "priced", micros: microUsd(1) },
+      }),
+    } as RedisSpendAppend);
+
+    await appendReachedRead.promise;
+
+    let commitSettled = false;
+    const commit = port.commitCheckpointAndRetainSpend!({
+      checkpointKey: "ckpt",
+      checkpointValue: "v",
+      spendKey: "spend",
+      checkpointTtlSec: 10,
+      spendTtlSec: 10,
+    }).then((r) => { commitSettled = true; return r; });
+
+    // Give the commit every chance to jump the queue.
+    await Promise.resolve();
+    await Bun.sleep(5);
+    expect(commitSettled).toBe(false);
+    // The append has WATCHed but nothing has reached MULTI yet.
+    expect(calls).toEqual(["append:watch"]);
+
+    releaseAppend();
+    expect(isOk(await append)).toBe(true);
+    expect(isOk(await commit)).toBe(true);
+    // The append's MULTI ran to completion before the commit's.
+    expect(calls).toEqual(["append:watch", "multi", "multi"]);
   });
 });
 

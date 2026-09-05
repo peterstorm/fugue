@@ -9,6 +9,7 @@
 
 import { describe, test, expect } from "bun:test";
 import { createInMemorySpendLedger } from "../../adapters/spend-ledger-memory.js";
+import { fakeInfra } from "../fixtures/host-boot-fakes.js";
 import { z } from "zod";
 import type { DagDef, RunId } from "@fuguejs/framework";
 import { noopTracer, dagId, runId as makeRunId, nodeId as makeNodeId, ok, isOk, gitSha } from "@fuguejs/framework";
@@ -126,17 +127,6 @@ const createMockRedis = (): { port: RedisPort; store: Map<string, string> } => {
   };
 };
 
-const createMockSharedInfra = (redis: RedisPort): SharedInfra => ({
-  spendLedger: createInMemorySpendLedger(),
-  llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as unknown as import("@fuguejs/framework").LlmClient,
-  llmPricingModel: { kind: "request" },
-  redis,
-  tracer: noopTracer,
-  contentFilter: null,
-  prompts: null,
-  logger: { info: () => {}, warn: () => {}, error: () => {} },
-  capabilities: [],
-});
 
 // ---------------------------------------------------------------------------
 // Pure key-prefix isolation tests
@@ -264,7 +254,7 @@ const ISO_AGENT_MAP = { "dag-alpha": "fugue-agent-alpha", "dag-beta": "fugue-age
 describe("createNodeContextForDag isolation", () => {
   test("contexts for different DAGs use different cache namespaces", async () => {
     const { port: redis } = createMockRedis();
-    const shared = createMockSharedInfra(redis);
+    const shared = fakeInfra(redis);
     const signal = new AbortController().signal;
 
     const dagA = makeRegisteredDag("dag-alpha");
@@ -283,7 +273,7 @@ describe("createNodeContextForDag isolation", () => {
 
   test("contexts for same DAG but different runIds produce different checkpoints", async () => {
     const { port: redis } = createMockRedis();
-    const shared = createMockSharedInfra(redis);
+    const shared = fakeInfra(redis);
     const signal = new AbortController().signal;
 
     const dag = makeRegisteredDag("dag-alpha");

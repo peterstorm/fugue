@@ -407,6 +407,22 @@ interface TerminalDeps {
   readonly opts?: DagRunOpts;
 }
 
+/**
+ * The one way this module fails a run: close the root span as an error, emit the
+ * matching run-end, and return the typed error. Every failure exit routes here
+ * so a new one cannot forget the span close or the run-end and leave telemetry
+ * unbalanced (a run-start with no run-end).
+ */
+const failClosed = <O>(
+  rootSpan: Span,
+  emitRunEnd: (status: "ok" | "error") => void,
+  error: FrameworkError,
+): Result<StatefulOutcome<O>, FrameworkError> => {
+  closeRootSpan(rootSpan, { kind: "error", error });
+  emitRunEnd("error");
+  return err(error);
+};
+
 const handleTerminalState = <O>(
   state: DagPhase,
   context: DagMachineContext,
@@ -447,9 +463,7 @@ const handleTerminalState = <O>(
       return ok({ kind: "completed", output: s.output as O });
     })
     .with({ kind: "failed" }, async (s) => {
-      closeRootSpan(deps.rootSpan, { kind: "error", error: s.error });
-      deps.emitRunEnd("error");
-      return err(s.error);
+      return failClosed(deps.rootSpan, deps.emitRunEnd, s.error);
     })
     // ADR-0060: the run parked at a human gate. Close the root span cleanly (not
     // an error — the run is paused, not finished) and surface `suspended` so a
@@ -515,9 +529,7 @@ const handleKernelError = <O>(
 ): Result<StatefulOutcome<O>, FrameworkError> => {
   if (isBeforeExecuteAbortError(e)) {
     const error: FrameworkError = { kind: "aborted", reason: "beforeExecute hook returned false" };
-    closeRootSpan(rootSpan, { kind: "error", error });
-    emitRunEnd("error");
-    return err(error);
+    return failClosed(rootSpan, emitRunEnd, error);
   }
 
   // Terminal-failed: the kernel attaches { state, context } to Error.cause.
@@ -528,9 +540,7 @@ const handleKernelError = <O>(
     retriability: "retriable",
     message: safeErrorMessage(e),
   };
-  closeRootSpan(rootSpan, { kind: "error", error });
-  emitRunEnd("error");
-  return err(error);
+  return failClosed(rootSpan, emitRunEnd, error);
 };
 
 // ---------------------------------------------------------------------------
@@ -573,17 +583,13 @@ export const runDagStatefulOutcome = async <I, O>(
     // 3. Compile
     const compiled = compileDagToMachine(effectiveDag, input);
     if (!compiled.ok) {
-      closeRootSpan(rootSpan, { kind: "error", error: compiled.error });
-      emitRunEnd("error");
-      return err(compiled.error);
+      return failClosed(rootSpan, emitRunEnd, compiled.error);
     }
 
     // 4. Resolve job
     const jobResult = resolveJob(compiled.value, effectiveDag, nodeCtx, opts);
     if (!jobResult.ok) {
-      closeRootSpan(rootSpan, { kind: "error", error: jobResult.error });
-      emitRunEnd("error");
-      return err(jobResult.error);
+      return failClosed(rootSpan, emitRunEnd, jobResult.error);
     }
     const job = jobResult.value;
 
@@ -693,8 +699,6 @@ const unexpectedNonTerminal = <O>(
     retriability: "retriable",
     message,
   };
-  closeRootSpan(rootSpan, { kind: "error", error });
-  emitRunEnd("error");
-  return err(error);
+  return failClosed(rootSpan, emitRunEnd, error);
 };
 

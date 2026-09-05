@@ -159,9 +159,4 @@ describe("node side-effects propagation (Phase 1)", () => {
     expect(start!.sideEffects).toEqual(profile);
   });
 
-  // Type-level enforcement test: the below would be a compile error.
-  // Uncomment to verify:
-  //
-  // const BAD_WRITES: SideEffectProfile = { kind: "writes" };
-  //   ~~~~~~ Error: Property 'resource' is missing in type '{ kind: "writes"; }'
 });

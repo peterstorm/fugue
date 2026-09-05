@@ -56,8 +56,11 @@ describe("createHost — HITL reconciliation lifecycle", () => {
     socketPath = undefined;
   });
 
-  it("logs a typed reconciliation error without aborting host startup", async () => {
-    socketPath = join(tmpdir(), `fugue-hitl-reconcile-error-${crypto.randomUUID()}.sock`);
+  /**
+   * A Redis whose `SMEMBERS <tenant>:hitl:active` fails — the one condition both
+   * reconciliation-failure tests need. Everything else behaves normally.
+   */
+  const redisWithFailingActiveSet = () => {
     const base = fakeRedis();
     const redis = {
       ...base.redis,
@@ -68,6 +71,12 @@ describe("createHost — HITL reconciliation lifecycle", () => {
         return base.redis.sMembers(key);
       },
     };
+    return { base, redis };
+  };
+
+  it("logs a typed reconciliation error without aborting host startup", async () => {
+    socketPath = join(tmpdir(), `fugue-hitl-reconcile-error-${crypto.randomUUID()}.sock`);
+    const { base, redis } = redisWithFailingActiveSet();
     const logger = testLogger();
     const booted = await createHost({
       config: makeConfig({ TEAMS_WEBHOOK_URL: "https://teams.example.test/hook" }),
@@ -89,16 +98,7 @@ describe("createHost — HITL reconciliation lifecycle", () => {
 
   it("a throwing reconciliation logger cannot reject host startup", async () => {
     socketPath = join(tmpdir(), `fugue-hitl-reconcile-logger-${crypto.randomUUID()}.sock`);
-    const base = fakeRedis();
-    const redis = {
-      ...base.redis,
-      async sMembers(key: string) {
-        if (key.endsWith(":hitl:active")) {
-          return err({ kind: "redis-unavailable" as const, operation: "SMEMBERS active" });
-        }
-        return base.redis.sMembers(key);
-      },
-    };
+    const { base, redis } = redisWithFailingActiveSet();
     const logger = testLogger();
     const booted = await createHost({
       config: makeConfig({ TEAMS_WEBHOOK_URL: "https://teams.example.test/hook" }),

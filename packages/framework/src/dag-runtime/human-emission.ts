@@ -20,7 +20,6 @@ import type { Witness } from "../types/freshness.js";
 import type { FrameworkError } from "../types/errors.js";
 import { type Result, ok, err } from "../types/result.js";
 import { computeJsonPatch } from "../shared/json-patch.js";
-import { fwLogger } from "../logger.js";
 import { safeErrorMessage } from "../types/safe-error.js";
 import { bestEffort, bestEffortLog } from "./best-effort.js";
 import { emit } from "./emit.js";
@@ -43,17 +42,23 @@ export const emitHumanIntervention = (
 
   if (!nodeDef) {
     const msg = `internal: node '${phase.nodeId}' missing from nodeMap during human-intervention emit`;
-    fwLogger().error(`[emitHumanIntervention] ${msg}`);
     const fwError: FrameworkError = { kind: "node-crash", nodeId: phase.nodeId, retriability: "non-retriable", message: msg };
-    emit(nodeCtx, {
-      type: "node-error",
-      runId: nodeCtx.runId,
-      dagId,
-      nodeId: phase.nodeId,
-      timestamp: stamp(),
-      error: msg,
-      frameworkError: fwError,
-    });
+    // Same fencing as the confidence-extract branch below, and for the same
+    // reason: `stamp()` runs `nowFn()` as an ARGUMENT, so a hostile clock throws
+    // before `emit`/`dispatchEvent` is even entered and no observer-side guard
+    // can catch it. Unfenced, that would escape as an exception and break this
+    // module's fail-closed contract — the typed Err must stay authoritative.
+    bestEffortLog("error", `[emitHumanIntervention] ${msg}`);
+    bestEffort("emitHumanIntervention", "node-error emission", () =>
+      emit(nodeCtx, {
+        type: "node-error",
+        runId: nodeCtx.runId,
+        dagId,
+        nodeId: phase.nodeId,
+        timestamp: stamp(),
+        error: msg,
+        frameworkError: fwError,
+      }));
     return err(fwError);
   }
 

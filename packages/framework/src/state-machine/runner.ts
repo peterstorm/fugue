@@ -1,7 +1,7 @@
 // runStateMachine — the durable state-machine kernel loop
 // Transition loop, event sourcing, checkpoint persistence, idempotency, trace emission
 
-import type { Machine, Executor, JobLike, KernelRunOpts } from "./types.js";
+import type { Machine, Executor, JobLike, KernelRunOpts, TraceEvent } from "./types.js";
 import { safeErrorMessage } from "../types/safe-error.js";
 
 const defaultClassifyError = (error: unknown): { retriable: boolean; message: string } => ({
@@ -118,6 +118,21 @@ export const runStateMachine = async <S, E, C>(
   // at 0 for every queue-level attempt).
   const retryCounters = new Map<string, number>();
 
+  // A throwing onTrace must never escape: traces are diagnostic and are emitted
+  // AFTER the transition is durable, so surfacing the throw would report a
+  // committed transition as a fatal executor crash. Both emission sites route
+  // through here so that guarantee cannot hold at one site and not the other.
+  const emitTrace = (trace: TraceEvent<S, E>): void => {
+    if (opts.onTrace === undefined) return;
+    try {
+      opts.onTrace(trace);
+    } catch (traceErr) {
+      reportWithoutThrowing(() =>
+        log.error("[runStateMachine] onTrace threw — ignoring to preserve durability:", traceErr),
+      );
+    }
+  };
+
   let { state, context } = job.data;
 
   while (!machine.isTerminal(state)) {
@@ -126,21 +141,13 @@ export const runStateMachine = async <S, E, C>(
       const proceed = opts.beforeExecute(state, context);
       if (!proceed) {
         // AD-4: emit skipped trace before aborting so consumers can observe the abort
-        if (opts.onTrace !== undefined) {
-          try {
-            opts.onTrace({
-              state,
-              nextState: state,
-              outcome: "skipped",
-              durationMs: 0,
-              timestamp: stamp(),
-            });
-          } catch (traceErr) {
-            reportWithoutThrowing(() =>
-              log.error("[runStateMachine] onTrace threw — ignoring to preserve durability:", traceErr),
-            );
-          }
-        }
+        emitTrace({
+          state,
+          nextState: state,
+          outcome: "skipped",
+          durationMs: 0,
+          timestamp: stamp(),
+        });
         throw new BeforeExecuteAbortError();
       }
     }
@@ -249,23 +256,14 @@ export const runStateMachine = async <S, E, C>(
       const traceEndMs = readTraceNow();
       if (traceEndMs !== undefined) {
         const outcome = isFailed ? "failed" : isRetry ? "retry" : "success";
-        // A throwing onTrace must not escape: the transition is already persisted
-        // and surfacing the throw would surface a successful transition as a fatal
-        // executor crash via run-dag-stateful's outer catch.
-        try {
-          opts.onTrace({
-            state: prevState,
-            event,
-            nextState: state,
-            outcome,
-            durationMs: traceStartMs === undefined ? 0 : traceEndMs - traceStartMs,
-            timestamp: new Date(traceEndMs),
-          });
-        } catch (traceErr) {
-          reportWithoutThrowing(() =>
-            log.error("[runStateMachine] onTrace threw — ignoring to preserve durability:", traceErr),
-          );
-        }
+        emitTrace({
+          state: prevState,
+          event,
+          nextState: state,
+          outcome,
+          durationMs: traceStartMs === undefined ? 0 : traceEndMs - traceStartMs,
+          timestamp: new Date(traceEndMs),
+        });
       }
     }
 

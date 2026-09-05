@@ -87,6 +87,19 @@ pre-1.0, so a minor bump may carry breaking changes.
 - A non-terminal `retrying` or `awaiting-human` phase reaching the terminal
   handler now attributes its invariant-violation error to the node it parked
   on rather than to the executor.
+- `emitHumanIntervention`'s missing-`nodeDef` branch now fences its log and
+  node-error emission the way the sibling confidence-extract branch does. The
+  timestamp is produced by calling `nowFn()` as an argument, so a hostile clock
+  threw *before* the observer dispatch's own guard could see it and escaped the
+  module's fail-closed contract; the typed `Err` is now always authoritative.
+- **Host:** an open circuit breaker now answers with its own `circuit-open`
+  HostError instead of reusing `dag-disabled`. The two are both 503 but mean
+  different things — disabled is administrative and cannot be waited out, an
+  open circuit clears after its cooldown — and clients previously could not
+  tell them apart. `Retry-After` is now derived from the DAG's effective
+  `resetTimeoutMs` / `CIRCUIT_BREAKER_COOLDOWN_MS` (rounded up, 1s floor)
+  instead of a hardcoded 30s that was simply wrong whenever the cooldown was
+  configured otherwise.
 - Every positive priced call consumes at least one micro-USD; positive overflow
   saturates, so sub-micro calls and infinity cannot create budget headroom.
 - Metered LLM requests, fixed pricing policies, node requirements, broker

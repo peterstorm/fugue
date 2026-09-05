@@ -1047,6 +1047,49 @@ describe("createNodeContextForDag — one authority across main/judge/custom LLM
     expect(stored.ok && stored.value.calls).toBe(1);
   });
 
+  // The other half of the contract pinned in `metered-llm.test.ts`: a malformed
+  // pricing model makes `createMeteredLlm` THROW, and `meterMintedLlm` must turn
+  // that into a typed `validation` error so a hostile or buggy broker fails the
+  // node closed instead of crashing the run.
+  it("converts a malformed broker pricing model into a typed validation error", async () => {
+    const brokerLlm = fakeLlm(2, 1);
+    const built = await createTestContext({
+      shared: baseSharedInfra(),
+      dag: makeDag({ llmBudget: { calls: 1 } }),
+    });
+
+    for (const pricingModel of [
+      { kind: "per-token" },
+      { kind: "fixed" },
+      { kind: "fixed", model: "" },
+      null,
+    ]) {
+      const decorated = built.meterMintedLlm(
+        "criticLlm",
+        {
+          clientKind: "llm",
+          client: brokerLlm.llm,
+          pricingModel: pricingModel as never,
+          runScopedOperations: {},
+        },
+        testNodeId,
+      );
+
+      expect(decorated.ok).toBe(false);
+      if (!decorated.ok) {
+        expect(decorated.error.kind).toBe("validation");
+        if (decorated.error.kind === "validation") {
+          expect(decorated.error.nodeId).toBe(testNodeId);
+          expect(decorated.error.message).toContain(
+            "broker-delivered LLM capability 'criticLlm' could not be metered",
+          );
+        }
+      }
+    }
+    // Refused before the provider was ever reached.
+    expect(brokerLlm.calls).toHaveLength(0);
+  });
+
   it("rehydrates a main+judge total from a fresh file ledger/context and refuses the next call", async () => {
     const root = mkdtempSync(join(tmpdir(), "fugue-context-file-ledger-"));
     try {

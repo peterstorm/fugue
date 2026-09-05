@@ -4,20 +4,12 @@ import {
   buildRuntimeCapabilities,
   buildRuntimeDeps,
 } from "../adapters/runtime-capabilities.js";
-import { makeConfig } from "./fixtures/host-boot-fakes.js";
-import type { RedisPort } from "../ports.js";
+import { fakeRedis, makeConfig } from "./fixtures/host-boot-fakes.js";
 
-const redis: RedisPort = {
-  get: async () => ok(null),
-  set: async () => ok("OK"),
-  del: async () => ok(0),
-  scan: async () => ok({ cursor: "0", keys: [] }),
-  setNx: async () => ok(true),
-  compareAndDelete: async () => ok(true),
-  sAdd: async () => ok(1),
-  sRem: async () => ok(1),
-  sMembers: async () => ok([]),
-};
+// These tests care only about capability wiring diagnostics, so the shared
+// in-memory fake is exactly right — a hand-rolled no-op stub would have to be
+// re-extended by hand every time RedisPort grows a method.
+const { redis } = fakeRedis();
 const logger = { info: () => {}, warn: () => {}, error: () => {} };
 
 describe("runtime capability diagnostics", () => {

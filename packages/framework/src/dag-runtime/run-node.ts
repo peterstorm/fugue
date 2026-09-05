@@ -290,6 +290,150 @@ interface RunNodeOpts {
   readonly minting?: MintingAuthority;
 }
 
+/**
+ * Resolve the node context this invocation actually runs with.
+ *
+ * With no broker wired this is the identity on `ctx` — the zero-regression
+ * static path. With one, the node's declared `requires` are minted into handles
+ * scoped to THIS node, against an `Invocation` carrying the real `nodeId` so
+ * every mint/refusal audits per-node rather than run-global. Minted handles are
+ * merged OVER the base context: broker-resolvable scope names get their narrowed
+ * handle, plain capabilities keep their static client.
+ *
+ * Every failure is fail-closed and emitted before `run` is ever reached; the
+ * caller only has to propagate the Err.
+ */
+const resolveMintedNodeContext = async (args: {
+  readonly ctx: NodeContext;
+  readonly node: NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>;
+  readonly nodeId: NodeId;
+  readonly dagId: DagId;
+  readonly minting: MintingAuthority | undefined;
+  readonly emitNodeError: (message: string, error: FrameworkError) => void;
+}): Promise<Result<NodeContext, FrameworkError>> => {
+  const { ctx, node, nodeId, dagId, minting, emitNodeError } = args;
+  if (!minting) return ok(ctx);
+
+  // Derive the Invocation's origin from the authority (single construction
+  // site) so the node is always minted AS the origin the authority gates
+  // against — the half-consistent "origin Y on an authority-X mint" state
+  // is unrepresentable here.
+  const inv = invocationFor(minting, { runId: ctx.runId, dagId, nodeId });
+  // Snapshot both sides of the broker claim before crossing the awaited
+  // extension seam. A broker must not be able to mutate the caller-owned
+  // requirements or change `provides()` answers and thereby rewrite the
+  // authority proof after minting has begun.
+  let requiredCapabilities: readonly Capability[];
+  let brokerClaims: ReadonlySet<Capability>;
+  try {
+    requiredCapabilities = Object.freeze([...node.requires]);
+    brokerClaims = new Set(
+      requiredCapabilities.filter(
+        (capability) => minting.broker.provides?.(capability) === true,
+      ),
+    );
+  } catch (caught) {
+    const violation = brokerContractViolation(
+      nodeId,
+      `requirements/claims snapshot threw: ${safeErrorMessage(caught)}`,
+    );
+    emitNodeError(`capability minting refused: ${messageOf(violation)}`, violation);
+    return err(violation);
+  }
+  // The port contract says errors flow on the Result channel, never thrown
+  // — but the broker is a public extension seam, so the contract is
+  // enforced here rather than assumed. An unfenced throw would escape to
+  // the wave-level catch-all and be reclassified as a RETRIABLE
+  // `node-crash`, re-firing the broker (token-endpoint egress) on every
+  // retry and losing the 403/503 taxonomy.
+  //
+  // Why this fence classifies NON-retriable while `node-span.ts`'s outer
+  // catch classifies a thrown `fn()` as RETRIABLE: the two catches sit at
+  // different altitudes and know different things. `node-span` wraps the
+  // whole node body, where a throw is an unclassified fault of unknown
+  // origin. Here the broker violated its Result-returning port contract;
+  // repeating the same invocation only repeats that deterministic
+  // violation and any egress before it. A real transient broker outage must
+  // be returned as typed `infra-unreachable`, which remains retriable.
+  let minted: Result<CapabilityBagSnapshot, FrameworkError>;
+  try {
+    minted = parseBrokerResult(
+      await minting.broker.mintFor(inv, requiredCapabilities),
+      nodeId,
+    );
+  } catch (caught) {
+    minted = err(brokerContractViolation(
+      nodeId,
+      `call/result inspection threw: ${safeErrorMessage(caught)}`,
+    ));
+  }
+  if (!minted.ok) {
+    emitNodeError(`capability minting refused: ${messageOf(minted.error)}`, minted.error);
+    return err(minted.error);
+  }
+  // Validate the broker's authority before either metering or merge. A
+  // returned key must be both declared by this node and claimed by the
+  // snapshotted `provides` view; otherwise the broker could inject authority
+  // the DAG never requested.
+  const overdelivered = Object.keys(minted.value).filter(
+    (key) =>
+      !requiredCapabilities.includes(key as Capability) ||
+      !brokerClaims.has(key as Capability),
+  );
+  if (overdelivered.length > 0) {
+    const overdeliveryError = brokerContractViolation(
+      nodeId,
+      `returned undeclared or unclaimed capabilities: ${overdelivered.sort().join(", ")}`,
+    );
+    emitNodeError(
+      `capability minting refused: ${messageOf(overdeliveryError)}`,
+      overdeliveryError,
+    );
+    return err(overdeliveryError);
+  }
+
+  // Validate delivery against the broker result itself, before the static
+  // base can participate in a merge. A base client must never satisfy a
+  // capability that `provides()` promised to mint for this invocation.
+  const undelivered = requiredCapabilities.filter(
+    (cap) =>
+      brokerClaims.has(cap) &&
+      (!Object.hasOwn(minted.value, cap) || minted.value[cap] == null),
+  );
+  const [firstUndelivered, ...restUndelivered] = undelivered;
+  if (firstUndelivered !== undefined) {
+    const missingErr: FrameworkError = {
+      kind: "missing-capability" as const,
+      missing: [
+        { nodeId, capability: firstUndelivered },
+        ...restUndelivered.map((capability) => ({ nodeId, capability })),
+      ],
+    };
+    emitNodeError(`broker claimed but did not deliver capabilities: ${messageOf(missingErr)}`, missingErr);
+    return err(missingErr);
+  }
+
+  const metered = meterScopedLlmCapabilities(minted.value, minting, nodeId);
+  if (!metered.ok) {
+    emitNodeError(`capability metering refused: ${messageOf(metered.error)}`, metered.error);
+    return err(metered.error);
+  }
+
+  const merged = mergeScopedCapabilities(ctx, metered.value);
+  if (!merged.ok) {
+    const mergeError: FrameworkError = {
+      kind: "validation",
+      nodeId,
+      message:
+        `capability broker returned non-null reserved/built-in key ` +
+        `'${merged.error.key}'; static built-in authority remains authoritative`,
+    };
+    emitNodeError(`capability merge refused: ${messageOf(mergeError)}`, mergeError);
+    return err(mergeError);
+  }
+  return ok(merged.value);
+};
+
 export const runNodeShared = async (
   node: NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>,
   ctx: ValidatedNodeContext,
@@ -364,135 +508,19 @@ export const runNodeShared = async (
     const nodeStart = nowFn();
     emit(ctx, { type: "node-start", runId: ctx.runId, dagId, nodeId, sideEffects: node.sideEffects, timestamp: stamp() });
 
-    // Per-invocation authority resolution (the per-node minting seam). When a
-    // broker is wired, the node's declared `requires` are resolved into narrowly
-    // scoped handles for THIS node only, minted against an `Invocation` carrying
-    // the real `nodeId` (so each mint/refusal audit is per-node, not run-global).
-    // The minted handles are merged over the base context; broker-resolvable
-    // scope names get their narrowed handle, plain capabilities keep their static
-    // client. A refusal fails the node fail-closed before `run` is ever called.
-    let runCtx: NodeContext = ctx;
-    const minting = opts.minting;
-    if (minting) {
-      // Derive the Invocation's origin from the authority (single construction
-      // site) so the node is always minted AS the origin the authority gates
-      // against — the half-consistent "origin Y on an authority-X mint" state
-      // is unrepresentable here.
-      const inv = invocationFor(minting, { runId: ctx.runId, dagId, nodeId });
-      // Snapshot both sides of the broker claim before crossing the awaited
-      // extension seam. A broker must not be able to mutate the caller-owned
-      // requirements or change `provides()` answers and thereby rewrite the
-      // authority proof after minting has begun.
-      let requiredCapabilities: readonly Capability[];
-      let brokerClaims: ReadonlySet<Capability>;
-      try {
-        requiredCapabilities = Object.freeze([...node.requires]);
-        brokerClaims = new Set(
-          requiredCapabilities.filter(
-            (capability) => minting.broker.provides?.(capability) === true,
-          ),
-        );
-      } catch (caught) {
-        const violation = brokerContractViolation(
-          nodeId,
-          `requirements/claims snapshot threw: ${safeErrorMessage(caught)}`,
-        );
-        emitNodeError(`capability minting refused: ${messageOf(violation)}`, violation);
-        return err(violation);
-      }
-      // The port contract says errors flow on the Result channel, never thrown
-      // — but the broker is a public extension seam, so the contract is
-      // enforced here rather than assumed. An unfenced throw would escape to
-      // the wave-level catch-all and be reclassified as a RETRIABLE
-      // `node-crash`, re-firing the broker (token-endpoint egress) on every
-      // retry and losing the 403/503 taxonomy.
-      //
-      // Why this fence classifies NON-retriable while `node-span.ts`'s outer
-      // catch classifies a thrown `fn()` as RETRIABLE: the two catches sit at
-      // different altitudes and know different things. `node-span` wraps the
-      // whole node body, where a throw is an unclassified fault of unknown
-      // origin. Here the broker violated its Result-returning port contract;
-      // repeating the same invocation only repeats that deterministic
-      // violation and any egress before it. A real transient broker outage must
-      // be returned as typed `infra-unreachable`, which remains retriable.
-      let minted: Result<CapabilityBagSnapshot, FrameworkError>;
-      try {
-        minted = parseBrokerResult(
-          await minting.broker.mintFor(inv, requiredCapabilities),
-          nodeId,
-        );
-      } catch (caught) {
-        minted = err(brokerContractViolation(
-          nodeId,
-          `call/result inspection threw: ${safeErrorMessage(caught)}`,
-        ));
-      }
-      if (!minted.ok) {
-        emitNodeError(`capability minting refused: ${messageOf(minted.error)}`, minted.error);
-        return err(minted.error);
-      }
-      // Validate the broker's authority before either metering or merge. A
-      // returned key must be both declared by this node and claimed by the
-      // snapshotted `provides` view; otherwise the broker could inject authority
-      // the DAG never requested.
-      const overdelivered = Object.keys(minted.value).filter(
-        (key) =>
-          !requiredCapabilities.includes(key as Capability) ||
-          !brokerClaims.has(key as Capability),
-      );
-      if (overdelivered.length > 0) {
-        const overdeliveryError = brokerContractViolation(
-          nodeId,
-          `returned undeclared or unclaimed capabilities: ${overdelivered.sort().join(", ")}`,
-        );
-        emitNodeError(
-          `capability minting refused: ${messageOf(overdeliveryError)}`,
-          overdeliveryError,
-        );
-        return err(overdeliveryError);
-      }
-
-      // Validate delivery against the broker result itself, before the static
-      // base can participate in a merge. A base client must never satisfy a
-      // capability that `provides()` promised to mint for this invocation.
-      const undelivered = requiredCapabilities.filter(
-        (cap) =>
-          brokerClaims.has(cap) &&
-          (!Object.hasOwn(minted.value, cap) || minted.value[cap] == null),
-      );
-      const [firstUndelivered, ...restUndelivered] = undelivered;
-      if (firstUndelivered !== undefined) {
-        const missingErr: FrameworkError = {
-          kind: "missing-capability" as const,
-          missing: [
-            { nodeId, capability: firstUndelivered },
-            ...restUndelivered.map((capability) => ({ nodeId, capability })),
-          ],
-        };
-        emitNodeError(`broker claimed but did not deliver capabilities: ${messageOf(missingErr)}`, missingErr);
-        return err(missingErr);
-      }
-
-      const metered = meterScopedLlmCapabilities(minted.value, minting, nodeId);
-      if (!metered.ok) {
-        emitNodeError(`capability metering refused: ${messageOf(metered.error)}`, metered.error);
-        return err(metered.error);
-      }
-
-      const merged = mergeScopedCapabilities(ctx, metered.value);
-      if (!merged.ok) {
-        const mergeError: FrameworkError = {
-          kind: "validation",
-          nodeId,
-          message:
-            `capability broker returned non-null reserved/built-in key ` +
-            `'${merged.error.key}'; static built-in authority remains authoritative`,
-        };
-        emitNodeError(`capability merge refused: ${messageOf(mergeError)}`, mergeError);
-        return err(mergeError);
-      }
-      runCtx = merged.value;
-    }
+    // Per-invocation authority resolution (the per-node minting seam) — see
+    // `resolveMintedNodeContext`. With no broker wired this is the identity on
+    // `ctx`; with one, a refusal fails the node closed before `run` is called.
+    const resolved = await resolveMintedNodeContext({
+      ctx,
+      node,
+      nodeId,
+      dagId,
+      minting: opts.minting,
+      emitNodeError,
+    });
+    if (!resolved.ok) return err(resolved.error);
+    let runCtx: NodeContext = resolved.value;
 
     // Built-in nodes can emit sub-spans while executing. Bind those timestamps
     // to the same runtime clock as node-start/node-end; do not reuse the

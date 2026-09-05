@@ -99,6 +99,7 @@ const rawDetailsFor = (error: HostError): unknown =>
     .with({ kind: "timeout" }, (e) => ({ timeoutMs: e.timeoutMs }))
     .with({ kind: "forbidden" }, (e) => ({ callerTeam: e.callerTeam, dagTeam: e.dagTeam }))
     .with({ kind: "dag-disabled" }, (e) => ({ reason: e.reason }))
+    .with({ kind: "circuit-open" }, (e) => ({ retryAfterSeconds: e.retryAfterSeconds }))
     .with(
       {
         kind: P.union(

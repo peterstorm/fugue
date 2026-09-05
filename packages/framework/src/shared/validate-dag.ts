@@ -114,6 +114,29 @@ const snapshotNode = (
  *     possible when authors construct nodes via factory helpers that take
  *     `id` explicitly.
  */
+/**
+ * Bucket `edges` by node id, pre-seeding an empty list for every known node so
+ * a lookup never returns undefined for a real node. `include` filters which
+ * edges participate — the three call sites differ ONLY in the key side and that
+ * filter, and hand-rolling the loop each time is how they would drift on the
+ * "skip edges pointing at unknown nodes" guard.
+ */
+const bucketEdgesBy = (
+  nodeIds: Iterable<NodeId>,
+  edges: readonly EdgeDef[],
+  key: (edge: EdgeDef) => string,
+  include: (edge: EdgeDef) => boolean = () => true,
+): Map<string, EdgeDef[]> => {
+  const buckets = new Map<string, EdgeDef[]>();
+  for (const id of nodeIds) buckets.set(id, []);
+  for (const edge of edges) {
+    if (!include(edge)) continue;
+    const list = buckets.get(key(edge));
+    if (list) list.push(edge);
+  }
+  return buckets;
+};
+
 export const validateDagShape = (
   input: DagDefInput,
   provenance?: DagDef["provenance"],
@@ -399,12 +422,7 @@ export const validateDagShape = (
 
   // Else-totality: every node with any conditional out-edge must have exactly
   // one default out-edge.
-  const outgoingByNode = new Map<NodeId, EdgeDef[]>();
-  for (const id of nodeIds) outgoingByNode.set(id, []);
-  for (const e of edges) {
-    const list = outgoingByNode.get(e.from);
-    if (list) list.push(e);
-  }
+  const outgoingByNode = bucketEdgesBy(nodeIds, edges, (e) => e.from);
   for (const id of nodeIds) {
     const out = outgoingByNode.get(id) ?? [];
     const guarded = out.filter(isConditionalEdge);
@@ -463,13 +481,12 @@ export const validateDagShape = (
     // ordering. A node whose only inbound is a `$input` edge is therefore an
     // entry for reachability purposes (skip `$input` edges when counting
     // inbound), and the request flows in regardless of routing.
-    const incomingAny = new Map<string, EdgeDef[]>();
-    for (const id of nodeIds) incomingAny.set(id, []);
-    for (const e of edges) {
-      if (isDagInput(e.from)) continue;
-      const list = incomingAny.get(e.to);
-      if (list) list.push(e);
-    }
+    const incomingAny = bucketEdgesBy(
+      nodeIds,
+      edges,
+      (e) => e.to,
+      (e) => !isDagInput(e.from),
+    );
     const entryIds = [...nodeIds].filter(
       (id) => (incomingAny.get(id)?.length ?? 0) === 0,
     );
@@ -493,14 +510,12 @@ export const validateDagShape = (
       // node is the actual frontier — the place where routing diverged from
       // the output. Reporting the output node itself (the prior behaviour)
       // sent every consumer chasing the symptom rather than the cause.
-      const incomingNonConditional = new Map<string, EdgeDef[]>();
-      for (const id of nodeIds) incomingNonConditional.set(id, []);
-      for (const e of edges) {
-        if (isConditionalEdge(e)) continue;
-        if (isDagInput(e.from)) continue;
-        const list = incomingNonConditional.get(e.to);
-        if (list) list.push(e);
-      }
+      const incomingNonConditional = bucketEdgesBy(
+        nodeIds,
+        edges,
+        (e) => e.to,
+        (e) => !isConditionalEdge(e) && !isDagInput(e.from),
+      );
       const visited = new Set<string>();
       const queue: string[] = [input.outputNodeId];
       let frontier: string = input.outputNodeId;

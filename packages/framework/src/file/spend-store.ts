@@ -14,6 +14,7 @@ import { atomicWriteFile, withFileLock } from "./atomic.js";
 import {
   fileOperationError,
   isFileBackendPathString,
+  type FileOperation,
 } from "./boundary-error.js";
 import {
   assertDirectoryIdentity,
@@ -89,14 +90,29 @@ export const createFileSpendStore = (rootPath: string): FileSpendStore => {
     throw fileOperationError("spendStore:create", rootPath, error);
   }
 
+  /**
+   * A malformed run id is the caller's permanent fault, not a transient IO
+   * fault — both operations must classify it identically, so they share one
+   * parse rather than two hand-copied wraps that could drift in operation name
+   * or retriability.
+   */
+  const parseRunIdFor = (
+    operation: FileOperation,
+    location: string,
+    candidate: RunId,
+  ): Result<RunId, FrameworkError> => {
+    const parsed = parseRuntimeRunId(candidate);
+    return parsed.ok
+      ? parsed
+      : err(fileOperationError(operation, location, parsed.error, "permanent"));
+  };
+
   return Object.freeze({
     read: async (candidate: RunId): Promise<Result<Spend, FrameworkError>> => {
       let location = root.path;
       try {
-        const parsedRunId = parseRuntimeRunId(candidate);
-        if (!parsedRunId.ok) {
-          return err(fileOperationError("spendStore:read", location, parsedRunId.error, "permanent"));
-        }
+        const parsedRunId = parseRunIdFor("spendStore:read", location, candidate);
+        if (!parsedRunId.ok) return parsedRunId;
         const paths = pathsFor(root, parsedRunId.value);
         location = paths.recordPath;
         return readSnapshot(root, parsedRunId.value, paths);
@@ -108,10 +124,8 @@ export const createFileSpendStore = (rootPath: string): FileSpendStore => {
     add: async (candidate: RunId, delta: Spend): Promise<Result<void, FrameworkError>> => {
       let location = root.path;
       try {
-        const parsedRunId = parseRuntimeRunId(candidate);
-        if (!parsedRunId.ok) {
-          return err(fileOperationError("spendStore:add", location, parsedRunId.error, "permanent"));
-        }
+        const parsedRunId = parseRunIdFor("spendStore:add", location, candidate);
+        if (!parsedRunId.ok) return parsedRunId;
         const parsedDelta = parseSpend(delta);
         if (!parsedDelta.ok) {
           return err(fileOperationError(

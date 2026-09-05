@@ -31,13 +31,19 @@ import type { AuthIdentity } from "../../domain/auth.js";
 import { authorizeDagAccess } from "./dag-access.js";
 import { errorResponse, hostUnavailableResponse, successResponse } from "../response.js";
 import type { HostError } from "../../domain/host-error.js";
-import { formatHostError, httpStatusFor } from "../../domain/host-error.js";
+import {
+  circuitOpen,
+  formatHostError,
+  httpStatusFor,
+  retryAfterSecondsFor,
+} from "../../domain/host-error.js";
 import { getRegistry } from "../../domain/host-state.js";
 import { lookupDag } from "../../domain/registry.js";
 import type { RegisteredDag } from "../../domain/registry.js";
 import { acquire, release } from "../../domain/concurrency.js";
 import type { ConcurrencyState } from "../../domain/concurrency.js";
 import { checkCircuit, markSuccess, markFailure } from "../../domain/circuit-guard.js";
+import { DEFAULTS } from "../../domain/circuit-breaker.js";
 import type { CircuitPort, CircuitConfig } from "../../domain/circuit-guard.js";
 import { classifyFrameworkError } from "../../domain/framework-error-http.js";
 import type { HitlRunService } from "../../hitl/service.js";
@@ -95,6 +101,27 @@ export interface RunDagDeps {
 }
 
 /**
+ * One response shape for every HostError this handler returns: status and
+ * Retry-After both come from the authoritative tables in `host-error.ts`
+ * (`httpStatusFor` / `retryAfterSecondsFor`) rather than being hand-copied per
+ * call site, so a policy change lands in one place and the two can never
+ * disagree about the same kind.
+ */
+const hostErrorResponse = (
+  c: Context,
+  dagId: string,
+  error: HostError,
+  details?: unknown,
+): Response => {
+  const retryAfter = retryAfterSecondsFor(error);
+  return errorResponse(c, httpStatusFor(error), error.kind, formatHostError(error), {
+    dagId,
+    ...(details !== undefined ? { details } : {}),
+    ...(retryAfter !== undefined ? { headers: { "Retry-After": String(retryAfter) } } : {}),
+  });
+};
+
+/**
  * Creates the run-dag handler with injected dependencies.
  *
  * `resolveRawId` extracts the target DAG id from the request — defaults to the
@@ -130,16 +157,13 @@ export const createRunDagHandler = (
     if (!registered) {
       const available = registry ? Array.from(registry.dags.keys()) : [];
       const notFound: HostError = { kind: "dag-not-found", dagId, available };
-      return errorResponse(c, 404, notFound.kind, formatHostError(notFound), {
-        dagId,
-        details: { available },
-      });
+      return hostErrorResponse(c, dagId, notFound, { available });
     }
 
     // Check if DAG is disabled
     if (registered.status.kind === "disabled") {
       const disabled: HostError = { kind: "dag-disabled", dagId, reason: registered.status.reason };
-      return errorResponse(c, 503, disabled.kind, formatHostError(disabled), { dagId });
+      return hostErrorResponse(c, dagId, disabled);
     }
 
     // 1.5. Authorization — check team scope and carry the parsed identity.
@@ -158,20 +182,14 @@ export const createRunDagHandler = (
         dagId,
         message: errorMsg,
       };
-      return errorResponse(c, 400, parseErr.kind, formatHostError(parseErr), {
-        dagId,
-        details: { message: errorMsg },
-      });
+      return hostErrorResponse(c, dagId, parseErr, { message: errorMsg });
     }
 
     const parseResult = registered.inputSchema.safeParse(input);
     if (!parseResult.success) {
       const issues = parseResult.error?.issues ?? [];
       const validationErr: HostError = { kind: "input-validation-failed", dagId, issues };
-      return errorResponse(c, 400, validationErr.kind, formatHostError(validationErr), {
-        dagId,
-        details: { issues },
-      });
+      return hostErrorResponse(c, dagId, validationErr, { issues });
     }
 
     // 2.5. HITL fork (ADR-0060): a DAG declaring a `humanReview` gate cannot run
@@ -189,7 +207,7 @@ export const createRunDagHandler = (
       }
       const started = await deps.hitl.startRun(dagId, registered.team, parseResult.data, identity);
       if (!started.ok) {
-        return errorResponse(c, httpStatusFor(started.error), started.error.kind, formatHostError(started.error), { dagId });
+        return hostErrorResponse(c, dagId, started.error);
       }
       // 202 Accepted: the run is queued for durable execution; poll GET /runs/:id.
       return c.json(
@@ -231,10 +249,8 @@ export const createRunDagHandler = (
       const concErr: HostError = atGlobalCapacity
         ? { kind: "global-concurrency-exceeded" }
         : { kind: "dag-concurrency-exceeded", dagId };
-      return errorResponse(c, 429, concErr.kind, formatHostError(concErr), {
-        dagId,
-        details: { scope: atGlobalCapacity ? "global" : "dag" },
-        headers: { "Retry-After": "5" },
+      return hostErrorResponse(c, dagId, concErr, {
+        scope: atGlobalCapacity ? "global" : "dag",
       });
     }
 
@@ -247,10 +263,17 @@ export const createRunDagHandler = (
 
     if (!circuitCheck.allowed) {
       deps.setConcurrency(release(deps.getConcurrency(), token));
-      return errorResponse(c, 503, "dag-disabled", `Circuit breaker open for DAG '${dagId}'`, {
+      // Its OWN kind, not `dag-disabled`: an open circuit clears after the
+      // breaker's cooldown, and the advertised Retry-After is derived from the
+      // DAG's effective `cooldownMs` rather than a hardcoded constant.
+      return hostErrorResponse(
+        c,
         dagId,
-        headers: { "Retry-After": "30" },
-      });
+        // `cooldownMs` is optional on CircuitConfig; `attemptReset` falls back to
+        // DEFAULTS.cooldownMs, so the advertised wait must fall back to the SAME
+        // constant or the header would again diverge from the real reset window.
+        circuitOpen(dagId, circuitConfig.cooldownMs ?? DEFAULTS.cooldownMs),
+      );
     }
 
     const { permit } = circuitCheck;

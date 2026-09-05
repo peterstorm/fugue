@@ -34,7 +34,10 @@ import type { Result } from "./result.js";
 import type { FrameworkError } from "./errors.js";
 import type { Capability, CapabilityRegistry } from "./node.js";
 import type { LlmClient, LlmPricingModel } from "./llm.js";
-import type { RunScopedLlmOperations } from "./capability-handle.js";
+import type {
+  HasNoExtraSymbolMembers,
+  RunScopedLlmOperations,
+} from "./capability-handle.js";
 import type { RunId, DagId, NodeId } from "./ids.js";
 
 /**
@@ -45,7 +48,7 @@ import type { RunId, DagId, NodeId } from "./ids.js";
  * configured binding map unchanged.
  */
 export type ScopedLlmCapability<T extends LlmClient = LlmClient> =
-  [Extract<Exclude<keyof T, keyof LlmClient>, symbol>] extends [never]
+  HasNoExtraSymbolMembers<T> extends true
     ? {
         readonly clientKind: "llm";
         readonly client: T;

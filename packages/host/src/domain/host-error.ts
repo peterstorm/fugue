@@ -38,6 +38,18 @@ export type HostError =
   | { readonly kind: "no-default-export"; readonly path: string }
   | { readonly kind: "dag-not-found"; readonly dagId: DagId; readonly available: readonly DagId[] }
   | { readonly kind: "dag-disabled"; readonly dagId: DagId; readonly reason: string }
+  // `circuit-open` is NOT `dag-disabled`. Both are 503, but disabled is an
+  // administrative state a client cannot wait out, while an open circuit clears
+  // on its own after the breaker's cooldown. Reusing one kind for both left
+  // clients unable to tell them apart. Carries its OWN backoff (the same shape
+  // `tenant-over-quota` uses) so the advertised Retry-After tracks the DAG's
+  // configured `resetTimeoutMs` / `CIRCUIT_BREAKER_COOLDOWN_MS` instead of a
+  // hardcoded constant.
+  | {
+      readonly kind: "circuit-open";
+      readonly dagId: DagId;
+      readonly retryAfterSeconds: RetryAfterSeconds;
+    }
   | { readonly kind: "global-concurrency-exceeded" }
   | { readonly kind: "dag-concurrency-exceeded"; readonly dagId: DagId }
   | { readonly kind: "timeout"; readonly dagId: DagId; readonly runId: RunId; readonly timeoutMs: number }
@@ -114,6 +126,7 @@ const HOST_ERROR_KINDS = Object.freeze({
   "no-default-export": true,
   "dag-not-found": true,
   "dag-disabled": true,
+  "circuit-open": true,
   "global-concurrency-exceeded": true,
   "dag-concurrency-exceeded": true,
   timeout: true,
@@ -185,12 +198,10 @@ const snapshotUnknown = (
         depth + 1,
       );
       if (!property.ok) return property;
-      Object.defineProperty(copy, key, {
-        value: property.value,
-        enumerable: true,
-        configurable: false,
-        writable: false,
-      });
+      // Plain assignment is enough: `copy` has a null prototype, so no inherited
+      // setter can intercept it, and the `Object.freeze` below already makes
+      // every own property non-writable and non-configurable.
+      copy[key] = property.value;
     }
     return { ok: true, value: Object.freeze(copy) };
   } catch {
@@ -403,6 +414,22 @@ export const parseHostError = (value: unknown): HostError | undefined => {
         ? undefined
         : frozenHostError({ kind: "dag-not-found", dagId, available });
     }
+    case "circuit-open": {
+      if (!hasExactOwnStringKeys(snapshot, ["kind", "dagId", "retryAfterSeconds"])) return undefined;
+      const dagId = parseDagId(snapshot.dagId);
+      if (dagId === undefined) return undefined;
+      const seconds = snapshot.retryAfterSeconds;
+      // Rebuilt through the smart constructor: an erased brand cannot be forged
+      // at this authority boundary, and a non-integer / negative is rejected.
+      if (typeof seconds !== "number" || !Number.isSafeInteger(seconds) || seconds < 0) {
+        return undefined;
+      }
+      return frozenHostError({
+        kind: "circuit-open",
+        dagId,
+        retryAfterSeconds: retryAfterSeconds(seconds),
+      });
+    }
     case "dag-disabled": {
       if (!hasExactOwnStringKeys(snapshot, ["kind", "dagId", "reason"])) return undefined;
       const dagId = parseDagId(snapshot.dagId);
@@ -591,7 +618,7 @@ export const httpStatusFor = (error: HostError): number =>
     .with({ kind: "timeout" }, () => 408)
     // worker-unavailable → 503 (SC-012, AD-8). Contained to this tenant.
     .with(
-      { kind: P.union("dag-disabled", "redis-unavailable", "run-lease-lost", "worker-unavailable") },
+      { kind: P.union("dag-disabled", "circuit-open", "redis-unavailable", "run-lease-lost", "worker-unavailable") },
       () => 503,
     )
     .with(
@@ -636,6 +663,8 @@ export const formatHostError = (error: HostError): string =>
     .with({ kind: "no-default-export" }, (e) => `no default export found in '${e.path}'`)
     .with({ kind: "dag-not-found" }, (e) => `DAG '${e.dagId}' not found (available: ${e.available.join(", ") || "none"})`)
     .with({ kind: "dag-disabled" }, (e) => `DAG '${e.dagId}' is disabled: ${e.reason}`)
+    .with({ kind: "circuit-open" }, (e) =>
+      `circuit breaker open for DAG '${e.dagId}'; retry after ${e.retryAfterSeconds}s`)
     .with({ kind: "global-concurrency-exceeded" }, () => `global concurrency limit exceeded`)
     .with({ kind: "dag-concurrency-exceeded" }, (e) => `concurrency limit exceeded for DAG '${e.dagId}'`)
     .with({ kind: "timeout" }, (e) => `DAG '${e.dagId}' run '${e.runId}' timed out after ${e.timeoutMs}ms`)
@@ -744,6 +773,19 @@ export const tenantOverQuota = (
   retryAfterSeconds: retryAfterSeconds(rawRetryAfterSeconds),
 });
 
+/**
+ * Producer of `circuit-open`. `cooldownMs` is the breaker's configured reset
+ * window; Retry-After is whole seconds, so round UP (never advertise a shorter
+ * wait than the breaker will actually enforce) with a 1s floor so a sub-second
+ * cooldown still tells the client to wait rather than retry instantly.
+ */
+export const circuitOpen = (dagId: DagId, cooldownMs: number): HostError =>
+  frozenHostError({
+    kind: "circuit-open",
+    dagId,
+    retryAfterSeconds: retryAfterSeconds(Math.max(1, Math.ceil(cooldownMs / 1000))),
+  });
+
 /** Producer of `worker-unavailable` (SC-012, AD-8) for THIS tenant only. */
 export const workerUnavailable = (tenant: TenantId): HostError =>
   frozenHostError({ kind: "worker-unavailable", tenant });
@@ -774,6 +816,8 @@ const RETRY_AFTER_POLICY = Object.freeze({
   "no-default-export": undefined,
   "dag-not-found": undefined,
   "dag-disabled": undefined,
+  "circuit-open": (error: HostError) =>
+    error.kind === "circuit-open" ? error.retryAfterSeconds : undefined,
   "global-concurrency-exceeded": 5,
   "dag-concurrency-exceeded": 5,
   timeout: undefined,

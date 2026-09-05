@@ -662,10 +662,6 @@ describe("Wave 2.3 — tail-sampling forceFlush isolates inner exporter rejectio
 });
 
 // ---------------------------------------------------------------------------
-// Wave 2.4 — event-log malformed-id warning frequency
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
 // Wave 6.6 — BufferedObserver clears the buffer even when policy.shouldFlush
 // throws. Without the try/finally, a throwing policy strands the buffer.
 // ---------------------------------------------------------------------------

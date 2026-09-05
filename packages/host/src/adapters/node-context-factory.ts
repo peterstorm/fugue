@@ -131,6 +131,15 @@ const failureEscalator = (opts: {
  * @satisfies FR-013 — Keys prefixed with tenant + DAG namespace
  * @satisfies FR-041 — Per-DAG TTL override applied
  */
+/**
+ * One guarded logger binding for an adapter's diagnostics: a failing log port
+ * must never take down the operation it was describing. Both namespaced
+ * adapters below take theirs from here so neither can quietly lose the guard.
+ */
+const guardedReporter = (logger: LogPort) =>
+  (level: "warn" | "error", message: string, context: Record<string, unknown>): void =>
+    logWithoutThrowing(logger, level, message, context);
+
 export const createNamespacedCache = (
   redis: RedisPort,
   tenant: TenantId,
@@ -138,12 +147,7 @@ export const createNamespacedCache = (
   defaultTtlSec: number | undefined,
   logger: LogPort,
 ): ContextCacheAdapter => {
-  // All cache diagnostics use one guarded logger binding.
-  const report = (
-    level: "warn" | "error",
-    message: string,
-    context: Record<string, unknown>,
-  ): void => logWithoutThrowing(logger, level, message, context);
+  const report = guardedReporter(logger);
 
   const getFailures = failureEscalator({
     warnMessage: "Cache get failed — graceful degradation to miss",
@@ -259,11 +263,7 @@ export const createNamespacedCheckpointWriter = (
     checkpointValue: string,
   ) => Promise<Result<string | null, HostError>>,
 ): CheckpointWriter => {
-  const report = (
-    level: "warn" | "error",
-    message: string,
-    context: Record<string, unknown>,
-  ): void => logWithoutThrowing(logger, level, message, context);
+  const report = guardedReporter(logger);
 
   const writeFailures = failureEscalator({
     warnMessage: "Checkpoint write failed — Redis error",
