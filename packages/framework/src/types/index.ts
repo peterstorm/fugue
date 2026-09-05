@@ -101,6 +101,22 @@ export {
   isMissingPathError,
 } from "./safe-error.js";
 
+// ── Own-data boundary parsing ─────────────────────────────────────────────
+// THE getter/proxy/prototype defence for values crossing an extension
+// boundary. Exported because the host's adapters parse the same untrusted
+// request/response objects the framework does and previously each carried
+// their own copy of the algorithm.
+export type { OwnDataFailure } from "./own-data.js";
+export {
+  isObjectLike,
+  readOwnDataProperty,
+  ownDataValue,
+  ownDescriptors,
+  hasExactOwnKeys,
+  snapshotOwnDataObject,
+  snapshotOwnDataArray,
+} from "./own-data.js";
+
 // ── Span kinds ────────────────────────────────────────────────────────────
 export type { SpanKind } from "./span.js";
 

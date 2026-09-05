@@ -99,6 +99,25 @@ const throwingClock = (): number => {
  * emission's clock failure so the rest of the wave runs normally, which is what
  * makes "a broken diagnostic cost a sibling its output" observable.
  */
+/**
+ * A clock that serves the first `healthy` readings and throws thereafter, and
+ * reports how many readings it served. Used to target ONE emission site: the
+ * count is calibrated by a first healthy run rather than hard-coded, so an
+ * unrelated change to how often the runtime reads the clock re-targets the test
+ * instead of silently pointing it somewhere else.
+ */
+const countingClock = (healthy: number): { clock: () => number; reads: () => number } => {
+  let reads = 0;
+  return {
+    clock: () => {
+      reads += 1;
+      if (reads > healthy) throw new Error("clock failed");
+      return Date.now();
+    },
+    reads: () => reads,
+  };
+};
+
 const throwOnceClock = (): (() => number) => {
   let thrown = false;
   return () => {
@@ -398,6 +417,53 @@ describe("executeWave — error paths", () => {
     if (result.event.type === "wave-done") {
       expect(result.event.outputs.get(N("a"))).toBe("carried");
       expect(result.event.outputs.get(N("b"))).toBe("b-out");
+    }
+  });
+
+  it("a failed co-failure emission still returns the primary node-failed", async () => {
+    // Round-13 C1 fenced THREE emit sites; the tests above drive a hostile clock
+    // through only two. This is the third: the co-failed-siblings loop, which
+    // runs AFTER `Promise.all` has resolved — so a throw there escapes the async
+    // function body directly, rejecting `executeWave` and discarding both the
+    // primary `node-failed` event and the `partialOutputs` that keep a retry
+    // from re-running the wave's completed nodes.
+    const primary: FrameworkError = {
+      kind: "validation",
+      nodeId: N("a"),
+      message: "primary failure",
+    };
+    const sibling: FrameworkError = {
+      kind: "validation",
+      nodeId: N("b"),
+      message: "sibling failure",
+    };
+    const nodes = (): Map<string, NodeDef<unknown, unknown>> =>
+      new Map<string, NodeDef<unknown, unknown>>([
+        ["a", { ...makeNode("a"), run: async () => err(primary) }],
+        ["b", { ...makeNode("b"), run: async () => err(sibling) }],
+        ["c", { ...makeNode("c"), run: async () => ok("c-out") }],
+      ]);
+    const wave = [["a", "b", "c"]];
+
+    // Calibrate: a healthy run tells us how many readings this wave takes. Two
+    // failures mean the siblings loop runs, and a failure path returns straight
+    // after it — so the LAST reading is that loop's emission.
+    const healthy = countingClock(Number.MAX_SAFE_INTEGER);
+    await executeWave(0, makeMachineCtx(wave), makeConfig(nodes(), healthy.clock));
+    const total = healthy.reads();
+    expect(total).toBeGreaterThan(1);
+
+    // Re-run serving every reading but that last one.
+    const hostile = countingClock(total - 1);
+    const result = await executeWave(0, makeMachineCtx(wave), makeConfig(nodes(), hostile.clock));
+
+    expect(result.event.type).toBe("node-failed");
+    if (result.event.type === "node-failed") {
+      expect(result.event.error).toBe(primary);
+      // `c` ran fine and `b` is still reported as the co-failure — proof the
+      // clock failed on the emission, not on any node's own execution.
+      expect(result.event.coFailedNodeIds).toEqual([N("b")]);
+      expect(result.event.partialOutputs?.get(N("c"))).toBe("c-out");
     }
   });
 });

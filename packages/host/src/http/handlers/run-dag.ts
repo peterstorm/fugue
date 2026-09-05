@@ -190,7 +190,9 @@ export const createRunDagHandler = (
     // Check if DAG is disabled
     if (registered.status.kind === "disabled") {
       const disabled: HostError = { kind: "dag-disabled", dagId, reason: registered.status.reason };
-      return hostErrorResponse(c, dagId, disabled);
+      // 503 → `server-fault`: the reason is withheld from the body, so the
+      // logger is the ONLY channel it can reach an operator through.
+      return hostErrorResponse(c, dagId, disabled, undefined, deps.logger);
     }
 
     // 1.5. Authorization — check team scope and carry the parsed identity.
@@ -300,6 +302,11 @@ export const createRunDagHandler = (
         // DEFAULTS.cooldownMs, so the advertised wait must fall back to the SAME
         // constant or the header would again diverge from the real reset window.
         circuitOpen(dagId, circuitConfig.cooldownMs ?? DEFAULTS.cooldownMs),
+        undefined,
+        // Also 503 → `server-fault`. `circuit-breaker.ts` is a pure domain
+        // module with no logging of its own, so without this an open breaker
+        // is invisible end-to-end: withheld from the body AND never logged.
+        deps.logger,
       );
     }
 

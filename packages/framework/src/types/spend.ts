@@ -15,6 +15,7 @@
 
 import { match } from "ts-pattern";
 import { err, ok, type Result } from "./result.js";
+import { isObjectLike, readOwnDataProperty, snapshotOwnDataArray } from "./own-data.js";
 
 /**
  * A non-empty, canonically-ordered list of model names.
@@ -179,14 +180,11 @@ export const makeSpend = (input: SpendInput): Spend => ({
   usd: normalizePricedSpend(input.usd),
 }) as Spend;
 
-const isObjectLike = (value: unknown): value is Record<PropertyKey, unknown> =>
-  (typeof value === "object" && value !== null) || typeof value === "function";
-
 const ownValue = (value: object, key: PropertyKey): Result<unknown, string> => {
   try {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    return descriptor !== undefined && Object.hasOwn(descriptor, "value")
-      ? ok(descriptor.value)
+    const read = readOwnDataProperty(value, key);
+    return read !== undefined
+      ? ok(read.value)
       : err(`Spend.${String(key)} must be an own data property`);
   } catch {
     return err(`Spend.${String(key)} could not be inspected`);
@@ -204,53 +202,36 @@ const parseObject = (
 ): Result<Readonly<Record<PropertyKey, unknown>>, string> => {
   if (!isObjectLike(value)) return err(`${path} must be an object`);
   try {
+    // The shared `isObjectLike` narrows to `object`; the index signature is a
+    // typing convenience for the field reads below, all of which still go
+    // through `ownValue` rather than trusting the shape.
     return Array.isArray(value)
       ? err(`${path} must be an object`)
-      : ok(value);
+      : ok(value as Readonly<Record<PropertyKey, unknown>>);
   } catch {
     return err(`${path} could not be inspected`);
   }
 };
 
 const parseModelArray = (value: unknown): Result<readonly string[], string> => {
-  try {
-    if (!Array.isArray(value)) {
-      return err("Spend.usd.models must be a non-empty string array");
-    }
-    const descriptors = Object.getOwnPropertyDescriptors(value) as unknown as Record<
-      PropertyKey,
-      PropertyDescriptor
-    >;
-    const lengthDescriptor = descriptors.length;
-    if (lengthDescriptor === undefined || !("value" in lengthDescriptor)) {
-      return err("Spend.usd.models.length must be an own data property");
-    }
-    const length = lengthDescriptor.value;
-    if (!Number.isSafeInteger(length) || length <= 0) {
-      return err("Spend.usd.models must be a non-empty string array");
-    }
-    const keys = Reflect.ownKeys(descriptors);
-    const canonicalIndices = keys.every((key) => {
-      if (key === "length") return true;
-      if (typeof key !== "string" || !/^(0|[1-9][0-9]*)$/.test(key)) return false;
-      return Number(key) < length;
-    });
-    if (keys.length !== length + 1 || !canonicalIndices) {
-      return err("Spend.usd.models must be a dense own-data array");
-    }
-    const models: string[] = [];
-    for (let index = 0; index < length; index += 1) {
-      const descriptor = descriptors[String(index)];
-      if (descriptor === undefined || !("value" in descriptor) ||
-          typeof descriptor.value !== "string") {
-        return err("Spend.usd.models must be a non-empty string array");
-      }
-      models.push(descriptor.value);
-    }
-    return ok(models);
-  } catch {
-    return err("Spend.usd.models could not be inspected");
+  // Non-empty: an `unpriced` marker with no model names would name nothing to
+  // the operator who has to act on it.
+  const snapshot = snapshotOwnDataArray(value, 1);
+  if (!snapshot.ok) {
+    return err(
+      snapshot.error.kind === "not-dense"
+        ? "Spend.usd.models must be a dense own-data array"
+        : "Spend.usd.models must be a non-empty string array",
+    );
   }
+  const models: string[] = [];
+  for (const element of snapshot.value) {
+    if (typeof element !== "string") {
+      return err("Spend.usd.models must be a non-empty string array");
+    }
+    models.push(element);
+  }
+  return ok(models);
 };
 
 /** Parse an adapter-supplied value before it enters budget arithmetic. */
@@ -327,9 +308,10 @@ export const NO_SPEND: Spend = Object.freeze(makeSpend({
 /**
  * Merge two canonically-ordered model lists into one.
  *
- * The `?? a[0]` fallback is unreachable — `sorted` is built from `a`, which the
- * type guarantees is non-empty — but it is how the non-emptiness is carried to
- * the compiler without a cast or a non-null assertion. Cheap, and the
+ * The `?? a` fallback is unreachable — `canonicalModelNames` returns `undefined`
+ * only for an empty input, and `[...a, ...b]` cannot be empty because `a`'s type
+ * already guarantees it is non-empty — but it is how that non-emptiness is
+ * carried to the compiler without a cast or a non-null assertion. Cheap, and the
  * alternative is an assertion that would be load-bearing for correctness.
  */
 const unionModels = (a: UnpricedModels, b: UnpricedModels): UnpricedModels =>

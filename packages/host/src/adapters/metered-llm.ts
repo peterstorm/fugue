@@ -9,6 +9,7 @@
  * metered surface so provider aliases cannot self-call behind the budget gate.
  */
 
+import { match } from "ts-pattern";
 import {
   EXECUTOR_NODE_ID,
   err,
@@ -24,9 +25,13 @@ import {
   type NodeContext,
   type Result,
   type SendWithToolsRequest,
+  hasExactOwnKeys,
+  isObjectLike,
+  ownDescriptors,
+  snapshotOwnDataArray,
+  snapshotOwnDataObject,
 } from "@fuguejs/framework";
 import {
-  isObjectLike,
   type MeteredLlmOperation,
   type MeteredRequest,
   type RunSpendAuthority,
@@ -38,79 +43,37 @@ const requestBoundaryError = (message: string): FrameworkError => ({
   message: `LLM request boundary: ${message}`,
 });
 
+// The descriptor walk itself is `types/own-data.ts` (shared with the framework's
+// spend/origin/binding boundaries). These wrap it in this module's wording and
+// error type — the mechanism is shared, the diagnostics stay local.
 const snapshotDataObject = (
   value: unknown,
   label: string,
 ): Result<Readonly<Record<PropertyKey, unknown>>, FrameworkError> => {
-  if (!isObjectLike(value)) {
-    return err(requestBoundaryError(`${label} must be an object`));
-  }
-  try {
-    const descriptors = Object.getOwnPropertyDescriptors(value) as Record<
-      PropertyKey,
-      PropertyDescriptor
-    >;
-    const snapshot: Record<PropertyKey, unknown> = Object.create(null);
-    for (const key of Reflect.ownKeys(descriptors)) {
-      const descriptor = descriptors[key];
-      if (descriptor === undefined || !("value" in descriptor)) {
-        return err(requestBoundaryError(`${label}.${String(key)} must be an own data property`));
-      }
-      Object.defineProperty(snapshot, key, {
-        value: descriptor.value,
-        enumerable: descriptor.enumerable,
-        configurable: false,
-        writable: false,
-      });
-    }
-    return ok(Object.freeze(snapshot));
-  } catch {
-    return err(requestBoundaryError(`${label} could not be inspected safely`));
-  }
+  const snapshot = snapshotOwnDataObject(value);
+  if (snapshot.ok) return snapshot;
+  return err(requestBoundaryError(match(snapshot.error)
+    .with({ kind: "not-an-object" }, () => `${label} must be an object`)
+    .with({ kind: "uninspectable" }, () => `${label} could not be inspected safely`)
+    .with({ kind: "not-own-data" }, (e) =>
+      `${label}.${String(e.key)} must be an own data property`)
+    .otherwise(() => `${label} could not be inspected safely`)));
 };
 
 const snapshotDataArray = (
   value: unknown,
   label: string,
 ): Result<readonly unknown[], FrameworkError> => {
-  try {
-    if (!Array.isArray(value)) {
-      return err(requestBoundaryError(`${label} must be an array`));
-    }
-    const descriptors = Object.getOwnPropertyDescriptors(value) as unknown as Record<
-      PropertyKey,
-      PropertyDescriptor
-    >;
-    const lengthDescriptor = descriptors.length;
-    if (lengthDescriptor === undefined || !("value" in lengthDescriptor)) {
-      return err(requestBoundaryError(`${label}.length must be an own data property`));
-    }
-    const length = lengthDescriptor.value;
-    if (!Number.isSafeInteger(length) || length < 0) {
-      return err(requestBoundaryError(`${label}.length must be a non-negative safe integer`));
-    }
-    const keys = Reflect.ownKeys(descriptors);
-    const hasOnlyCanonicalIndices = keys.every((key) => {
-      if (key === "length") return true;
-      if (typeof key !== "string" || !/^(0|[1-9][0-9]*)$/.test(key)) return false;
-      const index = Number(key);
-      return Number.isSafeInteger(index) && index < length;
-    });
-    if (keys.length !== length + 1 || !hasOnlyCanonicalIndices) {
-      return err(requestBoundaryError(`${label} must be a dense own-data array`));
-    }
-    const snapshot: unknown[] = [];
-    for (let index = 0; index < length; index += 1) {
-      const descriptor = descriptors[String(index)];
-      if (descriptor === undefined || !("value" in descriptor)) {
-        return err(requestBoundaryError(`${label}[${index}] must be an own data property`));
-      }
-      snapshot.push(descriptor.value);
-    }
-    return ok(Object.freeze(snapshot));
-  } catch {
-    return err(requestBoundaryError(`${label} could not be inspected safely`));
-  }
+  const snapshot = snapshotOwnDataArray(value);
+  if (snapshot.ok) return snapshot;
+  return err(requestBoundaryError(match(snapshot.error)
+    .with({ kind: "not-an-array" }, () => `${label} must be an array`)
+    .with({ kind: "bad-length" }, () =>
+      `${label}.length must be a non-negative safe integer`)
+    .with({ kind: "not-dense" }, () => `${label} must be a dense own-data array`)
+    .with({ kind: "not-own-data" }, (e) =>
+      `${label}[${String(e.key)}] must be an own data property`)
+    .otherwise(() => `${label} could not be inspected safely`)));
 };
 
 const requiredData = (
@@ -312,20 +275,12 @@ const snapshotToolsRequest = <O>(
 
 /** Own the deployment's pricing identity before issuing a run-scoped client. */
 const snapshotPricingModel = (pricingModel: LlmPricingModel): LlmPricingModel => {
-  let descriptors: Record<PropertyKey, PropertyDescriptor>;
-  try {
-    descriptors = Object.getOwnPropertyDescriptors(pricingModel) as Record<
-      PropertyKey,
-      PropertyDescriptor
-    >;
-  } catch {
-    throw new TypeError("LLM pricing model could not be inspected safely");
-  }
+  const read = ownDescriptors(pricingModel);
+  if (!read.ok) throw new TypeError("LLM pricing model could not be inspected safely");
+  const descriptors = read.value;
 
-  const keys = Reflect.ownKeys(descriptors);
   const hasExactly = (expected: readonly string[]): boolean =>
-    keys.length === expected.length &&
-    keys.every((key) => typeof key === "string" && expected.includes(key));
+    hasExactOwnKeys(descriptors, expected);
   const dataValue = (key: string): unknown => {
     const descriptor = descriptors[key];
     if (descriptor === undefined || !("value" in descriptor)) {

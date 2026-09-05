@@ -44,6 +44,7 @@ import { mergeScopedCapabilities } from "../shared/make-node-context.js";
 import type { NodeId, DagId } from "../types/ids.js";
 import { tryLlmModelId } from "../types/llm.js";
 import { emit } from "./emit.js";
+import { readOwnDataProperty } from "../types/own-data.js";
 import { bestEffort } from "./best-effort.js";
 import { validateInput, validateOutput } from "../shared/validate.js";
 import { buildNodeInput } from "../shared/build-input.js";
@@ -123,7 +124,7 @@ const parseBrokerResult = (
       return violation("Result keys must be strings");
     }
 
-    const okRead = readOwnData(value, "ok");
+    const okRead = readOwnDataProperty(value, "ok");
     if (okRead === undefined) {
       return violation("Result.ok must be an own data property");
     }
@@ -136,7 +137,7 @@ const parseBrokerResult = (
       return violation(`Result must contain exactly 'ok' and '${payloadKey}'`);
     }
 
-    const payloadRead = readOwnData(value, payloadKey);
+    const payloadRead = readOwnDataProperty(value, payloadKey);
     if (payloadRead === undefined) {
       return violation(`Result.${payloadKey} must be an own data property`);
     }
@@ -157,24 +158,15 @@ const parseBrokerResult = (
   }
 };
 
-/**
- * Read an own DATA property, refusing accessors. The absence signal carries no
- * message so each caller phrases its own diagnostic — the two callers name
- * different things ("scoped binding", "Result.ok") and both wordings are
- * observable. ONE encoding of the getter/proxy defence they share.
- */
-const readOwnData = (value: object, key: PropertyKey): { readonly value: unknown } | undefined => {
-  const descriptor = Object.getOwnPropertyDescriptor(value, key);
-  return descriptor !== undefined && Object.hasOwn(descriptor, "value")
-    ? { value: descriptor.value }
-    : undefined;
-};
-
+// The getter/proxy defence itself is `types/own-data.ts` — shared with
+// `types/spend.ts`, `run-dag-stateful.ts`, and the host's request/pricing
+// boundaries. Only the wording stays local: the two callers here name different
+// things ("scoped binding", "Result.ok") and both wordings are observable.
 const ownDataValue = (
   value: object,
   key: PropertyKey,
 ): Result<unknown, string> => {
-  const read = readOwnData(value, key);
+  const read = readOwnDataProperty(value, key);
   return read !== undefined
     ? ok(read.value)
     : err(`scoped binding '${String(key)}' must be an own data property`);

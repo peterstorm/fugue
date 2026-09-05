@@ -37,6 +37,8 @@ import {
   spendOfCall,
   spendOfUnknownCall,
   usageOfError,
+  isObjectLike,
+  readOwnDataProperty,
 } from "@fuguejs/framework";
 import type { LogPort, SpendLedgerPort } from "../ports.js";
 import { formatHostError } from "../domain/host-error.js";
@@ -104,20 +106,14 @@ export interface RunSpendAuthority {
 const writeTtlOf = (cache: MeteredRequestBase["cache"]): CacheTtl =>
   cache === undefined || cache.kind === "none" ? DEFAULT_CACHE_TTL : cache.ttl;
 
-/**
- * Shared with `metered-llm.ts`: both modules parse untrusted request/response
- * objects at the same boundary and must treat callable objects as object-like.
- */
-export const isObjectLike = (value: unknown): value is object =>
-  (typeof value === "object" && value !== null) || typeof value === "function";
-
 const isNonNegativeSafeInteger = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 
+// The descriptor read is `types/own-data.ts`; the wording stays local.
 const ownDataValue = (value: object, key: PropertyKey): Result<unknown, string> => {
-  const descriptor = Object.getOwnPropertyDescriptor(value, key);
-  return descriptor !== undefined && Object.hasOwn(descriptor, "value")
-    ? ok(descriptor.value)
+  const read = readOwnDataProperty(value, key);
+  return read !== undefined
+    ? ok(read.value)
     : err(`'${String(key)}' must be an own data property`);
 };
 

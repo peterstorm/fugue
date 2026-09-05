@@ -23,8 +23,10 @@ import { z } from "zod";
 import type { NodeId } from "../types/ids.js";
 import { FakeLlmClient } from "../llm/fake-client.js";
 import type { FakeTurn, FakeWithToolsScript } from "../llm/fake-client.js";
-import type { ToolDef, LlmRequest, SendWithToolsRequest } from "../types/llm.js";
+import type { LlmClient, LlmResponse, ToolDef, LlmRequest, SendWithToolsRequest } from "../types/llm.js";
 import type { NodeContext } from "../types/node.js";
+import type { Result } from "../types/result.js";
+import type { FrameworkError } from "../types/errors.js";
 import { stubLlmClient } from "./_llm-mocks.js";
 import { testNodeContext } from "./_context-factories.js";
 
@@ -785,3 +787,39 @@ describe("FakeLlmClient: scripted prompt-cache figures", () => {
     expect(result.value.cacheReadTokens).toBe(0);
   });
 });
+
+// ── LlmClient port variance pin (round-14 C1) ───────────────────────────────
+// `LlmClient`'s members are declared as readonly ARROW PROPERTIES, not method
+// shorthand. TypeScript checks method-shorthand parameters BIVARIANTLY even
+// under `strictFunctionTypes`, so a shorthand declaration would let an
+// implementation narrow `ctx` to a type demanding fields a plain `NodeContext`
+// does not carry — satisfying the interface structurally, then crashing at
+// runtime when the framework invokes it with the context it built itself
+// (`nodes/llm-with-tools.ts` passes exactly that). `CapabilityBroker.mintFor`
+// documents and defends against this same hazard; this pins the defence for
+// the framework's most-implemented port.
+//
+// This is a COMPILE-TIME assertion with no runtime body: the framework
+// typechecks its own tests, so a regression to method shorthand makes
+// `NarrowingClient` assignable to `LlmClient` and `tsc` fails right here.
+
+type NarrowerContext = NodeContext & { readonly requiredExtra: string };
+
+/**
+ * An implementation that NARROWS `ctx` — must not satisfy `LlmClient`.
+ * The generic `<O>` is preserved deliberately: a non-generic stand-in would be
+ * unassignable for the wrong reason (signature arity), and the pin would pass
+ * even with the hole open.
+ */
+type NarrowingClient = {
+  readonly sendStructured: LlmClient["sendStructured"];
+  readonly sendWithTools: <O>(
+    req: SendWithToolsRequest<O>,
+    ctx: NarrowerContext,
+  ) => Promise<Result<LlmResponse<O>, FrameworkError>>;
+};
+
+const llmClientVariancePin: NarrowingClient extends LlmClient
+  ? "BIVARIANT — the soundness hole has reopened"
+  : "contravariant" = "contravariant";
+void llmClientVariancePin;

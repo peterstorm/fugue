@@ -21,7 +21,7 @@ import type { Capability, NodeDef, NodeContext, ValidatedNodeContext } from "../
 import type { MintingAuthority } from "../types/capability-broker.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeId, DagId } from "../types/ids.js";
-import { emit } from "./emit.js";
+import { nodeErrorEmitter } from "./post-wave-context.js";
 import { applyJitter, DEFAULT_JITTER_RATIO } from "../shared/jitter.js";
 import { emitHumanIntervention } from "./human-emission.js";
 import { executeWave, type WaveConfig } from "./wave-execution.js";
@@ -116,23 +116,15 @@ const callHumanReviewHook = async (
   call: HumanReviewHookCall,
 ): Promise<UnenrichedDagEvent> => {
   const { phaseKind, nodeId, output, prompt, hooks, nodeMap, nodeCtx, dagId, nowFn } = call;
-  const stamp = (): Date => new Date(nowFn());
+  // THE shared node-error emission (`post-wave-context.ts`), not a third copy:
+  // this one had already drifted from the other two by carrying a `stack`.
+  const emitNodeError = nodeErrorEmitter({ nodeCtx, nodeMap, dagId, nowFn });
   const emitFailure = (
     frameworkError: FrameworkError,
     message: string,
     stack?: string,
   ): UnenrichedDagEvent => {
-    emit(nodeCtx, {
-      type: "node-error",
-      runId: nodeCtx.runId,
-      dagId,
-      nodeId,
-      sideEffects: nodeMap.get(nodeId)?.sideEffects,
-      timestamp: stamp(),
-      error: message,
-      ...(stack !== undefined ? { stack } : {}),
-      frameworkError,
-    });
+    emitNodeError(nodeId, message, frameworkError, stack);
     return { type: "node-failed", nodeId, error: frameworkError };
   };
   if (!hooks?.onHumanReview) {

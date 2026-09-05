@@ -47,6 +47,7 @@ import { fwLogger } from "../logger.js";
 import { bestEffort, bestEffortLog } from "./best-effort.js";
 import type { CompiledDagMachine } from "./machine.js";
 import type { NonEmptyString } from "../types/non-empty-string.js";
+import { hasExactOwnKeys, ownDescriptors } from "../types/own-data.js";
 
 // ---------------------------------------------------------------------------
 // DagRunOpts — caller-supplied options for runDagStateful
@@ -163,20 +164,20 @@ const snapshotOrigin = (
     message: `minting authority origin invalid while snapshotting run authority: ${message}`,
   });
 
-  let descriptors: Record<PropertyKey, PropertyDescriptor>;
-  try {
-    descriptors = Object.getOwnPropertyDescriptors(origin) as Record<
-      PropertyKey,
-      PropertyDescriptor
-    >;
-  } catch (error) {
-    return invalid(`could not be inspected safely: ${safeErrorMessage(error)}`);
+  // Descriptor walk and key-set check are `types/own-data.ts`; only the
+  // diagnostic wording ("minting authority origin invalid …") stays local.
+  const read = ownDescriptors(origin);
+  if (!read.ok) {
+    return invalid(
+      read.error.kind === "uninspectable"
+        ? `could not be inspected safely: ${safeErrorMessage(read.error.cause)}`
+        : "must be an object",
+    );
   }
+  const descriptors = read.value;
 
-  const keys = Reflect.ownKeys(descriptors);
   const hasExactly = (expected: readonly string[]): boolean =>
-    keys.length === expected.length &&
-    keys.every((key) => typeof key === "string" && expected.includes(key));
+    hasExactOwnKeys(descriptors, expected);
   const dataValue = (key: string): Result<unknown, FrameworkError> => {
     const descriptor = descriptors[key];
     return descriptor !== undefined && "value" in descriptor

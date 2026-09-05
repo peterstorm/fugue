@@ -273,15 +273,17 @@ export interface LlmClient {
    * model and returns a schema-validated response. Retries (when wired through
    * the DAG runtime) are handled at the node level, not within this call.
    */
-  sendStructured<O>(req: LlmRequest<O>): Promise<Result<LlmResponse<O>, FrameworkError>>;
+  readonly sendStructured: <O>(
+    req: LlmRequest<O>,
+  ) => Promise<Result<LlmResponse<O>, FrameworkError>>;
   /**
    * Run a tool-using LLM loop until the model emits a final response that
    * parses against `req.schema`. `ctx` is the calling node's `NodeContext` —
    * tools receive it (narrowed to `ToolContext` because LLM-with-tools nodes
    * always declare `requires: ["llm"]`).
    */
-  sendWithTools<O>(
+  readonly sendWithTools: <O>(
     req: SendWithToolsRequest<O>,
     ctx: NodeContext,
-  ): Promise<Result<LlmResponse<O>, FrameworkError>>;
+  ) => Promise<Result<LlmResponse<O>, FrameworkError>>;
 }

@@ -298,6 +298,89 @@ describe("run-dag handler", () => {
     expect(JSON.stringify(await res.json())).not.toContain(INTERNAL_DETAIL);
   });
 
+  // ── Every server fault reaches an operator (round-14 A1) ──────────────────
+  // `hostErrorResponse` withholds a 5xx's detail from the body and logs it
+  // instead — but `logger` is an optional parameter, and only the HITL call
+  // site passed it. `dag-disabled` and `circuit-open` are BOTH 503, and
+  // `logWithoutThrowingTo` calls `logger?.[level]?.(…)`, so an absent logger is
+  // a silent no-op: the reason a request was refused reached nobody, on either
+  // channel. `circuit-breaker.ts` is a pure domain module with no logging of
+  // its own, so this handler was the only place it could ever have surfaced.
+
+  const capturingLogger = () => {
+    const logs: Array<{ message: string; data: Record<string, unknown> }> = [];
+    return {
+      logs,
+      logger: {
+        info: () => {},
+        warn: () => {},
+        error: (message: string, data?: Record<string, unknown>) => {
+          logs.push({ message, data: data ?? {} });
+        },
+      } as RunDagDeps["logger"],
+    };
+  };
+
+  it("logs the withheld detail when a disabled DAG is refused", async () => {
+    const { logs, logger } = capturingLogger();
+    const disabled = makeDisabledDag("disabled-logging");
+
+    const res = await post(
+      createTestApp(defaultDeps({ logger }), makeReadyState(freeze([disabled], sha, Date.now()))),
+      "disabled-logging",
+      { query: "hi" },
+    );
+    const body = await res.json();
+
+    expect(res.status).toBe(503);
+    expect(body.error).toBe("dag-disabled");
+    // Withheld from the caller…
+    expect(JSON.stringify(body)).not.toContain("circuit open");
+    expect(body.details).toBeUndefined();
+    // …but not lost: the operator still gets the reason.
+    expect(logs.some((entry) => JSON.stringify(entry.data).includes("circuit open"))).toBe(true);
+  });
+
+  it("logs the withheld detail when an open circuit refuses a run", async () => {
+    const { logs, logger } = capturingLogger();
+    const base = makeDag("circuit-logging");
+    const cbDag: RegisteredDag = {
+      ...base,
+      config: { ...base.config, circuitBreaker: { failureThreshold: 1 } },
+    };
+    const app = createTestApp(
+      defaultDeps({
+        logger,
+        createContext: () => { throw new Error("ctx init failed"); },
+      }),
+      makeReadyState(freeze([cbDag], sha, Date.now())),
+    );
+
+    await post(app, "circuit-logging", { query: "x" });
+    await post(app, "circuit-logging", { query: "x" });
+    const refused = await post(app, "circuit-logging", { query: "x" });
+    const body = await refused.json();
+
+    expect(refused.status).toBe(503);
+    expect(body.error).toBe("circuit-open");
+    expect(body.details).toBeUndefined();
+    // The breaker state is unobservable anywhere else — this log is the only
+    // place an operator can learn the run was refused by an open circuit.
+    expect(logs.some((entry) => String(entry.data["kind"]) === "circuit-open")).toBe(true);
+  });
+
+  it("still refuses safely when no logger is wired at either 503 site", async () => {
+    // The logger is optional; losing the diagnostic must never cost the refusal.
+    const disabled = await post(
+      createTestApp(defaultDeps(), makeReadyState(freeze([makeDisabledDag("no-logger")], sha, Date.now()))),
+      "no-logger",
+      { query: "hi" },
+    );
+
+    expect(disabled.status).toBe(503);
+    expect(JSON.stringify(await disabled.json())).not.toContain("circuit open");
+  });
+
   it("keeps 4xx HostErrors precise — the discipline is status-driven, not blanket", async () => {
     // A curated caller-facing 4xx keeps its exact message and details.
     const res = await post(
