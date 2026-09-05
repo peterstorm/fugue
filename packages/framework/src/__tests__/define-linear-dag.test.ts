@@ -71,6 +71,24 @@ describe("defineLinearDag", () => {
     expect(dagErr.message).toContain("at least one node");
   });
 
+  // A linear chain is built from ARRAY POSITION, so `[A, B, C, A]` yields
+  // A→B, B→C, C→A: three distinct (from, to) pairs that pass the
+  // edge-uniqueness rule yet resolve through one collapsed node — a cycle
+  // `topoSort` would not reject until the first request. This module promises
+  // the error at boot, so the repeat is refused here.
+  it("rejects a node listed twice, which array order would turn into a cycle", () => {
+    let caught: unknown;
+    try {
+      defineLinearDag({ id: "repeat-cycle", nodes: [nodeA, nodeB, nodeC, nodeA] });
+    } catch (e) { caught = e; }
+
+    expect(caught).toBeInstanceOf(DagDefinitionError);
+    const dagErr = caught as DagDefinitionError;
+    expect(dagErr.detail.kind).toBe("validation");
+    expect(dagErr.message).toContain("more than once");
+    expect(dagErr.message).toContain("fetch");
+  });
+
   it("passes through retryLimits and evalJudges", () => {
     const dag = defineLinearDag({
       id: "retry-test",

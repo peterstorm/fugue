@@ -100,7 +100,6 @@ export const runStateMachine = async <S, E, C>(
 ): Promise<{ state: S; context: C }> => {
   const classify = opts.classifyError ?? defaultClassifyError;
   const nowFn = opts.now ?? Date.now;
-  const stamp = (): Date => new Date(nowFn());
   const dedupKeyFn = opts.computeDedupKey ?? fallbackDedupKey;
   const log = opts.logger ?? { warn: () => {}, error: () => {} };
   const readTraceNow = (): number | undefined => {
@@ -140,14 +139,24 @@ export const runStateMachine = async <S, E, C>(
     if (opts.beforeExecute !== undefined) {
       const proceed = opts.beforeExecute(state, context);
       if (!proceed) {
-        // AD-4: emit skipped trace before aborting so consumers can observe the abort
-        emitTrace({
-          state,
-          nextState: state,
-          outcome: "skipped",
-          durationMs: 0,
-          timestamp: stamp(),
-        });
+        // AD-4: emit skipped trace before aborting so consumers can observe the
+        // abort. The clock is read through `readTraceNow()` like every other
+        // trace site in this file: an inline `new Date(nowFn())` would run the
+        // clock as an ARGUMENT, before `emitTrace`'s own guard is entered, so a
+        // hostile clock would escape as a raw error and `handleKernelError`'s
+        // `isBeforeExecuteAbortError` check would misclassify a deliberate abort
+        // as a generic crash. A suppressed trace is acceptable; a substituted
+        // abort reason is not.
+        const abortAtMs = readTraceNow();
+        if (abortAtMs !== undefined) {
+          emitTrace({
+            state,
+            nextState: state,
+            outcome: "skipped",
+            durationMs: 0,
+            timestamp: new Date(abortAtMs),
+          });
+        }
         throw new BeforeExecuteAbortError();
       }
     }

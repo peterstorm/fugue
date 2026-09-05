@@ -30,6 +30,7 @@ import {
 } from "../types/error-factories.js";
 import {
   formatFrameworkError,
+  asFrameworkError,
   isFrameworkError,
   isFrameworkErrorKind,
   PersistedFrameworkErrorSchema,
@@ -199,6 +200,52 @@ describe("PersistedFrameworkErrorSchema", () => {
     revoked.revoke();
     expect(() => isFrameworkError(revoked.proxy)).not.toThrow();
     expect(isFrameworkError(revoked.proxy)).toBe(false);
+  });
+
+  it("recovers a pre-prompt-caching usage record through asFrameworkError", () => {
+    // A record written before prompt caching carries only the two token counts.
+    // `persistedUsageSchema` exists to accept it, defaulting the cache figures.
+    const legacy = {
+      kind: "node-crash",
+      nodeId: "node-x",
+      message: "boom",
+      retriability: "retriable",
+      usage: { tokensIn: 10, tokensOut: 5 },
+    };
+
+    // The wire parser accepts it...
+    expect(PersistedFrameworkErrorSchema.safeParse(legacy).success).toBe(true);
+
+    // ...but the source object is NOT a `FrameworkError`: `TokenUsage` declares
+    // all four fields required, and every `isFrameworkError` caller carries the
+    // SOURCE forward. Narrowing here would push `undefined` cache-token fields
+    // into budget accounting — a fail-open. The guard stays exact.
+    expect(isFrameworkError(legacy)).toBe(false);
+
+    // Recovery is what the caller actually wants, and it yields the CANONICAL
+    // value: structured kind/retriability intact, usage completed by the
+    // schema's defaults rather than dropped as unrecognizable.
+    const recovered = asFrameworkError(legacy);
+    expect(recovered).toBeDefined();
+    expect(recovered?.kind).toBe("node-crash");
+    if (recovered?.kind !== "node-crash") throw new Error("expected node-crash");
+    expect(recovered.retriability).toBe("retriable");
+    expect(recovered.usage).toEqual({
+      tokensIn: 10,
+      tokensOut: 5,
+      cacheWriteTokens: 0,
+      cacheReadTokens: 0,
+    });
+    // The recovered value is canonical, never the hostile source.
+    expect(recovered).not.toBe(legacy);
+
+    // Total for input the parser rejects, and for hostile input.
+    expect(asFrameworkError({ kind: "node-crash" })).toBeUndefined();
+    expect(asFrameworkError("not an error")).toBeUndefined();
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    expect(() => asFrameworkError(revoked.proxy)).not.toThrow();
+    expect(asFrameworkError(revoked.proxy)).toBeUndefined();
   });
 
   it("parses a standalone augmented-error kind without pretending it is a full error", () => {

@@ -25,7 +25,7 @@ import type {
   MintingAuthority,
 } from "../types/capability-broker.js";
 import type { FrameworkError } from "../types/errors.js";
-import { isFrameworkError } from "../types/errors.js";
+import { asFrameworkError } from "../types/errors.js";
 import { safeErrorMessage } from "../types/safe-error.js";
 import type { NodeId } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
@@ -44,7 +44,7 @@ import { beginRunTelemetry, closeRootSpan, startRunSpan } from "./run-telemetry.
 import type { FreshnessIndex } from "./freshness-check.js";
 import { sha256DedupKey } from "../shared/dedup-key.js";
 import { fwLogger } from "../logger.js";
-import { bestEffortLog } from "./best-effort.js";
+import { bestEffort, bestEffortLog } from "./best-effort.js";
 import type { CompiledDagMachine } from "./machine.js";
 import type { NonEmptyString } from "../types/non-empty-string.js";
 
@@ -412,14 +412,24 @@ interface TerminalDeps {
  * matching run-end, and return the typed error. Every failure exit routes here
  * so a new one cannot forget the span close or the run-end and leave telemetry
  * unbalanced (a run-start with no run-end).
+ *
+ * Both cleanup steps are fenced INDEPENDENTLY, for the same reason
+ * `runFinalizeInBackground` fences its own: they are diagnostics, and this is
+ * the function every failure exit depends on. `emitRunEnd` reads the
+ * caller-supplied clock unguarded, so an unfenced call here would let a hostile
+ * clock throw out of the very path whose job is to fail closed — turning a typed
+ * `Err` back into an escaping exception. A failure to close the span must also
+ * not prevent the run-end, and neither may replace the returned error.
  */
 const failClosed = <O>(
   rootSpan: Span,
   emitRunEnd: (status: "ok" | "error") => void,
   error: FrameworkError,
 ): Result<StatefulOutcome<O>, FrameworkError> => {
-  closeRootSpan(rootSpan, { kind: "error", error });
-  emitRunEnd("error");
+  bestEffort("runDagStateful", "fail-closed root span close", () =>
+    closeRootSpan(rootSpan, { kind: "error", error }));
+  bestEffort("runDagStateful", "fail-closed run-end emission", () =>
+    emitRunEnd("error"));
   return err(error);
 };
 
@@ -458,7 +468,21 @@ const handleTerminalState = <O>(
           );
         }
       } else {
-        await finalize();
+        // Fenced for the same reason the `onBackground` branch above is: a
+        // throwing eval judge — or a hostile clock inside finalize's own
+        // `emitRunEnd("ok")` — must not escape as a rejection. Failing closed
+        // here keeps run telemetry balanced (a run-start always gets a run-end)
+        // instead of leaving the root span open.
+        try {
+          await finalize();
+        } catch (cause) {
+          return failClosed(deps.rootSpan, deps.emitRunEnd, {
+            kind: "node-crash",
+            nodeId: EXECUTOR_NODE_ID,
+            retriability: "non-retriable",
+            message: `run finalize failed after DAG completion: ${safeErrorMessage(cause)}`,
+          });
+        }
       }
       return ok({ kind: "completed", output: s.output as O });
     })
@@ -515,8 +539,11 @@ const frameworkErrorFromKernelCause = (error: unknown): FrameworkError | undefin
       return undefined;
     }
     if (Reflect.get(state, "kind") !== "failed") return undefined;
-    const attachedError = Reflect.get(state, "error");
-    return isFrameworkError(attachedError) ? attachedError : undefined;
+    // Recover the CANONICAL error, not the attached source: this value crossed
+    // an unknown-exception boundary and may carry a pre-prompt-caching `usage`
+    // record, which `isFrameworkError` deliberately declines to narrow. Dropping
+    // it here would discard the kind/retriability the run's failure depends on.
+    return asFrameworkError(Reflect.get(state, "error"));
   } catch {
     return undefined;
   }
@@ -641,8 +668,12 @@ export const runDagStatefulOutcome = async <I, O>(
     try {
       const { state, context } = await runStateMachine(job, compiled.value.machine, executor, runOpts);
 
-      // 6. Handle terminal state
-      return handleTerminalState<O>(state, context, {
+      // 6. Handle terminal state.
+      // `return await`, not a bare `return`: a bare return hands the pending
+      // promise to the caller and the `catch` below — the one that routes every
+      // kernel failure through `handleKernelError` — never observes a rejection
+      // that settles after this frame returns.
+      return await handleTerminalState<O>(state, context, {
         rootSpan, dag, input, nodeCtx, meta, emitRunEnd, opts,
       });
     } catch (e) {

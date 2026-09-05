@@ -38,16 +38,26 @@ export const emitHumanIntervention = (
   capturedWitnesses: readonly Witness[],
 ): Result<void, FrameworkError> => {
   const stamp = (): Date => new Date(nowFn());
-  const nodeDef = nodeMap.get(phase.nodeId);
 
-  if (!nodeDef) {
-    const msg = `internal: node '${phase.nodeId}' missing from nodeMap during human-intervention emit`;
-    const fwError: FrameworkError = { kind: "node-crash", nodeId: phase.nodeId, retriability: "non-retriable", message: msg };
-    // Same fencing as the confidence-extract branch below, and for the same
-    // reason: `stamp()` runs `nowFn()` as an ARGUMENT, so a hostile clock throws
-    // before `emit`/`dispatchEvent` is even entered and no observer-side guard
-    // can catch it. Unfenced, that would escape as an exception and break this
-    // module's fail-closed contract — the typed Err must stay authoritative.
+  /**
+   * The one way this module fails: build the typed `node-crash`, report it as a
+   * diagnostic, and return `Err`. Reporting is fenced because `stamp()` runs
+   * `nowFn()` as an ARGUMENT — a hostile clock throws before `emit`/
+   * `dispatchEvent` is entered, where no observer-side guard can catch it.
+   * Unfenced, that would escape as an exception and break this module's
+   * fail-closed contract; the typed `Err` must stay authoritative. Both failure
+   * branches route here so the fence cannot hold at one and not the other.
+   */
+  const crashAndFail = (
+    msg: string,
+    sideEffects?: NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>["sideEffects"],
+  ): Result<void, FrameworkError> => {
+    const fwError: FrameworkError = {
+      kind: "node-crash",
+      nodeId: phase.nodeId,
+      retriability: "non-retriable",
+      message: msg,
+    };
     bestEffortLog("error", `[emitHumanIntervention] ${msg}`);
     bestEffort("emitHumanIntervention", "node-error emission", () =>
       emit(nodeCtx, {
@@ -55,11 +65,20 @@ export const emitHumanIntervention = (
         runId: nodeCtx.runId,
         dagId,
         nodeId: phase.nodeId,
+        ...(sideEffects !== undefined ? { sideEffects } : {}),
         timestamp: stamp(),
         error: msg,
         frameworkError: fwError,
       }));
     return err(fwError);
+  };
+
+  const nodeDef = nodeMap.get(phase.nodeId);
+
+  if (!nodeDef) {
+    return crashAndFail(
+      `internal: node '${phase.nodeId}' missing from nodeMap during human-intervention emit`,
+    );
   }
 
   const detailed: HumanActionDetailed = match(action)
@@ -83,45 +102,35 @@ export const emitHumanIntervention = (
     try {
       nodeConfidence = nodeDef.confidence.extract(phase.output);
     } catch (e) {
-      const msg = `confidence.extract failed for node '${phase.nodeId}': ${safeErrorMessage(e)}`;
-      const fwError: FrameworkError = {
-        kind: "node-crash",
-        nodeId: phase.nodeId,
-        retriability: "non-retriable",
-        message: msg,
-      };
-      bestEffortLog("error", `[emitHumanIntervention] ${msg}`);
-      bestEffort("emitHumanIntervention", "node-error emission", () =>
-        emit(nodeCtx, {
-          type: "node-error",
-          runId: nodeCtx.runId,
-          dagId,
-          nodeId: phase.nodeId,
-          sideEffects: nodeDef.sideEffects,
-          timestamp: stamp(),
-          error: msg,
-          frameworkError: fwError,
-        }));
-      return err(fwError);
+      return crashAndFail(
+        `confidence.extract failed for node '${phase.nodeId}': ${safeErrorMessage(e)}`,
+        nodeDef.sideEffects,
+      );
     }
   }
 
   const nodeSideEffects: SideEffectKind = nodeDef.sideEffects.kind;
 
-  emit(nodeCtx, {
-    type: "human-intervention",
-    runId: nodeCtx.runId,
-    dagId,
-    nodeId: phase.nodeId,
-    action: detailed,
-    actor: action.actor ?? "unknown",
-    elapsedMsSinceAwait: nowFn() - awaitStartMs,
-    context: {
-      nodeConfidence,
-      nodeSideEffects,
-      priorWitnesses: [...capturedWitnesses],
-    },
-    timestamp: stamp(),
-  });
+  // Same fencing as the two failure branches above, and for the same reason:
+  // `nowFn()`/`stamp()` run as ARGUMENTS, so a hostile clock throws before
+  // `emit`/`dispatchEvent` is entered and no observer-side guard can catch it.
+  // The success outcome is not a diagnostic — `ok(undefined)` must stay
+  // authoritative even when the event describing it cannot be built.
+  bestEffort("emitHumanIntervention", "human-intervention emission", () =>
+    emit(nodeCtx, {
+      type: "human-intervention",
+      runId: nodeCtx.runId,
+      dagId,
+      nodeId: phase.nodeId,
+      action: detailed,
+      actor: action.actor ?? "unknown",
+      elapsedMsSinceAwait: nowFn() - awaitStartMs,
+      context: {
+        nodeConfidence,
+        nodeSideEffects,
+        priorWitnesses: [...capturedWitnesses],
+      },
+      timestamp: stamp(),
+    }));
   return ok(undefined);
 };

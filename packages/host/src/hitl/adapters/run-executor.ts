@@ -16,7 +16,7 @@
  * drop it).
  */
 
-import { asNonEmptyString, runResumableDagJob, ok, err, EXECUTOR_NODE_ID, isFrameworkError, safeErrorMessage } from "@fuguejs/framework";
+import { asNonEmptyString, runResumableDagJob, ok, err, EXECUTOR_NODE_ID, asFrameworkError, safeErrorMessage } from "@fuguejs/framework";
 import type {
   Result,
   FrameworkError,
@@ -87,8 +87,11 @@ interface RunExecutorDeps {
 const frameworkCauseOf = (error: unknown): FrameworkError | null => {
   if (!((typeof error === "object" && error !== null) || typeof error === "function")) return null;
   try {
-    const cause = Reflect.get(error, "cause");
-    return isFrameworkError(cause) ? cause : null;
+    // Recover the CANONICAL error rather than narrowing the attached cause: a
+    // cause rehydrated from a durable HITL record may carry a pre-prompt-caching
+    // `usage`, which `isFrameworkError` deliberately declines to narrow. Falling
+    // back to the generic node-crash below would erase its kind/retriability.
+    return asFrameworkError(Reflect.get(error, "cause")) ?? null;
   } catch {
     return null;
   }

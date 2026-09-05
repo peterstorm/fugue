@@ -609,6 +609,98 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
     expect(result).toEqual(ok({ value: 1 }));
   });
 
+  // The non-background finalize path is fenced like its `onBackground` sibling.
+  // Two failure modes are covered at once: the finalize rejection must not
+  // escape as an unhandled promise rejection (the enclosing catch only sees it
+  // because the terminal handler is AWAITED), and it must fail closed —
+  // `run-end("error")` still emitted, so a run-start is never left unbalanced.
+  it("a failure inside non-background finalize fails closed instead of rejecting", async () => {
+    const obs = new RecordingObserver();
+    let inFinalize = false;
+    // Passes for the whole run, then throws once the judge signals that
+    // control has reached finalize — where the old code had no fence.
+    const clock = (): number => {
+      if (inFinalize) throw new Error("clock failed during finalize");
+      return 1_000;
+    };
+    const judge = {
+      id: N("judge"),
+      kind: "eval-judge" as const,
+      config: { id: "judge", criteria: ["accuracy"] },
+      run: async () => {
+        inFinalize = true;
+        return {
+          outcome: "passed" as const,
+          score: 1,
+          criteriaScores: { accuracy: 1 },
+          failedCriteria: [],
+          reason: "ok",
+        };
+      },
+    };
+    const dag = defineDagFromArray({
+      id: "finalize-fails",
+      nodes: [
+        createTransformNode({
+          id: N("A"),
+          inputSchema: z.any(),
+          outputSchema: z.any(),
+          transform: (i) => ok(i),
+        }),
+      ],
+      edges: [{ from: DAG_INPUT, to: "A" }],
+      evalJudges: [judge],
+    });
+
+    let settled: unknown;
+    await expect((async () => {
+      settled = await runDag(dag, { value: 1 }, mkCtx({ observer: obs }), { now: clock });
+    })()).resolves.toBeUndefined();
+
+    expect((settled as { ok: boolean }).ok).toBe(false);
+  });
+
+  // The other half of the fail-closed contract: when finalize fails but
+  // telemetry itself still works, the run-end MUST be emitted and MUST report
+  // the error, so a run-start is never left dangling.
+  it("a finalize failure still emits the matching run-end('error')", async () => {
+    const obs = new RecordingObserver();
+    // A judge result whose `outcome` throws on read: `judgePassed` reads it
+    // while folding results into meta, INSIDE finalize and outside the
+    // per-judge crash boundary.
+    const hostileResult = Object.defineProperty(
+      { score: 1, criteriaScores: {}, failedCriteria: [], reason: "ok" },
+      "outcome",
+      { get: () => { throw new Error("hostile judge result"); }, enumerable: true },
+    );
+    const judge = {
+      id: N("judge"),
+      kind: "eval-judge" as const,
+      config: { id: "judge", criteria: ["accuracy"] },
+      run: async () => hostileResult as never,
+    };
+    const dag = defineDagFromArray({
+      id: "finalize-fails-telemetry",
+      nodes: [
+        createTransformNode({
+          id: N("A"),
+          inputSchema: z.any(),
+          outputSchema: z.any(),
+          transform: (i) => ok(i),
+        }),
+      ],
+      edges: [{ from: DAG_INPUT, to: "A" }],
+      evalJudges: [judge],
+    });
+
+    const result = await runDag(dag, { value: 1 }, mkCtx({ observer: obs }));
+
+    expect(result.ok).toBe(false);
+    const runEnds = obs.events.filter((e) => e.type === "run-end");
+    expect(runEnds).toHaveLength(1);
+    expect((runEnds[0] as unknown as { status: string }).status).toBe("error");
+  });
+
   it("hostile origin accessors become validation errors with balanced run telemetry", async () => {
     const dag = mkSimpleDag("hostile-origin");
     const broker = { mintFor: async () => ok({}) };

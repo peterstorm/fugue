@@ -371,6 +371,31 @@ describe("runStateMachine", () => {
     expect(traces[0].event).toBeUndefined();
   });
 
+  // The abort trace reads the clock through the same guard every other trace
+  // site uses. Unguarded, `new Date(nowFn())` runs as an ARGUMENT to emitTrace,
+  // before emitTrace's own try/catch, so a hostile clock replaces the deliberate
+  // BeforeExecuteAbortError with a raw error — and `handleKernelError`'s
+  // `isBeforeExecuteAbortError` check then misreports the abort as a crash.
+  it("still aborts with BeforeExecuteAbortError when the trace clock throws", async () => {
+    const job = makeJob();
+    const traces: TraceEvent<State, Event>[] = [];
+    const executor: Executor<State, Event, Context> = async () => ({ type: "START" });
+
+    await expect(
+      runStateMachine(job, simpleMachine, executor, {
+        errorEventOf: defaultErrorEventOf,
+        beforeExecute: () => false,
+        onTrace: (t) => traces.push(t),
+        now: () => { throw new Error("clock failed"); },
+        logger: { warn: () => {}, error: () => {} },
+      }),
+    ).rejects.toThrow(/aborted by beforeExecute/i);
+
+    // The trace is a diagnostic: a hostile clock may suppress it, but must not
+    // substitute the abort reason.
+    expect(traces).toHaveLength(0);
+  });
+
   it("proceeds when beforeExecute returns true (FR-012)", async () => {
     const job = makeJob();
     const executor: Executor<State, Event, Context> = async (state) => {

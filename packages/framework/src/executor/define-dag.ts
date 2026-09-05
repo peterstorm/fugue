@@ -28,6 +28,8 @@ import type { Capability, NodeDef } from "../types/node.js";
 import type { EvalJudgeNodeDef } from "../nodes/eval-judge.js";
 import type { FrameworkError } from "../types/errors.js";
 import { formatFrameworkError } from "../types/errors.js";
+import type { NodeId } from "../types/ids.js";
+import { err } from "../types/result.js";
 import { validateDagShape } from "./validate-dag.js";
 
 export class DagDefinitionError extends Error {
@@ -70,6 +72,29 @@ export const defineDag = <const Nodes extends NodesRecord>(
 };
 
 /**
+ * First node id under which the array carries two DIFFERENT definitions.
+ *
+ * Re-listing the SAME node is legitimate and load-bearing: `defineRouter` names
+ * one shared target from several cases, and collapsing those to one entry is
+ * exactly right. Two different definitions under one id is the authoring error
+ * — `Object.fromEntries` would keep only the last and drop the other in
+ * silence.
+ */
+const firstCollidingNodeId = (
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- matches the array-shape variance leak
+  nodes: readonly NodeDef<any, any, any, readonly Capability[]>[],
+): NodeId | undefined => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- see above
+  const seen = new Map<NodeId, NodeDef<any, any, any, readonly Capability[]>>();
+  for (const node of nodes) {
+    const existing = seen.get(node.id);
+    if (existing !== undefined && existing !== node) return node.id;
+    seen.set(node.id, node);
+  }
+  return undefined;
+};
+
+/**
  * Convenience for tests / dynamic constructions: convert an array of nodes
  * (variance-leaked via `any`) into a record keyed by `node.id`, then call
  * `defineDag`. Edge endpoints stay `string`-typed at edit time — use the
@@ -87,6 +112,21 @@ export const defineDagFromArray = (input: {
   /** Stamped by shape helpers (defineLinearDag, …); absent for raw array use. */
   readonly provenance?: DagDef["provenance"];
 }): DagDef => {
+  // An id collision is unrepresentable in the record shape but not in an array,
+  // and `Object.fromEntries` would keep only the last definition and drop the
+  // other with no diagnostic. This module promises the error "at boot, not on
+  // the first request", so the collapse has to fail here, before it happens.
+  const collidingId = firstCollidingNodeId(input.nodes);
+  if (collidingId !== undefined) {
+    return orThrow(input.id, err({
+      kind: "validation",
+      nodeId: collidingId,
+      message:
+        `DAG '${input.id}' declares two different nodes under id '${collidingId}'; ` +
+        "node ids must identify one definition",
+    }));
+  }
+
   const nodesRecord: NodesRecord = Object.fromEntries(
     input.nodes.map((n) => [n.id, n]),
   );

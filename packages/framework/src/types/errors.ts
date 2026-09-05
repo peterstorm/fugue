@@ -568,6 +568,16 @@ const isSameOwnData = (
  * value must also equal the canonical parsed data: a wire migration/default or
  * correlation repair proves the parser output, not the source object narrowed
  * by this predicate. Parsing and comparison are fenced for hostile proxies.
+ *
+ * DELIBERATELY EXACT, and that exactness has a cost worth naming. Because
+ * `persistedUsageSchema` defaults the two cache-token fields, a pre-prompt-
+ * caching `usage: { tokensIn, tokensOut }` record PARSES but does not narrow —
+ * the source object is missing fields the in-memory `TokenUsage` declares
+ * required. Widening this predicate to admit it would be a fail-open: every
+ * caller returns or rethrows the SOURCE value, so `undefined` cache-token
+ * fields would reach budget accounting. A caller that needs to RECOVER such a
+ * record wants the canonical value, not a narrowed source — use
+ * `asFrameworkError`.
  */
 export const isFrameworkError = (value: unknown): value is FrameworkError => {
   try {
@@ -575,6 +585,26 @@ export const isFrameworkError = (value: unknown): value is FrameworkError => {
     return parsed.success && isSameOwnData(value, parsed.data);
   } catch {
     return false;
+  }
+};
+
+/**
+ * Recover a complete `FrameworkError` from an unknown boundary value — parse,
+ * don't validate. Returns the CANONICAL parsed value (wire defaults applied,
+ * checkpoint addresses correlated), so a record written before prompt caching
+ * existed is recovered with its structured `kind`/`retriability` intact and a
+ * complete `TokenUsage`, rather than being dropped as unrecognizable.
+ *
+ * Use this wherever an error is being carried forward from an unknown value;
+ * use `isFrameworkError` only to ask whether the value in hand ALREADY is one.
+ * The returned object is a new canonical value, never the hostile source.
+ */
+export const asFrameworkError = (value: unknown): FrameworkError | undefined => {
+  try {
+    const parsed = PersistedFrameworkErrorSchema.safeParse(value);
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
   }
 };
 

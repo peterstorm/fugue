@@ -127,9 +127,8 @@ export const fileOperationError = (
  * the factory/operation boundary, before it can reach `join`/fs as a raw
  * TypeError. ONE encoding for every file-backend entry point, including the
  * atomic, journal, checkpointer, freshness-index, resume, and spend-store
- * surfaces; the per-site
- * DIAGNOSTIC stays at each call site (the message names the site-specific
- * field).
+ * surfaces; the per-site DIAGNOSTIC stays at each call site (the message names
+ * the site-specific field).
  */
 export const isFileBackendPathString = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0 && !value.includes("\u0000");

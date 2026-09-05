@@ -25,7 +25,12 @@ import {
   type Result,
   type SendWithToolsRequest,
 } from "@fuguejs/framework";
-import { isObjectLike, type RunSpendAuthority } from "./run-spend-authority.js";
+import {
+  isObjectLike,
+  type MeteredLlmOperation,
+  type MeteredRequest,
+  type RunSpendAuthority,
+} from "./run-spend-authority.js";
 
 const requestBoundaryError = (message: string): FrameworkError => ({
   kind: "validation",
@@ -347,36 +352,47 @@ export const createMeteredLlm = (
   pricingModel: LlmPricingModel,
 ): LlmClient => {
   const boundPricingModel = snapshotPricingModel(pricingModel);
+
+  /**
+   * The one path from a caller's request to the inner client: snapshot first,
+   * then dispatch the SNAPSHOT through the authority. Both operations route
+   * here so neither can grow a way to reach `inner` without being metered, and
+   * so a failed snapshot always short-circuits to the typed `Err` rather than
+   * an unmetered call.
+   */
+  const dispatch = <O, Req extends MeteredRequest<O>>(
+    operation: MeteredLlmOperation,
+    snapshot: Result<Req, FrameworkError>,
+    call: (request: Req) => Promise<Result<LlmResponse<O>, FrameworkError>>,
+  ): Promise<Result<LlmResponse<O>, FrameworkError>> =>
+    snapshot.ok
+      ? authority.execute({
+          clientKey,
+          operation,
+          pricingModel: boundPricingModel,
+          request: snapshot.value,
+          call: () => call(snapshot.value),
+        })
+      : Promise.resolve(snapshot);
+
   return Object.freeze({
     sendStructured: <O>(
       req: LlmRequest<O>,
-    ): Promise<Result<LlmResponse<O>, FrameworkError>> => {
-      const request = snapshotStructuredRequest(req);
-      return request.ok
-        ? authority.execute({
-            clientKey,
-            operation: "sendStructured",
-            pricingModel: boundPricingModel,
-            request: request.value,
-            call: () => inner.sendStructured(request.value),
-          })
-        : Promise.resolve(request);
-    },
+    ): Promise<Result<LlmResponse<O>, FrameworkError>> =>
+      dispatch(
+        "sendStructured",
+        snapshotStructuredRequest(req),
+        (request) => inner.sendStructured(request),
+      ),
 
     sendWithTools: <O>(
       req: SendWithToolsRequest<O>,
       ctx: NodeContext,
-    ): Promise<Result<LlmResponse<O>, FrameworkError>> => {
-      const request = snapshotToolsRequest(req);
-      return request.ok
-        ? authority.execute({
-            clientKey,
-            operation: "sendWithTools",
-            pricingModel: boundPricingModel,
-            request: request.value,
-            call: () => inner.sendWithTools(request.value, ctx),
-          })
-        : Promise.resolve(request);
-    },
+    ): Promise<Result<LlmResponse<O>, FrameworkError>> =>
+      dispatch(
+        "sendWithTools",
+        snapshotToolsRequest(req),
+        (request) => inner.sendWithTools(request, ctx),
+      ),
   });
 };

@@ -26,7 +26,7 @@ export {
 
 // ── Errors ────────────────────────────────────────────────────────────────
 export type { FrameworkError, FrameworkErrorKind, MissingCapability, PartialTokenUsage } from "./errors.js";
-export { formatFrameworkError, isFrameworkError, isFrameworkErrorKind, PersistedFrameworkErrorSchema, FrameworkAugmentedError, usageOfError } from "./errors.js";
+export { asFrameworkError, formatFrameworkError, isFrameworkError, isFrameworkErrorKind, PersistedFrameworkErrorSchema, FrameworkAugmentedError, usageOfError } from "./errors.js";
 export { frameworkError } from "./error-factories.js";
 
 // ── Token usage ───────────────────────────────────────────────────────────

@@ -305,11 +305,22 @@ function isIssue(value: unknown): value is ZodIssue {
   return ISSUE_PAYLOAD_PARSERS[value.code](value);
 }
 
-const parseDagId = (value: unknown): DagId | undefined => {
+/**
+ * Rebuild a branded id from an untrusted wire value through its own smart
+ * constructor — the only way a brand is minted at this authority boundary, so
+ * an erased brand cannot be forged. Shared by all three id parsers below so a
+ * change to the rule (say, rejecting a non-string differently) cannot be
+ * remembered at one and forgotten at another.
+ */
+const parseBranded = <B>(
+  parse: (raw: string) => { readonly ok: true; readonly value: B } | { readonly ok: false },
+) => (value: unknown): B | undefined => {
   if (!isString(value)) return undefined;
-  const parsed = tryDagId(value);
+  const parsed = parse(value);
   return parsed.ok ? parsed.value : undefined;
 };
+
+const parseDagId = parseBranded(tryDagId);
 
 const parseDagIds = (value: unknown): readonly DagId[] | undefined => {
   if (!Array.isArray(value)) return undefined;
@@ -322,17 +333,9 @@ const parseDagIds = (value: unknown): readonly DagId[] | undefined => {
   return Object.freeze(parsed);
 };
 
-const parseRunId = (value: unknown): RunId | undefined => {
-  if (!isString(value)) return undefined;
-  const parsed = tryRunId(value);
-  return parsed.ok ? parsed.value : undefined;
-};
+const parseRunId = parseBranded(tryRunId);
 
-const parseTenantId = (value: unknown): TenantId | undefined => {
-  if (!isString(value)) return undefined;
-  const parsed = tenantId(value);
-  return parsed.ok ? parsed.value : undefined;
-};
+const parseTenantId = parseBranded(tenantId);
 
 const frozenHostError = <E extends HostError>(error: E): E => Object.freeze(error);
 

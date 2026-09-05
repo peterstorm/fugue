@@ -159,6 +159,45 @@ describe("emitHumanIntervention", () => {
     expect(intervention).toBeUndefined();
   });
 
+  // Third member of the hostile-diagnostics family, for the SUCCESS path. The
+  // two branches below cover the fail-closed exits; this one covers the exit
+  // that returns `ok`. `nowFn()`/`stamp()` run as ARGUMENTS to `emit`, so an
+  // unfenced success path lets a throwing clock escape as a raw exception —
+  // `handleHumanGate` has no try/catch, so it would surface as a crash rather
+  // than the documented `Result`.
+  it("keeps the successful outcome authoritative under a hostile clock", () => {
+    const obs = new RecordingObserver();
+    setFrameworkLogger({
+      debug: () => { throw new Error("logger failed"); },
+      info: () => {},
+      warn: () => {},
+      error: () => { throw new Error("logger failed"); },
+    });
+
+    try {
+      let result: ReturnType<typeof emitHumanIntervention> | undefined;
+      expect(() => {
+        result = emitHumanIntervention(
+          { nodeId: NID, output: { x: 1 } },
+          { kind: "approve", actor: "alice" },
+          new Map([[NID, makeNodeDef()]]), // node present, confidence "none"
+          makeCtx(obs) as any,
+          DID,
+          () => { throw new Error("clock failed"); },
+          0,
+          [],
+        );
+      }).not.toThrow();
+
+      expect(result?.ok).toBe(true);
+      // The event could not be built, but its absence is a lost diagnostic —
+      // never a lost outcome.
+      expect(obs.events).toHaveLength(0);
+    } finally {
+      __resetFrameworkLogger();
+    }
+  });
+
   // Mirror of the hostile-diagnostics test below, for the OTHER fail-closed
   // branch. `stamp()` runs `nowFn()` as an argument to `emit`, so a throwing
   // clock fires before dispatchEvent is entered and no observer-side guard can

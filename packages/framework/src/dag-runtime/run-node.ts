@@ -122,32 +122,32 @@ const parseBrokerResult = (
       return violation("Result keys must be strings");
     }
 
-    const okDescriptor = Object.getOwnPropertyDescriptor(value, "ok");
-    if (okDescriptor === undefined || !Object.hasOwn(okDescriptor, "value")) {
+    const okRead = readOwnData(value, "ok");
+    if (okRead === undefined) {
       return violation("Result.ok must be an own data property");
     }
 
     let payloadKey: "value" | "error";
-    if (okDescriptor.value === true) payloadKey = "value";
-    else if (okDescriptor.value === false) payloadKey = "error";
+    if (okRead.value === true) payloadKey = "value";
+    else if (okRead.value === false) payloadKey = "error";
     else return violation("Result.ok must be exactly true or false");
     if (keys.length !== 2 || !keys.includes("ok") || !keys.includes(payloadKey)) {
       return violation(`Result must contain exactly 'ok' and '${payloadKey}'`);
     }
 
-    const payloadDescriptor = Object.getOwnPropertyDescriptor(value, payloadKey);
-    if (payloadDescriptor === undefined || !Object.hasOwn(payloadDescriptor, "value")) {
+    const payloadRead = readOwnData(value, payloadKey);
+    if (payloadRead === undefined) {
       return violation(`Result.${payloadKey} must be an own data property`);
     }
 
     if (payloadKey === "value") {
-      const capabilities = snapshotScopedCapabilities(payloadDescriptor.value);
+      const capabilities = snapshotScopedCapabilities(payloadRead.value);
       return capabilities.ok
         ? ok(capabilities.value)
         : violation(capabilities.error);
     }
 
-    const frameworkError = PersistedFrameworkErrorSchema.safeParse(payloadDescriptor.value);
+    const frameworkError = PersistedFrameworkErrorSchema.safeParse(payloadRead.value);
     return frameworkError.success
       ? err(frameworkError.data)
       : violation("err(error) must contain a valid FrameworkError");
@@ -156,13 +156,26 @@ const parseBrokerResult = (
   }
 };
 
+/**
+ * Read an own DATA property, refusing accessors. The absence signal carries no
+ * message so each caller phrases its own diagnostic — the two callers name
+ * different things ("scoped binding", "Result.ok") and both wordings are
+ * observable. ONE encoding of the getter/proxy defence they share.
+ */
+const readOwnData = (value: object, key: PropertyKey): { readonly value: unknown } | undefined => {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  return descriptor !== undefined && Object.hasOwn(descriptor, "value")
+    ? { value: descriptor.value }
+    : undefined;
+};
+
 const ownDataValue = (
   value: object,
   key: PropertyKey,
 ): Result<unknown, string> => {
-  const descriptor = Object.getOwnPropertyDescriptor(value, key);
-  return descriptor !== undefined && Object.hasOwn(descriptor, "value")
-    ? ok(descriptor.value)
+  const read = readOwnData(value, key);
+  return read !== undefined
+    ? ok(read.value)
     : err(`scoped binding '${String(key)}' must be an own data property`);
 };
 

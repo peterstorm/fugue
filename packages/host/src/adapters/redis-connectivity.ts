@@ -312,8 +312,14 @@ export const createIoredisRedisPort = (
           return ok(undefined);
         }
       }),
+    // Routed through `watchGuarded`, not bare `serializeTransaction`: WATCH state
+    // is per-CONNECTION, so once a prior transaction's own UNWATCH cleanup has
+    // failed, every later transaction on this shared connection is unreliable —
+    // not only the WATCH-issuing ones. Sharing the gate keeps the port's
+    // "poisoned ⇒ fail fast with the recorded diagnostic" rule uniform instead
+    // of surfacing a generic aborted-EXEC error from this one method.
     commitCheckpointAndRetainSpend: (commit) =>
-      serializeTransaction(() =>
+      watchGuarded("Redis checkpoint/spend retention", () =>
         redisCall(
           () =>
             `MULTI CHECKPOINT-SPEND-RETENTION ${commit.checkpointKey} ${commit.spendKey}`,

@@ -667,6 +667,35 @@ describe("createRedisConnectivity — spend-ledger capability", () => {
     ]);
   });
 
+  // WATCH state is per-CONNECTION, so once a prior transaction's own UNWATCH
+  // cleanup has failed, every later transaction on this shared connection is
+  // unreliable — not only the WATCH-issuing ones. The checkpoint/spend commit
+  // shares that connection and must honour the same poison gate, failing fast
+  // with the recorded diagnostic instead of issuing commands.
+  it("refuses the atomic checkpoint once the shared connection's WATCH state is poisoned", async () => {
+    const fake = new FakeRedis({ throwOn: ["get", "unwatch"] });
+    const { bundle } = await wire(fake);
+
+    const poisoning = await bundle.redis.compareAndDelete("lease", "owner-a");
+    expect(isErr(poisoning)).toBe(true);
+    const callsAfterPoisoning = [...fake.calls];
+
+    const result = await bundle.redis.commitCheckpointAndRetainSpend?.({
+      checkpointKey: "run:node",
+      checkpointValue: "checkpoint",
+      spendKey: "run:spend",
+      checkpointTtlSec: 300,
+      spendTtlSec: 900,
+    });
+
+    expect(result !== undefined && isErr(result)).toBe(true);
+    if (result !== undefined && isErr(result) && result.error.kind === "redis-unavailable") {
+      expect(result.error.operation).toContain("optimistic transactions disabled");
+    }
+    // Fails fast: no MULTI is issued on the poisoned connection.
+    expect(fake.calls).toEqual(callsAfterPoisoning);
+  });
+
   it("fails the atomic checkpoint when spend retention reports a command error", async () => {
     const fake = new FakeRedis({
       execCommandError: new Error("spend retention failed"),

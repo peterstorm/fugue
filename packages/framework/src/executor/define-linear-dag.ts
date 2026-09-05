@@ -45,6 +45,25 @@ export const defineLinearDag = (config: LinearDagConfig): DagDef => {
     });
   }
 
+  // Edges come from ARRAY POSITION, so a node listed twice chains back into
+  // itself: `[A, B, C, A]` yields A→B, B→C, C→A — three distinct (from, to)
+  // pairs that pass the edge-uniqueness rule yet resolve through one collapsed
+  // node, forming a cycle. `topoSort` would not reject it until
+  // `compileDagToMachine` ran on the first request, so a linear chain refuses
+  // the repeat here regardless of whether the two entries are the same object.
+  const repeated = config.nodes.find(
+    (node, i) => config.nodes.findIndex((other) => other.id === node.id) !== i,
+  );
+  if (repeated !== undefined) {
+    throw new DagDefinitionError(config.id, {
+      kind: "validation",
+      nodeId: repeated.id,
+      message:
+        `defineLinearDag lists node '${repeated.id}' more than once; a linear ` +
+        "chain is built from array order, so a repeat would form a cycle",
+    });
+  }
+
   const chainEdges = config.nodes.slice(0, -1).map((node, i) => ({
     from: node.id as string,
     to: config.nodes[i + 1]!.id as string,

@@ -971,14 +971,18 @@ type HostLlmConfig =
 /** Parsed host configuration with provider-specific LLM requirements encoded. */
 export type HostConfig = ParsedHostConfig & HostLlmConfig;
 
+/** A provider credential that is actually present: declared, and not blank. */
+const isSupplied = (value: string | undefined): value is string =>
+  value !== undefined && value.length > 0;
+
 const withLlmPostcondition = (config: ParsedHostConfig): HostConfig | undefined => {
   if (config.LLM_PROVIDER === "anthropic") {
-    return config.ANTHROPIC_API_KEY !== undefined && config.ANTHROPIC_API_KEY.length > 0
+    return isSupplied(config.ANTHROPIC_API_KEY)
       ? { ...config, LLM_PROVIDER: "anthropic", ANTHROPIC_API_KEY: config.ANTHROPIC_API_KEY }
       : undefined;
   }
   if (config.LLM_PROVIDER === "openai") {
-    return config.OPENAI_API_KEY !== undefined && config.OPENAI_API_KEY.length > 0
+    return isSupplied(config.OPENAI_API_KEY)
       ? { ...config, LLM_PROVIDER: "openai", OPENAI_API_KEY: config.OPENAI_API_KEY }
       : undefined;
   }
@@ -987,10 +991,8 @@ const withLlmPostcondition = (config: ParsedHostConfig): HostConfig | undefined 
   const apiKey = config.AZURE_OPENAI_API_KEY;
   const deployment = config.AZURE_OPENAI_DEPLOYMENT;
   const model = config.AZURE_OPENAI_MODEL;
-  return endpoint !== undefined && endpoint.length > 0 &&
-      apiKey !== undefined && apiKey.length > 0 &&
-      deployment !== undefined && deployment.length > 0 &&
-      model !== undefined && model.length > 0
+  return isSupplied(endpoint) && isSupplied(apiKey) &&
+      isSupplied(deployment) && isSupplied(model)
     ? {
         ...config,
         LLM_PROVIDER: "azure",
