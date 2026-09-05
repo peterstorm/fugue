@@ -1,4 +1,3 @@
-import { NoopObserver } from "../observer/observer.js";
 import type { RunId, DagId } from "../types/ids.js";
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
@@ -10,6 +9,7 @@ import type { LlmClient, ToolDef } from "../types/llm.js";
 import { tool } from "../llm/tools.js";
 import { stubSendWithTools } from "./_llm-mocks.js";
 import { N } from "./_id-helpers.js";
+import { testNodeContext } from "./_context-factories.js";
 
 const InputSchema = z.object({ customerId: z.string() });
 const OutputSchema = z.object({ greeting: z.string() });
@@ -50,17 +50,12 @@ describe("createLlmWithToolsNode — factory", () => {
       buildUser: (input) => `say hi to ${input.customerId}`,
     });
 
-    const ctx: NodeContext = {
+    const ctx: NodeContext = testNodeContext({
       runId: "r1" as RunId,
       dagId: "d1" as DagId,
-      observer: new NoopObserver(),
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null, http: null, clock: null, budget: null,
       cache,
-      prompts: null,
       llm,
-      logger: { warn: () => {}, error: () => {} },
-    };
+    });
 
     const result = await node.run({ customerId: "abc" }, ctx as any);
     expect(result.ok).toBe(true);
@@ -107,17 +102,12 @@ describe("createLlmWithToolsNode — factory", () => {
       buildUser: (input) => `say hi to ${input.customerId}`,
     });
 
-    const ctx: NodeContext = {
+    const ctx: NodeContext = testNodeContext({
       runId: "r2" as RunId,
       dagId: "d2" as DagId,
-      observer: new NoopObserver(),
-      tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-      judgeLlm: null, http: null, clock: null, budget: null,
       cache,
-      prompts: null,
       llm,
-      logger: { warn: () => {}, error: () => {} },
-    };
+    });
 
     const result = await node.run({ customerId: "abc" }, ctx as any);
     expect(result.ok).toBe(true);
@@ -140,17 +130,7 @@ describe("node factories — the `cache` config reaches the request (FR-PC-001)"
     seen: { cache?: unknown }[],
   ): NodeContext =>
     ({
-      runId: "r1" as RunId,
-      dagId: "d1" as DagId,
-      observer: new NoopObserver(),
-      tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-      judgeLlm: null,
-      http: null,
-      clock: null,
-      budget: null,
-      cache: null,
-      prompts: null,
-      logger: { warn: () => {}, error: () => {} },
+      ...testNodeContext({ runId: "r1" as RunId, dagId: "d1" as DagId }),
       llm: {
         sendStructured: async (req: { cache?: unknown }) => {
           seen.push({ cache: req.cache });

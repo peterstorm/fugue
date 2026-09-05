@@ -33,7 +33,7 @@ import type {
   ScopedLlmCapability,
 } from "../types/capability-broker.js";
 import { createFakeHttpCapability } from "../http/http-capability.js";
-import { NoopObserver } from "../observer/observer.js";
+import { testNodeContext } from "./_context-factories.js";
 
 // ---------------------------------------------------------------------------
 // Module augmentation: register a custom "db" capability for tests
@@ -223,18 +223,10 @@ const makeNode = (id: string, requires: readonly Capability[]): NodeDef<unknown,
 });
 
 const makeCtx = (overrides: Partial<BaseNodeContext> = {}): BaseNodeContext => ({
+  ...testNodeContext(),
   runId: "r1" as any,
   dagId: "d1" as any,
-  logger: { warn: () => {}, error: () => {} },
   tracer: noopTracer as any,
-  observer: new NoopObserver(),
-  cache: null,
-  llm: null,
-  prompts: null,
-  judgeLlm: null,
-  http: null,
-  clock: null,
-  budget: null,
   ...overrides,
 });
 

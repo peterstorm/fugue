@@ -22,6 +22,7 @@ import type {
   LlmPricingModel,
 } from "@fuguejs/framework";
 import type { HostError } from "./host-error.js";
+import { logWithoutThrowingTo } from "./diagnostic-logging.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -172,27 +173,18 @@ type LifecycleDiagnosticFallback = (diagnostic: string) => unknown;
 const writeLifecycleFallback: LifecycleDiagnosticFallback = (diagnostic) =>
   process.stderr.write(diagnostic);
 
-/** Lifecycle diagnostics are secondary and must not alter control flow. */
+/**
+ * Lifecycle diagnostics are secondary and must not alter control flow — THE
+ * encoding of that rule is `logWithoutThrowing`; this only adapts the optional
+ * `data` this module carries to its required parameter.
+ */
 const logLifecycleWithoutThrowing = (
   logger: LifecycleLogger,
   level: "info" | "warn" | "error",
   message: string,
   data: Record<string, unknown> | undefined,
   writeFallback: LifecycleDiagnosticFallback,
-): void => {
-  try {
-    logger[level]?.(message, data);
-  } catch (loggerError) {
-    try {
-      writeFallback(
-        `[host lifecycle diagnostic fallback] ${level} ${message}; ` +
-          `data=${safeErrorMessage(data)}; loggerError=${safeErrorMessage(loggerError)}\n`,
-      );
-    } catch {
-      // The already-decided lifecycle or cleanup outcome remains authoritative.
-    }
-  }
-};
+): void => logWithoutThrowingTo(logger, level, message, data ?? {}, writeFallback);
 
 /**
  * Connect all capability handles in topological order.

@@ -12,12 +12,12 @@ import { isFrameworkErrorKind, safeErrorMessage } from "@fuguejs/framework";
 import type { FrameworkErrorKind } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import {
-  formatHostError,
-  httpStatusFor,
+  discloseHostError,
   parseHostError,
   retryAfterSecondsFor,
 } from "../../domain/host-error.js";
 import { errorResponse } from "../response.js";
+import { logWithoutThrowing } from "../../hitl/diagnostic-logging.js";
 
 /**
  * Logger interface for the error handler — injected to avoid coupling to a specific logger.
@@ -28,36 +28,17 @@ export interface ErrorHandlerLogger {
 
 export type ErrorHandlerFallback = (diagnostic: string) => unknown;
 
-const renderDiagnosticData = (data: Record<string, unknown>): string => {
-  try {
-    return Object.entries(data)
-      .map(([key, value]) => `${key}=${safeErrorMessage(value)}`)
-      .join(" ");
-  } catch {
-    return "<unrenderable diagnostic data>";
-  }
-};
-
-/** Diagnostics are secondary: neither logger nor stderr may replace the response. */
+/**
+ * Diagnostics are secondary: neither logger nor stderr may replace the response.
+ * THE encoding of that rule is `logWithoutThrowing`; this only pins the level,
+ * since every diagnostic this middleware emits is an error.
+ */
 const logErrorWithoutThrowing = (
   logger: ErrorHandlerLogger,
   message: string,
   data: Record<string, unknown>,
   writeFallback: ErrorHandlerFallback,
-): void => {
-  try {
-    logger.error(message, data);
-  } catch (loggerError) {
-    try {
-      writeFallback(
-        `[host error-handler fallback] ${message}; ${renderDiagnosticData(data)}; ` +
-          `loggerError=${safeErrorMessage(loggerError)}\n`,
-      );
-    } catch {
-      // The already-selected HTTP response remains authoritative.
-    }
-  }
-};
+): void => logWithoutThrowing(logger, "error", message, data, writeFallback);
 
 type JsonSafeTree =
   | null
@@ -171,55 +152,44 @@ const headersFor = (error: HostError): Record<string, string> | undefined => {
 };
 
 /**
- * Render a HostError to a client response, applying the 4xx/5xx disclosure
- * discipline.
+ * Render a HostError to a client response.
  *
- * SECURITY (information disclosure — OWASP A09/A05):
- *   - 5xx-class HostErrors (worker-unavailable 503, internal-invariant-violated
- *     500, git/import/config/etc 500) are SERVER faults. Their `formatHostError`
- *     text can interpolate raw internal state (e.g. `internal-invariant-violated`
- *     splices `e.message`, and the markTenant invariant carries a forged id in
- *     `context`). We therefore return a GENERIC client message and log the
- *     detailed `formatHostError` output + any `context` server-side — matching
- *     the discipline of the generic unhandled-error path, which never leaks
- *     internals and always logs.
- *   - 4xx-class HostErrors are deliberate, caller-facing outcomes whose messages
- *     are already curated to be safe (tenant-unknown is tenant-agnostic;
- *     tenant-over-quota names only the caller's OWN tenant; validation echoes the
- *     caller's own input). These keep their existing precise messages + details
- *     and are NOT logged (they are expected, caller-driven outcomes, not faults).
+ * The 4xx/5xx disclosure discipline itself lives in `discloseHostError`
+ * (domain/host-error.ts) so every HTTP surface reads ONE authority; this
+ * function only renders what that decision permits, and logs a server fault.
  */
 const respondWithHostError = (
   logger: ErrorHandlerLogger,
   writeFallback: ErrorHandlerFallback,
   c: Context,
   hostErr: HostError,
-): Response => {
-  const status = httpStatusFor(hostErr);
-
-  if (status >= 500) {
-    // Log full detail server-side; return a generic message to the client.
-    logErrorWithoutThrowing(logger, "Host error in request handler", {
-      kind: hostErr.kind,
-      detail: formatHostError(hostErr),
-      ...("context" in hostErr ? { context: hostErr.context } : {}),
-      ...correlationFor(hostErr),
-    }, writeFallback);
-    return errorResponse(c, status, hostErr.kind, "An unexpected error occurred", {
-      // No `details` — the 5xx body must not echo internal state. Headers (e.g.
-      // Retry-After for worker-unavailable 503) are still safe to advertise.
-      ...correlationFor(hostErr),
-      headers: headersFor(hostErr),
-    });
-  }
-
-  // 4xx — curated, safe, caller-facing messages + details.
-  return errorResponse(c, status, hostErr.kind, formatHostError(hostErr), {
-    details: detailsFor(hostErr),
-    ...correlationFor(hostErr),
-    headers: headersFor(hostErr),
-  });
-};
+): Response =>
+  match(discloseHostError(hostErr))
+    .with({ kind: "server-fault" }, (disclosure) => {
+      // Log full detail server-side; return a generic message to the client.
+      logErrorWithoutThrowing(logger, "Host error in request handler", {
+        kind: hostErr.kind,
+        detail: disclosure.detail,
+        ...("context" in hostErr ? { context: hostErr.context } : {}),
+        ...correlationFor(hostErr),
+      }, writeFallback);
+      return errorResponse(c, disclosure.status, hostErr.kind, disclosure.message, {
+        // No `details` — the 5xx body must not echo internal state. Headers (e.g.
+        // Retry-After for worker-unavailable 503) are still safe to advertise.
+        ...correlationFor(hostErr),
+        headers: headersFor(hostErr),
+      });
+    })
+    // 4xx — curated, safe, caller-facing messages + details. NOT logged: they
+    // are expected, caller-driven outcomes, not faults.
+    .with({ kind: "client-safe" }, (disclosure) =>
+      errorResponse(c, disclosure.status, hostErr.kind, disclosure.message, {
+        details: detailsFor(hostErr),
+        ...correlationFor(hostErr),
+        headers: headersFor(hostErr),
+      }),
+    )
+    .exhaustive();
 
 /** Narrow an arbitrary throw to an Error without trusting prototype traps. */
 const asError = (value: unknown): Error | undefined => {

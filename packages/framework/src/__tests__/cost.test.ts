@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { tokensOnly } from "../types/token-usage.js";
-import { computeCostUsd, PRICE_TABLE, spendOfCall } from "../llm/cost.js";
+import { computeCostUsd, isPricedModel, PRICE_TABLE, spendOfCall, spendOfUnknownCall } from "../llm/cost.js";
+import * as fc from "fast-check";
 
 describe("computeCostUsd", () => {
   it("returns correct cost for a known model", () => {
@@ -64,5 +65,96 @@ describe("computeCostUsd", () => {
     expect(PRICE_TABLE["gpt-4o"]).toBe(original);
     expect(PRICE_TABLE["attacker-model"]).toBeUndefined();
     expect(spendOfCall("gpt-4o", tokensOnly(1_000_000, 0))).toEqual(before);
+  });
+});
+
+// ── Fail-closed classification of a call with untrustworthy usage ────────────
+// When a provider does not report usable usage, the call axis stays exact but
+// token and USD admission must fail closed. Whether that closure is `priced
+// NO_MICROS` (a known model whose cost we simply could not read) or `unpriced`
+// (a model we could never have costed) is the decision these two make, and it
+// is what stops an unpriceable model from being free.
+
+describe("isPricedModel", () => {
+  it("is true for every model in the price table", () => {
+    for (const model of Object.keys(PRICE_TABLE)) {
+      expect(isPricedModel(model)).toBe(true);
+    }
+  });
+
+  it("is false for a model with no price-table entry", () => {
+    expect(isPricedModel("unknown-model-xyz")).toBe(false);
+  });
+
+  it("does not treat inherited Object properties as priced models", () => {
+    // A prototype-chain lookup would make "toString"/"constructor" free.
+    for (const key of ["toString", "constructor", "hasOwnProperty", "__proto__"]) {
+      expect(isPricedModel(key)).toBe(false);
+    }
+  });
+
+  it("is false for any string the price table does not own", () => {
+    fc.assert(
+      fc.property(fc.string(), (model) => {
+        expect(isPricedModel(model)).toBe(
+          Object.prototype.hasOwnProperty.call(PRICE_TABLE, model),
+        );
+      }),
+    );
+  });
+});
+
+describe("spendOfUnknownCall", () => {
+  it("counts exactly one call and no tokens", () => {
+    const spend = spendOfUnknownCall("gpt-4o");
+    expect(spend.calls).toBe(1);
+    expect(spend.tokens).toBe(0);
+  });
+
+  it("marks the usage unknown so ceiling evaluation fails closed", () => {
+    expect(spendOfUnknownCall("gpt-4o").usage).toBe("unknown");
+    expect(spendOfUnknownCall("unknown-model-xyz").usage).toBe("unknown");
+  });
+
+  it("reports a priced model's unreadable cost as priced-zero, not unpriced", () => {
+    // The model IS costable; only this call's usage was unusable. The `unknown`
+    // usage flag — not an unpriced marker — is what fails the token/USD axes.
+    const spend = spendOfUnknownCall("gpt-4o");
+    expect(spend.usd.kind).toBe("priced");
+    if (spend.usd.kind === "priced") expect(spend.usd.micros as number).toBe(0);
+  });
+
+  it("reports an unpriceable model as unpriced, naming the model", () => {
+    const spend = spendOfUnknownCall("unknown-model-xyz");
+    expect(spend.usd.kind).toBe("unpriced");
+    if (spend.usd.kind === "unpriced") {
+      expect([...spend.usd.models]).toEqual(["unknown-model-xyz"]);
+      expect(spend.usd.knownMicros as number).toBe(0);
+    }
+  });
+
+  it("names any unpriceable model it is handed", () => {
+    fc.assert(
+      fc.property(
+        fc.string({ minLength: 1 }).filter((m) => !isPricedModel(m)),
+        (model) => {
+          const spend = spendOfUnknownCall(model);
+          expect(spend.usd.kind).toBe("unpriced");
+          if (spend.usd.kind === "unpriced") expect([...spend.usd.models]).toContain(model);
+        },
+      ),
+    );
+  });
+
+  it("never reports a positive cost — an unread usage must not look expensive OR free-with-headroom", () => {
+    fc.assert(
+      fc.property(fc.string(), (model) => {
+        const spend = spendOfUnknownCall(model);
+        expect(spend.usage).toBe("unknown");
+        expect(
+          (spend.usd.kind === "priced" ? spend.usd.micros : spend.usd.knownMicros) as number,
+        ).toBe(0);
+      }),
+    );
   });
 });

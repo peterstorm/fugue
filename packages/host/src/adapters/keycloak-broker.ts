@@ -106,17 +106,11 @@ export const scopeName = (scope: DownstreamScope): string => `${scope.provider}:
  * before expiry is re-minted rather than presented downstream microseconds
  * before it lapses — which would 401 and (mis)map to `downstream-denied`, the
  * never-retried category (review I2, ADR-0059). The margin is capped at a
- * fraction of the token's own lifetime in `marginFor` so a short-lived token is
- * never pinned permanently stale.
+ * fraction of the token's own lifetime in `effectiveTtlMs` so a short-lived
+ * token is never pinned permanently stale.
  */
 const TOKEN_REFRESH_SKEW_MS = 60_000;
 
-/**
- * Effective cache TTL for a freshly minted token: its lifetime minus the
- * early-refresh skew, but never less than half its lifetime (so a token whose
- * own `expires_in` is below `2 × skew` still caches for a useful window instead
- * of being born stale). Pure.
- */
 /**
  * The `via` a resolution reports when NO branch was forced this time round (a
  * cache hit): it is a function of the invocation origin alone. Both cache-hit
@@ -126,6 +120,12 @@ const TOKEN_REFRESH_SKEW_MS = 60_000;
 const viaForOrigin = (origin: Invocation["origin"]): "token-exchange-v2" | "client_credentials" =>
   origin.kind === "user" ? "token-exchange-v2" : "client_credentials";
 
+/**
+ * Effective cache TTL for a freshly minted token: its lifetime minus the
+ * early-refresh skew, but never less than half its lifetime (so a token whose
+ * own `expires_in` is below `2 × skew` still caches for a useful window instead
+ * of being born stale). Pure.
+ */
 const effectiveTtlMs = (expiresInSec: number): number => {
   const lifetimeMs = expiresInSec * 1000;
   const margin = Math.min(TOKEN_REFRESH_SKEW_MS, Math.floor(lifetimeMs / 2));

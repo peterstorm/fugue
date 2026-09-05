@@ -1,8 +1,7 @@
 // runDagAsWorkerJob — wraps runDagStateful so worker queues see failures
 // and apply retry/DLQ policy (codex finding #1).
 
-import { NoopObserver } from "../observer/observer.js";
-import type { RunId, NodeId, DagId } from "../types/ids.js";
+import type { NodeId } from "../types/ids.js";
 import { DAG_INPUT } from "../types/ids.js";
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
@@ -13,6 +12,7 @@ import { runDagAsWorkerJob } from "../executor/run-dag.js";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
 import { createInMemoryBackend } from "../queue/in-memory.js";
 import { defineDagFromArray } from "../executor/define-dag.js";
+import { testNodeContext } from "./_context-factories.js";
 
 const noop = async (_input: unknown, _ctx: NodeContext) => ok(undefined as unknown);
 
@@ -32,17 +32,7 @@ const mkNode = (
   ...brandedOverride(overrides),
 });
 
-const mkCtx = (): NodeContext => ({
-  runId: "test-run" as RunId,
-  dagId: "test-dag" as DagId,
-  observer: new NoopObserver(),
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null,
-  cache: null,
-  prompts: null,
-  llm: null, http: null, clock: null, budget: null,
-  logger: { warn: () => {}, error: () => {} },
-});
+const mkCtx = (): NodeContext => testNodeContext();
 
 describe("runDagAsWorkerJob", () => {
   it("returns the DAG output on success", async () => {

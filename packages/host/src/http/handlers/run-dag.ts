@@ -33,8 +33,8 @@ import { errorResponse, hostUnavailableResponse, successResponse } from "../resp
 import type { HostError } from "../../domain/host-error.js";
 import {
   circuitOpen,
+  discloseHostError,
   formatHostError,
-  httpStatusFor,
   retryAfterSecondsFor,
 } from "../../domain/host-error.js";
 import { getRegistry } from "../../domain/host-state.js";
@@ -106,18 +106,45 @@ export interface RunDagDeps {
  * (`httpStatusFor` / `retryAfterSecondsFor`) rather than being hand-copied per
  * call site, so a policy change lands in one place and the two can never
  * disagree about the same kind.
+ *
+ * SECURITY (information disclosure — OWASP A09/A05): what the body may say is
+ * decided by `discloseHostError`, the SAME authority the error-handler
+ * middleware reads. This handler renders some HostErrors itself — notably the
+ * HITL `startRun` failure below, which never reaches that middleware and can
+ * carry 5xx kinds (`internal-invariant-violated`, `spend-ledger-unavailable`)
+ * whose formatted text splices raw internal state. A server fault therefore
+ * gets the generic message with NO `details`, and its detail is logged instead.
  */
 const hostErrorResponse = (
   c: Context,
   dagId: string,
   error: HostError,
   details?: unknown,
+  logger?: LogPort,
 ): Response => {
   const retryAfter = retryAfterSecondsFor(error);
-  return errorResponse(c, httpStatusFor(error), error.kind, formatHostError(error), {
+  const disclosure = discloseHostError(error);
+  // Headers (e.g. Retry-After) stay safe to advertise on either branch.
+  const headers = retryAfter !== undefined
+    ? { headers: { "Retry-After": String(retryAfter) } }
+    : {};
+
+  if (disclosure.kind === "server-fault") {
+    logWithoutThrowing(logger, "error", "Host error in run-dag handler", {
+      kind: error.kind,
+      detail: disclosure.detail,
+      dagId,
+    });
+    return errorResponse(c, disclosure.status, error.kind, disclosure.message, {
+      dagId,
+      ...headers,
+    });
+  }
+
+  return errorResponse(c, disclosure.status, error.kind, disclosure.message, {
     dagId,
     ...(details !== undefined ? { details } : {}),
-    ...(retryAfter !== undefined ? { headers: { "Retry-After": String(retryAfter) } } : {}),
+    ...headers,
   });
 };
 
@@ -207,7 +234,7 @@ export const createRunDagHandler = (
       }
       const started = await deps.hitl.startRun(dagId, registered.team, parseResult.data, identity);
       if (!started.ok) {
-        return hostErrorResponse(c, dagId, started.error);
+        return hostErrorResponse(c, dagId, started.error, undefined, deps.logger);
       }
       // 202 Accepted: the run is queued for durable execution; poll GET /runs/:id.
       return c.json(

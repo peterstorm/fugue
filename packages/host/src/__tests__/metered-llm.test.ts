@@ -1464,3 +1464,219 @@ describe("metered-llm: a failed ledger append is LOUD, and its severity says why
     expect(calls.length).toBe(0); // refused before reaching the provider
   });
 });
+
+// ── Request-parameter validation at the boundary (round-13 A15) ─────────────
+// `snapshotRequest` re-parses every field of an untrusted request before the
+// call is admitted or metered. Prior tests covered `model` and hostile
+// accessors; these cover the remaining branches — and, just as importantly,
+// their HAPPY paths, so a validator that rejected everything would be caught
+// too. Every rejection must land BEFORE provider egress and BEFORE admission,
+// or a malformed request could still spend budget.
+
+describe("metered-llm: request parameter validation", () => {
+  const meteredWithSpy = () => {
+    const { inner, calls } = fakeInner(1, 0);
+    return { metered: createMeteredLlm(inner, { logger: collectLogs().logger }), calls };
+  };
+
+  const expectRejectedBeforeEgress = (
+    result: Result<unknown, FrameworkError>,
+    calls: readonly unknown[],
+  ): void => {
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("validation");
+    expect(calls).toHaveLength(0);
+  };
+
+  it("accepts a well-formed thinking budget and rejects every malformed one", async () => {
+    const accepted = meteredWithSpy();
+    expect((await accepted.metered.sendStructured({
+      ...structuredReq(nodeA),
+      thinking: { type: "enabled", budgetTokens: 1024 },
+    } as LlmRequest<unknown>)).ok).toBe(true);
+    expect(accepted.calls).toHaveLength(1);
+
+    for (const thinking of [
+      { type: "enabled" },
+      { type: "enabled", budgetTokens: 0 },
+      { type: "enabled", budgetTokens: -1 },
+      { type: "enabled", budgetTokens: 1.5 },
+      { type: "disabled", budgetTokens: 10 },
+      { type: "enabled", budgetTokens: 10, extra: true },
+      "enabled",
+    ]) {
+      const { metered, calls } = meteredWithSpy();
+      expectRejectedBeforeEgress(
+        await metered.sendStructured({ ...structuredReq(nodeA), thinking } as LlmRequest<unknown>),
+        calls,
+      );
+    }
+  });
+
+  it("gates the conversation cache kind to sendWithTools only", async () => {
+    // A conversation cache is meaningful only across a tool loop's turns. If
+    // `sendStructured` accepted it, a single-shot call would key its cache on a
+    // conversation that does not exist — a silent cross-request cache hazard.
+    const conversation = { kind: "conversation", ttl: "1h" } as const;
+
+    const structured = meteredWithSpy();
+    expectRejectedBeforeEgress(
+      await structured.metered.sendStructured({
+        ...structuredReq(nodeA),
+        cache: conversation,
+      } as unknown as LlmRequest<unknown>),
+      structured.calls,
+    );
+
+    const tools = meteredWithSpy();
+    expect((await tools.metered.sendWithTools({
+      ...toolsReq(nodeA),
+      cache: conversation,
+    } as unknown as SendWithToolsRequest<unknown>, fakeCtx)).ok).toBe(true);
+    expect(tools.calls).toHaveLength(1);
+  });
+
+  it("accepts the cache policies both operations share", async () => {
+    for (const cache of [
+      { kind: "none" },
+      { kind: "static-prefix", ttl: "5m" },
+      { kind: "static-prefix", ttl: "1h" },
+    ] as const) {
+      const { metered, calls } = meteredWithSpy();
+      expect((await metered.sendStructured({
+        ...structuredReq(nodeA),
+        cache,
+      } as unknown as LlmRequest<unknown>)).ok).toBe(true);
+      expect(calls).toHaveLength(1);
+    }
+  });
+
+  it("rejects malformed cache policies before egress", async () => {
+    for (const cache of [
+      { kind: "static-prefix" },
+      { kind: "static-prefix", ttl: "10m" },
+      { kind: "none", ttl: "5m" },
+      { kind: "unknown", ttl: "5m" },
+      { kind: "static-prefix", ttl: "5m", extra: 1 },
+    ]) {
+      const { metered, calls } = meteredWithSpy();
+      expectRejectedBeforeEgress(
+        await metered.sendStructured({ ...structuredReq(nodeA), cache } as unknown as LlmRequest<unknown>),
+        calls,
+      );
+    }
+  });
+
+  it("bounds temperature to the closed unit interval on sendStructured", async () => {
+    for (const temperature of [0, 0.5, 1]) {
+      const { metered, calls } = meteredWithSpy();
+      expect((await metered.sendStructured({
+        ...structuredReq(nodeA), temperature,
+      } as LlmRequest<unknown>)).ok).toBe(true);
+      expect(calls).toHaveLength(1);
+    }
+
+    for (const temperature of [-0.1, 1.1, Number.NaN, Number.POSITIVE_INFINITY, "0.5"]) {
+      const { metered, calls } = meteredWithSpy();
+      expectRejectedBeforeEgress(
+        await metered.sendStructured({
+          ...structuredReq(nodeA), temperature,
+        } as unknown as LlmRequest<unknown>),
+        calls,
+      );
+    }
+  });
+
+  it("accepts an object or null tracer and rejects any other shape", async () => {
+    for (const tracer of [null, { withSpan: async (_n: string, _t: string, fn: () => unknown) => fn() }]) {
+      const { metered, calls } = meteredWithSpy();
+      expect((await metered.sendStructured({
+        ...structuredReq(nodeA), tracer,
+      } as unknown as LlmRequest<unknown>)).ok).toBe(true);
+      expect(calls).toHaveLength(1);
+    }
+
+    for (const tracer of ["tracer", 7, true]) {
+      const { metered, calls } = meteredWithSpy();
+      expectRejectedBeforeEgress(
+        await metered.sendStructured({
+          ...structuredReq(nodeA), tracer,
+        } as unknown as LlmRequest<unknown>),
+        calls,
+      );
+    }
+  });
+
+  it("bounds the tool loop's maxIterations, deadlineMs, and toolChoice", async () => {
+    const accepted = meteredWithSpy();
+    expect((await accepted.metered.sendWithTools({
+      ...toolsReq(nodeA),
+      maxIterations: 3,
+      deadlineMs: 1_000,
+      toolChoice: "auto",
+    } as unknown as SendWithToolsRequest<unknown>, fakeCtx)).ok).toBe(true);
+    expect(accepted.calls).toHaveLength(1);
+
+    for (const overrides of [
+      { maxIterations: 0 },
+      { maxIterations: -1 },
+      { maxIterations: 1.5 },
+      { maxIterations: "3" },
+      { deadlineMs: 0 },
+      { deadlineMs: -1 },
+      { deadlineMs: Number.POSITIVE_INFINITY },
+      { deadlineMs: "1000" },
+      { toolChoice: "required" },
+      { toolChoice: 1 },
+    ]) {
+      const { metered, calls } = meteredWithSpy();
+      expectRejectedBeforeEgress(
+        await metered.sendWithTools({
+          ...toolsReq(nodeA), ...overrides,
+        } as unknown as SendWithToolsRequest<unknown>, fakeCtx),
+        calls,
+      );
+    }
+
+    for (const toolChoice of ["auto", "any", "none"] as const) {
+      const { metered, calls } = meteredWithSpy();
+      expect((await metered.sendWithTools({
+        ...toolsReq(nodeA), toolChoice,
+      } as unknown as SendWithToolsRequest<unknown>, fakeCtx)).ok).toBe(true);
+      expect(calls).toHaveLength(1);
+    }
+  });
+
+  it("rejects an invalid nodeId before egress on both operations", async () => {
+    // `nodeId` is the attribution key every spend record is filed under: an
+    // unparseable one would either mis-file the spend or crash the ledger write
+    // after the provider had already been paid.
+    for (const nodeId of ["", "   ", "has spaces", "a".repeat(1024)]) {
+      const structured = meteredWithSpy();
+      expectRejectedBeforeEgress(
+        await structured.metered.sendStructured({
+          ...structuredReq(nodeA), nodeId,
+        } as unknown as LlmRequest<unknown>),
+        structured.calls,
+      );
+
+      const tools = meteredWithSpy();
+      expectRejectedBeforeEgress(
+        await tools.metered.sendWithTools({
+          ...toolsReq(nodeA), nodeId,
+        } as unknown as SendWithToolsRequest<unknown>, fakeCtx),
+        tools.calls,
+      );
+    }
+  });
+
+  it("rejects a non-object signal before egress", async () => {
+    const { metered, calls } = meteredWithSpy();
+    expectRejectedBeforeEgress(
+      await metered.sendStructured({
+        ...structuredReq(nodeA), signal: "abort",
+      } as unknown as LlmRequest<unknown>),
+      calls,
+    );
+  });
+});

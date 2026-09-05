@@ -765,6 +765,62 @@ describe("createRedisConnectivity — spend-ledger capability", () => {
     ]);
   });
 
+  // ── Corrupt hash field: append vs read (round-13 A11) ──────────────────────
+  // The two paths classify the SAME corruption differently and deliberately:
+  // an append cannot know whether it raced a concurrent writer, so it reports a
+  // RETRYABLE `redis-unavailable`; a read is a settled observation of a
+  // corrupt record and reports a non-retryable `internal-invariant-violated`.
+  // Nothing seeded corruption ahead of an append, so neither was pinned and the
+  // divergence could have been mistaken for a bug and "fixed" either way.
+
+  it("classifies a corrupt field as retryable on append", async () => {
+    for (const corrupt of ["not-a-number", "1.5", "-3", "", " 7", "0x10", "1e3"]) {
+      const fake = new FakeRedis();
+      fake.seedHash("run:spend", { micros: corrupt, tokens: "1", calls: "1" });
+      const { bundle } = await wire(fake);
+
+      const result = await bundle.redis.appendSpend?.({
+        key: "run:spend",
+        delta: makeSpend({
+          usage: "known",
+          tokens: 1,
+          calls: 1,
+          usd: { kind: "priced", micros: 1 as never },
+        }),
+      });
+
+      expect(result !== undefined && isErr(result)).toBe(true);
+      if (result !== undefined && isErr(result)) {
+        expect(result.error.kind).toBe("redis-unavailable");
+      }
+    }
+  });
+
+  it("does not commit a partial transaction when it finds a corrupt field", async () => {
+    // Fail-closed: a corrupt read must abort BEFORE any EXEC, or the append
+    // would write some axes and abandon others, deepening the corruption.
+    const fake = new FakeRedis();
+    fake.seedHash("run:spend", { micros: "not-a-number", tokens: "1", calls: "1" });
+    const { bundle } = await wire(fake);
+
+    await bundle.redis.appendSpend?.({
+      key: "run:spend",
+      delta: makeSpend({
+        usage: "known",
+        tokens: 1,
+        calls: 1,
+        usd: { kind: "priced", micros: 1 as never },
+      }),
+    });
+
+    expect(fake.calls.filter((call) => call.m === "multi.exec")).toHaveLength(0);
+    expect(await fake.hgetall("run:spend")).toEqual({
+      micros: "not-a-number",
+      tokens: "1",
+      calls: "1",
+    });
+  });
+
   it("saturates every cumulative axis at the safe-integer ceiling", async () => {
     const fake = new FakeRedis();
     const almostMax = String(Number.MAX_SAFE_INTEGER - 5);

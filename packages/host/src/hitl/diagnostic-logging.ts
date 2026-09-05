@@ -1,36 +1,22 @@
-import { safeErrorMessage } from "@fuguejs/framework";
-import type { LogPort } from "../ports.js";
+/**
+ * Shell binding of the host diagnostic rule: `domain/diagnostic-logging.ts`
+ * owns the behaviour and performs no I/O; this supplies stderr as the
+ * independent fallback channel, which is I/O and so belongs out here.
+ */
 
-const renderDiagnosticData = (data: Record<string, unknown>): string => {
-  try {
-    return Object.entries(data)
-      .map(([key, value]) => `${key}=${safeErrorMessage(value)}`)
-      .join(" ");
-  } catch {
-    return safeErrorMessage(data);
-  }
-};
+import {
+  logWithoutThrowingTo,
+  type DiagnosticFallback,
+  type DiagnosticLogger,
+} from "../domain/diagnostic-logging.js";
+
+export type { DiagnosticLogger } from "../domain/diagnostic-logging.js";
 
 /** Emit a host diagnostic without allowing logger failure to replace the modeled outcome. */
 export const logWithoutThrowing = (
-  logger: LogPort | undefined,
+  logger: DiagnosticLogger | undefined,
   level: "info" | "warn" | "error",
   message: string,
   data: Record<string, unknown>,
-  writeFallback: (diagnostic: string) => unknown = (diagnostic) => process.stderr.write(diagnostic),
-): void => {
-  try {
-    logger?.[level]?.(message, data);
-  } catch (loggerError) {
-    // Preserve the caller's typed or durable outcome, but make one last guarded
-    // attempt through a channel independent of the configured logger.
-    try {
-      writeFallback(
-        `[host diagnostic fallback] ${level} ${message}; ${renderDiagnosticData(data)}; ` +
-          `loggerError=${safeErrorMessage(loggerError)}\n`,
-      );
-    } catch {
-      // The modeled outcome remains authoritative when every diagnostic channel fails.
-    }
-  }
-};
+  writeFallback: DiagnosticFallback = (diagnostic) => process.stderr.write(diagnostic),
+): void => logWithoutThrowingTo(logger, level, message, data, writeFallback);

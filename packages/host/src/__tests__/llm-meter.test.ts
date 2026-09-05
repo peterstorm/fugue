@@ -33,6 +33,8 @@ import {
   spendFor,
   emptyReservation,
   admit,
+  admitCandidate,
+  type CandidatePricing,
   releaseReservation,
   learnObservedCall,
   projectedSpend,
@@ -477,5 +479,120 @@ describe("llm-meter: properties", () => {
         expect(admit(meter, runA, emptyReservation, limitsOf([tokens(1000)])).kind).toBe("admit");
       }),
     );
+  });
+
+  // ── Model-aware admission (admitCandidate) ─────────────────────────────────
+  // The fail-closed pre-flight gate: a model with no price-table entry cannot be
+  // costed, so under a declared USD ceiling it must be REFUSED before the call
+  // runs. A zero cost would make it free — the cheapest way past a dollar budget.
+
+  const priced = (model: string): CandidatePricing => ({ kind: "priced", model });
+  const unpriced = (model: string): CandidatePricing => ({ kind: "unpriced", model });
+
+  it("refuses an unpriced candidate under a USD ceiling before the call runs", () => {
+    const decision = admitCandidate(
+      emptyMeter(),
+      runA,
+      emptyReservation,
+      limitsOf([usd(100)]),
+      unpriced("mystery-model"),
+    );
+
+    expect(decision.kind).toBe("refuse");
+    if (decision.kind === "refuse") {
+      expect(decision.breach.kind).toBe("unpriced");
+      expect(decision.breach.basis).toBe("projected");
+      if (decision.breach.kind === "unpriced") {
+        expect([...decision.breach.models]).toContain("mystery-model");
+        expect(decision.breach.ceiling.kind).toBe("usd");
+      }
+    }
+  });
+
+  it("refuses an unpriced candidate even on a run with no spend at all", () => {
+    // Nothing settled and nothing in flight: the refusal comes from the model's
+    // unpriceability, not from any accumulated figure.
+    const decision = admitCandidate(
+      emptyMeter(),
+      runA,
+      emptyReservation,
+      limitsOf([usd(1_000_000), tokens(1_000_000), callsCeiling(1_000_000)]),
+      unpriced("mystery-model"),
+    );
+
+    expect(decision.kind).toBe("refuse");
+  });
+
+  it("admits an unpriced candidate when no USD ceiling is declared", () => {
+    // Without a dollar ceiling there is nothing an unpriceable cost can breach —
+    // the token and call axes are still exact.
+    const limits = limitsOf([tokens(1000), callsCeiling(10)]);
+    const decision = admitCandidate(emptyMeter(), runA, emptyReservation, limits, unpriced("mystery"));
+
+    expect(decision.kind).toBe("admit");
+    expect(decision).toEqual(admit(emptyMeter(), runA, emptyReservation, limits));
+  });
+
+  it("delegates a priced candidate to the plain admission decision", () => {
+    const limits = limitsOf([usd(100), tokens(1000)]);
+    const meter = accumulate(emptyMeter(), runA, freeCall(10));
+
+    expect(admitCandidate(meter, runA, emptyReservation, limits, priced("gpt-4o")))
+      .toEqual(admit(meter, runA, emptyReservation, limits));
+  });
+
+  it("admits any candidate when no ceilings are declared at all", () => {
+    for (const candidate of [priced("gpt-4o"), unpriced("mystery")]) {
+      expect(admitCandidate(emptyMeter(), runA, emptyReservation, undefined, candidate).kind)
+        .toBe("admit");
+    }
+  });
+
+  it("reserves on admission exactly as the plain decision does", () => {
+    const limits = limitsOf([tokens(1000)]);
+    const decision = admitCandidate(emptyMeter(), runA, emptyReservation, limits, unpriced("mystery"));
+
+    expect(decision.kind).toBe("admit");
+    if (decision.kind === "admit") expect(decision.state.inFlight).toBe(1);
+  });
+
+  it("an unpriced candidate NEVER admits under a USD ceiling, whatever the spend", () => {
+    fc.assert(
+      fc.property(
+        fc.nat({ max: 5000 }),
+        fc.nat({ max: 20 }),
+        fc.integer({ min: 1, max: 1_000_000 }),
+        (spent, calls, ceilingMicros) => {
+          let meter = emptyMeter();
+          for (let i = 0; i < calls; i += 1) meter = accumulate(meter, runA, freeCall(spent));
+          const limits = limitsOf([
+            { kind: "usd", limit: micros(ceilingMicros) },
+            tokens(10_000_000),
+            callsCeiling(10_000_000),
+          ]);
+
+          expect(admitCandidate(meter, runA, emptyReservation, limits, unpriced("m")).kind)
+            .toBe("refuse");
+        },
+      ),
+    );
+  });
+
+  it("carries the settled spend and in-flight count on an unpriced refusal", () => {
+    // The refusal is what the caller reports to the operator, so it must say
+    // what had actually been spent when the gate closed.
+    const meter = accumulate(emptyMeter(), runA, pricedCall(40, micros(7)));
+    const reserved = admit(meter, runA, emptyReservation, limitsOf([tokens(1000)]));
+    if (reserved.kind !== "admit") throw new Error("expected admit");
+
+    const decision = admitCandidate(
+      meter, runA, reserved.state, limitsOf([usd(100)]), unpriced("mystery"),
+    );
+
+    expect(decision.kind).toBe("refuse");
+    if (decision.kind === "refuse") {
+      expect(decision.settled).toEqual(spendFor(meter, runA));
+      expect(decision.inFlight).toBe(reserved.state.inFlight);
+    }
   });
 });

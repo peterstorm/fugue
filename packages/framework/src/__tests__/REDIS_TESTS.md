@@ -36,13 +36,12 @@ REDIS_URL=redis://localhost:6379 bun test packages/framework/src/__tests__/redis
 
 ## CI Coverage
 
-When CI infrastructure is established, add a Redis service container:
+CI runs them. `.github/workflows/ci.yml`'s `check` job installs `redis-server`,
+starts it on `localhost:6379`, waits for a `PONG`, and exports `REDIS_URL` into
+`$GITHUB_ENV` before the typecheck+test loop — so every push and PR exercises the
+Redis-gated suites rather than skipping them.
 
-```yaml
-services:
-  redis:
-    image: redis:7-alpine
-    ports: ["6379:6379"]
-env:
-  REDIS_URL: redis://localhost:6379
-```
+The loop asserts `REDIS_URL` is set before running. That guard is the point: the
+gating is `describe.skipIf`, which reports a *pass* when it skips, so a Redis that
+failed to start would otherwise turn the suites that prove concurrent spend cannot
+double-count into a silent no-op on the merge gate.

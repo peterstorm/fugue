@@ -709,7 +709,7 @@ describe("error-handler middleware", () => {
       expect(res.status).toBe(500);
       expect(await res.json()).toMatchObject({ error: "internal-error" });
       expect(fallback).toHaveLength(1);
-      expect(fallback[0]).toContain("host error-handler fallback");
+      expect(fallback[0]).toContain("host diagnostic fallback");
       expect(fallback[0]).toContain("logger unavailable");
     });
 

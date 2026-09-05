@@ -32,17 +32,15 @@ import { createInMemorySpendLedger } from "../adapters/spend-ledger-memory.js";
 import { createRedisSpendLedger, spendLedgerRedis } from "../adapters/spend-ledger-redis.js";
 import { createFileSpendLedger } from "../adapters/spend-ledger-file.js";
 import { tenantId } from "../domain/tenant.js";
-import { applyRedisSpendAppend } from "./fixtures/redis-spend-fake.js";
+import {
+  applyRedisSpendAppend,
+  applyRedisSpendAppendInterleaved,
+} from "./fixtures/redis-spend-fake.js";
+import { mkTenant } from "./fixtures/host-boot-fakes.js";
 
 const micros = (n: number): MicroUsd => n as MicroUsd;
 const runA = makeRunId("run-a");
 const runB = makeRunId("run-b");
-
-const mkTenant = (raw: string) => {
-  const parsed = tenantId(raw);
-  if (!parsed.ok) throw new Error("bad tenant fixture");
-  return parsed.value;
-};
 
 /**
  * A fake of the ledger's one-hash Redis capability. `appendSpend` assigns
@@ -346,6 +344,55 @@ describe("Redis ledger: complete transactional append", () => {
     calls: 1,
     usd: { kind: "unpriced", models: ["model-a", "model-z"], knownMicros: micros(7) },
   };
+
+  it("preserves every delta when concurrent appends actually interleave", async () => {
+    // The shared contract's "concurrent appends" case cannot fail for a
+    // Map-backed fake: its append applies SYNCHRONOUSLY, so `Promise.all` never
+    // yields between one append's read and its write and the calls in fact run
+    // strictly in sequence — the race it models cannot occur.
+    //
+    // This fake makes them genuinely concurrent (they queue at the port) and
+    // yields BETWEEN each field's read and write, so an append that were not
+    // serialized would drop its siblings' updates. Serializing the whole
+    // read-modify-write is exactly what real Redis buys with WATCH/MULTI/EXEC;
+    // what the assertion pins is the ledger's side of that contract — it must
+    // delegate the entire accumulation to `appendSpend` and never re-do any of
+    // it around the port, where the interleaving would lose updates.
+    const hashes = new Map<string, Map<string, string>>();
+    let waiting = 0;
+    let observedOverlap = false;
+    // The port's serialization point, standing in for WATCH/MULTI/EXEC.
+    let transaction: Promise<unknown> = Promise.resolve();
+
+    const redis = {
+      hGetAll: async (key: string) => ok(Object.fromEntries(hashes.get(key) ?? new Map())),
+      commitCheckpointAndRetainSpend: async () => ok("OK"),
+      appendSpend: async (append: RedisSpendAppend) => {
+        waiting += 1;
+        // More than one caller inside the port at once — a real race.
+        if (waiting > 1) observedOverlap = true;
+        transaction = transaction.then(() =>
+          applyRedisSpendAppendInterleaved(hashes, append),
+        );
+        try {
+          await transaction;
+        } finally {
+          waiting -= 1;
+        }
+        return ok(undefined);
+      },
+    } as unknown as RedisPort;
+
+    const ledger = ledgerOver(redis, 900);
+    const deltas = Array.from({ length: 12 }, (_, i) => pricedCall(i + 1, micros(i + 2)));
+
+    const results = await Promise.all(deltas.map((delta) => ledger.add(runA, delta)));
+
+    expect(results.every((result) => result.ok)).toBe(true);
+    // The appends really did contend — otherwise this proves nothing.
+    expect(observedOverlap).toBe(true);
+    expect(await readOrThrow(ledger, runA)).toEqual(deltas.reduce(addSpend, NO_SPEND));
+  });
 
   it("delegates the complete append once with one namespaced key and one TTL", async () => {
     const fake = fakeRedis();

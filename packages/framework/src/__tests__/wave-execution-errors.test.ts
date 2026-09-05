@@ -76,15 +76,39 @@ const makeMachineCtx = (waves: string[][] = [["a"]]): DagMachineContext => ({
   nodeById: new Map([[N("a"), makeNode("a")]]),
 });
 
-const makeConfig = (nodeMap?: Map<string, NodeDef<unknown, unknown>>): WaveConfig => ({
+const makeConfig = (
+  nodeMap?: Map<string, NodeDef<unknown, unknown>>,
+  nowFn: () => number = Date.now,
+): WaveConfig => ({
   dag: makeDag(),
   nodeMap: nodeMap
     ? new Map(Array.from(nodeMap.entries()).map(([k, v]) => [N(k), v]))
     : new Map([[N("a"), makeNode("a")]]),
   nodeCtx: makeValidatedCtx(),
-  nowFn: Date.now,
+  nowFn,
   freshnessIndex: new InMemoryFreshnessIndex(),
 });
+
+/** A clock that always throws — the hostile-clock property this suite pins. */
+const throwingClock = (): number => {
+  throw new Error("clock failed");
+};
+
+/**
+ * A clock that fails its FIRST reading and works thereafter. Isolates one
+ * emission's clock failure so the rest of the wave runs normally, which is what
+ * makes "a broken diagnostic cost a sibling its output" observable.
+ */
+const throwOnceClock = (): (() => number) => {
+  let thrown = false;
+  return () => {
+    if (!thrown) {
+      thrown = true;
+      throw new Error("clock failed");
+    }
+    return Date.now();
+  };
+};
 
 describe("executeWave — error paths", () => {
   it("out-of-bounds waveIndex returns non-retriable node-failed", async () => {
@@ -304,6 +328,76 @@ describe("executeWave — error paths", () => {
     if (result.event.type === "node-failed") {
       expect(result.event.error).toBe(primary);
       expect(result.event.coFailedNodeIds).toEqual([N("b")]);
+    }
+  });
+
+  // ── Hostile clock (round-13 C1) ────────────────────────────────────────────
+  // `executeWave` builds every event with `timestamp: stamp()`, and `stamp()`
+  // runs `nowFn()` as an ARGUMENT — evaluated before `emit` is entered, so a
+  // throwing clock is NOT contained by anything inside `emit`. Unfenced, the
+  // throw in the per-node catch handler escapes the `.map()` callback and
+  // rejects the `Promise.all`, so `executeWave` REJECTS instead of returning a
+  // `WaveResult` — and every already-completed sibling in the wave loses its
+  // output, so a retry re-runs its side effects.
+
+  it("a hostile clock cannot turn a wave into a rejection", async () => {
+    // The reproduction: input validation fails pre-span (the one clock site
+    // `withTracedNodeSpan`'s try/catch cannot cover), so the failure lands in
+    // `executeWave`'s catch handler — whose own `stamp()` then throws again.
+    const nodes = new Map<string, NodeDef<unknown, unknown>>([
+      ["a", { ...makeNode("a"), inputSchema: z.string() }],
+    ]);
+
+    const result = await executeWave(
+      0,
+      makeMachineCtx(),
+      makeConfig(nodes, throwingClock),
+    );
+
+    // The contract is a resolved WaveResult, never a rejected promise.
+    expect(result.event.type).toBe("node-failed");
+    expect(result.outcomes).toBeDefined();
+  });
+
+  it("a failed emission does not cost a completed sibling its carried output", async () => {
+    // Throws only on the emission that fires first (`a`'s pre-span
+    // `node-error`), so `b` runs on a working clock and completes.
+    const nodes = new Map<string, NodeDef<unknown, unknown>>([
+      ["a", { ...makeNode("a"), inputSchema: z.string() }],
+      ["b", { ...makeNode("b"), run: async () => ok("b-out") }],
+    ]);
+
+    const result = await executeWave(
+      0,
+      makeMachineCtx([["a", "b"]]),
+      makeConfig(nodes, throwOnceClock()),
+    );
+
+    expect(result.event.type).toBe("node-failed");
+    if (result.event.type === "node-failed") {
+      // `b` completed; its output must be carried so the retry does not re-run it.
+      expect(result.event.partialOutputs?.get(N("b"))).toBe("b-out");
+    }
+  });
+
+  it("a failed node-skipped emission still completes the wave", async () => {
+    // `priorOutputs.has(nodeId)` — the carried-output path. Its emission is a
+    // diagnostic; unfenced it turned a wave-done into a node-failed.
+    const machineCtx = {
+      ...makeMachineCtx([["a", "b"]]),
+      outputs: new Map([[N("a"), "carried"]]),
+    };
+    const nodes = new Map<string, NodeDef<unknown, unknown>>([
+      ["a", makeNode("a")],
+      ["b", { ...makeNode("b"), run: async () => ok("b-out") }],
+    ]);
+
+    const result = await executeWave(0, machineCtx, makeConfig(nodes, throwOnceClock()));
+
+    expect(result.event.type).toBe("wave-done");
+    if (result.event.type === "wave-done") {
+      expect(result.event.outputs.get(N("a"))).toBe("carried");
+      expect(result.event.outputs.get(N("b"))).toBe("b-out");
     }
   });
 });

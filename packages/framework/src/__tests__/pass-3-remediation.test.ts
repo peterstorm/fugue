@@ -31,23 +31,14 @@ import { N } from "./_id-helpers.js";
 import { setFrameworkTracer, __resetFrameworkTracer } from "../tracing/global-tracer.js";
 import { setFrameworkLogger, __resetFrameworkLogger } from "../logger.js";
 import { nonEmptyString } from "../types/non-empty-string.js";
+import { testNodeContext } from "./_context-factories.js";
 
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-const makeBaseCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
-  runId: "test-run" as RunId,
-  dagId: "test-dag" as DagId,
-  observer: new NoopObserver(),
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  logger: { warn: () => {}, error: () => {} },
-  cache: null,
-  llm: null, http: null, clock: null, budget: null,
-  prompts: null,
-  judgeLlm: null,
-  ...overrides,
-});
+const makeBaseCtx = (overrides: Partial<NodeContext> = {}): NodeContext =>
+  testNodeContext(overrides);
 
 const noop = async (_input: unknown, _ctx: NodeContext) => ok(undefined as unknown);
 

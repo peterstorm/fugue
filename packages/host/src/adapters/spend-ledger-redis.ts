@@ -152,8 +152,8 @@ export const createRedisSpendLedger = (deps: RedisSpendLedgerDeps): SpendLedgerP
         });
       } catch (error) {
         const message = safeErrorMessage(error);
-        // Same producer as `read`'s catch above — the hand-rolled literal this
-        // replaced skipped the helper's freeze.
+        // Same producer as `read`'s catch above, so both boundary-throw paths
+        // build an identically frozen error.
         return err(internalInvariantViolated(
           `SpendLedgerRedis.appendSpend threw across the port boundary: ${message}`,
           { operation: "spend-ledger append", error: message },

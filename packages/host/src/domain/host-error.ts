@@ -116,7 +116,14 @@ export type HostError =
 
 export type HostErrorKind = HostError["kind"];
 
-const HOST_ERROR_KINDS = Object.freeze({
+/**
+ * THE set of HostError kinds, as data. Exported so a test can prove a per-kind
+ * policy table (the Retry-After policy) covers every kind at RUNTIME: this
+ * package excludes `src/__tests__` from `tsc`, so a `satisfies Record<...>` in
+ * a test is never checked and a newly added kind would otherwise ship with an
+ * unreviewed backoff.
+ */
+export const HOST_ERROR_KINDS = Object.freeze({
   "git-clone-failed": true,
   "git-pull-failed": true,
   "git-timeout": true,
@@ -793,20 +800,7 @@ export const circuitOpen = (dagId: DagId, cooldownMs: number): HostError =>
 export const workerUnavailable = (tenant: TenantId): HostError =>
   frozenHostError({ kind: "worker-unavailable", tenant });
 
-/**
- * The Retry-After (seconds) a HostError advertises, if any. Centralizes the
- * "which errors are retriable, and after how long" decision so the HTTP layer
- * (error-handler middleware, supervisor) reads it from ONE authoritative place
- * instead of pattern-matching kinds itself. Returns `undefined` for errors
- * that carry no backoff signal.
- *
- * `tenant-over-quota` advertises its own per-tenant `retryAfterSeconds`. The
- * coarse concurrency limits and `worker-unavailable` keep a fixed 5s (the
- * established behaviour in the error-handler middleware), surfaced here so the
- * value lives in ONE place — both the live error-handler middleware AND
- * `classifyHostError` read it from here, so a 503 worker-unavailable advertises
- * the SAME Retry-After through every path (no divergent hardcoded sources).
- */
+/** One row of the Retry-After policy: a constant, or a value read off the error. */
 type RetryAfterPolicy = number | undefined | ((error: HostError) => number | undefined);
 
 const RETRY_AFTER_POLICY = Object.freeze({
@@ -850,7 +844,69 @@ const RETRY_AFTER_POLICY = Object.freeze({
   "fs-purge-failed": undefined,
 } satisfies Record<HostErrorKind, RetryAfterPolicy>);
 
+/**
+ * The Retry-After (seconds) a HostError advertises, if any. Centralizes the
+ * "which errors are retriable, and after how long" decision so the HTTP layer
+ * (error-handler middleware, supervisor) reads it from ONE authoritative place
+ * instead of pattern-matching kinds itself. Returns `undefined` for errors
+ * that carry no backoff signal.
+ *
+ * `tenant-over-quota` advertises its own per-tenant `retryAfterSeconds`. The
+ * coarse concurrency limits and `worker-unavailable` keep a fixed 5s (the
+ * established behaviour in the error-handler middleware), surfaced here so the
+ * value lives in ONE place — both the live error-handler middleware AND
+ * `classifyHostError` read it from here, so a 503 worker-unavailable advertises
+ * the SAME Retry-After through every path (no divergent hardcoded sources).
+ */
 export const retryAfterSecondsFor = (error: HostError): number | undefined => {
   const policy = RETRY_AFTER_POLICY[error.kind];
   return typeof policy === "function" ? policy(error) : policy;
+};
+
+/**
+ * What a HostError may disclose to the caller.
+ *
+ * `server-fault` carries BOTH the generic text the client gets and the
+ * `detail` the shell must log and must NOT send; `client-safe` carries the
+ * curated caller-facing message. Splitting the two makes "did this response
+ * leak internal state" a type-level question rather than a per-handler habit.
+ */
+export type HostErrorDisclosure =
+  | { readonly kind: "client-safe"; readonly status: number; readonly message: string }
+  | {
+      readonly kind: "server-fault";
+      readonly status: number;
+      readonly message: string;
+      readonly detail: string;
+    };
+
+/** The generic text every 5xx HostError shows the caller. */
+export const GENERIC_SERVER_FAULT_MESSAGE = "An unexpected error occurred";
+
+/**
+ * THE 4xx/5xx disclosure decision, owned by the domain so every HTTP surface
+ * reads one authority instead of re-deciding per handler.
+ *
+ * SECURITY (information disclosure — OWASP A09/A05):
+ *   - 5xx-class HostErrors (worker-unavailable 503, internal-invariant-violated
+ *     500, git/import/config/etc 500) are SERVER faults. Their `formatHostError`
+ *     text can interpolate raw internal state — `internal-invariant-violated`
+ *     splices `e.message`, and the markTenant invariant carries a forged id in
+ *     `context`. They therefore disclose only a GENERIC message; the detailed
+ *     text travels as `detail`, for the server-side log alone.
+ *   - 4xx-class HostErrors are deliberate, caller-facing outcomes whose messages
+ *     are already curated to be safe (tenant-unknown is tenant-agnostic;
+ *     tenant-over-quota names only the caller's OWN tenant; validation echoes the
+ *     caller's own input). They keep their precise messages.
+ *
+ * This lived inside the error-handler middleware, which meant the HITL branch of
+ * the run-dag handler — the one path that renders a HostError without passing
+ * through that middleware — rendered 5xx text verbatim to the client.
+ */
+export const discloseHostError = (error: HostError): HostErrorDisclosure => {
+  const status = httpStatusFor(error);
+  const formatted = formatHostError(error);
+  return status >= 500
+    ? { kind: "server-fault", status, message: GENERIC_SERVER_FAULT_MESSAGE, detail: formatted }
+    : { kind: "client-safe", status, message: formatted };
 };

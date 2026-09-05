@@ -48,6 +48,7 @@ import type { TenantId } from "../domain/tenant.js";
 import { createFileSpendLedger } from "../adapters/spend-ledger-file.js";
 import { applyRedisSpendAppend } from "./fixtures/redis-spend-fake.js";
 import { collectLogs } from "../adapters/__tests__/fixtures/log-capture.js";
+import { mkTenant } from "./fixtures/host-boot-fakes.js";
 
 interface AugmentedLlmClient extends LlmClient {
   readonly sendAlias: LlmClient["sendStructured"];
@@ -61,12 +62,6 @@ declare module "@fuguejs/framework" {
 }
 
 /** Build a `TenantId` for a test from a known-good literal via the canonical constructor. */
-const mkTenant = (s: string): TenantId => {
-  const r = tenantId(s);
-  if (!isOk(r)) throw new Error(`test tenant id "${s}" is invalid (kind: ${r.error.kind})`);
-  return r.value;
-};
-
 // Existing pass-through / wiring tests are identity-agnostic — an admin identity
 // reproduces the prior `agent`-keyed origin (admin/team → agent placeholder), so
 // their byte-identical assertions are unaffected.
@@ -1875,5 +1870,113 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
       throw new Error("expected the resumed slice to refuse from Redis-held spend");
     }
     expect(calls.length).toBe(3);
+  });
+
+  // ── Atomic checkpoint+spend commit failure (round-13 A13) ──────────────────
+  // Only the happy path and the plain `redis.set` failure path were covered.
+  // The atomic commit is the path a Redis-backed ledger actually takes, and a
+  // silently-swallowed failure there would let a run believe its checkpoint and
+  // its spend retention were both persisted when neither was.
+
+  it("surfaces an Err from the atomic commit as a checkpoint write failure", async () => {
+    const { llm } = fakeLlm(10, 5);
+    const capable = capableRedis();
+    const failing = {
+      ...capable.redis,
+      commitCheckpointAndRetainSpend: async () =>
+        err({ kind: "redis-unavailable" as const, operation: "SPEND-COMMIT" }),
+    } as unknown as RedisPort;
+    const shared = sharedWithRedis(llm, failing, collectLogs().logger);
+
+    const { ctx } = await createNodeContextForDag(
+      shared, makeDag({ checkpointTtlMs: 9_000 }), testRunId,
+      new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP,
+      false, undefined, undefined, 60,
+    );
+    if (ctx.checkpointWriter === null) throw new Error("expected checkpoint writer");
+
+    await expect(ctx.checkpointWriter.write(testRunId, testNodeId, { after: "llm" }))
+      .rejects.toThrow("Checkpoint persistence failed");
+  });
+
+  it("surfaces a THROWN atomic commit as a checkpoint write failure too", async () => {
+    // A port that throws across the boundary rather than returning Err is the
+    // same outcome to the caller: the checkpoint did not persist.
+    const { llm } = fakeLlm(10, 5);
+    const capable = capableRedis();
+    const throwing = {
+      ...capable.redis,
+      commitCheckpointAndRetainSpend: async () => { throw new Error("connection reset"); },
+    } as unknown as RedisPort;
+    const shared = sharedWithRedis(llm, throwing, collectLogs().logger);
+
+    const { ctx } = await createNodeContextForDag(
+      shared, makeDag({ checkpointTtlMs: 9_000 }), testRunId,
+      new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP,
+      false, undefined, undefined, 60,
+    );
+    if (ctx.checkpointWriter === null) throw new Error("expected checkpoint writer");
+
+    await expect(ctx.checkpointWriter.write(testRunId, testNodeId, { after: "llm" }))
+      .rejects.toThrow("Checkpoint persistence failed");
+  });
+});
+
+// ── Prompt resolution precedence (round-13 A14) ─────────────────────────────
+// `promptAccess` is a three-way branch: a DAG's own prompts win, else the
+// host-level shared prompts, else an empty accessor. Nothing read
+// `ctx.prompts.get(...)`, so a flipped precedence would have silently served
+// the wrong template to every node of a DAG that shipped its own.
+
+describe("createNodeContextForDag — prompt precedence", () => {
+  const sharedPrompts = { get: (name: string) => (name === "greet" ? "SHARED greet" : null) };
+
+  const dagWithPrompts = (entries: ReadonlyArray<readonly [string, string]>): RegisteredDag => ({
+    ...makeDag(),
+    prompts: new Map(entries),
+  });
+
+  const promptsOf = async (dag: RegisteredDag, shared: SharedInfra) => {
+    const { ctx } = await createNodeContextForDag(
+      shared, dag, testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP,
+    );
+    if (ctx.prompts === null) throw new Error("expected a prompt accessor");
+    return ctx.prompts;
+  };
+
+  it("serves the DAG's own prompt over a host-level one of the same name", async () => {
+    const prompts = await promptsOf(
+      dagWithPrompts([["greet", "DAG greet"]]),
+      { ...baseSharedInfra(), prompts: sharedPrompts },
+    );
+
+    expect(prompts.get("greet")).toBe("DAG greet");
+  });
+
+  it("does NOT fall through to host prompts for a name the DAG omits", async () => {
+    // Precedence is per-SOURCE, not per-name: a DAG that ships prompts owns the
+    // whole namespace, so a host template cannot leak into it under a new name.
+    const prompts = await promptsOf(
+      dagWithPrompts([["greet", "DAG greet"]]),
+      { ...baseSharedInfra(), prompts: sharedPrompts },
+    );
+
+    expect(prompts.get("farewell")).toBeNull();
+  });
+
+  it("falls back to host-level prompts when the DAG ships none", async () => {
+    const prompts = await promptsOf(
+      makeDag(),
+      { ...baseSharedInfra(), prompts: sharedPrompts },
+    );
+
+    expect(prompts.get("greet")).toBe("SHARED greet");
+    expect(prompts.get("missing")).toBeNull();
+  });
+
+  it("serves an empty accessor when neither the DAG nor the host has prompts", async () => {
+    const prompts = await promptsOf(makeDag(), baseSharedInfra());
+
+    expect(prompts.get("greet")).toBeNull();
   });
 });

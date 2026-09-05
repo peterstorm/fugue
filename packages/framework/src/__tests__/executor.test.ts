@@ -609,6 +609,84 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
     expect(result).toEqual(ok({ value: 1 }));
   });
 
+  // ── Background finalize failure (round-13 A9) ──────────────────────────────
+  // The hard case the `background.catch(...)` observer exists for: the hook
+  // throws AND therefore discards the promise it was handed, and the background
+  // finalize then fails. With nothing observing it, that rejection would surface
+  // as an unhandled promise rejection — a process-level crash in Node's default
+  // mode — long after the run already resolved `ok` to its caller.
+  it("a rejecting background finalize is observed even when the hook discarded it", async () => {
+    let inFinalize = false;
+    const clock = (): number => {
+      if (inFinalize) throw new Error("clock failed during background finalize");
+      return 1_000;
+    };
+    const judge = {
+      id: N("judge"),
+      kind: "eval-judge" as const,
+      config: { id: "judge", criteria: ["accuracy"] },
+      run: async () => {
+        inFinalize = true;
+        return {
+          outcome: "passed" as const,
+          score: 1,
+          criteriaScores: { accuracy: 1 },
+          failedCriteria: [],
+          reason: "ok",
+        };
+      },
+    };
+    const dag = defineDagFromArray({
+      id: "onbg-finalize-fails",
+      nodes: [
+        createTransformNode({
+          id: N("A"),
+          inputSchema: z.any(),
+          outputSchema: z.any(),
+          transform: (i) => ok(i),
+        }),
+      ],
+      edges: [{ from: DAG_INPUT, to: "A" }],
+      evalJudges: [judge],
+    });
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => { unhandled.push(reason); };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const result = await runDag(dag, { value: 1 }, mkCtx(), {
+        now: clock,
+        // Throws, so it never retains — let alone awaits — its argument.
+        onBackground: () => { throw new Error("hook observer down"); },
+      });
+
+      // The run's own outcome is unaffected: judges are background work.
+      expect(result).toEqual(ok({ value: 1 }));
+
+      // Give the discarded background promise every chance to settle and, if
+      // unobserved, to be reported.
+      await Bun.sleep(20);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("hands the background promise to the hook and settles it without rejecting", async () => {
+    let captured: Promise<unknown> | undefined;
+    const dag = mkSimpleDag("onbg-settles");
+
+    const result = await runDag(dag, { value: 1 }, mkCtx(), {
+      onBackground: (p) => { captured = p; },
+    });
+
+    expect(result).toEqual(ok({ value: 1 }));
+    expect(captured).toBeDefined();
+    // The finalizer is designed to RESOLVE every outcome, never to reject —
+    // a caller awaiting the handed promise must not have to guard it.
+    await expect(captured).resolves.toBeDefined();
+  });
+
   // The non-background finalize path is fenced like its `onBackground` sibling.
   // Two failure modes are covered at once: the finalize rejection must not
   // escape as an unhandled promise rejection (the enclosing catch only sees it

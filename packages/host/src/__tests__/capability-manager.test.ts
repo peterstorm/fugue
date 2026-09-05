@@ -235,7 +235,7 @@ describe("capability-manager", () => {
       expect(isErr(result)).toBe(true);
       expect(failingClosed).toBe(true);
       expect(fallback.some((line) =>
-        line.includes("host lifecycle diagnostic fallback") &&
+        line.includes("host diagnostic fallback") &&
         line.includes("failed to connect") &&
         line.includes("logger transport down")
       )).toBe(true);

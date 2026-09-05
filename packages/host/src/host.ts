@@ -13,6 +13,7 @@
  * @satisfies NFR-020 — Host MUST log startup/shutdown lifecycle events
  */
 
+import { match } from "ts-pattern";
 import { ok, err, runId as makeRunId, safeErrorMessage } from "@fuguejs/framework";
 import type { Result, DagId, NodeContext, DagDef, FrameworkError, RunId, CapabilityHandle } from "@fuguejs/framework";
 import { runDag } from "@fuguejs/framework";
@@ -29,27 +30,6 @@ import type { ModuleLoaderPort } from "./ports.js";
 import type { SharedInfra } from "./ports.js";
 import type { LogPort } from "./ports.js";
 
-/**
- * Log a SHUTDOWN diagnostic without letting a broken logger stop cleanup.
- *
- * Teardown must always run to completion: the authoritative outcome is the
- * `HostError`/`closeFailures` the caller already holds, and a logger that throws
- * mid-shutdown must not strand a Redis connection or a live listener. Three
- * teardown sites needed exactly this guard; expressing it once means a future
- * teardown step cannot quietly omit it.
- */
-const logSafely = <L extends "info" | "warn" | "error">(
-  logger: Pick<LogPort, L>,
-  level: L,
-  message: string,
-  data?: Record<string, unknown>,
-): void => {
-  try {
-    logger[level](message, data);
-  } catch {
-    // Deliberately contained — see above.
-  }
-};
 import type { RedisConnectivityPort } from "./ports.js";
 import { requireHitlRedisPort } from "./adapters/redis-connectivity.js";
 import { createNodeContextForDag } from "./adapters/node-context-factory.js";
@@ -240,7 +220,7 @@ export const stopBoundServerAfterBindFailure = (
   } catch (error) {
     const diagnostic = safeErrorMessage(error);
     // The returned HostError remains the authoritative cleanup diagnostic.
-    logSafely(logger, "error",
+    logWithoutThrowing(logger, "error",
       "Failed to stop HTTP server after bind finalization failure — listener may still be live",
       { bind: bindDescription, error: diagnostic });
     return diagnostic;
@@ -580,33 +560,41 @@ const wireHitlRunEngine = async (args: {
   const botConfigured = notifierSelection.kind === "bot-framework";
   let notifier: HumanReviewNotifierPort | undefined;
   let conversations: ConversationStorePort | undefined;
-  if (notifierSelection.kind === "bot-framework") {
-    // SECURITY (FR-013 / SC-001): the HITL conversation store is bound to the
-    // `routedTenant` so every `fugue:<tenant>:hitl:*` key is scoped under that
-    // tenant's Redis ACL. `routedTenant` is the worker's resolved `Tenant.id`
-    // when one is injected, falling back to the constant `default` only in the
-    // single-tenant `createHost`/main.ts path where no tenant is passed (FR-035).
-    conversations = createRedisConversationStore(sharedInfra.redis, routedTenant, sharedInfra.logger);
-    const connector = createBotConnector(
-      {
-        appId: notifierSelection.appId,
-        appPassword: notifierSelection.appPassword,
-        ...(notifierSelection.tokenUrl !== undefined ? { tokenUrl: notifierSelection.tokenUrl } : {}),
-      },
-      sharedInfra.logger,
-    );
-    notifier = createBotFrameworkNotifier({ connector, conversations });
-  } else if (notifierSelection.kind === "webhook") {
-    notifier = createWebhookNotifier(
-      {
-        webhookUrl: notifierSelection.webhookUrl,
-        approvalBaseUrl: notifierSelection.approvalBaseUrl,
-      },
-      fetchWebhookHttp(),
-    );
-  } else if (notifierSelection.reason === "bot-password-missing") {
-    logger.warn("BOT_APP_ID is set but BOT_APP_PASSWORD is not — Bot Framework transport disabled");
-  }
+  // Exhaustive over the selection union: a fourth transport cannot be added
+  // without the compiler demanding its wiring here.
+  match(notifierSelection)
+    .with({ kind: "bot-framework" }, (selection) => {
+      // SECURITY (FR-013 / SC-001): the HITL conversation store is bound to the
+      // `routedTenant` so every `fugue:<tenant>:hitl:*` key is scoped under that
+      // tenant's Redis ACL. `routedTenant` is the worker's resolved `Tenant.id`
+      // when one is injected, falling back to the constant `default` only in the
+      // single-tenant `createHost`/main.ts path where no tenant is passed (FR-035).
+      conversations = createRedisConversationStore(sharedInfra.redis, routedTenant, sharedInfra.logger);
+      const connector = createBotConnector(
+        {
+          appId: selection.appId,
+          appPassword: selection.appPassword,
+          ...(selection.tokenUrl !== undefined ? { tokenUrl: selection.tokenUrl } : {}),
+        },
+        sharedInfra.logger,
+      );
+      notifier = createBotFrameworkNotifier({ connector, conversations });
+    })
+    .with({ kind: "webhook" }, (selection) => {
+      notifier = createWebhookNotifier(
+        {
+          webhookUrl: selection.webhookUrl,
+          approvalBaseUrl: selection.approvalBaseUrl,
+        },
+        fetchWebhookHttp(),
+      );
+    })
+    .with({ kind: "disabled", reason: "bot-password-missing" }, () => {
+      logger.warn("BOT_APP_ID is set but BOT_APP_PASSWORD is not — Bot Framework transport disabled");
+    })
+    // Nothing configured at all is a silent, expected outcome — HITL is opt-in.
+    .with({ kind: "disabled", reason: "unconfigured" }, () => {})
+    .exhaustive();
 
   if (notifier !== undefined && queueBackend !== undefined) {
     // Parse the generic Redis adapter once at composition. Every HITL adapter
@@ -1118,7 +1106,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
     const recordFailure = (message: string, error: unknown): void => {
       const diagnostic = safeErrorMessage(error);
       failures.push(new Error(`${message}: ${diagnostic}`, { cause: error }));
-      logSafely(logger, "error", message, { error: diagnostic });
+      logWithoutThrowing(logger, "error", message, { error: diagnostic });
     };
     // Sibling of `performShutdown`'s `attempt`, but awaiting: each teardown step
     // must record its own failure and let EVERY later resource still be
@@ -1326,7 +1314,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
     const failures: unknown[] = [];
     const recordFailure = (operation: string, error: unknown): void => {
       failures.push(new Error(`Shutdown step failed: ${operation}`, { cause: error }));
-      logSafely(logger, "error", `Shutdown step failed: ${operation}`, {
+      logWithoutThrowing(logger, "error", `Shutdown step failed: ${operation}`, {
         error: safeErrorMessage(error),
       });
     };
@@ -1389,7 +1377,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
     if (failures.length === 0) {
       attempt("log host stopped", () => logger.info("Host stopped"));
     } else {
-      logSafely(logger, "warn", `Host stopped with ${failures.length} shutdown failure(s)`);
+      logWithoutThrowing(logger, "warn", `Host stopped with ${failures.length} shutdown failure(s)`, {});
     }
     if (failures.length > 0) {
       throw new AggregateError(failures, "Host shutdown completed with failures");

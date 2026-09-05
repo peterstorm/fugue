@@ -13,18 +13,23 @@ import {
 } from "@fuguejs/framework";
 // --- Tool definition ---------------------------------------------------------
 
+/** One closed deal — named once so the port, the tool's output type, and the
+ *  cache read below cannot drift apart. */
+interface Deal {
+  id: string;
+  amount: number;
+  closedAt: string;
+}
+
 interface DealsClient {
-  byCustomer: (
-    customerId: string,
-    limit: number,
-  ) => Promise<Array<{ id: string; amount: number; closedAt: string }>>;
+  byCustomer: (customerId: string, limit: number) => Promise<Deal[]>;
 }
 
 const makeLookupDealsTool = (
   deals: DealsClient,
 ): ToolDef<
   { customerId: string; limit?: number },
-  { deals: Array<{ id: string; amount: number; closedAt: string }> }
+  { deals: Deal[] }
 > => ({
   name: toolName("lookup_deals_by_customer"),
   description: "Fetch closed deals for a customer (most recent first).",
@@ -47,7 +52,7 @@ const makeLookupDealsTool = (
     const cacheKey = `crm:deals:${customerId}:${limit}`;
     const lookup = await ctx.cache?.get(cacheKey);
     if (lookup?.hit) {
-      return lookup.value as { deals: Array<{ id: string; amount: number; closedAt: string }> };
+      return lookup.value as { deals: Deal[] };
     }
 
     const result = { deals: await deals.byCustomer(customerId, limit ?? 20) };

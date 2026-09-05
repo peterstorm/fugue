@@ -20,13 +20,13 @@
  */
 import { describe, test, expect } from "bun:test";
 import { z } from "zod";
-import { NoopObserver } from "../observer/observer.js";
-import type { RunId, DagId, NodeId } from "../types/ids.js";
+import type { NodeId } from "../types/ids.js";
 import { FakeLlmClient } from "../llm/fake-client.js";
 import type { FakeTurn, FakeWithToolsScript } from "../llm/fake-client.js";
 import type { ToolDef, LlmRequest, SendWithToolsRequest } from "../types/llm.js";
 import type { NodeContext } from "../types/node.js";
 import { stubLlmClient } from "./_llm-mocks.js";
+import { testNodeContext } from "./_context-factories.js";
 
 const FinalSchema = z.object({ result: z.number() });
 /** Accepts ANY value — needed to isolate the serialization seams from the
@@ -34,18 +34,8 @@ const FinalSchema = z.object({ result: z.number() });
  * payloads that `JSON.stringify` cannot represent). */
 const AnySchema = z.unknown();
 
-const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
-  runId: "test-run" as RunId,
-  dagId: "test-dag" as DagId,
-  observer: new NoopObserver(),
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null,
-  cache: null,
-  prompts: null,
-  llm: stubLlmClient, http: null, clock: null, budget: null,
-  logger: { warn: () => {}, error: () => {} },
-  ...overrides,
-});
+const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext =>
+  testNodeContext({ llm: stubLlmClient, ...overrides });
 
 const structuredReq = (model = "m1"): LlmRequest<unknown> => ({
   system: "sys",

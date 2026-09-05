@@ -105,13 +105,21 @@ export const fakeInfra = (redis: RedisPort): SharedInfra => ({
   capabilities: [],
 });
 
-export const testLogger = (): SyncLogger & { logs: Array<{ level: string; msg: string }> } => {
-  const logs: Array<{ level: string; msg: string }> = [];
+/**
+ * Recording logger for boot/lifecycle tests. Captures `data` as well as the
+ * message: a diagnostic's structured payload is often the assertion (the
+ * fallback breadcrumb, the error detail), and a fixture that dropped it forced
+ * callers to hand-roll their own.
+ */
+export const testLogger = (): SyncLogger & {
+  logs: Array<{ level: string; msg: string; data?: unknown }>;
+} => {
+  const logs: Array<{ level: string; msg: string; data?: unknown }> = [];
   return {
     logs,
-    info: (msg) => logs.push({ level: "info", msg }),
-    warn: (msg) => logs.push({ level: "warn", msg }),
-    error: (msg) => logs.push({ level: "error", msg }),
+    info: (msg, data) => logs.push({ level: "info", msg, data }),
+    warn: (msg, data) => logs.push({ level: "warn", msg, data }),
+    error: (msg, data) => logs.push({ level: "error", msg, data }),
   };
 };
 

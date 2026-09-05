@@ -34,26 +34,15 @@ import { diffRegistry } from "../scheduler/diff.js";
 import type { TaskRegistry } from "../scheduler/types.js";
 
 import { ok } from "../types/result.js";
-import { NoopObserver } from "../observer/observer.js";
 import type { NodeContext } from "../types/node.js";
 import { DAG_INPUT } from "../types/ids.js";
 
 import fc from "fast-check";
 import { N, R } from "./_id-helpers.js";
-import { testRuntimeContext } from "./_context-factories.js";
+import { testNodeContext, testRuntimeContext } from "./_context-factories.js";
 
-const makeBaseCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
-  runId: "test-run" as RunId,
-  dagId: "test-dag" as DagId,
-  observer: new NoopObserver(),
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  logger: { warn: () => {}, error: () => {} },
-  cache: null,
-  llm: null, http: null, clock: null, budget: null,
-  prompts: null,
-  judgeLlm: null,
-  ...overrides,
-});
+const makeBaseCtx = (overrides: Partial<NodeContext> = {}): NodeContext =>
+  testNodeContext(overrides);
 
 // ===========================================================================
 // Wave 1.1 — `onTrace` exception isolation

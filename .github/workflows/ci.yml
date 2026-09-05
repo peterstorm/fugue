@@ -31,8 +31,22 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
-      - name: Install Redis integration-test dependency
-        run: sudo apt-get update && sudo apt-get install --yes redis-server
+      # The Redis-backed suites (spend-ledger WATCH/MULTI/EXEC transactions,
+      # checkpointer, cache, BullMQ queue) are gated on REDIS_URL at module load
+      # and SKIP without it. Installing the binary is not enough: CI must also
+      # start it and export the URL, or the merge gate silently skips the very
+      # tests that prove concurrent spend cannot double-count.
+      - name: Start Redis for the integration-gated suites
+        run: |
+          sudo apt-get update && sudo apt-get install --yes redis-server
+          sudo systemctl stop redis-server 2>/dev/null || true
+          redis-server --daemonize yes --port 6379 --save '' --appendonly no
+          for _ in $(seq 1 30); do
+            redis-cli -p 6379 ping 2>/dev/null | grep -q PONG && break
+            sleep 1
+          done
+          redis-cli -p 6379 ping
+          echo "REDIS_URL=redis://localhost:6379" >> "$GITHUB_ENV"
 
       - name: Check shipped-doc links
         run: bun run check:docs
@@ -41,7 +55,9 @@ jobs:
         run: bun test scripts/
 
       - name: Typecheck + test
+        # REDIS_URL (exported above) un-skips the Redis-gated suites.
         run: |
+          test -n "$REDIS_URL" || { echo "REDIS_URL unset — Redis suites would silently skip"; exit 1; }
           for pkg in $PACKAGES; do
             echo "::group::$pkg"
             (cd "packages/$pkg" && bunx tsc --noEmit && bun run test)

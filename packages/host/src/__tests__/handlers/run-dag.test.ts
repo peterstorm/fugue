@@ -27,6 +27,7 @@ import { initCircuit } from "../../domain/circuit-breaker.js";
 import type { CircuitState } from "../../domain/circuit-breaker.js";
 import type { AuthIdentity } from "../../domain/auth.js";
 import type { HitlRunService } from "../../hitl/service.js";
+import type { HostError } from "../../domain/host-error.js";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -235,6 +236,81 @@ describe("run-dag handler", () => {
     expect(body.error).toBe("redis-unavailable");
     expect(body.ok).toBe(false);
     expect(executeCalls).toBe(0);
+  });
+
+  // ── 5xx disclosure discipline on the HITL path (round-13 C2) ───────────────
+  // This handler renders HITL `startRun` failures itself — they never reach the
+  // error-handler middleware that owns the 4xx/5xx discipline. A 5xx HostError's
+  // formatted text splices raw internal state (`internal-invariant-violated`
+  // carries the caught error's own message), so rendering it verbatim leaked it.
+
+  const INTERNAL_DETAIL = "HITL clock threw outside its port contract: EBADF /var/secrets/token";
+
+  const hitlFailingWith = (error: HostError): HitlRunService =>
+    ({ async startRun() { return err(error); } }) as HitlRunService;
+
+  it("does not echo a 5xx HostError's internal detail to the caller", async () => {
+    const logged: Array<{ message: string; data: Record<string, unknown> }> = [];
+    const deps = defaultDeps({
+      hitl: hitlFailingWith({ kind: "internal-invariant-violated", message: INTERNAL_DETAIL }),
+      logger: {
+        info: () => {},
+        warn: () => {},
+        error: (message: string, data?: Record<string, unknown>) => {
+          logged.push({ message, data: data ?? {} });
+        },
+      } as RunDagDeps["logger"],
+    });
+
+    const res = await post(
+      createTestApp(deps, makeReadyState(freeze([makeHitlDag("hitl-5xx")], sha, Date.now()))),
+      "hitl-5xx",
+      { query: "hi" },
+    );
+    const body = await res.json();
+    const wire = JSON.stringify(body);
+
+    expect(res.status).toBe(500);
+    // The kind stays — it is the caller's stable handle on the failure class.
+    expect(body.error).toBe("internal-invariant-violated");
+    // The internal state does NOT, on any field of the body.
+    expect(wire).not.toContain(INTERNAL_DETAIL);
+    expect(wire).not.toContain("EBADF");
+    expect(body.message).toBe("An unexpected error occurred");
+    expect(body.details).toBeUndefined();
+
+    // …and it is not simply dropped: the operator still gets it server-side.
+    expect(logged.some((entry) => JSON.stringify(entry.data).includes(INTERNAL_DETAIL))).toBe(true);
+  });
+
+  it("suppresses the 5xx body detail even with no logger wired", async () => {
+    const deps = defaultDeps({
+      hitl: hitlFailingWith({ kind: "internal-invariant-violated", message: INTERNAL_DETAIL }),
+    });
+
+    const res = await post(
+      createTestApp(deps, makeReadyState(freeze([makeHitlDag("hitl-5xx-nolog")], sha, Date.now()))),
+      "hitl-5xx-nolog",
+      { query: "hi" },
+    );
+
+    expect(res.status).toBe(500);
+    expect(JSON.stringify(await res.json())).not.toContain(INTERNAL_DETAIL);
+  });
+
+  it("keeps 4xx HostErrors precise — the discipline is status-driven, not blanket", async () => {
+    // A curated caller-facing 4xx keeps its exact message and details.
+    const res = await post(
+      createTestApp(defaultDeps(), makeReadyState(freeze([makeDag("present")], sha, Date.now()))),
+      "absent-dag",
+      { query: "hi" },
+    );
+    const body = await res.json();
+
+    expect(res.status).toBe(404);
+    expect(body.error).toBe("dag-not-found");
+    expect(body.message).not.toBe("An unexpected error occurred");
+    expect(body.details).toBeDefined();
   });
 
   describe("identity threading into the run (FR-W3-007)", () => {

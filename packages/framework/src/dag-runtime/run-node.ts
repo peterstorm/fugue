@@ -44,6 +44,7 @@ import { mergeScopedCapabilities } from "../shared/make-node-context.js";
 import type { NodeId, DagId } from "../types/ids.js";
 import { tryLlmModelId } from "../types/llm.js";
 import { emit } from "./emit.js";
+import { bestEffort } from "./best-effort.js";
 import { validateInput, validateOutput } from "../shared/validate.js";
 import { buildNodeInput } from "../shared/build-input.js";
 import { withTracedNodeSpan, EMPTY_OUTCOME, type NodeSpanOutcome } from "./node-span.js";
@@ -469,17 +470,26 @@ export const runNodeShared = async (
     frameworkError: FrameworkError,
     extra?: { readonly stack?: string },
   ): void => {
-    emit(ctx, {
-      type: "node-error",
-      runId: ctx.runId,
-      dagId,
-      nodeId,
-      sideEffects: node.sideEffects,
-      timestamp: stamp(),
-      error,
-      ...(extra?.stack !== undefined ? { stack: extra.stack } : {}),
-      frameworkError,
-    });
+    // Fenced: `stamp()` runs `nowFn()` as an ARGUMENT, so a hostile clock throws
+    // before `emit`/`dispatchEvent` is entered. Two call sites below (checkpoint
+    // replay rejected, input validation failed) run BEFORE `withTracedNodeSpan`
+    // is entered, so its try/catch cannot contain them: the throw would escape
+    // `runNodeShared` into `executeWave`'s catch handler and cost that whole
+    // wave its already-completed siblings. The typed `Err` returned alongside
+    // each call is the authoritative outcome (`best-effort.ts`).
+    bestEffort("runNodeShared", "node-error emission", () =>
+      emit(ctx, {
+        type: "node-error",
+        runId: ctx.runId,
+        dagId,
+        nodeId,
+        sideEffects: node.sideEffects,
+        timestamp: stamp(),
+        error,
+        ...(extra?.stack !== undefined ? { stack: extra.stack } : {}),
+        frameworkError,
+      }),
+    );
   };
 
   // Checkpoint resume hit — validate against the current output schema and
@@ -491,14 +501,18 @@ export const runNodeShared = async (
       emitNodeError(`checkpoint replay rejected: ${messageOf(validated.error)}`, validated.error);
       return { result: validated, outcome: EMPTY_OUTCOME };
     }
-    emit(ctx, {
-      type: "node-skipped",
-      runId: ctx.runId,
-      dagId,
-      nodeId,
-      timestamp: stamp(),
-      reason: "checkpoint",
-    });
+    // Also pre-span, also clock-in-argument: the replayed checkpoint value
+    // returned below is the authoritative outcome.
+    bestEffort("runNodeShared", "node-skipped emission", () =>
+      emit(ctx, {
+        type: "node-skipped",
+        runId: ctx.runId,
+        dagId,
+        nodeId,
+        timestamp: stamp(),
+        reason: "checkpoint",
+      }),
+    );
     return { result: ok(validated.value), outcome: EMPTY_OUTCOME };
   }
 

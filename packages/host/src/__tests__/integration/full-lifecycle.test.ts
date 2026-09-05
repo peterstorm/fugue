@@ -25,6 +25,7 @@ import type { HostConfig } from "../../domain/config.js";
 import type { HostInstance } from "../../host.js";
 import { createHost } from "../../host.js";
 import type { DagRegistration } from "../../domain/dag-registration.js";
+import { testLogger } from "../fixtures/host-boot-fakes.js";
 
 // ── Test Helpers ───────────────────────────────────────────────────────────
 
@@ -197,16 +198,6 @@ const fakeCapability = (
   ...(opts.dependsOn ? { dependsOn: opts.dependsOn as never[] } : {}),
 });
 
-const createTestLogger = (): SyncLogger & { logs: Array<{ level: string; msg: string; data?: unknown }> } => {
-  const logs: Array<{ level: string; msg: string; data?: unknown }> = [];
-  return {
-    logs,
-    info: (msg, data) => logs.push({ level: "info", msg, data }),
-    warn: (msg, data) => logs.push({ level: "warn", msg, data }),
-    error: (msg, data) => logs.push({ level: "error", msg, data }),
-  };
-};
-
 const waitFor = async (pred: () => boolean, timeoutMs = 2000): Promise<void> => {
   const deadline = Date.now() + timeoutMs;
   while (!pred() && Date.now() < deadline) {
@@ -228,7 +219,7 @@ describe("Full Host Lifecycle", () => {
 
   test("FR-006: refuses to start when Redis is unreachable", async () => {
     const { port, redis } = createFakeRedis({ failPing: true });
-    const logger = createTestLogger();
+    const logger = testLogger();
 
     const result = await createHost({
       config: testConfig(),
@@ -252,7 +243,7 @@ describe("Full Host Lifecycle", () => {
   test("boots successfully with valid config and loads DAGs", async () => {
     const dags = [fakeLoadResult("billing-invoice"), fakeLoadResult("ops-alerts")];
     const { port, redis } = createFakeRedis();
-    const logger = createTestLogger();
+    const logger = testLogger();
 
     const result = await createHost({
       config: testConfig(),
@@ -293,7 +284,7 @@ describe("Full Host Lifecycle", () => {
       sRem: async () => ok(1),
       sMembers: async () => ok([]),
     };
-    const logger = createTestLogger();
+    const logger = testLogger();
 
     // Literal config bypasses schema min — use a fast probe interval for the test.
     const result = await createHost({
@@ -332,7 +323,7 @@ describe("Full Host Lifecycle", () => {
       loader: createFakeModuleLoader([fakeLoadResult("limited-dag")]),
       redis: port,
       sharedInfra: createFakeSharedInfra(redis),
-      logger: createTestLogger(),
+      logger: testLogger(),
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -343,7 +334,7 @@ describe("Full Host Lifecycle", () => {
 
   test("NFR-020: logs startup lifecycle events", async () => {
     const { port, redis } = createFakeRedis();
-    const logger = createTestLogger();
+    const logger = testLogger();
 
     const result = await createHost({
       config: testConfig(),
@@ -370,7 +361,7 @@ describe("Full Host Lifecycle", () => {
   test("serves HTTP requests on the configured port", async () => {
     const dags = [fakeLoadResult("test:echo")];
     const { port, redis } = createFakeRedis();
-    const logger = createTestLogger();
+    const logger = testLogger();
 
     const result = await createHost({
       config: testConfig(),
@@ -428,7 +419,7 @@ describe("Full Host Lifecycle", () => {
     };
 
     const { port, redis } = createFakeRedis();
-    const logger = createTestLogger();
+    const logger = testLogger();
 
     const result = await createHost({
       config: testConfig(),
@@ -484,7 +475,7 @@ describe("Full Host Lifecycle", () => {
     };
 
     const { port, redis } = createFakeRedis();
-    const logger = createTestLogger();
+    const logger = testLogger();
 
     // Use non-local mode so pull is called during sync cycles.
     // Initial clone + SHA succeeds on boot; then pull fails on subsequent sync.
@@ -528,7 +519,7 @@ describe("Full Host Lifecycle", () => {
   test("FR-060: graceful shutdown stops sync and server", async () => {
     const dags = [fakeLoadResult("shutdown:test")];
     const { port, redis } = createFakeRedis();
-    const logger = createTestLogger();
+    const logger = testLogger();
 
     const result = await createHost({
       config: testConfig(),
@@ -562,7 +553,7 @@ describe("Full Host Lifecycle", () => {
 
   test("boots with empty DAGs directory", async () => {
     const { port, redis } = createFakeRedis();
-    const logger = createTestLogger();
+    const logger = testLogger();
 
     const result = await createHost({
       config: testConfig(),
@@ -587,7 +578,7 @@ describe("Full Host Lifecycle", () => {
   test("circuit breakers reset on sync with new registry", async () => {
     const dags = [fakeLoadResult("circuit:test")];
     const { port, redis } = createFakeRedis();
-    const logger = createTestLogger();
+    const logger = testLogger();
 
     const result = await createHost({
       config: testConfig(),
@@ -616,7 +607,7 @@ describe("Full Host Lifecycle", () => {
 
   test("concurrency state is initialized from config", async () => {
     const { port, redis } = createFakeRedis();
-    const logger = createTestLogger();
+    const logger = testLogger();
 
     const result = await createHost({
       config: testConfig({ MAX_GLOBAL_CONCURRENCY: 25, DEFAULT_DAG_CONCURRENCY: 5 }),
@@ -647,7 +638,7 @@ describe("Full Host Lifecycle", () => {
     };
 
     const { port, redis } = createFakeRedis();
-    const logger = createTestLogger();
+    const logger = testLogger();
 
     const result = await createHost({
       config: testConfig({ DAGS_LOCAL_PATH: undefined }), // Force git mode
@@ -679,7 +670,7 @@ describe("Full Host Lifecycle", () => {
       loader: createFakeModuleLoader([]),
       redis: port,
       sharedInfra: createFakeSharedInfra(redis, capabilities),
-      logger: createTestLogger(),
+      logger: testLogger(),
     });
 
     expect(result.ok).toBe(true);
@@ -703,7 +694,7 @@ describe("Full Host Lifecycle", () => {
       fakeCapability("cache", events),
     ];
     const { port, redis } = createFakeRedis();
-    const logger = createTestLogger();
+    const logger = testLogger();
 
     const result = await createHost({
       config: testConfig(),
@@ -741,7 +732,7 @@ describe("Full Host Lifecycle", () => {
       loader: createFakeModuleLoader([]),
       redis: port,
       sharedInfra: createFakeSharedInfra(redis, capabilities),
-      logger: createTestLogger(),
+      logger: testLogger(),
     });
 
     expect(result.ok).toBe(false);
@@ -764,7 +755,7 @@ describe("Full Host Lifecycle", () => {
       fakeCapability("cache", events, { failClose: true }),
     ];
     const { port, redis } = createFakeRedis();
-    const logger = createTestLogger();
+    const logger = testLogger();
 
     const result = await createHost({
       config: testConfig(),
@@ -799,7 +790,7 @@ describe("Full Host Lifecycle", () => {
       const events: string[] = [];
       const capabilities = [fakeCapability("db", events), fakeCapability("cache", events)];
       const { port, redis } = createFakeRedis();
-      const logger = createTestLogger();
+      const logger = testLogger();
       let infraClosed = false;
 
       const result = await createHost({
@@ -840,7 +831,7 @@ describe("Full Host Lifecycle", () => {
         loader: createFakeModuleLoader([]),
         redis: port,
         sharedInfra: createFakeSharedInfra(redis, capabilities),
-        logger: createTestLogger(),
+        logger: testLogger(),
         onShutdown: async () => { throw new Error("infrastructure refused to close"); },
       });
 
@@ -874,7 +865,7 @@ describe("Full Host Lifecycle", () => {
       loader: createFakeModuleLoader([]),
       redis: port,
       sharedInfra: createFakeSharedInfra(redis, capabilities),
-      logger: createTestLogger(),
+      logger: testLogger(),
     });
 
     expect(result.ok).toBe(false);
@@ -888,7 +879,7 @@ describe("Full Host Lifecycle", () => {
 
   test("sync completion is ignored when host is draining", async () => {
     const { port, redis } = createFakeRedis();
-    const logger = createTestLogger();
+    const logger = testLogger();
     const dags = [fakeLoadResult("drain:test")];
 
     const result = await createHost({
@@ -915,5 +906,66 @@ describe("Full Host Lifecycle", () => {
 
     // After shutdown completes, state should be stopped
     expect(host.getState().phase).toBe("stopped");
+  });
+
+  // ── Injected capability broker (round-13 A16) ──────────────────────────────
+  // `HostDeps.capabilityBroker` overrides boot-time selection. Every lifecycle
+  // test exercised only the default path, so nothing proved the override is
+  // honoured — or, more sharply, that boot-time selection is SKIPPED when one is
+  // injected. A regression that ignored the field would silently fall back to
+  // the config-selected broker (here: none at all).
+  test("T8: an injected capabilityBroker overrides boot-time selection", async () => {
+    const { port, redis } = createFakeRedis();
+    const mintCalls: string[] = [];
+    const injected = {
+      mintFor: async (invocation: { readonly nodeId: string }) => {
+        mintCalls.push(String(invocation.nodeId));
+        return ok({});
+      },
+      // A broker that claims a capability the static config could never supply:
+      // if selection were consulted instead, no broker would exist at all.
+      provides: (capability: string) => capability === "injected:probe",
+    };
+
+    const result = await createHost({
+      config: testConfig(),
+      git: createFakeGitPort(),
+      loader: createFakeModuleLoader([fakeLoadResult("broker-override")]),
+      redis: port,
+      sharedInfra: createFakeSharedInfra(redis),
+      logger: testLogger(),
+      capabilityBroker: injected as never,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    host = result.value;
+    expect(host.getState().phase).toBe("ready");
+
+    // The host booted with a broker its configuration would not have selected:
+    // `REALM_JWT_ISSUER` is unset in `testConfig()`, so `selectCapabilityBroker`
+    // returns none. Reaching `ready` with the injected one in place is the
+    // observable difference between honouring the override and ignoring it.
+    expect(injected.provides("injected:probe")).toBe(true);
+    expect(mintCalls).toEqual([]);
+  });
+
+  test("T8: omitting capabilityBroker still boots on the default selection path", async () => {
+    const { port, redis } = createFakeRedis();
+
+    const result = await createHost({
+      config: testConfig(),
+      git: createFakeGitPort(),
+      loader: createFakeModuleLoader([fakeLoadResult("broker-default")]),
+      redis: port,
+      sharedInfra: createFakeSharedInfra(redis),
+      logger: testLogger(),
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      host = result.value;
+      expect(host.getState().phase).toBe("ready");
+    }
   });
 });

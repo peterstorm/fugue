@@ -27,7 +27,7 @@ import { EXECUTOR_NODE_ID } from "./types.js";
 import { runNodeShared } from "./run-node.js";
 import { type NodeSpanOutcome, EMPTY_OUTCOME } from "./node-span.js";
 import { emit } from "./emit.js";
-import { bestEffortLog } from "./best-effort.js";
+import { bestEffort, bestEffortLog } from "./best-effort.js";
 import { emitRoutingDecisions } from "./route-emission.js";
 import { type FreshnessIndex } from "./freshness-check.js";
 import { emitFreshnessWitnessEvents } from "./freshness-emission.js";
@@ -138,14 +138,20 @@ export const executeWave = async (
       try {
         // Skip nodes already successfully completed in this wave
         if (priorOutputs.has(nodeId)) {
-          emit(nodeCtx, {
-            type: "node-skipped",
-            runId: nodeCtx.runId,
-            dagId: dag.id,
-            nodeId,
-            timestamp: stamp(),
-            reason: "already-completed",
-          });
+          // Fenced: `stamp()` runs `nowFn()` as an ARGUMENT, so a hostile clock
+          // throws before `emit`/`dispatchEvent` is entered. The carried output
+          // below is the authoritative outcome and must survive that (see
+          // `best-effort.ts` — a diagnostic never replaces a modeled result).
+          bestEffort("executeWave", "node-skipped emission", () =>
+            emit(nodeCtx, {
+              type: "node-skipped",
+              runId: nodeCtx.runId,
+              dagId: dag.id,
+              nodeId,
+              timestamp: stamp(),
+              reason: "already-completed",
+            }),
+          );
           return {
             nodeId,
             result: ok(priorOutputs.get(nodeId)) as Result<unknown, FrameworkError>,
@@ -179,15 +185,23 @@ export const executeWave = async (
         return { nodeId, result, outcome };
       } catch (caught) {
         const frameworkError = asNodeFrameworkError(caught, nodeId);
-        emit(nodeCtx, {
-          type: "node-error",
-          runId: nodeCtx.runId,
-          dagId: dag.id,
-          nodeId,
-          timestamp: stamp(),
-          error: messageOf(frameworkError),
-          frameworkError,
-        });
+        // THE safety net for a thrown node defect, so it must itself be total.
+        // `stamp()` runs `nowFn()` as an ARGUMENT: unfenced, a hostile clock
+        // throws again HERE, escapes this `.map()` callback, and rejects the
+        // `Promise.all` — `executeWave` would reject instead of returning a
+        // `WaveResult`, discarding every already-completed sibling's output and
+        // re-running its side effects on the retry.
+        bestEffort("executeWave", "node-error emission", () =>
+          emit(nodeCtx, {
+            type: "node-error",
+            runId: nodeCtx.runId,
+            dagId: dag.id,
+            nodeId,
+            timestamp: stamp(),
+            error: messageOf(frameworkError),
+            frameworkError,
+          }),
+        );
         return {
           nodeId,
           result: err(frameworkError) as Result<unknown, FrameworkError>,
@@ -216,16 +230,21 @@ export const executeWave = async (
     const [primary, ...siblings] = failures as [{ nodeId: NodeId; error: FrameworkError }, ...{ nodeId: NodeId; error: FrameworkError }[]];
 
     for (const sibling of siblings) {
-      emit(nodeCtx, {
-        type: "node-error",
-        runId: nodeCtx.runId,
-        dagId: dag.id,
-        nodeId: sibling.nodeId,
-        sideEffects: nodeMap.get(sibling.nodeId)?.sideEffects,
-        timestamp: stamp(),
-        error: messageOf(sibling.error),
-        frameworkError: sibling.error,
-      });
+      // Same argument-evaluation hazard: the `node-failed` returned below is the
+      // authoritative outcome, and a throwing clock on a co-failure diagnostic
+      // must not cost the caller the primary failure or the carried outputs.
+      bestEffort("executeWave", "co-failed node-error emission", () =>
+        emit(nodeCtx, {
+          type: "node-error",
+          runId: nodeCtx.runId,
+          dagId: dag.id,
+          nodeId: sibling.nodeId,
+          sideEffects: nodeMap.get(sibling.nodeId)?.sideEffects,
+          timestamp: stamp(),
+          error: messageOf(sibling.error),
+          frameworkError: sibling.error,
+        }),
+      );
     }
 
     const partialOutputs = carriedOutputs(newOutputs, machineCtx.outputs);

@@ -45,23 +45,65 @@ const recordPath = (root: string, value: string): string => join(root, `${digest
 
 describe("file spend codec", () => {
   it("round-trips valid spend structurally (property)", () => {
+    // `usage` is generated over BOTH values: "unknown" is the absorbing signal
+    // that disables ceiling evaluation, so silently losing it across a durable
+    // round trip (a process restart) would reopen a ceiling that must keep
+    // refusing. The USD shape is generated too — an unpriced spend's model list
+    // is the other half of the same fail-closed signal.
     fc.assert(fc.property(
       fc.integer({ min: 0, max: 100_000 }),
       fc.integer({ min: 0, max: 100_000 }),
       fc.integer({ min: 0, max: 100_000 }),
-      (tokens, calls, micros) => {
+      fc.constantFrom("known" as const, "unknown" as const),
+      fc.option(fc.uniqueArray(modelName, { minLength: 1, maxLength: 3 }), { nil: undefined }),
+      (tokens, calls, micros, usage, models) => {
+        const canonical = models === undefined ? undefined : unpricedModels(models);
         const spend = makeSpend({
-          usage: "known",
+          usage,
           tokens,
           calls,
-          usd: { kind: "priced", micros: micros as MicroUsd },
+          usd: canonical === undefined
+            ? { kind: "priced", micros: micros as MicroUsd }
+            : { kind: "unpriced", models: canonical, knownMicros: micros as MicroUsd },
         });
         const encoded = serializeFileSpendRecord(rid, spend);
         expect(encoded.ok).toBe(true);
         if (!encoded.ok) return;
-        expect(parseFileSpendRecord(encoded.value, rid)).toEqual({ ok: true, value: spend });
+        const decoded = parseFileSpendRecord(encoded.value, rid);
+        expect(decoded).toEqual({ ok: true, value: spend });
+        // Pinned explicitly: the flag must survive, not merely compare equal by
+        // coincidence with a default.
+        if (decoded.ok) expect(decoded.value.usage).toBe(usage);
       },
     ));
+  });
+
+  it("keeps an unknown-usage unpriced spend intact through the codec", () => {
+    const models = unpricedModels(["mystery-model"]);
+    if (models === undefined) throw new Error("expected canonical models");
+    const spend = makeSpend({
+      usage: "unknown",
+      tokens: 0,
+      calls: 1,
+      usd: { kind: "unpriced", models, knownMicros: 0 as MicroUsd },
+    });
+
+    const encoded = serializeFileSpendRecord(rid, spend);
+    expect(encoded.ok).toBe(true);
+    if (!encoded.ok) return;
+    // The wire form carries the flag literally — a reader on another process
+    // must be able to see it without inferring it.
+    expect(JSON.parse(encoded.value).usage).toBe("unknown");
+
+    const decoded = parseFileSpendRecord(encoded.value, rid);
+    expect(decoded.ok).toBe(true);
+    if (decoded.ok) {
+      expect(decoded.value.usage).toBe("unknown");
+      expect(decoded.value.usd.kind).toBe("unpriced");
+      if (decoded.value.usd.kind === "unpriced") {
+        expect([...decoded.value.usd.models]).toEqual(["mystery-model"]);
+      }
+    }
   });
 
   it("round-trips arbitrary UTF-16 unpriced model names", () => {
@@ -131,6 +173,44 @@ describe("createFileSpendStore", () => {
       ok: true,
       value: addSpend(pricedCall(10, 4 as MicroUsd), unpricedCall(2, "future-model")),
     });
+  });
+
+  it("carries the unknown-usage signal across a process restart", async () => {
+    // The durability half of the codec property above: a run whose usage went
+    // unknown must still read back as unknown from a FRESH store instance, or a
+    // restart would silently reopen a ceiling that had stopped admitting.
+    const root = tempRoot();
+    const unknownUsage = makeSpend({
+      usage: "unknown",
+      tokens: 0,
+      calls: 1,
+      usd: { kind: "priced", micros: 0 as MicroUsd },
+    });
+
+    const first = createFileSpendStore(root);
+    expect((await first.add(rid, pricedCall(10, 4 as MicroUsd))).ok).toBe(true);
+    expect((await first.add(rid, unknownUsage)).ok).toBe(true);
+
+    const reloaded = await createFileSpendStore(root).read(rid);
+    expect(reloaded.ok).toBe(true);
+    if (reloaded.ok) {
+      expect(reloaded.value.usage).toBe("unknown");
+      expect(reloaded.value).toEqual(addSpend(pricedCall(10, 4 as MicroUsd), unknownUsage));
+    }
+  });
+
+  it("carries an unpriced model list across a process restart", async () => {
+    const root = tempRoot();
+    const first = createFileSpendStore(root);
+    expect((await first.add(rid, unpricedCall(3, "mystery-model"))).ok).toBe(true);
+
+    const reloaded = await createFileSpendStore(root).read(rid);
+    expect(reloaded.ok).toBe(true);
+    if (reloaded.ok && reloaded.value.usd.kind === "unpriced") {
+      expect([...reloaded.value.usd.models]).toEqual(["mystery-model"]);
+    } else {
+      throw new Error("expected an unpriced spend to reload as unpriced");
+    }
   });
 
   it("serializes concurrent adds into one complete aggregate", async () => {

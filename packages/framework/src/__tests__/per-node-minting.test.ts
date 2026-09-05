@@ -1167,4 +1167,177 @@ describe("per-node minting — broker port-contract enforcement", () => {
       expect(root).toBe("missing-capability");
     }
   });
+
+  // ── Fixed-pricing LLM bindings (round-13 A8) ───────────────────────────────
+  // `parseScopedBinding` accepts two pricing models. Every prior test used
+  // `{ kind: "request" }`, so the `"fixed"` branch — its model parse, its
+  // malformed-binding refusals, and the alias-collision refusal that guards
+  // every LLM binding — was never executed.
+
+  /** Build a broker minting one LLM capability with the given raw binding. */
+  const brokerMinting = (capability: string, binding: unknown): CapabilityBroker => ({
+    mintFor: async () => ok({ [capability]: binding } as never),
+    provides: (c) => c === capability,
+  });
+
+  const llmBindingClient = (onCall: () => void): LlmClient => ({
+    sendStructured: async <O>() => {
+      onCall();
+      return ok({
+        output: { answer: "fixed" } as O,
+        rawText: "",
+        tokensIn: 1,
+        tokensOut: 1,
+        cacheWriteTokens: 0,
+        cacheReadTokens: 0,
+      });
+    },
+    sendWithTools: async () => { throw new Error("unused"); },
+  });
+
+  /** Run a one-node DAG whose node requires `brokerLlm` from `broker`. */
+  const runWithBrokerLlm = async (
+    broker: CapabilityBroker,
+    meterLlm: MintingAuthority["meterLlm"],
+  ): Promise<Result<unknown, FrameworkError>> => {
+    const node = createFetchNode({
+      id: N("fixed-pricing-node"),
+      inputSchema: z.object({}),
+      outputSchema: z.object({ answer: z.string() }),
+      requires: ["brokerLlm"] as const,
+      fetch: async (_input, ctx) => {
+        const result = await ctx.brokerLlm.sendStructured({
+          system: "s",
+          user: "u",
+          model: "gpt-4o",
+          schema: z.object({ answer: z.string() }),
+          nodeId: N("fixed-pricing-node"),
+        });
+        return result.ok ? ok(result.value.output) : result;
+      },
+    });
+    const dag = defineDagFromArray({
+      id: "dag-1",
+      nodes: [node],
+      edges: [{ from: DAG_INPUT, to: "fixed-pricing-node" }],
+    });
+    return runDag(dag, {}, baseCtx(), {
+      minting: { broker, origin: agentOrigin, meterLlm },
+    });
+  };
+
+  const rootKindOf = (result: Result<unknown, FrameworkError>): string | undefined => {
+    if (result.ok) return undefined;
+    return result.error.kind === "retry-exhausted"
+      ? result.error.rootErrorKind
+      : result.error.kind;
+  };
+
+  it("carries a fixed pricing model's parsed id through to the meter", async () => {
+    let providerCalls = 0;
+    let observedPricing: unknown;
+    const broker = brokerMinting("brokerLlm", {
+      clientKind: "llm",
+      client: llmBindingClient(() => { providerCalls += 1; }),
+      pricingModel: { kind: "fixed", model: "gpt-4o" },
+      runScopedOperations: {},
+    });
+
+    const result = await runWithBrokerLlm(broker, (_capability, binding) => {
+      observedPricing = binding.pricingModel;
+      return ok({
+        sendStructured: (request) => binding.client.sendStructured(request),
+        sendWithTools: (request, ctx) => binding.client.sendWithTools(request, ctx),
+      });
+    });
+
+    expect(result).toEqual(ok({ answer: "fixed" }));
+    expect(providerCalls).toBe(1);
+    // The declared model reaches the meter, which is what lets a fixed-priced
+    // binding be costed without trusting the per-request model field.
+    expect(observedPricing).toEqual({ kind: "fixed", model: "gpt-4o" });
+  });
+
+  it("refuses a fixed pricing model with no model, an empty model, or a non-string one", async () => {
+    for (const pricingModel of [
+      { kind: "fixed" },
+      { kind: "fixed", model: "" },
+      { kind: "fixed", model: "   " },
+      { kind: "fixed", model: 42 },
+      { kind: "fixed", model: null },
+    ]) {
+      const broker = brokerMinting("brokerLlm", {
+        clientKind: "llm",
+        client: llmBindingClient(() => { throw new Error("must not run"); }),
+        pricingModel,
+        runScopedOperations: {},
+      });
+
+      const result = await runWithBrokerLlm(broker, (_c, binding) => ok({
+        sendStructured: (request) => binding.client.sendStructured(request),
+        sendWithTools: (request, ctx) => binding.client.sendWithTools(request, ctx),
+      }));
+
+      expect(result.ok).toBe(false);
+    }
+  });
+
+  it("refuses an unrecognised pricing model kind rather than defaulting one", async () => {
+    // Defaulting to `request` would silently re-price a binding the broker
+    // meant to fix — fail closed instead.
+    const broker = brokerMinting("brokerLlm", {
+      clientKind: "llm",
+      client: llmBindingClient(() => { throw new Error("must not run"); }),
+      pricingModel: { kind: "per-token" },
+      runScopedOperations: {},
+    });
+
+    const result = await runWithBrokerLlm(broker, (_c, binding) => ok({
+      sendStructured: (request) => binding.client.sendStructured(request),
+      sendWithTools: (request, ctx) => binding.client.sendWithTools(request, ctx),
+    }));
+
+    expect(result.ok).toBe(false);
+  });
+
+  it("refuses an alias that would shadow a standard operation on a fixed binding", async () => {
+    // An alias named `sendStructured` would let a broker replace the metered
+    // standard operation with an unmetered one of its own. The refusal must be
+    // fail-closed: the node never runs, so the provider is never reached.
+    for (const alias of ["sendStructured", "sendWithTools"]) {
+      let providerCalls = 0;
+      const broker = brokerMinting("brokerLlm", {
+        clientKind: "llm",
+        client: llmBindingClient(() => { providerCalls += 1; }),
+        pricingModel: { kind: "fixed", model: "gpt-4o" },
+        runScopedOperations: { [alias]: "sendStructured" },
+      });
+
+      const result = await runWithBrokerLlm(broker, (_c, binding) => ok({
+        sendStructured: (request) => binding.client.sendStructured(request),
+        sendWithTools: (request, ctx) => binding.client.sendWithTools(request, ctx),
+      }));
+
+      expect(result.ok).toBe(false);
+      expect(providerCalls).toBe(0);
+      // A malformed binding is a broker-contract violation, not a caller error.
+      expect(rootKindOf(result)).toBe("node-crash");
+    }
+  });
+
+  it("refuses an alias naming an operation that does not exist", async () => {
+    const broker = brokerMinting("brokerLlm", {
+      clientKind: "llm",
+      client: llmBindingClient(() => { throw new Error("must not run"); }),
+      pricingModel: { kind: "fixed", model: "gpt-4o" },
+      runScopedOperations: { critique: "sendAnything" },
+    });
+
+    const result = await runWithBrokerLlm(broker, (_c, binding) => ok({
+      sendStructured: (request) => binding.client.sendStructured(request),
+      sendWithTools: (request, ctx) => binding.client.sendWithTools(request, ctx),
+    }));
+
+    expect(result.ok).toBe(false);
+  });
 });

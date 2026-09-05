@@ -91,20 +91,31 @@ export type OnHumanReviewHook = (req: {
  * exceptions into `node-failed`, validate edited output, and emit the resulting
  * response/suspend event. Retry sleep remains at the call site.
  */
-const callHumanReviewHook = async (
-  phaseKind: "awaiting-human" | "retrying-hook" | "suspended",
-  nodeId: NodeId,
-  output: unknown,
-  prompt: NonEmptyString,
-  hooks: { onHumanReview?: OnHumanReviewHook } | undefined,
-  nodeMap: Map<
+/**
+ * One invocation of the shared human-review body. Bundled rather than passed
+ * positionally — nine positional arguments of which four are `NodeId`/`DagId`/
+ * `unknown`/function are trivially transposable at the call site, the same
+ * reason `post-wave-context.ts` replaced its own 10- and 7-argument calls.
+ */
+interface HumanReviewHookCall {
+  readonly phaseKind: "awaiting-human" | "retrying-hook" | "suspended";
+  readonly nodeId: NodeId;
+  readonly output: unknown;
+  readonly prompt: NonEmptyString;
+  readonly hooks: { onHumanReview?: OnHumanReviewHook } | undefined;
+  readonly nodeMap: Map<
     NodeId,
     NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>
-  >,
-  nodeCtx: NodeContext,
-  dagId: DagId,
-  nowFn: () => number,
+  >;
+  readonly nodeCtx: NodeContext;
+  readonly dagId: DagId;
+  readonly nowFn: () => number;
+}
+
+const callHumanReviewHook = async (
+  call: HumanReviewHookCall,
 ): Promise<UnenrichedDagEvent> => {
+  const { phaseKind, nodeId, output, prompt, hooks, nodeMap, nodeCtx, dagId, nowFn } = call;
   const stamp = (): Date => new Date(nowFn());
   const emitFailure = (
     frameworkError: FrameworkError,
@@ -298,7 +309,9 @@ export const buildDagExecutor = (
     }
 
     const awaitStartMs = nowFn();
-    const rawEvent = await callHumanReviewHook(phaseKind, nodeId, output, prompt, hooks, nodeMap, nodeCtx, dag.id, nowFn);
+    const rawEvent = await callHumanReviewHook({
+      phaseKind, nodeId, output, prompt, hooks, nodeMap, nodeCtx, dagId: dag.id, nowFn,
+    });
     const enrichResult = enrichHumanRespondedEvent(rawEvent, machineCtx);
     if (enrichResult.kind === "err") {
       return { type: "node-failed", nodeId: enrichResult.nodeId, error: enrichResult.error } satisfies DagEvent;

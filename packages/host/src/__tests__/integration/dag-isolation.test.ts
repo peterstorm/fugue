@@ -9,7 +9,7 @@
 
 import { describe, test, expect } from "bun:test";
 import { createInMemorySpendLedger } from "../../adapters/spend-ledger-memory.js";
-import { fakeInfra } from "../fixtures/host-boot-fakes.js";
+import { fakeInfra, mkTenant } from "../fixtures/host-boot-fakes.js";
 import { z } from "zod";
 import type { DagDef, RunId } from "@fuguejs/framework";
 import { noopTracer, dagId, runId as makeRunId, nodeId as makeNodeId, ok, isOk, gitSha } from "@fuguejs/framework";
@@ -30,12 +30,6 @@ import { tenantId } from "../../domain/tenant.js";
 import type { TenantId } from "../../domain/tenant.js";
 
 /** Build a `TenantId` for a test from a known-good literal via the canonical constructor. */
-const mkTenant = (s: string): TenantId => {
-  const r = tenantId(s);
-  if (!isOk(r)) throw new Error(`test tenant id "${s}" is invalid (kind: ${r.error.kind})`);
-  return r.value;
-};
-
 // Existing isolation tests are identity-agnostic — an admin identity preserves
 // the prior `agent`-keyed origin behaviour (admin/team → agent placeholder).
 const adminIdentity: AuthIdentity = { kind: "admin" };
