@@ -1,227 +1,403 @@
-# PR Remediation — 2026-09-05 (round 11)
+# PR Remediation Plan — Round 15 (`pr41`)
 
 **Branch:** `feat/f3-budget-capability-surface`
-**Review HEAD:** `2ffbd3f` (`fix: close advisory gaps and fence run-authority requires snapshot`)
-**Review Run Directory:** `.claude/reviews/review-and-fix-runs/2026-09-05T00-00-00Z-standalone-review-r11`
-**Canonical result:** `<run>/result.json` (digest `c8d8bb93a1c6a8c62637092a14bc832002a65bbf0a23080373886d8ab1fc3498`)
+**Review HEAD:** `dc90427` (`fix: close the LlmClient variance hole and round-14 advisories`)
+**Review Run Directory:** `.claude/reviews/review-and-fix-runs/2026-09-05T23-00-00Z-standalone-review-r15`
+**Canonical result:** `<run>/result.json` (all inputs below read from it; nothing hand-built)
+**Scope:** `kind: all`, 176 frozen files across `packages/framework`, `packages/host`, `apps/customer-summary`, `docs/`
 
 ## Review outcome
 
 | Bucket | Count |
-| --- | --- |
-| Reviewers spawned | 7 |
-| Critical findings raised | 3 |
-| Critical findings refuted | 1 |
-| **Surviving critical findings** | **2** |
-| Advisory findings | 28 |
+|---|---|
+| Reviewers spawned | 7 (one retry on `comment-analyzer` — out-of-scope path) |
+| Critical findings raised | 17 |
+| Refuted by panel | **0** |
+| Surviving criticals (mandatory) | **17** |
+| Advisory findings | 57 |
+| Advisories accepted | 48 |
+| Advisories dismissed | 9 |
+| Advisories deferred | 0 |
 
-The refutation panel ran three lenses (reproduction, intent, blast-radius) over
-the three criticals. Adjudicated result below.
+**Refutation panel:** lenses `reproduction`, `intent`, `security`; threshold 2 upheld.
+`reproduction` and `intent` upheld all 17. `security` upheld 5, returned `uncertain`
+on 11 (outside a security lens's remit), and returned **`refuted` on
+`comment-analyzer-6` alone** — which still survives at 2/3. See "Refuted-finding
+audit" below: no finding was refuted by the panel, so none is exempt from fixing.
 
-## Surviving critical findings — mandatory
+Every surviving critical is a **comment/doc/test-title accuracy defect** — a
+comment, header, or test name that asserts something the code beside it does not
+do. None is a behavioural bug. Two of them (`comment-analyzer-12`, `-13`) and one
+(`-17`) are tests whose *stated* invariant is not the one their assertions pin;
+those are fixed by strengthening the test until the claim is true, not by
+weakening the claim.
 
-### C1 — `packages/framework/src/dag-runtime/human-emission.ts:48`
+---
 
-The missing-`nodeDef` branch calls `fwLogger().error(...)` and `emit(nodeCtx, …)`
-unprotected, while the sibling `confidence.extract`-throw branch wraps the
-identical node-error emission in `bestEffortLog` / `bestEffort`.
+## Surviving critical findings — mandatory fixes
 
-Panel: **upheld** on reproduction and intent; refuted only on blast-radius.
-The decisive evidence is the intent lens: `human-emission.test.ts` ("keeps the
-typed confidence failure authoritative under hostile diagnostics") shows the
-sibling's `bestEffort` exists to guard the **inline `stamp()` / `nowFn()` call
-evaluated as an argument** — which happens *before* `dispatchEvent` is entered,
-so `dispatchEvent`'s own try/catch (the blast-radius lens's basis for refuting)
-cannot cover it. The unprotected branch calls `stamp()` identically at line 53.
-A throwing clock therefore escapes `emitHumanIntervention` as an exception,
-breaking the file header's own "Fail-closed … must surface — return `Err`"
-contract.
+### C1 — `packages/host/src/host.ts:6`
+**Claim:** header says "Constructs SharedInfra from config"; `SharedInfra` is only
+imported as a type (line 30) and arrives as a field on the injected `HostDeps`
+(line 157). Never constructed here.
+**Fix:** replace the bullet with "Receives `SharedInfra` from the injected
+`HostDeps` (constructed by the entrypoint, not here)".
 
-**Fix:** mirror the sibling exactly — `bestEffortLog` for the log, `bestEffort`
-for the emit — so both failure paths return `Err` under a hostile clock or
-observer. Pin with a test using a throwing `nowFn` on the missing-`nodeDef`
-path, asserting `Err` is returned rather than thrown.
+### C2 — `packages/host/src/host.ts:10`
+**Claim:** header states SIGTERM order as *draining state → stop sync → close
+server*; `performShutdown` (1313-1385) stops the sync loop and Redis probe
+**first** (1331-1341), then calls `beginDrain` (1345), then drains, then stops the
+server (1362-1366).
+**Fix:** restate the bullet in the real order: *stop sync loop + Redis probe →
+draining state → await in-flight drain → close server → stopped → exit*.
 
-### C2 — `packages/host/src/http/handlers/run-dag.ts:250`
+### C3 — `packages/host/src/domain/config.ts:301-305`
+**Claim:** `TEAMS_WEBHOOK_URL` doc says HITL is off (501) "only when NEITHER
+transport is configured". `wireHitlRunEngine` (`host.ts:599`) gates on
+`notifier !== undefined && queueBackend !== undefined`, and `host.ts:736-738`
+logs "A HITL notifier is configured but no queue backend was wired — HITL is
+disabled".
+**Fix:** add the second disabling condition to the doc — a configured transport
+with no wired `queueBackend` also leaves HITL off.
 
-The circuit-breaker-open branch calls
-`errorResponse(c, 503, "dag-disabled", …, { headers: { "Retry-After": "30" } })`
-— a **raw string literal** for the error kind and a **hardcoded** Retry-After.
+### C4 — `packages/host/src/adapters/keycloak-broker.ts:353`
+**Claim:** "The token cache is held in a single mutable cell in this shell"; lines
+393-394 declare two — `saCache` and `appOnlyCache` — and the very next comment
+block (358) already says "Two mutable cells".
+**Fix:** correct to "two mutable cells" and point at the block below that explains
+the split.
 
-Panel: **upheld** on intent and blast-radius; refuted on reproduction only
-because the finding's stated mechanism was imprecise (neither `dag-disabled`
-path actually consults `retryAfterSecondsFor`, since neither throws to reach
-the error-handler middleware). The upheld substance is:
+### C5 — `packages/framework/src/dag-runtime/executor.ts:88-93`
+**Claim:** the JSDoc says the shared human-gate body "…and emit the resulting
+response/suspend event". `callHumanReviewHook` (115-180) only returns an
+`UnenrichedDagEvent`; `emitHumanIntervention` is called by the caller
+`handleHumanGate` (313).
+**Fix:** correct the claim, and (this same block is `code-simplifier-1`) move it
+from above `HumanReviewHookCall` onto `callHumanReviewHook`, which it describes.
 
-1. `host-error.ts`'s `RETRY_AFTER_POLICY` doc states Retry-After must live in
-   "ONE authoritative place … no divergent hardcoded sources". A raw `"30"` is
-   exactly a divergent hardcoded source.
-2. `circuitConfig.cooldownMs` — per-DAG overridable via `resetTimeoutMs` and
-   env-configurable via `CIRCUIT_BREAKER_COOLDOWN_MS` — is already computed in
-   scope at line 217-221 and is **ignored**; the header always says 30s
-   regardless of configuration, which is simply wrong when it is configured
-   otherwise.
-3. The kind literal collides with the genuine `dag-disabled` variant: two
-   semantically different 503s report the same `error` code, one with
-   `Retry-After: 30` and one (line 141) with no Retry-After at all. A client
-   cannot tell "administratively disabled" from "circuit open, retry shortly".
+### C6 — `packages/framework/src/dag-runtime/run-node.ts:347-360`
+**Claim:** "An unfenced throw would escape to the wave-level catch-all and be
+reclassified as a RETRIABLE `node-crash`". The throw sits inside the callback
+passed to `withTracedNodeSpan`, whose own `fn()` catch (`node-span.ts:206-226`)
+intercepts first and hardcodes `retriability: "retriable"`; the wave-level
+`asNodeFrameworkError` is never reached (and classifies non-`FrameworkError`
+throws **non**-retriable anyway).
+**Fix:** correct the mechanism to name `node-span.ts`'s outer `fn()` catch. The
+stated consequence (retriable `node-crash`, re-firing broker egress on retry) is
+unchanged and correct. This also reconciles the paragraph with the one directly
+below it, which already names `node-span.ts`'s catch.
 
-**Fix (the real one, not a patched literal):** add a typed `circuit-open`
-`HostError` variant carrying `dagId` and its own `retryAfterSeconds`, modelled
-exactly on the existing `tenant-over-quota` precedent (a variant that carries
-its own backoff, read back through a `RETRY_AFTER_POLICY` function). Touches:
-the union, `HOST_ERROR_KINDS`, `parseHostError`, `httpStatusFor` (→ 503),
-`formatHostError`, `RETRY_AFTER_POLICY`, a `circuitOpen(...)` producer, and the
-`run-dag.ts` call site, which derives the value from `circuitConfig.cooldownMs`.
-`retryAfterSeconds` is a non-negative safe integer, so the ms→s conversion
-rounds **up** (a cooldown must never be under-advertised) with a 1s floor.
+### C7 — `packages/framework/src/llm/cost.ts:145`
+**Claim:** "This is the ONLY producer of budget-facing cost". `spendOfUnknownCall`
+(line 184) is a second producer, and `run-spend-authority.ts:377-381` feeds both
+into the same `accumulate(meter, runId, call)`.
+**Fix:** restate as: `spendOfCall` is the only producer of **priced** cost — the
+only path the cache multipliers reach the budget through — and name
+`spendOfUnknownCall` as the sibling fail-closed producer for untrustworthy usage.
 
-## Refuted critical — audited, never fixed
+### C8 — `packages/framework/src/types/dag-internals.ts:37`
+**Claim:** "The compile-time guard is retained for edge cases where a hand-rolled
+node has `id: string`". That branch (`string extends Nodes[K]["id"] ? Nodes[K]`)
+returns `Nodes[K]` **unconditionally**, never reaching the
+`Nodes[K] extends { readonly id: K }` guard.
+**Fix:** state the truth — a hand-rolled `id: string` node is accepted as-is and
+is caught only by the runtime `validateDagShape` check; the compile-time guard
+applies to the remaining non-`NodeId`, non-`string` cases.
 
-### `code-simplifier-2` — `packages/host/src/adapters/redis-connectivity.ts:189`
+### C9 — `packages/framework/src/index.ts:42-45`
+**Claim:** `runDagStateful` "live[s] on the `@fuguejs/framework/advanced` subpath".
+`advanced.ts` exports `runDagAsWorkerJob`, `runResumableDagJob`,
+`compileDagToMachine`, `buildDagExecutor`, `dagTransition`, `topoSort`,
+persistence helpers — never `runDagStateful`. `dag-runtime/index.ts:32-35`
+documents it as "intentionally NOT re-exported".
+**Fix:** correct the doc, not the API. Keeping `runDagStateful` off the public
+surface is the documented deliberate design (`dag-runtime/index.ts`, and
+`run-dag-stateful.ts:694` directs suspendable callers to `runDagStatefulOutcome` /
+`runResumableDagJob`). Widening the published surface to make a stale comment true
+would be a real API change dressed as a comment fix.
 
-Claim: `compareAndRun` returns `ok(false)` on a null EXEC while the sibling
-`setIfGuardsHold` / `setNxIfPresent` CAS loops retry, i.e. divergent retry
-semantics in a duplicated concurrency pattern.
+### C10 — `packages/framework/README.md:172`
+Same false claim in the Public-surface section. **Fix:** same correction.
 
-Panel reasoning:
-- **intent — refuted:** `redis-connectivity.test.ts:376-386` has a dedicated
-  test literally titled "returns a WATCH conflict as Ok(false)" locking this in
-  as the intended contract. `compareAndDelete` / `compareAndExpire` compare
-  against unique per-acquisition lock tokens (`run-queue.ts` callers), so a
-  WATCH abort means the token already changed — retrying would re-observe a
-  mismatch essentially always.
-- **blast-radius — refuted:** `compareAndRun` watches and mutates the **same**
-  key it compares, unlike the guard loops which watch a guard key and write a
-  different target. Callers already treat `false` as a legitimate signal:
-  `run-queue.ts:259-269` documents it as "lock lease was lost to a successor",
-  and `run-store.ts`'s `compensateAmbiguousPublication` re-verifies with a
-  follow-up GET rather than trusting the boolean.
-- reproduction — upheld (the code difference is real), but a real code
-  difference with intended semantics and no consequence is not a defect.
+### C11 — `packages/framework/src/__tests__/_context-factories.ts:4`
+**Claim:** "the full 13-field context object". `DagMachineContextPersisted` =
+`DagTopology`(4) + `DagRetryState`(4) + `DagHumanGateConfig`(2) +
+`DagRoutingState`(2) + 5 own = **17**.
+**Fix:** 17, and name the composition so the number is re-derivable rather than
+re-drifting.
 
-**Not fixed.** Collapsing these two loops would be an actual regression.
+### C12 — `packages/framework/src/__tests__/pass-3-remediation.test.ts:297`
+**Claim:** the test claims to pin "two transitions sharing prevStateKey and
+event-type MUST produce distinct dedup keys", but its synthetic state carries a
+monotonic `tag: stepCount`, so `stateKey = JSON.stringify(s)` is already unique
+per step and all six keys are distinct under *any* keyer. Worse, its strictly
+alternating `x→y→x→y` shape keeps prev-state and post-state keys in lockstep, so
+it cannot separate the fixed `(prevStateKey, eventType)` slot from the old
+post-`stateKey` slot either.
+**Fix (strengthen the test, don't weaken the claim):** drop `tag`, and replace the
+alternating shape with a self-loop shape that actually diverges the two keyings —
+`x→x, x→y, y→x, x→x, x→z, z→done`. Under the shipped keying all six dedup keys are
+distinct (`x|1`, `x|2`, `y|1`, `x|3`, `x|4`, `z|0`); under the old post-`stateKey`
+keying transitions 1 and 2 both derive `x|1|step` and collide. The existing
+`expect(new Set(captured).size).toBe(captured.length)` then genuinely fails on the
+pre-fix implementation.
+
+### C13 — `packages/framework/src/__tests__/pass-3-remediation.test.ts:880`
+**Claim:** the test says it "verifies the hook is invoked instead of defaulting to
+JSON.stringify", but its only assertion is `job.data.state.kind === "done"`, which
+holds under either keyer.
+**Fix (strengthen):** record `stateKey` invocations, and assert the emitted
+`dedupKey` is exactly `x|0|step` — the custom keyer's `"x"` — rather than the
+`JSON.stringify` form `{"kind":"x","seenAt":{}}|0|step`. Both assertions fail if
+the hook is ignored.
+
+### C14 — `packages/framework/src/__tests__/route-decided-evidence.test.ts:262-263`
+**Claim:** titled "throwing check function records reason: 'threw' and does not
+match"; the body asserts the run fails closed with `predicate-malformed` and never
+inspects a `route-decided` event.
+**Fix:** rename to the behaviour actually verified — "throwing check function
+fails the run closed with predicate-malformed". (The in-body comment "A throwing
+predicate is now treated as predicate-malformed" is already accurate; kept.)
+
+### C15 — `packages/framework/src/__tests__/predicate-malformed-event-sequence.test.ts:101`
+Same stale title, claiming a fall-through to default that the body never asserts.
+**Fix:** rename to match the asserted fail-closed `predicate-malformed` outcome.
+
+### C16 — `packages/framework/src/__tests__/node-side-effects-propagation.test.ts:7`
+**Claim:** header bullet "OTel span attributes are set correctly"; the file has
+zero span-attribute assertions and installs a stub tracer
+(`withSpan: (_n,_t,fn) => fn()`) that has no span object to assert on.
+**Fix:** drop the bullet. Span-attribute behaviour is pinned by
+`span-enrich.test.ts`; adding a real tracer here to make a stale bullet true would
+duplicate that coverage in a file about side-effect propagation.
+
+### C17 — `packages/host/src/__tests__/integration/full-lifecycle.test.ts:519`
+**Claim:** named "FR-060: graceful shutdown stops sync and server" but asserts only
+`phase === "stopped"` plus two log lines. `serverPort` is captured and never used;
+neither the server stopping nor the sync loop halting is verified.
+**Fix (strengthen):** after `shutdown()`, additionally assert
+(a) `host.server === null` — the server handle is released;
+(b) a `fetch` to the captured port is refused — it genuinely stopped accepting
+connections;
+(c) a post-shutdown `host.triggerSync()` drives **no** further `git.pull` /
+`currentSha` call, via a call-counting wrapper around the fake `GitPort` — the
+sync loop handle is dropped, so the name's "stops sync" half is pinned too.
+
+---
 
 ## Advisory dispositions
 
-**Final: 23 accepted, 2 deferred, 3 dismissed.** (Planned as 24/2/2; one
-acceptance was withdrawn during implementation when the code refuted it —
-recorded below.)
+All 57 dispositioned autonomously. **48 accepted, 9 dismissed, 0 deferred.**
 
-Disposition rule used, and why: this round produced two criticals (C1, C2) that
-were both *"two near-identical paths that silently diverged"*. That is direct
-evidence from this very review that duplicated **guard / error / fail-closed**
-shapes are a correctness risk even at only two sites. So: accept a dedup when
-the shape is a guard or error path (any site count), or when there are ≥3 sites
-of any shape, or when it deletes dead or misleading code. Dismiss purely
-cosmetic two-site tails with no correctness coupling. Defer work that changes a
-seam (deepen scope) or that sprays mechanical churn across files this
-remediation otherwise does not touch.
+Roll-up: 7 test-coverage + 1 type-design + 23 comment-accuracy + 17
+simplification = 48 accepted; 8 duplicate records + 1 refuted-on-implementation
+dismissed.
 
-### Accepted (23)
+### Dismissed (8) — duplicate records, no separate defect
 
-| ID | Location | Fix |
-| --- | --- | --- |
-| `pr-test-analyzer-1` | `metered-llm.ts:309` | Test `snapshotPricingModel`'s malformed-input throws AND the `meterMintedLlm` catch that converts them to a typed `validation` FrameworkError — the fail-closed path for a broker-delivered LLM capability. |
-| `pr-test-analyzer-2` | `__tests__/redis-connectivity.test.ts:877` | The `commitCheckpointAndRetainSpend`-vs-`appendSpend` serialization regression only runs with a live Redis (`describe.skipIf`). `serializeTransaction` is pure promise-chaining; add a fake-client ordering test that runs unconditionally. |
-| `comment-analyzer-1` | `config.ts:1011` | The "MUST mirror … (int + positive)" comment is false: only `maxConcurrent` is `.int()` in `DagRegistrationSchema.config`; `timeoutMs`/`cacheTtlMs`/`checkpointTtlMs` are `.positive()` only. Correct the comment to state the invariant that actually holds (comment-only; tightening the other schema would reject previously-valid registrations). |
-| `code-simplifier-4` | `run-dag-stateful.ts:449` | 6 sites of "close span, emit run-end error, return err" → one `failClosed` helper. Error path. |
-| `code-simplifier-5` | `validate-dag.ts:361` | **3 of the 4 cited sites.** The bucketing sites (400, 464, 494) now share one `bucketEdgesBy`. Site 358 is left alone: it COUNTS incoming edges rather than bucketing them, and it counts every edge (including `$input` and edges to unknown nodes) where the bucket form skips them — converting it would change behaviour, not just shape. |
-| `code-simplifier-6` | `run-node.ts:374` | Extract the ~120-line inline minting block from `runNodeShared` into a private helper. Altitude, within-interface. |
-| `code-simplifier-7` | `runner.ts:138` | 2 sites of identical `onTrace` try/catch → one `emitTrace`. Guard path. |
-| `code-simplifier-8` | `spend-store.ts:93` | 2 sites of runId-parse-and-wrap → one helper. Error path. |
-| `code-simplifier-9` | `define-dag.ts:58` | 2 sites of validate-then-throw-or-unwrap → one helper. Throw path. |
-| `code-simplifier-10` | `capability-handle.ts:66` | Share the one conditional-type predicate with `capability-broker.ts:48`. |
-| `code-simplifier-11` | `budget-capability.ts:88` | 6 sites of `Object.freeze({ ...x })` → one `frozenCopy`. |
-| `code-simplifier-12` | `spend-ledger-redis.ts:153` | `add`'s catch hand-rolls the object `internalInvariantViolated` already builds for `read`'s catch. Reuse it. |
-| `code-simplifier-13` | `run-executor.ts:229` | 7 sites of `{ runId, dagId }` log attribution → one constant. |
-| `code-simplifier-14` | `node-context-factory.ts:141` | 2 identical `report` logging closures → one. |
-| `code-simplifier-15` | `keycloak-broker.ts:428` | 2 sites of now-then-store-token → one `storeToken`. |
-| `code-simplifier-16` | `keycloak-broker.ts:409` | 2 sites of the same via-from-origin-kind ternary → one helper. |
-| `code-simplifier-17` | `run-dag.ts:132` | Status / Retry-After literals hand-copied at 5 sites. Folded into the C2 fix so both land coherently. |
-| `code-simplifier-18` | `host.ts:1129` | 4 inline try/catch-and-record blocks → the `attempt` helper `performShutdown` already extracts. Error path. |
-| `code-simplifier-19` | `host-error.ts:179` | `snapshotUnknown`'s per-key `Object.defineProperty` is redundant: the object has a null prototype (no setter can intercept assignment) and the trailing `Object.freeze` already establishes non-writable/non-configurable. Plain assignment is equivalent. |
-| `code-simplifier-20` | `config.ts:430` | 2 identical boolean-env-flag zod schemas → one `booleanEnvFlag`. |
-| `code-simplifier-22` | `node-side-effects-propagation.test.ts:162` | Delete a commented-out code block that can never run. Dead code. |
-| `code-simplifier-23` | `pass-3-remediation.test.ts:664` | Delete an orphaned "Wave 2.4" section header with no code under it. Dead comment. |
-| `code-simplifier-26` | `hitl-reconciliation-lifecycle.test.ts:61` | The same failing-`sMembers` fixture verbatim in two tests → one named helper. |
-| `code-simplifier-25` | `dag-isolation.test.ts:86` | **Partial.** `createMockSharedInfra` was byte-equivalent to the shared `fakeInfra` and is now deleted in favour of it (2 call sites). `createMockRedis` is KEPT: it returns its backing `store` for assertions and implements a `keys()` the shared fake does not, so it is not the duplicate the finding described. |
-| `code-simplifier-27` | `runtime-capabilities.test.ts:10` | Hand-rolled 9-method no-op `RedisPort` stub → `fakeRedis().redis` from the shared fixtures. |
+`pr-test-analyzer-8 … -14` and `type-design-analyzer-2` are the aggregator's
+prose-line parses of the same reviewer's structured findings: each carries
+`file: null` and a `claim` string that is byte-for-byte the prose restatement of
+`pr-test-analyzer-1 … -7` / `type-design-analyzer-1` respectively. Fixing the
+structured original resolves them; there is nothing additional to do and no file
+to anchor a change to.
 
-### Deferred (2)
+| ID | Duplicate of |
+|---|---|
+| `pr-test-analyzer-8` | `pr-test-analyzer-1` |
+| `pr-test-analyzer-9` | `pr-test-analyzer-2` |
+| `pr-test-analyzer-10` | `pr-test-analyzer-3` |
+| `pr-test-analyzer-11` | `pr-test-analyzer-4` |
+| `pr-test-analyzer-12` | `pr-test-analyzer-5` |
+| `pr-test-analyzer-13` | `pr-test-analyzer-6` |
+| `pr-test-analyzer-14` | `pr-test-analyzer-7` |
+| `type-design-analyzer-2` | `type-design-analyzer-1` |
 
-| ID | Reason |
-| --- | --- |
-| `type-design-analyzer-1` (`run-context.ts:111`) | The claim is sound — `origin: InvocationOrigin \| undefined`'s legality rule lives only in a comment. But encoding it needs an ADT that pairs `origin` with the minting authority, which is an **interface change** (deepen scope, explicitly out of distill's remit), rippling through `node-context-factory`, `run-dag.ts`, the hitl `run-executor`, host wiring and their tests. Landing a seam change inside a remediation whose surviving criticals are unrelated would make the diff unreviewable. Warrants its own `deepen` session. |
-| `code-simplifier-21` (`llm-fake-client.test.ts:37` + 13 more) | Mechanical churn across 14+ test files this remediation otherwise never touches. Round 10 dismissed the same class of swap after finding the shared factory returns a *different type* with *different fixture ids* that sibling assertions depend on — the same trap applies at 14× the surface. Wants its own dedicated pass with per-file verification. |
+### Dismissed (9th) — `silent-failure-hunter-1`, refuted during implementation
 
-### Dismissed (3)
+`packages/host/src/adapters/node-context-factory.ts:292,314,324`. The advisory
+reads the hardcoded `new Error("Checkpoint persistence failed")` as an
+actionability regression and asks for the computed reason (and
+`formatHostError(setResult.error)`) to be threaded into the thrown message.
 
-| ID | Reason |
-| --- | --- |
-| `code-simplifier-24` (`full-lifecycle.test.ts:117`) | **Refuted by the code.** The three "duplicated" fixtures are not duplicates — each carries a capability the shared fixture lacks, so swapping would lose behaviour: `createTestLogger` records a `data` field per entry (shared `testLogger` records only `level`/`msg`); `createFakeSharedInfra` takes a `capabilities` argument, passed at three call sites (lines 681, 713, 743), where `fakeInfra` hardcodes `[]`; `createFakeRedis` accepts `{ failPing }`, which the shared `fakeRedis` cannot express. Left as-is. |
+**The genericity is a deliberate, test-pinned disclosure boundary.** The fix was
+implemented, then reverted on this evidence:
+
+- `packages/host/src/__tests__/node-context-factory.test.ts:525` — the test
+  *"logs full typed Redis diagnostics server-side but throws no key or driver
+  detail"* asserts the thrown message contains none of the tenant, dagId, runId,
+  nodeId, or the raw driver text. Its fixture's `operation` is
+  `` `SET ${sensitiveKey}: NOPERM raw-driver-secret` ``.
+- Two sibling tests (`:486`, `:601`) pin the message with the anchored regex
+  `/^Checkpoint persistence failed$/`, and `:508`'s threshold-escalation test
+  asserts the raw driver text (`"socket reset during checkpoint"`) reaches the
+  *log* while the throw stays generic.
+
+`run-node.ts` renders whatever is thrown here into the DAG-visible
+`checkpoint-write-failed`, which is rendered into HTTP responses — so the
+requested change would publish the full checkpoint key and driver text to any
+caller. The actionable detail the advisory wants already exists server-side, with
+full structured context, via `report()` / `writeFailures.failed()`.
+
+**What was kept:** a comment at each of the three throw sites recording *why* the
+message is generic and pointing at the test that pins it, so the next reviewer
+does not re-raise it. The reviewer could not have seen this — the pinning test
+lives in a file its own review pass did not open.
+
+### Accepted — test coverage (7)
+
+| ID | Target | Fix |
+|---|---|---|
+| `pr-test-analyzer-1` | `http/handlers/run-dag.ts:230` | cover the `!deps.hitl` → 501 `hitl-not-configured` branch in `__tests__/handlers/run-dag.test.ts` |
+| `pr-test-analyzer-2` | `dag-runtime/run-dag-stateful.ts:157` | drive malformed `InvocationOrigin` shapes (wrong key set per variant, non-string `sub`/`agentClientId`, bad `kind`, non-object) through `snapshotOrigin` |
+| `pr-test-analyzer-3` | `http/middleware/error-handler.ts:73` | assert `rawDetailsFor`'s per-kind body fields through real dispatched responses — see the note below, the premise is only half true |
+| `pr-test-analyzer-4` | `describe/build-described-dag.ts` | cover the `topoSort` failure path and the output-node-not-found branch |
+| `pr-test-analyzer-5` | `host.ts:663` | exercise `reconcileHitlRuns`'s `inFlight` single-flight guard under overlapping concurrent calls |
+| `pr-test-analyzer-6` | `types/spend.ts:238` | cover `parseSpend`'s invalid `usage` enum, non-object input, invalid/missing `usd.kind`, missing `usd.micros` |
+| `pr-test-analyzer-7` | `http/handlers/run-dag.ts:237` | assert the HITL success path (202 `{runId, status:"queued"}`) |
+
+**Note on `pr-test-analyzer-3`.** Probing the real middleware showed the
+advisory's premise holds only for statuses below 500. `dag-disabled` (503),
+`circuit-open` (503) and `worker-unavailable` (503) go through the "Path 1b"
+generic-body disclosure discipline, which strips `details` entirely — so those
+three `rawDetailsFor` arms are unreachable in any client-visible body, and
+asserting they render would assert something the middleware deliberately does
+not do. The tests therefore split: `<500` kinds (`forbidden` 403, `timeout` 408,
+`dag-not-found` 404, `tenant-over-quota` 429, both concurrency 429s,
+`tenant-unknown` 404) pin the rendered `details` object exactly; `>=500` kinds
+pin the *withholding* plus the `Retry-After` header that is their actual retry
+contract.
+
+### Accepted — type design (1)
+
+- **`type-design-analyzer-1`** — `packages/framework/src/types/own-data.ts:56`.
+  The docstring asserts no call site distinguishes an absent key from an
+  accessor-backed one, but `run-spend-authority.ts:196-200` needs exactly that
+  distinction for the optional `thinking` field and hand-rolls the descriptor
+  walk the module exists to consolidate. **Fix:** add a
+  `readOptionalOwnDataProperty` primitive returning a three-way
+  `absent | accessor | value` result, migrate `run-spend-authority.ts` onto it,
+  and narrow the docstring so the collapsing rule is scoped to required fields.
+  This closes the last un-migrated copy *and* removes the latent trap where a
+  future "simplification" would silently stop rejecting a hostile accessor.
+
+### Accepted — comment accuracy (23)
+
+`comment-analyzer-18 … -40`, all corrections in place. Notable ones:
+
+- `-20`, `-38` — ADR-0082 misattributes the `llm.metered` redaction to `pickUsage`
+  and omits `usage: UsageKnowledge` from the `Spend` shape.
+- `-21` — `computeCostUsd` warns "once"; there is no de-dup, so it warns per call.
+- `-22` — `testNodeContext` is a 12-field literal, not 11.
+- `-29` — `capability-broker.ts` cites a `db` built-in that is not in
+  `BUILTIN_CAPABILITY_KEYS`.
+- `-31 … -35` — executor/wave/run-dag-stateful headers understating branches
+  (third `node-failed` cause, whole-wave re-invocation, waveless branches,
+  positional-not-chronological "first failure", suspended runs that skip
+  `emitRunEnd`).
+- `-39` — shutdown "clears the owner" for `HITL_RECONCILE_INTERVAL_MS`; it only
+  calls `clearInterval`.
+- `-40` — `spend-ledger-file.ts` documents none of the atomicity/durability
+  semantics its two sibling adapters spell out for the same port.
+
+### Accepted — simplification / consolidation (17)
+
+`code-simplifier-1 … -17`. The load-bearing theme: helpers this repo already
+committed to (`testNodeContext`, `testRuntimeContext`, `captureRejection`,
+`waitFor`, the table-driven config validators) exist precisely to kill a
+hand-rolled pattern, and a dozen sibling files never migrated. Each is a
+mechanical migration onto the existing helper, plus:
+
+- `-1`, `-2` — the misplaced/orphaned JSDoc blocks (`-1` is the same block as C5).
+- `-3` — `own-data.ts` spelling the same own-data check two ways.
+- `-4` — `span-enrich.ts`'s thrice-repeated filter-or-redact ternary.
+- `-5` — a `limit ?? 20` fallback for a value Zod's `.default(20)` guarantees.
+- `-12`, `-13` — byte-identical duplicated assertions / `it` bodies.
+- `-16`, `-17` — `config.ts`'s ~10 hand-written "required when X is set" blocks
+  and 3 hand-written paired-field XOR checks, both onto helpers the file already
+  applies elsewhere.
+
+---
+
+## Refuted-finding audit
+
+**`refuted_critical_findings`: 0 entries.** No finding was refuted by the panel, so
+none is exempt from remediation.
+
+One lens *did* return `refuted` on a single finding, and it is recorded here in
+full because the panel's own arithmetic (threshold 2 of 3) overrode it:
+
+> **`comment-analyzer-6`** — `run-node.ts:347` — refuted by the **security** lens:
+> "`node-span.ts:206-226` shows the outer catch around `fn()` … hardcodes
+> `retriability: "retriable"` directly, without ever calling
+> `asNodeFrameworkError` — so an unfenced throw is absorbed into a resolved
+> `Result` there and never reaches `wave-execution.ts`'s `asNodeFrameworkError`
+> catch-all. The comment's own next paragraph (`run-node.ts:356-363`) already names
+> `node-span.ts`'s outer catch as the RETRIABLE-producing mechanism, so the actual
+> behavior matches the comment's claim (retriable node-crash) and the finding's
+> premise that `asNodeFrameworkError` governs this path is factually wrong."
+>
+> Upheld by **reproduction** and **intent**, both on the narrower ground that the
+> comment names the *wrong interceptor* (wave-level catch-all rather than
+> node-span's own catch). Survives at 2/3.
+
+The C6 fix above is written to satisfy both readings: it corrects the named
+mechanism (what reproduction/intent upheld) while preserving the retriable
+consequence (what the security lens showed is correct), leaving the paragraph
+consistent with the one below it.
+
+---
+
+## Support paths (outside the frozen review scope)
+
+Registered in the remediation run's `supportPaths` at start:
+
+- `.claude/plans/2026-09-05-pr-remediation.md` — this plan.
+
+## Validation evidence
+
+Run after every fix above landed:
+
+| Check | Result |
+|---|---|
+| `bun run --cwd packages/framework typecheck` | clean (`tsc --noEmit` + `tsconfig.bin.json`) |
+| `bun run --cwd packages/host typecheck` | clean |
+| `bun test packages/framework` | **3455 pass, 0 fail**, 52 skip (Redis-gated), 190 files |
+| `bun test` in `packages/host`, per file | **2596 pass, 0 fail** |
+
+Mutation checks — each strengthened test was verified to FAIL against the
+pre-fix behaviour it claims to pin, so none is a tautology:
+
+| Test | Mutation applied | Result |
+|---|---|---|
+| C12 dedup-key walk | `runner.ts` dedupSlot → post-`stateKey` (the pre-fix keying) | **fails** ✅ |
+| C13 stateKey hook | `runner.ts` keyer → always `JSON.stringify` (ignore the hook) | **fails** ✅ |
+| `pr-test-analyzer-5` single-flight | `host.ts` `if (inFlight !== undefined) return inFlight;` removed | **fails** (3 reads, expected 2) ✅ |
+
+All three mutations were reverted; `git diff` on `runner.ts` and the guard line
+in `host.ts` is empty.
+
+Notes:
+- `packages/host/src/hitl/adapters/__tests__/run-executor.test.ts` failed once in
+  a whole-suite pass and then passed 3/3 in isolation. It is a timing-sensitive
+  file **not touched by this remediation** — a pre-existing flake, not a
+  regression.
+- The host suite's aggregate run truncates its summary line before and after
+  these changes alike (verified by stashing to `dc90427`), which is why the
+  per-file counts above are the evidence.
+- 52 framework skips and 20 bullmq skips are Redis-gated (`REDIS_URL` unset; no
+  local Redis in this environment). The `waitFor` consolidation in
+  `queue-bullmq-adapter.test.ts` sits mostly inside those gated blocks, so it is
+  typecheck-verified but not executed here.
 
 ## Validation commands
 
 ```bash
-bun run typecheck   # all 12 packages, must exit 0
-bun run test        # all 12 packages, must exit 0
+bun run --cwd packages/framework typecheck
+bun run --cwd packages/host typecheck
+bun test packages/framework
+bun test packages/host
 ```
 
-Green baseline at `2ffbd3f`: typecheck 12/12 clean; tests 12/12 clean
-(framework 3374, host 2514 + 10).
-
-## Self-inflicted bug caught during implementation
-
-Extracting `failClosed` in `run-dag-stateful.ts`, I inserted the helper first and
-then ran the call-site replacements — so one replacement pattern matched the
-helper's own freshly-written body and rewrote it into `return failClosed(...)`,
-an infinite recursion. It **type-checked cleanly** (infinite recursion is
-type-correct) and surfaced only as a hung test run. Fixed by restoring the body,
-routing the one call site the bad replacement had consumed, and thereafter
-inserting extracted helpers only AFTER performing the replacements. Recorded
-here because "typecheck passed" was not evidence of correctness.
-
-## Distill pass (apply mode, post-implementation)
-
-Run on the green baseline, one move at a time:
-
-1. **Restore altitude** — `hostErrorResponse` had been inserted between
-   `createRunDagHandler`'s doc comment and its declaration, orphaning that doc
-   onto the wrong symbol. Moved above the doc block.
-2. **Delete a type assertion** — the new `attempt` helper in
-   `teardownAfterServerStop` called `deps.onShutdown!()`, since a closure does
-   not keep the narrowing of a property access. Captured the narrowed value to a
-   const instead; no assertion, per `typescript-patterns.md`.
-
-**Skipped deliberately:** the `snapshotMintingAuthority` error-literal
-duplication noted in round 10 remains — same reasoning, and this round did not
-add to it.
-
-## Validation evidence
-
-Final run, after implementation and the distill pass:
-
-```
-bun run typecheck   → 12/12 packages, no errors
-bun run test        → 12/12 packages "Exited with code 0", 0 fail everywhere
-```
-
-| Package | Baseline (`2ffbd3f`) | Final |
-| --- | --- | --- |
-| `@fuguejs/framework` | 3374 pass | **3375 pass** (+1) |
-| `@fuguejs/host` | 2514 + 10 pass | **2526 + 10 pass** (+12) |
-| the other 10 packages | unchanged | unchanged, 0 fail |
-
-+13 tests, 0 failures, no assertion weakened. Four existing assertions in
-`run-dag.test.ts` were UPDATED (not weakened) from `dag-disabled` to
-`circuit-open`: they encoded the defect C2 fixed.
-
-**Mutation checks.** Each of the three new fail-closed regressions was verified
-to actually fail against the un-fixed source, then the source restored:
-
-| Test | Mutation | Result |
-| --- | --- | --- |
-| "keeps the typed missing-nodeDef failure authoritative under hostile diagnostics" | drop the `bestEffort`/`bestEffortLog` fences (C1's pre-fix state) | 9 pass / **1 fail** |
-| "holds a checkpoint commit behind an in-flight spend append" | drop `serializeTransaction` from `commitCheckpointAndRetainSpend` | 34 pass / **1 fail** |
-| C2's Retry-After derivation | covered directly: the test asserts `90` for a DAG configuring `resetTimeoutMs: 90_000`, which the old hardcoded `"30"` could not produce | n/a |
+Validation must pass before any staging. Remediation installs only through the
+registered remediation run's verified temporary index — no hand-run staging.

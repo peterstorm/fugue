@@ -472,8 +472,11 @@ const handleTerminalState = <O>(
         // Fenced for the same reason the `onBackground` branch above is: a
         // throwing eval judge — or a hostile clock inside finalize's own
         // `emitRunEnd("ok")` — must not escape as a rejection. Failing closed
-        // here keeps run telemetry balanced (a run-start always gets a run-end)
-        // instead of leaving the root span open.
+        // here keeps run telemetry balanced on this path: a run-start that
+        // reaches finalize always gets a run-end, instead of leaving the root
+        // span open. (The one deliberate exception is the `suspended` terminal
+        // state, which parks the run and skips `emitRunEnd` precisely because
+        // the run has not ended — it resumes under the same run id.)
         try {
           await finalize();
         } catch (cause) {

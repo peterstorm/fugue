@@ -22,6 +22,7 @@ import type { FrameworkError } from "../types/errors.js";
 import { z } from "zod";
 import { err, ok } from "../types/result.js";
 import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
+import { testRuntimeContext } from "./_context-factories.js";
 
 const makeNode = (id: string): NodeDef<unknown, unknown> => ({
   id: N(id),
@@ -52,29 +53,18 @@ const makeValidatedCtx = (obs?: RecordingObserver, signal?: AbortSignal) => {
   return brandAsValidatedNodeContext(ctx);
 };
 
-const makeMachineCtx = (waves: string[][] = [["a"]]): DagMachineContext => ({
-  waves: waves.map((w) => w.map(N)),
-  outputs: new Map(),
-  initialInput: {},
-  activeNodeIds: new Set(waves.flat().map(N)),
-  retries: new Map(),
-  retryConfigs: new Map(),
-  retryLimits: {},
-  defaultRetryLimit: 0,
-  confidenceByNode: new Map(),
-  freshnessCompletedNodeIds: new Set(),
-  freshnessExecutionEpoch: FE(),
-  incomingByNode: new Map(),
-  outputNodeId: undefined,
-  edges: [],
-  unconditionalAdj: new Map(),
-  humanReviewNodeIds: new Set(),
-  humanReviewPrompts: new Map(),
-  priorWitnesses: new Map(),
-  dag: makeDag(),
-  outgoingByNode: new Map(),
-  nodeById: new Map([[N("a"), makeNode("a")]]),
-});
+// Only the four fields this suite actually varies are named; the rest come from
+// `testRuntimeContext`, which is the one place a new DagMachineContext field has
+// to be remembered. Hand-assembling all ~19 here is how a field added upstream
+// silently keeps an old default in this file alone.
+const makeMachineCtx = (waves: string[][] = [["a"]]): DagMachineContext =>
+  testRuntimeContext({
+    dag: makeDag(),
+    waves: waves.map((w) => w.map(N)),
+    activeNodeIds: new Set(waves.flat().map(N)),
+    nodeById: new Map([[N("a"), makeNode("a")]]),
+    freshnessExecutionEpoch: FE(),
+  });
 
 const makeConfig = (
   nodeMap?: Map<string, NodeDef<unknown, unknown>>,

@@ -298,25 +298,43 @@ describe("Wave 1.3 — dedup-key derivation distinguishes (prevState, event-type
     // This is the structural invariant the fix protects: two transitions
     // sharing prevStateKey and event-type MUST produce distinct dedup keys
     // when both flag as retry-transitions. The original implementation keyed
-    // the retry counter by stateKey alone, so once the machine had moved past
-    // a self-loop the counter never re-incremented for the same prevState.
+    // the retry counter by the POST-state key alone, so once the machine had
+    // moved past a self-loop the counter never re-incremented for the same
+    // prevState.
+    //
+    // The state carries NO monotonic tag on purpose. A tag would make
+    // `JSON.stringify(state)` unique per step, so every dedup key would come
+    // out distinct under any keyer and the assertion below would pass on the
+    // broken implementation too. For the same reason the walk is not a plain
+    // x↔y alternation: under strict alternation the prev-state and post-state
+    // key sequences move in lockstep, which is exactly the case the two keyings
+    // agree on. The self-loop walk below is the shape that separates them:
+    //
+    //   step  prev → post   retry?   slot (prev::step)  dedup key
+    //   1     x    → x      yes      x → 1              x|1|step
+    //   2     x    → y      yes      x → 2              x|2|step
+    //   3     y    → x      yes      y → 1              y|1|step
+    //   4     x    → x      yes      x → 3              x|3|step
+    //   5     x    → z      yes      x → 4              x|4|step
+    //   6     z    → done   no       z → 0 (unseen)     z|0|step
+    //
+    // Six distinct keys under the shipped (prevStateKey::eventType) slot. Under
+    // the old post-`stateKey` slot, steps 1 and 2 both read attempt 1 (post-key
+    // `x` then post-key `y`, each first-seen) and both derive `x|1|step` — the
+    // uniqueness assertion below fails, which is what makes this test a real
+    // regression pin rather than a tautology.
 
-    type S = { readonly kind: "x"; readonly tag: number } | { readonly kind: "y"; readonly tag: number } | { readonly kind: "done" };
+    type S = { readonly kind: "x" } | { readonly kind: "y" } | { readonly kind: "z" } | { readonly kind: "done" };
     type E = { readonly type: "step" };
     type C = Record<string, never>;
 
+    const WALK: readonly S["kind"][] = ["x", "y", "x", "x", "z", "done"];
     let stepCount = 0;
     const machine = {
-      transition: (state: S, _event: E, ctx: C) => {
+      transition: (_state: S, _event: E, ctx: C) => {
+        const kind = WALK[stepCount] ?? "done";
         stepCount += 1;
-        if (stepCount >= 6) return { state: { kind: "done" as const }, context: ctx };
-        const next: S =
-          state.kind === "x"
-            ? { kind: "y", tag: stepCount }
-            : state.kind === "y"
-            ? { kind: "x", tag: stepCount }
-            : { kind: "done" };
-        return { state: next, context: ctx };
+        return { state: { kind } as S, context: ctx };
       },
       isTerminal: (s: S) => s.kind === "done",
       isFailed: (_: S) => false,
@@ -331,7 +349,7 @@ describe("Wave 1.3 — dedup-key derivation distinguishes (prevState, event-type
 
     const captured: string[] = [];
     const job = createInMemoryJob<S, C>(
-      { state: { kind: "x", tag: 0 }, context: {} },
+      { state: { kind: "x" }, context: {} },
     );
     // Wrap appendEvent to capture every dedupKey rather than relying on
     // last-seen dedup (which would falsely report no collisions).
@@ -348,14 +366,23 @@ describe("Wave 1.3 — dedup-key derivation distinguishes (prevState, event-type
       errorEventOf: () => ({ type: "step" as const }),
     });
 
-    // 5 retry-flagged step transitions x→y, y→x, x→y, y→x, x→y plus one
-    // terminal transition x→done (non-retry). All six dedup keys must be
-    // unique — the previous keying-by-stateKey-only would collapse the
-    // x→y / y→x cycles into a single slot each, dropping the second and
-    // third pair under a strict-dedup adapter (the BullMQ Lua script in
-    // particular checks the most recent stream entry).
+    // 5 retry-flagged step transitions plus one terminal transition z→done
+    // (non-retry), per the walk table above. All six dedup keys must be unique
+    // — the previous keying-by-post-stateKey-only collapses steps 1 and 2 onto
+    // one slot, dropping the second under a strict-dedup adapter (the BullMQ Lua
+    // script in particular checks the most recent stream entry).
     expect(captured.length).toBe(6);
     expect(new Set(captured).size).toBe(captured.length);
+    // Pin the derivation itself, not just its uniqueness: a future keyer change
+    // that happened to stay collision-free on this walk would still be caught.
+    expect(captured).toEqual([
+      '{"kind":"x"}|1|step',
+      '{"kind":"x"}|2|step',
+      '{"kind":"y"}|1|step',
+      '{"kind":"x"}|3|step',
+      '{"kind":"x"}|4|step',
+      '{"kind":"z"}|0|step',
+    ]);
   });
 });
 
@@ -882,6 +909,7 @@ describe("Wave 4.7 — Machine.stateKey hook", () => {
     type E = { readonly type: "step" };
     type C = Record<string, never>;
 
+    const stateKeyCalls: string[] = [];
     const machine = {
       transition: (state: S, _event: E, ctx: C) =>
         state.kind === "done"
@@ -893,18 +921,40 @@ describe("Wave 4.7 — Machine.stateKey hook", () => {
       // Custom keyer ignores the Map field (which JSON.stringify can't stably
       // represent across runs). Verifies the hook is invoked instead of
       // defaulting to JSON.stringify.
-      stateKey: (s: S) => s.kind,
+      //
+      // Reaching a terminal state is NOT evidence of that: this machine walks
+      // to `done` on its first transition under either keyer. The evidence is
+      // the derived dedup key, which embeds `keyer(prevState)` verbatim — `x`
+      // from this hook, versus `{"kind":"x","seenAt":{}}` from the
+      // JSON.stringify default (which silently flattens the Map to `{}`, the
+      // very unstable-representation problem the hook exists to sidestep).
+      stateKey: (s: S) => {
+        stateKeyCalls.push(s.kind);
+        return s.kind;
+      },
     };
 
     const job = createInMemoryJob<S, C>({
       state: { kind: "x", seenAt: new Map([["a", 1], ["b", 2]]) },
       context: {},
     });
+    const captured: (string | undefined)[] = [];
+    const recorder: typeof job = {
+      ...job,
+      appendEvent: async (event: unknown, dedupKey?: string) => {
+        captured.push(dedupKey);
+        await job.appendEvent(event, dedupKey);
+      },
+    };
     const executor = async (): Promise<E> => ({ type: "step" as const });
-    await runStateMachine(job, machine, executor, {
+    await runStateMachine(recorder, machine, executor, {
       errorEventOf: () => ({ type: "step" as const }),
     });
     expect(job.data.state.kind).toBe("done");
+    // The hook ran at all...
+    expect(stateKeyCalls.length).toBeGreaterThan(0);
+    // ...and its output — not JSON.stringify's — is what the runner keyed on.
+    expect(captured).toEqual(["x|0|step"]);
   });
 });
 

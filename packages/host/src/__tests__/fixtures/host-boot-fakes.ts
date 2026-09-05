@@ -1,6 +1,11 @@
 /**
  * Shared `createHost` boot fakes — the lightweight fake-port stack the host
- * boot tests use (host-uds-bind.test.ts, hitl-boot-wiring.test.ts).
+ * boot tests use (host-uds-bind.test.ts, entrypoint-wiring.test.ts,
+ * runtime-capabilities.test.ts, node-context-factory.test.ts,
+ * spend-ledger.test.ts, hitl-reconciliation-lifecycle.test.ts, and the
+ * integration suites). Kept as a list rather than "several tests" because a
+ * stale name here is how a fixture drifts from its callers — `grep -rl
+ * host-boot-fakes` is the source of truth.
  *
  * No real Redis/git/filesystem-of-DAGs: every port is a plain in-memory fake
  * (the repo's established port/fake idiom — no mock frameworks). The socket

@@ -89,31 +89,38 @@ export const enrichLlmSpan = (opts: EnrichLlmSpanOpts): void => {
 
   const filter = resolveContentFilter(opts);
 
+  /**
+   * One encoding of the filter-or-redact rule the three GenAI message events
+   * share: when a content filter is wired the (filtered) text is emitted under
+   * `<field>`; when it is not, the text NEVER leaves the process and the event
+   * carries `<field>_redacted` plus the original length instead.
+   *
+   * `field` varies (`content` for system/user, `reasoning_content` for the
+   * assistant message) which is why this takes it as a parameter rather than
+   * hardcoding `content` — three copies of the ternary is how the redaction
+   * rule and the length disclosure drift apart on the field that gets missed.
+   */
+  const contentAttrs = (
+    field: "content" | "reasoning_content",
+    text: string,
+  ): Record<string, string | number> =>
+    filter
+      ? { [field]: filter(text) }
+      : { [`${field}_redacted`]: "true", [`${field}_chars`]: text.length };
+
   // OTel GenAI semconv: emit prompts as `gen_ai.system.message` and
   // `gen_ai.user.message` events. Content gated by content filter (PII).
   // The `prompt_name` framework field rides along as an extra attribute on
   // the system message — not part of the spec, but harmless and useful.
-  otelSpan.addEvent(
-    EVENT_GEN_AI_SYSTEM_MESSAGE,
-    filter
-      ? {
-          role: "system",
-          content: filter(opts.system),
-          "ai.prompt_name": opts.promptName ?? "",
-        }
-      : {
-          role: "system",
-          content_redacted: "true",
-          content_chars: opts.system.length,
-          "ai.prompt_name": opts.promptName ?? "",
-        },
-  );
-  otelSpan.addEvent(
-    EVENT_GEN_AI_USER_MESSAGE,
-    filter
-      ? { role: "user", content: filter(opts.user) }
-      : { role: "user", content_redacted: "true", content_chars: opts.user.length },
-  );
+  otelSpan.addEvent(EVENT_GEN_AI_SYSTEM_MESSAGE, {
+    role: "system",
+    ...contentAttrs("content", opts.system),
+    "ai.prompt_name": opts.promptName ?? "",
+  });
+  otelSpan.addEvent(EVENT_GEN_AI_USER_MESSAGE, {
+    role: "user",
+    ...contentAttrs("content", opts.user),
+  });
 
   // Structured event: cost breakdown (framework-specific — not in GenAI spec).
   // `input_cost` stays the whole prompt side so existing consumers are
@@ -132,15 +139,9 @@ export const enrichLlmSpan = (opts: EnrichLlmSpanOpts): void => {
   // know GenAI semconv will still see the event and the role.
   if (opts.thinking) {
     otelSpan.setAttribute(AI_LLM_HAS_THINKING, true);
-    otelSpan.addEvent(
-      EVENT_GEN_AI_ASSISTANT_MESSAGE,
-      filter
-        ? { role: "assistant", reasoning_content: filter(opts.thinking) }
-        : {
-            role: "assistant",
-            reasoning_content_redacted: "true",
-            reasoning_content_chars: opts.thinking.length,
-          },
-    );
+    otelSpan.addEvent(EVENT_GEN_AI_ASSISTANT_MESSAGE, {
+      role: "assistant",
+      ...contentAttrs("reasoning_content", opts.thinking),
+    });
   }
 };

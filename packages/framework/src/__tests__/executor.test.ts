@@ -14,6 +14,7 @@ import { RecordingObserver } from "../observer/observer.js";
 import { defineDagFromArray } from "../executor/define-dag.js";
 import { N } from "./_id-helpers.js";
 import { testNodeContext as mkCtx } from "./_context-factories.js";
+import { createGuardrailNode } from "../nodes/guardrail.js";
 
 /**
  * A node that fails `failuresBeforeSuccess` times with a RETRIABLE crash and
@@ -468,8 +469,6 @@ describe("runDag", () => {
   });
 
   it("guardrail node in DAG passes data through with warnings to downstream nodes", async () => {
-    const { createGuardrailNode } = await import("../nodes/guardrail.js");
-
     const guardrail = createGuardrailNode({
       id: N("guard"),
       inputSchema: z.any(),
@@ -513,7 +512,7 @@ describe("runDag", () => {
   // Wave 2 §2.4: checkpoint write failures must NOT be silently swallowed.
   // Previously the failure was warn-and-continue; on the next crash-resume the
   // node would re-execute, breaking the idempotency contract the checkpoint is
-  // supposed to provide. Now the legacy path surfaces err(checkpoint-write-failed).
+  // supposed to provide. It now surfaces err(checkpoint-write-failed).
   it("checkpoint write failure surfaces as err(checkpoint-write-failed)", async () => {
     const failingCheckpointWriter = {
       write: async () => { throw new Error("Redis timeout"); },

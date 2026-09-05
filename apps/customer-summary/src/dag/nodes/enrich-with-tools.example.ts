@@ -28,7 +28,9 @@ interface DealsClient {
 const makeLookupDealsTool = (
   deals: DealsClient,
 ): ToolDef<
-  { customerId: string; limit?: number },
+  // `limit` is NOT optional in the parsed input: the schema below applies
+  // `.default(20)`, so Zod guarantees a number by the time `run` sees it.
+  { customerId: string; limit: number },
   { deals: Deal[] }
 > => ({
   name: toolName("lookup_deals_by_customer"),
@@ -55,7 +57,7 @@ const makeLookupDealsTool = (
       return lookup.value as { deals: Deal[] };
     }
 
-    const result = { deals: await deals.byCustomer(customerId, limit ?? 20) };
+    const result = { deals: await deals.byCustomer(customerId, limit) };
     if (ctx.cache?.set) {
       const setResult = await ctx.cache.set(cacheKey, result, 300);
       if (!setResult.ok) {

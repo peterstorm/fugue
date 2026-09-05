@@ -34,8 +34,16 @@ export type OutputsByNodeId<Nodes extends NodesRecord> = {
  * level — `NodeDef.id` is always `NodeId`, never a string literal. The runtime
  * validator in `validateDagShape` still catches key/id mismatches at module
  * load. This type now accepts any entry whose `id` extends `NodeId` (which is
- * always true for well-typed `NodeDef`). The compile-time guard is retained
- * for edge cases where a hand-rolled node has `id: string` instead of `NodeId`.
+ * always true for well-typed `NodeDef`).
+ *
+ * A hand-rolled node whose `id` widened to plain `string` is ALSO accepted
+ * as-is — the `string extends Nodes[K]["id"]` arm returns `Nodes[K]`
+ * unconditionally and never reaches the `id: K` check below it, because an
+ * unnarrowed `string` cannot be compared against the literal key at the type
+ * level. Those mismatches are caught at module load by `validateDagShape`, not
+ * here. The compile-time `id: K` guard therefore only fires for the remaining
+ * case: an `id` that is neither `NodeId` nor plain `string` — a literal or
+ * differently-branded type, where the mismatch IS decidable.
  */
 export type ConsistentNodes<Nodes extends NodesRecord> = {
   readonly [K in keyof Nodes]: Nodes[K]["id"] extends NodeId

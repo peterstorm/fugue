@@ -348,10 +348,11 @@ const resolveMintedNodeContext = async (args: {
   }
   // The port contract says errors flow on the Result channel, never thrown
   // — but the broker is a public extension seam, so the contract is
-  // enforced here rather than assumed. An unfenced throw would escape to
-  // the wave-level catch-all and be reclassified as a RETRIABLE
-  // `node-crash`, re-firing the broker (token-endpoint egress) on every
-  // retry and losing the 403/503 taxonomy.
+  // enforced here rather than assumed. An unfenced throw would not even reach
+  // the wave-level catch-all: this call sits inside the callback `node-span.ts`
+  // wraps, and that wrapper's own `fn()` catch intercepts first and hardcodes
+  // a RETRIABLE `node-crash` — re-firing the broker (token-endpoint egress) on
+  // every retry and losing the 403/503 taxonomy.
   //
   // Why this fence classifies NON-retriable while `node-span.ts`'s outer
   // catch classifies a thrown `fn()` as RETRIABLE: the two catches sit at

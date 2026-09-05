@@ -120,6 +120,64 @@ describe("createHost — HITL reconciliation lifecycle", () => {
     host = booted.value;
   });
 
+  it("never overlaps sweeps — a tick during an in-flight sweep joins it instead of starting a second", async () => {
+    // `reconcileHitlRuns` declares "Never overlap sweeps" as an invariant and
+    // enforces it with an `inFlight` promise. Sequential ticks cannot tell a
+    // working guard from a missing one — only a tick arriving WHILE a sweep is
+    // still running can. So the active-set read is held open across at least
+    // one interval tick and the reads are counted.
+    socketPath = join(tmpdir(), `fugue-hitl-reconcile-overlap-${crypto.randomUUID()}.sock`);
+    const base = fakeRedis();
+
+    let activeReads = 0;
+    let releaseSweep: (() => void) | undefined;
+    const redis = {
+      ...base.redis,
+      async sMembers(key: string) {
+        if (!key.endsWith(":hitl:active")) return base.redis.sMembers(key);
+        activeReads += 1;
+        // The boot-time sweep must complete or `createHost` never returns; only
+        // the timer-driven sweeps are held open.
+        if (activeReads > 1) {
+          await new Promise<void>((resolve) => { releaseSweep = resolve; });
+        }
+        return base.redis.sMembers(key);
+      },
+    };
+
+    const logger = testLogger();
+    const booted = await createHost({
+      config: makeConfig({
+        TEAMS_WEBHOOK_URL: "https://teams.example.test/hook",
+        HITL_RECONCILE_INTERVAL_MS: 1000,
+      }),
+      git: fakeGit(),
+      loader: fakeLoader(),
+      redis: base.port,
+      sharedInfra: fakeInfra(redis),
+      logger,
+      tenant: mkTenant("acme"),
+      bind: { unix: socketPath },
+      queueBackend: lifecycleQueue([]),
+    });
+
+    expect(booted.ok).toBe(true);
+    if (!booted.ok) return;
+    host = booted.value;
+
+    // Boot's own sweep has run and finished.
+    expect(activeReads).toBe(1);
+
+    // Long enough for at least two interval ticks (t≈1s, t≈2s). The first
+    // enters the sweep and blocks; every later tick must find `inFlight` set
+    // and return it rather than starting a second walk of the active index.
+    await wait(2_500);
+    expect(activeReads).toBe(2);
+
+    releaseSweep?.();
+    await wait(50);
+  });
+
   it("continues all teardown when the HTTP listener stop throws", async () => {
     socketPath = join(tmpdir(), `fugue-stop-throws-${crypto.randomUUID()}.sock`);
     const base = fakeRedis();

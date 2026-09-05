@@ -65,6 +65,24 @@ const cyclic = (): Record<string, unknown> => {
   return value;
 };
 
+
+/**
+ * A value that behaves exactly like `target` except that reading `prop` throws.
+ *
+ * The same trap shape was spelled out at seven sites, each differing only in the
+ * property name and the message — which is how one of them ends up reading
+ * `Reflect.get` from the wrong object, or quietly stops throwing at all, without
+ * the suite noticing. The point of every one of these tests is that the boundary
+ * survives a hostile getter, so the trap itself must be one thing.
+ */
+const throwingGetter = <T extends object>(target: T, prop: string, message: string): T =>
+  new Proxy(target, {
+    get(t, key) {
+      if (key === prop) throw new Error(message);
+      return Reflect.get(t, key);
+    },
+  });
+
 describe("FakeLlmClient — FR-040 total guards (never a raw rejection)", () => {
   test("a throwing response provider is a typed node-crash", async () => {
     const client = new FakeLlmClient(() => {
@@ -377,12 +395,7 @@ describe("FakeLlmClient — FR-040 total guards (never a raw rejection)", () => 
   // total read; a failing read yields the namespaced placeholder id and the
   // typed error still settles across the port.
   test("a request with a throwing nodeId getter is a typed node-crash with the placeholder id (never a raw rejection)", async () => {
-    const hostileReq = new Proxy(structuredReq(), {
-      get(target, prop) {
-        if (prop === "nodeId") throw new Error("nodeId getter exploded");
-        return Reflect.get(target, prop);
-      },
-    });
+    const hostileReq = throwingGetter(structuredReq(), "nodeId", "nodeId getter exploded");
     const client = new FakeLlmClient(new Map()); // no "m1" key — forces the crash path
     const result = await client.sendStructured(hostileReq);
     expect(result.ok).toBe(false);
@@ -394,12 +407,7 @@ describe("FakeLlmClient — FR-040 total guards (never a raw rejection)", () => 
   });
 
   test("a request with a throwing model getter is a typed node-crash (never a raw rejection)", async () => {
-    const hostileReq = new Proxy(structuredReq(), {
-      get(target, prop) {
-        if (prop === "model") throw new Error("model getter exploded");
-        return Reflect.get(target, prop);
-      },
-    });
+    const hostileReq = throwingGetter(structuredReq(), "model", "model getter exploded");
     const client = new FakeLlmClient(new Map());
     const result = await client.sendStructured(hostileReq);
     expect(result.ok).toBe(false);
@@ -414,12 +422,7 @@ describe("FakeLlmClient — FR-040 total guards (never a raw rejection)", () => 
   });
 
   test("an unconfigured sendWithTools request with a throwing nodeId getter is a typed node-crash (never a raw rejection)", async () => {
-    const hostileReq = new Proxy(toolsReq(), {
-      get(target, prop) {
-        if (prop === "nodeId") throw new Error("nodeId getter exploded");
-        return Reflect.get(target, prop);
-      },
-    });
+    const hostileReq = throwingGetter(toolsReq(), "nodeId", "nodeId getter exploded");
     const client = new FakeLlmClient(new Map()); // no withToolsScript — forces the crash path
     const result = await client.sendWithTools(hostileReq, makeCtx());
     expect(result.ok).toBe(false);
@@ -431,12 +434,7 @@ describe("FakeLlmClient — FR-040 total guards (never a raw rejection)", () => 
   });
 
   test("a request with a throwing maxIterations getter plays with the default limit (never a raw rejection)", async () => {
-    const hostileReq = new Proxy(toolsReq({ schema: FinalSchema }), {
-      get(target, prop) {
-        if (prop === "maxIterations") throw new Error("maxIterations getter exploded");
-        return Reflect.get(target, prop);
-      },
-    });
+    const hostileReq = throwingGetter(toolsReq({ schema: FinalSchema }), "maxIterations", "maxIterations getter exploded");
     const client = new FakeLlmClient(new Map(), {
       withToolsScript: [{ type: "final", content: { result: 1 } }],
     });
@@ -451,12 +449,7 @@ describe("FakeLlmClient — FR-040 total guards (never a raw rejection)", () => 
   // abort must still stop the loop), so the totality must hold per read — a
   // throwing `signal` getter on the request or the context cannot reject raw.
   test("a request whose signal getter throws is not a raw rejection (the abort probe is total)", async () => {
-    const hostileReq = new Proxy(toolsReq({ schema: FinalSchema }), {
-      get(target, prop) {
-        if (prop === "signal") throw new Error("signal getter exploded");
-        return Reflect.get(target, prop);
-      },
-    });
+    const hostileReq = throwingGetter(toolsReq({ schema: FinalSchema }), "signal", "signal getter exploded");
     const client = new FakeLlmClient(new Map(), {
       withToolsScript: [{ type: "final", content: { result: 1 } }],
     });
@@ -468,12 +461,7 @@ describe("FakeLlmClient — FR-040 total guards (never a raw rejection)", () => 
   });
 
   test("a context whose signal getter throws is not a raw rejection (the abort probe is total)", async () => {
-    const hostileCtx = new Proxy(makeCtx(), {
-      get(target, prop) {
-        if (prop === "signal") throw new Error("ctx signal getter exploded");
-        return Reflect.get(target, prop);
-      },
-    });
+    const hostileCtx = throwingGetter(makeCtx(), "signal", "ctx signal getter exploded");
     const client = new FakeLlmClient(new Map(), {
       withToolsScript: [{ type: "final", content: { result: 1 } }],
     });
@@ -483,12 +471,7 @@ describe("FakeLlmClient — FR-040 total guards (never a raw rejection)", () => 
   });
 
   test("a request with a throwing toolChoice getter never rejects raw (the tool_use branch reads it total)", async () => {
-    const hostileReq = new Proxy(toolsReq({ schema: FinalSchema }), {
-      get(target, prop) {
-        if (prop === "toolChoice") throw new Error("toolChoice getter exploded");
-        return Reflect.get(target, prop);
-      },
-    });
+    const hostileReq = throwingGetter(toolsReq({ schema: FinalSchema }), "toolChoice", "toolChoice getter exploded");
     // A tool_use turn is what reads `toolChoice`; an empty call list makes
     // dispatch a no-op and the loop advances to the script's end — proving
     // the read was total (no raw escape) and not equal to "none".

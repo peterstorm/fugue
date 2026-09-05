@@ -8,6 +8,7 @@ import type { DagMachineContext } from "../dag-runtime/types.js";
 import type { PostWaveContext } from "../dag-runtime/post-wave-context.js";
 import { InMemoryFreshnessIndex } from "../dag-runtime/freshness-check.js";
 import { N, R, D } from "./_id-helpers.js";
+import { testNodeContext } from "./_context-factories.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -25,17 +26,8 @@ const makeNodeDef = (overrides?: Partial<NodeDef<unknown, unknown>>): NodeDef<un
   ...overrides,
 });
 
-const makeCtx = (observer: RecordingObserver): NodeContext => ({
-  runId: R("r1"),
-  dagId: D("d1"),
-  observer,
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() } as unknown as NodeContext["tracer"],
-  judgeLlm: null,
-  cache: null,
-  prompts: null,
-  llm: null, http: null, clock: null, budget: null,
-  logger: { warn: () => {}, error: () => {} },
-});
+const makeCtx = (observer: RecordingObserver): NodeContext =>
+  testNodeContext({ runId: R("r1"), dagId: D("d1"), observer });
 
 const conditionalEdge = (from: string, to: string, check: (v: unknown) => boolean): EdgeDef => ({
   from: N(from),

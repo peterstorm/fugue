@@ -95,6 +95,67 @@ const booleanEnvFlag = () =>
     .transform((v) => v === true || v === "true" || v === "1")
     .default(false);
 
+// ---------------------------------------------------------------------------
+// Boot-validation helpers — the two shapes this schema's cross-field rules take
+// ---------------------------------------------------------------------------
+
+/**
+ * Just the slice of Zod's refinement context these helpers use. Structural
+ * rather than `z.core.$RefinementCtx<T>` so the helpers state exactly what they
+ * need and do not couple this module to a zod internal type name.
+ */
+interface ConfigIssueSink {
+  readonly addIssue: (issue: {
+    readonly code: "custom";
+    // Mutable, matching zod's own `path: PropertyKey[]`: a `readonly string[]`
+    // here would not be assignable to it, and the real refinement context
+    // would stop satisfying this interface.
+    readonly path: string[];
+    readonly message: string;
+  }) => void;
+}
+
+/**
+ * "These fields are required now that some gate is set."
+ *
+ * The same three lines — test falsy, `addIssue`, `path: [field]` — were written
+ * out roughly ten times, once per required field, which is how one of them ends
+ * up with a copy-pasted `path` naming the wrong variable and reporting a boot
+ * failure against something the operator did not set. This is the same
+ * table-driven shape the credential-endpoint checks already use: the caller
+ * keeps the gate (`if (c.X !== undefined)`), the table keeps the fields.
+ */
+const requireFields = (
+  ctx: ConfigIssueSink,
+  required: readonly (readonly [field: string, value: unknown, message: string])[],
+): void => {
+  for (const [field, value, message] of required) {
+    if (!value) ctx.addIssue({ code: "custom", path: [field], message });
+  }
+};
+
+/**
+ * "These two fields are only meaningful together: both set, or both unset."
+ *
+ * Spelled out three times as `(a !== undefined) !== (b !== undefined)` plus a
+ * ternary picking the missing one for `path`. Both halves are easy to get
+ * subtly wrong — an `===` for the `!==`, or a ternary that names the field that
+ * IS set — and neither mistake is visible without reading the whole expression.
+ * Both-unset stays valid, which is the zero-regression baseline every one of
+ * these pairs depends on.
+ */
+const requirePairedFields = (
+  ctx: ConfigIssueSink,
+  a: readonly [field: string, value: unknown],
+  b: readonly [field: string, value: unknown],
+  message: string,
+): void => {
+  const [aField, aValue] = a;
+  const [bField, bValue] = b;
+  if ((aValue !== undefined) === (bValue !== undefined)) return;
+  ctx.addIssue({ code: "custom", path: [aValue === undefined ? aField : bField], message });
+};
+
 export const HostConfigSchema = z.object({
   /** Git URL for the DAGs repository */
   DAGS_REPO_URL: z.string(),
@@ -298,10 +359,13 @@ export const HostConfigSchema = z.object({
   /**
    * Microsoft Teams Incoming Webhook (Workflows) URL for human-review
    * notifications. This is ONE of two HITL notifier transports: setting it (or
-   * the Bot Framework pair `BOT_APP_ID`/`BOT_APP_PASSWORD`) ENABLES HITL, so
-   * DAGs declaring a `humanReview` gate run on the durable queue (202 + runId)
-   * and post a review card here. HITL is off (and a `humanReview` DAG is refused
-   * with 501) only when NEITHER transport is configured.
+   * the Bot Framework pair `BOT_APP_ID`/`BOT_APP_PASSWORD`) SELECTS a transport,
+   * so DAGs declaring a `humanReview` gate run on the durable queue (202 + runId)
+   * and post a review card here. A transport is necessary but NOT sufficient:
+   * `wireHitlRunEngine` (host.ts) also requires a wired `queueBackend`, so HITL
+   * is off (and a `humanReview` DAG is refused with 501) when EITHER no transport
+   * is configured OR a transport is configured with no queue backend — the
+   * latter logs "A HITL notifier is configured but no queue backend was wired".
    */
   TEAMS_WEBHOOK_URL: z.string().url().optional(),
   /**
@@ -318,7 +382,9 @@ export const HostConfigSchema = z.object({
   HITL_WORKER_CONCURRENCY: z.coerce.number().int().min(1).default(4),
   /**
    * Server-owned active-run wakeup reconciliation cadence. Runs once after the
-   * worker starts and then at this bounded interval; shutdown clears the owner.
+   * worker starts and then at this bounded interval; shutdown stops the timer
+   * (`clearInterval`), which is all there is to release — the cadence keeps no
+   * owner record of its own.
    */
   HITL_RECONCILE_INTERVAL_MS: z.coerce.number().int().min(1000).default(30_000),
   /**
@@ -798,29 +864,23 @@ export const HostConfigSchema = z.object({
   // mismatch at boot rather than fail on the first `authedHttp` call. Unset is the
   // valid zero-regression baseline (the capability is simply not registered).
   if (c.CDRATOR_URL !== undefined) {
-    if (!c.CDRATOR_AUTH_URL) {
-      ctx.addIssue({ code: "custom", path: ["CDRATOR_AUTH_URL"], message: "Required when CDRATOR_URL is set" });
-    }
-    if (!c.CDRATOR_BRAND_KEY) {
-      ctx.addIssue({ code: "custom", path: ["CDRATOR_BRAND_KEY"], message: "Required when CDRATOR_URL is set" });
-    }
+    requireFields(ctx, [
+      ["CDRATOR_AUTH_URL", c.CDRATOR_AUTH_URL, "Required when CDRATOR_URL is set"],
+      ["CDRATOR_BRAND_KEY", c.CDRATOR_BRAND_KEY, "Required when CDRATOR_URL is set"],
+    ]);
     // The required token-grant fields depend on the grant flavour. operator_password
     // (default) needs the resource-owner username/password; client_credentials needs
     // the OAuth client id/secret (the HTTP Basic client) and NO username/password.
     if (c.CDRATOR_GRANT_TYPE === "client_credentials") {
-      if (!c.CDRATOR_CLIENT_ID) {
-        ctx.addIssue({ code: "custom", path: ["CDRATOR_CLIENT_ID"], message: "Required when CDRATOR_GRANT_TYPE is 'client_credentials'" });
-      }
-      if (!c.CDRATOR_CLIENT_SECRET) {
-        ctx.addIssue({ code: "custom", path: ["CDRATOR_CLIENT_SECRET"], message: "Required when CDRATOR_GRANT_TYPE is 'client_credentials'" });
-      }
+      requireFields(ctx, [
+        ["CDRATOR_CLIENT_ID", c.CDRATOR_CLIENT_ID, "Required when CDRATOR_GRANT_TYPE is 'client_credentials'"],
+        ["CDRATOR_CLIENT_SECRET", c.CDRATOR_CLIENT_SECRET, "Required when CDRATOR_GRANT_TYPE is 'client_credentials'"],
+      ]);
     } else {
-      if (!c.CDRATOR_USERNAME) {
-        ctx.addIssue({ code: "custom", path: ["CDRATOR_USERNAME"], message: "Required when CDRATOR_URL is set (operator_password grant)" });
-      }
-      if (!c.CDRATOR_PASSWORD) {
-        ctx.addIssue({ code: "custom", path: ["CDRATOR_PASSWORD"], message: "Required when CDRATOR_URL is set (operator_password grant)" });
-      }
+      requireFields(ctx, [
+        ["CDRATOR_USERNAME", c.CDRATOR_USERNAME, "Required when CDRATOR_URL is set (operator_password grant)"],
+        ["CDRATOR_PASSWORD", c.CDRATOR_PASSWORD, "Required when CDRATOR_URL is set (operator_password grant)"],
+      ]);
     }
   }
   // ── Oracle `oracle` capability (FR-033/FR-040/FR-041) ──────────────────────
@@ -830,12 +890,10 @@ export const HostConfigSchema = z.object({
   // first `oracle` query. Unset is the valid zero-regression baseline (FR-033): the
   // capability is simply not registered and all ORACLE_* fields may be absent.
   if (c.ORACLE_CONNECT_STRING !== undefined) {
-    if (!c.ORACLE_USER) {
-      ctx.addIssue({ code: "custom", path: ["ORACLE_USER"], message: "Required when ORACLE_CONNECT_STRING is set" });
-    }
-    if (!c.ORACLE_PASSWORD) {
-      ctx.addIssue({ code: "custom", path: ["ORACLE_PASSWORD"], message: "Required when ORACLE_CONNECT_STRING is set" });
-    }
+    requireFields(ctx, [
+      ["ORACLE_USER", c.ORACLE_USER, "Required when ORACLE_CONNECT_STRING is set"],
+      ["ORACLE_PASSWORD", c.ORACLE_PASSWORD, "Required when ORACLE_CONNECT_STRING is set"],
+    ]);
   }
   // ORACLE_POOL_MIN and ORACLE_POOL_MAX are bounded individually (min 0 / min 1)
   // but nothing rejects min > max — that spec parses OK here and then hands
@@ -856,13 +914,12 @@ export const HostConfigSchema = z.object({
   // Client id and secret are an inseparable pair: HTTP Basic on the token request
   // needs BOTH. One without the other is an internally-inconsistent config that
   // would silently half-build the Basic header. Reject the mismatch at boot.
-  if ((c.CDRATOR_CLIENT_ID !== undefined) !== (c.CDRATOR_CLIENT_SECRET !== undefined)) {
-    ctx.addIssue({
-      code: "custom",
-      path: [c.CDRATOR_CLIENT_ID === undefined ? "CDRATOR_CLIENT_ID" : "CDRATOR_CLIENT_SECRET"],
-      message: "CDRATOR_CLIENT_ID and CDRATOR_CLIENT_SECRET must be set together (HTTP Basic on the token request needs both)",
-    });
-  }
+  requirePairedFields(
+    ctx,
+    ["CDRATOR_CLIENT_ID", c.CDRATOR_CLIENT_ID],
+    ["CDRATOR_CLIENT_SECRET", c.CDRATOR_CLIENT_SECRET],
+    "CDRATOR_CLIENT_ID and CDRATOR_CLIENT_SECRET must be set together (HTTP Basic on the token request needs both)",
+  );
   // The in-Teams (Bot Framework) transport needs both the app id AND the app
   // password to mint a connector token. Enforce the pair at boot rather than
   // failing on the first review when the connector tries to authenticate.
@@ -911,27 +968,24 @@ export const HostConfigSchema = z.object({
   // would silently half-wire the Entra leg. Reject the mismatch at boot (FR-001)
   // rather than fail-close every Entra mint at runtime. Both-unset is the valid
   // zero-regression baseline (SC-001).
-  if ((c.ENTRA_TENANT_ID !== undefined) !== (c.ENTRA_CLIENT_ID !== undefined)) {
-    ctx.addIssue({
-      code: "custom",
-      path: [c.ENTRA_TENANT_ID === undefined ? "ENTRA_TENANT_ID" : "ENTRA_CLIENT_ID"],
-      message: "ENTRA_TENANT_ID and ENTRA_CLIENT_ID must be set together (tenant present iff client present)",
-    });
-  }
+  requirePairedFields(
+    ctx,
+    ["ENTRA_TENANT_ID", c.ENTRA_TENANT_ID],
+    ["ENTRA_CLIENT_ID", c.ENTRA_CLIENT_ID],
+    "ENTRA_TENANT_ID and ENTRA_CLIENT_ID must be set together (tenant present iff client present)",
+  );
   // WORKER MODE (FR-007): a worker is bound to exactly one tenant AND must know
   // where to resolve that tenant's secrets. TENANT_ID without FUGUE_SECRETS_REF
   // is a half-wired worker that could boot with no secrets (fail-open); the
   // reverse is a secrets ref with no tenant to scope keys/ACL under. Reject the
   // mismatch at boot rather than fail at first resolution. Both-unset is the
   // valid legacy single-tenant / supervisor process (FR-035).
-  if ((c.TENANT_ID !== undefined) !== (c.FUGUE_SECRETS_REF !== undefined)) {
-    ctx.addIssue({
-      code: "custom",
-      path: [c.TENANT_ID === undefined ? "TENANT_ID" : "FUGUE_SECRETS_REF"],
-      message:
-        "TENANT_ID and FUGUE_SECRETS_REF must be set together (worker mode requires both: the bound tenant and where to resolve its secrets)",
-    });
-  }
+  requirePairedFields(
+    ctx,
+    ["TENANT_ID", c.TENANT_ID],
+    ["FUGUE_SECRETS_REF", c.FUGUE_SECRETS_REF],
+    "TENANT_ID and FUGUE_SECRETS_REF must be set together (worker mode requires both: the bound tenant and where to resolve its secrets)",
+  );
 });
 
 // ---------------------------------------------------------------------------

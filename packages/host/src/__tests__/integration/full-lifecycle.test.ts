@@ -521,9 +521,19 @@ describe("Full Host Lifecycle", () => {
     const { port, redis } = createFakeRedis();
     const logger = testLogger();
 
+    // Count the git egress the sync loop drives, so "stops sync" is asserted on
+    // observed behaviour rather than inferred from a lifecycle log line.
+    const git = createFakeGitPort();
+    let gitCalls = 0;
+    const countingGit: GitPort = {
+      ...git,
+      pull: async (...args) => { gitCalls += 1; return git.pull(...args); },
+      currentSha: async (...args) => { gitCalls += 1; return git.currentSha(...args); },
+    };
+
     const result = await createHost({
       config: testConfig(),
-      git: createFakeGitPort(),
+      git: countingGit,
       loader: createFakeModuleLoader(dags),
       redis: port,
       sharedInfra: createFakeSharedInfra(redis),
@@ -542,6 +552,21 @@ describe("Full Host Lifecycle", () => {
     // State should be stopped
     const state = host.getState();
     expect(state.phase).toBe("stopped");
+
+    // ...and the server actually stopped, not merely the phase field. Both
+    // halves matter: the handle is released AND the socket stops accepting.
+    expect(host.server).toBeNull();
+    await expect(
+      fetch(`http://127.0.0.1:${serverPort}/health`, {
+        signal: AbortSignal.timeout(2000),
+      }),
+    ).rejects.toThrow();
+
+    // ...and the sync loop is genuinely halted: with its handle dropped,
+    // triggerSync() is inert and drives no further git egress.
+    const callsAfterShutdown = gitCalls;
+    await host.triggerSync();
+    expect(gitCalls).toBe(callsAfterShutdown);
 
     // Verify shutdown lifecycle logged
     const infoLogs = logger.logs.filter((l) => l.level === "info");

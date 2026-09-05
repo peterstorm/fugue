@@ -413,7 +413,7 @@ describe("Wave 6.2 — ratio() accepts an injectable RNG for deterministic tests
     ).toBe(true);
   });
 
-  it("rng returning 1 never flushes for p=0.5", () => {
+  it("rng returning 0.99 never flushes for p=0.5", () => {
     const policy = ratio(0.5, () => 0.99);
     expect(
       policy.shouldFlush({
@@ -694,7 +694,7 @@ describe("Wave 7 — property tests", () => {
 });
 
 // ===========================================================================
-// Wave 7 — input-validation failure emits node-error
+// Wave 4.1 — input-validation failure emits node-error
 // ===========================================================================
 
 describe("Wave 4.1 — input-validation failure emits a node-error event", () => {

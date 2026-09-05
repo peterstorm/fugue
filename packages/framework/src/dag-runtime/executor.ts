@@ -1,6 +1,9 @@
 // buildDagExecutor — DAG executor closure
 // Orchestrates wave execution, retry backoff with jitter, and human-review hook dispatch.
-// Returns an Executor<DagPhase, DagEvent, DagMachineContext> that runs one wave per call.
+// Returns an Executor<DagPhase, DagEvent, DagMachineContext> that advances the DAG
+// by one step per call. That step is a wave for `running`/`retrying`; the
+// human-gate phases (`awaiting-human`, `suspended`, `retrying-hook`) dispatch no
+// wave at all, and `pending` only emits the `start` event.
 //
 // Requirement → ADR cross-reference:
 //   FR-005  → ADR-0003 (event sourcing, checkpoint after every transition)
@@ -86,12 +89,6 @@ export type OnHumanReviewHook = (req: {
 }) => Promise<import("./types.js").HumanReviewOutcome>;
 
 /**
- * Shared body of the `awaiting-human`, `suspended`, and `retrying-hook`
- * executor branches. All three paths check for a wired hook, invoke it, catch
- * exceptions into `node-failed`, validate edited output, and emit the resulting
- * response/suspend event. Retry sleep remains at the call site.
- */
-/**
  * One invocation of the shared human-review body. Bundled rather than passed
  * positionally — nine positional arguments of which four are `NodeId`/`DagId`/
  * `unknown`/function are trivially transposable at the call site, the same
@@ -112,6 +109,15 @@ interface HumanReviewHookCall {
   readonly nowFn: () => number;
 }
 
+/**
+ * Shared body of the `awaiting-human`, `suspended`, and `retrying-hook`
+ * executor branches. All three paths check for a wired hook, invoke it, catch
+ * exceptions into `node-failed`, validate edited output, and RETURN the
+ * resulting response/suspend event. Emission is the caller's job: only
+ * `handleHumanGate` calls `emitHumanIntervention`, so the observer sees one
+ * event per gate no matter which of the three branches produced it. Retry sleep
+ * likewise remains at the call site.
+ */
 const callHumanReviewHook = async (
   call: HumanReviewHookCall,
 ): Promise<UnenrichedDagEvent> => {
@@ -189,14 +195,17 @@ const callHumanReviewHook = async (
  * 1. `pending`: returns a `start` event (drives the first transition).
  * 2. `running`: runs the full wave via Promise.all, returns `wave-done` or
  *    `node-failed` for the first failure.
- * 3. `retrying`: sleeps for `nextDelayMs * jitter` then re-runs the failed node.
+ * 3. `retrying`: sleeps for `nextDelayMs * jitter` then re-invokes the WHOLE
+ *    wave, not just the failed node — every node in it runs again, which is why
+ *    node `run` functions must be idempotent under retry.
  *    Returns `wave-done` (if all nodes in the wave now pass) or `node-failed`.
  * 4. `awaiting-human` / `suspended` / `retrying-hook` (ADR-0060): dispatches the
  *    `onHumanReview` hook (the latter two are handled identically to
  *    `awaiting-human`; `retrying-hook` additionally honours `nextDelayMs`).
  *    Returns `human-responded` (a decision is present), `human-suspend` (the
- *    hook returned `pending` → park the run), or `node-failed` (the hook threw
- *    or an edited output failed schema validation).
+ *    hook returned `pending` → park the run), or `node-failed` — which covers
+ *    three causes, not two: no `onHumanReview` hook is wired at all, the wired
+ *    hook threw, or an edited output failed schema validation.
  *
  * Terminal phases (`succeeded`, `failed`) are unreachable here — the runner's
  * `isTerminal` guard stops the loop first — so those branches throw.

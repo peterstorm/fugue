@@ -169,7 +169,7 @@ Adding a new layer? Add a rule. Adding a cross-layer import? It will fail CI.
 ## Public surface
 
 - `@fuguejs/framework` — the recommended consumer barrel: `runDag`, observer/tracing init, node-authoring types.
-- `@fuguejs/framework/advanced` — kernel-mode entry points (`runDagStateful`, `runDagAsWorkerJob`, `compileDagToMachine`, `buildDagExecutor`, `dagTransition`) for callers building custom machines on top of the framework. Reaching for these is a deliberate choice; the main barrel keeps them off the surface.
+- `@fuguejs/framework/advanced` — kernel-mode entry points (`runDagAsWorkerJob`, `runResumableDagJob`, `compileDagToMachine`, `buildDagExecutor`, `dagTransition`, `topoSort`, and the DAG persistence helpers) for callers building custom machines on top of the framework. Reaching for these is a deliberate choice; the main barrel keeps them off the surface. `runDagStateful` is deliberately on neither barrel — import it directly from `dag-runtime/run-dag-stateful.js`, or prefer `runDagStatefulOutcome` / `runResumableDagJob` for suspendable runs.
 - `@fuguejs/framework/bullmq` — the BullMQ transport adapter (`createBullMQBackend`, `adaptBullMQJob`, `createRedisMarkerStore`, `createRedisStreamReader`). Pulls in the optional `bullmq` / `ioredis` peer deps; isolated off the main barrel so transport-agnostic consumers stay clean.
 - `@fuguejs/framework/redis` — Redis-backed durable adapters (`RedisCache`, `RedisCheckpointer`, `RedisFreshnessIndex`). Requires the optional `ioredis` peer dep.
 - `@fuguejs/framework/testing` — stable import path for test tooling (`FakeLlmClient`, `createFakeHttpCapability`).

@@ -15,6 +15,7 @@ import { defineDag } from "../executor/define-dag.js";
 import { DagDefinitionError } from "../executor/define-dag.js";
 import type { NodeDef, NodeContext } from "../types/node.js";
 import { RecordingObserver } from "../observer/observer.js";
+import { testNodeContext } from "./_context-factories.js";
 
 const makeNode = (
   id: string,
@@ -98,18 +99,13 @@ describe("predicate-malformed — caught at defineDag time", () => {
 });
 
 describe("predicate-malformed — runtime check throws when predicate check() throws", () => {
-  it("throwing check function records reason: 'threw' and falls through to default", async () => {
-    const mkCtx = (observer: RecordingObserver): NodeContext => ({
-      runId: "threw-run" as RunId,
-      dagId: "threw-dag" as DagId,
-      observer,
-      tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-      judgeLlm: null,
-      cache: null,
-      prompts: null,
-      llm: null, http: null, clock: null, budget: null,
-      logger: { warn: () => {}, error: () => {} },
-    });
+  it("throwing check function fails the run closed with predicate-malformed instead of falling through to default", async () => {
+    const mkCtx = (observer: RecordingObserver): NodeContext =>
+      testNodeContext({
+        runId: "threw-run" as RunId,
+        dagId: "threw-dag" as DagId,
+        observer,
+      });
 
     const dag = defineDag({
       id: "threw",

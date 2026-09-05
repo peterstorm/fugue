@@ -5,7 +5,6 @@
 // All redis-gated tests skip cleanly without REDIS_URL.
 // Run with: REDIS_URL=redis://localhost:6379 bun test
 
-import { NoopObserver } from "../../observer/observer.js";
 import { __resetFrameworkLogger, setFrameworkLogger } from "../../logger.js";
 import type { RunId } from "../../types/ids.js";
 import { DAG_INPUT } from "../../types/ids.js";
@@ -117,6 +116,30 @@ const scriptRedis = (methods: ScriptRedisMethods = {}): Redis =>
 // ---------------------------------------------------------------------------
 // createRedisMarkerStore — FR-043
 // ---------------------------------------------------------------------------
+
+
+/**
+ * Poll `condition` until it holds or the timeout elapses, then return either
+ * way — the caller's own `expect` decides whether the wait succeeded.
+ *
+ * Seven hand-rolled scaffolds (five `setInterval`+`setTimeout` pairs and two
+ * `while (Date.now() < deadline)` loops) all did exactly this, each carrying its
+ * own chance to leak the interval or drop the timeout arm. The three scaffolds
+ * that remain are genuinely different: their poll bodies are async and capture
+ * state, so they are not this shape. Timing out here is
+ * NOT an assertion failure on its own: every call site already asserts the state
+ * it was waiting for, so a timeout surfaces as that assertion failing with a
+ * useful message rather than as an opaque hang.
+ */
+const waitFor = async (
+  condition: () => boolean,
+  { timeoutMs = 5000, intervalMs = 50 }: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline && !condition()) {
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+};
 
 describe("createRedisMarkerStore", () => {
   redisIt("set + exists + delete round-trip", async () => {
@@ -369,12 +392,7 @@ describe("createBullMQBackend enqueue + process", () => {
 
     await queue.enqueue("j1", { state: { kind: "pending" }, context: { value: 0 } });
 
-    await new Promise<void>((resolve) => {
-      const check = setInterval(() => {
-        if (received.length > 0) { clearInterval(check); resolve(); }
-      }, 50);
-      setTimeout(() => { clearInterval(check); resolve(); }, 5000);
-    });
+    await waitFor(() => received.length > 0);
 
     expect(received).toHaveLength(1);
     expect(received[0].state).toEqual({ kind: "pending" });
@@ -415,12 +433,7 @@ describe("createBullMQBackend enqueue + process", () => {
       },
     });
 
-    await new Promise<void>((resolve) => {
-      const check = setInterval(() => {
-        if (capturedAfterUpdate) { clearInterval(check); resolve(); }
-      }, 50);
-      setTimeout(() => { clearInterval(check); resolve(); }, 5000);
-    });
+    await waitFor(() => capturedAfterUpdate !== null);
 
     expect(capturedAfterUpdate).not.toBeNull();
     expect(capturedAfterUpdate!.context.outputs).toBeInstanceOf(Map);
@@ -450,12 +463,7 @@ describe("createBullMQBackend enqueue + process", () => {
 
     await queue.enqueue("j2", { state: { kind: "pending" }, context: { value: 0 } });
 
-    await new Promise<void>((resolve) => {
-      const check = setInterval(() => {
-        if (snapshots.length >= 2) { clearInterval(check); resolve(); }
-      }, 50);
-      setTimeout(() => { clearInterval(check); resolve(); }, 5000);
-    });
+    await waitFor(() => snapshots.length >= 2);
 
     expect(snapshots[0].state).toEqual({ kind: "pending" });
     expect(snapshots[1].state).toEqual({ kind: "running" });
@@ -632,12 +640,7 @@ describe("createBullMQBackend — onFailed + onError handlers", () => {
       { attempts: 2 },
     );
 
-    await new Promise<void>((resolve) => {
-      const check = setInterval(() => {
-        if (failedEvents.length > 0) { clearInterval(check); resolve(); }
-      }, 50);
-      setTimeout(() => { clearInterval(check); resolve(); }, 5000);
-    });
+    await waitFor(() => failedEvents.length > 0);
 
     expect(failedEvents.length).toBeGreaterThan(0);
     expect(failedEvents[0].err).toBeInstanceOf(Error);
@@ -678,12 +681,7 @@ describe("createBullMQBackend — onFailed + onError handlers", () => {
       { attempts: 2 },
     );
 
-    await new Promise<void>((resolve) => {
-      const check = setInterval(() => {
-        if (errorEvents.length > 0) { clearInterval(check); resolve(); }
-      }, 50);
-      setTimeout(() => { clearInterval(check); resolve(); }, 5000);
-    });
+    await waitFor(() => errorEvents.length > 0);
 
     await worker.close();
     await queue.close();
@@ -1132,10 +1130,10 @@ describe("createQueue / createWorker — RangeError guards (pure, no Redis neede
       backend.createQueue("a1-pin-queue");
       // ECONNREFUSED on localhost arrives within milliseconds; poll generously
       // so the pin is deterministic regardless of retry backoff timing.
-      const deadline = Date.now() + 10_000;
-      while (Date.now() < deadline && !lines.some((l) => l.includes("[BullMQ] Queue \"a1-pin-queue\" error:"))) {
-        await new Promise((r) => setTimeout(r, 25));
-      }
+      await waitFor(
+        () => lines.some((l) => l.includes("[BullMQ] Queue \"a1-pin-queue\" error:")),
+        { timeoutMs: 10_000, intervalMs: 25 },
+      );
       expect(lines.some((l) => l.includes("[BullMQ] Queue \"a1-pin-queue\" error:"))).toBe(true);
       await backend.close();
     } finally {
@@ -1157,10 +1155,7 @@ describe("createQueue / createWorker — RangeError guards (pure, no Redis neede
     try {
       const backend = createBullMQBackend(dummyConn);
       backend.createQueue("throwing-logger-queue");
-      const deadline = Date.now() + 10_000;
-      while (Date.now() < deadline && errorCalls === 0) {
-        await new Promise((resolve) => setTimeout(resolve, 25));
-      }
+      await waitFor(() => errorCalls > 0, { timeoutMs: 10_000, intervalMs: 25 });
       expect(errorCalls).toBeGreaterThan(0);
       await expect(backend.close()).resolves.toBeUndefined();
     } finally {
@@ -1227,17 +1222,9 @@ describe("§6.11 — BullMQ DAG resume reconstructs nodeMap via live dag", () =>
       defaultRetryLimit: 0,
     });
 
-    const mkCtx = (): NodeContext => ({
-      runId: "dag-resume-run" as RunId,
-      dagId: dag.id,
-      observer: new NoopObserver(),
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null,
-      cache: null,
-      prompts: null,
-      llm: null, http: null, clock: null, budget: null,
-      logger: { warn: () => {}, error: () => {} },
-    });
+    const { testNodeContext } = await import("../../__tests__/_context-factories.js");
+    const mkCtx = (): NodeContext =>
+      testNodeContext({ runId: "dag-resume-run" as RunId, dagId: dag.id });
 
     const backend = createBullMQBackend(REDIS_URL!);
     const queue = backend.createQueue<unknown, unknown>(queueName);

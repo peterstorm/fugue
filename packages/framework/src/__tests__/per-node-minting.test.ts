@@ -352,6 +352,134 @@ describe("per-node capability minting (C1)", () => {
     expect(mintCalls).toBe(0);
   });
 
+  // ── snapshotOrigin: the origin half of the run-authority parse fence ───────
+  //
+  // `own-data.ts`'s primitives are property-tested on their own, but nothing
+  // exercised THIS composition: the two variants' expected key sets, and the
+  // per-field string checks, are written out by hand here. Swapping the two key
+  // lists, or dropping a `typeof … === "string"` guard, keeps every own-data
+  // property test green while letting a malformed origin — the value the whole
+  // fence exists to reject before run-start — through into the audit record.
+  describe("snapshotOrigin rejects every malformed InvocationOrigin shape", () => {
+    // The label is derived from `expected`, never from `origin`: one of these
+    // origins is a revoked Proxy, and stringifying it to build a message would
+    // throw inside the assertion rather than inside the code under test.
+    const rejects = async (origin: unknown, expected: string): Promise<void> => {
+      let mintCalls = 0;
+      const broker: CapabilityBroker = {
+        mintFor: async () => {
+          mintCalls += 1;
+          return ok({} as unknown as ScopedCapabilityHandle);
+        },
+        provides: () => false,
+      };
+      const node = createFetchNode({
+        id: N("origin-fence"),
+        inputSchema: z.object({}),
+        outputSchema: z.object({ ok: z.boolean() }),
+        requires: [] as const,
+        fetch: async () => ok({ ok: true }),
+      });
+      const dag = defineDagFromArray({
+        id: "dag-origin",
+        nodes: [node],
+        edges: [{ from: DAG_INPUT, to: "origin-fence" }],
+      });
+
+      const result = await runDag(dag, {}, baseCtx(), {
+        minting: {
+          broker,
+          origin: origin as InvocationOrigin,
+          meterLlm: () => ok({} as LlmClient),
+        },
+      });
+
+      expect(result.ok, `expected refusal mentioning "${expected}"`).toBe(false);
+      if (!result.ok) {
+        // Narrow before reading `message`: `FrameworkError` is a union and not
+        // every member carries one. The kind assertion is load-bearing anyway —
+        // the fence must fail as a `validation`, not as a node crash.
+        expect(result.error.kind).toBe("validation");
+        if (result.error.kind === "validation") {
+          expect(result.error.message).toContain("minting authority origin invalid");
+          expect(result.error.message).toContain(expected);
+        }
+      }
+      // Fail CLOSED: a bad origin must stop the run before any egress, not
+      // after the broker has already minted against an unattributable caller.
+      expect(mintCalls).toBe(0);
+    };
+
+    it("refuses a non-object origin", async () => {
+      await rejects(42, "must be an object");
+      await rejects(null, "must be an object");
+    });
+
+    it("refuses an unknown or non-string kind", async () => {
+      await rejects({ kind: "service" }, 'kind must be exactly "agent" or "user"');
+      await rejects({ kind: 7 }, 'kind must be exactly "agent" or "user"');
+      await rejects({}, "kind must be an own data property");
+    });
+
+    it("refuses an agent origin carrying the wrong key set", async () => {
+      // Extra key...
+      await rejects(
+        { kind: "agent", agentClientId: "a", sub: "s" },
+        "agent variant must contain exactly kind and agentClientId",
+      );
+      // ...and missing key. Both directions matter: `hasExactOwnKeys` is an
+      // equality check, and a subset check would pass the second.
+      await rejects(
+        { kind: "agent" },
+        "agent variant must contain exactly kind and agentClientId",
+      );
+    });
+
+    it("refuses a user origin carrying the wrong key set", async () => {
+      await rejects(
+        { kind: "user", sub: "s" },
+        "user variant must contain exactly kind, sub, and agentClientId",
+      );
+      await rejects(
+        { kind: "user", sub: "s", agentClientId: "a", extra: 1 },
+        "user variant must contain exactly kind, sub, and agentClientId",
+      );
+      // The agent variant's key set must NOT satisfy the user variant, which is
+      // exactly what a swap of the two expected lists would produce.
+      await rejects(
+        { kind: "user", agentClientId: "a" },
+        "user variant must contain exactly kind, sub, and agentClientId",
+      );
+    });
+
+    it("refuses non-string identity fields on either variant", async () => {
+      await rejects({ kind: "agent", agentClientId: 7 }, "agentClientId must be a string");
+      await rejects(
+        { kind: "user", sub: 7, agentClientId: "a" },
+        "sub and agentClientId must be strings",
+      );
+      await rejects(
+        { kind: "user", sub: "s", agentClientId: 7 },
+        "sub and agentClientId must be strings",
+      );
+    });
+
+    it("refuses an accessor-backed field — a getter could answer differently later", async () => {
+      const hostile = Object.defineProperty({ kind: "agent" }, "agentClientId", {
+        get: () => "attacker",
+        enumerable: true,
+        configurable: true,
+      });
+      await rejects(hostile, "agentClientId must be an own data property");
+    });
+
+    it("refuses a revoked Proxy without letting the throw escape the Result", async () => {
+      const revocable = Proxy.revocable({ kind: "agent", agentClientId: "a" }, {});
+      revocable.revoke();
+      await rejects(revocable.proxy, "could not be inspected safely");
+    });
+  });
+
   it("rejects an untagged broker LLM instead of passing it through unmetered", async () => {
     let nodeRuns = 0;
     let meterCalls = 0;

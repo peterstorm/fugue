@@ -209,7 +209,6 @@ void nodeDefDefaultCapabilityTypePin;
 // ---------------------------------------------------------------------------
 
 const noop = async () => ({ ok: true as const, value: undefined });
-const noopTracer = { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() };
 
 const makeNode = (id: string, requires: readonly Capability[]): NodeDef<unknown, unknown> => ({
   id: N(id),
@@ -223,10 +222,12 @@ const makeNode = (id: string, requires: readonly Capability[]): NodeDef<unknown,
 });
 
 const makeCtx = (overrides: Partial<BaseNodeContext> = {}): BaseNodeContext => ({
+  // `tracer` is NOT overridden: testNodeContext()'s default is the same
+  // pass-through span wrapper this file's `noopTracer` was, and restating it
+  // here only creates a second thing to keep in step.
   ...testNodeContext(),
   runId: "r1" as any,
   dagId: "d1" as any,
-  tracer: noopTracer as any,
   ...overrides,
 });
 

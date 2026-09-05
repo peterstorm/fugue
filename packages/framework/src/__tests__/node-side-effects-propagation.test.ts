@@ -4,10 +4,13 @@ import { RN } from "./_freshness-helpers.js";
  *
  * Validates:
  * - sideEffects.kind survives through node-start, node-end, and node-error events.
- * - OTel span attributes are set correctly.
  * - idempotencyKey callback is invoked exactly once per node execution.
  * - Type-level: `kind: "writes"` without `resource` is a compile error
  *   (enforced via the discriminated union — no runtime test needed, compile-time only).
+ *
+ * Span attributes are deliberately NOT asserted here: this file installs a stub
+ * tracer with no span object to inspect, and `span-enrich.test.ts` already pins
+ * the attribute contract against the real enricher.
  */
 
 import { describe, it, expect } from "bun:test";
@@ -23,20 +26,10 @@ import { defineDagFromArray } from "../executor/define-dag.js";
 import type { NodeContext } from "../types/node.js";
 import type { RunId, DagId } from "../types/ids.js";
 import { DAG_INPUT } from "../types/ids.js";
+import { testNodeContext } from "./_context-factories.js";
 
-const mkCtx = (observer: RecordingObserver): NodeContext => ({
-  runId: "r" as RunId,
-  dagId: "d" as DagId,
-  observer,
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null,
-  cache: null,
-  prompts: null,
-  llm: null, http: null,
-  clock: null,
-  budget: null,
-  logger: { warn: () => {}, error: () => {} },
-});
+const mkCtx = (observer: RecordingObserver): NodeContext =>
+  testNodeContext({ runId: "r" as RunId, dagId: "d" as DagId, observer });
 
 describe("node side-effects propagation (Phase 1)", () => {
   it("sideEffects: { kind: 'none' } appears on node-start and node-end events", async () => {

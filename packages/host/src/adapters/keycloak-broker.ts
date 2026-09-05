@@ -350,8 +350,10 @@ const saDispatch = (
  * `requires` set into a scoped handle, fail-closed BEFORE any egress on an
  * unassigned scope, with a correlated audit record for every mint and refusal.
  *
- * The token cache is held in a single mutable cell in this shell (the broker is
- * long-lived across runs); the cache VALUE and its freshness decision stay pure.
+ * The token caches are held in two mutable cells in this shell (the broker is
+ * long-lived across runs) — one per egress, `saCache` and `appOnlyCache`; see the
+ * block above their declarations for why the split is deliberate. The cache
+ * VALUES and their freshness decisions stay pure.
  */
 export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker => {
   const audit: BrokerAudit = createBrokerAudit(deps.tracer, deps.logger);

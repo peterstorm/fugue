@@ -85,6 +85,138 @@ describe("error-handler middleware", () => {
     });
   });
 
+  // ── Per-kind detail fields, asserted through a real dispatched response ────
+  //
+  // `rawDetailsFor` is a ts-pattern table: `.exhaustive()` guarantees every
+  // HostError KIND has an arm, and nothing guarantees the arm builds the right
+  // SHAPE. A swapped field name (`dagTeam` for `callerTeam`) still compiles and
+  // still returns the right status — it just silently tells the client the
+  // wrong thing. Round-tripping through `parseHostError` does not catch it
+  // either, because that never looks at the rendered body. So each arm is
+  // pinned on the body a client actually receives.
+  //
+  // The <500 and >=500 arms are pinned differently ON PURPOSE. For a >=500
+  // status the "Path 1b" disclosure discipline replaces the body with a generic
+  // one, so `rawDetailsFor`'s `dag-disabled`, `circuit-open` and
+  // `worker-unavailable` arms never reach a client at all — for those the
+  // observable contract is the ABSENCE of details plus the `Retry-After`
+  // header, and that is what is asserted. Writing those three as if their
+  // details were visible would assert something the middleware deliberately
+  // does not do.
+  describe("per-kind response-body details (rawDetailsFor)", () => {
+    const dispatch = async (hostErr: HostError): Promise<{
+      status: number;
+      retryAfter: string | null;
+      body: { ok: boolean; error: string; details?: Record<string, unknown> };
+    }> => {
+      const { logger } = createTestLogger();
+      const app = createApp(logger, () => { throw new Error("boom", { cause: hostErr }); });
+      const res = await app.request("/throw");
+      return { status: res.status, retryAfter: res.headers.get("Retry-After"), body: await res.json() };
+    };
+
+    describe("client-facing (<500): the detail fields are rendered", () => {
+      it("forbidden carries BOTH team names in their own fields", async () => {
+        const { status, body } = await dispatch({
+          kind: "forbidden",
+          dagId: "d1" as never,
+          callerTeam: "team-a",
+          dagTeam: "team-b",
+        });
+        expect(status).toBe(403);
+        expect(body.error).toBe("forbidden");
+        // Compared as a whole object: a swap of the two names satisfies any
+        // assertion that only checks each field is present.
+        expect(body.details).toEqual({ callerTeam: "team-a", dagTeam: "team-b" });
+      });
+
+      it("timeout carries timeoutMs", async () => {
+        const { status, body } = await dispatch({
+          kind: "timeout",
+          dagId: "d1" as never,
+          runId: "r1" as never,
+          timeoutMs: 30_000,
+        });
+        expect(status).toBe(408);
+        expect(body.details).toEqual({ timeoutMs: 30_000 });
+      });
+
+      it("dag-not-found carries the available list", async () => {
+        const { status, body } = await dispatch({
+          kind: "dag-not-found",
+          dagId: "nope" as never,
+          available: ["a", "b"] as never,
+        });
+        expect(status).toBe(404);
+        expect(body.details).toEqual({ available: ["a", "b"] });
+      });
+
+      it("tenant-over-quota names the caller's OWN tenant and scopes it (FR-041)", async () => {
+        const { status, retryAfter, body } = await dispatch({
+          kind: "tenant-over-quota",
+          tenant: "acme" as never,
+          retryAfterSeconds: 7 as never,
+        });
+        expect(status).toBe(429);
+        expect(body.details).toEqual({ scope: "tenant", tenant: "acme" });
+        expect(retryAfter).toBe("7");
+      });
+
+      it("the two concurrency kinds are distinguishable by scope", async () => {
+        const global = await dispatch({ kind: "global-concurrency-exceeded" });
+        expect(global.status).toBe(429);
+        expect(global.body.details).toEqual({ scope: "global" });
+
+        const perDag = await dispatch({ kind: "dag-concurrency-exceeded", dagId: "slow" as never });
+        expect(perDag.status).toBe(429);
+        expect(perDag.body.details).toEqual({ scope: "dag", dagId: "slow" });
+      });
+
+      it("tenant-unknown discloses NOTHING (FR-040)", async () => {
+        const { status, body } = await dispatch({ kind: "tenant-unknown" });
+        expect(status).toBe(404);
+        // No tenant id, no "available" — nothing that could confirm another
+        // tenant's existence.
+        expect(body.details).toBeUndefined();
+      });
+    });
+
+    describe(">=500: details are withheld; the Retry-After header is the contract", () => {
+      it("dag-disabled withholds its reason from the body", async () => {
+        const { status, body } = await dispatch({
+          kind: "dag-disabled",
+          dagId: "d1" as never,
+          reason: "quarantined by operator",
+        });
+        expect(status).toBe(503);
+        expect(body.error).toBe("dag-disabled");
+        expect(body.details).toBeUndefined();
+      });
+
+      it("circuit-open withholds retryAfterSeconds from the body but sends the header", async () => {
+        const { status, retryAfter, body } = await dispatch({
+          kind: "circuit-open",
+          dagId: "d1" as never,
+          retryAfterSeconds: 42 as never,
+        });
+        expect(status).toBe(503);
+        expect(body.details).toBeUndefined();
+        // The header is how a client learns when to retry on this path.
+        expect(retryAfter).toBe("42");
+      });
+
+      it("worker-unavailable withholds the tenant from the body but sends the header", async () => {
+        const { status, retryAfter, body } = await dispatch({
+          kind: "worker-unavailable",
+          tenant: "acme" as never,
+        });
+        expect(status).toBe(503);
+        expect(body.details).toBeUndefined();
+        expect(retryAfter).toBe("5");
+      });
+    });
+  });
+
   describe("Path 2: Error with HostError as .cause", () => {
     it("unwraps cause and maps to correct status", async () => {
       const { logger } = createTestLogger();

@@ -9,7 +9,11 @@
 //   - `sources`: N parallel root **source nodes** (built with
 //     `createSourceNode`). They run concurrently in wave 0 and feed the join.
 //   - `join`: a fan-in node receiving an object keyed by the source node ids.
-//     Its `inputSchema` keys must equal that set (`fugue lint` checks this).
+//     Its `inputSchema` keys must equal that set — `defineSources` itself
+//     enforces this synchronously at definition time (`assertFanInKeys` throws
+//     `DagDefinitionError`), so a mismatch fails at module load, not at run
+//     time. `fugue lint` reports the same class of mismatch earlier, in the
+//     editor.
 //   - `assemble` (optional): a second-stage fan-in over the join. Output node.
 //
 // The request reaches `join`/`assemble` ONLY if that node declares a `"$input"`

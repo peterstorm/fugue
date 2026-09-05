@@ -68,7 +68,11 @@ export const AI_PROMPT_CACHE_POLICY = "ai.prompt_cache.policy";
 /**
  * False when a call DECLARED a cache policy and the provider reported neither
  * a write nor a read — the prefix sat below the model's minimum cacheable size,
- * or a volatile byte broke the prefix match. Absent when no policy was declared.
+ * or a volatile byte broke the prefix match.
+ *
+ * Absent in TWO cases, not one: no policy was declared at all, and a declared
+ * policy of `"none"` — `span-enrich.ts` skips the attribute there because a call
+ * that asked for no caching has nothing to be effective or ineffective about.
  */
 export const AI_PROMPT_CACHE_EFFECTIVE = "ai.prompt_cache.effective";
 export const GEN_AI_TOOL_NAME = "gen_ai.tool.name";

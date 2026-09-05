@@ -3,11 +3,13 @@
  *
  * This is the IMPERATIVE SHELL. It holds mutable `let` references
  * to state and wires everything:
- * - Constructs SharedInfra from config
+ * - Receives SharedInfra from the injected HostDeps (the entrypoint constructs
+ *   it; this file only destructures and threads it)
  * - Creates mutable state references (HostState, ConcurrencyState, CircuitBreaker map)
  * - Wires sync loop → registry swap + circuit breaker force-reset
  * - Wires HTTP router → read current state
- * - Handles SIGTERM → draining state → stop sync → close server → exit
+ * - Handles SIGTERM → stop sync loop + Redis probe → draining state → await
+ *   in-flight drain → close server → stopped → exit (see `performShutdown`)
  *
  * @satisfies FR-060 — Host MUST exit cleanly on SIGTERM after draining in-flight requests
  * @satisfies NFR-020 — Host MUST log startup/shutdown lifecycle events

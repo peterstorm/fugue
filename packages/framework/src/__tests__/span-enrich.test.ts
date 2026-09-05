@@ -90,11 +90,6 @@ describe("resolveContentFilter", () => {
     expect(filter).not.toBeNull();
     expect(filter!("secret")).toBe("secret");
   });
-
-  it("returns null when contentFilter is null", () => {
-    const filter = resolveContentFilter({ contentFilter: null });
-    expect(filter).toBeNull();
-  });
 });
 
 // ---------------------------------------------------------------------------

@@ -141,6 +141,68 @@ describe("MicroUsd: money as an integer", () => {
     }
   });
 
+  // `parseSpend` is the boundary parser guarding adapter-supplied spend before
+  // it enters budget arithmetic, so every early return in it is a fail-closed
+  // path. The cases below are the ones no test reached: they are all "the
+  // value is the wrong SHAPE" rather than "the number is out of range", which
+  // is what the forged-value test above covers.
+  it("rejects malformed top-level and usd shapes, naming the offending field", () => {
+    const cases: readonly (readonly [label: string, value: unknown, expected: string])[] = [
+      ["a non-object", 42, "Spend"],
+      ["null", null, "Spend"],
+      ["an array", [], "Spend"],
+      ["an invalid usage enum", { ...NO_SPEND, usage: "maybe" }, "Spend.usage"],
+      ["a missing usage", { tokens: 0, calls: 0, usd: { kind: "priced", micros: 0 } }, "usage"],
+      ["a non-object usd", { ...NO_SPEND, usd: 1 }, "Spend.usd"],
+      ["a missing usd.kind", { ...NO_SPEND, usd: {} }, "kind"],
+      ["an invalid usd.kind", { ...NO_SPEND, usd: { kind: "free" } }, "Spend.usd.kind"],
+      ["a priced usd with no micros", { ...NO_SPEND, usd: { kind: "priced" } }, "micros"],
+      [
+        "a priced usd with non-integer micros",
+        { ...NO_SPEND, usd: { kind: "priced", micros: 1.5 } },
+        "Spend.usd.micros",
+      ],
+      [
+        "an unpriced usd with no knownMicros",
+        { ...NO_SPEND, usd: { kind: "unpriced", models: ["a"] } },
+        "knownMicros",
+      ],
+    ];
+    for (const [label, value, expected] of cases) {
+      const result = parseSpend(value);
+      expect(result.ok, `expected ${label} to be rejected`).toBe(false);
+      // The message must name the field: this parser's whole job is telling an
+      // operator WHICH adapter value was wrong, and a generic "invalid Spend"
+      // would make every one of these branches indistinguishable in a log.
+      if (!result.ok) expect(result.error, `for ${label}`).toContain(expected);
+    }
+  });
+
+  it("accepts both usage values and round-trips a valid unpriced spend", () => {
+    // The positive twin of the rejection table: proves the checks above reject
+    // the shape rather than simply rejecting everything.
+    for (const usage of ["known", "unknown"] as const) {
+      const parsed = parseSpend({ ...NO_SPEND, usage });
+      expect(parsed.ok).toBe(true);
+      if (parsed.ok) expect(parsed.value.usage).toBe(usage);
+    }
+    const unpriced = parseSpend({
+      usage: "known",
+      tokens: 3,
+      calls: 1,
+      usd: { kind: "unpriced", models: ["a", "b"], knownMicros: 7 },
+    });
+    expect(unpriced.ok).toBe(true);
+    if (unpriced.ok) {
+      expect(unpriced.value.tokens).toBe(3);
+      expect(unpriced.value.usd).toEqual({
+        kind: "unpriced",
+        models: modelsOf(["a", "b"]),
+        knownMicros: micros(7),
+      });
+    }
+  });
+
   it("keeps revoked and accessor-backed model arrays inside the Result boundary", () => {
     const revoked = Proxy.revocable(["model-a"], {});
     revoked.revoke();

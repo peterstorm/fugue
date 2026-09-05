@@ -289,6 +289,13 @@ export const createNamespacedCheckpointWriter = (
         report("warn", "Checkpoint write failed — value not serializable", {
           key: fullKey, dagId, runId, nodeId: nodeId as string, error: message,
         });
+        // DELIBERATELY generic, and deliberately NOT `message`. `run-node.ts`
+        // turns whatever is thrown here into the DAG-visible
+        // `checkpoint-write-failed` via `safeErrorMessage`, so this string
+        // crosses the disclosure boundary into API responses. The actionable
+        // detail is emitted server-side instead, by the `report()` call above
+        // with full structured context. See the sibling throws below and
+        // `node-context-factory.test.ts` ("throws no key or driver detail").
         throw new Error("Checkpoint value is not serializable");
       }
       let setResult: Awaited<ReturnType<RedisPort["set"]>>;
@@ -311,6 +318,10 @@ export const createNamespacedCheckpointWriter = (
           nodeId: nodeId as string,
           error: message,
         });
+        // Generic for the same reason as the serialization throw above: the raw
+        // driver text (`message`) is logged by `writeFailures.failed` and must
+        // not reach the DAG-visible error, which is rendered into HTTP
+        // responses. Triage reads the structured log line, not this string.
         throw new Error("Checkpoint persistence failed");
       }
       if (!setResult.ok) {
@@ -321,6 +332,9 @@ export const createNamespacedCheckpointWriter = (
           nodeId: nodeId as string,
           error: formatHostError(setResult.error),
         });
+        // `formatHostError(setResult.error)` carries the full checkpoint key
+        // (tenant/dag/run/node) and raw driver text — logged above, never
+        // thrown. Pinned by `node-context-factory.test.ts`.
         throw new Error("Checkpoint persistence failed");
       }
       writeFailures.succeeded();

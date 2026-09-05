@@ -1,8 +1,11 @@
 // Test fixture factories for DagMachineContextPersisted and its slice types.
 //
 // These factories let tests construct focused slices without assembling
-// the full 13-field context object. Each factory provides sensible defaults
-// that can be overridden via partial arguments.
+// the full 17-field context object — DagTopology (4) + DagRetryState (4) +
+// DagHumanGateConfig (2) + DagRoutingState (2) plus DagMachineContextPersisted's
+// own 5 (outputs, initialInput, priorWitnesses, freshnessCompletedNodeIds,
+// freshnessExecutionEpoch). Each factory provides sensible defaults that can be
+// overridden via partial arguments.
 //
 // Usage:
 //   import { testContext, testTopology, testRetryState } from "./_context-factories.js";
@@ -137,7 +140,7 @@ export const testRuntimeContext = (
  * A minimal, fully-null `NodeContext`: no LLM, no cache, no prompts, no clock,
  * a no-op observer/tracer and a silent logger.
  *
- * The same 11-field literal was written out in seven test files, differing only
+ * The same 12-field literal was written out in seven test files, differing only
  * in the run/dag id strings. Every field added to `NodeContext` had to be
  * remembered in all seven — and a file that forgot one simply stopped compiling
  * for reasons unrelated to what it was testing. Callers override exactly the

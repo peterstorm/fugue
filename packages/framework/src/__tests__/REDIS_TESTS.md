@@ -42,6 +42,7 @@ starts it on `localhost:6379`, waits for a `PONG`, and exports `REDIS_URL` into
 Redis-gated suites rather than skipping them.
 
 The loop asserts `REDIS_URL` is set before running. That guard is the point: the
-gating is `describe.skipIf`, which reports a *pass* when it skips, so a Redis that
-failed to start would otherwise turn the suites that prove concurrent spend cannot
-double-count into a silent no-op on the merge gate.
+gating is a module-load `const describeRedis = hasRedis ? describe : describe.skip`,
+and a skipped suite reports a *pass*, so a Redis that failed to start would
+otherwise turn the suites that prove concurrent spend cannot double-count into a
+silent no-op on the merge gate.

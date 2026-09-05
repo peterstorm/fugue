@@ -28,12 +28,25 @@ export type CeilingHeadroom =
       /** Non-negative monetary headroom; never interchangeable with raw USD. */
       readonly amount: MicroUsd;
     }
+  /**
+   * A model in use has no price-table entry, so no honest headroom figure
+   * exists. Mirrors `Breach`'s `unpriced` member deliberately: headroom and
+   * breach must agree about when a number is unknowable, or a caller could read
+   * "available" from one and "unpriced" from the other for the same spend.
+   */
   | {
       readonly kind: "unpriced";
       readonly ceiling: UsdCeiling;
       readonly models: UnpricedModels;
+      /** Headroom against the calls that WERE priced — a genuine lower bound. */
       readonly observedAtLeast: MicroUsd;
     }
+  /**
+   * The provider did not report trustworthy usage, so the consumed amount — and
+   * therefore the headroom — is a lower bound only. Same mirroring rationale as
+   * `unpriced` above; there is one member per ceiling unit because the bound is
+   * denominated in that unit.
+   */
   | {
       readonly kind: "unknown-usage";
       readonly ceiling: TokensCeiling;

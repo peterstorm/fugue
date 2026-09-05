@@ -142,9 +142,13 @@ export const costUsd = (
  * One settled call, measured on every axis a budget can limit — the bridge from
  * "how many tokens" to "what did it cost".
  *
- * This is the ONLY producer of budget-facing cost, so the cache multipliers
- * above reach the budget through exactly one path and cannot be reimplemented
- * slightly differently by a second caller.
+ * This is the only producer of PRICED budget-facing cost, so the cache
+ * multipliers above reach the budget through exactly one path and cannot be
+ * reimplemented slightly differently by a second caller. Its sibling
+ * `spendOfUnknownCall` is the other producer feeding the same accumulator
+ * (`run-spend-authority.ts`), but it never prices: it exists for the calls whose
+ * reported usage cannot be trusted, and returns a fail-closed unknown-usage
+ * spend rather than running this arithmetic on untrustworthy inputs.
  *
  * Unlike `computeCostUsd`, an unknown model does NOT log and does NOT return
  * zero. It returns an `unpriced` spend, which carries the model name to
@@ -189,8 +193,10 @@ export const spendOfUnknownCall = (model: string): Spend =>
   );
 
 /**
- * Cost of one call (or of an accumulated run) in USD, warning once when the
- * model has no price-table entry.
+ * Cost of one call (or of an accumulated run) in USD, warning when the model has
+ * no price-table entry. The warning is per call, not per model — there is no
+ * de-dup tracking here, which is exactly why the per-span path below does not
+ * use this function.
  *
  * Per-span enrichment uses `costUsd(costRatesFor(model), …)` instead: it runs on
  * every call, and an unpriced model would otherwise emit a log line per span.

@@ -39,12 +39,18 @@ export { toJson, fromJson, tryFromJson } from "./state-machine/serialize.js";
 // DAG runtime — public surface only
 //
 // `runDag` and `runDagAsWorkerJob` are the sanctioned public entries.
+// `compileDagToMachine`, `buildDagExecutor`, and `dagTransition` live on the
+// `@fuguejs/framework/advanced` subpath for callers building custom machines on
+// the kernel — see `./advanced.ts`. Keeping them off the main barrel signals
+// that reaching for them is a deliberate choice, not an accident from a
+// wildcard import.
+//
 // `runDagStateful` (the back-compat flat `Result<O>` entry for block-until-
-// decided callers, per ADR-0060 §4), `compileDagToMachine`, `buildDagExecutor`,
-// and `dagTransition` live on the `@fuguejs/framework/advanced` subpath
-// for callers building custom machines on the kernel — see `./advanced.ts`.
-// Keeping them off the main barrel signals that reaching for them is a
-// deliberate choice, not an accident from a wildcard import.
+// decided callers, per ADR-0060 §4) is on NEITHER barrel — not this one and not
+// `advanced`. It is reachable only by direct file import
+// (`dag-runtime/run-dag-stateful.js`) and through the `executor/run-dag.ts`
+// wrapper; see `dag-runtime/index.ts` for why. Suspendable callers want
+// `runDagStatefulOutcome` / `runResumableDagJob` instead.
 // ---------------------------------------------------------------------------
 export type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, HumanAction, HumanReviewOutcome, HumanGatePayload, DagTopology, DagRetryState, DagHumanGateConfig, DagRoutingState } from "./dag-runtime/types.js";
 // The synthetic node id the kernel attributes executor-level (non-node) crashes

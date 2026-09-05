@@ -14,8 +14,10 @@
  * `dag-runtime/run-dag-stateful.ts` (`snapshotOrigin`'s local closures),
  * `host/adapters/metered-llm.ts` (`snapshotDataObject`, `snapshotDataArray`,
  * `snapshotPricingModel`), and `host/adapters/run-spend-authority.ts`
- * (`ownDataValue`) — where a fix to the algorithm had five places to land and
- * nothing kept them in step. `run-node.ts`'s own comment claimed to be "ONE
+ * (`ownDataValue` for required fields, plus a raw descriptor walk for the
+ * optional `thinking` field — see `readOptionalOwnDataProperty` below, added in
+ * round 15 so that last copy could migrate too) — where a fix to the algorithm
+ * had five places to land and nothing kept them in step. `run-node.ts`'s own comment claimed to be "ONE
  * encoding of the getter/proxy defence", which held only inside that file.
  *
  * These functions report failure as STRUCTURED DATA, never as a rendered
@@ -52,18 +54,69 @@ export const isObjectLike = (value: unknown): value is object =>
   (typeof value === "object" && value !== null) || typeof value === "function";
 
 /**
- * Read one own DATA property. `undefined` means "not present as own data" — it
- * does NOT distinguish an absent key from an accessor, because no call site
- * treats those differently and collapsing them keeps the rule one line.
+ * Is this descriptor a DATA descriptor (as opposed to an accessor)?
+ *
+ * ONE spelling for the check this module exists to centralise. `Object.hasOwn`
+ * rather than `"value" in descriptor`: the `in` form consults the prototype
+ * chain, and a module whose entire thesis is "never trust the prototype chain"
+ * should not make an exception for the descriptor objects it reasons about.
+ */
+const isDataDescriptor = (
+  descriptor: PropertyDescriptor | undefined,
+): descriptor is PropertyDescriptor & { readonly value: unknown } =>
+  descriptor !== undefined && Object.hasOwn(descriptor, "value");
+
+/**
+ * Read one REQUIRED own DATA property. `undefined` means "not present as own
+ * data" and deliberately collapses two distinct cases — key absent, and key
+ * present but an accessor/inherited — because for a required field both are the
+ * same verdict: reject.
+ *
+ * That collapse is WRONG for an OPTIONAL field, where absent means "fine" and
+ * an accessor means "malformed, reject". Reach for `readOptionalOwnDataProperty`
+ * there; using this one would silently treat a hostile accessor as absent.
  */
 export const readOwnDataProperty = (
   value: object,
   key: PropertyKey,
 ): { readonly value: unknown } | undefined => {
   const descriptor = Object.getOwnPropertyDescriptor(value, key);
-  return descriptor !== undefined && Object.hasOwn(descriptor, "value")
-    ? { value: descriptor.value }
-    : undefined;
+  return isDataDescriptor(descriptor) ? { value: descriptor.value } : undefined;
+};
+
+/**
+ * How an OPTIONAL own-data field was present, keeping the distinction
+ * `readOwnDataProperty` collapses.
+ *
+ * The three cases are genuinely different verdicts for an optional field:
+ * `absent` is valid (the field is optional), `accessor` is malformed (an author
+ * who supplies the key must supply it as data, or a getter could return a
+ * different answer after validation), and `data` carries the value to use.
+ */
+export type OptionalOwnData =
+  /** No own property with this key at all — valid for an optional field. */
+  | { readonly kind: "absent" }
+  /** Present, but an accessor or otherwise not an own data property. */
+  | { readonly kind: "accessor" }
+  /** Present as an own data property. */
+  | { readonly kind: "data"; readonly value: unknown };
+
+/**
+ * Read one OPTIONAL own DATA property, preserving absent-vs-accessor.
+ *
+ * This is the primitive `run-spend-authority.ts` hand-rolled for the optional
+ * `thinking` field — the one call site that genuinely needs the distinction
+ * `readOwnDataProperty` throws away.
+ */
+export const readOptionalOwnDataProperty = (
+  value: object,
+  key: PropertyKey,
+): OptionalOwnData => {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (descriptor === undefined) return { kind: "absent" };
+  return isDataDescriptor(descriptor)
+    ? { kind: "data", value: descriptor.value }
+    : { kind: "accessor" };
 };
 
 /** `readOwnDataProperty` as a `Result`, for callers already on that rail. */
@@ -112,7 +165,7 @@ export const snapshotOwnDataObject = (
   const snapshot: Record<PropertyKey, unknown> = Object.create(null);
   for (const key of Reflect.ownKeys(descriptors.value)) {
     const descriptor = descriptors.value[key];
-    if (descriptor === undefined || !("value" in descriptor)) {
+    if (!isDataDescriptor(descriptor)) {
       return err({ kind: "not-own-data", key });
     }
     Object.defineProperty(snapshot, key, {
@@ -153,7 +206,7 @@ export const snapshotOwnDataArray = (
   if (!descriptors.ok) return descriptors;
 
   const lengthDescriptor = descriptors.value.length;
-  if (lengthDescriptor === undefined || !("value" in lengthDescriptor)) {
+  if (!isDataDescriptor(lengthDescriptor)) {
     return err({ kind: "bad-length" });
   }
   const length: unknown = lengthDescriptor.value;
@@ -173,7 +226,7 @@ export const snapshotOwnDataArray = (
   const snapshot: unknown[] = [];
   for (let index = 0; index < length; index += 1) {
     const descriptor = descriptors.value[String(index)];
-    if (descriptor === undefined || !("value" in descriptor)) {
+    if (!isDataDescriptor(descriptor)) {
       return err({ kind: "not-own-data", key: String(index) });
     }
     snapshot.push(descriptor.value);

@@ -20,6 +20,7 @@ import { createTransformNode } from "../nodes/transform.js";
 import type { TraceEvent } from "../state-machine/types.js";
 import type { DagPhase, DagEvent } from "../dag-runtime/types.js";
 import { N, R, D } from "./_id-helpers.js";
+import { testNodeContext } from "./_context-factories.js";
 
 // ---------------------------------------------------------------------------
 // Deterministic PRNG — seeded linear congruential generator. Test failures
@@ -45,17 +46,12 @@ interface Recording {
   readonly entries: readonly { kind: "trace" | "observer"; idx: number; tag: string }[];
 }
 
-const mkCtx = (observer: RecordingObserver): NodeContext => ({
-  runId: R(`r-${Math.floor(Math.random() * 1e9)}`),
-  dagId: D("ontrace-ordering"),
-  observer,
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null,
-  cache: null,
-  prompts: null,
-  llm: null, http: null, clock: null, budget: null,
-  logger: { warn: () => {}, error: () => {} },
-});
+const mkCtx = (observer: RecordingObserver): NodeContext =>
+  testNodeContext({
+    runId: R(`r-${Math.floor(Math.random() * 1e9)}`),
+    dagId: D("ontrace-ordering"),
+    observer,
+  });
 
 const mkNode = (id: string, kind: "ok" | "fail-once" | "fail-always", state: { calls: Record<string, number> }): NodeDef<unknown, unknown> => {
   if (kind === "ok") {

@@ -1,27 +1,19 @@
 import { describe, test, expect } from "bun:test";
 import type { RunId, DagId } from "../types/ids.js";
+import type { NodeContext } from "../types/node.js";
+import type { Observer } from "../types/observer.js";
 import { createGuardrailNode } from "../../src/index.js";
 import type { GuardrailResult } from "../../src/index.js";
 import { z } from "zod";
 import { NoopObserver, RecordingObserver } from "../../src/observer/observer.js";
 import { N } from "./_id-helpers.js";
+import { testNodeContext } from "./_context-factories.js";
 
 const InputSchema = z.object({ value: z.number() });
 const OutputSchema: z.ZodType<GuardrailResult<number>> = z.any();
 
-const makeCtx = (observer = new NoopObserver()) => ({
-  runId: "test" as RunId,
-  dagId: "test" as DagId,
-  observer,
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null,
-  cache: null,
-  logger: { warn: () => {}, error: () => {} },
-  prompts: null,
-  llm: null, http: null,
-  clock: null,
-  budget: null,
-});
+const makeCtx = (observer: Observer = new NoopObserver()): NodeContext =>
+  testNodeContext({ runId: "test" as RunId, dagId: "test" as DagId, observer });
 
 describe("createGuardrailNode", () => {
   test("passes data through when validation succeeds", async () => {

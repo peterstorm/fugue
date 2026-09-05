@@ -238,6 +238,70 @@ describe("run-dag handler", () => {
     expect(executeCalls).toBe(0);
   });
 
+  // ── The two HITL fork branches with no coverage before round 15 ────────────
+  // `defaultDeps()` leaves `hitl` undefined, which is exactly the
+  // not-configured host: without this test, inverting or dropping the guard
+  // would silently let a humanReview DAG fall through to the SYNCHRONOUS path,
+  // where it can park for a human while holding a request open.
+  it("refuses a humanReview DAG with 501 when the host has no HITL wired", async () => {
+    let executeCalls = 0;
+    const deps = defaultDeps({
+      executeDag: (async () => {
+        executeCalls += 1;
+        return ok({ unreachable: true });
+      }) as RunDagDeps["executeDag"],
+    });
+    expect(deps.hitl).toBeUndefined();
+
+    const res = await post(
+      createTestApp(deps, makeReadyState(freeze([makeHitlDag("hitl-unwired")], sha, Date.now()))),
+      "hitl-unwired",
+      { query: "hi" },
+    );
+    const body = await res.json();
+
+    expect(res.status).toBe(501);
+    expect(body.ok).toBe(false);
+    expect(body.error).toBe("hitl-not-configured");
+    // The refusal must be terminal, not a fallback: the synchronous executor
+    // is the thing this branch exists to keep a HITL DAG away from.
+    expect(executeCalls).toBe(0);
+  });
+
+  it("enqueues a humanReview DAG and answers 202 queued with the engine's runId", async () => {
+    let executeCalls = 0;
+    let startRunCalls = 0;
+    const hitl = {
+      async startRun() {
+        startRunCalls += 1;
+        return ok({ runId: runId("hitl-queued-run") });
+      },
+    } as unknown as HitlRunService;
+    const deps = defaultDeps({
+      hitl,
+      executeDag: (async () => {
+        executeCalls += 1;
+        return ok({ unreachable: true });
+      }) as RunDagDeps["executeDag"],
+    });
+
+    const res = await post(
+      createTestApp(deps, makeReadyState(freeze([makeHitlDag("hitl-queued")], sha, Date.now()))),
+      "hitl-queued",
+      { query: "hi" },
+    );
+    const body = await res.json();
+
+    expect(res.status).toBe(202);
+    expect(body.ok).toBe(true);
+    expect(body.data).toEqual({ runId: "hitl-queued-run", status: "queued" });
+    // The runId is mirrored at the top level too — clients poll GET /runs/:id
+    // with it, so both spellings are part of the contract.
+    expect(body.runId).toBe("hitl-queued-run");
+    expect(startRunCalls).toBe(1);
+    expect(executeCalls).toBe(0);
+  });
+
   // ── 5xx disclosure discipline on the HITL path (round-13 C2) ───────────────
   // This handler renders HITL `startRun` failures itself — they never reach the
   // error-handler middleware that owns the 4xx/5xx discipline. A 5xx HostError's

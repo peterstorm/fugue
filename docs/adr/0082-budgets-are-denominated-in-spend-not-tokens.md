@@ -48,7 +48,7 @@ A third: `PRICE_TABLE` is hand-maintained, and `computeCostUsd` returns **0** fo
 
 ## Decision
 
-**Spend, not tokens.** The meter accumulates a `Spend` — `{ tokens, calls, usd }` — and `llm/cost.ts` gains `spendOfCall`, the single producer of budget-facing cost. It reuses the same cache-weighted arithmetic ADR-0081 established, so the multipliers reach the budget through exactly one path.
+**Spend, not tokens.** The meter accumulates a `Spend` — `{ tokens, calls, usd, usage }`, where `usage: UsageKnowledge` records whether the provider's reported usage was trustworthy (the axis the "Unknown cost is a union member" decision below rests on) — and `llm/cost.ts` gains `spendOfCall`, the single producer of *priced* budget-facing cost. It reuses the same cache-weighted arithmetic ADR-0081 established, so the multipliers reach the budget through exactly one path.
 
 **Money is a bounded exact integer.** `MicroUsd` (1e-6 USD, branded) is what ceilings compare against; the raw USD float stays display-only. Every in-memory value is a non-negative safe integer. Every positive per-call cost rounds upward at the float→integer boundary, so repeated sub-micro-dollar calls cannot disappear from the USD total. Positive overflow, including infinity, saturates at `Number.MAX_SAFE_INTEGER`, which is fail-closed because every valid monetary ceiling is then reached. Within that domain, settlement order cannot introduce float drift or operator disagreement.
 
@@ -87,7 +87,7 @@ The basis is correct **by construction**: the admission gate evaluates settled s
 - `llm-budget-exceeded` changed shape. It is a control-plane error with a wire schema, so the persisted parser changed with it; the HTTP mapping (429 + `Retry-After`) is untouched.
 - The two accounting paths in `metered-llm` are now one. They were duplicated when the shared sequence was four lines; each must now additionally price the response and evaluate several ceilings, which is where two copies would have diverged.
 - **At this decision's adoption, the budget was not durable.** A resumable run built a fresh NodeContext per execution slice, so parking and resuming restarted the accumulator at zero. ADR-0083 subsequently introduced the Spend Ledger: current slices hydrate cumulative spend and append every settled call through the selected ledger adapter.
-- Also fixed in passing, and unrelated to budgets: `llm.metered` spread the whole `LlmResponse` onto an info-level log line, so model output, `thinking`, and `rawText` were being logged with none of the redaction the span path applies. `pickUsage` narrows a response to exactly its four token figures. See `pickUsage`'s doc comment for why it lists fields where the surrounding convention spreads them.
+- Also fixed in passing, and unrelated to budgets: `llm.metered` spread the whole `LlmResponse` onto an info-level log line, so model output, `thinking`, and `rawText` were being logged with none of the redaction the span path applies. The fix narrows a response to exactly its four token figures before logging. It landed as `pickUsage`; a later hardening commit superseded that with `tokenUsageOf`, which is what the code calls today.
 
 ## Related
 

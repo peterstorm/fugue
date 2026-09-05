@@ -21,6 +21,7 @@ import {
   isObjectLike,
   ownDataValue,
   ownDescriptors,
+  readOptionalOwnDataProperty,
   readOwnDataProperty,
   snapshotOwnDataArray,
   snapshotOwnDataObject,
@@ -327,5 +328,73 @@ describe("snapshotOwnDataArray", () => {
 
     expect(result.ok).toBe(true);
     if (result.ok) expect([...result.value]).toEqual([1, 2]);
+  });
+});
+
+describe("readOptionalOwnDataProperty", () => {
+  // The reason this primitive exists: `readOwnDataProperty` answers `undefined`
+  // for BOTH "absent" and "accessor", which is the right verdict for a required
+  // field and the wrong one for an optional field, where absent is valid and an
+  // accessor must be refused. `run-spend-authority.ts`'s optional `thinking`
+  // field is the call site that needs the split.
+  it("reports an absent key as absent", () => {
+    expect(readOptionalOwnDataProperty({}, "thinking")).toEqual({ kind: "absent" });
+  });
+
+  it("reports an own data property as data, carrying the value", () => {
+    expect(readOptionalOwnDataProperty({ thinking: "why" }, "thinking")).toEqual({
+      kind: "data",
+      value: "why",
+    });
+  });
+
+  it("reports an own data property holding undefined as data, NOT absent", () => {
+    // The distinction matters: `{ thinking: undefined }` is a key the author
+    // supplied as data, and collapsing it to `absent` would be the same
+    // information loss this primitive exists to avoid.
+    expect(readOptionalOwnDataProperty({ thinking: undefined }, "thinking")).toEqual({
+      kind: "data",
+      value: undefined,
+    });
+  });
+
+  it("reports a getter-backed key as accessor, never as absent", () => {
+    const hostile = Object.defineProperty({}, "thinking", {
+      get: () => "attacker-controlled",
+      configurable: true,
+      enumerable: true,
+    });
+    expect(readOptionalOwnDataProperty(hostile, "thinking")).toEqual({ kind: "accessor" });
+  });
+
+  it("reports a setter-only key as accessor", () => {
+    const hostile = Object.defineProperty({}, "thinking", {
+      set: () => {},
+      configurable: true,
+      enumerable: true,
+    });
+    expect(readOptionalOwnDataProperty(hostile, "thinking")).toEqual({ kind: "accessor" });
+  });
+
+  it("reports an inherited data property as absent — only OWN properties count", () => {
+    const inherited = Object.create({ thinking: "from-prototype" }) as object;
+    expect(readOptionalOwnDataProperty(inherited, "thinking")).toEqual({ kind: "absent" });
+  });
+
+  it("agrees with readOwnDataProperty on every value, modulo the split it preserves", () => {
+    fc.assert(
+      fc.property(fc.anything(), (value) => {
+        const holder = { field: value };
+        const required = readOwnDataProperty(holder, "field");
+        const optional = readOptionalOwnDataProperty(holder, "field");
+        // For a plain data property the two agree on the value...
+        expect(optional).toEqual({ kind: "data", value });
+        expect(required).toEqual({ value });
+        // ...and `absent`/`accessor` are exactly the cases the required form
+        // collapses to `undefined`.
+        expect(readOwnDataProperty({}, "field")).toBeUndefined();
+        expect(readOptionalOwnDataProperty({}, "field")).toEqual({ kind: "absent" });
+      }),
+    );
   });
 });

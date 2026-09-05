@@ -74,11 +74,6 @@ export interface WaveConfig {
   readonly minting?: MintingAuthority;
 }
 
-/**
- * Per-wave-invocation context assembled at the top of `executeWave`.
- * Concentrates everything the post-dispatch pipeline (freshness + routing)
- * needs into one object, eliminating 10-param / 7-param positional calls.
- */
 import type { PostWaveContext } from "./post-wave-context.js";
 
 interface WaveResult {
@@ -95,7 +90,9 @@ interface WaveResult {
  * 1. Collect outputs and detect failures
  * 2. Emit freshness witness events for reads/writes nodes
  * 3. Compute routing decisions for conditional out-edges
- * 4. Return wave-done (success) or node-failed (first failure)
+ * 4. Return wave-done (success) or node-failed (first failure in WAVE ORDER —
+ *    nodes run concurrently under Promise.all, so "first" is the earliest
+ *    position in the wave array, not the earliest to fail in wall-clock time)
  *
  * Returns both the event AND the per-node outcomes so the caller can fold
  * them into run-level meta without a callback.

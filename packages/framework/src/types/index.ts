@@ -106,10 +106,11 @@ export {
 // boundary. Exported because the host's adapters parse the same untrusted
 // request/response objects the framework does and previously each carried
 // their own copy of the algorithm.
-export type { OwnDataFailure } from "./own-data.js";
+export type { OwnDataFailure, OptionalOwnData } from "./own-data.js";
 export {
   isObjectLike,
   readOwnDataProperty,
+  readOptionalOwnDataProperty,
   ownDataValue,
   ownDescriptors,
   hasExactOwnKeys,

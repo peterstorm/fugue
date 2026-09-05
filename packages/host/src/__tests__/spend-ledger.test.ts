@@ -212,6 +212,11 @@ for (const [name, build] of BACKENDS) {
       );
     });
 
+    // NOTE on what this proves per backend: `Promise.all` only interleaves where
+    // the backend actually yields. The in-memory and fake-Redis backends apply
+    // their writes synchronously, so for those two this is a "no delta is
+    // dropped by the fold" check rather than a race test. The real interleaving
+    // proof for the Redis path is the dedicated interleaving fake below.
     it("concurrent appends preserve every delta", async () => {
       const ledger = build();
       const deltas = Array.from({ length: 12 }, (_, index) => pricedCall(index + 1, micros(index + 2)));

@@ -19,6 +19,7 @@ import type { FrameworkError } from "../types/errors.js";
 import type { HumanAction } from "../dag-runtime/types.js";
 import { ok, err } from "../types/result.js";
 import { N } from "./_id-helpers.js";
+import { RecordingObserver } from "../observer/observer.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -473,7 +474,7 @@ describe("runDagStateful — HITL approve-with-edit", () => {
   // Wave 2 §2.5: a reviewer's edited output must conform to the node's
   // outputSchema. Without this guard, a mis-typed edit silently propagates to
   // downstream nodes.
-  it("approve-with-edit with schema-violating output fails the run with kind=validation", async () => {
+  it("approve-with-edit with schema-violating output fails the run (validation, retry-exhausted, or node-crash)", async () => {
     const dag = makeDag({
       nodes: [
         makeNode("a", {
@@ -726,7 +727,7 @@ describe("runDagStateful — abort", () => {
     }
   });
 
-  it("aborting mid-run cancels the in-flight node and resolves Err(aborted)", async () => {
+  it("aborting mid-run: the node observes ctx.signal and cooperatively resolves Err(aborted)", async () => {
     const controller = new AbortController();
     let observedSignalAborted = false;
     const slowNode: NodeDef<unknown, unknown, FrameworkError> = {
@@ -1075,7 +1076,6 @@ describe("runDagStateful — cycle detection", () => {
   });
 
   it("cyclic DAG emits balanced run-start/run-end observer events", async () => {
-    const { RecordingObserver } = await import("../observer/observer.js");
     const observer = new RecordingObserver();
     const ctx = { ...makeCtx(), observer };
 

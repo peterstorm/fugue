@@ -8,9 +8,10 @@ import { z } from "zod";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
 import { defineDag } from "../executor/define-dag.js";
 import type { NodeDef, NodeContext } from "../types/node.js";
-import { NoopObserver, RecordingObserver } from "../observer/observer.js";
+import { RecordingObserver } from "../observer/observer.js";
 import { ok } from "../types/result.js";
 import { N } from "./_id-helpers.js";
+import { testNodeContext } from "./_context-factories.js";
 
 const noop = async () => ok(undefined as unknown);
 
@@ -35,17 +36,12 @@ const makeNode = (
   ...overrides,
 });
 
-const ctx = (observer?: RecordingObserver): NodeContext => ({
-  runId: "r" as RunId,
-  dagId: "d" as DagId,
-  observer: observer ?? new NoopObserver(),
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null,
-  cache: null,
-  prompts: null,
-  llm: null, http: null, clock: null, budget: null,
-  logger: { warn: () => {}, error: () => {} },
-});
+const ctx = (observer?: RecordingObserver): NodeContext =>
+  testNodeContext({
+    runId: "r" as RunId,
+    dagId: "d" as DagId,
+    ...(observer ? { observer } : {}),
+  });
 
 const twoWayRoutingDag = (routerOutput: unknown) => defineDag({
   id: "two-way",

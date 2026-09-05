@@ -160,7 +160,7 @@ export type CapabilityBroker = {
    * capability the broker provides is NOT required to be present on the wired
    * NodeContext — it is minted per node when the node actually runs, so the
    * run-start check must not fail it as `missing-capability`. A capability the
-   * broker does NOT provide (e.g. the static `http`/`db` clients, or `llm`) is
+   * broker does NOT provide (e.g. the static `http` client, or `llm`) is
    * still validated against the base context as before.
    *
    * Optional and defaulting to "provides nothing": the pass-through broker (and

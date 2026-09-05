@@ -173,10 +173,7 @@ describe("createFileJournal — closed typed throwing shell", () => {
     const revoked = Proxy.revocable({}, {});
     revoked.revoke();
     const journal = createFileJournal(dir, { now: () => { throw revoked.proxy; } });
-    const failure = await journal.appendEvent({ type: "X" }, "clock-key").then(
-      () => null,
-      (error: unknown) => error,
-    );
+    const failure = await captureRejection(journal.appendEvent({ type: "X" }, "clock-key"));
     const typed = asCacheError(failure, "appendEvent");
     expect(typed.message).toContain(dir);
     expect(typed.message).toMatch(/unprintable|Proxy|revoked/i);
@@ -461,12 +458,9 @@ describe("createFileJournal — checkpoint/progress projections", () => {
   it("writeCheckpoint rejects a forged/raw runtime input with typed operation/path", async () => {
     const dir = tempDir();
     const journal = createFileJournal(dir);
-    const failure = await journal.writeCheckpoint(
+    const failure = await captureRejection(journal.writeCheckpoint(
       { json: '{"schemaVersion":1,"data":{}}', data: {} } as never,
-    ).then(
-      () => null,
-      (error: unknown) => error,
-    );
+    ));
     const typed = asCacheError(failure, "writeCheckpoint");
     expect(typed.message).toContain(join(dir, "checkpoint.json"));
     expect(journal.readCheckpoint()).toBeNull();
@@ -1100,14 +1094,8 @@ describe("createFileJournal.appendEvent — non-serializable events fail identic
     const journal = createFileJournal(dir);
     const symbolEvent = { a: 1, s: Symbol("x") };
 
-    const keyedError = await journal.appendEvent(symbolEvent, "k1").then(
-      () => null,
-      (e: unknown) => e,
-    );
-    const keylessError = await journal.appendEvent(symbolEvent).then(
-      () => null,
-      (e: unknown) => e,
-    );
+    const keyedError = await captureRejection(journal.appendEvent(symbolEvent, "k1"));
+    const keylessError = await captureRejection(journal.appendEvent(symbolEvent));
 
     const keyedTyped = asCacheError(keyedError, "appendEvent");
     const keylessTyped = asCacheError(keylessError, "appendEvent");
@@ -1146,10 +1134,7 @@ describe("createFileJournal.appendEvent — lock release outcomes", () => {
       },
     });
 
-    const failure = await journal.appendEvent({ type: "COMMITTED" }, "release-fails").then(
-      () => null,
-      (error: unknown) => error,
-    );
+    const failure = await captureRejection(journal.appendEvent({ type: "COMMITTED" }, "release-fails"));
 
     const typed = asCacheError(failure, "appendEvent");
     expect(typed.message).toContain("releaseFileLock");
@@ -1184,10 +1169,10 @@ describe("createFileJournal.appendEvent — lock release outcomes", () => {
       },
     });
 
-    const failure = await journal.appendEvent(
+    const failure = await captureRejection(journal.appendEvent(
       { type: "MUST-NOT-COMMIT", unsupported: Symbol("x") },
       "body-and-release-fail",
-    ).then(() => null, (error: unknown) => error);
+    ));
 
     const typed = asCacheError(failure, "appendEvent");
     expect(typed.message).toContain("FR-009");
@@ -1208,9 +1193,9 @@ describe("createFileJournal.appendEvent — lock release outcomes", () => {
     // Force a failure INSIDE the locked section: the symbol-bearing event
     // passes the FR-015 gate, the lock is acquired, and only then does the
     // serialization rejection through the closed typed shell.
-    const failed = await journal
-      .appendEvent({ a: 1, s: Symbol("x") }, "boom")
-      .then(() => null, (e: unknown) => e);
+    const failed = await captureRejection(
+      journal.appendEvent({ a: 1, s: Symbol("x") }, "boom"),
+    );
     expect(asCacheError(failed, "appendEvent").message).toContain("FR-009");
 
     // If the finally-path release had not run, this GOOD append would spin
@@ -1451,13 +1436,10 @@ describe("createFileJournal.appendEvent — FR-015 dedupKey boundary", () => {
     ];
 
     for (const bad of malformed) {
-      const failure = await journal.appendEvent(
+      const failure = await captureRejection(journal.appendEvent(
         { type: "X" },
         bad as string,
-      ).then(
-        () => null,
-        (error: unknown) => error,
-      );
+      ));
       const typed = asCacheError(failure, "appendEvent");
       expect(typed.message).toContain("FR-015");
       expect(typed.message).toContain(dir);
@@ -1502,10 +1484,7 @@ describe("createFileJournal.appendEvent — FR-015 dedupKey boundary", () => {
 
     for (const bad of [accessorObject, hostileProxy, revoked.proxy]) {
       const hostileDedupKey: unknown = bad;
-      const failure = await journal.appendEvent({ type: "X" }, hostileDedupKey as string).then(
-        () => null,
-        (error: unknown) => error,
-      );
+      const failure = await captureRejection(journal.appendEvent({ type: "X" }, hostileDedupKey as string));
       const typed = asCacheError(failure, "appendEvent");
       expect(typed.message).toContain("runtime type object");
       expect(typed.message).toContain("FR-015");
@@ -1535,13 +1514,10 @@ describe("createFileJournal.appendEvent — FR-015 dedupKey boundary", () => {
       },
     };
 
-    const failure = await journal.appendEvent(
+    const failure = await captureRejection(journal.appendEvent(
       { type: "MUST-NOT-LAND" },
       supplied.dedupKey as string,
-    ).then(
-      () => null,
-      (error: unknown) => error,
-    );
+    ));
     expect(asCacheError(failure, "appendEvent").message).toContain("runtime type null");
     expect(reads).toBe(1);
     expect(readdirSync(dir).sort()).toEqual(beforeNames);
@@ -1561,10 +1537,7 @@ describe("cache-error failure-class classification (permanent vs transient)", ()
     // Throwing clock — the injected dependency fails identically on every retry.
     const dir = tempDir();
     const journal = createFileJournal(dir, { now: () => { throw new Error("clock boom"); } });
-    const thrown = await journal.appendEvent({ type: "X" }, "clock-throws").then(
-      () => null,
-      (error: unknown) => error,
-    );
+    const thrown = await captureRejection(journal.appendEvent({ type: "X" }, "clock-throws"));
     const thrownTyped = asCacheError(thrown as FrameworkError, "appendEvent");
     expect(thrownTyped.failureClass).toBe("permanent");
     expect(retriabilityOf(thrownTyped)).toBe("non-retriable");
@@ -1572,10 +1545,7 @@ describe("cache-error failure-class classification (permanent vs transient)", ()
     // Non-finite timestamp — the codec-constructed invariant rejection.
     const dir2 = tempDir();
     const journal2 = createFileJournal(dir2, { now: () => Number.NaN });
-    const nonFinite = await journal2.appendEvent({ type: "X" }, "clock-nan").then(
-      () => null,
-      (error: unknown) => error,
-    );
+    const nonFinite = await captureRejection(journal2.appendEvent({ type: "X" }, "clock-nan"));
     const nonFiniteTyped = asCacheError(nonFinite as FrameworkError, "appendEvent");
     expect(nonFiniteTyped.failureClass).toBe("permanent");
     expect(retriabilityOf(nonFiniteTyped)).toBe("non-retriable");
@@ -1587,10 +1557,7 @@ describe("cache-error failure-class classification (permanent vs transient)", ()
     const journal = createFileJournal(dir);
 
     // FR-015: "a|b" violates ADR-0076 keyed/keyless digest disjointness.
-    const appendFailure = await journal.appendEvent({ type: "X" }, "a|b").then(
-      () => null,
-      (error: unknown) => error,
-    );
+    const appendFailure = await captureRejection(journal.appendEvent({ type: "X" }, "a|b"));
     const appended = asCacheError(appendFailure as FrameworkError, "appendEvent");
     expect(appended.failureClass).toBe("permanent");
     expect(retriabilityOf(appended)).toBe("non-retriable");
@@ -1611,10 +1578,7 @@ describe("cache-error failure-class classification (permanent vs transient)", ()
     const eventsDir = join(dir, EVENTS_DIR);
     chmodSync(eventsDir, 0o000); // lock acquire fails EACCES before any write
     try {
-      const failure = await journal.appendEvent({ type: "B" }, "k1").then(
-        () => null,
-        (error: unknown) => error,
-      );
+      const failure = await captureRejection(journal.appendEvent({ type: "B" }, "k1"));
       const typed = asCacheError(failure as FrameworkError, "appendEvent");
       expect(typed.failureClass).toBeUndefined();
       expect(retriabilityOf(typed)).toBe("retriable");

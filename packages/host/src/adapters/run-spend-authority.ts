@@ -39,6 +39,7 @@ import {
   usageOfError,
   isObjectLike,
   readOwnDataProperty,
+  readOptionalOwnDataProperty,
 } from "@fuguejs/framework";
 import type { LogPort, SpendLedgerPort } from "../ports.js";
 import { formatHostError } from "../domain/host-error.js";
@@ -193,11 +194,16 @@ const settledLlmResult = <O>(
       if (!rawText.ok || typeof rawText.value !== "string") {
         return malformed("successful response rawText must be an own string data property");
       }
-      const thinkingDescriptor = Object.getOwnPropertyDescriptor(response, "thinking");
-      if (thinkingDescriptor !== undefined && !Object.hasOwn(thinkingDescriptor, "value")) {
+      // `thinking` is OPTIONAL, so the absent-vs-accessor distinction that
+      // `ownDataValue` collapses is load-bearing here: absent is valid, an
+      // accessor is malformed. `readOptionalOwnDataProperty` is the shared
+      // primitive for exactly that — this used to be a hand-rolled descriptor
+      // walk, the last un-migrated copy of the own-data defence.
+      const thinkingRead = readOptionalOwnDataProperty(response, "thinking");
+      if (thinkingRead.kind === "accessor") {
         return malformed("successful response thinking must be an own data property when present");
       }
-      const thinking = thinkingDescriptor?.value;
+      const thinking = thinkingRead.kind === "data" ? thinkingRead.value : undefined;
       if (thinking !== undefined && typeof thinking !== "string") {
         return malformed("successful response thinking must be a string when present");
       }

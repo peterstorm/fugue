@@ -7,6 +7,7 @@ import type { NodeContext } from "../types/node.js";
 import type { DagDef } from "../types/dag.js";
 import type { Observer } from "../observer/observer.js";
 import type { ObserverEvent } from "../types/events.js";
+import { testNodeContext } from "./_context-factories.js";
 
 /**
  * Wave 1.3 regression — `beginRunTelemetry` previously dispatched `run-start`
@@ -24,17 +25,8 @@ describe("run telemetry remains secondary to DAG execution", () => {
     __resetFrameworkLogger();
   });
 
-  const makeCtx = (observer: Observer): NodeContext => ({
-    runId: "run-1" as RunId,
-    dagId: "dag-1" as DagId,
-    observer,
-    tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-    judgeLlm: null,
-    cache: null,
-    prompts: null,
-    llm: null, http: null, clock: null, budget: null,
-    logger: { warn: () => {}, error: () => {} },
-  });
+  const makeCtx = (observer: Observer): NodeContext =>
+    testNodeContext({ runId: "run-1" as RunId, dagId: "dag-1" as DagId, observer });
 
   const dag = { id: "dag-1" } as unknown as DagDef;
 
