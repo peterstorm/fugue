@@ -5,6 +5,8 @@ import { remainingFor, snapshotSpend } from "../types/budget-capability.js";
 import { fixedBudgetCapability } from "../testing.js";
 import type { Ceiling } from "../types/budget.js";
 import type { MicroUsd, Spend, SpendInput } from "../types/spend.js";
+import type { Remaining } from "../types/budget-capability.js";
+import { NO_SPEND } from "../types/spend.js";
 import { makeSpend, unpricedModels } from "../types/spend.js";
 
 const spendOf = (input: SpendInput): Spend => makeSpend(input);
@@ -183,6 +185,87 @@ describe("remainingFor", () => {
 });
 
 describe("fixedBudgetCapability", () => {
+  it.each([
+    [
+      "tokens available",
+      { kind: "available", unit: "tokens", ceiling: { kind: "tokens", limit: 1000 }, amount: 400 },
+    ],
+    [
+      "calls available",
+      { kind: "available", unit: "calls", ceiling: { kind: "calls", limit: 5 }, amount: 2 },
+    ],
+    [
+      "usd available",
+      { kind: "available", unit: "usd", ceiling: { kind: "usd", limit: 900 as MicroUsd }, amount: 250 as MicroUsd },
+    ],
+    [
+      "unpriced",
+      {
+        kind: "unpriced",
+        ceiling: { kind: "usd", limit: 900 as MicroUsd },
+        models: modelsOf(["a-model", "z-model"]),
+        observedAtLeast: 120 as MicroUsd,
+      },
+    ],
+    [
+      "unknown-usage on the tokens axis",
+      { kind: "unknown-usage", ceiling: { kind: "tokens", limit: 1000 }, observedAtLeast: 30 },
+    ],
+    [
+      "unknown-usage on the usd axis",
+      { kind: "unknown-usage", ceiling: { kind: "usd", limit: 900 as MicroUsd }, observedAtLeast: 30 as MicroUsd },
+    ],
+  ] as const)(
+    "snapshots and isolates a budgeted %s headroom",
+    (_label, headroom) => {
+      // The fixture's whole job is handing a node a value it cannot use to
+      // reach back into the test's own state — and `snapshotHeadroom` has one
+      // branch per headroom member to do it. Only the default `unbudgeted`
+      // path was ever exercised, so a branch that forgot to copy the ceiling
+      // (or dropped the discriminant that keeps the tokens and usd arms apart,
+      // which the module's own comment flags as easy to de-correlate) would
+      // have quietly corrupted every node test built on this fixture.
+      const source: Remaining = { kind: "budgeted", basis: "projected", headroom: [headroom] };
+      const fake = fixedBudgetCapability(NO_SPEND, source);
+
+      const first = fake.remaining();
+      expect(first).toEqual(source);
+
+      // A fresh, deeply frozen value every read — never the caller's object.
+      const second = fake.remaining();
+      expect(first).not.toBe(second);
+      expect(first).toEqual(second);
+      if (first.kind !== "budgeted") throw new Error("expected budgeted");
+      expect(Object.isFrozen(first)).toBe(true);
+      expect(Object.isFrozen(first.headroom)).toBe(true);
+      expect(Object.isFrozen(first.headroom[0])).toBe(true);
+      expect(first.headroom[0]).not.toBe(headroom);
+      expect(Object.isFrozen(first.headroom[0]?.ceiling)).toBe(true);
+      expect(first.headroom[0]?.ceiling).not.toBe(headroom.ceiling);
+    },
+  );
+
+  it("keeps every headroom member of a multi-ceiling budget, in order", () => {
+    // The `.map(snapshotHeadroom)` has to be total: a budget declaring three
+    // axes must come back with three, not with the ones whose branch happened
+    // to be implemented.
+    const headroom = [
+      { kind: "available", unit: "tokens", ceiling: { kind: "tokens", limit: 10 }, amount: 4 },
+      { kind: "available", unit: "calls", ceiling: { kind: "calls", limit: 3 }, amount: 1 },
+      { kind: "unknown-usage", ceiling: { kind: "usd", limit: 5 as MicroUsd }, observedAtLeast: 2 as MicroUsd },
+    ] as const;
+    const fake = fixedBudgetCapability(NO_SPEND, {
+      kind: "budgeted",
+      basis: "projected",
+      headroom: [...headroom],
+    });
+
+    const snapshot = fake.remaining();
+    if (snapshot.kind !== "budgeted") throw new Error("expected budgeted");
+    expect(snapshot.headroom).toEqual([...headroom]);
+    expect(snapshot.headroom.map((h) => h.ceiling.kind)).toEqual(["tokens", "calls", "usd"]);
+  });
+
   it("provides deterministic fresh snapshots for node tests", () => {
     const fake = fixedBudgetCapability(spendOf({
       usage: "known",

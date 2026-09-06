@@ -564,7 +564,8 @@ export const validateDagShape = (
   return ok(validated);
 };
 
-// Re-export so test helpers building array-shape inputs can convert.
+// Exported so test helpers building array-shape inputs can convert. (The
+// re-exports live in `executor/validate-dag.ts` and `executor/index.ts`.)
 export const recordFromNodeArray = (
   nodes: readonly NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>[],
 ): NodesRecord => Object.fromEntries(nodes.map((node) => [node.id, node]));

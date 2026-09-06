@@ -464,12 +464,18 @@ export const runNodeShared = async (
     extra?: { readonly stack?: string },
   ): void => {
     // Fenced: `stamp()` runs `nowFn()` as an ARGUMENT, so a hostile clock throws
-    // before `emit`/`dispatchEvent` is entered. Two call sites below (checkpoint
-    // replay rejected, input validation failed) run BEFORE `withTracedNodeSpan`
-    // is entered, so its try/catch cannot contain them: the throw would escape
-    // `runNodeShared` into `executeWave`'s catch handler and cost that whole
-    // wave its already-completed siblings. The typed `Err` returned alongside
-    // each call is the authoritative outcome (`best-effort.ts`).
+    // before `emit`/`dispatchEvent` is entered. Three call sites below
+    // (checkpoint replay rejected, input assembly failed, input validation
+    // failed) run BEFORE `withTracedNodeSpan` is entered, so its try/catch
+    // cannot contain them: the throw would escape `runNodeShared` into
+    // `executeWave`'s per-node catch, which would classify this node's failure
+    // as a generic caught defect rather than the typed `Err` it actually is.
+    // The siblings are NOT at risk here — that catch returns a per-node result
+    // and `carriedOutputs` still carries their outputs (the wave-wide loss is
+    // the hazard guarded at `wave-execution.ts`'s outermost fence, where an
+    // escaping throw would reject `Promise.all` instead). The typed `Err`
+    // returned alongside each call is the authoritative outcome
+    // (`best-effort.ts`).
     bestEffort("runNodeShared", "node-error emission", () =>
       emit(ctx, {
         type: "node-error",
@@ -511,6 +517,10 @@ export const runNodeShared = async (
 
   const nodeInputResult = buildNodeInput(outputs, incoming, nodeId);
   if (!nodeInputResult.ok) {
+    // Same reason as the input-validation branch below: a missing required
+    // source is checkpoint corruption or a framework ordering bug, and without
+    // an event a buffered observer sees the node simply disappear.
+    emitNodeError(`input assembly failed: ${messageOf(nodeInputResult.error)}`, nodeInputResult.error);
     return { result: nodeInputResult, outcome: EMPTY_OUTCOME };
   }
   const nodeInput = nodeInputResult.value;

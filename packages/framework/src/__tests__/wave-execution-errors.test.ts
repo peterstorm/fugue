@@ -90,25 +90,6 @@ const throwingClock = (): number => {
  * emission's clock failure so the rest of the wave runs normally, which is what
  * makes "a broken diagnostic cost a sibling its output" observable.
  */
-/**
- * A clock that serves the first `healthy` readings and throws thereafter, and
- * reports how many readings it served. Used to target ONE emission site: the
- * count is calibrated by a first healthy run rather than hard-coded, so an
- * unrelated change to how often the runtime reads the clock re-targets the test
- * instead of silently pointing it somewhere else.
- */
-const countingClock = (healthy: number): { clock: () => number; reads: () => number } => {
-  let reads = 0;
-  return {
-    clock: () => {
-      reads += 1;
-      if (reads > healthy) throw new Error("clock failed");
-      return Date.now();
-    },
-    reads: () => reads,
-  };
-};
-
 const throwOnceClock = (): (() => number) => {
   let thrown = false;
   return () => {
@@ -411,61 +392,87 @@ describe("executeWave — error paths", () => {
     }
   });
 
-  it("a failed co-failure emission still returns the primary node-failed", async () => {
-    // Round-13 C1 fenced THREE emit sites; the tests above drive a hostile clock
-    // through only two. This is the third: the co-failed-siblings loop, which
-    // runs AFTER `Promise.all` has resolved — so a throw there escapes the async
-    // function body directly, rejecting `executeWave` and discarding both the
-    // primary `node-failed` event and the `partialOutputs` that keep a retry
-    // from re-running the wave's completed nodes.
-    const primary: FrameworkError = {
-      kind: "validation",
-      nodeId: N("a"),
-      message: "primary failure",
-    };
-    const sibling: FrameworkError = {
-      kind: "validation",
-      nodeId: N("b"),
-      message: "sibling failure",
-    };
-    const nodes = (): Map<string, NodeDef<unknown, unknown>> =>
-      new Map<string, NodeDef<unknown, unknown>>([
-        ["a", { ...makeNode("a"), run: async () => err(primary) }],
-        ["b", { ...makeNode("b"), run: async () => err(sibling) }],
-        ["c", { ...makeNode("c"), run: async () => ok("c-out") }],
-      ]);
-    const wave = [["a", "b", "c"]];
+  it("emits node-error for a node the DAG does not define, and survives a hostile clock doing it", async () => {
+    // `node-not-found` is an invariant violation — a persisted
+    // `DagMachineContext` naming a node that no longer exists — and it is the
+    // LAST failure a post-mortem should have to infer from an absence. It used
+    // to return its typed `Err` having emitted nothing at all.
+    //
+    // This also replaces the old "a failed co-failure emission still returns
+    // the primary node-failed" test. That test pinned the fence on the
+    // co-failed-siblings loop, and that loop is gone: it re-emitted `node-error`
+    // for nodes that had already reported one, so a co-failed sibling raised two
+    // events and the primary raised one. Emission now belongs to the site that
+    // produces the error, and this is the wave-level site that was missing —
+    // so the round-13 C1 intent (every wave-level emission is fenced against a
+    // hostile clock) is pinned where the emissions actually live.
+    const emptyNodeMap = new Map<string, NodeDef<unknown, unknown>>();
+    const observer = new RecordingObserver();
 
-    // Calibrate: a healthy run tells us how many readings this wave takes. Two
-    // failures mean the siblings loop runs, and a failure path returns straight
-    // after it — so the LAST reading is that loop's emission.
-    const healthy = countingClock(Number.MAX_SAFE_INTEGER);
-    await executeWave(0, makeMachineCtx(wave), makeConfig(nodes(), healthy.clock));
-    const total = healthy.reads();
-    expect(total).toBeGreaterThan(1);
+    const healthy = await executeWave(
+      0,
+      makeMachineCtx(),
+      { ...makeConfig(emptyNodeMap), nodeCtx: makeValidatedCtx(observer) },
+    );
+    expect(healthy.event.type).toBe("node-failed");
+    const errors = observer.events.filter((e) => e.type === "node-error");
+    expect(errors.length).toBe(1);
+    expect(errors[0]?.type === "node-error" ? errors[0].nodeId : undefined).toBe(N("a"));
 
-    // Re-run serving every reading but that last one.
-    const hostile = countingClock(total - 1);
-    const result = await executeWave(0, makeMachineCtx(wave), makeConfig(nodes(), hostile.clock));
+    // The same path with a clock that always throws: the diagnostic is lost,
+    // the typed outcome is NOT. `executeWave` must return, never reject.
+    const hostile = await executeWave(0, makeMachineCtx(), makeConfig(emptyNodeMap, throwingClock));
+    expect(hostile.event.type).toBe("node-failed");
+    if (hostile.event.type === "node-failed") {
+      expect(hostile.event.error.kind).toBe("node-crash");
+      if (hostile.event.error.kind === "node-crash") {
+        expect(hostile.event.error.message).toContain("node-not-found");
+      }
+    }
+  });
+
+  it("reports each failing node in a multi-failure wave exactly once", async () => {
+    // The counting half of the same contract, at the `executeWave` seam:
+    // two nodes fail, and the wave produces two `node-error` events, not three.
+    const primary: FrameworkError = { kind: "validation", nodeId: N("a"), message: "primary failure" };
+    const sibling: FrameworkError = { kind: "validation", nodeId: N("b"), message: "sibling failure" };
+    const nodes = new Map<string, NodeDef<unknown, unknown>>([
+      ["a", { ...makeNode("a"), run: async () => err(primary) }],
+      ["b", { ...makeNode("b"), run: async () => err(sibling) }],
+      ["c", { ...makeNode("c"), run: async () => ok("c-out") }],
+    ]);
+    const observer = new RecordingObserver();
+
+    const result = await executeWave(
+      0,
+      makeMachineCtx([["a", "b", "c"]]),
+      { ...makeConfig(nodes), nodeCtx: makeValidatedCtx(observer) },
+    );
 
     expect(result.event.type).toBe("node-failed");
     if (result.event.type === "node-failed") {
       expect(result.event.error).toBe(primary);
-      // `c` ran fine and `b` is still reported as the co-failure — proof the
-      // clock failed on the emission, not on any node's own execution.
       expect(result.event.coFailedNodeIds).toEqual([N("b")]);
       expect(result.event.partialOutputs?.get(N("c"))).toBe("c-out");
     }
+
+    const perNode = new Map<string, number>();
+    for (const e of observer.events) {
+      if (e.type === "node-error") perNode.set(e.nodeId, (perNode.get(e.nodeId) ?? 0) + 1);
+    }
+    expect(perNode.get(N("a"))).toBe(1);
+    expect(perNode.get(N("b"))).toBe(1);
+    expect(perNode.has(N("c"))).toBe(false);
   });
 });
 
 describe("executeWave — routing early failure carries durable freshness state", () => {
-  // The freshness-`aborted` return (line ~296) already pins this carry; the
-  // routing early-failure return is the OTHER exit that has to do it. Both
-  // hand the durable resource→witness projection and the completed-node set
-  // back to the pure transition — drop them here and a retry after a routing
-  // failure re-attempts freshness work the wave already did, re-firing the
-  // side effects those witnesses were recorded to prevent.
+  // The freshness-`aborted` return already pins this carry; the routing
+  // early-failure return is the OTHER exit that has to do it. Both hand the
+  // durable resource→witness projection and the completed-node set back to the
+  // pure transition — drop them here and a retry after a routing failure
+  // re-attempts freshness work the wave already did, re-firing the side effects
+  // those witnesses were recorded to prevent.
   const witnessed = mkWitness("orders", "v7");
 
   const failingConfidenceNode = (): NodeDef<unknown, unknown> => ({

@@ -624,71 +624,23 @@ describe("HostConfigSchema", () => {
     expect(result.value.DEFAULT_CHECKPOINT_TTL_MS).toBe(172_800_000);
   });
 
-  it("rejects PORT of 0 (below min 1)", () => {
-    const result = parseHostConfig({ ...validEnv, PORT: "0" });
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.kind).toBe("config-invalid");
-  });
-
-  it("rejects negative PORT", () => {
-    const result = parseHostConfig({ ...validEnv, PORT: "-1" });
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.kind).toBe("config-invalid");
-  });
-
-  it("rejects PORT above 65535", () => {
-    const result = parseHostConfig({ ...validEnv, PORT: "70000" });
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.kind).toBe("config-invalid");
-  });
-
-  it("rejects MAX_GLOBAL_CONCURRENCY of 0", () => {
-    const result = parseHostConfig({ ...validEnv, MAX_GLOBAL_CONCURRENCY: "0" });
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.kind).toBe("config-invalid");
-  });
-
-  it("rejects negative MAX_GLOBAL_CONCURRENCY", () => {
-    const result = parseHostConfig({ ...validEnv, MAX_GLOBAL_CONCURRENCY: "-5" });
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.kind).toBe("config-invalid");
-  });
-
-  it("rejects DAGS_POLL_INTERVAL_MS below 1000", () => {
-    const result = parseHostConfig({ ...validEnv, DAGS_POLL_INTERVAL_MS: "500" });
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.kind).toBe("config-invalid");
-  });
-
-  it("rejects DEFAULT_DAG_TIMEOUT_MS of 0", () => {
-    const result = parseHostConfig({ ...validEnv, DEFAULT_DAG_TIMEOUT_MS: "0" });
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.kind).toBe("config-invalid");
-  });
-
-  it("rejects CIRCUIT_BREAKER_THRESHOLD of 0", () => {
-    const result = parseHostConfig({ ...validEnv, CIRCUIT_BREAKER_THRESHOLD: "0" });
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.kind).toBe("config-invalid");
-  });
-
-  it("rejects empty string for numeric field (coerces to 0, below min)", () => {
-    const result = parseHostConfig({ ...validEnv, PORT: "" });
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.kind).toBe("config-invalid");
-  });
-
-  it("rejects fractional PORT value", () => {
-    const result = parseHostConfig({ ...validEnv, PORT: "3.5" });
+  // Ten blocks that differed only in which env var carried which bad value, and
+  // all asserted the same two things. As a table, the set of numeric fields
+  // actually guarded — and the shape of value each one rejects — is readable at
+  // a glance, and a newly-bounded field is one row rather than a copy-paste.
+  it.each([
+    ["PORT", "0", "below its min of 1"],
+    ["PORT", "-1", "negative"],
+    ["PORT", "70000", "above its max of 65535"],
+    ["PORT", "", "empty (coerces to 0, below min)"],
+    ["PORT", "3.5", "fractional"],
+    ["MAX_GLOBAL_CONCURRENCY", "0", "zero"],
+    ["MAX_GLOBAL_CONCURRENCY", "-5", "negative"],
+    ["DAGS_POLL_INTERVAL_MS", "500", "below its min of 1000"],
+    ["DEFAULT_DAG_TIMEOUT_MS", "0", "zero"],
+    ["CIRCUIT_BREAKER_THRESHOLD", "0", "zero"],
+  ] as const)("rejects %s when it is %s", (field, value) => {
+    const result = parseHostConfig({ ...validEnv, [field]: value });
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error.kind).toBe("config-invalid");

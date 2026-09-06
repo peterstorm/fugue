@@ -391,14 +391,8 @@ describe("fugue bin (subprocess)", () => {
     expect(stderr).toContain("exactly one <dagDir>");
   });
 
-  it("--help exits 0 with usage on stdout", async () => {
-    const { exitCode, stdout } = await runBin(["--help"]);
-    expect(exitCode).toBe(0);
-    expect(stdout).toContain("Usage: fugue");
-  });
-
-  it("-h exits 0 with usage on stdout", async () => {
-    const { exitCode, stdout } = await runBin(["-h"]);
+  it.each(["--help", "-h"])("%s exits 0 with usage on stdout", async (flag) => {
+    const { exitCode, stdout } = await runBin([flag]);
     expect(exitCode).toBe(0);
     expect(stdout).toContain("Usage: fugue");
   });

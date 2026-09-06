@@ -1095,6 +1095,42 @@ describe("runDagStateful — cycle detection", () => {
     const runEnd = observer.events.find((e) => e.type === "run-end");
     expect(runEnd && "status" in runEnd ? runEnd.status : undefined).toBe("error");
   });
+
+  it.each([
+    ["an unknown node key", { no_such_node: 2 }],
+    ["a negative count", { a: -1 }],
+    ["a fractional count", { a: 1.5 }],
+  ] as const)(
+    "invalid opts.retryLimits (%s) still emits a balanced run-start/run-end pair",
+    async (_label, retryLimits) => {
+      // The pre-flight failure that used to be INVISIBLE. `withRetryLimits` ran
+      // before `beginRunTelemetry`, so a misconfigured retry override returned
+      // its Err having emitted nothing at all — no run-start, no run-end, no
+      // error. From a monitoring seat the run had never been attempted. Its two
+      // sibling pre-flight failures (minting snapshot, capability check) both
+      // emit the pair, and so does the cyclic-DAG case directly above; this is
+      // the same invariant, and it is only worth anything if it holds on EVERY
+      // pre-flight path rather than most of them.
+      const observer = new RecordingObserver();
+      const ctx = { ...makeCtx(), observer };
+      const dag = makeDag({
+        nodes: [makeNode("a")],
+        edges: [{ from: DAG_INPUT, to: "a" }],
+        outputNodeId: "a",
+      });
+
+      const result = await runDagStateful(dag, null, ctx, { retryLimits });
+
+      expect(result.ok).toBe(false);
+      const types = observer.events.map((e) => e.type);
+      expect(types).toContain("run-start");
+      const runEnd = observer.events.find((e) => e.type === "run-end");
+      expect(runEnd && "status" in runEnd ? runEnd.status : undefined).toBe("error");
+      // Exactly one of each — a balanced PAIR, not a run-start with two ends.
+      expect(types.filter((t) => t === "run-start").length).toBe(1);
+      expect(types.filter((t) => t === "run-end").length).toBe(1);
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------

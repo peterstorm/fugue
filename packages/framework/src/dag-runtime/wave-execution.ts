@@ -104,6 +104,15 @@ export const executeWave = async (
 ): Promise<WaveResult> => {
   const { dag, nodeMap, nodeCtx, resumeCheckpoint, nowFn, freshnessIndex, minting } = config;
   const stamp = (): Date => new Date(nowFn());
+  /**
+   * THE `node-error` emission for the two failures `executeWave` itself
+   * produces — a wave naming an undefined node, and a thrown node defect its
+   * safety net catches. Everything else that can fail reports from inside
+   * `runNodeShared`. One emitter, so those two can never drift from the event
+   * shape the rest of the runtime emits (it also carries `sideEffects`, which
+   * the hand-rolled copy this replaced silently dropped).
+   */
+  const emitWaveNodeError = nodeErrorEmitter({ nodeCtx, nodeMap, dagId: dag.id, nowFn });
 
   // An out-of-bounds waveIndex is an invariant violation.
   if (waveIndex < 0 || waveIndex >= machineCtx.waves.length) {
@@ -158,14 +167,21 @@ export const executeWave = async (
 
         const node = nodeMap.get(nodeId);
         if (!node) {
+          const notFound: FrameworkError = {
+            kind: "node-crash",
+            nodeId,
+            message: `node-not-found: ${nodeId}`,
+            retriability: "non-retriable",
+          };
+          // A wave naming a node the DAG does not define is an invariant
+          // violation (stale or corrupted persisted `DagMachineContext`) — the
+          // LAST failure a post-mortem should have to infer from an absence.
+          // Fenced like every sibling emission: the typed `Err` below is the
+          // authoritative outcome and a hostile clock must not replace it.
+          emitWaveNodeError(nodeId, messageOf(notFound), notFound);
           return {
             nodeId,
-            result: err({
-              kind: "node-crash" as const,
-              nodeId,
-              message: `node-not-found: ${nodeId}`,
-              retriability: "non-retriable" as const,
-            }) as Result<unknown, FrameworkError>,
+            result: err(notFound) as Result<unknown, FrameworkError>,
             outcome: EMPTY_OUTCOME,
           };
         }
@@ -183,22 +199,13 @@ export const executeWave = async (
       } catch (caught) {
         const frameworkError = asNodeFrameworkError(caught, nodeId);
         // THE safety net for a thrown node defect, so it must itself be total.
-        // `stamp()` runs `nowFn()` as an ARGUMENT: unfenced, a hostile clock
-        // throws again HERE, escapes this `.map()` callback, and rejects the
-        // `Promise.all` — `executeWave` would reject instead of returning a
-        // `WaveResult`, discarding every already-completed sibling's output and
-        // re-running its side effects on the retry.
-        bestEffort("executeWave", "node-error emission", () =>
-          emit(nodeCtx, {
-            type: "node-error",
-            runId: nodeCtx.runId,
-            dagId: dag.id,
-            nodeId,
-            timestamp: stamp(),
-            error: messageOf(frameworkError),
-            frameworkError,
-          }),
-        );
+        // The emitter reads the clock as an ARGUMENT inside its own
+        // `bestEffort`: unfenced, a hostile clock would throw again HERE,
+        // escape this `.map()` callback and reject the `Promise.all` —
+        // `executeWave` would reject instead of returning a `WaveResult`,
+        // discarding every already-completed sibling's output and re-running
+        // its side effects on the retry.
+        emitWaveNodeError(nodeId, messageOf(frameworkError), frameworkError);
         return {
           nodeId,
           result: err(frameworkError) as Result<unknown, FrameworkError>,
@@ -226,17 +233,15 @@ export const executeWave = async (
   if (failures.length > 0) {
     const [primary, ...siblings] = failures as [{ nodeId: NodeId; error: FrameworkError }, ...{ nodeId: NodeId; error: FrameworkError }[]];
 
-    // The shared emitter owns this event shape (and the same `bestEffort` fence:
-    // the `node-failed` returned below is the authoritative outcome, and a
-    // throwing clock on a co-failure diagnostic must not cost the caller the
-    // primary failure or the carried outputs). It labels its own fence
-    // `nodeErrorEmitter`/`node-error emission` rather than this call site — a
-    // diagnostic label, not an outcome, and the price of not keeping a fourth
-    // hand-rolled copy of the event in sync.
-    const emitCoFailure = nodeErrorEmitter({ nodeCtx, nodeMap, dagId: dag.id, nowFn });
-    for (const sibling of siblings) {
-      emitCoFailure(sibling.nodeId, messageOf(sibling.error), sibling.error);
-    }
+    // Deliberately NO co-failure re-emission. THE contract is one `node-error`
+    // per failing node, emitted by the site that produced the error, and every
+    // path that reaches `failures` now honours it. A loop over `siblings` here
+    // re-emitted for nodes that had already reported, so a co-failed sibling
+    // raised two events and the primary raised one — every observer keyed on
+    // `node-error` double-counted it. The real gap it was papering over was the
+    // two paths that emitted NOTHING (`node-not-found` above, and input
+    // assembly in `runNodeShared`); both now report for themselves.
+    // `dag-concurrent-wave-failure.test.ts` pins the exact per-node counts.
 
     const partialOutputs = carriedOutputs(newOutputs, machineCtx.outputs);
 

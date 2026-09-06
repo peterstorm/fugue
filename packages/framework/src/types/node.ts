@@ -466,8 +466,15 @@ export interface NodeDef<
    */
   readonly humanReview?: NodeHumanReviewConfig;
   /**
-   * Per-node retry configuration (backoff delays, jitter). Falls back to
-   * `DagDef.retryLimits` / `DagDef.defaultRetryLimit` when omitted.
+   * Per-node retry configuration (backoff delays, jitter).
+   *
+   * Two SEPARATE fallback chains meet on this node, and conflating them reads
+   * as one setting that it is not:
+   * - How MANY times to retry comes from `DagDef.retryLimits` /
+   *   `DagDef.defaultRetryLimit` — neither of which this field carries.
+   * - HOW LONG to wait between attempts (`backoffMs`, `jitterRatio`) comes from
+   *   here, falling back to `NodeRetryConfig`'s own documented defaults
+   *   (`[1000, 2000, 4000]`, `0.2`). Nothing on `DagDef` supplies these.
    */
   readonly retry?: NodeRetryConfig;
 }

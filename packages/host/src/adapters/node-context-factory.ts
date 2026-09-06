@@ -627,12 +627,21 @@ const resolveOriginAndBindSubjectToken = (args: {
  * @satisfies FR-W3-007 — `origin` carries the user's `sub` so a user-initiated
  *   run is attributable and per-hop-exchangeable by the broker
  */
-export const createNodeContextForDag = async (
-  shared: SharedInfra,
-  dag: RegisteredDag,
-  runId: RunId,
-  signal: AbortSignal,
-  identity: AuthIdentity,
+/**
+ * Everything beyond the five arguments a caller always has in hand. Bundled
+ * rather than passed positionally: this list grew one feature at a time
+ * (agent-client mapping, minting, subject-token binding, tenant routing, TTL)
+ * until it was ten positional parameters, several of them optional, defaulted,
+ * or same-shaped — and the two production call sites had to reconstruct that
+ * order independently, with only these doc comments rather than the compiler
+ * to keep them honest. Named fields make a transposition a type error, and
+ * follow the precedent already set by `PostWaveContext` and
+ * `callHumanReviewHook` in the framework.
+ *
+ * Every field is optional, and every default here is the SAFE one — an
+ * un-threaded caller must never accidentally widen authority.
+ */
+export interface CreateNodeContextOptions {
   /**
    * The DAG-id → REAL Keycloak agent-client-id map (FR-040, `AGENT_CLIENT_MAP`),
    * INJECTED from host config. Threaded into `invocationOriginForIdentity` so the
@@ -643,7 +652,7 @@ export const createNodeContextForDag = async (
    * Defaults to the empty map; the separate `mintingActive` flag determines
    * whether that empty mapping refuses the run.
    */
-  agentClientMap: AgentClientMap = {},
+  readonly agentClientMap?: AgentClientMap;
   /**
    * Whether per-node minting is wired for this boot (`broker !== undefined`).
    * Load-bearing for the fail-closed origin check below: an unmapped DAG is
@@ -654,7 +663,7 @@ export const createNodeContextForDag = async (
    * `{}`) must NOT 500 every run. Defaults to `false` (safe: no throw) so an
    * un-threaded caller never spuriously refuses.
    */
-  mintingActive: boolean = false,
+  readonly mintingActive?: boolean;
   /**
    * HOST-SIDE side-channel sink for a user run's verified `subject_token`
    * (FR-030/FR-032). When the run is user-initiated, the factory binds
@@ -663,7 +672,7 @@ export const createNodeContextForDag = async (
    * (which stays string-only) or reaching a capability handle (NFR-011). Optional:
    * the no-broker / non-user paths pass nothing and behave byte-identically.
    */
-  bindSubjectToken?: (runId: RunId, token: SubjectToken) => void,
+  readonly bindSubjectToken?: (runId: RunId, token: SubjectToken) => void;
   /**
    * The worker's resolved routed `Tenant.id` (FR-013 / SC-001 / ADR-0067). When
    * provided it is the AUTHORITATIVE tenant axis for EVERY Redis key this context
@@ -675,10 +684,26 @@ export const createNodeContextForDag = async (
    * back to the `dag.team` derivation below — byte-identical to the prior
    * behaviour for those callers.
    */
-  routedTenant?: TenantId,
+  readonly routedTenant?: TenantId;
   /** Retention of authoritative resumable state (for example HITL run TTL). */
-  resumableRunTtlSec?: number,
+  readonly resumableRunTtlSec?: number;
+}
+
+export const createNodeContextForDag = async (
+  shared: SharedInfra,
+  dag: RegisteredDag,
+  runId: RunId,
+  signal: AbortSignal,
+  identity: AuthIdentity,
+  options: CreateNodeContextOptions = {},
 ): Promise<NodeContextForDag> => {
+  const {
+    agentClientMap = {},
+    mintingActive = false,
+    bindSubjectToken,
+    routedTenant,
+    resumableRunTtlSec,
+  } = options;
   const dagId = dag.id;
   const ttl = resolveTtl(dag);
 

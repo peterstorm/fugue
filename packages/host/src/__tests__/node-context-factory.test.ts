@@ -200,7 +200,7 @@ const createTestContext = (opts: TestContextOptions = {}) =>
     opts.run ?? testRunId,
     opts.signal ?? new AbortController().signal,
     opts.identity ?? adminIdentity,
-    opts.agentClientMap ?? FACTORY_AGENT_MAP,
+    { agentClientMap: opts.agentClientMap ?? FACTORY_AGENT_MAP },
   );
 
 /**
@@ -673,7 +673,7 @@ describe("createNodeContextForDag — fail-closed tenant derivation (AD-4 / US2 
       testRunId,
       new AbortController().signal,
       adminIdentity,
-      FACTORY_AGENT_MAP,
+      { agentClientMap: FACTORY_AGENT_MAP },
     );
     await expect(promise).rejects.toThrow(/invalid owning team/i);
   });
@@ -706,10 +706,7 @@ describe("createNodeContextForDag — routed-tenant key namespacing (ADR-0067 / 
       testRunId,
       new AbortController().signal,
       adminIdentity,
-      FACTORY_AGENT_MAP,
-      false,
-      undefined,
-      routed,
+      { agentClientMap: FACTORY_AGENT_MAP, routedTenant: routed },
     );
 
     const writeResult = await ctx.cache.set("k", { v: 1 });
@@ -730,7 +727,7 @@ describe("createNodeContextForDag — routed-tenant key namespacing (ADR-0067 / 
       testRunId,
       new AbortController().signal,
       adminIdentity,
-      FACTORY_AGENT_MAP,
+      { agentClientMap: FACTORY_AGENT_MAP },
     );
 
     await ctx.cache.set("k", { v: 1 });
@@ -755,7 +752,7 @@ describe("createNodeContextForDag — static client wiring (SC-005)", () => {
       testRunId,
       new AbortController().signal,
       adminIdentity,
-      FACTORY_AGENT_MAP,
+      { agentClientMap: FACTORY_AGENT_MAP },
     );
 
     // `extractClients([httpHandle]).http === httpHandle.client` — the factory
@@ -930,7 +927,7 @@ describe("createNodeContextForDag — one authority across main/judge/custom LLM
       testRunId,
       new AbortController().signal,
       adminIdentity,
-      FACTORY_AGENT_MAP,
+      { agentClientMap: FACTORY_AGENT_MAP },
     );
     if (ctx.llm === null || ctx.judgeLlm === null || ctx.budget === null) {
       throw new Error("expected all built-in clients");
@@ -1109,7 +1106,7 @@ describe("createNodeContextForDag — one authority across main/judge/custom LLM
         testRunId,
         new AbortController().signal,
         adminIdentity,
-        FACTORY_AGENT_MAP,
+        { agentClientMap: FACTORY_AGENT_MAP },
       );
       if (first.ctx.llm === null || first.ctx.judgeLlm === null) throw new Error("expected LLMs");
       expect((await first.ctx.llm.sendStructured(structuredReq())).ok).toBe(true);
@@ -1123,7 +1120,7 @@ describe("createNodeContextForDag — one authority across main/judge/custom LLM
         testRunId,
         new AbortController().signal,
         adminIdentity,
-        FACTORY_AGENT_MAP,
+        { agentClientMap: FACTORY_AGENT_MAP },
       );
       if (resumed.ctx.llm === null || resumed.ctx.budget === null) throw new Error("expected context");
       expect(resumed.ctx.budget.spent().tokens).toBe(30);
@@ -1142,7 +1139,7 @@ describe("createNodeContextForDag — one authority across main/judge/custom LLM
       testRunId,
       new AbortController().signal,
       adminIdentity,
-      FACTORY_AGENT_MAP,
+      { agentClientMap: FACTORY_AGENT_MAP },
     );
     if (ctx.llm === null || ctx.budget === null) throw new Error("expected metered context");
     expect(ctx.budget.remaining()).toEqual({ kind: "unbudgeted" });
@@ -1220,7 +1217,7 @@ describe("invocationOriginForIdentity — user sub threading + real-client resol
       new AbortController().signal,
       userIdentity,
       // FR-040: map the DAG to its real agent client so the origin resolves.
-      { [testDagId as string]: "fugue-agent-test" },
+      { agentClientMap: { [testDagId as string]: "fugue-agent-test" } },
     );
 
     // The run path no longer dead-ends the user identity: a base NodeContext is
@@ -1241,8 +1238,7 @@ describe("invocationOriginForIdentity — user sub threading + real-client resol
       testRunId,
       new AbortController().signal,
       adminIdentity,
-      {},
-      true,
+      { agentClientMap: {}, mintingActive: true },
     );
     await expect(promise).rejects.toThrow(/no agent client mapping/);
   });
@@ -1257,8 +1253,7 @@ describe("invocationOriginForIdentity — user sub threading + real-client resol
       testRunId,
       new AbortController().signal,
       adminIdentity,
-      {},
-      false,
+      { agentClientMap: {}, mintingActive: false },
     );
     expect(ctx).toBeDefined();
     expect(origin).toBeUndefined();
@@ -1280,9 +1275,7 @@ describe("invocationOriginForIdentity — user sub threading + real-client resol
       testRunId,
       new AbortController().signal,
       userWithProof,
-      {},
-      true,
-      (rid) => { bound.push(rid); },
+      { agentClientMap: {}, mintingActive: true, bindSubjectToken: (rid) => { bound.push(rid); } },
     );
     await expect(promise).rejects.toThrow(/no agent client mapping/);
     // The fail-closed throw fires BEFORE the bind, so nothing is retained.
@@ -1341,9 +1334,11 @@ describe("createNodeContextForDag — binds the subject token host-side, NEVER o
       testRunId,
       new AbortController().signal,
       userIdentity,
-      FACTORY_AGENT_MAP,
-      true,
-      (rid, token) => bound.push({ runId: rid, token }),
+      {
+        agentClientMap: FACTORY_AGENT_MAP,
+        mintingActive: true,
+        bindSubjectToken: (rid, token) => bound.push({ runId: rid, token }),
+      },
     );
 
     // The token went through the HOST-SIDE sink, keyed on the run id.
@@ -1364,9 +1359,7 @@ describe("createNodeContextForDag — binds the subject token host-side, NEVER o
       testRunId,
       new AbortController().signal,
       adminIdentity,
-      FACTORY_AGENT_MAP,
-      true,
-      (rid) => bound.push(rid),
+      { agentClientMap: FACTORY_AGENT_MAP, mintingActive: true, bindSubjectToken: (rid) => bound.push(rid) },
     );
     expect(bound).toEqual([]);
   });
@@ -1380,9 +1373,7 @@ describe("createNodeContextForDag — binds the subject token host-side, NEVER o
       testRunId,
       new AbortController().signal,
       reconstructed,
-      FACTORY_AGENT_MAP,
-      true,
-      (rid) => bound.push(rid),
+      { agentClientMap: FACTORY_AGENT_MAP, mintingActive: true, bindSubjectToken: (rid) => bound.push(rid) },
     );
     // No token to bind → the broker's user exchange fails closed for this run.
     expect(bound).toEqual([]);
@@ -1417,7 +1408,7 @@ describe("createNodeContextForDag — spend survives a park/resume (FR-B-006)", 
 
   const sliceFor = async (shared: SharedInfra, dag: RegisteredDag) => {
     const { ctx } = await createNodeContextForDag(
-      shared, dag, testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP,
+      shared, dag, testRunId, new AbortController().signal, adminIdentity, { agentClientMap: FACTORY_AGENT_MAP },
     );
     if (ctx.llm === null) throw new Error("expected wired llm");
     return ctx.llm;
@@ -1658,7 +1649,7 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
     const shared = sharedWithRedis(llm, createMockRedis().redis, captured.logger);
 
     await createNodeContextForDag(
-      shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP,
+      shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, { agentClientMap: FACTORY_AGENT_MAP },
     );
 
     const line = captured.logs.find((l) => l.msg.includes("Spend ledger is NOT durable"));
@@ -1690,7 +1681,7 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
       };
 
       const { ctx } = await createNodeContextForDag(
-        shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP,
+        shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, { agentClientMap: FACTORY_AGENT_MAP },
       );
       if (ctx.llm === null) throw new Error("expected wired llm");
       expect((await ctx.llm.sendStructured(structuredReq())).ok).toBe(true);
@@ -1721,7 +1712,7 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
     const shared = sharedWithRedis(llm, capable.redis, captured.logger);
 
     const { ctx } = await createNodeContextForDag(
-      shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP,
+      shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, { agentClientMap: FACTORY_AGENT_MAP },
     );
     if (ctx.llm === null) throw new Error("expected wired llm");
     await ctx.llm.sendStructured(structuredReq());
@@ -1753,11 +1744,7 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
       testRunId,
       new AbortController().signal,
       adminIdentity,
-      FACTORY_AGENT_MAP,
-      false,
-      undefined,
-      undefined,
-      60,
+      { agentClientMap: FACTORY_AGENT_MAP, resumableRunTtlSec: 60 },
     );
     if (ctx.llm === null || ctx.checkpointWriter === null) {
       throw new Error("expected metered LLM and checkpoint writer");
@@ -1789,11 +1776,7 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
       testRunId,
       new AbortController().signal,
       adminIdentity,
-      FACTORY_AGENT_MAP,
-      false,
-      undefined,
-      undefined,
-      30,
+      { agentClientMap: FACTORY_AGENT_MAP, resumableRunTtlSec: 30 },
     );
     if (ctx.llm === null || ctx.checkpointWriter === null) {
       throw new Error("expected metered LLM and checkpoint writer");
@@ -1821,8 +1804,8 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
       testRunId,
       new AbortController().signal,
       adminIdentity,
-      FACTORY_AGENT_MAP,
       // resumableRunTtlSec omitted entirely — the `?? checkpointTtlSec` arm.
+      { agentClientMap: FACTORY_AGENT_MAP },
     );
     if (ctx.llm === null || ctx.checkpointWriter === null) {
       throw new Error("expected metered LLM and checkpoint writer");
@@ -1849,7 +1832,7 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
 
     const slice = async () => {
       const { ctx } = await createNodeContextForDag(
-        shared, dag, testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP,
+        shared, dag, testRunId, new AbortController().signal, adminIdentity, { agentClientMap: FACTORY_AGENT_MAP },
       );
       if (ctx.llm === null) throw new Error("expected wired llm");
       return ctx.llm;
@@ -1890,8 +1873,8 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
 
     const { ctx } = await createNodeContextForDag(
       shared, makeDag({ checkpointTtlMs: 9_000 }), testRunId,
-      new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP,
-      false, undefined, undefined, 60,
+      new AbortController().signal, adminIdentity,
+      { agentClientMap: FACTORY_AGENT_MAP, resumableRunTtlSec: 60 },
     );
     if (ctx.checkpointWriter === null) throw new Error("expected checkpoint writer");
 
@@ -1912,8 +1895,8 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
 
     const { ctx } = await createNodeContextForDag(
       shared, makeDag({ checkpointTtlMs: 9_000 }), testRunId,
-      new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP,
-      false, undefined, undefined, 60,
+      new AbortController().signal, adminIdentity,
+      { agentClientMap: FACTORY_AGENT_MAP, resumableRunTtlSec: 60 },
     );
     if (ctx.checkpointWriter === null) throw new Error("expected checkpoint writer");
 
@@ -1938,7 +1921,7 @@ describe("createNodeContextForDag — prompt precedence", () => {
 
   const promptsOf = async (dag: RegisteredDag, shared: SharedInfra) => {
     const { ctx } = await createNodeContextForDag(
-      shared, dag, testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP,
+      shared, dag, testRunId, new AbortController().signal, adminIdentity, { agentClientMap: FACTORY_AGENT_MAP },
     );
     if (ctx.prompts === null) throw new Error("expected a prompt accessor");
     return ctx.prompts;

@@ -967,7 +967,12 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
       // factory reads it off the identity via the pure seam and stores it under
       // `rid` so the broker can resolve it for the RFC 8693 exchange. Non-user
       // runs bind nothing. `executeDag` releases it on completion (below).
-      return createNodeContextForDag(sharedInfra, registered, rid, signal, identity, config.AGENT_CLIENT_MAP, broker !== undefined, subjectTokens.bind, routedTenant);
+      return createNodeContextForDag(sharedInfra, registered, rid, signal, identity, {
+        agentClientMap: config.AGENT_CLIENT_MAP,
+        mintingActive: broker !== undefined,
+        bindSubjectToken: subjectTokens.bind,
+        routedTenant,
+      });
     },
     executeDag: async <I, O>(
       dag: DagDef,

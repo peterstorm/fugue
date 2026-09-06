@@ -254,8 +254,8 @@ describe("createNodeContextForDag isolation", () => {
     const dagA = makeRegisteredDag("dag-alpha");
     const dagB = makeRegisteredDag("dag-beta");
 
-    const { ctx: ctxA } = await createNodeContextForDag(shared, dagA, "run-1" as unknown as RunId, signal, adminIdentity, ISO_AGENT_MAP);
-    const { ctx: ctxB } = await createNodeContextForDag(shared, dagB, "run-1" as unknown as RunId, signal, adminIdentity, ISO_AGENT_MAP);
+    const { ctx: ctxA } = await createNodeContextForDag(shared, dagA, "run-1" as unknown as RunId, signal, adminIdentity, { agentClientMap: ISO_AGENT_MAP });
+    const { ctx: ctxB } = await createNodeContextForDag(shared, dagB, "run-1" as unknown as RunId, signal, adminIdentity, { agentClientMap: ISO_AGENT_MAP });
 
     // Both contexts are created without error
     expect(ctxA).toBeDefined();
@@ -272,8 +272,8 @@ describe("createNodeContextForDag isolation", () => {
 
     const dag = makeRegisteredDag("dag-alpha");
 
-    const { ctx: ctx1 } = await createNodeContextForDag(shared, dag, "run-1" as unknown as RunId, signal, adminIdentity, ISO_AGENT_MAP);
-    const { ctx: ctx2 } = await createNodeContextForDag(shared, dag, "run-2" as unknown as RunId, signal, adminIdentity, ISO_AGENT_MAP);
+    const { ctx: ctx1 } = await createNodeContextForDag(shared, dag, "run-1" as unknown as RunId, signal, adminIdentity, { agentClientMap: ISO_AGENT_MAP });
+    const { ctx: ctx2 } = await createNodeContextForDag(shared, dag, "run-2" as unknown as RunId, signal, adminIdentity, { agentClientMap: ISO_AGENT_MAP });
 
     expect(ctx1).not.toBe(ctx2);
   });

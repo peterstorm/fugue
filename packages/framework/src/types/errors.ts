@@ -389,8 +389,21 @@ const persistedUsdCeilingSchema = z.object({
   limit: PersistedMicroUsdSchema,
 });
 const persistedBasisSchema = z.enum(["settled", "projected"]);
-const persistedTokensCeilingSchema = z.object({ kind: z.literal("tokens"), limit: z.number() });
-const persistedCallsCeilingSchema = z.object({ kind: z.literal("calls"), limit: z.number() });
+/**
+ * A count axis (tokens, calls) crossing the wire. Same sanitization discipline
+ * as `PersistedMicroUsdSchema` on the cost axis, for the same reason: `budget.ts`
+ * refuses a non-finite figure because `observed >= limit` is FALSE forever
+ * against `NaN`/`Infinity`, so a poisoned limit is a ceiling that can never
+ * refuse again. `TokensCeiling`/`CallsCeiling` are plain numbers rather than a
+ * branded type, so there is no transform to apply — but "plain number" is not a
+ * reason to accept a negative, fractional or infinite one from a persisted
+ * payload. Live accounting never reaches this value (`usageOfError` returns
+ * `undefined` for `llm-budget-exceeded`); this is the defence-in-depth layer
+ * that keeps a future reader of `Breach.observed` from inheriting the hole.
+ */
+const persistedCountSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const persistedTokensCeilingSchema = z.object({ kind: z.literal("tokens"), limit: persistedCountSchema });
+const persistedCallsCeilingSchema = z.object({ kind: z.literal("calls"), limit: persistedCountSchema });
 const persistedUnpricedModelsSchema = z.array(z.string()).min(1).transform((models, context) => {
   const canonical = unpricedModels(models);
   if (canonical !== undefined) return canonical;
@@ -402,13 +415,13 @@ const persistedBreachSchema = z.union([
     kind: z.literal("reached"),
     ceiling: persistedTokensCeilingSchema,
     basis: persistedBasisSchema,
-    observed: z.number(),
+    observed: persistedCountSchema,
   }),
   z.object({
     kind: z.literal("reached"),
     ceiling: persistedCallsCeilingSchema,
     basis: persistedBasisSchema,
-    observed: z.number(),
+    observed: persistedCountSchema,
   }),
   z.object({
     kind: z.literal("reached"),
@@ -427,7 +440,7 @@ const persistedBreachSchema = z.union([
     kind: z.literal("unknown-usage"),
     ceiling: persistedTokensCeilingSchema,
     basis: persistedBasisSchema,
-    observedAtLeast: z.number(),
+    observedAtLeast: persistedCountSchema,
   }),
   z.object({
     kind: z.literal("unknown-usage"),

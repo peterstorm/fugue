@@ -7,7 +7,8 @@
 // Internal decomposition:
 //   prepareDagRun     — pre-flight: retry merge, telemetry, capability check
 //   resolveJob        — job handle: caller-supplied or fresh in-memory
-//   handleTerminalState — match terminal state: judges, error, invariant violation
+//   handleTerminalState — match terminal state: judges, suspended (HITL), error,
+//                         invariant violation
 //   handleKernelError — catch block: abort vs terminal-failed
 
 import { match } from "ts-pattern";
@@ -332,15 +333,25 @@ const prepareDagRun = (
   nodeCtx: NodeContext,
   opts?: Pick<DagRunOpts, "retryLimits" | "now" | "minting">,
 ): Result<PreparedRun, FrameworkError> => {
+  // Run-start comes FIRST — before the retry merge, not just before compile —
+  // so every pre-flight failure produces a balanced run-start/run-end pair.
+  // `beginRunTelemetry` reads `dag`, never `effectiveDag`, so nothing here
+  // depends on the merge having succeeded. An invalid `opts.retryLimits`
+  // (unknown node key, negative or fractional count) used to return before this
+  // line, which meant a misconfigured retry override emitted NO observer events
+  // at all: no run-start, no run-end, no error — invisible to monitoring, and
+  // the one pre-flight failure that broke the invariant its two siblings below
+  // already honour.
+  const { emitRunEnd } = beginRunTelemetry(nodeCtx, dag, { now: opts?.now });
+
   const derivedDag = opts?.retryLimits !== undefined
     ? withRetryLimits(dag, opts.retryLimits)
     : ok(dag);
-  if (!derivedDag.ok) return derivedDag;
+  if (!derivedDag.ok) {
+    emitRunEnd("error");
+    return derivedDag;
+  }
   const effectiveDag = derivedDag.value;
-
-  // Emit run-start BEFORE compile so a malformed DAG still produces a balanced
-  // run-start/run-end pair.
-  const { emitRunEnd } = beginRunTelemetry(nodeCtx, dag, { now: opts?.now });
 
   // Snapshot the broker's answers once per distinct required capability, then
   // use that same immutable facade for validation and every dispatch. Authority

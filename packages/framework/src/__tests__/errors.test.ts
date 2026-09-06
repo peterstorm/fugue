@@ -202,6 +202,69 @@ describe("PersistedFrameworkErrorSchema", () => {
     expect(isFrameworkError(revoked.proxy)).toBe(false);
   });
 
+  it("sanitizes a persisted breach's COUNT axes exactly as it does its cost axis", () => {
+    // The cost axis has always been sanitized (`PersistedMicroUsdSchema`). The
+    // token and call axes sat beside it accepting any JS number. That asymmetry
+    // is the whole finding: `budget.ts` refuses a non-finite figure because
+    // `observed >= limit` is FALSE forever against NaN/Infinity — a poisoned
+    // limit is a ceiling that can never refuse again — and a value arriving
+    // from a persisted worker payload is precisely the one you cannot vouch for.
+    const breachWith = (
+      ceiling: Record<string, unknown>,
+      observed: unknown,
+    ): unknown => ({
+      kind: "llm-budget-exceeded",
+      runId: "run-x",
+      nodeId: "node-x",
+      cause: { kind: "reached", ceiling, basis: "settled", observed },
+    });
+
+    // The honest shape still parses, on every axis.
+    expect(PersistedFrameworkErrorSchema.safeParse(
+      breachWith({ kind: "tokens", limit: 1000 }, 1200),
+    ).success).toBe(true);
+    expect(PersistedFrameworkErrorSchema.safeParse(
+      breachWith({ kind: "calls", limit: 5 }, 6),
+    ).success).toBe(true);
+    expect(PersistedFrameworkErrorSchema.safeParse(
+      breachWith({ kind: "usd", limit: 1000 }, 1200),
+    ).success).toBe(true);
+
+    // Poisoned LIMITS are refused on the count axes, matching the cost axis.
+    for (const poison of [-1, 1.5, Infinity, -Infinity, NaN]) {
+      expect(PersistedFrameworkErrorSchema.safeParse(
+        breachWith({ kind: "tokens", limit: poison }, 1),
+      ).success).toBe(false);
+      expect(PersistedFrameworkErrorSchema.safeParse(
+        breachWith({ kind: "calls", limit: poison }, 1),
+      ).success).toBe(false);
+    }
+
+    // …and so are poisoned OBSERVATIONS.
+    for (const poison of [-1, 1.5, Infinity, NaN]) {
+      expect(PersistedFrameworkErrorSchema.safeParse(
+        breachWith({ kind: "tokens", limit: 10 }, poison),
+      ).success).toBe(false);
+    }
+
+    // The `unknown-usage` arm carries its floor on the same axis, so it gets
+    // the same treatment rather than a second, laxer rule.
+    const unknownUsage = (observedAtLeast: unknown): unknown => ({
+      kind: "llm-budget-exceeded",
+      runId: "run-x",
+      nodeId: "node-x",
+      cause: {
+        kind: "unknown-usage",
+        ceiling: { kind: "tokens", limit: 10 },
+        basis: "settled",
+        observedAtLeast,
+      },
+    });
+    expect(PersistedFrameworkErrorSchema.safeParse(unknownUsage(3)).success).toBe(true);
+    expect(PersistedFrameworkErrorSchema.safeParse(unknownUsage(-3)).success).toBe(false);
+    expect(PersistedFrameworkErrorSchema.safeParse(unknownUsage(Infinity)).success).toBe(false);
+  });
+
   it("recovers a pre-prompt-caching usage record through asFrameworkError", () => {
     // A record written before prompt caching carries only the two token counts.
     // `persistedUsageSchema` exists to accept it, defaulting the cache figures.

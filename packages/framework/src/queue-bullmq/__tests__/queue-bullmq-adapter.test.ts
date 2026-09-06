@@ -1023,88 +1023,35 @@ describe("createQueue / createWorker — RangeError guards (pure, no Redis neede
   // They assert RangeError is thrown synchronously before any I/O.
   const dummyConn = { host: "127.0.0.1", port: 16379 };
 
-  it("createQueue throws RangeError for defaultAttempts = 0", () => {
+  // One table, one gate. Twelve near-identical blocks differing only in the
+  // injected number made it easy to add a case to one function and forget the
+  // other — the table makes the two guards visibly share a rejection set.
+  const rejected = [
+    ["zero", 0],
+    ["negative", -5],
+    ["NaN", NaN],
+    ["Infinity", Infinity],
+    // The gate is INTEGER, not merely finite — a fractional attempt count is
+    // as meaningless as a negative one.
+    ["fractional", 1.5],
+  ] as const;
+
+  it.each(rejected)("createQueue throws RangeError for a %s defaultAttempts", (_label, value) => {
+    const backend = createBullMQBackend(dummyConn);
+    expect(() => backend.createQueue("q", { defaultAttempts: value })).toThrow(RangeError);
+  });
+
+  it.each(rejected)("createWorker throws RangeError for a %s concurrency", (_label, value) => {
     const backend = createBullMQBackend(dummyConn);
     expect(() =>
-      backend.createQueue("q", { defaultAttempts: 0 }),
+      backend.createWorker("q", async () => {}, { concurrency: value }),
     ).toThrow(RangeError);
   });
 
-  it("createQueue throws RangeError for defaultAttempts = -1", () => {
+  it("admits the smallest honest value on both gates", () => {
     const backend = createBullMQBackend(dummyConn);
-    expect(() =>
-      backend.createQueue("q", { defaultAttempts: -1 }),
-    ).toThrow(RangeError);
-  });
-
-  it("createQueue throws RangeError for defaultAttempts = NaN", () => {
-    const backend = createBullMQBackend(dummyConn);
-    expect(() =>
-      backend.createQueue("q", { defaultAttempts: NaN }),
-    ).toThrow(RangeError);
-  });
-
-  it("createQueue throws RangeError for defaultAttempts = Infinity", () => {
-    const backend = createBullMQBackend(dummyConn);
-    expect(() =>
-      backend.createQueue("q", { defaultAttempts: Infinity }),
-    ).toThrow(RangeError);
-  });
-
-  it("createQueue throws RangeError for defaultAttempts = 1.5 (the gate is integer, not just finite)", () => {
-    const backend = createBullMQBackend(dummyConn);
-    expect(() =>
-      backend.createQueue("q", { defaultAttempts: 1.5 }),
-    ).toThrow(RangeError);
-  });
-
-  it("createWorker throws RangeError for concurrency = 0", () => {
-    const backend = createBullMQBackend(dummyConn);
-    expect(() =>
-      backend.createWorker("q", async () => {}, { concurrency: 0 }),
-    ).toThrow(RangeError);
-  });
-
-  it("createWorker throws RangeError for concurrency = -5", () => {
-    const backend = createBullMQBackend(dummyConn);
-    expect(() =>
-      backend.createWorker("q", async () => {}, { concurrency: -5 }),
-    ).toThrow(RangeError);
-  });
-
-  it("createWorker throws RangeError for concurrency = NaN", () => {
-    const backend = createBullMQBackend(dummyConn);
-    expect(() =>
-      backend.createWorker("q", async () => {}, { concurrency: NaN }),
-    ).toThrow(RangeError);
-  });
-
-  it("createWorker throws RangeError for concurrency = Infinity", () => {
-    const backend = createBullMQBackend(dummyConn);
-    expect(() =>
-      backend.createWorker("q", async () => {}, { concurrency: Infinity }),
-    ).toThrow(RangeError);
-  });
-
-  it("createWorker throws RangeError for concurrency = 1.5 (the gate is integer, not just finite)", () => {
-    const backend = createBullMQBackend(dummyConn);
-    expect(() =>
-      backend.createWorker("q", async () => {}, { concurrency: 1.5 }),
-    ).toThrow(RangeError);
-  });
-
-  it("createQueue does not throw for defaultAttempts = 1", () => {
-    const backend = createBullMQBackend(dummyConn);
-    expect(() =>
-      backend.createQueue("q", { defaultAttempts: 1 }),
-    ).not.toThrow();
-  });
-
-  it("createWorker does not throw for concurrency = 1", () => {
-    const backend = createBullMQBackend(dummyConn);
-    expect(() =>
-      backend.createWorker("q", async () => {}, { concurrency: 1 }),
-    ).not.toThrow();
+    expect(() => backend.createQueue("q", { defaultAttempts: 1 })).not.toThrow();
+    expect(() => backend.createWorker("q", async () => {}, { concurrency: 1 })).not.toThrow();
   });
 
   // Regression (round-12 A1): the Queue's INTERNAL connection (a separate

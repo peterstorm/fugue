@@ -75,8 +75,12 @@ interface RunExecutorDeps {
    * The worker's resolved routed `Tenant.id` (FR-013 / SC-001 / ADR-0067),
    * threaded into `createNodeContextForDag` so a resumed HITL run's cache /
    * checkpoint keys share the SAME `fugue:<tenant>:` namespace as the
-   * synchronous run path and every other per-tenant store. Omitted on the
-   * single-tenant path (the factory then falls back to the `dag.team` derivation).
+   * synchronous run path and every other per-tenant store. Optional on the type,
+   * but `host.ts` — the only caller that wires this executor — always passes a
+   * resolved `Tenant.id`, falling back to the constant `default` rather than to
+   * absence, so the shipped single-tenant path does NOT omit it. (The genuinely
+   * omittable one is `createNodeContextForDag`'s `routedTenant`, which does fall
+   * back to the `dag.team` derivation.)
    */
   readonly tenant?: TenantId;
   /** TTL of the durable HITL run record this slice may resume from. */
@@ -191,16 +195,21 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
             req.runId,
             controller.signal,
             toExecIdentity(req.identity),
-            agentClientMap ?? {},
-            broker !== undefined,
-            // bindSubjectToken: intentionally omitted on the resume path. A user
-            // run's verified `subject_token` is bound at INITIATION (sync path);
-            // across a HITL park/resume it is not re-presented, so a user-path
-            // capability mint fails closed (no proof) rather than reusing a stale
-            // token — correct, not a leak.
-            undefined,
-            tenant,
-            runRetentionTtlSec,
+            {
+              // `?? {}` would be dead: an absent field takes the factory's own
+              // documented default of the empty map.
+              agentClientMap,
+              mintingActive: broker !== undefined,
+              // `bindSubjectToken` is intentionally ABSENT on the resume path. A
+              // user run's verified `subject_token` is bound at INITIATION (the
+              // sync path); across a HITL park/resume it is not re-presented, so
+              // a user-path capability mint fails closed (no proof) rather than
+              // reusing a stale token — correct, not a leak. Named fields let
+              // this be an omission rather than a positional `undefined` a
+              // reader has to count arguments to identify.
+              routedTenant: tenant,
+              resumableRunTtlSec: runRetentionTtlSec,
+            },
           );
           phase = "execution";
 
