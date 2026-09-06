@@ -154,7 +154,7 @@ the run starts, so admission can reason about it rather than discovering it.
 
 The framework work — **all of it shipped in PR-A (ADR-0085); kept here as the design record**:
 
-- `redis-checkpointer.ts:250` gains the `opts?: SaveNodeOpts` parameter its own port already
+- `redis-checkpointer.ts:261` gains the `opts?: SaveNodeOpts` parameter its own port already
   declares on `Checkpointer.saveNode`, and encodes via `compositeNodeKey` — the same codec the file
   backend uses. Canonical calls (no opts) must produce byte-identical keys to today, so existing
   runs are unaffected and no migration is required.

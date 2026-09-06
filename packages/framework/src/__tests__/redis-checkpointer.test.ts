@@ -608,6 +608,113 @@ describe("RedisCheckpointer — required corruption observability", () => {
   });
 });
 
+// Driver-failure totality (ADR-0080: "never a raw rejection"). Every hostile
+// seam this adapter owns ITSELF — the injected clock, the load-opts getter,
+// JSON serialization, the corrupt-entry logger — is pinned above. The seam it
+// does NOT own is the one likeliest to fire in production: ioredis rejecting
+// because the connection dropped mid-call. Four `catch` blocks translate that
+// into a typed `cache-error`, and each carries a DIFFERENT `operation` tag, so
+// a reader of a production error can tell which call failed.
+//
+// Untested, all four were free to rot: a refactor that moved a driver call out
+// from under its try would leak a raw rejection through a port declaring
+// `Promise<Result<_, FrameworkError>>`, and a typo'd tag would mislabel the
+// failure — both with the whole suite green. These pin the tag, not just the
+// kind, for exactly that reason.
+//
+// What each stub OMITS is part of its assertion: reaching an unlisted method
+// throws a TypeError rather than resolving typed, so a stub kept minimal also
+// proves the adapter never touched a call the path should not reach.
+describe("RedisCheckpointer — driver-failure totality (the driver rejects)", () => {
+  // The one shared fixture: four tests need the SAME driver fault, so the fault
+  // is never what distinguishes them — only the call it interrupts is.
+  const DROPPED = () => new Error("Connection is closed.");
+
+  test("load: a rejecting GET on the meta key is cache-error(load:get-meta)", async () => {
+    const redis = {
+      get: async () => {
+        throw DROPPED();
+      },
+    } as unknown as Redis;
+
+    const result = await new RedisCheckpointer(redis).load(R("driver-get-meta"));
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a typed refusal");
+    expect(result.error).toMatchObject({ kind: "cache-error", operation: "load:get-meta" });
+  });
+
+  test("load: a rejecting HGETALL on the nodes key is cache-error(load:hgetall-nodes)", async () => {
+    // The meta read and every gate must SUCCEED first, or this would pass for
+    // the wrong reason — the two load-side tags would be indistinguishable.
+    const redis = {
+      get: async () =>
+        JSON.stringify({
+          dagId: "d",
+          startedAt: "2026-01-01T00:00:00.000Z",
+          nodeCount: 1,
+          createdAt: new Date().toISOString(),
+          frameworkVersion: FRAMEWORK_VERSION,
+        }),
+      hgetall: async () => {
+        throw DROPPED();
+      },
+    } as unknown as Redis;
+
+    const result = await new RedisCheckpointer(redis).load(R("driver-hgetall"));
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a typed refusal");
+    expect(result.error).toMatchObject({ kind: "cache-error", operation: "load:hgetall-nodes" });
+  });
+
+  test("saveNode: a NON-NOSCRIPT evalsha rejection is cache-error(saveNode) and does NOT retry via EVAL", async () => {
+    // The NOSCRIPT branch matches on error TEXT. A driver fault that is not a
+    // flushed script must fall through to the typed boundary — replaying it as
+    // an inline EVAL would turn one dropped connection into two.
+    const evalCalls: string[] = [];
+    const redis = {
+      script: async () => "sha-1",
+      evalsha: async () => {
+        throw DROPPED();
+      },
+      eval: async () => {
+        evalCalls.push("eval");
+        return "OK";
+      },
+    } as unknown as Redis;
+
+    const result = await new RedisCheckpointer(redis).saveNode(R("driver-evalsha"), {
+      nodeId: N("n1"),
+      output: { ok: true },
+      completedAt: new Date("2026-08-12T00:00:01Z"),
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a typed refusal");
+    expect(result.error).toMatchObject({ kind: "cache-error", operation: "saveNode" });
+    expect(evalCalls).toEqual([]);
+  });
+
+  test("setMeta: a rejecting SET is cache-error(setMeta)", async () => {
+    const redis = {
+      set: async () => {
+        throw DROPPED();
+      },
+    } as unknown as Redis;
+
+    const result = await new RedisCheckpointer(redis).setMeta(R("driver-set-meta"), {
+      dagId: D("d"),
+      startedAt: new Date("2026-08-12T00:00:00Z"),
+      nodeCount: 1,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a typed refusal");
+    expect(result.error).toMatchObject({ kind: "cache-error", operation: "setMeta" });
+  });
+});
+
 // Redis integration is opt-in, matching the queue adapter tests. Set
 // REDIS_URL=redis://localhost:6379 to run the shared contract and the
 // Redis-specific script-cache regression.

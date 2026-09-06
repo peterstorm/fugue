@@ -130,9 +130,17 @@ export function checkpointerSuite(
 
     // ── Composite addressing (ADR-0075) — port contract since F1 PR-A ───────
     //
-    // These four are the durable precondition for F1's runtime-width fan-out.
-    // If any backend fails them, a mapped node's indices collide and a partial
-    // fan silently restarts from whichever index wrote last on resume.
+    // These five are the durable precondition for F1's runtime-width fan-out,
+    // and they pin the two halves of one contract.
+    //
+    // The first four are ADDRESS DISTINCTNESS: if any backend fails them, a
+    // mapped node's indices collide and a partial fan silently restarts from
+    // whichever index wrote last on resume.
+    //
+    // The fifth is FAIL-CLOSED: a malformed address must issue no write at
+    // all rather than fall back to the canonical key. That fallback is how a
+    // fan index would clobber the node's own checkpoint, so a backend that
+    // passed the first four and skipped this one would still lose data.
 
     test("composite opts store under the composite address, not the bare nodeId", async () => {
       const meta: RunMeta = { dagId: "dag-1" as DagId, startedAt: new Date(), nodeCount: 1 };
