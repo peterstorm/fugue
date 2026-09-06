@@ -1,7 +1,10 @@
 # Plan: F1 — Runtime-width fan-out
 
 **Created:** 2026-09-06
-**Status:** Draft — design agreed, not yet implemented
+**Status:** **PR-A shipped 2026-09-06** (composite checkpoint addressing on every backend — see
+ADR-0085). D7 decided. PR-B (the `map` node itself) is what remains; PR-C and PR-D follow it.
+§2 below is preserved as the evidence record of the state PR-A was written against, annotated
+rather than rewritten — see the note at its head.
 **Branch:** `feat/f1-runtime-width-fanout`
 **Baseline:** `main` @ `3845ad9` (0.5.1 — F6, F4 and F3 all merged; Bun pinned to 1.4.2 by ADR-0084)
 **Roadmap position:** F1 in `docs/spikes/2026-08-02-graph-engineering-findings.md` §F1. The recommended
@@ -31,7 +34,10 @@ of the absent framework boundaries `loom` routes around when it drives orchestra
 
 ## 2. Verified current state
 
-Read on `3845ad9`. This section is what the code actually does, not what the spike assumed.
+Read on `3845ad9`. This section is what the code actually did **before PR-A**, not what the spike
+assumed — it is the evidence record of why PR-A was needed, so it is annotated below rather than
+rewritten. **Rows marked CLOSED were fixed by PR-A** (ADR-0085); the Host row is still open and
+is PR-B's work.
 
 **The outer topology is compile-time and immutable.**
 
@@ -63,8 +69,8 @@ shapes the work breakdown:
 | Backend | Honors composite opts? | Evidence |
 |---|---|---|
 | File | Yes | `file/checkpointer.ts:392` takes and applies `opts` |
-| In-memory | No — deliberately | ADR-0075 / F6 FR-023 |
-| Redis | **No — no `opts` parameter at all** | `checkpoint/redis-checkpointer.ts:250` is `saveNode(runId, state)` |
+| In-memory | ~~No — deliberately~~ **CLOSED by PR-A** | ADR-0075 / F6 FR-023; now honors `opts` (ADR-0085) |
+| Redis | ~~**No — no `opts` parameter at all**~~ **CLOSED by PR-A** | was `saveNode(runId, state)`; now `saveNode(runId, state, opts?)` encoding via `encodeStoredNodeKey` |
 | **Host (production)** | **No — different code path entirely** | see below |
 
 The host does not go through the framework checkpointer port for run checkpoints. It has its own
@@ -146,14 +152,14 @@ the run starts, so admission can reason about it rather than discovering it.
 
 ### D3 — Carry the composite address to Redis and to the host key
 
-The framework work:
+The framework work — **all of it shipped in PR-A (ADR-0085); kept here as the design record**:
 
 - `redis-checkpointer.ts:250` gains the `opts?: SaveNodeOpts` parameter its own port already
   declares on `Checkpointer.saveNode`, and encodes via `compositeNodeKey` — the same codec the file
   backend uses. Canonical calls (no opts) must produce byte-identical keys to today, so existing
   runs are unaffected and no migration is required.
 
-The host work — the part with no current equivalent:
+The host work — **still open, and PR-B's**; no current equivalent:
 
 - `buildCheckpointKey` (`host/src/domain/cache-keys.ts:73`) gains an optional index dimension,
   preserving `fugue:<tenant>:<dagId>:<runId>:<nodeId>` exactly when absent.
