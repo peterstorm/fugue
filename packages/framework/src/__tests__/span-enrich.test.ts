@@ -9,6 +9,7 @@ import { context, trace, type Span } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { enrichLlmSpan } from "../tracing/span-enrich.js";
 import {
+  AI_LLM_COST_PRICED,
   AI_LLM_COST_USD,
   AI_PROMPT_CACHE_EFFECTIVE,
   AI_PROMPT_CACHE_POLICY,
@@ -88,11 +89,6 @@ describe("resolveContentFilter", () => {
     const filter = resolveContentFilter({ contentFilter: IDENTITY_FILTER });
     expect(filter).not.toBeNull();
     expect(filter!("secret")).toBe("secret");
-  });
-
-  it("returns null when contentFilter is null", () => {
-    const filter = resolveContentFilter({ contentFilter: null });
-    expect(filter).toBeNull();
   });
 });
 
@@ -228,6 +224,19 @@ describe("enrichLlmSpan — llm.cost components", () => {
     expect(event).toBeDefined();
     return event?.attrs ?? {};
   };
+
+  it("distinguishes an unpriced zero estimate from a priced zero", () => {
+    const known = captureEnrichment({ ...baseOpts, usage: tokensOnly(0, 0) });
+    const unknown = captureEnrichment({
+      ...baseOpts,
+      model: "unpriced-model",
+      usage: tokensOnly(0, 0),
+    });
+    expect(known.attributes[AI_LLM_COST_USD]).toBe(0);
+    expect(unknown.attributes[AI_LLM_COST_USD]).toBe(0);
+    expect(known.attributes[AI_LLM_COST_PRICED]).toBe(true);
+    expect(unknown.attributes[AI_LLM_COST_PRICED]).toBe(false);
+  });
 
   it("splits the input side by how each prompt token was billed", () => {
     const usage = {

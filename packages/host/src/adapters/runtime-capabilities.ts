@@ -23,9 +23,13 @@ import { createInMemorySpendLedger } from "./spend-ledger-memory.js";
 import { buildDocumentsCapability, describeDocumentsAdapter } from "./documents-capability.js";
 import { buildCdratorCapability } from "./cdrator-capability.js";
 import { buildOracleCapability, connectStringHost } from "./oracle-capability.js";
-import { createHostLlmClient } from "../entrypoint-wiring.js";
+import {
+  createHostLlmClient,
+  hostLlmPricingModel,
+} from "../entrypoint-wiring.js";
 import { createLocalGitAdapter, createBunGitAdapter } from "./git-sync.js";
 import { createModuleLoader } from "./module-loader.js";
+import { logWithoutThrowing } from "../hitl/diagnostic-logging.js";
 
 /**
  * Build the capability array for a host.
@@ -50,35 +54,42 @@ export const buildRuntimeCapabilities = async (
     { name: "clock", client: systemClock },
   ];
 
+  // Each optional adapter is `undefined` when unconfigured (the zero-regression
+  // gate). `describe` stays a thunk: the messages below read config fields that
+  // are only guaranteed present once the adapter itself resolved.
+  const wire = (
+    handle: CapabilityHandle | undefined,
+    describe: () => string,
+  ): void => {
+    if (handle === undefined) return;
+    capabilities.push(handle);
+    logWithoutThrowing(logger, "info", describe(), logContext);
+  };
+
   // ADR-0052: `documents`, selected by environment (fs / ms-graph). The adapter
   // package loads only when configured. `createHost` calls connect() at boot
   // (validating the mount / auth wiring) and close() at shutdown.
-  const documents = await buildDocumentsCapability(config);
-  if (documents !== undefined) {
-    capabilities.push(documents);
-    logger.info(`documents capability: ${describeDocumentsAdapter(config)}`, logContext);
-  }
+  wire(
+    await buildDocumentsCapability(config),
+    () => `documents capability: ${describeDocumentsAdapter(config)}`,
+  );
 
   // FR-060: `authedHttp` — the generic @fuguejs/http-auth adapter configured for
   // the CDRator/Oister REST API from CDRATOR_* env. Credentials come only from
   // config; none are logged.
-  const cdrator = buildCdratorCapability(config);
-  if (cdrator !== undefined) {
-    capabilities.push(cdrator);
-    logger.info(`authedHttp capability: @fuguejs/http-auth targeting ${config.CDRATOR_URL}`, logContext);
-  }
+  wire(
+    buildCdratorCapability(config),
+    () => `authedHttp capability: @fuguejs/http-auth targeting ${config.CDRATOR_URL}`,
+  );
 
   // FR-031/FR-033: `oracle` — a read-only oracledb pool wired from ORACLE_* env.
   // Log ONLY the non-secret host:port/service of the connect string, never
   // user/password (FR-041/SC-008).
-  const oracle = buildOracleCapability(config, logger);
-  if (oracle !== undefined) {
-    capabilities.push(oracle);
-    logger.info(
+  wire(
+    buildOracleCapability(config, logger),
+    () =>
       `oracle capability: @fuguejs/oracle targeting ${connectStringHost(config.ORACLE_CONNECT_STRING!)}`,
-      logContext,
-    );
-  }
+  );
 
   return capabilities;
 };
@@ -104,11 +115,12 @@ export const buildRuntimeDeps = async (
   const capabilities = await buildRuntimeCapabilities(config, logger, logContext);
   const sharedInfra: SharedInfra = {
     llm: await createHostLlmClient(config),
+    llmPricingModel: hostLlmPricingModel(config),
     redis,
-    // The ledger is constructed PER NODE CONTEXT (it binds a tenant + DAG
-    // namespace), so what SharedInfra carries is the process-wide fallback used
-    // when a Redis adapter cannot back one. `createNodeContextForDag` replaces
-    // it with the Redis-backed ledger whenever the primitives are available.
+    // STOCK SELECTION IS EXPLICITLY REDIS-FIRST: the memory adapter carries
+    // metadata role `redis-fallback`, so `createNodeContextForDag` selects a
+    // namespaced Redis ledger whenever its primitives are available and uses
+    // this process-only backend only on a loud downgrade.
     spendLedger: createInMemorySpendLedger(),
     tracer: noopTracer,
     contentFilter: null,

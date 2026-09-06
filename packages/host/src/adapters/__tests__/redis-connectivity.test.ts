@@ -12,14 +12,23 @@
  * plus the typed-`Result` error wrapping every method does, and init failure.
  */
 
-import { describe, it, expect } from "bun:test";
+import { afterAll, beforeAll, describe, it, expect } from "bun:test";
 import {
+  createIoredisRedisPort,
   createRedisConnectivity,
   disconnectRedisQuietly,
   type RedisClientFactory,
 } from "../redis-connectivity.js";
-import { isOk, isErr } from "@fuguejs/framework";
+import {
+  isOk,
+  isErr,
+  makeSpend,
+  microUsd,
+  unpricedModels,
+} from "@fuguejs/framework";
+import type { RedisSpendAppend } from "../../ports.js";
 import type { Redis as IoRedis } from "ioredis";
+import { unpricedModelHashField } from "../../domain/spend-record.js";
 
 // ── Controllable fake ioredis client ─────────────────────────────────────────
 // Only the methods the adapter drives are implemented. Cast to the ioredis type
@@ -32,9 +41,9 @@ interface FakeOverrides {
   readonly getResult?: string | null;
   readonly execNullOnce?: boolean;
   readonly execCommandError?: Error;
+  readonly execCommandErrorAt?: number;
   readonly throwOn?: readonly string[];
   readonly thrownValue?: unknown;
-  readonly expireResult?: number;
 }
 
 class FakeRedis {
@@ -44,6 +53,7 @@ class FakeRedis {
   private readonly throwOn: Set<string>;
   private readonly o: FakeOverrides;
   private readonly values = new Map<string, string>();
+  private readonly hashes = new Map<string, Map<string, string>>();
   private execNullRemaining: number;
 
   constructor(o: FakeOverrides = {}) {
@@ -70,6 +80,9 @@ class FakeRedis {
     return "PONG";
   }
   seed(key: string, value: string): void { this.values.set(key, value); }
+  seedHash(key: string, values: Readonly<Record<string, string>>): void {
+    this.hashes.set(key, new Map(Object.entries(values)));
+  }
   async get(key: string): Promise<string | null> {
     this.rec("get", [key]);
     return "getResult" in this.o ? this.o.getResult ?? null : this.values.get(key) ?? null;
@@ -94,25 +107,37 @@ class FakeRedis {
   }
   multi() {
     this.rec("multi", []);
-    let operation:
+    const operations: Array<
       | { readonly kind: "delete"; readonly key: string }
       | { readonly kind: "expire"; readonly key: string }
+      | { readonly kind: "hash-increment" }
+      | { readonly kind: "hash-set"; readonly key: string; readonly field: string; readonly value: string }
       | { readonly kind: "set"; readonly key: string; readonly value: string; readonly onlyIfAbsent: boolean }
-      | undefined;
+    > = [];
     const chain = {
       del: (key: string) => {
         this.rec("multi.del", [key]);
-        operation = { kind: "delete", key };
+        operations.push({ kind: "delete", key });
         return chain;
       },
       expire: (key: string, seconds: number) => {
         this.rec("multi.expire", [key, seconds]);
-        operation = { kind: "expire", key };
+        operations.push({ kind: "expire", key });
+        return chain;
+      },
+      hset: (key: string, field: string, value: string | number) => {
+        this.rec("multi.hset", [key, field, value]);
+        operations.push({ kind: "hash-set", key, field, value: String(value) });
+        return chain;
+      },
+      hincrby: (key: string, field: string, by: number) => {
+        this.rec("multi.hincrby", [key, field, by]);
+        operations.push({ kind: "hash-increment" });
         return chain;
       },
       set: (key: string, value: string, ...args: unknown[]) => {
         this.rec("multi.set", [key, value, ...args]);
-        operation = { kind: "set", key, value, onlyIfAbsent: args.includes("NX") };
+        operations.push({ kind: "set", key, value, onlyIfAbsent: args.includes("NX") });
         return chain;
       },
       exec: async () => {
@@ -121,23 +146,32 @@ class FakeRedis {
           this.execNullRemaining -= 1;
           return null;
         }
-        if (this.o.execCommandError !== undefined) {
-          return [[this.o.execCommandError, null]] as [Error | null, unknown][];
-        }
-        if (operation?.kind === "delete") {
-          return [[null, this.values.delete(operation.key) ? 1 : 0]] as [Error | null, unknown][];
-        }
-        if (operation?.kind === "expire") {
-          return [[null, this.values.has(operation.key) ? 1 : 0]] as [Error | null, unknown][];
-        }
-        if (operation?.kind === "set") {
+        return operations.map((operation, index): [Error | null, unknown] => {
+          if (
+            this.o.execCommandError !== undefined &&
+            index === (this.o.execCommandErrorAt ?? 0)
+          ) {
+            return [this.o.execCommandError, null];
+          }
+          if (operation.kind === "delete") {
+            return [null, this.values.delete(operation.key) ? 1 : 0];
+          }
+          if (operation.kind === "expire") {
+            return [null, this.values.has(operation.key) ? 1 : 0];
+          }
+          if (operation.kind === "hash-set") {
+            const hash = this.hashes.get(operation.key) ?? new Map<string, string>();
+            hash.set(operation.field, operation.value);
+            this.hashes.set(operation.key, hash);
+            return [null, 1];
+          }
+          if (operation.kind === "hash-increment") return [null, 7];
           if (operation.onlyIfAbsent && this.values.has(operation.key)) {
-            return [[null, null]] as [Error | null, unknown][];
+            return [null, null];
           }
           this.values.set(operation.key, operation.value);
-          return [[null, "OK"]] as [Error | null, unknown][];
-        }
-        return [] as [Error | null, unknown][];
+          return [null, "OK"];
+        });
       },
     };
     return chain;
@@ -162,19 +196,14 @@ class FakeRedis {
     this.rec("smembers", [key]);
     return ["a", "b"];
   }
-  async hincrby(...args: unknown[]): Promise<number> {
-    this.rec("hincrby", args);
-    return 7;
+  async hget(key: string, field: string): Promise<string | null> {
+    this.rec("hget", [key, field]);
+    return this.hashes.get(key)?.get(field) ?? null;
   }
   async hgetall(key: string): Promise<Record<string, string>> {
     this.rec("hgetall", [key]);
-    return { tokens: "10", micros: "5" };
-  }
-  // EXPIRE answers 1 when the key existed and the TTL was set, 0 when it did
-  // not — the adapter's job is to turn that into a boolean.
-  async expire(...args: unknown[]): Promise<number> {
-    this.rec("expire", args);
-    return "expireResult" in this.o ? (this.o.expireResult as number) : 1;
+    const hash = this.hashes.get(key);
+    return hash === undefined ? { tokens: "10", micros: "5" } : Object.fromEntries(hash);
   }
   async quit(): Promise<string> {
     this.rec("quit", []);
@@ -252,6 +281,7 @@ describe("createRedisConnectivity — per-tenant ACL credential override", () =>
     expect(opts().username).toBe("fugue-tenant-acme");
     expect(opts().password).toBe("s3cret");
     expect(opts().lazyConnect).toBe(true);
+    expect(opts().autoResendUnfulfilledCommands).toBe(false);
   });
 
   it("passes NO username/password when no ACL credential is supplied (inherit REDIS_URL auth)", async () => {
@@ -586,55 +616,28 @@ describe("createRedisConnectivity — initialization failure", () => {
   });
 });
 
-describe("createRedisConnectivity — spend-ledger primitives", () => {
-  // These three were added to `RedisPort` for the durable spend ledger and were
-  // only ever exercised through a hand-rolled fake in `spend-ledger.test.ts`,
-  // which never touches the real `redisCall` error-wrapping path. `expire` in
-  // particular does a genuine 1/0 → boolean transform that nothing pinned.
-
-  it("hIncrBy issues HINCRBY and returns the new field value", async () => {
-    const fake = new FakeRedis();
-    const { bundle } = await wire(fake);
-    const result = await bundle.redis.hIncrBy?.("run:spend", "tokens", 150);
-    expect(result !== undefined && isOk(result) && result.value).toBe(7);
-    expect(fake.calls.find((c) => c.m === "hincrby")?.args).toEqual(["run:spend", "tokens", 150]);
-  });
+describe("createRedisConnectivity — spend-ledger capability", () => {
+  const completeAppend: RedisSpendAppend = {
+    key: "run:spend",
+    delta: makeSpend({
+      usage: "known",
+      tokens: 10,
+      calls: 1,
+      usd: {
+        kind: "unpriced",
+        models: unpricedModels(["model-a", "model-z"])!,
+        knownMicros: 7 as never,
+      },
+    }),
+    ttlSec: 900,
+  };
 
   it("hGetAll issues HGETALL and returns every field", async () => {
     const fake = new FakeRedis();
     const { bundle } = await wire(fake);
     const result = await bundle.redis.hGetAll?.("run:spend");
     expect(result !== undefined && isOk(result) && result.value).toEqual({ tokens: "10", micros: "5" });
-    expect(fake.calls.find((c) => c.m === "hgetall")?.args).toEqual(["run:spend"]);
-  });
-
-  it("expire maps Redis's 1 to true and 0 to false", async () => {
-    // The whole point of the coercion: 0 means "no such key", which is a real
-    // answer a caller may act on, not a failure.
-    const applied = await (await wire(new FakeRedis({ expireResult: 1 }))).bundle.redis.expire?.("k", 60);
-    expect(applied !== undefined && isOk(applied) && applied.value).toBe(true);
-
-    const absent = await (await wire(new FakeRedis({ expireResult: 0 }))).bundle.redis.expire?.("k", 60);
-    expect(absent !== undefined && isOk(absent) && absent.value).toBe(false);
-  });
-
-  it("expire issues EXPIRE with the key and seconds", async () => {
-    const fake = new FakeRedis();
-    const { bundle } = await wire(fake);
-    await bundle.redis.expire?.("run:spend", 900);
-    expect(fake.calls.find((c) => c.m === "expire")?.args).toEqual(["run:spend", 900]);
-  });
-
-  it("wraps a thrown hIncrBy as Err(redis-unavailable) naming the command", async () => {
-    // Same contract every other primitive on this port keeps: a driver throw
-    // never escapes as an exception, it becomes a typed Result the ledger can
-    // fail closed on.
-    const { bundle } = await wire(new FakeRedis({ throwOn: ["hincrby"] }));
-    const result = await bundle.redis.hIncrBy?.("k", "f", 1);
-    expect(result !== undefined && isErr(result)).toBe(true);
-    if (result !== undefined && isErr(result) && result.error.kind === "redis-unavailable") {
-      expect(result.error.operation).toMatch(/HINCRBY/);
-    }
+    expect(fake.calls.find((call) => call.m === "hgetall")?.args).toEqual(["run:spend"]);
   });
 
   it("wraps a thrown hGetAll as Err(redis-unavailable)", async () => {
@@ -643,11 +646,515 @@ describe("createRedisConnectivity — spend-ledger primitives", () => {
     expect(result !== undefined && isErr(result)).toBe(true);
   });
 
-  it("wraps a thrown expire as Err(redis-unavailable) — never a bare false", async () => {
-    // The coercion must not swallow a failure into the `false` that legitimately
-    // means "no such key"; those are different answers.
-    const { bundle } = await wire(new FakeRedis({ throwOn: ["expire"] }));
-    const result = await bundle.redis.expire?.("k", 1);
+  it("atomically writes a checkpoint and refreshes spend retention", async () => {
+    const fake = new FakeRedis();
+    const { bundle } = await wire(fake);
+
+    const result = await bundle.redis.commitCheckpointAndRetainSpend?.({
+      checkpointKey: "run:node",
+      checkpointValue: "checkpoint",
+      spendKey: "run:spend",
+      checkpointTtlSec: 300,
+      spendTtlSec: 900,
+    });
+
+    expect(result !== undefined && isOk(result)).toBe(true);
+    expect(fake.calls).toEqual([
+      { m: "multi", args: [] },
+      { m: "multi.set", args: ["run:node", "checkpoint", "EX", 300] },
+      { m: "multi.expire", args: ["run:spend", 900] },
+      { m: "multi.exec", args: [] },
+    ]);
+  });
+
+  // WATCH state is per-CONNECTION, so once a prior transaction's own UNWATCH
+  // cleanup has failed, every later transaction on this shared connection is
+  // unreliable — not only the WATCH-issuing ones. The checkpoint/spend commit
+  // shares that connection and must honour the same poison gate, failing fast
+  // with the recorded diagnostic instead of issuing commands.
+  it("refuses the atomic checkpoint once the shared connection's WATCH state is poisoned", async () => {
+    const fake = new FakeRedis({ throwOn: ["get", "unwatch"] });
+    const { bundle } = await wire(fake);
+
+    const poisoning = await bundle.redis.compareAndDelete("lease", "owner-a");
+    expect(isErr(poisoning)).toBe(true);
+    const callsAfterPoisoning = [...fake.calls];
+
+    const result = await bundle.redis.commitCheckpointAndRetainSpend?.({
+      checkpointKey: "run:node",
+      checkpointValue: "checkpoint",
+      spendKey: "run:spend",
+      checkpointTtlSec: 300,
+      spendTtlSec: 900,
+    });
+
+    expect(result !== undefined && isErr(result)).toBe(true);
+    if (result !== undefined && isErr(result) && result.error.kind === "redis-unavailable") {
+      expect(result.error.operation).toContain("optimistic transactions disabled");
+    }
+    // Fails fast: no MULTI is issued on the poisoned connection.
+    expect(fake.calls).toEqual(callsAfterPoisoning);
+  });
+
+  it("fails the atomic checkpoint when spend retention reports a command error", async () => {
+    const fake = new FakeRedis({
+      execCommandError: new Error("spend retention failed"),
+      execCommandErrorAt: 1,
+    });
+    const { bundle } = await wire(fake);
+
+    const result = await bundle.redis.commitCheckpointAndRetainSpend?.({
+      checkpointKey: "run:node",
+      checkpointValue: "checkpoint",
+      spendKey: "run:spend",
+      checkpointTtlSec: 300,
+      spendTtlSec: 900,
+    });
+
     expect(result !== undefined && isErr(result)).toBe(true);
   });
+
+  it("atomically reads, saturates, and writes markers -> micros -> tokens -> calls -> expiry", async () => {
+    const fake = new FakeRedis();
+    const { bundle } = await wire(fake);
+
+    const result = await bundle.redis.appendSpend?.(completeAppend);
+
+    expect(result !== undefined && isOk(result)).toBe(true);
+    expect(fake.calls).toEqual([
+      { m: "watch", args: ["run:spend"] },
+      { m: "hget", args: ["run:spend", "micros"] },
+      { m: "hget", args: ["run:spend", "tokens"] },
+      { m: "hget", args: ["run:spend", "calls"] },
+      { m: "multi", args: [] },
+      { m: "multi.hset", args: ["run:spend", unpricedModelHashField("model-a"), "1"] },
+      { m: "multi.hset", args: ["run:spend", unpricedModelHashField("model-z"), "1"] },
+      { m: "multi.hset", args: ["run:spend", "micros", 7] },
+      { m: "multi.hset", args: ["run:spend", "tokens", 10] },
+      { m: "multi.hset", args: ["run:spend", "calls", 1] },
+      { m: "multi.expire", args: ["run:spend", 900] },
+      { m: "multi.exec", args: [] },
+    ]);
+    expect(fake.calls.some((call) => ["hset", "hincrby", "expire"].includes(call.m))).toBe(false);
+    expect(fake.calls.some((call) => call.m.toLowerCase().includes("eval"))).toBe(false);
+  });
+
+  it("omits zero numeric writes and expiry while retaining one optimistic transaction", async () => {
+    const fake = new FakeRedis();
+    const { bundle } = await wire(fake);
+
+    const result = await bundle.redis.appendSpend?.({
+      key: "run:spend",
+      delta: makeSpend({
+        usage: "known",
+        tokens: 0,
+        calls: 1,
+        usd: { kind: "priced", micros: 0 as never },
+      }),
+    });
+
+    expect(result !== undefined && isOk(result)).toBe(true);
+    expect(fake.calls).toEqual([
+      { m: "watch", args: ["run:spend"] },
+      { m: "hget", args: ["run:spend", "micros"] },
+      { m: "hget", args: ["run:spend", "tokens"] },
+      { m: "hget", args: ["run:spend", "calls"] },
+      { m: "multi", args: [] },
+      { m: "multi.hset", args: ["run:spend", "calls", 1] },
+      { m: "multi.exec", args: [] },
+    ]);
+  });
+
+  // ── Corrupt hash field: append vs read (round-13 A11) ──────────────────────
+  // The two paths classify the SAME corruption differently and deliberately:
+  // an append cannot know whether it raced a concurrent writer, so it reports a
+  // RETRYABLE `redis-unavailable`; a read is a settled observation of a
+  // corrupt record and reports a non-retryable `internal-invariant-violated`.
+  // Nothing seeded corruption ahead of an append, so neither was pinned and the
+  // divergence could have been mistaken for a bug and "fixed" either way.
+
+  it("classifies a corrupt field as retryable on append", async () => {
+    for (const corrupt of ["not-a-number", "1.5", "-3", "", " 7", "0x10", "1e3"]) {
+      const fake = new FakeRedis();
+      fake.seedHash("run:spend", { micros: corrupt, tokens: "1", calls: "1" });
+      const { bundle } = await wire(fake);
+
+      const result = await bundle.redis.appendSpend?.({
+        key: "run:spend",
+        delta: makeSpend({
+          usage: "known",
+          tokens: 1,
+          calls: 1,
+          usd: { kind: "priced", micros: 1 as never },
+        }),
+      });
+
+      expect(result !== undefined && isErr(result)).toBe(true);
+      if (result !== undefined && isErr(result)) {
+        expect(result.error.kind).toBe("redis-unavailable");
+      }
+    }
+  });
+
+  it("does not commit a partial transaction when it finds a corrupt field", async () => {
+    // Fail-closed: a corrupt read must abort BEFORE any EXEC, or the append
+    // would write some axes and abandon others, deepening the corruption.
+    const fake = new FakeRedis();
+    fake.seedHash("run:spend", { micros: "not-a-number", tokens: "1", calls: "1" });
+    const { bundle } = await wire(fake);
+
+    await bundle.redis.appendSpend?.({
+      key: "run:spend",
+      delta: makeSpend({
+        usage: "known",
+        tokens: 1,
+        calls: 1,
+        usd: { kind: "priced", micros: 1 as never },
+      }),
+    });
+
+    expect(fake.calls.filter((call) => call.m === "multi.exec")).toHaveLength(0);
+    expect(await fake.hgetall("run:spend")).toEqual({
+      micros: "not-a-number",
+      tokens: "1",
+      calls: "1",
+    });
+  });
+
+  it("saturates every cumulative axis at the safe-integer ceiling", async () => {
+    const fake = new FakeRedis();
+    const almostMax = String(Number.MAX_SAFE_INTEGER - 5);
+    fake.seedHash("run:spend", {
+      micros: almostMax,
+      tokens: almostMax,
+      calls: almostMax,
+    });
+    const { bundle } = await wire(fake);
+
+    const result = await bundle.redis.appendSpend?.({
+      key: "run:spend",
+      delta: makeSpend({
+        usage: "known",
+        tokens: 10,
+        calls: 10,
+        usd: { kind: "priced", micros: 10 as never },
+      }),
+    });
+
+    expect(result !== undefined && isOk(result)).toBe(true);
+    expect(await fake.hgetall("run:spend")).toEqual({
+      micros: String(Number.MAX_SAFE_INTEGER),
+      tokens: String(Number.MAX_SAFE_INTEGER),
+      calls: String(Number.MAX_SAFE_INTEGER),
+    });
+    expect(fake.calls.filter((call) => call.m === "multi.hset").map((call) => call.args))
+      .toEqual([
+        ["run:spend", "micros", Number.MAX_SAFE_INTEGER],
+        ["run:spend", "tokens", Number.MAX_SAFE_INTEGER],
+        ["run:spend", "calls", Number.MAX_SAFE_INTEGER],
+      ]);
+  });
+
+  it("inspects every EXEC result and returns a typed failure from the final EXPIRE", async () => {
+    const fake = new FakeRedis({
+      execCommandError: new Error("second EXPIRE failed"),
+      execCommandErrorAt: 5,
+    });
+    const { bundle } = await wire(fake);
+
+    const result = await bundle.redis.appendSpend?.(completeAppend);
+
+    expect(result !== undefined && isErr(result)).toBe(true);
+    if (result !== undefined && isErr(result) && result.error.kind === "redis-unavailable") {
+      expect(result.error.operation).toContain("second EXPIRE failed");
+    }
+  });
+
+  it("retries definite WATCH conflicts but returns typed failures for thrown acknowledgements", async () => {
+    const conflicted = new FakeRedis({ execNullOnce: true });
+    const retried = await (await wire(conflicted)).bundle.redis.appendSpend?.(completeAppend);
+    expect(retried !== undefined && isOk(retried)).toBe(true);
+    expect(conflicted.calls.filter((call) => call.m === "multi.exec")).toHaveLength(2);
+
+    const thrown = await (await wire(new FakeRedis({ throwOn: ["multi.exec"] }))).bundle.redis
+      .appendSpend?.(completeAppend);
+    expect(thrown !== undefined && isErr(thrown)).toBe(true);
+    if (thrown !== undefined && isErr(thrown) && thrown.error.kind === "redis-unavailable") {
+      expect(thrown.error.operation).toContain("SPEND-APPEND");
+    }
+  });
 });
+
+// ── Transaction serialization (no live Redis required) ──────────────────────
+// The invariant that a checkpoint commit cannot interleave with an in-flight
+// spend append is what stops a commit's EXEC from clearing the append's WATCH
+// guard and silently undercounting spend. It was pinned ONLY by the REDIS_URL-
+// gated suite below, so a bare `bun test` never exercised it. `serializeTransaction`
+// is pure promise-chaining over the injected client, so a fake proves the
+// ordering everywhere.
+describe("createIoredisRedisPort — transaction serialization (fake client)", () => {
+  it("holds a checkpoint commit behind an in-flight spend append", async () => {
+    const calls: string[] = [];
+    let releaseAppend: () => void = () => {};
+    const appendReachedRead = Promise.withResolvers<void>();
+    const appendMayProceed = new Promise<void>((resolve) => { releaseAppend = resolve; });
+
+    const multi = () => {
+      const queued: unknown[] = [];
+      const chain = {
+        hset: (...a: unknown[]) => { queued.push(a); return chain; },
+        expire: (...a: unknown[]) => { queued.push(a); return chain; },
+        set: (...a: unknown[]) => { queued.push(a); return chain; },
+        exec: async () => queued.map(() => [null, "OK"] as const),
+      };
+      return chain;
+    };
+
+    const client = {
+      watch: async () => { calls.push("append:watch"); return "OK"; },
+      unwatch: async () => "OK",
+      hget: async () => {
+        // Park the append mid-transaction, after WATCH and before EXEC.
+        appendReachedRead.resolve();
+        await appendMayProceed;
+        return null;
+      },
+      multi: () => { calls.push("multi"); return multi(); },
+    } as unknown as IoRedis;
+
+    const port = createIoredisRedisPort(client);
+
+    const append = port.appendSpend!({
+      key: "spend",
+      delta: makeSpend({
+        usage: "known",
+        tokens: 1,
+        calls: 1,
+        usd: { kind: "priced", micros: microUsd(1) },
+      }),
+    } as RedisSpendAppend);
+
+    await appendReachedRead.promise;
+
+    let commitSettled = false;
+    const commit = port.commitCheckpointAndRetainSpend!({
+      checkpointKey: "ckpt",
+      checkpointValue: "v",
+      spendKey: "spend",
+      checkpointTtlSec: 10,
+      spendTtlSec: 10,
+    }).then((r) => { commitSettled = true; return r; });
+
+    // Give the commit every chance to jump the queue.
+    await Promise.resolve();
+    await Bun.sleep(5);
+    expect(commitSettled).toBe(false);
+    // The append has WATCHed but nothing has reached MULTI yet.
+    expect(calls).toEqual(["append:watch"]);
+
+    releaseAppend();
+    expect(isOk(await append)).toBe(true);
+    expect(isOk(await commit)).toBe(true);
+    // The append's MULTI ran to completion before the commit's.
+    expect(calls).toEqual(["append:watch", "multi", "multi"]);
+  });
+});
+
+const liveRedisUrl = process.env.REDIS_URL;
+
+describe.skipIf(liveRedisUrl === undefined)(
+  "createIoredisRedisPort — real Redis spend transactions",
+  () => {
+    let bundle: Extract<
+      Awaited<ReturnType<typeof createRedisConnectivity>>,
+      { readonly ok: true }
+    >["value"];
+    let observer: IoRedis;
+    const prefix = `fugue:test:spend:${crypto.randomUUID()}`;
+
+    beforeAll(async () => {
+      if (liveRedisUrl === undefined) return;
+      const connected = await createRedisConnectivity(liveRedisUrl);
+      if (!connected.ok) throw new Error(`Redis test connection failed: ${connected.error.kind}`);
+      bundle = connected.value;
+      const { Redis } = await import("ioredis");
+      observer = new Redis(liveRedisUrl);
+    });
+
+    afterAll(async () => {
+      if (liveRedisUrl === undefined) return;
+      await observer.del(`${prefix}:spend`, `${prefix}:saturated`, `${prefix}:checkpoint`);
+      await observer.quit();
+      await bundle.disconnect();
+    });
+
+    it("commits concurrent additive deltas, marker union, and one spend TTL", async () => {
+      const key = `${prefix}:spend`;
+      const append = bundle.redis.appendSpend;
+      if (append === undefined) throw new Error("appendSpend is not wired");
+      const models = unpricedModels(["model-a", "model-z"]);
+      if (models === undefined) throw new Error("expected canonical models");
+      const delta = makeSpend({
+        usage: "unknown",
+        tokens: 3,
+        calls: 1,
+        usd: { kind: "unpriced", models, knownMicros: 2 as never },
+      });
+      const outcomes = await Promise.all(
+        Array.from({ length: 8 }, () => append({ key, delta, ttlSec: 30 })),
+      );
+      expect(outcomes.every(isOk)).toBe(true);
+      expect(await observer.hgetall(key)).toEqual({
+        "$unpriced:006d006f00640065006c002d0061": "1",
+        "$unpriced:006d006f00640065006c002d007a": "1",
+        "$usage:unknown": "1",
+        calls: "8",
+        micros: "16",
+        tokens: "24",
+      });
+      expect(await observer.ttl(key)).toBeGreaterThan(0);
+    });
+
+    it("keeps cumulative overflow readable by saturating all axes", async () => {
+      const key = `${prefix}:saturated`;
+      const append = bundle.redis.appendSpend;
+      if (append === undefined) throw new Error("appendSpend is not wired");
+      const amount = (value: number) => makeSpend({
+        usage: "known",
+        tokens: value,
+        calls: value,
+        usd: { kind: "priced", micros: value as never },
+      });
+
+      expect((await append({ key, delta: amount(Number.MAX_SAFE_INTEGER - 5) })).ok).toBe(true);
+      expect((await append({ key, delta: amount(10) })).ok).toBe(true);
+      expect(await observer.hgetall(key)).toEqual({
+        calls: String(Number.MAX_SAFE_INTEGER),
+        micros: String(Number.MAX_SAFE_INTEGER),
+        tokens: String(Number.MAX_SAFE_INTEGER),
+      });
+    });
+
+    it("keeps checkpoint EXEC behind WATCH and retries after a second-client mutation", async () => {
+      if (liveRedisUrl === undefined) return;
+      const { Redis } = await import("ioredis");
+      const primary = new Redis(liveRedisUrl);
+      const competitor = new Redis(liveRedisUrl);
+      const spendKey = `${prefix}:interleaved-spend`;
+      const checkpointKey = `${prefix}:interleaved-checkpoint`;
+      let releaseReads: () => void = () => {};
+      const readsReleased = new Promise<void>((resolve) => { releaseReads = resolve; });
+      let reportReadsCaptured: () => void = () => {};
+      const readsCaptured = new Promise<void>((resolve) => { reportReadsCaptured = resolve; });
+      let hgetReads = 0;
+      let multiCalls = 0;
+      const client = new Proxy(primary, {
+        get(target, property) {
+          if (property === "hget") {
+            return async (key: string, field: string) => {
+              const value = await target.hget(key, field);
+              hgetReads += 1;
+              if (hgetReads === 3) {
+                reportReadsCaptured();
+                await readsReleased;
+              }
+              return value;
+            };
+          }
+          if (property === "multi") {
+            return (...args: Parameters<IoRedis["multi"]>) => {
+              multiCalls += 1;
+              return target.multi(...args);
+            };
+          }
+          const member = Reflect.get(target, property, target) as unknown;
+          return typeof member === "function" ? member.bind(target) : member;
+        },
+      }) as IoRedis;
+      const redis = createIoredisRedisPort(client);
+      const append = redis.appendSpend;
+      const commit = redis.commitCheckpointAndRetainSpend;
+      if (append === undefined || commit === undefined) {
+        throw new Error("spend transaction operations are not wired");
+      }
+
+      try {
+        await competitor.del(spendKey, checkpointKey);
+        await competitor.hset(spendKey, "micros", "10", "tokens", "10", "calls", "10");
+        const appended = append({
+          key: spendKey,
+          delta: makeSpend({
+            usage: "known",
+            tokens: 2,
+            calls: 1,
+            usd: { kind: "priced", micros: 1 as never },
+          }),
+        });
+        await readsCaptured;
+
+        const checkpointed = commit({
+          checkpointKey,
+          checkpointValue: "checkpoint",
+          spendKey,
+          checkpointTtlSec: 30,
+          spendTtlSec: 60,
+        });
+        expect(multiCalls).toBe(0);
+        await competitor.hincrby(spendKey, "tokens", 5);
+        releaseReads();
+
+        const [appendResult, checkpointResult] = await Promise.all([appended, checkpointed]);
+        expect(appendResult.ok).toBe(true);
+        expect(checkpointResult.ok).toBe(true);
+        expect(hgetReads).toBe(6);
+        expect(await competitor.hgetall(spendKey)).toEqual({
+          calls: "11",
+          micros: "11",
+          tokens: "17",
+        });
+        expect(await competitor.get(checkpointKey)).toBe("checkpoint");
+      } finally {
+        releaseReads();
+        await competitor.del(spendKey, checkpointKey);
+        await Promise.all([primary.quit(), competitor.quit()]);
+      }
+    });
+
+    it("atomically writes a checkpoint while retaining spend longer", async () => {
+      const spendKey = `${prefix}:spend`;
+      const checkpointKey = `${prefix}:checkpoint`;
+      await observer.del(spendKey, checkpointKey);
+      const append = bundle.redis.appendSpend;
+      const commit = bundle.redis.commitCheckpointAndRetainSpend;
+      if (append === undefined || commit === undefined) {
+        throw new Error("checkpoint/spend operations are not wired");
+      }
+      const seeded = await append({
+        key: spendKey,
+        delta: makeSpend({
+          usage: "known",
+          tokens: 1,
+          calls: 1,
+          usd: { kind: "priced", micros: 1 as never },
+        }),
+        ttlSec: 5,
+      });
+      expect(seeded.ok).toBe(true);
+      const result = await commit({
+        checkpointKey,
+        checkpointValue: "checkpoint",
+        spendKey,
+        checkpointTtlSec: 5,
+        spendTtlSec: 30,
+      });
+      expect(result.ok).toBe(true);
+      expect(await observer.get(checkpointKey)).toBe("checkpoint");
+      const [checkpointTtl, spendTtl] = await Promise.all([
+        observer.ttl(checkpointKey),
+        observer.ttl(spendKey),
+      ]);
+      expect(checkpointTtl).toBeGreaterThan(0);
+      expect(spendTtl).toBeGreaterThan(checkpointTtl);
+    });
+  },
+);

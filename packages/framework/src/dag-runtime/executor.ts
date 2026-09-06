@@ -1,6 +1,9 @@
 // buildDagExecutor — DAG executor closure
 // Orchestrates wave execution, retry backoff with jitter, and human-review hook dispatch.
-// Returns an Executor<DagPhase, DagEvent, DagMachineContext> that runs one wave per call.
+// Returns an Executor<DagPhase, DagEvent, DagMachineContext> that advances the DAG
+// by one step per call. That step is a wave for `running`/`retrying`; the
+// human-gate phases (`awaiting-human`, `suspended`, `retrying-hook`) dispatch no
+// wave at all, and `pending` only emits the `start` event.
 //
 // Requirement → ADR cross-reference:
 //   FR-005  → ADR-0003 (event sourcing, checkpoint after every transition)
@@ -17,11 +20,11 @@ import { match, P } from "ts-pattern";
 import type { Executor } from "../state-machine/types.js";
 import type { DagPhase, DagEvent, DagMachineContext } from "./types.js";
 import type { DagDef } from "../types/dag.js";
-import type { NodeDef, NodeContext, ValidatedNodeContext } from "../types/node.js";
+import type { Capability, NodeDef, NodeContext, ValidatedNodeContext } from "../types/node.js";
 import type { MintingAuthority } from "../types/capability-broker.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeId, DagId } from "../types/ids.js";
-import { emit } from "./emit.js";
+import { nodeErrorEmitter } from "./post-wave-context.js";
 import { applyJitter, DEFAULT_JITTER_RATIO } from "../shared/jitter.js";
 import { emitHumanIntervention } from "./human-emission.js";
 import { executeWave, type WaveConfig } from "./wave-execution.js";
@@ -57,7 +60,10 @@ const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
 const validateApproveEdit = (
   action: import("./types.js").HumanAction,
   nodeId: NodeId,
-  nodeMap: Map<NodeId, NodeDef<unknown, unknown>>,
+  nodeMap: Map<
+    NodeId,
+    NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>
+  >,
 ): string | null => {
   if (action.kind !== "approve-with-edit") return null;
   const nodeDef = nodeMap.get(nodeId);
@@ -73,8 +79,8 @@ const validateApproveEdit = (
 
 /**
  * The human-review hook the executor calls when a node's wave suspends. Declared
- * once (round-38 cs-3) rather than inlined at both the private helper and the
- * public `buildDagExecutor` signature, so the two can never drift.
+ * once rather than inlined at both the private helper and the public
+ * `buildDagExecutor` signature, so the two can never drift.
  */
 export type OnHumanReviewHook = (req: {
   nodeId: NodeId;
@@ -83,23 +89,50 @@ export type OnHumanReviewHook = (req: {
 }) => Promise<import("./types.js").HumanReviewOutcome>;
 
 /**
+ * One invocation of the shared human-review body. Bundled rather than passed
+ * positionally — nine positional arguments of which four are `NodeId`/`DagId`/
+ * `unknown`/function are trivially transposable at the call site, the same
+ * reason `post-wave-context.ts` replaced its own 10- and 7-argument calls.
+ */
+interface HumanReviewHookCall {
+  readonly phaseKind: "awaiting-human" | "retrying-hook" | "suspended";
+  readonly nodeId: NodeId;
+  readonly output: unknown;
+  readonly prompt: NonEmptyString;
+  readonly hooks: { onHumanReview?: OnHumanReviewHook } | undefined;
+  readonly nodeMap: Map<
+    NodeId,
+    NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>
+  >;
+  readonly nodeCtx: NodeContext;
+  readonly dagId: DagId;
+  readonly nowFn: () => number;
+}
+
+/**
  * Shared body of the `awaiting-human`, `suspended`, and `retrying-hook`
  * executor branches. All three paths check for a wired hook, invoke it, catch
- * exceptions into `node-failed`, validate edited output, and emit the resulting
- * response/suspend event. Retry sleep remains at the call site.
+ * exceptions into `node-failed`, validate edited output, and RETURN the
+ * resulting response/suspend event. Emission is the caller's job: only
+ * `handleHumanGate` calls `emitHumanIntervention`, so the observer sees one
+ * event per gate no matter which of the three branches produced it. Retry sleep
+ * likewise remains at the call site.
  */
 const callHumanReviewHook = async (
-  phaseKind: "awaiting-human" | "retrying-hook" | "suspended",
-  nodeId: NodeId,
-  output: unknown,
-  prompt: NonEmptyString,
-  hooks: { onHumanReview?: OnHumanReviewHook } | undefined,
-  nodeMap: Map<NodeId, NodeDef<unknown, unknown>>,
-  nodeCtx: NodeContext,
-  dagId: DagId,
-  nowFn: () => number,
+  call: HumanReviewHookCall,
 ): Promise<UnenrichedDagEvent> => {
-  const stamp = (): Date => new Date(nowFn());
+  const { phaseKind, nodeId, output, prompt, hooks, nodeMap, nodeCtx, dagId, nowFn } = call;
+  // THE shared node-error emission (`post-wave-context.ts`), not a third copy:
+  // this one had already drifted from the other two by carrying a `stack`.
+  const emitNodeError = nodeErrorEmitter({ nodeCtx, nodeMap, dagId, nowFn });
+  const emitFailure = (
+    frameworkError: FrameworkError,
+    message: string,
+    stack?: string,
+  ): UnenrichedDagEvent => {
+    emitNodeError(nodeId, message, frameworkError, stack);
+    return { type: "node-failed", nodeId, error: frameworkError };
+  };
   if (!hooks?.onHumanReview) {
     return {
       type: "node-failed",
@@ -119,23 +152,14 @@ const callHumanReviewHook = async (
   } catch (e) {
     const message = safeErrorMessage(e);
     const stack = safeErrorStack(e);
-    const crash: FrameworkError = { kind: "node-crash", nodeId, retriability: "retriable", message, ...(stack !== undefined ? { stack } : {}) };
-    emit(nodeCtx, {
-      type: "node-error",
-      runId: nodeCtx.runId,
-      dagId,
+    const crash: FrameworkError = {
+      kind: "node-crash",
       nodeId,
-      sideEffects: nodeMap.get(nodeId)?.sideEffects,
-      timestamp: stamp(),
-      error: message,
-      stack,
-      frameworkError: crash,
-    });
-    return {
-      type: "node-failed",
-      nodeId,
-      error: crash,
-    } satisfies DagEvent;
+      retriability: "retriable",
+      message,
+      ...(stack !== undefined ? { stack } : {}),
+    };
+    return emitFailure(crash, message, stack);
   }
 
   // ADR-0060: hook declined to decide → park the run. `human-suspend` drives
@@ -155,21 +179,7 @@ const callHumanReviewHook = async (
       nodeId,
       message: validationFailure,
     };
-    emit(nodeCtx, {
-      type: "node-error",
-      runId: nodeCtx.runId,
-      dagId,
-      nodeId,
-      sideEffects: nodeMap.get(nodeId)?.sideEffects,
-      timestamp: stamp(),
-      error: validationFailure,
-      frameworkError: valErr,
-    });
-    return {
-      type: "node-failed",
-      nodeId,
-      error: valErr,
-    } satisfies DagEvent;
+    return emitFailure(valErr, validationFailure);
   }
 
   return { type: "human-responded", nodeId, action } satisfies UnenrichedDagEvent;
@@ -185,22 +195,30 @@ const callHumanReviewHook = async (
  * 1. `pending`: returns a `start` event (drives the first transition).
  * 2. `running`: runs the full wave via Promise.all, returns `wave-done` or
  *    `node-failed` for the first failure.
- * 3. `retrying`: sleeps for `nextDelayMs * jitter` then re-runs the failed node.
+ * 3. `retrying`: sleeps for `nextDelayMs * jitter` then re-enters the wave —
+ *    but NOT every node in it runs again. `handleNodeFailed` merged the failed
+ *    attempt's `partialOutputs` into `ctx.outputs`, so `executeWave` finds the
+ *    already-succeeded siblings in `priorOutputs` and skips them via
+ *    `node-skipped`/`already-completed`, returning the carried output instead of
+ *    re-running the side effect. Only the failed node and any `coFailedNodeIds`
+ *    re-execute, which is why THOSE nodes' `run` functions must be idempotent
+ *    under retry.
  *    Returns `wave-done` (if all nodes in the wave now pass) or `node-failed`.
  * 4. `awaiting-human` / `suspended` / `retrying-hook` (ADR-0060): dispatches the
  *    `onHumanReview` hook (the latter two are handled identically to
  *    `awaiting-human`; `retrying-hook` additionally honours `nextDelayMs`).
  *    Returns `human-responded` (a decision is present), `human-suspend` (the
- *    hook returned `pending` → park the run), or `node-failed` (the hook threw
- *    or an edited output failed schema validation).
+ *    hook returned `pending` → park the run), or `node-failed` — which covers
+ *    three causes, not two: no `onHumanReview` hook is wired at all, the wired
+ *    hook threw, or an edited output failed schema validation.
  *
  * Terminal phases (`succeeded`, `failed`) are unreachable here — the runner's
  * `isTerminal` guard stops the loop first — so those branches throw.
  *
  * The executor never performs state transitions — it only produces DagEvents.
- * Observer events (node-start, node-end, node-error, run-start, run-end) are
- * emitted here so consumers see the full run-start / node-start / node-end /
- * run-end stream regardless of the execution path.
+ * Node observer events are emitted by the wave/node helpers and the human-gate
+ * path. Run-start/run-end belong to `run-dag-stateful.ts`, which wraps this
+ * executor so run telemetry remains balanced across compile and setup failures.
  */
 export const buildDagExecutor = (
   dag: DagDef,
@@ -244,7 +262,10 @@ export const buildDagExecutor = (
     minting?: MintingAuthority;
   },
 ): Executor<DagPhase, DagEvent, DagMachineContext> => {
-  const nodeMap = new Map<NodeId, NodeDef<unknown, unknown>>(
+  const nodeMap = new Map<
+    NodeId,
+    NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>
+  >(
     dag.nodes.map((n) => [n.id, n]),
   );
   const recordOutcomes = hooks?.recordOutcomes;
@@ -294,7 +315,9 @@ export const buildDagExecutor = (
     }
 
     const awaitStartMs = nowFn();
-    const rawEvent = await callHumanReviewHook(phaseKind, nodeId, output, prompt, hooks, nodeMap, nodeCtx, dag.id, nowFn);
+    const rawEvent = await callHumanReviewHook({
+      phaseKind, nodeId, output, prompt, hooks, nodeMap, nodeCtx, dagId: dag.id, nowFn,
+    });
     const enrichResult = enrichHumanRespondedEvent(rawEvent, machineCtx);
     if (enrichResult.kind === "err") {
       return { type: "node-failed", nodeId: enrichResult.nodeId, error: enrichResult.error } satisfies DagEvent;
@@ -372,11 +395,8 @@ export const buildDagExecutor = (
       // Terminal states — unreachable per runner's isTerminal guard.
       // Throw to surface the invariant violation.
       // -----------------------------------------------------------------------
-      .with({ kind: "succeeded" }, () => {
-        throw new Error("buildDagExecutor: unreachable — terminal succeeded");
-      })
-      .with({ kind: "failed" }, () => {
-        throw new Error("buildDagExecutor: unreachable — terminal failed");
+      .with({ kind: "succeeded" }, { kind: "failed" }, (p) => {
+        throw new Error(`buildDagExecutor: unreachable — terminal ${p.kind}`);
       })
       .exhaustive();
 };

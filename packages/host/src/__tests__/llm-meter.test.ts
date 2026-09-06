@@ -2,9 +2,11 @@
  * Tests for the pure llm-meter ADT (domain/llm-meter.ts).
  *
  * Covers accumulation, per-run isolation, immutability, the admission decision,
- * the overshoot-by-one rule (FR-W1-004 / SC-003), the no-budget passthrough
+ * the sequential crossing-call allowance (FR-W1-004), learned estimate-based
+ * reservation accounting for concurrency (SC-003), the no-budget passthrough
  * (FR-W1-006), the multi-ceiling decision (FR-B-002), the settled-vs-projected
- * basis (FR-B-013), and property-based invariants.
+ * basis (FR-B-013), and property-based invariants. SC-003 does not promise a
+ * one-call bound for a first burst or for later calls larger than the estimate.
  *
  * The meter accumulates `Spend`, not tokens. The value algebra itself is tested
  * in the framework (`spend.test.ts`, `budget.test.ts`); what is tested here is
@@ -22,6 +24,8 @@ import {
   pricedCall,
   unpricedCall,
   usdToMicros,
+  firstBreach,
+  remainingFor,
 } from "@fuguejs/framework";
 import {
   emptyMeter,
@@ -29,8 +33,11 @@ import {
   spendFor,
   emptyReservation,
   admit,
+  admitCandidate,
+  type CandidatePricing,
   releaseReservation,
   learnObservedCall,
+  projectedSpend,
   type LlmMeter,
   type ReservationState,
 } from "../domain/llm-meter.js";
@@ -53,6 +60,30 @@ const freeCall = (n: number): Spend => pricedCall(n, micros(0));
 const runA = makeRunId("run-a");
 const runB = makeRunId("run-b");
 
+const reservationWith = (inFlight: number, maxObservedCall: Spend): ReservationState => {
+  let state = learnObservedCall(emptyReservation, maxObservedCall);
+  for (let index = 0; index < inFlight; index += 1) {
+    const decision = admit(emptyMeter(), runA, state);
+    if (decision.kind !== "admit") throw new Error("unbudgeted reservation must admit");
+    state = decision.state;
+  }
+  return state;
+};
+
+const meterTypePins = (): void => {
+  // @ts-expect-error — only emptyMeter/accumulate can construct the branded meter.
+  const forged: LlmMeter = { spendByRun: new Map([[runA, NO_SPEND]]) };
+  void forged;
+};
+void meterTypePins;
+
+const reservationTypePins = (): void => {
+  // @ts-expect-error — callers cannot forge structural or negative reservation states.
+  const invalid: ReservationState = { inFlight: -1, maxObservedCall: NO_SPEND };
+  void invalid;
+};
+void reservationTypePins;
+
 // ---------------------------------------------------------------------------
 // Accumulation
 // ---------------------------------------------------------------------------
@@ -68,6 +99,7 @@ describe("llm-meter: accumulate + spendFor", () => {
   it("adds a settled call to a run's running total", () => {
     const meter = accumulate(emptyMeter(), runA, pricedCall(150, micros(2_000)));
     expect(spendFor(meter, runA)).toEqual({
+      usage: "known",
       tokens: 150,
       calls: 1,
       usd: { kind: "priced", micros: micros(2_000) },
@@ -80,6 +112,7 @@ describe("llm-meter: accumulate + spendFor", () => {
       emptyMeter(),
     );
     expect(spendFor(meter, runA)).toEqual({
+      usage: "known",
       tokens: 300,
       calls: 3,
       usd: { kind: "priced", micros: micros(1_500) },
@@ -105,6 +138,21 @@ describe("llm-meter: accumulate + spendFor", () => {
     expect(meter.spendByRun.has(runA)).toBe(true);
     expect((meter.spendByRun as unknown as Record<string, unknown>)["set"]).toBeUndefined();
     expect(Object.isFrozen(meter)).toBe(true);
+  });
+
+  it("deeply freezes nested spend snapshots at the meter seam", () => {
+    const meter = accumulate(emptyMeter(), runA, unpricedCall(5, "nested-model"));
+    const exposed = meter.spendByRun.get(runA);
+    expect(exposed).toBeDefined();
+    if (exposed === undefined || exposed.usd.kind !== "unpriced") return;
+
+    expect(Object.isFrozen(exposed)).toBe(true);
+    expect(Object.isFrozen(exposed.usd)).toBe(true);
+    expect(Object.isFrozen(exposed.usd.models)).toBe(true);
+    expect(() => (exposed.usd.models as unknown as string[]).push("poison")).toThrow();
+    const later = spendFor(meter, runA);
+    if (later.usd.kind !== "unpriced") throw new Error("expected unpriced spend");
+    expect([...later.usd.models]).toEqual(["nested-model"]);
   });
 
   it("carries an unpriced call into the run total, absorbing", () => {
@@ -141,10 +189,10 @@ describe("llm-meter: admit with no ceilings (FR-W1-006)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Admission — the overshoot-by-one contract
+// Admission — the sequential crossing-call allowance
 // ---------------------------------------------------------------------------
 
-describe("llm-meter: overshoot-by-one (FR-W1-004 / SC-003)", () => {
+describe("llm-meter: sequential crossing call (FR-W1-004)", () => {
   it("admits the call that crosses the boundary and refuses the next one", () => {
     // The check is BEFORE the call and against settled spend, so exactly one
     // call runs past the ceiling. That single overshoot is the documented
@@ -227,8 +275,8 @@ describe("llm-meter: any declared ceiling refuses (FR-B-002)", () => {
 
 describe("llm-meter: reservation bounds concurrent overshoot (SC-003)", () => {
   it("lets the first parallel burst through while no estimate has been learned", () => {
-    // The documented FR-W1-004 allowance, generalised: with no settled call yet
-    // there is nothing to estimate a concurrent call's size from.
+    // With no settled call yet there is nothing from which SC-003 can estimate
+    // a concurrent call's size; this first burst has no one-call bound.
     const limits = limitsOf([tokens(1000)]);
     let state: ReservationState = emptyReservation;
     for (let i = 0; i < 5; i += 1) {
@@ -244,7 +292,7 @@ describe("llm-meter: reservation bounds concurrent overshoot (SC-003)", () => {
     const meter = accumulate(emptyMeter(), runA, freeCall(600));
     // One 600-token call settled, one more of the same size in flight:
     // 600 + 600 projects past 1000 even though settled spend is still under.
-    const state = { inFlight: 1, maxObservedCall: freeCall(600) };
+    const state = reservationWith(1, freeCall(600));
     const decision = admit(meter, runA, state, limits);
     if (decision.kind !== "refuse") throw new Error("expected refuse");
     expect(decision.breach.basis).toBe("projected");
@@ -258,7 +306,7 @@ describe("llm-meter: reservation bounds concurrent overshoot (SC-003)", () => {
     // A ceiling spend has actually reached is a stronger statement than one an
     // estimate says it is about to.
     const meter = accumulate(emptyMeter(), runA, freeCall(5000));
-    const state = { inFlight: 3, maxObservedCall: freeCall(5000) };
+    const state = reservationWith(3, freeCall(5000));
     const decision = admit(meter, runA, state, limitsOf([tokens(1000)]));
     if (decision.kind !== "refuse") throw new Error("expected refuse");
     expect(decision.breach.basis).toBe("settled");
@@ -269,16 +317,24 @@ describe("llm-meter: reservation bounds concurrent overshoot (SC-003)", () => {
     // within budget and has nothing outstanding is never refused by the
     // estimate — even a large learned one.
     const meter = accumulate(emptyMeter(), runA, freeCall(100));
-    const state = { inFlight: 0, maxObservedCall: freeCall(999_999) };
+    const state = reservationWith(0, freeCall(999_999));
     expect(admit(meter, runA, state, limitsOf([tokens(1000)])).kind).toBe("admit");
   });
 
-  it("releases by decrementing, clamped at zero on a double release", () => {
-    const state = releaseReservation({ inFlight: 1, maxObservedCall: NO_SPEND });
-    expect(state.inFlight).toBe(0);
-    // A double release is a contract breach; clamping keeps the projection sane
-    // rather than letting a negative count grant free headroom.
-    expect(releaseReservation(state).inFlight).toBe(0);
+  it("returns a typed underflow failure and leaves state unchanged on double release", () => {
+    const initial = reservationWith(1, NO_SPEND);
+    const released = releaseReservation(initial);
+    expect(released.ok).toBe(true);
+    if (!released.ok) return;
+    expect(released.value.inFlight).toBe(0);
+    expect(initial.inFlight).toBe(1);
+
+    const underflow = releaseReservation(released.value);
+    expect(underflow).toEqual({
+      ok: false,
+      error: { kind: "reservation-underflow", inFlight: 0 },
+    });
+    expect(released.value.inFlight).toBe(0);
   });
 
   it("widens the learned estimate monotonically, per axis", () => {
@@ -295,6 +351,73 @@ describe("llm-meter: reservation bounds concurrent overshoot (SC-003)", () => {
 // ---------------------------------------------------------------------------
 // Properties
 // ---------------------------------------------------------------------------
+
+describe("llm-meter: projection/read-model agreement", () => {
+  it("a projected breach exists iff remaining has an exhausted or unpriced axis (property)", () => {
+    fc.assert(fc.property(
+      fc.nat({ max: 10_000 }),
+      fc.nat({ max: 100 }),
+      fc.nat({ max: 2_000 }),
+      fc.nat({ max: 8 }),
+      fc.nat({ max: 20_000 }),
+      (settledTokens, inFlight, maxCallTokens, callLimit, tokenLimit) => {
+        const meter = accumulate(emptyMeter(), runA, {
+          usage: "known",
+          tokens: settledTokens,
+          calls: 0,
+          usd: { kind: "priced", micros: micros(0) },
+        });
+        const state = reservationWith(inFlight, freeCall(maxCallTokens));
+        const limits = limitsOf([tokens(tokenLimit), callsCeiling(callLimit)]);
+        const projected = projectedSpend(meter, runA, state);
+        const breach = firstBreach(projected, limits, "projected");
+        const remaining = remainingFor(limits, projected);
+        if (remaining.kind !== "budgeted") throw new Error("limits are present");
+        const exhausted = remaining.headroom.some((headroom) =>
+          headroom.kind === "unpriced" ||
+          headroom.kind === "unknown-usage" ||
+          headroom.amount === 0
+        );
+        expect(breach !== undefined).toBe(exhausted);
+      },
+    ));
+  });
+
+  it("legal reservation transitions never produce a negative in-flight count (property)", () => {
+    fc.assert(fc.property(fc.nat({ max: 100 }), (admissions) => {
+      let state = reservationWith(admissions, freeCall(1));
+      expect(state.inFlight).toBe(admissions);
+      for (let released = 0; released < admissions; released += 1) {
+        const transition = releaseReservation(state);
+        expect(transition.ok).toBe(true);
+        if (!transition.ok) return;
+        state = transition.value;
+        expect(state.inFlight).toBeGreaterThanOrEqual(0);
+      }
+      expect(releaseReservation(state)).toEqual({
+        ok: false,
+        error: { kind: "reservation-underflow", inFlight: 0 },
+      });
+    }));
+  });
+
+  it("projection is monotone in inFlight for a learned non-negative call (property)", () => {
+    fc.assert(fc.property(
+      fc.nat({ max: 10_000 }),
+      fc.nat({ max: 1_000 }),
+      fc.nat({ max: 50 }),
+      fc.nat({ max: 50 }),
+      (settledTokens, callTokens, first, extra) => {
+        const meter = accumulate(emptyMeter(), runA, freeCall(settledTokens));
+        const maxObservedCall = freeCall(callTokens);
+        const lower = projectedSpend(meter, runA, reservationWith(first, maxObservedCall));
+        const upper = projectedSpend(meter, runA, reservationWith(first + extra, maxObservedCall));
+        expect(upper.tokens).toBeGreaterThanOrEqual(lower.tokens);
+        expect(upper.calls).toBeGreaterThanOrEqual(lower.calls);
+      },
+    ));
+  });
+});
 
 describe("llm-meter: properties", () => {
   const arbCall = fc.oneof(
@@ -356,5 +479,182 @@ describe("llm-meter: properties", () => {
         expect(admit(meter, runA, emptyReservation, limitsOf([tokens(1000)])).kind).toBe("admit");
       }),
     );
+  });
+
+  // ── Model-aware admission (admitCandidate) ─────────────────────────────────
+  // The fail-closed pre-flight gate: a model with no price-table entry cannot be
+  // costed, so under a declared USD ceiling it must be REFUSED before the call
+  // runs. A zero cost would make it free — the cheapest way past a dollar budget.
+
+  const priced = (model: string): CandidatePricing => ({ kind: "priced", model });
+  const unpriced = (model: string): CandidatePricing => ({ kind: "unpriced", model });
+
+  it("refuses an unpriced candidate under a USD ceiling before the call runs", () => {
+    const decision = admitCandidate(
+      emptyMeter(),
+      runA,
+      emptyReservation,
+      limitsOf([usd(100)]),
+      unpriced("mystery-model"),
+    );
+
+    expect(decision.kind).toBe("refuse");
+    if (decision.kind === "refuse") {
+      expect(decision.breach.kind).toBe("unpriced");
+      expect(decision.breach.basis).toBe("projected");
+      if (decision.breach.kind === "unpriced") {
+        expect([...decision.breach.models]).toContain("mystery-model");
+        expect(decision.breach.ceiling.kind).toBe("usd");
+      }
+    }
+  });
+
+  it("refuses an unpriced candidate even on a run with no spend at all", () => {
+    // Nothing settled and nothing in flight: the refusal comes from the model's
+    // unpriceability, not from any accumulated figure.
+    const decision = admitCandidate(
+      emptyMeter(),
+      runA,
+      emptyReservation,
+      limitsOf([usd(1_000_000), tokens(1_000_000), callsCeiling(1_000_000)]),
+      unpriced("mystery-model"),
+    );
+
+    expect(decision.kind).toBe("refuse");
+  });
+
+  it("admits an unpriced candidate when no USD ceiling is declared", () => {
+    // Without a dollar ceiling there is nothing an unpriceable cost can breach —
+    // the token and call axes are still exact.
+    const limits = limitsOf([tokens(1000), callsCeiling(10)]);
+    const decision = admitCandidate(emptyMeter(), runA, emptyReservation, limits, unpriced("mystery"));
+
+    expect(decision.kind).toBe("admit");
+    expect(decision).toEqual(admit(emptyMeter(), runA, emptyReservation, limits));
+  });
+
+  it("delegates a priced candidate to the plain admission decision", () => {
+    const limits = limitsOf([usd(100), tokens(1000)]);
+    const meter = accumulate(emptyMeter(), runA, freeCall(10));
+
+    expect(admitCandidate(meter, runA, emptyReservation, limits, priced("gpt-4o")))
+      .toEqual(admit(meter, runA, emptyReservation, limits));
+  });
+
+  it("admits any candidate when no ceilings are declared at all", () => {
+    for (const candidate of [priced("gpt-4o"), unpriced("mystery")]) {
+      expect(admitCandidate(emptyMeter(), runA, emptyReservation, undefined, candidate).kind)
+        .toBe("admit");
+    }
+  });
+
+  it("reserves on admission exactly as the plain decision does", () => {
+    const limits = limitsOf([tokens(1000)]);
+    const decision = admitCandidate(emptyMeter(), runA, emptyReservation, limits, unpriced("mystery"));
+
+    expect(decision.kind).toBe("admit");
+    if (decision.kind === "admit") expect(decision.state.inFlight).toBe(1);
+  });
+
+  it("an unpriced candidate NEVER admits under a USD ceiling, whatever the spend", () => {
+    fc.assert(
+      fc.property(
+        fc.nat({ max: 5000 }),
+        fc.nat({ max: 20 }),
+        fc.integer({ min: 1, max: 1_000_000 }),
+        (spent, calls, ceilingMicros) => {
+          let meter = emptyMeter();
+          for (let i = 0; i < calls; i += 1) meter = accumulate(meter, runA, freeCall(spent));
+          const limits = limitsOf([
+            { kind: "usd", limit: micros(ceilingMicros) },
+            tokens(10_000_000),
+            callsCeiling(10_000_000),
+          ]);
+
+          expect(admitCandidate(meter, runA, emptyReservation, limits, unpriced("m")).kind)
+            .toBe("refuse");
+        },
+      ),
+    );
+  });
+
+  it("reports an already-REACHED settled ceiling instead of the projected unpriced one", () => {
+    // `admit`'s settled-before-projected ordering is documented as load-bearing:
+    // a refusal must name the strongest ACTUAL reason, not an estimate. The
+    // unpriced-candidate rule is projected (nothing has been spent on this model
+    // yet), so it must not jump the queue. A run that has already burned its
+    // token ceiling is over budget for a reason that does not go away when
+    // somebody adds a price-table entry — and "add a price for mystery-model"
+    // is exactly the wrong remedy to hand the operator here.
+    const meter = accumulate(emptyMeter(), runA, freeCall(1000));
+    const decision = admitCandidate(
+      meter,
+      runA,
+      emptyReservation,
+      limitsOf([usd(100), tokens(1000)]),
+      unpriced("mystery-model"),
+    );
+
+    expect(decision.kind).toBe("refuse");
+    if (decision.kind !== "refuse") return;
+    expect(decision.breach.kind).toBe("reached");
+    expect(decision.breach.basis).toBe("settled");
+    expect(decision.breach.ceiling.kind).toBe("tokens");
+    // Identical to the reason the plain decision would give for the same run.
+    expect(decision).toEqual(
+      admit(meter, runA, emptyReservation, limitsOf([usd(100), tokens(1000)])),
+    );
+  });
+
+  it("does not relabel ALREADY-settled unpriced spend as merely projected", () => {
+    // The run already settled a call on an unpriceable model, so its cost is
+    // unknown as a matter of record, not of estimate. Reporting `projected`
+    // would tell the operator the overrun has not happened yet.
+    const meter = accumulate(emptyMeter(), runA, unpricedCall(10, "earlier-model"));
+    const decision = admitCandidate(
+      meter, runA, emptyReservation, limitsOf([usd(100)]), unpriced("mystery-model"),
+    );
+
+    expect(decision.kind).toBe("refuse");
+    if (decision.kind !== "refuse") return;
+    expect(decision.breach.basis).toBe("settled");
+    expect(decision.breach.kind).toBe("unpriced");
+    if (decision.breach.kind !== "unpriced") return;
+    expect([...decision.breach.models]).toEqual(["earlier-model"]);
+  });
+
+  it("still refuses the unpriced candidate when nothing is settled yet", () => {
+    // The settled check leading does not weaken the fail-closed rule: with the
+    // run inside every ceiling, the projected unpriced refusal is still THE
+    // reason, and it still names the candidate model.
+    const meter = accumulate(emptyMeter(), runA, freeCall(1));
+    const decision = admitCandidate(
+      meter, runA, emptyReservation, limitsOf([usd(100), tokens(1000)]), unpriced("mystery-model"),
+    );
+
+    expect(decision.kind).toBe("refuse");
+    if (decision.kind !== "refuse") return;
+    expect(decision.breach.kind).toBe("unpriced");
+    expect(decision.breach.basis).toBe("projected");
+    if (decision.breach.kind !== "unpriced") return;
+    expect([...decision.breach.models]).toEqual(["mystery-model"]);
+  });
+
+  it("carries the settled spend and in-flight count on an unpriced refusal", () => {
+    // The refusal is what the caller reports to the operator, so it must say
+    // what had actually been spent when the gate closed.
+    const meter = accumulate(emptyMeter(), runA, pricedCall(40, micros(7)));
+    const reserved = admit(meter, runA, emptyReservation, limitsOf([tokens(1000)]));
+    if (reserved.kind !== "admit") throw new Error("expected admit");
+
+    const decision = admitCandidate(
+      meter, runA, reserved.state, limitsOf([usd(100)]), unpriced("mystery"),
+    );
+
+    expect(decision.kind).toBe("refuse");
+    if (decision.kind === "refuse") {
+      expect(decision.settled).toEqual(spendFor(meter, runA));
+      expect(decision.inFlight).toBe(reserved.state.inFlight);
+    }
   });
 });

@@ -1,6 +1,5 @@
-import { NoopObserver } from "../observer/observer.js";
 import { tokensOnly } from "../types/token-usage.js";
-import type { RunId, NodeId, DagId } from "../types/ids.js";
+import type { NodeId, DagId } from "../types/ids.js";
 import { DAG_INPUT } from "../types/ids.js";
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
@@ -14,19 +13,13 @@ import { stubSendWithTools } from "./_llm-mocks.js";
 import { defineDag } from "../executor/define-dag.js";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
 import { N } from "./_id-helpers.js";
+import { testNodeContext } from "./_context-factories.js";
 
 const OutputSchema = z.object({ greeting: z.string() });
 
 const mkLlmCtx = (outputs: unknown[]): NodeContext => {
   let callCount = 0;
-  return {
-    runId: "test" as RunId,
-    dagId: "test" as DagId,
-    observer: new NoopObserver(),
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null, http: null, clock: null,
-    cache: null,
-    logger: { warn: () => {}, error: () => {} },
+  return testNodeContext({
     prompts: { get: (_name: string) => "prompt template" },
     llm: {
       sendWithTools: stubSendWithTools,
@@ -39,7 +32,7 @@ const mkLlmCtx = (outputs: unknown[]): NodeContext => {
         });
       },
     },
-  };
+  });
 };
 
 describe("LLM node retry", () => {
@@ -102,29 +95,23 @@ describe("LLM node retry", () => {
 // surfaces correctly to the DAG retry policy" is otherwise untested.
 // ---------------------------------------------------------------------------
 
-const mkAlwaysTransientLlmCtx = (counter: { calls: number }): NodeContext => ({
-  runId: "test" as RunId,
-  dagId: "test" as DagId,
-  observer: new NoopObserver(),
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null, http: null, clock: null,
-  cache: null,
-  logger: { warn: () => {}, error: () => {} },
-  prompts: { get: (_name: string) => "prompt template" },
-  llm: {
-    sendWithTools: stubSendWithTools,
-    sendStructured: async (
-      _req: LlmRequest<any>,
-    ): Promise<Result<LlmResponse<any>, FrameworkError>> => {
-      counter.calls += 1;
-      return err({
-        kind: "transient",
-        nodeId: "llm-rate-limited" as NodeId,
-        message: `429 rate limited (attempt ${counter.calls})`,
-      });
+const mkAlwaysTransientLlmCtx = (counter: { calls: number }): NodeContext =>
+  testNodeContext({
+    prompts: { get: (_name: string) => "prompt template" },
+    llm: {
+      sendWithTools: stubSendWithTools,
+      sendStructured: async (
+        _req: LlmRequest<any>,
+      ): Promise<Result<LlmResponse<any>, FrameworkError>> => {
+        counter.calls += 1;
+        return err({
+          kind: "transient",
+          nodeId: "llm-rate-limited" as NodeId,
+          message: `429 rate limited (attempt ${counter.calls})`,
+        });
+      },
     },
-  },
-});
+  });
 
 describe("LLM rate-limit → DAG retry-exhausted (W5.6)", () => {
   it("transient on every attempt → run terminates with retry-exhausted and rootErrorKind=transient", async () => {

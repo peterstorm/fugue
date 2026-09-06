@@ -34,6 +34,8 @@ __pycache__/
 .claude/specs/*/panel-runs/
 .claude/**/orchestration-runs/
 .claude/**/wave-gate-runs/
+# loom worktree checkouts — live git worktrees, never repo content
+.claude/worktrees/
 
 # fugue compose/new --from gauntlet staging dirs (always cleaned up, but never commit strays)
 .fugue-compose/

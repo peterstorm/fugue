@@ -24,10 +24,12 @@ import type {
   EdgeDefRawInput,
 } from "../types/dag.js";
 import type { NodesRecord } from "../types/dag-internals.js";
-import type { NodeDef } from "../types/node.js";
+import type { Capability, NodeDef } from "../types/node.js";
 import type { EvalJudgeNodeDef } from "../nodes/eval-judge.js";
 import type { FrameworkError } from "../types/errors.js";
 import { formatFrameworkError } from "../types/errors.js";
+import type { NodeId } from "../types/ids.js";
+import { err } from "../types/result.js";
 import { validateDagShape } from "./validate-dag.js";
 
 export class DagDefinitionError extends Error {
@@ -49,17 +51,47 @@ export class DagDefinitionError extends Error {
  * `<const Nodes>` infers the literal record so `edges[].from` / `edges[].to`
  * and `outputNodeId` are constrained to known node ids at edit time.
  */
+/**
+ * Both entry points fail the same way — a shape violation is an authoring
+ * error, thrown rather than returned, because a malformed DAG has no valid
+ * runtime. Sharing the unwrap keeps the two from drifting to different error
+ * types or swallowing one of them.
+ */
+const orThrow = (id: string, result: ReturnType<typeof validateDagShape>): DagDef => {
+  if (!result.ok) throw new DagDefinitionError(id, result.error);
+  return result.value;
+};
+
 export const defineDag = <const Nodes extends NodesRecord>(
   input: DagDefInput<Nodes>,
 ): DagDef => {
   // Drop the literal-typed `Nodes` constraint at this single seam so
   // `validateDagShape` operates on the base type. Edit-time constraints from
   // `DagDefInput<Nodes>` were already enforced at the call site.
-  const result = validateDagShape(input as DagDefInput);
-  if (!result.ok) {
-    throw new DagDefinitionError(input.id, result.error);
+  return orThrow(input.id, validateDagShape(input as DagDefInput));
+};
+
+/**
+ * First node id under which the array carries two DIFFERENT definitions.
+ *
+ * Re-listing the SAME node is legitimate and load-bearing: `defineRouter` names
+ * one shared target from several cases, and collapsing those to one entry is
+ * exactly right. Two different definitions under one id is the authoring error
+ * — `Object.fromEntries` would keep only the last and drop the other in
+ * silence.
+ */
+const firstCollidingNodeId = (
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- matches the array-shape variance leak
+  nodes: readonly NodeDef<any, any, any, readonly Capability[]>[],
+): NodeId | undefined => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- see above
+  const seen = new Map<NodeId, NodeDef<any, any, any, readonly Capability[]>>();
+  for (const node of nodes) {
+    const existing = seen.get(node.id);
+    if (existing !== undefined && existing !== node) return node.id;
+    seen.set(node.id, node);
   }
-  return result.value;
+  return undefined;
 };
 
 /**
@@ -71,7 +103,7 @@ export const defineDag = <const Nodes extends NodesRecord>(
 export const defineDagFromArray = (input: {
   readonly id: string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional
-  readonly nodes: readonly NodeDef<any, any, any>[];
+  readonly nodes: readonly NodeDef<any, any, any, readonly Capability[]>[];
   readonly edges: readonly EdgeDefRawInput[];
   readonly outputNodeId?: string;
   readonly evalJudges?: readonly EvalJudgeNodeDef[];
@@ -80,6 +112,21 @@ export const defineDagFromArray = (input: {
   /** Stamped by shape helpers (defineLinearDag, …); absent for raw array use. */
   readonly provenance?: DagDef["provenance"];
 }): DagDef => {
+  // An id collision is unrepresentable in the record shape but not in an array,
+  // and `Object.fromEntries` would keep only the last definition and drop the
+  // other with no diagnostic. This module promises the error "at boot, not on
+  // the first request", so the collapse has to fail here, before it happens.
+  const collidingId = firstCollidingNodeId(input.nodes);
+  if (collidingId !== undefined) {
+    return orThrow(input.id, err({
+      kind: "validation",
+      nodeId: collidingId,
+      message:
+        `DAG '${input.id}' declares two different nodes under id '${collidingId}'; ` +
+        "node ids must identify one definition",
+    }));
+  }
+
   const nodesRecord: NodesRecord = Object.fromEntries(
     input.nodes.map((n) => [n.id, n]),
   );
@@ -92,8 +139,5 @@ export const defineDagFromArray = (input: {
     retryLimits: input.retryLimits,
     defaultRetryLimit: input.defaultRetryLimit,
   }, input.provenance);
-  if (!result.ok) {
-    throw new DagDefinitionError(input.id, result.error);
-  }
-  return result.value;
+  return orThrow(input.id, result);
 };

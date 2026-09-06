@@ -223,6 +223,58 @@ describe("runStateMachine", () => {
     );
   });
 
+  it("falls back deterministically when classifyError throws and preserves both diagnostics", async () => {
+    const job = createInMemoryJob<RetryState, RetryContext>({
+      state: { kind: "running" },
+      context: { count: 0, retries: 0 },
+    });
+    let calls = 0;
+    const executorFailure = new Error("provider exploded");
+    const result = await runStateMachine(job, retryMachine, async () => {
+      calls += 1;
+      if (calls === 1) throw executorFailure;
+      return { type: "DONE" as const };
+    }, {
+      classifyError: () => { throw new Error("classifier exploded"); },
+      errorEventOf: (classified) => ({
+        type: "ERROR" as const,
+        retriable: classified.retriable,
+        message: classified.message,
+      }),
+    });
+
+    expect(result.state.kind).toBe("succeeded");
+    const first = job.events[0]?.event as RetryEvent | undefined;
+    expect(first?.type).toBe("ERROR");
+    if (first?.type === "ERROR") {
+      expect(first.retriable).toBe(false);
+      expect(first.message).toContain("provider exploded");
+      expect(first.message).toContain("classifier exploded");
+    }
+  });
+
+  it("aggregates the original executor failure when errorEventOf throws", async () => {
+    const executorFailure = new Error("executor exploded");
+    const mapperFailure = new Error("event mapper exploded");
+    let caught: unknown;
+    try {
+      await runStateMachine(makeJob({ kind: "running" }), simpleMachine, async () => {
+        throw executorFailure;
+      }, {
+        errorEventOf: () => { throw mapperFailure; },
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(AggregateError);
+    const aggregate = caught as AggregateError;
+    expect(aggregate.cause).toBe(executorFailure);
+    expect(aggregate.errors).toEqual([executorFailure, mapperFailure]);
+    expect(aggregate.message).toContain("executor exploded");
+    expect(aggregate.message).toContain("event mapper exploded");
+  });
+
   for (const [caseName, makeThrown] of hostileThrownValues) {
     it(`FR-006: default classifier delivers an ERROR event for ${caseName}`, async () => {
       const job = createInMemoryJob<RetryState, RetryContext>({
@@ -317,6 +369,31 @@ describe("runStateMachine", () => {
     expect(traces[0].state.kind).toBe("pending");
     expect(traces[0].nextState.kind).toBe("pending");
     expect(traces[0].event).toBeUndefined();
+  });
+
+  // The abort trace reads the clock through the same guard every other trace
+  // site uses. Unguarded, `new Date(nowFn())` runs as an ARGUMENT to emitTrace,
+  // before emitTrace's own try/catch, so a hostile clock replaces the deliberate
+  // BeforeExecuteAbortError with a raw error — and `handleKernelError`'s
+  // `isBeforeExecuteAbortError` check then misreports the abort as a crash.
+  it("still aborts with BeforeExecuteAbortError when the trace clock throws", async () => {
+    const job = makeJob();
+    const traces: TraceEvent<State, Event>[] = [];
+    const executor: Executor<State, Event, Context> = async () => ({ type: "START" });
+
+    await expect(
+      runStateMachine(job, simpleMachine, executor, {
+        errorEventOf: defaultErrorEventOf,
+        beforeExecute: () => false,
+        onTrace: (t) => traces.push(t),
+        now: () => { throw new Error("clock failed"); },
+        logger: { warn: () => {}, error: () => {} },
+      }),
+    ).rejects.toThrow(/aborted by beforeExecute/i);
+
+    // The trace is a diagnostic: a hostile clock may suppress it, but must not
+    // substitute the abort reason.
+    expect(traces).toHaveLength(0);
   });
 
   it("proceeds when beforeExecute returns true (FR-012)", async () => {

@@ -23,19 +23,10 @@ import { RecordingObserver } from "../observer/observer.js";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
 import { defineDagFromArray } from "../executor/define-dag.js";
 import { DAG_INPUT } from "../types/ids.js";
+import { testNodeContext } from "./_context-factories.js";
 
-const mkCtx = (observer: RecordingObserver): NodeContext => ({
-  runId: R("fresh-r1"),
-  dagId: D("fresh-d"),
-  observer,
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null,
-  cache: null,
-  prompts: null,
-  llm: null, http: null,
-  clock: null,
-  logger: { warn: () => {}, error: () => {} },
-});
+const mkCtx = (observer: RecordingObserver): NodeContext =>
+  testNodeContext({ runId: R("fresh-r1"), dagId: D("fresh-d"), observer });
 
 describe("freshness witness — no conflict (Phase 3)", () => {
   it("reads node with extractWitness emits witness-captured event", async () => {

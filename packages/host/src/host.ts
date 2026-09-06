@@ -3,16 +3,19 @@
  *
  * This is the IMPERATIVE SHELL. It holds mutable `let` references
  * to state and wires everything:
- * - Constructs SharedInfra from config
+ * - Receives SharedInfra from the injected HostDeps (the entrypoint constructs
+ *   it; this file only destructures and threads it)
  * - Creates mutable state references (HostState, ConcurrencyState, CircuitBreaker map)
  * - Wires sync loop → registry swap + circuit breaker force-reset
  * - Wires HTTP router → read current state
- * - Handles SIGTERM → draining state → stop sync → close server → exit
+ * - Handles SIGTERM → stop sync loop + Redis probe → draining state → await
+ *   in-flight drain → close server → stopped → exit (see `performShutdown`)
  *
  * @satisfies FR-060 — Host MUST exit cleanly on SIGTERM after draining in-flight requests
  * @satisfies NFR-020 — Host MUST log startup/shutdown lifecycle events
  */
 
+import { match } from "ts-pattern";
 import { ok, err, runId as makeRunId, safeErrorMessage } from "@fuguejs/framework";
 import type { Result, DagId, NodeContext, DagDef, FrameworkError, RunId, CapabilityHandle } from "@fuguejs/framework";
 import { runDag } from "@fuguejs/framework";
@@ -29,27 +32,6 @@ import type { ModuleLoaderPort } from "./ports.js";
 import type { SharedInfra } from "./ports.js";
 import type { LogPort } from "./ports.js";
 
-/**
- * Log a SHUTDOWN diagnostic without letting a broken logger stop cleanup.
- *
- * Teardown must always run to completion: the authoritative outcome is the
- * `HostError`/`closeFailures` the caller already holds, and a logger that throws
- * mid-shutdown must not strand a Redis connection or a live listener. Three
- * teardown sites needed exactly this guard; expressing it once means a future
- * teardown step cannot quietly omit it.
- */
-const logSafely = <L extends "warn" | "error">(
-  logger: Pick<LogPort, L>,
-  level: L,
-  message: string,
-  data?: Record<string, unknown>,
-): void => {
-  try {
-    logger[level](message, data);
-  } catch {
-    // Deliberately contained — see above.
-  }
-};
 import type { RedisConnectivityPort } from "./ports.js";
 import { requireHitlRedisPort } from "./adapters/redis-connectivity.js";
 import { createNodeContextForDag } from "./adapters/node-context-factory.js";
@@ -63,7 +45,11 @@ import { verifyTenantHeader, TENANT_HEADER_NAME } from "./domain/tenant-header.j
 import { createRealmJwtVerifier } from "./adapters/realm-jwt-verifier.js";
 import type { RealmJwtDeps } from "./http/middleware/auth.js";
 import type { AuthenticatedUser, Team } from "./domain/auth.js";
-import type { CapabilityBroker, InvocationOrigin } from "@fuguejs/framework";
+import type {
+  CapabilityBroker,
+  InvocationOrigin,
+  ScopedLlmMeter,
+} from "@fuguejs/framework";
 import { createKeycloakBroker } from "./adapters/keycloak-broker.js";
 import { createSubjectTokenRegistry } from "./adapters/subject-token-registry.js";
 import type { SubjectTokenRegistry } from "./adapters/subject-token-registry.js";
@@ -83,6 +69,7 @@ import { getRegistry } from "./domain/host-state.js";
 import { lookupDag } from "./domain/registry.js";
 import type { QueueBackend, WorkerHandle } from "@fuguejs/framework";
 import { createHitlRunService } from "./hitl/service.js";
+import { logWithoutThrowing } from "./hitl/diagnostic-logging.js";
 import type { HitlRunService } from "./hitl/service.js";
 import { createRedisRunStore } from "./hitl/adapters/run-store.js";
 import { createRedisDecisionStore } from "./hitl/adapters/decision-store.js";
@@ -108,6 +95,31 @@ import { startRedisProbe } from "./lifecycle/redis-probe.js";
 import type { RedisProbeHandle } from "./lifecycle/redis-probe.js";
 import type { ConcurrencyState } from "./domain/concurrency.js";
 import { topoSortHandles, connectAll, closeAll } from "./domain/capability-manager.js";
+
+/** Preserve a boot failure and every subordinate cleanup failure in one HostError. */
+const bootAbortWithCleanup = (
+  primary: HostError,
+  cleanupFailures: readonly unknown[],
+): HostError => {
+  if (cleanupFailures.length === 0) return primary;
+  const diagnostics = cleanupFailures.map(safeErrorMessage);
+  return {
+    kind: "internal-invariant-violated",
+    message:
+      `${formatHostError(primary)}; boot-abort cleanup also failed: ` +
+      diagnostics.join("; "),
+    context: {
+      primary: formatHostError(primary),
+      cleanupFailures: diagnostics,
+    },
+  };
+};
+
+const capabilityCleanupErrors = (
+  failures: readonly { readonly name: string; readonly error: string }[],
+  context: string,
+): readonly Error[] => failures.map((failure) =>
+  new Error(`Capability '${failure.name}' failed to close during ${context}: ${failure.error}`));
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -154,6 +166,8 @@ export interface HostDeps {
    * pair); absent either, HITL is off and a `humanReview` DAG is refused with 501.
    */
   readonly queueBackend?: QueueBackend;
+  /** Optional embedder/test authority; production defaults to config selection. */
+  readonly capabilityBroker?: CapabilityBroker;
   /** Called during graceful shutdown to clean up infrastructure (e.g., close Redis). */
   readonly onShutdown?: () => Promise<void>;
   /**
@@ -208,7 +222,7 @@ export const stopBoundServerAfterBindFailure = (
   } catch (error) {
     const diagnostic = safeErrorMessage(error);
     // The returned HostError remains the authoritative cleanup diagnostic.
-    logSafely(logger, "error",
+    logWithoutThrowing(logger, "error",
       "Failed to stop HTTP server after bind finalization failure — listener may still be live",
       { bind: bindDescription, error: diagnostic });
     return diagnostic;
@@ -548,33 +562,41 @@ const wireHitlRunEngine = async (args: {
   const botConfigured = notifierSelection.kind === "bot-framework";
   let notifier: HumanReviewNotifierPort | undefined;
   let conversations: ConversationStorePort | undefined;
-  if (notifierSelection.kind === "bot-framework") {
-    // SECURITY (FR-013 / SC-001): the HITL conversation store is bound to the
-    // `routedTenant` so every `fugue:<tenant>:hitl:*` key is scoped under that
-    // tenant's Redis ACL. `routedTenant` is the worker's resolved `Tenant.id`
-    // when one is injected, falling back to the constant `default` only in the
-    // single-tenant `createHost`/main.ts path where no tenant is passed (FR-035).
-    conversations = createRedisConversationStore(sharedInfra.redis, routedTenant, sharedInfra.logger);
-    const connector = createBotConnector(
-      {
-        appId: notifierSelection.appId,
-        appPassword: notifierSelection.appPassword,
-        ...(notifierSelection.tokenUrl !== undefined ? { tokenUrl: notifierSelection.tokenUrl } : {}),
-      },
-      sharedInfra.logger,
-    );
-    notifier = createBotFrameworkNotifier({ connector, conversations });
-  } else if (notifierSelection.kind === "webhook") {
-    notifier = createWebhookNotifier(
-      {
-        webhookUrl: notifierSelection.webhookUrl,
-        approvalBaseUrl: notifierSelection.approvalBaseUrl,
-      },
-      fetchWebhookHttp(),
-    );
-  } else if (notifierSelection.reason === "bot-password-missing") {
-    logger.warn("BOT_APP_ID is set but BOT_APP_PASSWORD is not — Bot Framework transport disabled");
-  }
+  // Exhaustive over the selection union: a fourth transport cannot be added
+  // without the compiler demanding its wiring here.
+  match(notifierSelection)
+    .with({ kind: "bot-framework" }, (selection) => {
+      // SECURITY (FR-013 / SC-001): the HITL conversation store is bound to the
+      // `routedTenant` so every `fugue:<tenant>:hitl:*` key is scoped under that
+      // tenant's Redis ACL. `routedTenant` is the worker's resolved `Tenant.id`
+      // when one is injected, falling back to the constant `default` only in the
+      // single-tenant `createHost`/main.ts path where no tenant is passed (FR-035).
+      conversations = createRedisConversationStore(sharedInfra.redis, routedTenant, sharedInfra.logger);
+      const connector = createBotConnector(
+        {
+          appId: selection.appId,
+          appPassword: selection.appPassword,
+          ...(selection.tokenUrl !== undefined ? { tokenUrl: selection.tokenUrl } : {}),
+        },
+        sharedInfra.logger,
+      );
+      notifier = createBotFrameworkNotifier({ connector, conversations });
+    })
+    .with({ kind: "webhook" }, (selection) => {
+      notifier = createWebhookNotifier(
+        {
+          webhookUrl: selection.webhookUrl,
+          approvalBaseUrl: selection.approvalBaseUrl,
+        },
+        fetchWebhookHttp(),
+      );
+    })
+    .with({ kind: "disabled", reason: "bot-password-missing" }, () => {
+      logger.warn("BOT_APP_ID is set but BOT_APP_PASSWORD is not — Bot Framework transport disabled");
+    })
+    // Nothing configured at all is a silent, expected outcome — HITL is opt-in.
+    .with({ kind: "disabled", reason: "unconfigured" }, () => {})
+    .exhaustive();
 
   if (notifier !== undefined && queueBackend !== undefined) {
     // Parse the generic Redis adapter once at composition. Every HITL adapter
@@ -603,6 +625,7 @@ const wireHitlRunEngine = async (args: {
       broker,
       agentClientMap: config.AGENT_CLIENT_MAP,
       tenant: routedTenant,
+      runRetentionTtlSec: config.HITL_RUN_TTL_SEC,
       logger: sharedInfra.logger,
     });
     const runQueue = createRunQueue({
@@ -646,14 +669,14 @@ const wireHitlRunEngine = async (args: {
         try {
           const reconciled = await service.reconcileActiveRuns();
           if (!reconciled.ok) {
-            logger.error("HITL active-run reconciliation failed", {
+            logWithoutThrowing(logger, "error", "HITL active-run reconciliation failed", {
               error: reconciled.error.kind,
             });
           }
         } catch (error) {
           // Adapter contracts are no-throw, but lifecycle supervision must remain
           // total if a non-conforming dependency rejects unexpectedly.
-          logger.error("HITL active-run reconciliation threw", {
+          logWithoutThrowing(logger, "error", "HITL active-run reconciliation threw", {
             error: safeErrorMessage(error),
           });
         } finally {
@@ -782,9 +805,17 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
     const connectResult = await connectAll(sortedHandles, logger);
     if (!connectResult.ok) {
       // Boot aborts — close the handles that already connected so a
-      // crash-loop boot doesn't leak pools/sockets on every restart.
-      await closeAll(connectResult.error.connected, logger);
-      return err(connectResult.error.error);
+      // crash-loop boot doesn't leak pools/sockets on every restart. Cleanup
+      // failures remain subordinate to, but cannot disappear behind, the
+      // authoritative connect failure.
+      const prefixCleanup = await closeAll(connectResult.error.connected, logger);
+      return err(bootAbortWithCleanup(connectResult.error.error, [
+        ...capabilityCleanupErrors(
+          connectResult.error.cleanupFailures,
+          "failed capability connect",
+        ),
+        ...capabilityCleanupErrors(prefixCleanup, "failed capability connect"),
+      ]));
     }
     logger.info(`${sortedHandles.length} external capabilities connected`);
   }
@@ -795,8 +826,18 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
     // Capabilities already connected — close them before aborting boot so a
     // crash-loop boot doesn't leak pools/sockets (same guarantee as the
     // connect-failure path above).
-    if (sortedHandles.length > 0) await closeAll(sortedHandles, logger);
-    return err({ kind: "internal-invariant-violated", message: "Boot → ready transition failed", context: { from: readyResult.error.from, to: readyResult.error.to } });
+    const cleanupFailures = sortedHandles.length > 0
+      ? await closeAll(sortedHandles, logger)
+      : [];
+    const primary: HostError = {
+      kind: "internal-invariant-violated",
+      message: "Boot → ready transition failed",
+      context: { from: readyResult.error.from, to: readyResult.error.to },
+    };
+    return err(bootAbortWithCleanup(
+      primary,
+      capabilityCleanupErrors(cleanupFailures, "failed ready transition"),
+    ));
   }
   hostState = readyResult.value;
 
@@ -826,13 +867,14 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
   // dispatch) — FR-030/FR-032. The raw token travels ONLY through here; it never
   // crosses `InvocationOrigin` (string-only) nor reaches a capability handle.
   const subjectTokens = createSubjectTokenRegistry();
-  const broker: CapabilityBroker | undefined = selectCapabilityBroker(
-    config,
-    sharedInfra,
-    logger,
-    Date.now,
-    subjectTokens.resolve,
-  );
+  const broker: CapabilityBroker | undefined = deps.capabilityBroker ??
+    selectCapabilityBroker(
+      config,
+      sharedInfra,
+      logger,
+      Date.now,
+      subjectTokens.resolve,
+    );
 
   // ── Inbound user (OIDC) JWT path (FR-020/021/022/023, SC-005) ────────────
   // Wired LIVE as ONE inseparable group (verifier + iss/aud policy + run-auth
@@ -910,6 +952,7 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
     },
     createContext: (
       registered: RegisteredDag,
+      rid: RunId,
       signal: AbortSignal,
       // The resolved inbound identity is threaded through to the NodeContext
       // factory (FR-W3-007), which derives `Invocation.origin` from it: an OIDC
@@ -920,18 +963,23 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
       // at boot) can authorize each node against it.
       identity: AuthIdentity,
     ): Promise<NodeContextForDag> => {
-      const rid = makeRunId(crypto.randomUUID());
       // Bind the user run's verified subject token host-side (FR-030/FR-032): the
       // factory reads it off the identity via the pure seam and stores it under
       // `rid` so the broker can resolve it for the RFC 8693 exchange. Non-user
       // runs bind nothing. `executeDag` releases it on completion (below).
-      return createNodeContextForDag(sharedInfra, registered, rid, signal, identity, config.AGENT_CLIENT_MAP, broker !== undefined, subjectTokens.bind, routedTenant);
+      return createNodeContextForDag(sharedInfra, registered, rid, signal, identity, {
+        agentClientMap: config.AGENT_CLIENT_MAP,
+        mintingActive: broker !== undefined,
+        bindSubjectToken: subjectTokens.bind,
+        routedTenant,
+      });
     },
     executeDag: async <I, O>(
       dag: DagDef,
       input: I,
       ctx: NodeContext,
       origin: InvocationOrigin | undefined,
+      meterMintedLlm: ScopedLlmMeter,
     ): Promise<Result<O, FrameworkError>> => {
       // Inject the boot-selected broker + run origin (as one MintingAuthority —
       // the framework's option type makes broker-without-origin unrepresentable)
@@ -947,11 +995,14 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
       // without copy-drift from this call site.
       return withSubjectTokenRelease(subjectTokens, ctx.runId, () =>
         runDag<I, O>(dag, input, ctx, {
-          minting: broker !== undefined && origin !== undefined ? { broker, origin } : undefined,
+          minting: broker !== undefined && origin !== undefined
+            ? { broker, origin, meterLlm: meterMintedLlm }
+            : undefined,
         }),
       );
     },
     clock: Date.now,
+    newRunId: () => makeRunId(crypto.randomUUID()),
     circuitConfig: {
       threshold: config.CIRCUIT_BREAKER_THRESHOLD,
       windowMs: config.CIRCUIT_BREAKER_WINDOW_MS,
@@ -1052,59 +1103,77 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
    *     a failed boot left no record of WHICH one.
    *
    * Stopping the server is deliberately NOT part of this: the two callers stop
-   * it differently on purpose (`shutdown` calls `server.stop()`; the boot-abort
-   * path uses `stopBoundServerAfterBindFailure`, whose failure string is folded
-   * into the returned error). Callers stop the server, then call this.
+   * it differently on purpose (`shutdown` fences `server.stop()` and continues;
+   * the boot-abort path uses `stopBoundServerAfterBindFailure`, whose failure
+   * string is folded into the returned error). Callers stop the server, then
+   * call this.
    */
-  const teardownAfterServerStop = async (context: string): Promise<void> => {
-    // Diagnostics are secondary to completing teardown.
-    const logFailure = (message: string, error: unknown): void =>
-      logSafely(logger, "error", message, { error: safeErrorMessage(error) });
-
-    // Stop server-owned reconciliation before closing the worker/Redis it uses:
-    // stop scheduling, then let the sweep already in flight finish.
-    if (hitlReconciliation !== undefined) {
-      hitlReconciliation.stop();
-      await hitlReconciliation.settle();
-      hitlReconciliation = undefined;
-    }
-
-    // Stop the HITL worker (ADR-0060) — drains its in-flight job, then no more
-    // run slices are processed. The queue backend itself is closed by the binary
-    // via `onShutdown` (it owns the BullMQ/Redis connection).
-    if (hitlWorker) {
+  const teardownAfterServerStop = async (context: string): Promise<readonly unknown[]> => {
+    const failures: unknown[] = [];
+    const recordFailure = (message: string, error: unknown): void => {
+      const diagnostic = safeErrorMessage(error);
+      failures.push(new Error(`${message}: ${diagnostic}`, { cause: error }));
+      logWithoutThrowing(logger, "error", message, { error: diagnostic });
+    };
+    // Sibling of `performShutdown`'s `attempt`, but awaiting: each teardown step
+    // must record its own failure and let EVERY later resource still be
+    // attempted, so no step may propagate. Hand-rolling the try/catch per step
+    // is how one of them would eventually be written without the fence.
+    const attempt = async (message: string, effect: () => unknown): Promise<void> => {
       try {
-        await hitlWorker.close();
-      } catch (closeError) {
-        logFailure(`Failed to close HITL worker during ${context}`, closeError);
+        await effect();
+      } catch (error) {
+        recordFailure(message, error);
       }
-      hitlWorker = undefined;
+    };
+
+    // Clear ownership before each operation so teardown remains idempotent even
+    // when a non-conforming port throws. Every later resource is still attempted.
+    const reconciliation = hitlReconciliation;
+    hitlReconciliation = undefined;
+    if (reconciliation !== undefined) {
+      await attempt(
+        `Failed to stop HITL reconciliation during ${context}`,
+        () => reconciliation.stop(),
+      );
+      await attempt(
+        `Failed to settle HITL reconciliation during ${context}`,
+        () => reconciliation.settle(),
+      );
     }
 
-    // Close connected capabilities (ADR-0051) in reverse topological order, then
-    // infrastructure. `closeAll` reports per-capability failures rather than
-    // throwing, so name them: "shutdown completed" with a silent failed close is
-    // exactly the state an operator needs to be able to see.
-    if (sortedHandles.length > 0) {
-      const closeFailures = await closeAll(sortedHandles, logger);
-      if (closeFailures.length > 0) {
-        logSafely(logger, "warn",
-          `Capability shutdown completed with ${closeFailures.length} failure(s)`,
-          { context, failures: closeFailures.map((f) => f.name) });
-      }
+    const worker = hitlWorker;
+    hitlWorker = undefined;
+    if (worker !== undefined) {
+      await attempt(`Failed to close HITL worker during ${context}`, () => worker.close());
     }
 
-    // Clean up infrastructure (e.g., close Redis connections).
-    if (deps.onShutdown) {
+    const handles = sortedHandles;
+    sortedHandles = [];
+    if (handles.length > 0) {
       try {
-        await deps.onShutdown();
-      } catch (cleanupError) {
-        logFailure(
-          `Infrastructure cleanup failed during ${context} — resources may be leaked`,
-          cleanupError,
-        );
+        const closeFailures = await closeAll(handles, logger);
+        for (const failure of closeFailures) {
+          recordFailure(
+            `Capability '${failure.name}' failed to close during ${context}`,
+            new Error(failure.error),
+          );
+        }
+      } catch (error) {
+        recordFailure(`Capability shutdown threw during ${context}`, error);
       }
     }
+
+    // Captured so the closure keeps the narrowing — a property access would
+    // need a non-null assertion here, which the type rules rule out.
+    const onShutdown = deps.onShutdown;
+    if (onShutdown) {
+      await attempt(
+        `Infrastructure cleanup failed during ${context} — resources may be leaked`,
+        () => onShutdown(),
+      );
+    }
+    return failures;
   };
 
   // `| undefined` is type-honest: `Bun.serve` may throw before assigning (a bind
@@ -1143,15 +1212,22 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
     // depending only on the OPTIONAL `onShutdown` would otherwise leave a
     // mis-permissioned tenant socket listening, worse than a clean boot failure.
     const serverStopFailure = stopBoundServerAfterBindFailure(bunServer, bindDesc, logger);
-    await teardownAfterServerStop("boot abort after server bind failure");
-    const stopContext = serverStopFailure === undefined
-      ? ""
-      : `; failed to stop the bound server and the listener may still be live: ${serverStopFailure}`;
-    return err({
+    const teardownFailures = await teardownAfterServerStop(
+      "boot abort after server bind failure",
+    );
+    const primary: HostError = {
       kind: "internal-invariant-violated",
-      message: `Failed to bind HTTP server on ${bindDesc}: ${safeErrorMessage(e)}${stopContext}`,
+      message: `Failed to bind HTTP server on ${bindDesc}: ${safeErrorMessage(e)}`,
       context: unixPath !== undefined ? { unix: unixPath } : { port: config.PORT },
-    });
+    };
+    return err(bootAbortWithCleanup(primary, [
+      ...(serverStopFailure === undefined
+        ? []
+        : [new Error(
+            `Failed to stop the bound server; listener may still be live: ${serverStopFailure}`,
+          )]),
+      ...teardownFailures,
+    ]));
   }
   // The catch above returns on any bind/chmod failure, so reaching here means the
   // server is bound and `bunServer` is assigned.
@@ -1240,63 +1316,84 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
   );
 
   // ── Shutdown Logic ───────────────────────────────────────────────────────
-  const shutdown = async () => {
-    logger.info("Shutdown initiated — draining in-flight requests...");
+  let shutdownPromise: Promise<void> | undefined;
+  const performShutdown = async (): Promise<void> => {
+    const failures: unknown[] = [];
+    const recordFailure = (operation: string, error: unknown): void => {
+      failures.push(new Error(`Shutdown step failed: ${operation}`, { cause: error }));
+      logWithoutThrowing(logger, "error", `Shutdown step failed: ${operation}`, {
+        error: safeErrorMessage(error),
+      });
+    };
+    const attempt = (operation: string, effect: () => void): void => {
+      try {
+        effect();
+      } catch (error) {
+        recordFailure(operation, error);
+      }
+    };
 
-    // Stop sync loop
-    if (syncLoop) {
-      syncLoop.stop();
-      syncLoop = null;
+    attempt("log shutdown start", () =>
+      logger.info("Shutdown initiated — draining in-flight requests..."));
+
+    const stoppingSyncLoop = syncLoop;
+    syncLoop = null;
+    if (stoppingSyncLoop !== null) {
+      attempt("stop sync loop", () => stoppingSyncLoop.stop());
     }
 
-    // Stop Redis liveness probe — no more degraded/recovered transitions during drain
-    if (redisProbe) {
-      redisProbe.stop();
-      redisProbe = null;
+    const stoppingRedisProbe = redisProbe;
+    redisProbe = null;
+    if (stoppingRedisProbe !== null) {
+      attempt("stop Redis liveness probe", () => stoppingRedisProbe.stop());
     }
 
-    // Transition to draining
     const inflightCount = concurrency.global.current;
     const drainResult = beginDrain(hostState, inflightCount, Date.now());
     if (drainResult.ok) {
       hostState = drainResult.value;
     } else {
-      logger.warn("Cannot transition to draining", {
-        currentPhase: hostState.phase,
-        error: drainResult.error.message,
-      });
+      const transitionError = new Error(drainResult.error.message);
+      recordFailure("transition host to draining", transitionError);
     }
 
-    // Wait for in-flight requests to drain (up to DRAIN_TIMEOUT_MS)
     const drainDeadline = Date.now() + config.DRAIN_TIMEOUT_MS;
     while (concurrency.global.current > 0 && Date.now() < drainDeadline) {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-
     if (concurrency.global.current > 0) {
-      logger.warn(`Drain timeout — ${concurrency.global.current} requests still in-flight`);
+      attempt("log drain timeout", () =>
+        logger.warn(`Drain timeout — ${concurrency.global.current} requests still in-flight`));
     }
 
-    // Stop HTTP server
-    if (server) {
-      server.stop();
-      server = null;
+    const stoppingServer = server;
+    server = null;
+    if (stoppingServer !== null) {
+      attempt("stop HTTP server", () => stoppingServer.stop());
     }
 
-    await teardownAfterServerStop("shutdown");
+    failures.push(...await teardownAfterServerStop("shutdown"));
 
-    // Transition to stopped
     const stoppedResult = drainComplete(hostState);
     if (stoppedResult.ok) {
       hostState = stoppedResult.value;
     } else {
-      logger.warn("Cannot transition to stopped", {
-        currentPhase: hostState.phase,
-        error: stoppedResult.error.message,
-      });
+      recordFailure("transition host to stopped", new Error(stoppedResult.error.message));
     }
 
-    logger.info("Host stopped");
+    if (failures.length === 0) {
+      attempt("log host stopped", () => logger.info("Host stopped"));
+    } else {
+      logWithoutThrowing(logger, "warn", `Host stopped with ${failures.length} shutdown failure(s)`, {});
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(failures, "Host shutdown completed with failures");
+    }
+  };
+
+  const shutdown = (): Promise<void> => {
+    shutdownPromise ??= performShutdown();
+    return shutdownPromise;
   };
 
   // ── Signal Handlers ──────────────────────────────────────────────────────
@@ -1318,12 +1415,12 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
     getState: () => hostState,
     getConcurrency: () => concurrency,
     getCircuitBreakers: () => circuitBreakers as ReadonlyMap<DagId, CircuitState>,
-    shutdown: async () => {
+    shutdown: () => {
       if (signalHandle) {
         signalHandle.unregister();
         signalHandle = null;
       }
-      await shutdown();
+      return shutdown();
     },
     triggerSync: async () => {
       if (syncLoop) {

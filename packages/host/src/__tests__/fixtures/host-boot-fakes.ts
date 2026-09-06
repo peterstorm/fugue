@@ -1,6 +1,11 @@
 /**
  * Shared `createHost` boot fakes — the lightweight fake-port stack the host
- * boot tests use (host-uds-bind.test.ts, hitl-boot-wiring.test.ts).
+ * boot tests use (host-uds-bind.test.ts, entrypoint-wiring.test.ts,
+ * runtime-capabilities.test.ts, node-context-factory.test.ts,
+ * spend-ledger.test.ts, hitl-reconciliation-lifecycle.test.ts, and the
+ * integration suites). Kept as a list rather than "several tests" because a
+ * stale name here is how a fixture drifts from its callers — `grep -rl
+ * host-boot-fakes` is the source of truth.
  *
  * No real Redis/git/filesystem-of-DAGs: every port is a plain in-memory fake
  * (the repo's established port/fake idiom — no mock frameworks). The socket
@@ -16,6 +21,7 @@ import type { SyncLogger } from "../../sync/sync-loop.js";
 import type { HostConfig } from "../../domain/config.js";
 import { parseHostConfig } from "../../domain/config.js";
 import { tenantId } from "../../domain/tenant.js";
+import { createInMemorySpendLedger } from "../../adapters/spend-ledger-memory.js";
 
 export const makeConfig = (overrides?: Record<string, string | undefined>): HostConfig => {
   const r = parseHostConfig({
@@ -94,7 +100,9 @@ export const fakeRedis = (): { port: RedisConnectivityPort; redis: RedisPort } =
 
 export const fakeInfra = (redis: RedisPort): SharedInfra => ({
   llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as never,
+  llmPricingModel: { kind: "request" },
   redis,
+  spendLedger: createInMemorySpendLedger(),
   tracer: noopTracer,
   contentFilter: null,
   prompts: null,
@@ -102,13 +110,21 @@ export const fakeInfra = (redis: RedisPort): SharedInfra => ({
   capabilities: [],
 });
 
-export const testLogger = (): SyncLogger & { logs: Array<{ level: string; msg: string }> } => {
-  const logs: Array<{ level: string; msg: string }> = [];
+/**
+ * Recording logger for boot/lifecycle tests. Captures `data` as well as the
+ * message: a diagnostic's structured payload is often the assertion (the
+ * fallback breadcrumb, the error detail), and a fixture that dropped it forced
+ * callers to hand-roll their own.
+ */
+export const testLogger = (): SyncLogger & {
+  logs: Array<{ level: string; msg: string; data?: unknown }>;
+} => {
+  const logs: Array<{ level: string; msg: string; data?: unknown }> = [];
   return {
     logs,
-    info: (msg) => logs.push({ level: "info", msg }),
-    warn: (msg) => logs.push({ level: "warn", msg }),
-    error: (msg) => logs.push({ level: "error", msg }),
+    info: (msg, data) => logs.push({ level: "info", msg, data }),
+    warn: (msg, data) => logs.push({ level: "warn", msg, data }),
+    error: (msg, data) => logs.push({ level: "error", msg, data }),
   };
 };
 

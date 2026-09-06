@@ -86,27 +86,38 @@ describe("concurrent wave failures", () => {
     // Run should fail
     expect(result.ok).toBe(false);
 
-    // Observer should have node-error events for the co-failed sibling(s)
+    // THE contract: exactly one `node-error` per failing node — no more, no
+    // fewer. Both halves are load-bearing and both were once broken.
+    //
+    // Too few: a failure path that reports nothing leaves a buffered observer
+    // watching the node simply disappear.
+    //
+    // Too many: `executeWave` used to re-emit for every non-primary failure on
+    // top of the event the node had already raised for itself, so a co-failed
+    // sibling produced TWO events and the primary one — every observer, metric
+    // and alert keyed on `node-error` silently double-counted the sibling.
+    // This assertion used to read `toBeGreaterThanOrEqual(1)`, which is exactly
+    // why that survived sixteen review rounds. Counting is the point.
     const nodeErrors = observer.events.filter(
       (e: ObserverEvent) => e.type === "node-error",
     );
 
-    // At least 1 node-error for the sibling failure
-    expect(nodeErrors.length).toBeGreaterThanOrEqual(1);
-
-    // Both fail_a and fail_b should be mentioned somewhere in error events
-    // or the primary error
-    const allFailedIds = new Set<string>();
+    const perNode = new Map<string, number>();
     for (const e of nodeErrors) {
-      if (e.type === "node-error") allFailedIds.add(e.nodeId);
+      if (e.type === "node-error") perNode.set(e.nodeId, (perNode.get(e.nodeId) ?? 0) + 1);
     }
+
+    expect(perNode.get(N("fail_a"))).toBe(1);
+    expect(perNode.get(N("fail_b"))).toBe(1);
+    // The node that succeeded never reports a failure.
+    expect(perNode.has(N("ok_node"))).toBe(false);
+    // …and nothing else raised one either.
+    expect(nodeErrors.length).toBe(2);
+
+    // Whichever failure became primary is still the one the run returns.
     if (!result.ok && "nodeId" in result.error) {
-      allFailedIds.add(result.error.nodeId as string);
+      expect([N("fail_a"), N("fail_b")] as string[]).toContain(result.error.nodeId as string);
     }
-    // At least one of the failed nodes is reported
-    expect(
-      allFailedIds.has(N("fail_a")) || allFailedIds.has(N("fail_b")),
-    ).toBe(true);
   });
 
   test("partial outputs from successful siblings are captured", async () => {

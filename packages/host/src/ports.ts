@@ -8,7 +8,17 @@
  * for operations that can fail, making failure explicit at the type level.
  */
 
-import type { Result, DagId, GitSha, LlmClient, Tracer, PromptAccess, RunId, Spend } from "@fuguejs/framework";
+import type {
+  Result,
+  DagId,
+  GitSha,
+  LlmClient,
+  LlmPricingModel,
+  Tracer,
+  PromptAccess,
+  RunId,
+  Spend,
+} from "@fuguejs/framework";
 import type { CapabilityHandle } from "@fuguejs/framework";
 import type { HostError } from "./domain/host-error.js";
 import type { DagRegistration } from "./domain/dag-registration.js";
@@ -101,19 +111,42 @@ export type GitPort = {
 
 // ── Redis ────────────────────────────────────────────────────────────────────
 
-/**
- * Redis-like interface for cache/checkpoint operations.
- * Returns Result to make failures explicit — no try/catch required at call sites.
- */
+/** Mutually exclusive Redis expiry units for atomic write operations. */
 export type RedisExpiry =
   | { readonly expiresInSec: number; readonly expiresInMs?: never }
   | { readonly expiresInMs: number; readonly expiresInSec?: never };
+
+/**
+ * Complete Redis spend append owned by the Spend Ledger consumer.
+ *
+ * The adapter commits marker fields, saturated numeric totals, and optional
+ * retention in one optimistic transaction against ONE hash key. Keeping the complete delta in this
+ * request makes split-key marker/value races unrepresentable to the caller.
+ */
+export type RedisSpendAppend = {
+  readonly key: string;
+  readonly delta: Spend;
+  readonly ttlSec?: number;
+};
+
+/** One atomic checkpoint write plus retention refresh for its run spend hash. */
+export type RedisCheckpointSpendCommit = {
+  readonly checkpointKey: string;
+  readonly checkpointValue: string;
+  readonly spendKey: string;
+  readonly checkpointTtlSec: number;
+  readonly spendTtlSec: number;
+};
 
 export type RedisValueGuard = {
   readonly key: string;
   readonly expectedValue: string;
 };
 
+/**
+ * Redis-like interface for cache/checkpoint operations.
+ * Returns Result to make failures explicit — no try/catch required at call sites.
+ */
 export type RedisPort = {
   readonly get: (key: string) => Promise<Result<string | null, HostError>>;
   readonly set: (key: string, value: string, opts?: { expiresInSec?: number }) => Promise<Result<string | null, HostError>>;
@@ -208,24 +241,28 @@ export type RedisPort = {
     value: string,
     opts: { expiresInSec: number },
   ) => Promise<Result<"not-present" | "created" | "exists", HostError>>;
-  /**
-   * Atomically add `by` to a hash field, creating the key and field at zero
-   * first. Optional so existing `RedisPort` fakes stay valid; the spend ledger
-   * parses it once at construction rather than null-checking per call.
-   *
-   * This is the primitive that lets a run's durable spend be appended without a
-   * read-modify-write: the stored figures are sums, `HINCRBY` is an atomic sum,
-   * so two concurrent writers cannot lose an increment between them.
-   */
-  readonly hIncrBy?: (key: string, field: string, by: number) => Promise<Result<number, HostError>>;
   /** Read every field of a hash. An absent key yields an empty record, not an error. */
   readonly hGetAll?: (key: string) => Promise<Result<Readonly<Record<string, string>>, HostError>>;
   /**
-   * Set a key's idle TTL. Distinct from `compareAndExpire`, which guards on a
-   * value first: the ledger has no value to guard on because it never reads
-   * before writing, and refreshing a TTL it just appended to needs no guard.
+   * Atomically append one complete Spend Record with optimistic `WATCH`/`MULTI`.
+   *
+   * The transaction reads and saturates numeric axes, then queues every
+   * unpriced-model marker `HSET`, nonzero numeric `HSET`s cost-first (`micros`,
+   * `tokens`, `calls`), and one optional `EXPIRE`. A proven WATCH conflict may
+   * retry; command failure or ambiguous acknowledgement returns one typed
+   * failure. Callers and the Redis driver never replay a transaction that may
+   * already have committed.
    */
-  readonly expire?: (key: string, seconds: number) => Promise<Result<boolean, HostError>>;
+  readonly appendSpend?: (append: RedisSpendAppend) => Promise<Result<void, HostError>>;
+  /**
+   * Atomically write one checkpoint and extend the corresponding spend hash.
+   * The two explicit TTLs preserve their independent DAG-checkpoint and
+   * resumable-run lifecycles. An absent spend hash is valid before the
+   * run's first LLM call; EXPIRE then reports zero without aborting the write.
+   */
+  readonly commitCheckpointAndRetainSpend?: (
+    commit: RedisCheckpointSpendCommit,
+  ) => Promise<Result<string | null, HostError>>;
 }
 
 /**
@@ -275,20 +312,20 @@ export type RedisPubSubPort = {
 // ── Shared Infrastructure ────────────────────────────────────────────────────
 
 /**
- * Shared infrastructure singletons — initialized once at host startup.
- * Passed by reference into every NodeContext (no per-request allocation).
+ * Shared boot resources initialized once at host startup. Their underlying
+ * clients are reused; each run allocates its own authority, metered facades,
+ * capability map, cache adapter, and checkpoint adapter.
  */
 export type SharedInfra = {
   readonly llm: LlmClient;
+  /** Composition-owned model policy used for both provider egress and pricing. */
+  readonly llmPricingModel: LlmPricingModel;
   readonly redis: RedisPort;
   /**
-   * FALLBACK per-run spend ledger — not usually the one that gets used.
-   *
-   * `createNodeContextForDag` builds a Redis-backed ledger per NodeContext
-   * whenever the wired `RedisPort` offers `hIncrBy`/`hGetAll`/`expire`, and only
-   * falls back to this one when it does not (loudly: that downgrade costs
-   * durability across process restarts and is logged at `error`). A reader of
-   * this field alone would otherwise assume it is what a run consults.
+   * Selected ledger binding. Stock wiring supplies a `redis-fallback` memory
+   * ledger, making Redis-first selection explicit. Embedders may inject an
+   * `authoritative` durable ledger (for example file), which is never displaced
+   * merely because Redis exposes ledger primitives.
    */
   readonly spendLedger: SpendLedgerPort;
   readonly tracer: Tracer;
@@ -298,7 +335,9 @@ export type SharedInfra = {
   /**
    * External capability handles registered at host creation.
    * Connected during boot, closed during shutdown.
-   * Clients are injected into per-request NodeContexts.
+   * Non-LLM clients may be injected directly into per-request NodeContexts;
+   * boot-scoped LLM clients are transformed into run-scoped metered or
+   * composed facades first.
    *
    * @satisfies ADR-0051 — Extensible capability registry
    */
@@ -312,39 +351,56 @@ export type SharedInfra = {
 
 // ── Spend Ledger ────────────────────────────────────────────────────────────
 
+/** Selection and durability facts carried by a spend-ledger adapter. */
+export type SpendLedgerMetadata =
+  | {
+      readonly role: "redis-fallback";
+      readonly backend: "memory";
+      readonly durability: "process";
+    }
+  | {
+      readonly role: "authoritative";
+      readonly backend: "file" | "redis";
+      readonly durability: "restart";
+    };
+
 /**
- * Durable per-run LLM spend.
+ * Per-run LLM spend persistence seam.
  *
- * The in-process meter is the authority WITHIN one execution slice; this port
- * is what makes a run's spend survive BETWEEN them. A resumable run builds a
+ * The in-process meter is the authority WITHIN one execution slice. Whether
+ * this seam survives a process restart is explicit in `metadata.durability`:
+ * the memory adapter is process-local, while authoritative adapters survive
+ * restart. A resumable run builds a
  * fresh NodeContext per slice, so without it a run that parks for a human
  * decision and resumes starts from zero — five parks, six budgets.
  *
  * Two operations, deliberately: hydrate once when a slice starts, append once
- * per settled call. `add` is not a read-modify-write, so it needs no lock and
- * no compare-and-swap — see `domain/spend-record.ts` for why the encoding makes
- * that true.
+ * per settled call. The seam requires monotone commutative append semantics,
+ * not one persistence protocol: Redis commits one complete additive
+ * transaction; the file adapter serializes whole-snapshot replacement per run.
  */
 export type SpendLedgerPort = {
+  /** Selection and durability facts travel with the adapter they describe. */
+  readonly metadata: SpendLedgerMetadata;
   /**
    * Spend already recorded for a run. An unknown run reads as `NO_SPEND`, not
    * an error — "never seen" and "seen, spent nothing" are the same fact, and
    * the budget check treats them identically.
    *
-   * An infrastructure failure IS an error, and the caller must fail closed on
-   * it: an unreadable ledger is indistinguishable from a spent one, and
-   * guessing zero is precisely the refill-on-resume bug this port exists to
-   * close.
+   * An infrastructure failure IS an error. Budget-enforcing callers must fail
+   * closed because an unreadable ledger is indistinguishable from a spent one;
+   * non-enforcing callers may explicitly degrade to metering from zero so a
+   * metering outage does not become an availability outage.
    */
   readonly read: (runId: RunId) => Promise<Result<Spend, HostError>>;
   /**
-   * Append one settled call's spend. Monotone and commutative — the stored
-   * figures are sums and a set union, so concurrent appends cannot corrupt the
-   * record whatever order they land in.
+   * Append one settled call's spend. Monotone and commutative — adapters must
+   * preserve every delta under concurrent calls, whatever settlement order.
    *
-   * Returns no total: the in-process meter already knows the run's figure, and
-   * a total assembled from several independent atomic commands could disagree
-   * with a concurrent writer's view. Nothing would be able to trust it.
+   * Returns no total: the in-process meter already knows the run's figure and
+   * this write seam only acknowledges persistence. A lost acknowledgement may
+   * be ambiguous, so adapters must not replay a write that may have committed;
+   * an optimistic conflict proven not to have committed may retry internally.
    */
   readonly add: (runId: RunId, delta: Spend) => Promise<Result<void, HostError>>;
 };

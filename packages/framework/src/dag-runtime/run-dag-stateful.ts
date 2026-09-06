@@ -7,7 +7,8 @@
 // Internal decomposition:
 //   prepareDagRun     — pre-flight: retry merge, telemetry, capability check
 //   resolveJob        — job handle: caller-supplied or fresh in-memory
-//   handleTerminalState — match terminal state: judges, error, invariant violation
+//   handleTerminalState — match terminal state: judges, suspended (HITL), error,
+//                         invariant violation
 //   handleKernelError — catch block: abort vs terminal-failed
 
 import { match } from "ts-pattern";
@@ -16,16 +17,24 @@ import type { JobLike, KernelRunOpts } from "../state-machine/types.js";
 import type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, HumanReviewOutcome } from "./types.js";
 import { EXECUTOR_NODE_ID } from "./types.js";
 import type { DagDef } from "../types/dag.js";
-import { withRetryLimits } from "../types/dag.js";
-import type { NodeContext, ValidatedNodeContext } from "../types/node.js";
-import type { MintingAuthority } from "../types/capability-broker.js";
+import { withRetryLimits } from "../shared/validate-dag.js";
+import type { Capability, NodeContext, ValidatedNodeContext } from "../types/node.js";
+import type {
+  CapabilityBroker,
+  Invocation,
+  InvocationOrigin,
+  MintingAuthority,
+} from "../types/capability-broker.js";
 import type { FrameworkError } from "../types/errors.js";
-import { isFrameworkError } from "../types/errors.js";
+import { asFrameworkError } from "../types/errors.js";
 import { safeErrorMessage } from "../types/safe-error.js";
 import type { NodeId } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
 import { createInMemoryJob } from "../queue/in-memory-job.js";
-import { runStateMachine } from "../state-machine/runner.js";
+import {
+  isBeforeExecuteAbortError,
+  runStateMachine,
+} from "../state-machine/runner.js";
 import { compileDagToMachine } from "./machine.js";
 import { buildDagExecutor } from "./executor.js";
 import { finalizeRunWithJudges, runFinalizeInBackground } from "./eval-judges.js";
@@ -36,8 +45,10 @@ import { beginRunTelemetry, closeRootSpan, startRunSpan } from "./run-telemetry.
 import type { FreshnessIndex } from "./freshness-check.js";
 import { sha256DedupKey } from "../shared/dedup-key.js";
 import { fwLogger } from "../logger.js";
+import { bestEffort, bestEffortLog } from "./best-effort.js";
 import type { CompiledDagMachine } from "./machine.js";
 import type { NonEmptyString } from "../types/non-empty-string.js";
+import { hasExactOwnKeys, ownDescriptors } from "../types/own-data.js";
 
 // ---------------------------------------------------------------------------
 // DagRunOpts — caller-supplied options for runDagStateful
@@ -144,10 +155,177 @@ export interface DagRunOpts
 // prepareDagRun — pre-flight: merge retry limits, emit run-start, validate capabilities
 // ---------------------------------------------------------------------------
 
+const snapshotOrigin = (
+  origin: unknown,
+  nodeId: NodeId,
+): Result<InvocationOrigin, FrameworkError> => {
+  const invalid = (message: string): Result<InvocationOrigin, FrameworkError> => err({
+    kind: "validation",
+    nodeId,
+    message: `minting authority origin invalid while snapshotting run authority: ${message}`,
+  });
+
+  // Descriptor walk and key-set check are `types/own-data.ts`; only the
+  // diagnostic wording ("minting authority origin invalid …") stays local.
+  const read = ownDescriptors(origin);
+  if (!read.ok) {
+    return invalid(
+      read.error.kind === "uninspectable"
+        ? `could not be inspected safely: ${safeErrorMessage(read.error.cause)}`
+        : "must be an object",
+    );
+  }
+  const descriptors = read.value;
+
+  const hasExactly = (expected: readonly string[]): boolean =>
+    hasExactOwnKeys(descriptors, expected);
+  const dataValue = (key: string): Result<unknown, FrameworkError> => {
+    const descriptor = descriptors[key];
+    return descriptor !== undefined && "value" in descriptor
+      ? ok(descriptor.value)
+      : invalid(`${key} must be an own data property`);
+  };
+
+  const kind = dataValue("kind");
+  if (!kind.ok) return kind;
+  if (kind.value === "agent") {
+    if (!hasExactly(["kind", "agentClientId"])) {
+      return invalid("agent variant must contain exactly kind and agentClientId");
+    }
+    const agentClientId = dataValue("agentClientId");
+    if (!agentClientId.ok) return agentClientId;
+    return typeof agentClientId.value === "string"
+      ? ok(Object.freeze({ kind: "agent", agentClientId: agentClientId.value }))
+      : invalid("agentClientId must be a string");
+  }
+  if (kind.value === "user") {
+    if (!hasExactly(["kind", "sub", "agentClientId"])) {
+      return invalid("user variant must contain exactly kind, sub, and agentClientId");
+    }
+    const sub = dataValue("sub");
+    if (!sub.ok) return sub;
+    const agentClientId = dataValue("agentClientId");
+    if (!agentClientId.ok) return agentClientId;
+    return typeof sub.value === "string" && typeof agentClientId.value === "string"
+      ? ok(Object.freeze({
+          kind: "user",
+          sub: sub.value,
+          agentClientId: agentClientId.value,
+        }))
+      : invalid("sub and agentClientId must be strings");
+  }
+  return invalid('kind must be exactly "agent" or "user"');
+};
+
+/**
+ * Observe broker authority once per distinct capability required by this DAG.
+ * The returned facade is the sole broker view used by both run-start validation
+ * and dispatch, so a stateful `provides` predicate cannot waive validation and
+ * later permit static fallback. The source broker keeps receiver identity for
+ * `mintFor`; only its capability claims and invocation origin are snapshotted.
+ */
+const snapshotMintingAuthority = (
+  dag: DagDef,
+  opts: Pick<DagRunOpts, "minting"> | undefined,
+): Result<MintingAuthority | undefined, FrameworkError> => {
+  const snapshotNodeId = dag.nodes[0]?.id ?? EXECUTOR_NODE_ID;
+  let boundary: {
+    readonly source: CapabilityBroker;
+    readonly mintFor: CapabilityBroker["mintFor"];
+    readonly provides: CapabilityBroker["provides"];
+    readonly origin: InvocationOrigin;
+    readonly meterLlm: MintingAuthority["meterLlm"];
+  };
+
+  try {
+    // Read the complete authority graph exactly once inside one parse fence.
+    // Accessors on opts, authority, broker, origin, or any origin field all
+    // become the same typed validation failure instead of escaping after
+    // run-start and leaving telemetry unbalanced.
+    const authority = opts?.minting;
+    if (authority === undefined) return ok(undefined);
+    const source = authority.broker;
+    const mintFor = source.mintFor;
+    const provides = source.provides;
+    const origin = snapshotOrigin(authority.origin, snapshotNodeId);
+    if (!origin.ok) return err(origin.error);
+    const meterLlm = authority.meterLlm;
+    if (typeof mintFor !== "function") {
+      return err({
+        kind: "validation",
+        nodeId: snapshotNodeId,
+        message: "broker.mintFor must be a function while snapshotting run authority",
+      });
+    }
+    if (typeof meterLlm !== "function") {
+      return err({
+        kind: "validation",
+        nodeId: snapshotNodeId,
+        message: "minting authority meterLlm must be a function",
+      });
+    }
+    boundary = { source, mintFor, provides, origin: origin.value, meterLlm };
+  } catch (error) {
+    return err({
+      kind: "validation",
+      nodeId: snapshotNodeId,
+      message:
+        "minting authority accessor threw while snapshotting run authority: " +
+        safeErrorMessage(error),
+    });
+  }
+
+  const { source, mintFor, provides, origin, meterLlm } = boundary;
+  const provided = new Set<Capability>();
+  const observed = new Set<Capability>();
+
+  for (const node of dag.nodes) {
+    // `node.requires` is a frozen array for any DAG built by `defineDag*`, but
+    // `runDag` accepts a `DagDef` value — a hand-assembled one can carry a
+    // hostile iterable. Fence the spread too, not just `provides()`: an unfenced
+    // throw here escapes runDag's Result contract as an uncaught exception.
+    let required: readonly Capability[];
+    try {
+      required = [...node.requires];
+    } catch (error) {
+      return err({
+        kind: "validation",
+        nodeId: node.id,
+        message:
+          "node.requires threw while snapshotting run authority: " +
+          safeErrorMessage(error),
+      });
+    }
+    for (const capability of required) {
+      if (observed.has(capability)) continue;
+      observed.add(capability);
+      try {
+        if (provides?.call(source, capability) === true) provided.add(capability);
+      } catch (error) {
+        return err({
+          kind: "validation",
+          nodeId: node.id,
+          message:
+            `broker.provides("${capability}") threw while snapshotting run authority: ` +
+            safeErrorMessage(error),
+        });
+      }
+    }
+  }
+
+  const broker: CapabilityBroker = Object.freeze({
+    mintFor: (inv: Invocation, requires: readonly Capability[]) =>
+      mintFor.call(source, inv, requires),
+    provides: (capability: Capability) => provided.has(capability),
+  });
+  return ok(Object.freeze({ broker, origin, meterLlm }));
+};
+
 interface PreparedRun {
   readonly effectiveDag: DagDef;
   readonly validatedCtx: ValidatedNodeContext;
   readonly emitRunEnd: (status: "ok" | "error") => void;
+  readonly minting?: MintingAuthority;
 }
 
 const prepareDagRun = (
@@ -155,24 +333,52 @@ const prepareDagRun = (
   nodeCtx: NodeContext,
   opts?: Pick<DagRunOpts, "retryLimits" | "now" | "minting">,
 ): Result<PreparedRun, FrameworkError> => {
-  const effectiveDag: DagDef =
-    opts?.retryLimits !== undefined ? withRetryLimits(dag, opts.retryLimits) : dag;
-
-  // Emit run-start BEFORE compile so a malformed DAG still produces a balanced
-  // run-start/run-end pair.
+  // Run-start comes FIRST — before the retry merge, not just before compile —
+  // so every pre-flight failure produces a balanced run-start/run-end pair.
+  // `beginRunTelemetry` reads `dag`, never `effectiveDag`, so nothing here
+  // depends on the merge having succeeded. An invalid `opts.retryLimits`
+  // (unknown node key, negative or fractional count) used to return before this
+  // line, which meant a misconfigured retry override emitted NO observer events
+  // at all: no run-start, no run-end, no error — invisible to monitoring, and
+  // the one pre-flight failure that broke the invariant its two siblings below
+  // already honour.
   const { emitRunEnd } = beginRunTelemetry(nodeCtx, dag, { now: opts?.now });
 
+  const derivedDag = opts?.retryLimits !== undefined
+    ? withRetryLimits(dag, opts.retryLimits)
+    : ok(dag);
+  if (!derivedDag.ok) {
+    emitRunEnd("error");
+    return derivedDag;
+  }
+  const effectiveDag = derivedDag.value;
+
+  // Snapshot the broker's answers once per distinct required capability, then
+  // use that same immutable facade for validation and every dispatch. Authority
+  // cannot drift between the proof that waived static validation and delivery.
+  const mintingSnapshot = snapshotMintingAuthority(effectiveDag, opts);
+  if (!mintingSnapshot.ok) {
+    emitRunEnd("error");
+    return err(mintingSnapshot.error);
+  }
+
   // Capability validation. On success, hands back a phantom-branded token.
-  // A minting broker's `provides()` capabilities are resolved at dispatch, so
-  // the run-start check treats them as satisfied rather than demanding them on
-  // the boot-scoped base context.
-  const capCheck = validateCapabilities(effectiveDag, nodeCtx, opts?.minting?.broker);
+  // A minting broker's snapshotted `provides()` capabilities are resolved at
+  // dispatch, so the run-start check treats them as satisfied rather than
+  // demanding them on the boot-scoped base context.
+  const minting = mintingSnapshot.value;
+  const capCheck = validateCapabilities(effectiveDag, nodeCtx, minting?.broker);
   if (!capCheck.ok) {
     emitRunEnd("error");
     return err(capCheck.error);
   }
 
-  return ok({ effectiveDag, validatedCtx: capCheck.value, emitRunEnd });
+  return ok({
+    effectiveDag,
+    validatedCtx: capCheck.value,
+    emitRunEnd,
+    ...(minting !== undefined ? { minting } : {}),
+  });
 };
 
 // ---------------------------------------------------------------------------
@@ -213,6 +419,32 @@ interface TerminalDeps {
   readonly opts?: DagRunOpts;
 }
 
+/**
+ * The one way this module fails a run: close the root span as an error, emit the
+ * matching run-end, and return the typed error. Every failure exit routes here
+ * so a new one cannot forget the span close or the run-end and leave telemetry
+ * unbalanced (a run-start with no run-end).
+ *
+ * Both cleanup steps are fenced INDEPENDENTLY, for the same reason
+ * `runFinalizeInBackground` fences its own: they are diagnostics, and this is
+ * the function every failure exit depends on. `emitRunEnd` reads the
+ * caller-supplied clock unguarded, so an unfenced call here would let a hostile
+ * clock throw out of the very path whose job is to fail closed — turning a typed
+ * `Err` back into an escaping exception. A failure to close the span must also
+ * not prevent the run-end, and neither may replace the returned error.
+ */
+const failClosed = <O>(
+  rootSpan: Span,
+  emitRunEnd: (status: "ok" | "error") => void,
+  error: FrameworkError,
+): Result<StatefulOutcome<O>, FrameworkError> => {
+  bestEffort("runDagStateful", "fail-closed root span close", () =>
+    closeRootSpan(rootSpan, { kind: "error", error }));
+  bestEffort("runDagStateful", "fail-closed run-end emission", () =>
+    emitRunEnd("error"));
+  return err(error);
+};
+
 const handleTerminalState = <O>(
   state: DagPhase,
   context: DagMachineContext,
@@ -228,16 +460,49 @@ const handleTerminalState = <O>(
         );
 
       if (deps.opts?.onBackground) {
-        deps.opts.onBackground(runFinalizeInBackground(finalize, deps.rootSpan, deps.emitRunEnd));
+        const background = runFinalizeInBackground(finalize, deps.rootSpan, deps.emitRunEnd);
+        // Observe the guarded promise before handing it to caller code. The
+        // finalizer is designed to resolve every outcome, but this rejection
+        // observer keeps a future regression from becoming unhandled when the
+        // hook itself throws and discards its argument.
+        void background.catch((error) => {
+          bestEffortLog(
+            "error",
+            `[runDagStateful] background finalize escaped its guard: ${safeErrorMessage(error)}`,
+          );
+        });
+        try {
+          deps.opts.onBackground(background);
+        } catch (error) {
+          bestEffortLog(
+            "error",
+            `[runDagStateful] onBackground hook threw after DAG completion: ${safeErrorMessage(error)}`,
+          );
+        }
       } else {
-        await finalize();
+        // Fenced for the same reason the `onBackground` branch above is: a
+        // throwing eval judge — or a hostile clock inside finalize's own
+        // `emitRunEnd("ok")` — must not escape as a rejection. Failing closed
+        // here keeps run telemetry balanced on this path: a run-start that
+        // reaches finalize always gets a run-end, instead of leaving the root
+        // span open. (The one deliberate exception is the `suspended` terminal
+        // state, which parks the run and skips `emitRunEnd` precisely because
+        // the run has not ended — it resumes under the same run id.)
+        try {
+          await finalize();
+        } catch (cause) {
+          return failClosed(deps.rootSpan, deps.emitRunEnd, {
+            kind: "node-crash",
+            nodeId: EXECUTOR_NODE_ID,
+            retriability: "non-retriable",
+            message: `run finalize failed after DAG completion: ${safeErrorMessage(cause)}`,
+          });
+        }
       }
       return ok({ kind: "completed", output: s.output as O });
     })
     .with({ kind: "failed" }, async (s) => {
-      closeRootSpan(deps.rootSpan, { kind: "error", error: s.error });
-      deps.emitRunEnd("error");
-      return err(s.error);
+      return failClosed(deps.rootSpan, deps.emitRunEnd, s.error);
     })
     // ADR-0060: the run parked at a human gate. Close the root span cleanly (not
     // an error — the run is paused, not finished) and surface `suspended` so a
@@ -248,11 +513,10 @@ const handleTerminalState = <O>(
       closeRootSpan(deps.rootSpan, { kind: "ok" });
       return ok({ kind: "suspended", nodeId: s.nodeId, prompt: s.prompt, output: s.output });
     })
+    // Phases that carry no node identity: the violation is the executor's.
     .with(
       { kind: "pending" },
       { kind: "running" },
-      { kind: "retrying" },
-      { kind: "awaiting-human" },
       async (s) => unexpectedNonTerminal(
         deps.rootSpan,
         deps.emitRunEnd,
@@ -260,21 +524,19 @@ const handleTerminalState = <O>(
         EXECUTOR_NODE_ID,
       ),
     )
-    .with({ kind: "retrying-hook" }, async (s) =>
-      unexpectedNonTerminal(deps.rootSpan, deps.emitRunEnd, s.kind, s.nodeId))
+    // Phases that name the node they are parked on: attribute the violation
+    // there, so the diagnostic points at the node instead of the executor.
+    .with(
+      { kind: "retrying" },
+      { kind: "awaiting-human" },
+      { kind: "retrying-hook" },
+      async (s) => unexpectedNonTerminal(deps.rootSpan, deps.emitRunEnd, s.kind, s.nodeId),
+    )
     .exhaustive();
 
 // ---------------------------------------------------------------------------
 // handleKernelError — catch block: abort vs terminal-failed
 // ---------------------------------------------------------------------------
-
-const isBeforeExecuteAbort = (error: unknown): boolean => {
-  try {
-    return error instanceof Error && safeErrorMessage(error).includes("aborted by beforeExecute");
-  } catch {
-    return false;
-  }
-};
 
 /** Parse the kernel's attached terminal state without trusting any property access. */
 const frameworkErrorFromKernelCause = (error: unknown): FrameworkError | undefined => {
@@ -292,8 +554,11 @@ const frameworkErrorFromKernelCause = (error: unknown): FrameworkError | undefin
       return undefined;
     }
     if (Reflect.get(state, "kind") !== "failed") return undefined;
-    const attachedError = Reflect.get(state, "error");
-    return isFrameworkError(attachedError) ? attachedError : undefined;
+    // Recover the CANONICAL error, not the attached source: this value crossed
+    // an unknown-exception boundary and may carry a pre-prompt-caching `usage`
+    // record, which `isFrameworkError` deliberately declines to narrow. Dropping
+    // it here would discard the kind/retriability the run's failure depends on.
+    return asFrameworkError(Reflect.get(state, "error"));
   } catch {
     return undefined;
   }
@@ -304,11 +569,9 @@ const handleKernelError = <O>(
   rootSpan: Span,
   emitRunEnd: (status: "ok" | "error") => void,
 ): Result<StatefulOutcome<O>, FrameworkError> => {
-  if (isBeforeExecuteAbort(e)) {
+  if (isBeforeExecuteAbortError(e)) {
     const error: FrameworkError = { kind: "aborted", reason: "beforeExecute hook returned false" };
-    closeRootSpan(rootSpan, { kind: "error", error });
-    emitRunEnd("error");
-    return err(error);
+    return failClosed(rootSpan, emitRunEnd, error);
   }
 
   // Terminal-failed: the kernel attaches { state, context } to Error.cause.
@@ -319,9 +582,7 @@ const handleKernelError = <O>(
     retriability: "retriable",
     message: safeErrorMessage(e),
   };
-  closeRootSpan(rootSpan, { kind: "error", error });
-  emitRunEnd("error");
-  return err(error);
+  return failClosed(rootSpan, emitRunEnd, error);
 };
 
 // ---------------------------------------------------------------------------
@@ -357,24 +618,20 @@ export const runDagStatefulOutcome = async <I, O>(
   // 1. Pre-flight
   const prepared = prepareDagRun(dag, nodeCtx, opts);
   if (!prepared.ok) return prepared;
-  const { effectiveDag, validatedCtx, emitRunEnd } = prepared.value;
+  const { effectiveDag, validatedCtx, emitRunEnd, minting } = prepared.value;
 
   // 2. OTel root span wraps compilation + execution
   return startRunSpan(dag, nodeCtx, async (rootSpan): Promise<Result<StatefulOutcome<O>, FrameworkError>> => {
     // 3. Compile
     const compiled = compileDagToMachine(effectiveDag, input);
     if (!compiled.ok) {
-      closeRootSpan(rootSpan, { kind: "error", error: compiled.error });
-      emitRunEnd("error");
-      return err(compiled.error);
+      return failClosed(rootSpan, emitRunEnd, compiled.error);
     }
 
     // 4. Resolve job
     const jobResult = resolveJob(compiled.value, effectiveDag, nodeCtx, opts);
     if (!jobResult.ok) {
-      closeRootSpan(rootSpan, { kind: "error", error: jobResult.error });
-      emitRunEnd("error");
-      return err(jobResult.error);
+      return failClosed(rootSpan, emitRunEnd, jobResult.error);
     }
     const job = jobResult.value;
 
@@ -391,7 +648,7 @@ export const runDagStatefulOutcome = async <I, O>(
       random: opts?.random,
       now: opts?.now,
       freshnessIndex: opts?.freshnessIndex,
-      minting: opts?.minting,
+      minting,
     });
 
     const errorEventOf = (classified: { retriable: boolean; message: string }): DagEvent => ({
@@ -426,8 +683,12 @@ export const runDagStatefulOutcome = async <I, O>(
     try {
       const { state, context } = await runStateMachine(job, compiled.value.machine, executor, runOpts);
 
-      // 6. Handle terminal state
-      return handleTerminalState<O>(state, context, {
+      // 6. Handle terminal state.
+      // `return await`, not a bare `return`: a bare return hands the pending
+      // promise to the caller and the `catch` below — the one that routes every
+      // kernel failure through `handleKernelError` — never observes a rejection
+      // that settles after this frame returns.
+      return await handleTerminalState<O>(state, context, {
         rootSpan, dag, input, nodeCtx, meta, emitRunEnd, opts,
       });
     } catch (e) {
@@ -484,8 +745,6 @@ const unexpectedNonTerminal = <O>(
     retriability: "retriable",
     message,
   };
-  closeRootSpan(rootSpan, { kind: "error", error });
-  emitRunEnd("error");
-  return err(error);
+  return failClosed(rootSpan, emitRunEnd, error);
 };
 

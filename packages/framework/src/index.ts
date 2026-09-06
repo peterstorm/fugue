@@ -2,10 +2,10 @@
 //
 // Public surface: authoring-facing types, runtime entry points, and the
 // pluggable seams (Observer, Cache, LLM, JobLike, Scheduler) consumers
-// implement. Pure-internal helpers (transition primitives, JSON
-// serialization, scheduler internals) are intentionally NOT re-exported
-// here. Direct imports from their concrete paths remain available for tests
-// and any consumer that genuinely needs them.
+// implement. Documented JSON wrappers are public for custom durable backends;
+// low-level serialization and transition primitives plus scheduler internals
+// remain internal. Direct concrete-path imports remain available for tests and
+// consumers that genuinely need those internals.
 
 export * from "./types/index.js";
 export * from "./executor/index.js";
@@ -39,12 +39,18 @@ export { toJson, fromJson, tryFromJson } from "./state-machine/serialize.js";
 // DAG runtime — public surface only
 //
 // `runDag` and `runDagAsWorkerJob` are the sanctioned public entries.
+// `compileDagToMachine`, `buildDagExecutor`, and `dagTransition` live on the
+// `@fuguejs/framework/advanced` subpath for callers building custom machines on
+// the kernel — see `./advanced.ts`. Keeping them off the main barrel signals
+// that reaching for them is a deliberate choice, not an accident from a
+// wildcard import.
+//
 // `runDagStateful` (the back-compat flat `Result<O>` entry for block-until-
-// decided callers, per ADR-0060 §4), `compileDagToMachine`, `buildDagExecutor`,
-// and `dagTransition` live on the `@fuguejs/framework/advanced` subpath
-// for callers building custom machines on the kernel — see `./advanced.ts`.
-// Keeping them off the main barrel signals that reaching for them is a
-// deliberate choice, not an accident from a wildcard import.
+// decided callers, per ADR-0060 §4) is on NEITHER barrel — not this one and not
+// `advanced`. It is reachable only by direct file import
+// (`dag-runtime/run-dag-stateful.js`) and through the `executor/run-dag.ts`
+// wrapper; see `dag-runtime/index.ts` for why. Suspendable callers want
+// `runDagStatefulOutcome` / `runResumableDagJob` instead.
 // ---------------------------------------------------------------------------
 export type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, HumanAction, HumanReviewOutcome, HumanGatePayload, DagTopology, DagRetryState, DagHumanGateConfig, DagRoutingState } from "./dag-runtime/types.js";
 // The synthetic node id the kernel attributes executor-level (non-node) crashes
@@ -98,21 +104,9 @@ export type { CronScheduler, CronSchedulerOpts } from "./scheduler/scheduler.js"
 export { createCronScheduler } from "./scheduler/scheduler.js";
 
 // ---------------------------------------------------------------------------
-// Capability-typed NodeContext helpers — public surface for constructing
-// NodeContexts and the always-present field defaults.
+// Capability helpers not already supplied by the leading types barrel.
 // ---------------------------------------------------------------------------
 export { makeNodeContext, consoleLogger, noopTracer, noopObserver, createPassthroughBroker } from "./shared/index.js";
-export type { Capability, CapabilityRegistry, BaseNodeContext, TypedNodeContext, NodeContextInit, HttpCapability } from "./types/node.js";
-export type { CapabilityHandle, AdapterFactory } from "./types/capability-handle.js";
-// Per-invocation authority seam — the broker port + scoped-handle shape, and
-// the `MintingAuthority` pair (`broker` + `origin`) `runDag` consumes. The
-// pass-through broker (`createPassthroughBroker`, above) is an optional
-// embedder convenience equivalent to omitting the broker; host-side brokers
-// (Keycloak/Entra) live in the host.
-export type { CapabilityBroker, Invocation, InvocationCorrelation, InvocationOrigin, MintingAuthority, ScopedCapabilityHandle } from "./types/capability-broker.js";
-// `invocationFor` — the sole `Invocation` constructor, deriving `origin` from the
-// `MintingAuthority` so a node's invocation can't disagree with the authority minting it.
-export { invocationFor } from "./types/capability-broker.js";
 // Built-in capability catalogue — runtime values consumed by `fugue capabilities`
 // and any tooling that needs the authoritative built-in set + its metadata.
 export { BUILTIN_CAPABILITY_KEYS, BUILTIN_CAPABILITY_INFO } from "./types/node.js";

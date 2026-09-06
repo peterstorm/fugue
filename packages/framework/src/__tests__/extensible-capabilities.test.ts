@@ -21,12 +21,19 @@ import { createFetchNode } from "../nodes/fetch.js";
 import { createTransformNode } from "../nodes/transform.js";
 import { makeNodeContext } from "../shared/make-node-context.js";
 import type { NodeDef, BaseNodeContext, Capability } from "../types/node.js";
+import { llmModelId } from "../types/llm.js";
+import type { LlmClient, LlmPricingModel, LlmRequest, LlmResponse } from "../types/llm.js";
 import type { FrameworkError } from "../types/errors.js";
 import { ok, err, isOk, isErr } from "../types/result.js";
+import { NO_SPEND } from "../types/spend.js";
 import type { Result } from "../types/result.js";
 import type { CapabilityHandle } from "../types/capability-handle.js";
+import type {
+  ScopedCapabilityHandle,
+  ScopedLlmCapability,
+} from "../types/capability-broker.js";
 import { createFakeHttpCapability } from "../http/http-capability.js";
-import { NoopObserver } from "../observer/observer.js";
+import { testNodeContext } from "./_context-factories.js";
 
 // ---------------------------------------------------------------------------
 // Module augmentation: register a custom "db" capability for tests
@@ -37,18 +44,171 @@ interface TestDbCapability {
   queryOne<T>(schema: z.ZodType<T>, sql: string, params?: unknown[]): Promise<Result<T | null, FrameworkError>>;
 }
 
+interface AugmentedCritic extends LlmClient {
+  readonly critique: LlmClient["sendStructured"];
+}
+
+interface NarrowedAliasCritic extends LlmClient {
+  readonly critique: <O>(
+    request: LlmRequest<O>,
+  ) => Promise<Result<LlmResponse<O & { readonly refined: true }>, FrameworkError>>;
+}
+
+interface NarrowedStandardCritic extends LlmClient {
+  readonly sendStructured: <O>(
+    request: LlmRequest<O>,
+  ) => Promise<Result<LlmResponse<O & { readonly refined: true }>, FrameworkError>>;
+}
+
+declare const symbolAlias: unique symbol;
+interface SymbolCritic extends LlmClient {
+  readonly [symbolAlias]: LlmClient["sendStructured"];
+}
+
 declare module "../types/node.js" {
   interface CapabilityRegistry {
     db: TestDbCapability;
+    criticLlm: LlmClient;
+    augmentedCritic: AugmentedCritic;
+    mixedCritic: LlmClient | TestDbCapability;
+    symbolCritic: SymbolCritic;
+    narrowedAliasCritic: NarrowedAliasCritic;
+    narrowedStandardCritic: NarrowedStandardCritic;
   }
 }
+
+const capabilityHandleKindTypePins = (llm: LlmClient, db: TestDbCapability): void => {
+  const marked: CapabilityHandle<"criticLlm"> = {
+    name: "criticLlm",
+    client: llm,
+    clientKind: "llm",
+    pricingModel: { kind: "request" },
+  };
+  void marked;
+
+  // @ts-expect-error -- every registry client extending LlmClient must opt into metering.
+  const bypass: CapabilityHandle<"criticLlm"> = { name: "criticLlm", client: llm };
+  // @ts-expect-error -- non-LLM handles cannot accidentally opt into LLM decoration.
+  const falseMarker: CapabilityHandle<"db"> = { name: "db", client: db, clientKind: "llm" };
+
+  const augmented = llm as AugmentedCritic;
+  const composed: CapabilityHandle<"augmentedCritic"> = {
+    name: "augmentedCritic",
+    client: augmented,
+    clientKind: "llm",
+    pricingModel: { kind: "request" },
+    runScopedOperations: {
+      critique: "sendStructured",
+    },
+  };
+  // @ts-expect-error -- augmented aliases require an explicit declarative operation map.
+  const uncomposed: CapabilityHandle<"augmentedCritic"> = {
+    name: "augmentedCritic",
+    client: augmented,
+    clientKind: "llm",
+    pricingModel: { kind: "request" },
+  };
+  // @ts-expect-error -- a registry union mixing LLM and non-LLM clients is forbidden.
+  const mixed: CapabilityHandle<"mixedCritic"> = {
+    name: "mixedCritic",
+    client: llm,
+    clientKind: "llm",
+    pricingModel: { kind: "request" },
+  };
+  // @ts-expect-error -- runtime facades enumerate string aliases only.
+  const symbolKeyed: CapabilityHandle<"symbolCritic"> = {
+    name: "symbolCritic",
+    client: llm as SymbolCritic,
+    clientKind: "llm",
+    pricingModel: { kind: "request" },
+    runScopedOperations: {},
+  };
+  const narrowedAlias: CapabilityHandle<"narrowedAliasCritic"> = {
+    name: "narrowedAliasCritic",
+    client: llm as NarrowedAliasCritic,
+    clientKind: "llm",
+    pricingModel: { kind: "request" },
+    // @ts-expect-error -- the facade's base operation cannot promise a narrowed alias result.
+    runScopedOperations: { critique: "sendStructured" },
+  };
+  // @ts-expect-error -- overriding a standard operation with a narrower result is unsound.
+  const narrowedStandard: CapabilityHandle<"narrowedStandardCritic"> = {
+    name: "narrowedStandardCritic",
+    client: llm as NarrowedStandardCritic,
+    clientKind: "llm",
+    pricingModel: { kind: "request" },
+    runScopedOperations: {},
+  };
+  const executableComposer: CapabilityHandle<"augmentedCritic"> = {
+    name: "augmentedCritic",
+    client: augmented,
+    clientKind: "llm",
+    pricingModel: { kind: "request" },
+    // @ts-expect-error -- executable composition callbacks are not an authority proof.
+    composeRunClient: () => augmented,
+  };
+  void bypass;
+  void falseMarker;
+  void composed;
+  void mixed;
+  void symbolKeyed;
+  void executableComposer;
+  void narrowedAlias;
+  void narrowedStandard;
+  void uncomposed;
+};
+void capabilityHandleKindTypePins;
+
+const scopedCapabilityTypePins = (llm: LlmClient, db: TestDbCapability): void => {
+  const augmented = llm as AugmentedCritic;
+  const scoped: ScopedLlmCapability<AugmentedCritic> = {
+    clientKind: "llm",
+    client: augmented,
+    pricingModel: { kind: "request" },
+    runScopedOperations: { critique: "sendStructured" },
+  };
+  // @ts-expect-error -- augmented scoped clients cannot omit required aliases.
+  const missingAliases: ScopedLlmCapability<AugmentedCritic> = {
+    clientKind: "llm",
+    client: augmented,
+    pricingModel: { kind: "request" },
+  };
+  // @ts-expect-error -- runtime facades cannot materialize symbol-keyed operations.
+  const symbolScoped: ScopedLlmCapability<SymbolCritic> = {
+    clientKind: "llm",
+    client: llm as SymbolCritic,
+    pricingModel: { kind: "request" },
+    runScopedOperations: {},
+  };
+  // @ts-expect-error -- every non-LLM scoped client requires the non-llm envelope.
+  const untagged: ScopedCapabilityHandle = { db };
+  void scoped;
+  void missingAliases;
+  void symbolScoped;
+  void untagged;
+};
+void scopedCapabilityTypePins;
+
+const pricingModelTypePins = (): void => {
+  const fixed: LlmPricingModel = { kind: "fixed", model: llmModelId("gpt-4o") };
+  // @ts-expect-error -- fixed pricing requires a parsed non-empty model identity.
+  const raw: LlmPricingModel = { kind: "fixed", model: "gpt-4o" };
+  void fixed;
+  void raw;
+};
+void pricingModelTypePins;
+
+const nodeDefDefaultCapabilityTypePin = (_node: NodeDef): void => {
+  // @ts-expect-error -- direct NodeDef annotation keeps undeclared llm nullable.
+  void ({} as Parameters<NodeDef["run"]>[1]).llm.sendStructured;
+};
+void nodeDefDefaultCapabilityTypePin;
 
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
 
 const noop = async () => ({ ok: true as const, value: undefined });
-const noopTracer = { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() };
 
 const makeNode = (id: string, requires: readonly Capability[]): NodeDef<unknown, unknown> => ({
   id: N(id),
@@ -62,17 +222,12 @@ const makeNode = (id: string, requires: readonly Capability[]): NodeDef<unknown,
 });
 
 const makeCtx = (overrides: Partial<BaseNodeContext> = {}): BaseNodeContext => ({
+  // `tracer` is NOT overridden: testNodeContext()'s default is the same
+  // pass-through span wrapper this file's `noopTracer` was, and restating it
+  // here only creates a second thing to keep in step.
+  ...testNodeContext(),
   runId: "r1" as any,
   dagId: "d1" as any,
-  logger: { warn: () => {}, error: () => {} },
-  tracer: noopTracer as any,
-  observer: new NoopObserver(),
-  cache: null,
-  llm: null,
-  prompts: null,
-  judgeLlm: null,
-  http: null,
-  clock: null,
   ...overrides,
 });
 
@@ -81,6 +236,11 @@ const makeCtx = (overrides: Partial<BaseNodeContext> = {}): BaseNodeContext => (
 // ---------------------------------------------------------------------------
 
 describe("extensible capability registry (ADR-0051)", () => {
+  it("constructs only non-empty fixed model identities", () => {
+    expect(String(llmModelId("gpt-4o"))).toBe("gpt-4o");
+    expect(() => llmModelId("")).toThrow("LLM model identity must be a non-empty string");
+  });
+
   describe("custom capability validation", () => {
     it("custom capability 'db' missing → Err with missing-capability", () => {
       const dag = defineDagFromArray({
@@ -157,16 +317,42 @@ describe("extensible capability registry (ADR-0051)", () => {
       expect(ctx.http).toBe(fakeHttp.client);
     });
 
-    it("top-level fields take precedence over capabilities record", () => {
+    it("defined top-level fields take precedence over the capabilities record", () => {
       const httpDirect = createFakeHttpCapability({}).client;
       const httpBag = createFakeHttpCapability({}).client;
+      const budgetDirect = { spent: () => NO_SPEND, remaining: () => ({ kind: "unbudgeted" as const }) };
+      const budgetBag = { spent: () => NO_SPEND, remaining: () => ({ kind: "unbudgeted" as const }) };
       const ctx = makeNodeContext({
         runId: "r1",
         dagId: "d1",
         http: httpDirect,
-        capabilities: { http: httpBag },
+        budget: budgetDirect,
+        capabilities: { http: httpBag, budget: budgetBag },
       });
       expect(ctx.http).toBe(httpDirect);
+      expect(ctx.budget).toBe(budgetDirect);
+    });
+
+    it("explicit top-level null overrides a non-null capability bag value", () => {
+      const bagHttp = createFakeHttpCapability({}).client;
+      const ctx = makeNodeContext({
+        runId: "r1",
+        dagId: "d1",
+        http: null,
+        capabilities: { http: bagHttp },
+      });
+      expect(ctx.http).toBeNull();
+    });
+
+    it("an explicitly undefined top-level capability falls back to the bag", () => {
+      const bagHttp = createFakeHttpCapability({}).client;
+      const ctx = makeNodeContext({
+        runId: "r1",
+        dagId: "d1",
+        http: undefined,
+        capabilities: { http: bagHttp },
+      });
+      expect(ctx.http).toBe(bagHttp);
     });
 
     it("built-in capability sourced from the bag lands on the named field", () => {
@@ -198,6 +384,27 @@ describe("extensible capability registry (ADR-0051)", () => {
       if (!result.ok && result.error.kind === "missing-capability") {
         expect(result.error.missing[0].capability).toBe("db");
       }
+    });
+
+    it("prototype-meta capability input cannot alter the context prototype or inject inherited capabilities", () => {
+      const capabilities = JSON.parse(
+        '{"__proto__":{"db":{"polluted":true}},"constructor":{"polluted":true},"prototype":{"polluted":true}}',
+      );
+      const ctx = makeNodeContext({
+        runId: "r1",
+        dagId: "d1",
+        capabilities,
+      });
+
+      expect(Object.getPrototypeOf(ctx)).toBeNull();
+      expect(Object.hasOwn(ctx, "__proto__")).toBe(false);
+      expect(Object.hasOwn(ctx, "constructor")).toBe(false);
+      expect(Object.hasOwn(ctx, "prototype")).toBe(false);
+      expect((ctx as unknown as Record<string, unknown>).__proto__).toBeUndefined();
+      expect((ctx as unknown as Record<string, unknown>).constructor).toBeUndefined();
+      expect((ctx as unknown as Record<string, unknown>).prototype).toBeUndefined();
+      expect((ctx as unknown as Record<string, unknown>).db).toBeUndefined();
+      expect(({} as Record<string, unknown>).polluted).toBeUndefined();
     });
 
     it("a custom capability named like a reserved field cannot shadow framework infrastructure", () => {

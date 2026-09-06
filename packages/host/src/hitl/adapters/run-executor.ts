@@ -16,7 +16,7 @@
  * drop it).
  */
 
-import { asNonEmptyString, runResumableDagJob, ok, err, EXECUTOR_NODE_ID, isFrameworkError, safeErrorMessage } from "@fuguejs/framework";
+import { asNonEmptyString, runResumableDagJob, ok, err, EXECUTOR_NODE_ID, asFrameworkError, safeErrorMessage } from "@fuguejs/framework";
 import type {
   Result,
   FrameworkError,
@@ -75,18 +75,27 @@ interface RunExecutorDeps {
    * The worker's resolved routed `Tenant.id` (FR-013 / SC-001 / ADR-0067),
    * threaded into `createNodeContextForDag` so a resumed HITL run's cache /
    * checkpoint keys share the SAME `fugue:<tenant>:` namespace as the
-   * synchronous run path and every other per-tenant store. Omitted on the
-   * single-tenant path (the factory then falls back to the `dag.team` derivation).
+   * synchronous run path and every other per-tenant store. Optional on the type,
+   * but `host.ts` — the only caller that wires this executor — always passes a
+   * resolved `Tenant.id`, falling back to the constant `default` rather than to
+   * absence, so the shipped single-tenant path does NOT omit it. (The genuinely
+   * omittable one is `createNodeContextForDag`'s `routedTenant`, which does fall
+   * back to the `dag.team` derivation.)
    */
   readonly tenant?: TenantId;
+  /** TTL of the durable HITL run record this slice may resume from. */
+  readonly runRetentionTtlSec?: number;
   readonly logger?: LogPort;
 }
 
 const frameworkCauseOf = (error: unknown): FrameworkError | null => {
   if (!((typeof error === "object" && error !== null) || typeof error === "function")) return null;
   try {
-    const cause = Reflect.get(error, "cause");
-    return isFrameworkError(cause) ? cause : null;
+    // Recover the CANONICAL error rather than narrowing the attached cause: a
+    // cause rehydrated from a durable HITL record may carry a pre-prompt-caching
+    // `usage`, which `isFrameworkError` deliberately declines to narrow. Falling
+    // back to the generic node-crash below would erase its kind/retriability.
+    return asFrameworkError(Reflect.get(error, "cause")) ?? null;
   } catch {
     return null;
   }
@@ -108,7 +117,15 @@ const checkpointWriteFailure = (failure: HostError): FrameworkError => ({
 });
 
 export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
-  const { sharedInfra, getRegisteredDag, broker, agentClientMap, tenant, logger } = deps;
+  const {
+    sharedInfra,
+    getRegisteredDag,
+    broker,
+    agentClientMap,
+    tenant,
+    runRetentionTtlSec,
+    logger,
+  } = deps;
 
   return {
     async seedCheckpoint(dagId, input): Promise<Result<string, HostError>> {
@@ -124,6 +141,9 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
     },
 
     async run(req: RunExecutionRequest): Promise<Result<RunExecOutcome, HostError>> {
+      // Every diagnostic from this slice is attributed to the same run; naming
+      // it once keeps a later log line from silently omitting half the pair.
+      const attribution = { runId: req.runId, dagId: req.dagId } as const;
       const registered = getRegisteredDag(req.dagId);
       if (!registered) {
         // The DAG existed when seedCheckpoint accepted this durable run but was
@@ -169,21 +189,27 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
         if (!startedJob.ok) return err(startedJob.error);
         const fencedJob = deadlineFencedJob(startedJob.value, assertExecutionAuthorized);
         const slice = (async () => {
-          const { ctx, origin } = await createNodeContextForDag(
+          const { ctx, origin, meterMintedLlm } = await createNodeContextForDag(
             sharedInfra,
             registered,
             req.runId,
             controller.signal,
             toExecIdentity(req.identity),
-            agentClientMap ?? {},
-            broker !== undefined,
-            // bindSubjectToken: intentionally omitted on the resume path. A user
-            // run's verified `subject_token` is bound at INITIATION (sync path);
-            // across a HITL park/resume it is not re-presented, so a user-path
-            // capability mint fails closed (no proof) rather than reusing a stale
-            // token — correct, not a leak.
-            undefined,
-            tenant,
+            {
+              // `?? {}` would be dead: an absent field takes the factory's own
+              // documented default of the empty map.
+              agentClientMap,
+              mintingActive: broker !== undefined,
+              // `bindSubjectToken` is intentionally ABSENT on the resume path. A
+              // user run's verified `subject_token` is bound at INITIATION (the
+              // sync path); across a HITL park/resume it is not re-presented, so
+              // a user-path capability mint fails closed (no proof) rather than
+              // reusing a stale token — correct, not a leak. Named fields let
+              // this be an omission rather than a positional `undefined` a
+              // reader has to count arguments to identify.
+              routedTenant: tenant,
+              resumableRunTtlSec: runRetentionTtlSec,
+            },
           );
           phase = "execution";
 
@@ -197,7 +223,9 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
               assertExecutionAuthorized();
               await req.onDecisionConsumed(nodeId);
             },
-            ...(broker !== undefined && origin !== undefined ? { minting: { broker, origin } } : {}),
+            ...(broker !== undefined && origin !== undefined
+              ? { minting: { broker, origin, meterLlm: meterMintedLlm } }
+              : {}),
           });
         })();
 
@@ -213,19 +241,19 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
               logger,
               "error",
               "hitl: run slice settled after its deadline",
-              { runId: req.runId, dagId: req.dagId, outcome: outcome.kind },
+              { ...attribution, outcome: outcome.kind },
             ),
             onLateRejection: (error) => logWithoutThrowing(
               logger,
               "error",
               "hitl: run slice rejected after its deadline",
-              { runId: req.runId, dagId: req.dagId, error: safeErrorMessage(error) },
+              { ...attribution, error: safeErrorMessage(error) },
             ),
             onTimeoutCancellationFailure: (error) => logWithoutThrowing(
               logger,
               "error",
               "hitl: run slice timeout cancellation failed",
-              { runId: req.runId, dagId: req.dagId, error: safeErrorMessage(error) },
+              { ...attribution, error: safeErrorMessage(error) },
             ),
           },
         );
@@ -252,13 +280,32 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
         }
         return ok({ kind: "completed", output: outcome.output });
       } catch (e) {
-        const checkpointFailure = req.job.checkpointFailure();
+        let checkpointFailure: HostError | null;
+        try {
+          checkpointFailure = req.job.checkpointFailure();
+        } catch (inspectionError) {
+          const error: FrameworkError = {
+            kind: "node-crash",
+            retriability: "non-retriable",
+            nodeId: EXECUTOR_NODE_ID,
+            message:
+              `run slice failed: ${safeErrorMessage(e)}; ` +
+              `checkpoint failure inspection also failed: ${safeErrorMessage(inspectionError)}`,
+          };
+          logWithoutThrowing(
+            logger,
+            "error",
+            "hitl: run slice and checkpoint failure inspection both failed — failing closed",
+            { ...attribution, error: error.message },
+          );
+          return ok({ kind: "failed", error });
+        }
         if (checkpointFailure !== null) {
           logWithoutThrowing(
             logger,
             "error",
             "hitl: checkpoint persistence failed — failing run closed to avoid replay",
-            { runId: req.runId, dagId: req.dagId, error: checkpointFailure.kind },
+            { ...attribution, error: checkpointFailure.kind },
           );
           return ok({ kind: "failed", error: checkpointWriteFailure(checkpointFailure) });
         }
@@ -274,11 +321,7 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
           logger,
           "error",
           phase === "setup" ? "hitl: run slice setup failed" : "hitl: run slice failed",
-          {
-            runId: req.runId,
-            dagId: req.dagId,
-            error: safeErrorMessage(e),
-          },
+          { ...attribution, error: safeErrorMessage(e) },
         );
         return ok({ kind: "failed", error: toFrameworkError(e) });
       } finally {

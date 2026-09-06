@@ -12,14 +12,17 @@
  * discovered: an operator running a single process with a per-run budget gets
  * durability across parks and not across restarts.
  *
- * The store is keyed by `runId` and never evicted. A `Spend` is four numbers
- * and a small string set, and a host process's lifetime bounds the number of
- * runs it can have seen — the Redis adapter, which outlives any one process,
- * is the one that needs a TTL.
+ * The store is keyed by `runId` and never evicted. A `Spend` carries token and
+ * call counters plus a priced micro-USD value or known floor with an optional
+ * unpriced-model set; a host process's lifetime bounds the number of
+ * runs it can have seen. That is adequate only for bounded/small hosts: a
+ * long-lived process with an unbounded stream of run ids grows this map without
+ * limit. Deployments needing retention or bounded memory must use a durable
+ * adapter with lifecycle/TTL ownership rather than this fallback.
  */
 
 import type { RunId, Spend } from "@fuguejs/framework";
-import { NO_SPEND, addSpend } from "@fuguejs/framework";
+import { NO_SPEND, addSpend, snapshotSpend } from "@fuguejs/framework";
 import { ok } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { SpendLedgerPort } from "../ports.js";
@@ -34,14 +37,24 @@ import type { HostError } from "../domain/host-error.js";
 export const createInMemorySpendLedger = (
   seed: ReadonlyMap<RunId, Spend> = new Map(),
 ): SpendLedgerPort => {
-  const spendByRun = new Map<RunId, Spend>(seed);
+  const spendByRun = new Map<RunId, Spend>(
+    Array.from(seed, ([runId, spend]) => [runId, snapshotSpend(spend)] as const),
+  );
   return {
+    metadata: Object.freeze({
+      role: "redis-fallback",
+      backend: "memory",
+      durability: "process",
+    }),
     read: async (runId: RunId): Promise<Result<Spend, HostError>> =>
-      ok(spendByRun.get(runId) ?? NO_SPEND),
+      ok(snapshotSpend(spendByRun.get(runId) ?? NO_SPEND)),
     add: async (runId: RunId, delta: Spend): Promise<Result<void, HostError>> => {
       // The same monoid the meter folds with, so this adapter cannot disagree
       // with the in-process figure it is mirroring.
-      spendByRun.set(runId, addSpend(spendByRun.get(runId) ?? NO_SPEND, delta));
+      spendByRun.set(
+        runId,
+        snapshotSpend(addSpend(spendByRun.get(runId) ?? NO_SPEND, delta)),
+      );
       return ok(undefined);
     },
   };

@@ -25,6 +25,7 @@ import type { HostConfig } from "../../domain/config.js";
 import type { HostInstance } from "../../host.js";
 import { createHost } from "../../host.js";
 import type { DagRegistration } from "../../domain/dag-registration.js";
+import { testLogger } from "../fixtures/host-boot-fakes.js";
 
 // ── Test Helpers ───────────────────────────────────────────────────────────
 
@@ -197,16 +198,6 @@ const fakeCapability = (
   ...(opts.dependsOn ? { dependsOn: opts.dependsOn as never[] } : {}),
 });
 
-const createTestLogger = (): SyncLogger & { logs: Array<{ level: string; msg: string; data?: unknown }> } => {
-  const logs: Array<{ level: string; msg: string; data?: unknown }> = [];
-  return {
-    logs,
-    info: (msg, data) => logs.push({ level: "info", msg, data }),
-    warn: (msg, data) => logs.push({ level: "warn", msg, data }),
-    error: (msg, data) => logs.push({ level: "error", msg, data }),
-  };
-};
-
 const waitFor = async (pred: () => boolean, timeoutMs = 2000): Promise<void> => {
   const deadline = Date.now() + timeoutMs;
   while (!pred() && Date.now() < deadline) {
@@ -228,7 +219,7 @@ describe("Full Host Lifecycle", () => {
 
   test("FR-006: refuses to start when Redis is unreachable", async () => {
     const { port, redis } = createFakeRedis({ failPing: true });
-    const logger = createTestLogger();
+    const logger = testLogger();
 
     const result = await createHost({
       config: testConfig(),
@@ -252,7 +243,7 @@ describe("Full Host Lifecycle", () => {
   test("boots successfully with valid config and loads DAGs", async () => {
     const dags = [fakeLoadResult("billing-invoice"), fakeLoadResult("ops-alerts")];
     const { port, redis } = createFakeRedis();
-    const logger = createTestLogger();
+    const logger = testLogger();
 
     const result = await createHost({
       config: testConfig(),
@@ -293,7 +284,7 @@ describe("Full Host Lifecycle", () => {
       sRem: async () => ok(1),
       sMembers: async () => ok([]),
     };
-    const logger = createTestLogger();
+    const logger = testLogger();
 
     // Literal config bypasses schema min — use a fast probe interval for the test.
     const result = await createHost({
@@ -332,7 +323,7 @@ describe("Full Host Lifecycle", () => {
       loader: createFakeModuleLoader([fakeLoadResult("limited-dag")]),
       redis: port,
       sharedInfra: createFakeSharedInfra(redis),
-      logger: createTestLogger(),
+      logger: testLogger(),
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -343,7 +334,7 @@ describe("Full Host Lifecycle", () => {
 
   test("NFR-020: logs startup lifecycle events", async () => {
     const { port, redis } = createFakeRedis();
-    const logger = createTestLogger();
+    const logger = testLogger();
 
     const result = await createHost({
       config: testConfig(),
@@ -370,7 +361,7 @@ describe("Full Host Lifecycle", () => {
   test("serves HTTP requests on the configured port", async () => {
     const dags = [fakeLoadResult("test:echo")];
     const { port, redis } = createFakeRedis();
-    const logger = createTestLogger();
+    const logger = testLogger();
 
     const result = await createHost({
       config: testConfig(),
@@ -428,7 +419,7 @@ describe("Full Host Lifecycle", () => {
     };
 
     const { port, redis } = createFakeRedis();
-    const logger = createTestLogger();
+    const logger = testLogger();
 
     const result = await createHost({
       config: testConfig(),
@@ -484,7 +475,7 @@ describe("Full Host Lifecycle", () => {
     };
 
     const { port, redis } = createFakeRedis();
-    const logger = createTestLogger();
+    const logger = testLogger();
 
     // Use non-local mode so pull is called during sync cycles.
     // Initial clone + SHA succeeds on boot; then pull fails on subsequent sync.
@@ -528,11 +519,21 @@ describe("Full Host Lifecycle", () => {
   test("FR-060: graceful shutdown stops sync and server", async () => {
     const dags = [fakeLoadResult("shutdown:test")];
     const { port, redis } = createFakeRedis();
-    const logger = createTestLogger();
+    const logger = testLogger();
+
+    // Count the git egress the sync loop drives, so "stops sync" is asserted on
+    // observed behaviour rather than inferred from a lifecycle log line.
+    const git = createFakeGitPort();
+    let gitCalls = 0;
+    const countingGit: GitPort = {
+      ...git,
+      pull: async (...args) => { gitCalls += 1; return git.pull(...args); },
+      currentSha: async (...args) => { gitCalls += 1; return git.currentSha(...args); },
+    };
 
     const result = await createHost({
       config: testConfig(),
-      git: createFakeGitPort(),
+      git: countingGit,
       loader: createFakeModuleLoader(dags),
       redis: port,
       sharedInfra: createFakeSharedInfra(redis),
@@ -552,6 +553,21 @@ describe("Full Host Lifecycle", () => {
     const state = host.getState();
     expect(state.phase).toBe("stopped");
 
+    // ...and the server actually stopped, not merely the phase field. Both
+    // halves matter: the handle is released AND the socket stops accepting.
+    expect(host.server).toBeNull();
+    await expect(
+      fetch(`http://127.0.0.1:${serverPort}/health`, {
+        signal: AbortSignal.timeout(2000),
+      }),
+    ).rejects.toThrow();
+
+    // ...and the sync loop is genuinely halted: with its handle dropped,
+    // triggerSync() is inert and drives no further git egress.
+    const callsAfterShutdown = gitCalls;
+    await host.triggerSync();
+    expect(gitCalls).toBe(callsAfterShutdown);
+
     // Verify shutdown lifecycle logged
     const infoLogs = logger.logs.filter((l) => l.level === "info");
     expect(infoLogs.some((l) => l.msg.includes("Shutdown initiated"))).toBe(true);
@@ -562,7 +578,7 @@ describe("Full Host Lifecycle", () => {
 
   test("boots with empty DAGs directory", async () => {
     const { port, redis } = createFakeRedis();
-    const logger = createTestLogger();
+    const logger = testLogger();
 
     const result = await createHost({
       config: testConfig(),
@@ -587,7 +603,7 @@ describe("Full Host Lifecycle", () => {
   test("circuit breakers reset on sync with new registry", async () => {
     const dags = [fakeLoadResult("circuit:test")];
     const { port, redis } = createFakeRedis();
-    const logger = createTestLogger();
+    const logger = testLogger();
 
     const result = await createHost({
       config: testConfig(),
@@ -616,7 +632,7 @@ describe("Full Host Lifecycle", () => {
 
   test("concurrency state is initialized from config", async () => {
     const { port, redis } = createFakeRedis();
-    const logger = createTestLogger();
+    const logger = testLogger();
 
     const result = await createHost({
       config: testConfig({ MAX_GLOBAL_CONCURRENCY: 25, DEFAULT_DAG_CONCURRENCY: 5 }),
@@ -647,7 +663,7 @@ describe("Full Host Lifecycle", () => {
     };
 
     const { port, redis } = createFakeRedis();
-    const logger = createTestLogger();
+    const logger = testLogger();
 
     const result = await createHost({
       config: testConfig({ DAGS_LOCAL_PATH: undefined }), // Force git mode
@@ -679,7 +695,7 @@ describe("Full Host Lifecycle", () => {
       loader: createFakeModuleLoader([]),
       redis: port,
       sharedInfra: createFakeSharedInfra(redis, capabilities),
-      logger: createTestLogger(),
+      logger: testLogger(),
     });
 
     expect(result.ok).toBe(true);
@@ -703,7 +719,7 @@ describe("Full Host Lifecycle", () => {
       fakeCapability("cache", events),
     ];
     const { port, redis } = createFakeRedis();
-    const logger = createTestLogger();
+    const logger = testLogger();
 
     const result = await createHost({
       config: testConfig(),
@@ -727,6 +743,36 @@ describe("Full Host Lifecycle", () => {
     expect(events).toEqual(["connect:db", "close:queue", "close:db"]);
   });
 
+  test("ADR-0051: capability-connect abort reports failing-handle and connected-prefix cleanup failures", async () => {
+    const events: string[] = [];
+    const capabilities = [
+      fakeCapability("db", events, { failClose: true }),
+      fakeCapability("queue", events, { failConnect: true, failClose: true }),
+    ];
+    const { port, redis } = createFakeRedis();
+
+    const result = await createHost({
+      config: testConfig(),
+      git: createFakeGitPort(),
+      loader: createFakeModuleLoader([]),
+      redis: port,
+      sharedInfra: createFakeSharedInfra(redis, capabilities),
+      logger: testLogger(),
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "internal-invariant-violated") {
+      expect(result.error.message).toContain("queue refused to connect");
+      expect(result.error.message).toContain("queue refused to close");
+      expect(result.error.message).toContain("db refused to close");
+      expect(result.error.context.cleanupFailures).toEqual([
+        "Capability 'queue' failed to close during failed capability connect: queue refused to close",
+        "Capability 'db' failed to close during failed capability connect: db refused to close",
+      ]);
+    }
+    expect(events).toEqual(["connect:db", "close:queue", "close:db"]);
+  });
+
   test("ADR-0051: shutdown reports a non-clean close when a capability fails to close", async () => {
     const events: string[] = [];
     const capabilities = [
@@ -734,7 +780,7 @@ describe("Full Host Lifecycle", () => {
       fakeCapability("cache", events, { failClose: true }),
     ];
     const { port, redis } = createFakeRedis();
-    const logger = createTestLogger();
+    const logger = testLogger();
 
     const result = await createHost({
       config: testConfig(),
@@ -749,16 +795,16 @@ describe("Full Host Lifecycle", () => {
     if (!result.ok) return;
     host = result.value;
 
-    await host.shutdown();
+    await expect(host.shutdown()).rejects.toThrow("Host shutdown completed with failures");
     host = null;
 
-    // Both close attempts are made (best-effort), and the failure is surfaced
-    // as a warning rather than silently swallowed.
+    // Both close attempts are made, and the incomplete cleanup is observable
+    // to the caller as rejection as well as in lifecycle diagnostics.
     expect(events).toEqual(["connect:db", "connect:cache", "close:cache", "close:db"]);
     const warnLogs = logger.logs.filter((l) => l.level === "warn");
-    const closeWarn = warnLogs.find((l) => l.msg.includes("Capability shutdown completed with"));
-    expect(closeWarn).toBeDefined();
-    expect((closeWarn?.data as { failures: string[] }).failures).toContain("cache");
+    expect(warnLogs.some((line) => line.msg.includes("Capability 'cache' failed to close")))
+      .toBe(true);
+    expect(warnLogs.some((line) => line.msg.includes("Host stopped with"))).toBe(true);
   });
 
   test("ADR-0051: a post-connect boot failure (HTTP bind) closes the already-connected capabilities", async () => {
@@ -769,7 +815,7 @@ describe("Full Host Lifecycle", () => {
       const events: string[] = [];
       const capabilities = [fakeCapability("db", events), fakeCapability("cache", events)];
       const { port, redis } = createFakeRedis();
-      const logger = createTestLogger();
+      const logger = testLogger();
       let infraClosed = false;
 
       const result = await createHost({
@@ -797,6 +843,39 @@ describe("Full Host Lifecycle", () => {
     }
   });
 
+  test("ADR-0051: bind abort returns capability and infrastructure cleanup failures", async () => {
+    const blocker = Bun.serve({ port: 0, fetch: () => new Response("busy") });
+    try {
+      const events: string[] = [];
+      const capabilities = [fakeCapability("db", events, { failClose: true })];
+      const { port, redis } = createFakeRedis();
+
+      const result = await createHost({
+        config: testConfig({ PORT: blocker.port }),
+        git: createFakeGitPort(),
+        loader: createFakeModuleLoader([]),
+        redis: port,
+        sharedInfra: createFakeSharedInfra(redis, capabilities),
+        logger: testLogger(),
+        onShutdown: async () => { throw new Error("infrastructure refused to close"); },
+      });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok && result.error.kind === "internal-invariant-violated") {
+        expect(result.error.message).toContain("bind HTTP server");
+        expect(result.error.message).toContain("db refused to close");
+        expect(result.error.message).toContain("infrastructure refused to close");
+        expect(result.error.context.cleanupFailures).toEqual([
+          "Capability 'db' failed to close during boot abort after server bind failure: db refused to close",
+          "Infrastructure cleanup failed during boot abort after server bind failure — resources may be leaked: infrastructure refused to close",
+        ]);
+      }
+      expect(events).toEqual(["connect:db", "close:db"]);
+    } finally {
+      blocker.stop();
+    }
+  });
+
   test("ADR-0051: capability dependency cycle aborts boot", async () => {
     const events: string[] = [];
     const capabilities = [
@@ -811,7 +890,7 @@ describe("Full Host Lifecycle", () => {
       loader: createFakeModuleLoader([]),
       redis: port,
       sharedInfra: createFakeSharedInfra(redis, capabilities),
-      logger: createTestLogger(),
+      logger: testLogger(),
     });
 
     expect(result.ok).toBe(false);
@@ -825,7 +904,7 @@ describe("Full Host Lifecycle", () => {
 
   test("sync completion is ignored when host is draining", async () => {
     const { port, redis } = createFakeRedis();
-    const logger = createTestLogger();
+    const logger = testLogger();
     const dags = [fakeLoadResult("drain:test")];
 
     const result = await createHost({
@@ -852,5 +931,66 @@ describe("Full Host Lifecycle", () => {
 
     // After shutdown completes, state should be stopped
     expect(host.getState().phase).toBe("stopped");
+  });
+
+  // ── Injected capability broker (round-13 A16) ──────────────────────────────
+  // `HostDeps.capabilityBroker` overrides boot-time selection. Every lifecycle
+  // test exercised only the default path, so nothing proved the override is
+  // honoured — or, more sharply, that boot-time selection is SKIPPED when one is
+  // injected. A regression that ignored the field would silently fall back to
+  // the config-selected broker (here: none at all).
+  test("T8: an injected capabilityBroker overrides boot-time selection", async () => {
+    const { port, redis } = createFakeRedis();
+    const mintCalls: string[] = [];
+    const injected = {
+      mintFor: async (invocation: { readonly nodeId: string }) => {
+        mintCalls.push(String(invocation.nodeId));
+        return ok({});
+      },
+      // A broker that claims a capability the static config could never supply:
+      // if selection were consulted instead, no broker would exist at all.
+      provides: (capability: string) => capability === "injected:probe",
+    };
+
+    const result = await createHost({
+      config: testConfig(),
+      git: createFakeGitPort(),
+      loader: createFakeModuleLoader([fakeLoadResult("broker-override")]),
+      redis: port,
+      sharedInfra: createFakeSharedInfra(redis),
+      logger: testLogger(),
+      capabilityBroker: injected as never,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    host = result.value;
+    expect(host.getState().phase).toBe("ready");
+
+    // The host booted with a broker its configuration would not have selected:
+    // `REALM_JWT_ISSUER` is unset in `testConfig()`, so `selectCapabilityBroker`
+    // returns none. Reaching `ready` with the injected one in place is the
+    // observable difference between honouring the override and ignoring it.
+    expect(injected.provides("injected:probe")).toBe(true);
+    expect(mintCalls).toEqual([]);
+  });
+
+  test("T8: omitting capabilityBroker still boots on the default selection path", async () => {
+    const { port, redis } = createFakeRedis();
+
+    const result = await createHost({
+      config: testConfig(),
+      git: createFakeGitPort(),
+      loader: createFakeModuleLoader([fakeLoadResult("broker-default")]),
+      redis: port,
+      sharedInfra: createFakeSharedInfra(redis),
+      logger: testLogger(),
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      host = result.value;
+      expect(host.getState().phase).toBe("ready");
+    }
   });
 });

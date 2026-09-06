@@ -14,8 +14,15 @@
 
 import type { Result } from "@fuguejs/framework";
 import { ok, err, safeErrorMessage } from "@fuguejs/framework";
-import type { CapabilityHandle, Capability, CapabilityRegistry } from "@fuguejs/framework";
+import type {
+  CapabilityHandle,
+  Capability,
+  CapabilityRegistry,
+  LlmClient,
+  LlmPricingModel,
+} from "@fuguejs/framework";
 import type { HostError } from "./host-error.js";
+import { logWithoutThrowingTo } from "./diagnostic-logging.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -134,6 +141,12 @@ export const topoSortHandles = (
 // Connect / Close (effectful — called by the imperative shell)
 // ---------------------------------------------------------------------------
 
+/** A single capability that failed to close during lifecycle cleanup. */
+interface CloseFailure {
+  readonly name: string;
+  readonly error: string;
+}
+
 /**
  * A connect failure paired with the handles that successfully connected
  * before it — the caller MUST close that prefix to avoid leaking pools and
@@ -143,6 +156,8 @@ interface ConnectFailure {
   readonly error: HostError;
   /** Handles whose `connect()` completed before the failure, in connect order. */
   readonly connected: readonly CapabilityHandle[];
+  /** Cleanup failures already observed on the handle whose connect failed. */
+  readonly cleanupFailures: readonly CloseFailure[];
 }
 
 type LifecycleLogMethod = (msg: string, data?: Record<string, unknown>) => void;
@@ -153,20 +168,23 @@ type LifecycleLogger = {
 };
 type ConnectLogger = Required<Pick<LifecycleLogger, "info" | "error">>;
 type CloseLogger = Required<Pick<LifecycleLogger, "info" | "warn">>;
+type LifecycleDiagnosticFallback = (diagnostic: string) => unknown;
 
-/** Lifecycle diagnostics are secondary and must not alter control flow. */
+const writeLifecycleFallback: LifecycleDiagnosticFallback = (diagnostic) =>
+  process.stderr.write(diagnostic);
+
+/**
+ * Lifecycle diagnostics are secondary and must not alter control flow — THE
+ * encoding of that rule is `logWithoutThrowingTo`; this only adapts the optional
+ * `data` this module carries to its required parameter.
+ */
 const logLifecycleWithoutThrowing = (
   logger: LifecycleLogger,
   level: "info" | "warn" | "error",
   message: string,
-  data?: Record<string, unknown>,
-): void => {
-  try {
-    logger[level]?.(message, data);
-  } catch {
-    // Continue with the already-decided lifecycle or cleanup outcome.
-  }
-};
+  data: Record<string, unknown> | undefined,
+  writeFallback: LifecycleDiagnosticFallback,
+): void => logWithoutThrowingTo(logger, level, message, data ?? {}, writeFallback);
 
 /**
  * Connect all capability handles in topological order.
@@ -176,31 +194,55 @@ const logLifecycleWithoutThrowing = (
 export const connectAll = async (
   handles: readonly CapabilityHandle[],
   logger: ConnectLogger,
+  writeFallback: LifecycleDiagnosticFallback = writeLifecycleFallback,
 ): Promise<Result<void, ConnectFailure>> => {
   const connected: CapabilityHandle[] = [];
   for (const handle of handles) {
     if (handle.connect) {
-      logLifecycleWithoutThrowing(logger, "info", `Connecting capability '${handle.name}'...`);
+      logLifecycleWithoutThrowing(
+        logger,
+        "info",
+        `Connecting capability '${handle.name}'...`,
+        undefined,
+        writeFallback,
+      );
       try {
         await handle.connect();
-        logLifecycleWithoutThrowing(logger, "info", `Capability '${handle.name}' connected`);
+        logLifecycleWithoutThrowing(
+          logger,
+          "info",
+          `Capability '${handle.name}' connected`,
+          undefined,
+          writeFallback,
+        );
       } catch (e) {
         const message = safeErrorMessage(e);
-        logLifecycleWithoutThrowing(logger, "error", `Capability '${handle.name}' failed to connect`, { error: message });
+        logLifecycleWithoutThrowing(
+          logger,
+          "error",
+          `Capability '${handle.name}' failed to connect`,
+          { error: message },
+          writeFallback,
+        );
         // The failing handle's adapter may have constructed resources at
         // factory time (e.g. a pg Pool opens sockets before connect() runs).
         // Close it best-effort so an aborted boot doesn't orphan them — the
         // caller only closes the *connected prefix*, which excludes this
-        // handle. A close failure is logged, never masks the connect error.
+        // handle. A close failure remains subordinate to the connect error but
+        // is returned as cleanup evidence instead of existing only in logs.
+        const cleanupFailures: CloseFailure[] = [];
         if (handle.close) {
           try {
             await handle.close();
           } catch (closeError) {
+            const cleanupError = safeErrorMessage(closeError);
+            cleanupFailures.push({ name: handle.name, error: cleanupError });
             logLifecycleWithoutThrowing(
               logger,
               "error",
               `Capability '${handle.name}' failed to close after connect failure`,
-              { error: safeErrorMessage(closeError) },
+              { error: cleanupError },
+              writeFallback,
             );
           }
         }
@@ -211,6 +253,7 @@ export const connectAll = async (
             context: { capability: handle.name },
           },
           connected,
+          cleanupFailures,
         });
       }
     }
@@ -218,12 +261,6 @@ export const connectAll = async (
   }
   return ok(undefined);
 };
-
-/** A single capability that failed to close during shutdown. */
-interface CloseFailure {
-  readonly name: string;
-  readonly error: string;
-}
 
 /**
  * Close all capability handles in reverse order (dependencies close last).
@@ -234,6 +271,7 @@ interface CloseFailure {
 export const closeAll = async (
   handles: readonly CapabilityHandle[],
   logger: CloseLogger,
+  writeFallback: LifecycleDiagnosticFallback = writeLifecycleFallback,
 ): Promise<readonly CloseFailure[]> => {
   const failures: CloseFailure[] = [];
   // Close in reverse order (dependents close before dependencies)
@@ -243,7 +281,13 @@ export const closeAll = async (
 
     try {
       await handle.close();
-      logLifecycleWithoutThrowing(logger, "info", `Capability '${handle.name}' closed`);
+      logLifecycleWithoutThrowing(
+        logger,
+        "info",
+        `Capability '${handle.name}' closed`,
+        undefined,
+        writeFallback,
+      );
     } catch (caught) {
       const error = safeErrorMessage(caught);
       // Record the close outcome before attempting secondary diagnostics.
@@ -253,6 +297,7 @@ export const closeAll = async (
         "warn",
         `Capability '${handle.name}' failed to close`,
         { error },
+        writeFallback,
       );
     }
   }
@@ -260,37 +305,32 @@ export const closeAll = async (
 };
 
 // ---------------------------------------------------------------------------
-// Health Check (effectful — aggregation only; periodic host polling is a
-// follow-up, see capability-handle.ts)
+// Health Check (effectful aggregation)
 // ---------------------------------------------------------------------------
 
 /**
  * Run health checks on all capabilities that declare one.
  * Returns aggregated report. Best-effort — never throws.
  *
- * Consumed by `GET /admin/capabilities/health` (see
- * `http/handlers/admin/capabilities.ts`, which documents why this is an
- * operator-driven admin route rather than a kubelet probe). Feeding the host's
- * degraded state from a periodic poll remains a separate, unbuilt feature.
+ * Consumed by the operator-driven `GET /admin/capabilities/health` route.
  */
 export const checkHealth = async (
   handles: readonly CapabilityHandle[],
 ): Promise<CapabilityHealthReport> => {
   const results: CapabilityHealth[] = [];
-  let hasUnhealthy = false;
 
   for (const handle of handles) {
-    if (!handle.healthCheck) {
-      results.push({ status: "no-check", name: handle.name });
-      continue;
-    }
     try {
-      const result = await handle.healthCheck();
+      const healthCheck = handle.healthCheck;
+      if (healthCheck === undefined) {
+        results.push({ status: "no-check", name: handle.name });
+        continue;
+      }
+      const result = await healthCheck();
       if (result.ok) {
         results.push({ status: "healthy", name: handle.name });
       } else {
         results.push({ status: "unhealthy", name: handle.name, reason: result.error });
-        hasUnhealthy = true;
       }
     } catch (e) {
       results.push({
@@ -298,12 +338,11 @@ export const checkHealth = async (
         name: handle.name,
         reason: safeErrorMessage(e),
       });
-      hasUnhealthy = true;
     }
   }
 
   return {
-    overall: hasUnhealthy ? "degraded" : "healthy",
+    overall: results.some(({ status }) => status === "unhealthy") ? "degraded" : "healthy",
     capabilities: results,
   };
 };
@@ -312,7 +351,7 @@ export const checkHealth = async (
 // Utility: extract client map from handles
 // ---------------------------------------------------------------------------
 
-/**
+/*
  * Extract a capabilities record from a set of handles.
  *
  * This record is the BOOT-SCOPED static client set: it is passed directly to
@@ -345,8 +384,47 @@ export const checkHealth = async (
  * dropping a handle (last-writer-wins) and surfacing later as a phantom
  * `missing-capability`.
  */
+/** Run-scoped transformations applied while extracting boot capability clients. */
+export type CapabilityClientDecorators = {
+  readonly llm?: (
+    name: Capability,
+    client: LlmClient,
+    pricingModel: LlmPricingModel,
+  ) => LlmClient;
+};
+
+export const runScopedLlmFacade = (
+  metered: LlmClient,
+  aliases: Readonly<Record<string, unknown>>,
+): LlmClient => {
+  const facade: Record<string, unknown> = Object.create(null);
+  const bind = (operation: "sendStructured" | "sendWithTools"): unknown =>
+    metered[operation].bind(metered);
+
+  facade.sendStructured = bind("sendStructured");
+  facade.sendWithTools = bind("sendWithTools");
+  for (const [alias, operation] of Object.entries(aliases)) {
+    if (alias === "sendStructured" || alias === "sendWithTools") {
+      throw new Error(`runScopedOperations cannot replace standard operation '${alias}'`);
+    }
+    if (operation !== "sendStructured" && operation !== "sendWithTools") {
+      throw new Error(
+        `runScopedOperations alias '${alias}' names unknown operation '${String(operation)}'`,
+      );
+    }
+    facade[alias] = bind(operation);
+  }
+  return Object.freeze(facade) as unknown as LlmClient;
+};
+
+/**
+ * Restore the validated handle-name/client correlation into a capability map.
+ * This is the boot-time trust boundary described above; duplicate names fail
+ * loudly and LLM handles are transformed into run-scoped metered facades.
+ */
 export const extractClients = (
   handles: readonly CapabilityHandle[],
+  decorators: CapabilityClientDecorators = {},
 ): Partial<{ readonly [K in Capability]: CapabilityRegistry[K] }> => {
   const clients: Partial<Record<Capability, unknown>> = {};
   for (const handle of handles) {
@@ -356,7 +434,22 @@ export const extractClients = (
           `topoSortHandles should have rejected this at boot. This is a wiring bug.`,
       );
     }
-    clients[handle.name] = handle.client;
+    // This remains inside the existing name↔client correlation trust boundary.
+    // Standard LLMs receive the narrow metered surface directly. Augmented
+    // aliases are declarative data interpreted here; adapter code never gets a
+    // run-scoped composition callback in which it could retain the boot client.
+    if (handle.clientKind === "llm" && decorators.llm !== undefined) {
+      const metered = decorators.llm(
+        handle.name,
+        handle.client,
+        handle.pricingModel,
+      );
+      clients[handle.name] = handle.runScopedOperations === undefined
+        ? metered
+        : runScopedLlmFacade(metered, handle.runScopedOperations);
+    } else {
+      clients[handle.name] = handle.client;
+    }
   }
   return clients as Partial<{ [K in Capability]: CapabilityRegistry[K] }>;
 };

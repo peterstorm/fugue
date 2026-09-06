@@ -9,6 +9,7 @@ import type { HumanAction } from "../dag-runtime/types.js";
 import type { HumanInterventionEvent } from "../types/events.js";
 import { z } from "zod";
 import { ok } from "../types/result.js";
+import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
 
 const NID = nodeId("test-node");
 const RID = runId("run-1");
@@ -156,6 +157,122 @@ describe("emitHumanIntervention", () => {
     expect(errEvt).toBeDefined();
     const intervention = obs.events.find((e) => e.type === "human-intervention");
     expect(intervention).toBeUndefined();
+  });
+
+  // Third member of the hostile-diagnostics family, for the SUCCESS path. The
+  // two branches below cover the fail-closed exits; this one covers the exit
+  // that returns `ok`. `nowFn()`/`stamp()` run as ARGUMENTS to `emit`, so an
+  // unfenced success path lets a throwing clock escape as a raw exception —
+  // `handleHumanGate` has no try/catch, so it would surface as a crash rather
+  // than the documented `Result`.
+  it("keeps the successful outcome authoritative under a hostile clock", () => {
+    const obs = new RecordingObserver();
+    setFrameworkLogger({
+      debug: () => { throw new Error("logger failed"); },
+      info: () => {},
+      warn: () => {},
+      error: () => { throw new Error("logger failed"); },
+    });
+
+    try {
+      let result: ReturnType<typeof emitHumanIntervention> | undefined;
+      expect(() => {
+        result = emitHumanIntervention(
+          { nodeId: NID, output: { x: 1 } },
+          { kind: "approve", actor: "alice" },
+          new Map([[NID, makeNodeDef()]]), // node present, confidence "none"
+          makeCtx(obs) as any,
+          DID,
+          () => { throw new Error("clock failed"); },
+          0,
+          [],
+        );
+      }).not.toThrow();
+
+      expect(result?.ok).toBe(true);
+      // The event could not be built, but its absence is a lost diagnostic —
+      // never a lost outcome.
+      expect(obs.events).toHaveLength(0);
+    } finally {
+      __resetFrameworkLogger();
+    }
+  });
+
+  // Mirror of the hostile-diagnostics test below, for the OTHER fail-closed
+  // branch. `stamp()` runs `nowFn()` as an argument to `emit`, so a throwing
+  // clock fires before dispatchEvent is entered and no observer-side guard can
+  // catch it. This branch must still return its typed Err, never throw.
+  it("keeps the typed missing-nodeDef failure authoritative under hostile diagnostics", () => {
+    const obs = new RecordingObserver();
+    setFrameworkLogger({
+      debug: () => { throw new Error("logger failed"); },
+      info: () => {},
+      warn: () => {},
+      error: () => { throw new Error("logger failed"); },
+    });
+
+    try {
+      const result = emitHumanIntervention(
+        { nodeId: NID, output: {} },
+        { kind: "approve" },
+        new Map(), // node absent → the missing-nodeDef branch
+        makeCtx(obs) as any,
+        DID,
+        () => { throw new Error("clock failed"); },
+        Date.now(),
+        [],
+      );
+
+      expect(result.ok).toBe(false);
+      if (!result.ok && result.error.kind === "node-crash") {
+        expect(result.error.message).toContain("missing from nodeMap");
+        expect(result.error.retriability).toBe("non-retriable");
+      } else {
+        throw new Error("expected a typed non-retriable node-crash Err");
+      }
+      expect(obs.events).toHaveLength(0);
+    } finally {
+      __resetFrameworkLogger();
+    }
+  });
+
+  it("keeps the typed confidence failure authoritative under hostile diagnostics", () => {
+    const obs = new RecordingObserver();
+    const hostile = { toString: () => { throw new Error("hostile coercion"); } };
+    const nodeDef = makeNodeDef({
+      confidence: {
+        mode: "value",
+        extract: () => { throw hostile; },
+      },
+    });
+    setFrameworkLogger({
+      debug: () => { throw new Error("logger failed"); },
+      info: () => {},
+      warn: () => {},
+      error: () => { throw new Error("logger failed"); },
+    });
+
+    try {
+      const result = emitHumanIntervention(
+        { nodeId: NID, output: {} },
+        { kind: "approve" },
+        new Map([[NID, nodeDef]]),
+        makeCtx(obs) as any,
+        DID,
+        () => { throw new Error("clock failed"); },
+        Date.now(),
+        [],
+      );
+
+      expect(result.ok).toBe(false);
+      if (!result.ok && result.error.kind === "node-crash") {
+        expect(result.error.message).toContain("confidence.extract failed");
+        expect(result.error.retriability).toBe("non-retriable");
+      }
+      expect(obs.events).toHaveLength(0);
+    } finally {
+      __resetFrameworkLogger();
+    }
   });
 
   it("fail-closed: returns Err when nodeDef is missing (framework-bug guard)", () => {

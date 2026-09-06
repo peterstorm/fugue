@@ -9,6 +9,7 @@ import type { NodeId } from "../types/ids.js";
 import { nodeId } from "../types/ids.js";
 import type { Witness, FreshnessExecutionEpoch } from "../types/witness.js";
 import type { NonEmptyString } from "../types/non-empty-string.js";
+import type { Capability } from "../types/node.js";
 
 /**
  * Sentinel node id used by the executor/runner when an ERROR event arrives
@@ -369,5 +370,13 @@ export interface DagMachineContext extends DagMachineContextPersisted {
    * Precomputed node-id → NodeDef lookup. Built once at compile time so
    * the executor can do O(1) lookups for `node.run()` dispatch.
    */
-  readonly nodeById: ReadonlyMap<NodeId, import("../types/node.js").NodeDef<unknown, unknown>>;
+  readonly nodeById: ReadonlyMap<
+    NodeId,
+    import("../types/node.js").NodeDef<
+      unknown,
+      unknown,
+      FrameworkError,
+      readonly Capability[]
+    >
+  >;
 }

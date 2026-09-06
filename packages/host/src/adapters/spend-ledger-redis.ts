@@ -1,56 +1,52 @@
 /**
  * Redis-backed spend ledger — the adapter that survives process death.
  *
- * Appends are LOCK-FREE, and that is a property of the encoding rather than a
- * risk taken. `domain/spend-record.ts` stores a run's spend as three numeric
- * sums plus a set of model names; `HINCRBY` and `SADD` are atomic, commutative,
- * and each independently correct under any interleaving, so two workers
- * appending to the same run cannot lose an increment or corrupt the record.
- * Nothing here does a read-modify-write, so there is nothing to race on.
+ * Appends are one atomic `MULTI`/`EXEC` owned by the Redis adapter. The
+ * transaction queues every unpriced-model hash marker first, then nonzero
+ * numeric sums cost-first (`micros`, `tokens`, `calls`), then one retention
+ * refresh when `ttlSec` is configured. Marker and values share one key, so split-read/expiry races and
+ * standalone append command paths are unrepresentable.
  *
- * The three increments and the set-add are separately atomic but not atomic
- * TOGETHER. A crash between them leaves a run recorded as having spent tokens
- * without the matching cost, or vice versa — always UNDER-reporting one axis of
- * one call, never over-reporting and never corrupting. That window is bounded
- * by one call, the same magnitude as the documented overshoot-by-one allowance,
- * and erring toward under-reporting a single call is the correct direction for
- * a partial write: the alternative (a transaction) buys exactness at the price
- * of a round trip on every call and a failure mode — a half-applied MULTI — that
- * is strictly worse to reason about.
+ * Concurrent appends use a locally serialized WATCH/read/MULTI/EXEC loop.
+ * Serialization prevents commands sharing this connection from consuming one
+ * another's WATCH state; WATCH still detects cross-process writers, and a null
+ * EXEC retries from a fresh read. A process crash can still lose every
+ * provider-settled append not acknowledged before death, and
+ * a thrown/failed transaction acknowledgement is ambiguous. This adapter
+ * returns one typed append failure and never claims that values committed or
+ * retries an additive delta that may already have committed.
  *
  * @satisfies FR-B-006 — spend is durable per runId
  */
 
 import type { DagId, RunId, Spend } from "@fuguejs/framework";
-import { err, ok } from "@fuguejs/framework";
+import { err, ok, safeErrorMessage } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { RedisPort, SpendLedgerPort } from "../ports.js";
 import type { HostError } from "../domain/host-error.js";
-import { formatHostError } from "../domain/host-error.js";
-import type { LogPort } from "../ports.js";
-import { logWithoutThrowing } from "../hitl/diagnostic-logging.js";
+import { internalInvariantViolated } from "../domain/host-error.js";
 import type { TenantId } from "../domain/tenant.js";
-import { buildSpendKey, buildSpendUnpricedKey } from "../domain/cache-keys.js";
-import { parseFigure, recordOf, spendOfRecord } from "../domain/spend-record.js";
+import { buildSpendKey } from "../domain/cache-keys.js";
+import { spendOfHash } from "../domain/spend-record.js";
 
 /**
  * The Redis surface a ledger needs, proven present at CONSTRUCTION.
  *
- * `hIncrBy`/`hGetAll`/`expire` are optional on `RedisPort` so unrelated fakes
- * stay valid. Parsing them once here — rather than null-checking per call —
- * means the missing-primitive case is decided in ONE place, and the resulting
- * error names exactly which methods are absent.
+ * `hGetAll`/`appendSpend` are optional on `RedisPort` so unrelated fakes stay
+ * valid. Parsing them once here — rather than null-checking per call — means the
+ * missing-capability case is decided in ONE place, and the resulting error
+ * names exactly which methods are absent.
  *
- * It does NOT abort anything. The sole caller (`createNodeContextForDag`) logs
- * that error and DOWNGRADES to the in-process ledger, because refusing every
- * run over a metering capability would turn a configuration gap into an
- * outage. An earlier version of this comment claimed the host "fails at boot",
- * which was never what any caller did.
+ * A missing capability is a construction-time downgrade signal. The sole
+ * caller (`createNodeContextForDag`) logs it and selects the in-process ledger
+ * rather than turning a metering configuration gap into an outage.
  */
-export type SpendLedgerRedis = Pick<RedisPort, "sAdd" | "sMembers"> & {
-  readonly hIncrBy: NonNullable<RedisPort["hIncrBy"]>;
+export type SpendLedgerRedis = {
   readonly hGetAll: NonNullable<RedisPort["hGetAll"]>;
-  readonly expire: NonNullable<RedisPort["expire"]>;
+  readonly appendSpend: NonNullable<RedisPort["appendSpend"]>;
+  readonly commitCheckpointAndRetainSpend: NonNullable<
+    RedisPort["commitCheckpointAndRetainSpend"]
+  >;
 };
 
 /**
@@ -61,23 +57,19 @@ export type SpendLedgerRedis = Pick<RedisPort, "sAdd" | "sMembers"> & {
  */
 export const spendLedgerRedis = (redis: RedisPort): Result<SpendLedgerRedis, HostError> => {
   // The DIAGNOSTIC is derived from this list; the GUARD below is not, and
-  // cannot be. TypeScript will not narrow `redis.hIncrBy` to non-`undefined`
-  // from a computed `missing` array, so the explicit `||` chain is what earns
-  // the assertion-free return literal underneath it — collapsing the two would
-  // require a type assertion, which this codebase avoids precisely here.
-  //
-  // So adding a fourth primitive is TWO edits, not one: this list (for the
-  // message) and the guard (for the decision). Missing the guard is caught by
-  // the compiler at the return literal, which is a confusing place to learn it
-  // but not a silent failure. An earlier version of this comment claimed one
-  // edit sufficed; it did not.
+  // cannot be. TypeScript will not narrow optional methods from a computed
+  // `missing` array, so the explicit guard earns the assertion-free return.
   const required = [
-    ["hIncrBy", redis.hIncrBy],
     ["hGetAll", redis.hGetAll],
-    ["expire", redis.expire],
+    ["appendSpend", redis.appendSpend],
+    ["commitCheckpointAndRetainSpend", redis.commitCheckpointAndRetainSpend],
   ] as const;
   const missing = required.filter(([, method]) => method === undefined).map(([name]) => name);
-  if (redis.hIncrBy === undefined || redis.hGetAll === undefined || redis.expire === undefined) {
+  if (
+    redis.hGetAll === undefined ||
+    redis.appendSpend === undefined ||
+    redis.commitCheckpointAndRetainSpend === undefined
+  ) {
     return err({
       kind: "config-invalid",
       message:
@@ -86,31 +78,17 @@ export const spendLedgerRedis = (redis: RedisPort): Result<SpendLedgerRedis, Hos
     });
   }
   return ok({
-    sAdd: redis.sAdd,
-    sMembers: redis.sMembers,
-    expire: redis.expire,
-    hIncrBy: redis.hIncrBy,
-    hGetAll: redis.hGetAll,
+    hGetAll: redis.hGetAll.bind(redis),
+    appendSpend: redis.appendSpend.bind(redis),
+    commitCheckpointAndRetainSpend:
+      redis.commitCheckpointAndRetainSpend.bind(redis),
   });
 };
-
-/** Hash field names — one place, so the reader and the writer cannot disagree. */
-const FIELD = { tokens: "tokens", calls: "calls", micros: "micros" } as const;
 
 export interface RedisSpendLedgerDeps {
   readonly redis: SpendLedgerRedis;
   readonly tenant: TenantId;
   readonly dagId: DagId;
-  /**
-   * Where a best-effort failure goes.
-   *
-   * The TTL refresh below deliberately does not fail the append — but "does not
-   * fail" is not "is not worth knowing about". Without a logger this adapter was
-   * structurally incapable of reporting an EXPIRE failure, and an EXPIRE that
-   * quietly stops working lets a live run's spend record expire underneath it,
-   * which reopens the refill-on-resume bug with no diagnostic trail at all.
-   */
-  readonly logger: LogPort;
   /**
    * How long a run's spend record outlives its last write.
    *
@@ -135,76 +113,52 @@ export interface RedisSpendLedgerDeps {
  * to every call.
  */
 export const createRedisSpendLedger = (deps: RedisSpendLedgerDeps): SpendLedgerPort => {
-  const { redis, tenant, dagId, ttlSec, logger } = deps;
-  const keys = (runId: RunId) => ({
-    hash: buildSpendKey(tenant, dagId, runId),
-    unpriced: buildSpendUnpricedKey(tenant, dagId, runId),
-  });
+  const { redis, tenant, dagId, ttlSec } = deps;
+  const key = (runId: RunId): string => buildSpendKey(tenant, dagId, runId);
 
   return {
+    metadata: Object.freeze({
+      role: "authoritative",
+      backend: "redis",
+      durability: "restart",
+    }),
     read: async (runId: RunId): Promise<Result<Spend, HostError>> => {
-      const { hash, unpriced } = keys(runId);
-      const figures = await redis.hGetAll(hash);
-      // An unreadable ledger must surface as an error, never as zero: the
-      // caller fails the slice closed on it, because "we could not read what
-      // this run has spent" and "this run has spent nothing" have to stay
-      // distinguishable — collapsing them IS the refill-on-resume bug.
-      if (!figures.ok) return err(figures.error);
-      const models = await redis.sMembers(unpriced);
-      if (!models.ok) return err(models.error);
+      try {
+        const stored = await redis.hGetAll(key(runId));
+        if (!stored.ok) return err(stored.error);
 
-      return ok(
-        spendOfRecord({
-          tokens: parseFigure(figures.value[FIELD.tokens]),
-          calls: parseFigure(figures.value[FIELD.calls]),
-          micros: parseFigure(figures.value[FIELD.micros]),
-          unpricedModels: models.value,
-        }),
-      );
+        const parsed = spendOfHash(stored.value);
+        return parsed.ok
+          ? parsed
+          : err(internalInvariantViolated(
+              "Stored Redis spend record is malformed",
+              { field: parsed.error.field, reason: parsed.error.reason },
+            ));
+      } catch (error) {
+        const message = safeErrorMessage(error);
+        return err(internalInvariantViolated(
+          `SpendLedgerRedis.hGetAll threw across the port boundary: ${message}`,
+          { operation: "spend-ledger read", error: message },
+        ));
+      }
     },
 
     add: async (runId: RunId, delta: Spend): Promise<Result<void, HostError>> => {
-      const { hash, unpriced } = keys(runId);
-      const record = recordOf(delta);
-
-      // Ordered cost-first: if the process dies mid-append, the axis most
-      // likely to be under a tight ceiling is the one already recorded.
-      for (const [field, by] of [
-        [FIELD.micros, record.micros],
-        [FIELD.tokens, record.tokens],
-        [FIELD.calls, record.calls],
-      ] as const) {
-        // A zero increment is a no-op that would still cost a round trip.
-        if (by === 0) continue;
-        const incremented = await redis.hIncrBy(hash, field, by);
-        if (!incremented.ok) return err(incremented.error);
+      try {
+        return await redis.appendSpend({
+          key: key(runId),
+          delta,
+          ...(ttlSec !== undefined ? { ttlSec } : {}),
+        });
+      } catch (error) {
+        const message = safeErrorMessage(error);
+        // Same producer as `read`'s catch above, so both boundary-throw paths
+        // build an identically frozen error.
+        return err(internalInvariantViolated(
+          `SpendLedgerRedis.appendSpend threw across the port boundary: ${message}`,
+          { operation: "spend-ledger append", error: message },
+        ));
       }
-
-      for (const model of record.unpricedModels) {
-        const added = await redis.sAdd(unpriced, model);
-        if (!added.ok) return err(added.error);
-      }
-
-      // Refresh idleness on both keys. A failure here does NOT fail the append —
-      // the spend is already recorded, and the only consequence is a key that
-      // expires earlier than intended, which loses durability rather than money.
-      // It IS logged: an EXPIRE that silently stops working lets a live run's
-      // record expire underneath it, and that is the refill-on-resume bug again
-      // with nothing to grep for. `warn`, matching the severity of what is lost.
-      if (ttlSec !== undefined) {
-        for (const key of [hash, unpriced]) {
-          const refreshed = await redis.expire(key, ttlSec);
-          if (!refreshed.ok) {
-            logWithoutThrowing(logger, "warn", "spend-ledger.ttl-refresh-failed", {
-              key,
-              ttlSec,
-              reason: formatHostError(refreshed.error),
-              consequence: "this run's spend record may expire while the run is still active",
-            });
-          }
-        }
-      }
-      return ok(undefined);
     },
   };
 };

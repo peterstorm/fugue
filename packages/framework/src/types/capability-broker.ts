@@ -17,8 +17,7 @@
 // compiles and runs today continues to do so with no migration step (US3,
 // FR-W2-002/003, SC-005). The framework also ships a PASS-THROUGH broker (see
 // `../shared/passthrough-broker.ts`) — an optional embedder convenience that
-// hands back the statically-configured clients byte-identically, equivalent to
-// omitting the broker.
+// hands back its configured tagged bindings byte-identically.
 //
 // The host-side broker that mints narrowly-scoped tokens per invocation lives
 // in the host, NOT here (FR-W2-006) — the port and the pass-through convenience
@@ -34,62 +33,70 @@
 import type { Result } from "./result.js";
 import type { FrameworkError } from "./errors.js";
 import type { Capability, CapabilityRegistry } from "./node.js";
+import type { LlmClient, LlmPricingModel } from "./llm.js";
+import type {
+  HasNoExtraSymbolMembers,
+  RunScopedLlmOperations,
+} from "./capability-handle.js";
 import type { RunId, DagId, NodeId } from "./ids.js";
 
 /**
- * The resolved, scoped client set for a single invocation. Mirrors the output
- * shape of the host's `extractClients` (`Partial<{ [K in Capability]: ... }>`),
- * so the broker can be dropped in wherever a static client record is consumed.
- *
- * A capability key is present iff the broker resolved a client for it. The
- * pass-through broker returns exactly the configured set unchanged.
+ * Tagged dispatch bindings resolved for one invocation. These are not direct
+ * context clients: dispatch must meter every `llm` binding and unwrap each
+ * `client` before merging it into a node context. A key is present iff the
+ * broker resolved that capability; the pass-through broker preserves its
+ * configured binding map unchanged.
  */
-export type ScopedCapabilityHandle = Partial<{ readonly [K in Capability]: CapabilityRegistry[K] }>;
+export type ScopedLlmCapability<T extends LlmClient = LlmClient> =
+  HasNoExtraSymbolMembers<T> extends true
+    ? {
+        readonly clientKind: "llm";
+        readonly client: T;
+        readonly pricingModel: LlmPricingModel;
+        readonly runScopedOperations: RunScopedLlmOperations<T>;
+      }
+    : never;
 
-/**
- * Who initiated an invocation — a discriminated union, not optional fields. An
- * invocation is EITHER agent-initiated (autonomous/cron) OR user-initiated,
- * never an ambiguous blend. In later waves `origin` selects the authority
- * strategy (agent → `client_credentials`; user → token exchange preserving
- * `sub`). The pass-through broker IGNORES `origin` entirely — authority is not
- * yet varied.
- *
- * Exported as a named type so consumers building it from an auth identity can
- * `match(origin).with(...).exhaustive()` by name and reuse the shape.
- */
+export type ScopedNonLlmCapability<T> = {
+  readonly clientKind: "non-llm";
+  readonly client: T;
+};
+
+type ScopedCapabilityValue<T> =
+  [Extract<T, LlmClient>] extends [never]
+    ? ScopedNonLlmCapability<T>
+    : [Exclude<T, LlmClient>] extends [never]
+      ? ScopedLlmCapability<Extract<T, LlmClient>>
+      : never;
+
+export type ScopedCapabilityHandle = Partial<{
+  readonly [K in Capability]: ScopedCapabilityValue<CapabilityRegistry[K]>;
+}>;
+
+/** Host-owned decorator for a broker-delivered LLM binding. */
+export type ScopedLlmMeter = (
+  capability: Capability,
+  binding: ScopedLlmCapability,
+  nodeId: NodeId,
+) => Result<LlmClient, FrameworkError>;
+
+/** Agent or user authority; the discriminant makes ambiguous blends unrepresentable. */
 export type InvocationOrigin =
   | { readonly kind: "agent"; readonly agentClientId: string }
   | { readonly kind: "user"; readonly sub: string; readonly agentClientId: string };
 
 /**
- * The per-node minting authority — a broker AND the origin it authorizes
- * against, as ONE value.
- *
- * The two are useless apart: run-start validation exempts `broker.provides()`
- * scopes from the base-context check *because* they will be minted at dispatch,
- * and dispatch minting needs `origin` to build each node's `Invocation`. When
- * they were two independent optionals, `broker`-without-`origin` was
- * representable — validation waved scope capabilities through, minting silently
- * never ran, and the node crashed on an `undefined` handle. Pairing them in one
- * type makes that half-wired state unrepresentable.
+ * One complete per-node authority. Broker, origin, and LLM meter travel
+ * together because run-start exemptions are valid only when dispatch can mint
+ * and safely materialize every advertised binding.
  */
 export interface MintingAuthority {
   readonly broker: CapabilityBroker;
   readonly origin: InvocationOrigin;
+  readonly meterLlm: ScopedLlmMeter;
 }
 
-/**
- * Identity + correlation for one node invocation.
- *
- * `runId`/`dagId`/`nodeId` are the correlation triple every later mint/refusal
- * audit record is keyed on.
- *
- * `origin` MUST be the same origin the run's `MintingAuthority` authorizes
- * against — the broker gates and mints AS that origin. The two are kept
- * consistent by constructing every `Invocation` through `invocationFor` below
- * (the sole construction site), so an `Invocation` whose `origin` disagrees
- * with the authority that mints it is not produced by the runtime.
- */
+/** Authority identity plus the correlation triple for one node dispatch. */
 export interface Invocation {
   readonly origin: InvocationOrigin;
   readonly runId: RunId;
@@ -97,25 +104,14 @@ export interface Invocation {
   readonly nodeId: NodeId;
 }
 
-/**
- * The correlation triple for one node invocation — everything an `Invocation`
- * needs beyond the origin (which the `MintingAuthority` already owns).
- */
+/** Correlation data supplied beside the authority-owned origin. */
 export interface InvocationCorrelation {
   readonly runId: RunId;
   readonly dagId: DagId;
   readonly nodeId: NodeId;
 }
 
-/**
- * Build the per-node `Invocation` for a dispatch, DERIVING `origin` from the
- * minting authority rather than re-supplying it. This is the single
- * construction site (`dag-runtime/run-node.ts`): pulling `origin` straight off
- * the `MintingAuthority` makes "the node was minted AS origin X but its
- * `Invocation` claims origin Y" unrepresentable in the runtime — the same
- * pairing discipline `MintingAuthority` itself uses. The broker then gates,
- * mints, and audits against exactly the origin the authority was wired with.
- */
+/** Derive origin from the authority so dispatch cannot claim another identity. */
 export const invocationFor = (
   authority: MintingAuthority,
   correlation: InvocationCorrelation,
@@ -137,22 +133,24 @@ export const invocationFor = (
  * Errors flow on the `Result` channel (`FrameworkError`), never thrown across
  * the boundary. The pass-through broker never produces an `Err`.
  *
- * @satisfies FR-W2-009 — the LLM handle is expressible as the first
- *   invocation-scoped capability over this same `mintFor` seam (no OIDC
- *   required): `"llm"` is a `Capability`, so a future broker can resolve it here
- *   without any change to THIS PORT. (Not migrated in this wave — the
- *   metered-llm wiring stays.) NOTE the RUNTIME is not yet ready for that
- *   future: `mergeScopedCapabilities` deliberately refuses to overlay built-in
- *   capability keys (`llm`/`http`/…), and `validateCapabilities` therefore
- *   REJECTS a broker claiming `provides()` for one as a wiring error. Migrating
- *   a built-in onto this seam means lifting both guards in the same commit —
- *   the port itself needs no change.
+ * @satisfies FR-W2-009 — custom registry LLM capabilities are expressible on
+ *   this seam as explicit `ScopedLlmCapability` bindings. Dispatch requires the
+ *   run's host-owned meter before merge, so broker authority cannot create an
+ *   unmetered provider path. Built-in keys (`llm`/`http`/…) remain static and
+ *   are still rejected by validation/merge; only custom scoped LLMs use this
+ *   path.
  */
-export interface CapabilityBroker {
-  mintFor(
+export type CapabilityBroker = {
+  /**
+   * Declared as a readonly function property rather than method shorthand:
+   * method shorthand is checked bivariantly even under `strictFunctionTypes`,
+   * and this port resolves per-invocation authority — an implementation that
+   * narrowed `inv` or `requires` must not type-check.
+   */
+  readonly mintFor: (
     inv: Invocation,
     requires: readonly Capability[],
-  ): Promise<Result<ScopedCapabilityHandle, FrameworkError>>;
+  ) => Promise<Result<ScopedCapabilityHandle, FrameworkError>>;
 
   /**
    * Does this broker resolve `cap` per-invocation (minting it at node dispatch)
@@ -162,7 +160,7 @@ export interface CapabilityBroker {
    * capability the broker provides is NOT required to be present on the wired
    * NodeContext — it is minted per node when the node actually runs, so the
    * run-start check must not fail it as `missing-capability`. A capability the
-   * broker does NOT provide (e.g. the static `http`/`db` clients, or `llm`) is
+   * broker does NOT provide (e.g. the static `http` client, or `llm`) is
    * still validated against the base context as before.
    *
    * Optional and defaulting to "provides nothing": the pass-through broker (and
@@ -172,5 +170,5 @@ export interface CapabilityBroker {
    * broker) implements it to claim the `"<provider>:<operation>"` scope names it
    * resolves at dispatch.
    */
-  provides?(cap: Capability): boolean;
-}
+  readonly provides?: (cap: Capability) => boolean;
+};

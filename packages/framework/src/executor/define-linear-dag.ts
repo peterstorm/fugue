@@ -7,7 +7,7 @@
 // same branded result.
 
 import type { DagDef } from "../types/dag.js";
-import type { NodeDef } from "../types/node.js";
+import type { Capability, NodeDef } from "../types/node.js";
 import type { EvalJudgeNodeDef } from "../nodes/eval-judge.js";
 import { DagDefinitionError, defineDagFromArray } from "./define-dag.js";
 import { nodeId } from "../types/ids.js";
@@ -16,7 +16,7 @@ import { dagInputEdgeFor } from "./dag-input-edge.js";
 export interface LinearDagConfig {
   readonly id: string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional
-  readonly nodes: readonly NodeDef<any, any, any>[];
+  readonly nodes: readonly NodeDef<any, any, any, readonly Capability[]>[];
   readonly evalJudges?: readonly EvalJudgeNodeDef[];
   readonly defaultRetryLimit?: number;
   readonly retryLimits?: Readonly<Record<string, number>>;
@@ -42,6 +42,25 @@ export const defineLinearDag = (config: LinearDagConfig): DagDef => {
       kind: "validation",
       nodeId: nodeId(config.id),
       message: "defineLinearDag requires at least one node",
+    });
+  }
+
+  // Edges come from ARRAY POSITION, so a node listed twice chains back into
+  // itself: `[A, B, C, A]` yields A→B, B→C, C→A — three distinct (from, to)
+  // pairs that pass the edge-uniqueness rule yet resolve through one collapsed
+  // node, forming a cycle. `topoSort` would not reject it until
+  // `compileDagToMachine` ran on the first request, so a linear chain refuses
+  // the repeat here regardless of whether the two entries are the same object.
+  const repeated = config.nodes.find(
+    (node, i) => config.nodes.findIndex((other) => other.id === node.id) !== i,
+  );
+  if (repeated !== undefined) {
+    throw new DagDefinitionError(config.id, {
+      kind: "validation",
+      nodeId: repeated.id,
+      message:
+        `defineLinearDag lists node '${repeated.id}' more than once; a linear ` +
+        "chain is built from array order, so a repeat would form a cycle",
     });
   }
 

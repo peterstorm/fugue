@@ -17,7 +17,6 @@ import {
   checkpointKeyPrefix,
   buildCheckpointKey,
   buildSpendKey,
-  buildSpendUnpricedKey,
   type TenantId,
 } from "../../domain/cache-keys.js";
 import { tenantId } from "../../domain/tenant.js";
@@ -69,7 +68,6 @@ describe("cache key builders — tenant prefix (SECURITY: AD-4 / US2 / SC-001)",
       checkpointKeyPrefix(TENANT_A, dagId("d"), makeRunId("r")),
       buildCheckpointKey(TENANT_A, dagId("d"), makeRunId("r"), makeNodeId("n")),
       buildSpendKey(TENANT_A, dagId("d"), makeRunId("r")),
-      buildSpendUnpricedKey(TENANT_A, dagId("d"), makeRunId("r")),
     ];
     for (const key of keys) {
       expect(key.startsWith(prefix)).toBe(true);
@@ -140,7 +138,6 @@ describe("cache key builders — prefix-containment property (SECURITY: AD-4 / S
           checkpointKeyPrefix(t, dagId(d), makeRunId(r)),
           buildCheckpointKey(t, dagId(d), makeRunId(r), makeNodeId(n)),
           buildSpendKey(t, dagId(d), makeRunId(r)),
-          buildSpendUnpricedKey(t, dagId(d), makeRunId(r)),
         ];
         return keys.every((key) => key.startsWith(prefix));
       }),
@@ -168,15 +165,9 @@ describe("cache key builders — prefix-containment property (SECURITY: AD-4 / S
   });
 });
 
-describe("spend keys are disjoint from the checkpoint NodeId namespace (C1)", () => {
-  // Local arbitraries: the ones above are scoped to their own describe.
-  //
-  // The NODE id deliberately generates the full `ID_PATTERN` alphabet INCLUDING
-  // `:` — `spend:unpriced` is a valid node id and one of the two names that
-  // collided, so an arbitrary excluding `:` would miss half the bug. Tenant,
-  // dag and run ids keep the colon-free alphabet their own smart constructors
-  // require (`DAG_ID_REGEX` rejects `:` outright, which is what keeps dagIds
-  // out of Redis key namespaces in the first place).
+describe("the spend key is disjoint from the checkpoint NodeId namespace (C1)", () => {
+  // The node arbitrary covers the complete `ID_PATTERN` alphabet. Tenant, DAG,
+  // and run ids keep the colon-free alphabet their constructors require.
   const anyNodeId = fc.stringMatching(/^[A-Za-z0-9_:-]{1,64}$/);
   const colonFree = fc.stringMatching(/^[A-Za-z0-9_-]{1,64}$/);
   const anyTenant = colonFree.map(mkTenant);
@@ -187,7 +178,7 @@ describe("spend keys are disjoint from the checkpoint NodeId namespace (C1)", ()
   // ledger's HASH, silently zeroing the run's recorded spend and then
   // permanently refusing every later slice of a budgeted run on `WRONGTYPE`.
   //
-  // `$` is outside `ID_PATTERN`, so no valid `NodeId` can reach these strings.
+  // `$` is outside `ID_PATTERN`, so no valid `NodeId` can reach this string.
   // Same technique as `DAG_INPUT = "$input"`, same reason.
 
   it("a node literally named `spend` does NOT collide with the spend key", () => {
@@ -199,33 +190,16 @@ describe("spend keys are disjoint from the checkpoint NodeId namespace (C1)", ()
     expect(spendKey).toBe("fugue:tenant-a:orders:run-1:$spend");
   });
 
-  it("a node named `spend:unpriced` does NOT collide with the unpriced-set key", () => {
-    const unpricedKey = buildSpendUnpricedKey(TENANT_A, dagId("orders"), makeRunId("run-1"));
-    const checkpoint = buildCheckpointKey(
-      TENANT_A, dagId("orders"), makeRunId("run-1"), makeNodeId("spend:unpriced"),
-    );
-    expect(unpricedKey).not.toBe(checkpoint);
-  });
-
-  it("NO valid node id can produce either spend key, for any tenant/dag/run", () => {
+  it("NO valid node id can produce the spend key, for any tenant/dag/run", () => {
     // The general statement: `anyNodeId` generates the `ID_PATTERN` domain, and
     // the property is that the spend keys sit outside the image of
     // `buildCheckpointKey` entirely — not merely that a few names differ.
     fc.assert(
       fc.property(anyTenant, colonFree, colonFree, anyNodeId, (t, d, r, n) => {
         const checkpoint = buildCheckpointKey(t, dagId(d), makeRunId(r), makeNodeId(n));
-        return (
-          checkpoint !== buildSpendKey(t, dagId(d), makeRunId(r)) &&
-          checkpoint !== buildSpendUnpricedKey(t, dagId(d), makeRunId(r))
-        );
+        return checkpoint !== buildSpendKey(t, dagId(d), makeRunId(r));
       }),
     );
-  });
-
-  it("the two spend keys are distinct from each other", () => {
-    const hash = buildSpendKey(TENANT_A, dagId("d"), makeRunId("r"));
-    const set = buildSpendUnpricedKey(TENANT_A, dagId("d"), makeRunId("r"));
-    expect(hash).not.toBe(set);
   });
 
   it("two tenants with identical DAG + run produce DIFFERENT spend keys", () => {

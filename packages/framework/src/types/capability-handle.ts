@@ -1,108 +1,129 @@
 /**
- * Capability lifecycle handle — wraps a capability client with runtime
- * lifecycle hooks (connect/close) and optional health checking.
+ * Boot-scoped capability lifecycle handle.
  *
- * AXIS NOTE: `CapabilityHandle` is the BOOT-scoped *lifecycle* wrapper — it
- * owns `connect`/`close`/`healthCheck` and the connection pool, opened once at
- * boot and shared across every run. It is DISTINCT from `CapabilityBroker`
- * (`./capability-broker.ts`), which resolves per-invocation *authority* over the
- * same client set. Pools stay boot-scoped; only authority is invocation-scoped.
- * The two axes do not overlap: a broker never touches connect/close, and a
- * handle never varies authority per call.
- *
- * Adapter packages produce `CapabilityHandle` instances via factory functions.
- * The runtime manages the lifecycle:
- *   - `connect()` is called once at startup (after config validation).
- *   - `close()` is called at shutdown (graceful drain).
- *   - `healthCheck()` is available for degraded-state detection (host
- *     polling is not yet wired; `checkHealth` aggregation exists in the
- *     host's capability manager).
- *
- * @example
- * ```ts
- * const pgHandle: CapabilityHandle<"db"> = {
- *   name: "db",
- *   client: pgCapabilityImpl,
- *   connect: () => pool.connect(),
- *   close: () => pool.end(),
- *   healthCheck: async () => {
- *     await pool.query("SELECT 1");
- *     return ok(undefined);
- *   },
- * };
- * ```
+ * `clientKind` is explicit adapter intent, not runtime duck typing. Any registry
+ * client assignable to `LlmClient` must be marked `"llm"`; non-LLM handles
+ * cannot carry the marker. An augmented LLM subtype must declare how each
+ * additional provider-operation alias maps to the standard LLM surface. The
+ * host interprets that data into a facade around the authority-bearing client.
+ * The distributive conditional preserves both rules after heterogeneous handles
+ * widen to `CapabilityHandle[]`.
  */
 
+import type { LlmClient, LlmPricingModel } from "./llm.js";
 import type { Result } from "./result.js";
 import type { CapabilityRegistry, Capability } from "./node.js";
 
-/**
- * Runtime lifecycle wrapper for a capability client.
- *
- * @typeParam K - The capability name (key of `CapabilityRegistry`).
- */
-export interface CapabilityHandle<K extends Capability = Capability> {
+type CapabilityHandleBase<K extends Capability> = {
   /** Capability name — must match a key in `CapabilityRegistry`. */
   readonly name: K;
-
-  /** The capability client instance injected into `NodeContext`. */
+  /**
+   * Boot-scoped client. Non-LLM clients may be injected directly into a
+   * `NodeContext`; LLM clients are transformed into run-scoped metered or
+   * composed facades before injection.
+   */
   readonly client: CapabilityRegistry[K];
-
-  /**
-   * Called once at runtime startup. Use for connection pool init,
-   * authentication handshakes, etc. Throwing aborts the boot sequence.
-   */
   readonly connect?: () => Promise<void>;
-
-  /**
-   * Called at runtime shutdown. Use for pool drain, socket close, etc.
-   * The runtime awaits this before process exit.
-   */
   readonly close?: () => Promise<void>;
-
-  /**
-   * Optional health check for degraded-state detection. Return `Err(reason)`
-   * to signal unhealthy. (The host's `checkHealth` aggregates these; periodic
-   * polling is not yet wired into the host runtime.)
-   */
   readonly healthCheck?: () => Promise<Result<void, string>>;
-
-  /**
-   * Optional dependency ordering. If this capability requires another
-   * capability to be connected first, declare it here. The runtime
-   * topologically sorts `connect()` calls.
-   *
-   * Only *handle-backed* capabilities are valid targets — built-ins that are
-   * set directly as built-in `NodeContext` fields by `makeNodeContext`
-   * (`llm`, `judgeLlm`, `prompts`, `cache`), never registered as a
-   * `CapabilityHandle`, are never seen by the lifecycle manager, so
-   * depending on them always fails the boot-time check. (`http`, by contrast,
-   * is handle-backed via `createHttpCapability` and reaches the host through
-   * the `capabilities` array — so it *is* a valid target when an HTTP handle
-   * is registered.) The type cannot express this narrowing (which capabilities
-   * are handle-backed is a runtime property of the deployment), so it is
-   * enforced at boot by `topoSortHandles`.
-   */
+  /** Handle-backed capabilities that must connect before this one. */
   readonly dependsOn?: readonly Capability[];
-}
+};
+
+export type RunScopedLlmOperation = "sendStructured" | "sendWithTools";
+
+type IsMutuallyAssignable<A, B> =
+  [A] extends [B]
+    ? [B] extends [A] ? true : false
+    : false;
+
+type RunScopedOperationFor<F> =
+  IsMutuallyAssignable<F, LlmClient["sendStructured"]> extends true
+    ? "sendStructured"
+    : IsMutuallyAssignable<F, LlmClient["sendWithTools"]> extends true
+      ? "sendWithTools"
+      : never;
+
+type HasCompatibleStandardOperations<T extends LlmClient> =
+  IsMutuallyAssignable<T["sendStructured"], LlmClient["sendStructured"]> extends true
+    ? IsMutuallyAssignable<T["sendWithTools"], LlmClient["sendWithTools"]>
+    : false;
 
 /**
- * Factory function type for creating capability handles from configuration.
- * Adapter packages export one of these as their public API.
+ * Declarative aliases for an augmented LLM subtype.
  *
- * @typeParam K - The capability name.
- * @typeParam C - The configuration type (validated by the adapter, typically via Zod).
- *
- * @example
- * ```ts
- * export const createPgAdapter: AdapterFactory<"db", PgAdapterConfig> = (config) => ({
- *   name: "db",
- *   client: new PgCapabilityImpl(config),
- *   connect: () => pool.connect(),
- *   close: () => pool.end(),
- * });
- * ```
+ * Extra fields must be operation-compatible functions. Adapters provide no
+ * executable composition callback, so ignoring the metered client or closing
+ * over a boot-scoped provider is not representable at this seam.
  */
+export type RunScopedLlmOperations<T extends LlmClient> = {
+  readonly [K in Extract<Exclude<keyof T, keyof LlmClient>, string>]:
+    RunScopedOperationFor<T[K]>;
+};
+
+/**
+ * True when `T` adds no symbol-keyed members beyond `LlmClient`.
+ *
+ * A symbol-keyed extra cannot be named in a `runScopedOperations` alias map
+ * (alias keys are strings), so such a client could smuggle an operation past
+ * the run-scoped facade the host builds — it must be rejected at the type
+ * level. Shared with `capability-broker.ts`'s `ScopedLlmCapability`: both
+ * gates guard the SAME hole, and spelling the predicate twice is how they
+ * would drift apart.
+ */
+export type HasNoExtraSymbolMembers<T extends LlmClient> =
+  [Extract<Exclude<keyof T, keyof LlmClient>, symbol>] extends [never] ? true : false;
+
+type LlmHandleFields<T extends LlmClient> =
+  HasCompatibleStandardOperations<T> extends true
+    ? HasNoExtraSymbolMembers<T> extends true
+      ? LlmClient extends T
+        ? {
+            readonly clientKind: "llm";
+            readonly pricingModel: LlmPricingModel;
+            readonly runScopedOperations?: never;
+          }
+        : {
+            readonly clientKind: "llm";
+            readonly pricingModel: LlmPricingModel;
+            readonly runScopedOperations: RunScopedLlmOperations<T>;
+          }
+      : never
+    : never;
+
+type IsAny<T> = 0 extends (1 & T) ? true : false;
+
+type UnclassifiedHandleMetadata =
+  | {
+      readonly clientKind?: never;
+      readonly pricingModel?: never;
+      readonly runScopedOperations?: never;
+    }
+  | {
+      readonly clientKind: "llm";
+      readonly pricingModel: LlmPricingModel;
+      readonly runScopedOperations?: Readonly<Record<string, RunScopedLlmOperation>>;
+    };
+
+type LlmHandleMetadata<K extends Capability> =
+  IsAny<CapabilityRegistry[K]> extends true
+    ? UnclassifiedHandleMetadata
+    : [Extract<CapabilityRegistry[K], LlmClient>] extends [never]
+      ? {
+          readonly clientKind?: never;
+          readonly pricingModel?: never;
+          readonly runScopedOperations?: never;
+        }
+      : [Exclude<CapabilityRegistry[K], LlmClient>] extends [never]
+        ? LlmHandleFields<Extract<CapabilityRegistry[K], LlmClient>>
+        : never;
+
+export type CapabilityHandle<K extends Capability = Capability> =
+  K extends Capability
+    ? CapabilityHandleBase<K> & LlmHandleMetadata<K>
+    : never;
+
+/** Standard adapter factory shape. */
 export type AdapterFactory<K extends Capability, C> = (
   config: C,
 ) => CapabilityHandle<K>;

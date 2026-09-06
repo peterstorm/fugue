@@ -1,14 +1,12 @@
-import { NoopObserver } from "../observer/observer.js";
-import type { RunId, DagId } from "../types/ids.js";
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 import { ok } from "../types/result.js";
-import type { NodeContext } from "../types/node.js";
+import { testNodeContext } from "./_context-factories.js";
 import { runDag } from "../executor/run-dag.js";
 import { createFetchNode } from "../nodes/fetch.js";
 import { createTransformNode } from "../nodes/transform.js";
 import { defineDagFromArray } from "../executor/define-dag.js";
-import { DAG_INPUT } from "../types/ids.js";
+import { DAG_INPUT, dagId, runId } from "../types/ids.js";
 import { N } from "./_id-helpers.js";
 
 /**
@@ -43,16 +41,9 @@ describe("second-dag (SC-007): hello world DAG", () => {
     ],
   });
 
-  const mkCtx = (): NodeContext => ({
-    runId: "hw-run" as RunId,
-    dagId: "hello-world" as DagId,
-    observer: new NoopObserver(),
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null,
-    cache: null,
-    prompts: null,
-    llm: null, http: null, clock: null,
-    logger: { warn: () => {}, error: () => {} },
+  const mkCtx = () => testNodeContext({
+    runId: runId("hw-run"),
+    dagId: dagId("hello-world"),
   });
 
   it("produces formatted greeting from name input", async () => {

@@ -156,7 +156,8 @@ shred -u /tmp/cx.env
 cat > /tmp/leads.env <<'EOF'
 AZURE_OPENAI_API_KEY=leads-azure-key
 AZURE_OPENAI_ENDPOINT=https://leads.openai.azure.com
-AZURE_OPENAI_DEPLOYMENT=gpt-4o-mini
+AZURE_OPENAI_DEPLOYMENT=leads-chat-production
+AZURE_OPENAI_MODEL=gpt-4o-mini
 EOF
 oc create secret generic fugue-tenant-leads --from-file=leads.env=/tmp/leads.env
 shred -u /tmp/leads.env

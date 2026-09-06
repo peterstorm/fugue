@@ -17,6 +17,7 @@
  * - `createFileFreshnessIndex`, backed by one digest-addressed atomic
  *   latest-write singleton per resource, with deterministic Redis-compatible
  *   tie-breaking and lazy 24h TTL;
+ * - `createFileSpendStore`, a locked whole-snapshot store keyed by run digest;
  * - the journal and record codecs used by hosts that need forensic reads —
  *   `parseStoredEventRecord` is the text entry point (the full raw-seam →
  *   strict-parser composition); `parseFileEventRecord` remains exported as
@@ -64,13 +65,14 @@ export type { FileEventRecord } from "./file/event-record.js";
 // Durable Checkpointer over per-run meta.json + nodes/<digest>.json.
 export { createFileCheckpointer } from "./file/checkpointer.js";
 export type { FileCheckpointerOptions } from "./file/checkpointer.js";
-// `META_RECORD_NODE_ID` and the `checkpoint-write-failed` builder are
-// canonical in `types/error-factories.ts` (deepening-round D2); the codec
-// re-exports them so this barrel and the test imports keep their paths.
+// Canonical metadata-record node id re-exported by the checkpointer codec.
 export { META_RECORD_NODE_ID } from "./file/checkpointer-codec.js";
 // Durable FreshnessIndex with one digest-addressed atomic latest-write
 // singleton per resource and lazy TTL (ADR-0079).
 export { createFileFreshnessIndex } from "./file/freshness-index.js";
 export type { FileFreshnessIndexOptions } from "./file/freshness-index.js";
+// Atomic spend snapshots for host ledger adapters.
+export { createFileSpendStore } from "./file/spend-store.js";
+export type { FileSpendStore } from "./file/spend-store.js";
 // Kernel envelope type consumed by `readFileEvents` / `replayEvents`.
 export type { RecordedEvent } from "./state-machine/types.js";

@@ -1,13 +1,48 @@
 // runStateMachine — the durable state-machine kernel loop
 // Transition loop, event sourcing, checkpoint persistence, idempotency, trace emission
 
-import type { Machine, Executor, JobLike, KernelRunOpts } from "./types.js";
+import type { Machine, Executor, JobLike, KernelRunOpts, TraceEvent } from "./types.js";
 import { safeErrorMessage } from "../types/safe-error.js";
 
 const defaultClassifyError = (error: unknown): { retriable: boolean; message: string } => ({
   retriable: true,
   message: safeErrorMessage(error),
 });
+
+/** Keep the executor failure authoritative when a caller classifier is broken. */
+const classifyExecutorError = (
+  error: unknown,
+  classify: (error: unknown) => { retriable: boolean; message: string },
+): { retriable: boolean; message: string } => {
+  try {
+    return classify(error);
+  } catch (classificationError) {
+    return {
+      retriable: false,
+      message:
+        `executor failed: ${safeErrorMessage(error)}; ` +
+        `error classifier also failed: ${safeErrorMessage(classificationError)}`,
+    };
+  }
+};
+
+/** Dedicated kernel control flow for a `beforeExecute` refusal. */
+export class BeforeExecuteAbortError extends Error {
+  constructor() {
+    super("runStateMachine: aborted by beforeExecute hook");
+    this.name = "BeforeExecuteAbortError";
+  }
+}
+
+export const isBeforeExecuteAbortError = (
+  value: unknown,
+): value is BeforeExecuteAbortError => {
+  try {
+    return value instanceof BeforeExecuteAbortError;
+  } catch {
+    return false;
+  }
+};
 
 /** A diagnostic sink is subordinate to the durable transition outcome. */
 const reportWithoutThrowing = (report: () => void): void => {
@@ -65,7 +100,6 @@ export const runStateMachine = async <S, E, C>(
 ): Promise<{ state: S; context: C }> => {
   const classify = opts.classifyError ?? defaultClassifyError;
   const nowFn = opts.now ?? Date.now;
-  const stamp = (): Date => new Date(nowFn());
   const dedupKeyFn = opts.computeDedupKey ?? fallbackDedupKey;
   const log = opts.logger ?? { warn: () => {}, error: () => {} };
   const readTraceNow = (): number | undefined => {
@@ -83,6 +117,21 @@ export const runStateMachine = async <S, E, C>(
   // at 0 for every queue-level attempt).
   const retryCounters = new Map<string, number>();
 
+  // A throwing onTrace must never escape: traces are diagnostic and are emitted
+  // AFTER the transition is durable, so surfacing the throw would report a
+  // committed transition as a fatal executor crash. Both emission sites route
+  // through here so that guarantee cannot hold at one site and not the other.
+  const emitTrace = (trace: TraceEvent<S, E>): void => {
+    if (opts.onTrace === undefined) return;
+    try {
+      opts.onTrace(trace);
+    } catch (traceErr) {
+      reportWithoutThrowing(() =>
+        log.error("[runStateMachine] onTrace threw — ignoring to preserve durability:", traceErr),
+      );
+    }
+  };
+
   let { state, context } = job.data;
 
   while (!machine.isTerminal(state)) {
@@ -90,23 +139,25 @@ export const runStateMachine = async <S, E, C>(
     if (opts.beforeExecute !== undefined) {
       const proceed = opts.beforeExecute(state, context);
       if (!proceed) {
-        // AD-4: emit skipped trace before aborting so consumers can observe the abort
-        if (opts.onTrace !== undefined) {
-          try {
-            opts.onTrace({
-              state,
-              nextState: state,
-              outcome: "skipped",
-              durationMs: 0,
-              timestamp: stamp(),
-            });
-          } catch (traceErr) {
-            reportWithoutThrowing(() =>
-              log.error("[runStateMachine] onTrace threw — ignoring to preserve durability:", traceErr),
-            );
-          }
+        // AD-4: emit skipped trace before aborting so consumers can observe the
+        // abort. The clock is read through `readTraceNow()` like every other
+        // trace site in this file: an inline `new Date(nowFn())` would run the
+        // clock as an ARGUMENT, before `emitTrace`'s own guard is entered, so a
+        // hostile clock would escape as a raw error and `handleKernelError`'s
+        // `isBeforeExecuteAbortError` check would misclassify a deliberate abort
+        // as a generic crash. A suppressed trace is acceptable; a substituted
+        // abort reason is not.
+        const abortAtMs = readTraceNow();
+        if (abortAtMs !== undefined) {
+          emitTrace({
+            state,
+            nextState: state,
+            outcome: "skipped",
+            durationMs: 0,
+            timestamp: new Date(abortAtMs),
+          });
         }
-        throw new Error("runStateMachine: aborted by beforeExecute hook");
+        throw new BeforeExecuteAbortError();
       }
     }
 
@@ -119,8 +170,17 @@ export const runStateMachine = async <S, E, C>(
       // FR-006: ALWAYS catch executor exceptions and deliver them to the machine
       // as a typed ERROR event. errorEventOf is required by the type system —
       // callers without one cannot construct a valid `RunOptions`.
-      const classified = classify(raw);
-      event = opts.errorEventOf(classified);
+      const classified = classifyExecutorError(raw, classify);
+      try {
+        event = opts.errorEventOf(classified);
+      } catch (mappingError) {
+        throw new AggregateError(
+          [raw, mappingError],
+          `Executor failed (${safeErrorMessage(raw)}), then errorEventOf failed ` +
+            `(${safeErrorMessage(mappingError)})`,
+          { cause: raw },
+        );
+      }
     }
 
     const prevState = state;
@@ -205,23 +265,14 @@ export const runStateMachine = async <S, E, C>(
       const traceEndMs = readTraceNow();
       if (traceEndMs !== undefined) {
         const outcome = isFailed ? "failed" : isRetry ? "retry" : "success";
-        // A throwing onTrace must not escape: the transition is already persisted
-        // and surfacing the throw would surface a successful transition as a fatal
-        // executor crash via run-dag-stateful's outer catch.
-        try {
-          opts.onTrace({
-            state: prevState,
-            event,
-            nextState: state,
-            outcome,
-            durationMs: traceStartMs === undefined ? 0 : traceEndMs - traceStartMs,
-            timestamp: new Date(traceEndMs),
-          });
-        } catch (traceErr) {
-          reportWithoutThrowing(() =>
-            log.error("[runStateMachine] onTrace threw — ignoring to preserve durability:", traceErr),
-          );
-        }
+        emitTrace({
+          state: prevState,
+          event,
+          nextState: state,
+          outcome,
+          durationMs: traceStartMs === undefined ? 0 : traceEndMs - traceStartMs,
+          timestamp: new Date(traceEndMs),
+        });
       }
     }
 

@@ -47,7 +47,7 @@ export { parseHostConfig, parseFugueYaml, HostConfigSchema, FugueYamlSchema, wor
 
 // ── Multi-tenant: tenant + worker UDS + supervisor header contract ──────────
 export type { TenantId, Tenant, SecretsRef, TenantRegistryView } from "./domain/tenant.js";
-export { tenantId, markTenant, markSecretsRef, resolveTenant, TENANT_ID_REGEX } from "./domain/tenant.js";
+export { tenantId, markSecretsRef, resolveTenant, TENANT_ID_REGEX } from "./domain/tenant.js";
 export type { TenantHeaderVerification } from "./domain/tenant-header.js";
 export { TENANT_HEADER_NAME, signTenantHeader, verifyTenantHeader } from "./domain/tenant-header.js";
 
@@ -72,7 +72,18 @@ export type { SyncConfig, SyncLogger, SyncLoopHandle } from "./sync/sync-loop.js
 
 export { createBunGitAdapter, createLocalGitAdapter } from "./adapters/git-sync.js";
 export { createModuleLoader } from "./adapters/module-loader.js";
-export type { GitPort, ModuleLoaderPort, LoadResult, BulkLoadResult, LoadError, SharedInfra, RedisPort, LogPort } from "./ports.js";
+export type {
+  GitPort,
+  ModuleLoaderPort,
+  LoadResult,
+  BulkLoadResult,
+  LoadError,
+  SharedInfra,
+  RedisPort,
+  LogPort,
+  SpendLedgerPort,
+} from "./ports.js";
+export { createFileSpendLedger } from "./adapters/spend-ledger-file.js";
 
 // Capability builders — the host's own boot-wiring primitives. Exported so an
 // out-of-tree consumer (e.g. a live smoke harness) can wire the SAME capabilities

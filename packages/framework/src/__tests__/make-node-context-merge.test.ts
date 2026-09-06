@@ -1,140 +1,236 @@
-/**
- * Tests for `mergeScopedCapabilities` (shared/make-node-context.ts) — the
- * dispatch-time merge of broker-minted handles over the boot-scoped base
- * NodeContext.
- *
- * The guard under test (A11): RESERVED infrastructure keys (`logger`/`tracer`/
- * `observer`, plus the built-in capability keys) are NEVER overwritten by a
- * minted handle. `Capability = keyof CapabilityRegistry` is open to consumer
- * augmentation, so a hostile/buggy broker COULD return a record keyed
- * `"logger"` — without the filter, `Object.assign` would clobber
- * framework-guaranteed infrastructure.
- */
+/** Tests for the fail-closed dispatch-time capability merge. */
 
-import { describe, test, expect } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { makeNodeContext, mergeScopedCapabilities } from "../shared/make-node-context.js";
-import type { ScopedCapabilityHandle } from "../types/capability-broker.js";
+import { NO_SPEND } from "../types/spend.js";
 import type { Logger } from "../types/node.js";
+import type { DagId, RunId } from "../types/ids.js";
 import type { Tracer } from "../types/tracer.js";
 
-const baseLogger: Logger = {
-  warn: () => {},
-  error: () => {},
+const baseLogger: Logger = { warn: () => {}, error: () => {} };
+const baseTracer: Tracer = { withSpan: async (_name, _type, fn) => fn() };
+
+const makeBase = () => makeNodeContext({
+  runId: "run-merge",
+  dagId: "dag-merge",
+  logger: baseLogger,
+  tracer: baseTracer,
+});
+
+const mergeOk = (
+  base: ReturnType<typeof makeBase>,
+  scoped: Readonly<Record<string, unknown>>,
+) => {
+  const merged = mergeScopedCapabilities(base, scoped);
+  expect(merged.ok).toBe(true);
+  if (!merged.ok) throw new Error(`unexpected merge failure for ${merged.error.key}`);
+  return merged.value;
 };
 
-const baseTracer: Tracer = {
-  withSpan: async (_name, _type, fn) => fn(),
-};
-
-const makeBase = () =>
-  makeNodeContext({
-    runId: "run-merge",
-    dagId: "dag-merge",
-    logger: baseLogger,
-    tracer: baseTracer,
+describe("makeNodeContext built-in capability ownership", () => {
+  test("revalidates forged branded identifiers because brands erase at runtime", () => {
+    expect(() => makeNodeContext({
+      runId: "bad run" as RunId,
+      dagId: "valid-dag",
+    })).toThrow(/Invalid runId/);
+    expect(() => makeNodeContext({
+      runId: "valid-run",
+      dagId: "bad:dag" as DagId,
+    })).toThrow(/Invalid dagId/);
   });
 
-describe("mergeScopedCapabilities — reserved keys never clobbered (A11)", () => {
-  test("a minted handle named 'logger'/'tracer'/'observer' does NOT overwrite framework infrastructure", () => {
-    const base = makeBase();
-    const evil = { sendMail: async () => ({ ok: true as const, value: { messageId: "x" } }) };
-    // A record a broker could only produce by augmenting the registry with a
-    // reserved name — the merge must drop these keys, keeping the merge total.
-    const scoped = {
-      logger: evil,
-      tracer: evil,
-      observer: evil,
-    } as unknown as ScopedCapabilityHandle;
-
-    const merged = mergeScopedCapabilities(base, scoped);
-
-    // Infrastructure survives BY REFERENCE — not replaced, not wrapped.
-    expect(merged.logger).toBe(baseLogger);
-    expect(merged.tracer).toBe(baseTracer);
-    expect(merged.observer).toBe(base.observer);
+  test("ignores Object.prototype pollution instead of satisfying a built-in", () => {
+    const inherited = { request: async () => ({ ok: true }) };
+    const prior = Object.getOwnPropertyDescriptor(Object.prototype, "http");
+    Object.defineProperty(Object.prototype, "http", {
+      value: inherited,
+      configurable: true,
+    });
+    try {
+      const ctx = makeNodeContext({
+        runId: "run-polluted",
+        dagId: "dag-polluted",
+        capabilities: {},
+      });
+      expect(ctx.http).toBeNull();
+      expect(Object.hasOwn(ctx, "http")).toBe(true);
+    } finally {
+      if (prior === undefined) delete (Object.prototype as Record<string, unknown>).http;
+      else Object.defineProperty(Object.prototype, "http", prior);
+    }
   });
 
-  test("a non-reserved minted key DOES merge over the base (the filter is not dropping everything)", () => {
-    const base = makeBase();
-    const handle = { sendMail: async () => ({ ok: true as const, value: { messageId: "m-1" } }) };
-    const scoped = {
-      "msgraph:mail.send": handle,
-      logger: { warn: () => {}, error: () => {} },
-    } as unknown as ScopedCapabilityHandle;
+  test("checks ownership before evaluating an inherited built-in getter", () => {
+    let reads = 0;
+    const prototype = Object.defineProperty({}, "http", {
+      get() {
+        reads += 1;
+        throw new Error("inherited built-in getter must not run");
+      },
+    });
+    const init = Object.assign(Object.create(prototype), {
+      runId: "run-hostile-built-in",
+      dagId: "dag-hostile-built-in",
+    });
 
-    const merged = mergeScopedCapabilities(base, scoped);
-
-    expect((merged as unknown as Record<string, unknown>)["msgraph:mail.send"]).toBe(handle);
-    expect(merged.logger).toBe(baseLogger); // reserved key still protected
-    // The base context itself is untouched (the merge returns a NEW context).
-    expect((base as unknown as Record<string, unknown>)["msgraph:mail.send"]).toBeUndefined();
+    const ctx = makeNodeContext(init);
+    expect(ctx.http).toBeNull();
+    expect(reads).toBe(0);
   });
 
-  test("built-in capability keys are reserved too — a minted 'llm' cannot replace the boot-scoped client", () => {
-    const base = makeBase();
-    const scoped = { llm: { bogus: true } } as unknown as ScopedCapabilityHandle;
-    const merged = mergeScopedCapabilities(base, scoped);
-    expect(merged.llm).toBe(base.llm);
+  test("ignores a capabilities bag inherited by the init object", () => {
+    const inheritedHttp = { tag: "inherited-http" };
+    const inheritedCustom = { tag: "inherited-custom" };
+    const init = Object.assign(Object.create({
+      capabilities: {
+        http: inheritedHttp,
+        "svc:inherited": inheritedCustom,
+      },
+    }), {
+      runId: "run-inherited-init",
+      dagId: "dag-inherited-init",
+    });
+
+    const ctx = makeNodeContext(init);
+    expect(ctx.http).toBeNull();
+    expect((ctx as unknown as Record<string, unknown>)["svc:inherited"]).toBeUndefined();
   });
 
-  test("an empty (or all-null) mint result returns the base context BY REFERENCE (byte-identical no-op)", () => {
-    const base = makeBase();
-    expect(mergeScopedCapabilities(base, {} as ScopedCapabilityHandle)).toBe(base);
-    expect(
-      mergeScopedCapabilities(base, { logger: null } as unknown as ScopedCapabilityHandle),
-    ).toBe(base);
+  test("ignores an Object.prototype capabilities bag", () => {
+    const prior = Object.getOwnPropertyDescriptor(Object.prototype, "capabilities");
+    Object.defineProperty(Object.prototype, "capabilities", {
+      value: {
+        http: { tag: "prototype-http" },
+        "svc:prototype": { tag: "prototype-custom" },
+      },
+      configurable: true,
+    });
+    try {
+      const ctx = makeNodeContext({
+        runId: "run-prototype-init",
+        dagId: "dag-prototype-init",
+      });
+      expect(ctx.http).toBeNull();
+      expect((ctx as unknown as Record<string, unknown>)["svc:prototype"]).toBeUndefined();
+    } finally {
+      if (prior === undefined) {
+        delete (Object.prototype as Record<string, unknown>).capabilities;
+      } else {
+        Object.defineProperty(Object.prototype, "capabilities", prior);
+      }
+    }
+  });
+
+  test("accepts only own values from a custom-prototype bag and preserves top-level precedence", () => {
+    const inherited = { tag: "inherited-http" };
+    const own = { tag: "own-http" };
+    const bag = Object.assign(Object.create({ http: inherited }), { http: own });
+
+    const fromBag = makeNodeContext({
+      runId: "run-own",
+      dagId: "dag-own",
+      capabilities: bag,
+    });
+    expect(fromBag.http as unknown).toBe(own);
+
+    delete bag.http;
+    const inheritedOnly = makeNodeContext({
+      runId: "run-inherited",
+      dagId: "dag-inherited",
+      capabilities: bag,
+    });
+    expect(inheritedOnly.http).toBeNull();
+
+    const explicitNull = makeNodeContext({
+      runId: "run-null",
+      dagId: "dag-null",
+      http: null,
+      capabilities: Object.assign(Object.create({ http: inherited }), { http: own }),
+    });
+    expect(explicitNull.http).toBeNull();
   });
 });
 
-// ── Pass-4 A3: a dropped non-null reserved entry is WARNED, not silent ───────
-
-import { setFrameworkLogger, __resetFrameworkLogger } from "../logger.js";
-
-describe("mergeScopedCapabilities — dropped reserved entries are warned (capability.merge.dropped)", () => {
-  test("a non-null minted entry under a built-in key emits one warn with key + run/dag correlation", () => {
-    const warns: { msg: string; data: Record<string, unknown> }[] = [];
-    setFrameworkLogger({
-      debug: () => {},
-      info: () => {},
-      warn: (msg, ...args) => warns.push({ msg, data: (args[0] ?? {}) as Record<string, unknown> }),
-      error: () => {},
-    });
-    try {
-      const base = makeBase();
-      // validateCapabilities' loud rejection only covers brokers implementing
-      // provides(); a passthrough-style broker built with a built-in key
-      // reaches the merge unannounced — the warn is its only trace.
-      const scoped = { http: { tag: "broker-http" } } as unknown as ScopedCapabilityHandle;
-      const merged = mergeScopedCapabilities(base, scoped);
-
-      // The entry was dropped (base unchanged) …
-      expect(merged).toBe(base);
-      // … and the drop was surfaced, not silent.
-      const w = warns.find((x) => x.msg === "capability.merge.dropped");
-      expect(w).toBeDefined();
-      expect(w?.data.key).toBe("http");
-      expect(w?.data.runId).toBe("run-merge");
-      expect(w?.data.dagId).toBe("dag-merge");
-    } finally {
-      __resetFrameworkLogger();
+describe("mergeScopedCapabilities", () => {
+  test("fails closed for every non-null reserved infrastructure key", () => {
+    const base = makeBase();
+    const evil = { sendMail: async () => ({ ok: true as const, value: { messageId: "x" } }) };
+    for (const key of ["logger", "tracer", "observer"] as const) {
+      const merged = mergeScopedCapabilities(
+        base,
+        { [key]: evil },
+      );
+      expect(merged).toEqual({
+        ok: false,
+        error: { kind: "reserved-capability", key },
+      });
+      expect(base.logger).toBe(baseLogger);
+      expect(base.tracer).toBe(baseTracer);
     }
   });
 
-  test("null/absent minted entries do NOT warn (a broker that resolved nothing is the documented no-op)", () => {
-    const warns: string[] = [];
-    setFrameworkLogger({
-      debug: () => {},
-      info: () => {},
-      warn: (msg) => warns.push(msg),
-      error: () => {},
-    });
-    try {
-      const base = makeBase();
-      const merged = mergeScopedCapabilities(base, {} as ScopedCapabilityHandle);
-      expect(merged).toBe(base);
-      expect(warns).toHaveLength(0);
-    } finally {
-      __resetFrameworkLogger();
+  test("fails closed for broker-minted built-ins while the static client stays authoritative", () => {
+    const budget = {
+      spent: () => NO_SPEND,
+      remaining: () => ({ kind: "unbudgeted" as const }),
+    };
+    const base = makeNodeContext({ runId: "run-merge", dagId: "dag-merge", budget });
+
+    for (const key of ["llm", "budget", "http"] as const) {
+      expect(mergeScopedCapabilities(
+        base,
+        { [key]: { poisoned: true } },
+      )).toEqual({
+        ok: false,
+        error: { kind: "reserved-capability", key },
+      });
     }
+    expect(base.budget).toBe(budget);
+  });
+
+  test("rejects prototype-meta keys from parsed broker output without prototype or inherited injection", () => {
+    const base = makeBase();
+    const parsed = JSON.parse(
+      '{"__proto__":{"injectedCapability":true},"constructor":{"polluted":true},"prototype":{"polluted":true}}',
+    ) as Readonly<Record<string, unknown>>;
+
+    for (const key of ["__proto__", "constructor", "prototype"] as const) {
+      const single = JSON.parse(JSON.stringify({ [key]: { polluted: true } })) as Readonly<Record<string, unknown>>;
+      expect(mergeScopedCapabilities(base, single)).toEqual({
+        ok: false,
+        error: { kind: "reserved-capability", key },
+      });
+    }
+
+    const merged = mergeScopedCapabilities(base, parsed);
+    expect(merged.ok).toBe(false);
+    expect(Object.getPrototypeOf(base)).toBeNull();
+    expect(Object.hasOwn(base, "__proto__")).toBe(false);
+    expect((base as unknown as Record<string, unknown>).__proto__).toBeUndefined();
+    expect((base as unknown as Record<string, unknown>).constructor).toBeUndefined();
+    expect((base as unknown as Record<string, unknown>).prototype).toBeUndefined();
+    expect((base as unknown as Record<string, unknown>).injectedCapability).toBeUndefined();
+    expect(({} as Record<string, unknown>).injectedCapability).toBeUndefined();
+  });
+
+  test("merges a non-reserved minted key over a new context", () => {
+    const base = makeBase();
+    const handle = { sendMail: async () => ({ ok: true as const, value: { messageId: "m-1" } }) };
+    const merged = mergeOk(
+      base,
+      { "msgraph:mail.send": handle },
+    );
+
+    expect((merged as unknown as Record<string, unknown>)["msgraph:mail.send"]).toBe(handle);
+    expect((base as unknown as Record<string, unknown>)["msgraph:mail.send"]).toBeUndefined();
+  });
+
+  test("empty and all-null mint results return the base context by reference", () => {
+    const base = makeBase();
+    expect(mergeOk(base, {})).toBe(base);
+    expect(mergeOk(
+      base,
+      { logger: null },
+    )).toBe(base);
   });
 });

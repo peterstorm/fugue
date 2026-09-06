@@ -3,29 +3,22 @@ import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { DAG_INPUT } from "../types/ids.js";
 import { z } from "zod";
 import { ok, err } from "../types/result.js";
-import type { NodeContext, NodeDef } from "../types/node.js";
+import type { NodeDef } from "../types/node.js";
 import type { DagDef } from "../types/dag.js";
 import type { HumanAction } from "../dag-runtime/types.js";
+import type { MintingAuthority } from "../types/capability-broker.js";
 import { runDag } from "../executor/run-dag.js";
 import { topoSort } from "../shared/topo.js";
 import { createTransformNode } from "../nodes/transform.js";
-import { RecordingObserver, NoopObserver } from "../observer/observer.js";
+import { RecordingObserver } from "../observer/observer.js";
 import { defineDagFromArray } from "../executor/define-dag.js";
 import { N } from "./_id-helpers.js";
-
-const mkCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
-  runId: "test-run" as RunId,
-  dagId: "test-dag" as DagId,
-  observer: new NoopObserver(),
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null,
-  cache: null,
-  prompts: null,
-  llm: null, http: null,
-  clock: null,
-  logger: { warn: () => {}, error: () => {} },
-  ...overrides,
-});
+import { testNodeContext as mkCtx } from "./_context-factories.js";
+import { createGuardrailNode } from "../nodes/guardrail.js";
+import { buildDagExecutor } from "../dag-runtime/executor.js";
+import { brandAsValidatedNodeContext } from "../types/node.js";
+import { nonEmptyString } from "../types/non-empty-string.js";
+import { testRuntimeContext } from "./_context-factories.js";
 
 /**
  * A node that fails `failuresBeforeSuccess` times with a RETRIABLE crash and
@@ -480,8 +473,6 @@ describe("runDag", () => {
   });
 
   it("guardrail node in DAG passes data through with warnings to downstream nodes", async () => {
-    const { createGuardrailNode } = await import("../nodes/guardrail.js");
-
     const guardrail = createGuardrailNode({
       id: N("guard"),
       inputSchema: z.any(),
@@ -525,7 +516,7 @@ describe("runDag", () => {
   // Wave 2 §2.4: checkpoint write failures must NOT be silently swallowed.
   // Previously the failure was warn-and-continue; on the next crash-resume the
   // node would re-execute, breaking the idempotency contract the checkpoint is
-  // supposed to provide. Now the legacy path surfaces err(checkpoint-write-failed).
+  // supposed to provide. It now surfaces err(checkpoint-write-failed).
   it("checkpoint write failure surfaces as err(checkpoint-write-failed)", async () => {
     const failingCheckpointWriter = {
       write: async () => { throw new Error("Redis timeout"); },
@@ -610,6 +601,245 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
     });
     expect(result.ok).toBe(true);
     expect(backgroundCalled).toBe(true);
+  });
+
+  it("a throwing onBackground hook cannot reject a completed DAG", async () => {
+    const dag = mkSimpleDag("onbg-throw");
+    const result = await runDag(dag, { value: 1 }, mkCtx(), {
+      onBackground: () => { throw new Error("hook observer down"); },
+    });
+
+    expect(result).toEqual(ok({ value: 1 }));
+  });
+
+  // ── Background finalize failure (round-13 A9) ──────────────────────────────
+  // The hard case the `background.catch(...)` observer exists for: the hook
+  // throws AND therefore discards the promise it was handed, and the background
+  // finalize then fails. With nothing observing it, that rejection would surface
+  // as an unhandled promise rejection — a process-level crash in Node's default
+  // mode — long after the run already resolved `ok` to its caller.
+  it("a rejecting background finalize is observed even when the hook discarded it", async () => {
+    let inFinalize = false;
+    const clock = (): number => {
+      if (inFinalize) throw new Error("clock failed during background finalize");
+      return 1_000;
+    };
+    const judge = {
+      id: N("judge"),
+      kind: "eval-judge" as const,
+      config: { id: "judge", criteria: ["accuracy"] },
+      run: async () => {
+        inFinalize = true;
+        return {
+          outcome: "passed" as const,
+          score: 1,
+          criteriaScores: { accuracy: 1 },
+          failedCriteria: [],
+          reason: "ok",
+        };
+      },
+    };
+    const dag = defineDagFromArray({
+      id: "onbg-finalize-fails",
+      nodes: [
+        createTransformNode({
+          id: N("A"),
+          inputSchema: z.any(),
+          outputSchema: z.any(),
+          transform: (i) => ok(i),
+        }),
+      ],
+      edges: [{ from: DAG_INPUT, to: "A" }],
+      evalJudges: [judge],
+    });
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => { unhandled.push(reason); };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const result = await runDag(dag, { value: 1 }, mkCtx(), {
+        now: clock,
+        // Throws, so it never retains — let alone awaits — its argument.
+        onBackground: () => { throw new Error("hook observer down"); },
+      });
+
+      // The run's own outcome is unaffected: judges are background work.
+      expect(result).toEqual(ok({ value: 1 }));
+
+      // Give the discarded background promise every chance to settle and, if
+      // unobserved, to be reported.
+      await Bun.sleep(20);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("hands the background promise to the hook and settles it without rejecting", async () => {
+    let captured: Promise<unknown> | undefined;
+    const dag = mkSimpleDag("onbg-settles");
+
+    const result = await runDag(dag, { value: 1 }, mkCtx(), {
+      onBackground: (p) => { captured = p; },
+    });
+
+    expect(result).toEqual(ok({ value: 1 }));
+    expect(captured).toBeDefined();
+    // The finalizer is designed to RESOLVE every outcome, never to reject —
+    // a caller awaiting the handed promise must not have to guard it.
+    await expect(captured).resolves.toBeDefined();
+  });
+
+  // The non-background finalize path is fenced like its `onBackground` sibling.
+  // Two failure modes are covered at once: the finalize rejection must not
+  // escape as an unhandled promise rejection (the enclosing catch only sees it
+  // because the terminal handler is AWAITED), and it must fail closed —
+  // `run-end("error")` still emitted, so a run-start is never left unbalanced.
+  it("a failure inside non-background finalize fails closed instead of rejecting", async () => {
+    const obs = new RecordingObserver();
+    let inFinalize = false;
+    // Passes for the whole run, then throws once the judge signals that
+    // control has reached finalize — where the old code had no fence.
+    const clock = (): number => {
+      if (inFinalize) throw new Error("clock failed during finalize");
+      return 1_000;
+    };
+    const judge = {
+      id: N("judge"),
+      kind: "eval-judge" as const,
+      config: { id: "judge", criteria: ["accuracy"] },
+      run: async () => {
+        inFinalize = true;
+        return {
+          outcome: "passed" as const,
+          score: 1,
+          criteriaScores: { accuracy: 1 },
+          failedCriteria: [],
+          reason: "ok",
+        };
+      },
+    };
+    const dag = defineDagFromArray({
+      id: "finalize-fails",
+      nodes: [
+        createTransformNode({
+          id: N("A"),
+          inputSchema: z.any(),
+          outputSchema: z.any(),
+          transform: (i) => ok(i),
+        }),
+      ],
+      edges: [{ from: DAG_INPUT, to: "A" }],
+      evalJudges: [judge],
+    });
+
+    let settled: unknown;
+    await expect((async () => {
+      settled = await runDag(dag, { value: 1 }, mkCtx({ observer: obs }), { now: clock });
+    })()).resolves.toBeUndefined();
+
+    expect((settled as { ok: boolean }).ok).toBe(false);
+  });
+
+  // The other half of the fail-closed contract: when finalize fails but
+  // telemetry itself still works, the run-end MUST be emitted and MUST report
+  // the error, so a run-start is never left dangling.
+  it("a finalize failure still emits the matching run-end('error')", async () => {
+    const obs = new RecordingObserver();
+    // A judge result whose `outcome` throws on read: `judgePassed` reads it
+    // while folding results into meta, INSIDE finalize and outside the
+    // per-judge crash boundary.
+    const hostileResult = Object.defineProperty(
+      { score: 1, criteriaScores: {}, failedCriteria: [], reason: "ok" },
+      "outcome",
+      { get: () => { throw new Error("hostile judge result"); }, enumerable: true },
+    );
+    const judge = {
+      id: N("judge"),
+      kind: "eval-judge" as const,
+      config: { id: "judge", criteria: ["accuracy"] },
+      run: async () => hostileResult as never,
+    };
+    const dag = defineDagFromArray({
+      id: "finalize-fails-telemetry",
+      nodes: [
+        createTransformNode({
+          id: N("A"),
+          inputSchema: z.any(),
+          outputSchema: z.any(),
+          transform: (i) => ok(i),
+        }),
+      ],
+      edges: [{ from: DAG_INPUT, to: "A" }],
+      evalJudges: [judge],
+    });
+
+    const result = await runDag(dag, { value: 1 }, mkCtx({ observer: obs }));
+
+    expect(result.ok).toBe(false);
+    const runEnds = obs.events.filter((e) => e.type === "run-end");
+    expect(runEnds).toHaveLength(1);
+    expect((runEnds[0] as unknown as { status: string }).status).toBe("error");
+  });
+
+  it("hostile origin accessors become validation errors with balanced run telemetry", async () => {
+    const dag = mkSimpleDag("hostile-origin");
+    const broker = { mintFor: async () => ok({}) };
+    const originAccessor = Object.defineProperty({ broker }, "origin", {
+      get() { throw new Error("hostile origin getter"); },
+    }) as unknown as MintingAuthority;
+    const originField = Object.defineProperty({ kind: "agent" }, "agentClientId", {
+      get() { throw new Error("hostile agentClientId getter"); },
+    });
+    const originFieldAccessor = { broker, origin: originField } as unknown as MintingAuthority;
+
+    for (const minting of [originAccessor, originFieldAccessor]) {
+      const observer = new RecordingObserver();
+      const result = await runDag(dag, { value: 1 }, mkCtx({ observer }), { minting });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.kind).toBe("validation");
+        if (result.error.kind === "validation") {
+          expect(result.error.message).toContain("snapshotting run authority");
+        }
+      }
+      expect(observer.events.map((event) => event.type)).toEqual(["run-start", "run-end"]);
+      const runEnd = observer.events[1];
+      expect(runEnd?.type).toBe("run-end");
+      if (runEnd?.type === "run-end") expect(runEnd.status).toBe("error");
+    }
+  });
+
+  it("rejects every malformed origin variant before minting with balanced run telemetry", async () => {
+    const dag = mkSimpleDag("malformed-origin");
+    let mints = 0;
+    const broker = { mintFor: async () => { mints += 1; return ok({}); } };
+    const meterLlm: MintingAuthority["meterLlm"] = (_capability, _binding, nodeId) =>
+      err({ kind: "validation", nodeId, message: "unexpected LLM binding" });
+    const malformedOrigins: readonly unknown[] = [
+      { kind: "service", agentClientId: "agent-x" },
+      { kind: "agent", agentClientId: 42 },
+      { kind: "user", agentClientId: "agent-x" },
+      { kind: "user", sub: "subject-x", agentClientId: "agent-x", extra: true },
+    ];
+
+    for (const origin of malformedOrigins) {
+      const observer = new RecordingObserver();
+      const minting = { broker, origin, meterLlm } as unknown as MintingAuthority;
+      const result = await runDag(dag, { value: 1 }, mkCtx({ observer }), { minting });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok && result.error.kind === "validation") {
+        expect(result.error.message).toContain("minting authority origin invalid");
+      } else {
+        throw new Error("expected origin validation failure");
+      }
+      expect(observer.events.map((event) => event.type)).toEqual(["run-start", "run-end"]);
+      const runEnd = observer.events[1];
+      if (runEnd?.type === "run-end") expect(runEnd.status).toBe("error");
+    }
+    expect(mints).toBe(0);
   });
 
   // Shared: a DAG with a single humanReview node, used to exercise the new
@@ -751,9 +981,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
   });
 
   it("onBackground on state-machine path: caller resolves before background promise; promise resolves later", async () => {
-    // codex finding #3: SM path now supports onBackground for parity with the
-    // legacy fast path. Caller-bound timeouts (HTTP request signal) no longer
-    // block on judges + span finalization.
+    // The hook receives the guarded finalize promise without delaying the caller.
     const dag = mkSimpleDag("onbg-jl");
     let bgCaptured: Promise<any> | undefined;
     const result = await runDag(dag, {}, mkCtx(), {
@@ -805,8 +1033,9 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
     expect(callCount).toBe(2);
   });
 
-  it("DagDef.retryLimits = {} (empty) does NOT route to state-machine path", async () => {
-    // Empty retryLimits is meaningless; should stay on legacy fast path.
+  it("DagDef.retryLimits = {} contributes no retry configuration", async () => {
+    // An empty retry-limit map contributes no retries, so the node runs once
+    // through the same single stateful runtime path.
     let callCount = 0;
     // Never succeeds, and declares no retry config of its own.
     const flakyNode = makeFlakyNode({
@@ -823,7 +1052,7 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
     });
     const result = await runDag(dag, {}, mkCtx());
     expect(result.ok).toBe(false);
-    // Legacy path = single attempt, no retry
+    // No configured retry means one attempt.
     expect(callCount).toBe(1);
   });
 
@@ -852,5 +1081,122 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
     }
     // Called 3 times: 1 initial + 2 retries
     expect(callCount).toBe(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Abort during the executor's own waits.
+//
+// Node bodies check `ctx.signal` cooperatively, but the executor ALSO waits in
+// two places a node cannot see: the retry backoff sleep, and the human-review
+// gate. These pin what an abort arriving during each of those waits does.
+// ---------------------------------------------------------------------------
+
+describe("buildDagExecutor: abort during executor-owned waits", () => {
+  /**
+   * A one-node DAG whose node reports whether it ran. The two abort tests below
+   * assert on that flag — "the executor returned abort" is only half the claim;
+   * the other half is that the wave never dispatched. The human-gate test needs
+   * only the DAG shape.
+   */
+  const dagRecordingDispatch = (id: string): { dag: DagDef; ranNode: () => boolean } => {
+    let ran = false;
+    const dag = defineDagFromArray({
+      id,
+      nodes: [
+        createTransformNode({
+          id: N("a"),
+          inputSchema: z.any(),
+          outputSchema: z.any(),
+          transform: (i) => { ran = true; return ok(i); },
+        }),
+      ],
+      edges: [{ from: DAG_INPUT, to: "a" }],
+    });
+    return { dag, ranNode: () => ran };
+  };
+
+  const soleWave = (dag: DagDef) =>
+    testRuntimeContext({ dag, waves: [[N("a")]], activeNodeIds: new Set([N("a")]) });
+
+  it("short-circuits a retry backoff sleep the moment the signal fires", async () => {
+    // The sleep resolves on abort rather than on the timer, so the executor
+    // reaches its post-sleep check long before the delay elapses. Without that
+    // wiring a cancelled run would sit out its full backoff — here a wall-clock
+    // minute — before noticing, and the wave would then run anyway.
+    const { dag, ranNode } = dagRecordingDispatch("abort-backoff-dag");
+    const controller = new AbortController();
+    const executor = buildDagExecutor(
+      dag,
+      brandAsValidatedNodeContext(mkCtx({ signal: controller.signal })),
+      // Pin jitter so the nominal delay is the delay.
+      { random: () => 0.5 },
+    );
+
+    const startedAt = Date.now();
+    const pending = executor(
+      { kind: "retrying", wave: 0, nodeId: N("a"), attempt: 1, nextDelayMs: 60_000 },
+      soleWave(dag),
+    );
+    // Abort AFTER the sleep has been entered, so this exercises the listener
+    // path rather than the already-aborted fast path.
+    await Promise.resolve();
+    controller.abort();
+
+    expect(await pending).toEqual({ type: "abort", reason: "signal" });
+    expect(Date.now() - startedAt).toBeLessThan(60_000);
+    expect(ranNode()).toBe(false);
+  });
+
+  it("returns abort from an already-aborted signal without entering the wave", async () => {
+    const { dag, ranNode } = dagRecordingDispatch("abort-preaborted-dag");
+    const executor = buildDagExecutor(
+      dag,
+      brandAsValidatedNodeContext(mkCtx({ signal: AbortSignal.abort() })),
+    );
+
+    const event = await executor(
+      { kind: "retrying", wave: 0, nodeId: N("a"), attempt: 1, nextDelayMs: 5 },
+      soleWave(dag),
+    );
+
+    expect(event).toEqual({ type: "abort", reason: "signal" });
+    expect(ranNode()).toBe(false);
+  });
+
+  it("honours a human decision that arrives while the run is being cancelled", async () => {
+    // DOCUMENTED BEHAVIOUR, not an oversight: `handleHumanGate` does not
+    // re-check the signal after `onHumanReview` resolves. A decision a person
+    // actually made is a fact, and discarding it would lose the approval while
+    // still having shown them the request. The abort is observed one step later
+    // — the run loop's next wave hits the node-level signal check — so the
+    // cancellation still wins, without the gate silently eating the answer.
+    const { dag } = dagRecordingDispatch("abort-wait-dag");
+    const controller = new AbortController();
+    const executor = buildDagExecutor(
+      dag,
+      brandAsValidatedNodeContext(mkCtx({ signal: controller.signal })),
+      {
+        onHumanReview: async () => {
+          // Cancellation lands while the human decision is in flight.
+          controller.abort();
+          return { kind: "approve" } as HumanAction;
+        },
+      },
+    );
+
+    const event = await executor(
+      {
+        kind: "awaiting-human",
+        nodeId: N("a"),
+        output: { reviewed: true },
+        prompt: nonEmptyString("approve?"),
+        pendingReviews: [],
+        wave: 0,
+      },
+      soleWave(dag),
+    );
+
+    expect(event).toEqual({ type: "human-responded", nodeId: N("a"), action: { kind: "approve" } });
   });
 });

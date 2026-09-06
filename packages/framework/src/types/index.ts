@@ -1,7 +1,5 @@
-// Types barrel — explicit named exports. Internal helpers (`brandAsDagDef`,
-// `isUnconditionalEdge`) are reachable from their concrete file paths for
-// any caller with a documented need, but the barrel mirrors the README
-// "Authoring surface" section.
+// Types barrel — explicit named exports. Runtime parsers and derivations live
+// on the executor surface; this barrel mirrors the README authoring types.
 
 // ── Result (Either) ────────────────────────────────────────────────────────
 export type { Result, Ok, Err } from "./result.js";
@@ -28,7 +26,7 @@ export {
 
 // ── Errors ────────────────────────────────────────────────────────────────
 export type { FrameworkError, FrameworkErrorKind, MissingCapability, PartialTokenUsage } from "./errors.js";
-export { formatFrameworkError, isFrameworkError, PersistedFrameworkErrorSchema, FrameworkAugmentedError, usageOfError } from "./errors.js";
+export { asFrameworkError, formatFrameworkError, isFrameworkError, isFrameworkErrorKind, PersistedFrameworkErrorSchema, FrameworkAugmentedError, usageOfError } from "./errors.js";
 export { frameworkError } from "./error-factories.js";
 
 // ── Token usage ───────────────────────────────────────────────────────────
@@ -51,16 +49,29 @@ export {
 // prompt caching severed the link between token count and money: a cache read
 // bills at 0.1x and a write at 1.25-2.0x, so a token ceiling can no longer see
 // an order-of-magnitude difference in spend.
-export type { MicroUsd, PricedSpend, Spend, UnpricedModels } from "./spend.js";
+export type {
+  MicroUsd,
+  PricedSpend,
+  Spend,
+  SpendInput,
+  UnpricedModels,
+  UsageKnowledge,
+} from "./spend.js";
 export {
   NO_MICROS,
   NO_SPEND,
   addSpend,
   costFloor,
+  makeSpend,
   maxSpend,
+  microUsd,
   microsToUsd,
+  parseSpend,
   pricedCall,
+  unknownUsageCall,
   unpricedCall,
+  unpricedModel,
+  unpricedModels,
   scaleSpend,
   usdToMicros,
 } from "./spend.js";
@@ -75,6 +86,8 @@ export type {
   UsdCeiling,
 } from "./budget.js";
 export { breachOf, ceilings, firstBreach, formatBreach, observedOf } from "./budget.js";
+export type { BudgetCapability, CeilingHeadroom, Remaining } from "./budget-capability.js";
+export { remainingFor, snapshotSpend } from "./budget-capability.js";
 
 // ── Total error diagnostics ───────────────────────────────────────────────
 // Total (never-throwing) inspection helpers for values caught at an `unknown`
@@ -87,6 +100,23 @@ export {
   probeErrorCode,
   isMissingPathError,
 } from "./safe-error.js";
+
+// ── Own-data boundary parsing ─────────────────────────────────────────────
+// THE getter/proxy/prototype defence for values crossing an extension
+// boundary. Exported because the host's adapters parse the same untrusted
+// request/response objects the framework does and previously each carried
+// their own copy of the algorithm.
+export type { OwnDataFailure, OptionalOwnData } from "./own-data.js";
+export {
+  isObjectLike,
+  readOwnDataProperty,
+  readOptionalOwnDataProperty,
+  ownDataValue,
+  ownDescriptors,
+  hasExactOwnKeys,
+  snapshotOwnDataObject,
+  snapshotOwnDataArray,
+} from "./own-data.js";
 
 // ── Span kinds ────────────────────────────────────────────────────────────
 export type { SpanKind } from "./span.js";
@@ -171,7 +201,12 @@ export type {
 // not re-exported — only `validateCapabilities` constructs them.
 
 // ── Capability lifecycle ──────────────────────────────────────────────────
-export type { CapabilityHandle, AdapterFactory } from "./capability-handle.js";
+export type {
+  CapabilityHandle,
+  AdapterFactory,
+  RunScopedLlmOperation,
+  RunScopedLlmOperations,
+} from "./capability-handle.js";
 
 // ── Capability authority (per-invocation broker seam) ─────────────────────
 export type {
@@ -181,6 +216,9 @@ export type {
   InvocationOrigin,
   MintingAuthority,
   ScopedCapabilityHandle,
+  ScopedLlmCapability,
+  ScopedNonLlmCapability,
+  ScopedLlmMeter,
 } from "./capability-broker.js";
 export { invocationFor } from "./capability-broker.js";
 
@@ -194,10 +232,7 @@ export type {
   Predicate,
   PredicateResult,
 } from "./dag.js";
-export { withRetryLimits } from "./dag.js";
-// `brandAsDagDef`, `isUnconditionalEdge`, `isConditionalEdge`,
-// `isDefaultEdge`, and `DagDefShape` are internal — imported directly
-// from `./types/dag.js` where needed.
+// Edge narrowing helpers remain internal to the runtime.
 
 // ── Branded identifiers ───────────────────────────────────────────────────
 export type { RunId, NodeId, DagId, GitSha, DagInputId } from "./ids.js";

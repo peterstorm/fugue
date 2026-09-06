@@ -22,19 +22,10 @@ import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
 import { defineDagFromArray } from "../executor/define-dag.js";
 import { InMemoryFreshnessIndex } from "../dag-runtime/freshness-check.js";
 import { DAG_INPUT } from "../types/ids.js";
+import { testNodeContext } from "./_context-factories.js";
 
-const mkCtx = (observer: RecordingObserver, runId: string): NodeContext => ({
-  runId: R(runId),
-  dagId: D("conflict-d"),
-  observer,
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null,
-  cache: null,
-  prompts: null,
-  llm: null, http: null,
-  clock: null,
-  logger: { warn: () => {}, error: () => {} },
-});
+const mkCtx = (observer: RecordingObserver, runId: string): NodeContext =>
+  testNodeContext({ runId: R(runId), dagId: D("conflict-d"), observer });
 
 describe("freshness witness — conflict detected (Phase 3)", () => {
   it("detects stale-witness conflict across two sequential runs sharing a freshness index", async () => {

@@ -7,6 +7,115 @@ and its lockstep packages (`@fuguejs/host`, `@fuguejs/fs`, `@fuguejs/ms-graph`,
 follows [Keep a Changelog](https://keepachangelog.com/); this project is
 pre-1.0, so a minor bump may carry breaking changes.
 
+## [Unreleased]
+
+### Added
+
+- **Budget capability.** `budget` is the seventh built-in capability. Its
+  read-only `spent()` and `remaining()` views expose settled spend and
+  admission-safe projected headroom. `fixedBudgetCapability` is available from
+  `@fuguejs/framework/testing`.
+- **File spend store.** `@fuguejs/framework/file` exports
+  `createFileSpendStore`, a digest-addressed, locked, atomic whole-snapshot
+  persistence surface for host spend-ledger adapters.
+
+### Changed
+
+- **Breaking (source):** `BaseNodeContext` / explicit `NodeContext` literals now
+  require `budget: null` when no budget capability is wired. Prefer
+  `makeNodeContext`, whose `NodeContextInit.budget` remains optional.
+- **Breaking (source):** a `CapabilityHandle<K>` whose registered client extends
+  `LlmClient` must declare `clientKind: "llm"` and a `pricingModel` policy.
+  Fixed policies require a smart-constructed, non-empty `LlmModelId`.
+  Non-LLM handles cannot declare these fields, and mixed LLM/non-LLM registry
+  unions are rejected. An augmented LLM subtype must additionally provide a
+  declarative string-keyed `runScopedOperations` alias map. The host interprets
+  that map into a frozen run-scoped facade, so adapter code cannot retain a boot
+  client and bypass the shared Run Spend Authority.
+- **Breaking (source/wire):** `Spend` now carries `usage: "known" | "unknown"`.
+  Unknown usage is durable and absorbing; token/USD admission fails closed,
+  while call-only ceilings remain evaluable.
+- **Breaking (source):** `Spend`, `MicroUsd`, and `UnpricedModels` are opaque
+  smart-constructed values. Spend arithmetic saturates at
+  `Number.MAX_SAFE_INTEGER` so overflow fails closed instead of poisoning or
+  creating budget headroom.
+- **Breaking (source):** every broker capability value is a tagged `llm` or
+  `non-llm` binding. Scoped LLM bindings always carry `runScopedOperations`;
+  augmented clients cannot omit their aliases, narrow a standard operation's
+  contract, or promise a narrower alias result. `MintingAuthority` requires its
+  host-owned LLM meter, making broker-without-meter wiring unrepresentable.
+  Untagged and over-delivered runtime values are rejected before merge.
+- **Breaking (source):** directly annotated `NodeDef` values now default their
+  capability generic to `readonly []`; only capabilities named by an explicit
+  requirement tuple are non-null in `run`.
+- **Breaking (configuration):** Azure hosts must set `AZURE_OPENAI_MODEL` to the
+  underlying pricing SKU separately from the arbitrary
+  `AZURE_OPENAI_DEPLOYMENT` routing alias.
+- **Breaking (source):** `withRetryLimits` now returns a typed `Result` and is
+  exported from the executor surface. Every retry override re-enters
+  `validateDagShape`; the unchecked `DagDef` brand constructor is no longer
+  exported, and validated DAGs snapshot caller-owned node data before branding.
+
+### Fixed
+
+- Malformed provider cache parts can no longer exceed inclusive `tokensIn` and
+  bypass token budgets; violations settle as durable unknown usage.
+- Metered LLM requests now parse required runtime fields and hostile tool arrays
+  before admission, so malformed model values cannot reach provider egress or
+  throw during post-provider settlement.
+- Redis spend appends atomically saturate cumulative axes at
+  `Number.MAX_SAFE_INTEGER`; resumed runs remain readable after overflow and
+  match memory/file ledger semantics. Every transaction on the shared command
+  connection now serializes behind active WATCH state, so checkpoint commits
+  cannot clear an append's conflict guard and cause durable undercounting.
+- HTTP hard deadlines include context construction, and late successful effects
+  are diagnosed after a terminal 408.
+- Redis spend retention now outlives shorter checkpoint TTLs for resumable HITL
+  runs, with real-Redis transaction coverage.
+- Successful provider results are parsed as complete own-data `LlmResponse`
+  envelopes before settlement. Their already schema-parsed output is preserved
+  exactly, so transforming schemas are never applied twice by spend authority.
+- Listener-stop and hostile Keycloak diagnostic failures can no longer abort
+  later teardown or escape typed Result boundaries.
+- Run-start authority snapshotting now fences its `node.requires` iteration, so
+  a hand-assembled `DagDef` carrying a hostile `requires` is refused on
+  `runDag`'s Result channel instead of escaping as an uncaught exception. The
+  broker is never consulted for such a run.
+- Tool schema rejections report the offending path and the actual reason
+  (`request.tools[i].inputSchema …`) instead of a fixed
+  `must expose safeParse` message.
+- A non-terminal `retrying` or `awaiting-human` phase reaching the terminal
+  handler now attributes its invariant-violation error to the node it parked
+  on rather than to the executor.
+- `emitHumanIntervention`'s missing-`nodeDef` branch now fences its log and
+  node-error emission the way the sibling confidence-extract branch does. The
+  timestamp is produced by calling `nowFn()` as an argument, so a hostile clock
+  threw *before* the observer dispatch's own guard could see it and escaped the
+  module's fail-closed contract; the typed `Err` is now always authoritative.
+- **Host:** an open circuit breaker now answers with its own `circuit-open`
+  HostError instead of reusing `dag-disabled`. The two are both 503 but mean
+  different things — disabled is administrative and cannot be waited out, an
+  open circuit clears after its cooldown — and clients previously could not
+  tell them apart. `Retry-After` is now derived from the DAG's effective
+  `resetTimeoutMs` / `CIRCUIT_BREAKER_COOLDOWN_MS` (rounded up, 1s floor)
+  instead of a hardcoded 30s that was simply wrong whenever the cooldown was
+  configured otherwise.
+- Every positive priced call consumes at least one micro-USD; positive overflow
+  saturates, so sub-micro calls and infinity cannot create budget headroom.
+- Metered LLM requests, fixed pricing policies, node requirements, broker
+  claims, and invocation origins are parsed into immutable snapshots before
+  crossing authority seams. Caller aliases, malformed discriminants, and
+  stateful accessors cannot make provider egress differ from pricing or identity
+  authorization.
+- Host shutdown and every post-acquisition boot abort attempt all teardown
+  steps and preserve primary plus cleanup failures instead of reporting
+  incomplete cleanup as success.
+- Unknown errors must satisfy the complete `FrameworkError` variant parser;
+  known discriminants with missing payload can no longer select retry or
+  authorization handling.
+- Hostile request-body, confidence-extractor, checkpoint-inspection, logger, and
+  wrapped-cause values preserve their original typed failure boundaries.
+
 ## [0.5.1] — 2026-08-24
 
 ### Fixed

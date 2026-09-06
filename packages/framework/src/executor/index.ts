@@ -1,4 +1,4 @@
-export { validateDagShape, recordFromNodeArray } from "./validate-dag.js";
+export { validateDagShape, recordFromNodeArray, withRetryLimits } from "./validate-dag.js";
 export { defineDag, defineDagFromArray, DagDefinitionError } from "./define-dag.js";
 export { defineLinearDag, type LinearDagConfig } from "./define-linear-dag.js";
 export { defineFanOut, type FanOutDagConfig, type NonEmptyNodeList } from "./define-fan-out.js";

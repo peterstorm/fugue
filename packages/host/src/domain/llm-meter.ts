@@ -2,9 +2,10 @@
  * Pure LLM spend meter — per-`runId` accumulator + budget decision.
  *
  * Functional core: no I/O, no clocks, no network. Every operation is a pure
- * function over an immutable `LlmMeter` value. The metered-llm adapter (the
- * imperative shell) holds the live meter and threads it through these
- * functions; this module never touches the wire.
+ * function over an immutable `LlmMeter` value. `RunSpendAuthority` owns and
+ * threads the live meter plus reservation state; the metered-llm decorator
+ * snapshots requests and delegates into that imperative shell. This module
+ * never touches the wire.
  *
  * WHY SPEND AND NOT TOKENS: the meter used to accumulate `tokensIn + tokensOut`
  * and compare that against a single token ceiling. Prompt caching (F4) severed
@@ -15,36 +16,52 @@
  * ceiling can be denominated in, and the framework's `spendOfCall` is the one
  * place a call is priced.
  *
- * @satisfies FR-W0-004 — aggregate consumption per (dagId,runId,nodeId)
+ * @satisfies FR-W0-004 — aggregate consumption by runId; DAG/node attribution
+ *   belongs to Run Spend Authority diagnostics
  * @satisfies FR-W1-002 — pre-call comparison of cumulative vs budget
- * @satisfies FR-W1-004 — overshoot-by-one rule (the check is BEFORE the call)
+ * @satisfies FR-W1-004 — sequential pre-call admission permits the crossing call
  * @satisfies FR-W1-005 — in-memory counter, no network
  * @satisfies FR-W1-006 — absent budget never refuses
- * @satisfies SC-003 — at most one call allowed past a reached ceiling
+ * @satisfies SC-003 — concurrent admission accounts for a learned call estimate
  * @satisfies FR-B-002 — refuse when ANY declared ceiling is reached
  * @satisfies FR-B-013 — the refusal names the ceiling, basis, and observed figure
  */
 
-import type { Breach, Ceilings, RunId, Spend } from "@fuguejs/framework";
-import { NO_SPEND, addSpend, firstBreach, maxSpend, scaleSpend } from "@fuguejs/framework";
+import type { Breach, Ceilings, Result, RunId, Spend, UsdCeiling } from "@fuguejs/framework";
+import {
+  NO_SPEND,
+  addSpend,
+  costFloor,
+  err,
+  firstBreach,
+  maxSpend,
+  ok,
+  scaleSpend,
+  snapshotSpend,
+  unpricedModel,
+} from "@fuguejs/framework";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
+declare const __llmMeterBrand: unique symbol;
+
 /**
- * Immutable per-`runId` spend accumulator. The map is treated as frozen — every
- * mutation produces a new `LlmMeter` via `accumulate`. An absent `runId` means
- * zero spend (no entry is materialised until the first `accumulate`).
+ * Immutable per-`runId` spend accumulator. The private brand confines
+ * construction to `meterOf`; every legal mutation produces a new value via
+ * `accumulate`. An absent `runId` means zero spend (no entry is materialised
+ * until the first `accumulate`).
  */
-export interface LlmMeter {
+export type LlmMeter = Readonly<{
   readonly spendByRun: ReadonlyMap<RunId, Spend>;
-}
+  readonly [__llmMeterBrand]: "LlmMeter";
+}>;
 
 /** Runtime-read-only snapshot; no mutable `Map` methods escape the ADT. */
 const meterOf = (entries: ReadonlyMap<RunId, Spend>): LlmMeter => {
   const snapshot = new Map(
-    Array.from(entries, ([runId, spend]) => [runId, Object.freeze({ ...spend })] as const),
+    Array.from(entries, ([runId, spend]) => [runId, snapshotSpend(spend)] as const),
   );
   let view: ReadonlyMap<RunId, Spend>;
   const facade = {
@@ -63,7 +80,7 @@ const meterOf = (entries: ReadonlyMap<RunId, Spend>): LlmMeter => {
     },
   } satisfies ReadonlyMap<RunId, Spend>;
   view = Object.freeze(facade);
-  return Object.freeze({ spendByRun: view });
+  return Object.freeze({ spendByRun: view }) as LlmMeter;
 };
 
 /** The empty meter — no runs have consumed anything yet. */
@@ -119,9 +136,11 @@ export const accumulate = (meter: LlmMeter, runId: RunId, delta: Spend): LlmMete
  * single call seen so far) and `inFlight` counts the calls currently holding a
  * reservation, so the projection is `settled + inFlight x maxObservedCall`.
  *
- * Steady-state overshoot is bounded to ~one call; the very first parallel burst
- * (estimate still zero) can overshoot by its call count — the documented
- * FR-W1-004 allowance, generalised.
+ * Admission reserves the largest settled call observed so far. That estimate
+ * limits bursts whose calls are no larger than what the authority has learned,
+ * but it is not a one-call bound: a later concurrent burst of larger calls can
+ * exceed the estimate. Settlement learns the larger per-axis size, tightening
+ * subsequent admissions monotonically.
  *
  * `inFlight` is a COUNT rather than a running sum of reserved amounts. The sum
  * form required each release to free exactly what its matching admit reserved,
@@ -133,16 +152,34 @@ export const accumulate = (meter: LlmMeter, runId: RunId, delta: Spend): LlmMete
  * additionally cannot be subtracted honestly: once an `unpriced` call is in the
  * sum there is no way to take it back out.
  */
-export interface ReservationState {
+declare const __reservationStateBrand: unique symbol;
+
+/** Opaque state: only this module's legal transitions can construct it. */
+export type ReservationState = Readonly<{
   readonly inFlight: number;
   readonly maxObservedCall: Spend;
-}
+  readonly [__reservationStateBrand]: "ReservationState";
+}>;
+
+const reservationState = (inFlight: number, maxObservedCall: Spend): ReservationState =>
+  Object.freeze({
+    inFlight,
+    maxObservedCall: snapshotSpend(maxObservedCall),
+  }) as ReservationState;
 
 /** No calls admitted, no per-call estimate learned yet. */
-export const emptyReservation: ReservationState = {
-  inFlight: 0,
-  maxObservedCall: NO_SPEND,
-};
+export const emptyReservation: ReservationState = reservationState(0, NO_SPEND);
+
+/**
+ * Admission-safe spend projection shared by enforcement and the budget read
+ * model. One formula prevents concurrent reservations from being presented as
+ * available headroom while the next call's gate already considers them spent.
+ */
+export const projectedSpend = (
+  meter: LlmMeter,
+  runId: RunId,
+  state: ReservationState,
+): Spend => addSpend(spendFor(meter, runId), scaleSpend(state.maxObservedCall, state.inFlight));
 
 /**
  * Outcome of the reservation-aware pre-call gate. An `admit` carries the next
@@ -161,19 +198,18 @@ export type AdmitDecision =
       readonly inFlight: number;
     };
 
-const reserve = (state: ReservationState): ReservationState => ({
-  ...state,
-  inFlight: state.inFlight + 1,
-});
+const reserve = (state: ReservationState): ReservationState =>
+  reservationState(state.inFlight + 1, state.maxObservedCall);
 
 /**
  * Decide whether the NEXT call for `runId` may proceed under `limits`.
  *
- * The comparison is BEFORE the call, against settled-so-far (FR-W1-002). The
- * overshoot-by-one rule (FR-W1-004) falls out directly: while spend is below
- * every ceiling each call is allowed — so the call that crosses a boundary, the
- * single overshoot, runs — and only once a ceiling is reached is the next call
- * refused.
+ * The comparison is BEFORE the call, against settled-so-far (FR-W1-002). In a
+ * sequential flow, while spend is below every ceiling the crossing call is
+ * admitted and the following call is refused (FR-W1-004). Concurrent admission
+ * additionally projects `inFlight × maxObservedCall`; that estimate limits a
+ * learned-size burst but cannot promise one-call overshoot for a first or larger
+ * concurrent burst.
  *
  * Absent `limits` always admits (FR-W1-006: no budget means no enforcement,
  * though metering still happens). A ceiling of zero refuses the first call, as
@@ -207,28 +243,80 @@ export const admit = (
   const settledBreach = firstBreach(settled, limits, "settled");
   if (settledBreach !== undefined) return refusal(settledBreach);
 
-  const projected = addSpend(settled, scaleSpend(state.maxObservedCall, state.inFlight));
-  const projectedBreach = firstBreach(projected, limits, "projected");
+  const projectedBreach = firstBreach(projectedSpend(meter, runId, state), limits, "projected");
   if (projectedBreach !== undefined) return refusal(projectedBreach);
 
   return { kind: "admit", state: reserve(state) };
 };
 
+export type CandidatePricing =
+  | { readonly kind: "priced"; readonly model: string }
+  | { readonly kind: "unpriced"; readonly model: string };
+
+/**
+ * Model-aware admission command. The shell resolves provider composition into
+ * candidate pricing data; this pure core owns the fail-closed USD rule.
+ *
+ * The unpriced-candidate rule is a PROJECTED one: nothing has been spent on this
+ * model yet, only proposed. So it stays behind `admit`'s settled check, for the
+ * same reason that check leads there — a refusal must report the strongest
+ * ACTUAL reason. Returning the hand-built projected breach first would mask an
+ * already-reached `tokens`/`calls` ceiling, and would relabel spend that is
+ * already settled-unpriced (or settled-unknown-usage) as a mere projection.
+ * The call is refused either way; only the reported `Breach` differs, and a
+ * budget refusal an operator cannot trust is a budget refusal they will ignore.
+ */
+export const admitCandidate = (
+  meter: LlmMeter,
+  runId: RunId,
+  state: ReservationState,
+  limits: Ceilings | undefined,
+  candidate: CandidatePricing,
+): AdmitDecision => {
+  // A priced candidate, or no budget at all, is exactly the plain decision.
+  if (limits === undefined || candidate.kind !== "unpriced") {
+    return admit(meter, runId, state, limits);
+  }
+  // Typed predicate rather than a bare `find` plus a second `.kind === "usd"`:
+  // the search already established which variant this is, and re-testing it
+  // only to recover the type is a fact the reader has to check twice.
+  const usdCeiling = limits.find((c): c is UsdCeiling => c.kind === "usd");
+  if (usdCeiling === undefined) return admit(meter, runId, state, limits);
+
+  const settled = spendFor(meter, runId);
+  const settledBreach = firstBreach(settled, limits, "settled");
+  const refusal = (breach: Breach): AdmitDecision =>
+    ({ kind: "refuse", breach, settled, inFlight: state.inFlight });
+  if (settledBreach !== undefined) return refusal(settledBreach);
+
+  return refusal({
+    kind: "unpriced",
+    ceiling: usdCeiling,
+    basis: "projected",
+    models: unpricedModel(candidate.model),
+    observedAtLeast: costFloor(settled.usd),
+  });
+};
+
+export type ReservationInvariantError = {
+  readonly kind: "reservation-underflow";
+  readonly inFlight: number;
+};
+
 /**
  * Release one admitted call's reservation (call once, on settle).
  *
- * Clamped at zero: `inFlight` counts outstanding admissions, so a negative
- * value is reachable only through a contract breach (a double release), and
- * clamping keeps the projection sane rather than letting a negative count grant
- * free headroom.
+ * Underflow is a typed invariant failure, never a clamped success. The input is
+ * immutable and the Err carries no replacement state, so a caller cannot
+ * accidentally install a lower count and grant headroom after a double release.
  */
-export const releaseReservation = (state: ReservationState): ReservationState => ({
-  ...state,
-  inFlight: Math.max(0, state.inFlight - 1),
-});
+export const releaseReservation = (
+  state: ReservationState,
+): Result<ReservationState, ReservationInvariantError> =>
+  state.inFlight <= 0
+    ? err({ kind: "reservation-underflow", inFlight: state.inFlight })
+    : ok(reservationState(state.inFlight - 1, state.maxObservedCall));
 
 /** Widen the per-call estimate from a settled call (per-axis monotone max). */
-export const learnObservedCall = (state: ReservationState, call: Spend): ReservationState => ({
-  ...state,
-  maxObservedCall: maxSpend(state.maxObservedCall, call),
-});
+export const learnObservedCall = (state: ReservationState, call: Spend): ReservationState =>
+  reservationState(state.inFlight, maxSpend(state.maxObservedCall, call));

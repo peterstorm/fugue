@@ -12,14 +12,17 @@ import { describe, it, expect } from "bun:test";
 import * as fc from "fast-check";
 import type { Ceiling, MicroUsd } from "../types/index.js";
 import {
+  NO_MICROS,
   NO_SPEND,
   addSpend,
   breachOf,
   ceilings,
   firstBreach,
   formatBreach,
+  makeSpend,
   observedOf,
   pricedCall,
+  unknownUsageCall,
   unpricedCall,
   usdToMicros,
 } from "../types/index.js";
@@ -28,6 +31,9 @@ const micros = (n: number): MicroUsd => n as MicroUsd;
 const tokens = (limit: number): Ceiling => ({ kind: "tokens", limit });
 const calls = (limit: number): Ceiling => ({ kind: "calls", limit });
 const usd = (dollars: number): Ceiling => ({ kind: "usd", limit: usdToMicros(dollars) });
+
+/** A priced cost axis at `dollars`, for building a Spend directly. */
+const pricedUsd = (dollars: number) => ({ kind: "priced", micros: usdToMicros(dollars) } as const);
 
 /** `ceilings` never returns undefined for a non-empty input; unwrap for tests. */
 const limitsOf = (declared: readonly Ceiling[]) => {
@@ -116,6 +122,20 @@ describe("breachOf: token and call axes", () => {
   });
 });
 
+describe("breachOf: unknown usage fails closed only on unevaluable axes", () => {
+  const unknown = unknownUsageCall({ kind: "priced", micros: NO_MICROS });
+
+  it("refuses token and USD ceilings with an explicit unknown-usage reason", () => {
+    expect(breachOf(unknown, tokens(1_000), "settled")?.kind).toBe("unknown-usage");
+    expect(breachOf(unknown, usd(1_000), "settled")?.kind).toBe("unknown-usage");
+  });
+
+  it("keeps the calls axis evaluable", () => {
+    expect(breachOf(unknown, calls(2), "settled")).toBeUndefined();
+    expect(breachOf(unknown, calls(1), "settled")?.kind).toBe("reached");
+  });
+});
+
 describe("breachOf: the usd axis fails closed on an unpriced model", () => {
   it("refuses when cost cannot be evaluated, whatever the priced portion", () => {
     // Treating an unknown cost as zero would make the cheapest way past a
@@ -151,7 +171,12 @@ describe("firstBreach: any ceiling refuses", () => {
         fc.nat({ max: 20 }),
         fc.nat({ max: 5000 }),
         (tokenSpend, callCount, costMicros) => {
-          const spend = { tokens: tokenSpend, calls: callCount, usd: { kind: "priced" as const, micros: micros(costMicros) } };
+          const spend = makeSpend({
+            usage: "known",
+            tokens: tokenSpend,
+            calls: callCount,
+            usd: { kind: "priced", micros: micros(costMicros) },
+          });
           const limits = limitsOf([tokens(2000), calls(10), { kind: "usd", limit: micros(2000) }]);
           const over =
             tokenSpend >= 2000 || callCount >= 10 || costMicros >= 2000;
@@ -163,7 +188,12 @@ describe("firstBreach: any ceiling refuses", () => {
   });
 
   it("reports the usd ceiling first when several are breached at once", () => {
-    const spend = { tokens: 10_000, calls: 99, usd: { kind: "priced" as const, micros: micros(10_000) } };
+    const spend = makeSpend({
+      usage: "known",
+      tokens: 10_000,
+      calls: 99,
+      usd: { kind: "priced", micros: micros(10_000) },
+    });
     const breach = firstBreach(spend, limitsOf([tokens(10), calls(1), { kind: "usd", limit: micros(10) }]), "settled");
     expect(breach?.ceiling.kind).toBe("usd");
   });
@@ -185,6 +215,35 @@ describe("formatBreach + observedOf", () => {
     expect(formatBreach(breach)).toContain("$2.500000");
     expect(formatBreach(breach)).toContain("$1.000000");
     expect(formatBreach(breach)).toContain("projected");
+  });
+
+  it("says the TOKEN figure is unknown, not that it stayed under the budget", () => {
+    // `unknown-usage` is the other fail-closed refusal, and its message has a
+    // different job from `unpriced`: nothing needs pricing, the provider simply
+    // did not report usage. Reporting a bare number here would read as a
+    // measurement; the wording has to carry that the figure is a FLOOR.
+    const breach = breachOf(unknownUsageCall({ kind: "priced", micros: NO_MICROS }), tokens(1000), "settled");
+    expect(breach?.kind).toBe("unknown-usage");
+    if (breach === undefined) return;
+    expect(formatBreach(breach)).toBe(
+      "token usage is unknown against the 1000 budget " +
+        "(trustworthy tokens observed before uncertainty: 0)",
+    );
+    expect(observedOf(breach)).toBe(0);
+  });
+
+  it("says the COST is unknown, in dollars, and reports the priced floor", () => {
+    // Same breach kind on the usd axis takes the other `formatBreach` arm: the
+    // observation is money, so it renders as dollars, and `observedAtLeast` is
+    // the cost of the calls that WERE priced before usage went dark.
+    const breach = breachOf(unknownUsageCall(pricedUsd(2.5)), usd(1), "projected");
+    expect(breach?.kind).toBe("unknown-usage");
+    if (breach === undefined) return;
+    expect(formatBreach(breach)).toBe(
+      "cost is unknown against the $1.000000 budget " +
+        "(priced lower bound before uncertainty: $2.500000)",
+    );
+    expect(observedOf(breach)).toBe(usdToMicros(2.5));
   });
 
   it("names the model to price when cost is unevaluable", () => {

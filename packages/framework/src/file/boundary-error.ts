@@ -35,6 +35,9 @@ export type FileOperation =
   | "createFileFreshnessIndex"
   | "createFileJob"
   | "createFileJournal"
+  | "spendStore:create"
+  | "spendStore:read"
+  | "spendStore:add"
   | "data"
   | "eventDigestOf"
   | "eventFileName"
@@ -122,10 +125,10 @@ export const fileOperationError = (
  * Path-string domain gate for the file backend's entry points (ADR-0080): a
  * brand-bypassed non-string, empty, or NUL-bearing path must fail closed at
  * the factory/operation boundary, before it can reach `join`/fs as a raw
- * TypeError. ONE encoding for every file-backend entry point (atomic.ts,
- * journal.ts, checkpointer.ts, freshness-index.ts, resume.ts); the per-site
- * DIAGNOSTIC stays at each call site (the message names the site-specific
- * field).
+ * TypeError. ONE encoding for every file-backend entry point, including the
+ * atomic, journal, checkpointer, freshness-index, resume, and spend-store
+ * surfaces; the per-site DIAGNOSTIC stays at each call site (the message names
+ * the site-specific field).
  */
 export const isFileBackendPathString = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0 && !value.includes("\u0000");

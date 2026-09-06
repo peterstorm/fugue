@@ -48,9 +48,9 @@ A third: `PRICE_TABLE` is hand-maintained, and `computeCostUsd` returns **0** fo
 
 ## Decision
 
-**Spend, not tokens.** The meter accumulates a `Spend` — `{ tokens, calls, usd }` — and `llm/cost.ts` gains `spendOfCall`, the single producer of budget-facing cost. It reuses the same cache-weighted arithmetic ADR-0081 established, so the multipliers reach the budget through exactly one path.
+**Spend, not tokens.** The meter accumulates a `Spend` — `{ tokens, calls, usd, usage }`, where `usage: UsageKnowledge` records whether the provider's reported usage was trustworthy (the axis the "Unknown cost is a union member" decision below rests on) — and `llm/cost.ts` gains `spendOfCall`, the single producer of *priced* budget-facing cost. It reuses the same cache-weighted arithmetic ADR-0081 established, so the multipliers reach the budget through exactly one path.
 
-**Money is an integer.** `MicroUsd` (1e-6 USD, branded) is what ceilings compare against; the raw USD float stays display-only. A run's total is an unbounded sum, float addition is not associative, and two operators reconciling the same run must not be able to disagree.
+**Money is a bounded exact integer.** `MicroUsd` (1e-6 USD, branded) is what ceilings compare against; the raw USD float stays display-only. Every in-memory value is a non-negative safe integer. Every positive per-call cost rounds upward at the float→integer boundary, so repeated sub-micro-dollar calls cannot disappear from the USD total. Positive overflow, including infinity, saturates at `Number.MAX_SAFE_INTEGER`, which is fail-closed because every valid monetary ceiling is then reached. Within that domain, settlement order cannot introduce float drift or operator disagreement.
 
 **Unknown cost is a union member, not a sentinel.**
 
@@ -62,15 +62,17 @@ type PricedSpend =
 
 `unpriced` **absorbs** under `addSpend`: once any call in a run was unpriced, no total for that run is trustworthy, and the type says so instead of a comment saying so. It carries the offending model names — so the refusal message names what to add to `PRICE_TABLE` — and `knownMicros`, the priced portion, which is a genuine lower bound and turns "unknown" into "at least $1.23, plus model X".
 
-**A `usd` ceiling against unpriced spend always breaches.** Token and call ceilings do not: they are perfectly evaluable on an unpriced model, and refusing there would apply fail-closed where nothing is unknown.
+**A `usd` ceiling against unpriced spend always breaches.** Token and call ceilings do not: they are perfectly evaluable on an unpriced model, and refusing there would apply fail-closed where nothing is unknown. Provider usage uncertainty is separate: a call with no trustworthy usage persists an absorbing unknown marker, after which token and USD ceilings are unevaluable and fail closed while call ceilings remain exact.
 
 **Ceilings are a non-empty, one-per-kind, canonically-ordered list.** `ceilings()` is the only constructor; duplicates collapse to their **minimum**. Composing a DAG's limits with a caller-supplied set is therefore just `ceilings([...dag, ...request])`, and "raise my budget" is not expressible — deny-by-default falls out of the data structure rather than out of a check somebody must remember to write.
+
+**Pricing follows the provider-effective model.** Every LLM binding carries a composition-owned policy: request-selected providers price the request model, while fixed deployments bind one model and reject conflicting requests before egress. The metered boundary parses each request into one immutable own-data snapshot and passes that exact value to both admission and provider egress. Stateful accessors therefore cannot expose one model/cache policy to pricing and another to the provider.
 
 **A refusal names its ceiling and its basis.**
 
 ```ts
 kind: "llm-budget-exceeded";
-cause: Breach;   // { reached | unpriced }, each carrying `ceiling` and `basis: "settled" | "projected"`
+cause: Breach;   // { reached | unpriced | unknown-usage }, each carrying `ceiling` and `basis: "settled" | "projected"`
 ```
 
 The basis is correct **by construction**: the admission gate evaluates settled spend and the projection as two separate calls to `firstBreach`, each told which figure it was handed. Nothing infers afterwards which one drove the decision.
@@ -84,8 +86,8 @@ The basis is correct **by construction**: the admission gate evaluates settled s
 - The reservation state became simpler while gaining an axis: it counts in-flight calls rather than summing reserved amounts, because `Spend` cannot be subtracted honestly once an `unpriced` call is in the sum. The projection uses the current estimate for every in-flight call — marginally more conservative than the previous sum of older, smaller estimates, which is the fail-closed direction.
 - `llm-budget-exceeded` changed shape. It is a control-plane error with a wire schema, so the persisted parser changed with it; the HTTP mapping (429 + `Retry-After`) is untouched.
 - The two accounting paths in `metered-llm` are now one. They were duplicated when the shared sequence was four lines; each must now additionally price the response and evaluate several ceilings, which is where two copies would have diverged.
-- **The budget is still not durable.** A resumable run builds a fresh NodeContext per execution slice, so parking and resuming restarts the accumulator at zero. This ADR does not fix that; it makes the figure being lost the right figure. The ledger is a separate change.
-- Also fixed in passing, and unrelated to budgets: `llm.metered` spread the whole `LlmResponse` onto an info-level log line, so model output, `thinking`, and `rawText` were being logged with none of the redaction the span path applies. `pickUsage` narrows a response to exactly its four token figures. See `pickUsage`'s doc comment for why it lists fields where the surrounding convention spreads them.
+- **At this decision's adoption, the budget was not durable.** A resumable run built a fresh NodeContext per execution slice, so parking and resuming restarted the accumulator at zero. ADR-0083 subsequently introduced the Spend Ledger: current slices hydrate cumulative spend and append every settled call through the selected ledger adapter.
+- Also fixed in passing, and unrelated to budgets: `llm.metered` spread the whole `LlmResponse` onto an info-level log line, so model output, `thinking`, and `rawText` were being logged with none of the redaction the span path applies. The fix narrows a response to exactly its four token figures before logging. It landed as `pickUsage`; a later hardening commit superseded that with `tokenUsageOf`, which is what the code calls today.
 
 ## Related
 

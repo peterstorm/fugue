@@ -1,126 +1,145 @@
 /**
- * The durable encoding of a run's `Spend`, and the parse back out of it.
+ * Pure Redis Spend Record encoding.
  *
- * Functional core: two pure total functions, no I/O.
- *
- * Used by the REDIS adapter, which is the one that has to flatten a `Spend`
- * into storage. The in-process adapter holds `Spend` values directly and folds
- * them with `addSpend`, so it never encodes anything. The two therefore agree
- * because both implement the same monoid — which the parameterised contract
- * suite in `spend-ledger.test.ts` proves — and NOT because they share this
- * encoding. (An earlier version of this header claimed the stronger, structural
- * guarantee; it was never true of the in-process backend.)
- *
- * WHY THIS SHAPE: the encoding is chosen so that appending to it is the SAME
- * operation as `addSpend`. `Spend`'s monoid is (sum, sum, sum, set-union), and
- * every field below is one of those:
- *
- * | field            | append   | Redis        |
- * |------------------|----------|--------------|
- * | `tokens`         | sum      | `HINCRBY`    |
- * | `calls`          | sum      | `HINCRBY`    |
- * | `micros`         | sum      | `HINCRBY`    |
- * | `unpricedModels` | union    | `SADD`       |
- *
- * All four are atomic, commutative, and idempotent under re-application of the
- * same delta ordering, so concurrent writers cannot corrupt the record no
- * matter how their commands interleave — no lock, no read-modify-write, no
- * compare-and-swap. The alternative encoding (store a `Spend` blob and rewrite
- * it) would have needed all three.
+ * One Redis HASH is the aggregate: numeric axes use their established fields,
+ * while unknown-usage and unpriced-model membership use reserved marker fields.
+ * One HGETALL prevents split-key reads; strict parsing protects every present
+ * field. Transactional append plus the monotone unknown marker preserves the
+ * accounting state that admission relies on.
  */
 
-import type { MicroUsd, Spend, UnpricedModels } from "@fuguejs/framework";
-import { costFloor } from "@fuguejs/framework";
+import type { Result, Spend } from "@fuguejs/framework";
+import { costFloor, err, makeSpend, microUsd, ok, unpricedModels } from "@fuguejs/framework";
 
-/**
- * A run's accumulated spend, flattened to the four independently-appendable
- * fields above.
- *
- * `unpricedModels` empty means the total is PRICED; non-empty means some call
- * in the run had no price-table entry, and `micros` is then the priced portion
- * — a lower bound. That is exactly the `PricedSpend` union, encoded so that the
- * discriminant is derived from the set's emptiness rather than stored beside it
- * (a stored discriminant could disagree with the set it describes).
- */
-export interface SpendRecord {
+interface SpendRecord {
+  readonly usageUnknown: boolean;
   readonly tokens: number;
   readonly calls: number;
   readonly micros: number;
   readonly unpricedModels: readonly string[];
 }
 
-/** Flatten a `Spend` for storage. Total — every `Spend` has an encoding. */
+/** Numeric hash fields. Reserved marker fields cannot collide with these. */
+export const SPEND_HASH_FIELDS = Object.freeze({
+  micros: "micros",
+  tokens: "tokens",
+  calls: "calls",
+});
+
+/** `$` cannot start a numeric axis; fixed-width UTF-16 hex makes each model one field. */
+const SPEND_UNPRICED_FIELD_PREFIX = "$unpriced:";
+export const SPEND_MARKER_VALUE = "1";
+export const SPEND_USAGE_UNKNOWN_FIELD = "$usage:unknown";
+
+type SpendHashParseError = Readonly<{
+  kind: "malformed-spend-hash";
+  field: string;
+  reason: "unknown-field" | "invalid-numeric-value" | "invalid-marker-field" | "invalid-marker-value";
+}>;
+
+/** Flatten a trusted domain Spend for the transactional writer. */
 export const recordOf = (spend: Spend): SpendRecord => ({
+  usageUnknown: spend.usage === "unknown",
   tokens: spend.tokens,
   calls: spend.calls,
-  // The priced total, or the priced FLOOR of an unpriced aggregate. Both are
-  // sums, which is what makes the stored field appendable.
   micros: costFloor(spend.usd),
   unpricedModels: spend.usd.kind === "unpriced" ? [...spend.usd.models] : [],
 });
 
 /**
- * Parse a stored record back into a `Spend`.
+ * Canonical collision-proof hash field for one unpriced model.
  *
- * Total rather than `Result`-returning: every field is independently coerced to
- * a usable value, so there is no input for which this fails.
- *
- * Non-finite and negative figures read as ZERO. Be clear about what that costs:
- * for a genuinely corrupted figure this UNDER-reports — a `micros` field
- * holding `"1e999"` or `"corrupt"` becomes `0`, and the run looks cheaper than
- * it was. That is a bounded loss of one field of one record, and it is chosen
- * deliberately over the alternative, which is unbounded: a `NaN` propagates
- * into every later sum, `observed >= limit` is false forever after, and the
- * budget stops refusing anything on EVERY axis for the rest of the run.
- *
- * A bounded under-report beats a permanently disabled budget. (An earlier
- * version of this comment claimed the clamp errs toward MORE spend recorded,
- * "never less" — the opposite of what `safeFigure` does.)
- *
- * Note the residual exposure this leaves, since it is not obvious: because this
- * function is total, a corrupted figure never surfaces as a read failure, so
- * FR-B-007's fail-closed check in `createNodeContextForDag` does not engage.
- * A budgeted run proceeds on an under-reported total. Closing that would mean
- * distinguishing "absent" from "unparseable" at the adapter boundary, which is
- * tracked with the ledger's remaining work rather than papered over here.
- *
- * Model names are sorted and de-duplicated so a hydrated `Spend` is structurally
- * equal to the one that was stored, whatever order the backend enumerated them
- * in. Without that, `addSpend`'s commutativity would hold in memory and break
- * across a resume.
+ * JavaScript strings are UTF-16 code-unit sequences, not guaranteed Unicode
+ * scalar-value sequences. Encoding each code unit as four lowercase hex digits
+ * is therefore total and reversible even for empty strings and lone surrogates.
  */
-export const spendOfRecord = (record: SpendRecord): Spend => {
-  const models = [...new Set(record.unpricedModels.filter((m) => m.length > 0))].sort();
-  const micros = safeFigure(record.micros) as MicroUsd;
-  const [head, ...rest] = models;
-  return {
-    tokens: safeFigure(record.tokens),
-    calls: safeFigure(record.calls),
-    usd:
-      head === undefined
-        ? { kind: "priced", micros }
-        : {
-            kind: "unpriced",
-            models: [head, ...rest] as UnpricedModels,
-            knownMicros: micros,
-          },
-  };
+export const unpricedModelHashField = (model: string): string => {
+  let encoded = "";
+  for (let index = 0; index < model.length; index++) {
+    encoded += model.charCodeAt(index).toString(16).padStart(4, "0");
+  }
+  return `${SPEND_UNPRICED_FIELD_PREFIX}${encoded}`;
+};
+
+export const parseSpendRecordInteger = (raw: string): number | undefined => {
+  if (!/^(0|[1-9][0-9]*)$/.test(raw)) return undefined;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+};
+
+/** Add two parsed record axes without leaving JavaScript's exact integer domain. */
+export const addSpendRecordInteger = (current: number, delta: number): number =>
+  current > Number.MAX_SAFE_INTEGER - delta
+    ? Number.MAX_SAFE_INTEGER
+    : current + delta;
+
+const modelOfMarkerField = (field: string): string | undefined => {
+  if (!field.startsWith(SPEND_UNPRICED_FIELD_PREFIX)) return undefined;
+  const encoded = field.slice(SPEND_UNPRICED_FIELD_PREFIX.length);
+  if (encoded.length % 4 !== 0 || !/^[0-9a-f]*$/.test(encoded)) return undefined;
+
+  let model = "";
+  for (let index = 0; index < encoded.length; index += 4) {
+    model += String.fromCharCode(Number.parseInt(encoded.slice(index, index + 4), 16));
+  }
+  return model;
 };
 
 /**
- * THE clamp. One definition site, because "a malformed figure reads as a safe
- * zero" is a single rule and it was previously spelled twice — here and inside
- * `spendOfRecord` — so a change to one was not guaranteed to reach the other.
- */
-const safeFigure = (n: number): number => (Number.isFinite(n) ? Math.max(0, n) : 0);
-
-/**
- * Parse one stored numeric field.
+ * Strictly parse the complete Redis hash.
  *
- * Absent reads as zero — a hash field a run never wrote is a run that never
- * spent on that axis, which is the same fact. An unparseable string also reads
- * as zero rather than failing the read: see `spendOfRecord` on why a malformed
- * figure must not become an error at this boundary.
+ * Missing numeric axes mean zero; every PRESENT field and value is controlled
+ * by this grammar. Unknown fields, malformed markers, and non-canonical,
+ * negative, unsafe, or non-integer figures are typed failures rather than
+ * values that could hydrate a cheaper-looking run.
  */
-export const parseFigure = (raw: string | null | undefined): number =>
-  raw === null || raw === undefined ? 0 : safeFigure(Number(raw));
+export const spendOfHash = (
+  hash: Readonly<Record<string, string>>,
+): Result<Spend, SpendHashParseError> => {
+  const figures = { micros: 0, tokens: 0, calls: 0 };
+  let usage: Spend["usage"] = "known";
+  const models: string[] = [];
+
+  for (const [field, raw] of Object.entries(hash)) {
+    if (field === SPEND_HASH_FIELDS.micros ||
+        field === SPEND_HASH_FIELDS.tokens ||
+        field === SPEND_HASH_FIELDS.calls) {
+      const parsed = parseSpendRecordInteger(raw);
+      if (parsed === undefined) {
+        return err({ kind: "malformed-spend-hash", field, reason: "invalid-numeric-value" });
+      }
+      figures[field] = parsed;
+      continue;
+    }
+
+    if (field === SPEND_USAGE_UNKNOWN_FIELD) {
+      if (raw !== SPEND_MARKER_VALUE) {
+        return err({ kind: "malformed-spend-hash", field, reason: "invalid-marker-value" });
+      }
+      usage = "unknown";
+      continue;
+    }
+    if (!field.startsWith(SPEND_UNPRICED_FIELD_PREFIX)) {
+      return err({ kind: "malformed-spend-hash", field, reason: "unknown-field" });
+    }
+    const model = modelOfMarkerField(field);
+    if (model === undefined) {
+      return err({ kind: "malformed-spend-hash", field, reason: "invalid-marker-field" });
+    }
+    if (raw !== SPEND_MARKER_VALUE) {
+      return err({ kind: "malformed-spend-hash", field, reason: "invalid-marker-value" });
+    }
+    models.push(model);
+  }
+
+  const canonicalModels = unpricedModels(models);
+  const micros = microUsd(figures.micros);
+  return ok(makeSpend({
+    usage,
+    tokens: figures.tokens,
+    calls: figures.calls,
+    usd: canonicalModels === undefined
+      ? { kind: "priced", micros }
+      : { kind: "unpriced", models: canonicalModels, knownMicros: micros },
+  }));
+};

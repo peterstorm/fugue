@@ -9,7 +9,6 @@
 // Property: a DAG that retries at least once emits at least one trace event
 // with `outcome: "retry"`.
 
-import { NoopObserver } from "../observer/observer.js";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { DAG_INPUT } from "../types/ids.js";
 import { describe, it, expect } from "bun:test";
@@ -21,18 +20,10 @@ import type { NodeContext, NodeDef } from "../types/node.js";
 import type { TraceEvent } from "../state-machine/types.js";
 import type { DagPhase, DagEvent } from "../dag-runtime/types.js";
 import { N } from "./_id-helpers.js";
+import { testNodeContext } from "./_context-factories.js";
 
-const mkCtx = (): NodeContext => ({
-  runId: "retry-trace-run" as RunId,
-  dagId: "retry-trace-dag" as DagId,
-  observer: new NoopObserver(),
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null,
-  cache: null,
-  prompts: null,
-  llm: null, http: null, clock: null,
-  logger: { warn: () => {}, error: () => {} },
-});
+const mkCtx = (): NodeContext =>
+  testNodeContext({ runId: "retry-trace-run" as RunId, dagId: "retry-trace-dag" as DagId });
 
 describe("§6.12 — DAG-machine retry trace outcome (regression for §1.2)", () => {
   it("flaky node that fails once emits at least one trace with outcome:'retry'", async () => {

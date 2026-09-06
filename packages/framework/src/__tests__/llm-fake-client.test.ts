@@ -20,13 +20,15 @@
  */
 import { describe, test, expect } from "bun:test";
 import { z } from "zod";
-import { NoopObserver } from "../observer/observer.js";
-import type { RunId, DagId, NodeId } from "../types/ids.js";
+import type { NodeId } from "../types/ids.js";
 import { FakeLlmClient } from "../llm/fake-client.js";
 import type { FakeTurn, FakeWithToolsScript } from "../llm/fake-client.js";
-import type { ToolDef, LlmRequest, SendWithToolsRequest } from "../types/llm.js";
+import type { LlmClient, LlmResponse, ToolDef, LlmRequest, SendWithToolsRequest } from "../types/llm.js";
 import type { NodeContext } from "../types/node.js";
+import type { Result } from "../types/result.js";
+import type { FrameworkError } from "../types/errors.js";
 import { stubLlmClient } from "./_llm-mocks.js";
+import { testNodeContext } from "./_context-factories.js";
 
 const FinalSchema = z.object({ result: z.number() });
 /** Accepts ANY value — needed to isolate the serialization seams from the
@@ -34,18 +36,8 @@ const FinalSchema = z.object({ result: z.number() });
  * payloads that `JSON.stringify` cannot represent). */
 const AnySchema = z.unknown();
 
-const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext => ({
-  runId: "test-run" as RunId,
-  dagId: "test-dag" as DagId,
-  observer: new NoopObserver(),
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null,
-  cache: null,
-  prompts: null,
-  llm: stubLlmClient, http: null, clock: null,
-  logger: { warn: () => {}, error: () => {} },
-  ...overrides,
-});
+const makeCtx = (overrides: Partial<NodeContext> = {}): NodeContext =>
+  testNodeContext({ llm: stubLlmClient, ...overrides });
 
 const structuredReq = (model = "m1"): LlmRequest<unknown> => ({
   system: "sys",
@@ -72,6 +64,24 @@ const cyclic = (): Record<string, unknown> => {
   value.self = value;
   return value;
 };
+
+
+/**
+ * A value that behaves exactly like `target` except that reading `prop` throws.
+ *
+ * The same trap shape was spelled out at seven sites, each differing only in the
+ * property name and the message — which is how one of them ends up reading
+ * `Reflect.get` from the wrong object, or quietly stops throwing at all, without
+ * the suite noticing. The point of every one of these tests is that the boundary
+ * survives a hostile getter, so the trap itself must be one thing.
+ */
+const throwingGetter = <T extends object>(target: T, prop: string, message: string): T =>
+  new Proxy(target, {
+    get(t, key) {
+      if (key === prop) throw new Error(message);
+      return Reflect.get(t, key);
+    },
+  });
 
 describe("FakeLlmClient — FR-040 total guards (never a raw rejection)", () => {
   test("a throwing response provider is a typed node-crash", async () => {
@@ -385,12 +395,7 @@ describe("FakeLlmClient — FR-040 total guards (never a raw rejection)", () => 
   // total read; a failing read yields the namespaced placeholder id and the
   // typed error still settles across the port.
   test("a request with a throwing nodeId getter is a typed node-crash with the placeholder id (never a raw rejection)", async () => {
-    const hostileReq = new Proxy(structuredReq(), {
-      get(target, prop) {
-        if (prop === "nodeId") throw new Error("nodeId getter exploded");
-        return Reflect.get(target, prop);
-      },
-    });
+    const hostileReq = throwingGetter(structuredReq(), "nodeId", "nodeId getter exploded");
     const client = new FakeLlmClient(new Map()); // no "m1" key — forces the crash path
     const result = await client.sendStructured(hostileReq);
     expect(result.ok).toBe(false);
@@ -402,12 +407,7 @@ describe("FakeLlmClient — FR-040 total guards (never a raw rejection)", () => 
   });
 
   test("a request with a throwing model getter is a typed node-crash (never a raw rejection)", async () => {
-    const hostileReq = new Proxy(structuredReq(), {
-      get(target, prop) {
-        if (prop === "model") throw new Error("model getter exploded");
-        return Reflect.get(target, prop);
-      },
-    });
+    const hostileReq = throwingGetter(structuredReq(), "model", "model getter exploded");
     const client = new FakeLlmClient(new Map());
     const result = await client.sendStructured(hostileReq);
     expect(result.ok).toBe(false);
@@ -422,12 +422,7 @@ describe("FakeLlmClient — FR-040 total guards (never a raw rejection)", () => 
   });
 
   test("an unconfigured sendWithTools request with a throwing nodeId getter is a typed node-crash (never a raw rejection)", async () => {
-    const hostileReq = new Proxy(toolsReq(), {
-      get(target, prop) {
-        if (prop === "nodeId") throw new Error("nodeId getter exploded");
-        return Reflect.get(target, prop);
-      },
-    });
+    const hostileReq = throwingGetter(toolsReq(), "nodeId", "nodeId getter exploded");
     const client = new FakeLlmClient(new Map()); // no withToolsScript — forces the crash path
     const result = await client.sendWithTools(hostileReq, makeCtx());
     expect(result.ok).toBe(false);
@@ -439,12 +434,7 @@ describe("FakeLlmClient — FR-040 total guards (never a raw rejection)", () => 
   });
 
   test("a request with a throwing maxIterations getter plays with the default limit (never a raw rejection)", async () => {
-    const hostileReq = new Proxy(toolsReq({ schema: FinalSchema }), {
-      get(target, prop) {
-        if (prop === "maxIterations") throw new Error("maxIterations getter exploded");
-        return Reflect.get(target, prop);
-      },
-    });
+    const hostileReq = throwingGetter(toolsReq({ schema: FinalSchema }), "maxIterations", "maxIterations getter exploded");
     const client = new FakeLlmClient(new Map(), {
       withToolsScript: [{ type: "final", content: { result: 1 } }],
     });
@@ -459,12 +449,7 @@ describe("FakeLlmClient — FR-040 total guards (never a raw rejection)", () => 
   // abort must still stop the loop), so the totality must hold per read — a
   // throwing `signal` getter on the request or the context cannot reject raw.
   test("a request whose signal getter throws is not a raw rejection (the abort probe is total)", async () => {
-    const hostileReq = new Proxy(toolsReq({ schema: FinalSchema }), {
-      get(target, prop) {
-        if (prop === "signal") throw new Error("signal getter exploded");
-        return Reflect.get(target, prop);
-      },
-    });
+    const hostileReq = throwingGetter(toolsReq({ schema: FinalSchema }), "signal", "signal getter exploded");
     const client = new FakeLlmClient(new Map(), {
       withToolsScript: [{ type: "final", content: { result: 1 } }],
     });
@@ -476,12 +461,7 @@ describe("FakeLlmClient — FR-040 total guards (never a raw rejection)", () => 
   });
 
   test("a context whose signal getter throws is not a raw rejection (the abort probe is total)", async () => {
-    const hostileCtx = new Proxy(makeCtx(), {
-      get(target, prop) {
-        if (prop === "signal") throw new Error("ctx signal getter exploded");
-        return Reflect.get(target, prop);
-      },
-    });
+    const hostileCtx = throwingGetter(makeCtx(), "signal", "ctx signal getter exploded");
     const client = new FakeLlmClient(new Map(), {
       withToolsScript: [{ type: "final", content: { result: 1 } }],
     });
@@ -491,12 +471,7 @@ describe("FakeLlmClient — FR-040 total guards (never a raw rejection)", () => 
   });
 
   test("a request with a throwing toolChoice getter never rejects raw (the tool_use branch reads it total)", async () => {
-    const hostileReq = new Proxy(toolsReq({ schema: FinalSchema }), {
-      get(target, prop) {
-        if (prop === "toolChoice") throw new Error("toolChoice getter exploded");
-        return Reflect.get(target, prop);
-      },
-    });
+    const hostileReq = throwingGetter(toolsReq({ schema: FinalSchema }), "toolChoice", "toolChoice getter exploded");
     // A tool_use turn is what reads `toolChoice`; an empty call list makes
     // dispatch a no-op and the loop advances to the script's end — proving
     // the read was total (no raw escape) and not equal to "none".
@@ -795,3 +770,39 @@ describe("FakeLlmClient: scripted prompt-cache figures", () => {
     expect(result.value.cacheReadTokens).toBe(0);
   });
 });
+
+// ── LlmClient port variance pin (round-14 C1) ───────────────────────────────
+// `LlmClient`'s members are declared as readonly ARROW PROPERTIES, not method
+// shorthand. TypeScript checks method-shorthand parameters BIVARIANTLY even
+// under `strictFunctionTypes`, so a shorthand declaration would let an
+// implementation narrow `ctx` to a type demanding fields a plain `NodeContext`
+// does not carry — satisfying the interface structurally, then crashing at
+// runtime when the framework invokes it with the context it built itself
+// (`nodes/llm-with-tools.ts` passes exactly that). `CapabilityBroker.mintFor`
+// documents and defends against this same hazard; this pins the defence for
+// the framework's most-implemented port.
+//
+// This is a COMPILE-TIME assertion with no runtime body: the framework
+// typechecks its own tests, so a regression to method shorthand makes
+// `NarrowingClient` assignable to `LlmClient` and `tsc` fails right here.
+
+type NarrowerContext = NodeContext & { readonly requiredExtra: string };
+
+/**
+ * An implementation that NARROWS `ctx` — must not satisfy `LlmClient`.
+ * The generic `<O>` is preserved deliberately: a non-generic stand-in would be
+ * unassignable for the wrong reason (signature arity), and the pin would pass
+ * even with the hole open.
+ */
+type NarrowingClient = {
+  readonly sendStructured: LlmClient["sendStructured"];
+  readonly sendWithTools: <O>(
+    req: SendWithToolsRequest<O>,
+    ctx: NarrowerContext,
+  ) => Promise<Result<LlmResponse<O>, FrameworkError>>;
+};
+
+const llmClientVariancePin: NarrowingClient extends LlmClient
+  ? "BIVARIANT — the soundness hole has reopened"
+  : "contravariant" = "contravariant";
+void llmClientVariancePin;

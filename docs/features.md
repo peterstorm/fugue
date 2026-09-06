@@ -27,6 +27,7 @@ Fugue is a DAG-shaped, durable runtime for LLM-bearing workflows. This document 
 19. [Cron Scheduler with Dependencies](#19-cron-scheduler-with-dependencies)
 20. [Architecture Enforcement](#20-architecture-enforcement)
 21. [Prompt Caching](#21-prompt-caching)
+22. [Per-Run Spend Budget](#22-per-run-spend-budget)
 
 ---
 
@@ -129,7 +130,7 @@ Without branded IDs, argument-swap bugs are **invisible at compile time**. A fun
 
 ### What It Does
 
-Every function that can fail returns `Result<T, FrameworkError>` instead of throwing. The `FrameworkError` is a discriminated union of 27 kinds, each with typed fields. A `never` guard in `formatFrameworkError` ensures adding a new error kind without handling it is a **compile error**.
+Runtime operation seams return `Result<T, FrameworkError>` instead of throwing. Smart constructors may throw when a caller violates a construction invariant, and the host's imperative-shell setup factories may reject on infrastructure failure; those exceptions are contained and translated at their outer shell. The `FrameworkError` is a discriminated union of 27 kinds, each with typed fields. A `never` guard in `formatFrameworkError` ensures adding a new error kind without handling it is a **compile error**.
 
 ### What It Catches
 
@@ -183,7 +184,7 @@ Exceptions are **invisible in the type system**. Any function can throw anything
 
 Each node declares `requires: readonly Capability[]` (e.g., `["llm", "prompts"]`). At run start — **before any node executes** — the runtime validates that the wired context satisfies all declared capabilities. The node's `run` function receives a narrowed `TypedNodeContext<R>` where required fields are guaranteed non-null.
 
-The capability set is **extensible** (ADR-0051): beyond the built-ins (`llm`, `cache`, `prompts`, `judgeLlm`, `http`, `clock`), adapter packages register new capabilities — e.g. `documents` (file I/O), `db` (Postgres) — by augmenting `CapabilityRegistry`. A node then declares `requires: ["db"] as const` and gets a typed, non-null `ctx.db`. Run `fugue capabilities` for the live built-in list; see `adapter-authoring.md` to write an adapter and `llm-document-source.md` for reading files.
+The capability set is **extensible** (ADR-0051): beyond the built-ins (`llm`, `cache`, `prompts`, `judgeLlm`, `http`, `clock`, `budget`), adapter packages register new capabilities — e.g. `documents` (file I/O), `db` (Postgres) — by augmenting `CapabilityRegistry`. A node then declares `requires: ["db"] as const` and gets a typed, non-null `ctx.db`. Run `fugue capabilities` for the live built-in list; see `adapter-authoring.md` to write an adapter and `llm-document-source.md` for reading files.
 
 ### What It Catches
 
@@ -1004,7 +1005,7 @@ usage.cacheReadTokens     //  9_000  — billed at ~0.1x
 uncachedInputTokens(usage)//  1_000  — derived
 ```
 
-Cost weights the three classes separately: uncached at 1.0x, cache-write at 1.25x (`5m`) or 2.0x (`1h`), cache-read at 0.1x. Traces carry `gen_ai.usage.cache_read_input_tokens`, `ai.prompt_cache.policy` and `ai.prompt_cache.effective`.
+Cost weights the three classes separately: uncached at 1.0x, cache-write at 1.25x (`5m`) or 2.0x (`1h`), cache-read at 0.1x. Traces carry `gen_ai.usage.cache_read_input_tokens`, `ai.prompt_cache.policy`, `ai.prompt_cache.effective`, and `ai.llm.cost_priced`; an unknown model's zero display estimate is therefore distinguishable from genuinely priced/free telemetry.
 
 ### Why It Matters
 
@@ -1023,7 +1024,7 @@ Refuses an LLM call **before** it happens once a run has reached a declared ceil
 llmBudget:
   usd: 2.50      # dollars — the axis that means what you meant
   tokens: 500000 # every token, both directions
-  calls: 40      # settled provider round trips
+  calls: 40      # delegated LLM attempts, including failed/malformed outcomes
 ```
 
 ```typescript
@@ -1040,19 +1041,58 @@ Cost is computed from the prompt-cache split, so a cached run and an uncached on
 
 **Unpriced models fail closed.** `PRICE_TABLE` is hand-maintained; a model with no entry has an unknown cost, and a `usd` ceiling refuses rather than treating unknown as free. The refusal names the model so the fix is obvious. Token and call ceilings are unaffected — they are perfectly evaluable on any model.
 
-Omitting every ceiling means no enforcement: calls are still metered and logged (`llm.metered`), never refused.
+Omitting every ceiling means no enforcement: calls are still metered and logged (`llm.metered`), never refused. Every delegated LLM attempt consumes the calls axis even when it returns a typed failure, malformed `Result`, or throws. Missing trustworthy usage is persisted as explicit uncertainty: call-only ceilings remain evaluable, while token and USD ceilings fail closed before another provider attempt.
+
+Nodes can declare the read-only Budget Capability and adapt before they fan out:
+
+```ts
+const plan = createFetchNode({
+  id: "plan",
+  requires: ["budget"] as const,
+  // `remaining()` uses the SAME projection as admission, including reservations.
+  fetch: async (_input, ctx) => {
+    const remaining = ctx.budget.remaining();
+    const spent = ctx.budget.spent(); // settled, deeply immutable snapshot
+    return ok({ remaining, spent });
+  },
+  // ...schemas/side effects...
+});
+```
+
+`remaining()` returns `{ kind: "unbudgeted" }` when no ceiling exists. Otherwise
+it returns canonical per-axis headroom with `basis: "projected"`; each available
+member carries a `unit` discriminant, token/call amounts are numbers, USD amounts
+are branded `MicroUsd`, and all clamp at zero. Spend axes are opaque
+non-negative safe integers; aggregation saturates at `Number.MAX_SAFE_INTEGER`,
+which fails closed against every valid ceiling. An unpriced model or unknown provider usage is explicit domain data
+(`unpriced` or `unknown-usage`), never fictional numeric availability. Budget reads can affect
+retry-time decisions, just like clock reads can affect time-dependent nodes, so
+node tests should inject `fixedBudgetCapability` from
+`@fuguejs/framework/testing`.
 
 ### Why It Matters
 
 Before prompt caching, a token count was a serviceable proxy for money. It no longer is: a cache read bills at 0.1x and a write at up to 2.0x, so three runs reporting the same 110,000 tokens can span **13.8x** in real cost. A ceiling that cannot see that difference is not protecting a budget.
 
-Overshoot is bounded rather than eliminated: the check runs before the call against spend that settles after it, so exactly one call passes a reached ceiling in the sequential case, and a concurrency reservation bounds the parallel case. See ADR-0082.
+Overshoot is bounded rather than eliminated: the check runs before the call against spend that settles after it, so exactly one call passes a reached ceiling in the sequential case. Concurrency reservations constrain warm bursts using the largest settled call learned so far; a cold first burst, or concurrent calls larger than that projection, can exceed the learned estimate until settlement widens it. See ADR-0082.
 
-**Spend is durable.** A resumable run builds a fresh NodeContext per execution slice, so the in-process counter alone would let a run that parks for a human decision resume with its budget refilled — five parks, six budgets. A spend ledger (Redis, or in-process for a single-process deployment) is hydrated once when a slice starts and appended to as calls settle, so a run that parked already over its ceiling refuses immediately on resume.
+**Spend durability depends on the selected ledger.** A resumable run builds a fresh NodeContext per execution slice, so a slice-local counter alone would refill the budget after a park. Redis and file ledgers survive process replacement; the in-process ledger carries spend only across slices in the same process and resets on restart. Every selected ledger is hydrated once per slice and appended as calls settle. Redis spend has no expiry when checkpoints have none; otherwise its retention is at least both the checkpoint TTL and the authoritative HITL run TTL, so a resumable run cannot outlive its accounting.
 
-A budgeted run whose ledger cannot be READ refuses the slice: an unreadable ledger is indistinguishable from a spent one, and assuming zero is the refill bug by another name. An unbudgeted run carries on — there is no ceiling to protect. A failed ledger WRITE never fails the call, because the tokens are already spent; it is logged at `error` under a declared budget.
+A budgeted run whose ledger cannot be READ refuses the slice: an unreadable ledger is indistinguishable from a spent one, and assuming zero is the refill bug by another name. An unbudgeted run carries on — there is no ceiling to protect. If a budgeted call's ledger WRITE is not acknowledged, the paid provider attempt remains counted in-process but the run fails non-retriably; continuing would let a later slice hydrate stale spend. Unbudgeted calls preserve their provider outcome and log the durability loss.
 
-**Known gaps:** an LLM client reaching a node through the capabilities bag (rather than `ctx.llm`) is unmetered — no deployment wires one today. And an F6 file-durable deployment gets the in-process ledger, so its spend survives parks but not process restarts. Both are tracked in `docs/plans/2026-08-27-f3-budget-capability.md`.
+One Run Spend Authority meters `ctx.llm`, `judgeLlm`, every custom
+boot-scoped `CapabilityHandle` marked `clientKind: "llm"`, and tagged
+broker-delivered LLM bindings before they enter a node context. Broker results
+form a closed `llm | non-llm` ADT, so an untagged client is rejected rather than
+passed through. Every scoped LLM carries a required `runScopedOperations` alias
+map; augmented subtypes derive its required keys from their client type, and the host interprets it into
+a frozen facade bound to the metered standard surface, so adapter code cannot
+retain a boot client or bypass the authority through target-bound self-calls. All clients share one reservation gate, spent view, ceiling, and
+ledger. File-durable embedders can
+inject the host's `createFileSpendLedger(root)` adapter as authoritative; Redis
+capability detection does not override it. Ledger metadata carries backend,
+durability, and role so only the actually selected memory fallback logs “NOT
+durable.” The stock host remains explicitly Redis-first with that memory fallback.
 
 ---
 

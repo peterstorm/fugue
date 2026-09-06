@@ -8,26 +8,30 @@ import { z } from "zod";
 import {
   createLlmWithToolsNode,
   toolName,
-  type FrameworkError,
-  type NodeDef,
+  type LlmWithToolsNodeDef,
   type ToolDef,
 } from "@fuguejs/framework";
-import type { CrmRecord } from "../../schemas/crm.js";
-
 // --- Tool definition ---------------------------------------------------------
 
+/** One closed deal — named once so the port, the tool's output type, and the
+ *  cache read below cannot drift apart. */
+interface Deal {
+  id: string;
+  amount: number;
+  closedAt: string;
+}
+
 interface DealsClient {
-  byCustomer: (
-    customerId: string,
-    limit: number,
-  ) => Promise<Array<{ id: string; amount: number; closedAt: string }>>;
+  byCustomer: (customerId: string, limit: number) => Promise<Deal[]>;
 }
 
 const makeLookupDealsTool = (
   deals: DealsClient,
 ): ToolDef<
-  { customerId: string; limit?: number },
-  { deals: Array<{ id: string; amount: number; closedAt: string }> }
+  // `limit` is NOT optional in the parsed input: the schema below applies
+  // `.default(20)`, so Zod guarantees a number by the time `run` sees it.
+  { customerId: string; limit: number },
+  { deals: Deal[] }
 > => ({
   name: toolName("lookup_deals_by_customer"),
   description: "Fetch closed deals for a customer (most recent first).",
@@ -50,10 +54,10 @@ const makeLookupDealsTool = (
     const cacheKey = `crm:deals:${customerId}:${limit}`;
     const lookup = await ctx.cache?.get(cacheKey);
     if (lookup?.hit) {
-      return lookup.value as { deals: Array<{ id: string; amount: number; closedAt: string }> };
+      return lookup.value as { deals: Deal[] };
     }
 
-    const result = { deals: await deals.byCustomer(customerId, limit ?? 20) };
+    const result = { deals: await deals.byCustomer(customerId, limit) };
     if (ctx.cache?.set) {
       const setResult = await ctx.cache.set(cacheKey, result, 300);
       if (!setResult.ok) {
@@ -85,7 +89,7 @@ type Output = z.infer<typeof EnrichedSummarySchema>;
 export const createEnrichWithToolsNode = (
   deals: DealsClient,
   model = "claude-sonnet-4-5",
-): NodeDef<Input, Output, FrameworkError> => {
+): LlmWithToolsNodeDef<Input, Output> => {
   const lookupDealsTool = makeLookupDealsTool(deals);
 
   return createLlmWithToolsNode<Input, Output>({
@@ -105,13 +109,3 @@ export const createEnrichWithToolsNode = (
       "activity over the last 12 months.",
   });
 };
-
-// --- Helpers used in tests / docs (kept exported for the example test) -------
-
-export const __forExample = {
-  makeLookupDealsTool,
-  EnrichedSummarySchema,
-};
-
-// Suppress unused import warnings for reference types.
-export type _Reference = CrmRecord;

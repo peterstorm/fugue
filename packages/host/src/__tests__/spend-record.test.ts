@@ -1,34 +1,40 @@
-/**
- * The durable encoding of `Spend` (domain/spend-record.ts).
- *
- * The load-bearing property is a ROUND TRIP: a spend written to a ledger and
- * read back in a later slice must be the same value, or the budget silently
- * changes meaning across a resume. It gets a property test rather than
- * examples, because the interesting inputs are the ones nobody thinks of.
- */
-
 import { describe, it, expect } from "bun:test";
 import * as fc from "fast-check";
 import type { MicroUsd, PricedSpend, Spend } from "@fuguejs/framework";
-import { NO_SPEND, addSpend, pricedCall, unpricedCall } from "@fuguejs/framework";
-import { parseFigure, recordOf, spendOfRecord } from "../domain/spend-record.js";
+import {
+  NO_MICROS,
+  NO_SPEND,
+  addSpend,
+  pricedCall,
+  unknownUsageCall,
+  unpricedCall,
+} from "@fuguejs/framework";
+import {
+  recordOf,
+  spendOfHash,
+  SPEND_HASH_FIELDS,
+  SPEND_MARKER_VALUE,
+  SPEND_USAGE_UNKNOWN_FIELD,
+  unpricedModelHashField,
+} from "../domain/spend-record.js";
 
 const micros = (n: number): MicroUsd => n as MicroUsd;
-
+const modelName = fc
+  .array(fc.integer({ min: 0, max: 0xffff }), { maxLength: 12 })
+  .map((codeUnits) => String.fromCharCode(...codeUnits));
 const arbSpend: fc.Arbitrary<Spend> = fc.oneof(
   fc.record({
+    usage: fc.constantFrom("known" as const, "unknown" as const),
     tokens: fc.nat({ max: 1_000_000 }),
     calls: fc.nat({ max: 100 }),
     usd: fc.nat({ max: 10_000_000 }).map((m): PricedSpend => ({ kind: "priced", micros: micros(m) })),
   }),
   fc.record({
+    usage: fc.constantFrom("known" as const, "unknown" as const),
     tokens: fc.nat({ max: 1_000_000 }),
     calls: fc.nat({ max: 100 }),
     usd: fc
-      .tuple(
-        fc.uniqueArray(fc.string({ minLength: 1, maxLength: 6 }), { minLength: 1, maxLength: 3 }),
-        fc.nat({ max: 10_000_000 }),
-      )
+      .tuple(fc.uniqueArray(modelName, { minLength: 1, maxLength: 3 }), fc.nat({ max: 10_000_000 }))
       .map(([models, m]): PricedSpend => ({
         kind: "unpriced",
         models: [...models].sort() as unknown as readonly [string, ...string[]],
@@ -37,101 +43,93 @@ const arbSpend: fc.Arbitrary<Spend> = fc.oneof(
   }),
 );
 
-describe("spend-record: round trip", () => {
+const hashOf = (spend: Spend): Readonly<Record<string, string>> => {
+  const record = recordOf(spend);
+  return {
+    ...(record.usageUnknown ? { [SPEND_USAGE_UNKNOWN_FIELD]: SPEND_MARKER_VALUE } : {}),
+    [SPEND_HASH_FIELDS.micros]: String(record.micros),
+    [SPEND_HASH_FIELDS.tokens]: String(record.tokens),
+    [SPEND_HASH_FIELDS.calls]: String(record.calls),
+    ...Object.fromEntries(record.unpricedModels.map((model) => [
+      unpricedModelHashField(model),
+      SPEND_MARKER_VALUE,
+    ])),
+  };
+};
+
+const parseOrThrow = (hash: Readonly<Record<string, string>>): Spend => {
+  const parsed = spendOfHash(hash);
+  if (!parsed.ok) throw new Error(`${parsed.error.field}: ${parsed.error.reason}`);
+  return parsed.value;
+};
+
+describe("spend-record: one-hash round trip", () => {
   it("is the identity for every Spend", () => {
-    // If this ever stops holding, a run's budget means one thing before a park
-    // and something else after it.
-    fc.assert(
-      fc.property(arbSpend, (spend) => {
-        expect(spendOfRecord(recordOf(spend))).toEqual(spend);
-      }),
-    );
+    fc.assert(fc.property(arbSpend, (spend) => {
+      expect(parseOrThrow(hashOf(spend))).toEqual(spend);
+    }));
   });
 
-  it("round-trips NO_SPEND to a PRICED zero, not an unpriced one", () => {
-    // A run that has spent nothing has a known cost of zero. Decoding it as
-    // `unpriced` would make every fresh budgeted run refuse on its first call.
-    expect(spendOfRecord(recordOf(NO_SPEND))).toEqual(NO_SPEND);
-    expect(spendOfRecord(recordOf(NO_SPEND)).usd.kind).toBe("priced");
+  it("reads an absent hash as priced NO_SPEND", () => {
+    expect(parseOrThrow({})).toEqual(NO_SPEND);
   });
 
-  it("preserves the priced/unpriced discriminant through the encoding", () => {
-    fc.assert(
-      fc.property(arbSpend, (spend) => {
-        expect(spendOfRecord(recordOf(spend)).usd.kind).toBe(spend.usd.kind);
-      }),
-    );
-  });
-});
-
-describe("spend-record: the discriminant is DERIVED from the model set", () => {
-  it("reads an empty model list as priced and a non-empty one as unpriced", () => {
-    // Storing the discriminant beside the set it describes would make
-    // `kind: "priced"` with a non-empty set representable — a record that
-    // contradicts itself. Deriving it removes that state entirely.
-    expect(spendOfRecord({ tokens: 1, calls: 1, micros: 5, unpricedModels: [] }).usd.kind).toBe("priced");
-    expect(spendOfRecord({ tokens: 1, calls: 1, micros: 5, unpricedModels: ["m"] }).usd.kind).toBe("unpriced");
+  it("sorts marker fields canonically and decodes arbitrary UTF-16 model names", () => {
+    fc.assert(fc.property(modelName, (model) => {
+      const parsed = parseOrThrow({ [unpricedModelHashField(model)]: "1" });
+      if (parsed.usd.kind !== "unpriced") throw new Error("expected unpriced");
+      expect([...parsed.usd.models]).toEqual([model]);
+    }));
   });
 
-  it("ignores empty-string model names rather than fabricating an unpriced total", () => {
-    // A backend that returned `[""]` for an absent set would otherwise flip a
-    // perfectly priced run to unevaluable and refuse it under a usd ceiling.
-    expect(spendOfRecord({ tokens: 1, calls: 1, micros: 5, unpricedModels: [""] }).usd.kind).toBe("priced");
-  });
-
-  it("sorts and de-duplicates, so a hydrated spend equals the stored one", () => {
-    // Redis SMEMBERS has no defined order. Without canonicalising here,
-    // `addSpend`'s commutativity would hold in memory and break across a
-    // resume — the same value comparing unequal to itself.
-    const decoded = spendOfRecord({
-      tokens: 0, calls: 0, micros: 0,
-      unpricedModels: ["z", "a", "z", "m"],
-    });
-    if (decoded.usd.kind !== "unpriced") throw new Error("expected unpriced");
-    expect([...decoded.usd.models]).toEqual(["a", "m", "z"]);
+  it("round-trips lone surrogates without throwing", () => {
+    const model = `prefix-${String.fromCharCode(0xd800)}-suffix`;
+    expect(() => unpricedModelHashField(model)).not.toThrow();
+    const parsed = parseOrThrow({ [unpricedModelHashField(model)]: "1" });
+    if (parsed.usd.kind !== "unpriced") throw new Error("expected unpriced");
+    expect(parsed.usd.models).toEqual([model]);
   });
 });
 
-describe("spend-record: malformed figures read SAFE, never as an error", () => {
-  it("clamps non-finite and negative figures to zero", () => {
-    const decoded = spendOfRecord({
-      tokens: Number.NaN,
-      calls: -5,
-      micros: Number.POSITIVE_INFINITY,
-      unpricedModels: [],
-    });
-    expect(decoded.tokens).toBe(0);
-    expect(decoded.calls).toBe(0);
-    if (decoded.usd.kind !== "priced") throw new Error("expected priced");
-    expect(decoded.usd.micros).toBe(micros(0));
-  });
-
-  it("parses a stored string field, treating absent and unparseable as zero", () => {
-    expect(parseFigure("1234")).toBe(1234);
-    expect(parseFigure(undefined)).toBe(0);
-    expect(parseFigure(null)).toBe(0);
-    expect(parseFigure("not-a-number")).toBe(0);
-    expect(parseFigure("-99")).toBe(0);
+describe("spend-record: strict controlled-field grammar", () => {
+  it.each([
+    ["unknown", { other: "1" }, "unknown-field"],
+    ["negative", { tokens: "-1" }, "invalid-numeric-value"],
+    ["decimal", { calls: "1.5" }, "invalid-numeric-value"],
+    ["exponent", { micros: "1e3" }, "invalid-numeric-value"],
+    ["leading zero", { tokens: "01" }, "invalid-numeric-value"],
+    ["unsafe", { tokens: "9007199254740992" }, "invalid-numeric-value"],
+    ["marker field", { "$unpriced:000": "1" }, "invalid-marker-field"],
+    ["non-canonical marker field", { "$unpriced:004A": "1" }, "invalid-marker-field"],
+    ["marker value", { [unpricedModelHashField("model")]: "2" }, "invalid-marker-value"],
+    ["usage marker value", { [SPEND_USAGE_UNKNOWN_FIELD]: "2" }, "invalid-marker-value"],
+  ] as const)("rejects %s data", (_label, hash, reason) => {
+    const parsed = spendOfHash(hash);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error.reason).toBe(reason);
   });
 });
 
-describe("spend-record: the encoding is appendable", () => {
-  it("summing two records equals encoding their sum — the whole reason for the shape", () => {
-    // This is what lets an adapter use HINCRBY instead of a read-modify-write.
-    // If it stopped holding, concurrent appends would need a lock.
-    fc.assert(
-      fc.property(arbSpend, arbSpend, (a, b) => {
-        const summed = recordOf(addSpend(a, b));
-        const ra = recordOf(a);
-        const rb = recordOf(b);
-        expect(summed.tokens).toBe(ra.tokens + rb.tokens);
-        expect(summed.calls).toBe(ra.calls + rb.calls);
-        expect(summed.micros).toBe(ra.micros + rb.micros);
-        expect([...summed.unpricedModels].sort()).toEqual(
-          [...new Set([...ra.unpricedModels, ...rb.unpricedModels])].sort(),
-        );
-      }),
-    );
+describe("spend-record: append algebra", () => {
+  it("numeric sums and model-field union encode addSpend", () => {
+    fc.assert(fc.property(arbSpend, arbSpend, (a, b) => {
+      const summed = recordOf(addSpend(a, b));
+      const ra = recordOf(a);
+      const rb = recordOf(b);
+      expect(summed.tokens).toBe(ra.tokens + rb.tokens);
+      expect(summed.calls).toBe(ra.calls + rb.calls);
+      expect(summed.micros).toBe(ra.micros + rb.micros);
+      expect(summed.usageUnknown).toBe(ra.usageUnknown || rb.usageUnknown);
+      expect([...summed.unpricedModels].sort()).toEqual(
+        [...new Set([...ra.unpricedModels, ...rb.unpricedModels])].sort(),
+      );
+    }));
+  });
+
+  it("persists unknown usage as an absorbing marker", () => {
+    const unknown = unknownUsageCall({ kind: "priced", micros: NO_MICROS });
+    expect(parseOrThrow(hashOf(unknown))).toEqual(unknown);
+    expect(recordOf(addSpend(pricedCall(1, micros(1)), unknown)).usageUnknown).toBe(true);
   });
 
   it("keeps the priced floor when an unpriced call joins a priced total", () => {

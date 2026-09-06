@@ -12,13 +12,24 @@
 
 import { describe, it, expect } from "bun:test";
 import { ok, err, isOk, isErr } from "@fuguejs/framework";
-import type { Capability, CapabilityHandle } from "@fuguejs/framework";
+import type { Capability, CapabilityHandle, LlmClient } from "@fuguejs/framework";
+interface ComposedLlm extends LlmClient {
+  readonly alias: LlmClient["sendStructured"];
+}
+
+declare module "@fuguejs/framework" {
+  interface CapabilityRegistry {
+    composedLlm: ComposedLlm;
+  }
+}
+
 import {
   topoSortHandles,
   connectAll,
   closeAll,
   checkHealth,
   extractClients,
+  runScopedLlmFacade,
 } from "../domain/capability-manager.js";
 
 // ---------------------------------------------------------------------------
@@ -203,8 +214,9 @@ describe("capability-manager", () => {
       }
     });
 
-    it("a throwing error logger cannot mask the connect failure or skip failing-handle cleanup", async () => {
+    it("a throwing error logger cannot mask the connect failure and emits a fallback breadcrumb", async () => {
       let failingClosed = false;
+      const fallback: string[] = [];
       const handles = [
         makeHandle("b", {
           connect: async () => { throw new Error("connect-boom"); },
@@ -216,10 +228,34 @@ describe("capability-manager", () => {
         error: () => { throw new Error("logger transport down"); },
       };
 
-      const result = await connectAll(handles, logger);
+      const result = await connectAll(handles, logger, (diagnostic) => {
+        fallback.push(diagnostic);
+      });
 
       expect(isErr(result)).toBe(true);
       expect(failingClosed).toBe(true);
+      expect(fallback.some((line) =>
+        line.includes("host diagnostic fallback") &&
+        line.includes("failed to connect") &&
+        line.includes("logger transport down")
+      )).toBe(true);
+      if (!result.ok) expect(result.error.error.message).toContain("connect-boom");
+    });
+
+    it("keeps the connect Result authoritative when logger and stderr fallback both throw", async () => {
+      let closed = false;
+      const result = await connectAll([
+        makeHandle("broken", {
+          connect: async () => { throw new Error("connect-boom"); },
+          close: async () => { closed = true; },
+        }),
+      ], {
+        info: () => { throw new Error("logger down"); },
+        error: () => { throw new Error("logger down"); },
+      }, () => { throw new Error("stderr down"); });
+
+      expect(result.ok).toBe(false);
+      expect(closed).toBe(true);
       if (!result.ok) expect(result.error.error.message).toContain("connect-boom");
     });
 
@@ -258,10 +294,14 @@ describe("capability-manager", () => {
       const result = await connectAll(handles, logger);
       expect(isErr(result)).toBe(true);
       if (!result.ok) {
-        // The surfaced error is the connect failure, not the close failure.
+        // The surfaced primary is still the connect failure, while cleanup
+        // evidence remains structured for the host's boot-abort aggregate.
         expect(result.error.error.message).toContain("connect-boom");
+        expect(result.error.cleanupFailures).toEqual([
+          { name: "b", error: "close-boom" },
+        ]);
       }
-      // The close failure is logged, not swallowed.
+      // The close failure is logged as well as returned.
       expect(errorLogs.some((m) => m.includes("failed to close after connect failure"))).toBe(true);
     });
   });
@@ -315,7 +355,7 @@ describe("capability-manager", () => {
       expect(order).toEqual(["b", "a"]);
     });
 
-    it("a throwing warn logger cannot mask a close failure or stop later closes", async () => {
+    it("a throwing warn logger and stderr fallback cannot mask a close failure or stop later closes", async () => {
       const order: string[] = [];
       const hostile = Object.create(null) as Record<string, unknown>;
       Object.defineProperty(hostile, "message", { get: () => { throw new Error("message getter"); } });
@@ -330,7 +370,11 @@ describe("capability-manager", () => {
         warn: () => { throw new Error("logger transport down"); },
       };
 
-      const failures = await closeAll(handles, logger);
+      const failures = await closeAll(
+        handles,
+        logger,
+        () => { throw new Error("stderr transport down"); },
+      );
 
       expect(order).toEqual(["c", "a"]);
       expect(failures).toEqual([{ name: "b", error: "[object Object]" }]);
@@ -369,6 +413,21 @@ describe("capability-manager", () => {
       expect(report.capabilities[0]?.status).toBe("no-check");
     });
 
+    it("a throwing healthCheck accessor is contained as unhealthy", async () => {
+      const hostile = Object.defineProperty(makeHandle("a"), "healthCheck", {
+        get: () => { throw new Error("accessor failed"); },
+      });
+
+      const report = await checkHealth([hostile]);
+
+      expect(report.overall).toBe("degraded");
+      expect(report.capabilities).toEqual([{
+        status: "unhealthy",
+        name: "a",
+        reason: "accessor failed",
+      }]);
+    });
+
     it("healthCheck that throws → unhealthy", async () => {
       const handles = [
         makeHandle("a", { healthCheck: async () => { throw new Error("timeout"); } }),
@@ -392,6 +451,95 @@ describe("capability-manager", () => {
 
     it("empty handles → empty record", () => {
       expect(extractClients([])).toEqual({});
+    });
+
+    it("decorates each explicitly marked LLM once and preserves non-LLM identity", () => {
+      const llm = {} as LlmClient;
+      const plain = { query: "same-reference" };
+      const replacement = {} as LlmClient;
+      const seen: Capability[] = [];
+      const handles = [
+        {
+          name: "judgeLlm",
+          client: llm,
+          clientKind: "llm",
+          pricingModel: { kind: "request" },
+        },
+        makeHandle("db", { client: plain }),
+      ] as readonly CapabilityHandle[];
+
+      const clients = extractClients(handles, {
+        llm: (name, client) => {
+          seen.push(name);
+          expect(client).toBe(llm);
+          return replacement;
+        },
+      });
+
+      expect(seen).toEqual(["judgeLlm"]);
+      expect(clients.judgeLlm).toBe(replacement);
+      expect((clients as Record<string, unknown>).db).toBe(plain);
+    });
+
+    it("interprets augmented aliases through the metered surface only", async () => {
+      let bootCalls = 0;
+      let meteredCalls = 0;
+      const result = ok({ output: {}, tokensIn: 0, tokensOut: 0, cacheWriteTokens: 0, cacheReadTokens: 0, rawText: "" });
+      const boot: ComposedLlm = {
+        sendStructured: async () => { bootCalls += 1; return result; },
+        sendWithTools: async () => { bootCalls += 1; return result; },
+        alias: async () => { bootCalls += 1; return result; },
+      };
+      const metered: LlmClient = {
+        sendStructured: async () => { meteredCalls += 1; return result; },
+        sendWithTools: async () => { meteredCalls += 1; return result; },
+      };
+      const handles: readonly CapabilityHandle[] = [{
+        name: "composedLlm",
+        client: boot,
+        clientKind: "llm",
+        pricingModel: { kind: "request" },
+        runScopedOperations: { alias: "sendStructured" },
+      }];
+
+      const clients = extractClients(handles, { llm: () => metered });
+      const facade = clients.composedLlm;
+      if (facade === undefined) throw new Error("expected composed client");
+      await facade.alias({} as never);
+      await facade.sendWithTools({} as never, {} as never);
+
+      expect(bootCalls).toBe(0);
+      expect(meteredCalls).toBe(2);
+      expect(Object.getPrototypeOf(facade)).toBeNull();
+      expect(Object.isFrozen(facade)).toBe(true);
+    });
+
+    // The facade is what binds an augmented capability's aliases to the metered
+    // surface. Both guards below keep an alias from shadowing or forging a
+    // provider operation — the only two ways an alias map could open a path
+    // around the budget gate.
+    it("refuses an alias that would replace a standard operation", () => {
+      const metered = {
+        sendStructured: async () => ok({}) as never,
+        sendWithTools: async () => ok({}) as never,
+      } as unknown as LlmClient;
+
+      for (const standard of ["sendStructured", "sendWithTools"] as const) {
+        expect(() => runScopedLlmFacade(metered, { [standard]: "sendStructured" }))
+          .toThrow(`runScopedOperations cannot replace standard operation '${standard}'`);
+      }
+    });
+
+    it("refuses an alias naming an operation that does not exist", () => {
+      const metered = {
+        sendStructured: async () => ok({}) as never,
+        sendWithTools: async () => ok({}) as never,
+      } as unknown as LlmClient;
+
+      for (const bogus of ["sendRaw", "", "constructor", undefined, 7]) {
+        expect(() => runScopedLlmFacade(metered, { critique: bogus }))
+          .toThrow(`runScopedOperations alias 'critique' names unknown operation '${String(bogus)}'`);
+      }
     });
 
     it("throws on duplicate handle names (defence-in-depth past topoSort)", () => {

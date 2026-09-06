@@ -5,6 +5,8 @@ import {
   createFetchNode,
   createTransformNode,
   createEvalJudgeNode,
+  defineDagFromArray,
+  DAG_INPUT,
   ok,
   nodeId,
   dagId,
@@ -93,7 +95,7 @@ describe("defineRouter", () => {
     expect(cond?.when.version).toBe(1);
   });
 
-  it("passes through whenPredicate unchanged (advanced form)", () => {
+  it("snapshots whenPredicate metadata while preserving its validated check (advanced form)", () => {
     const customPredicate = {
       label: "custom-label",
       version: 7,
@@ -113,11 +115,16 @@ describe("defineRouter", () => {
       default: fallback,
     });
 
+    customPredicate.label = "mutated-after-definition";
+    customPredicate.version = 99;
+
     const cond = dag.edges.find(isConditionalEdge);
-    expect(cond?.when).toBe(customPredicate);
+    expect(cond?.when).not.toBe(customPredicate);
     expect(cond?.when.label).toBe("custom-label");
     expect(cond?.when.version).toBe(7);
     expect(cond?.when.minConfidence).toBe("high");
+    expect(cond?.when.check).toBe(customPredicate.check);
+    expect(Object.isFrozen(cond?.when)).toBe(true);
   });
 
   it("throws a structured DagDefinitionError on empty cases", () => {
@@ -159,6 +166,39 @@ describe("defineRouter", () => {
     expect(captured).toBeInstanceOf(DagDefinitionError);
     const err = captured as DagDefinitionError;
     expect(err.detail.kind).toBe("duplicate-edge");
+  });
+
+  // Re-listing the SAME node is legitimate — the test above depends on it, and
+  // one shared router target must collapse to one entry. Two DIFFERENT
+  // definitions under one id is the authoring error: `Object.fromEntries` would
+  // keep the last and drop the other with no diagnostic.
+  it("rejects two different definitions sharing one node id", () => {
+    const first = createTransformNode({
+      id: "collide",
+      inputSchema: z.any(),
+      outputSchema: z.any(),
+      transform: () => ok({ which: "first" }),
+    });
+    const second = createTransformNode({
+      id: "collide",
+      inputSchema: z.any(),
+      outputSchema: z.any(),
+      transform: () => ok({ which: "second" }),
+    });
+
+    let caught: unknown;
+    try {
+      defineDagFromArray({
+        id: "id-collision",
+        nodes: [first, second],
+        edges: [{ from: DAG_INPUT, to: "collide" }],
+      });
+    } catch (e) { caught = e; }
+
+    expect(caught).toBeInstanceOf(DagDefinitionError);
+    const dagErr = caught as DagDefinitionError;
+    expect(dagErr.detail.kind).toBe("validation");
+    expect(dagErr.message).toContain("two different nodes under id 'collide'");
   });
 
   it("passes through evalJudges", () => {

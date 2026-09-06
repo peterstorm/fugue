@@ -16,26 +16,38 @@ import {
   NO_SPEND,
   addSpend,
   costFloor,
+  makeSpend,
   maxSpend,
+  microUsd,
   microsToUsd,
+  parseSpend,
   pricedCall,
   scaleSpend,
+  unknownUsageCall,
   unpricedCall,
+  unpricedModels,
   usdToMicros,
 } from "../types/spend.js";
 
-const micros = (n: number): MicroUsd => n as MicroUsd;
+const micros = (n: number): MicroUsd => microUsd(n);
+const modelsOf = (models: readonly string[]) => {
+  const canonical = unpricedModels(models);
+  if (canonical === undefined) throw new Error("expected non-empty model names");
+  return canonical;
+};
 
 /** Arbitrary spends, both priced and unpriced, with realistic magnitudes. */
 const arbSpend: fc.Arbitrary<Spend> = fc.oneof(
   fc.record({
+    usage: fc.constant("known" as const),
     tokens: fc.nat({ max: 1_000_000 }),
     calls: fc.nat({ max: 100 }),
     usd: fc.nat({ max: 10_000_000 }).map(
       (m): PricedSpend => ({ kind: "priced", micros: micros(m) }),
     ),
-  }),
+  }).map(makeSpend),
   fc.record({
+    usage: fc.constant("known" as const),
     tokens: fc.nat({ max: 1_000_000 }),
     calls: fc.nat({ max: 100 }),
     usd: fc
@@ -47,38 +59,188 @@ const arbSpend: fc.Arbitrary<Spend> = fc.oneof(
         kind: "unpriced",
         // The type guarantees non-emptiness; `uniqueArray` guarantees it at
         // runtime, and sorting matches the canonical form `unionModels` keeps.
-        models: [...models].sort() as unknown as readonly [string, ...string[]],
+        models: modelsOf(models),
         knownMicros: micros(m),
       })),
-  }),
+  }).map(makeSpend),
 );
 
 describe("MicroUsd: money as an integer", () => {
-  it("rounds a USD float to whole micro-dollars", () => {
+  it("rounds every positive USD amount upward so billable calls cannot disappear", () => {
     expect(usdToMicros(1.5)).toBe(micros(1_500_000));
-    expect(usdToMicros(0.0000004)).toBe(micros(0));
+    expect(usdToMicros(0.0000004)).toBe(micros(1));
     expect(usdToMicros(0.0000006)).toBe(micros(1));
+
+    const repeated = Array.from({ length: 10 }, () => pricedCall(0, usdToMicros(0.0000001)))
+      .reduce(addSpend, NO_SPEND);
+    expect(costFloor(repeated.usd)).toBe(micros(10));
+  });
+
+  it("maps every generated positive sub-micro-dollar charge to nonzero spend", () => {
+    fc.assert(fc.property(
+      fc.integer({ min: 1, max: 999 }),
+      (nanoUsd) => usdToMicros(nanoUsd / 1_000_000_000) >= micros(1),
+    ));
   });
 
   it("round-trips through the display conversion", () => {
     expect(microsToUsd(usdToMicros(2.5))).toBeCloseTo(2.5, 10);
   });
 
-  it("reads a non-finite or negative figure as zero rather than poisoning every later sum", () => {
-    // A NaN would propagate through the run total, and `NaN >= limit` is false
-    // forever — the budget would fail OPEN permanently. Negative would be a
-    // refund, which a provider cannot issue.
+  it("maps invalid non-positive inputs to zero and positive overflow to saturation", () => {
+    // NaN must not poison comparisons and negative values cannot be refunds.
+    // Positive infinity/overflow is cost, so both money constructors saturate fail-closed.
+    expect(microUsd(Number.NaN)).toBe(micros(0));
+    expect(microUsd(Number.NEGATIVE_INFINITY)).toBe(micros(0));
+    expect(microUsd(Number.POSITIVE_INFINITY)).toBe(microUsd(Number.MAX_SAFE_INTEGER));
     expect(usdToMicros(Number.NaN)).toBe(micros(0));
-    expect(usdToMicros(Number.POSITIVE_INFINITY)).toBe(micros(0));
+    expect(usdToMicros(Number.POSITIVE_INFINITY)).toBe(microUsd(Number.MAX_SAFE_INTEGER));
+    expect(usdToMicros(Number.NEGATIVE_INFINITY)).toBe(micros(0));
     expect(usdToMicros(-5)).toBe(micros(0));
+    expect(usdToMicros(Number.MAX_VALUE)).toBe(microUsd(Number.MAX_SAFE_INTEGER));
+  });
+
+  it("saturates every generated positive unsafe micro-USD input", () => {
+    fc.assert(fc.property(
+      fc.double({ min: Number.MAX_SAFE_INTEGER, noNaN: true, noDefaultInfinity: true }),
+      (value) => microUsd(value) === microUsd(Number.MAX_SAFE_INTEGER),
+    ));
   });
 
   it("stays exact under repeated addition where a float would drift", () => {
-    // 0.1 + 0.2 !== 0.3 in binary floating point. In micro-USD it is exact, and
-    // exactness is what lets two operators reconcile the same run identically.
     const tenth = usdToMicros(0.1);
-    const total = [tenth, tenth, tenth].reduce((a, b) => (a + b) as MicroUsd, NO_MICROS);
-    expect(total).toBe(usdToMicros(0.3));
+    const total = [tenth, tenth, tenth]
+      .map((amount) => pricedCall(0, amount))
+      .reduce(addSpend, NO_SPEND);
+    expect(costFloor(total.usd)).toBe(usdToMicros(0.3));
+  });
+
+  it("saturates overflowing money and counts at MAX_SAFE_INTEGER (fail closed)", () => {
+    const max = pricedCall(Number.MAX_SAFE_INTEGER, microUsd(Number.MAX_SAFE_INTEGER));
+    const saturated = addSpend(max, pricedCall(1, microUsd(1)));
+    expect(saturated.tokens).toBe(Number.MAX_SAFE_INTEGER);
+    expect(saturated.calls).toBe(2);
+    expect(costFloor(saturated.usd)).toBe(microUsd(Number.MAX_SAFE_INTEGER));
+    expect(scaleSpend(max, 2).tokens).toBe(Number.MAX_SAFE_INTEGER);
+  });
+
+  it("rejects forged negative, unsafe, and non-canonical adapter values", () => {
+    for (const value of [
+      { ...NO_SPEND, tokens: -1 },
+      { ...NO_SPEND, calls: Number.MAX_SAFE_INTEGER + 1 },
+      {
+        ...NO_SPEND,
+        usd: { kind: "unpriced", models: ["z", "a"], knownMicros: 0 },
+      },
+      {
+        ...NO_SPEND,
+        usd: { kind: "unpriced", models: ["a", "a"], knownMicros: 0 },
+      },
+    ]) {
+      expect(parseSpend(value).ok).toBe(false);
+    }
+  });
+
+  // `parseSpend` is the boundary parser guarding adapter-supplied spend before
+  // it enters budget arithmetic, so every early return in it is a fail-closed
+  // path. The cases below are the ones no test reached: they are all "the
+  // value is the wrong SHAPE" rather than "the number is out of range", which
+  // is what the forged-value test above covers.
+  it("rejects malformed top-level and usd shapes, naming the offending field", () => {
+    const cases: readonly (readonly [label: string, value: unknown, expected: string])[] = [
+      ["a non-object", 42, "Spend"],
+      ["null", null, "Spend"],
+      ["an array", [], "Spend"],
+      ["an invalid usage enum", { ...NO_SPEND, usage: "maybe" }, "Spend.usage"],
+      ["a missing usage", { tokens: 0, calls: 0, usd: { kind: "priced", micros: 0 } }, "usage"],
+      ["a non-object usd", { ...NO_SPEND, usd: 1 }, "Spend.usd"],
+      ["a missing usd.kind", { ...NO_SPEND, usd: {} }, "kind"],
+      ["an invalid usd.kind", { ...NO_SPEND, usd: { kind: "free" } }, "Spend.usd.kind"],
+      ["a priced usd with no micros", { ...NO_SPEND, usd: { kind: "priced" } }, "micros"],
+      [
+        "a priced usd with non-integer micros",
+        { ...NO_SPEND, usd: { kind: "priced", micros: 1.5 } },
+        "Spend.usd.micros",
+      ],
+      [
+        "an unpriced usd with no knownMicros",
+        { ...NO_SPEND, usd: { kind: "unpriced", models: ["a"] } },
+        "knownMicros",
+      ],
+    ];
+    for (const [label, value, expected] of cases) {
+      const result = parseSpend(value);
+      expect(result.ok, `expected ${label} to be rejected`).toBe(false);
+      // The message must name the field: this parser's whole job is telling an
+      // operator WHICH adapter value was wrong, and a generic "invalid Spend"
+      // would make every one of these branches indistinguishable in a log.
+      if (!result.ok) expect(result.error, `for ${label}`).toContain(expected);
+    }
+  });
+
+  it("accepts both usage values and round-trips a valid unpriced spend", () => {
+    // The positive twin of the rejection table: proves the checks above reject
+    // the shape rather than simply rejecting everything.
+    for (const usage of ["known", "unknown"] as const) {
+      const parsed = parseSpend({ ...NO_SPEND, usage });
+      expect(parsed.ok).toBe(true);
+      if (parsed.ok) expect(parsed.value.usage).toBe(usage);
+    }
+    const unpriced = parseSpend({
+      usage: "known",
+      tokens: 3,
+      calls: 1,
+      usd: { kind: "unpriced", models: ["a", "b"], knownMicros: 7 },
+    });
+    expect(unpriced.ok).toBe(true);
+    if (unpriced.ok) {
+      expect(unpriced.value.tokens).toBe(3);
+      expect(unpriced.value.usd).toEqual({
+        kind: "unpriced",
+        models: modelsOf(["a", "b"]),
+        knownMicros: micros(7),
+      });
+    }
+  });
+
+  it("keeps revoked and accessor-backed model arrays inside the Result boundary", () => {
+    const revoked = Proxy.revocable(["model-a"], {});
+    revoked.revoke();
+    let reads = 0;
+    const accessorModels = ["placeholder"];
+    Object.defineProperty(accessorModels, "0", {
+      enumerable: true,
+      get: () => {
+        reads += 1;
+        return "model-a";
+      },
+    });
+    const spendWith = (models: unknown) => ({
+      ...NO_SPEND,
+      usd: { kind: "unpriced", models, knownMicros: 0 },
+    });
+
+    expect(parseSpend(spendWith(revoked.proxy)).ok).toBe(false);
+    expect(parseSpend(spendWith(accessorModels)).ok).toBe(false);
+    expect(reads).toBe(0);
+  });
+});
+
+describe("UnpricedModels canonicalization", () => {
+  it("sorts, deduplicates, and is idempotent for arbitrary non-empty inputs", () => {
+    fc.assert(fc.property(
+      fc.array(fc.string({ minLength: 1, maxLength: 24 }), {
+        minLength: 1,
+        maxLength: 40,
+      }),
+      (input) => {
+        const canonical = unpricedModels(input);
+        expect(canonical).toBeDefined();
+        if (canonical === undefined) return;
+        expect([...canonical]).toEqual([...new Set(input)].sort());
+        expect(unpricedModels(canonical)).toEqual(canonical);
+      },
+    ));
   });
 });
 
@@ -120,6 +282,16 @@ describe("addSpend: a commutative monoid", () => {
         expect(costFloor(sum.usd)).toBeGreaterThanOrEqual(costFloor(a.usd));
       }),
     );
+  });
+});
+
+describe("addSpend: unknown usage absorbs", () => {
+  it("cannot become known again under either append order", () => {
+    fc.assert(fc.property(arbSpend, (known) => {
+      const unknown = unknownUsageCall({ kind: "priced", micros: NO_MICROS });
+      expect(addSpend(known, unknown).usage).toBe("unknown");
+      expect(addSpend(unknown, known).usage).toBe("unknown");
+    }));
   });
 });
 
@@ -171,11 +343,12 @@ describe("per-call constructors", () => {
 describe("scaleSpend: the in-flight projection", () => {
   it("multiplies every axis", () => {
     const scaled = scaleSpend(pricedCall(100, micros(2_000)), 3);
-    expect(scaled).toEqual({
+    expect(scaled).toEqual(makeSpend({
+      usage: "known",
       tokens: 300,
       calls: 3,
       usd: { kind: "priced", micros: micros(6_000) },
-    });
+    }));
   });
 
   it("yields a PRICED zero for zero calls, even from an unpriced estimate", () => {
@@ -196,15 +369,33 @@ describe("scaleSpend: the in-flight projection", () => {
   });
 });
 
+/** `unpricedModels` returns undefined only for an empty list; unwrap for tests. */
+const canonicalModelsOf = (models: readonly string[]) => {
+  const canonical = unpricedModels(models);
+  if (canonical === undefined) throw new Error("expected non-empty models");
+  return canonical;
+};
+
 describe("maxSpend: the learned per-call estimate", () => {
   it("takes the per-axis maximum", () => {
-    const a = { tokens: 10, calls: 1, usd: { kind: "priced", micros: micros(500) } } as const;
-    const b = { tokens: 4, calls: 3, usd: { kind: "priced", micros: micros(900) } } as const;
-    expect(maxSpend(a, b)).toEqual({
+    const a = makeSpend({
+      usage: "known",
       tokens: 10,
+      calls: 1,
+      usd: { kind: "priced", micros: micros(500) },
+    });
+    const b = makeSpend({
+      usage: "known",
+      tokens: 4,
       calls: 3,
       usd: { kind: "priced", micros: micros(900) },
     });
+    expect(maxSpend(a, b)).toEqual(makeSpend({
+      usage: "known",
+      tokens: 10,
+      calls: 3,
+      usd: { kind: "priced", micros: micros(900) },
+    }));
   });
 
   it("prefers unpriced on the cost axis", () => {
@@ -212,6 +403,37 @@ describe("maxSpend: the learned per-call estimate", () => {
     // cannot honestly be a number.
     expect(maxSpend(pricedCall(10, micros(9_999)), unpricedCall(1, "m")).usd.kind).toBe("unpriced");
     expect(maxSpend(unpricedCall(1, "m"), pricedCall(10, micros(9_999))).usd.kind).toBe("unpriced");
+  });
+
+  it("unions the offending model names when BOTH sides are unpriced", () => {
+    // `addSpend` is asserted on the merged model list; the estimate has to be
+    // held to the same standard. A max that kept only one side's models would
+    // still report `kind: "unpriced"` — passing the kind-only check above —
+    // while naming half the models an operator has to go and price.
+    const est = maxSpend(unpricedCall(10, "model-z"), unpricedCall(4, "model-a"));
+    expect(est.usd.kind).toBe("unpriced");
+    if (est.usd.kind !== "unpriced") return;
+    expect([...est.usd.models]).toEqual(["model-a", "model-z"]);
+  });
+
+  it("keeps the larger priced floor when both sides are unpriced", () => {
+    const a = makeSpend({
+      usage: "known",
+      tokens: 1,
+      calls: 1,
+      usd: { kind: "unpriced", models: canonicalModelsOf(["m1"]), knownMicros: micros(400) },
+    });
+    const b = makeSpend({
+      usage: "known",
+      tokens: 1,
+      calls: 1,
+      usd: { kind: "unpriced", models: canonicalModelsOf(["m2"]), knownMicros: micros(900) },
+    });
+    const est = maxSpend(a, b);
+    expect(est.usd.kind).toBe("unpriced");
+    if (est.usd.kind !== "unpriced") return;
+    expect(est.usd.knownMicros).toBe(micros(900));
+    expect([...est.usd.models]).toEqual(["m1", "m2"]);
   });
 
   it("is commutative and idempotent", () => {

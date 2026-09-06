@@ -13,6 +13,8 @@
 import { describe, it, expect } from "bun:test";
 import * as fc from "fast-check";
 import {
+  circuitOpen,
+  HOST_ERROR_KINDS,
   httpStatusFor,
   formatHostError,
   retryAfterSeconds,
@@ -21,6 +23,7 @@ import {
   tenantOverQuota,
   workerUnavailable,
   type HostError,
+  type HostErrorKind,
 } from "../../domain/host-error.js";
 import {
   classifyHostError,
@@ -95,6 +98,97 @@ describe("retryAfterSecondsFor", () => {
   });
   it("worker-unavailable advertises a fixed 5s — single-sourced for BOTH the middleware and classifier", () => {
     expect(retryAfterSecondsFor(workerUnavailable(tid("acme")))).toBe(5);
+  });
+
+  // ── The policy table itself (round-13 C6) ──────────────────────────────────
+  // `retryAfterSecondsFor` is a per-kind lookup table. The compiler proves it
+  // has an entry for every kind, but NOT that any entry holds the right value —
+  // two rows swapped by a copy/paste would change the advertised backoff for a
+  // budget or quota error with nothing to catch it. This pins the whole table.
+  //
+  // `satisfies Record<HostErrorKind, ...>` is the second half: a newly added
+  // HostError kind fails TYPECHECK here until its backoff is deliberately
+  // pinned, so the table can never grow an unreviewed row.
+
+  /** Every kind whose backoff is a constant, and the exact value it advertises. */
+  const CONSTANT_BACKOFF = {
+    "git-clone-failed": undefined,
+    "git-pull-failed": undefined,
+    "git-timeout": undefined,
+    "git-spawn-failed": undefined,
+    "import-failed": undefined,
+    "validation-failed": undefined,
+    "no-default-export": undefined,
+    "dag-not-found": undefined,
+    "dag-disabled": undefined,
+    "global-concurrency-exceeded": 5,
+    "dag-concurrency-exceeded": 5,
+    timeout: undefined,
+    "redis-unavailable": undefined,
+    "spend-ledger-unavailable": undefined,
+    "bun-install-failed": undefined,
+    "config-invalid": undefined,
+    "tenant-config-invalid": undefined,
+    "input-validation-failed": undefined,
+    "dag-validation-failed": undefined,
+    "body-parse-failed": undefined,
+    "discovery-failed": undefined,
+    "async-result-expired": undefined,
+    "run-not-found": undefined,
+    "run-lease-lost": undefined,
+    "run-not-suspended": undefined,
+    "notification-failed": undefined,
+    unauthorized: undefined,
+    forbidden: undefined,
+    "team-already-exists": undefined,
+    "team-not-found": undefined,
+    "tenant-unknown": undefined,
+    "worker-unavailable": 5,
+    "internal-invariant-violated": undefined,
+    "fs-purge-failed": undefined,
+    // Derived from the error's own field, not a constant — asserted separately
+    // below because a fixed expectation here would not prove the derivation.
+    "circuit-open": "from-error",
+    "tenant-over-quota": "from-error",
+  } as const satisfies Record<HostErrorKind, number | undefined | "from-error">;
+
+  it("advertises exactly the declared backoff for every constant-policy kind", () => {
+    for (const [kind, expected] of Object.entries(CONSTANT_BACKOFF)) {
+      if (expected === "from-error") continue;
+      // The lookup dispatches on `kind` alone for these, so a minimal carrier
+      // is a faithful probe of the policy row.
+      expect(retryAfterSecondsFor({ kind } as HostError)).toBe(expected as never);
+    }
+  });
+
+  it("pins a row for every HostError kind, so a new kind cannot ship unreviewed", () => {
+    // Checked at RUNTIME against the production kind table, not by `satisfies`:
+    // this package excludes `src/__tests__` from `tsc`, so a type-level
+    // exhaustiveness claim in a test file is never actually verified.
+    expect(Object.keys(CONSTANT_BACKOFF).sort()).toEqual(Object.keys(HOST_ERROR_KINDS).sort());
+  });
+
+  it("derives circuit-open's backoff from the breaker's own cooldown", () => {
+    expect(retryAfterSecondsFor(circuitOpen("d" as never, 30_000))).toBe(30);
+    expect(retryAfterSecondsFor(circuitOpen("d" as never, 90_000))).toBe(90);
+    // Sub-second cooldowns still advertise a usable, non-zero backoff.
+    expect(retryAfterSecondsFor(circuitOpen("d" as never, 400))).toBe(1);
+  });
+
+  it("derives tenant-over-quota's backoff from the tenant's own allowance", () => {
+    for (const seconds of [0, 1, 42, 3600]) {
+      expect(retryAfterSecondsFor(tenantOverQuota(tid("acme"), seconds))).toBe(seconds);
+    }
+  });
+
+  it("keeps the budget/quota backoffs distinct from the concurrency ones", () => {
+    // The swap this pins: quota (per-tenant, derived) vs coarse concurrency
+    // (fixed 5s) vs spend-ledger-unavailable (no backoff advertised at all).
+    expect(retryAfterSecondsFor(tenantOverQuota(tid("acme"), 42))).toBe(42);
+    expect(retryAfterSecondsFor({ kind: "global-concurrency-exceeded" })).toBe(5);
+    expect(
+      retryAfterSecondsFor({ kind: "spend-ledger-unavailable" } as HostError),
+    ).toBeUndefined();
   });
 });
 

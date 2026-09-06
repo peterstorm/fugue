@@ -15,6 +15,7 @@ import { z } from "zod";
 import { N, NO_SIDE_EFFECTS, NO_CONFIDENCE } from "./_id-helpers.js";
 import { validateCapabilities } from "../shared/capabilities.js";
 import { makeNodeContext, mergeScopedCapabilities } from "../shared/make-node-context.js";
+import { testNodeContext } from "./_context-factories.js";
 import { defineDagFromArray } from "../executor/define-dag.js";
 import { DAG_INPUT } from "../types/ids.js";
 import type { NodeDef, BaseNodeContext, Capability } from "../types/node.js";
@@ -22,10 +23,9 @@ import { BUILTIN_CAPABILITY_KEYS, RESERVED_NON_CAPABILITY_KEYS } from "../types/
 import type { LlmClient } from "../types/llm.js";
 import type { CapabilityBroker, ScopedCapabilityHandle } from "../types/capability-broker.js";
 import { isOk, isErr, ok } from "../types/result.js";
-import { NoopObserver } from "../observer/observer.js";
+import { NO_SPEND } from "../types/spend.js";
 
 const noop = async () => ({ ok: true as const, value: undefined });
-const noopTracer = { startSpan: () => ({ end: () => {}, setAttribute: () => {}, setStatus: () => {}, recordException: () => {}, isRecording: () => false }) } as any;
 
 const makeNode = (id: string, requires: readonly Capability[]): NodeDef<unknown, unknown> => ({
   id: N(id),
@@ -38,19 +38,12 @@ const makeNode = (id: string, requires: readonly Capability[]): NodeDef<unknown,
   confidence: NO_CONFIDENCE,
 });
 
-const makeCtx = (overrides: Partial<BaseNodeContext> = {}): BaseNodeContext => ({
-  runId: "r1" as any,
-  dagId: "d1" as any,
-  logger: { warn: () => {}, error: () => {} },
-  tracer: noopTracer,
-  observer: new NoopObserver(),
-  cache: null,
-  llm: null, http: null,
-  prompts: null,
-  judgeLlm: null,
-  clock: null,
-  ...overrides,
-});
+const makeCtx = (overrides: Partial<BaseNodeContext> = {}): BaseNodeContext =>
+  testNodeContext({
+    runId: "r1" as BaseNodeContext["runId"],
+    dagId: "d1" as BaseNodeContext["dagId"],
+    ...overrides,
+  });
 
 const fakeLlm = {} as LlmClient;
 
@@ -63,6 +56,21 @@ describe("validateCapabilities", () => {
     });
     const result = validateCapabilities(dag, makeCtx());
     expect(isOk(result)).toBe(true);
+  });
+
+  it("budget is the seventh built-in: missing fails and a read-only client satisfies it", () => {
+    const dag = defineDagFromArray({
+      id: "d",
+      nodes: [makeNode("a", ["budget"])],
+      edges: [{ from: DAG_INPUT, to: "a" }],
+    });
+    expect(isErr(validateCapabilities(dag, makeCtx()))).toBe(true);
+    expect(isOk(validateCapabilities(dag, makeCtx({
+      budget: {
+        spent: () => NO_SPEND,
+        remaining: () => ({ kind: "unbudgeted" }),
+      },
+    })))).toBe(true);
   });
 
   it("all required capabilities present → Ok", () => {
@@ -147,12 +155,28 @@ describe("validateCapabilities", () => {
     }
   });
 
+  it("prototype-meta names cannot be satisfied by inherited context properties", () => {
+    const ctx = makeNodeContext({ runId: "r1", dagId: "d1" });
+    for (const key of ["__proto__", "prototype", "constructor"] as const) {
+      const capability = key as Capability;
+      const dag = defineDagFromArray({
+        id: "d",
+        nodes: [makeNode("a", [capability])],
+        edges: [{ from: DAG_INPUT, to: "a" }],
+      });
+      const result = validateCapabilities(dag, ctx);
+      expect(result.ok).toBe(false);
+      if (!result.ok && result.error.kind === "missing-capability") {
+        expect(result.error.missing[0]).toEqual({ nodeId: N("a"), capability });
+      }
+    }
+  });
+
   it("a broker claiming provides() for a BUILT-IN capability key → Err kind 'validation' (wiring error, not a silent drop)", () => {
     // SEAM CONTRACT with `mergeScopedCapabilities`: the merge refuses to overlay
-    // built-in keys (`llm`/`http`/…), so a broker claiming one would have its
-    // minted handle silently dropped — the node would run against the static
-    // client while the system believes the broker governs it (silent authority
-    // widening). Validation must fail the run LOUDLY instead.
+    // built-in keys (`llm`/`http`/…), so a broker claiming one contradicts the
+    // static built-in authority contract. Validation fails before minting, and
+    // the merge independently fails closed for malformed unannounced output.
     const broker: CapabilityBroker = {
       mintFor: async () => ok({} as ScopedCapabilityHandle),
       provides: (c: Capability) => c === "llm",
@@ -175,7 +199,7 @@ describe("validateCapabilities", () => {
     }
   });
 
-  it("each built-in capability key claimed by a broker is rejected (llm/cache/prompts/judgeLlm/http/clock)", () => {
+  it("each built-in capability key claimed by a broker is rejected (including budget)", () => {
     for (const builtin of BUILTIN_CAPABILITY_KEYS) {
       const broker: CapabilityBroker = {
         mintFor: async () => ok({} as ScopedCapabilityHandle),
@@ -262,12 +286,14 @@ describe("validateCapabilities + mergeScopedCapabilities — seam invariant (pro
           base,
           { [capName]: handle } as unknown as ScopedCapabilityHandle,
         );
-        expect((merged as unknown as Record<string, unknown>)[capName]).toBe(handle);
+        expect(merged.ok).toBe(true);
+        if (!merged.ok) return;
+        expect((merged.value as unknown as Record<string, unknown>)[capName]).toBe(handle);
       }),
     );
   });
 
-  it("the rejected complement: every built-in key claimed by a broker fails validation AND is dropped by the merge (the seam agrees on both sides)", () => {
+  it("the rejected complement: every built-in key claimed by a broker fails validation AND merge (the seam agrees on both sides)", () => {
     fc.assert(
       fc.property(fc.constantFrom(...BUILTIN_CAPABILITY_KEYS), (builtin) => {
         const broker: CapabilityBroker = {
@@ -284,18 +310,19 @@ describe("validateCapabilities + mergeScopedCapabilities — seam invariant (pro
         expect(isErr(validated)).toBe(true);
         if (!validated.ok) expect(validated.error.kind).toBe("validation");
 
-        // …because the merge would silently drop the same key (kept in lockstep:
-        // if the merge ever starts overlaying built-ins, FR-W2-009, this pair of
-        // assertions forces the validation rejection to be lifted in the same
-        // commit).
+        // …and the merge independently refuses the malformed minted output.
+        // If broker-minted built-ins land (FR-W2-009), both sides must change in
+        // the same commit.
         const base = makeNodeContext({ runId: "run-prop", dagId: "dag-prop" });
         const merged = mergeScopedCapabilities(
           base,
           { [builtin]: { bogus: true } } as unknown as ScopedCapabilityHandle,
         );
-        expect((merged as unknown as Record<string, unknown>)[builtin]).toBe(
-          (base as unknown as Record<string, unknown>)[builtin],
-        );
+        expect(merged).toEqual({
+          ok: false,
+          error: { kind: "reserved-capability", key: builtin },
+        });
+        expect((base as unknown as Record<string, unknown>)[builtin]).not.toEqual({ bogus: true });
       }),
     );
   });

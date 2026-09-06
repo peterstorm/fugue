@@ -2,10 +2,8 @@
  * Framework-level semantic conventions for span attributes and events.
  *
  * Source of truth split (ADR-0023):
- * - For anything covered by the OTel GenAI semantic conventions, we emit the
- *   spec attribute (`gen_ai.*`) directly at the call site. Those names are
- *   not re-exported here — call sites use string literals matching the spec
- *   so a grep for `gen_ai.usage.input_tokens` lands on the emission point.
+ * - OTel GenAI semantic-convention names (`gen_ai.*`) are centralized and
+ *   exported here as `GEN_AI_*` constants so every call site uses one spelling.
  * - The constants below cover framework concerns the spec does NOT address:
  *   DAG/run/node identity, cost in USD, guardrail outcomes, and the
  *   thinking-presence boolean. These keep the framework-owned `ai.*` prefix.
@@ -20,6 +18,7 @@ export const AI_DAG_ID = "ai.dag.id";
 export const AI_RUN_ID = "ai.run.id";
 
 export const AI_LLM_COST_USD = "ai.llm.cost_usd";
+export const AI_LLM_COST_PRICED = "ai.llm.cost_priced";
 export const AI_LLM_HAS_THINKING = "ai.llm.has_thinking";
 
 export const AI_GUARDRAIL_PASSED = "ai.guardrail.passed";
@@ -69,7 +68,11 @@ export const AI_PROMPT_CACHE_POLICY = "ai.prompt_cache.policy";
 /**
  * False when a call DECLARED a cache policy and the provider reported neither
  * a write nor a read — the prefix sat below the model's minimum cacheable size,
- * or a volatile byte broke the prefix match. Absent when no policy was declared.
+ * or a volatile byte broke the prefix match.
+ *
+ * Absent in TWO cases, not one: no policy was declared at all, and a declared
+ * policy of `"none"` — `span-enrich.ts` skips the attribute there because a call
+ * that asked for no caching has nothing to be effective or ineffective about.
  */
 export const AI_PROMPT_CACHE_EFFECTIVE = "ai.prompt_cache.effective";
 export const GEN_AI_TOOL_NAME = "gen_ai.tool.name";

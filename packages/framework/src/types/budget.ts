@@ -10,7 +10,7 @@
 
 import { match, P } from "ts-pattern";
 import type { MicroUsd, Spend, UnpricedModels } from "./spend.js";
-import { microsToUsd } from "./spend.js";
+import { costFloor, microUsd, microsToUsd } from "./spend.js";
 import { sanitizeCount } from "./token-usage.js";
 
 // ---------------------------------------------------------------------------
@@ -24,11 +24,12 @@ export interface TokensCeiling {
 }
 
 /**
- * Limit on settled provider calls.
+ * Limit on delegated LLM attempts settled by the run authority. Failures with
+ * no trustworthy usage still count, so retry amplification cannot bypass it.
  *
- * The cheapest available circuit-breaker for retry amplification: a tool that
- * always errors burns turns until its iteration cap, and a call ceiling catches
- * that immediately where a token ceiling only catches it expensively.
+ * The cheapest available circuit-breaker for retry amplification across outer
+ * delegated attempts. A complete multi-turn `sendWithTools` loop is one call;
+ * use its `maxIterations` limit to bound individual tool-loop turns.
  */
 export interface CallsCeiling {
   readonly kind: "calls";
@@ -68,8 +69,10 @@ export type CeilingKind = Ceiling["kind"];
  * The brand makes `ceilings()` the only way to obtain the type, which is the
  * same technique `MicroUsd` and the branded identifiers already use here.
  */
+declare const ceilingsBrand: unique symbol;
+
 export type Ceilings = readonly [Ceiling, ...Ceiling[]] & {
-  readonly __brand: "Ceilings";
+  readonly [ceilingsBrand]: void;
 };
 
 /**
@@ -86,7 +89,7 @@ const limitOf = (c: Ceiling): number => c.limit;
 const withLimit = (c: Ceiling, limit: number): Ceiling =>
   match(c)
     .returnType<Ceiling>()
-    .with({ kind: "usd" }, () => ({ kind: "usd", limit: limit as MicroUsd }))
+    .with({ kind: "usd" }, () => ({ kind: "usd", limit: microUsd(limit) }))
     .with({ kind: "tokens" }, () => ({ kind: "tokens", limit }))
     .with({ kind: "calls" }, () => ({ kind: "calls", limit }))
     .exhaustive();
@@ -156,10 +159,15 @@ export type Basis = "settled" | "projected";
 export type Breach =
   | {
       readonly kind: "reached";
-      readonly ceiling: Ceiling;
+      readonly ceiling: TokensCeiling | CallsCeiling;
       readonly basis: Basis;
-      /** The figure compared, in the ceiling's own unit. */
       readonly observed: number;
+    }
+  | {
+      readonly kind: "reached";
+      readonly ceiling: UsdCeiling;
+      readonly basis: Basis;
+      readonly observed: MicroUsd;
     }
   | {
       readonly kind: "unpriced";
@@ -168,6 +176,18 @@ export type Breach =
       /** Models in use with no price-table entry. */
       readonly models: UnpricedModels;
       /** Cost of the calls that WERE priced — a genuine lower bound. */
+      readonly observedAtLeast: MicroUsd;
+    }
+  | {
+      readonly kind: "unknown-usage";
+      readonly ceiling: TokensCeiling;
+      readonly basis: Basis;
+      readonly observedAtLeast: number;
+    }
+  | {
+      readonly kind: "unknown-usage";
+      readonly ceiling: UsdCeiling;
+      readonly basis: Basis;
       readonly observedAtLeast: MicroUsd;
     };
 
@@ -199,17 +219,27 @@ export const breachOf = (spend: Spend, ceiling: Ceiling, basis: Basis): Breach |
   match(ceiling)
     .returnType<Breach | undefined>()
     .with({ kind: "tokens" }, (c) =>
-      reachedBy(spend.tokens, c.limit)
-        ? { kind: "reached", ceiling: c, basis, observed: spend.tokens }
-        : undefined,
+      spend.usage === "unknown"
+        ? { kind: "unknown-usage", ceiling: c, basis, observedAtLeast: spend.tokens }
+        : reachedBy(spend.tokens, c.limit)
+          ? { kind: "reached", ceiling: c, basis, observed: spend.tokens }
+          : undefined,
     )
     .with({ kind: "calls" }, (c) =>
       reachedBy(spend.calls, c.limit)
         ? { kind: "reached", ceiling: c, basis, observed: spend.calls }
         : undefined,
     )
-    .with({ kind: "usd" }, (c) =>
-      match(spend.usd)
+    .with({ kind: "usd" }, (c) => {
+      if (spend.usage === "unknown") {
+        return {
+          kind: "unknown-usage",
+          ceiling: c,
+          basis,
+          observedAtLeast: costFloor(spend.usd),
+        };
+      }
+      return match(spend.usd)
         .returnType<Breach | undefined>()
         .with({ kind: "unpriced" }, (u) => ({
           kind: "unpriced",
@@ -223,8 +253,8 @@ export const breachOf = (spend: Spend, ceiling: Ceiling, basis: Basis): Breach |
             ? { kind: "reached", ceiling: c, basis, observed: p.micros }
             : undefined,
         )
-        .exhaustive(),
-    )
+        .exhaustive();
+    })
     .exhaustive();
 
 /**
@@ -247,7 +277,7 @@ export const firstBreach = (
 };
 
 /** Micro-USD rendered as dollars, for human-facing text only. */
-const dollars = (micros: number): string => `$${microsToUsd(micros as MicroUsd).toFixed(6)}`;
+const dollars = (micros: MicroUsd): string => `$${microsToUsd(micros).toFixed(6)}`;
 
 /** Human-readable one-liner for a breach — for logs and error messages. */
 export const formatBreach = (b: Breach): string =>
@@ -262,6 +292,14 @@ export const formatBreach = (b: Breach): string =>
       `cost cannot be evaluated against a ${dollars(x.ceiling.limit)} budget: ` +
       `no price-table entry for ${x.models.join(", ")} ` +
       `(priced calls so far: ${dollars(x.observedAtLeast)})`,
+    )
+    .with({ kind: "unknown-usage", ceiling: { kind: "tokens" } }, (x) =>
+      `token usage is unknown against the ${x.ceiling.limit} budget ` +
+      `(trustworthy tokens observed before uncertainty: ${x.observedAtLeast})`,
+    )
+    .with({ kind: "unknown-usage", ceiling: { kind: "usd" } }, (x) =>
+      `cost is unknown against the ${dollars(x.ceiling.limit)} budget ` +
+      `(priced lower bound before uncertainty: ${dollars(x.observedAtLeast)})`,
     )
     .exhaustive();
 

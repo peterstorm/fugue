@@ -13,6 +13,32 @@ Shipped in this package — read from `node_modules/@fuguejs/host/docs/`:
 
 For authoring DAGs themselves, see [`@fuguejs/framework/docs/llm-dag-authoring.md`](../framework/docs/llm-dag-authoring.md).
 
+## Injectable file spend ledger
+
+The stock host remains Redis-first. An embedder running the framework's F6 file
+runtime can explicitly install the durable file adapter instead of relying on
+the in-process fallback. The adapter carries `authoritative`/`file`/`restart`
+metadata, so capable Redis does not override this injection and only a selected
+memory fallback is reported as not durable:
+
+```ts
+import { createFileSpendLedger, formatHostError } from "@fuguejs/host";
+import type { SharedInfra } from "@fuguejs/host";
+
+const ledger = createFileSpendLedger("/var/lib/fugue/spend");
+if (!ledger.ok) throw new Error(formatHostError(ledger.error));
+
+const shared: SharedInfra = {
+  // ...llm, redis, tracer, logger, capabilities...
+  llmPricingModel: { kind: "request" },
+  spendLedger: ledger.value,
+};
+```
+
+The directory is deployment-owned. Its records are strict, digest-addressed,
+locked whole snapshots; corruption is a typed read error and budgeted slices
+fail closed. The adapter does not retry additive writes.
+
 ## Deployment Model: One Host Per Team
 
 Each team gets their own host instance. This gives you:
@@ -202,7 +228,8 @@ All configuration is via environment variables, validated at startup with Zod. T
 | `OPENAI_API_KEY` | `LLM_PROVIDER=openai` | Team's OpenAI API key |
 | `AZURE_OPENAI_ENDPOINT` | `LLM_PROVIDER=azure` | Team's Azure endpoint URL |
 | `AZURE_OPENAI_API_KEY` | `LLM_PROVIDER=azure` | Team's Azure API key |
-| `AZURE_OPENAI_DEPLOYMENT` | `LLM_PROVIDER=azure` | Team's Azure deployment name |
+| `AZURE_OPENAI_DEPLOYMENT` | `LLM_PROVIDER=azure` | Team's arbitrary Azure deployment name, used for routing |
+| `AZURE_OPENAI_MODEL` | `LLM_PROVIDER=azure` | Underlying model SKU used for pricing and the per-node model contract (for example `gpt-4o-mini`) |
 | `AZURE_OPENAI_API_VERSION` | No (default: `2025-03-01-preview`) | Azure API version |
 
 ### Optional
@@ -277,8 +304,8 @@ Different nodes in the same DAG can use different models. The `model` string is 
 | Provider | Model routing |
 |----------|--------------|
 | **OpenAI** | Per-node `model` sent directly. Teams use any model their key has access to: `gpt-4o`, `gpt-4o-mini`, `o4-mini`, etc. |
-| **Anthropic** | Per-node `model` sent directly: `claude-sonnet-4-6`, `claude-haiku-4-5`, etc. (use current ids, not the dated form). |
-| **Azure** | `AZURE_OPENAI_DEPLOYMENT` overrides per-node model. All calls route through one deployment. Deploy multiple host instances for multiple Azure models. |
+| **Anthropic** | Per-node `model` is sent directly. USD-budgeted DAGs must use a model present in the framework pricing authority, such as `claude-sonnet-4-20250514` or `claude-haiku-4-20250514`; unpriced aliases fail closed. |
+| **Azure** | `AZURE_OPENAI_DEPLOYMENT` is the routing alias; `AZURE_OPENAI_MODEL` is the underlying fixed pricing SKU. A per-node model that differs from the SKU is rejected before egress. Deploy multiple host instances for multiple Azure models. |
 
 ---
 

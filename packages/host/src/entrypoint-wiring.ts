@@ -1,9 +1,10 @@
 import {
   AnthropicLlmClient,
   OpenAILlmClient,
+  llmModelId,
   safeErrorMessage,
 } from "@fuguejs/framework";
-import type { LlmClient } from "@fuguejs/framework";
+import type { LlmClient, LlmPricingModel } from "@fuguejs/framework";
 import type { HostConfig } from "./domain/config.js";
 import type { HostError } from "./domain/host-error.js";
 import type { LogPort } from "./ports.js";
@@ -61,7 +62,7 @@ export const redisUrlRedactions = (redisUrl: string): readonly string[] => {
 export const redisOperationFailure = (
   operation: string,
   error: unknown,
-  redactions: readonly string[] = [],
+  redactions: readonly string[],
 ): HostError => {
   let diagnostic = safeErrorMessage(error);
   for (const secret of redactions) {
@@ -84,7 +85,10 @@ export const disconnectRedisClients = async (
   );
   const failures = outcomes.flatMap((outcome, index) =>
     outcome.status === "rejected"
-      ? [new Error(`${targets[index]!.name}: ${safeErrorMessage(outcome.reason)}`)]
+      ? [new Error(
+          `${targets[index]!.name}: ${safeErrorMessage(outcome.reason)}`,
+          { cause: outcome.reason },
+        )]
       : [],
   );
   if (failures.length > 0) {
@@ -106,14 +110,15 @@ export const createJsonConsoleLogger = (
 });
 
 export type HostLlmPlan =
-  | { readonly provider: "anthropic"; readonly apiKey: string | undefined }
-  | { readonly provider: "openai"; readonly apiKey: string | undefined; readonly baseUrl: string }
+  | { readonly provider: "anthropic"; readonly apiKey: string }
+  | { readonly provider: "openai"; readonly apiKey: string; readonly baseUrl: string }
   | {
       readonly provider: "azure";
       readonly apiKey: string;
       readonly baseUrl: string;
       readonly apiVersion: string;
       readonly deployment: string;
+      readonly model: string;
     };
 
 /** Pure provider selection; `parseHostConfig` has already enforced required keys. */
@@ -122,14 +127,15 @@ export const planHostLlm = (config: HostConfig): HostLlmPlan => {
     return { provider: "anthropic", apiKey: config.ANTHROPIC_API_KEY };
   }
   if (config.LLM_PROVIDER === "azure") {
-    const endpoint = (config.AZURE_OPENAI_ENDPOINT ?? "").replace(/\/$/, "");
-    const deployment = config.AZURE_OPENAI_DEPLOYMENT ?? "";
+    const endpoint = config.AZURE_OPENAI_ENDPOINT.replace(/\/$/, "");
+    const deployment = config.AZURE_OPENAI_DEPLOYMENT;
     return {
       provider: "azure",
-      apiKey: config.AZURE_OPENAI_API_KEY ?? "",
+      apiKey: config.AZURE_OPENAI_API_KEY,
       baseUrl: `${endpoint}/openai/deployments/${deployment}`,
       apiVersion: config.AZURE_OPENAI_API_VERSION,
       deployment,
+      model: config.AZURE_OPENAI_MODEL,
     };
   }
   return {
@@ -139,7 +145,15 @@ export const planHostLlm = (config: HostConfig): HostLlmPlan => {
   };
 };
 
-type LoadAnthropicClient = (apiKey: string | undefined) => Promise<LlmClient>;
+/** Bind the provider's effective model policy at host composition. */
+export const hostLlmPricingModel = (config: HostConfig): LlmPricingModel => {
+  const plan = planHostLlm(config);
+  return plan.provider === "azure"
+    ? { kind: "fixed", model: llmModelId(plan.model) }
+    : { kind: "request" };
+};
+
+type LoadAnthropicClient = (apiKey: string) => Promise<LlmClient>;
 
 const loadAnthropicClient: LoadAnthropicClient = async (apiKey) => {
   const { default: Anthropic } = await import("@anthropic-ai/sdk");
@@ -163,6 +177,6 @@ export const createHostLlmClient = async (
         modelOverride: plan.deployment,
       });
     case "openai":
-      return new OpenAILlmClient({ apiKey: plan.apiKey ?? "", baseUrl: plan.baseUrl });
+      return new OpenAILlmClient({ apiKey: plan.apiKey, baseUrl: plan.baseUrl });
   }
 };

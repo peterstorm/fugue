@@ -128,6 +128,64 @@ export const createVectorAdapter = (config: VectorConfig): CapabilityHandle<"vec
 };
 ```
 
+### LLM clients must opt into shared metering
+
+If the registry client extends `LlmClient`, the conditional handle type requires
+`clientKind: "llm"` plus a composition-owned `pricingModel` policy:
+
+```ts
+export const createCriticAdapter = (client: LlmClient): CapabilityHandle<"criticLlm"> => ({
+  name: "criticLlm",
+  client,
+  clientKind: "llm",
+  pricingModel: { kind: "request" },
+});
+```
+
+The host uses this explicit metadata to route the main client, `judgeLlm`, and
+custom boot-scoped LLM clients through one Run Spend Authority. It never duck
+types method names. Omitting the marker is a compile error; adding it to a
+non-LLM handle is also a compile error. Existing non-LLM adapters do not change.
+
+An augmented registry client (a strict subtype with provider-specific aliases)
+also requires `runScopedOperations`. This is declarative data mapping each alias
+to one standard LLM operation. The host interprets it into the run-scoped facade;
+adapter code cannot ignore the metered client or close over the boot client:
+
+```ts
+interface AugmentedCritic extends LlmClient {
+  critique(req: LlmRequest<Critique>): Promise<Result<LlmResponse<Critique>, FrameworkError>>;
+}
+
+export const createAugmentedCriticAdapter = (
+  provider: AugmentedCritic,
+): CapabilityHandle<"augmentedCritic"> => ({
+  name: "augmentedCritic",
+  client: provider,
+  clientKind: "llm",
+  pricingModel: { kind: "fixed", model: "gpt-4o" },
+  runScopedOperations: {
+    critique: "sendStructured",
+  },
+});
+```
+
+Use `{ kind: "request" }` only when the provider sends the request's model.
+A deployment that routes every call to one model uses `{ kind: "fixed", model }`;
+a conflicting request is refused before egress, and settlement prices the fixed
+model. The host-owned facade keeps boot-scoped provider resources reusable while making
+every exposed provider operation authority-bearing by construction. Additional
+fields on an augmented subtype must be operation-compatible aliases; arbitrary
+adapter-authored facade functions are intentionally unsupported.
+
+A per-invocation `CapabilityBroker` returns tagged bindings, not raw clients.
+Non-LLM clients use `{ clientKind: "non-llm", client }`. LLM clients use
+`{ clientKind: "llm", client, pricingModel, runScopedOperations }`; the alias
+map is required even for the standard `LlmClient` (`{}`), and augmented client
+keys are derived into the map's type. Untagged broker values are rejected before
+context merge, so a contract-violating broker cannot smuggle an LLM around the
+Run Spend Authority.
+
 Lifecycle contract (`CapabilityHandle`):
 - `connect()` once at boot — throwing aborts startup.
 - `close()` at shutdown — awaited before exit.
@@ -174,6 +232,9 @@ Tests use `bun:test`, live in `src/__tests__/`, and assert on `Result` via
 ## 7. Checklist
 
 - [ ] `name` matches the `CapabilityRegistry` key exactly.
+- [ ] A client extending `LlmClient` declares `clientKind: "llm"` and `pricingModel`.
+- [ ] An augmented LLM subtype declares every string-keyed provider alias in `runScopedOperations`; symbol aliases are rejected.
+- [ ] A broker returns only tagged `non-llm` or `llm` bindings; every scoped LLM includes `runScopedOperations`.
 - [ ] No exceptions escape `client` methods — everything is `Result`.
 - [ ] Errors classified transient vs non-retriable correctly.
 - [ ] `connect`/`close` manage all external resources; boot fails loudly.

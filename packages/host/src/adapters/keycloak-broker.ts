@@ -40,12 +40,13 @@
 
 import { match } from "ts-pattern";
 import type { Result, FrameworkError, Capability } from "@fuguejs/framework";
-import { ok, err } from "@fuguejs/framework";
+import { ok, err, safeErrorMessage } from "@fuguejs/framework";
 import type {
   CapabilityBroker,
   Invocation,
   InvocationOrigin,
   ScopedCapabilityHandle,
+  ScopedNonLlmCapability,
 } from "@fuguejs/framework";
 import type { Tracer } from "@fuguejs/framework";
 import type { LogPort } from "../ports.js";
@@ -105,10 +106,19 @@ export const scopeName = (scope: DownstreamScope): string => `${scope.provider}:
  * before expiry is re-minted rather than presented downstream microseconds
  * before it lapses — which would 401 and (mis)map to `downstream-denied`, the
  * never-retried category (review I2, ADR-0059). The margin is capped at a
- * fraction of the token's own lifetime in `marginFor` so a short-lived token is
- * never pinned permanently stale.
+ * fraction of the token's own lifetime in `effectiveTtlMs` so a short-lived
+ * token is never pinned permanently stale.
  */
 const TOKEN_REFRESH_SKEW_MS = 60_000;
+
+/**
+ * The `via` a resolution reports when NO branch was forced this time round (a
+ * cache hit): it is a function of the invocation origin alone. Both cache-hit
+ * paths witness it from here so the audit can never name two different
+ * strategies for the same origin.
+ */
+const viaForOrigin = (origin: Invocation["origin"]): "token-exchange-v2" | "client_credentials" =>
+  origin.kind === "user" ? "token-exchange-v2" : "client_credentials";
 
 /**
  * Effective cache TTL for a freshly minted token: its lifetime minus the
@@ -340,8 +350,10 @@ const saDispatch = (
  * `requires` set into a scoped handle, fail-closed BEFORE any egress on an
  * unassigned scope, with a correlated audit record for every mint and refusal.
  *
- * The token cache is held in a single mutable cell in this shell (the broker is
- * long-lived across runs); the cache VALUE and its freshness decision stay pure.
+ * The token caches are held in two mutable cells in this shell (the broker is
+ * long-lived across runs) — one per egress, `saCache` and `appOnlyCache`; see the
+ * block above their declarations for why the split is deliberate. The cache
+ * VALUES and their freshness decisions stay pure.
  */
 export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker => {
   const audit: BrokerAudit = createBrokerAudit(deps.tracer, deps.logger);
@@ -367,6 +379,19 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
   // of triple B (lost update). And concurrent mints of the SAME triple are
   // single-flighted below, so SC-008's "≤1 token request per triple per TTL"
   // holds under concurrency, not just single-threaded.
+  // One stamp-and-store for both token cells: `now()` is read once per store so
+  // the entry's stored-at and the sweep's cutoff agree, and the cell is passed
+  // in / returned rather than captured, so callers keep the re-read discipline.
+  const storeFreshToken = (
+    cell: TokenCache,
+    key: string,
+    token: string,
+    expiresInSec: number,
+  ): TokenCache => {
+    const storedAt = deps.now();
+    return store(cell, key, cacheToken(token, storedAt, effectiveTtlMs(expiresInSec)), storedAt);
+  };
+
   let saCache: TokenCache = emptyCache;
   let appOnlyCache: TokenCache = emptyCache;
 
@@ -405,7 +430,7 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
       // concurrent acquisition of this same triple may have populated it.
       const cachedApp = lookup(appOnlyCache, cacheK, deps.now());
       if (cachedApp !== undefined) {
-        const via = inv.origin.kind === "user" ? "token-exchange-v2" : "client_credentials";
+        const via = viaForOrigin(inv.origin);
         return ok({ token: cachedApp.token, via, acquisition: "cache-reuse" });
       }
 
@@ -420,16 +445,11 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
         const mintResult = await dispatch.mint();
         if (!mintResult.ok) return err(mintResult.error);
         saToken = mintResult.value.accessToken;
-        // Early-refresh margin (I2); re-read the live cell so a concurrent mint of a
-        // DIFFERENT triple isn't clobbered (no lost update). The store-time sweep
-        // (token-cache.ts) drops already-stale entries, bounding the cell.
-        const saStoredAt = deps.now();
-        saCache = store(
-          saCache,
-          cacheK,
-          cacheToken(saToken, saStoredAt, effectiveTtlMs(mintResult.value.expiresInSec)),
-          saStoredAt,
-        );
+        // Early-refresh margin (I2); the live cell is passed in and the result
+        // assigned back, so a concurrent mint of a DIFFERENT triple isn't
+        // clobbered (no lost update). The store-time sweep (token-cache.ts)
+        // drops already-stale entries, bounding the cell.
+        saCache = storeFreshToken(saCache, cacheK, saToken, mintResult.value.expiresInSec);
       }
 
       // WIF exchange — present the SA token as the Entra `client_assertion`.
@@ -437,12 +457,11 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
       const wif = await deps.entraWif.exchange({ clientAssertion: saToken, scope, audience });
       if (!wif.ok) return err(wif.error);
 
-      const appStoredAt = deps.now();
-      appOnlyCache = store(
+      appOnlyCache = storeFreshToken(
         appOnlyCache,
         cacheK,
-        cacheToken(wif.value.accessToken, appStoredAt, effectiveTtlMs(wif.value.expiresInSec)),
-        appStoredAt,
+        wif.value.accessToken,
+        wif.value.expiresInSec,
       );
       return ok({ token: wif.value.accessToken, via: dispatch.via, acquisition: "minted" });
     } catch (e) {
@@ -452,7 +471,7 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
         kind: "infra-unreachable",
         operation: hopInFlight.operation,
         hop: hopInFlight.hop,
-        message: `capability port threw across the boundary: ${e instanceof Error ? e.message : String(e)}`,
+        message: `capability port threw across the boundary: ${safeErrorMessage(e)}`,
       });
     }
   };
@@ -487,7 +506,7 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
           kind: "infra-unreachable",
           operation: "mint",
           hop: "broker-internal",
-          message: `app-token acquisition threw across the in-flight boundary: ${e instanceof Error ? e.message : String(e)}`,
+          message: `app-token acquisition threw across the in-flight boundary: ${safeErrorMessage(e)}`,
         }),
     );
     inFlight.set(cacheK, p);
@@ -567,7 +586,7 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
         // The `via` is a function of origin alone here (no branch was forced this
         // resolution); witness it from the origin so the audit names the strategy.
         // `acquisition: "cache-reuse"` witnesses that no egress happened.
-        const via = inv.origin.kind === "user" ? "token-exchange-v2" : "client_credentials";
+        const via = viaForOrigin(inv.origin);
         await audit.mint(auditFields(inv, scopeStr), via, "cache-reuse");
         resolved.push({
           capability,
@@ -610,9 +629,15 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
     // that same handle type — so a scope key can never be augmented with a
     // mismatched client without failing compilation there. This stays the SINGLE
     // broker-side trust-boundary cast (the other is `extractClients`).
-    const handleRecord: Record<string, OperationNarrowedHandle> = {};
+    const handleRecord: Record<
+      string,
+      ScopedNonLlmCapability<OperationNarrowedHandle>
+    > = {};
     for (const r of resolved) {
-      handleRecord[r.capability] = r.handle;
+      handleRecord[r.capability] = {
+        clientKind: "non-llm",
+        client: r.handle,
+      };
     }
     return ok(handleRecord as ScopedCapabilityHandle);
   };
@@ -638,7 +663,7 @@ export const createKeycloakBroker = (deps: KeycloakBrokerDeps): CapabilityBroker
         kind: "infra-unreachable",
         operation: "mint",
         hop: "broker-internal",
-        message: `broker dependency threw across the boundary: ${e instanceof Error ? e.message : String(e)}`,
+        message: `broker dependency threw across the boundary: ${safeErrorMessage(e)}`,
       };
       // The scope is unknown at this fence (the throw may precede scope
       // parsing); `"*"` keeps the SC-009 record correlated without inventing

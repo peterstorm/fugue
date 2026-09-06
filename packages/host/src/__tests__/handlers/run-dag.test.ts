@@ -1,6 +1,17 @@
 import { describe, it, expect } from "bun:test";
 import { Hono } from "hono";
-import { dagId, gitSha, ok, err, runDag, defineDagFromArray, createFetchNode, makeNodeContext, DAG_INPUT } from "@fuguejs/framework";
+import {
+  dagId,
+  gitSha,
+  ok,
+  err,
+  runDag,
+  runId,
+  defineDagFromArray,
+  createFetchNode,
+  makeNodeContext,
+  DAG_INPUT,
+} from "@fuguejs/framework";
 import type { NodeContext, FrameworkError, DagId, Capability, CapabilityBroker, InvocationOrigin } from "@fuguejs/framework";
 import { z } from "zod";
 import { createRunDagHandler } from "../../http/handlers/run-dag.js";
@@ -16,6 +27,7 @@ import { initCircuit } from "../../domain/circuit-breaker.js";
 import type { CircuitState } from "../../domain/circuit-breaker.js";
 import type { AuthIdentity } from "../../domain/auth.js";
 import type { HitlRunService } from "../../hitl/service.js";
+import type { HostError } from "../../domain/host-error.js";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -74,13 +86,14 @@ const defaultDeps = (overrides?: Partial<RunDagDeps>): RunDagDeps => {
       set: (id, s) => { circuits.set(id, s); },
     },
     circuitConfig: { threshold: 5, windowMs: 60_000 },
-    createContext: (() =>
+    createContext: ((_registered, requestedRunId) =>
       Promise.resolve({
-        ctx: { runId: "test-run-id" } as unknown as NodeContext,
+        ctx: { runId: requestedRunId } as unknown as NodeContext,
         origin: { kind: "agent", agentClientId: "test-dag" },
       })) as unknown as RunDagDeps["createContext"],
     executeDag: successExecuteDag,
     clock: () => Date.now(),
+    newRunId: () => runId("test-run-id"),
     ...overrides,
   };
 };
@@ -225,6 +238,228 @@ describe("run-dag handler", () => {
     expect(executeCalls).toBe(0);
   });
 
+  // ── The two HITL fork branches with no coverage before round 15 ────────────
+  // `defaultDeps()` leaves `hitl` undefined, which is exactly the
+  // not-configured host: without this test, inverting or dropping the guard
+  // would silently let a humanReview DAG fall through to the SYNCHRONOUS path,
+  // where it can park for a human while holding a request open.
+  it("refuses a humanReview DAG with 501 when the host has no HITL wired", async () => {
+    let executeCalls = 0;
+    const deps = defaultDeps({
+      executeDag: (async () => {
+        executeCalls += 1;
+        return ok({ unreachable: true });
+      }) as RunDagDeps["executeDag"],
+    });
+    expect(deps.hitl).toBeUndefined();
+
+    const res = await post(
+      createTestApp(deps, makeReadyState(freeze([makeHitlDag("hitl-unwired")], sha, Date.now()))),
+      "hitl-unwired",
+      { query: "hi" },
+    );
+    const body = await res.json();
+
+    expect(res.status).toBe(501);
+    expect(body.ok).toBe(false);
+    expect(body.error).toBe("hitl-not-configured");
+    // The refusal must be terminal, not a fallback: the synchronous executor
+    // is the thing this branch exists to keep a HITL DAG away from.
+    expect(executeCalls).toBe(0);
+  });
+
+  it("enqueues a humanReview DAG and answers 202 queued with the engine's runId", async () => {
+    let executeCalls = 0;
+    let startRunCalls = 0;
+    const hitl = {
+      async startRun() {
+        startRunCalls += 1;
+        return ok({ runId: runId("hitl-queued-run") });
+      },
+    } as unknown as HitlRunService;
+    const deps = defaultDeps({
+      hitl,
+      executeDag: (async () => {
+        executeCalls += 1;
+        return ok({ unreachable: true });
+      }) as RunDagDeps["executeDag"],
+    });
+
+    const res = await post(
+      createTestApp(deps, makeReadyState(freeze([makeHitlDag("hitl-queued")], sha, Date.now()))),
+      "hitl-queued",
+      { query: "hi" },
+    );
+    const body = await res.json();
+
+    expect(res.status).toBe(202);
+    expect(body.ok).toBe(true);
+    expect(body.data).toEqual({ runId: "hitl-queued-run", status: "queued" });
+    // The runId is mirrored at the top level too — clients poll GET /runs/:id
+    // with it, so both spellings are part of the contract.
+    expect(body.runId).toBe("hitl-queued-run");
+    expect(startRunCalls).toBe(1);
+    expect(executeCalls).toBe(0);
+  });
+
+  // ── 5xx disclosure discipline on the HITL path (round-13 C2) ───────────────
+  // This handler renders HITL `startRun` failures itself — they never reach the
+  // error-handler middleware that owns the 4xx/5xx discipline. A 5xx HostError's
+  // formatted text splices raw internal state (`internal-invariant-violated`
+  // carries the caught error's own message), so rendering it verbatim leaked it.
+
+  const INTERNAL_DETAIL = "HITL clock threw outside its port contract: EBADF /var/secrets/token";
+
+  const hitlFailingWith = (error: HostError): HitlRunService =>
+    ({ async startRun() { return err(error); } }) as HitlRunService;
+
+  it("does not echo a 5xx HostError's internal detail to the caller", async () => {
+    const logged: Array<{ message: string; data: Record<string, unknown> }> = [];
+    const deps = defaultDeps({
+      hitl: hitlFailingWith({ kind: "internal-invariant-violated", message: INTERNAL_DETAIL }),
+      logger: {
+        info: () => {},
+        warn: () => {},
+        error: (message: string, data?: Record<string, unknown>) => {
+          logged.push({ message, data: data ?? {} });
+        },
+      } as RunDagDeps["logger"],
+    });
+
+    const res = await post(
+      createTestApp(deps, makeReadyState(freeze([makeHitlDag("hitl-5xx")], sha, Date.now()))),
+      "hitl-5xx",
+      { query: "hi" },
+    );
+    const body = await res.json();
+    const wire = JSON.stringify(body);
+
+    expect(res.status).toBe(500);
+    // The kind stays — it is the caller's stable handle on the failure class.
+    expect(body.error).toBe("internal-invariant-violated");
+    // The internal state does NOT, on any field of the body.
+    expect(wire).not.toContain(INTERNAL_DETAIL);
+    expect(wire).not.toContain("EBADF");
+    expect(body.message).toBe("An unexpected error occurred");
+    expect(body.details).toBeUndefined();
+
+    // …and it is not simply dropped: the operator still gets it server-side.
+    expect(logged.some((entry) => JSON.stringify(entry.data).includes(INTERNAL_DETAIL))).toBe(true);
+  });
+
+  it("suppresses the 5xx body detail even with no logger wired", async () => {
+    const deps = defaultDeps({
+      hitl: hitlFailingWith({ kind: "internal-invariant-violated", message: INTERNAL_DETAIL }),
+    });
+
+    const res = await post(
+      createTestApp(deps, makeReadyState(freeze([makeHitlDag("hitl-5xx-nolog")], sha, Date.now()))),
+      "hitl-5xx-nolog",
+      { query: "hi" },
+    );
+
+    expect(res.status).toBe(500);
+    expect(JSON.stringify(await res.json())).not.toContain(INTERNAL_DETAIL);
+  });
+
+  // ── Every server fault reaches an operator (round-14 A1) ──────────────────
+  // `hostErrorResponse` withholds a 5xx's detail from the body and logs it
+  // instead — but `logger` is an optional parameter, and only the HITL call
+  // site passed it. `dag-disabled` and `circuit-open` are BOTH 503, and
+  // `logWithoutThrowingTo` calls `logger?.[level]?.(…)`, so an absent logger is
+  // a silent no-op: the reason a request was refused reached nobody, on either
+  // channel. `circuit-breaker.ts` is a pure domain module with no logging of
+  // its own, so this handler was the only place it could ever have surfaced.
+
+  const capturingLogger = () => {
+    const logs: Array<{ message: string; data: Record<string, unknown> }> = [];
+    return {
+      logs,
+      logger: {
+        info: () => {},
+        warn: () => {},
+        error: (message: string, data?: Record<string, unknown>) => {
+          logs.push({ message, data: data ?? {} });
+        },
+      } as RunDagDeps["logger"],
+    };
+  };
+
+  it("logs the withheld detail when a disabled DAG is refused", async () => {
+    const { logs, logger } = capturingLogger();
+    const disabled = makeDisabledDag("disabled-logging");
+
+    const res = await post(
+      createTestApp(defaultDeps({ logger }), makeReadyState(freeze([disabled], sha, Date.now()))),
+      "disabled-logging",
+      { query: "hi" },
+    );
+    const body = await res.json();
+
+    expect(res.status).toBe(503);
+    expect(body.error).toBe("dag-disabled");
+    // Withheld from the caller…
+    expect(JSON.stringify(body)).not.toContain("circuit open");
+    expect(body.details).toBeUndefined();
+    // …but not lost: the operator still gets the reason.
+    expect(logs.some((entry) => JSON.stringify(entry.data).includes("circuit open"))).toBe(true);
+  });
+
+  it("logs the withheld detail when an open circuit refuses a run", async () => {
+    const { logs, logger } = capturingLogger();
+    const base = makeDag("circuit-logging");
+    const cbDag: RegisteredDag = {
+      ...base,
+      config: { ...base.config, circuitBreaker: { failureThreshold: 1 } },
+    };
+    const app = createTestApp(
+      defaultDeps({
+        logger,
+        createContext: () => { throw new Error("ctx init failed"); },
+      }),
+      makeReadyState(freeze([cbDag], sha, Date.now())),
+    );
+
+    await post(app, "circuit-logging", { query: "x" });
+    await post(app, "circuit-logging", { query: "x" });
+    const refused = await post(app, "circuit-logging", { query: "x" });
+    const body = await refused.json();
+
+    expect(refused.status).toBe(503);
+    expect(body.error).toBe("circuit-open");
+    expect(body.details).toBeUndefined();
+    // The breaker state is unobservable anywhere else — this log is the only
+    // place an operator can learn the run was refused by an open circuit.
+    expect(logs.some((entry) => String(entry.data["kind"]) === "circuit-open")).toBe(true);
+  });
+
+  it("still refuses safely when no logger is wired at either 503 site", async () => {
+    // The logger is optional; losing the diagnostic must never cost the refusal.
+    const disabled = await post(
+      createTestApp(defaultDeps(), makeReadyState(freeze([makeDisabledDag("no-logger")], sha, Date.now()))),
+      "no-logger",
+      { query: "hi" },
+    );
+
+    expect(disabled.status).toBe(503);
+    expect(JSON.stringify(await disabled.json())).not.toContain("circuit open");
+  });
+
+  it("keeps 4xx HostErrors precise — the discipline is status-driven, not blanket", async () => {
+    // A curated caller-facing 4xx keeps its exact message and details.
+    const res = await post(
+      createTestApp(defaultDeps(), makeReadyState(freeze([makeDag("present")], sha, Date.now()))),
+      "absent-dag",
+      { query: "hi" },
+    );
+    const body = await res.json();
+
+    expect(res.status).toBe(404);
+    expect(body.error).toBe("dag-not-found");
+    expect(body.message).not.toBe("An unexpected error occurred");
+    expect(body.details).toBeDefined();
+  });
+
   describe("identity threading into the run (FR-W3-007)", () => {
     // The user `sub`/`azp` must reach `createContext` so T8 can build
     // `Invocation.origin`. We capture the identity arg to prove the seam works,
@@ -232,7 +467,7 @@ describe("run-dag handler", () => {
     const runWith = async (identity: AuthIdentity) => {
       const captured: AuthIdentity[] = [];
       const deps = defaultDeps({
-        createContext: (async (_reg, _sig, id: AuthIdentity) => {
+        createContext: (async (_reg, _runId, _sig, id: AuthIdentity) => {
           captured.push(id);
           return {
             ctx: { runId: "test-run-id" } as unknown as NodeContext,
@@ -327,6 +562,34 @@ describe("run-dag handler", () => {
     expect(body.error).toBe("body-parse-failed");
   });
 
+  it("returns 400 when request JSON parsing throws a hostile non-Error", async () => {
+    const hostile = { toString: () => { throw new Error("coercion must not run"); } };
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("hostState" as never, readyState as never);
+      c.set("authIdentity" as never, { kind: "admin" } as never);
+      Object.defineProperty(c.req, "json", {
+        value: async () => { throw hostile; },
+      });
+      await next();
+    });
+    app.post(
+      "/dags/:id/run",
+      createRunDagHandler(defaultDeps()) as unknown as (c: unknown) => Promise<Response>,
+    );
+
+    const response = await app.request("/dags/test-dag/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: "hi" }),
+    });
+
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.error).toBe("body-parse-failed");
+    expect(typeof body.details.message).toBe("string");
+  });
+
   it("returns 400 for input validation failure", async () => {
     const app = createTestApp(defaultDeps(), readyState);
     const res = await post(app, "test-dag", { wrong: "field" });
@@ -401,7 +664,11 @@ describe("run-dag handler", () => {
     expect((await post(app, "ctx-throw-dag", { query: "x" })).status).toBe(500); // failure 2 → opens
     const r3 = await post(app, "ctx-throw-dag", { query: "x" });
     expect(r3.status).toBe(503);                                                  // circuit now open
-    expect((await r3.json()).error).toBe("dag-disabled");
+    // Its own kind — NOT `dag-disabled`, which is the administrative state a
+    // client cannot wait out. An open circuit clears after the cooldown, so it
+    // also advertises a Retry-After derived from that cooldown.
+    expect((await r3.json()).error).toBe("circuit-open");
+    expect(r3.headers.get("Retry-After")).toBe("30");
   });
 
   it("returns 500 and releases the concurrency token when createContext rejects (async)", async () => {
@@ -436,7 +703,11 @@ describe("run-dag handler", () => {
     expect((await post(app, "ctx-reject-dag", { query: "x" })).status).toBe(500); // failure 2 → opens
     const r3 = await post(app, "ctx-reject-dag", { query: "x" });
     expect(r3.status).toBe(503);                                                  // circuit now open
-    expect((await r3.json()).error).toBe("dag-disabled");
+    // Its own kind — NOT `dag-disabled`, which is the administrative state a
+    // client cannot wait out. An open circuit clears after the cooldown, so it
+    // also advertises a Retry-After derived from that cooldown.
+    expect((await r3.json()).error).toBe("circuit-open");
+    expect(r3.headers.get("Retry-After")).toBe("30");
   });
 
   it("does not consume the half-open circuit probe when concurrency rejects (no wedge)", async () => {
@@ -485,7 +756,7 @@ describe("run-dag handler", () => {
     const res = await post(app, "test-dag", { query: "hi" });
 
     expect(res.status).toBe(503);
-    expect((await res.json()).error).toBe("dag-disabled");
+    expect((await res.json()).error).toBe("circuit-open");
     // The slot acquired before the circuit check must be released — no leak.
     expect(concurrency.global.current).toBe(0);
   });
@@ -592,7 +863,15 @@ describe("run-dag handler", () => {
       // broker + per-run origin as one MintingAuthority.
       executeDag: (async <I, O>(d: unknown, input: I, ctx: NodeContext, origin: InvocationOrigin) =>
         runDag<I, O>(d as never, input, ctx, {
-          minting: { broker: refusingBroker, origin },
+          minting: {
+            broker: refusingBroker,
+            origin,
+            meterLlm: (_capability, _binding, nodeId) => err({
+              kind: "validation",
+              nodeId,
+              message: "refusing broker unexpectedly delivered an LLM binding",
+            }),
+          },
           suppressRoutingWarnings: true,
         })) as unknown as RunDagDeps["executeDag"],
       circuitConfig: { threshold: 1, windowMs: 60_000 },
@@ -607,6 +886,69 @@ describe("run-dag handler", () => {
     }
     // One mintFor call per request — the settled refusal consumed no retries.
     expect(mintCalls).toHaveLength(4);
+  });
+
+  it("hard-bounds a context-construction hang and releases concurrency", async () => {
+    const base = makeDag("setup-wedged-dag");
+    const timedDag: RegisteredDag = { ...base, config: { ...base.config, timeout: 5 } };
+    const reg = freeze([timedDag], sha, Date.now());
+    let concurrency = initConcurrency(50, 10);
+    const deps = defaultDeps({
+      getConcurrency: () => concurrency,
+      setConcurrency: (next) => { concurrency = next; },
+      createContext: (() => new Promise(() => {})) as RunDagDeps["createContext"],
+    });
+
+    const response = await Promise.race([
+      post(createTestApp(deps, makeReadyState(reg)), "setup-wedged-dag", { query: "hi" }),
+      Bun.sleep(250).then(() => { throw new Error("context setup remained wedged"); }),
+    ]);
+
+    expect(response.status).toBe(408);
+    expect((await response.json()).runId).toBe("test-run-id");
+    expect(concurrency.global.current).toBe(0);
+  });
+
+  it("warns when successful effects complete after the terminal 408", async () => {
+    const base = makeDag("late-success-dag");
+    const timedDag: RegisteredDag = { ...base, config: { ...base.config, timeout: 1 } };
+    const reg = freeze([timedDag], sha, Date.now());
+    let resolveExecution!: (value: ReturnType<typeof ok<{ done: boolean }>>) => void;
+    const pending = new Promise<ReturnType<typeof ok<{ done: boolean }>>>((resolve) => {
+      resolveExecution = resolve;
+    });
+    const diagnostics: Array<{
+      readonly level: string;
+      readonly message: string;
+      readonly data?: Record<string, unknown>;
+    }> = [];
+    const deps = defaultDeps({
+      executeDag: (() => pending) as RunDagDeps["executeDag"],
+      logger: {
+        info(message, data) { diagnostics.push({ level: "info", message, data }); },
+        warn(message, data) { diagnostics.push({ level: "warn", message, data }); },
+        error(message, data) { diagnostics.push({ level: "error", message, data }); },
+      },
+    });
+
+    const response = await post(
+      createTestApp(deps, makeReadyState(reg)),
+      "late-success-dag",
+      { query: "hi" },
+    );
+    expect(response.status).toBe(408);
+    resolveExecution(ok({ done: true }));
+    await Bun.sleep(5);
+
+    expect(diagnostics).toContainEqual({
+      level: "warn",
+      message: "host: DAG execution completed after request deadline",
+      data: {
+        dagId: "late-success-dag",
+        runId: "test-run-id",
+        consequence: "effects completed after HTTP 408; client retry may duplicate work",
+      },
+    });
   });
 
   it("returns 408 when execution exceeds the host timeout (cooperative abort surfaces)", async () => {
@@ -637,7 +979,7 @@ describe("run-dag handler", () => {
 
     await Bun.sleep(60);
     expect(diagnostics).toContainEqual({
-      message: "host: DAG execution rejected after request deadline",
+      message: "host: DAG pipeline rejected after request deadline",
       data: { dagId: "slow-dag", runId: "test-run-id", error: "aborted" },
     });
   });
@@ -684,6 +1026,53 @@ describe("run-dag handler", () => {
     expect(concurrency.global.current).toBe(0);
   });
 
+  // The heart of the circuit-open fix: the advertised Retry-After is DERIVED
+  // from the breaker's effective cooldown, not a hardcoded constant. A DAG that
+  // overrides `resetTimeoutMs` must see its own value in the header.
+  it("derives Retry-After from the DAG's configured circuit-breaker cooldown", async () => {
+    const base = makeDag("cb-cooldown-dag");
+    const cbDag: RegisteredDag = {
+      ...base,
+      config: {
+        ...base.config,
+        circuitBreaker: { failureThreshold: 1, resetTimeoutMs: 90_000 },
+      },
+    };
+    const reg = freeze([cbDag], sha, Date.now());
+    const app = createTestApp(defaultDeps({ executeDag: failExecuteDag }), makeReadyState(reg));
+
+    expect((await post(app, "cb-cooldown-dag", { query: "x" })).status).toBe(500);
+    expect((await post(app, "cb-cooldown-dag", { query: "x" })).status).toBe(500);
+    const denied = await post(app, "cb-cooldown-dag", { query: "x" });
+
+    expect(denied.status).toBe(503);
+    expect((await denied.json()).error).toBe("circuit-open");
+    // 90s, not the 30s default — proves the value is read from config.
+    expect(denied.headers.get("Retry-After")).toBe("90");
+  });
+
+  // Sub-second cooldowns must still round UP to a whole second: advertising 0
+  // would tell the client to retry immediately, before the breaker resets.
+  it("rounds a sub-second circuit cooldown up to a 1s Retry-After", async () => {
+    const base = makeDag("cb-fast-dag");
+    const cbDag: RegisteredDag = {
+      ...base,
+      config: {
+        ...base.config,
+        circuitBreaker: { failureThreshold: 1, resetTimeoutMs: 250 },
+      },
+    };
+    const reg = freeze([cbDag], sha, Date.now());
+    const app = createTestApp(defaultDeps({ executeDag: failExecuteDag }), makeReadyState(reg));
+
+    expect((await post(app, "cb-fast-dag", { query: "x" })).status).toBe(500);
+    expect((await post(app, "cb-fast-dag", { query: "x" })).status).toBe(500);
+    const denied = await post(app, "cb-fast-dag", { query: "x" });
+
+    expect(denied.status).toBe(503);
+    expect(denied.headers.get("Retry-After")).toBe("1");
+  });
+
   it("honors a per-DAG circuitBreaker.failureThreshold (opens sooner than the host default)", async () => {
     // threshold 1 → recordFailure opens once count > 1, i.e. after the 2nd failure.
     const base = makeDag("cb-dag");
@@ -696,7 +1085,7 @@ describe("run-dag handler", () => {
     expect((await post(app, "cb-dag", { query: "x" })).status).toBe(500); // failure 2 → opens
     const r3 = await post(app, "cb-dag", { query: "x" });
     expect(r3.status).toBe(503);                                          // circuit now open
-    expect((await r3.json()).error).toBe("dag-disabled");
+    expect((await r3.json()).error).toBe("circuit-open");
   });
 
   it("uses the host default threshold when the DAG declares no circuitBreaker (no early open)", async () => {

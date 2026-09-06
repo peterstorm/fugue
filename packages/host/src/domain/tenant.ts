@@ -30,8 +30,8 @@
  *     `SubjectToken` pattern), so "this object is a REGISTERED tenant principal"
  *     is unforgeable: a plain object cannot be passed where a routed `Tenant`
  *     principal is required. The SOLE producer is `markTenant`, and the trust
- *     seam where principals are MINTED is registry CONSTRUCTION — the T3 registry
- *     adapter (and the test fakes that stand in for it today) call `markTenant`
+ *     seam where principals are MINTED is registry CONSTRUCTION — the shipped
+ *     Redis registry adapter and focused test fakes call `markTenant`
  *     once per registered tenant when they build the `TenantRegistryView`.
  *     `resolveTenant` does NOT mint principals: it is a pure boundary LOOKUP that
  *     hands back an already-branded `Tenant` from that view (or fails closed).
@@ -45,35 +45,36 @@ import { match } from "ts-pattern";
 import type { AuthIdentity, Team } from "./auth.js";
 import type { HostError } from "./host-error.js";
 import { tenantUnknown, internalInvariantViolated } from "./host-error.js";
+import {
+  TENANT_ID_REGEX,
+  isReservedTenantId,
+  type TenantId,
+} from "./tenant-id.js";
 import type { Result } from "@fuguejs/framework";
 import { ok, err } from "@fuguejs/framework";
 
+export type { TenantId, TenantIdParseError } from "./tenant-id.js";
+export {
+  tenantId,
+  TENANT_ID_REGEX,
+  RESERVED_TENANT_IDS,
+  isReservedTenantId,
+} from "./tenant-id.js";
+
 // ── Branded types ───────────────────────────────────────────────────────────
 
-declare const __tenantIdBrand: unique symbol;
 declare const __tenantBrand: unique symbol;
 declare const __secretsRefBrand: unique symbol;
 
-/**
- * A registered tenant's stable identifier. Hard-branded (a `unique symbol`,
- * like `RunId`/`DagId`): a plain `string` does NOT inhabit it, so an arbitrary
- * caller-supplied string can never be routed as a tenant id. Its sole producer
- * is `tenantId`, which validates the SHAPE (see `TENANT_ID_REGEX`); the brand
- * additionally encodes "passed shape validation at a parse boundary".
- *
- * The shape is deliberately Redis-key-safe: a `TenantId` becomes the
- * `fugue:<tenant>:*` key prefix and the `~fugue:<tenant>:*` Redis-ACL pattern
- * (AD-4), so it MUST NOT contain `:` (the key delimiter) or any glob
- * metacharacter — otherwise one tenant's id could be crafted to widen its own
- * ACL pattern over another tenant's keyspace.
- */
-export type TenantId = string & { readonly [__tenantIdBrand]: void };
+// TenantId and its only grammar constructor live in `tenant-id.ts`, a pure
+// value-object module that HostError parsing can consume without importing this
+// registration/principal module back into the error taxonomy.
 
 /**
  * The registered tenant security principal. Hard-branded so it cannot be
  * constructed by widening a plain object — only `markTenant` produces it, and
- * `markTenant` is called at registry CONSTRUCTION (the T3 registry adapter, and
- * test fakes today), once per registered tenant. That makes "this object is a
+ * `markTenant` is called at registry CONSTRUCTION (the shipped Redis registry
+ * adapter and focused test fakes), once per registered tenant. That makes "this object is a
  * tenant that was admitted to the registry under a shape-validated id" an
  * unforgeable, single-producer guarantee (FR-002, FR-003). `resolveTenant`
  * consumes these principals; it never mints them.
@@ -103,18 +104,17 @@ export type SecretsRef = string & { readonly [__secretsRefBrand]: void };
 // ── Registry view (injected, read-only) ─────────────────────────────────────
 
 /**
- * The minimal, READ-ONLY projection of the tenant registry that resolution
- * needs. The full registry ADT (register/deregister/reconfigure, Redis
- * adapter, pub/sub) lands in a later task (T3); `resolveTenant` depends only on
- * this narrow view so it stays a pure lookup and so the registry implementation
- * can evolve without touching the boundary parse.
+ * The minimal, READ-ONLY projection of the shipped tenant registry that
+ * resolution needs. `resolveTenant` depends only on this narrow view so it
+ * stays a pure lookup and register/deregister/reconfigure, Redis persistence,
+ * and pub/sub can evolve without touching the boundary parse.
  *
  * `tenantForTeam(team)` returns the registered principal for that owning team,
  * or `undefined` for an unknown team — first-class ABSENCE, never a thrown error
  * or a fabricated principal (fail-closed). The principals it returns were minted
  * by `markTenant` at registry construction.
  *
- * SECURITY CONTRACT for implementations (T3 adapter + test fakes):
+ * SECURITY CONTRACT for implementations (Redis adapter + test fakes):
  *   - `tenantForTeam` MUST resolve against OWN properties only. If the registry
  *     is backed by a plain object keyed on team, it MUST guard every lookup with
  *     `Object.prototype.hasOwnProperty.call(...)` (mirroring `agentClientIdForDag`
@@ -135,74 +135,9 @@ export interface TenantRegistryView {
 // ── Smart constructors ──────────────────────────────────────────────────────
 
 /**
- * Shape of a tenant id. Stricter than the general framework id regex: NO `:`
- * (Redis key delimiter) and NO glob metacharacters (`*`, `?`, `[`, `]`), so a
- * `TenantId` is always safe to interpolate into both a `fugue:<tenant>:*` key
- * and a `~fugue:<tenant>:*` Redis-ACL pattern without escaping. Lowercasing is
- * NOT enforced here (registration owns canonicalization); the regex only
- * guarantees the value can never widen a key/ACL namespace.
- */
-export const TENANT_ID_REGEX = /^[A-Za-z0-9_-]{1,64}$/;
-
-/**
- * Control-plane namespace segments that appear immediately after `fugue:` in
- * NON-tenant-scoped keys/channels: the tenant registry (`fugue:tenants:*` —
- * `TENANT_KEY_PREFIX` / `TENANT_EVENTS_CHANNEL`) and the supervisor's own state
- * (`fugue:supervisor:*` — the worker registry `WORKER_KEY_PREFIX` and the audit
- * stream `AUDIT_STREAM_KEY`). These are RESERVED: a tenant whose id equalled one
- * would be granted the ACL pattern `~fugue:<id>:*` (see `buildAclSpec`) that
- * OVERLAPS that control-plane keyspace — e.g. id `tenants` → `~fugue:tenants:*`
- * matches `fugue:tenants:<other>`, letting a scoped worker READ every other
- * tenant's config record (`secretsRef`, owning team, Keycloak mapping), WRITE to
- * the supervisor's registries, or publish on the lifecycle channel. That silently
- * defeats the cross-tenant isolation the whole feature rests on (ADR-0067, FR-040).
- *
- * Compared case-INSENSITIVELY: Redis keys are case-sensitive, so only an
- * exact-case id truly collides, but reserving the whole case-fold costs nothing
- * and removes any doubt (and any future `fugue:Supervisor:`-style key). Keep this
- * set in sync with the `fugue:<segment>:` prefixes the supervisor adapters own —
- * `import-boundaries.test.ts` (boundary E) pins that every such prefix is covered.
- */
-export const RESERVED_TENANT_IDS: ReadonlySet<string> = new Set(["tenants", "supervisor"]);
-
-/**
- * True iff `s` collides (case-insensitively) with a reserved control-plane
- * namespace segment — see `RESERVED_TENANT_IDS`. A reserved id passes
- * `TENANT_ID_REGEX` (it is shape-valid) but must never become a `TenantId`, so
- * this is checked alongside the regex at every parse/brand/ACL boundary.
- */
-export const isReservedTenantId = (s: string): boolean => RESERVED_TENANT_IDS.has(s.toLowerCase());
-
-/**
- * Parse-don't-validate constructor for `TenantId`. Returns a `Result` rather
- * than throwing, since tenant ids arrive from config/registration data at a
- * parse boundary. REJECTS two classes of value, each of which could widen one
- * tenant's `~fugue:<tenant>:*` ACL pattern over another's keyspace (AD-4, SC-001):
- *   - a `:` or glob metacharacter in the id (`TENANT_ID_REGEX`), and
- *   - a reserved control-plane namespace segment (`isReservedTenantId`) whose
- *     pattern would overlap the supervisor's own keys.
- * Both invariants are enforced in types here, never assumed downstream.
- */
-export const tenantId = (s: string): Result<TenantId, HostError> => {
-  if (!TENANT_ID_REGEX.test(s)) {
-    return err({
-      kind: "config-invalid",
-      message: `invalid tenant id "${s}": must match ${TENANT_ID_REGEX.source} (no ':' or glob metacharacters — required for Redis key/ACL scoping)`,
-    });
-  }
-  if (isReservedTenantId(s)) {
-    return err({
-      kind: "config-invalid",
-      message: `invalid tenant id "${s}": reserved control-plane namespace — its ~fugue:${s}:* ACL pattern would overlap the supervisor's own fugue:${s}:* keyspace`,
-    });
-  }
-  return ok(s as TenantId);
-};
-
-/**
  * @internal Brand a tenant principal. The single PRODUCER of `Tenant`, called at
- * registry construction — the T3 registry adapter (and the test fakes that stand
- * in for it today) invoke it once per registered tenant while building the
+ * registry construction — the shipped Redis registry adapter and focused test
+ * fakes invoke it once per registered tenant while building the
  * `TenantRegistryView`. `resolveTenant` does NOT call it; it only LOOKS UP
  * already-branded principals. Calling it on an arbitrary pair is a deliberate
  * forgery of the brand — visible in review, never accidental (mirrors
@@ -215,7 +150,7 @@ export const tenantId = (s: string): Result<TenantId, HostError> => {
  * error. We THROW (not `Result`) because, like every other post-brand violation
  * in the host (e.g. `host.ts` / `graph-capability.ts`), it is unrecoverable
  * programmer error, not a parse outcome. This closes the fail-open gate for the
- * T3 registry: a malformed id can never become a branded principal that would
+ * registry: a malformed id can never become a branded principal that would
  * widen its own `fugue:<tenant>:*` key / `~fugue:<tenant>:*` ACL namespace.
  */
 export const markTenant = (id: TenantId, team: Team): Tenant => {
@@ -236,7 +171,7 @@ export const markTenant = (id: TenantId, team: Team): Tenant => {
 
 /**
  * @internal Brand an opaque secrets reference. Producer of `SecretsRef` — the
- * registry adapter (T3) calls it when reading a tenant config's stored
+ * registry adapter calls it when reading a tenant config's stored
  * reference. Branding a plain string here does NOT grant the holder the
  * authority to dereference it; that authority lives in the worker's
  * `SecretsSource` (AD-6). Kept as a single named seam so every place a raw

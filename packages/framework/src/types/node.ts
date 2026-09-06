@@ -11,6 +11,7 @@ import type { Confidence } from "./confidence.js";
 import type { HttpCapability } from "./http-capability.js";
 import type { ClockCapability } from "./clock.js";
 import type { NonEmptyString } from "./non-empty-string.js";
+import type { BudgetCapability } from "./budget-capability.js";
 
 export type { Tracer };
 export type { HttpCapability } from "./http-capability.js";
@@ -36,8 +37,8 @@ export interface NodeRetryConfig {
   /**
    * Backoff delays in ms for successive attempts [attempt0, attempt1, ...].
    * Defaults to [1000, 2000, 4000]. Non-empty by construction: an empty
-   * ladder has no attempt-0 delay (round-21 tda-1); `validateDagShape`
-   * rejects `[]` at runtime for untyped inputs, and the tuple type makes
+   * ladder has no attempt-0 delay; `validateDagShape` rejects `[]` at runtime
+   * for untyped inputs, and the tuple type makes
    * the empty state unrepresentable for typed ones.
    */
   readonly backoffMs?: readonly [number, ...number[]];
@@ -57,9 +58,9 @@ export interface NodeHumanReviewConfig {
    * Prompt shown to the reviewer — the gate's entire human-facing payload.
    * Branded `NonEmptyString`: a blank prompt (a gate that asks nothing) is
    * unrepresentable by construction, so the invariant lives in the type, not in
-   * a runtime guard. The only gateway is `withHumanReview` (which parses a raw
-   * string into the brand), so attaching this field with a bare `""` literal is
-   * a compile error — the validation choke point cannot be bypassed.
+   * a runtime guard. `withHumanReview`, `nonEmptyString`, and
+   * `asNonEmptyString` are the public parsing gateways, so attaching this field
+   * with a bare `""` literal is a compile error.
    */
   readonly prompt: NonEmptyString;
 }
@@ -156,6 +157,7 @@ export interface CapabilityRegistry {
   readonly judgeLlm: LlmClient;
   readonly http: HttpCapability;
   readonly clock: ClockCapability;
+  readonly budget: BudgetCapability;
 }
 
 /**
@@ -193,6 +195,7 @@ export const BUILTIN_CAPABILITY_KEYS = [
   "judgeLlm",
   "http",
   "clock",
+  "budget",
 ] as const satisfies readonly Capability[];
 
 export type BuiltinCapabilityKey = (typeof BUILTIN_CAPABILITY_KEYS)[number];
@@ -238,7 +241,7 @@ export const BUILTIN_CAPABILITY_INFO = {
   },
   judgeLlm: {
     description:
-      "Separate LLM client used by eval-judge nodes, kept distinct from the main `llm` client so judging never contends with generation.",
+      "Distinct LLM capability binding for eval-judge nodes; it still shares the run's spend admission, budget, and ledger with generation.",
     clientType: "LlmClient",
     reference: "createEvalJudgeNode (DagDef.evalJudges)",
   },
@@ -253,6 +256,12 @@ export const BUILTIN_CAPABILITY_INFO = {
       "Injectable wall-clock source (now(): Date). Wired to the system clock in production and a fixed instant in tests, so any time-dependent node is deterministic without monkey-patching globals.",
     clientType: "ClockCapability",
     reference: "any node factory (createFetchNode/createSourceNode/createTransformNode) with requires: ['clock']",
+  },
+  budget: {
+    description:
+      "Read-only settled spend and admission-safe projected headroom for the run. Reads can affect retry-time decisions, so tests should inject a fixed budget capability.",
+    clientType: "BudgetCapability",
+    reference: "any node factory with requires: ['budget']",
   },
 } as const satisfies Record<BuiltinCapabilityKey, CapabilityInfo>;
 
@@ -282,6 +291,7 @@ export interface BaseNodeContext {
   readonly judgeLlm: LlmClient | null;
   readonly http: HttpCapability | null;
   readonly clock: ClockCapability | null;
+  readonly budget: BudgetCapability | null;
   /**
    * Runtime-owned observer timestamp seam. `runNodeShared` replaces this for
    * each invocation from `RunOptions.now`; built-in nodes use it for sub-spans.
@@ -399,7 +409,7 @@ export interface NodeDef<
   I = unknown,
   O = unknown,
   E extends FrameworkError = FrameworkError,
-  R extends readonly Capability[] = readonly Capability[],
+  R extends readonly Capability[] = readonly [],
 > {
   readonly id: NodeId;
   readonly kind: NodeKind;
@@ -456,8 +466,15 @@ export interface NodeDef<
    */
   readonly humanReview?: NodeHumanReviewConfig;
   /**
-   * Per-node retry configuration (backoff delays, jitter). Falls back to
-   * `DagDef.retryLimits` / `DagDef.defaultRetryLimit` when omitted.
+   * Per-node retry configuration (backoff delays, jitter).
+   *
+   * Two SEPARATE fallback chains meet on this node, and conflating them reads
+   * as one setting that it is not:
+   * - How MANY times to retry comes from `DagDef.retryLimits` /
+   *   `DagDef.defaultRetryLimit` — neither of which this field carries.
+   * - HOW LONG to wait between attempts (`backoffMs`, `jitterRatio`) comes from
+   *   here, falling back to `NodeRetryConfig`'s own documented defaults
+   *   (`[1000, 2000, 4000]`, `0.2`). Nothing on `DagDef` supplies these.
    */
   readonly retry?: NodeRetryConfig;
 }
@@ -467,8 +484,9 @@ export interface NodeDef<
  * `observer` are optional — when omitted the runtime injects no-op defaults.
  * Capability fields stay as in `BaseNodeContext`.
  *
- * Custom capabilities can be passed via the `capabilities` record or as
- * top-level fields (built-in capabilities remain top-level for backward compat).
+ * Custom capabilities must be passed via the `capabilities` record. Only
+ * built-in capabilities retain top-level compatibility fields; they may also be
+ * supplied in the record.
  */
 export type NodeContextInit = {
   readonly runId: string | RunId;
@@ -483,6 +501,7 @@ export type NodeContextInit = {
   readonly judgeLlm?: LlmClient | null;
   readonly http?: HttpCapability | null;
   readonly clock?: ClockCapability | null;
+  readonly budget?: BudgetCapability | null;
   readonly signal?: AbortSignal;
   readonly contentFilter?: ContentFilter | null;
   /**
@@ -490,7 +509,7 @@ export type NodeContextInit = {
    * entries. Values are the capability client instances.
    *
    * Built-in capabilities (`llm`, `cache`, `prompts`, `judgeLlm`, `http`,
-   * `clock`) can also be passed here instead of as top-level fields.
+   * `clock`, `budget`) can also be passed here instead of as top-level fields.
    */
   readonly capabilities?: Partial<{ readonly [K in Capability]: CapabilityRegistry[K] | null }>;
 };

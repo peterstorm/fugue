@@ -30,7 +30,9 @@ import {
 } from "../types/error-factories.js";
 import {
   formatFrameworkError,
+  asFrameworkError,
   isFrameworkError,
+  isFrameworkErrorKind,
   PersistedFrameworkErrorSchema,
   messageOf,
   retriabilityOf,
@@ -147,6 +149,173 @@ describe("PersistedFrameworkErrorSchema", () => {
       message: "boom",
       retriability: "retriable",
     }).success).toBe(false);
+  });
+
+  it("admits only complete variants through isFrameworkError and is total for hostile input", () => {
+    for (const malformed of [
+      { kind: "node-crash" },
+      { kind: "validation", nodeId: "node-x" },
+      { kind: "policy-refusal" },
+      { kind: "infra-unreachable", operation: "mint" },
+    ]) {
+      expect(isFrameworkError(malformed)).toBe(false);
+    }
+    expect(isFrameworkError({
+      kind: "node-crash",
+      nodeId: "node-x",
+      message: "boom",
+      retriability: "non-retriable",
+    })).toBe(true);
+
+    // A parser repair/canonicalization proves only its OUTPUT. The original
+    // object remains malformed and must not be narrowed by a type guard.
+    expect(PersistedFrameworkErrorSchema.safeParse({
+      kind: "checkpoint-write-failed",
+      runId: "run-x",
+      nodeId: "node-x",
+      invalidRunId: "../escape",
+      message: "bad address",
+    }).success).toBe(true);
+    expect(isFrameworkError({
+      kind: "checkpoint-write-failed",
+      runId: "run-x",
+      nodeId: "node-x",
+      invalidRunId: "../escape",
+      message: "bad address",
+    })).toBe(false);
+    expect(isFrameworkError({
+      kind: "llm-budget-exceeded",
+      runId: "run-x",
+      nodeId: "node-x",
+      cause: {
+        kind: "unpriced",
+        ceiling: { kind: "usd", limit: 10 },
+        basis: "settled",
+        models: ["z-model", "a-model"],
+        observedAtLeast: 0,
+      },
+    })).toBe(false);
+
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    expect(() => isFrameworkError(revoked.proxy)).not.toThrow();
+    expect(isFrameworkError(revoked.proxy)).toBe(false);
+  });
+
+  it("sanitizes a persisted breach's COUNT axes exactly as it does its cost axis", () => {
+    // The cost axis has always been sanitized (`PersistedMicroUsdSchema`). The
+    // token and call axes sat beside it accepting any JS number. That asymmetry
+    // is the whole finding: `budget.ts` refuses a non-finite figure because
+    // `observed >= limit` is FALSE forever against NaN/Infinity — a poisoned
+    // limit is a ceiling that can never refuse again — and a value arriving
+    // from a persisted worker payload is precisely the one you cannot vouch for.
+    const breachWith = (
+      ceiling: Record<string, unknown>,
+      observed: unknown,
+    ): unknown => ({
+      kind: "llm-budget-exceeded",
+      runId: "run-x",
+      nodeId: "node-x",
+      cause: { kind: "reached", ceiling, basis: "settled", observed },
+    });
+
+    // The honest shape still parses, on every axis.
+    expect(PersistedFrameworkErrorSchema.safeParse(
+      breachWith({ kind: "tokens", limit: 1000 }, 1200),
+    ).success).toBe(true);
+    expect(PersistedFrameworkErrorSchema.safeParse(
+      breachWith({ kind: "calls", limit: 5 }, 6),
+    ).success).toBe(true);
+    expect(PersistedFrameworkErrorSchema.safeParse(
+      breachWith({ kind: "usd", limit: 1000 }, 1200),
+    ).success).toBe(true);
+
+    // Poisoned LIMITS are refused on the count axes, matching the cost axis.
+    for (const poison of [-1, 1.5, Infinity, -Infinity, NaN]) {
+      expect(PersistedFrameworkErrorSchema.safeParse(
+        breachWith({ kind: "tokens", limit: poison }, 1),
+      ).success).toBe(false);
+      expect(PersistedFrameworkErrorSchema.safeParse(
+        breachWith({ kind: "calls", limit: poison }, 1),
+      ).success).toBe(false);
+    }
+
+    // …and so are poisoned OBSERVATIONS.
+    for (const poison of [-1, 1.5, Infinity, NaN]) {
+      expect(PersistedFrameworkErrorSchema.safeParse(
+        breachWith({ kind: "tokens", limit: 10 }, poison),
+      ).success).toBe(false);
+    }
+
+    // The `unknown-usage` arm carries its floor on the same axis, so it gets
+    // the same treatment rather than a second, laxer rule.
+    const unknownUsage = (observedAtLeast: unknown): unknown => ({
+      kind: "llm-budget-exceeded",
+      runId: "run-x",
+      nodeId: "node-x",
+      cause: {
+        kind: "unknown-usage",
+        ceiling: { kind: "tokens", limit: 10 },
+        basis: "settled",
+        observedAtLeast,
+      },
+    });
+    expect(PersistedFrameworkErrorSchema.safeParse(unknownUsage(3)).success).toBe(true);
+    expect(PersistedFrameworkErrorSchema.safeParse(unknownUsage(-3)).success).toBe(false);
+    expect(PersistedFrameworkErrorSchema.safeParse(unknownUsage(Infinity)).success).toBe(false);
+  });
+
+  it("recovers a pre-prompt-caching usage record through asFrameworkError", () => {
+    // A record written before prompt caching carries only the two token counts.
+    // `persistedUsageSchema` exists to accept it, defaulting the cache figures.
+    const legacy = {
+      kind: "node-crash",
+      nodeId: "node-x",
+      message: "boom",
+      retriability: "retriable",
+      usage: { tokensIn: 10, tokensOut: 5 },
+    };
+
+    // The wire parser accepts it...
+    expect(PersistedFrameworkErrorSchema.safeParse(legacy).success).toBe(true);
+
+    // ...but the source object is NOT a `FrameworkError`: `TokenUsage` declares
+    // all four fields required, and every `isFrameworkError` caller carries the
+    // SOURCE forward. Narrowing here would push `undefined` cache-token fields
+    // into budget accounting — a fail-open. The guard stays exact.
+    expect(isFrameworkError(legacy)).toBe(false);
+
+    // Recovery is what the caller actually wants, and it yields the CANONICAL
+    // value: structured kind/retriability intact, usage completed by the
+    // schema's defaults rather than dropped as unrecognizable.
+    const recovered = asFrameworkError(legacy);
+    expect(recovered).toBeDefined();
+    expect(recovered?.kind).toBe("node-crash");
+    if (recovered?.kind !== "node-crash") throw new Error("expected node-crash");
+    expect(recovered.retriability).toBe("retriable");
+    expect(recovered.usage).toEqual({
+      tokensIn: 10,
+      tokensOut: 5,
+      cacheWriteTokens: 0,
+      cacheReadTokens: 0,
+    });
+    // The recovered value is canonical, never the hostile source.
+    expect(recovered).not.toBe(legacy);
+
+    // Total for input the parser rejects, and for hostile input.
+    expect(asFrameworkError({ kind: "node-crash" })).toBeUndefined();
+    expect(asFrameworkError("not an error")).toBeUndefined();
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    expect(() => asFrameworkError(revoked.proxy)).not.toThrow();
+    expect(asFrameworkError(revoked.proxy)).toBeUndefined();
+  });
+
+  it("parses a standalone augmented-error kind without pretending it is a full error", () => {
+    expect(isFrameworkErrorKind("node-crash")).toBe(true);
+    expect(isFrameworkErrorKind("policy-refusal")).toBe(true);
+    expect(isFrameworkErrorKind("made-up-kind")).toBe(false);
+    expect(isFrameworkError({ kind: "node-crash" })).toBe(false);
   });
 });
 
@@ -413,11 +582,9 @@ describe("retriabilityOf — single source of truth for the retry fast-fail fork
   });
 
   it("recognizes every table-constructed kind as a typed framework error (identity survives the guard)", () => {
-    // The closed kind domain in types/errors.ts is compiler-checked for
-    // COVERAGE (a kind added to the union and omitted from the
-    // `Record<FrameworkErrorKind, true>` table is a compile error); this pins
-    // the consumer-side contract from the other side: no kind this file
-    // constructs is dropped by `isFrameworkError`, so the boundary fences that
+    // PersistedFrameworkErrorSchema is compiler-checked for complete kind
+    // coverage; this pins the consumer-side contract from the other side: no
+    // complete kind this file constructs is dropped by `isFrameworkError`, so the boundary fences that
     // branch on it (resume.ts, job.ts appendEvent, atomic.ts acquireFileLock)
     // can never re-tag a kind that lost its identity.
     for (const [error] of cases) {
@@ -770,6 +937,32 @@ describe("PersistedFrameworkErrorSchema: llm-budget-exceeded round-trips through
     expect(parsed.data.cause.observedAtLeast).toBe(250_000 as MicroUsd);
     // The formatter is total over anything the parser admits.
     expect(() => formatFrameworkError(parsed.data)).not.toThrow();
+  });
+
+  it("parses unknown usage for token/USD ceilings and rejects it for calls", () => {
+    const unknown = (ceiling: unknown) => ({
+      kind: "llm-budget-exceeded",
+      runId: "run-budget",
+      nodeId: "node-x",
+      cause: {
+        kind: "unknown-usage",
+        ceiling,
+        basis: "settled",
+        observedAtLeast: 12,
+      },
+    });
+
+    for (const ceiling of [
+      { kind: "tokens", limit: 100 },
+      { kind: "usd", limit: 100 },
+    ]) {
+      const parsed = PersistedFrameworkErrorSchema.safeParse(unknown(ceiling));
+      expect(parsed.success).toBe(true);
+      if (parsed.success) expect(() => formatFrameworkError(parsed.data)).not.toThrow();
+    }
+    expect(PersistedFrameworkErrorSchema.safeParse(
+      unknown({ kind: "calls", limit: 100 }),
+    ).success).toBe(false);
   });
 
   it("REJECTS an unpriced cause naming no model", () => {

@@ -11,19 +11,14 @@ import { runDag } from "../executor/run-dag.js";
 import { defineDag } from "../executor/define-dag.js";
 import { createTransformNode } from "../nodes/transform.js";
 import { DAG_INPUT } from "../types/ids.js";
+import { testNodeContext } from "./_context-factories.js";
 
-const mkCtx = (observer: Observer): NodeContext => ({
-  runId: "crash-test-run" as RunId,
-  dagId: "crash-test-dag" as DagId,
-  observer,
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null,
-  cache: null,
-  prompts: null,
-  llm: null, http: null,
-  clock: null,
-  logger: { warn: () => {}, error: () => {} },
-});
+const mkCtx = (observer: Observer): NodeContext =>
+  testNodeContext({
+    runId: "crash-test-run" as RunId,
+    dagId: "crash-test-dag" as DagId,
+    observer,
+  });
 
 describe("Observer crash isolation", () => {
   it("DAG run completes despite observer throwing on every event", async () => {

@@ -235,6 +235,28 @@ describe("HostConfigSchema", () => {
     expect(result.value.LLM_PROVIDER).toBe("openai");
   });
 
+  it("requires an Azure model SKU separately from its routing deployment", () => {
+    const azure = {
+      ...validEnv,
+      LLM_PROVIDER: "azure",
+      AZURE_OPENAI_ENDPOINT: "https://myoai.openai.azure.com",
+      AZURE_OPENAI_API_KEY: "key",
+      AZURE_OPENAI_DEPLOYMENT: "team-chat-production",
+    };
+    const missingModel = parseHostConfig(azure);
+    expect(missingModel.ok).toBe(false);
+    if (!missingModel.ok && missingModel.error.kind === "config-invalid") {
+      expect(missingModel.error.message).toContain("AZURE_OPENAI_MODEL");
+    }
+
+    const complete = parseHostConfig({ ...azure, AZURE_OPENAI_MODEL: "gpt-4o-mini" });
+    expect(complete.ok).toBe(true);
+    if (complete.ok) {
+      expect(complete.value.AZURE_OPENAI_DEPLOYMENT).toBe("team-chat-production");
+      expect(complete.value.AZURE_OPENAI_MODEL).toBe("gpt-4o-mini");
+    }
+  });
+
   it("rejects invalid LLM provider value", () => {
     const result = parseHostConfig({ ...validEnv, LLM_PROVIDER: "gemini" });
     expect(result.ok).toBe(false);
@@ -250,7 +272,8 @@ describe("HostConfigSchema", () => {
       OPENAI_API_KEY: "sk-xxx",
       AZURE_OPENAI_ENDPOINT: "https://myoai.openai.azure.com",
       AZURE_OPENAI_API_KEY: "key",
-      AZURE_OPENAI_DEPLOYMENT: "gpt-4",
+      AZURE_OPENAI_DEPLOYMENT: "team-chat-production",
+      AZURE_OPENAI_MODEL: "gpt-4o-mini",
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://localhost:4317",
       MLFLOW_TRACKING_URI: "http://localhost:5000",
       MLFLOW_EXPERIMENT_ID: "123",
@@ -601,71 +624,23 @@ describe("HostConfigSchema", () => {
     expect(result.value.DEFAULT_CHECKPOINT_TTL_MS).toBe(172_800_000);
   });
 
-  it("rejects PORT of 0 (below min 1)", () => {
-    const result = parseHostConfig({ ...validEnv, PORT: "0" });
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.kind).toBe("config-invalid");
-  });
-
-  it("rejects negative PORT", () => {
-    const result = parseHostConfig({ ...validEnv, PORT: "-1" });
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.kind).toBe("config-invalid");
-  });
-
-  it("rejects PORT above 65535", () => {
-    const result = parseHostConfig({ ...validEnv, PORT: "70000" });
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.kind).toBe("config-invalid");
-  });
-
-  it("rejects MAX_GLOBAL_CONCURRENCY of 0", () => {
-    const result = parseHostConfig({ ...validEnv, MAX_GLOBAL_CONCURRENCY: "0" });
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.kind).toBe("config-invalid");
-  });
-
-  it("rejects negative MAX_GLOBAL_CONCURRENCY", () => {
-    const result = parseHostConfig({ ...validEnv, MAX_GLOBAL_CONCURRENCY: "-5" });
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.kind).toBe("config-invalid");
-  });
-
-  it("rejects DAGS_POLL_INTERVAL_MS below 1000", () => {
-    const result = parseHostConfig({ ...validEnv, DAGS_POLL_INTERVAL_MS: "500" });
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.kind).toBe("config-invalid");
-  });
-
-  it("rejects DEFAULT_DAG_TIMEOUT_MS of 0", () => {
-    const result = parseHostConfig({ ...validEnv, DEFAULT_DAG_TIMEOUT_MS: "0" });
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.kind).toBe("config-invalid");
-  });
-
-  it("rejects CIRCUIT_BREAKER_THRESHOLD of 0", () => {
-    const result = parseHostConfig({ ...validEnv, CIRCUIT_BREAKER_THRESHOLD: "0" });
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.kind).toBe("config-invalid");
-  });
-
-  it("rejects empty string for numeric field (coerces to 0, below min)", () => {
-    const result = parseHostConfig({ ...validEnv, PORT: "" });
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.kind).toBe("config-invalid");
-  });
-
-  it("rejects fractional PORT value", () => {
-    const result = parseHostConfig({ ...validEnv, PORT: "3.5" });
+  // Ten blocks that differed only in which env var carried which bad value, and
+  // all asserted the same two things. As a table, the set of numeric fields
+  // actually guarded — and the shape of value each one rejects — is readable at
+  // a glance, and a newly-bounded field is one row rather than a copy-paste.
+  it.each([
+    ["PORT", "0", "below its min of 1"],
+    ["PORT", "-1", "negative"],
+    ["PORT", "70000", "above its max of 65535"],
+    ["PORT", "", "empty (coerces to 0, below min)"],
+    ["PORT", "3.5", "fractional"],
+    ["MAX_GLOBAL_CONCURRENCY", "0", "zero"],
+    ["MAX_GLOBAL_CONCURRENCY", "-5", "negative"],
+    ["DAGS_POLL_INTERVAL_MS", "500", "below its min of 1000"],
+    ["DEFAULT_DAG_TIMEOUT_MS", "0", "zero"],
+    ["CIRCUIT_BREAKER_THRESHOLD", "0", "zero"],
+  ] as const)("rejects %s when it is %s", (field, value) => {
+    const result = parseHostConfig({ ...validEnv, [field]: value });
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error.kind).toBe("config-invalid");
@@ -850,5 +825,96 @@ describe("FugueYamlSchema", () => {
     expect(parseFugueYaml({ team: "t", llmBudgetTokens: -100 }, "/dags/x/fugue.yaml").ok).toBe(false);
     expect(parseFugueYaml({ team: "t", llmBudgetTokens: 1000.5 }, "/dags/x/fugue.yaml").ok).toBe(false);
     expect(parseFugueYaml({ team: "t", llmBudgetTokens: "50000" }, "/dags/x/fugue.yaml").ok).toBe(false);
+  });
+});
+
+// ── The postcondition and the schema must agree (round-13 A10) ───────────────
+// `withLlmPostcondition` re-checks, on the PARSED config, the same
+// provider/credential pairing the schema's `superRefine` already rejected. Its
+// failure branch is therefore unreachable through `parseHostConfig` — which is
+// exactly the risk: nothing proved the two stayed in step, so a `superRefine`
+// that loosened (or a postcondition that tightened) would surface as a
+// `config-invalid` naming an internal postcondition rather than the missing
+// variable, and no test would notice.
+
+describe("LLM provider postcondition agrees with the schema", () => {
+  const base = {
+    DAGS_REPO_URL: "https://github.com/org/dags.git",
+    REDIS_URL: "redis://localhost:6379",
+    ADMIN_TOKEN: "test-admin-token-long-enough",
+  };
+
+  const POSTCONDITION_MESSAGE =
+    "LLM provider configuration did not satisfy its parsed postcondition";
+
+  const AZURE = {
+    AZURE_OPENAI_ENDPOINT: "https://example.openai.azure.com",
+    AZURE_OPENAI_API_KEY: "azure-key",
+    AZURE_OPENAI_DEPLOYMENT: "deploy",
+    AZURE_OPENAI_MODEL: "gpt-4o",
+  };
+
+  /** Every provider, fully credentialed and with each credential dropped in turn. */
+  const cases: ReadonlyArray<Record<string, string | undefined>> = [
+    { LLM_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-ant" },
+    { LLM_PROVIDER: "anthropic" },
+    { LLM_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "" },
+    { LLM_PROVIDER: "openai", OPENAI_API_KEY: "sk-openai" },
+    { LLM_PROVIDER: "openai" },
+    { LLM_PROVIDER: "openai", OPENAI_API_KEY: "" },
+    { LLM_PROVIDER: "azure", ...AZURE },
+    ...Object.keys(AZURE).map((dropped) => ({
+      LLM_PROVIDER: "azure",
+      ...Object.fromEntries(Object.entries(AZURE).filter(([k]) => k !== dropped)),
+    })),
+    ...Object.keys(AZURE).map((blanked) => ({
+      LLM_PROVIDER: "azure",
+      ...AZURE,
+      [blanked]: "",
+    })),
+  ];
+
+  it("never reports a postcondition failure for an env the schema accepted", () => {
+    for (const llm of cases) {
+      const result = parseHostConfig({ ...base, ...llm });
+      if (!result.ok && result.error.kind === "config-invalid") {
+        // A rejection must name the missing variable, never the internal re-check.
+        expect(result.error.message).not.toContain(POSTCONDITION_MESSAGE);
+      }
+    }
+  });
+
+  it("accepts exactly the fully credentialed provider configurations", () => {
+    expect(parseHostConfig({ ...base, LLM_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-ant" }).ok)
+      .toBe(true);
+    expect(parseHostConfig({ ...base, LLM_PROVIDER: "openai", OPENAI_API_KEY: "sk-o" }).ok)
+      .toBe(true);
+    expect(parseHostConfig({ ...base, LLM_PROVIDER: "azure", ...AZURE }).ok).toBe(true);
+  });
+
+  it("rejects every partially credentialed provider configuration", () => {
+    for (const llm of cases) {
+      const supplied = (key: string) => {
+        const value = (llm as Record<string, string | undefined>)[key];
+        return typeof value === "string" && value.length > 0;
+      };
+      const complete =
+        (llm.LLM_PROVIDER === "anthropic" && supplied("ANTHROPIC_API_KEY")) ||
+        (llm.LLM_PROVIDER === "openai" && supplied("OPENAI_API_KEY")) ||
+        (llm.LLM_PROVIDER === "azure" && Object.keys(AZURE).every(supplied));
+
+      expect(parseHostConfig({ ...base, ...llm }).ok).toBe(complete);
+    }
+  });
+
+  it("carries the provider's credentials onto the parsed config", () => {
+    // The postcondition's real job: narrowing the union so the credential is
+    // present on the returned type, not merely validated and discarded.
+    const azure = parseHostConfig({ ...base, LLM_PROVIDER: "azure", ...AZURE });
+    expect(azure.ok).toBe(true);
+    if (azure.ok && azure.value.LLM_PROVIDER === "azure") {
+      expect(azure.value.AZURE_OPENAI_DEPLOYMENT).toBe("deploy");
+      expect(azure.value.AZURE_OPENAI_MODEL).toBe("gpt-4o");
+    }
   });
 });

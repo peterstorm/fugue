@@ -2,6 +2,8 @@ export type {
   CacheTtl,
   ConversationCachePolicy,
   LlmClient,
+  LlmModelId,
+  LlmPricingModel,
   LlmRequest,
   LlmResponse,
   SendWithToolsRequest,
@@ -10,6 +12,7 @@ export type {
   ToolContext,
   ToolName,
 } from "../types/llm.js";
+export { llmModelId, tryLlmModelId } from "../types/llm.js";
 // Prompt-cache placement. Node authors only need the policy types above; these
 // are for adapters translating a plan into a provider's wire format.
 export type { PromptCachePlan } from "./prompt-cache.js";
@@ -54,7 +57,9 @@ export {
   computeCostUsd,
   costRatesFor,
   costUsd,
+  isPricedModel,
   spendOfCall,
+  spendOfUnknownCall,
   PRICE_TABLE,
 } from "./cost.js";
 export type { CostRates } from "./cost.js";

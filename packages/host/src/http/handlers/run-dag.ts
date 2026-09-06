@@ -10,8 +10,20 @@
  */
 
 import type { Context } from "hono";
-import type { Result, NodeContext, FrameworkError, InvocationOrigin } from "@fuguejs/framework";
-import { formatFrameworkError, safeErrorMessage, tryDagId } from "@fuguejs/framework";
+import type {
+  Result,
+  NodeContext,
+  FrameworkError,
+  InvocationOrigin,
+  ScopedLlmMeter,
+  RunId,
+} from "@fuguejs/framework";
+import {
+  formatFrameworkError,
+  runId as makeRunId,
+  safeErrorMessage,
+  tryDagId,
+} from "@fuguejs/framework";
 import type { DagDef } from "@fuguejs/framework";
 import type { HostEnv } from "../env.js";
 import type { NodeContextForDag } from "../../domain/run-context.js";
@@ -19,13 +31,19 @@ import type { AuthIdentity } from "../../domain/auth.js";
 import { authorizeDagAccess } from "./dag-access.js";
 import { errorResponse, hostUnavailableResponse, successResponse } from "../response.js";
 import type { HostError } from "../../domain/host-error.js";
-import { formatHostError, httpStatusFor } from "../../domain/host-error.js";
+import {
+  circuitOpen,
+  discloseHostError,
+  formatHostError,
+  retryAfterSecondsFor,
+} from "../../domain/host-error.js";
 import { getRegistry } from "../../domain/host-state.js";
 import { lookupDag } from "../../domain/registry.js";
 import type { RegisteredDag } from "../../domain/registry.js";
 import { acquire, release } from "../../domain/concurrency.js";
 import type { ConcurrencyState } from "../../domain/concurrency.js";
 import { checkCircuit, markSuccess, markFailure } from "../../domain/circuit-guard.js";
+import { DEFAULTS } from "../../domain/circuit-breaker.js";
 import type { CircuitPort, CircuitConfig } from "../../domain/circuit-guard.js";
 import { classifyFrameworkError } from "../../domain/framework-error-http.js";
 import type { HitlRunService } from "../../hitl/service.js";
@@ -58,6 +76,7 @@ export interface RunDagDeps {
    */
   readonly createContext: (
     registered: RegisteredDag,
+    runId: RunId,
     signal: AbortSignal,
     identity: AuthIdentity,
   ) => Promise<NodeContextForDag>;
@@ -73,11 +92,61 @@ export interface RunDagDeps {
     input: I,
     ctx: NodeContext,
     origin: InvocationOrigin | undefined,
+    meterMintedLlm: ScopedLlmMeter,
   ) => Promise<Result<O, FrameworkError>>;
   readonly clock: () => number;
+  readonly newRunId?: () => RunId;
   /** Optional structured diagnostics for failures settling after a hard deadline. */
   readonly logger?: LogPort;
 }
+
+/**
+ * One response shape for every HostError this handler returns: status and
+ * Retry-After both come from the authoritative tables in `host-error.ts`
+ * (`httpStatusFor` / `retryAfterSecondsFor`) rather than being hand-copied per
+ * call site, so a policy change lands in one place and the two can never
+ * disagree about the same kind.
+ *
+ * SECURITY (information disclosure — OWASP A09/A05): what the body may say is
+ * decided by `discloseHostError`, the SAME authority the error-handler
+ * middleware reads. This handler renders some HostErrors itself — notably the
+ * HITL `startRun` failure below, which never reaches that middleware and can
+ * carry 5xx kinds (`internal-invariant-violated`, `spend-ledger-unavailable`)
+ * whose formatted text splices raw internal state. A server fault therefore
+ * gets the generic message with NO `details`, and its detail is logged instead.
+ */
+const hostErrorResponse = (
+  c: Context,
+  dagId: string,
+  error: HostError,
+  details?: unknown,
+  logger?: LogPort,
+): Response => {
+  const retryAfter = retryAfterSecondsFor(error);
+  const disclosure = discloseHostError(error);
+  // Headers (e.g. Retry-After) stay safe to advertise on either branch.
+  const headers = retryAfter !== undefined
+    ? { headers: { "Retry-After": String(retryAfter) } }
+    : {};
+
+  if (disclosure.kind === "server-fault") {
+    logWithoutThrowing(logger, "error", "Host error in run-dag handler", {
+      kind: error.kind,
+      detail: disclosure.detail,
+      dagId,
+    });
+    return errorResponse(c, disclosure.status, error.kind, disclosure.message, {
+      dagId,
+      ...headers,
+    });
+  }
+
+  return errorResponse(c, disclosure.status, error.kind, disclosure.message, {
+    dagId,
+    ...(details !== undefined ? { details } : {}),
+    ...headers,
+  });
+};
 
 /**
  * Creates the run-dag handler with injected dependencies.
@@ -115,16 +184,15 @@ export const createRunDagHandler = (
     if (!registered) {
       const available = registry ? Array.from(registry.dags.keys()) : [];
       const notFound: HostError = { kind: "dag-not-found", dagId, available };
-      return errorResponse(c, 404, notFound.kind, formatHostError(notFound), {
-        dagId,
-        details: { available },
-      });
+      return hostErrorResponse(c, dagId, notFound, { available });
     }
 
     // Check if DAG is disabled
     if (registered.status.kind === "disabled") {
       const disabled: HostError = { kind: "dag-disabled", dagId, reason: registered.status.reason };
-      return errorResponse(c, 503, disabled.kind, formatHostError(disabled), { dagId });
+      // 503 → `server-fault`: the reason is withheld from the body, so the
+      // logger is the ONLY channel it can reach an operator through.
+      return hostErrorResponse(c, dagId, disabled, undefined, deps.logger);
     }
 
     // 1.5. Authorization — check team scope and carry the parsed identity.
@@ -137,26 +205,20 @@ export const createRunDagHandler = (
     try {
       input = await c.req.json();
     } catch (e: unknown) {
-      const errorMsg = e instanceof Error ? e.message : String(e);
+      const errorMsg = safeErrorMessage(e);
       const parseErr: HostError = {
         kind: "body-parse-failed",
         dagId,
         message: errorMsg,
       };
-      return errorResponse(c, 400, parseErr.kind, formatHostError(parseErr), {
-        dagId,
-        details: { message: errorMsg },
-      });
+      return hostErrorResponse(c, dagId, parseErr, { message: errorMsg });
     }
 
     const parseResult = registered.inputSchema.safeParse(input);
     if (!parseResult.success) {
       const issues = parseResult.error?.issues ?? [];
       const validationErr: HostError = { kind: "input-validation-failed", dagId, issues };
-      return errorResponse(c, 400, validationErr.kind, formatHostError(validationErr), {
-        dagId,
-        details: { issues },
-      });
+      return hostErrorResponse(c, dagId, validationErr, { issues });
     }
 
     // 2.5. HITL fork (ADR-0060): a DAG declaring a `humanReview` gate cannot run
@@ -174,7 +236,7 @@ export const createRunDagHandler = (
       }
       const started = await deps.hitl.startRun(dagId, registered.team, parseResult.data, identity);
       if (!started.ok) {
-        return errorResponse(c, httpStatusFor(started.error), started.error.kind, formatHostError(started.error), { dagId });
+        return hostErrorResponse(c, dagId, started.error, undefined, deps.logger);
       }
       // 202 Accepted: the run is queued for durable execution; poll GET /runs/:id.
       return c.json(
@@ -216,10 +278,8 @@ export const createRunDagHandler = (
       const concErr: HostError = atGlobalCapacity
         ? { kind: "global-concurrency-exceeded" }
         : { kind: "dag-concurrency-exceeded", dagId };
-      return errorResponse(c, 429, concErr.kind, formatHostError(concErr), {
-        dagId,
-        details: { scope: atGlobalCapacity ? "global" : "dag" },
-        headers: { "Retry-After": "5" },
+      return hostErrorResponse(c, dagId, concErr, {
+        scope: atGlobalCapacity ? "global" : "dag",
       });
     }
 
@@ -232,10 +292,22 @@ export const createRunDagHandler = (
 
     if (!circuitCheck.allowed) {
       deps.setConcurrency(release(deps.getConcurrency(), token));
-      return errorResponse(c, 503, "dag-disabled", `Circuit breaker open for DAG '${dagId}'`, {
+      // Its OWN kind, not `dag-disabled`: an open circuit clears after the
+      // breaker's cooldown, and the advertised Retry-After is derived from the
+      // DAG's effective `cooldownMs` rather than a hardcoded constant.
+      return hostErrorResponse(
+        c,
         dagId,
-        headers: { "Retry-After": "30" },
-      });
+        // `cooldownMs` is optional on CircuitConfig; `attemptReset` falls back to
+        // DEFAULTS.cooldownMs, so the advertised wait must fall back to the SAME
+        // constant or the header would again diverge from the real reset window.
+        circuitOpen(dagId, circuitConfig.cooldownMs ?? DEFAULTS.cooldownMs),
+        undefined,
+        // Also 503 → `server-fault`. `circuit-breaker.ts` is a pure domain
+        // module with no logging of its own, so without this an open breaker
+        // is invisible end-to-end: withheld from the body AND never logged.
+        deps.logger,
+      );
     }
 
     const { permit } = circuitCheck;
@@ -248,70 +320,88 @@ export const createRunDagHandler = (
       const HOST_TIMEOUT = Symbol("host-timeout");
       const controller = new AbortController();
 
-      let ctx: NodeContext;
-      let origin: InvocationOrigin | undefined;
-      try {
-        // `await` preserves the setup-guard semantics: a synchronous throw or a
-        // rejected promise from `createContext` both land in this catch.
-        // Thread the resolved inbound identity (user `sub`/`azp`, or admin/team)
-        // into context creation so user-initiated runs are attributable and the
-        // broker builds a per-node `Invocation` carrying the run `origin`.
-        const built = await deps.createContext(registered, controller.signal, identity);
-        ctx = built.ctx;
-        origin = built.origin;
-      } catch (setupErr) {
-        markFailure(permit, deps.clock(), circuitConfig);
-        throw setupErr;
-      }
+      const requestRunId = deps.newRunId?.() ?? makeRunId(crypto.randomUUID());
       const startTime = deps.clock();
       const timeoutResponse = (): Response => {
         markFailure(permit, deps.clock(), circuitConfig);
         const timeoutErr: HostError = {
           kind: "timeout",
           dagId,
-          runId: ctx.runId,
+          runId: requestRunId,
           timeoutMs,
         };
         return errorResponse(c, 408, timeoutErr.kind, formatHostError(timeoutErr), {
           dagId,
-          runId: ctx.runId,
+          runId: requestRunId,
           details: { timeoutMs },
         });
       };
 
       try {
+        const pipeline = (async () => {
+          const built = await deps.createContext(
+            registered,
+            requestRunId,
+            controller.signal,
+            identity,
+          );
+          const result = await deps.executeDag(
+            registered.dag,
+            parseResult.data,
+            built.ctx,
+            built.origin,
+            built.meterMintedLlm,
+          );
+          return { built, result };
+        })();
         const completion = await settleBeforeDeadline(
-          deps.executeDag(registered.dag, parseResult.data, ctx, origin),
+          pipeline,
           timeoutMs,
           () => controller.abort(HOST_TIMEOUT),
           {
-            onLateFulfillment: (lateResult) => {
-              if (!lateResult.ok) {
+            onLateFulfillment: ({ result: lateResult }) => {
+              if (lateResult.ok) {
+                logWithoutThrowing(
+                  deps.logger,
+                  "warn",
+                  "host: DAG execution completed after request deadline",
+                  {
+                    dagId,
+                    runId: requestRunId,
+                    consequence: "effects completed after HTTP 408; client retry may duplicate work",
+                  },
+                );
+              } else {
                 logWithoutThrowing(
                   deps.logger,
                   "error",
                   "host: DAG execution failed after request deadline",
-                  { dagId, runId: ctx.runId, error: formatFrameworkError(lateResult.error) },
+                  {
+                    dagId,
+                    runId: requestRunId,
+                    error: formatFrameworkError(lateResult.error),
+                  },
                 );
               }
             },
             onLateRejection: (error) => logWithoutThrowing(
               deps.logger,
               "error",
-              "host: DAG execution rejected after request deadline",
-              { dagId, runId: ctx.runId, error: safeErrorMessage(error) },
+              "host: DAG pipeline rejected after request deadline",
+              { dagId, runId: requestRunId, error: safeErrorMessage(error) },
             ),
             onTimeoutCancellationFailure: (error) => logWithoutThrowing(
               deps.logger,
               "error",
               "host: request timeout cancellation failed",
-              { dagId, runId: ctx.runId, error: safeErrorMessage(error) },
+              { dagId, runId: requestRunId, error: safeErrorMessage(error) },
             ),
           },
         );
         if (completion.kind === "timed-out") return timeoutResponse();
 
-        const result = completion.value;
+        const { built, result } = completion.value;
+        const ctx = built.ctx;
         const durationMs = deps.clock() - startTime;
 
         // A cooperative runtime usually settles cancellation as Result.err,

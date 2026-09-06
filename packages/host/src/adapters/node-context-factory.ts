@@ -3,13 +3,13 @@
  *
  * Key responsibilities:
  * - Tenant-and-DAG-namespaced Redis key prefixes for cache and checkpoint isolation (FR-013)
- * - Fresh runId + independent AbortSignal per request (FR-032)
+ * - Caller-supplied run identity + AbortSignal threaded into each context (FR-032)
  * - Per-DAG TTL overrides for cache/checkpoint entries (FR-041)
- * - Shared infrastructure (LLM, tracer) passed through without per-request init
+ * - Shared underlying clients reused; per-run metering decorators and budget state allocated
  *
  * @satisfies FR-013 — Cache keys prefixed fugue:<tenant>:<dagId>:cache:<key>
  * @satisfies FR-013 — Checkpoint keys prefixed fugue:<tenant>:<dagId>:<runId>:<nodeId>
- * @satisfies FR-032 — Each request gets unique runId and independent AbortSignal
+ * @satisfies FR-032 — Caller-created runId and AbortSignal are threaded unchanged
  * @satisfies FR-041 — Per-DAG TTL overrides apply to cache/checkpoint entries
  * @satisfies SC-008 (host spec: cross-DAG cache isolation) — Two DAGs using the
  *   same cache key string are isolated. NOT the identity-scoped-capabilities
@@ -27,28 +27,42 @@ import type {
   NodeId,
   Result,
   FrameworkError,
+  Ceilings,
+  InvocationOrigin,
 } from "@fuguejs/framework";
-import type { InvocationOrigin } from "@fuguejs/framework";
-import { fromJson, makeNodeContext, ok, isErr, safeErrorMessage, toJson } from "@fuguejs/framework";
+import {
+  err,
+  fromJson,
+  makeNodeContext,
+  ok,
+  isErr,
+  parseSpend,
+  safeErrorMessage,
+  toJson,
+} from "@fuguejs/framework";
 import { assertLosslessEvent } from "@fuguejs/framework/file";
 import type { RegisteredDag } from "../domain/registry.js";
 import type { AuthIdentity, AgentClientMap } from "../domain/auth.js";
-import type { RedisPort, SharedInfra, LogPort } from "../ports.js";
-import { extractClients } from "../domain/capability-manager.js";
+import type { RedisPort, SharedInfra, LogPort, SpendLedgerPort } from "../ports.js";
+import {
+  extractClients,
+  runScopedLlmFacade,
+} from "../domain/capability-manager.js";
 import { invocationOriginForIdentity, subjectTokenForIdentity } from "../domain/run-context.js";
 import type { NodeContextForDag } from "../domain/run-context.js";
 import type { SubjectToken } from "../domain/auth.js";
 import { createMeteredLlm } from "./metered-llm.js";
-import type { HydratedSpend } from "./metered-llm.js";
+import { createRunSpendAuthority } from "./run-spend-authority.js";
+import type { HydratedSpend } from "./run-spend-authority.js";
 import { ceilingsOf } from "../domain/llm-budget.js";
 import { createRedisSpendLedger, spendLedgerRedis } from "./spend-ledger-redis.js";
+import { logWithoutThrowing } from "../hitl/diagnostic-logging.js";
 
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
 /**
- * TTL configuration resolved for a specific DAG — combines host defaults
- * with per-DAG overrides from fugue.yaml.
+ * TTL configuration resolved solely from one DAG's fugue.yaml overrides.
  */
 interface ResolvedTtl {
   readonly cacheTtlSec: number | undefined;
@@ -58,12 +72,16 @@ interface ResolvedTtl {
 // ── Key Prefixing (delegated to domain/cache-keys.ts) ─────────────────────
 
 export { cacheKeyPrefix, buildCacheKey, checkpointKeyPrefix, buildCheckpointKey } from "../domain/cache-keys.js";
-import { buildCacheKey, buildCheckpointKey } from "../domain/cache-keys.js";
+import { buildCacheKey, buildCheckpointKey, buildSpendKey } from "../domain/cache-keys.js";
 import type { TenantId } from "../domain/cache-keys.js";
 import { tenantId } from "../domain/tenant.js";
 import { formatHostError } from "../domain/host-error.js";
+import type { HostError } from "../domain/host-error.js";
 
 // ── Adapters (wrap Redis with namespacing) ─────────────────────────────────
+
+/** Failure count at which consecutive Redis diagnostics escalate from warn to error. */
+const FAILURE_ESCALATION_THRESHOLD = 10;
 
 /**
  * Track consecutive failures of one Redis-backed operation and escalate the log
@@ -77,24 +95,10 @@ import { formatHostError } from "../domain/host-error.js";
  * of that rule could drift to three different thresholds — and a counter that a
  * copy forgot to RESET on success would escalate forever after one bad minute.
  */
-const reportWithoutThrowing = (
-  logger: LogPort,
-  level: "warn" | "error",
-  message: string,
-  context: Record<string, unknown>,
-): void => {
-  try {
-    logger[level](message, context);
-  } catch {
-    // The cache/checkpoint outcome remains authoritative over diagnostics.
-  }
-};
-
 const failureEscalator = (opts: {
-  readonly threshold: number;
   /** Logged while the failure still looks transient. */
   readonly warnMessage: string;
-  /** Logged once `threshold` consecutive failures say the dependency is down. */
+  /** Logged once consecutive failures say the dependency is down. */
   readonly errorMessage: string;
   readonly report: (
     level: "warn" | "error",
@@ -107,7 +111,7 @@ const failureEscalator = (opts: {
     /** Record a failure and report it at the level the current run length earns. */
     failed: (context: Record<string, unknown>): void => {
       consecutiveFailures++;
-      const escalated = consecutiveFailures >= opts.threshold;
+      const escalated = consecutiveFailures >= FAILURE_ESCALATION_THRESHOLD;
       opts.report(escalated ? "error" : "warn", escalated ? opts.errorMessage : opts.warnMessage, {
         ...context,
         consecutiveFailures,
@@ -120,8 +124,14 @@ const failureEscalator = (opts: {
   };
 };
 
-/** Consecutive Redis failures before a warn becomes an error (see `failureEscalator`). */
-const FAILURE_ESCALATION_THRESHOLD = 10;
+/**
+ * One guarded logger binding for an adapter's diagnostics: a failing log port
+ * must never take down the operation it was describing. Both namespaced
+ * adapters below take theirs from here so neither can quietly lose the guard.
+ */
+const guardedReporter = (logger: LogPort) =>
+  (level: "warn" | "error", message: string, context: Record<string, unknown>): void =>
+    logWithoutThrowing(logger, level, message, context);
 
 /**
  * Create a ContextCacheAdapter that prefixes all keys with the tenant + DAG
@@ -137,25 +147,14 @@ export const createNamespacedCache = (
   defaultTtlSec: number | undefined,
   logger: LogPort,
 ): ContextCacheAdapter => {
-  // One binding for the three sites that log from this factory, matching the
-  // idiom `createNamespacedCheckpointWriter` below already uses. Two of them
-  // previously wrote the same closure inline and the third called through
-  // differently-shaped, so a reader had to re-derive that all three were the
-  // same thing.
-  const report = (
-    level: "warn" | "error",
-    message: string,
-    context: Record<string, unknown>,
-  ): void => reportWithoutThrowing(logger, level, message, context);
+  const report = guardedReporter(logger);
 
   const getFailures = failureEscalator({
-    threshold: FAILURE_ESCALATION_THRESHOLD,
     warnMessage: "Cache get failed — graceful degradation to miss",
     errorMessage: "Cache get failures exceeded threshold — Redis may be degraded",
     report,
   });
   const setFailures = failureEscalator({
-    threshold: FAILURE_ESCALATION_THRESHOLD,
     warnMessage: "Cache set failed — Redis error",
     errorMessage: "Cache set failures exceeded threshold — Redis may be degraded",
     report,
@@ -164,7 +163,13 @@ export const createNamespacedCache = (
   return {
     get: async (key: string): Promise<CacheLookup> => {
       const fullKey = buildCacheKey(tenant, dagId, key);
-      const result = await redis.get(fullKey);
+      let result: Awaited<ReturnType<RedisPort["get"]>>;
+      try {
+        result = await redis.get(fullKey);
+      } catch (error) {
+        getFailures.failed({ key: fullKey, dagId, error: safeErrorMessage(error) });
+        return { hit: false };
+      }
       if (!result.ok) {
         getFailures.failed({ key: fullKey, dagId, error: result.error.kind });
         return { hit: false };
@@ -201,21 +206,34 @@ export const createNamespacedCache = (
       ttlSec?: number,
     ): Promise<Result<void, FrameworkError>> => {
       const fullKey = buildCacheKey(tenant, dagId, key);
-      let serialized: string;
+      let serialized: string | undefined;
+      let serializationError: string | undefined;
       try {
         serialized = JSON.stringify(value);
-      } catch (e) {
-        reportWithoutThrowing(logger, "warn", "Cache set failed — value not serializable", {
+        if (serialized === undefined) {
+          serializationError = "JSON.stringify returned undefined for the top-level value";
+        }
+      } catch (error) {
+        serializationError = safeErrorMessage(error);
+      }
+      if (serialized === undefined) {
+        logWithoutThrowing(logger, "warn", "Cache set failed — value not serializable", {
           key: fullKey,
           dagId,
-          error: safeErrorMessage(e),
+          error: serializationError ?? "unknown serialization failure",
         });
         return ok(undefined); // Don't kill the request for a cache write failure
       }
       const effectiveTtl = ttlSec ?? defaultTtlSec;
-      const setResult = effectiveTtl !== undefined
-        ? await redis.set(fullKey, serialized, { expiresInSec: effectiveTtl })
-        : await redis.set(fullKey, serialized);
+      let setResult: Awaited<ReturnType<RedisPort["set"]>>;
+      try {
+        setResult = effectiveTtl !== undefined
+          ? await redis.set(fullKey, serialized, { expiresInSec: effectiveTtl })
+          : await redis.set(fullKey, serialized);
+      } catch (error) {
+        setFailures.failed({ key: fullKey, error: safeErrorMessage(error) });
+        return ok(undefined);
+      }
       if (!setResult.ok) {
         setFailures.failed({ key: fullKey, error: setResult.error.kind });
       } else {
@@ -240,15 +258,14 @@ export const createNamespacedCheckpointWriter = (
   runId: RunId,
   checkpointTtlSec: number | undefined,
   logger: LogPort,
+  commitCheckpointAndRetainSpend?: (
+    checkpointKey: string,
+    checkpointValue: string,
+  ) => Promise<Result<string | null, HostError>>,
 ): CheckpointWriter => {
-  const report = (
-    level: "warn" | "error",
-    message: string,
-    context: Record<string, unknown>,
-  ): void => reportWithoutThrowing(logger, level, message, context);
+  const report = guardedReporter(logger);
 
   const writeFailures = failureEscalator({
-    threshold: FAILURE_ESCALATION_THRESHOLD,
     warnMessage: "Checkpoint write failed — Redis error",
     errorMessage: "Checkpoint write failures exceeded threshold — Redis may be degraded",
     report,
@@ -272,20 +289,53 @@ export const createNamespacedCheckpointWriter = (
         report("warn", "Checkpoint write failed — value not serializable", {
           key: fullKey, dagId, runId, nodeId: nodeId as string, error: message,
         });
-        throw new Error(`Checkpoint write failed for ${fullKey}: value not serializable (${message})`);
+        // DELIBERATELY generic, and deliberately NOT `message`. `run-node.ts`
+        // turns whatever is thrown here into the DAG-visible
+        // `checkpoint-write-failed` via `safeErrorMessage`, so this string
+        // crosses the disclosure boundary into API responses. The actionable
+        // detail is emitted server-side instead, by the `report()` call above
+        // with full structured context. See the sibling throws below and
+        // `node-context-factory.test.ts` ("throws no key or driver detail").
+        throw new Error("Checkpoint value is not serializable");
       }
-      const setResult = checkpointTtlSec !== undefined
-        ? await redis.set(fullKey, serialized, { expiresInSec: checkpointTtlSec })
-        : await redis.set(fullKey, serialized);
+      let setResult: Awaited<ReturnType<RedisPort["set"]>>;
+      try {
+        if (commitCheckpointAndRetainSpend !== undefined) {
+          setResult = await commitCheckpointAndRetainSpend(fullKey, serialized);
+        } else if (checkpointTtlSec !== undefined) {
+          setResult = await redis.set(fullKey, serialized, {
+            expiresInSec: checkpointTtlSec,
+          });
+        } else {
+          setResult = await redis.set(fullKey, serialized);
+        }
+      } catch (error) {
+        const message = safeErrorMessage(error);
+        writeFailures.failed({
+          key: fullKey,
+          dagId,
+          runId,
+          nodeId: nodeId as string,
+          error: message,
+        });
+        // Generic for the same reason as the serialization throw above: the raw
+        // driver text (`message`) is logged by `writeFailures.failed` and must
+        // not reach the DAG-visible error, which is rendered into HTTP
+        // responses. Triage reads the structured log line, not this string.
+        throw new Error("Checkpoint persistence failed");
+      }
       if (!setResult.ok) {
         writeFailures.failed({
           key: fullKey,
           dagId,
           runId,
           nodeId: nodeId as string,
-          error: setResult.error.kind,
+          error: formatHostError(setResult.error),
         });
-        throw new Error(`Checkpoint write failed for ${fullKey}: ${setResult.error.kind}`);
+        // `formatHostError(setResult.error)` carries the full checkpoint key
+        // (tenant/dag/run/node) and raw driver text — logged above, never
+        // thrown. Pinned by `node-context-factory.test.ts`.
+        throw new Error("Checkpoint persistence failed");
       }
       writeFailures.succeeded();
     },
@@ -310,6 +360,231 @@ export const resolveTtl = (dag: RegisteredDag): ResolvedTtl => {
   };
 };
 
+const resolveTenantForDag = (
+  dag: RegisteredDag,
+  routedTenant: TenantId | undefined,
+): TenantId => {
+  if (routedTenant !== undefined) return routedTenant;
+  const parsed = tenantId(dag.team);
+  if (isErr(parsed)) {
+    throw new Error(
+      `createNodeContextForDag: DAG "${dag.id}" has an invalid owning team ` +
+        `"${dag.team}" that cannot be used as a tenant key namespace: ${formatHostError(parsed.error)}`,
+    );
+  }
+  return parsed.value;
+};
+
+type LedgerReadResult = Awaited<ReturnType<SpendLedgerPort["read"]>>;
+
+/** Enforce the ledger's Result policy at the injected I/O boundary. */
+const readSpendLedger = async (
+  ledger: SpendLedgerPort,
+  runId: RunId,
+): Promise<LedgerReadResult> => {
+  try {
+    const read = await ledger.read(runId);
+    if (!read.ok) return read;
+    const parsed = parseSpend(read.value);
+    return parsed.ok
+      ? ok(parsed.value)
+      : err({
+          kind: "internal-invariant-violated",
+          message: `SpendLedgerPort.read returned invalid Spend: ${parsed.error}`,
+          context: { operation: "spend-ledger read", error: parsed.error },
+        });
+  } catch (error) {
+    const message = safeErrorMessage(error);
+    return err({
+      kind: "internal-invariant-violated",
+      message: `SpendLedgerPort.read threw across the port boundary: ${message}`,
+      context: { operation: "spend-ledger read", error: message },
+    });
+  }
+};
+
+type CheckpointCommit = (
+  checkpointKey: string,
+  checkpointValue: string,
+) => Promise<Result<string | null, HostError>>;
+
+type HydratedLedger = (
+  | {
+      readonly ledger: SpendLedgerPort;
+      readonly limits?: undefined;
+      readonly hydrated: HydratedSpend;
+    }
+  | {
+      readonly ledger: SpendLedgerPort;
+      readonly limits: Ceilings;
+      readonly hydrated: Extract<HydratedSpend, { readonly kind: "known" }>;
+    }
+) & { readonly checkpointCommit?: CheckpointCommit };
+
+const selectAndHydrateSpendLedger = async (args: {
+  readonly shared: SharedInfra;
+  readonly tenant: TenantId;
+  readonly dagId: DagId;
+  readonly runId: RunId;
+  readonly ttl: ResolvedTtl;
+  readonly limits: Ceilings | undefined;
+  readonly resumableRunTtlSec?: number;
+}): Promise<HydratedLedger> => {
+  const { shared, tenant, dagId, runId, ttl, limits, resumableRunTtlSec } = args;
+  let ledger = shared.spendLedger;
+  let checkpointCommit: CheckpointCommit | undefined;
+  if (ledger.metadata.role === "redis-fallback") {
+    const ledgerRedis = spendLedgerRedis(shared.redis);
+    if (ledgerRedis.ok) {
+      const checkpointTtlSec = ttl.checkpointTtlSec;
+      const spendTtlSec = checkpointTtlSec === undefined
+        ? undefined
+        : Math.max(checkpointTtlSec, resumableRunTtlSec ?? checkpointTtlSec);
+      ledger = createRedisSpendLedger({
+        redis: ledgerRedis.value,
+        tenant,
+        dagId,
+        ...(spendTtlSec !== undefined ? { ttlSec: spendTtlSec } : {}),
+      });
+      if (checkpointTtlSec !== undefined && spendTtlSec !== undefined) {
+        const spendKey = buildSpendKey(tenant, dagId, runId);
+        checkpointCommit = (checkpointKey, checkpointValue) =>
+          ledgerRedis.value.commitCheckpointAndRetainSpend({
+            checkpointKey,
+            checkpointValue,
+            spendKey,
+            checkpointTtlSec,
+            spendTtlSec,
+          });
+      }
+    } else {
+      logWithoutThrowing(
+        shared.logger,
+        "error",
+        "Spend ledger is NOT durable — falling back to the in-process backend",
+        {
+          dagId: dagId as string,
+          runId: runId as string,
+          backend: shared.spendLedger.metadata.backend,
+          durability: shared.spendLedger.metadata.durability,
+          reason: formatHostError(ledgerRedis.error),
+          consequence: "per-run LLM budgets reset when this process restarts",
+        },
+      );
+    }
+  }
+
+  // One binding for the optional field: all three exits below carry it
+  // identically, and `checkpointCommit` is fully resolved by this point.
+  const commit = checkpointCommit !== undefined ? { checkpointCommit } : {};
+
+  const prior = await readSpendLedger(ledger, runId);
+  if (!prior.ok && limits !== undefined) {
+    throw new Error(
+      `createNodeContextForDag: DAG '${dagId}' declares an LLM budget but its spend ledger ` +
+        `could not be read for run '${runId}' — refusing to run a budgeted slice with ` +
+        `unknown prior spend: ${formatHostError(prior.error)}`,
+    );
+  }
+  if (!prior.ok) {
+    logWithoutThrowing(shared.logger, "warn", "Spend ledger unreadable — metering from zero", {
+      dagId: dagId as string,
+      runId: runId as string,
+      error: formatHostError(prior.error),
+    });
+    return { ledger, hydrated: { kind: "unknown" }, ...commit };
+  }
+
+  const hydrated = { kind: "known" as const, spend: prior.value };
+  return limits === undefined
+    ? { ledger, hydrated, ...commit }
+    : { ledger, limits, hydrated, ...commit };
+};
+
+const createSpendBindings = (
+  shared: SharedInfra,
+  dagId: DagId,
+  runId: RunId,
+  selection: HydratedLedger,
+) => {
+  const meterBase = {
+    dagId,
+    runId,
+    ledger: selection.ledger,
+    logger: shared.logger,
+  };
+  const authority = selection.limits === undefined
+    ? createRunSpendAuthority({ ...meterBase, hydrated: selection.hydrated })
+    : createRunSpendAuthority({
+        ...meterBase,
+        limits: selection.limits,
+        hydrated: selection.hydrated,
+      });
+
+  const meterMintedLlm: NodeContextForDag["meterMintedLlm"] = (
+    clientKey,
+    binding,
+    nodeId,
+  ) => {
+    try {
+      const metered = createMeteredLlm(
+        binding.client,
+        clientKey,
+        authority,
+        binding.pricingModel,
+      );
+      return ok(runScopedLlmFacade(metered, binding.runScopedOperations));
+    } catch (error) {
+      return err({
+        kind: "validation",
+        nodeId,
+        message:
+          `broker-delivered LLM capability '${clientKey}' could not be metered: ` +
+          safeErrorMessage(error),
+      });
+    }
+  };
+
+  return {
+    authority,
+    meterMintedLlm,
+    llm: createMeteredLlm(
+      shared.llm,
+      "llm",
+      authority,
+      shared.llmPricingModel,
+    ),
+    capabilities: extractClients(shared.capabilities, {
+      llm: (clientKey, client, pricingModel) =>
+        createMeteredLlm(client, clientKey, authority, pricingModel),
+    }),
+  };
+};
+
+const resolveOriginAndBindSubjectToken = (args: {
+  readonly agentClientMap: AgentClientMap;
+  readonly identity: AuthIdentity;
+  readonly dagId: DagId;
+  readonly runId: RunId;
+  readonly mintingActive: boolean;
+  readonly bindSubjectToken?: (runId: RunId, token: SubjectToken) => void;
+}): InvocationOrigin | undefined => {
+  const { agentClientMap, identity, dagId, runId, mintingActive, bindSubjectToken } = args;
+  const origin = invocationOriginForIdentity(agentClientMap, identity, dagId);
+  if (origin === undefined && mintingActive) {
+    throw new Error(
+      `createNodeContextForDag: DAG '${dagId}' has no agent client mapping in AGENT_CLIENT_MAP ` +
+        `(FR-040 fail-closed) — refusing to run with an absent/fabricated agent identity`,
+    );
+  }
+
+  if (bindSubjectToken !== undefined) {
+    const subjectToken = subjectTokenForIdentity(identity);
+    if (subjectToken !== undefined) bindSubjectToken(runId, subjectToken);
+  }
+  return origin;
+};
+
 // `NodeContextForDag` and the pure `invocationOriginForIdentity` live in
 // `domain/run-context.ts` — the contract of the `createContext` port belongs to
 // the domain, not this adapter (the HTTP layer names it without importing
@@ -321,9 +596,10 @@ export const resolveTtl = (dag: RegisteredDag): ResolvedTtl => {
  * Construct the BASE NodeContext for a specific DAG execution, plus the run's
  * `origin`.
  *
- * The base context carries the BOOT-SCOPED static capability clients
- * (`extractClients` over the registered handles — the single trust-boundary
- * cast; see capability-manager.ts) exactly as before. Per-invocation AUTHORITY
+ * The base context carries boot-scoped static non-LLM clients plus run-scoped
+ * metered facades built from boot-scoped LLM authority (`extractClients` over
+ * registered handles is the single trust-boundary cast; see
+ * capability-manager.ts). Per-invocation AUTHORITY
  * is layered on TOP of this base, per node, by the framework when a minting
  * broker is wired into `runDag` (the host selects the live Keycloak broker when
  * realm config is present): each node's declared `"<provider>:<operation>"`
@@ -343,7 +619,7 @@ export const resolveTtl = (dag: RegisteredDag): ResolvedTtl => {
  *
  * @satisfies FR-013 — Cache key isolation
  * @satisfies FR-013 — Checkpoint key isolation
- * @satisfies FR-032 — Per-request runId + AbortSignal
+ * @satisfies FR-032 — Caller-supplied runId + AbortSignal
  * @satisfies FR-041 — Per-DAG TTL overrides
  * @satisfies SC-008 (host spec: cross-DAG cache isolation — not the
  *   identity-scoped-capabilities token-dedup SC-008)
@@ -351,22 +627,32 @@ export const resolveTtl = (dag: RegisteredDag): ResolvedTtl => {
  * @satisfies FR-W3-007 — `origin` carries the user's `sub` so a user-initiated
  *   run is attributable and per-hop-exchangeable by the broker
  */
-export const createNodeContextForDag = async (
-  shared: SharedInfra,
-  dag: RegisteredDag,
-  runId: RunId,
-  signal: AbortSignal,
-  identity: AuthIdentity,
+/**
+ * Everything beyond the five arguments a caller always has in hand. Bundled
+ * rather than passed positionally: this list grew one feature at a time
+ * (agent-client mapping, minting, subject-token binding, tenant routing, TTL)
+ * until it was ten positional parameters, several of them optional, defaulted,
+ * or same-shaped — and the two production call sites had to reconstruct that
+ * order independently, with only these doc comments rather than the compiler
+ * to keep them honest. Named fields make a transposition a type error, and
+ * follow the precedent already set by `PostWaveContext` and
+ * `callHumanReviewHook` in the framework.
+ *
+ * Every field is optional, and every default here is the SAFE one — an
+ * un-threaded caller must never accidentally widen authority.
+ */
+export interface CreateNodeContextOptions {
   /**
    * The DAG-id → REAL Keycloak agent-client-id map (FR-040, `AGENT_CLIENT_MAP`),
    * INJECTED from host config. Threaded into `invocationOriginForIdentity` so the
    * run `origin` carries the DAG's real agent client. A DAG id with NO mapping
-   * resolves to `undefined` and FAILS CLOSED here (throws a wiring-defect error
-   * caught by both run paths) rather than minting as an absent/wrong client.
-   * Defaults to the empty map (every DAG fails closed) so an un-threaded caller is
-   * safe-by-default.
+   * resolves to `undefined` and FAILS CLOSED here only while `mintingActive` is
+   * true, rather than minting as an absent/wrong client. With minting disabled,
+   * the origin is unused and an unmapped DAG follows the static-client path.
+   * Defaults to the empty map; the separate `mintingActive` flag determines
+   * whether that empty mapping refuses the run.
    */
-  agentClientMap: AgentClientMap = {},
+  readonly agentClientMap?: AgentClientMap;
   /**
    * Whether per-node minting is wired for this boot (`broker !== undefined`).
    * Load-bearing for the fail-closed origin check below: an unmapped DAG is
@@ -377,7 +663,7 @@ export const createNodeContextForDag = async (
    * `{}`) must NOT 500 every run. Defaults to `false` (safe: no throw) so an
    * un-threaded caller never spuriously refuses.
    */
-  mintingActive: boolean = false,
+  readonly mintingActive?: boolean;
   /**
    * HOST-SIDE side-channel sink for a user run's verified `subject_token`
    * (FR-030/FR-032). When the run is user-initiated, the factory binds
@@ -386,7 +672,7 @@ export const createNodeContextForDag = async (
    * (which stays string-only) or reaching a capability handle (NFR-011). Optional:
    * the no-broker / non-user paths pass nothing and behave byte-identically.
    */
-  bindSubjectToken?: (runId: RunId, token: SubjectToken) => void,
+  readonly bindSubjectToken?: (runId: RunId, token: SubjectToken) => void;
   /**
    * The worker's resolved routed `Tenant.id` (FR-013 / SC-001 / ADR-0067). When
    * provided it is the AUTHORITATIVE tenant axis for EVERY Redis key this context
@@ -398,121 +684,46 @@ export const createNodeContextForDag = async (
    * back to the `dag.team` derivation below — byte-identical to the prior
    * behaviour for those callers.
    */
-  routedTenant?: TenantId,
+  readonly routedTenant?: TenantId;
+  /** Retention of authoritative resumable state (for example HITL run TTL). */
+  readonly resumableRunTtlSec?: number;
+}
+
+export const createNodeContextForDag = async (
+  shared: SharedInfra,
+  dag: RegisteredDag,
+  runId: RunId,
+  signal: AbortSignal,
+  identity: AuthIdentity,
+  options: CreateNodeContextOptions = {},
 ): Promise<NodeContextForDag> => {
+  const {
+    agentClientMap = {},
+    mintingActive = false,
+    bindSubjectToken,
+    routedTenant,
+    resumableRunTtlSec,
+  } = options;
   const dagId = dag.id;
   const ttl = resolveTtl(dag);
 
-  // SECURITY (FR-013 / US2 / SC-001 / ADR-0067): the tenant axis for EVERY Redis
-  // key this context produces. The supervisor resolves the routed `Tenant`
-  // principal at the request boundary and threads its already-branded `id` here
-  // as `routedTenant` (the SAME value the token / HITL / run-lock stores key on
-  // in `host.ts`), so every host-produced key shares ONE `fugue:<tenant>:`
-  // namespace. A branded `TenantId` is shape-validated by construction, so no
-  // re-parse is needed.
-  //
-  // FALLBACK (no `routedTenant`): the single-tenant `main.ts` entrypoint and the
-  // derivation unit tests omit it; the tenant is then derived from the DAG's
-  // owning `team` and parsed through the canonical `tenantId` smart constructor —
-  // the SINGLE source of the namespace invariant (`:` and glob metacharacters
-  // rejected, so no key/ACL-namespace escape). FAIL-CLOSED: `dag.team` is
-  // path-/config-derived data, not a known-good literal, so a `Left` is possible
-  // (a team segment with a `:` or over 64 chars); we REFUSE rather than emit an
-  // unscoped key — same discipline as the unmapped-agent-client check below.
-  let tenant: TenantId;
-  if (routedTenant !== undefined) {
-    tenant = routedTenant;
-  } else {
-    const tenantResult = tenantId(dag.team);
-    if (isErr(tenantResult)) {
-      throw new Error(
-        `createNodeContextForDag: DAG "${dagId}" has an invalid owning team ` +
-          `"${dag.team}" that cannot be used as a tenant key namespace: ${formatHostError(tenantResult.error)}`,
-      );
-    }
-    tenant = tenantResult.value;
-  }
-
-  // Wrap the shared LLM client in a per-run metered decorator: every call is
-  // attributed (dagId, runId, nodeId), aggregated, and budget-checked in-process
-  // (no network round trip). When `llmBudgetTokens` is unset the decorator meters
-  // but never refuses (FR-W1-006). One decorator per NodeContext → run-scoped
-  // counter. @satisfies FR-W0-001 FR-W0-004 FR-W1-001..006 (FR-W2-009:
-  // LLM authority is deliberately run-scoped here — the metered decorator is
-  // the per-run budget authority; see keycloak-broker.ts)
+  const tenant = resolveTenantForDag(dag, routedTenant);
   const limits = ceilingsOf(dag.config);
-
-  // The DURABLE half of the budget. The meter itself is per-NodeContext, and a
-  // resumable run builds a fresh NodeContext per execution slice, so without a
-  // ledger a run that parks for a human decision and resumes would start from
-  // zero spend — five parks, six budgets. The ledger is read ONCE here and
-  // appended to as calls settle.
-  //
-  // Redis-backed when the adapter offers the primitives; otherwise the
-  // process-wide in-memory ledger from SharedInfra, which still carries spend
-  // across the slices of one process (the whole HITL park/resume path in a
-  // single-process deployment) and is honest about not surviving a restart.
-  const ledgerRedis = spendLedgerRedis(shared.redis);
-  if (!ledgerRedis.ok) {
-    // NOT silent. Falling back trades durable, cross-process spend for a
-    // process-local map, so a budgeted run silently regains its full ceiling on
-    // every restart — the refill bug this whole feature closes, reintroduced by
-    // configuration rather than by code. `error`, because an operator who set a
-    // budget is relying on a guarantee that is no longer being provided, and
-    // the only place that fact exists is this line.
-    reportWithoutThrowing(shared.logger, "error", "Spend ledger is NOT durable — falling back to the in-process backend", {
-      dagId: dagId as string,
-      runId: runId as string,
-      reason: formatHostError(ledgerRedis.error),
-      consequence: "per-run LLM budgets reset when this process restarts",
-    });
-  }
-  const spendLedger = ledgerRedis.ok
-    ? createRedisSpendLedger({
-        redis: ledgerRedis.value,
-        tenant,
-        dagId,
-        logger: shared.logger,
-        ...(ttl.checkpointTtlSec !== undefined ? { ttlSec: ttl.checkpointTtlSec } : {}),
-      })
-    : shared.spendLedger;
-
-  const hydrated = await spendLedger.read(runId);
-  // FAIL CLOSED (FR-B-007). An unreadable ledger is indistinguishable from a
-  // spent one, and assuming zero is exactly the refill-on-resume bug the ledger
-  // exists to close — so a BUDGETED run refuses to start a slice it cannot
-  // account for. An UNBUDGETED run carries on: there is no ceiling to protect,
-  // and failing it would turn a metering outage into an availability outage.
-  if (!hydrated.ok && limits !== undefined) {
-    throw new Error(
-      `createNodeContextForDag: DAG '${dagId}' declares an LLM budget but its spend ledger ` +
-        `could not be read for run '${runId}' — refusing to run a budgeted slice with ` +
-        `unknown prior spend: ${formatHostError(hydrated.error)}`,
-    );
-  }
-  if (!hydrated.ok) {
-    reportWithoutThrowing(shared.logger, "warn", "Spend ledger unreadable — metering from zero", {
-      dagId: dagId as string,
-      runId: runId as string,
-      error: formatHostError(hydrated.error),
-    });
-  }
-
-  // Two arms because `MeteredLlmDeps` couples them: a declared budget obliges a
-  // KNOWN prior spend, which the fail-closed throw above has already guaranteed.
-  // The compiler now enforces what that throw establishes.
-  const meterBase = { dagId, runId, ledger: spendLedger, logger: shared.logger };
-  const priorSpend: HydratedSpend = hydrated.ok
-    ? { kind: "known", spend: hydrated.value }
-    : { kind: "unknown" };
-  const llm =
-    limits !== undefined && hydrated.ok
-      ? createMeteredLlm(shared.llm, {
-          ...meterBase,
-          limits,
-          hydrated: { kind: "known", spend: hydrated.value },
-        })
-      : createMeteredLlm(shared.llm, { ...meterBase, hydrated: priorSpend });
+  const hydratedLedger = await selectAndHydrateSpendLedger({
+    shared,
+    tenant,
+    dagId,
+    runId,
+    ttl,
+    limits,
+    ...(resumableRunTtlSec !== undefined ? { resumableRunTtlSec } : {}),
+  });
+  const { authority, meterMintedLlm, llm, capabilities } = createSpendBindings(
+    shared,
+    dagId,
+    runId,
+    hydratedLedger,
+  );
 
   const cache = createNamespacedCache(shared.redis, tenant, dagId, ttl.cacheTtlSec, shared.logger);
   const checkpointWriter = createNamespacedCheckpointWriter(
@@ -522,6 +733,7 @@ export const createNodeContextForDag = async (
     runId,
     ttl.checkpointTtlSec,
     shared.logger,
+    hydratedLedger.checkpointCommit,
   );
 
   // Per-DAG prompts take precedence; fall back to shared (host-level) prompts.
@@ -530,47 +742,21 @@ export const createNodeContextForDag = async (
     ? { get: (name: string) => dagPrompts.get(name) ?? null }
     : shared.prompts ?? { get: () => null };
 
-  // FAIL CLOSED (FR-040): resolve the DAG's REAL agent client via AGENT_CLIENT_MAP.
-  // An unmapped DAG id yields `undefined` — the run has no agent identity. When
-  // per-node minting IS wired (`mintingActive`) we refuse here rather than mint as
-  // a fabricated/absent client. When minting is NOT wired the `origin` is never
-  // consumed by the caller (the framework skips minting), so an unmapped DAG runs
-  // the zero-regression static path instead of throwing — a no-realm deployment
-  // (`AGENT_CLIENT_MAP` defaults to `{}`) must not 500 every run (SC-001/SC-005).
-  // This throw is an adapter-boundary wiring-defect surface (like `wifTokenEndpoint`
-  // / `formatToken`); both run paths (`run-dag.ts`, `run-executor.ts`) fence the
-  // `createNodeContextForDag` call, so it never escapes as an unhandled rejection.
-  const origin: InvocationOrigin | undefined = invocationOriginForIdentity(
+  const origin = resolveOriginAndBindSubjectToken({
     agentClientMap,
     identity,
     dagId,
-  );
-  if (origin === undefined && mintingActive) {
-    throw new Error(
-      `createNodeContextForDag: DAG '${dagId}' has no agent client mapping in AGENT_CLIENT_MAP ` +
-        `(FR-040 fail-closed) — refusing to run with an absent/fabricated agent identity`,
-    );
-  }
-
-  // Thread the user's verified subject token HOST-SIDE (FR-032), but ONLY after
-  // the fail-closed origin check above has passed — so a minting-wired,
-  // registered-but-unmapped DAG throws BEFORE any token is bound, and we never
-  // retain a JWT under a runId whose run will not proceed (the run-dag setup-error
-  // path does not release; only `withSubjectTokenRelease` around `executeDag`
-  // does, NFR-014). Read it off the identity via the pure seam (never off
-  // `InvocationOrigin`); an agent/team/admin run has no subject token, so nothing
-  // is bound and the broker's user exchange fails closed for any illegitimate user
-  // hop claiming this runId. The raw token is carried only through this sink.
-  if (bindSubjectToken !== undefined) {
-    const subjectToken = subjectTokenForIdentity(identity);
-    if (subjectToken !== undefined) bindSubjectToken(runId, subjectToken);
-  }
+    runId,
+    mintingActive,
+    ...(bindSubjectToken !== undefined ? { bindSubjectToken } : {}),
+  });
 
   const ctx = makeNodeContext({
     runId,
     dagId,
     tracer: shared.tracer,
     llm,
+    budget: authority.budget,
     cache,
     checkpointWriter,
     signal,
@@ -578,8 +764,8 @@ export const createNodeContextForDag = async (
     prompts: promptAccess,
     // The boot-scoped static client set. Per-node minted scope handles (when a
     // broker is wired) are merged OVER this by the framework at dispatch.
-    capabilities: extractClients(shared.capabilities),
+    capabilities,
   });
 
-  return { ctx, origin };
+  return { ctx, origin, meterMintedLlm };
 };

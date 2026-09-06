@@ -76,9 +76,13 @@ oc new-project fugue-cx --display-name="Fugue Host — CX Team"
 
 ## Deploy Redis
 
-All Fugue host instances can share a single Redis instance. Keys are namespaced by prefix, so there are no collisions.
+Every key is tenant-prefixed, but this guide's standalone `main.ts` topology uses
+the fixed tenant id `default`. Two standalone hosts pointed at one Redis would
+therefore share `fugue:default:*` and are **not isolated**. Deploy one Redis per
+standalone host. The multi-tenant supervisor topology may share Redis because it
+routes each worker with its real tenant id and tenant-scoped ACL.
 
-### Deploy shared Redis (recommended)
+### Deploy Redis for this host (recommended)
 
 ```bash
 helm install platform-redis bitnami/redis \
@@ -89,29 +93,50 @@ helm install platform-redis bitnami/redis \
 
 Note the connection URL: `redis://:password@platform-redis-master:6379`
 
-Use this same URL for all host instances.
+Use this URL only for this standalone host instance. Use a separate Redis URL
+for another standalone team host.
+
+### Spend-ledger backend
+
+Stock host wiring is Redis-first and unchanged. Redis spend records survive
+process replacement. They have no expiry when checkpoints have no expiry;
+otherwise their TTL is at least the checkpoint TTL and, for resumable HITL
+slices, at least `HITL_RUN_TTL_SEC`. If the configured Redis adapter
+cannot provide the increment/read/expiry primitives, the host logs an error and
+falls back to the process-local ledger; budgets then survive parks in that
+process but not restarts.
+
+Embedders using the F6 file runtime may instead construct
+`createFileSpendLedger(root)` and inject it as `SharedInfra.spendLedger`. Its
+backend metadata marks it authoritative and restart-durable, so Redis capability
+detection does not displace it and no in-process “NOT durable” warning is emitted.
+The root must be a persistent, non-symlink directory owned by the runtime user. Keep
+it for at least as long as resumable run state; deleting a run's durable state
+must delete its spend record in the same lifecycle operation. The backend uses
+per-run lock directories and atomic rename, and is intended for F6's local
+single-writer filesystem contract—not network filesystems with incompatible
+rename/lock semantics. No automatic TTL, GC, or backend selection from
+`DAGS_LOCAL_PATH` is provided.
 
 ### Key namespacing
 
-Multiple hosts use the same Redis with no conflicts:
+The tenant is always the first namespace segment:
 
 ```
-Host instance "cx"        Host instance "leads"       Host instance "billing"
-       │                          │                           │
-       └─ fugue:tokens:<hash>     ├─ fugue:tokens:<hash>      ├─ fugue:tokens:<hash>
-       ├─ fugue:teams:cx          ├─ fugue:teams:leads        ├─ fugue:teams:billing
-       ├─ fugue:customer-summary: ├─ fugue:lead-scoring:      ├─ fugue:invoice-processor:
-       │  cache:<key>             │  cache:<key>              │  cache:<key>
-       └─ fugue:customer-summary: └─ fugue:lead-scoring:      └─ fugue:invoice-processor:
-          <runId>:<nodeId>           <runId>:<nodeId>            <runId>:<nodeId>
-                                                                    ↓
-                                              [Single Shared Redis Instance]
+Standalone host (`main.ts`)                 Routed multi-tenant worker (`acme`)
+        │                                              │
+        ├─ fugue:default:tokens:<hash>                 ├─ fugue:acme:tokens:<hash>
+        ├─ fugue:default:teams:<team>                  ├─ fugue:acme:teams:<team>
+        ├─ fugue:default:teams-index                   ├─ fugue:acme:teams-index
+        ├─ fugue:default:<dagId>:cache:<key>           ├─ fugue:acme:<dagId>:cache:<key>
+        ├─ fugue:default:<dagId>:<runId>:<nodeId>      ├─ fugue:acme:<dagId>:<runId>:<nodeId>
+        └─ fugue:default:<dagId>:<runId>:$spend        └─ fugue:acme:<dagId>:<runId>:$spend
 ```
 
-All keys are prefixed with their scope:
-- `fugue:tokens:*` — team tokens (all teams)
-- `fugue:teams:*` — team metadata (all teams)
-- `fugue:<dagId>:*` — per-DAG cache and checkpoints (team-scoped by DAG ownership)
+All host data keys therefore begin `fugue:<tenant>:`. Redis ACL patterns for a
+routed worker must grant only `~fugue:<tenant>:*`; never derive an ACL from the
+obsolete unscoped `fugue:<dagId>:*`, `fugue:tokens:*`, or `fugue:teams:*`
+patterns.
 
 ### Sizing the shared Redis
 
@@ -122,16 +147,18 @@ All keys are prefixed with their scope:
 | Checkpoints | Depends on DAG complexity; TTL auto-cleanup |
 | **Total** (3 teams, light usage) | ~500MB—1GB |
 
-Monitor Redis memory with `redis-cli INFO memory`. Set `maxmemory` and eviction policy:
+Monitor Redis memory with `redis-cli INFO memory` and alert before capacity is exhausted. Accounting Redis must use `noeviction`: an LRU policy can evict a live `$spend` hash independently of its checkpoint, and an absent hash is the valid zero-spend representation for a new run. Eviction would therefore refill a resumed run's budget. Size persistent storage and `maxmemory` with headroom instead of relying on key eviction:
 
 ```bash
 helm install platform-redis bitnami/redis \
   --set master.persistence.size=5Gi \
   --set redis.masterConfiguration.maxmemory=4gb \
-  --set redis.masterConfiguration.maxmemoryPolicy=allkeys-lru
+  --set redis.masterConfiguration.maxmemoryPolicy=noeviction
 ```
 
-> **Optional: Separate Redis per team** — If you need complete isolation (e.g., one team's high cache usage shouldn't evict another's), deploy independent Redis instances. But shared Redis is simpler and more resource-efficient.
+> **Standalone topology:** separate Redis per host is required for isolation.
+> **Multi-tenant supervisor topology:** one shared Redis is supported because
+> tenant-prefixed keys and per-tenant ACL users are wired by the supervisor.
 
 ---
 
@@ -168,7 +195,8 @@ oc create secret generic fugue-host-secrets \
   --from-literal=REDIS_URL="redis://:password@fugue-redis-master:6379" \
   --from-literal=AZURE_OPENAI_API_KEY="team-azure-key" \
   --from-literal=AZURE_OPENAI_ENDPOINT="https://team-resource.openai.azure.com" \
-  --from-literal=AZURE_OPENAI_DEPLOYMENT="gpt-4o-mini"
+  --from-literal=AZURE_OPENAI_DEPLOYMENT="team-chat-production" \
+  --from-literal=AZURE_OPENAI_MODEL="gpt-4o-mini"
 ```
 
 ### (Optional) Git credentials for private DAG repos

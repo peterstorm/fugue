@@ -5,7 +5,6 @@
 // surfaces the mismatch as `checkpoint-version-mismatch` rather than letting
 // stale cached outputs replay against a topology they were not computed under.
 
-import { NoopObserver } from "../observer/observer.js";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { DAG_INPUT } from "../types/ids.js";
 import { describe, it, expect } from "bun:test";
@@ -19,18 +18,12 @@ import type { DagDef } from "../types/dag.js";
 import type { NodeDef, NodeContext } from "../types/node.js";
 import type { DagPhase, DagMachineContext } from "../dag-runtime/types.js";
 import { ok } from "../types/result.js";
+import { testNodeContext } from "./_context-factories.js";
 
-const ctx: NodeContext = {
+const ctx: NodeContext = testNodeContext({
   runId: "resume-test" as RunId,
   dagId: "fp-test" as DagId,
-  observer: new NoopObserver(),
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null,
-  cache: null,
-  prompts: null,
-  llm: null, http: null, clock: null,
-  logger: { warn: () => {}, error: () => {} },
-};
+});
 
 const transform = (id: string): NodeDef<unknown, unknown> => ({
   id: id as unknown as NodeId,

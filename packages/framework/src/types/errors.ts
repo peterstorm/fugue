@@ -16,6 +16,7 @@ import type { Capability } from "./node.js";
 import type { Breach } from "./budget.js";
 import { formatBreach } from "./budget.js";
 import type { MicroUsd } from "./spend.js";
+import { microUsd, unpricedModels } from "./spend.js";
 import type { TokenUsage } from "./token-usage.js";
 import { safeDiagnosticRender, safeErrorMessage } from "./safe-error.js";
 
@@ -379,31 +380,72 @@ const persistedRetriabilitySchema = z.enum(["retriable", "non-retriable"]);
 // the brand declares the domain, deserialization restores it.
 const PersistedMicroUsdSchema: z.ZodType<MicroUsd> = z
   .number()
-  .transform((value) => value as MicroUsd);
+  .int()
+  .nonnegative()
+  .max(Number.MAX_SAFE_INTEGER)
+  .transform(microUsd);
 const persistedUsdCeilingSchema = z.object({
   kind: z.literal("usd"),
   limit: PersistedMicroUsdSchema,
 });
-const persistedCeilingSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("tokens"), limit: z.number() }),
-  z.object({ kind: z.literal("calls"), limit: z.number() }),
-  persistedUsdCeilingSchema,
-]);
 const persistedBasisSchema = z.enum(["settled", "projected"]);
-const persistedBreachSchema = z.discriminatedUnion("kind", [
+/**
+ * A count axis (tokens, calls) crossing the wire. Same sanitization discipline
+ * as `PersistedMicroUsdSchema` on the cost axis, for the same reason: `budget.ts`
+ * refuses a non-finite figure because `observed >= limit` is FALSE forever
+ * against `NaN`/`Infinity`, so a poisoned limit is a ceiling that can never
+ * refuse again. `TokensCeiling`/`CallsCeiling` are plain numbers rather than a
+ * branded type, so there is no transform to apply — but "plain number" is not a
+ * reason to accept a negative, fractional or infinite one from a persisted
+ * payload. Live accounting never reaches this value (`usageOfError` returns
+ * `undefined` for `llm-budget-exceeded`); this is the defence-in-depth layer
+ * that keeps a future reader of `Breach.observed` from inheriting the hole.
+ */
+const persistedCountSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const persistedTokensCeilingSchema = z.object({ kind: z.literal("tokens"), limit: persistedCountSchema });
+const persistedCallsCeilingSchema = z.object({ kind: z.literal("calls"), limit: persistedCountSchema });
+const persistedUnpricedModelsSchema = z.array(z.string()).min(1).transform((models, context) => {
+  const canonical = unpricedModels(models);
+  if (canonical !== undefined) return canonical;
+  context.addIssue({ code: "custom", message: "unpriced breach requires a model" });
+  return z.NEVER;
+});
+const persistedBreachSchema = z.union([
   z.object({
     kind: z.literal("reached"),
-    ceiling: persistedCeilingSchema,
+    ceiling: persistedTokensCeilingSchema,
     basis: persistedBasisSchema,
-    observed: z.number(),
+    observed: persistedCountSchema,
+  }),
+  z.object({
+    kind: z.literal("reached"),
+    ceiling: persistedCallsCeilingSchema,
+    basis: persistedBasisSchema,
+    observed: persistedCountSchema,
+  }),
+  z.object({
+    kind: z.literal("reached"),
+    ceiling: persistedUsdCeilingSchema,
+    basis: persistedBasisSchema,
+    observed: PersistedMicroUsdSchema,
   }),
   z.object({
     kind: z.literal("unpriced"),
     ceiling: persistedUsdCeilingSchema,
     basis: persistedBasisSchema,
-    // Non-empty on the wire too: an `unpriced` breach naming no model would be
-    // a record asserting "unknown cost, caused by nothing".
-    models: z.tuple([z.string()], z.string()),
+    models: persistedUnpricedModelsSchema,
+    observedAtLeast: PersistedMicroUsdSchema,
+  }),
+  z.object({
+    kind: z.literal("unknown-usage"),
+    ceiling: persistedTokensCeilingSchema,
+    basis: persistedBasisSchema,
+    observedAtLeast: persistedCountSchema,
+  }),
+  z.object({
+    kind: z.literal("unknown-usage"),
+    ceiling: persistedUsdCeilingSchema,
+    basis: persistedBasisSchema,
     observedAtLeast: PersistedMicroUsdSchema,
   }),
 ]);
@@ -418,6 +460,10 @@ const persistedFrameworkErrorKinds = z.enum([
   "missing-capability", "llm-budget-exceeded", "infra-unreachable",
   "policy-refusal", "downstream-denied",
 ]);
+
+/** Parse the standalone serialized kind marker carried by FrameworkAugmentedError. */
+export const isFrameworkErrorKind = (value: unknown): value is FrameworkErrorKind =>
+  persistedFrameworkErrorKinds.safeParse(value).success;
 
 const PersistedFrameworkErrorSchemaDefinition = z.discriminatedUnion("kind", [
   z.looseObject({ kind: z.literal("validation"), nodeId: PersistedNodeIdSchema, message: z.string(), path: z.string().optional() }),
@@ -489,69 +535,89 @@ const correlateCheckpointAddresses = (
 export const PersistedFrameworkErrorSchema: ExhaustivePersistedFrameworkErrorSchema =
   PersistedFrameworkErrorSchemaDefinition.transform(correlateCheckpointAddresses);
 
-/**
- * Every `FrameworkError["kind"]` literal — the closed discriminant domain
- * of `isFrameworkError` — as a Record indexed by the FULL union, so BOTH
- * membership and coverage are compile-checked. A kind added to the
- * `FrameworkError` union and omitted here is a compile error (TS2741) —
- * not a silent registration miss that would make `isFrameworkError` fail
- * closed on the new kind and let the boundary fences (resume.ts, job.ts
- * `appendEvent`, atomic.ts `acquireFileLock`) re-tag it, silently losing
- * its identity — and a key here the union no longer declares is a compile
- * error too.
- */
-const FRAMEWORK_ERROR_KINDS: Record<FrameworkErrorKind, true> = {
-  validation: true,
-  "retry-exhausted": true,
-  "checkpoint-missing": true,
-  "checkpoint-expired": true,
-  "checkpoint-corrupt": true,
-  "checkpoint-version-mismatch": true,
-  "checkpoint-write-failed": true,
-  "prompt-not-found": true,
-  "cache-error": true,
-  "node-crash": true,
-  "cycle-detected": true,
-  aborted: true,
-  rejected: true,
-  "invalid-reroute": true,
-  transient: true,
-  "missing-default-edge": true,
-  "output-unreachable-under-routing": true,
-  "predicate-malformed": true,
-  "duplicate-edge": true,
-  "root-expects-input": true,
-  "source-has-incoming": true,
-  "invalid-dag-input-edge": true,
-  "missing-capability": true,
-  "llm-budget-exceeded": true,
-  "infra-unreachable": true,
-  "policy-refusal": true,
-  "downstream-denied": true,
+/** Compare an unknown source with its canonical parser output using data properties only. */
+const isSameOwnData = (
+  source: unknown,
+  canonical: unknown,
+  seen: WeakMap<object, object> = new WeakMap(),
+): boolean => {
+  if (Object.is(source, canonical)) return true;
+  if (typeof source !== "object" || source === null ||
+      typeof canonical !== "object" || canonical === null) return false;
+  if (Array.isArray(source) !== Array.isArray(canonical)) return false;
+
+  const observed = seen.get(source);
+  if (observed !== undefined) return observed === canonical;
+  seen.set(source, canonical);
+
+  const sourceDescriptors = Object.getOwnPropertyDescriptors(source) as Record<
+    PropertyKey,
+    PropertyDescriptor
+  >;
+  const canonicalDescriptors = Object.getOwnPropertyDescriptors(canonical) as Record<
+    PropertyKey,
+    PropertyDescriptor
+  >;
+  const sourceKeys = Reflect.ownKeys(sourceDescriptors);
+  const canonicalKeys = new Set(Reflect.ownKeys(canonicalDescriptors));
+  if (sourceKeys.length !== canonicalKeys.size) return false;
+
+  return sourceKeys.every((key) => {
+    if (!canonicalKeys.has(key)) return false;
+    const sourceProperty = sourceDescriptors[key];
+    const canonicalProperty = canonicalDescriptors[key];
+    return sourceProperty !== undefined && canonicalProperty !== undefined &&
+      Object.hasOwn(sourceProperty, "value") &&
+      Object.hasOwn(canonicalProperty, "value") &&
+      isSameOwnData(sourceProperty.value, canonicalProperty.value, seen);
+  });
 };
 
-/** Derived membership set (string-keyed for the untyped `kind` probe). */
-const FRAMEWORK_ERROR_KIND_SET: ReadonlySet<string> = new Set(Object.keys(FRAMEWORK_ERROR_KINDS));
-
 /**
- * Runtime type guard for `FrameworkError` — narrows an unknown value (a
- * caught throw, a boundary-crossing payload) to the typed union by
- * discriminant inspection: the value must be an object carrying a string
- * `kind` that is a member of the CLOSED `FrameworkErrorKind` domain.
- * Anything else — a plain `Error`, a hostile object carrying an off-union
- * `kind` string — is NOT a typed framework error and must not be relabeled
- * as one by a boundary that only ever throws typed values (e.g. the file
- * journal's `readCheckpoint`, ADR-0080).
+ * Runtime type guard for `FrameworkError` at unknown exception boundaries.
+ * The exhaustive wire parser validates the complete selected variant, not
+ * merely its discriminant, so `{ kind: "node-crash" }` cannot acquire typed
+ * retry/authorization authority without the required payload. The original
+ * value must also equal the canonical parsed data: a wire migration/default or
+ * correlation repair proves the parser output, not the source object narrowed
+ * by this predicate. Parsing and comparison are fenced for hostile proxies.
+ *
+ * DELIBERATELY EXACT, and that exactness has a cost worth naming. Because
+ * `persistedUsageSchema` defaults the two cache-token fields, a pre-prompt-
+ * caching `usage: { tokensIn, tokensOut }` record PARSES but does not narrow —
+ * the source object is missing fields the in-memory `TokenUsage` declares
+ * required. Widening this predicate to admit it would be a fail-open: every
+ * caller returns or rethrows the SOURCE value, so `undefined` cache-token
+ * fields would reach budget accounting. A caller that needs to RECOVER such a
+ * record wants the canonical value, not a narrowed source — use
+ * `asFrameworkError`.
  */
 export const isFrameworkError = (value: unknown): value is FrameworkError => {
   try {
-    if (typeof value !== "object" || value === null || !("kind" in value)) return false;
-    const kind = Reflect.get(value, "kind");
-    return typeof kind === "string" && FRAMEWORK_ERROR_KIND_SET.has(kind);
+    const parsed = PersistedFrameworkErrorSchema.safeParse(value);
+    return parsed.success && isSameOwnData(value, parsed.data);
   } catch {
-    // A revoked/hostile Proxy is not safely inspectable and therefore cannot
-    // be admitted as a typed framework error.
     return false;
+  }
+};
+
+/**
+ * Recover a complete `FrameworkError` from an unknown boundary value — parse,
+ * don't validate. Returns the CANONICAL parsed value (wire defaults applied,
+ * checkpoint addresses correlated), so a record written before prompt caching
+ * existed is recovered with its structured `kind`/`retriability` intact and a
+ * complete `TokenUsage`, rather than being dropped as unrecognizable.
+ *
+ * Use this wherever an error is being carried forward from an unknown value;
+ * use `isFrameworkError` only to ask whether the value in hand ALREADY is one.
+ * The returned object is a new canonical value, never the hostile source.
+ */
+export const asFrameworkError = (value: unknown): FrameworkError | undefined => {
+  try {
+    const parsed = PersistedFrameworkErrorSchema.safeParse(value);
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
   }
 };
 
@@ -600,22 +666,17 @@ export const usageOfError = (e: FrameworkError): PartialTokenUsage | undefined =
     )
     .exhaustive();
 
-/**
- * Retriability of a `FrameworkError` — the SINGLE source of truth for the DAG
- * retry machinery's fast-fail-vs-retry fork (`handleNodeFailed`). Retriability
- * is the defining behavioral axis of the whole taxonomy, so it lives here, on
- * the type's own module, as a TOTAL function the compiler forces to be
- * exhaustive: adding a new error kind without classifying it is a compile
- * error, and a new kind can never silently default to "retriable" (the unsafe,
- * non-fail-closed direction that a hand-maintained boolean disjunction allowed).
- *
- * `"non-retriable"` = a deterministic failure that re-running cannot clear;
- * `handleNodeFailed` fast-fails it, preserving the retry budget for genuinely
- * transient kinds. See that function for the per-kind rationale (settled auth
- * denials, tool-loop exhaustion, schema mismatches, budget exhaustion, …).
- */
+/** Whether replay may clear a failure or must fast-fail deterministically. */
 export type Retriability = "retriable" | "non-retriable";
 
+/**
+ * The single total classification used by the DAG retry machinery. Adding a
+ * FrameworkError kind without classifying it is a compile error, so a new kind
+ * can never silently default to the unsafe retriable direction.
+ *
+ * `non-retriable` means replay cannot clear the failure; `handleNodeFailed`
+ * fast-fails it and preserves retry budget for genuinely transient failures.
+ */
 export const retriabilityOf = (e: FrameworkError): Retriability =>
   match(e)
     // `node-crash` carries its own explicit retriability discriminant.

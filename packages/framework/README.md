@@ -31,7 +31,7 @@ Types and entry points that workflow authors touch.
 
 ### `types/`
 
-- `DagDef`, `DagDefInput`, `EdgeDef`, `EdgeDefInput`, `EdgeDefRawInput`, `Predicate`, `withRetryLimits` — the DAG shape, edge-predicate vocabulary (ADR 0015, ADR 0016), and the retry-limit helper.
+- `DagDef`, `DagDefInput`, `EdgeDef`, `EdgeDefInput`, `EdgeDefRawInput`, `Predicate` — the validated DAG shape and edge-predicate vocabulary (ADR 0015, ADR 0016).
 - `NodeDef`, `NodeKind`, `NodeRetryConfig`, `NodeHumanReviewConfig` — node authoring contract.
 - `Capability`, `BaseNodeContext`, `NodeContext`, `TypedNodeContext`, `NodeContextInit` — capability-typed `NodeContext`. Declare `requires` on a `NodeDef` and the `ctx` parameter is typed accordingly — `requires: ["llm"]` yields `ctx.llm: LlmClient` (non-null).
 - `ClockCapability` plus the `systemClock` / `fixedClock` constructors — the `clock` capability (`requires: ["clock"]`); `fixedClock` pins time for deterministic tests, `systemClock` is the production default.
@@ -47,7 +47,7 @@ Internal inference helpers (`ConsistentNodes`, `OutputOf`, `OutputsByNodeId`, `N
 
 - `defineDag`, `defineDagFromArray`, `DagDefinitionError` — type-driven DAG constructor(s) with `outputNodeId` enforcement.
 - `defineSources`, `SourcesDagConfig` — constructor for source-rooted DAGs; validates fan-in keys against source-node ids at definition time.
-- `validateDagShape`, `recordFromNodeArray` — pure validation utilities.
+- `validateDagShape`, `recordFromNodeArray`, `withRetryLimits` — pure validation utilities. `withRetryLimits` returns `Result<DagDef, FrameworkError>` and re-enters the same parser, so unknown node IDs and invalid counts cannot launder the validation brand.
 - `runDag`, `resumeRun`, `RunOptions` — execution entry points. Always route through the durable state machine (ADR 0021). `RunOptions` includes `jobLike`, `onHumanReview`, `onBackground`, `retryLimits`, and the ADR 0019 routing advisory toggle `suppressRoutingWarnings`. (`onTrace` is available on `RunOptions`.)
 
 ### `nodes/`
@@ -169,7 +169,7 @@ Adding a new layer? Add a rule. Adding a cross-layer import? It will fail CI.
 ## Public surface
 
 - `@fuguejs/framework` — the recommended consumer barrel: `runDag`, observer/tracing init, node-authoring types.
-- `@fuguejs/framework/advanced` — kernel-mode entry points (`runDagStateful`, `runDagAsWorkerJob`, `compileDagToMachine`, `buildDagExecutor`, `dagTransition`) for callers building custom machines on top of the framework. Reaching for these is a deliberate choice; the main barrel keeps them off the surface.
+- `@fuguejs/framework/advanced` — kernel-mode entry points (`runDagAsWorkerJob`, `runResumableDagJob`, `compileDagToMachine`, `buildDagExecutor`, `dagTransition`, `topoSort`, and the DAG persistence helpers) for callers building custom machines on top of the framework. Reaching for these is a deliberate choice; the main barrel keeps them off the surface. `runDagStateful` is deliberately on neither barrel — import it directly from `dag-runtime/run-dag-stateful.js`, or prefer `runDagStatefulOutcome` / `runResumableDagJob` for suspendable runs.
 - `@fuguejs/framework/bullmq` — the BullMQ transport adapter (`createBullMQBackend`, `adaptBullMQJob`, `createRedisMarkerStore`, `createRedisStreamReader`). Pulls in the optional `bullmq` / `ioredis` peer deps; isolated off the main barrel so transport-agnostic consumers stay clean.
 - `@fuguejs/framework/redis` — Redis-backed durable adapters (`RedisCache`, `RedisCheckpointer`, `RedisFreshnessIndex`). Requires the optional `ioredis` peer dep.
 - `@fuguejs/framework/testing` — stable import path for test tooling (`FakeLlmClient`, `createFakeHttpCapability`).

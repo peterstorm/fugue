@@ -20,7 +20,12 @@
  */
 
 import { match } from "ts-pattern";
-import type { DagId, InvocationOrigin, NodeContext } from "@fuguejs/framework";
+import type {
+  DagId,
+  InvocationOrigin,
+  NodeContext,
+  ScopedLlmMeter,
+} from "@fuguejs/framework";
 import type { AuthIdentity, SubjectToken, AgentClientMap } from "./auth.js";
 import { agentClientIdForDag } from "./auth.js";
 
@@ -104,4 +109,6 @@ export interface NodeContextForDag {
    * defined `origin`; the minting sites additionally guard `origin !== undefined`.
    */
   readonly origin: InvocationOrigin | undefined;
+  /** Host-owned decorator for broker-delivered LLM capability bindings. */
+  readonly meterMintedLlm: ScopedLlmMeter;
 }

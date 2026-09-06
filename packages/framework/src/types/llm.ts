@@ -9,7 +9,7 @@
 // on `types/node.ts` and are reachable from the `llm/` barrel.
 
 import type { z } from "zod";
-import type { Result } from "./result.js";
+import { err, ok, type Result } from "./result.js";
 import type { FrameworkError } from "./errors.js";
 import type { NodeContext, TypedNodeContext } from "./node.js";
 import type { NodeId } from "./ids.js";
@@ -76,6 +76,33 @@ export type SingleShotCachePolicy =
 export type ConversationCachePolicy =
   | SingleShotCachePolicy
   | { readonly kind: "conversation"; readonly ttl: CacheTtl };
+
+declare const __llmModelIdBrand: unique symbol;
+
+/** Non-empty provider model identity used by fixed pricing policies. */
+export type LlmModelId = string & { readonly [__llmModelIdBrand]: void };
+
+/** Total parser for model identities crossing an untrusted boundary. */
+export const tryLlmModelId = (value: unknown): Result<LlmModelId, string> =>
+  typeof value === "string" && value.length > 0
+    ? ok(value as LlmModelId)
+    : err("LLM model identity must be a non-empty string");
+
+/** Smart constructor for trusted authoring/composition sites. */
+export const llmModelId = (value: string): LlmModelId => {
+  const parsed = tryLlmModelId(value);
+  if (!parsed.ok) throw new TypeError(parsed.error);
+  return parsed.value;
+};
+
+/**
+ * Which model identity an LLM binding authorizes for pricing and egress.
+ * Dynamic providers use the request model; fixed deployments bind one model
+ * during composition and reject conflicting requests before provider egress.
+ */
+export type LlmPricingModel =
+  | { readonly kind: "request" }
+  | { readonly kind: "fixed"; readonly model: LlmModelId };
 
 // ---------------------------------------------------------------------------
 // Single-shot structured responses
@@ -246,15 +273,17 @@ export interface LlmClient {
    * model and returns a schema-validated response. Retries (when wired through
    * the DAG runtime) are handled at the node level, not within this call.
    */
-  sendStructured<O>(req: LlmRequest<O>): Promise<Result<LlmResponse<O>, FrameworkError>>;
+  readonly sendStructured: <O>(
+    req: LlmRequest<O>,
+  ) => Promise<Result<LlmResponse<O>, FrameworkError>>;
   /**
    * Run a tool-using LLM loop until the model emits a final response that
    * parses against `req.schema`. `ctx` is the calling node's `NodeContext` —
    * tools receive it (narrowed to `ToolContext` because LLM-with-tools nodes
    * always declare `requires: ["llm"]`).
    */
-  sendWithTools<O>(
+  readonly sendWithTools: <O>(
     req: SendWithToolsRequest<O>,
     ctx: NodeContext,
-  ): Promise<Result<LlmResponse<O>, FrameworkError>>;
+  ) => Promise<Result<LlmResponse<O>, FrameworkError>>;
 }

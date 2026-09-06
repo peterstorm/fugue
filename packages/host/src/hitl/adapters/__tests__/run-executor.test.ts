@@ -26,6 +26,7 @@ import {
   gitSha,
   nodeId,
   EXECUTOR_NODE_ID,
+  tokensOnly,
 } from "@fuguejs/framework";
 import { compileDagToMachine, persistDagContext } from "@fuguejs/framework/advanced";
 import type {
@@ -34,6 +35,8 @@ import type {
   NodeContext,
   NodeDef,
   LlmClient,
+  Capability,
+  FrameworkError,
   CapabilityBroker,
 } from "@fuguejs/framework";
 import type { RedisPort, SharedInfra } from "../../../ports.js";
@@ -67,6 +70,7 @@ const stubLlm: LlmClient = {
 
 const sharedInfra = (): SharedInfra => ({
   llm: stubLlm,
+  llmPricingModel: { kind: "request" },
   redis: stubRedis(),
   spendLedger: createInMemorySpendLedger(),
   tracer: noopTracer,
@@ -80,7 +84,14 @@ const sharedInfra = (): SharedInfra => ({
 
 const noopRun = async (_i: unknown, _c: NodeContext) => ok(undefined as unknown);
 
-const makeNode = (id: string, overrides: Partial<NodeDef<unknown, unknown>> = {}): NodeDef<unknown, unknown> => ({
+type TestNodeDef = NodeDef<
+  unknown,
+  unknown,
+  FrameworkError,
+  readonly Capability[]
+>;
+
+const makeNode = (id: string, overrides: Partial<TestNodeDef> = {}): TestNodeDef => ({
   // @ts-expect-error — branded id test fixture
   id,
   kind: "transform",
@@ -93,7 +104,7 @@ const makeNode = (id: string, overrides: Partial<NodeDef<unknown, unknown>> = {}
   ...overrides,
 });
 
-const singleNodeDag = (run: NodeDef<unknown, unknown>["run"]): DagDef =>
+const singleNodeDag = (run: TestNodeDef["run"]): DagDef =>
   defineDag({
     id: "exec-dag",
     nodes: { only: makeNode("only", { run }) },
@@ -275,6 +286,34 @@ describe("createRunExecutor — channel split (err vs failed)", () => {
     if (result.ok && result.value.kind === "failed" && result.value.error.kind === "node-crash") {
       expect(result.value.error.nodeId).toBe(EXECUTOR_NODE_ID);
       expect(typeof result.value.error.message).toBe("string");
+    }
+  });
+
+  it("preserves the slice failure when checkpointFailure inspection also throws", async () => {
+    const dag = singleNodeDag((async () => ok("unreachable")) as never);
+    const reg = registered(dag);
+    const throwingInfra: SharedInfra = {
+      ...sharedInfra(),
+      get capabilities(): never { throw new Error("original context failure"); },
+    };
+    const exec = createRunExecutor({
+      sharedInfra: throwingInfra,
+      getRegisteredDag: () => reg,
+      agentClientMap: { "exec-dag": "fugue-agent-exec" },
+    });
+    const job = await seedJobLike(dag, null);
+    const hostileJob: RunExecutionJob = {
+      ...job,
+      checkpointFailure: () => { throw new Error("checkpoint inspection failure"); },
+    };
+
+    const result = await exec.run(runReq(dag, hostileJob, null));
+
+    expect(result.ok && result.value.kind).toBe("failed");
+    if (result.ok && result.value.kind === "failed" && result.value.error.kind === "node-crash") {
+      expect(result.value.error.retriability).toBe("non-retriable");
+      expect(result.value.error.message).toContain("original context failure");
+      expect(result.value.error.message).toContain("checkpoint inspection failure");
     }
   });
 
@@ -509,6 +548,94 @@ describe("createRunExecutor — fail-closed on an empty AGENT_CLIENT_MAP (FR-040
     const jobLike = await seedJobLike(dag, null);
     const res = await exec.run(runReq(dag, jobLike, null));
     expect(res.ok && res.value.kind).toBe("completed");
+  });
+});
+
+describe("createRunExecutor — broker LLM metering survives HITL resume", () => {
+  it("hydrates the first slice's broker call and refuses provider egress after approval", async () => {
+    let providerCalls = 0;
+    const brokerLlm: LlmClient = {
+      sendStructured: async <O>() => {
+        providerCalls += 1;
+        return ok({ output: "ok" as O, rawText: "", ...tokensOnly(1, 0) });
+      },
+      sendWithTools: async <O>() => {
+        providerCalls += 1;
+        return ok({ output: "ok" as O, rawText: "", ...tokensOnly(1, 0) });
+      },
+    };
+    const capability = "resumeBrokerLlm" as Capability;
+    const broker: CapabilityBroker = {
+      mintFor: async () => ok({
+        [capability]: {
+          clientKind: "llm",
+          client: brokerLlm,
+          pricingModel: { kind: "fixed", model: "gpt-4o" },
+          runScopedOperations: {},
+        },
+      } as never),
+      provides: (candidate) => candidate === capability,
+    };
+    const callBroker = (async (_input: unknown, ctx: NodeContext) => {
+      const client = (ctx as unknown as Record<string, LlmClient>)[capability];
+      if (client === undefined) throw new Error("broker LLM was not merged");
+      const result = await client.sendStructured({
+        system: "s",
+        user: "u",
+        model: "gpt-4o",
+        schema: z.string(),
+        nodeId: nodeId("broker-call"),
+      });
+      return result.ok ? ok(result.value.output) : result;
+    }) as never;
+    const dag = defineDag({
+      id: "exec-dag",
+      nodes: {
+        beforeReview: makeNode("beforeReview", {
+          run: callBroker,
+          requires: [capability],
+          humanReview: { prompt: "Approve?" } as never,
+        }),
+        afterReview: makeNode("afterReview", {
+          run: callBroker,
+          requires: [capability],
+        }),
+      },
+      edges: [
+        { from: DAG_INPUT, to: "beforeReview" },
+        { from: "beforeReview", to: "afterReview" },
+      ],
+      outputNodeId: "afterReview",
+    });
+    const baseRegistration = registered(dag);
+    const reg: RegisteredDag = {
+      ...baseRegistration,
+      config: { ...baseRegistration.config, llmBudget: { calls: 1 } },
+    };
+    const exec = createRunExecutor({
+      sharedInfra: sharedInfra(),
+      getRegisteredDag: () => reg,
+      broker,
+      agentClientMap: { "exec-dag": "fugue-agent-exec" },
+    });
+    const job = await seedJobLike(dag, null);
+
+    const parked = await exec.run({
+      ...runReq(dag, job, null),
+      onHumanReview: async () => ({ kind: "pending" }),
+    });
+    expect(parked.ok && parked.value.kind).toBe("suspended");
+    expect(providerCalls).toBe(1);
+
+    const resumed = await exec.run({
+      ...runReq(dag, job, null),
+      onHumanReview: async () => ({ kind: "approve" }),
+    });
+    expect(resumed.ok && resumed.value.kind).toBe("failed");
+    if (resumed.ok && resumed.value.kind === "failed") {
+      expect(resumed.value.error.kind).toBe("llm-budget-exceeded");
+    }
+    expect(providerCalls).toBe(1);
   });
 });
 

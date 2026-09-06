@@ -9,6 +9,7 @@
 
 import { describe, test, expect } from "bun:test";
 import { createInMemorySpendLedger } from "../../adapters/spend-ledger-memory.js";
+import { fakeInfra, mkTenant } from "../fixtures/host-boot-fakes.js";
 import { z } from "zod";
 import type { DagDef, RunId } from "@fuguejs/framework";
 import { noopTracer, dagId, runId as makeRunId, nodeId as makeNodeId, ok, isOk, gitSha } from "@fuguejs/framework";
@@ -29,12 +30,6 @@ import { tenantId } from "../../domain/tenant.js";
 import type { TenantId } from "../../domain/tenant.js";
 
 /** Build a `TenantId` for a test from a known-good literal via the canonical constructor. */
-const mkTenant = (s: string): TenantId => {
-  const r = tenantId(s);
-  if (!isOk(r)) throw new Error(`test tenant id "${s}" is invalid (kind: ${r.error.kind})`);
-  return r.value;
-};
-
 // Existing isolation tests are identity-agnostic — an admin identity preserves
 // the prior `agent`-keyed origin behaviour (admin/team → agent placeholder).
 const adminIdentity: AuthIdentity = { kind: "admin" };
@@ -126,16 +121,6 @@ const createMockRedis = (): { port: RedisPort; store: Map<string, string> } => {
   };
 };
 
-const createMockSharedInfra = (redis: RedisPort): SharedInfra => ({
-  spendLedger: createInMemorySpendLedger(),
-  llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as unknown as import("@fuguejs/framework").LlmClient,
-  redis,
-  tracer: noopTracer,
-  contentFilter: null,
-  prompts: null,
-  logger: { info: () => {}, warn: () => {}, error: () => {} },
-  capabilities: [],
-});
 
 // ---------------------------------------------------------------------------
 // Pure key-prefix isolation tests
@@ -263,14 +248,14 @@ const ISO_AGENT_MAP = { "dag-alpha": "fugue-agent-alpha", "dag-beta": "fugue-age
 describe("createNodeContextForDag isolation", () => {
   test("contexts for different DAGs use different cache namespaces", async () => {
     const { port: redis } = createMockRedis();
-    const shared = createMockSharedInfra(redis);
+    const shared = fakeInfra(redis);
     const signal = new AbortController().signal;
 
     const dagA = makeRegisteredDag("dag-alpha");
     const dagB = makeRegisteredDag("dag-beta");
 
-    const { ctx: ctxA } = await createNodeContextForDag(shared, dagA, "run-1" as unknown as RunId, signal, adminIdentity, ISO_AGENT_MAP);
-    const { ctx: ctxB } = await createNodeContextForDag(shared, dagB, "run-1" as unknown as RunId, signal, adminIdentity, ISO_AGENT_MAP);
+    const { ctx: ctxA } = await createNodeContextForDag(shared, dagA, "run-1" as unknown as RunId, signal, adminIdentity, { agentClientMap: ISO_AGENT_MAP });
+    const { ctx: ctxB } = await createNodeContextForDag(shared, dagB, "run-1" as unknown as RunId, signal, adminIdentity, { agentClientMap: ISO_AGENT_MAP });
 
     // Both contexts are created without error
     expect(ctxA).toBeDefined();
@@ -282,13 +267,13 @@ describe("createNodeContextForDag isolation", () => {
 
   test("contexts for same DAG but different runIds produce different checkpoints", async () => {
     const { port: redis } = createMockRedis();
-    const shared = createMockSharedInfra(redis);
+    const shared = fakeInfra(redis);
     const signal = new AbortController().signal;
 
     const dag = makeRegisteredDag("dag-alpha");
 
-    const { ctx: ctx1 } = await createNodeContextForDag(shared, dag, "run-1" as unknown as RunId, signal, adminIdentity, ISO_AGENT_MAP);
-    const { ctx: ctx2 } = await createNodeContextForDag(shared, dag, "run-2" as unknown as RunId, signal, adminIdentity, ISO_AGENT_MAP);
+    const { ctx: ctx1 } = await createNodeContextForDag(shared, dag, "run-1" as unknown as RunId, signal, adminIdentity, { agentClientMap: ISO_AGENT_MAP });
+    const { ctx: ctx2 } = await createNodeContextForDag(shared, dag, "run-2" as unknown as RunId, signal, adminIdentity, { agentClientMap: ISO_AGENT_MAP });
 
     expect(ctx1).not.toBe(ctx2);
   });

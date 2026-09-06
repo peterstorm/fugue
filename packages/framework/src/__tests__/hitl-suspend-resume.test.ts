@@ -9,9 +9,9 @@
 //   - the gated node does NOT re-run on resume (its output is preserved)
 //   - synchronous runDag treats a pending hook as a misuse (invariant err)
 
-import { NoopObserver, RecordingObserver } from "../observer/observer.js";
+import { RecordingObserver } from "../observer/observer.js";
 import type { HumanInterventionEvent } from "../types/events.js";
-import type { RunId, NodeId, DagId } from "../types/ids.js";
+import type { RunId, NodeId } from "../types/ids.js";
 import { DAG_INPUT } from "../types/ids.js";
 import { describe, it, expect, mock } from "bun:test";
 import { z } from "zod";
@@ -25,6 +25,7 @@ import { type NodeOverride, brandedOverride } from "./_node-override.js";
 import type { HumanReviewOutcome, DagPhase, DagMachineContext } from "../dag-runtime/types.js";
 import { ok } from "../types/result.js";
 import { nonEmptyString } from "../types/non-empty-string.js";
+import { testNodeContext } from "./_context-factories.js";
 
 // ---------------------------------------------------------------------------
 // Helpers (mirrors dag-runtime-stateful.test.ts)
@@ -48,19 +49,7 @@ const makeNode = (
   ...brandedOverride(overrides),
 });
 
-const makeCtx = (): NodeContext => ({
-  runId: "test-run-id" as RunId,
-  dagId: "test-dag" as DagId,
-  observer: new NoopObserver(),
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null,
-  cache: null,
-  prompts: null,
-  llm: null,
-  http: null,
-  clock: null,
-  logger: { warn: () => {}, error: () => {} },
-});
+const makeCtx = (): NodeContext => testNodeContext({ runId: "test-run-id" as RunId });
 
 const makeDag = (nodes: readonly NodeDef<unknown, unknown>[], edges: readonly EdgeDefRawInput[], outputNodeId?: string): DagDef =>
   defineDag({

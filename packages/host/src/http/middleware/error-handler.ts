@@ -8,9 +8,16 @@
 
 import { match, P } from "ts-pattern";
 import type { Context } from "hono";
+import { isFrameworkErrorKind, safeErrorMessage } from "@fuguejs/framework";
+import type { FrameworkErrorKind } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
-import { httpStatusFor, formatHostError, retryAfterSecondsFor } from "../../domain/host-error.js";
+import {
+  discloseHostError,
+  parseHostError,
+  retryAfterSecondsFor,
+} from "../../domain/host-error.js";
 import { errorResponse } from "../response.js";
+import { logWithoutThrowing } from "../../hitl/diagnostic-logging.js";
 
 /**
  * Logger interface for the error handler — injected to avoid coupling to a specific logger.
@@ -19,20 +26,51 @@ export interface ErrorHandlerLogger {
   readonly error: (msg: string, data?: Record<string, unknown>) => void;
 }
 
+export type ErrorHandlerFallback = (diagnostic: string) => unknown;
+
 /**
- * Determine if an unknown value is a HostError by checking for the `kind` discriminant.
+ * Diagnostics are secondary: neither logger nor stderr may replace the response.
+ * THE encoding of that rule is `logWithoutThrowing`; this only pins the level,
+ * since every diagnostic this middleware emits is an error.
  */
-const isHostError = (e: unknown): e is HostError =>
-  e != null &&
-  typeof e === "object" &&
-  "kind" in e &&
-  typeof (e as Record<string, unknown>).kind === "string";
+const logErrorWithoutThrowing = (
+  logger: ErrorHandlerLogger,
+  message: string,
+  data: Record<string, unknown>,
+  writeFallback: ErrorHandlerFallback,
+): void => logWithoutThrowing(logger, "error", message, data, writeFallback);
+
+type JsonSafeTree =
+  | null
+  | boolean
+  | number
+  | string
+  | readonly JsonSafeTree[]
+  | { readonly [key: string]: JsonSafeTree };
+
+/** Convert trusted snapshotted details into a deeply immutable JSON wire tree. */
+const immutableJsonSafeTree = (value: unknown): JsonSafeTree => {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "bigint") return value.toString();
+  if (typeof value === "symbol") return String(value);
+  if (value === undefined) return null;
+  if (Array.isArray(value)) return Object.freeze(value.map(immutableJsonSafeTree));
+  if (typeof value === "object") {
+    const copy = Object.create(null) as Record<string, JsonSafeTree>;
+    for (const [key, property] of Object.entries(value)) {
+      copy[key] = immutableJsonSafeTree(property);
+    }
+    return Object.freeze(copy);
+  }
+  return String(value);
+};
 
 /**
  * Extract details from a HostError for the response body.
  * Exhaustive — adding a new HostError kind without a case here is a compile error.
  */
-const detailsFor = (error: HostError): unknown =>
+const rawDetailsFor = (error: HostError): unknown =>
   match(error)
     .with({ kind: "dag-not-found" }, (e) => ({ available: e.available }))
     .with({ kind: "input-validation-failed" }, (e) => ({ issues: e.issues }))
@@ -42,6 +80,7 @@ const detailsFor = (error: HostError): unknown =>
     .with({ kind: "timeout" }, (e) => ({ timeoutMs: e.timeoutMs }))
     .with({ kind: "forbidden" }, (e) => ({ callerTeam: e.callerTeam, dagTeam: e.dagTeam }))
     .with({ kind: "dag-disabled" }, (e) => ({ reason: e.reason }))
+    .with({ kind: "circuit-open" }, (e) => ({ retryAfterSeconds: e.retryAfterSeconds }))
     .with(
       {
         kind: P.union(
@@ -53,6 +92,7 @@ const detailsFor = (error: HostError): unknown =>
           "import-failed",
           "no-default-export",
           "redis-unavailable",
+          "spend-ledger-unavailable",
           "bun-install-failed",
           "config-invalid",
           "tenant-config-invalid",
@@ -80,24 +120,23 @@ const detailsFor = (error: HostError): unknown =>
     .with({ kind: "fs-purge-failed" }, () => undefined)
     .exhaustive();
 
-/**
- * Extract dagId if present on the error.
- */
-const dagIdFor = (error: HostError): string | undefined => {
-  if ("dagId" in error && typeof error.dagId === "string") {
-    return error.dagId;
-  }
-  return undefined;
+const detailsFor = (error: HostError): JsonSafeTree | undefined => {
+  const details = rawDetailsFor(error);
+  return details === undefined ? undefined : immutableJsonSafeTree(details);
 };
 
 /**
- * Extract runId if present on the error.
+ * The correlation ids this HostError variant carries, if any. Every caller
+ * below wants the pair, so it is resolved once rather than field by field.
  */
-const runIdFor = (error: HostError): string | undefined => {
-  if ("runId" in error && typeof error.runId === "string") {
-    return error.runId;
-  }
-  return undefined;
+const correlationFor = (
+  error: HostError,
+): { readonly dagId?: string; readonly runId?: string } => {
+  const stringField = (field: "dagId" | "runId"): string | undefined => {
+    const value: unknown = Reflect.get(error, field);
+    return typeof value === "string" ? value : undefined;
+  };
+  return { dagId: stringField("dagId"), runId: stringField("runId") };
 };
 
 /**
@@ -113,96 +152,116 @@ const headersFor = (error: HostError): Record<string, string> | undefined => {
 };
 
 /**
- * Render a HostError to a client response, applying the 4xx/5xx disclosure
- * discipline.
+ * Render a HostError to a client response.
  *
- * SECURITY (information disclosure — OWASP A09/A05):
- *   - 5xx-class HostErrors (worker-unavailable 503, internal-invariant-violated
- *     500, git/import/config/etc 500) are SERVER faults. Their `formatHostError`
- *     text can interpolate raw internal state (e.g. `internal-invariant-violated`
- *     splices `e.message`, and the markTenant invariant carries a forged id in
- *     `context`). We therefore return a GENERIC client message and log the
- *     detailed `formatHostError` output + any `context` server-side — matching
- *     the discipline of the generic unhandled-error path, which never leaks
- *     internals and always logs.
- *   - 4xx-class HostErrors are deliberate, caller-facing outcomes whose messages
- *     are already curated to be safe (tenant-unknown is tenant-agnostic;
- *     tenant-over-quota names only the caller's OWN tenant; validation echoes the
- *     caller's own input). These keep their existing precise messages + details
- *     and are NOT logged (they are expected, caller-driven outcomes, not faults).
+ * The 4xx/5xx disclosure discipline itself lives in `discloseHostError`
+ * (domain/host-error.ts) so every HTTP surface reads ONE authority; this
+ * function only renders what that decision permits, and logs a server fault.
  */
 const respondWithHostError = (
   logger: ErrorHandlerLogger,
+  writeFallback: ErrorHandlerFallback,
   c: Context,
   hostErr: HostError,
-): Response => {
-  const status = httpStatusFor(hostErr);
+): Response =>
+  match(discloseHostError(hostErr))
+    .with({ kind: "server-fault" }, (disclosure) => {
+      // Log full detail server-side; return a generic message to the client.
+      logErrorWithoutThrowing(logger, "Host error in request handler", {
+        kind: hostErr.kind,
+        detail: disclosure.detail,
+        ...("context" in hostErr ? { context: hostErr.context } : {}),
+        ...correlationFor(hostErr),
+      }, writeFallback);
+      return errorResponse(c, disclosure.status, hostErr.kind, disclosure.message, {
+        // No `details` — the 5xx body must not echo internal state. Headers (e.g.
+        // Retry-After for worker-unavailable 503) are still safe to advertise.
+        ...correlationFor(hostErr),
+        headers: headersFor(hostErr),
+      });
+    })
+    // 4xx — curated, safe, caller-facing messages + details. NOT logged: they
+    // are expected, caller-driven outcomes, not faults.
+    .with({ kind: "client-safe" }, (disclosure) =>
+      errorResponse(c, disclosure.status, hostErr.kind, disclosure.message, {
+        details: detailsFor(hostErr),
+        ...correlationFor(hostErr),
+        headers: headersFor(hostErr),
+      }),
+    )
+    .exhaustive();
 
-  if (status >= 500) {
-    // Log full detail server-side; return a generic message to the client.
-    logger.error("Host error in request handler", {
-      kind: hostErr.kind,
-      detail: formatHostError(hostErr),
-      ...("context" in hostErr ? { context: hostErr.context } : {}),
-      dagId: dagIdFor(hostErr),
-      runId: runIdFor(hostErr),
-    });
-    return errorResponse(c, status, hostErr.kind, "An unexpected error occurred", {
-      // No `details` — the 5xx body must not echo internal state. Headers (e.g.
-      // Retry-After for worker-unavailable 503) are still safe to advertise.
-      dagId: dagIdFor(hostErr),
-      runId: runIdFor(hostErr),
-      headers: headersFor(hostErr),
-    });
+/** Narrow an arbitrary throw to an Error without trusting prototype traps. */
+const asError = (value: unknown): Error | undefined => {
+  try {
+    return value instanceof Error ? value : undefined;
+  } catch {
+    return undefined;
   }
+};
 
-  // 4xx — curated, safe, caller-facing messages + details.
-  return errorResponse(c, status, hostErr.kind, formatHostError(hostErr), {
-    details: detailsFor(hostErr),
-    dagId: dagIdFor(hostErr),
-    runId: runIdFor(hostErr),
-    headers: headersFor(hostErr),
-  });
+const readErrorField = (error: Error, key: "cause" | "message" | "stack"): unknown => {
+  try {
+    return (error as unknown as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
+};
+
+/** Accept only an own data property from the framework's closed vocabulary. */
+const readFrameworkErrorKind = (error: Error): FrameworkErrorKind | undefined => {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(error, "frameworkErrorKind");
+    if (descriptor === undefined || !("value" in descriptor)) return undefined;
+    return isFrameworkErrorKind(descriptor.value) ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
 };
 
 /**
  * Create a Hono error handler with injected logger.
  * Registered via `app.onError(createErrorHandler(logger))`.
  */
-export const createErrorHandler = (logger: ErrorHandlerLogger) => (thrown: Error | HostError, c: Context): Response => {
-  // If it's a HostError (thrown directly or wrapped)
-  if (isHostError(thrown)) {
-    return respondWithHostError(logger, c, thrown);
+export const createErrorHandler = (
+  logger: ErrorHandlerLogger,
+  writeFallback: ErrorHandlerFallback = (diagnostic) => process.stderr.write(diagnostic),
+) => (thrown: unknown, c: Context): Response => {
+  const directHostError = parseHostError(thrown);
+  if (directHostError !== undefined) {
+    return respondWithHostError(logger, writeFallback, c, directHostError);
   }
 
-  // Check if the Error has a HostError as cause
-  if (thrown instanceof Error && isHostError(thrown.cause)) {
-    return respondWithHostError(logger, c, thrown.cause);
+  const thrownError = asError(thrown);
+  const causeValue = thrownError === undefined ? undefined : readErrorField(thrownError, "cause");
+  const causeHostError = parseHostError(causeValue);
+  if (causeHostError !== undefined) {
+    return respondWithHostError(logger, writeFallback, c, causeHostError);
   }
 
-  // Check for FrameworkError (has `kind` field from the framework)
-  if (thrown instanceof Error && "frameworkErrorKind" in thrown) {
-    const kind = (thrown as unknown as { frameworkErrorKind: string }).frameworkErrorKind;
-    logger.error("Framework error in request handler", {
-      kind,
-      error: thrown.message,
-      stack: thrown.stack,
-    });
-    // FrameworkErrors have controlled messages (e.g., "LLM unavailable") — safe to expose kind.
-    // But message may contain internal details, so use a generic message.
-    return errorResponse(c, 500, kind, `Framework error: ${kind}`);
+  const frameworkErrorKind = thrownError === undefined
+    ? undefined
+    : readFrameworkErrorKind(thrownError);
+  if (thrownError !== undefined && frameworkErrorKind !== undefined) {
+    logErrorWithoutThrowing(logger, "Framework error in request handler", {
+      kind: frameworkErrorKind,
+      error: readErrorField(thrownError, "message"),
+      stack: readErrorField(thrownError, "stack"),
+    }, writeFallback);
+    return errorResponse(
+      c,
+      500,
+      frameworkErrorKind,
+      `Framework error: ${frameworkErrorKind}`,
+    );
   }
 
-  // Generic unhandled error — MUST be logged for observability
-  // SECURITY: Never expose internal error messages to clients.
-  // Full details are logged server-side only.
-  const internalMessage = thrown instanceof Error ? thrown.message : String(thrown);
-  const cause = thrown instanceof Error && thrown.cause instanceof Error ? thrown.cause : undefined;
-  logger.error("Unhandled error in request handler", {
-    error: internalMessage,
-    stack: thrown instanceof Error ? thrown.stack : undefined,
-    causeMessage: cause?.message,
-    causeStack: cause?.stack,
-  });
+  const causeError = asError(causeValue);
+  logErrorWithoutThrowing(logger, "Unhandled error in request handler", {
+    error: safeErrorMessage(thrown),
+    stack: thrownError === undefined ? undefined : readErrorField(thrownError, "stack"),
+    causeMessage: causeValue === undefined ? undefined : safeErrorMessage(causeValue),
+    causeStack: causeError === undefined ? undefined : readErrorField(causeError, "stack"),
+  }, writeFallback);
   return errorResponse(c, 500, "internal-error", "An unexpected error occurred");
 };

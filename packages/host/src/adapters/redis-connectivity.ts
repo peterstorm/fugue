@@ -12,7 +12,13 @@
  * module graph for tests that never connect.
  */
 
-import type { HitlRedisPort, RedisConnectivityPort, RedisExpiry, RedisPort } from "../ports.js";
+import type {
+  HitlRedisPort,
+  RedisConnectivityPort,
+  RedisExpiry,
+  RedisPort,
+  RedisValueGuard,
+} from "../ports.js";
 import type { HostError } from "../domain/host-error.js";
 import { ok, err, safeErrorMessage } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
@@ -20,6 +26,15 @@ import type { Result } from "@fuguejs/framework";
 // at runtime. The driver is pulled by the dynamic `import("ioredis")` in the
 // default factory ONLY, never for a caller that injects its own client factory.
 import type { Redis as IoRedis, RedisOptions } from "ioredis";
+import {
+  addSpendRecordInteger,
+  parseSpendRecordInteger,
+  recordOf,
+  SPEND_HASH_FIELDS,
+  SPEND_MARKER_VALUE,
+  SPEND_USAGE_UNKNOWN_FIELD,
+  unpricedModelHashField,
+} from "../domain/spend-record.js";
 
 /**
  * A Redis ACL credential pair. STRUCTURAL on purpose — any `{ username, password }`
@@ -50,6 +65,28 @@ const redisErr = (operation: string, e: unknown): HostError => ({
 });
 
 type RedisFailure = (operation: string, error: unknown) => HostError;
+type RedisExecResults = ReadonlyArray<readonly [Error | null, unknown]> | null;
+
+/** Prove one MULTI result list is complete and free of queued command errors. */
+const requireTransactionResults = (
+  operation: string,
+  executed: RedisExecResults,
+  expectedCommands: number,
+): Exclude<RedisExecResults, null> => {
+  if (executed === null) {
+    throw new Error(`${operation} EXEC unexpectedly aborted without WATCH`);
+  }
+  if (executed.length !== expectedCommands) {
+    throw new Error(
+      `${operation} EXEC returned ${executed.length} results for ` +
+        `${expectedCommands} queued commands`,
+    );
+  }
+  for (const [commandError] of executed) {
+    if (commandError !== null) throw commandError;
+  }
+  return executed;
+};
 
 /**
  * Adapt one ioredis command connection to the complete host `RedisPort`.
@@ -60,15 +97,15 @@ export const createIoredisRedisPort = (
   client: IoRedis,
   redisFailure: RedisFailure = redisErr,
 ): RedisPort => {
-  let watchTail: Promise<void> = Promise.resolve();
+  let transactionTail: Promise<void> = Promise.resolve();
   let poisonedWatchFailure: HostError | null = null;
-  const serializeWatch = async <T,>(
+  const serializeTransaction = async <T,>(
     work: () => Promise<Result<T, HostError>>,
   ): Promise<Result<T, HostError>> => {
     let releaseTurn: () => void = () => {};
     const turn = new Promise<void>((resolve) => { releaseTurn = resolve; });
-    const previous = watchTail;
-    watchTail = previous.then(() => turn);
+    const previous = transactionTail;
+    transactionTail = previous.then(() => turn);
     await previous;
     try {
       return await work();
@@ -81,7 +118,7 @@ export const createIoredisRedisPort = (
     operation: string,
     body: () => Promise<Result<T, HostError>>,
   ): Promise<Result<T, HostError>> =>
-    serializeWatch(async () => {
+    serializeTransaction(async () => {
       if (poisonedWatchFailure !== null) return err(poisonedWatchFailure);
       try {
         return await body();
@@ -108,6 +145,33 @@ export const createIoredisRedisPort = (
     opts.expiresInMs !== undefined
       ? multi.set(key, value, "PX", opts.expiresInMs)
       : multi.set(key, value, "EX", opts.expiresInSec);
+
+  /**
+   * WATCH the guard keys, abort unless every one still holds its expected
+   * value, then stage the SET in a MULTI. A null EXEC means a guard changed
+   * under us, so the whole check-and-set retries. Shared by `setIfValue`
+   * (one guard) and `setIfValues` (many); each keeps its own operation label.
+   */
+  const setIfGuardsHold = (
+    guards: readonly RedisValueGuard[],
+    key: string,
+    value: string,
+    opts: RedisExpiry,
+  ) => async (): Promise<Result<boolean, HostError>> => {
+    for (;;) {
+      await client.watch(...guards.map((guard) => guard.key));
+      const actual = await Promise.all(guards.map((guard) => client.get(guard.key)));
+      if (actual.some((observed, index) => observed !== guards[index]!.expectedValue)) {
+        await client.unwatch();
+        return ok(false);
+      }
+      const executed = await stageExpiringSet(client.multi(), key, value, opts).exec();
+      if (executed === null) continue;
+      const [commandError, written] = executed[0] ?? [];
+      if (commandError !== null) throw commandError;
+      return ok(written === "OK");
+    }
+  };
 
   const compareAndRun = (
     operation: string,
@@ -165,36 +229,15 @@ export const createIoredisRedisPort = (
     compareAndExpire: (key, expectedValue, expiresInSec) =>
       compareAndRun("COMPARE-AND-EXPIRE", key, expectedValue, (multi) => multi.expire(key, expiresInSec)),
     setIfValue: (guardKey, expectedValue, key, value, opts) =>
-      watchGuarded(`SET-IF-VALUE ${guardKey} -> ${key}`, async () => {
-        for (;;) {
-          await client.watch(guardKey);
-          if (await client.get(guardKey) !== expectedValue) {
-            await client.unwatch();
-            return ok(false);
-          }
-          const executed = await stageExpiringSet(client.multi(), key, value, opts).exec();
-          if (executed === null) continue;
-          const [commandError, written] = executed[0] ?? [];
-          if (commandError !== null) throw commandError;
-          return ok(written === "OK");
-        }
-      }),
+      watchGuarded(
+        `SET-IF-VALUE ${guardKey} -> ${key}`,
+        setIfGuardsHold([{ key: guardKey, expectedValue }], key, value, opts),
+      ),
     setIfValues: (guards, key, value, opts) =>
-      watchGuarded(`SET-IF-VALUES ${guards.map((guard) => guard.key).join(",")} -> ${key}`, async () => {
-        for (;;) {
-          await client.watch(...guards.map((guard) => guard.key));
-          const actual = await Promise.all(guards.map((guard) => client.get(guard.key)));
-          if (actual.some((value, index) => value !== guards[index]!.expectedValue)) {
-            await client.unwatch();
-            return ok(false);
-          }
-          const executed = await stageExpiringSet(client.multi(), key, value, opts).exec();
-          if (executed === null) continue;
-          const [commandError, written] = executed[0] ?? [];
-          if (commandError !== null) throw commandError;
-          return ok(written === "OK");
-        }
-      }),
+      watchGuarded(
+        `SET-IF-VALUES ${guards.map((guard) => guard.key).join(",")} -> ${key}`,
+        setIfGuardsHold(guards, key, value, opts),
+      ),
     setNxIfPresent: (guardKey, key, value, opts) =>
       watchGuarded(`SETNX-IF-PRESENT ${guardKey} -> ${key}`, async () => {
         for (;;) {
@@ -210,13 +253,95 @@ export const createIoredisRedisPort = (
           return ok(created === "OK" ? "created" : "exists");
         }
       }),
-    hIncrBy: (key, field, by) =>
-      redisCall(() => `HINCRBY ${key} ${field}`, () => client.hincrby(key, field, by)),
     hGetAll: (key) => redisCall(() => `HGETALL ${key}`, () => client.hgetall(key)),
-    expire: async (key, seconds) => {
-      const applied = await redisCall(() => `EXPIRE ${key}`, () => client.expire(key, seconds));
-      return applied.ok ? ok(applied.value === 1) : applied;
-    },
+    appendSpend: (append) =>
+      watchGuarded(`MULTI SPEND-APPEND ${append.key}`, async () => {
+        const record = recordOf(append.delta);
+        const numericEntries = [
+          [SPEND_HASH_FIELDS.micros, record.micros],
+          [SPEND_HASH_FIELDS.tokens, record.tokens],
+          [SPEND_HASH_FIELDS.calls, record.calls],
+        ] as const;
+        if (numericEntries.some(([, value]) => !Number.isSafeInteger(value) || value < 0)) {
+          throw new Error("Redis spend append rejected a non-negative-safe-integer invariant violation");
+        }
+        // Encode every marker before WATCH so hostile model text cannot leave
+        // optimistic transaction state on the shared command connection.
+        const markerFields = [
+          ...(record.usageUnknown ? [SPEND_USAGE_UNKNOWN_FIELD] : []),
+          ...record.unpricedModels.map(unpricedModelHashField),
+        ];
+
+        for (;;) {
+          await client.watch(append.key);
+          const currentValues = await Promise.all(
+            numericEntries.map(([field]) => client.hget(append.key, field)),
+          );
+          const totals = numericEntries.map(([field, delta], index) => {
+            const raw = currentValues[index];
+            const current = raw === null ? 0 : parseSpendRecordInteger(raw);
+            if (current === undefined) {
+              throw new Error(`Redis spend append found malformed ${field} value '${raw}'`);
+            }
+            return [
+              field,
+              delta,
+              delta === 0 ? current : addSpendRecordInteger(current, delta),
+            ] as const;
+          });
+
+          const transaction = client.multi();
+          let queuedCommands = 0;
+          for (const field of markerFields) {
+            transaction.hset(append.key, field, SPEND_MARKER_VALUE);
+            queuedCommands += 1;
+          }
+          for (const [field, delta, total] of totals) {
+            if (delta === 0) continue;
+            transaction.hset(append.key, field, total);
+            queuedCommands += 1;
+          }
+          if (append.ttlSec !== undefined) {
+            transaction.expire(append.key, append.ttlSec);
+            queuedCommands += 1;
+          }
+
+          const executed = await transaction.exec();
+          if (executed === null) continue;
+          requireTransactionResults("Redis spend append", executed, queuedCommands);
+          return ok(undefined);
+        }
+      }),
+    // Routed through `watchGuarded`, not bare `serializeTransaction`: WATCH state
+    // is per-CONNECTION, so once a prior transaction's own UNWATCH cleanup has
+    // failed, every later transaction on this shared connection is unreliable —
+    // not only the WATCH-issuing ones. Sharing the gate keeps the port's
+    // "poisoned ⇒ fail fast with the recorded diagnostic" rule uniform instead
+    // of surfacing a generic aborted-EXEC error from this one method.
+    commitCheckpointAndRetainSpend: (commit) =>
+      watchGuarded("Redis checkpoint/spend retention", () =>
+        redisCall(
+          () =>
+            `MULTI CHECKPOINT-SPEND-RETENTION ${commit.checkpointKey} ${commit.spendKey}`,
+          async () => {
+            const executed = requireTransactionResults(
+              "Redis checkpoint/spend retention",
+              await client
+                .multi()
+                .set(
+                  commit.checkpointKey,
+                  commit.checkpointValue,
+                  "EX",
+                  commit.checkpointTtlSec,
+                )
+                .expire(commit.spendKey, commit.spendTtlSec)
+                .exec(),
+              2,
+            );
+            return (executed[0]?.[1] ?? null) as string | null;
+          },
+        ),
+      ),
     sAdd: (key, member) => redisCall(() => `SADD ${key}`, () => client.sadd(key, member)),
     sRem: (key, member) => redisCall(() => `SREM ${key}`, () => client.srem(key, member)),
     sMembers: (key) => redisCall(() => `SMEMBERS ${key}`, () => client.smembers(key)),
@@ -272,6 +397,8 @@ export const createRedisConnectivity = async (
     const makeClient = createClient ?? (await defaultIoredisFactory());
     const client = makeClient(redisUrl, {
       maxRetriesPerRequest: 3,
+      // Additive MULTI/EXEC acknowledgement is ambiguous: replay can double spend.
+      autoResendUnfulfilledCommands: false,
       lazyConnect: true,
       ...(aclCredential !== undefined
         ? { username: aclCredential.username, password: aclCredential.password }
@@ -315,8 +442,8 @@ export const createRedisConnectivity = async (
 /**
  * Best-effort Redis disconnect on an entrypoint's error path.
  *
- * ONE encoding (round-38 cs-19) of the cleanup both `main.ts` and
- * `worker-main.ts` need on their startup-failure path. It goes to `console`
+ * The single cleanup encoding both `main.ts` and `worker-main.ts` use on their
+ * startup-failure path. It goes to `console`
  * rather than the structured logger deliberately: the logger may itself be part
  * of the failed bootstrap, and this diagnostic must not be able to displace the
  * original error being rethrown.

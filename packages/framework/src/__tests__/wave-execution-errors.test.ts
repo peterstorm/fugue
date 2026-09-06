@@ -11,16 +11,19 @@ import { describe, it, expect } from "bun:test";
 import { executeWave, type WaveConfig } from "../dag-runtime/wave-execution.js";
 import { InMemoryFreshnessIndex } from "../dag-runtime/freshness-check.js";
 import { N, R, D } from "./_id-helpers.js";
-import { FE } from "./_freshness-helpers.js";
+import { FE, RN, mkWitness } from "./_freshness-helpers.js";
 import { makeNodeContext } from "../shared/make-node-context.js";
 import { RecordingObserver } from "../observer/observer.js";
 import { brandAsValidatedNodeContext } from "../types/node.js";
 import type { DagMachineContext } from "../dag-runtime/types.js";
 import type { NodeDef } from "../types/node.js";
-import type { DagDef } from "../types/dag.js";
+import type { DagDef, EdgeDef } from "../types/dag.js";
 import type { FrameworkError } from "../types/errors.js";
+import type { NodeId } from "../types/ids.js";
 import { z } from "zod";
 import { err, ok } from "../types/result.js";
+import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
+import { testRuntimeContext } from "./_context-factories.js";
 
 const makeNode = (id: string): NodeDef<unknown, unknown> => ({
   id: N(id),
@@ -51,39 +54,52 @@ const makeValidatedCtx = (obs?: RecordingObserver, signal?: AbortSignal) => {
   return brandAsValidatedNodeContext(ctx);
 };
 
-const makeMachineCtx = (waves: string[][] = [["a"]]): DagMachineContext => ({
-  waves: waves.map((w) => w.map(N)),
-  outputs: new Map(),
-  initialInput: {},
-  activeNodeIds: new Set(waves.flat().map(N)),
-  retries: new Map(),
-  retryConfigs: new Map(),
-  retryLimits: {},
-  defaultRetryLimit: 0,
-  confidenceByNode: new Map(),
-  freshnessCompletedNodeIds: new Set(),
-  freshnessExecutionEpoch: FE(),
-  incomingByNode: new Map(),
-  outputNodeId: undefined,
-  edges: [],
-  unconditionalAdj: new Map(),
-  humanReviewNodeIds: new Set(),
-  humanReviewPrompts: new Map(),
-  priorWitnesses: new Map(),
-  dag: makeDag(),
-  outgoingByNode: new Map(),
-  nodeById: new Map([[N("a"), makeNode("a")]]),
-});
+// Only the four fields this suite actually varies are named; the rest come from
+// `testRuntimeContext`, which is the one place a new DagMachineContext field has
+// to be remembered. Hand-assembling all ~19 here is how a field added upstream
+// silently keeps an old default in this file alone.
+const makeMachineCtx = (waves: string[][] = [["a"]]): DagMachineContext =>
+  testRuntimeContext({
+    dag: makeDag(),
+    waves: waves.map((w) => w.map(N)),
+    activeNodeIds: new Set(waves.flat().map(N)),
+    nodeById: new Map([[N("a"), makeNode("a")]]),
+    freshnessExecutionEpoch: FE(),
+  });
 
-const makeConfig = (nodeMap?: Map<string, NodeDef<unknown, unknown>>): WaveConfig => ({
+const makeConfig = (
+  nodeMap?: Map<string, NodeDef<unknown, unknown>>,
+  nowFn: () => number = Date.now,
+): WaveConfig => ({
   dag: makeDag(),
   nodeMap: nodeMap
     ? new Map(Array.from(nodeMap.entries()).map(([k, v]) => [N(k), v]))
     : new Map([[N("a"), makeNode("a")]]),
   nodeCtx: makeValidatedCtx(),
-  nowFn: Date.now,
+  nowFn,
   freshnessIndex: new InMemoryFreshnessIndex(),
 });
+
+/** A clock that always throws — the hostile-clock property this suite pins. */
+const throwingClock = (): number => {
+  throw new Error("clock failed");
+};
+
+/**
+ * A clock that fails its FIRST reading and works thereafter. Isolates one
+ * emission's clock failure so the rest of the wave runs normally, which is what
+ * makes "a broken diagnostic cost a sibling its output" observable.
+ */
+const throwOnceClock = (): (() => number) => {
+  let thrown = false;
+  return () => {
+    if (!thrown) {
+      thrown = true;
+      throw new Error("clock failed");
+    }
+    return Date.now();
+  };
+};
 
 describe("executeWave — error paths", () => {
   it("out-of-bounds waveIndex returns non-retriable node-failed", async () => {
@@ -96,6 +112,25 @@ describe("executeWave — error paths", () => {
         expect(result.event.error.retriability).toBe("non-retriable");
         expect(result.event.error.message).toContain("out-of-bounds");
       }
+    }
+  });
+
+  it("a throwing logger cannot replace the out-of-bounds invariant failure", async () => {
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: () => {},
+      error: () => { throw new Error("logger failed"); },
+    });
+    try {
+      const result = await executeWave(99, makeMachineCtx(), makeConfig());
+      expect(result.event.type).toBe("node-failed");
+      if (result.event.type === "node-failed" && result.event.error.kind === "node-crash") {
+        expect(result.event.error.message).toContain("out-of-bounds");
+        expect(result.event.error.retriability).toBe("non-retriable");
+      }
+    } finally {
+      __resetFrameworkLogger();
     }
   });
 
@@ -285,5 +320,207 @@ describe("executeWave — error paths", () => {
       expect(result.event.error).toBe(primary);
       expect(result.event.coFailedNodeIds).toEqual([N("b")]);
     }
+  });
+
+  // ── Hostile clock (round-13 C1) ────────────────────────────────────────────
+  // `executeWave` builds every event with `timestamp: stamp()`, and `stamp()`
+  // runs `nowFn()` as an ARGUMENT — evaluated before `emit` is entered, so a
+  // throwing clock is NOT contained by anything inside `emit`. Unfenced, the
+  // throw in the per-node catch handler escapes the `.map()` callback and
+  // rejects the `Promise.all`, so `executeWave` REJECTS instead of returning a
+  // `WaveResult` — and every already-completed sibling in the wave loses its
+  // output, so a retry re-runs its side effects.
+
+  it("a hostile clock cannot turn a wave into a rejection", async () => {
+    // The reproduction: input validation fails pre-span (the one clock site
+    // `withTracedNodeSpan`'s try/catch cannot cover), so the failure lands in
+    // `executeWave`'s catch handler — whose own `stamp()` then throws again.
+    const nodes = new Map<string, NodeDef<unknown, unknown>>([
+      ["a", { ...makeNode("a"), inputSchema: z.string() }],
+    ]);
+
+    const result = await executeWave(
+      0,
+      makeMachineCtx(),
+      makeConfig(nodes, throwingClock),
+    );
+
+    // The contract is a resolved WaveResult, never a rejected promise.
+    expect(result.event.type).toBe("node-failed");
+    expect(result.outcomes).toBeDefined();
+  });
+
+  it("a failed emission does not cost a completed sibling its carried output", async () => {
+    // Throws only on the emission that fires first (`a`'s pre-span
+    // `node-error`), so `b` runs on a working clock and completes.
+    const nodes = new Map<string, NodeDef<unknown, unknown>>([
+      ["a", { ...makeNode("a"), inputSchema: z.string() }],
+      ["b", { ...makeNode("b"), run: async () => ok("b-out") }],
+    ]);
+
+    const result = await executeWave(
+      0,
+      makeMachineCtx([["a", "b"]]),
+      makeConfig(nodes, throwOnceClock()),
+    );
+
+    expect(result.event.type).toBe("node-failed");
+    if (result.event.type === "node-failed") {
+      // `b` completed; its output must be carried so the retry does not re-run it.
+      expect(result.event.partialOutputs?.get(N("b"))).toBe("b-out");
+    }
+  });
+
+  it("a failed node-skipped emission still completes the wave", async () => {
+    // `priorOutputs.has(nodeId)` — the carried-output path. Its emission is a
+    // diagnostic; unfenced it turned a wave-done into a node-failed.
+    const machineCtx = {
+      ...makeMachineCtx([["a", "b"]]),
+      outputs: new Map([[N("a"), "carried"]]),
+    };
+    const nodes = new Map<string, NodeDef<unknown, unknown>>([
+      ["a", makeNode("a")],
+      ["b", { ...makeNode("b"), run: async () => ok("b-out") }],
+    ]);
+
+    const result = await executeWave(0, machineCtx, makeConfig(nodes, throwOnceClock()));
+
+    expect(result.event.type).toBe("wave-done");
+    if (result.event.type === "wave-done") {
+      expect(result.event.outputs.get(N("a"))).toBe("carried");
+      expect(result.event.outputs.get(N("b"))).toBe("b-out");
+    }
+  });
+
+  it("emits node-error for a node the DAG does not define, and survives a hostile clock doing it", async () => {
+    // `node-not-found` is an invariant violation — a persisted
+    // `DagMachineContext` naming a node that no longer exists — and it is the
+    // LAST failure a post-mortem should have to infer from an absence. It used
+    // to return its typed `Err` having emitted nothing at all.
+    //
+    // This also replaces the old "a failed co-failure emission still returns
+    // the primary node-failed" test. That test pinned the fence on the
+    // co-failed-siblings loop, and that loop is gone: it re-emitted `node-error`
+    // for nodes that had already reported one, so a co-failed sibling raised two
+    // events and the primary raised one. Emission now belongs to the site that
+    // produces the error, and this is the wave-level site that was missing —
+    // so the round-13 C1 intent (every wave-level emission is fenced against a
+    // hostile clock) is pinned where the emissions actually live.
+    const emptyNodeMap = new Map<string, NodeDef<unknown, unknown>>();
+    const observer = new RecordingObserver();
+
+    const healthy = await executeWave(
+      0,
+      makeMachineCtx(),
+      { ...makeConfig(emptyNodeMap), nodeCtx: makeValidatedCtx(observer) },
+    );
+    expect(healthy.event.type).toBe("node-failed");
+    const errors = observer.events.filter((e) => e.type === "node-error");
+    expect(errors.length).toBe(1);
+    expect(errors[0]?.type === "node-error" ? errors[0].nodeId : undefined).toBe(N("a"));
+
+    // The same path with a clock that always throws: the diagnostic is lost,
+    // the typed outcome is NOT. `executeWave` must return, never reject.
+    const hostile = await executeWave(0, makeMachineCtx(), makeConfig(emptyNodeMap, throwingClock));
+    expect(hostile.event.type).toBe("node-failed");
+    if (hostile.event.type === "node-failed") {
+      expect(hostile.event.error.kind).toBe("node-crash");
+      if (hostile.event.error.kind === "node-crash") {
+        expect(hostile.event.error.message).toContain("node-not-found");
+      }
+    }
+  });
+
+  it("reports each failing node in a multi-failure wave exactly once", async () => {
+    // The counting half of the same contract, at the `executeWave` seam:
+    // two nodes fail, and the wave produces two `node-error` events, not three.
+    const primary: FrameworkError = { kind: "validation", nodeId: N("a"), message: "primary failure" };
+    const sibling: FrameworkError = { kind: "validation", nodeId: N("b"), message: "sibling failure" };
+    const nodes = new Map<string, NodeDef<unknown, unknown>>([
+      ["a", { ...makeNode("a"), run: async () => err(primary) }],
+      ["b", { ...makeNode("b"), run: async () => err(sibling) }],
+      ["c", { ...makeNode("c"), run: async () => ok("c-out") }],
+    ]);
+    const observer = new RecordingObserver();
+
+    const result = await executeWave(
+      0,
+      makeMachineCtx([["a", "b", "c"]]),
+      { ...makeConfig(nodes), nodeCtx: makeValidatedCtx(observer) },
+    );
+
+    expect(result.event.type).toBe("node-failed");
+    if (result.event.type === "node-failed") {
+      expect(result.event.error).toBe(primary);
+      expect(result.event.coFailedNodeIds).toEqual([N("b")]);
+      expect(result.event.partialOutputs?.get(N("c"))).toBe("c-out");
+    }
+
+    const perNode = new Map<string, number>();
+    for (const e of observer.events) {
+      if (e.type === "node-error") perNode.set(e.nodeId, (perNode.get(e.nodeId) ?? 0) + 1);
+    }
+    expect(perNode.get(N("a"))).toBe(1);
+    expect(perNode.get(N("b"))).toBe(1);
+    expect(perNode.has(N("c"))).toBe(false);
+  });
+});
+
+describe("executeWave — routing early failure carries durable freshness state", () => {
+  // The freshness-`aborted` return already pins this carry; the routing
+  // early-failure return is the OTHER exit that has to do it. Both hand the
+  // durable resource→witness projection and the completed-node set back to the
+  // pure transition — drop them here and a retry after a routing failure
+  // re-attempts freshness work the wave already did, re-firing the side effects
+  // those witnesses were recorded to prevent.
+  const witnessed = mkWitness("orders", "v7");
+
+  const failingConfidenceNode = (): NodeDef<unknown, unknown> => ({
+    ...makeNode("a"),
+    confidence: {
+      mode: "value",
+      extract: () => { throw new Error("confidence extractor exploded"); },
+    },
+  });
+
+  it("carries priorWitnesses and freshnessCompletedNodeIds onto the early-failure event", async () => {
+    const node = failingConfidenceNode();
+    const dag = { ...makeDag(), nodes: [node] } as unknown as DagDef;
+    const machineCtx = testRuntimeContext({
+      dag,
+      waves: [[N("a")]],
+      activeNodeIds: new Set([N("a")]),
+      nodeById: new Map([[N("a"), node]]),
+      // A conditional outgoing edge is what makes routing evaluate this node at
+      // all — without one, `emitRoutingDecisions` skips it entirely.
+      outgoingByNode: new Map<NodeId, readonly EdgeDef[]>([[
+        N("a"),
+        [{
+          from: N("a"),
+          to: N("b"),
+          kind: "conditional",
+          when: { label: "always", version: 1, check: () => true },
+        }],
+      ]]),
+      priorWitnesses: new Map([[String(RN("orders")), witnessed]]),
+      freshnessCompletedNodeIds: new Set([N("earlier")]),
+      freshnessExecutionEpoch: FE(),
+    }) as DagMachineContext;
+
+    const { event } = await executeWave(
+      0,
+      machineCtx,
+      { ...makeConfig(new Map([["a", node]])), dag },
+    );
+
+    expect(event.type).toBe("node-failed");
+    if (event.type !== "node-failed") return;
+    expect(event.error.kind).toBe("node-crash");
+    expect(event.priorWitnesses).toEqual(new Map([[String(RN("orders")), witnessed]]));
+    // The carried set is prior ∪ this wave's witnessed nodes: `earlier` survives
+    // the routing failure (that is the carry-through), and `a` — which DID run
+    // its side effect before routing rejected its output — joins it, so a retry
+    // does not re-witness it either.
+    expect(event.freshnessCompletedNodeIds).toEqual(new Set([N("earlier"), N("a")]));
   });
 });

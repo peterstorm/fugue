@@ -25,6 +25,7 @@ import { RecordingObserver } from "../observer/observer.js";
 import { runDagStateful } from "../dag-runtime/run-dag-stateful.js";
 import { defineDag } from "../executor/define-dag.js";
 import { N } from "./_id-helpers.js";
+import { testNodeContext } from "./_context-factories.js";
 
 const makeNode = (
   id: string,
@@ -42,17 +43,12 @@ const makeNode = (
   ...overrides,
 });
 
-const mkCtx = (observer: RecordingObserver): NodeContext => ({
-  runId: "evidence-run" as RunId,
-  dagId: "evidence-dag" as DagId,
-  observer,
-  tracer: { withSpan: <T,>(_n: string, _t: string, fn: () => Promise<T>) => fn() },
-  judgeLlm: null,
-  cache: null,
-  prompts: null,
-  llm: null, http: null, clock: null,
-  logger: { warn: () => {}, error: () => {} },
-});
+const mkCtx = (observer: RecordingObserver): NodeContext =>
+  testNodeContext({
+    runId: "evidence-run" as RunId,
+    dagId: "evidence-dag" as DagId,
+    observer,
+  });
 
 const routeEvents = (obs: RecordingObserver): RouteDecidedEvent[] =>
   obs.events.filter((e): e is RouteDecidedEvent => e.type === "route-decided");
@@ -217,7 +213,6 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
     expect(route!.defaultTaken).toBe(true);
     const pred = route!.evidence.predicateResults[0];
     expect(pred?.outcome).toBe("below-min-confidence");
-    expect(pred?.outcome).toBe("below-min-confidence");
     expect(pred?.evaluatedConfidence?.bucket).toBe("low");
   });
 
@@ -260,7 +255,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
     expect(pred?.outcome).toBe("matched");
   });
 
-  it("throwing check function records reason: 'threw' and does not match", async () => {
+  it("throwing check function fails the run closed with predicate-malformed", async () => {
     const obs = new RecordingObserver();
     const dag = defineDag({
       id: "throws",

@@ -6,6 +6,9 @@
  */
 
 import { describe, it, expect } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createInMemorySpendLedger } from "../adapters/spend-ledger-memory.js";
 import { fromJson, ok, err, isOk, dagId, runId as makeRunId, nodeId as makeNodeId, gitSha, noopTracer, createHttpCapability, systemClock, observedOf, usdToMicros, tokensOnly, NO_SPEND } from "@fuguejs/framework";
 import type {
@@ -21,7 +24,7 @@ import type {
   FrameworkError,
 } from "@fuguejs/framework";
 import type { HostError } from "../domain/host-error.js";
-import type { RedisPort, LogPort, SharedInfra } from "../ports.js";
+import type { RedisPort, RedisSpendAppend, LogPort, SharedInfra } from "../ports.js";
 import type { SpendLedgerPort } from "../ports.js";
 import type { RegisteredDag } from "../domain/registry.js";
 import { z } from "zod";
@@ -34,17 +37,31 @@ import {
   buildCheckpointKey,
 } from "../adapters/node-context-factory.js";
 import { subjectTokenForIdentity, invocationOriginForIdentity } from "../domain/run-context.js";
-import { markSubjectToken, type AuthIdentity, type SubjectToken } from "../domain/auth.js";
+import {
+  markSubjectToken,
+  type AgentClientMap,
+  type AuthIdentity,
+  type SubjectToken,
+} from "../domain/auth.js";
 import { tenantId } from "../domain/tenant.js";
 import type { TenantId } from "../domain/tenant.js";
+import { createFileSpendLedger } from "../adapters/spend-ledger-file.js";
+import { applyRedisSpendAppend } from "./fixtures/redis-spend-fake.js";
+import { collectLogs } from "../adapters/__tests__/fixtures/log-capture.js";
+import { mkTenant } from "./fixtures/host-boot-fakes.js";
+
+interface AugmentedLlmClient extends LlmClient {
+  readonly sendAlias: LlmClient["sendStructured"];
+}
+
+declare module "@fuguejs/framework" {
+  interface CapabilityRegistry {
+    criticLlm: LlmClient;
+    augmentedLlm: AugmentedLlmClient;
+  }
+}
 
 /** Build a `TenantId` for a test from a known-good literal via the canonical constructor. */
-const mkTenant = (s: string): TenantId => {
-  const r = tenantId(s);
-  if (!isOk(r)) throw new Error(`test tenant id "${s}" is invalid (kind: ${r.error.kind})`);
-  return r.value;
-};
-
 // Existing pass-through / wiring tests are identity-agnostic — an admin identity
 // reproduces the prior `agent`-keyed origin (admin/team → agent placeholder), so
 // their byte-identical assertions are unaffected.
@@ -64,6 +81,11 @@ const testTenant = mkTenant("eng");
 // the wiring/metering tests below (these exercise context construction, not the
 // FR-040 fail-closed path, which has its own dedicated tests).
 const FACTORY_AGENT_MAP = { [testDagId as string]: "fugue-agent-test" };
+const memoryLedgerMetadata = Object.freeze({
+  role: "redis-fallback" as const,
+  backend: "memory" as const,
+  durability: "process" as const,
+});
 
 const makeDag = (overrides?: Partial<RegisteredDag["config"]>): RegisteredDag => ({
   id: testDagId,
@@ -138,16 +160,6 @@ const failingRedis = (): RedisPort => ({
   sMembers: async () => err({ kind: "redis-unavailable", operation: "smembers" } as HostError),
 });
 
-const collectLogs = () => {
-  const logs: { level: string; msg: string; data?: Record<string, unknown> }[] = [];
-  const logger: LogPort = {
-    info: (msg, data) => logs.push({ level: "info", msg, data }),
-    warn: (msg, data) => logs.push({ level: "warn", msg, data }),
-    error: (msg, data) => logs.push({ level: "error", msg, data }),
-  };
-  return { logger, logs };
-};
-
 // ── resolveTtl ─────────────────────────────────────────────────────────────
 
 /**
@@ -161,6 +173,7 @@ const baseSharedInfra = (
   capabilities: SharedInfra["capabilities"] = [],
 ): SharedInfra => ({
   llm: { chat: async () => ({ content: "", usage: { inputTokens: 0, outputTokens: 0 } }) } as any,
+  llmPricingModel: { kind: "request" },
   redis: createMockRedis().redis,
   spendLedger: createInMemorySpendLedger(),
   tracer: noopTracer,
@@ -169,6 +182,26 @@ const baseSharedInfra = (
   logger: { info: () => {}, warn: () => {}, error: () => {} },
   capabilities,
 });
+
+type TestContextOptions = {
+  readonly shared?: SharedInfra;
+  readonly dag?: RegisteredDag;
+  readonly run?: RunId;
+  readonly signal?: AbortSignal;
+  readonly identity?: AuthIdentity;
+  readonly agentClientMap?: AgentClientMap;
+};
+
+/** Defaults the run identity and wiring; focused cases vary only their seam. */
+const createTestContext = (opts: TestContextOptions = {}) =>
+  createNodeContextForDag(
+    opts.shared ?? baseSharedInfra(),
+    opts.dag ?? makeDag(),
+    opts.run ?? testRunId,
+    opts.signal ?? new AbortController().signal,
+    opts.identity ?? adminIdentity,
+    { agentClientMap: opts.agentClientMap ?? FACTORY_AGENT_MAP },
+  );
 
 /**
  * ONE client fake and ONE request shape for the file.
@@ -269,6 +302,26 @@ describe("createNamespacedCache", () => {
     expect(logs.some(l => l.level === "warn" && l.msg.includes("Cache get failed"))).toBe(true);
   });
 
+  it.each(["throw", "reject"] as const)(
+    "gracefully degrades to miss when Redis get %ss",
+    async (mode) => {
+      const base = createMockRedis().redis;
+      const redis: RedisPort = {
+        ...base,
+        get: mode === "throw"
+          ? () => { throw new Error("get invocation escaped"); }
+          : async () => Promise.reject(new Error("get await escaped")),
+      };
+      const { logger, logs } = collectLogs();
+      const cache = createNamespacedCache(redis, testTenant, testDagId, undefined, logger);
+
+      expect(await cache.get("hostile-get")).toEqual({ hit: false });
+      const line = logs.find((entry) => entry.msg.includes("Cache get failed"));
+      expect(line?.level).toBe("warn");
+      expect(String(line?.data?.["error"])).toContain(mode === "throw" ? "invocation" : "await");
+    },
+  );
+
   it("treats corrupted JSON as cache miss", async () => {
     const store = new Map([
       [buildCacheKey(testTenant, testDagId, "bad"), "not-json{{{"],
@@ -302,33 +355,65 @@ describe("createNamespacedCache", () => {
     expect(logs.some(l => l.level === "warn" && l.msg.includes("Cache set failed"))).toBe(true);
   });
 
-  it("cache fallback outcomes survive a throwing diagnostic logger", async () => {
-    const throwingLogger: LogPort = {
-      info: () => {},
-      warn: () => { throw new Error("logger failed"); },
-      error: () => { throw new Error("logger failed"); },
-    };
-    const failed = createNamespacedCache(
-      failingRedis(), testTenant, testDagId, undefined, throwingLogger,
-    );
-    expect(await failed.get("missing")).toEqual({ hit: false });
-    expect((await failed.set("key", "value")).ok).toBe(true);
+  it.each(["throw", "reject"] as const)(
+    "keeps cache writes best-effort when Redis set %ss",
+    async (mode) => {
+      const base = createMockRedis().redis;
+      const redis: RedisPort = {
+        ...base,
+        set: mode === "throw"
+          ? () => { throw new Error("set invocation escaped"); }
+          : async () => Promise.reject(new Error("set await escaped")),
+      };
+      const { logger, logs } = collectLogs();
+      const cache = createNamespacedCache(redis, testTenant, testDagId, undefined, logger);
 
-    const corruptedStore = new Map([
-      [buildCacheKey(testTenant, testDagId, "corrupt"), "not-json{{{"],
-    ]);
-    const corrupted = createNamespacedCache(
-      createMockRedis(corruptedStore).redis,
-      testTenant,
-      testDagId,
-      undefined,
-      throwingLogger,
-    );
-    expect(await corrupted.get("corrupt")).toEqual({ hit: false });
+      expect(await cache.set("hostile-set", { safe: true })).toEqual(ok(undefined));
+      const line = logs.find((entry) => entry.msg.includes("Cache set failed"));
+      expect(line?.level).toBe("warn");
+      expect(String(line?.data?.["error"])).toContain(mode === "throw" ? "invocation" : "await");
+    },
+  );
 
-    const cyclic: Record<string, unknown> = {};
-    cyclic.self = cyclic;
-    expect((await corrupted.set("cyclic", cyclic)).ok).toBe(true);
+  it("cache fallback outcomes survive a throwing logger and report through guarded stderr", async () => {
+    const diagnostics: string[] = [];
+    const originalWrite = process.stderr.write;
+    process.stderr.write = ((chunk: unknown): boolean => {
+      diagnostics.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const throwingLogger: LogPort = {
+        info: () => {},
+        warn: () => { throw new Error("logger failed"); },
+        error: () => { throw new Error("logger failed"); },
+      };
+      const failed = createNamespacedCache(
+        failingRedis(), testTenant, testDagId, undefined, throwingLogger,
+      );
+      expect(await failed.get("missing")).toEqual({ hit: false });
+      expect((await failed.set("key", "value")).ok).toBe(true);
+
+      const corruptedStore = new Map([
+        [buildCacheKey(testTenant, testDagId, "corrupt"), "not-json{{{"],
+      ]);
+      const corrupted = createNamespacedCache(
+        createMockRedis(corruptedStore).redis,
+        testTenant,
+        testDagId,
+        undefined,
+        throwingLogger,
+      );
+      expect(await corrupted.get("corrupt")).toEqual({ hit: false });
+
+      const cyclic: Record<string, unknown> = {};
+      cyclic.self = cyclic;
+      expect((await corrupted.set("cyclic", cyclic)).ok).toBe(true);
+      expect(diagnostics.some((line) => line.includes("[host diagnostic fallback]"))).toBe(true);
+      expect(diagnostics.some((line) => line.includes("logger failed"))).toBe(true);
+    } finally {
+      process.stderr.write = originalWrite;
+    }
   });
 
   it("set handles non-serializable values gracefully", async () => {
@@ -341,6 +426,26 @@ describe("createNamespacedCache", () => {
     const result = await cache.set("k", circular);
     expect(result.ok).toBe(true);
     expect(logs.some(l => l.msg.includes("not serializable"))).toBe(true);
+  });
+
+  it("rejects top-level undefined, function, and symbol before calling Redis", async () => {
+    const { redis, calls } = createMockRedis();
+    const { logger, logs } = collectLogs();
+    const cache = createNamespacedCache(redis, testTenant, testDagId, undefined, logger);
+
+    for (const [key, value] of [
+      ["undefined", undefined],
+      ["function", () => "not-json"],
+      ["symbol", Symbol("not-json")],
+    ] as const) {
+      expect((await cache.set(key, value)).ok).toBe(true);
+    }
+
+    expect(calls.filter((call) => call.op === "set")).toHaveLength(0);
+    const diagnostics = logs.filter((line) => line.msg.includes("not serializable"));
+    expect(diagnostics).toHaveLength(3);
+    expect(diagnostics.every((line) => String(line.data?.["error"]).includes("returned undefined")))
+      .toBe(true);
   });
 
   it("escalates to error level after consecutive failures", async () => {
@@ -377,8 +482,74 @@ describe("createNamespacedCheckpointWriter", () => {
     const { logger, logs } = collectLogs();
     const writer = createNamespacedCheckpointWriter(failingRedis(), testTenant, testDagId, testRunId, undefined, logger);
 
-    await expect(writer.write(testRunId, testNodeId, { data: 1 })).rejects.toThrow(/Checkpoint write failed/);
+    await expect(writer.write(testRunId, testNodeId, { data: 1 })).rejects.toThrow(
+      /^Checkpoint persistence failed$/,
+    );
     expect(logs.some(l => l.msg.includes("Checkpoint write failed"))).toBe(true);
+  });
+
+  it("routes thrown Redis writes through contextual threshold escalation", async () => {
+    const redis: RedisPort = {
+      ...createMockRedis().redis,
+      set: async () => { throw new Error("socket reset during checkpoint"); },
+    };
+    const { logger, logs } = collectLogs();
+    const writer = createNamespacedCheckpointWriter(
+      redis,
+      testTenant,
+      testDagId,
+      testRunId,
+      undefined,
+      logger,
+    );
+
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      await expect(writer.write(testRunId, testNodeId, { attempt })).rejects.toThrow(
+        /^Checkpoint persistence failed$/,
+      );
+    }
+
+    const escalated = logs.find((line) => line.level === "error");
+    expect(escalated?.msg).toContain("Checkpoint write failures exceeded threshold");
+    expect(escalated?.data).toMatchObject({
+      key: buildCheckpointKey(testTenant, testDagId, testRunId, testNodeId),
+      dagId: testDagId,
+      runId: testRunId,
+      nodeId: testNodeId,
+      error: "socket reset during checkpoint",
+      consecutiveFailures: 10,
+    });
+  });
+
+  it("logs full typed Redis diagnostics server-side but throws no key or driver detail", async () => {
+    const sensitiveKey = buildCheckpointKey(testTenant, testDagId, testRunId, testNodeId);
+    const redis: RedisPort = {
+      ...createMockRedis().redis,
+      set: async () => err({
+        kind: "redis-unavailable",
+        operation: `SET ${sensitiveKey}: NOPERM raw-driver-secret`,
+      }),
+    };
+    const { logger, logs } = collectLogs();
+    const writer = createNamespacedCheckpointWriter(
+      redis, testTenant, testDagId, testRunId, undefined, logger,
+    );
+
+    let boundaryMessage = "";
+    try {
+      await writer.write(testRunId, testNodeId, { data: 1 });
+    } catch (error) {
+      boundaryMessage = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(boundaryMessage).toBe("Checkpoint persistence failed");
+    expect(boundaryMessage).not.toContain(String(testTenant));
+    expect(boundaryMessage).not.toContain(String(testDagId));
+    expect(boundaryMessage).not.toContain(String(testRunId));
+    expect(boundaryMessage).not.toContain(String(testNodeId));
+    expect(boundaryMessage).not.toContain("raw-driver-secret");
+    expect(String(logs[0]?.data?.["error"])).toContain(sensitiveKey);
+    expect(String(logs[0]?.data?.["error"])).toContain("raw-driver-secret");
   });
 
   it.each([
@@ -426,7 +597,9 @@ describe("createNamespacedCheckpointWriter", () => {
       failingRedis(), testTenant, testDagId, testRunId, undefined, throwingLogger,
     );
 
-    await expect(writer.write(testRunId, testNodeId, { data: 1 })).rejects.toThrow(/Checkpoint write failed/);
+    await expect(writer.write(testRunId, testNodeId, { data: 1 })).rejects.toThrow(
+      /^Checkpoint persistence failed$/,
+    );
   });
 });
 
@@ -438,7 +611,7 @@ describe("createNodeContextForDag — built-in http capability", () => {
   // and any `requires: ["http"]` DAG fails the boot-time capability check.
   it("surfaces a usable http client when the handle is wired into capabilities", async () => {
     const shared = baseSharedInfra([createHttpCapability()]);
-    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
+    const { ctx } = await createTestContext({ shared });
 
     expect(ctx.http).not.toBeNull();
     // The presence check `ctx.http != null` is exactly what
@@ -449,7 +622,7 @@ describe("createNodeContextForDag — built-in http capability", () => {
 
   it("leaves http null when no http handle is wired (documents the gap the wiring closes)", async () => {
     const shared = baseSharedInfra([]);
-    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
+    const { ctx } = await createTestContext({ shared });
 
     expect(ctx.http).toBeNull();
   });
@@ -461,7 +634,7 @@ describe("createNodeContextForDag — built-in http capability", () => {
   // migrated the clock from a factory seam to a capability without host wiring.
   it("surfaces a usable clock when the handle is wired into capabilities", async () => {
     const shared = baseSharedInfra([{ name: "clock", client: systemClock }]);
-    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
+    const { ctx } = await createTestContext({ shared });
 
     expect(ctx.clock).not.toBeNull();
     // The presence check `ctx.clock != null` is what `validateCapabilities`
@@ -472,7 +645,7 @@ describe("createNodeContextForDag — built-in http capability", () => {
 
   it("leaves clock null when no clock handle is wired (documents the gap the wiring closes)", async () => {
     const shared = baseSharedInfra([]);
-    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
+    const { ctx } = await createTestContext({ shared });
 
     expect(ctx.clock).toBeNull();
   });
@@ -500,7 +673,7 @@ describe("createNodeContextForDag — fail-closed tenant derivation (AD-4 / US2 
       testRunId,
       new AbortController().signal,
       adminIdentity,
-      FACTORY_AGENT_MAP,
+      { agentClientMap: FACTORY_AGENT_MAP },
     );
     await expect(promise).rejects.toThrow(/invalid owning team/i);
   });
@@ -533,10 +706,7 @@ describe("createNodeContextForDag — routed-tenant key namespacing (ADR-0067 / 
       testRunId,
       new AbortController().signal,
       adminIdentity,
-      FACTORY_AGENT_MAP,
-      false,
-      undefined,
-      routed,
+      { agentClientMap: FACTORY_AGENT_MAP, routedTenant: routed },
     );
 
     const writeResult = await ctx.cache.set("k", { v: 1 });
@@ -557,7 +727,7 @@ describe("createNodeContextForDag — routed-tenant key namespacing (ADR-0067 / 
       testRunId,
       new AbortController().signal,
       adminIdentity,
-      FACTORY_AGENT_MAP,
+      { agentClientMap: FACTORY_AGENT_MAP },
     );
 
     await ctx.cache.set("k", { v: 1 });
@@ -582,7 +752,7 @@ describe("createNodeContextForDag — static client wiring (SC-005)", () => {
       testRunId,
       new AbortController().signal,
       adminIdentity,
-      FACTORY_AGENT_MAP,
+      { agentClientMap: FACTORY_AGENT_MAP },
     );
 
     // `extractClients([httpHandle]).http === httpHandle.client` — the factory
@@ -603,7 +773,7 @@ describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..0
     const { llm } = fakeLlm(10, 5);
     const shared = sharedWithLlm(llm);
 
-    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
+    const { ctx } = await createTestContext({ shared });
 
     // If the factory ever stops wrapping (handing the shared client through
     // unmetered), this reference check is the loudest possible regression guard.
@@ -616,7 +786,7 @@ describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..0
     const shared = sharedWithLlm(llm);
     const dag = makeDag({ llmBudgetTokens: 1 }); // budget 1: call 1 is the single overshoot
 
-    const { ctx } = await createNodeContextForDag(shared, dag, testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
+    const { ctx } = await createTestContext({ shared, dag });
     if (ctx.llm === null) throw new Error("expected wired llm");
 
     const r1 = await ctx.llm.sendStructured(structuredReq()); // 0 < 1 → allowed, settles 15
@@ -650,7 +820,7 @@ describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..0
     const shared = sharedWithLlm(llm);
     const dag = makeDag({ llmBudget: { usd: 1.5 } });
 
-    const { ctx } = await createNodeContextForDag(shared, dag, testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
+    const { ctx } = await createTestContext({ shared, dag });
     if (ctx.llm === null) throw new Error("expected wired llm");
 
     expect((await ctx.llm.sendStructured(pricedReq())).ok).toBe(true);
@@ -675,7 +845,7 @@ describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..0
     const shared = sharedWithLlm(llm);
     const dag = makeDag({ llmBudget: { calls: 2 } });
 
-    const { ctx } = await createNodeContextForDag(shared, dag, testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
+    const { ctx } = await createTestContext({ shared, dag });
     if (ctx.llm === null) throw new Error("expected wired llm");
 
     expect((await ctx.llm.sendStructured(pricedReq())).ok).toBe(true);
@@ -699,7 +869,7 @@ describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..0
     const shared = sharedWithLlm(llm);
     const dag = makeDag({ llmBudgetTokens: 100_000, llmBudget: { tokens: 1 } });
 
-    const { ctx } = await createNodeContextForDag(shared, dag, testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
+    const { ctx } = await createTestContext({ shared, dag });
     if (ctx.llm === null) throw new Error("expected wired llm");
 
     expect((await ctx.llm.sendStructured(structuredReq())).ok).toBe(true); // the overshoot
@@ -717,13 +887,264 @@ describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..0
     const { llm, calls } = fakeLlm(1_000_000, 0);
     const shared = sharedWithLlm(llm);
 
-    const { ctx } = await createNodeContextForDag(shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP);
+    const { ctx } = await createTestContext({ shared });
     if (ctx.llm === null) throw new Error("expected wired llm");
 
     for (let i = 0; i < 3; i++) {
       expect((await ctx.llm.sendStructured(structuredReq())).ok).toBe(true);
     }
     expect(calls.length).toBe(3); // all delegated — no budget, no refusal
+  });
+});
+
+describe("createNodeContextForDag — one authority across main/judge/custom LLM clients", () => {
+  it("accumulates every marked client into one budget view and one ceiling", async () => {
+    const main = fakeLlm(10, 5);
+    const judge = fakeLlm(10, 5);
+    const critic = fakeLlm(10, 5);
+    const captured = collectLogs();
+    const shared: SharedInfra = {
+      ...baseSharedInfra([
+        {
+          name: "judgeLlm",
+          client: judge.llm,
+          clientKind: "llm",
+          pricingModel: { kind: "request" },
+        },
+        {
+          name: "criticLlm",
+          client: critic.llm,
+          clientKind: "llm",
+          pricingModel: { kind: "request" },
+        },
+      ]),
+      llm: main.llm,
+      logger: captured.logger,
+    };
+    const { ctx } = await createNodeContextForDag(
+      shared,
+      makeDag({ llmBudgetTokens: 45 }),
+      testRunId,
+      new AbortController().signal,
+      adminIdentity,
+      { agentClientMap: FACTORY_AGENT_MAP },
+    );
+    if (ctx.llm === null || ctx.judgeLlm === null || ctx.budget === null) {
+      throw new Error("expected all built-in clients");
+    }
+    const criticClient = (ctx as NodeContext & { readonly criticLlm: LlmClient }).criticLlm;
+
+    expect(ctx.judgeLlm).not.toBe(judge.llm);
+    expect(criticClient).not.toBe(critic.llm);
+    expect((await ctx.llm.sendStructured(structuredReq())).ok).toBe(true);
+    expect((await ctx.judgeLlm.sendStructured(structuredReq())).ok).toBe(true);
+    expect((await criticClient.sendStructured(structuredReq())).ok).toBe(true);
+    expect(ctx.budget.spent().tokens).toBe(45);
+    expect(ctx.budget.remaining()).toEqual({
+      kind: "budgeted",
+      basis: "projected",
+      headroom: [{
+        kind: "available",
+        unit: "tokens",
+        ceiling: { kind: "tokens", limit: 45 },
+        amount: 0,
+      }],
+    });
+
+    const refused = await ctx.llm.sendStructured(structuredReq());
+    expect(refused.ok).toBe(false);
+    expect(main.calls).toHaveLength(1);
+    expect(judge.calls).toHaveLength(1);
+    expect(critic.calls).toHaveLength(1);
+    expect(
+      captured.logs
+        .filter((line) => line.msg === "llm.metered")
+        .map((line) => line.data?.clientKey),
+    ).toEqual(["llm", "judgeLlm", "criticLlm"]);
+  });
+
+  it("interprets an augmented alias through the metered surface and enforces the shared gate", async () => {
+    let providerCalls = 0;
+    let bootAliasCalls = 0;
+    const augmented: AugmentedLlmClient = {
+      sendStructured: async <O>(): Promise<Result<LlmResponse<O>, FrameworkError>> => {
+        providerCalls += 1;
+        return ok({ output: {} as O, ...tokensOnly(3, 2), rawText: "" });
+      },
+      sendWithTools: async <O>(): Promise<Result<LlmResponse<O>, FrameworkError>> => {
+        providerCalls += 1;
+        return ok({ output: {} as O, ...tokensOnly(3, 2), rawText: "" });
+      },
+      // This boot-scoped self-call is exactly what a transparent target-bound
+      // Proxy failed to intercept. The run facade below must not expose it.
+      sendAlias(req) {
+        bootAliasCalls += 1;
+        return this.sendStructured(req);
+      },
+    };
+    const shared = baseSharedInfra([{
+      name: "augmentedLlm",
+      client: augmented,
+      clientKind: "llm",
+      pricingModel: { kind: "request" },
+      runScopedOperations: { sendAlias: "sendStructured" },
+    }]);
+    const captured = collectLogs();
+    const { ctx } = await createTestContext({
+      shared: { ...shared, logger: captured.logger },
+      dag: makeDag({ llmBudget: { tokens: 5 } }),
+    });
+    const runClient = (ctx as NodeContext & { readonly augmentedLlm: AugmentedLlmClient })
+      .augmentedLlm;
+
+    expect(runClient).not.toBe(augmented);
+    expect((await runClient.sendAlias(structuredReq())).ok).toBe(true);
+    const refused = await runClient.sendAlias(structuredReq());
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.error.kind).toBe("llm-budget-exceeded");
+    expect(providerCalls).toBe(1);
+    expect(bootAliasCalls).toBe(0);
+    expect(ctx.budget?.spent().tokens).toBe(5);
+    expect(
+      captured.logs.filter((line) => line.msg === "llm.metered")[0]?.data?.["clientKey"],
+    ).toBe("augmentedLlm");
+  });
+
+  it("meters a broker-delivered custom LLM through the same authority and ledger", async () => {
+    const brokerLlm = fakeLlm(2, 1);
+    const ledger = createInMemorySpendLedger();
+    const built = await createTestContext({
+      shared: { ...baseSharedInfra(), spendLedger: ledger },
+      dag: makeDag({ llmBudget: { calls: 1 } }),
+    });
+    const decorated = built.meterMintedLlm(
+      "criticLlm",
+      {
+        clientKind: "llm",
+        client: brokerLlm.llm,
+        pricingModel: { kind: "request" },
+        runScopedOperations: {},
+      },
+      testNodeId,
+    );
+    if (!decorated.ok) throw new Error("expected broker LLM decoration");
+
+    expect((await decorated.value.sendStructured(structuredReq())).ok).toBe(true);
+    const refused = await decorated.value.sendStructured(structuredReq());
+
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.error.kind).toBe("llm-budget-exceeded");
+    expect(brokerLlm.calls).toHaveLength(1);
+    const stored = await ledger.read(testRunId);
+    expect(stored.ok && stored.value.calls).toBe(1);
+  });
+
+  // The other half of the contract pinned in `metered-llm.test.ts`: a malformed
+  // pricing model makes `createMeteredLlm` THROW, and `meterMintedLlm` must turn
+  // that into a typed `validation` error so a hostile or buggy broker fails the
+  // node closed instead of crashing the run.
+  it("converts a malformed broker pricing model into a typed validation error", async () => {
+    const brokerLlm = fakeLlm(2, 1);
+    const built = await createTestContext({
+      shared: baseSharedInfra(),
+      dag: makeDag({ llmBudget: { calls: 1 } }),
+    });
+
+    for (const pricingModel of [
+      { kind: "per-token" },
+      { kind: "fixed" },
+      { kind: "fixed", model: "" },
+      null,
+    ]) {
+      const decorated = built.meterMintedLlm(
+        "criticLlm",
+        {
+          clientKind: "llm",
+          client: brokerLlm.llm,
+          pricingModel: pricingModel as never,
+          runScopedOperations: {},
+        },
+        testNodeId,
+      );
+
+      expect(decorated.ok).toBe(false);
+      if (!decorated.ok) {
+        expect(decorated.error.kind).toBe("validation");
+        if (decorated.error.kind === "validation") {
+          expect(decorated.error.nodeId).toBe(testNodeId);
+          expect(decorated.error.message).toContain(
+            "broker-delivered LLM capability 'criticLlm' could not be metered",
+          );
+        }
+      }
+    }
+    // Refused before the provider was ever reached.
+    expect(brokerLlm.calls).toHaveLength(0);
+  });
+
+  it("rehydrates a main+judge total from a fresh file ledger/context and refuses the next call", async () => {
+    const root = mkdtempSync(join(tmpdir(), "fugue-context-file-ledger-"));
+    try {
+      const fileLedger = createFileSpendLedger(root);
+      if (!fileLedger.ok) throw new Error("expected file ledger");
+      const main = fakeLlm(10, 5);
+      const judge = fakeLlm(10, 5);
+      const shared: SharedInfra = {
+        ...baseSharedInfra([{
+          name: "judgeLlm",
+          client: judge.llm,
+          clientKind: "llm",
+          pricingModel: { kind: "request" },
+        }]),
+        llm: main.llm,
+        spendLedger: fileLedger.value,
+      };
+      const dag = makeDag({ llmBudgetTokens: 30 });
+      const first = await createNodeContextForDag(
+        shared,
+        dag,
+        testRunId,
+        new AbortController().signal,
+        adminIdentity,
+        { agentClientMap: FACTORY_AGENT_MAP },
+      );
+      if (first.ctx.llm === null || first.ctx.judgeLlm === null) throw new Error("expected LLMs");
+      expect((await first.ctx.llm.sendStructured(structuredReq())).ok).toBe(true);
+      expect((await first.ctx.judgeLlm.sendStructured(structuredReq())).ok).toBe(true);
+
+      const freshLedger = createFileSpendLedger(root);
+      if (!freshLedger.ok) throw new Error("expected fresh file ledger");
+      const resumed = await createNodeContextForDag(
+        { ...shared, spendLedger: freshLedger.value },
+        dag,
+        testRunId,
+        new AbortController().signal,
+        adminIdentity,
+        { agentClientMap: FACTORY_AGENT_MAP },
+      );
+      if (resumed.ctx.llm === null || resumed.ctx.budget === null) throw new Error("expected context");
+      expect(resumed.ctx.budget.spent().tokens).toBe(30);
+      expect((await resumed.ctx.llm.sendStructured(structuredReq())).ok).toBe(false);
+      expect(main.calls).toHaveLength(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("always injects an unbudgeted read view when no ceilings are declared", async () => {
+    const main = fakeLlm(2, 1);
+    const { ctx } = await createNodeContextForDag(
+      { ...baseSharedInfra(), llm: main.llm },
+      makeDag(),
+      testRunId,
+      new AbortController().signal,
+      adminIdentity,
+      { agentClientMap: FACTORY_AGENT_MAP },
+    );
+    if (ctx.llm === null || ctx.budget === null) throw new Error("expected metered context");
+    expect(ctx.budget.remaining()).toEqual({ kind: "unbudgeted" });
+    await ctx.llm.sendStructured(structuredReq());
+    expect(ctx.budget.spent().tokens).toBe(3);
   });
 });
 
@@ -796,7 +1217,7 @@ describe("invocationOriginForIdentity — user sub threading + real-client resol
       new AbortController().signal,
       userIdentity,
       // FR-040: map the DAG to its real agent client so the origin resolves.
-      { [testDagId as string]: "fugue-agent-test" },
+      { agentClientMap: { [testDagId as string]: "fugue-agent-test" } },
     );
 
     // The run path no longer dead-ends the user identity: a base NodeContext is
@@ -817,8 +1238,7 @@ describe("invocationOriginForIdentity — user sub threading + real-client resol
       testRunId,
       new AbortController().signal,
       adminIdentity,
-      {},
-      true,
+      { agentClientMap: {}, mintingActive: true },
     );
     await expect(promise).rejects.toThrow(/no agent client mapping/);
   });
@@ -833,8 +1253,7 @@ describe("invocationOriginForIdentity — user sub threading + real-client resol
       testRunId,
       new AbortController().signal,
       adminIdentity,
-      {},
-      false,
+      { agentClientMap: {}, mintingActive: false },
     );
     expect(ctx).toBeDefined();
     expect(origin).toBeUndefined();
@@ -856,9 +1275,7 @@ describe("invocationOriginForIdentity — user sub threading + real-client resol
       testRunId,
       new AbortController().signal,
       userWithProof,
-      {},
-      true,
-      (rid) => { bound.push(rid); },
+      { agentClientMap: {}, mintingActive: true, bindSubjectToken: (rid) => { bound.push(rid); } },
     );
     await expect(promise).rejects.toThrow(/no agent client mapping/);
     // The fail-closed throw fires BEFORE the bind, so nothing is retained.
@@ -917,9 +1334,11 @@ describe("createNodeContextForDag — binds the subject token host-side, NEVER o
       testRunId,
       new AbortController().signal,
       userIdentity,
-      FACTORY_AGENT_MAP,
-      true,
-      (rid, token) => bound.push({ runId: rid, token }),
+      {
+        agentClientMap: FACTORY_AGENT_MAP,
+        mintingActive: true,
+        bindSubjectToken: (rid, token) => bound.push({ runId: rid, token }),
+      },
     );
 
     // The token went through the HOST-SIDE sink, keyed on the run id.
@@ -940,9 +1359,7 @@ describe("createNodeContextForDag — binds the subject token host-side, NEVER o
       testRunId,
       new AbortController().signal,
       adminIdentity,
-      FACTORY_AGENT_MAP,
-      true,
-      (rid) => bound.push(rid),
+      { agentClientMap: FACTORY_AGENT_MAP, mintingActive: true, bindSubjectToken: (rid) => bound.push(rid) },
     );
     expect(bound).toEqual([]);
   });
@@ -956,9 +1373,7 @@ describe("createNodeContextForDag — binds the subject token host-side, NEVER o
       testRunId,
       new AbortController().signal,
       reconstructed,
-      FACTORY_AGENT_MAP,
-      true,
-      (rid) => bound.push(rid),
+      { agentClientMap: FACTORY_AGENT_MAP, mintingActive: true, bindSubjectToken: (rid) => bound.push(rid) },
     );
     // No token to bind → the broker's user exchange fails closed for this run.
     expect(bound).toEqual([]);
@@ -982,9 +1397,18 @@ describe("createNodeContextForDag — spend survives a park/resume (FR-B-006)", 
     spendLedger: ledger,
   });
 
+  const ledgerFailureFixture = (behavior: {
+    readonly read?: SpendLedgerPort["read"];
+    readonly add?: SpendLedgerPort["add"];
+  }): SpendLedgerPort => ({
+    metadata: memoryLedgerMetadata,
+    read: behavior.read ?? (async () => ok(NO_SPEND)),
+    add: behavior.add ?? (async () => ok(undefined)),
+  });
+
   const sliceFor = async (shared: SharedInfra, dag: RegisteredDag) => {
     const { ctx } = await createNodeContextForDag(
-      shared, dag, testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP,
+      shared, dag, testRunId, new AbortController().signal, adminIdentity, { agentClientMap: FACTORY_AGENT_MAP },
     );
     if (ctx.llm === null) throw new Error("expected wired llm");
     return ctx.llm;
@@ -1067,10 +1491,9 @@ describe("createNodeContextForDag — spend survives a park/resume (FR-B-006)", 
   it("REFUSES the slice when a BUDGETED run's ledger cannot be read (FR-B-007)", async () => {
     // An unreadable ledger is indistinguishable from a spent one. Assuming zero
     // would be the refill bug, deliberately reintroduced.
-    const broken: SpendLedgerPort = {
+    const broken = ledgerFailureFixture({
       read: async () => err({ kind: "redis-unavailable", operation: "spend-ledger read" }),
-      add: async () => ok(undefined),
-    };
+    });
     const { llm } = fakeLlm(10, 5);
     const shared = sharedWith(llm, broken);
 
@@ -1079,14 +1502,40 @@ describe("createNodeContextForDag — spend survives a park/resume (FR-B-006)", 
     ).rejects.toThrow(/could not be read/);
   });
 
+  it("REFUSES a BUDGETED slice when the ledger rejects across its Result boundary", async () => {
+    const rejecting = ledgerFailureFixture({
+      read: async () => { throw new Error("ledger transport rejected"); },
+    });
+    const { llm } = fakeLlm(10, 5);
+
+    await expect(
+      sliceFor(sharedWith(llm, rejecting), makeDag({ llmBudget: { tokens: 1000 } })),
+    ).rejects.toThrow(/SpendLedgerPort\.read threw.*ledger transport rejected/);
+  });
+
+  it("refuses forged negative hydrated spend before budget arithmetic", async () => {
+    const forged = ledgerFailureFixture({
+      read: async () => ok({
+        usage: "known",
+        tokens: -100,
+        calls: -1,
+        usd: { kind: "priced", micros: -50 },
+      } as never),
+    });
+    const { llm } = fakeLlm(10, 5);
+
+    await expect(
+      sliceFor(sharedWith(llm, forged), makeDag({ llmBudget: { tokens: 1000 } })),
+    ).rejects.toThrow(/returned invalid Spend.*non-negative safe integer/);
+  });
+
   it("RUNS an UNBUDGETED run whose ledger cannot be read", async () => {
     // There is no ceiling to protect, so failing the slice would turn a
     // metering outage into an availability outage. Metering degrades; the run
     // proceeds.
-    const broken: SpendLedgerPort = {
+    const broken = ledgerFailureFixture({
       read: async () => err({ kind: "redis-unavailable", operation: "spend-ledger read" }),
-      add: async () => ok(undefined),
-    };
+    });
     const { llm, calls } = fakeLlm(10, 5);
     const captured = collectLogs();
     const shared = { ...sharedWith(llm, broken), logger: captured.logger };
@@ -1105,61 +1554,85 @@ describe("createNodeContextForDag — spend survives a park/resume (FR-B-006)", 
     expect(calls.length).toBe(1);
   });
 
-  it("does not fail a call when the ledger APPEND fails — the tokens are already spent", async () => {
-    // Refusing the result would waste the call and lose the output too. What is
-    // lost is durability, and that is what gets logged.
-    const writeOnlyFailure: SpendLedgerPort = {
-      read: async () => ok(NO_SPEND),
+  it("RUNS an UNBUDGETED slice when the ledger rejects and reports metering-from-zero", async () => {
+    const rejecting = ledgerFailureFixture({
+      read: async () => { throw new Error("ledger transport rejected"); },
+    });
+    const { llm, calls } = fakeLlm(10, 5);
+    const captured = collectLogs();
+    const shared = { ...sharedWith(llm, rejecting), logger: captured.logger };
+
+    const slice = await sliceFor(shared, makeDag());
+    expect((await slice.sendStructured(structuredReq())).ok).toBe(true);
+    expect(calls).toHaveLength(1);
+
+    const warned = captured.logs.find((line) => line.msg.includes("Spend ledger unreadable"));
+    expect(warned?.level).toBe("warn");
+    expect(String(warned?.data?.["error"] ?? "")).toContain("SpendLedgerPort.read threw");
+    expect(String(warned?.data?.["error"] ?? "")).toContain("ledger transport rejected");
+  });
+
+  it("fails a budgeted call non-retriably when the ledger append is not acknowledged", async () => {
+    // Provider spend happened, but a resumable budget cannot continue from a
+    // stale durable total. The slice stops without retrying the additive write.
+    const writeOnlyFailure = ledgerFailureFixture({
       add: async () => err({ kind: "redis-unavailable", operation: "spend-ledger add" }),
-    };
+    });
     const { llm, calls } = fakeLlm(10, 5);
     const shared = sharedWith(llm, writeOnlyFailure);
 
     const slice = await sliceFor(shared, makeDag({ llmBudget: { tokens: 1000 } }));
-    expect((await slice.sendStructured(structuredReq())).ok).toBe(true);
+    const result = await slice.sendStructured(structuredReq());
+    expect(result.ok).toBe(false);
+    if (result.ok || result.error.kind !== "node-crash") throw new Error("expected node-crash");
+    expect(result.error.retriability).toBe("non-retriable");
     expect(calls.length).toBe(1);
   });
 });
 
-// ── The ledger BACKEND selection (round-2 RC2) ──────────────────────────────
+// ── Spend-ledger backend authority and fallback invariants ──────────────────
 //
-// `spendLedgerRedis` decides whether a run gets the durable Redis ledger or the
-// process-local fallback, and the fallback costs budget durability across
-// restarts. Before these tests neither branch was exercised: every fixture in
-// this file omits `hIncrBy`/`hGetAll`/`expire` (they are OPTIONAL on
-// `RedisPort`), so the downgrade fired on every single test, unasserted, into a
-// no-op logger — and the Redis-backed branch was reached by nothing at all.
+// An explicitly injected authoritative ledger is never displaced. Stock memory
+// wiring selects Redis when its complete append surface is available; otherwise
+// it remains an honest process-local fallback and emits the durability loss.
 describe("createNodeContextForDag — which spend ledger a run actually gets", () => {
   /**
    * A `RedisPort` that CAN back the ledger. The default `createMockRedis`
    * deliberately cannot, so the two fixtures together cover both branches.
    */
   const capableRedis = () => {
-    const hashes = new Map<string, Map<string, number>>();
-    const sets = new Map<string, Set<string>>();
+    const hashes = new Map<string, Map<string, string>>();
     const seen: string[] = [];
+    const commits: Array<{
+      readonly checkpointKey: string;
+      readonly spendKey: string;
+      readonly checkpointTtlSec: number;
+      readonly spendTtlSec: number;
+    }> = [];
     const base = createMockRedis().redis;
     const redis = {
       ...base,
-      hIncrBy: async (key: string, field: string, by: number) => {
-        seen.push(key);
-        const hash = hashes.get(key) ?? new Map<string, number>();
-        hash.set(field, (hash.get(field) ?? 0) + by);
-        hashes.set(key, hash);
-        return ok(hash.get(field) ?? 0);
+      hGetAll: async (key: string) => ok(Object.fromEntries(hashes.get(key) ?? new Map())),
+      commitCheckpointAndRetainSpend: async (commit) => {
+        commits.push({
+          checkpointKey: commit.checkpointKey,
+          spendKey: commit.spendKey,
+          checkpointTtlSec: commit.checkpointTtlSec,
+          spendTtlSec: commit.spendTtlSec,
+        });
+        return base.set(
+          commit.checkpointKey,
+          commit.checkpointValue,
+          { expiresInSec: commit.checkpointTtlSec },
+        );
       },
-      hGetAll: async (key: string) =>
-        ok(Object.fromEntries([...(hashes.get(key) ?? new Map())].map(([f, v]) => [f, String(v)]))),
-      expire: async () => ok(true),
-      sAdd: async (key: string, member: string) => {
-        const set = sets.get(key) ?? new Set<string>();
-        set.add(member);
-        sets.set(key, set);
-        return ok(1);
+      appendSpend: async (append: RedisSpendAppend) => {
+        seen.push(append.key);
+        applyRedisSpendAppend(hashes, append);
+        return ok(undefined);
       },
-      sMembers: async (key: string) => ok([...(sets.get(key) ?? new Set<string>())]),
     } as unknown as RedisPort;
-    return { redis, hashes, seen };
+    return { redis, hashes, seen, commits };
   };
 
   const sharedWithRedis = (llm: LlmClient, redis: RedisPort, logger: LogPort): SharedInfra => ({
@@ -1170,25 +1643,62 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
   });
 
   it("DOWNGRADES loudly when the Redis adapter cannot back the ledger", async () => {
-    // The C2 fix. Its whole point is that this fact exists in exactly one place
-    // — this log line — so an unasserted version of it is worth very little.
+    // A durability downgrade is observable through exactly one asserted error log.
     const { llm } = fakeLlm(10, 5);
     const captured = collectLogs();
     const shared = sharedWithRedis(llm, createMockRedis().redis, captured.logger);
 
     await createNodeContextForDag(
-      shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP,
+      shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, { agentClientMap: FACTORY_AGENT_MAP },
     );
 
     const line = captured.logs.find((l) => l.msg.includes("Spend ledger is NOT durable"));
     expect(line).toBeDefined();
     expect(line?.level).toBe("error");
     const reason = String(line?.data?.["reason"] ?? "");
-    for (const primitive of ["hIncrBy", "hGetAll", "expire"]) {
+    for (const primitive of [
+      "hGetAll",
+      "appendSpend",
+      "commitCheckpointAndRetainSpend",
+    ]) {
       expect(reason).toContain(primitive);
     }
     expect(String(line?.data?.["consequence"] ?? "")).toContain("restart");
     expect(line?.data?.["dagId"]).toBe(testDagId as string);
+  });
+
+  it("keeps an explicitly injected file ledger authoritative even when Redis is capable", async () => {
+    const root = mkdtempSync(join(tmpdir(), "fugue-authoritative-file-ledger-"));
+    try {
+      const fileLedger = createFileSpendLedger(root);
+      if (!fileLedger.ok) throw new Error("expected file ledger");
+      const { llm } = fakeLlm(10, 5);
+      const captured = collectLogs();
+      const capable = capableRedis();
+      const shared: SharedInfra = {
+        ...sharedWithRedis(llm, capable.redis, captured.logger),
+        spendLedger: fileLedger.value,
+      };
+
+      const { ctx } = await createNodeContextForDag(
+        shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, { agentClientMap: FACTORY_AGENT_MAP },
+      );
+      if (ctx.llm === null) throw new Error("expected wired llm");
+      expect((await ctx.llm.sendStructured(structuredReq())).ok).toBe(true);
+
+      expect(capable.seen).toHaveLength(0);
+      expect(captured.logs.some((line) => line.msg.includes("NOT durable"))).toBe(false);
+      const recorded = await fileLedger.value.read(testRunId);
+      expect(recorded.ok).toBe(true);
+      if (recorded.ok) expect(recorded.value.tokens).toBe(15);
+      expect(fileLedger.value.metadata).toEqual({
+        role: "authoritative",
+        backend: "file",
+        durability: "restart",
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("uses the REDIS-backed ledger when the adapter offers the primitives", async () => {
@@ -1202,7 +1712,7 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
     const shared = sharedWithRedis(llm, capable.redis, captured.logger);
 
     const { ctx } = await createNodeContextForDag(
-      shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP,
+      shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, { agentClientMap: FACTORY_AGENT_MAP },
     );
     if (ctx.llm === null) throw new Error("expected wired llm");
     await ctx.llm.sendStructured(structuredReq());
@@ -1224,6 +1734,94 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
     expect(fallback.value).toEqual(NO_SPEND);
   });
 
+  it("retains spend for the resumable run TTL when it exceeds checkpoint TTL", async () => {
+    const { llm } = fakeLlm(10, 5);
+    const capable = capableRedis();
+    const shared = sharedWithRedis(llm, capable.redis, collectLogs().logger);
+    const { ctx } = await createNodeContextForDag(
+      shared,
+      makeDag({ checkpointTtlMs: 9_000 }),
+      testRunId,
+      new AbortController().signal,
+      adminIdentity,
+      { agentClientMap: FACTORY_AGENT_MAP, resumableRunTtlSec: 60 },
+    );
+    if (ctx.llm === null || ctx.checkpointWriter === null) {
+      throw new Error("expected metered LLM and checkpoint writer");
+    }
+
+    expect((await ctx.llm.sendStructured(structuredReq())).ok).toBe(true);
+    await ctx.checkpointWriter.write(testRunId, testNodeId, { after: "llm" });
+
+    expect(capable.commits).toEqual([{
+      checkpointKey: buildCheckpointKey(testTenant, testDagId, testRunId, testNodeId),
+      spendKey: `fugue:${testTenant}:${testDagId}:${testRunId}:$spend`,
+      checkpointTtlSec: 9,
+      spendTtlSec: 60,
+    }]);
+  });
+
+  // The retention floor is `max(checkpointTtlSec, resumableRunTtlSec ?? checkpointTtlSec)`.
+  // The case above pins the direction where the resumable TTL wins. These two pin
+  // the FLOOR itself: drop the `Math.max` and a resumed run's spend record can
+  // expire before the checkpoint that resumes it, silently restarting budget
+  // accounting from zero.
+  it("floors spend retention at the checkpoint TTL when it exceeds the resumable run TTL", async () => {
+    const { llm } = fakeLlm(10, 5);
+    const capable = capableRedis();
+    const shared = sharedWithRedis(llm, capable.redis, collectLogs().logger);
+    const { ctx } = await createNodeContextForDag(
+      shared,
+      makeDag({ checkpointTtlMs: 90_000 }),
+      testRunId,
+      new AbortController().signal,
+      adminIdentity,
+      { agentClientMap: FACTORY_AGENT_MAP, resumableRunTtlSec: 30 },
+    );
+    if (ctx.llm === null || ctx.checkpointWriter === null) {
+      throw new Error("expected metered LLM and checkpoint writer");
+    }
+
+    expect((await ctx.llm.sendStructured(structuredReq())).ok).toBe(true);
+    await ctx.checkpointWriter.write(testRunId, testNodeId, { after: "llm" });
+
+    expect(capable.commits).toEqual([{
+      checkpointKey: buildCheckpointKey(testTenant, testDagId, testRunId, testNodeId),
+      spendKey: `fugue:${testTenant}:${testDagId}:${testRunId}:$spend`,
+      checkpointTtlSec: 90,
+      // NOT 30: the shorter resumable TTL must not shorten spend retention.
+      spendTtlSec: 90,
+    }]);
+  });
+
+  it("retains spend for the checkpoint TTL when no resumable run TTL is configured", async () => {
+    const { llm } = fakeLlm(10, 5);
+    const capable = capableRedis();
+    const shared = sharedWithRedis(llm, capable.redis, collectLogs().logger);
+    const { ctx } = await createNodeContextForDag(
+      shared,
+      makeDag({ checkpointTtlMs: 45_000 }),
+      testRunId,
+      new AbortController().signal,
+      adminIdentity,
+      // resumableRunTtlSec omitted entirely — the `?? checkpointTtlSec` arm.
+      { agentClientMap: FACTORY_AGENT_MAP },
+    );
+    if (ctx.llm === null || ctx.checkpointWriter === null) {
+      throw new Error("expected metered LLM and checkpoint writer");
+    }
+
+    expect((await ctx.llm.sendStructured(structuredReq())).ok).toBe(true);
+    await ctx.checkpointWriter.write(testRunId, testNodeId, { after: "llm" });
+
+    expect(capable.commits).toEqual([{
+      checkpointKey: buildCheckpointKey(testTenant, testDagId, testRunId, testNodeId),
+      spendKey: `fugue:${testTenant}:${testDagId}:${testRunId}:$spend`,
+      checkpointTtlSec: 45,
+      spendTtlSec: 45,
+    }]);
+  });
+
   it("hydrates a resumed slice from the REDIS ledger, not from zero", async () => {
     // The park/resume guarantee, over the durable backend rather than the
     // in-process stand-in the other durability tests use.
@@ -1234,7 +1832,7 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
 
     const slice = async () => {
       const { ctx } = await createNodeContextForDag(
-        shared, dag, testRunId, new AbortController().signal, adminIdentity, FACTORY_AGENT_MAP,
+        shared, dag, testRunId, new AbortController().signal, adminIdentity, { agentClientMap: FACTORY_AGENT_MAP },
       );
       if (ctx.llm === null) throw new Error("expected wired llm");
       return ctx.llm;
@@ -1255,5 +1853,113 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
       throw new Error("expected the resumed slice to refuse from Redis-held spend");
     }
     expect(calls.length).toBe(3);
+  });
+
+  // ── Atomic checkpoint+spend commit failure (round-13 A13) ──────────────────
+  // Only the happy path and the plain `redis.set` failure path were covered.
+  // The atomic commit is the path a Redis-backed ledger actually takes, and a
+  // silently-swallowed failure there would let a run believe its checkpoint and
+  // its spend retention were both persisted when neither was.
+
+  it("surfaces an Err from the atomic commit as a checkpoint write failure", async () => {
+    const { llm } = fakeLlm(10, 5);
+    const capable = capableRedis();
+    const failing = {
+      ...capable.redis,
+      commitCheckpointAndRetainSpend: async () =>
+        err({ kind: "redis-unavailable" as const, operation: "SPEND-COMMIT" }),
+    } as unknown as RedisPort;
+    const shared = sharedWithRedis(llm, failing, collectLogs().logger);
+
+    const { ctx } = await createNodeContextForDag(
+      shared, makeDag({ checkpointTtlMs: 9_000 }), testRunId,
+      new AbortController().signal, adminIdentity,
+      { agentClientMap: FACTORY_AGENT_MAP, resumableRunTtlSec: 60 },
+    );
+    if (ctx.checkpointWriter === null) throw new Error("expected checkpoint writer");
+
+    await expect(ctx.checkpointWriter.write(testRunId, testNodeId, { after: "llm" }))
+      .rejects.toThrow("Checkpoint persistence failed");
+  });
+
+  it("surfaces a THROWN atomic commit as a checkpoint write failure too", async () => {
+    // A port that throws across the boundary rather than returning Err is the
+    // same outcome to the caller: the checkpoint did not persist.
+    const { llm } = fakeLlm(10, 5);
+    const capable = capableRedis();
+    const throwing = {
+      ...capable.redis,
+      commitCheckpointAndRetainSpend: async () => { throw new Error("connection reset"); },
+    } as unknown as RedisPort;
+    const shared = sharedWithRedis(llm, throwing, collectLogs().logger);
+
+    const { ctx } = await createNodeContextForDag(
+      shared, makeDag({ checkpointTtlMs: 9_000 }), testRunId,
+      new AbortController().signal, adminIdentity,
+      { agentClientMap: FACTORY_AGENT_MAP, resumableRunTtlSec: 60 },
+    );
+    if (ctx.checkpointWriter === null) throw new Error("expected checkpoint writer");
+
+    await expect(ctx.checkpointWriter.write(testRunId, testNodeId, { after: "llm" }))
+      .rejects.toThrow("Checkpoint persistence failed");
+  });
+});
+
+// ── Prompt resolution precedence (round-13 A14) ─────────────────────────────
+// `promptAccess` is a three-way branch: a DAG's own prompts win, else the
+// host-level shared prompts, else an empty accessor. Nothing read
+// `ctx.prompts.get(...)`, so a flipped precedence would have silently served
+// the wrong template to every node of a DAG that shipped its own.
+
+describe("createNodeContextForDag — prompt precedence", () => {
+  const sharedPrompts = { get: (name: string) => (name === "greet" ? "SHARED greet" : null) };
+
+  const dagWithPrompts = (entries: ReadonlyArray<readonly [string, string]>): RegisteredDag => ({
+    ...makeDag(),
+    prompts: new Map(entries),
+  });
+
+  const promptsOf = async (dag: RegisteredDag, shared: SharedInfra) => {
+    const { ctx } = await createNodeContextForDag(
+      shared, dag, testRunId, new AbortController().signal, adminIdentity, { agentClientMap: FACTORY_AGENT_MAP },
+    );
+    if (ctx.prompts === null) throw new Error("expected a prompt accessor");
+    return ctx.prompts;
+  };
+
+  it("serves the DAG's own prompt over a host-level one of the same name", async () => {
+    const prompts = await promptsOf(
+      dagWithPrompts([["greet", "DAG greet"]]),
+      { ...baseSharedInfra(), prompts: sharedPrompts },
+    );
+
+    expect(prompts.get("greet")).toBe("DAG greet");
+  });
+
+  it("does NOT fall through to host prompts for a name the DAG omits", async () => {
+    // Precedence is per-SOURCE, not per-name: a DAG that ships prompts owns the
+    // whole namespace, so a host template cannot leak into it under a new name.
+    const prompts = await promptsOf(
+      dagWithPrompts([["greet", "DAG greet"]]),
+      { ...baseSharedInfra(), prompts: sharedPrompts },
+    );
+
+    expect(prompts.get("farewell")).toBeNull();
+  });
+
+  it("falls back to host-level prompts when the DAG ships none", async () => {
+    const prompts = await promptsOf(
+      makeDag(),
+      { ...baseSharedInfra(), prompts: sharedPrompts },
+    );
+
+    expect(prompts.get("greet")).toBe("SHARED greet");
+    expect(prompts.get("missing")).toBeNull();
+  });
+
+  it("serves an empty accessor when neither the DAG nor the host has prompts", async () => {
+    const prompts = await promptsOf(makeDag(), baseSharedInfra());
+
+    expect(prompts.get("greet")).toBeNull();
   });
 });
