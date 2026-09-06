@@ -107,11 +107,12 @@ describe("SC-006 gate integrity pins", () => {
     expect(typeof barrel).toBe("object");
   });
 
-  it("InMemoryCheckpointer.saveNode with composite opts pins the bare nodeId key (FR-023)", async () => {
-    // FR-023 byte-identical contract: the in-memory backend deliberately
-    // ignores SaveNodeOpts — a composite save must stay loadable under the
-    // canonical bare nodeId key and must NOT introduce the composite
-    // `dag@nodeId@index@attempt` key (that is the file backend's job).
+  it("InMemoryCheckpointer.saveNode honors composite opts, and folds a no-opts save to the bare key (ADR-0075)", async () => {
+    // Was an FR-023 pin (in-memory ignored SaveNodeOpts so F6 changed no
+    // layout). F1 PR-A made every backend honor the address, because a fan
+    // whose indices collide in memory is a trap that only surfaces when the
+    // backend is swapped. What survives from the old pin is the half that must
+    // never change: canonical folding keeps a no-opts save on the bare key.
     const cp = new InMemoryCheckpointer();
     const rid = "opts-pin-run" as RunId;
     const metaRes = await cp.setMeta(rid, {
@@ -129,13 +130,19 @@ describe("SC-006 gate integrity pins", () => {
     const saveRes = await cp.saveNode(rid, state, { index: 1, attempt: 2 });
     expect(saveRes.ok).toBe(true);
 
+    const canonicalState = { ...state, output: { done: false } };
+    const canonicalRes = await cp.saveNode(rid, canonicalState);
+    expect(canonicalRes.ok).toBe(true);
+
     const loadRes = await cp.load(rid);
     expect(loadRes.ok).toBe(true);
     const runState = loadRes.ok ? loadRes.value : null;
     expect(runState).not.toBeNull();
     if (!runState) return;
-    expect(runState.nodes["n1"]).toEqual(state);
-    expect(runState.nodes["dag@n1@1@2"]).toBeUndefined();
+    // The composite save landed on its own address...
+    expect(runState.nodes["dag@n1@1@2"]).toEqual(state);
+    // ...and did not displace the canonical entry, which stays bare.
+    expect(runState.nodes["n1"]).toEqual(canonicalState);
   });
 });
 

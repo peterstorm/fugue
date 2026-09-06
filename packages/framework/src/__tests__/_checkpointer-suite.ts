@@ -9,11 +9,17 @@
 // fingerprint, TTL, and representable corrupt-node behavior live here because
 // they are backend contract, not filesystem mechanics.
 //
-// Deliberate division: composite addressing and filesystem atomicity remain in
-// `file-checkpointer.test.ts`. FR-023 requires Redis and in-memory to ignore
-// composite options exactly as before, so putting composite expectations here
-// would weaken compatibility or create a fake backend carve-out. Rename/tmp
-// atomicity is likewise a property of the file adapter, not the port.
+// Composite addressing (ADR-0075) MOVED HERE in F1 PR-A. It used to live only
+// in `file-checkpointer.test.ts` because F6's FR-023 required Redis and
+// in-memory to ignore composite options, so a shared expectation would have
+// been a fake carve-out. All three backends now honor the address, which makes
+// it port contract — and the suite is where contract belongs, so a fourth
+// backend cannot ship indexed fan-out that silently overwrites itself.
+//
+// Deliberate division: filesystem atomicity (rename/tmp) stays in
+// `file-checkpointer.test.ts`, a property of that adapter, not of the port.
+// The file backend's richer composite cases (digest filenames, the full
+// namespace/index/attempt permutation table) also stay there.
 //
 // Not named `*.test.ts` on purpose: it declares no top-level tests, it is a
 // library the real test files call (same convention as `_id-helpers.ts`).
@@ -119,6 +125,135 @@ export function checkpointerSuite(
       if (loadResult.ok && loadResult.value) {
         expect(loadResult.value.nodes["n1"].nodeId).toBe(N("n1"));
         expect(loadResult.value.nodes["n1"].output).toEqual({ text: "hello" });
+      }
+    });
+
+    // ── Composite addressing (ADR-0075) — port contract since F1 PR-A ───────
+    //
+    // These four are the durable precondition for F1's runtime-width fan-out.
+    // If any backend fails them, a mapped node's indices collide and a partial
+    // fan silently restarts from whichever index wrote last on resume.
+
+    test("composite opts store under the composite address, not the bare nodeId", async () => {
+      const meta: RunMeta = { dagId: "dag-1" as DagId, startedAt: new Date(), nodeCount: 1 };
+      await cp.setMeta(R("run-c1"), meta);
+      const nodeState: NodeState = {
+        nodeId: "n1" as NodeId,
+        output: { text: "indexed" },
+        completedAt: new Date("2025-06-01T12:00:00Z"),
+      };
+
+      const saveResult = await cp.saveNode(R("run-c1"), nodeState, {
+        namespace: "sub",
+        index: 3,
+        attempt: 1,
+      });
+      expect(saveResult.ok).toBe(true);
+
+      const loadResult = await cp.load(R("run-c1"));
+      expect(loadResult.ok).toBe(true);
+      if (loadResult.ok && loadResult.value) {
+        expect(Object.keys(loadResult.value.nodes)).toEqual(["sub@n1@3@1"]);
+        // The KEY is the address; `nodeId` stays the canonical DAG identity.
+        expect(loadResult.value.nodes["sub@n1@3@1"].nodeId).toBe(N("n1"));
+        expect(loadResult.value.nodes["sub@n1@3@1"].output).toEqual({ text: "indexed" });
+      }
+    });
+
+    test("canonical folding: a no-opts save is keyed by exactly the bare nodeId", async () => {
+      const meta: RunMeta = { dagId: "dag-1" as DagId, startedAt: new Date(), nodeCount: 1 };
+      await cp.setMeta(R("run-c2"), meta);
+      const nodeState: NodeState = {
+        nodeId: "n1" as NodeId,
+        output: { text: "canonical" },
+        completedAt: new Date("2025-06-01T12:00:00Z"),
+      };
+      await cp.saveNode(R("run-c2"), nodeState);
+
+      const loadResult = await cp.load(R("run-c2"));
+      expect(loadResult.ok).toBe(true);
+      if (loadResult.ok && loadResult.value) {
+        expect(Object.keys(loadResult.value.nodes)).toEqual(["n1"]);
+      }
+    });
+
+    test("distinct indices of one node address distinct entries (F1 fan-out)", async () => {
+      const meta: RunMeta = { dagId: "dag-1" as DagId, startedAt: new Date(), nodeCount: 1 };
+      await cp.setMeta(R("run-c3"), meta);
+      const at = new Date("2025-06-01T12:00:00Z");
+
+      for (const i of [0, 1, 2]) {
+        const saved = await cp.saveNode(
+          R("run-c3"),
+          { nodeId: "n1" as NodeId, output: { i }, completedAt: at },
+          { index: i },
+        );
+        expect(saved.ok).toBe(true);
+      }
+
+      const loadResult = await cp.load(R("run-c3"));
+      expect(loadResult.ok).toBe(true);
+      if (loadResult.ok && loadResult.value) {
+        expect(Object.keys(loadResult.value.nodes).sort()).toEqual([
+          "dag@n1@0@0",
+          "dag@n1@1@0",
+          "dag@n1@2@0",
+        ]);
+        // Each index kept ITS OWN output — the overwrite this whole address
+        // space exists to prevent.
+        expect(loadResult.value.nodes["dag@n1@1@0"].output).toEqual({ i: 1 });
+      }
+    });
+
+    test("a canonical save and an indexed save of the same node coexist", async () => {
+      const meta: RunMeta = { dagId: "dag-1" as DagId, startedAt: new Date(), nodeCount: 1 };
+      await cp.setMeta(R("run-c4"), meta);
+      const at = new Date("2025-06-01T12:00:00Z");
+
+      await cp.saveNode(R("run-c4"), { nodeId: "n1" as NodeId, output: "canonical", completedAt: at });
+      await cp.saveNode(
+        R("run-c4"),
+        { nodeId: "n1" as NodeId, output: "indexed", completedAt: at },
+        { index: 0 },
+      );
+
+      const loadResult = await cp.load(R("run-c4"));
+      expect(loadResult.ok).toBe(true);
+      if (loadResult.ok && loadResult.value) {
+        expect(Object.keys(loadResult.value.nodes).sort()).toEqual(["dag@n1@0@0", "n1"]);
+        expect(loadResult.value.nodes["n1"].output).toBe("canonical");
+        expect(loadResult.value.nodes["dag@n1@0@0"].output).toBe("indexed");
+      }
+    });
+
+    test("a malformed composite address fails typed and writes nothing", async () => {
+      const meta: RunMeta = { dagId: "dag-1" as DagId, startedAt: new Date(), nodeCount: 1 };
+      await cp.setMeta(R("run-c5"), meta);
+      const nodeState: NodeState = {
+        nodeId: "n1" as NodeId,
+        output: { text: "nope" },
+        completedAt: new Date("2025-06-01T12:00:00Z"),
+      };
+
+      const result = await cp.saveNode(
+        R("run-c5"),
+        nodeState,
+        Object.freeze({ namespace: "../bad", index: -1 }) as never,
+      );
+      expect(result.ok).toBe(false);
+      // The SAME error kind on every backend. A malformed address is caller
+      // error, not a driver fault, so it must not surface as `cache-error` on
+      // one backend and `checkpoint-write-failed` on another — a caller cannot
+      // branch on a kind that depends on deployment configuration.
+      if (!result.ok) expect(result.error.kind).toBe("checkpoint-write-failed");
+
+      // Fail closed: it must NOT have fallen back to the canonical key. A
+      // silent canonical write would let a fan index clobber the node's own
+      // checkpoint.
+      const loadResult = await cp.load(R("run-c5"));
+      expect(loadResult.ok).toBe(true);
+      if (loadResult.ok && loadResult.value) {
+        expect(Object.keys(loadResult.value.nodes)).toEqual([]);
       }
     });
 

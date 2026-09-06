@@ -190,6 +190,44 @@ register as `when: { field, equals }` at `:323`. `DAG_SHAPES` (`types/dag.ts:184
 the doc comment there already states that both `DagProvenance` and the CLI's `SHAPES` derive from
 that tuple, so a new shape is added in exactly one place and the projections cannot drift.
 
+### D7 — HITL is rejected inside a mapped sub-DAG, at module load
+
+**Decided 2026-09-06.** A node carrying `humanReview` (`types/node.ts:467`) inside a mapped
+sub-DAG is rejected by `executor/validate-dag.ts` at module load, with an error naming the
+gather-then-review alternative.
+
+The structural reason is that it cannot currently be expressed. `HumanGatePayload`
+(`dag-runtime/types.ts:56`) carries a single `nodeId: NodeId` and `pendingReviews: readonly
+NodeId[]`; neither has an index dimension, so *"index 12 of the mapped review node is awaiting a
+human"* has no representation. That payload is deliberately shared across all three gate phases —
+`awaiting-human`, `suspended`, `retrying-hook` (`:71`, `:72`, `:93`) — with the stated intent that a
+field added there propagates to every gate phase and every transition projection. Widening it is not
+a local change.
+
+Two further consequences argue against doing it in v1:
+
+- **Partial-fan park semantics are undefined.** If index 12 parks, either 13..24 keep running (the
+  fan is now partly settled and partly parked, and resume must reconstruct which) or the whole fan
+  halts (a parallel construct serialized on its slowest human). Both are defensible; neither is
+  obvious; the choice changes the resume reconstruction.
+- **It silently voids ADR-0074.** `maxQueuedRuns` bounds *runs*, not gates. One run with a 75-wide
+  parked fan is one run against the limit but 75 outstanding human decisions — precisely the failure
+  ADR-0074 was written to fix ("a first-class admission limit that advertised a guarantee the system
+  did not provide").
+
+The decision rests on an asymmetry rather than on HITL-in-a-fan being unreasonable. Forbidding it is
+removable in one additive change once fan semantics have been exercised for real. Shipping a
+half-specified per-index gate is not: **parked runs are durable and long-lived**, so a wrong address
+shape means migrating runs a human is mid-decision on, days later. Checkpoint addresses can be
+migrated quietly; pending human decisions cannot.
+
+The documented alternative is fan → gather → one `humanReview` node over the gathered array: one
+prompt, one decision, N items — which for most approval workflows is better than N separate
+approvals anyway.
+
+This also narrows §11 Q1: the child sub-DAG can reuse the existing executor minus the one branch
+whose semantics were undefined.
+
 ---
 
 ## 5. Requirements
@@ -206,6 +244,7 @@ that tuple, so a new shape is added in exactly one place and the projections can
 | FR-F1-008 | Canonical (non-mapped) checkpoint keys are byte-identical to `3845ad9` on every backend. No migration. |
 | FR-F1-009 | A mapped node renders as one plate with a multiplicity annotation in `describedToMermaid`. |
 | FR-F1-010 | `AuthoredDag` accepts a `map` shape with a `widthFrom` field reference through its closed schema; no expression evaluation. |
+| FR-F1-011 | A node carrying `humanReview` inside a mapped sub-DAG is rejected at module load, with an error naming the gather-then-review alternative (D7). |
 
 ---
 
@@ -230,10 +269,21 @@ that tuple, so a new shape is added in exactly one place and the projections can
 
 | PR | Scope | Why this seam |
 |---|---|---|
-| **PR-A** | Carry the composite address through `redis-checkpointer.ts` and the host's `buildCheckpointKey` / `createNamespacedCheckpointWriter`. No `map` node yet. | Independently valuable and independently testable: it closes the F6-era gap where ADR-0075's address exists in the port but not on the production path. Landing it first means the F1 runtime work has a durable address to write to instead of inventing one. |
-| **PR-B** | `MapWidth` parsing, the `map` node kind, sub-DAG execution, the typed reducer, `defineDag` validation. | The functional core of the feature. Depends on PR-A only for durability. |
+| **PR-A** | Bring `redis-checkpointer.ts` and `InMemoryCheckpointer` up to the composite address the port already declares at `checkpointer.ts:505`, and move composite expectations into the shared `_checkpointer-suite.ts`. No `map` node yet. | Independently valuable and independently testable: it closes the F6-era gap where ADR-0075's address exists in the port but is honored by only one of three backends. Landing it first means the F1 runtime work has a durable address to write to instead of inventing one. |
+| **PR-B** | `MapWidth` parsing, the `map` node kind, sub-DAG execution, the typed reducer, `defineDag` validation (incl. FR-F1-011), **and the index dimension on the host's `CheckpointWriter` / `buildCheckpointKey`**. | The functional core. The host writer moves here deliberately — see the note below. |
 | **PR-C** | `AuthoredDag` closed `map` shape + `widthFrom`; `DAG_SHAPES` member; plate rendering in `describedToMermaid`. | The authoring and visualization surface; no runtime risk. |
 | **PR-D** | Budget projection over `maxWidth` at admission, if §9 keeps it in scope. | Isolated to the F3 admission path. |
+
+**Why the host writer sits in PR-B, not PR-A** (refined 2026-09-06 after reading the code). The
+host's `CheckpointWriter.write(runId, nodeId, value)`
+(`host/src/adapters/node-context-factory.ts:254`) is a **different port** from the framework's
+`Checkpointer`. It never had composite support and is not part of ADR-0075's story, so widening its
+signature in PR-A would add an index parameter with no caller until PR-B — "ports introduced for
+future swappability with no second adapter or test fake", which `architecture.md` names as an
+anti-pattern. It lands with the map node that gives it meaning.
+
+PR-A is therefore self-contained: the port at `checkpointer.ts:505` already declares `opts?`, and
+two of three backends silently ignore it. Closing that is meaningful on its own terms.
 
 ---
 
@@ -278,10 +328,11 @@ that tuple, so a new shape is added in exactly one place and the projections can
 
 ## 11. Open questions
 
-1. **Does the child sub-DAG reuse `runDagStateful`, or a narrower sub-executor?** Reuse gives retry,
-   freshness and observability for free but drags in HITL, whose semantics inside a fan are
-   undefined (does index 12 parking park the whole fan?). This is the biggest unresolved design
-   question and should be settled before PR-B.
-2. **Is HITL legal inside a mapped sub-DAG at all in F1?** Forbidding it at `defineDag` time is a
-   defensible v1 and removes question 1's hardest branch.
-3. **Does admission project the fan (D4), or is metering-only sufficient for v1?**
+1. **Does the child sub-DAG reuse `runDagStateful`, or a narrower sub-executor?** Narrowed by D7,
+   not yet closed. With HITL rejected at module load, reuse no longer drags in the branch whose
+   semantics were undefined, so reuse is now the presumptive answer — retry, freshness and
+   observability come free. To confirm against the executor's actual entry conditions before PR-B.
+2. ~~**Is HITL legal inside a mapped sub-DAG at all in F1?**~~ **Resolved 2026-09-06 — no.** See D7
+   and FR-F1-011.
+3. **Does admission project the fan (D4), or is metering-only sufficient for v1?** Open. Does not
+   block PR-A or PR-B.

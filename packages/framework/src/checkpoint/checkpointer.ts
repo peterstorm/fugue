@@ -4,6 +4,7 @@ import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { err, ok } from "../types/result.js";
 import { FRAMEWORK_VERSION } from "./fingerprint.js";
 import type { CompositeNodeKeyOpts } from "./composite-node-key.js";
+import { compositeNodeKey } from "./composite-node-key.js";
 import {
   ID_PATTERN,
   __brandNodeId,
@@ -15,7 +16,6 @@ import {
   CHECKPOINT_INVALID_RUN_ID,
   buildCheckpointWriteFailed,
   frameworkError,
-  stringOf,
 } from "../types/error-factories.js";
 import { safeDiagnosticRender, safeErrorMessage } from "../types/safe-error.js";
 
@@ -676,10 +676,14 @@ export class InMemoryCheckpointer implements Checkpointer {
   async saveNode(
     runId: RunId,
     state: NodeState,
-    _opts?: SaveNodeOpts,
+    opts?: SaveNodeOpts,
   ): Promise<Result<void, FrameworkError>> {
-    // FR-023: options are intentionally unobserved. `state.nodeId` is the one
-    // identity source and the bare key used by this backend.
+    // `state.nodeId` remains the one identity source; `opts` selects the
+    // STORED ADDRESS (ADR-0075). F6's FR-023 pinned this backend to ignore
+    // `opts` so that feature changed no existing layout; F1 needs indexed
+    // instances to address distinct entries on every backend, not just file,
+    // so the address is now honored here too. Canonical folding keeps a
+    // no-opts call keyed by exactly `nodeId`, so nothing existing moves.
     const existing = this.nodes.get(runId) ?? {};
     let rawNodeId: unknown = CHECKPOINT_INVALID_NODE_ID;
     let detached: NodeState;
@@ -701,7 +705,28 @@ export class InMemoryCheckpointer implements Checkpointer {
         ),
       );
     }
-    this.nodes.set(runId, { ...existing, [stringOf(detached.nodeId)]: detached });
+    // Separate try from the snapshot gate above so the diagnostic names the
+    // actual fault: a malformed composite address is caller error, not an
+    // unreadable node state. `compositeNodeKey` throws as a write-side
+    // constructor invariant; it must settle typed like every other write
+    // failure on this backend rather than escape as a raw rejection.
+    let nodeKey: string;
+    try {
+      nodeKey = compositeNodeKey(detached.nodeId, opts);
+    } catch (error) {
+      return err(
+        buildCheckpointWriteFailed(
+          runId,
+          detached.nodeId,
+          `composite node address is invalid: ${safeErrorMessage(error)}`,
+        ),
+      );
+    }
+    // Computed keys in an object literal use CreateDataProperty, not Set, so a
+    // node legally named `__proto__` (ID_PATTERN admits `_`) defines an own
+    // entry instead of re-parenting the map — the same hazard the Redis and
+    // file backends handle with defineProperty.
+    this.nodes.set(runId, { ...existing, [nodeKey]: detached });
     return ok(undefined);
   }
 

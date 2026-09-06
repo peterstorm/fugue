@@ -10,7 +10,9 @@ import type {
   RunMeta,
   NodeState,
   RunState,
+  SaveNodeOpts,
 } from "./checkpointer.js";
+import { compositeNodeKey } from "./composite-node-key.js";
 import {
   TTL_SECONDS,
   evaluateCheckpointLoadGates,
@@ -21,7 +23,7 @@ import {
   snapshotExpectedDagFingerprint,
 } from "./checkpointer.js";
 import { FRAMEWORK_VERSION } from "./fingerprint.js";
-import { frameworkError } from "../types/error-factories.js";
+import { buildCheckpointWriteFailed, frameworkError } from "../types/error-factories.js";
 import { safeErrorMessage } from "../types/safe-error.js";
 import { fwLogger } from "../logger.js";
 
@@ -247,9 +249,36 @@ export class RedisCheckpointer implements Checkpointer {
     });
   }
 
-  async saveNode(runId: RunId, state: NodeState): Promise<Result<void, FrameworkError>> {
+  async saveNode(
+    runId: RunId,
+    state: NodeState,
+    opts?: SaveNodeOpts,
+  ): Promise<Result<void, FrameworkError>> {
+    const { nodeId, payload } = serializeNode(state);
+    // The HASH FIELD is the composite address (ADR-0075); the payload keeps
+    // `state.nodeId` as the canonical DAG identity. Canonical folding means a
+    // call with no opts encodes to exactly `nodeId`, so existing keys are
+    // byte-identical and no migration is required.
+    //
+    // Address encoding sits OUTSIDE the driver try below, and reports
+    // `checkpoint-write-failed` rather than `cache-error`, because a malformed
+    // address is caller error, not a Redis fault — and because the file and
+    // in-memory backends already classify it that way. Folding it into the
+    // driver catch would make one failure wear three different error kinds
+    // depending on which backend a run happened to be configured with.
+    let nodeKey: string;
     try {
-      const { nodeId, payload } = serializeNode(state);
+      nodeKey = compositeNodeKey(nodeId, opts);
+    } catch (e) {
+      return err(
+        buildCheckpointWriteFailed(
+          runId,
+          nodeId,
+          `composite node address is invalid: ${safeErrorMessage(e)}`,
+        ),
+      );
+    }
+    try {
       if (!this.saveNodeSha) {
         this.saveNodeSha = await this.redis.script("LOAD", SAVE_NODE_SCRIPT) as string;
       }
@@ -259,7 +288,7 @@ export class RedisCheckpointer implements Checkpointer {
           2,
           nodesKey(runId),
           metaKey(runId),
-          nodeId,
+          nodeKey,
           payload,
           String(TTL_SECONDS),
         );
@@ -273,7 +302,7 @@ export class RedisCheckpointer implements Checkpointer {
             2,
             nodesKey(runId),
             metaKey(runId),
-            nodeId,
+            nodeKey,
             payload,
             String(TTL_SECONDS),
           );

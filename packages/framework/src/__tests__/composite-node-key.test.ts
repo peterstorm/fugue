@@ -540,7 +540,13 @@ describe("fast-check properties", () => {
   });
 });
 
-describe("InMemoryCheckpointer — composite opts (FR-023)", () => {
+// F6's FR-023 pinned this backend to IGNORE composite opts, so that feature
+// changed no existing layout. F1 needs indexed instances to address distinct
+// entries on every backend — a fan whose indices collide in memory is a trap
+// that only shows up when someone swaps the backend — so the address is now
+// honored here, and these tests pin the new contract. Canonical folding is what
+// keeps the change non-breaking: a no-opts save is still keyed by bare nodeId.
+describe("InMemoryCheckpointer — composite opts (ADR-0075, honored since F1)", () => {
   afterEach(() => {
     __resetFrameworkLogger();
   });
@@ -548,40 +554,83 @@ describe("InMemoryCheckpointer — composite opts (FR-023)", () => {
   const meta = { dagId: D("dag-1"), startedAt: new Date("2026-08-12T00:00:00Z"), nodeCount: 1 };
   const nodeState = { nodeId: N("n1"), output: { x: 42 }, completedAt: new Date("2026-08-12T00:00:01Z") };
 
-  it("storage and return behavior stay identical to a canonical save", async () => {
-    const withOpts = new InMemoryCheckpointer();
-    const canonical = new InMemoryCheckpointer();
-    for (const cp of [withOpts, canonical]) {
-      await cp.setMeta(R("run-1"), meta);
-    }
+  it("a composite save is stored under the composite address, not the bare nodeId", async () => {
+    const cp = new InMemoryCheckpointer();
+    await cp.setMeta(R("run-1"), meta);
 
-    const withOptsResult = await withOpts.saveNode(
-      R("run-1"),
-      nodeState,
-      { namespace: "sub", index: 3, attempt: 1 },
-    );
-    const canonicalResult = await canonical.saveNode(R("run-1"), nodeState);
-    expect(withOptsResult).toEqual(canonicalResult);
+    const result = await cp.saveNode(R("run-1"), nodeState, {
+      namespace: "sub",
+      index: 3,
+      attempt: 1,
+    });
+    expect(result).toEqual({ ok: true, value: undefined });
 
-    const a = await withOpts.load(R("run-1"));
-    const b = await canonical.load(R("run-1"));
-    expect(a).toEqual(b);
-    if (a.ok && a.value !== null) {
-      expect(Object.keys(a.value.nodes)).toEqual(["n1"]);
-      expect(a.value.nodes["dag@n1@3@1"]).toBeUndefined();
-    }
+    const loaded = await cp.load(R("run-1"));
+    if (!loaded.ok || loaded.value === null) throw new Error("expected loaded state");
+    expect(Object.keys(loaded.value.nodes)).toEqual(["sub@n1@3@1"]);
+    // The stored NodeState still carries the canonical DAG identity (ADR-0075):
+    // the KEY is the address, `nodeId` is who the node is.
+    expect(loaded.value.nodes["sub@n1@3@1"]?.nodeId).toBe(N("n1"));
   });
 
-  it("ignores every composite option shape, including malformed runtime values", async () => {
+  it("a no-opts save still keys by the bare nodeId — canonical folding, no migration", async () => {
+    const cp = new InMemoryCheckpointer();
+    await cp.setMeta(R("run-1"), meta);
+    await cp.saveNode(R("run-1"), nodeState);
+
+    const loaded = await cp.load(R("run-1"));
+    if (!loaded.ok || loaded.value === null) throw new Error("expected loaded state");
+    expect(Object.keys(loaded.value.nodes)).toEqual(["n1"]);
+  });
+
+  it("indices of the same node do not overwrite each other — the whole point for F1 fan-out", async () => {
+    const cp = new InMemoryCheckpointer();
+    await cp.setMeta(R("run-1"), meta);
+
+    await cp.saveNode(R("run-1"), { ...nodeState, output: { x: 0 } }, { index: 0 });
+    await cp.saveNode(R("run-1"), { ...nodeState, output: { x: 1 } }, { index: 1 });
+    await cp.saveNode(R("run-1"), { ...nodeState, output: { x: 2 } }, { index: 2 });
+
+    const loaded = await cp.load(R("run-1"));
+    if (!loaded.ok || loaded.value === null) throw new Error("expected loaded state");
+    expect(Object.keys(loaded.value.nodes).sort()).toEqual([
+      "dag@n1@0@0",
+      "dag@n1@1@0",
+      "dag@n1@2@0",
+    ]);
+    expect(loaded.value.nodes["dag@n1@1@0"]?.output).toEqual({ x: 1 });
+  });
+
+  it("a canonical save and a composite save of the same node coexist", async () => {
+    const cp = new InMemoryCheckpointer();
+    await cp.setMeta(R("run-1"), meta);
+    await cp.saveNode(R("run-1"), { ...nodeState, output: { x: "canonical" } });
+    await cp.saveNode(R("run-1"), { ...nodeState, output: { x: "indexed" } }, { index: 0 });
+
+    const loaded = await cp.load(R("run-1"));
+    if (!loaded.ok || loaded.value === null) throw new Error("expected loaded state");
+    expect(Object.keys(loaded.value.nodes).sort()).toEqual(["dag@n1@0@0", "n1"]);
+    expect(loaded.value.nodes["n1"]?.output).toEqual({ x: "canonical" });
+    expect(loaded.value.nodes["dag@n1@0@0"]?.output).toEqual({ x: "indexed" });
+  });
+
+  it("malformed composite options fail TYPED — a bad address is caller error, not a silent canonical write", async () => {
     const cp = new InMemoryCheckpointer();
     await cp.setMeta(R("run-1"), meta);
     const malformed = Object.freeze({ namespace: "../ignored", index: -1, attempt: Number.NaN });
     const result = await cp.saveNode(R("run-1"), nodeState, malformed);
 
-    expect(result).toEqual({ ok: true, value: undefined });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a typed write failure");
+    expect(result.error.kind).toBe("checkpoint-write-failed");
+
+    // Fail-closed: nothing was written under the bare nodeId either. Silently
+    // folding a malformed address onto the canonical key is the specific
+    // failure this arm exists to prevent — a fan index would overwrite the
+    // node's own checkpoint.
     const loaded = await cp.load(R("run-1"));
     if (!loaded.ok || loaded.value === null) throw new Error("expected loaded state");
-    expect(Object.keys(loaded.value.nodes)).toEqual(["n1"]);
+    expect(Object.keys(loaded.value.nodes)).toEqual([]);
   });
 
   it("emits no warning or other logger-observable behavior for composite options", async () => {

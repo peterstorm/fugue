@@ -58,6 +58,7 @@ The shipped file implementation in [`file/checkpointer.ts`](../../packages/frame
 
 **Negative:**
 - Composite options are part of the shared port but have backend-specific persistence semantics in this release: the file backend honors them, while in-memory and Redis intentionally collapse saves to `nodeId`.
+  **Closed 2026-09-06 by [ADR-0085](0085-composite-checkpoint-addressing-is-port-contract-on-every-backend.md):** every backend now honors the address, and the contract cases moved into the shared parity suite. Canonical folding is unchanged, so stored keys did not move.
 - A namespace alone cannot create a distinct entry; callers must provide `index` or `attempt` to select composite form.
 - The positional key grammar and reserved `@` separator become compatibility constraints. Adding components or changing normalization requires a versioned design change.
 - Loaded node maps may contain both bare and composite string keys, so consumers that enumerate nodes must inspect stored keys rather than assume every key equals `NodeState.nodeId`.
