@@ -540,49 +540,27 @@ describe("fast-check properties", () => {
   });
 });
 
-describe("InMemoryCheckpointer — composite opts (FR-023)", () => {
+// F6's FR-023 pinned this backend to IGNORE composite opts, so that feature
+// changed no existing layout. F1 made every backend honor the address — a fan
+// whose indices collide in memory is a trap that only shows up when someone
+// swaps the backend.
+//
+// The ADDRESSING contract itself (composite storage, canonical folding,
+// distinct indices, canonical/composite coexistence, malformed fail-closed)
+// lives in `_checkpointer-suite.ts`, which runs against this backend through
+// `checkpointerSuite("InMemoryCheckpointer", ...)`. It is deliberately NOT
+// repeated here: two hand-synced copies of one contract is the failure mode
+// ADR-0085 moved those cases into the suite to prevent.
+//
+// What remains is the one property the suite does not assert — that a valid
+// composite save is logger-silent.
+describe("InMemoryCheckpointer — composite opts (ADR-0075, honored since F1)", () => {
   afterEach(() => {
     __resetFrameworkLogger();
   });
 
   const meta = { dagId: D("dag-1"), startedAt: new Date("2026-08-12T00:00:00Z"), nodeCount: 1 };
   const nodeState = { nodeId: N("n1"), output: { x: 42 }, completedAt: new Date("2026-08-12T00:00:01Z") };
-
-  it("storage and return behavior stay identical to a canonical save", async () => {
-    const withOpts = new InMemoryCheckpointer();
-    const canonical = new InMemoryCheckpointer();
-    for (const cp of [withOpts, canonical]) {
-      await cp.setMeta(R("run-1"), meta);
-    }
-
-    const withOptsResult = await withOpts.saveNode(
-      R("run-1"),
-      nodeState,
-      { namespace: "sub", index: 3, attempt: 1 },
-    );
-    const canonicalResult = await canonical.saveNode(R("run-1"), nodeState);
-    expect(withOptsResult).toEqual(canonicalResult);
-
-    const a = await withOpts.load(R("run-1"));
-    const b = await canonical.load(R("run-1"));
-    expect(a).toEqual(b);
-    if (a.ok && a.value !== null) {
-      expect(Object.keys(a.value.nodes)).toEqual(["n1"]);
-      expect(a.value.nodes["dag@n1@3@1"]).toBeUndefined();
-    }
-  });
-
-  it("ignores every composite option shape, including malformed runtime values", async () => {
-    const cp = new InMemoryCheckpointer();
-    await cp.setMeta(R("run-1"), meta);
-    const malformed = Object.freeze({ namespace: "../ignored", index: -1, attempt: Number.NaN });
-    const result = await cp.saveNode(R("run-1"), nodeState, malformed);
-
-    expect(result).toEqual({ ok: true, value: undefined });
-    const loaded = await cp.load(R("run-1"));
-    if (!loaded.ok || loaded.value === null) throw new Error("expected loaded state");
-    expect(Object.keys(loaded.value.nodes)).toEqual(["n1"]);
-  });
 
   it("emits no warning or other logger-observable behavior for composite options", async () => {
     const calls: string[] = [];

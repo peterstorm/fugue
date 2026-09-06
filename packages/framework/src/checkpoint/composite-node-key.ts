@@ -1,9 +1,9 @@
 // Composite checkpoint node-key codec (ADR-0075).
 //
 // Pure, backend-agnostic encoding of the composite node address space for the
-// `Checkpointer` port — no I/O, no imports from infra. The file backend keys
-// durable checkpoint entries by these strings; in-memory and Redis backends
-// ignore the composite options entirely (FR-023), so this module is the single
+// `Checkpointer` port — no I/O, no imports from infra. EVERY backend keys
+// durable checkpoint entries by these strings (ADR-0085; F6 shipped it
+// file-only under FR-023, which no longer holds), so this module is the single
 // definition of what a composite nodeKey IS.
 //
 // Invariants (collision-free by construction):
@@ -30,12 +30,14 @@
 //     validated inputs, per ADR-0080 ("low-level pure implementation
 //     functions may use local exceptions as control flow, but every exported
 //     throwing boundary catches and converts them before they can escape").
-//     The single production call site (the file checkpointer's `saveNode`)
-//     re-validates the boundary first, so the only throw reachable there is
-//     this module's own `assertNoNamespaceAlone` rule (which the boundary
-//     parse intentionally does not pre-reject — the ambiguity rule belongs to
-//     this module as the single definition of the composite key), and it is
-//     converted to typed `checkpoint-write-failed` at that boundary.
+//     Every production call site converts it: the file checkpointer's
+//     `saveNode` re-validates the boundary first (so the only throw reachable
+//     there is this module's own `assertNoNamespaceAlone` rule, which the
+//     boundary parse intentionally does not pre-reject — the ambiguity rule
+//     belongs to this module as the single definition of the composite key),
+//     while the in-memory and Redis backends route through the port's
+//     `encodeStoredNodeKey`. All three converge on typed
+//     `checkpoint-write-failed`.
 //   - The port-level `Result<_, FrameworkError>` channel is the Checkpointer's
 //     own — this module sits below it and never crosses it.
 

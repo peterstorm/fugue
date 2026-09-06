@@ -1,11 +1,12 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import Redis from "ioredis";
 import { InMemoryCheckpointer, TTL_SECONDS } from "../checkpoint/checkpointer.js";
-import type { CheckpointerLoadOpts, InMemoryStoredMeta, RunMeta } from "../checkpoint/checkpointer.js";
+import type { Checkpointer, CheckpointerLoadOpts, InMemoryStoredMeta, RunMeta } from "../checkpoint/checkpointer.js";
 import type { DagId, NodeId, RunId } from "../types/ids.js";
 import { FRAMEWORK_VERSION } from "../checkpoint/fingerprint.js";
 import { RedisCheckpointer } from "../checkpoint/redis-checkpointer.js";
-import { checkpointerSuite } from "./_checkpointer-suite.js";
+import { checkpointerSuite, type CheckpointerSuiteRaw } from "./_checkpointer-suite.js";
+import { redisDriverFake } from "./_redis-driver-fake.js";
 import { D, N, R } from "./_id-helpers.js";
 import { formatFrameworkError, retriabilityOf } from "../types/errors.js";
 import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
@@ -20,6 +21,27 @@ import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
 // bypass shape, and nothing on the adapter exposes its internals.
 const inMemoryStore = new Map<string, InMemoryStoredMeta>();
 
+/**
+ * The one bypass that is not a bypass: every OTHER hook in the raw objects
+ * below reaches durable state a backend-specific way (the in-memory test store
+ * for one leg, a raw `redis.set`/`hset` for the other), which is why the suite
+ * asks for them at all. A stale version is different — `setMeta` stamps
+ * whatever `frameworkVersion` it is handed, so both legs get there through the
+ * public port and the two copies were identical by nothing but coincidence.
+ */
+const setStaleVersionViaSetMeta: CheckpointerSuiteRaw["setStaleVersion"] = async (
+  cp,
+  runId,
+  { startedAt, nodeCount },
+) => {
+  await cp.setMeta(R(runId), {
+    dagId: D("d"),
+    startedAt,
+    nodeCount,
+    frameworkVersion: "1",
+  });
+};
+
 checkpointerSuite(
   "InMemoryCheckpointer",
   () => {
@@ -27,14 +49,7 @@ checkpointerSuite(
     return new InMemoryCheckpointer({ testStore: inMemoryStore });
   },
   {
-    setStaleVersion: async (cp, runId, { startedAt, nodeCount }) => {
-      await cp.setMeta(R(runId), {
-        dagId: D("d"),
-        startedAt,
-        nodeCount,
-        frameworkVersion: "1",
-      });
-    },
+    setStaleVersion: setStaleVersionViaSetMeta,
     setMissingVersion: async (_cp, runId, { startedAt, nodeCount }) => {
       // Stored record with NO frameworkVersion (the ADR-0017 missing-field
       // case) — written directly, bypassing setMeta's version stamping.
@@ -55,12 +70,96 @@ checkpointerSuite(
   },
 );
 
+// Redis-specific hostile-value totality (FR-040/ADR-0080). The Redis backend
+// serializes with JSON, so its hostile-input class is NOT the in-memory
+// backend's (structured-clone) one: `JSON.stringify` tolerates a function by
+// dropping it, but THROWS on a cyclic object or a BigInt, and
+// `completedAt.toISOString()` throws on an invalid Date. `NodeState.output` is
+// typed `unknown`, so every one of those is type-legal input.
+//
+// These are pinned here rather than in the shared suite because the classes
+// genuinely differ per backend (the suite would have to assert a different
+// outcome per leg, which is what a shared contract must not do).
+//
+// The regression they exist for: F1 PR-A's distill pass hoisted
+// `serializeNode(state)` above `saveNode`'s try while extracting
+// `encodeStoredNodeKey`, so these throws escaped as raw rejections instead of
+// the typed `Result` the port declares.
+describe("RedisCheckpointer — hostile-value totality (write-side serialization)", () => {
+  // No driver call should ever be reached, so the fake overrides NOTHING: every
+  // method is the named-throw default, and the refusal has to happen before any
+  // of them (fail closed, no write).
+  const unusedRedis = () => redisDriverFake();
+
+  test("saveNode resolves a typed err for a CYCLIC output, never a raw rejection", async () => {
+    const cp: Checkpointer = new RedisCheckpointer(unusedRedis());
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+
+    const result = await cp.saveNode(R("hostile-redis-1"), {
+      nodeId: N("n1"),
+      output: cyclic,
+      completedAt: new Date("2026-08-12T00:00:01Z"),
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected typed refusal");
+    // The tag is asserted, not just the kind: `saveNode` is DELIBERATELY the
+    // same tag the driver-failure catch below uses (see that block's banner),
+    // and this pins the sharing as a decision rather than a coincidence.
+    expect(result.error).toMatchObject({ kind: "cache-error", operation: "saveNode" });
+  });
+
+  test("saveNode resolves a typed err for an INVALID completedAt, never a raw rejection", async () => {
+    const cp: Checkpointer = new RedisCheckpointer(unusedRedis());
+
+    const result = await cp.saveNode(R("hostile-redis-2"), {
+      nodeId: N("n1"),
+      output: { ok: true },
+      completedAt: new Date(Number.NaN),
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected typed refusal");
+    expect(result.error).toMatchObject({ kind: "cache-error", operation: "saveNode" });
+  });
+
+  test("a serialization refusal issues NO driver call", async () => {
+    const calls: string[] = [];
+    const recording = redisDriverFake({
+      script: async () => {
+        calls.push("script");
+        return "sha-1";
+      },
+      evalsha: async () => {
+        calls.push("evalsha");
+        return "OK";
+      },
+      eval: async () => {
+        calls.push("eval");
+        return "OK";
+      },
+    });
+    const cp: Checkpointer = new RedisCheckpointer(recording);
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+
+    await cp.saveNode(R("hostile-redis-3"), {
+      nodeId: N("n1"),
+      output: cyclic,
+      completedAt: new Date("2026-08-12T00:00:01Z"),
+    });
+
+    expect(calls).toEqual([]);
+  });
+});
+
 // In-memory-specific hostile-value totality (FR-040/ADR-0080): the port
 // methods declare `Promise<Result<_, FrameworkError>>`, so non-cloneable
 // values must resolve with a typed `err` — never a raw promise rejection.
-// These tests are NOT in the shared suite because the Redis backend silently
-// drops non-JSON values at serialize time (pre-existing divergence, out of
-// this review's scope); the file backend pins the same class in its own tests.
+// These tests are NOT in the shared suite because each backend's hostile-input
+// class is different (structured-clone here, JSON above); the file backend
+// pins the same discipline in its own tests.
 describe("InMemoryCheckpointer — hostile-value totality", () => {
   test("saveNode refuses non-cloneable state with a typed checkpoint-write-failed, never a raw rejection", async () => {
     const cp = new InMemoryCheckpointer();
@@ -505,10 +604,10 @@ describe("RedisCheckpointer — required corruption observability", () => {
       createdAt: new Date().toISOString(),
       frameworkVersion: FRAMEWORK_VERSION,
     });
-    const redis = {
+    const redis = redisDriverFake({
       get: async () => meta,
       hgetall: async () => ({ broken: "{ not json" }),
-    } as unknown as Redis;
+    });
     setFrameworkLogger({
       debug: () => {},
       info: () => {},
@@ -520,6 +619,148 @@ describe("RedisCheckpointer — required corruption observability", () => {
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected required-warning failure");
     expect(result.error).toMatchObject({ kind: "cache-error", operation: "checkpoint:load" });
+  });
+});
+
+// Driver-failure totality (ADR-0080: "never a raw rejection"). Every hostile
+// seam this adapter owns ITSELF — the injected clock, the load-opts getter,
+// JSON serialization, the corrupt-entry logger — is pinned above. The seam it
+// does NOT own is the one likeliest to fire in production: the driver
+// rejecting because the connection dropped mid-call. These pin the five driver
+// calls that can reject, and they pin the `operation` tag, not just the kind.
+//
+// The tag is worth pinning because it is what localizes a production failure —
+// but only three of the tags belong to one call each. `saveNode` is shared, ON
+// PURPOSE, between the pre-driver serialization guard and the driver catch
+// (see `saveNode`'s own comment: keeping one tag is what makes composite
+// addressing observably identical to what shipped before it). So for a
+// `cache-error(saveNode)`, `message` is what says whether the caller handed us
+// an unserializable value or Redis went away — never `operation`. The
+// serialization tests above assert the same tag, so that sharing is a recorded
+// decision and splitting it has to change a test that explains why.
+//
+// Untested, these were free to rot: a refactor that moved a driver call out
+// from under its try would leak a raw rejection through a port declaring
+// `Promise<Result<_, FrameworkError>>`, and a typo'd tag would mislabel the
+// failure — both with the whole suite green.
+//
+// What each fake does NOT override is part of its assertion: `redisDriverFake`
+// defaults every other method to a throw naming itself, so a test also proves
+// the adapter never reached a call that path should not make.
+describe("RedisCheckpointer — driver-failure totality (the driver rejects)", () => {
+  // The one shared fixture: four tests need the SAME driver fault, so the fault
+  // is never what distinguishes them — only the call it interrupts is.
+  const DROPPED = () => new Error("Connection is closed.");
+
+  test("load: a rejecting GET on the meta key is cache-error(load:get-meta)", async () => {
+    const redis = redisDriverFake({
+      get: async () => {
+        throw DROPPED();
+      },
+    });
+
+    const result = await new RedisCheckpointer(redis).load(R("driver-get-meta"));
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a typed refusal");
+    expect(result.error).toMatchObject({ kind: "cache-error", operation: "load:get-meta" });
+  });
+
+  test("load: a rejecting HGETALL on the nodes key is cache-error(load:hgetall-nodes)", async () => {
+    // The meta read and every gate must SUCCEED first, or this would pass for
+    // the wrong reason — the two load-side tags would be indistinguishable.
+    const redis = redisDriverFake({
+      get: async () =>
+        JSON.stringify({
+          dagId: "d",
+          startedAt: "2026-01-01T00:00:00.000Z",
+          nodeCount: 1,
+          createdAt: new Date().toISOString(),
+          frameworkVersion: FRAMEWORK_VERSION,
+        }),
+      hgetall: async () => {
+        throw DROPPED();
+      },
+    });
+
+    const result = await new RedisCheckpointer(redis).load(R("driver-hgetall"));
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a typed refusal");
+    expect(result.error).toMatchObject({ kind: "cache-error", operation: "load:hgetall-nodes" });
+  });
+
+  test("saveNode: a NON-NOSCRIPT evalsha rejection is cache-error(saveNode) and does NOT retry via EVAL", async () => {
+    // The NOSCRIPT branch matches on error TEXT. A driver fault that is not a
+    // flushed script must fall through to the typed boundary — replaying it as
+    // an inline EVAL would turn one dropped connection into two.
+    const evalCalls: string[] = [];
+    const redis = redisDriverFake({
+      script: async () => "sha-1",
+      evalsha: async () => {
+        throw DROPPED();
+      },
+      eval: async () => {
+        evalCalls.push("eval");
+        return "OK";
+      },
+    });
+
+    const result = await new RedisCheckpointer(redis).saveNode(R("driver-evalsha"), {
+      nodeId: N("n1"),
+      output: { ok: true },
+      completedAt: new Date("2026-08-12T00:00:01Z"),
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a typed refusal");
+    expect(result.error).toMatchObject({ kind: "cache-error", operation: "saveNode" });
+    expect(evalCalls).toEqual([]);
+  });
+
+  test("saveNode: a rejecting SCRIPT LOAD is cache-error(saveNode) and never reaches EVALSHA", async () => {
+    // Priming the Lua SHA is a driver call like any other, and it is the FIRST
+    // one `saveNode` makes on a cold adapter — so it is the one a production
+    // reconnect is likeliest to catch. It shares the outer try (and the tag)
+    // with the evalsha path; what this pins is that it is inside that try at
+    // all. Hoisting the priming step to its own init helper is the refactor
+    // that would leak it, and nothing else in the suite would notice.
+    //
+    // `evalsha`/`eval` stay at their named-throw defaults: reaching either
+    // after the SHA never arrived would fail loudly rather than pass quietly.
+    const redis = redisDriverFake({
+      script: async () => {
+        throw DROPPED();
+      },
+    });
+
+    const result = await new RedisCheckpointer(redis).saveNode(R("driver-script-load"), {
+      nodeId: N("n1"),
+      output: { ok: true },
+      completedAt: new Date("2026-08-12T00:00:01Z"),
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a typed refusal");
+    expect(result.error).toMatchObject({ kind: "cache-error", operation: "saveNode" });
+  });
+
+  test("setMeta: a rejecting SET is cache-error(setMeta)", async () => {
+    const redis = redisDriverFake({
+      set: async () => {
+        throw DROPPED();
+      },
+    });
+
+    const result = await new RedisCheckpointer(redis).setMeta(R("driver-set-meta"), {
+      dagId: D("d"),
+      startedAt: new Date("2026-08-12T00:00:00Z"),
+      nodeCount: 1,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a typed refusal");
+    expect(result.error).toMatchObject({ kind: "cache-error", operation: "setMeta" });
   });
 });
 
@@ -584,14 +825,7 @@ describeRedis("RedisCheckpointer", () => {
     "shared contract",
     () => new RedisCheckpointer(redisOrThrow()),
     {
-      setStaleVersion: async (cp, runId, { startedAt, nodeCount }) => {
-        await cp.setMeta(R(runId), {
-          dagId: D("d"),
-          startedAt,
-          nodeCount,
-          frameworkVersion: "1",
-        });
-      },
+      setStaleVersion: setStaleVersionViaSetMeta,
       setMissingVersion: async (_cp, runId, { startedAt, nodeCount }) => {
         await redisOrThrow().set(
           `chkpt:${runId}:meta`,

@@ -23,9 +23,6 @@ import { join } from "node:path";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { checkImports, findUncheckedBrandImports, type Violation } from "../scripts/check-imports.js";
-import { InMemoryCheckpointer } from "../checkpoint/checkpointer.js";
-import type { RunId } from "../types/ids.js";
-import { D, N } from "./_id-helpers.js";
 
 const SRC_DIR = join(__dirname, "../");
 
@@ -105,37 +102,6 @@ describe("SC-006 gate integrity pins", () => {
     const barrel = await import("@fuguejs/framework/file");
     expect(barrel).toBeDefined();
     expect(typeof barrel).toBe("object");
-  });
-
-  it("InMemoryCheckpointer.saveNode with composite opts pins the bare nodeId key (FR-023)", async () => {
-    // FR-023 byte-identical contract: the in-memory backend deliberately
-    // ignores SaveNodeOpts — a composite save must stay loadable under the
-    // canonical bare nodeId key and must NOT introduce the composite
-    // `dag@nodeId@index@attempt` key (that is the file backend's job).
-    const cp = new InMemoryCheckpointer();
-    const rid = "opts-pin-run" as RunId;
-    const metaRes = await cp.setMeta(rid, {
-      dagId: D("opts-pin-dag"),
-      startedAt: new Date(0),
-      nodeCount: 1,
-    });
-    expect(metaRes.ok).toBe(true);
-
-    const state = {
-      nodeId: N("n1"),
-      output: { done: true },
-      completedAt: new Date(0),
-    };
-    const saveRes = await cp.saveNode(rid, state, { index: 1, attempt: 2 });
-    expect(saveRes.ok).toBe(true);
-
-    const loadRes = await cp.load(rid);
-    expect(loadRes.ok).toBe(true);
-    const runState = loadRes.ok ? loadRes.value : null;
-    expect(runState).not.toBeNull();
-    if (!runState) return;
-    expect(runState.nodes["n1"]).toEqual(state);
-    expect(runState.nodes["dag@n1@1@2"]).toBeUndefined();
   });
 });
 
