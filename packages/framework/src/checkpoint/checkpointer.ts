@@ -404,10 +404,16 @@ export interface RunState {
    * `${namespace}@${nodeId}@${index}@${attempt}` for composite saves (ADR-0075;
    * encode/decode via `compositeNodeKey`/`parseCompositeNodeKey`). `NodeState.nodeId`
    * inside each entry still names the real node, so mapped/fan-out instances
-   * of the same node appear as separate entries under distinct composite keys
-   * in backends that implement composite addressing (the file backend). The
-   * in-memory and Redis backends collapse composite saves onto the bare
-   * `nodeId` key instead (FR-023: they ignore `SaveNodeOpts` entirely).
+   * of the same node appear as separate entries under distinct composite keys.
+   *
+   * EVERY backend addresses this way (ADR-0085). F6 shipped composite storage
+   * file-only under FR-023; that restriction no longer holds.
+   *
+   * Consequence for readers, and the reason this is spelled out: a loaded map
+   * may mix bare and composite keys, so a consumer enumerating `nodes` must
+   * decode each key through `parseCompositeNodeKey` rather than assume every
+   * key equals its entry's `NodeState.nodeId`. Assuming the latter silently
+   * skips every fan-out instance.
    */
   readonly nodes: Readonly<Record<string, NodeState>>;
   /**
@@ -446,10 +452,17 @@ export type SaveNodeOpts = CompositeNodeKeyOpts;
  * `compositeNodeKey` throws as a write-side constructor invariant. Every
  * backend must turn that into `checkpoint-write-failed`: a malformed address
  * is CALLER error, not a driver fault, and a caller cannot branch on an error
- * kind that varies with which backend a deployment happened to configure.
- * Centralizing it makes that parity structural rather than three hand-kept
- * copies — a Redis implementation that folded the throw into its driver
- * `try` would silently report `cache-error` instead (ADR-0085).
+ * kind that varies with which backend a deployment happened to configure. A
+ * Redis implementation that folded the throw into its driver `try` would
+ * silently report `cache-error` instead (ADR-0085).
+ *
+ * Adopted by the in-memory and Redis backends. `file/checkpointer.ts` reaches
+ * the same error KIND through its own `writeFailed` call rather than this
+ * helper, because its diagnostic wording differs and its catch also spans
+ * `serializeNode` — so the parity is structural for two of three backends and
+ * argued for the third. Routing the file backend through here is a worthwhile
+ * follow-up; it would change that adapter's observable message text, which is
+ * why it did not ride along with ADR-0085.
  *
  * Returning `Err` also keeps the fail-closed property at each call site: a
  * rejected address must issue NO write, never fall back to the canonical key,
@@ -531,10 +544,13 @@ export interface Checkpointer {
    * The optional 3rd argument enables composite addressing (ADR-0075): with
    * `index`/`attempt` both absent the entry is stored under the canonical
    * `nodeId` key (existing behavior, byte-identical); with either present the
-   * entry is stored under the composite key (see `SaveNodeOpts`). The
-   * in-memory and Redis backends ignore `opts` exactly as today (FR-023);
-   * composite addressing is a versioned opt-in implemented by the file
-   * backend. `load` returns entries keyed by the stored nodeKey.
+   * entry is stored under the composite key (see `SaveNodeOpts`).
+   *
+   * EVERY backend honors `opts` (ADR-0085) — F6's file-only restriction
+   * (FR-023) no longer holds. Implementers must route the address through
+   * `encodeStoredNodeKey` so a malformed one fails `checkpoint-write-failed`
+   * without issuing a write, rather than falling back to the canonical key.
+   * `load` returns entries keyed by the stored nodeKey.
    */
   saveNode(runId: RunId, state: NodeState, opts?: SaveNodeOpts): Promise<Result<void, FrameworkError>>;
   setMeta(runId: RunId, meta: RunMeta): Promise<Result<void, FrameworkError>>;

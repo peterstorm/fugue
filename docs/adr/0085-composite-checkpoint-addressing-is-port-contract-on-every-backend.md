@@ -22,9 +22,10 @@ split as a known negative:
 > to `nodeId`.
 
 That was the right call for F6, which needed to change no existing layout. It is the wrong state to
-begin F1 (runtime-width fan-out) from, and the reason is not stylistic. The port at
-`checkpoint/checkpointer.ts:505` declares `saveNode(runId, state, opts?: SaveNodeOpts)`, so a
-composite-aware caller compiles against every backend — but `redis-checkpointer.ts` did not even
+begin F1 (runtime-width fan-out) from, and the reason is not stylistic. The port
+(`Checkpointer.saveNode` in `checkpoint/checkpointer.ts`) declares
+`saveNode(runId, state, opts?: SaveNodeOpts)`, so a composite-aware caller compiles against every
+backend — but `redis-checkpointer.ts` did not even
 *declare* the third parameter, and `InMemoryCheckpointer` accepted and discarded it. A mapped node
 checkpointing per index would therefore have had every index of the fan overwrite the same entry on
 two of three backends, and a partial fan would silently restart from whichever index wrote last on
@@ -82,9 +83,10 @@ FR-023's *outcome* for stored data is preserved; only its restriction on new add
   normalized addresses by ADR-0075's injectivity argument, and `parseCompositeNodeKey` classifies
   either — but readers walking `RunState.nodes` must use it rather than assume bare node ids. This
   was already true for the file backend.
-- `InMemoryCheckpointer` still does not run the shared parity suite (only the file and Redis
-  backends call `checkpointerSuite`). Its composite behavior is pinned directly in
-  `composite-node-key.test.ts`. Bringing it under the suite is worthwhile and is not done here.
+- The Redis nodes hash and the in-memory node map may now each hold a serialize-time throw class
+  the other does not: Redis serializes with JSON (a cyclic value or BigInt throws), in-memory uses
+  structured clone (a function throws). Both settle typed, but the classes differ, so those cases
+  are pinned per backend rather than in the shared suite.
 
 ## Related
 

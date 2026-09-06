@@ -215,14 +215,23 @@ export class RedisCheckpointer implements Checkpointer {
     // never ran" from "node ran but checkpoint is unreadable".
     const nodes: Record<string, NodeState> = {};
     const corruptNodeAddresses: CorruptCheckpointAddress[] = [];
-    for (const [nodeId, raw] of Object.entries(rawNodes)) {
+    // `storedKey`, not `nodeId`: since ADR-0085 this backend writes composite
+    // addresses too, so a hash field is EITHER a canonical `nodeId` OR
+    // `namespace@nodeId@index@attempt`. Decode with `parseCompositeNodeKey`
+    // before treating one as a node identity — `NodeState.nodeId` inside the
+    // entry is the identity; the key is the address.
+    for (const [storedKey, raw] of Object.entries(rawNodes)) {
       try {
         // `__proto__` matches ID_PATTERN (`_` is in the charset), so it is a
-        // LEGAL nodeId — plain bracket assignment would hit Object.prototype's
-        // `__proto__` SETTER and re-parent the returned map instead of defining
-        // an own entry (the file backend's defineProperty choice, parity-
-        // pinned across all legs in the shared `checkpointerSuite`).
-        Object.defineProperty(nodes, nodeId, {
+        // LEGAL nodeId and therefore a legal canonical key — plain bracket
+        // assignment would hit Object.prototype's `__proto__` SETTER and
+        // re-parent the returned map instead of defining an own entry (the
+        // file backend's defineProperty choice, parity-pinned across all legs
+        // in the shared `checkpointerSuite`). A composite key cannot collide
+        // with `__proto__` — it always contains `@`, which ID_PATTERN excludes
+        // — so only the canonical arm needs this, but defineProperty is
+        // unconditional because branching on key shape here would buy nothing.
+        Object.defineProperty(nodes, storedKey, {
           value: deserializeNode(raw),
           enumerable: true,
           writable: true,
@@ -230,12 +239,12 @@ export class RedisCheckpointer implements Checkpointer {
         });
       } catch (error) {
         const report = reportCorruptCheckpointEntry({
-          warning: `[RedisCheckpointer] Dropping corrupt checkpoint entry runId=${runId} nodeId=${nodeId}: ${safeErrorMessage(error)}`,
+          warning: `[RedisCheckpointer] Dropping corrupt checkpoint entry runId=${runId} nodeKey=${storedKey}: ${safeErrorMessage(error)}`,
           warn: (warning) => fwLogger().warn(warning),
           loggerFailure: (message) => frameworkError.cacheError("checkpoint:load", message),
         });
         if (!report.ok) return report;
-        corruptNodeAddresses.push({ kind: "node-key", nodeKey: nodeId });
+        corruptNodeAddresses.push({ kind: "node-key", nodeKey: storedKey });
       }
     }
 
@@ -254,7 +263,30 @@ export class RedisCheckpointer implements Checkpointer {
     state: NodeState,
     opts?: SaveNodeOpts,
   ): Promise<Result<void, FrameworkError>> {
-    const { nodeId, payload } = serializeNode(state);
+    // Serialization is GUARDED, not incidental. `NodeState.output` is typed
+    // `unknown`, so a cyclic object or a BigInt is type-legal and makes
+    // `JSON.stringify` throw, and an invalid `completedAt` makes
+    // `toISOString()` throw. The port declares
+    // `Promise<Result<void, FrameworkError>>`, so those must settle typed —
+    // never a raw rejection (ADR-0080).
+    //
+    // This is its own try rather than a statement inside the driver try below
+    // for the same reason the address encoding is: a value that cannot be
+    // serialized must issue NO driver call. It reports `cache-error` with
+    // `operation: "saveNode"`, which is exactly what this adapter returned for
+    // the same inputs before composite addressing threaded `opts` through
+    // here, so nothing observable changes for a class that already worked.
+    let nodeId: NodeId;
+    let payload: string;
+    try {
+      ({ nodeId, payload } = serializeNode(state));
+    } catch (e) {
+      return err({
+        kind: "cache-error" as const,
+        operation: "saveNode",
+        message: safeErrorMessage(e),
+      });
+    }
     // The HASH FIELD is the composite address (ADR-0075); the payload keeps
     // `state.nodeId` as the canonical DAG identity. Canonical folding means a
     // call with no opts encodes to exactly `nodeId`, so existing keys are

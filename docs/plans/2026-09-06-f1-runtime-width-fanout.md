@@ -54,7 +54,7 @@ outputs for the same node without one save overwriting another."*
 - `checkpoint/composite-node-key.ts` encodes `(namespace, nodeId, index, attempt)` as
   `` `${namespace}@${nodeId}@${index}@${attempt}` ``, with `@` outside the identifier grammar so
   canonical (0 separators) and composite (exactly 3) forms are provably disjoint.
-- The port already accepts it: `checkpointer.ts:505` is
+- The port already accepts it: `Checkpointer.saveNode` (`checkpoint/checkpointer.ts`) is
   `saveNode(runId, state, opts?: SaveNodeOpts)` where `SaveNodeOpts = CompositeNodeKeyOpts`.
 
 **But the address does not exist on the path production actually writes.** This is the finding that
@@ -149,7 +149,7 @@ the run starts, so admission can reason about it rather than discovering it.
 The framework work:
 
 - `redis-checkpointer.ts:250` gains the `opts?: SaveNodeOpts` parameter its own port already
-  declares at `checkpointer.ts:505`, and encodes via `compositeNodeKey` — the same codec the file
+  declares on `Checkpointer.saveNode`, and encodes via `compositeNodeKey` — the same codec the file
   backend uses. Canonical calls (no opts) must produce byte-identical keys to today, so existing
   runs are unaffected and no migration is required.
 
@@ -269,7 +269,7 @@ whose semantics were undefined.
 
 | PR | Scope | Why this seam |
 |---|---|---|
-| **PR-A** | Bring `redis-checkpointer.ts` and `InMemoryCheckpointer` up to the composite address the port already declares at `checkpointer.ts:505`, and move composite expectations into the shared `_checkpointer-suite.ts`. No `map` node yet. | Independently valuable and independently testable: it closes the F6-era gap where ADR-0075's address exists in the port but is honored by only one of three backends. Landing it first means the F1 runtime work has a durable address to write to instead of inventing one. |
+| **PR-A** | Bring `redis-checkpointer.ts` and `InMemoryCheckpointer` up to the composite address `Checkpointer.saveNode` already declares, and move composite expectations into the shared `_checkpointer-suite.ts`. No `map` node yet. | Independently valuable and independently testable: it closes the F6-era gap where ADR-0075's address exists in the port but is honored by only one of three backends. Landing it first means the F1 runtime work has a durable address to write to instead of inventing one. |
 | **PR-B** | `MapWidth` parsing, the `map` node kind, sub-DAG execution, the typed reducer, `defineDag` validation (incl. FR-F1-011), **and the index dimension on the host's `CheckpointWriter` / `buildCheckpointKey`**. | The functional core. The host writer moves here deliberately — see the note below. |
 | **PR-C** | `AuthoredDag` closed `map` shape + `widthFrom`; `DAG_SHAPES` member; plate rendering in `describedToMermaid`. | The authoring and visualization surface; no runtime risk. |
 | **PR-D** | Budget projection over `maxWidth` at admission, if §9 keeps it in scope. | Isolated to the F3 admission path. |
@@ -282,7 +282,7 @@ signature in PR-A would add an index parameter with no caller until PR-B — "po
 future swappability with no second adapter or test fake", which `architecture.md` names as an
 anti-pattern. It lands with the map node that gives it meaning.
 
-PR-A is therefore self-contained: the port at `checkpointer.ts:505` already declares `opts?`, and
+PR-A is therefore self-contained: `Checkpointer.saveNode` already declares `opts?`, and
 two of three backends silently ignore it. Closing that is meaningful on its own terms.
 
 ---

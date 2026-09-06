@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import Redis from "ioredis";
 import { InMemoryCheckpointer, TTL_SECONDS } from "../checkpoint/checkpointer.js";
-import type { CheckpointerLoadOpts, InMemoryStoredMeta, RunMeta } from "../checkpoint/checkpointer.js";
+import type { Checkpointer, CheckpointerLoadOpts, InMemoryStoredMeta, RunMeta } from "../checkpoint/checkpointer.js";
 import type { DagId, NodeId, RunId } from "../types/ids.js";
 import { FRAMEWORK_VERSION } from "../checkpoint/fingerprint.js";
 import { RedisCheckpointer } from "../checkpoint/redis-checkpointer.js";
@@ -55,12 +55,97 @@ checkpointerSuite(
   },
 );
 
+// Redis-specific hostile-value totality (FR-040/ADR-0080). The Redis backend
+// serializes with JSON, so its hostile-input class is NOT the in-memory
+// backend's (structured-clone) one: `JSON.stringify` tolerates a function by
+// dropping it, but THROWS on a cyclic object or a BigInt, and
+// `completedAt.toISOString()` throws on an invalid Date. `NodeState.output` is
+// typed `unknown`, so every one of those is type-legal input.
+//
+// These are pinned here rather than in the shared suite because the classes
+// genuinely differ per backend (the suite would have to assert a different
+// outcome per leg, which is what a shared contract must not do).
+//
+// The regression they exist for: F1 PR-A's distill pass hoisted
+// `serializeNode(state)` above `saveNode`'s try while extracting
+// `encodeStoredNodeKey`, so these throws escaped as raw rejections instead of
+// the typed `Result` the port declares.
+describe("RedisCheckpointer — hostile-value totality (write-side serialization)", () => {
+  // No driver call should ever be reached; a bare stub is enough, and its
+  // emptiness is itself part of the assertion (fail closed, no write).
+  const unusedRedis = () =>
+    ({
+      script: async () => "sha-1",
+      evalsha: async () => "OK",
+      eval: async () => "OK",
+    }) as never;
+
+  test("saveNode resolves a typed err for a CYCLIC output, never a raw rejection", async () => {
+    const cp: Checkpointer = new RedisCheckpointer(unusedRedis());
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+
+    const result = await cp.saveNode(R("hostile-redis-1"), {
+      nodeId: N("n1"),
+      output: cyclic,
+      completedAt: new Date("2026-08-12T00:00:01Z"),
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected typed refusal");
+    expect(result.error.kind).toBe("cache-error");
+  });
+
+  test("saveNode resolves a typed err for an INVALID completedAt, never a raw rejection", async () => {
+    const cp: Checkpointer = new RedisCheckpointer(unusedRedis());
+
+    const result = await cp.saveNode(R("hostile-redis-2"), {
+      nodeId: N("n1"),
+      output: { ok: true },
+      completedAt: new Date(Number.NaN),
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected typed refusal");
+    expect(result.error.kind).toBe("cache-error");
+  });
+
+  test("a serialization refusal issues NO driver call", async () => {
+    const calls: string[] = [];
+    const recording = {
+      script: async () => {
+        calls.push("script");
+        return "sha-1";
+      },
+      evalsha: async () => {
+        calls.push("evalsha");
+        return "OK";
+      },
+      eval: async () => {
+        calls.push("eval");
+        return "OK";
+      },
+    } as never;
+    const cp: Checkpointer = new RedisCheckpointer(recording);
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+
+    await cp.saveNode(R("hostile-redis-3"), {
+      nodeId: N("n1"),
+      output: cyclic,
+      completedAt: new Date("2026-08-12T00:00:01Z"),
+    });
+
+    expect(calls).toEqual([]);
+  });
+});
+
 // In-memory-specific hostile-value totality (FR-040/ADR-0080): the port
 // methods declare `Promise<Result<_, FrameworkError>>`, so non-cloneable
 // values must resolve with a typed `err` — never a raw promise rejection.
-// These tests are NOT in the shared suite because the Redis backend silently
-// drops non-JSON values at serialize time (pre-existing divergence, out of
-// this review's scope); the file backend pins the same class in its own tests.
+// These tests are NOT in the shared suite because each backend's hostile-input
+// class is different (structured-clone here, JSON above); the file backend
+// pins the same discipline in its own tests.
 describe("InMemoryCheckpointer — hostile-value totality", () => {
   test("saveNode refuses non-cloneable state with a typed checkpoint-write-failed, never a raw rejection", async () => {
     const cp = new InMemoryCheckpointer();

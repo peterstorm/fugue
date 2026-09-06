@@ -115,6 +115,37 @@ describe("RedisCheckpointer — composite opts reach the wire (ADR-0075)", () =>
     expect(calls).toEqual([]);
   });
 
+  test("the NOSCRIPT/EVAL fallback carries the SAME composite address as the EVALSHA path", async () => {
+    // The Lua SHA can be evicted from the server's script cache at any time, so
+    // the inline-EVAL retry is a real production path, not a corner. It is a
+    // SECOND place the node key is passed, and this PR changed both — a fix
+    // applied to only one would silently write fan-out indices to the canonical
+    // key whenever the cache happened to be cold.
+    const evalCalls: string[] = [];
+    const noscriptRedis = {
+      script: async () => "sha-1",
+      evalsha: async () => {
+        throw new Error("NOSCRIPT No matching script. Please use EVAL.");
+      },
+      eval: async (
+        _script: string,
+        _numKeys: number,
+        _nodesKey: string,
+        _metaKey: string,
+        nodeKey: string,
+      ) => {
+        evalCalls.push(nodeKey);
+        return "OK";
+      },
+    } as never;
+    const cp: Checkpointer = new RedisCheckpointer(noscriptRedis);
+
+    const result = await cp.saveNode(RUN, state, { namespace: "sub", index: 5, attempt: 2 });
+
+    expect(result.ok).toBe(true);
+    expect(evalCalls).toEqual(["sub@n1@5@2"]);
+  });
+
   test("setMeta/saveNode pairing carries the composite key through", async () => {
     const calls: EvalCall[] = [];
     const cp: Checkpointer = new RedisCheckpointer(recordingRedis(calls) as never);
