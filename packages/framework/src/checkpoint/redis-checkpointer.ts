@@ -77,9 +77,7 @@ const deserializeMeta = (raw: string): { meta: RunMeta; createdAt: Date } => {
 const serializeNode = (
   state: NodeState,
 ): { readonly nodeId: NodeId; readonly payload: string } => {
-  const nodeId = state.nodeId;
-  const output = state.output;
-  const completedAt = state.completedAt;
+  const { nodeId, output, completedAt } = state;
   return {
     nodeId,
     payload: JSON.stringify({

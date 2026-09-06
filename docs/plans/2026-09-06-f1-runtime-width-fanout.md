@@ -13,12 +13,19 @@ start F1 before F3 and F4"* — is satisfied: F3 gives a per-run spend ceiling, 
 is no longer unbounded spend, and F4 gives prompt caching, so a shared prefix fanned N ways no longer
 costs ~10× what it should.
 
+> **Citation convention.** Code references in this document name a **file and a
+> symbol**, never a line number. Line numbers here rotted three times across the
+> PR-45 review rounds — most recently when an edit *above* `saveNode` in
+> `redis-checkpointer.ts` silently moved it, with nothing failing. A symbol
+> survives any edit that does not rename it, and a rename is greppable in a way
+> a stale integer never is. Please keep it that way.
+
 ---
 
 ## 1. Problem
 
-`DagDefInput.nodes` (`types/dag.ts:154`) is a static record keyed at author time, and `DAG_SHAPES`
-(`types/dag.ts:184`) is the closed tuple `["linear", "fan-out", "diamond", "router", "sources"]`.
+`DagDefInput.nodes` (`types/dag.ts`) is a static record keyed at author time, and `DAG_SHAPES`
+(`types/dag.ts`) is the closed tuple `["linear", "fan-out", "diamond", "router", "sources"]`.
 Every width in a Fugue DAG is therefore a number the author typed.
 
 The motivating workload is one where a scoping node decides the width: 5 → 25 → 75, where 25 is
@@ -41,11 +48,11 @@ is PR-B's work.
 
 **The outer topology is compile-time and immutable.**
 
-- `DagTopology.waves` is `readonly (readonly NodeId[])[]`, documented at `dag-runtime/types.ts:249`
+- `DagTopology.waves` is `readonly (readonly NodeId[])[]`, documented on `DagTopology` in `dag-runtime/types.ts`
   as *"Topology facts computed once at compile time. Immutable after construction."*
-- `DagMachineContextPersisted.outputs` is `ReadonlyMap<NodeId, unknown>` (`dag-runtime/types.ts:314`)
+- `DagMachineContextPersisted.outputs` is `ReadonlyMap<NodeId, unknown>` (`dag-runtime/types.ts`)
   — **exactly one output per node id**.
-- `activeNodeIds` is `ReadonlySet<NodeId>` (`dag-runtime/types.ts:292`).
+- `activeNodeIds` is `ReadonlySet<NodeId>` (`dag-runtime/types.ts`).
 - Every helper in `dag-runtime/wave-resolution.ts` (`waveNodes`, `activeWaveNodes`,
   `waveIndexByNodeId`, `collectHumanReviewQueue`, `advanceToNextWave`) is keyed by `NodeId` alone.
 
@@ -68,14 +75,14 @@ shapes the work breakdown:
 
 | Backend | Honors composite opts? | Evidence |
 |---|---|---|
-| File | Yes | `file/checkpointer.ts:392` takes and applies `opts` |
+| File | Yes | `file/checkpointer.ts`'s `saveNode` takes and applies `opts` |
 | In-memory | ~~No — deliberately~~ **CLOSED by PR-A** | ADR-0075 / F6 FR-023; now honors `opts` (ADR-0085) |
 | Redis | ~~**No — no `opts` parameter at all**~~ **CLOSED by PR-A** | was `saveNode(runId, state)`; now `saveNode(runId, state, opts?)` encoding via `encodeStoredNodeKey` |
 | **Host (production)** | **No — different code path entirely** | see below |
 
 The host does not go through the framework checkpointer port for run checkpoints. It has its own
-writer, `createNamespacedCheckpointWriter` (`host/src/adapters/node-context-factory.ts:254`), which
-builds keys with `buildCheckpointKey` (`host/src/domain/cache-keys.ts:73`):
+writer, `createNamespacedCheckpointWriter` (`host/src/adapters/node-context-factory.ts`), which
+builds keys with `buildCheckpointKey` (`host/src/domain/cache-keys.ts`):
 
 ```
 fugue:<tenant>:<dagId>:<runId>:<nodeId>
@@ -102,7 +109,7 @@ production runs.
    backstop, not a design. A declared maximum width makes worst-case fan cost statically knowable.
 3. **Acyclic.** A map node applies a child sub-DAG; it does not introduce a back edge.
 4. **The authored surface is a field reference, not an expression language.** `AuthoredDag`'s
-   routing predicates are already `{ field, equals }` (`cli/authored.ts:323`). Runtime width must
+   routing predicates are already `{ field, equals }` (`cli/authored.ts`). Runtime width must
    stay in that register — a closed schema, not an eval.
 5. **No checkpoint migration.** ADR-0075 achieved its address extension additively; F1 must extend
    Redis and the host key the same way, with canonical keys unchanged.
@@ -121,7 +128,7 @@ This is the decision everything else follows from, so the rejected alternative i
 
 **Rejected: materialize N nodes into the wave at runtime.** It reads natural — the fan really is N
 things — but it breaks, in order: `DagTopology.waves`' compile-time immutability
-(`dag-runtime/types.ts:249`), the one-output-per-`NodeId` shape of `ctx.outputs`, `activeNodeIds`
+(`dag-runtime/types.ts`), the one-output-per-`NodeId` shape of `ctx.outputs`, `activeNodeIds`
 set semantics, the static `DagDefInput.nodes` record, and `defineDag`'s ability to validate
 reachability and else-totality at module load — because the node set would no longer be known then.
 It converts the framework's central invariant into a runtime concern to buy notation.
@@ -154,16 +161,16 @@ the run starts, so admission can reason about it rather than discovering it.
 
 The framework work — **all of it shipped in PR-A (ADR-0085); kept here as the design record**:
 
-- `redis-checkpointer.ts:261` gains the `opts?: SaveNodeOpts` parameter its own port already
+- `redis-checkpointer.ts`'s `saveNode` gains the `opts?: SaveNodeOpts` parameter its own port already
   declares on `Checkpointer.saveNode`, and encodes via `compositeNodeKey` — the same codec the file
   backend uses. Canonical calls (no opts) must produce byte-identical keys to today, so existing
   runs are unaffected and no migration is required.
 
 The host work — **still open, and PR-B's**; no current equivalent:
 
-- `buildCheckpointKey` (`host/src/domain/cache-keys.ts:73`) gains an optional index dimension,
+- `buildCheckpointKey` (`host/src/domain/cache-keys.ts`) gains an optional index dimension,
   preserving `fugue:<tenant>:<dagId>:<runId>:<nodeId>` exactly when absent.
-- `createNamespacedCheckpointWriter` (`host/src/adapters/node-context-factory.ts:254`) threads it.
+- `createNamespacedCheckpointWriter` (`host/src/adapters/node-context-factory.ts`) threads it.
 
 The separator must be chosen the way ADR-0075 and the spend key already choose theirs: outside the
 `NodeId` grammar, so an indexed address cannot collide with a node literally named to look like one.
@@ -192,21 +199,21 @@ guessed N would be a lie in a diagram people read to understand topology.
 ### D6 — `AuthoredDag` gains a closed `map` shape
 
 A `widthFrom` **field reference** added to the closed schema in `cli/authored.ts`, in the same
-register as `when: { field, equals }` at `:323`. `DAG_SHAPES` (`types/dag.ts:184`) gains a member;
+register as that file's existing `when: { field, equals }`. `DAG_SHAPES` (`types/dag.ts`) gains a member;
 the doc comment there already states that both `DagProvenance` and the CLI's `SHAPES` derive from
 that tuple, so a new shape is added in exactly one place and the projections cannot drift.
 
 ### D7 — HITL is rejected inside a mapped sub-DAG, at module load
 
-**Decided 2026-09-06.** A node carrying `humanReview` (`types/node.ts:467`) inside a mapped
+**Decided 2026-09-06.** A node carrying `humanReview` (`types/node.ts`) inside a mapped
 sub-DAG is rejected by `executor/validate-dag.ts` at module load, with an error naming the
 gather-then-review alternative.
 
 The structural reason is that it cannot currently be expressed. `HumanGatePayload`
-(`dag-runtime/types.ts:56`) carries a single `nodeId: NodeId` and `pendingReviews: readonly
+(`dag-runtime/types.ts`) carries a single `nodeId: NodeId` and `pendingReviews: readonly
 NodeId[]`; neither has an index dimension, so *"index 12 of the mapped review node is awaiting a
 human"* has no representation. That payload is deliberately shared across all three gate phases —
-`awaiting-human`, `suspended`, `retrying-hook` (`:71`, `:72`, `:93`) — with the stated intent that a
+`awaiting-human`, `suspended`, `retrying-hook` — each an intersection with it — with the stated intent that a
 field added there propagates to every gate phase and every transition projection. Widening it is not
 a local change.
 
@@ -282,7 +289,7 @@ whose semantics were undefined.
 
 **Why the host writer sits in PR-B, not PR-A** (refined 2026-09-06 after reading the code). The
 host's `CheckpointWriter.write(runId, nodeId, value)`
-(`host/src/adapters/node-context-factory.ts:254`) is a **different port** from the framework's
+(`host/src/adapters/node-context-factory.ts`) is a **different port** from the framework's
 `Checkpointer`. It never had composite support and is not part of ADR-0075's story, so widening its
 signature in PR-A would add an index parameter with no caller until PR-B — "ports introduced for
 future swappability with no second adapter or test fake", which `architecture.md` names as an

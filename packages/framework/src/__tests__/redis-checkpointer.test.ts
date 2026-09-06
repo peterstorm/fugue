@@ -5,7 +5,7 @@ import type { Checkpointer, CheckpointerLoadOpts, InMemoryStoredMeta, RunMeta } 
 import type { DagId, NodeId, RunId } from "../types/ids.js";
 import { FRAMEWORK_VERSION } from "../checkpoint/fingerprint.js";
 import { RedisCheckpointer } from "../checkpoint/redis-checkpointer.js";
-import { checkpointerSuite } from "./_checkpointer-suite.js";
+import { checkpointerSuite, type CheckpointerSuiteRaw } from "./_checkpointer-suite.js";
 import { redisDriverFake } from "./_redis-driver-fake.js";
 import { D, N, R } from "./_id-helpers.js";
 import { formatFrameworkError, retriabilityOf } from "../types/errors.js";
@@ -21,6 +21,27 @@ import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
 // bypass shape, and nothing on the adapter exposes its internals.
 const inMemoryStore = new Map<string, InMemoryStoredMeta>();
 
+/**
+ * The one bypass that is not a bypass: every OTHER hook in the raw objects
+ * below reaches durable state a backend-specific way (the in-memory test store
+ * for one leg, a raw `redis.set`/`hset` for the other), which is why the suite
+ * asks for them at all. A stale version is different — `setMeta` stamps
+ * whatever `frameworkVersion` it is handed, so both legs get there through the
+ * public port and the two copies were identical by nothing but coincidence.
+ */
+const setStaleVersionViaSetMeta: CheckpointerSuiteRaw["setStaleVersion"] = async (
+  cp,
+  runId,
+  { startedAt, nodeCount },
+) => {
+  await cp.setMeta(R(runId), {
+    dagId: D("d"),
+    startedAt,
+    nodeCount,
+    frameworkVersion: "1",
+  });
+};
+
 checkpointerSuite(
   "InMemoryCheckpointer",
   () => {
@@ -28,14 +49,7 @@ checkpointerSuite(
     return new InMemoryCheckpointer({ testStore: inMemoryStore });
   },
   {
-    setStaleVersion: async (cp, runId, { startedAt, nodeCount }) => {
-      await cp.setMeta(R(runId), {
-        dagId: D("d"),
-        startedAt,
-        nodeCount,
-        frameworkVersion: "1",
-      });
-    },
+    setStaleVersion: setStaleVersionViaSetMeta,
     setMissingVersion: async (_cp, runId, { startedAt, nodeCount }) => {
       // Stored record with NO frameworkVersion (the ADR-0017 missing-field
       // case) — written directly, bypassing setMeta's version stamping.
@@ -811,14 +825,7 @@ describeRedis("RedisCheckpointer", () => {
     "shared contract",
     () => new RedisCheckpointer(redisOrThrow()),
     {
-      setStaleVersion: async (cp, runId, { startedAt, nodeCount }) => {
-        await cp.setMeta(R(runId), {
-          dagId: D("d"),
-          startedAt,
-          nodeCount,
-          frameworkVersion: "1",
-        });
-      },
+      setStaleVersion: setStaleVersionViaSetMeta,
       setMissingVersion: async (_cp, runId, { startedAt, nodeCount }) => {
         await redisOrThrow().set(
           `chkpt:${runId}:meta`,
