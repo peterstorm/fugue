@@ -260,7 +260,7 @@ The host is the **imperative shell** that wires the framework into a production 
 |-----------|---------------|
 | `hitl/service.ts` | Suspend/resume orchestration: park a run, resolve a decision, resume execution |
 | `hitl/human-review-hook.ts` | Bridges the framework's `onHumanReview` hook to the durable run store |
-| `hitl/run-store-job.ts` / `adapters/run-queue.ts` / `run-store.ts` / `run-executor.ts` | BullMQ-over-Redis durable run queue, store, and resume worker |
+| `hitl/run-store-job.ts` / `hitl/adapters/{run-queue,run-store,run-executor}.ts` | BullMQ-over-Redis durable run queue, store, and resume worker |
 | `hitl/identity.ts` | Binds the approving identity to the resolved decision |
 | `hitl/adapters/webhook-notifier.ts` / `bot/` | Teams approval transports — deep-link webhook and in-Teams Bot Framework cards |
 

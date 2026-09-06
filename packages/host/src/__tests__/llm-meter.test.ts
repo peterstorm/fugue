@@ -578,6 +578,68 @@ describe("llm-meter: properties", () => {
     );
   });
 
+  it("reports an already-REACHED settled ceiling instead of the projected unpriced one", () => {
+    // `admit`'s settled-before-projected ordering is documented as load-bearing:
+    // a refusal must name the strongest ACTUAL reason, not an estimate. The
+    // unpriced-candidate rule is projected (nothing has been spent on this model
+    // yet), so it must not jump the queue. A run that has already burned its
+    // token ceiling is over budget for a reason that does not go away when
+    // somebody adds a price-table entry — and "add a price for mystery-model"
+    // is exactly the wrong remedy to hand the operator here.
+    const meter = accumulate(emptyMeter(), runA, freeCall(1000));
+    const decision = admitCandidate(
+      meter,
+      runA,
+      emptyReservation,
+      limitsOf([usd(100), tokens(1000)]),
+      unpriced("mystery-model"),
+    );
+
+    expect(decision.kind).toBe("refuse");
+    if (decision.kind !== "refuse") return;
+    expect(decision.breach.kind).toBe("reached");
+    expect(decision.breach.basis).toBe("settled");
+    expect(decision.breach.ceiling.kind).toBe("tokens");
+    // Identical to the reason the plain decision would give for the same run.
+    expect(decision).toEqual(
+      admit(meter, runA, emptyReservation, limitsOf([usd(100), tokens(1000)])),
+    );
+  });
+
+  it("does not relabel ALREADY-settled unpriced spend as merely projected", () => {
+    // The run already settled a call on an unpriceable model, so its cost is
+    // unknown as a matter of record, not of estimate. Reporting `projected`
+    // would tell the operator the overrun has not happened yet.
+    const meter = accumulate(emptyMeter(), runA, unpricedCall(10, "earlier-model"));
+    const decision = admitCandidate(
+      meter, runA, emptyReservation, limitsOf([usd(100)]), unpriced("mystery-model"),
+    );
+
+    expect(decision.kind).toBe("refuse");
+    if (decision.kind !== "refuse") return;
+    expect(decision.breach.basis).toBe("settled");
+    expect(decision.breach.kind).toBe("unpriced");
+    if (decision.breach.kind !== "unpriced") return;
+    expect([...decision.breach.models]).toEqual(["earlier-model"]);
+  });
+
+  it("still refuses the unpriced candidate when nothing is settled yet", () => {
+    // The settled check leading does not weaken the fail-closed rule: with the
+    // run inside every ceiling, the projected unpriced refusal is still THE
+    // reason, and it still names the candidate model.
+    const meter = accumulate(emptyMeter(), runA, freeCall(1));
+    const decision = admitCandidate(
+      meter, runA, emptyReservation, limitsOf([usd(100), tokens(1000)]), unpriced("mystery-model"),
+    );
+
+    expect(decision.kind).toBe("refuse");
+    if (decision.kind !== "refuse") return;
+    expect(decision.breach.kind).toBe("unpriced");
+    expect(decision.breach.basis).toBe("projected");
+    if (decision.breach.kind !== "unpriced") return;
+    expect([...decision.breach.models]).toEqual(["mystery-model"]);
+  });
+
   it("carries the settled spend and in-flight count on an unpriced refusal", () => {
     // The refusal is what the caller reports to the operator, so it must say
     // what had actually been spent when the gate closed.

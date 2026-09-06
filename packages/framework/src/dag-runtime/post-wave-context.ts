@@ -36,8 +36,9 @@ export interface PostWaveContext {
 /**
  * Exactly what a `node-error` emission needs. Narrower than `PostWaveContext`
  * (and asking only for a `NodeContext`, not a validated one) so callers outside
- * the post-wave pipeline — the executor's human-review gate — can use the same
- * emitter instead of hand-rolling a third copy of the event shape.
+ * the post-wave pipeline — the executor's human-review gate, and `executeWave`'s
+ * co-failed-sibling emission — can use the same emitter instead of each
+ * hand-rolling its own copy of the event shape.
  */
 export interface NodeErrorContext {
   readonly nodeCtx: NodeContext;
@@ -54,6 +55,7 @@ export interface NodeErrorContext {
  * closed over an identical copy; the executor's human-review gate closed over a
  * third that had already drifted (it carried a `stack` the others did not), so
  * `stack` is a parameter here rather than a reason to keep a separate copy.
+ * `executeWave`'s co-failed-sibling emission was the fourth and last such copy.
  *
  * Fenced with `bestEffort`: `new Date(nowFn())` is evaluated as an ARGUMENT, so
  * a hostile clock throws before `emit`/`dispatchEvent` is entered. Every caller

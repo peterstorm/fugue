@@ -42,6 +42,13 @@ import {
   testLogger,
 } from "./fixtures/host-boot-fakes.js";
 
+/** A promise plus its resolver — parks a node so a request stays in flight. */
+const deferred = <T>() => {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+};
+
 declare module "@fuguejs/framework" {
   interface CapabilityRegistry {
     shellBrokerLlm: LlmClient;
@@ -404,5 +411,151 @@ describe("createHost broker-LLM composition", () => {
 
     expect(executed.status).toBe(429);
     expect(providerCalls).toBe(1);
+  });
+
+  it("waits for in-flight requests and warns when the drain deadline passes", async () => {
+    // FR-060's drain is the difference between a rolling deploy and a dropped
+    // request: shutdown must not stop the listener out from under work already
+    // admitted. The timeout branch is the other half — an unbounded wait would
+    // turn one stuck handler into a host that never exits, so the drain gives
+    // up and says so rather than hanging silently.
+    const gate = deferred<void>();
+    const node = createFetchNode({
+      id: "slow" as never,
+      inputSchema: z.object({ query: z.string() }),
+      outputSchema: z.object({ done: z.boolean() }),
+      requires: [] as const,
+      fetch: async () => { await gate.promise; return ok({ done: true }); },
+    });
+    const dag = defineDagFromArray({
+      id: "drain-dag",
+      nodes: [node],
+      edges: [{ from: DAG_INPUT, to: "slow" }],
+      outputNodeId: "slow",
+    });
+    const loaded: LoadResult = {
+      id: dag.id as DagId,
+      registration: {
+        dag,
+        inputSchema: z.object({ query: z.string() }),
+        config: { timeoutMs: 30_000, maxConcurrent: 2 },
+        meta: { description: "drain", version: "1.0.0" },
+      },
+      modulePath: "/tmp/test-dags/dags/eng/drain-dag/dag.ts",
+      prompts: new Map(),
+      team: "eng",
+    };
+    const loader: ModuleLoaderPort = {
+      loadDagModule: async () => ok(loaded),
+      discoverDagPaths: async () => ok([loaded.modulePath]),
+      loadAll: async (): Promise<BulkLoadResult> => ({ loaded: [loaded], errors: [] }),
+    };
+    const redis = fakeRedis();
+    const logger = testLogger();
+    const hostConfig = makeConfig({ DRAIN_TIMEOUT_MS: "1000" });
+    socketPath = join(tmpdir(), `fugue-drain-${crypto.randomUUID()}.sock`);
+    const booted = await createHost({
+      config: hostConfig,
+      git: fakeGit(),
+      loader,
+      redis: redis.port,
+      sharedInfra: fakeInfra(redis.redis),
+      logger,
+      tenant: mkTenant("acme"),
+      bind: { unix: socketPath },
+    });
+    expect(booted.ok).toBe(true);
+    if (!booted.ok) return;
+    host = booted.value;
+
+    // Fire the request and DO NOT await it — the handler parks inside the node.
+    const inFlight = fetch("http://uds.fugue.internal/dags/drain-dag/run", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${hostConfig.ADMIN_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ query: "go" }),
+      unix: socketPath,
+    } as RequestInit & { unix: string }).catch(() => undefined);
+
+    // Wait until the request has actually taken a concurrency slot; without
+    // this the drain loop would find nothing in flight and prove nothing.
+    const admittedBy = Date.now() + 5_000;
+    while (host.getConcurrency().global.current === 0 && Date.now() < admittedBy) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(host.getConcurrency().global.current).toBeGreaterThan(0);
+
+    const shutdownStartedAt = Date.now();
+    await host.shutdown();
+    const drainedFor = Date.now() - shutdownStartedAt;
+
+    // It WAITED (rather than stopping the listener immediately) …
+    expect(drainedFor).toBeGreaterThanOrEqual(1_000);
+    // … and it gave up rather than waiting forever, naming what is still stuck.
+    const warning = logger.logs.find((entry) =>
+      entry.level === "warn" && entry.msg.startsWith("Drain timeout"),
+    );
+    expect(warning).toBeDefined();
+    expect(warning?.msg).toContain("requests still in-flight");
+
+    host = undefined;
+    gate.resolve();
+    await inFlight;
+  }, 20_000);
+
+  it("warns and leaves HITL off when a notifier is configured with no queue backend", async () => {
+    // A transport is necessary but NOT sufficient. Booting with a webhook and
+    // no queue would otherwise look configured while every `humanReview` DAG
+    // silently answered 501 — so the boot log has to say which half is missing.
+    // Distinct from the no-transport-at-all case, which is a silent, expected
+    // opt-out and must NOT warn.
+    const redis = fakeRedis();
+    const logger = testLogger();
+    socketPath = join(tmpdir(), `fugue-hitl-noqueue-${crypto.randomUUID()}.sock`);
+    const booted = await createHost({
+      config: makeConfig({ TEAMS_WEBHOOK_URL: "https://example.invalid/hook" }),
+      git: fakeGit(),
+      loader: fakeLoader(),
+      redis: redis.port,
+      sharedInfra: fakeInfra(redis.redis),
+      logger,
+      tenant: mkTenant("acme"),
+      bind: { unix: socketPath },
+      // queueBackend deliberately omitted.
+    });
+    expect(booted.ok).toBe(true);
+    if (!booted.ok) return;
+    host = booted.value;
+
+    expect(logger.logs).toContainEqual(expect.objectContaining({
+      level: "warn",
+      msg: "A HITL notifier is configured but no queue backend was wired — HITL is disabled",
+    }));
+    // The enabled-path line must NOT have been logged.
+    expect(logger.logs.some((entry) => entry.msg.startsWith("HITL durable run engine enabled")))
+      .toBe(false);
+  });
+
+  it("stays silent about HITL when no notifier transport is configured at all", async () => {
+    const redis = fakeRedis();
+    const logger = testLogger();
+    socketPath = join(tmpdir(), `fugue-hitl-none-${crypto.randomUUID()}.sock`);
+    const booted = await createHost({
+      config: makeConfig(),
+      git: fakeGit(),
+      loader: fakeLoader(),
+      redis: redis.port,
+      sharedInfra: fakeInfra(redis.redis),
+      logger,
+      tenant: mkTenant("acme"),
+      bind: { unix: socketPath },
+    });
+    expect(booted.ok).toBe(true);
+    if (!booted.ok) return;
+    host = booted.value;
+
+    expect(logger.logs.some((entry) => entry.msg.includes("HITL"))).toBe(false);
   });
 });

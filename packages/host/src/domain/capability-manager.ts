@@ -175,7 +175,7 @@ const writeLifecycleFallback: LifecycleDiagnosticFallback = (diagnostic) =>
 
 /**
  * Lifecycle diagnostics are secondary and must not alter control flow — THE
- * encoding of that rule is `logWithoutThrowing`; this only adapts the optional
+ * encoding of that rule is `logWithoutThrowingTo`; this only adapts the optional
  * `data` this module carries to its required parameter.
  */
 const logLifecycleWithoutThrowing = (

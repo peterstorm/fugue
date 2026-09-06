@@ -25,6 +25,7 @@ import {
 } from "../types/spend.js";
 import type { MicroUsd } from "../types/spend.js";
 import { runId, type RunId } from "../types/ids.js";
+import { formatFrameworkError } from "../types/errors.js";
 
 const roots: string[] = [];
 const tempRoot = (): string => {
@@ -148,6 +149,31 @@ describe("file spend codec", () => {
       { ...valid, runId: "another-run" },
     ]) {
       expect(parseFileSpendRecord(JSON.stringify(malformed), rid).ok).toBe(false);
+    }
+  });
+
+  it("rejects a record MISSING any V1 field, not only one carrying an extra", () => {
+    // The exact-key-set check is symmetric by construction — it compares the
+    // sorted key list, so a dropped field fails for the same reason a surplus
+    // one does. Asserting only the surplus direction would leave a codec that
+    // defaulted an absent `usage` (or an absent `unpricedModels`) to a benign
+    // value looking correct, and defaulting is exactly how a persisted record
+    // of unknown provenance gets silently read as cheaper than it was.
+    const valid: Record<string, unknown> = {
+      schemaVersion: 1,
+      runId: rid,
+      usage: "known",
+      tokens: 1,
+      calls: 1,
+      micros: 1,
+      unpricedModels: [],
+    };
+    for (const dropped of Object.keys(valid)) {
+      const { [dropped]: _omitted, ...missing } = valid;
+      const parsed = parseFileSpendRecord(JSON.stringify(missing), rid);
+      expect(parsed.ok).toBe(false);
+      if (parsed.ok) return;
+      expect(formatFrameworkError(parsed.error)).toContain("do not match schema V1");
     }
   });
 });

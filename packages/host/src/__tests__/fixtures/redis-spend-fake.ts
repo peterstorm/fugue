@@ -8,6 +8,21 @@ import {
   unpricedModelHashField,
 } from "../../domain/spend-record.js";
 
+/**
+ * The marker half of a spend record: set-once fields whose write is identical in
+ * both appliers below, and which carry no read-modify-write to interleave. Only
+ * the numeric accumulation differs between them, so only that stays duplicated.
+ */
+const writeMarkerFields = (
+  hash: Map<string, string>,
+  record: ReturnType<typeof recordOf>,
+): void => {
+  if (record.usageUnknown) hash.set(SPEND_USAGE_UNKNOWN_FIELD, SPEND_MARKER_VALUE);
+  for (const model of record.unpricedModels) {
+    hash.set(unpricedModelHashField(model), SPEND_MARKER_VALUE);
+  }
+};
+
 /** Apply the Redis spend transaction's commutative hash update in a plain test store. */
 export const applyRedisSpendAppend = (
   hashes: Map<string, Map<string, string>>,
@@ -15,10 +30,7 @@ export const applyRedisSpendAppend = (
 ): void => {
   const record = recordOf(append.delta);
   const hash = hashes.get(append.key) ?? new Map<string, string>();
-  if (record.usageUnknown) hash.set(SPEND_USAGE_UNKNOWN_FIELD, SPEND_MARKER_VALUE);
-  for (const model of record.unpricedModels) {
-    hash.set(unpricedModelHashField(model), SPEND_MARKER_VALUE);
-  }
+  writeMarkerFields(hash, record);
   for (const [field, by] of [
     [SPEND_HASH_FIELDS.micros, record.micros],
     [SPEND_HASH_FIELDS.tokens, record.tokens],
@@ -48,10 +60,7 @@ export const applyRedisSpendAppendInterleaved = async (
 ): Promise<void> => {
   const record = recordOf(append.delta);
   const hash = hashes.get(append.key) ?? new Map<string, string>();
-  if (record.usageUnknown) hash.set(SPEND_USAGE_UNKNOWN_FIELD, SPEND_MARKER_VALUE);
-  for (const model of record.unpricedModels) {
-    hash.set(unpricedModelHashField(model), SPEND_MARKER_VALUE);
-  }
+  writeMarkerFields(hash, record);
   for (const [field, by] of [
     [SPEND_HASH_FIELDS.micros, record.micros],
     [SPEND_HASH_FIELDS.tokens, record.tokens],

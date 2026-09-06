@@ -27,7 +27,7 @@
  * @satisfies FR-B-013 — the refusal names the ceiling, basis, and observed figure
  */
 
-import type { Breach, Ceilings, Result, RunId, Spend } from "@fuguejs/framework";
+import type { Breach, Ceilings, Result, RunId, Spend, UsdCeiling } from "@fuguejs/framework";
 import {
   NO_SPEND,
   addSpend,
@@ -256,6 +256,15 @@ export type CandidatePricing =
 /**
  * Model-aware admission command. The shell resolves provider composition into
  * candidate pricing data; this pure core owns the fail-closed USD rule.
+ *
+ * The unpriced-candidate rule is a PROJECTED one: nothing has been spent on this
+ * model yet, only proposed. So it stays behind `admit`'s settled check, for the
+ * same reason that check leads there — a refusal must report the strongest
+ * ACTUAL reason. Returning the hand-built projected breach first would mask an
+ * already-reached `tokens`/`calls` ceiling, and would relabel spend that is
+ * already settled-unpriced (or settled-unknown-usage) as a mere projection.
+ * The call is refused either way; only the reported `Breach` differs, and a
+ * budget refusal an operator cannot trust is a budget refusal they will ignore.
  */
 export const admitCandidate = (
   meter: LlmMeter,
@@ -264,24 +273,29 @@ export const admitCandidate = (
   limits: Ceilings | undefined,
   candidate: CandidatePricing,
 ): AdmitDecision => {
-  const usdCeiling = limits?.find((ceiling) => ceiling.kind === "usd");
-  if (candidate.kind === "unpriced" && usdCeiling?.kind === "usd") {
-    const settled = spendFor(meter, runId);
-    const models = unpricedModel(candidate.model);
-    return {
-      kind: "refuse",
-      breach: {
-        kind: "unpriced",
-        ceiling: usdCeiling,
-        basis: "projected",
-        models,
-        observedAtLeast: costFloor(settled.usd),
-      },
-      settled,
-      inFlight: state.inFlight,
-    };
+  // A priced candidate, or no budget at all, is exactly the plain decision.
+  if (limits === undefined || candidate.kind !== "unpriced") {
+    return admit(meter, runId, state, limits);
   }
-  return admit(meter, runId, state, limits);
+  // Typed predicate rather than a bare `find` plus a second `.kind === "usd"`:
+  // the search already established which variant this is, and re-testing it
+  // only to recover the type is a fact the reader has to check twice.
+  const usdCeiling = limits.find((c): c is UsdCeiling => c.kind === "usd");
+  if (usdCeiling === undefined) return admit(meter, runId, state, limits);
+
+  const settled = spendFor(meter, runId);
+  const settledBreach = firstBreach(settled, limits, "settled");
+  const refusal = (breach: Breach): AdmitDecision =>
+    ({ kind: "refuse", breach, settled, inFlight: state.inFlight });
+  if (settledBreach !== undefined) return refusal(settledBreach);
+
+  return refusal({
+    kind: "unpriced",
+    ceiling: usdCeiling,
+    basis: "projected",
+    models: unpricedModel(candidate.model),
+    observedAtLeast: costFloor(settled.usd),
+  });
 };
 
 export type ReservationInvariantError = {

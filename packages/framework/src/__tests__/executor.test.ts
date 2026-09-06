@@ -15,6 +15,10 @@ import { defineDagFromArray } from "../executor/define-dag.js";
 import { N } from "./_id-helpers.js";
 import { testNodeContext as mkCtx } from "./_context-factories.js";
 import { createGuardrailNode } from "../nodes/guardrail.js";
+import { buildDagExecutor } from "../dag-runtime/executor.js";
+import { brandAsValidatedNodeContext } from "../types/node.js";
+import { nonEmptyString } from "../types/non-empty-string.js";
+import { testRuntimeContext } from "./_context-factories.js";
 
 /**
  * A node that fails `failuresBeforeSuccess` times with a RETRIABLE crash and
@@ -1077,5 +1081,122 @@ describe("runDag routing (single-path — Wave 7 §7.3)", () => {
     }
     // Called 3 times: 1 initial + 2 retries
     expect(callCount).toBe(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Abort during the executor's own waits.
+//
+// Node bodies check `ctx.signal` cooperatively, but the executor ALSO waits in
+// two places a node cannot see: the retry backoff sleep, and the human-review
+// gate. These pin what an abort arriving during each of those waits does.
+// ---------------------------------------------------------------------------
+
+describe("buildDagExecutor: abort during executor-owned waits", () => {
+  /**
+   * A one-node DAG whose node reports whether it ran. The two abort tests below
+   * assert on that flag — "the executor returned abort" is only half the claim;
+   * the other half is that the wave never dispatched. The human-gate test needs
+   * only the DAG shape.
+   */
+  const dagRecordingDispatch = (id: string): { dag: DagDef; ranNode: () => boolean } => {
+    let ran = false;
+    const dag = defineDagFromArray({
+      id,
+      nodes: [
+        createTransformNode({
+          id: N("a"),
+          inputSchema: z.any(),
+          outputSchema: z.any(),
+          transform: (i) => { ran = true; return ok(i); },
+        }),
+      ],
+      edges: [{ from: DAG_INPUT, to: "a" }],
+    });
+    return { dag, ranNode: () => ran };
+  };
+
+  const soleWave = (dag: DagDef) =>
+    testRuntimeContext({ dag, waves: [[N("a")]], activeNodeIds: new Set([N("a")]) });
+
+  it("short-circuits a retry backoff sleep the moment the signal fires", async () => {
+    // The sleep resolves on abort rather than on the timer, so the executor
+    // reaches its post-sleep check long before the delay elapses. Without that
+    // wiring a cancelled run would sit out its full backoff — here a wall-clock
+    // minute — before noticing, and the wave would then run anyway.
+    const { dag, ranNode } = dagRecordingDispatch("abort-backoff-dag");
+    const controller = new AbortController();
+    const executor = buildDagExecutor(
+      dag,
+      brandAsValidatedNodeContext(mkCtx({ signal: controller.signal })),
+      // Pin jitter so the nominal delay is the delay.
+      { random: () => 0.5 },
+    );
+
+    const startedAt = Date.now();
+    const pending = executor(
+      { kind: "retrying", wave: 0, nodeId: N("a"), attempt: 1, nextDelayMs: 60_000 },
+      soleWave(dag),
+    );
+    // Abort AFTER the sleep has been entered, so this exercises the listener
+    // path rather than the already-aborted fast path.
+    await Promise.resolve();
+    controller.abort();
+
+    expect(await pending).toEqual({ type: "abort", reason: "signal" });
+    expect(Date.now() - startedAt).toBeLessThan(60_000);
+    expect(ranNode()).toBe(false);
+  });
+
+  it("returns abort from an already-aborted signal without entering the wave", async () => {
+    const { dag, ranNode } = dagRecordingDispatch("abort-preaborted-dag");
+    const executor = buildDagExecutor(
+      dag,
+      brandAsValidatedNodeContext(mkCtx({ signal: AbortSignal.abort() })),
+    );
+
+    const event = await executor(
+      { kind: "retrying", wave: 0, nodeId: N("a"), attempt: 1, nextDelayMs: 5 },
+      soleWave(dag),
+    );
+
+    expect(event).toEqual({ type: "abort", reason: "signal" });
+    expect(ranNode()).toBe(false);
+  });
+
+  it("honours a human decision that arrives while the run is being cancelled", async () => {
+    // DOCUMENTED BEHAVIOUR, not an oversight: `handleHumanGate` does not
+    // re-check the signal after `onHumanReview` resolves. A decision a person
+    // actually made is a fact, and discarding it would lose the approval while
+    // still having shown them the request. The abort is observed one step later
+    // — the run loop's next wave hits the node-level signal check — so the
+    // cancellation still wins, without the gate silently eating the answer.
+    const { dag } = dagRecordingDispatch("abort-wait-dag");
+    const controller = new AbortController();
+    const executor = buildDagExecutor(
+      dag,
+      brandAsValidatedNodeContext(mkCtx({ signal: controller.signal })),
+      {
+        onHumanReview: async () => {
+          // Cancellation lands while the human decision is in flight.
+          controller.abort();
+          return { kind: "approve" } as HumanAction;
+        },
+      },
+    );
+
+    const event = await executor(
+      {
+        kind: "awaiting-human",
+        nodeId: N("a"),
+        output: { reviewed: true },
+        prompt: nonEmptyString("approve?"),
+        pendingReviews: [],
+        wave: 0,
+      },
+      soleWave(dag),
+    );
+
+    expect(event).toEqual({ type: "human-responded", nodeId: N("a"), action: { kind: "approve" } });
   });
 });

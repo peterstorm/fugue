@@ -74,7 +74,7 @@ export interface WaveConfig {
   readonly minting?: MintingAuthority;
 }
 
-import type { PostWaveContext } from "./post-wave-context.js";
+import { nodeErrorEmitter, type PostWaveContext } from "./post-wave-context.js";
 
 interface WaveResult {
   readonly event: DagEvent;
@@ -226,22 +226,16 @@ export const executeWave = async (
   if (failures.length > 0) {
     const [primary, ...siblings] = failures as [{ nodeId: NodeId; error: FrameworkError }, ...{ nodeId: NodeId; error: FrameworkError }[]];
 
+    // The shared emitter owns this event shape (and the same `bestEffort` fence:
+    // the `node-failed` returned below is the authoritative outcome, and a
+    // throwing clock on a co-failure diagnostic must not cost the caller the
+    // primary failure or the carried outputs). It labels its own fence
+    // `nodeErrorEmitter`/`node-error emission` rather than this call site — a
+    // diagnostic label, not an outcome, and the price of not keeping a fourth
+    // hand-rolled copy of the event in sync.
+    const emitCoFailure = nodeErrorEmitter({ nodeCtx, nodeMap, dagId: dag.id, nowFn });
     for (const sibling of siblings) {
-      // Same argument-evaluation hazard: the `node-failed` returned below is the
-      // authoritative outcome, and a throwing clock on a co-failure diagnostic
-      // must not cost the caller the primary failure or the carried outputs.
-      bestEffort("executeWave", "co-failed node-error emission", () =>
-        emit(nodeCtx, {
-          type: "node-error",
-          runId: nodeCtx.runId,
-          dagId: dag.id,
-          nodeId: sibling.nodeId,
-          sideEffects: nodeMap.get(sibling.nodeId)?.sideEffects,
-          timestamp: stamp(),
-          error: messageOf(sibling.error),
-          frameworkError: sibling.error,
-        }),
-      );
+      emitCoFailure(sibling.nodeId, messageOf(sibling.error), sibling.error);
     }
 
     const partialOutputs = carriedOutputs(newOutputs, machineCtx.outputs);

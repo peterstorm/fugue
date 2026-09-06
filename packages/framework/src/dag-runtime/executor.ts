@@ -195,9 +195,14 @@ const callHumanReviewHook = async (
  * 1. `pending`: returns a `start` event (drives the first transition).
  * 2. `running`: runs the full wave via Promise.all, returns `wave-done` or
  *    `node-failed` for the first failure.
- * 3. `retrying`: sleeps for `nextDelayMs * jitter` then re-invokes the WHOLE
- *    wave, not just the failed node — every node in it runs again, which is why
- *    node `run` functions must be idempotent under retry.
+ * 3. `retrying`: sleeps for `nextDelayMs * jitter` then re-enters the wave —
+ *    but NOT every node in it runs again. `handleNodeFailed` merged the failed
+ *    attempt's `partialOutputs` into `ctx.outputs`, so `executeWave` finds the
+ *    already-succeeded siblings in `priorOutputs` and skips them via
+ *    `node-skipped`/`already-completed`, returning the carried output instead of
+ *    re-running the side effect. Only the failed node and any `coFailedNodeIds`
+ *    re-execute, which is why THOSE nodes' `run` functions must be idempotent
+ *    under retry.
  *    Returns `wave-done` (if all nodes in the wave now pass) or `node-failed`.
  * 4. `awaiting-human` / `suspended` / `retrying-hook` (ADR-0060): dispatches the
  *    `onHumanReview` hook (the latter two are handled identically to

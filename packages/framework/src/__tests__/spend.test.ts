@@ -369,6 +369,13 @@ describe("scaleSpend: the in-flight projection", () => {
   });
 });
 
+/** `unpricedModels` returns undefined only for an empty list; unwrap for tests. */
+const canonicalModelsOf = (models: readonly string[]) => {
+  const canonical = unpricedModels(models);
+  if (canonical === undefined) throw new Error("expected non-empty models");
+  return canonical;
+};
+
 describe("maxSpend: the learned per-call estimate", () => {
   it("takes the per-axis maximum", () => {
     const a = makeSpend({
@@ -396,6 +403,37 @@ describe("maxSpend: the learned per-call estimate", () => {
     // cannot honestly be a number.
     expect(maxSpend(pricedCall(10, micros(9_999)), unpricedCall(1, "m")).usd.kind).toBe("unpriced");
     expect(maxSpend(unpricedCall(1, "m"), pricedCall(10, micros(9_999))).usd.kind).toBe("unpriced");
+  });
+
+  it("unions the offending model names when BOTH sides are unpriced", () => {
+    // `addSpend` is asserted on the merged model list; the estimate has to be
+    // held to the same standard. A max that kept only one side's models would
+    // still report `kind: "unpriced"` — passing the kind-only check above —
+    // while naming half the models an operator has to go and price.
+    const est = maxSpend(unpricedCall(10, "model-z"), unpricedCall(4, "model-a"));
+    expect(est.usd.kind).toBe("unpriced");
+    if (est.usd.kind !== "unpriced") return;
+    expect([...est.usd.models]).toEqual(["model-a", "model-z"]);
+  });
+
+  it("keeps the larger priced floor when both sides are unpriced", () => {
+    const a = makeSpend({
+      usage: "known",
+      tokens: 1,
+      calls: 1,
+      usd: { kind: "unpriced", models: canonicalModelsOf(["m1"]), knownMicros: micros(400) },
+    });
+    const b = makeSpend({
+      usage: "known",
+      tokens: 1,
+      calls: 1,
+      usd: { kind: "unpriced", models: canonicalModelsOf(["m2"]), knownMicros: micros(900) },
+    });
+    const est = maxSpend(a, b);
+    expect(est.usd.kind).toBe("unpriced");
+    if (est.usd.kind !== "unpriced") return;
+    expect(est.usd.knownMicros).toBe(micros(900));
+    expect([...est.usd.models]).toEqual(["m1", "m2"]);
   });
 
   it("is commutative and idempotent", () => {

@@ -22,6 +22,7 @@ import {
 import type { LogPort, SpendLedgerPort } from "../ports.js";
 import { createInMemorySpendLedger } from "../adapters/spend-ledger-memory.js";
 import { emptyReservation, learnObservedCall } from "../domain/llm-meter.js";
+import { collectLogs } from "../adapters/__tests__/fixtures/log-capture.js";
 
 const limits = ceilings([{ kind: "tokens", limit: 30 }])!;
 const oneCallLimit = ceilings([{ kind: "calls", limit: 1 }])!;
@@ -59,6 +60,21 @@ const testAuthority = (opts: {
     logger: opts.logger ?? logger,
     ...(opts.limits !== undefined ? { limits: opts.limits } : {}),
   });
+
+/**
+ * A ledger whose every append fails. Three tests need exactly this — the
+ * unbudgeted/budgeted split and the provider-outcome ordering — and a
+ * per-test copy is how one of them would quietly stop failing the same way.
+ */
+const alwaysFailingLedger = (): SpendLedgerPort => ({
+  metadata: { role: "redis-fallback", backend: "memory", durability: "process" },
+  read: async () => ok(NO_SPEND),
+  add: async () => err({
+    kind: "internal-invariant-violated",
+    message: "ledger unavailable",
+    context: {},
+  }),
+});
 
 describe("RunSpendAuthority", () => {
   it("remaining includes every shared in-flight reservation and agrees with admission", async () => {
@@ -412,21 +428,8 @@ describe("RunSpendAuthority", () => {
   });
 
   it("logs a failed provider outcome before a budgeted ledger failure masks its return", async () => {
-    const events: Array<{ readonly msg: string; readonly data?: Record<string, unknown> }> = [];
-    const capturingLogger: LogPort = {
-      info: (msg, data) => { events.push({ msg, data }); },
-      warn: (msg, data) => { events.push({ msg, data }); },
-      error: (msg, data) => { events.push({ msg, data }); },
-    };
-    const failingLedger: SpendLedgerPort = {
-      metadata: { role: "redis-fallback", backend: "memory", durability: "process" },
-      read: async () => ok(NO_SPEND),
-      add: async () => err({
-        kind: "internal-invariant-violated",
-        message: "ledger unavailable",
-        context: {},
-      }),
-    };
+    const { logger: capturingLogger, logs: events } = collectLogs();
+    const failingLedger = alwaysFailingLedger();
     const authority = testAuthority({
       run: "provider-and-ledger-failure",
       limits: oneCallLimit,
@@ -586,4 +589,230 @@ describe("RunSpendAuthority", () => {
 
     expect(authority.budget.remaining()).toEqual(second);
   });
+
+  // ── The Result-boundary fence ──────────────────────────────────────────────
+  // Every other malformed-client case above returns a bad VALUE. These two
+  // break the contract the other way — by throwing — which is the case the
+  // `try/catch` around `call()` exists for. Without it the exception escapes
+  // `execute` and crashes the node run instead of degrading to a typed error,
+  // and the call is never settled, so its reservation leaks and its spend is
+  // never recorded.
+
+  it.each([
+    ["throws synchronously", () => { throw new Error("client exploded"); }],
+    ["rejects", async () => { throw new Error("client exploded"); }],
+  ] as const)(
+    "converts a client that %s into a typed node-crash and still settles the call",
+    async (label, call) => {
+      const ledger = createInMemorySpendLedger();
+      const authorityRunId = runId(`throwing-client-${label.replaceAll(" ", "-")}`);
+      const authority = testAuthority({ run: authorityRunId, limits, ledger });
+
+      const settled = await authority.execute({
+        clientKey: "llm",
+        operation: "sendStructured",
+        request,
+        call: call as () => Promise<Result<LlmResponse<unknown>, FrameworkError>>,
+      });
+
+      expect(settled.ok).toBe(false);
+      if (settled.ok) return;
+      expect(settled.error.kind).toBe("node-crash");
+      if (settled.error.kind !== "node-crash") return;
+      expect(settled.error.message).toContain("LlmClient.sendStructured threw across the Result boundary");
+      expect(settled.error.message).toContain("client exploded");
+      expect(settled.error.retriability).toBe("non-retriable");
+
+      // A thrown call is still a call that may have cost money: it settles as
+      // one durable unknown call, exactly as a malformed VALUE does.
+      const unknown = spendOfUnknownCall("m");
+      expect(authority.budget.spent()).toEqual(unknown);
+      expect(await ledger.read(authorityRunId)).toEqual(ok(unknown));
+
+      // The reservation was released, so the next call is admitted rather than
+      // refused against a phantom in-flight estimate.
+      expect(authority.budget.remaining()).toMatchObject({ kind: "budgeted" });
+    },
+  );
+
+  it("hides a hostile non-Error throw behind a safe message", async () => {
+    const authority = testAuthority({ run: "hostile-throw", limits });
+    const settled = await authority.execute({
+      clientKey: "llm",
+      operation: "sendStructured",
+      request,
+      call: () => {
+        throw { get message() { throw new Error("nested explosion"); } };
+      },
+    });
+
+    expect(settled.ok).toBe(false);
+    if (!settled.ok && settled.error.kind === "node-crash") {
+      expect(settled.error.message).toContain("threw across the Result boundary");
+    }
+  });
+
+  // ── The UNBUDGETED ledger-failure branch ───────────────────────────────────
+
+  it("keeps the provider result when an UNBUDGETED ledger write fails, and says so at warn", async () => {
+    // Deliberate asymmetry, and the reason it is deliberate: with no ceiling
+    // there is nothing the lost record could have enforced, so failing the
+    // node would turn a bookkeeping outage into a run outage. With a ceiling
+    // (the test above) the same failure IS an enforcement failure and must
+    // fail the call closed. The `warn`-vs-`error` level is the operator-visible
+    // encoding of that difference, so both are pinned.
+    const { logger: capturingLogger, logs: events } = collectLogs();
+    const failingLedger = alwaysFailingLedger();
+    // No `limits` — the unbudgeted authority.
+    const authority = testAuthority({
+      run: "unbudgeted-ledger-failure",
+      ledger: failingLedger,
+      logger: capturingLogger,
+    });
+
+    const settled = await authority.execute({
+      clientKey: "llm",
+      operation: "sendStructured",
+      request,
+      call: async () => response(),
+    });
+
+    expect(settled.ok).toBe(true);
+    const failure = events.find((entry) => entry.msg === "llm.ledger-write-failed");
+    expect(failure).toBeDefined();
+    expect(failure?.level).toBe("warn");
+    expect(failure?.data?.providerOutcome).toBe("success");
+    expect(failure?.data?.reason).toContain("ledger unavailable");
+    // The unrecorded figures are named, so the loss is reconstructable.
+    expect(failure?.data?.unrecorded).toBeDefined();
+  });
+
+  it("escalates the SAME ledger failure to error and a node-crash once a ceiling exists", async () => {
+    const { logger: capturingLogger, logs: events } = collectLogs();
+    const failingLedger = alwaysFailingLedger();
+    const authority = testAuthority({
+      run: "budgeted-ledger-failure",
+      limits: oneCallLimit,
+      ledger: failingLedger,
+      logger: capturingLogger,
+    });
+
+    const settled = await authority.execute({
+      clientKey: "llm",
+      operation: "sendStructured",
+      request,
+      call: async () => response(),
+    });
+
+    expect(settled.ok).toBe(false);
+    if (!settled.ok && settled.error.kind === "node-crash") {
+      expect(settled.error.message).toContain("could not be durably recorded");
+    }
+    expect(events.find((entry) => entry.msg === "llm.ledger-write-failed")?.level).toBe("error");
+  });
+
+  // ── Accumulation across a retry, and across concurrent siblings ────────────
+
+  it("counts a failed attempt's burned tokens AND the successful retry's toward one budget", async () => {
+    // `node-crash.usage` exists so a crash that burned tokens still attributes
+    // them (FR-W0-001). The ledger is a monotone append, so a retry ADDS to the
+    // failed attempt rather than replacing it — which is the only honest
+    // accounting: the provider charged for both. A retry that clobbered the
+    // first would let an unbounded retry loop cost an unbounded amount under a
+    // budget that never moves.
+    const ledger = createInMemorySpendLedger();
+    const authorityRunId = runId("crash-usage-across-retry");
+    const authority = testAuthority({ run: authorityRunId, limits, ledger });
+
+    const crashed = await authority.execute({
+      clientKey: "llm",
+      operation: "sendStructured",
+      request,
+      call: async () => err({
+        kind: "node-crash" as const,
+        nodeId: request.nodeId,
+        retriability: "retriable" as const,
+        message: "iteration limit",
+        usage: tokensOnly(12, 0),
+      }),
+    });
+    expect(crashed.ok).toBe(false);
+    expect(authority.budget.spent().tokens).toBe(12);
+
+    const retried = await authority.execute({
+      clientKey: "llm",
+      operation: "sendStructured",
+      request,
+      call: async () => response(),
+    });
+    expect(retried.ok).toBe(true);
+
+    // 12 burned + 10 on the retry — both preserved, neither clobbered.
+    expect(authority.budget.spent().tokens).toBe(22);
+    expect(authority.budget.spent().calls).toBe(2);
+    const durable = await ledger.read(authorityRunId);
+    expect(durable.ok).toBe(true);
+    if (durable.ok) expect(durable.value.tokens).toBe(22);
+  });
+
+  it("bounds AGGREGATE spend across concurrent siblings sharing one authority", async () => {
+    // Sibling nodes in one wave run under a single per-run authority, so the
+    // budget they share is a run budget, not a per-node one. Dispatching them
+    // truly concurrently — all three admitted-or-refused before any settles —
+    // is what proves the reservation accounting holds without a settle in
+    // between; sequential calls would pass even if reservations were ignored.
+    //
+    // The estimate is LEARNED first, deliberately. SC-003 promises a bound for
+    // a burst whose call size the meter has seen, and explicitly does NOT
+    // promise one for a first burst (nothing has been observed yet, so the
+    // projection is zero and every sibling is admitted). Asserting a bound on
+    // an unlearned burst would pin a guarantee the design does not make.
+    const ledger = createInMemorySpendLedger();
+    const authorityRunId = runId("concurrent-siblings");
+    const callsCeiling = ceilings([{ kind: "calls", limit: 3 }])!;
+    const authority = testAuthority({ run: authorityRunId, limits: callsCeiling, ledger });
+
+    const learned = await authority.execute({
+      clientKey: "llm",
+      operation: "sendStructured",
+      request,
+      call: async () => response(),
+    });
+    expect(learned.ok).toBe(true);
+
+    let providerCalls = 0;
+    const gate = deferred<void>();
+    const siblings = [0, 1, 2].map(() =>
+      authority.execute({
+        clientKey: "llm",
+        operation: "sendStructured",
+        request,
+        call: async () => {
+          providerCalls += 1;
+          await gate.promise;
+          return response();
+        },
+      }),
+    );
+    // Let every admission decision run before any call settles.
+    await Promise.resolve();
+    await Promise.resolve();
+    gate.resolve();
+
+    const settled = await Promise.all(siblings);
+    // The projection uses in-flight BEFORE reserving the current call, so the
+    // third sibling sees settled 1 + 2 in-flight = the ceiling of 3 and is refused.
+    expect(settled.filter((r) => r.ok).length).toBe(2);
+    expect(settled.filter((r) => !r.ok).length).toBe(1);
+    expect(providerCalls).toBe(2);
+
+    // The aggregate — the only figure a run budget is actually about — stayed
+    // inside the shared ceiling, and the durable ledger agrees with the meter.
+    expect(authority.budget.spent().calls).toBe(3);
+    expect(authority.budget.spent().calls).toBeLessThanOrEqual(3);
+    const durable = await ledger.read(authorityRunId);
+    expect(durable.ok).toBe(true);
+    if (durable.ok) expect(durable.value.calls).toBe(3);
+  });
+
 });

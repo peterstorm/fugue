@@ -103,7 +103,7 @@ export const makeNodeContext = (init: NodeContextInit): NodeContext => {
  * NEW context the node's `run` is invoked with. Used by the runtime when a
  * minting `CapabilityBroker` is wired: the broker resolves a node's declared
  * scopes into narrowed handles at dispatch, and those handles are layered over
- * the boot-scoped static client set (`http`/`db`/`llm`/…) the base context
+ * the boot-scoped static client set (`http`/`llm`/`cache`/…) the base context
  * already carries — broker-resolvable `"<provider>:<operation>"` names get their
  * minted handle, every plain capability keeps its static client.
  *

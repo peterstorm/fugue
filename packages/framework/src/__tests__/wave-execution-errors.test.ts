@@ -11,14 +11,15 @@ import { describe, it, expect } from "bun:test";
 import { executeWave, type WaveConfig } from "../dag-runtime/wave-execution.js";
 import { InMemoryFreshnessIndex } from "../dag-runtime/freshness-check.js";
 import { N, R, D } from "./_id-helpers.js";
-import { FE } from "./_freshness-helpers.js";
+import { FE, RN, mkWitness } from "./_freshness-helpers.js";
 import { makeNodeContext } from "../shared/make-node-context.js";
 import { RecordingObserver } from "../observer/observer.js";
 import { brandAsValidatedNodeContext } from "../types/node.js";
 import type { DagMachineContext } from "../dag-runtime/types.js";
 import type { NodeDef } from "../types/node.js";
-import type { DagDef } from "../types/dag.js";
+import type { DagDef, EdgeDef } from "../types/dag.js";
 import type { FrameworkError } from "../types/errors.js";
+import type { NodeId } from "../types/ids.js";
 import { z } from "zod";
 import { err, ok } from "../types/result.js";
 import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
@@ -455,5 +456,64 @@ describe("executeWave — error paths", () => {
       expect(result.event.coFailedNodeIds).toEqual([N("b")]);
       expect(result.event.partialOutputs?.get(N("c"))).toBe("c-out");
     }
+  });
+});
+
+describe("executeWave — routing early failure carries durable freshness state", () => {
+  // The freshness-`aborted` return (line ~296) already pins this carry; the
+  // routing early-failure return is the OTHER exit that has to do it. Both
+  // hand the durable resource→witness projection and the completed-node set
+  // back to the pure transition — drop them here and a retry after a routing
+  // failure re-attempts freshness work the wave already did, re-firing the
+  // side effects those witnesses were recorded to prevent.
+  const witnessed = mkWitness("orders", "v7");
+
+  const failingConfidenceNode = (): NodeDef<unknown, unknown> => ({
+    ...makeNode("a"),
+    confidence: {
+      mode: "value",
+      extract: () => { throw new Error("confidence extractor exploded"); },
+    },
+  });
+
+  it("carries priorWitnesses and freshnessCompletedNodeIds onto the early-failure event", async () => {
+    const node = failingConfidenceNode();
+    const dag = { ...makeDag(), nodes: [node] } as unknown as DagDef;
+    const machineCtx = testRuntimeContext({
+      dag,
+      waves: [[N("a")]],
+      activeNodeIds: new Set([N("a")]),
+      nodeById: new Map([[N("a"), node]]),
+      // A conditional outgoing edge is what makes routing evaluate this node at
+      // all — without one, `emitRoutingDecisions` skips it entirely.
+      outgoingByNode: new Map<NodeId, readonly EdgeDef[]>([[
+        N("a"),
+        [{
+          from: N("a"),
+          to: N("b"),
+          kind: "conditional",
+          when: { label: "always", version: 1, check: () => true },
+        }],
+      ]]),
+      priorWitnesses: new Map([[String(RN("orders")), witnessed]]),
+      freshnessCompletedNodeIds: new Set([N("earlier")]),
+      freshnessExecutionEpoch: FE(),
+    }) as DagMachineContext;
+
+    const { event } = await executeWave(
+      0,
+      machineCtx,
+      { ...makeConfig(new Map([["a", node]])), dag },
+    );
+
+    expect(event.type).toBe("node-failed");
+    if (event.type !== "node-failed") return;
+    expect(event.error.kind).toBe("node-crash");
+    expect(event.priorWitnesses).toEqual(new Map([[String(RN("orders")), witnessed]]));
+    // The carried set is prior ∪ this wave's witnessed nodes: `earlier` survives
+    // the routing failure (that is the carry-through), and `a` — which DID run
+    // its side effect before routing rejected its output — joins it, so a retry
+    // does not re-witness it either.
+    expect(event.freshnessCompletedNodeIds).toEqual(new Set([N("earlier"), N("a")]));
   });
 });
