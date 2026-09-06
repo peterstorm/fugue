@@ -430,14 +430,48 @@ export interface RunState {
  * stored under the bare `nodeId` — byte-identical to pre-extension behavior
  * (a `namespace` supplied without either is rejected as ambiguous caller
  * error by `compositeNodeKey`).
- * Composite-capable backends (currently the file backend) store an entry with
- * either component under
+ * With either component present, the entry is stored under
  * `${namespace ?? "dag"}@${nodeId}@${index ?? 0}@${attempt ?? 0}`, a distinct
  * durable key so indexed fan-out instances (F1) and subgraph namespaces (F8)
- * never overwrite each other or the canonical entry. In-memory and Redis
- * intentionally ignore these options and fold to bare `nodeId` (FR-023).
+ * never overwrite each other or the canonical entry. EVERY backend honors this
+ * (ADR-0085); F6 shipped it file-only under FR-023, which no longer holds.
  */
 export type SaveNodeOpts = CompositeNodeKeyOpts;
+
+/**
+ * Encode a node's STORED ADDRESS, or fail typed — ONE encoding of this
+ * boundary, shared by the adapters (the same discipline as
+ * `evaluateCheckpointLoadGates` and `parseNodeStateRecord` above).
+ *
+ * `compositeNodeKey` throws as a write-side constructor invariant. Every
+ * backend must turn that into `checkpoint-write-failed`: a malformed address
+ * is CALLER error, not a driver fault, and a caller cannot branch on an error
+ * kind that varies with which backend a deployment happened to configure.
+ * Centralizing it makes that parity structural rather than three hand-kept
+ * copies — a Redis implementation that folded the throw into its driver
+ * `try` would silently report `cache-error` instead (ADR-0085).
+ *
+ * Returning `Err` also keeps the fail-closed property at each call site: a
+ * rejected address must issue NO write, never fall back to the canonical key,
+ * which is how a fan index would clobber the node's own checkpoint.
+ */
+export const encodeStoredNodeKey = (
+  runId: RunId,
+  nodeId: NodeId,
+  opts: SaveNodeOpts | undefined,
+): Result<string, FrameworkError> => {
+  try {
+    return ok(compositeNodeKey(nodeId, opts));
+  } catch (error) {
+    return err(
+      buildCheckpointWriteFailed(
+        runId,
+        nodeId,
+        `composite node address is invalid: ${safeErrorMessage(error)}`,
+      ),
+    );
+  }
+};
 
 /** Per-call options for `Checkpointer.load`. */
 export interface CheckpointerLoadOpts {
@@ -705,28 +739,16 @@ export class InMemoryCheckpointer implements Checkpointer {
         ),
       );
     }
-    // Separate try from the snapshot gate above so the diagnostic names the
-    // actual fault: a malformed composite address is caller error, not an
-    // unreadable node state. `compositeNodeKey` throws as a write-side
-    // constructor invariant; it must settle typed like every other write
-    // failure on this backend rather than escape as a raw rejection.
-    let nodeKey: string;
-    try {
-      nodeKey = compositeNodeKey(detached.nodeId, opts);
-    } catch (error) {
-      return err(
-        buildCheckpointWriteFailed(
-          runId,
-          detached.nodeId,
-          `composite node address is invalid: ${safeErrorMessage(error)}`,
-        ),
-      );
-    }
+    // Encoded separately from the snapshot gate above so the diagnostic names
+    // the actual fault: a malformed address is caller error, not an unreadable
+    // node state.
+    const nodeKey = encodeStoredNodeKey(runId, detached.nodeId, opts);
+    if (!nodeKey.ok) return nodeKey;
     // Computed keys in an object literal use CreateDataProperty, not Set, so a
     // node legally named `__proto__` (ID_PATTERN admits `_`) defines an own
     // entry instead of re-parenting the map — the same hazard the Redis and
     // file backends handle with defineProperty.
-    this.nodes.set(runId, { ...existing, [nodeKey]: detached });
+    this.nodes.set(runId, { ...existing, [nodeKey.value]: detached });
     return ok(undefined);
   }
 

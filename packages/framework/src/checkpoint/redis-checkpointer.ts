@@ -12,18 +12,18 @@ import type {
   RunState,
   SaveNodeOpts,
 } from "./checkpointer.js";
-import { compositeNodeKey } from "./composite-node-key.js";
 import {
   TTL_SECONDS,
   evaluateCheckpointLoadGates,
   standardCheckpointClockRead,
+  encodeStoredNodeKey,
   parseNodeStateRecord,
   parseRunMetaRecord,
   reportCorruptCheckpointEntry,
   snapshotExpectedDagFingerprint,
 } from "./checkpointer.js";
 import { FRAMEWORK_VERSION } from "./fingerprint.js";
-import { buildCheckpointWriteFailed, frameworkError } from "../types/error-factories.js";
+import { frameworkError } from "../types/error-factories.js";
 import { safeErrorMessage } from "../types/safe-error.js";
 import { fwLogger } from "../logger.js";
 
@@ -260,24 +260,11 @@ export class RedisCheckpointer implements Checkpointer {
     // call with no opts encodes to exactly `nodeId`, so existing keys are
     // byte-identical and no migration is required.
     //
-    // Address encoding sits OUTSIDE the driver try below, and reports
-    // `checkpoint-write-failed` rather than `cache-error`, because a malformed
-    // address is caller error, not a Redis fault — and because the file and
-    // in-memory backends already classify it that way. Folding it into the
-    // driver catch would make one failure wear three different error kinds
-    // depending on which backend a run happened to be configured with.
-    let nodeKey: string;
-    try {
-      nodeKey = compositeNodeKey(nodeId, opts);
-    } catch (e) {
-      return err(
-        buildCheckpointWriteFailed(
-          runId,
-          nodeId,
-          `composite node address is invalid: ${safeErrorMessage(e)}`,
-        ),
-      );
-    }
+    // Encoded BEFORE (and outside) the driver try below: a malformed address
+    // must issue no write at all, and must not be reclassified as this
+    // adapter's `cache-error`. See `encodeStoredNodeKey`.
+    const nodeKey = encodeStoredNodeKey(runId, nodeId, opts);
+    if (!nodeKey.ok) return nodeKey;
     try {
       if (!this.saveNodeSha) {
         this.saveNodeSha = await this.redis.script("LOAD", SAVE_NODE_SCRIPT) as string;
@@ -288,7 +275,7 @@ export class RedisCheckpointer implements Checkpointer {
           2,
           nodesKey(runId),
           metaKey(runId),
-          nodeKey,
+          nodeKey.value,
           payload,
           String(TTL_SECONDS),
         );
@@ -302,7 +289,7 @@ export class RedisCheckpointer implements Checkpointer {
             2,
             nodesKey(runId),
             metaKey(runId),
-            nodeKey,
+            nodeKey.value,
             payload,
             String(TTL_SECONDS),
           );
