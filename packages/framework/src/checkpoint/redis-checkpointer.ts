@@ -1,4 +1,3 @@
-import Redis from "ioredis";
 import type { Result } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { RunId, NodeId } from "../types/ids.js";
@@ -122,12 +121,56 @@ redis.call("EXPIRE", KEYS[2], ARGV[3])
 return 1
 `;
 
+/**
+ * The driver seam this adapter actually needs, owned by this consumer rather
+ * than by `ioredis` (architecture.md, "Ports at I/O Boundaries"; the shape is
+ * `typescript-patterns.md`'s object type of call signatures, so a fake is a
+ * plain object literal, not a mock).
+ *
+ * Every signature carries the EXACT arity of the call below it, not a
+ * convenient `...args`. That is the point: the port is what the compiler
+ * checks a test fake against, so a fake whose `evalsha` took the arguments in
+ * the wrong order used to type-check behind an `as never` and now does not.
+ *
+ * `ioredis.Redis` satisfies this structurally with no cast, so production
+ * wiring is unchanged and needs no adapter of its own — and the single
+ * production call site is what keeps proving it, since that file type-checks a
+ * real client against this port on every build.
+ */
+export type RedisCheckpointerDriver = {
+  get(key: string): Promise<string | null>;
+  set(key: string, value: string, ex: "EX", ttlSeconds: number): Promise<unknown>;
+  hgetall(key: string): Promise<Record<string, string>>;
+  script(subcommand: "LOAD", script: string): Promise<unknown>;
+  evalsha: SaveNodeScriptInvocation;
+  eval: SaveNodeScriptInvocation;
+};
+
+/**
+ * EVALSHA and EVAL take the same arguments here by requirement, not by
+ * coincidence: the NOSCRIPT fallback must replay exactly what the primary path
+ * sent, or a fan-out index would land under a different key whenever the
+ * script cache happened to be cold. One shape names both so they cannot drift.
+ */
+type SaveNodeScriptInvocation = (
+  scriptOrSha: string,
+  numKeys: number,
+  nodesKey: string,
+  metaKey: string,
+  nodeKey: string,
+  payload: string,
+  ttlSeconds: string,
+) => Promise<unknown>;
+
 export class RedisCheckpointer implements Checkpointer {
   /** EVALSHA hash, populated on first saveNode (lazy SCRIPT LOAD). */
   private saveNodeSha: string | null = null;
   private readonly now: () => number;
 
-  constructor(private readonly redis: Redis, opts?: { readonly now?: () => number }) {
+  constructor(
+    private readonly redis: RedisCheckpointerDriver,
+    opts?: { readonly now?: () => number },
+  ) {
     this.now = opts?.now ?? Date.now;
   }
 
@@ -156,11 +199,7 @@ export class RedisCheckpointer implements Checkpointer {
     try {
       rawMeta = await this.redis.get(metaKey(runId));
     } catch (e) {
-      return err({
-        kind: "cache-error" as const,
-        operation: "load:get-meta",
-        message: safeErrorMessage(e),
-      });
+      return err(frameworkError.cacheError("load:get-meta", safeErrorMessage(e)));
     }
     if (!rawMeta) return ok(null);
 
@@ -202,11 +241,7 @@ export class RedisCheckpointer implements Checkpointer {
     try {
       rawNodes = await this.redis.hgetall(nodesKey(runId));
     } catch (e) {
-      return err({
-        kind: "cache-error" as const,
-        operation: "load:hgetall-nodes",
-        message: safeErrorMessage(e),
-      });
+      return err(frameworkError.cacheError("load:hgetall-nodes", safeErrorMessage(e)));
     }
 
     // Per-entry deserialize: a single corrupt row must not poison the rest.
@@ -281,11 +316,7 @@ export class RedisCheckpointer implements Checkpointer {
     try {
       ({ nodeId, payload } = serializeNode(state));
     } catch (e) {
-      return err({
-        kind: "cache-error" as const,
-        operation: "saveNode",
-        message: safeErrorMessage(e),
-      });
+      return err(frameworkError.cacheError("saveNode", safeErrorMessage(e)));
     }
     // The HASH FIELD is the composite address (ADR-0075); the payload keeps
     // `state.nodeId` as the canonical DAG identity. Canonical folding means a
@@ -331,11 +362,7 @@ export class RedisCheckpointer implements Checkpointer {
       }
       return ok(undefined);
     } catch (e) {
-      return err({
-        kind: "cache-error" as const,
-        operation: "saveNode",
-        message: safeErrorMessage(e),
-      });
+      return err(frameworkError.cacheError("saveNode", safeErrorMessage(e)));
     }
   }
 
@@ -352,11 +379,7 @@ export class RedisCheckpointer implements Checkpointer {
       await this.redis.set(metaKey(runId), serializeMeta(meta, createdAtClock.value), "EX", TTL_SECONDS);
       return ok(undefined);
     } catch (e) {
-      return err({
-        kind: "cache-error" as const,
-        operation: "setMeta",
-        message: safeErrorMessage(e),
-      });
+      return err(frameworkError.cacheError("setMeta", safeErrorMessage(e)));
     }
   }
 }

@@ -6,6 +6,7 @@ import type { DagId, NodeId, RunId } from "../types/ids.js";
 import { FRAMEWORK_VERSION } from "../checkpoint/fingerprint.js";
 import { RedisCheckpointer } from "../checkpoint/redis-checkpointer.js";
 import { checkpointerSuite } from "./_checkpointer-suite.js";
+import { redisDriverFake } from "./_redis-driver-fake.js";
 import { D, N, R } from "./_id-helpers.js";
 import { formatFrameworkError, retriabilityOf } from "../types/errors.js";
 import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
@@ -71,14 +72,10 @@ checkpointerSuite(
 // `encodeStoredNodeKey`, so these throws escaped as raw rejections instead of
 // the typed `Result` the port declares.
 describe("RedisCheckpointer — hostile-value totality (write-side serialization)", () => {
-  // No driver call should ever be reached; a bare stub is enough, and its
-  // emptiness is itself part of the assertion (fail closed, no write).
-  const unusedRedis = () =>
-    ({
-      script: async () => "sha-1",
-      evalsha: async () => "OK",
-      eval: async () => "OK",
-    }) as never;
+  // No driver call should ever be reached, so the fake overrides NOTHING: every
+  // method is the named-throw default, and the refusal has to happen before any
+  // of them (fail closed, no write).
+  const unusedRedis = () => redisDriverFake();
 
   test("saveNode resolves a typed err for a CYCLIC output, never a raw rejection", async () => {
     const cp: Checkpointer = new RedisCheckpointer(unusedRedis());
@@ -93,7 +90,10 @@ describe("RedisCheckpointer — hostile-value totality (write-side serialization
 
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected typed refusal");
-    expect(result.error.kind).toBe("cache-error");
+    // The tag is asserted, not just the kind: `saveNode` is DELIBERATELY the
+    // same tag the driver-failure catch below uses (see that block's banner),
+    // and this pins the sharing as a decision rather than a coincidence.
+    expect(result.error).toMatchObject({ kind: "cache-error", operation: "saveNode" });
   });
 
   test("saveNode resolves a typed err for an INVALID completedAt, never a raw rejection", async () => {
@@ -107,12 +107,12 @@ describe("RedisCheckpointer — hostile-value totality (write-side serialization
 
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected typed refusal");
-    expect(result.error.kind).toBe("cache-error");
+    expect(result.error).toMatchObject({ kind: "cache-error", operation: "saveNode" });
   });
 
   test("a serialization refusal issues NO driver call", async () => {
     const calls: string[] = [];
-    const recording = {
+    const recording = redisDriverFake({
       script: async () => {
         calls.push("script");
         return "sha-1";
@@ -125,7 +125,7 @@ describe("RedisCheckpointer — hostile-value totality (write-side serialization
         calls.push("eval");
         return "OK";
       },
-    } as never;
+    });
     const cp: Checkpointer = new RedisCheckpointer(recording);
     const cyclic: Record<string, unknown> = {};
     cyclic.self = cyclic;
@@ -590,10 +590,10 @@ describe("RedisCheckpointer — required corruption observability", () => {
       createdAt: new Date().toISOString(),
       frameworkVersion: FRAMEWORK_VERSION,
     });
-    const redis = {
+    const redis = redisDriverFake({
       get: async () => meta,
       hgetall: async () => ({ broken: "{ not json" }),
-    } as unknown as Redis;
+    });
     setFrameworkLogger({
       debug: () => {},
       info: () => {},
@@ -611,31 +611,39 @@ describe("RedisCheckpointer — required corruption observability", () => {
 // Driver-failure totality (ADR-0080: "never a raw rejection"). Every hostile
 // seam this adapter owns ITSELF — the injected clock, the load-opts getter,
 // JSON serialization, the corrupt-entry logger — is pinned above. The seam it
-// does NOT own is the one likeliest to fire in production: ioredis rejecting
-// because the connection dropped mid-call. Four `catch` blocks translate that
-// into a typed `cache-error`, and each carries a DIFFERENT `operation` tag, so
-// a reader of a production error can tell which call failed.
+// does NOT own is the one likeliest to fire in production: the driver
+// rejecting because the connection dropped mid-call. These pin the five driver
+// calls that can reject, and they pin the `operation` tag, not just the kind.
 //
-// Untested, all four were free to rot: a refactor that moved a driver call out
+// The tag is worth pinning because it is what localizes a production failure —
+// but only three of the tags belong to one call each. `saveNode` is shared, ON
+// PURPOSE, between the pre-driver serialization guard and the driver catch
+// (see `saveNode`'s own comment: keeping one tag is what makes composite
+// addressing observably identical to what shipped before it). So for a
+// `cache-error(saveNode)`, `message` is what says whether the caller handed us
+// an unserializable value or Redis went away — never `operation`. The
+// serialization tests above assert the same tag, so that sharing is a recorded
+// decision and splitting it has to change a test that explains why.
+//
+// Untested, these were free to rot: a refactor that moved a driver call out
 // from under its try would leak a raw rejection through a port declaring
 // `Promise<Result<_, FrameworkError>>`, and a typo'd tag would mislabel the
-// failure — both with the whole suite green. These pin the tag, not just the
-// kind, for exactly that reason.
+// failure — both with the whole suite green.
 //
-// What each stub OMITS is part of its assertion: reaching an unlisted method
-// throws a TypeError rather than resolving typed, so a stub kept minimal also
-// proves the adapter never touched a call the path should not reach.
+// What each fake does NOT override is part of its assertion: `redisDriverFake`
+// defaults every other method to a throw naming itself, so a test also proves
+// the adapter never reached a call that path should not make.
 describe("RedisCheckpointer — driver-failure totality (the driver rejects)", () => {
   // The one shared fixture: four tests need the SAME driver fault, so the fault
   // is never what distinguishes them — only the call it interrupts is.
   const DROPPED = () => new Error("Connection is closed.");
 
   test("load: a rejecting GET on the meta key is cache-error(load:get-meta)", async () => {
-    const redis = {
+    const redis = redisDriverFake({
       get: async () => {
         throw DROPPED();
       },
-    } as unknown as Redis;
+    });
 
     const result = await new RedisCheckpointer(redis).load(R("driver-get-meta"));
 
@@ -647,7 +655,7 @@ describe("RedisCheckpointer — driver-failure totality (the driver rejects)", (
   test("load: a rejecting HGETALL on the nodes key is cache-error(load:hgetall-nodes)", async () => {
     // The meta read and every gate must SUCCEED first, or this would pass for
     // the wrong reason — the two load-side tags would be indistinguishable.
-    const redis = {
+    const redis = redisDriverFake({
       get: async () =>
         JSON.stringify({
           dagId: "d",
@@ -659,7 +667,7 @@ describe("RedisCheckpointer — driver-failure totality (the driver rejects)", (
       hgetall: async () => {
         throw DROPPED();
       },
-    } as unknown as Redis;
+    });
 
     const result = await new RedisCheckpointer(redis).load(R("driver-hgetall"));
 
@@ -673,7 +681,7 @@ describe("RedisCheckpointer — driver-failure totality (the driver rejects)", (
     // flushed script must fall through to the typed boundary — replaying it as
     // an inline EVAL would turn one dropped connection into two.
     const evalCalls: string[] = [];
-    const redis = {
+    const redis = redisDriverFake({
       script: async () => "sha-1",
       evalsha: async () => {
         throw DROPPED();
@@ -682,7 +690,7 @@ describe("RedisCheckpointer — driver-failure totality (the driver rejects)", (
         evalCalls.push("eval");
         return "OK";
       },
-    } as unknown as Redis;
+    });
 
     const result = await new RedisCheckpointer(redis).saveNode(R("driver-evalsha"), {
       nodeId: N("n1"),
@@ -696,12 +704,39 @@ describe("RedisCheckpointer — driver-failure totality (the driver rejects)", (
     expect(evalCalls).toEqual([]);
   });
 
+  test("saveNode: a rejecting SCRIPT LOAD is cache-error(saveNode) and never reaches EVALSHA", async () => {
+    // Priming the Lua SHA is a driver call like any other, and it is the FIRST
+    // one `saveNode` makes on a cold adapter — so it is the one a production
+    // reconnect is likeliest to catch. It shares the outer try (and the tag)
+    // with the evalsha path; what this pins is that it is inside that try at
+    // all. Hoisting the priming step to its own init helper is the refactor
+    // that would leak it, and nothing else in the suite would notice.
+    //
+    // `evalsha`/`eval` stay at their named-throw defaults: reaching either
+    // after the SHA never arrived would fail loudly rather than pass quietly.
+    const redis = redisDriverFake({
+      script: async () => {
+        throw DROPPED();
+      },
+    });
+
+    const result = await new RedisCheckpointer(redis).saveNode(R("driver-script-load"), {
+      nodeId: N("n1"),
+      output: { ok: true },
+      completedAt: new Date("2026-08-12T00:00:01Z"),
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a typed refusal");
+    expect(result.error).toMatchObject({ kind: "cache-error", operation: "saveNode" });
+  });
+
   test("setMeta: a rejecting SET is cache-error(setMeta)", async () => {
-    const redis = {
+    const redis = redisDriverFake({
       set: async () => {
         throw DROPPED();
       },
-    } as unknown as Redis;
+    });
 
     const result = await new RedisCheckpointer(redis).setMeta(R("driver-set-meta"), {
       dagId: D("d"),

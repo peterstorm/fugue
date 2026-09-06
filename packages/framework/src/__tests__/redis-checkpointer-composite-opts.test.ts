@@ -21,33 +21,39 @@ import { describe, test, expect } from "bun:test";
 import { RedisCheckpointer } from "../checkpoint/redis-checkpointer.js";
 import type { Checkpointer, SaveNodeOpts } from "../checkpoint/checkpointer.js";
 import { dagId, nodeId, runId } from "../types/ids.js";
+import { redisDriverFake } from "./_redis-driver-fake.js";
 
 interface EvalCall {
   readonly nodeKey: string;
   readonly payload: string;
 }
 
-/** Records the node key each `saveNode` writes into the run's nodes hash. */
-const recordingRedis = (calls: EvalCall[]) => ({
-  script: async () => "sha-1",
-  evalsha: async (
-    _sha: string,
-    _numKeys: number,
-    _nodesKey: string,
-    _metaKey: string,
-    nodeKey: string,
-    payload: string,
-  ) => {
-    calls.push({ nodeKey, payload });
-    return "OK";
-  },
-  eval: async () => "OK",
-  hgetall: async () => ({}),
-  set: async () => "OK",
-  get: async () => null,
-  expire: async () => 1,
-  del: async () => 1,
-});
+/**
+ * Records the node key each `saveNode` writes into the run's nodes hash.
+ *
+ * The parameter list is checked against `RedisCheckpointerDriver`, so `nodeKey`
+ * really is the argument the adapter passes in that position — before the port
+ * existed, a cast let this fake claim any order it liked and still pass.
+ */
+const recordingRedis = (calls: EvalCall[]) =>
+  redisDriverFake({
+    script: async () => "sha-1",
+    evalsha: async (
+      _sha: string,
+      _numKeys: number,
+      _nodesKey: string,
+      _metaKey: string,
+      nodeKey: string,
+      payload: string,
+    ) => {
+      calls.push({ nodeKey, payload });
+      return "OK";
+    },
+    eval: async () => "OK",
+    hgetall: async () => ({}),
+    set: async () => "OK",
+    get: async () => null,
+  });
 
 const RUN = runId("run-composite");
 const NODE = nodeId("n1");
@@ -61,7 +67,7 @@ describe("RedisCheckpointer — composite opts reach the wire (ADR-0075)", () =>
   test("the composite address is the hash FIELD; canonical folding leaves it bare", async () => {
     const calls: EvalCall[] = [];
     // Typed as the PORT, so the call is the one a composite-aware caller makes.
-    const cp: Checkpointer = new RedisCheckpointer(recordingRedis(calls) as never);
+    const cp: Checkpointer = new RedisCheckpointer(recordingRedis(calls));
 
     await cp.saveNode(RUN, state, { namespace: "sub", index: 3, attempt: 1 });
     await cp.saveNode(RUN, state);
@@ -71,7 +77,7 @@ describe("RedisCheckpointer — composite opts reach the wire (ADR-0075)", () =>
 
   test("the stored PAYLOAD keeps the canonical nodeId even under a composite key", async () => {
     const calls: EvalCall[] = [];
-    const cp: Checkpointer = new RedisCheckpointer(recordingRedis(calls) as never);
+    const cp: Checkpointer = new RedisCheckpointer(recordingRedis(calls));
 
     await cp.saveNode(RUN, state, { index: 7 });
 
@@ -84,7 +90,7 @@ describe("RedisCheckpointer — composite opts reach the wire (ADR-0075)", () =>
 
   test("distinct indices write distinct fields — no index overwrites another", async () => {
     const calls: EvalCall[] = [];
-    const cp: Checkpointer = new RedisCheckpointer(recordingRedis(calls) as never);
+    const cp: Checkpointer = new RedisCheckpointer(recordingRedis(calls));
 
     for (const index of [0, 1, 2]) await cp.saveNode(RUN, state, { index });
 
@@ -93,7 +99,7 @@ describe("RedisCheckpointer — composite opts reach the wire (ADR-0075)", () =>
 
   test("a malformed address fails typed and issues NO write at all", async () => {
     const calls: EvalCall[] = [];
-    const cp: Checkpointer = new RedisCheckpointer(recordingRedis(calls) as never);
+    const cp: Checkpointer = new RedisCheckpointer(recordingRedis(calls));
     const malformed = Object.freeze({
       namespace: "../bad",
       index: -1,
@@ -122,7 +128,7 @@ describe("RedisCheckpointer — composite opts reach the wire (ADR-0075)", () =>
     // applied to only one would silently write fan-out indices to the canonical
     // key whenever the cache happened to be cold.
     const evalCalls: string[] = [];
-    const noscriptRedis = {
+    const noscriptRedis = redisDriverFake({
       script: async () => "sha-1",
       evalsha: async () => {
         throw new Error("NOSCRIPT No matching script. Please use EVAL.");
@@ -137,7 +143,7 @@ describe("RedisCheckpointer — composite opts reach the wire (ADR-0075)", () =>
         evalCalls.push(nodeKey);
         return "OK";
       },
-    } as never;
+    });
     const cp: Checkpointer = new RedisCheckpointer(noscriptRedis);
 
     const result = await cp.saveNode(RUN, state, { namespace: "sub", index: 5, attempt: 2 });
@@ -148,7 +154,7 @@ describe("RedisCheckpointer — composite opts reach the wire (ADR-0075)", () =>
 
   test("setMeta/saveNode pairing carries the composite key through", async () => {
     const calls: EvalCall[] = [];
-    const cp: Checkpointer = new RedisCheckpointer(recordingRedis(calls) as never);
+    const cp: Checkpointer = new RedisCheckpointer(recordingRedis(calls));
     const meta = await cp.setMeta(RUN, {
       dagId: dagId("dag-1"),
       startedAt: new Date("2026-08-12T00:00:00Z"),

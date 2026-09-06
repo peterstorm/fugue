@@ -130,17 +130,24 @@ export function checkpointerSuite(
 
     // ── Composite addressing (ADR-0075) — port contract since F1 PR-A ───────
     //
-    // These five are the durable precondition for F1's runtime-width fan-out,
-    // and they pin the two halves of one contract.
+    // These five are the durable precondition for F1's runtime-width fan-out.
+    // They pin three separate guarantees, each with its own failure mode, so a
+    // backend that passes some and not others fails in a different way:
     //
-    // The first four are ADDRESS DISTINCTNESS: if any backend fails them, a
-    // mapped node's indices collide and a partial fan silently restarts from
-    // whichever index wrote last on resume.
+    //   DISTINCTNESS (1st, 3rd, 4th) — a composite address is stored under
+    //   itself, distinct indices address distinct entries, and a canonical
+    //   save coexists with an indexed one. Fail these and a mapped node's
+    //   indices collide: a partial fan silently restarts from whichever index
+    //   wrote last on resume.
     //
-    // The fifth is FAIL-CLOSED: a malformed address must issue no write at
-    // all rather than fall back to the canonical key. That fallback is how a
-    // fan index would clobber the node's own checkpoint, so a backend that
-    // passed the first four and skipped this one would still lose data.
+    //   CANONICAL-KEY STABILITY (2nd) — a no-opts save is keyed by exactly the
+    //   bare nodeId. This is not about fan-out at all; it is the no-migration
+    //   guarantee. Fail it and every EXISTING, non-mapped run's checkpoints
+    //   move to a new key, so each one silently resumes from nothing.
+    //
+    //   FAIL-CLOSED (5th) — a malformed address issues no write rather than
+    //   falling back to the canonical key. That fallback is how a fan index
+    //   would clobber the node's own checkpoint.
 
     test("composite opts store under the composite address, not the bare nodeId", async () => {
       const meta: RunMeta = { dagId: "dag-1" as DagId, startedAt: new Date(), nodeCount: 1 };
