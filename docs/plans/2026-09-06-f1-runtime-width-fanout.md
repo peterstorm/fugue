@@ -2,7 +2,9 @@
 
 **Created:** 2026-09-06
 **Status:** **PR-A shipped 2026-09-06** (composite checkpoint addressing on every backend — see
-ADR-0085). D7 decided. PR-B (the `map` node itself) is what remains; PR-C and PR-D follow it.
+ADR-0085). **PR-B shipped 2026-09-07** (the `map` node, the width value types, per-index durable
+addressing and resume, the host key's index dimension, FR-F1-011). D7 decided and enforced.
+PR-C and PR-D remain. See §12 for what PR-B decided that this plan did not specify.
 §2 below is preserved as the evidence record of the state PR-A was written against, annotated
 rather than rewritten — see the note at its head.
 **Branch:** `feat/f1-runtime-width-fanout`
@@ -349,3 +351,68 @@ two of three backends silently ignore it. Closing that is meaningful on its own 
    and FR-F1-011.
 3. **Does admission project the fan (D4), or is metering-only sufficient for v1?** Open. Does not
    block PR-A or PR-B.
+
+
+---
+
+## 12. What PR-B decided that this plan did not specify
+
+Recorded here rather than left implicit, because each was a fork the plan left
+open and a later reader would otherwise have to re-derive from the code.
+
+### The `checkpointer` capability is where per-index state lives
+
+FR-F1-007 says resume must re-run only the indices with no durable entry, "on
+Redis and the host writer". Implementing it surfaced a fact §2 did not record:
+**the host's `CheckpointWriter` keys are write-only.** Nothing in production
+reads them back — outer-run resume comes from the kernel's `jobLike`, and those
+keys are a durable per-node output record consumed elsewhere. So there was no
+reader on that path for a fan to consult.
+
+The fan's per-index state therefore lives in the framework's `Checkpointer`
+port, reached through a new `checkpointer` capability. That is the port
+ADR-0075's composite address was designed for — its Context paragraph names
+indexed fan-out explicitly — and PR-A had just made every backend honor it.
+
+The capability is registered through ADR-0051's module-augmentation point from
+`checkpoint/capability.ts`, not added to `BaseNodeContext` as an eighth
+built-in. The reason is structural: `types/errors.ts` imports `Capability` from
+`types/node.ts`, and `checkpoint/checkpointer.ts` imports `types/errors.ts`, so
+a built-in field would close an import cycle. `module-graph-acyclic.test.ts`
+catches this; it caught it once during PR-B already, for `MapIndex`, which is
+why that brand sits in its own leaf module.
+
+**Consequence for hosts:** a DAG containing a map node now needs a
+`Checkpointer` wired into the node context (`capabilities: { checkpointer }`).
+A run without one fails at the capability gate before any node runs, which is
+the intended fail-closed behavior — a map node without durable per-index state
+would silently re-run every completed index after a crash.
+
+### The host key's index dimension is written, not yet read
+
+`buildCheckpointKey` gained the `$<index>` form and the host writer threads it,
+so a fan's durable per-node output records are addressed per index rather than
+overwriting each other. That half of FR-F1-006 is closed. The *read* side of
+FR-F1-007 on that path is not, and cannot be until something reads those keys
+back at all — which is a separate change with its own port, and is not what the
+map node depends on.
+
+### The fan is sequential
+
+Not stated either way in §4. PR-B runs indices one at a time, and two properties
+depend on it: a run that hits its F3 ceiling mid-fan stops at a **known** index
+rather than at whichever of N in-flight children lost the race, and the
+reducer's input is in index order on a resumed run as well as a fresh one.
+
+Bounded concurrency is additive later — it changes neither the address space nor
+the reducer's contract — but it is a real gap for a wide fan of slow children
+and should be its own PR with its own budget-interaction tests.
+
+### FR-F1-011 is enforced in `createMapNode`, not `validateDagShape`
+
+§7 assigned it to `defineDag` validation. It lives in the node constructor
+instead, because that is where the child sub-DAG is visible: the child is in the
+constructor's closure, and surfacing it on `NodeDef` purely so a later validator
+could re-find it would widen the node type for every node in the framework to
+serve one kind. Construction is module-scope, so the rejection is still at
+import — strictly earlier than the DAG the node is later placed in.

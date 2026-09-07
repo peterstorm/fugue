@@ -9,6 +9,10 @@ export {
   corruptCheckpointAddressValue,
   InMemoryCheckpointer,
 } from "./checkpointer.js";
+// Re-exported for its SIDE EFFECT as much as its value: the module carries the
+// `checkpointer` CapabilityRegistry augmentation, and a type-only module would
+// be elided by the bundler, silently taking the augmentation with it.
+export { CHECKPOINTER_CAPABILITY } from "./capability.js";
 export { dagFingerprint, FRAMEWORK_VERSION } from "./fingerprint.js";
 export {
   compositeNodeKey,

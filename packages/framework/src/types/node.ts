@@ -31,7 +31,7 @@ export type ConfidenceMode<O> =
   | { readonly mode: "none" }
   | { readonly mode: "value"; readonly extract: (output: O) => Confidence };
 
-export type NodeKind = "fetch" | "transform" | "llm" | "guardrail" | "eval-judge";
+export type NodeKind = "fetch" | "transform" | "llm" | "guardrail" | "eval-judge" | "map";
 
 /** Retry configuration for a single node. */
 export interface NodeRetryConfig {
