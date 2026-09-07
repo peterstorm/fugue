@@ -286,6 +286,37 @@ describe("compositeNodeKey — hostile inputs rejected (typed throws)", () => {
         expect((error as Error).message).not.toContain("exploded");
       }
     });
+
+    // Round-22 C1 — the namespace-ALONE branch. Every hostile-namespace pin
+    // above supplies `index`, which routes through `assertIdComponent`; with
+    // no addressing component the ambiguity guard fires FIRST and builds its
+    // own message, a second rejection path that round 21's fix did not cover
+    // and no test reached. That is why this defect recurred: the fix went to
+    // the instance, not the class.
+    it("rejects a throwing-hook namespace ALONE with the codec's own typed message (never a raw trap)", () => {
+      const call = () =>
+        compositeNodeKey(N("read-node"), {
+          namespace: hostile as unknown as string,
+        } as unknown as CompositeNodeKeyOpts);
+      expect(call).toThrow("without index/attempt is ambiguous");
+      try {
+        call();
+        throw new Error("expected the codec to reject the hostile value");
+      } catch (error) {
+        expect((error as Error).message).not.toContain("exploded");
+      }
+    });
+  }
+
+  // The ambiguity rule itself still fires for every forged namespace shape,
+  // not just the ones whose rendering used to trap — the guard rejects on
+  // PRESENCE, so its verdict must not depend on the value's type at all.
+  for (const [label, bad] of forgedNamespaces) {
+    it(`rejects a forged namespace (${label}) supplied alone as ambiguous`, () => {
+      expect(() =>
+        compositeNodeKey(N("read-node"), { namespace: bad } as unknown as CompositeNodeKeyOpts),
+      ).toThrow("without index/attempt is ambiguous");
+    });
   }
 });
 

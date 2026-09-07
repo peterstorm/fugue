@@ -765,6 +765,23 @@ describe("RedisCheckpointer — driver-failure totality (the driver rejects)", (
   });
 });
 
+/**
+ * The corrupt-meta grammar cases, defined ONCE and run twice: against a fake
+ * driver (fast, no server) and against a real one. Two copies would drift the
+ * moment someone added a ninth mutation to the leg they happened to be
+ * looking at, and the leg that missed it would still be green.
+ */
+const CORRUPT_META_MUTATIONS: [string, Record<string, unknown>][] = [
+    ["negative nodeCount", { nodeCount: -7 }],
+    ["string nodeCount", { nodeCount: "3" }],
+    ["non-finite nodeCount (JSON null)", { nodeCount: 1e999 }],
+    ["missing nodeCount", { nodeCount: undefined }],
+    ["non-string dagId", { dagId: 42 }],
+    ["colon-bearing dagId", { dagId: "tenant:dag" }],
+    ["non-string startedAt", { startedAt: 123 }],
+    ["non-string createdAt", { createdAt: null }],
+];
+
 // Hostile-seam totality WITHOUT a live server (round-21 pr-test-analyzer-1).
 // The Redis backend's injected-clock and load-opts guards are the same "never
 // a raw rejection" class as the driver-failure block above, but they were
@@ -897,6 +914,41 @@ describe("RedisCheckpointer — hostile seams without a live server", () => {
       expect(result.error.message).toContain("expected the script SHA as a string");
     }
   });
+
+  // Round-22 pr-test-analyzer-1: the corrupt-meta GRAMMAR gate, fast.
+  //
+  // The live-server table below pins the same eight mutations, but only under
+  // `REDIS_URL` — so the gate that stops corrupt bytes from becoming a "valid"
+  // checkpoint had zero coverage on a plain `bun test`. Nothing about the
+  // grammar needs a server: the gate reads the meta STRING, and the fake
+  // supplies it directly. This is the same gap class round 21 closed for the
+  // clock and load-opts guards; closing it here for the sibling contract is
+  // what stops the class from recurring one seam at a time.
+  test.each(CORRUPT_META_MUTATIONS)(
+    "corrupt stored meta (%s) settles as typed checkpoint-corrupt without a live server",
+    async (_label, mutation) => {
+      const corrupt = JSON.stringify({
+        dagId: "d",
+        startedAt: "2026-01-01T00:00:00.000Z",
+        nodeCount: 1,
+        createdAt: new Date().toISOString(),
+        frameworkVersion: FRAMEWORK_VERSION,
+        ...mutation,
+      });
+      // `hgetall` stays at its named-throw default: the grammar gate must
+      // refuse before the nodes read, so corrupt meta costs no second call.
+      const cp = new RedisCheckpointer(redisDriverFake({ get: async () => corrupt }));
+
+      const result = await cp.load(R("fake-corrupt-meta"));
+
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("expected a typed refusal");
+      expect(result.error.kind).toBe("checkpoint-corrupt");
+      if (result.error.kind === "checkpoint-corrupt") {
+        expect(result.error.message).toContain("deserialize failed");
+      }
+    },
+  );
 
   test("the NOSCRIPT fallback replays the EVALSHA argument list byte for byte", async () => {
     // Round-21 code-simplifier-1 pinned structurally: the two call sites now
@@ -1059,6 +1111,54 @@ describeRedis("RedisCheckpointer", () => {
     await cleanRuns(ownedRunIds);
   });
 
+  // Round-22 pr-test-analyzer-2: SAVE_NODE_SCRIPT's own reason for existing.
+  //
+  // The script justifies itself with "a worker crash between the HSET and
+  // either EXPIRE call would leave one key without a TTL, leaking checkpoint
+  // data forever" — and nothing verified the second half of that claim.
+  // Every other saveNode test observes the ARGUMENT LIST handed to
+  // evalsha/eval, which a fake can report faithfully while the script itself
+  // does something else entirely; deleting either EXPIRE line from the Lua
+  // source passed the whole suite. This is the only assertion in the file that
+  // needs a real server, because the effect being checked is the server's.
+  test("saveNode's script sets a TTL on BOTH keys — proven by stripping them first", async () => {
+    const runId = makeRunId();
+    await cp.setMeta(R(runId), { dagId: D("d"), startedAt: new Date(), nodeCount: 1 });
+    await cp.saveNode(R(runId), {
+      nodeId: N("n1"),
+      output: { v: 1 },
+      completedAt: new Date(),
+    });
+
+    // Both keys exist now, but asserting their TTL here would prove nothing
+    // about the SCRIPT: `setMeta` sets the meta key with its own `EX`, so the
+    // meta TTL is already there whether or not the Lua ever touches KEYS[2].
+    // PERSIST strips both, leaving the script as the only thing that can put
+    // an expiry back — which is exactly the claim its comment makes.
+    await redisOrThrow().persist(`chkpt:${runId}`);
+    await redisOrThrow().persist(`chkpt:${runId}:meta`);
+    expect(await redisOrThrow().ttl(`chkpt:${runId}`)).toBe(-1);
+    expect(await redisOrThrow().ttl(`chkpt:${runId}:meta`)).toBe(-1);
+
+    await cp.saveNode(R(runId), {
+      nodeId: N("n2"),
+      output: { v: 2 },
+      completedAt: new Date(),
+    });
+
+    // `ttl` returns -1 for a key with no expiry and -2 for a missing key, so
+    // "> 0" rejects both the leak this script exists to prevent and the key
+    // never being written at all. Drop either EXPIRE line from
+    // SAVE_NODE_SCRIPT and the corresponding assertion goes to -1.
+    const nodesTtl = await redisOrThrow().ttl(`chkpt:${runId}`);
+    const metaTtl = await redisOrThrow().ttl(`chkpt:${runId}:meta`);
+
+    expect(nodesTtl).toBeGreaterThan(0);
+    expect(metaTtl).toBeGreaterThan(0);
+    expect(nodesTtl).toBeLessThanOrEqual(TTL_SECONDS);
+    expect(metaTtl).toBeLessThanOrEqual(TTL_SECONDS);
+  });
+
   // Redis-specific: SCRIPT FLUSH between saves causes NOSCRIPT on EVALSHA;
   // the adapter must fall back to inline EVAL and re-prime the SHA.
   test("recovers from server-side SCRIPT FLUSH (NOSCRIPT) via inline EVAL fallback", async () => {
@@ -1204,16 +1304,7 @@ describeRedis("RedisCheckpointer", () => {
   // settle as `checkpoint-corrupt` — never flow negative/Infinity/string
   // counts or non-string ids into consumers as a "valid" checkpoint — and a
   // corrupt node row must drop into `corruptNodeAddresses`, not into the map.
-  test.each([
-    ["negative nodeCount", { nodeCount: -7 }],
-    ["string nodeCount", { nodeCount: "3" }],
-    ["non-finite nodeCount (JSON null)", { nodeCount: 1e999 }],
-    ["missing nodeCount", { nodeCount: undefined }],
-    ["non-string dagId", { dagId: 42 }],
-    ["colon-bearing dagId", { dagId: "tenant:dag" }],
-    ["non-string startedAt", { startedAt: 123 }],
-    ["non-string createdAt", { createdAt: null }],
-  ])("corrupt stored meta (%s) settles as typed checkpoint-corrupt", async (_label, mutation) => {
+  test.each(CORRUPT_META_MUTATIONS)("corrupt stored meta (%s) settles as typed checkpoint-corrupt", async (_label, mutation) => {
     const runId = makeRunId();
     const meta = {
       dagId: "d",

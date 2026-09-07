@@ -110,8 +110,16 @@ const assertNoNamespaceAlone = (opts: {
   readonly attempt?: number;
 }): void => {
   if (opts.namespace !== undefined && opts.index === undefined && opts.attempt === undefined) {
+    // `safeDiagnosticRender` for the same reason the two asserts below use it:
+    // `${opts.namespace}` invokes the value's own `toString`, so a forged
+    // `{ toString() { throw } }` reaching THIS branch would explode while the
+    // rejection was still being built and escape carrying the hostile's text.
+    // This branch is the one a namespace-ONLY opts bag takes, so the asserts
+    // below never see it: EVERY rejection path out of this module renders
+    // untrusted values through the same helper, which is what makes the
+    // error-channel contract above hold by inspection rather than per-site.
     throw new Error(
-      `Invalid composite node key opts: namespace "${opts.namespace}" without index/attempt is ambiguous — ` +
+      `Invalid composite node key opts: namespace ${safeDiagnosticRender(opts.namespace)} without index/attempt is ambiguous — ` +
         "a namespace-only address would be silently folded into the canonical nodeId; supply index and/or attempt to address a composite entry",
     );
   }
