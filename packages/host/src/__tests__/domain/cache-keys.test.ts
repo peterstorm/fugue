@@ -10,7 +10,7 @@
 
 import { describe, it, expect } from "bun:test";
 import * as fc from "fast-check";
-import { dagId, runId as makeRunId, nodeId as makeNodeId, isOk } from "@fuguejs/framework";
+import { dagId, runId as makeRunId, nodeId as makeNodeId, isOk, mapIndex } from "@fuguejs/framework";
 import {
   cacheKeyPrefix,
   buildCacheKey,
@@ -180,6 +180,94 @@ describe("the spend key is disjoint from the checkpoint NodeId namespace (C1)", 
   //
   // `$` is outside `ID_PATTERN`, so no valid `NodeId` can reach this string.
   // Same technique as `DAG_INPUT = "$input"`, same reason.
+
+  // ── F1 PR-B: the fan index dimension (D3, FR-F1-006/007/008) ──────────────
+  //
+  // The index makes a second address form live under the SAME prefix as the
+  // canonical checkpoint key and the `$spend` aggregate. Three things have to
+  // hold at once, and each has its own failure: canonical keys must not move
+  // (no migration), indexed keys must not collide with each other (an index
+  // silently overwriting another is the exact bug the index exists to prevent),
+  // and neither form may reach `$spend` (whose HASH a checkpoint `SET` would
+  // destroy).
+
+  it("an ABSENT index produces the byte-identical pre-F1 key (FR-F1-008)", () => {
+    // The no-migration guarantee, stated as an equality rather than a format
+    // description: adding the parameter must not have moved a single existing
+    // key by one byte.
+    const key = buildCheckpointKey(TENANT_A, dagId("orders"), makeRunId("run-1"), makeNodeId("fetch"));
+    expect(key).toBe("fugue:tenant-a:orders:run-1:fetch");
+  });
+
+  it("a PRESENT index appends `$<index>` beneath the same prefix", () => {
+    expect(
+      buildCheckpointKey(TENANT_A, dagId("orders"), makeRunId("run-1"), makeNodeId("fetch"), mapIndex(3)),
+    ).toBe("fugue:tenant-a:orders:run-1:fetch$3");
+    // Index 0 is a real address, NOT the canonical form. This is the same
+    // decision ADR-0075 made for the composite codec: an explicit zero selects
+    // the indexed keyspace, so a one-wide fan does not overwrite the node's own
+    // canonical checkpoint.
+    expect(
+      buildCheckpointKey(TENANT_A, dagId("orders"), makeRunId("run-1"), makeNodeId("fetch"), mapIndex(0)),
+    ).toBe("fugue:tenant-a:orders:run-1:fetch$0");
+  });
+
+  it("index 0 is NOT the canonical key — a one-wide fan cannot clobber the node", () => {
+    const canonical = buildCheckpointKey(TENANT_A, dagId("d"), makeRunId("r"), makeNodeId("n"));
+    const indexed = buildCheckpointKey(TENANT_A, dagId("d"), makeRunId("r"), makeNodeId("n"), mapIndex(0));
+    expect(indexed).not.toBe(canonical);
+  });
+
+  it("distinct indices address distinct keys — no index overwrites another (FR-F1-006)", () => {
+    const keys = [0, 1, 2, 24].map((i) =>
+      buildCheckpointKey(TENANT_A, dagId("d"), makeRunId("r"), makeNodeId("n"), mapIndex(i)),
+    );
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it("NO valid node id can impersonate an indexed address, for any tenant/dag/run", () => {
+    // The general statement, not a sample: `$` is outside `ID_PATTERN`, so a
+    // canonical key can never contain one. Without this, a node named
+    // `fetch$3` would address the same durable entry as index 3 of `fetch`.
+    fc.assert(
+      fc.property(anyTenant, colonFree, colonFree, anyNodeId, anyNodeId, fc.nat({ max: 10_000 }),
+        (t, d, r, canonicalNode, fannedNode, i) => {
+          const canonical = buildCheckpointKey(t, dagId(d), makeRunId(r), makeNodeId(canonicalNode));
+          const indexed = buildCheckpointKey(
+            t, dagId(d), makeRunId(r), makeNodeId(fannedNode), mapIndex(i),
+          );
+          return canonical !== indexed;
+        }),
+      { numRuns: 400 },
+    );
+  });
+
+  it("NO indexed address can reach the spend key either", () => {
+    // `$spend` starts with `$` where a nodeId cannot, so an indexed key
+    // (`<nodeId>$<int>`) is disjoint from it too — but the checkpoint `SET`
+    // destroying the ledger HASH is severe enough to state for BOTH forms
+    // rather than inferring the second from the first.
+    fc.assert(
+      fc.property(anyTenant, colonFree, colonFree, anyNodeId, fc.nat({ max: 10_000 }),
+        (t, d, r, n, i) => {
+          const indexed = buildCheckpointKey(t, dagId(d), makeRunId(r), makeNodeId(n), mapIndex(i));
+          return indexed !== buildSpendKey(t, dagId(d), makeRunId(r));
+        }),
+      { numRuns: 400 },
+    );
+  });
+
+  it("every indexed key still carries the tenant prefix (AD-4 / US2 / SC-001)", () => {
+    // The index is a new way to build a key, so it is a new way to escape the
+    // tenant ACL scope if it ever bypassed the prefix chokepoint.
+    fc.assert(
+      fc.property(anyTenant, colonFree, colonFree, anyNodeId, fc.nat({ max: 10_000 }),
+        (t, d, r, n, i) =>
+          buildCheckpointKey(t, dagId(d), makeRunId(r), makeNodeId(n), mapIndex(i))
+            .startsWith(`fugue:${t}:`)),
+      { numRuns: 400 },
+    );
+  });
 
   it("a node literally named `spend` does NOT collide with the spend key", () => {
     const spendKey = buildSpendKey(TENANT_A, dagId("orders"), makeRunId("run-1"));

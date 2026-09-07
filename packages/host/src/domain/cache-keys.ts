@@ -18,7 +18,7 @@
  *   isolated (now also across tenants).
  */
 
-import type { DagId, RunId, NodeId } from "@fuguejs/framework";
+import type { DagId, RunId, NodeId, MapIndex } from "@fuguejs/framework";
 
 // `TenantId` is the SINGLE canonical, hard-branded tenant identifier defined in
 // `./tenant-id` (the supervisor's resolved security principal). Importing the type
@@ -67,15 +67,32 @@ export const checkpointKeyPrefix = (tenant: TenantId, dagId: DagId, runId: RunId
   `${tenantPrefix(tenant)}${dagId}:${runId}:`;
 
 /**
- * Build the full checkpoint key for a specific tenant, DAG, run, and node.
- * Format: `fugue:<tenant>:<dagId>:<runId>:<nodeId>`
+ * Build the full checkpoint key for a specific tenant, DAG, run, and node —
+ * optionally addressing ONE child instance of a `map` node's fan (F1 PR-B, D3).
+ *
+ * Format: `fugue:<tenant>:<dagId>:<runId>:<nodeId>`            (index absent)
+ *         `fugue:<tenant>:<dagId>:<runId>:<nodeId>$<index>`    (index present)
+ *
+ * `$` is the separator for the same reason `buildSpendKey` already uses it and
+ * ADR-0075 uses `@`: it is OUTSIDE `NodeId`'s grammar (`[A-Za-z0-9_:-]`). That
+ * is what makes the two forms provably disjoint — a canonical key can never
+ * contain `$`, so no node can be named to impersonate an indexed address, and
+ * an indexed address can never collide with the sibling `$spend` aggregate
+ * (which starts with `$`, where a nodeId cannot).
+ *
+ * FR-F1-008: with `index` absent the output is BYTE-IDENTICAL to the pre-F1
+ * key, so every existing checkpoint keeps resolving and no migration is needed.
+ * `MapIndex` is branded, so a caller cannot reach the indexed form with a
+ * value that would mint an unmatchable address.
  */
 export const buildCheckpointKey = (
   tenant: TenantId,
   dagId: DagId,
   runId: RunId,
   nodeId: NodeId,
-): string => `${checkpointKeyPrefix(tenant, dagId, runId)}${nodeId}`;
+  index?: MapIndex,
+): string =>
+  `${checkpointKeyPrefix(tenant, dagId, runId)}${nodeId}${index === undefined ? "" : `$${index}`}`;
 
 /**
  * Build the ONE Redis HASH key holding a run's durable spend.

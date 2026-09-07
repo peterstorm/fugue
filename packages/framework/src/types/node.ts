@@ -12,6 +12,7 @@ import type { HttpCapability } from "./http-capability.js";
 import type { ClockCapability } from "./clock.js";
 import type { NonEmptyString } from "./non-empty-string.js";
 import type { BudgetCapability } from "./budget-capability.js";
+import type { MapIndex } from "./map-index.js";
 
 export type { Tracer };
 export type { HttpCapability } from "./http-capability.js";
@@ -101,9 +102,28 @@ export interface ContextCacheAdapter {
   ) => Promise<Result<void, FrameworkError>>;
 }
 
-/** Durable checkpoint writer — persists node outputs for crash-resume. */
+/**
+ * Durable checkpoint writer — persists node outputs for crash-resume.
+ *
+ * This is the HOST's writer, a different port from the framework's
+ * `Checkpointer` (which addresses composite entries through ADR-0075's codec).
+ * The two are not interchangeable and are not being merged here: this one is
+ * what production actually writes run checkpoints through.
+ *
+ * `index` addresses one child instance of a `map` node's fan (F1 PR-B). Absent
+ * — the only shape that existed before F1 — MUST produce a byte-identical key
+ * to before (FR-F1-008), so no existing checkpoint needs migrating. It is a
+ * branded `MapIndex` rather than a bare number because the value lands in a
+ * durable address: a `NaN` or `-1` would mint a key no resume could ever match,
+ * and the failure would present as an index that silently re-executes forever.
+ */
 export interface CheckpointWriter {
-  readonly write: (runId: RunId, nodeId: NodeId, value: unknown) => Promise<void>;
+  readonly write: (
+    runId: RunId,
+    nodeId: NodeId,
+    value: unknown,
+    index?: MapIndex,
+  ) => Promise<void>;
 }
 
 // ---------------------------------------------------------------------------

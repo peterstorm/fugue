@@ -60,6 +60,20 @@ export const frameworkError = {
   transient: (nid: string | NodeId, message: string, httpStatus?: number): FrameworkError =>
     ({ kind: "transient", nodeId: toNodeId(nid), message, ...(httpStatus !== undefined ? { httpStatus } : {}) }),
 
+  /**
+   * A map node's `widthFrom` did not resolve to an array (FR-F1-005).
+   *
+   * `found` must already be a BOUNDED rendering (`safeDiagnosticRender`), not
+   * the raw value: the upstream output is arbitrary caller data and this error
+   * is serialized into durable control-plane records.
+   */
+  mapWidthInvalid: (nid: string | NodeId, widthFrom: string, found: string): FrameworkError =>
+    ({ kind: "map-width-invalid", nodeId: toNodeId(nid), widthFrom, found }),
+
+  /** A map node's resolved width exceeded its declared `maxWidth` (FR-F1-003). */
+  mapWidthExceeded: (nid: string | NodeId, resolvedWidth: number, maxWidth: number): FrameworkError =>
+    ({ kind: "map-width-exceeded", nodeId: toNodeId(nid), resolvedWidth, maxWidth }),
+
   rejected: (nid: string | NodeId, reason: string): FrameworkError =>
     ({ kind: "rejected", nodeId: toNodeId(nid), reason }),
 

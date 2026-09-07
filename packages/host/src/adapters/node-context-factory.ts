@@ -21,6 +21,7 @@ import { isDeepStrictEqual } from "node:util";
 import type {
   ContextCacheAdapter,
   CheckpointWriter,
+  MapIndex,
   CacheLookup,
   DagId,
   RunId,
@@ -272,8 +273,17 @@ export const createNamespacedCheckpointWriter = (
   });
 
   return {
-    write: async (_runId: RunId, nodeId: NodeId, value: unknown): Promise<void> => {
-      const fullKey = buildCheckpointKey(tenant, dagId, runId, nodeId);
+    write: async (
+      _runId: RunId,
+      nodeId: NodeId,
+      value: unknown,
+      index?: MapIndex,
+    ): Promise<void> => {
+      // `index` addresses one child of a `map` node's fan (F1 PR-B). Threaded
+      // straight into the key builder rather than branched on here: absent, the
+      // builder produces the byte-identical pre-F1 key (FR-F1-008), so this
+      // path has no separate canonical case to keep in sync.
+      const fullKey = buildCheckpointKey(tenant, dagId, runId, nodeId, index);
       let serialized: string;
       try {
         assertLosslessEvent(value, {
