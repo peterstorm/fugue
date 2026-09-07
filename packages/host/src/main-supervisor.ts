@@ -28,7 +28,7 @@ import { formatHostError, fsPurgeFailed } from "./domain/host-error.js";
 import type { HostError } from "./domain/host-error.js";
 import type { Result } from "@fuguejs/framework";
 import { ok, err, safeErrorMessage } from "@fuguejs/framework";
-import type { RedisConnectivityPort, RedisPort, RedisPubSubPort, TokenStorePort } from "./ports.js";
+import type { LogPort, RedisConnectivityPort, RedisPort, RedisPubSubPort, TokenStorePort } from "./ports.js";
 import { createSupervisor, createTerminationHandler } from "./supervisor/supervisor.js";
 import type { AdmissionPort, AdmissionOutcome, AuthDeps } from "./supervisor/supervisor.js";
 import {
@@ -66,7 +66,7 @@ import {
 import type { AuditStreamPort } from "./supervisor/audit/audit-sink-log-redis.js";
 import type { AuditPort } from "./supervisor/audit/audit-port.js";
 import { createRedisTokenStore } from "./adapters/token-store.js";
-import { createIoredisRedisPort } from "./adapters/redis-connectivity.js";
+import { attachRedisErrorListener, createIoredisRedisPort } from "./adapters/redis-connectivity.js";
 import { runBootstrap } from "./supervisor/bootstrap/run-bootstrap.js";
 import { createRealmJwtVerifier } from "./adapters/realm-jwt-verifier.js";
 import type { RealmJwtDeps } from "./http/middleware/auth.js";
@@ -96,11 +96,22 @@ interface RedisBundle {
   readonly disconnect: () => Promise<void>;
 }
 
-const createRedis = async (redisUrl: string): Promise<Result<RedisBundle, HostError>> => {
+const createRedis = async (
+  redisUrl: string,
+  logger: LogPort,
+): Promise<Result<RedisBundle, HostError>> => {
   try {
     const { Redis } = await import("ioredis");
     const client = new Redis(redisUrl, { maxRetriesPerRequest: 3, lazyConnect: true });
     const subClient = new Redis(redisUrl, { maxRetriesPerRequest: 3, lazyConnect: true });
+    // Both clients, before either can dial. `Redis` is an EventEmitter, so an
+    // `error` event with no listener is THROWN — and this process supervises
+    // every tenant worker on the host, with no `uncaughtException` handler of
+    // its own, so an unlistened connection reset takes all of them down with
+    // it. Same one-line defect as `createRedisConnectivity`'s, strictly wider
+    // blast radius; closed through the same helper so the two cannot drift.
+    attachRedisErrorListener(client, logger, { client: "command" });
+    attachRedisErrorListener(subClient, logger, { client: "pubsub" });
     const redisRedactions = redisUrlRedactions(redisUrl);
     const redisFailure = (operation: string, error: unknown): HostError =>
       redisOperationFailure(operation, error, redisRedactions);
@@ -204,7 +215,7 @@ const main = async () => {
   }
   const config = configResult.value;
 
-  const redisResult = await createRedis(config.REDIS_URL);
+  const redisResult = await createRedis(config.REDIS_URL, logger);
   if (!redisResult.ok) {
     logger.error(`[supervisor] Redis connectivity failed: ${formatHostError(redisResult.error)}`);
     process.exit(1);

@@ -82,10 +82,16 @@ const makeRedis = (seed: {
     hGetAll: NonNullable<RedisPort["hGetAll"]>;
     hSet: NonNullable<RedisPort["hSet"]>;
     get: RedisPort["get"];
+    set: RedisPort["set"];
   } = {
     get: async (key) => {
       touched.push(key);
       return ok(strings.get(key) ?? null);
+    },
+    set: async (key, value) => {
+      touched.push(key);
+      strings.set(key, value);
+      return ok(null);
     },
     hGetAll: async (key) => {
       touched.push(key);
@@ -103,11 +109,7 @@ const makeRedis = (seed: {
 
   const port: RedisPort = {
     get: (key) => behaviour.get(key),
-    set: async (key, value) => {
-      touched.push(key);
-      strings.set(key, value);
-      return ok(null);
-    },
+    set: (key, value, opts) => behaviour.set(key, value, opts),
     del: async () => ok(1),
     scan: async () => ok({ cursor: "0", keys: [] }),
     sAdd: async () => ok(1),
@@ -516,6 +518,36 @@ describe("createNamespacedCheckpointer — totality", () => {
         expect(loaded.error.message).toContain("down");
       }
     }
+  });
+
+  it("turns a failing metadata WRITE into a typed cache-error", async () => {
+    // setMeta's driver call was the one path with no failure test while its
+    // get/hGetAll/hSet siblings each had one — and that arm is exactly where a
+    // rejecting driver escaped before. A run whose meta write silently
+    // "succeeded" would look resumable and have nowhere to hang its entries.
+    const { port, behaviour } = makeRedis();
+    behaviour.set = async () => err({ kind: "redis-unavailable", operation: "SET: down" });
+
+    const written = await subject(port).checkpointer.setMeta(RUN, meta());
+    expect(written.ok).toBe(false);
+    if (!written.ok) {
+      expect(written.error.kind).toBe("cache-error");
+      if (written.error.kind === "cache-error") {
+        expect(written.error.message).toContain("down");
+      }
+    }
+  });
+
+  it("turns a REJECTING metadata write into a typed cache-error, never a raw rejection", async () => {
+    const { port, behaviour } = makeRedis();
+    behaviour.set = () => Promise.reject(new Error("socket closed"));
+
+    const written = await subject(port).checkpointer
+      .setMeta(RUN, meta())
+      .catch((error: unknown) => ({ ok: false as const, error, raw: true }));
+
+    expect("raw" in written).toBe(false);
+    expect(written.ok).toBe(false);
   });
 
   it("turns a failing nodes read into a typed cache-error", async () => {

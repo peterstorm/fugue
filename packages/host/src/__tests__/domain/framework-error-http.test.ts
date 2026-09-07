@@ -48,6 +48,37 @@ describe("classifyFrameworkError", () => {
     expect(c.countsAsCircuitFailure).toBe(true);
   });
 
+  // The two kinds F1 PR-B added to EXECUTION_FAILURE_KINDS. The source comment
+  // argues for placing them there BECAUSE they are deterministic and
+  // caller-data-shaped, "classified alongside `validation` — its closest
+  // sibling"; these pin the conclusion that argument reaches, so a later
+  // reclassification has to change a test rather than only a comment. Both are
+  // asserted to match `validation` exactly, since "they move together" is the
+  // stated contract.
+  for (const [label, error] of [
+    ["map-width-invalid", {
+      kind: "map-width-invalid", nodeId: "n" as never, widthFrom: "items", found: "3",
+    }],
+    ["map-width-exceeded", {
+      kind: "map-width-exceeded", nodeId: "n" as never, resolvedWidth: 26, maxWidth: 25,
+    }],
+  ] as const satisfies readonly (readonly [string, FrameworkError])[]) {
+    it(`${label} → 500, DOES trip the circuit (classified with validation)`, () => {
+      const c = classifyFrameworkError(error);
+      expect(c.status).toBe(500);
+      expect(c.countsAsCircuitFailure).toBe(true);
+      // Not a settled denial and not a usage limit: no Retry-After, because a
+      // retry re-reads the same upstream value and reproduces the verdict.
+      expect(c.retryAfterSeconds).toBeUndefined();
+
+      const validation = classifyFrameworkError({
+        kind: "validation", nodeId: "n" as never, message: "bad",
+      });
+      expect(c.status).toBe(validation.status);
+      expect(c.countsAsCircuitFailure).toBe(validation.countsAsCircuitFailure);
+    });
+  }
+
   it("validation → 500, DOES trip the circuit", () => {
     const e: FrameworkError = { kind: "validation", nodeId: "n" as never, message: "bad" };
     const c = classifyFrameworkError(e);

@@ -11,10 +11,14 @@
 // then fan over something else, and there is no second place where the bound
 // could be checked differently.
 //
-// The three arms are the whole contract (FR-F1-003/004/005):
-//   - not an array            → `map-width-invalid`, fail closed
-//   - length > maxWidth       → `map-width-exceeded`, fail closed, NEVER truncated
-//   - length === 0            → SUCCESS with an empty fan (not an error)
+// The three arms are the whole contract. Each carries its OWN FR, because the
+// arms below are not in ascending FR order and a reader pairing them
+// positionally against a "FR-F1-003/004/005" group label would mis-attribute
+// all three:
+//   - not an array            → `map-width-invalid`, fail closed        (FR-F1-005)
+//   - length > maxWidth       → `map-width-exceeded`, fail closed,
+//                               NEVER truncated                          (FR-F1-003)
+//   - length === 0            → SUCCESS with an empty fan (not an error) (FR-F1-004)
 //
 // Zero deserves its own sentence because it is the arm most likely to be
 // "fixed" into a crash by someone reading the other two: "nothing matched" is

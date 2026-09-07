@@ -14,12 +14,14 @@
 
 import type {
   HitlRedisPort,
+  LogPort,
   RedisConnectivityPort,
   RedisExpiry,
   RedisPort,
   RedisValueGuard,
 } from "../ports.js";
 import type { HostError } from "../domain/host-error.js";
+import { logWithoutThrowing } from "../hitl/diagnostic-logging.js";
 import { ok, err, safeErrorMessage } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 // Type-only — erased at compile time, so importing this module loads NO ioredis
@@ -387,6 +389,39 @@ export const requireHitlRedisPort = (redis: RedisPort): HitlRedisPort => {
   return redis as HitlRedisPort;
 };
 
+/**
+ * Attach the `error` listener every ioredis client MUST have.
+ *
+ * `Redis` is an `EventEmitter`, and Node's contract for an `error` event with
+ * NO listener is to throw it. So a connection reset, a failed reconnect, or an
+ * ACL disconnect does not degrade this host — it kills the process. That is not
+ * a hypothetical: nothing in `packages/host/src` attached one before, on any of
+ * the client construction sites, and the process-wide `uncaughtException`
+ * handler cannot stand in for it (it is registered inside `createHost`, AFTER
+ * `executeStartup` has already dialled Redis, and it exits the process anyway).
+ *
+ * The handler logs and returns, deliberately. ioredis owns reconnection, and
+ * the host reports `degraded:redis-disconnected` from its own `ping` probe —
+ * the defect being closed here is the CRASH, not the absence of a recovery
+ * policy, and inventing one here would be a second, unreviewed decision.
+ *
+ * `logWithoutThrowing` is the reporting channel because it is the one that
+ * cannot itself become the failure: an absent or throwing logger falls back to
+ * stderr, so this is never silent.
+ */
+export const attachRedisErrorListener = (
+  client: Pick<IoRedis, "on">,
+  logger: LogPort | undefined,
+  context: Record<string, unknown> = {},
+): void => {
+  client.on("error", (error: unknown) => {
+    logWithoutThrowing(logger, "error", "Redis client connection error", {
+      ...context,
+      error: safeErrorMessage(error),
+    });
+  });
+};
+
 const defaultIoredisFactory = async (): Promise<RedisClientFactory> => {
   const { Redis } = await import("ioredis");
   return (redisUrl, options) => new Redis(redisUrl, options);
@@ -403,11 +438,16 @@ const defaultIoredisFactory = async (): Promise<RedisClientFactory> => {
  *   the `redisUrl` credential (ACL disabled / single-tenant deployment).
  * @param createClient   OPTIONAL ioredis client factory (test seam). Defaults to
  *   the dynamic-import ioredis factory; a unit test injects a fake.
+ * @param logger         OPTIONAL log port for connection-level `error` events.
+ *   Optional rather than required so the entrypoints need no change to be made
+ *   crash-safe; absent, `logWithoutThrowing` still reports to stderr, so the
+ *   event is never swallowed. Passing a real logger only upgrades the channel.
  */
 export const createRedisConnectivity = async (
   redisUrl: string,
   aclCredential?: RedisAclCredential,
   createClient?: RedisClientFactory,
+  logger?: LogPort,
 ): Promise<Result<RedisConnectivityBundle, HostError>> => {
   try {
     // The client comes from the injected factory (default: ioredis, dynamically
@@ -423,6 +463,11 @@ export const createRedisConnectivity = async (
         ? { username: aclCredential.username, password: aclCredential.password }
         : {}),
     });
+
+    // BEFORE any command can be issued: the window between construction and the
+    // first `ping` is exactly where the initial dial fails, and an unlistened
+    // `error` there is the crash this closes.
+    attachRedisErrorListener(client, logger);
 
     const port: RedisConnectivityPort = {
       ping: async () => {
