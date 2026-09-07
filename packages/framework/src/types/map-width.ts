@@ -191,7 +191,21 @@ export const resolveMappedItems = (
   // built to exactly this many elements — so "the length we checked" and "the
   // length we return" are the same number by construction rather than by two
   // reads agreeing.
-  const width = field.length;
+  //
+  // Inside a try for the reason the guard above does NOT cover it: `Array.isArray`
+  // performs `IsArray`, which unwraps a Proxy to its target WITHOUT invoking any
+  // trap. Passing that guard therefore proves the target is an array and proves
+  // nothing at all about what the next property read does — a Proxy whose `get`
+  // trap throws on `"length"` reaches this line having satisfied every check
+  // before it. So this read gets the same typed refusal as the field read above
+  // and the element reads below; the module header's promise is about EVERY
+  // access, and this is the third of three.
+  let width: number;
+  try {
+    width = field.length;
+  } catch (error) {
+    return readThrew(nodeId, from, "the width", error);
+  }
   if (width > max) {
     return err(frameworkError.mapWidthExceeded(nodeId, width, max));
   }

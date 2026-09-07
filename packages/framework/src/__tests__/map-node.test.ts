@@ -56,13 +56,17 @@ const ctxWith = (checkpointer: Checkpointer, runIdStr = "run-fan") =>
 /** Run a map node directly — the fan is the unit under test, not the outer wave. */
 const fanNode = (
   calls: unknown[],
-  over: { readonly maxWidth?: number; readonly child?: DagDef } = {},
+  over: {
+    readonly maxWidth?: number;
+    readonly child?: DagDef;
+    readonly widthFrom?: string;
+  } = {},
 ) =>
   createMapNode({
     id: "fan",
     inputSchema: z.object({ items: z.array(z.number()) }),
     outputSchema: z.array(z.number()),
-    widthFrom: "items",
+    widthFrom: over.widthFrom ?? "items",
     maxWidth: over.maxWidth ?? 25,
     child: over.child ?? childDag(calls),
     childOutputSchema: z.number(),
@@ -401,34 +405,12 @@ describe("createMapNode — rejected at module load", () => {
     ["NaN", Number.NaN],
   ] as const) {
     it(`rejects a ${label} maxWidth at construction`, () => {
-      expect(() =>
-        createMapNode({
-          id: "fan",
-          inputSchema: z.object({ items: z.array(z.number()) }),
-          outputSchema: z.array(z.number()),
-          widthFrom: "items",
-          maxWidth: bad,
-          child: childDag([]),
-          childOutputSchema: z.number(),
-          reduce: (rs) => ok([...rs]),
-        }),
-      ).toThrow("positive safe integer");
+      expect(() => fanNode([], { maxWidth: bad })).toThrow("positive safe integer");
     });
   }
 
   it("rejects a widthFrom that is not a plain field reference", () => {
-    expect(() =>
-      createMapNode({
-        id: "fan",
-        inputSchema: z.object({ items: z.array(z.number()) }),
-        outputSchema: z.array(z.number()),
-        widthFrom: "payload.items",
-        maxWidth: 5,
-        child: childDag([]),
-        childOutputSchema: z.number(),
-        reduce: (rs) => ok([...rs]),
-      }),
-    ).toThrow("field reference");
+    expect(() => fanNode([], { widthFrom: "payload.items" })).toThrow("field reference");
   });
 
   // FR-F1-011 / D7 — the one the plan singles out.
@@ -477,6 +459,36 @@ describe("createMapNode — rejected at module load", () => {
 
   it("accepts a child with no humanReview", () => {
     expect(() => fanNode([])).not.toThrow();
+  });
+});
+
+// ── The declared side-effect profile ────────────────────────────────────────
+
+describe("createMapNode — the side-effect profile", () => {
+  // A map node calls `saveNode` and `setMeta`; both MUTATE durable state, which
+  // is what `types/node.ts` defines `"writes"` as and explicitly excludes from
+  // `"reads"` ("without mutation"). Round 23 corrected this from `"reads"` and
+  // nothing pinned it, so a revert passed the whole suite.
+  //
+  // The mislabel is structural, not cosmetic: `side-effects.ts`'s union admits
+  // `idempotencyKey` and the write-freshness extractors ONLY on the
+  // `writes`/`external-call` arms, and `node-span.ts` gates its idempotency-key
+  // handling on those kinds — so `"reads"` silently excludes a state-mutating
+  // node from idempotency handling and misreports it to freshness contracts,
+  // operator dashboards and routing-safety analysis alike.
+  it("declares `writes` over the fan's checkpoint resource, not `reads`", () => {
+    const node = fanNode([]);
+    expect(node.sideEffects?.kind).toBe("writes");
+    // Compared as a plain string: `ResourceName` is branded, and re-branding
+    // the literal here would assert only that the same constructor was called
+    // twice rather than what it produced.
+    expect(String(node.sideEffects?.resource)).toBe("checkpoint:fan");
+  });
+
+  it("declares the checkpointer capability, which is what makes a partial fan resumable", () => {
+    // The gate that refuses a host wiring no `checkpointer` before any node
+    // runs — the reason `packages/host` grows a readable checkpointer at all.
+    expect(fanNode([]).requires).toEqual(["checkpointer"]);
   });
 });
 

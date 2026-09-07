@@ -8,7 +8,10 @@
  * - Shared underlying clients reused; per-run metering decorators and budget state allocated
  *
  * @satisfies FR-013 — Cache keys prefixed fugue:<tenant>:<dagId>:cache:<key>
- * @satisfies FR-013 — Checkpoint keys prefixed fugue:<tenant>:<dagId>:<runId>:<nodeId>
+ * @satisfies FR-013 — Checkpoint keys prefixed fugue:<tenant>:<dagId>:<runId>:<nodeId>,
+ *   with the optional `$<index>` suffix that addresses ONE child of a map
+ *   node's fan (F1 PR-B), and the `$meta` / `$nodes` aggregates the readable
+ *   checkpointer keeps beneath the same prefix
  * @satisfies FR-032 — Caller-created runId and AbortSignal are threaded unchanged
  * @satisfies FR-041 — Per-DAG TTL overrides apply to cache/checkpoint entries
  * @satisfies SC-008 (host spec: cross-DAG cache isolation) — Two DAGs using the
@@ -32,6 +35,7 @@ import type {
   InvocationOrigin,
 } from "@fuguejs/framework";
 import {
+  CHECKPOINTER_CAPABILITY,
   err,
   fromJson,
   makeNodeContext,
@@ -57,6 +61,7 @@ import { createRunSpendAuthority } from "./run-spend-authority.js";
 import type { HydratedSpend } from "./run-spend-authority.js";
 import { ceilingsOf } from "../domain/llm-budget.js";
 import { createRedisSpendLedger, spendLedgerRedis } from "./spend-ledger-redis.js";
+import { asCheckpointerRedisPort, createNamespacedCheckpointer } from "./redis-checkpointer.js";
 import { logWithoutThrowing } from "../hitl/diagnostic-logging.js";
 
 
@@ -628,7 +633,7 @@ const resolveOriginAndBindSubjectToken = (args: {
  * broker, and it now moves per node, in the framework.
  *
  * @satisfies FR-013 — Cache key isolation
- * @satisfies FR-013 — Checkpoint key isolation
+ * @satisfies FR-013 — Checkpoint key isolation, canonical and `$<index>` alike
  * @satisfies FR-032 — Caller-supplied runId + AbortSignal
  * @satisfies FR-041 — Per-DAG TTL overrides
  * @satisfies SC-008 (host spec: cross-DAG cache isolation — not the
@@ -746,6 +751,41 @@ export const createNodeContextForDag = async (
     hydratedLedger.checkpointCommit,
   );
 
+  // The READ side of the same boundary (F1 PR-B). A `map` node declares
+  // `requires: ["checkpointer"]` unconditionally, because a partial fan is only
+  // resumable if the completed indices can be read back — the write-only
+  // `checkpointWriter` above cannot do that.
+  //
+  // Per-run, not boot-scoped, for exactly the reason the writer is: the key
+  // namespace is `fugue:<tenant>:<dagId>:<runId>:…` and none of those three are
+  // known until the run is. `buildRuntimeCapabilities` therefore cannot hold it.
+  //
+  // A `RedisPort` without the two hash primitives yields no capability rather
+  // than a half-wired one. That is deliberate and it is the SAFE branch: the
+  // framework's capability gate then refuses any DAG containing a map node
+  // before its first node runs, with a `missing-capability` error naming the
+  // node — instead of a `TypeError` mid-fan, after the run has already spent.
+  const checkpointerRedis = asCheckpointerRedisPort(shared.redis);
+  if (checkpointerRedis === null) {
+    logWithoutThrowing(
+      shared.logger,
+      "warn",
+      "checkpointer capability unavailable — the Redis port implements no hash primitives; " +
+        "DAGs containing a map node will be refused at the capability gate",
+      { dagId, runId },
+    );
+  }
+  const checkpointer = checkpointerRedis === null
+    ? null
+    : createNamespacedCheckpointer(
+        checkpointerRedis,
+        tenant,
+        dagId,
+        runId,
+        ttl.checkpointTtlSec,
+        shared.logger,
+      );
+
   // Per-DAG prompts take precedence; fall back to shared (host-level) prompts.
   const dagPrompts = dag.prompts;
   const promptAccess = dagPrompts.size > 0
@@ -772,9 +812,13 @@ export const createNodeContextForDag = async (
     signal,
     contentFilter: shared.contentFilter,
     prompts: promptAccess,
-    // The boot-scoped static client set. Per-node minted scope handles (when a
-    // broker is wired) are merged OVER this by the framework at dispatch.
-    capabilities,
+    // The boot-scoped static client set, plus the one capability that cannot be
+    // boot-scoped because its identity is the run itself (see `checkpointer`
+    // above). Per-node minted scope handles (when a broker is wired) are merged
+    // OVER this by the framework at dispatch.
+    capabilities: checkpointer === null
+      ? capabilities
+      : { ...capabilities, [CHECKPOINTER_CAPABILITY]: checkpointer },
   });
 
   return { ctx, origin, meterMintedLlm };

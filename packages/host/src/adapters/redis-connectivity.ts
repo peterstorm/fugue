@@ -254,6 +254,25 @@ export const createIoredisRedisPort = (
         }
       }),
     hGetAll: (key) => redisCall(() => `HGETALL ${key}`, () => client.hgetall(key)),
+    // Field write and key TTL are ONE transaction whenever a TTL is asked for
+    // (see the port doc): a crash between a bare HSET and a following EXPIRE
+    // leaves the key immortal. `requireTransactionResults` proves both queued
+    // commands ran and neither reported an error — a queued-command failure
+    // throws and `redisCall` converts it, so a partially-applied transaction
+    // can never be reported as success.
+    hSet: (key, field, value, opts) =>
+      opts?.expiresInSec === undefined
+        ? redisCall(() => `HSET ${key} ${field}`, async () => {
+            await client.hset(key, field, value);
+          })
+        : redisCall(() => `MULTI HSET+EXPIRE ${key} ${field}`, async () => {
+            const executed = await client
+              .multi()
+              .hset(key, field, value)
+              .expire(key, opts.expiresInSec!)
+              .exec();
+            requireTransactionResults(`MULTI HSET+EXPIRE ${key}`, executed, 2);
+          }),
     appendSpend: (append) =>
       watchGuarded(`MULTI SPEND-APPEND ${append.key}`, async () => {
         const record = recordOf(append.delta);

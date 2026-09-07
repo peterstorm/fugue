@@ -573,7 +573,7 @@ describe("retriabilityOf — single source of truth for the retry fast-fail fork
     [{ kind: "map-width-exceeded", nodeId: nid, resolvedWidth: 26, maxWidth: 25 }, "non-retriable"],
   ];
 
-  it("classifies every one of the 27 error kinds exactly as the old retry disjunction did", () => {
+  it("classifies every kind in the table exactly as the old retry disjunction did", () => {
     for (const [error, expected] of cases) {
       expect(retriabilityOf(error)).toBe(expected);
     }

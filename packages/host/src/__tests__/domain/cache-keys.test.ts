@@ -16,6 +16,8 @@ import {
   buildCacheKey,
   checkpointKeyPrefix,
   buildCheckpointKey,
+  buildCheckpointMetaKey,
+  buildCheckpointNodesKey,
   buildSpendKey,
   type TenantId,
 } from "../../domain/cache-keys.js";
@@ -60,6 +62,15 @@ describe("cache key builders — tenant prefix (SECURITY: AD-4 / US2 / SC-001)",
     ).toBe("fugue:tenant-a:orders:run-1:fetch");
   });
 
+  it("buildCheckpointMetaKey / buildCheckpointNodesKey are the run's $-suffixed aggregates", () => {
+    expect(buildCheckpointMetaKey(TENANT_A, dagId("orders"), makeRunId("run-1"))).toBe(
+      "fugue:tenant-a:orders:run-1:$meta",
+    );
+    expect(buildCheckpointNodesKey(TENANT_A, dagId("orders"), makeRunId("run-1"))).toBe(
+      "fugue:tenant-a:orders:run-1:$nodes",
+    );
+  });
+
   it("EVERY builder output starts with the tenant prefix (no key escapes)", () => {
     const prefix = `fugue:${TENANT_A}:`;
     const keys = [
@@ -67,6 +78,8 @@ describe("cache key builders — tenant prefix (SECURITY: AD-4 / US2 / SC-001)",
       buildCacheKey(TENANT_A, dagId("d"), "k"),
       checkpointKeyPrefix(TENANT_A, dagId("d"), makeRunId("r")),
       buildCheckpointKey(TENANT_A, dagId("d"), makeRunId("r"), makeNodeId("n")),
+      buildCheckpointMetaKey(TENANT_A, dagId("d"), makeRunId("r")),
+      buildCheckpointNodesKey(TENANT_A, dagId("d"), makeRunId("r")),
       buildSpendKey(TENANT_A, dagId("d"), makeRunId("r")),
     ];
     for (const key of keys) {
@@ -137,6 +150,8 @@ describe("cache key builders — prefix-containment property (SECURITY: AD-4 / S
           buildCacheKey(t, dagId(d), k),
           checkpointKeyPrefix(t, dagId(d), makeRunId(r)),
           buildCheckpointKey(t, dagId(d), makeRunId(r), makeNodeId(n)),
+          buildCheckpointMetaKey(t, dagId(d), makeRunId(r)),
+          buildCheckpointNodesKey(t, dagId(d), makeRunId(r)),
           buildSpendKey(t, dagId(d), makeRunId(r)),
         ];
         return keys.every((key) => key.startsWith(prefix));
@@ -288,6 +303,35 @@ describe("the spend key is disjoint from the checkpoint NodeId namespace (C1)", 
         return checkpoint !== buildSpendKey(t, dagId(d), makeRunId(r));
       }),
     );
+  });
+
+  it("NO node id — bare or indexed — can reach the $meta or $nodes aggregates", () => {
+    // The same statement the spend key earns, for the two aggregates the
+    // checkpointer adds beneath the identical prefix. A node key colliding with
+    // `$nodes` would have a `SET` destroy the run's whole readable fan; one
+    // colliding with `$meta` would make every index look like a fresh run.
+    fc.assert(
+      fc.property(anyTenant, colonFree, colonFree, anyNodeId, fc.nat({ max: 10_000 }),
+        (t, d, r, n, i) => {
+          const bare = buildCheckpointKey(t, dagId(d), makeRunId(r), makeNodeId(n));
+          const indexed = buildCheckpointKey(t, dagId(d), makeRunId(r), makeNodeId(n), mapIndex(i));
+          const metaKey = buildCheckpointMetaKey(t, dagId(d), makeRunId(r));
+          const nodesKey = buildCheckpointNodesKey(t, dagId(d), makeRunId(r));
+          return bare !== metaKey && bare !== nodesKey
+            && indexed !== metaKey && indexed !== nodesKey;
+        }),
+      { numRuns: 400 },
+    );
+  });
+
+  it("the three $-aggregates beneath one run prefix are mutually distinct", () => {
+    const args = [TENANT_A, dagId("orders"), makeRunId("run-1")] as const;
+    const keys = [
+      buildSpendKey(...args),
+      buildCheckpointMetaKey(...args),
+      buildCheckpointNodesKey(...args),
+    ];
+    expect(new Set(keys).size).toBe(keys.length);
   });
 
   it("two tenants with identical DAG + run produce DIFFERENT spend keys", () => {

@@ -273,6 +273,41 @@ describe("resolveMappedItems — the three arms (FR-F1-003/004/005)", () => {
     }
   });
 
+  // Round-24 C1/C2 — the THIRD access, between the two the previous round
+  // guarded.
+  //
+  // `Array.isArray` performs `IsArray`, which unwraps a Proxy to its target
+  // without invoking any trap. So this value satisfies the array guard on the
+  // line above and then throws on the `length` read below it — the one access
+  // in the function that was still outside a `try`. The escape was real: past
+  // `resolveMappedItems`'s own `Result<MappedItems, FrameworkError>` contract
+  // and past `map.ts`'s `run`, arriving at `run-node.ts`'s safety net to be
+  // re-tagged as an opaque `node-crash` instead of the precise refusal the
+  // caller-data fault deserves.
+  it("converts a throwing LENGTH getter into a typed refusal, never a raw throw", () => {
+    const explosive = new Proxy([1, 2, 3], {
+      get(t, prop, recv): unknown {
+        if (prop === "length") throw new Error("length getter exploded");
+        return Reflect.get(t, prop, recv);
+      },
+    });
+
+    // Pinned explicitly: the guard the read sits behind passes for this value.
+    // Without this line the test would still pass if `Array.isArray` ever
+    // started rejecting proxies, and would stop testing what it is named for.
+    expect(Array.isArray(explosive)).toBe(true);
+
+    const result = resolveMappedItems(NODE, { items: explosive }, FROM, MAX);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("map-width-invalid");
+      if (result.error.kind === "map-width-invalid") {
+        expect(result.error.found).toContain("threw");
+      }
+    }
+  });
+
   // Round-23 C2 — the twin of the upstream-getter pin above, one level down.
   it("converts a throwing ELEMENT getter into a typed refusal, never a raw throw", () => {
     // The upstream-object getter was already guarded; the per-index read was

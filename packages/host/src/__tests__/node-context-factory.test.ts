@@ -112,6 +112,11 @@ const createMockRedis = (store: Map<string, string> = new Map()): {
   calls: { op: string; key: string }[];
 } => {
   const calls: { op: string; key: string }[] = [];
+  // Hashes live apart from strings because Redis's do: a GET of a hash key is a
+  // type error there, so a fake that blurred them would hide an adapter
+  // reaching for the wrong one. Present at all because the node context now
+  // wires a `checkpointer` capability over these two primitives (F1 PR-B).
+  const hashes = new Map<string, Map<string, string>>();
   const redis: RedisPort = {
     get: async (key) => {
       calls.push({ op: "get", key });
@@ -144,6 +149,17 @@ const createMockRedis = (store: Map<string, string> = new Map()): {
     sAdd: async () => ok(1),
     sRem: async () => ok(1),
     sMembers: async () => ok([]),
+    hGetAll: async (key) => {
+      calls.push({ op: "hGetAll", key });
+      return ok(Object.fromEntries(hashes.get(key) ?? new Map<string, string>()));
+    },
+    hSet: async (key, field, value) => {
+      calls.push({ op: "hSet", key });
+      const hash = hashes.get(key) ?? new Map<string, string>();
+      hash.set(field, value);
+      hashes.set(key, hash);
+      return ok(undefined);
+    },
   };
   return { redis, calls };
 };
@@ -692,6 +708,74 @@ describe("createNodeContextForDag — built-in http capability", () => {
     const { ctx } = await createTestContext({ shared });
 
     expect(ctx.clock).toBeNull();
+  });
+
+  // Regression guard for round-24 C3, and the one that would have caught it at
+  // the time. `createMapNode` declares `requires: ["checkpointer"]`
+  // unconditionally, so a host that does not wire the capability refuses EVERY
+  // DAG containing a map node at the boot-time capability gate — the feature
+  // shipped unreachable from the only runtime that runs DAGs in production.
+  //
+  // Unlike `http`/`clock`, this one CANNOT come from `sharedInfra.capabilities`:
+  // its key namespace is `fugue:<tenant>:<dagId>:<runId>:…` and none of the
+  // three are known until the run is, so the factory builds it per run.
+  it("surfaces a readable checkpointer, wired per run rather than from boot capabilities", async () => {
+    const shared = baseSharedInfra([]);
+    const { ctx } = await createTestContext({ shared });
+
+    // The presence check `ctx.checkpointer != null` is exactly what
+    // `validateCapabilities` gates a `requires: ["checkpointer"]` node on.
+    expect(ctx.checkpointer ?? null).not.toBeNull();
+    expect(typeof ctx.checkpointer?.load).toBe("function");
+    expect(typeof ctx.checkpointer?.saveNode).toBe("function");
+    expect(typeof ctx.checkpointer?.setMeta).toBe("function");
+  });
+
+  it("round-trips one fan index through the wired checkpointer, under the tenant prefix", async () => {
+    const { redis, calls } = createMockRedis();
+    const shared = { ...baseSharedInfra([]), redis };
+    const { ctx } = await createTestContext({ shared });
+    if (ctx.checkpointer === null) throw new Error("expected a wired checkpointer");
+
+    expect((await ctx.checkpointer.setMeta(testRunId, {
+      dagId: testDagId,
+      startedAt: new Date("2026-01-01T00:00:00.000Z"),
+      nodeCount: 1,
+    })).ok).toBe(true);
+    expect((await ctx.checkpointer.saveNode(
+      testRunId,
+      { nodeId: testNodeId, output: { v: 7 }, completedAt: new Date("2026-01-01T00:00:01.000Z") },
+      { index: mapIndex(3) },
+    )).ok).toBe(true);
+
+    const loaded = await ctx.checkpointer.load(testRunId);
+    if (!loaded.ok || loaded.value === null) throw new Error("expected a loaded run state");
+    expect(Object.values(loaded.value.nodes)[0]?.output).toEqual({ v: 7 });
+    // Every key it reached for is tenant-scoped — the invariant a global
+    // `chkpt:<runId>` backend would break (AD-4 / US2 / SC-001).
+    for (const call of calls) {
+      expect(call.key.startsWith(`fugue:${testTenant}:`)).toBe(true);
+    }
+  });
+
+  // The SAFE branch, stated as behavior rather than left to inference: a port
+  // that cannot back a checkpointer yields no capability at all, so the gate
+  // refuses the run before any node executes instead of a TypeError mid-fan.
+  it("wires no checkpointer when the Redis port lacks hash primitives, and says so", async () => {
+    const { redis } = createMockRedis();
+    const { hGetAll: _hGetAll, hSet: _hSet, ...hashless } = redis;
+    const { logger, logs } = collectLogs();
+    const shared = { ...baseSharedInfra([]), redis: hashless, logger };
+    const { ctx } = await createTestContext({ shared });
+
+    // `undefined`, not `null`: a custom (registry-augmented) capability that was
+    // never wired is simply an absent property, where an unwired BUILT-IN is an
+    // explicit null. `validateCapabilities` gates on `== null`, which is exactly
+    // why it covers both — so the assertion is written the way the gate reads it
+    // rather than pinning one of the two spellings.
+    expect(ctx.checkpointer ?? null).toBeNull();
+    expect(logs.some((l) =>
+      l.level === "warn" && l.msg.includes("checkpointer capability unavailable"))).toBe(true);
   });
 });
 
@@ -1690,7 +1774,13 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
     // A durability downgrade is observable through exactly one asserted error log.
     const { llm } = fakeLlm(10, 5);
     const captured = collectLogs();
-    const shared = sharedWithRedis(llm, createMockRedis().redis, captured.logger);
+    // `hGetAll` is stripped DELIBERATELY. The shared fake grew it when the
+    // checkpointer capability landed, and this test is about the downgrade
+    // message naming every primitive the ledger needs — so the port must be
+    // missing them by construction here, not by whatever the shared fake
+    // happens to omit this month.
+    const { hGetAll: _noHash, ...ledgerIncapable } = createMockRedis().redis;
+    const shared = sharedWithRedis(llm, ledgerIncapable, captured.logger);
 
     await createNodeContextForDag(
       shared, makeDag(), testRunId, new AbortController().signal, adminIdentity, { agentClientMap: FACTORY_AGENT_MAP },
