@@ -422,7 +422,14 @@ export const attachRedisErrorListener = (
   });
 };
 
-const defaultIoredisFactory = async (): Promise<RedisClientFactory> => {
+/**
+ * THE default ioredis factory, shared by every client-construction site in this
+ * package. Exported so `redis-bundle.ts` cannot grow a second `import("ioredis")`
+ * that drifts from this one — the same reason `attachRedisErrorListener` is
+ * shared rather than repeated. Dynamic so the driver stays out of the module
+ * graph for a caller that injects its own factory.
+ */
+export const defaultIoredisFactory = async (): Promise<RedisClientFactory> => {
   const { Redis } = await import("ioredis");
   return (redisUrl, options) => new Redis(redisUrl, options);
 };

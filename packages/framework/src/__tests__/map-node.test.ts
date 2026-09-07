@@ -73,6 +73,30 @@ const fanNode = (
     reduce: (results) => ok([...results]),
   });
 
+/**
+ * The D1 topology: a scoping node that DECIDES the width at run time, feeding
+ * the fan. One authored node set, whatever `n` turns out to be — which is the
+ * whole claim D1 makes, so both of its tests build the same graph.
+ */
+const scopeThenFan = () =>
+  defineDag({
+    id: "outer",
+    nodes: {
+      scope: createTransformNode({
+        id: "scope",
+        inputSchema: z.object({ n: z.number() }),
+        outputSchema: z.object({ items: z.array(z.number()) }),
+        transform: ({ n }) => ok({ items: Array.from({ length: n }, (_, i) => i + 1) }),
+      }),
+      fan: fanNode([]),
+    },
+    edges: [
+      { from: DAG_INPUT, to: "scope" },
+      { from: "scope", to: "fan" },
+    ],
+    outputNodeId: "fan",
+  });
+
 const FAN = nodeId("fan");
 const RUN = makeRunId("run-fan");
 
@@ -497,26 +521,8 @@ describe("createMapNode — the side-effect profile", () => {
 describe("createMapNode — D1: one node in the outer graph", () => {
   it("runs inside an ordinary DAG, occupying a single node id with a single output", async () => {
     const cp = new InMemoryCheckpointer();
-    const scope = createTransformNode({
-      id: "scope",
-      inputSchema: z.object({ n: z.number() }),
-      outputSchema: z.object({ items: z.array(z.number()) }),
-      // The motivating workload: a scoping node DECIDES the width at run time.
-      transform: ({ n }) => ok({ items: Array.from({ length: n }, (_, i) => i + 1) }),
-    });
-
-    const dag = defineDag({
-      id: "outer",
-      nodes: { scope, fan: fanNode([]) },
-      edges: [
-        { from: DAG_INPUT, to: "scope" },
-        { from: "scope", to: "fan" },
-      ],
-      outputNodeId: "fan",
-    });
-
     const result = await runDag<unknown, readonly number[]>(
-      dag,
+      scopeThenFan(),
       { n: 4 },
       ctxWith(cp, "run-outer"),
     );
@@ -530,21 +536,7 @@ describe("createMapNode — D1: one node in the outer graph", () => {
     // compiled DAG. If the fan were materialised into waves, this would require
     // two different topologies.
     const cp = new InMemoryCheckpointer();
-    const scope = createTransformNode({
-      id: "scope",
-      inputSchema: z.object({ n: z.number() }),
-      outputSchema: z.object({ items: z.array(z.number()) }),
-      transform: ({ n }) => ok({ items: Array.from({ length: n }, (_, i) => i + 1) }),
-    });
-    const dag = defineDag({
-      id: "outer",
-      nodes: { scope, fan: fanNode([]) },
-      edges: [
-        { from: DAG_INPUT, to: "scope" },
-        { from: "scope", to: "fan" },
-      ],
-      outputNodeId: "fan",
-    });
+    const dag = scopeThenFan();
 
     const three = await runDag<unknown, readonly number[]>(dag, { n: 3 }, ctxWith(cp, "run-a"));
     const five = await runDag<unknown, readonly number[]>(dag, { n: 5 }, ctxWith(cp, "run-b"));

@@ -204,11 +204,39 @@ export const resolveMappedItems = (
   // before it. So this read gets the same typed refusal as the field read above
   // and the element reads below; the module header's promise is about EVERY
   // access, and this is the third of three.
-  let width: number;
+  //
+  // Typed `unknown`, not `number`, and that is the load-bearing part. A
+  // `let width: number` annotation is a compile-time label over a value the
+  // compiler never saw produced: `field` is only proven `Array.isArray`-true,
+  // and a Proxy `get` trap returns whatever it likes. Declaring `unknown`
+  // forces the read to pass the guard below before anything can compare it.
+  let width: unknown;
   try {
     width = field.length;
   } catch (error) {
     return readThrew(nodeId, from, "the width", error);
+  }
+
+  // The guard the three earlier hardenings did not cover. They each closed an
+  // access that could THROW or CHANGE; none established that what came back is
+  // a number at all. It need not be: a `length` getter returning an object with
+  // a stateful `valueOf` — one reporting 1 the first time it is coerced and 1e6
+  // afterwards — passes `width > max` on the first ToPrimitive call and then
+  // lengthens the "fixed-count" loop below on every iteration, because `i <
+  // width` re-coerces the SAME object each time. That is the maxWidth bypass of
+  // round 1 again, reached by coercion rather than by growth.
+  //
+  // Narrowing to a primitive here is what closes it, not merely detecting the
+  // hostile case: a primitive `number` in `<` and `>` never calls `valueOf`,
+  // so past this line there is no second reading of the width to disagree with
+  // the one the bound was checked against. Same shape as `asMaxWidth` and
+  // `asMapIndex` in this file, which lead with the identical `typeof` check.
+  //
+  // `mapWidthInvalid`, not `mapWidthExceeded`: a value that is not a number is
+  // not a width that came out too large, it is not a width — the same refusal
+  // a non-array field gets.
+  if (typeof width !== "number" || !Number.isSafeInteger(width) || width < 0) {
+    return err(frameworkError.mapWidthInvalid(nodeId, from, safeDiagnosticRender(width)));
   }
   if (width > max) {
     return err(frameworkError.mapWidthExceeded(nodeId, width, max));

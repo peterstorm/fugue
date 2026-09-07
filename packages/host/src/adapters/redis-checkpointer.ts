@@ -253,11 +253,13 @@ export const createNamespacedCheckpointer = (
         if (!parsed.ok) throw new Error(parsed.error);
         ({ meta, createdAt } = parsed.value);
       } catch (e) {
-        return err({
-          kind: "checkpoint-corrupt" as const,
-          runId,
-          message: `meta deserialize failed: ${safeErrorMessage(e)}`,
-        });
+        // Through the factory, like every other error site in this file. The
+        // literal it replaces was type-safe, but it was a second construction
+        // path for one kind — a field added to `checkpoint-corrupt` would have
+        // had one call site the compiler could not point at.
+        return err(
+          frameworkError.checkpointCorrupt(runId, `meta deserialize failed: ${safeErrorMessage(e)}`),
+        );
       }
 
       const expectedFingerprint = snapshotExpectedDagFingerprint(loadOpts);

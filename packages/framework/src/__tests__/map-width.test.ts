@@ -333,6 +333,69 @@ describe("resolveMappedItems — the three arms (FR-F1-003/004/005)", () => {
     }
   });
 
+  // Round-26 C1 — the fourth variant of the class, and the one none of the
+  // three earlier guards covered.
+  //
+  // Rounds 1–3 each hardened an access that could THROW or CHANGE. None
+  // established that what came back from `length` is a number at all. It need
+  // not be: a `get` trap can return anything, and `let width: number` was a
+  // compile-time label over a value the compiler never saw produced. An object
+  // with a stateful `valueOf` — reporting an in-bound number the first time it
+  // is coerced and a huge one afterwards — passed `width > max` on that first
+  // ToPrimitive call and then lengthened the "fixed-count" loop on every
+  // iteration, because `i < width` re-coerces the SAME object each time. The
+  // round-1 bypass again, reached by coercion rather than by growth.
+  it("a LENGTH that coerces to a bigger number after the bound check cannot lengthen the fan", () => {
+    let coercions = 0;
+    const twoFaced = {
+      valueOf() {
+        coercions += 1;
+        return coercions === 1 ? 1 : 1_000;
+      },
+    };
+    const deceptive = new Proxy(Array.from({ length: 1_000 }, (_, i) => i), {
+      get(t, prop, recv): unknown {
+        if (prop === "length") return twoFaced;
+        return Reflect.get(t, prop, recv);
+      },
+    });
+
+    // The value satisfies every guard that precedes the width read.
+    expect(Array.isArray(deceptive)).toBe(true);
+
+    const result = resolveMappedItems(NODE, { items: deceptive }, FROM, maxWidth(3));
+
+    // Refused outright: a value that is not a number is not a width that came
+    // out too large, so it is `map-width-invalid`, not `map-width-exceeded`.
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("map-width-invalid");
+  });
+
+  it.each([
+    ["a string", "3"],
+    ["undefined", undefined],
+    ["null", null],
+    ["a plain object", {}],
+    ["a bigint", 3n],
+    ["a fraction", 1.5],
+    ["NaN", Number.NaN],
+    ["Infinity", Number.POSITIVE_INFINITY],
+    ["a negative count", -1],
+    ["an unsafe integer", Number.MAX_SAFE_INTEGER + 2],
+  ])("refuses a LENGTH that is %s", (_label, lied: unknown) => {
+    const liar = new Proxy([1, 2, 3], {
+      get(t, prop, recv): unknown {
+        if (prop === "length") return lied;
+        return Reflect.get(t, prop, recv);
+      },
+    });
+
+    const result = resolveMappedItems(NODE, { items: liar }, FROM, MAX);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("map-width-invalid");
+  });
+
   it("copies the items, so a later mutation of the upstream cannot change the fan mid-flight", () => {
     // The fan's width and its items must be the same facts at index 0 and at
     // index N-1; aliasing the caller's array would let an upstream mutation
