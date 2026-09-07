@@ -35,6 +35,7 @@ import {
   attachRedisErrorListener,
   createIoredisRedisPort,
   defaultIoredisFactory,
+  ensureConnected,
 } from "./redis-connectivity.js";
 import type { RedisClientFactory } from "./redis-connectivity.js";
 import {
@@ -96,7 +97,7 @@ export const createRedisBundle = async (
     const connectivity: RedisConnectivityPort = {
       ping: async () => {
         try {
-          if (client.status === "wait") await client.connect();
+          await ensureConnected(client);
           await client.ping();
           return ok(undefined);
         } catch (error) {
@@ -123,12 +124,30 @@ export const createRedisBundle = async (
         redisCall(() => `PUBLISH ${channel}`, async () => { await client.publish(channel, message); }),
       subscribe: (channel, handler) =>
         redisCall(() => `SUBSCRIBE ${channel}`, async () => {
-          if (subClient.status === "wait") await subClient.connect();
-          subClient.on("message", (receivedChannel, message) => {
+          await ensureConnected(subClient);
+          // Named, so the handle below can detach exactly THIS listener.
+          //
+          // `subClient` is one connection shared by every subscribe call for the
+          // life of the process. An anonymous listener here would be
+          // unreachable afterwards, so `unsubscribe` could only issue the Redis
+          // UNSUBSCRIBE and would leave the JS handler attached: each cycle
+          // leaks one EventEmitter listener, and a later resubscribe to the same
+          // channel delivers every message to the stale handler as well as the
+          // new one — a caller that believes it detached still gets called.
+          const onMessage = (receivedChannel: string, message: string): void => {
             if (receivedChannel === channel) handler(message);
-          });
+          };
+          subClient.on("message", onMessage);
           await subClient.subscribe(channel);
-          return { unsubscribe: async () => { await subClient.unsubscribe(channel); } };
+          return {
+            unsubscribe: async () => {
+              // Listener first: after this line no further delivery can reach
+              // the handler even if UNSUBSCRIBE rejects, so releasing is total
+              // over the thing the caller actually asked to be rid of.
+              subClient.off("message", onMessage);
+              await subClient.unsubscribe(channel);
+            },
+          };
         }),
     };
 
@@ -142,7 +161,7 @@ export const createRedisBundle = async (
       rules: readonly string[],
     ): Promise<Result<void, HostError>> => {
       try {
-        if (client.status === "wait") await client.connect();
+        await ensureConnected(client);
         await client.call("ACL", subcommand, username, ...rules);
         return ok(undefined);
       } catch (error) {
@@ -162,7 +181,7 @@ export const createRedisBundle = async (
     // only swallow that log or rethrow it.
     const auditStream: AuditStreamPort = {
       xAdd: async (streamKey, fields) => {
-        if (client.status === "wait") await client.connect();
+        await ensureConnected(client);
         const args: string[] = [];
         for (const [k, v] of Object.entries(fields)) { args.push(k, v); }
         const id = await client.xadd(streamKey, "*", ...args);

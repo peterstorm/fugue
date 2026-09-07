@@ -56,6 +56,19 @@ class FakeClient {
     return this;
   }
 
+  /**
+   * Real removal, by identity, exactly as EventEmitter does it — a fake that
+   * accepted `off` and did nothing would let the leak this models pass.
+   */
+  off(event: string, listener: (...a: never[]) => void): this {
+    const pool = event === "error" ? this.errorListeners : event === "message" ? this.messageListeners : undefined;
+    if (pool !== undefined) {
+      const at = (pool as unknown as unknown[]).indexOf(listener);
+      if (at !== -1) pool.splice(at, 1);
+    }
+    return this;
+  }
+
   async connect(): Promise<void> {
     this.connectCalls += 1;
     this.status = "ready";
@@ -305,15 +318,54 @@ describe("createRedisBundle — pubsub", () => {
     expect(received).toEqual(["yes"]);
   });
 
-  it("unsubscribe releases the channel", async () => {
+  it("unsubscribe issues UNSUBSCRIBE and, more importantly, stops delivery", async () => {
     const sub = new FakeClient();
     const { bundle } = await wire(new FakeClient(), sub);
 
-    const result = await bundle.pubsub.subscribe("ch", () => {});
+    const received: string[] = [];
+    const result = await bundle.pubsub.subscribe("ch", (m) => received.push(m));
     expect(isOk(result)).toBe(true);
     if (!isOk(result)) return;
     await result.value.unsubscribe();
+
     expect(sub.calls.map((c) => c.m)).toEqual(["subscribe", "unsubscribe"]);
+    // The assertion that actually holds the contract. Checking only the outgoing
+    // command would stay green with the JS listener still attached — which is
+    // exactly the state this file used to leave the connection in.
+    for (const listener of [...sub.messageListeners]) listener("ch", "after");
+    expect(received).toEqual([]);
+  });
+
+  it("does not accumulate listeners across subscribe/unsubscribe cycles", async () => {
+    // `subClient` is one connection for the life of the process. An anonymous
+    // listener would be unreachable from the handle, so every cycle would leak
+    // one — unbounded growth, and Node's MaxListenersExceededWarning eventually.
+    const sub = new FakeClient();
+    const { bundle } = await wire(new FakeClient(), sub);
+
+    for (let i = 0; i < 5; i++) {
+      const r = await bundle.pubsub.subscribe("ch", () => {});
+      if (!isOk(r)) throw new Error("subscribe failed");
+      await r.value.unsubscribe();
+      expect(sub.messageListeners).toHaveLength(0);
+    }
+  });
+
+  it("a resubscribe does not double-fire the previously released handler", async () => {
+    const sub = new FakeClient();
+    const { bundle } = await wire(new FakeClient(), sub);
+
+    const stale: string[] = [];
+    const fresh: string[] = [];
+    const first = await bundle.pubsub.subscribe("ch", (m) => stale.push(m));
+    if (!isOk(first)) throw new Error("subscribe failed");
+    await first.value.unsubscribe();
+    const second = await bundle.pubsub.subscribe("ch", (m) => fresh.push(m));
+    if (!isOk(second)) throw new Error("resubscribe failed");
+
+    for (const listener of [...sub.messageListeners]) listener("ch", "hello");
+    expect(fresh).toEqual(["hello"]);
+    expect(stale).toEqual([]); // the caller that detached stays detached
   });
 });
 

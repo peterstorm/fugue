@@ -423,6 +423,27 @@ export const attachRedisErrorListener = (
 };
 
 /**
+ * THE lazy-connect guard, shared by every command site in this package.
+ *
+ * `lazyConnect: true` leaves a client in the "wait" state until something dials
+ * it. The guard must be conditional: after the initial connection ioredis owns
+ * reconnection, and calling `connect()` on an already-connected client REJECTS —
+ * which would make every probe after the first falsely report Redis dead and
+ * flap the host into `degraded:redis-disconnected`.
+ *
+ * One helper rather than five hand-copies for the same reason
+ * `attachRedisErrorListener` and `defaultIoredisFactory` are shared: both test
+ * files already describe this as a single named invariant ("the `status ===
+ * "wait"` connect guard"), and a future edit — a new ioredis status to
+ * account for — should be one change, not a five-site grep that can miss one.
+ */
+export const ensureConnected = async (
+  client: Pick<IoRedis, "status" | "connect">,
+): Promise<void> => {
+  if (client.status === "wait") await client.connect();
+};
+
+/**
  * THE default ioredis factory, shared by every client-construction site in this
  * package. Exported so `redis-bundle.ts` cannot grow a second `import("ioredis")`
  * that drifts from this one — the same reason `attachRedisErrorListener` is
@@ -479,15 +500,10 @@ export const createRedisConnectivity = async (
     const port: RedisConnectivityPort = {
       ping: async () => {
         try {
-          // `lazyConnect: true` leaves the client in the "wait" state until the
-          // first probe dials it. Guard the connect on that state: after the
-          // initial connection ioredis owns reconnection, and calling `connect()`
-          // on an already-connected client rejects — which would make every probe
-          // tick after the first falsely report Redis dead and flap the host into
-          // `degraded:redis-disconnected`.
-          if (client.status === "wait") {
-            await client.connect();
-          }
+          // The shared guard: conditional because calling `connect()` on an
+          // already-connected client rejects, which would flap the host into
+          // `degraded:redis-disconnected` on every probe after the first.
+          await ensureConnected(client);
           await client.ping();
           return ok(undefined);
         } catch (e) {
