@@ -92,6 +92,14 @@ const EXECUTION_FAILURE_KINDS = [
   "root-expects-input",
   "source-has-incoming",
   "invalid-dag-input-edge",
+  // A map node's width came back wrong (not an array, or over the declared
+  // maximum). Deterministic and caller-data-shaped, so classified alongside
+  // `validation` — its closest sibling, a node refusing its own input — rather
+  // than given a new policy in a PR about fan-out. Both are non-retriable at
+  // the framework level; if the 500-plus-breaker treatment of deterministic
+  // caller data is ever revisited, `validation` and these move together.
+  "map-width-invalid",
+  "map-width-exceeded",
 ] as const;
 
 /**

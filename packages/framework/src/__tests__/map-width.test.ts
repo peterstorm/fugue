@@ -25,9 +25,12 @@ const MAX = maxWidth(25);
 
 describe("maxWidth — author-declared bound (FR-F1-002)", () => {
   it("accepts a positive safe integer", () => {
-    expect(maxWidth(1)).toBe(1);
-    expect(maxWidth(25)).toBe(25);
-    expect(maxWidth(Number.MAX_SAFE_INTEGER)).toBe(Number.MAX_SAFE_INTEGER);
+    // Compared as plain numbers: `toBe` infers the branded type from its
+    // receiver, and the assertion here is about the VALUE surviving the
+    // constructor unchanged, not about the brand (which `branding` below owns).
+    expect(maxWidth(1) as number).toBe(1);
+    expect(maxWidth(25) as number).toBe(25);
+    expect(maxWidth(Number.MAX_SAFE_INTEGER) as number).toBe(Number.MAX_SAFE_INTEGER);
   });
 
   // Zero is rejected HERE but legal as a resolved width — the two numbers are
@@ -67,8 +70,8 @@ describe("maxWidth — author-declared bound (FR-F1-002)", () => {
 
 describe("widthFrom — the field reference (design constraint 4)", () => {
   it("accepts a JS identifier", () => {
-    expect(widthFrom("items")).toBe("items");
-    expect(widthFrom("_private$1")).toBe("_private$1");
+    expect(widthFrom("items") as string).toBe("items");
+    expect(widthFrom("_private$1") as string).toBe("_private$1");
   });
 
   // Not a path language: a dotted reference is rejected rather than quietly

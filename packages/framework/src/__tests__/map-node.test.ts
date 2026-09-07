@@ -41,7 +41,7 @@ const childDag = (calls: unknown[]) =>
         },
       }),
     },
-    edges: [{ from: DAG_INPUT as string, to: "double" }],
+    edges: [{ from: DAG_INPUT, to: "double" }],
     outputNodeId: "double",
   });
 
@@ -103,7 +103,7 @@ describe("createMapNode — the fan (FR-F1-001)", () => {
             transform: (s) => ok(s),
           }),
         },
-        edges: [{ from: DAG_INPUT as string, to: "echo" }],
+        edges: [{ from: DAG_INPUT, to: "echo" }],
         outputNodeId: "echo",
       }),
       childOutputSchema: z.string(),
@@ -157,7 +157,7 @@ describe("createMapNode — the fan (FR-F1-001)", () => {
           },
         }),
       },
-      edges: [{ from: DAG_INPUT as string, to: "boom" }],
+      edges: [{ from: DAG_INPUT, to: "boom" }],
       outputNodeId: "boom",
     });
     const node = createMapNode({
@@ -253,7 +253,7 @@ describe("createMapNode — per-index durability (FR-F1-006/007)", () => {
           },
         }),
       },
-      edges: [{ from: DAG_INPUT as string, to: "step" }],
+      edges: [{ from: DAG_INPUT, to: "step" }],
       outputNodeId: "step",
     });
     const firstNode = createMapNode({
@@ -396,7 +396,7 @@ describe("createMapNode — rejected at module load", () => {
           { prompt: "approve?" },
         ),
       },
-      edges: [{ from: DAG_INPUT as string, to: "review" }],
+      edges: [{ from: DAG_INPUT, to: "review" }],
       outputNodeId: "review",
     });
 
@@ -447,7 +447,7 @@ describe("createMapNode — D1: one node in the outer graph", () => {
       id: "outer",
       nodes: { scope, fan: fanNode([]) },
       edges: [
-        { from: DAG_INPUT as string, to: "scope" },
+        { from: DAG_INPUT, to: "scope" },
         { from: "scope", to: "fan" },
       ],
       outputNodeId: "fan",
@@ -478,7 +478,7 @@ describe("createMapNode — D1: one node in the outer graph", () => {
       id: "outer",
       nodes: { scope, fan: fanNode([]) },
       edges: [
-        { from: DAG_INPUT as string, to: "scope" },
+        { from: DAG_INPUT, to: "scope" },
         { from: "scope", to: "fan" },
       ],
       outputNodeId: "fan",

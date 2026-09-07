@@ -23,11 +23,12 @@ import type { z } from "zod";
 import type { NodeDef, TypedNodeContext } from "../types/node.js";
 import type { DagDef } from "../types/dag.js";
 import type { Result } from "../types/result.js";
-import { err, ok } from "../types/result.js";
+import { err } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import { frameworkError } from "../types/error-factories.js";
 import { safeErrorMessage } from "../types/safe-error.js";
 import { nodeId as brandNodeId } from "../types/ids.js";
+import { resourceName } from "../types/witness.js";
 import type { NodeId } from "../types/ids.js";
 import { maxWidth as brandMaxWidth, resolveMappedItems, widthFrom as brandWidthFrom } from "../types/map-width.js";
 import { mapIndex } from "../types/map-index.js";
@@ -171,7 +172,7 @@ export const createMapNode = <I, ChildOut, O>(
     // The fan's own side effects are whatever the child does; the map node
     // itself only reads its width and writes checkpoints. `reads` is the
     // honest floor — it consults durable state to decide what to skip.
-    sideEffects: { kind: "reads", resource: "checkpoint:fan" },
+    sideEffects: { kind: "reads", resource: resourceName("checkpoint:fan") },
     confidence: { mode: "none" },
     run: async (
       input: I,
