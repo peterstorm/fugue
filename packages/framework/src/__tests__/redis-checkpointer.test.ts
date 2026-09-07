@@ -5,6 +5,7 @@ import type { Checkpointer, CheckpointerLoadOpts, InMemoryStoredMeta, RunMeta } 
 import type { DagId, NodeId, RunId } from "../types/ids.js";
 import { FRAMEWORK_VERSION } from "../checkpoint/fingerprint.js";
 import { RedisCheckpointer } from "../checkpoint/redis-checkpointer.js";
+import type { RedisCheckpointerDriver } from "../checkpoint/redis-checkpointer.js";
 import { checkpointerSuite, type CheckpointerSuiteRaw } from "./_checkpointer-suite.js";
 import { redisDriverFake } from "./_redis-driver-fake.js";
 import { D, N, R } from "./_id-helpers.js";
@@ -761,6 +762,190 @@ describe("RedisCheckpointer — driver-failure totality (the driver rejects)", (
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected a typed refusal");
     expect(result.error).toMatchObject({ kind: "cache-error", operation: "setMeta" });
+  });
+});
+
+// Hostile-seam totality WITHOUT a live server (round-21 pr-test-analyzer-1).
+// The Redis backend's injected-clock and load-opts guards are the same "never
+// a raw rejection" class as the driver-failure block above, but they were
+// pinned only inside the `REDIS_URL`-gated integration block below — so a
+// developer running `bun test` with no server got zero signal on them, and a
+// refactor that dropped a guard stayed green locally. Nothing about these
+// contracts needs a real server: the seams are the injected clock and the
+// caller's opts bag, and `redisDriverFake` supplies the only stored bytes the
+// paths read. The integration block keeps its own copies (they additionally
+// prove the guards hold against a REAL server's bytes); these are the fast leg.
+describe("RedisCheckpointer — hostile seams without a live server", () => {
+  // Enough stored meta for `load` to get PAST the short-circuit and the
+  // version gate and actually reach the clock read — without it every test
+  // here would pass on `ok(null)` for the wrong reason.
+  const storedMeta = () =>
+    JSON.stringify({
+      dagId: "d",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      nodeCount: 1,
+      createdAt: new Date().toISOString(),
+      frameworkVersion: FRAMEWORK_VERSION,
+    });
+
+  test("a throwing injected clock settles load as a typed cache-error, never a raw rejection", async () => {
+    // Only `get` is overridden: `hgetall` stays at its named-throw default, so
+    // the guard must refuse BEFORE the nodes read rather than after paying for
+    // it — reaching it would fail loudly instead of passing quietly.
+    const cp = new RedisCheckpointer(redisDriverFake({ get: async () => storedMeta() }), {
+      now: () => {
+        throw new Error("hostile clock");
+      },
+    });
+
+    const result = await cp.load(R("fake-clock-throw"));
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a typed refusal");
+    expect(result.error.kind).toBe("cache-error");
+    if (result.error.kind === "cache-error") {
+      expect(result.error.operation).toContain("load");
+      expect(result.error.message).toContain("hostile clock");
+      // Deterministic rejection — retry cannot clear a throwing clock.
+      expect(retriabilityOf(result.error)).toBe("non-retriable");
+    }
+  });
+
+  test("a throwing injected clock settles setMeta as a typed cache-error and issues no write", async () => {
+    // `set` is left at the strict default, so reaching the driver at all would
+    // surface as the fake's named throw rather than this guard's message.
+    const cp = new RedisCheckpointer(redisDriverFake(), {
+      now: () => {
+        throw new Error("hostile clock");
+      },
+    });
+
+    const result = await cp.setMeta(R("fake-clock-throw-2"), {
+      dagId: D("d"),
+      startedAt: new Date("2026-08-12T00:00:00Z"),
+      nodeCount: 1,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a typed refusal");
+    expect(result.error.kind).toBe("cache-error");
+    if (result.error.kind === "cache-error") {
+      expect(result.error.operation).toContain("setMeta");
+      expect(result.error.message).toContain("hostile clock");
+    }
+  });
+
+  test("a NaN injected clock fails closed — the FR-027 TTL check cannot be silently voided", async () => {
+    // A NaN TTL comparison is always `false`, so an unguarded clock would let
+    // every expired checkpoint resume forever. The guard must reject the clock
+    // OUTPUT, not merely survive reading it.
+    const cp = new RedisCheckpointer(redisDriverFake({ get: async () => storedMeta() }), {
+      now: () => Number.NaN,
+    });
+
+    const result = await cp.load(R("fake-clock-nan"));
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a typed refusal");
+    expect(result.error.kind).toBe("cache-error");
+    if (result.error.kind === "cache-error") {
+      expect(result.error.message).toContain("non-representable timestamp");
+      expect(retriabilityOf(result.error)).toBe("non-retriable");
+    }
+  });
+
+  test("a throwing expectedDagFingerprint getter settles as a typed cache-error, never a raw rejection", async () => {
+    const cp = new RedisCheckpointer(redisDriverFake({ get: async () => storedMeta() }));
+    const opts = {
+      get expectedDagFingerprint(): string {
+        throw new Error("hostile opts getter");
+      },
+    } as CheckpointerLoadOpts;
+
+    const result = await cp.load(R("fake-opts-throw"), opts);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a typed refusal");
+    expect(result.error.kind).toBe("cache-error");
+    if (result.error.kind === "cache-error") {
+      expect(result.error.message).toContain("could not inspect options");
+    }
+  });
+
+  test("a SCRIPT LOAD result that is not a string fails typed and never reaches EVALSHA", async () => {
+    // Round-21 type-design-analyzer-2. The port types `script` as
+    // `Promise<unknown>` because that is ioredis's own return type; the
+    // adapter used to close the gap with `as string`. An assertion would let a
+    // driver returning a Buffer (`returnBuffers`) be stored as the SHA and
+    // handed to `evalsha`, where it fails later as an opaque driver error on a
+    // different call. `evalsha` stays at its named-throw default, so reaching
+    // it would fail loudly rather than pass quietly.
+    const cp = new RedisCheckpointer(
+      redisDriverFake({ script: async () => Buffer.from("not-a-sha") }),
+    );
+
+    const result = await cp.saveNode(R("fake-script-nonstring"), {
+      nodeId: N("n1"),
+      output: { ok: true },
+      completedAt: new Date("2026-08-12T00:00:01Z"),
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a typed refusal");
+    expect(result.error).toMatchObject({ kind: "cache-error", operation: "saveNode" });
+    if (result.error.kind === "cache-error") {
+      expect(result.error.message).toContain("expected the script SHA as a string");
+    }
+  });
+
+  test("the NOSCRIPT fallback replays the EVALSHA argument list byte for byte", async () => {
+    // Round-21 code-simplifier-1 pinned structurally: the two call sites now
+    // share ONE hoisted tuple, so they cannot drift. This asserts the whole
+    // argument list, not just the node key — a divergent TTL or a swapped
+    // key order would write to the wrong hash or expire on a different
+    // schedule, and the node-key-only assertion in
+    // redis-checkpointer-composite-opts.test.ts would not see it.
+    const evalshaArgs: string[][] = [];
+    const evalArgs: string[][] = [];
+    // Typed as the PORT's own invocation shape — no cast. A recorder that
+    // claimed a different parameter order would not compile, which is the
+    // whole reason `RedisCheckpointerDriver` exists.
+    const recordInvocation =
+      (into: string[][], then: () => Promise<unknown>): RedisCheckpointerDriver["evalsha"] =>
+      async (scriptOrSha, numKeys, nodes, meta, nodeKey, payload, ttlSeconds) => {
+        into.push([scriptOrSha, String(numKeys), nodes, meta, nodeKey, payload, ttlSeconds]);
+        return then();
+      };
+    const redis = redisDriverFake({
+      script: async () => "sha-1",
+      evalsha: recordInvocation(evalshaArgs, () => {
+        throw new Error("NOSCRIPT No matching script. Please use EVAL.");
+      }),
+      eval: recordInvocation(evalArgs, async () => "OK"),
+    });
+
+    const result = await new RedisCheckpointer(redis).saveNode(
+      R("fake-noscript-args"),
+      {
+        nodeId: N("n1"),
+        output: { ok: true },
+        completedAt: new Date("2026-08-12T00:00:01Z"),
+      },
+      { namespace: "sub", index: 5, attempt: 2 },
+    );
+
+    expect(result.ok).toBe(true);
+    // Drop the leading script identifier (SHA vs. source) — everything after
+    // it is the shared tuple and must be identical.
+    expect(evalArgs[0]!.slice(1)).toEqual(evalshaArgs[0]!.slice(1));
+    expect(evalArgs[0]!.slice(1)).toEqual([
+      "2",
+      "chkpt:fake-noscript-args",
+      "chkpt:fake-noscript-args:meta",
+      "sub@n1@5@2",
+      evalArgs[0]![5]!,
+      String(TTL_SECONDS),
+    ]);
   });
 });
 

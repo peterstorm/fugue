@@ -97,9 +97,14 @@ describe("RedisCheckpointer — composite opts reach the wire (ADR-0075)", () =>
     expect(calls.map((c) => c.nodeKey)).toEqual(["dag@n1@0@0", "dag@n1@1@0", "dag@n1@2@0"]);
   });
 
-  test("a malformed address fails typed and issues NO write at all", async () => {
-    const calls: EvalCall[] = [];
-    const cp: Checkpointer = new RedisCheckpointer(recordingRedis(calls));
+  test("a malformed address fails typed and issues NO driver call at all", async () => {
+    // The STRICT fake, with nothing overridden: every driver method throws
+    // naming itself. `recordingRedis` would prove only "zero evalsha" — this
+    // proves zero driver calls of ANY kind, which is what this file's own
+    // premise (wire-level evidence the shared suite cannot give) actually
+    // claims. A reached driver call now surfaces as `cache-error` from the
+    // fake's named throw, which the kind assertion below catches.
+    const cp: Checkpointer = new RedisCheckpointer(redisDriverFake());
     const malformed = Object.freeze({
       namespace: "../bad",
       index: -1,
@@ -112,13 +117,28 @@ describe("RedisCheckpointer — composite opts reach the wire (ADR-0075)", () =>
     // `checkpoint-write-failed`, matching the file and in-memory backends — a
     // bad address is caller error, not a Redis fault. Classifying it as
     // `cache-error` here would make one failure wear a different kind
-    // depending on which backend a deployment configured.
+    // depending on which backend a deployment configured. It is ALSO what
+    // distinguishes "the encoder refused" from "a driver call was reached and
+    // the strict fake refused": the latter is `cache-error`.
     if (!result.ok) expect(result.error.kind).toBe("checkpoint-write-failed");
-    // Fail closed at the wire: the encoder runs BEFORE the driver call, so a
-    // rejected address must not fall back to the canonical key. A silent
-    // canonical write is precisely how a fan index would clobber the node's
-    // own checkpoint.
-    expect(calls).toEqual([]);
+  });
+
+  test("a forged null namespace is refused rather than folded onto the default (round-21 C1)", async () => {
+    // The Redis backend hands the caller's `opts` straight to the codec with no
+    // prior boundary re-validation (unlike the file backend). Before the codec
+    // gated `namespace` on `=== undefined`, a forged `null` was silently
+    // replaced with "dag" and the entry landed at `dag@n1@3@0` — a real write,
+    // to an address the caller never asked for. Pinned at the wire, on the
+    // backend that has no second line of defense.
+    const cp: Checkpointer = new RedisCheckpointer(redisDriverFake());
+
+    const result = await cp.saveNode(RUN, state, {
+      namespace: null,
+      index: 3,
+    } as unknown as SaveNodeOpts);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("checkpoint-write-failed");
   });
 
   test("the NOSCRIPT/EVAL fallback carries the SAME composite address as the EVALSHA path", async () => {

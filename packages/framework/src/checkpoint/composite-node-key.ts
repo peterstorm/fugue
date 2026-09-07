@@ -150,8 +150,15 @@ export const isNonNegativeSafeInteger = (value: unknown): value is number =>
 
 const assertIdComponent = (kind: string, value: string): void => {
   if (!isIdComponent(value)) {
+    // `safeDiagnosticRender`, not raw interpolation, for the same reason
+    // `assertIndexOrAttempt` uses it: `${value}` invokes the value's own
+    // `toString`, so a forged `{ toString() { throw } }` would explode INSIDE
+    // this codec's rejection and escape carrying the hostile's error text —
+    // the exact "raw trap" the error-channel contract above forbids. The
+    // renderer goes through the object tag before any guarded coercion
+    // (pinned in composite-node-key.test.ts alongside the index/attempt twins).
     throw new Error(
-      `Invalid composite node key ${kind} "${value}": must match ${ID_PATTERN.source} (no "@" — the composite separator)`,
+      `Invalid composite node key ${kind} ${safeDiagnosticRender(value)}: must match ${ID_PATTERN.source} (no "@" — the composite separator)`,
     );
   }
 };
@@ -214,7 +221,19 @@ export const compositeNodeKey = (nodeId: NodeId, opts?: CompositeNodeKeyOpts): s
     return nodeId;
   }
 
-  const namespace = opts.namespace ?? DEFAULT_NODE_NAMESPACE;
+  // Presence is `=== undefined`, NOT `??`: the two are different rules for a
+  // forged `null`, and `??` picks the wrong one. `??` treats `null` as absent,
+  // so `{ namespace: null, index: 5 }` would silently encode under the DEFAULT
+  // namespace — the caller's out-of-contract value discarded rather than
+  // rejected, contradicting this module's own "out-of-contract keys are
+  // rejected outright" contract and diverging from how the SIBLING fields of
+  // the same opts bag behave (`index`/`attempt` gate on `!== undefined`, so
+  // `null` reaches their assert and throws). The file backend's
+  // `parseSaveNodeBoundary` already rejects a non-string namespace; the
+  // in-memory and Redis backends hand `opts` straight here, so this gate is
+  // the only thing standing between a forged value and a misaddressed durable
+  // entry on two of three backends.
+  const namespace = opts.namespace === undefined ? DEFAULT_NODE_NAMESPACE : opts.namespace;
   assertIdComponent("namespace", namespace);
   if (opts.index !== undefined) assertIndexOrAttempt("index", opts.index);
   if (opts.attempt !== undefined) assertIndexOrAttempt("attempt", opts.attempt);

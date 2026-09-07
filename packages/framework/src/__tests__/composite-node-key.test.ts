@@ -207,6 +207,86 @@ describe("compositeNodeKey — hostile inputs rejected (typed throws)", () => {
       });
     }
   }
+
+  // Round-21 C1 — the namespace slot must reject a forged value the SAME way
+  // its sibling slots do. `index`/`attempt` gate on `!== undefined`, so a
+  // forged `null` reaches their assert and throws (the `hostileNumbers` table
+  // above covers exactly that). `namespace` used to be defaulted with `??`,
+  // which treats `null` as ABSENT — so `{ namespace: null, index: 5 }` encoded
+  // as `dag@read-node@5@0`, byte-identical to the call that supplied no
+  // namespace at all, with the caller's out-of-contract value silently
+  // discarded. `strictNullChecks` keeps honest TS callers out, but forged JS
+  // values at `saveNode`'s opts boundary are this module's stated threat model,
+  // and the in-memory and Redis backends pass `opts` straight through with no
+  // prior re-validation (only the file backend's `parseSaveNodeBoundary`
+  // pre-rejects it). Both addressing components are exercised because the
+  // ambiguity guard skips on either one.
+  const forgedNamespaces: readonly (readonly [string, unknown])[] = [
+    ["null", null],
+    ["a number", 42],
+    ["a boolean", false],
+    ["an object", {}],
+    ["an array", []],
+  ];
+  const addressingSlots = [
+    ["index", { index: 1 }],
+    ["attempt", { attempt: 1 }],
+  ] as const;
+  for (const [label, bad] of forgedNamespaces) {
+    for (const [slot, address] of addressingSlots) {
+      it(`throws on a forged namespace (${label}) with ${slot} present`, () => {
+        expect(() =>
+          compositeNodeKey(N("read-node"), { ...address, namespace: bad as unknown as string }),
+        ).toThrow("Invalid composite node key namespace");
+      });
+    }
+  }
+
+  it("a forged namespace is never silently folded onto the default namespace", () => {
+    // The failure this pins is not "it throws" but "it does not encode": before
+    // the fix the call below returned the SAME key as the namespace-less call,
+    // so a caller whose namespace config resolved to null wrote to "dag"
+    // instead of failing — silent misaddressing, the hazard the ambiguity rule
+    // exists to prevent, reached through a different value.
+    const withoutNamespace = compositeNodeKey(N("read-node"), { index: 5 });
+    expect(withoutNamespace).toBe("dag@read-node@5@0");
+    expect(() =>
+      compositeNodeKey(N("read-node"), { namespace: null as unknown as string, index: 5 }),
+    ).toThrow();
+  });
+
+  // Round-21 C1b — message totality for the namespace/nodeId slot, the twin of
+  // the index/attempt pins above. `assertIdComponent` used to interpolate the
+  // raw value (`"${value}"`), which invokes the value's own `toString`: a
+  // throwing hook exploded INSIDE the codec's own rejection and escaped
+  // carrying the hostile's text instead of the codec's rule.
+  for (const hostile of [throwingValueOf, throwingToString]) {
+    it("rejects a throwing-hook namespace with the codec's own typed message (never a raw trap)", () => {
+      const call = () =>
+        compositeNodeKey(N("read-node"), {
+          namespace: hostile as unknown as string,
+          index: 1,
+        });
+      expect(call).toThrow("Invalid composite node key namespace");
+      try {
+        call();
+        throw new Error("expected the codec to reject the hostile value");
+      } catch (error) {
+        expect((error as Error).message).not.toContain("exploded");
+      }
+    });
+
+    it("rejects a throwing-hook nodeId with the codec's own typed message (never a raw trap)", () => {
+      const call = () => compositeNodeKey(rawNodeId(hostile as unknown as string), { index: 1 });
+      expect(call).toThrow("Invalid composite node key nodeId");
+      try {
+        call();
+        throw new Error("expected the codec to reject the hostile value");
+      } catch (error) {
+        expect((error as Error).message).not.toContain("exploded");
+      }
+    });
+  }
 });
 
 describe("parseCompositeNodeKey — classification", () => {

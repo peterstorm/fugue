@@ -23,7 +23,7 @@ import {
 } from "./checkpointer.js";
 import { FRAMEWORK_VERSION } from "./fingerprint.js";
 import { frameworkError } from "../types/error-factories.js";
-import { safeErrorMessage } from "../types/safe-error.js";
+import { safeDiagnosticRender, safeErrorMessage } from "../types/safe-error.js";
 import { fwLogger } from "../logger.js";
 
 interface StoredMeta {
@@ -326,34 +326,49 @@ export class RedisCheckpointer implements Checkpointer {
     // adapter's `cache-error`. See `encodeStoredNodeKey`.
     const nodeKey = encodeStoredNodeKey(runId, nodeId, opts);
     if (!nodeKey.ok) return nodeKey;
+    // ONE definition of the script's argument list, shared by the EVALSHA call
+    // and its NOSCRIPT/EVAL fallback below. Written twice, the two could drift
+    // — and the drift that matters is silent: a composite address applied to
+    // only one of them would write fan-out indices to the CANONICAL key
+    // whenever the server's script cache happened to be cold. That risk had a
+    // dedicated regression test catching it after the fact; hoisting the tuple
+    // removes it structurally, because there is now only one place to change.
+    const scriptArgs = [
+      nodesKey(runId),
+      metaKey(runId),
+      nodeKey.value,
+      payload,
+      String(TTL_SECONDS),
+    ] as const;
     try {
       if (!this.saveNodeSha) {
-        this.saveNodeSha = await this.redis.script("LOAD", SAVE_NODE_SCRIPT) as string;
+        // The port types `script` as `Promise<unknown>` on purpose: that is
+        // ioredis's own declared return type, so `ioredis.Redis` satisfies the
+        // port structurally with no cast. Narrowing it here with a runtime
+        // check rather than an `as string` assertion keeps that property AND
+        // fails closed — an assertion would let a driver returning a Buffer
+        // (e.g. under `returnBuffers`) thread a non-string into `evalsha` as
+        // if it were a validated SHA, and the failure would surface later, on
+        // a different call, as an opaque driver error.
+        const sha = await this.redis.script("LOAD", SAVE_NODE_SCRIPT);
+        if (typeof sha !== "string") {
+          return err(
+            frameworkError.cacheError(
+              "saveNode",
+              `SCRIPT LOAD returned ${safeDiagnosticRender(sha)}, expected the script SHA as a string`,
+            ),
+          );
+        }
+        this.saveNodeSha = sha;
       }
       try {
-        await this.redis.evalsha(
-          this.saveNodeSha,
-          2,
-          nodesKey(runId),
-          metaKey(runId),
-          nodeKey.value,
-          payload,
-          String(TTL_SECONDS),
-        );
+        await this.redis.evalsha(this.saveNodeSha, 2, ...scriptArgs);
       } catch (e) {
         // NOSCRIPT (script flushed from server cache) — fall back to inline EVAL
         // and re-prime the SHA.
         if (e instanceof Error && e.message.includes("NOSCRIPT")) {
           this.saveNodeSha = null;
-          await this.redis.eval(
-            SAVE_NODE_SCRIPT,
-            2,
-            nodesKey(runId),
-            metaKey(runId),
-            nodeKey.value,
-            payload,
-            String(TTL_SECONDS),
-          );
+          await this.redis.eval(SAVE_NODE_SCRIPT, 2, ...scriptArgs);
         } else {
           throw e;
         }
