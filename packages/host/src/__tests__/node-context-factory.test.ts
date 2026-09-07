@@ -10,7 +10,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInMemorySpendLedger } from "../adapters/spend-ledger-memory.js";
-import { fromJson, ok, err, isOk, dagId, runId as makeRunId, nodeId as makeNodeId, gitSha, noopTracer, createHttpCapability, systemClock, observedOf, usdToMicros, tokensOnly, NO_SPEND } from "@fuguejs/framework";
+import { fromJson, ok, err, isOk, dagId, runId as makeRunId, nodeId as makeNodeId, gitSha, noopTracer, createHttpCapability, systemClock, observedOf, usdToMicros, tokensOnly, NO_SPEND, mapIndex } from "@fuguejs/framework";
 import type {
   Result,
   DagId,
@@ -476,6 +476,50 @@ describe("createNamespacedCheckpointWriter", () => {
 
     const expectedKey = buildCheckpointKey(testTenant, testDagId, testRunId, testNodeId);
     expect(store.get(expectedKey)).toBe(JSON.stringify({ output: "done" }));
+  });
+
+  // Round-23 C5/C6 — the index actually reaches Redis.
+  //
+  // `buildCheckpointKey`'s indexed form is exhaustively tested as a pure
+  // function, but that only proves the STRING builder. What was untested is the
+  // adapter body that holds the parameter: dropping the fourth argument at the
+  // call site inside `write` passed every test in this file, and the plan's own
+  // risk table names exactly that class ("the index dimension is dropped
+  // somewhere along the production path and nobody notices — this already
+  // happened once").
+  it("threads a fan index through to the key Redis actually receives", async () => {
+    const store = new Map<string, string>();
+    const { redis } = createMockRedis(store);
+    const { logger } = collectLogs();
+    const writer = createNamespacedCheckpointWriter(redis, testTenant, testDagId, testRunId, undefined, logger);
+
+    await writer.write(testRunId, testNodeId, { output: "idx-2" }, mapIndex(2));
+
+    const indexedKey = buildCheckpointKey(testTenant, testDagId, testRunId, testNodeId, mapIndex(2));
+    expect(indexedKey.endsWith("$2")).toBe(true);
+    expect(store.get(indexedKey)).toBe(JSON.stringify({ output: "idx-2" }));
+  });
+
+  it("distinct fan indices write distinct Redis keys, and neither is the canonical one", async () => {
+    // The whole point of the index: one child's checkpoint must not overwrite
+    // another's, and index 0 must not collide with the node's own canonical
+    // entry.
+    const store = new Map<string, string>();
+    const { redis } = createMockRedis(store);
+    const { logger } = collectLogs();
+    const writer = createNamespacedCheckpointWriter(redis, testTenant, testDagId, testRunId, undefined, logger);
+
+    await writer.write(testRunId, testNodeId, { at: "canonical" });
+    await writer.write(testRunId, testNodeId, { at: 0 }, mapIndex(0));
+    await writer.write(testRunId, testNodeId, { at: 1 }, mapIndex(1));
+
+    expect(store.size).toBe(3);
+    expect(store.get(buildCheckpointKey(testTenant, testDagId, testRunId, testNodeId)))
+      .toBe(JSON.stringify({ at: "canonical" }));
+    expect(store.get(buildCheckpointKey(testTenant, testDagId, testRunId, testNodeId, mapIndex(0))))
+      .toBe(JSON.stringify({ at: 0 }));
+    expect(store.get(buildCheckpointKey(testTenant, testDagId, testRunId, testNodeId, mapIndex(1))))
+      .toBe(JSON.stringify({ at: 1 }));
   });
 
   it("rejects on Redis failure so runDag can surface checkpoint-write-failed", async () => {

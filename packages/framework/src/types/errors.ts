@@ -381,8 +381,16 @@ export type FrameworkError =
 export type FrameworkErrorKind = FrameworkError["kind"];
 
 // The framework owns the wire parser for its error ADT. Persistence adapters
-// compose this schema into their own records instead of duplicating all 27
-// variants and drifting when the framework error vocabulary changes.
+// compose this schema into their own records instead of duplicating every
+// variant and drifting when the framework error vocabulary changes.
+//
+// Deliberately not a count. The number was written as "27", the union grew to
+// 29, and the stale figure was the visible half of a real defect: the
+// `persistedFrameworkErrorKinds` enum below is a SECOND hand-maintained list of
+// the same names, and it had not been extended either — so `isFrameworkErrorKind`
+// returned false for two kinds the framework itself was constructing.
+// `errors.test.ts` now asserts the enum and the union agree, which is the check
+// a number in a comment was never going to be.
 const persistedBrandedId = <T>(parse: (raw: string) => { readonly ok: true; readonly value: T } | { readonly ok: false }): z.ZodType<T> =>
   z.string().transform((value, context) => {
     const parsed = parse(value);
@@ -483,16 +491,66 @@ const persistedBreachSchema = z.union([
   }),
 ]);
 const PersistedCapabilitySchema: z.ZodType<Capability> = z.string().transform((value) => value as Capability);
-const persistedFrameworkErrorKinds = z.enum([
-  "validation", "retry-exhausted", "checkpoint-missing", "checkpoint-expired",
-  "checkpoint-corrupt", "checkpoint-version-mismatch", "checkpoint-write-failed",
-  "prompt-not-found", "cache-error", "node-crash", "cycle-detected", "aborted",
-  "rejected", "invalid-reroute", "transient", "missing-default-edge",
-  "output-unreachable-under-routing", "predicate-malformed", "duplicate-edge",
-  "root-expects-input", "source-has-incoming", "invalid-dag-input-edge",
-  "missing-capability", "llm-budget-exceeded", "infra-unreachable",
-  "policy-refusal", "downstream-denied",
-]);
+/**
+ * Every `FrameworkError` discriminant, as a table the COMPILER keeps in
+ * lockstep with the union: a kind missing from here, or a key here that is not
+ * a kind, is a compile error. Same technique as `DAG_PHASE_KIND_TABLE`.
+ *
+ * This exists because the previous shape — a hand-written `z.enum([...])` list
+ * of the same names — was a second copy of the union maintained by hand, and it
+ * silently fell behind. When `map-width-invalid`/`map-width-exceeded` were
+ * added, the discriminated-union schema below was extended and this list was
+ * not, so `isFrameworkErrorKind` returned FALSE for two kinds the framework
+ * itself constructs. Nothing failed, because agreement between the two lists
+ * was checked by nobody. Deriving the enum from a compiler-checked table means
+ * a new kind cannot be added to only one of them.
+ */
+const FRAMEWORK_ERROR_KIND_TABLE: Record<FrameworkErrorKind, true> = {
+  validation: true,
+  "retry-exhausted": true,
+  "checkpoint-missing": true,
+  "checkpoint-expired": true,
+  "checkpoint-corrupt": true,
+  "checkpoint-version-mismatch": true,
+  "checkpoint-write-failed": true,
+  "prompt-not-found": true,
+  "cache-error": true,
+  "node-crash": true,
+  "cycle-detected": true,
+  aborted: true,
+  rejected: true,
+  "invalid-reroute": true,
+  transient: true,
+  "missing-default-edge": true,
+  "output-unreachable-under-routing": true,
+  "predicate-malformed": true,
+  "duplicate-edge": true,
+  "root-expects-input": true,
+  "source-has-incoming": true,
+  "invalid-dag-input-edge": true,
+  "missing-capability": true,
+  "llm-budget-exceeded": true,
+  "infra-unreachable": true,
+  "policy-refusal": true,
+  "downstream-denied": true,
+  "map-width-invalid": true,
+  "map-width-exceeded": true,
+};
+
+/**
+ * The runtime-enumerable set of every `FrameworkError` kind. Exported so a test
+ * (or a consumer building its own boundary) can compare against the taxonomy
+ * itself rather than against a number someone has to remember to bump.
+ */
+export const FRAMEWORK_ERROR_KINDS: readonly FrameworkErrorKind[] =
+  Object.keys(FRAMEWORK_ERROR_KIND_TABLE) as FrameworkErrorKind[];
+
+const persistedFrameworkErrorKinds = z.enum(
+  // The cast is to the tuple shape `z.enum` requires; the VALUES are the
+  // compiler-checked table's own keys, so the enum cannot list a kind the union
+  // does not have, nor miss one it does.
+  FRAMEWORK_ERROR_KINDS as unknown as [FrameworkErrorKind, ...FrameworkErrorKind[]],
+);
 
 /** Parse the standalone serialized kind marker carried by FrameworkAugmentedError. */
 export const isFrameworkErrorKind = (value: unknown): value is FrameworkErrorKind =>

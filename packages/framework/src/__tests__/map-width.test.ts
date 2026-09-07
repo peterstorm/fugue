@@ -215,6 +215,89 @@ describe("resolveMappedItems — the three arms (FR-F1-003/004/005)", () => {
     if (result.ok) expect(result.value.width).toBe(2);
   });
 
+  // Round-23 C1 — the bound must survive a value that reports a DIFFERENT
+  // length on the second read.
+  //
+  // `Array.isArray` unwraps proxies, so a Proxy around a real array passes the
+  // type guard. The original code checked `field.length` once and then built
+  // the result with `[...field]`, whose iterator re-reads `length` on every
+  // step — so a growing `length` produced a result whose `items.length`
+  // exceeded the max that had just been enforced, while `width` still reported
+  // the checked-safe number. The fan driver iterates `items`, so this was a
+  // live maxWidth bypass: a declared max of 3 could run 50 children.
+  it("a length that GROWS after the bound check cannot lengthen the fan", () => {
+    const target = Array.from({ length: 50 }, (_, i) => i);
+    let reads = 0;
+    const growing = new Proxy(target, {
+      get(t, prop, recv): unknown {
+        if (prop === "length") {
+          reads += 1;
+          return reads === 1 ? 3 : 50;
+        }
+        return Reflect.get(t, prop, recv);
+      },
+    });
+
+    const result = resolveMappedItems(NODE, { items: growing }, FROM, maxWidth(3));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected the first, in-bound length to be honored");
+    // The two numbers must agree, and both must respect the bound. Asserting
+    // only `width` would have passed against the broken code.
+    expect(result.value.width).toBe(3);
+    expect(result.value.items.length).toBe(3);
+    expect(result.value.items.length).toBeLessThanOrEqual(3);
+  });
+
+  it("a length that SHRINKS after the bound check still yields exactly the checked width", () => {
+    // The mirror case: the copy is built to the snapshotted count, so a
+    // shrinking length cannot silently truncate the fan either. `undefined`
+    // holes are the honest result of a value that lied about its own size.
+    const target = Array.from({ length: 5 }, (_, i) => i);
+    let reads = 0;
+    const shrinking = new Proxy(target, {
+      get(t, prop, recv): unknown {
+        if (prop === "length") {
+          reads += 1;
+          return reads === 1 ? 5 : 1;
+        }
+        return Reflect.get(t, prop, recv);
+      },
+    });
+
+    const result = resolveMappedItems(NODE, { items: shrinking }, FROM, maxWidth(10));
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.width).toBe(5);
+      expect(result.value.items.length).toBe(5);
+    }
+  });
+
+  // Round-23 C2 — the twin of the upstream-getter pin above, one level down.
+  it("converts a throwing ELEMENT getter into a typed refusal, never a raw throw", () => {
+    // The upstream-object getter was already guarded; the per-index read was
+    // not, so a throwing element escaped `resolveMappedItems` — and then
+    // escaped the map node's `run` — past a `Result<_, FrameworkError>`
+    // contract.
+    const hostile: unknown[] = [1, 2, 3];
+    Object.defineProperty(hostile, 1, {
+      get() {
+        throw new Error("element getter exploded");
+      },
+      configurable: true,
+    });
+
+    const result = resolveMappedItems(NODE, { items: hostile }, FROM, MAX);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("map-width-invalid");
+      if (result.error.kind === "map-width-invalid") {
+        expect(result.error.found).toContain("threw");
+      }
+    }
+  });
+
   it("copies the items, so a later mutation of the upstream cannot change the fan mid-flight", () => {
     // The fan's width and its items must be the same facts at index 0 and at
     // index N-1; aliasing the caller's array would let an upstream mutation
@@ -253,6 +336,25 @@ describe("resolveMappedItems — properties", () => {
           // One rule, both directions: nothing in the admitted set exceeds the
           // bound and nothing beyond the bound is admitted.
           expect(result.ok).toBe(length <= bound);
+        },
+      ),
+      { numRuns: 400 },
+    );
+  });
+
+  it("items.length never exceeds max on ANY success", () => {
+    // The bound stated as a property of the RETURNED value rather than of the
+    // number that was checked. C1 satisfied the latter and violated the former.
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 1, max: 30 }),
+        fc.array(fc.integer(), { maxLength: 60 }),
+        (bound, items) => {
+          const result = resolveMappedItems(NODE, { items }, FROM, maxWidth(bound));
+          if (result.ok) {
+            expect(result.value.items.length).toBeLessThanOrEqual(bound);
+            expect(result.value.items.length).toBe(result.value.width);
+          }
         },
       ),
       { numRuns: 400 },

@@ -169,10 +169,16 @@ export const createMapNode = <I, ChildOut, O>(
     inputSchema: config.inputSchema,
     outputSchema: config.outputSchema,
     requires: MAP_REQUIRES,
-    // The fan's own side effects are whatever the child does; the map node
-    // itself only reads its width and writes checkpoints. `reads` is the
-    // honest floor — it consults durable state to decide what to skip.
-    sideEffects: { kind: "reads", resource: resourceName("checkpoint:fan") },
+    // `writes`, not `reads`. The node calls `saveNode` and `setMeta`, both of
+    // which mutate durable state, and `node.ts` defines `reads` as reading
+    // external state WITHOUT mutation. The distinction is load-bearing rather
+    // than descriptive: `side-effects.ts` admits `idempotencyKey` and the
+    // write-freshness extractors only on the `writes`/`external-call` arms, and
+    // `node-span.ts` gates its idempotency handling on those kinds — so
+    // labelling a mutating node `reads` silently excluded it from that
+    // handling and misreported it to every consumer of the profile (freshness
+    // contracts, operator dashboards, routing safety analysis).
+    sideEffects: { kind: "writes", resource: resourceName("checkpoint:fan") },
     confidence: { mode: "none" },
     run: async (
       input: I,
@@ -180,7 +186,7 @@ export const createMapNode = <I, ChildOut, O>(
     ): Promise<Result<O, FrameworkError>> => {
       const resolved = resolveMappedItems(id, input, from, max);
       if (!resolved.ok) return resolved;
-      const { items } = resolved.value;
+      const { items, width } = resolved.value;
 
       // Which indices are already durable. A `load` failure is NOT treated as
       // "nothing is done": that would silently re-run a fan whose entries
@@ -198,7 +204,10 @@ export const createMapNode = <I, ChildOut, O>(
         const seeded = await ctx.checkpointer.setMeta(ctx.runId, {
           dagId: ctx.dagId,
           startedAt: new Date(),
-          nodeCount: items.length,
+          // The parsed `width`, not a re-derived `items.length`. They are equal
+          // by construction, and reading the one the bound was checked against
+          // means there is no second number that could ever disagree with it.
+          nodeCount: width,
         });
         if (!seeded.ok) return seeded;
       }

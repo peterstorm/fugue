@@ -129,6 +129,29 @@ export interface MappedItems {
 }
 
 /**
+ * ONE encoding of "a read of untrusted upstream data threw" → the module's
+ * typed refusal.
+ *
+ * Written once on purpose. The defect this module was just fixed for was the
+ * same rule applied to the field read and not to the element read below it —
+ * two copies of one contract, and only one of them maintained. A single
+ * conversion means a new hostile-read site cannot get a different answer.
+ */
+const readThrew = (
+  nodeId: NodeId,
+  from: WidthFrom,
+  what: string,
+  error: unknown,
+): Result<never, FrameworkError> =>
+  err(
+    frameworkError.mapWidthInvalid(
+      nodeId,
+      from,
+      `reading ${what} threw: ${safeDiagnosticRender(error)}`,
+    ),
+  );
+
+/**
  * Read a map node's items off the upstream output and prove them within bound.
  *
  * `upstream` is untrusted: it is whatever the previous node returned. Every
@@ -154,27 +177,49 @@ export const resolveMappedItems = (
   try {
     field = (upstream as Record<string, unknown>)[from];
   } catch (error) {
-    return err(
-      frameworkError.mapWidthInvalid(
-        nodeId,
-        from,
-        `reading the field threw: ${safeDiagnosticRender(error)}`,
-      ),
-    );
+    return readThrew(nodeId, from, "the field", error);
   }
 
   if (!Array.isArray(field)) {
     return err(frameworkError.mapWidthInvalid(nodeId, from, safeDiagnosticRender(field)));
   }
 
+  // `length` is read ONCE, into a local, and every later decision uses that
+  // local. It is not a style preference: `Array.isArray` unwraps proxies, so
+  // `field` can be a Proxy whose `length` returns a different number on each
+  // read. The bound is enforced against this snapshot, and the copy below is
+  // built to exactly this many elements — so "the length we checked" and "the
+  // length we return" are the same number by construction rather than by two
+  // reads agreeing.
   const width = field.length;
   if (width > max) {
     return err(frameworkError.mapWidthExceeded(nodeId, width, max));
   }
 
-  // Copied, not aliased. The caller holds a value it can fan over N times
-  // without the upstream output mutating the list underneath it between
-  // indices — the fan's width and its items must be the same facts at index 0
-  // and at index N-1.
-  return ok({ items: [...field], width });
+  // Copied by BOUNDED INDEX, not by spread.
+  //
+  // `[...field]` walks the array iterator, which re-reads `length` on every
+  // step — so a `length` that grows after the check above produced a result
+  // whose `items.length` exceeded the `max` that had just been enforced, while
+  // `width` still reported the checked-safe number. The fan driver iterates
+  // `items`, so that was a live `maxWidth` bypass: a declared max of 3 could
+  // run 50 children. A fixed-count loop cannot be lengthened by anything the
+  // value does afterwards.
+  //
+  // Inside the try for the same reason the field read above is: an index
+  // getter can throw, and this function's contract is
+  // `Result<_, FrameworkError>` — a raw throw here escapes the map node's
+  // `run`, whose contract is the same. The module's header promises every
+  // access survives a hostile value; this is one of them.
+  //
+  // Copied rather than aliased so a later mutation of the upstream array
+  // cannot change the fan between index 0 and index N-1.
+  const items: unknown[] = [];
+  try {
+    for (let i = 0; i < width; i++) items.push(field[i]);
+  } catch (error) {
+    return readThrew(nodeId, from, "an element", error);
+  }
+
+  return ok({ items, width });
 };

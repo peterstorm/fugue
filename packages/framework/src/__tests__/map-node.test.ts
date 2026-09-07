@@ -21,8 +21,9 @@ import { createTransformNode } from "../nodes/transform.js";
 import { withHumanReview } from "../nodes/human-review.js";
 import { ok, err } from "../types/result.js";
 import { mapIndex } from "../types/map-index.js";
-import { DAG_INPUT, nodeId, runId as makeRunId } from "../types/ids.js";
+import { DAG_INPUT, dagId, nodeId, runId as makeRunId } from "../types/ids.js";
 import type { Checkpointer } from "../checkpoint/checkpointer.js";
+import type { DagDef } from "../types/dag.js";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -53,14 +54,17 @@ const ctxWith = (checkpointer: Checkpointer, runIdStr = "run-fan") =>
   });
 
 /** Run a map node directly — the fan is the unit under test, not the outer wave. */
-const fanNode = (calls: unknown[], over: { readonly maxWidth?: number } = {}) =>
+const fanNode = (
+  calls: unknown[],
+  over: { readonly maxWidth?: number; readonly child?: DagDef } = {},
+) =>
   createMapNode({
     id: "fan",
     inputSchema: z.object({ items: z.array(z.number()) }),
     outputSchema: z.array(z.number()),
     widthFrom: "items",
     maxWidth: over.maxWidth ?? 25,
-    child: childDag(calls),
+    child: over.child ?? childDag(calls),
     childOutputSchema: z.number(),
     reduce: (results) => ok([...results]),
   });
@@ -160,16 +164,7 @@ describe("createMapNode — the fan (FR-F1-001)", () => {
       edges: [{ from: DAG_INPUT, to: "boom" }],
       outputNodeId: "boom",
     });
-    const node = createMapNode({
-      id: "fan",
-      inputSchema: z.object({ items: z.array(z.number()) }),
-      outputSchema: z.array(z.number()),
-      widthFrom: "items",
-      maxWidth: 25,
-      child: failing,
-      childOutputSchema: z.number(),
-      reduce: (rs) => ok([...rs]),
-    });
+    const node = fanNode([], { child: failing });
 
     const result = await node.run({ items: [1, 2, 3] }, ctxWith(new InMemoryCheckpointer()) as never);
     expect(result.ok).toBe(false);
@@ -256,16 +251,7 @@ describe("createMapNode — per-index durability (FR-F1-006/007)", () => {
       edges: [{ from: DAG_INPUT, to: "step" }],
       outputNodeId: "step",
     });
-    const firstNode = createMapNode({
-      id: "fan",
-      inputSchema: z.object({ items: z.array(z.number()) }),
-      outputSchema: z.array(z.number()),
-      widthFrom: "items",
-      maxWidth: 25,
-      child: flaky,
-      childOutputSchema: z.number(),
-      reduce: (rs) => ok([...rs]),
-    });
+    const firstNode = fanNode([], { child: flaky });
 
     const first = await firstNode.run({ items: [10, 20, 30, 40] }, ctxWith(cp) as never);
     expect(first.ok).toBe(false);
@@ -288,7 +274,7 @@ describe("createMapNode — per-index durability (FR-F1-006/007)", () => {
     // written. Gathering a stored value that no longer parses would launder
     // stale data into a fresh result.
     const cp = new InMemoryCheckpointer();
-    await cp.setMeta(RUN, { dagId: nodeId("outer") as never, startedAt: new Date(), nodeCount: 1 });
+    await cp.setMeta(RUN, { dagId: dagId("outer"), startedAt: new Date(), nodeCount: 1 });
     await cp.saveNode(
       RUN,
       { nodeId: FAN, output: "not a number", completedAt: new Date() },
@@ -337,6 +323,70 @@ describe("createMapNode — per-index durability (FR-F1-006/007)", () => {
     if (!result.ok) expect(result.error.kind).toBe("cache-error");
     // Stopped at the first index rather than running all three.
     expect(calls).toEqual([1]);
+  });
+
+  it("does NOT re-seed checkpoint meta when the run already has a record", async () => {
+    // Round-23 pr-test-analyzer-4. The guard's stated intent is "an outer run
+    // that already established the record keeps its own" — previously covered
+    // only by accident, via a test that happened to pre-seed. A map node that
+    // overwrote the run's meta would reset `nodeCount`/`startedAt` for every
+    // other consumer of that record.
+    const cp = new InMemoryCheckpointer();
+    const startedAt = new Date("2020-01-01T00:00:00Z");
+    await cp.setMeta(RUN, { dagId: dagId("outer"), startedAt, nodeCount: 99 });
+
+    const result = await fanNode([]).run({ items: [1, 2] }, ctxWith(cp) as never);
+    expect(result.ok).toBe(true);
+
+    const loaded = await cp.load(RUN);
+    if (!loaded.ok || loaded.value === null) throw new Error("expected the seeded meta to survive");
+    expect(loaded.value.meta.nodeCount).toBe(99);
+    expect(loaded.value.meta.startedAt.toISOString()).toBe(startedAt.toISOString());
+  });
+
+  it("seeds meta itself when the run has none, so the fan's entries are visible on resume", async () => {
+    // The other side of the same guard. Without a meta record the Redis backend
+    // short-circuits `load` before reading the nodes hash, so the fan's entries
+    // would be written and then be invisible to the resume that needs them.
+    const cp = new InMemoryCheckpointer();
+    const result = await fanNode([]).run({ items: [1, 2, 3] }, ctxWith(cp) as never);
+    expect(result.ok).toBe(true);
+
+    const loaded = await cp.load(RUN);
+    if (!loaded.ok || loaded.value === null) throw new Error("expected the fan to seed meta");
+    expect(loaded.value.meta.nodeCount).toBe(3);
+  });
+});
+
+// ── The capability gate ─────────────────────────────────────────────────────
+
+describe("createMapNode — the checkpointer capability is not optional", () => {
+  it("declares checkpointer in requires, so a run without one fails at the gate", async () => {
+    // Round-23 pr-test-analyzer-3. Plan §12 states the fail-closed guarantee:
+    // "A run without one fails at the capability gate before any node runs."
+    // `MAP_REQUIRES` is that guarantee's whole enforcement mechanism, and
+    // nothing asserted it. A map node wired without a Checkpointer would
+    // otherwise silently re-run every completed index after a crash.
+    const calls: unknown[] = [];
+    const node = fanNode(calls);
+    expect(node.requires).toEqual(["checkpointer"]);
+
+    const dag = defineDag({
+      id: "outer",
+      nodes: { fan: node },
+      edges: [{ from: DAG_INPUT, to: "fan" }],
+      outputNodeId: "fan",
+    });
+
+    // A context with NO capabilities wired.
+    const bare = makeNodeContext({ runId: "run-nocap", dagId: "outer" });
+    const result = await runDag<unknown, unknown>(dag, { items: [1, 2] }, bare);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("missing-capability");
+    // Before any node ran: the fan must not have started and then discovered
+    // it had nowhere to record itself.
+    expect(calls).toEqual([]);
   });
 });
 
