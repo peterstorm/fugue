@@ -1,9 +1,9 @@
 // Composite checkpoint node-key codec (ADR-0075).
 //
 // Pure, backend-agnostic encoding of the composite node address space for the
-// `Checkpointer` port — no I/O, no imports from infra. The file backend keys
-// durable checkpoint entries by these strings; in-memory and Redis backends
-// ignore the composite options entirely (FR-023), so this module is the single
+// `Checkpointer` port — no I/O, no imports from infra. EVERY backend keys
+// durable checkpoint entries by these strings (ADR-0085; F6 shipped it
+// file-only under FR-023, which no longer holds), so this module is the single
 // definition of what a composite nodeKey IS.
 //
 // Invariants (collision-free by construction):
@@ -30,12 +30,14 @@
 //     validated inputs, per ADR-0080 ("low-level pure implementation
 //     functions may use local exceptions as control flow, but every exported
 //     throwing boundary catches and converts them before they can escape").
-//     The single production call site (the file checkpointer's `saveNode`)
-//     re-validates the boundary first, so the only throw reachable there is
-//     this module's own `assertNoNamespaceAlone` rule (which the boundary
-//     parse intentionally does not pre-reject — the ambiguity rule belongs to
-//     this module as the single definition of the composite key), and it is
-//     converted to typed `checkpoint-write-failed` at that boundary.
+//     Every production call site converts it: the file checkpointer's
+//     `saveNode` re-validates the boundary first (so the only throw reachable
+//     there is this module's own `assertNoNamespaceAlone` rule, which the
+//     boundary parse intentionally does not pre-reject — the ambiguity rule
+//     belongs to this module as the single definition of the composite key),
+//     while the in-memory and Redis backends route through the port's
+//     `encodeStoredNodeKey`. All three converge on typed
+//     `checkpoint-write-failed`.
 //   - The port-level `Result<_, FrameworkError>` channel is the Checkpointer's
 //     own — this module sits below it and never crosses it.
 
@@ -108,8 +110,16 @@ const assertNoNamespaceAlone = (opts: {
   readonly attempt?: number;
 }): void => {
   if (opts.namespace !== undefined && opts.index === undefined && opts.attempt === undefined) {
+    // `safeDiagnosticRender` for the same reason the two asserts below use it:
+    // `${opts.namespace}` invokes the value's own `toString`, so a forged
+    // `{ toString() { throw } }` reaching THIS branch would explode while the
+    // rejection was still being built and escape carrying the hostile's text.
+    // This branch is the one a namespace-ONLY opts bag takes, so the asserts
+    // below never see it: EVERY rejection path out of this module renders
+    // untrusted values through the same helper, which is what makes the
+    // error-channel contract above hold by inspection rather than per-site.
     throw new Error(
-      `Invalid composite node key opts: namespace "${opts.namespace}" without index/attempt is ambiguous — ` +
+      `Invalid composite node key opts: namespace ${safeDiagnosticRender(opts.namespace)} without index/attempt is ambiguous — ` +
         "a namespace-only address would be silently folded into the canonical nodeId; supply index and/or attempt to address a composite entry",
     );
   }
@@ -148,8 +158,15 @@ export const isNonNegativeSafeInteger = (value: unknown): value is number =>
 
 const assertIdComponent = (kind: string, value: string): void => {
   if (!isIdComponent(value)) {
+    // `safeDiagnosticRender`, not raw interpolation, for the same reason
+    // `assertIndexOrAttempt` uses it: `${value}` invokes the value's own
+    // `toString`, so a forged `{ toString() { throw } }` would explode INSIDE
+    // this codec's rejection and escape carrying the hostile's error text —
+    // the exact "raw trap" the error-channel contract above forbids. The
+    // renderer goes through the object tag before any guarded coercion
+    // (pinned in composite-node-key.test.ts alongside the index/attempt twins).
     throw new Error(
-      `Invalid composite node key ${kind} "${value}": must match ${ID_PATTERN.source} (no "@" — the composite separator)`,
+      `Invalid composite node key ${kind} ${safeDiagnosticRender(value)}: must match ${ID_PATTERN.source} (no "@" — the composite separator)`,
     );
   }
 };
@@ -212,7 +229,19 @@ export const compositeNodeKey = (nodeId: NodeId, opts?: CompositeNodeKeyOpts): s
     return nodeId;
   }
 
-  const namespace = opts.namespace ?? DEFAULT_NODE_NAMESPACE;
+  // Presence is `=== undefined`, NOT `??`: the two are different rules for a
+  // forged `null`, and `??` picks the wrong one. `??` treats `null` as absent,
+  // so `{ namespace: null, index: 5 }` would silently encode under the DEFAULT
+  // namespace — the caller's out-of-contract value discarded rather than
+  // rejected, contradicting this module's own "out-of-contract keys are
+  // rejected outright" contract and diverging from how the SIBLING fields of
+  // the same opts bag behave (`index`/`attempt` gate on `!== undefined`, so
+  // `null` reaches their assert and throws). The file backend's
+  // `parseSaveNodeBoundary` already rejects a non-string namespace; the
+  // in-memory and Redis backends hand `opts` straight here, so this gate is
+  // the only thing standing between a forged value and a misaddressed durable
+  // entry on two of three backends.
+  const namespace = opts.namespace === undefined ? DEFAULT_NODE_NAMESPACE : opts.namespace;
   assertIdComponent("namespace", namespace);
   if (opts.index !== undefined) assertIndexOrAttempt("index", opts.index);
   if (opts.attempt !== undefined) assertIndexOrAttempt("attempt", opts.attempt);

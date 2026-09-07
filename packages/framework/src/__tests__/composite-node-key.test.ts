@@ -207,6 +207,117 @@ describe("compositeNodeKey — hostile inputs rejected (typed throws)", () => {
       });
     }
   }
+
+  // Round-21 C1 — the namespace slot must reject a forged value the SAME way
+  // its sibling slots do. `index`/`attempt` gate on `!== undefined`, so a
+  // forged `null` reaches their assert and throws (the `hostileNumbers` table
+  // above covers exactly that). `namespace` used to be defaulted with `??`,
+  // which treats `null` as ABSENT — so `{ namespace: null, index: 5 }` encoded
+  // as `dag@read-node@5@0`, byte-identical to the call that supplied no
+  // namespace at all, with the caller's out-of-contract value silently
+  // discarded. `strictNullChecks` keeps honest TS callers out, but forged JS
+  // values at `saveNode`'s opts boundary are this module's stated threat model,
+  // and the in-memory and Redis backends pass `opts` straight through with no
+  // prior re-validation (only the file backend's `parseSaveNodeBoundary`
+  // pre-rejects it). Both addressing components are exercised because the
+  // ambiguity guard skips on either one.
+  const forgedNamespaces: readonly (readonly [string, unknown])[] = [
+    ["null", null],
+    ["a number", 42],
+    ["a boolean", false],
+    ["an object", {}],
+    ["an array", []],
+  ];
+  const addressingSlots = [
+    ["index", { index: 1 }],
+    ["attempt", { attempt: 1 }],
+  ] as const;
+  for (const [label, bad] of forgedNamespaces) {
+    for (const [slot, address] of addressingSlots) {
+      it(`throws on a forged namespace (${label}) with ${slot} present`, () => {
+        expect(() =>
+          compositeNodeKey(N("read-node"), { ...address, namespace: bad as unknown as string }),
+        ).toThrow("Invalid composite node key namespace");
+      });
+    }
+  }
+
+  it("a forged namespace is never silently folded onto the default namespace", () => {
+    // The failure this pins is not "it throws" but "it does not encode": before
+    // the fix the call below returned the SAME key as the namespace-less call,
+    // so a caller whose namespace config resolved to null wrote to "dag"
+    // instead of failing — silent misaddressing, the hazard the ambiguity rule
+    // exists to prevent, reached through a different value.
+    const withoutNamespace = compositeNodeKey(N("read-node"), { index: 5 });
+    expect(withoutNamespace).toBe("dag@read-node@5@0");
+    expect(() =>
+      compositeNodeKey(N("read-node"), { namespace: null as unknown as string, index: 5 }),
+    ).toThrow();
+  });
+
+  // Round-21 C1b — message totality for the namespace/nodeId slot, the twin of
+  // the index/attempt pins above. `assertIdComponent` used to interpolate the
+  // raw value (`"${value}"`), which invokes the value's own `toString`: a
+  // throwing hook exploded INSIDE the codec's own rejection and escaped
+  // carrying the hostile's text instead of the codec's rule.
+  for (const hostile of [throwingValueOf, throwingToString]) {
+    it("rejects a throwing-hook namespace with the codec's own typed message (never a raw trap)", () => {
+      const call = () =>
+        compositeNodeKey(N("read-node"), {
+          namespace: hostile as unknown as string,
+          index: 1,
+        });
+      expect(call).toThrow("Invalid composite node key namespace");
+      try {
+        call();
+        throw new Error("expected the codec to reject the hostile value");
+      } catch (error) {
+        expect((error as Error).message).not.toContain("exploded");
+      }
+    });
+
+    it("rejects a throwing-hook nodeId with the codec's own typed message (never a raw trap)", () => {
+      const call = () => compositeNodeKey(rawNodeId(hostile as unknown as string), { index: 1 });
+      expect(call).toThrow("Invalid composite node key nodeId");
+      try {
+        call();
+        throw new Error("expected the codec to reject the hostile value");
+      } catch (error) {
+        expect((error as Error).message).not.toContain("exploded");
+      }
+    });
+
+    // Round-22 C1 — the namespace-ALONE branch. Every hostile-namespace pin
+    // above supplies `index`, which routes through `assertIdComponent`; with
+    // no addressing component the ambiguity guard fires FIRST and builds its
+    // own message, a second rejection path that round 21's fix did not cover
+    // and no test reached. That is why this defect recurred: the fix went to
+    // the instance, not the class.
+    it("rejects a throwing-hook namespace ALONE with the codec's own typed message (never a raw trap)", () => {
+      const call = () =>
+        compositeNodeKey(N("read-node"), {
+          namespace: hostile as unknown as string,
+        } as unknown as CompositeNodeKeyOpts);
+      expect(call).toThrow("without index/attempt is ambiguous");
+      try {
+        call();
+        throw new Error("expected the codec to reject the hostile value");
+      } catch (error) {
+        expect((error as Error).message).not.toContain("exploded");
+      }
+    });
+  }
+
+  // The ambiguity rule itself still fires for every forged namespace shape,
+  // not just the ones whose rendering used to trap — the guard rejects on
+  // PRESENCE, so its verdict must not depend on the value's type at all.
+  for (const [label, bad] of forgedNamespaces) {
+    it(`rejects a forged namespace (${label}) supplied alone as ambiguous`, () => {
+      expect(() =>
+        compositeNodeKey(N("read-node"), { namespace: bad } as unknown as CompositeNodeKeyOpts),
+      ).toThrow("without index/attempt is ambiguous");
+    });
+  }
 });
 
 describe("parseCompositeNodeKey — classification", () => {
@@ -540,49 +651,27 @@ describe("fast-check properties", () => {
   });
 });
 
-describe("InMemoryCheckpointer — composite opts (FR-023)", () => {
+// F6's FR-023 pinned this backend to IGNORE composite opts, so that feature
+// changed no existing layout. F1 made every backend honor the address — a fan
+// whose indices collide in memory is a trap that only shows up when someone
+// swaps the backend.
+//
+// The ADDRESSING contract itself (composite storage, canonical folding,
+// distinct indices, canonical/composite coexistence, malformed fail-closed)
+// lives in `_checkpointer-suite.ts`, which runs against this backend through
+// `checkpointerSuite("InMemoryCheckpointer", ...)`. It is deliberately NOT
+// repeated here: two hand-synced copies of one contract is the failure mode
+// ADR-0085 moved those cases into the suite to prevent.
+//
+// What remains is the one property the suite does not assert — that a valid
+// composite save is logger-silent.
+describe("InMemoryCheckpointer — composite opts (ADR-0075, honored since F1)", () => {
   afterEach(() => {
     __resetFrameworkLogger();
   });
 
   const meta = { dagId: D("dag-1"), startedAt: new Date("2026-08-12T00:00:00Z"), nodeCount: 1 };
   const nodeState = { nodeId: N("n1"), output: { x: 42 }, completedAt: new Date("2026-08-12T00:00:01Z") };
-
-  it("storage and return behavior stay identical to a canonical save", async () => {
-    const withOpts = new InMemoryCheckpointer();
-    const canonical = new InMemoryCheckpointer();
-    for (const cp of [withOpts, canonical]) {
-      await cp.setMeta(R("run-1"), meta);
-    }
-
-    const withOptsResult = await withOpts.saveNode(
-      R("run-1"),
-      nodeState,
-      { namespace: "sub", index: 3, attempt: 1 },
-    );
-    const canonicalResult = await canonical.saveNode(R("run-1"), nodeState);
-    expect(withOptsResult).toEqual(canonicalResult);
-
-    const a = await withOpts.load(R("run-1"));
-    const b = await canonical.load(R("run-1"));
-    expect(a).toEqual(b);
-    if (a.ok && a.value !== null) {
-      expect(Object.keys(a.value.nodes)).toEqual(["n1"]);
-      expect(a.value.nodes["dag@n1@3@1"]).toBeUndefined();
-    }
-  });
-
-  it("ignores every composite option shape, including malformed runtime values", async () => {
-    const cp = new InMemoryCheckpointer();
-    await cp.setMeta(R("run-1"), meta);
-    const malformed = Object.freeze({ namespace: "../ignored", index: -1, attempt: Number.NaN });
-    const result = await cp.saveNode(R("run-1"), nodeState, malformed);
-
-    expect(result).toEqual({ ok: true, value: undefined });
-    const loaded = await cp.load(R("run-1"));
-    if (!loaded.ok || loaded.value === null) throw new Error("expected loaded state");
-    expect(Object.keys(loaded.value.nodes)).toEqual(["n1"]);
-  });
 
   it("emits no warning or other logger-observable behavior for composite options", async () => {
     const calls: string[] = [];
