@@ -3,11 +3,12 @@
  * Oracle DRIVER-LOADS smoke — the SECRET-FREE, DB-FREE half of SC-006 (NFR-001).
  *
  * Proves the `oracledb` thin-mode driver LOADS and RUNS its network stack on the
- * PRODUCTION base image (`oven/bun:1.2-alpine`) — the one genuinely image-specific
- * risk (pure-JS Oracle Net over musl/alpine, no Instant Client / native addon).
- * It needs NO credentials and NO reachable database, so it runs unconditionally in
- * GitHub CI where neither the Oracle secrets (they live as OpenShift SealedSecrets)
- * nor network line-of-sight to the real DB exist.
+ * ORIGINAL PRODUCTION base image (`oven/bun:1.4.2-alpine`) — the one genuinely
+ * image-specific risk (pure-JS Oracle Net over musl/alpine, no Instant Client /
+ * native addon). It needs NO credentials and NO reachable database, so the shared
+ * `.github/workflows/verify.yml` runs it unconditionally for both CI and release,
+ * where neither the Oracle secrets (they live as OpenShift SealedSecrets) nor
+ * network line-of-sight to the real DB exist.
  *
  * The REAL connectivity proof (an actual `SELECT 1 FROM DUAL` against prod Oracle)
  * is a SEPARATE check that can only run where the secret + network are: the

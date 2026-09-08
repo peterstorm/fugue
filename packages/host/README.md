@@ -549,13 +549,25 @@ curl -X POST http://host:3000/admin/teams \
 
 ---
 
-## Tests
+## Contributor verification
+
+From the repository root, use the canonical fail-closed gate:
 
 ```bash
-bun test                    # All tests across all packages
-bun test packages/host      # Host tests only
-bun run typecheck           # TypeScript validation
+bun install --frozen-lockfile
+bun run verify
 ```
+
+It delegates to all 12 workspace scripts, including the host package's intentionally ordered test script and the framework's separate CLI compiler tier. It also verifies the root scripts and shipped-doc links.
+
+For focused host iteration only:
+
+```bash
+(cd packages/host && bun run typecheck)
+(cd packages/host && bun run test)
+```
+
+Focused package commands are not repository parity evidence and Redis-gated suites can skip without `REDIS_URL`. Full verification requires exact Bun 1.4.2, a local `redis-server` binary, and an authorized, ACL-capable disposable Redis test server that the caller starts and stops. Server authentication is optional policy; the canonical guide and CI deliberately prove password authentication. The integration suites write fixtures and ACL users, so never use production or shared Redis. See [`../../CONTRIBUTING.md`](../../CONTRIBUTING.md) for the complete setup and the separate production-image Oracle control.
 
 ---
 

@@ -1,51 +1,28 @@
 # Publish the @fuguejs/* packages to npmjs on a version tag.
-#
-# Usage:
-#   1. Bump versions (keep them in lockstep) and commit.
-#   2. git tag v0.1.0 && git push --tags
-#
-# Auth: npm OIDC trusted publishing — no NPM_TOKEN secret. All 9 @fuguejs/*
-# packages already exist on npmjs and have a trusted publisher configured
-# (package → Settings → Trusted Publisher → GitHub Actions: owner/repo +
-# workflow filename `release.yaml`), so every release runs through here with
-# provenance — no manual step.
-#
-# NEW PACKAGE ONLY: npm lets you configure a trusted publisher only on a
-# package that already exists, so the very FIRST publish of a brand-new package
-# is manual (`bun publish` from a logged-in shell); configure its trusted
-# publisher immediately after, then all subsequent releases run through here.
-# (History: @fuguejs/oracle and @fuguejs/http-auth were manually first-published
-# at 0.3.0 but their trusted publisher was configured only at 0.4.0 — the
-# workflow had skipped them at 0.3.0 as already-on-registry, so the missing
-# config surfaced as an ENEEDAUTH on the first genuinely-new version it pushed.)
-#
-# Packages ship TypeScript source (bun-first distribution). `bun pm pack`
-# rewrites `workspace:*` ranges to the real versions at pack time; the tarball
-# is then handed to `npm publish` (npm >= 11.5.1 for OIDC). Publish order
-# below only matters for registry visibility.
-#
-# GOTCHA: OIDC validation requires each package.json's repository.url to
-# EXACTLY match this GitHub repo — a missing/mismatched field fails with a
-# misleading ENEEDAUTH (npm/cli#9088; cost us v0.1.1 and v0.1.2). When a
-# release run fails, prefer fixing forward: bump to the next patch version
-# and push a fresh tag — the "skip versions already on the registry" step
-# makes partially-published releases safe to supersede.
+# Manual dispatch validates the same versions and all nine tarballs, but cannot publish.
 name: release
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      release-tag:
+        description: Tag whose package versions and artifacts should be validated
+        required: true
+        type: string
 
 env:
-  # Publish order: dependencies before dependents. These are DIRECTORY names
-  # (packages/$pkg), not npm names — the oracle package lives in `adapter-oracle`
-  # but publishes as `@fuguejs/oracle`. `adapter-oracle` + `http-auth` depend only
-  # on `framework` and are depended on by `host`, so they slot after the leaf deps
-  # and before `host`.
+  # Publish order remains dependencies before dependents.
   PACKAGES: framework document-source xlsx adapter-fs adapter-ms-graph adapter-pg adapter-oracle http-auth host
+  EXPECTED_RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs['release-tag'] }}
 
 jobs:
+  verification:
+    uses: ./.github/workflows/verify.yml
+
   publish:
+    needs: verification
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -54,19 +31,15 @@ jobs:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.2 # keep in lockstep with ci.yml + packages/host/Dockerfile
+          bun-version: 1.4.2
       - uses: actions/setup-node@v5
         with:
           node-version: 24 # npm >= 11.5.1 required for OIDC trusted publishing
-
       - run: bun install --frozen-lockfile
-
-      - name: Install Redis integration-test dependency
-        run: sudo apt-get update && sudo apt-get install --yes redis-server
 
       - name: Verify tag matches package versions
         run: |
-          expected="${GITHUB_REF_NAME#v}"
+          expected="${EXPECTED_RELEASE_TAG#v}"
           for pkg in $PACKAGES; do
             actual=$(bun -e "console.log(require('./packages/$pkg/package.json').version)")
             if [ "$actual" != "$expected" ]; then
@@ -75,13 +48,34 @@ jobs:
             fi
           done
 
-      - name: Typecheck + test
+      - name: Prepare and validate all release tarballs
         run: |
+          rm -rf .release
+          mkdir .release
           for pkg in $PACKAGES; do
-            (cd "packages/$pkg" && bunx tsc --noEmit && bun run test)
+            name=$(bun -e "console.log(require('./packages/$pkg/package.json').name)")
+            version=$(bun -e "console.log(require('./packages/$pkg/package.json').version)")
+            destination="$GITHUB_WORKSPACE/.release/$pkg"
+            mkdir -p "$destination"
+            (cd "packages/$pkg" && bun pm pack --destination "$destination")
+
+            # Refuse stale workspace pins before any package can be published.
+            bad=$(tar -xzOf "$destination"/*.tgz package/package.json \
+              | bun -e 'const pj = await new Response(Bun.stdin.stream()).json();
+                  const want = process.argv[1];
+                  const deps = { ...pj.dependencies, ...pj.peerDependencies };
+                  const bad = Object.entries(deps)
+                    .filter(([n, v]) => n.startsWith("@fuguejs/") && v !== want)
+                    .map(([n, v]) => n + "@" + v);
+                  console.log(bad.join(" "));' "$version")
+            if [ -n "$bad" ]; then
+              echo "::error::$name tarball pins stale workspace versions: $bad — bump the workspace \"version\" fields in bun.lock" >&2
+              exit 1
+            fi
           done
 
-      - name: Publish (skip versions already on the registry)
+      - name: Publish validated tarballs (skip versions already on the registry)
+        if: github.event_name == 'push' && github.ref_type == 'tag'
         run: |
           for pkg in $PACKAGES; do
             name=$(bun -e "console.log(require('./packages/$pkg/package.json').name)")
@@ -90,33 +84,5 @@ jobs:
               echo "$name@$version already published — skipping"
               continue
             fi
-            # bun pm pack rewrites workspace:* ranges; npm publishes the tarball via
-            # OIDC. No --provenance flag: trusted publishing generates provenance
-            # automatically, and OIDC validation requires package.json's
-            # repository.url to exactly match this repo (else: misleading ENEEDAUTH).
-            (
-              cd "packages/$pkg"
-              rm -rf .release && mkdir .release
-              bun pm pack --destination .release
-
-              # GATE: bun pm pack resolves workspace:* from bun.lock, whose
-              # workspace "version" fields bun install does NOT refresh on a
-              # version bump — v0.1.4 shipped pinning siblings at 0.1.0 this
-              # way. Refuse to publish a tarball whose @fuguejs/* pins don't
-              # all equal the release version.
-              bad=$(tar -xzOf .release/*.tgz package/package.json \
-                | bun -e 'const pj = await new Response(Bun.stdin.stream()).json();
-                    const want = process.argv[1]; // bun -e: argv = [bun, ...args]
-                    const deps = { ...pj.dependencies, ...pj.peerDependencies };
-                    const bad = Object.entries(deps)
-                      .filter(([n, v]) => n.startsWith("@fuguejs/") && v !== want)
-                      .map(([n, v]) => n + "@" + v);
-                    console.log(bad.join(" "));' "$version")
-              if [ -n "$bad" ]; then
-                echo "::error::$name tarball pins stale workspace versions: $bad — bump the workspace \"version\" fields in bun.lock" >&2
-                exit 1
-              fi
-
-              npm publish .release/*.tgz --access public
-            )
+            npm publish ".release/$pkg"/*.tgz --access public
           done

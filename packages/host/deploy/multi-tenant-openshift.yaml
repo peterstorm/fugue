@@ -248,10 +248,11 @@ spec:
 ---
 # ── Oracle connectivity smoke — the REAL SC-006 / NFR-001 check ───────────────
 # Runs IN-CLUSTER, where the ORACLE_* SealedSecret is decrypted AND Oracle is
-# network-reachable — the two things GitHub CI structurally lacks. (CI only proves
-# the thin-mode driver LOADS on the prod image — see .github/workflows/ci.yml
-# `oracle-driver-smoke` — because the creds live as SealedSecrets and the DB is not
-# reachable from a hosted runner.) This Job opens a REAL connection and runs
+# network-reachable — the two things GitHub CI structurally lacks. (The shared
+# .github/workflows/verify.yml `original-image-oracle-smoke` job only proves the
+# thin-mode driver LOADS in the original production base image; both CI and release
+# require it, but the hosted runner has neither these SealedSecrets nor a DB route.)
+# This PostSync Job opens a REAL connection and runs
 # `SELECT 1 FROM DUAL` via scripts/oracle-smoke-connect.ts — the same
 # createOracleAdapter().connect()/healthCheck() the host uses — so a wrong connect
 # string, rotated password, or network break is caught at DEPLOY time, not at first

@@ -4,7 +4,7 @@ DAG-shaped, durable runtime for LLM-bearing workflows. Typed orchestration of mu
 
 ## Packages
 
-The framework and its adapters version in lockstep (currently **0.5.1**) and publish under the `@fuguejs/*` scope.
+The nine public packages version in lockstep (currently **0.5.1**) and publish under the `@fuguejs/*` scope. The repository also contains three private example/application workspaces; root verification delegates to all 12 workspace scripts.
 
 | Package | Name | Description |
 |---------|------|-------------|
@@ -14,6 +14,8 @@ The framework and its adapters version in lockstep (currently **0.5.1**) and pub
 | [`packages/adapter-fs`](packages/adapter-fs/) | `@fuguejs/fs` | Filesystem `DocumentSource` adapter (root-confined) |
 | [`packages/adapter-ms-graph`](packages/adapter-ms-graph/) | `@fuguejs/ms-graph` | Microsoft Graph / OneDrive / SharePoint `DocumentSource` adapter |
 | [`packages/adapter-pg`](packages/adapter-pg/) | `@fuguejs/pg` | PostgreSQL capability adapter |
+| [`packages/adapter-oracle`](packages/adapter-oracle/) | `@fuguejs/oracle` | Oracle thin-mode capability adapter |
+| [`packages/http-auth`](packages/http-auth/) | `@fuguejs/http-auth` | OAuth client-credentials HTTP capability with token reuse and credential-safe errors |
 | [`packages/xlsx`](packages/xlsx/) | `@fuguejs/xlsx` | Workbook parsing (`.xlsx` → typed rows) |
 | [`packages/examples`](packages/examples/) | `@fuguejs/examples` | Ten golden, lint-clean example DAGs (`01`–`10`) |
 | [`apps/customer-summary`](apps/customer-summary/) | `@fuguejs/customer-summary` | Example DAG app — CRM summarization pipeline with a Python eval harness |
@@ -21,20 +23,17 @@ The framework and its adapters version in lockstep (currently **0.5.1**) and pub
 
 ## Quick Start
 
+Repository contributors use the fail-closed root gate:
+
 ```bash
-# Install dependencies (Bun workspace)
-bun install
-
-# Run all tests (3,097 tests across 10 packages, all green;
-# ~35 Redis-gated tests skip automatically without a running Redis)
-bun run test
-
-# Type check every package
-bun run typecheck
-
-# Verify the shipped docs' relative links still resolve
-bun run check:docs
+# Bun must exactly match packages/host/Dockerfile (currently 1.4.2).
+# REDIS_URL must target an authorized, disposable, ACL-capable test server;
+# the canonical CONTRIBUTING setup proves password auth. redis-server must be in PATH.
+bun install --frozen-lockfile
+bun run verify
 ```
+
+This delegates to all 12 workspace `typecheck` and `test` scripts, including the framework's separate published-CLI compiler tier, and also checks the root verification scripts and shipped-doc links. See [CONTRIBUTING.md](CONTRIBUTING.md) for safe Redis setup, focused commands, exact-image Oracle proof, and release dry runs.
 
 ### Scaffold a DAG with the CLI
 
@@ -91,6 +90,7 @@ A production container image is at [`packages/host/Dockerfile`](packages/host/Do
 - **[Observability Backends](docs/observability-backends.md)** / **[Tracing Pipeline](docs/tracing-pipeline.md)** — MLflow + Azure AI Foundry
 - **[Eval Pipeline](docs/eval-pipeline.md)** — the customer-summary evaluation harness
 - **[Requirements](docs/requirements.md)** — requirement traceability (FR/NFR/SC)
+- **[Contributing](CONTRIBUTING.md)** — exact-runtime verification, disposable Redis setup, CI/image parity, and release procedure
 
 ## Architecture
 
@@ -133,10 +133,10 @@ A DAG can suspend at a **human-review gate**, persist its state to Redis, and re
 ## Development
 
 ```bash
-bun install              # Install all workspace dependencies
-bun run test             # Run all tests (3,097 across 10 packages)
-bun run typecheck        # Type check all packages
-bun run check:docs       # Verify shipped-doc relative links
-bun run infra:up         # Start Redis + MLflow (requires podman)
-bun run hitl:smoke       # End-to-end human-in-the-loop smoke test
+bun install --frozen-lockfile  # Install the locked workspace graph
+bun run verify                 # Canonical contributor gate (exact Bun + disposable Redis required)
+bun run infra:up               # Optional development infrastructure: Redis + MLflow (requires podman)
+bun run hitl:smoke             # Focused end-to-end HITL smoke; not a substitute for verify
 ```
+
+`bun run verify` does not start or stop a contributor's Redis server, and it does not include the independent production-base-image Oracle smoke. The prerequisites and both proof surfaces are documented in [CONTRIBUTING.md](CONTRIBUTING.md).

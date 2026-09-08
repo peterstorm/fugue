@@ -11,18 +11,18 @@
  * user and asserts the live server refuses cross-tenant value access and all
  * keyspace enumeration with NOPERM, while allowing the tenant's OWN keyspace.
  *
- * GATED: runs only when `REDIS_URL` points at an ACL-capable server (the repo's
- * `bun run test:redis` spins up redis:7-alpine, which supports ACLs). With no
- * `REDIS_URL` the whole suite is skipped — CI without Redis is unaffected. The
- * suite PROBES ACL support (`ACL CAT`) before provisioning: a server that genuinely
- * lacks ACLs skips with a logged note, but on an ACL-capable server a provisioning
- * failure FAILS LOUDLY (it would be a regression in the production `apply` path —
- * the exact thing this test exists to catch — not an unsupported server).
+ * GATED: with no `REDIS_URL`, the whole suite is deliberately skipped so a narrow
+ * package test remains available without Redis. Once `REDIS_URL` is configured,
+ * importing the client, authenticating, connecting, and proving `ACL CAT` are
+ * required setup: every failure is fatal rather than an all-skipped green result.
+ * Provisioning failures likewise FAIL LOUDLY because they are regressions in the
+ * production `apply` path this test exists to cover.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { ok, err } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
+import { createRedisConnectivity } from "../../adapters/redis-connectivity.js";
 import { redisUnavailable } from "../../domain/host-error.js";
 import type { HostError } from "../../domain/host-error.js";
 import { tenantId } from "../../domain/tenant.js";
@@ -32,35 +32,7 @@ import { apply } from "../../supervisor/secrets/redis-acl-provisioner.js";
 import type { RedisAclAdminPort } from "../../supervisor/secrets/redis-acl-provisioner.js";
 
 const REDIS_URL = process.env.REDIS_URL;
-
-/**
- * Probe ACL capability BEFORE the suite is declared, so a server that genuinely
- * lacks ACLs produces an explicit SKIP — not a green pass with zero assertions.
- * (Probing inside `beforeAll` forces per-`it` `return` guards, which Bun reports as
- * PASSING, overstating coverage: the suite would read all-green having asserted
- * nothing.) On an ACL-capable server, provisioning failures still FAIL LOUDLY
- * inside `beforeAll` — that path is a real `apply` regression, not an unsupported
- * server. `ACL CAT` exists on every ACL-capable server (Redis ≥6) and throws an
- * unknown-command error otherwise.
- */
-const aclCapable: boolean = await (async (): Promise<boolean> => {
-  if (REDIS_URL === undefined || REDIS_URL === "") return false;
-  try {
-    const { Redis } = await import("ioredis");
-    const probe = new Redis(REDIS_URL, { maxRetriesPerRequest: 1, lazyConnect: true });
-    try {
-      await probe.connect();
-      await probe.call("ACL", "CAT");
-      return true;
-    } finally {
-      await probe.quit().catch(() => {});
-    }
-  } catch {
-    // eslint-disable-next-line no-console
-    console.warn("[acl-real-server] REDIS_URL is set but the server lacks ACL support (ACL CAT failed); skipping suite");
-    return false;
-  }
-})();
+const redisConfigured = REDIS_URL !== undefined && REDIS_URL.trim() !== "";
 
 // Distinct, test-scoped tenant ids so the derived ACL usernames + key prefixes
 // never collide with real provisioned tenants on a shared dev Redis.
@@ -99,7 +71,7 @@ const realAclAdmin = (client: import("ioredis").Redis): RedisAclAdminPort => ({
   },
 });
 
-describe.skipIf(!aclCapable)(
+describe.skipIf(!redisConfigured)(
   "REAL Redis honors buildAclSpec — cross-tenant NOPERM (SC-001, ADR-0067)",
   () => {
     // ioredis is imported lazily so the module load doesn't require it when skipped.
@@ -109,7 +81,24 @@ describe.skipIf(!aclCapable)(
     let scoped: import("ioredis").Redis | undefined;
 
     beforeAll(async () => {
+      // Absence is the only skip condition. Once configured, import, auth,
+      // connection, and ACL capability are mandatory setup and reject this suite.
       const { Redis } = await import("ioredis");
+      const probe = new Redis(REDIS_URL!, {
+        maxRetriesPerRequest: 1,
+        lazyConnect: true,
+        connectTimeout: 500,
+        commandTimeout: 1_000,
+        enableOfflineQueue: false,
+        retryStrategy: () => null,
+      });
+      try {
+        await probe.connect();
+        await probe.call("ACL", "CAT");
+      } finally {
+        probe.disconnect();
+      }
+
       RedisClass = Redis;
       admin = new Redis(REDIS_URL!, { maxRetriesPerRequest: 1, lazyConnect: true });
       await admin.connect();
@@ -124,28 +113,31 @@ describe.skipIf(!aclCapable)(
       await admin.set(otherKey, "theirs");
       await admin.sadd(mySetKey, "a", "b");
 
-      // ACL support is already confirmed (the module-level `aclCapable` probe gates
-      // this suite via `describe.skipIf`), so a failure here is a REGRESSION in the
-      // production `apply` provisioner — FAIL LOUDLY, the exact thing this test exists
-      // to catch — not an unsupported server.
+      // ACL support is already confirmed by the configured setup probe above, so
+      // a failure here is a REGRESSION in the production `apply` provisioner —
+      // FAIL LOUDLY, the exact thing this test exists to catch — not an
+      // unsupported server.
       const applied = await apply(realAclAdmin(admin), ME, {
         generateRandomBytes: () => crypto.getRandomValues(new Uint8Array(32)),
       });
       expect(applied.ok).toBe(true);
       if (!applied.ok) return; // unreachable on success; narrows the union below.
 
-      // Connect AS the scoped user — the worker's posture. `enableReadyCheck` is
-      // OFF because the scoped user is (correctly) denied `INFO` — ioredis's ready
-      // probe runs INFO and would otherwise log a spurious NOPERM warning. The
-      // worker connects the same way (it never runs INFO).
-      scoped = new RedisClass(REDIS_URL!, {
-        username: applied.value.username,
-        password: applied.value.password,
-        maxRetriesPerRequest: 1,
-        lazyConnect: true,
-        enableReadyCheck: false,
-      });
-      await scoped.connect();
+      // Connect AS the scoped user through the production worker construction
+      // seam. This is load-bearing when REDIS_URL contains privileged admin
+      // userinfo: ioredis URL credentials outrank option credentials, so the seam
+      // must replace the URL userinfo rather than merely supplying options.
+      const connected = await createRedisConnectivity(
+        REDIS_URL!,
+        applied.value,
+        (scopedUrl, options) => {
+          scoped = new RedisClass(scopedUrl, options);
+          return scoped;
+        },
+      );
+      expect(connected.ok).toBe(true);
+      if (!connected.ok) return;
+      expect((await connected.value.port.ping()).ok).toBe(true);
     });
 
     afterAll(async () => {

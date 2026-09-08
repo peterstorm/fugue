@@ -1,9 +1,3 @@
-# Typecheck + test every publishable package on each push/PR.
-#
-# This is the same gate release.yml runs at tag time — running it on every
-# change means a broken host/framework can't sit unnoticed on main until the
-# next release. Same package list, same loop, so the two workflows can't
-# drift apart silently.
 name: ci
 
 on:
@@ -11,97 +5,6 @@ on:
     branches: [main]
   pull_request:
 
-env:
-  # Superset of release.yaml's PACKAGES: CI typechecks + tests every workspace
-  # member, INCLUDING adapter-oracle + http-auth. Those two are intentionally NOT
-  # in release.yaml's publish set yet — publishing them to npm needs a version
-  # bump to host's lockstep version + a manual first-publish (trusted-publisher
-  # setup), an npm decision separate from running them through CI. They MUST be
-  # exercised here regardless, so a regression in either fails the build.
-  PACKAGES: framework document-source xlsx adapter-fs adapter-ms-graph adapter-pg adapter-oracle http-auth host
-
 jobs:
-  check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
-        with:
-          # PINNED, and pinned to the SAME version as packages/host/Dockerfile's
-          # base image. This was `latest` while prod ran 1.2, and the gap was not
-          # theoretical: on 1.2.23 a second `createHost` bind to an already-bound
-          # UDS SUCCEEDS, so FR-007's fail-closed boot abort did not hold on the
-          # runtime we ship, and thrown fs errors reached the CLI problems
-          # envelope without their stack. Both pass on 1.4.2. A green `check` is
-          # only evidence about production if it ran on production's runtime, so
-          # this version and the Dockerfile's must be bumped together.
-          bun-version: 1.4.2
-
-      - run: bun install --frozen-lockfile
-
-      # The Redis-backed suites (spend-ledger WATCH/MULTI/EXEC transactions,
-      # checkpointer, cache, BullMQ queue) are gated on REDIS_URL at module load
-      # and SKIP without it. Installing the binary is not enough: CI must also
-      # start it and export the URL, or the merge gate silently skips the very
-      # tests that prove concurrent spend cannot double-count.
-      - name: Start Redis for the integration-gated suites
-        run: |
-          sudo apt-get update && sudo apt-get install --yes redis-server
-          sudo systemctl stop redis-server 2>/dev/null || true
-          redis-server --daemonize yes --port 6379 --save '' --appendonly no
-          for _ in $(seq 1 30); do
-            redis-cli -p 6379 ping 2>/dev/null | grep -q PONG && break
-            sleep 1
-          done
-          redis-cli -p 6379 ping
-          echo "REDIS_URL=redis://localhost:6379" >> "$GITHUB_ENV"
-
-      - name: Check shipped-doc links
-        run: bun run check:docs
-
-      - name: Test repo scripts
-        run: bun test scripts/
-
-      - name: Typecheck + test
-        # REDIS_URL (exported above) un-skips the Redis-gated suites.
-        run: |
-          test -n "$REDIS_URL" || { echo "REDIS_URL unset — Redis suites would silently skip"; exit 1; }
-          for pkg in $PACKAGES; do
-            echo "::group::$pkg"
-            (cd "packages/$pkg" && bunx tsc --noEmit && bun run test)
-            echo "::endgroup::"
-          done
-
-  # SC-006 / NFR-001 — CI half: prove @fuguejs/oracle's thin-mode driver LOADS and
-  # runs its network stack on the PRODUCTION base image (`oven/bun:1.4.2-alpine`).
-  # oracledb thin mode was verified on Bun 1.3.x in dev, but prod runs alpine
-  # (packages/host/Dockerfile), so this MUST run inside that exact image — keep this
-  # tag and the Dockerfile's `FROM` identical — hence the
-  # job-level `container:`. The pure-JS Oracle Net stack over musl/alpine is the one
-  # genuinely image-specific risk, and it needs NO Instant Client and NO native build.
-  #
-  # SECRET-FREE + DB-FREE, so it runs on EVERY push/PR with no gating: it dials an
-  # unreachable target and asserts the driver loaded + attempted a connection (a
-  # network error, not a module-load error). It does NOT prove real connectivity.
-  #
-  # The REAL connectivity smoke (a live `SELECT 1 FROM DUAL` against prod Oracle)
-  # cannot run in GitHub CI: the ORACLE_* credentials live as OpenShift SealedSecrets
-  # and Oracle is only reachable in-cluster. That proof runs as the OpenShift Job in
-  # packages/host/deploy (scripts/oracle-smoke-connect.ts) at deploy time — gating the
-  # rollout, not the merge. See the fugue-oracle-smoke Job in
-  # packages/host/deploy/multi-tenant-openshift.yaml.
-  oracle-driver-smoke:
-    runs-on: ubuntu-latest
-    # Run INSIDE the prod base image — that the driver works HERE is the whole point.
-    container:
-      image: oven/bun:1.4.2-alpine
-    steps:
-      - uses: actions/checkout@v5
-
-      # Thin mode only: no Instant Client, no native build step. The frozen install
-      # resolves `oracledb` (a host runtime dependency, lockfile-pinned at 7.0.0),
-      # which runs in THIN mode by default — pure-JS Oracle Net over TCP, musl-safe.
-      - run: bun install --frozen-lockfile
-
-      - name: Driver-loads smoke on oven/bun:1.4.2-alpine (no secrets, no DB)
-        run: bun scripts/oracle-driver-smoke.ts
+  verification:
+    uses: ./.github/workflows/verify.yml
