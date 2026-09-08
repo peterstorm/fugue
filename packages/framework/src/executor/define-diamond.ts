@@ -9,17 +9,16 @@
 // diamond"). Output is always the join node. Sugar over `defineFanOut`.
 
 import type { DagDef } from "../types/dag.js";
-import type { Capability, NodeDef } from "../types/node.js";
 import type { EvalJudgeNodeDef } from "../nodes/eval-judge.js";
 import { defineFanOut, type NonEmptyNodeList } from "./define-fan-out.js";
 
 export interface DiamondDagConfig {
   readonly id: string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional
-  readonly source: NodeDef<any, any, any, readonly Capability[]>;
+  readonly source: DagDef["nodes"][number];
   readonly branches: NonEmptyNodeList;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional
-  readonly join: NodeDef<any, any, any, readonly Capability[]>;
+  readonly join: DagDef["nodes"][number];
   readonly evalJudges?: readonly EvalJudgeNodeDef[];
   readonly defaultRetryLimit?: number;
   readonly retryLimits?: Readonly<Record<string, number>>;

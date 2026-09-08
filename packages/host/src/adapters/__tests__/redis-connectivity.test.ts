@@ -20,13 +20,34 @@ import {
   type RedisClientFactory,
 } from "../redis-connectivity.js";
 import {
+  compositeNodeKey,
+  dagId,
   isOk,
   isErr,
   makeSpend,
+  mapIndex,
   microUsd,
+  nodeId as makeNodeId,
+  runId as makeRunId,
   unpricedModels,
 } from "@fuguejs/framework";
-import type { RedisSpendAppend } from "../../ports.js";
+import {
+  asCheckpointerRedisPort,
+  createNamespacedCheckpointer,
+} from "../redis-checkpointer.js";
+import {
+  buildCheckpointMetaKey,
+  buildCheckpointNodesKey,
+} from "../../domain/cache-keys.js";
+import { tenantId } from "../../domain/tenant.js";
+
+/** The canonical constructor is a smart one; a fixture proves the literal once. */
+const mkTenant = (id: string) => {
+  const parsed = tenantId(id);
+  if (!parsed.ok) throw new Error(`bad tenant ${id}`);
+  return parsed.value;
+};
+import type { LogPort, RedisSpendAppend } from "../../ports.js";
 import type { Redis as IoRedis } from "ioredis";
 import { unpricedModelHashField } from "../../domain/spend-record.js";
 
@@ -70,6 +91,31 @@ class FakeRedis {
     }
   }
 
+  /**
+   * Registered `error` listeners. `Redis` is an EventEmitter and Node THROWS an
+   * `error` event that has none, so "was a listener attached" is the whole
+   * property — recorded here so a test can both assert it and fire the event.
+   */
+  readonly errorListeners: Array<(error: unknown) => void> = [];
+  /**
+   * How many COMMANDS had been issued when the listener registered. Recorded
+   * instead of pushing `on` into `calls`, which every other test in this file
+   * asserts on exactly — a listener registration is not a Redis command and
+   * must not read as one.
+   */
+  errorListenerAttachedAfterCommands = -1;
+  on(event: string, listener: (error: unknown) => void): this {
+    if (event === "error") {
+      this.errorListeners.push(listener);
+      this.errorListenerAttachedAfterCommands = this.calls.length;
+    }
+    return this;
+  }
+  /** Emit as Node would: with no listener registered, the event THROWS. */
+  emitError(error: unknown): void {
+    if (this.errorListeners.length === 0) throw error;
+    for (const listener of this.errorListeners) listener(error);
+  }
   async connect(): Promise<void> {
     this.connectCalls += 1;
     if (this.throwOn.has("connect")) throw new Error("connect boom");
@@ -195,6 +241,19 @@ class FakeRedis {
   async smembers(key: string): Promise<string[]> {
     this.rec("smembers", [key]);
     return ["a", "b"];
+  }
+  /**
+   * The BARE HSET. Its absence from this fake is precisely why the untested
+   * `hSet` branch went unnoticed: only `multi.hset` existed, so nothing could
+   * observe an adapter issuing a bare one.
+   */
+  async hset(key: string, field: string, value: string | number): Promise<number> {
+    this.rec("hset", [key, field, value]);
+    const hash = this.hashes.get(key) ?? new Map<string, string>();
+    const created = hash.has(field) ? 0 : 1;
+    hash.set(field, String(value));
+    this.hashes.set(key, hash);
+    return created;
   }
   async hget(key: string, field: string): Promise<string | null> {
     this.rec("hget", [key, field]);
@@ -892,6 +951,133 @@ describe("createRedisConnectivity — spend-ledger capability", () => {
 // gated suite below, so a bare `bun test` never exercised it. `serializeTransaction`
 // is pure promise-chaining over the injected client, so a fake proves the
 // ordering everywhere.
+// ── The `error` listener (round-25 C1) ──────────────────────────────────────
+
+describe("createRedisConnectivity — connection-error listener", () => {
+  // `Redis` is an EventEmitter; Node's contract for an `error` event with NO
+  // listener is to THROW it. Before this listener existed, a connection reset,
+  // a failed reconnect, or an ACL disconnect did not degrade the host — it
+  // killed the process. Nothing in packages/host/src attached one.
+  it("attaches an error listener at construction, before any command can run", async () => {
+    const fake = new FakeRedis();
+    await wire(fake);
+
+    expect(fake.errorListeners.length).toBe(1);
+    // BEFORE any command: the initial dial is exactly where this fails, and an
+    // attach that waited for the first command would miss that window.
+    expect(fake.errorListenerAttachedAfterCommands).toBe(0);
+  });
+
+  it("reports a connection error instead of letting it escape as a crash", async () => {
+    const fake = new FakeRedis();
+    const captured: string[] = [];
+    const { factory } = factoryFor(fake);
+    const logger: LogPort = {
+      info: () => {},
+      warn: () => {},
+      error: (msg, data) => { captured.push(`${msg} ${JSON.stringify(data)}`); },
+    };
+    const r = await createRedisConnectivity("redis://localhost:6379", undefined, factory, logger);
+    if (!isOk(r)) throw new Error("expected createRedisConnectivity to succeed");
+
+    // `emitError` throws when no listener is registered — the pre-fix
+    // behaviour — so this call NOT throwing is the assertion.
+    expect(() => fake.emitError(new Error("ECONNRESET"))).not.toThrow();
+    expect(captured.length).toBe(1);
+    expect(captured[0]).toContain("Redis client connection error");
+    expect(captured[0]).toContain("ECONNRESET");
+  });
+
+  it("survives a THROWING logger — reporting must never become the failure", async () => {
+    const fake = new FakeRedis();
+    const { factory } = factoryFor(fake);
+    const hostile: LogPort = {
+      info: () => {},
+      warn: () => {},
+      error: () => { throw new Error("logger exploded"); },
+    };
+    const r = await createRedisConnectivity("redis://localhost:6379", undefined, factory, hostile);
+    if (!isOk(r)) throw new Error("expected createRedisConnectivity to succeed");
+
+    // A logger that throws inside an EventEmitter handler would re-raise the
+    // very crash the listener exists to prevent. `logWithoutThrowing` falls
+    // back to stderr instead.
+    expect(() => fake.emitError(new Error("ECONNRESET"))).not.toThrow();
+  });
+
+  it("still reports when NO logger is wired, so the event is never silent", async () => {
+    // The entrypoints pass no logger today; absent one the diagnostic goes to
+    // stderr rather than nowhere. The property under test is that the listener
+    // exists and swallows nothing.
+    const fake = new FakeRedis();
+    await wire(fake);
+    expect(fake.errorListeners.length).toBe(1);
+    expect(() => fake.emitError(new Error("ECONNRESET"))).not.toThrow();
+  });
+});
+
+// ── hSet: the bare and transactional branches (round-25 C2) ─────────────────
+
+describe("createIoredisRedisPort — hSet", () => {
+  it("issues ONE bare HSET and no transaction when no TTL is asked for", async () => {
+    const fake = new FakeRedis();
+    const { bundle } = await wire(fake);
+
+    const written = await bundle.redis.hSet!("h", "f", "v");
+    expect(isOk(written)).toBe(true);
+    expect(fake.calls.filter((c) => c.m === "hset").map((c) => c.args))
+      .toEqual([["h", "f", "v"]]);
+    // A MULTI here would be pure overhead for a write with no paired command.
+    expect(fake.calls.some((c) => c.m === "multi")).toBe(false);
+  });
+
+  it("pairs HSET with EXPIRE in ONE transaction when a TTL is asked for", async () => {
+    const fake = new FakeRedis();
+    const { bundle } = await wire(fake);
+
+    const written = await bundle.redis.hSet!("h", "f", "v", { expiresInSec: 900 });
+    expect(isOk(written)).toBe(true);
+
+    // The pairing is the whole point: a bare HSET followed by a SEPARATE
+    // EXPIRE leaves the key immortal if the process dies in the gap — the
+    // same hazard `setNx`'s atomic acquire exists to close. So assert BOTH
+    // commands are queued, on the same key, inside one MULTI — and that no
+    // bare HSET was issued alongside.
+    expect(fake.calls.some((c) => c.m === "multi")).toBe(true);
+    expect(fake.calls.filter((c) => c.m === "multi.hset").map((c) => c.args))
+      .toEqual([["h", "f", "v"]]);
+    expect(fake.calls.filter((c) => c.m === "multi.expire").map((c) => c.args))
+      .toEqual([["h", 900]]);
+    expect(fake.calls.some((c) => c.m === "hset")).toBe(false);
+  });
+
+  it("fails typed when a queued command inside the transaction errors", async () => {
+    // `requireTransactionResults` is what turns a partially-applied EXEC into a
+    // failure; without it a half-applied transaction reports success.
+    const fake = new FakeRedis({
+      execCommandError: new Error("OOM"),
+      execCommandErrorAt: 1,
+    });
+    const { bundle } = await wire(fake);
+
+    const written = await bundle.redis.hSet!("h", "f", "v", { expiresInSec: 900 });
+    expect(isErr(written)).toBe(true);
+  });
+
+  it("wraps a throwing driver in a typed Result rather than rejecting", async () => {
+    for (const [label, fake] of [
+      ["bare", new FakeRedis({ throwOn: ["hset"] })],
+      ["transactional", new FakeRedis({ throwOn: ["multi.hset"] })],
+    ] as const) {
+      const { bundle } = await wire(fake);
+      const written = label === "bare"
+        ? await bundle.redis.hSet!("h", "f", "v")
+        : await bundle.redis.hSet!("h", "f", "v", { expiresInSec: 900 });
+      expect(isErr(written)).toBe(true);
+    }
+  });
+});
+
 describe("createIoredisRedisPort — transaction serialization (fake client)", () => {
   it("holds a checkpoint commit behind an in-flight spend append", async () => {
     const calls: string[] = [];
@@ -1155,6 +1341,115 @@ describe.skipIf(liveRedisUrl === undefined)(
       ]);
       expect(checkpointTtl).toBeGreaterThan(0);
       expect(spendTtl).toBeGreaterThan(checkpointTtl);
+    });
+  },
+);
+
+// ── The checkpointer against a real server (round-25 code-reviewer-1) ────────
+//
+// Every layer of the host checkpointer is otherwise tested against a
+// hand-written fake `RedisPort`, so nothing proved the REAL Redis commands
+// round-trip: a fake cannot tell you that `hSet`'s field survives an HGETALL,
+// that the TTL actually landed on the hash, or that the tenant-prefixed keys
+// the ACL depends on are the keys that reach the server.
+//
+// `REDIS_URL`-gated like its sibling suites above. What it does NOT cover, and
+// the reason that half is named rather than quietly dropped: crash-and-resume
+// through a booted host, worker and registry with a real DAG. That needs a
+// fixture this PR does not have; it is the follow-up FR-F1-007 asks for.
+describe.skipIf(liveRedisUrl === undefined)(
+  "createNamespacedCheckpointer — real Redis round trip",
+  () => {
+    let bundle: Extract<
+      Awaited<ReturnType<typeof createRedisConnectivity>>,
+      { readonly ok: true }
+    >["value"];
+    let observer: IoRedis;
+    const runSuffix = crypto.randomUUID().slice(0, 8);
+    const tenant = mkTenant("livetest");
+    const dag = dagId("live-dag");
+    const run = makeRunId(`live-run-${runSuffix}`);
+    const node = makeNodeId("fan");
+
+    beforeAll(async () => {
+      if (liveRedisUrl === undefined) return;
+      const connected = await createRedisConnectivity(liveRedisUrl);
+      if (!connected.ok) throw new Error(`Redis test connection failed: ${connected.error.kind}`);
+      bundle = connected.value;
+      const { Redis } = await import("ioredis");
+      observer = new Redis(liveRedisUrl);
+    });
+
+    afterAll(async () => {
+      if (liveRedisUrl === undefined) return;
+      await observer.del(
+        buildCheckpointMetaKey(tenant, dag, run),
+        buildCheckpointNodesKey(tenant, dag, run),
+      );
+      await observer.quit();
+      await bundle.disconnect();
+    });
+
+    it("round-trips indexed fan entries through real HSET/HGETALL under the tenant prefix", async () => {
+      if (liveRedisUrl === undefined) return;
+      const proven = asCheckpointerRedisPort(bundle.redis);
+      if (proven === null) throw new Error("the real port must satisfy the checkpointer port");
+      const checkpointer = createNamespacedCheckpointer(
+        proven, tenant, dag, run, 60,
+        { info: () => {}, warn: () => {}, error: () => {} },
+      );
+
+      expect((await checkpointer.setMeta(run, {
+        dagId: dag,
+        startedAt: new Date("2026-01-01T00:00:00.000Z"),
+        nodeCount: 3,
+      })).ok).toBe(true);
+
+      for (const index of [0, 1, 2]) {
+        const saved = await checkpointer.saveNode(
+          run,
+          { nodeId: node, output: { v: index * 10 }, completedAt: new Date("2026-01-01T00:00:01.000Z") },
+          { index: mapIndex(index) },
+        );
+        expect(saved.ok).toBe(true);
+      }
+
+      const loaded = await checkpointer.load(run);
+      if (!loaded.ok || loaded.value === null) throw new Error("expected a loaded run state");
+      expect(Object.keys(loaded.value.nodes).length).toBe(3);
+      const key1 = compositeNodeKey(node, { index: mapIndex(1) });
+      expect(loaded.value.nodes[key1]?.output).toEqual({ v: 10 });
+      expect(loaded.value.corruptNodeAddresses).toEqual([]);
+
+      // Observed on the SERVER, not through the adapter: the keys really are
+      // tenant-prefixed (the precondition the `~fugue:<tenant>:*` ACL rests on),
+      // the hash really holds one field per index, and BOTH keys carry a TTL —
+      // the HSET+EXPIRE pairing, verified where it actually matters.
+      const nodesKey = buildCheckpointNodesKey(tenant, dag, run);
+      const metaKey = buildCheckpointMetaKey(tenant, dag, run);
+      expect(nodesKey.startsWith(`fugue:${tenant}:`)).toBe(true);
+      expect(Object.keys(await observer.hgetall(nodesKey)).length).toBe(3);
+      const [nodesTtl, metaTtl] = await Promise.all([
+        observer.ttl(nodesKey),
+        observer.ttl(metaKey),
+      ]);
+      expect(nodesTtl).toBeGreaterThan(0);
+      expect(metaTtl).toBeGreaterThan(0);
+    });
+
+    it("reports a fresh run as null before any metadata exists", async () => {
+      if (liveRedisUrl === undefined) return;
+      const proven = asCheckpointerRedisPort(bundle.redis);
+      if (proven === null) throw new Error("the real port must satisfy the checkpointer port");
+      const fresh = makeRunId(`live-fresh-${runSuffix}`);
+      const checkpointer = createNamespacedCheckpointer(
+        proven, tenant, dag, fresh, 60,
+        { info: () => {}, warn: () => {}, error: () => {} },
+      );
+
+      const loaded = await checkpointer.load(fresh);
+      expect(loaded.ok).toBe(true);
+      if (loaded.ok) expect(loaded.value).toBeNull();
     });
   },
 );

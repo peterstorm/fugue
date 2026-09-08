@@ -51,7 +51,7 @@ import { type Result, ok, err } from "../types/result.js";
  * ⇒ every required capability is validated against `ctx`, the unchanged path.
  */
 export const validateCapabilities = (
-  dag: DagDef,
+  dag: Pick<DagDef, "nodes">,
   ctx: BaseNodeContext,
   broker?: CapabilityBroker,
 ): Result<ValidatedNodeContext, FrameworkError> => {

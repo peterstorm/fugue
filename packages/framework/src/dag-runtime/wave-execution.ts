@@ -16,7 +16,8 @@
 //   FR-029  → ADR-0029 (routing decisions pre-computed by executor, carried on wave-done)
 
 import type { DagDef } from "../types/dag.js";
-import type { Capability, NodeDef, ValidatedNodeContext } from "../types/node.js";
+import type { ValidatedNodeContext } from "../types/node.js";
+import type { ExecutionScope } from "./execution-scope.js";
 import type { MintingAuthority } from "../types/capability-broker.js";
 import { messageOf, asNodeFrameworkError, type FrameworkError } from "../types/errors.js";
 import type { NodeId } from "../types/ids.js";
@@ -62,10 +63,8 @@ const sizedOrUndefined = (
 
 export interface WaveConfig {
   readonly dag: DagDef;
-  readonly nodeMap: Map<
-    NodeId,
-    NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>
-  >;
+  readonly nodeMap: Map<NodeId, DagDef["nodes"][number]>;
+  readonly executionScope: ExecutionScope;
   readonly nodeCtx: ValidatedNodeContext;
   readonly resumeCheckpoint?: Map<string, unknown>;
   readonly nowFn: () => number;
@@ -193,6 +192,7 @@ export const executeWave = async (
           dag.id,
           priorOutputs,
           incoming,
+          { scope: config.executionScope, executionEpoch: machineCtx.freshnessExecutionEpoch },
           { checkpoint: resumeCheckpoint, now: nowFn, minting },
         );
         return { nodeId, result, outcome };

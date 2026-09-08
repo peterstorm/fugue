@@ -244,6 +244,28 @@ export type RedisPort = {
   /** Read every field of a hash. An absent key yields an empty record, not an error. */
   readonly hGetAll?: (key: string) => Promise<Result<Readonly<Record<string, string>>, HostError>>;
   /**
+   * Write one field of a hash, optionally (re)setting the WHOLE key's TTL in
+   * the same atomic transaction.
+   *
+   * The TTL is not a convenience argument. `HSET` followed by a separate
+   * `EXPIRE` leaves the key with no expiry if the process dies in the gap — the
+   * key then outlives every retention policy that was supposed to bound it, and
+   * never self-heals, which is the identical hazard `setNx`'s `expiresInSec`
+   * exists to close for locks. One `MULTI` makes the pair indivisible.
+   *
+   * Optional, and paired with `hGetAll`: a consumer needing hash reads AND
+   * writes must prove BOTH are present on the port it was handed rather than
+   * assume them (`asCheckpointerRedisPort` in `adapters/redis-checkpointer.ts`
+   * is the pattern), so an in-memory `RedisPort` that implements neither stays
+   * a valid `RedisPort`.
+   */
+  readonly hSet?: (
+    key: string,
+    field: string,
+    value: string,
+    opts?: { readonly expiresInSec?: number },
+  ) => Promise<Result<void, HostError>>;
+  /**
    * Atomically append one complete Spend Record with optimistic `WATCH`/`MULTI`.
    *
    * The transaction reads and saturates numeric axes, then queues every

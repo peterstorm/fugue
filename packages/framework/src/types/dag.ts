@@ -1,18 +1,50 @@
 import type { Capability, NodeDef } from "./node.js";
 import type { EvalJudgeNodeDef } from "./eval-judge.js";
-import type {
-  NodesRecord,
-  OutputsByNodeId,
-  ConsistentNodes,
-} from "./dag-internals.js";
+import type { z } from "zod";
+import type { FrameworkError } from "./errors.js";
+import type { Result } from "./result.js";
+import type { WidthFrom, MaxWidth } from "./map-width.js";
 import type { DagId, NodeId, DagInputId } from "./ids.js";
 import type { Confidence, ConfidenceBucket } from "./confidence.js";
 
-// Inference helpers (NodesRecord, OutputOf, OutputsByNodeId, ConsistentNodes)
-// are imported above but NOT re-exported. They live in `./dag-internals.ts`,
-// reachable directly when genuinely needed; keeping them off the barrel
-// (`types/index.ts` → `export * from "./dag.js"`) shrinks the public surface
-// without losing intra-framework usability.
+/** Runtime-owned fan body; author configuration is captured once, not closed over. */
+export type MapNodeDef<I = unknown, ChildOut = unknown, O = unknown> =
+  Omit<NodeDef<I, O>, "kind" | "run" | "requires"> & Readonly<{
+    kind: "map";
+    requires: readonly ["checkpointer"];
+    mapping: Readonly<{
+      child: DagDef;
+      childOutputSchema: z.ZodType<ChildOut>;
+      widthFrom: WidthFrom;
+      maxWidth: MaxWidth;
+      reduce: (results: readonly ChildOut[]) => Result<O, FrameworkError>;
+    }>;
+  }>;
+
+/** Ordinary nodes stay callable; only a map needs runtime-owned child dispatch. */
+export type DagNodeDef<
+  I = unknown, O = unknown, E extends FrameworkError = FrameworkError,
+  R extends readonly Capability[] = readonly [],
+> = NodeDef<I, O, E, R> | MapNodeDef<I, any, O>; // heterogeneous child-output erasure
+
+// Mutually dependent DAG definition/inference types live together to avoid a
+// type-only module cycle. These helpers are deliberately absent from the barrel.
+export type NodesRecord = {
+  readonly [id: string]: DagNodeDef<any, any, any, readonly Capability[]>;
+};
+export type OutputOf<N> = N extends { readonly outputSchema: z.ZodType<infer O> } ? O : unknown;
+export type OutputsByNodeId<Nodes extends NodesRecord> = {
+  readonly [K in keyof Nodes & string]: OutputOf<Nodes[K]>;
+};
+export type ConsistentNodes<Nodes extends NodesRecord> = {
+  readonly [K in keyof Nodes]: Nodes[K]["id"] extends NodeId
+    ? Nodes[K]
+    : string extends Nodes[K]["id"]
+      ? Nodes[K]
+      : Nodes[K] extends { readonly id: K }
+        ? Nodes[K]
+        : { readonly __error: `nodes['${K & string}'].id must equal '${K & string}'` };
+};
 
 /**
  * Function-based predicate over a node's output with optional confidence
@@ -146,9 +178,6 @@ export type EdgeDefInput<
     }[Ids]
   | { readonly from: Ids; readonly to: Ids; readonly kind: "default" };
 
-// Inference machinery (NodesRecord, OutputOf, OutputsByNodeId, ConsistentNodes)
-// lives in `./dag-internals.ts` so the public barrel doesn't leak them.
-
 export interface DagDefInput<Nodes extends NodesRecord = NodesRecord> {
   readonly id: string;
   readonly nodes: Nodes & ConsistentNodes<Nodes>;
@@ -194,7 +223,7 @@ export type DagProvenance = (typeof DAG_SHAPES)[number];
 export interface DagDef {
   readonly id: DagId;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- validated DAGs erase heterogeneous input/output/error generics at this runtime seam
-  readonly nodes: readonly NodeDef<any, any, any, readonly Capability[]>[];
+  readonly nodes: readonly DagNodeDef<any, any, any, readonly Capability[]>[];
   readonly edges: readonly EdgeDef[];
   readonly outputNodeId?: NodeId;
   readonly evalJudges?: readonly EvalJudgeNodeDef[];

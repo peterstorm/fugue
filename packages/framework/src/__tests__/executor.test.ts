@@ -19,6 +19,7 @@ import { buildDagExecutor } from "../dag-runtime/executor.js";
 import { brandAsValidatedNodeContext } from "../types/node.js";
 import { nonEmptyString } from "../types/non-empty-string.js";
 import { testRuntimeContext } from "./_context-factories.js";
+import { unmappedRootScope } from "./_execution-scope.js";
 
 /**
  * A node that fails `failuresBeforeSuccess` times with a RETRIABLE crash and
@@ -1129,6 +1130,7 @@ describe("buildDagExecutor: abort during executor-owned waits", () => {
     const executor = buildDagExecutor(
       dag,
       brandAsValidatedNodeContext(mkCtx({ signal: controller.signal })),
+      unmappedRootScope,
       // Pin jitter so the nominal delay is the delay.
       { random: () => 0.5 },
     );
@@ -1153,6 +1155,7 @@ describe("buildDagExecutor: abort during executor-owned waits", () => {
     const executor = buildDagExecutor(
       dag,
       brandAsValidatedNodeContext(mkCtx({ signal: AbortSignal.abort() })),
+      unmappedRootScope,
     );
 
     const event = await executor(
@@ -1176,6 +1179,7 @@ describe("buildDagExecutor: abort during executor-owned waits", () => {
     const executor = buildDagExecutor(
       dag,
       brandAsValidatedNodeContext(mkCtx({ signal: controller.signal })),
+      unmappedRootScope,
       {
         onHumanReview: async () => {
           // Cancellation lands while the human decision is in flight.

@@ -20,7 +20,8 @@ import { match, P } from "ts-pattern";
 import type { Executor } from "../state-machine/types.js";
 import type { DagPhase, DagEvent, DagMachineContext } from "./types.js";
 import type { DagDef } from "../types/dag.js";
-import type { Capability, NodeDef, NodeContext, ValidatedNodeContext } from "../types/node.js";
+import type { NodeContext, ValidatedNodeContext } from "../types/node.js";
+import type { ExecutionScope } from "./execution-scope.js";
 import type { MintingAuthority } from "../types/capability-broker.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { NodeId, DagId } from "../types/ids.js";
@@ -60,10 +61,7 @@ const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
 const validateApproveEdit = (
   action: import("./types.js").HumanAction,
   nodeId: NodeId,
-  nodeMap: Map<
-    NodeId,
-    NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>
-  >,
+  nodeMap: Map<NodeId, DagDef["nodes"][number]>,
 ): string | null => {
   if (action.kind !== "approve-with-edit") return null;
   const nodeDef = nodeMap.get(nodeId);
@@ -100,10 +98,7 @@ interface HumanReviewHookCall {
   readonly output: unknown;
   readonly prompt: NonEmptyString;
   readonly hooks: { onHumanReview?: OnHumanReviewHook } | undefined;
-  readonly nodeMap: Map<
-    NodeId,
-    NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>
-  >;
+  readonly nodeMap: Map<NodeId, DagDef["nodes"][number]>;
   readonly nodeCtx: NodeContext;
   readonly dagId: DagId;
   readonly nowFn: () => number;
@@ -223,6 +218,7 @@ const callHumanReviewHook = async (
 export const buildDagExecutor = (
   dag: DagDef,
   nodeCtx: ValidatedNodeContext,
+  executionScope: ExecutionScope,
   hooks?: {
     onHumanReview?: OnHumanReviewHook;
     /** Called once per wave with the per-node outcomes; the caller folds them into run-level meta. */
@@ -262,10 +258,7 @@ export const buildDagExecutor = (
     minting?: MintingAuthority;
   },
 ): Executor<DagPhase, DagEvent, DagMachineContext> => {
-  const nodeMap = new Map<
-    NodeId,
-    NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>
-  >(
+  const nodeMap = new Map<NodeId, DagDef["nodes"][number]>(
     dag.nodes.map((n) => [n.id, n]),
   );
   const recordOutcomes = hooks?.recordOutcomes;
@@ -275,7 +268,7 @@ export const buildDagExecutor = (
   const freshnessIndex = hooks?.freshnessIndex ?? new InMemoryFreshnessIndex();
 
   const waveConfig: WaveConfig = {
-    dag, nodeMap, nodeCtx, resumeCheckpoint, nowFn, freshnessIndex,
+    dag, nodeMap, nodeCtx, resumeCheckpoint, nowFn, freshnessIndex, executionScope,
     minting: hooks?.minting,
   };
 

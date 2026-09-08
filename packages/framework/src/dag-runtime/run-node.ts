@@ -31,7 +31,7 @@ import { safeErrorMessage } from "../types/safe-error.js";
 import type {
   Capability,
   NodeContext,
-  NodeDef,
+  TypedNodeContext,
   ValidatedNodeContext,
 } from "../types/node.js";
 import type {
@@ -51,6 +51,10 @@ import { buildNodeInput } from "../shared/build-input.js";
 import { withTracedNodeSpan, EMPTY_OUTCOME, type NodeSpanOutcome } from "./node-span.js";
 import { resolveContentFilter } from "../tracing/content-filter.js";
 import type { IncomingSources } from "../shared/incoming.js";
+import type { DagDef } from "../types/dag.js";
+import type { ExecutionScope } from "./execution-scope.js";
+import type { FreshnessExecutionEpoch } from "../types/witness.js";
+import { runMappedFan } from "./run-mapped-fan.js";
 
 const brokerContractViolation = (
   nodeId: NodeId,
@@ -311,7 +315,7 @@ interface RunNodeOpts {
  */
 const resolveMintedNodeContext = async (args: {
   readonly ctx: NodeContext;
-  readonly node: NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>;
+  readonly node: DagDef["nodes"][number];
   readonly nodeId: NodeId;
   readonly dagId: DagId;
   readonly minting: MintingAuthority | undefined;
@@ -442,11 +446,12 @@ const resolveMintedNodeContext = async (args: {
 };
 
 export const runNodeShared = async (
-  node: NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>,
+  node: DagDef["nodes"][number],
   ctx: ValidatedNodeContext,
   dagId: DagId,
   outputs: ReadonlyMap<NodeId, unknown>,
   incoming: IncomingSources,
+  execution: Readonly<{ scope: ExecutionScope; executionEpoch: FreshnessExecutionEpoch }>,
   opts: RunNodeOpts = {},
 ): Promise<{ result: Result<unknown, FrameworkError>; outcome: NodeSpanOutcome }> => {
   const nodeId = node.id;
@@ -566,11 +571,21 @@ export const runNodeShared = async (
       // provided capabilities were proved by dispatch-time mint delivery and
       // reserved-key merge validation. Together those checks make this cast
       // sound — the runtime is the oracle for which fields are non-null.
-      const runFn = node.run as (
-        input: unknown,
-        ctx: NodeContext,
-      ) => Promise<Result<unknown, FrameworkError>>;
-      runResult = await runFn(inputResult.value, runCtx);
+      if (node.kind === "map") {
+        if (execution.scope.kind !== "root") {
+          runResult = err({ kind: "validation", nodeId, message: "nested mapped execution is unsupported" });
+        } else {
+          runResult = await runMappedFan(node, inputResult.value,
+            runCtx as TypedNodeContext<readonly ["checkpointer"]>,
+            execution.executionEpoch, execution.scope.executeMappedChild, nowFn);
+        }
+      } else {
+        const runFn = node.run as (
+          input: unknown,
+          ctx: NodeContext,
+        ) => Promise<Result<unknown, FrameworkError>>;
+        runResult = await runFn(inputResult.value, runCtx);
+      }
     } catch (caught) {
       const frameworkError = asNodeFrameworkError(caught, nodeId);
       const message = messageOf(frameworkError);
@@ -596,7 +611,8 @@ export const runNodeShared = async (
 
     if (ctx.checkpointWriter) {
       try {
-        await ctx.checkpointWriter.write(ctx.runId, nodeId, outputResult.value);
+        await ctx.checkpointWriter.write(ctx.runId, nodeId, outputResult.value,
+          execution.scope.kind === "mapped-child" ? execution.scope.scope : undefined);
       } catch (e) {
         const message = safeErrorMessage(e);
         const cpwError: FrameworkError = {

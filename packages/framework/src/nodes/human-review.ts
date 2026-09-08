@@ -1,5 +1,6 @@
 import type { z } from "zod";
-import type { NodeDef, Capability } from "../types/node.js";
+import type { NodeDef } from "../types/node.js";
+import type { DagDef } from "../types/dag.js";
 import type { FrameworkError } from "../types/errors.js";
 import { ok } from "../types/result.js";
 import { asNonEmptyString } from "../types/non-empty-string.js";
@@ -41,10 +42,10 @@ import { createTransformNode } from "./transform.js";
  * gate. Re-gating would silently spread the new config over the old, dropping
  * the first prompt — another illegal state, not a last-write-wins overwrite.
  */
-export const withHumanReview = <I, O, E extends FrameworkError, R extends readonly Capability[]>(
-  node: NodeDef<I, O, E, R>,
+export const withHumanReview = <N extends DagDef["nodes"][number]>(
+  node: N,
   config: { readonly prompt: string },
-): NodeDef<I, O, E, R> => {
+): N => {
   const prompt = asNonEmptyString(config.prompt);
   if (prompt === undefined) {
     throw new Error(

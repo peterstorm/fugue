@@ -3,8 +3,8 @@ import type { FrameworkError } from "../types/errors.js";
 import type { RunId, NodeId, DagId } from "../types/ids.js";
 import { err, ok } from "../types/result.js";
 import { FRAMEWORK_VERSION } from "./fingerprint.js";
-import type { CompositeNodeKeyOpts } from "./composite-node-key.js";
-import { compositeNodeKey } from "./composite-node-key.js";
+import type { CompositeNodeKeyOpts } from "../shared/composite-node-key.js";
+import { compositeNodeKey } from "../shared/composite-node-key.js";
 import {
   ID_PATTERN,
   __brandNodeId,

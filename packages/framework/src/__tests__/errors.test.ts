@@ -36,6 +36,7 @@ import {
   PersistedFrameworkErrorSchema,
   messageOf,
   retriabilityOf,
+  FRAMEWORK_ERROR_KINDS,
   usageOfError,
   FrameworkAugmentedError,
   type FrameworkError,
@@ -565,20 +566,30 @@ describe("retriabilityOf — single source of truth for the retry fast-fail fork
     [{ kind: "source-has-incoming", nodeId: nid, message: "has edge" }, "retriable"],
     [{ kind: "invalid-dag-input-edge", edge: { from: "$input", to: "n" }, message: "bad" }, "retriable"],
     [{ kind: "infra-unreachable", operation: "mint", hop: "cc", message: "down" }, "retriable"],
+    // Both map-width refusals are functions of the SAME upstream output a retry
+    // would re-read, so a retry reproduces the verdict exactly; labelling them
+    // retriable would burn the node's whole budget re-deriving one answer.
+    [{ kind: "map-width-invalid", nodeId: nid, widthFrom: "items", found: "3" }, "non-retriable"],
+    [{ kind: "map-width-exceeded", nodeId: nid, resolvedWidth: 26, maxWidth: 25 }, "non-retriable"],
   ];
 
-  it("classifies every one of the 27 error kinds exactly as the old retry disjunction did", () => {
+  it("classifies every kind in the table exactly as the old retry disjunction did", () => {
     for (const [error, expected] of cases) {
       expect(retriabilityOf(error)).toBe(expected);
     }
   });
 
   it("covers every FrameworkError kind (no kind silently defaults)", () => {
-    // If a kind were added to the taxonomy without a table row here, this count
-    // would drift; `retriabilityOf`'s `.exhaustive()` already fails compilation,
-    // and this guards the test itself from falling behind.
-    const kinds = new Set(cases.map(([e]) => e.kind));
-    expect(kinds.size).toBe(27);
+    // Compared against the TAXONOMY, not against a remembered number. The
+    // literal `27` that used to sit here was the same failure mode as the
+    // `z.enum` list it was guarding: a second hand-maintained copy of the kind
+    // set, which fell behind silently when this feature added two kinds. The
+    // set difference also names WHICH kind is missing, instead of reporting
+    // that two numbers differ.
+    const covered = new Set<string>(cases.map(([e]) => e.kind));
+    const missing = FRAMEWORK_ERROR_KINDS.filter((k) => !covered.has(k));
+    expect(missing).toEqual([]);
+    expect(covered.size).toBe(FRAMEWORK_ERROR_KINDS.length);
   });
 
   it("recognizes every table-constructed kind as a typed framework error (identity survives the guard)", () => {
@@ -631,6 +642,10 @@ describe("usageOfError — FR-W0-001 token-attribution contract", () => {
     [{ kind: "cache-error", operation: "get", message: "timeout" }, undefined],
     [{ kind: "cache-error", operation: "appendEvent", message: "capacity exhausted", failureClass: "permanent" }, undefined],
     [{ kind: "cycle-detected", nodeIds: [nid] }, undefined],
+    // A map width is decided BEFORE any child runs, so neither refusal can have
+    // consumed a token.
+    [{ kind: "map-width-invalid", nodeId: nid, widthFrom: "items", found: "3" }, undefined],
+    [{ kind: "map-width-exceeded", nodeId: nid, resolvedWidth: 26, maxWidth: 25 }, undefined],
     [{ kind: "rejected", nodeId: nid, reason: "no" }, undefined],
     [{ kind: "invalid-reroute", targetNodeId: nid, message: "bad" }, undefined],
     [{ kind: "missing-default-edge", nodeId: nid }, undefined],
@@ -650,11 +665,12 @@ describe("usageOfError — FR-W0-001 token-attribution contract", () => {
   });
 
   it("covers every FrameworkError kind (no kind silently defaults)", () => {
-    // Same guard as the `retriabilityOf` block: a new kind without a row here
-    // would drift the count; `usageOfError`'s `.exhaustive()` fails
-    // compilation first, and this guards the table itself.
-    const kinds = new Set(cases.map(([e]) => e.kind));
-    expect(kinds.size).toBe(27);
+    // Same guard as the `retriabilityOf` block, and for the same reason it is
+    // no longer a literal count — see the note there.
+    const covered = new Set<string>(cases.map(([e]) => e.kind));
+    const missing = FRAMEWORK_ERROR_KINDS.filter((k) => !covered.has(k));
+    expect(missing).toEqual([]);
+    expect(covered.size).toBe(FRAMEWORK_ERROR_KINDS.length);
   });
 
   it("returns the caller's exact partial totals, not a copy or a mutation sink", () => {

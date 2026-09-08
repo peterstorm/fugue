@@ -12,6 +12,7 @@ import type { HttpCapability } from "./http-capability.js";
 import type { ClockCapability } from "./clock.js";
 import type { NonEmptyString } from "./non-empty-string.js";
 import type { BudgetCapability } from "./budget-capability.js";
+import type { MappedChildScope } from "./mapped-child-scope.js";
 
 export type { Tracer };
 export type { HttpCapability } from "./http-capability.js";
@@ -30,7 +31,7 @@ export type ConfidenceMode<O> =
   | { readonly mode: "none" }
   | { readonly mode: "value"; readonly extract: (output: O) => Confidence };
 
-export type NodeKind = "fetch" | "transform" | "llm" | "guardrail" | "eval-judge";
+export type NodeKind = "fetch" | "transform" | "llm" | "guardrail" | "eval-judge" | "map";
 
 /** Retry configuration for a single node. */
 export interface NodeRetryConfig {
@@ -101,9 +102,25 @@ export interface ContextCacheAdapter {
   ) => Promise<Result<void, FrameworkError>>;
 }
 
-/** Durable checkpoint writer — persists node outputs for crash-resume. */
+/**
+ * Durable node-output writer — not the readable fan-completion Checkpointer.
+ *
+ * This is the HOST's writer, a different port from the framework's
+ * `Checkpointer` (which addresses composite entries through ADR-0075's codec).
+ * Root machine resume uses JobLike; mapped completion replay uses Checkpointer.
+ * This port records per-node outputs without providing a replay reader.
+ *
+ * `scope` identifies child output by parent map, index and durable execution
+ * epoch. Absent means the canonical root address (FR-F1-008). The readable
+ * Checkpointer's map-completion entries remain a separate record space.
+ */
 export interface CheckpointWriter {
-  readonly write: (runId: RunId, nodeId: NodeId, value: unknown) => Promise<void>;
+  readonly write: (
+    runId: RunId,
+    nodeId: NodeId,
+    value: unknown,
+    scope?: MappedChildScope,
+  ) => Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -412,7 +429,7 @@ export interface NodeDef<
   R extends readonly Capability[] = readonly [],
 > {
   readonly id: NodeId;
-  readonly kind: NodeKind;
+  readonly kind: Exclude<NodeKind, "map">;
   readonly inputSchema: z.ZodType<I>;
   readonly outputSchema: z.ZodType<O>;
   /**

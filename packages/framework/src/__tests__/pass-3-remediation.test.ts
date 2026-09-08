@@ -32,6 +32,7 @@ import { setFrameworkTracer, __resetFrameworkTracer } from "../tracing/global-tr
 import { setFrameworkLogger, __resetFrameworkLogger } from "../logger.js";
 import { nonEmptyString } from "../types/non-empty-string.js";
 import { testNodeContext } from "./_context-factories.js";
+import { unmappedRootScope } from "./_execution-scope.js";
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -277,7 +278,7 @@ describe("Wave 1.3 — dedup-key derivation distinguishes (prevState, event-type
       context: compiled.value.initialContext,
     });
 
-    const executor = buildDagExecutor(dag, brandAsValidatedNodeContext(makeBaseCtx()));
+    const executor = buildDagExecutor(dag, brandAsValidatedNodeContext(makeBaseCtx()), unmappedRootScope);
 
     try {
       await runStateMachine(job, compiled.value.machine, executor, {
@@ -876,7 +877,7 @@ describe("Wave 6.12 — buildDagExecutor without onHumanReview hook", () => {
     const compiled = compileDagToMachine(dag, null);
     if (!compiled.ok) throw new Error("compile failed");
 
-    const executor = buildDagExecutor(dag, brandAsValidatedNodeContext(makeBaseCtx()));
+    const executor = buildDagExecutor(dag, brandAsValidatedNodeContext(makeBaseCtx()), unmappedRootScope);
     const event = await executor(
       {
         kind: "awaiting-human",

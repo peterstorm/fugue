@@ -13,7 +13,6 @@
 // Sugar over `defineDagFromArray`. Same module-load validation, same brand.
 
 import type { DagDef, DagProvenance } from "../types/dag.js";
-import type { Capability, NodeDef } from "../types/node.js";
 import type { EvalJudgeNodeDef } from "../nodes/eval-judge.js";
 import { defineDagFromArray } from "./define-dag.js";
 import { dagInputEdgeFor } from "./dag-input-edge.js";
@@ -24,17 +23,17 @@ import { dagInputEdgeFor } from "./dag-input-edge.js";
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional
 export type NonEmptyNodeList = readonly [
-  NodeDef<any, any, any, readonly Capability[]>,
-  ...NodeDef<any, any, any, readonly Capability[]>[],
+  DagDef["nodes"][number],
+  ...DagDef["nodes"][number][],
 ];
 
 export interface FanOutDagConfig {
   readonly id: string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional
-  readonly source: NodeDef<any, any, any, readonly Capability[]>;
+  readonly source: DagDef["nodes"][number];
   readonly branches: NonEmptyNodeList;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional
-  readonly join?: NodeDef<any, any, any, readonly Capability[]>;
+  readonly join?: DagDef["nodes"][number];
   readonly evalJudges?: readonly EvalJudgeNodeDef[];
   readonly defaultRetryLimit?: number;
   readonly retryLimits?: Readonly<Record<string, number>>;

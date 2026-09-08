@@ -342,14 +342,55 @@ export type FrameworkError =
       readonly kind: "downstream-denied";
       readonly resource: string;
       readonly reason: string;
+    }
+  | {
+      /**
+       * A `map` node's `widthFrom` field did not resolve to an array on the
+       * upstream output (FR-F1-005). Fail-closed: a map over "not a list" has
+       * no legal width, and guessing one (treat-as-empty, wrap-in-singleton)
+       * would produce a plausible wrong answer instead of a stopped run.
+       *
+       * `found` is a bounded diagnostic RENDERING of what was there, never the
+       * value itself — the upstream output is arbitrary caller data and this
+       * error is serialized into durable control-plane records.
+       */
+      readonly kind: "map-width-invalid";
+      readonly nodeId: NodeId;
+      readonly widthFrom: string;
+      readonly found: string;
+    }
+  | {
+      /**
+       * A `map` node's resolved width exceeded its author-declared `maxWidth`
+       * (FR-F1-003). Both numbers are carried structurally, not just formatted
+       * into the message, because the operator's next action depends on the
+       * gap: a width of 26 against a max of 25 is a limit to raise, and a width
+       * of 40,000 is upstream data that went wrong.
+       *
+       * Truncation is never a legal outcome — a truncated fan produces a
+       * plausible, wrong, CHEAPER answer, which is the worst failure available
+       * here.
+       */
+      readonly kind: "map-width-exceeded";
+      readonly nodeId: NodeId;
+      readonly resolvedWidth: number;
+      readonly maxWidth: number;
     };
 
 /** Discriminant union of all error kinds — use for consumer-side exhaustive switches. */
 export type FrameworkErrorKind = FrameworkError["kind"];
 
 // The framework owns the wire parser for its error ADT. Persistence adapters
-// compose this schema into their own records instead of duplicating all 27
-// variants and drifting when the framework error vocabulary changes.
+// compose this schema into their own records instead of duplicating every
+// variant and drifting when the framework error vocabulary changes.
+//
+// Deliberately not a count. The number was written as "27", the union grew to
+// 29, and the stale figure was the visible half of a real defect: the
+// `persistedFrameworkErrorKinds` enum below is a SECOND hand-maintained list of
+// the same names, and it had not been extended either — so `isFrameworkErrorKind`
+// returned false for two kinds the framework itself was constructing.
+// `errors.test.ts` now asserts the enum and the union agree, which is the check
+// a number in a comment was never going to be.
 const persistedBrandedId = <T>(parse: (raw: string) => { readonly ok: true; readonly value: T } | { readonly ok: false }): z.ZodType<T> =>
   z.string().transform((value, context) => {
     const parsed = parse(value);
@@ -450,16 +491,66 @@ const persistedBreachSchema = z.union([
   }),
 ]);
 const PersistedCapabilitySchema: z.ZodType<Capability> = z.string().transform((value) => value as Capability);
-const persistedFrameworkErrorKinds = z.enum([
-  "validation", "retry-exhausted", "checkpoint-missing", "checkpoint-expired",
-  "checkpoint-corrupt", "checkpoint-version-mismatch", "checkpoint-write-failed",
-  "prompt-not-found", "cache-error", "node-crash", "cycle-detected", "aborted",
-  "rejected", "invalid-reroute", "transient", "missing-default-edge",
-  "output-unreachable-under-routing", "predicate-malformed", "duplicate-edge",
-  "root-expects-input", "source-has-incoming", "invalid-dag-input-edge",
-  "missing-capability", "llm-budget-exceeded", "infra-unreachable",
-  "policy-refusal", "downstream-denied",
-]);
+/**
+ * Every `FrameworkError` discriminant, as a table the COMPILER keeps in
+ * lockstep with the union: a kind missing from here, or a key here that is not
+ * a kind, is a compile error. Same technique as `DAG_PHASE_KIND_TABLE`.
+ *
+ * This exists because the previous shape — a hand-written `z.enum([...])` list
+ * of the same names — was a second copy of the union maintained by hand, and it
+ * silently fell behind. When `map-width-invalid`/`map-width-exceeded` were
+ * added, the discriminated-union schema below was extended and this list was
+ * not, so `isFrameworkErrorKind` returned FALSE for two kinds the framework
+ * itself constructs. Nothing failed, because agreement between the two lists
+ * was checked by nobody. Deriving the enum from a compiler-checked table means
+ * a new kind cannot be added to only one of them.
+ */
+const FRAMEWORK_ERROR_KIND_TABLE: Record<FrameworkErrorKind, true> = {
+  validation: true,
+  "retry-exhausted": true,
+  "checkpoint-missing": true,
+  "checkpoint-expired": true,
+  "checkpoint-corrupt": true,
+  "checkpoint-version-mismatch": true,
+  "checkpoint-write-failed": true,
+  "prompt-not-found": true,
+  "cache-error": true,
+  "node-crash": true,
+  "cycle-detected": true,
+  aborted: true,
+  rejected: true,
+  "invalid-reroute": true,
+  transient: true,
+  "missing-default-edge": true,
+  "output-unreachable-under-routing": true,
+  "predicate-malformed": true,
+  "duplicate-edge": true,
+  "root-expects-input": true,
+  "source-has-incoming": true,
+  "invalid-dag-input-edge": true,
+  "missing-capability": true,
+  "llm-budget-exceeded": true,
+  "infra-unreachable": true,
+  "policy-refusal": true,
+  "downstream-denied": true,
+  "map-width-invalid": true,
+  "map-width-exceeded": true,
+};
+
+/**
+ * The runtime-enumerable set of every `FrameworkError` kind. Exported so a test
+ * (or a consumer building its own boundary) can compare against the taxonomy
+ * itself rather than against a number someone has to remember to bump.
+ */
+export const FRAMEWORK_ERROR_KINDS: readonly FrameworkErrorKind[] =
+  Object.keys(FRAMEWORK_ERROR_KIND_TABLE) as FrameworkErrorKind[];
+
+const persistedFrameworkErrorKinds = z.enum(
+  // The cast is to the tuple shape `z.enum` requires; the VALUES are the
+  // compiler-checked table's own keys, so the enum cannot list a kind the union
+  // does not have, nor miss one it does.
+  FRAMEWORK_ERROR_KINDS as unknown as [FrameworkErrorKind, ...FrameworkErrorKind[]],
+);
 
 /** Parse the standalone serialized kind marker carried by FrameworkAugmentedError. */
 export const isFrameworkErrorKind = (value: unknown): value is FrameworkErrorKind =>
@@ -499,6 +590,17 @@ const PersistedFrameworkErrorSchemaDefinition = z.discriminatedUnion("kind", [
   z.looseObject({ kind: z.literal("infra-unreachable"), operation: z.enum(["mint", "exchange", "federation", "downstream"]), hop: z.string(), message: z.string() }),
   z.looseObject({ kind: z.literal("policy-refusal"), scope: z.string(), agentClientId: z.string().optional() }),
   z.looseObject({ kind: z.literal("downstream-denied"), resource: z.string(), reason: z.string() }),
+  z.looseObject({ kind: z.literal("map-width-invalid"), nodeId: PersistedNodeIdSchema, widthFrom: z.string(), found: z.string() }),
+  z.looseObject({
+    kind: z.literal("map-width-exceeded"),
+    nodeId: PersistedNodeIdSchema,
+    // Both widths are re-validated as non-negative safe integers on the way
+    // back IN: these numbers are what an operator reads to decide whether to
+    // raise a limit, so a corrupt record must fail the parse rather than
+    // render "width NaN of max null".
+    resolvedWidth: z.number().int().nonnegative(),
+    maxWidth: z.number().int().positive(),
+  }),
 ]);
 
 type MissingPersistedFrameworkErrorKind = Exclude<
@@ -662,6 +764,10 @@ export const usageOfError = (e: FrameworkError): PartialTokenUsage | undefined =
       { kind: "infra-unreachable" },
       { kind: "policy-refusal" },
       { kind: "downstream-denied" },
+      // A map width is decided BEFORE any child runs, so neither map error can
+      // have consumed a token.
+      { kind: "map-width-invalid" },
+      { kind: "map-width-exceeded" },
       () => undefined,
     )
     .exhaustive();
@@ -696,6 +802,11 @@ export const retriabilityOf = (e: FrameworkError): Retriability =>
       // `"permanent"` class is a deterministic failure like the kinds above
       // (capacity, FR-015, losslessness — re-running reproduces it).
       { kind: "cache-error", failureClass: "permanent" },
+      // Both map-width refusals are functions of the SAME upstream output the
+      // retry would re-read, so a retry reproduces them exactly. Labelling them
+      // retriable would burn the node's whole budget re-deriving one verdict.
+      { kind: "map-width-invalid" },
+      { kind: "map-width-exceeded" },
       () => "non-retriable" as const,
     )
     // Everything else goes through the standard backoff path. The graph-
@@ -756,6 +867,8 @@ export const messageOf = (e: unknown): string => {
       // compile error here rather than silently folding it into JSON-stringify.
       .with(
         { kind: "predicate-malformed" },
+        { kind: "map-width-invalid" },
+        { kind: "map-width-exceeded" },
         { kind: "validation" },
         { kind: "checkpoint-write-failed" },
         { kind: "aborted" },
@@ -829,6 +942,10 @@ export const formatFrameworkError = (e: FrameworkError): string =>
       const node = e.invalidNodeId === undefined ? e.nodeId : safeDiagnosticRender(e.invalidNodeId);
       return `checkpoint write failed for run '${run}' node '${node}': ${e.message}`;
     })
+    .with({ kind: "map-width-invalid" }, (e) => `map node '${e.nodeId}': widthFrom '${e.widthFrom}' did not resolve to an array (found ${e.found})`)
+    // Both numbers in the line, in the order an operator reads them: what came
+    // back, then what was allowed. The structured fields carry the same pair.
+    .with({ kind: "map-width-exceeded" }, (e) => `map node '${e.nodeId}': resolved width ${e.resolvedWidth} exceeds declared maxWidth ${e.maxWidth}`)
     .with({ kind: "missing-capability" }, (e) => `missing capabilities: ${e.missing.map(m => `${m.capability} (node '${m.nodeId}')`).join(", ")}`)
     .with({ kind: "llm-budget-exceeded" }, (e) => `llm budget exceeded for run '${e.runId}' (node '${e.nodeId}'): ${formatBreach(e.cause)}`)
     .with({ kind: "infra-unreachable" }, (e) => `capability provider unreachable during '${e.operation}' (hop '${e.hop}'): ${e.message}`)

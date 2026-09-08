@@ -118,7 +118,7 @@ import type {
   RunState,
   SaveNodeOpts,
 } from "../checkpoint/checkpointer.js";
-import { compositeNodeKey } from "../checkpoint/composite-node-key.js";
+import { compositeNodeKey } from "../shared/composite-node-key.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { RunId } from "../types/ids.js";
 import { ID_PATTERN, __brandRunId } from "../types/ids.js";

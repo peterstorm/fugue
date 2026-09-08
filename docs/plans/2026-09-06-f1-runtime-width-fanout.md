@@ -1,11 +1,14 @@
 # Plan: F1 — Runtime-width fan-out
 
 **Created:** 2026-09-06
-**Status:** **PR-A shipped 2026-09-06** (composite checkpoint addressing on every backend — see
-ADR-0085). D7 decided. PR-B (the `map` node itself) is what remains; PR-C and PR-D follow it.
-§2 below is preserved as the evidence record of the state PR-A was written against, annotated
-rather than rewritten — see the note at its head.
-**Branch:** `feat/f1-runtime-width-fanout`
+**Status:** **PR-A shipped 2026-09-06** (ADR-0085). PR-B's initial implementation was
+recorded on 2026-09-07; that record was not proof of PR46 correctness closure or merge.
+**2026-09-08 correctness closure implemented; parent final validation/publication pending.**
+The supported runtime contract is §13 and [ADR-0086](../adr/0086-root-owned-mapped-child-execution.md).
+PR-C and PR-D remain outside this closure. §§1–11 preserve the original problem/design
+record; supersession notes distinguish proposals from current behavior. §12 records the
+initial PR-B decisions and explicitly marks those replaced by closure.
+**Branch:** `feat/f1-map-node` (original planning branch: `feat/f1-runtime-width-fanout`)
 **Baseline:** `main` @ `3845ad9` (0.5.1 — F6, F4 and F3 all merged; Bun pinned to 1.4.2 by ADR-0084)
 **Roadmap position:** F1 in `docs/spikes/2026-08-02-graph-engineering-findings.md` §F1. The recommended
 order is `F4 + F3 → F1 → F2`. Both preconditions have now shipped, and the spike's gate — *"Do not
@@ -23,6 +26,9 @@ costs ~10× what it should.
 ---
 
 ## 1. Problem
+
+**Historical motivation (before PR-B).** Runtime-width mapping is now implemented as
+one node, not an additional outer DAG shape; see §13.
 
 `DagDefInput.nodes` (`types/dag.ts`) is a static record keyed at author time, and `DAG_SHAPES`
 (`types/dag.ts`) is the closed tuple `["linear", "fan-out", "diamond", "router", "sources"]`.
@@ -43,8 +49,8 @@ of the absent framework boundaries `loom` routes around when it drives orchestra
 
 Read on `3845ad9`. This section is what the code actually did **before PR-A**, not what the spike
 assumed — it is the evidence record of why PR-A was needed, so it is annotated below rather than
-rewritten. **Rows marked CLOSED were fixed by PR-A** (ADR-0085); the Host row is still open and
-is PR-B's work.
+rewritten. **Rows marked CLOSED were fixed by PR-A** (ADR-0085). The Host row records the
+original PR-B gap, now closed by the full mapped child scope in §13, not an index alone.
 
 **The outer topology is compile-time and immutable.**
 
@@ -64,7 +70,7 @@ ADR-0075 shipped a composite node-key codec with F6. Its Context paragraph names
 outright: *"Indexed fan-out, nested DAG namespaces, and repeated attempts need multiple durable
 outputs for the same node without one save overwriting another."*
 
-- `checkpoint/composite-node-key.ts` encodes `(namespace, nodeId, index, attempt)` as
+- `shared/composite-node-key.ts` (relocated unchanged during PR46 closure) encodes `(namespace, nodeId, index, attempt)` as
   `` `${namespace}@${nodeId}@${index}@${attempt}` ``, with `@` outside the identifier grammar so
   canonical (0 separators) and composite (exactly 3) forms are provably disjoint.
 - The port already accepts it: `Checkpointer.saveNode` (`checkpoint/checkpointer.ts`) is
@@ -78,7 +84,7 @@ shapes the work breakdown:
 | File | Yes | `file/checkpointer.ts`'s `saveNode` takes and applies `opts` |
 | In-memory | ~~No — deliberately~~ **CLOSED by PR-A** | ADR-0075 / F6 FR-023; now honors `opts` (ADR-0085) |
 | Redis | ~~**No — no `opts` parameter at all**~~ **CLOSED by PR-A** | was `saveNode(runId, state)`; now `saveNode(runId, state, opts?)` encoding via `encodeStoredNodeKey` |
-| **Host (production)** | **No — different code path entirely** | see below |
+| **Host (production)** | Historically no — different code path | **CLOSED by PR46 closure**, §13; original evidence below |
 
 The host does not go through the framework checkpointer port for run checkpoints. It has its own
 writer, `createNamespacedCheckpointWriter` (`host/src/adapters/node-context-factory.ts`), which
@@ -118,6 +124,11 @@ production runs.
 
 ## 4. Design
 
+**Original proposals, with supersessions noted.** D1's one-node topology, D2's
+bounded width and D7's child-HITL refusal survive. §13 governs the execution seam,
+complete write scope, and durable generation semantics. D5/D6 and D4's projection
+remain future PR-C/PR-D work, not live implementation instructions for PR46.
+
 ### D1 — The map node is ONE node in the outer graph
 
 A `map` node is a single `NodeId` in `waves`, `activeNodeIds` and `outputs`. Its output is the
@@ -133,10 +144,10 @@ set semantics, the static `DagDefInput.nodes` record, and `defineDag`'s ability 
 reachability and else-totality at module load — because the node set would no longer be known then.
 It converts the framework's central invariant into a runtime concern to buy notation.
 
-Keeping the map node singular means **wave scheduling needs no change at all.** The spike lists
-`wave-execution.ts` / `wave-resolution.ts` as a design consequence; under D1 they are untouched.
-That is a real reduction in scope versus the spike's estimate, and it is a consequence of the
-sub-DAG framing the spike itself proposed.
+The original proposal inferred that `wave-execution.ts` / `wave-resolution.ts` would
+be untouched. **Superseded by closure:** topology and wave scheduling remain static,
+but actual wave dispatch must carry the root execution scope and current persisted
+parent epoch. A callable map closure cannot provide that ownership.
 
 ### D2 — `MapWidth`: parsed, bounded, fail-closed
 
@@ -166,7 +177,7 @@ The framework work — **all of it shipped in PR-A (ADR-0085); kept here as the 
   backend uses. Canonical calls (no opts) must produce byte-identical keys to today, so existing
   runs are unaffected and no migration is required.
 
-The host work — **still open, and PR-B's**; no current equivalent:
+The original host proposal — **superseded by §13's full map/index/epoch scope**:
 
 - `buildCheckpointKey` (`host/src/domain/cache-keys.ts`) gains an optional index dimension,
   preserving `fugue:<tenant>:<dagId>:<runId>:<nodeId>` exactly when absent.
@@ -176,15 +187,17 @@ The separator must be chosen the way ADR-0075 and the spend key already choose t
 `NodeId` grammar, so an indexed address cannot collide with a node literally named to look like one.
 The spend key's use of `$` for exactly this reason is the local precedent.
 
-**Resume semantics.** A partial fan resumes by loading the per-index entries that exist and
-re-running only the missing indices. This is the whole point of the index dimension, and it is the
+**Resume semantics (qualified by §13).** Within the same durable execution epoch, a
+partial fan resumes by loading acknowledged per-index completions and re-running
+only missing indices. A valid reroute advances the epoch and cannot reuse old completions. This is the whole point of the index dimension, and it is the
 behaviour to pin with tests, because it is precisely what silently degrades to "restart the whole
 fan" if the address is dropped anywhere along the path.
 
 ### D4 — Budget: project the fan, don't discover it
 
-F3's Run Spend Authority already meters every settled LLM call, so a fan is metered correctly
-without changes. What `maxWidth` adds is that admission can project `width × per-child estimate`
+F3's Run Spend Authority meters settled LLM calls. The original assumption that this
+composed automatically was **superseded by PR46 closure**: child dispatch must retain
+the original host meter and minting authority, including broker-delivered LLM aliases. What `maxWidth` adds is that admission can project `width × per-child estimate`
 *before* starting the fan, rather than admitting child 1 and refusing child 40 halfway through — a
 half-executed fan that has spent money and produced nothing usable. Whether projection is in F1 or
 deferred is a scoping decision (see §9); the metering itself is already correct either way.
@@ -206,8 +219,10 @@ that tuple, so a new shape is added in exactly one place and the projections can
 ### D7 — HITL is rejected inside a mapped sub-DAG, at module load
 
 **Decided 2026-09-06.** A node carrying `humanReview` (`types/node.ts`) inside a mapped
-sub-DAG is rejected by `executor/validate-dag.ts` at module load, with an error naming the
-gather-then-review alternative.
+sub-DAG is rejected at module load, with an error naming the gather-then-review
+alternative. Current enforcement is shared `snapshotMappedChild`, called by
+`createMapNode` and `validateDagShape` (see §13); the original assignment to the
+executor validator was superseded.
 
 The structural reason is that it cannot currently be expressed. `HumanGatePayload`
 (`dag-runtime/types.ts`) carries a single `nodeId: NodeId` and `pendingReviews: readonly
@@ -302,6 +317,10 @@ two of three backends silently ignore it. Closing that is meaningful on its own 
 
 ## 8. Documentation
 
+**Original documentation proposal.** ADR-0085 now owns backend parity; ADR-0086
+owns root mapped-child execution. The number reservation and broader feature/
+requirements work below are historical proposals, not outstanding PR46 instructions.
+
 - **ADR** — the D1 decision (map node stays one node in the outer graph; runtime materialization
   rejected) is exactly the kind of choice this repo writes ADRs for. Number assigned at merge
   (0085 is next free as of this draft).
@@ -341,11 +360,168 @@ two of three backends silently ignore it. Closing that is meaningful on its own 
 
 ## 11. Open questions
 
-1. **Does the child sub-DAG reuse `runDagStateful`, or a narrower sub-executor?** Narrowed by D7,
-   not yet closed. With HITL rejected at module load, reuse no longer drags in the branch whose
-   semantics were undefined, so reuse is now the presumptive answer — retry, freshness and
-   observability come free. To confirm against the executor's actual entry conditions before PR-B.
+1. **Resolved by PR46 closure:** roots and mapped children use one `runPreparedDag`
+   kernel body behind an explicit root-owned execution seam. Blindly calling public
+   `runDag(child, item, ctx)` loses authority and duplicates root lifecycle; spreading
+   root options would corrupt durable-job ownership. Freshness/observability do not
+   come free: resource sharing and root-only lifecycle are explicit, and child
+   freshness extractors remain refused.
 2. ~~**Is HITL legal inside a mapped sub-DAG at all in F1?**~~ **Resolved 2026-09-06 — no.** See D7
    and FR-F1-011.
 3. **Does admission project the fan (D4), or is metering-only sufficient for v1?** Open. Does not
    block PR-A or PR-B.
+
+
+---
+
+## 12. What PR-B decided that this plan did not specify
+
+Initial PR-B implementation record (2026-09-07), retained for provenance. The
+write-only/readable port distinction and sequential fan survive; index-only writer
+addressing and hidden constructor execution were superseded by §13.
+
+### The `checkpointer` capability is where per-index state lives
+
+FR-F1-007 says resume must re-run only the indices with no durable entry, "on
+Redis and the host writer". Implementing it surfaced a fact §2 did not record:
+**the host's `CheckpointWriter` keys are write-only.** Nothing in production
+reads them back — outer-run resume comes from the kernel's `jobLike`, and those
+keys are a durable per-node output record consumed elsewhere. So there was no
+reader on that path for a fan to consult.
+
+The fan's per-index state therefore lives in the framework's `Checkpointer`
+port, reached through a new `checkpointer` capability. That is the port
+ADR-0075's composite address was designed for — its Context paragraph names
+indexed fan-out explicitly — and PR-A had just made every backend honor it.
+
+The capability is registered through ADR-0051's module-augmentation point from
+`checkpoint/capability.ts`, not added to `BaseNodeContext` as an eighth
+built-in. The reason is structural: `types/errors.ts` imports `Capability` from
+`types/node.ts`, and `checkpoint/checkpointer.ts` imports `types/errors.ts`, so
+a built-in field would close an import cycle. `module-graph-acyclic.test.ts`
+catches this; it caught it once during PR-B already, for `MapIndex`, which is
+why that brand sits in its own leaf module.
+
+**Consequence for hosts:** a DAG containing a map node now needs a
+`Checkpointer` wired into the node context (`capabilities: { checkpointer }`).
+A run without one fails at the capability gate before any node runs, which is
+the intended fail-closed behavior — a map node without durable per-index state
+would silently re-run every completed index after a crash.
+
+### Historical index-only host writer — superseded
+
+Initial PR-B added a `$<index>` key form and manual writer tests. Actual child
+runtime calls did not carry that index, so those tests did **not** establish
+collision-free production writes. Closure replaces this with frozen
+`MappedChildScope` on actual child writes: map identity, real child node identity,
+index and parent epoch all participate via the existing composite codec (§13).
+The writer remains write-only; fan resume correctly reads the separate
+`checkpointer` capability, not these output records. No writer read port is required
+or promised for FR-F1-007.
+
+### The fan is sequential
+
+Not stated either way in §4. PR-B runs indices one at a time, and two properties
+depend on it: a run that hits its F3 ceiling mid-fan stops at a **known** index
+rather than at whichever of N in-flight children lost the race, and the
+reducer's input is in index order on a resumed run as well as a fresh one.
+
+Bounded concurrency is additive later — it changes neither the address space nor
+the reducer's contract — but it is a real gap for a wide fan of slow children
+and should be its own PR with its own budget-interaction tests.
+
+### Historical constructor-only child refusal — superseded
+
+Initial PR-B hid the child in a callable map closure and refused human review
+only in `createMapNode`. Closure makes the immutable `mapping` descriptor visible
+on `MapNodeDef`, not every ordinary `NodeDef`. Both construction and the mandatory
+DAG parser invoke bounded child snapshot/refusal. Eligibility also covers the exact
+owned frozen child that executes, so changing getters cannot introduce unsupported
+freshness or human review after preflight, or enter recursive nested-map parsing.
+
+---
+
+## 13. PR46 correctness closure — current contract (2026-09-08)
+
+[ADR-0086](../adr/0086-root-owned-mapped-child-execution.md) records the decision;
+[the closure record](../../.claude/plans/2026-09-08-pr46-correctness-closure.md)
+records defect groups, acceptance evidence and validation status.
+
+- **One visible immutable map, one outer output.** Ordinary `NodeDef` remains
+  callable and excludes map from its `kind`; `DagNodeDef` is the ordinary-or-map
+  union. `MapNodeDef` has a frozen descriptor and no `run`. The child, reducer,
+  schemas and width policy are captured once; functions/schemas remain opaque
+  references, not recursively cloned implementations. Evaluator entries/configs,
+  criteria arrays and rubric records are owned frozen snapshots; caller values,
+  functions and closure state are not recursively cloned/frozen.
+- **Root-owned dispatch and authority.** `prepareDagRun` inventories outer nodes
+  plus each direct mapped child before any predecessor work, including zero width.
+  One broker-claim snapshot covers that inventory. Each child mints its own
+  requirements with its structural DagId, real NodeId and root RunId, using the
+  original base context, snapshotted origin, broker receiver and host LLM meter.
+  Child requirements are not hoisted into the map's checkpointer-only request;
+  parent-scoped grants are not inherited. Describe capabilities use the same
+  bounded runtime inventory's sorted, deduplicated union, without expanding outer
+  topology or changing map `requires: ["checkpointer"]`.
+- **Shared resources, separate ownership.** One `runPreparedDag` kernel body serves
+  both scopes. Child jobs are private/local; root durable JobLike, replay map,
+  retry overrides, human/commit/trace/classification hooks and background ownership
+  stay root-only. Clock/RNG/FreshnessIndex and original signal, clients, cache/prompt
+  closures and spend authority are retained. Structural child DagId never rebinds
+  host root resource namespaces. Children emit node/domain events and spans, not
+  observer run-start/run-end; child judges finish foreground before fan save.
+- **Retry is not reroute.** Actual wave dispatch passes persisted parent
+  `freshnessExecutionEpoch`. Completion lookup and save both use
+  `{ index, attempt: executionEpoch }` for map NodeId, producing
+  `dag@<mapNodeId>@<index>@<executionEpoch>`. Same-generation retry/replacement
+  reuses acknowledged completions; a valid backward reroute advances the epoch
+  before work, even for identical inputs or a reroute directly to the fan.
+- **Corruption is not missing work.** Every nonempty loaded
+  `corruptNodeAddresses` refuses fan work before replay/gather, metadata seeding,
+  children, saves or reduction, including zero width, unrelated/old-epoch keys and
+  opaque digest filenames. File/Redis adapters still warn/drop; the stricter fan
+  returns attributable `checkpoint-corrupt`, preserving both address ADT arms.
+  Public `runDag` wraps it as `retry-exhausted` with
+  `rootErrorKind: checkpoint-corrupt` and the serialized original error in
+  `lastError` (default zero retries: one attempt). No automatic destructive cleanup:
+  operators inspect/repair storage, then rerun; corrupt acknowledged work is not
+  a healthy miss. Healthy prefixes are reused and genuinely missing work runs.
+  Failed initial metadata stops work with its original error; fresh child outputs
+  must pass the mapping schema before save/gather, not only the child DAG schema.
+- **Two record spaces.** Fan completions live in the readable Checkpointer
+  (`$nodes` hash in the host). Actual child output writes carry frozen
+  `MappedChildScope { mapNodeId, index, executionEpoch }` as the writer's fourth
+  argument. Host STRING keys are
+  `fugue:<tenant>:<rootDag>:<run>:<mapNodeId>@<childNodeId>@<index>@<executionEpoch>`:
+  namespace=mapNodeId, nodeId=real child node, index=index, attempt=epoch. Root
+  writes remain `fugue:<tenant>:<rootDag>:<run>:<nodeId>` byte-for-byte. No new
+  codec or checkpoint migration; `shared/composite-node-key.ts` is the unchanged
+  relocated codec, with identical named main/checkpoint exports. Wrong-run host
+  writer calls reject before scope/value observation, encoding, serialization,
+  diagnostics or checkpoint/spend effects; matching-run keys/retention are unchanged.
+- **Bounded refusal and cancellation.** Nested maps, child human review and child
+  read/write freshness extractors are refused against the actual execution
+  snapshot. Ordinary reads/writes without extractors are legal. Malformed map
+  descriptors/requirement containers and revoked-array width inputs fail typed.
+  Cancellation blocks subsequent indices and reduction, including empty/final-index
+  success. A concurrently completed child can still be saved; external effects
+  without acknowledged completion may repeat after interruption.
+
+**Not part of this guarantee:** recursive child fingerprints, indexed broker audit
+metadata, or root aggregation of child judge/guardrail summaries. These are deferred
+advisories, not silently implemented closure criteria. PR-C authoring/plate rendering,
+PR-D fan budget projection, nested/HITL/indexed freshness semantics and concurrent fan
+scheduling remain separate work.
+
+**Evidence status:** the earlier full workspace baseline passed **7,141 tests,
+3 skipped, 0 failed** before snapshot/codec corrections (**3,721 framework tests**
+and **5 independent probes** subsequently passed). The later **7,149 + 7** parent
+validation is also historical, before adjudication. The adjudicated **2 criticals
+and 4 accepted advisories are implemented; 5 advisories deferred, 0 findings refuted**.
+Worker RED/GREEN history now includes corruption **7 pass/9 fail → 76 focused pass**,
+snapshot/describe **8 pass/15 fail → 103 pass**, and writer **92 pass/7 fail → 150
+final focused pass**. Both framework workers report **3,752 pass, 0 fail, 0 skip**
+with source/bin typechecks green; these overlapping runs are not additive or final
+whole-candidate certification. Full counts, mutation controls, prerequisites and
+scope caveats live in the closure record. Parent final validation, registered
+installation and publication remain pending.

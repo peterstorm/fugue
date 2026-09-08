@@ -18,7 +18,8 @@
  *   isolated (now also across tenants).
  */
 
-import type { DagId, RunId, NodeId } from "@fuguejs/framework";
+import { compositeNodeKey } from "@fuguejs/framework";
+import type { DagId, RunId, NodeId, MappedChildScope } from "@fuguejs/framework";
 
 // `TenantId` is the SINGLE canonical, hard-branded tenant identifier defined in
 // `./tenant-id` (the supervisor's resolved security principal). Importing the type
@@ -67,15 +68,64 @@ export const checkpointKeyPrefix = (tenant: TenantId, dagId: DagId, runId: RunId
   `${tenantPrefix(tenant)}${dagId}:${runId}:`;
 
 /**
- * Build the full checkpoint key for a specific tenant, DAG, run, and node.
- * Format: `fugue:<tenant>:<dagId>:<runId>:<nodeId>`
+ * Build the full checkpoint key for a specific tenant, DAG, run, and node —
+ * optionally addressing a mapped child's node output by map, index and parent
+ * execution epoch using the existing composite codec (ADR-0075/0085).
+ *
+ * Canonical: `fugue:<tenant>:<rootDag>:<run>:<node>` (byte-identical, FR-F1-008).
+ * Mapped: `fugue:<tenant>:<rootDag>:<run>:<map>@<node>@<index>@<epoch>`.
+ * Structural child DAG identity never rebinds the host's root resource namespace.
+ * `@` is outside NodeId's grammar; `$meta`, `$nodes` and `$spend` stay disjoint.
  */
 export const buildCheckpointKey = (
   tenant: TenantId,
   dagId: DagId,
   runId: RunId,
   nodeId: NodeId,
-): string => `${checkpointKeyPrefix(tenant, dagId, runId)}${nodeId}`;
+  scope?: MappedChildScope,
+): string => {
+  const address = scope === undefined
+    ? nodeId
+    : compositeNodeKey(nodeId, {
+        namespace: scope.mapNodeId,
+        index: scope.index,
+        attempt: scope.executionEpoch,
+      });
+  return `${checkpointKeyPrefix(tenant, dagId, runId)}${address}`;
+};
+
+/**
+ * Build the Redis STRING key holding one run's checkpoint METADATA record
+ * (`RunMeta` plus the write time the FR-027 expiry gate is measured from).
+ *
+ * Format: `fugue:<tenant>:<dagId>:<runId>:$meta`
+ *
+ * `$` carries the same weight it does in `buildCheckpointKey` and
+ * `buildSpendKey`: it is outside `NodeId`'s grammar (`[A-Za-z0-9_:-]`), so this
+ * key is provably disjoint from every canonical and indexed node key beneath
+ * the same prefix. No node can be named `$meta`.
+ */
+export const buildCheckpointMetaKey = (tenant: TenantId, dagId: DagId, runId: RunId): string =>
+  `${checkpointKeyPrefix(tenant, dagId, runId)}$meta`;
+
+/**
+ * Build the ONE Redis HASH key holding a run's readable node entries, keyed by
+ * the framework's stored node address (the bare `nodeId`, or the composite
+ * `namespace@nodeId@index@attempt` of ADR-0075).
+ *
+ * Format: `fugue:<tenant>:<dagId>:<runId>:$nodes`
+ *
+ * WHY A HASH, next to the per-node STRING keys `buildCheckpointKey` already
+ * produces: `Checkpointer.load` must return EVERY entry for a run, and the only
+ * enumeration primitive that survives the per-tenant ACL is a read of one key
+ * (`scan` is denied on the worker credential — see `ports.ts`). One HGETALL of
+ * one key is that read. The two live side by side deliberately: the string keys
+ * are the write-only `CheckpointWriter`'s existing address space and stay
+ * byte-identical (FR-F1-008), while this hash is the readable one a partial fan
+ * resumes from.
+ */
+export const buildCheckpointNodesKey = (tenant: TenantId, dagId: DagId, runId: RunId): string =>
+  `${checkpointKeyPrefix(tenant, dagId, runId)}$nodes`;
 
 /**
  * Build the ONE Redis HASH key holding a run's durable spend.

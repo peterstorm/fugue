@@ -14,12 +14,14 @@
 
 import type {
   HitlRedisPort,
+  LogPort,
   RedisConnectivityPort,
   RedisExpiry,
   RedisPort,
   RedisValueGuard,
 } from "../ports.js";
 import type { HostError } from "../domain/host-error.js";
+import { logWithoutThrowing } from "../hitl/diagnostic-logging.js";
 import { ok, err, safeErrorMessage } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 // Type-only — erased at compile time, so importing this module loads NO ioredis
@@ -254,6 +256,25 @@ export const createIoredisRedisPort = (
         }
       }),
     hGetAll: (key) => redisCall(() => `HGETALL ${key}`, () => client.hgetall(key)),
+    // Field write and key TTL are ONE transaction whenever a TTL is asked for
+    // (see the port doc): a crash between a bare HSET and a following EXPIRE
+    // leaves the key immortal. `requireTransactionResults` proves both queued
+    // commands ran and neither reported an error — a queued-command failure
+    // throws and `redisCall` converts it, so a partially-applied transaction
+    // can never be reported as success.
+    hSet: (key, field, value, opts) =>
+      opts?.expiresInSec === undefined
+        ? redisCall(() => `HSET ${key} ${field}`, async () => {
+            await client.hset(key, field, value);
+          })
+        : redisCall(() => `MULTI HSET+EXPIRE ${key} ${field}`, async () => {
+            const executed = await client
+              .multi()
+              .hset(key, field, value)
+              .expire(key, opts.expiresInSec!)
+              .exec();
+            requireTransactionResults(`MULTI HSET+EXPIRE ${key}`, executed, 2);
+          }),
     appendSpend: (append) =>
       watchGuarded(`MULTI SPEND-APPEND ${append.key}`, async () => {
         const record = recordOf(append.delta);
@@ -368,7 +389,68 @@ export const requireHitlRedisPort = (redis: RedisPort): HitlRedisPort => {
   return redis as HitlRedisPort;
 };
 
-const defaultIoredisFactory = async (): Promise<RedisClientFactory> => {
+/**
+ * Attach the `error` listener every ioredis client MUST have.
+ *
+ * `Redis` is an `EventEmitter`, and Node's contract for an `error` event with
+ * NO listener is to throw it. So a connection reset, a failed reconnect, or an
+ * ACL disconnect does not degrade this host — it kills the process. That is not
+ * a hypothetical: nothing in `packages/host/src` attached one before, on any of
+ * the client construction sites, and the process-wide `uncaughtException`
+ * handler cannot stand in for it (it is registered inside `createHost`, AFTER
+ * `executeStartup` has already dialled Redis, and it exits the process anyway).
+ *
+ * The handler logs and returns, deliberately. ioredis owns reconnection, and
+ * the host reports `degraded:redis-disconnected` from its own `ping` probe —
+ * the defect being closed here is the CRASH, not the absence of a recovery
+ * policy, and inventing one here would be a second, unreviewed decision.
+ *
+ * `logWithoutThrowing` is the reporting channel because it is the one that
+ * cannot itself become the failure: an absent or throwing logger falls back to
+ * stderr, so this is never silent.
+ */
+export const attachRedisErrorListener = (
+  client: Pick<IoRedis, "on">,
+  logger: LogPort | undefined,
+  context: Record<string, unknown> = {},
+): void => {
+  client.on("error", (error: unknown) => {
+    logWithoutThrowing(logger, "error", "Redis client connection error", {
+      ...context,
+      error: safeErrorMessage(error),
+    });
+  });
+};
+
+/**
+ * THE lazy-connect guard, shared by every command site in this package.
+ *
+ * `lazyConnect: true` leaves a client in the "wait" state until something dials
+ * it. The guard must be conditional: after the initial connection ioredis owns
+ * reconnection, and calling `connect()` on an already-connected client REJECTS —
+ * which would make every probe after the first falsely report Redis dead and
+ * flap the host into `degraded:redis-disconnected`.
+ *
+ * One helper rather than five hand-copies for the same reason
+ * `attachRedisErrorListener` and `defaultIoredisFactory` are shared: both test
+ * files already describe this as a single named invariant ("the `status ===
+ * "wait"` connect guard"), and a future edit — a new ioredis status to
+ * account for — should be one change, not a five-site grep that can miss one.
+ */
+export const ensureConnected = async (
+  client: Pick<IoRedis, "status" | "connect">,
+): Promise<void> => {
+  if (client.status === "wait") await client.connect();
+};
+
+/**
+ * THE default ioredis factory, shared by every client-construction site in this
+ * package. Exported so `redis-bundle.ts` cannot grow a second `import("ioredis")`
+ * that drifts from this one — the same reason `attachRedisErrorListener` is
+ * shared rather than repeated. Dynamic so the driver stays out of the module
+ * graph for a caller that injects its own factory.
+ */
+export const defaultIoredisFactory = async (): Promise<RedisClientFactory> => {
   const { Redis } = await import("ioredis");
   return (redisUrl, options) => new Redis(redisUrl, options);
 };
@@ -384,11 +466,16 @@ const defaultIoredisFactory = async (): Promise<RedisClientFactory> => {
  *   the `redisUrl` credential (ACL disabled / single-tenant deployment).
  * @param createClient   OPTIONAL ioredis client factory (test seam). Defaults to
  *   the dynamic-import ioredis factory; a unit test injects a fake.
+ * @param logger         OPTIONAL log port for connection-level `error` events.
+ *   Optional rather than required so the entrypoints need no change to be made
+ *   crash-safe; absent, `logWithoutThrowing` still reports to stderr, so the
+ *   event is never swallowed. Passing a real logger only upgrades the channel.
  */
 export const createRedisConnectivity = async (
   redisUrl: string,
   aclCredential?: RedisAclCredential,
   createClient?: RedisClientFactory,
+  logger?: LogPort,
 ): Promise<Result<RedisConnectivityBundle, HostError>> => {
   try {
     // The client comes from the injected factory (default: ioredis, dynamically
@@ -405,18 +492,18 @@ export const createRedisConnectivity = async (
         : {}),
     });
 
+    // BEFORE any command can be issued: the window between construction and the
+    // first `ping` is exactly where the initial dial fails, and an unlistened
+    // `error` there is the crash this closes.
+    attachRedisErrorListener(client, logger);
+
     const port: RedisConnectivityPort = {
       ping: async () => {
         try {
-          // `lazyConnect: true` leaves the client in the "wait" state until the
-          // first probe dials it. Guard the connect on that state: after the
-          // initial connection ioredis owns reconnection, and calling `connect()`
-          // on an already-connected client rejects — which would make every probe
-          // tick after the first falsely report Redis dead and flap the host into
-          // `degraded:redis-disconnected`.
-          if (client.status === "wait") {
-            await client.connect();
-          }
+          // The shared guard: conditional because calling `connect()` on an
+          // already-connected client rejects, which would flap the host into
+          // `degraded:redis-disconnected` on every probe after the first.
+          await ensureConnected(client);
           await client.ping();
           return ok(undefined);
         } catch (e) {

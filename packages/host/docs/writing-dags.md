@@ -123,6 +123,77 @@ the canonical authoring guide.
 | `meta.description` | `string` | `""` | Human-readable description |
 | `meta.version` | `string` | `"0.0.0"` | Semver version |
 
+## Mapped execution and durable addresses
+
+Author maps with the framework's
+[`createMapNode`](../../framework/docs/llm-dag-authoring.md#createmapnode--runtime-width-fan-out).
+A child uses the root host-selected origin, broker and LLM meter, with its own
+NodeId and structural DagId. It shares the root RunId, signal, clients, spend
+authority and host cache/prompt closures. **Child DagId is structural identity,
+not permission to select a new host resource namespace.** Child requirements
+are checked before predecessor work, even for zero width, then minted for each
+actual child invocation; the map itself requests only `checkpointer`. Describe/
+manifest capabilities use the same bounded outer/direct-child runtime inventory's
+sorted, deduplicated union, without expanding topology or widening map `requires`.
+
+The host has two distinct checkpoint record spaces. Let
+`P = fugue:<tenant>:<rootDag>:<run>:`; all entries below retain that root prefix.
+
+| Record | Redis address | Meaning |
+|---|---|---|
+| Root node output | `P<nodeId>` (STRING) | Canonical write-only output; unchanged bytes. |
+| Mapped child node output | `P<mapNodeId>@<childNodeId>@<index>@<executionEpoch>` (STRING) | Actual child writer output; sibling maps, indices and generations are distinct. |
+| Fan completions | `P$nodes` (HASH), field `dag@<mapNodeId>@<index>@<executionEpoch>` | Readable `Checkpointer` state used to resume a partial fan. |
+| Fan checkpoint metadata | `P$meta` (STRING) | Run-bound Checkpointer metadata, separate from output records. |
+| Run spend | `P$spend` (HASH) | Shared run spend ledger, not a node checkpoint. |
+
+`CheckpointWriter` is a framework write-only port:
+`write(runId, nodeId, value, scope?: MappedChildScope): Promise<void>`, where
+`MappedChildScope` is readonly `{ mapNodeId: NodeId; index: MapIndex;
+executionEpoch: FreshnessExecutionEpoch }`. The runtime supplies a frozen scope
+on actual child writes and no scope on root writes. `buildCheckpointKey` uses
+`compositeNodeKey(realChildNodeId, { namespace: mapNodeId, index,
+attempt: executionEpoch })`; it does not forge a NodeId or add an index-only
+suffix. `@` is outside the NodeId grammar, and reserved `$meta`/`$nodes`/`$spend`
+remain disjoint. This scope is address data, not new host authority.
+The host writer rejects a requested runId differing from its closure-bound run
+before scope/value observation, key encoding, serialization, diagnostics or any
+Redis/checkpoint-spend effect. Its `Promise<void>` rejects with
+`checkpoint writer is scoped to run <boundRun> and was asked for <askedRun>`.
+Matching-run root/mapped writes retain the keys above and existing TTL/retention;
+this guard does not make the addressable port an unforgeable capability.
+
+Fan lookup/save use the current persisted **parent `freshnessExecutionEpoch`**
+as `attempt`, not a retry count. Same-generation retry/replacement reuses
+acknowledged indices. Backward reroute advances the epoch before replacement
+work, including same-valued inputs and reroutes directly to the fan. The host
+writer is not read for resume; the separate readable Checkpointer is wired only
+when Redis hash operations are available. External effects without acknowledged
+fan completion may repeat after a crash; this is not an exactly-once effect claim.
+
+**Corrupt state is not a missing index.** The mapped fan rejects every nonempty
+loaded `corruptNodeAddresses` before replay/gather, metadata seeding, child work,
+saves or reduction, including zero width, unrelated/old-epoch keys and opaque
+digest filenames. File/Redis adapters still warn/drop corrupt records and report
+both address ADT variants; the stricter fan returns attributable `checkpoint-corrupt`.
+Public `runDag` preserves it as `retry-exhausted` with
+`rootErrorKind: checkpoint-corrupt` and the serialized original error in `lastError`
+(default zero retries: one attempt). Repeated loads cannot bypass this refusal.
+There is **no automatic destructive cleanup**. Inspect and repair the underlying
+storage, then rerun, accounting for effects already acknowledged; deleting corrupt
+work is not a safe recovery shortcut. Healthy prefixes are reused and genuinely
+missing indices execute normally.
+
+Host response-cache keys remain `fugue:<tenant>:<rootDag>:cache:<key>`; mapping
+does not add an index/epoch to that independent cache policy. Existing checkpoint
+TTL and spend-retention commit policy remain in force. Child jobs are private
+and local, never the root durable JobLike. Children do not begin/end an observer
+root lifecycle or inherit root background ownership; child judges finish before
+completion acknowledgement. Nested maps, child human review and child freshness
+extractors are refused against the immutable execution snapshot. Gather, then
+review at root level. No recursive child fingerprint, indexed broker audit schema
+or root child-quality-summary aggregation is promised.
+
 ## Prompt Templates
 
 If your DAG uses `createLlmNode` with `promptName`, place prompt files in a `prompts/` directory alongside `dag.ts`:

@@ -13,7 +13,8 @@ import type { DagMachineContext } from "./types.js";
 
 import type { DagId, NodeId } from "../types/ids.js";
 import type { FrameworkError } from "../types/errors.js";
-import type { Capability, NodeContext, NodeDef, ValidatedNodeContext } from "../types/node.js";
+import type { NodeContext, ValidatedNodeContext } from "../types/node.js";
+import type { DagDef } from "../types/dag.js";
 import type { FreshnessIndex } from "../types/freshness.js";
 import type { Witness } from "../types/witness.js";
 import { emit } from "./emit.js";
@@ -21,10 +22,7 @@ import { bestEffort } from "./best-effort.js";
 
 export interface PostWaveContext {
   readonly waveNodeIds: readonly NodeId[];
-  readonly nodeMap: ReadonlyMap<
-    NodeId,
-    NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>
-  >;
+  readonly nodeMap: ReadonlyMap<NodeId, DagDef["nodes"][number]>;
   readonly nodeCtx: ValidatedNodeContext;
   readonly machineCtx: DagMachineContext;
   readonly dagId: DagId;
@@ -42,10 +40,7 @@ export interface PostWaveContext {
  */
 export interface NodeErrorContext {
   readonly nodeCtx: NodeContext;
-  readonly nodeMap: ReadonlyMap<
-    NodeId,
-    NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>
-  >;
+  readonly nodeMap: ReadonlyMap<NodeId, DagDef["nodes"][number]>;
   readonly dagId: DagId;
   readonly nowFn: () => number;
 }

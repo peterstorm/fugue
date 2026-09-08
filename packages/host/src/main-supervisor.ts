@@ -28,7 +28,7 @@ import { formatHostError, fsPurgeFailed } from "./domain/host-error.js";
 import type { HostError } from "./domain/host-error.js";
 import type { Result } from "@fuguejs/framework";
 import { ok, err, safeErrorMessage } from "@fuguejs/framework";
-import type { RedisConnectivityPort, RedisPort, RedisPubSubPort, TokenStorePort } from "./ports.js";
+import type { TokenStorePort } from "./ports.js";
 import { createSupervisor, createTerminationHandler } from "./supervisor/supervisor.js";
 import type { AdmissionPort, AdmissionOutcome, AuthDeps } from "./supervisor/supervisor.js";
 import {
@@ -57,139 +57,19 @@ import {
 } from "./supervisor/lifecycle/grace-window-purge.js";
 import type { GracePurgeDeps } from "./supervisor/lifecycle/grace-window-purge.js";
 import { apply as applyAclUser, revoke as revokeAclUser } from "./supervisor/secrets/redis-acl-provisioner.js";
-import type { RedisAclAdminPort } from "./supervisor/secrets/redis-acl-provisioner.js";
 import {
   createLogAuditSink,
   createRedisStreamAuditSink,
   createCompoundAuditSink,
 } from "./supervisor/audit/audit-sink-log-redis.js";
-import type { AuditStreamPort } from "./supervisor/audit/audit-sink-log-redis.js";
 import type { AuditPort } from "./supervisor/audit/audit-port.js";
 import { createRedisTokenStore } from "./adapters/token-store.js";
-import { createIoredisRedisPort } from "./adapters/redis-connectivity.js";
+import { createRedisBundle } from "./adapters/redis-bundle.js";
 import { runBootstrap } from "./supervisor/bootstrap/run-bootstrap.js";
 import { createRealmJwtVerifier } from "./adapters/realm-jwt-verifier.js";
 import type { RealmJwtDeps } from "./http/middleware/auth.js";
 import type { AuthenticatedUser, Team } from "./domain/auth.js";
-import {
-  createJsonConsoleLogger,
-  disconnectRedisClients,
-  redisOperationFailure,
-  redisUrlRedactions,
-} from "./entrypoint-wiring.js";
-
-// ── Redis (connectivity + commands + pub/sub) ────────────────────────────────
-
-interface RedisBundle {
-  readonly connectivity: RedisConnectivityPort;
-  readonly redis: RedisPort;
-  readonly pubsub: RedisPubSubPort;
-  /**
-   * Privileged ACL admin port over the supervisor's admin connection — used by
-   * the grace-window purge to `ACL DELUSER` a deregistered tenant's scoped user
-   * (the per-tenant user cannot revoke itself). Distinct from the data-plane
-   * `RedisPort` because ACL ops are privileged.
-   */
-  readonly aclAdmin: RedisAclAdminPort;
-  /** Append-only audit stream (`XADD`) over the supervisor's admin connection. */
-  readonly auditStream: AuditStreamPort;
-  readonly disconnect: () => Promise<void>;
-}
-
-const createRedis = async (redisUrl: string): Promise<Result<RedisBundle, HostError>> => {
-  try {
-    const { Redis } = await import("ioredis");
-    const client = new Redis(redisUrl, { maxRetriesPerRequest: 3, lazyConnect: true });
-    const subClient = new Redis(redisUrl, { maxRetriesPerRequest: 3, lazyConnect: true });
-    const redisRedactions = redisUrlRedactions(redisUrl);
-    const redisFailure = (operation: string, error: unknown): HostError =>
-      redisOperationFailure(operation, error, redisRedactions);
-
-    const connectivity: RedisConnectivityPort = {
-      ping: async () => {
-        try {
-          if (client.status === "wait") await client.connect();
-          await client.ping();
-          return ok(undefined);
-        } catch (error) {
-          return err(redisFailure("PING", error));
-        }
-      },
-    };
-
-    const redis = createIoredisRedisPort(client, redisFailure);
-
-    const redisCall = async <T>(
-      describe: () => string,
-      run: () => Promise<T>,
-    ): Promise<Result<T, HostError>> => {
-      try {
-        return ok(await run());
-      } catch (error) {
-        return err(redisFailure(describe(), error));
-      }
-    };
-
-    const pubsub: RedisPubSubPort = {
-      publish: (channel, message) =>
-        redisCall(() => `PUBLISH ${channel}`, async () => { await client.publish(channel, message); }),
-      subscribe: (channel, handler) =>
-        redisCall(() => `SUBSCRIBE ${channel}`, async () => {
-          if (subClient.status === "wait") await subClient.connect();
-          subClient.on("message", (receivedChannel, message) => {
-            if (receivedChannel === channel) handler(message);
-          });
-          await subClient.subscribe(channel);
-          return { unsubscribe: async () => { await subClient.unsubscribe(channel); } };
-        }),
-    };
-
-    const aclAdmin: RedisAclAdminPort = {
-      setUser: async (username, rules) => {
-        try {
-          if (client.status === "wait") await client.connect();
-          await client.call("ACL", "SETUSER", username, ...rules);
-          return ok(undefined);
-        } catch (error) {
-          return err(redisFailure(`ACL SETUSER ${username}`, error));
-        }
-      },
-      delUser: async (username) => {
-        try {
-          if (client.status === "wait") await client.connect();
-          await client.call("ACL", "DELUSER", username);
-          return ok(undefined);
-        } catch (error) {
-          return err(redisFailure(`ACL DELUSER ${username}`, error));
-        }
-      },
-    };
-
-    const auditStream: AuditStreamPort = {
-      xAdd: async (streamKey, fields) => {
-        if (client.status === "wait") await client.connect();
-        const args: string[] = [];
-        for (const [k, v] of Object.entries(fields)) { args.push(k, v); }
-        const id = await client.xadd(streamKey, "*", ...args);
-        return String(id);
-      },
-    };
-
-    return ok({
-      connectivity,
-      redis,
-      pubsub,
-      aclAdmin,
-      auditStream,
-      disconnect: () => disconnectRedisClients([
-        { name: "command", quit: () => client.quit() },
-        { name: "subscriber", quit: () => subClient.quit() },
-      ]),
-    });
-  } catch (error) {
-    return err(redisOperationFailure("Redis init", error, redisUrlRedactions(redisUrl)));
-  }
-};
+import { createJsonConsoleLogger } from "./entrypoint-wiring.js";
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 
@@ -204,7 +84,7 @@ const main = async () => {
   }
   const config = configResult.value;
 
-  const redisResult = await createRedis(config.REDIS_URL);
+  const redisResult = await createRedisBundle(config.REDIS_URL, logger);
   if (!redisResult.ok) {
     logger.error(`[supervisor] Redis connectivity failed: ${formatHostError(redisResult.error)}`);
     process.exit(1);
