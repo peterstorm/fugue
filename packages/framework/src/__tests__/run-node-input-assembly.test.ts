@@ -1,107 +1,45 @@
-// run-node-input-assembly.test.ts — Tests for run-node.ts input assembly logic
-// Finding #19: conditional dep input assembly only integration-tested.
-//
-// Tests the 0/1/≥2 required dep split and optional dep keyed-object shape
-// via runNodeShared with a trivial echo node that returns its input.
-
+// Input assembly at the actual node-dispatch seam: 0/1/many required sources
+// and optional sources. A plain child-dispatch fake refuses unexpected maps.
 import { describe, it, expect } from "bun:test";
-import { N, D } from "./_id-helpers.js";
 import { z } from "zod";
+import { N, D } from "./_id-helpers.js";
 import { runNodeShared } from "../dag-runtime/run-node.js";
 import { ok } from "../types/result.js";
-import type { NodeDef, ValidatedNodeContext } from "../types/node.js";
-import type { IncomingSources } from "../shared/incoming.js";
+import type { NodeDef } from "../types/node.js";
+import type { NodeId } from "../types/ids.js";
 import { makeNodeContext } from "../shared/index.js";
+import { validateCapabilities } from "../shared/capabilities.js";
+import { ordinaryExecution } from "./_execution-scope.js";
 
-// Echo node: returns whatever input it receives
 const echoNode: NodeDef<unknown, unknown> = {
-  id: N("echo"),
-  kind: "transform",
-  inputSchema: z.unknown(),
-  outputSchema: z.unknown(),
-  requires: [],
-  sideEffects: { kind: "none" },
-  confidence: { mode: "none" },
-  run: async (input) => ok(input),
+  id: N("echo"), kind: "transform", inputSchema: z.unknown(), outputSchema: z.unknown(),
+  requires: [], sideEffects: { kind: "none" }, confidence: { mode: "none" },
+  run: async input => ok(input),
 };
+const validated = validateCapabilities({ nodes: [echoNode] }, makeNodeContext({ runId: "test-run", dagId: "test-dag" }));
+if (!validated.ok) throw new Error("echo context must validate");
+const ctx = validated.value;
 
-// Minimal validated context — echo node has requires: [] so any ctx is valid.
-// Cast to ValidatedNodeContext since there's nothing to validate.
-const ctx = makeNodeContext({ runId: "test-run", dagId: "test-dag" }) as unknown as ValidatedNodeContext;
+const cases: readonly Readonly<{
+  name: string;
+  required: readonly string[];
+  optional: readonly string[];
+  outputs: readonly (readonly [string, unknown])[];
+  expected: unknown;
+}>[] = [
+  { name: "0 required, 0 optional → undefined (source node)", required: [], optional: [], outputs: [], expected: undefined },
+  { name: "1 required → bare upstream value", required: ["upstream"], optional: [], outputs: [["upstream", { x: 42 }]], expected: { x: 42 } },
+  { name: "2 required → keyed object", required: ["a", "b"], optional: [], outputs: [["a", "valueA"], ["b", "valueB"]], expected: { a: "valueA", b: "valueB" } },
+  { name: "optional present → all keys", required: ["r"], optional: ["opt"], outputs: [["r", "reqVal"], ["opt", "optVal"]], expected: { r: "reqVal", opt: "optVal" } },
+  { name: "optional absent → undefined value", required: ["r"], optional: ["missing"], outputs: [["r", "reqVal"]], expected: { r: "reqVal", missing: undefined } },
+  { name: "mixed required and optional", required: ["a", "b"], optional: ["c"], outputs: [["a", 1], ["b", 2]], expected: { a: 1, b: 2, c: undefined } },
+];
 
 describe("runNodeShared input assembly", () => {
-
-  it("0 required deps, 0 optional → input = undefined (source node, C0)", async () => {
-    // No node implicitly receives the DAG input any more: a 0-required node is
-    // a source and gets `undefined`. The request arrives only via a $input edge.
-    const incoming: IncomingSources = { required: [], optional: [] };
-    const outputs: ReadonlyMap<string, unknown> = new Map();
-
-    // @ts-expect-error — branded ID test fixture
-    const { result } = await runNodeShared(echoNode, ctx, D("d"), outputs, incoming);
-    expect(result.ok).toBe(true);
-    if (result.ok) expect(result.value).toBe(undefined);
-  });
-
-  it("1 required dep → input = bare upstream value", async () => {
-    const incoming: IncomingSources = { required: ["upstream"], optional: [] };
-    const outputs: ReadonlyMap<string, unknown> = new Map([["upstream", { x: 42 }]]);
-
-    // @ts-expect-error — branded ID test fixture
-    const { result } = await runNodeShared(echoNode, ctx, D("d"), outputs, incoming);
-    expect(result.ok).toBe(true);
-    if (result.ok) expect(result.value).toEqual({ x: 42 });
-  });
-
-  it("2 required deps → input = keyed object", async () => {
-    const incoming: IncomingSources = { required: ["a", "b"], optional: [] };
-    const outputs: ReadonlyMap<string, unknown> = new Map([
-      ["a", "valueA"],
-      ["b", "valueB"],
-    ]);
-
-    // @ts-expect-error — branded ID test fixture
-    const { result } = await runNodeShared(echoNode, ctx, D("d"), outputs, incoming);
-    expect(result.ok).toBe(true);
-    if (result.ok) expect(result.value).toEqual({ a: "valueA", b: "valueB" });
-  });
-
-  it("optional deps present → keyed object with all keys", async () => {
-    const incoming: IncomingSources = { required: ["r"], optional: ["opt"] };
-    const outputs: ReadonlyMap<string, unknown> = new Map([
-      ["r", "reqVal"],
-      ["opt", "optVal"],
-    ]);
-
-    // @ts-expect-error — branded ID test fixture
-    const { result } = await runNodeShared(echoNode, ctx, D("d"), outputs, incoming);
-    expect(result.ok).toBe(true);
-    if (result.ok) expect(result.value).toEqual({ r: "reqVal", opt: "optVal" });
-  });
-
-  it("optional deps absent → keyed object with undefined values", async () => {
-    const incoming: IncomingSources = { required: ["r"], optional: ["missing"] };
-    const outputs: ReadonlyMap<string, unknown> = new Map([["r", "reqVal"]]);
-
-    // @ts-expect-error — branded ID test fixture
-    const { result } = await runNodeShared(echoNode, ctx, D("d"), outputs, incoming);
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.value).toEqual({ r: "reqVal", missing: undefined });
-    }
-  });
-
-  it("mixed required + optional → keyed object, optional undefined when absent", async () => {
-    const incoming: IncomingSources = { required: ["a", "b"], optional: ["c"] };
-    const outputs: ReadonlyMap<string, unknown> = new Map([
-      ["a", 1],
-      ["b", 2],
-      // "c" deliberately absent
-    ]);
-
-    // @ts-expect-error — branded ID test fixture
-    const { result } = await runNodeShared(echoNode, ctx, D("d"), outputs, incoming);
-    expect(result.ok).toBe(true);
-    if (result.ok) expect(result.value).toEqual({ a: 1, b: 2, c: undefined });
+  for (const test of cases) it(test.name, async () => {
+    const outputs = new Map<NodeId, unknown>(test.outputs.map(([id, value]) => [N(id), value]));
+    const { result } = await runNodeShared(echoNode, ctx, D("d"), outputs,
+      { required: test.required, optional: test.optional }, ordinaryExecution);
+    expect(result).toEqual(ok(test.expected));
   });
 });

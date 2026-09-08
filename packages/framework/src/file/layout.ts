@@ -44,7 +44,7 @@
 
 import { createHash } from "node:crypto";
 import { ID_PATTERN } from "../types/ids.js";
-import { isNonNegativeSafeInteger } from "../checkpoint/composite-node-key.js";
+import { isNonNegativeSafeInteger } from "../shared/composite-node-key.js";
 import { toJson } from "../state-machine/serialize.js";
 import { safeDiagnosticRender } from "../types/safe-error.js";
 import { fileOperationError } from "./boundary-error.js";

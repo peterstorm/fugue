@@ -12,7 +12,7 @@ import type { HttpCapability } from "./http-capability.js";
 import type { ClockCapability } from "./clock.js";
 import type { NonEmptyString } from "./non-empty-string.js";
 import type { BudgetCapability } from "./budget-capability.js";
-import type { MapIndex } from "./map-index.js";
+import type { MappedChildScope } from "./mapped-child-scope.js";
 
 export type { Tracer };
 export type { HttpCapability } from "./http-capability.js";
@@ -103,26 +103,23 @@ export interface ContextCacheAdapter {
 }
 
 /**
- * Durable checkpoint writer — persists node outputs for crash-resume.
+ * Durable node-output writer — not the readable fan-completion Checkpointer.
  *
  * This is the HOST's writer, a different port from the framework's
  * `Checkpointer` (which addresses composite entries through ADR-0075's codec).
- * The two are not interchangeable and are not being merged here: this one is
- * what production actually writes run checkpoints through.
+ * Root machine resume uses JobLike; mapped completion replay uses Checkpointer.
+ * This port records per-node outputs without providing a replay reader.
  *
- * `index` addresses one child instance of a `map` node's fan (F1 PR-B). Absent
- * — the only shape that existed before F1 — MUST produce a byte-identical key
- * to before (FR-F1-008), so no existing checkpoint needs migrating. It is a
- * branded `MapIndex` rather than a bare number because the value lands in a
- * durable address: a `NaN` or `-1` would mint a key no resume could ever match,
- * and the failure would present as an index that silently re-executes forever.
+ * `scope` identifies child output by parent map, index and durable execution
+ * epoch. Absent means the canonical root address (FR-F1-008). The readable
+ * Checkpointer's map-completion entries remain a separate record space.
  */
 export interface CheckpointWriter {
   readonly write: (
     runId: RunId,
     nodeId: NodeId,
     value: unknown,
-    index?: MapIndex,
+    scope?: MappedChildScope,
   ) => Promise<void>;
 }
 
@@ -432,7 +429,7 @@ export interface NodeDef<
   R extends readonly Capability[] = readonly [],
 > {
   readonly id: NodeId;
-  readonly kind: NodeKind;
+  readonly kind: Exclude<NodeKind, "map">;
   readonly inputSchema: z.ZodType<I>;
   readonly outputSchema: z.ZodType<O>;
   /**

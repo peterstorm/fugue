@@ -160,6 +160,117 @@ createTransformNode<I, O>({
 })
 ```
 
+### `createMapNode` — runtime-width fan-out
+
+A map is **one node** in the outer DAG, not a dynamic expansion of its waves.
+`createMapNode` returns `MapNodeDef<I, ChildOut, O>` with a visible immutable
+`mapping` descriptor and **no `run`**. Put it in a DAG and use `runDag` (or the
+host's durable execution path). Ordinary `NodeDef` remains callable;
+`DagNodeDef` is the union admitted by DAG constructors.
+
+`MapNodeConfig<I, ChildOut, O>` takes `id`, `inputSchema`, `outputSchema`,
+`widthFrom` (one field name, not a path/expression), `maxWidth` (positive safe
+integer), `child: DagDef`, `childOutputSchema`, and
+`reduce: (results: readonly ChildOut[]) => Result<O, FrameworkError>`.
+
+```ts
+import { z } from "zod";
+import {
+  createMapNode, createTransformNode, defineDag, defineLinearDag,
+  DAG_INPUT, ok,
+} from "@fuguejs/framework";
+
+const double = createTransformNode({
+  id: "double",
+  inputSchema: z.number(),
+  outputSchema: z.number(),
+  transform: (value) => ok(value * 2),
+});
+const child = defineLinearDag({ id: "double-item", nodes: [double] });
+const fan = createMapNode({
+  id: "fan",
+  inputSchema: z.object({ items: z.array(z.number()) }),
+  outputSchema: z.array(z.number()),
+  widthFrom: "items",
+  maxWidth: 75,
+  child,
+  childOutputSchema: z.number(),
+  reduce: (results) => ok([...results]),
+});
+const dag = defineDag({
+  id: "double-items",
+  nodes: { fan },
+  edges: [{ from: DAG_INPUT, to: "fan" }],
+  outputNodeId: "fan",
+});
+```
+
+**Runtime contract:**
+
+- The map requires only `checkpointer`, the readable `Checkpointer` capability
+  registered by the framework's module augmentation. Embedded callers wire it
+  through `makeNodeContext({ ..., capabilities: { checkpointer } })`; use a
+  durable adapter for restart durability. The host wires its run-bound Redis
+  adapter when hash operations are available. Missing capability fails before work.
+- Root preparation checks outer **and direct child** requirements before any
+  predecessor runs, even at zero width. Each actual child dispatch uses its own
+  requirements/NodeId/structural DagId under the original root authority, origin
+  and host LLM meter. Child requirements are never hoisted into the map request;
+  a parent's scoped grant never becomes the child's base authority. Describe
+  capabilities are the sorted, deduplicated union of the same bounded outer/direct-
+  child runtime inventory; map `requires` and the outer topology stay unchanged.
+- Indices run sequentially; the reducer receives validated outputs in ascending
+  index order, including `[]` for a live zero-width fan. Missing/non-array fields,
+  revoked-array inputs and over-limit widths fail closed, never truncate.
+- Acknowledged completions use map NodeId plus `{ index, attempt: executionEpoch }`
+  in `Checkpointer`. The epoch is the **persisted parent `freshnessExecutionEpoch`**:
+  same-generation retry/replacement reuses completions; a valid reroute advances it
+  before work, even for unchanged inputs. Replayed outputs are schema-checked.
+  External effects completed without an acknowledged fan save may repeat.
+- Every nonempty loaded `corruptNodeAddresses` refuses mapped-fan work before
+  replay/gather, metadata seeding, child execution, saves or reduction, even at
+  zero width or for unrelated/old-epoch node keys and opaque digest filenames.
+  File/Redis adapters still warn/drop corrupt entries; the stricter fan preserves
+  the address ADT in an attributable `checkpoint-corrupt`. Public `runDag` returns
+  the existing `retry-exhausted` wrapper with `rootErrorKind: checkpoint-corrupt`
+  and the serialized original error in `lastError` (default zero retries: one
+  attempt). Configured retries may load again but cannot bypass corrupt-load refusal.
+  There is no automatic destructive cleanup: inspect/repair storage, then rerun,
+  accounting for acknowledged effects rather than treating corruption as a healthy
+  miss. Healthy prefixes are reused; genuinely missing indices execute normally.
+- Failed initial checkpoint metadata stops the fan with its original error. Fresh
+  child outputs must pass `childOutputSchema` before fan save/gather, even if they
+  passed the child DAG's output schema; failure stops subsequent children/reduction.
+- Children share root RunId, signal, clock/RNG/FreshnessIndex, original clients,
+  host cache/prompt closures and spend authority, but have private local jobs.
+  They do not inherit root durable JobLike, replay map, retry overrides,
+  human/commit/trace/classification hooks or background ownership. Child judges
+  finish in the foreground before fan save. Child node/domain events and spans
+  remain; observer root run-start/run-end belong only to the root.
+- Actual child output writes receive `CheckpointWriter.write`'s fourth argument,
+  frozen `MappedChildScope { mapNodeId, index, executionEpoch }`. Root writes omit
+  it. These write-only records are **not** the fan's readable completion store;
+  see [host addresses](../../host/docs/writing-dags.md#mapped-execution-and-durable-addresses).
+- Cancellation stops further indices and reduction (including empty/final-index
+  success). A child that completed during cancellation can still have its
+  successful completion saved; cancellation cannot undo delegated effects.
+
+**Construction and limits:** the descriptor captures child/schema/reducer/width
+configuration once. Invalid constructor configuration throws at definition time;
+`validateDagShape` returns typed refusals and `defineDag` raises `DagDefinitionError`.
+Both construction and DAG parsing refuse nested maps, child
+`humanReview`, and child read/write freshness extractors **on the actual owned
+execution snapshot**, not just an earlier caller observation. Ordinary reads/writes
+without extractors remain supported. Gather, then review at root level (including
+`withHumanReview(fan, { prompt })`). Evaluator entries/configs, criteria arrays and
+rubric records are owned frozen snapshots, so alias mutation cannot replace the
+captured evaluator definition. Opaque schema/function references and closure state
+are not recursively cloned, and caller-owned values are not frozen. This adds no
+recursive child fingerprint, indexed broker audit
+dimension, or root aggregation of child judge/guardrail summaries. CLI authored-map
+shapes/plate rendering and whole-fan budget projection are separate, unimplemented
+F1 follow-ups; `defineFanOut` remains author-time parallel sibling width.
+
 ### `createLlmNode` — structured LLM call with prompt template
 
 ```ts
@@ -483,7 +594,7 @@ Examples for each are in "Common Patterns" below.
 defineDag({
   id: string,                    // must match [A-Za-z0-9_-]{1,128}
   nodes: {                       // record keyed by node id
-    [nodeId]: NodeDef,           // key MUST match node.id
+    [nodeId]: DagNodeDef,        // ordinary NodeDef or MapNodeDef; key MUST match node.id
   },
   edges: [                       // array of edge objects
     { from: DAG_INPUT, to: "nodeA" },                         // request → entry node

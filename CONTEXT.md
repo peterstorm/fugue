@@ -13,7 +13,11 @@ gates, freshness-aware state management, and production observability.
 | Term | Definition |
 |------|-----------|
 | **DAG** | A directed acyclic graph of nodes connected by edges. The unit of orchestration. |
-| **Node** | A single computation step with typed input/output schemas, a declared side-effect profile, and a capability set. |
+| **Node** | A single computation step with typed input/output schemas, a declared side-effect profile, and a capability set. Ordinary callable steps are `NodeDef`; `DagNodeDef` is the ordinary-or-map dispatch union. |
+| **Map Node** | One node in the immutable outer topology, with one gathered output. `MapNodeDef` has a visible immutable `mapping` descriptor and no `run`; the root runtime dispatches its prepared child DAG sequentially over a bounded array (ADR-0086). |
+| **Mapped Child Execution** | A child invocation through the root-owned execution seam, not a new root Run. It shares the root RunId, authority and resources while exposing the child's structural DagId; it owns a private local job, never the root durable JobLike or root lifecycle hooks. |
+| **Mapped Child Scope** | Frozen `MappedChildScope { mapNodeId, index, executionEpoch }` supplied to actual child `CheckpointWriter.write` calls. The host encodes the real child NodeId with namespace=mapNodeId, index, attempt=executionEpoch under the root tenant/DAG/Run prefix. Root writes have no scope. |
+| **Fan Completion** | A successful child output acknowledged through the readable `checkpointer` capability at `dag@<mapNodeId>@<index>@<executionEpoch>`. Lookup and save use the current persisted parent epoch. Same-generation retry/replacement reuses acknowledged indices; reroute cannot reuse the previous generation. Separate from the host's write-only child output records. |
 | **Edge** | A connection between nodes. Three kinds: `unconditional`, `conditional` (with a predicate), `default` (fallback when no conditional matches). |
 | **Wave** | A set of nodes at the same topological depth that can execute concurrently. The DAG is compiled into an ordered sequence of waves. |
 | **Run** | A single execution of a DAG with a specific input. Identified by a `RunId`. |
@@ -36,7 +40,7 @@ gates, freshness-aware state management, and production observability.
 | Term | Definition |
 |------|-----------|
 | **Branded ID** | `RunId`, `NodeId`, `DagId` — string newtypes with compile-time brands. Only smart constructors or `__brand` escapes produce them. |
-| **Checkpoint identifier ownership** | The `Checkpointer` port is typed with branded identifiers end-to-end (`saveNode(runId: RunId, state: NodeState)`, `NodeState.nodeId: NodeId`, `RunMeta.dagId: DagId`) — `state.nodeId` is the ONE node address source, so a mismatched key/state pair is unrepresentable. Adapters KEEP runtime re-validation: a brand bypass is possible, and the file backend re-validates for path safety (NFR-010). `DagId` is the stricter domain (no `:` — Redis key-namespace escape). `DagDef.id` stays `string` at the authoring surface; consumers bridge with `dagId(dag.id)` (deepening round D1). |
+| **Checkpoint identifier ownership** | The `Checkpointer` port is typed with branded identifiers end-to-end (`saveNode(runId: RunId, state: NodeState)`, `NodeState.nodeId: NodeId`, `RunMeta.dagId: DagId`) — `state.nodeId` is the ONE node address source, so a mismatched key/state pair is unrepresentable. Adapters KEEP runtime re-validation: a brand bypass is possible, and the file backend re-validates for path safety (NFR-010). `DagId` is the stricter domain (no `:` — Redis key-namespace escape). `DagDefInput.id` is `string` at the authoring surface; the parser issues branded `DagDef.id: DagId`. |
 | **Corrupt Checkpoint Address** | A dropped per-node checkpoint entry’s discriminated address: `{ kind: "node-key", nodeKey }` when a stored node key is recoverable, or `{ kind: "digest-filename", fileName }` when only the file address is known. `RunState.corruptNodeAddresses` never erases this distinction. |
 | **Required Corruption Observability** | Persisted Checkpointer adapters must emit a warning before reporting a corrupt-entry drop as successful. `reportCorruptCheckpointEntry` owns the policy: a logger failure becomes typed `cache-error(load)` for both Redis and file; it never rejects raw or disappears. |
 | **Result\<T, E\>** | Either-style type: `Ok<T>` or `Err<E>`. No exceptions cross module boundaries. |
@@ -48,7 +52,7 @@ gates, freshness-aware state management, and production observability.
 | **HttpCapability** | Built-in capability for HTTP API calls. Returns `Result`, validates responses against Zod schemas. |
 | **ClockCapability** | Built-in `"clock"` capability. Nodes read time through `ctx.clock` instead of ambient `Date`; `systemClock` is the production default, `fixedClock` pins time for deterministic tests. |
 | **ValidatedNodeContext** | Phantom-branded `NodeContext` proving capability validation passed. Only `validateCapabilities` can produce it. |
-| **DagDef** | Immutable branded DAG issued only by `validateDagShape`. Validation snapshots nodes, requirement/retry arrays, edges, predicates, judges, and retry limits before branding; retry overrides return a typed `Result` by re-entering the same parser, so caller mutation or unchecked derivation cannot invalidate the proof. |
+| **DagDef** | Immutable branded DAG issued only by `validateDagShape`, with a branded DagId and `DagNodeDef` nodes. Validation snapshots nodes, requirement/retry arrays, edges, predicate metadata, judge arrays (including owned frozen evaluator entries/configs, criteria arrays and rubric records), and retry limits before branding; retry overrides re-enter the same parser. Map descriptors capture child/schema/reducer/width configuration; child eligibility is checked against the exact owned execution snapshot as well as bounded early observations. Opaque schemas/functions remain captured references, not recursively cloned or fingerprinted implementations. |
 
 ### Routing & Confidence
 
@@ -70,7 +74,7 @@ gates, freshness-aware state management, and production observability.
 | **Freshness Violation** | Detected when a write's `conditionedOn` witness has been superseded by a later write to the same resource. Its event derives the resource solely from `conditionedOnWitness.resource`; no duplicate resource field can drift. |
 | **FreshnessIndex** | Port interface for witness tracking. Conflict lookup and durable logical-write acknowledgement are separate questions: `findConflict` selects the latest write, while `hasRecordedWrite` addresses `(runId, nodeId, executionEpoch, newWitness)` even after supersession. Three adapters: `InMemoryFreshnessIndex` (single-process), Redis-backed (distributed), file-backed (digest-addressed singletons, `file/` subpath). |
 | **Freshness Completion Proof** | Durable set of node IDs whose post-wave freshness bookkeeping completed. It is distinct from node outputs because output persistence can precede witness emission; retries and replacement workers use this proof to emit only genuinely outstanding bookkeeping. |
-| **Freshness Execution Epoch** | Durable non-negative generation stamped onto every write witness. Bookkeeping retries preserve the epoch; each valid HITL reroute increments it before replacement work executes, so a same-valued re-execution is distinct from an ambiguously acknowledged retry. |
+| **Freshness Execution Epoch** | Durable non-negative generation stamped onto every write witness. Bookkeeping retries preserve the epoch; each valid HITL reroute increments it before replacement work executes, so a same-valued re-execution is distinct from an ambiguously acknowledged retry. The parent's persisted `freshnessExecutionEpoch` also supplies fan-completion `attempt` and mapped child write scope; it is not a retry counter or input hash. |
 | **`checkFreshness` (batch)** | The same stale-read rule in BATCH form over an event log. Off the runtime path — used for post-hoc forensics and as the differential oracle a property test checks `InMemoryFreshnessIndex` against, so the rule cannot drift between the two implementations. Not exported from the package barrel. |
 
 ### Human-in-the-Loop (HITL)
@@ -194,14 +198,14 @@ The F6 feature (ADRs 0075–0080) adds a self-contained durable filesystem backe
 | Layer | Imports From | Responsibility |
 |-------|-------------|---------------|
 | `types/` | Nothing | Domain types, branded IDs, discriminated unions |
-| `shared/` | `types/` | Pure utilities (topo sort, validation, input assembly) |
+| `shared/` | `types/` | Pure utilities (topo sort, validation, input assembly, composite node-address codec) |
 | `dag-runtime/` | `types/`, `shared/` | Pure transitions + imperative execution shell |
 | `state-machine/` | `types/` | Generic state machine kernel |
 | `executor/` | `types/`, `shared/`, `dag-runtime/`, `state-machine/` | Public API (`defineDag`, `runDag`) |
 | `llm/` | `types/` | LLM client implementations |
 | `observer/` | `types/` | Observer implementations |
-| `checkpoint/` | `types/` | Checkpoint persistence — in-memory + Redis adapter |
-| `file/` | `types/`, `checkpoint/`, `state-machine/` | Durable file backend: event journal, checkpointer, freshness index, spend store, job, resume (subpath `@fuguejs/framework/file`) |
+| `checkpoint/` | `types/`, `shared/` | Checkpoint persistence — in-memory + Redis adapter; named codec exports delegate to `shared/composite-node-key.ts` |
+| `file/` | `types/`, `shared/`, `checkpoint/`, `state-machine/` | Durable file backend: event journal, checkpointer, freshness index, spend store, job, resume (subpath `@fuguejs/framework/file`) |
 | `cache/` | `types/` | Response caching — in-memory + Redis adapter |
 | `queue/` | `types/`, `state-machine/` | Queue abstractions |
 | `queue-bullmq/` | `queue/`, `state-machine/` | BullMQ adapter |
@@ -224,10 +228,20 @@ The F6 feature (ADRs 0075–0080) adds a self-contained durable filesystem backe
 3. **Edges are the single source of truth** for topology (no `deps` field on nodes — ADR 0017).
 4. **Predicates are never evaluated in the pure transition layer** — the executor pre-computes routing decisions and carries them on events (ADR 0029).
 5. **Branded types prevent argument-swap bugs** — `RunId`, `NodeId`, `DagId` are incompatible at compile time.
-6. **Capability validation happens once at run start** — before any `node.run` is called.
+6. **Capability validation happens once at root run start** — the bounded inventory includes outer nodes and each map's direct child nodes, even at zero width. Broker claims are snapshotted once per distinct capability. Child dispatch uses original base authority/origin/host meter and each child's own requirements, never hoisted map requirements or an inherited parent-scoped grant. Describe capabilities use the same bounded runtime inventory's sorted, deduplicated union; map `requires` remains checkpointer-only.
 7. **Freshness is fail-closed** — extractor failures abort the wave; proceeding without witness data would allow stale writes.
 8. **Pre-release: no backward-compat shims** — internal renames are first-class refactors, not aliased. No `@deprecated` re-exports for code that has not shipped.
 9. **Clock guards follow the storage domain** — raw-ms values are finiteness-guarded only; ms→Date values are guarded for finiteness AND representability (`isRepresentableTimestampMs`). The two-domain split is a pinned invariant (`clock-parity.test.ts`), not a convention.
+
+### Mapped execution limits (ADR-0086)
+
+Nested maps, child `humanReview`, and child read/write freshness extractors are refused at construction and DAG snapshot parsing; ordinary reads/writes without extractors remain supported. Gather, then review at root level. Root preparation retains one clock/RNG/FreshnessIndex plus the original signal, clients, host prompt/cache closures and spend authority. Children emit node/domain events and spans but no observer root run-start/run-end; child judges finish in the foreground before fan completion acknowledgement. Root-only replay, retry overrides, human/commit/trace/classification hooks and background ownership do not flow into children.
+
+Every nonempty loaded `corruptNodeAddresses` refuses mapped-fan replay/gather, metadata seeding, child execution, saves and reduction, even at zero width or for apparently unrelated/old-epoch keys and opaque digest filenames. File/Redis adapters still warn/drop; the stricter consumer preserves the address ADT and returns attributable `checkpoint-corrupt`. Public `runDag` preserves the original serialized cause in `retry-exhausted.lastError` with `rootErrorKind: checkpoint-corrupt` (default zero retries: one attempt). There is no automatic destructive cleanup: operators inspect/repair storage, then rerun, rather than treating corrupt acknowledged work as healthy missing work. Healthy prefixes are reused; genuinely missing indices execute.
+
+The host `CheckpointWriter.write` rejects a requested runId differing from its bound run before scope/value observation, encoding, serialization, diagnostics or checkpoint/spend effects. Matching root/mapped writes retain their keys and retention policy; scope remains address data, not an unforgeable capability.
+
+Cancellation prevents further child dispatch and reduction, including empty/final-index success; an already-completed child can still have its completion saved. Unacknowledged external effects may repeat after interruption. This contract adds neither recursive child fingerprints, indexed broker audit dimensions, nor root aggregation of child judge/guardrail metadata.
 
 ### Host Layer (`@fuguejs/host`)
 

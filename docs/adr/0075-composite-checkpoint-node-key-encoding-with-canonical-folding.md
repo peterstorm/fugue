@@ -36,7 +36,7 @@ The stored address also had to be deterministic, reversible, and unambiguous. Va
 
 The port in [`checkpoint/checkpointer.ts`](../../packages/framework/src/checkpoint/checkpointer.ts) accepts `saveNode(runId, state, opts?)`, where `state.nodeId` is the sole canonical node identity and `SaveNodeOpts` aliases `CompositeNodeKeyOpts { namespace?: string; index?: number; attempt?: number }`. The optional third argument extends that identity with composite addressing without duplicating node identity at the interface.
 
-The pure codec in [`checkpoint/composite-node-key.ts`](../../packages/framework/src/checkpoint/composite-node-key.ts) defines these invariants:
+The pure codec in [`shared/composite-node-key.ts`](../../packages/framework/src/shared/composite-node-key.ts) defines these invariants. Its source ownership moved inward, byte-identical, during PR46 closure ([ADR-0086](0086-root-owned-mapped-child-execution.md)); named public exports through `checkpoint/index.ts` remain unchanged:
 
 - If both `index` and `attempt` are absent, `compositeNodeKey` returns exactly `nodeId`. A supplied namespace alone does not change the address. This is the canonical form required by FR-021. (Amended 2026-08-14: a namespace alone is now **rejected** as ambiguous caller error rather than folded — see the Amendment below.)
 - If either `index` or `attempt` is present, the result is `` `${namespace}@${nodeId}@${index}@${attempt}` ``, with namespace defaulting to `dag` and each missing numeric component defaulting to `0`. An explicitly supplied zero selects composite form.

@@ -24,6 +24,7 @@ import { z } from "zod";
 import { err, ok } from "../types/result.js";
 import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
 import { testRuntimeContext } from "./_context-factories.js";
+import { unmappedRootScope } from "./_execution-scope.js";
 
 const makeNode = (id: string): NodeDef<unknown, unknown> => ({
   id: N(id),
@@ -76,6 +77,7 @@ const makeConfig = (
     ? new Map(Array.from(nodeMap.entries()).map(([k, v]) => [N(k), v]))
     : new Map([[N("a"), makeNode("a")]]),
   nodeCtx: makeValidatedCtx(),
+  executionScope: unmappedRootScope,
   nowFn,
   freshnessIndex: new InMemoryFreshnessIndex(),
 });
@@ -169,6 +171,7 @@ describe("executeWave — error paths", () => {
       dag: makeDag(),
       nodeMap: new Map([[N("a"), makeNode("a")]]),
       nodeCtx: validCtx,
+      executionScope: unmappedRootScope,
       nowFn: Date.now,
       freshnessIndex: new InMemoryFreshnessIndex(),
     };

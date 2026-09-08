@@ -184,8 +184,15 @@ export const resolveMappedItems = (
     return readThrew(nodeId, from, "the field", error);
   }
 
-  if (!Array.isArray(field)) {
-    return err(frameworkError.mapWidthInvalid(nodeId, from, safeDiagnosticRender(field)));
+  // IsArray itself throws on a revoked proxy, before any length/index read.
+  let array: readonly unknown[];
+  try {
+    if (!Array.isArray(field)) {
+      return err(frameworkError.mapWidthInvalid(nodeId, from, safeDiagnosticRender(field)));
+    }
+    array = field;
+  } catch (error) {
+    return readThrew(nodeId, from, "the array shape", error);
   }
 
   // `length` is read ONCE, into a local, and every later decision uses that
@@ -212,7 +219,7 @@ export const resolveMappedItems = (
   // forces the read to pass the guard below before anything can compare it.
   let width: unknown;
   try {
-    width = field.length;
+    width = array.length;
   } catch (error) {
     return readThrew(nodeId, from, "the width", error);
   }
@@ -262,7 +269,7 @@ export const resolveMappedItems = (
   // cannot change the fan between index 0 and index N-1.
   const items: unknown[] = [];
   try {
-    for (let i = 0; i < width; i++) items.push(field[i]);
+    for (let i = 0; i < width; i++) items.push(array[i]);
   } catch (error) {
     return readThrew(nodeId, from, "an element", error);
   }

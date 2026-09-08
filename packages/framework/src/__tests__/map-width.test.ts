@@ -189,6 +189,17 @@ describe("resolveMappedItems — the three arms (FR-F1-003/004/005)", () => {
     });
   }
 
+  it("refuses a revoked array proxy through the typed width error channel", () => {
+    const { proxy, revoke } = Proxy.revocable([1], {});
+    revoke();
+    const result = resolveMappedItems(NODE, { items: proxy }, FROM, MAX);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("map-width-invalid");
+      if (result.error.kind === "map-width-invalid") expect(result.error.found).toContain("threw");
+    }
+  });
+
   it("converts a throwing getter on the upstream output into a typed refusal", () => {
     // This runs inside a node's `run`, whose contract is
     // `Result<_, FrameworkError>` — a raw throw here would escape as a node

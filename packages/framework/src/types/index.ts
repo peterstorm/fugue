@@ -226,6 +226,8 @@ export { invocationFor } from "./capability-broker.js";
 export type {
   DagDef,
   DagDefInput,
+  DagNodeDef,
+  MapNodeDef,
   EdgeDef,
   EdgeDefInput,
   EdgeDefRawInput,
@@ -244,6 +246,7 @@ export { systemClock, fixedClock, isRepresentableTimestampMs } from "./clock.js"
 
 export type { NonEmptyString } from "./non-empty-string.js";
 export { asNonEmptyString, nonEmptyString } from "./non-empty-string.js";
+export type { MappedChildScope } from "./mapped-child-scope.js";
 export type { WidthFrom, MaxWidth, MapIndex, MappedItems } from "./map-width.js";
 export {
   asWidthFrom,

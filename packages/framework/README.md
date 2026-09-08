@@ -32,7 +32,10 @@ Types and entry points that workflow authors touch.
 ### `types/`
 
 - `DagDef`, `DagDefInput`, `EdgeDef`, `EdgeDefInput`, `EdgeDefRawInput`, `Predicate` — the validated DAG shape and edge-predicate vocabulary (ADR 0015, ADR 0016).
-- `NodeDef`, `NodeKind`, `NodeRetryConfig`, `NodeHumanReviewConfig` — node authoring contract.
+- `NodeDef`, `NodeKind`, `NodeRetryConfig`, `NodeHumanReviewConfig` — ordinary callable node authoring contract; `NodeDef.kind` excludes `map`.
+- `MapNodeDef`, `DagNodeDef` — a map has a visible immutable `mapping` descriptor and no `run`; `DagNodeDef` is the ordinary-or-map union used by DAG constructors/runtime dispatch.
+- `WidthFrom`, `MaxWidth`, `MapIndex`, `MappedItems`; `widthFrom` / `asWidthFrom`, `maxWidth` / `asMaxWidth`, `mapIndex` / `asMapIndex`, `resolveMappedItems` — bounded fan field/index parsing.
+- `CheckpointWriter`, `MappedChildScope` — write-only output port: `write(runId, nodeId, value, scope?)`. Mapped child calls carry frozen `{ mapNodeId, index, executionEpoch }`; ordinary root calls omit scope. This is separate from readable fan completions in `Checkpointer`. The host writer rejects a mismatched bound run before effects; see [host addresses](../host/docs/writing-dags.md#mapped-execution-and-durable-addresses).
 - `Capability`, `BaseNodeContext`, `NodeContext`, `TypedNodeContext`, `NodeContextInit` — capability-typed `NodeContext`. Declare `requires` on a `NodeDef` and the `ctx` parameter is typed accordingly — `requires: ["llm"]` yields `ctx.llm: LlmClient` (non-null).
 - `ClockCapability` plus the `systemClock` / `fixedClock` constructors — the `clock` capability (`requires: ["clock"]`); `fixedClock` pins time for deterministic tests, `systemClock` is the production default.
 - `RunId`, `NodeId`, `DagId` plus the `runId`, `nodeId`, `dagId` smart constructors — branded identifiers; raw strings cross the boundary at the entry points (`defineDag`, `makeNodeContext`, `runDag`) and become branded once.
@@ -41,7 +44,7 @@ Types and entry points that workflow authors touch.
 - `Result`, `Ok`, `Err`, `ok`, `err`, `isOk`, `isErr`, `andThen`, `andThenAsync`, `map`, `mapAsync`, `mapErr`, `unwrapOr`, `fold`, `orElse`, `tryCatch`, `tryCatchAsync`, `sequenceFirst`, `sequenceAll`, `tap`, `tapErr`, `fromNullable` — the `Either` shape used everywhere errors are returned (no exceptions across module boundaries). (`unwrap` is available via direct path import for tests but intentionally excluded from the barrel.)
 - `FrameworkError` (re-exported from `types/errors.js`) — discriminated error union.
 
-Internal inference helpers (`ConsistentNodes`, `OutputOf`, `OutputsByNodeId`, `NodesRecord`) live in `types/dag-internals.ts` and are intentionally not re-exported.
+Internal inference helpers (`ConsistentNodes`, `OutputOf`, `OutputsByNodeId`, `NodesRecord`) live with the mutually dependent DAG/map types in `types/dag.ts` and are intentionally absent from the main barrel. The former `types/dag-internals.ts` module was removed, not aliased.
 
 ### `executor/`
 
@@ -57,6 +60,7 @@ Built-in node factories (each declares its capability `requires`):
 - `createFetchNode`, `FetchNodeConfig`
 - `createSourceNode`, `SourceNodeConfig` — a root node that takes no DAG input (`z.void()`), for DAGs that begin from sources rather than `$input`
 - `createTransformNode`, `TransformNodeConfig`
+- `createMapNode`, `MapNodeConfig` — one outer node applying a prepared child DAG sequentially over a bounded array, then gathering through a typed reducer. Requires `checkpointer`; use it through a DAG, never `.run`. See [mapped execution](./docs/llm-dag-authoring.md#createmapnode--runtime-width-fan-out).
 - `createHumanReviewNode`, `HumanReviewNodeConfig`, `withHumanReview` — human-in-the-loop gates (ADR 0060). `createHumanReviewNode` is a typed passthrough that pauses for a decision; `withHumanReview(node, { prompt })` gates any existing node. A gated node routes the run to the durable state machine (host supplies `RunOptions.onHumanReview`).
 - `createLlmNode`, `LlmNodeConfig`
 - `createLlmWithToolsNode`, `LlmWithToolsNodeConfig`
@@ -99,7 +103,9 @@ Domain event bus (typed). Tracing-specific concerns (OTel exporters, span helper
 ### `checkpoint/`
 
 - `Checkpointer` interface plus `RunMeta`, `NodeState`, `RunState`, `InMemoryCheckpointer`, `RedisCheckpointer`. Both backends enforce framework-version stamping on resume — see the §"Versioning" section — and the `checkpoint-expired` / `checkpoint-corrupt` / `checkpoint-version-mismatch` error kinds.
-- `dagFingerprint`, `FRAMEWORK_VERSION` — byte-stable DAG hash and the version constant stamped into checkpoint meta.
+- Mapped fans reject every nonempty loaded `corruptNodeAddresses`, including unrelated/old-epoch keys, opaque digest filenames and zero width, before fan work. Adapters still warn/drop; public `runDag` preserves the original cause in `retry-exhausted` with `rootErrorKind: checkpoint-corrupt`. No automatic destructive cleanup: inspect/repair storage and rerun, rather than treating corrupt work as a healthy miss. See [mapped recovery](./docs/llm-dag-authoring.md#createmapnode--runtime-width-fan-out).
+- `dagFingerprint`, `FRAMEWORK_VERSION` — byte-stable DAG hash and the version constant stamped into checkpoint meta. Map closure does not add recursive child-implementation fingerprinting.
+- `compositeNodeKey`, `parseCompositeNodeKey`, `DEFAULT_NODE_NAMESPACE`, `CompositeNodeKeyOpts`, `ParsedCompositeNodeKey` — unchanged named exports. The pure implementation now lives in `src/shared/composite-node-key.ts`; `checkpoint/index.ts` re-exports it. No forwarding implementation remains at the former checkpoint source path.
 
 ## State-machine kernel (durability core)
 

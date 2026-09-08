@@ -37,8 +37,8 @@ catches it; the app fails fast at boot).
 declare const __dagValidated: unique symbol;
 
 export interface DagDef {
-  readonly id: string;
-  readonly nodes: readonly NodeDef<unknown, unknown>[];
+  readonly id: DagId;
+  readonly nodes: readonly DagNodeDef<any, any, any, readonly Capability[]>[];
   readonly edges: readonly EdgeDef[];
   // ...
   readonly [__dagValidated]: true;
@@ -59,6 +59,36 @@ Three things going on:
   symbol value to use as a computed property name. The type checker
   enforces presence; the absence of any runtime symbol means the
   property *can't even be created* outside the validator.
+
+### Ordinary nodes versus mapped nodes
+
+`NodeDef<I, O, E, R>` is still the ordinary callable contract: its `kind`
+excludes `"map"`, and `run` is present. `MapNodeDef<I, ChildOut, O>` instead
+has `kind: "map"`, `requires: readonly ["checkpointer"]`, a visible immutable
+`mapping` descriptor, and **no `run`**. `DagNodeDef<I, O, E, R>` is their union;
+DAG constructors and shape helpers admit that union. Consumers handling a whole
+DAG must narrow `kind`, not assume every node is callable. Ordinary factories
+remain ordinary `NodeDef` producers; `withHumanReview` preserves the complete
+argument type, including a root-level map descriptor.
+
+The mutually dependent DAG/map/inference cluster is colocated in
+`types/dag.ts`. `NodeDef` stays in `types/node.ts`; there is no
+`types/dag-internals.ts` compatibility module. Internal `NodesRecord`,
+`ConsistentNodes`, `OutputOf` and `OutputsByNodeId` are not main-barrel exports.
+`OutputOf` infers from `outputSchema`, so mapped gathered outputs retain their
+types without inventing a callable map body.
+
+The parser snapshots a map descriptor and its bounded child before branding.
+Nested maps, child human review and child freshness extractors are refused
+against **the exact owned frozen snapshot** returned for execution, as well as
+early/captured observations that prevent entering unsupported recursive parsing.
+Configuration aliases cannot replace the captured child, schemas or reducer.
+`evalJudges` entries/configs, criteria arrays and rubric records are owned frozen
+snapshots, not merely a copied outer array. Captured evaluator functions and schemas
+remain opaque references; implementations/closure state are not recursively cloned,
+and caller-owned values are not frozen.
+This is definition consistency, not a new recursive fingerprint guarantee.
+See [mapped execution](./llm-dag-authoring.md#createmapnode--runtime-width-fan-out).
 
 ### Why this works
 
@@ -139,12 +169,14 @@ That's the whole basis for edge-typo protection.
 ### `extends NodesRecord` — the constraint
 
 ```ts
-export type NodesRecord = { readonly [id: string]: NodeDef<any, any, any> };
+export type NodesRecord = {
+  readonly [id: string]: DagNodeDef<any, any, any, readonly Capability[]>;
+};
 ```
 
 Two notes:
 
-- We use a **string-index signature**, not `Record<string, NodeDef<...>>`.
+- We use a **string-index signature**, not `Record<string, DagNodeDef<...>>`.
   Empirically, `Record<string, X>` as a constraint causes TS to widen
   the inferred record literal to `Record<string, X>` — losing the
   literal keys we just paid for with `<const Nodes>`. The index-signature
@@ -152,14 +184,12 @@ Two notes:
   force inference to widen. This is the kind of subtle TS quirk that's
   hard to explain except by trying both and seeing which keeps the
   literal keys.
-- `NodeDef<any, any, any>` is a **deliberate variance leak**. Each node's
-  generic parameters (input/output/error types) are typically
-  heterogeneous within one DAG. The strict bound
-  `NodeDef<unknown, unknown>` would reject nodes that have more
-  specific I/O types — co/contravariance bites in both directions. `any`
-  on the parameters is the simplest escape; we recover safety at the
-  call boundary because every node is invoked through `runNode`, which
-  runs `inputSchema.parse` / `outputSchema.parse` (the runtime gate).
+- `DagNodeDef<any, any, any, readonly Capability[]>` deliberately erases
+  heterogeneous input/output/error/capability parameters at the DAG storage
+  seam. `unknown` would reject ordinary nodes with more specific input types.
+  Runtime dispatch schema-checks inputs/outputs, narrows ordinary versus map,
+  and invokes the root-owned child runner only for the map arm. It does not
+  make maps callable or weaken ordinary factory return types.
 
 ### `DagDefInput<Nodes>` — typed edges and output
 
@@ -199,31 +229,15 @@ it's been erased to the runtime shape.
 
 ## 3. The brand applier — `validateDagShape`
 
-```ts
-export const validateDagShape = (
-  input: DagDefInput,
-): Result<DagDef, FrameworkError> => {
-  // ... structural checks ...
-  const runtimeDag = {
-    id: input.id,
-    nodes: entries.map(([, n]) => n),
-    edges,
-    // ...
-  } as unknown as DagDef;
+`validateDagShape(input: DagDefInput, provenance?: DagDef["provenance"])`
+returns `Result<DagDef, FrameworkError>`. This is the sole brand-issuing seam:
+it freezes the assembled DAG and its owned node/edge/policy snapshots before
+one `as DagDef` assertion. It never brands the caller's mutable input directly.
+Retry-limit derivations re-enter this parser and return `Result`; a brand proves
+the owned definition, not the continued validity of caller aliases.
 
-  return ok(runtimeDag);
-};
-```
-
-The double cast `as unknown as DagDef` is required because the constructed
-object structurally lacks the brand property — but the type system needs
-to see the brand. `as unknown` discards type information; the second `as`
-re-asserts the wider type. This is the *only* place in the codebase where
-a `DagDef` is minted, and it's behind a structural-validity gate.
-
-The brand carries no runtime data — at runtime, `runtimeDag[__dagValidated]`
-is `undefined`. The brand exists purely to fence out literal construction
-elsewhere.
+The brand carries no runtime data. It exists purely to fence out literal
+construction elsewhere.
 
 ---
 
@@ -235,7 +249,7 @@ config-driven node arrays) we expose a second function:
 ```ts
 export const defineDagFromArray = (input: {
   readonly id: string;
-  readonly nodes: readonly NodeDef<any, any, any>[];
+  readonly nodes: readonly DagNodeDef<any, any, any, readonly Capability[]>[];
   readonly edges: readonly EdgeDef[];          // string-typed
   readonly outputNodeId?: string;              // string-typed
   // ...
@@ -517,9 +531,10 @@ revisit with Option C.
 
 ### 6.2 Record-key vs `node.id` consistency — **DONE**
 
-Each node-creator helper now carries a `<const Id extends string>`
-generic and returns `NodeDef<...> & { id: Id }`, so the literal id
-flows through:
+Ordinary node-creator helpers carrying a `<const Id extends string>`
+generic return `NodeDef<...> & { id: Id }`, so the literal id flows through.
+`createMapNode` instead returns `MapNodeDef` with a branded NodeId; its record
+key/id agreement is checked by the validator. For example:
 
 ```ts
 export const createTransformNode = <I, O, const Id extends string = string>(
@@ -531,11 +546,13 @@ export const createTransformNode = <I, O, const Id extends string = string>(
 
 ```ts
 export type ConsistentNodes<Nodes extends NodesRecord> = {
-  readonly [K in keyof Nodes]: string extends Nodes[K]["id"]
-    ? Nodes[K]                                    // wide string id — defer to validator
-    : Nodes[K] extends { readonly id: K }
-      ? Nodes[K]                                  // literal matches key
-      : { readonly __error: `nodes['${K & string}'].id must equal '${K & string}'` };
+  readonly [K in keyof Nodes]: Nodes[K]["id"] extends NodeId
+    ? Nodes[K]                                    // branded id — defer to validator
+    : string extends Nodes[K]["id"]
+      ? Nodes[K]                                  // wide string id — defer to validator
+      : Nodes[K] extends { readonly id: K }
+        ? Nodes[K]                                // literal matches key
+        : { readonly __error: `nodes['${K & string}'].id must equal '${K & string}'` };
 };
 
 export interface DagDefInput<Nodes extends NodesRecord = NodesRecord> {
@@ -897,7 +914,7 @@ What happens:
 | Step | Where | What |
 | --- | --- | --- |
 | Inference | `tsc` | `<const Nodes>` infers `Nodes = { fetch, extract, synthesize }`. `keyof Nodes & string = "fetch" \| "extract" \| "synthesize"`. Edges and `outputNodeId` get squiggles on typos. |
-| Module load | Node import | `defineDag` executes. `validateDagShape` checks key/id consistency, edge endpoints, `$input`-edge well-formedness, edge uniqueness, conditional-predicate well-formedness, source/root invariant, else-totality, freshness-extractor consistency, and output reachability. On failure: throws `DagDefinitionError`. On success: returns the input cast (via `as unknown as DagDef`) to the branded type. |
+| Module load | Node import | `defineDag` executes. `validateDagShape` checks key/id consistency, edge endpoints, `$input`-edge well-formedness, edge uniqueness, conditional-predicate well-formedness, source/root invariant, else-totality, freshness-extractor consistency, and output reachability. On failure: throws `DagDefinitionError`. On success: returns an owned frozen DAG snapshot with the validation brand; map children are snapshotted and checked for supported eligibility. |
 | First `runDag` call | Runtime | `compileDagToMachine` calls `topoSort` for cycle detection and wave assignment. |
 | Per-wave execution | Runtime | `runWave` filters by `activeNodeIds`, executes nodes, fires guards (which may throw `guard-threw`). |
 

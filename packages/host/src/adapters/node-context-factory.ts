@@ -9,8 +9,8 @@
  *
  * @satisfies FR-013 — Cache keys prefixed fugue:<tenant>:<dagId>:cache:<key>
  * @satisfies FR-013 — Checkpoint keys prefixed fugue:<tenant>:<dagId>:<runId>:<nodeId>,
- *   with the optional `$<index>` suffix that addresses ONE child of a map
- *   node's fan (F1 PR-B), and the `$meta` / `$nodes` aggregates the readable
+ *   or a mapped `<map>@<node>@<index>@<epoch>` address (F1 PR-B),
+ *   and the `$meta` / `$nodes` aggregates the readable
  *   checkpointer keeps beneath the same prefix
  * @satisfies FR-032 — Caller-created runId and AbortSignal are threaded unchanged
  * @satisfies FR-041 — Per-DAG TTL overrides apply to cache/checkpoint entries
@@ -24,7 +24,7 @@ import { isDeepStrictEqual } from "node:util";
 import type {
   ContextCacheAdapter,
   CheckpointWriter,
-  MapIndex,
+  MappedChildScope,
   CacheLookup,
   DagId,
   RunId,
@@ -279,16 +279,15 @@ export const createNamespacedCheckpointWriter = (
 
   return {
     write: async (
-      _runId: RunId,
+      askedRunId: RunId,
       nodeId: NodeId,
       value: unknown,
-      index?: MapIndex,
+      scope?: MappedChildScope,
     ): Promise<void> => {
-      // `index` addresses one child of a `map` node's fan (F1 PR-B). Threaded
-      // straight into the key builder rather than branched on here: absent, the
-      // builder produces the byte-identical pre-F1 key (FR-F1-008), so this
-      // path has no separate canonical case to keep in sync.
-      const fullKey = buildCheckpointKey(tenant, dagId, runId, nodeId, index);
+      if (askedRunId !== runId) {
+        throw new Error(`checkpoint writer is scoped to run ${runId} and was asked for ${askedRunId}`);
+      }
+      const fullKey = buildCheckpointKey(tenant, dagId, runId, nodeId, scope);
       let serialized: string;
       try {
         assertLosslessEvent(value, {
@@ -633,7 +632,7 @@ const resolveOriginAndBindSubjectToken = (args: {
  * broker, and it now moves per node, in the framework.
  *
  * @satisfies FR-013 — Cache key isolation
- * @satisfies FR-013 — Checkpoint key isolation, canonical and `$<index>` alike
+ * @satisfies FR-013 — Checkpoint key isolation, canonical and mapped alike
  * @satisfies FR-032 — Caller-supplied runId + AbortSignal
  * @satisfies FR-041 — Per-DAG TTL overrides
  * @satisfies SC-008 (host spec: cross-DAG cache isolation — not the

@@ -23,8 +23,8 @@ import type {
   DagDefInput,
   EdgeDefRawInput,
 } from "../types/dag.js";
-import type { NodesRecord } from "../types/dag-internals.js";
-import type { Capability, NodeDef } from "../types/node.js";
+import type { NodesRecord, DagNodeDef } from "../types/dag.js";
+import type { Capability } from "../types/node.js";
 import type { EvalJudgeNodeDef } from "../nodes/eval-judge.js";
 import type { FrameworkError } from "../types/errors.js";
 import { formatFrameworkError } from "../types/errors.js";
@@ -82,10 +82,10 @@ export const defineDag = <const Nodes extends NodesRecord>(
  */
 const firstCollidingNodeId = (
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- matches the array-shape variance leak
-  nodes: readonly NodeDef<any, any, any, readonly Capability[]>[],
+  nodes: readonly DagNodeDef<any, any, any, readonly Capability[]>[],
 ): NodeId | undefined => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- see above
-  const seen = new Map<NodeId, NodeDef<any, any, any, readonly Capability[]>>();
+  const seen = new Map<NodeId, DagNodeDef<any, any, any, readonly Capability[]>>();
   for (const node of nodes) {
     const existing = seen.get(node.id);
     if (existing !== undefined && existing !== node) return node.id;
@@ -103,7 +103,7 @@ const firstCollidingNodeId = (
 export const defineDagFromArray = (input: {
   readonly id: string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- variance leak intentional
-  readonly nodes: readonly NodeDef<any, any, any, readonly Capability[]>[];
+  readonly nodes: readonly DagNodeDef<any, any, any, readonly Capability[]>[];
   readonly edges: readonly EdgeDefRawInput[];
   readonly outputNodeId?: string;
   readonly evalJudges?: readonly EvalJudgeNodeDef[];

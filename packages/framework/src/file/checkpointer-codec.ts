@@ -49,7 +49,7 @@ export { parseCanonicalIsoDate } from "../checkpoint/checkpointer.js";
 import {
   isNonNegativeSafeInteger,
   parseCompositeNodeKey,
-} from "../checkpoint/composite-node-key.js";
+} from "../shared/composite-node-key.js";
 import { FRAMEWORK_VERSION } from "../checkpoint/fingerprint.js";
 import {
   deserializeValue,

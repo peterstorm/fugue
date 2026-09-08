@@ -10,7 +10,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInMemorySpendLedger } from "../adapters/spend-ledger-memory.js";
-import { fromJson, ok, err, isOk, dagId, runId as makeRunId, nodeId as makeNodeId, gitSha, noopTracer, createHttpCapability, systemClock, observedOf, usdToMicros, tokensOnly, NO_SPEND, mapIndex } from "@fuguejs/framework";
+import { fromJson, ok, err, isOk, dagId, runId as makeRunId, nodeId as makeNodeId, gitSha, noopTracer, createHttpCapability, systemClock, observedOf, usdToMicros, tokensOnly, NO_SPEND, mapIndex, freshnessExecutionEpoch } from "@fuguejs/framework";
 import type {
   Result,
   DagId,
@@ -494,48 +494,89 @@ describe("createNamespacedCheckpointWriter", () => {
     expect(store.get(expectedKey)).toBe(JSON.stringify({ output: "done" }));
   });
 
-  // Round-23 C5/C6 — the index actually reaches Redis.
-  //
-  // `buildCheckpointKey`'s indexed form is exhaustively tested as a pure
-  // function, but that only proves the STRING builder. What was untested is the
-  // adapter body that holds the parameter: dropping the fourth argument at the
-  // call site inside `write` passed every test in this file, and the plan's own
-  // risk table names exactly that class ("the index dimension is dropped
-  // somewhere along the production path and nobody notices — this already
-  // happened once").
-  it("threads a fan index through to the key Redis actually receives", async () => {
+  it("threads the full mapped-child scope into Redis without changing root keys", async () => {
     const store = new Map<string, string>();
     const { redis } = createMockRedis(store);
     const { logger } = collectLogs();
     const writer = createNamespacedCheckpointWriter(redis, testTenant, testDagId, testRunId, undefined, logger);
 
-    await writer.write(testRunId, testNodeId, { output: "idx-2" }, mapIndex(2));
+    const scope = { mapNodeId: makeNodeId("fan"), index: mapIndex(2), executionEpoch: freshnessExecutionEpoch(3) };
+    await writer.write(testRunId, testNodeId, { output: "idx-2" }, scope);
 
-    const indexedKey = buildCheckpointKey(testTenant, testDagId, testRunId, testNodeId, mapIndex(2));
-    expect(indexedKey.endsWith("$2")).toBe(true);
+    const indexedKey = buildCheckpointKey(testTenant, testDagId, testRunId, testNodeId, scope);
+    expect(indexedKey.endsWith(`fan@${testNodeId}@2@3`)).toBe(true);
     expect(store.get(indexedKey)).toBe(JSON.stringify({ output: "idx-2" }));
   });
 
-  it("distinct fan indices write distinct Redis keys, and neither is the canonical one", async () => {
-    // The whole point of the index: one child's checkpoint must not overwrite
-    // another's, and index 0 must not collide with the node's own canonical
-    // entry.
+  it("maps, indices and epochs write distinct records alongside the canonical node", async () => {
     const store = new Map<string, string>();
     const { redis } = createMockRedis(store);
     const { logger } = collectLogs();
     const writer = createNamespacedCheckpointWriter(redis, testTenant, testDagId, testRunId, undefined, logger);
 
     await writer.write(testRunId, testNodeId, { at: "canonical" });
-    await writer.write(testRunId, testNodeId, { at: 0 }, mapIndex(0));
-    await writer.write(testRunId, testNodeId, { at: 1 }, mapIndex(1));
+    const scopes = [
+      { mapNodeId: makeNodeId("fan"), index: mapIndex(0), executionEpoch: freshnessExecutionEpoch(0) },
+      { mapNodeId: makeNodeId("fan"), index: mapIndex(1), executionEpoch: freshnessExecutionEpoch(0) },
+      { mapNodeId: makeNodeId("other"), index: mapIndex(0), executionEpoch: freshnessExecutionEpoch(0) },
+      { mapNodeId: makeNodeId("fan"), index: mapIndex(0), executionEpoch: freshnessExecutionEpoch(1) },
+    ];
+    for (const [at, scope] of scopes.entries()) await writer.write(testRunId, testNodeId, { at }, scope);
 
-    expect(store.size).toBe(3);
+    expect(store.size).toBe(5);
     expect(store.get(buildCheckpointKey(testTenant, testDagId, testRunId, testNodeId)))
       .toBe(JSON.stringify({ at: "canonical" }));
-    expect(store.get(buildCheckpointKey(testTenant, testDagId, testRunId, testNodeId, mapIndex(0))))
-      .toBe(JSON.stringify({ at: 0 }));
-    expect(store.get(buildCheckpointKey(testTenant, testDagId, testRunId, testNodeId, mapIndex(1))))
-      .toBe(JSON.stringify({ at: 1 }));
+    for (const [at, scope] of scopes.entries()) {
+      expect(store.get(buildCheckpointKey(testTenant, testDagId, testRunId, testNodeId, scope)))
+        .toBe(JSON.stringify({ at }));
+    }
+  });
+
+  describe.each([
+    ["root", undefined, "fugue:eng:test-dag:run-001:node-a"],
+    ["mapped", { mapNodeId: makeNodeId("fan"), index: mapIndex(2), executionEpoch: freshnessExecutionEpoch(3) }, "fugue:eng:test-dag:run-001:fan@node-a@2@3"],
+  ] as const)("%s run binding", (_label, scope, expectedKey) => {
+    it.each([undefined, 30])("rejects another run without Redis effects (TTL %s), then accepts the bound run", async (ttl) => {
+      const store = new Map([[expectedKey, JSON.stringify({ output: "prior" })]]);
+      const { redis, calls } = createMockRedis(store);
+      const { logger } = collectLogs();
+      const writer = createNamespacedCheckpointWriter(redis, testTenant, testDagId, testRunId, ttl, logger);
+
+      await expect(writer.write(makeRunId("run-other"), testNodeId, { output: "wrong" }, scope))
+        .rejects.toThrow("checkpoint writer is scoped to run run-001 and was asked for run-other");
+
+      expect(calls).toEqual([]);
+      expect([...store]).toEqual([[expectedKey, JSON.stringify({ output: "prior" })]]);
+
+      await writer.write(testRunId, testNodeId, { output: "accepted" }, scope);
+      expect(calls).toEqual([{ op: "set", key: expectedKey }]);
+      expect([...store]).toEqual([[expectedKey, JSON.stringify({ output: "accepted" })]]);
+    });
+  });
+
+  it("rejects a wrong run before observing the value or encoding mapped scope", async () => {
+    const { redis, calls } = createMockRedis();
+    const { logger, logs } = collectLogs();
+    const writer = createNamespacedCheckpointWriter(redis, testTenant, testDagId, testRunId, 30, logger);
+    let valueReads = 0;
+    let scopeReads = 0;
+    const value = {
+      get output() { valueReads += 1; throw new Error("value must not be read"); },
+    };
+    const scope = {
+      get mapNodeId(): NodeId { scopeReads += 1; throw new Error("scope must not be encoded"); },
+      index: mapIndex(2),
+      executionEpoch: freshnessExecutionEpoch(3),
+    };
+
+    for (const address of [undefined, scope]) {
+      await expect(writer.write(makeRunId("run-other"), testNodeId, value, address))
+        .rejects.toThrow("checkpoint writer is scoped to run run-001 and was asked for run-other");
+    }
+    expect(valueReads).toBe(0);
+    expect(scopeReads).toBe(0);
+    expect(calls).toEqual([]);
+    expect(logs).toEqual([]);
   });
 
   it("rejects on Redis failure so runDag can surface checkpoint-write-failed", async () => {
@@ -1737,7 +1778,7 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
       readonly checkpointTtlSec: number;
       readonly spendTtlSec: number;
     }> = [];
-    const base = createMockRedis().redis;
+    const { redis: base, calls } = createMockRedis();
     const redis = {
       ...base,
       hGetAll: async (key: string) => ok(Object.fromEntries(hashes.get(key) ?? new Map())),
@@ -1760,7 +1801,7 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
         return ok(undefined);
       },
     } as unknown as RedisPort;
-    return { redis, hashes, seen, commits };
+    return { redis, hashes, seen, commits, calls };
   };
 
   const sharedWithRedis = (llm: LlmClient, redis: RedisPort, logger: LogPort): SharedInfra => ({
@@ -1866,6 +1907,45 @@ describe("createNodeContextForDag — which spend ledger a run actually gets", (
     expect(fallback.ok).toBe(true);
     if (!fallback.ok) return;
     expect(fallback.value).toEqual(NO_SPEND);
+  });
+
+  it.each([
+    ["root", undefined, "fugue:eng:test-dag:run-001:node-a"],
+    ["mapped", { mapNodeId: makeNodeId("fan"), index: mapIndex(2), executionEpoch: freshnessExecutionEpoch(3) }, "fugue:eng:test-dag:run-001:fan@node-a@2@3"],
+  ] as const)("refuses wrong-run %s writes before checkpoint/spend commit or retention", async (_label, scope, expectedKey) => {
+    const capable = capableRedis();
+    const { llm } = fakeLlm(10, 5);
+    const { ctx } = await createNodeContextForDag(
+      sharedWithRedis(llm, capable.redis, collectLogs().logger),
+      makeDag({ checkpointTtlMs: 9_000 }),
+      testRunId,
+      new AbortController().signal,
+      adminIdentity,
+      { agentClientMap: FACTORY_AGENT_MAP, resumableRunTtlSec: 60 },
+    );
+    if (ctx.checkpointWriter === null || ctx.llm === null) throw new Error("expected wired writer and LLM");
+    expect((await ctx.llm.sendStructured(structuredReq())).ok).toBe(true);
+    const priorSpend = structuredClone(capable.hashes);
+    const priorAppends = [...capable.seen];
+
+    await expect(ctx.checkpointWriter.write(makeRunId("run-other"), testNodeId, { output: "wrong" }, scope))
+      .rejects.toThrow("checkpoint writer is scoped to run run-001 and was asked for run-other");
+    expect(capable.commits).toEqual([]);
+    expect(capable.calls).toEqual([]);
+    expect(capable.hashes).toEqual(priorSpend);
+    expect(capable.seen).toEqual(priorAppends);
+    expect(await capable.redis.get(expectedKey)).toEqual(ok(null));
+
+    await ctx.checkpointWriter.write(testRunId, testNodeId, { output: "accepted" }, scope);
+    expect(capable.commits).toEqual([{
+      checkpointKey: expectedKey,
+      spendKey: "fugue:eng:test-dag:run-001:$spend",
+      checkpointTtlSec: 9,
+      spendTtlSec: 60,
+    }]);
+    expect(await capable.redis.get(expectedKey)).toEqual(ok(JSON.stringify({ output: "accepted" })));
+    expect(capable.hashes).toEqual(priorSpend);
+    expect(capable.seen).toEqual(priorAppends);
   });
 
   it("retains spend for the resumable run TTL when it exceeds checkpoint TTL", async () => {

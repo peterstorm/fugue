@@ -87,7 +87,9 @@ export interface RunOptions {
   readonly random?: () => number;
   /**
    * Shared freshness index for cross-DAG detection within a process. When
-   * omitted, a private instance is created per executor.
+   * omitted, one private instance is selected for the root Run. Mapped children
+   * inherit that resource, but child freshness extractors are rejected until
+   * indexed witness identity can be represented.
    *
    * @see ADR-0024 — freshness witness contract design
    */

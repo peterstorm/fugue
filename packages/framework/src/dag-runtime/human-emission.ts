@@ -10,7 +10,8 @@
 // silently producing a misleading observer event.
 
 import { match } from "ts-pattern";
-import type { Capability, NodeDef, NodeContext } from "../types/node.js";
+import type { NodeContext } from "../types/node.js";
+import type { DagDef } from "../types/dag.js";
 import type { NodeId, DagId } from "../types/ids.js";
 import type { HumanAction } from "./types.js";
 import type { HumanActionDetailed } from "../types/events.js";
@@ -27,10 +28,7 @@ import { emit } from "./emit.js";
 export const emitHumanIntervention = (
   phase: { nodeId: NodeId; output: unknown },
   action: HumanAction,
-  nodeMap: ReadonlyMap<
-    NodeId,
-    NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>
-  >,
+  nodeMap: ReadonlyMap<NodeId, DagDef["nodes"][number]>,
   nodeCtx: NodeContext,
   dagId: DagId,
   nowFn: () => number,
@@ -50,7 +48,7 @@ export const emitHumanIntervention = (
    */
   const crashAndFail = (
     msg: string,
-    sideEffects?: NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>["sideEffects"],
+    sideEffects?: DagDef["nodes"][number]["sideEffects"],
   ): Result<void, FrameworkError> => {
     const fwError: FrameworkError = {
       kind: "node-crash",

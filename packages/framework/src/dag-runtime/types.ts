@@ -372,7 +372,7 @@ export interface DagMachineContext extends DagMachineContextPersisted {
    */
   readonly nodeById: ReadonlyMap<
     NodeId,
-    import("../types/node.js").NodeDef<
+    import("../types/dag.js").DagNodeDef<
       unknown,
       unknown,
       FrameworkError,

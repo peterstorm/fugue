@@ -4,10 +4,12 @@ import type {
   EdgeDef,
   EdgeDefRawInput,
 } from "../types/dag.js";
-import type { NodesRecord } from "../types/dag-internals.js";
+import type { NodesRecord, MapNodeDef } from "../types/dag.js";
 import { isConditionalEdge, isDefaultEdge } from "../types/dag.js";
-import type { Capability, NodeDef } from "../types/node.js";
+import { asMaxWidth, asWidthFrom } from "../types/map-width.js";
+import { safeErrorMessage } from "../types/safe-error.js";
 import type { FrameworkError } from "../types/errors.js";
+import type { EvalJudgeNodeDef } from "../types/eval-judge.js";
 import { frameworkError } from "../types/error-factories.js";
 import type { NodeId } from "../types/ids.js";
 import { nodeId, tryNodeId, dagId, DAG_INPUT, isDagInput } from "../types/ids.js";
@@ -63,33 +65,129 @@ const validationErr = (nodeId: NodeId, message: string): FrameworkError => ({
   message,
 });
 
+/** Own evaluator data, retaining opaque executable references rather than freezing closures. */
+const snapshotEvalJudges = (
+  input: Pick<DagDefInput, "evalJudges">,
+): Result<readonly EvalJudgeNodeDef[] | undefined, FrameworkError> => {
+  try {
+    const judges = input.evalJudges;
+    if (judges === undefined) return ok(undefined);
+    return ok(Object.freeze(judges.map((judge) => {
+      // Capture each accessor once; all subsequent reads use these own data values.
+      const captured = { ...judge };
+      const config = { ...captured.config };
+      return Object.freeze({
+        ...captured,
+        config: Object.freeze({
+          ...config,
+          criteria: Object.freeze([...config.criteria]),
+          ...(config.rubric !== undefined ? { rubric: Object.freeze({ ...config.rubric }) } : {}),
+        }),
+      });
+    })));
+  } catch (cause) {
+    return err(validationErr(nodeId("__dag__"), `invalid evaluator snapshot: ${safeErrorMessage(cause)}`));
+  }
+};
+
 /** Defensive immutable copy issued only after the node has passed validation. */
 const snapshotNode = (
-  node: NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>,
-): NodeDef<unknown, unknown, FrameworkError, readonly Capability[]> => Object.freeze({
-  ...node,
-  requires: Object.freeze([...node.requires]),
-  sideEffects: Object.freeze({ ...node.sideEffects }),
-  confidence: Object.freeze({ ...node.confidence }),
-  ...(node.humanReview !== undefined
-    ? { humanReview: Object.freeze({ ...node.humanReview }) }
-    : {}),
-  ...(node.retry !== undefined
-    ? {
-        retry: Object.freeze({
-          ...node.retry,
-          ...(node.retry.backoffMs !== undefined
-            ? {
-                backoffMs: Object.freeze([
-                  node.retry.backoffMs[0],
-                  ...node.retry.backoffMs.slice(1),
-                ] as [number, ...number[]]),
-              }
-            : {}),
-        }),
-      }
-    : {}),
-});
+  node: DagDef["nodes"][number],
+): Result<DagDef["nodes"][number], FrameworkError> => {
+  try {
+    const captured = { ...node };
+    const mapped = captured.kind === "map" ? snapshotMapping(captured) : ok(undefined);
+    if (!mapped.ok) return mapped;
+    return ok(Object.freeze({
+      ...captured,
+      ...(mapped.value !== undefined ? { mapping: mapped.value } : {}),
+      requires: captured.kind === "map"
+        ? Object.freeze(["checkpointer"] as const)
+        : Object.freeze([...captured.requires]),
+      sideEffects: Object.freeze({ ...captured.sideEffects }),
+      confidence: Object.freeze({ ...captured.confidence }),
+      ...(captured.humanReview !== undefined
+        ? { humanReview: Object.freeze({ ...captured.humanReview }) }
+        : {}),
+      ...(captured.retry !== undefined
+        ? {
+            retry: Object.freeze({
+              ...captured.retry,
+              ...(captured.retry.backoffMs !== undefined
+                ? {
+                    backoffMs: Object.freeze([
+                      captured.retry.backoffMs[0],
+                      ...captured.retry.backoffMs.slice(1),
+                    ] as [number, ...number[]]),
+                  }
+                : {}),
+            }),
+          }
+        : {}),
+    }) as DagDef["nodes"][number]);
+  } catch (cause) {
+    return err(validationErr(node.id, `invalid node snapshot: ${safeErrorMessage(cause)}`));
+  }
+};
+
+const mappedChildEligibility = (mapNodeId: NodeId, child: DagDef): Result<DagDef, FrameworkError> => {
+  for (const node of child.nodes) {
+    if (node.kind === "map") return err(validationErr(mapNodeId,
+      `map '${mapNodeId}' child '${child.id}' contains nested map '${node.id}'; nested maps are unsupported`));
+    if (node.humanReview !== undefined) return err(validationErr(mapNodeId,
+      `map '${mapNodeId}' child '${child.id}' declares humanReview on '${node.id}'. Fan, GATHER, then put one humanReview node on the gathered array (FR-F1-011)`));
+    const se = node.sideEffects;
+    if ((se.kind === "reads" && se.extractWitness !== undefined) ||
+        (se.kind === "writes" && (se.extractConditionedOn !== undefined || se.extractNewWitness !== undefined))) {
+      return err(validationErr(mapNodeId,
+        `map '${mapNodeId}' child '${child.id}' node '${node.id}' declares freshness extractors; indexed/epoch witness identity is unsupported`));
+    }
+  }
+  return ok(child);
+};
+
+/** Bounded child snapshot: no recursive map or indexed human/witness semantics. */
+export const snapshotMappedChild = (mapNodeId: NodeId, child: DagDef): Result<DagDef, FrameworkError> => {
+  try {
+    const eligible = mappedChildEligibility(mapNodeId, child);
+    if (!eligible.ok) return eligible;
+    // Capture discriminants before parsing: a getter must not introduce a map
+    // after the early refusal and recurse into an unsupported/cyclic graph.
+    const captured = { ...child, nodes: child.nodes.map((node) => ({ ...node })) };
+    const bounded = mappedChildEligibility(mapNodeId, captured);
+    if (!bounded.ok) return bounded;
+    const parsed = validateDagShape({ ...captured, nodes: recordFromNodeArray(captured.nodes) }, captured.provenance);
+    if (!parsed.ok) return parsed;
+    // Eligibility belongs to this exact owned, frozen execution snapshot, not
+    // the caller's earlier observations (including nested profile accessors).
+    return mappedChildEligibility(mapNodeId, parsed.value);
+  } catch (cause) {
+    return err(validationErr(mapNodeId, `invalid mapped child: ${safeErrorMessage(cause)}`));
+  }
+};
+
+const snapshotMapping = (
+  node: MapNodeDef,
+): Result<MapNodeDef["mapping"], FrameworkError> => {
+  const id = node.id;
+  try {
+    const requires = node.requires;
+    if (!Array.isArray(requires) || requires.length !== 1 || requires[0] !== "checkpointer" || "run" in node) {
+      return err(validationErr(id, `map '${id}' must declare only checkpointer and a mapping descriptor, not run`));
+    }
+    const { child, childOutputSchema, reduce, widthFrom, maxWidth } = node.mapping;
+    if (typeof widthFrom !== "string" || asWidthFrom(widthFrom) === undefined ||
+        asMaxWidth(maxWidth) === undefined || typeof reduce !== "function" ||
+        typeof childOutputSchema?.safeParse !== "function") {
+      return err(validationErr(id, `map '${id}' requires a valid immutable mapping descriptor`));
+    }
+    const snapshot = snapshotMappedChild(id, child);
+    if (!snapshot.ok) return snapshot;
+    return ok(Object.freeze({ child: snapshot.value, childOutputSchema, reduce, widthFrom, maxWidth }));
+  } catch (cause) {
+    return err(validationErr(id, `invalid map '${id}' descriptor: ${safeErrorMessage(cause)}`));
+  }
+};
 
 /**
  * Structural validation of a `DagDefInput`. On success, brands the input as
@@ -143,7 +241,7 @@ export const validateDagShape = (
 ): Result<DagDef, FrameworkError> => {
   const entries = Object.entries(input.nodes) as [
     string,
-    NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>,
+    DagDef["nodes"][number],
   ][];
 
   if (entries.length === 0) {
@@ -545,14 +643,20 @@ export const validateDagShape = (
   // Predicate functions remain the validated executable values, but their
   // metadata container is parser-owned and frozen.
   const validatedEdges = edges.map(snapshotEdge);
+  const nodes: DagDef["nodes"][number][] = [];
+  for (const [, node] of entries) {
+    const snapshot = snapshotNode(node);
+    if (!snapshot.ok) return snapshot;
+    nodes.push(snapshot.value);
+  }
+  const judges = snapshotEvalJudges(input);
+  if (!judges.ok) return judges;
   const validated = Object.freeze({
     id: dagId(input.id),
-    nodes: Object.freeze(entries.map(([, node]) => snapshotNode(node))),
+    nodes: Object.freeze(nodes),
     edges: Object.freeze(validatedEdges),
     ...(input.outputNodeId !== undefined ? { outputNodeId: nodeId(input.outputNodeId) } : {}),
-    ...(input.evalJudges !== undefined
-      ? { evalJudges: Object.freeze([...input.evalJudges]) }
-      : {}),
+    ...(judges.value !== undefined ? { evalJudges: judges.value } : {}),
     ...(input.retryLimits !== undefined
       ? { retryLimits: Object.freeze({ ...input.retryLimits }) }
       : {}),
@@ -567,7 +671,7 @@ export const validateDagShape = (
 // Exported so test helpers building array-shape inputs can convert. (The
 // re-exports live in `executor/validate-dag.ts` and `executor/index.ts`.)
 export const recordFromNodeArray = (
-  nodes: readonly NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>[],
+  nodes: DagDef["nodes"],
 ): NodesRecord => Object.fromEntries(nodes.map((node) => [node.id, node]));
 
 /**

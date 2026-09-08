@@ -15,8 +15,8 @@ import {
   DEFAULT_NODE_NAMESPACE,
   compositeNodeKey,
   parseCompositeNodeKey as parseCompositeNodeKeyBranded,
-} from "../checkpoint/composite-node-key.js";
-import type { CompositeNodeKeyOpts } from "../checkpoint/composite-node-key.js";
+} from "../shared/composite-node-key.js";
+import type { CompositeNodeKeyOpts } from "../shared/composite-node-key.js";
 
 /**
  * De-branded mirror of `ParsedCompositeNodeKey`. `parseCompositeNodeKey` carries

@@ -15,7 +15,7 @@ import { z } from "zod";
 import { defineDag, runDag } from "../executor/index.js";
 import { makeNodeContext } from "../shared/index.js";
 import { InMemoryCheckpointer } from "../checkpoint/checkpointer.js";
-import { compositeNodeKey } from "../checkpoint/composite-node-key.js";
+import { compositeNodeKey } from "../shared/composite-node-key.js";
 import { createMapNode } from "../nodes/map.js";
 import { createTransformNode } from "../nodes/transform.js";
 import { withHumanReview } from "../nodes/human-review.js";
@@ -23,7 +23,12 @@ import { ok, err } from "../types/result.js";
 import { mapIndex } from "../types/map-index.js";
 import { DAG_INPUT, dagId, nodeId, runId as makeRunId } from "../types/ids.js";
 import type { Checkpointer } from "../checkpoint/checkpointer.js";
-import type { DagDef } from "../types/dag.js";
+import type { DagDef, MapNodeDef } from "../types/dag.js";
+import type { NodeContext } from "../types/node.js";
+
+const runFan = <I, C, O>(node: MapNodeDef<I, C, O>, input: I, ctx: NodeContext) =>
+  runDag<I, O>(defineDag({ id: "outer", nodes: { fan: node },
+    edges: [{ from: DAG_INPUT, to: "fan" }], outputNodeId: "fan" }), input, ctx);
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -53,7 +58,7 @@ const ctxWith = (checkpointer: Checkpointer, runIdStr = "run-fan") =>
     capabilities: { checkpointer },
   });
 
-/** Run a map node directly — the fan is the unit under test, not the outer wave. */
+/** A map definition, always exercised through real root preparation/dispatch. */
 const fanNode = (
   calls: unknown[],
   over: {
@@ -106,7 +111,7 @@ describe("createMapNode — the fan (FR-F1-001)", () => {
   it("applies the child sub-DAG over every item and gathers through the reducer", async () => {
     const calls: unknown[] = [];
     const cp = new InMemoryCheckpointer();
-    const result = await fanNode(calls).run({ items: [1, 2, 3] }, ctxWith(cp) as never);
+    const result = await runFan(fanNode(calls), { items: [1, 2, 3] }, ctxWith(cp));
 
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error("expected a gathered output");
@@ -142,7 +147,7 @@ describe("createMapNode — the fan (FR-F1-001)", () => {
       reduce: (rs) => ok(rs.join("-")),
     });
 
-    const result = await node.run({ items: ["a", "b", "c"] }, ctxWith(cp) as never);
+    const result = await runFan(node, { items: ["a", "b", "c"] }, ctxWith(cp));
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value).toBe("a-b-c");
   });
@@ -151,7 +156,7 @@ describe("createMapNode — the fan (FR-F1-001)", () => {
   it("a width of 0 runs no child and hands the reducer an empty array", async () => {
     const calls: unknown[] = [];
     const cp = new InMemoryCheckpointer();
-    const result = await fanNode(calls).run({ items: [] }, ctxWith(cp) as never);
+    const result = await runFan(fanNode(calls), { items: [] }, ctxWith(cp));
 
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value).toEqual([]);
@@ -164,10 +169,7 @@ describe("createMapNode — the fan (FR-F1-001)", () => {
     // return the answer — the worst of both.
     const calls: unknown[] = [];
     const cp = new InMemoryCheckpointer();
-    const result = await fanNode(calls, { maxWidth: 2 }).run(
-      { items: [1, 2, 3] },
-      ctxWith(cp) as never,
-    );
+    const result = await runFan(fanNode(calls, { maxWidth: 2 }), { items: [1, 2, 3] }, ctxWith(cp));
 
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.kind).toBe("map-width-exceeded");
@@ -194,7 +196,7 @@ describe("createMapNode — the fan (FR-F1-001)", () => {
     });
     const node = fanNode([], { child: failing });
 
-    const result = await node.run({ items: [1, 2, 3] }, ctxWith(new InMemoryCheckpointer()) as never);
+    const result = await runFan(node, { items: [1, 2, 3] }, ctxWith(new InMemoryCheckpointer()));
     expect(result.ok).toBe(false);
     // Index 3 never ran: a fan that kept going past a failure would spend the
     // remaining budget producing a result the caller is not going to get.
@@ -217,7 +219,7 @@ describe("createMapNode — the fan (FR-F1-001)", () => {
       },
     });
 
-    const result = await node.run({ items: [1] }, ctxWith(new InMemoryCheckpointer()) as never);
+    const result = await runFan(node, { items: [1] }, ctxWith(new InMemoryCheckpointer()));
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("node-crash");
@@ -234,7 +236,7 @@ describe("createMapNode — the fan (FR-F1-001)", () => {
 describe("createMapNode — per-index durability (FR-F1-006/007)", () => {
   it("checkpoints each index under a DISTINCT composite address", async () => {
     const cp = new InMemoryCheckpointer();
-    await fanNode([]).run({ items: [1, 2, 3] }, ctxWith(cp) as never);
+    await runFan(fanNode([]), { items: [1, 2, 3] }, ctxWith(cp));
 
     const loaded = await cp.load(RUN);
     expect(loaded.ok).toBe(true);
@@ -251,7 +253,7 @@ describe("createMapNode — per-index durability (FR-F1-006/007)", () => {
   it("each stored entry names the real node, not the composite key", async () => {
     // ADR-0075: the KEY is the address, `nodeId` is the node's identity.
     const cp = new InMemoryCheckpointer();
-    await fanNode([]).run({ items: [7] }, ctxWith(cp) as never);
+    await runFan(fanNode([]), { items: [7] }, ctxWith(cp));
     const loaded = await cp.load(RUN);
     if (!loaded.ok || loaded.value === null) throw new Error("expected entries");
     expect(loaded.value.nodes[compositeNodeKey(FAN, { index: mapIndex(0) })]?.nodeId).toBe(FAN);
@@ -281,13 +283,13 @@ describe("createMapNode — per-index durability (FR-F1-006/007)", () => {
     });
     const firstNode = fanNode([], { child: flaky });
 
-    const first = await firstNode.run({ items: [10, 20, 30, 40] }, ctxWith(cp) as never);
+    const first = await runFan(firstNode, { items: [10, 20, 30, 40] }, ctxWith(cp));
     expect(first.ok).toBe(false);
     expect(firstCalls).toEqual([10, 20, 30]);
 
     // Second attempt: the SAME run id, a healthy child, and a fresh call log.
     const secondCalls: unknown[] = [];
-    const second = await fanNode(secondCalls).run({ items: [10, 20, 30, 40] }, ctxWith(cp) as never);
+    const second = await runFan(fanNode(secondCalls), { items: [10, 20, 30, 40] }, ctxWith(cp));
 
     expect(second.ok).toBe(true);
     // 10 and 20 were durable and are replayed; only 30 and 40 actually run.
@@ -309,7 +311,7 @@ describe("createMapNode — per-index durability (FR-F1-006/007)", () => {
       { index: mapIndex(0) },
     );
 
-    const result = await fanNode([]).run({ items: [1] }, ctxWith(cp) as never);
+    const result = await runFan(fanNode([]), { items: [1] }, ctxWith(cp));
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("validation");
@@ -329,10 +331,12 @@ describe("createMapNode — per-index durability (FR-F1-006/007)", () => {
       setMeta: async () => ok(undefined),
     };
     const calls: unknown[] = [];
-    const result = await fanNode(calls).run({ items: [1, 2] }, ctxWith(failingRead) as never);
+    const result = await runFan(fanNode(calls), { items: [1, 2] }, ctxWith(failingRead));
 
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error.kind).toBe("cache-error");
+    expect(result).toMatchObject({ ok: false, error: {
+      kind: "retry-exhausted", rootErrorKind: "cache-error", nodeId: FAN,
+    } });
     expect(calls).toEqual([]);
   });
 
@@ -345,10 +349,12 @@ describe("createMapNode — per-index durability (FR-F1-006/007)", () => {
       saveNode: async () => err({ kind: "cache-error", operation: "saveNode", message: "disk full" }),
     };
     const calls: unknown[] = [];
-    const result = await fanNode(calls).run({ items: [1, 2, 3] }, ctxWith(failingWrite) as never);
+    const result = await runFan(fanNode(calls), { items: [1, 2, 3] }, ctxWith(failingWrite));
 
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error.kind).toBe("cache-error");
+    expect(result).toMatchObject({ ok: false, error: {
+      kind: "retry-exhausted", rootErrorKind: "cache-error", nodeId: FAN,
+    } });
     // Stopped at the first index rather than running all three.
     expect(calls).toEqual([1]);
   });
@@ -363,7 +369,7 @@ describe("createMapNode — per-index durability (FR-F1-006/007)", () => {
     const startedAt = new Date("2020-01-01T00:00:00Z");
     await cp.setMeta(RUN, { dagId: dagId("outer"), startedAt, nodeCount: 99 });
 
-    const result = await fanNode([]).run({ items: [1, 2] }, ctxWith(cp) as never);
+    const result = await runFan(fanNode([]), { items: [1, 2] }, ctxWith(cp));
     expect(result.ok).toBe(true);
 
     const loaded = await cp.load(RUN);
@@ -377,7 +383,7 @@ describe("createMapNode — per-index durability (FR-F1-006/007)", () => {
     // short-circuits `load` before reading the nodes hash, so the fan's entries
     // would be written and then be invisible to the resume that needs them.
     const cp = new InMemoryCheckpointer();
-    const result = await fanNode([]).run({ items: [1, 2, 3] }, ctxWith(cp) as never);
+    const result = await runFan(fanNode([]), { items: [1, 2, 3] }, ctxWith(cp));
     expect(result.ok).toBe(true);
 
     const loaded = await cp.load(RUN);

@@ -10,10 +10,10 @@
 import { match } from "ts-pattern";
 import type { z } from "zod";
 import type { DagDef } from "../types/dag.js";
-import type { Capability, NodeDef } from "../types/node.js";
 import type { FrameworkError } from "../types/errors.js";
 import { type Result, ok, err } from "../types/result.js";
 import { topoSort } from "../shared/topo.js";
+import { runtimeNodeInventory } from "../shared/runtime-node-inventory.js";
 import { zodToJsonSchema } from "../llm/zod-schema.js";
 
 // ---------------------------------------------------------------------------
@@ -136,7 +136,7 @@ const safeZodToJsonSchema = (
 };
 
 const describeNode = (
-  node: NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>,
+  node: DagDef["nodes"][number],
 ): DescribedNode => ({
   id: node.id as string,
   kind: node.kind,
@@ -166,13 +166,8 @@ const describeEdge = (e: DagDef["edges"][number]): DescribedEdge =>
     }))
     .exhaustive();
 
-const collectCapabilities = (dag: DagDef): string[] => {
-  const set = new Set<string>();
-  for (const node of dag.nodes) {
-    for (const cap of node.requires as readonly string[]) set.add(cap);
-  }
-  return [...set].sort();
-};
+const collectCapabilities = (dag: DagDef): string[] =>
+  [...new Set(runtimeNodeInventory(dag).nodes.flatMap((node) => node.requires))].sort();
 
 /**
  * Type-narrowed accessor for the `promptName` field on LLM-kind nodes. The
@@ -181,7 +176,7 @@ const collectCapabilities = (dag: DagDef): string[] => {
  * `as unknown` cast at the call site.
  */
 const readNodePromptName = (
-  node: NodeDef<unknown, unknown, FrameworkError, readonly Capability[]>,
+  node: DagDef["nodes"][number],
 ): string | null => {
   if (node.kind !== "llm") return null;
   const candidate = (node as { readonly promptName?: unknown }).promptName;

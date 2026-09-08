@@ -18,7 +18,8 @@
  *   isolated (now also across tenants).
  */
 
-import type { DagId, RunId, NodeId, MapIndex } from "@fuguejs/framework";
+import { compositeNodeKey } from "@fuguejs/framework";
+import type { DagId, RunId, NodeId, MappedChildScope } from "@fuguejs/framework";
 
 // `TenantId` is the SINGLE canonical, hard-branded tenant identifier defined in
 // `./tenant-id` (the supervisor's resolved security principal). Importing the type
@@ -68,31 +69,30 @@ export const checkpointKeyPrefix = (tenant: TenantId, dagId: DagId, runId: RunId
 
 /**
  * Build the full checkpoint key for a specific tenant, DAG, run, and node —
- * optionally addressing ONE child instance of a `map` node's fan (F1 PR-B, D3).
+ * optionally addressing a mapped child's node output by map, index and parent
+ * execution epoch using the existing composite codec (ADR-0075/0085).
  *
- * Format: `fugue:<tenant>:<dagId>:<runId>:<nodeId>`            (index absent)
- *         `fugue:<tenant>:<dagId>:<runId>:<nodeId>$<index>`    (index present)
- *
- * `$` is the separator for the same reason `buildSpendKey` already uses it and
- * ADR-0075 uses `@`: it is OUTSIDE `NodeId`'s grammar (`[A-Za-z0-9_:-]`). That
- * is what makes the two forms provably disjoint — a canonical key can never
- * contain `$`, so no node can be named to impersonate an indexed address, and
- * an indexed address can never collide with the sibling `$spend` aggregate
- * (which starts with `$`, where a nodeId cannot).
- *
- * FR-F1-008: with `index` absent the output is BYTE-IDENTICAL to the pre-F1
- * key, so every existing checkpoint keeps resolving and no migration is needed.
- * `MapIndex` is branded, so a caller cannot reach the indexed form with a
- * value that would mint an unmatchable address.
+ * Canonical: `fugue:<tenant>:<rootDag>:<run>:<node>` (byte-identical, FR-F1-008).
+ * Mapped: `fugue:<tenant>:<rootDag>:<run>:<map>@<node>@<index>@<epoch>`.
+ * Structural child DAG identity never rebinds the host's root resource namespace.
+ * `@` is outside NodeId's grammar; `$meta`, `$nodes` and `$spend` stay disjoint.
  */
 export const buildCheckpointKey = (
   tenant: TenantId,
   dagId: DagId,
   runId: RunId,
   nodeId: NodeId,
-  index?: MapIndex,
-): string =>
-  `${checkpointKeyPrefix(tenant, dagId, runId)}${nodeId}${index === undefined ? "" : `$${index}`}`;
+  scope?: MappedChildScope,
+): string => {
+  const address = scope === undefined
+    ? nodeId
+    : compositeNodeKey(nodeId, {
+        namespace: scope.mapNodeId,
+        index: scope.index,
+        attempt: scope.executionEpoch,
+      });
+  return `${checkpointKeyPrefix(tenant, dagId, runId)}${address}`;
+};
 
 /**
  * Build the Redis STRING key holding one run's checkpoint METADATA record

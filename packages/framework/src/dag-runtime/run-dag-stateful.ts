@@ -18,6 +18,7 @@ import type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted,
 import { EXECUTOR_NODE_ID } from "./types.js";
 import type { DagDef } from "../types/dag.js";
 import { withRetryLimits } from "../shared/validate-dag.js";
+import { runtimeNodeInventory } from "../shared/runtime-node-inventory.js";
 import type { Capability, NodeContext, ValidatedNodeContext } from "../types/node.js";
 import type {
   CapabilityBroker,
@@ -42,7 +43,8 @@ import { createDagRunMeta, foldOutcomes, type DagRunMeta, type NodeSpanOutcome }
 import { validateCapabilities } from "../shared/capabilities.js";
 import { wrapDagJobLike } from "./persistence.js";
 import { beginRunTelemetry, closeRootSpan, startRunSpan } from "./run-telemetry.js";
-import type { FreshnessIndex } from "./freshness-check.js";
+import { type FreshnessIndex, InMemoryFreshnessIndex } from "./freshness-check.js";
+import type { ExecutionScope, ExecuteMappedChild } from "./execution-scope.js";
 import { sha256DedupKey } from "../shared/dedup-key.js";
 import { fwLogger } from "../logger.js";
 import { bestEffort, bestEffortLog } from "./best-effort.js";
@@ -132,9 +134,9 @@ export interface DagRunOpts
    */
   readonly random?: () => number;
   /**
-   * FreshnessIndex port for witness tracking. When omitted, a private in-memory
-   * adapter is created per executor. Pass a shared or durable adapter to
-   * coordinate freshness detection beyond one executor.
+   * FreshnessIndex port for witness tracking. Root preparation selects one
+   * resource for the whole Run, including mapped children. Child freshness
+   * extractors are unsupported until witnesses can represent mapped addresses.
    */
   readonly freshnessIndex?: FreshnessIndex;
   /**
@@ -225,7 +227,7 @@ const snapshotOrigin = (
  * `mintFor`; only its capability claims and invocation origin are snapshotted.
  */
 const snapshotMintingAuthority = (
-  dag: DagDef,
+  dag: Pick<DagDef, "nodes">,
   opts: Pick<DagRunOpts, "minting"> | undefined,
 ): Result<MintingAuthority | undefined, FrameworkError> => {
   const snapshotNodeId = dag.nodes[0]?.id ?? EXECUTOR_NODE_ID;
@@ -321,6 +323,16 @@ const snapshotMintingAuthority = (
   return ok(Object.freeze({ broker, origin, meterLlm }));
 };
 
+type RunResources = Readonly<{
+  now: () => number;
+  random: () => number;
+  freshnessIndex: FreshnessIndex;
+}>;
+
+type PreparedExecution =
+  | (Extract<ExecutionScope, { kind: "root" }> & { readonly rootOptions: DagRunOpts })
+  | Extract<ExecutionScope, { kind: "mapped-child" }>;
+
 interface PreparedRun {
   readonly effectiveDag: DagDef;
   readonly validatedCtx: ValidatedNodeContext;
@@ -332,7 +344,7 @@ const prepareDagRun = (
   dag: DagDef,
   nodeCtx: NodeContext,
   opts?: Pick<DagRunOpts, "retryLimits" | "now" | "minting">,
-): Result<PreparedRun, FrameworkError> => {
+): Result<PreparedRun & { readonly mappedChildren: ReadonlyMap<NodeId, DagDef> }, FrameworkError> => {
   // Run-start comes FIRST — before the retry merge, not just before compile —
   // so every pre-flight failure produces a balanced run-start/run-end pair.
   // `beginRunTelemetry` reads `dag`, never `effectiveDag`, so nothing here
@@ -356,7 +368,11 @@ const prepareDagRun = (
   // Snapshot the broker's answers once per distinct required capability, then
   // use that same immutable facade for validation and every dispatch. Authority
   // cannot drift between the proof that waived static validation and delivery.
-  const mintingSnapshot = snapshotMintingAuthority(effectiveDag, opts);
+  // Bounded, run-owned inventory. Child requirements are validated early, but
+  // never hoisted into the map's own mint request.
+  const inventory = runtimeNodeInventory(effectiveDag);
+  const { mappedChildren } = inventory;
+  const mintingSnapshot = snapshotMintingAuthority(inventory, opts);
   if (!mintingSnapshot.ok) {
     emitRunEnd("error");
     return err(mintingSnapshot.error);
@@ -367,7 +383,7 @@ const prepareDagRun = (
   // dispatch, so the run-start check treats them as satisfied rather than
   // demanding them on the boot-scoped base context.
   const minting = mintingSnapshot.value;
-  const capCheck = validateCapabilities(effectiveDag, nodeCtx, minting?.broker);
+  const capCheck = validateCapabilities(inventory, nodeCtx, minting?.broker);
   if (!capCheck.ok) {
     emitRunEnd("error");
     return err(capCheck.error);
@@ -375,6 +391,7 @@ const prepareDagRun = (
 
   return ok({
     effectiveDag,
+    mappedChildren,
     validatedCtx: capCheck.value,
     emitRunEnd,
     ...(minting !== undefined ? { minting } : {}),
@@ -615,21 +632,59 @@ export const runDagStatefulOutcome = async <I, O>(
   nodeCtx: NodeContext,
   opts?: DagRunOpts,
 ): Promise<Result<StatefulOutcome<O>, FrameworkError>> => {
-  // 1. Pre-flight
   const prepared = prepareDagRun(dag, nodeCtx, opts);
   if (!prepared.ok) return prepared;
-  const { effectiveDag, validatedCtx, emitRunEnd, minting } = prepared.value;
+  const { validatedCtx, minting, mappedChildren } = prepared.value;
+  // Share sources/resources, not root ownership. A child never sees the root
+  // job, resume outputs, gate/trace hooks, retry overrides or background hook.
+  const resources = Object.freeze({
+    now: opts?.now ?? Date.now,
+    random: opts?.random ?? Math.random,
+    freshnessIndex: opts?.freshnessIndex ?? new InMemoryFreshnessIndex(),
+  });
+  const executeMappedChild: ExecuteMappedChild = async (childInput, scope) => {
+    const child = mappedChildren.get(scope.mapNodeId);
+    if (child === undefined) return err({ kind: "validation", nodeId: scope.mapNodeId,
+      message: "mapped child was not included in root preparation" });
+    // Project structural identity while retaining every original run resource,
+    // including augmented capabilities and host-owned cache/prompt/meter closures.
+    // This is the BASE context, never the parent's scoped minted overlay.
+    const childCtx = Object.freeze({ ...validatedCtx, dagId: child.id,
+      eventTimestamp: () => new Date(resources.now()) });
+    const outcome = await runPreparedDag<unknown, unknown>({
+      effectiveDag: child, validatedCtx: childCtx, minting,
+      // Only the root owns the shared run-ID observer buffer, including errors.
+      emitRunEnd: () => {},
+    }, childInput, { kind: "mapped-child", scope }, resources);
+    if (!outcome.ok) return outcome;
+    if (outcome.value.kind === "suspended") return err({ kind: "validation", nodeId: scope.mapNodeId,
+      message: "mapped child cannot suspend; gather before human review" });
+    return ok(outcome.value.output);
+  };
+  return runPreparedDag<I, O>(prepared.value, input,
+    { kind: "root", executeMappedChild, rootOptions: opts ?? {} }, resources);
+};
+
+/** The sole kernel body for root and mapped-child executions. */
+const runPreparedDag = async <I, O>(
+  prepared: PreparedRun,
+  input: I,
+  executionScope: PreparedExecution,
+  resources: RunResources,
+): Promise<Result<StatefulOutcome<O>, FrameworkError>> => {
+  const { effectiveDag: dag, validatedCtx: nodeCtx, emitRunEnd, minting } = prepared;
+  const opts = executionScope.kind === "root" ? executionScope.rootOptions : undefined;
 
   // 2. OTel root span wraps compilation + execution
   return startRunSpan(dag, nodeCtx, async (rootSpan): Promise<Result<StatefulOutcome<O>, FrameworkError>> => {
     // 3. Compile
-    const compiled = compileDagToMachine(effectiveDag, input);
+    const compiled = compileDagToMachine(dag, input);
     if (!compiled.ok) {
       return failClosed(rootSpan, emitRunEnd, compiled.error);
     }
 
     // 4. Resolve job
-    const jobResult = resolveJob(compiled.value, effectiveDag, nodeCtx, opts);
+    const jobResult = resolveJob(compiled.value, dag, nodeCtx, opts);
     if (!jobResult.ok) {
       return failClosed(rootSpan, emitRunEnd, jobResult.error);
     }
@@ -641,13 +696,13 @@ export const runDagStatefulOutcome = async <I, O>(
       meta = foldOutcomes(meta, outcomes);
     };
 
-    const executor = buildDagExecutor(effectiveDag, validatedCtx, {
+    const executor = buildDagExecutor(dag, nodeCtx, executionScope, {
       onHumanReview: opts?.onHumanReview,
       recordOutcomes,
       resumeCheckpoint: opts?.resumeCheckpoint,
-      random: opts?.random,
-      now: opts?.now,
-      freshnessIndex: opts?.freshnessIndex,
+      random: resources.random,
+      now: resources.now,
+      freshnessIndex: resources.freshnessIndex,
       minting,
     });
 
@@ -663,7 +718,7 @@ export const runDagStatefulOutcome = async <I, O>(
       classifyError: opts?.classifyError,
       onTrace: opts?.onTrace,
       errorEventOf,
-      now: opts?.now,
+      now: resources.now,
       computeDedupKey: sha256DedupKey,
       logger: fwLogger(),
       // ADR-0060: translate the generic post-commit hook into the DAG-semantic
