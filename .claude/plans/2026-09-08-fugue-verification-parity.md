@@ -104,6 +104,14 @@ The ordinary plan path `.claude/plans/2026-09-08-fugue-verification-parity.md` i
 - Last code/docs gate: from a fresh source-only disposable copy under non-root Bun 1.4.2 with a fresh frozen install and documented password-authenticated Redis on loopback port 6389, run the exact `bun run verify` contract. Expected workspace authority remains 7,083 passes + 3 skips; new root-test counts are reported separately.
 - Write `/tmp/fugue-verification-parity-adjudicated-remediation.md` with the whole 31-path candidate plus support-path inventory, path modes, manifest/hash stability, authority hash, commands/results, and unchanged-evidence hashes.
 
+## Hosted CI Podman-oracle closure
+
+- Red hosted evidence is workflow run **34233924209** at pushed branch commit `70180b472d43d05f11a14231ac5054a6175ab490`: the real-Podman helper exited zero, but the test incorrectly required empty stderr even though Podman emitted normal first-pull progress there.
+- This closure owns only `scripts/__tests__/redis-shells.test.ts` and this existing plan. Production scripts, workflows, canonical review evidence/result `4c1af9f8767a19911b5d47db4b0a25f9ea243f46f4caa354ed07e1665c925973`, inventories, index, run/state, and publication remain unchanged.
+- Keep the real-Podman case active whenever Podman is present and keep its existing timeout. Drain both output streams; make helper exit status the oracle and include stderr only as assertion diagnostics. A recording fake Bun must prove the exact child-test argv, propagated loopback `REDIS_URL`, and a `PONG` from the real container.
+- Add a deterministic positive fake-Podman control that emits representative image-pull progress on stderr while the helper exits zero, invokes the child tests with the exact URL, and stops the exact created ID. Preserve primary-failure precedence, cleanup-failure status, bounded readiness cleanup, and failed-create/no-foreign-stop controls.
+- Validate from one copied checkout under Bun 1.4.2 with focused tests, strict script typecheck, all root script tests, scoped lint, Distill, and—where the local Docker boundary permits—the canonical authenticated full verification. The parent owns push and subsequent hosted live proof; this plan records no remote-green claim.
+
 ## Completion discipline
 
 - Start the distill apply pass only from a green focused baseline; apply and report one simplification move at a time.

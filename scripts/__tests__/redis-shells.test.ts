@@ -82,6 +82,7 @@ const runWaitForRedis = async (mode: "delayed-pong" | "permanent-error"): Promis
 
 type LegacyOptions = Readonly<{
   podmanRunExit?: number;
+  podmanRunStderr?: string;
   bunExit?: number;
   stopExit?: number;
   readiness?: "immediate" | "timeout";
@@ -99,6 +100,7 @@ const runLegacyRedis = async (options: LegacyOptions = {}): Promise<ShellResult>
       "printf 'podman:%s\\n' \"$*\" >> \"$COMMAND_LOG\"",
       "case \"${1:-}\" in",
       "  run)",
+      "    if [ -n \"$PODMAN_RUN_STDERR\" ]; then printf '%s\\n' \"$PODMAN_RUN_STDERR\" >&2; fi",
       "    if [ \"$PODMAN_RUN_EXIT\" -ne 0 ]; then exit \"$PODMAN_RUN_EXIT\"; fi",
       "    printf '%s\\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "    ;;",
@@ -137,6 +139,7 @@ const runLegacyRedis = async (options: LegacyOptions = {}): Promise<ShellResult>
       PATH: `${directory}${delimiter}${process.env.PATH ?? ""}`,
       COMMAND_LOG: logPath,
       PODMAN_RUN_EXIT: String(options.podmanRunExit ?? 0),
+      PODMAN_RUN_STDERR: options.podmanRunStderr ?? "",
       PODMAN_STOP_EXIT: String(options.stopExit ?? 0),
       BUN_EXIT: String(options.bunExit ?? 0),
       READINESS_MODE: options.readiness ?? "immediate",
@@ -175,9 +178,11 @@ describe("scripts/wait-for-redis.sh", () => {
 });
 
 describe("scripts/test-redis.sh", () => {
-  it("uses an unnamed loopback ephemeral container and cleans up its exact ID", async () => {
-    const result = await runLegacyRedis();
-    expect(result.exitCode).toBe(0);
+  it("succeeds through normal image-pull stderr and cleans up its exact ID", async () => {
+    const imagePullProgress = "Trying to pull docker.io/library/redis:7-alpine...";
+    const result = await runLegacyRedis({ podmanRunStderr: imagePullProgress });
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(result.stderr).toContain(imagePullProgress);
     expect(result.log[0]).toBe("podman:run --rm -d -p 127.0.0.1::6379 redis:7-alpine");
     expect(result.log).toContain("podman:port aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 6379/tcp");
     expect(result.log).toContain("bun:run --filter * test REDIS_URL=redis://127.0.0.1:49152");
@@ -219,24 +224,49 @@ describe("scripts/test-redis.sh", () => {
     async () => {
       const directory = await mkdtemp(join(tmpdir(), "fugue-real-podman-probe-"));
       cleanupDirectories.push(directory);
-      await executable(join(directory, "bun"), "#!/bin/sh\nexit 0\n");
+      const logPath = join(directory, "child.log");
+      await executable(
+        join(directory, "bun"),
+        [
+          "#!/bin/sh",
+          "set -eu",
+          "printf 'bun-argc:%s\\n' \"$#\" >> \"$COMMAND_LOG\"",
+          "for argument in \"$@\"; do printf 'bun-arg:%s\\n' \"$argument\" >> \"$COMMAND_LOG\"; done",
+          "printf 'bun-redis-url:%s\\n' \"$REDIS_URL\" >> \"$COMMAND_LOG\"",
+          "ping=$(redis-cli --no-auth-warning -u \"$REDIS_URL\" PING)",
+          "printf 'bun-redis-ping:%s\\n' \"$ping\" >> \"$COMMAND_LOG\"",
+          "test \"$ping\" = PONG",
+          "",
+        ].join("\n"),
+      );
       const child = Bun.spawn(["bash", testRedisScript], {
         cwd: repoRoot,
         env: {
           ...inheritedEnvironment(),
           PATH: `${directory}${delimiter}${process.env.PATH ?? ""}`,
+          COMMAND_LOG: logPath,
           REDIS_READY_MAX_ATTEMPTS: "80",
           REDIS_READY_DELAY_SECONDS: "0.1",
         },
         stdout: "pipe",
         stderr: "pipe",
       });
-      const [exitCode, stderr] = await Promise.all([
+      const [exitCode, , stderr] = await Promise.all([
         child.exited,
+        new Response(child.stdout).text(),
         new Response(child.stderr).text(),
       ]);
-      expect(stderr).toBe("");
-      expect(exitCode).toBe(0);
+      expect(exitCode, stderr).toBe(0);
+      const log = (await readFile(logPath, "utf8")).trim().split("\n");
+      expect(log.slice(0, 5)).toEqual([
+        "bun-argc:4",
+        "bun-arg:run",
+        "bun-arg:--filter",
+        "bun-arg:*",
+        "bun-arg:test",
+      ]);
+      expect(log[5]).toMatch(/^bun-redis-url:redis:\/\/127[.]0[.]0[.]1:[0-9]+$/);
+      expect(log[6]).toBe("bun-redis-ping:PONG");
     },
     30_000,
   );
