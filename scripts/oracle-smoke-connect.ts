@@ -1,13 +1,14 @@
 #!/usr/bin/env bun
 /**
- * Oracle smoke-connect — opens a REAL Oracle connection via @fuguejs/oracle on
- * the PRODUCTION base image (oven/bun:1.2-alpine) and runs `SELECT 1 FROM DUAL`,
- * exiting non-zero if the connection or query fails (SC-006).
+ * Oracle smoke-connect — opens a REAL Oracle connection via @fuguejs/oracle from
+ * the SHIPPED host image (based on `oven/bun:1.4.2-alpine`) and runs
+ * `SELECT 1 FROM DUAL`, exiting non-zero if the connection or query fails (SC-006).
  *
- * Closes the brief's one residual feasibility check: oracledb thin mode was
- * verified on Bun 1.3.x in dev, but prod runs `oven/bun:1.2-alpine`. This script
- * is run by the `oracle-smoke-connect` CI job INSIDE that exact image to prove
- * thin-mode connectivity there (NFR-001 — pooled thin-mode works on prod image).
+ * This is the credentialed, network-reachable half of the Oracle proof. The Argo
+ * PostSync `fugue-oracle-smoke` Job in packages/host/deploy runs this script inside
+ * the shipped host image after deployment (NFR-001 — pooled thin mode works in the
+ * production artifact). GitHub's separate original-image driver smoke has neither
+ * secrets nor a database route and makes no live-connectivity claim.
  *
  * It REUSES the package's lifecycle handle rather than re-implementing the driver
  * call: `createOracleAdapter(...).connect()` is the canonical connectivity probe
@@ -15,7 +16,8 @@
  * (see packages/adapter-oracle/src/index.ts). `healthCheck()` runs the same query
  * behind a 5s timeout as a second, bounded confirmation.
  *
- * Credentials come ONLY from the environment (wired from CI secrets by the job):
+ * Credentials come ONLY from the environment (wired from the OpenShift
+ * SealedSecret by the PostSync Job):
  *   - ORACLE_CONNECT_STRING   easy-connect `HOST:PORT/SERVICE`
  *   - ORACLE_USER             Oracle schema/user
  *   - ORACLE_PASSWORD         Oracle password
@@ -52,7 +54,7 @@ const required = (name: string, missing: string[]): string | undefined => {
 
 /**
  * Progress/diagnostic line. Goes to STDERR (not a structured logger — this is a
- * standalone CI script, not host runtime code) so it never interleaves with any
+ * standalone deploy-time script, not host runtime code) so it never interleaves with any
  * machine-read stdout and is allowed by the no-console-log boundary. Never
  * carries credentials — only the adapter's already-stripped messages reach here.
  */

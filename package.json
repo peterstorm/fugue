@@ -3,8 +3,12 @@
   "private": true,
   "workspaces": ["packages/*", "apps/*", "examples/*"],
   "scripts": {
-    "typecheck": "bun run --filter '*' typecheck",
+    "verify": "bash scripts/verify.sh",
+    "check:verification-prerequisites": "bun scripts/verify-prerequisites.ts",
+    "typecheck": "bun run --filter '*' typecheck && bun run typecheck:scripts",
+    "typecheck:scripts": "bun ./node_modules/typescript/bin/tsc --noEmit -p tsconfig.scripts.json",
     "test": "bun run --filter '*' test",
+    "test:scripts": "bun test scripts/",
     "check:docs": "bun scripts/check-doc-links.ts",
     "infra:up": "bash scripts/infra-up.sh",
     "infra:down": "bash scripts/infra-down.sh",
@@ -13,12 +17,14 @@
     "eval:pull-model": "bash scripts/pull-judge-model.sh",
     "dev": "bun run --filter customer-summary dev",
     "hitl:smoke": "bash examples/hitl-smoke/run.sh",
-    "test:redis": "podman run --rm -d --name fugue-redis-test -p 6379:6379 redis:7-alpine && sleep 1 && REDIS_URL=redis://localhost:6379 bun run --filter '*' test; podman stop fugue-redis-test"
+    "test:redis": "bash scripts/test-redis.sh"
   },
   "devDependencies": {
     "@opentelemetry/api": "^1.9.1",
+    "@types/bun": "1.4.1",
     "@opentelemetry/sdk-node": "^0.215.0",
     "typescript": "^6.0.3",
+    "ts-pattern": "^5.9.0",
     "yaml": "^2.8.3"
   }
 }

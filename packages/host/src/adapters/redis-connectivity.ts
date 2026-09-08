@@ -455,12 +455,29 @@ export const defaultIoredisFactory = async (): Promise<RedisClientFactory> => {
   return (redisUrl, options) => new Redis(redisUrl, options);
 };
 
+/** Replace inherited URL userinfo with the worker's scoped ACL identity.
+ *
+ * ioredis gives URL credentials precedence over `RedisOptions` credentials. The
+ * override therefore has to happen in an owned URL before client construction;
+ * retaining privileged admin userinfo would silently authenticate the worker as
+ * admin even when scoped options were supplied.
+ */
+const bindRedisAclCredential = (
+  redisUrl: string,
+  credential: RedisAclCredential,
+): string => {
+  const scopedUrl = new URL(redisUrl);
+  scopedUrl.username = credential.username;
+  scopedUrl.password = credential.password;
+  return scopedUrl.toString();
+};
+
 /**
  * Construct the ioredis-backed connectivity bundle.
  *
  * @param redisUrl       the connection URL (may carry inherited credentials).
  * @param aclCredential  OPTIONAL per-tenant ACL credential (ADR-0067). When set,
- *   the explicit username/password OVERRIDE any inherited in `redisUrl`, so the
+ *   its username/password REPLACE any inherited userinfo in an owned URL, so the
  *   worker authenticates as its OWN `~fugue:<tenant>:*`-scoped user and a
  *   cross-tenant key access is refused by Redis with NOPERM. Absent ⇒ connect with
  *   the `redisUrl` credential (ACL disabled / single-tenant deployment).
@@ -482,14 +499,17 @@ export const createRedisConnectivity = async (
     // imported so the driver stays out of the module graph for a caller that
     // injects its own factory).
     const makeClient = createClient ?? (await defaultIoredisFactory());
-    const client = makeClient(redisUrl, {
+    const clientUrl = aclCredential === undefined
+      ? redisUrl
+      : bindRedisAclCredential(redisUrl, aclCredential);
+    const client = makeClient(clientUrl, {
       maxRetriesPerRequest: 3,
       // Additive MULTI/EXEC acknowledgement is ambiguous: replay can double spend.
       autoResendUnfulfilledCommands: false,
       lazyConnect: true,
-      ...(aclCredential !== undefined
-        ? { username: aclCredential.username, password: aclCredential.password }
-        : {}),
+      // The scoped ACL deliberately denies INFO; do not ask ioredis to use it as
+      // a readiness probe. The host's explicit PING remains the startup gate.
+      ...(aclCredential === undefined ? {} : { enableReadyCheck: false }),
     });
 
     // BEFORE any command can be issued: the window between construction and the

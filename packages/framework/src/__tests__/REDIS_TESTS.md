@@ -1,48 +1,51 @@
 # Redis/BullMQ Integration Tests
 
-## Why they're skipped
+## Focused runs can skip
 
-~34 Redis-gated tests across these files require a running Redis instance. They
-are guarded at module-load time by:
+Redis-gated suites select `describe` or `describe.skip` at module load from `process.env.REDIS_URL`. This keeps package-focused iteration possible without infrastructure, but a skipped suite is not parity evidence.
 
 ```typescript
-const hasRedis = Boolean(process.env.REDIS_URL);
-const describeRedis = hasRedis ? describe : describe.skip;
-
-describeRedis("...", () => { ... });
+const redisUrl = process.env.REDIS_URL;
+const describeRedis = redisUrl ? describe : describe.skip;
 ```
 
-This ensures the test suite passes in any environment without Redis, while
-still validating Redis-specific behavior when infrastructure is available.
+## Canonical repository verification
 
-## Running locally
+From the repository root, use `bun run verify`, not a package-only Redis helper. Its prerequisite phase fails closed unless:
+
+- Bun exactly matches the production Dockerfile (currently 1.4.2);
+- `redis-server` is available in `PATH`;
+- `REDIS_URL` is a valid, non-blank `redis://` or `rediss://` URL whose connection is authorized, returns `PONG`, and supports `ACL CAT`.
+
+The executable and URL are separate requirements. A host queue test starts its own isolated Unix-socket `redis-server`, while the URL enables the repository's live Redis suites.
+
+The gate does not start, own, reset, or stop the server named by a contributor's `REDIS_URL`. Redis authentication is optional server policy, but the canonical guide and CI deliberately prove a credentialed default-user connection. The integration tests write fixtures and create/delete ACL users, so the URL must point to an exclusive disposable test server—never production or shared development infrastructure. See [`../../../../CONTRIBUTING.md`](../../../../CONTRIBUTING.md) for the authenticated, loopback-only Bash setup with caller-owned cleanup.
+
+## Focused framework commands
+
+With a disposable server already running:
 
 ```bash
-# Start Redis via Docker Compose
-docker compose -f infra/compose.yaml up redis -d
+REDIS_URL=redis://default:<password>@127.0.0.1:<port> \
+  bun test packages/framework/src/queue-bullmq/
 
-# Run the Redis-gated tests (REDIS_URL un-skips them at module load)
-REDIS_URL=redis://localhost:6379 bun test packages/framework/src/queue-bullmq/
-REDIS_URL=redis://localhost:6379 bun test packages/framework/src/__tests__/redis-cache.test.ts
-REDIS_URL=redis://localhost:6379 bun test packages/framework/src/__tests__/redis-checkpointer.test.ts
+REDIS_URL=redis://default:<password>@127.0.0.1:<port> \
+  bun test packages/framework/src/__tests__/redis-cache.test.ts \
+           packages/framework/src/__tests__/redis-checkpointer.test.ts \
+           packages/framework/src/__tests__/map-checkpoint-corruption.test.ts
 ```
 
-## What they cover
+These commands are intentionally narrower than `bun run verify` and do not prove the host Redis suites, all workspaces, root scripts, documentation, or the production-image Oracle smoke.
 
-- `redis-cache.test.ts` — LLM response caching with TTL via Redis
-- `redis-checkpointer.test.ts` — Durable checkpoint persistence (HSET/GET, Lua atomicity)
-- `queue-bullmq-adapter.test.ts` — BullMQ enqueue/process, Map serialization round-trip
-- Redis Streams event log — XADD/XRANGE, envelope format, replay-to-timestamp
+## What the framework suites cover
 
-## CI Coverage
+- `redis-cache.test.ts` — response caching and TTL behavior.
+- `redis-checkpointer.test.ts` — durable checkpoint persistence, corruption handling, and atomicity.
+- `map-checkpoint-corruption.test.ts` — mapped-run refusal when persisted fan state is corrupt.
+- `queue-bullmq-adapter.test.ts` — BullMQ queue/worker behavior, serialization, deduplication, and Redis Streams event logs.
 
-CI runs them. `.github/workflows/ci.yml`'s `check` job installs `redis-server`,
-starts it on `localhost:6379`, waits for a `PONG`, and exports `REDIS_URL` into
-`$GITHUB_ENV` before the typecheck+test loop — so every push and PR exercises the
-Redis-gated suites rather than skipping them.
+## CI and release coverage
 
-The loop asserts `REDIS_URL` is set before running. That guard is the point: the
-gating is a module-load `const describeRedis = hasRedis ? describe : describe.skip`,
-and a skipped suite reports a *pass*, so a Redis that failed to start would
-otherwise turn the suites that prove concurrent spend cannot double-count into a
-silent no-op on the merge gate.
+Both `.github/workflows/ci.yml` and `.github/workflows/release.yaml` call `.github/workflows/verify.yml`. Its `workspace-gate` job installs and starts a disposable Redis service, exports `REDIS_URL`, and then invokes exactly `bun run verify`; the preflight prevents an unavailable or non-ACL server from becoming a silent skip.
+
+The reusable workflow also requires a separate `original-image-oracle-smoke` job. That image-specific control is not part of local `bun run verify` and makes no live-database claim.

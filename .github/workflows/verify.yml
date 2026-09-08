@@ -1,0 +1,41 @@
+name: verify
+
+on:
+  workflow_call:
+
+jobs:
+  workspace-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+      - name: Start disposable Redis
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes redis-server
+          sudo systemctl stop redis-server 2>/dev/null || true
+          redis-server \
+            --daemonize yes \
+            --bind 127.0.0.1 \
+            --protected-mode yes \
+            --port 6389 \
+            --save '' \
+            --appendonly no \
+            --requirepass 'fugue-ci-test-password'
+          bash scripts/wait-for-redis.sh 'redis://default:fugue-ci-test-password@127.0.0.1:6389'
+          printf '%s\n' 'REDIS_URL=redis://default:fugue-ci-test-password@127.0.0.1:6389' >> "$GITHUB_ENV"
+      - name: Verify repository
+        run: bun run verify
+
+  original-image-oracle-smoke:
+    runs-on: ubuntu-latest
+    container:
+      image: oven/bun:1.4.2-alpine
+    steps:
+      - uses: actions/checkout@v5
+      - run: bun install --frozen-lockfile
+      - name: Driver-loads smoke on the production base image
+        run: bun scripts/oracle-driver-smoke.ts

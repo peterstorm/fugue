@@ -7,7 +7,7 @@
  * server, runs everywhere — and lock the three subtle, comment-documented invariants
  * that now live in this one place:
  *   - the `status === "wait"` connect guard (connect ONCE, never flap afterwards),
- *   - the per-tenant ACL credential OVERRIDE (username/password reach the client),
+ *   - the per-tenant ACL credential OVERRIDE (scoped userinfo replaces URL admin auth),
  *   - the ATOMIC `SET … EX … NX` acquire for `setNx` with a TTL (vs bare `setnx`),
  * plus the typed-`Result` error wrapping every method does, and init failure.
  */
@@ -270,25 +270,36 @@ class FakeRedis {
   }
 }
 
-/** A factory over a given fake that ALSO records the options the adapter passes. */
+/** A factory over a given fake that records the URL and options the adapter passes. */
 const factoryFor = (
   fake: FakeRedis,
-): { readonly factory: RedisClientFactory; opts: () => Record<string, unknown> } => {
-  let captured: Record<string, unknown> = {};
+): {
+  readonly factory: RedisClientFactory;
+  readonly url: () => string;
+  readonly opts: () => Record<string, unknown>;
+} => {
+  let capturedUrl = "";
+  let capturedOptions: Record<string, unknown> = {};
   return {
-    factory: (_url, options) => {
-      captured = options as unknown as Record<string, unknown>;
+    factory: (url, options) => {
+      capturedUrl = url;
+      capturedOptions = options as unknown as Record<string, unknown>;
       return fake as unknown as IoRedis;
     },
-    opts: () => captured,
+    url: () => capturedUrl,
+    opts: () => capturedOptions,
   };
 };
 
-const wire = async (fake: FakeRedis, acl?: { username: string; password: string }) => {
-  const { factory, opts } = factoryFor(fake);
-  const r = await createRedisConnectivity("redis://localhost:6379", acl, factory);
+const wire = async (
+  fake: FakeRedis,
+  acl?: { username: string; password: string },
+  redisUrl = "redis://localhost:6379",
+) => {
+  const { factory, url, opts } = factoryFor(fake);
+  const r = await createRedisConnectivity(redisUrl, acl, factory);
   if (!isOk(r)) throw new Error("expected createRedisConnectivity to succeed");
-  return { bundle: r.value, opts };
+  return { bundle: r.value, url, opts };
 };
 
 // ── status === "wait" connect guard ──────────────────────────────────────────
@@ -334,20 +345,41 @@ describe("createRedisConnectivity — startup ping connect guard", () => {
 // ── ACL credential override ──────────────────────────────────────────────────
 
 describe("createRedisConnectivity — per-tenant ACL credential override", () => {
-  it("passes username/password to the client when an ACL credential is supplied", async () => {
-    const fake = new FakeRedis();
-    const { opts } = await wire(fake, { username: "fugue-tenant-acme", password: "s3cret" });
-    expect(opts().username).toBe("fugue-tenant-acme");
-    expect(opts().password).toBe("s3cret");
-    expect(opts().lazyConnect).toBe(true);
-    expect(opts().autoResendUnfulfilledCommands).toBe(false);
+  it("binds scoped userinfo into the URL with or without inherited admin userinfo", async () => {
+    const adminUrls = [
+      "redis://localhost:6379",
+      "redis://default:admin-secret@localhost:6379/4?family=authenticated",
+    ] as const;
+
+    for (const adminUrl of adminUrls) {
+      const fake = new FakeRedis();
+      const { url, opts } = await wire(
+        fake,
+        { username: "fugue-tenant-acme", password: "scoped secret" },
+        adminUrl,
+      );
+      const scopedUrl = new URL(url());
+      expect(scopedUrl.username).toBe("fugue-tenant-acme");
+      expect(scopedUrl.password).toBe("scoped%20secret");
+      expect(scopedUrl.pathname).toBe(new URL(adminUrl).pathname);
+      expect(scopedUrl.search).toBe(new URL(adminUrl).search);
+      expect(url()).not.toContain("admin-secret");
+      expect("username" in opts()).toBe(false);
+      expect("password" in opts()).toBe(false);
+      expect(opts().lazyConnect).toBe(true);
+      expect(opts().autoResendUnfulfilledCommands).toBe(false);
+      expect(opts().enableReadyCheck).toBe(false);
+    }
   });
 
-  it("passes NO username/password when no ACL credential is supplied (inherit REDIS_URL auth)", async () => {
+  it("passes the original URL and no credential options when no ACL credential is supplied", async () => {
     const fake = new FakeRedis();
-    const { opts } = await wire(fake);
+    const adminUrl = "redis://default:admin-secret@localhost:6379";
+    const { url, opts } = await wire(fake, undefined, adminUrl);
+    expect(url()).toBe(adminUrl);
     expect("username" in opts()).toBe(false);
     expect("password" in opts()).toBe(false);
+    expect("enableReadyCheck" in opts()).toBe(false);
   });
 });
 

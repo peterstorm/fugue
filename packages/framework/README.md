@@ -193,9 +193,22 @@ Fugue implements Level 3 observability: for any production failure, a single eve
 
 See [`docs/observability/state-transitions.md`](../../docs/observability/state-transitions.md) for worked examples, dashboard queries, and node-author patterns.
 
+## Contributor verification
+
+From the repository root, `bun run verify` is the canonical contributor gate. It invokes this package's own `typecheck` script, which checks both `src` and the published `bin/fugue.ts` CLI through `tsconfig.bin.json`, then invokes this package's test script as one of all 12 workspace test scripts. The root gate also checks repository-owned verification scripts and shipped documentation.
+
+For focused iteration only:
+
+```bash
+(cd packages/framework && bun run typecheck)
+(cd packages/framework && bun run test)
+```
+
+These package-only commands are narrower than the repository gate. Redis suites can skip when `REDIS_URL` is absent. Full verification requires an authorized, ACL-capable disposable test server plus a local `redis-server` executable; server authentication is optional policy, while the canonical guide and CI deliberately prove password authentication. See [`../../CONTRIBUTING.md`](../../CONTRIBUTING.md). The gate never owns or stops the server supplied by the contributor.
+
 ## Test conventions
 
-- Redis-gated tests use `process.env.REDIS_URL` to skip cleanly when no Redis is reachable.
+- Redis-gated tests use `process.env.REDIS_URL` to skip cleanly during focused runs; the root verification preflight fails closed instead of accepting that skip.
 - Property tests use `fast-check`.
 - Boundary lints (`check-imports`) run in `bun run check`.
 

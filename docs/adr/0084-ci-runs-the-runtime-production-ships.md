@@ -21,13 +21,13 @@ Two failures reproduce on **both** versions and are container artifacts rather t
 
 ## Decision
 
-**Pin the Bun version, and pin CI and production to the same one.** As of this ADR that is `1.4.2`, in three places that must be bumped together:
+**Pin the Bun version, and pin CI and production to the same one.** As of this ADR that is `1.4.2`. The current direct pins are in three files that must be bumped together:
 
 | Where | Setting |
 |---|---|
-| `packages/host/Dockerfile` | `FROM oven/bun:1.4.2-alpine` |
-| `.github/workflows/ci.yml` | `bun-version: 1.4.2`, and the `oracle-driver-smoke` job's `container.image` |
-| `.github/workflows/release.yaml` | `bun-version: 1.4.2` |
+| `packages/host/Dockerfile` | `FROM oven/bun:1.4.2-alpine` — production source of truth |
+| `.github/workflows/verify.yml` | workspace `bun-version: 1.4.2` and Oracle `container.image: oven/bun:1.4.2-alpine` |
+| `.github/workflows/release.yaml` | packaging `bun-version: 1.4.2`; shared verification is called separately |
 
 An exact patch tag, not a `1.4` or `latest` floating tag: a floating tag reintroduces exactly the drift this ADR exists to remove, and the failure mode is silent.
 
@@ -35,10 +35,10 @@ This moves production **forward** (1.2.23 → 1.4.2) rather than pinning CI back
 
 ## Consequences
 
-- A green `check` is now evidence about production, because it executed production's runtime.
-- Bun upgrades become deliberate: one commit touching three files, with the suite proving the new runtime before it ships.
-- The three pins can still drift from each other. Nothing enforces their equality mechanically; each site carries a comment naming the other two, and this ADR is the record of why. A CI assertion that the resolved `bun --version` matches the Dockerfile's `FROM` tag would close that, and is worth adding if the pins are ever found out of step.
-- `@types/bun` (pinned exactly at 1.4.1 across all twelve workspaces) should be bumped alongside the runtime so the type surface keeps matching what runs.
+- A green shared repository gate is evidence from production's runtime because the preflight rejects any Bun version that differs from the Dockerfile.
+- Bun upgrades remain deliberate: one change updates the Dockerfile, both pins in `verify.yml`, release packaging, and the corresponding tests before it ships.
+- Pin equality is now mechanically enforced. The prerequisite parser derives the exact patch from the Dockerfile at runtime, and parsed-workflow tests require every setup/image pin to equal it.
+- `@types/bun` (pinned exactly at 1.4.1 across all twelve workspaces, with direct root ownership for verification scripts) should be bumped alongside the runtime so the type surface keeps matching what runs.
 - ADR-0034 describes the host container as `oven/bun:1.2-alpine`. That statement was accurate when written; per this repo's convention the historical record stands and this ADR supersedes the version detail, not the git-CLI decision it was making.
 
 ## Related
@@ -46,3 +46,7 @@ This moves production **forward** (1.2.23 → 1.4.2) rather than pinning CI back
 - ADR-0034 — raw git via `Bun.spawn` (describes the container at the older version)
 - FR-007 — UDS bind + `chmod 0600`, the fail-closed boot abort this skew defeated
 - ADR-0080 — typed failure surfaces, the contract the missing stacks eroded
+
+## Current enforcement note (2026-09-08)
+
+CI and release now call the same reusable `.github/workflows/verify.yml`. Its repository job performs a frozen install, starts disposable Redis, and invokes the root `bun run verify`; that command delegates to all 12 workspace typecheck/test scripts (including the framework CLI compiler tier), the deliberately scoped root-script compiler/tests, and shipped-doc checks. Its second required job preserves the Oracle driver smoke in the original `oven/bun:1.4.2-alpine` image. Local `bun run verify` proves the repository/runtime/Redis gate but does not claim that independent image proof or the credentialed OpenShift PostSync `SELECT 1 FROM DUAL` check.

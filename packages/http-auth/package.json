@@ -14,7 +14,7 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test --path-ignore-patterns='dist/**'"
   },
   "peerDependencies": {
     "@fuguejs/framework": "workspace:*",
