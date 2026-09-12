@@ -212,8 +212,20 @@ export const fanInConstName = (id: KebabIdent): string => `${pascalCase(id)}FanI
 /** LLM node factory (the injectable model seam): `summarize` → `createSummarize`. */
 export const llmFactoryName = (id: KebabIdent): string => `create${pascalCase(id)}`;
 
-/** Module-level node const for non-llm nodes: `fetch-record` → `fetchRecord`. */
+/** Module-level node const for ordinary non-llm nodes: `fetch-record` → `fetchRecord`. */
 const nodeConstName = (id: KebabIdent): string => camelCase(id);
+
+/** Factory enclosing an authored map's inline child declarations. */
+export const mapFactoryName = (id: KebabIdent): string => `create${pascalCase(id)}Map`;
+
+/**
+ * Child-local bindings occupy a codegen-only namespace outside KEBAB_IDENT,
+ * so no authored parent or child id can collide with them.
+ */
+const CHILD_LOCAL_PREFIX = "$child_";
+export const CHILD_MODEL_NAME = "$childModel";
+export const childLocalName = (generatedName: string): string =>
+  `${CHILD_LOCAL_PREFIX}${generatedName}`;
 
 /**
  * The `<camel>Node` identifier claimed for llm nodes: `summarize` →
@@ -225,13 +237,16 @@ const nodeConstName = (id: KebabIdent): string => camelCase(id);
 export const llmNodeRefName = (id: KebabIdent): string => `${camelCase(id)}Node`;
 
 /**
- * The identifier a node contributes to the structure expression: the llm ref
- * for llm nodes (dead today — see `llmNodeRefName`), the plain const otherwise.
- * `kind` is the closed authored kind vocabulary (`AuthoredNodeKind` — derived
- * in-module from `NODE_FACTORY_NAME`, so this module stays import-free).
+ * The identifier a node contributes to collision accounting: an LLM's
+ * conservative future node ref, a map factory, or an ordinary node const.
+ * `kind` is derived in-module from `NODE_FACTORY_NAME`, keeping this module
+ * import-free.
  */
-export const nodeRefName = (id: KebabIdent, kind: AuthoredNodeKind): string =>
-  kind === "llm" ? llmNodeRefName(id) : nodeConstName(id);
+export const nodeRefName = (id: KebabIdent, kind: AuthoredNodeKind): string => {
+  if (kind === "llm") return llmNodeRefName(id);
+  if (kind === "map") return mapFactoryName(id);
+  return nodeConstName(id);
+};
 
 // The two DAG-level constructors take the branded `KebabIdent`, exactly like
 // the node-level constructors above: both the authored pipeline (`dag.name`)
@@ -271,6 +286,7 @@ export const NODE_FACTORY_NAME = {
   llm: "createLlmNode",
   "human-review": "createHumanReviewNode",
   source: "createSourceNode",
+  map: "createCollectMapNode",
 } as const;
 
 /**
@@ -369,6 +385,7 @@ interface IdentifierSource {
 export const generatedIdentifiersFor = (node: IdentifierSource): readonly string[] => [
   nodeConstName(node.id),
   ...(node.kind === "llm" ? [llmNodeRefName(node.id), llmFactoryName(node.id)] : []),
+  ...(node.kind === "map" ? [mapFactoryName(node.id)] : []),
   schemaConstName(node.id),
   fanInConstName(node.id),
 ];

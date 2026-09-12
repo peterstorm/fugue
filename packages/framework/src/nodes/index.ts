@@ -6,4 +6,10 @@ export { createLlmWithToolsNode, type LlmWithToolsNodeConfig, type LlmWithToolsN
 export { createGuardrailNode, type GuardrailNodeConfig, type GuardrailResult, type GuardrailSkipped, type GuardrailValidated, type GuardrailCheck } from "./guardrail.js";
 export { createEvalJudgeNode, type EvalJudgeNodeConfig, type EvalJudgeNodeDef, type EvalJudgeResult, type EvalJudgeResponse, EvalJudgeResponseSchema, toEvalJudgeResult, llmFailureResult } from "./eval-judge.js";
 export { JUDGE_SYSTEM_FRAME, generateDefaultRubric, resolveRubric, assembleJudgeUserMessage } from "./eval-judge-prompt.js";
-export { createMapNode, type MapNodeConfig } from "./map.js";
+export {
+  createMapNode,
+  createCollectMapNode,
+  type MapNodeConfig,
+  type CollectMapNodeConfig,
+  type CollectedMapOutput,
+} from "./map.js";

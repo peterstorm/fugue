@@ -1,8 +1,7 @@
 # ADR-0086: Root-owned mapped child execution
 
 ## Status
-Accepted — implemented in the PR46 correctness-closure candidate. Parent final
-whole-candidate validation and publication are pending; this is not a merge certification.
+Accepted — implemented and merged in PR #46 on 2026-09-08.
 
 ## Date
 2026-09-08
@@ -191,8 +190,8 @@ policy, production tenant ACL enforcement or exactly-once external effects.
 Recursive child fingerprinting, indexed broker Invocation audit dimensions and
 root child-quality-summary aggregation are **deferred advisories**, not guarantees.
 PR-C authored-map/plate rendering, PR-D whole-fan admission projection and concurrent
-fan scheduling remain separate work. Validation history and pending parent gates
-live in the closure record, not in a claim that this ADR certifies current HEAD.
+fan scheduling remain separate work. PR-B validation history lives in the closure
+record; merge does not certify deployed infrastructure or exactly-once effects.
 
 ## Related
 

@@ -29,9 +29,12 @@
 
 import { createHash } from "node:crypto";
 import { match } from "ts-pattern";
-import { structureRefs } from "./authored.js";
+import { childOutputSpec, mapItemSpec, mapOutputSpec, structureRefs } from "./authored.js";
 import type {
+  AuthoredChildDag,
+  AuthoredChildNode,
   AuthoredDag,
+  AuthoredMapNode,
   AuthoredNode,
   FieldType,
   SchemaSpec,
@@ -45,6 +48,7 @@ import {
   type TemplateCtx,
 } from "./new-templates.js";
 import {
+  CHILD_MODEL_NAME,
   DAG_CONST_NAME,
   DEFAULT_MODEL_NAME,
   FIXED_IMPORT_NAME,
@@ -56,6 +60,7 @@ import {
   TEMPLATE_OPENERS,
   NODE_FACTORY_NAME,
   SHAPE_HELPER_NAME,
+  childLocalName,
   dagFactoryName,
   fanInConstName,
   llmFactoryName,
@@ -120,20 +125,30 @@ const comment = (text: string): string =>
 const promptText = (text: string): string =>
   text.replace(TEMPLATE_OPENERS, "{ ").replace(FUGUE_BODY_MARKERS, "＠");
 
-const zodExpr = (t: FieldType): string =>
-  match(t)
+function zodExpr(type: FieldType): string {
+  return match(type)
     .with({ kind: "string" }, () => "z.string()")
     .with({ kind: "number" }, () => "z.number()")
     .with({ kind: "boolean" }, () => "z.boolean()")
-    .with({ kind: "enum" }, (e) => `z.enum([${e.values.map((v) => JSON.stringify(v)).join(", ")}])`)
+    .with({ kind: "enum" }, (entry) => `z.enum([${entry.values.map((value) => JSON.stringify(value)).join(", ")}])`)
+    .with({ kind: "array" }, (entry) => `z.array(${schemaExpr(entry.element)})`)
     .exhaustive();
+}
 
-const defaultExpr = (t: FieldType): string =>
-  match(t)
+function schemaExpr(spec: SchemaSpec, indent = ""): string {
+  const fields = spec.fields
+    .map((field) => `${indent}  ${key(field.name)}: ${zodExpr(field.type)},${field.description ? ` // ${comment(field.description)}` : ""}`)
+    .join("\n");
+  return `z.object({\n${fields}\n${indent}})`;
+}
+
+const defaultExpr = (type: FieldType): string =>
+  match(type)
     .with({ kind: "string" }, () => '"todo"')
     .with({ kind: "number" }, () => "0")
     .with({ kind: "boolean" }, () => "false")
-    .with({ kind: "enum" }, (e) => JSON.stringify(e.values[0]))
+    .with({ kind: "enum" }, (entry) => JSON.stringify(entry.values[0]))
+    .with({ kind: "array" }, () => "[]")
     .exhaustive();
 
 /** LLM node outputs always carry bucketed confidence (the framework idiom). */
@@ -142,12 +157,8 @@ const withConfidence = (spec: SchemaSpec): SchemaSpec =>
     ? spec
     : { fields: [...spec.fields, CONFIDENCE_FIELD] };
 
-const schemaConst = (name: string, spec: SchemaSpec): string => {
-  const fields = spec.fields
-    .map((f) => `  ${key(f.name)}: ${zodExpr(f.type)},${f.description ? ` // ${comment(f.description)}` : ""}`)
-    .join("\n");
-  return `const ${name} = z.object({\n${fields}\n});`;
-};
+const schemaConst = (name: string, spec: SchemaSpec): string =>
+  `const ${name} = ${schemaExpr(spec)};`;
 
 const defaultsObject = (spec: SchemaSpec, indent = "    "): string =>
   spec.fields.map((f) => `${indent}${key(f.name)}: ${defaultExpr(f.type)},`).join("\n");
@@ -168,14 +179,10 @@ interface NodePlan {
   readonly outSpec: SchemaSpec | null;
   /** Expression for the node's input schema const; null for source nodes. */
   readonly inExpr: string | null;
-  /**
-   * Var identifier referenced in the structure call (`nodeRefName`). DEAD for
-   * llm nodes — `nodeExprRef` calls the factory (`llmFactoryName(id)(model)`)
-   * instead of a bound const, so the `llmNodeRefName` value assigned here
-   * never reaches the emitted file (it is still claimed by
-   * `generatedIdentifiersFor`; see the rationale on `llmNodeRefName`).
-   */
+  /** Var identifier referenced in the structure call for non-LLM nodes. */
   readonly ref: string;
+  /** Factory binding for LLM nodes; null for every other node kind. */
+  readonly llmFactory: string | null;
 }
 
 const purposeComment = (node: AuthoredNode): string => `// ${node.id} — ${comment(node.purpose)}`;
@@ -230,38 +237,11 @@ export const structuralProjection = (body: string): string =>
   );
 
 /**
- * Stamp generated TypeScript with a tamper-evident integrity banner. The
- * `@fugue-integrity sha256:<hex>` hash covers the machine-owned STRUCTURE — the
- * body with each `@fugue-body` region collapsed by `structuralProjection` — so
- * rewiring the DAG by hand (imports, schemas, ids, structure, registration)
- * trips the hash, but implementing the placeholder node bodies the scaffold
- * tells you to fill in does NOT. This resolves the former contradiction where a
- * whole-body hash forbade the very edits `nextSteps` and the generated README
- * instruct.
- *
- * Pure (body in, stamped body out) and co-located with `structuralProjection`
- * and the region markers it depends on — the entire integrity contract lives in
- * this one module; the shell (`new.ts`) only writes the returned string.
- *
- * CROSS-REPO COUPLING SURFACE — loom's `fugue-generated-integrity` engine rule
- * (loom/engine `src/linter/programmatic/fugue-generated-integrity.ts`)
- * recomputes this hash and blocks on a mismatch at the wave gate. It is a
- * consumer of, and depends byte-for-byte on, all four of (nothing imported):
- *   1. the banner line format `// @fugue-integrity sha256:<64-hex>` (lowercase
- *      hex, on its own line) this function emits;
- *   2. the COMMENT-ONLY PRELUDE: every line above the integrity line is a `//`
- *      comment (the banner sits at the top of the file; the rule fails closed
- *      on real code above the integrity line — it would escape the hash);
- *   3. the two `@fugue-body-start` / `@fugue-body-end` marker strings above;
- *   4. the collapse rule: sha256 over `structuralProjection` of everything
- *      AFTER the integrity line, utf-8, hex digest.
- *
- * The projected STRUCTURE is the sole input to the hash, so regenerating from
- * the same AuthoredDag reproduces the identical structure and hence the
- * identical hash. Regeneration is NOT a byte-for-byte fixed point of an
- * implemented file, though: it re-emits placeholder bodies, DESTROYING any
- * implemented `@fugue-body` region contents — which is why overwriting a
- * non-empty dir requires `--force`.
+ * Stamp generated TypeScript using the complete cross-repository integrity
+ * contract documented beside the markers and projection above. Pure and
+ * deterministic: the same AuthoredDag reproduces the same structural hash.
+ * Regeneration still replaces implemented body regions, so overwriting a
+ * non-empty directory requires `--force`.
  */
 export const stampGenerated = (body: string): string => {
   const hash = createHash("sha256").update(structuralProjection(body), "utf-8").digest("hex");
@@ -332,20 +312,39 @@ const ${p.ref} = ${NODE_FACTORY_NAME["human-review"]}({
 /** Prompt placeholders must be identifier-ish — sanitize fan-in keys. */
 const placeholderName = (fieldKey: string): string => fieldKey.replace(/[^A-Za-z0-9_]/g, "_");
 
-const llmNode = (p: NodePlan, promptName: string, inputFields: readonly string[], fanIn: boolean): string => {
-  // Fan-in inputs are OBJECTS keyed by node id — stringify them so the prompt
-  // placeholder receives JSON, not "[object Object]".
-  const buildInputEntries = inputFields
-    .map((f) =>
-      fanIn
-        ? `${key(placeholderName(f))}: JSON.stringify(input[${JSON.stringify(f)}])`
-        : `${key(placeholderName(f))}: input[${JSON.stringify(f)}]`,
-    )
+type LlmPromptInput = Readonly<{
+  readonly source: string;
+  readonly encoding: "scalar" | "json";
+}>;
+
+type LlmNodeEmissionOptions = Readonly<{
+  readonly explicitReturnType?: boolean;
+}>;
+
+const llmNode = (
+  p: NodePlan,
+  promptName: string,
+  inputs: readonly LlmPromptInput[],
+  options: LlmNodeEmissionOptions = {},
+): string => {
+  const explicitReturnType = options.explicitReturnType ?? true;
+  if (p.llmFactory === null) {
+    throw new Error(`authored-codegen invariant: LLM node '${p.node.id}' has no factory binding`);
+  }
+  const buildInputEntries = inputs
+    .map((input) => {
+      const value = `input[${JSON.stringify(input.source)}]`;
+      const encoded = input.encoding === "json" ? `JSON.stringify(${value})` : value;
+      return `${key(placeholderName(input.source))}: ${encoded}`;
+    })
     .join(", ");
+  const returnType = explicitReturnType
+    ? `: LlmNodeDef<z.infer<typeof ${p.inExpr}>, z.infer<typeof ${p.outName}>>`
+    : "";
   return `${purposeComment(p.node)}
-const ${llmFactoryName(p.node.id)} = (
+const ${p.llmFactory} = (
   model: string,
-): LlmNodeDef<z.infer<typeof ${p.inExpr}>, z.infer<typeof ${p.outName}>> => {
+)${returnType} => {
   const node = ${NODE_FACTORY_NAME.llm}({
     id: ${JSON.stringify(p.node.id)},
     inputSchema: ${p.inExpr},
@@ -362,11 +361,13 @@ const llmPrompt = (
   dag: AuthoredDag,
   node: LlmNode,
   promptName: string,
-  inputFields: readonly string[],
-  fanIn: boolean,
+  inputs: readonly LlmPromptInput[],
 ): PromptFile => {
-  const vars = inputFields
-    .map((f) => `${placeholderName(f)}${fanIn ? " (JSON)" : ""}: {{${placeholderName(f)}}}`)
+  const vars = inputs
+    .map((input) => {
+      const placeholder = placeholderName(input.source);
+      return `${placeholder}${input.encoding === "json" ? " (JSON)" : ""}: {{${placeholder}}}`;
+    })
     .join("\n");
   const outSpec = withConfidence(node.output);
   const jsonShape = outSpec.fields
@@ -406,30 +407,60 @@ interface Plans {
   readonly hasLlm: boolean;
 }
 
+const childHasLlm = (node: AuthoredMapNode): boolean =>
+  node.child.nodes.some((child) => child.kind === "llm");
+
+const allLlmCount = (dag: AuthoredDag): number =>
+  dag.nodes.reduce(
+    (count, node) => count + (node.kind === "llm" ? 1 : 0) +
+      (node.kind === "map" ? node.child.nodes.filter((child) => child.kind === "llm").length : 0),
+    0,
+  );
+
 /**
  * Prompt registry name for an llm node: the dag name when it is the only llm
  * node, `<dag>-<node>` otherwise.
  */
 const promptNameFor = (dag: AuthoredDag, id: string): string =>
-  dag.nodes.filter((n) => n.kind === "llm").length === 1 ? dag.name : `${dag.name}-${id}`;
+  allLlmCount(dag) === 1 ? dag.name : `${dag.name}-${id}`;
+
+const childPromptNameFor = (dag: AuthoredDag, map: AuthoredMapNode, id: string): string =>
+  `${dag.name}-${map.id}@${id}`;
 
 const planNodes = (dag: AuthoredDag): Plans => {
   const byId = new Map<string, NodePlan>();
   for (const node of dag.nodes) {
     const outSpec = match(node)
       .with({ kind: "human-review" }, () => null)
-      .with({ kind: "llm" }, (n) => withConfidence(n.output))
-      .otherwise((n) => n.output);
+      .with({ kind: "llm" }, (entry) => withConfidence(entry.output))
+      .with({ kind: "map" }, (entry) => mapOutputSpec(entry))
+      .otherwise((entry) => entry.output);
     byId.set(node.id, {
       node,
       outName: schemaConstName(node.id),
       outSpec,
       inExpr: null, // filled by wiring
       ref: nodeRefName(node.id, node.kind),
+      llmFactory: node.kind === "llm" ? llmFactoryName(node.id) : null,
     });
   }
-  return { byId, hasLlm: dag.nodes.some((n) => n.kind === "llm") };
+  return {
+    byId,
+    hasLlm: dag.nodes.some((node) =>
+      node.kind === "llm" || (node.kind === "map" && childHasLlm(node)),
+    ),
+  };
 };
+
+const planChildNodes = (nodes: readonly AuthoredChildNode[]): Map<string, NodePlan> =>
+  new Map(nodes.map((node) => [node.id, {
+    node,
+    outName: childLocalName(schemaConstName(node.id)),
+    outSpec: node.kind === "llm" ? withConfidence(node.output) : node.output,
+    inExpr: null,
+    ref: childLocalName(nodeRefName(node.id, node.kind)),
+    llmFactory: node.kind === "llm" ? childLocalName(llmFactoryName(node.id)) : null,
+  }] as const));
 
 /** Fan-in schema const over a set of upstream plans (keys = node ids). */
 const fanInConst = (name: string, upstream: readonly NodePlan[], extra?: readonly (readonly [string, string])[]): string => {
@@ -456,6 +487,137 @@ const effectiveOutName = (p: NodePlan): string => {
     );
   }
   return p.inExpr;
+};
+
+interface ChildEmission {
+  readonly declaration: string;
+  readonly prompts: readonly PromptFile[];
+}
+
+const indent = (value: string, spaces: number): string => {
+  const prefix = " ".repeat(spaces);
+  return value.split("\n").map((line) => line.length === 0 ? line : `${prefix}${line}`).join("\n");
+};
+
+const emitChildStructure = (
+  child: AuthoredChildDag,
+  plans: Map<string, NodePlan>,
+  itemSchema: SchemaSpec,
+): { readonly expression: string; readonly extras: readonly string[] } => {
+  const plan = (id: string): NodePlan => {
+    const found = plans.get(id);
+    if (found === undefined) throw new Error(`authored map invariant: unknown child node '${id}'`);
+    return found;
+  };
+  const setInput = (id: string, expression: string): void => {
+    plans.set(id, { ...plan(id), inExpr: expression });
+  };
+  const itemExpr = schemaExpr(itemSchema, "  ");
+  const extras: string[] = [];
+  const ref = (id: string): string => {
+    const node = plan(id);
+    if (node.node.kind !== "llm") return node.ref;
+    if (node.llmFactory === null) {
+      throw new Error(`authored map invariant: child LLM '${node.node.id}' has no factory binding`);
+    }
+    return `${node.llmFactory}(${CHILD_MODEL_NAME})`;
+  };
+
+  const expression = match(child.structure)
+    .with({ shape: "linear" }, (linear) => {
+      let previous = itemExpr;
+      for (const id of linear.order) {
+        setInput(id, previous);
+        previous = effectiveOutName(plan(id));
+      }
+      return `${SHAPE_HELPER_NAME.linear}({\n  id: ${JSON.stringify(child.id)},\n  nodes: [${linear.order.map(ref).join(", ")}],\n})`;
+    })
+    .with({ shape: "fan-out" }, { shape: "diamond" }, (fan) => {
+      setInput(fan.source, itemExpr);
+      const sourceOutput = effectiveOutName(plan(fan.source));
+      for (const id of fan.branches) setInput(id, sourceOutput);
+      if (fan.join === undefined) {
+        throw new Error(`authored map invariant: child '${child.id}' fan-out has no join`);
+      }
+      const fanInName = childLocalName(fanInConstName(fan.join));
+      extras.push(fanInConst(fanInName, fan.branches.map(plan)));
+      setInput(fan.join, fanInName);
+      return `${SHAPE_HELPER_NAME[fan.shape]}({\n  id: ${JSON.stringify(child.id)},\n  source: ${ref(fan.source)},\n  branches: [${fan.branches.map(ref).join(", ")}],\n  join: ${ref(fan.join)},\n})`;
+    })
+    .with({ shape: "router" }, (router) => {
+      setInput(router.classifier, itemExpr);
+      const classifierOutput = effectiveOutName(plan(router.classifier));
+      for (const entry of router.cases) setInput(entry.to, classifierOutput);
+      setInput(router.default, classifierOutput);
+      const cases = router.cases.map((entry) => `    ${key(entry.label)}: {\n      when: (out) => (out as z.infer<typeof ${classifierOutput}>).${entry.when.field} === ${JSON.stringify(entry.when.equals)},\n      to: ${ref(entry.to)},\n    },`).join("\n");
+      return `${SHAPE_HELPER_NAME.router}({\n  id: ${JSON.stringify(child.id)},\n  classifier: ${ref(router.classifier)},\n  cases: {\n${cases}\n  },\n  default: ${ref(router.default)},\n})`;
+    })
+    .with({ shape: "sources" }, (sources) => {
+      const joinFanIn = childLocalName(fanInConstName(sources.join));
+      extras.push(fanInConst(joinFanIn, sources.sources.map(plan)));
+      setInput(sources.join, joinFanIn);
+      const assembleFanIn = childLocalName(fanInConstName(sources.assemble));
+      extras.push(fanInConst(assembleFanIn, [plan(sources.join)], [["$input", itemExpr]]));
+      setInput(sources.assemble, assembleFanIn);
+      return `${SHAPE_HELPER_NAME.sources}({\n  id: ${JSON.stringify(child.id)},\n  sources: [${sources.sources.map(ref).join(", ")}],\n  join: ${ref(sources.join)},\n  assemble: ${ref(sources.assemble)},\n})`;
+    })
+    .exhaustive();
+
+  return { expression, extras };
+};
+
+const emitMapNode = (
+  dag: AuthoredDag,
+  plan: NodePlan,
+  node: AuthoredMapNode,
+): ChildEmission => {
+  if (plan.inExpr === null) {
+    throw new Error(`authored map invariant: map node '${node.id}' reached codegen before input wiring`);
+  }
+  const itemSpec = mapItemSpec(dag, node);
+  const childIds = structureRefs(node.child.structure).map(([childId]) => childId);
+  const plans = planChildNodes(node.child.nodes);
+  const child = emitChildStructure(node.child, plans, itemSpec);
+  const declarations: string[] = [];
+  for (const id of childIds) {
+    const childPlan = plans.get(id);
+    if (childPlan?.outSpec !== null && childPlan?.outSpec !== undefined) {
+      declarations.push(schemaConst(childPlan.outName, childPlan.outSpec));
+    }
+  }
+  declarations.push(...child.extras);
+
+  const prompts: PromptFile[] = [];
+  for (const id of childIds) {
+    const childPlan = plans.get(id);
+    if (childPlan === undefined) throw new Error(`authored map invariant: unknown child node '${id}'`);
+    switch (childPlan.node.kind) {
+      case "fetch":
+        declarations.push(fetchNode(childPlan, childPlan.node.output));
+        break;
+      case "source":
+        declarations.push(sourceNode(childPlan, childPlan.node.output));
+        break;
+      case "transform":
+        declarations.push(transformNode(childPlan, childPlan.node.output));
+        break;
+      case "llm": {
+        const promptName = childPromptNameFor(dag, node, childPlan.node.id);
+        const inputs = llmPromptInputs(
+          { input: itemSpec, nodes: node.child.nodes, structure: node.child.structure },
+          childPlan,
+        );
+        declarations.push(llmNode(childPlan, promptName, inputs, { explicitReturnType: false }));
+        prompts.push(llmPrompt(dag, childPlan.node, promptName, inputs));
+        break;
+      }
+    }
+  }
+
+  const parameter = childHasLlm(node) ? `${CHILD_MODEL_NAME}: string` : "";
+  const body = declarations.length === 0 ? "" : `${indent(declarations.join("\n\n"), 2)}\n\n`;
+  const declaration = `${purposeComment(node)}\nconst ${plan.ref} = (${parameter}) => {\n${body}  return ${NODE_FACTORY_NAME.map}({\n    id: ${JSON.stringify(node.id)},\n    inputSchema: ${plan.inExpr},\n    widthFrom: ${JSON.stringify(node.widthFrom)},\n    maxWidth: ${node.maxWidth},\n    child: ${child.expression.replace(/\n/g, "\n    ")},\n    childOutputSchema: ${schemaExpr(childOutputSpec(node.child), "    ")},\n    gather: { kind: "collect", field: ${JSON.stringify(node.gather.field)} },\n  });\n};`;
+  return { declaration, prompts };
 };
 
 /**
@@ -587,10 +749,15 @@ ${cases}
         break;
       case "llm": {
         const promptName = promptNameFor(dag, p.node.id);
-        const inputFields = llmInputFields(dag, p);
-        const fanIn = llmInputIsFanIn(dag, p);
-        nodeDecls.push(llmNode(p, promptName, inputFields, fanIn));
-        prompts.push(llmPrompt(dag, p.node, promptName, inputFields, fanIn));
+        const inputs = llmPromptInputs(dag, p);
+        nodeDecls.push(llmNode(p, promptName, inputs));
+        prompts.push(llmPrompt(dag, p.node, promptName, inputs));
+        break;
+      }
+      case "map": {
+        const emitted = emitMapNode(dag, p, p.node);
+        nodeDecls.push(emitted.declaration);
+        prompts.push(...emitted.prompts);
         break;
       }
     }
@@ -649,33 +816,49 @@ const structureOrder = (dag: AuthoredDag): readonly string[] =>
   structureRefs(dag.structure).map(([id]) => id);
 
 /**
- * In the LLM factory case the structure references `create<Node>(model)`;
- * everywhere else the plain const.
+ * Structure references invoke an LLM factory, invoke a map factory (with a
+ * model when its child needs one), or use the plain const for ordinary nodes.
  */
-const nodeExprRef = (p: NodePlan): string =>
-  p.node.kind === "llm" ? `${llmFactoryName(p.node.id)}(opts.model ?? ${DEFAULT_MODEL_NAME})` : p.ref;
+const nodeExprRef = (plan: NodePlan): string => {
+  if (plan.node.kind === "llm") {
+    if (plan.llmFactory === null) {
+      throw new Error(`authored-codegen invariant: LLM node '${plan.node.id}' has no factory binding`);
+    }
+    return `${plan.llmFactory}(opts.model ?? ${DEFAULT_MODEL_NAME})`;
+  }
+  if (plan.node.kind === "map") {
+    return childHasLlm(plan.node)
+      ? `${plan.ref}(opts.model ?? ${DEFAULT_MODEL_NAME})`
+      : `${plan.ref}()`;
+  }
+  return plan.ref;
+};
 
 /**
- * Whether an LLM node's derived input is a fan-in object (keys = node ids /
- * `$input`) rather than a predecessor's flat fields. Fan-in values are
- * objects, so `buildInput` must JSON.stringify them for the prompt.
+ * Prompt inputs carry their encoding with their source field. Fan-in objects
+ * and authored arrays use JSON; scalar direct fields preserve scalar coercion.
  */
-const llmInputIsFanIn = (dag: AuthoredDag, p: NodePlan): boolean =>
-  match(dag.structure)
-    .with({ shape: "fan-out" }, { shape: "diamond" }, (s) => s.join === p.node.id)
-    .with({ shape: "sources" }, (s) => s.join === p.node.id || s.assemble === p.node.id)
-    .with({ shape: "linear" }, { shape: "router" }, () => false)
-    .exhaustive();
-
-/** Top-level input keys an LLM node's buildInput/prompt can reference. */
-const llmInputFields = (dag: AuthoredDag, p: NodePlan): readonly string[] => {
-  const s = dag.structure;
-  const byId = new Map(dag.nodes.map((n) => [n.id, n] as const));
-  // Human-review gates have no output variant — they contribute no fields here
-  // (the linear walk below skips past them to the real producer anyway).
-  const fieldsOf = (id: KebabIdent): readonly string[] => {
-    const n = byId.get(id);
-    return n === undefined || n.kind === "human-review" ? [] : n.output.fields.map((f) => f.name);
+const llmPromptInputs = (
+  graph: {
+    readonly input: SchemaSpec;
+    readonly nodes: readonly AuthoredNode[];
+    readonly structure: AuthoredDag["structure"];
+  },
+  p: NodePlan,
+): readonly LlmPromptInput[] => {
+  const s = graph.structure;
+  const byId = new Map(graph.nodes.map((node) => [node.id, node] as const));
+  const direct = (spec: SchemaSpec): readonly LlmPromptInput[] =>
+    spec.fields.map((field) => ({
+      source: field.name,
+      encoding: field.type.kind === "array" ? "json" : "scalar",
+    }));
+  const fanIn = (ids: readonly string[]): readonly LlmPromptInput[] =>
+    ids.map((source) => ({ source, encoding: "json" }));
+  const fieldsOf = (id: KebabIdent): readonly LlmPromptInput[] => {
+    const node = byId.get(id);
+    if (node === undefined || node.kind === "human-review") return [];
+    return direct(node.kind === "map" ? mapOutputSpec(node) : node.output);
   };
 
   switch (s.shape) {
@@ -685,20 +868,18 @@ const llmInputFields = (dag: AuthoredDag, p: NodePlan): readonly string[] => {
       // predecessor that actually produces fields (mirrors effectiveOutName).
       let j = i - 1;
       while (j >= 0 && byId.get(s.order[j]!)?.kind === "human-review") j--;
-      return j < 0 ? dag.input.fields.map((f) => f.name) : fieldsOf(s.order[j]!);
+      return j < 0 ? direct(graph.input) : fieldsOf(s.order[j]!);
     }
     case "fan-out":
     case "diamond":
-      if (p.node.id === s.source) return dag.input.fields.map((f) => f.name);
-      if (p.node.id === s.join) return s.branches; // fan-in keys
+      if (p.node.id === s.source) return direct(graph.input);
+      if (p.node.id === s.join) return fanIn(s.branches);
       return fieldsOf(s.source);
     case "router":
-      return p.node.id === s.classifier
-        ? dag.input.fields.map((f) => f.name)
-        : fieldsOf(s.classifier);
+      return p.node.id === s.classifier ? direct(graph.input) : fieldsOf(s.classifier);
     case "sources":
-      if (p.node.id === s.join) return s.sources; // fan-in keys
-      if (p.node.id === s.assemble) return [s.join, "$input"];
+      if (p.node.id === s.join) return fanIn(s.sources);
+      if (p.node.id === s.assemble) return fanIn([s.join, "$input"]);
       return []; // a source node consumes nothing
     default:
       // Keep this switch exhaustive: a newly-added Shape must fail compilation
@@ -712,22 +893,29 @@ const llmInputFields = (dag: AuthoredDag, p: NodePlan): readonly string[] => {
 // sets `RESERVED_IDENTIFIERS` is built from — an import this function emits is
 // reserved at parse time by construction.
 const buildImports = (dag: AuthoredDag, hasLlm: boolean): string => {
-  const kinds = [...new Set(dag.nodes.map((n) => n.kind))];
-  const helper = SHAPE_HELPER_NAME[dag.structure.shape];
+  const hasDirectLlm = dag.nodes.some((node) => node.kind === "llm");
+  const kinds = [...new Set(dag.nodes.flatMap((node) => [
+    node.kind,
+    ...(node.kind === "map" ? node.child.nodes.map((child) => child.kind) : []),
+  ]))];
+  const helpers = [...new Set([
+    SHAPE_HELPER_NAME[dag.structure.shape],
+    ...dag.nodes.flatMap((node) =>
+      node.kind === "map" ? [SHAPE_HELPER_NAME[node.child.structure.shape]] : [],
+    ),
+  ])];
 
-  // `ok(...)` appears only in the placeholder fetch/transform/source bodies —
-  // llm factories return through the confidence spread and human-review gates
-  // have no body — so an all-llm/review DAG must not import it (mirrors the
-  // `confidence`/hasLlm gating; an unused import is lint noise in every
-  // generated module).
-  const needsOk = dag.nodes.some(
-    (n) => n.kind === "fetch" || n.kind === "transform" || n.kind === "source",
+  // `ok(...)` appears only in generated fetch/transform/source placeholder
+  // bodies. The collect-map constructor owns its fixed reducer, while llm and
+  // human-review nodes emit no `ok`, so an all-llm map must not import it.
+  const needsOk = kinds.some(
+    (kind) => kind === "fetch" || kind === "transform" || kind === "source",
   );
 
   const names = [
     ...(hasLlm ? [FIXED_IMPORT_NAME.confidence] : []),
     ...kinds.map((k) => NODE_FACTORY_NAME[k]),
-    helper,
+    ...helpers,
     ...(needsOk ? [FIXED_IMPORT_NAME.ok] : []),
   ].sort();
 
@@ -736,7 +924,7 @@ const buildImports = (dag: AuthoredDag, hasLlm: boolean): string => {
     `import {`,
     ...names.map((n) => `  ${n},`),
     `} from "@fuguejs/framework";`,
-    ...(hasLlm ? [`import type { ${FIXED_IMPORT_NAME.llmNodeDefType} } from "@fuguejs/framework";`] : []),
+    ...(hasDirectLlm ? [`import type { ${FIXED_IMPORT_NAME.llmNodeDefType} } from "@fuguejs/framework";`] : []),
     `import type { ${FIXED_IMPORT_NAME.dagRegistrationType} } from "@fuguejs/host/contract";`,
   ].join("\n");
 };

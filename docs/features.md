@@ -28,6 +28,7 @@ Fugue is a DAG-shaped, durable runtime for LLM-bearing workflows. This document 
 20. [Architecture Enforcement](#20-architecture-enforcement)
 21. [Prompt Caching](#21-prompt-caching)
 22. [Per-Run Spend Budget](#22-per-run-spend-budget)
+23. [Runtime-Width Map Nodes](#23-runtime-width-map-nodes)
 
 ---
 
@@ -1096,6 +1097,84 @@ durable.” The stock host remains explicitly Redis-first with that memory fallb
 
 ---
 
+## 23. Runtime-Width Map Nodes
+
+### What It Does
+
+A map node applies one statically defined child DAG to every element of an array
+whose length is known only at runtime. It remains **one node** in the outer DAG,
+with one gathered output and an author-declared positive `maxWidth`.
+
+```ts
+const scoreItems = createMapNode({
+  id: "score-items",
+  inputSchema: z.object({ items: z.array(ItemSchema) }),
+  outputSchema: z.object({ results: z.array(ScoreSchema) }),
+  widthFrom: "items",
+  maxWidth: 25,
+  child: scoreItemDag,
+  childOutputSchema: ScoreSchema,
+  reduce: (results) => ok({ results: [...results] }),
+});
+```
+
+The closed `AuthoredDag` format can generate the same construct without accepting
+code strings. `map` is a **node kind inside an existing static structure**, not a
+whole-DAG shape:
+
+```json
+{
+  "id": "score-items",
+  "kind": "map",
+  "purpose": "Score every item",
+  "widthFrom": "items",
+  "maxWidth": 25,
+  "child": {
+    "id": "score-item-child",
+    "nodes": [
+      {
+        "id": "score-item",
+        "kind": "transform",
+        "purpose": "Score one item",
+        "output": { "fields": [{ "name": "score", "type": { "kind": "number" } }] }
+      }
+    ],
+    "structure": { "shape": "linear", "order": ["score-item"] }
+  },
+  "gather": { "kind": "collect", "field": "results" }
+}
+```
+
+The predecessor declares `items` as
+`{"kind":"array","element":{"fields":[...]}}`. The item schema becomes the
+child input schema, and collect derives the outer output as an array of the child
+output. Authored reducers are deliberately closed to `collect`; arbitrary function
+source, expressions, dynamic imports, and `eval` are not part of the format.
+
+`fugue describe` exposes `widthFrom`, `maxWidth`, child DAG id, and authored gather
+metadata. `fugue visualize` and compose render one plate labelled with symbolic
+`n` and `0 ≤ n ≤ maxWidth`; child nodes are not projected into outer waves.
+
+### What It Catches
+
+- A non-array/missing `widthFrom` fails closed instead of iterating nonsense.
+- A resolved width above `maxWidth` fails before child work; values are never silently truncated.
+- Every completed index is durably acknowledged under map/index/execution-epoch addressing, so process replacement reruns only missing work.
+- A reroute advances the epoch, preventing stale completions from satisfying new work.
+- Corrupt fan checkpoints refuse execution rather than looking like missing work and repeating effects.
+- Authored child maps, child human review, no-join child fan-outs, and router terminals with incompatible outputs are rejected before code generation.
+
+### Why It Matters
+
+Static `defineFanOut` is right when branch count is known in source. A map is for
+rosters, search results, batches, and reviewer sets whose width comes from data.
+Bounding width preserves reviewable worst-case fan size; prompt caching and the
+per-run spend authority keep each child economically accountable. Whole-fan budget
+projection remains the separate PR-D admission improvement; v1 execution is
+sequential and does not claim concurrent fan scheduling.
+
+---
+
 ## Quick Reference: Error → Feature Mapping
 
 | Failure Mode | Feature That Catches It |
@@ -1124,3 +1203,6 @@ durable.” The stock host remains explicitly Redis-first with that memory fallb
 | Cache breakpoints accumulating past the provider cap | Rolling breakpoint, applied to a copy |
 | Enabling caching silently shrinks a run's metered tokens | Provider-normalised inclusive `tokensIn` |
 | A cache policy that quietly does nothing | Inert-policy warning + `ai.prompt_cache.effective` |
+| Runtime array exceeds its reviewed fan bound | Map `maxWidth` refusal (never truncation) |
+| Crash repeats already-acknowledged fan indices | Composite map/index/epoch completion addressing |
+| Dynamic fan is drawn as guessed runtime boxes | One bounded Mermaid map plate |

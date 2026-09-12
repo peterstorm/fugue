@@ -15,6 +15,12 @@ review/Run state. Parent owns source integration, canonical review, final valida
 and publication. The documentation worker records the supported contract only and
 does not stage or commit.
 
+> **Completion postscript (2026-09-12).** The pending language below is the
+> immutable worker-era evidence boundary. Parent validation completed, PR #46
+> merged as `f93fbf8` on 2026-09-08, and PR #47's canonical shared verification
+> passed on merge commit `3ad7321`. This postscript records those later facts
+> without rewriting historical counts or claiming npm publication/deployment.
+
 ## Governing contract
 
 - [CONTEXT](../../CONTEXT.md) — ubiquitous language and invariants.
