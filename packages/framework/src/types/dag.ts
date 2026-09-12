@@ -17,6 +17,8 @@ export type MapNodeDef<I = unknown, ChildOut = unknown, O = unknown> =
       childOutputSchema: z.ZodType<ChildOut>;
       widthFrom: WidthFrom;
       maxWidth: MaxWidth;
+      /** Present only when the reducer came from the closed authored collect gather. */
+      authoredGather?: Readonly<{ readonly kind: "collect"; readonly field: string }>;
       reduce: (results: readonly ChildOut[]) => Result<O, FrameworkError>;
     }>;
   }>;

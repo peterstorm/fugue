@@ -171,7 +171,10 @@ host's durable execution path). Ordinary `NodeDef` remains callable;
 `MapNodeConfig<I, ChildOut, O>` takes `id`, `inputSchema`, `outputSchema`,
 `widthFrom` (one field name, not a path/expression), `maxWidth` (positive safe
 integer), `child: DagDef`, `childOutputSchema`, and
-`reduce: (results: readonly ChildOut[]) => Result<O, FrameworkError>`.
+`reduce: (results: readonly ChildOut[]) => Result<O, FrameworkError>`. The optional
+`authoredGather` descriptor is emitted by deterministic authored-map codegen so
+describe/Mermaid can report a truthful collect field; it is metadata and never
+replaces or executes the reducer.
 
 ```ts
 import { z } from "zod";
@@ -267,9 +270,82 @@ rubric records are owned frozen snapshots, so alias mutation cannot replace the
 captured evaluator definition. Opaque schema/function references and closure state
 are not recursively cloned, and caller-owned values are not frozen. This adds no
 recursive child fingerprint, indexed broker audit
-dimension, or root aggregation of child judge/guardrail summaries. CLI authored-map
-shapes/plate rendering and whole-fan budget projection are separate, unimplemented
-F1 follow-ups; `defineFanOut` remains author-time parallel sibling width.
+dimension, or root aggregation of child judge/guardrail summaries. Whole-fan budget
+projection remains the separate PR-D follow-up; `defineFanOut` remains author-time
+parallel sibling width.
+
+#### Closed authored maps (`fugue new --from` / `fugue compose`)
+
+`map` is an authored **node kind** placed in any existing static structure role whose
+input has a directly addressable array field. It is not a `DAG_SHAPES` member and does
+not add `fugue new --shape map` or a `defineMap` helper.
+
+```json
+{
+  "fugueAuthored": 1,
+  "name": "score-batch",
+  "team": "risk",
+  "description": "Scope and score records",
+  "input": {
+    "fields": [{
+      "name": "items",
+      "type": {
+        "kind": "array",
+        "element": {
+          "fields": [
+            { "name": "recordId", "type": { "kind": "string" } },
+            { "name": "amount", "type": { "kind": "number" } }
+          ]
+        }
+      }
+    }]
+  },
+  "nodes": [{
+    "id": "score-items",
+    "kind": "map",
+    "purpose": "Score every record",
+    "widthFrom": "items",
+    "maxWidth": 25,
+    "child": {
+      "id": "score-item-child",
+      "nodes": [{
+        "id": "score-item",
+        "kind": "transform",
+        "purpose": "Score one record",
+        "output": {
+          "fields": [{ "name": "score", "type": { "kind": "number" } }]
+        }
+      }],
+      "structure": { "shape": "linear", "order": ["score-item"] }
+    },
+    "gather": { "kind": "collect", "field": "results" }
+  }, {
+    "id": "finish",
+    "kind": "transform",
+    "purpose": "Summarize collected scores",
+    "output": {
+      "fields": [{ "name": "count", "type": { "kind": "number" } }]
+    }
+  }],
+  "structure": { "shape": "linear", "order": ["score-items", "finish"] }
+}
+```
+
+The important closed contracts are:
+
+- `widthFrom` is one field identifier, not a path/expression, and must name an
+  array field in the map's derived direct input.
+- `maxWidth` is a positive safe integer.
+- The inline child reuses `linear`, `fan-out`, `diamond`, `router`, or `sources`.
+  Child maps and human review are rejected; child fan-out requires a join; router
+  terminals must expose the same ordered output field names/types.
+- Authored maps omit `output`. `{ "kind": "collect", "field": "results" }`
+  derives `z.object({ results: z.array(ChildOutputSchema) })` and the reducer.
+  No authored reducer source or expression is accepted.
+- Child LLM prompts are named `<dag>-<map>@<child>`, keeping them disjoint from
+  ordinary prompt names while remaining deterministic.
+- Describe/Mermaid keep the child out of outer nodes, edges and waves. One map
+  plate shows the symbolic width and inclusive `0..maxWidth` bound.
 
 ### `createLlmNode` — structured LLM call with prompt template
 

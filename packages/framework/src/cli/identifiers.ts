@@ -212,8 +212,11 @@ export const fanInConstName = (id: KebabIdent): string => `${pascalCase(id)}FanI
 /** LLM node factory (the injectable model seam): `summarize` → `createSummarize`. */
 export const llmFactoryName = (id: KebabIdent): string => `create${pascalCase(id)}`;
 
-/** Module-level node const for non-llm nodes: `fetch-record` → `fetchRecord`. */
+/** Module-level node const for ordinary non-llm nodes: `fetch-record` → `fetchRecord`. */
 const nodeConstName = (id: KebabIdent): string => camelCase(id);
+
+/** Factory enclosing an authored map's inline child declarations. */
+export const mapFactoryName = (id: KebabIdent): string => `create${pascalCase(id)}Map`;
 
 /**
  * The `<camel>Node` identifier claimed for llm nodes: `summarize` →
@@ -231,7 +234,11 @@ export const llmNodeRefName = (id: KebabIdent): string => `${camelCase(id)}Node`
  * in-module from `NODE_FACTORY_NAME`, so this module stays import-free).
  */
 export const nodeRefName = (id: KebabIdent, kind: AuthoredNodeKind): string =>
-  kind === "llm" ? llmNodeRefName(id) : nodeConstName(id);
+  kind === "llm"
+    ? llmNodeRefName(id)
+    : kind === "map"
+      ? mapFactoryName(id)
+      : nodeConstName(id);
 
 // The two DAG-level constructors take the branded `KebabIdent`, exactly like
 // the node-level constructors above: both the authored pipeline (`dag.name`)
@@ -271,6 +278,7 @@ export const NODE_FACTORY_NAME = {
   llm: "createLlmNode",
   "human-review": "createHumanReviewNode",
   source: "createSourceNode",
+  map: "createMapNode",
 } as const;
 
 /**
@@ -369,6 +377,7 @@ interface IdentifierSource {
 export const generatedIdentifiersFor = (node: IdentifierSource): readonly string[] => [
   nodeConstName(node.id),
   ...(node.kind === "llm" ? [llmNodeRefName(node.id), llmFactoryName(node.id)] : []),
+  ...(node.kind === "map" ? [mapFactoryName(node.id)] : []),
   schemaConstName(node.id),
   fanInConstName(node.id),
 ];

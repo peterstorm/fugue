@@ -1,14 +1,16 @@
 # Plan: F1 — Runtime-width fan-out
 
 **Created:** 2026-09-06
-**Status:** **PR-A shipped 2026-09-06** (ADR-0085). PR-B's initial implementation was
-recorded on 2026-09-07; that record was not proof of PR46 correctness closure or merge.
-**2026-09-08 correctness closure implemented; parent final validation/publication pending.**
-The supported runtime contract is §13 and [ADR-0086](../adr/0086-root-owned-mapped-child-execution.md).
-PR-C and PR-D remain outside this closure. §§1–11 preserve the original problem/design
-record; supersession notes distinguish proposals from current behavior. §12 records the
-initial PR-B decisions and explicitly marks those replaced by closure.
-**Branch:** `feat/f1-map-node` (original planning branch: `feat/f1-runtime-width-fanout`)
+**Status:** **PR-A shipped in PR #45 on 2026-09-06** (ADR-0085). **PR-B and its
+correctness closure shipped in PR #46 on 2026-09-08** (ADR-0086). PR #47 then made
+the repository's canonical verification gate cover the complete CI/release surface.
+PR-C's authored-map and plate-rendering candidate is on `feat/f1-authored-map`; PR-D
+whole-fan budget projection remains separate. The supported runtime contract is §13
+and [ADR-0086](../adr/0086-root-owned-mapped-child-execution.md). §§1–11 preserve the
+original problem/design record; supersession notes distinguish proposals from current
+behavior. §12 records the initial PR-B decisions and explicitly marks those replaced by
+closure.
+**Branch:** `feat/f1-authored-map` (PR-A: `feat/f1-runtime-width-fanout`; PR-B: `feat/f1-map-node`)
 **Baseline:** `main` @ `3845ad9` (0.5.1 — F6, F4 and F3 all merged; Bun pinned to 1.4.2 by ADR-0084)
 **Roadmap position:** F1 in `docs/spikes/2026-08-02-graph-engineering-findings.md` §F1. The recommended
 order is `F4 + F3 → F1 → F2`. Both preconditions have now shipped, and the spike's gate — *"Do not
@@ -209,12 +211,20 @@ this is one change, not two. A mapped node renders as a single node with a multi
 (`×n`, `≤ maxWidth`), not an unrolled fan — the width is not known at render time, and drawing a
 guessed N would be a lie in a diagram people read to understand topology.
 
-### D6 — `AuthoredDag` gains a closed `map` shape
+### D6 — `AuthoredDag` gains a closed `map` node variant
 
-A `widthFrom` **field reference** added to the closed schema in `cli/authored.ts`, in the same
-register as that file's existing `when: { field, equals }`. `DAG_SHAPES` (`types/dag.ts`) gains a member;
-the doc comment there already states that both `DagProvenance` and the CLI's `SHAPES` derive from
-that tuple, so a new shape is added in exactly one place and the projections cannot drift.
+**Superseded for PR-C:** `map` is not a whole-DAG shape and does not join `DAG_SHAPES`.
+That tuple names static topology-helper provenance and drives `fugue new --shape`; adding
+`map` would require a false `defineMap` helper and contradict D1. Instead, a map is one
+closed authored **node** embedded in any existing static structure role with a directly
+addressable input schema.
+
+The wire variant carries `widthFrom` (one field reference), positive `maxWidth`, an inline
+static child DAG, and `{ kind: "collect", field }`. Array fields use the closed
+`{ kind: "array", element: SchemaSpec }` type. Child maps and human review are
+unrepresentable; child fan-out requires a join, and router terminals have one common
+output shape. The collect gather derives the map output and deterministic reducer, so no
+expression, function source, or eval-like mechanism enters authored JSON.
 
 ### D7 — HITL is rejected inside a mapped sub-DAG, at module load
 
@@ -271,7 +281,7 @@ whose semantics were undefined.
 | FR-F1-007 | Resume re-runs only the indices with no durable entry, on **Redis and the host writer**, not only on the file backend. |
 | FR-F1-008 | Canonical (non-mapped) checkpoint keys are byte-identical to `3845ad9` on every backend. No migration. |
 | FR-F1-009 | A mapped node renders as one plate with a multiplicity annotation in `describedToMermaid`. |
-| FR-F1-010 | `AuthoredDag` accepts a `map` shape with a `widthFrom` field reference through its closed schema; no expression evaluation. |
+| FR-F1-010 | `AuthoredDag` accepts a closed `map` node variant with a direct `widthFrom` array-field reference, bounded inline static child, and collect gather; no expression evaluation. |
 | FR-F1-011 | A node carrying `humanReview` inside a mapped sub-DAG is rejected at module load, with an error naming the gather-then-review alternative (D7). |
 
 ---
@@ -299,7 +309,7 @@ whose semantics were undefined.
 |---|---|---|
 | **PR-A** | Bring `redis-checkpointer.ts` and `InMemoryCheckpointer` up to the composite address `Checkpointer.saveNode` already declares, and move composite expectations into the shared `_checkpointer-suite.ts`. No `map` node yet. | Independently valuable and independently testable: it closes the F6-era gap where ADR-0075's address exists in the port but is honored by only one of three backends. Landing it first means the F1 runtime work has a durable address to write to instead of inventing one. |
 | **PR-B** | `MapWidth` parsing, the `map` node kind, sub-DAG execution, the typed reducer, `defineDag` validation (incl. FR-F1-011), **and the index dimension on the host's `CheckpointWriter` / `buildCheckpointKey`**. | The functional core. The host writer moves here deliberately — see the note below. |
-| **PR-C** | `AuthoredDag` closed `map` shape + `widthFrom`; `DAG_SHAPES` member; plate rendering in `describedToMermaid`. | The authoring and visualization surface; no runtime risk. |
+| **PR-C** | `AuthoredDag` closed `map` node + array field/`widthFrom` + inline static child + collect gather; map-specific describe metadata; one-plate rendering in `describedToMermaid`. `DAG_SHAPES` deliberately stays unchanged. | The authoring and visualization surface; no dynamic code or runtime-topology expansion. |
 | **PR-D** | Budget projection over `maxWidth` at admission, if §9 keeps it in scope. | Isolated to the F3 admission path. |
 
 **Why the host writer sits in PR-B, not PR-A** (refined 2026-09-06 after reading the code). The
@@ -329,7 +339,7 @@ requirements work below are historical proposals, not outstanding PR46 instructi
   negative, so closing it should amend that record rather than leave it stale.
 - `docs/features.md` — a new numbered feature section, following §21/§22's "What It Does / What It
   Catches / Why It Matters" structure.
-- `docs/requirements.md` traceability entries for FR-F1-001..010.
+- `docs/requirements.md` traceability entries for FR-F1-001..011.
 
 ---
 
@@ -509,9 +519,9 @@ records defect groups, acceptance evidence and validation status.
 
 **Not part of this guarantee:** recursive child fingerprints, indexed broker audit
 metadata, or root aggregation of child judge/guardrail summaries. These are deferred
-advisories, not silently implemented closure criteria. PR-C authoring/plate rendering,
-PR-D fan budget projection, nested/HITL/indexed freshness semantics and concurrent fan
-scheduling remain separate work.
+advisories, not silently implemented closure criteria. PR-C authoring/plate rendering is
+implemented on its separate candidate branch; PR-D fan budget projection,
+nested/HITL/indexed freshness semantics and concurrent fan scheduling remain separate work.
 
 **Evidence status:** the earlier full workspace baseline passed **7,141 tests,
 3 skipped, 0 failed** before snapshot/codec corrections (**3,721 framework tests**
@@ -523,5 +533,6 @@ snapshot/describe **8 pass/15 fail → 103 pass**, and writer **92 pass/7 fail �
 final focused pass**. Both framework workers report **3,752 pass, 0 fail, 0 skip**
 with source/bin typechecks green; these overlapping runs are not additive or final
 whole-candidate certification. Full counts, mutation controls, prerequisites and
-scope caveats live in the closure record. Parent final validation, registered
-installation and publication remain pending.
+scope caveats live in the closure record. PR-B parent validation completed and PR #46 merged on 2026-09-08; PR #47's shared
+verification workflow subsequently passed on `main`. These facts do not claim npm
+publication or close PR-C/PR-D.

@@ -23,6 +23,8 @@ export interface MapNodeConfig<I, ChildOut, O> {
   readonly child: DagDef;
   /** Applied to fresh AND replayed child outputs before reduction. */
   readonly childOutputSchema: z.ZodType<ChildOut>;
+  /** Metadata for a reducer generated from the closed authored collect gather. */
+  readonly authoredGather?: Readonly<{ readonly kind: "collect"; readonly field: string }>;
   /** Ascending index order, including the legal empty fan. */
   readonly reduce: (results: readonly ChildOut[]) => Result<O, FrameworkError>;
 }
@@ -49,6 +51,9 @@ export const createMapNode = <I, ChildOut, O>(
       childOutputSchema: config.childOutputSchema,
       widthFrom: from,
       maxWidth: max,
+      ...(config.authoredGather !== undefined
+        ? { authoredGather: Object.freeze({ ...config.authoredGather }) }
+        : {}),
       reduce: config.reduce,
     }),
   });

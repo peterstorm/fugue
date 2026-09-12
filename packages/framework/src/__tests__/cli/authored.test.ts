@@ -433,7 +433,7 @@ describe("AuthoredDag schema", () => {
         const problem = parsed.problems.find((p) => p.startsWith(`nodes.${idx}.output`));
         expect(problem).toBeDefined();
         expect(problem).toContain(
-          "output is required for fetch/transform/llm/source nodes — only human-review nodes omit it",
+          "output is required for fetch/transform/llm/source nodes — human-review and map nodes derive/forward output and omit it",
         );
       }
     }
@@ -443,7 +443,7 @@ describe("AuthoredDag schema", () => {
     // The discriminated union's default for a bad discriminator is a bare
     // "Invalid input" — useless to the compose repair loop, so the union
     // error map must name the full kind vocabulary.
-    const vocabulary = '"fetch"|"transform"|"llm"|"human-review"|"source"';
+    const vocabulary = '"fetch"|"transform"|"llm"|"human-review"|"source"|"map"';
 
     const unknown = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
     (unknown.nodes[0] as { kind: string }).kind = "fletch";

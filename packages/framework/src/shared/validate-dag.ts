@@ -175,15 +175,27 @@ const snapshotMapping = (
     if (!Array.isArray(requires) || requires.length !== 1 || requires[0] !== "checkpointer" || "run" in node) {
       return err(validationErr(id, `map '${id}' must declare only checkpointer and a mapping descriptor, not run`));
     }
-    const { child, childOutputSchema, reduce, widthFrom, maxWidth } = node.mapping;
+    const { child, childOutputSchema, reduce, widthFrom, maxWidth, authoredGather } = node.mapping;
+    const validGather = authoredGather === undefined ||
+      (authoredGather !== null && authoredGather.kind === "collect" &&
+        typeof authoredGather.field === "string" && asWidthFrom(authoredGather.field) !== undefined);
     if (typeof widthFrom !== "string" || asWidthFrom(widthFrom) === undefined ||
         asMaxWidth(maxWidth) === undefined || typeof reduce !== "function" ||
-        typeof childOutputSchema?.safeParse !== "function") {
+        typeof childOutputSchema?.safeParse !== "function" || !validGather) {
       return err(validationErr(id, `map '${id}' requires a valid immutable mapping descriptor`));
     }
     const snapshot = snapshotMappedChild(id, child);
     if (!snapshot.ok) return snapshot;
-    return ok(Object.freeze({ child: snapshot.value, childOutputSchema, reduce, widthFrom, maxWidth }));
+    return ok(Object.freeze({
+      child: snapshot.value,
+      childOutputSchema,
+      reduce,
+      widthFrom,
+      maxWidth,
+      ...(authoredGather !== undefined
+        ? { authoredGather: Object.freeze({ ...authoredGather }) }
+        : {}),
+    }));
   } catch (cause) {
     return err(validationErr(id, `invalid map '${id}' descriptor: ${safeErrorMessage(cause)}`));
   }

@@ -34,7 +34,7 @@ import {
 } from "./identifiers.js";
 import { assertNever } from "./types.js";
 import type { Shape } from "./new-templates.js";
-import { CONFIDENCE_BUCKET } from "./vocabulary.js";
+import { CONFIDENCE_BUCKET, CONFIDENCE_FIELD } from "./vocabulary.js";
 
 // ---------------------------------------------------------------------------
 // Field / schema specs (closed vocabulary)
@@ -85,36 +85,44 @@ const NO_FUGUE_BODY_MARKER = {
     "must not contain '@fugue-body' (the integrity-projection marker — it would poison the structural hash of the generated module)",
 } as const;
 
-const FieldTypeSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("string") }).strict(),
-  z.object({ kind: z.literal("number") }).strict(),
-  z.object({ kind: z.literal("boolean") }).strict(),
-  z
-    .object({
-      kind: z.literal("enum"),
-      // Enum values never reach `//` comments, but they DO reach another
-      // single-line context: the prompt body's JSON response shape (jsonShape
-      // in authored-codegen renders every value inline). A line terminator
-      // there garbles the prompt even though codegen JSON-escapes the z.enum
-      // literal. `.readonly()` so the inferred type is ReadonlyArray (and the
-      // parsed value is frozen) — enum values are facts, never mutated.
-      values: z
-        .array(
-          z
-            .string()
-            .min(1)
-            .regex(SINGLE_LINE, "must be a single line")
-            .refine(NO_TEMPLATE_OPEN.check, NO_TEMPLATE_OPEN.message)
-            .refine(NO_FUGUE_BODY_MARKER.check, NO_FUGUE_BODY_MARKER.message),
-        )
-        .min(2)
-        .readonly(),
-    })
-    .strict(),
-]);
-export type FieldType = z.infer<typeof FieldTypeSchema>;
+export type FieldType =
+  | { readonly kind: "string" }
+  | { readonly kind: "number" }
+  | { readonly kind: "boolean" }
+  | { readonly kind: "enum"; readonly values: readonly string[] }
+  | { readonly kind: "array"; readonly element: SchemaSpec };
 
-const FieldSpecSchema = z
+export interface FieldSpec {
+  readonly name: string;
+  readonly type: FieldType;
+  readonly description?: string;
+}
+
+export interface SchemaSpec {
+  readonly fields: readonly FieldSpec[];
+}
+
+const enumValue = z
+  .string()
+  .min(1)
+  .regex(SINGLE_LINE, "must be a single line")
+  .refine(NO_TEMPLATE_OPEN.check, NO_TEMPLATE_OPEN.message)
+  .refine(NO_FUGUE_BODY_MARKER.check, NO_FUGUE_BODY_MARKER.message);
+
+// Recursive because an authored object field may itself be an array of
+// objects. The recursion is data-only and bounded by the JSON document; it
+// never admits executable schema source.
+const FieldTypeSchema: z.ZodType<FieldType, FieldType> = z.lazy(() =>
+  z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("string") }).strict(),
+    z.object({ kind: z.literal("number") }).strict(),
+    z.object({ kind: z.literal("boolean") }).strict(),
+    z.object({ kind: z.literal("enum"), values: z.array(enumValue).min(2).readonly() }).strict(),
+    z.object({ kind: z.literal("array"), element: SchemaSpecSchema }).strict(),
+  ]),
+);
+
+const FieldSpecSchema: z.ZodType<FieldSpec, FieldSpec> = z
   .object({
     name: z
       .string()
@@ -142,20 +150,11 @@ const FieldSpecSchema = z
       seen.add(v);
     }
   });
-export type FieldSpec = z.infer<typeof FieldSpecSchema>;
 
-/**
- * One definition serves both `SchemaSpecSchema` (the shared spec) and the
- * required-`output` slot on nodes — the ONLY difference is the message a
- * MISSING value produces. `missingMessage` is a thunk so the output slot can
- * name the kinds that require an output, derived from the node variants
- * declared further down (the thunk runs at parse time, so ordering is safe).
- */
-const schemaSpec = (missingMessage?: () => string) =>
+/** One schema parser serves inputs, outputs, array elements and map gathers. */
+const schemaSpec = (missingMessage?: () => string): z.ZodType<SchemaSpec, SchemaSpec> =>
   z
     .object(
-      // `.readonly()` — field lists are ReadonlyArray in the inferred types
-      // (consumers only map/iterate; extension goes through spread copies).
       { fields: z.array(FieldSpecSchema).min(1).readonly() },
       missingMessage === undefined
         ? undefined
@@ -172,8 +171,7 @@ const schemaSpec = (missingMessage?: () => string) =>
       }
     });
 
-const SchemaSpecSchema = schemaSpec();
-export type SchemaSpec = z.infer<typeof SchemaSpecSchema>;
+const SchemaSpecSchema: z.ZodType<SchemaSpec, SchemaSpec> = schemaSpec();
 
 // ---------------------------------------------------------------------------
 // Nodes
@@ -223,11 +221,12 @@ const nodePurpose = z
  * output must state which kinds require one and which kind omits it.
  */
 const requiredOutput = schemaSpec(
-  () => `output is required for ${OUTPUT_NODE_KINDS.join("/")} nodes — only human-review nodes omit it`,
+  () => `output is required for ${OUTPUT_NODE_KINDS.join("/")} nodes — human-review and map nodes derive/forward output and omit it`,
 );
 
 /**
- * A node kind whose output spec is REQUIRED — every kind except human-review.
+ * An ordinary node kind whose output spec is REQUIRED. Human-review forwards
+ * its predecessor and map derives its collect output, so both are separate variants.
  * Generic so each variant keeps its literal `kind` (the discriminated-union
  * type stays precise: `Extract<AuthoredNode, { kind: "llm" }>` works).
  */
@@ -237,7 +236,7 @@ const outputNode = <K extends string>(kind: K) =>
       id: nodeId,
       kind: z.literal(kind),
       purpose: nodePurpose,
-      /** Output field spec — required for every kind except human-review. */
+      /** Output field spec — required for each ordinary output-bearing kind. */
       output: requiredOutput,
     })
     .strict();
@@ -249,60 +248,37 @@ const outputNode = <K extends string>(kind: K) =>
  * just makes the kind/output dependency a parse-time fact instead of a
  * superRefine.
  */
-const authoredNodeVariants = [
+const outputNodeVariants = [
   outputNode("fetch"),
   outputNode("transform"),
   outputNode("llm"),
-  z
-    .object(
-      {
-        id: nodeId,
-        kind: z.literal("human-review"),
-        purpose: nodePurpose,
-      },
-      {
-        // The default strict-object issue is `Unrecognized key: "output"`,
-        // which names the key but not the rule — the compose repair loop
-        // feeds these messages to an LLM, so state the rule precisely.
-        // Sibling stray keys ride along in the SAME issue (`issue.keys`), so
-        // they must survive into the message too — swallowing them costs the
-        // repair loop a round. When `output` itself is absent, Zod's default
-        // unrecognized-keys message already says everything there is to say.
-        error: (issue) => {
-          if (issue.code !== "unrecognized_keys" || !issue.keys.includes("output")) {
-            return undefined;
-          }
-          const rule =
-            "human-review nodes must not declare output (a review gate passes through the reviewed node's schema)";
-          const siblings = issue.keys.filter((k) => k !== "output");
-          return siblings.length === 0
-            ? rule
-            : `${rule}; also unrecognized: ${siblings.map((k) => JSON.stringify(k)).join(", ")}`;
-        },
-      },
-    )
-    .strict(),
   outputNode("source"),
 ] as const;
 
-/**
- * Kind vocabularies DERIVED from the variant literals above — the single
- * source; never hand-write a second copy of the kind list.
- */
-const NODE_KINDS = authoredNodeVariants.map((v) => v.shape.kind.value);
-const OUTPUT_NODE_KINDS = authoredNodeVariants
-  .filter((v) => "output" in v.shape)
-  .map((v) => v.shape.kind.value);
-const KIND_LIST = NODE_KINDS.map((k) => JSON.stringify(k)).join("|");
+const HumanReviewNodeSchema = z
+  .object(
+    {
+      id: nodeId,
+      kind: z.literal("human-review"),
+      purpose: nodePurpose,
+    },
+    {
+      error: (issue) => {
+        if (issue.code !== "unrecognized_keys" || !issue.keys.includes("output")) return undefined;
+        const rule =
+          "human-review nodes must not declare output (a review gate passes through the reviewed node's schema)";
+        const siblings = issue.keys.filter((k) => k !== "output");
+        return siblings.length === 0
+          ? rule
+          : `${rule}; also unrecognized: ${siblings.map((k) => JSON.stringify(k)).join(", ")}`;
+      },
+    },
+  )
+  .strict();
 
-const AuthoredNodeSchema = z.discriminatedUnion("kind", authoredNodeVariants, {
-  // Zod's default for an unknown or missing discriminator is a bare
-  // "Invalid input" — useless to the compose repair loop. Name the full
-  // vocabulary; every other issue code falls through to its own message.
-  error: (issue) =>
-    issue.code === "invalid_union" ? `node kind must be one of ${KIND_LIST}` : undefined,
-});
-export type AuthoredNode = z.infer<typeof AuthoredNodeSchema>;
+const OUTPUT_NODE_KINDS = outputNodeVariants.map((variant) => variant.shape.kind.value);
+const ChildNodeSchema = z.discriminatedUnion("kind", outputNodeVariants);
+export type AuthoredChildNode = z.infer<typeof ChildNodeSchema>;
 
 // ---------------------------------------------------------------------------
 // Structure (one variant per DAG shape; mirrors the define* helpers)
@@ -326,8 +302,8 @@ const RouterCaseSchema = z
   .strict();
 export type RouterCase = z.infer<typeof RouterCaseSchema>;
 
-const StructureSchema = z.discriminatedUnion("shape", [
-  z.object({ shape: z.literal("linear"), order: z.array(nodeRef).min(2) }).strict(),
+const structureSchema = (minimumLinearNodes: number) => z.discriminatedUnion("shape", [
+  z.object({ shape: z.literal("linear"), order: z.array(nodeRef).min(minimumLinearNodes) }).strict(),
   z
     .object({
       shape: z.literal("fan-out"),
@@ -361,6 +337,9 @@ const StructureSchema = z.discriminatedUnion("shape", [
     })
     .strict(),
 ]);
+
+const StructureSchema = structureSchema(2);
+const ChildStructureSchema = structureSchema(1);
 type AuthoredStructure = z.infer<typeof StructureSchema>;
 
 // Compile-time proof that `StructureSchema`'s discriminated union covers exactly
@@ -378,33 +357,6 @@ const _structureCoversShapes: _StructureCoversShapes = true;
 const _structureNoExtraShapes: _StructureNoExtraShapes = true;
 void _structureCoversShapes;
 void _structureNoExtraShapes;
-
-// ---------------------------------------------------------------------------
-// The AuthoredDag
-// ---------------------------------------------------------------------------
-
-const BaseAuthoredDagSchema = z
-  .object({
-    /** Format discriminator + version for forward evolution. */
-    fugueAuthored: z.literal(1),
-    name: kebabIdentField("name must be kebab-case starting with a letter"),
-    // Parsed into the branded `Kebab` through the single smart constructor
-    // (mirrors `name`'s treatment) — so a parsed dag's `team` carries the
-    // proof the KEBAB rule passed, and consumers like `runCompose`'s --team
-    // comparison work brand-to-brand instead of trusting a bare string.
-    team: kebabField("team must be kebab-case"),
-    description: z
-      .string()
-      .min(1)
-      .regex(SINGLE_LINE, "must be a single line")
-      .refine(NO_TEMPLATE_OPEN.check, NO_TEMPLATE_OPEN.message)
-      .refine(NO_FUGUE_BODY_MARKER.check, NO_FUGUE_BODY_MARKER.message),
-    /** DAG input schema (the request). */
-    input: SchemaSpecSchema,
-    nodes: z.array(AuthoredNodeSchema).min(1),
-    structure: StructureSchema,
-  })
-  .strict();
 
 /**
  * Node ids referenced by a structure, with the role each plays — in dependency
@@ -443,6 +395,367 @@ export const structureRefs = (s: AuthoredStructure): ReadonlyArray<readonly [Keb
   }
 };
 
+// ---------------------------------------------------------------------------
+// Inline mapped children and the collect-only authored map node
+// ---------------------------------------------------------------------------
+
+const fieldTypeShape = (type: FieldType): unknown => {
+  if (type.kind !== "array") return type;
+  return {
+    kind: "array",
+    element: type.element.fields.map((field) => ({
+      name: field.name,
+      type: fieldTypeShape(field.type),
+    })),
+  };
+};
+
+const schemaShape = (spec: SchemaSpec): string =>
+  JSON.stringify(spec.fields.map((field) => ({
+    name: field.name,
+    type: fieldTypeShape(field.type),
+  })));
+
+const terminalRefs = (structure: AuthoredStructure): readonly KebabIdent[] => {
+  switch (structure.shape) {
+    case "linear":
+      return structure.order.length === 0 ? [] : [structure.order[structure.order.length - 1]!];
+    case "fan-out":
+      return structure.join === undefined ? [] : [structure.join];
+    case "diamond":
+      return [structure.join];
+    case "router":
+      return [...structure.cases.map((entry) => entry.to), structure.default];
+    case "sources":
+      return [structure.assemble];
+    default:
+      return assertNever(structure);
+  }
+};
+
+const addGraphReferenceIssues = (
+  nodes: readonly { readonly id: KebabIdent }[],
+  structure: AuthoredStructure,
+  ctx: z.RefinementCtx,
+): void => {
+  const byId = new Set(nodes.map((node) => node.id));
+  if (byId.size !== nodes.length) {
+    const seen = new Set<string>();
+    for (const node of nodes) {
+      if (seen.has(node.id)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `duplicate node id '${node.id}'` });
+      }
+      seen.add(node.id);
+    }
+  }
+
+  const referenced = new Map<string, number>();
+  for (const [id, role] of structureRefs(structure)) {
+    if (!byId.has(id)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `structure ${role} references unknown node '${id}'` });
+    }
+    referenced.set(id, (referenced.get(id) ?? 0) + 1);
+  }
+  for (const [id, count] of referenced) {
+    if (count > 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `node '${id}' is referenced ${count} times in the structure (each node plays exactly one role)`,
+      });
+    }
+  }
+  for (const node of nodes) {
+    if (!referenced.has(node.id)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `node '${node.id}' is not referenced by the structure` });
+    }
+  }
+};
+
+const addSourceRoleIssues = (
+  nodes: readonly { readonly id: KebabIdent; readonly kind: string }[],
+  structure: AuthoredStructure,
+  ctx: z.RefinementCtx,
+): void => {
+  const byId = new Map(nodes.map((node) => [node.id, node] as const));
+  if (structure.shape === "sources") {
+    for (const id of structure.sources) {
+      const node = byId.get(id);
+      if (node !== undefined && node.kind !== "source") {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `sources entry '${id}' must be kind "source" (got "${node.kind}")` });
+      }
+    }
+    for (const [role, id] of [["join", structure.join], ["assemble", structure.assemble]] as const) {
+      if (byId.get(id)?.kind === "source") {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${role} '${id}' must not be a source node` });
+      }
+    }
+    return;
+  }
+  for (const node of nodes) {
+    if (node.kind === "source") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `node '${node.id}' is kind "source" but shape is "${structure.shape}" — source nodes belong to the sources shape`,
+      });
+    }
+  }
+};
+
+const addRouterIssues = (
+  nodes: readonly AuthoredChildNode[],
+  structure: AuthoredStructure,
+  ctx: z.RefinementCtx,
+): void => {
+  if (structure.shape !== "router") return;
+  const byId = new Map(nodes.map((node) => [node.id, node] as const));
+  const classifier = byId.get(structure.classifier);
+  const classifierFields = classifier?.output.fields ?? [];
+  const labels = new Set<string>();
+  const predicates = new Set<string>();
+  for (const [index, entry] of structure.cases.entries()) {
+    const field = classifierFields.find((candidate) => candidate.name === entry.when.field);
+    if (field === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `cases[${index}] predicate field '${entry.when.field}' is not a field of classifier '${structure.classifier}' output` });
+    } else if (field.type.kind !== "enum") {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `cases[${index}] predicate field '${entry.when.field}' must be an enum (got ${field.type.kind}) — closed routing only` });
+    } else if (!field.type.values.includes(entry.when.equals)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `cases[${index}] 'equals: ${entry.when.equals}' is not a value of enum '${entry.when.field}' (${field.type.values.join(", ")})` });
+    }
+    if (labels.has(entry.label)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `cases[${index}] duplicate label '${entry.label}'` });
+    }
+    labels.add(entry.label);
+    const predicate = `${entry.when.field}\u0000${entry.when.equals}`;
+    if (predicates.has(predicate)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `cases[${index}] duplicate predicate {field: '${entry.when.field}', equals: '${entry.when.equals}'} — the case is unreachable` });
+    }
+    predicates.add(predicate);
+  }
+};
+
+const addIdentifierIssues = (
+  nodes: readonly Parameters<typeof generatedIdentifiersFor>[0][],
+  ctx: z.RefinementCtx,
+  reserved: ReadonlySet<string> = RESERVED_IDENTIFIERS,
+): void => {
+  const identifiers = nodes.map((node) => ({ node, names: generatedIdentifiersFor(node) }));
+  for (const { node, names } of identifiers) {
+    const camel = camelCase(node.id);
+    if (JS_RESERVED_WORDS.has(camel)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `node id '${node.id}' is reserved (camelCases to the JS reserved word '${camel}')` });
+    }
+    for (const name of names) {
+      if (reserved.has(name)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `node id '${node.id}' is reserved (generated identifier '${name}' collides with a generated or imported identifier)` });
+      }
+    }
+  }
+  for (let leftIndex = 0; leftIndex < identifiers.length; leftIndex++) {
+    for (let rightIndex = leftIndex + 1; rightIndex < identifiers.length; rightIndex++) {
+      const left = identifiers[leftIndex]!;
+      const right = identifiers[rightIndex]!;
+      if (left.node.id === right.node.id) continue;
+      const shared = left.names.filter((name) => right.names.includes(name));
+      if (shared.length > 0) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `node ids '${left.node.id}' and '${right.node.id}' generate colliding identifier(s): ${shared.join(", ")}` });
+      }
+    }
+  }
+};
+
+const childNodeOutputSpec = (node: AuthoredChildNode): SchemaSpec =>
+  node.kind === "llm" && !node.output.fields.some((field) => field.name === "confidence")
+    ? { fields: [...node.output.fields, CONFIDENCE_FIELD] }
+    : node.output;
+
+const ChildDagSchema = z
+  .object({
+    id: kebabIdentField("child DAG id must be kebab-case starting with a letter"),
+    nodes: z.array(ChildNodeSchema).min(1).readonly(),
+    structure: ChildStructureSchema,
+  })
+  .strict()
+  .superRefine((child, ctx) => {
+    addGraphReferenceIssues(child.nodes, child.structure, ctx);
+    addSourceRoleIssues(child.nodes, child.structure, ctx);
+    addRouterIssues(child.nodes, child.structure, ctx);
+    addIdentifierIssues(child.nodes, ctx);
+    for (const node of child.nodes) {
+      if (node.kind !== "llm") continue;
+      const confidence = node.output.fields.find((field) => field.name === "confidence");
+      if (confidence === undefined) continue;
+      const valid = confidence.type.kind === "enum" &&
+        confidence.type.values.length === CONFIDENCE_BUCKET.length &&
+        confidence.type.values.every((value, index) => value === CONFIDENCE_BUCKET[index]);
+      if (!valid) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `llm node '${node.id}' output field 'confidence' must be exactly {"kind":"enum","values":${JSON.stringify(CONFIDENCE_BUCKET)}}` });
+      }
+    }
+    if (child.structure.shape === "fan-out" && child.structure.join === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "mapped child fan-out requires a join so one child output schema is statically knowable" });
+    }
+    const byId = new Map(child.nodes.map((node) => [node.id, node] as const));
+    const terminals = terminalRefs(child.structure).flatMap((id) => {
+      const node = byId.get(id);
+      return node === undefined ? [] : [node];
+    });
+    const expected = terminals[0] === undefined ? undefined : childNodeOutputSpec(terminals[0]);
+    if (expected !== undefined) {
+      for (const terminal of terminals.slice(1)) {
+        if (schemaShape(childNodeOutputSpec(terminal)) !== schemaShape(expected)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `mapped child terminal '${terminal.id}' output must match terminal '${terminals[0]!.id}' field names and types`,
+          });
+        }
+      }
+    }
+  })
+  .transform((child) => {
+    const byId = new Map(child.nodes.map((node) => [node.id, node] as const));
+    const nodes = structureRefs(child.structure).flatMap(([id]) => {
+      const node = byId.get(id);
+      return node === undefined ? [] : [node];
+    });
+    return nodes.length === child.nodes.length ? { ...child, nodes } : child;
+  });
+
+export type AuthoredChildDag = z.infer<typeof ChildDagSchema>;
+
+export const childOutputSpec = (child: AuthoredChildDag): SchemaSpec => {
+  const terminal = terminalRefs(child.structure)[0];
+  const node = terminal === undefined ? undefined : child.nodes.find((candidate) => candidate.id === terminal);
+  if (node === undefined) {
+    throw new Error(`authored map invariant: child '${child.id}' has no terminal output`);
+  }
+  return childNodeOutputSpec(node);
+};
+
+const GatherSchema = z.object({
+  kind: z.literal("collect"),
+  field: z
+    .string()
+    .regex(IDENT, "gather field must be a JS identifier")
+    .refine((field) => !FORBIDDEN_FIELD_NAMES.has(field), "gather field '__proto__' is not allowed"),
+}).strict();
+
+const MapNodeSchema = z
+  .object(
+    {
+      id: nodeId,
+      kind: z.literal("map"),
+      purpose: nodePurpose,
+      widthFrom: z
+        .string()
+        .regex(IDENT, "widthFrom must be one field reference (a JS identifier)")
+        .refine((field) => !FORBIDDEN_FIELD_NAMES.has(field), "widthFrom '__proto__' is not allowed"),
+      maxWidth: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      child: ChildDagSchema,
+      gather: GatherSchema,
+    },
+    {
+      error: (issue) =>
+        issue.code === "unrecognized_keys" && issue.keys.includes("output")
+          ? "map nodes must not declare output; the collect gather derives it from the child output"
+          : undefined,
+    },
+  )
+  .strict();
+
+const authoredNodeVariants = [
+  outputNodeVariants[0],
+  outputNodeVariants[1],
+  outputNodeVariants[2],
+  HumanReviewNodeSchema,
+  outputNodeVariants[3],
+  MapNodeSchema,
+] as const;
+const NODE_KINDS = authoredNodeVariants.map((variant) => variant.shape.kind.value);
+const KIND_LIST = NODE_KINDS.map((kind) => JSON.stringify(kind)).join("|");
+const AuthoredNodeSchema = z.discriminatedUnion("kind", authoredNodeVariants, {
+  error: (issue) => issue.code === "invalid_union" ? `node kind must be one of ${KIND_LIST}` : undefined,
+});
+export type AuthoredNode = z.infer<typeof AuthoredNodeSchema>;
+export type AuthoredMapNode = Extract<AuthoredNode, { readonly kind: "map" }>;
+
+export const mapOutputSpec = (node: AuthoredMapNode): SchemaSpec => ({
+  fields: [{
+    name: node.gather.field,
+    type: { kind: "array", element: childOutputSpec(node.child) },
+  }],
+});
+
+const outputSpecOf = (node: AuthoredNode | undefined): SchemaSpec | undefined => {
+  if (node === undefined || node.kind === "human-review") return undefined;
+  return node.kind === "map" ? mapOutputSpec(node) : node.output;
+};
+
+const directInputSpec = (
+  dag: { readonly input: SchemaSpec; readonly nodes: readonly AuthoredNode[]; readonly structure: AuthoredStructure },
+  id: KebabIdent,
+): SchemaSpec | undefined => {
+  const byId = new Map(dag.nodes.map((node) => [node.id, node] as const));
+  const structure = dag.structure;
+  switch (structure.shape) {
+    case "linear": {
+      const index = structure.order.indexOf(id);
+      if (index === 0) return dag.input;
+      let predecessor = index - 1;
+      while (predecessor >= 0) {
+        const spec = outputSpecOf(byId.get(structure.order[predecessor]!));
+        if (spec !== undefined) return spec;
+        predecessor--;
+      }
+      return dag.input;
+    }
+    case "fan-out":
+    case "diamond":
+      if (id === structure.source) return dag.input;
+      if (structure.branches.includes(id)) return outputSpecOf(byId.get(structure.source));
+      return undefined;
+    case "router":
+      return id === structure.classifier ? dag.input : outputSpecOf(byId.get(structure.classifier));
+    case "sources":
+      return undefined;
+    default:
+      return assertNever(structure);
+  }
+};
+
+/** Item schema selected by a parsed map's direct array-field reference. */
+export const mapItemSpec = (
+  dag: { readonly input: SchemaSpec; readonly nodes: readonly AuthoredNode[]; readonly structure: AuthoredStructure },
+  node: AuthoredMapNode,
+): SchemaSpec => {
+  const input = directInputSpec(dag, node.id);
+  const field = input?.fields.find((candidate) => candidate.name === node.widthFrom);
+  if (field?.type.kind !== "array") {
+    throw new Error(`authored map invariant: '${node.id}.${node.widthFrom}' is not an array input`);
+  }
+  return field.type.element;
+};
+
+// ---------------------------------------------------------------------------
+// The AuthoredDag
+// ---------------------------------------------------------------------------
+
+const BaseAuthoredDagSchema = z
+  .object({
+    fugueAuthored: z.literal(1),
+    name: kebabIdentField("name must be kebab-case starting with a letter"),
+    team: kebabField("team must be kebab-case"),
+    description: z
+      .string()
+      .min(1)
+      .regex(SINGLE_LINE, "must be a single line")
+      .refine(NO_TEMPLATE_OPEN.check, NO_TEMPLATE_OPEN.message)
+      .refine(NO_FUGUE_BODY_MARKER.check, NO_FUGUE_BODY_MARKER.message),
+    input: SchemaSpecSchema,
+    nodes: z.array(AuthoredNodeSchema).min(1),
+    structure: StructureSchema,
+  })
+  .strict();
+
 const AuthoredDagSchema = BaseAuthoredDagSchema.superRefine((dag, ctx) => {
   const byId = new Map(dag.nodes.map((n) => [n.id, n] as const));
 
@@ -453,94 +766,11 @@ const AuthoredDagSchema = BaseAuthoredDagSchema.superRefine((dag, ctx) => {
   // these, but rejecting at parse time gives the author/LLM a precise message
   // naming both sides instead of a duplicate-declaration SyntaxError.
   const moduleReserved = new Set([...RESERVED_IDENTIFIERS, ...dagLevelIdentifiers(dag.name)]);
-  const identsByNode = dag.nodes.map((n) => ({ node: n, idents: generatedIdentifiersFor(n) }));
-  for (const { node, idents } of identsByNode) {
-    const camel = camelCase(node.id);
-    if (JS_RESERVED_WORDS.has(camel)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `node id '${node.id}' is reserved (camelCases to the JS reserved word '${camel}')`,
-      });
-    }
-    for (const ident of idents) {
-      if (moduleReserved.has(ident)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `node id '${node.id}' is reserved (generated identifier '${ident}' collides with a generated or imported identifier)`,
-        });
-      }
-    }
-  }
-  for (let a = 0; a < identsByNode.length; a++) {
-    for (let b = a + 1; b < identsByNode.length; b++) {
-      const left = identsByNode[a]!;
-      const right = identsByNode[b]!;
-      if (left.node.id === right.node.id) continue; // duplicate ids get their own message below
-      const shared = left.idents.filter((i) => right.idents.includes(i));
-      if (shared.length > 0) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `node ids '${left.node.id}' and '${right.node.id}' generate colliding identifier(s): ${shared.join(", ")}`,
-        });
-      }
-    }
-  }
+  addIdentifierIssues(dag.nodes, ctx, moduleReserved);
 
-  // Node ids unique
-  if (byId.size !== dag.nodes.length) {
-    const seen = new Set<string>();
-    for (const n of dag.nodes) {
-      if (seen.has(n.id)) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `duplicate node id '${n.id}'` });
-      }
-      seen.add(n.id);
-    }
-  }
-
-  // Every structure reference resolves; every node is referenced exactly once.
-  const refs = structureRefs(dag.structure);
-  const referenced = new Map<string, number>();
-  for (const [id, role] of refs) {
-    if (!byId.has(id)) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `structure ${role} references unknown node '${id}'` });
-    }
-    referenced.set(id, (referenced.get(id) ?? 0) + 1);
-  }
-  for (const [id, count] of referenced) {
-    if (count > 1) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `node '${id}' is referenced ${count} times in the structure (each node plays exactly one role)` });
-    }
-  }
-  for (const n of dag.nodes) {
-    if (!referenced.has(n.id)) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `node '${n.id}' is not referenced by the structure` });
-    }
-  }
-
-  // Kind constraints per shape role
   const s = dag.structure;
-  const kindOf = (id: KebabIdent) => byId.get(id)?.kind;
-
-  if (s.shape === "sources") {
-    for (const id of s.sources) {
-      if (byId.has(id) && kindOf(id) !== "source") {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `sources entry '${id}' must be kind "source" (got "${kindOf(id)}")` });
-      }
-    }
-    if (byId.has(s.join) && kindOf(s.join) === "source") {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `join '${s.join}' must not be a source node` });
-    }
-    if (byId.has(s.assemble) && kindOf(s.assemble) === "source") {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `assemble '${s.assemble}' must not be a source node` });
-    }
-  } else {
-    // Source nodes are only valid roots of the sources shape.
-    for (const n of dag.nodes) {
-      if (n.kind === "source") {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `node '${n.id}' is kind "source" but shape is "${s.shape}" — source nodes belong to the sources shape` });
-      }
-    }
-  }
+  addGraphReferenceIssues(dag.nodes, s, ctx);
+  addSourceRoleIssues(dag.nodes, s, ctx);
 
   // LLM confidence: codegen injects the CONFIDENCE_BUCKET enum when absent.
   // An EXPLICIT 'confidence' output field must be exactly that shape —
@@ -578,8 +808,7 @@ const AuthoredDagSchema = BaseAuthoredDagSchema.superRefine((dag, ctx) => {
     const classifier = byId.get(s.classifier);
     // A human-review classifier has no output (and is illegal outside linear —
     // reported above), so every predicate correctly reports "not a field".
-    const fields =
-      classifier === undefined || classifier.kind === "human-review" ? [] : classifier.output.fields;
+    const fields = outputSpecOf(classifier)?.fields ?? [];
     for (const [i, c] of s.cases.entries()) {
       const field = fields.find((f) => f.name === c.when.field);
       if (!field) {
@@ -614,6 +843,33 @@ const AuthoredDagSchema = BaseAuthoredDagSchema.superRefine((dag, ctx) => {
         });
       }
       predicates.add(p);
+    }
+  }
+
+  for (const [index, node] of dag.nodes.entries()) {
+    if (node.kind !== "map") continue;
+    const input = directInputSpec(dag, node.id);
+    if (input === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["nodes", index, "widthFrom"],
+        message: `map node '${node.id}' is in a fan-in/source role without a directly addressable input field`,
+      });
+      continue;
+    }
+    const field = input.fields.find((candidate) => candidate.name === node.widthFrom);
+    if (field === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["nodes", index, "widthFrom"],
+        message: `'${node.widthFrom}' is not a field of map node '${node.id}' input`,
+      });
+    } else if (field.type.kind !== "array") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["nodes", index, "widthFrom"],
+        message: `'${node.widthFrom}' must reference an array field (got ${field.type.kind})`,
+      });
     }
   }
 })

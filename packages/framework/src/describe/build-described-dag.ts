@@ -9,7 +9,7 @@
 
 import { match } from "ts-pattern";
 import type { z } from "zod";
-import type { DagDef } from "../types/dag.js";
+import type { DagDef, DagNodeDef } from "../types/dag.js";
 import type { FrameworkError } from "../types/errors.js";
 import { type Result, ok, err } from "../types/result.js";
 import { topoSort } from "../shared/topo.js";
@@ -24,13 +24,29 @@ import { zodToJsonSchema } from "../llm/zod-schema.js";
  * Per-node describe payload. Stable JSON contract — adding a field is a minor
  * version bump for LLM authoring consumers.
  */
-export interface DescribedNode {
+interface DescribedNodeBase {
   readonly id: string;
-  readonly kind: string;
   readonly sideEffects: string;
   readonly requires: readonly string[];
   readonly humanReview: boolean;
 }
+
+export interface DescribedMap {
+  readonly widthFrom: string;
+  readonly maxWidth: number;
+  readonly childDagId: string;
+  readonly gather: Readonly<{ readonly kind: "collect"; readonly field: string }> | null;
+}
+
+export type DescribedNode =
+  | (DescribedNodeBase & {
+      readonly kind: "map";
+      readonly mapping: DescribedMap;
+    })
+  | (DescribedNodeBase & {
+      readonly kind: Exclude<DagNodeDef["kind"], "map">;
+      readonly mapping?: never;
+    });
 
 /**
  * Per-edge describe payload — discriminated on `kind`. The conditional
@@ -137,13 +153,25 @@ const safeZodToJsonSchema = (
 
 const describeNode = (
   node: DagDef["nodes"][number],
-): DescribedNode => ({
-  id: node.id as string,
-  kind: node.kind,
-  sideEffects: node.sideEffects.kind,
-  requires: [...(node.requires as readonly string[])],
-  humanReview: node.humanReview !== undefined,
-});
+): DescribedNode => {
+  const base: DescribedNodeBase = {
+    id: node.id as string,
+    sideEffects: node.sideEffects.kind,
+    requires: [...(node.requires as readonly string[])],
+    humanReview: node.humanReview !== undefined,
+  };
+  if (node.kind !== "map") return { ...base, kind: node.kind };
+  return {
+    ...base,
+    kind: "map",
+    mapping: {
+      widthFrom: node.mapping.widthFrom,
+      maxWidth: node.mapping.maxWidth,
+      childDagId: node.mapping.child.id,
+      gather: node.mapping.authoredGather ?? null,
+    },
+  };
+};
 
 const describeEdge = (e: DagDef["edges"][number]): DescribedEdge =>
   match(e)
@@ -198,7 +226,7 @@ const collectPromptNames = (
   // Also walk nodes so the CLI (which has no host context) still surfaces
   // promptName references, and so the host's manifest stays honest if the
   // two surfaces drift.
-  for (const node of dag.nodes) {
+  for (const node of runtimeNodeInventory(dag).nodes) {
     const name = readNodePromptName(node);
     if (name !== null) set.add(name);
   }

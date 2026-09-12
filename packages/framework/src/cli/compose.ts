@@ -354,6 +354,7 @@ const NODE_KIND_GUIDANCE = {
   llm: "model call — a confidence bucket is added automatically",
   "human-review": "approval gate; NO output field; linear shape only, never first",
   source: "context-only read; sources shape only",
+  map: "bounded runtime fan over an inline static child; NO output field; collect gather only",
 } satisfies Record<AuthoredNodeKind, string>;
 
 /** Structure syntax + guidance per shape (rendered as the shape table). */
@@ -389,8 +390,13 @@ Respond with exactly one action:
 AuthoredDag rules (closed vocabulary — the schema rejects anything else):
 - fugueAuthored: 1. name/team/node ids/case labels: kebab-case (name and
   node ids must start with a letter).
-- input + node outputs are field lists; field types are ONLY
-  {"kind":"string"|"number"|"boolean"} or {"kind":"enum","values":[...≥2]}.
+- input + node outputs are field lists; field types are
+  {"kind":"string"|"number"|"boolean"}, {"kind":"enum","values":[...≥2]},
+  or {"kind":"array","element":{"fields":[...]}}.
+- A map node is one node inside an existing structure. It has widthFrom (one
+  direct array field), positive maxWidth, an inline child {id,nodes,structure},
+  and gather:{kind:"collect",field}. It omits output; collect derives it.
+  Child nodes exclude map and human-review; a child fan-out requires a join.
 - Field names must be valid JS identifiers. Node ids must not be JS reserved
   words and must not collide with the identifiers codegen derives from them —
   reserved ids: "dag", "input", "opts", "ok", "registration", "z",
