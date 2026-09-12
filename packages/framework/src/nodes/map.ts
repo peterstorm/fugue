@@ -1,8 +1,13 @@
 // A map is one immutable outer node. The runtime owns child preparation and
 // dispatch; author callbacks never receive root minting or durable-job authority.
-import type { z } from "zod";
-import type { DagDef, MapNodeDef } from "../types/dag.js";
-import type { Result } from "../types/result.js";
+import { z } from "zod";
+import {
+  authoredCollectGather,
+  type AuthoredCollectGather,
+  type DagDef,
+  type MapNodeDef,
+} from "../types/dag.js";
+import { type Result, ok } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import { nodeId } from "../types/ids.js";
 import { resourceName } from "../types/witness.js";
@@ -23,15 +28,27 @@ export interface MapNodeConfig<I, ChildOut, O> {
   readonly child: DagDef;
   /** Applied to fresh AND replayed child outputs before reduction. */
   readonly childOutputSchema: z.ZodType<ChildOut>;
-  /** Metadata for a reducer generated from the closed authored collect gather. */
-  readonly authoredGather?: Readonly<{ readonly kind: "collect"; readonly field: string }>;
   /** Ascending index order, including the legal empty fan. */
   readonly reduce: (results: readonly ChildOut[]) => Result<O, FrameworkError>;
 }
 
-/** Capture author configuration once; later aliases cannot change execution. */
-export const createMapNode = <I, ChildOut, O>(
+export type CollectedMapOutput<Field extends string, ChildOut> = Readonly<{
+  readonly [Key in Field]: readonly ChildOut[];
+}>;
+
+export interface CollectMapNodeConfig<I, ChildOut, Field extends string> {
+  readonly id: string;
+  readonly inputSchema: z.ZodType<I>;
+  readonly widthFrom: string;
+  readonly maxWidth: number;
+  readonly child: DagDef;
+  readonly childOutputSchema: z.ZodType<ChildOut>;
+  readonly gather: Readonly<{ readonly kind: "collect"; readonly field: Field }>;
+}
+
+const createCapturedMapNode = <I, ChildOut, O>(
   config: MapNodeConfig<I, ChildOut, O>,
+  gather: AuthoredCollectGather | undefined,
 ): MapNodeDef<I, ChildOut, O> => {
   const id = nodeId(config.id);
   const from = widthFrom(config.widthFrom);
@@ -51,10 +68,47 @@ export const createMapNode = <I, ChildOut, O>(
       childOutputSchema: config.childOutputSchema,
       widthFrom: from,
       maxWidth: max,
-      ...(config.authoredGather !== undefined
-        ? { authoredGather: Object.freeze({ ...config.authoredGather }) }
-        : {}),
+      ...(gather !== undefined ? { authoredGather: gather } : {}),
       reduce: config.reduce,
     }),
   });
+};
+
+/**
+ * Capture references once. Later property reassignment cannot replace them;
+ * opaque schema implementations and reducer closure state are not cloned.
+ */
+export const createMapNode = <I, ChildOut, O>(
+  config: MapNodeConfig<I, ChildOut, O>,
+): MapNodeDef<I, ChildOut, O> => createCapturedMapNode(config, undefined);
+
+/**
+ * Honest collect specialization: output schema, reducer, and describe metadata
+ * are issued together, so callers cannot claim collect semantics for another reducer.
+ */
+export const createCollectMapNode = <I, ChildOut, const Field extends string>(
+  config: CollectMapNodeConfig<I, ChildOut, Field>,
+): MapNodeDef<I, ChildOut, CollectedMapOutput<Field, ChildOut>> => {
+  const field = widthFrom(config.gather.field);
+  const outputSchema = z.object({
+    [field]: z.array(config.childOutputSchema),
+  }) as unknown as z.ZodType<CollectedMapOutput<Field, ChildOut>>;
+  const reduce = (
+    results: readonly ChildOut[],
+  ): Result<CollectedMapOutput<Field, ChildOut>, FrameworkError> =>
+    ok(Object.freeze({ [field]: Object.freeze([...results]) }) as CollectedMapOutput<Field, ChildOut>);
+
+  return createCapturedMapNode(
+    {
+      id: config.id,
+      inputSchema: config.inputSchema,
+      outputSchema,
+      widthFrom: config.widthFrom,
+      maxWidth: config.maxWidth,
+      child: config.child,
+      childOutputSchema: config.childOutputSchema,
+      reduce,
+    },
+    authoredCollectGather(field),
+  );
 };

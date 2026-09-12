@@ -171,10 +171,13 @@ host's durable execution path). Ordinary `NodeDef` remains callable;
 `MapNodeConfig<I, ChildOut, O>` takes `id`, `inputSchema`, `outputSchema`,
 `widthFrom` (one field name, not a path/expression), `maxWidth` (positive safe
 integer), `child: DagDef`, `childOutputSchema`, and
-`reduce: (results: readonly ChildOut[]) => Result<O, FrameworkError>`. The optional
-`authoredGather` descriptor is emitted by deterministic authored-map codegen so
-describe/Mermaid can report a truthful collect field; it is metadata and never
-replaces or executes the reducer.
+`reduce: (results: readonly ChildOut[]) => Result<O, FrameworkError>`.
+
+`createCollectMapNode` is the collect specialization used by deterministic
+authored-map codegen. Its config omits `outputSchema` and `reduce`; one
+`gather: { kind: "collect", field }` causes the constructor to issue the array
+output schema, ascending-order reducer, and truthful describe/Mermaid metadata
+together. A caller cannot attach collect metadata to an unrelated reducer.
 
 ```ts
 import { z } from "zod";
@@ -340,8 +343,10 @@ The important closed contracts are:
   Child maps and human review are rejected; child fan-out requires a join; router
   terminals must expose the same ordered output field names/types.
 - Authored maps omit `output`. `{ "kind": "collect", "field": "results" }`
-  derives `z.object({ results: z.array(ChildOutputSchema) })` and the reducer.
-  No authored reducer source or expression is accepted.
+  makes codegen call `createCollectMapNode`, which derives
+  `z.object({ results: z.array(ChildOutputSchema) })`, the reducer, and truthful
+  describe metadata as one invariant. No authored reducer source or expression
+  is accepted or evaluated.
 - Child LLM prompts are named `<dag>-<map>@<child>`, keeping them disjoint from
   ordinary prompt names while remaining deterministic.
 - Describe/Mermaid keep the child out of outer nodes, edges and waves. One map

@@ -178,14 +178,10 @@ interface NodePlan {
   readonly outSpec: SchemaSpec | null;
   /** Expression for the node's input schema const; null for source nodes. */
   readonly inExpr: string | null;
-  /**
-   * Var identifier referenced in the structure call (`nodeRefName`). DEAD for
-   * llm nodes — `nodeExprRef` calls the factory (`llmFactoryName(id)(model)`)
-   * instead of a bound const, so the `llmNodeRefName` value assigned here
-   * never reaches the emitted file (it is still claimed by
-   * `generatedIdentifiersFor`; see the rationale on `llmNodeRefName`).
-   */
+  /** Var identifier referenced in the structure call for non-LLM nodes. */
   readonly ref: string;
+  /** Factory binding for LLM nodes; null for every other node kind. */
+  readonly llmFactory: string | null;
 }
 
 const purposeComment = (node: AuthoredNode): string => `// ${node.id} — ${comment(node.purpose)}`;
@@ -342,27 +338,32 @@ const ${p.ref} = ${NODE_FACTORY_NAME["human-review"]}({
 /** Prompt placeholders must be identifier-ish — sanitize fan-in keys. */
 const placeholderName = (fieldKey: string): string => fieldKey.replace(/[^A-Za-z0-9_]/g, "_");
 
+type LlmPromptInput = Readonly<{
+  readonly source: string;
+  readonly encoding: "scalar" | "json";
+}>;
+
 const llmNode = (
   p: NodePlan,
   promptName: string,
-  inputFields: readonly string[],
-  fanIn: boolean,
+  inputs: readonly LlmPromptInput[],
   explicitReturnType = true,
 ): string => {
-  // Fan-in inputs are OBJECTS keyed by node id — stringify them so the prompt
-  // placeholder receives JSON, not "[object Object]".
-  const buildInputEntries = inputFields
-    .map((f) =>
-      fanIn
-        ? `${key(placeholderName(f))}: JSON.stringify(input[${JSON.stringify(f)}])`
-        : `${key(placeholderName(f))}: input[${JSON.stringify(f)}]`,
-    )
+  if (p.llmFactory === null) {
+    throw new Error(`authored-codegen invariant: LLM node '${p.node.id}' has no factory binding`);
+  }
+  const buildInputEntries = inputs
+    .map((input) => {
+      const value = `input[${JSON.stringify(input.source)}]`;
+      const encoded = input.encoding === "json" ? `JSON.stringify(${value})` : value;
+      return `${key(placeholderName(input.source))}: ${encoded}`;
+    })
     .join(", ");
   const returnType = explicitReturnType
     ? `: LlmNodeDef<z.infer<typeof ${p.inExpr}>, z.infer<typeof ${p.outName}>>`
     : "";
   return `${purposeComment(p.node)}
-const ${llmFactoryName(p.node.id)} = (
+const ${p.llmFactory} = (
   model: string,
 )${returnType} => {
   const node = ${NODE_FACTORY_NAME.llm}({
@@ -381,11 +382,13 @@ const llmPrompt = (
   dag: AuthoredDag,
   node: LlmNode,
   promptName: string,
-  inputFields: readonly string[],
-  fanIn: boolean,
+  inputs: readonly LlmPromptInput[],
 ): PromptFile => {
-  const vars = inputFields
-    .map((f) => `${placeholderName(f)}${fanIn ? " (JSON)" : ""}: {{${placeholderName(f)}}}`)
+  const vars = inputs
+    .map((input) => {
+      const placeholder = placeholderName(input.source);
+      return `${placeholder}${input.encoding === "json" ? " (JSON)" : ""}: {{${placeholder}}}`;
+    })
     .join("\n");
   const outSpec = withConfidence(node.output);
   const jsonShape = outSpec.fields
@@ -459,6 +462,7 @@ const planNodes = (dag: AuthoredDag): Plans => {
       outSpec,
       inExpr: null, // filled by wiring
       ref: nodeRefName(node.id, node.kind),
+      llmFactory: node.kind === "llm" ? llmFactoryName(node.id) : null,
     });
   }
   return {
@@ -469,13 +473,18 @@ const planNodes = (dag: AuthoredDag): Plans => {
   };
 };
 
+const CHILD_LOCAL_PREFIX = "$child_";
+const CHILD_MODEL_NAME = "$childModel";
+const childLocalName = (name: string): string => `${CHILD_LOCAL_PREFIX}${name}`;
+
 const planChildNodes = (nodes: readonly AuthoredChildNode[]): Map<string, NodePlan> =>
   new Map(nodes.map((node) => [node.id, {
     node,
-    outName: schemaConstName(node.id),
+    outName: childLocalName(schemaConstName(node.id)),
     outSpec: node.kind === "llm" ? withConfidence(node.output) : node.output,
     inExpr: null,
-    ref: nodeRefName(node.id, node.kind),
+    ref: childLocalName(nodeRefName(node.id, node.kind)),
+    llmFactory: node.kind === "llm" ? childLocalName(llmFactoryName(node.id)) : null,
   }] as const));
 
 /** Fan-in schema const over a set of upstream plans (keys = node ids). */
@@ -532,7 +541,11 @@ const emitChildStructure = (
   const extras: string[] = [];
   const ref = (id: string): string => {
     const node = plan(id);
-    return node.node.kind === "llm" ? `${llmFactoryName(node.node.id)}(model)` : node.ref;
+    if (node.node.kind !== "llm") return node.ref;
+    if (node.llmFactory === null) {
+      throw new Error(`authored map invariant: child LLM '${node.node.id}' has no factory binding`);
+    }
+    return `${node.llmFactory}(${CHILD_MODEL_NAME})`;
   };
 
   const expression = match(child.structure)
@@ -551,7 +564,7 @@ const emitChildStructure = (
       if (fan.join === undefined) {
         throw new Error(`authored map invariant: child '${child.id}' fan-out has no join`);
       }
-      const fanInName = fanInConstName(fan.join);
+      const fanInName = childLocalName(fanInConstName(fan.join));
       extras.push(fanInConst(fanInName, fan.branches.map(plan)));
       setInput(fan.join, fanInName);
       return `${SHAPE_HELPER_NAME[fan.shape]}({\n  id: ${JSON.stringify(child.id)},\n  source: ${ref(fan.source)},\n  branches: [${fan.branches.map(ref).join(", ")}],\n  join: ${ref(fan.join)},\n})`;
@@ -565,10 +578,10 @@ const emitChildStructure = (
       return `${SHAPE_HELPER_NAME.router}({\n  id: ${JSON.stringify(child.id)},\n  classifier: ${ref(router.classifier)},\n  cases: {\n${cases}\n  },\n  default: ${ref(router.default)},\n})`;
     })
     .with({ shape: "sources" }, (sources) => {
-      const joinFanIn = fanInConstName(sources.join);
+      const joinFanIn = childLocalName(fanInConstName(sources.join));
       extras.push(fanInConst(joinFanIn, sources.sources.map(plan)));
       setInput(sources.join, joinFanIn);
-      const assembleFanIn = fanInConstName(sources.assemble);
+      const assembleFanIn = childLocalName(fanInConstName(sources.assemble));
       extras.push(fanInConst(assembleFanIn, [plan(sources.join)], [["$input", itemExpr]]));
       setInput(sources.assemble, assembleFanIn);
       return `${SHAPE_HELPER_NAME.sources}({\n  id: ${JSON.stringify(child.id)},\n  sources: [${sources.sources.map(ref).join(", ")}],\n  join: ${ref(sources.join)},\n  assemble: ${ref(sources.assemble)},\n})`;
@@ -615,21 +628,20 @@ const emitMapNode = (
         break;
       case "llm": {
         const promptName = childPromptNameFor(dag, node, childPlan.node.id);
-        const inputFields = llmInputFields(
+        const inputs = llmPromptInputs(
           { input: itemSpec, nodes: node.child.nodes, structure: node.child.structure },
           childPlan,
         );
-        const fanIn = llmInputIsFanIn(node.child.structure, childPlan);
-        declarations.push(llmNode(childPlan, promptName, inputFields, fanIn, false));
-        prompts.push(llmPrompt(dag, childPlan.node, promptName, inputFields, fanIn));
+        declarations.push(llmNode(childPlan, promptName, inputs, false));
+        prompts.push(llmPrompt(dag, childPlan.node, promptName, inputs));
         break;
       }
     }
   }
 
-  const parameter = childHasLlm(node) ? "model: string" : "";
+  const parameter = childHasLlm(node) ? `${CHILD_MODEL_NAME}: string` : "";
   const body = declarations.length === 0 ? "" : `${indent(declarations.join("\n\n"), 2)}\n\n`;
-  const declaration = `${purposeComment(node)}\nconst ${mapFactoryName(node.id)} = (${parameter}) => {\n${body}  return createMapNode({\n    id: ${JSON.stringify(node.id)},\n    inputSchema: ${plan.inExpr},\n    outputSchema: ${plan.outName},\n    widthFrom: ${JSON.stringify(node.widthFrom)},\n    maxWidth: ${node.maxWidth},\n    child: ${child.expression.replace(/\n/g, "\n    ")},\n    childOutputSchema: ${schemaExpr(childOutputSpec(node.child), "    ")},\n    authoredGather: { kind: "collect", field: ${JSON.stringify(node.gather.field)} },\n    reduce: (results) => ok({ ${key(node.gather.field)}: [...results] }),\n  });\n};`;
+  const declaration = `${purposeComment(node)}\nconst ${mapFactoryName(node.id)} = (${parameter}) => {\n${body}  return ${NODE_FACTORY_NAME.map}({\n    id: ${JSON.stringify(node.id)},\n    inputSchema: ${plan.inExpr},\n    widthFrom: ${JSON.stringify(node.widthFrom)},\n    maxWidth: ${node.maxWidth},\n    child: ${child.expression.replace(/\n/g, "\n    ")},\n    childOutputSchema: ${schemaExpr(childOutputSpec(node.child), "    ")},\n    gather: { kind: "collect", field: ${JSON.stringify(node.gather.field)} },\n  });\n};`;
   return { declaration, prompts };
 };
 
@@ -762,10 +774,9 @@ ${cases}
         break;
       case "llm": {
         const promptName = promptNameFor(dag, p.node.id);
-        const inputFields = llmInputFields(dag, p);
-        const fanIn = llmInputIsFanIn(dag.structure, p);
-        nodeDecls.push(llmNode(p, promptName, inputFields, fanIn));
-        prompts.push(llmPrompt(dag, p.node, promptName, inputFields, fanIn));
+        const inputs = llmPromptInputs(dag, p);
+        nodeDecls.push(llmNode(p, promptName, inputs));
+        prompts.push(llmPrompt(dag, p.node, promptName, inputs));
         break;
       }
       case "map": {
@@ -835,7 +846,10 @@ const structureOrder = (dag: AuthoredDag): readonly string[] =>
  */
 const nodeExprRef = (plan: NodePlan): string => {
   if (plan.node.kind === "llm") {
-    return `${llmFactoryName(plan.node.id)}(opts.model ?? ${DEFAULT_MODEL_NAME})`;
+    if (plan.llmFactory === null) {
+      throw new Error(`authored-codegen invariant: LLM node '${plan.node.id}' has no factory binding`);
+    }
+    return `${plan.llmFactory}(opts.model ?? ${DEFAULT_MODEL_NAME})`;
   }
   if (plan.node.kind === "map") {
     return childHasLlm(plan.node)
@@ -846,36 +860,30 @@ const nodeExprRef = (plan: NodePlan): string => {
 };
 
 /**
- * Whether an LLM node's derived input is a fan-in object (keys = node ids /
- * `$input`) rather than a predecessor's flat fields. Fan-in values are
- * objects, so `buildInput` must JSON.stringify them for the prompt.
+ * Prompt inputs carry their encoding with their source field. Fan-in objects
+ * and authored arrays use JSON; scalar direct fields preserve scalar coercion.
  */
-const llmInputIsFanIn = (
-  structure: AuthoredDag["structure"],
-  p: NodePlan,
-): boolean =>
-  match(structure)
-    .with({ shape: "fan-out" }, { shape: "diamond" }, (s) => s.join === p.node.id)
-    .with({ shape: "sources" }, (s) => s.join === p.node.id || s.assemble === p.node.id)
-    .with({ shape: "linear" }, { shape: "router" }, () => false)
-    .exhaustive();
-
-/** Top-level input keys an LLM node's buildInput/prompt can reference. */
-const llmInputFields = (
+const llmPromptInputs = (
   graph: {
     readonly input: SchemaSpec;
     readonly nodes: readonly AuthoredNode[];
     readonly structure: AuthoredDag["structure"];
   },
   p: NodePlan,
-): readonly string[] => {
+): readonly LlmPromptInput[] => {
   const s = graph.structure;
   const byId = new Map(graph.nodes.map((node) => [node.id, node] as const));
-  const fieldsOf = (id: KebabIdent): readonly string[] => {
+  const direct = (spec: SchemaSpec): readonly LlmPromptInput[] =>
+    spec.fields.map((field) => ({
+      source: field.name,
+      encoding: field.type.kind === "array" ? "json" : "scalar",
+    }));
+  const fanIn = (ids: readonly string[]): readonly LlmPromptInput[] =>
+    ids.map((source) => ({ source, encoding: "json" }));
+  const fieldsOf = (id: KebabIdent): readonly LlmPromptInput[] => {
     const node = byId.get(id);
     if (node === undefined || node.kind === "human-review") return [];
-    const output = node.kind === "map" ? mapOutputSpec(node) : node.output;
-    return output.fields.map((field) => field.name);
+    return direct(node.kind === "map" ? mapOutputSpec(node) : node.output);
   };
 
   switch (s.shape) {
@@ -885,20 +893,18 @@ const llmInputFields = (
       // predecessor that actually produces fields (mirrors effectiveOutName).
       let j = i - 1;
       while (j >= 0 && byId.get(s.order[j]!)?.kind === "human-review") j--;
-      return j < 0 ? graph.input.fields.map((field) => field.name) : fieldsOf(s.order[j]!);
+      return j < 0 ? direct(graph.input) : fieldsOf(s.order[j]!);
     }
     case "fan-out":
     case "diamond":
-      if (p.node.id === s.source) return graph.input.fields.map((field) => field.name);
-      if (p.node.id === s.join) return s.branches; // fan-in keys
+      if (p.node.id === s.source) return direct(graph.input);
+      if (p.node.id === s.join) return fanIn(s.branches);
       return fieldsOf(s.source);
     case "router":
-      return p.node.id === s.classifier
-        ? graph.input.fields.map((field) => field.name)
-        : fieldsOf(s.classifier);
+      return p.node.id === s.classifier ? direct(graph.input) : fieldsOf(s.classifier);
     case "sources":
-      if (p.node.id === s.join) return s.sources; // fan-in keys
-      if (p.node.id === s.assemble) return [s.join, "$input"];
+      if (p.node.id === s.join) return fanIn(s.sources);
+      if (p.node.id === s.assemble) return fanIn([s.join, "$input"]);
       return []; // a source node consumes nothing
     default:
       // Keep this switch exhaustive: a newly-added Shape must fail compilation
@@ -924,14 +930,11 @@ const buildImports = (dag: AuthoredDag, hasLlm: boolean): string => {
     ),
   ])];
 
-  // `ok(...)` appears only in the placeholder fetch/transform/source bodies —
-  // llm factories return through the confidence spread and human-review gates
-  // have no body — so an all-llm/review DAG must not import it (mirrors the
-  // `confidence`/hasLlm gating; an unused import is lint noise in every
-  // generated module).
-  const needsOk = dag.nodes.some(
-    (node) => node.kind === "fetch" || node.kind === "transform" || node.kind === "source" ||
-      node.kind === "map",
+  // `ok(...)` appears only in generated fetch/transform/source placeholder
+  // bodies. The collect-map constructor owns its fixed reducer, while llm and
+  // human-review nodes emit no `ok`, so an all-llm map must not import it.
+  const needsOk = kinds.some(
+    (kind) => kind === "fetch" || kind === "transform" || kind === "source",
   );
 
   const names = [

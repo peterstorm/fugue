@@ -278,7 +278,7 @@ export const NODE_FACTORY_NAME = {
   llm: "createLlmNode",
   "human-review": "createHumanReviewNode",
   source: "createSourceNode",
-  map: "createMapNode",
+  map: "createCollectMapNode",
 } as const;
 
 /**

@@ -2,10 +2,11 @@
 // convergence, Phase B1).
 //
 // `DescribedDag` is DERIVED from code (`fugue describe`); `AuthoredDag` is the
-// superset an author (human or LLM) writes BEFORE code exists. It carries the
-// intent `DescribedDag` cannot: per-node `purpose`, field-level output specs,
-// and routing cases as data. `fugue new --from <authored.json>` turns it into
-// code deterministically; `fugue compose` lets an LLM edit ONLY this JSON —
+// complementary representation an author (human or LLM) writes BEFORE code
+// exists. It carries intent `DescribedDag` cannot: per-node `purpose`,
+// field-level output specs, and routing cases as data.
+// `fugue new --from <authored.json>` turns it into code deterministically;
+// `fugue compose` lets an LLM edit ONLY this JSON —
 // the LLM never hand-writes `defineDag`.
 //
 // The schema is deliberately CLOSED: field types are a fixed union, routing
@@ -277,7 +278,11 @@ const HumanReviewNodeSchema = z
   .strict();
 
 const OUTPUT_NODE_KINDS = outputNodeVariants.map((variant) => variant.shape.kind.value);
-const ChildNodeSchema = z.discriminatedUnion("kind", outputNodeVariants);
+const ChildNodeSchema = z.discriminatedUnion("kind", outputNodeVariants, {
+  error: (issue) => issue.code === "invalid_union"
+    ? "mapped child node kind must be fetch/transform/llm/source; nested maps and human-review are unsupported — gather, then review at root level (FR-F1-011)"
+    : undefined,
+});
 export type AuthoredChildNode = z.infer<typeof ChildNodeSchema>;
 
 // ---------------------------------------------------------------------------
@@ -501,15 +506,15 @@ const addSourceRoleIssues = (
   }
 };
 
-const addRouterIssues = (
-  nodes: readonly AuthoredChildNode[],
+const addRouterIssues = <Node extends { readonly id: KebabIdent }>(
+  nodes: readonly Node[],
   structure: AuthoredStructure,
+  outputOf: (node: Node | undefined) => SchemaSpec | undefined,
   ctx: z.RefinementCtx,
 ): void => {
   if (structure.shape !== "router") return;
   const byId = new Map(nodes.map((node) => [node.id, node] as const));
-  const classifier = byId.get(structure.classifier);
-  const classifierFields = classifier?.output.fields ?? [];
+  const classifierFields = outputOf(byId.get(structure.classifier))?.fields ?? [];
   const labels = new Set<string>();
   const predicates = new Set<string>();
   for (const [index, entry] of structure.cases.entries()) {
@@ -578,7 +583,7 @@ const ChildDagSchema = z
   .superRefine((child, ctx) => {
     addGraphReferenceIssues(child.nodes, child.structure, ctx);
     addSourceRoleIssues(child.nodes, child.structure, ctx);
-    addRouterIssues(child.nodes, child.structure, ctx);
+    addRouterIssues(child.nodes, child.structure, (node) => node?.output, ctx);
     addIdentifierIssues(child.nodes, ctx);
     for (const node of child.nodes) {
       if (node.kind !== "llm") continue;
@@ -757,8 +762,6 @@ const BaseAuthoredDagSchema = z
   .strict();
 
 const AuthoredDagSchema = BaseAuthoredDagSchema.superRefine((dag, ctx) => {
-  const byId = new Map(dag.nodes.map((n) => [n.id, n] as const));
-
   // Identifier safety: every identifier codegen will emit for a node (const,
   // schema const, fan-in const, llm factory) must avoid JS reserved words, the
   // module's imports/fixed consts, the DAG-level names, and every OTHER node's
@@ -802,49 +805,10 @@ const AuthoredDagSchema = BaseAuthoredDagSchema.superRefine((dag, ctx) => {
     }
   }
 
-  // Router: classifier's output must carry the predicate field as an enum, and
-  // every `equals` must be one of its values; the default handler catches the rest.
-  if (s.shape === "router") {
-    const classifier = byId.get(s.classifier);
-    // A human-review classifier has no output (and is illegal outside linear —
-    // reported above), so every predicate correctly reports "not a field".
-    const fields = outputSpecOf(classifier)?.fields ?? [];
-    for (const [i, c] of s.cases.entries()) {
-      const field = fields.find((f) => f.name === c.when.field);
-      if (!field) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `cases[${i}] predicate field '${c.when.field}' is not a field of classifier '${s.classifier}' output` });
-        continue;
-      }
-      if (field.type.kind !== "enum") {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `cases[${i}] predicate field '${c.when.field}' must be an enum (got ${field.type.kind}) — closed routing only` });
-        continue;
-      }
-      if (!field.type.values.includes(c.when.equals)) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `cases[${i}] 'equals: ${c.when.equals}' is not a value of enum '${c.when.field}' (${field.type.values.join(", ")})` });
-      }
-    }
-    const labels = new Set<string>();
-    for (const [i, c] of s.cases.entries()) {
-      if (labels.has(c.label)) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `cases[${i}] duplicate label '${c.label}'` });
-      }
-      labels.add(c.label);
-    }
-    // Two cases with the same {field, equals} predicate: the second can never
-    // fire (cases are checked in order) — an unreachable route is an authoring
-    // mistake, not a fallback.
-    const predicates = new Set<string>();
-    for (const [i, c] of s.cases.entries()) {
-      const p = `${c.when.field}\u0000${c.when.equals}`;
-      if (predicates.has(p)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `cases[${i}] duplicate predicate {field: '${c.when.field}', equals: '${c.when.equals}'} — the case is unreachable`,
-        });
-      }
-      predicates.add(p);
-    }
-  }
+  // Root and child routers share one closed predicate policy. A human-review
+  // classifier has no output (and is illegal outside linear), so it reports
+  // the same precise missing-field problem through this resolver.
+  addRouterIssues(dag.nodes, s, outputSpecOf, ctx);
 
   for (const [index, node] of dag.nodes.entries()) {
     if (node.kind !== "map") continue;

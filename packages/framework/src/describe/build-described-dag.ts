@@ -113,10 +113,9 @@ export interface BuildDescribedDagInput {
   readonly description: string;
   readonly version: string;
   /**
-   * Authoritative set of prompts the host has loaded for this DAG. When
-   * supplied, takes precedence over node introspection for the `prompts`
-   * array. The CLI omits this (no host context); the host passes
-   * `RegisteredDag.prompts`.
+   * Prompts the host loaded for this DAG. Describe unions these keys with
+   * node-introspected prompt names so omissions on either surface stay visible.
+   * The CLI omits this (no host context); the host passes `RegisteredDag.prompts`.
    */
   readonly loadedPrompts?: ReadonlyMap<string, string>;
   /** Optional sink for non-fatal warnings (schema serialization failures). */

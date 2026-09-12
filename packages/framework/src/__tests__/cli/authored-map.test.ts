@@ -1,11 +1,20 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import fc from "fast-check";
 import { parseAuthoredDag, type AuthoredDag } from "../../cli/authored.js";
 import { buildAuthoredScaffold } from "../../cli/authored-codegen.js";
 import { runGauntlet } from "../../cli/gauntlet.js";
 import { describedToMermaid } from "../../cli/visualize.js";
+import { z } from "zod";
+import { FakeLlmClient } from "../../llm/fake-client.js";
+import { createMapNode } from "../../nodes/map.js";
+import { makeNodeContext } from "../../shared/make-node-context.js";
+import { ok } from "../../types/result.js";
+import type { DagDef } from "../../types/dag.js";
+import type { FrameworkError } from "../../types/errors.js";
+import type { NodeDef, TypedNodeContext } from "../../types/node.js";
 
 const tmpRoot = resolve(__dirname, ".tmp-authored-map");
 
@@ -90,6 +99,43 @@ const mapOf = (value: JsonObject): JsonObject => nodesOf(value)[1]!;
 const childOf = (value: JsonObject): JsonObject => mapOf(value).child as JsonObject;
 const childNodesOf = (value: JsonObject): JsonObject[] => childOf(value).nodes as JsonObject[];
 
+const importGeneratedDag = async (dag: AuthoredDag, name: string): Promise<DagDef> => {
+  const dir = join(tmpRoot, `import-${name}`);
+  await mkdir(dir, { recursive: true });
+  const path = join(dir, "dag.ts");
+  await writeFile(path, buildAuthoredScaffold(dag).dagTs, "utf-8");
+  const loaded: unknown = await import(pathToFileURL(path).href);
+  const registration = (loaded as { readonly default?: unknown }).default;
+  if (typeof registration !== "object" || registration === null || !("dag" in registration)) {
+    throw new Error("generated module did not default-export a DAG registration");
+  }
+  return registration.dag as DagDef;
+};
+
+const runGeneratedLlm = async (
+  node: DagDef["nodes"][number],
+  input: unknown,
+  prompt: string,
+  output: unknown,
+): Promise<string> => {
+  if (node.kind !== "llm") throw new Error("expected a generated LLM node");
+  let rendered = "";
+  const llm = new FakeLlmClient((request) => {
+    rendered = request.user;
+    return output;
+  });
+  const runnable = node as NodeDef<unknown, unknown, FrameworkError, readonly ["llm", "prompts"]>;
+  const context = makeNodeContext({
+    runId: "authored-map-prompt",
+    dagId: "authored-map",
+    llm,
+    prompts: { get: () => prompt },
+  }) as TypedNodeContext<readonly ["llm", "prompts"]>;
+  const result = await runnable.run(input, context);
+  if (!result.ok) throw new Error(`generated LLM failed: ${result.error.kind}`);
+  return rendered;
+};
+
 describe("AuthoredDag map node (FR-F1-010)", () => {
   it("parses an inline child and derives the collected output", () => {
     const dag = mustParse(MAP_FIXTURE);
@@ -131,7 +177,11 @@ describe("AuthoredDag map node (FR-F1-010)", () => {
       kind: "human-review",
       purpose: "Approve one item",
     };
-    expect(parseAuthoredDag(review).ok).toBe(false);
+    const parsedReview = parseAuthoredDag(review);
+    expect(parsedReview.ok).toBe(false);
+    if (!parsedReview.ok) {
+      expect(parsedReview.problems.join("\n")).toContain("gather, then review at root level");
+    }
 
     const reducer = draft();
     mapOf(reducer).gather = { kind: "expression", source: "results => results" };
@@ -284,8 +334,8 @@ describe("authored map codegen and plate rendering", () => {
     }];
     const scaffold = buildAuthoredScaffold(mustParse(value));
     expect(scaffold.dagTs).toContain("export const createAuthoredMapDag");
-    expect(scaffold.dagTs).toContain("const createScoreItemsMap = (model: string)");
-    expect(scaffold.dagTs).toContain("createScoreItem(model)");
+    expect(scaffold.dagTs).toContain("const createScoreItemsMap = ($childModel: string)");
+    expect(scaffold.dagTs).toContain("$child_createScoreItem($childModel)");
     expect(scaffold.prompts.map((prompt) => prompt.name)).toEqual([
       "authored-map-score-items@score-item",
     ]);
@@ -293,6 +343,123 @@ describe("authored map codegen and plate rendering", () => {
     if (!result.ok) throw new Error(JSON.stringify(result.errors, null, 2));
     expect(result.described.prompts).toEqual(["authored-map-score-items@score-item"]);
     expect(JSON.stringify(result.described.outputSchema)).toContain('"confidence"');
+  });
+
+  it("JSON-encodes collected and child-item arrays before real prompt rendering", async () => {
+    const downstream = draft();
+    nodesOf(downstream).push({
+      id: "summarize-results",
+      kind: "llm",
+      purpose: "Summarize every result",
+      output: fields(["summary", scalar("string")]),
+    });
+    (downstream.structure as JsonObject).order = ["scope-records", "score-items", "summarize-results"];
+    const downstreamDag = mustParse(downstream);
+    const downstreamScaffold = buildAuthoredScaffold(downstreamDag);
+    expect(downstreamScaffold.dagTs).toContain('results: JSON.stringify(input["results"])');
+    const downstreamRuntime = await importGeneratedDag(downstreamDag, "map-to-llm");
+    const downstreamLlm = downstreamRuntime.nodes.find((node) => node.id === "summarize-results");
+    if (downstreamLlm === undefined) throw new Error("missing downstream LLM");
+    const results = [{ recordId: "r-1", score: 0.92 }];
+    const downstreamPrompt = downstreamScaffold.prompts.find((prompt) => prompt.name === "authored-map");
+    if (downstreamPrompt === undefined) throw new Error("missing downstream prompt");
+    const renderedResults = await runGeneratedLlm(
+      downstreamLlm,
+      { results },
+      downstreamPrompt.body,
+      { summary: "done", confidence: "high" },
+    );
+    expect(renderedResults).toContain(JSON.stringify(results));
+    expect(renderedResults).not.toContain("[object Object]");
+
+    const childArray = draft();
+    const itemFields = (((nodesOf(childArray)[0]!.output as JsonObject).fields as JsonObject[])[1]!
+      .type as JsonObject).element as JsonObject;
+    (itemFields.fields as JsonObject[]).push({
+      name: "evidence",
+      type: {
+        kind: "array",
+        element: fields(["code", scalar("string")]),
+      },
+    });
+    childOf(childArray).nodes = [{
+      id: "score-item",
+      kind: "llm",
+      purpose: "Score item evidence",
+      output: fields(["score", scalar("number")]),
+    }];
+    const childDag = mustParse(childArray);
+    const childScaffold = buildAuthoredScaffold(childDag);
+    expect(childScaffold.dagTs).toContain('evidence: JSON.stringify(input["evidence"])');
+    const childRuntime = await importGeneratedDag(childDag, "child-array-to-llm");
+    const runtimeMap = childRuntime.nodes.find((node) => node.kind === "map");
+    if (runtimeMap?.kind !== "map") throw new Error("missing runtime map");
+    const childLlm = runtimeMap.mapping.child.nodes.find((node) => node.id === "score-item");
+    if (childLlm === undefined) throw new Error("missing child LLM");
+    const childPrompt = childScaffold.prompts.find((prompt) => prompt.name.endsWith("@score-item"));
+    if (childPrompt === undefined) throw new Error("missing child prompt");
+    const evidence = [{ code: "e-1" }];
+    const renderedEvidence = await runGeneratedLlm(
+      childLlm,
+      { recordId: "r-1", amount: 10, evidence },
+      childPrompt.body,
+      { score: 1, confidence: "high" },
+    );
+    expect(renderedEvidence).toContain(JSON.stringify(evidence));
+    expect(renderedEvidence).not.toContain("[object Object]");
+  });
+
+  it("isolates child bindings from model and outer schema names", async () => {
+    const mixed = draft();
+    childOf(mixed).nodes = [
+      {
+        id: "model",
+        kind: "transform",
+        purpose: "Prepare the model input",
+        output: fields(["recordId", scalar("string")]),
+      },
+      {
+        id: "summarize",
+        kind: "llm",
+        purpose: "Summarize the model input",
+        output: fields(["summary", scalar("string")]),
+      },
+    ];
+    childOf(mixed).structure = { shape: "linear", order: ["model", "summarize"] };
+    const mixedDag = mustParse(mixed);
+    const mixedScaffold = buildAuthoredScaffold(mixedDag);
+    expect(mixedScaffold.dagTs).toContain("const $child_model =");
+    expect(mixedScaffold.dagTs).toContain("const createScoreItemsMap = ($childModel: string)");
+    const mixedResult = await runGauntlet(mixedDag, join(tmpRoot, "child-model-binding"));
+    if (!mixedResult.ok) throw new Error(JSON.stringify(mixedResult.errors, null, 2));
+
+    const sameAsMap = draft();
+    childNodesOf(sameAsMap)[0]!.id = "score-items";
+    (childOf(sameAsMap).structure as JsonObject).order = ["score-items"];
+    const sameAsMapDag = mustParse(sameAsMap);
+    const sameAsMapScaffold = buildAuthoredScaffold(sameAsMapDag);
+    expect(sameAsMapScaffold.dagTs).toContain("const ScoreItemsSchema =");
+    expect(sameAsMapScaffold.dagTs).toContain("const $child_ScoreItemsSchema =");
+    const sameAsMapRuntime = await importGeneratedDag(sameAsMapDag, "same-as-map-schema");
+    const sameAsMapNode = sameAsMapRuntime.nodes.find((node) => node.kind === "map");
+    if (sameAsMapNode?.kind !== "map") throw new Error("missing same-name map");
+    expect(sameAsMapNode.outputSchema.safeParse({
+      results: [{ recordId: "r-1", score: 1 }],
+    }).success).toBe(true);
+    expect(sameAsMapNode.outputSchema.safeParse({ recordId: "r-1", score: 1 }).success).toBe(false);
+
+    const sameAsOuter = draft();
+    childNodesOf(sameAsOuter)[0]!.id = "scope-records";
+    childNodesOf(sameAsOuter)[0]!.output = fields(["score", scalar("number")]);
+    (childOf(sameAsOuter).structure as JsonObject).order = ["scope-records"];
+    const sameAsOuterDag = mustParse(sameAsOuter);
+    const sameAsOuterRuntime = await importGeneratedDag(sameAsOuterDag, "same-as-outer-schema");
+    const sameAsOuterMap = sameAsOuterRuntime.nodes.find((node) => node.kind === "map");
+    if (sameAsOuterMap?.kind !== "map") throw new Error("missing outer-collision map");
+    expect(sameAsOuterMap.inputSchema.safeParse({
+      requestId: "request-1",
+      items: [{ recordId: "r-1", amount: 10 }],
+    }).success).toBe(true);
   });
 
   it("generates chained maps and keeps sibling child prompt names injective", async () => {
@@ -326,14 +493,34 @@ describe("authored map codegen and plate rendering", () => {
     expect(result.described.nodes.filter((node) => node.kind === "map")).toHaveLength(2);
   });
 
-  it("emits a real createMapNode with a static child and collect reducer", () => {
+  it("emits the honest collect-map constructor with a static child", () => {
     const scaffold = buildAuthoredScaffold(mustParse(MAP_FIXTURE));
-    expect(scaffold.dagTs).toContain("createMapNode");
+    expect(scaffold.dagTs).toContain("createCollectMapNode");
     expect(scaffold.dagTs).toContain('widthFrom: "items"');
     expect(scaffold.dagTs).toContain("maxWidth: 25");
     expect(scaffold.dagTs).toContain('id: "score-item-child"');
-    expect(scaffold.dagTs).toContain("reduce: (results) => ok({ results: [...results] })");
+    expect(scaffold.dagTs).toContain('gather: { kind: "collect", field: "results" }');
+    expect(scaffold.dagTs).not.toContain("reduce:");
     expect(scaffold.dagTs).not.toContain("eval(");
+  });
+
+  it("does not let arbitrary reducers claim authored collect metadata", async () => {
+    const generated = await importGeneratedDag(mustParse(MAP_FIXTURE), "manual-map-metadata");
+    const template = generated.nodes.find((node) => node.kind === "map");
+    if (template?.kind !== "map") throw new Error("missing template map");
+    const config = {
+      id: "manual-map",
+      inputSchema: z.object({ items: z.array(z.number()) }),
+      outputSchema: z.object({ total: z.number() }),
+      widthFrom: "items",
+      maxWidth: 3,
+      child: template.mapping.child,
+      childOutputSchema: z.number(),
+      reduce: (results: readonly number[]) => ok({ total: results.reduce((sum, value) => sum + value, 0) }),
+      authoredGather: { kind: "collect", field: "forged" },
+    } as const;
+    const manual = createMapNode(config);
+    expect(manual.mapping.authoredGather).toBeUndefined();
   });
 
   it("survives generate/import/lint/describe and renders exactly one bounded plate", async () => {

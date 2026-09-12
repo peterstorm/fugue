@@ -5,7 +5,7 @@ import type {
   EdgeDefRawInput,
 } from "../types/dag.js";
 import type { NodesRecord, MapNodeDef } from "../types/dag.js";
-import { isConditionalEdge, isDefaultEdge } from "../types/dag.js";
+import { isAuthoredCollectGather, isConditionalEdge, isDefaultEdge } from "../types/dag.js";
 import { asMaxWidth, asWidthFrom } from "../types/map-width.js";
 import { safeErrorMessage } from "../types/safe-error.js";
 import type { FrameworkError } from "../types/errors.js";
@@ -177,7 +177,7 @@ const snapshotMapping = (
     }
     const { child, childOutputSchema, reduce, widthFrom, maxWidth, authoredGather } = node.mapping;
     const validGather = authoredGather === undefined ||
-      (authoredGather !== null && authoredGather.kind === "collect" &&
+      (isAuthoredCollectGather(authoredGather) && authoredGather.kind === "collect" &&
         typeof authoredGather.field === "string" && asWidthFrom(authoredGather.field) !== undefined);
     if (typeof widthFrom !== "string" || asWidthFrom(widthFrom) === undefined ||
         asMaxWidth(maxWidth) === undefined || typeof reduce !== "function" ||
@@ -192,9 +192,7 @@ const snapshotMapping = (
       reduce,
       widthFrom,
       maxWidth,
-      ...(authoredGather !== undefined
-        ? { authoredGather: Object.freeze({ ...authoredGather }) }
-        : {}),
+      ...(authoredGather !== undefined ? { authoredGather } : {}),
     }));
   } catch (cause) {
     return err(validationErr(id, `invalid map '${id}' descriptor: ${safeErrorMessage(cause)}`));

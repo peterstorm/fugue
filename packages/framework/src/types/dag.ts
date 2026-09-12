@@ -7,6 +7,27 @@ import type { WidthFrom, MaxWidth } from "./map-width.js";
 import type { DagId, NodeId, DagInputId } from "./ids.js";
 import type { Confidence, ConfidenceBucket } from "./confidence.js";
 
+const AUTHORED_COLLECT_GATHER: unique symbol = Symbol("fugue.authored-collect-gather");
+
+export type AuthoredCollectGather = Readonly<{
+  readonly kind: "collect";
+  readonly field: string;
+  readonly [AUTHORED_COLLECT_GATHER]: true;
+}>;
+
+/** Internal issuer for truthful collect metadata; intentionally absent from the public barrel. */
+export const authoredCollectGather = (field: string): AuthoredCollectGather =>
+  Object.freeze({
+    kind: "collect" as const,
+    field,
+    [AUTHORED_COLLECT_GATHER]: true as const,
+  });
+
+/** Runtime proof used when snapshotting potentially forged map descriptors. */
+export const isAuthoredCollectGather = (value: unknown): value is AuthoredCollectGather =>
+  typeof value === "object" && value !== null &&
+  (value as Readonly<Record<PropertyKey, unknown>>)[AUTHORED_COLLECT_GATHER] === true;
+
 /** Runtime-owned fan body; author configuration is captured once, not closed over. */
 export type MapNodeDef<I = unknown, ChildOut = unknown, O = unknown> =
   Omit<NodeDef<I, O>, "kind" | "run" | "requires"> & Readonly<{
@@ -17,8 +38,8 @@ export type MapNodeDef<I = unknown, ChildOut = unknown, O = unknown> =
       childOutputSchema: z.ZodType<ChildOut>;
       widthFrom: WidthFrom;
       maxWidth: MaxWidth;
-      /** Present only when the reducer came from the closed authored collect gather. */
-      authoredGather?: Readonly<{ readonly kind: "collect"; readonly field: string }>;
+      /** Present only when the runtime issued the closed collect reducer/schema pair. */
+      authoredGather?: AuthoredCollectGather;
       reduce: (results: readonly ChildOut[]) => Result<O, FrameworkError>;
     }>;
   }>;
@@ -56,8 +77,8 @@ export type ConsistentNodes<Nodes extends NodesRecord> = {
  *
  * When `minConfidence` is set, the framework short-circuits: if the
  * upstream confidence bucket is below `minConfidence` (per
- * `CONFIDENCE_ORDER`), the predicate is recorded as `{ matched: false,
- * reason: "below-min-confidence" }` and the check function is never
+ * `CONFIDENCE_ORDER`), the predicate is recorded as
+ * `{ outcome: "below-min-confidence" }` and the check function is never
  * called.
  *
  * @see RouteEvidence for how predicate results are recorded.
@@ -199,9 +220,9 @@ export interface DagDefInput<Nodes extends NodesRecord = NodesRecord> {
 
 // ---------------------------------------------------------------------------
 // DagDef — branded, validated DagDefInput in the runtime-friendly array
-// shape. Only `defineDag` produces values of this type, so `runDag` /
-// `runDagStateful` / `compileDagToMachine` can refuse hand-rolled literals
-// at the type level.
+// shape. `validateDagShape` is the issuer; public constructors delegate to
+// that gate, so `runDag` / `runDagStateful` / `compileDagToMachine` can refuse
+// hand-rolled literals at the type level.
 // ---------------------------------------------------------------------------
 
 declare const __dagValidated: unique symbol;
