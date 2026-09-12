@@ -48,6 +48,7 @@ import {
   type TemplateCtx,
 } from "./new-templates.js";
 import {
+  CHILD_MODEL_NAME,
   DAG_CONST_NAME,
   DEFAULT_MODEL_NAME,
   FIXED_IMPORT_NAME,
@@ -59,6 +60,7 @@ import {
   TEMPLATE_OPENERS,
   NODE_FACTORY_NAME,
   SHAPE_HELPER_NAME,
+  childLocalName,
   dagFactoryName,
   fanInConstName,
   llmFactoryName,
@@ -236,38 +238,11 @@ export const structuralProjection = (body: string): string =>
   );
 
 /**
- * Stamp generated TypeScript with a tamper-evident integrity banner. The
- * `@fugue-integrity sha256:<hex>` hash covers the machine-owned STRUCTURE — the
- * body with each `@fugue-body` region collapsed by `structuralProjection` — so
- * rewiring the DAG by hand (imports, schemas, ids, structure, registration)
- * trips the hash, but implementing the placeholder node bodies the scaffold
- * tells you to fill in does NOT. This resolves the former contradiction where a
- * whole-body hash forbade the very edits `nextSteps` and the generated README
- * instruct.
- *
- * Pure (body in, stamped body out) and co-located with `structuralProjection`
- * and the region markers it depends on — the entire integrity contract lives in
- * this one module; the shell (`new.ts`) only writes the returned string.
- *
- * CROSS-REPO COUPLING SURFACE — loom's `fugue-generated-integrity` engine rule
- * (loom/engine `src/linter/programmatic/fugue-generated-integrity.ts`)
- * recomputes this hash and blocks on a mismatch at the wave gate. It is a
- * consumer of, and depends byte-for-byte on, all four of (nothing imported):
- *   1. the banner line format `// @fugue-integrity sha256:<64-hex>` (lowercase
- *      hex, on its own line) this function emits;
- *   2. the COMMENT-ONLY PRELUDE: every line above the integrity line is a `//`
- *      comment (the banner sits at the top of the file; the rule fails closed
- *      on real code above the integrity line — it would escape the hash);
- *   3. the two `@fugue-body-start` / `@fugue-body-end` marker strings above;
- *   4. the collapse rule: sha256 over `structuralProjection` of everything
- *      AFTER the integrity line, utf-8, hex digest.
- *
- * The projected STRUCTURE is the sole input to the hash, so regenerating from
- * the same AuthoredDag reproduces the identical structure and hence the
- * identical hash. Regeneration is NOT a byte-for-byte fixed point of an
- * implemented file, though: it re-emits placeholder bodies, DESTROYING any
- * implemented `@fugue-body` region contents — which is why overwriting a
- * non-empty dir requires `--force`.
+ * Stamp generated TypeScript using the complete cross-repository integrity
+ * contract documented beside the markers and projection above. Pure and
+ * deterministic: the same AuthoredDag reproduces the same structural hash.
+ * Regeneration still replaces implemented body regions, so overwriting a
+ * non-empty directory requires `--force`.
  */
 export const stampGenerated = (body: string): string => {
   const hash = createHash("sha256").update(structuralProjection(body), "utf-8").digest("hex");
@@ -472,10 +447,6 @@ const planNodes = (dag: AuthoredDag): Plans => {
     ),
   };
 };
-
-const CHILD_LOCAL_PREFIX = "$child_";
-const CHILD_MODEL_NAME = "$childModel";
-const childLocalName = (name: string): string => `${CHILD_LOCAL_PREFIX}${name}`;
 
 const planChildNodes = (nodes: readonly AuthoredChildNode[]): Map<string, NodePlan> =>
   new Map(nodes.map((node) => [node.id, {
@@ -841,8 +812,8 @@ const structureOrder = (dag: AuthoredDag): readonly string[] =>
   structureRefs(dag.structure).map(([id]) => id);
 
 /**
- * In the LLM factory case the structure references `create<Node>(model)`;
- * everywhere else the plain const.
+ * Structure references invoke an LLM factory, invoke a map factory (with a
+ * model when its child needs one), or use the plain const for ordinary nodes.
  */
 const nodeExprRef = (plan: NodePlan): string => {
   if (plan.node.kind === "llm") {

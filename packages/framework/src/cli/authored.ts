@@ -37,6 +37,13 @@ import { assertNever } from "./types.js";
 import type { Shape } from "./new-templates.js";
 import { CONFIDENCE_BUCKET, CONFIDENCE_FIELD } from "./vocabulary.js";
 
+type DeepReadonly<T> =
+  T extends string | number | boolean | bigint | symbol | null | undefined ? T
+    : T extends (...args: never[]) => unknown ? T
+      : T extends readonly unknown[] ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
+        : T extends object ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
+          : T;
+
 // ---------------------------------------------------------------------------
 // Field / schema specs (closed vocabulary)
 // ---------------------------------------------------------------------------
@@ -243,11 +250,9 @@ const outputNode = <K extends string>(kind: K) =>
     .strict();
 
 /**
- * The node union, discriminated on `kind`. A human-review gate is a typed
- * passthrough over the reviewed node's schema, so its variant has NO `output`
- * — every other kind requires one. Same JSON wire shape as ever; the union
- * just makes the kind/output dependency a parse-time fact instead of a
- * superRefine.
+ * Output-bearing nodes share one variant family. Human-review omits `output`
+ * because it forwards its predecessor; map omits it because collect derives
+ * the schema. The discriminated union makes those dependencies parse-time facts.
  */
 const outputNodeVariants = [
   outputNode("fetch"),
@@ -283,7 +288,7 @@ const ChildNodeSchema = z.discriminatedUnion("kind", outputNodeVariants, {
     ? "mapped child node kind must be fetch/transform/llm/source; nested maps and human-review are unsupported — gather, then review at root level (FR-F1-011)"
     : undefined,
 });
-export type AuthoredChildNode = z.infer<typeof ChildNodeSchema>;
+export type AuthoredChildNode = DeepReadonly<z.infer<typeof ChildNodeSchema>>;
 
 // ---------------------------------------------------------------------------
 // Structure (one variant per DAG shape; mirrors the define* helpers)
@@ -305,7 +310,7 @@ const RouterCaseSchema = z
     to: nodeRef,
   })
   .strict();
-export type RouterCase = z.infer<typeof RouterCaseSchema>;
+export type RouterCase = DeepReadonly<z.infer<typeof RouterCaseSchema>>;
 
 const structureSchema = (minimumLinearNodes: number) => z.discriminatedUnion("shape", [
   z.object({ shape: z.literal("linear"), order: z.array(nodeRef).min(minimumLinearNodes) }).strict(),
@@ -345,7 +350,7 @@ const structureSchema = (minimumLinearNodes: number) => z.discriminatedUnion("sh
 
 const StructureSchema = structureSchema(2);
 const ChildStructureSchema = structureSchema(1);
-type AuthoredStructure = z.infer<typeof StructureSchema>;
+type AuthoredStructure = DeepReadonly<z.infer<typeof StructureSchema>>;
 
 // Compile-time proof that `StructureSchema`'s discriminated union covers exactly
 // the canonical `Shape` set (derived from the `DAG_SHAPES` tuple in
@@ -400,26 +405,35 @@ export const structureRefs = (s: AuthoredStructure): ReadonlyArray<readonly [Keb
   }
 };
 
+const orderNodesByStructure = <Node extends { readonly id: KebabIdent }>(
+  nodes: readonly Node[],
+  structure: AuthoredStructure,
+): readonly Node[] => {
+  const byId = new Map(nodes.map((node) => [node.id, node] as const));
+  const ordered = structureRefs(structure).flatMap(([id]) => {
+    const node = byId.get(id);
+    return node === undefined ? [] : [node];
+  });
+  return ordered.length === nodes.length ? ordered : nodes;
+};
+
 // ---------------------------------------------------------------------------
 // Inline mapped children and the collect-only authored map node
 // ---------------------------------------------------------------------------
 
-const fieldTypeShape = (type: FieldType): unknown => {
-  if (type.kind !== "array") return type;
-  return {
-    kind: "array",
-    element: type.element.fields.map((field) => ({
-      name: field.name,
-      type: fieldTypeShape(field.type),
-    })),
-  };
-};
+function canonicalFields(spec: SchemaSpec): readonly unknown[] {
+  return spec.fields
+    .map((field) => ({ name: field.name, type: fieldTypeShape(field.type) }))
+    .toSorted((left, right) => left.name.localeCompare(right.name));
+}
 
-const schemaShape = (spec: SchemaSpec): string =>
-  JSON.stringify(spec.fields.map((field) => ({
-    name: field.name,
-    type: fieldTypeShape(field.type),
-  })));
+function fieldTypeShape(type: FieldType): unknown {
+  if (type.kind === "array") return { kind: "array", element: canonicalFields(type.element) };
+  if (type.kind === "enum") return { kind: "enum", values: [...type.values].sort() };
+  return type;
+}
+
+const schemaShape = (spec: SchemaSpec): string => JSON.stringify(canonicalFields(spec));
 
 const terminalRefs = (structure: AuthoredStructure): readonly KebabIdent[] => {
   switch (structure.shape) {
@@ -616,16 +630,12 @@ const ChildDagSchema = z
       }
     }
   })
-  .transform((child) => {
-    const byId = new Map(child.nodes.map((node) => [node.id, node] as const));
-    const nodes = structureRefs(child.structure).flatMap(([id]) => {
-      const node = byId.get(id);
-      return node === undefined ? [] : [node];
-    });
-    return nodes.length === child.nodes.length ? { ...child, nodes } : child;
-  });
+  .transform((child) => ({
+    ...child,
+    nodes: orderNodesByStructure(child.nodes, child.structure),
+  }));
 
-export type AuthoredChildDag = z.infer<typeof ChildDagSchema>;
+export type AuthoredChildDag = DeepReadonly<z.infer<typeof ChildDagSchema>>;
 
 export const childOutputSpec = (child: AuthoredChildDag): SchemaSpec => {
   const terminal = terminalRefs(child.structure)[0];
@@ -680,7 +690,7 @@ const KIND_LIST = NODE_KINDS.map((kind) => JSON.stringify(kind)).join("|");
 const AuthoredNodeSchema = z.discriminatedUnion("kind", authoredNodeVariants, {
   error: (issue) => issue.code === "invalid_union" ? `node kind must be one of ${KIND_LIST}` : undefined,
 });
-export type AuthoredNode = z.infer<typeof AuthoredNodeSchema>;
+export type AuthoredNode = DeepReadonly<z.infer<typeof AuthoredNodeSchema>>;
 export type AuthoredMapNode = Extract<AuthoredNode, { readonly kind: "map" }>;
 
 export const mapOutputSpec = (node: AuthoredMapNode): SchemaSpec => ({
@@ -743,6 +753,15 @@ export const mapItemSpec = (
 // ---------------------------------------------------------------------------
 // The AuthoredDag
 // ---------------------------------------------------------------------------
+
+/** Recursively freeze the parser-owned data graph before issuing its brand. */
+const deepFreezeOwned = <T>(value: T): DeepReadonly<T> => {
+  if (typeof value !== "object" || value === null) return value as DeepReadonly<T>;
+  for (const key of Reflect.ownKeys(value)) {
+    deepFreezeOwned((value as Record<PropertyKey, unknown>)[key]);
+  }
+  return (Object.isFrozen(value) ? value : Object.freeze(value)) as DeepReadonly<T>;
+};
 
 const BaseAuthoredDagSchema = z
   .object({
@@ -845,19 +864,16 @@ const AuthoredDagSchema = BaseAuthoredDagSchema.superRefine((dag, ctx) => {
   // by the structure, so the reordering is a bijection. When refinements
   // failed (unknown refs / duplicate roles) the parse is already a failure —
   // the guards below only keep this transform throw-free on that dead path.
-  .transform((dag) => {
-    const byId = new Map(dag.nodes.map((n) => [n.id, n] as const));
-    const ordered = structureRefs(dag.structure).flatMap(([id]) => {
-      const node = byId.get(id);
-      return node === undefined ? [] : [node];
-    });
-    return ordered.length === dag.nodes.length ? { ...dag, nodes: ordered } : dag;
-  })
+  .transform((dag) => ({
+    ...dag,
+    nodes: orderNodesByStructure(dag.nodes, dag.structure),
+  }))
+  .transform(deepFreezeOwned)
   .brand<"AuthoredDag">();
 
 /**
- * BRANDED: only `parseAuthoredDag` / `parseAuthoredDagJson` produce this type,
- * so holding an `AuthoredDag` means every refinement above already passed.
+ * BRANDED and deeply readonly: only the parse entry points issue this owned,
+ * recursively frozen value after every refinement above has passed.
  */
 export type AuthoredDag = z.infer<typeof AuthoredDagSchema>;
 /**

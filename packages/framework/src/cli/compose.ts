@@ -490,13 +490,6 @@ export const classifyAnswer = (text: string): AnswerClass => {
 };
 
 /**
- * Guard a programmatic round budget: NaN / negative / fractional values
- * would silently disable the bound (`rounds.questions >= NaN` is always
- * false — unbounded paid turns). Malformed budgets are a deterministic
- * caller bug (the CLI never sets these options), so the boundary throws
- * rather than returning a ComposeOutcome arm.
- */
-/**
  * THE one "input stream died" outcome. Both prompt sites (question rounds and
  * the accept prompt) hit the same wall and must report it identically — same
  * cause, same rounds, and the most recent gauntlet-proven draft carried along
@@ -513,6 +506,12 @@ const inputClosed = (
   ...(lastProven !== null ? { draft: lastProven } : {}),
 });
 
+/**
+ * Guard a programmatic round budget: NaN / negative / fractional values
+ * would silently disable the bound (`rounds.questions >= NaN` is always
+ * false — unbounded paid turns). Malformed budgets are a deterministic
+ * caller bug, so the boundary throws rather than returning a ComposeOutcome.
+ */
 const requireRoundBudget = (value: number, name: string): number => {
   if (!Number.isInteger(value) || value < 0) {
     throw new Error(`${name} must be a non-negative integer, got ${value}`);

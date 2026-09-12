@@ -177,7 +177,8 @@ integer), `child: DagDef`, `childOutputSchema`, and
 authored-map codegen. Its config omits `outputSchema` and `reduce`; one
 `gather: { kind: "collect", field }` causes the constructor to issue the array
 output schema, ascending-order reducer, and truthful describe/Mermaid metadata
-together. A caller cannot attach collect metadata to an unrelated reducer.
+together. The metadata token is bound to those exact schema/reducer identities;
+transplanting it onto a reconstructed map fails DAG validation.
 
 ```ts
 import { z } from "zod";
@@ -341,7 +342,10 @@ The important closed contracts are:
 - `maxWidth` is a positive safe integer.
 - The inline child reuses `linear`, `fan-out`, `diamond`, `router`, or `sources`.
   Child maps and human review are rejected; child fan-out requires a join; router
-  terminals must expose the same ordered output field names/types.
+  terminals must expose equivalent output field names/types (field and enum order
+  do not change schema meaning).
+- A successfully parsed `AuthoredDag` is an owned, recursively frozen value;
+  its brand remains a valid codegen proof after it crosses the parse boundary.
 - Authored maps omit `output`. `{ "kind": "collect", "field": "results" }`
   makes codegen call `createCollectMapNode`, which derives
   `z.object({ results: z.array(ChildOutputSchema) })`, the reducer, and truthful

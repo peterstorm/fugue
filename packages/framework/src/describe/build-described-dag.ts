@@ -2,10 +2,10 @@
 // by both `fugue describe` (CLI) and `GET /dags/:id/manifest` (host). Keeping
 // the assembly in one place prevents the two surfaces from drifting.
 //
-// Pure function: takes a branded `DagDef` plus optional context (registered
-// prompts, input schema), returns either a `DescribedDag` or a structured
-// `FrameworkError` if the DAG's topology can't be sorted (a registry/
-// validator invariant violation, never expected in practice).
+// Deterministic assembly with an optional diagnostic callback: takes a branded
+// `DagDef` plus context and returns either a `DescribedDag` or a structured
+// `FrameworkError` if topology cannot be sorted. Schema serialization warnings
+// may invoke the caller-provided sink while leaving the payload best-effort.
 
 import { match } from "ts-pattern";
 import type { z } from "zod";

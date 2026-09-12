@@ -32,9 +32,12 @@ export interface MapNodeConfig<I, ChildOut, O> {
   readonly reduce: (results: readonly ChildOut[]) => Result<O, FrameworkError>;
 }
 
-export type CollectedMapOutput<Field extends string, ChildOut> = Readonly<{
-  readonly [Key in Field]: readonly ChildOut[];
-}>;
+export type CollectedMapOutput<Field extends string, ChildOut> =
+  string extends Field
+    ? Readonly<Record<string, readonly ChildOut[] | undefined>>
+    : Field extends unknown
+      ? Readonly<Record<Field, readonly ChildOut[]>>
+      : never;
 
 export interface CollectMapNodeConfig<I, ChildOut, Field extends string> {
   readonly id: string;
@@ -109,6 +112,10 @@ export const createCollectMapNode = <I, ChildOut, const Field extends string>(
       childOutputSchema: config.childOutputSchema,
       reduce,
     },
-    authoredCollectGather(field),
+    authoredCollectGather(field, {
+      outputSchema,
+      childOutputSchema: config.childOutputSchema,
+      reduce,
+    }),
   );
 };

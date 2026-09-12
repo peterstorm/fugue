@@ -3,7 +3,7 @@ import type { EvalJudgeNodeDef } from "./eval-judge.js";
 import type { z } from "zod";
 import type { FrameworkError } from "./errors.js";
 import type { Result } from "./result.js";
-import type { WidthFrom, MaxWidth } from "./map-width.js";
+import { asWidthFrom, type WidthFrom, type MaxWidth } from "./map-width.js";
 import type { DagId, NodeId, DagInputId } from "./ids.js";
 import type { Confidence, ConfidenceBucket } from "./confidence.js";
 
@@ -15,18 +15,45 @@ export type AuthoredCollectGather = Readonly<{
   readonly [AUTHORED_COLLECT_GATHER]: true;
 }>;
 
+export type AuthoredCollectBinding = Readonly<{
+  readonly outputSchema: unknown;
+  readonly childOutputSchema: unknown;
+  readonly reduce: unknown;
+}>;
+
+const authoredCollectBindings = new WeakMap<AuthoredCollectGather, AuthoredCollectBinding>();
+
 /** Internal issuer for truthful collect metadata; intentionally absent from the public barrel. */
-export const authoredCollectGather = (field: string): AuthoredCollectGather =>
-  Object.freeze({
+export const authoredCollectGather = (
+  field: string,
+  binding: AuthoredCollectBinding,
+): AuthoredCollectGather => {
+  const gather = Object.freeze({
     kind: "collect" as const,
     field,
     [AUTHORED_COLLECT_GATHER]: true as const,
   });
+  authoredCollectBindings.set(gather, Object.freeze({ ...binding }));
+  return gather;
+};
 
-/** Runtime proof used when snapshotting potentially forged map descriptors. */
-export const isAuthoredCollectGather = (value: unknown): value is AuthoredCollectGather =>
-  typeof value === "object" && value !== null &&
-  (value as Readonly<Record<PropertyKey, unknown>>)[AUTHORED_COLLECT_GATHER] === true;
+/** Prove both the token's complete shape and its exact constructor-issued binding. */
+export const isAuthoredCollectGather = (
+  value: unknown,
+  binding: AuthoredCollectBinding,
+): value is AuthoredCollectGather => {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Readonly<Record<PropertyKey, unknown>>;
+  if (candidate[AUTHORED_COLLECT_GATHER] !== true || candidate.kind !== "collect" ||
+      typeof candidate.field !== "string" || asWidthFrom(candidate.field) === undefined) {
+    return false;
+  }
+  const issued = authoredCollectBindings.get(value as AuthoredCollectGather);
+  return issued !== undefined &&
+    issued.outputSchema === binding.outputSchema &&
+    issued.childOutputSchema === binding.childOutputSchema &&
+    issued.reduce === binding.reduce;
+};
 
 /** Runtime-owned fan body; author configuration is captured once, not closed over. */
 export type MapNodeDef<I = unknown, ChildOut = unknown, O = unknown> =

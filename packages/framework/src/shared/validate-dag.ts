@@ -17,9 +17,9 @@ import { type Result, ok, err } from "../types/result.js";
 import { CONFIDENCE_ORDER, type ConfidenceBucket } from "../types/confidence.js";
 
 /**
- * Normalize a raw input edge into the tagged-discriminant `EdgeDef`. Private
- * to this module — only called after `validateDagShape` has confirmed that
- * `from`/`to` reference known node IDs.
+ * Normalize a shape-checked raw edge into the tagged `EdgeDef`. Ordinary
+ * endpoint membership is validated after this projection; `$input` receives
+ * its reserved brand here and remains legal only as an edge source.
  */
 // Brand an edge endpoint. `$input` (the virtual request source) bypasses the
 // `nodeId()` regex — `$` is not a legal id char by construction — and brands to
@@ -176,9 +176,11 @@ const snapshotMapping = (
       return err(validationErr(id, `map '${id}' must declare only checkpointer and a mapping descriptor, not run`));
     }
     const { child, childOutputSchema, reduce, widthFrom, maxWidth, authoredGather } = node.mapping;
-    const validGather = authoredGather === undefined ||
-      (isAuthoredCollectGather(authoredGather) && authoredGather.kind === "collect" &&
-        typeof authoredGather.field === "string" && asWidthFrom(authoredGather.field) !== undefined);
+    const validGather = authoredGather === undefined || isAuthoredCollectGather(authoredGather, {
+      outputSchema: node.outputSchema,
+      childOutputSchema,
+      reduce,
+    });
     if (typeof widthFrom !== "string" || asWidthFrom(widthFrom) === undefined ||
         asMaxWidth(maxWidth) === undefined || typeof reduce !== "function" ||
         typeof childOutputSchema?.safeParse !== "function" || !validGather) {
@@ -197,6 +199,29 @@ const snapshotMapping = (
   } catch (cause) {
     return err(validationErr(id, `invalid map '${id}' descriptor: ${safeErrorMessage(cause)}`));
   }
+};
+
+/**
+ * Bucket `edges` by node id, pre-seeding an empty list for every known node so
+ * a lookup never returns undefined for a real node. `include` filters which
+ * edges participate — the three call sites differ ONLY in the key side and that
+ * filter, and hand-rolling the loop each time is how they would drift on the
+ * "skip edges pointing at unknown nodes" guard.
+ */
+const bucketEdgesBy = (
+  nodeIds: Iterable<NodeId>,
+  edges: readonly EdgeDef[],
+  key: (edge: EdgeDef) => string,
+  include: (edge: EdgeDef) => boolean = () => true,
+): Map<string, EdgeDef[]> => {
+  const buckets = new Map<string, EdgeDef[]>();
+  for (const id of nodeIds) buckets.set(id, []);
+  for (const edge of edges) {
+    if (!include(edge)) continue;
+    const list = buckets.get(key(edge));
+    if (list) list.push(edge);
+  }
+  return buckets;
 };
 
 /**
@@ -222,29 +247,6 @@ const snapshotMapping = (
  *     possible when authors construct nodes via factory helpers that take
  *     `id` explicitly.
  */
-/**
- * Bucket `edges` by node id, pre-seeding an empty list for every known node so
- * a lookup never returns undefined for a real node. `include` filters which
- * edges participate — the three call sites differ ONLY in the key side and that
- * filter, and hand-rolling the loop each time is how they would drift on the
- * "skip edges pointing at unknown nodes" guard.
- */
-const bucketEdgesBy = (
-  nodeIds: Iterable<NodeId>,
-  edges: readonly EdgeDef[],
-  key: (edge: EdgeDef) => string,
-  include: (edge: EdgeDef) => boolean = () => true,
-): Map<string, EdgeDef[]> => {
-  const buckets = new Map<string, EdgeDef[]>();
-  for (const id of nodeIds) buckets.set(id, []);
-  for (const edge of edges) {
-    if (!include(edge)) continue;
-    const list = buckets.get(key(edge));
-    if (list) list.push(edge);
-  }
-  return buckets;
-};
-
 export const validateDagShape = (
   input: DagDefInput,
   provenance?: DagDef["provenance"],

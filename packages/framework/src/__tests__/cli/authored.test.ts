@@ -1,8 +1,8 @@
 // AuthoredDag (B1) + deterministic codegen (B2) — the load-bearing assertion
 // mirrors new.test.ts: every shape the authoring schema accepts must generate
 // a dag.ts that survives the real gauntlet (import through defineDag + lint),
-// and `describe` on the generated code must match the authored structure
-// (the roundtrip that makes AuthoredDag ⊇ DescribedDag one format family).
+// and `describe` on the generated code must match the authored structure;
+// author-only intent remains outside the derived DescribedDag contract.
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { existsSync } from "node:fs";
@@ -334,6 +334,24 @@ describe("AuthoredDag schema", () => {
       expect(parsed.ok).toBe(true);
     });
   }
+
+  it("owns and recursively freezes parsed authoring data", () => {
+    const raw = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
+    const dag = mustParse(raw);
+
+    expect(Object.isFrozen(dag)).toBe(true);
+    expect(Object.isFrozen(dag.input)).toBe(true);
+    expect(Object.isFrozen(dag.input.fields)).toBe(true);
+    expect(Object.isFrozen(dag.input.fields[0])).toBe(true);
+    expect(Object.isFrozen(dag.nodes)).toBe(true);
+    expect(Object.isFrozen(dag.nodes[0])).toBe(true);
+    expect(Reflect.set(dag.nodes[0]!, "purpose", "changed")).toBe(false);
+    expect(dag.nodes[0]!.purpose).toBe("Load the record");
+
+    (raw.nodes[0] as { purpose: string }).purpose = "caller still owns raw input";
+    expect(raw.nodes[0]!.purpose).toBe("caller still owns raw input");
+    expect(dag.nodes[0]!.purpose).toBe("Load the record");
+  });
 
   const reject = (mutate: (dag: AuthoredDagInput) => unknown, needle: string) => {
     const raw = mutate(structuredClone(FIXTURES.router!) as AuthoredDagInput);
