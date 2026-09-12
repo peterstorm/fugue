@@ -8,18 +8,17 @@ import {
   type MapNodeDef,
 } from "../types/dag.js";
 import { type Result, ok } from "../types/result.js";
-import type { FrameworkError } from "../types/errors.js";
+import { formatFrameworkError, type FrameworkError } from "../types/errors.js";
 import { nodeId } from "../types/ids.js";
 import { resourceName } from "../types/witness.js";
 import { maxWidth, widthFrom } from "../types/map-width.js";
 import { snapshotMappedChild } from "../shared/validate-dag.js";
 import "../checkpoint/capability.js";
 
-export interface MapNodeConfig<I, ChildOut, O> {
+interface MapExecutionConfig<I, ChildOut> {
   readonly id: string;
   /** Upstream value carrying the array named by widthFrom. */
   readonly inputSchema: z.ZodType<I>;
-  readonly outputSchema: z.ZodType<O>;
   /** One field reference, not a path or an expression. */
   readonly widthFrom: string;
   /** Positive safe integer, enforced before any child work can be spent. */
@@ -28,24 +27,26 @@ export interface MapNodeConfig<I, ChildOut, O> {
   readonly child: DagDef;
   /** Applied to fresh AND replayed child outputs before reduction. */
   readonly childOutputSchema: z.ZodType<ChildOut>;
+}
+
+export interface MapNodeConfig<I, ChildOut, O> extends MapExecutionConfig<I, ChildOut> {
+  readonly outputSchema: z.ZodType<O>;
   /** Ascending index order, including the legal empty fan. */
   readonly reduce: (results: readonly ChildOut[]) => Result<O, FrameworkError>;
 }
 
-export type CollectedMapOutput<Field extends string, ChildOut> =
-  string extends Field
-    ? Readonly<Record<string, readonly ChildOut[] | undefined>>
-    : Field extends unknown
-      ? Readonly<Record<Field, readonly ChildOut[]>>
-      : never;
+/** Empty-object assignability distinguishes infinite string domains from finite literal keys. */
+type IsInfiniteStringDomain<Field extends string> = {} extends Record<Field, never> ? true : false;
 
-export interface CollectMapNodeConfig<I, ChildOut, Field extends string> {
-  readonly id: string;
-  readonly inputSchema: z.ZodType<I>;
-  readonly widthFrom: string;
-  readonly maxWidth: number;
-  readonly child: DagDef;
-  readonly childOutputSchema: z.ZodType<ChildOut>;
+export type CollectedMapOutput<Field extends string, ChildOut> =
+  Field extends unknown
+    ? IsInfiniteStringDomain<Field> extends true
+      ? Readonly<Record<Field, readonly ChildOut[] | undefined>>
+      : Readonly<Record<Field, readonly ChildOut[]>>
+    : never;
+
+export interface CollectMapNodeConfig<I, ChildOut, Field extends string>
+  extends MapExecutionConfig<I, ChildOut> {
   readonly gather: Readonly<{ readonly kind: "collect"; readonly field: Field }>;
 }
 
@@ -57,7 +58,7 @@ const createCapturedMapNode = <I, ChildOut, O>(
   const from = widthFrom(config.widthFrom);
   const max = maxWidth(config.maxWidth);
   const child = snapshotMappedChild(id, config.child);
-  if (!child.ok) throw new Error(child.error.kind === "validation" ? child.error.message : `invalid mapped child for '${id}'`);
+  if (!child.ok) throw new Error(formatFrameworkError(child.error));
   return Object.freeze({
     id,
     kind: "map",
@@ -92,9 +93,10 @@ export const createMapNode = <I, ChildOut, O>(
 export const createCollectMapNode = <I, ChildOut, const Field extends string>(
   config: CollectMapNodeConfig<I, ChildOut, Field>,
 ): MapNodeDef<I, ChildOut, CollectedMapOutput<Field, ChildOut>> => {
+  const childOutputSchema = config.childOutputSchema;
   const field = widthFrom(config.gather.field);
   const outputSchema = z.object({
-    [field]: z.array(config.childOutputSchema),
+    [field]: z.array(childOutputSchema),
   }) as unknown as z.ZodType<CollectedMapOutput<Field, ChildOut>>;
   const reduce = (
     results: readonly ChildOut[],
@@ -109,12 +111,12 @@ export const createCollectMapNode = <I, ChildOut, const Field extends string>(
       widthFrom: config.widthFrom,
       maxWidth: config.maxWidth,
       child: config.child,
-      childOutputSchema: config.childOutputSchema,
+      childOutputSchema,
       reduce,
     },
     authoredCollectGather(field, {
       outputSchema,
-      childOutputSchema: config.childOutputSchema,
+      childOutputSchema,
       reduce,
     }),
   );

@@ -1616,12 +1616,11 @@ describe("parse problem formatting", () => {
 // ---------------------------------------------------------------------------
 // Identifier accounting drift guard — the parse-time collision check
 // (`generatedIdentifiersFor` ∪ `dagLevelIdentifiers` ∪ `RESERVED_IDENTIFIERS`)
-// must claim EVERY name codegen actually emits: every top-level const /
+// must claim every TOP-LEVEL name codegen emits: every top-level const /
 // interface declaration and every import binding in a generated dag.ts.
-// Both are now built from the same `identifiers.ts` name constructors; this
-// test proves the derivation covers the emission for every fixture shape, so
-// a new emitted name can never silently regress collision detection back to
-// gauntlet-time SyntaxErrors.
+// Both are built from the same `identifiers.ts` name constructors; this
+// non-map fixture matrix protects root emission, while `authored-map.test.ts`
+// separately protects map factories and child-local bindings.
 // ---------------------------------------------------------------------------
 
 describe("identifier accounting covers every emitted name", () => {
@@ -1722,9 +1721,9 @@ describe("hostile free-text properties", () => {
 
   // Hostile ENUM values: a `"`, backtick, or `${...}` passes the schema's
   // SINGLE_LINE check (only LINE TERMINATORS are rejected) and then flows,
-  // unescaped-if-naive, into FOUR JSON.stringify-guarded sites — zodExpr
-  // (authored-codegen ~90), defaultExpr (~98), the LLM prompt's jsonShape hint
-  // (~238), and the router `when.equals` comparison (~388). The existing
+  // unescaped-if-naive, into FOUR JSON.stringify-guarded sites in
+  // `authored-codegen.ts`: `zodExpr`, `defaultExpr`, the LLM prompt's
+  // `jsonShape` hint, and the router `when.equals` comparison. The existing
   // free-text property never mutates enum values, so these four sites went
   // uncovered against hostile input. Note: an LLM node's `confidence` field is
   // pinned to the exact bucket enum, so we cover the LLM-prompt jsonShape via a
@@ -1738,7 +1737,7 @@ describe("hostile free-text properties", () => {
     for (const hostile of HOSTILE_ENUMS) {
       const d = structuredClone(FIXTURES.router!) as AuthoredDagInput;
       // The fetch classifier's `bucket` enum (zodExpr/defaultExpr) AND the
-      // routing case's `equals` (when.equals, codegen line 388) set to the same
+      // routing case's `when.equals` set to the same
       // hostile value so it is a legal predicate target.
       const bucket = outputOf(d.nodes[0]!).fields.find((f) => f.name === "bucket")! as {
         type: { kind: string; values?: readonly string[] };
@@ -1757,7 +1756,7 @@ describe("hostile free-text properties", () => {
         throw new Error(`gauntlet failed for ${JSON.stringify(hostile)}: ${JSON.stringify(verdict.errors)}`);
       }
 
-      // The generated dag.ts routes on the JSON-escaped literal (line 388) and
+      // The generated dag.ts routes on the JSON-escaped `when.equals` literal and
       // the zod enum lists it escaped — never the raw hostile bytes.
       const dagTs = buildAuthoredScaffold(parsed.dag).dagTs;
       expect(dagTs).toContain(`=== ${JSON.stringify(hostile)}`);
@@ -1787,7 +1786,7 @@ describe("hostile free-text properties", () => {
         throw new Error(`gauntlet failed for ${JSON.stringify(hostile)}: ${JSON.stringify(verdict.errors)}`);
       }
 
-      // The prompt shape-hint must carry the value JSON-escaped (line 238), not
+      // The prompt's `jsonShape` hint must carry the value JSON-escaped, not
       // the raw hostile bytes that would break the `{ ... }` hint or open a
       // `${}` template hole in the generated prompt string.
       const scaffold = buildAuthoredScaffold(parsed.dag);

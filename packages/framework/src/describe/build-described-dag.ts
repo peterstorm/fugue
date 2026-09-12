@@ -167,7 +167,12 @@ const describeNode = (
       widthFrom: node.mapping.widthFrom,
       maxWidth: node.mapping.maxWidth,
       childDagId: node.mapping.child.id,
-      gather: node.mapping.authoredGather ?? null,
+      gather: node.mapping.authoredGather === undefined
+        ? null
+        : Object.freeze({
+            kind: node.mapping.authoredGather.kind,
+            field: node.mapping.authoredGather.field,
+          }),
     },
   };
 };

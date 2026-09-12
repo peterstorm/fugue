@@ -64,7 +64,6 @@ import {
   dagFactoryName,
   fanInConstName,
   llmFactoryName,
-  mapFactoryName,
   nodeRefName,
   schemaConstName,
   type KebabIdent,
@@ -318,12 +317,17 @@ type LlmPromptInput = Readonly<{
   readonly encoding: "scalar" | "json";
 }>;
 
+type LlmNodeEmissionOptions = Readonly<{
+  readonly explicitReturnType?: boolean;
+}>;
+
 const llmNode = (
   p: NodePlan,
   promptName: string,
   inputs: readonly LlmPromptInput[],
-  explicitReturnType = true,
+  options: LlmNodeEmissionOptions = {},
 ): string => {
+  const explicitReturnType = options.explicitReturnType ?? true;
   if (p.llmFactory === null) {
     throw new Error(`authored-codegen invariant: LLM node '${p.node.id}' has no factory binding`);
   }
@@ -603,7 +607,7 @@ const emitMapNode = (
           { input: itemSpec, nodes: node.child.nodes, structure: node.child.structure },
           childPlan,
         );
-        declarations.push(llmNode(childPlan, promptName, inputs, false));
+        declarations.push(llmNode(childPlan, promptName, inputs, { explicitReturnType: false }));
         prompts.push(llmPrompt(dag, childPlan.node, promptName, inputs));
         break;
       }
@@ -612,7 +616,7 @@ const emitMapNode = (
 
   const parameter = childHasLlm(node) ? `${CHILD_MODEL_NAME}: string` : "";
   const body = declarations.length === 0 ? "" : `${indent(declarations.join("\n\n"), 2)}\n\n`;
-  const declaration = `${purposeComment(node)}\nconst ${mapFactoryName(node.id)} = (${parameter}) => {\n${body}  return ${NODE_FACTORY_NAME.map}({\n    id: ${JSON.stringify(node.id)},\n    inputSchema: ${plan.inExpr},\n    widthFrom: ${JSON.stringify(node.widthFrom)},\n    maxWidth: ${node.maxWidth},\n    child: ${child.expression.replace(/\n/g, "\n    ")},\n    childOutputSchema: ${schemaExpr(childOutputSpec(node.child), "    ")},\n    gather: { kind: "collect", field: ${JSON.stringify(node.gather.field)} },\n  });\n};`;
+  const declaration = `${purposeComment(node)}\nconst ${plan.ref} = (${parameter}) => {\n${body}  return ${NODE_FACTORY_NAME.map}({\n    id: ${JSON.stringify(node.id)},\n    inputSchema: ${plan.inExpr},\n    widthFrom: ${JSON.stringify(node.widthFrom)},\n    maxWidth: ${node.maxWidth},\n    child: ${child.expression.replace(/\n/g, "\n    ")},\n    childOutputSchema: ${schemaExpr(childOutputSpec(node.child), "    ")},\n    gather: { kind: "collect", field: ${JSON.stringify(node.gather.field)} },\n  });\n};`;
   return { declaration, prompts };
 };
 
@@ -824,8 +828,8 @@ const nodeExprRef = (plan: NodePlan): string => {
   }
   if (plan.node.kind === "map") {
     return childHasLlm(plan.node)
-      ? `${mapFactoryName(plan.node.id)}(opts.model ?? ${DEFAULT_MODEL_NAME})`
-      : `${mapFactoryName(plan.node.id)}()`;
+      ? `${plan.ref}(opts.model ?? ${DEFAULT_MODEL_NAME})`
+      : `${plan.ref}()`;
   }
   return plan.ref;
 };

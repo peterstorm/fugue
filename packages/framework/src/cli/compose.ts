@@ -27,6 +27,7 @@ import { z } from "zod";
 import type { LlmClient } from "../types/llm.js";
 import { formatFrameworkError } from "../types/errors.js";
 import { nodeId } from "../types/ids.js";
+import { safeErrorMessage } from "../types/safe-error.js";
 import { parseAuthoredDag, type AuthoredDag } from "./authored.js";
 import { resolveRoot } from "./paths.js";
 import { runGauntlet, type GauntletResult } from "./gauntlet.js";
@@ -94,15 +95,15 @@ export interface ComposeOptions {
   readonly force?: boolean;
   /**
    * Max clarifying-question rounds before the model must draft. Default 2.
-   * Must be a non-negative integer — `runCompose` throws otherwise (NaN /
-   * negative / fractional values would silently disable the bound).
+   * Must be a non-negative safe integer — `runCompose` throws otherwise.
+   * NaN/infinity disable comparisons; unsafe counters eventually saturate.
    */
   readonly maxQuestionRounds?: number;
   /**
    * Max repair rounds PER DRAFT (schema-validation failures and gauntlet
    * failures both count; the budget resets when a refinement produces a new
    * draft). `rounds.repairs` in the outcome stays cumulative. Default 3.
-   * Must be a non-negative integer — `runCompose` throws otherwise.
+   * Must be a non-negative safe integer — `runCompose` throws otherwise.
    */
   readonly maxRepairRounds?: number;
 }
@@ -507,16 +508,24 @@ const inputClosed = (
 });
 
 /**
- * Guard a programmatic round budget: NaN / negative / fractional values
- * would silently disable the bound (`rounds.questions >= NaN` is always
- * false — unbounded paid turns). Malformed budgets are a deterministic
- * caller bug, so the boundary throws rather than returning a ComposeOutcome.
+ * Guard a programmatic round budget. NaN/infinity can disable comparisons;
+ * fractional values alter the effective bound; unsafe counters eventually
+ * saturate. Malformed budgets are caller bugs, so this boundary throws.
  */
 const requireRoundBudget = (value: number, name: string): number => {
-  if (!Number.isInteger(value) || value < 0) {
-    throw new Error(`${name} must be a non-negative integer, got ${value}`);
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${name} must be a non-negative integer within the safe range, got ${value}`);
   }
   return value;
+};
+
+/** Render untrusted model values without adding an exception channel to repair. */
+const promptJson = (value: unknown): string => {
+  try {
+    return JSON.stringify(value, null, 2) ?? "null";
+  } catch (cause) {
+    return `[unserializable value omitted: ${safeErrorMessage(cause)}]`;
+  }
 };
 
 const summarize = (dag: AuthoredDag): string =>
@@ -608,8 +617,8 @@ export const runCompose = async (
     draftRepairs++;
     rounds.repairs++;
     return correctedDraftTurn(
-      `Your draft failed schema validation. Problems:\n${JSON.stringify(problems, null, 2)}\n` +
-        `Current draft:\n${JSON.stringify(first.dag, null, 2)}\n` +
+      `Your draft failed schema validation. Problems:\n${promptJson(problems)}\n` +
+        `Current draft:\n${promptJson(first.dag)}\n` +
         `Return a corrected {"action":"draft","dag":{...}}.`,
     );
   };
@@ -716,8 +725,8 @@ export const runCompose = async (
       draftRepairs++;
       rounds.repairs++;
       const attempt = await correctedDraftTurn(
-        `Your draft failed validation. Structured violations:\n${JSON.stringify(verdict.errors, null, 2)}\n` +
-          `Current draft:\n${JSON.stringify(draft, null, 2)}\n` +
+        `Your draft failed validation. Structured violations:\n${promptJson(verdict.errors)}\n` +
+          `Current draft:\n${promptJson(draft)}\n` +
           `Return a corrected {"action":"draft","dag":{...}}.`,
       );
       if (!attempt.ok) return attempt.outcome;
@@ -802,7 +811,7 @@ export const runCompose = async (
     draftRepairs = 0; // a refinement is a new draft — fresh repair budget
     conversation.push(`Refinement request: ${classified.text}`);
     const attempt = await correctedDraftTurn(
-      `Current accepted-so-far draft:\n${JSON.stringify(draft, null, 2)}\n` +
+      `Current accepted-so-far draft:\n${promptJson(draft)}\n` +
         `Apply the refinement above and return {"action":"draft","dag":{...}}.`,
       "refined",
     );

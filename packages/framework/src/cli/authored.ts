@@ -19,6 +19,7 @@
 // passed every refinement — no structurally-shaped impostors.
 
 import { z } from "zod";
+import { safeErrorMessage } from "../types/safe-error.js";
 import {
   FUGUE_BODY_MARKER,
   IDENT,
@@ -43,6 +44,44 @@ type DeepReadonly<T> =
       : T extends readonly unknown[] ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
         : T extends object ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
           : T;
+
+/**
+ * Keep recursive Zod parsing and owned freezing below the JavaScript call-stack
+ * ceiling. Cycles are programmatic-only (not JSON), so they are refused at the
+ * same wire boundary rather than entering recursive schemas.
+ */
+const MAX_AUTHORED_VALUE_DEPTH = 64;
+
+type AuthoredValueWalk =
+  | { readonly kind: "enter"; readonly value: unknown; readonly depth: number }
+  | { readonly kind: "leave"; readonly value: object };
+
+const authoredValueProblem = (raw: unknown): string | undefined => {
+  const active = new WeakSet<object>();
+  const pending: AuthoredValueWalk[] = [{ kind: "enter", value: raw, depth: 0 }];
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    if (current.kind === "leave") {
+      active.delete(current.value);
+      continue;
+    }
+    if (typeof current.value !== "object" || current.value === null) continue;
+    if (current.depth > MAX_AUTHORED_VALUE_DEPTH) {
+      return `authored DAG exceeds the maximum supported value depth of ${MAX_AUTHORED_VALUE_DEPTH}`;
+    }
+    if (active.has(current.value)) return "authored DAG must be an acyclic JSON value";
+    active.add(current.value);
+    pending.push({ kind: "leave", value: current.value });
+    for (const key of Object.keys(current.value)) {
+      pending.push({
+        kind: "enter",
+        value: (current.value as Record<string, unknown>)[key],
+        depth: current.depth + 1,
+      });
+    }
+  }
+  return undefined;
+};
 
 // ---------------------------------------------------------------------------
 // Field / schema specs (closed vocabulary)
@@ -159,7 +198,7 @@ const FieldSpecSchema: z.ZodType<FieldSpec, FieldSpec> = z
     }
   });
 
-/** One schema parser serves inputs, outputs, array elements and map gathers. */
+/** One schema parser serves DAG inputs, node outputs, and recursive array elements. */
 const schemaSpec = (missingMessage?: () => string): z.ZodType<SchemaSpec, SchemaSpec> =>
   z
     .object(
@@ -587,6 +626,24 @@ const childNodeOutputSpec = (node: AuthoredChildNode): SchemaSpec =>
     ? { fields: [...node.output.fields, CONFIDENCE_FIELD] }
     : node.output;
 
+const addLlmConfidenceIssue = (
+  node: { readonly id: string; readonly output: SchemaSpec },
+  ctx: z.RefinementCtx,
+  guidance = "",
+): void => {
+  const confidence = node.output.fields.find((field) => field.name === "confidence");
+  if (confidence === undefined) return;
+  const valid = confidence.type.kind === "enum" &&
+    confidence.type.values.length === CONFIDENCE_BUCKET.length &&
+    confidence.type.values.every((value, index) => value === CONFIDENCE_BUCKET[index]);
+  if (!valid) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `llm node '${node.id}' output field 'confidence' must be exactly {"kind":"enum","values":${JSON.stringify(CONFIDENCE_BUCKET)}}${guidance}`,
+    });
+  }
+};
+
 const ChildDagSchema = z
   .object({
     id: kebabIdentField("child DAG id must be kebab-case starting with a letter"),
@@ -600,15 +657,7 @@ const ChildDagSchema = z
     addRouterIssues(child.nodes, child.structure, (node) => node?.output, ctx);
     addIdentifierIssues(child.nodes, ctx);
     for (const node of child.nodes) {
-      if (node.kind !== "llm") continue;
-      const confidence = node.output.fields.find((field) => field.name === "confidence");
-      if (confidence === undefined) continue;
-      const valid = confidence.type.kind === "enum" &&
-        confidence.type.values.length === CONFIDENCE_BUCKET.length &&
-        confidence.type.values.every((value, index) => value === CONFIDENCE_BUCKET[index]);
-      if (!valid) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `llm node '${node.id}' output field 'confidence' must be exactly {"kind":"enum","values":${JSON.stringify(CONFIDENCE_BUCKET)}}` });
-      }
+      if (node.kind === "llm") addLlmConfidenceIssue(node, ctx);
     }
     if (child.structure.shape === "fan-out" && child.structure.join === undefined) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "mapped child fan-out requires a join so one child output schema is statically knowable" });
@@ -798,19 +847,13 @@ const AuthoredDagSchema = BaseAuthoredDagSchema.superRefine((dag, ctx) => {
   // An EXPLICIT 'confidence' output field must be exactly that shape —
   // anything else would clash with the framework's bucketed-confidence
   // channel (`confidence(o.confidence, "self-reported-bucket")`).
-  for (const n of dag.nodes) {
-    if (n.kind !== "llm") continue;
-    const conf = n.output.fields.find((f) => f.name === "confidence");
-    if (conf === undefined) continue;
-    const isBucket =
-      conf.type.kind === "enum" &&
-      conf.type.values.length === CONFIDENCE_BUCKET.length &&
-      conf.type.values.every((v, i) => v === CONFIDENCE_BUCKET[i]);
-    if (!isBucket) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `llm node '${n.id}' output field 'confidence' must be exactly {"kind":"enum","values":${JSON.stringify(CONFIDENCE_BUCKET)}} (the framework's bucketed confidence) — or omit it and let codegen inject it`,
-      });
+  for (const node of dag.nodes) {
+    if (node.kind === "llm") {
+      addLlmConfidenceIssue(
+        node,
+        ctx,
+        " (the framework's bucketed confidence) — or omit it and let codegen inject it",
+      );
     }
   }
 
@@ -895,9 +938,15 @@ const issuesToProblems = (issues: readonly z.ZodIssue[]): string[] =>
   issues.map((i) => (i.path.length > 0 ? `${i.path.join(".")}: ${i.message}` : i.message));
 
 export const parseAuthoredDag = (raw: unknown): AuthoredParseResult => {
-  const parsed = AuthoredDagSchema.safeParse(raw);
-  if (parsed.success) return { ok: true, dag: parsed.data };
-  return { ok: false, problems: issuesToProblems(parsed.error.issues) };
+  try {
+    const valueProblem = authoredValueProblem(raw);
+    if (valueProblem !== undefined) return { ok: false, problems: [valueProblem] };
+    const parsed = AuthoredDagSchema.safeParse(raw);
+    if (parsed.success) return { ok: true, dag: parsed.data };
+    return { ok: false, problems: issuesToProblems(parsed.error.issues) };
+  } catch (cause) {
+    return { ok: false, problems: [`invalid authored DAG: ${safeErrorMessage(cause)}`] };
+  }
 };
 
 export const parseAuthoredDagJson = (json: string): AuthoredParseResult => {

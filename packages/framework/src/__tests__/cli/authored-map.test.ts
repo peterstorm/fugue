@@ -3,23 +3,29 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import fc from "fast-check";
-import { parseAuthoredDag, type AuthoredDag } from "../../cli/authored.js";
+import { parseAuthoredDag, parseAuthoredDagJson, type AuthoredDag } from "../../cli/authored.js";
+import { parseIntent, runCompose, type ComposeTurn } from "../../cli/compose.js";
 import { buildAuthoredScaffold } from "../../cli/authored-codegen.js";
 import { runGauntlet } from "../../cli/gauntlet.js";
 import { describedToMermaid } from "../../cli/visualize.js";
 import { z } from "zod";
 import { FakeLlmClient } from "../../llm/fake-client.js";
+import { tokensOnly } from "../../types/token-usage.js";
 import {
   createCollectMapNode,
   createMapNode,
   type CollectedMapOutput,
 } from "../../nodes/map.js";
 import { makeNodeContext } from "../../shared/make-node-context.js";
-import { ok } from "../../types/result.js";
+import { type Result, ok } from "../../types/result.js";
 import { defineDag } from "../../executor/define-dag.js";
-import type { DagDef } from "../../types/dag.js";
+import { validateDagShape } from "../../shared/validate-dag.js";
+import { buildDescribedDag } from "../../describe/build-described-dag.js";
+import { createTransformNode } from "../../nodes/transform.js";
+import type { DagDef, DagDefInput } from "../../types/dag.js";
 import { DAG_INPUT } from "../../types/ids.js";
 import type { FrameworkError } from "../../types/errors.js";
+import type { LlmClient, LlmRequest, LlmResponse } from "../../types/llm.js";
 import type { NodeDef, TypedNodeContext } from "../../types/node.js";
 
 const assertAuthoredDagReadonly = (dag: AuthoredDag): void => {
@@ -37,16 +43,22 @@ void assertAuthoredDagReadonly;
 const assertCollectOutputTypes = (
   unionOutput: CollectedMapOutput<"left" | "right", number>,
   widenedOutput: CollectedMapOutput<string, number>,
+  patternedOutput: CollectedMapOutput<`results_${string}`, number>,
 ): void => {
   if ("left" in unionOutput) {
     const left: readonly number[] = unionOutput.left;
     void left;
   }
   const possiblyMissing: readonly number[] | undefined = widenedOutput.anyField;
+  const patternedPossiblyMissing: readonly number[] | undefined = patternedOutput.results_other;
   void possiblyMissing;
+  void patternedPossiblyMissing;
   // @ts-expect-error A union-selected field is not present in every output arm.
   const notAlwaysLeft: readonly number[] = unionOutput.left;
+  // @ts-expect-error An infinite template-literal domain cannot promise every matching key.
+  const notAlwaysPatterned: readonly number[] = patternedOutput.results_other;
   void notAlwaysLeft;
+  void notAlwaysPatterned;
 };
 void assertCollectOutputTypes;
 
@@ -126,12 +138,33 @@ const mustParse = (raw: unknown): AuthoredDag => {
   return parsed.dag;
 };
 
+const mustIntent = (raw: string) => {
+  const parsed = parseIntent(raw);
+  if (parsed === null) throw new Error("expected non-empty intent");
+  return parsed;
+};
+
 type JsonObject = Record<string, unknown>;
 const draft = (): JsonObject => structuredClone(MAP_FIXTURE) as unknown as JsonObject;
 const nodesOf = (value: JsonObject): JsonObject[] => value.nodes as JsonObject[];
 const mapOf = (value: JsonObject): JsonObject => nodesOf(value)[1]!;
 const childOf = (value: JsonObject): JsonObject => mapOf(value).child as JsonObject;
 const childNodesOf = (value: JsonObject): JsonObject[] => childOf(value).nodes as JsonObject[];
+
+const deeplyNestedDraft = (levels = 100): JsonObject => {
+  const value = draft();
+  let type: JsonObject = { kind: "string" };
+  for (let index = 0; index < levels; index++) {
+    type = {
+      kind: "array",
+      element: { fields: [{ name: "nested", type }] },
+    };
+  }
+  const input = value.input as JsonObject;
+  const inputFields = input.fields as JsonObject[];
+  inputFields[0]!.type = type;
+  return value;
+};
 
 const importGeneratedDag = async (dag: AuthoredDag, name: string): Promise<DagDef> => {
   const dir = join(tmpRoot, `import-${name}`);
@@ -171,6 +204,23 @@ const runGeneratedLlm = async (
 };
 
 describe("AuthoredDag map node (FR-F1-010)", () => {
+  it("typechecks the static contracts covered by the registered regression", () => {
+    const repoRoot = resolve(__dirname, "../../../../..");
+    const compiled = Bun.spawnSync([
+      process.execPath,
+      "./node_modules/typescript/bin/tsc",
+      "--noEmit",
+      "-p",
+      "packages/framework/tsconfig.json",
+    ], {
+      cwd: repoRoot,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const output = `${new TextDecoder().decode(compiled.stdout)}${new TextDecoder().decode(compiled.stderr)}`;
+    expect(compiled.exitCode, output).toBe(0);
+  }, 30_000);
+
   it("parses an inline child and derives the collected output", () => {
     const dag = mustParse(MAP_FIXTURE);
     const map = dag.nodes.find((node) => node.kind === "map");
@@ -230,14 +280,126 @@ describe("AuthoredDag map node (FR-F1-010)", () => {
     }
   });
 
-  it("accepts every positive safe maxWidth and preserves it", () => {
-    fc.assert(fc.property(fc.integer({ min: 1, max: 100_000 }), (bound) => {
+  it("accepts sampled and boundary positive safe maxWidth values", () => {
+    const assertAccepted = (bound: number): void => {
       const value = draft();
       mapOf(value).maxWidth = bound;
       const map = mustParse(value).nodes.find((node) => node.kind === "map");
       if (map?.kind !== "map") throw new Error("expected map node");
       expect(map.maxWidth).toBe(bound);
-    }));
+    };
+    fc.assert(fc.property(fc.integer({ min: 1, max: 100_000 }), assertAccepted));
+    assertAccepted(Number.MAX_SAFE_INTEGER);
+
+    const unsafe = draft();
+    mapOf(unsafe).maxWidth = Number.MAX_SAFE_INTEGER + 1;
+    expect(parseAuthoredDag(unsafe).ok).toBe(false);
+  });
+
+  it("returns structured problems for over-deep authored values", () => {
+    const nested = deeplyNestedDraft();
+    const parsed = parseAuthoredDag(nested);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.problems).toEqual([
+      "authored DAG exceeds the maximum supported value depth of 64",
+    ]);
+    expect(parseAuthoredDagJson(JSON.stringify(nested)).ok).toBe(false);
+  });
+
+  it("repairs an over-deep refinement without losing the last proven draft", async () => {
+    const turns: ComposeTurn[] = [
+      { action: "draft", dag: MAP_FIXTURE },
+      { action: "draft", dag: deeplyNestedDraft() },
+      { action: "questions", questions: ["unexpected repair question"] },
+    ];
+    const client: LlmClient = {
+      async sendStructured<O>(request: LlmRequest<O>): Promise<Result<LlmResponse<O>, FrameworkError>> {
+        const turn = turns.shift();
+        if (turn === undefined) throw new Error("scripted LLM ran out of turns");
+        const parsed = request.schema.safeParse(turn);
+        if (!parsed.success) throw new Error(parsed.error.message);
+        return ok({ output: parsed.data, ...tokensOnly(0, 0), rawText: JSON.stringify(turn) });
+      },
+      async sendWithTools(): Promise<never> {
+        throw new Error("compose never uses tools");
+      },
+    };
+    const answers = ["make it deeply nested"];
+    const outcome = await runCompose(
+      {
+        intent: mustIntent("score records"),
+        team: mustParse(MAP_FIXTURE).team,
+        root: join(tmpRoot, "deep-compose"),
+        maxRepairRounds: 1,
+      },
+      client,
+      {
+        ask: async () => ({ kind: "answer", text: answers.shift() ?? "abort" }),
+        say: () => {},
+      },
+    );
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok || outcome.reason !== "llm-error") throw new Error("expected bounded llm-error");
+    expect(outcome.rounds).toEqual({ questions: 0, repairs: 1, refinements: 1 });
+    expect(outcome.draft).toEqual(mustParse(MAP_FIXTURE));
+  });
+
+  it("rejects unsafe compose round budgets before any effect", async () => {
+    let effects = 0;
+    const client: LlmClient = {
+      async sendStructured(): Promise<never> {
+        effects++;
+        throw new Error("LLM must not run");
+      },
+      async sendWithTools(): Promise<never> {
+        effects++;
+        throw new Error("tools must not run");
+      },
+    };
+    const io = {
+      ask: async () => {
+        effects++;
+        return { kind: "answer" as const, text: "yes" };
+      },
+      say: () => { effects++; },
+    };
+    const common = {
+      intent: mustIntent("score records"),
+      team: mustParse(MAP_FIXTURE).team,
+      root: join(tmpRoot, "unsafe-budget"),
+    };
+    await expect(runCompose({ ...common, maxQuestionRounds: Number.MAX_SAFE_INTEGER + 1 }, client, io))
+      .rejects.toThrow("non-negative integer within the safe range");
+    await expect(runCompose({ ...common, maxRepairRounds: Number.MAX_SAFE_INTEGER + 1 }, client, io))
+      .rejects.toThrow("non-negative integer within the safe range");
+    expect(effects).toBe(0);
+  });
+
+  it("returns typed validation errors for malformed raw DAG identifiers", () => {
+    const work = createTransformNode({
+      id: "work",
+      inputSchema: z.unknown(),
+      outputSchema: z.unknown(),
+      transform: (value) => ok(value),
+    });
+    const base: DagDefInput = {
+      id: "valid-dag",
+      nodes: { work },
+      edges: [{ from: DAG_INPUT, to: "work" }],
+      outputNodeId: "work",
+    };
+    const cases: readonly DagDefInput[] = [
+      { ...base, id: "bad id" },
+      { ...base, outputNodeId: "bad id" },
+      { ...base, edges: [{ from: "bad id", to: "work" }] },
+      { ...base, edges: [{ from: DAG_INPUT, to: "bad id" }] },
+    ];
+    for (const candidate of cases) {
+      const parsed = validateDagShape(candidate);
+      expect(parsed.ok).toBe(false);
+      if (!parsed.ok) expect(parsed.error.kind).toBe("validation");
+    }
   });
 
   it("returns an owned deeply immutable proof whose generated bytes stay stable", () => {
@@ -326,6 +488,13 @@ describe("AuthoredDag map node (FR-F1-010)", () => {
           fields: [
             { name: "value", type: scalar("string") },
             { name: "state", type: { kind: "enum", values: ["open", "closed"] } },
+            {
+              name: "items",
+              type: {
+                kind: "array",
+                element: fields(["first", scalar("string")], ["second", scalar("number")]),
+              },
+            },
           ],
         },
       },
@@ -335,6 +504,13 @@ describe("AuthoredDag map node (FR-F1-010)", () => {
         purpose: "Right",
         output: {
           fields: [
+            {
+              name: "items",
+              type: {
+                kind: "array",
+                element: fields(["second", scalar("number")], ["first", scalar("string")]),
+              },
+            },
             { name: "state", type: { kind: "enum", values: ["closed", "open"] } },
             { name: "value", type: scalar("string") },
           ],
@@ -614,6 +790,32 @@ describe("authored map codegen and plate rendering", () => {
     const provenance = collect.mapping.authoredGather;
     if (provenance === undefined) throw new Error("missing collect provenance");
 
+    const singleIdentityMismatches = [
+      {
+        ...collect,
+        outputSchema: z.object({ results: z.array(z.number()) }),
+      },
+      {
+        ...collect,
+        mapping: { ...collect.mapping, childOutputSchema: z.number() },
+      },
+      {
+        ...collect,
+        mapping: {
+          ...collect.mapping,
+          reduce: (results: readonly number[]) => collect.mapping.reduce(results),
+        },
+      },
+    ];
+    for (const [index, mismatched] of singleIdentityMismatches.entries()) {
+      const id = `mismatched-collect-${index}`;
+      expect(() => defineDag({
+        id,
+        nodes: { "honest-map": mismatched },
+        edges: [{ from: DAG_INPUT, to: "honest-map" }],
+      })).toThrow("requires a valid immutable mapping descriptor");
+    }
+
     const custom = createMapNode({
       id: "manual-map",
       inputSchema,
@@ -634,6 +836,52 @@ describe("authored map codegen and plate rendering", () => {
       nodes: { "manual-map": transplanted },
       edges: [{ from: DAG_INPUT, to: "manual-map" }],
     })).toThrow("requires a valid immutable mapping descriptor");
+  });
+
+  it("captures a stateful child schema once and keeps collect output truthful", async () => {
+    const generated = await importGeneratedDag(mustParse(MAP_FIXTURE), "stateful-child-schema");
+    const template = generated.nodes.find((node) => node.kind === "map");
+    if (template?.kind !== "map") throw new Error("missing template map");
+    let reads = 0;
+    const firstSchema = z.string();
+    const laterSchema = z.number() as unknown as z.ZodType<string>;
+    const config = {
+      id: "captured-schema-map",
+      inputSchema: z.object({ items: z.array(z.string()) }),
+      widthFrom: "items",
+      maxWidth: 3,
+      child: template.mapping.child,
+      get childOutputSchema(): z.ZodType<string> {
+        reads++;
+        return reads === 1 ? firstSchema : laterSchema;
+      },
+      gather: { kind: "collect" as const, field: "results" as const },
+    };
+
+    const collect = createCollectMapNode(config);
+    expect(reads).toBe(1);
+    const reduced = collect.mapping.reduce(["captured"]);
+    if (!reduced.ok) throw new Error(reduced.error.kind);
+    expect(collect.mapping.childOutputSchema).toBe(firstSchema);
+    expect(collect.outputSchema.safeParse(reduced.value).success).toBe(true);
+
+    const described = buildDescribedDag({
+      dag: defineDag({
+        id: "captured-schema-dag",
+        nodes: { "captured-schema-map": collect },
+        edges: [{ from: DAG_INPUT, to: "captured-schema-map" }],
+        outputNodeId: "captured-schema-map",
+      }),
+      route: "/captured-schema-dag",
+      description: "captured schema",
+      version: "1.0.0",
+    });
+    if (!described.ok) throw new Error(described.error.kind);
+    const map = described.value.nodes.find((node) => node.kind === "map");
+    if (map?.kind !== "map" || map.mapping.gather === null) throw new Error("missing gather");
+    expect(map.mapping.gather).toEqual({ kind: "collect", field: "results" });
+    expect(map.mapping.gather).not.toBe(collect.mapping.authoredGather);
+    expect(Reflect.ownKeys(map.mapping.gather)).toEqual(["kind", "field"]);
   });
 
   it("collects empty and ordered child results behind a truthful output schema", async () => {

@@ -344,6 +344,9 @@ The important closed contracts are:
   Child maps and human review are rejected; child fan-out requires a join; router
   terminals must expose equivalent output field names/types (field and enum order
   do not change schema meaning).
+- Authored wire values are bounded to 64 nested JSON containers before recursive
+  schema parsing; deeper or cyclic programmatic values return structured parse
+  problems rather than exhausting the JavaScript call stack.
 - A successfully parsed `AuthoredDag` is an owned, recursively frozen value;
   its brand remains a valid codegen proof after it crosses the parse boundary.
 - Authored maps omit `output`. `{ "kind": "collect", "field": "results" }`
