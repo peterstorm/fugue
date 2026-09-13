@@ -369,8 +369,12 @@ The important closed contracts are:
   Their type marks ordinary prototype members as the gathered array when that
   name may be the selected field, otherwise `undefined`; no inherited callable
   is exposed. No authored reducer source or expression is accepted or evaluated.
-- Child LLM prompts are named `<dag>-<map>@<child>`, keeping them disjoint from
-  ordinary prompt names while remaining deterministic.
+- Child LLM prompts normally use `<dag>-<map>@<child>`, keeping them disjoint
+  from ordinary prompt names. If an ordinary or child logical prompt name would
+  make `<name>.txt` exceed the portable 255-byte component bound, codegen keeps
+  a readable prefix and appends `~<full-sha256>` of the complete logical name.
+  Short names stay byte-identical; long names remain deterministic and
+  collision-resistant.
 - Describe/Mermaid keep the child out of outer nodes, edges and waves. One map
   plate shows the symbolic width and inclusive `0..maxWidth` bound.
 

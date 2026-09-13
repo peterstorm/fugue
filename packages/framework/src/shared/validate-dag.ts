@@ -42,6 +42,35 @@ const validationErr = (nodeId: NodeId, message: string): FrameworkError => ({
   message,
 });
 
+/** Contain opaque schema callbacks used by the source/unit correlation check. */
+const sourceAcceptsUndefined = (
+  node: DagDef["nodes"][number],
+): Result<boolean, FrameworkError> => {
+  try {
+    return ok(node.inputSchema.safeParse(undefined).success);
+  } catch (cause) {
+    return err(validationErr(
+      node.id,
+      `Source node '${node.id}' inputSchema probe threw: ${safeErrorMessage(cause)}`,
+    ));
+  }
+};
+
+/** Own retry overrides before any reconstruction can observe caller accessors. */
+const mergeRetryLimits = (
+  existing: Readonly<Record<string, number>> | undefined,
+  overrides: Readonly<Record<string, number>>,
+): Result<Readonly<Record<string, number>>, FrameworkError> => {
+  try {
+    return ok({ ...(existing ?? {}), ...overrides });
+  } catch (cause) {
+    return err(validationErr(
+      nodeId("__dag__"),
+      `invalid retryLimits override capture: ${safeErrorMessage(cause)}`,
+    ));
+  }
+};
+
 /**
  * Capture every node-owned policy container once before validation. Schemas and
  * executable closures remain opaque references; the data around them becomes
@@ -602,13 +631,17 @@ export const validateDagShape = (
     // hand- or dynamically-built node could pair `isSource: true` with a non-unit
     // schema that rejects `undefined`. Reject that here so the illegal state
     // fails at definition time instead of surfacing as a confusing runtime parse.
-    if (node.isSource === true && !node.inputSchema.safeParse(undefined).success) {
-      return err(
-        validationErr(
-          node.id,
-          `Source node '${node.id}' has an inputSchema that rejects \`undefined\` — a source consumes no DAG input, so its inputSchema must be the unit schema (z.void()). Build it with createSourceNode`,
-        ),
-      );
+    if (node.isSource === true) {
+      const acceptsUndefined = sourceAcceptsUndefined(node);
+      if (!acceptsUndefined.ok) return acceptsUndefined;
+      if (!acceptsUndefined.value) {
+        return err(
+          validationErr(
+            node.id,
+            `Source node '${node.id}' has an inputSchema that rejects \`undefined\` — a source consumes no DAG input, so its inputSchema must be the unit schema (z.void()). Build it with createSourceNode`,
+          ),
+        );
+      }
     }
     if (node.isSource !== true && inDeg === 0) {
       return err(
@@ -661,11 +694,12 @@ export const validateDagShape = (
     if (se.kind !== "writes") continue;
     // One XOR, stated once: whichever extractor is present without its twin
     // names itself in the message.
-    const missing = se.extractNewWitness && !se.extractConditionedOn
-      ? { declared: "extractNewWitness", absent: "extractConditionedOn" }
-      : se.extractConditionedOn && !se.extractNewWitness
-        ? { declared: "extractConditionedOn", absent: "extractNewWitness" }
-        : null;
+    let missing: { readonly declared: string; readonly absent: string } | null = null;
+    if (se.extractNewWitness && !se.extractConditionedOn) {
+      missing = { declared: "extractNewWitness", absent: "extractConditionedOn" };
+    } else if (se.extractConditionedOn && !se.extractNewWitness) {
+      missing = { declared: "extractConditionedOn", absent: "extractNewWitness" };
+    }
     if (missing !== null) {
       return err(
         validationErr(
@@ -784,14 +818,18 @@ export const recordFromNodeArray = (
 export const withRetryLimits = (
   dag: DagDef,
   limits: Readonly<Record<string, number>>,
-): Result<DagDef, FrameworkError> => validateDagShape({
-  id: dag.id,
-  nodes: recordFromNodeArray(dag.nodes),
-  edges: dag.edges,
-  ...(dag.outputNodeId !== undefined ? { outputNodeId: dag.outputNodeId } : {}),
-  ...(dag.evalJudges !== undefined ? { evalJudges: dag.evalJudges } : {}),
-  retryLimits: { ...(dag.retryLimits ?? {}), ...limits },
-  ...(dag.defaultRetryLimit !== undefined
-    ? { defaultRetryLimit: dag.defaultRetryLimit }
-    : {}),
-}, dag.provenance);
+): Result<DagDef, FrameworkError> => {
+  const retryLimits = mergeRetryLimits(dag.retryLimits, limits);
+  if (!retryLimits.ok) return retryLimits;
+  return validateDagShape({
+    id: dag.id,
+    nodes: recordFromNodeArray(dag.nodes),
+    edges: dag.edges,
+    ...(dag.outputNodeId !== undefined ? { outputNodeId: dag.outputNodeId } : {}),
+    ...(dag.evalJudges !== undefined ? { evalJudges: dag.evalJudges } : {}),
+    retryLimits: retryLimits.value,
+    ...(dag.defaultRetryLimit !== undefined
+      ? { defaultRetryLimit: dag.defaultRetryLimit }
+      : {}),
+  }, dag.provenance);
+};

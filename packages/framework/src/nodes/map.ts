@@ -54,7 +54,7 @@ export interface MapNodeConfig<
 /** Empty-object assignability distinguishes infinite string domains from finite literal keys. */
 type IsInfiniteStringDomain<Field extends string> = {} extends Record<Field, never> ? true : false;
 
-/** Own string keys of ordinary Object.prototype; all are absent on collect dictionaries. */
+/** Ordinary Object.prototype names are never inherited; only the selected gather key is own. */
 type ObjectPrototypeKey =
   | keyof Object
   | "__defineGetter__"

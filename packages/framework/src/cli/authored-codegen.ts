@@ -195,8 +195,9 @@ interface NodePlan {
   readonly needsModel: boolean;
 }
 
-type ChildNodePlan = Omit<NodePlan, "node"> & Readonly<{
+type ChildNodePlan = Omit<NodePlan, "node" | "outSpec"> & Readonly<{
   readonly node: AuthoredChildNode;
+  readonly outSpec: SchemaSpec;
 }>;
 
 const purposeComment = (node: AuthoredNode): string => `// ${node.id} — ${comment(node.purpose)}`;
@@ -418,15 +419,26 @@ const nodeLlmCount = (node: AuthoredNode): number =>
       map.child.nodes.filter((child) => child.kind === "llm").length)
     .otherwise(() => 0);
 
-/**
- * Prompt registry name for an llm node: the dag name when it is the only llm
- * node, `<dag>-<node>` otherwise.
- */
+// `<prompt-name>.txt` is one filesystem component. Authored identifiers are
+// ASCII, so string length is byte length for every logical prompt name here.
+const PROMPT_FILE_SUFFIX = ".txt";
+const FILESYSTEM_COMPONENT_MAX_LENGTH = 255;
+const PROMPT_NAME_MAX_LENGTH = FILESYSTEM_COMPONENT_MAX_LENGTH - PROMPT_FILE_SUFFIX.length;
+
+/** Preserve readable names when possible; adapt overlong identities with full SHA-256. */
+const boundedPromptName = (logicalName: string): string => {
+  if (logicalName.length <= PROMPT_NAME_MAX_LENGTH) return logicalName;
+  const digest = createHash("sha256").update(logicalName, "utf-8").digest("hex");
+  const suffix = `~${digest}`;
+  return `${logicalName.slice(0, PROMPT_NAME_MAX_LENGTH - suffix.length)}${suffix}`;
+};
+
+/** DAG name for one LLM, `<dag>-<node>` for many, then bounded for disk. */
 const promptNameFor = (dag: AuthoredDag, id: string, llmCount: number): string =>
-  llmCount === 1 ? dag.name : `${dag.name}-${id}`;
+  boundedPromptName(llmCount === 1 ? dag.name : `${dag.name}-${id}`);
 
 const childPromptNameFor = (dag: AuthoredDag, map: AuthoredMapNode, id: string): string =>
-  `${dag.name}-${map.id}@${id}`;
+  boundedPromptName(`${dag.name}-${map.id}@${id}`);
 
 const planNodes = (dag: AuthoredDag): Plans => {
   const byId = new Map<string, NodePlan>();
@@ -582,9 +594,8 @@ const emitMapNode = (
   const declarations: string[] = [];
   for (const id of childIds) {
     const childPlan = plans.get(id);
-    if (childPlan?.outSpec !== null && childPlan?.outSpec !== undefined) {
-      declarations.push(schemaConst(childPlan.outName, childPlan.outSpec));
-    }
+    if (childPlan === undefined) throw new Error(`authored map invariant: unknown child node '${id}'`);
+    declarations.push(schemaConst(childPlan.outName, childPlan.outSpec));
   }
   declarations.push(...child.extras);
 

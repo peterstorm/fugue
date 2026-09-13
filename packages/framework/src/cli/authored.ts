@@ -482,7 +482,7 @@ const schemaShape = (spec: SchemaSpec): string => JSON.stringify(canonicalFields
 const terminalRefs = (structure: AuthoredStructure): readonly KebabIdent[] => {
   switch (structure.shape) {
     case "linear":
-      return structure.order.length === 0 ? [] : [structure.order[structure.order.length - 1]!];
+      return structure.order.slice(-1);
     case "fan-out":
       return structure.join === undefined ? [] : [structure.join];
     case "diamond":

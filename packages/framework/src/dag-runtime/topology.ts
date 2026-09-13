@@ -195,9 +195,9 @@ export const computeUnconditionalAdj = (
 //              * unconditional edge whose source isn't always-active (the
 //                source itself sits behind a conditional/default).
 //
-// When `optional` is non-empty the runtime builds `nodeInput` as an object
-// keyed by `required ∪ optional`; absent optional sources surface as
-// `undefined` (preserving the legacy `optionalDeps` semantics).
+// Input shape depends on total source count, not bucket: one required or
+// selected optional source is bare; two or more are keyed by
+// `required ∪ optional`, with absent optional sources represented as undefined.
 // ---------------------------------------------------------------------------
 
 

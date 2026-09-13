@@ -87,13 +87,25 @@ describe("buildNodeInput", () => {
     expect(result).toEqual({ ok: true, value: { a: "valueA", opt: undefined } });
   });
 
-  it("optional forces keyed shape even with 0 required", () => {
-    const outputs = new Map([["opt", "yes"]]);
+  it("one selected optional router source returns its bare upstream value", () => {
+    const outputs = new Map([["classifier", { route: "yes" }]]);
     const result = buildNodeInput(outputs, {
       required: [],
-      optional: ["opt"],
-    }, "test-node");
-    expect(result).toEqual({ ok: true, value: { opt: "yes" } });
+      optional: ["classifier"],
+    }, "handler");
+    expect(result).toEqual({ ok: true, value: { route: "yes" } });
+  });
+
+  it("multiple optional sources retain a keyed fan-in shape", () => {
+    const outputs = new Map([["left", "yes"]]);
+    const result = buildNodeInput(outputs, {
+      required: [],
+      optional: ["left", "right"],
+    }, "merge");
+    expect(result).toEqual({
+      ok: true,
+      value: { left: "yes", right: undefined },
+    });
   });
 
   it("returns non-retriable error when required source is missing", () => {

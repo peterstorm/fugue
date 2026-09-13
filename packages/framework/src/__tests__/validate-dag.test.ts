@@ -3,7 +3,7 @@ import { z } from "zod";
 import { ok } from "../types/result.js";
 import type { DagDefInput } from "../types/dag.js";
 import { DAG_INPUT, nodeId } from "../types/ids.js";
-import { validateDagShape } from "../executor/validate-dag.js";
+import { validateDagShape, withRetryLimits } from "../executor/validate-dag.js";
 import { createTransformNode } from "../nodes/transform.js";
 import type { Capability } from "../types/node.js";
 
@@ -145,6 +145,25 @@ describe("validateDagShape", () => {
     }
   });
 
+  it("contains a throwing source inputSchema probe as a node-attributed validation error", () => {
+    const throwingSchema = z.unknown().superRefine(() => {
+      throw new Error("source refinement exploded");
+    });
+    const source = { ...mkNode("S"), isSource: true, inputSchema: throwingSchema };
+    const result = validateDagShape({
+      id: "throwing-source-schema",
+      nodes: { S: source },
+      edges: [],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatchObject({ kind: "validation", nodeId: "S" });
+      expect(result.error.kind === "validation" && result.error.message).toContain(
+        "Source node 'S' inputSchema probe threw: source refinement exploded",
+      );
+    }
+  });
+
   it("accepts a source node with a unit (z.void()) inputSchema", () => {
     const goodSource = { ...mkNode("S"), isSource: true, inputSchema: z.void() };
     const dag: DagDefInput = {
@@ -283,6 +302,38 @@ describe("validateDagShape", () => {
       expect(r.error.nodeId).toBe(nodeId("A"));
     } else {
       throw new Error(`expected a validation error for the empty ladder, got ${r.ok ? "ok" : r.error.kind}`);
+    }
+  });
+
+  it("contains hostile retry-limit accessors and proxy traps before re-parsing", () => {
+    const parsed = validateDagShape({
+      id: "retry-override-totality",
+      nodes: { A: mkNode("A") },
+      edges: [{ from: DAG_INPUT, to: "A" }],
+    });
+    if (!parsed.ok) throw new Error(parsed.error.kind);
+
+    const hostileLimits: readonly Readonly<Record<string, number>>[] = [
+      {
+        get A(): number {
+          throw new Error("retry getter exploded");
+        },
+      },
+      new Proxy({ A: 1 }, {
+        ownKeys: () => {
+          throw new Error("retry ownKeys exploded");
+        },
+      }),
+    ];
+    for (const limits of hostileLimits) {
+      const result = withRetryLimits(parsed.value, limits);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error).toMatchObject({ kind: "validation", nodeId: "__dag__" });
+        expect(result.error.kind === "validation" && result.error.message).toContain(
+          "invalid retryLimits override capture",
+        );
+      }
     }
   });
 

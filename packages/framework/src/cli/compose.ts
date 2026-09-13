@@ -234,9 +234,7 @@ interface ParseComposeError {
 export const parseComposeArgs = (args: readonly string[]): ParsedComposeArgs | ParseComposeError => {
   const problems: string[] = [];
   let intent: string | undefined;
-  let parsedIntent: Intent | null = null;
   let team: string | undefined;
-  let parsedTeam: Kebab | null = null;
   let model: string | undefined;
   let owner: string | undefined;
   let root: string | undefined;
@@ -280,26 +278,25 @@ export const parseComposeArgs = (args: readonly string[]): ParsedComposeArgs | P
       });
   }
 
+  const parsedIntent = intent === undefined ? null : parseIntent(intent);
   if (intent === undefined) {
     problems.push('missing intent string (e.g. `fugue compose "Process refunds…" --team payments`)');
-  } else {
+  } else if (parsedIntent === null) {
     // A blank intent gives the model nothing to draft from — reject it here
     // rather than burning an LLM round on an empty brief. `parseIntent` is
     // the single producer of the branded intent.
-    parsedIntent = parseIntent(intent);
-    if (parsedIntent === null) problems.push("intent must be non-empty");
+    problems.push("intent must be non-empty");
   }
+
+  const parsedTeam = team === undefined ? null : parseKebab(team);
   if (team === undefined) {
     problems.push("missing --team <team>");
-  } else {
+  } else if (parsedTeam === null) {
     // The team lands in the AuthoredDag (kebab-case there) and in the
     // dags/<team>/ directory name — reject junk at the boundary instead of
     // letting the first LLM draft fail schema validation on our own flag.
     // `parseKebab` is the single producer of the branded team.
-    parsedTeam = parseKebab(team);
-    if (parsedTeam === null) {
-      problems.push(`--team '${team}' must be kebab-case (lowercase, digits, single dashes)`);
-    }
+    problems.push(`--team '${team}' must be kebab-case (lowercase, digits, single dashes)`);
   }
 
   if (parsedIntent === null || parsedTeam === null || problems.length > 0) {

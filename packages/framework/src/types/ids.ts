@@ -55,7 +55,7 @@ export const isDagInput = (id: string): id is DagInputId => id === DAG_INPUT;
 /** Canonical maximum shared by every runtime and authoring identifier proof. */
 export const ID_MAX_LENGTH = 128;
 
-/** The regex every framework identifier is validated against. */
+/** General RunId/NodeId grammar; DagId is stricter and GitSha has its own domain. */
 export const ID_PATTERN = new RegExp(`^[A-Za-z0-9_:-]{1,${ID_MAX_LENGTH}}$`);
 
 // Load-time assertion of the load-bearing invariant from the DAG_INPUT block

@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -7,6 +8,7 @@ import { parseAuthoredDag, parseAuthoredDagJson, type AuthoredDag } from "../../
 import { parseIntent, runCompose, type ComposeTurn } from "../../cli/compose.js";
 import { buildAuthoredScaffold, structuralProjection } from "../../cli/authored-codegen.js";
 import { runGauntlet } from "../../cli/gauntlet.js";
+import { writeAuthoredScaffold } from "../../cli/new.js";
 import { describedToMermaid } from "../../cli/visualize.js";
 import { z } from "zod";
 import { FakeLlmClient } from "../../llm/fake-client.js";
@@ -21,7 +23,7 @@ import { type Result, ok } from "../../types/result.js";
 import { InMemoryCheckpointer } from "../../checkpoint/checkpointer.js";
 import { defineDag } from "../../executor/define-dag.js";
 import { runDag } from "../../executor/run-dag.js";
-import { validateDagShape } from "../../shared/validate-dag.js";
+import { validateDagShape, withRetryLimits } from "../../shared/validate-dag.js";
 import { buildDescribedDag } from "../../describe/build-described-dag.js";
 import { createTransformNode } from "../../nodes/transform.js";
 import type { DagDef, DagDefInput } from "../../types/dag.js";
@@ -245,6 +247,25 @@ const importGeneratedDag = async (
   return registration.dag as DagDef;
 };
 
+const implementGeneratedBodies = (
+  source: string,
+  bodies: readonly string[],
+): string => {
+  let bodyIndex = 0;
+  const implemented = source.replace(
+    /^(\s*)\/\/ @fugue-body-start[\s\S]*?^\s*\/\/ @fugue-body-end/gm,
+    (_region, indentation: string) => {
+      const body = bodies[bodyIndex++];
+      if (body === undefined) throw new Error("generated more body regions than expected");
+      return `${indentation}// @fugue-body-start\n${indentation}${body}\n${indentation}// @fugue-body-end`;
+    },
+  );
+  if (bodyIndex !== bodies.length) {
+    throw new Error(`implemented ${bodyIndex} generated bodies, expected ${bodies.length}`);
+  }
+  return implemented;
+};
+
 const runGeneratedLlm = async (
   node: DagDef["nodes"][number],
   input: unknown,
@@ -277,16 +298,7 @@ describe("AuthoredDag map node (FR-F1-010)", () => {
       'fetch: async (_input) => $fugue.ok({ requestId: _input.requestId, items: [{ recordId: "b", amount: 2 }, { recordId: "a", amount: 1 }] }),',
       'transform: (_input) => $fugue.ok({ recordId: _input.recordId, score: _input.amount }),',
     ];
-    let bodyIndex = 0;
-    const implemented = original.replace(
-      /^(\s*)\/\/ @fugue-body-start[\s\S]*?^\s*\/\/ @fugue-body-end/gm,
-      (_region, indentation: string) => {
-        const body = bodies[bodyIndex++];
-        if (body === undefined) throw new Error("generated more body regions than expected");
-        return `${indentation}// @fugue-body-start\n${indentation}${body}\n${indentation}// @fugue-body-end`;
-      },
-    );
-    expect(bodyIndex).toBe(bodies.length);
+    const implemented = implementGeneratedBodies(original, bodies);
     expect(structuralProjection(implemented)).toBe(structuralProjection(original));
     const compileDir = join(tmpRoot, "implemented-compile");
     await mkdir(compileDir, { recursive: true });
@@ -379,7 +391,7 @@ describe("AuthoredDag map node (FR-F1-010)", () => {
         fugueAuthored: 1,
         name: "map-router-handler",
         team: "demo",
-        description: "Map as a router handler",
+        description: "Map as a router case handler",
         input: fields(["requestId", scalar("string")]),
         nodes: [
           {
@@ -402,13 +414,83 @@ describe("AuthoredDag map node (FR-F1-010)", () => {
           default: "fallback",
         },
       },
+      {
+        fugueAuthored: 1,
+        name: "map-router-default",
+        team: "demo",
+        description: "Map as the router default handler",
+        input: fields(["requestId", scalar("string")]),
+        nodes: [
+          {
+            ...scope(),
+            id: "classify",
+            output: {
+              fields: [
+                ...((scope().output as JsonObject).fields as JsonObject[]),
+                { name: "route", type: { kind: "enum", values: ["map", "other"] } },
+              ],
+            },
+          },
+          mapNode(),
+          transform("other-handler"),
+        ],
+        structure: {
+          shape: "router",
+          classifier: "classify",
+          cases: [{ label: "other", when: { field: "route", equals: "other" }, to: "other-handler" }],
+          default: "score-items",
+        },
+      },
     ];
+
+    const childBody = "transform: (_input) => $fugue.ok({ recordId: _input.recordId, score: _input.amount }),";
+    const roleBodies: Readonly<Record<string, readonly string[]>> = {
+      "map-fan-source": [
+        childBody,
+        'transform: (_input) => $fugue.ok({ value: "left" }),',
+        'transform: (_input) => $fugue.ok({ value: "right" }),',
+      ],
+      "map-fan-branch": [
+        'fetch: async (_input) => $fugue.ok({ requestId: _input.requestId, items: [{ recordId: "a", amount: 1 }] }),',
+        childBody,
+        'transform: (_input) => $fugue.ok({ value: "other" }),',
+      ],
+      "map-router-handler": [
+        'fetch: async (_input) => $fugue.ok({ requestId: _input.requestId, items: [{ recordId: "a", amount: 1 }], route: "map" }),',
+        childBody,
+        'transform: (_input) => $fugue.ok({ value: "fallback" }),',
+      ],
+      "map-router-default": [
+        'fetch: async (_input) => $fugue.ok({ requestId: _input.requestId, items: [{ recordId: "a", amount: 1 }], route: "map" }),',
+        'transform: (_input) => $fugue.ok({ value: "other" }),',
+        childBody,
+      ],
+    };
 
     for (const candidate of validRoles) {
       const parsed = mustParse(candidate);
-      const verdict = await runGauntlet(parsed, join(tmpRoot, String(candidate.name)));
+      const role = String(candidate.name);
+      const verdict = await runGauntlet(parsed, join(tmpRoot, role));
       if (!verdict.ok) throw new Error(JSON.stringify(verdict.errors, null, 2));
       expect(verdict.described.nodes.some((node) => node.kind === "map")).toBe(true);
+
+      const bodies = roleBodies[role];
+      if (bodies === undefined) continue;
+      const implemented = implementGeneratedBodies(buildAuthoredScaffold(parsed).dagTs, bodies);
+      const runtime = await importGeneratedDag(parsed, `${role}-runtime`, implemented);
+      const input = role === "map-fan-source"
+        ? { requestId: "request-1", items: [{ recordId: "a", amount: 1 }] }
+        : { requestId: "request-1" };
+      const execution = await runDag(runtime, input, makeNodeContext({
+        runId: `${role}-runtime`,
+        dagId: runtime.id,
+        capabilities: { checkpointer: new InMemoryCheckpointer() },
+      }), { suppressRoutingWarnings: true });
+      if (!execution.ok) throw new Error(`${role}: ${JSON.stringify(execution.error)}`);
+      expect(execution.ok, role).toBe(true);
+      if (role.startsWith("map-router-")) {
+        expect(execution.value).toEqual({ results: [{ recordId: "a", score: 1 }] });
+      }
     }
 
     const fanIn = validRoles[2]!;
@@ -609,6 +691,61 @@ describe("AuthoredDag map node (FR-F1-010)", () => {
     }
   });
 
+  it("bounds ordinary and mapped-child prompt filenames without losing identity", async () => {
+    const value = draft();
+    const dagName = "a".repeat(ID_MAX_LENGTH);
+    const scopeId = "b".repeat(ID_MAX_LENGTH);
+    const mapId = "c".repeat(ID_MAX_LENGTH);
+    const childNodeId = "d".repeat(ID_MAX_LENGTH);
+    const outerLlmId = "e".repeat(ID_MAX_LENGTH);
+    value.name = dagName;
+    nodesOf(value)[0]!.id = scopeId;
+    mapOf(value).id = mapId;
+    childNodesOf(value)[0]!.id = childNodeId;
+    childNodesOf(value)[0]!.kind = "llm";
+    nodesOf(value).push({
+      id: outerLlmId,
+      kind: "llm",
+      purpose: "Summarize collected scores",
+      output: fields(["summary", scalar("string")]),
+    });
+    (value.structure as JsonObject).order = [scopeId, mapId, outerLlmId];
+    (childOf(value).structure as JsonObject).order = [childNodeId];
+
+    const authored = mustParse(value);
+    const logicalNames = [
+      `${dagName}-${mapId}@${childNodeId}`,
+      `${dagName}-${outerLlmId}`,
+    ];
+    const promptNameMaxLength = 255 - ".txt".length;
+    const expectedNames = logicalNames.map((logicalName) => {
+      const suffix = `~${createHash("sha256").update(logicalName, "utf-8").digest("hex")}`;
+      return `${logicalName.slice(0, promptNameMaxLength - suffix.length)}${suffix}`;
+    });
+    const first = buildAuthoredScaffold(authored);
+    const second = buildAuthoredScaffold(authored);
+    expect(first.prompts.map((prompt) => prompt.name)).toEqual(expectedNames);
+    expect(second.prompts).toEqual(first.prompts);
+    expect(new Set(expectedNames).size).toBe(expectedNames.length);
+    for (const name of expectedNames) {
+      expect(name).toHaveLength(promptNameMaxLength);
+      expect(`${name}.txt`).toHaveLength(255);
+      expect(name).toMatch(/~[0-9a-f]{64}$/);
+    }
+
+    const written = await writeAuthoredScaffold(
+      authored,
+      { root: join(tmpRoot, "bounded-prompt-write"), force: false },
+      [],
+      [],
+    );
+    expect(written.ok).toBe(true);
+    if (!written.ok) throw new Error(written.problems.join("; "));
+    for (const name of expectedNames) {
+      expect(written.files.some((file) => file.endsWith(`/prompts/${name}.txt`))).toBe(true);
+    }
+  });
+
   it("accepts sampled and boundary positive safe maxWidth values", () => {
     const assertAccepted = (bound: number): void => {
       const value = draft();
@@ -746,6 +883,56 @@ describe("AuthoredDag map node (FR-F1-010)", () => {
       const parsed = validateDagShape(candidate);
       expect(parsed.ok).toBe(false);
       if (!parsed.ok) expect(parsed.error.kind).toBe("validation");
+    }
+  });
+
+  it("contains hostile retry overrides and source schema callbacks in typed validation", () => {
+    const work = createTransformNode({
+      id: "work",
+      inputSchema: z.unknown(),
+      outputSchema: z.unknown(),
+      transform: (value) => ok(value),
+    });
+    const parsed = validateDagShape({
+      id: "validation-totality",
+      nodes: { work },
+      edges: [{ from: DAG_INPUT, to: "work" }],
+    });
+    if (!parsed.ok) throw new Error(parsed.error.kind);
+
+    const hostileLimits: readonly Readonly<Record<string, number>>[] = [
+      {
+        get work(): number {
+          throw new Error("retry getter exploded");
+        },
+      },
+      new Proxy({ work: 1 }, {
+        ownKeys: () => {
+          throw new Error("retry ownKeys exploded");
+        },
+      }),
+    ];
+    for (const limits of hostileLimits) {
+      const result = withRetryLimits(parsed.value, limits);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error).toMatchObject({ kind: "validation", nodeId: "__dag__" });
+        expect(result.error.kind === "validation" && result.error.message).toContain("invalid retryLimits override capture");
+      }
+    }
+
+    const throwingSchema = z.unknown().superRefine(() => {
+      throw new Error("source refinement exploded");
+    });
+    const source = validateDagShape({
+      id: "source-schema-totality",
+      nodes: { work: { ...work, isSource: true, inputSchema: throwingSchema } },
+      edges: [],
+    });
+    expect(source.ok).toBe(false);
+    if (!source.ok) {
+      expect(source.error).toMatchObject({ kind: "validation", nodeId: "work" });
+      expect(source.error.kind === "validation" && source.error.message).toContain("source refinement exploded");
     }
   });
 
@@ -1470,6 +1657,52 @@ describe("authored map codegen and plate rendering", () => {
     expect(parsedInheritedName.toString).toEqual([4, 5]);
     expect(Object.getPrototypeOf(parsedInheritedName)).toBeNull();
     expect(Object.isFrozen(parsedInheritedName)).toBe(true);
+  });
+
+  it("re-hardens valid root-map checkpoints and rejects malformed collected items", async () => {
+    const generated = await importGeneratedDag(mustParse(MAP_FIXTURE), "collect-root-replay");
+    const template = generated.nodes.find((node) => node.kind === "map");
+    if (template?.kind !== "map") throw new Error("missing template map");
+    const collect = createCollectMapNode({
+      id: "collect-root",
+      inputSchema: z.object({ items: z.array(z.number()) }),
+      widthFrom: "items",
+      maxWidth: 3,
+      child: template.mapping.child,
+      childOutputSchema: z.number(),
+      gather: { kind: "collect", field: "results" },
+    });
+    const dag = defineDag({
+      id: "collect-root-replay",
+      nodes: { "collect-root": collect },
+      edges: [{ from: DAG_INPUT, to: "collect-root" }],
+      outputNodeId: "collect-root",
+    });
+    const executeReplay = (output: unknown, runId: string) => runDag(
+      dag,
+      { items: [999] },
+      makeNodeContext({
+        runId,
+        dagId: dag.id,
+        capabilities: { checkpointer: new InMemoryCheckpointer() },
+      }),
+      { resume: { runId, checkpoint: new Map([["collect-root", output]]) } },
+    );
+
+    const valid = await executeReplay({ results: [3, 1, 2] }, "valid-collect-replay");
+    expect(valid.ok).toBe(true);
+    if (!valid.ok) throw new Error(valid.error.kind);
+    const replayed = valid.value as Readonly<{ readonly results: readonly number[] }>;
+    expect(replayed).toEqual({ results: [3, 1, 2] });
+    expect(Object.getPrototypeOf(replayed)).toBeNull();
+    expect(Object.isFrozen(replayed)).toBe(true);
+    expect(Object.isFrozen(replayed.results)).toBe(true);
+
+    const malformed = await executeReplay({ results: [3, "bad"] }, "bad-collect-replay");
+    expect(malformed.ok).toBe(false);
+    if (!malformed.ok) {
+      expect(malformed.error).toMatchObject({ kind: "validation", nodeId: "collect-root" });
+    }
   });
 
   it("contains hostile and malformed describe schemas behind null plus warnings", async () => {
