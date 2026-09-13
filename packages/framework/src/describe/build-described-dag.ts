@@ -222,8 +222,8 @@ const collectPromptNames = (
   loadedPrompts: ReadonlyMap<string, string> | undefined,
 ): string[] => {
   const set = new Set<string>();
-  // When the host supplied its authoritative prompt set, seed from it first
-  // — it's the ground truth for "what's actually been loaded for this DAG".
+  // Seed from the host-loaded prompt set when available, then augment it with
+  // node-introspected references below so omissions on either surface remain visible.
   if (loadedPrompts) {
     for (const name of loadedPrompts.keys()) set.add(name);
   }

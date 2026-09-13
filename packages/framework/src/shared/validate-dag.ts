@@ -5,7 +5,7 @@ import type {
   EdgeDefRawInput,
 } from "../types/dag.js";
 import type { NodesRecord, MapNodeDef } from "../types/dag.js";
-import { isAuthoredCollectGather, isConditionalEdge, isDefaultEdge } from "../types/dag.js";
+import { MAP_FAN_RESOURCE, isAuthoredCollectGather, isConditionalEdge, isDefaultEdge } from "../types/dag.js";
 import { asMaxWidth, asWidthFrom } from "../types/map-width.js";
 import { safeErrorMessage } from "../types/safe-error.js";
 import type { FrameworkError } from "../types/errors.js";
@@ -152,6 +152,15 @@ const snapshotMapping = (
     if (!Array.isArray(requires) || requires.length !== 1 || requires[0] !== "checkpointer" || "run" in node) {
       return err(validationErr(id, `map '${id}' must declare only checkpointer and a mapping descriptor, not run`));
     }
+    const sourceFlag = (node as { readonly isSource?: unknown }).isSource;
+    const sideEffects = node.sideEffects;
+    if (sourceFlag === true || sideEffects?.kind !== "writes" ||
+        sideEffects.resource !== MAP_FAN_RESOURCE || sideEffects.idempotencyKey !== undefined ||
+        sideEffects.extractConditionedOn !== undefined || sideEffects.extractNewWitness !== undefined ||
+        node.confidence?.mode !== "none") {
+      return err(validationErr(id,
+        `map '${id}' must consume upstream input, write only '${MAP_FAN_RESOURCE}' fan completions, and declare no confidence extractor`));
+    }
     const { child, childOutputSchema, reduce, widthFrom, maxWidth, authoredGather } = node.mapping;
     const validGather = authoredGather === undefined || isAuthoredCollectGather(authoredGather, {
       outputSchema: node.outputSchema,
@@ -249,7 +258,7 @@ export const validateDagShape = (
     if (!keyValid.ok) {
       return err(
         validationErr(
-          nodeId("__dag__"),
+          validationNodeId,
           `nodes['${key}'] has invalid id: ${keyValid.error}`,
         ),
       );
@@ -301,12 +310,12 @@ export const validateDagShape = (
     }
   }
 
-  // DAG-level retry budgets (retryLimits / defaultRetryLimit): per-node
-  // retry counts are compared against attempt counters, so the domain is the
-  // same non-negative-safe-integer class as the node-level numeric gates
-  // above. A bare `as Readonly<Record<string, number>>` pass-through (the
-  // pre-fix shape) let NaN/negative/infinite limits flow into `getRetryLimit`
-  // and corrupt the budget. Same single gate, same `validation`-kind error.
+  // DAG-level retry budgets (retryLimits / defaultRetryLimit) are COUNT-valued:
+  // unlike finite non-negative backoff delays and the finite [0,1] jitter ratio
+  // above, counts must be non-negative safe integers. A bare
+  // `as Readonly<Record<string, number>>` pass-through (the pre-fix shape) let
+  // NaN/negative/infinite limits flow into `getRetryLimit` and corrupt the
+  // budget. Same single gate, same `validation`-kind error.
   if (input.retryLimits !== undefined) {
     for (const [key, limit] of Object.entries(input.retryLimits)) {
       // The key must NAME a node in this DAG. `retryLimits` is a raw
@@ -319,7 +328,7 @@ export const validateDagShape = (
       if (!Object.hasOwn(input.nodes, key)) {
         return err(
           validationErr(
-            nodeId("__dag__"),
+            validationNodeId,
             `retryLimits['${key}'] names no node in DAG '${input.id}' — a retry budget for an unknown node would be silently ignored`,
           ),
         );
@@ -327,7 +336,7 @@ export const validateDagShape = (
       if (limit === undefined) {
         return err(
           validationErr(
-            nodeId("__dag__"),
+            validationNodeId,
             `retryLimits['${key}'] must be a non-negative safe integer, got undefined`,
           ),
         );
@@ -335,7 +344,7 @@ export const validateDagShape = (
       if (!Number.isSafeInteger(limit) || limit < 0) {
         return err(
           validationErr(
-            nodeId("__dag__"),
+            validationNodeId,
             `retryLimits['${key}'] must be a non-negative safe integer, got ${String(limit)}`,
           ),
         );
@@ -348,7 +357,7 @@ export const validateDagShape = (
   ) {
     return err(
       validationErr(
-        nodeId("__dag__"),
+        validationNodeId,
         `defaultRetryLimit must be a non-negative safe integer, got ${String(input.defaultRetryLimit)}`,
       ),
     );

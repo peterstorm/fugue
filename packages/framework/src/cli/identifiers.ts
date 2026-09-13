@@ -154,15 +154,13 @@ export const FUGUE_BODY_MARKERS = new RegExp(
   "g",
 );
 
-// Narrowed to the branded `KebabIdent` — the module's invariant is "only a
-// parsed KebabIdent is safe to reshape into a JS identifier". A bare `string`
-// param would let an unvalidated name (`2fast`, `default`, `a b`) slip in and
-// produce an illegal identifier; taking `KebabIdent` makes that
-// unrepresentable. `pascalCase` is module-private (no external callers — its
-// only callers are `camelCase` just below and the name constructors further
-// down, all of which already hold a `KebabIdent`); `camelCase` stays exported
-// for the parse-time reserved-word check in `authored.ts`, but narrowed the
-// same way.
+// Narrowed to the branded `KebabIdent` — the brand proves lexical shape before
+// a name is reshaped into a JS identifier. Reserved-word safety is a separate
+// authored-DAG parse invariant (`JS_RESERVED_WORDS` below): `default` is a
+// valid `KebabIdent` but is not a valid emitted binding. `pascalCase` is
+// module-private (no external callers — its only callers are `camelCase` just
+// below and the name constructors further down, all of which already hold a
+// `KebabIdent`); `camelCase` stays exported for that reserved-word check.
 const pascalCase = (kebab: KebabIdent): string =>
   kebab
     .split("-")
@@ -312,10 +310,11 @@ export const SHAPE_HELPER_NAME = {
 /**
  * Fixed-SPELLING import names — names whose spelling never depends on node
  * ids or the DAG name. EMISSION is gated per name (`buildImports`): `z` and
- * the `DagRegistration` type are always emitted; `ok` only when a
- * fetch/transform/source node needs a placeholder body; `confidence` and the
- * `LlmNodeDef` type only when an llm node is present. RESERVATION is
- * unconditional — all five names sit in `RESERVED_IDENTIFIERS` regardless of
+ * the `DagRegistration` type are always emitted; `err` and `frameworkError`
+ * only when a fetch/transform/source node needs an unimplemented body;
+ * `confidence` and the `LlmNodeDef` type only when an llm node is present.
+ * `ok` remains reserved for the body authors replace. RESERVATION is
+ * unconditional — all names sit in `RESERVED_IDENTIFIERS` regardless of
  * kinds/shape (the same conservatism as `generatedIdentifiersFor`: a
  * refinement that adds the first llm node must not introduce a collision the
  * schema already accepted). Type-only imports still reserve their name —
@@ -325,6 +324,8 @@ export const SHAPE_HELPER_NAME = {
 export const FIXED_IMPORT_NAME = {
   zod: "z",
   ok: "ok",
+  err: "err",
+  frameworkError: "frameworkError",
   confidence: "confidence",
   llmNodeDefType: "LlmNodeDef",
   dagRegistrationType: "DagRegistration",

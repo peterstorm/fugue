@@ -24,6 +24,7 @@ import { buildDescribedDag } from "../../describe/build-described-dag.js";
 import { createTransformNode } from "../../nodes/transform.js";
 import type { DagDef, DagDefInput } from "../../types/dag.js";
 import { DAG_INPUT } from "../../types/ids.js";
+import { resourceName } from "../../types/witness.js";
 import type { FrameworkError } from "../../types/errors.js";
 import type { LlmClient, LlmRequest, LlmResponse } from "../../types/llm.js";
 import type { NodeDef, TypedNodeContext } from "../../types/node.js";
@@ -61,6 +62,56 @@ const assertCollectOutputTypes = (
   void notAlwaysPatterned;
 };
 void assertCollectOutputTypes;
+
+const assertMapTypePolicies = (child: DagDef): void => {
+  const inputSchema = z.object({ items: z.array(z.number()), scalar: z.string() });
+  const valid = createMapNode({
+    id: "typed-map",
+    inputSchema,
+    outputSchema: z.array(z.number()),
+    widthFrom: "items",
+    maxWidth: 3,
+    child,
+    childOutputSchema: z.number(),
+    reduce: (values) => ok([...values]),
+  });
+  createMapNode({
+    id: "invalid-typed-map",
+    inputSchema,
+    outputSchema: z.array(z.number()),
+    // @ts-expect-error A known scalar input field cannot determine map width.
+    widthFrom: "scalar",
+    maxWidth: 3,
+    child,
+    childOutputSchema: z.number(),
+    reduce: (values) => ok([...values]),
+  });
+  const forgedSource: typeof valid = {
+    ...valid,
+    // @ts-expect-error A map consumes upstream input and cannot be a source.
+    isSource: true,
+  };
+  const forgedSideEffects: typeof valid = {
+    ...valid,
+    // @ts-expect-error Mapped fan completion persistence is always a write.
+    sideEffects: { kind: "none" },
+  };
+  const forgedResource: typeof valid = {
+    ...valid,
+    sideEffects: {
+      ...valid.sideEffects,
+      // @ts-expect-error Only the constructor-owned fan resource is valid for a map.
+      resource: resourceName("checkpoint:other"),
+    },
+  };
+  const forgedConfidence: typeof valid = {
+    ...valid,
+    // @ts-expect-error Maps do not emit a confidence value.
+    confidence: { mode: "value", extract: () => ({ bucket: "high", source: "heuristic" }) },
+  };
+  void [valid, forgedSource, forgedSideEffects, forgedResource, forgedConfidence];
+};
+void assertMapTypePolicies;
 
 const tmpRoot = resolve(__dirname, ".tmp-authored-map");
 
@@ -232,6 +283,137 @@ describe("AuthoredDag map node (FR-F1-010)", () => {
     expect(map.child.nodes.map((node) => String(node.id))).toEqual(["score-item"]);
   });
 
+  it("supports every static map role with direct input and rejects fan-in roles", async () => {
+    const mapNode = (): JsonObject => structuredClone(mapOf(draft()));
+    const itemInput = (): JsonObject => structuredClone(nodesOf(draft())[0]!.output as JsonObject);
+    const transform = (id: string): JsonObject => ({
+      id,
+      kind: "transform",
+      purpose: `Run ${id}`,
+      output: fields(["value", scalar("string")]),
+    });
+    const scope = (): JsonObject => structuredClone(nodesOf(draft())[0]!);
+
+    const validRoles: readonly JsonObject[] = [
+      {
+        fugueAuthored: 1,
+        name: "map-linear-entry",
+        team: "demo",
+        description: "Map at the linear entry",
+        input: itemInput(),
+        nodes: [mapNode(), transform("finish")],
+        structure: { shape: "linear", order: ["score-items", "finish"] },
+      },
+      {
+        fugueAuthored: 1,
+        name: "map-fan-source",
+        team: "demo",
+        description: "Map as the fan source",
+        input: itemInput(),
+        nodes: [mapNode(), transform("left"), transform("right")],
+        structure: { shape: "fan-out", source: "score-items", branches: ["left", "right"] },
+      },
+      {
+        fugueAuthored: 1,
+        name: "map-fan-branch",
+        team: "demo",
+        description: "Map as a fan branch",
+        input: fields(["requestId", scalar("string")]),
+        nodes: [scope(), mapNode(), transform("other-branch")],
+        structure: { shape: "fan-out", source: "scope-records", branches: ["score-items", "other-branch"] },
+      },
+      {
+        fugueAuthored: 1,
+        name: "map-router-handler",
+        team: "demo",
+        description: "Map as a router handler",
+        input: fields(["requestId", scalar("string")]),
+        nodes: [
+          {
+            ...scope(),
+            id: "classify",
+            output: {
+              fields: [
+                ...((scope().output as JsonObject).fields as JsonObject[]),
+                { name: "route", type: { kind: "enum", values: ["map", "other"] } },
+              ],
+            },
+          },
+          mapNode(),
+          transform("fallback"),
+        ],
+        structure: {
+          shape: "router",
+          classifier: "classify",
+          cases: [{ label: "map", when: { field: "route", equals: "map" }, to: "score-items" }],
+          default: "fallback",
+        },
+      },
+    ];
+
+    for (const candidate of validRoles) {
+      const parsed = mustParse(candidate);
+      const verdict = await runGauntlet(parsed, join(tmpRoot, String(candidate.name)));
+      if (!verdict.ok) throw new Error(JSON.stringify(verdict.errors, null, 2));
+      expect(verdict.described.nodes.some((node) => node.kind === "map")).toBe(true);
+    }
+
+    const fanIn = validRoles[2]!;
+    const fanJoin = structuredClone(fanIn);
+    fanJoin.name = "map-fan-join-refused";
+    (fanJoin.nodes as JsonObject[]).push(transform("second-branch"));
+    fanJoin.structure = {
+      shape: "diamond",
+      source: "scope-records",
+      branches: ["other-branch", "second-branch"],
+      join: "score-items",
+    };
+    const refusedJoin = parseAuthoredDag(fanJoin);
+    expect(refusedJoin.ok).toBe(false);
+    if (!refusedJoin.ok) expect(refusedJoin.problems.join("\n")).toContain("fan-in/source role");
+
+    const sourcesJoin: JsonObject = {
+      fugueAuthored: 1,
+      name: "map-sources-join-refused",
+      team: "demo",
+      description: "A sources fan-in cannot expose one direct width field",
+      input: fields(["requestId", scalar("string")]),
+      nodes: [
+        { id: "source-a", kind: "source", purpose: "Read A", output: itemInput() },
+        { id: "source-b", kind: "source", purpose: "Read B", output: itemInput() },
+        mapNode(),
+        transform("finish"),
+      ],
+      structure: {
+        shape: "sources",
+        sources: ["source-a", "source-b"],
+        join: "score-items",
+        assemble: "finish",
+      },
+    };
+    const refusedSourcesJoin = parseAuthoredDag(sourcesJoin);
+    expect(refusedSourcesJoin.ok).toBe(false);
+    if (!refusedSourcesJoin.ok) {
+      expect(refusedSourcesJoin.problems.join("\n")).toContain("fan-in/source role");
+    }
+
+    const routerClassifier = structuredClone(validRoles[3]!);
+    routerClassifier.name = "map-router-classifier-refused";
+    routerClassifier.structure = {
+      shape: "router",
+      classifier: "score-items",
+      cases: [{ label: "map", when: { field: "results", equals: "map" }, to: "classify" }],
+      default: "fallback",
+    };
+    const refusedClassifier = parseAuthoredDag(routerClassifier);
+    expect(refusedClassifier.ok).toBe(false);
+    if (!refusedClassifier.ok) {
+      const problems = refusedClassifier.problems.join("\n");
+      expect(problems).toContain("must be an enum");
+      expect(problems).not.toContain("fan-in/source role");
+    }
+  });
+
   it("rejects non-field width references, non-array fields, and invalid bounds", () => {
     const cases: readonly [string, (value: JsonObject) => void, string][] = [
       ["path", (value) => { mapOf(value).widthFrom = "payload.items"; }, "field"],
@@ -304,6 +486,24 @@ describe("AuthoredDag map node (FR-F1-010)", () => {
       "authored DAG exceeds the maximum supported value depth of 64",
     ]);
     expect(parseAuthoredDagJson(JSON.stringify(nested)).ok).toBe(false);
+  });
+
+  it("rejects cycles without rejecting shared acyclic authored values", () => {
+    const cyclic = draft();
+    cyclic.self = cyclic;
+    const refused = parseAuthoredDag(cyclic);
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.problems).toEqual([
+      "authored DAG must be an acyclic JSON value",
+    ]);
+
+    const sharedType = { kind: "string" };
+    const aliased = draft();
+    (aliased.input as JsonObject).fields = [
+      { name: "requestId", type: sharedType },
+      { name: "traceId", type: sharedType },
+    ];
+    expect(parseAuthoredDag(aliased).ok).toBe(true);
   });
 
   it("repairs an over-deep refinement without losing the last proven draft", async () => {
@@ -761,6 +961,60 @@ describe("authored map codegen and plate rendering", () => {
     expect(result.described.nodes.filter((node) => node.kind === "map")).toHaveLength(2);
   });
 
+  it("generated fetch, source, and transform bodies fail closed until implemented", async () => {
+    const mapped = await importGeneratedDag(mustParse(MAP_FIXTURE), "unimplemented-map-bodies");
+    const outerFetch = mapped.nodes.find((node) => node.id === "scope-records");
+    const map = mapped.nodes.find((node) => node.kind === "map");
+    if (outerFetch === undefined || map?.kind !== "map") throw new Error("missing generated map nodes");
+    const childTransform = map.mapping.child.nodes.find((node) => node.id === "score-item");
+    if (childTransform === undefined) throw new Error("missing generated child transform");
+
+    const sourceDag = mustParse({
+      fugueAuthored: 1,
+      name: "unimplemented-sources",
+      team: "demo",
+      description: "Exercise source placeholders",
+      input: fields(["requestId", scalar("string")]),
+      nodes: [
+        { id: "source-a", kind: "source", purpose: "Read A", output: fields(["a", scalar("string")]) },
+        { id: "source-b", kind: "source", purpose: "Read B", output: fields(["b", scalar("string")]) },
+        { id: "join", kind: "transform", purpose: "Join", output: fields(["joined", scalar("string")]) },
+        { id: "finish", kind: "transform", purpose: "Finish", output: fields(["done", scalar("boolean")]) },
+      ],
+      structure: { shape: "sources", sources: ["source-a", "source-b"], join: "join", assemble: "finish" },
+    });
+    const sourced = await importGeneratedDag(sourceDag, "unimplemented-source-body");
+    const source = sourced.nodes.find((node) => node.id === "source-a");
+    if (source === undefined) throw new Error("missing generated source");
+
+    const context = makeNodeContext({
+      runId: "unimplemented-generated",
+      dagId: "generated-bodies",
+    }) as TypedNodeContext<readonly []>;
+    for (const [node, input] of [
+      [outerFetch, { requestId: "request-1" }],
+      [childTransform, { recordId: "record-1", amount: 10 }],
+      [source, undefined],
+    ] as const) {
+      if (node.kind === "map") throw new Error("expected an ordinary generated node");
+      const runnable = node as NodeDef<unknown, unknown, FrameworkError, readonly []>;
+      const result = await runnable.run(input, context);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error).toMatchObject({
+          kind: "validation",
+          nodeId: node.id,
+          path: "body",
+          message: `generated body for '${node.id}' is unimplemented`,
+        });
+      }
+    }
+
+    const generated = buildAuthoredScaffold(mustParse(MAP_FIXTURE)).dagTs;
+    expect(generated).not.toMatch(/\bok\s*\(\s*\{/);
+    expect(generated).not.toContain('"todo"');
+  });
+
   it("emits the honest collect-map constructor with a static child", () => {
     const scaffold = buildAuthoredScaffold(mustParse(MAP_FIXTURE));
     expect(scaffold.dagTs).toContain("createCollectMapNode");
@@ -836,6 +1090,31 @@ describe("authored map codegen and plate rendering", () => {
       nodes: { "manual-map": transplanted },
       edges: [{ from: DAG_INPUT, to: "manual-map" }],
     })).toThrow("requires a valid immutable mapping descriptor");
+  });
+
+  it("rejects forged map source, side-effect, and confidence policies", async () => {
+    const generated = await importGeneratedDag(mustParse(MAP_FIXTURE), "forged-map-policy");
+    const map = generated.nodes.find((node) => node.kind === "map");
+    if (map?.kind !== "map") throw new Error("missing generated map");
+
+    const forgeries = [
+      [{ ...map, isSource: true }, "source-has-incoming"],
+      [{ ...map, sideEffects: { kind: "none" } }, "validation"],
+      [{ ...map, sideEffects: { ...map.sideEffects, resource: resourceName("checkpoint:other") } }, "validation"],
+      [{ ...map, confidence: { mode: "value", extract: () => ({ bucket: "high", source: "heuristic" }) } }, "validation"],
+    ] as const;
+    for (const [forged, errorKind] of forgeries) {
+      const parsed = validateDagShape({
+        id: "forged-map-policy",
+        nodes: { "score-items": forged },
+        edges: [{ from: DAG_INPUT, to: "score-items" }],
+      } as unknown as DagDefInput);
+      expect(parsed.ok).toBe(false);
+      if (!parsed.ok) expect(parsed.error).toMatchObject({
+        kind: errorKind,
+        nodeId: "score-items",
+      });
+    }
   });
 
   it("captures a stateful child schema once and keeps collect output truthful", async () => {

@@ -76,9 +76,9 @@ const FIXTURES: Record<string, AuthoredDagInput> = {
     ],
     structure: { shape: "linear", order: ["fetch-record", "summarize"] },
   },
-  // Exercises the number/boolean codegen arms (z.number()/z.boolean() +
-  // 0/false defaults). Every other fixture uses only string/enum fields, so
-  // without this the scalar-type branches emit into generated dag.ts untested.
+  // Exercises number/boolean schema codegen (z.number()/z.boolean()). Every
+  // other fixture uses only string/enum fields, so these scalar schema arms
+  // would otherwise be absent from generated-module coverage.
   "linear-scalar-fields": {
     fugueAuthored: 1,
     name: "authored-scalar",
@@ -1094,17 +1094,20 @@ describe("authored codegen survives the gauntlet", () => {
     expect(scaffold.prompts[0]!.body).toContain("never use a number");
   });
 
-  it("imports `ok` only when a node body uses it (all-llm and llm+review DAGs omit it)", () => {
-    // `ok(...)` appears only in placeholder fetch/transform/source bodies —
-    // an all-llm (or llm + human-review) DAG importing it would carry an
-    // unused import in every generated module.
-    const okImportLine = /^\s+ok,$/m;
-    expect(buildAuthoredScaffold(mustParse(FIXTURES["linear-two-llm"]!)).dagTs).not.toMatch(okImportLine);
-    expect(buildAuthoredScaffold(mustParse(FIXTURES["linear-llm-review"]!)).dagTs).not.toMatch(okImportLine);
-    // DAGs with an ok-using body keep the import (and the emitted code uses it).
+  it("imports typed failure helpers only when generated bodies need them", () => {
+    const errImportLine = /^\s+err,$/m;
+    const factoryImportLine = /^\s+frameworkError,$/m;
+    for (const fixture of [FIXTURES["linear-two-llm"]!, FIXTURES["linear-llm-review"]!]) {
+      const generated = buildAuthoredScaffold(mustParse(fixture)).dagTs;
+      expect(generated).not.toMatch(errImportLine);
+      expect(generated).not.toMatch(factoryImportLine);
+    }
+
     const withBodies = buildAuthoredScaffold(mustParse(FIXTURES.linear!)).dagTs;
-    expect(withBodies).toMatch(okImportLine);
-    expect(withBodies).toContain("ok({");
+    expect(withBodies).toMatch(errImportLine);
+    expect(withBodies).toMatch(factoryImportLine);
+    expect(withBodies).toContain('err(frameworkError.validation("fetch-record"');
+    expect(withBodies).not.toContain('"todo"');
   });
 
   it("a two-llm dag emits per-node prompt names and a 2-entry registry", async () => {
@@ -1722,7 +1725,7 @@ describe("hostile free-text properties", () => {
   // Hostile ENUM values: a `"`, backtick, or `${...}` passes the schema's
   // SINGLE_LINE check (only LINE TERMINATORS are rejected) and then flows,
   // unescaped-if-naive, into FOUR JSON.stringify-guarded sites in
-  // `authored-codegen.ts`: `zodExpr`, `defaultExpr`, the LLM prompt's
+  // `authored-codegen.ts`: `zodExpr` and the LLM prompt's
   // `jsonShape` hint, and the router `when.equals` comparison. The existing
   // free-text property never mutates enum values, so these four sites went
   // uncovered against hostile input. Note: an LLM node's `confidence` field is
@@ -1736,7 +1739,7 @@ describe("hostile free-text properties", () => {
     await mkdir(root, { recursive: true });
     for (const hostile of HOSTILE_ENUMS) {
       const d = structuredClone(FIXTURES.router!) as AuthoredDagInput;
-      // The fetch classifier's `bucket` enum (zodExpr/defaultExpr) AND the
+      // The fetch classifier's `bucket` enum (`zodExpr`) AND the
       // routing case's `when.equals` set to the same
       // hostile value so it is a legal predicate target.
       const bucket = outputOf(d.nodes[0]!).fields.find((f) => f.name === "bucket")! as {
@@ -1771,7 +1774,7 @@ describe("hostile free-text properties", () => {
       const d = structuredClone(FIXTURES["sources-llm"]!) as AuthoredDagInput;
       // Add a NON-confidence enum output field to the LLM `synthesize` node —
       // this reaches the prompt jsonShape hint (codegen line 238) plus
-      // zodExpr/defaultExpr for the generated output schema.
+      // `zodExpr` for the generated output schema.
       const synth = d.nodes.find((n) => n.id === "synthesize")!;
       (outputOf(synth).fields as { name: string; type: unknown }[]).push({
         name: "category",

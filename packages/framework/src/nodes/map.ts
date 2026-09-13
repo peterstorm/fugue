@@ -3,6 +3,7 @@
 import { z } from "zod";
 import {
   authoredCollectGather,
+  MAP_FAN_RESOURCE,
   type AuthoredCollectGather,
   type DagDef,
   type MapNodeDef,
@@ -10,17 +11,27 @@ import {
 import { type Result, ok } from "../types/result.js";
 import { formatFrameworkError, type FrameworkError } from "../types/errors.js";
 import { nodeId } from "../types/ids.js";
-import { resourceName } from "../types/witness.js";
-import { maxWidth, widthFrom } from "../types/map-width.js";
+import { maxWidth, widthFrom, type WidthFrom } from "../types/map-width.js";
 import { snapshotMappedChild } from "../shared/validate-dag.js";
 import "../checkpoint/capability.js";
 
-interface MapExecutionConfig<I, ChildOut> {
+type ArrayField<I> = {
+  readonly [Key in keyof I & string]-?: I[Key] extends readonly unknown[] ? Key : never;
+}[keyof I & string];
+
+type MapWidthField<I, Field extends string> =
+  Field extends WidthFrom
+    ? Field
+    : string extends Field
+      ? Field
+      : Field extends ArrayField<I> ? Field : never;
+
+interface MapExecutionConfig<I, ChildOut, WidthField extends string> {
   readonly id: string;
   /** Upstream value carrying the array named by widthFrom. */
   readonly inputSchema: z.ZodType<I>;
-  /** One field reference, not a path or an expression. */
-  readonly widthFrom: string;
+  /** A valid literal array key, a dynamic string, or a parsed WidthFrom proof. */
+  readonly widthFrom: MapWidthField<I, WidthField>;
   /** Positive safe integer, enforced before any child work can be spent. */
   readonly maxWidth: number;
   /** A child DAG without nested maps, human gates or freshness extractors. */
@@ -29,7 +40,12 @@ interface MapExecutionConfig<I, ChildOut> {
   readonly childOutputSchema: z.ZodType<ChildOut>;
 }
 
-export interface MapNodeConfig<I, ChildOut, O> extends MapExecutionConfig<I, ChildOut> {
+export interface MapNodeConfig<
+  I,
+  ChildOut,
+  O,
+  WidthField extends string = string,
+> extends MapExecutionConfig<I, ChildOut, WidthField> {
   readonly outputSchema: z.ZodType<O>;
   /** Ascending index order, including the legal empty fan. */
   readonly reduce: (results: readonly ChildOut[]) => Result<O, FrameworkError>;
@@ -45,13 +61,17 @@ export type CollectedMapOutput<Field extends string, ChildOut> =
       : Readonly<Record<Field, readonly ChildOut[]>>
     : never;
 
-export interface CollectMapNodeConfig<I, ChildOut, Field extends string>
-  extends MapExecutionConfig<I, ChildOut> {
+export interface CollectMapNodeConfig<
+  I,
+  ChildOut,
+  Field extends string,
+  WidthField extends string = string,
+> extends MapExecutionConfig<I, ChildOut, WidthField> {
   readonly gather: Readonly<{ readonly kind: "collect"; readonly field: Field }>;
 }
 
-const createCapturedMapNode = <I, ChildOut, O>(
-  config: MapNodeConfig<I, ChildOut, O>,
+const createCapturedMapNode = <I, ChildOut, O, WidthField extends string>(
+  config: MapNodeConfig<I, ChildOut, O, WidthField>,
   gather: AuthoredCollectGather | undefined,
 ): MapNodeDef<I, ChildOut, O> => {
   const id = nodeId(config.id);
@@ -65,7 +85,7 @@ const createCapturedMapNode = <I, ChildOut, O>(
     inputSchema: config.inputSchema,
     outputSchema: config.outputSchema,
     requires: Object.freeze(["checkpointer"] as const),
-    sideEffects: Object.freeze({ kind: "writes", resource: resourceName("checkpoint:fan") }),
+    sideEffects: Object.freeze({ kind: "writes", resource: MAP_FAN_RESOURCE }),
     confidence: Object.freeze({ mode: "none" }),
     mapping: Object.freeze({
       child: child.value,
@@ -82,16 +102,21 @@ const createCapturedMapNode = <I, ChildOut, O>(
  * Capture references once. Later property reassignment cannot replace them;
  * opaque schema implementations and reducer closure state are not cloned.
  */
-export const createMapNode = <I, ChildOut, O>(
-  config: MapNodeConfig<I, ChildOut, O>,
+export const createMapNode = <I, ChildOut, O, const WidthField extends string>(
+  config: MapNodeConfig<I, ChildOut, O, WidthField>,
 ): MapNodeDef<I, ChildOut, O> => createCapturedMapNode(config, undefined);
 
 /**
  * Honest collect specialization: output schema, reducer, and describe metadata
  * are issued together, so callers cannot claim collect semantics for another reducer.
  */
-export const createCollectMapNode = <I, ChildOut, const Field extends string>(
-  config: CollectMapNodeConfig<I, ChildOut, Field>,
+export const createCollectMapNode = <
+  I,
+  ChildOut,
+  const Field extends string,
+  const WidthField extends string,
+>(
+  config: CollectMapNodeConfig<I, ChildOut, Field, WidthField>,
 ): MapNodeDef<I, ChildOut, CollectedMapOutput<Field, ChildOut>> => {
   const childOutputSchema = config.childOutputSchema;
   const field = widthFrom(config.gather.field);

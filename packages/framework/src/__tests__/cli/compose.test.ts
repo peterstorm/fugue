@@ -868,6 +868,36 @@ describe("runCompose", () => {
     expect(shown).toContain("redundant-passthrough: identity-shaped transform");
   });
 
+  it("shows schema-serialization warnings before asking the operator to accept", async () => {
+    const root = join(tmpRoot, "warnings-before-accept");
+    const warning = "outputSchema for node 'final' could not be serialized";
+    const okWithWarning = async (dag: AuthoredDag, r: string): Promise<GauntletResult> => {
+      const verdict = await runGauntlet(dag, r);
+      return verdict.ok ? { ...verdict, warnings: [warning] } : verdict;
+    };
+    const { client } = scriptedLlm([draft(validDag)]);
+    const events: string[] = [];
+    const outcome = await runCompose(
+      { intent: mustIntent("briefing"), team: assist, root },
+      client,
+      {
+        say: (message) => { events.push(`say:${message}`); },
+        ask: async (question) => {
+          events.push(`ask:${question}`);
+          return { kind: "answer", text: "yes" };
+        },
+      },
+      okWithWarning,
+    );
+    if (!outcome.ok) throw new Error(`compose failed: ${JSON.stringify(outcome)}`);
+
+    const warningIndex = events.findIndex((event) => event.includes(`Warnings:\n  - ${warning}`));
+    const acceptIndex = events.findIndex((event) => event.startsWith("ask:Accept this DAG?"));
+    expect(warningIndex).toBeGreaterThanOrEqual(0);
+    expect(acceptIndex).toBeGreaterThan(warningIndex);
+    expect(outcome.result.warnings).toEqual([warning]);
+  });
+
   it("a draft whose team drifts from --team enters the repair loop like a schema failure", async () => {
     const root = join(tmpRoot, "team-drift");
     // "elsewhere" is schema-valid kebab — only the --team flag binds it.

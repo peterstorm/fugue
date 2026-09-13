@@ -38,7 +38,11 @@ origin, resource namespace and Run Spend Authority (ADRs 0053/0054/0083).
 `NodeDef` remains the ordinary callable node contract; its `kind` excludes map.
 `MapNodeDef` has `kind: "map"`, `requires: readonly ["checkpointer"]`, an immutable
 visible `mapping` descriptor and **no `run`**, including no throwing placeholder.
-`DagNodeDef` is the ordinary-or-map dispatch union. DAG/map/inference types live
+Its type also fixes `isSource?: false`, fan-checkpoint `writes`, and confidence
+`none`; the DAG parser independently refuses forged contradictory values.
+Typed constructor literals restrict `widthFrom` to array-valued input keys, while
+pre-parsed or dynamic strings retain runtime validation. `DagNodeDef` is the
+ordinary-or-map dispatch union. DAG/map/inference types live
 together in `types/dag.ts`; ordinary types stay in `types/node.ts`. The former
 `types/dag-internals.ts` is removed, not compatibility-aliased.
 

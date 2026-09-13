@@ -6,6 +6,7 @@ import type { Result } from "./result.js";
 import { asWidthFrom, type WidthFrom, type MaxWidth } from "./map-width.js";
 import type { DagId, NodeId, DagInputId } from "./ids.js";
 import type { Confidence, ConfidenceBucket } from "./confidence.js";
+import { resourceName, type ResourceName } from "./witness.js";
 
 const AUTHORED_COLLECT_GATHER: unique symbol = Symbol("fugue.authored-collect-gather");
 
@@ -55,11 +56,28 @@ export const isAuthoredCollectGather = (
     issued.reduce === binding.reduce;
 };
 
+declare const __mapFanResource: unique symbol;
+type MapFanResource = ResourceName & { readonly [__mapFanResource]: true };
+
+/** One canonical side-effect resource for durable mapped-fan completions. */
+export const MAP_FAN_RESOURCE = resourceName("checkpoint:fan") as MapFanResource;
+
 /** Runtime-owned fan body; author configuration is captured once, not closed over. */
 export type MapNodeDef<I = unknown, ChildOut = unknown, O = unknown> =
-  Omit<NodeDef<I, O>, "kind" | "run" | "requires"> & Readonly<{
+  Omit<NodeDef<I, O>, "kind" | "run" | "requires" | "isSource" | "sideEffects" | "confidence"> & Readonly<{
     kind: "map";
+    /** A map consumes upstream input and can never be a source root. */
+    isSource?: false;
     requires: readonly ["checkpointer"];
+    /** Fan completion persistence is the map's fixed side-effect policy. */
+    sideEffects: Readonly<{
+      kind: "writes";
+      resource: MapFanResource;
+      idempotencyKey?: never;
+      extractConditionedOn?: never;
+      extractNewWitness?: never;
+    }>;
+    confidence: Readonly<{ readonly mode: "none" }>;
     mapping: Readonly<{
       child: DagDef;
       childOutputSchema: z.ZodType<ChildOut>;

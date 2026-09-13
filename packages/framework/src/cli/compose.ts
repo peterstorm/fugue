@@ -2,16 +2,17 @@
 // convergence, Phase B3).
 //
 // The loop is an explicit machine: interview → draft → validate → present →
-// refine/accept. THE LLM'S ONLY OUTPUT CHANNEL IS THE AuthoredDag JSON —
-// every turn is `sendStructured` against a closed Zod schema, graph code is
-// always generated deterministically (`buildAuthoredScaffold`), and every
+// refine/accept. The model's only channel is a closed `ComposeTurn` envelope:
+// either clarifying questions or an AuthoredDag draft. AuthoredDag JSON is the
+// only GRAPH-ARTIFACT channel; code is always generated deterministically
+// (`buildAuthoredScaffold`), and every
 // draft is proven through the real gauntlet before the user sees it:
 // codegen → `import` through `defineDag` (defineDag's structural checks,
 // throws) → `fugue lint` (fan-in keys, passthrough, shape hints) → `fugue
 // describe` (the DescribedDag whose Mermaid render — `describedToMermaid`,
 // the same renderer `fugue visualize` uses — is what the user approves).
-// Violations feed back to the LLM as structured JSON events, not prose. The
-// LLM never hand-writes `defineDag`.
+// Violations feed back as JSON-serialized diagnostics embedded in the textual
+// conversation. The LLM never hand-writes `defineDag`.
 //
 // The draft payload crosses the wire as `unknown` and is parsed by
 // `parseAuthoredDag` INSIDE the loop — a schema-invalid draft enters the
@@ -400,8 +401,8 @@ AuthoredDag rules (closed vocabulary — the schema rejects anything else):
   Child nodes exclude map and human-review; a child fan-out requires a join.
 - Field names must be valid JS identifiers. Node ids must not be JS reserved
   words and must not collide with the identifiers codegen derives from them —
-  reserved ids: "dag", "input", "opts", "ok", "registration", "z",
-  "confidence", plus any id that camelCases to a framework import/const
+  reserved ids: "dag", "input", "opts", "ok", "err", "framework-error",
+  "registration", "z", "confidence", plus any id that camelCases to a framework import/const
   (e.g. "create-fetch-node" → createFetchNode, "define-router" →
   defineRouter). Also avoid "<x>-node" ids that
   would shadow a sibling llm node named "<x>" (e.g. "llm-node" collides only
@@ -742,6 +743,9 @@ export const runCompose = async (
     // `fugue visualize`), not a re-encoding of the AuthoredDag. The user
     // approves the real thing.
     io.say(`\n${summarize(draft)}\n\n${describedToMermaid(verdict.described)}\n`);
+    if (verdict.warnings.length > 0) {
+      io.say(`Warnings:\n${verdict.warnings.map((warning) => `  - ${warning}`).join("\n")}`);
+    }
     if (verdict.advisories.length > 0) {
       io.say(`Advisories:\n${verdict.advisories.map((a) => `  - ${a.kind}: ${a.message}`).join("\n")}`);
     }

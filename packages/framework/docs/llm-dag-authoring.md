@@ -169,7 +169,7 @@ host's durable execution path). Ordinary `NodeDef` remains callable;
 `DagNodeDef` is the union admitted by DAG constructors.
 
 `MapNodeConfig<I, ChildOut, O>` takes `id`, `inputSchema`, `outputSchema`,
-`widthFrom` (one field name, not a path/expression), `maxWidth` (positive safe
+`widthFrom` (an array-valued field of `I`, not a path/expression), `maxWidth` (positive safe
 integer), `child: DagDef`, `childOutputSchema`, and
 `reduce: (results: readonly ChildOut[]) => Result<O, FrameworkError>`.
 
@@ -280,9 +280,12 @@ parallel sibling width.
 
 #### Closed authored maps (`fugue new --from` / `fugue compose`)
 
-`map` is an authored **node kind** placed in any existing static structure role whose
-input has a directly addressable array field. It is not a `DAG_SHAPES` member and does
-not add `fugue new --shape map` or a `defineMap` helper.
+`map` is an authored **node kind** placed where the static role supplies one direct
+input schema: linear positions, fan-out/diamond source or branch positions, and
+router case/default handlers. Collect-only v1 maps cannot be fan-in joins, any
+`sources` role, or a router classifier (routing requires a direct enum output field).
+It is not a `DAG_SHAPES` member and does not add `fugue new --shape map` or a
+`defineMap` helper.
 
 ```json
 {
@@ -338,7 +341,8 @@ not add `fugue new --shape map` or a `defineMap` helper.
 The important closed contracts are:
 
 - `widthFrom` is one field identifier, not a path/expression, and must name an
-  array field in the map's derived direct input.
+  array field in the map's derived direct input. Typed `createMapNode` callers
+  can select only array-valued input keys; wire/forged inputs retain runtime checks.
 - `maxWidth` is a positive safe integer.
 - The inline child reuses `linear`, `fan-out`, `diamond`, `router`, or `sources`.
   Child maps and human review are rejected; child fan-out requires a join; router
@@ -349,6 +353,10 @@ The important closed contracts are:
   problems rather than exhausting the JavaScript call stack.
 - A successfully parsed `AuthoredDag` is an owned, recursively frozen value;
   its brand remains a valid codegen proof after it crosses the parse boundary.
+- Generated fetch/source/transform bodies are deliberately unimplemented and
+  return `err(frameworkError.validation(...))` until replaced inside their
+  `@fugue-body` regions. An untouched scaffold can be imported and linted but
+  cannot report fabricated placeholder data as successful execution.
 - Authored maps omit `output`. `{ "kind": "collect", "field": "results" }`
   makes codegen call `createCollectMapNode`, which derives
   `z.object({ results: z.array(ChildOutputSchema) })`, the reducer, and truthful
@@ -1183,14 +1191,13 @@ return err({ kind: "validation", nodeId: nodeId("score"), message: "CVR not foun
 
 </details>
 
-### Framework entry points never throw
+### Operational Result APIs do not throw expected failures
 
 Capabilities (`ctx.documents.getContent`, `ctx.http.get`, …), `parseWorkbook`
-from `@fuguejs/xlsx`, and every framework entry point return `Result` and signal
-failure with `err(...)` — including "expected" failures like a missing file or a
-missing worksheet. They do **not** throw. A defensive `try/catch` wrapped around
-one of them is a smell: it catches nothing and hides the real control flow.
-Branch on `.ok` instead:
+from `@fuguejs/xlsx`, and documented operational APIs that return `Result`
+signal expected failure with `err(...)` — including a missing file or worksheet.
+A defensive `try/catch` wrapped around one of those Result calls is a smell: it
+hides the real control flow. Branch on `.ok` instead:
 
 ```ts
 const parsed = await parseWorkbook(bytes, RowSchema, { sheet: "Data" });
@@ -1198,9 +1205,12 @@ if (!parsed.ok) return parsed;        // propagate — no try/catch
 // … use parsed.value
 ```
 
-(Genuinely throwing third-party code at the very edge of a fetch node — a
-library with no Result contract — is the only place a `try/catch` belongs, and
-it should convert straight into an `err(frameworkError.*)`.)
+Construction and caller-invariant gateways are intentionally different:
+invalid `createMapNode` configuration throws at definition time, `defineDag`
+raises `DagDefinitionError`, and malformed programmatic compose round budgets
+throw before effects. Genuinely throwing third-party code at the edge of a
+fetch node should be caught there and converted straight into an
+`err(frameworkError.*)`.
 
 ---
 

@@ -216,8 +216,10 @@ guessed N would be a lie in a diagram people read to understand topology.
 **Superseded for PR-C:** `map` is not a whole-DAG shape and does not join `DAG_SHAPES`.
 That tuple names static topology-helper provenance and drives `fugue new --shape`; adding
 `map` would require a false `defineMap` helper and contradict D1. Instead, a map is one
-closed authored **node** embedded in any existing static structure role with a directly
-addressable input schema.
+closed authored **node** embedded where a static role supplies one directly addressable
+input schema: linear positions, fan-out/diamond source or branches, and router handlers.
+Collect-only v1 maps cannot occupy fan-in joins, `sources` roles, or the router classifier
+(which requires a direct enum output field).
 
 The wire variant carries `widthFrom` (one field reference), positive `maxWidth`, an inline
 static child DAG, and `{ kind: "collect", field }`. Array fields use the closed

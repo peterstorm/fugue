@@ -10,8 +10,8 @@
 //
 // RELATIONSHIP TO `new-templates.ts` (deliberate, not drift): the golden
 // templates are human-education scaffolds with realistic example bodies and
-// teaching comments; THIS module is the machine generator — placeholder
-// ("todo") bodies, prompts derived from `purpose`, and the
+// teaching comments; THIS module is the machine generator — fail-closed
+// unimplemented bodies, prompts derived from `purpose`, and the
 // regenerate-from-`dag.authored.json` workflow. Both stay compliant with the
 // same idioms because the idiom surface is single-sourced: every emitted NAME
 // comes from the `identifiers.ts` constructors (which also feed the
@@ -142,15 +142,6 @@ function schemaExpr(spec: SchemaSpec, indent = ""): string {
   return `z.object({\n${fields}\n${indent}})`;
 }
 
-const defaultExpr = (type: FieldType): string =>
-  match(type)
-    .with({ kind: "string" }, () => '"todo"')
-    .with({ kind: "number" }, () => "0")
-    .with({ kind: "boolean" }, () => "false")
-    .with({ kind: "enum" }, (entry) => JSON.stringify(entry.values[0]))
-    .with({ kind: "array" }, () => "[]")
-    .exhaustive();
-
 /** LLM node outputs always carry bucketed confidence (the framework idiom). */
 const withConfidence = (spec: SchemaSpec): SchemaSpec =>
   spec.fields.some((f) => f.name === "confidence")
@@ -160,8 +151,8 @@ const withConfidence = (spec: SchemaSpec): SchemaSpec =>
 const schemaConst = (name: string, spec: SchemaSpec): string =>
   `const ${name} = ${schemaExpr(spec)};`;
 
-const defaultsObject = (spec: SchemaSpec, indent = "    "): string =>
-  spec.fields.map((f) => `${indent}${key(f.name)}: ${defaultExpr(f.type)},`).join("\n");
+const unimplementedBody = (node: AuthoredNode): string =>
+  `err(frameworkError.validation(${JSON.stringify(node.id)}, ${JSON.stringify(`generated body for '${node.id}' is unimplemented`)}, "body"))`;
 
 // ---------------------------------------------------------------------------
 // Per-node code
@@ -183,6 +174,8 @@ interface NodePlan {
   readonly ref: string;
   /** Factory binding for LLM nodes; null for every other node kind. */
   readonly llmFactory: string | null;
+  /** Whether emitting this node expression needs the DAG's selected model. */
+  readonly needsModel: boolean;
 }
 
 const purposeComment = (node: AuthoredNode): string => `// ${node.id} — ${comment(node.purpose)}`;
@@ -253,50 +246,40 @@ export const stampGenerated = (body: string): string => {
   );
 };
 
-// The placeholder-body emitters take the output spec explicitly: the caller
-// has already narrowed `p.node` by kind, so `p.node.output` is a plain field
-// access — no non-null assertion anywhere. The body property (comment + the
-// async callback) is wrapped in @fugue-body markers so implementing it does not
-// trip the integrity hash; id/schemas stay outside the markers and hashed.
+// Every unimplemented body returns the same node-attributed typed refusal.
+// The body property (comment + callback) is wrapped in @fugue-body markers so
+// implementing it does not trip the integrity hash; ids and schemas stay
+// outside the markers and remain hashed.
 
-const fetchNode = (p: NodePlan, outSpec: SchemaSpec): string => `${purposeComment(p.node)}
+const fetchNode = (p: NodePlan): string => `${purposeComment(p.node)}
 const ${p.ref} = ${NODE_FACTORY_NAME.fetch}({
   id: ${JSON.stringify(p.node.id)},
   inputSchema: ${p.inExpr},
   outputSchema: ${p.outName},
   ${FUGUE_BODY_START}
-  // Placeholder — implement the real fetch for: ${comment(p.node.purpose)}
-  fetch: async (_input) =>
-    ok({
-${defaultsObject(outSpec, "      ")}
-    }),
+  // Unimplemented — replace this typed refusal with the real fetch for: ${comment(p.node.purpose)}
+  fetch: async (_input) => ${unimplementedBody(p.node)},
   ${FUGUE_BODY_END}
 });`;
 
-const sourceNode = (p: NodePlan, outSpec: SchemaSpec): string => `${purposeComment(p.node)}
+const sourceNode = (p: NodePlan): string => `${purposeComment(p.node)}
 const ${p.ref} = ${NODE_FACTORY_NAME.source}({
   id: ${JSON.stringify(p.node.id)},
   outputSchema: ${p.outName},
   ${FUGUE_BODY_START}
-  // Placeholder — implement the real fetch for: ${comment(p.node.purpose)}
-  fetch: async () =>
-    ok({
-${defaultsObject(outSpec, "      ")}
-    }),
+  // Unimplemented — replace this typed refusal with the real fetch for: ${comment(p.node.purpose)}
+  fetch: async () => ${unimplementedBody(p.node)},
   ${FUGUE_BODY_END}
 });`;
 
-const transformNode = (p: NodePlan, outSpec: SchemaSpec): string => `${purposeComment(p.node)}
+const transformNode = (p: NodePlan): string => `${purposeComment(p.node)}
 const ${p.ref} = ${NODE_FACTORY_NAME.transform}({
   id: ${JSON.stringify(p.node.id)},
   inputSchema: ${p.inExpr},
   outputSchema: ${p.outName},
   ${FUGUE_BODY_START}
-  // Placeholder — map the real values for: ${comment(p.node.purpose)}
-  transform: (_input) =>
-    ok({
-${defaultsObject(outSpec, "      ")}
-    }),
+  // Unimplemented — replace this typed refusal with the real mapping for: ${comment(p.node.purpose)}
+  transform: (_input) => ${unimplementedBody(p.node)},
   ${FUGUE_BODY_END}
 });`;
 
@@ -404,32 +387,32 @@ interface AuthoredScaffold {
 
 interface Plans {
   readonly byId: Map<string, NodePlan>;
-  readonly hasLlm: boolean;
+  readonly llmCount: number;
 }
 
-const childHasLlm = (node: AuthoredMapNode): boolean =>
-  node.child.nodes.some((child) => child.kind === "llm");
-
-const allLlmCount = (dag: AuthoredDag): number =>
-  dag.nodes.reduce(
-    (count, node) => count + (node.kind === "llm" ? 1 : 0) +
-      (node.kind === "map" ? node.child.nodes.filter((child) => child.kind === "llm").length : 0),
-    0,
-  );
+const nodeLlmCount = (node: AuthoredNode): number =>
+  match(node)
+    .with({ kind: "llm" }, () => 1)
+    .with({ kind: "map" }, (map) =>
+      map.child.nodes.filter((child) => child.kind === "llm").length)
+    .otherwise(() => 0);
 
 /**
  * Prompt registry name for an llm node: the dag name when it is the only llm
  * node, `<dag>-<node>` otherwise.
  */
-const promptNameFor = (dag: AuthoredDag, id: string): string =>
-  allLlmCount(dag) === 1 ? dag.name : `${dag.name}-${id}`;
+const promptNameFor = (dag: AuthoredDag, id: string, llmCount: number): string =>
+  llmCount === 1 ? dag.name : `${dag.name}-${id}`;
 
 const childPromptNameFor = (dag: AuthoredDag, map: AuthoredMapNode, id: string): string =>
   `${dag.name}-${map.id}@${id}`;
 
 const planNodes = (dag: AuthoredDag): Plans => {
   const byId = new Map<string, NodePlan>();
+  let llmCount = 0;
   for (const node of dag.nodes) {
+    const count = nodeLlmCount(node);
+    llmCount += count;
     const outSpec = match(node)
       .with({ kind: "human-review" }, () => null)
       .with({ kind: "llm" }, (entry) => withConfidence(entry.output))
@@ -442,14 +425,10 @@ const planNodes = (dag: AuthoredDag): Plans => {
       inExpr: null, // filled by wiring
       ref: nodeRefName(node.id, node.kind),
       llmFactory: node.kind === "llm" ? llmFactoryName(node.id) : null,
+      needsModel: count > 0,
     });
   }
-  return {
-    byId,
-    hasLlm: dag.nodes.some((node) =>
-      node.kind === "llm" || (node.kind === "map" && childHasLlm(node)),
-    ),
-  };
+  return { byId, llmCount };
 };
 
 const planChildNodes = (nodes: readonly AuthoredChildNode[]): Map<string, NodePlan> =>
@@ -460,6 +439,7 @@ const planChildNodes = (nodes: readonly AuthoredChildNode[]): Map<string, NodePl
     inExpr: null,
     ref: childLocalName(nodeRefName(node.id, node.kind)),
     llmFactory: node.kind === "llm" ? childLocalName(llmFactoryName(node.id)) : null,
+    needsModel: node.kind === "llm",
   }] as const));
 
 /** Fan-in schema const over a set of upstream plans (keys = node ids). */
@@ -593,13 +573,13 @@ const emitMapNode = (
     if (childPlan === undefined) throw new Error(`authored map invariant: unknown child node '${id}'`);
     switch (childPlan.node.kind) {
       case "fetch":
-        declarations.push(fetchNode(childPlan, childPlan.node.output));
+        declarations.push(fetchNode(childPlan));
         break;
       case "source":
-        declarations.push(sourceNode(childPlan, childPlan.node.output));
+        declarations.push(sourceNode(childPlan));
         break;
       case "transform":
-        declarations.push(transformNode(childPlan, childPlan.node.output));
+        declarations.push(transformNode(childPlan));
         break;
       case "llm": {
         const promptName = childPromptNameFor(dag, node, childPlan.node.id);
@@ -614,7 +594,7 @@ const emitMapNode = (
     }
   }
 
-  const parameter = childHasLlm(node) ? `${CHILD_MODEL_NAME}: string` : "";
+  const parameter = plan.needsModel ? `${CHILD_MODEL_NAME}: string` : "";
   const body = declarations.length === 0 ? "" : `${indent(declarations.join("\n\n"), 2)}\n\n`;
   const declaration = `${purposeComment(node)}\nconst ${plan.ref} = (${parameter}) => {\n${body}  return ${NODE_FACTORY_NAME.map}({\n    id: ${JSON.stringify(node.id)},\n    inputSchema: ${plan.inExpr},\n    widthFrom: ${JSON.stringify(node.widthFrom)},\n    maxWidth: ${node.maxWidth},\n    child: ${child.expression.replace(/\n/g, "\n    ")},\n    childOutputSchema: ${schemaExpr(childOutputSpec(node.child), "    ")},\n    gather: { kind: "collect", field: ${JSON.stringify(node.gather.field)} },\n  });\n};`;
   return { declaration, prompts };
@@ -625,7 +605,8 @@ const emitMapNode = (
  * Deterministic and pure.
  */
 export const buildAuthoredScaffold = (dag: AuthoredDag): AuthoredScaffold => {
-  const { byId, hasLlm } = planNodes(dag);
+  const { byId, llmCount } = planNodes(dag);
+  const hasLlm = llmCount > 0;
   const plan = (id: string): NodePlan => {
     const p = byId.get(id);
     if (!p) throw new Error(`authored-codegen invariant: unknown node '${id}' (schema validation should have rejected this)`);
@@ -736,19 +717,19 @@ ${cases}
     const p = plan(id);
     switch (p.node.kind) {
       case "fetch":
-        nodeDecls.push(fetchNode(p, p.node.output));
+        nodeDecls.push(fetchNode(p));
         break;
       case "source":
-        nodeDecls.push(sourceNode(p, p.node.output));
+        nodeDecls.push(sourceNode(p));
         break;
       case "transform":
-        nodeDecls.push(transformNode(p, p.node.output));
+        nodeDecls.push(transformNode(p));
         break;
       case "human-review":
         nodeDecls.push(humanReviewNode(p));
         break;
       case "llm": {
-        const promptName = promptNameFor(dag, p.node.id);
+        const promptName = promptNameFor(dag, p.node.id, llmCount);
         const inputs = llmPromptInputs(dag, p);
         nodeDecls.push(llmNode(p, promptName, inputs));
         prompts.push(llmPrompt(dag, p.node, promptName, inputs));
@@ -775,8 +756,9 @@ ${cases}
 // Generated deterministically from dag.authored.json (via \`fugue new --from\`
 // or \`fugue compose\`). The STRUCTURE is authoritative and integrity-hashed —
 // edit dag.authored.json and regenerate rather than rewiring by hand. Node
-// bodies between the "@fugue-body" markers are yours to implement: they are
-// EXCLUDED from the integrity hash, so filling them in is expected and safe.`;
+// bodies between the "@fugue-body" markers are yours to implement: untouched
+// bodies fail closed, and the regions are EXCLUDED from the integrity hash, so
+// filling them in is expected and safe.`;
 
   const dagBinding = hasLlm
     ? `${llmFactoryPreamble(dag.name)}
@@ -827,7 +809,7 @@ const nodeExprRef = (plan: NodePlan): string => {
     return `${plan.llmFactory}(opts.model ?? ${DEFAULT_MODEL_NAME})`;
   }
   if (plan.node.kind === "map") {
-    return childHasLlm(plan.node)
+    return plan.needsModel
       ? `${plan.ref}(opts.model ?? ${DEFAULT_MODEL_NAME})`
       : `${plan.ref}()`;
   }
@@ -905,10 +887,9 @@ const buildImports = (dag: AuthoredDag, hasLlm: boolean): string => {
     ),
   ])];
 
-  // `ok(...)` appears only in generated fetch/transform/source placeholder
-  // bodies. The collect-map constructor owns its fixed reducer, while llm and
-  // human-review nodes emit no `ok`, so an all-llm map must not import it.
-  const needsOk = kinds.some(
+  // Untouched fetch/transform/source bodies fail closed through the standard
+  // Result/error factories. LLM and human-review nodes need neither import.
+  const hasUnimplementedBody = kinds.some(
     (kind) => kind === "fetch" || kind === "transform" || kind === "source",
   );
 
@@ -916,7 +897,7 @@ const buildImports = (dag: AuthoredDag, hasLlm: boolean): string => {
     ...(hasLlm ? [FIXED_IMPORT_NAME.confidence] : []),
     ...kinds.map((k) => NODE_FACTORY_NAME[k]),
     ...helpers,
-    ...(needsOk ? [FIXED_IMPORT_NAME.ok] : []),
+    ...(hasUnimplementedBody ? [FIXED_IMPORT_NAME.err, FIXED_IMPORT_NAME.frameworkError] : []),
   ].sort();
 
   return [
