@@ -24,7 +24,7 @@ import {
   type Kebab,
 } from "../../cli/identifiers.js";
 import { runGauntlet, type GauntletResult } from "../../cli/gauntlet.js";
-import { nodeId } from "../../types/ids.js";
+import { ID_MAX_LENGTH, nodeId } from "../../types/ids.js";
 import { CONFIDENCE_FIELD } from "../../cli/vocabulary.js";
 import { runNewFrom, writeAuthoredScaffold } from "../../cli/new.js";
 import type { DescribedDag } from "../../describe/index.js";
@@ -821,6 +821,36 @@ describe("AuthoredDag schema", () => {
     const nameD = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
     (nameD as { name: string }).name = "2fast-pipeline";
     expect(parseAuthoredDag(nameD).ok).toBe(false);
+  });
+
+  it("shares the runtime identifier length boundary with authored proofs", async () => {
+    const maxName = "a".repeat(ID_MAX_LENGTH);
+    const maxNode = "b".repeat(ID_MAX_LENGTH);
+    const boundary = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
+    (boundary as { name: string }).name = maxName;
+    (boundary.nodes[1] as { id: string }).id = maxNode;
+    (boundary.structure as { order: string[] }).order = ["fetch-record", maxNode];
+    const parsedBoundary = mustParse(boundary);
+    const verdict = await runGauntlet(parsedBoundary, join(tmpRoot, "max-authored-identifiers"));
+    if (!verdict.ok) throw new Error(JSON.stringify(verdict.errors, null, 2));
+
+    const overlongName = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
+    (overlongName as { name: string }).name = "a".repeat(ID_MAX_LENGTH + 1);
+    const refusedName = parseAuthoredDag(overlongName);
+    expect(refusedName.ok).toBe(false);
+    if (!refusedName.ok) expect(refusedName.problems.join("\n")).toContain("at most 128 characters");
+
+    const overlongNode = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
+    const invalidId = "b".repeat(ID_MAX_LENGTH + 1);
+    (overlongNode.nodes[1] as { id: string }).id = invalidId;
+    (overlongNode.structure as { order: string[] }).order = ["fetch-record", invalidId];
+    const refusedNode = parseAuthoredDag(overlongNode);
+    expect(refusedNode.ok).toBe(false);
+    if (!refusedNode.ok) {
+      const problems = refusedNode.problems.join("\n");
+      expect(problems).toContain("node id must be kebab-case starting with a letter and at most 128 characters");
+      expect(problems).toContain("node reference must be kebab-case starting with a letter and at most 128 characters");
+    }
   });
 
   it("rejects node ids that are strict-mode reserved words ('with', 'debugger', 'eval', 'arguments')", () => {

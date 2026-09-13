@@ -233,7 +233,7 @@ const snapshotMapping = (
     const sourceFlag = (node as { readonly isSource?: unknown }).isSource;
     const sideEffects = node.sideEffects;
     const confidence = node.confidence as Readonly<Record<PropertyKey, unknown>>;
-    if (sourceFlag === true || sideEffects?.kind !== "writes" ||
+    if ((sourceFlag !== undefined && sourceFlag !== false) || sideEffects?.kind !== "writes" ||
         sideEffects.resource !== MAP_FAN_RESOURCE || sideEffects.idempotencyKey !== undefined ||
         sideEffects.extractConditionedOn !== undefined || sideEffects.extractNewWitness !== undefined ||
         confidence.mode !== "none" || Reflect.ownKeys(confidence).some((key) => key !== "mode")) {

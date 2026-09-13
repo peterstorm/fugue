@@ -54,11 +54,28 @@ export interface MapNodeConfig<
 /** Empty-object assignability distinguishes infinite string domains from finite literal keys. */
 type IsInfiniteStringDomain<Field extends string> = {} extends Record<Field, never> ? true : false;
 
+/** Own string keys of ordinary Object.prototype; all are absent on collect dictionaries. */
+type ObjectPrototypeKey =
+  | keyof Object
+  | "__defineGetter__"
+  | "__defineSetter__"
+  | "__lookupGetter__"
+  | "__lookupSetter__"
+  | "__proto__";
+
+type NullPrototypeMembers<Field extends string, Value> = Readonly<{
+  readonly [Key in ObjectPrototypeKey]?: Key extends Field ? Value : undefined;
+}>;
+
+type CollectedFieldValue<ChildOut> = readonly ChildOut[];
+
 export type CollectedMapOutput<Field extends string, ChildOut> =
   Field extends unknown
-    ? IsInfiniteStringDomain<Field> extends true
-      ? Readonly<Record<Field, readonly ChildOut[] | undefined>>
-      : Readonly<Record<Field, readonly ChildOut[]>>
+    ? (
+        IsInfiniteStringDomain<Field> extends true
+          ? Readonly<Record<Field, CollectedFieldValue<ChildOut> | undefined>>
+          : Readonly<Record<Field, CollectedFieldValue<ChildOut>>>
+      ) & NullPrototypeMembers<Field, CollectedFieldValue<ChildOut>>
     : never;
 
 export interface CollectMapNodeConfig<
@@ -136,7 +153,12 @@ export const createCollectMapNode = <
   const field = widthFrom(gatherField);
   const outputSchema = z.object({
     [field]: z.array(childOutputSchema),
-  }) as unknown as z.ZodType<CollectedMapOutput<Field, ChildOut>>;
+  }).overwrite((value) =>
+    // Zod widens a computed object key to a mutable string record; this
+    // constructor still owns the required field and returns its narrower
+    // immutable/null-prototype representation of the same parsed shape.
+    collectedOutput(gatherField, value[field]!) as unknown as typeof value,
+  ) as unknown as z.ZodType<CollectedMapOutput<Field, ChildOut>>;
   const reduce = (
     results: readonly ChildOut[],
   ): Result<CollectedMapOutput<Field, ChildOut>, FrameworkError> =>

@@ -19,6 +19,7 @@
 // passed every refinement — no structurally-shaped impostors.
 
 import { z } from "zod";
+import { ID_MAX_LENGTH } from "../types/ids.js";
 import { safeErrorMessage } from "../types/safe-error.js";
 import {
   FUGUE_BODY_MARKER,
@@ -253,7 +254,10 @@ const kebabIdentField = (message: string) => brandedStringField(parseKebabIdent,
  */
 const kebabField = (message: string) => brandedStringField(parseKebab, message);
 
-const nodeId = kebabIdentField("node id must be kebab-case starting with a letter");
+const kebabIdentRule = (subject: string): string =>
+  `${subject} must be kebab-case starting with a letter and at most ${ID_MAX_LENGTH} characters`;
+
+const nodeId = kebabIdentField(kebabIdentRule("node id"));
 /** What this node is for — the authoring intent DescribedDag can't carry. */
 const nodePurpose = z
   .string()
@@ -338,7 +342,7 @@ export type AuthoredChildNode = DeepReadonly<z.infer<typeof ChildNodeSchema>>;
 // (KEBAB_IDENT, not plain KEBAB) — a ref like "2fast" can never resolve and
 // should be rejected with the precise lexical message rather than only the
 // unknown-node refinement.
-const nodeRef = kebabIdentField("node reference must be kebab-case starting with a letter");
+const nodeRef = kebabIdentField(kebabIdentRule("node reference"));
 
 const RouterCaseSchema = z
   .object({
@@ -653,7 +657,7 @@ const addLlmConfidenceIssue = (
 
 const ChildDagSchema = z
   .object({
-    id: kebabIdentField("child DAG id must be kebab-case starting with a letter"),
+    id: kebabIdentField(kebabIdentRule("child DAG id")),
     nodes: z.array(ChildNodeSchema).min(1).readonly(),
     structure: ChildStructureSchema,
   })
@@ -823,7 +827,7 @@ const deepFreezeOwned = <T>(value: T): DeepReadonly<T> => {
 const BaseAuthoredDagSchema = z
   .object({
     fugueAuthored: z.literal(1),
-    name: kebabIdentField("name must be kebab-case starting with a letter"),
+    name: kebabIdentField(kebabIdentRule("name")),
     team: kebabField("team must be kebab-case"),
     description: z
       .string()

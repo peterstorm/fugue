@@ -52,8 +52,11 @@ export const isDagInput = (id: string): id is DagInputId => id === DAG_INPUT;
 // Allow `:` so callers can namespace run ids (`tenant:run-abc`) without
 // jumping through encoding hoops. The regex stays restrictive enough that
 // IDs remain URL-safe and printable in operator UIs.
+/** Canonical maximum shared by every runtime and authoring identifier proof. */
+export const ID_MAX_LENGTH = 128;
+
 /** The regex every framework identifier is validated against. */
-export const ID_PATTERN = /^[A-Za-z0-9_:-]{1,128}$/;
+export const ID_PATTERN = new RegExp(`^[A-Za-z0-9_:-]{1,${ID_MAX_LENGTH}}$`);
 
 // Load-time assertion of the load-bearing invariant from the DAG_INPUT block
 // above: the reserved request id is spelled outside `ID_PATTERN` so it can never
@@ -90,7 +93,7 @@ export const nodeId = (s: string): NodeId => {
  * Pattern for DagId — stricter than the general ID_PATTERN.
  * Disallows `:` to prevent Redis key namespace escape (keys use `:` as delimiter).
  */
-const DAG_ID_REGEX = /^[A-Za-z0-9_-]{1,128}$/;
+const DAG_ID_REGEX = new RegExp(`^[A-Za-z0-9_-]{1,${ID_MAX_LENGTH}}$`);
 
 /** Smart constructor for `DagId`. Validates against `DAG_ID_REGEX` (no colons). */
 export const dagId = (s: string): DagId => {

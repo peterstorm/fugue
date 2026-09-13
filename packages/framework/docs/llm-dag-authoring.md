@@ -353,6 +353,8 @@ The important closed contracts are:
   problems rather than exhausting the JavaScript call stack.
 - A successfully parsed `AuthoredDag` is an owned, recursively frozen value;
   its brand remains a valid codegen proof after it crosses the parse boundary.
+  DAG names, child DAG ids, node ids, and structure references are kebab-case,
+  start with a letter, and share the runtime identifier limit of 128 characters.
 - Generated fetch/source/transform bodies are deliberately unimplemented and
   return `$fugue.err($fugue.frameworkError.validation(...))` until replaced
   inside their `@fugue-body` regions. The integrity-hashed `$fugue` namespace
@@ -360,12 +362,13 @@ The important closed contracts are:
   `$fugue.ok(value)` success code neither changes imports nor leaves dead ones.
   An untouched scaffold imports and lints but cannot report fabricated data.
 - Authored maps omit `output`. `{ "kind": "collect", "field": "results" }`
-  makes codegen call `createCollectMapNode`, which derives
-  `z.object({ results: z.array(ChildOutputSchema) })`, the reducer, and truthful
-  describe metadata as one invariant. Dynamic string fields produce frozen
-  null-prototype dictionaries: every indexed lookup is the collected array or
-  `undefined`, including names inherited by ordinary objects such as `toString`.
-  No authored reducer source or expression is accepted or evaluated.
+  makes codegen call `createCollectMapNode`, which derives the field schema,
+  schema-output hardening transform, reducer, and truthful describe metadata as
+  one invariant. Reducer values, successful schema parses, and final `runDag`
+  outputs are frozen null-prototype dictionaries with frozen result arrays.
+  Their type marks ordinary prototype members as the gathered array when that
+  name may be the selected field, otherwise `undefined`; no inherited callable
+  is exposed. No authored reducer source or expression is accepted or evaluated.
 - Child LLM prompts are named `<dag>-<map>@<child>`, keeping them disjoint from
   ordinary prompt names while remaining deterministic.
 - Describe/Mermaid keep the child out of outer nodes, edges and waves. One map
@@ -1232,7 +1235,7 @@ fetch node should be caught there and converted straight into an
 - [ ] Roots are **source nodes** (`createSourceNode`, no `inputSchema`); the request is consumed only via `DAG_INPUT` edges (a single `$input` edge for a bare consumer, the `"$input"` key for a fan-in)
 - [ ] A fan-in node's `z.object` keys equal its incoming source ids (including `"$input"` when it has a `DAG_INPUT` edge)
 - [ ] Errors are built with `frameworkError.*`, not raw `err({ kind, … })` literals
-- [ ] No defensive `try/catch` around capabilities / `parseWorkbook` / framework calls — they return `Result`, they don't throw
+- [ ] No defensive `try/catch` around capabilities, `parseWorkbook`, or other documented operational `Result` APIs — branch on `.ok` (construction gateways may throw as documented above)
 - [ ] Required env vars are listed in `fugue.yaml` `env:`; optional defaulted config is a factory option, not a hidden `process.env` read
 - [ ] `export default` a `DagRegistration` object
 

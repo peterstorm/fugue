@@ -195,6 +195,10 @@ interface NodePlan {
   readonly needsModel: boolean;
 }
 
+type ChildNodePlan = Omit<NodePlan, "node"> & Readonly<{
+  readonly node: AuthoredChildNode;
+}>;
+
 const purposeComment = (node: AuthoredNode): string => `// ${node.id} — ${comment(node.purpose)}`;
 
 // ---------------------------------------------------------------------------
@@ -448,7 +452,7 @@ const planNodes = (dag: AuthoredDag): Plans => {
   return { byId, llmCount };
 };
 
-const planChildNodes = (nodes: readonly AuthoredChildNode[]): Map<string, NodePlan> =>
+const planChildNodes = (nodes: readonly AuthoredChildNode[]): Map<string, ChildNodePlan> =>
   new Map(nodes.map((node) => [node.id, {
     node,
     outName: childLocalName(schemaConstName(node.id)),
@@ -498,10 +502,10 @@ const indent = (value: string, spaces: number): string => {
 
 const emitChildStructure = (
   child: AuthoredChildDag,
-  plans: Map<string, NodePlan>,
+  plans: Map<string, ChildNodePlan>,
   itemSchema: SchemaSpec,
 ): { readonly expression: string; readonly extras: readonly string[] } => {
-  const plan = (id: string): NodePlan => {
+  const plan = (id: string): ChildNodePlan => {
     const found = plans.get(id);
     if (found === undefined) throw new Error(`authored map invariant: unknown child node '${id}'`);
     return found;
@@ -608,6 +612,8 @@ const emitMapNode = (
         prompts.push(llmPrompt(dag, childPlan.node, promptName, inputs));
         break;
       }
+      default:
+        assertNever(childPlan.node);
     }
   }
 
@@ -758,6 +764,8 @@ ${cases}
         prompts.push(...emitted.prompts);
         break;
       }
+      default:
+        assertNever(p.node);
     }
   }
 

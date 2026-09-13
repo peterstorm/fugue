@@ -18,12 +18,14 @@ import {
 } from "../../nodes/map.js";
 import { makeNodeContext } from "../../shared/make-node-context.js";
 import { type Result, ok } from "../../types/result.js";
+import { InMemoryCheckpointer } from "../../checkpoint/checkpointer.js";
 import { defineDag } from "../../executor/define-dag.js";
+import { runDag } from "../../executor/run-dag.js";
 import { validateDagShape } from "../../shared/validate-dag.js";
 import { buildDescribedDag } from "../../describe/build-described-dag.js";
 import { createTransformNode } from "../../nodes/transform.js";
 import type { DagDef, DagDefInput } from "../../types/dag.js";
-import { DAG_INPUT } from "../../types/ids.js";
+import { DAG_INPUT, ID_MAX_LENGTH } from "../../types/ids.js";
 import { resourceName } from "../../types/witness.js";
 import type { FrameworkError } from "../../types/errors.js";
 import type { LlmClient, LlmRequest, LlmResponse } from "../../types/llm.js";
@@ -43,6 +45,8 @@ void assertAuthoredDagReadonly;
 
 const assertCollectOutputTypes = (
   unionOutput: CollectedMapOutput<"left" | "right", number>,
+  literalOutput: CollectedMapOutput<"results", number>,
+  prototypeNamedOutput: CollectedMapOutput<"toString", number>,
   widenedOutput: CollectedMapOutput<string, number>,
   patternedOutput: CollectedMapOutput<`results_${string}`, number>,
 ): void => {
@@ -51,9 +55,16 @@ const assertCollectOutputTypes = (
     void left;
   }
   const possiblyMissing: readonly number[] | undefined = widenedOutput.anyField;
+  const widenedPrototypeName: readonly number[] | undefined = widenedOutput.toString;
+  const absentLiteralPrototypeName: undefined = literalOutput.toString;
+  const gatheredPrototypeName: readonly number[] = prototypeNamedOutput.toString;
   const patternedPossiblyMissing: readonly number[] | undefined = patternedOutput.results_other;
-  void possiblyMissing;
-  void patternedPossiblyMissing;
+  void [possiblyMissing, widenedPrototypeName, absentLiteralPrototypeName];
+  void [gatheredPrototypeName, patternedPossiblyMissing];
+  // @ts-expect-error Null-prototype collect outputs never inherit callable Object members.
+  widenedOutput.toString();
+  // @ts-expect-error A non-prototype gather field leaves toString absent, not callable.
+  literalOutput.toString();
   // @ts-expect-error A union-selected field is not present in every output arm.
   const notAlwaysLeft: readonly number[] = unionOutput.left;
   // @ts-expect-error An infinite template-literal domain cannot promise every matching key.
@@ -217,11 +228,15 @@ const deeplyNestedDraft = (levels = 100): JsonObject => {
   return value;
 };
 
-const importGeneratedDag = async (dag: AuthoredDag, name: string): Promise<DagDef> => {
+const importGeneratedDag = async (
+  dag: AuthoredDag,
+  name: string,
+  source = buildAuthoredScaffold(dag).dagTs,
+): Promise<DagDef> => {
   const dir = join(tmpRoot, `import-${name}`);
   await mkdir(dir, { recursive: true });
   const path = join(dir, "dag.ts");
-  await writeFile(path, buildAuthoredScaffold(dag).dagTs, "utf-8");
+  await writeFile(path, source, "utf-8");
   const loaded: unknown = await import(pathToFileURL(path).href);
   const registration = (loaded as { readonly default?: unknown }).default;
   if (typeof registration !== "object" || registration === null || !("dag" in registration)) {
@@ -255,10 +270,11 @@ const runGeneratedLlm = async (
 };
 
 describe("AuthoredDag map node (FR-F1-010)", () => {
-  it("typechecks static contracts and a fully body-implemented generated module", async () => {
-    const original = buildAuthoredScaffold(mustParse(MAP_FIXTURE)).dagTs;
+  it("typechecks and executes a fully body-implemented generated map", async () => {
+    const authored = mustParse(MAP_FIXTURE);
+    const original = buildAuthoredScaffold(authored).dagTs;
     const bodies = [
-      'fetch: async (_input) => $fugue.ok({ requestId: _input.requestId, items: [] }),',
+      'fetch: async (_input) => $fugue.ok({ requestId: _input.requestId, items: [{ recordId: "b", amount: 2 }, { recordId: "a", amount: 1 }] }),',
       'transform: (_input) => $fugue.ok({ recordId: _input.recordId, score: _input.amount }),',
     ];
     let bodyIndex = 0;
@@ -290,6 +306,23 @@ describe("AuthoredDag map node (FR-F1-010)", () => {
     });
     const output = `${new TextDecoder().decode(compiled.stdout)}${new TextDecoder().decode(compiled.stderr)}`;
     expect(compiled.exitCode, output).toBe(0);
+
+    const runtime = await importGeneratedDag(authored, "implemented-runtime", implemented);
+    const execution = await runDag(runtime, { requestId: "request-1" }, makeNodeContext({
+      runId: "implemented-authored-map",
+      dagId: runtime.id,
+      capabilities: { checkpointer: new InMemoryCheckpointer() },
+    }));
+    expect(execution.ok).toBe(true);
+    if (!execution.ok) throw new Error(execution.error.kind);
+    expect(execution.value).toEqual({
+      results: [{ recordId: "b", score: 2 }, { recordId: "a", score: 1 }],
+    });
+    const collected = execution.value as Readonly<Record<string, unknown>>;
+    expect(Object.getPrototypeOf(collected)).toBeNull();
+    expect(Object.isFrozen(collected)).toBe(true);
+    expect(Object.isFrozen(collected.results)).toBe(true);
+    expect(collected.toString).toBeUndefined();
   }, 30_000);
 
   it("parses an inline child and derives the collected output", () => {
@@ -454,8 +487,38 @@ describe("AuthoredDag map node (FR-F1-010)", () => {
 
   it("rejects executable/unsupported child and gather forms", () => {
     const nested = draft();
-    childNodesOf(nested)[0]!.kind = "map";
-    expect(parseAuthoredDag(nested).ok).toBe(false);
+    const itemElement = ((((nodesOf(nested)[0]!.output as JsonObject).fields as JsonObject[])[1]!
+      .type as JsonObject).element as JsonObject);
+    (itemElement.fields as JsonObject[]).push({
+      name: "nestedItems",
+      type: {
+        kind: "array",
+        element: fields(["value", scalar("number")]),
+      },
+    });
+    childNodesOf(nested)[0] = {
+      id: "score-item",
+      kind: "map",
+      purpose: "Map a nested item",
+      widthFrom: "nestedItems",
+      maxWidth: 2,
+      child: {
+        id: "nested-item-child",
+        nodes: [{
+          id: "finish-nested-item",
+          kind: "transform",
+          purpose: "Finish a nested item",
+          output: fields(["value", scalar("number")]),
+        }],
+        structure: { shape: "linear", order: ["finish-nested-item"] },
+      },
+      gather: { kind: "collect", field: "nestedResults" },
+    };
+    const parsedNested = parseAuthoredDag(nested);
+    expect(parsedNested.ok).toBe(false);
+    if (!parsedNested.ok) {
+      expect(parsedNested.problems.join("\n")).toContain("nested maps and human-review are unsupported");
+    }
 
     const review = draft();
     childNodesOf(review)[0] = {
@@ -479,6 +542,70 @@ describe("AuthoredDag map node (FR-F1-010)", () => {
     expect(parsedOutput.ok).toBe(false);
     if (!parsedOutput.ok) {
       expect(parsedOutput.problems.join("\n")).toContain("collect gather derives it");
+    }
+  });
+
+  it("accepts gather-then-review as one root human gate", async () => {
+    const value = draft();
+    nodesOf(value).push({
+      id: "review-results",
+      kind: "human-review",
+      purpose: "Approve the collected results",
+    });
+    (value.structure as JsonObject).order = ["scope-records", "score-items", "review-results"];
+
+    const authored = mustParse(value);
+    const verdict = await runGauntlet(authored, join(tmpRoot, "gather-then-review"));
+    if (!verdict.ok) throw new Error(JSON.stringify(verdict.errors, null, 2));
+    expect(verdict.described.nodes.find((node) => node.id === "review-results")?.humanReview).toBe(true);
+
+    const runtime = await importGeneratedDag(authored, "gather-then-review");
+    const review = runtime.nodes.find((node) => node.id === "review-results");
+    if (review === undefined) throw new Error("missing generated review node");
+    expect(review.inputSchema.safeParse({
+      results: [{ recordId: "r-1", score: 1 }],
+    }).success).toBe(true);
+    expect(review.inputSchema.safeParse({ recordId: "r-1", score: 1 }).success).toBe(false);
+  });
+
+  it("enforces the runtime identifier limit on every authored identifier role", async () => {
+    const boundary = draft();
+    const name = "a".repeat(ID_MAX_LENGTH);
+    const scopeId = "b".repeat(ID_MAX_LENGTH);
+    const mapId = "c".repeat(ID_MAX_LENGTH);
+    const childId = "d".repeat(ID_MAX_LENGTH);
+    const childNodeId = "e".repeat(ID_MAX_LENGTH);
+    boundary.name = name;
+    nodesOf(boundary)[0]!.id = scopeId;
+    mapOf(boundary).id = mapId;
+    childOf(boundary).id = childId;
+    childNodesOf(boundary)[0]!.id = childNodeId;
+    (boundary.structure as JsonObject).order = [scopeId, mapId];
+    (childOf(boundary).structure as JsonObject).order = [childNodeId];
+    const accepted = mustParse(boundary);
+    const verdict = await runGauntlet(accepted, join(tmpRoot, "max-authored-identifiers"));
+    if (!verdict.ok) throw new Error(JSON.stringify(verdict.errors, null, 2));
+
+    const cases: readonly [string, (value: JsonObject, id: string) => void][] = [
+      ["name", (value, id) => { value.name = id; }],
+      ["node and reference", (value, id) => {
+        nodesOf(value)[0]!.id = id;
+        (value.structure as JsonObject).order = [id, "score-items"];
+      }],
+      ["child DAG", (value, id) => { childOf(value).id = id; }],
+      ["child node and reference", (value, id) => {
+        childNodesOf(value)[0]!.id = id;
+        (childOf(value).structure as JsonObject).order = [id];
+      }],
+    ];
+    for (const [label, mutate] of cases) {
+      const overlong = draft();
+      mutate(overlong, "z".repeat(ID_MAX_LENGTH + 1));
+      const refused = parseAuthoredDag(overlong);
+      expect(refused.ok, label).toBe(false);
+      if (!refused.ok) {
+        expect(refused.problems.join("\n"), label).toContain("at most 128 characters");
+      }
     }
   });
 
@@ -1228,6 +1355,7 @@ describe("authored map codegen and plate rendering", () => {
 
     const forgeries = [
       [{ ...map, isSource: true }, "source-has-incoming"],
+      [{ ...map, isSource: "source" }, "validation"],
       [{ ...map, sideEffects: { kind: "none" } }, "validation"],
       [{ ...map, sideEffects: { ...map.sideEffects, resource: resourceName("checkpoint:other") } }, "validation"],
       [{ ...map, confidence: { mode: "value", extract: () => ({ bucket: "high", source: "heuristic" }) } }, "validation"],
@@ -1314,10 +1442,18 @@ describe("authored map codegen and plate rendering", () => {
     expect(ordered.value.results).toEqual([3, 1, 2]);
     expect(Object.getPrototypeOf(ordered.value)).toBeNull();
     expect(ordered.value.toString).toBeUndefined();
-    expect(collect.outputSchema.safeParse(ordered.value).success).toBe(true);
     expect(Object.isFrozen(ordered.value.results)).toBe(true);
 
-    const inheritedName = createCollectMapNode({
+    const parsed = collect.outputSchema.safeParse({ results: [3, 1, 2] });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) throw new Error(parsed.error.message);
+    expect(parsed.data.results).toEqual([3, 1, 2]);
+    expect(Object.getPrototypeOf(parsed.data)).toBeNull();
+    expect(Object.isFrozen(parsed.data)).toBe(true);
+    expect(Object.isFrozen(parsed.data.results)).toBe(true);
+    expect(parsed.data.toString).toBeUndefined();
+
+    const inheritedNameCollect = createCollectMapNode({
       id: "collect-inherited-name",
       inputSchema: z.object({ items: z.array(z.number()) }),
       widthFrom: "items",
@@ -1325,10 +1461,15 @@ describe("authored map codegen and plate rendering", () => {
       child: template.mapping.child,
       childOutputSchema: z.number(),
       gather: { kind: "collect", field: "toString" },
-    }).mapping.reduce([4, 5]);
+    });
+    const inheritedName = inheritedNameCollect.mapping.reduce([4, 5]);
     if (!inheritedName.ok) throw new Error("collect reducer failed");
     expect(inheritedName.value.toString).toEqual([4, 5]);
     expect(Object.hasOwn(inheritedName.value, "toString")).toBe(true);
+    const parsedInheritedName = inheritedNameCollect.outputSchema.parse({ toString: [4, 5] });
+    expect(parsedInheritedName.toString).toEqual([4, 5]);
+    expect(Object.getPrototypeOf(parsedInheritedName)).toBeNull();
+    expect(Object.isFrozen(parsedInheritedName)).toBe(true);
   });
 
   it("contains hostile and malformed describe schemas behind null plus warnings", async () => {

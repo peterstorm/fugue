@@ -12,9 +12,11 @@
 // both sides — instead of letting the validation gauntlet surface a
 // duplicate-declaration SyntaxError the author/LLM has to decode.
 //
-// Pure data + pure functions, no imports — `authored.ts`,
-// `authored-codegen.ts`, `new-templates.ts` and `types.ts` all depend on this
-// module, never the reverse.
+// Pure data + pure functions. The only import is the canonical low-level
+// runtime identifier limit; `authored.ts`, `authored-codegen.ts`,
+// `new-templates.ts` and `types.ts` all depend on this module, never the reverse.
+
+import { ID_MAX_LENGTH } from "../types/ids.js";
 
 // ---------------------------------------------------------------------------
 // Lexical rules — the single source for the kebab/identifier regexes every
@@ -51,9 +53,10 @@ export const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
 export type Kebab = string & { readonly __brand: "Kebab" };
 
 /**
- * A `KEBAB_IDENT`-validated string (node ids, DAG names) — the only strings
- * safe to feed the name constructors below, since they camelCase/PascalCase
- * into emitted JS identifiers.
+ * A length-bounded `KEBAB_IDENT` string (node ids, DAG names) — the only
+ * strings safe to feed the name constructors below and the runtime DagId /
+ * NodeId constructors, since codegen camelCases/PascalCases them into emitted
+ * JS identifiers.
  */
 export type KebabIdent = string & { readonly __brand: "KebabIdent" };
 
@@ -61,9 +64,9 @@ export type KebabIdent = string & { readonly __brand: "KebabIdent" };
 export const parseKebab = (raw: string): Kebab | null =>
   KEBAB.test(raw) ? (raw as Kebab) : null;
 
-/** The sole `KebabIdent` producer: `null` unless `KEBAB_IDENT` matches. */
+/** The sole producer: `null` unless lexical shape and runtime length both match. */
 export const parseKebabIdent = (raw: string): KebabIdent | null =>
-  KEBAB_IDENT.test(raw) ? (raw as KebabIdent) : null;
+  raw.length <= ID_MAX_LENGTH && KEBAB_IDENT.test(raw) ? (raw as KebabIdent) : null;
 
 /**
  * The full ECMAScript LineTerminator set as a regex character-class body:
@@ -369,18 +372,19 @@ interface IdentifierSource {
 }
 
 /**
- * Every identifier `authored-codegen` can emit for a node, derived from the
- * same name constructors codegen calls:
- *   - `nodeConstName(id)`   — the node const (non-llm ref)
+ * Conservative reservation superset for identifiers `authored-codegen` may
+ * emit for a node, derived from the same name constructors codegen calls:
+ *   - `nodeConstName(id)`   — reserved for every kind, including map although
+ *                             current map emission binds only its factory
  *   - `llmNodeRefName(id)`  — claimed for llm nodes though never bound today
  *                             (see the rationale on `llmNodeRefName`)
  *   - `llmFactoryName(id)`  — the llm factory
  *   - `schemaConstName(id)` — the output schema const
  *   - `fanInConstName(id)`  — the fan-in schema const (join/assemble roles)
  *
- * Conservative on purpose: the FanIn / llm entries are claimed even when the
- * node's current role wouldn't emit them, so a refinement that changes a
- * node's role can never introduce a collision the schema already accepted.
+ * Conservative on purpose: ordinary map const, FanIn, and llm entries remain
+ * claimed even when current emission or role does not use them, so a later
+ * refinement cannot introduce a collision the schema already accepted.
  */
 export const generatedIdentifiersFor = (node: IdentifierSource): readonly string[] => [
   nodeConstName(node.id),
