@@ -354,14 +354,18 @@ The important closed contracts are:
 - A successfully parsed `AuthoredDag` is an owned, recursively frozen value;
   its brand remains a valid codegen proof after it crosses the parse boundary.
 - Generated fetch/source/transform bodies are deliberately unimplemented and
-  return `err(frameworkError.validation(...))` until replaced inside their
-  `@fugue-body` regions. An untouched scaffold can be imported and linted but
-  cannot report fabricated placeholder data as successful execution.
+  return `$fugue.err($fugue.frameworkError.validation(...))` until replaced
+  inside their `@fugue-body` regions. The integrity-hashed `$fugue` namespace
+  also owns their factory calls, so replacing every body with documented
+  `$fugue.ok(value)` success code neither changes imports nor leaves dead ones.
+  An untouched scaffold imports and lints but cannot report fabricated data.
 - Authored maps omit `output`. `{ "kind": "collect", "field": "results" }`
   makes codegen call `createCollectMapNode`, which derives
   `z.object({ results: z.array(ChildOutputSchema) })`, the reducer, and truthful
-  describe metadata as one invariant. No authored reducer source or expression
-  is accepted or evaluated.
+  describe metadata as one invariant. Dynamic string fields produce frozen
+  null-prototype dictionaries: every indexed lookup is the collected array or
+  `undefined`, including names inherited by ordinary objects such as `toString`.
+  No authored reducer source or expression is accepted or evaluated.
 - Child LLM prompts are named `<dag>-<map>@<child>`, keeping them disjoint from
   ordinary prompt names while remaining deterministic.
 - Describe/Mermaid keep the child out of outer nodes, edges and waves. One map
@@ -1149,7 +1153,10 @@ bunx fugue prompts check dags/<team>/<name>
 ## Result Type
 
 All node functions return `Result<T, FrameworkError>` — `ok(value)` on success,
-`err(...)` on failure. **Build errors with the `frameworkError.*` factories**,
+`err(...)` on failure. Generated AuthoredDag scaffolds expose the same helpers
+as `$fugue.ok`, `$fugue.err`, and `$fugue.frameworkError` inside editable body
+regions; use those bindings without changing integrity-hashed imports.
+**Build errors with the `frameworkError.*` factories** in ordinary modules,
 not raw object literals: the factories brand the `nodeId`, fill required fields,
 and keep call sites stable as the error types evolve. The kinds an author
 typically constructs are `validation`, `transient`, and `node-crash` — all
@@ -1217,7 +1224,7 @@ fetch node should be caught there and converted straight into an
 ## Checklist for a Valid DAG
 
 - [ ] Every node key in `nodes` matches that node's `id`
-- [ ] Every `edges[].from` and `edges[].to` references a key in `nodes`
+- [ ] Every `edges[].to` and every non-`DAG_INPUT` `edges[].from` references a key in `nodes`
 - [ ] No duplicate edges (same `from`+`to` pair)
 - [ ] Output node is reachable via unconditional/default edges from roots
 - [ ] If conditional edges leave a node, a `kind: "default"` edge exists (else-totality)
@@ -1229,16 +1236,19 @@ fetch node should be caught there and converted straight into an
 - [ ] Required env vars are listed in `fugue.yaml` `env:`; optional defaulted config is a factory option, not a hidden `process.env` read
 - [ ] `export default` a `DagRegistration` object
 
-All structural rules are validated at module load by `defineDag()` — invalid
-DAGs throw `DagDefinitionError` immediately, with a message pointing at the problem.
+`defineDag()` validates node/edge identities, source roles, routing totality,
+and reachability at module load and throws `DagDefinitionError` immediately.
+Run `fugue lint` for fan-in schema-key checks, and use execution/schema tests
+for general upstream/downstream schema compatibility.
 
 ---
 
 ## Verifying with the `fugue` CLI
 
 The `fugue` binary (`packages/framework/bin/fugue.ts`) validates and
-introspects a DAG file without needing to start the host. **All output is JSON
-on stdout**, designed for machine consumption.
+introspects a DAG file without needing to start the host. Output is JSON on
+stdout for machine consumption, except `fugue visualize --raw`, which emits
+bare Mermaid text for piping into documentation.
 
 > Run `bunx fugue …` from a directory whose package depends on
 > `@fuguejs/framework` (bun links the bin per dependent). From an unrelated

@@ -679,6 +679,38 @@ describe("runCompose", () => {
     expect(outcome.draft).toEqual(validDag);
   });
 
+  it("contains a rejected LLM promise and preserves the last proven draft", async () => {
+    const root = join(tmpRoot, "llm-rejection-carries-draft");
+    const first = draft(validDag);
+    let calls = 0;
+    const client: LlmClient = {
+      async sendStructured<O>(req: LlmRequest<O>): Promise<Result<LlmResponse<O>, FrameworkError>> {
+        calls++;
+        if (calls > 1) throw new Error("adapter promise rejected");
+        const parsed = req.schema.safeParse(first);
+        if (!parsed.success) throw new Error(parsed.error.message);
+        return ok({ output: parsed.data, ...tokensOnly(0, 0), rawText: JSON.stringify(first) });
+      },
+      async sendWithTools(): Promise<never> {
+        throw new Error("compose never uses tools");
+      },
+    };
+    const { io } = scriptedIo(["rename it"]);
+
+    const outcome = await runCompose(
+      { intent: mustIntent("briefing"), team: assist, root },
+      client,
+      io,
+    );
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok || outcome.reason !== "llm-error") {
+      throw new Error(`expected llm-error, got ${JSON.stringify(outcome)}`);
+    }
+    expect(outcome.problems[0]).toContain("adapter promise rejected");
+    expect(outcome.draft).toEqual(validDag);
+    expect(calls).toBe(2);
+  });
+
   it("repair-exhausted after a refinement carries the last proven draft's JSON", async () => {
     const root = join(tmpRoot, "exhausted-carries-draft");
     let calls = 0;

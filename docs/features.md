@@ -1159,7 +1159,7 @@ metadata. `fugue visualize` and compose render one plate labelled with symbolic
 
 - A non-array/missing `widthFrom` fails closed instead of iterating nonsense.
 - A resolved width above `maxWidth` fails before child work; values are never silently truncated.
-- Every completed index is durably acknowledged under map/index/execution-epoch addressing, so process replacement reruns only missing work.
+- When backed by a durable `Checkpointer`, every completed index is durably acknowledged under map/index/execution-epoch addressing, so process replacement reruns only missing work.
 - A reroute advances the epoch, preventing stale completions from satisfying new work.
 - Corrupt fan checkpoints refuse execution rather than looking like missing work and repeating effects.
 - Authored child maps, child human review, no-join child fan-outs, and router terminals with incompatible outputs are rejected before code generation.

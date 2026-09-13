@@ -135,8 +135,11 @@ const safeZodToJsonSchema = (
   schema: unknown,
   onError: (e: unknown) => void,
 ): Record<string, unknown> | null => {
-  if (!isZodSchema(schema)) return null;
+  if (schema === undefined) return null;
   try {
+    if (!isZodSchema(schema)) {
+      throw new TypeError("expected a Zod schema");
+    }
     return zodToJsonSchema(schema);
   } catch (e) {
     // Warning delivery is diagnostic-only. A broken sink cannot replace the
@@ -198,8 +201,8 @@ const describeEdge = (e: DagDef["edges"][number]): DescribedEdge =>
     }))
     .exhaustive();
 
-const collectCapabilities = (dag: DagDef): string[] =>
-  [...new Set(runtimeNodeInventory(dag).nodes.flatMap((node) => node.requires))].sort();
+const collectCapabilities = (nodes: DagDef["nodes"]): string[] =>
+  [...new Set(nodes.flatMap((node) => node.requires))].sort();
 
 /**
  * Type-narrowed accessor for the `promptName` field on LLM-kind nodes. The
@@ -218,7 +221,7 @@ const readNodePromptName = (
 };
 
 const collectPromptNames = (
-  dag: DagDef,
+  nodes: DagDef["nodes"],
   loadedPrompts: ReadonlyMap<string, string> | undefined,
 ): string[] => {
   const set = new Set<string>();
@@ -230,7 +233,7 @@ const collectPromptNames = (
   // Also walk nodes so the CLI (which has no host context) still surfaces
   // promptName references, and so the host's manifest stays honest if the
   // two surfaces drift.
-  for (const node of runtimeNodeInventory(dag).nodes) {
+  for (const node of nodes) {
     const name = readNodePromptName(node);
     if (name !== null) set.add(name);
   }
@@ -272,6 +275,7 @@ export const buildDescribedDag = (
   const { dag, warningSink } = input;
   const waves = topoSort(dag);
   if (!waves.ok) return err(waves.error);
+  const runtimeNodes = runtimeNodeInventory(dag).nodes;
 
   const waveIds: readonly (readonly string[])[] = waves.value.map((wave) =>
     wave.map((id) => id as string),
@@ -291,7 +295,7 @@ export const buildDescribedDag = (
     nodes: dag.nodes.map(describeNode),
     edges: dag.edges.map(describeEdge),
     waves: waveIds,
-    prompts: collectPromptNames(dag, input.loadedPrompts),
-    capabilities: collectCapabilities(dag),
+    prompts: collectPromptNames(runtimeNodes, input.loadedPrompts),
+    capabilities: collectCapabilities(runtimeNodes),
   });
 };

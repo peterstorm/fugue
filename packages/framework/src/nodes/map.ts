@@ -70,6 +70,19 @@ export interface CollectMapNodeConfig<
   readonly gather: Readonly<{ readonly kind: "collect"; readonly field: Field }>;
 }
 
+/** A dictionary whose runtime lookup semantics match its string index signature. */
+const collectedOutput = <Field extends string, ChildOut>(
+  field: Field,
+  results: readonly ChildOut[],
+): CollectedMapOutput<Field, ChildOut> => {
+  const output = Object.create(null) as Record<string, readonly ChildOut[] | undefined>;
+  Object.defineProperty(output, field, {
+    value: Object.freeze([...results]),
+    enumerable: true,
+  });
+  return Object.freeze(output) as CollectedMapOutput<Field, ChildOut>;
+};
+
 const createCapturedMapNode = <I, ChildOut, O, WidthField extends string>(
   config: MapNodeConfig<I, ChildOut, O, WidthField>,
   gather: AuthoredCollectGather | undefined,
@@ -119,14 +132,15 @@ export const createCollectMapNode = <
   config: CollectMapNodeConfig<I, ChildOut, Field, WidthField>,
 ): MapNodeDef<I, ChildOut, CollectedMapOutput<Field, ChildOut>> => {
   const childOutputSchema = config.childOutputSchema;
-  const field = widthFrom(config.gather.field);
+  const gatherField = config.gather.field;
+  const field = widthFrom(gatherField);
   const outputSchema = z.object({
     [field]: z.array(childOutputSchema),
   }) as unknown as z.ZodType<CollectedMapOutput<Field, ChildOut>>;
   const reduce = (
     results: readonly ChildOut[],
   ): Result<CollectedMapOutput<Field, ChildOut>, FrameworkError> =>
-    ok(Object.freeze({ [field]: Object.freeze([...results]) }) as CollectedMapOutput<Field, ChildOut>);
+    ok(collectedOutput(gatherField, results));
 
   return createCapturedMapNode(
     {

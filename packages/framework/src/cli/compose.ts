@@ -2,7 +2,7 @@
 // convergence, Phase B3).
 //
 // The loop is an explicit machine: interview → draft → validate → present →
-// refine/accept. The model's only channel is a closed `ComposeTurn` envelope:
+// refine/accept. The model's only channel is a normalized `ComposeTurn` union:
 // either clarifying questions or an AuthoredDag draft. AuthoredDag JSON is the
 // only GRAPH-ARTIFACT channel; code is always generated deterministically
 // (`buildAuthoredScaffold`), and every
@@ -28,7 +28,7 @@ import { z } from "zod";
 import type { LlmClient } from "../types/llm.js";
 import { formatFrameworkError } from "../types/errors.js";
 import { nodeId } from "../types/ids.js";
-import { safeErrorMessage } from "../types/safe-error.js";
+import { safeErrorMessage, safeErrorStack } from "../types/safe-error.js";
 import { parseAuthoredDag, type AuthoredDag } from "./authored.js";
 import { resolveRoot } from "./paths.js";
 import { runGauntlet, type GauntletResult } from "./gauntlet.js";
@@ -401,8 +401,8 @@ AuthoredDag rules (closed vocabulary — the schema rejects anything else):
   Child nodes exclude map and human-review; a child fan-out requires a join.
 - Field names must be valid JS identifiers. Node ids must not be JS reserved
   words and must not collide with the identifiers codegen derives from them —
-  reserved ids: "dag", "input", "opts", "ok", "err", "framework-error",
-  "registration", "z", "confidence", plus any id that camelCases to a framework import/const
+  reserved ids: "dag", "input", "opts", "registration", "z", "confidence",
+  plus any id that camelCases to a framework import/const
   (e.g. "create-fetch-node" → createFetchNode, "define-router" →
   defineRouter). Also avoid "<x>-node" ids that
   would shadow a sibling llm node named "<x>" (e.g. "llm-node" collides only
@@ -580,19 +580,23 @@ export const runCompose = async (
 
   const turn = async (extra?: string): Promise<ComposeTurn | { readonly error: string }> => {
     const user = [...conversation, ...(extra !== undefined ? [extra] : [])].join("\n\n");
-    const res = await llm.sendStructured({
-      system: SYSTEM_PROMPT,
-      user,
-      model,
-      schema: ComposeTurnSchema,
-      nodeId: COMPOSE_NODE_ID,
-      // Deterministic-core: drafting/repair turns are structured edits of a
-      // closed JSON document, not creative writing — pin sampling to 0 so a
-      // replayed conversation is as reproducible as the provider allows.
-      temperature: 0,
-    });
-    if (!res.ok) return { error: formatFrameworkError(res.error) };
-    return res.value.output;
+    try {
+      const res = await llm.sendStructured({
+        system: SYSTEM_PROMPT,
+        user,
+        model,
+        schema: ComposeTurnSchema,
+        nodeId: COMPOSE_NODE_ID,
+        // Deterministic-core: drafting/repair turns are structured edits of a
+        // closed JSON document, not creative writing — pin sampling to 0 so a
+        // replayed conversation is as reproducible as the provider allows.
+        temperature: 0,
+      });
+      if (!res.ok) return { error: formatFrameworkError(res.error) };
+      return res.value.output;
+    } catch (cause) {
+      return { error: safeErrorStack(cause) ?? safeErrorMessage(cause) };
+    }
   };
 
   type DraftAttempt =

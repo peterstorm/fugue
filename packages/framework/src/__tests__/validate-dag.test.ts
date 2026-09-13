@@ -50,6 +50,31 @@ describe("validateDagShape", () => {
     expect(Object.isFrozen(validatedNode?.retry?.backoffMs)).toBe(true);
   });
 
+  it("captures a stateful retry accessor once before validating and issuing it", () => {
+    let reads = 0;
+    const stateful = {
+      ...mkNode("A"),
+      get retry() {
+        reads++;
+        return reads === 1
+          ? { backoffMs: [100] as [number], jitterRatio: 0 }
+          : { backoffMs: [NaN] as [number], jitterRatio: 2 };
+      },
+    };
+    const parsed = validateDagShape({
+      id: "atomic-retry",
+      nodes: { A: stateful },
+      edges: [{ from: DAG_INPUT, to: "A" }],
+    });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) throw new Error(parsed.error.kind);
+    expect(reads).toBe(1);
+    expect(parsed.value.nodes[0]?.retry).toEqual({
+      backoffMs: [100],
+      jitterRatio: 0,
+    });
+  });
+
   it("snapshots conditional predicates so caller mutation cannot change routing policy", () => {
     const originalCheck = (value: unknown): boolean => value === "route-b";
     const predicate: {

@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 import fc from "fast-check";
 import { parseAuthoredDag, parseAuthoredDagJson, type AuthoredDag } from "../../cli/authored.js";
 import { parseIntent, runCompose, type ComposeTurn } from "../../cli/compose.js";
-import { buildAuthoredScaffold } from "../../cli/authored-codegen.js";
+import { buildAuthoredScaffold, structuralProjection } from "../../cli/authored-codegen.js";
 import { runGauntlet } from "../../cli/gauntlet.js";
 import { describedToMermaid } from "../../cli/visualize.js";
 import { z } from "zod";
@@ -255,7 +255,27 @@ const runGeneratedLlm = async (
 };
 
 describe("AuthoredDag map node (FR-F1-010)", () => {
-  it("typechecks the static contracts covered by the registered regression", () => {
+  it("typechecks static contracts and a fully body-implemented generated module", async () => {
+    const original = buildAuthoredScaffold(mustParse(MAP_FIXTURE)).dagTs;
+    const bodies = [
+      'fetch: async (_input) => $fugue.ok({ requestId: _input.requestId, items: [] }),',
+      'transform: (_input) => $fugue.ok({ recordId: _input.recordId, score: _input.amount }),',
+    ];
+    let bodyIndex = 0;
+    const implemented = original.replace(
+      /^(\s*)\/\/ @fugue-body-start[\s\S]*?^\s*\/\/ @fugue-body-end/gm,
+      (_region, indentation: string) => {
+        const body = bodies[bodyIndex++];
+        if (body === undefined) throw new Error("generated more body regions than expected");
+        return `${indentation}// @fugue-body-start\n${indentation}${body}\n${indentation}// @fugue-body-end`;
+      },
+    );
+    expect(bodyIndex).toBe(bodies.length);
+    expect(structuralProjection(implemented)).toBe(structuralProjection(original));
+    const compileDir = join(tmpRoot, "implemented-compile");
+    await mkdir(compileDir, { recursive: true });
+    await writeFile(join(compileDir, "dag.ts"), implemented, "utf-8");
+
     const repoRoot = resolve(__dirname, "../../../../..");
     const compiled = Bun.spawnSync([
       process.execPath,
@@ -669,6 +689,19 @@ describe("AuthoredDag map node (FR-F1-010)", () => {
     const routerParsed = parseAuthoredDag(router);
     expect(routerParsed.ok).toBe(false);
     if (!routerParsed.ok) expect(routerParsed.problems.join("\n")).toContain("output must match");
+  });
+
+  it("accepts JS-reserved and module-reserved child ids in the prefixed child namespace", async () => {
+    for (const id of ["default", "input"] as const) {
+      const value = draft();
+      childNodesOf(value)[0]!.id = id;
+      (childOf(value).structure as JsonObject).order = [id];
+      const parsed = mustParse(value);
+      const scaffold = buildAuthoredScaffold(parsed);
+      expect(scaffold.dagTs).toContain(`const $child_${id} =`);
+      const verdict = await runGauntlet(parsed, join(tmpRoot, `child-reserved-${id}`));
+      if (!verdict.ok) throw new Error(JSON.stringify(verdict.errors, null, 2));
+    }
   });
 
   it("compares mapped-router terminal schemas independent of field and enum order", () => {
@@ -1092,6 +1125,102 @@ describe("authored map codegen and plate rendering", () => {
     })).toThrow("requires a valid immutable mapping descriptor");
   });
 
+  it("validates and issues the same captured retry and map-confidence policies", async () => {
+    const generated = await importGeneratedDag(mustParse(MAP_FIXTURE), "stateful-policy-capture");
+    const map = generated.nodes.find((node) => node.kind === "map");
+    if (map?.kind !== "map") throw new Error("missing generated map");
+
+    const retryNode = createTransformNode({
+      id: "retry-work",
+      inputSchema: z.unknown(),
+      outputSchema: z.unknown(),
+      transform: (value) => ok(value),
+    });
+    let retryReads = 0;
+    const statefulRetry = {
+      ...retryNode,
+      get retry() {
+        retryReads++;
+        return retryReads === 1
+          ? { backoffMs: [100] as [number], jitterRatio: 0 }
+          : { backoffMs: [NaN] as [number], jitterRatio: 2 };
+      },
+    };
+    const retryDag = validateDagShape({
+      id: "captured-retry",
+      nodes: { "retry-work": statefulRetry },
+      edges: [{ from: DAG_INPUT, to: "retry-work" }],
+    });
+    expect(retryDag.ok).toBe(true);
+    if (!retryDag.ok) throw new Error(retryDag.error.kind);
+    expect(retryReads).toBe(1);
+    expect(retryDag.value.nodes[0]?.retry).toEqual({ backoffMs: [100], jitterRatio: 0 });
+
+    let confidenceReads = 0;
+    const confidence = {
+      get mode() {
+        confidenceReads++;
+        return confidenceReads === 1 ? "none" : "value";
+      },
+    };
+    const confidenceDag = validateDagShape({
+      id: "captured-confidence",
+      nodes: { "score-items": { ...map, confidence } },
+      edges: [{ from: DAG_INPUT, to: "score-items" }],
+    } as unknown as DagDefInput);
+    expect(confidenceDag.ok).toBe(true);
+    if (!confidenceDag.ok) throw new Error(confidenceDag.error.kind);
+    expect(confidenceReads).toBe(1);
+    expect(confidenceDag.value.nodes[0]?.confidence).toEqual({ mode: "none" });
+
+    const forged = validateDagShape({
+      id: "captured-confidence-extractor",
+      nodes: {
+        "score-items": {
+          ...map,
+          confidence: {
+            mode: "none",
+            extract: () => ({ bucket: "high", source: "heuristic" }),
+          },
+        },
+      },
+      edges: [{ from: DAG_INPUT, to: "score-items" }],
+    } as unknown as DagDefInput);
+    expect(forged.ok).toBe(false);
+  });
+
+  it("describes and renders a custom map reducer without claiming collect metadata", async () => {
+    const generated = await importGeneratedDag(mustParse(MAP_FIXTURE), "custom-map-render");
+    const template = generated.nodes.find((node) => node.kind === "map");
+    if (template?.kind !== "map") throw new Error("missing template map");
+    const custom = createMapNode({
+      id: "custom-map",
+      inputSchema: z.object({ items: z.array(z.number()) }),
+      outputSchema: z.object({ total: z.number() }),
+      widthFrom: "items",
+      maxWidth: 3,
+      child: template.mapping.child,
+      childOutputSchema: z.number(),
+      reduce: (results) => ok({ total: results.reduce((sum, value) => sum + value, 0) }),
+    });
+    const described = buildDescribedDag({
+      dag: defineDag({
+        id: "custom-map-dag",
+        nodes: { "custom-map": custom },
+        edges: [{ from: DAG_INPUT, to: "custom-map" }],
+        outputNodeId: "custom-map",
+      }),
+      route: "/custom-map",
+      description: "custom map",
+      version: "1.0.0",
+    });
+    if (!described.ok) throw new Error(described.error.kind);
+    const mapped = described.value.nodes.find((node) => node.kind === "map");
+    if (mapped?.kind !== "map") throw new Error("missing described map");
+    expect(mapped.mapping.gather).toBeNull();
+    expect(describedToMermaid(described.value)).toContain("gather: custom reducer");
+  });
+
   it("rejects forged map source, side-effect, and confidence policies", async () => {
     const generated = await importGeneratedDag(mustParse(MAP_FIXTURE), "forged-map-policy");
     const map = generated.nodes.find((node) => node.kind === "map");
@@ -1163,10 +1292,11 @@ describe("authored map codegen and plate rendering", () => {
     expect(Reflect.ownKeys(map.mapping.gather)).toEqual(["kind", "field"]);
   });
 
-  it("collects empty and ordered child results behind a truthful output schema", async () => {
+  it("collects into frozen null-prototype dictionaries matching widened lookups", async () => {
     const generated = await importGeneratedDag(mustParse(MAP_FIXTURE), "collect-reducer");
     const template = generated.nodes.find((node) => node.kind === "map");
     if (template?.kind !== "map") throw new Error("missing template map");
+    const field: string = "results";
     const collect = createCollectMapNode({
       id: "collect-values",
       inputSchema: z.object({ items: z.array(z.number()) }),
@@ -1174,16 +1304,60 @@ describe("authored map codegen and plate rendering", () => {
       maxWidth: 3,
       child: template.mapping.child,
       childOutputSchema: z.number(),
-      gather: { kind: "collect", field: "results" },
+      gather: { kind: "collect", field },
     });
 
     const empty = collect.mapping.reduce([]);
     const ordered = collect.mapping.reduce([3, 1, 2]);
-    expect(empty).toEqual(ok({ results: [] }));
-    expect(ordered).toEqual(ok({ results: [3, 1, 2] }));
-    if (!ordered.ok) throw new Error("collect reducer failed");
+    if (!empty.ok || !ordered.ok) throw new Error("collect reducer failed");
+    expect(empty.value.results).toEqual([]);
+    expect(ordered.value.results).toEqual([3, 1, 2]);
+    expect(Object.getPrototypeOf(ordered.value)).toBeNull();
+    expect(ordered.value.toString).toBeUndefined();
     expect(collect.outputSchema.safeParse(ordered.value).success).toBe(true);
     expect(Object.isFrozen(ordered.value.results)).toBe(true);
+
+    const inheritedName = createCollectMapNode({
+      id: "collect-inherited-name",
+      inputSchema: z.object({ items: z.array(z.number()) }),
+      widthFrom: "items",
+      maxWidth: 3,
+      child: template.mapping.child,
+      childOutputSchema: z.number(),
+      gather: { kind: "collect", field: "toString" },
+    }).mapping.reduce([4, 5]);
+    if (!inheritedName.ok) throw new Error("collect reducer failed");
+    expect(inheritedName.value.toString).toEqual([4, 5]);
+    expect(Object.hasOwn(inheritedName.value, "toString")).toBe(true);
+  });
+
+  it("contains hostile and malformed describe schemas behind null plus warnings", async () => {
+    const generated = await importGeneratedDag(mustParse(MAP_FIXTURE), "hostile-describe-schema");
+    const getterFailure = new Error("parse getter exploded");
+    const hostile = new Proxy(z.string(), {
+      get(target, property, receiver) {
+        if (property === "parse") throw getterFailure;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    for (const [schema, expected] of [[hostile, getterFailure], [42, "expected a Zod schema"]] as const) {
+      const warnings: unknown[] = [];
+      const described = buildDescribedDag({
+        dag: generated,
+        inputSchema: schema,
+        route: "/hostile-schema",
+        description: "hostile schema",
+        version: "1.0.0",
+        warningSink: {
+          onSchemaSerializationError: (_where, error) => warnings.push(error),
+        },
+      });
+      expect(described.ok).toBe(true);
+      if (!described.ok) throw new Error(described.error.kind);
+      expect(described.value.inputSchema).toBeNull();
+      expect(warnings).toHaveLength(1);
+      expect(expected instanceof Error ? warnings[0] : (warnings[0] as Error).message).toEqual(expected);
+    }
   });
 
   it("survives generate/import/lint/describe and renders exactly one bounded plate", async () => {

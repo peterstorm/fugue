@@ -308,24 +308,22 @@ export const SHAPE_HELPER_NAME = {
 } as const;
 
 /**
- * Fixed-SPELLING import names — names whose spelling never depends on node
- * ids or the DAG name. EMISSION is gated per name (`buildImports`): `z` and
- * the `DagRegistration` type are always emitted; `err` and `frameworkError`
- * only when a fetch/transform/source node needs an unimplemented body;
- * `confidence` and the `LlmNodeDef` type only when an llm node is present.
- * `ok` remains reserved for the body authors replace. RESERVATION is
- * unconditional — all names sit in `RESERVED_IDENTIFIERS` regardless of
- * kinds/shape (the same conservatism as `generatedIdentifiersFor`: a
- * refinement that adds the first llm node must not introduce a collision the
- * schema already accepted). Type-only imports still reserve their name —
- * TypeScript rejects a const that redeclares an imported binding, type-only
- * or not.
+ * Stable framework namespace for generated executable nodes. The `$` prefix
+ * is outside authored `KEBAB_IDENT`, so no authored binding can collide with
+ * it. Machine-owned factory calls keep the namespace live after every body is
+ * replaced; body authors use the same namespace for `ok`, `err`, and
+ * `frameworkError` without editing integrity-hashed imports.
+ */
+export const FRAMEWORK_NAMESPACE_NAME = "$fugue";
+
+/**
+ * Fixed-spelling named imports whose spelling never depends on node ids or the
+ * DAG name. Emission is gated per name by `buildImports`; reservation remains
+ * unconditional so later refinements cannot introduce a collision that an
+ * earlier authored parse accepted. Type-only imports reserve their names too.
  */
 export const FIXED_IMPORT_NAME = {
   zod: "z",
-  ok: "ok",
-  err: "err",
-  frameworkError: "frameworkError",
   confidence: "confidence",
   llmNodeDefType: "LlmNodeDef",
   dagRegistrationType: "DagRegistration",
@@ -350,6 +348,7 @@ export const RESERVED_IDENTIFIERS: ReadonlySet<string> = new Set([
   // only deep in the gauntlet with an opaque id-mismatch error.
   "opts",
   REGISTRATION_CONST_NAME,
+  FRAMEWORK_NAMESPACE_NAME,
   ...Object.values(FIXED_IMPORT_NAME),
   ...Object.values(NODE_FACTORY_NAME),
   ...Object.values(SHAPE_HELPER_NAME),

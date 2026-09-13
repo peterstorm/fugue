@@ -52,6 +52,57 @@ describe("buildDescribedDag", () => {
     expect(described.value.outputSchema).not.toBeNull();
   });
 
+  it("contains throwing schema detection and reports the original failure", () => {
+    const schemaFailure = new Error("parse getter exploded");
+    const hostileSchema = new Proxy(z.string(), {
+      get(target, property, receiver) {
+        if (property === "parse") throw schemaFailure;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const warnings: unknown[] = [];
+
+    const described = buildDescribedDag({
+      dag,
+      inputSchema: hostileSchema,
+      route: "/describe",
+      description: "best effort",
+      version: "1.0.0",
+      warningSink: {
+        onSchemaSerializationError: (_where, error) => warnings.push(error),
+      },
+    });
+
+    expect(described.ok).toBe(true);
+    if (!described.ok) return;
+    expect(described.value.inputSchema).toBeNull();
+    expect(warnings).toEqual([schemaFailure]);
+  });
+
+  it("warns for a present malformed schema but not for an omitted schema", () => {
+    const warnings: unknown[] = [];
+    const build = (inputSchema?: unknown) => buildDescribedDag({
+      dag,
+      ...(inputSchema !== undefined ? { inputSchema } : {}),
+      route: "/describe",
+      description: "best effort",
+      version: "1.0.0",
+      warningSink: {
+        onSchemaSerializationError: (_where, error) => warnings.push(error),
+      },
+    });
+
+    const malformed = build(42);
+    expect(malformed.ok).toBe(true);
+    if (malformed.ok) expect(malformed.value.inputSchema).toBeNull();
+    expect(warnings).toHaveLength(1);
+    expect((warnings[0] as Error).message).toBe("expected a Zod schema");
+
+    const omitted = build();
+    expect(omitted.ok).toBe(true);
+    expect(warnings).toHaveLength(1);
+  });
+
   // ── The two branches a single happy-path test never reached ────────────────
 
   it("surfaces a topoSort failure as Err rather than a half-built payload", () => {

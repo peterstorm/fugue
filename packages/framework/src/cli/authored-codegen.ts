@@ -52,6 +52,7 @@ import {
   DAG_CONST_NAME,
   DEFAULT_MODEL_NAME,
   FIXED_IMPORT_NAME,
+  FRAMEWORK_NAMESPACE_NAME,
   FUGUE_BODY_MARKERS,
   FUGUE_BODY_TOKEN,
   IDENT,
@@ -151,8 +152,24 @@ const withConfidence = (spec: SchemaSpec): SchemaSpec =>
 const schemaConst = (name: string, spec: SchemaSpec): string =>
   `const ${name} = ${schemaExpr(spec)};`;
 
+const BODY_NODE_KINDS: ReadonlySet<AuthoredNode["kind"]> = new Set([
+  "fetch",
+  "source",
+  "transform",
+]);
+
+/**
+ * Executable-body factories share the stable framework namespace that body
+ * authors use for Result helpers. Structural factory calls keep the namespace
+ * live even after every human-owned body has been replaced.
+ */
+const nodeFactory = (kind: AuthoredNode["kind"]): string =>
+  BODY_NODE_KINDS.has(kind)
+    ? `${FRAMEWORK_NAMESPACE_NAME}.${NODE_FACTORY_NAME[kind]}`
+    : NODE_FACTORY_NAME[kind];
+
 const unimplementedBody = (node: AuthoredNode): string =>
-  `err(frameworkError.validation(${JSON.stringify(node.id)}, ${JSON.stringify(`generated body for '${node.id}' is unimplemented`)}, "body"))`;
+  `${FRAMEWORK_NAMESPACE_NAME}.err(${FRAMEWORK_NAMESPACE_NAME}.frameworkError.validation(${JSON.stringify(node.id)}, ${JSON.stringify(`generated body for '${node.id}' is unimplemented`)}, "body"))`;
 
 // ---------------------------------------------------------------------------
 // Per-node code
@@ -252,7 +269,7 @@ export const stampGenerated = (body: string): string => {
 // outside the markers and remain hashed.
 
 const fetchNode = (p: NodePlan): string => `${purposeComment(p.node)}
-const ${p.ref} = ${NODE_FACTORY_NAME.fetch}({
+const ${p.ref} = ${nodeFactory("fetch")}({
   id: ${JSON.stringify(p.node.id)},
   inputSchema: ${p.inExpr},
   outputSchema: ${p.outName},
@@ -263,7 +280,7 @@ const ${p.ref} = ${NODE_FACTORY_NAME.fetch}({
 });`;
 
 const sourceNode = (p: NodePlan): string => `${purposeComment(p.node)}
-const ${p.ref} = ${NODE_FACTORY_NAME.source}({
+const ${p.ref} = ${nodeFactory("source")}({
   id: ${JSON.stringify(p.node.id)},
   outputSchema: ${p.outName},
   ${FUGUE_BODY_START}
@@ -273,7 +290,7 @@ const ${p.ref} = ${NODE_FACTORY_NAME.source}({
 });`;
 
 const transformNode = (p: NodePlan): string => `${purposeComment(p.node)}
-const ${p.ref} = ${NODE_FACTORY_NAME.transform}({
+const ${p.ref} = ${nodeFactory("transform")}({
   id: ${JSON.stringify(p.node.id)},
   inputSchema: ${p.inExpr},
   outputSchema: ${p.outName},
@@ -286,7 +303,7 @@ const ${p.ref} = ${NODE_FACTORY_NAME.transform}({
 const humanReviewNode = (p: NodePlan): string => `${purposeComment(p.node)}
 // Human-review gate: the run SUSPENDS here and waits for a decision
 // (approve / reject / approve-with-edit / reroute) before continuing.
-const ${p.ref} = ${NODE_FACTORY_NAME["human-review"]}({
+const ${p.ref} = ${nodeFactory("human-review")}({
   id: ${JSON.stringify(p.node.id)},
   schema: ${p.inExpr},
   prompt: ${JSON.stringify(`Approve: ${p.node.purpose}?`)},
@@ -328,7 +345,7 @@ const llmNode = (
 const ${p.llmFactory} = (
   model: string,
 )${returnType} => {
-  const node = ${NODE_FACTORY_NAME.llm}({
+  const node = ${nodeFactory("llm")}({
     id: ${JSON.stringify(p.node.id)},
     inputSchema: ${p.inExpr},
     outputSchema: ${p.outName},
@@ -596,7 +613,7 @@ const emitMapNode = (
 
   const parameter = plan.needsModel ? `${CHILD_MODEL_NAME}: string` : "";
   const body = declarations.length === 0 ? "" : `${indent(declarations.join("\n\n"), 2)}\n\n`;
-  const declaration = `${purposeComment(node)}\nconst ${plan.ref} = (${parameter}) => {\n${body}  return ${NODE_FACTORY_NAME.map}({\n    id: ${JSON.stringify(node.id)},\n    inputSchema: ${plan.inExpr},\n    widthFrom: ${JSON.stringify(node.widthFrom)},\n    maxWidth: ${node.maxWidth},\n    child: ${child.expression.replace(/\n/g, "\n    ")},\n    childOutputSchema: ${schemaExpr(childOutputSpec(node.child), "    ")},\n    gather: { kind: "collect", field: ${JSON.stringify(node.gather.field)} },\n  });\n};`;
+  const declaration = `${purposeComment(node)}\nconst ${plan.ref} = (${parameter}) => {\n${body}  return ${nodeFactory("map")}({\n    id: ${JSON.stringify(node.id)},\n    inputSchema: ${plan.inExpr},\n    widthFrom: ${JSON.stringify(node.widthFrom)},\n    maxWidth: ${node.maxWidth},\n    child: ${child.expression.replace(/\n/g, "\n    ")},\n    childOutputSchema: ${schemaExpr(childOutputSpec(node.child), "    ")},\n    gather: { kind: "collect", field: ${JSON.stringify(node.gather.field)} },\n  });\n};`;
   return { declaration, prompts };
 };
 
@@ -887,21 +904,21 @@ const buildImports = (dag: AuthoredDag, hasLlm: boolean): string => {
     ),
   ])];
 
-  // Untouched fetch/transform/source bodies fail closed through the standard
-  // Result/error factories. LLM and human-review nodes need neither import.
-  const hasUnimplementedBody = kinds.some(
-    (kind) => kind === "fetch" || kind === "transform" || kind === "source",
-  );
+  // Executable-body factories and Result helpers share one namespace import.
+  // Its structural factory calls keep it live after all bodies are implemented.
+  const hasGeneratedBody = kinds.some((kind) => BODY_NODE_KINDS.has(kind));
 
   const names = [
     ...(hasLlm ? [FIXED_IMPORT_NAME.confidence] : []),
-    ...kinds.map((k) => NODE_FACTORY_NAME[k]),
+    ...kinds.filter((kind) => !BODY_NODE_KINDS.has(kind)).map((kind) => NODE_FACTORY_NAME[kind]),
     ...helpers,
-    ...(hasUnimplementedBody ? [FIXED_IMPORT_NAME.err, FIXED_IMPORT_NAME.frameworkError] : []),
   ].sort();
 
   return [
     `import { ${FIXED_IMPORT_NAME.zod} } from "zod";`,
+    ...(hasGeneratedBody
+      ? [`import * as ${FRAMEWORK_NAMESPACE_NAME} from "@fuguejs/framework";`]
+      : []),
     `import {`,
     ...names.map((n) => `  ${n},`),
     `} from "@fuguejs/framework";`,

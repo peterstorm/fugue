@@ -28,6 +28,7 @@ import {
   SINGLE_LINE,
   TEMPLATE_OPEN,
   camelCase,
+  childLocalName,
   dagLevelIdentifiers,
   generatedIdentifiersFor,
   parseKebab,
@@ -496,15 +497,12 @@ const addGraphReferenceIssues = (
   structure: AuthoredStructure,
   ctx: z.RefinementCtx,
 ): void => {
-  const byId = new Set(nodes.map((node) => node.id));
-  if (byId.size !== nodes.length) {
-    const seen = new Set<string>();
-    for (const node of nodes) {
-      if (seen.has(node.id)) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `duplicate node id '${node.id}'` });
-      }
-      seen.add(node.id);
+  const byId = new Set<KebabIdent>();
+  for (const node of nodes) {
+    if (byId.has(node.id)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `duplicate node id '${node.id}'` });
     }
+    byId.add(node.id);
   }
 
   const referenced = new Map<string, number>();
@@ -591,19 +589,28 @@ const addRouterIssues = <Node extends { readonly id: KebabIdent }>(
   }
 };
 
+type IdentifierScope =
+  | { readonly kind: "module"; readonly reserved: ReadonlySet<string> }
+  | { readonly kind: "mapped-child" };
+
 const addIdentifierIssues = (
   nodes: readonly Parameters<typeof generatedIdentifiersFor>[0][],
   ctx: z.RefinementCtx,
-  reserved: ReadonlySet<string> = RESERVED_IDENTIFIERS,
+  scope: IdentifierScope,
 ): void => {
-  const identifiers = nodes.map((node) => ({ node, names: generatedIdentifiersFor(node) }));
+  const identifiers = nodes.map((node) => ({
+    node,
+    names: generatedIdentifiersFor(node).map((name) =>
+      scope.kind === "mapped-child" ? childLocalName(name) : name),
+  }));
   for (const { node, names } of identifiers) {
+    if (scope.kind !== "module") continue;
     const camel = camelCase(node.id);
     if (JS_RESERVED_WORDS.has(camel)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: `node id '${node.id}' is reserved (camelCases to the JS reserved word '${camel}')` });
     }
     for (const name of names) {
-      if (reserved.has(name)) {
+      if (scope.reserved.has(name)) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, message: `node id '${node.id}' is reserved (generated identifier '${name}' collides with a generated or imported identifier)` });
       }
     }
@@ -655,7 +662,7 @@ const ChildDagSchema = z
     addGraphReferenceIssues(child.nodes, child.structure, ctx);
     addSourceRoleIssues(child.nodes, child.structure, ctx);
     addRouterIssues(child.nodes, child.structure, (node) => node?.output, ctx);
-    addIdentifierIssues(child.nodes, ctx);
+    addIdentifierIssues(child.nodes, ctx, { kind: "mapped-child" });
     for (const node of child.nodes) {
       if (node.kind === "llm") addLlmConfidenceIssue(node, ctx);
     }
@@ -669,8 +676,9 @@ const ChildDagSchema = z
     });
     const expected = terminals[0] === undefined ? undefined : childNodeOutputSpec(terminals[0]);
     if (expected !== undefined) {
+      const expectedShape = schemaShape(expected);
       for (const terminal of terminals.slice(1)) {
-        if (schemaShape(childNodeOutputSpec(terminal)) !== schemaShape(expected)) {
+        if (schemaShape(childNodeOutputSpec(terminal)) !== expectedShape) {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
             message: `mapped child terminal '${terminal.id}' output must match terminal '${terminals[0]!.id}' field names and types`,
@@ -837,7 +845,7 @@ const AuthoredDagSchema = BaseAuthoredDagSchema.superRefine((dag, ctx) => {
   // these, but rejecting at parse time gives the author/LLM a precise message
   // naming both sides instead of a duplicate-declaration SyntaxError.
   const moduleReserved = new Set([...RESERVED_IDENTIFIERS, ...dagLevelIdentifiers(dag.name)]);
-  addIdentifierIssues(dag.nodes, ctx, moduleReserved);
+  addIdentifierIssues(dag.nodes, ctx, { kind: "module", reserved: moduleReserved });
 
   const s = dag.structure;
   addGraphReferenceIssues(dag.nodes, s, ctx);

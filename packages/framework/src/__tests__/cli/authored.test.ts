@@ -1094,19 +1094,18 @@ describe("authored codegen survives the gauntlet", () => {
     expect(scaffold.prompts[0]!.body).toContain("never use a number");
   });
 
-  it("imports typed failure helpers only when generated bodies need them", () => {
-    const errImportLine = /^\s+err,$/m;
-    const factoryImportLine = /^\s+frameworkError,$/m;
+  it("emits one stable framework namespace only when generated bodies need it", () => {
+    const namespaceImport = 'import * as $fugue from "@fuguejs/framework";';
     for (const fixture of [FIXTURES["linear-two-llm"]!, FIXTURES["linear-llm-review"]!]) {
       const generated = buildAuthoredScaffold(mustParse(fixture)).dagTs;
-      expect(generated).not.toMatch(errImportLine);
-      expect(generated).not.toMatch(factoryImportLine);
+      expect(generated).not.toContain(namespaceImport);
     }
 
     const withBodies = buildAuthoredScaffold(mustParse(FIXTURES.linear!)).dagTs;
-    expect(withBodies).toMatch(errImportLine);
-    expect(withBodies).toMatch(factoryImportLine);
-    expect(withBodies).toContain('err(frameworkError.validation("fetch-record"');
+    expect(withBodies).toContain(namespaceImport);
+    expect(withBodies).toContain("$fugue.createFetchNode({");
+    expect(withBodies).toContain("$fugue.createTransformNode({");
+    expect(withBodies).toContain('$fugue.err($fugue.frameworkError.validation("fetch-record"');
     expect(withBodies).not.toContain('"todo"');
   });
 
@@ -1638,7 +1637,10 @@ describe("identifier accounting covers every emitted name", () => {
     for (const m of dagTs.matchAll(/^import(?: type)? \{ ([A-Za-z_$][\w$]*) \}/gm)) {
       names.add(m[1]!);
     }
-    // The multi-line framework import block.
+    // Namespace imports and the multi-line framework import block.
+    for (const m of dagTs.matchAll(/^import \* as ([A-Za-z_$][\w$]*) from /gm)) {
+      names.add(m[1]!);
+    }
     const block = dagTs.match(/^import \{\n([\s\S]*?)\n\} from "@fuguejs\/framework";/m);
     for (const line of block?.[1]?.split("\n") ?? []) {
       const name = line.trim().replace(/,$/, "");
