@@ -99,7 +99,11 @@ for **both** completion lookup and save against map NodeId:
 
 `dag@<mapNodeId>@<index>@<executionEpoch>`
 
-Same-generation retry/replacement reuses acknowledged completions. A valid backward
+Same-generation retry/replacement reuses acknowledged completions. A fan completion
+retains the child DAG result before the map-level `childOutputSchema` adaptation;
+fresh and replayed values therefore cross that parser exactly once. Collect maps
+validate the resulting `ChildOut` again only through their separate
+`collectedItemSchema` when parsing final/root-checkpoint output. A valid backward
 reroute durably advances the epoch before replacement work; even identical inputs
 or a reroute directly to the fan cannot consume the prior generation's completions.
 This reuses the existing durable generation, not a retry counter, random token,

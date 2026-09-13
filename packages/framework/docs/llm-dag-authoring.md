@@ -175,10 +175,14 @@ integer), `child: DagDef`, `childOutputSchema`, and
 
 `createCollectMapNode` is the collect specialization used by deterministic
 authored-map codegen. Its config omits `outputSchema` and `reduce`; one
-`gather: { kind: "collect", field }` causes the constructor to issue the array
-output schema, ascending-order reducer, and truthful describe/Mermaid metadata
-together. The metadata token is bound to those exact schema/reducer identities;
-transplanting it onto a reconstructed map fails DAG validation.
+`gather: { kind: "collect", field }` plus `collectedItemSchema` causes the
+constructor to issue the keyed-array output schema, ascending-order reducer, and
+truthful describe/Mermaid metadata together. `childOutputSchema` adapts a child
+DAG result into `ChildOut`; `collectedItemSchema` validates that already-parsed
+`ChildOut` in root output/checkpoint data. Keep them separate when the first
+schema coerces or transforms (for example, `z.string().transform(Number)` then
+`z.number()`). The metadata token is bound to the exact output/child schema and
+reducer identities; transplanting it onto a reconstructed map fails DAG validation.
 
 ```ts
 import { z } from "zod";
@@ -246,8 +250,12 @@ const dag = defineDag({
   accounting for acknowledged effects rather than treating corruption as a healthy
   miss. Healthy prefixes are reused; genuinely missing indices execute normally.
 - Failed initial checkpoint metadata stops the fan with its original error. Fresh
-  child outputs must pass `childOutputSchema` before fan save/gather, even if they
-  passed the child DAG's output schema; failure stops subsequent children/reduction.
+  child DAG outputs must pass `childOutputSchema` before fan save/gather, even if
+  they passed the child DAG's own output schema; failure stops subsequent
+  children/reduction. Fan completion persistence retains the pre-adaptation child
+  DAG value, so fresh and replayed completions each cross `childOutputSchema`
+  exactly once. A collect map's separately supplied `collectedItemSchema` validates
+  the resulting `ChildOut` values in final/root-checkpoint output.
 - Children share root RunId, signal, clock/RNG/FreshnessIndex, original clients,
   host cache/prompt closures and spend authority, but have private local jobs.
   They do not inherit root durable JobLike, replay map, retry overrides,
@@ -341,8 +349,9 @@ It is not a `DAG_SHAPES` member and does not add `fugue new --shape map` or a
 The important closed contracts are:
 
 - `widthFrom` is one field identifier, not a path/expression, and must name an
-  array field in the map's derived direct input. Typed `createMapNode` callers
-  can select only array-valued input keys; wire/forged inputs retain runtime checks.
+  array field in the map's derived direct input. Literal keys passed by typed
+  `createMapNode` callers are restricted to array-valued input fields; dynamic
+  strings and parsed `WidthFrom` proofs retain runtime checks.
 - `maxWidth` is a positive safe integer.
 - The inline child reuses `linear`, `fan-out`, `diamond`, `router`, or `sources`.
   Child maps and human review are rejected; child fan-out requires a join; router
@@ -362,10 +371,12 @@ The important closed contracts are:
   `$fugue.ok(value)` success code neither changes imports nor leaves dead ones.
   An untouched scaffold imports and lints but cannot report fabricated data.
 - Authored maps omit `output`. `{ "kind": "collect", "field": "results" }`
-  makes codegen call `createCollectMapNode`, which derives the field schema,
-  schema-output hardening transform, reducer, and truthful describe metadata as
-  one invariant. Reducer values, successful schema parses, and final `runDag`
-  outputs are frozen null-prototype dictionaries with frozen result arrays.
+  makes codegen call `createCollectMapNode`, supplying the structural child schema
+  explicitly for both raw-child adaptation and already-parsed collect validation.
+  The constructor derives the field schema, schema-output hardening transform,
+  reducer, and truthful describe metadata as one invariant. Reducer values,
+  successful schema parses, and final `runDag` outputs are frozen null-prototype
+  dictionaries with frozen result arrays.
   Their type marks ordinary prototype members as the gathered array when that
   name may be the selected field, otherwise `undefined`; no inherited callable
   is exposed. No authored reducer source or expression is accepted or evaluated.

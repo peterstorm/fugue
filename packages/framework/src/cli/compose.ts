@@ -177,8 +177,9 @@ type ComposeOutcome =
       /**
        * `gauntlet-failed` = an environment-class failure of the proving
        * machinery. `cause` carries the doc's own taxonomy as a discriminant:
-       * `"threw"` — the gauntlet threw (ENOSPC, EACCES, …), `problems` is the
-       * stack; `"unrepairable-errors"` — it completed normally but the verdict
+       * `"threw"` — the gauntlet threw (ENOSPC, EACCES, …), `problems` carries
+       * a safely inspected stack or total fallback; `"unrepairable-errors"` —
+       * it completed normally but the verdict
        * carried errors outside the repairable allowlist (import-failed/
        * analyzer-failed/describe-failed/no-default-export/missing-dag-field),
        * `problems` is the formatted verdict (unrepairable first, any
@@ -196,8 +197,9 @@ type ComposeOutcome =
       readonly ok: false;
       /**
        * The accepted draft could not be written. `cause`: `"threw"` — the
-       * scaffold writer threw (environment failure; `problems` is the stack);
-       * `"rejected"` — it returned a typed refusal (`NewResult`'s problems,
+       * scaffold writer threw (environment failure; `problems` carries a safely
+       * inspected stack or total fallback); `"rejected"` — it returned a typed
+       * refusal (`NewResult`'s problems,
        * e.g. a non-empty target dir without --force).
        */
       readonly reason: "write-failed";
@@ -517,6 +519,10 @@ const requireRoundBudget = (value: number, name: string): number => {
   return value;
 };
 
+/** Total rendering for any value rejected by an injected compose collaborator. */
+const caughtProblem = (cause: unknown): string =>
+  safeErrorStack(cause) ?? safeErrorMessage(cause);
+
 /** Render untrusted model values without adding an exception channel to repair. */
 const promptJson = (value: unknown): string => {
   try {
@@ -592,7 +598,7 @@ export const runCompose = async (
       if (!res.ok) return { error: formatFrameworkError(res.error) };
       return res.value.output;
     } catch (cause) {
-      return { error: safeErrorStack(cause) ?? safeErrorMessage(cause) };
+      return { error: caughtProblem(cause) };
     }
   };
 
@@ -689,8 +695,8 @@ export const runCompose = async (
           reason: "gauntlet-failed",
           cause: "threw",
           // Environment failures are debugged from this outcome alone — keep
-          // the stack, not just the message.
-          problems: [e instanceof Error ? (e.stack ?? e.message) : String(e)],
+          // the stack when one can be inspected safely.
+          problems: [caughtProblem(e)],
           rounds,
           draft: d,
         },
@@ -791,7 +797,7 @@ export const runCompose = async (
           ok: false,
           reason: "write-failed",
           cause: "threw",
-          problems: [e instanceof Error ? (e.stack ?? e.message) : String(e)],
+          problems: [caughtProblem(e)],
           rounds,
           draft,
         };

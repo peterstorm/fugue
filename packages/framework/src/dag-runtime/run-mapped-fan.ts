@@ -63,9 +63,11 @@ export const runMappedFan = async (
     const parsed = mapping.childOutputSchema.safeParse(child.value);
     if (!parsed.success) return err(frameworkError.validation(id,
       `fan index ${i} produced an output the child schema rejects: ${parsed.error.message}`));
+    // Persist the child DAG result, not the map-level adapted value. Replay
+    // passes this same domain through childOutputSchema exactly once.
     // Foreground child finalization and this save both finish before index i+1.
     const saved = await ctx.checkpointer.saveNode(ctx.runId,
-      { nodeId: id, output: parsed.data, completedAt: new Date(now()) }, address);
+      { nodeId: id, output: child.value, completedAt: new Date(now()) }, address);
     if (!saved.ok) return saved;
     gathered.push(parsed.data);
   }

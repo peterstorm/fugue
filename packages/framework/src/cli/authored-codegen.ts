@@ -630,7 +630,8 @@ const emitMapNode = (
 
   const parameter = plan.needsModel ? `${CHILD_MODEL_NAME}: string` : "";
   const body = declarations.length === 0 ? "" : `${indent(declarations.join("\n\n"), 2)}\n\n`;
-  const declaration = `${purposeComment(node)}\nconst ${plan.ref} = (${parameter}) => {\n${body}  return ${nodeFactory("map")}({\n    id: ${JSON.stringify(node.id)},\n    inputSchema: ${plan.inExpr},\n    widthFrom: ${JSON.stringify(node.widthFrom)},\n    maxWidth: ${node.maxWidth},\n    child: ${child.expression.replace(/\n/g, "\n    ")},\n    childOutputSchema: ${schemaExpr(childOutputSpec(node.child), "    ")},\n    gather: { kind: "collect", field: ${JSON.stringify(node.gather.field)} },\n  });\n};`;
+  const childSchema = schemaExpr(childOutputSpec(node.child), "    ");
+  const declaration = `${purposeComment(node)}\nconst ${plan.ref} = (${parameter}) => {\n${body}  return ${nodeFactory("map")}({\n    id: ${JSON.stringify(node.id)},\n    inputSchema: ${plan.inExpr},\n    widthFrom: ${JSON.stringify(node.widthFrom)},\n    maxWidth: ${node.maxWidth},\n    child: ${child.expression.replace(/\n/g, "\n    ")},\n    childOutputSchema: ${childSchema},\n    collectedItemSchema: ${childSchema},\n    gather: { kind: "collect", field: ${JSON.stringify(node.gather.field)} },\n  });\n};`;
   return { declaration, prompts };
 };
 

@@ -36,7 +36,7 @@ interface MapExecutionConfig<I, ChildOut, WidthField extends string> {
   readonly maxWidth: number;
   /** A child DAG without nested maps, human gates or freshness extractors. */
   readonly child: DagDef;
-  /** Applied to fresh AND replayed child outputs before reduction. */
+  /** Adapts each fresh child DAG result or pre-adaptation fan completion before reduction. */
   readonly childOutputSchema: z.ZodType<ChildOut>;
 }
 
@@ -84,6 +84,8 @@ export interface CollectMapNodeConfig<
   Field extends string,
   WidthField extends string = string,
 > extends MapExecutionConfig<I, ChildOut, WidthField> {
+  /** Validates already-parsed ChildOut values in the gathered/root-checkpoint shape. */
+  readonly collectedItemSchema: z.ZodType<NoInfer<ChildOut>, NoInfer<ChildOut>>;
   readonly gather: Readonly<{ readonly kind: "collect"; readonly field: Field }>;
 }
 
@@ -149,10 +151,11 @@ export const createCollectMapNode = <
   config: CollectMapNodeConfig<I, ChildOut, Field, WidthField>,
 ): MapNodeDef<I, ChildOut, CollectedMapOutput<Field, ChildOut>> => {
   const childOutputSchema = config.childOutputSchema;
+  const collectedItemSchema = config.collectedItemSchema;
   const gatherField = config.gather.field;
   const field = widthFrom(gatherField);
   const outputSchema = z.object({
-    [field]: z.array(childOutputSchema),
+    [field]: z.array(collectedItemSchema),
   }).overwrite((value) =>
     // Zod widens a computed object key to a mutable string record; this
     // constructor still owns the required field and returns its narrower

@@ -54,3 +54,4 @@ rendering. PR-D whole-fan budget projection remains separate.
 | FR-F1-009 | `DescribedNode` exposes bounded map metadata and Mermaid renders one plate, never runtime-width boxes. |
 | FR-F1-010 | The closed `AuthoredDag` map-node variant parses a direct array field, bounded inline static child, and collect gather; authored JSON accepts and evaluates no supplied expression or reducer source. |
 | FR-F1-011 | Nested child maps and child human review are rejected before execution; gather then review at root level. |
+| FR-F1-012 | Fresh and replayed fan completions cross the map-level child parser exactly once; collect validates already-parsed values separately in final/root-checkpoint output. |

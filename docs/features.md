@@ -1147,7 +1147,11 @@ whole-DAG shape:
 
 The predecessor declares `items` as
 `{"kind":"array","element":{"fields":[...]}}`. The item schema becomes the
-child input schema, and collect derives the outer output as an array of the child
+child input schema, and collect derives a frozen null-prototype outer object whose
+selected field contains the ordered child-output array, such as
+`{ results: ChildOut[] }`. Generated maps use the structural child schema in two
+explicit roles: `childOutputSchema` adapts each child DAG result, while
+`collectedItemSchema` validates the already-parsed values in final/root-checkpoint
 output. Authored reducers are deliberately closed to `collect`; arbitrary function
 source, expressions, dynamic imports, and `eval` are not part of the format.
 

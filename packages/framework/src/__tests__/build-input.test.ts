@@ -1,14 +1,14 @@
 /**
  * Unit tests for `buildNodeInput`.
  *
- * Validates the 0/1/≥2 required sources split and optional source handling.
+ * Validates bare/keyed assembly by total incoming-source cardinality.
  */
 
 import { describe, it, expect } from "bun:test";
 import { buildNodeInput } from "../shared/build-input.js";
 
 describe("buildNodeInput", () => {
-  it("no required sources → returns undefined (source node, C0)", () => {
+  it("no incoming sources → returns undefined (source node, C0)", () => {
     // Under 0.2.0 no node implicitly receives the DAG input: a 0-required node
     // is a source and gets `undefined`. The request reaches a node only via a
     // `$input` edge (which makes "$input" a required source).

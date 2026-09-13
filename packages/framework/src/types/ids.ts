@@ -52,7 +52,7 @@ export const isDagInput = (id: string): id is DagInputId => id === DAG_INPUT;
 // Allow `:` so callers can namespace run ids (`tenant:run-abc`) without
 // jumping through encoding hoops. The regex stays restrictive enough that
 // IDs remain URL-safe and printable in operator UIs.
-/** Canonical maximum shared by every runtime and authoring identifier proof. */
+/** Maximum for RunId, NodeId, DagId, and authored DAG/node identifier proofs. */
 export const ID_MAX_LENGTH = 128;
 
 /** General RunId/NodeId grammar; DagId is stricter and GitSha has its own domain. */
