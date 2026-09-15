@@ -31,6 +31,9 @@ type HostEnv = {
   };
 };
 
+// Noop logger for handler constructions whose test does not assert on logs.
+const noopLogger = { info: () => {}, warn: () => {}, error: () => {} };
+
 const makeApp = (state: HostState, identity: AuthIdentity) => {
   const app = new Hono<HostEnv>();
   app.use("*", async (c, next) => {
@@ -38,7 +41,7 @@ const makeApp = (state: HostState, identity: AuthIdentity) => {
     c.set("authIdentity", identity);
     await next();
   });
-  app.get("/dags/:id/manifest", createManifestHandler());
+  app.get("/dags/:id/manifest", createManifestHandler({ logger: noopLogger }));
   return app;
 };
 
@@ -92,7 +95,7 @@ const adminIdentity: AuthIdentity = { kind: "admin" };
 const expectManifest = (
   built: ReturnType<typeof buildManifest>,
 ) => {
-  if (!built.ok) throw new Error(`buildManifest failed: ${built.errorMessage}`);
+  if (!built.ok) throw new Error(`buildManifest failed: ${built.error.kind}`);
   return built.value;
 };
 
@@ -362,11 +365,51 @@ describe("manifestHandler", () => {
       c.set("hostState", state);
       await next();
     });
-    app.get("/dags/:id/manifest", createManifestHandler());
+    app.get("/dags/:id/manifest", createManifestHandler({ logger: noopLogger }));
 
     const res = await app.request("/dags/manifest-test/manifest");
     expect(res.status).toBe(401);
     const body = await res.json();
     expect(body.error).toBe("unauthorized");
+  });
+
+  it("delivers schema-serialization degradation to onSchemaWarning and the injected logger", async () => {
+    // Pin of the host warning-delivery wiring: buildManifest forwards each
+    // non-fatal schema-serialization failure to onSchemaWarning, and
+    // createManifestHandler routes it to deps.logger.warn — the channel the
+    // framework's required warningSink exists to guarantee server-side.
+    const hostileSchema = new Proxy(z.string(), {
+      get(target, property, receiver) {
+        if (property === "_zod") throw new Error("schema getter exploded");
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const registered = makeRegisteredDag({ inputSchema: hostileSchema });
+    const warnings: string[] = [];
+    const manifest = expectManifest(buildManifest(registered, (message) => warnings.push(message)));
+    expect(manifest.inputSchema).toBeNull();
+    expect(warnings).toEqual(["inputSchema: schema getter exploded"]);
+
+    const state: HostState = {
+      phase: "ready",
+      registry: freeze([registered], gitSha("abc123"), 1000),
+      lastSyncAt: 1000,
+      lastSyncSha: gitSha("abc123"),
+    };
+    const logs: string[] = [];
+    const app = new Hono<HostEnv>();
+    app.use("*", async (c, next) => {
+      c.set("hostState", state);
+      c.set("authIdentity", adminIdentity);
+      await next();
+    });
+    app.get("/dags/:id/manifest", createManifestHandler({
+      logger: { info: () => {}, warn: (msg, data) => logs.push(`${msg} ${String(data?.detail ?? "")}`), error: () => {} },
+    }));
+    const res = await app.request("/dags/manifest-test/manifest");
+    expect(res.status).toBe(200);
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toContain("schema serialization degraded to null");
+    expect(logs[0]).toContain("inputSchema: schema getter exploded");
   });
 });

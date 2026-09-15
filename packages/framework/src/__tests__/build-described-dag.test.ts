@@ -3,8 +3,10 @@ import { z } from "zod";
 import { buildDescribedDag } from "../describe/build-described-dag.js";
 import { defineDagFromArray } from "../executor/define-dag.js";
 import { createTransformNode } from "../nodes/transform.js";
+import { createLlmNode } from "../nodes/llm.js";
 import { DAG_INPUT } from "../types/ids.js";
 import { ok } from "../types/result.js";
+import { inertWarningSink } from "./_describe-helpers.js";
 
 const node = createTransformNode({
   id: "describe-node",
@@ -143,6 +145,7 @@ describe("buildDescribedDag", () => {
       route: "/cycle",
       description: "cyclic",
       version: "1.0.0",
+      warningSink: inertWarningSink,
     });
 
     expect(described.ok).toBe(false);
@@ -150,8 +153,8 @@ describe("buildDescribedDag", () => {
     expect(described.error.kind).toBe("cycle-detected");
   });
 
-  it("renders a null outputSchema when outputNodeId names a node the DAG does not contain", () => {
-    // The defensive `if (!node) return null` in `outputSchemaOf`. Reached the
+  it("surfaces an orphaned outputNodeId as Err rather than a lying payload", () => {
+    // The sibling topoSort unknown-reference invariant violation. Reached the
     // same way: the id is rewritten on an already-branded DagDef, since the
     // definition-time validator would reject it.
     const orphaned = {
@@ -165,14 +168,19 @@ describe("buildDescribedDag", () => {
       route: "/orphan",
       description: "orphaned output node",
       version: "1.0.0",
+      warningSink: inertWarningSink,
     });
 
-    // Non-fatal by design: an unresolvable output node degrades the DESCRIPTION
-    // to a null schema rather than failing the describe endpoint outright.
-    expect(described.ok).toBe(true);
-    if (!described.ok) return;
-    expect(described.value.outputSchema).toBeNull();
-    expect(described.value.inputSchema).not.toBeNull();
+    // Same invariant-violation class as topoSort's dead path: a structured
+    // FrameworkError instead of a payload whose outputNodeId points at a node
+    // the DAG does not contain.
+    expect(described.ok).toBe(false);
+    if (described.ok) return;
+    expect(described.error.kind).toBe("validation");
+    if (described.error.kind !== "validation") return;
+    expect(described.error.message).toBe(
+      "outputNodeId references unknown node 'not-a-node'",
+    );
   });
 
   it("renders a null outputSchema when the DAG declares no output node", () => {
@@ -184,6 +192,7 @@ describe("buildDescribedDag", () => {
       route: "/headless",
       description: "no output node",
       version: "1.0.0",
+      warningSink: inertWarningSink,
     });
 
     expect(described.ok).toBe(true);
@@ -192,11 +201,12 @@ describe("buildDescribedDag", () => {
   });
 
   it("unions loadedPrompts keys with node-introspected prompt names", () => {
-    // Only pin of the loadedPrompts host-union branch of collectPromptNames:
-    // seeding from the host set and the node walk both augment one collection
-    // so omissions on either surface stay visible. A regression dropping the
-    // seeding (or the union loop) would silently omit host-loaded prompt names
-    // from the stable describe contract.
+    // Pin of the loadedPrompts host-union branch of collectPromptNames:
+    // seeding from the host set augments one collection. A regression dropping
+    // the seeding would silently omit host-loaded prompt names from the stable
+    // describe contract. (A dropped node walk is caught by the
+    // simultaneous-union pin below and the separate mapped-describe prompt
+    // pin, not by this fixture — its only node carries no promptName.)
     const described = buildDescribedDag({
       dag,
       inputSchema: z.string(),
@@ -204,10 +214,91 @@ describe("buildDescribedDag", () => {
       description: "prompt union",
       version: "1.0.0",
       loadedPrompts: new Map([["host-prompt", "host body"]]),
+      warningSink: inertWarningSink,
     });
 
     expect(described.ok).toBe(true);
     if (!described.ok) return;
     expect(described.value.prompts).toEqual(["host-prompt"]);
+  });
+
+  it("unions host-loaded prompts and node-introspected prompt names in one payload", () => {
+    // Simultaneous-union pin: seeding from the host set AND the node walk both
+    // augment one collection, so dropping either branch fails this assertion.
+    const llmNode = createLlmNode({
+      id: "summary",
+      inputSchema: z.string(),
+      outputSchema: z.string(),
+      promptName: "authored-map-summary",
+      model: "test-model",
+      buildInput: (input) => ({ value: input }),
+    });
+    const llmDag = defineDagFromArray({
+      id: "prompt-union-dag",
+      nodes: [llmNode],
+      edges: [{ from: DAG_INPUT, to: "summary" }],
+      outputNodeId: "summary",
+    });
+
+    const described = buildDescribedDag({
+      dag: llmDag,
+      inputSchema: z.string(),
+      route: "/describe",
+      description: "prompt union",
+      version: "1.0.0",
+      loadedPrompts: new Map([["host-prompt", "host body"]]),
+      warningSink: inertWarningSink,
+    });
+
+    expect(described.ok).toBe(true);
+    if (!described.ok) return;
+    expect(described.value.prompts).toEqual(["authored-map-summary", "host-prompt"]);
+  });
+
+  it("routes a node outputSchema failure through the sink's outputSchema arm", () => {
+    // Pin of the { field: "outputSchema", nodeId } where arm: every sink
+    // fixture above exercises the inputSchema path and discards the where
+    // argument, so a regression misrouting the discriminator or dropping the
+    // node-path null would leave the payload contract intact but corrupt
+    // node-level degradation diagnostics.
+    const schemaFailure = new Error("output schema introspection failed");
+    const hostileOutput = new Proxy(z.string(), {
+      get(target, property, receiver) {
+        if (property === "_zod") throw schemaFailure;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const failingNode = createTransformNode({
+      id: "output-failure-node",
+      inputSchema: z.string(),
+      outputSchema: hostileOutput,
+      transform: (value) => ok(value),
+    });
+    const outputDag = defineDagFromArray({
+      id: "output-failure-dag",
+      nodes: [failingNode],
+      edges: [{ from: DAG_INPUT, to: "output-failure-node" }],
+      outputNodeId: "output-failure-node",
+    });
+    const warnings: { where: unknown; error: unknown }[] = [];
+
+    const described = buildDescribedDag({
+      dag: outputDag,
+      inputSchema: z.string(),
+      route: "/describe",
+      description: "output failure",
+      version: "1.0.0",
+      warningSink: {
+        onSchemaSerializationError: (where, error) => warnings.push({ where, error }),
+      },
+    });
+
+    expect(described.ok).toBe(true);
+    if (!described.ok) return;
+    expect(described.value.outputSchema).toBeNull();
+    expect(described.value.inputSchema).not.toBeNull();
+    expect(warnings).toEqual([
+      { where: { field: "outputSchema", nodeId: "output-failure-node" }, error: schemaFailure },
+    ]);
   });
 });

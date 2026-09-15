@@ -28,37 +28,11 @@ export type { IncomingSources };
  *
  * Wave-0 entry points are nodes with no incoming edges from real nodes;
  * virtual `DAG_INPUT` edges are already satisfied and do not count.
- *
- * Accepts either a `DagDef` (for compile-time) or raw `edges` + precomputed
- * `outgoing` map (for the pure transition layer which has no access to `DagDef`).
  */
-export function seedInitialActiveSet(dag: DagDef): ReadonlySet<NodeId>;
-export function seedInitialActiveSet(edges: readonly EdgeDef[], outgoing: ReadonlyMap<NodeId, readonly EdgeDef[]>): ReadonlySet<NodeId>;
-export function seedInitialActiveSet(
-  dagOrEdges: DagDef | readonly EdgeDef[],
-  precomputedOutgoing?: ReadonlyMap<NodeId, readonly EdgeDef[]>,
-): ReadonlySet<NodeId> {
-  let edges: readonly EdgeDef[];
-  let outgoing: ReadonlyMap<NodeId, readonly EdgeDef[]>;
-  let nodeIds: readonly NodeId[];
-
-  if (Array.isArray(dagOrEdges)) {
-    edges = dagOrEdges;
-    outgoing = precomputedOutgoing!;
-    // Derive node ids from edges (all unique from/to). `DAG_INPUT` is a virtual
-    // source, never a real node — exclude it so it is not treated as a seed.
-    const ids = new Set<NodeId>();
-    for (const e of edges) {
-      if (!isDagInput(e.from)) ids.add(e.from);
-      ids.add(e.to);
-    }
-    nodeIds = [...ids];
-  } else {
-    const dag = dagOrEdges as DagDef;
-    edges = dag.edges;
-    outgoing = computeOutgoingByNode(dag);
-    nodeIds = dag.nodes.map(n => n.id);
-  }
+export function seedInitialActiveSet(dag: DagDef): ReadonlySet<NodeId> {
+  const edges = dag.edges;
+  const outgoing = computeOutgoingByNode(dag);
+  const nodeIds = dag.nodes.map(n => n.id);
 
   // Build incoming count. `DAG_INPUT` edges DON'T count: `$input` is a virtual
   // wave-(-1) source, always satisfied, so a node whose only inbound is a
@@ -118,17 +92,6 @@ export const expandActive = (
   }
   return next;
 };
-
-/**
- * Get all out-edges for a given source node id.
- *
- * Prefer `machineCtx.outgoingByNode.get(id)` from `DagMachineContext` where
- * available — that map is precomputed once in `compileDagToMachine`. This
- * helper has no in-repo call sites; it is retained only as a public re-export
- * (`dag-runtime/conditional.ts`, `dag-runtime/index.ts`) for external consumers.
- */
-export const outgoingOf = (dag: DagDef, fromNodeId: NodeId): readonly EdgeDef[] =>
-  dag.edges.filter((e) => e.from === fromNodeId);
 
 /**
  * Compile-time adjacency builder. Walk all edges once and bucket by `from`;
@@ -245,7 +208,7 @@ const incomingSourcesFor = (
  */
 export const computeIncomingByNode = (
   dag: DagDef,
-): Map<NodeId, IncomingSources> => {
+): ReadonlyMap<NodeId, IncomingSources> => {
   const alwaysActive = seedInitialActiveSet(dag);
   const out = new Map<NodeId, IncomingSources>();
   for (const n of dag.nodes) {
@@ -253,14 +216,3 @@ export const computeIncomingByNode = (
   }
   return out;
 };
-
-/**
- * Look up an `IncomingSources` for one node. Slow path (rebuilds the
- * always-active set each call); reach for `computeIncomingByNode` instead
- * when iterating.
- */
-export const incomingSources = (
-  dag: DagDef,
-  toNodeId: NodeId,
-): IncomingSources =>
-  incomingSourcesFor(dag, toNodeId, seedInitialActiveSet(dag));

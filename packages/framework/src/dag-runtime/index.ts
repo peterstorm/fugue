@@ -57,6 +57,5 @@ export {
 // Topology helpers
 export {
   expandActive,
-  outgoingOf,
   seedInitialActiveSet,
 } from "./topology.js";
