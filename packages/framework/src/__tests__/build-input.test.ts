@@ -8,7 +8,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { buildNodeInput } from "../shared/build-input.js";
-import { nodeId } from "../types/ids.js";
+import { DAG_INPUT, nodeId } from "../types/ids.js";
 
 describe("buildNodeInput", () => {
   it("no incoming sources → returns undefined (source node, C0)", () => {
@@ -27,7 +27,7 @@ describe("buildNodeInput", () => {
     // resolved from the seeded outputs map as a bare value.
     const outputs = new Map<string, unknown>([["$input", { region: "dk" }]]);
     const result = buildNodeInput(outputs, {
-      required: ["$input"],
+      required: [DAG_INPUT],
       optional: [],
     }, nodeId("test-node"));
     expect(result).toEqual({ ok: true, value: { region: "dk" } });
@@ -36,7 +36,7 @@ describe("buildNodeInput", () => {
   it("single required source → returns bare upstream value", () => {
     const outputs = new Map([["fetch", { data: 42 }]]);
     const result = buildNodeInput(outputs, {
-      required: ["fetch"],
+      required: [nodeId("fetch")],
       optional: [],
     }, nodeId("test-node"));
     expect(result).toEqual({ ok: true, value: { data: 42 } });
@@ -48,7 +48,7 @@ describe("buildNodeInput", () => {
       ["b", "valueB"],
     ]);
     const result = buildNodeInput(outputs, {
-      required: ["a", "b"],
+      required: [nodeId("a"), nodeId("b")],
       optional: [],
     }, nodeId("test-node"));
     expect(result).toEqual({ ok: true, value: { a: "valueA", b: "valueB" } });
@@ -60,7 +60,7 @@ describe("buildNodeInput", () => {
       ["$input", { region: "dk", minScore: 5 }],
     ]);
     const result = buildNodeInput(outputs, {
-      required: ["score", "$input"],
+      required: [nodeId("score"), DAG_INPUT],
       optional: [],
     }, nodeId("assemble"));
     expect(result).toEqual({
@@ -75,8 +75,8 @@ describe("buildNodeInput", () => {
       ["opt", "optValue"],
     ]);
     const result = buildNodeInput(outputs, {
-      required: ["a"],
-      optional: ["opt"],
+      required: [nodeId("a")],
+      optional: [nodeId("opt")],
     }, nodeId("test-node"));
     expect(result).toEqual({ ok: true, value: { a: "valueA", opt: "optValue" } });
   });
@@ -84,8 +84,8 @@ describe("buildNodeInput", () => {
   it("optional sources missing → keyed object with undefined", () => {
     const outputs = new Map([["a", "valueA"]]);
     const result = buildNodeInput(outputs, {
-      required: ["a"],
-      optional: ["opt"],
+      required: [nodeId("a")],
+      optional: [nodeId("opt")],
     }, nodeId("test-node"));
     expect(result).toEqual({ ok: true, value: { a: "valueA", opt: undefined } });
   });
@@ -94,7 +94,7 @@ describe("buildNodeInput", () => {
     const outputs = new Map([["classifier", { route: "yes" }]]);
     const result = buildNodeInput(outputs, {
       required: [],
-      optional: ["classifier"],
+      optional: [nodeId("classifier")],
     }, nodeId("handler"));
     expect(result).toEqual({ ok: true, value: { route: "yes" } });
   });
@@ -103,7 +103,7 @@ describe("buildNodeInput", () => {
     const outputs = new Map([["left", "yes"]]);
     const result = buildNodeInput(outputs, {
       required: [],
-      optional: ["left", "right"],
+      optional: [nodeId("left"), nodeId("right")],
     }, nodeId("merge"));
     expect(result).toEqual({
       ok: true,
@@ -113,7 +113,7 @@ describe("buildNodeInput", () => {
 
   it("returns non-retriable error when required source is missing", () => {
     const result = buildNodeInput(new Map(), {
-      required: ["missing"],
+      required: [nodeId("missing")],
       optional: [],
     }, nodeId("test-node"));
     expect(result.ok).toBe(false);
@@ -133,7 +133,7 @@ describe("buildNodeInput", () => {
     // instead of silently passing `undefined` as the node's input.
     const result = buildNodeInput(new Map(), {
       required: [],
-      optional: ["classifier"],
+      optional: [nodeId("classifier")],
     }, nodeId("handler"));
     expect(result.ok).toBe(false);
     if (!result.ok) {

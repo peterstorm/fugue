@@ -198,8 +198,11 @@ const incomingSourcesFor = (
   toNodeId: NodeId,
   alwaysActive: ReadonlySet<NodeId>,
 ): IncomingSources => {
-  const required: string[] = [];
-  const optional: string[] = [];
+  // Branded from the gate-validated `EdgeDef` endpoints — the validated-id
+  // invariant `buildNodeInput` advertises as structural for its `nodeId`
+  // parameter is carried end-to-end instead of dropped at this boundary.
+  const required: NodeId[] = [];
+  const optional: NodeId[] = [];
   const seenRequired = new Set<string>();
   const seenOptional = new Set<string>();
 

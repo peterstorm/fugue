@@ -3,9 +3,10 @@
 // Hard-branded newtypes over `string`. A plain `string` does NOT satisfy
 // these types at compile time — callers must go through the smart
 // constructors (`runId`, `nodeId`, `dagId`) which validate against
-// `ID_PATTERN`, or through the internal `__brandXxx` escape hatches for
-// trusted framework code that has already validated by other means. The
-// validating DagId escape applies DagId's stricter no-colon grammar.
+// `ID_PATTERN` (DagId against its stricter no-colon `DAG_ID_REGEX`), or
+// through the internal `__brandXxx` brand functions, which validate against
+// the same grammars themselves. The ACTUAL unchecked bypasses are the
+// `*Unchecked` variants, documented beside their definitions below.
 //
 // At runtime the values are still plain strings; the brand is erased by
 // TypeScript. The hard brand catches argument-swap bugs and ensures that
@@ -141,8 +142,11 @@ export const __brandDagIdUnchecked = (s: string): DagId => s as DagId;
 // ---------------------------------------------------------------------------
 
 /**
- * The ONE `ID_PATTERN` acceptance test behind both `try*` parsers (round-38
- * cs-5) — the same clause `validate` factors for their throwing siblings.
+ * The ONE `ID_PATTERN` acceptance test behind `tryRunId` and `tryNodeId`
+ * (round-38 cs-5) — the same clause `validate` factors for their throwing
+ * siblings. `tryDagId` deliberately does NOT route through this helper: it
+ * tests `DAG_ID_REGEX` (DagId's stricter no-colon grammar) directly, whose
+ * character class excludes `:` — routing it here would silently weaken DagId.
  * `typeof` first: `RegExp.test` coerces non-strings, so a bypassed caller's
  * number would otherwise match.
  */

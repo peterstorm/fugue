@@ -145,6 +145,37 @@ describe("validateDagShape", () => {
     }
   });
 
+  it("rejects a sideEffects-less ordinary node (the capture-time defensive gate, pinned)", () => {
+    // The `NodeDef` type requires `sideEffects` at every supported authoring
+    // surface; a TS-bypassing dynamically-built node without the container
+    // would otherwise carry `sideEffects: undefined` into the validated DagDef
+    // and the stable describe payload. The round-13 remediation (accepted
+    // code-reviewer-2 fix) added this gate clause — pinned here like its
+    // sibling defensive checks (source inputSchema correlation, retry numeric
+    // domains, hostile accessors) so a regression removing it fails loudly.
+    const sideEffectsLess = {
+      ...mkNode("S"),
+      sideEffects: undefined,
+    } as unknown as ReturnType<typeof mkNode>;
+    const dag: DagDefInput = {
+      id: "side-effects-less",
+      nodes: { S: sideEffectsLess, B: mkNode("B") },
+      edges: [{ from: "S", to: "B" }],
+    };
+    const r = validateDagShape(dag);
+    expect(r.ok).toBe(false);
+    if (!r.ok && r.error.kind === "validation") {
+      expect(r.error.message).toContain(
+        "is missing sideEffects — every NodeDef carries a side-effect profile with a kind",
+      );
+      // The message names the offending node (mutation pin: a message-only
+      // `${kind}: ${message}` revert would silently drop the attribution).
+      expect(r.error.message).toContain("node 'S'");
+    } else {
+      throw new Error(`expected a validation error for the sideEffects-less node, got ${r.ok ? "ok" : r.error.kind}`);
+    }
+  });
+
   it("contains a throwing source inputSchema probe as a node-attributed validation error", () => {
     const throwingSchema = z.unknown().superRefine(() => {
       throw new Error("source refinement exploded");
@@ -364,6 +395,42 @@ describe("validateDagShape", () => {
       } else {
         throw new Error(`expected a validation error for defaultRetryLimit=${String(bad)}, got ${withDefault.ok ? "ok" : withDefault.error.kind}`);
       }
+    }
+  });
+
+  it("renders hostile non-stringifiable guard values through safeErrorMessage into the typed Err", () => {
+    // Every stringifiable pinned value (NaN, -1, 1.5, Infinity) produces
+    // message-identical diagnostics under both `String()` and
+    // `safeErrorMessage`, so the round-13 total-rendering fix
+    // (type-design-analyzer-2) is invisible to those pins. A non-stringifiable
+    // value would throw out of the guard's diagnostics under a reverted
+    // `String()` rendering — pinned here so the settlement in the promised
+    // typed Err stays total over every value the guard accepts.
+    const hostile = Object.create(null) as unknown as number;
+    const withLimit = validateDagShape({
+      id: "hostile-limits-value",
+      nodes: { A: mkNode("A") },
+      edges: [{ from: DAG_INPUT, to: "A" }],
+      retryLimits: { A: hostile },
+    });
+    expect(withLimit.ok).toBe(false);
+    if (!withLimit.ok && withLimit.error.kind === "validation") {
+      expect(withLimit.error.message).toContain("retryLimits['A'] must be a non-negative safe integer");
+    } else {
+      throw new Error(`expected a validation error for the hostile retryLimits value, got ${withLimit.ok ? "ok" : withLimit.error.kind}`);
+    }
+
+    const withDefault = validateDagShape({
+      id: "hostile-limit-default",
+      nodes: { A: mkNode("A") },
+      edges: [{ from: DAG_INPUT, to: "A" }],
+      defaultRetryLimit: hostile,
+    });
+    expect(withDefault.ok).toBe(false);
+    if (!withDefault.ok && withDefault.error.kind === "validation") {
+      expect(withDefault.error.message).toContain("defaultRetryLimit must be a non-negative safe integer");
+    } else {
+      throw new Error(`expected a validation error for the hostile defaultRetryLimit, got ${withDefault.ok ? "ok" : withDefault.error.kind}`);
     }
   });
 

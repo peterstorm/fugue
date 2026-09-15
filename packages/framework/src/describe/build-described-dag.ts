@@ -157,7 +157,7 @@ const describeNode = (
   node: DagDef["nodes"][number],
 ): DescribedNode => {
   const base: DescribedNodeBase = {
-    id: node.id as string,
+    id: node.id,
     sideEffects: node.sideEffects.kind,
     requires: [...(node.requires as readonly string[])],
     humanReview: node.humanReview !== undefined,
@@ -183,20 +183,20 @@ const describeNode = (
 const describeEdge = (e: DagDef["edges"][number]): DescribedEdge =>
   match(e)
     .with({ kind: "unconditional" }, (edge) => ({
-      from: edge.from as string,
-      to: edge.to as string,
+      from: edge.from,
+      to: edge.to,
       kind: "unconditional" as const,
     }))
     .with({ kind: "conditional" }, (edge) => ({
-      from: edge.from as string,
-      to: edge.to as string,
+      from: edge.from,
+      to: edge.to,
       kind: "conditional" as const,
       predicateLabel: edge.when.label,
       predicateVersion: edge.when.version,
     }))
     .with({ kind: "default" }, (edge) => ({
-      from: edge.from as string,
-      to: edge.to as string,
+      from: edge.from,
+      to: edge.to,
       kind: "default" as const,
     }))
     .exhaustive();
@@ -249,7 +249,7 @@ const outputSchemaOf = (
   if (!node) return null;
   return safeZodToJsonSchema(node.outputSchema, (e) => {
     warningSink?.onSchemaSerializationError(
-      { field: "outputSchema", nodeId: node.id as string },
+      { field: "outputSchema", nodeId: node.id },
       e,
     );
   });
@@ -278,11 +278,11 @@ export const buildDescribedDag = (
   const runtimeNodes = runtimeNodeInventory(dag).nodes;
 
   const waveIds: readonly (readonly string[])[] = waves.value.map((wave) =>
-    wave.map((id) => id as string),
+    wave.map((id) => id),
   );
 
   return ok({
-    id: dag.id as string,
+    id: dag.id,
     route: input.route,
     description: input.description,
     version: input.version,
@@ -291,7 +291,7 @@ export const buildDescribedDag = (
     }),
     outputSchema: outputSchemaOf(dag, warningSink),
     outputNodeId:
-      dag.outputNodeId !== undefined ? (dag.outputNodeId as string) : null,
+      dag.outputNodeId !== undefined ? dag.outputNodeId : null,
     nodes: dag.nodes.map(describeNode),
     edges: dag.edges.map(describeEdge),
     waves: waveIds,

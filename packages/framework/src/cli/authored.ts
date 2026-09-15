@@ -416,6 +416,10 @@ void _structureNoExtraShapes;
  * order (declarations precede use). Exported as the single source of the
  * structural walk: codegen's `structureOrder` derives its iteration order from
  * this same function, so the two can never disagree on a shape's node set.
+ * `terminalRefs` is the shape-aware terminal half of the same walk — exported
+ * for codegen's collect-config resolution (the map factory references the
+ * terminal's emitted schema const), so both scopes agree on which node is the
+ * terminal without a duplicated per-shape switch.
  */
 export const structureRefs = (s: AuthoredStructure): ReadonlyArray<readonly [KebabIdent, string]> => {
   switch (s.shape) {
@@ -478,7 +482,7 @@ function fieldTypeShape(type: FieldType): unknown {
 
 const schemaShape = (spec: SchemaSpec): string => JSON.stringify(canonicalFields(spec));
 
-const terminalRefs = (structure: AuthoredStructure): readonly KebabIdent[] => {
+export const terminalRefs = (structure: AuthoredStructure): readonly KebabIdent[] => {
   switch (structure.shape) {
     case "linear":
       return structure.order.slice(-1);
@@ -737,12 +741,16 @@ const MapNodeSchema = z
   )
   .strict();
 
+// Listed explicitly in KIND_LIST order (the pinned vocabulary) — the numeric
+// indexing saved nothing on additions (a new kind must be added to both arrays
+// either way) and forced a reader to count indices; discriminated-union parsing
+// is by distinct literal discriminator, so the explicit list is behavior-neutral.
 const authoredNodeVariants = [
-  outputNodeVariants[0],
-  outputNodeVariants[1],
-  outputNodeVariants[2],
+  outputNode("fetch"),
+  outputNode("transform"),
+  outputNode("llm"),
   HumanReviewNodeSchema,
-  outputNodeVariants[3],
+  outputNode("source"),
   MapNodeSchema,
 ] as const;
 const NODE_KINDS = authoredNodeVariants.map((variant) => variant.shape.kind.value);

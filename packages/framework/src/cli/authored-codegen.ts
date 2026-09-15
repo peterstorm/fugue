@@ -29,7 +29,7 @@
 
 import { createHash } from "node:crypto";
 import { match } from "ts-pattern";
-import { childOutputSpec, mapItemSpec, mapOutputSpec, structureRefs } from "./authored.js";
+import { mapItemSpec, mapOutputSpec, structureRefs, terminalRefs } from "./authored.js";
 import type {
   AuthoredChildDag,
   AuthoredChildNode,
@@ -475,6 +475,13 @@ const planChildNodes = (nodes: readonly AuthoredChildNode[]): Map<string, ChildN
     needsModel: node.kind === "llm",
   }] as const));
 
+/** Resolve one child plan or refuse the unknown-child map invariant. */
+const childPlanOf = (plans: Map<string, ChildNodePlan>, id: string): ChildNodePlan => {
+  const found = plans.get(id);
+  if (found === undefined) throw new Error(`authored map invariant: unknown child node '${id}'`);
+  return found;
+};
+
 /** Fan-in schema const over a set of upstream plans (keys = node ids). */
 const fanInConst = (name: string, upstream: readonly NodePlan[], extra?: readonly (readonly [string, string])[]): string => {
   const entries = [
@@ -626,11 +633,7 @@ const emitChildStructure = (
   plans: Map<string, ChildNodePlan>,
   itemSchema: SchemaSpec,
 ): { readonly expression: string; readonly extras: readonly string[] } => {
-  const plan = (id: string): ChildNodePlan => {
-    const found = plans.get(id);
-    if (found === undefined) throw new Error(`authored map invariant: unknown child node '${id}'`);
-    return found;
-  };
+  const plan = (id: string): ChildNodePlan => childPlanOf(plans, id);
   const setInput = (id: string, expression: string): void => {
     plans.set(id, { ...plan(id), inExpr: expression });
   };
@@ -676,16 +679,13 @@ const emitMapNode = (
   const child = emitChildStructure(node.child, plans, itemSpec);
   const declarations: string[] = [];
   for (const id of childIds) {
-    const childPlan = plans.get(id);
-    if (childPlan === undefined) throw new Error(`authored map invariant: unknown child node '${id}'`);
-    declarations.push(schemaConst(childPlan.outName, childPlan.outSpec));
+    declarations.push(schemaConst(childPlanOf(plans, id).outName, childPlanOf(plans, id).outSpec));
   }
   declarations.push(...child.extras);
 
   const prompts: PromptFile[] = [];
   for (const id of childIds) {
-    const childPlan = plans.get(id);
-    if (childPlan === undefined) throw new Error(`authored map invariant: unknown child node '${id}'`);
+    const childPlan = childPlanOf(plans, id);
     switch (childPlan.node.kind) {
       case "fetch":
         declarations.push(fetchNode(childPlan));
@@ -713,8 +713,19 @@ const emitMapNode = (
 
   const parameter = plan.needsModel ? `${CHILD_MODEL_NAME}: string` : "";
   const body = declarations.length === 0 ? "" : `${indent(declarations.join("\n\n"), 2)}\n\n`;
-  const childSchema = schemaExpr(childOutputSpec(node.child), "    ");
-  const declaration = `${purposeComment(node)}\nconst ${plan.ref} = (${parameter}) => {\n${body}  return ${nodeFactory("map")}({\n    id: ${JSON.stringify(node.id)},\n    inputSchema: ${plan.inExpr},\n    widthFrom: ${JSON.stringify(node.widthFrom)},\n    maxWidth: ${node.maxWidth},\n    child: ${child.expression.replace(/\n/g, "\n    ")},\n    childOutputSchema: ${childSchema},\n    collectedItemSchema: ${childSchema},\n    gather: { kind: "collect", field: ${JSON.stringify(node.gather.field)} },\n  });\n};`;
+  // The child's collected-output schema is single-sourced: the terminal's
+  // already-emitted `$child_<Pascal>Schema` const serves both config roles
+  // (its outSpec equals `childOutputSpec(node.child)` — both derive from the
+  // terminal via `withConfidence`/`childNodeOutputSpec`), so one schema
+  // instance is emitted instead of three, and the mapping identity check
+  // (`isAuthoredCollectGather` compares references) still binds to the exact
+  // identities the authored constructor captured.
+  const terminalId = terminalRefs(node.child.structure)[0];
+  if (terminalId === undefined) {
+    throw new Error(`authored map invariant: child '${node.child.id}' has no terminal output`);
+  }
+  const terminalPlan = childPlanOf(plans, terminalId);
+  const declaration = `${purposeComment(node)}\nconst ${plan.ref} = (${parameter}) => {\n${body}  return ${nodeFactory("map")}({\n    id: ${JSON.stringify(node.id)},\n    inputSchema: ${plan.inExpr},\n    widthFrom: ${JSON.stringify(node.widthFrom)},\n    maxWidth: ${node.maxWidth},\n    child: ${child.expression.replace(/\n/g, "\n    ")},\n    childOutputSchema: ${terminalPlan.outName},\n    collectedItemSchema: ${terminalPlan.outName},\n    gather: { kind: "collect", field: ${JSON.stringify(node.gather.field)} },\n  });\n};`;
   return { declaration, prompts };
 };
 

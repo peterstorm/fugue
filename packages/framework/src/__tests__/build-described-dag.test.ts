@@ -110,7 +110,7 @@ describe("buildDescribedDag", () => {
     // violation that "should never reach this code in practice" — which is
     // exactly the kind of branch that rots. `defineDagFromArray` refuses a
     // cyclic DAG at definition time, so the cycle is introduced afterwards, on
-    // a already-branded DagDef, to reach the builder at all.
+    // an already-branded DagDef, to reach the builder at all.
     const a = createTransformNode({
       id: "cycle-a",
       inputSchema: z.string(),

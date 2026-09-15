@@ -49,7 +49,7 @@ const minimalCtx: DagMachineContext = {
   retries: new Map(),
   initialInput: null,
   activeNodeIds: new Set([N("a"), N("b")]),
-  incomingByNode: new Map([[N("a"), { required: [], optional: [] }], [N("b"), { required: ["a"], optional: [] }]]),
+  incomingByNode: new Map([[N("a"), { required: [], optional: [] }], [N("b"), { required: [N("a")], optional: [] }]]),
   outgoingByNode: new Map([[N("a"), minimalDag.edges], [N("b"), []]]),
   unconditionalAdj: new Map([[N("a"), [N("b")]]]),
   nodeById: new Map([

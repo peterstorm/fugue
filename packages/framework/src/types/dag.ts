@@ -274,9 +274,10 @@ declare const __dagValidated: unique symbol;
 
 /**
  * The closed set of DAG shapes the framework knows about — the single source of
- * truth. Both `DagProvenance` (below) and the CLI's `SHAPES` / scaffold-helper
- * union derive from this tuple, so a new shape is added in exactly one place and
- * the projections cannot drift apart.
+ * truth. Both `DagProvenance` (below) and the CLI's `Shape` type
+ * (`cli/new-templates.ts`, re-exporting this tuple) / scaffold-helper union
+ * derive from it, so a new shape is added in exactly one place and the
+ * projections cannot drift apart.
  */
 export const DAG_SHAPES = ["linear", "fan-out", "diamond", "router", "sources"] as const;
 
