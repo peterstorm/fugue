@@ -22,17 +22,17 @@ const ctx = validated.value;
 
 const cases: readonly Readonly<{
   name: string;
-  required: readonly string[];
-  optional: readonly string[];
+  required: readonly NodeId[];
+  optional: readonly NodeId[];
   outputs: readonly (readonly [string, unknown])[];
   expected: unknown;
 }>[] = [
   { name: "0 required, 0 optional → undefined (source node)", required: [], optional: [], outputs: [], expected: undefined },
-  { name: "1 required → bare upstream value", required: ["upstream"], optional: [], outputs: [["upstream", { x: 42 }]], expected: { x: 42 } },
-  { name: "2 required → keyed object", required: ["a", "b"], optional: [], outputs: [["a", "valueA"], ["b", "valueB"]], expected: { a: "valueA", b: "valueB" } },
-  { name: "optional present → all keys", required: ["r"], optional: ["opt"], outputs: [["r", "reqVal"], ["opt", "optVal"]], expected: { r: "reqVal", opt: "optVal" } },
-  { name: "optional absent → undefined value", required: ["r"], optional: ["missing"], outputs: [["r", "reqVal"]], expected: { r: "reqVal", missing: undefined } },
-  { name: "mixed required and optional", required: ["a", "b"], optional: ["c"], outputs: [["a", 1], ["b", 2]], expected: { a: 1, b: 2, c: undefined } },
+  { name: "1 required → bare upstream value", required: [N("upstream")], optional: [], outputs: [["upstream", { x: 42 }]], expected: { x: 42 } },
+  { name: "2 required → keyed object", required: [N("a"), N("b")], optional: [], outputs: [["a", "valueA"], ["b", "valueB"]], expected: { a: "valueA", b: "valueB" } },
+  { name: "optional present → all keys", required: [N("r")], optional: [N("opt")], outputs: [["r", "reqVal"], ["opt", "optVal"]], expected: { r: "reqVal", opt: "optVal" } },
+  { name: "optional absent → undefined value", required: [N("r")], optional: [N("missing")], outputs: [["r", "reqVal"]], expected: { r: "reqVal", missing: undefined } },
+  { name: "mixed required and optional", required: [N("a"), N("b")], optional: [N("c")], outputs: [["a", 1], ["b", 2]], expected: { a: 1, b: 2, c: undefined } },
 ];
 
 describe("runNodeShared input assembly", () => {

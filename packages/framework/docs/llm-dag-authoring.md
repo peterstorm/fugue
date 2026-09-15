@@ -169,9 +169,20 @@ host's durable execution path). Ordinary `NodeDef` remains callable;
 `DagNodeDef` is the union admitted by DAG constructors.
 
 `MapNodeConfig<I, ChildOut, O>` takes `id`, `inputSchema`, `outputSchema`,
-`widthFrom` (one field name, not a path/expression), `maxWidth` (positive safe
+`widthFrom` (an array-valued field of `I`, not a path/expression), `maxWidth` (positive safe
 integer), `child: DagDef`, `childOutputSchema`, and
 `reduce: (results: readonly ChildOut[]) => Result<O, FrameworkError>`.
+
+`createCollectMapNode` is the collect specialization used by deterministic
+authored-map codegen. Its config omits `outputSchema` and `reduce`; one
+`gather: { kind: "collect", field }` plus `collectedItemSchema` causes the
+constructor to issue the keyed-array output schema, ascending-order reducer, and
+truthful describe/Mermaid metadata together. `childOutputSchema` adapts a child
+DAG result into `ChildOut`; `collectedItemSchema` validates that already-parsed
+`ChildOut` in root output/checkpoint data. Keep them separate when the first
+schema coerces or transforms (for example, `z.string().transform(Number)` then
+`z.number()`). The metadata token is bound to the exact output/child schema and
+reducer identities; transplanting it onto a reconstructed map fails DAG validation.
 
 ```ts
 import { z } from "zod";
@@ -239,8 +250,12 @@ const dag = defineDag({
   accounting for acknowledged effects rather than treating corruption as a healthy
   miss. Healthy prefixes are reused; genuinely missing indices execute normally.
 - Failed initial checkpoint metadata stops the fan with its original error. Fresh
-  child outputs must pass `childOutputSchema` before fan save/gather, even if they
-  passed the child DAG's output schema; failure stops subsequent children/reduction.
+  child DAG outputs must pass `childOutputSchema` before fan save/gather, even if
+  they passed the child DAG's own output schema; failure stops subsequent
+  children/reduction. Fan completion persistence retains the pre-adaptation child
+  DAG value, so fresh and replayed completions each cross `childOutputSchema`
+  exactly once. A collect map's separately supplied `collectedItemSchema` validates
+  the resulting `ChildOut` values in final/root-checkpoint output.
 - Children share root RunId, signal, clock/RNG/FreshnessIndex, original clients,
   host cache/prompt closures and spend authority, but have private local jobs.
   They do not inherit root durable JobLike, replay map, retry overrides,
@@ -267,9 +282,112 @@ rubric records are owned frozen snapshots, so alias mutation cannot replace the
 captured evaluator definition. Opaque schema/function references and closure state
 are not recursively cloned, and caller-owned values are not frozen. This adds no
 recursive child fingerprint, indexed broker audit
-dimension, or root aggregation of child judge/guardrail summaries. CLI authored-map
-shapes/plate rendering and whole-fan budget projection are separate, unimplemented
-F1 follow-ups; `defineFanOut` remains author-time parallel sibling width.
+dimension, or root aggregation of child judge/guardrail summaries. Whole-fan budget
+projection remains the separate PR-D follow-up; `defineFanOut` remains author-time
+parallel sibling width.
+
+#### Closed authored maps (`fugue new --from` / `fugue compose`)
+
+`map` is an authored **node kind** placed where the static role supplies one direct
+input schema: linear positions, fan-out/diamond source or branch positions, and
+router case/default handlers. Collect-only v1 maps cannot be fan-in joins, any
+`sources` role, or a router classifier (routing requires a direct enum output field).
+It is not a `DAG_SHAPES` member and does not add `fugue new --shape map` or a
+`defineMap` helper.
+
+```json
+{
+  "fugueAuthored": 1,
+  "name": "score-batch",
+  "team": "risk",
+  "description": "Scope and score records",
+  "input": {
+    "fields": [{
+      "name": "items",
+      "type": {
+        "kind": "array",
+        "element": {
+          "fields": [
+            { "name": "recordId", "type": { "kind": "string" } },
+            { "name": "amount", "type": { "kind": "number" } }
+          ]
+        }
+      }
+    }]
+  },
+  "nodes": [{
+    "id": "score-items",
+    "kind": "map",
+    "purpose": "Score every record",
+    "widthFrom": "items",
+    "maxWidth": 25,
+    "child": {
+      "id": "score-item-child",
+      "nodes": [{
+        "id": "score-item",
+        "kind": "transform",
+        "purpose": "Score one record",
+        "output": {
+          "fields": [{ "name": "score", "type": { "kind": "number" } }]
+        }
+      }],
+      "structure": { "shape": "linear", "order": ["score-item"] }
+    },
+    "gather": { "kind": "collect", "field": "results" }
+  }, {
+    "id": "finish",
+    "kind": "transform",
+    "purpose": "Summarize collected scores",
+    "output": {
+      "fields": [{ "name": "count", "type": { "kind": "number" } }]
+    }
+  }],
+  "structure": { "shape": "linear", "order": ["score-items", "finish"] }
+}
+```
+
+The important closed contracts are:
+
+- `widthFrom` is one field identifier, not a path/expression, and must name an
+  array field in the map's derived direct input. Literal keys passed by typed
+  `createMapNode` callers are restricted to array-valued input fields; dynamic
+  strings and parsed `WidthFrom` proofs retain runtime checks.
+- `maxWidth` is a positive safe integer.
+- The inline child reuses `linear`, `fan-out`, `diamond`, `router`, or `sources`.
+  Child maps and human review are rejected; child fan-out requires a join; router
+  terminals must expose equivalent output field names/types (field and enum order
+  do not change schema meaning).
+- Authored wire values are bounded to 64 nested JSON containers before recursive
+  schema parsing; deeper or cyclic programmatic values return structured parse
+  problems rather than exhausting the JavaScript call stack.
+- A successfully parsed `AuthoredDag` is an owned, recursively frozen value;
+  its brand remains a valid codegen proof after it crosses the parse boundary.
+  DAG names, child DAG ids, node ids, and structure references are kebab-case,
+  start with a letter, and share the runtime identifier limit of 128 characters.
+- Generated fetch/source/transform bodies are deliberately unimplemented and
+  return `$fugue.err($fugue.frameworkError.validation(...))` until replaced
+  inside their `@fugue-body` regions. The integrity-hashed `$fugue` namespace
+  also owns their factory calls, so replacing every body with documented
+  `$fugue.ok(value)` success code neither changes imports nor leaves dead ones.
+  An untouched scaffold imports and lints but cannot report fabricated data.
+- Authored maps omit `output`. `{ "kind": "collect", "field": "results" }`
+  makes codegen call `createCollectMapNode`, supplying the structural child schema
+  explicitly for both raw-child adaptation and already-parsed collect validation.
+  The constructor derives the field schema, schema-output hardening transform,
+  reducer, and truthful describe metadata as one invariant. Reducer values,
+  successful schema parses, and final `runDag` outputs are frozen null-prototype
+  dictionaries with frozen result arrays.
+  Their type marks ordinary prototype members as the gathered array when that
+  name may be the selected field, otherwise `undefined`; no inherited callable
+  is exposed. No authored reducer source or expression is accepted or evaluated.
+- Child LLM prompts normally use `<dag>-<map>@<child>`, keeping them disjoint
+  from ordinary prompt names. If an ordinary or child logical prompt name would
+  make `<name>.txt` exceed the portable 255-byte component bound, codegen keeps
+  a readable prefix and appends `~<full-sha256>` of the complete logical name.
+  Short names stay byte-identical; long names remain deterministic and
+  collision-resistant.
+- Describe/Mermaid keep the child out of outer nodes, edges and waves. One map
+  plate shows the symbolic width and inclusive `0..maxWidth` bound.
 
 ### `createLlmNode` — structured LLM call with prompt template
 
@@ -1053,7 +1171,10 @@ bunx fugue prompts check dags/<team>/<name>
 ## Result Type
 
 All node functions return `Result<T, FrameworkError>` — `ok(value)` on success,
-`err(...)` on failure. **Build errors with the `frameworkError.*` factories**,
+`err(...)` on failure. Generated AuthoredDag scaffolds expose the same helpers
+as `$fugue.ok`, `$fugue.err`, and `$fugue.frameworkError` inside editable body
+regions; use those bindings without changing integrity-hashed imports.
+**Build errors with the `frameworkError.*` factories** in ordinary modules,
 not raw object literals: the factories brand the `nodeId`, fill required fields,
 and keep call sites stable as the error types evolve. The kinds an author
 typically constructs are `validation`, `transient`, and `node-crash` — all
@@ -1095,14 +1216,13 @@ return err({ kind: "validation", nodeId: nodeId("score"), message: "CVR not foun
 
 </details>
 
-### Framework entry points never throw
+### Operational Result APIs do not throw expected failures
 
 Capabilities (`ctx.documents.getContent`, `ctx.http.get`, …), `parseWorkbook`
-from `@fuguejs/xlsx`, and every framework entry point return `Result` and signal
-failure with `err(...)` — including "expected" failures like a missing file or a
-missing worksheet. They do **not** throw. A defensive `try/catch` wrapped around
-one of them is a smell: it catches nothing and hides the real control flow.
-Branch on `.ok` instead:
+from `@fuguejs/xlsx`, and documented operational APIs that return `Result`
+signal expected failure with `err(...)` — including a missing file or worksheet.
+A defensive `try/catch` wrapped around one of those Result calls is a smell: it
+hides the real control flow. Branch on `.ok` instead:
 
 ```ts
 const parsed = await parseWorkbook(bytes, RowSchema, { sheet: "Data" });
@@ -1110,16 +1230,19 @@ if (!parsed.ok) return parsed;        // propagate — no try/catch
 // … use parsed.value
 ```
 
-(Genuinely throwing third-party code at the very edge of a fetch node — a
-library with no Result contract — is the only place a `try/catch` belongs, and
-it should convert straight into an `err(frameworkError.*)`.)
+Construction and caller-invariant gateways are intentionally different:
+invalid `createMapNode` configuration throws at definition time, `defineDag`
+raises `DagDefinitionError`, and malformed programmatic compose round budgets
+throw before effects. Genuinely throwing third-party code at the edge of a
+fetch node should be caught there and converted straight into an
+`err(frameworkError.*)`.
 
 ---
 
 ## Checklist for a Valid DAG
 
 - [ ] Every node key in `nodes` matches that node's `id`
-- [ ] Every `edges[].from` and `edges[].to` references a key in `nodes`
+- [ ] Every `edges[].to` and every non-`DAG_INPUT` `edges[].from` references a key in `nodes`
 - [ ] No duplicate edges (same `from`+`to` pair)
 - [ ] Output node is reachable via unconditional/default edges from roots
 - [ ] If conditional edges leave a node, a `kind: "default"` edge exists (else-totality)
@@ -1127,20 +1250,23 @@ it should convert straight into an `err(frameworkError.*)`.)
 - [ ] Roots are **source nodes** (`createSourceNode`, no `inputSchema`); the request is consumed only via `DAG_INPUT` edges (a single `$input` edge for a bare consumer, the `"$input"` key for a fan-in)
 - [ ] A fan-in node's `z.object` keys equal its incoming source ids (including `"$input"` when it has a `DAG_INPUT` edge)
 - [ ] Errors are built with `frameworkError.*`, not raw `err({ kind, … })` literals
-- [ ] No defensive `try/catch` around capabilities / `parseWorkbook` / framework calls — they return `Result`, they don't throw
+- [ ] No defensive `try/catch` around capabilities, `parseWorkbook`, or other documented operational `Result` APIs — branch on `.ok` (construction gateways may throw as documented above)
 - [ ] Required env vars are listed in `fugue.yaml` `env:`; optional defaulted config is a factory option, not a hidden `process.env` read
 - [ ] `export default` a `DagRegistration` object
 
-All structural rules are validated at module load by `defineDag()` — invalid
-DAGs throw `DagDefinitionError` immediately, with a message pointing at the problem.
+`defineDag()` validates node/edge identities, source roles, routing totality,
+and reachability at module load and throws `DagDefinitionError` immediately.
+Run `fugue lint` for fan-in schema-key checks, and use execution/schema tests
+for general upstream/downstream schema compatibility.
 
 ---
 
 ## Verifying with the `fugue` CLI
 
 The `fugue` binary (`packages/framework/bin/fugue.ts`) validates and
-introspects a DAG file without needing to start the host. **All output is JSON
-on stdout**, designed for machine consumption.
+introspects a DAG file without needing to start the host. Output is JSON on
+stdout for machine consumption, except `fugue visualize --raw`, which emits
+bare Mermaid text for piping into documentation.
 
 > Run `bunx fugue …` from a directory whose package depends on
 > `@fuguejs/framework` (bun links the bin per dependent). From an unrelated

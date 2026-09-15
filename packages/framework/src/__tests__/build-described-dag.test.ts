@@ -52,6 +52,57 @@ describe("buildDescribedDag", () => {
     expect(described.value.outputSchema).not.toBeNull();
   });
 
+  it("contains throwing schema detection and reports the original failure", () => {
+    const schemaFailure = new Error("parse getter exploded");
+    const hostileSchema = new Proxy(z.string(), {
+      get(target, property, receiver) {
+        if (property === "parse") throw schemaFailure;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const warnings: unknown[] = [];
+
+    const described = buildDescribedDag({
+      dag,
+      inputSchema: hostileSchema,
+      route: "/describe",
+      description: "best effort",
+      version: "1.0.0",
+      warningSink: {
+        onSchemaSerializationError: (_where, error) => warnings.push(error),
+      },
+    });
+
+    expect(described.ok).toBe(true);
+    if (!described.ok) return;
+    expect(described.value.inputSchema).toBeNull();
+    expect(warnings).toEqual([schemaFailure]);
+  });
+
+  it("warns for a present malformed schema but not for an omitted schema", () => {
+    const warnings: unknown[] = [];
+    const build = (inputSchema?: unknown) => buildDescribedDag({
+      dag,
+      ...(inputSchema !== undefined ? { inputSchema } : {}),
+      route: "/describe",
+      description: "best effort",
+      version: "1.0.0",
+      warningSink: {
+        onSchemaSerializationError: (_where, error) => warnings.push(error),
+      },
+    });
+
+    const malformed = build(42);
+    expect(malformed.ok).toBe(true);
+    if (malformed.ok) expect(malformed.value.inputSchema).toBeNull();
+    expect(warnings).toHaveLength(1);
+    expect((warnings[0] as Error).message).toBe("expected a Zod schema");
+
+    const omitted = build();
+    expect(omitted.ok).toBe(true);
+    expect(warnings).toHaveLength(1);
+  });
+
   // ── The two branches a single happy-path test never reached ────────────────
 
   it("surfaces a topoSort failure as Err rather than a half-built payload", () => {
@@ -59,7 +110,7 @@ describe("buildDescribedDag", () => {
     // violation that "should never reach this code in practice" — which is
     // exactly the kind of branch that rots. `defineDagFromArray` refuses a
     // cyclic DAG at definition time, so the cycle is introduced afterwards, on
-    // a already-branded DagDef, to reach the builder at all.
+    // an already-branded DagDef, to reach the builder at all.
     const a = createTransformNode({
       id: "cycle-a",
       inputSchema: z.string(),
@@ -138,5 +189,25 @@ describe("buildDescribedDag", () => {
     expect(described.ok).toBe(true);
     if (!described.ok) return;
     expect(described.value.outputSchema).toBeNull();
+  });
+
+  it("unions loadedPrompts keys with node-introspected prompt names", () => {
+    // Only pin of the loadedPrompts host-union branch of collectPromptNames:
+    // seeding from the host set and the node walk both augment one collection
+    // so omissions on either surface stay visible. A regression dropping the
+    // seeding (or the union loop) would silently omit host-loaded prompt names
+    // from the stable describe contract.
+    const described = buildDescribedDag({
+      dag,
+      inputSchema: z.string(),
+      route: "/describe",
+      description: "prompt union",
+      version: "1.0.0",
+      loadedPrompts: new Map([["host-prompt", "host body"]]),
+    });
+
+    expect(described.ok).toBe(true);
+    if (!described.ok) return;
+    expect(described.value.prompts).toEqual(["host-prompt"]);
   });
 });

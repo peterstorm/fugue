@@ -1,8 +1,7 @@
 # ADR-0086: Root-owned mapped child execution
 
 ## Status
-Accepted — implemented in the PR46 correctness-closure candidate. Parent final
-whole-candidate validation and publication are pending; this is not a merge certification.
+Accepted — implemented and merged in PR #46 on 2026-09-08.
 
 ## Date
 2026-09-08
@@ -39,7 +38,11 @@ origin, resource namespace and Run Spend Authority (ADRs 0053/0054/0083).
 `NodeDef` remains the ordinary callable node contract; its `kind` excludes map.
 `MapNodeDef` has `kind: "map"`, `requires: readonly ["checkpointer"]`, an immutable
 visible `mapping` descriptor and **no `run`**, including no throwing placeholder.
-`DagNodeDef` is the ordinary-or-map dispatch union. DAG/map/inference types live
+Its type also fixes `isSource?: false`, fan-checkpoint `writes`, and confidence
+`none`; the DAG parser independently refuses forged contradictory values.
+Typed constructor literals restrict `widthFrom` to array-valued input keys, while
+pre-parsed or dynamic strings retain runtime validation. `DagNodeDef` is the
+ordinary-or-map dispatch union. DAG/map/inference types live
 together in `types/dag.ts`; ordinary types stay in `types/node.ts`. The former
 `types/dag-internals.ts` is removed, not compatibility-aliased.
 
@@ -96,7 +99,11 @@ for **both** completion lookup and save against map NodeId:
 
 `dag@<mapNodeId>@<index>@<executionEpoch>`
 
-Same-generation retry/replacement reuses acknowledged completions. A valid backward
+Same-generation retry/replacement reuses acknowledged completions. A fan completion
+retains the child DAG result before the map-level `childOutputSchema` adaptation;
+fresh and replayed values therefore cross that parser exactly once. Collect maps
+validate the resulting `ChildOut` again only through their separate
+`collectedItemSchema` when parsing final/root-checkpoint output. A valid backward
 reroute durably advances the epoch before replacement work; even identical inputs
 or a reroute directly to the fan cannot consume the prior generation's completions.
 This reuses the existing durable generation, not a retry counter, random token,
@@ -191,8 +198,8 @@ policy, production tenant ACL enforcement or exactly-once external effects.
 Recursive child fingerprinting, indexed broker Invocation audit dimensions and
 root child-quality-summary aggregation are **deferred advisories**, not guarantees.
 PR-C authored-map/plate rendering, PR-D whole-fan admission projection and concurrent
-fan scheduling remain separate work. Validation history and pending parent gates
-live in the closure record, not in a claim that this ADR certifies current HEAD.
+fan scheduling remain separate work. PR-B validation history lives in the closure
+record; merge does not certify deployed infrastructure or exactly-once effects.
 
 ## Related
 

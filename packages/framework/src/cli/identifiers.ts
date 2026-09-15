@@ -12,9 +12,11 @@
 // both sides — instead of letting the validation gauntlet surface a
 // duplicate-declaration SyntaxError the author/LLM has to decode.
 //
-// Pure data + pure functions, no imports — `authored.ts`,
-// `authored-codegen.ts`, `new-templates.ts` and `types.ts` all depend on this
-// module, never the reverse.
+// Pure data + pure functions. The only import is the canonical low-level
+// runtime identifier limit; `authored.ts`, `authored-codegen.ts`,
+// `new-templates.ts` and `types.ts` all depend on this module, never the reverse.
+
+import { ID_MAX_LENGTH } from "../types/ids.js";
 
 // ---------------------------------------------------------------------------
 // Lexical rules — the single source for the kebab/identifier regexes every
@@ -51,9 +53,10 @@ export const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
 export type Kebab = string & { readonly __brand: "Kebab" };
 
 /**
- * A `KEBAB_IDENT`-validated string (node ids, DAG names) — the only strings
- * safe to feed the name constructors below, since they camelCase/PascalCase
- * into emitted JS identifiers.
+ * A length-bounded `KEBAB_IDENT` string (node ids, DAG names) — the only
+ * strings safe to feed the name constructors below and the runtime DagId /
+ * NodeId constructors, since codegen camelCases/PascalCases them into emitted
+ * JS identifiers.
  */
 export type KebabIdent = string & { readonly __brand: "KebabIdent" };
 
@@ -61,9 +64,9 @@ export type KebabIdent = string & { readonly __brand: "KebabIdent" };
 export const parseKebab = (raw: string): Kebab | null =>
   KEBAB.test(raw) ? (raw as Kebab) : null;
 
-/** The sole `KebabIdent` producer: `null` unless `KEBAB_IDENT` matches. */
+/** The sole producer: `null` unless lexical shape and runtime length both match. */
 export const parseKebabIdent = (raw: string): KebabIdent | null =>
-  KEBAB_IDENT.test(raw) ? (raw as KebabIdent) : null;
+  raw.length <= ID_MAX_LENGTH && KEBAB_IDENT.test(raw) ? (raw as KebabIdent) : null;
 
 /**
  * The full ECMAScript LineTerminator set as a regex character-class body:
@@ -154,15 +157,13 @@ export const FUGUE_BODY_MARKERS = new RegExp(
   "g",
 );
 
-// Narrowed to the branded `KebabIdent` — the module's invariant is "only a
-// parsed KebabIdent is safe to reshape into a JS identifier". A bare `string`
-// param would let an unvalidated name (`2fast`, `default`, `a b`) slip in and
-// produce an illegal identifier; taking `KebabIdent` makes that
-// unrepresentable. `pascalCase` is module-private (no external callers — its
-// only callers are `camelCase` just below and the name constructors further
-// down, all of which already hold a `KebabIdent`); `camelCase` stays exported
-// for the parse-time reserved-word check in `authored.ts`, but narrowed the
-// same way.
+// Narrowed to the branded `KebabIdent` — the brand proves lexical shape before
+// a name is reshaped into a JS identifier. Reserved-word safety is a separate
+// authored-DAG parse invariant (`JS_RESERVED_WORDS` below): `default` is a
+// valid `KebabIdent` but is not a valid emitted binding. `pascalCase` is
+// module-private (no external callers — its only callers are `camelCase` just
+// below and the name constructors further down, all of which already hold a
+// `KebabIdent`); `camelCase` stays exported for that reserved-word check.
 const pascalCase = (kebab: KebabIdent): string =>
   kebab
     .split("-")
@@ -212,8 +213,20 @@ export const fanInConstName = (id: KebabIdent): string => `${pascalCase(id)}FanI
 /** LLM node factory (the injectable model seam): `summarize` → `createSummarize`. */
 export const llmFactoryName = (id: KebabIdent): string => `create${pascalCase(id)}`;
 
-/** Module-level node const for non-llm nodes: `fetch-record` → `fetchRecord`. */
+/** Module-level node const for ordinary non-llm nodes: `fetch-record` → `fetchRecord`. */
 const nodeConstName = (id: KebabIdent): string => camelCase(id);
+
+/** Factory enclosing an authored map's inline child declarations. */
+export const mapFactoryName = (id: KebabIdent): string => `create${pascalCase(id)}Map`;
+
+/**
+ * Child-local bindings occupy a codegen-only namespace outside KEBAB_IDENT,
+ * so no authored parent or child id can collide with them.
+ */
+const CHILD_LOCAL_PREFIX = "$child_";
+export const CHILD_MODEL_NAME = "$childModel";
+export const childLocalName = (generatedName: string): string =>
+  `${CHILD_LOCAL_PREFIX}${generatedName}`;
 
 /**
  * The `<camel>Node` identifier claimed for llm nodes: `summarize` →
@@ -225,13 +238,16 @@ const nodeConstName = (id: KebabIdent): string => camelCase(id);
 export const llmNodeRefName = (id: KebabIdent): string => `${camelCase(id)}Node`;
 
 /**
- * The identifier a node contributes to the structure expression: the llm ref
- * for llm nodes (dead today — see `llmNodeRefName`), the plain const otherwise.
- * `kind` is the closed authored kind vocabulary (`AuthoredNodeKind` — derived
- * in-module from `NODE_FACTORY_NAME`, so this module stays import-free).
+ * The identifier a node contributes to collision accounting: an LLM's
+ * conservative future node ref, a map factory, or an ordinary node const.
+ * `kind` is derived in-module from `NODE_FACTORY_NAME`, keeping this module
+ * import-free.
  */
-export const nodeRefName = (id: KebabIdent, kind: AuthoredNodeKind): string =>
-  kind === "llm" ? llmNodeRefName(id) : nodeConstName(id);
+export const nodeRefName = (id: KebabIdent, kind: AuthoredNodeKind): string => {
+  if (kind === "llm") return llmNodeRefName(id);
+  if (kind === "map") return mapFactoryName(id);
+  return nodeConstName(id);
+};
 
 // The two DAG-level constructors take the branded `KebabIdent`, exactly like
 // the node-level constructors above: both the authored pipeline (`dag.name`)
@@ -271,6 +287,7 @@ export const NODE_FACTORY_NAME = {
   llm: "createLlmNode",
   "human-review": "createHumanReviewNode",
   source: "createSourceNode",
+  map: "createCollectMapNode",
 } as const;
 
 /**
@@ -294,21 +311,22 @@ export const SHAPE_HELPER_NAME = {
 } as const;
 
 /**
- * Fixed-SPELLING import names — names whose spelling never depends on node
- * ids or the DAG name. EMISSION is gated per name (`buildImports`): `z` and
- * the `DagRegistration` type are always emitted; `ok` only when a
- * fetch/transform/source node needs a placeholder body; `confidence` and the
- * `LlmNodeDef` type only when an llm node is present. RESERVATION is
- * unconditional — all five names sit in `RESERVED_IDENTIFIERS` regardless of
- * kinds/shape (the same conservatism as `generatedIdentifiersFor`: a
- * refinement that adds the first llm node must not introduce a collision the
- * schema already accepted). Type-only imports still reserve their name —
- * TypeScript rejects a const that redeclares an imported binding, type-only
- * or not.
+ * Stable framework namespace for generated executable nodes. The `$` prefix
+ * is outside authored `KEBAB_IDENT`, so no authored binding can collide with
+ * it. Machine-owned factory calls keep the namespace live after every body is
+ * replaced; body authors use the same namespace for `ok`, `err`, and
+ * `frameworkError` without editing integrity-hashed imports.
+ */
+export const FRAMEWORK_NAMESPACE_NAME = "$fugue";
+
+/**
+ * Fixed-spelling named imports whose spelling never depends on node ids or the
+ * DAG name. Emission is gated per name by `buildImports`; reservation remains
+ * unconditional so later refinements cannot introduce a collision that an
+ * earlier authored parse accepted. Type-only imports reserve their names too.
  */
 export const FIXED_IMPORT_NAME = {
   zod: "z",
-  ok: "ok",
   confidence: "confidence",
   llmNodeDefType: "LlmNodeDef",
   dagRegistrationType: "DagRegistration",
@@ -333,6 +351,7 @@ export const RESERVED_IDENTIFIERS: ReadonlySet<string> = new Set([
   // only deep in the gauntlet with an opaque id-mismatch error.
   "opts",
   REGISTRATION_CONST_NAME,
+  FRAMEWORK_NAMESPACE_NAME,
   ...Object.values(FIXED_IMPORT_NAME),
   ...Object.values(NODE_FACTORY_NAME),
   ...Object.values(SHAPE_HELPER_NAME),
@@ -353,22 +372,24 @@ interface IdentifierSource {
 }
 
 /**
- * Every identifier `authored-codegen` can emit for a node, derived from the
- * same name constructors codegen calls:
- *   - `nodeConstName(id)`   — the node const (non-llm ref)
+ * Conservative reservation superset for identifiers `authored-codegen` may
+ * emit for a node, derived from the same name constructors codegen calls:
+ *   - `nodeConstName(id)`   — reserved for every kind, including map although
+ *                             current map emission binds only its factory
  *   - `llmNodeRefName(id)`  — claimed for llm nodes though never bound today
  *                             (see the rationale on `llmNodeRefName`)
  *   - `llmFactoryName(id)`  — the llm factory
  *   - `schemaConstName(id)` — the output schema const
  *   - `fanInConstName(id)`  — the fan-in schema const (join/assemble roles)
  *
- * Conservative on purpose: the FanIn / llm entries are claimed even when the
- * node's current role wouldn't emit them, so a refinement that changes a
- * node's role can never introduce a collision the schema already accepted.
+ * Conservative on purpose: ordinary map const, FanIn, and llm entries remain
+ * claimed even when current emission or role does not use them, so a later
+ * refinement cannot introduce a collision the schema already accepted.
  */
 export const generatedIdentifiersFor = (node: IdentifierSource): readonly string[] => [
   nodeConstName(node.id),
   ...(node.kind === "llm" ? [llmNodeRefName(node.id), llmFactoryName(node.id)] : []),
+  ...(node.kind === "map" ? [mapFactoryName(node.id)] : []),
   schemaConstName(node.id),
   fanInConstName(node.id),
 ];

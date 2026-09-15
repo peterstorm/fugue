@@ -679,6 +679,38 @@ describe("runCompose", () => {
     expect(outcome.draft).toEqual(validDag);
   });
 
+  it("contains a rejected LLM promise and preserves the last proven draft", async () => {
+    const root = join(tmpRoot, "llm-rejection-carries-draft");
+    const first = draft(validDag);
+    let calls = 0;
+    const client: LlmClient = {
+      async sendStructured<O>(req: LlmRequest<O>): Promise<Result<LlmResponse<O>, FrameworkError>> {
+        calls++;
+        if (calls > 1) throw new Error("adapter promise rejected");
+        const parsed = req.schema.safeParse(first);
+        if (!parsed.success) throw new Error(parsed.error.message);
+        return ok({ output: parsed.data, ...tokensOnly(0, 0), rawText: JSON.stringify(first) });
+      },
+      async sendWithTools(): Promise<never> {
+        throw new Error("compose never uses tools");
+      },
+    };
+    const { io } = scriptedIo(["rename it"]);
+
+    const outcome = await runCompose(
+      { intent: mustIntent("briefing"), team: assist, root },
+      client,
+      io,
+    );
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok || outcome.reason !== "llm-error") {
+      throw new Error(`expected llm-error, got ${JSON.stringify(outcome)}`);
+    }
+    expect(outcome.problems[0]).toContain("adapter promise rejected");
+    expect(outcome.draft).toEqual(validDag);
+    expect(calls).toBe(2);
+  });
+
   it("repair-exhausted after a refinement carries the last proven draft's JSON", async () => {
     const root = join(tmpRoot, "exhausted-carries-draft");
     let calls = 0;
@@ -866,6 +898,36 @@ describe("runCompose", () => {
     const shown = said.join("\n");
     expect(shown).toContain("Advisories:");
     expect(shown).toContain("redundant-passthrough: identity-shaped transform");
+  });
+
+  it("shows schema-serialization warnings before asking the operator to accept", async () => {
+    const root = join(tmpRoot, "warnings-before-accept");
+    const warning = "outputSchema for node 'final' could not be serialized";
+    const okWithWarning = async (dag: AuthoredDag, r: string): Promise<GauntletResult> => {
+      const verdict = await runGauntlet(dag, r);
+      return verdict.ok ? { ...verdict, warnings: [warning] } : verdict;
+    };
+    const { client } = scriptedLlm([draft(validDag)]);
+    const events: string[] = [];
+    const outcome = await runCompose(
+      { intent: mustIntent("briefing"), team: assist, root },
+      client,
+      {
+        say: (message) => { events.push(`say:${message}`); },
+        ask: async (question) => {
+          events.push(`ask:${question}`);
+          return { kind: "answer", text: "yes" };
+        },
+      },
+      okWithWarning,
+    );
+    if (!outcome.ok) throw new Error(`compose failed: ${JSON.stringify(outcome)}`);
+
+    const warningIndex = events.findIndex((event) => event.includes(`Warnings:\n  - ${warning}`));
+    const acceptIndex = events.findIndex((event) => event.startsWith("ask:Accept this DAG?"));
+    expect(warningIndex).toBeGreaterThanOrEqual(0);
+    expect(acceptIndex).toBeGreaterThan(warningIndex);
+    expect(outcome.result.warnings).toEqual([warning]);
   });
 
   it("a draft whose team drifts from --team enters the repair loop like a schema failure", async () => {

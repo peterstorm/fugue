@@ -105,6 +105,17 @@ export const describedToMermaid = (dag: DescribedDag): string => {
   }
 
   for (const node of dag.nodes) {
+    if (node.kind === "map") {
+      const gather = node.mapping.gather === null
+        ? "gather: custom reducer"
+        : `gather: collect → ${node.mapping.gather.field}`;
+      const label = escapeLabel(
+        `${node.id}<br/>map<br/>width: ${node.mapping.widthFrom} × n ` +
+        `(0 ≤ n ≤ ${node.mapping.maxWidth})<br/>child: ${node.mapping.childDagId}<br/>${gather}`,
+      );
+      lines.push(`    ${safeId(node.id)}[["${label}"]]`);
+      continue;
+    }
     const label = escapeLabel(`${node.id}<br/>${node.kind}`);
     // Human-review gates suspend the run — render as a hexagon and tag the class.
     lines.push(

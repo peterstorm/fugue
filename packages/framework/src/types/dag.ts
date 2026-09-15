@@ -3,20 +3,88 @@ import type { EvalJudgeNodeDef } from "./eval-judge.js";
 import type { z } from "zod";
 import type { FrameworkError } from "./errors.js";
 import type { Result } from "./result.js";
-import type { WidthFrom, MaxWidth } from "./map-width.js";
+import { asWidthFrom, type WidthFrom, type MaxWidth } from "./map-width.js";
 import type { DagId, NodeId, DagInputId } from "./ids.js";
 import type { Confidence, ConfidenceBucket } from "./confidence.js";
+import { resourceName, type ResourceName } from "./witness.js";
+
+const AUTHORED_COLLECT_GATHER: unique symbol = Symbol("fugue.authored-collect-gather");
+
+export type AuthoredCollectGather = Readonly<{
+  readonly kind: "collect";
+  readonly field: string;
+  readonly [AUTHORED_COLLECT_GATHER]: true;
+}>;
+
+export type AuthoredCollectBinding = Readonly<{
+  readonly outputSchema: unknown;
+  readonly childOutputSchema: unknown;
+  readonly reduce: unknown;
+}>;
+
+const authoredCollectBindings = new WeakMap<AuthoredCollectGather, AuthoredCollectBinding>();
+
+/** Internal issuer for truthful collect metadata; intentionally absent from the public barrel. */
+export const authoredCollectGather = (
+  field: string,
+  binding: AuthoredCollectBinding,
+): AuthoredCollectGather => {
+  const gather = Object.freeze({
+    kind: "collect" as const,
+    field,
+    [AUTHORED_COLLECT_GATHER]: true as const,
+  });
+  authoredCollectBindings.set(gather, Object.freeze({ ...binding }));
+  return gather;
+};
+
+/** Prove both the token's complete shape and its exact constructor-issued binding. */
+export const isAuthoredCollectGather = (
+  value: unknown,
+  binding: AuthoredCollectBinding,
+): value is AuthoredCollectGather => {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Readonly<Record<PropertyKey, unknown>>;
+  if (candidate[AUTHORED_COLLECT_GATHER] !== true || candidate.kind !== "collect" ||
+      typeof candidate.field !== "string" || asWidthFrom(candidate.field) === undefined) {
+    return false;
+  }
+  const issued = authoredCollectBindings.get(value as AuthoredCollectGather);
+  return issued !== undefined &&
+    issued.outputSchema === binding.outputSchema &&
+    issued.childOutputSchema === binding.childOutputSchema &&
+    issued.reduce === binding.reduce;
+};
+
+declare const __mapFanResource: unique symbol;
+type MapFanResource = ResourceName & { readonly [__mapFanResource]: true };
+
+/** One canonical side-effect resource for durable mapped-fan completions. */
+export const MAP_FAN_RESOURCE = resourceName("checkpoint:fan") as MapFanResource;
 
 /** Runtime-owned fan body; author configuration is captured once, not closed over. */
 export type MapNodeDef<I = unknown, ChildOut = unknown, O = unknown> =
-  Omit<NodeDef<I, O>, "kind" | "run" | "requires"> & Readonly<{
+  Omit<NodeDef<I, O>, "kind" | "run" | "requires" | "isSource" | "sideEffects" | "confidence"> & Readonly<{
     kind: "map";
+    /** A map consumes upstream input and can never be a source root. */
+    isSource?: false;
     requires: readonly ["checkpointer"];
+    /** Fan completion persistence is the map's fixed side-effect policy. */
+    sideEffects: Readonly<{
+      kind: "writes";
+      resource: MapFanResource;
+      idempotencyKey?: never;
+      extractConditionedOn?: never;
+      extractNewWitness?: never;
+    }>;
+    confidence: Readonly<{ readonly mode: "none" }>;
     mapping: Readonly<{
       child: DagDef;
       childOutputSchema: z.ZodType<ChildOut>;
       widthFrom: WidthFrom;
       maxWidth: MaxWidth;
+      /** Present only when the runtime issued the closed collect reducer/schema pair. */
+      authoredGather?: AuthoredCollectGather;
       reduce: (results: readonly ChildOut[]) => Result<O, FrameworkError>;
     }>;
   }>;
@@ -54,8 +122,8 @@ export type ConsistentNodes<Nodes extends NodesRecord> = {
  *
  * When `minConfidence` is set, the framework short-circuits: if the
  * upstream confidence bucket is below `minConfidence` (per
- * `CONFIDENCE_ORDER`), the predicate is recorded as `{ matched: false,
- * reason: "below-min-confidence" }` and the check function is never
+ * `CONFIDENCE_ORDER`), the predicate is recorded as
+ * `{ outcome: "below-min-confidence" }` and the check function is never
  * called.
  *
  * @see RouteEvidence for how predicate results are recorded.
@@ -83,9 +151,9 @@ export type PredicateResult = {
   | { readonly outcome: "threw"; readonly message: string }
 );
 
-// evaluatePredicate has been moved to `dag-runtime/conditional.ts` where
-// it belongs (it contains business logic, not type definitions). Import from
-// `dag-runtime/conditional.js` directly.
+// evaluatePredicate lives in `dag-runtime/routing.ts` where it belongs
+// (it contains business logic, not type definitions). Import from
+// `dag-runtime/routing.js` directly.
 
 /**
  * Edge variants (runtime shape, after `defineDag` strips literal id types).
@@ -197,18 +265,19 @@ export interface DagDefInput<Nodes extends NodesRecord = NodesRecord> {
 
 // ---------------------------------------------------------------------------
 // DagDef — branded, validated DagDefInput in the runtime-friendly array
-// shape. Only `defineDag` produces values of this type, so `runDag` /
-// `runDagStateful` / `compileDagToMachine` can refuse hand-rolled literals
-// at the type level.
+// shape. `validateDagShape` is the issuer; public constructors delegate to
+// that gate, so `runDag` / `runDagStateful` / `compileDagToMachine` can refuse
+// hand-rolled literals at the type level.
 // ---------------------------------------------------------------------------
 
 declare const __dagValidated: unique symbol;
 
 /**
  * The closed set of DAG shapes the framework knows about — the single source of
- * truth. Both `DagProvenance` (below) and the CLI's `SHAPES` / scaffold-helper
- * union derive from this tuple, so a new shape is added in exactly one place and
- * the projections cannot drift apart.
+ * truth. Both `DagProvenance` (below) and the CLI's `Shape` type
+ * (`cli/new-templates.ts`, re-exporting this tuple) / scaffold-helper union
+ * derive from it, so a new shape is added in exactly one place and the
+ * projections cannot drift apart.
  */
 export const DAG_SHAPES = ["linear", "fan-out", "diamond", "router", "sources"] as const;
 

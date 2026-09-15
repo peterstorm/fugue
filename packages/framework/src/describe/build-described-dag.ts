@@ -2,14 +2,14 @@
 // by both `fugue describe` (CLI) and `GET /dags/:id/manifest` (host). Keeping
 // the assembly in one place prevents the two surfaces from drifting.
 //
-// Pure function: takes a branded `DagDef` plus optional context (registered
-// prompts, input schema), returns either a `DescribedDag` or a structured
-// `FrameworkError` if the DAG's topology can't be sorted (a registry/
-// validator invariant violation, never expected in practice).
+// Deterministic assembly with an optional diagnostic callback: takes a branded
+// `DagDef` plus context and returns either a `DescribedDag` or a structured
+// `FrameworkError` if topology cannot be sorted. Schema serialization warnings
+// may invoke the caller-provided sink while leaving the payload best-effort.
 
 import { match } from "ts-pattern";
 import type { z } from "zod";
-import type { DagDef } from "../types/dag.js";
+import type { DagDef, DagNodeDef } from "../types/dag.js";
 import type { FrameworkError } from "../types/errors.js";
 import { type Result, ok, err } from "../types/result.js";
 import { topoSort } from "../shared/topo.js";
@@ -24,13 +24,29 @@ import { zodToJsonSchema } from "../llm/zod-schema.js";
  * Per-node describe payload. Stable JSON contract — adding a field is a minor
  * version bump for LLM authoring consumers.
  */
-export interface DescribedNode {
+interface DescribedNodeBase {
   readonly id: string;
-  readonly kind: string;
   readonly sideEffects: string;
   readonly requires: readonly string[];
   readonly humanReview: boolean;
 }
+
+export interface DescribedMap {
+  readonly widthFrom: string;
+  readonly maxWidth: number;
+  readonly childDagId: string;
+  readonly gather: Readonly<{ readonly kind: "collect"; readonly field: string }> | null;
+}
+
+export type DescribedNode =
+  | (DescribedNodeBase & {
+      readonly kind: "map";
+      readonly mapping: DescribedMap;
+    })
+  | (DescribedNodeBase & {
+      readonly kind: Exclude<DagNodeDef["kind"], "map">;
+      readonly mapping?: never;
+    });
 
 /**
  * Per-edge describe payload — discriminated on `kind`. The conditional
@@ -97,10 +113,9 @@ export interface BuildDescribedDagInput {
   readonly description: string;
   readonly version: string;
   /**
-   * Authoritative set of prompts the host has loaded for this DAG. When
-   * supplied, takes precedence over node introspection for the `prompts`
-   * array. The CLI omits this (no host context); the host passes
-   * `RegisteredDag.prompts`.
+   * Prompts the host loaded for this DAG. Describe unions these keys with
+   * node-introspected prompt names so omissions on either surface stay visible.
+   * The CLI omits this (no host context); the host passes `RegisteredDag.prompts`.
    */
   readonly loadedPrompts?: ReadonlyMap<string, string>;
   /** Optional sink for non-fatal warnings (schema serialization failures). */
@@ -120,8 +135,11 @@ const safeZodToJsonSchema = (
   schema: unknown,
   onError: (e: unknown) => void,
 ): Record<string, unknown> | null => {
-  if (!isZodSchema(schema)) return null;
+  if (schema === undefined) return null;
   try {
+    if (!isZodSchema(schema)) {
+      throw new TypeError("expected a Zod schema");
+    }
     return zodToJsonSchema(schema);
   } catch (e) {
     // Warning delivery is diagnostic-only. A broken sink cannot replace the
@@ -137,37 +155,54 @@ const safeZodToJsonSchema = (
 
 const describeNode = (
   node: DagDef["nodes"][number],
-): DescribedNode => ({
-  id: node.id as string,
-  kind: node.kind,
-  sideEffects: node.sideEffects.kind,
-  requires: [...(node.requires as readonly string[])],
-  humanReview: node.humanReview !== undefined,
-});
+): DescribedNode => {
+  const base: DescribedNodeBase = {
+    id: node.id,
+    sideEffects: node.sideEffects.kind,
+    requires: [...(node.requires as readonly string[])],
+    humanReview: node.humanReview !== undefined,
+  };
+  if (node.kind !== "map") return { ...base, kind: node.kind };
+  return {
+    ...base,
+    kind: "map",
+    mapping: {
+      widthFrom: node.mapping.widthFrom,
+      maxWidth: node.mapping.maxWidth,
+      childDagId: node.mapping.child.id,
+      gather: node.mapping.authoredGather === undefined
+        ? null
+        : Object.freeze({
+            kind: node.mapping.authoredGather.kind,
+            field: node.mapping.authoredGather.field,
+          }),
+    },
+  };
+};
 
 const describeEdge = (e: DagDef["edges"][number]): DescribedEdge =>
   match(e)
     .with({ kind: "unconditional" }, (edge) => ({
-      from: edge.from as string,
-      to: edge.to as string,
+      from: edge.from,
+      to: edge.to,
       kind: "unconditional" as const,
     }))
     .with({ kind: "conditional" }, (edge) => ({
-      from: edge.from as string,
-      to: edge.to as string,
+      from: edge.from,
+      to: edge.to,
       kind: "conditional" as const,
       predicateLabel: edge.when.label,
       predicateVersion: edge.when.version,
     }))
     .with({ kind: "default" }, (edge) => ({
-      from: edge.from as string,
-      to: edge.to as string,
+      from: edge.from,
+      to: edge.to,
       kind: "default" as const,
     }))
     .exhaustive();
 
-const collectCapabilities = (dag: DagDef): string[] =>
-  [...new Set(runtimeNodeInventory(dag).nodes.flatMap((node) => node.requires))].sort();
+const collectCapabilities = (nodes: DagDef["nodes"]): string[] =>
+  [...new Set(nodes.flatMap((node) => node.requires))].sort();
 
 /**
  * Type-narrowed accessor for the `promptName` field on LLM-kind nodes. The
@@ -186,19 +221,19 @@ const readNodePromptName = (
 };
 
 const collectPromptNames = (
-  dag: DagDef,
+  nodes: DagDef["nodes"],
   loadedPrompts: ReadonlyMap<string, string> | undefined,
 ): string[] => {
   const set = new Set<string>();
-  // When the host supplied its authoritative prompt set, seed from it first
-  // — it's the ground truth for "what's actually been loaded for this DAG".
+  // Seed from the host-loaded prompt set when available, then augment it with
+  // node-introspected references below so omissions on either surface remain visible.
   if (loadedPrompts) {
     for (const name of loadedPrompts.keys()) set.add(name);
   }
   // Also walk nodes so the CLI (which has no host context) still surfaces
   // promptName references, and so the host's manifest stays honest if the
   // two surfaces drift.
-  for (const node of dag.nodes) {
+  for (const node of nodes) {
     const name = readNodePromptName(node);
     if (name !== null) set.add(name);
   }
@@ -214,7 +249,7 @@ const outputSchemaOf = (
   if (!node) return null;
   return safeZodToJsonSchema(node.outputSchema, (e) => {
     warningSink?.onSchemaSerializationError(
-      { field: "outputSchema", nodeId: node.id as string },
+      { field: "outputSchema", nodeId: node.id },
       e,
     );
   });
@@ -240,13 +275,14 @@ export const buildDescribedDag = (
   const { dag, warningSink } = input;
   const waves = topoSort(dag);
   if (!waves.ok) return err(waves.error);
+  const runtimeNodes = runtimeNodeInventory(dag).nodes;
 
   const waveIds: readonly (readonly string[])[] = waves.value.map((wave) =>
-    wave.map((id) => id as string),
+    wave.map((id) => id),
   );
 
   return ok({
-    id: dag.id as string,
+    id: dag.id,
     route: input.route,
     description: input.description,
     version: input.version,
@@ -255,11 +291,11 @@ export const buildDescribedDag = (
     }),
     outputSchema: outputSchemaOf(dag, warningSink),
     outputNodeId:
-      dag.outputNodeId !== undefined ? (dag.outputNodeId as string) : null,
+      dag.outputNodeId !== undefined ? dag.outputNodeId : null,
     nodes: dag.nodes.map(describeNode),
     edges: dag.edges.map(describeEdge),
     waves: waveIds,
-    prompts: collectPromptNames(dag, input.loadedPrompts),
-    capabilities: collectCapabilities(dag),
+    prompts: collectPromptNames(runtimeNodes, input.loadedPrompts),
+    capabilities: collectCapabilities(runtimeNodes),
   });
 };

@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "kind": "loom-verification-manifest",
+  "checks": [
+    {
+      "id": "project:authored-map-regression",
+      "scope": "wave",
+      "executable": "bun",
+      "args": [
+        "test",
+        "packages/framework/src/__tests__/cli/authored-map.test.ts",
+        "--reporter=junit",
+        "--reporter-outfile=.loom/completion-reports/authored-map-regression.junit.xml"
+      ],
+      "cwd": ".",
+      "timeoutMs": 300000,
+      "report": {
+        "kind": "required-file",
+        "path": ".loom/completion-reports/authored-map-regression.junit.xml"
+      }
+    }
+  ]
+}

@@ -2,16 +2,17 @@
 // convergence, Phase B3).
 //
 // The loop is an explicit machine: interview → draft → validate → present →
-// refine/accept. THE LLM'S ONLY OUTPUT CHANNEL IS THE AuthoredDag JSON —
-// every turn is `sendStructured` against a closed Zod schema, graph code is
-// always generated deterministically (`buildAuthoredScaffold`), and every
+// refine/accept. The model's only channel is a normalized `ComposeTurn` union:
+// either clarifying questions or an AuthoredDag draft. AuthoredDag JSON is the
+// only GRAPH-ARTIFACT channel; code is always generated deterministically
+// (`buildAuthoredScaffold`), and every
 // draft is proven through the real gauntlet before the user sees it:
 // codegen → `import` through `defineDag` (defineDag's structural checks,
 // throws) → `fugue lint` (fan-in keys, passthrough, shape hints) → `fugue
 // describe` (the DescribedDag whose Mermaid render — `describedToMermaid`,
 // the same renderer `fugue visualize` uses — is what the user approves).
-// Violations feed back to the LLM as structured JSON events, not prose. The
-// LLM never hand-writes `defineDag`.
+// Violations feed back as JSON-serialized diagnostics embedded in the textual
+// conversation. The LLM never hand-writes `defineDag`.
 //
 // The draft payload crosses the wire as `unknown` and is parsed by
 // `parseAuthoredDag` INSIDE the loop — a schema-invalid draft enters the
@@ -27,6 +28,7 @@ import { z } from "zod";
 import type { LlmClient } from "../types/llm.js";
 import { formatFrameworkError } from "../types/errors.js";
 import { nodeId } from "../types/ids.js";
+import { safeErrorMessage, safeErrorStack } from "../types/safe-error.js";
 import { parseAuthoredDag, type AuthoredDag } from "./authored.js";
 import { resolveRoot } from "./paths.js";
 import { runGauntlet, type GauntletResult } from "./gauntlet.js";
@@ -94,15 +96,15 @@ export interface ComposeOptions {
   readonly force?: boolean;
   /**
    * Max clarifying-question rounds before the model must draft. Default 2.
-   * Must be a non-negative integer — `runCompose` throws otherwise (NaN /
-   * negative / fractional values would silently disable the bound).
+   * Must be a non-negative safe integer — `runCompose` throws otherwise.
+   * NaN/infinity disable comparisons; unsafe counters eventually saturate.
    */
   readonly maxQuestionRounds?: number;
   /**
    * Max repair rounds PER DRAFT (schema-validation failures and gauntlet
    * failures both count; the budget resets when a refinement produces a new
    * draft). `rounds.repairs` in the outcome stays cumulative. Default 3.
-   * Must be a non-negative integer — `runCompose` throws otherwise.
+   * Must be a non-negative safe integer — `runCompose` throws otherwise.
    */
   readonly maxRepairRounds?: number;
 }
@@ -175,8 +177,9 @@ type ComposeOutcome =
       /**
        * `gauntlet-failed` = an environment-class failure of the proving
        * machinery. `cause` carries the doc's own taxonomy as a discriminant:
-       * `"threw"` — the gauntlet threw (ENOSPC, EACCES, …), `problems` is the
-       * stack; `"unrepairable-errors"` — it completed normally but the verdict
+       * `"threw"` — the gauntlet threw (ENOSPC, EACCES, …), `problems` carries
+       * a safely inspected stack or total fallback; `"unrepairable-errors"` —
+       * it completed normally but the verdict
        * carried errors outside the repairable allowlist (import-failed/
        * analyzer-failed/describe-failed/no-default-export/missing-dag-field),
        * `problems` is the formatted verdict (unrepairable first, any
@@ -194,8 +197,9 @@ type ComposeOutcome =
       readonly ok: false;
       /**
        * The accepted draft could not be written. `cause`: `"threw"` — the
-       * scaffold writer threw (environment failure; `problems` is the stack);
-       * `"rejected"` — it returned a typed refusal (`NewResult`'s problems,
+       * scaffold writer threw (environment failure; `problems` carries a safely
+       * inspected stack or total fallback); `"rejected"` — it returned a typed
+       * refusal (`NewResult`'s problems,
        * e.g. a non-empty target dir without --force).
        */
       readonly reason: "write-failed";
@@ -232,9 +236,7 @@ interface ParseComposeError {
 export const parseComposeArgs = (args: readonly string[]): ParsedComposeArgs | ParseComposeError => {
   const problems: string[] = [];
   let intent: string | undefined;
-  let parsedIntent: Intent | null = null;
   let team: string | undefined;
-  let parsedTeam: Kebab | null = null;
   let model: string | undefined;
   let owner: string | undefined;
   let root: string | undefined;
@@ -278,26 +280,25 @@ export const parseComposeArgs = (args: readonly string[]): ParsedComposeArgs | P
       });
   }
 
+  const parsedIntent = intent === undefined ? null : parseIntent(intent);
   if (intent === undefined) {
     problems.push('missing intent string (e.g. `fugue compose "Process refunds…" --team payments`)');
-  } else {
+  } else if (parsedIntent === null) {
     // A blank intent gives the model nothing to draft from — reject it here
     // rather than burning an LLM round on an empty brief. `parseIntent` is
     // the single producer of the branded intent.
-    parsedIntent = parseIntent(intent);
-    if (parsedIntent === null) problems.push("intent must be non-empty");
+    problems.push("intent must be non-empty");
   }
+
+  const parsedTeam = team === undefined ? null : parseKebab(team);
   if (team === undefined) {
     problems.push("missing --team <team>");
-  } else {
+  } else if (parsedTeam === null) {
     // The team lands in the AuthoredDag (kebab-case there) and in the
     // dags/<team>/ directory name — reject junk at the boundary instead of
     // letting the first LLM draft fail schema validation on our own flag.
     // `parseKebab` is the single producer of the branded team.
-    parsedTeam = parseKebab(team);
-    if (parsedTeam === null) {
-      problems.push(`--team '${team}' must be kebab-case (lowercase, digits, single dashes)`);
-    }
+    problems.push(`--team '${team}' must be kebab-case (lowercase, digits, single dashes)`);
   }
 
   if (parsedIntent === null || parsedTeam === null || problems.length > 0) {
@@ -354,6 +355,7 @@ const NODE_KIND_GUIDANCE = {
   llm: "model call — a confidence bucket is added automatically",
   "human-review": "approval gate; NO output field; linear shape only, never first",
   source: "context-only read; sources shape only",
+  map: "bounded runtime fan over an inline static child; NO output field; collect gather only",
 } satisfies Record<AuthoredNodeKind, string>;
 
 /** Structure syntax + guidance per shape (rendered as the shape table). */
@@ -389,12 +391,17 @@ Respond with exactly one action:
 AuthoredDag rules (closed vocabulary — the schema rejects anything else):
 - fugueAuthored: 1. name/team/node ids/case labels: kebab-case (name and
   node ids must start with a letter).
-- input + node outputs are field lists; field types are ONLY
-  {"kind":"string"|"number"|"boolean"} or {"kind":"enum","values":[...≥2]}.
+- input + node outputs are field lists; field types are
+  {"kind":"string"|"number"|"boolean"}, {"kind":"enum","values":[...≥2]},
+  or {"kind":"array","element":{"fields":[...]}}.
+- A map node is one node inside an existing structure. It has widthFrom (one
+  direct array field), positive maxWidth, an inline child {id,nodes,structure},
+  and gather:{kind:"collect",field}. It omits output; collect derives it.
+  Child nodes exclude map and human-review; a child fan-out requires a join.
 - Field names must be valid JS identifiers. Node ids must not be JS reserved
   words and must not collide with the identifiers codegen derives from them —
-  reserved ids: "dag", "input", "opts", "ok", "registration", "z",
-  "confidence", plus any id that camelCases to a framework import/const
+  reserved ids: "dag", "input", "opts", "registration", "z", "confidence",
+  plus any id that camelCases to a framework import/const
   (e.g. "create-fetch-node" → createFetchNode, "define-router" →
   defineRouter). Also avoid "<x>-node" ids that
   would shadow a sibling llm node named "<x>" (e.g. "llm-node" collides only
@@ -484,13 +491,6 @@ export const classifyAnswer = (text: string): AnswerClass => {
 };
 
 /**
- * Guard a programmatic round budget: NaN / negative / fractional values
- * would silently disable the bound (`rounds.questions >= NaN` is always
- * false — unbounded paid turns). Malformed budgets are a deterministic
- * caller bug (the CLI never sets these options), so the boundary throws
- * rather than returning a ComposeOutcome arm.
- */
-/**
  * THE one "input stream died" outcome. Both prompt sites (question rounds and
  * the accept prompt) hit the same wall and must report it identically — same
  * cause, same rounds, and the most recent gauntlet-proven draft carried along
@@ -507,11 +507,29 @@ const inputClosed = (
   ...(lastProven !== null ? { draft: lastProven } : {}),
 });
 
+/**
+ * Guard a programmatic round budget. NaN/infinity can disable comparisons;
+ * fractional values alter the effective bound; unsafe counters eventually
+ * saturate. Malformed budgets are caller bugs, so this boundary throws.
+ */
 const requireRoundBudget = (value: number, name: string): number => {
-  if (!Number.isInteger(value) || value < 0) {
-    throw new Error(`${name} must be a non-negative integer, got ${value}`);
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${name} must be a non-negative integer within the safe range, got ${value}`);
   }
   return value;
+};
+
+/** Total rendering for any value rejected by an injected compose collaborator. */
+const caughtProblem = (cause: unknown): string =>
+  safeErrorStack(cause) ?? safeErrorMessage(cause);
+
+/** Render untrusted model values without adding an exception channel to repair. */
+const promptJson = (value: unknown): string => {
+  try {
+    return JSON.stringify(value, null, 2) ?? "null";
+  } catch (cause) {
+    return `[unserializable value omitted: ${safeErrorMessage(cause)}]`;
+  }
 };
 
 const summarize = (dag: AuthoredDag): string =>
@@ -565,19 +583,23 @@ export const runCompose = async (
 
   const turn = async (extra?: string): Promise<ComposeTurn | { readonly error: string }> => {
     const user = [...conversation, ...(extra !== undefined ? [extra] : [])].join("\n\n");
-    const res = await llm.sendStructured({
-      system: SYSTEM_PROMPT,
-      user,
-      model,
-      schema: ComposeTurnSchema,
-      nodeId: COMPOSE_NODE_ID,
-      // Deterministic-core: drafting/repair turns are structured edits of a
-      // closed JSON document, not creative writing — pin sampling to 0 so a
-      // replayed conversation is as reproducible as the provider allows.
-      temperature: 0,
-    });
-    if (!res.ok) return { error: formatFrameworkError(res.error) };
-    return res.value.output;
+    try {
+      const res = await llm.sendStructured({
+        system: SYSTEM_PROMPT,
+        user,
+        model,
+        schema: ComposeTurnSchema,
+        nodeId: COMPOSE_NODE_ID,
+        // Deterministic-core: drafting/repair turns are structured edits of a
+        // closed JSON document, not creative writing — pin sampling to 0 so a
+        // replayed conversation is as reproducible as the provider allows.
+        temperature: 0,
+      });
+      if (!res.ok) return { error: formatFrameworkError(res.error) };
+      return res.value.output;
+    } catch (cause) {
+      return { error: caughtProblem(cause) };
+    }
   };
 
   type DraftAttempt =
@@ -603,8 +625,8 @@ export const runCompose = async (
     draftRepairs++;
     rounds.repairs++;
     return correctedDraftTurn(
-      `Your draft failed schema validation. Problems:\n${JSON.stringify(problems, null, 2)}\n` +
-        `Current draft:\n${JSON.stringify(first.dag, null, 2)}\n` +
+      `Your draft failed schema validation. Problems:\n${promptJson(problems)}\n` +
+        `Current draft:\n${promptJson(first.dag)}\n` +
         `Return a corrected {"action":"draft","dag":{...}}.`,
     );
   };
@@ -673,8 +695,8 @@ export const runCompose = async (
           reason: "gauntlet-failed",
           cause: "threw",
           // Environment failures are debugged from this outcome alone — keep
-          // the stack, not just the message.
-          problems: [e instanceof Error ? (e.stack ?? e.message) : String(e)],
+          // the stack when one can be inspected safely.
+          problems: [caughtProblem(e)],
           rounds,
           draft: d,
         },
@@ -711,8 +733,8 @@ export const runCompose = async (
       draftRepairs++;
       rounds.repairs++;
       const attempt = await correctedDraftTurn(
-        `Your draft failed validation. Structured violations:\n${JSON.stringify(verdict.errors, null, 2)}\n` +
-          `Current draft:\n${JSON.stringify(draft, null, 2)}\n` +
+        `Your draft failed validation. Structured violations:\n${promptJson(verdict.errors)}\n` +
+          `Current draft:\n${promptJson(draft)}\n` +
           `Return a corrected {"action":"draft","dag":{...}}.`,
       );
       if (!attempt.ok) return attempt.outcome;
@@ -728,6 +750,9 @@ export const runCompose = async (
     // `fugue visualize`), not a re-encoding of the AuthoredDag. The user
     // approves the real thing.
     io.say(`\n${summarize(draft)}\n\n${describedToMermaid(verdict.described)}\n`);
+    if (verdict.warnings.length > 0) {
+      io.say(`Warnings:\n${verdict.warnings.map((warning) => `  - ${warning}`).join("\n")}`);
+    }
     if (verdict.advisories.length > 0) {
       io.say(`Advisories:\n${verdict.advisories.map((a) => `  - ${a.kind}: ${a.message}`).join("\n")}`);
     }
@@ -772,7 +797,7 @@ export const runCompose = async (
           ok: false,
           reason: "write-failed",
           cause: "threw",
-          problems: [e instanceof Error ? (e.stack ?? e.message) : String(e)],
+          problems: [caughtProblem(e)],
           rounds,
           draft,
         };
@@ -797,7 +822,7 @@ export const runCompose = async (
     draftRepairs = 0; // a refinement is a new draft — fresh repair budget
     conversation.push(`Refinement request: ${classified.text}`);
     const attempt = await correctedDraftTurn(
-      `Current accepted-so-far draft:\n${JSON.stringify(draft, null, 2)}\n` +
+      `Current accepted-so-far draft:\n${promptJson(draft)}\n` +
         `Apply the refinement above and return {"action":"draft","dag":{...}}.`,
       "refined",
     );

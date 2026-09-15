@@ -5,49 +5,26 @@ import type {
   EdgeDefRawInput,
 } from "../types/dag.js";
 import type { NodesRecord, MapNodeDef } from "../types/dag.js";
-import { isConditionalEdge, isDefaultEdge } from "../types/dag.js";
+import { MAP_FAN_RESOURCE, isAuthoredCollectGather, isConditionalEdge, isDefaultEdge } from "../types/dag.js";
 import { asMaxWidth, asWidthFrom } from "../types/map-width.js";
 import { safeErrorMessage } from "../types/safe-error.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { EvalJudgeNodeDef } from "../types/eval-judge.js";
 import { frameworkError } from "../types/error-factories.js";
 import type { NodeId } from "../types/ids.js";
-import { nodeId, tryNodeId, dagId, DAG_INPUT, isDagInput } from "../types/ids.js";
+import { nodeId, tryNodeId, tryDagId, DAG_INPUT, isDagInput } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
 import { CONFIDENCE_ORDER, type ConfidenceBucket } from "../types/confidence.js";
 
-/**
- * Normalize a raw input edge into the tagged-discriminant `EdgeDef`. Private
- * to this module — only called after `validateDagShape` has confirmed that
- * `from`/`to` reference known node IDs.
- */
-// Brand an edge endpoint. `$input` (the virtual request source) bypasses the
-// `nodeId()` regex — `$` is not a legal id char by construction — and brands to
-// the reserved `DAG_INPUT` constant instead. Only ever legal on an edge `from`;
-// the validator rejects `$input` as a `to` before this is reached for targets.
-const brandEndpoint = (s: string): NodeId => (isDagInput(s) ? DAG_INPUT : nodeId(s));
-
-const normalizeEdge = (e: EdgeDefRawInput): EdgeDef => {
+/** Normalize a shape-checked raw edge with its already-parsed endpoint proofs. */
+const normalizeEdge = (e: EdgeDefRawInput, from: NodeId, to: NodeId): EdgeDef => {
   if ("kind" in e && e.kind === "default") {
-    return Object.freeze({
-      from: brandEndpoint(e.from),
-      to: brandEndpoint(e.to),
-      kind: "default" as const,
-    });
+    return Object.freeze({ from, to, kind: "default" as const });
   }
   if ("when" in e) {
-    return Object.freeze({
-      from: brandEndpoint(e.from),
-      to: brandEndpoint(e.to),
-      kind: "conditional" as const,
-      when: e.when,
-    });
+    return Object.freeze({ from, to, kind: "conditional" as const, when: e.when });
   }
-  return Object.freeze({
-    from: brandEndpoint(e.from),
-    to: brandEndpoint(e.to),
-    kind: "unconditional" as const,
-  });
+  return Object.freeze({ from, to, kind: "unconditional" as const });
 };
 
 /** Own the validated routing policy instead of retaining caller-owned state. */
@@ -64,6 +41,124 @@ const validationErr = (nodeId: NodeId, message: string): FrameworkError => ({
   nodeId,
   message,
 });
+
+/** Contain opaque schema callbacks used by the source/unit correlation check. */
+const sourceAcceptsUndefined = (
+  node: DagDef["nodes"][number],
+): Result<boolean, FrameworkError> => {
+  try {
+    return ok(node.inputSchema.safeParse(undefined).success);
+  } catch (cause) {
+    return err(validationErr(
+      node.id,
+      `Source node '${node.id}' inputSchema probe threw: ${safeErrorMessage(cause)}`,
+    ));
+  }
+};
+
+/** Own retry overrides before any reconstruction can observe caller accessors. */
+const mergeRetryLimits = (
+  existing: Readonly<Record<string, number>> | undefined,
+  overrides: Readonly<Record<string, number>>,
+): Result<Readonly<Record<string, number>>, FrameworkError> => {
+  try {
+    return ok({ ...(existing ?? {}), ...overrides });
+  } catch (cause) {
+    return err(validationErr(
+      nodeId("__dag__"),
+      `invalid retryLimits override capture: ${safeErrorMessage(cause)}`,
+    ));
+  }
+};
+
+/**
+ * Capture every node-owned policy container once before validation. Schemas and
+ * executable closures remain opaque references; the data around them becomes
+ * plain parser-owned state so accessors cannot change between proof and issue.
+ */
+const captureNodeInput = (
+  node: DagDef["nodes"][number],
+): Result<DagDef["nodes"][number], FrameworkError> => {
+  // Hand-built-node defensive obligation: sideEffects is a required NodeDef
+  // field, but `{ ...captured.sideEffects }` yields `{}` for undefined with no
+  // rejection, so a TS-bypassing dynamically-built node without a sideEffects
+  // container would otherwise carry `sideEffects: undefined` into the validated
+  // DagDef and the stable describe payload. Reject it here with the same
+  // defensive posture the gate applies to hand-built isSource/inputSchema
+  // inconsistencies and retry numeric domains. Maps are rejected separately by
+  // snapshotMapping (sideEffects?.kind !== "writes").
+  if (node.kind !== "map" && (node as { readonly sideEffects?: unknown }).sideEffects === undefined) {
+    return err(validationErr(
+      nodeId("__dag__"),
+      `node '${safeErrorMessage(node.id)}' is missing sideEffects — every NodeDef carries a side-effect profile with a kind`,
+    ));
+  }
+  try {
+    const captured = { ...node };
+    const retry = captured.retry === undefined
+      ? undefined
+      : {
+          ...captured.retry,
+          ...(captured.retry.backoffMs !== undefined
+            ? { backoffMs: [...captured.retry.backoffMs] as [number, ...number[]] }
+            : {}),
+        };
+    const common = {
+      ...captured,
+      requires: [...captured.requires],
+      sideEffects: { ...captured.sideEffects },
+      confidence: { ...captured.confidence },
+      ...(captured.humanReview !== undefined
+        ? { humanReview: { ...captured.humanReview } }
+        : {}),
+      ...(retry !== undefined ? { retry } : {}),
+    };
+    return ok((captured.kind === "map"
+      ? { ...common, mapping: { ...captured.mapping } }
+      : common) as DagDef["nodes"][number]);
+  } catch (cause) {
+    return err(validationErr(
+      nodeId("__dag__"),
+      `invalid node capture: ${safeErrorMessage(cause)}`,
+    ));
+  }
+};
+
+/** Capture the complete raw DAG envelope before any invariant reads. */
+const captureDagInput = (
+  input: DagDefInput,
+): Result<DagDefInput, FrameworkError> => {
+  try {
+    const captured = { ...input };
+    const nodeEntries: [string, DagDef["nodes"][number]][] = [];
+    for (const [key, node] of Object.entries(captured.nodes)) {
+      const nodeCapture = captureNodeInput(node);
+      if (!nodeCapture.ok) return nodeCapture;
+      nodeEntries.push([key, nodeCapture.value]);
+    }
+    const edges = captured.edges.map((raw) => {
+      const edge = { ...raw };
+      if (!("when" in edge)) return edge;
+      const predicate = edge.when;
+      return typeof predicate === "object" && predicate !== null && !Array.isArray(predicate)
+        ? { ...edge, when: { ...predicate } }
+        : edge;
+    }) as readonly EdgeDefRawInput[];
+    return ok({
+      ...captured,
+      nodes: Object.fromEntries(nodeEntries),
+      edges,
+      ...(captured.retryLimits !== undefined
+        ? { retryLimits: { ...captured.retryLimits } }
+        : {}),
+    });
+  } catch (cause) {
+    return err(validationErr(
+      nodeId("__dag__"),
+      `invalid DAG capture: ${safeErrorMessage(cause)}`,
+    ));
+  }
+};
 
 /** Own evaluator data, retaining opaque executable references rather than freezing closures. */
 const snapshotEvalJudges = (
@@ -116,8 +211,7 @@ const snapshotNode = (
               ...(captured.retry.backoffMs !== undefined
                 ? {
                     backoffMs: Object.freeze([
-                      captured.retry.backoffMs[0],
-                      ...captured.retry.backoffMs.slice(1),
+                      ...captured.retry.backoffMs,
                     ] as [number, ...number[]]),
                   }
                 : {}),
@@ -175,18 +269,63 @@ const snapshotMapping = (
     if (!Array.isArray(requires) || requires.length !== 1 || requires[0] !== "checkpointer" || "run" in node) {
       return err(validationErr(id, `map '${id}' must declare only checkpointer and a mapping descriptor, not run`));
     }
-    const { child, childOutputSchema, reduce, widthFrom, maxWidth } = node.mapping;
+    const sourceFlag = (node as { readonly isSource?: unknown }).isSource;
+    const sideEffects = node.sideEffects;
+    const confidence = node.confidence as Readonly<Record<PropertyKey, unknown>>;
+    if ((sourceFlag !== undefined && sourceFlag !== false) || sideEffects?.kind !== "writes" ||
+        sideEffects.resource !== MAP_FAN_RESOURCE || sideEffects.idempotencyKey !== undefined ||
+        sideEffects.extractConditionedOn !== undefined || sideEffects.extractNewWitness !== undefined ||
+        confidence.mode !== "none" || Reflect.ownKeys(confidence).some((key) => key !== "mode")) {
+      return err(validationErr(id,
+        `map '${id}' must consume upstream input, write only '${MAP_FAN_RESOURCE}' fan completions, and declare no confidence extractor`));
+    }
+    const { child, childOutputSchema, reduce, widthFrom, maxWidth, authoredGather } = node.mapping;
+    const validGather = authoredGather === undefined || isAuthoredCollectGather(authoredGather, {
+      outputSchema: node.outputSchema,
+      childOutputSchema,
+      reduce,
+    });
     if (typeof widthFrom !== "string" || asWidthFrom(widthFrom) === undefined ||
         asMaxWidth(maxWidth) === undefined || typeof reduce !== "function" ||
-        typeof childOutputSchema?.safeParse !== "function") {
+        typeof childOutputSchema?.safeParse !== "function" || !validGather) {
       return err(validationErr(id, `map '${id}' requires a valid immutable mapping descriptor`));
     }
     const snapshot = snapshotMappedChild(id, child);
     if (!snapshot.ok) return snapshot;
-    return ok(Object.freeze({ child: snapshot.value, childOutputSchema, reduce, widthFrom, maxWidth }));
+    return ok(Object.freeze({
+      child: snapshot.value,
+      childOutputSchema,
+      reduce,
+      widthFrom,
+      maxWidth,
+      ...(authoredGather !== undefined ? { authoredGather } : {}),
+    }));
   } catch (cause) {
     return err(validationErr(id, `invalid map '${id}' descriptor: ${safeErrorMessage(cause)}`));
   }
+};
+
+/**
+ * Bucket `edges` by node id, pre-seeding an empty list for every known node so
+ * a lookup never returns undefined for a real node. `include` filters which
+ * edges participate — the three call sites differ ONLY in the key side and that
+ * filter, and hand-rolling the loop each time is how they would drift on the
+ * "skip edges pointing at unknown nodes" guard.
+ */
+const bucketEdgesBy = (
+  nodeIds: Iterable<NodeId>,
+  edges: readonly EdgeDef[],
+  key: (edge: EdgeDef) => string,
+  include: (edge: EdgeDef) => boolean = () => true,
+): Map<string, EdgeDef[]> => {
+  const buckets = new Map<string, EdgeDef[]>();
+  for (const id of nodeIds) buckets.set(id, []);
+  for (const edge of edges) {
+    if (!include(edge)) continue;
+    const list = buckets.get(key(edge));
+    if (list) list.push(edge);
+  }
+  return buckets;
 };
 
 /**
@@ -212,40 +351,26 @@ const snapshotMapping = (
  *     possible when authors construct nodes via factory helpers that take
  *     `id` explicitly.
  */
-/**
- * Bucket `edges` by node id, pre-seeding an empty list for every known node so
- * a lookup never returns undefined for a real node. `include` filters which
- * edges participate — the three call sites differ ONLY in the key side and that
- * filter, and hand-rolling the loop each time is how they would drift on the
- * "skip edges pointing at unknown nodes" guard.
- */
-const bucketEdgesBy = (
-  nodeIds: Iterable<NodeId>,
-  edges: readonly EdgeDef[],
-  key: (edge: EdgeDef) => string,
-  include: (edge: EdgeDef) => boolean = () => true,
-): Map<string, EdgeDef[]> => {
-  const buckets = new Map<string, EdgeDef[]>();
-  for (const id of nodeIds) buckets.set(id, []);
-  for (const edge of edges) {
-    if (!include(edge)) continue;
-    const list = buckets.get(key(edge));
-    if (list) list.push(edge);
-  }
-  return buckets;
-};
-
 export const validateDagShape = (
   input: DagDefInput,
   provenance?: DagDef["provenance"],
 ): Result<DagDef, FrameworkError> => {
-  const entries = Object.entries(input.nodes) as [
+  const validationNodeId = nodeId("__dag__");
+  const capture = captureDagInput(input);
+  if (!capture.ok) return capture;
+  const capturedInput = capture.value;
+  const parsedDagId = tryDagId(capturedInput.id);
+  if (!parsedDagId.ok) {
+    return err(validationErr(validationNodeId, parsedDagId.error));
+  }
+
+  const entries = Object.entries(capturedInput.nodes) as [
     string,
     DagDef["nodes"][number],
   ][];
 
   if (entries.length === 0) {
-    return err(validationErr(nodeId("__dag__"), `DAG '${input.id}' has no nodes`));
+    return err(validationErr(validationNodeId, `DAG '${capturedInput.id}' has no nodes`));
   }
 
   // Record-key vs node.id consistency + key format validation.
@@ -254,7 +379,7 @@ export const validateDagShape = (
     if (!keyValid.ok) {
       return err(
         validationErr(
-          nodeId("__dag__"),
+          validationNodeId,
           `nodes['${key}'] has invalid id: ${keyValid.error}`,
         ),
       );
@@ -306,14 +431,14 @@ export const validateDagShape = (
     }
   }
 
-  // DAG-level retry budgets (retryLimits / defaultRetryLimit): per-node
-  // retry counts are compared against attempt counters, so the domain is the
-  // same non-negative-safe-integer class as the node-level numeric gates
-  // above. A bare `as Readonly<Record<string, number>>` pass-through (the
-  // pre-fix shape) let NaN/negative/infinite limits flow into `getRetryLimit`
-  // and corrupt the budget. Same single gate, same `validation`-kind error.
-  if (input.retryLimits !== undefined) {
-    for (const [key, limit] of Object.entries(input.retryLimits)) {
+  // DAG-level retry budgets (retryLimits / defaultRetryLimit) are COUNT-valued:
+  // unlike finite non-negative backoff delays and the finite [0,1] jitter ratio
+  // above, counts must be non-negative safe integers. A bare
+  // `as Readonly<Record<string, number>>` pass-through (the pre-fix shape) let
+  // NaN/negative/infinite limits flow into `getRetryLimit` and corrupt the
+  // budget. Same single gate, same `validation`-kind error.
+  if (capturedInput.retryLimits !== undefined) {
+    for (const [key, limit] of Object.entries(capturedInput.retryLimits)) {
       // The key must NAME a node in this DAG. `retryLimits` is a raw
       // string-keyed record on the authoring surface — TypeScript erases a
       // branded key type on `Record<NodeId, number>` back to a string index
@@ -321,18 +446,18 @@ export const validateDagShape = (
       // unchecked it silently no-ops: `getRetryLimit` never finds the entry
       // and the node quietly runs on `defaultRetryLimit ?? 0` instead of the
       // budget its author configured.
-      if (!Object.hasOwn(input.nodes, key)) {
+      if (!Object.hasOwn(capturedInput.nodes, key)) {
         return err(
           validationErr(
-            nodeId("__dag__"),
-            `retryLimits['${key}'] names no node in DAG '${input.id}' — a retry budget for an unknown node would be silently ignored`,
+            validationNodeId,
+            `retryLimits['${key}'] names no node in DAG '${capturedInput.id}' — a retry budget for an unknown node would be silently ignored`,
           ),
         );
       }
       if (limit === undefined) {
         return err(
           validationErr(
-            nodeId("__dag__"),
+            validationNodeId,
             `retryLimits['${key}'] must be a non-negative safe integer, got undefined`,
           ),
         );
@@ -340,33 +465,50 @@ export const validateDagShape = (
       if (!Number.isSafeInteger(limit) || limit < 0) {
         return err(
           validationErr(
-            nodeId("__dag__"),
-            `retryLimits['${key}'] must be a non-negative safe integer, got ${String(limit)}`,
+            validationNodeId,
+            `retryLimits['${key}'] must be a non-negative safe integer, got ${safeErrorMessage(limit)}`,
           ),
         );
       }
     }
   }
   if (
-    input.defaultRetryLimit !== undefined &&
-    (!Number.isSafeInteger(input.defaultRetryLimit) || input.defaultRetryLimit < 0)
+    capturedInput.defaultRetryLimit !== undefined &&
+    (!Number.isSafeInteger(capturedInput.defaultRetryLimit) || capturedInput.defaultRetryLimit < 0)
   ) {
     return err(
       validationErr(
-        nodeId("__dag__"),
-        `defaultRetryLimit must be a non-negative safe integer, got ${String(input.defaultRetryLimit)}`,
+        validationNodeId,
+        `defaultRetryLimit must be a non-negative safe integer, got ${safeErrorMessage(capturedInput.defaultRetryLimit)}`,
       ),
     );
   }
 
   const nodeIds = new Set(entries.map(([id]) => nodeId(id)));
 
+  const parsedOutputNodeId = capturedInput.outputNodeId === undefined
+    ? undefined
+    : tryNodeId(capturedInput.outputNodeId);
+  if (parsedOutputNodeId !== undefined && !parsedOutputNodeId.ok) {
+    return err(
+      validationErr(
+        validationNodeId,
+        `outputNodeId '${capturedInput.outputNodeId}' has invalid id: ${parsedOutputNodeId.error}`,
+      ),
+    );
+  }
+  const outputNodeId = parsedOutputNodeId?.value;
+
   // DAG_INPUT-edge well-formedness (C0). `$input` is the virtual request
-  // source: legal only as an unconditional `from`. Checked on the RAW edges,
-  // before `normalizeEdge` would brand a `$input` `to` through `nodeId()` and
-  // throw on the illegal `$` character.
-  const rawEdges = input.edges as readonly EdgeDefRawInput[];
+  // source: legal only as an unconditional `from`. Parse every endpoint before
+  // normalization so malformed raw identifiers remain in the Result channel.
+  const rawEdges = capturedInput.edges as readonly EdgeDefRawInput[];
+  const edges: EdgeDef[] = [];
   for (const e of rawEdges) {
+    const parsedFrom = isDagInput(e.from) ? ok(DAG_INPUT) : tryNodeId(e.from);
+    if (!parsedFrom.ok) {
+      return err(validationErr(validationNodeId, `edge source '${e.from}' has invalid id: ${parsedFrom.error}`));
+    }
     if (isDagInput(e.to)) {
       return err(
         frameworkError.invalidDagInputEdge(
@@ -374,6 +516,10 @@ export const validateDagShape = (
           `DAG_INPUT ('$input') cannot be an edge target — it is the virtual request source, never a node`,
         ),
       );
+    }
+    const parsedTo = tryNodeId(e.to);
+    if (!parsedTo.ok) {
+      return err(validationErr(validationNodeId, `edge target '${e.to}' has invalid id: ${parsedTo.error}`));
     }
     if (isDagInput(e.from)) {
       const conditionalOrDefault =
@@ -387,13 +533,8 @@ export const validateDagShape = (
         );
       }
     }
+    edges.push(normalizeEdge(e, parsedFrom.value, parsedTo.value));
   }
-
-  // Normalize edges into the tagged-discriminant runtime form. The input may
-  // carry the implicit-unconditional or implicit-conditional (`when`-only)
-  // shape per `EdgeDefRawInput`; downstream code reads exclusively from the
-  // normalized array.
-  const edges: readonly EdgeDef[] = rawEdges.map(normalizeEdge);
 
   // Edge endpoints reference known nodes (the literal-typed input guards
   // this at edit time, but defensive at runtime for `as DagDefInput` casts).
@@ -468,7 +609,7 @@ export const validateDagShape = (
         return err({
           kind: "predicate-malformed",
           nodeId: e.from,
-          message: `Edge '${e.from}' -> '${e.to}' predicate has invalid minConfidence '${String(minConfidence)}' — must be one of: ${validBuckets.join(", ")}`,
+          message: `Edge '${e.from}' -> '${e.to}' predicate has invalid minConfidence '${safeErrorMessage(minConfidence)}' — must be one of: ${validBuckets.join(", ")}`,
         });
       }
     }
@@ -500,13 +641,17 @@ export const validateDagShape = (
     // hand- or dynamically-built node could pair `isSource: true` with a non-unit
     // schema that rejects `undefined`. Reject that here so the illegal state
     // fails at definition time instead of surfacing as a confusing runtime parse.
-    if (node.isSource === true && !node.inputSchema.safeParse(undefined).success) {
-      return err(
-        validationErr(
-          node.id,
-          `Source node '${node.id}' has an inputSchema that rejects \`undefined\` — a source consumes no DAG input, so its inputSchema must be the unit schema (z.void()). Build it with createSourceNode`,
-        ),
-      );
+    if (node.isSource === true) {
+      const acceptsUndefined = sourceAcceptsUndefined(node);
+      if (!acceptsUndefined.ok) return acceptsUndefined;
+      if (!acceptsUndefined.value) {
+        return err(
+          validationErr(
+            node.id,
+            `Source node '${node.id}' has an inputSchema that rejects \`undefined\` — a source consumes no DAG input, so its inputSchema must be the unit schema (z.void()). Build it with createSourceNode`,
+          ),
+        );
+      }
     }
     if (node.isSource !== true && inDeg === 0) {
       return err(
@@ -541,11 +686,11 @@ export const validateDagShape = (
     }
   }
 
-  if (input.outputNodeId !== undefined && !nodeIds.has(nodeId(input.outputNodeId))) {
+  if (outputNodeId !== undefined && !nodeIds.has(outputNodeId)) {
     return err(
       validationErr(
-        nodeId(input.outputNodeId),
-        `outputNodeId '${input.outputNodeId}' is not a node in DAG '${input.id}'`,
+        outputNodeId,
+        `outputNodeId '${outputNodeId}' is not a node in DAG '${capturedInput.id}'`,
       ),
     );
   }
@@ -559,11 +704,12 @@ export const validateDagShape = (
     if (se.kind !== "writes") continue;
     // One XOR, stated once: whichever extractor is present without its twin
     // names itself in the message.
-    const missing = se.extractNewWitness && !se.extractConditionedOn
-      ? { declared: "extractNewWitness", absent: "extractConditionedOn" }
-      : se.extractConditionedOn && !se.extractNewWitness
-        ? { declared: "extractConditionedOn", absent: "extractNewWitness" }
-        : null;
+    let missing: { readonly declared: string; readonly absent: string } | null = null;
+    if (se.extractNewWitness && !se.extractConditionedOn) {
+      missing = { declared: "extractNewWitness", absent: "extractConditionedOn" };
+    } else if (se.extractConditionedOn && !se.extractNewWitness) {
+      missing = { declared: "extractConditionedOn", absent: "extractNewWitness" };
+    }
     if (missing !== null) {
       return err(
         validationErr(
@@ -574,7 +720,7 @@ export const validateDagShape = (
     }
   }
 
-  if (input.outputNodeId !== undefined) {
+  if (outputNodeId !== undefined) {
     // `DAG_INPUT` is a virtual wave-(-1) source: always satisfied, imposing no
     // ordering. A node whose only inbound is a `$input` edge is therefore an
     // entry for reachability purposes (skip `$input` edges when counting
@@ -602,7 +748,7 @@ export const validateDagShape = (
       }
     }
 
-    if (!reachable.has(nodeId(input.outputNodeId))) {
+    if (!reachable.has(outputNodeId)) {
       // Walk backward from the output along unconditional + default edges to
       // find the first node that has no unconditional/default inbound. That
       // node is the actual frontier — the place where routing diverged from
@@ -615,8 +761,8 @@ export const validateDagShape = (
         (e) => !isConditionalEdge(e) && !isDagInput(e.from),
       );
       const visited = new Set<string>();
-      const queue: string[] = [input.outputNodeId];
-      let frontier: string = input.outputNodeId;
+      const queue: string[] = [outputNodeId];
+      let frontier: string = outputNodeId;
       while (queue.length > 0) {
         const cur = queue.shift()!;
         if (visited.has(cur)) continue;
@@ -632,7 +778,7 @@ export const validateDagShape = (
       }
       return err({
         kind: "output-unreachable-under-routing",
-        outputNodeId: nodeId(input.outputNodeId),
+        outputNodeId,
         missedFromNode: nodeId(frontier),
       });
     }
@@ -649,19 +795,19 @@ export const validateDagShape = (
     if (!snapshot.ok) return snapshot;
     nodes.push(snapshot.value);
   }
-  const judges = snapshotEvalJudges(input);
+  const judges = snapshotEvalJudges(capturedInput);
   if (!judges.ok) return judges;
   const validated = Object.freeze({
-    id: dagId(input.id),
+    id: parsedDagId.value,
     nodes: Object.freeze(nodes),
     edges: Object.freeze(validatedEdges),
-    ...(input.outputNodeId !== undefined ? { outputNodeId: nodeId(input.outputNodeId) } : {}),
+    ...(outputNodeId !== undefined ? { outputNodeId } : {}),
     ...(judges.value !== undefined ? { evalJudges: judges.value } : {}),
-    ...(input.retryLimits !== undefined
-      ? { retryLimits: Object.freeze({ ...input.retryLimits }) }
+    ...(capturedInput.retryLimits !== undefined
+      ? { retryLimits: Object.freeze({ ...capturedInput.retryLimits }) }
       : {}),
-    ...(input.defaultRetryLimit !== undefined
-      ? { defaultRetryLimit: input.defaultRetryLimit }
+    ...(capturedInput.defaultRetryLimit !== undefined
+      ? { defaultRetryLimit: capturedInput.defaultRetryLimit }
       : {}),
     ...(provenance !== undefined ? { provenance } : {}),
   }) as DagDef;
@@ -682,14 +828,18 @@ export const recordFromNodeArray = (
 export const withRetryLimits = (
   dag: DagDef,
   limits: Readonly<Record<string, number>>,
-): Result<DagDef, FrameworkError> => validateDagShape({
-  id: dag.id,
-  nodes: recordFromNodeArray(dag.nodes),
-  edges: dag.edges,
-  ...(dag.outputNodeId !== undefined ? { outputNodeId: dag.outputNodeId } : {}),
-  ...(dag.evalJudges !== undefined ? { evalJudges: dag.evalJudges } : {}),
-  retryLimits: { ...(dag.retryLimits ?? {}), ...limits },
-  ...(dag.defaultRetryLimit !== undefined
-    ? { defaultRetryLimit: dag.defaultRetryLimit }
-    : {}),
-}, dag.provenance);
+): Result<DagDef, FrameworkError> => {
+  const retryLimits = mergeRetryLimits(dag.retryLimits, limits);
+  if (!retryLimits.ok) return retryLimits;
+  return validateDagShape({
+    id: dag.id,
+    nodes: recordFromNodeArray(dag.nodes),
+    edges: dag.edges,
+    ...(dag.outputNodeId !== undefined ? { outputNodeId: dag.outputNodeId } : {}),
+    ...(dag.evalJudges !== undefined ? { evalJudges: dag.evalJudges } : {}),
+    retryLimits: retryLimits.value,
+    ...(dag.defaultRetryLimit !== undefined
+      ? { defaultRetryLimit: dag.defaultRetryLimit }
+      : {}),
+  }, dag.provenance);
+};

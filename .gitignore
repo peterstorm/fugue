@@ -21,8 +21,9 @@ dump.rdb
 __pycache__/
 *.pyc
 
-# Loom orchestration state (machine-local)
+# Loom orchestration state and generated verification reports (machine-local)
 .claude/state/
+.loom/completion-reports/
 
 # Ephemeral run evidence. These directories hold the events, checkpoints,
 # contexts, transcripts, and receipts of individual Wave Gate, panel, and

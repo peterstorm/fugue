@@ -1,21 +1,24 @@
 /**
  * Unit tests for `buildNodeInput`.
  *
- * Validates the 0/1/≥2 required sources split and optional source handling.
+ * Validates bare/keyed assembly by total incoming-source cardinality. Node ids
+ * go through the branded `NodeId` smart constructor — the validated-id
+ * precondition `buildNodeInput` expresses structurally in its signature.
  */
 
 import { describe, it, expect } from "bun:test";
 import { buildNodeInput } from "../shared/build-input.js";
+import { DAG_INPUT, nodeId } from "../types/ids.js";
 
 describe("buildNodeInput", () => {
-  it("no required sources → returns undefined (source node, C0)", () => {
+  it("no incoming sources → returns undefined (source node, C0)", () => {
     // Under 0.2.0 no node implicitly receives the DAG input: a 0-required node
     // is a source and gets `undefined`. The request reaches a node only via a
     // `$input` edge (which makes "$input" a required source).
     const result = buildNodeInput(new Map(), {
       required: [],
       optional: [],
-    }, "test-node");
+    }, nodeId("test-node"));
     expect(result).toEqual({ ok: true, value: undefined });
   });
 
@@ -24,18 +27,18 @@ describe("buildNodeInput", () => {
     // resolved from the seeded outputs map as a bare value.
     const outputs = new Map<string, unknown>([["$input", { region: "dk" }]]);
     const result = buildNodeInput(outputs, {
-      required: ["$input"],
+      required: [DAG_INPUT],
       optional: [],
-    }, "test-node");
+    }, nodeId("test-node"));
     expect(result).toEqual({ ok: true, value: { region: "dk" } });
   });
 
   it("single required source → returns bare upstream value", () => {
     const outputs = new Map([["fetch", { data: 42 }]]);
     const result = buildNodeInput(outputs, {
-      required: ["fetch"],
+      required: [nodeId("fetch")],
       optional: [],
-    }, "test-node");
+    }, nodeId("test-node"));
     expect(result).toEqual({ ok: true, value: { data: 42 } });
   });
 
@@ -45,9 +48,9 @@ describe("buildNodeInput", () => {
       ["b", "valueB"],
     ]);
     const result = buildNodeInput(outputs, {
-      required: ["a", "b"],
+      required: [nodeId("a"), nodeId("b")],
       optional: [],
-    }, "test-node");
+    }, nodeId("test-node"));
     expect(result).toEqual({ ok: true, value: { a: "valueA", b: "valueB" } });
   });
 
@@ -57,9 +60,9 @@ describe("buildNodeInput", () => {
       ["$input", { region: "dk", minScore: 5 }],
     ]);
     const result = buildNodeInput(outputs, {
-      required: ["score", "$input"],
+      required: [nodeId("score"), DAG_INPUT],
       optional: [],
-    }, "assemble");
+    }, nodeId("assemble"));
     expect(result).toEqual({
       ok: true,
       value: { score: { scored: [] }, $input: { region: "dk", minScore: 5 } },
@@ -72,41 +75,72 @@ describe("buildNodeInput", () => {
       ["opt", "optValue"],
     ]);
     const result = buildNodeInput(outputs, {
-      required: ["a"],
-      optional: ["opt"],
-    }, "test-node");
+      required: [nodeId("a")],
+      optional: [nodeId("opt")],
+    }, nodeId("test-node"));
     expect(result).toEqual({ ok: true, value: { a: "valueA", opt: "optValue" } });
   });
 
   it("optional sources missing → keyed object with undefined", () => {
     const outputs = new Map([["a", "valueA"]]);
     const result = buildNodeInput(outputs, {
-      required: ["a"],
-      optional: ["opt"],
-    }, "test-node");
+      required: [nodeId("a")],
+      optional: [nodeId("opt")],
+    }, nodeId("test-node"));
     expect(result).toEqual({ ok: true, value: { a: "valueA", opt: undefined } });
   });
 
-  it("optional forces keyed shape even with 0 required", () => {
-    const outputs = new Map([["opt", "yes"]]);
+  it("one selected optional router source returns its bare upstream value", () => {
+    const outputs = new Map([["classifier", { route: "yes" }]]);
     const result = buildNodeInput(outputs, {
       required: [],
-      optional: ["opt"],
-    }, "test-node");
-    expect(result).toEqual({ ok: true, value: { opt: "yes" } });
+      optional: [nodeId("classifier")],
+    }, nodeId("handler"));
+    expect(result).toEqual({ ok: true, value: { route: "yes" } });
+  });
+
+  it("multiple optional sources retain a keyed fan-in shape", () => {
+    const outputs = new Map([["left", "yes"]]);
+    const result = buildNodeInput(outputs, {
+      required: [],
+      optional: [nodeId("left"), nodeId("right")],
+    }, nodeId("merge"));
+    expect(result).toEqual({
+      ok: true,
+      value: { left: "yes", right: undefined },
+    });
   });
 
   it("returns non-retriable error when required source is missing", () => {
     const result = buildNodeInput(new Map(), {
-      required: ["missing"],
+      required: [nodeId("missing")],
       optional: [],
-    }, "test-node");
+    }, nodeId("test-node"));
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("node-crash");
       if (result.error.kind === "node-crash") {
         expect(result.error.retriability).toBe("non-retriable");
         expect(result.error.message).toContain("BUG: required source 'missing' has no output");
+      }
+    }
+  });
+
+  it("returns non-retriable error when the sole optional source is missing", () => {
+    // Same corruption class as the required-source branch: a selected router
+    // edge whose output is absent is checkpoint corruption or a framework
+    // ordering bug, so it gets the same non-retriable node-attributed error
+    // instead of silently passing `undefined` as the node's input.
+    const result = buildNodeInput(new Map(), {
+      required: [],
+      optional: [nodeId("classifier")],
+    }, nodeId("handler"));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("non-retriable");
+        expect(result.error.message).toContain("BUG: sole optional source 'classifier' has no output");
       }
     }
   });

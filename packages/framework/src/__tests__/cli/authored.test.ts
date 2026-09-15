@@ -1,8 +1,8 @@
 // AuthoredDag (B1) + deterministic codegen (B2) — the load-bearing assertion
 // mirrors new.test.ts: every shape the authoring schema accepts must generate
 // a dag.ts that survives the real gauntlet (import through defineDag + lint),
-// and `describe` on the generated code must match the authored structure
-// (the roundtrip that makes AuthoredDag ⊇ DescribedDag one format family).
+// and `describe` on the generated code must match the authored structure;
+// author-only intent remains outside the derived DescribedDag contract.
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { existsSync } from "node:fs";
@@ -24,7 +24,7 @@ import {
   type Kebab,
 } from "../../cli/identifiers.js";
 import { runGauntlet, type GauntletResult } from "../../cli/gauntlet.js";
-import { nodeId } from "../../types/ids.js";
+import { ID_MAX_LENGTH, nodeId } from "../../types/ids.js";
 import { CONFIDENCE_FIELD } from "../../cli/vocabulary.js";
 import { runNewFrom, writeAuthoredScaffold } from "../../cli/new.js";
 import type { DescribedDag } from "../../describe/index.js";
@@ -63,6 +63,27 @@ const outputOf = (n: AuthoredDagInput["nodes"][number]) => {
   return n.output;
 };
 
+/**
+ * Minimal inert DescribedDag for gauntlet stubs — runNewFrom only forwards
+ * advisories/warnings from the verdict and never inspects the payload, so
+ * one shared fixture keeps the stub-using tests honest about that (and a
+ * field added to `DescribedDag` still fails here at compile time).
+ */
+const describedStub: DescribedDag = {
+  id: "authored-linear",
+  route: "/authored-linear",
+  description: "stub",
+  version: "1.0.0",
+  inputSchema: null,
+  outputSchema: null,
+  outputNodeId: null,
+  nodes: [],
+  edges: [],
+  waves: [],
+  prompts: [],
+  capabilities: [],
+};
+
 const FIXTURES: Record<string, AuthoredDagInput> = {
   linear: {
     fugueAuthored: 1,
@@ -76,9 +97,9 @@ const FIXTURES: Record<string, AuthoredDagInput> = {
     ],
     structure: { shape: "linear", order: ["fetch-record", "summarize"] },
   },
-  // Exercises the number/boolean codegen arms (z.number()/z.boolean() +
-  // 0/false defaults). Every other fixture uses only string/enum fields, so
-  // without this the scalar-type branches emit into generated dag.ts untested.
+  // Exercises number/boolean schema codegen (z.number()/z.boolean()). Every
+  // other fixture uses only string/enum fields, so these scalar schema arms
+  // would otherwise be absent from generated-module coverage.
   "linear-scalar-fields": {
     fugueAuthored: 1,
     name: "authored-scalar",
@@ -335,6 +356,24 @@ describe("AuthoredDag schema", () => {
     });
   }
 
+  it("owns and recursively freezes parsed authoring data", () => {
+    const raw = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
+    const dag = mustParse(raw);
+
+    expect(Object.isFrozen(dag)).toBe(true);
+    expect(Object.isFrozen(dag.input)).toBe(true);
+    expect(Object.isFrozen(dag.input.fields)).toBe(true);
+    expect(Object.isFrozen(dag.input.fields[0])).toBe(true);
+    expect(Object.isFrozen(dag.nodes)).toBe(true);
+    expect(Object.isFrozen(dag.nodes[0])).toBe(true);
+    expect(Reflect.set(dag.nodes[0]!, "purpose", "changed")).toBe(false);
+    expect(dag.nodes[0]!.purpose).toBe("Load the record");
+
+    (raw.nodes[0] as { purpose: string }).purpose = "caller still owns raw input";
+    expect(raw.nodes[0]!.purpose).toBe("caller still owns raw input");
+    expect(dag.nodes[0]!.purpose).toBe("Load the record");
+  });
+
   const reject = (mutate: (dag: AuthoredDagInput) => unknown, needle: string) => {
     const raw = mutate(structuredClone(FIXTURES.router!) as AuthoredDagInput);
     const parsed = parseAuthoredDag(raw);
@@ -433,7 +472,7 @@ describe("AuthoredDag schema", () => {
         const problem = parsed.problems.find((p) => p.startsWith(`nodes.${idx}.output`));
         expect(problem).toBeDefined();
         expect(problem).toContain(
-          "output is required for fetch/transform/llm/source nodes — only human-review nodes omit it",
+          "output is required for fetch/transform/llm/source nodes — human-review and map nodes derive/forward output and omit it",
         );
       }
     }
@@ -443,7 +482,7 @@ describe("AuthoredDag schema", () => {
     // The discriminated union's default for a bad discriminator is a bare
     // "Invalid input" — useless to the compose repair loop, so the union
     // error map must name the full kind vocabulary.
-    const vocabulary = '"fetch"|"transform"|"llm"|"human-review"|"source"';
+    const vocabulary = '"fetch"|"transform"|"llm"|"human-review"|"source"|"map"';
 
     const unknown = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
     (unknown.nodes[0] as { kind: string }).kind = "fletch";
@@ -805,6 +844,36 @@ describe("AuthoredDag schema", () => {
     expect(parseAuthoredDag(nameD).ok).toBe(false);
   });
 
+  it("shares the runtime identifier length boundary with authored proofs", async () => {
+    const maxName = "a".repeat(ID_MAX_LENGTH);
+    const maxNode = "b".repeat(ID_MAX_LENGTH);
+    const boundary = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
+    (boundary as { name: string }).name = maxName;
+    (boundary.nodes[1] as { id: string }).id = maxNode;
+    (boundary.structure as { order: string[] }).order = ["fetch-record", maxNode];
+    const parsedBoundary = mustParse(boundary);
+    const verdict = await runGauntlet(parsedBoundary, join(tmpRoot, "max-authored-identifiers"));
+    if (!verdict.ok) throw new Error(JSON.stringify(verdict.errors, null, 2));
+
+    const overlongName = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
+    (overlongName as { name: string }).name = "a".repeat(ID_MAX_LENGTH + 1);
+    const refusedName = parseAuthoredDag(overlongName);
+    expect(refusedName.ok).toBe(false);
+    if (!refusedName.ok) expect(refusedName.problems.join("\n")).toContain("at most 128 characters");
+
+    const overlongNode = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
+    const invalidId = "b".repeat(ID_MAX_LENGTH + 1);
+    (overlongNode.nodes[1] as { id: string }).id = invalidId;
+    (overlongNode.structure as { order: string[] }).order = ["fetch-record", invalidId];
+    const refusedNode = parseAuthoredDag(overlongNode);
+    expect(refusedNode.ok).toBe(false);
+    if (!refusedNode.ok) {
+      const problems = refusedNode.problems.join("\n");
+      expect(problems).toContain("node id must be kebab-case starting with a letter and at most 128 characters");
+      expect(problems).toContain("node reference must be kebab-case starting with a letter and at most 128 characters");
+    }
+  });
+
   it("rejects node ids that are strict-mode reserved words ('with', 'debugger', 'eval', 'arguments')", () => {
     for (const id of ["with", "debugger", "eval", "arguments"]) {
       const d = structuredClone(FIXTURES.linear!) as AuthoredDagInput;
@@ -1076,17 +1145,19 @@ describe("authored codegen survives the gauntlet", () => {
     expect(scaffold.prompts[0]!.body).toContain("never use a number");
   });
 
-  it("imports `ok` only when a node body uses it (all-llm and llm+review DAGs omit it)", () => {
-    // `ok(...)` appears only in placeholder fetch/transform/source bodies —
-    // an all-llm (or llm + human-review) DAG importing it would carry an
-    // unused import in every generated module.
-    const okImportLine = /^\s+ok,$/m;
-    expect(buildAuthoredScaffold(mustParse(FIXTURES["linear-two-llm"]!)).dagTs).not.toMatch(okImportLine);
-    expect(buildAuthoredScaffold(mustParse(FIXTURES["linear-llm-review"]!)).dagTs).not.toMatch(okImportLine);
-    // DAGs with an ok-using body keep the import (and the emitted code uses it).
+  it("emits one stable framework namespace only when generated bodies need it", () => {
+    const namespaceImport = 'import * as $fugue from "@fuguejs/framework";';
+    for (const fixture of [FIXTURES["linear-two-llm"]!, FIXTURES["linear-llm-review"]!]) {
+      const generated = buildAuthoredScaffold(mustParse(fixture)).dagTs;
+      expect(generated).not.toContain(namespaceImport);
+    }
+
     const withBodies = buildAuthoredScaffold(mustParse(FIXTURES.linear!)).dagTs;
-    expect(withBodies).toMatch(okImportLine);
-    expect(withBodies).toContain("ok({");
+    expect(withBodies).toContain(namespaceImport);
+    expect(withBodies).toContain("$fugue.createFetchNode({");
+    expect(withBodies).toContain("$fugue.createTransformNode({");
+    expect(withBodies).toContain('$fugue.err($fugue.frameworkError.validation("fetch-record"');
+    expect(withBodies).not.toContain('"todo"');
   });
 
   it("a two-llm dag emits per-node prompt names and a 2-entry registry", async () => {
@@ -1384,20 +1455,6 @@ describe("authored codegen survives the gauntlet", () => {
     };
     // The ok verdict now carries the DescribedDag of the generated code —
     // runNewFrom only forwards advisories, so a minimal stub suffices here.
-    const describedStub: DescribedDag = {
-      id: "authored-linear",
-      route: "/authored-linear",
-      description: "stub",
-      version: "1.0.0",
-      inputSchema: null,
-      outputSchema: null,
-      outputNodeId: null,
-      nodes: [],
-      edges: [],
-      waves: [],
-      prompts: [],
-      capabilities: [],
-    };
     const okWithAdvisory = async (): Promise<GauntletResult> => ({
       ok: true,
       described: describedStub,
@@ -1416,20 +1473,6 @@ describe("authored codegen survives the gauntlet", () => {
     await mkdir(root, { recursive: true });
     const fromPath = join(root, "x.authored.json");
     await Bun.write(fromPath, JSON.stringify(FIXTURES.linear));
-    const describedStub: DescribedDag = {
-      id: "authored-linear",
-      route: "/authored-linear",
-      description: "stub",
-      version: "1.0.0",
-      inputSchema: null,
-      outputSchema: null,
-      outputNodeId: null,
-      nodes: [],
-      edges: [],
-      waves: [],
-      prompts: [],
-      capabilities: [],
-    };
     const warning = "outputSchema (node 'summarize'): unrepresentable in JSON Schema";
     const okWithWarning = async (): Promise<GauntletResult> => ({
       ok: true,
@@ -1598,12 +1641,11 @@ describe("parse problem formatting", () => {
 // ---------------------------------------------------------------------------
 // Identifier accounting drift guard — the parse-time collision check
 // (`generatedIdentifiersFor` ∪ `dagLevelIdentifiers` ∪ `RESERVED_IDENTIFIERS`)
-// must claim EVERY name codegen actually emits: every top-level const /
+// must claim every TOP-LEVEL name codegen emits: every top-level const /
 // interface declaration and every import binding in a generated dag.ts.
-// Both are now built from the same `identifiers.ts` name constructors; this
-// test proves the derivation covers the emission for every fixture shape, so
-// a new emitted name can never silently regress collision detection back to
-// gauntlet-time SyntaxErrors.
+// Both are built from the same `identifiers.ts` name constructors; this
+// non-map fixture matrix protects root emission, while `authored-map.test.ts`
+// separately protects map factories and child-local bindings.
 // ---------------------------------------------------------------------------
 
 describe("identifier accounting covers every emitted name", () => {
@@ -1618,7 +1660,10 @@ describe("identifier accounting covers every emitted name", () => {
     for (const m of dagTs.matchAll(/^import(?: type)? \{ ([A-Za-z_$][\w$]*) \}/gm)) {
       names.add(m[1]!);
     }
-    // The multi-line framework import block.
+    // Namespace imports and the multi-line framework import block.
+    for (const m of dagTs.matchAll(/^import \* as ([A-Za-z_$][\w$]*) from /gm)) {
+      names.add(m[1]!);
+    }
     const block = dagTs.match(/^import \{\n([\s\S]*?)\n\} from "@fuguejs\/framework";/m);
     for (const line of block?.[1]?.split("\n") ?? []) {
       const name = line.trim().replace(/,$/, "");
@@ -1704,9 +1749,9 @@ describe("hostile free-text properties", () => {
 
   // Hostile ENUM values: a `"`, backtick, or `${...}` passes the schema's
   // SINGLE_LINE check (only LINE TERMINATORS are rejected) and then flows,
-  // unescaped-if-naive, into FOUR JSON.stringify-guarded sites — zodExpr
-  // (authored-codegen ~90), defaultExpr (~98), the LLM prompt's jsonShape hint
-  // (~238), and the router `when.equals` comparison (~388). The existing
+  // unescaped-if-naive, into FOUR JSON.stringify-guarded sites in
+  // `authored-codegen.ts`: `zodExpr` and the LLM prompt's
+  // `jsonShape` hint, and the router `when.equals` comparison. The existing
   // free-text property never mutates enum values, so these four sites went
   // uncovered against hostile input. Note: an LLM node's `confidence` field is
   // pinned to the exact bucket enum, so we cover the LLM-prompt jsonShape via a
@@ -1719,8 +1764,8 @@ describe("hostile free-text properties", () => {
     await mkdir(root, { recursive: true });
     for (const hostile of HOSTILE_ENUMS) {
       const d = structuredClone(FIXTURES.router!) as AuthoredDagInput;
-      // The fetch classifier's `bucket` enum (zodExpr/defaultExpr) AND the
-      // routing case's `equals` (when.equals, codegen line 388) set to the same
+      // The fetch classifier's `bucket` enum (`zodExpr`) AND the
+      // routing case's `when.equals` set to the same
       // hostile value so it is a legal predicate target.
       const bucket = outputOf(d.nodes[0]!).fields.find((f) => f.name === "bucket")! as {
         type: { kind: string; values?: readonly string[] };
@@ -1739,7 +1784,7 @@ describe("hostile free-text properties", () => {
         throw new Error(`gauntlet failed for ${JSON.stringify(hostile)}: ${JSON.stringify(verdict.errors)}`);
       }
 
-      // The generated dag.ts routes on the JSON-escaped literal (line 388) and
+      // The generated dag.ts routes on the JSON-escaped `when.equals` literal and
       // the zod enum lists it escaped — never the raw hostile bytes.
       const dagTs = buildAuthoredScaffold(parsed.dag).dagTs;
       expect(dagTs).toContain(`=== ${JSON.stringify(hostile)}`);
@@ -1754,7 +1799,7 @@ describe("hostile free-text properties", () => {
       const d = structuredClone(FIXTURES["sources-llm"]!) as AuthoredDagInput;
       // Add a NON-confidence enum output field to the LLM `synthesize` node —
       // this reaches the prompt jsonShape hint (codegen line 238) plus
-      // zodExpr/defaultExpr for the generated output schema.
+      // `zodExpr` for the generated output schema.
       const synth = d.nodes.find((n) => n.id === "synthesize")!;
       (outputOf(synth).fields as { name: string; type: unknown }[]).push({
         name: "category",
@@ -1769,7 +1814,7 @@ describe("hostile free-text properties", () => {
         throw new Error(`gauntlet failed for ${JSON.stringify(hostile)}: ${JSON.stringify(verdict.errors)}`);
       }
 
-      // The prompt shape-hint must carry the value JSON-escaped (line 238), not
+      // The prompt's `jsonShape` hint must carry the value JSON-escaped, not
       // the raw hostile bytes that would break the `{ ... }` hint or open a
       // `${}` template hole in the generated prompt string.
       const scaffold = buildAuthoredScaffold(parsed.dag);

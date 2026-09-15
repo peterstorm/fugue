@@ -1,6 +1,7 @@
 export type {
   DescribedDag,
   DescribedNode,
+  DescribedMap,
   DescribedEdge,
   BuildDescribedDagInput,
   DescribeWarningSink,
