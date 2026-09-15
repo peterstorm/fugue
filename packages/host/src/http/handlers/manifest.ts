@@ -37,7 +37,9 @@ import type { RegisteredDag } from "../../domain/registry.js";
  * serialization failure. The payload still ships with `null` in place of the
  * unrenderable schema (the documented LLM-tooling contract), but the caller can
  * log/observe the degradation instead of it vanishing silently — matching the
- * `fugue describe` CLI surface, which writes the same warnings to stderr.
+ * `fugue describe` CLI surface, which writes the same warnings to stderr. The
+ * sink itself is always provided (describe requires the diagnostic channel);
+ * when `onSchemaWarning` is absent the delivery is inert at this boundary.
  */
 export const buildManifest = (
   registered: RegisteredDag,
@@ -51,20 +53,16 @@ export const buildManifest = (
     description: registered.meta.description,
     version: registered.meta.version,
     loadedPrompts: registered.prompts,
-    ...(onSchemaWarning
-      ? {
-          warningSink: {
-            onSchemaSerializationError: (where, e) => {
-              const target =
-                where.field === "outputSchema"
-                  ? `outputSchema (node '${where.nodeId}')`
-                  : "inputSchema";
-              const msg = e instanceof Error ? e.message : String(e);
-              onSchemaWarning(`${target}: ${msg}`);
-            },
-          },
-        }
-      : {}),
+    warningSink: {
+      onSchemaSerializationError: (where, e) => {
+        const target =
+          where.field === "outputSchema"
+            ? `outputSchema (node '${where.nodeId}')`
+            : "inputSchema";
+        const msg = e instanceof Error ? e.message : String(e);
+        onSchemaWarning?.(`${target}: ${msg}`);
+      },
+    },
   });
 
   if (!built.ok) {

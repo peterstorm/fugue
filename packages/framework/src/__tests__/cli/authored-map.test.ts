@@ -32,6 +32,7 @@ import { resourceName } from "../../types/witness.js";
 import type { FrameworkError } from "../../types/errors.js";
 import type { LlmClient, LlmRequest, LlmResponse } from "../../types/llm.js";
 import type { NodeDef, TypedNodeContext } from "../../types/node.js";
+import { inertWarningSink } from "../_describe-helpers.js";
 
 const assertAuthoredDagReadonly = (dag: AuthoredDag): void => {
   // @ts-expect-error AuthoredDag owns a readonly node array.
@@ -1657,6 +1658,7 @@ describe("authored map codegen and plate rendering", () => {
       route: "/custom-map",
       description: "custom map",
       version: "1.0.0",
+      warningSink: inertWarningSink,
     });
     if (!described.ok) throw new Error(described.error.kind);
     const mapped = described.value.nodes.find((node) => node.kind === "map");
@@ -1735,6 +1737,7 @@ describe("authored map codegen and plate rendering", () => {
       route: "/captured-schema-dag",
       description: "captured schema",
       version: "1.0.0",
+      warningSink: inertWarningSink,
     });
     if (!described.ok) throw new Error(described.error.kind);
     const map = described.value.nodes.find((node) => node.kind === "map");
@@ -1937,6 +1940,7 @@ describe("authored map codegen and plate rendering", () => {
         maxWidth: 25,
         childDagId: "score-item-child",
         gather: { kind: "collect", field: "results" },
+        childNodes: [{ id: "score-item" }],
       },
     });
     expect(result.described.nodes.some((node) => node.id === "score-item")).toBe(false);

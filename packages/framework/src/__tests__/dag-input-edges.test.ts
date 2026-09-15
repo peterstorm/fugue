@@ -15,6 +15,7 @@ import { runDag } from "../executor/run-dag.js";
 import { makeNodeContext } from "../shared/make-node-context.js";
 import { fixedClock } from "../types/clock.js";
 import { buildDescribedDag } from "../describe/build-described-dag.js";
+import { inertWarningSink } from "./_describe-helpers.js";
 
 const Req = z.object({ region: z.string(), minScore: z.number() });
 const ctx = () => makeNodeContext({ runId: "r1", dagId: "d1" });
@@ -311,7 +312,7 @@ describe("C0 — describe renders the $input edge", () => {
       edges: [{ from: DAG_INPUT, to: "consume" }],
       outputNodeId: "consume",
     });
-    const described = buildDescribedDag({ dag, route: "/x", description: "", version: "1.0.0" });
+    const described = buildDescribedDag({ dag, route: "/x", description: "", version: "1.0.0", warningSink: inertWarningSink });
     expect(described.ok).toBe(true);
     if (described.ok) {
       expect(described.value.edges).toContainEqual({

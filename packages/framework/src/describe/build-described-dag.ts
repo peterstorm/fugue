@@ -2,10 +2,12 @@
 // by both `fugue describe` (CLI) and `GET /dags/:id/manifest` (host). Keeping
 // the assembly in one place prevents the two surfaces from drifting.
 //
-// Deterministic assembly with an optional diagnostic callback: takes a branded
-// `DagDef` plus context and returns either a `DescribedDag` or a structured
-// `FrameworkError` if topology cannot be sorted. Schema serialization warnings
-// may invoke the caller-provided sink while leaving the payload best-effort.
+// Deterministic assembly with a caller-provided diagnostic callback: takes a
+// branded `DagDef` plus context and returns either a `DescribedDag` or a
+// structured `FrameworkError` for registry/validator invariant violations
+// (unsortable topology, an `outputNodeId` naming an unknown node). Schema
+// serialization warnings invoke the caller-provided sink while leaving the
+// payload best-effort.
 
 import { match } from "ts-pattern";
 import type { z } from "zod";
@@ -31,11 +33,21 @@ interface DescribedNodeBase {
   readonly humanReview: boolean;
 }
 
+/**
+ * Map-node describe payload. The child DAG's nodes and edges are projected
+ * into the payload so manifest consumers see the mapped structure — the child
+ * is not a separately registered DAG, so this payload is the only surface
+ * carrying its contract. `childDagId` stays as the execution-addressing
+ * reference; the top-level `waves` array remains outer-only (child execution
+ * schedules as its own DAG invocation).
+ */
 export interface DescribedMap {
   readonly widthFrom: string;
   readonly maxWidth: number;
   readonly childDagId: string;
   readonly gather: Readonly<{ readonly kind: "collect"; readonly field: string }> | null;
+  readonly childNodes: readonly DescribedNode[];
+  readonly childEdges: readonly DescribedEdge[];
 }
 
 export type DescribedNode =
@@ -118,8 +130,13 @@ export interface BuildDescribedDagInput {
    * The CLI omits this (no host context); the host passes `RegisteredDag.prompts`.
    */
   readonly loadedPrompts?: ReadonlyMap<string, string>;
-  /** Optional sink for non-fatal warnings (schema serialization failures). */
-  readonly warningSink?: DescribeWarningSink;
+  /**
+   * Sink for non-fatal warnings (schema serialization failures). Required so
+   * a degraded schema is always observable somewhere — a no-sink call would
+   * make the `null` in place of the bad schema indistinguishable from an
+   * absent one. Fixtures that do not assert on warnings pass an inert sink.
+   */
+  readonly warningSink: DescribeWarningSink;
 }
 
 // ---------------------------------------------------------------------------
@@ -176,6 +193,11 @@ const describeNode = (
             kind: node.mapping.authoredGather.kind,
             field: node.mapping.authoredGather.field,
           }),
+      // Projected so manifest consumers see the mapped structure: the child
+      // is not a separately registered DAG, so this payload is the only
+      // surface carrying its contract (recursive for nested maps).
+      childNodes: node.mapping.child.nodes.map(describeNode),
+      childEdges: node.mapping.child.edges.map(describeEdge),
     },
   };
 };
@@ -241,33 +263,31 @@ const collectPromptNames = (
 };
 
 const outputSchemaOf = (
-  dag: DagDef,
-  warningSink: DescribeWarningSink | undefined,
-): Record<string, unknown> | null => {
-  if (dag.outputNodeId === undefined) return null;
-  const node = dag.nodes.find((n) => n.id === dag.outputNodeId);
-  if (!node) return null;
-  return safeZodToJsonSchema(node.outputSchema, (e) => {
-    warningSink?.onSchemaSerializationError(
+  node: DagDef["nodes"][number],
+  warningSink: DescribeWarningSink,
+): Record<string, unknown> | null =>
+  safeZodToJsonSchema(node.outputSchema, (e) => {
+    warningSink.onSchemaSerializationError(
       { field: "outputSchema", nodeId: node.id },
       e,
     );
   });
-};
 
 // ---------------------------------------------------------------------------
 // Builder
 // ---------------------------------------------------------------------------
 
 /**
- * Build a `DescribedDag` from a branded `DagDef`. Returns `Err` only when the
- * DAG fails to topologically sort — a registry/validator invariant violation
- * that should never reach this code in practice, but is surfaced as a
- * structured `FrameworkError` instead of being swallowed silently.
+ * Build a `DescribedDag` from a branded `DagDef`. Returns `Err` for two
+ * registry/validator invariant violations that should never reach this code in
+ * practice, but are surfaced as structured `FrameworkError`s instead of being
+ * swallowed silently: an unsortable topology (like `topoSort` itself) and an
+ * `outputNodeId` that names a node the DAG does not contain — degrading that
+ * to a payload would emit an `outputNodeId` pointing at a nonexistent node.
  *
  * Non-fatal warnings (e.g. a Zod schema that `zodToJsonSchema` cannot render)
- * route through the optional `warningSink`; the returned payload sets the
- * affected field to `null`.
+ * route through the caller-provided `warningSink`; the returned payload sets
+ * the affected field to `null`.
  */
 export const buildDescribedDag = (
   input: BuildDescribedDagInput,
@@ -275,6 +295,17 @@ export const buildDescribedDag = (
   const { dag, warningSink } = input;
   const waves = topoSort(dag);
   if (!waves.ok) return err(waves.error);
+  const outputNode =
+    dag.outputNodeId === undefined
+      ? null
+      : dag.nodes.find((n) => n.id === dag.outputNodeId) ?? null;
+  if (outputNode === null && dag.outputNodeId !== undefined) {
+    return err({
+      kind: "validation" as const,
+      nodeId: dag.outputNodeId,
+      message: `outputNodeId references unknown node '${dag.outputNodeId}'`,
+    });
+  }
   const runtimeNodes = runtimeNodeInventory(dag).nodes;
 
   const waveIds: readonly (readonly string[])[] = waves.value.map((wave) =>
@@ -287,9 +318,10 @@ export const buildDescribedDag = (
     description: input.description,
     version: input.version,
     inputSchema: safeZodToJsonSchema(input.inputSchema, (e) => {
-      warningSink?.onSchemaSerializationError({ field: "inputSchema" }, e);
+      warningSink.onSchemaSerializationError({ field: "inputSchema" }, e);
     }),
-    outputSchema: outputSchemaOf(dag, warningSink),
+    outputSchema:
+      outputNode === null ? null : outputSchemaOf(outputNode, warningSink),
     outputNodeId:
       dag.outputNodeId !== undefined ? dag.outputNodeId : null,
     nodes: dag.nodes.map(describeNode),

@@ -8,6 +8,7 @@ import { buildDescribedDag, createFetchNode, createMapNode, defineDag, runDag, D
 import { runDescribe } from "../cli/describe.js";
 import { InMemoryCheckpointer } from "../checkpoint/checkpointer.js";
 import { makeNodeContext } from "../shared/make-node-context.js";
+import { inertWarningSink } from "./_describe-helpers.js";
 import type { Capability } from "../types/node.js";
 import type { DagDef } from "../types/dag.js";
 import type { Invocation } from "../types/capability-broker.js";
@@ -21,7 +22,7 @@ declare module "../types/node.js" {
 
 const registrationMeta = { route: "/mapped/run", description: "Mapped authority", version: "1.0.0" };
 const described = (dag: DagDef) => {
-  const result = buildDescribedDag({ dag, ...registrationMeta });
+  const result = buildDescribedDag({ dag, ...registrationMeta, warningSink: inertWarningSink });
   if (!result.ok) throw new Error("fixture description failed");
   return result.value;
 };
@@ -45,13 +46,21 @@ const fixture = (first: readonly Capability[], second: readonly Capability[] = f
 };
 
 describe("mapped descriptions share the bounded runtime capability inventory", () => {
-  it("includes child-only builtin/custom requirements without projecting children or hoisting map permissions", () => {
+  it("includes child-only builtin/custom requirements without projecting children into the outer node list or hoisting map permissions", () => {
     const { dag, fan } = fixture([customCapability, "cache"], ["clock", customCapability]);
     const result = described(dag);
     expect(result.capabilities).toEqual(["cache", "checkpointer", "clock", customCapability]);
     expect(result.nodes.map(n => n.id)).toEqual(["pre", "fan"]);
     expect(result.nodes.find(n => n.id === "fan")?.requires).toEqual(["checkpointer"]);
     expect(fan.requires).toEqual(["checkpointer"]);
+    // The mapped structure is projected into the mapping payload — the child
+    // is not a separately registered DAG, so this payload is the only surface
+    // carrying its contract.
+    const mapping = result.nodes.find(n => n.id === "fan")?.mapping;
+    expect(mapping?.childNodes.map(n => n.id)).toEqual(["first", "second"]);
+    expect(mapping?.childEdges.map(e => [e.from, e.to])).toEqual([
+      ["$input", "first"], ["first", "second"],
+    ]);
     expect(result.waves).toEqual([["pre"], ["fan"]]);
     expect(result.edges).toHaveLength(2);
     expect(described(dag)).toEqual(result);

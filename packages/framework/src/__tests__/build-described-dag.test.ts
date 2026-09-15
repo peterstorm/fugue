@@ -5,6 +5,7 @@ import { defineDagFromArray } from "../executor/define-dag.js";
 import { createTransformNode } from "../nodes/transform.js";
 import { DAG_INPUT } from "../types/ids.js";
 import { ok } from "../types/result.js";
+import { inertWarningSink } from "./_describe-helpers.js";
 
 const node = createTransformNode({
   id: "describe-node",
@@ -143,6 +144,7 @@ describe("buildDescribedDag", () => {
       route: "/cycle",
       description: "cyclic",
       version: "1.0.0",
+      warningSink: inertWarningSink,
     });
 
     expect(described.ok).toBe(false);
@@ -150,8 +152,8 @@ describe("buildDescribedDag", () => {
     expect(described.error.kind).toBe("cycle-detected");
   });
 
-  it("renders a null outputSchema when outputNodeId names a node the DAG does not contain", () => {
-    // The defensive `if (!node) return null` in `outputSchemaOf`. Reached the
+  it("surfaces an orphaned outputNodeId as Err rather than a lying payload", () => {
+    // The sibling topoSort unknown-reference invariant violation. Reached the
     // same way: the id is rewritten on an already-branded DagDef, since the
     // definition-time validator would reject it.
     const orphaned = {
@@ -165,14 +167,19 @@ describe("buildDescribedDag", () => {
       route: "/orphan",
       description: "orphaned output node",
       version: "1.0.0",
+      warningSink: inertWarningSink,
     });
 
-    // Non-fatal by design: an unresolvable output node degrades the DESCRIPTION
-    // to a null schema rather than failing the describe endpoint outright.
-    expect(described.ok).toBe(true);
-    if (!described.ok) return;
-    expect(described.value.outputSchema).toBeNull();
-    expect(described.value.inputSchema).not.toBeNull();
+    // Same invariant-violation class as topoSort's dead path: a structured
+    // FrameworkError instead of a payload whose outputNodeId points at a node
+    // the DAG does not contain.
+    expect(described.ok).toBe(false);
+    if (described.ok) return;
+    expect(described.error.kind).toBe("validation");
+    if (described.error.kind !== "validation") return;
+    expect(described.error.message).toBe(
+      "outputNodeId references unknown node 'not-a-node'",
+    );
   });
 
   it("renders a null outputSchema when the DAG declares no output node", () => {
@@ -184,6 +191,7 @@ describe("buildDescribedDag", () => {
       route: "/headless",
       description: "no output node",
       version: "1.0.0",
+      warningSink: inertWarningSink,
     });
 
     expect(described.ok).toBe(true);
@@ -204,6 +212,7 @@ describe("buildDescribedDag", () => {
       description: "prompt union",
       version: "1.0.0",
       loadedPrompts: new Map([["host-prompt", "host body"]]),
+      warningSink: inertWarningSink,
     });
 
     expect(described.ok).toBe(true);

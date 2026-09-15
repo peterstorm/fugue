@@ -12,11 +12,9 @@ export type { IncomingSources } from "./topology.js";
 export {
   seedInitialActiveSet,
   expandActive,
-  outgoingOf,
   computeOutgoingByNode,
   computeUnconditionalAdj,
   computeIncomingByNode,
-  incomingSources,
 } from "./topology.js";
 
 export type { Decision } from "./routing.js";
