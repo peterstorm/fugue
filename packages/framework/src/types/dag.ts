@@ -151,9 +151,9 @@ export type PredicateResult = {
   | { readonly outcome: "threw"; readonly message: string }
 );
 
-// evaluatePredicate has been moved to `dag-runtime/conditional.ts` where
-// it belongs (it contains business logic, not type definitions). Import from
-// `dag-runtime/conditional.js` directly.
+// evaluatePredicate lives in `dag-runtime/routing.ts` where it belongs
+// (it contains business logic, not type definitions). Import from
+// `dag-runtime/routing.js` directly.
 
 /**
  * Edge variants (runtime shape, after `defineDag` strips literal id types).

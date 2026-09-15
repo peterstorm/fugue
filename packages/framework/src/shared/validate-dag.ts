@@ -79,17 +79,28 @@ const mergeRetryLimits = (
 const captureNodeInput = (
   node: DagDef["nodes"][number],
 ): Result<DagDef["nodes"][number], FrameworkError> => {
+  // Hand-built-node defensive obligation: sideEffects is a required NodeDef
+  // field, but `{ ...captured.sideEffects }` yields `{}` for undefined with no
+  // rejection, so a TS-bypassing dynamically-built node without a sideEffects
+  // container would otherwise carry `sideEffects: undefined` into the validated
+  // DagDef and the stable describe payload. Reject it here with the same
+  // defensive posture the gate applies to hand-built isSource/inputSchema
+  // inconsistencies and retry numeric domains. Maps are rejected separately by
+  // snapshotMapping (sideEffects?.kind !== "writes").
+  if (node.kind !== "map" && (node as { readonly sideEffects?: unknown }).sideEffects === undefined) {
+    return err(validationErr(
+      nodeId("__dag__"),
+      `node '${safeErrorMessage(node.id)}' is missing sideEffects — every NodeDef carries a side-effect profile with a kind`,
+    ));
+  }
   try {
     const captured = { ...node };
-    const capturedRetry = captured.retry === undefined
-      ? undefined
-      : { ...captured.retry };
-    const retry = capturedRetry === undefined
+    const retry = captured.retry === undefined
       ? undefined
       : {
-          ...capturedRetry,
-          ...(capturedRetry.backoffMs !== undefined
-            ? { backoffMs: [...capturedRetry.backoffMs] as [number, ...number[]] }
+          ...captured.retry,
+          ...(captured.retry.backoffMs !== undefined
+            ? { backoffMs: [...captured.retry.backoffMs] as [number, ...number[]] }
             : {}),
         };
     const common = {
@@ -200,8 +211,7 @@ const snapshotNode = (
               ...(captured.retry.backoffMs !== undefined
                 ? {
                     backoffMs: Object.freeze([
-                      captured.retry.backoffMs[0],
-                      ...captured.retry.backoffMs.slice(1),
+                      ...captured.retry.backoffMs,
                     ] as [number, ...number[]]),
                   }
                 : {}),
@@ -456,7 +466,7 @@ export const validateDagShape = (
         return err(
           validationErr(
             validationNodeId,
-            `retryLimits['${key}'] must be a non-negative safe integer, got ${String(limit)}`,
+            `retryLimits['${key}'] must be a non-negative safe integer, got ${safeErrorMessage(limit)}`,
           ),
         );
       }
@@ -469,7 +479,7 @@ export const validateDagShape = (
     return err(
       validationErr(
         validationNodeId,
-        `defaultRetryLimit must be a non-negative safe integer, got ${String(capturedInput.defaultRetryLimit)}`,
+        `defaultRetryLimit must be a non-negative safe integer, got ${safeErrorMessage(capturedInput.defaultRetryLimit)}`,
       ),
     );
   }
@@ -599,7 +609,7 @@ export const validateDagShape = (
         return err({
           kind: "predicate-malformed",
           nodeId: e.from,
-          message: `Edge '${e.from}' -> '${e.to}' predicate has invalid minConfidence '${String(minConfidence)}' — must be one of: ${validBuckets.join(", ")}`,
+          message: `Edge '${e.from}' -> '${e.to}' predicate has invalid minConfidence '${safeErrorMessage(minConfidence)}' — must be one of: ${validBuckets.join(", ")}`,
         });
       }
     }

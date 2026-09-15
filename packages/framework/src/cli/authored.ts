@@ -151,12 +151,22 @@ export interface SchemaSpec {
   readonly fields: readonly FieldSpec[];
 }
 
-const enumValue = z
-  .string()
-  .min(1)
-  .regex(SINGLE_LINE, "must be a single line")
-  .refine(NO_TEMPLATE_OPEN.check, NO_TEMPLATE_OPEN.message)
-  .refine(NO_FUGUE_BODY_MARKER.check, NO_FUGUE_BODY_MARKER.message);
+/**
+ * The free-text lexical policy, single-sourced: min(1) + SINGLE_LINE +
+ * NO_TEMPLATE_OPEN + NO_FUGUE_BODY_MARKER refinements. Every free-text surface
+ * (enum values, field descriptions, node purpose, DAG description) routes
+ * through this factory so a new free-text surface cannot forget a scrub layer
+ * and the 'must be a single line' message exists once.
+ */
+const freeText = () =>
+  z
+    .string()
+    .min(1)
+    .regex(SINGLE_LINE, "must be a single line")
+    .refine(NO_TEMPLATE_OPEN.check, NO_TEMPLATE_OPEN.message)
+    .refine(NO_FUGUE_BODY_MARKER.check, NO_FUGUE_BODY_MARKER.message);
+
+const enumValue = freeText();
 
 // Recursive because an authored object field may itself be an array of
 // objects. The recursion is data-only and bounded by the JSON document; it
@@ -180,13 +190,7 @@ const FieldSpecSchema: z.ZodType<FieldSpec, FieldSpec> = z
         message: "field name '__proto__' is not allowed (object-literal prototype setter — it cannot be emitted as a schema key)",
       }),
     type: FieldTypeSchema,
-    description: z
-      .string()
-      .min(1)
-      .regex(SINGLE_LINE, "must be a single line")
-      .refine(NO_TEMPLATE_OPEN.check, NO_TEMPLATE_OPEN.message)
-      .refine(NO_FUGUE_BODY_MARKER.check, NO_FUGUE_BODY_MARKER.message)
-      .optional(),
+    description: freeText().optional(),
   })
   .strict()
   .superRefine((f, ctx) => {
@@ -259,12 +263,7 @@ const kebabIdentRule = (subject: string): string =>
 
 const nodeId = kebabIdentField(kebabIdentRule("node id"));
 /** What this node is for — the authoring intent DescribedDag can't carry. */
-const nodePurpose = z
-  .string()
-  .min(1)
-  .regex(SINGLE_LINE, "must be a single line")
-  .refine(NO_TEMPLATE_OPEN.check, NO_TEMPLATE_OPEN.message)
-  .refine(NO_FUGUE_BODY_MARKER.check, NO_FUGUE_BODY_MARKER.message);
+const nodePurpose = freeText();
 
 /**
  * The `output` slot for kinds that require one. Zod's default missing-key
@@ -821,7 +820,7 @@ const deepFreezeOwned = <T>(value: T): DeepReadonly<T> => {
   for (const key of Reflect.ownKeys(value)) {
     deepFreezeOwned((value as Record<PropertyKey, unknown>)[key]);
   }
-  return (Object.isFrozen(value) ? value : Object.freeze(value)) as DeepReadonly<T>;
+  return Object.freeze(value) as DeepReadonly<T>;
 };
 
 const BaseAuthoredDagSchema = z
@@ -829,12 +828,7 @@ const BaseAuthoredDagSchema = z
     fugueAuthored: z.literal(1),
     name: kebabIdentField(kebabIdentRule("name")),
     team: kebabField("team must be kebab-case"),
-    description: z
-      .string()
-      .min(1)
-      .regex(SINGLE_LINE, "must be a single line")
-      .refine(NO_TEMPLATE_OPEN.check, NO_TEMPLATE_OPEN.message)
-      .refine(NO_FUGUE_BODY_MARKER.check, NO_FUGUE_BODY_MARKER.message),
+    description: freeText(),
     input: SchemaSpecSchema,
     nodes: z.array(AuthoredNodeSchema).min(1),
     structure: StructureSchema,

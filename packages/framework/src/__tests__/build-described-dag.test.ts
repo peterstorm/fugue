@@ -190,4 +190,24 @@ describe("buildDescribedDag", () => {
     if (!described.ok) return;
     expect(described.value.outputSchema).toBeNull();
   });
+
+  it("unions loadedPrompts keys with node-introspected prompt names", () => {
+    // Only pin of the loadedPrompts host-union branch of collectPromptNames:
+    // seeding from the host set and the node walk both augment one collection
+    // so omissions on either surface stay visible. A regression dropping the
+    // seeding (or the union loop) would silently omit host-loaded prompt names
+    // from the stable describe contract.
+    const described = buildDescribedDag({
+      dag,
+      inputSchema: z.string(),
+      route: "/describe",
+      description: "prompt union",
+      version: "1.0.0",
+      loadedPrompts: new Map([["host-prompt", "host body"]]),
+    });
+
+    expect(described.ok).toBe(true);
+    if (!described.ok) return;
+    expect(described.value.prompts).toEqual(["host-prompt"]);
+  });
 });

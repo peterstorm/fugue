@@ -1,11 +1,14 @@
 /**
  * Unit tests for `buildNodeInput`.
  *
- * Validates bare/keyed assembly by total incoming-source cardinality.
+ * Validates bare/keyed assembly by total incoming-source cardinality. Node ids
+ * go through the branded `NodeId` smart constructor — the validated-id
+ * precondition `buildNodeInput` expresses structurally in its signature.
  */
 
 import { describe, it, expect } from "bun:test";
 import { buildNodeInput } from "../shared/build-input.js";
+import { nodeId } from "../types/ids.js";
 
 describe("buildNodeInput", () => {
   it("no incoming sources → returns undefined (source node, C0)", () => {
@@ -15,7 +18,7 @@ describe("buildNodeInput", () => {
     const result = buildNodeInput(new Map(), {
       required: [],
       optional: [],
-    }, "test-node");
+    }, nodeId("test-node"));
     expect(result).toEqual({ ok: true, value: undefined });
   });
 
@@ -26,7 +29,7 @@ describe("buildNodeInput", () => {
     const result = buildNodeInput(outputs, {
       required: ["$input"],
       optional: [],
-    }, "test-node");
+    }, nodeId("test-node"));
     expect(result).toEqual({ ok: true, value: { region: "dk" } });
   });
 
@@ -35,7 +38,7 @@ describe("buildNodeInput", () => {
     const result = buildNodeInput(outputs, {
       required: ["fetch"],
       optional: [],
-    }, "test-node");
+    }, nodeId("test-node"));
     expect(result).toEqual({ ok: true, value: { data: 42 } });
   });
 
@@ -47,7 +50,7 @@ describe("buildNodeInput", () => {
     const result = buildNodeInput(outputs, {
       required: ["a", "b"],
       optional: [],
-    }, "test-node");
+    }, nodeId("test-node"));
     expect(result).toEqual({ ok: true, value: { a: "valueA", b: "valueB" } });
   });
 
@@ -59,7 +62,7 @@ describe("buildNodeInput", () => {
     const result = buildNodeInput(outputs, {
       required: ["score", "$input"],
       optional: [],
-    }, "assemble");
+    }, nodeId("assemble"));
     expect(result).toEqual({
       ok: true,
       value: { score: { scored: [] }, $input: { region: "dk", minScore: 5 } },
@@ -74,7 +77,7 @@ describe("buildNodeInput", () => {
     const result = buildNodeInput(outputs, {
       required: ["a"],
       optional: ["opt"],
-    }, "test-node");
+    }, nodeId("test-node"));
     expect(result).toEqual({ ok: true, value: { a: "valueA", opt: "optValue" } });
   });
 
@@ -83,7 +86,7 @@ describe("buildNodeInput", () => {
     const result = buildNodeInput(outputs, {
       required: ["a"],
       optional: ["opt"],
-    }, "test-node");
+    }, nodeId("test-node"));
     expect(result).toEqual({ ok: true, value: { a: "valueA", opt: undefined } });
   });
 
@@ -92,7 +95,7 @@ describe("buildNodeInput", () => {
     const result = buildNodeInput(outputs, {
       required: [],
       optional: ["classifier"],
-    }, "handler");
+    }, nodeId("handler"));
     expect(result).toEqual({ ok: true, value: { route: "yes" } });
   });
 
@@ -101,7 +104,7 @@ describe("buildNodeInput", () => {
     const result = buildNodeInput(outputs, {
       required: [],
       optional: ["left", "right"],
-    }, "merge");
+    }, nodeId("merge"));
     expect(result).toEqual({
       ok: true,
       value: { left: "yes", right: undefined },
@@ -112,13 +115,32 @@ describe("buildNodeInput", () => {
     const result = buildNodeInput(new Map(), {
       required: ["missing"],
       optional: [],
-    }, "test-node");
+    }, nodeId("test-node"));
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.kind).toBe("node-crash");
       if (result.error.kind === "node-crash") {
         expect(result.error.retriability).toBe("non-retriable");
         expect(result.error.message).toContain("BUG: required source 'missing' has no output");
+      }
+    }
+  });
+
+  it("returns non-retriable error when the sole optional source is missing", () => {
+    // Same corruption class as the required-source branch: a selected router
+    // edge whose output is absent is checkpoint corruption or a framework
+    // ordering bug, so it gets the same non-retriable node-attributed error
+    // instead of silently passing `undefined` as the node's input.
+    const result = buildNodeInput(new Map(), {
+      required: [],
+      optional: ["classifier"],
+    }, nodeId("handler"));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("node-crash");
+      if (result.error.kind === "node-crash") {
+        expect(result.error.retriability).toBe("non-retriable");
+        expect(result.error.message).toContain("BUG: sole optional source 'classifier' has no output");
       }
     }
   });

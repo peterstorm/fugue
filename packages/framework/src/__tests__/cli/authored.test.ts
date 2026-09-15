@@ -63,6 +63,27 @@ const outputOf = (n: AuthoredDagInput["nodes"][number]) => {
   return n.output;
 };
 
+/**
+ * Minimal inert DescribedDag for gauntlet stubs — runNewFrom only forwards
+ * advisories/warnings from the verdict and never inspects the payload, so
+ * one shared fixture keeps the stub-using tests honest about that (and a
+ * field added to `DescribedDag` still fails here at compile time).
+ */
+const describedStub: DescribedDag = {
+  id: "authored-linear",
+  route: "/authored-linear",
+  description: "stub",
+  version: "1.0.0",
+  inputSchema: null,
+  outputSchema: null,
+  outputNodeId: null,
+  nodes: [],
+  edges: [],
+  waves: [],
+  prompts: [],
+  capabilities: [],
+};
+
 const FIXTURES: Record<string, AuthoredDagInput> = {
   linear: {
     fugueAuthored: 1,
@@ -1434,20 +1455,6 @@ describe("authored codegen survives the gauntlet", () => {
     };
     // The ok verdict now carries the DescribedDag of the generated code —
     // runNewFrom only forwards advisories, so a minimal stub suffices here.
-    const describedStub: DescribedDag = {
-      id: "authored-linear",
-      route: "/authored-linear",
-      description: "stub",
-      version: "1.0.0",
-      inputSchema: null,
-      outputSchema: null,
-      outputNodeId: null,
-      nodes: [],
-      edges: [],
-      waves: [],
-      prompts: [],
-      capabilities: [],
-    };
     const okWithAdvisory = async (): Promise<GauntletResult> => ({
       ok: true,
       described: describedStub,
@@ -1466,20 +1473,6 @@ describe("authored codegen survives the gauntlet", () => {
     await mkdir(root, { recursive: true });
     const fromPath = join(root, "x.authored.json");
     await Bun.write(fromPath, JSON.stringify(FIXTURES.linear));
-    const describedStub: DescribedDag = {
-      id: "authored-linear",
-      route: "/authored-linear",
-      description: "stub",
-      version: "1.0.0",
-      inputSchema: null,
-      outputSchema: null,
-      outputNodeId: null,
-      nodes: [],
-      edges: [],
-      waves: [],
-      prompts: [],
-      capabilities: [],
-    };
     const warning = "outputSchema (node 'summarize'): unrepresentable in JSON Schema";
     const okWithWarning = async (): Promise<GauntletResult> => ({
       ok: true,

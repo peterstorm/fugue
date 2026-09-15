@@ -21,17 +21,6 @@ export type { IncomingSources };
 // Adjacency helpers
 // ---------------------------------------------------------------------------
 
-const buildOutgoing = (dag: DagDef): Map<NodeId, EdgeDef[]> => {
-  const out = new Map<NodeId, EdgeDef[]>();
-  for (const n of dag.nodes) out.set(n.id, []);
-  for (const e of dag.edges) {
-    const list = out.get(e.from);
-    if (list) list.push(e);
-  }
-  return out;
-};
-
-
 /**
  * Seed the initial active set: every node reachable from a wave-0 entry point
  * along unconditional edges only. Conditional and default targets are added
@@ -67,7 +56,7 @@ export function seedInitialActiveSet(
   } else {
     const dag = dagOrEdges as DagDef;
     edges = dag.edges;
-    outgoing = buildOutgoing(dag);
+    outgoing = computeOutgoingByNode(dag);
     nodeIds = dag.nodes.map(n => n.id);
   }
 
@@ -135,15 +124,17 @@ export const expandActive = (
  *
  * Prefer `machineCtx.outgoingByNode.get(id)` from `DagMachineContext` where
  * available — that map is precomputed once in `compileDagToMachine`. This
- * helper is retained for non-runtime callers (validators, tests) that don't
- * have access to a `DagMachineContext`.
+ * helper has no in-repo call sites; it is retained only as a public re-export
+ * (`dag-runtime/conditional.ts`, `dag-runtime/index.ts`) for external consumers.
  */
 export const outgoingOf = (dag: DagDef, fromNodeId: NodeId): readonly EdgeDef[] =>
   dag.edges.filter((e) => e.from === fromNodeId);
 
 /**
- * Compile-time adjacency builder. Walk all edges once and bucket by `from`,
- * giving every node its outgoing list in O(E). Consumers do O(1) lookup.
+ * Compile-time adjacency builder. Walk all edges once and bucket by `from`;
+ * only nodes with at least one outgoing (non-`$input`) edge receive a bucket —
+ * sink nodes are absent from the map, so consumers guard with `?? []` (O(1)
+ * lookup against the precomputed map).
  */
 export const computeOutgoingByNode = (
   dag: DagDef,
@@ -159,10 +150,11 @@ export const computeOutgoingByNode = (
 };
 
 /**
- * Compile-time closure-free adjacency builder. Maps each node to the target
- * node IDs of its unconditional out-edges only. Used by the pure transition
- * layer (`expandActive`, `seedInitialActiveSet`) which never evaluates
- * predicate closures. Serializable.
+ * Compile-time closure-free adjacency builder. Buckets the target node IDs of
+ * unconditional out-edges by `from`; only nodes with at least one unconditional
+ * (non-`$input`) out-edge receive a bucket. Consumed by `expandActive`
+ * (wave-resolution.ts, reroute.ts), which never evaluates predicate closures;
+ * `seedInitialActiveSet` derives its own outgoing instead. Serializable.
  */
 export const computeUnconditionalAdj = (
   dag: DagDef,
@@ -243,8 +235,10 @@ const incomingSourcesFor = (
  * Precompute `IncomingSources` for every node in the DAG. Returns a Map keyed
  * by node id; lookups are O(1) at wave dispatch time.
  *
- * Called once per `compileDagToMachine` / `runDagInner` and stashed on the
- * machine context (`incomingByNode`).
+ * Called once per `compileDagToMachine` (dag-runtime/machine.ts, stashed on
+ * the machine context as `incomingByNode`) and per `wrapDagJobLike`
+ * (dag-runtime/persistence.ts); `fugue lint` (cli/lint-checks.ts) also derives
+ * the same map for its key-set checks.
  */
 export const computeIncomingByNode = (
   dag: DagDef,

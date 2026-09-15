@@ -502,6 +502,115 @@ const effectiveOutName = (p: NodePlan): string => {
   return p.inExpr;
 };
 
+/**
+ * One parameterized structure-wiring emitter for both scopes: the root DAG
+ * (buildAuthoredScaffold) and a mapped child (emitChildStructure). The
+ * per-shape wiring contract — which upstream output each node consumes and how
+ * fan-ins are keyed — exists here once; the two scopes are thin adapters that
+ * differ only in the naming adapter (node-ref expression, fan-in const
+ * naming), the root-input expression, join requiredness, and pedagogical
+ * comment emission. A new Shape is implemented once, here.
+ */
+interface StructureWiringScope {
+  /** The scope's emitted id: the DAG name (root) or the child DAG id (mapped child). */
+  readonly scopeId: string;
+  /** Plan accessor — throws with the scope's own invariant message. */
+  readonly plan: (id: string) => NodePlan;
+  /** Store the wired input expression on the scope's plan map. */
+  readonly setInput: (id: string, expression: string) => void;
+  /** Node-ref-to-expression resolution (root: nodeExprRef; child: the LLM factory binding). */
+  readonly nodeRefOf: (plan: NodePlan) => string;
+  /** Fan-in const naming (root: fanInConstName; child: childLocalName(fanInConstName)). */
+  readonly fanInNameOf: (joinId: KebabIdent) => string;
+  /** The scope's root input expression: INPUT_SCHEMA_NAME (root) or the item-schema expression (child). */
+  readonly rootInput: string;
+  /** A mapped child fan-out requires a join; the root fan-out allows an optional join. */
+  readonly joinRequired: boolean;
+  /** Fan-in consts and their comments land here (root: extraDecls; child: local extras). */
+  readonly pushDecl: (decl: string) => void;
+  /** Pedagogical fan-in comments (root emits; the mapped child emits none). */
+  readonly fanInComments: (
+    context: "fan-out-join" | "sources-join" | "sources-assemble",
+  ) => readonly string[];
+  /** Router default-arm comment (root: " // REQUIRED"; mapped child: ""). */
+  readonly routerDefaultSuffix: string;
+}
+
+/** Pedagogical fan-in comments, adapter-local: the root emitter's teaching
+ *  comments for each fan-in const; the mapped-child emitter emits none. */
+const FAN_IN_COMMENTS: Readonly<
+  Record<"fan-out-join" | "sources-join" | "sources-assemble", readonly string[]>
+> = {
+  "fan-out-join": [
+    `// The join sees every branch keyed by its node id — keys MUST equal the\n// incoming set (\`fugue lint\` enforces this).`,
+  ],
+  "sources-join": [
+    `// Join: fan-in keyed by the source node ids (\`fugue lint\` checks the key set).`,
+  ],
+  "sources-assemble": [
+    `// Assemble: fan-in over the join + the request via the "$input" slot.\n// Declaring "$input" is what makes \`defineSources\` add the DAG_INPUT edge.`,
+  ],
+};
+
+const emitStructureWiring = (
+  structure: AuthoredDag["structure"],
+  scope: StructureWiringScope,
+): string => {
+  const { plan, setInput, nodeRefOf, fanInNameOf, rootInput, joinRequired, pushDecl, fanInComments, routerDefaultSuffix } = scope;
+  return match(structure)
+    .with({ shape: "linear" }, (linear) => {
+      let previous = rootInput;
+      for (const id of linear.order) {
+        setInput(id, previous);
+        previous = effectiveOutName(plan(id));
+      }
+      return `${SHAPE_HELPER_NAME.linear}({
+  id: ${JSON.stringify(scope.scopeId)},
+  nodes: [${linear.order.map((id) => nodeRefOf(plan(id))).join(", ")}],
+})`;
+    })
+    .with({ shape: "fan-out" }, { shape: "diamond" }, (fan) => {
+      setInput(fan.source, rootInput);
+      const sourceOut = effectiveOutName(plan(fan.source));
+      for (const id of fan.branches) setInput(id, sourceOut);
+      let joinPart = "";
+      if (fan.join !== undefined) {
+        const fanInName = fanInNameOf(fan.join);
+        for (const comment of fanInComments("fan-out-join")) pushDecl(comment);
+        pushDecl(fanInConst(fanInName, fan.branches.map(plan)));
+        setInput(fan.join, fanInName);
+        joinPart = `\n  join: ${nodeRefOf(plan(fan.join))},`;
+      } else if (joinRequired) {
+        throw new Error(`authored map invariant: child '${scope.scopeId}' fan-out has no join`);
+      }
+      return `${SHAPE_HELPER_NAME[fan.shape]}({\n  id: ${JSON.stringify(scope.scopeId)},\n  source: ${nodeRefOf(plan(fan.source))},\n  branches: [${fan.branches.map((id) => nodeRefOf(plan(id))).join(", ")}],${joinPart}\n})`;
+    })
+    .with({ shape: "router" }, (router) => {
+      setInput(router.classifier, rootInput);
+      const classifierOut = effectiveOutName(plan(router.classifier));
+      for (const entry of router.cases) setInput(entry.to, classifierOut);
+      setInput(router.default, classifierOut);
+      const cases = router.cases
+        .map(
+          (entry) => `    ${key(entry.label)}: {\n      when: (out) => (out as z.infer<typeof ${classifierOut}>).${entry.when.field} === ${JSON.stringify(entry.when.equals)},\n      to: ${nodeRefOf(plan(entry.to))},\n    },`,
+        )
+        .join("\n");
+      return `${SHAPE_HELPER_NAME.router}({\n  id: ${JSON.stringify(scope.scopeId)},\n  classifier: ${nodeRefOf(plan(router.classifier))},\n  cases: {\n${cases}\n  },\n  default: ${nodeRefOf(plan(router.default))},${routerDefaultSuffix}\n})`;
+    })
+    .with({ shape: "sources" }, (sources) => {
+      const joinFanIn = fanInNameOf(sources.join);
+      for (const comment of fanInComments("sources-join")) pushDecl(comment);
+      pushDecl(fanInConst(joinFanIn, sources.sources.map(plan)));
+      setInput(sources.join, joinFanIn);
+      const assembleFanIn = fanInNameOf(sources.assemble);
+      for (const comment of fanInComments("sources-assemble")) pushDecl(comment);
+      pushDecl(fanInConst(assembleFanIn, [plan(sources.join)], [["$input", rootInput]]));
+      setInput(sources.assemble, assembleFanIn);
+      return `${SHAPE_HELPER_NAME.sources}({\n  id: ${JSON.stringify(scope.scopeId)},\n  sources: [${sources.sources.map((id) => nodeRefOf(plan(id))).join(", ")}],\n  join: ${nodeRefOf(plan(sources.join))},\n  assemble: ${nodeRefOf(plan(sources.assemble))},\n})`;
+    })
+    .exhaustive();
+};
+
 interface ChildEmission {
   readonly declaration: string;
   readonly prompts: readonly PromptFile[];
@@ -527,8 +636,7 @@ const emitChildStructure = (
   };
   const itemExpr = schemaExpr(itemSchema, "  ");
   const extras: string[] = [];
-  const ref = (id: string): string => {
-    const node = plan(id);
+  const ref = (node: NodePlan): string => {
     if (node.node.kind !== "llm") return node.ref;
     if (node.llmFactory === null) {
       throw new Error(`authored map invariant: child LLM '${node.node.id}' has no factory binding`);
@@ -536,45 +644,20 @@ const emitChildStructure = (
     return `${node.llmFactory}(${CHILD_MODEL_NAME})`;
   };
 
-  const expression = match(child.structure)
-    .with({ shape: "linear" }, (linear) => {
-      let previous = itemExpr;
-      for (const id of linear.order) {
-        setInput(id, previous);
-        previous = effectiveOutName(plan(id));
-      }
-      return `${SHAPE_HELPER_NAME.linear}({\n  id: ${JSON.stringify(child.id)},\n  nodes: [${linear.order.map(ref).join(", ")}],\n})`;
-    })
-    .with({ shape: "fan-out" }, { shape: "diamond" }, (fan) => {
-      setInput(fan.source, itemExpr);
-      const sourceOutput = effectiveOutName(plan(fan.source));
-      for (const id of fan.branches) setInput(id, sourceOutput);
-      if (fan.join === undefined) {
-        throw new Error(`authored map invariant: child '${child.id}' fan-out has no join`);
-      }
-      const fanInName = childLocalName(fanInConstName(fan.join));
-      extras.push(fanInConst(fanInName, fan.branches.map(plan)));
-      setInput(fan.join, fanInName);
-      return `${SHAPE_HELPER_NAME[fan.shape]}({\n  id: ${JSON.stringify(child.id)},\n  source: ${ref(fan.source)},\n  branches: [${fan.branches.map(ref).join(", ")}],\n  join: ${ref(fan.join)},\n})`;
-    })
-    .with({ shape: "router" }, (router) => {
-      setInput(router.classifier, itemExpr);
-      const classifierOutput = effectiveOutName(plan(router.classifier));
-      for (const entry of router.cases) setInput(entry.to, classifierOutput);
-      setInput(router.default, classifierOutput);
-      const cases = router.cases.map((entry) => `    ${key(entry.label)}: {\n      when: (out) => (out as z.infer<typeof ${classifierOutput}>).${entry.when.field} === ${JSON.stringify(entry.when.equals)},\n      to: ${ref(entry.to)},\n    },`).join("\n");
-      return `${SHAPE_HELPER_NAME.router}({\n  id: ${JSON.stringify(child.id)},\n  classifier: ${ref(router.classifier)},\n  cases: {\n${cases}\n  },\n  default: ${ref(router.default)},\n})`;
-    })
-    .with({ shape: "sources" }, (sources) => {
-      const joinFanIn = childLocalName(fanInConstName(sources.join));
-      extras.push(fanInConst(joinFanIn, sources.sources.map(plan)));
-      setInput(sources.join, joinFanIn);
-      const assembleFanIn = childLocalName(fanInConstName(sources.assemble));
-      extras.push(fanInConst(assembleFanIn, [plan(sources.join)], [["$input", itemExpr]]));
-      setInput(sources.assemble, assembleFanIn);
-      return `${SHAPE_HELPER_NAME.sources}({\n  id: ${JSON.stringify(child.id)},\n  sources: [${sources.sources.map(ref).join(", ")}],\n  join: ${ref(sources.join)},\n  assemble: ${ref(sources.assemble)},\n})`;
-    })
-    .exhaustive();
+  const expression = emitStructureWiring(child.structure, {
+    scopeId: child.id,
+    plan,
+    setInput,
+    nodeRefOf: ref,
+    fanInNameOf: (joinId) => childLocalName(fanInConstName(joinId)),
+    rootInput: itemExpr,
+    joinRequired: true,
+    pushDecl: (decl) => {
+      extras.push(decl);
+    },
+    fanInComments: () => [],
+    routerDefaultSuffix: "",
+  });
 
   return { expression, extras };
 };
@@ -667,83 +750,24 @@ export const buildAuthoredScaffold = (dag: AuthoredDag): AuthoredScaffold => {
     if (p.outSpec) schemaDecls.push(schemaConst(p.outName, p.outSpec));
   }
 
-  // Wire inputs per shape + build the structure expression
-  const structureExpr: string = match(s)
-    .with({ shape: "linear" }, (lin) => {
-      let prevSchema: string = INPUT_SCHEMA_NAME;
-      for (const id of lin.order) {
-        setInput(id, prevSchema);
-        prevSchema = effectiveOutName(plan(id));
-      }
-      return `${SHAPE_HELPER_NAME.linear}({
-  id: ${JSON.stringify(dag.name)},
-  nodes: [${lin.order.map((id) => nodeExprRef(plan(id))).join(", ")}],
-})`;
-    })
-    .with({ shape: "fan-out" }, { shape: "diamond" }, (fan) => {
-      const helper = SHAPE_HELPER_NAME[fan.shape];
-      setInput(fan.source, INPUT_SCHEMA_NAME);
-      const sourceOut = effectiveOutName(plan(fan.source));
-      for (const id of fan.branches) setInput(id, sourceOut);
-      let joinPart = "";
-      if (fan.join !== undefined) {
-        const fanInName = fanInConstName(fan.join);
-        extraDecls.push(
-          `// The join sees every branch keyed by its node id — keys MUST equal the\n// incoming set (\`fugue lint\` enforces this).`,
-          fanInConst(fanInName, fan.branches.map(plan)),
-        );
-        setInput(fan.join, fanInName);
-        joinPart = `\n  join: ${nodeExprRef(plan(fan.join))},`;
-      }
-      return `${helper}({
-  id: ${JSON.stringify(dag.name)},
-  source: ${nodeExprRef(plan(fan.source))},
-  branches: [${fan.branches.map((id) => nodeExprRef(plan(id))).join(", ")}],${joinPart}
-})`;
-    })
-    .with({ shape: "router" }, (r) => {
-      setInput(r.classifier, INPUT_SCHEMA_NAME);
-      const classifierOut = effectiveOutName(plan(r.classifier));
-      for (const c of r.cases) setInput(c.to, classifierOut);
-      setInput(r.default, classifierOut);
-      const cases = r.cases
-        .map(
-          (c) => `    ${key(c.label)}: {
-      when: (out) => (out as z.infer<typeof ${classifierOut}>).${c.when.field} === ${JSON.stringify(c.when.equals)},
-      to: ${nodeExprRef(plan(c.to))},
-    },`,
-        )
-        .join("\n");
-      return `${SHAPE_HELPER_NAME.router}({
-  id: ${JSON.stringify(dag.name)},
-  classifier: ${nodeExprRef(plan(r.classifier))},
-  cases: {
-${cases}
-  },
-  default: ${nodeExprRef(plan(r.default))}, // REQUIRED
-})`;
-    })
-    .with({ shape: "sources" }, (src) => {
-      const joinFanIn = fanInConstName(src.join);
-      extraDecls.push(
-        `// Join: fan-in keyed by the source node ids (\`fugue lint\` checks the key set).`,
-        fanInConst(joinFanIn, src.sources.map(plan)),
-      );
-      setInput(src.join, joinFanIn);
-      const assembleFanIn = fanInConstName(src.assemble);
-      extraDecls.push(
-        `// Assemble: fan-in over the join + the request via the "$input" slot.\n// Declaring "$input" is what makes \`defineSources\` add the DAG_INPUT edge.`,
-        fanInConst(assembleFanIn, [plan(src.join)], [["$input", INPUT_SCHEMA_NAME]]),
-      );
-      setInput(src.assemble, assembleFanIn);
-      return `${SHAPE_HELPER_NAME.sources}({
-  id: ${JSON.stringify(dag.name)},
-  sources: [${src.sources.map((id) => nodeExprRef(plan(id))).join(", ")}],
-  join: ${nodeExprRef(plan(src.join))},
-  assemble: ${nodeExprRef(plan(src.assemble))},
-})`;
-    })
-    .exhaustive();
+  // Wire inputs per shape + build the structure expression. One parameterized
+  // emitter for both scopes (root and mapped child) — the per-shape wiring
+  // contract exists once; this adapter differs only in naming, the root-input
+  // expression, optional join, and the pedagogical comments.
+  const structureExpr: string = emitStructureWiring(s, {
+    scopeId: dag.name,
+    plan,
+    setInput,
+    nodeRefOf: nodeExprRef,
+    fanInNameOf: fanInConstName,
+    rootInput: INPUT_SCHEMA_NAME,
+    joinRequired: false,
+    pushDecl: (decl) => {
+      extraDecls.push(decl);
+    },
+    fanInComments: (context) => FAN_IN_COMMENTS[context],
+    routerDefaultSuffix: " // REQUIRED",
+  });
 
   // Node declarations (structure order = declaration order)
   const nodeDecls: string[] = [];

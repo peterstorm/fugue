@@ -654,6 +654,17 @@ describe("AuthoredDag map node (FR-F1-010)", () => {
       expect(parsedReview.problems.join("\n")).toContain("gather, then review at root level");
     }
 
+    // The third '__proto__' emission surface: its two siblings (schema field
+    // names, widthFrom) are pinned by tests — a gather field named '__proto__'
+    // must be refused at parse time with the precise gather-field rule.
+    const gatherField = draft();
+    (mapOf(gatherField).gather as Record<string, unknown>).field = "__proto__";
+    const refusedGatherField = parseAuthoredDag(gatherField);
+    expect(refusedGatherField.ok).toBe(false);
+    if (!refusedGatherField.ok) {
+      expect(refusedGatherField.problems.join("\n")).toContain("gather field '__proto__' is not allowed");
+    }
+
     const reducer = draft();
     mapOf(reducer).gather = { kind: "expression", source: "results => results" };
     expect(parseAuthoredDag(reducer).ok).toBe(false);
