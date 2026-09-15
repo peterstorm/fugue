@@ -25,7 +25,6 @@ acyclic graphs. It compiles a `DagDef` into a `Machine`, pairs it with an
 | File | Responsibility | I/O? |
 |------|---------------|------|
 | `routing.ts` | Predicate evaluation, `decideRoute()` | Pure |
-| `conditional.ts` | Re-exports `evaluatePredicate` from routing.ts | Pure |
 | `route-emission.ts` | Emit `route-decided` / `node-pruned` observer events | Shell |
 | `reroute.ts` | Human-reroute enrichment, active-set reseeding | Pure |
 | `topology.ts` | Static graph analysis: adjacency, incoming sources | Pure |

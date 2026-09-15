@@ -15,7 +15,7 @@ import type { DagDef, DagNodeDef } from "../types/dag.js";
 import type { FrameworkError } from "../types/errors.js";
 import { type Result, ok, err } from "../types/result.js";
 import { topoSort } from "../shared/topo.js";
-import { runtimeNodeInventory } from "../shared/runtime-node-inventory.js";
+import { inventoryCapabilities, runtimeNodeInventory } from "../shared/runtime-node-inventory.js";
 import { zodToJsonSchema } from "../llm/zod-schema.js";
 
 // ---------------------------------------------------------------------------
@@ -195,7 +195,9 @@ const describeNode = (
           }),
       // Projected so manifest consumers see the mapped structure: the child
       // is not a separately registered DAG, so this payload is the only
-      // surface carrying its contract (recursive for nested maps).
+      // surface carrying its contract. The recursion is defensive — nested
+      // maps are rejected at map construction and validation, so nested-map
+      // describe is not a supported input path.
       childNodes: node.mapping.child.nodes.map(describeNode),
       childEdges: node.mapping.child.edges.map(describeEdge),
     },
@@ -222,9 +224,6 @@ const describeEdge = (e: DagDef["edges"][number]): DescribedEdge =>
       kind: "default" as const,
     }))
     .exhaustive();
-
-const collectCapabilities = (nodes: DagDef["nodes"]): string[] =>
-  [...new Set(nodes.flatMap((node) => node.requires))].sort();
 
 /**
  * Type-narrowed accessor for the `promptName` field on LLM-kind nodes. The
@@ -308,10 +307,6 @@ export const buildDescribedDag = (
   }
   const runtimeNodes = runtimeNodeInventory(dag).nodes;
 
-  const waveIds: readonly (readonly string[])[] = waves.value.map((wave) =>
-    wave.map((id) => id),
-  );
-
   return ok({
     id: dag.id,
     route: input.route,
@@ -326,8 +321,8 @@ export const buildDescribedDag = (
       dag.outputNodeId !== undefined ? dag.outputNodeId : null,
     nodes: dag.nodes.map(describeNode),
     edges: dag.edges.map(describeEdge),
-    waves: waveIds,
+    waves: waves.value,
     prompts: collectPromptNames(runtimeNodes, input.loadedPrompts),
-    capabilities: collectCapabilities(runtimeNodes),
+    capabilities: inventoryCapabilities(dag),
   });
 };

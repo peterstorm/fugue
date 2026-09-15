@@ -208,7 +208,7 @@ const incomingSourcesFor = (
  */
 export const computeIncomingByNode = (
   dag: DagDef,
-): Map<NodeId, IncomingSources> => {
+): ReadonlyMap<NodeId, IncomingSources> => {
   const alwaysActive = seedInitialActiveSet(dag);
   const out = new Map<NodeId, IncomingSources>();
   for (const n of dag.nodes) {

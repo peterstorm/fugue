@@ -20,3 +20,14 @@ export const runtimeNodeInventory = (dag: Pick<DagDef, "nodes">): Readonly<{
   }
   return Object.freeze({ nodes: Object.freeze(nodes), mappedChildren });
 };
+
+/**
+ * The sorted, deduplicated capability union of the bounded inventory's nodes —
+ * outer and mapped-child requirements in one collection, the complete set the
+ * runtime claims during execution (child requirements are hoisted onto the
+ * map's per-invocation authority request). Derived here beside the inventory
+ * it summarizes so a change to how the inventory is bounded cannot be
+ * forgotten in describe.
+ */
+export const inventoryCapabilities = (dag: Pick<DagDef, "nodes">): string[] =>
+  [...new Set(runtimeNodeInventory(dag).nodes.flatMap((node) => node.requires))].sort();
