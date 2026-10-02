@@ -1,0 +1,11 @@
+{
+  "kind": "regex",
+  "name": "inv-2-fan-errors-via-factory",
+  "description": "F1 PR-D: fan-budget-refused and fan-child-failed errors are constructed only through frameworkError factories, so every refusal carries the redeploy hint, lower-bound flag and estimator-applied fields",
+  "extensions": [".ts"],
+  "pattern": "kind:\\s*[\"'`]fan-(budget-refused|child-failed)[\"'`]\\s*,",
+  "flags": "",
+  "excludePatterns": ["types/error-factories.ts", ".test.ts"],
+  "fixHint": "Build the error with frameworkError.fanBudgetRefused(...) / frameworkError.fanChildFailed(...) from packages/framework/src/types/error-factories.ts instead of an object literal.",
+  "enabled": true
+}

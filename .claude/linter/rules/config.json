@@ -209,7 +209,8 @@
     "packages/framework/src/state-machine/replay.ts",
     "packages/framework/src/scheduler/catch-up.ts",
     "packages/framework/src/scheduler/cycle.ts",
-    "packages/framework/src/scheduler/diff.ts"
+    "packages/framework/src/scheduler/diff.ts",
+    "packages/framework/src/dag-runtime/fan/"
   ],
   "maxFunctionLines": 60,
   "excludeFromMaxLines": [".test.ts", ".spec.ts", ".property.test.ts", "host.ts", "run-dag.ts"]

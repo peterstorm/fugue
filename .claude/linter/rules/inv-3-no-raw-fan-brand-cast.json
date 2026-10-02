@@ -1,0 +1,11 @@
+{
+  "kind": "regex",
+  "name": "inv-3-no-raw-fan-brand-cast",
+  "description": "F1 PR-D: ChildConcurrency and FanConcurrencyCap are issued only by their smart constructors (parse, don't validate); no `as` cast may forge the brand",
+  "extensions": [".ts"],
+  "pattern": "\\bas\\s+(ChildConcurrency|FanConcurrencyCap)\\b",
+  "flags": "",
+  "excludePatterns": ["types/fan-scheduling.ts", ".test.ts"],
+  "fixHint": "Use childConcurrency(n) / fanConcurrencyCap(n) (or their Result-returning parse variants) from packages/framework/src/types/fan-scheduling.ts.",
+  "enabled": true
+}

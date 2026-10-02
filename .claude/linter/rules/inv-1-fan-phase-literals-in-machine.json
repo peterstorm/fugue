@@ -1,0 +1,11 @@
+{
+  "kind": "regex",
+  "name": "inv-1-fan-phase-literals-in-machine",
+  "description": "F1 PR-D LC-1: fan phase literals (fan-dispatching / fan-draining / fan-done) may only appear in the fan machine file; every other module imports the machine's constructors/types",
+  "extensions": [".ts"],
+  "pattern": "[\"'`]fan-(dispatching|draining|done)[\"'`]",
+  "flags": "",
+  "excludePatterns": ["dag-runtime/fan/fan-machine.ts", ".test.ts"],
+  "fixHint": "Import FanPhase constructors/guards from packages/framework/src/dag-runtime/fan/fan-machine.ts instead of re-spelling phase literals or re-implementing fanStep transitions.",
+  "enabled": true
+}
