@@ -3,20 +3,50 @@
   "kind": "loom-verification-manifest",
   "checks": [
     {
-      "id": "project:authored-map-regression",
+      "id": "project:xlsx-test",
       "scope": "wave",
       "executable": "bun",
       "args": [
         "test",
-        "packages/framework/src/__tests__/cli/authored-map.test.ts",
+        "packages/xlsx/src",
         "--reporter=junit",
-        "--reporter-outfile=.loom/completion-reports/authored-map-regression.junit.xml"
+        "--reporter-outfile=.loom/completion-reports/xlsx-test.junit.xml"
+      ],
+      "cwd": ".",
+      "timeoutMs": 600000,
+      "report": {
+        "kind": "required-file",
+        "path": ".loom/completion-reports/xlsx-test.junit.xml"
+      }
+    },
+    {
+      "id": "project:xlsx-typecheck",
+      "scope": "wave",
+      "executable": "bun",
+      "args": [
+        "run",
+        "--cwd",
+        "packages/xlsx",
+        "typecheck"
       ],
       "cwd": ".",
       "timeoutMs": 300000,
       "report": {
-        "kind": "required-file",
-        "path": ".loom/completion-reports/authored-map-regression.junit.xml"
+        "kind": "not-required"
+      }
+    },
+    {
+      "id": "project:document-source-test",
+      "scope": "wave",
+      "executable": "bun",
+      "args": [
+        "test",
+        "packages/document-source/src"
+      ],
+      "cwd": ".",
+      "timeoutMs": 300000,
+      "report": {
+        "kind": "not-required"
       }
     }
   ]

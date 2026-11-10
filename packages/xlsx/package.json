@@ -1,6 +1,6 @@
 {
   "name": "@fuguejs/xlsx",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/peterstorm/fugue.git",
@@ -14,13 +14,13 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "bun test --path-ignore-patterns='dist/**'"
+    "test": "bun test --path-ignore-patterns='dist/**'",
+    "bench:memory": "bun bench/parse-memory.ts"
   },
   "dependencies": {
     "@fuguejs/framework": "workspace:*",
-    "exceljs": "^4.4.0",
-    "jszip": "^3.10.1",
-    "xlsx": "^0.18.5"
+    "fflate": "^0.8.2",
+    "saxes": "^6.0.0"
   },
   "peerDependencies": {
     "zod": "^4.3.6"
@@ -31,8 +31,12 @@
     }
   },
   "devDependencies": {
-    "@types/bun": "1.4.1",
     "@fuguejs/fs": "workspace:*",
+    "@types/bun": "1.4.1",
+    "exceljs": "^4.4.0",
+    "fast-check": "^4.7.0",
+    "jszip": "^3.10.1",
+    "xlsx": "^0.18.5",
     "zod": "^4.3.6"
   },
   "publishConfig": {
