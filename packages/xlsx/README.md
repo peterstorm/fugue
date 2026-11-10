@@ -109,15 +109,22 @@ imported at runtime.
 ## Memory budget
 
 Streaming a 25.6k-row master list (the shape of the direct-sales `Brancheliste.xlsx`)
-must peak at or below **100 MB** of RSS for the parse. The previous SheetJS
-full load peaked at about 570 MB on the same workbook.
+must peak at or below **100 MB** of RSS **above the loaded-modules baseline**.
+The budget is not an absolute process-RSS ceiling. The previous SheetJS full
+load peaked at about 570 MB on the same workbook.
 
 `bench/parse-memory.ts` measures it. Each workbook is parsed in a fresh child
 process that streams it with a counting fold (no row is retained). The budgeted
-value is the peak RSS during the parse minus the process's RSS just before it,
-with modules loaded and garbage collected. That baseline is reported but not
-budgeted: it is mostly the `@fuguejs/framework` module graph (about 70 MB),
-which a host has loaded long before any parse.
+value is the peak RSS during the parse minus the baseline, which is the
+process's RSS just before the parse, with modules loaded and garbage collected.
+That baseline is reported but not budgeted. It is mostly the
+`@fuguejs/framework` module graph (about 70 MB), which a host has loaded long
+before any parse.
+
+The peak is the kernel's lifetime peak when the parse raised it. Otherwise it
+is the highest sample from a worker thread that polls RSS every 1 ms through the
+whole parse. Polling covers the synchronous `openWorkbook` (shared strings and
+styles) as well as the fold. The report names which of the two decided.
 
 ```bash
 bun run bench:memory                     # synthetic Brancheliste (deterministic, 25.6k rows)
@@ -126,8 +133,9 @@ FUGUE_REAL_DATA_DIR=/path/to/fugue-dags/data bun run bench:memory   # also the r
 ```
 
 It prints `brancheliste-parse (<workbook>): <n> MB / 100 MB OK` per workbook and
-exits 1 on a breach (2 on bad arguments, a missing real workbook or a failed
-parse). CI runs it on the synthetic workbook through
+exits 1 on a breach. It exits 2 on bad arguments, a missing real workbook, a
+fixture or temp-file failure, a failed parse, an unreadable child report or an
+inconsistent measurement (a peak below the baseline). CI runs it on the synthetic workbook through
 `src/__tests__/memory-budget.test.ts`; the real-data run is local only, because
 the workbook is business data.
 
@@ -142,6 +150,7 @@ Unit tests build `.xlsx` fixtures in memory (no committed binaries):
   cell matrix), with `TZ` pinned.
 - `real-data.local.test.ts`: the same differential on the real source workbooks.
   It runs only when `FUGUE_REAL_DATA_DIR` is set and is skipped in CI.
-- `memory-budget.test.ts`: the 100 MB parse budget on the synthetic workbook.
+- `memory-budget.test.ts`: the 100 MB parse budget (peak above the
+  loaded-modules baseline) on the synthetic workbook.
 - An end-to-end test reads a real file from disk through `@fuguejs/fs` and
   parses it, proving the `getContent → parseWorkbook` path.

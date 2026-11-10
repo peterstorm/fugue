@@ -11,9 +11,14 @@
  * - ExcelJS, for the shapes real exports have and for every fixture the existing
  *   xlsx tests build, so writer-specific output is covered too.
  *
- * Everything is a pure function of its seed: the PRNG is seeded, ZIP entry dates
- * and document-property timestamps are fixed, and ExcelJS output is re-zipped
- * with fixed dates. The same seed yields the same bytes.
+ * Everything is a pure function of its seed: the PRNG is seeded, and document
+ * properties carry a fixed timestamp. The archives `zipParts` writes — every raw
+ * OOXML workbook and the ExcelJS output re-zipped by `excelBytes` — are
+ * byte-identical for the same seed: every entry carries a fixed date and no
+ * implicit folder entry (which JSZip would stamp with wall-clock time) is
+ * written. The rebuilt fixtures of the existing xlsx tests are the exception:
+ * they are written exactly as those tests write them, so only their content is
+ * deterministic, not their bytes.
  */
 
 import ExcelJS from "exceljs";
@@ -21,6 +26,7 @@ import JSZip from "jszip";
 import { match } from "ts-pattern";
 import { z } from "zod";
 import type { ParseWorkbookOpts } from "../../index.js";
+import { BRANCHELISTE_ROWS } from "./bench-core.js";
 
 // ════════════════════════════════════════════════════════════════════════════
 // Fixture model
@@ -250,40 +256,50 @@ const cellXml = (ref: string | null, cell: RawCell, sst: SharedStrings): string 
     .exhaustive();
 };
 
-/** The bounding ref of every explicitly or implicitly addressed cell (for `dimension: auto`). */
-const boundingRef = (sheet: RawSheet): string => {
-  let row = 0;
-  let maxRow = 1;
-  let maxCol = 0;
-  for (const rr of sheet.rows) {
-    row = rr.r === "implicit" ? row + 1 : rr.r;
+/** A cell with the 0-based column a reader assigns it (an implicit cell follows the previous one). */
+type AddressedCell = { readonly placed: PlacedCell; readonly col: number };
+
+/** A row with the 1-based row number a reader assigns it (an implicit row follows the previous one). */
+type AddressedRow = { readonly raw: RawRow; readonly row: number; readonly cells: readonly AddressedCell[] };
+
+/** Resolve every row and cell to the address a reader assigns it: the one addressing rule. */
+const addressed = (sheet: RawSheet): readonly AddressedRow[] => {
+  let row = 0; // the cursors are local: each call resolves from scratch
+  return sheet.rows.map((raw) => {
+    row = raw.r === "implicit" ? row + 1 : raw.r;
     let col = -1;
-    for (const pc of rr.cells) {
-      col = pc.col === "implicit" ? col + 1 : pc.col;
-      maxRow = Math.max(maxRow, row);
-      maxCol = Math.max(maxCol, col);
-    }
-  }
-  return `A1:${colLetters(maxCol)}${maxRow}`;
+    const cells = raw.cells.map((placed): AddressedCell => {
+      col = placed.col === "implicit" ? col + 1 : placed.col;
+      return { placed, col };
+    });
+    return { raw, row, cells };
+  });
+};
+
+/** The bounding ref of every explicitly or implicitly addressed cell (for `dimension: auto`). */
+const boundingRef = (rows: readonly AddressedRow[]): string => {
+  const max = rows.reduce(
+    (acc, r) => r.cells.reduce((m, c) => ({ row: Math.max(m.row, r.row), col: Math.max(m.col, c.col) }), acc),
+    { row: 1, col: 0 },
+  );
+  return `A1:${colLetters(max.col)}${max.row}`;
 };
 
 const sheetXml = (sheet: RawSheet, sst: SharedStrings): string => {
-  let row = 0;
-  const body = sheet.rows
-    .map((rr) => {
-      row = rr.r === "implicit" ? row + 1 : rr.r;
-      const thisRow = row;
-      const cells = rr.cells
-        .map((pc) => cellXml(pc.col === "implicit" ? null : `${colLetters(pc.col)}${thisRow}`, pc.cell, sst))
+  const rows = addressed(sheet);
+  const body = rows
+    .map(({ raw, row, cells }) => {
+      const cellsXml = cells
+        .map(({ placed, col }) => cellXml(placed.col === "implicit" ? null : `${colLetters(col)}${row}`, placed.cell, sst))
         .join("");
-      const rAttr = rr.r === "implicit" ? "" : ` r="${rr.r}"`;
-      return cells === "" ? `<row${rAttr}/>` : `<row${rAttr}>${cells}</row>`;
+      const rAttr = raw.r === "implicit" ? "" : ` r="${raw.r}"`;
+      return cellsXml === "" ? `<row${rAttr}/>` : `<row${rAttr}>${cellsXml}</row>`;
     })
     .join("");
   const dim =
     sheet.dimension.kind === "none"
       ? ""
-      : `<dimension ref="${sheet.dimension.kind === "auto" ? boundingRef(sheet) : sheet.dimension.ref}"/>`;
+      : `<dimension ref="${sheet.dimension.kind === "auto" ? boundingRef(rows) : sheet.dimension.ref}"/>`;
   const merges =
     sheet.merges === undefined || sheet.merges.length === 0
       ? ""
@@ -382,11 +398,16 @@ const renderWorkbook = (wb: RawWorkbook): Readonly<Record<string, string>> => {
 // ════════════════════════════════════════════════════════════════════════════
 
 /** Fixed entry timestamp, so archives are byte-identical run to run. */
-const FIXED_DATE = new Date(Date.UTC(2026, 0, 1, 12, 0, 0));
+export const FIXED_DATE = new Date(Date.UTC(2026, 0, 1, 12, 0, 0));
 
+/**
+ * Zip the parts with a fixed date on every entry. `createFolders: false` keeps
+ * JSZip from adding implicit folder entries (`xl/`, `xl/worksheets/`), which it
+ * would stamp with wall-clock time; readers never need them.
+ */
 const zipParts = (parts: Readonly<Record<string, string | Uint8Array>>, compression: "DEFLATE" | "STORE"): Promise<Uint8Array> => {
   const zip = new JSZip();
-  for (const [path, data] of Object.entries(parts)) zip.file(path, data, { date: FIXED_DATE });
+  for (const [path, data] of Object.entries(parts)) zip.file(path, data, { date: FIXED_DATE, createFolders: false });
   return zip.generateAsync({ type: "uint8array", compression, compressionOptions: { level: 6 } });
 };
 
@@ -408,8 +429,12 @@ const newExcelWorkbook = (): ExcelJS.Workbook => {
   return wb;
 };
 
-const excelBytes = async (wb: ExcelJS.Workbook): Promise<Uint8Array> =>
-  restamp(new Uint8Array((await wb.xlsx.writeBuffer()) as ArrayBuffer));
+/** ExcelJS's own archive, as it writes it (wall-clock entry dates included). */
+const writeExcel = async (wb: ExcelJS.Workbook): Promise<Uint8Array> =>
+  new Uint8Array((await wb.xlsx.writeBuffer()) as ArrayBuffer);
+
+/** ExcelJS output re-zipped with fixed dates, so the same workbook gives the same bytes. */
+const excelBytes = async (wb: ExcelJS.Workbook): Promise<Uint8Array> => restamp(await writeExcel(wb));
 
 // ════════════════════════════════════════════════════════════════════════════
 // Value pools (Danish-shaped, with the characters real exports carry)
@@ -510,9 +535,6 @@ export const syntheticBrancheliste = (rowCount: number, seed: number): Promise<U
     sheets: [{ name: "Brancheliste", dimension: { kind: "auto" }, rows: rowsFrom(1, [BRANCHELISTE_HEADERS.map((h) => s(h)), ...data]) }],
   });
 };
-
-/** The real master list's size. */
-const BRANCHELISTE_ROWS = 25_600;
 
 // ════════════════════════════════════════════════════════════════════════════
 // The nine other source shapes
@@ -962,7 +984,8 @@ const edgeReads = (): readonly FixtureRead[] => [
 
 // ════════════════════════════════════════════════════════════════════════════
 // The fixtures the existing xlsx tests build (xlsx.test.ts, date-group-item.test.ts,
-// end-to-end.test.ts), rebuilt byte-for-byte the same way.
+// end-to-end.test.ts), rebuilt the same way: ExcelJS's own archive, not re-zipped,
+// so their content is deterministic but their entry dates are wall-clock.
 // ════════════════════════════════════════════════════════════════════════════
 
 const RowSchema = z.object({ customerId: z.string(), revenue: z.number() });
@@ -975,7 +998,7 @@ const makeXlsx = async (
   const ws = wb.addWorksheet(opts.sheetName ?? "Sheet1");
   ws.addRow([...(opts.headerRow ?? ["customerId", "revenue"])]);
   for (const r of data) ws.addRow([...r]);
-  return new Uint8Array((await wb.xlsx.writeBuffer()) as ArrayBuffer);
+  return writeExcel(wb);
 };
 
 const excelRows = async (sheets: readonly { readonly name: string; readonly rows: readonly (readonly ExcelJS.CellValue[])[] }[]): Promise<Uint8Array> => {
@@ -984,7 +1007,7 @@ const excelRows = async (sheets: readonly { readonly name: string; readonly rows
     const ws = wb.addWorksheet(sh.name);
     for (const r of sh.rows) ws.addRow([...r]);
   }
-  return new Uint8Array((await wb.xlsx.writeBuffer()) as ArrayBuffer);
+  return writeExcel(wb);
 };
 
 const dateGroupFixture = async (
@@ -1002,7 +1025,7 @@ const dateGroupFixture = async (
       ["Delesag", 45800],
     ],
   });
-  const zip = await JSZip.loadAsync(new Uint8Array(await wb.xlsx.writeBuffer()));
+  const zip = await JSZip.loadAsync(await writeExcel(wb));
   const tableFile = zip.file(/^xl\/tables\/.*\.xml$/)[0];
   if (tableFile === undefined) throw new Error("fixture bug: no table XML emitted");
   const xml = await tableFile.async("string");
@@ -1018,7 +1041,7 @@ const errorCellFixture = async (): Promise<Uint8Array> => {
   ws.addRow(["customerId", "revenue"]);
   const row = ws.addRow(["c-1", null]);
   row.getCell(2).value = { error: "#REF!" } as unknown as ExcelJS.CellValue;
-  return new Uint8Array((await wb.xlsx.writeBuffer()) as ArrayBuffer);
+  return writeExcel(wb);
 };
 
 /** Existing fixtures for row reading, sheet selection and failure outcomes. */

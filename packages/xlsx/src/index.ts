@@ -53,8 +53,16 @@
 import type { z } from "zod";
 import type { Result, FrameworkError } from "@fuguejs/framework";
 import { ok, err } from "@fuguejs/framework";
-import { DEFAULT_MAX_ENTRY_BYTES, findEntry, inflateEntry, inflateSlices, readZip, type ZipArchive } from "./zip.js";
-import { createXmlFeed, decodeUtf8 } from "./xml.js";
+import {
+  DEFAULT_MAX_ENTRY_BYTES,
+  findEntry,
+  inflateEntry,
+  inflateSlices,
+  readZip,
+  type ZipArchive,
+  type ZipEntry,
+} from "./zip.js";
+import { createXmlFeed, decodeUtf8, type XmlFeed } from "./xml.js";
 import {
   parseContentTypes,
   parseRelationships,
@@ -115,12 +123,12 @@ const loaded = new WeakMap<WorkbookHandle, LoadedWorkbook>();
 /**
  * Default yield cadence: 16 KiB of compressed sheet input.
  *
- * The plan specified 64 KiB. The default is deliberately lower because each
- * yield is also the garbage collector's chance to run. On one real 25k-row
- * export, measured once, yielding every 16 KiB peaked about 13 MB lower than
- * yielding every 64 KiB, at the cost of about 100 extra macrotask hops (well
- * under a millisecond). That is a single measurement, not a guarantee for other
- * workbooks. Callers that prefer fewer hops can pass `yieldEveryBytes`.
+ * Kept small because each yield is also the garbage collector's chance to run.
+ * On one real 25k-row export, measured once, yielding every 16 KiB peaked about
+ * 13 MB lower than yielding every 64 KiB, at the cost of about 100 extra
+ * macrotask hops (well under a millisecond). That is a single measurement, not
+ * a guarantee for other workbooks. Callers that prefer fewer hops can pass
+ * `yieldEveryBytes`.
  */
 const DEFAULT_YIELD_EVERY_BYTES = 16 * 1024;
 
@@ -133,12 +141,14 @@ const DEFAULT_YIELD_EVERY_BYTES = 16 * 1024;
 const SLICE_BYTES = 16 * 1024;
 
 /**
- * Normalise a cell value to a primitive (or `null`). The reader already yields
- * primitives / `Date`, so this mostly passes through — but it ALSO handles the
- * ExcelJS-shaped objects (formula `{ formula, result }`, rich text
- * `{ richText }`, hyperlink `{ text, hyperlink }`, error `{ error }`) so the
- * function stays a self-contained, independently-tested normaliser regardless of
- * the producer. Error cells and unknown objects → `null`.
+ * Normalise a cell value to a primitive (or `null`): primitives and `Date` pass
+ * through, and ExcelJS-shaped objects (formula `{ formula, result }`, rich text
+ * `{ richText }`, hyperlink `{ text, hyperlink }`, error `{ error }`) are
+ * flattened. Error cells and unknown objects → `null`.
+ *
+ * A standalone, independently tested public helper. The streaming reader does
+ * NOT use it (cells are decoded in `cell-value.ts`), so changing it never
+ * changes what `parseWorkbook` or `foldRows` return.
  */
 export const normalizeCell = (value: unknown): string | number | boolean | Date | null => {
   if (value === null || value === undefined) return null;
@@ -265,11 +275,47 @@ const worksheetNotFound = (sheet: string | number | undefined): FrameworkError =
   xlsxCrash(`worksheet not found: ${sheet ?? "(first)"}`);
 
 /**
+ * Feed the sheet's compressed slices through `feed`, yielding to the event loop
+ * every `yieldEveryBytes`, until the input ends or `stop` says the fold has its
+ * answer. Returns the feed's last result: an inflate or XML failure, or the
+ * close of a fully read sheet.
+ */
+const feedSheet = async (
+  archive: ZipArchive,
+  entry: ZipEntry,
+  feed: XmlFeed,
+  yieldEveryBytes: number,
+  stop: () => boolean,
+): Promise<Result<void, string>> => {
+  const decoder = new TextDecoder();
+  const sliceBytes = Math.min(SLICE_BYTES, yieldEveryBytes);
+  let sinceYield = 0;
+  for (const slice of inflateSlices(archive, entry, { sliceBytes, maxBytes: DEFAULT_MAX_ENTRY_BYTES })) {
+    if (!slice.ok) return err(slice.error.message);
+    const written = feed.write(decoder.decode(slice.value, { stream: true }));
+    if (!written.ok || stop()) return written;
+    sinceYield += sliceBytes;
+    if (sinceYield >= yieldEveryBytes) {
+      sinceYield = 0;
+      await yieldToEventLoop();
+    }
+  }
+  const tail = feed.write(decoder.decode());
+  return tail.ok ? feed.close() : tail;
+};
+
+/**
  * Stream one sheet's rows through `step`, in worksheet order, without
  * materialising the sheet. `rowNumber` is the 1-based worksheet row.
  *
  * Rows reach `step` in strictly ascending worksheet order. A sheet that cannot
  * be streamed in that order is a node-crash (see below).
+ *
+ * With a valid `<dimension>`, the fold ends at the first row past the
+ * dimension's last row and stops reading the sheet: XML in the compressed
+ * slices after that row is never parsed, so malformed or truncated XML there
+ * goes unreported. Malformed XML in any slice that WAS parsed, including the
+ * one that ended the fold, is always a node-crash.
  *
  * Returns:
  * - `node-crash` (non-retriable, deterministic, so never retried) when:
@@ -278,7 +324,7 @@ const worksheetNotFound = (sheet: string | number | undefined): FrameworkError =
  *   - the sheet is absent, by name or by 1-based index;
  *   - the sheet part is corrupt or would inflate past the per-entry cap
  *     (512 MiB, the zip-bomb guard);
- *   - the sheet XML is malformed or truncated;
+ *   - the sheet XML is malformed or truncated (within the parsed range above);
  *   - a cell addresses a row that has already been emitted (rows out of
  *     ascending order);
  *   - a cell references a shared string index that is not in the table;
@@ -310,8 +356,9 @@ export const foldRows = async <T, A>(
   if (entry === undefined) return err(worksheetNotFound(opts.sheet));
   if (part.kind === "cellless") return ok(init);
 
-  // Imperative shell: the SAX callbacks advance a pure fold (`foldRow`); the
-  // loop below owns the only mutable state and stops at the first failure.
+  // Imperative shell: the SAX callbacks advance a pure fold (`foldRow`); this
+  // closure owns the only mutable state and stops at the first failure.
+  const malformed = (message: string): FrameworkError => xlsxCrash(`failed to parse worksheet '${part.name}': ${message}`);
   let fold: RowFold<A> = startFold(opts.headerRow ?? 1, init);
   let failure: FrameworkError | null = null;
   let done = false;
@@ -331,33 +378,15 @@ export const foldRows = async <T, A>(
         }
       },
       fail: (message) => {
-        failure ??= xlsxCrash(`failed to parse worksheet '${part.name}': ${message}`);
+        failure ??= malformed(message);
       },
     },
   );
-  const feed = createXmlFeed(reader);
-  const decoder = new TextDecoder();
-  const malformed = (message: string): FrameworkError => xlsxCrash(`failed to parse worksheet '${part.name}': ${message}`);
-
-  const sliceBytes = Math.min(SLICE_BYTES, yieldEveryBytes);
-  let sinceYield = 0;
-  for (const slice of inflateSlices(wb.archive, entry, { sliceBytes, maxBytes: DEFAULT_MAX_ENTRY_BYTES })) {
-    if (!slice.ok) return err(malformed(slice.error.message));
-    const written = feed.write(decoder.decode(slice.value, { stream: true }));
-    if (failure !== null) return err(failure);
-    if (done) return ok(fold.acc);
-    if (!written.ok) return err(malformed(written.error));
-    sinceYield += sliceBytes;
-    if (sinceYield >= yieldEveryBytes) {
-      sinceYield = 0;
-      await yieldToEventLoop();
-    }
-  }
-  const tail = feed.write(decoder.decode());
-  const closed = tail.ok ? feed.close() : tail;
+  const fed = await feedSheet(wb.archive, entry, createXmlFeed(reader), yieldEveryBytes, () => failure !== null || done);
+  // A row or sheet failure precedes the XML error that stopped the parse; an
+  // XML error in a parsed slice outranks `done`.
   if (failure !== null) return err(failure);
-  if (!closed.ok && !done) return err(malformed(closed.error));
-  return ok(fold.acc);
+  return fed.ok ? ok(fold.acc) : err(malformed(fed.error));
 };
 
 /**

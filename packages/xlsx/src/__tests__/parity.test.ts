@@ -14,12 +14,18 @@ import { describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
 import JSZip from "jszip";
 import {
+  childEnv,
   differential,
+  NOT_A_ZIP_MESSAGE,
   PARITY_TIME_ZONES,
   runSuiteUnderTimeZone,
+  suiteVerdict,
   timeZoneOfChild,
 } from "./support/sheetjs-oracle.js";
+import { parseJUnitTotals } from "./support/junit-report.js";
 import {
+  anyRow,
+  FIXED_DATE,
   fixtureCases,
   randomWorkbook,
   SOURCE_SHAPES,
@@ -55,9 +61,20 @@ describe("AS-009: parseWorkbook ≡ SheetJS oracle on every fixture", () => {
   }
 });
 
+const RANDOM_SEEDS = Array.from({ length: 60 }, (_, i) => 1000 + i * 7919);
+
+/**
+ * Non-vacuity floors for the random seeds. Agreement on an error or on zero rows
+ * proves nothing about cell semantics, so most reads must produce rows. Measured
+ * when the floors were set: 148 of 220 reads (67%) produced rows, and 55 of the
+ * 60 seeds had at least one such read. The floors leave headroom for generator
+ * tweaks but fail if the row-producing evidence shrinks substantially.
+ */
+const MIN_ROW_READ_SHARE = 0.5;
+const MIN_ROW_SEED_SHARE = 0.8;
+
 describe("AS-009: random synthetic workbooks (cell-type mix, sparse addressing)", () => {
-  const SEEDS = Array.from({ length: 60 }, (_, i) => 1000 + i * 7919);
-  for (const seed of SEEDS) {
+  for (const seed of RANDOM_SEEDS) {
     it(`AS-009: random workbook seed ${seed} matches the oracle on every read`, async () => {
       const c = await randomWorkbook(seed);
       for (const read of c.reads) {
@@ -66,14 +83,48 @@ describe("AS-009: random synthetic workbooks (cell-type mix, sparse addressing)"
       }
     });
   }
+
+  it("AS-009: the random seeds are not vacuous — most reads produce rows", async () => {
+    const perSeed = await Promise.all(
+      RANDOM_SEEDS.map(async (seed) => {
+        const c = await randomWorkbook(seed);
+        const outcomes = await Promise.all(c.reads.map(async (read) => (await differential(c.bytes, read.schema, read.opts)).expected));
+        return outcomes.map((o) => o.kind === "rows" && o.rows.length > 0);
+      }),
+    );
+    const reads = perSeed.flat();
+    const rowReads = reads.filter(Boolean).length;
+    const rowSeeds = perSeed.filter((seedReads) => seedReads.some(Boolean)).length;
+    expect(rowReads / reads.length).toBeGreaterThanOrEqual(MIN_ROW_READ_SHARE);
+    expect(rowSeeds / RANDOM_SEEDS.length).toBeGreaterThanOrEqual(MIN_ROW_SEED_SHARE);
+  });
+});
+
+describe("canonical error messages", () => {
+  it("the fixed non-ZIP message is compared exactly, never masked", async () => {
+    const { expected, divergence } = await differential(new Uint8Array([1, 2, 3, 4]), anyRow);
+    expect(divergence).toBeNull();
+    expect(expected).toMatchObject({ kind: "error", error: { kind: "node-crash", fields: { message: NOT_A_ZIP_MESSAGE } } });
+  });
+
+  it("only the parser-specific tail of an unreadable ZIP's message is masked", async () => {
+    // The ZIP signature, then garbage: both readers fail, each quoting its own parser.
+    const corrupt = new Uint8Array([0x50, 0x4b, 0x03, 0x04, ...Array.from({ length: 60 }, (_, i) => i)]);
+    const { expected, divergence } = await differential(corrupt, anyRow);
+    expect(divergence).toBeNull();
+    expect(expected).toMatchObject({
+      kind: "error",
+      error: { kind: "node-crash", fields: { message: "failed to parse workbook: <reader-specific detail>" } },
+    });
+  });
 });
 
 /**
  * Digest of an archive's file entries (name + uncompressed bytes, in archive order).
- * Zip bytes are not compared because JSZip stamps implicit folder entries with
- * wall-clock time, and `docProps/` is skipped because ExcelJS writes wall-clock
- * created/modified stamps there; the workbook content is what the parity gate
- * reads.
+ * Bytes are not compared because the rebuilt fixtures of the existing xlsx tests
+ * are ExcelJS's own archives, with wall-clock entry dates, and `docProps/` is
+ * skipped because ExcelJS writes wall-clock created/modified stamps there in
+ * those fixtures; the workbook content is what the parity gate reads.
  */
 const contentDigest = async (bytes: Uint8Array): Promise<string> => {
   const hash = createHash("sha256");
@@ -147,7 +198,20 @@ describe("fixture generators are stable against golden content", () => {
   });
 });
 
+/** Every entry's date and folder flag, in archive order. */
+const entryStamps = async (bytes: Uint8Array): Promise<readonly { readonly name: string; readonly dir: boolean; readonly date: number }[]> =>
+  Object.values((await JSZip.loadAsync(bytes)).files).map((e) => ({ name: e.name, dir: e.dir, date: e.date.getTime() }));
+
 describe("fixture generators are deterministic", () => {
+  it("generated archives carry no wall-clock state: every entry has the fixed date and none is an implicit folder", async () => {
+    const [brancheliste, sources] = await Promise.all([syntheticBrancheliste(50, 42), syntheticSources(5)]);
+    for (const bytes of [brancheliste, ...SOURCE_SHAPES.map((shape) => sources[shape])]) {
+      const stamps = await entryStamps(bytes);
+      expect(stamps.length).toBeGreaterThan(0);
+      for (const stamp of stamps) expect({ ...stamp, dir: false, date: FIXED_DATE.getTime() }).toEqual(stamp);
+    }
+  });
+
   it("syntheticBrancheliste yields identical bytes for the same seed and different bytes for another", async () => {
     const [a, b, c] = await Promise.all([
       syntheticBrancheliste(300, 42),
@@ -168,6 +232,55 @@ describe("fixture generators are deterministic", () => {
   });
 });
 
+describe("pinned-TZ runner (pure parts)", () => {
+  const junit = (attrs: string): string =>
+    `<?xml version="1.0" encoding="UTF-8"?>\n<testsuites name="bun test" ${attrs}>\n  <testsuite name="f" tests="1"><testcase name="t" /></testsuite>\n</testsuites>\n`;
+
+  it("parseJUnitTotals reads the run's totals from the root <testsuites>", () => {
+    expect(parseJUnitTotals(junit('tests="12" assertions="40" failures="1" skipped="3" time="0.2"'))).toEqual({
+      ok: true,
+      value: { tests: 12, failures: 1, skipped: 3, passed: 8 },
+    });
+    expect(parseJUnitTotals(junit('tests="4" failures="0" errors="1"'))).toEqual({
+      ok: true,
+      value: { tests: 4, failures: 1, skipped: 0, passed: 3 },
+    });
+  });
+
+  it.each([
+    ["malformed XML", "<testsuites tests='1' failures='0'>"],
+    ["a different root element", '<testsuite tests="1" failures="0"/>'],
+    ["a missing count", junit('failures="0"')],
+    ["a non-numeric count", junit('tests="many" failures="0"')],
+    ["more failed than run", junit('tests="1" failures="2"')],
+    ["an empty report", ""],
+  ])("parseJUnitTotals rejects %s", (_label, xml) => {
+    expect(parseJUnitTotals(xml).ok).toBe(false);
+  });
+
+  it("suiteVerdict: the exit code decides first, then the JUnit totals", () => {
+    const totals = (passed: number, failures: number) =>
+      ({ ok: true, value: { tests: passed + failures, failures, skipped: 0, passed } }) as const;
+    expect(suiteVerdict(0, totals(5, 0), "out")).toEqual({ kind: "passed", passed: 5, output: "out" });
+    expect(suiteVerdict(1, totals(5, 0), "out")).toEqual({ kind: "failed", reason: "exit code 1", output: "out" });
+    expect(suiteVerdict(0, totals(5, 1), "")).toMatchObject({ kind: "failed", reason: "1 failed despite exit code 0" });
+    expect(suiteVerdict(0, totals(0, 0), "")).toMatchObject({ kind: "failed", reason: "no test passed" });
+    expect(suiteVerdict(0, { ok: false, error: "gone" }, "")).toMatchObject({ kind: "failed", reason: "unreadable JUnit report: gone" });
+  });
+
+  it("childEnv pins TZ and hands the child FUGUE_REAL_DATA_DIR resolved against the parent's cwd", () => {
+    const zone = PARITY_TIME_ZONES[1]!;
+    expect(childEnv({ FUGUE_REAL_DATA_DIR: "data", KEEP: "1" }, "/work/repo", zone)).toEqual({
+      FUGUE_REAL_DATA_DIR: "/work/repo/data",
+      KEEP: "1",
+      TZ: "Europe/Copenhagen",
+      FUGUE_PARITY_CHILD_TZ: "Europe/Copenhagen",
+    });
+    expect(childEnv({ FUGUE_REAL_DATA_DIR: "/abs/data" }, "/work", zone).FUGUE_REAL_DATA_DIR).toBe("/abs/data");
+    expect(childEnv({}, "/work", zone)).toEqual({ TZ: "Europe/Copenhagen", FUGUE_PARITY_CHILD_TZ: "Europe/Copenhagen" });
+  });
+});
+
 if (childZone.kind === "child") {
   describe("time-zone pin (child run)", () => {
     it(`runs with TZ pinned to ${childZone.zone.tz}`, () => {
@@ -183,7 +296,7 @@ if (childZone.kind === "child") {
         `AS-009: the whole parity suite passes under TZ=${zone.tz}`,
         async () => {
           const run = await runSuiteUnderTimeZone(import.meta.path, zone);
-          if (run.kind !== "passed") throw new Error(`parity suite under TZ=${zone.tz} ${run.kind}:\n${run.output}`);
+          if (run.kind !== "passed") throw new Error(`parity suite under TZ=${zone.tz} failed (${run.reason}):\n${run.output}`);
           expect(run.passed).toBeGreaterThan(cases.length);
         },
         600_000,

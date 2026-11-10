@@ -40,61 +40,71 @@ export interface RichTextReader extends XmlHandler {
 
 const isWhitespace = (s: string): boolean => /^\s*$/.test(s);
 
+/** Where a rich-text reader stands inside one element. */
+interface RichTextState {
+  depth: number;
+  firstChild: "none" | "t" | "other";
+  leadingText: "none" | "whitespace" | "text";
+  firstText: string;
+  inFirstT: boolean;
+  hasRun: boolean;
+  phoneticDepth: number;
+  runTDepth: number;
+  runText: string;
+}
+
+/** The state before an element's first event; `reset` returns to exactly this. */
+const freshRichText = (): RichTextState => ({
+  depth: 0,
+  firstChild: "none",
+  leadingText: "none",
+  firstText: "",
+  inFirstT: false,
+  hasRun: false,
+  phoneticDepth: 0,
+  runTDepth: 0,
+  runText: "",
+});
+
 /**
- * A SAX-event accumulator for one rich-text element. It mutates local state as
+ * A SAX-event accumulator for one rich-text element. It mutates its state as
  * events arrive (it is a parser, and allocating per event would cost the hot
  * path); the state never escapes and `result` is a pure read of it.
  */
 export const createRichTextReader = (mode: RichTextMode): RichTextReader => {
-  let depth = 0;
-  let firstChild: "none" | "t" | "other" = "none";
-  let leadingText: "none" | "whitespace" | "text" = "none";
-  let firstText = "";
-  let inFirstT = false;
-  let hasRun = false;
-  let phoneticDepth = 0;
-  let runTDepth = 0;
-  let runText = "";
+  let s = freshRichText();
 
   return {
     reset: () => {
-      depth = 0;
-      firstChild = "none";
-      leadingText = "none";
-      firstText = "";
-      inFirstT = false;
-      hasRun = false;
-      phoneticDepth = 0;
-      runTDepth = 0;
-      runText = "";
+      s = freshRichText();
     },
     open: (name: string, attrs: XmlAttrs, selfClosing: boolean) => {
-      if (depth === 0 && firstChild === "none") {
-        firstChild = name === "t" ? "t" : "other";
-        inFirstT = firstChild === "t" && !selfClosing;
+      if (s.depth === 0 && s.firstChild === "none") {
+        s.firstChild = name === "t" ? "t" : "other";
+        s.inFirstT = s.firstChild === "t" && !selfClosing;
       }
-      if (name === "r" && !selfClosing && Object.keys(attrs).length === 0) hasRun = true;
-      if (name === "rPh") phoneticDepth++;
-      if (name === "t" && phoneticDepth === 0) runTDepth++;
-      depth++;
+      if (name === "r" && !selfClosing && Object.keys(attrs).length === 0) s.hasRun = true;
+      if (name === "rPh") s.phoneticDepth++;
+      if (name === "t" && s.phoneticDepth === 0) s.runTDepth++;
+      s.depth++;
     },
     close: (name: string) => {
-      depth--;
-      if (name === "t" && phoneticDepth === 0 && runTDepth > 0) runTDepth--;
-      if (name === "rPh" && phoneticDepth > 0) phoneticDepth--;
-      if (depth === 0 && inFirstT) inFirstT = false;
+      s.depth--;
+      if (name === "t" && s.phoneticDepth === 0 && s.runTDepth > 0) s.runTDepth--;
+      if (name === "rPh" && s.phoneticDepth > 0) s.phoneticDepth--;
+      if (s.depth === 0 && s.inFirstT) s.inFirstT = false;
     },
     text: (text: string) => {
-      if (depth === 0 && firstChild === "none" && text.length > 0) {
-        leadingText = leadingText === "text" || !isWhitespace(text) ? "text" : "whitespace";
+      if (s.depth === 0 && s.firstChild === "none" && text.length > 0) {
+        s.leadingText = s.leadingText === "text" || !isWhitespace(text) ? "text" : "whitespace";
       }
-      if (inFirstT) firstText += text;
-      if (runTDepth > 0 && phoneticDepth === 0) runText += text;
+      if (s.inFirstT) s.firstText += text;
+      if (s.runTDepth > 0 && s.phoneticDepth === 0) s.runText += text;
     },
     result: () => {
-      if (firstChild === "t" && leadingText !== "text") return decodeXmlEscapes(firstText);
-      if (hasRun) return decodeXmlEscapes(runText);
-      const empty = firstChild === "none" && (mode === "shared" ? leadingText !== "text" : leadingText === "none");
+      if (s.firstChild === "t" && s.leadingText !== "text") return decodeXmlEscapes(s.firstText);
+      if (s.hasRun) return decodeXmlEscapes(s.runText);
+      const empty = s.firstChild === "none" && (mode === "shared" ? s.leadingText !== "text" : s.leadingText === "none");
       return empty ? "" : null;
     },
   };

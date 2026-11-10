@@ -213,6 +213,7 @@ describe("documented node-crash causes, through the public API", () => {
     ["malformed worksheet XML", `<worksheet><sheetData>${header}<row r="2"><c r="A2"></row></sheetData></worksheet>`, [], "failed to parse worksheet 'S'"],
     ["truncated worksheet XML", `<worksheet><sheetData>${header}<row r="2"><c r="A2"><v>1</v></c>`, [], "failed to parse worksheet 'S'"],
     ["a shared-string index past the table", `<worksheet><sheetData>${header}<row r="2"><c r="A2" t="s"><v>3</v></c></row></sheetData></worksheet>`, ["only"], "shared string 3"],
+    ["malformed XML in the slice that also ends the fold (a row past the dimension's last row)", `<worksheet><dimension ref="A1:B2"/><sheetData>${header}<row r="2"><c r="A2" t="inlineStr"><is><t>a</t></is></c><c r="B2"><v>1</v></c></row><row r="3"><c r="A3"><v>1</v></c></row><row r="4"><c r="A4"></row></sheetData></worksheet>`, [], "failed to parse worksheet 'S'"],
     ["rows out of ascending order", `<worksheet><sheetData>${header}<row r="5"><c r="A5"><v>1</v></c></row><row r="3"><c r="A3"><v>2</v></c></row></sheetData></worksheet>`, [], "precedes row 5"],
   ];
 
@@ -223,6 +224,21 @@ describe("documented node-crash causes, through the public API", () => {
       expectCrash(await parseWorkbook(bytes, Row), fragment);
     });
   }
+
+  it("decodes multi-byte UTF-8 in shared and inline strings identically at any slice size", async () => {
+    const words = ["æblegrød", "Øresund", "Åbenrå blåbær", "🦀🎉👩‍👩‍👧", "naïve 日本語 ünïcödé"].map((w) => w.repeat(40));
+    const rows = words
+      .map((w, i) => `<row r="${i + 2}"><c r="A${i + 2}" t="s"><v>${i}</v></c><c r="B${i + 2}" t="inlineStr"><is><t>${[...w].reverse().join("")}</t></is></c></row>`)
+      .join("");
+    const bytes = rawBook(`<worksheet><sheetData>${header}${rows}</sheetData></worksheet>`, words);
+    const Text = z.object({ id: z.string(), n: z.string() });
+    const expected = words.map((w) => ({ id: w, n: [...w].reverse().join("") }));
+    const byteBySlice = await foldRows(open(bytes), Text, { yieldEveryBytes: 1 }, [] as Array<z.infer<typeof Text>>, collect);
+    const byDefault = await foldRows(open(bytes), Text, {}, [] as Array<z.infer<typeof Text>>, collect);
+    expect(byteBySlice).toEqual({ ok: true, value: expected });
+    expect(byDefault).toEqual(byteBySlice);
+    expect(await parseWorkbook(bytes, Text)).toEqual({ ok: true, value: { rows: expected } });
+  });
 
   it("a non-integer yieldEveryBytes is a node-crash, like a non-positive one", async () => {
     const h = open(await makeBook({ S: [["id", "n"], ["a", 1]] }));

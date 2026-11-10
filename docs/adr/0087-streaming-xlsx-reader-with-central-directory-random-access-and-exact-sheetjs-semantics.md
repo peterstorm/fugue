@@ -162,7 +162,13 @@ a duplicate header, a foreign handle, and an invalid `yieldEveryBytes`.
   real workbooks.
 - `packages/xlsx/src/__tests__/memory-budget.test.ts` spawns
   `packages/xlsx/bench/parse-memory.ts` on a synthetic Brancheliste. In CI it
-  asserts a peak RSS of at most 100 MB (AS-015).
+  asserts that the parse's peak RSS above the loaded-modules baseline is at
+  most 100 MB (AS-015). The baseline is the child process's RSS after module
+  load and a full GC, just before the parse. It is reported but not budgeted,
+  so the budget is not an absolute process-RSS ceiling. The peak is the
+  kernel's lifetime peak when the parse raised it. Otherwise it is the highest
+  sample from a worker thread that polls RSS every 1 ms through `openWorkbook`
+  and the fold.
 - INV-1 is a lint rule. It forbids any runtime import of SheetJS. Only
   `*.test.ts` files and `sheetjs-oracle.ts` may import it. Runtime dependencies
   are `@fuguejs/framework`, `fflate` and `saxes`. `xlsx`, `exceljs` and `jszip`
@@ -182,8 +188,8 @@ cadence with `yieldEveryBytes`.
 
 **Positive:**
 - Peak parse memory is bounded to the shared-strings table plus one row,
-  instead of a full cell map. This is enforced by a 100 MB CI budget, down from
-  about 570 MB.
+  instead of a full cell map. This is enforced by a CI budget of 100 MB above
+  the loaded-modules baseline. The SheetJS full load peaked at about 570 MB.
 - Existing `parseWorkbook` callers see no behaviour change. SheetJS parity is a
   tested property, not a hope.
 - One `openWorkbook` serves many sheets. Scoringsmodel downloads and loads once.

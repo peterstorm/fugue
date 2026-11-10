@@ -6,15 +6,16 @@
  *   FUGUE_REAL_DATA_DIR=/path/to/fugue-dags/data bun test src/__tests__/real-data.local.test.ts
  *
  * Unset (CI), the differential reports as skipped. Set, a missing workbook is a
- * failure — never a silent skip. A production read that is not marked optional
- * must parse to at least one row: both readers failing (or reading nothing) the
- * same way means the catalogue is wrong, and fails the gate. Each workbook is compared on the reads
- * production performs AND on every sheet with the header on row 1, in this
- * process and again in child processes with TZ pinned to UTC and
- * Europe/Copenhagen.
+ * failure — never a silent skip. Every read states its presence: a `required`
+ * read must parse to at least one row, because both readers failing (or reading
+ * nothing) the same way means the catalogue is wrong, and fails the gate. Each
+ * workbook is compared on the reads production performs AND on every sheet with
+ * the header on row 1, in this process and again in child processes with TZ
+ * pinned to UTC and Europe/Copenhagen (a relative `FUGUE_REAL_DATA_DIR` is
+ * resolved against this process's cwd before it is handed to them).
  */
 import { describe, expect, it } from "bun:test";
-import { isAbsolute, join, resolve } from "node:path";
+import { join } from "node:path";
 import type { ParseWorkbookOpts } from "../index.js";
 import {
   differential,
@@ -27,52 +28,45 @@ import {
   type Divergence,
 } from "./support/sheetjs-oracle.js";
 import { anyRow, syntheticBrancheliste } from "./support/fixtures.js";
+import { realDataDir } from "./support/real-data-dir.js";
 
 /**
- * One production read of a real workbook (sheet + header row as fugue-dags reads it).
- * `required` (the default) reads must parse: both readers failing identically on
- * one means the catalogue (sheet name, header row) is wrong, not that parity
- * holds. `optional` reads mirror production reads that tolerate a missing sheet.
+ * One read of a real workbook (sheet + header row as fugue-dags reads it), with
+ * its presence stated at every catalogue entry. `required` reads must parse:
+ * both readers failing identically on one means the catalogue (sheet name,
+ * header row) is wrong, not that parity holds. `optional` reads mirror
+ * production reads that tolerate a missing sheet, and the exploratory sheet sweep.
  */
 type ReadPresence = "required" | "optional";
 type ProductionRead = {
   readonly label: string;
   readonly opts: ParseWorkbookOpts;
-  readonly presence?: ReadPresence;
+  readonly presence: ReadPresence;
 };
 type RealWorkbook = { readonly file: string; readonly reads: readonly ProductionRead[] };
 
 /** The 10 source workbooks the direct-sales DAGs read (fugue-dags `lib/sources.ts`). */
 const REAL_SOURCE_WORKBOOKS: readonly RealWorkbook[] = [
-  { file: "Brancheliste.xlsx", reads: [{ label: "master list", opts: {} }] },
+  { file: "Brancheliste.xlsx", reads: [{ label: "master list", opts: {}, presence: "required" }] },
   {
     file: "Scoringsmodel_v0_udkast.xlsx",
     reads: [
-      { label: "weights", opts: { sheet: "1. Signaler & vægte", headerRow: 4 } },
+      { label: "weights", opts: { sheet: "1. Signaler & vægte", headerRow: 4 }, presence: "required" },
       { label: "scaling (optional sheet)", opts: { sheet: "2. Skalering" }, presence: "optional" },
     ],
   },
-  { file: "Gamle_kunder.xlsx", reads: [{ label: "previous customers", opts: {} }] },
-  { file: "Tabte_salgsmuligheder.xlsx", reads: [{ label: "lost opportunities", opts: { sheet: "Salgsmuligheder" } }] },
-  { file: "Dansk_Erhverv.xlsx", reads: [{ label: "members", opts: {} }] },
-  { file: "Leverandørliste.xlsx", reads: [{ label: "suppliers", opts: { sheet: "Ark1" } }] },
-  { file: "Tivoli Erhvervsklub.xlsx", reads: [{ label: "members", opts: { sheet: "Ark1" } }] },
-  { file: "FCK.xlsx", reads: [{ label: "partners", opts: { sheet: "Sheet1" } }] },
-  { file: "IT-Branchen.xlsx", reads: [{ label: "members", opts: { sheet: "Medlemmer" } }] },
+  { file: "Gamle_kunder.xlsx", reads: [{ label: "previous customers", opts: {}, presence: "required" }] },
+  { file: "Tabte_salgsmuligheder.xlsx", reads: [{ label: "lost opportunities", opts: { sheet: "Salgsmuligheder" }, presence: "required" }] },
+  { file: "Dansk_Erhverv.xlsx", reads: [{ label: "members", opts: {}, presence: "required" }] },
+  { file: "Leverandørliste.xlsx", reads: [{ label: "suppliers", opts: { sheet: "Ark1" }, presence: "required" }] },
+  { file: "Tivoli Erhvervsklub.xlsx", reads: [{ label: "members", opts: { sheet: "Ark1" }, presence: "required" }] },
+  { file: "FCK.xlsx", reads: [{ label: "partners", opts: { sheet: "Sheet1" }, presence: "required" }] },
+  { file: "IT-Branchen.xlsx", reads: [{ label: "members", opts: { sheet: "Medlemmer" }, presence: "required" }] },
   {
     file: "GlobalConnect_kunder.xlsx",
-    reads: [{ label: "customers", opts: { sheet: "QUERY_FOR_COPY OF KUNDELISTE SM" } }],
+    reads: [{ label: "customers", opts: { sheet: "QUERY_FOR_COPY OF KUNDELISTE SM" }, presence: "required" }],
   },
 ];
-
-/** Whether the real-data differential runs, decided once from the environment. */
-type RealDataPlan = { readonly kind: "skip" } | { readonly kind: "run"; readonly dir: string };
-
-const realDataPlan = (env: Readonly<Record<string, string | undefined>>, cwd: string): RealDataPlan => {
-  const raw = env.FUGUE_REAL_DATA_DIR?.trim();
-  if (raw === undefined || raw === "") return { kind: "skip" };
-  return { kind: "run", dir: isAbsolute(raw) ? raw : resolve(cwd, raw) };
-};
 
 /** Why one read of a real workbook fails the gate. */
 type ReadFinding =
@@ -99,9 +93,9 @@ const findingOf = (
 };
 
 /**
- * Every read of one workbook → its findings. Production reads are `required`
- * unless marked otherwise; the sweep of each sheet at header row 1 is
- * exploratory (a sheet need not be tabular there), so it only checks parity.
+ * Every read of one workbook → its findings. The sweep of each sheet at header
+ * row 1 is exploratory (a sheet need not be tabular there), so it is `optional`
+ * and only checks parity.
  */
 const divergencesOf = async (bytes: Uint8Array, workbook: RealWorkbook): Promise<readonly ReadDivergence[]> => {
   const sheetReads: readonly ProductionRead[] = oracleSheetNames(bytes).map((sheet) => ({
@@ -112,7 +106,7 @@ const divergencesOf = async (bytes: Uint8Array, workbook: RealWorkbook): Promise
   const found: ReadDivergence[] = [];
   for (const read of [...workbook.reads, ...sheetReads]) {
     const { expected, divergence } = await differential(bytes, anyRow, read.opts);
-    const finding = findingOf(read.presence ?? "required", expected, divergence);
+    const finding = findingOf(read.presence, expected, divergence);
     if (finding !== null) found.push({ read: read.label, finding });
   }
   return found;
@@ -127,10 +121,10 @@ describe("real-data differential gate", () => {
   });
 
   it("skips unless FUGUE_REAL_DATA_DIR names a directory; relative paths resolve against the cwd", () => {
-    expect(realDataPlan({}, "/w")).toEqual({ kind: "skip" });
-    expect(realDataPlan({ FUGUE_REAL_DATA_DIR: "  " }, "/w")).toEqual({ kind: "skip" });
-    expect(realDataPlan({ FUGUE_REAL_DATA_DIR: "/data" }, "/w")).toEqual({ kind: "run", dir: "/data" });
-    expect(realDataPlan({ FUGUE_REAL_DATA_DIR: "data" }, "/w")).toEqual({ kind: "run", dir: "/w/data" });
+    expect(realDataDir({}, "/w")).toEqual({ kind: "unset" });
+    expect(realDataDir({ FUGUE_REAL_DATA_DIR: "  " }, "/w")).toEqual({ kind: "unset" });
+    expect(realDataDir({ FUGUE_REAL_DATA_DIR: "/data" }, "/w")).toEqual({ kind: "set", dir: "/data" });
+    expect(realDataDir({ FUGUE_REAL_DATA_DIR: " data " }, "/w")).toEqual({ kind: "set", dir: "/w/data" });
   });
 
   it("AS-009: a required production read that errors or reads nothing on both readers is a finding, an optional one is not", async () => {
@@ -139,7 +133,7 @@ describe("real-data differential gate", () => {
     const typo = "Ark-that-does-not-exist";
     const workbookWith = (reads: readonly ProductionRead[]): RealWorkbook => ({ file: "synthetic.xlsx", reads });
 
-    const requiredTypo = await divergencesOf(bytes, workbookWith([{ label: "typo'd sheet", opts: { sheet: typo } }]));
+    const requiredTypo = await divergencesOf(bytes, workbookWith([{ label: "typo'd sheet", opts: { sheet: typo }, presence: "required" }]));
     expect(requiredTypo.map((f) => [f.read, f.finding.kind])).toEqual([["typo'd sheet", "required-read-failed"]]);
 
     const optionalTypo = await divergencesOf(
@@ -150,21 +144,21 @@ describe("real-data differential gate", () => {
 
     const requiredBadHeaderRow = await divergencesOf(
       bytes,
-      workbookWith([{ label: "header past the data", opts: { sheet: firstSheet, headerRow: 100_000 } }]),
+      workbookWith([{ label: "header past the data", opts: { sheet: firstSheet, headerRow: 100_000 }, presence: "required" }]),
     );
     expect(requiredBadHeaderRow.map((f) => [f.read, f.finding.kind])).toEqual([
       ["header past the data", "required-read-empty"],
     ]);
 
-    expect(await divergencesOf(bytes, workbookWith([{ label: "master list", opts: {} }]))).toEqual([]);
+    expect(await divergencesOf(bytes, workbookWith([{ label: "master list", opts: {}, presence: "required" }]))).toEqual([]);
   });
 });
 
-const plan = realDataPlan(process.env, process.cwd());
+const plan = realDataDir(process.env, process.cwd());
 const childZone = timeZoneOfChild(process.env);
 
-describe.skipIf(plan.kind === "skip")("AS-009: real source workbooks ≡ SheetJS oracle", () => {
-  const dir = plan.kind === "run" ? plan.dir : "";
+describe.skipIf(plan.kind === "unset")("AS-009: real source workbooks ≡ SheetJS oracle", () => {
+  const dir = plan.kind === "set" ? plan.dir : "";
 
   for (const workbook of REAL_SOURCE_WORKBOOKS) {
     it(
@@ -185,7 +179,7 @@ describe.skipIf(plan.kind === "skip")("AS-009: real source workbooks ≡ SheetJS
         `AS-009: the real-data differential passes under TZ=${zone.tz}`,
         async () => {
           const run = await runSuiteUnderTimeZone(import.meta.path, zone);
-          if (run.kind !== "passed") throw new Error(`real-data suite under TZ=${zone.tz} ${run.kind}:\n${run.output}`);
+          if (run.kind !== "passed") throw new Error(`real-data suite under TZ=${zone.tz} failed (${run.reason}):\n${run.output}`);
           expect(run.passed).toBeGreaterThanOrEqual(REAL_SOURCE_WORKBOOKS.length);
         },
         1_800_000,

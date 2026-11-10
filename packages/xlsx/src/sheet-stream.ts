@@ -126,6 +126,14 @@ export const targetRow = (r: string | undefined, elementRow: number, col: number
 
 // ── the assembler ────────────────────────────────────────────────────────────
 
+/** The first `<v>` of a cell: not met yet, being read, or read. */
+type CellText =
+  | { readonly kind: "unseen" }
+  | { readonly kind: "reading"; readonly text: string }
+  | { readonly kind: "read"; readonly text: string };
+
+const UNSEEN: CellText = Object.freeze({ kind: "unseen" });
+
 interface OpenCell {
   readonly t: string | undefined;
   readonly style: string | undefined;
@@ -134,8 +142,9 @@ interface OpenCell {
   /** Row the cell is stored in; `null` = dropped. */
   readonly row: number | null;
   readonly depth: number;
-  v: string | undefined;
-  vState: "none" | "in" | "done";
+  /** Replaced (never edited) as the first `<v>` is read. */
+  value: CellText;
+  /** The first `<is>`'s value; `undefined` until one has been read. */
   inline: SharedString | undefined;
 }
 
@@ -144,10 +153,44 @@ interface OpenInline {
   readonly depth: number;
 }
 
+/** The open `<sheetData>` and `<row>` elements' depths. */
+interface RowFrame {
+  readonly sheetDataDepth: number;
+  readonly rowDepth: number;
+}
+
+/** A self-closing `<row/>`: only its `r` matters, and only if it is the last row. */
+interface TrailingRow {
+  readonly r: string | undefined;
+}
+
+/**
+ * Where the SAX stream stands. Each phase carries exactly the open elements it
+ * needs, so a cell outside a row, or an inline string outside a cell, cannot be
+ * represented. `finished` and `failed` are terminal: every later event is ignored.
+ */
+type Phase =
+  | { readonly kind: "before-sheet-data" }
+  | { readonly kind: "between-rows"; readonly sheetDataDepth: number; readonly trailingRow: TrailingRow | null }
+  | { readonly kind: "in-row"; readonly frame: RowFrame }
+  | { readonly kind: "in-cell"; readonly frame: RowFrame; readonly cell: OpenCell }
+  | { readonly kind: "in-inline"; readonly frame: RowFrame; readonly cell: OpenCell; readonly inline: OpenInline }
+  | { readonly kind: "finished" }
+  | { readonly kind: "failed" };
+
+type PhaseOf<K extends Phase["kind"]> = Extract<Phase, { readonly kind: K }>;
+
+const BEFORE_SHEET_DATA: Phase = Object.freeze({ kind: "before-sheet-data" });
+const FINISHED: Phase = Object.freeze({ kind: "finished" });
+const FAILED: Phase = Object.freeze({ kind: "failed" });
+
+/** Compile-time exhaustiveness: a `Phase` kind a dispatcher forgot fails to type-check here. */
+const exhausted = (_phase: never): void => undefined;
+
 /**
  * One worksheet's parse progress. It is mutated in place as SAX events arrive
- * and never escapes `createSheetReader` — every emitted row is a map the sink
- * owns from then on.
+ * (the phase is replaced on each transition) and never escapes
+ * `createSheetReader` — every emitted row is a map the sink owns from then on.
  */
 interface Assembly {
   readonly ctx: DecodeContext;
@@ -155,19 +198,13 @@ interface Assembly {
   /** Target row → its cells, for rows not yet emitted. */
   readonly pending: Map<number, Map<number, CellValue>>;
   depth: number;
-  failed: boolean;
-  finished: boolean;
-  dimensionSeen: boolean;
-  hasBounds: boolean;
-  sheetDataDepth: number | null;
-  rowDepth: number | null;
+  phase: Phase;
+  /** The first `<dimension>`: not met, met but not a range SheetJS accepts, or a declared range. */
+  dimension: "unseen" | "ignored" | "declared";
   elementRow: number;
   lastRowNumber: number;
   maxElementRow: number;
-  trailingRow: { readonly r: string | undefined } | null;
   lastCol: number;
-  cell: OpenCell | null;
-  inline: OpenInline | null;
   /** Rows below this index have been emitted. */
   emittedBelow: number;
 }
@@ -177,24 +214,19 @@ const newAssembly = (ctx: DecodeContext, sink: SheetSink): Assembly => ({
   sink,
   pending: new Map(),
   depth: 0,
-  failed: false,
-  finished: false,
-  dimensionSeen: false,
-  hasBounds: false,
-  sheetDataDepth: null,
-  rowDepth: null,
+  phase: BEFORE_SHEET_DATA,
+  dimension: "unseen",
   elementRow: -1,
   lastRowNumber: 0,
   maxElementRow: -1,
-  trailingRow: null,
   lastCol: -1,
-  cell: null,
-  inline: null,
   emittedBelow: 0,
 });
 
+const isTerminal = (p: Phase): boolean => p.kind === "finished" || p.kind === "failed";
+
 const fail = (a: Assembly, message: string): void => {
-  a.failed = true;
+  a.phase = FAILED;
   a.sink.fail(message);
 };
 
@@ -204,42 +236,43 @@ const emitBelow = (a: Assembly, limit: number, keepUpTo = Number.POSITIVE_INFINI
   for (const r of ready) {
     const cells = a.pending.get(r);
     a.pending.delete(r);
-    if (cells !== undefined && r <= keepUpTo && !a.failed && !a.finished) a.sink.row(r, cells);
+    if (cells !== undefined && r <= keepUpTo && !isTerminal(a.phase)) a.sink.row(r, cells);
   }
   a.emittedBelow = Math.max(a.emittedBelow, limit);
 };
 
-const openRow = (a: Assembly, attrs: XmlAttrs): void => {
+const openRow = (a: Assembly, attrs: XmlAttrs, frame: RowFrame): void => {
   const r = attrs["r"];
   const rowNumber = rowNumberOf(r, a.lastRowNumber);
   if (!Number.isFinite(rowNumber)) return fail(a, `row ${JSON.stringify(r)} has no row number`);
+  a.phase = { kind: "in-row", frame };
   a.lastRowNumber = rowNumber;
   a.elementRow = rowNumber - 1;
   a.maxElementRow = Math.max(a.maxElementRow, a.elementRow);
-  a.trailingRow = null;
   a.lastCol = -1;
   emitBelow(a, a.elementRow);
 };
 
-const openCell = (a: Assembly, attrs: XmlAttrs, at: number): void => {
+const openCell = (a: Assembly, frame: RowFrame, attrs: XmlAttrs, at: number): void => {
   const r = attrs["r"];
   const col = r === undefined ? a.lastCol + 1 : columnOf(r);
   a.lastCol = col;
-  a.cell = {
+  const cell: OpenCell = {
     t: attrs["t"],
     style: attrs["s"],
     col,
     address: r ?? encodeCell(a.elementRow, col),
     row: targetRow(r, a.elementRow, col),
     depth: at,
-    v: undefined,
-    vState: "none",
+    value: UNSEEN,
     inline: undefined,
   };
+  a.phase = { kind: "in-cell", frame, cell };
 };
 
 const closeCell = (a: Assembly, c: OpenCell): void => {
-  const decoded = decodeCell({ t: c.t, v: c.v === "" ? undefined : c.v, inline: c.inline, style: c.style }, a.ctx);
+  const v = c.value.kind === "unseen" || c.value.text === "" ? undefined : c.value.text;
+  const decoded = decodeCell({ t: c.t, v, inline: c.inline, style: c.style }, a.ctx);
   if (decoded.kind === "bad-shared-string") {
     return fail(a, `cell ${c.address} references shared string ${decoded.index}, which does not exist`);
   }
@@ -256,85 +289,102 @@ const closeCell = (a: Assembly, c: OpenCell): void => {
 };
 
 /** End of `<sheetData>`: SheetJS's last row is the dimension's, else the last row element's. */
-const closeSheetData = (a: Assembly): void => {
-  if (a.trailingRow !== null) {
-    const n = rowNumberOf(a.trailingRow.r, a.lastRowNumber);
+const closeSheetData = (a: Assembly, trailingRow: TrailingRow | null): void => {
+  if (trailingRow !== null) {
+    const n = rowNumberOf(trailingRow.r, a.lastRowNumber);
     if (Number.isFinite(n)) a.maxElementRow = Math.max(a.maxElementRow, n - 1);
   }
-  emitBelow(a, Number.POSITIVE_INFINITY, a.hasBounds ? Number.POSITIVE_INFINITY : a.maxElementRow);
-  a.finished = true;
+  emitBelow(a, Number.POSITIVE_INFINITY, a.dimension === "declared" ? Number.POSITIVE_INFINITY : a.maxElementRow);
+  a.phase = FINISHED;
 };
 
 // ── SAX phases: before <sheetData>, between rows, inside a row, inside a cell ──
 
 const openBeforeSheetData = (a: Assembly, name: string, attrs: XmlAttrs, selfClosing: boolean, at: number): void => {
-  if (name === "dimension" && !a.dimensionSeen) {
-    a.dimensionSeen = true;
+  if (name === "dimension" && a.dimension === "unseen") {
     const bounds = parseDimensionRef(attrs["ref"] ?? "");
-    if (bounds === null) return;
-    a.hasBounds = true;
-    a.sink.dimension(bounds);
-  } else if (name === "sheetData" && !selfClosing) a.sheetDataDepth = at;
+    a.dimension = bounds === null ? "ignored" : "declared";
+    if (bounds !== null) a.sink.dimension(bounds);
+  } else if (name === "sheetData" && !selfClosing) a.phase = { kind: "between-rows", sheetDataDepth: at, trailingRow: null };
 };
 
-const openBetweenRows = (a: Assembly, sheetDataDepth: number, name: string, attrs: XmlAttrs, selfClosing: boolean, at: number): void => {
-  if (name !== "row" || at !== sheetDataDepth + 1) return;
+const openBetweenRows = (
+  a: Assembly,
+  p: PhaseOf<"between-rows">,
+  name: string,
+  attrs: XmlAttrs,
+  selfClosing: boolean,
+  at: number,
+): void => {
+  if (name !== "row" || at !== p.sheetDataDepth + 1) return;
   if (selfClosing) {
-    a.trailingRow = { r: attrs["r"] };
+    a.phase = { ...p, trailingRow: { r: attrs["r"] } };
     return;
   }
-  a.rowDepth = at;
-  openRow(a, attrs);
+  openRow(a, attrs, { sheetDataDepth: p.sheetDataDepth, rowDepth: at });
 };
 
-const openInCell = (a: Assembly, cell: OpenCell, name: string, attrs: XmlAttrs, selfClosing: boolean, at: number): void => {
-  if (name === "v" && cell.vState === "none") {
-    cell.vState = "in";
-    cell.v = "";
+const openInCell = (a: Assembly, p: PhaseOf<"in-cell">, name: string, attrs: XmlAttrs, selfClosing: boolean, at: number): void => {
+  const { cell } = p;
+  if (name === "v" && cell.value.kind === "unseen") {
+    cell.value = { kind: "reading", text: "" };
   } else if (name === "is" && cell.inline === undefined && !selfClosing && Object.keys(attrs).length === 0) {
-    a.inline = { reader: createRichTextReader("inline"), depth: at };
+    a.phase = { kind: "in-inline", frame: p.frame, cell, inline: { reader: createRichTextReader("inline"), depth: at } };
   }
 };
 
 const onOpen = (a: Assembly, name: string, attrs: XmlAttrs, selfClosing: boolean): void => {
   const at = a.depth++;
-  if (a.failed || a.finished) return;
-  if (a.inline !== null) return a.inline.reader.open(name, attrs, selfClosing);
-  if (a.sheetDataDepth === null) return openBeforeSheetData(a, name, attrs, selfClosing, at);
-  if (a.rowDepth === null) return openBetweenRows(a, a.sheetDataDepth, name, attrs, selfClosing, at);
-  if (a.cell !== null) return openInCell(a, a.cell, name, attrs, selfClosing, at);
-  if (name === "c" && at === a.rowDepth + 1) openCell(a, attrs, at);
+  const p = a.phase;
+  if (p.kind === "in-inline") return p.inline.reader.open(name, attrs, selfClosing);
+  if (p.kind === "in-cell") return openInCell(a, p, name, attrs, selfClosing, at);
+  if (p.kind === "in-row") {
+    if (name === "c" && at === p.frame.rowDepth + 1) openCell(a, p.frame, attrs, at);
+    return;
+  }
+  if (p.kind === "between-rows") return openBetweenRows(a, p, name, attrs, selfClosing, at);
+  if (p.kind === "before-sheet-data") return openBeforeSheetData(a, name, attrs, selfClosing, at);
+  if (p.kind === "finished" || p.kind === "failed") return;
+  exhausted(p);
 };
 
-const closeInline = (a: Assembly, inline: OpenInline, name: string, at: number): void => {
-  if (at !== inline.depth) return inline.reader.close(name);
-  if (a.cell !== null) a.cell.inline = inline.reader.result();
-  a.inline = null;
+const closeInline = (a: Assembly, p: PhaseOf<"in-inline">, name: string, at: number): void => {
+  if (at !== p.inline.depth) return p.inline.reader.close(name);
+  p.cell.inline = p.inline.reader.result();
+  a.phase = { kind: "in-cell", frame: p.frame, cell: p.cell };
 };
 
-const closeInCell = (a: Assembly, cell: OpenCell, name: string, at: number): void => {
+const closeInCell = (a: Assembly, p: PhaseOf<"in-cell">, name: string, at: number): void => {
+  const { cell } = p;
   if (at === cell.depth) {
-    a.cell = null;
+    a.phase = { kind: "in-row", frame: p.frame };
     closeCell(a, cell);
-  } else if (name === "v" && cell.vState === "in") cell.vState = "done";
+  } else if (name === "v" && cell.value.kind === "reading") cell.value = { kind: "read", text: cell.value.text };
 };
 
 const onClose = (a: Assembly, name: string): void => {
   const at = --a.depth;
-  if (a.failed || a.finished) return;
-  if (a.inline !== null) return closeInline(a, a.inline, name, at);
-  if (a.cell !== null) return closeInCell(a, a.cell, name, at);
-  if (a.rowDepth !== null) {
-    if (at === a.rowDepth) a.rowDepth = null;
+  const p = a.phase;
+  if (p.kind === "in-inline") return closeInline(a, p, name, at);
+  if (p.kind === "in-cell") return closeInCell(a, p, name, at);
+  if (p.kind === "in-row") {
+    if (at === p.frame.rowDepth) a.phase = { kind: "between-rows", sheetDataDepth: p.frame.sheetDataDepth, trailingRow: null };
     return;
   }
-  if (a.sheetDataDepth !== null && at === a.sheetDataDepth) closeSheetData(a);
+  if (p.kind === "between-rows") {
+    if (at === p.sheetDataDepth) closeSheetData(a, p.trailingRow);
+    return;
+  }
+  if (p.kind === "before-sheet-data" || p.kind === "finished" || p.kind === "failed") return;
+  exhausted(p);
 };
 
 const onText = (a: Assembly, text: string): void => {
-  if (a.failed || a.finished) return;
-  if (a.inline !== null) a.inline.reader.text(text);
-  else if (a.cell !== null && a.cell.vState === "in") a.cell.v += text;
+  const p = a.phase;
+  if (p.kind === "in-inline") p.inline.reader.text(text);
+  else if (p.kind === "in-cell" && p.cell.value.kind === "reading") {
+    p.cell.value = { kind: "reading", text: p.cell.value.text + text };
+  }
 };
 
 /** A SAX handler for one worksheet, reporting rows to `sink` as they complete. */

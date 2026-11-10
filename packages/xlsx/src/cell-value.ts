@@ -93,7 +93,7 @@ const sharedString = (sst: SharedStrings, v: string): DecodedCell => {
 
 type TypedDecoder = (v: string | undefined, raw: RawCell, ctx: DecodeContext) => DecodedCell;
 
-/** The `t` attribute's cell types (ECMA-376 ST_CellType, plus SheetJS's `inlineStr`). */
+/** The `t` attribute's cell types (ECMA-376 ST_CellType). */
 const DECODERS: Readonly<Record<string, TypedDecoder>> = {
   n: (v, raw, ctx) => {
     if (v === undefined) return SKIP;

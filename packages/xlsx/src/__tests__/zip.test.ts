@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from "bun:test";
 import { strToU8, zipSync } from "fflate";
-import { findEntry, inflateEntry, inflateSlices, readZip } from "../zip.js";
+import { DEFAULT_MAX_ENTRY_BYTES, findEntry, inflateEntry, inflateSlices, readZip } from "../zip.js";
 import { openWorkbook } from "../index.js";
 
 const text = (n: number): string => Array.from({ length: n }, (_, i) => `row-${i};`).join("");
@@ -112,6 +112,33 @@ describe("inflateEntry — random access", () => {
     const capped = inflateEntry(r.value, r.value.entries[1]!, 500);
     expect(capped.ok).toBe(false);
     if (!capped.ok) expect(capped.error.kind).toBe("too-large");
+  });
+
+  it("does not preallocate from a declared size the compressed size cannot back", () => {
+    const bytes = archiveBytes();
+    const first = indexOfSig(bytes, CENTRAL_SIG);
+    const second = indexOfSig(bytes, CENTRAL_SIG, first + 4);
+    // A few KiB of deflate now claims to inflate to 400 MiB, just under the cap.
+    u32At(bytes, second + 24, 400 * 1024 * 1024);
+    const r = readZip(bytes);
+    if (!r.ok) throw new Error("fixture");
+    const entry = r.value.entries[1]!;
+    expect(entry.compressedSize).toBeLessThan(16 * 1024);
+    const out = inflateEntry(r.value, entry, DEFAULT_MAX_ENTRY_BYTES);
+    expect(out.ok && new TextDecoder().decode(out.value)).toBe(text(2000));
+    // The result views the buffer it was inflated into: its size is the allocation.
+    if (out.ok) expect(out.value.buffer.byteLength).toBeLessThan(1 << 20);
+  });
+
+  it("still returns an honest entry that declares more than it inflates to", () => {
+    const bytes = archiveBytes();
+    const first = indexOfSig(bytes, CENTRAL_SIG);
+    const second = indexOfSig(bytes, CENTRAL_SIG, first + 4);
+    u32At(bytes, second + 24, text(2000).length + 10);
+    const r = readZip(bytes);
+    if (!r.ok) throw new Error("fixture");
+    const out = inflateEntry(r.value, r.value.entries[1]!, DEFAULT_MAX_ENTRY_BYTES);
+    expect(out.ok && new TextDecoder().decode(out.value)).toBe(text(2000));
   });
 
   it("refuses an entry whose declared size exceeds the cap (zip-bomb guard)", () => {

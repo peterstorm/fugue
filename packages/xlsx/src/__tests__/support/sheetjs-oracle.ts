@@ -15,18 +15,28 @@
  *
  * This file is the ONLY non-`*.test.ts` file allowed to import `xlsx` (INV-1).
  *
+ * The oracle's local `ParseWorkbookOpts` stays verbatim, but a compile-time
+ * assertion below binds it to the production type: if the production options
+ * gain or change a field, this file stops compiling instead of the oracle
+ * silently ignoring the field.
+ *
  * Besides the oracle it owns the parity decision itself: a canonical, fully
  * comparable form of a parse outcome (`canonicalOutcome`), the first divergence
  * between two outcomes (`firstDivergence`), the one-call `differential`, and the
- * pinned-time-zone child-process runner (`runSuiteUnderTimeZone`).
+ * pinned-time-zone child-process runner (`runSuiteUnderTimeZone`), whose verdict
+ * comes from the child's exit code and its JUnit report.
  */
 
 import * as XLSX from "xlsx";
-import { dirname, resolve } from "node:path";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import type { z } from "zod";
 import type { Result, FrameworkError } from "@fuguejs/framework";
 import { ok, err, nodeId } from "@fuguejs/framework";
-import { parseWorkbook } from "../../index.js";
+import { parseWorkbook, type ParseWorkbookOpts as ProductionParseWorkbookOpts } from "../../index.js";
+import { parseJUnitTotals, type JUnitTotals } from "./junit-report.js";
+import { REAL_DATA_DIR_ENV, realDataDir } from "./real-data-dir.js";
 
 // ════════════════════════════════════════════════════════════════════════════
 // The oracle — verbatim copy of the pre-change SheetJS implementation.
@@ -58,6 +68,11 @@ interface ParseWorkbookOpts {
   /** 1-based row holding the column headers. Default: 1. */
   readonly headerRow?: number;
 }
+
+// ── Not part of the verbatim copy: the oracle's options must BE the production options. ──
+/** `true` only when A and B are the same type (mutually assignable, modifiers included). */
+type Equal<A, B> = (<X>() => X extends A ? 1 : 2) extends <X>() => X extends B ? 1 : 2 ? true : false;
+true satisfies Equal<ParseWorkbookOpts, ProductionParseWorkbookOpts>;
 
 /**
  * Normalise a cell value to a primitive (or `null`). SheetJS already hands back
@@ -237,7 +252,8 @@ export type CanonicalRow =
 /**
  * A `FrameworkError` with its message made comparable. Only an unreadable
  * workbook's crash detail is reader-specific (it quotes the underlying parser's
- * exception), so that detail is masked; every other message is compared exactly.
+ * exception), so that tail is masked. Every other message is compared exactly,
+ * including the fixed non-ZIP message, which both readers publish verbatim.
  */
 export type CanonicalError = { readonly kind: FrameworkError["kind"]; readonly fields: Readonly<Record<string, unknown>> };
 
@@ -258,6 +274,16 @@ type OutcomeSummary =
 
 const UNREADABLE_PREFIX = "failed to parse workbook: ";
 
+/** The signature guard's fixed message (see `oracleParse`): a published contract, not reader-specific detail. */
+export const NOT_A_ZIP_MESSAGE = `${UNREADABLE_PREFIX}not a valid .xlsx file (missing ZIP signature)`;
+
+/** NaN and -0 are not JSON-distinguishable, so they get explicit tags. */
+const canonicalNumber = (v: number): number | "NaN" | "-0" => {
+  if (Number.isNaN(v)) return "NaN";
+  if (Object.is(v, -0)) return "-0";
+  return v;
+};
+
 const canonicalValue = (v: unknown): CanonicalValue => {
   if (v === null) return { type: "null" };
   if (v === undefined) return { type: "undefined" };
@@ -270,13 +296,6 @@ const canonicalValue = (v: unknown): CanonicalValue => {
   if (typeof v === "number") return { type: "number", value: canonicalNumber(v) };
   return { type: "other", repr: `${typeof v}:${String(v)}` };
 };
-
-/** NaN and -0 are not JSON-distinguishable, so they get explicit tags. */
-function canonicalNumber(v: number): number | "NaN" | "-0" {
-  if (Number.isNaN(v)) return "NaN";
-  if (Object.is(v, -0)) return "-0";
-  return v;
-}
 
 const prototypeOf = (o: object): "null" | "Object.prototype" | "other" => {
   const p: unknown = Object.getPrototypeOf(o);
@@ -297,13 +316,18 @@ const canonicalRow = (row: unknown): CanonicalRow =>
 const canonicalError = (e: FrameworkError): CanonicalError => {
   const fields: Record<string, unknown> = { ...e };
   const message = fields.message;
-  if (e.kind === "node-crash" && typeof message === "string" && message.startsWith(UNREADABLE_PREFIX)) {
+  const readerSpecific =
+    e.kind === "node-crash" &&
+    typeof message === "string" &&
+    message.startsWith(UNREADABLE_PREFIX) &&
+    message !== NOT_A_ZIP_MESSAGE;
+  if (readerSpecific) {
     fields.message = `${UNREADABLE_PREFIX}<reader-specific detail>`;
   }
   return { kind: e.kind, fields };
 };
 
-const canonicalOutcome =<T>(r: Result<{ rows: readonly T[] }, FrameworkError>): CanonicalOutcome =>
+const canonicalOutcome = <T>(r: Result<{ rows: readonly T[] }, FrameworkError>): CanonicalOutcome =>
   r.ok ? { kind: "rows", rows: r.value.rows.map(canonicalRow) } : { kind: "error", error: canonicalError(r.error) };
 
 const summary = (o: CanonicalOutcome): OutcomeSummary =>
@@ -312,7 +336,7 @@ const summary = (o: CanonicalOutcome): OutcomeSummary =>
 const same = (a: unknown, b: unknown): boolean => Bun.deepEquals(a, b, true);
 
 /** `null` when `actual` equals `expected` exactly; otherwise the first point where they differ. */
-const firstDivergence =(actual: CanonicalOutcome, expected: CanonicalOutcome): Divergence | null => {
+const firstDivergence = (actual: CanonicalOutcome, expected: CanonicalOutcome): Divergence | null => {
   if (actual.kind === "error" && expected.kind === "error") {
     return same(actual.error, expected.error) ? null : { kind: "error", actual: actual.error, expected: expected.error };
   }
@@ -369,31 +393,63 @@ export const timeZoneOfChild = (env: Readonly<Record<string, string | undefined>
 
 export type SuiteRun =
   | { readonly kind: "passed"; readonly passed: number; readonly output: string }
-  | { readonly kind: "failed"; readonly exitCode: number; readonly output: string };
+  | { readonly kind: "failed"; readonly reason: string; readonly output: string };
 
 const PACKAGE_ROOT = resolve(dirname(import.meta.path), "../../..");
 
-const countOf = (output: string, label: "pass" | "fail"): number => {
-  const m = new RegExp(`^\\s*(\\d+) ${label}\\s*$`, "m").exec(output);
-  return m === null ? 0 : Number(m[1]);
+/**
+ * The child's environment: `TZ` pinned, and `FUGUE_REAL_DATA_DIR` made absolute.
+ * The child runs from the package root, so a relative directory must be
+ * resolved against the parent's `cwd` before it is handed over.
+ */
+export const childEnv = (
+  env: Readonly<Record<string, string | undefined>>,
+  cwd: string,
+  zone: ParityTimeZone,
+): Readonly<Record<string, string | undefined>> => {
+  const dir = realDataDir(env, cwd);
+  return { ...env, TZ: zone.tz, [PARITY_CHILD_ENV]: zone.tz, ...(dir.kind === "set" ? { [REAL_DATA_DIR_ENV]: dir.dir } : {}) };
 };
 
-/** Run one test file in a fresh `bun test` process with TZ pinned to `zone`. */
+/**
+ * The child run's verdict. The exit code decides first; a zero exit then needs
+ * a readable JUnit report with no failures and at least one passed test.
+ */
+export const suiteVerdict = (exitCode: number, report: Result<JUnitTotals, string>, output: string): SuiteRun => {
+  const failed = (reason: string): SuiteRun => ({ kind: "failed", reason, output });
+  if (exitCode !== 0) return failed(`exit code ${exitCode}`);
+  if (!report.ok) return failed(`unreadable JUnit report: ${report.error}`);
+  if (report.value.failures > 0) return failed(`${report.value.failures} failed despite exit code 0`);
+  if (report.value.passed === 0) return failed("no test passed");
+  return { kind: "passed", passed: report.value.passed, output };
+};
+
+const readReport = async (file: string): Promise<Result<JUnitTotals, string>> => {
+  try {
+    return parseJUnitTotals(await Bun.file(file).text());
+  } catch (e) {
+    return err(`cannot read ${file}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+};
+
+/** Run one test file in a fresh `bun test` process with TZ pinned to `zone`; it writes a JUnit report. */
 export const runSuiteUnderTimeZone = async (testFile: string, zone: ParityTimeZone): Promise<SuiteRun> => {
-  const child = Bun.spawn([process.execPath, "test", testFile], {
-    cwd: PACKAGE_ROOT,
-    env: { ...process.env, TZ: zone.tz, [PARITY_CHILD_ENV]: zone.tz },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ]);
-  const output = `${stdout}${stderr}`;
-  const passed = countOf(output, "pass");
-  return exitCode === 0 && countOf(output, "fail") === 0 && passed > 0
-    ? { kind: "passed", passed, output }
-    : { kind: "failed", exitCode, output };
+  const dir = await mkdtemp(join(tmpdir(), "fugue-parity-junit-"));
+  try {
+    const reportFile = join(dir, "report.xml");
+    const child = Bun.spawn([process.execPath, "test", testFile, "--reporter=junit", `--reporter-outfile=${reportFile}`], {
+      cwd: PACKAGE_ROOT,
+      env: childEnv(process.env, process.cwd(), zone),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    return suiteVerdict(exitCode, await readReport(reportFile), `${stdout}${stderr}`);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 };

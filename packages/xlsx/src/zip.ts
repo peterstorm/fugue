@@ -4,8 +4,9 @@
  * An `.xlsx` is a ZIP. Its bytes arrive whole from `documents.getContent`, so
  * the central directory gives free random access to every part: the small
  * parts (workbook, rels, styles, shared strings) are inflated first, and the
- * worksheet is then streamed in compressed slices. Nothing here buffers more
- * than one slice's inflated output.
+ * worksheet is then streamed in compressed slices. `inflateSlices` buffers at
+ * most one slice's inflated output; `inflateEntry` holds a whole (small) part,
+ * under the per-entry cap.
  *
  * Pure: reads the input array, never writes it, does no I/O. Failures are
  * values (`ZipError`), never exceptions.
@@ -228,22 +229,38 @@ const inflateStreamed = (archive: ZipArchive, entry: ZipEntry, maxBytes: number)
 };
 
 /**
+ * Fast-path preallocation is trusted only as far as the compressed size can
+ * back it. Workbook XML rarely compresses past ~20:1, so a declared size beyond
+ * `FAST_PATH_RATIO` × compressed (and beyond the floor, which keeps tiny parts
+ * on the fast path) is not believed: a hostile central directory could
+ * otherwise force a near-cap allocation for every small part.
+ */
+const FAST_PATH_RATIO = 64;
+const FAST_PATH_FLOOR = 64 * 1024;
+
+/** Bytes the fast path may preallocate for `entry`: its declared size, bounded by what its compressed size can back. */
+const fastPathCapacity = (entry: ZipEntry): number =>
+  Math.min(entry.uncompressedSize, Math.max(FAST_PATH_FLOOR, entry.compressedSize * FAST_PATH_RATIO));
+
+/**
  * Inflate a whole (small) entry into one buffer, under the same cap.
  *
- * The fast path inflates in one call into a buffer one byte larger than the
- * declared size: fflate silently truncates at the buffer's end, so a full
- * buffer proves the declared size lied, and the entry is re-inflated through
- * the capped streaming path instead.
+ * The fast path inflates in one call into a buffer one byte larger than
+ * `fastPathCapacity`: fflate silently truncates at the buffer's end, so a full
+ * buffer proves the entry is larger than that (the declared size lied low, or
+ * lied high and was not believed), and the entry is re-inflated through the
+ * capped streaming path instead.
  */
 export const inflateEntry = (archive: ZipArchive, entry: ZipEntry, maxBytes: number): Result<Uint8Array, ZipError> => {
   if (entry.method !== 8 || entry.uncompressedSize >= maxBytes) return inflateStreamed(archive, entry, maxBytes);
   const data = entryData(archive, entry);
   if (!data.ok) return data;
+  const capacity = fastPathCapacity(entry);
   let out: Uint8Array;
   try {
-    out = inflateSync(data.value, { out: new Uint8Array(entry.uncompressedSize + 1) });
+    out = inflateSync(data.value, { out: new Uint8Array(capacity + 1) });
   } catch (e) {
     return zipErr("corrupt", `'${entry.name}' failed to inflate: ${e instanceof Error ? e.message : String(e)}`);
   }
-  return out.length > entry.uncompressedSize ? inflateStreamed(archive, entry, maxBytes) : ok(out);
+  return out.length > capacity ? inflateStreamed(archive, entry, maxBytes) : ok(out);
 };
