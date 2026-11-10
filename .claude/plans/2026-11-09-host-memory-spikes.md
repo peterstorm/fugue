@@ -312,7 +312,7 @@ export interface WorkbookHandle {                       // opaque, immutable; pa
 }
 export const openWorkbook: (bytes: Uint8Array) => Result<WorkbookHandle, FrameworkError>;
   // non-ZIP / unreadable parts → node-crash, non-retriable (FR-031)
-export interface FoldOpts extends ParseWorkbookOpts { readonly yieldEveryBytes?: number } // default 64 KiB compressed
+export interface FoldOpts extends ParseWorkbookOpts { readonly yieldEveryBytes?: number } // default 16 KiB compressed (changed from 64 KiB during T1: measured ~13 MB lower peak on the real Brancheliste export; see FoldOpts docs in packages/xlsx/src/index.ts)
 export const foldRows: <T, A>(
   workbook: WorkbookHandle, rowSchema: z.ZodType<T>, opts: FoldOpts,
   init: A, step: (acc: A, row: T, rowNumber: number) => A,
