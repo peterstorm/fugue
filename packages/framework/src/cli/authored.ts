@@ -20,6 +20,7 @@
 
 import { z } from "zod";
 import { ID_MAX_LENGTH } from "../types/ids.js";
+import { FAN_ESTIMATORS } from "../types/fan-scheduling.js";
 import { safeErrorMessage } from "../types/safe-error.js";
 import {
   FUGUE_BODY_MARKER,
@@ -718,6 +719,45 @@ const GatherSchema = z.object({
     .refine((field) => !FORBIDDEN_FIELD_NAMES.has(field), "gather field '__proto__' is not allowed"),
 }).strict();
 
+/**
+ * Render the offending authored value into a scheduling-field problem message.
+ * AS-029 / AS-051: the authored-DAG load surface must name the invalid VALUE,
+ * not just the rule — the compose repair loop and human authors both read
+ * these problems. JSON rendering for values that have one;
+ * `safeErrorMessage` for the rest (hostile/non-serializable input).
+ */
+const renderSchedulingValue = (value: unknown): string => {
+  const json = JSON.stringify(value);
+  return json === undefined ? safeErrorMessage(value) : json;
+};
+
+/** The two authored scheduling fields' problem messages name field + value. */
+const schedulingProblem = (field: "childConcurrency" | "estimator") => {
+  const expected = field === "childConcurrency"
+    ? "a positive safe integer"
+    : `one of ${FAN_ESTIMATORS.join(", ")}`;
+  return (issue: { readonly input?: unknown }): string =>
+    `${field} must be ${expected}, got ${renderSchedulingValue(issue.input)}`;
+};
+
+/**
+ * Authored fan scheduling (F1 PR-D, AD-8). The value domains here mirror
+ * `parseFanScheduling` exactly (positive safe integer; the closed estimator
+ * set) — the definition-time constructors in `nodes/map.ts` remain the single
+ * parse authority and re-refuse anything forged past this schema. The error
+ * messages name the field and the offending value (AS-029, AS-051); the issue
+ * path carries the node position.
+ */
+const childConcurrencyField = z
+  .number({ error: schedulingProblem("childConcurrency") })
+  .int({ error: schedulingProblem("childConcurrency") })
+  .positive({ error: schedulingProblem("childConcurrency") })
+  .max(Number.MAX_SAFE_INTEGER, { error: schedulingProblem("childConcurrency") })
+  .optional();
+const estimatorField = z
+  .enum(FAN_ESTIMATORS, { error: schedulingProblem("estimator") })
+  .optional();
+
 const MapNodeSchema = z
   .object(
     {
@@ -729,6 +769,8 @@ const MapNodeSchema = z
         .regex(IDENT, "widthFrom must be one field reference (a JS identifier)")
         .refine((field) => !FORBIDDEN_FIELD_NAMES.has(field), "widthFrom '__proto__' is not allowed"),
       maxWidth: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      childConcurrency: childConcurrencyField,
+      estimator: estimatorField,
       child: ChildDagSchema,
       gather: GatherSchema,
     },

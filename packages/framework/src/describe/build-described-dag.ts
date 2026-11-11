@@ -11,8 +11,9 @@
 
 import { match } from "ts-pattern";
 import type { z } from "zod";
-import type { DagDef, DagNodeDef } from "../types/dag.js";
+import type { DagDef, DagNodeDef, MapNodeDef } from "../types/dag.js";
 import type { FrameworkError } from "../types/errors.js";
+import { parseFanScheduling, type FanEstimator } from "../types/fan-scheduling.js";
 import { type Result, ok, err } from "../types/result.js";
 import { topoSort } from "../shared/topo.js";
 import { inventoryCapabilities, runtimeNodeInventory } from "../shared/runtime-node-inventory.js";
@@ -44,6 +45,13 @@ interface DescribedNodeBase {
 export interface DescribedMap {
   readonly widthFrom: string;
   readonly maxWidth: number;
+  /**
+   * Authored, defaulted fan scheduling (F1 PR-D, AD-8): the child-concurrency
+   * limit and per-child estimator the fan will run with, before any host cap.
+   * Projected so manifest consumers can reason about fan pacing; the
+   * effective (capped) value is runtime state, not definition data.
+   */
+  readonly scheduling: Readonly<{ readonly childConcurrency: number; readonly estimator: FanEstimator }>;
   readonly childDagId: string;
   readonly gather: Readonly<{ readonly kind: "collect"; readonly field: string }> | null;
   readonly childNodes: readonly DescribedNode[];
@@ -186,6 +194,7 @@ const describeNode = (
     mapping: {
       widthFrom: node.mapping.widthFrom,
       maxWidth: node.mapping.maxWidth,
+      scheduling: describeScheduling(node),
       childDagId: node.mapping.child.id,
       gather: node.mapping.authoredGather === undefined
         ? null
@@ -202,6 +211,23 @@ const describeNode = (
       childEdges: node.mapping.child.edges.map(describeEdge),
     },
   };
+};
+
+/**
+ * Project authored fan scheduling into plain describe data (FR-001, FR-046).
+ * One parse through the single defaults site covers every arm: a PRESENT
+ * scheduling re-parses idempotently (and fails closed on a forged value that
+ * could only reach this builder by bypassing the validated-DagDef brand), an
+ * ABSENT one — a pre-T6-shaped map node — resolves to the authored defaults;
+ * the parser freezes its result, and a brand bypass is the only way to reach
+ * the refusal arm, which throws rather than projecting unvalidated data.
+ */
+const describeScheduling = (
+  node: MapNodeDef<unknown, unknown, unknown>,
+): Readonly<{ readonly childConcurrency: number; readonly estimator: FanEstimator }> => {
+  const parsed = parseFanScheduling(node.id, node.mapping.scheduling ?? {});
+  if (!parsed.ok) throw new Error(parsed.error.message);
+  return parsed.value;
 };
 
 const describeEdge = (e: DagDef["edges"][number]): DescribedEdge =>

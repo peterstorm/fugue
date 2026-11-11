@@ -7,6 +7,7 @@ import type {
 import type { NodesRecord, MapNodeDef } from "../types/dag.js";
 import { MAP_FAN_RESOURCE, isAuthoredCollectGather, isConditionalEdge, isDefaultEdge } from "../types/dag.js";
 import { asMaxWidth, asWidthFrom } from "../types/map-width.js";
+import { parseFanScheduling } from "../types/fan-scheduling.js";
 import { safeErrorMessage } from "../types/safe-error.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { EvalJudgeNodeDef } from "../types/eval-judge.js";
@@ -279,7 +280,7 @@ const snapshotMapping = (
       return err(validationErr(id,
         `map '${id}' must consume upstream input, write only '${MAP_FAN_RESOURCE}' fan completions, and declare no confidence extractor`));
     }
-    const { child, childOutputSchema, reduce, widthFrom, maxWidth, authoredGather } = node.mapping;
+    const { child, childOutputSchema, reduce, widthFrom, maxWidth, authoredGather, scheduling } = node.mapping;
     const validGather = authoredGather === undefined || isAuthoredCollectGather(authoredGather, {
       outputSchema: node.outputSchema,
       childOutputSchema,
@@ -290,6 +291,21 @@ const snapshotMapping = (
         typeof childOutputSchema?.safeParse !== "function" || !validGather) {
       return err(validationErr(id, `map '${id}' requires a valid immutable mapping descriptor`));
     }
+    // Authored fan scheduling (F1 PR-D, AD-8): validated and frozen by this
+    // gate. An ABSENT field resolves to the authored defaults through
+    // parseFanScheduling — the single defaults site (FR-001, FR-046); a
+    // present but forged value is refused naming the node and the value
+    // (AS-029, AS-051). The produced `FanSchedulingRejection` is the precise
+    // `validation` arm of FrameworkError, so it flows unchanged.
+    if (scheduling !== undefined &&
+        (typeof scheduling !== "object" || scheduling === null || Array.isArray(scheduling))) {
+      return err(validationErr(
+        id,
+        `map '${id}' scheduling must be an object with optional childConcurrency and estimator fields, got ${safeErrorMessage(scheduling)}`,
+      ));
+    }
+    const parsedScheduling = parseFanScheduling(id, scheduling ?? {});
+    if (!parsedScheduling.ok) return err(parsedScheduling.error);
     const snapshot = snapshotMappedChild(id, child);
     if (!snapshot.ok) return snapshot;
     return ok(Object.freeze({
@@ -298,6 +314,7 @@ const snapshotMapping = (
       reduce,
       widthFrom,
       maxWidth,
+      scheduling: parsedScheduling.value,
       ...(authoredGather !== undefined ? { authoredGather } : {}),
     }));
   } catch (cause) {

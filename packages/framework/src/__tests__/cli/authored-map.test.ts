@@ -13,6 +13,7 @@ import { describedToMermaid } from "../../cli/visualize.js";
 import { z } from "zod";
 import { FakeLlmClient } from "../../llm/fake-client.js";
 import { tokensOnly } from "../../types/token-usage.js";
+import { childConcurrency } from "../../types/fan-scheduling.js";
 import {
   createCollectMapNode,
   createMapNode,
@@ -1951,5 +1952,117 @@ describe("authored map codegen and plate rendering", () => {
     expect(mermaid).toContain("child: score-item-child");
     expect(mermaid).toContain("gather: collect → results");
     expect(mermaid).not.toContain("score-item<br/>");
+  });
+});
+
+describe("authored map fan scheduling (F1 PR-D)", () => {
+  const withScheduling = (): JsonObject => {
+    const value = draft();
+    mapOf(value).childConcurrency = 4;
+    mapOf(value).estimator = "p90";
+    return value;
+  };
+
+  const describedMapOf = async (dag: DagDef, name: string) => {
+    const described = buildDescribedDag({
+      dag,
+      route: `/${name}`,
+      description: name,
+      version: "1.0.0",
+      warningSink: inertWarningSink,
+    });
+    if (!described.ok) throw new Error(described.error.kind);
+    const mapped = described.value.nodes.find((node) => node.kind === "map");
+    if (mapped?.kind !== "map") throw new Error("missing described map");
+    return mapped.mapping;
+  };
+
+  it("accepts childConcurrency and estimator and carries them on the authored map", () => {
+    const parsed = mustParse(withScheduling());
+    const map = parsed.nodes.find((node) => node.kind === "map");
+    if (map?.kind !== "map") throw new Error("missing authored map");
+    expect(map.childConcurrency).toBe(4);
+    expect(map.estimator).toBe("p90");
+  });
+
+  it("rejects an invalid childConcurrency naming the field and the value (AS-029)", () => {
+    const cases: readonly [string, (value: JsonObject) => void, string][] = [
+      ["zero", (value) => { mapOf(value).childConcurrency = 0; }, "got 0"],
+      ["negative", (value) => { mapOf(value).childConcurrency = -2; }, "got -2"],
+      ["fraction", (value) => { mapOf(value).childConcurrency = 1.5; }, "got 1.5"],
+      ["string", (value) => { mapOf(value).childConcurrency = "3"; }, 'got "3"'],
+      ["NaN", (value) => { mapOf(value).childConcurrency = Number.NaN; }, "got null"],
+      ["overflow", (value) => { mapOf(value).childConcurrency = Number.MAX_SAFE_INTEGER + 1; }, `got ${Number.MAX_SAFE_INTEGER + 1}`],
+    ];
+    for (const [label, mutate, rendered] of cases) {
+      const value = draft();
+      mutate(value);
+      const parsed = parseAuthoredDag(value);
+      expect(parsed.ok, label).toBe(false);
+      if (!parsed.ok) {
+        const problems = parsed.problems.join("\n");
+        expect(problems, label).toContain("childConcurrency");
+        expect(problems, label).toContain(rendered);
+        // The issue path names the map node positionally.
+        expect(problems, label).toContain("nodes.1.childConcurrency");
+      }
+    }
+  });
+
+  it("rejects an estimator outside the closed set naming the field and the value (AS-051)", () => {
+    const cases: readonly [string, (value: JsonObject) => void, string][] = [
+      ["unknown", (value) => { mapOf(value).estimator = "p99"; }, 'got "p99"'],
+      ["synonym", (value) => { mapOf(value).estimator = "median"; }, 'got "median"'],
+      ["number", (value) => { mapOf(value).estimator = 7; }, "got 7"],
+      ["null", (value) => { mapOf(value).estimator = null; }, "got null"],
+    ];
+    for (const [label, mutate, rendered] of cases) {
+      const value = draft();
+      mutate(value);
+      const parsed = parseAuthoredDag(value);
+      expect(parsed.ok, label).toBe(false);
+      if (!parsed.ok) {
+        const problems = parsed.problems.join("\n");
+        expect(problems, label).toContain("estimator");
+        expect(problems, label).toContain(rendered);
+        expect(problems, label).toContain("nodes.1.estimator");
+      }
+    }
+  });
+
+  it("emits scheduling fields in generated code only when the author declares them", () => {
+    const emitted = buildAuthoredScaffold(mustParse(withScheduling())).dagTs;
+    expect(emitted).toContain("childConcurrency: 4,");
+    expect(emitted).toContain('estimator: "p90",');
+
+    const plain = buildAuthoredScaffold(mustParse(MAP_FIXTURE)).dagTs;
+    expect(plain).not.toContain("childConcurrency:");
+    expect(plain).not.toContain("estimator:");
+  });
+
+  it("round-trips authored scheduling through codegen, definition, and the validated mapping", async () => {
+    const generated = await importGeneratedDag(mustParse(withScheduling()), "scheduling-roundtrip");
+    const map = generated.nodes.find((node) => node.kind === "map");
+    if (map?.kind !== "map") throw new Error("missing generated map");
+    expect(map.mapping.scheduling).toEqual({ childConcurrency: childConcurrency(4), estimator: "p90" });
+    expect(Object.isFrozen(map.mapping.scheduling)).toBe(true);
+
+    // An author who declares nothing gets the defaults at definition.
+    const plain = await importGeneratedDag(mustParse(MAP_FIXTURE), "scheduling-roundtrip-defaults");
+    const plainMap = plain.nodes.find((node) => node.kind === "map");
+    if (plainMap?.kind !== "map") throw new Error("missing generated map");
+    expect(plainMap.mapping.scheduling).toEqual({ childConcurrency: childConcurrency(1), estimator: "largest-seen" });
+  });
+
+  it("projects authored scheduling into the described map metadata, defaulting when absent", async () => {
+    const generated = await importGeneratedDag(mustParse(withScheduling()), "scheduling-describe");
+    expect(await describedMapOf(generated, "scheduling-describe")).toMatchObject({
+      scheduling: { childConcurrency: 4, estimator: "p90" },
+    });
+
+    const plain = await importGeneratedDag(mustParse(MAP_FIXTURE), "scheduling-describe-defaults");
+    expect(await describedMapOf(plain, "scheduling-describe-defaults")).toMatchObject({
+      scheduling: { childConcurrency: 1, estimator: "largest-seen" },
+    });
   });
 });

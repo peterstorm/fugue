@@ -27,7 +27,21 @@ import {
   CHECKPOINT_INVALID_NODE_ID,
   CHECKPOINT_INVALID_RUN_ID,
   META_RECORD_NODE_ID,
+  frameworkError,
 } from "../types/error-factories.js";
+import { fanRefusal } from "../types/fan-scheduling.js";
+import { mapIndex } from "../types/map-index.js";
+
+/** One complete fan refusal, shared by the per-kind coverage tables below. */
+const coverageRefusal = fanRefusal({
+  ceiling: { kind: "calls", limit: 10 },
+  perChildEstimate: 2,
+  estimatorApplied: "largest-seen",
+  effectiveConcurrency: 2,
+  completed: 3,
+  remaining: 4,
+  lowerBound: false,
+});
 import {
   formatFrameworkError,
   asFrameworkError,
@@ -318,6 +332,20 @@ describe("PersistedFrameworkErrorSchema", () => {
     expect(isFrameworkErrorKind("made-up-kind")).toBe(false);
     expect(isFrameworkError({ kind: "node-crash" })).toBe(false);
   });
+
+  it("accepts EVERY kind of the compiler-checked taxonomy (the runtime enum cannot fall behind the union)", () => {
+    // The historical defect this pins: `persistedFrameworkErrorKinds` used to
+    // be a second hand-maintained list that silently fell behind the union —
+    // `isFrameworkErrorKind` returned false for kinds the framework itself
+    // constructs. The enum is now DERIVED from the compiler-checked kind
+    // table, so agreement is structural; this loop keeps the runtime guarantee
+    // observable: every exported kind is a valid standalone marker, and the
+    // taxonomy is enumerated without duplicates.
+    expect(new Set(FRAMEWORK_ERROR_KINDS).size).toBe(FRAMEWORK_ERROR_KINDS.length);
+    for (const kind of FRAMEWORK_ERROR_KINDS) {
+      expect(isFrameworkErrorKind(kind)).toBe(true);
+    }
+  });
 });
 
 describe("FrameworkError: llm-budget-exceeded", () => {
@@ -571,6 +599,32 @@ describe("retriabilityOf — single source of truth for the retry fast-fail fork
     // retriable would burn the node's whole budget re-deriving one answer.
     [{ kind: "map-width-invalid", nodeId: nid, widthFrom: "items", found: "3" }, "non-retriable"],
     [{ kind: "map-width-exceeded", nodeId: nid, resolvedWidth: 26, maxWidth: 25 }, "non-retriable"],
+    // A projection refusal re-projects the same verdict against the same
+    // ceiling; a child-failed fan follows its primary (both directions pinned).
+    [frameworkError.fanBudgetRefused(nid, coverageRefusal), "non-retriable"],
+    [frameworkError.fanChildFailed(
+      nid,
+      { index: mapIndex(0), error: { kind: "transient", nodeId: nid, message: "429" } },
+      { kind: "refusal", refusal: coverageRefusal },
+    ), "retriable"],
+    [frameworkError.fanChildFailed(
+      nid,
+      { index: mapIndex(0), error: { kind: "validation", nodeId: nid, message: "bad" } },
+      { kind: "refusal", refusal: coverageRefusal },
+    ), "non-retriable"],
+    // The remaining two FanFailureCauses arms: neither the secondary's
+    // retriability nor the attached refusal leaks into the classification —
+    // the primary alone decides, in every arm.
+    [frameworkError.fanChildFailed(
+      nid,
+      { index: mapIndex(0), error: { kind: "transient", nodeId: nid, message: "429" } },
+      { kind: "secondaries", secondary: [{ index: mapIndex(2), error: { kind: "node-crash", nodeId: nid, message: "boom", retriability: "non-retriable" } }] },
+    ), "retriable"],
+    [frameworkError.fanChildFailed(
+      nid,
+      { index: mapIndex(0), error: { kind: "validation", nodeId: nid, message: "bad" } },
+      { kind: "secondaries-and-refusal", secondary: [{ index: mapIndex(2), error: { kind: "node-crash", nodeId: nid, message: "boom", retriability: "retriable" } }], refusal: coverageRefusal },
+    ), "non-retriable"],
   ];
 
   it("classifies every kind in the table exactly as the old retry disjunction did", () => {
@@ -656,6 +710,14 @@ describe("usageOfError — FR-W0-001 token-attribution contract", () => {
     [{ kind: "source-has-incoming", nodeId: nid, message: "has edge" }, undefined],
     [{ kind: "invalid-dag-input-edge", edge: { from: "$input", to: "n" }, message: "bad" }, undefined],
     [{ kind: "infra-unreachable", operation: "mint", hop: "cc", message: "down" }, undefined],
+    // Fan errors summarise children whose spend was attributed as each child
+    // settled — even a usage-carrying primary must not be counted again.
+    [frameworkError.fanBudgetRefused(nid, coverageRefusal), undefined],
+    [frameworkError.fanChildFailed(
+      nid,
+      { index: mapIndex(0), error: { kind: "transient", nodeId: nid, message: "429", usage: used } },
+      { kind: "refusal", refusal: coverageRefusal },
+    ), undefined],
   ];
 
   it("attributes usage exactly on the three tool-use-loop kinds and nowhere else", () => {

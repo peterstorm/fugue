@@ -4,6 +4,7 @@ import type { z } from "zod";
 import type { FrameworkError } from "./errors.js";
 import type { Result } from "./result.js";
 import { asWidthFrom, type WidthFrom, type MaxWidth } from "./map-width.js";
+import type { FanScheduling } from "./fan-scheduling.js";
 import type { DagId, NodeId, DagInputId } from "./ids.js";
 import type { Confidence, ConfidenceBucket } from "./confidence.js";
 import { resourceName, type ResourceName } from "./witness.js";
@@ -83,6 +84,26 @@ export type MapNodeDef<I = unknown, ChildOut = unknown, O = unknown> =
       childOutputSchema: z.ZodType<ChildOut>;
       widthFrom: WidthFrom;
       maxWidth: MaxWidth;
+      /**
+       * Authored, defaulted child concurrency and estimator (F1 PR-D, AD-8):
+       * the two knobs a fan admits and estimates its children with. The
+       * structure-only fingerprint excludes this field, so retuning a fan
+       * never invalidates its saved children (FR-051).
+       *
+       * Consumer rule: an ABSENT field resolves to the defaults
+       * `{ childConcurrency: 1, estimator: "largest-seen" }`, obtained ONLY
+       * through `parseFanScheduling(nodeId, {})` — the single defaults site
+       * (FR-001, FR-046); no consumer may hand-write them.
+       *
+       * PHASED (wave 1 → wave 2): OPTIONAL until T6 lands. The producers of
+       * mapping snapshots — `snapshotMapping` in `shared/validate-dag.ts` and
+       * `createMapNode` in `nodes/map.ts` — are T6 files that do not emit
+       * `scheduling` yet; requiring it here would break `bun run typecheck`
+       * outside this wave's scope. In wave 2, T6 freezes a
+       * `parseFanScheduling` result into every snapshot, after which the field
+       * is always present at runtime.
+       */
+      scheduling?: FanScheduling;
       /** Present only when the runtime issued the closed collect reducer/schema pair. */
       authoredGather?: AuthoredCollectGather;
       reduce: (results: readonly ChildOut[]) => Result<O, FrameworkError>;

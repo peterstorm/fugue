@@ -725,7 +725,19 @@ const emitMapNode = (
     throw new Error(`authored map invariant: child '${node.child.id}' has no terminal output`);
   }
   const terminalPlan = childPlanOf(plans, terminalId);
-  const declaration = `${purposeComment(node)}\nconst ${plan.ref} = (${parameter}) => {\n${body}  return ${nodeFactory("map")}({\n    id: ${JSON.stringify(node.id)},\n    inputSchema: ${plan.inExpr},\n    widthFrom: ${JSON.stringify(node.widthFrom)},\n    maxWidth: ${node.maxWidth},\n    child: ${child.expression.replace(/\n/g, "\n    ")},\n    childOutputSchema: ${terminalPlan.outName},\n    collectedItemSchema: ${terminalPlan.outName},\n    gather: { kind: "collect", field: ${JSON.stringify(node.gather.field)} },\n  });\n};`;
+  // Authored fan scheduling (F1 PR-D, AD-8): emitted only when present, so
+  // authors who declare nothing get a byte-identical generated module and the
+  // definition-time defaults apply (FR-001, FR-046). The estimator is a
+  // closed-union literal; JSON.stringify pins it as a string literal.
+  const schedulingLines = [
+    ...(node.childConcurrency !== undefined
+      ? [`    childConcurrency: ${node.childConcurrency},`]
+      : []),
+    ...(node.estimator !== undefined
+      ? [`    estimator: ${JSON.stringify(node.estimator)},`]
+      : []),
+  ].join("\n");
+  const declaration = `${purposeComment(node)}\nconst ${plan.ref} = (${parameter}) => {\n${body}  return ${nodeFactory("map")}({\n    id: ${JSON.stringify(node.id)},\n    inputSchema: ${plan.inExpr},\n    widthFrom: ${JSON.stringify(node.widthFrom)},\n    maxWidth: ${node.maxWidth},\n${schedulingLines.length > 0 ? `${schedulingLines}\n` : ""}    child: ${child.expression.replace(/\n/g, "\n    ")},\n    childOutputSchema: ${terminalPlan.outName},\n    collectedItemSchema: ${terminalPlan.outName},\n    gather: { kind: "collect", field: ${JSON.stringify(node.gather.field)} },\n  });\n};`;
   return { declaration, prompts };
 };
 

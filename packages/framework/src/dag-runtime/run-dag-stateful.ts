@@ -50,6 +50,7 @@ import { fwLogger } from "../logger.js";
 import { bestEffort, bestEffortLog } from "./best-effort.js";
 import type { CompiledDagMachine } from "./machine.js";
 import type { NonEmptyString } from "../types/non-empty-string.js";
+import type { FanConcurrencyCap } from "../types/fan-scheduling.js";
 import { hasExactOwnKeys, ownDescriptors } from "../types/own-data.js";
 
 // ---------------------------------------------------------------------------
@@ -151,6 +152,23 @@ export interface DagRunOpts
    * unchanged.
    */
   readonly minting?: MintingAuthority;
+  /**
+   * Host-wide operator ceiling on any map fan's child concurrency (FR-030,
+   * AD-8). Effective fan concurrency is `min(authored childConcurrency, cap)`;
+   * a clamp warns once per fan start and is observed on the `fan-start` event
+   * (FR-033). Operator configuration, never a per-run or per-tenant API
+   * (FR-034): the host threads
+   * `fanConcurrencyCap(config.FAN_CHILD_CONCURRENCY_MAX)` through
+   * `runResumableDagJob` (T7); no other caller sets it. The value arrives
+   * already branded — the smart constructor throws at the configuration
+   * boundary, so a non-positive-integer setting never reaches a run (FR-032).
+   * Omitted ⇒ `DEFAULT_FAN_CONCURRENCY_CAP` (8).
+   *
+   * PHASED (wave 1 → wave 4): type-only until T10 builds the root `FanRuntime`
+   * from it in `runDagStatefulOutcome`; until then the field is accepted and
+   * inert.
+   */
+  readonly fanConcurrencyCap?: FanConcurrencyCap;
 }
 
 // ---------------------------------------------------------------------------

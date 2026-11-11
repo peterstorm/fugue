@@ -7,7 +7,7 @@
 
 ## Summary
 
-Today a runtime-width map fan runs its children strictly one at a time, so wide fans are slow, and a fan can burn a large part of the run's budget before anything notices that the whole fan cannot fit. This feature lets DAG authors run fan children concurrently up to an authored limit, capped by a host-wide operator maximum. It adds a whole-fan budget admission check: after the first batch of children, it projects whether the remaining children fit the run's ceilings and refuses at a known, resumable point if they do not. Determinism is kept throughout: index-ordered reduce, first error by index, and drain-and-save on failure. Bounded concurrency also extends to nested fans (depth 2) and to static fan-out siblings, along with opt-in adaptive concurrency and alternative per-child cost estimators.
+Today a runtime-width map fan runs its children strictly one at a time, so wide fans are slow, and a fan can burn a large part of the run's budget before anything notices that the whole fan cannot fit. This feature lets DAG authors run fan children concurrently up to an authored limit, capped by a host-wide operator maximum. It adds a whole-fan budget admission check: after the first batch of children, it projects whether the remaining children fit the run's ceilings and refuses at a known, resumable point if they do not. Determinism is kept throughout: index-ordered reduce, first error by index, and drain-and-save on failure. It also adds selectable per-child cost estimators. Requirements for nested fans (depth 2), opt-in adaptive concurrency, and bounded static fan-out siblings are deferred to the follow-on D2 and D3 deliveries — each with its own spec (see the F1 plan's Dependencies table) — and are out of this delivery's scope. 
 
 All Key Constraints in `brainstorm.md` are locked and carry into this spec.
 
@@ -93,39 +93,6 @@ All Key Constraints in `brainstorm.md` are locked and carry into this spec.
 - AS-030: Given an invalid host maximum (not a positive integer), When the host starts, Then startup fails with an error naming the setting.
 - AS-031: Given the existing DAG-level run-concurrency limit, When the operator or author reads configuration, docs, or errors, Then the per-fan child-concurrency settings are named and documented distinctly from it so the two cannot be confused.
 
-### US5: [P1] Bounded concurrency for nested fans (depth 2)
-
-**As a** DAG author
-**I want** to place a fan inside a fan child, with defined, bounded concurrency
-**So that** I can express two-level fan-outs without concurrency multiplying past a documented, operator-controllable bound
-
-**Why this priority:** User ruled in scope; nested maps are currently rejected at definition time.
-
-**Acceptance Scenarios:**
-- AS-032: Given a map node whose mapped child DAG contains another map node (nesting depth 2), When the DAG is defined, Then it is accepted (today it is rejected).
-- AS-033: Given nested fans with outer effective concurrency Co_eff = min(outer authored, host maximum) and inner effective concurrency Ci_eff = min(inner authored, host maximum), When they run, Then the number of concurrently running leaf children never exceeds Co_eff × Ci_eff (at most 64 at the default host maximum of 8).
-- AS-034: Given nested fans, When the inner fan's projection refuses, Then the refusal error identifies both the outer index and the inner fan, and the outer fan treats it as a terminal failure of that outer child (drain-and-save, first error by index).
-- AS-035: Given nested fans resumed from checkpoints, When they complete, Then reducer inputs at both levels are in index order and identical to an uninterrupted run.
-- AS-047: Given a map node nested at depth 3 or deeper (a map inside a mapped child DAG that is itself inside a mapped child DAG), When the DAG is defined, Then it is rejected with an error naming the offending node.
-- AS-048: Given a human-review node inside a mapped child DAG at any nesting depth, When the DAG is defined, Then it is rejected, as today.
-
-### US6: [P1] Adaptive concurrency
-
-**As a** DAG author
-**I want** a fan's concurrency to back off when the provider throttles and recover when it stops
-**So that** the fan stays fast without hammering a throttling provider
-
-**Why this priority:** User ruled in scope.
-
-**Acceptance Scenarios:**
-- AS-036: Given adaptive concurrency enabled for a fan, When the fan runs, Then in-flight children never exceed the current adaptive target, and the target always stays within [1, effective concurrency].
-- AS-037: Given adaptive concurrency changes the in-flight target, When it changes, Then a structured event records the old target, the new target, and the triggering signal.
-- AS-038: Given adaptive concurrency, When the fan completes, Then reducer input, first-error-by-index, projection refusal, and drain-and-save behave exactly as with a fixed limit.
-- AS-039: Given adaptive concurrency not enabled (the default), When the fan runs, Then behavior is identical to the fixed-limit scheduler.
-- AS-049: Given adaptive concurrency enabled and current target T, When a child reports a provider throttling (rate-limit) error, Then the target becomes max(1, floor(T/2)).
-- AS-050: Given adaptive concurrency enabled and current target T below effective concurrency, When a batch of T children settles with no throttle signal, Then the target becomes T + 1, never exceeding effective concurrency.
-- AS-055: Given adaptive concurrency enabled, When the fan starts, Then the initial target equals the effective concurrency.
-
 ### US7: [P1] Selectable per-child cost estimator
 
 **As a** DAG author
@@ -140,22 +107,6 @@ All Key Constraints in `brainstorm.md` are locked and carry into this spec.
 - AS-042: Given a percentile estimator and fewer than 5 settled children, When projection runs, Then projection falls back to the largest-seen estimate and the refusal error (if any) names the estimator actually applied.
 - AS-043: Given any estimator, When the fan runs, Then the host per-call meter still enforces every call independently and remains the hard stop.
 - AS-051: Given an estimator value outside {largest-seen, p50, p90, p95}, When the DAG is defined or loaded, Then it is rejected with an error naming the node and the invalid value.
-
-### US8: [P1] Bounded concurrency for static fan-out siblings
-
-**As a** DAG author
-**I want** to limit how many sibling branches of a static fan-out run at once
-**So that** wide static fan-outs can get the same host protection as map fans when I ask for it
-
-**Why this priority:** User ruled in scope; today all active nodes in a wave run at once with no bound.
-
-**Acceptance Scenarios:**
-- AS-044: Given a static fan-out with no sibling limit authored, When the wave runs, Then all siblings run at once, unbounded, with behavior identical to today (the host maximum does not apply).
-- AS-045: Given a static fan-out with a sibling limit S, When the wave runs, Then no more than min(S, host maximum) siblings are in flight at once.
-- AS-046: Given a bounded static fan-out wave where a sibling fails, When the wave settles, Then the reported failure is the first in wave order, as today.
-- AS-052: Given a bounded static fan-out wave, When siblings are dispatched, Then no whole-fan budget projection is applied; only the concurrency bound and the host per-call meter constrain it.
-- AS-053: Given an authored sibling limit that is not a positive integer, When the DAG is defined or loaded, Then it is rejected with an error naming the node and the invalid value.
-- AS-054: Given an authored sibling limit greater than the host maximum, When the wave runs, Then it is clamped to the host maximum with the same warning and structured event as AS-027.
 
 ---
 
@@ -218,27 +169,9 @@ All Key Constraints in `brainstorm.md` are locked and carry into this spec.
 - FR-034: System MUST NOT offer a per-run override of fan concurrency; only the DAG author (authored structure) and the operator (host maximum) influence it.
 - FR-035: System MUST name and document per-fan child concurrency settings distinctly from the existing DAG-level run-concurrency limit.
 
-### Core Requirements — Nested Fans (US5)
-
-- FR-040: System MUST accept a map node inside a mapped child DAG at nesting depth 2 exactly, lifting today's definition-time rejection for that depth. System MUST reject map nesting at depth 3 or deeper at definition time with an error naming the offending node. Human-review nodes inside mapped child DAGs MUST remain prohibited at every depth.
-- FR-041: System MUST cap each nesting level's effective concurrency independently by the host maximum, so peak concurrently running leaf children across nested fans is ≤ Co_eff × Ci_eff (the product bound; at most 64 at the default host maximum of 8). The product bound MUST be documented, including that the operator lowers it by lowering the host maximum.
-- FR-042: System MUST attribute a nested refusal or failure to both the outer index and the inner fan, and treat it as a terminal failure of the outer child.
-- FR-043: System MUST preserve index-ordered reduce, first-error-by-index, drain-and-save, and checkpoint replay independently at each nesting level.
-
-### Core Requirements — Adaptive Concurrency (US6)
-
-- FR-044: System MUST allow a DAG author to opt a fan into adaptive concurrency, off by default. When enabled, the in-flight target MUST start at effective concurrency and stay within [1, effective concurrency], adjusted by additive-increase/multiplicative-decrease on the provider-throttling signal: on a child throttle (rate-limit) error the target becomes max(1, floor(target/2)); after each clean batch (target children settle with no throttle signal) the target increases by 1, capped at effective concurrency.
-- FR-045: System MUST emit a structured event each time the adaptive target changes, carrying old target, new target, and the signal.
-
 ### Core Requirements — Per-Child Estimator (US7)
 
 - FR-046: System MUST allow a DAG author to choose the per-child cost estimator for a fan from the fixed set {largest-seen, p50, p90, p95}, defaulting to largest-seen. A percentile estimator MUST fall back to largest-seen until at least 5 children of the fan have settled. Any other estimator value MUST be rejected at DAG definition/load with an error naming the node and value. The refusal error MUST name the estimator actually applied.
-
-### Core Requirements — Static Fan-Out Siblings (US8)
-
-- FR-047: System MUST allow a DAG author to bound how many sibling branches of a static fan-out wave run at once, as a positive integer capped by the host maximum (clamped with the FR-033 warning and event). When no sibling limit is authored, static fan-out siblings MUST remain unbounded, exactly as today, and the host maximum MUST NOT apply to them.
-- FR-048: System MUST keep today's first-failure-in-wave-order semantics for bounded static fan-out waves.
-- FR-049: System MUST NOT apply whole-fan budget projection to static fan-out siblings; only the concurrency bound and the host per-call meter constrain them.
 
 ### Data Requirements
 
@@ -284,11 +217,8 @@ All Key Constraints in `brainstorm.md` are locked and carry into this spec.
 - SC-009: Corrupt-checkpoint tests at concurrency > 1 dispatch 0 children before refusing.
 - SC-010: Clamp tests show effective concurrency equals min(authored, host maximum), with exactly 1 warning and 1 structured event per clamped fan start.
 - SC-011: Host default of 8 and host maximum of 1 are each verified by at least one test.
-- SC-012: Nested-fan tests show peak concurrent leaf children never exceed Co_eff × Ci_eff across ≥ 1,000 generated interleavings; 100% of depth-3-or-deeper map nestings and 100% of human-review nodes inside mapped child DAGs are rejected at definition time in tests.
 - SC-013: All doc locations in FR-062 are updated in the same change set.
 - SC-014: 100% of projection-refusal tests under each of p50, p90, and p95 produce an error naming the estimator applied; a test for each percentile shows fallback to largest-seen with 0, 1, and 4 settled children and the percentile in use from the 5th settled child onward.
-- SC-015: A property test over arbitrary throttle/clean-batch signal sequences finds 0 cases where the adaptive target leaves [1, effective concurrency] or deviates from the FR-044 rule, and 0 target changes without a matching structured event, across ≥ 1,000 generated cases.
-- SC-016: Static fan-out tests show 0 behavioral differences from today when no sibling limit is authored, and peak in-flight siblings ≤ min(S, host maximum) in 100% of bounded runs.
 
 **Measurement approach:** Automated example and property-based tests with deterministic/fake-clock scheduling; doc review at PR time.
 
@@ -326,9 +256,6 @@ None — all resolved 2026-10-02 (see Change Log).
 - Host per-call LLM meter.
 - Root-held dispatch and spend authority (ADR-0086).
 - Run ceilings sourced from DAG configuration, and the spend ledger loaded on resume.
-- Wave-based execution for static fan-out siblings.
-- Child errors that distinguish provider throttling (rate-limit) from other failures, for the adaptive signal.
-- Existing definition-time validation that rejects nested maps and human-review inside mapped children.
 
 ---
 
@@ -338,10 +265,7 @@ None — all resolved 2026-10-02 (see Change Log).
 |------|--------|---------------------|
 | Probe batch overshoots ceiling by up to one batch | Med | Explicitly carved out in FR-018: bounded by C × M and by the per-call meter. No unprojected probe once a refusal seed exists (FR-026). Operator can lower the host maximum. |
 | Confusion between new per-fan concurrency and existing DAG-level run concurrency | Med | Distinct naming and docs (FR-035) |
-| Nested concurrency multiplies to Co_eff × Ci_eff (up to 64 at default) | High | Documented product bound (FR-041); depth capped at 2 (FR-040); operator mitigates by lowering the host maximum |
-| Host default of 8 changes behavior of wide static fan-out waves | Low | Mitigated: static fan-out default stays unbounded exactly as today; host maximum applies only to an authored sibling limit (FR-047) |
 | Percentile estimator weakens the overshoot guarantee | Med | Default stays largest-seen; percentile bound documented as best-effort; per-call meter remains the hard stop (FR-018) |
-| Adaptive concurrency makes traces non-deterministic | Med | Opt-in only; ordering/error invariants unchanged (AS-038); every target change emits an event (FR-045) |
 | Resume-after-refusal repeated refusal mistaken for a bug | Low | Redeploy hint in error and docs (FR-014, FR-062) |
 
 ---
@@ -387,3 +311,4 @@ None — all resolved 2026-10-02 (see Change Log).
 | 2026-10-02 | Added FR-025: a mixed refusal and child failure in one drain returns the lowest-index failure as primary, attaches the refusal in the returned error, and still emits the refusal event. Reason: plan-alignment round 1, user decision | architecture-agent |
 | 2026-10-02 | Added FR-026 and AS-056: a refusal seed is persisted per epoch and evaluated before dispatch on resume (sticky refusal unless ceilings were raised). Amended AS-009 and FR-010 (no unprojected probe when seeded), and AS-014, FR-017 and SC-008 (deterministic re-refusal, including remainder ≤ C and non-constant cost). Reason: plan-alignment round 1, user decision | architecture-agent |
 | 2026-10-02 | FR-060: the refusal event is self-contained and carries effective concurrency (AS-012 alignment). Reason: plan-alignment round 1, user decision | architecture-agent |
+| 2026-10-05 | Scope amendment: the nested-fan, adaptive-concurrency, and static-fan-out-sibling user stories, requirements, and acceptance scenarios were moved out of this delivery's spec; they are deferred to the follow-on D2 and D3 deliveries, each with its own spec. Reason: the wave-gate requirement-coverage floor requires every spec entry to have a completion owner in this delivery's task graph; those entries belong to future runs. Operator-approved | orchestrator |

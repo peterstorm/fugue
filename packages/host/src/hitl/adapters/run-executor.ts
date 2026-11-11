@@ -16,12 +16,13 @@
  * drop it).
  */
 
-import { asNonEmptyString, runResumableDagJob, ok, err, EXECUTOR_NODE_ID, asFrameworkError, safeErrorMessage } from "@fuguejs/framework";
+import { asNonEmptyString, runResumableDagJob, ok, err, EXECUTOR_NODE_ID, asFrameworkError, safeErrorMessage, fanConcurrencyCap } from "@fuguejs/framework";
 import type {
   Result,
   FrameworkError,
   CapabilityBroker,
   JobLike,
+  FanConcurrencyCap,
 } from "@fuguejs/framework";
 import { compileDagToMachine, persistDagContext } from "@fuguejs/framework/advanced";
 import { toJson } from "@fuguejs/framework";
@@ -85,6 +86,20 @@ interface RunExecutorDeps {
   readonly tenant?: TenantId;
   /** TTL of the durable HITL run record this slice may resume from. */
   readonly runRetentionTtlSec?: number;
+  /**
+   * Host-wide operator ceiling on map-fan child concurrency — the validated
+   * `config.FAN_CHILD_CONCURRENCY_MAX` integer (FR-030, AD-8). It stays PLAIN
+   * here (the host-config contract): this executor brands it ONCE at
+   * composition with the framework's `fanConcurrencyCap` smart constructor —
+   * whose throw on a non-positive-integer is a composition-time failure, so an
+   * invalid setting can never reach a run (FR-032) — and threads the branded
+   * value into every `runResumableDagJob` slice as `opts.fanConcurrencyCap`.
+   * Operator configuration applied to EVERY run; never a per-run or per-tenant
+   * input (FR-034, OOS-009). The host composition (host.ts) supplies it from
+   * `config.FAN_CHILD_CONCURRENCY_MAX`; omitted ⇒ the framework's
+   * `DEFAULT_FAN_CONCURRENCY_CAP` (8) applies downstream.
+   */
+  readonly fanChildConcurrencyMax?: number;
   readonly logger?: LogPort;
 }
 
@@ -124,8 +139,18 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
     agentClientMap,
     tenant,
     runRetentionTtlSec,
+    fanChildConcurrencyMax,
     logger,
   } = deps;
+  // FR-030 / AD-8: brand the operator cap ONCE at the configuration boundary.
+  // The smart constructor throws on a non-positive-integer (INV-3: never an
+  // `as` cast outside `types/fan-scheduling.ts`), so an invalid setting can
+  // never reach a run; host config validation (T4) has already accepted the
+  // env string as a positive safe integer.
+  const fanCap: FanConcurrencyCap | undefined =
+    fanChildConcurrencyMax === undefined
+      ? undefined
+      : fanConcurrencyCap(fanChildConcurrencyMax);
 
   return {
     async seedCheckpoint(dagId, input): Promise<Result<string, HostError>> {
@@ -215,6 +240,10 @@ export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
 
           return runResumableDagJob<unknown, unknown>(registered.dag, req.input, ctx, {
             jobLike: fencedJob,
+            // Operator fan cap (FR-030, FR-034): one host-wide value, branded
+            // at composition and applied to EVERY run — never a per-run API.
+            // Omitted ⇒ the framework's DEFAULT_FAN_CONCURRENCY_CAP applies.
+            ...(fanCap !== undefined ? { fanConcurrencyCap: fanCap } : {}),
             onHumanReview: async (review) => {
               assertExecutionAuthorized();
               return req.onHumanReview(review);

@@ -9,11 +9,29 @@
 // a rejected raw id never inhabits the branded arm — it takes the placeholder
 // and the rejected bytes are preserved additively in
 // `invalidRunId`/`invalidNodeId`, never a raw throw.
+//
+// THE FAN SOLE-CONSTRUCTOR CONTRACT (F1 PR-D, INV-2): `fanBudgetRefused` and
+// `fanChildFailed` below are the ONLY sanctioned constructors for the
+// `fan-budget-refused` / `fan-child-failed` kinds. A `kind:` object literal
+// for either kind built anywhere else in production code is a lint failure
+// (`.claude/linter/rules/inv-2-fan-errors-via-factory.json`, fail-closed;
+// tests excepted). The point is FR-014 completeness: the refusal record is
+// built once, by `fanRefusal()` in `types/fan-scheduling.ts` — frozen, with
+// the canonical `FAN_REFUSAL_HINT`, axis correlated with the ceiling and
+// `scopePath` pinned — and every error carrying it inherits that whole story.
+// That is also why `fanBudgetRefused` performs NO re-validation of the
+// refusal it attaches: beyond-the-type checks here would re-validate what the
+// refusing constructor already guarantees (the wire layer's LOOSE parse is
+// the only place an unvalidated refusal exists, and `asFrameworkError`
+// canonicalises it without ever rebuilding through this factory).
+// `fanChildFailed` additionally enforces FR-021's ordering invariant: the
+// primary is the strictly lowest failure index, unique across the drain.
 
 import { nodeId as brandNodeId, runId as brandRunId } from "./ids.js";
 import { buildCheckpointWriteFailed } from "./checkpoint-address.js";
 import type { NodeId, RunId } from "./ids.js";
 import type { FrameworkError, MissingCapability, Retriability } from "./errors.js";
+import type { FanFailureCauses, FanRefusal, IndexedError } from "./fan-scheduling.js";
 import type { Capability } from "./node.js";
 
 const toNodeId = (nid: string | NodeId): NodeId => brandNodeId(nid as string);
@@ -73,6 +91,40 @@ export const frameworkError = {
   /** A map node's resolved width exceeded its declared `maxWidth` (FR-F1-003). */
   mapWidthExceeded: (nid: string | NodeId, resolvedWidth: number, maxWidth: number): FrameworkError =>
     ({ kind: "map-width-exceeded", nodeId: toNodeId(nid), resolvedWidth, maxWidth }),
+
+  /**
+   * A fan refused to admit more children by budget projection, with no child
+   * failure in the drain (FR-014, FR-015). The SOLE construction path for this
+   * kind (INV-2), so every refusal reaches callers with the full FR-014
+   * record — hint, effective concurrency, lower-bound flag, estimator applied.
+   */
+  fanBudgetRefused: (nid: string | NodeId, refusal: FanRefusal): FrameworkError =>
+    ({ kind: "fan-budget-refused", nodeId: toNodeId(nid), refusal }),
+
+  /**
+   * A fan's lowest-index child failure, with every other failure and/or the
+   * refusal observed in the same drain (FR-021, FR-025). The SOLE construction
+   * path for this kind (INV-2).
+   *
+   * Throws (constructor invariant) when `primary` is not the strictly lowest
+   * index among the failures or an index repeats: FR-021 defines the primary
+   * as the lowest-index failure, so any other ordering is a framework bug in
+   * the caller's failure ordering, not a reportable outcome.
+   */
+  fanChildFailed: (
+    nid: string | NodeId,
+    primary: IndexedError<FrameworkError>,
+    causes: FanFailureCauses<FrameworkError>,
+  ): FrameworkError => {
+    const secondary = causes.kind === "refusal" ? [] : causes.secondary;
+    const indices = [primary.index, ...secondary.map((s) => s.index)];
+    if (secondary.some((s) => s.index <= primary.index) || new Set(indices).size !== indices.length) {
+      throw new Error(
+        `fanChildFailed: primary index ${primary.index} must be the unique lowest failure index (got ${indices.join(", ")})`,
+      );
+    }
+    return { kind: "fan-child-failed", nodeId: toNodeId(nid), primary, causes };
+  },
 
   rejected: (nid: string | NodeId, reason: string): FrameworkError =>
     ({ kind: "rejected", nodeId: toNodeId(nid), reason }),
