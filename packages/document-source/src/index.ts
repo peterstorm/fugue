@@ -240,8 +240,23 @@ declare module "@fuguejs/framework" {
  *   by the number of distinct files, not by refresh count.
  *
  * Create the parser at MODULE scope so the memo is shared across DAG
- * instances/runs; module cache-busting on deploy gives a fresh memo per
- * code version.
+ * instances/runs. Where that module lives decides its lifetime under the
+ * host's hot reload, which re-imports only the DAG entry module as
+ * `dag.ts?v=<sha>`:
+ * - In a `lib/` module or a package (the usual place): the module is
+ *   imported by its plain specifier, so it is evaluated once per worker
+ *   process and shared by every `?v=<sha>` re-import. The memo survives
+ *   deploys, and changes to `lib/` code (including the `parse` function)
+ *   take effect only when the worker restarts. The memo still re-parses a
+ *   file whose fingerprint changed.
+ * - In the DAG entry module itself: each deployed version evaluates a fresh
+ *   copy with an empty memo, and the superseded module (with its memo) is not
+ *   unloaded, so every deploy adds one more retained memo until restart.
+ *
+ * The memo holds the whole parsed value for as long as the process lives. For
+ * a large workbook, fold it into the smaller value you actually need with
+ * `openWorkbook`/`foldRows` from `@fuguejs/xlsx` and memoize that, not the
+ * full row array.
  *
  * @example
  * ```ts

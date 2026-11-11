@@ -144,6 +144,22 @@ fetch: async (_input, ctx) => readReport(ctx.documents, localPathRef("report.xls
 Metadata failures fail open to a direct read+parse; parse failures are never
 cached; concurrent calls share one in-flight parse.
 
+Where the parser lives decides how long its memo lives. The host's hot reload
+re-imports only the DAG entry module (`dag.ts?v=<sha>`):
+
+- **In a `lib/` module or a package** (recommended): evaluated once per worker
+  process and shared by every deployed version. The memo survives deploys, and
+  a change to that `lib/` code (including the parse function) takes effect only
+  when the worker restarts.
+- **In `dag.ts` itself**: every deploy evaluates a fresh copy with an empty
+  memo, and the superseded copy is not unloaded, so each deploy retains one
+  more memo until the worker restarts.
+
+The memo keeps the whole parsed value resident. For a large workbook, do not
+memoize the full row array: fold it into the smaller value you serve (see
+[Large workbooks](#large-workbooks--openworkbook--foldrows) below) and cache
+that.
+
 ---
 
 ## Wire an adapter into the host
@@ -282,6 +298,44 @@ const parsed = await parseWorkbook(bytes, RowSchema);  // Promise<Result<{ rows 
 The same parser works regardless of which adapter delivered the bytes — verified
 end-to-end (`@fuguejs/fs` read from disk → `parseWorkbook`) in
 `packages/xlsx/src/__tests__/end-to-end.test.ts`.
+
+### Large workbooks — `openWorkbook` + `foldRows`
+
+`parseWorkbook` collects every row into an array. For a large sheet (tens of
+thousands of rows), stream it instead and keep only what you need. The reader
+never materialises the sheet: peak memory is the shared-strings table plus one
+row, and rows reach your step one at a time in worksheet order.
+
+```ts
+import { openWorkbook, foldRows } from "@fuguejs/xlsx";
+
+const wb = openWorkbook(bytes);                 // Result<WorkbookHandle> — loads shared strings + styles once
+if (!wb.ok) return wb;
+const counts = await foldRows(
+  wb.value,
+  RowSchema,
+  { sheet: "Data" },                            // same sheet/headerRow opts as parseWorkbook
+  new Map<string, number>(),                    // accumulator, owned by this one call
+  (acc, row) => acc.set(row.customerId, (acc.get(row.customerId) ?? 0) + 1),
+);                                              // Promise<Result<Map<string, number>, FrameworkError>>
+```
+
+- One handle serves every sheet: `foldRows` over several sheets of the same
+  handle reuses the one load. `wb.value.sheetNames` lists them.
+- `foldRows` yields to the event loop every 16 KiB of compressed input
+  (`yieldEveryBytes` to change it), so a long fold does not stall requests.
+- Errors match `parseWorkbook`: `node-crash` for unreadable bytes or a missing
+  sheet, `validation` (`row <n>: …`) at the first row that violates
+  `rowSchema` — the fold stops there. `xlsxErrorRow(error)` recovers `<n>`.
+- Memory budget: streaming the 25.6k-row master list stays at or below 100 MB
+  RSS for the parse (`packages/xlsx/bench/parse-memory.ts`).
+
+**Snapshot pattern.** When many requests read the same rarely-changing
+workbooks, do not parse per request. Hold a module-scope snapshot (in `lib/`,
+per the module-lifetime note above) that is rebuilt by `foldRows` only when a
+source's `getMetadata` fingerprint changes, and serve every request from it;
+concurrent cold requests join the one in-flight build. The direct-sales DAGs
+in fugue-dags (`lib/lead-snapshot/`) are the reference implementation.
 
 ---
 

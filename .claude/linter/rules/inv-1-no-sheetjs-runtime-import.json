@@ -1,0 +1,19 @@
+{
+  "kind": "regex",
+  "name": "inv-1-no-sheetjs-runtime-import",
+  "description": "INV-1 (FR-042): SheetJS (the `xlsx` npm package) is a development-only differential oracle. No production source may import it; only *.test.ts files and the dedicated oracle harness (sheetjs-oracle.ts) may.",
+  "extensions": [
+    ".ts",
+    ".tsx",
+    ".mts",
+    ".cts"
+  ],
+  "pattern": "\\b(from|import|require)\\s*\\(?\\s*[\"']xlsx[\"'/]",
+  "flags": "",
+  "excludePatterns": [
+    ".test.ts",
+    "sheetjs-oracle.ts"
+  ],
+  "fixHint": "Use the streaming reader in @fuguejs/xlsx (openWorkbook / foldRows / parseWorkbook). SheetJS may only be imported from *.test.ts files or packages/xlsx/src/__tests__/support/sheetjs-oracle.ts, as the differential reference.",
+  "enabled": true
+}

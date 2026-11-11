@@ -1,66 +1,83 @@
 /**
- * @fuguejs/xlsx — pure workbook parsing for Fugue DAGs.
+ * @fuguejs/xlsx — streaming workbook parsing for Fugue DAGs.
  *
  * `parseWorkbook` turns `.xlsx` bytes into Zod-validated typed rows. It is a
- * deterministic, side-effect-free transform: no filesystem or network I/O, and
- * the same bytes always yield the same result. The byte fetching is a `documents`
+ * side-effect-free transform with no filesystem or network I/O. It is
+ * deterministic within one process: the same bytes always yield the same result,
+ * including under concurrent parses. Date cells are the exception across
+ * processes. Like SheetJS, `serialToDate` builds them in the process's local time
+ * zone, so the same bytes read under a different `TZ` give `Date`s at different
+ * instants. The byte fetching is a `documents`
  * capability concern (`@fuguejs/ms-graph`, `@fuguejs/fs`); parsing stays here so it
  * is fixture-testable and provider-agnostic. See ADR-0052.
  *
- * ## Why SheetJS (not ExcelJS) for reading
+ * ## Streaming, with SheetJS semantics
  *
- * Reading uses **SheetJS (`xlsx`)**, which parses into a compact address-keyed
- * cell map, NOT ExcelJS's per-cell object model. This is load-bearing for the
- * multi-tenant host's memory budget: ExcelJS full-load explodes on real exports
- * (a 25k-row sheet ≈ 300 MB; a styled/date-grouped export > 1 GB), enough to OOM
- * a worker, and its streaming reader is non-deterministically broken under Bun
- * (sequential reads corrupt shared global state). SheetJS reads the same files in
- * a fraction of the memory (≈150–230 MB for the largest), is deterministic and
- * concurrency-safe under Bun, and parses date-grouped table autofilters natively
- * (it never touches `xl/tables`, so the ExcelJS `dateGroupItem` crash is moot).
- * ExcelJS remains only a TEST/fixture dependency.
+ * The reader never materialises a sheet. The bytes are already in memory, so
+ * the ZIP central directory gives random access: the workbook, its rels, the
+ * styles and the shared strings are inflated first (once per `openWorkbook`),
+ * then the selected sheet is inflated in compressed slices and fed through
+ * saxes into a row assembler. Each completed row is projected through the
+ * header map, validated, and handed to a fold step. Peak memory is the shared
+ * strings plus one row, instead of a full cell map. For example, the SheetJS
+ * full load peaked at ~570 MB on one measured 25k-row export.
+ *
+ * Cell semantics are those of SheetJS 0.18.5 (`XLSX.read(buf, { type: "buffer",
+ * cellDates: true })`), the previous implementation, and are held to it by a
+ * differential test suite: formula → cached result, rich text / hyperlink →
+ * text, dates (by number format) → `Date`, error cells → `null`. SheetJS itself
+ * is only a development dependency, used as that oracle.
  *
  * ## Usage
  *
  * ```ts
  * import { z } from "zod";
- * import { parseWorkbook } from "@fuguejs/xlsx";
+ * import { openWorkbook, foldRows, parseWorkbook } from "@fuguejs/xlsx";
  *
  * const RowSchema = z.object({ customerId: z.string(), revenue: z.coerce.number() });
  *
  * // inside a createFetchNode `fetch`, after ctx.documents.getContent(ref):
  * const parsed = await parseWorkbook(bytes, RowSchema);   // Result<{ rows }, FrameworkError>
+ *
+ * // Large sheets: fold rows without collecting them; one load serves many sheets.
+ * const wb = openWorkbook(bytes);
+ * if (wb.ok) {
+ *   const total = await foldRows(wb.value, RowSchema, { sheet: "Data" }, 0, (sum, row) => sum + row.revenue);
+ * }
  * ```
  *
- * Rows are objects keyed by the header-row cells. Cells are normalised to
- * primitives (formula → cached result, rich text / hyperlink → text, dates kept
- * as `Date`); pair numeric or date columns with `z.coerce.*` if your source
- * stores them as text.
+ * Rows are objects keyed by the header-row cells. Pair numeric or date columns
+ * with `z.coerce.*` if your source stores them as text.
  */
 
-import * as XLSX from "xlsx";
 import type { z } from "zod";
 import type { Result, FrameworkError } from "@fuguejs/framework";
-import { ok, err, nodeId } from "@fuguejs/framework";
+import { ok, err } from "@fuguejs/framework";
+import {
+  DEFAULT_MAX_ENTRY_BYTES,
+  findEntry,
+  inflateEntry,
+  inflateSlices,
+  readZip,
+  type ZipArchive,
+  type ZipEntry,
+} from "./zip.js";
+import { createXmlFeed, decodeUtf8, type XmlFeed } from "./xml.js";
+import {
+  parseContentTypes,
+  parseRelationships,
+  parseWorkbookXml,
+  resolveSheetParts,
+  selectSheet,
+  workbookRelsPath,
+  type SheetPart,
+} from "./workbook-parts.js";
+import { parseSharedStrings, type SharedStrings } from "./shared-strings.js";
+import { isDateStyle, parseStyles, UNFORMATTED, type DateStyles } from "./styles.js";
+import { createSheetReader } from "./sheet-stream.js";
+import { foldRow, startFold, xlsxCrash, type RowFold } from "./rows.js";
 
-/** Sentinel node ID for parse errors (parsing is a lib, not a DAG node). */
-const XLSX_NODE_ID = nodeId("xlsx-parse");
-
-const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
-
-const crashErr = (message: string): FrameworkError => ({
-  kind: "node-crash",
-  nodeId: XLSX_NODE_ID,
-  message,
-  retriability: "non-retriable",
-});
-
-const validationErr = (message: string, path?: string): FrameworkError => ({
-  kind: "validation",
-  nodeId: XLSX_NODE_ID,
-  message,
-  ...(path !== undefined ? { path } : {}),
-});
+export { xlsxErrorRow } from "./rows.js";
 
 /** Options for `parseWorkbook`. */
 export interface ParseWorkbookOpts {
@@ -70,13 +87,68 @@ export interface ParseWorkbookOpts {
   readonly headerRow?: number;
 }
 
+/** Options for `foldRows`. */
+export interface FoldOpts extends ParseWorkbookOpts {
+  /**
+   * Yield to the event loop after every this many bytes of COMPRESSED sheet
+   * input, so a long fold does not stall other work. Default 16 KiB.
+   */
+  readonly yieldEveryBytes?: number;
+}
+
+declare const WorkbookBrand: unique symbol;
+
 /**
- * Normalise a cell value to a primitive (or `null`). SheetJS already hands back
- * primitives / `Date` (with `cellDates`), so this mostly passes through — but it
- * ALSO handles the ExcelJS-shaped objects (formula `{ formula, result }`, rich
- * text `{ richText }`, hyperlink `{ text, hyperlink }`, error `{ error }`) so the
- * function stays a self-contained, independently-tested normaliser regardless of
- * the producer. Error cells and unknown objects → `null`.
+ * A loaded workbook: opaque and immutable. Its parts (workbook, rels, styles,
+ * shared strings) were read once by `openWorkbook`; every `foldRows` over it,
+ * on any sheet, reuses them.
+ */
+export interface WorkbookHandle {
+  readonly [WorkbookBrand]: true;
+  /** Sheet names in workbook order. */
+  readonly sheetNames: readonly string[];
+}
+
+/** What a handle stands for; reachable only through this module. */
+interface LoadedWorkbook {
+  readonly archive: ZipArchive;
+  readonly sheets: readonly SheetPart[];
+  readonly sst: SharedStrings;
+  readonly styles: DateStyles;
+}
+
+/** Handle → its loaded workbook. Written once per `openWorkbook`, never mutated after. */
+const loaded = new WeakMap<WorkbookHandle, LoadedWorkbook>();
+
+/**
+ * Default yield cadence: 16 KiB of compressed sheet input.
+ *
+ * Kept small because each yield is also the garbage collector's chance to run.
+ * On one real 25k-row export, measured once, yielding every 16 KiB peaked about
+ * 13 MB lower than yielding every 64 KiB, at the cost of about 100 extra
+ * macrotask hops (well under a millisecond). That is a single measurement, not
+ * a guarantee for other workbooks. Callers that prefer fewer hops can pass
+ * `yieldEveryBytes`.
+ */
+const DEFAULT_YIELD_EVERY_BYTES = 16 * 1024;
+
+/**
+ * Compressed bytes inflated and parsed per step (at most `yieldEveryBytes`).
+ * Small slices keep each step's inflated text, and the parser garbage it
+ * produces, small. On the same single export, 16 KiB slices peaked about 20 MB
+ * lower than 64 KiB ones (measured once, not a guarantee).
+ */
+const SLICE_BYTES = 16 * 1024;
+
+/**
+ * Normalise a cell value to a primitive (or `null`): primitives and `Date` pass
+ * through, and ExcelJS-shaped objects (formula `{ formula, result }`, rich text
+ * `{ richText }`, hyperlink `{ text, hyperlink }`, error `{ error }`) are
+ * flattened. Error cells and unknown objects → `null`.
+ *
+ * A standalone, independently tested public helper. The streaming reader does
+ * NOT use it (cells are decoded in `cell-value.ts`), so changing it never
+ * changes what `parseWorkbook` or `foldRows` return.
  */
 export const normalizeCell = (value: unknown): string | number | boolean | Date | null => {
   if (value === null || value === undefined) return null;
@@ -97,31 +169,244 @@ export const normalizeCell = (value: unknown): string | number | boolean | Date 
   return null;
 };
 
-/**
- * The raw value of a SheetJS cell, mapped for `normalizeCell`. An error cell
- * (`t === "e"`, e.g. `#REF!`/`#DIV/0!`) carries its code in `.v`; map it to `null`
- * so it normalises like ExcelJS error cells did. Formula cells expose the cached
- * result in `.v` (we never evaluate formulas). A missing cell → `null`.
- */
-const cellValue = (cell: XLSX.CellObject | undefined): unknown =>
-  cell === undefined ? null : cell.t === "e" ? null : cell.v ?? null;
+// ── loading ──────────────────────────────────────────────────────────────────
 
-/**
- * Select the target worksheet by name, 1-based index, or default (first), or
- * `undefined` when the requested sheet is absent (→ caller emits node-crash).
- */
-const selectSheet = (wb: XLSX.WorkBook, sheet: string | number | undefined): XLSX.WorkSheet | undefined => {
-  if (typeof sheet === "string") return wb.Sheets[sheet];
-  const name = wb.SheetNames[(typeof sheet === "number" ? sheet : 1) - 1];
-  return name === undefined ? undefined : wb.Sheets[name];
+const failedToParse = (message: string): FrameworkError => xlsxCrash(`failed to parse workbook: ${message}`);
+
+/** Inflate and decode one XML part, or `null` when it is absent. */
+const readPart = (archive: ZipArchive, path: string): Result<string | null, FrameworkError> => {
+  const entry = findEntry(archive, path);
+  if (entry === undefined) return ok(null);
+  const bytes = inflateEntry(archive, entry, DEFAULT_MAX_ENTRY_BYTES);
+  return bytes.ok ? ok(decodeUtf8(bytes.value)) : err(failedToParse(bytes.error.message));
+};
+
+/** Read and parse an optional part; `fallback` when the part is absent. */
+const loadPart = <T>(
+  archive: ZipArchive,
+  path: string | null,
+  parse: (xml: string) => Result<T, string>,
+  fallback: T,
+): Result<T, FrameworkError> => {
+  if (path === null) return ok(fallback);
+  const xml = readPart(archive, path);
+  if (!xml.ok) return xml;
+  if (xml.value === null) return ok(fallback);
+  const parsed = parse(xml.value);
+  return parsed.ok ? parsed : err(failedToParse(`${path}: ${parsed.error}`));
+};
+
+const hasZipSignature = (bytes: Uint8Array): boolean =>
+  bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04;
+
+const loadWorkbook = (bytes: Uint8Array): Result<LoadedWorkbook, FrameworkError> => {
+  // An .xlsx is a ZIP, so it MUST start with the PK local-file-header magic.
+  if (!hasZipSignature(bytes)) {
+    return err(failedToParse("not a valid .xlsx file (missing ZIP signature)"));
+  }
+  const zip = readZip(bytes);
+  if (!zip.ok) return err(failedToParse(zip.error.message));
+  const archive = zip.value;
+
+  const contentTypes = readPart(archive, "[Content_Types].xml");
+  if (!contentTypes.ok) return contentTypes;
+  if (contentTypes.value === null) return err(failedToParse("Unsupported ZIP file"));
+  const locations = parseContentTypes(contentTypes.value);
+  if (!locations.ok) return err(failedToParse(`[Content_Types].xml: ${locations.error}`));
+
+  const workbookPath =
+    locations.value.workbook ?? (findEntry(archive, "xl/workbook.xml") !== undefined ? "xl/workbook.xml" : null);
+  if (workbookPath === null) return err(failedToParse("Could not find workbook"));
+  if (workbookPath.toLowerCase().endsWith(".bin")) {
+    return err(failedToParse("binary (.xlsb) workbooks are not supported"));
+  }
+
+  const sst = loadPart(archive, locations.value.sharedStrings, parseSharedStrings, Object.freeze([]));
+  if (!sst.ok) return sst;
+  const styles = loadPart(archive, locations.value.styles, parseStyles, UNFORMATTED);
+  if (!styles.ok) return styles;
+
+  const workbookXml = readPart(archive, workbookPath);
+  if (!workbookXml.ok) return workbookXml;
+  if (workbookXml.value === null) return err(failedToParse("Could not find workbook"));
+  const sheets = parseWorkbookXml(workbookXml.value);
+  if (!sheets.ok) return err(failedToParse(`${workbookPath}: ${sheets.error}`));
+
+  const preferredRels = workbookRelsPath(workbookPath);
+  const relsPath = findEntry(archive, preferredRels) !== undefined ? preferredRels : "xl/_rels/workbook.xml.rels";
+  const rels = loadPart(archive, relsPath, (xml) => parseRelationships(xml), null);
+  if (!rels.ok) return rels;
+
+  return ok(
+    Object.freeze({
+      archive,
+      sheets: resolveSheetParts({
+        sheets: sheets.value,
+        rels: rels.value,
+        relsPath,
+        exists: (path) => findEntry(archive, path) !== undefined,
+      }),
+      sst: sst.value,
+      styles: styles.value,
+    }),
+  );
 };
 
 /**
- * Parse `.xlsx` bytes into rows validated against `rowSchema`.
+ * Load a workbook once: read the ZIP directory and the workbook-level parts.
+ * Bytes that are not a readable `.xlsx` → non-retriable `node-crash`.
+ */
+export const openWorkbook = (bytes: Uint8Array): Result<WorkbookHandle, FrameworkError> => {
+  const workbook = loadWorkbook(bytes);
+  if (!workbook.ok) return workbook;
+  // The brand is a compile-time fiction; this cast is the handle's only constructor.
+  const handle = Object.freeze({
+    sheetNames: Object.freeze(workbook.value.sheets.map((s) => s.name)),
+  }) as unknown as WorkbookHandle;
+  loaded.set(handle, workbook.value);
+  return ok(handle);
+};
+
+// ── folding ──────────────────────────────────────────────────────────────────
+
+const yieldToEventLoop = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+const worksheetNotFound = (sheet: string | number | undefined): FrameworkError =>
+  xlsxCrash(`worksheet not found: ${sheet ?? "(first)"}`);
+
+/**
+ * Feed the sheet's compressed slices through `feed`, yielding to the event loop
+ * every `yieldEveryBytes`, until the input ends or `stop` says the fold has its
+ * answer. Returns the feed's last result: an inflate or XML failure, or the
+ * close of a fully read sheet.
+ */
+const feedSheet = async (
+  archive: ZipArchive,
+  entry: ZipEntry,
+  feed: XmlFeed,
+  yieldEveryBytes: number,
+  stop: () => boolean,
+): Promise<Result<void, string>> => {
+  const decoder = new TextDecoder();
+  const sliceBytes = Math.min(SLICE_BYTES, yieldEveryBytes);
+  let sinceYield = 0;
+  for (const slice of inflateSlices(archive, entry, { sliceBytes, maxBytes: DEFAULT_MAX_ENTRY_BYTES })) {
+    if (!slice.ok) return err(slice.error.message);
+    const written = feed.write(decoder.decode(slice.value, { stream: true }));
+    if (!written.ok || stop()) return written;
+    sinceYield += sliceBytes;
+    if (sinceYield >= yieldEveryBytes) {
+      sinceYield = 0;
+      await yieldToEventLoop();
+    }
+  }
+  const tail = feed.write(decoder.decode());
+  return tail.ok ? feed.close() : tail;
+};
+
+/**
+ * Stream one sheet's rows through `step`, in worksheet order, without
+ * materialising the sheet. `rowNumber` is the 1-based worksheet row.
+ *
+ * Rows reach `step` in strictly ascending worksheet order. A sheet that cannot
+ * be streamed in that order is a node-crash (see below).
+ *
+ * With a valid `<dimension>`, the fold ends at the first row past the
+ * dimension's last row and stops reading the sheet: XML in the compressed
+ * slices after that row is never parsed, so malformed or truncated XML there
+ * goes unreported. Malformed XML in any slice that WAS parsed, including the
+ * one that ended the fold, is always a node-crash.
  *
  * Returns:
- * - `node-crash` (non-retriable) when the bytes aren't a readable workbook or
- *   the requested worksheet is absent — deterministic, so not retried.
+ * - `node-crash` (non-retriable, deterministic, so never retried) when:
+ *   - the handle is not from `openWorkbook`;
+ *   - `yieldEveryBytes` is not a positive safe integer;
+ *   - the sheet is absent, by name or by 1-based index;
+ *   - the sheet part is corrupt or would inflate past the per-entry cap
+ *     (512 MiB, the zip-bomb guard);
+ *   - the sheet XML is malformed or truncated (within the parsed range above);
+ *   - a cell addresses a row that has already been emitted (rows out of
+ *     ascending order);
+ *   - a cell references a shared string index that is not in the table;
+ *   - the header row holds a duplicate non-blank header.
+ * - `validation` when a row does not match `rowSchema` (`row <n>: …`; recover
+ *   `n` with `xlsxErrorRow`). The fold stops at the first failing row.
+ * - `ok(acc)` otherwise.
+ *
+ * The accumulator belongs to this one call: `step` may push into it rather than
+ * copy it, and the caller freezes what it keeps.
+ */
+export const foldRows = async <T, A>(
+  workbook: WorkbookHandle,
+  rowSchema: z.ZodType<T>,
+  opts: FoldOpts,
+  init: A,
+  step: (acc: A, row: T, rowNumber: number) => A,
+): Promise<Result<A, FrameworkError>> => {
+  const wb = loaded.get(workbook);
+  if (wb === undefined) return err(xlsxCrash("not a workbook handle: use openWorkbook to obtain one"));
+  const yieldEveryBytes = opts.yieldEveryBytes ?? DEFAULT_YIELD_EVERY_BYTES;
+  if (!Number.isSafeInteger(yieldEveryBytes) || yieldEveryBytes <= 0) {
+    return err(xlsxCrash(`yieldEveryBytes must be a positive integer, got ${yieldEveryBytes}`));
+  }
+
+  const part = selectSheet(wb.sheets, opts.sheet);
+  if (part === undefined || part.kind === "unreadable") return err(worksheetNotFound(opts.sheet));
+  const entry = findEntry(wb.archive, part.path);
+  if (entry === undefined) return err(worksheetNotFound(opts.sheet));
+  if (part.kind === "cellless") return ok(init);
+
+  // Imperative shell: the SAX callbacks advance a pure fold (`foldRow`); this
+  // closure owns the only mutable state and stops at the first failure.
+  const malformed = (message: string): FrameworkError => xlsxCrash(`failed to parse worksheet '${part.name}': ${message}`);
+  let fold: RowFold<A> = startFold(opts.headerRow ?? 1, init);
+  let failure: FrameworkError | null = null;
+  let done = false;
+  const reader = createSheetReader(
+    { sst: wb.sst, isDateStyle: (s) => isDateStyle(wb.styles, s) },
+    {
+      dimension: (bounds) => {
+        fold = { ...fold, bounds };
+      },
+      row: (rowIndex, cells) => {
+        if (failure !== null || done) return;
+        const next = foldRow(fold, rowIndex, cells, rowSchema, step);
+        if (!next.ok) failure = next.error;
+        else {
+          fold = next.value.fold;
+          done = next.value.kind === "done";
+        }
+      },
+      fail: (message) => {
+        failure ??= malformed(message);
+      },
+    },
+  );
+  const fed = await feedSheet(wb.archive, entry, createXmlFeed(reader), yieldEveryBytes, () => failure !== null || done);
+  // A row or sheet failure precedes the XML error that stopped the parse; an
+  // XML error in a parsed slice outranks `done`.
+  if (failure !== null) return err(failure);
+  return fed.ok ? ok(fold.acc) : err(malformed(fed.error));
+};
+
+/**
+ * Parse `.xlsx` bytes into rows validated against `rowSchema`: `openWorkbook`
+ * followed by a collecting `foldRows`.
+ *
+ * Returns:
+ * - `node-crash` (non-retriable, deterministic, so never retried) when:
+ *   - the bytes are not a readable `.xlsx` (no ZIP signature, a corrupt
+ *     archive, missing or malformed workbook parts, an `.xlsb` workbook);
+ *   - any workbook part or the sheet would inflate past the per-entry cap
+ *     (512 MiB, the zip-bomb guard);
+ *   - the requested worksheet is absent, by name or by 1-based index;
+ *   - the sheet XML is malformed or truncated;
+ *   - a cell addresses a row that has already been emitted (rows out of
+ *     ascending order);
+ *   - a cell references a shared string index that is not in the table;
+ *   - the header row holds a duplicate non-blank header.
+ *   `yieldEveryBytes` is not a `parseWorkbook` option, so the default always
+ *   applies and cannot be invalid here.
  * - `validation` when a row does not match `rowSchema` (message names the row).
  * - `ok({ rows })` otherwise. Rows are skipped when every cell normalises to
  *   empty — this includes rows whose cells are all error cells (`#REF!`,
@@ -134,82 +419,11 @@ export const parseWorkbook = async <T>(
   rowSchema: z.ZodType<T>,
   opts: ParseWorkbookOpts = {},
 ): Promise<Result<{ rows: readonly T[] }, FrameworkError>> => {
-  // An .xlsx is a ZIP, so it MUST start with the PK local-file-header magic
-  // (`50 4B 03 04`). SheetJS is lenient and would coerce arbitrary bytes into an
-  // empty sheet rather than throw, so guard the magic up front to keep the
-  // "non-workbook bytes → node-crash" contract (deterministic, non-retriable).
-  if (
-    bytes.length < 4 ||
-    bytes[0] !== 0x50 || bytes[1] !== 0x4b || bytes[2] !== 0x03 || bytes[3] !== 0x04
-  ) {
-    return err(crashErr("failed to parse workbook: not a valid .xlsx file (missing ZIP signature)"));
-  }
-
-  let wb: XLSX.WorkBook;
-  try {
-    // `cellDates` surfaces date cells as `Date` (preserving the contract); SheetJS
-    // reads into a compact cell map. `dense: false` keeps address-keyed access.
-    wb = XLSX.read(Buffer.from(bytes), { type: "buffer", cellDates: true });
-  } catch (e) {
-    return err(crashErr(`failed to parse workbook: ${msg(e)}`));
-  }
-
-  const ws = selectSheet(wb, opts.sheet);
-  if (ws === undefined) {
-    return err(crashErr(`worksheet not found: ${opts.sheet ?? "(first)"}`));
-  }
-
-  // An empty sheet has no `!ref` range → zero rows (mirrors the old empty result).
-  const ref = ws["!ref"];
-  if (typeof ref !== "string" || ref.length === 0) return ok({ rows: [] });
-  const range = XLSX.utils.decode_range(ref);
-
-  // ── Header row (0-based = headerRow - 1) → column → key map ────────────────
-  const headerRowNum = opts.headerRow ?? 1;
-  const headerR = headerRowNum - 1;
-  const headers = new Map<number, string>();
-  const seen = new Set<string>();
-  for (let c = range.s.c; c <= range.e.c; c++) {
-    const cell = ws[XLSX.utils.encode_cell({ r: headerR, c })] as XLSX.CellObject | undefined;
-    const h = normalizeCell(cellValue(cell));
-    const key = h === null ? "" : String(h).trim();
-    if (key === "") continue; // blank header column — legitimately skipped
-    // A duplicate non-empty header would silently overwrite the earlier column
-    // when rows are keyed by header — fail loudly instead.
-    if (seen.has(key)) {
-      return err(crashErr(`duplicate header column: '${key}' (header row ${headerRowNum})`));
-    }
-    seen.add(key);
-    headers.set(c, key);
-  }
-
-  // ── Data rows (rows after the header row) ──────────────────────────────────
-  const rows: T[] = [];
-  for (let r = headerR + 1; r <= range.e.r; r++) {
-    // Prototype-free: row keys come from the file's header cells, so a header
-    // literally named `__proto__`/`constructor` would otherwise mutate the object
-    // prototype instead of setting an own property. `Object.create(null)` makes
-    // every assignment an own property regardless of the key (Zod validation that
-    // follows reads declared fields either way, but this keeps the row a plain
-    // data bag and is consistent with the codebase's null-prototype boundaries).
-    const obj: Record<string, unknown> = Object.create(null);
-    let hasValue = false;
-    for (const [c, key] of headers) {
-      const cell = ws[XLSX.utils.encode_cell({ r, c })] as XLSX.CellObject | undefined;
-      const val = normalizeCell(cellValue(cell));
-      if (val !== null && val !== "") hasValue = true;
-      obj[key] = val;
-    }
-    if (!hasValue) continue; // skip fully-blank rows
-
-    const parsed = rowSchema.safeParse(obj);
-    if (!parsed.success) {
-      const issue = parsed.error.issues[0];
-      // Row number reported 1-based, matching the worksheet row (r is 0-based).
-      return err(validationErr(`row ${r + 1}: ${parsed.error.message}`, issue?.path.join(".")));
-    }
-    rows.push(parsed.data);
-  }
-
-  return ok({ rows });
+  const workbook = openWorkbook(bytes);
+  if (!workbook.ok) return workbook;
+  const rows = await foldRows(workbook.value, rowSchema, opts, [] as T[], (acc, row) => {
+    acc.push(row);
+    return acc;
+  });
+  return rows.ok ? ok({ rows: rows.value }) : rows;
 };
