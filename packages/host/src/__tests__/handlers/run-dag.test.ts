@@ -15,7 +15,7 @@ import {
 import type { NodeContext, FrameworkError, DagId, Capability, CapabilityBroker, InvocationOrigin } from "@fuguejs/framework";
 import { z } from "zod";
 import { createRunDagHandler } from "../../http/handlers/run-dag.js";
-import { settleBeforeDeadline } from "../../adapters/settle-before-deadline.js";
+import { settleBeforeDeadline } from "../../domain/settle-before-deadline.js";
 import type { RunDagDeps } from "../../http/handlers/run-dag.js";
 import type { RegisteredDag } from "../../domain/registry.js";
 import type { HostState } from "../../domain/host-state.js";

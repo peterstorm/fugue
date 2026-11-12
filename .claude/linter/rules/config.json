@@ -1,135 +1,137 @@
 {
+  "exclude": [
+    {
+      "path": ".venv/",
+      "reason": "python virtualenv for the eval/bench harness; site-packages hold third-party JavaScript (matplotlib, etc.) that no project rule governs"
+    },
+    {
+      "path": "packages/framework/docs/examples/",
+      "reason": "documentation samples shipped to readers verbatim \u2014 they import `@fuguejs/host/contract` on purpose to show the host wiring, and are compiled by the docs check rather than by a package tsconfig"
+    },
+    {
+      "path": "packages/framework/src/__tests__/boundary-imports.test.ts",
+      "reason": "its fixtures ARE import statements written as strings \u2014 the boundary checker's own corpus, unreadable by a text-based import extractor"
+    },
+    {
+      "path": "packages/framework/src/__tests__/cli/fixtures/",
+      "reason": "CLI fixture corpus: the near-identical invalid/success pairs ARE the test input, so identical blocks between fixture files are the point rather than duplicated logic"
+    }
+  ],
+  "requireGovernance": [
+    "packages/"
+  ],
   "boundaries": [
     {
-      "module": "packages/host/src/domain/",
-      "allow": ["./", "packages/host/src/domain/", "@fuguejs/framework", "zod", "ts-pattern"],
+      "module": "packages/framework/src/types/",
+      "description": "The bottom of the framework: pure domain types, branded ids and discriminated unions. Imports nothing upward; the one shared/ edge is the public barrel re-exporting the pure JSON-patch impl.",
+      "allow": [
+        "./",
+        "packages/framework/src/types/",
+        "packages/framework/src/shared/",
+        "zod",
+        "ts-pattern",
+        "bun:test",
+        "fast-check"
+      ],
       "deny": [
-        "packages/host/src/adapters/",
-        "packages/host/src/http/",
-        "packages/host/src/sync/",
-        "packages/host/src/lifecycle/",
-        "packages/host/src/host",
-        "packages/host/src/main",
-        "hono",
+        "node:",
+        "packages/framework/src/dag-runtime/",
+        "packages/framework/src/executor/",
+        "packages/framework/src/checkpoint/",
+        "packages/framework/src/llm/",
+        "packages/framework/src/cache/",
+        "packages/framework/src/queue/",
+        "packages/framework/src/observer/",
+        "packages/framework/src/tracing/",
+        "packages/framework/src/file/",
+        "packages/host/",
+        "@fuguejs/host",
         "ioredis",
-        "yaml"
-      ]
-    },
-    {
-      "module": "packages/host/src/sync/",
-      "allow": ["./", "packages/host/src/sync/", "packages/host/src/domain/", "packages/host/src/adapters/", "@fuguejs/framework"],
-      "deny": [
-        "packages/host/src/http/",
-        "packages/host/src/lifecycle/",
-        "packages/host/src/host",
-        "packages/host/src/main",
-        "hono",
-        "ioredis"
-      ]
-    },
-    {
-      "module": "packages/host/src/http/",
-      "allow": ["./", "packages/host/src/http/", "packages/host/src/domain/", "@fuguejs/framework", "hono", "ts-pattern"],
-      "deny": [
-        "packages/host/src/adapters/",
-        "packages/host/src/sync/",
-        "packages/host/src/lifecycle/",
-        "packages/host/src/host",
-        "packages/host/src/main",
-        "ioredis"
-      ]
-    },
-    {
-      "module": "packages/host/src/lifecycle/",
-      "allow": ["./", "packages/host/src/lifecycle/", "packages/host/src/domain/", "packages/host/src/adapters/", "packages/host/src/sync/", "@fuguejs/framework"],
-      "deny": [
-        "packages/host/src/http/",
-        "packages/host/src/host",
-        "packages/host/src/main",
-        "hono",
-        "ioredis"
-      ]
-    },
-    {
-      "module": "packages/host/src/adapters/",
-      "allow": ["./", "packages/host/src/adapters/", "packages/host/src/domain/", "@fuguejs/framework", "ts-pattern"],
-      "deny": [
-        "packages/host/src/http/",
-        "packages/host/src/sync/",
-        "packages/host/src/lifecycle/",
-        "packages/host/src/host",
-        "packages/host/src/main",
         "hono"
       ]
     },
     {
-      "module": "packages/framework/src/types/",
-      "allow": ["./", "packages/framework/src/types/", "zod"],
-      "deny": [
-        "packages/framework/src/dag-runtime/",
-        "packages/framework/src/shared/",
-        "packages/framework/src/executor/",
-        "packages/framework/src/llm/",
-        "packages/framework/src/observer/",
-        "packages/framework/src/cache/",
-        "packages/framework/src/checkpoint/",
-        "packages/framework/src/queue/",
-        "packages/framework/src/queue-bullmq/",
-        "packages/framework/src/scheduler/",
-        "packages/framework/src/tracing/",
-        "packages/framework/src/state-machine/",
-        "packages/framework/src/nodes/",
-        "packages/framework/src/sugar/",
-        "@opentelemetry/",
-        "bullmq",
-        "ioredis"
-      ]
-    },
-    {
       "module": "packages/framework/src/shared/",
-      "allow": ["./", "packages/framework/src/shared/", "packages/framework/src/types/", "zod", "node:crypto"],
+      "description": "Pure utilities (topo sort, hashing, JSON patch, composite node-address codec). Depends on types/ and the logger seam only; never on the runtime or a backend.",
+      "allow": [
+        "./",
+        "packages/framework/src/shared/",
+        "packages/framework/src/types/",
+        "packages/framework/src/logger",
+        "node:",
+        "zod",
+        "ts-pattern",
+        "bun:test",
+        "fast-check"
+      ],
       "deny": [
         "packages/framework/src/dag-runtime/",
         "packages/framework/src/executor/",
-        "packages/framework/src/llm/",
-        "packages/framework/src/cache/",
+        "packages/framework/src/state-machine/",
         "packages/framework/src/checkpoint/",
+        "packages/framework/src/file/",
+        "packages/framework/src/cache/",
+        "packages/framework/src/llm/",
         "packages/framework/src/queue/",
         "packages/framework/src/queue-bullmq/",
         "packages/framework/src/scheduler/",
-        "packages/framework/src/state-machine/",
         "packages/framework/src/nodes/",
-        "bullmq",
+        "packages/framework/src/observer/",
+        "packages/framework/src/tracing/",
+        "packages/host/",
+        "@fuguejs/host",
         "ioredis",
-        "@opentelemetry/"
+        "bullmq",
+        "hono"
       ]
     },
     {
       "module": "packages/framework/src/state-machine/",
-      "allow": ["./", "packages/framework/src/state-machine/", "packages/framework/src/types/"],
+      "description": "The generic state-machine kernel: transitions, replay, serialization. Pure over types/; knows no DAG, no backend and no transport.",
+      "allow": [
+        "./",
+        "packages/framework/src/state-machine/",
+        "packages/framework/src/types/",
+        "node:",
+        "zod",
+        "ts-pattern",
+        "bun:test",
+        "fast-check"
+      ],
       "deny": [
         "packages/framework/src/dag-runtime/",
         "packages/framework/src/executor/",
-        "packages/framework/src/llm/",
-        "packages/framework/src/observer/",
-        "packages/framework/src/cache/",
         "packages/framework/src/checkpoint/",
-        "packages/framework/src/queue/",
+        "packages/framework/src/file/",
+        "packages/framework/src/cache/",
         "packages/framework/src/queue-bullmq/",
         "packages/framework/src/scheduler/",
-        "packages/framework/src/tracing/",
-        "bullmq",
+        "packages/host/",
+        "@fuguejs/host",
         "ioredis",
-        "@opentelemetry/"
+        "bullmq",
+        "hono"
       ]
     },
     {
-      "module": "packages/framework/src/dag-runtime/fan/__tests__/",
+      "module": "packages/framework/src/dag-runtime/",
+      "description": "Pure transitions plus the imperative execution shell for one DAG run. May read the runtime's own collaborators (tracing, logger, observer, queue, checkpoint, the eval-judge node types) but never the public executor, the LLM clients, the caches or a transport adapter.",
       "allow": [
         "./",
         "packages/framework/src/dag-runtime/",
         "packages/framework/src/types/",
         "packages/framework/src/shared/",
+        "packages/framework/src/state-machine/",
+        "packages/framework/src/tracing/",
+        "packages/framework/src/logger",
+        "packages/framework/src/observer/",
+        "packages/framework/src/queue/",
+        "packages/framework/src/checkpoint/",
+        "packages/framework/src/nodes/eval-judge",
+        "node:",
+        "ts-pattern",
+        "zod",
+        "@opentelemetry/",
         "bun:test",
         "fast-check"
       ],
@@ -137,81 +139,444 @@
         "packages/framework/src/executor/",
         "packages/framework/src/llm/",
         "packages/framework/src/cache/",
-        "packages/framework/src/checkpoint/",
         "packages/framework/src/queue-bullmq/",
         "packages/framework/src/scheduler/",
+        "packages/framework/src/cli/",
+        "packages/host/",
+        "@fuguejs/host",
+        "ioredis",
         "bullmq",
-        "ioredis"
-      ]
-    },
-    {
-      "module": "packages/framework/src/dag-runtime/",
-      "allow": [
-        "./",
-        "packages/framework/src/dag-runtime/",
-        "packages/framework/src/types/",
-        "packages/framework/src/shared/",
-        "packages/framework/src/state-machine/",
-        "packages/framework/src/observer/",
-        "packages/framework/src/tracing/",
-        "packages/framework/src/queue/",
-        "packages/framework/src/logger",
-        "ts-pattern",
-        "@opentelemetry/"
-      ],
-      "deny": [
-        "packages/framework/src/executor/",
-        "packages/framework/src/llm/",
-        "packages/framework/src/cache/",
-        "packages/framework/src/checkpoint/",
-        "packages/framework/src/queue-bullmq/",
-        "packages/framework/src/scheduler/",
-        "bullmq",
-        "ioredis"
+        "hono"
       ]
     },
     {
       "module": "packages/framework/src/scheduler/",
-      "allow": ["./", "packages/framework/src/scheduler/", "packages/framework/src/types/"],
+      "description": "The cron scheduler: a timer-driven shell over the queue port and the logger. No transport adapter, no host.",
+      "allow": [
+        "./",
+        "packages/framework/src/scheduler/",
+        "packages/framework/src/queue/",
+        "packages/framework/src/logger",
+        "packages/framework/src/shared/",
+        "packages/framework/src/types/",
+        "packages/framework/src/state-machine/",
+        "node:",
+        "cron-parser",
+        "ts-pattern",
+        "zod",
+        "bun:test",
+        "fast-check"
+      ],
       "deny": [
+        "packages/framework/src/queue-bullmq/",
         "packages/framework/src/dag-runtime/",
         "packages/framework/src/executor/",
-        "packages/framework/src/llm/",
-        "packages/framework/src/observer/",
-        "packages/framework/src/cache/",
-        "packages/framework/src/checkpoint/",
-        "packages/framework/src/queue-bullmq/",
-        "bullmq",
+        "packages/host/",
+        "@fuguejs/host",
         "ioredis",
-        "@opentelemetry/"
+        "bullmq",
+        "hono"
       ]
     },
     {
       "module": "packages/framework/src/queue-bullmq/",
+      "description": "The BullMQ/Redis queue adapter. Owns the only sanctioned bullmq + ioredis imports outside the redis checkpoint/cache adapters; may use the executor in tests.",
       "allow": [
         "./",
         "packages/framework/src/queue-bullmq/",
-        "packages/framework/src/types/",
         "packages/framework/src/queue/",
         "packages/framework/src/state-machine/",
+        "packages/framework/src/types/",
         "packages/framework/src/logger",
+        "packages/framework/src/executor/",
+        "packages/framework/src/__tests__/",
+        "node:",
         "bullmq",
-        "ioredis"
+        "ioredis",
+        "zod",
+        "ts-pattern",
+        "bun:test",
+        "fast-check"
       ],
       "deny": [
-        "packages/framework/src/dag-runtime/",
-        "packages/framework/src/executor/",
-        "packages/framework/src/llm/",
-        "packages/framework/src/observer/",
-        "packages/framework/src/cache/",
-        "packages/framework/src/checkpoint/",
-        "packages/framework/src/scheduler/"
+        "packages/host/",
+        "@fuguejs/host",
+        "hono"
+      ]
+    },
+    {
+      "module": "packages/framework/",
+      "description": "The framework package root: everything not claimed by a finer boundary (executor, llm, nodes, cache, checkpoint, file, observer, tracing, cli, scripts). Imports its own tree plus declared externals; never the host package (except the generated-app contract in codegen/docs) or an adapter package.",
+      "allow": [
+        "./",
+        "packages/framework/src/",
+        "@fuguejs/framework",
+        "@fuguejs/host/contract",
+        "node:",
+        "bun:test",
+        "bun:ffi",
+        "fast-check",
+        "zod",
+        "ts-pattern",
+        "ioredis",
+        "bullmq",
+        "cron-parser",
+        "yaml",
+        "typescript",
+        "@opentelemetry/",
+        "@anthropic-ai/sdk",
+        "@azure/",
+        "openai",
+        "@fuguejs\\/framework"
+      ],
+      "deny": [
+        "packages/host/",
+        "@fuguejs/host/src",
+        "@fuguejs/ms-graph",
+        "@fuguejs/oracle",
+        "@fuguejs/fs",
+        "@fuguejs/http-auth",
+        "@fuguejs/document-source",
+        "hono",
+        "pg"
+      ]
+    },
+    {
+      "module": "packages/host/src/domain/",
+      "description": "The host's functional core: pure state machines, config parsing, error mapping, auth model. Imports ports and the framework only; never an adapter, the HTTP shell or the lifecycle shell.",
+      "allow": [
+        "./",
+        "packages/host/src/domain/",
+        "packages/host/src/ports",
+        "@fuguejs/framework",
+        "zod",
+        "ts-pattern",
+        "node:",
+        "bun:test",
+        "fast-check"
+      ],
+      "deny": [
+        "packages/host/src/adapters/",
+        "packages/host/src/http/",
+        "packages/host/src/sync/",
+        "packages/host/src/lifecycle/",
+        "packages/host/src/supervisor/",
+        "packages/host/src/hitl/",
+        "packages/host/src/host",
+        "packages/host/src/main",
+        "hono",
+        "ioredis",
+        "bullmq"
+      ]
+    },
+    {
+      "module": "packages/host/src/sync/",
+      "description": "The git sync loop: timer-driven shell over the registry and the git adapter. Reads the domain and its ports; never the HTTP shell or the top-level wiring.",
+      "allow": [
+        "./",
+        "packages/host/src/sync/",
+        "packages/host/src/domain/",
+        "packages/host/src/ports",
+        "@fuguejs/framework",
+        "ts-pattern",
+        "zod",
+        "node:",
+        "bun:test"
+      ],
+      "deny": [
+        "packages/host/src/http/",
+        "packages/host/src/lifecycle/",
+        "packages/host/src/host",
+        "packages/host/src/main",
+        "hono",
+        "ioredis",
+        "bullmq"
+      ]
+    },
+    {
+      "module": "packages/host/src/http/",
+      "description": "The HTTP shell: Hono routes, handlers and middleware. Orchestrates the domain, the ports, the supervisor, the HITL service and the adapters it is wired with; never the top-level host wiring.",
+      "allow": [
+        "./",
+        "packages/host/src/http/",
+        "packages/host/src/domain/",
+        "packages/host/src/ports",
+        "packages/host/src/supervisor/",
+        "packages/host/src/hitl/",
+        "packages/host/src/adapters/",
+        "packages/host/src/entrypoint-wiring/",
+        "@fuguejs/framework",
+        "hono",
+        "ts-pattern",
+        "zod",
+        "jose",
+        "node:",
+        "bun:test",
+        "fast-check"
+      ],
+      "deny": [
+        "packages/host/src/host",
+        "packages/host/src/main",
+        "ioredis",
+        "bullmq"
+      ]
+    },
+    {
+      "module": "packages/host/src/lifecycle/",
+      "description": "Boot, signals and the Redis probe: the process-lifecycle shell. Domain, ports and sync only; never the HTTP shell.",
+      "allow": [
+        "./",
+        "packages/host/src/lifecycle/",
+        "packages/host/src/domain/",
+        "packages/host/src/ports",
+        "packages/host/src/sync/",
+        "packages/host/src/adapters/",
+        "@fuguejs/framework",
+        "node:",
+        "ts-pattern",
+        "bun:test"
+      ],
+      "deny": [
+        "packages/host/src/host",
+        "packages/host/src/main",
+        "hono",
+        "bullmq"
+      ]
+    },
+    {
+      "module": "packages/host/src/adapters/",
+      "description": "The host's infrastructure adapters (Redis, git, Graph, Keycloak, spend authority, run executor). Implements domain-owned ports; may read the domain, the ports and the sibling shells it adapts, never the top-level wiring.",
+      "allow": [
+        "./",
+        "packages/host/src/adapters/",
+        "packages/host/src/domain/",
+        "packages/host/src/ports",
+        "packages/host/src/hitl/",
+        "packages/host/src/supervisor/",
+        "packages/host/src/entrypoint-wiring",
+        "packages/host/src/sync/",
+        "packages/host/src/http/",
+        "@fuguejs/framework",
+        "@fuguejs/http-auth",
+        "@fuguejs/ms-graph",
+        "@fuguejs/fs",
+        "@fuguejs/oracle",
+        "@azure/",
+        "jose",
+        "ioredis",
+        "zod",
+        "ts-pattern",
+        "node:",
+        "bun:test",
+        "fast-check"
+      ],
+      "deny": [
+        "packages/host/src/host",
+        "packages/host/src/main",
+        "hono",
+        "bullmq"
+      ]
+    },
+    {
+      "module": "packages/host/",
+      "description": "The host package root: the top-level shell (host.ts, main.ts), the supervisor, the HITL subsystem, entrypoint wiring and the ports module. Composes everything inside the package; never reaches into framework internals or another package's source.",
+      "allow": [
+        "./",
+        "packages/host/src/",
+        "@fuguejs/framework",
+        "@fuguejs/http-auth",
+        "@fuguejs/ms-graph",
+        "@fuguejs/fs",
+        "@fuguejs/oracle",
+        "@azure/",
+        "@anthropic-ai/sdk",
+        "hono",
+        "ioredis",
+        "bullmq",
+        "jose",
+        "zod",
+        "ts-pattern",
+        "node:",
+        "bun:test",
+        "bun:ffi",
+        "fast-check",
+        "fs",
+        "path",
+        "os",
+        "url",
+        "crypto",
+        "child_process"
+      ],
+      "deny": [
+        "packages/framework/",
+        "packages/adapter-",
+        "packages/http-auth/",
+        "packages/document-source/",
+        "packages/xlsx/",
+        "pg"
+      ]
+    },
+    {
+      "module": "packages/adapter-pg/",
+      "description": "CockroachDB/Postgres capability adapter. Depends on the framework's adapter-factory surface and its own driver.",
+      "allow": [
+        "./",
+        "packages/adapter-pg/src/",
+        "@fuguejs/framework",
+        "pg",
+        "zod",
+        "ts-pattern",
+        "node:",
+        "bun:test"
+      ],
+      "deny": [
+        "packages/host/",
+        "@fuguejs/host",
+        "packages/framework/src/"
+      ]
+    },
+    {
+      "module": "packages/adapter-oracle/",
+      "description": "Oracle capability adapter. Depends on the framework's adapter-factory surface and the injected driver.",
+      "allow": [
+        "./",
+        "packages/adapter-oracle/src/",
+        "@fuguejs/framework",
+        "zod",
+        "ts-pattern",
+        "node:",
+        "bun:test"
+      ],
+      "deny": [
+        "packages/host/",
+        "@fuguejs/host",
+        "packages/framework/src/"
+      ]
+    },
+    {
+      "module": "packages/adapter-ms-graph/",
+      "description": "Microsoft Graph document capability adapter. Depends on the framework and the document-source port; never the host.",
+      "allow": [
+        "./",
+        "packages/adapter-ms-graph/src/",
+        "@fuguejs/framework",
+        "@fuguejs/document-source",
+        "zod",
+        "ts-pattern",
+        "node:",
+        "bun:test"
+      ],
+      "deny": [
+        "packages/host/",
+        "@fuguejs/host",
+        "packages/framework/src/"
+      ]
+    },
+    {
+      "module": "packages/http-auth/",
+      "description": "Shared HTTP auth primitives (JWKS verification, claims policy). Depends on the framework's Result surface; never the host.",
+      "allow": [
+        "./",
+        "packages/http-auth/src/",
+        "@fuguejs/framework",
+        "jose",
+        "zod",
+        "ts-pattern",
+        "node:",
+        "bun:test"
+      ],
+      "deny": [
+        "packages/host/",
+        "@fuguejs/host",
+        "packages/framework/src/"
+      ]
+    },
+    {
+      "module": "packages/document-source/",
+      "description": "The document-source port and its shared types. Framework Result surface only.",
+      "allow": [
+        "./",
+        "packages/document-source/src/",
+        "@fuguejs/framework",
+        "zod",
+        "ts-pattern",
+        "node:",
+        "bun:test"
+      ],
+      "deny": [
+        "packages/host/",
+        "@fuguejs/host",
+        "packages/framework/src/"
+      ]
+    },
+    {
+      "module": "packages/xlsx/",
+      "description": "The streaming XLSX reader and its benches: own tree plus node built-ins, its two runtime deps, and the dev-only differential oracles (xlsx/exceljs/jszip) which only tests and benches may use.",
+      "allow": [
+        "./",
+        "packages/xlsx/",
+        "@fuguejs/framework",
+        "@fuguejs/fs",
+        "node:",
+        "fflate",
+        "saxes",
+        "zod",
+        "ts-pattern",
+        "bun:test",
+        "fast-check",
+        "xlsx",
+        "exceljs",
+        "jszip"
+      ],
+      "deny": [
+        "packages/host/",
+        "@fuguejs/host"
+      ]
+    },
+    {
+      "module": "packages/adapter-fs/",
+      "description": "The local-filesystem document-source adapter: framework Result surface plus node:fs.",
+      "allow": [
+        "./",
+        "packages/adapter-fs/",
+        "@fuguejs/framework",
+        "@fuguejs/document-source",
+        "zod",
+        "ts-pattern",
+        "node:",
+        "fs",
+        "path",
+        "bun:test"
+      ],
+      "deny": [
+        "packages/host/",
+        "@fuguejs/host",
+        "packages/framework/src/"
+      ]
+    },
+    {
+      "module": "packages/examples/",
+      "description": "Runnable example DAGs: the public framework surface, the document-source port, and the host's registration contract \u2014 never host internals.",
+      "allow": [
+        "./",
+        "packages/examples/src/",
+        "packages/examples/",
+        "@fuguejs/framework",
+        "zod",
+        "ts-pattern",
+        "node:",
+        "bun:test",
+        "@fuguejs/document-source",
+        "@fuguejs/host/contract"
+      ],
+      "deny": [
+        "packages/host/",
+        "packages/framework/src/"
       ]
     }
   ],
   "pureModules": [
     "packages/host/src/domain/",
-    "packages/host/src/sync/diff.ts",
     "packages/framework/src/types/",
     "packages/framework/src/shared/build-input.ts",
     "packages/framework/src/shared/hash.ts",
@@ -225,7 +590,6 @@
     "packages/framework/src/dag-runtime/wave-resolution.ts",
     "packages/framework/src/dag-runtime/retry-policy.ts",
     "packages/framework/src/dag-runtime/human-resolution.ts",
-    "packages/framework/src/dag-runtime/conditional.ts",
     "packages/framework/src/dag-runtime/topology.ts",
     "packages/framework/src/state-machine/replay.ts",
     "packages/framework/src/scheduler/catch-up.ts",
@@ -233,6 +597,43 @@
     "packages/framework/src/scheduler/diff.ts",
     "packages/framework/src/dag-runtime/fan/"
   ],
-  "maxFunctionLines": 60,
-  "excludeFromMaxLines": [".test.ts", ".spec.ts", ".property.test.ts", "host.ts", "run-dag.ts"]
+  "impureModules": [
+    {
+      "path": "packages/framework/src/types/clock.ts",
+      "reason": "systemClock \u2014 the one sanctioned wall-clock read in the framework; every other module in types/ is pure, and nodes read time only through the clock capability"
+    },
+    {
+      "path": "packages/host/src/domain/tenant-header.ts",
+      "reason": "node:crypto's synchronous HMAC/timingSafeEqual primitives \u2014 pure computation over its inputs, but the purity rule's node: predicate cannot distinguish a primitive from I/O"
+    },
+    {
+      "path": "packages/host/src/domain/capability-manager.ts",
+      "reason": "lifecycle connect/close orchestration: it drives async handle connects and reports failed-cleanup diagnostics through an injected sink (the pure helpers it calls stay pure)"
+    },
+    {
+      "path": "packages/host/src/domain/settle-before-deadline.ts",
+      "reason": "races a promise against a timer: the timer is the one I/O this module exists to perform, and the caller needs the settlement to fire before an outer deadline rather than to compute anything"
+    }
+  ],
+  "maxFunctionLines": 50,
+  "excludeFromMaxLines": [
+    ".test.ts",
+    ".spec.ts",
+    ".test.tsx",
+    ".spec.tsx",
+    ".property.test.ts"
+  ],
+  "maxDiscriminantBranches": 3,
+  "discriminantTags": [
+    "kind",
+    "type",
+    "status",
+    "op",
+    "phase",
+    "format",
+    "unit",
+    "source"
+  ],
+  "duplicateBlockMinTokens": 100,
+  "duplicateBlockMinLines": 8
 }

@@ -1,10 +1,13 @@
 {
   "kind": "regex",
   "name": "no-bare-throw",
-  "description": "Disallow throwing raw errors in framework code — use Result/FrameworkError instead",
-  "extensions": [".ts"],
+  "description": "Disallow throwing raw errors in framework code \u2014 use Result/FrameworkError instead. DISABLED 2026-11-12 after measuring: 234 repo-wide sites, and architecture.md sanctions constructor-invariant throws ('Constructor invariants \u2192 may throw (guards type's validity)'). Every remaining site outside types/ is a smart-constructor or internal-assertion guard, so enabling it demands a Result-signature refactor per call site \u2014 a design change, not a lint fix. Re-enable per layer once that refactor is scheduled.",
+  "extensions": [
+    ".ts"
+  ],
   "pattern": "^\\s*throw new (Error|TypeError|RangeError)\\(",
   "flags": "",
   "fixHint": "Return err({ kind: '...', ... }) instead of throwing. Exceptions should only cross boundaries at the imperative shell (executor, runner). If this IS the shell boundary, add a comment explaining why.",
-  "enabled": false
+  "enabled": false,
+  "excludePatterns": []
 }

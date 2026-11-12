@@ -215,7 +215,7 @@ const createHttpClient = (config: HttpCapabilityConfig): HttpCapability => ({
  * });
  *
  * // Pass to runtime or makeNodeContext:
- * const ctx = makeNodeContext({ runId: "r1", dagId: "d1", http: http.client });
+ * const ctx = makeNodeContext({ runId: RunId("r1"), dagId: DagId("d1"), http: http.client });
  * ```
  */
 export const createHttpCapability = (

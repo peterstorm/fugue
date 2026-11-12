@@ -305,7 +305,7 @@ export const fanHarness = (o: FanHarnessOptions) => {
   }, o.failSave);
   const ctx = makeNodeContext({
     runId: RUN,
-    dagId: "outer",
+    dagId: dagId("outer"),
     capabilities: { checkpointer: recorded },
     observer: { observe: (e) => { events.push(e); } },
     signal: controller.signal,

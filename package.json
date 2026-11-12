@@ -1,10 +1,15 @@
 {
   "name": "fugue",
   "private": true,
-  "workspaces": ["packages/*", "apps/*", "examples/*"],
+  "workspaces": [
+    "packages/*",
+    "apps/*",
+    "examples/*"
+  ],
   "scripts": {
     "verify": "bash scripts/verify.sh",
     "check:verification-prerequisites": "bun scripts/verify-prerequisites.ts",
+    "lint": "env -u PI_CODING_AGENT bun node_modules/@peterstorm/loom/scripts/lint-project.ts",
     "typecheck": "bun run --filter '*' typecheck && bun run typecheck:scripts",
     "typecheck:scripts": "bun ./node_modules/typescript/bin/tsc --noEmit -p tsconfig.scripts.json",
     "test": "bun run --filter '*' test",
@@ -21,10 +26,11 @@
   },
   "devDependencies": {
     "@opentelemetry/api": "^1.9.1",
-    "@types/bun": "1.4.1",
     "@opentelemetry/sdk-node": "^0.215.0",
-    "typescript": "^6.0.3",
+    "@peterstorm/loom": "github:peterstorm/loom#f1493c034c47333da7a981d7316c842fffaa5ecd",
+    "@types/bun": "1.4.1",
     "ts-pattern": "^5.9.0",
+    "typescript": "^6.0.3",
     "yaml": "^2.8.3"
   }
 }

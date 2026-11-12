@@ -34,7 +34,7 @@
  */
 
 import type { Context, Next } from "hono";
-import type { AuthIdentity, AuthenticatedUser, SignatureVerifiedClaims, Team } from "../../domain/auth.js";
+import type { AuthIdentity, AuthenticatedUser, SignatureVerifiedClaims, Team, VerifyRealmJwt, JwtVerifyError } from "../../domain/auth.js";
 import { hashToken, isTeamTokenShape, markSubjectToken } from "../../domain/auth.js";
 import type { TokenGrant } from "../../domain/auth.js";
 import { validateRealmJwtClaims, describeAuthError } from "../../domain/jwt-validation.js";
@@ -45,26 +45,12 @@ import { errorResponse } from "../response.js";
 // ---------------------------------------------------------------------------
 // Realm JWT verifier port (signature verification — INJECTED, never hardcoded)
 // ---------------------------------------------------------------------------
-
-/**
- * Reason a signature verifier could not produce verified claims. `invalid` is a
- * client fault (bad signature / unparsable token) → 401; `unavailable` is an
- * infrastructure fault (JWKS fetch failed, key rotation in flight) → 503,
- * mirroring the Redis-unavailable branch. The verifier MUST fail closed.
- */
-export type JwtVerifyError =
-  | { readonly kind: "invalid"; readonly reason: string }
-  | { readonly kind: "unavailable"; readonly reason: string };
-
-/**
- * Port for verifying a JWT's SIGNATURE and returning its (now branded) claims.
- * The real implementation is JWKS-backed (keys fetched from the realm, never
- * hardcoded); tests inject a fake. This port is the ONLY producer of
- * `SignatureVerifiedClaims` (it calls `markSignatureVerified` AFTER checking the
- * signature) — and `validateRealmJwtClaims` accepts only that brand, so the
- * "signature first" ordering is enforced by the type system, not convention.
- */
-export type VerifyRealmJwt = (token: string) => Promise<Result<SignatureVerifiedClaims, JwtVerifyError>>;
+// The port and its error type are DOMAIN types: the pure claim validator
+// (`domain/jwt-validation.ts`) consumes the port, and adapters implement it, so
+// the middleware shell imports them rather than owning them. They live in
+// `domain/auth.ts` and are re-exported here because every dep bundle that wires
+// the realm-JWT path names the verifier and its error together.
+export type { JwtVerifyError, VerifyRealmJwt } from "../../domain/auth.js";
 
 // ---------------------------------------------------------------------------
 // Constant-time string comparison (timing-attack resistant)
