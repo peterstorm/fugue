@@ -19,7 +19,7 @@
 //
 // Therefore there are TWO entry points:
 //   * `mapEventToFoundry(event)` — exhaustive over all 16 ObserverEvent
-//     variants (13 pre-existing + the 3 ADR-0087 fan events, which map to `[]`
+//     variants (13 pre-existing + the 3 ADR-0090 fan events, which map to `[]`
 //     by contract — see the fan arms below for why). For `run-end` it emits a
 //     summary carrying only the fields the bare event guarantees (duration,
 //     status) plus the run-latency metric.
@@ -265,7 +265,7 @@ export function mapEventToFoundry(
     .with({ type: "write-attempted" }, () => [])
     .with({ type: "freshness-violation" }, () => [])
     .with({ type: "human-intervention" }, () => [])
-    // Fan scheduling events (ADR-0087, D1) map to [] BY CONTRACT, not by
+    // Fan scheduling events (ADR-0090, D1) map to [] BY CONTRACT, not by
     // omission. They are run-log observability for the fan's own budget
     // diagnostics (FR-060: effective concurrency at start, per-projection
     // estimates, the refusal point), additive and OUTSIDE the FR-004 trace

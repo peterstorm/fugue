@@ -18,6 +18,7 @@
 // (codegen, gauntlet, scaffold writer) is guaranteed a value that already
 // passed every refinement — no structurally-shaped impostors.
 
+import { match, P } from "ts-pattern";
 import { z } from "zod";
 import { ID_MAX_LENGTH } from "../types/ids.js";
 import { FAN_ESTIMATORS } from "../types/fan-scheduling.js";
@@ -37,7 +38,6 @@ import {
   parseKebabIdent,
   type KebabIdent,
 } from "./identifiers.js";
-import { assertNever } from "./types.js";
 import type { Shape } from "./new-templates.js";
 import { CONFIDENCE_BUCKET, CONFIDENCE_FIELD } from "./vocabulary.js";
 
@@ -398,7 +398,7 @@ type AuthoredStructure = DeepReadonly<z.infer<typeof StructureSchema>>;
 
 // Compile-time proof that `StructureSchema`'s discriminated union covers exactly
 // the canonical `Shape` set (derived from the `DAG_SHAPES` tuple in
-// `types/dag.ts`). The `assertNever` in `structureRefs` only fires when a
+// `types/dag.ts`). The `.exhaustive()` in `structureRefs` only fires when a
 // variant is ADDED to the union — it cannot force the union to COVER every
 // `Shape`. These two aliases close both directions, mirroring the
 // `_NoExtraShapes` backstop in `types.ts`: a new shape in `DAG_SHAPES` with no
@@ -422,36 +422,28 @@ void _structureNoExtraShapes;
  * terminal's emitted schema const), so both scopes agree on which node is the
  * terminal without a duplicated per-shape switch.
  */
-export const structureRefs = (s: AuthoredStructure): ReadonlyArray<readonly [KebabIdent, string]> => {
-  switch (s.shape) {
-    case "linear":
-      return s.order.map((id, i) => [id, `order[${i}]`] as const);
-    case "fan-out":
-    case "diamond":
-      return [
-        [s.source, "source"] as const,
-        ...s.branches.map((id, i) => [id, `branches[${i}]`] as const),
-        ...(s.join !== undefined ? [[s.join, "join"] as const] : []),
-      ];
-    case "router":
-      return [
-        [s.classifier, "classifier"] as const,
-        ...s.cases.map((c, i) => [c.to, `cases[${i}].to`] as const),
-        [s.default, "default"] as const,
-      ];
-    case "sources":
-      return [
-        ...s.sources.map((id, i) => [id, `sources[${i}]`] as const),
-        [s.join, "join"] as const,
-        [s.assemble, "assemble"] as const,
-      ];
-    default:
-      // The return type is inferred, so a missing case would otherwise fall
-      // through to `undefined` silently — assertNever makes a new shape a
-      // compile error here.
-      return assertNever(s);
-  }
-};
+export const structureRefs = (s: AuthoredStructure): ReadonlyArray<readonly [KebabIdent, string]> =>
+  // `.exhaustive()` makes a newly-added shape a compile error here rather than
+  // a silent fall-through to `undefined`.
+  match(s)
+    .returnType<ReadonlyArray<readonly [KebabIdent, string]>>()
+    .with({ shape: "linear" }, (linear) => linear.order.map((id, i) => [id, `order[${i}]`] as const))
+    .with({ shape: P.union("fan-out", "diamond") }, (fan) => [
+      [fan.source, "source"] as const,
+      ...fan.branches.map((id, i) => [id, `branches[${i}]`] as const),
+      ...(fan.join !== undefined ? [[fan.join, "join"] as const] : []),
+    ])
+    .with({ shape: "router" }, (router) => [
+      [router.classifier, "classifier"] as const,
+      ...router.cases.map((c, i) => [c.to, `cases[${i}].to`] as const),
+      [router.default, "default"] as const,
+    ])
+    .with({ shape: "sources" }, (sources) => [
+      ...sources.sources.map((id, i) => [id, `sources[${i}]`] as const),
+      [sources.join, "join"] as const,
+      [sources.assemble, "assemble"] as const,
+    ])
+    .exhaustive();
 
 const orderNodesByStructure = <Node extends { readonly id: KebabIdent }>(
   nodes: readonly Node[],
@@ -483,22 +475,15 @@ function fieldTypeShape(type: FieldType): unknown {
 
 const schemaShape = (spec: SchemaSpec): string => JSON.stringify(canonicalFields(spec));
 
-export const terminalRefs = (structure: AuthoredStructure): readonly KebabIdent[] => {
-  switch (structure.shape) {
-    case "linear":
-      return structure.order.slice(-1);
-    case "fan-out":
-      return structure.join === undefined ? [] : [structure.join];
-    case "diamond":
-      return [structure.join];
-    case "router":
-      return [...structure.cases.map((entry) => entry.to), structure.default];
-    case "sources":
-      return [structure.assemble];
-    default:
-      return assertNever(structure);
-  }
-};
+export const terminalRefs = (structure: AuthoredStructure): readonly KebabIdent[] =>
+  match(structure)
+    .returnType<readonly KebabIdent[]>()
+    .with({ shape: "linear" }, (linear) => linear.order.slice(-1))
+    .with({ shape: "fan-out" }, (fanOut) => (fanOut.join === undefined ? [] : [fanOut.join]))
+    .with({ shape: "diamond" }, (diamond) => [diamond.join])
+    .with({ shape: "router" }, (router) => [...router.cases.map((entry) => entry.to), router.default])
+    .with({ shape: "sources" }, (sources) => [sources.assemble])
+    .exhaustive();
 
 const addGraphReferenceIssues = (
   nodes: readonly { readonly id: KebabIdent }[],
@@ -820,31 +805,27 @@ const directInputSpec = (
   id: KebabIdent,
 ): SchemaSpec | undefined => {
   const byId = new Map(dag.nodes.map((node) => [node.id, node] as const));
-  const structure = dag.structure;
-  switch (structure.shape) {
-    case "linear": {
-      const index = structure.order.indexOf(id);
+  return match(dag.structure)
+    .returnType<SchemaSpec | undefined>()
+    .with({ shape: "linear" }, ({ order }) => {
+      const index = order.indexOf(id);
       if (index === 0) return dag.input;
-      let predecessor = index - 1;
-      while (predecessor >= 0) {
-        const spec = outputSpecOf(byId.get(structure.order[predecessor]!));
-        if (spec !== undefined) return spec;
-        predecessor--;
-      }
-      return dag.input;
-    }
-    case "fan-out":
-    case "diamond":
-      if (id === structure.source) return dag.input;
-      if (structure.branches.includes(id)) return outputSpecOf(byId.get(structure.source));
+      // Nearest field-producing predecessor (human-review gates are passthroughs).
+      const producing = order
+        .slice(0, Math.max(index, 0))
+        .map((predecessorId) => outputSpecOf(byId.get(predecessorId)))
+        .findLast((spec) => spec !== undefined);
+      return producing ?? dag.input;
+    })
+    .with({ shape: P.union("fan-out", "diamond") }, (fan) => {
+      if (id === fan.source) return dag.input;
+      if (fan.branches.includes(id)) return outputSpecOf(byId.get(fan.source));
       return undefined;
-    case "router":
-      return id === structure.classifier ? dag.input : outputSpecOf(byId.get(structure.classifier));
-    case "sources":
-      return undefined;
-    default:
-      return assertNever(structure);
-  }
+    })
+    .with({ shape: "router" }, (router) =>
+      id === router.classifier ? dag.input : outputSpecOf(byId.get(router.classifier)))
+    .with({ shape: "sources" }, () => undefined)
+    .exhaustive();
 };
 
 /** Item schema selected by a parsed map's direct array-field reference. */

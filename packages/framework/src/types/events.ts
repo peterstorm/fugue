@@ -234,11 +234,11 @@ export interface HumanInterventionEvent {
 }
 
 // ---------------------------------------------------------------------------
-// Fan scheduling events (ADR-0087)
+// Fan scheduling events (ADR-0090)
 // ---------------------------------------------------------------------------
 
 /**
- * Structured observability for concurrent `map` fans (F1 PR-D, ADR-0087):
+ * Structured observability for concurrent `map` fans (F1 PR-D, ADR-0090):
  * effective concurrency at fan start (including any FR-033 clamp), the
  * projected per-child cost and estimator at each projection, and the refusal
  * point (FR-060).

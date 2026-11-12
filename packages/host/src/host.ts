@@ -16,8 +16,8 @@
  */
 
 import { match } from "ts-pattern";
-import { ok, err, runId as makeRunId, safeErrorMessage } from "@fuguejs/framework";
-import type { Result, DagId, NodeContext, DagDef, FrameworkError, RunId, CapabilityHandle } from "@fuguejs/framework";
+import { ok, err, runId as makeRunId, safeErrorMessage, fanConcurrencyCap } from "@fuguejs/framework";
+import type { Result, DagId, NodeContext, DagDef, FrameworkError, RunId, CapabilityHandle, FanConcurrencyCap, RunOptions } from "@fuguejs/framework";
 import { runDag } from "@fuguejs/framework";
 import type { HostConfig } from "./domain/config.js";
 import type { HostState } from "./domain/host-state.js";
@@ -266,6 +266,24 @@ export const withSubjectTokenRelease = async <T>(
     registry.release(runId);
   }
 };
+
+/**
+ * Kernel options for a synchronous (non-HITL) HTTP run. The operator fan cap is
+ * a REQUIRED argument, so `executeDag` cannot start a run without it: the
+ * host-wide `FAN_CHILD_CONCURRENCY_MAX` ceiling (FR-030) applies to sync runs
+ * exactly as it does to resumable ones, and is never a per-run input (FR-034).
+ * `minting` is passed through unchanged (`undefined` when no broker is wired).
+ *
+ * Pure and exported so the cap-reaches-the-kernel wiring is asserted directly,
+ * the same way `withSubjectTokenRelease` pins the teardown.
+ */
+export const syncRunOptions = (
+  operatorFanCap: FanConcurrencyCap,
+  minting: RunOptions["minting"],
+): Pick<RunOptions, "minting" | "fanConcurrencyCap"> => ({
+  minting,
+  fanConcurrencyCap: operatorFanCap,
+});
 
 /**
  * Select the capability broker for this boot — the per-invocation AUTHORITY
@@ -626,6 +644,9 @@ const wireHitlRunEngine = async (args: {
       agentClientMap: config.AGENT_CLIENT_MAP,
       tenant: routedTenant,
       runRetentionTtlSec: config.HITL_RUN_TTL_SEC,
+      // FR-030: the operator ceiling on map-fan child concurrency. The executor
+      // brands it once and applies it to every resumable slice.
+      fanChildConcurrencyMax: config.FAN_CHILD_CONCURRENCY_MAX,
       logger: sharedInfra.logger,
     });
     const runQueue = createRunQueue({
@@ -940,6 +961,11 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
   // then live consistently under `fugue:default:`.
   const tokenStore = createRedisTokenStore(sharedInfra.redis, routedTenant, sharedInfra.logger);
 
+  // FR-030 / FR-032: brand the operator fan cap ONCE at composition. Host config
+  // validation has already accepted it as a positive integer, so the smart
+  // constructor cannot throw here; every sync run below receives this value.
+  const operatorFanCap = fanConcurrencyCap(config.FAN_CHILD_CONCURRENCY_MAX);
+
   const routerDeps: RouterDeps = {
     hitl: hitlService,
     teamsBot: teamsBotHandle,
@@ -994,11 +1020,12 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
       // wiring (resolve AND throw) is unit-testable against the real registry
       // without copy-drift from this call site.
       return withSubjectTokenRelease(subjectTokens, ctx.runId, () =>
-        runDag<I, O>(dag, input, ctx, {
-          minting: broker !== undefined && origin !== undefined
+        runDag<I, O>(dag, input, ctx, syncRunOptions(
+          operatorFanCap,
+          broker !== undefined && origin !== undefined
             ? { broker, origin, meterLlm: meterMintedLlm }
             : undefined,
-        }),
+        )),
       );
     },
     clock: Date.now,

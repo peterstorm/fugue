@@ -1,0 +1,922 @@
+{
+  "recordedFrom": "packages/framework/src/dag-runtime/run-mapped-fan.ts @ 53f5a578 (pre-change sequential fan; byte-identical at branch point bbb8e374)",
+  "scenarios": {
+    "fresh: every child succeeds and reduces in index order": {
+      "trace": [
+        {
+          "op": "load"
+        },
+        {
+          "op": "setMeta",
+          "dagId": "outer",
+          "startedAt": "2026-01-01T00:00:00.000Z",
+          "nodeCount": 5
+        },
+        {
+          "op": "dispatch",
+          "index": 0,
+          "epoch": 0,
+          "input": 3
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@0@0",
+          "output": 0,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "dispatch",
+          "index": 1,
+          "epoch": 0,
+          "input": 1
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@1@0",
+          "output": 10,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "dispatch",
+          "index": 2,
+          "epoch": 0,
+          "input": 4
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@2@0",
+          "output": 20,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "dispatch",
+          "index": 3,
+          "epoch": 0,
+          "input": 1
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@3@0",
+          "output": 30,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "dispatch",
+          "index": 4,
+          "epoch": 0,
+          "input": 5
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@4@0",
+          "output": 40,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "reduce",
+          "input": [
+            0,
+            10,
+            20,
+            30,
+            40
+          ]
+        }
+      ],
+      "result": {
+        "ok": true,
+        "value": [
+          0,
+          10,
+          20,
+          30,
+          40
+        ]
+      }
+    },
+    "fresh: a single-item fan": {
+      "trace": [
+        {
+          "op": "load"
+        },
+        {
+          "op": "setMeta",
+          "dagId": "outer",
+          "startedAt": "2026-01-01T00:00:00.000Z",
+          "nodeCount": 1
+        },
+        {
+          "op": "dispatch",
+          "index": 0,
+          "epoch": 0,
+          "input": 7
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@0@0",
+          "output": 0,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "reduce",
+          "input": [
+            0
+          ]
+        }
+      ],
+      "result": {
+        "ok": true,
+        "value": [
+          0
+        ]
+      }
+    },
+    "fresh: an empty fan seeds metadata and reduces nothing": {
+      "trace": [
+        {
+          "op": "load"
+        },
+        {
+          "op": "setMeta",
+          "dagId": "outer",
+          "startedAt": "2026-01-01T00:00:00.000Z",
+          "nodeCount": 0
+        },
+        {
+          "op": "reduce",
+          "input": []
+        }
+      ],
+      "result": {
+        "ok": true,
+        "value": []
+      }
+    },
+    "fresh: execution epoch 2 addresses every read and write": {
+      "trace": [
+        {
+          "op": "load"
+        },
+        {
+          "op": "setMeta",
+          "dagId": "outer",
+          "startedAt": "2026-01-01T00:00:00.000Z",
+          "nodeCount": 5
+        },
+        {
+          "op": "dispatch",
+          "index": 0,
+          "epoch": 2,
+          "input": 3
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@0@2",
+          "output": 0,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "dispatch",
+          "index": 1,
+          "epoch": 2,
+          "input": 1
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@1@2",
+          "output": 10,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "dispatch",
+          "index": 2,
+          "epoch": 2,
+          "input": 4
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@2@2",
+          "output": 20,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "dispatch",
+          "index": 3,
+          "epoch": 2,
+          "input": 1
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@3@2",
+          "output": 30,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "dispatch",
+          "index": 4,
+          "epoch": 2,
+          "input": 5
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@4@2",
+          "output": 40,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "reduce",
+          "input": [
+            0,
+            10,
+            20,
+            30,
+            40
+          ]
+        }
+      ],
+      "result": {
+        "ok": true,
+        "value": [
+          0,
+          10,
+          20,
+          30,
+          40
+        ]
+      }
+    },
+    "resume: this epoch's saved indices replay; another epoch's are ignored": {
+      "trace": [
+        {
+          "op": "load"
+        },
+        {
+          "op": "dispatch",
+          "index": 0,
+          "epoch": 0,
+          "input": 3
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@0@0",
+          "output": 0,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "dispatch",
+          "index": 2,
+          "epoch": 0,
+          "input": 4
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@2@0",
+          "output": 20,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "dispatch",
+          "index": 4,
+          "epoch": 0,
+          "input": 5
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@4@0",
+          "output": 40,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "reduce",
+          "input": [
+            0,
+            10,
+            20,
+            30,
+            40
+          ]
+        }
+      ],
+      "result": {
+        "ok": true,
+        "value": [
+          0,
+          10,
+          20,
+          30,
+          40
+        ]
+      }
+    },
+    "resume: every index saved — nothing dispatches": {
+      "trace": [
+        {
+          "op": "load"
+        },
+        {
+          "op": "reduce",
+          "input": [
+            0,
+            10,
+            20,
+            30,
+            40
+          ]
+        }
+      ],
+      "result": {
+        "ok": true,
+        "value": [
+          0,
+          10,
+          20,
+          30,
+          40
+        ]
+      }
+    },
+    "failure: a terminal child error stops the fan at that index": {
+      "trace": [
+        {
+          "op": "load"
+        },
+        {
+          "op": "setMeta",
+          "dagId": "outer",
+          "startedAt": "2026-01-01T00:00:00.000Z",
+          "nodeCount": 5
+        },
+        {
+          "op": "dispatch",
+          "index": 0,
+          "epoch": 0,
+          "input": 3
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@0@0",
+          "output": 0,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "dispatch",
+          "index": 1,
+          "epoch": 0,
+          "input": 1
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@1@0",
+          "output": 10,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "dispatch",
+          "index": 2,
+          "epoch": 0,
+          "input": 4
+        }
+      ],
+      "result": {
+        "ok": false,
+        "error": {
+          "kind": "rejected",
+          "nodeId": "work",
+          "reason": "child 2 refused its item"
+        }
+      }
+    },
+    "failure: the first child fails": {
+      "trace": [
+        {
+          "op": "load"
+        },
+        {
+          "op": "setMeta",
+          "dagId": "outer",
+          "startedAt": "2026-01-01T00:00:00.000Z",
+          "nodeCount": 5
+        },
+        {
+          "op": "dispatch",
+          "index": 0,
+          "epoch": 0,
+          "input": 3
+        }
+      ],
+      "result": {
+        "ok": false,
+        "error": {
+          "kind": "rejected",
+          "nodeId": "work",
+          "reason": "child 0 refused its item"
+        }
+      }
+    },
+    "failure: a child output the child schema rejects is never saved": {
+      "trace": [
+        {
+          "op": "load"
+        },
+        {
+          "op": "setMeta",
+          "dagId": "outer",
+          "startedAt": "2026-01-01T00:00:00.000Z",
+          "nodeCount": 5
+        },
+        {
+          "op": "dispatch",
+          "index": 0,
+          "epoch": 0,
+          "input": 3
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@0@0",
+          "output": 0,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "dispatch",
+          "index": 1,
+          "epoch": 0,
+          "input": 1
+        }
+      ],
+      "result": {
+        "ok": false,
+        "error": {
+          "kind": "validation",
+          "nodeId": "fan",
+          "message": "fan index 1 produced an output the child schema rejects: [\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected number, received string\"\n  }\n]"
+        }
+      }
+    },
+    "failure: a saved entry the child schema rejects stops the replay": {
+      "trace": [
+        {
+          "op": "load"
+        },
+        {
+          "op": "dispatch",
+          "index": 0,
+          "epoch": 0,
+          "input": 3
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@0@0",
+          "output": 0,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        }
+      ],
+      "result": {
+        "ok": false,
+        "error": {
+          "kind": "validation",
+          "nodeId": "fan",
+          "message": "checkpoint replay rejected for fan index 1: [\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected number, received string\"\n  }\n]"
+        }
+      }
+    },
+    "failure: a failed completion save stops the fan": {
+      "trace": [
+        {
+          "op": "load"
+        },
+        {
+          "op": "setMeta",
+          "dagId": "outer",
+          "startedAt": "2026-01-01T00:00:00.000Z",
+          "nodeCount": 5
+        },
+        {
+          "op": "dispatch",
+          "index": 0,
+          "epoch": 0,
+          "input": 3
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@0@0",
+          "output": 0,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "dispatch",
+          "index": 1,
+          "epoch": 0,
+          "input": 1
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@1@0",
+          "output": 10,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        }
+      ],
+      "result": {
+        "ok": false,
+        "error": {
+          "kind": "checkpoint-write-failed",
+          "runId": "fan-harness",
+          "nodeId": "fan",
+          "message": "completion store full"
+        }
+      }
+    },
+    "failure: a failed load dispatches nothing": {
+      "trace": [
+        {
+          "op": "load"
+        }
+      ],
+      "result": {
+        "ok": false,
+        "error": {
+          "kind": "cache-error",
+          "operation": "load",
+          "message": "checkpoint store unreachable"
+        }
+      }
+    },
+    "failure: a failed metadata seed dispatches nothing": {
+      "trace": [
+        {
+          "op": "load"
+        },
+        {
+          "op": "setMeta",
+          "dagId": "outer",
+          "startedAt": "2026-01-01T00:00:00.000Z",
+          "nodeCount": 5
+        }
+      ],
+      "result": {
+        "ok": false,
+        "error": {
+          "kind": "cache-error",
+          "operation": "setMeta",
+          "message": "metadata write refused"
+        }
+      }
+    },
+    "failure: any corrupt entry refuses the whole fan": {
+      "trace": [
+        {
+          "op": "load"
+        }
+      ],
+      "result": {
+        "ok": false,
+        "error": {
+          "kind": "checkpoint-corrupt",
+          "runId": "fan-harness",
+          "message": "mapped fan cannot safely replay a checkpoint with corrupt entries: [{\"kind\":\"node-key\",\"nodeKey\":\"dag@fan@3@0\"}]",
+          "nodeId": "fan"
+        }
+      }
+    },
+    "failure: the width exceeds maxWidth": {
+      "trace": [],
+      "result": {
+        "ok": false,
+        "error": {
+          "kind": "map-width-exceeded",
+          "nodeId": "fan",
+          "resolvedWidth": 9,
+          "maxWidth": 8
+        }
+      }
+    },
+    "failure: the input carries no width field": {
+      "trace": [],
+      "result": {
+        "ok": false,
+        "error": {
+          "kind": "map-width-invalid",
+          "nodeId": "fan",
+          "widthFrom": "items",
+          "found": "undefined"
+        }
+      }
+    },
+    "abort: before the fan starts, nothing loads": {
+      "trace": [],
+      "result": {
+        "ok": false,
+        "error": {
+          "kind": "aborted",
+          "reason": "signal"
+        }
+      }
+    },
+    "abort: during child 1 — its save lands, nothing more starts": {
+      "trace": [
+        {
+          "op": "load"
+        },
+        {
+          "op": "setMeta",
+          "dagId": "outer",
+          "startedAt": "2026-01-01T00:00:00.000Z",
+          "nodeCount": 5
+        },
+        {
+          "op": "dispatch",
+          "index": 0,
+          "epoch": 0,
+          "input": 3
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@0@0",
+          "output": 0,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "dispatch",
+          "index": 1,
+          "epoch": 0,
+          "input": 1
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@1@0",
+          "output": 10,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        }
+      ],
+      "result": {
+        "ok": false,
+        "error": {
+          "kind": "aborted",
+          "reason": "signal"
+        }
+      }
+    },
+    "abort: during the final child — the reducer never runs": {
+      "trace": [
+        {
+          "op": "load"
+        },
+        {
+          "op": "setMeta",
+          "dagId": "outer",
+          "startedAt": "2026-01-01T00:00:00.000Z",
+          "nodeCount": 5
+        },
+        {
+          "op": "dispatch",
+          "index": 0,
+          "epoch": 0,
+          "input": 3
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@0@0",
+          "output": 0,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "dispatch",
+          "index": 1,
+          "epoch": 0,
+          "input": 1
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@1@0",
+          "output": 10,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "dispatch",
+          "index": 2,
+          "epoch": 0,
+          "input": 4
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@2@0",
+          "output": 20,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "dispatch",
+          "index": 3,
+          "epoch": 0,
+          "input": 1
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@3@0",
+          "output": 30,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "dispatch",
+          "index": 4,
+          "epoch": 0,
+          "input": 5
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@4@0",
+          "output": 40,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        }
+      ],
+      "result": {
+        "ok": false,
+        "error": {
+          "kind": "aborted",
+          "reason": "signal"
+        }
+      }
+    },
+    "reducer: returns its own error": {
+      "trace": [
+        {
+          "op": "load"
+        },
+        {
+          "op": "setMeta",
+          "dagId": "outer",
+          "startedAt": "2026-01-01T00:00:00.000Z",
+          "nodeCount": 5
+        },
+        {
+          "op": "dispatch",
+          "index": 0,
+          "epoch": 0,
+          "input": 3
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@0@0",
+          "output": 0,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "dispatch",
+          "index": 1,
+          "epoch": 0,
+          "input": 1
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@1@0",
+          "output": 10,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "dispatch",
+          "index": 2,
+          "epoch": 0,
+          "input": 4
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@2@0",
+          "output": 20,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "dispatch",
+          "index": 3,
+          "epoch": 0,
+          "input": 1
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@3@0",
+          "output": 30,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "dispatch",
+          "index": 4,
+          "epoch": 0,
+          "input": 5
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@4@0",
+          "output": 40,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "reduce",
+          "input": [
+            0,
+            10,
+            20,
+            30,
+            40
+          ]
+        }
+      ],
+      "result": {
+        "ok": false,
+        "error": {
+          "kind": "rejected",
+          "nodeId": "fan",
+          "reason": "reducer refused the gather"
+        }
+      }
+    },
+    "reducer: throws": {
+      "trace": [
+        {
+          "op": "load"
+        },
+        {
+          "op": "setMeta",
+          "dagId": "outer",
+          "startedAt": "2026-01-01T00:00:00.000Z",
+          "nodeCount": 5
+        },
+        {
+          "op": "dispatch",
+          "index": 0,
+          "epoch": 0,
+          "input": 3
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@0@0",
+          "output": 0,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "dispatch",
+          "index": 1,
+          "epoch": 0,
+          "input": 1
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@1@0",
+          "output": 10,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "dispatch",
+          "index": 2,
+          "epoch": 0,
+          "input": 4
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@2@0",
+          "output": 20,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "dispatch",
+          "index": 3,
+          "epoch": 0,
+          "input": 1
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@3@0",
+          "output": 30,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "dispatch",
+          "index": 4,
+          "epoch": 0,
+          "input": 5
+        },
+        {
+          "op": "saveNode",
+          "key": "dag@fan@4@0",
+          "output": 40,
+          "completedAt": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "op": "reduce",
+          "input": [
+            0,
+            10,
+            20,
+            30,
+            40
+          ]
+        }
+      ],
+      "result": {
+        "ok": false,
+        "error": {
+          "kind": "node-crash",
+          "nodeId": "fan",
+          "message": "map reducer threw: reducer exploded",
+          "retriability": "non-retriable"
+        }
+      }
+    }
+  }
+}

@@ -28,7 +28,7 @@
 //               source ids; assemble consumes { join, $input }
 
 import { createHash } from "node:crypto";
-import { match } from "ts-pattern";
+import { match, P } from "ts-pattern";
 import { mapItemSpec, mapOutputSpec, structureRefs, terminalRefs } from "./authored.js";
 import type {
   AuthoredChildDag,
@@ -70,7 +70,6 @@ import {
   type KebabIdent,
 } from "./identifiers.js";
 import { CONFIDENCE_FIELD } from "./vocabulary.js";
-import { assertNever } from "./types.js";
 
 /** The llm node variant — the only kind that owns a prompt. */
 type LlmNode = Extract<AuthoredNode, { kind: "llm" }>;
@@ -618,10 +617,14 @@ const emitStructureWiring = (
     .exhaustive();
 };
 
-interface ChildEmission {
-  readonly declaration: string;
-  readonly prompts: readonly PromptFile[];
-}
+/** One node's emitted declaration plus the prompt files it owns (LLM nodes, maps). */
+type NodeEmission = Readonly<{
+  declaration: string;
+  prompts: readonly PromptFile[];
+}>;
+
+/** A node kind that owns no prompt. */
+const promptless = (declaration: string): NodeEmission => ({ declaration, prompts: [] });
 
 const indent = (value: string, spaces: number): string => {
   const prefix = " ".repeat(spaces);
@@ -665,51 +668,61 @@ const emitChildStructure = (
   return { expression, extras };
 };
 
+/** One mapped child node's declaration, and its prompt when it is an LLM child. */
+const emitChildNode = (
+  dag: AuthoredDag,
+  map: AuthoredMapNode,
+  itemSpec: SchemaSpec,
+  childPlan: ChildNodePlan,
+): NodeEmission =>
+  match(childPlan.node)
+    .returnType<NodeEmission>()
+    .with({ kind: "fetch" }, () => promptless(fetchNode(childPlan)))
+    .with({ kind: "source" }, () => promptless(sourceNode(childPlan)))
+    .with({ kind: "transform" }, () => promptless(transformNode(childPlan)))
+    .with({ kind: "llm" }, (llm) => {
+      const promptName = childPromptNameFor(dag, map, llm.id);
+      const inputs = llmPromptInputs(
+        { input: itemSpec, nodes: map.child.nodes, structure: map.child.structure },
+        childPlan,
+      );
+      return {
+        declaration: llmNode(childPlan, promptName, inputs, { explicitReturnType: false }),
+        prompts: [llmPrompt(dag, llm, promptName, inputs)],
+      };
+    })
+    .exhaustive();
+
+/**
+ * Authored fan scheduling (F1 PR-D, AD-8): emitted only when present, so
+ * authors who declare nothing get a byte-identical generated module and the
+ * definition-time defaults apply (FR-001, FR-046). The estimator is a
+ * closed-union literal; JSON.stringify pins it as a string literal.
+ */
+const schedulingConfigLines = (node: AuthoredMapNode): readonly string[] => [
+  ...(node.childConcurrency !== undefined ? [`    childConcurrency: ${node.childConcurrency},`] : []),
+  ...(node.estimator !== undefined ? [`    estimator: ${JSON.stringify(node.estimator)},`] : []),
+];
+
 const emitMapNode = (
   dag: AuthoredDag,
   plan: NodePlan,
   node: AuthoredMapNode,
-): ChildEmission => {
+): NodeEmission => {
   if (plan.inExpr === null) {
     throw new Error(`authored map invariant: map node '${node.id}' reached codegen before input wiring`);
   }
   const itemSpec = mapItemSpec(dag, node);
-  const childIds = structureRefs(node.child.structure).map(([childId]) => childId);
   const plans = planChildNodes(node.child.nodes);
+  // Child wiring resolves each plan's input first; the plans are read after it.
   const child = emitChildStructure(node.child, plans, itemSpec);
-  const declarations: string[] = [];
-  for (const id of childIds) {
-    declarations.push(schemaConst(childPlanOf(plans, id).outName, childPlanOf(plans, id).outSpec));
-  }
-  declarations.push(...child.extras);
-
-  const prompts: PromptFile[] = [];
-  for (const id of childIds) {
-    const childPlan = childPlanOf(plans, id);
-    switch (childPlan.node.kind) {
-      case "fetch":
-        declarations.push(fetchNode(childPlan));
-        break;
-      case "source":
-        declarations.push(sourceNode(childPlan));
-        break;
-      case "transform":
-        declarations.push(transformNode(childPlan));
-        break;
-      case "llm": {
-        const promptName = childPromptNameFor(dag, node, childPlan.node.id);
-        const inputs = llmPromptInputs(
-          { input: itemSpec, nodes: node.child.nodes, structure: node.child.structure },
-          childPlan,
-        );
-        declarations.push(llmNode(childPlan, promptName, inputs, { explicitReturnType: false }));
-        prompts.push(llmPrompt(dag, childPlan.node, promptName, inputs));
-        break;
-      }
-      default:
-        assertNever(childPlan.node);
-    }
-  }
+  const childPlans = structureRefs(node.child.structure).map(([childId]) => childPlanOf(plans, childId));
+  const childNodes = childPlans.map((childPlan) => emitChildNode(dag, node, itemSpec, childPlan));
+  const declarations = [
+    ...childPlans.map((childPlan) => schemaConst(childPlan.outName, childPlan.outSpec)),
+    ...child.extras,
+    ...childNodes.map((emitted) => emitted.declaration),
+  ];
 
   const parameter = plan.needsModel ? `${CHILD_MODEL_NAME}: string` : "";
   const body = declarations.length === 0 ? "" : `${indent(declarations.join("\n\n"), 2)}\n\n`;
@@ -725,20 +738,9 @@ const emitMapNode = (
     throw new Error(`authored map invariant: child '${node.child.id}' has no terminal output`);
   }
   const terminalPlan = childPlanOf(plans, terminalId);
-  // Authored fan scheduling (F1 PR-D, AD-8): emitted only when present, so
-  // authors who declare nothing get a byte-identical generated module and the
-  // definition-time defaults apply (FR-001, FR-046). The estimator is a
-  // closed-union literal; JSON.stringify pins it as a string literal.
-  const schedulingLines = [
-    ...(node.childConcurrency !== undefined
-      ? [`    childConcurrency: ${node.childConcurrency},`]
-      : []),
-    ...(node.estimator !== undefined
-      ? [`    estimator: ${JSON.stringify(node.estimator)},`]
-      : []),
-  ].join("\n");
-  const declaration = `${purposeComment(node)}\nconst ${plan.ref} = (${parameter}) => {\n${body}  return ${nodeFactory("map")}({\n    id: ${JSON.stringify(node.id)},\n    inputSchema: ${plan.inExpr},\n    widthFrom: ${JSON.stringify(node.widthFrom)},\n    maxWidth: ${node.maxWidth},\n${schedulingLines.length > 0 ? `${schedulingLines}\n` : ""}    child: ${child.expression.replace(/\n/g, "\n    ")},\n    childOutputSchema: ${terminalPlan.outName},\n    collectedItemSchema: ${terminalPlan.outName},\n    gather: { kind: "collect", field: ${JSON.stringify(node.gather.field)} },\n  });\n};`;
-  return { declaration, prompts };
+  const scheduling = schedulingConfigLines(node).map((line) => `${line}\n`).join("");
+  const declaration = `${purposeComment(node)}\nconst ${plan.ref} = (${parameter}) => {\n${body}  return ${nodeFactory("map")}({\n    id: ${JSON.stringify(node.id)},\n    inputSchema: ${plan.inExpr},\n    widthFrom: ${JSON.stringify(node.widthFrom)},\n    maxWidth: ${node.maxWidth},\n${scheduling}    child: ${child.expression.replace(/\n/g, "\n    ")},\n    childOutputSchema: ${terminalPlan.outName},\n    collectedItemSchema: ${terminalPlan.outName},\n    gather: { kind: "collect", field: ${JSON.stringify(node.gather.field)} },\n  });\n};`;
+  return { declaration, prompts: childNodes.flatMap((emitted) => emitted.prompts) };
 };
 
 /**
@@ -747,7 +749,6 @@ const emitMapNode = (
  */
 export const buildAuthoredScaffold = (dag: AuthoredDag): AuthoredScaffold => {
   const { byId, llmCount } = planNodes(dag);
-  const hasLlm = llmCount > 0;
   const plan = (id: string): NodePlan => {
     const p = byId.get(id);
     if (!p) throw new Error(`authored-codegen invariant: unknown node '${id}' (schema validation should have rejected this)`);
@@ -757,27 +758,47 @@ export const buildAuthoredScaffold = (dag: AuthoredDag): AuthoredScaffold => {
     byId.set(id, { ...plan(id), inExpr: expr });
   };
 
-  const s = dag.structure;
   // One canonical iteration order for EVERY emitted section — parse already
   // canonicalizes `dag.nodes` to this order, but deriving it here keeps the
   // emitted bytes independent of the nodes array even for a value that
   // bypassed the brand (tests) — schema consts, node decls, and prompts can
   // never disagree.
   const orderedIds = structureOrder(dag);
-  const schemaDecls: string[] = [schemaConst(INPUT_SCHEMA_NAME, dag.input)];
-  const extraDecls: string[] = [];
-
   // Output schema consts (skip human-review — passthrough)
-  for (const id of orderedIds) {
-    const p = plan(id);
-    if (p.outSpec) schemaDecls.push(schemaConst(p.outName, p.outSpec));
-  }
+  const schemaDecls = [
+    schemaConst(INPUT_SCHEMA_NAME, dag.input),
+    ...orderedIds.flatMap((id) => {
+      const p = plan(id);
+      return p.outSpec ? [schemaConst(p.outName, p.outSpec)] : [];
+    }),
+  ];
+  // Wiring resolves every node's input before any node is declared.
+  const wired = wireRootStructure(dag, plan, setInput);
+  // Node declarations (structure order = declaration order)
+  const nodes = orderedIds.map((id) => emitRootNode(dag, llmCount, plan(id)));
 
-  // Wire inputs per shape + build the structure expression. One parameterized
-  // emitter for both scopes (root and mapped child) — the per-shape wiring
-  // contract exists once; this adapter differs only in naming, the root-input
-  // expression, optional join, and the pedagogical comments.
-  const structureExpr: string = emitStructureWiring(s, {
+  const dagTs = assembleDagModule(dag, llmCount > 0, {
+    schemaDecls,
+    extraDecls: wired.extraDecls,
+    nodeDecls: nodes.map((emitted) => emitted.declaration),
+    structureExpr: wired.structureExpr,
+  });
+  return { dagTs, prompts: nodes.flatMap((emitted) => emitted.prompts) };
+};
+
+/**
+ * Wire inputs per shape + build the root structure expression. One
+ * parameterized emitter for both scopes (root and mapped child) — the
+ * per-shape wiring contract exists once; this adapter differs only in naming,
+ * the root-input expression, optional join, and the pedagogical comments.
+ */
+const wireRootStructure = (
+  dag: AuthoredDag,
+  plan: (id: string) => NodePlan,
+  setInput: (id: string, expr: string) => void,
+): Readonly<{ structureExpr: string; extraDecls: readonly string[] }> => {
+  const extraDecls: string[] = [];
+  const structureExpr = emitStructureWiring(dag.structure, {
     scopeId: dag.name,
     plan,
     setInput,
@@ -791,51 +812,26 @@ export const buildAuthoredScaffold = (dag: AuthoredDag): AuthoredScaffold => {
     fanInComments: (context) => FAN_IN_COMMENTS[context],
     routerDefaultSuffix: " // REQUIRED",
   });
+  return { structureExpr, extraDecls };
+};
 
-  // Node declarations (structure order = declaration order)
-  const nodeDecls: string[] = [];
-  const prompts: PromptFile[] = [];
-  for (const id of orderedIds) {
-    const p = plan(id);
-    switch (p.node.kind) {
-      case "fetch":
-        nodeDecls.push(fetchNode(p));
-        break;
-      case "source":
-        nodeDecls.push(sourceNode(p));
-        break;
-      case "transform":
-        nodeDecls.push(transformNode(p));
-        break;
-      case "human-review":
-        nodeDecls.push(humanReviewNode(p));
-        break;
-      case "llm": {
-        const promptName = promptNameFor(dag, p.node.id, llmCount);
-        const inputs = llmPromptInputs(dag, p);
-        nodeDecls.push(llmNode(p, promptName, inputs));
-        prompts.push(llmPrompt(dag, p.node, promptName, inputs));
-        break;
-      }
-      case "map": {
-        const emitted = emitMapNode(dag, p, p.node);
-        nodeDecls.push(emitted.declaration);
-        prompts.push(...emitted.prompts);
-        break;
-      }
-      default:
-        assertNever(p.node);
-    }
-  }
+/** One root node's declaration, and the prompts it owns (an LLM node, or a map's LLM children). */
+const emitRootNode = (dag: AuthoredDag, llmCount: number, p: NodePlan): NodeEmission =>
+  match(p.node)
+    .returnType<NodeEmission>()
+    .with({ kind: "fetch" }, () => promptless(fetchNode(p)))
+    .with({ kind: "source" }, () => promptless(sourceNode(p)))
+    .with({ kind: "transform" }, () => promptless(transformNode(p)))
+    .with({ kind: "human-review" }, () => promptless(humanReviewNode(p)))
+    .with({ kind: "llm" }, (llm) => {
+      const promptName = promptNameFor(dag, llm.id, llmCount);
+      const inputs = llmPromptInputs(dag, p);
+      return { declaration: llmNode(p, promptName, inputs), prompts: [llmPrompt(dag, llm, promptName, inputs)] };
+    })
+    .with({ kind: "map" }, (map) => emitMapNode(dag, p, map))
+    .exhaustive();
 
-  const ctx: TemplateCtx = {
-    name: dag.name,
-    team: dag.team,
-    llm: hasLlm,
-  };
-
-  const imports = buildImports(dag, hasLlm);
-  const header = `// ${dag.name} — ${comment(dag.description)}
+const scaffoldHeader = (dag: AuthoredDag): string => `// ${dag.name} — ${comment(dag.description)}
 //
 // Generated deterministically from dag.authored.json (via \`fugue new --from\`
 // or \`fugue compose\`). The STRUCTURE is authoritative and integrity-hashed —
@@ -844,29 +840,43 @@ export const buildAuthoredScaffold = (dag: AuthoredDag): AuthoredScaffold => {
 // bodies fail closed, and the regions are EXCLUDED from the integrity hash, so
 // filling them in is expected and safe.`;
 
-  const dagBinding = hasLlm
+/** The DAG binding: a model-parameterized factory when any node needs a model, else a plain const. */
+const dagBinding = (dag: AuthoredDag, hasLlm: boolean, structureExpr: string): string =>
+  hasLlm
     ? `${llmFactoryPreamble(dag.name)}
 
 ${llmDagFactoryOpen(dag.name)}
   ${structureExpr.replace(/\n/g, "\n  ")};`
     : `const ${DAG_CONST_NAME} = ${structureExpr};`;
 
-  const dagTs = [
-    header,
+/** The emitted sections of a generated `dag.ts`, each already in declaration order. */
+type ScaffoldSections = Readonly<{
+  schemaDecls: readonly string[];
+  extraDecls: readonly string[];
+  nodeDecls: readonly string[];
+  structureExpr: string;
+}>;
+
+const assembleDagModule = (dag: AuthoredDag, hasLlm: boolean, sections: ScaffoldSections): string => {
+  const ctx: TemplateCtx = {
+    name: dag.name,
+    team: dag.team,
+    llm: hasLlm,
+  };
+  return [
+    scaffoldHeader(dag),
     "",
-    imports,
+    buildImports(dag, hasLlm),
     "",
-    schemaDecls.join("\n\n"),
-    ...(extraDecls.length > 0 ? ["", extraDecls.join("\n")] : []),
+    sections.schemaDecls.join("\n\n"),
+    ...(sections.extraDecls.length > 0 ? ["", sections.extraDecls.join("\n")] : []),
     "",
-    nodeDecls.join("\n\n"),
+    sections.nodeDecls.join("\n\n"),
     "",
-    dagBinding,
+    dagBinding(dag, hasLlm, sections.structureExpr),
     "",
     registration(ctx, hasLlm ? `${dagFactoryName(dag.name)}()` : DAG_CONST_NAME, dag.description),
   ].join("\n");
-
-  return { dagTs, prompts };
 };
 
 // ---------------------------------------------------------------------------
@@ -912,7 +922,6 @@ const llmPromptInputs = (
   },
   p: NodePlan,
 ): readonly LlmPromptInput[] => {
-  const s = graph.structure;
   const byId = new Map(graph.nodes.map((node) => [node.id, node] as const));
   const direct = (spec: SchemaSpec): readonly LlmPromptInput[] =>
     spec.fields.map((field) => ({
@@ -927,31 +936,31 @@ const llmPromptInputs = (
     return direct(node.kind === "map" ? mapOutputSpec(node) : node.output);
   };
 
-  switch (s.shape) {
-    case "linear": {
-      const i = s.order.indexOf(p.node.id);
+  // Exhaustive: a newly-added Shape must fail compilation here until its
+  // input-field semantics are explicitly implemented.
+  return match(graph.structure)
+    .returnType<readonly LlmPromptInput[]>()
+    .with({ shape: "linear" }, ({ order }) => {
       // Human-review gates are typed passthroughs — walk back to the nearest
       // predecessor that actually produces fields (mirrors effectiveOutName).
-      let j = i - 1;
-      while (j >= 0 && byId.get(s.order[j]!)?.kind === "human-review") j--;
-      return j < 0 ? direct(graph.input) : fieldsOf(s.order[j]!);
-    }
-    case "fan-out":
-    case "diamond":
-      if (p.node.id === s.source) return direct(graph.input);
-      if (p.node.id === s.join) return fanIn(s.branches);
-      return fieldsOf(s.source);
-    case "router":
-      return p.node.id === s.classifier ? direct(graph.input) : fieldsOf(s.classifier);
-    case "sources":
-      if (p.node.id === s.join) return fanIn(s.sources);
-      if (p.node.id === s.assemble) return fanIn([s.join, "$input"]);
+      const producer = order
+        .slice(0, Math.max(order.indexOf(p.node.id), 0))
+        .findLast((id) => byId.get(id)?.kind !== "human-review");
+      return producer === undefined ? direct(graph.input) : fieldsOf(producer);
+    })
+    .with({ shape: P.union("fan-out", "diamond") }, (fan) => {
+      if (p.node.id === fan.source) return direct(graph.input);
+      if (p.node.id === fan.join) return fanIn(fan.branches);
+      return fieldsOf(fan.source);
+    })
+    .with({ shape: "router" }, (router) =>
+      p.node.id === router.classifier ? direct(graph.input) : fieldsOf(router.classifier))
+    .with({ shape: "sources" }, (sources) => {
+      if (p.node.id === sources.join) return fanIn(sources.sources);
+      if (p.node.id === sources.assemble) return fanIn([sources.join, "$input"]);
       return []; // a source node consumes nothing
-    default:
-      // Keep this switch exhaustive: a newly-added Shape must fail compilation
-      // here until its input-field semantics are explicitly implemented.
-      return assertNever(s);
-  }
+    })
+    .exhaustive();
 };
 
 // Every import name comes from the `identifiers.ts` catalogue

@@ -2040,6 +2040,38 @@ describe("authored map fan scheduling (F1 PR-D)", () => {
     expect(plain).not.toContain("estimator:");
   });
 
+  it("emits each scheduling field independently, in place between maxWidth and child", () => {
+    const concurrencyOnly = draft();
+    mapOf(concurrencyOnly).childConcurrency = 6;
+    const concurrencyTs = buildAuthoredScaffold(mustParse(concurrencyOnly)).dagTs;
+    expect(concurrencyTs).toContain("    maxWidth: 25,\n    childConcurrency: 6,\n    child: ");
+    expect(concurrencyTs).not.toContain("estimator:");
+
+    const estimatorOnly = draft();
+    mapOf(estimatorOnly).estimator = "p50";
+    const estimatorTs = buildAuthoredScaffold(mustParse(estimatorOnly)).dagTs;
+    expect(estimatorTs).toContain('    maxWidth: 25,\n    estimator: "p50",\n    child: ');
+    expect(estimatorTs).not.toContain("childConcurrency:");
+
+    // Both fields: concurrency first, then the estimator, in one contiguous block.
+    expect(buildAuthoredScaffold(mustParse(withScheduling())).dagTs)
+      .toContain('    maxWidth: 25,\n    childConcurrency: 4,\n    estimator: "p90",\n    child: ');
+    // Absent scheduling leaves the map config exactly as before the feature.
+    expect(buildAuthoredScaffold(mustParse(MAP_FIXTURE)).dagTs).toContain("    maxWidth: 25,\n    child: ");
+  });
+
+  it("defaults the undeclared field when only one scheduling field is authored (round-trip)", async () => {
+    const estimatorOnly = draft();
+    mapOf(estimatorOnly).estimator = "p95";
+    const generated = await importGeneratedDag(mustParse(estimatorOnly), "scheduling-roundtrip-partial");
+    const map = generated.nodes.find((node) => node.kind === "map");
+    if (map?.kind !== "map") throw new Error("missing generated map");
+    expect(map.mapping.scheduling).toEqual({ childConcurrency: childConcurrency(1), estimator: "p95" });
+    expect(await describedMapOf(generated, "scheduling-roundtrip-partial")).toMatchObject({
+      scheduling: { childConcurrency: 1, estimator: "p95" },
+    });
+  });
+
   it("round-trips authored scheduling through codegen, definition, and the validated mapping", async () => {
     const generated = await importGeneratedDag(mustParse(withScheduling()), "scheduling-roundtrip");
     const map = generated.nodes.find((node) => node.kind === "map");

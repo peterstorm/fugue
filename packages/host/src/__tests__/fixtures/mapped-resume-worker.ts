@@ -1,7 +1,7 @@
 /** Real host executor + Redis run store. Queue acquisition is test-owned, not BullMQ. */
 import Redis from "ioredis";
 import { z } from "zod";
-import { DAG_INPUT, createFetchNode, createMapNode, createTransformNode, defineDag, nodeId, ok, runId, withHumanReview } from "@fuguejs/framework";
+import { DAG_INPUT, DEFAULT_FAN_CONCURRENCY_CAP, createFetchNode, createMapNode, createTransformNode, defineDag, nodeId, ok, runId, withHumanReview } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import { createRedisConnectivity, requireHitlRedisPort } from "../../adapters/redis-connectivity.js";
 import { tenantId } from "../../domain/tenant.js";
@@ -75,7 +75,7 @@ const authority = createRunLeaseAuthority();
 const store = createRedisRunStore(requireHitlRedisPort(connected.redis), tenant, { ttlSec: RUN_RETENTION_SEC }, authority.verifier);
 const executor = createRunExecutor({
   sharedInfra: mappedHostInfra(connected.redis), getRegisteredDag: (requested) => requested === dag.id ? registered : undefined,
-  tenant, runRetentionTtlSec: RUN_RETENTION_SEC,
+  tenant, runRetentionTtlSec: RUN_RETENTION_SEC, fanChildConcurrencyMax: DEFAULT_FAN_CONCURRENCY_CAP,
 });
 try {
   let record = unwrap(await store.get(id));

@@ -4,9 +4,12 @@
 **Status:** **PR-A shipped in PR #45 on 2026-09-06** (ADR-0085). **PR-B and its
 correctness closure shipped in PR #46 on 2026-09-08** (ADR-0086). PR #47 then made
 the repository's canonical verification gate cover the complete CI/release surface.
-PR-C's authored-map and plate-rendering candidate is on `feat/f1-authored-map`; PR-D
-whole-fan budget projection remains separate. The supported runtime contract is §13
-and [ADR-0086](../adr/0086-root-owned-mapped-child-execution.md). §§1–11 preserve the
+PR-C's authored-map and plate-rendering candidate is on `feat/f1-authored-map`. **PR-D1
+(bounded-concurrency fan scheduling with whole-fan budget projection) is on
+`feat/f1-pr-d-fan-scheduling`** ([ADR-0090](../adr/0090-concurrent-fan-scheduling-and-whole-fan-projection.md)). Nested fans (D2) and adaptive concurrency
+with static-sibling limits (D3) are deferred. The supported runtime contract is §13
+and [ADR-0086](../adr/0086-root-owned-mapped-child-execution.md), as amended by
+ADR-0090. §§1–11 preserve the
 original problem/design record; supersession notes distinguish proposals from current
 behavior. §12 records the initial PR-B decisions and explicitly marks those replaced by
 closure.
@@ -204,6 +207,16 @@ the original host meter and minting authority, including broker-delivered LLM al
 half-executed fan that has spent money and produced nothing usable. Whether projection is in F1 or
 deferred is a scoping decision (see §9); the metering itself is already correct either way.
 
+> **Decided in PR-D1** ([ADR-0090](../adr/0090-concurrent-fan-scheduling-and-whole-fan-projection.md)).
+> Projection does not use `width × estimate` up front, because there is no estimate
+> before any child has run. Instead:
+>
+> - The first `min(C, unreplayed)` children form an unprojected probe batch.
+> - Every later dispatch projects `settled + remainingChildren × perChildEstimate`
+>   against each budgeted axis.
+>
+> See §13 for the contract and the overshoot bounds.
+
 ### D5 — Render a plate, not N boxes
 
 `describedToMermaid` (`cli/visualize.ts`) is shared by `fugue visualize` and compose previews, so
@@ -389,8 +402,10 @@ requirements work below are historical proposals, not outstanding PR46 instructi
 ## 12. What PR-B decided that this plan did not specify
 
 Initial PR-B implementation record (2026-09-07), retained for provenance. The
-write-only/readable port distinction and sequential fan survive; index-only writer
-addressing and hidden constructor execution were superseded by §13.
+write-only/readable port distinction survives. Index-only writer addressing and
+hidden constructor execution were superseded by §13. The sequential fan was
+superseded by PR-D1 (ADR-0090; see *The fan is sequential — superseded* below and
+§13).
 
 ### The `checkpointer` capability is where per-index state lives
 
@@ -431,7 +446,13 @@ The writer remains write-only; fan resume correctly reads the separate
 `checkpointer` capability, not these output records. No writer read port is required
 or promised for FR-F1-007.
 
-### The fan is sequential
+### The fan is sequential — superseded
+
+> **Superseded by PR-D1**
+> ([ADR-0090](../adr/0090-concurrent-fan-scheduling-and-whole-fan-projection.md)). Fans now run up to
+> `C = min(childConcurrency, FAN_CHILD_CONCURRENCY_MAX)` children at once.
+> `childConcurrency` defaults to 1, so an unconfigured fan is still sequential and
+> byte-identical to the record below. The record is kept for provenance.
 
 Not stated either way in §4. PR-B runs indices one at a time, and two properties
 depend on it: a run that hits its F3 ceiling mid-fan stops at a **known** index
@@ -441,6 +462,23 @@ reducer's input is in index order on a resumed run as well as a fresh one.
 Bounded concurrency is additive later — it changes neither the address space nor
 the reducer's contract — but it is a real gap for a wide fan of slow children
 and should be its own PR with its own budget-interaction tests.
+
+**What PR-D1 did with those two properties:**
+
+- **Index-ordered reducer input** is kept at every C. The machine gathers outputs
+  by index and reduces only when nothing is in flight. A property test pins this
+  over arbitrary completion orders.
+- **"Stops at a known index"** is replaced by something stronger: a typed
+  whole-fan refusal *before* the fan spends past its ceiling.
+  - The refusal reports how many children completed (including those that
+    finished during the drain) and how many remain.
+  - Spend after the refusal decision is bounded by (C−1)×M.
+  - The refusal is persisted as a per-epoch seed, so a resume refuses again
+    deterministically until a redeploy raises a ceiling.
+
+The address space is unchanged, as predicted. Fan completions keep
+`dag@<map>@<index>@<epoch>`. The only addition is the disjoint `fan-seed`
+namespace. See §13.
 
 ### Historical constructor-only child refusal — superseded
 
@@ -517,13 +555,138 @@ records defect groups, acceptance evidence and validation status.
   descriptors/requirement containers and revoked-array width inputs fail typed.
   Cancellation blocks subsequent indices and reduction, including empty/final-index
   success. A concurrently completed child can still be saved; external effects
-  without acknowledged completion may repeat after interruption.
+  without acknowledged completion may repeat after interruption. Under PR-D1,
+  cancellation is one cause of the **drain** described below.
+
+### PR-D1 contract update — concurrent scheduling and whole-fan projection
+
+[ADR-0090](../adr/0090-concurrent-fan-scheduling-and-whole-fan-projection.md)
+amends the closure contract above. Every
+bullet above still holds at every concurrency. In particular, these are unchanged:
+
+- root authority;
+- completion identity;
+- corruption refusal before any dispatch;
+- the bounded refusals.
+
+The points below are added on top of them.
+
+**Concurrency settings**
+
+- **Bounded concurrency.** A map node may author `childConcurrency`, a positive
+  integer that defaults to 1.
+  - The host caps it with `FAN_CHILD_CONCURRENCY_MAX`, a positive integer that
+    defaults to 8. It is host-wide, with no per-tenant or per-run override.
+  - The effective concurrency is `C = min(authored, cap)`.
+  - A clamp produces one warning and one `fan-start{clamped: true}` event.
+  - These are **child-level** settings, distinct from the run-level
+    `MAX_GLOBAL_CONCURRENCY`, `DEFAULT_DAG_CONCURRENCY` and `fugue.yaml`
+    `maxConcurrent`.
+- **Not fingerprinted.** `childConcurrency` and `estimator` are frozen on
+  `mapping.scheduling` and excluded from the fingerprint.
+
+**The scheduler**
+
+- **One pure scheduler.** LC-1 (`fanStep` in `dag-runtime/fan/fan-machine.ts`)
+  decides:
+  - which index starts next;
+  - when projection runs;
+  - when the drain begins;
+  - whether a seed is persisted;
+  - the single outcome.
+- **Slot body unchanged.** Each slot runs the unchanged per-index body
+  (replay-hit parse, or child → `childOutputSchema` → save).
+- **Ordering.** In-flight ≤ C at all times. Reducer input is in index order at
+  every C.
+- **C=1 equivalence.** At C=1 the dispatch order, the checkpoint calls, the
+  reducer input and the errors are byte-identical to the sequential runner,
+  checked against a golden trace.
+
+**Budget admission**
+
+- **Probe, then project.** Without a refusal seed, the first `min(C, unreplayed)`
+  children are an unprojected probe batch. Every later dispatch projects
+  `settled + remainingChildren × perChildEstimate` on each budgeted axis, using
+  the existing read-only headroom ADT:
+  - available axes in their own unit;
+  - unpriced or unknown-usage axes against the known lower bound;
+  - no projection on unbudgeted axes.
+- **Spend sample.** A child's sample is the run-wide spend delta between its
+  dispatch and its settle (the *lifetime window*). M is the largest such sample.
+  The window never under-counts a child's true cost.
+- **Estimator.** `largest-seen` is the default. `p50`, `p90` and `p95` use
+  nearest-rank and fall back to largest-seen below 5 samples. The estimator
+  actually applied is recorded.
+
+**Overshoot (FR-018)**
+
+Under largest-seen:
+
+- (a) Post-refusal spend ≤ (C−1)×M, unconditionally.
+- (b) There is no post-probe overshoot when no child exceeds the estimate in force
+  at its admission. Total post-probe overshoot is therefore ≤ (C−1)×M.
+- (c) The probe batch is ≤ C×M, plus the host per-call meter.
+- (d) A cost spike is bounded only by the host per-call meter.
+
+Under a percentile estimator, (a) still holds and (b) is best effort. The per-call
+meter stays the hard stop for every call.
+
+**Drain and errors**
+
+- **The drain.** A terminal child failure, a refusal or an abort stops
+  dispatch. In-flight children finish, are validated and are saved.
+- **Error precedence** is child failure > refusal > abort:
+  - A single failure returns the bare primary error, as before.
+  - Several failures, or a failure together with a refusal, return
+    `fan-child-failed { primary: lowest index, causes }`. The refusal is attached,
+    never dropped.
+  - A refusal alone returns the non-retriable `fan-budget-refused`. Its refusal
+    record carries:
+    - the axis and ceiling;
+    - the per-child estimate and the estimator applied;
+    - the effective concurrency;
+    - completed (including drain completions) and remaining counts;
+    - the lower-bound flag;
+    - the redeploy hint.
+  - An abort stays `aborted`.
+  - No partial fan is ever reduced after a refusal or an abort.
+
+**Resume after a refusal**
+
+- **The seed.** A refusal persists a version-1 refusal seed at
+  `fan-seed@<mapNodeId>@0@<executionEpoch>`, through the fan's own `checkpointer`.
+  The seed holds the estimator, the samples, the estimate and the ceilings in
+  force.
+- **Sticky refusal.** On a resume in the same epoch, the seed is evaluated before
+  any dispatch. Unless a ceiling has been raised, which needs a DAG redeploy, the
+  fan refuses again with the same kind and **0 dispatches**. This holds whatever
+  the remainder size or the variation in per-child cost.
+- **After a raise.** Projection runs before *every* dispatch, with no probe, and
+  every saved index is reused.
+- **Reroute.** A reroute advances the epoch, so the old seed is ignored.
+- **Saving the seed.** A failed seed save fails closed as
+  `checkpoint-write-failed`.
+
+**Persistence and observability**
+
+- **Purely additive persistence.** There is no `FRAMEWORK_VERSION` bump and no
+  new `NodeState` field. The `fan-seed` namespace uses ADR-0075/0085's unchanged
+  composite grammar.
+- **Events.** `fan-start`, `fan-projection` and `fan-refused` are added. The
+  refusal event is self-contained. The run-status API is unchanged.
 
 **Not part of this guarantee:** recursive child fingerprints, indexed broker audit
 metadata, or root aggregation of child judge/guardrail summaries. These are deferred
 advisories, not silently implemented closure criteria. PR-C authoring/plate rendering is
-implemented on its separate candidate branch; PR-D fan budget projection,
-nested/HITL/indexed freshness semantics and concurrent fan scheduling remain separate work.
+implemented on its separate candidate branch. PR-D1 decides fan budget projection and
+concurrent fan scheduling (ADR-0090).
+
+These remain separate work:
+
+- nested fans (D2), where a nested product bound of Co_eff × Ci_eff peak leaf
+  children awaits D2's addressing decision;
+- adaptive concurrency and static-sibling limits (D3);
+- HITL and indexed freshness semantics inside children.
 
 **Evidence status:** the earlier full workspace baseline passed **7,141 tests,
 3 skipped, 0 failed** before snapshot/codec corrections (**3,721 framework tests**

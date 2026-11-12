@@ -56,6 +56,7 @@ const testConfig = (overrides?: Partial<HostConfig>): HostConfig => ({
   CIRCUIT_BREAKER_WINDOW_MS: 60_000,
   DEFAULT_CACHE_TTL_MS: 300_000,
   DEFAULT_CHECKPOINT_TTL_MS: 86_400_000,
+  FAN_CHILD_CONCURRENCY_MAX: 8,
   ...overrides,
 });
 

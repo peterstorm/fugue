@@ -39,7 +39,7 @@ The `FR-F1-*` namespace belongs to
 [`docs/plans/2026-09-06-f1-runtime-width-fanout.md`](plans/2026-09-06-f1-runtime-width-fanout.md),
 not the host specification above. PR #45 supplied composite-address backend parity;
 PR #46 supplied the runtime/host map contract; PR-C supplies authored maps and plate
-rendering. PR-D whole-fan budget projection remains separate.
+rendering. PR-D1 supplies bounded-concurrency fan scheduling and whole-fan budget projection (ADR-0090); nested fans and adaptive concurrency remain separate.
 
 | Requirement | Traceability |
 |---|---|
