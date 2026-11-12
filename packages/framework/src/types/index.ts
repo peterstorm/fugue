@@ -257,3 +257,36 @@ export {
   mapIndex,
   resolveMappedItems,
 } from "./map-width.js";
+// ── Fan scheduling (F1 PR-D) ───────────────────────────────────────────────
+// The authoring + runtime vocabulary of bounded-concurrency fans: the two
+// concurrency brands and their constructors/parsers, the closed estimator
+// set, the authored `FanScheduling` record, the `FanRefusal` a projection
+// reports, and the failure-cause assembly a fan child failure carries.
+//
+// Deliberately NOT re-exported here (runtime persistence internals, consumed
+// through concrete imports inside `dag-runtime/`): `fanRefusal` and
+// `FanRefusalFacts` (the refusal constructor and its input), `FAN_REFUSAL_HINT`,
+// and the refusal-seed trio `FanRefusalSeed` / `FanRefusalSeedSchema` /
+// `FAN_SEED_NAMESPACE` (+ `FAN_SEED_VERSION`) — the seed's wire schema and
+// checkpoint address are persistence-layer details, not authoring surface.
+export type {
+  ChildConcurrency,
+  FanConcurrencyCap,
+  FanEstimator,
+  FanScheduling,
+  FanSchedulingField,
+  FanSchedulingRejection,
+  SpendSample,
+  FanRefusal,
+  IndexedError,
+  FanFailureCauses,
+} from "./fan-scheduling.js";
+export {
+  childConcurrency,
+  parseChildConcurrency,
+  fanConcurrencyCap,
+  DEFAULT_FAN_CONCURRENCY_CAP,
+  FAN_ESTIMATORS,
+  parseFanEstimator,
+  parseFanScheduling,
+} from "./fan-scheduling.js";

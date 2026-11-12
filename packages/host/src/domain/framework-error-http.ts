@@ -13,6 +13,27 @@
  *   - `policy-refusal` / `downstream-denied` → 403. A settled "no" from the
  *     broker's local gate or the downstream identity provider. Fail-closed,
  *     never retried (ADR-0059) → does NOT count as a circuit failure.
+ *   - `fan-budget-refused` → 429, the same class as `llm-budget-exceeded`:
+ *     a fan's projection refusal is a settled per-run budget limit.
+ *   - `fan-child-failed` → the class of its PRIMARY (lowest-index) child error.
+ *
+ *   Fan classification contract (F1 PR-D), pinned by
+ *   `__tests__/domain/framework-error-http.test.ts`:
+ *     1. A refusal is the WHOLE-FAN analogue of the per-call budget breach —
+ *        same 429 class, same Retry-After, same breaker-sparing: the client
+ *        must raise the ceiling (the refusal's `hint`), the host did its job.
+ *     2. `fan-child-failed` is a STRUCTURAL wrapper, so it delegates —
+ *        recursively through nested fans and through the `retry-exhausted`
+ *        wrapper — to the error that actually decided the outcome. A child's
+ *        settled denial stays 403; a child's budget breach stays 429.
+ *     3. The ATTACHED refusal never changes the class: the primary alone
+ *        decides, mirroring `retriabilityOf` — a refusal rides along as
+ *        FR-025 data without upgrading or downgrading the client-facing
+ *        status. (Only the kind survives a retry wrapper, so a wrapped
+ *        `fan-child-failed` falls back to the execution-failure class.)
+ *     4. Both matches remain exhaustive over `FrameworkError` kinds: a new
+ *        kind without a classification is a compile error, never a silent
+ *        `{500, countsAsCircuitFailure: true}` default.
  *   - `llm-budget-exceeded` → 429. A deterministic per-run usage limit, not a
  *     host fault → does NOT count as a circuit failure (one run hitting its
  *     budget must not open the breaker for everyone).
@@ -112,8 +133,13 @@ const classifyRootKind = (
 ): FrameworkErrorHttp =>
   match(kind)
     .with("policy-refusal", "downstream-denied", () => SETTLED_DENIAL)
-    .with("llm-budget-exceeded", () => BUDGET_LIMIT)
+    .with("llm-budget-exceeded", "fan-budget-refused", () => BUDGET_LIMIT)
     .with("infra-unreachable", () => INFRA_OUTAGE)
+    // A wrapped `fan-child-failed` is classified by its PRIMARY child error in
+    // `classifyFrameworkError`, but only the kind string survives the retry
+    // wrapper, so the primary is unknowable here. Fall back to the execution
+    // failure class: a fan whose child failed is a failed execution.
+    .with("fan-child-failed", () => EXECUTION_FAILURE)
     .with(P.union(...EXECUTION_FAILURE_KINDS), () => EXECUTION_FAILURE)
     .exhaustive();
 
@@ -199,7 +225,12 @@ export const classifyFrameworkError = (error: FrameworkError): FrameworkErrorHtt
     // so the two classifiers cannot drift on what counts as a settled denial.
     .with({ kind: P.union("policy-refusal", "downstream-denied") }, () => SETTLED_DENIAL)
     // Deterministic per-run usage limit — client should back off, not the host.
-    .with({ kind: "llm-budget-exceeded" }, () => BUDGET_LIMIT)
+    // A fan's budget projection refusal is the same class of settled per-run
+    // usage limit: the client must raise the budget, the host did its job.
+    .with({ kind: P.union("llm-budget-exceeded", "fan-budget-refused") }, () => BUDGET_LIMIT)
+    // A fan failed because its lowest-index child did — classify by that
+    // child's error, so a child's settled denial stays a 403, not a 500.
+    .with({ kind: "fan-child-failed" }, (e) => classifyFrameworkError(e.primary.error))
     // Transient provider-reach failure — retriable AND a real infra signal.
     .with({ kind: "infra-unreachable" }, () => INFRA_OUTAGE)
     // Retry wrapper — classify by what actually exhausted the budget.

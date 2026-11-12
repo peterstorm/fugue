@@ -12,7 +12,7 @@
 //   handleKernelError — catch block: abort vs terminal-failed
 
 import { match } from "ts-pattern";
-import type { Span } from "@opentelemetry/api";
+import { trace, type Span } from "@opentelemetry/api";
 import type { JobLike, KernelRunOpts } from "../state-machine/types.js";
 import type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, HumanReviewOutcome } from "./types.js";
 import { EXECUTOR_NODE_ID } from "./types.js";
@@ -44,12 +44,13 @@ import { validateCapabilities } from "../shared/capabilities.js";
 import { wrapDagJobLike } from "./persistence.js";
 import { beginRunTelemetry, closeRootSpan, startRunSpan } from "./run-telemetry.js";
 import { type FreshnessIndex, InMemoryFreshnessIndex } from "./freshness-check.js";
-import type { ExecutionScope, ExecuteMappedChild } from "./execution-scope.js";
+import type { ExecutionScope, ExecuteMappedChild, FanRuntime } from "./execution-scope.js";
 import { sha256DedupKey } from "../shared/dedup-key.js";
 import { fwLogger } from "../logger.js";
 import { bestEffort, bestEffortLog } from "./best-effort.js";
 import type { CompiledDagMachine } from "./machine.js";
 import type { NonEmptyString } from "../types/non-empty-string.js";
+import { DEFAULT_FAN_CONCURRENCY_CAP, type FanConcurrencyCap } from "../types/fan-scheduling.js";
 import { hasExactOwnKeys, ownDescriptors } from "../types/own-data.js";
 
 // ---------------------------------------------------------------------------
@@ -151,6 +152,21 @@ export interface DagRunOpts
    * unchanged.
    */
   readonly minting?: MintingAuthority;
+  /**
+   * Host-wide operator ceiling on any map fan's child concurrency (FR-030,
+   * AD-8). Effective fan concurrency is `min(authored childConcurrency, cap)`;
+   * a clamp warns once per fan start and is observed on the `fan-start` event
+   * (FR-033). Operator configuration, never a per-run or per-tenant API
+   * (FR-034): the host's config parse brands `FAN_CHILD_CONCURRENCY_MAX`
+   * (its only mint site) and threads it through `runResumableDagJob`; no
+   * other caller sets it. The value arrives already branded — that parse
+   * rejects a non-positive-integer setting at startup, so one never reaches a
+   * run (FR-032).
+   * Omitted ⇒ `DEFAULT_FAN_CONCURRENCY_CAP` (8). `runDagStatefulOutcome`
+   * folds it into the root `FanRuntime` (AD-7), which `runNodeShared` hands to
+   * every root-level map fan.
+   */
+  readonly fanConcurrencyCap?: FanConcurrencyCap;
 }
 
 // ---------------------------------------------------------------------------
@@ -661,8 +677,21 @@ export const runDagStatefulOutcome = async <I, O>(
       message: "mapped child cannot suspend; gather before human review" });
     return ok(outcome.value.output);
   };
+  // Root-owned fan resources (AD-7): built ONCE, from the root-validated base
+  // context — the run-wide read-only budget and the run logger — and the
+  // operator cap. Children never receive it: nested fans are refused (D2).
+  // `tagSpan` binds the fan's telemetry sink to the active OTel span here,
+  // in the shell, so the fan interpreter itself stays OTel-free (SC-006).
+  const fan: FanRuntime = Object.freeze({
+    budget: validatedCtx.budget,
+    cap: opts?.fanConcurrencyCap ?? DEFAULT_FAN_CONCURRENCY_CAP,
+    logger: validatedCtx.logger,
+    tagSpan: (attributes: Readonly<Record<string, number | boolean>>) => {
+      trace.getActiveSpan()?.setAttributes(attributes);
+    },
+  });
   return runPreparedDag<I, O>(prepared.value, input,
-    { kind: "root", executeMappedChild, rootOptions: opts ?? {} }, resources);
+    { kind: "root", executeMappedChild, fan, rootOptions: opts ?? {} }, resources);
 };
 
 /** The sole kernel body for root and mapped-child executions. */

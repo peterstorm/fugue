@@ -12,6 +12,7 @@ import { type Result, ok } from "../types/result.js";
 import { formatFrameworkError, type FrameworkError } from "../types/errors.js";
 import { nodeId } from "../types/ids.js";
 import { maxWidth, widthFrom, type WidthFrom } from "../types/map-width.js";
+import { parseFanScheduling, type FanEstimator } from "../types/fan-scheduling.js";
 import { snapshotMappedChild } from "../shared/validate-dag.js";
 import "../checkpoint/capability.js";
 
@@ -34,6 +35,21 @@ interface MapExecutionConfig<I, ChildOut, WidthField extends string> {
   readonly widthFrom: MapWidthField<I, WidthField>;
   /** Positive safe integer, enforced before any child work can be spent. */
   readonly maxWidth: number;
+  /**
+   * Authored child concurrency (F1 PR-D, FR-001): how many of this fan's
+   * children may be in flight at once — a positive safe integer defaulting
+   * to 1. Named distinctly from the DAG-level run concurrency (FR-035); the
+   * host caps it with FAN_CHILD_CONCURRENCY_MAX. Invalid values are rejected
+   * HERE at definition (AS-029), with an error naming the node and the value.
+   */
+  readonly childConcurrency?: number;
+  /**
+   * Authored per-child cost estimator (FR-046) from the closed set
+   * {largest-seen, p50, p90, p95}, defaulting to largest-seen. Invalid values
+   * are rejected HERE at definition (AS-051), with an error naming the node
+   * and the value.
+   */
+  readonly estimator?: FanEstimator;
   /** A child DAG without nested maps, human gates or freshness extractors. */
   readonly child: DagDef;
   /** Adapts each fresh child DAG result or pre-adaptation fan completion before reduction. */
@@ -109,6 +125,16 @@ const createCapturedMapNode = <I, ChildOut, O, WidthField extends string>(
   const id = nodeId(config.id);
   const from = widthFrom(config.widthFrom);
   const max = maxWidth(config.maxWidth);
+  // Authored scheduling is parsed exactly once, here at definition, through
+  // the single parse/defaults site (FR-001, FR-046). Each authored field is
+  // read once into plain data; absent fields acquire their defaults inside
+  // the parser, and an invalid present one is refused naming the node, the
+  // field and the value (AS-029, AS-051) — the maxWidth throwing precedent.
+  const scheduling = parseFanScheduling(id, {
+    childConcurrency: config.childConcurrency,
+    estimator: config.estimator,
+  });
+  if (!scheduling.ok) throw new Error(formatFrameworkError(scheduling.error));
   const child = snapshotMappedChild(id, config.child);
   if (!child.ok) throw new Error(formatFrameworkError(child.error));
   return Object.freeze({
@@ -124,6 +150,9 @@ const createCapturedMapNode = <I, ChildOut, O, WidthField extends string>(
       childOutputSchema: config.childOutputSchema,
       widthFrom: from,
       maxWidth: max,
+      // Parser-owned and frozen by parseFanScheduling: no caller-owned
+      // scheduling object reaches the captured mapping.
+      scheduling: scheduling.value,
       ...(gather !== undefined ? { authoredGather: gather } : {}),
       reduce: config.reduce,
     }),
@@ -174,6 +203,8 @@ export const createCollectMapNode = <
       outputSchema,
       widthFrom: config.widthFrom,
       maxWidth: config.maxWidth,
+      childConcurrency: config.childConcurrency,
+      estimator: config.estimator,
       child: config.child,
       childOutputSchema,
       reduce,

@@ -1173,9 +1173,14 @@ metadata. `fugue visualize` and compose render one plate labelled with symbolic
 Static `defineFanOut` is right when branch count is known in source. A map is for
 rosters, search results, batches, and reviewer sets whose width comes from data.
 Bounding width preserves reviewable worst-case fan size; prompt caching and the
-per-run spend authority keep each child economically accountable. Whole-fan budget
-projection remains the separate PR-D admission improvement; v1 execution is
-sequential and does not claim concurrent fan scheduling.
+per-run spend authority keep each child economically accountable. Since F1 PR-D1
+(ADR-0090) a fan runs up to `min(childConcurrency, FAN_CHILD_CONCURRENCY_MAX)`
+children at once and is admitted against the run budget as a whole: a projected
+breach refuses the fan with a typed, non-retriable `fan-budget-refused` error
+instead of spending into the ceiling one call at a time. The refusal is persisted
+as a seed, so resuming under the same budget refuses again before any dispatch.
+Continuing requires redeploying with a larger budget, which reuses every saved
+child.
 
 ---
 

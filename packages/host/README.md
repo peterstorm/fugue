@@ -241,8 +241,9 @@ All configuration is via environment variables, validated at startup with Zod. T
 | `DAGS_LOCAL_PATH` | — | Skip git clone, read from this path (dev mode) |
 | `PORT` | `3000` | HTTP listen port |
 | `REDIS_PROBE_INTERVAL_MS` | `10000` | Redis liveness probe interval (ms) |
-| `MAX_GLOBAL_CONCURRENCY` | `50` | Max concurrent DAG runs |
-| `DEFAULT_DAG_CONCURRENCY` | `10` | Default per-DAG concurrency limit |
+| `MAX_GLOBAL_CONCURRENCY` | `50` | Max concurrent DAG **runs** host-wide (run-level) |
+| `DEFAULT_DAG_CONCURRENCY` | `10` | Default max concurrent **runs** of one DAG (run-level; `fugue.yaml` `maxConcurrent` overrides it per DAG) |
+| `FAN_CHILD_CONCURRENCY_MAX` | `8` | Host-wide cap on the **children of one map fan** in flight at once, inside a single run (child-level). Positive integer; an invalid value fails startup naming this setting. `1` makes every fan sequential; whole-fan budget projection still applies. See [Map fan child concurrency](#map-fan-child-concurrency-and-budget-projection) |
 | `DEFAULT_DAG_TIMEOUT_MS` | `60000` | Default per-DAG timeout (ms) |
 | `MAX_DAG_TIMEOUT_MS` | `120000` | Hard ceiling on DAG timeout |
 | `DRAIN_TIMEOUT_MS` | `30000` | Graceful shutdown drain period |
@@ -256,6 +257,138 @@ All configuration is via environment variables, validated at startup with Zod. T
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OpenTelemetry exporter endpoint |
 | `MLFLOW_TRACKING_URI` | — | MLflow tracking server URI |
 | `MLFLOW_EXPERIMENT_ID` | — | MLflow experiment ID |
+
+### Map fan child concurrency and budget projection
+
+A runtime-width `map` node (a **fan**) runs its child DAG once per input item. Four
+concurrency settings exist, at two different levels, and they are deliberately named
+apart:
+
+| Setting | Level | Set by | Bounds |
+|---|---|---|---|
+| `MAX_GLOBAL_CONCURRENCY` | run | operator (env) | concurrent DAG runs across the host |
+| `DEFAULT_DAG_CONCURRENCY` / `fugue.yaml` `maxConcurrent` | run | operator / DAG owner | concurrent runs of one DAG |
+| `childConcurrency` on the map node | child | DAG author | that fan's children in flight inside one run (default `1`) |
+| `FAN_CHILD_CONCURRENCY_MAX` | child | operator (env) | every fan's `childConcurrency`, host-wide (default `8`) |
+
+**How the effective value is chosen**
+
+- A fan runs at **effective concurrency** `C = min(childConcurrency,
+  FAN_CHILD_CONCURRENCY_MAX)`.
+- When the authored value exceeds the cap, the fan is clamped. The host logs one
+  warning and emits one `fan-start` observer event with `clamped: true`, each
+  naming the fan, the authored value and the effective value.
+- There is no per-run or per-tenant override.
+- An unconfigured fan (`childConcurrency` 1) is sequential. An unbudgeted one is
+  byte-identical to earlier releases. A budgeted fan still projects the whole fan
+  at C=1, so it may refuse earlier than the per-call meter alone would, and it then
+  writes a refusal seed ([below](#whole-fan-budget-projection)).
+- `FAN_CHILD_CONCURRENCY_MAX=1` forces every fan on the host to be sequential. It
+  does not turn whole-fan budget projection off.
+
+**Sizing provider rate limits.** The levels multiply. Up to
+`MAX_GLOBAL_CONCURRENCY` runs, each with a fan of up to C children, can be calling
+your LLM provider at once.
+
+**Nesting.** Nested maps (a map inside a mapped child DAG) are still refused at
+DAG load, so a fan's peak concurrency is C. Once nested fans ship, the peak number
+of concurrent leaf children will be bounded by the product of the two levels'
+effective concurrencies, `C_outer × C_inner`, and each level is capped by
+`FAN_CHILD_CONCURRENCY_MAX`.
+
+**Static siblings.** Static fan-out siblings in one wave are not governed by these
+settings.
+
+#### Whole-fan budget projection
+
+When the DAG declares a budget (`llmBudget`, or the legacy `llmBudgetTokens`, in
+`fugue.yaml` or the `dag.ts` config), a fan does not wait for the per-call meter to
+stop it partway through. It projects instead:
+
+1. **The probe batch.** The first `min(C, remaining)` children are dispatched
+   unprojected, because nothing has been measured yet.
+2. **Projection.** Before every later dispatch, the fan projects
+   `settled + remainingChildren × perChildEstimate` on each budgeted axis. If any
+   ceiling would be breached, it refuses.
+3. **The estimate.** The per-child estimate comes from the fan's `estimator`:
+   - `largest-seen`, the default;
+   - `p50`, `p90` or `p95`. These fall back to largest-seen until 5 children
+     have settled.
+
+A refusal ends the run with error `fan-budget-refused`: HTTP **429**, the same
+class as `llm-budget-exceeded`. It does not trip the circuit breaker and it is
+never retried. The error and its `fan-refused` event carry:
+
+- the breached axis and ceiling;
+- the per-child estimate and the estimator actually applied;
+- the effective concurrency;
+- the completed and remaining child counts;
+- a `lowerBound` flag (true spend may be higher on an unpriced or unknown-usage
+  axis);
+- the hint: **redeploy the DAG with a larger budget**.
+
+Children already in flight when a fan refuses, fails or is aborted are not
+cancelled. They finish and their outputs are saved (the **drain**).
+
+**Overshoot bounds.** C is the effective concurrency. M is the largest measured
+per-child spend: the run-wide spend between a child's dispatch and its settle,
+which is never below its true cost. With the default `largest-seen` estimator:
+
+- **(a)** Spend after the refusal decision is ≤ (C−1) × M.
+- **(b)** If no child costs more than the estimate in force when it was admitted,
+  dispatches after the probe batch never push spend past a ceiling. Total
+  post-probe overshoot is therefore ≤ (C−1) × M.
+- **(c) Probe carve-out.** The unprojected probe batch is bounded by C × M, and by
+  the per-call meter.
+- **(d) Cost spike.** A child that costs more than the estimate in force at its
+  admission is bounded **only by the host per-call meter**.
+
+Under `p50`, `p90` and `p95`, (a) still holds and (b) is **best effort only**. A
+percentile sits below the largest child, so a more expensive child counts as a
+spike. Choose a percentile when one outlier child would otherwise make projection
+refuse a fan that fits.
+
+Two operational notes:
+
+- The per-call meter stays the hard stop for every LLM call under every estimator.
+- Because the measure M over-counts when children overlap, a fan at high C may
+  refuse slightly early. That is the conservative direction.
+
+#### Resume after a refusal
+
+A refused fan persists a **refusal seed** for its current execution epoch. The
+seed is stored as `fan-seed@<mapNodeId>@0@<epoch>` in the run's checkpoint node
+hash, next to the fan's saved children.
+
+- **When it applies.** The seed matters only when the same run is re-executed in
+  the same epoch:
+  - A synchronous run is never resumed. A new request is a new run, with no seed.
+  - A durable (HITL) run that settled `fan-budget-refused` is recorded as failed
+    and is not retried.
+  - The seed governs a replacement worker that resumes a slice interrupted after
+    the refusal but before that failure was recorded. It also governs an
+    embedder that resumes the run through the framework's resumable entry point.
+
+  In those cases the fan evaluates the seed before dispatching anything.
+- **The refusal is sticky until a redeploy raises a ceiling.** Without such a
+  redeploy, the fan refuses again with the same `fan-budget-refused`. It
+  dispatches **zero** children, however few remain. The `fan-refused` event
+  carries `sticky: true`.
+- **What counts as a raise.** Run ceilings come only from the DAG's
+  `llmBudget`, and a caller can only tighten them. Restarting the host, or
+  redeploying with an equal or lower budget, does not lift the refusal.
+- **After a raise.** Push a DAG revision with a larger `llmBudget`. The fan then
+  resumes with projection before every dispatch (no new probe batch), and it
+  reuses every child already saved. Budget and concurrency changes do not change
+  the DAG fingerprint, so saved children stay valid. If the raise is still not
+  enough, the fan refuses again with a refreshed seed.
+- **Reroute.** A HITL reroute that re-runs the fan starts a new execution epoch.
+  The old seed is ignored, and the fan probes afresh.
+
+The authoritative record is ADR-0090, concurrent fan scheduling
+(`docs/adr/0090-concurrent-fan-scheduling-and-whole-fan-projection.md` in the
+repository). For deployment-side guidance,
+see [`docs/deployment.md`](docs/deployment.md#map-fan-concurrency).
 
 ### Human-in-the-Loop & Identity (optional)
 
@@ -440,6 +573,8 @@ A DAG that reaches a `humanReview` gate suspends and the run is durably parked. 
 | 408 | `timeout` | Exceeded timeout |
 | 429 | `dag-concurrency-exceeded` | Per-DAG concurrency limit hit |
 | 429 | `global-concurrency-exceeded` | Global limit hit |
+| 429 | `llm-budget-exceeded` | The host per-call meter refused an LLM call against the DAG's `llmBudget` |
+| 429 | `fan-budget-refused` | A map fan's whole-fan projection refused: its remaining children cannot fit the `llmBudget`. Redeploy with a larger budget ([details](#whole-fan-budget-projection)) |
 | 503 | `dag-disabled` | Circuit breaker open |
 
 ---
@@ -494,7 +629,7 @@ export default registration;
 team: my-team               # team owning this DAG
 owner: platform             # individual owner (metadata)
 route: /summarize           # custom route override
-maxConcurrent: 5            # concurrency limit
+maxConcurrent: 5            # concurrent RUNS of this DAG (run-level; not map-fan children)
 timeoutMs: 90000            # timeout (ms)
 cacheTtlMs: 600000          # cache TTL
 checkpointTtlMs: 86400000   # checkpoint TTL

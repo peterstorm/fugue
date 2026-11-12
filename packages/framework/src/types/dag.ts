@@ -4,6 +4,7 @@ import type { z } from "zod";
 import type { FrameworkError } from "./errors.js";
 import type { Result } from "./result.js";
 import { asWidthFrom, type WidthFrom, type MaxWidth } from "./map-width.js";
+import type { FanScheduling } from "./fan-scheduling.js";
 import type { DagId, NodeId, DagInputId } from "./ids.js";
 import type { Confidence, ConfidenceBucket } from "./confidence.js";
 import { resourceName, type ResourceName } from "./witness.js";
@@ -83,6 +84,20 @@ export type MapNodeDef<I = unknown, ChildOut = unknown, O = unknown> =
       childOutputSchema: z.ZodType<ChildOut>;
       widthFrom: WidthFrom;
       maxWidth: MaxWidth;
+      /**
+       * Authored, defaulted child concurrency and estimator (F1 PR-D, AD-8):
+       * the two knobs a fan admits and estimates its children with. The
+       * structure-only fingerprint excludes this field, so retuning a fan
+       * never invalidates its saved children (FR-051).
+       *
+       * Always present: both producers — `createMapNode` (`nodes/map.ts`) and
+       * `snapshotMapping` (`shared/validate-dag.ts`) — freeze a
+       * `parseFanScheduling` result here, so an author who declares nothing
+       * gets the defaults from that single defaults site (FR-001, FR-046) and
+       * consumers read this field directly. A mapping without it is a forgery,
+       * refused by the validator.
+       */
+      scheduling: FanScheduling;
       /** Present only when the runtime issued the closed collect reducer/schema pair. */
       authoredGather?: AuthoredCollectGather;
       reduce: (results: readonly ChildOut[]) => Result<O, FrameworkError>;

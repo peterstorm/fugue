@@ -18,8 +18,10 @@
 // (codegen, gauntlet, scaffold writer) is guaranteed a value that already
 // passed every refinement — no structurally-shaped impostors.
 
+import { match, P } from "ts-pattern";
 import { z } from "zod";
 import { ID_MAX_LENGTH } from "../types/ids.js";
+import { FAN_ESTIMATORS } from "../types/fan-scheduling.js";
 import { safeErrorMessage } from "../types/safe-error.js";
 import {
   FUGUE_BODY_MARKER,
@@ -36,7 +38,6 @@ import {
   parseKebabIdent,
   type KebabIdent,
 } from "./identifiers.js";
-import { assertNever } from "./types.js";
 import type { Shape } from "./new-templates.js";
 import { CONFIDENCE_BUCKET, CONFIDENCE_FIELD } from "./vocabulary.js";
 
@@ -397,7 +398,7 @@ type AuthoredStructure = DeepReadonly<z.infer<typeof StructureSchema>>;
 
 // Compile-time proof that `StructureSchema`'s discriminated union covers exactly
 // the canonical `Shape` set (derived from the `DAG_SHAPES` tuple in
-// `types/dag.ts`). The `assertNever` in `structureRefs` only fires when a
+// `types/dag.ts`). The `.exhaustive()` in `structureRefs` only fires when a
 // variant is ADDED to the union — it cannot force the union to COVER every
 // `Shape`. These two aliases close both directions, mirroring the
 // `_NoExtraShapes` backstop in `types.ts`: a new shape in `DAG_SHAPES` with no
@@ -421,36 +422,28 @@ void _structureNoExtraShapes;
  * terminal's emitted schema const), so both scopes agree on which node is the
  * terminal without a duplicated per-shape switch.
  */
-export const structureRefs = (s: AuthoredStructure): ReadonlyArray<readonly [KebabIdent, string]> => {
-  switch (s.shape) {
-    case "linear":
-      return s.order.map((id, i) => [id, `order[${i}]`] as const);
-    case "fan-out":
-    case "diamond":
-      return [
-        [s.source, "source"] as const,
-        ...s.branches.map((id, i) => [id, `branches[${i}]`] as const),
-        ...(s.join !== undefined ? [[s.join, "join"] as const] : []),
-      ];
-    case "router":
-      return [
-        [s.classifier, "classifier"] as const,
-        ...s.cases.map((c, i) => [c.to, `cases[${i}].to`] as const),
-        [s.default, "default"] as const,
-      ];
-    case "sources":
-      return [
-        ...s.sources.map((id, i) => [id, `sources[${i}]`] as const),
-        [s.join, "join"] as const,
-        [s.assemble, "assemble"] as const,
-      ];
-    default:
-      // The return type is inferred, so a missing case would otherwise fall
-      // through to `undefined` silently — assertNever makes a new shape a
-      // compile error here.
-      return assertNever(s);
-  }
-};
+export const structureRefs = (s: AuthoredStructure): ReadonlyArray<readonly [KebabIdent, string]> =>
+  // `.exhaustive()` makes a newly-added shape a compile error here rather than
+  // a silent fall-through to `undefined`.
+  match(s)
+    .returnType<ReadonlyArray<readonly [KebabIdent, string]>>()
+    .with({ shape: "linear" }, (linear) => linear.order.map((id, i) => [id, `order[${i}]`] as const))
+    .with({ shape: P.union("fan-out", "diamond") }, (fan) => [
+      [fan.source, "source"] as const,
+      ...fan.branches.map((id, i) => [id, `branches[${i}]`] as const),
+      ...(fan.join !== undefined ? [[fan.join, "join"] as const] : []),
+    ])
+    .with({ shape: "router" }, (router) => [
+      [router.classifier, "classifier"] as const,
+      ...router.cases.map((c, i) => [c.to, `cases[${i}].to`] as const),
+      [router.default, "default"] as const,
+    ])
+    .with({ shape: "sources" }, (sources) => [
+      ...sources.sources.map((id, i) => [id, `sources[${i}]`] as const),
+      [sources.join, "join"] as const,
+      [sources.assemble, "assemble"] as const,
+    ])
+    .exhaustive();
 
 const orderNodesByStructure = <Node extends { readonly id: KebabIdent }>(
   nodes: readonly Node[],
@@ -482,22 +475,15 @@ function fieldTypeShape(type: FieldType): unknown {
 
 const schemaShape = (spec: SchemaSpec): string => JSON.stringify(canonicalFields(spec));
 
-export const terminalRefs = (structure: AuthoredStructure): readonly KebabIdent[] => {
-  switch (structure.shape) {
-    case "linear":
-      return structure.order.slice(-1);
-    case "fan-out":
-      return structure.join === undefined ? [] : [structure.join];
-    case "diamond":
-      return [structure.join];
-    case "router":
-      return [...structure.cases.map((entry) => entry.to), structure.default];
-    case "sources":
-      return [structure.assemble];
-    default:
-      return assertNever(structure);
-  }
-};
+export const terminalRefs = (structure: AuthoredStructure): readonly KebabIdent[] =>
+  match(structure)
+    .returnType<readonly KebabIdent[]>()
+    .with({ shape: "linear" }, (linear) => linear.order.slice(-1))
+    .with({ shape: "fan-out" }, (fanOut) => (fanOut.join === undefined ? [] : [fanOut.join]))
+    .with({ shape: "diamond" }, (diamond) => [diamond.join])
+    .with({ shape: "router" }, (router) => [...router.cases.map((entry) => entry.to), router.default])
+    .with({ shape: "sources" }, (sources) => [sources.assemble])
+    .exhaustive();
 
 const addGraphReferenceIssues = (
   nodes: readonly { readonly id: KebabIdent }[],
@@ -718,6 +704,45 @@ const GatherSchema = z.object({
     .refine((field) => !FORBIDDEN_FIELD_NAMES.has(field), "gather field '__proto__' is not allowed"),
 }).strict();
 
+/**
+ * Render the offending authored value into a scheduling-field problem message.
+ * AS-029 / AS-051: the authored-DAG load surface must name the invalid VALUE,
+ * not just the rule — the compose repair loop and human authors both read
+ * these problems. JSON rendering for values that have one;
+ * `safeErrorMessage` for the rest (hostile/non-serializable input).
+ */
+const renderSchedulingValue = (value: unknown): string => {
+  const json = JSON.stringify(value);
+  return json === undefined ? safeErrorMessage(value) : json;
+};
+
+/** The two authored scheduling fields' problem messages name field + value. */
+const schedulingProblem = (field: "childConcurrency" | "estimator") => {
+  const expected = field === "childConcurrency"
+    ? "a positive safe integer"
+    : `one of ${FAN_ESTIMATORS.join(", ")}`;
+  return (issue: { readonly input?: unknown }): string =>
+    `${field} must be ${expected}, got ${renderSchedulingValue(issue.input)}`;
+};
+
+/**
+ * Authored fan scheduling (F1 PR-D, AD-8). The value domains here mirror
+ * `parseFanScheduling` exactly (positive safe integer; the closed estimator
+ * set) — the definition-time constructors in `nodes/map.ts` remain the single
+ * parse authority and re-refuse anything forged past this schema. The error
+ * messages name the field and the offending value (AS-029, AS-051); the issue
+ * path carries the node position.
+ */
+const childConcurrencyField = z
+  .number({ error: schedulingProblem("childConcurrency") })
+  .int({ error: schedulingProblem("childConcurrency") })
+  .positive({ error: schedulingProblem("childConcurrency") })
+  .max(Number.MAX_SAFE_INTEGER, { error: schedulingProblem("childConcurrency") })
+  .optional();
+const estimatorField = z
+  .enum(FAN_ESTIMATORS, { error: schedulingProblem("estimator") })
+  .optional();
+
 const MapNodeSchema = z
   .object(
     {
@@ -729,6 +754,8 @@ const MapNodeSchema = z
         .regex(IDENT, "widthFrom must be one field reference (a JS identifier)")
         .refine((field) => !FORBIDDEN_FIELD_NAMES.has(field), "widthFrom '__proto__' is not allowed"),
       maxWidth: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      childConcurrency: childConcurrencyField,
+      estimator: estimatorField,
       child: ChildDagSchema,
       gather: GatherSchema,
     },
@@ -778,31 +805,27 @@ const directInputSpec = (
   id: KebabIdent,
 ): SchemaSpec | undefined => {
   const byId = new Map(dag.nodes.map((node) => [node.id, node] as const));
-  const structure = dag.structure;
-  switch (structure.shape) {
-    case "linear": {
-      const index = structure.order.indexOf(id);
+  return match(dag.structure)
+    .returnType<SchemaSpec | undefined>()
+    .with({ shape: "linear" }, ({ order }) => {
+      const index = order.indexOf(id);
       if (index === 0) return dag.input;
-      let predecessor = index - 1;
-      while (predecessor >= 0) {
-        const spec = outputSpecOf(byId.get(structure.order[predecessor]!));
-        if (spec !== undefined) return spec;
-        predecessor--;
-      }
-      return dag.input;
-    }
-    case "fan-out":
-    case "diamond":
-      if (id === structure.source) return dag.input;
-      if (structure.branches.includes(id)) return outputSpecOf(byId.get(structure.source));
+      // Nearest field-producing predecessor (human-review gates are passthroughs).
+      const producing = order
+        .slice(0, Math.max(index, 0))
+        .map((predecessorId) => outputSpecOf(byId.get(predecessorId)))
+        .findLast((spec) => spec !== undefined);
+      return producing ?? dag.input;
+    })
+    .with({ shape: P.union("fan-out", "diamond") }, (fan) => {
+      if (id === fan.source) return dag.input;
+      if (fan.branches.includes(id)) return outputSpecOf(byId.get(fan.source));
       return undefined;
-    case "router":
-      return id === structure.classifier ? dag.input : outputSpecOf(byId.get(structure.classifier));
-    case "sources":
-      return undefined;
-    default:
-      return assertNever(structure);
-  }
+    })
+    .with({ shape: "router" }, (router) =>
+      id === router.classifier ? dag.input : outputSpecOf(byId.get(router.classifier)))
+    .with({ shape: "sources" }, () => undefined)
+    .exhaustive();
 };
 
 /** Item schema selected by a parsed map's direct array-field reference. */

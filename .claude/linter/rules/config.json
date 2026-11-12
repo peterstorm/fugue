@@ -124,6 +124,27 @@
       ]
     },
     {
+      "module": "packages/framework/src/dag-runtime/fan/__tests__/",
+      "allow": [
+        "./",
+        "packages/framework/src/dag-runtime/",
+        "packages/framework/src/types/",
+        "packages/framework/src/shared/",
+        "bun:test",
+        "fast-check"
+      ],
+      "deny": [
+        "packages/framework/src/executor/",
+        "packages/framework/src/llm/",
+        "packages/framework/src/cache/",
+        "packages/framework/src/checkpoint/",
+        "packages/framework/src/queue-bullmq/",
+        "packages/framework/src/scheduler/",
+        "bullmq",
+        "ioredis"
+      ]
+    },
+    {
       "module": "packages/framework/src/dag-runtime/",
       "allow": [
         "./",
@@ -209,7 +230,8 @@
     "packages/framework/src/state-machine/replay.ts",
     "packages/framework/src/scheduler/catch-up.ts",
     "packages/framework/src/scheduler/cycle.ts",
-    "packages/framework/src/scheduler/diff.ts"
+    "packages/framework/src/scheduler/diff.ts",
+    "packages/framework/src/dag-runtime/fan/"
   ],
   "maxFunctionLines": 60,
   "excludeFromMaxLines": [".test.ts", ".spec.ts", ".property.test.ts", "host.ts", "run-dag.ts"]

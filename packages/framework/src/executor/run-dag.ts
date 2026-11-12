@@ -13,6 +13,7 @@ import type { DagDef } from "../types/dag.js";
 import { isConditionalEdge, isDefaultEdge } from "../types/dag.js";
 import type { NodeContext } from "../types/node.js";
 import type { MintingAuthority } from "../types/capability-broker.js";
+import type { FanConcurrencyCap } from "../types/fan-scheduling.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { JobLike, KernelRunOpts } from "../state-machine/types.js";
 import type { DagPhase, DagEvent, DagMachineContext, DagMachineContextPersisted, HumanReviewOutcome } from "../dag-runtime/types.js";
@@ -110,6 +111,22 @@ export interface RunOptions {
    * whatever the broker returns.
    */
   readonly minting?: MintingAuthority;
+  /**
+   * Host-wide operator ceiling on any map fan's child concurrency (FR-030,
+   * AD-8), forwarded verbatim into the kernel's `DagRunOpts.fanConcurrencyCap`
+   * (full contract in dag-runtime/run-dag-stateful.ts). Effective fan
+   * concurrency is `min(authored childConcurrency, cap)`; a clamp warns once
+   * per fan start and is observed on the `fan-start` event (FR-033).
+   *
+   * This is the OPERATOR channel, not a per-run override API (FR-034, OOS-009):
+   * the host's config parse brands `FAN_CHILD_CONCURRENCY_MAX` with the
+   * framework smart constructor — its only mint site — and no other caller
+   * sets it. The value arrives already branded (INV-3: never an `as` cast
+   * outside `types/fan-scheduling.ts`); a non-positive-integer setting never
+   * reaches a run because that parse rejects it at startup, naming the setting
+   * (FR-032). Omitted ⇒ `DEFAULT_FAN_CONCURRENCY_CAP` (8).
+   */
+  readonly fanConcurrencyCap?: FanConcurrencyCap;
 
   // ─── Advanced kernel hooks (rarely needed outside tests) ───────────────
 
@@ -184,6 +201,7 @@ const runDagToOutcome = async <I, O>(
     random: opts?.random,
     freshnessIndex: opts?.freshnessIndex,
     minting: opts?.minting,
+    fanConcurrencyCap: opts?.fanConcurrencyCap,
     beforeExecute: opts?.beforeExecute,
     classifyError: opts?.classifyError,
     onTrace: opts?.onTrace,

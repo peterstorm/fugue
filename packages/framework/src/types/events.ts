@@ -6,6 +6,12 @@ import type { Confidence } from "./confidence.js";
 import type { Witness, WriteEntry, FreshnessExecutionEpoch } from "./witness.js";
 import type { SideEffectKind } from "./side-effects.js";
 import type { JsonPatch } from "./json-patch.js";
+import type {
+  ChildConcurrency,
+  FanConcurrencyCap,
+  FanEstimator,
+  FanRefusal,
+} from "./fan-scheduling.js";
 
 export interface RunStartEvent {
   readonly type: "run-start";
@@ -227,6 +233,128 @@ export interface HumanInterventionEvent {
   readonly timestamp: Date;
 }
 
+// ---------------------------------------------------------------------------
+// Fan scheduling events (ADR-0090)
+// ---------------------------------------------------------------------------
+
+/**
+ * Structured observability for concurrent `map` fans (F1 PR-D, ADR-0090):
+ * effective concurrency at fan start (including any FR-033 clamp), the
+ * projected per-child cost and estimator at each projection, and the refusal
+ * point (FR-060).
+ *
+ * All three variants are ADDITIVE and OUTSIDE the FR-004 trace (AD-13): C=1
+ * golden equivalence is defined over dispatch order, checkpoint calls and
+ * errors — never these events — so emitting them cannot break trace
+ * equivalence and trace consumers are not taught about them.
+ *
+ * The union stays CLOSED but EXTENSIBLE (AD-2): D3 (adaptive concurrency)
+ * later adds a `throttle` event and an `adaptiveTarget` field WITHOUT
+ * reshaping any variant. Keep field shapes stable and additive — never
+ * repurpose or retype an existing field.
+ *
+ * These interfaces CARRY facts only: no fan phase literals (INV-1 — those
+ * live in the LC-1 machine file), no error objects (INV-2 — errors are minted
+ * only by the error factories), no brand casts (INV-3 — the concurrency
+ * brands are minted only in `types/fan-scheduling.ts`).
+ */
+
+/**
+ * Emitted once per fan start — the structured half of the FR-033 clamp. It
+ * names the fan (`nodeId`), the authored child concurrency, and the effective
+ * concurrency the scheduler runs with, so a clamp is auditable from the event
+ * log alone: `clamped: true` means `authored` exceeded the host cap `cap` and
+ * `effective` is `min(authored, cap)`; `clamped: false` means
+ * `effective === authored`. The VISIBLE warning (a `logger.warn`) is the
+ * shell's job (`runMappedFan`), not the event's — this event is the
+ * structured half the spec pairs with it.
+ *
+ * `width` is the fan's child count; `replayed` counts children satisfied from
+ * checkpoints; `seeded` is true when a persisted refusal seed was found for
+ * this fan (the AD-11 seed lifecycle — a seeded fan resumes with the seed's
+ * refused ceilings rather than re-projecting the remaining children from
+ * scratch). `estimator` is the estimator the fan's projections apply
+ * (largest-seen by default).
+ */
+export interface FanStartEvent {
+  readonly type: "fan-start";
+  readonly runId: RunId;
+  readonly dagId: DagId;
+  readonly nodeId: NodeId;
+  readonly width: number;
+  readonly replayed: number;
+  readonly seeded: boolean;
+  readonly authored: ChildConcurrency;
+  readonly cap: FanConcurrencyCap;
+  readonly effective: number;
+  readonly clamped: boolean;
+  readonly estimator: FanEstimator;
+  readonly timestamp: Date;
+}
+
+/**
+ * Emitted at each whole-fan projection (FR-060): the per-child estimate the
+ * projection applied on the budget axis it was evaluated against, the
+ * estimator that produced it, and the verdict for the remaining children.
+ *
+ * `estimate` is the per-child figure on `axis`; `lowerBound` is that axis's
+ * under-counting flag (true on `unpriced` / `unknown-usage` usd/token axes,
+ * false on priced ones — the AD-4 headroom table), so a consumer can tell a
+ * floor estimate from an exact figure without re-deriving ceiling kinds.
+ * `estimatorApplied` records what was ACTUALLY applied — a percentile may
+ * have fallen back — not what was authored. `effectiveConcurrency` is the
+ * fan's running concurrency at the projection; `remainingChildren` is width
+ * minus successfully completed children, so it includes in-flight slots and
+ * the slot about to start (AD-4).
+ *
+ * `verdict` is the projection's decision: `admit` when the remaining children
+ * fit inside the ceiling on the evaluated axis, `refuse` when they do not —
+ * there `axis` is the first breached axis in ceiling order (AD-4) and the
+ * companion `fan-refused` event carries the full breach (ceiling, completed
+ * and remaining counts) in its embedded `FanRefusal`.
+ */
+export interface FanProjectionEvent {
+  readonly type: "fan-projection";
+  readonly runId: RunId;
+  readonly dagId: DagId;
+  readonly nodeId: NodeId;
+  readonly effectiveConcurrency: number;
+  readonly axis: FanRefusal["axis"];
+  readonly estimate: number;
+  readonly estimatorApplied: FanEstimator;
+  readonly remainingChildren: number;
+  readonly verdict: "admit" | "refuse";
+  readonly lowerBound: boolean;
+  readonly timestamp: Date;
+}
+
+/**
+ * Emitted at the refusal point — the structured, SELF-CONTAINED half of
+ * FR-060 (AS-012). The embedded `FanRefusal` carries the full breach: the
+ * breached axis and its ceiling, the per-child estimate, the estimator
+ * applied, the effective concurrency, and the completed and remaining
+ * counts, so "why was this fan refused?" is answerable from this one event
+ * with no join against `fan-start` or `fan-projection`.
+ *
+ * `sticky` is true when the refusal was replayed from a persisted refusal
+ * seed (FR-026) rather than freshly projected — the resume re-refuses until
+ * the budget is raised (AD-11). `attachedToChildFailure` is true when the
+ * refusal is reported as a cause of a `fan-child-failed` error (a drain on
+ * failure that also breached the ceiling) rather than as the sole
+ * `fan-budget-refused` outcome; either way the remedy is the refusal's
+ * `hint`.
+ */
+export interface FanRefusedEvent {
+  readonly type: "fan-refused";
+  readonly runId: RunId;
+  readonly dagId: DagId;
+  readonly nodeId: NodeId;
+  readonly refusal: FanRefusal;
+  readonly sticky: boolean;
+  readonly attachedToChildFailure: boolean;
+  readonly timestamp: Date;
+}
+
 export type ObserverEvent =
   | RunStartEvent
   | NodeStartEvent
@@ -240,4 +368,7 @@ export type ObserverEvent =
   | WitnessCapturedEvent
   | WriteAttemptedEvent
   | FreshnessViolationEvent
-  | HumanInterventionEvent;
+  | HumanInterventionEvent
+  | FanStartEvent
+  | FanProjectionEvent
+  | FanRefusedEvent;

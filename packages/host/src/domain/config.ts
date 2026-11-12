@@ -10,6 +10,9 @@
  * - FR-040 (host-TTL): Global TTL defaults for cache and checkpoint entries
  * - FR-041 (host-TTL): Per-DAG TTL overrides in fugue.yaml
  * - FR-100: fugue.yaml declares team, owner, env, limit overrides
+ * - FR-030/FR-031/FR-032/FR-035 (fan-scheduling): host-wide
+ *   FAN_CHILD_CONCURRENCY_MAX (default 8, 1 = sequential fans, invalid fails
+ *   startup naming the setting), distinct from run-level concurrency limits
  *
  * NOTE: FR-040/FR-041 collide across two specs. The host-TTL spec owns the
  * cache/checkpoint TTL fields above; the keycloak-entra-wiring spec owns the
@@ -19,7 +22,7 @@
  */
 
 import { z } from "zod";
-import { ok, err } from "@fuguejs/framework";
+import { ok, err, fanConcurrencyCap } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { HostError } from "./host-error.js";
 import type { TenantId } from "./tenant.js";
@@ -171,10 +174,57 @@ export const HostConfigSchema = z.object({
   REDIS_URL: z.string(),
   /** HTTP port to listen on */
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
-  /** Maximum concurrent DAG runs across all DAGs */
+  /**
+   * Maximum concurrent DAG runs across all DAGs — a RUN-LEVEL limit (FR-035).
+   * It bounds how many DAGs execute host-wide and says nothing about
+   * parallelism inside one run: bounded-concurrency map fans are capped by
+   * the separate FAN_CHILD_CONCURRENCY_MAX below.
+   */
   MAX_GLOBAL_CONCURRENCY: z.coerce.number().int().min(1).default(50),
-  /** Default per-DAG concurrency limit when not overridden in fugue.yaml */
+  /**
+   * Default per-DAG concurrency limit when not overridden in fugue.yaml —
+   * also a RUN-LEVEL limit (FR-035): it bounds concurrent RUNS of one DAG
+   * (overridable per DAG via fugue.yaml's `maxConcurrent`), never the children
+   * of a fan inside a run. That is FAN_CHILD_CONCURRENCY_MAX's job, and that
+   * cap is host-wide with no per-DAG or per-run override (FR-030, FR-034).
+   */
   DEFAULT_DAG_CONCURRENCY: z.coerce.number().int().min(1).default(10),
+  /**
+   * Host-wide ceiling on concurrently running CHILDREN WITHIN ONE map fan
+   * (FR-030, AD-8). Distinct from the run-level limits above:
+   * `MAX_GLOBAL_CONCURRENCY` bounds concurrent DAG runs across the host and
+   * `DEFAULT_DAG_CONCURRENCY` bounds concurrent runs of one DAG; this bounds the
+   * fan-out inside a single run's map node (FR-035). A fan's effective child
+   * concurrency is its authored `childConcurrency` capped by this value.
+   *
+   * Contract (exact): accepted iff the env string's `Number()` coercion is a
+   * positive SAFE integer — 1..Number.MAX_SAFE_INTEGER. The coercion is
+   * `Number()`, not a decimal-integer grammar: radix (`0x8`) and exponent
+   * (`1e1`) spellings coerce to their integer; NaN spellings ("NaN", the JS
+   * numeric-separator typo "1_000"), negative zero, whitespace-only and
+   * fractional values fail boot; and a coercion beyond 2^53−1 ("1e30",
+   * "9007199254740993") fails boot "Too big" instead of silently rounding,
+   * because `.int()` is `Number.isSafeInteger`. An invalid value fails host
+   * startup with an error naming this setting (FR-032, AS-030). Default 8
+   * when unset (AS-025).
+   *
+   * Operator-only: one value for the whole host — not per-tenant, and no
+   * per-run override (FR-030, FR-034). `1` is valid and forces every map fan to
+   * run its children sequentially (FR-031).
+   *
+   * Boundary (parse, don't validate): the parsed value IS the framework's
+   * branded `FanConcurrencyCap`, minted here and nowhere else in the host. Both
+   * run paths — `syncRunOptions` for sync HTTP runs and `createRunExecutor`
+   * for resumable slices — take the brand, so no plain or unchecked cap
+   * exists past this parse. `fanConcurrencyCap` throws on anything but a
+   * positive safe integer; it runs only after `.int()` (zod v4:
+   * `Number.isSafeInteger`) and `.min(1)` have accepted exactly that set, so
+   * the throw is unreachable and every rejection stays a `config-invalid`
+   * naming this setting. The framework's own no-cap fallback
+   * (`DEFAULT_FAN_CONCURRENCY_CAP`) is spec-locked to the same default 8 —
+   * the equality is pinned by `config.test.ts`.
+   */
+  FAN_CHILD_CONCURRENCY_MAX: z.coerce.number().int().min(1).default(8).transform(fanConcurrencyCap),
   /** Default per-DAG timeout (ms) when not overridden in fugue.yaml */
   DEFAULT_DAG_TIMEOUT_MS: z.coerce.number().int().min(1000).default(60_000),
   /** Maximum allowed DAG timeout regardless of per-DAG config */

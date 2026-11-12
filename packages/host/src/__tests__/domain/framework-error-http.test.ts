@@ -79,6 +79,136 @@ describe("classifyFrameworkError", () => {
     });
   }
 
+  describe("fan errors (F1 PR-D)", () => {
+    const refusal = {
+      axis: "calls",
+      ceiling: { kind: "calls", limit: 10 },
+      perChildEstimate: 2,
+      estimatorApplied: "largest-seen",
+      effectiveConcurrency: 2,
+      completed: 3,
+      remaining: 4,
+      lowerBound: false,
+      hint: "redeploy the DAG with a larger budget",
+      scopePath: [],
+    } as const;
+    const childFailed = (primary: FrameworkError): FrameworkError => ({
+      kind: "fan-child-failed",
+      nodeId: "map" as never,
+      primary: { index: 0 as never, error: primary },
+      causes: { kind: "refusal", refusal },
+    });
+
+    it("fan-budget-refused → 429 like llm-budget-exceeded, does NOT trip the circuit", () => {
+      const e: FrameworkError = { kind: "fan-budget-refused", nodeId: "map" as never, refusal };
+      const c = classifyFrameworkError(e);
+      expect(c).toEqual(classifyFrameworkError({
+        kind: "llm-budget-exceeded",
+        runId: "r" as never,
+        nodeId: "n" as never,
+        cause: { kind: "reached", ceiling: { kind: "calls", limit: 10 }, basis: "settled", observed: 10 },
+      }));
+      expect(c.status).toBe(429);
+      expect(c.countsAsCircuitFailure).toBe(false);
+    });
+
+    it("fan-child-failed delegates to its primary child error's class", () => {
+      const denied = classifyFrameworkError(childFailed({ kind: "policy-refusal", scope: "mail.send" }));
+      expect(denied.status).toBe(403);
+      expect(denied.countsAsCircuitFailure).toBe(false);
+      const outage = classifyFrameworkError(childFailed({ kind: "infra-unreachable", operation: "mint", hop: "kc", message: "down" }));
+      expect(outage.status).toBe(503);
+      expect(outage.countsAsCircuitFailure).toBe(true);
+      const crash = classifyFrameworkError(childFailed({ kind: "node-crash", nodeId: "c" as never, message: "x", retriability: "non-retriable" }));
+      expect(crash.status).toBe(500);
+      expect(crash.countsAsCircuitFailure).toBe(true);
+    });
+
+    it("fan-budget-refused → 429 carries Retry-After: the client backs off, the host did its job", () => {
+      const c = classifyFrameworkError({ kind: "fan-budget-refused", nodeId: "map" as never, refusal });
+      expect(c.retryAfterSeconds).toBeGreaterThan(0);
+    });
+
+    it("fan-child-failed delegates recursively: a nested fan-child-failed classifies as the innermost primary's class", () => {
+      const innermost: FrameworkError = { kind: "infra-unreachable", operation: "mint", hop: "kc", message: "down" };
+      expect(classifyFrameworkError(childFailed(childFailed(innermost)))).toEqual(classifyFrameworkError(innermost));
+    });
+
+    it("the attached causes never change the class: same primary, three arms, one answer", () => {
+      // FR-025's HTTP stake: the refusal and the further failures ride along
+      // as data without altering what the client sees — the primary alone
+      // decides, in every `FanFailureCauses` arm (mirrors `retriabilityOf`).
+      const primary: FrameworkError = { kind: "transient", nodeId: "c" as never, message: "429" };
+      const secondary = {
+        index: 2 as never,
+        error: { kind: "node-crash", nodeId: "c2" as never, message: "x", retriability: "retriable" } as FrameworkError,
+      };
+      const statusWithCauses = (causes: unknown): number | undefined =>
+        classifyFrameworkError({
+          kind: "fan-child-failed",
+          nodeId: "map" as never,
+          primary: { index: 0 as never, error: primary },
+          causes: causes as never,
+        }).status;
+      expect(statusWithCauses({ kind: "secondaries", secondary: [secondary] })).toBe(500);
+      expect(statusWithCauses({ kind: "refusal", refusal })).toBe(500);
+      expect(statusWithCauses({ kind: "secondaries-and-refusal", secondary: [secondary], refusal })).toBe(500);
+      // The answer IS the primary's own class — not a new policy invented for
+      // the wrapper.
+      expect(statusWithCauses({ kind: "refusal", refusal })).toBe(classifyFrameworkError(primary).status);
+    });
+
+    it("an attached fan-budget-refused does NOT upgrade a failing primary to 429", () => {
+      // The inverse direction of delegation: the refusal rides along as
+      // FR-025 data; the client-facing status stays the primary's class —
+      // 500 + breaker, no Retry-After, because this run failed, it was not
+      // refused.
+      const c = classifyFrameworkError(childFailed({ kind: "transient", nodeId: "c" as never, message: "429" }));
+      expect(c.status).toBe(500);
+      expect(c.countsAsCircuitFailure).toBe(true);
+      expect(c.retryAfterSeconds).toBeUndefined();
+    });
+
+    it("a fan-budget-refused observed as a SECONDARY does not leak its 429 into the classification", () => {
+      // A nested fan child's own refusal sits inside a secondary's error; it
+      // is context for the operator, never the outcome the client called
+      // about — the primary still decides.
+      const c = classifyFrameworkError({
+        kind: "fan-child-failed",
+        nodeId: "map" as never,
+        primary: {
+          index: 0 as never,
+          error: { kind: "node-crash", nodeId: "c" as never, message: "x", retriability: "non-retriable" },
+        },
+        causes: {
+          kind: "secondaries",
+          secondary: [{
+            index: 3 as never,
+            error: { kind: "fan-budget-refused", nodeId: "nested" as never, refusal },
+          }],
+        },
+      } as FrameworkError);
+      expect(c.status).toBe(500);
+      expect(c.countsAsCircuitFailure).toBe(true);
+    });
+
+    it("fan-child-failed whose primary is a nested fan-budget-refused → 429, does NOT trip the circuit", () => {
+      const c = classifyFrameworkError(childFailed({
+        kind: "fan-budget-refused", nodeId: "nested-map" as never, refusal,
+      }));
+      expect(c.status).toBe(429);
+      expect(c.countsAsCircuitFailure).toBe(false);
+    });
+
+    it("fan-child-failed whose primary exhausted retries on a budget breach → 429 (delegation crosses the retry wrapper)", () => {
+      const c = classifyFrameworkError(childFailed({
+        kind: "retry-exhausted", nodeId: "c" as never, attempts: 3, lastError: "…", rootErrorKind: "llm-budget-exceeded",
+      }));
+      expect(c.status).toBe(429);
+      expect(c.countsAsCircuitFailure).toBe(false);
+    });
+  });
+
   it("validation → 500, DOES trip the circuit", () => {
     const e: FrameworkError = { kind: "validation", nodeId: "n" as never, message: "bad" };
     const c = classifyFrameworkError(e);
@@ -121,6 +251,18 @@ describe("classifyFrameworkError", () => {
       const c = classifyFrameworkError(wrapped("llm-budget-exceeded"));
       expect(c.status).toBe(429);
       expect(c.countsAsCircuitFailure).toBe(false);
+    });
+
+    it("rooted in fan-budget-refused → 429, does NOT trip the circuit", () => {
+      const c = classifyFrameworkError(wrapped("fan-budget-refused"));
+      expect(c.status).toBe(429);
+      expect(c.countsAsCircuitFailure).toBe(false);
+    });
+
+    it("rooted in fan-child-failed → 500 (only the kind survives the wrapper, the primary is unknowable)", () => {
+      const c = classifyFrameworkError(wrapped("fan-child-failed"));
+      expect(c.status).toBe(500);
+      expect(c.countsAsCircuitFailure).toBe(true);
     });
 
     it("rooted in a genuine execution failure (transient) → 500, trips the circuit", () => {

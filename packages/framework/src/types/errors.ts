@@ -1,4 +1,43 @@
-// Discriminated union of all framework errors
+// Discriminated union of all framework errors.
+//
+// THE FAN ERROR LAYER (F1 PR-D, AD-6 / INV-2) — the contract this module owns:
+//
+//   Two fan outcome kinds, built ONLY through the sole constructors in
+//   `types/error-factories.ts` (`frameworkError.fanBudgetRefused` /
+//   `.fanChildFailed`; INV-2, enforced fail-closed by the
+//   `inv-2-fan-errors-via-factory` lint rule, tests excepted):
+//
+//   - `fan-budget-refused { nodeId; refusal }` — the drain cause was a
+//     projection refusal and NO child failed (FR-014, FR-015). It is
+//     NON-RETRIABLE in `retriabilityOf` on purpose: a refusal is a function
+//     of the run's ceilings and the observed per-child spend, so replaying
+//     the node against the same ceiling re-derives the same verdict and the
+//     root retry would only burn budget looping on it (the operator's remedy
+//     is the refusal's `hint`: redeploy with a larger ceiling).
+//   - `fan-child-failed { nodeId; primary; causes }` — the drain observed the
+//     lowest-index child failure together with further failures and/or the
+//     refusal (FR-021, FR-025). Its retriability IS the primary's, so replay
+//     can clear the fan exactly when it can clear that child. The fourth
+//     failure/refusal combination (one failure, no refusal) is deliberately
+//     unrepresentable: that drain returns the bare primary error, which keeps
+//     C=1 error identity (FR-004).
+//
+//   Why `FanRefusal`/`FanFailureCauses` parse LOOSELY on the wire: this
+//   module's persisted layer re-establishes each FIELD's own domain (counts,
+//   brands, the closed estimator set, the axis↔ceiling correlation) but
+//   deliberately checks nothing BEYOND the in-memory type — the strict
+//   `ceiling`-vs-`ceilings` cross-rule belongs to the refusal SEED
+//   (`fan-scheduling.ts`), not to an error record read back at an unknown
+//   boundary. A parse here must answer exactly one question: is this a
+//   well-formed `FrameworkError` of this kind? Anything stricter would
+//   re-tag a settled refusal as a generic `node-crash` — silently dropping
+//   the FR-014 record that FR-025 forbids dropping.
+//
+//   Why the kind table is COMPILER-checked: `FRAMEWORK_ERROR_KIND_TABLE` is
+//   the single list the persisted schema's enum is derived from, so a new
+//   kind cannot be added to the union without extending the table (and vice
+//   versa) — the failure mode that previously shipped two silently divergent
+//   hand-maintained lists.
 
 import { match } from "ts-pattern";
 import { z } from "zod";
@@ -13,8 +52,15 @@ import type { RunId, NodeId } from "./ids.js";
 // `FrameworkError` from this module) — safe: type imports erase at compile
 // time, so no runtime cycle exists.
 import type { Capability } from "./node.js";
-import type { Breach } from "./budget.js";
+import type { Breach, CeilingKind } from "./budget.js";
 import { formatBreach } from "./budget.js";
+// The fan vocabulary lives in a LEAF module that never imports this one: its
+// `IndexedError`/`FanFailureCauses` are generic over the failure type and are
+// instantiated with `FrameworkError` here, so this edge cannot close a cycle.
+import type { FanFailureCauses, FanRefusal, IndexedError } from "./fan-scheduling.js";
+import { FAN_ESTIMATORS } from "./fan-scheduling.js";
+import type { MapIndex } from "./map-index.js";
+import { asMapIndex } from "./map-index.js";
 import type { MicroUsd } from "./spend.js";
 import { microUsd, unpricedModels } from "./spend.js";
 import type { TokenUsage } from "./token-usage.js";
@@ -375,6 +421,33 @@ export type FrameworkError =
       readonly nodeId: NodeId;
       readonly resolvedWidth: number;
       readonly maxWidth: number;
+    }
+  | {
+      /**
+       * A fan stopped admitting children because the projected spend of the
+       * remaining children would cross a run ceiling, and no child failed
+       * during the drain (FR-014, FR-015). A distinct outcome — not a generic
+       * failure, and not `llm-budget-exceeded`, which is a per-call refusal.
+       * Non-retriable: re-running the node against the same ceiling projects
+       * the same verdict. Build only via `frameworkError.fanBudgetRefused`.
+       */
+      readonly kind: "fan-budget-refused";
+      readonly nodeId: NodeId;
+      readonly refusal: FanRefusal;
+    }
+  | {
+      /**
+       * A fan observed child failures together with further failures and/or a
+       * refusal in the same drain (FR-021, FR-025). `primary` is the
+       * lowest-index failure; `causes` keeps everything else so a mixed drain
+       * loses nothing. A lone failure with no refusal is returned bare instead.
+       * Retriability follows the primary. Build only via
+       * `frameworkError.fanChildFailed`.
+       */
+      readonly kind: "fan-child-failed";
+      readonly nodeId: NodeId;
+      readonly primary: IndexedError<FrameworkError>;
+      readonly causes: FanFailureCauses<FrameworkError>;
     };
 
 /** Discriminant union of all error kinds — use for consumer-side exhaustive switches. */
@@ -491,6 +564,51 @@ const persistedBreachSchema = z.union([
   }),
 ]);
 const PersistedCapabilitySchema: z.ZodType<Capability> = z.string().transform((value) => value as Capability);
+const PersistedMapIndexSchema: z.ZodType<MapIndex> = z.number().transform((value, context) => {
+  const index = asMapIndex(value);
+  if (index !== undefined) return index;
+  context.addIssue({ code: "custom", message: "value is not a valid map index" });
+  return z.NEVER;
+});
+/**
+ * A fan refusal on the wire. Each field's own domain is re-established
+ * (non-negative integers, the `MicroUsd` brand, the closed estimator set), and
+ * `axis` discriminates the ceiling of that same axis — the in-memory
+ * `FanRefusal` makes a disagreeing pair unrepresentable, so the parse restores
+ * exactly that. Nothing BEYOND the type is checked (no `hint` wording, no
+ * `ceiling`-vs-run-ceilings rule — that is the refusal SEED's concern): a record
+ * failing this parse stops being a `FrameworkError` at every unknown boundary,
+ * and `asNodeFrameworkError` would then re-tag a settled refusal as a generic
+ * `node-crash`.
+ */
+const persistedFanRefusalFields = {
+  perChildEstimate: persistedCountSchema,
+  estimatorApplied: z.enum(FAN_ESTIMATORS),
+  effectiveConcurrency: z.number().int().positive(),
+  completed: persistedCountSchema,
+  remaining: persistedCountSchema,
+  lowerBound: z.boolean(),
+  hint: z.string(),
+  // Empty in D1; D2 (nested fans) extends this additively.
+  scopePath: z.tuple([]),
+};
+const persistedFanRefusalSchema = z.discriminatedUnion("axis", [
+  z.object({ axis: z.literal("tokens"), ceiling: persistedTokensCeilingSchema, ...persistedFanRefusalFields }),
+  z.object({ axis: z.literal("calls"), ceiling: persistedCallsCeilingSchema, ...persistedFanRefusalFields }),
+  z.object({ axis: z.literal("usd"), ceiling: persistedUsdCeilingSchema, ...persistedFanRefusalFields }),
+]);
+// The nested child error is a whole `FrameworkError`, parsed by the complete
+// (transforming) schema. The explicit annotation breaks the circular type
+// reference the recursion would otherwise create; `z.lazy` defers the value
+// reference until parse time, after `PersistedFrameworkErrorSchema` exists.
+const persistedNestedFrameworkError: z.ZodType<FrameworkError> = z.lazy(() => PersistedFrameworkErrorSchema);
+const persistedIndexedErrorSchema = z.object({ index: PersistedMapIndexSchema, error: persistedNestedFrameworkError });
+const persistedSecondariesSchema = z.tuple([persistedIndexedErrorSchema], persistedIndexedErrorSchema);
+const persistedFanFailureCausesSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("secondaries"), secondary: persistedSecondariesSchema }),
+  z.object({ kind: z.literal("refusal"), refusal: persistedFanRefusalSchema }),
+  z.object({ kind: z.literal("secondaries-and-refusal"), secondary: persistedSecondariesSchema, refusal: persistedFanRefusalSchema }),
+]);
 /**
  * Every `FrameworkError` discriminant, as a table the COMPILER keeps in
  * lockstep with the union: a kind missing from here, or a key here that is not
@@ -535,6 +653,8 @@ const FRAMEWORK_ERROR_KIND_TABLE: Record<FrameworkErrorKind, true> = {
   "downstream-denied": true,
   "map-width-invalid": true,
   "map-width-exceeded": true,
+  "fan-budget-refused": true,
+  "fan-child-failed": true,
 };
 
 /**
@@ -601,6 +721,8 @@ const PersistedFrameworkErrorSchemaDefinition = z.discriminatedUnion("kind", [
     resolvedWidth: z.number().int().nonnegative(),
     maxWidth: z.number().int().positive(),
   }),
+  z.looseObject({ kind: z.literal("fan-budget-refused"), nodeId: PersistedNodeIdSchema, refusal: persistedFanRefusalSchema }),
+  z.looseObject({ kind: z.literal("fan-child-failed"), nodeId: PersistedNodeIdSchema, primary: persistedIndexedErrorSchema, causes: persistedFanFailureCausesSchema }),
 ]);
 
 type MissingPersistedFrameworkErrorKind = Exclude<
@@ -637,20 +759,43 @@ const correlateCheckpointAddresses = (
 export const PersistedFrameworkErrorSchema: ExhaustivePersistedFrameworkErrorSchema =
   PersistedFrameworkErrorSchemaDefinition.transform(correlateCheckpointAddresses);
 
-/** Compare an unknown source with its canonical parser output using data properties only. */
+/**
+ * Compare an unknown source with its canonical parser output using data
+ * properties only.
+ *
+ * Termination and shared-subtree fidelity are carried by two maps, not one:
+ *   - `inFlight` holds the pairs currently being compared. A revisit of an
+ *     in-flight pair is a CYCLE; it is assumed equal while the pair's own
+ *     remaining fields still decide (the standard inductive verdict for
+ *     cyclic values — a real difference is always found at a field that is
+ *     compared).
+ *   - `settled` caches the verdict of every completed pair. A DAG-shared
+ *     subtree (one source object referenced from two fields — legal for
+ *     `fan-child-failed`, whose `causes.refusal` may also sit inside a
+ *     nested child's own refusal) must re-answer PER VISIT: the parser
+ *     materialises one fresh canonical object per path, so pinning the first
+ *     canonical (the previous single-map shape) wrongly failed such values —
+ *     and `isFrameworkError` would then re-wrap a typed fan error at an
+ *     unknown boundary, dropping the refusal (FR-025).
+ */
 const isSameOwnData = (
   source: unknown,
   canonical: unknown,
-  seen: WeakMap<object, object> = new WeakMap(),
+  inFlight: Map<object, Map<object, boolean>> = new Map(),
+  settled: WeakMap<object, Map<object, boolean>> = new WeakMap(),
 ): boolean => {
   if (Object.is(source, canonical)) return true;
   if (typeof source !== "object" || source === null ||
       typeof canonical !== "object" || canonical === null) return false;
   if (Array.isArray(source) !== Array.isArray(canonical)) return false;
 
-  const observed = seen.get(source);
-  if (observed !== undefined) return observed === canonical;
-  seen.set(source, canonical);
+  if (inFlight.get(source)?.get(canonical) === true) return true;
+  const cached = settled.get(source)?.get(canonical);
+  if (cached !== undefined) return cached;
+
+  let flight = inFlight.get(source);
+  if (flight === undefined) inFlight.set(source, (flight = new Map()));
+  flight.set(canonical, true);
 
   const sourceDescriptors = Object.getOwnPropertyDescriptors(source) as Record<
     PropertyKey,
@@ -662,17 +807,24 @@ const isSameOwnData = (
   >;
   const sourceKeys = Reflect.ownKeys(sourceDescriptors);
   const canonicalKeys = new Set(Reflect.ownKeys(canonicalDescriptors));
-  if (sourceKeys.length !== canonicalKeys.size) return false;
+  const same =
+    sourceKeys.length === canonicalKeys.size &&
+    sourceKeys.every((key) => {
+      if (!canonicalKeys.has(key)) return false;
+      const sourceProperty = sourceDescriptors[key];
+      const canonicalProperty = canonicalDescriptors[key];
+      return sourceProperty !== undefined && canonicalProperty !== undefined &&
+        Object.hasOwn(sourceProperty, "value") &&
+        Object.hasOwn(canonicalProperty, "value") &&
+        isSameOwnData(sourceProperty.value, canonicalProperty.value, inFlight, settled);
+    });
 
-  return sourceKeys.every((key) => {
-    if (!canonicalKeys.has(key)) return false;
-    const sourceProperty = sourceDescriptors[key];
-    const canonicalProperty = canonicalDescriptors[key];
-    return sourceProperty !== undefined && canonicalProperty !== undefined &&
-      Object.hasOwn(sourceProperty, "value") &&
-      Object.hasOwn(canonicalProperty, "value") &&
-      isSameOwnData(sourceProperty.value, canonicalProperty.value, seen);
-  });
+  flight.delete(canonical);
+  if (flight.size === 0) inFlight.delete(source);
+  let cache = settled.get(source);
+  if (cache === undefined) settled.set(source, (cache = new Map()));
+  cache.set(canonical, same);
+  return same;
 };
 
 /**
@@ -768,6 +920,11 @@ export const usageOfError = (e: FrameworkError): PartialTokenUsage | undefined =
       // have consumed a token.
       { kind: "map-width-invalid" },
       { kind: "map-width-exceeded" },
+      // A fan error summarises children whose spend was already attributed
+      // when each child's own calls settled. Reading usage off the nested
+      // child errors here would count those tokens a second time.
+      { kind: "fan-budget-refused" },
+      { kind: "fan-child-failed" },
       () => undefined,
     )
     .exhaustive();
@@ -807,8 +964,15 @@ export const retriabilityOf = (e: FrameworkError): Retriability =>
       // retriable would burn the node's whole budget re-deriving one verdict.
       { kind: "map-width-invalid" },
       { kind: "map-width-exceeded" },
+      // A projection refusal is a function of the run's ceilings and the
+      // observed per-child spend; re-running the node against the same ceiling
+      // projects the same verdict, so the root retry must never loop it.
+      { kind: "fan-budget-refused" },
       () => "non-retriable" as const,
     )
+    // The fan failed because its lowest-index child did: replay can clear the
+    // fan exactly when it can clear that child.
+    .with({ kind: "fan-child-failed" }, (e) => retriabilityOf(e.primary.error))
     // Everything else goes through the standard backoff path. The graph-
     // structural kinds (cycle-detected, duplicate-edge, root-expects-input, …)
     // are emitted at validation time and never reach the retry machinery, so
@@ -869,6 +1033,8 @@ export const messageOf = (e: unknown): string => {
         { kind: "predicate-malformed" },
         { kind: "map-width-invalid" },
         { kind: "map-width-exceeded" },
+        { kind: "fan-budget-refused" },
+        { kind: "fan-child-failed" },
         { kind: "validation" },
         { kind: "checkpoint-write-failed" },
         { kind: "aborted" },
@@ -954,7 +1120,45 @@ export const formatFrameworkError = (e: FrameworkError): string =>
         ? `policy refusal: scope '${e.scope}' not assigned to agent client '${e.agentClientId}'`
         : `policy refusal: scope '${e.scope}' not recognised (agent client unknown)`)
     .with({ kind: "downstream-denied" }, (e) => `downstream denied resource '${e.resource}': ${e.reason}`)
+    .with({ kind: "fan-budget-refused" }, (e) => `map node '${e.nodeId}' ${formatFanRefusal(e.refusal)}`)
+    .with({ kind: "fan-child-failed" }, (e) => {
+      const head = `map node '${e.nodeId}': child ${e.primary.index} failed: ${formatFrameworkError(e.primary.error)}`;
+      return match(e.causes)
+        .with({ kind: "secondaries" }, (c) => `${head}; ${formatSecondaries(c.secondary)}`)
+        .with({ kind: "refusal" }, (c) => `${head}; also ${formatFanRefusal(c.refusal)}`)
+        .with({ kind: "secondaries-and-refusal" }, (c) =>
+          `${head}; ${formatSecondaries(c.secondary)}; also ${formatFanRefusal(c.refusal)}`)
+        .exhaustive();
+    })
     .exhaustive();
+
+/** A figure in the unit of the ceiling axis it is measured on. */
+const formatAxisAmount = (axis: CeilingKind, amount: number): string =>
+  match(axis)
+    // Micro-USD rendered as dollars, for human-facing text only. Plain
+    // division, not `microsToUsd`: an estimate is a number, not a `MicroUsd`,
+    // and a formatter must never throw while describing a failure.
+    .with("usd", () => `$${(amount / 1_000_000).toFixed(6)}`)
+    .with("tokens", () => `${amount} tokens`)
+    .with("calls", () => `${amount} calls`)
+    .exhaustive();
+
+/**
+ * The FR-014 refusal story on one line: which ceiling, what the projection
+ * used, how far the fan got, at what concurrency, whether the figures are a
+ * lower bound, and what the operator must do to continue.
+ */
+const formatFanRefusal = (r: FanRefusal): string =>
+  `refused by budget projection on the ${r.axis} axis: ` +
+  `${r.remaining} remaining children at ${formatAxisAmount(r.axis, r.perChildEstimate)} per child ` +
+  `(estimator ${r.estimatorApplied}) would exceed the ${formatAxisAmount(r.ceiling.kind, r.ceiling.limit)} ceiling ` +
+  `(completed ${r.completed}, remaining ${r.remaining}, effective concurrency ${r.effectiveConcurrency})` +
+  (r.lowerBound ? "; the estimate is a lower bound — true spend may be higher" : "") +
+  `. Hint: ${r.hint}`;
+
+const formatSecondaries = (secondary: readonly IndexedError<FrameworkError>[]): string =>
+  `${secondary.length} further child failure${secondary.length === 1 ? "" : "s"} ` +
+  `(${secondary.map((s) => `child ${s.index}: ${s.error.kind}`).join(", ")})`;
 
 /**
  * Error subclass thrown by `runDagAsWorkerJob` so queue adapters (BullMQ)
@@ -995,6 +1199,13 @@ export class FrameworkAugmentedError extends Error {
  *
  * `safeErrorMessage` renders the value, so a hostile thrown object cannot throw
  * again while being described.
+ *
+ * The passthrough rule is also the FR-025 stake for the fan kinds: a typed
+ * `fan-budget-refused`/`fan-child-failed` reaching this boundary (e.g. a node
+ * body that returns a pre-assembled fan error as its `Err`) must survive
+ * UNCHANGED — re-wrapping it as a `node-crash` is precisely the refusal-data
+ * drop FR-025 forbids. `isFrameworkError` is the exactness gate that makes the
+ * passthrough safe: only a value that IS a well-formed typed error narrows.
  */
 export const asNodeFrameworkError = (caught: unknown, nodeId: NodeId): FrameworkError =>
   isFrameworkError(caught)

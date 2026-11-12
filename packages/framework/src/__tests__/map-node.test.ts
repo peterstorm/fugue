@@ -16,15 +16,17 @@ import { defineDag, runDag } from "../executor/index.js";
 import { makeNodeContext } from "../shared/index.js";
 import { InMemoryCheckpointer } from "../checkpoint/checkpointer.js";
 import { compositeNodeKey } from "../shared/composite-node-key.js";
-import { createMapNode } from "../nodes/map.js";
+import { createMapNode, createCollectMapNode } from "../nodes/map.js";
+import { childConcurrency } from "../types/fan-scheduling.js";
 import { createTransformNode } from "../nodes/transform.js";
 import { withHumanReview } from "../nodes/human-review.js";
 import { ok, err } from "../types/result.js";
 import { mapIndex } from "../types/map-index.js";
 import { DAG_INPUT, dagId, nodeId, runId as makeRunId } from "../types/ids.js";
 import type { Checkpointer } from "../checkpoint/checkpointer.js";
-import type { DagDef, MapNodeDef } from "../types/dag.js";
+import type { DagDef, DagDefInput, MapNodeDef } from "../types/dag.js";
 import type { NodeContext } from "../types/node.js";
+import { validateDagShape } from "../shared/validate-dag.js";
 
 const runFan = <I, C, O>(node: MapNodeDef<I, C, O>, input: I, ctx: NodeContext) =>
   runDag<I, O>(defineDag({ id: "outer", nodes: { fan: node },
@@ -550,5 +552,189 @@ describe("createMapNode — D1: one node in the outer graph", () => {
     expect(three.ok && five.ok).toBe(true);
     if (three.ok) expect(three.value).toHaveLength(3);
     if (five.ok) expect(five.value).toHaveLength(5);
+  });
+});
+
+// ── F1 PR-D (T6): authored fan scheduling ─────────────────────────────
+
+/** The map config both scheduling suites define from: the constructor's and the validator's. */
+const base = {
+  id: "fan",
+  inputSchema: z.object({ items: z.array(z.number()) }),
+  outputSchema: z.array(z.number()),
+  widthFrom: "items" as const,
+  maxWidth: 25,
+  child: childDag([]),
+  childOutputSchema: z.number(),
+  reduce: (results: readonly number[]) => ok([...results]),
+};
+
+describe("createMapNode — authored fan scheduling (F1 PR-D)", () => {
+  /** The thrown definition-time message, or a sentinel if nothing threw. */
+  const rejectionOf = (config: unknown): string => {
+    try {
+      createMapNode(config as typeof base);
+    } catch (cause) {
+      return cause instanceof Error ? cause.message : String(cause);
+    }
+    return "<no rejection>";
+  };
+
+  it("defaults to childConcurrency 1 and largest-seen when the author declares nothing (FR-001, FR-046)", () => {
+    const node = createMapNode(base);
+    expect(node.mapping.scheduling).toEqual({ childConcurrency: childConcurrency(1), estimator: "largest-seen" });
+    // Frozen parser-owned data: no caller-owned scheduling object reaches the mapping.
+    expect(Object.isFrozen(node.mapping.scheduling)).toBe(true);
+  });
+
+  it("keeps authored values, frozen on the mapping", () => {
+    const node = createMapNode({ ...base, childConcurrency: 4, estimator: "p90" });
+    expect(node.mapping.scheduling).toEqual({ childConcurrency: childConcurrency(4), estimator: "p90" });
+    expect(Object.isFrozen(node.mapping.scheduling)).toBe(true);
+    // Read once at definition: a later mutation of the caller's copy cannot
+    // reach the captured scheduling (the capture-once posture of this node).
+    const config = { ...base, childConcurrency: 4 };
+    const captured = createMapNode(config);
+    config.childConcurrency = 99;
+    expect(captured.mapping.scheduling).toEqual({ childConcurrency: childConcurrency(4), estimator: "largest-seen" });
+  });
+
+  it("rejects a childConcurrency that is not a positive safe integer, naming the node and the value (AS-029)", () => {
+    const cases: readonly [string, unknown, string][] = [
+      ["zero", 0, "got 0"],
+      ["negative", -2, "got -2"],
+      ["fraction", 1.5, "got 1.5"],
+      ["NaN", NaN, "got NaN"],
+      ["Infinity", Infinity, "got Infinity"],
+      ["string", "3", 'got "3"'],
+      ["null", null, "got null"],
+    ];
+    for (const [label, invalid, rendered] of cases) {
+      const message = rejectionOf({ ...base, childConcurrency: invalid });
+      expect(message, label).toContain("childConcurrency");
+      expect(message, label).toContain("'fan'");
+      expect(message, label).toContain(rendered);
+    }
+  });
+
+  it("rejects an estimator outside the closed set, naming the node and the value (AS-051)", () => {
+    const cases: readonly [string, unknown, string][] = [
+      ["unknown-string", "p99", 'got "p99"'],
+      ["synonym", "median", 'got "median"'],
+      ["number", 7, "got 7"],
+      ["null", null, "got null"],
+    ];
+    for (const [label, invalid, rendered] of cases) {
+      const message = rejectionOf({ ...base, estimator: invalid });
+      expect(message, label).toContain("estimator");
+      expect(message, label).toContain("'fan'");
+      expect(message, label).toContain(rendered);
+    }
+  });
+
+  it("treats an undefined authored field as absent, not as a rejected value", () => {
+    const node = createMapNode({ ...base, childConcurrency: undefined, estimator: undefined });
+    expect(node.mapping.scheduling).toEqual({ childConcurrency: childConcurrency(1), estimator: "largest-seen" });
+  });
+
+  it("survives defineDag with the authored scheduling frozen in the validated snapshot", () => {
+    const node = createMapNode({ ...base, childConcurrency: 4, estimator: "p90" });
+    const defined = defineDag({
+      id: "outer",
+      nodes: { fan: node },
+      edges: [{ from: DAG_INPUT, to: "fan" }],
+      outputNodeId: "fan",
+    });
+    const definedNode = defined.nodes[0]!;
+    if (definedNode.kind !== "map") throw new Error("expected the map node");
+    expect(definedNode.mapping.scheduling).toEqual({ childConcurrency: childConcurrency(4), estimator: "p90" });
+    expect(Object.isFrozen(definedNode.mapping.scheduling)).toBe(true);
+  });
+
+  it("applies the same defaults and authored values to the collect map", () => {
+    const collectBase = {
+      ...base,
+      id: "collect-fan",
+      collectedItemSchema: z.number(),
+      gather: { kind: "collect" as const, field: "results" as const },
+    };
+    delete (collectBase as Partial<typeof collectBase>).outputSchema;
+    const defaults = createCollectMapNode(collectBase);
+    expect(defaults.mapping.scheduling).toEqual({ childConcurrency: childConcurrency(1), estimator: "largest-seen" });
+    const authored = createCollectMapNode({ ...collectBase, childConcurrency: 3, estimator: "p95" });
+    expect(authored.mapping.scheduling).toEqual({ childConcurrency: childConcurrency(3), estimator: "p95" });
+    expect(rejectionOf({ ...collectBase, childConcurrency: 0 })).toContain("got 0");
+    expect(rejectionOf({ ...collectBase, estimator: "p99" })).toContain('got "p99"');
+  });
+});
+
+describe("validateDagShape — fan scheduling gate (F1 PR-D)", () => {
+  const defineWith = (node: unknown) =>
+    validateDagShape({
+      id: "outer",
+      nodes: { fan: node },
+      edges: [{ from: DAG_INPUT, to: "fan" }],
+      outputNodeId: "fan",
+    } as unknown as DagDefInput);
+
+  /** The `validation` arm of a refused definition, or a thrown sentinel. */
+  const validationOf = (parsed: ReturnType<typeof validateDagShape>) => {
+    if (!parsed.ok) {
+      if (parsed.error.kind !== "validation") throw new Error(`expected a validation error, got ${parsed.error.kind}`);
+      return parsed.error;
+    }
+    throw new Error("expected the DAG to be refused");
+  };
+
+  it("refuses forged scheduling on a hand-built map node, naming the node and the value (AS-029)", () => {
+    const valid = createMapNode(base);
+    // Forged scheduling bypasses the types entirely — exactly what this gate
+    // exists to catch — so the forged node is built untyped and handed straight
+    // to the shape validator.
+    const rejection = validationOf(defineWith({
+      ...valid,
+      mapping: { ...valid.mapping, scheduling: { childConcurrency: 0, estimator: "p50" } },
+    }));
+    expect(rejection.nodeId).toBe(nodeId("fan"));
+    expect(rejection.message).toContain("childConcurrency");
+    expect(rejection.message).toContain("got 0");
+  });
+
+  it("refuses a forged estimator, naming the node and the value (AS-051)", () => {
+    const valid = createMapNode(base);
+    const rejection = validationOf(defineWith({
+      ...valid,
+      mapping: { ...valid.mapping, scheduling: { childConcurrency: 2, estimator: "p99" } },
+    }));
+    expect(rejection.nodeId).toBe(nodeId("fan"));
+    expect(rejection.message).toContain("estimator");
+    expect(rejection.message).toContain('got "p99"');
+  });
+
+  // A non-object would otherwise reach `parseFanScheduling`, which reads its
+  // fields: `null` would throw there, and an array or primitive would parse
+  // to the defaults, silently laundering the forgery.
+  it.each([
+    ["null", null],
+    ["an array", []],
+    ["a string", "x"],
+    ["a number", 3],
+  ] as const)("refuses a forged non-object scheduling outright: %s", (_label, forged) => {
+    const valid = createMapNode(base);
+    const rejection = validationOf(defineWith({
+      ...valid,
+      mapping: { ...valid.mapping, scheduling: forged },
+    }));
+    expect(rejection.nodeId).toBe(nodeId("fan"));
+    expect(rejection.message).toContain("map 'fan' scheduling must be an object");
+  });
+
+  it("refuses a mapping with no scheduling at all: every producer freezes one, so its absence is a forgery", () => {
+    const valid = createMapNode(base);
+    const { scheduling: _absent, ...mappingWithoutScheduling } = valid.mapping;
+    const rejection = validationOf(defineWith({ ...valid, mapping: mappingWithoutScheduling }));
+    expect(rejection.nodeId).toBe(nodeId("fan"));
+    expect(rejection.message).toContain("map 'fan' scheduling must be an object");
+    expect(rejection.message).toContain("got undefined");
   });
 });

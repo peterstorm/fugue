@@ -18,9 +18,11 @@
 // plus `totalCostUsd` bridged from OTel spans by `TailSamplingProcessor`).
 //
 // Therefore there are TWO entry points:
-//   * `mapEventToFoundry(event)` — exhaustive over all 13 ObserverEvent
-//     variants. For `run-end` it emits a summary carrying only the fields the
-//     bare event guarantees (duration, status) plus the run-latency metric.
+//   * `mapEventToFoundry(event)` — exhaustive over all 16 ObserverEvent
+//     variants (13 pre-existing + the 3 ADR-0090 fan events, which map to `[]`
+//     by contract — see the fan arms below for why). For `run-end` it emits a
+//     summary carrying only the fields the bare event guarantees (duration,
+//     status) plus the run-latency metric.
 //     This is the seam the BufferedObserver replay path can use directly.
 //   * `mapRunSummaryToFoundry(summary, runEnd)` — the FULL FR-019 emission.
 //     The app-layer run-summary bridge computes a `RunSummary` and calls
@@ -263,6 +265,25 @@ export function mapEventToFoundry(
     .with({ type: "write-attempted" }, () => [])
     .with({ type: "freshness-violation" }, () => [])
     .with({ type: "human-intervention" }, () => [])
+    // Fan scheduling events (ADR-0090, D1) map to [] BY CONTRACT, not by
+    // omission. They are run-log observability for the fan's own budget
+    // diagnostics (FR-060: effective concurrency at start, per-projection
+    // estimates, the refusal point), additive and OUTSIDE the FR-004 trace
+    // (AD-13). The Foundry channel covers what FR-018/019/020 ask for — run
+    // summaries, routing decisions, pruned branches, node latency, cache
+    // hits — and a fan budget event carries none of those signals, so a
+    // Foundry emission here would duplicate a channel with no consumer. A fan
+    // refusal still surfaces end-to-end: the run summary's `status: "error"`
+    // plus the `fan-budget-refused` FrameworkError, the same deliberate
+    // channel as `node-error` above.
+    //
+    // Exhaustiveness contract: a NEW ObserverEvent variant must grow an arm
+    // HERE (the `.exhaustive()` below makes forgetting one a compile error);
+    // give the new arm a stated rationale like this one, so the next reader
+    // can tell a contract from an oversight.
+    .with({ type: "fan-start" }, () => [])
+    .with({ type: "fan-projection" }, () => [])
+    .with({ type: "fan-refused" }, () => [])
     .exhaustive();
 }
 

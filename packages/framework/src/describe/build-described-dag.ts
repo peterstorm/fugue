@@ -13,6 +13,7 @@ import { match } from "ts-pattern";
 import type { z } from "zod";
 import type { DagDef, DagNodeDef } from "../types/dag.js";
 import type { FrameworkError } from "../types/errors.js";
+import type { FanEstimator } from "../types/fan-scheduling.js";
 import { type Result, ok, err } from "../types/result.js";
 import { topoSort } from "../shared/topo.js";
 import { inventoryCapabilities, runtimeNodeInventory } from "../shared/runtime-node-inventory.js";
@@ -44,6 +45,13 @@ interface DescribedNodeBase {
 export interface DescribedMap {
   readonly widthFrom: string;
   readonly maxWidth: number;
+  /**
+   * Authored, defaulted fan scheduling (F1 PR-D, AD-8): the child-concurrency
+   * limit and per-child estimator the fan will run with, before any host cap.
+   * Projected so manifest consumers can reason about fan pacing; the
+   * effective (capped) value is runtime state, not definition data.
+   */
+  readonly scheduling: Readonly<{ readonly childConcurrency: number; readonly estimator: FanEstimator }>;
   readonly childDagId: string;
   readonly gather: Readonly<{ readonly kind: "collect"; readonly field: string }> | null;
   readonly childNodes: readonly DescribedNode[];
@@ -186,6 +194,8 @@ const describeNode = (
     mapping: {
       widthFrom: node.mapping.widthFrom,
       maxWidth: node.mapping.maxWidth,
+      // Already plain data: the validator froze a fresh `parseFanScheduling` result here (FR-001, FR-046).
+      scheduling: node.mapping.scheduling,
       childDagId: node.mapping.child.id,
       gather: node.mapping.authoredGather === undefined
         ? null

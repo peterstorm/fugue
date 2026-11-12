@@ -88,8 +88,36 @@ FR-023's *outcome* for stored data is preserved; only its restriction on new add
   structured clone (a function throws). Both settle typed, but the classes differ, so those cases
   are pinned per backend rather than in the shared suite.
 
+## Note: a second fan address space (F1 PR-D1)
+
+[ADR-0090](0090-concurrent-fan-scheduling-and-whole-fan-projection.md) adds one more composite namespace on top of ADR-0086's fan
+completions at `dag@<mapNodeId>@<index>@<executionEpoch>`. When a map fan's whole-fan
+budget projection refuses, the fan persists a **refusal seed** for its current
+execution epoch:
+
+`fan-seed@<mapNodeId>@0@<executionEpoch>`
+
+The seed is written through the same `Checkpointer.saveNode` port, with
+`{ namespace: "fan-seed", index: 0, attempt: executionEpoch }`.
+
+**There is no grammar, codec, port or backend change:**
+
+- `fan-seed` is an ordinary namespace value. It encodes and parses through the
+  unchanged `compositeNodeKey` / `parseCompositeNodeKey` pair.
+- On Redis it is one more field in the run's node hash. The in-memory and file
+  backends store it like any other composite address.
+- It is disjoint from `dag` by namespace, so a seed can never be read as a child
+  completion.
+- Like any other entry, it falls under ADR-0086's whole-fan corruption refusal.
+
+The Negative consequence above still applies: readers walking `RunState.nodes`
+must use `parseCompositeNodeKey` and must not assume bare node ids. One node can
+now hold its canonical key, its `dag@…` completions and its `fan-seed@…` entries
+side by side.
+
 ## Related
 
 - ADR-0075 — the composite codec and its file-backend-only rollout, which this completes
+- ADR-0090 — concurrent fan scheduling; the `fan-seed` namespace
 - ADR-0084 — the same class of gap (a suite proving something about a non-shipped configuration)
 - `docs/plans/2026-09-06-f1-runtime-width-fanout.md` §2, PR-A

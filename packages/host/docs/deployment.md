@@ -25,8 +25,9 @@ Deploy a Fugue Host instance for a team on OpenShift with their own LLM credenti
 11. [Execute a DAG](#execute-a-dag)
 12. [Multiple Teams](#multiple-teams)
 13. [Monitoring & Troubleshooting](#monitoring--troubleshooting)
-14. [Scaling](#scaling)
-15. [Upgrading](#upgrading)
+14. [Map Fan Concurrency](#map-fan-concurrency)
+15. [Scaling](#scaling)
+16. [Upgrading](#upgrading)
 
 ---
 
@@ -298,6 +299,8 @@ spec:
               value: "50"
             - name: DEFAULT_DAG_CONCURRENCY
               value: "10"
+            - name: FAN_CHILD_CONCURRENCY_MAX   # child-level: children of ONE map fan, not runs
+              value: "8"
             - name: DEFAULT_DAG_TIMEOUT_MS
               value: "60000"
             - name: DRAIN_TIMEOUT_MS
@@ -601,7 +604,133 @@ Deploy one host instance per team. They share nothing except the container image
 | DAG not appearing | Path doesn't match `dags/{team}/{name}/dag.ts` | Fix directory structure |
 | 401 on DAG calls | Token invalid or revoked | Re-provision team |
 | 429 | Concurrency limit hit | Increase `maxConcurrent` in fugue.yaml |
+| 429 `fan-budget-refused` | A map fan's whole-fan projection says its remaining children cannot fit the DAG's `llmBudget` | Push the DAG with a larger `llmBudget`, or lower the fan's width. A resumed run of the same fan stays refused until a ceiling is raised ([details](#resume-after-a-refusal)) |
 | 503 `dag-disabled` | Circuit breaker open | Wait 30s or push fix |
+
+---
+
+## Map Fan Concurrency
+
+A runtime-width `map` node (a **fan**) runs a child DAG once per input item. The
+operator controls how many of a fan's children may run at once with one host-wide
+setting:
+
+| Variable | Default | Level | Bounds |
+|---|---|---|---|
+| `FAN_CHILD_CONCURRENCY_MAX` | `8` | child | Children of **one map fan**, inside one run |
+| `MAX_GLOBAL_CONCURRENCY` | `50` | run | Concurrent DAG runs across the host |
+| `DEFAULT_DAG_CONCURRENCY` / `fugue.yaml` `maxConcurrent` | `10` | run | Concurrent runs of one DAG |
+
+These are different knobs. Raising `maxConcurrent` never speeds up a fan, and
+`FAN_CHILD_CONCURRENCY_MAX` never admits more runs.
+
+### Effective concurrency
+
+- **Authoring.** The DAG author sets `childConcurrency` on the map node. It
+  defaults to `1`, which means sequential.
+- **Effective value.** The fan runs at **effective concurrency**
+  `C = min(childConcurrency, FAN_CHILD_CONCURRENCY_MAX)`.
+- **Clamping.** When the authored value is higher than the cap, the host logs one
+  warning and emits one `fan-start` observer event with `clamped: true`. Both name
+  the fan, the authored value and the effective value.
+- **Validation.** `FAN_CHILD_CONCURRENCY_MAX` must be a positive integer. Any other
+  value fails startup with an error naming the setting.
+- **Sequential fallback.** `FAN_CHILD_CONCURRENCY_MAX=1` is valid and forces every
+  fan on the host to run sequentially. It is the switch to reach for if concurrent
+  fans misbehave against a provider. It switches concurrency off, not budget
+  projection: an unbudgeted fan then behaves as in earlier releases, but a budgeted fan
+  still projects the whole fan, so it may refuse earlier than the per-call meter
+  alone would, and it then writes a refusal seed
+  ([below](#resume-after-a-refusal)).
+- **No overrides.** The setting is host-wide only. There is no per-tenant value
+  and no per-run override.
+
+**Sizing.**
+
+- **Provider rate limits.** Concurrency multiplies across the levels. Up to
+  `MAX_GLOBAL_CONCURRENCY` runs, each running a fan of up to C children, can be
+  calling the LLM provider at once. Size provider rate limits and quotas for that
+  product, or lower the cap. The host does no cross-fan or tenant-level rate
+  limiting.
+- **Nested maps** are refused at DAG load in this release, so one fan contributes
+  at most C concurrent children. When nested fans ship, a two-level fan's peak
+  will be bounded by the product of both levels' effective concurrencies
+  (`C_outer × C_inner`), and each level is capped by `FAN_CHILD_CONCURRENCY_MAX`.
+- **Static siblings** of an authored fan-out wave are not governed by this setting.
+
+### Budget projection and overshoot
+
+For a DAG with an `llmBudget`, each fan projects its own spend:
+
+- **Probe batch.** The first `min(C, remaining)` children run unprojected.
+- **Projection.** Before every later dispatch, the fan checks
+  `settled + remainingChildren × perChildEstimate` against each budgeted ceiling.
+  It refuses when a ceiling would be breached.
+- **Refusal.** The run fails with `fan-budget-refused` (HTTP 429). The error names:
+  - the axis and ceiling;
+  - the per-child estimate and the estimator applied;
+  - the effective concurrency;
+  - the completed and remaining counts;
+  - whether the figures are a lower bound.
+- **No cancellation.** Children already in flight are not cancelled. They finish
+  and are saved.
+
+C is the effective concurrency. M is the largest measured per-child spend, which is
+never below a child's true cost. With the default `largest-seen` estimator:
+
+- **(a)** Spend after the refusal decision is ≤ (C−1) × M.
+- **(b)** With no cost spike, dispatches after the probe batch never exceed a
+  ceiling. Total post-probe overshoot is therefore ≤ (C−1) × M.
+- **(c) Probe carve-out.** The unprojected probe batch is bounded by C × M, and by
+  the host per-call meter.
+- **(d) Cost spike.** A child costing more than the estimate in force when it was
+  admitted is bounded only by the host per-call meter.
+
+With a percentile estimator (`p50`, `p90`, `p95`), (a) still holds but (b) is
+**best effort only**. The host per-call meter remains the hard stop for every call
+under every estimator.
+
+### Resume after a refusal
+
+A refusal is persisted as a **refusal seed** in the run's Redis checkpoint node
+hash, as field `fan-seed@<mapNodeId>@0@<epoch>`. Fan completions are stored
+alongside it as `dag@…` fields.
+
+**Which runs this affects.**
+
+- **Synchronous runs.** A synchronous HTTP run is never resumed. It returns the
+  429, and a new request is a new run with no seed.
+- **Settled durable runs.** The host records a durable (HITL) run that settled
+  with `fan-budget-refused` as **failed** and does not retry it.
+- **Interrupted durable runs.** The seed governs any later re-execution of the
+  same run in the same execution epoch. Two cases:
+  - a replacement worker resumes a slice that was interrupted (for example a pod
+    restart) after the refusal but before the failure was recorded;
+  - an embedder resumes the run through the framework's resumable entry point.
+
+  In both cases the fan reads the seed **before dispatching anything**.
+
+**The refusal is sticky until a redeploy raises a ceiling.**
+
+- **Without a raise.** A pod restart, a host upgrade, or a DAG push with an equal
+  or lower budget refuses again: the same `fan-budget-refused`, **zero** children
+  dispatched, and a `fan-refused` event with `sticky: true`.
+  - Run ceilings come only from the DAG's budget configuration, and a caller can
+    only tighten them.
+- **Raising the budget.** Push a DAG revision with a larger `llmBudget`. The next
+  resume of that run projects before every dispatch, skips the probe batch, and
+  reuses every saved child.
+  - Budget and concurrency changes do not alter the DAG fingerprint, so saved
+    children stay valid across that redeploy.
+  - If the raise is still not enough, the fan refuses again with a refreshed seed.
+- **Reroute.** A HITL reroute that re-runs the fan starts a new execution epoch.
+  The old seed is ignored, and the fan probes afresh.
+- **Do not delete seeds.** Do not delete `fan-seed@…` fields to "unstick" a run.
+  The seed is what keeps a resume from spending another probe batch past the
+  ceiling. Raise the budget instead.
+
+The full decision record, ADR-0090 (concurrent fan scheduling), lives in the
+repository's `docs/adr/`.
 
 ---
 

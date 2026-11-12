@@ -17,7 +17,7 @@
 
 import { match } from "ts-pattern";
 import { ok, err, runId as makeRunId, safeErrorMessage } from "@fuguejs/framework";
-import type { Result, DagId, NodeContext, DagDef, FrameworkError, RunId, CapabilityHandle } from "@fuguejs/framework";
+import type { Result, DagId, NodeContext, DagDef, FrameworkError, RunId, CapabilityHandle, FanConcurrencyCap, RunOptions } from "@fuguejs/framework";
 import { runDag } from "@fuguejs/framework";
 import type { HostConfig } from "./domain/config.js";
 import type { HostState } from "./domain/host-state.js";
@@ -266,6 +266,24 @@ export const withSubjectTokenRelease = async <T>(
     registry.release(runId);
   }
 };
+
+/**
+ * Kernel options for a synchronous (non-HITL) HTTP run. The operator fan cap is
+ * a REQUIRED argument, so `executeDag` cannot start a run without it: the
+ * host-wide `FAN_CHILD_CONCURRENCY_MAX` ceiling (FR-030) applies to sync runs
+ * exactly as it does to resumable ones, and is never a per-run input (FR-034).
+ * `minting` is passed through unchanged (`undefined` when no broker is wired).
+ *
+ * Pure and exported so the cap-reaches-the-kernel wiring is asserted directly,
+ * the same way `withSubjectTokenRelease` pins the teardown.
+ */
+export const syncRunOptions = (
+  operatorFanCap: FanConcurrencyCap,
+  minting: RunOptions["minting"],
+): Pick<RunOptions, "minting" | "fanConcurrencyCap"> => ({
+  minting,
+  fanConcurrencyCap: operatorFanCap,
+});
 
 /**
  * Select the capability broker for this boot — the per-invocation AUTHORITY
@@ -626,6 +644,9 @@ const wireHitlRunEngine = async (args: {
       agentClientMap: config.AGENT_CLIENT_MAP,
       tenant: routedTenant,
       runRetentionTtlSec: config.HITL_RUN_TTL_SEC,
+      // FR-030: the operator ceiling on map-fan child concurrency, branded by
+      // the config parse; the executor applies it to every resumable slice.
+      fanConcurrencyCap: config.FAN_CHILD_CONCURRENCY_MAX,
       logger: sharedInfra.logger,
     });
     const runQueue = createRunQueue({
@@ -994,11 +1015,14 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
       // wiring (resolve AND throw) is unit-testable against the real registry
       // without copy-drift from this call site.
       return withSubjectTokenRelease(subjectTokens, ctx.runId, () =>
-        runDag<I, O>(dag, input, ctx, {
-          minting: broker !== undefined && origin !== undefined
+        runDag<I, O>(dag, input, ctx, syncRunOptions(
+          // FR-030 / FR-032: the operator fan cap, branded by the host config
+          // parse (its only mint site) — the same value every resumable slice gets.
+          config.FAN_CHILD_CONCURRENCY_MAX,
+          broker !== undefined && origin !== undefined
             ? { broker, origin, meterLlm: meterMintedLlm }
             : undefined,
-        }),
+        )),
       );
     },
     clock: Date.now,

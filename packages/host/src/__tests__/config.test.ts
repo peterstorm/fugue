@@ -1,4 +1,7 @@
 import { describe, it, expect } from "bun:test";
+import * as fc from "fast-check";
+import { DEFAULT_FAN_CONCURRENCY_CAP, fanConcurrencyCap } from "@fuguejs/framework";
+import type { FanConcurrencyCap } from "@fuguejs/framework";
 import { parseHostConfig, parseFugueYaml, HostConfigSchema, FugueYamlSchema } from "../domain/config.js";
 import type { HostConfig, FugueYaml } from "../domain/config.js";
 
@@ -226,6 +229,330 @@ describe("HostConfigSchema", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.MAX_GLOBAL_CONCURRENCY).toBe(100);
+  });
+
+  describe("FAN_CHILD_CONCURRENCY_MAX (FR-030..FR-032, FR-035)", () => {
+    /** The env spelling fails startup with a `config-invalid` naming this setting (FR-032, AS-030). */
+    const expectRejectedNamingSetting = (raw: string): void => {
+      const result = parseHostConfig({ ...validEnv, FAN_CHILD_CONCURRENCY_MAX: raw });
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.kind).toBe("config-invalid");
+      if (result.error.kind !== "config-invalid") return;
+      expect(result.error.message).toContain("FAN_CHILD_CONCURRENCY_MAX");
+    };
+
+    it("defaults to 8 when unset (AS-025, SC-011)", () => {
+      const result = parseHostConfig(validEnv);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.FAN_CHILD_CONCURRENCY_MAX).toBe(8);
+    });
+
+    it("is a setting distinct from the run-level concurrency limits (FR-035)", () => {
+      const result = parseHostConfig({
+        ...validEnv,
+        MAX_GLOBAL_CONCURRENCY: "3",
+        DEFAULT_DAG_CONCURRENCY: "2",
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      // Overriding the run-level limits leaves the per-fan ceiling at its own default.
+      expect(result.value.FAN_CHILD_CONCURRENCY_MAX).toBe(8);
+      expect(result.value.MAX_GLOBAL_CONCURRENCY).toBe(3);
+      expect(result.value.DEFAULT_DAG_CONCURRENCY).toBe(2);
+    });
+
+    it("accepts 1, which forces sequential fans (FR-031, SC-011)", () => {
+      const result = parseHostConfig({ ...validEnv, FAN_CHILD_CONCURRENCY_MAX: "1" });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.FAN_CHILD_CONCURRENCY_MAX).toBe(1);
+    });
+
+    it("coerces a numeric string from the environment (z.coerce)", () => {
+      // Env vars arrive as strings, so an operator writes
+      // FAN_CHILD_CONCURRENCY_MAX=4 and the parsed config carries the number.
+      for (const [raw, value] of [["4", 4], ["16", 16]] as const) {
+        const result = parseHostConfig({ ...validEnv, FAN_CHILD_CONCURRENCY_MAX: raw });
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.FAN_CHILD_CONCURRENCY_MAX).toBe(value);
+      }
+    });
+
+    // Each constraint is exercised distinctly: `0`/`-1`/`-3` are valid integers
+    // below the `min(1)` floor, `1.5`/`2.5` are numbers above it that fail only
+    // `int()`, `""` coerces to 0, and `"abc"` fails the number coercion outright.
+    for (const bad of ["0", "-3", "-1", "1.5", "2.5", "abc", ""]) {
+      it(`rejects ${JSON.stringify(bad)} at startup with an error naming the setting (FR-032, AS-030)`, () =>
+        expectRejectedNamingSetting(bad));
+    }
+
+    it("property: accepts exactly the positive integers and preserves the value", () => {
+      fc.assert(
+        fc.property(fc.integer({ min: 1, max: 1_000_000 }), (n) => {
+          const result = parseHostConfig({ ...validEnv, FAN_CHILD_CONCURRENCY_MAX: String(n) });
+          return result.ok && result.value.FAN_CHILD_CONCURRENCY_MAX === n;
+        }),
+      );
+    });
+
+    it("property: rejects every non-positive integer, naming the setting", () => {
+      fc.assert(
+        fc.property(fc.integer({ min: -1_000_000, max: 0 }), (n) => {
+          const result = parseHostConfig({ ...validEnv, FAN_CHILD_CONCURRENCY_MAX: String(n) });
+          return (
+            !result.ok &&
+            result.error.kind === "config-invalid" &&
+            result.error.message.includes("FAN_CHILD_CONCURRENCY_MAX")
+          );
+        }),
+      );
+    });
+
+    it("property: rejects every non-integer, naming the setting", () => {
+      fc.assert(
+        fc.property(
+          fc.double({ min: -1000, max: 1000, noNaN: true, noDefaultInfinity: true }).filter((x) => !Number.isInteger(x)),
+          (x) => {
+            const result = parseHostConfig({ ...validEnv, FAN_CHILD_CONCURRENCY_MAX: String(x) });
+            return (
+              !result.ok &&
+              result.error.kind === "config-invalid" &&
+              result.error.message.includes("FAN_CHILD_CONCURRENCY_MAX")
+            );
+          },
+        ),
+      );
+    });
+
+    // int()/min(1) boundary over coerced IEEE numbers: `1.0` and `1` are the
+    // same number, so an operator who writes a decimal point still gets the
+    // integer they meant — while `1.5`/`2.5` (tested above) are genuinely
+    // fractional and fail boot.
+    it("accepts integer-valued decimals as exactly that integer", () => {
+      for (const [raw, value] of [["1.0", 1], ["8.0", 8], ["2.0", 2]] as const) {
+        const result = parseHostConfig({ ...validEnv, FAN_CHILD_CONCURRENCY_MAX: raw });
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.FAN_CHILD_CONCURRENCY_MAX).toBe(value);
+      }
+    });
+
+    // Non-finite coercions must never become an unbounded cap: `1e999`
+    // overflows to Infinity, which would silently mean "no ceiling". The number
+    // coercion refuses non-finite input outright, so these fail boot — and
+    // whichever check fires, the parse must fail AND name the setting
+    // (FR-032, AS-030).
+    for (const bad of ["Infinity", "-Infinity", "1e999", "-1e999"]) {
+      it(`rejects the non-finite spelling ${JSON.stringify(bad)}, naming the setting`, () =>
+        expectRejectedNamingSetting(bad));
+    }
+
+    // A string that is only ALMOST a number (thousands separator, trailing
+    // units, embedded whitespace) coerces to NaN — it must fail boot loudly,
+    // never partially coerce to its leading digits.
+    for (const bad of ["8,000", "8abc", "1 2"]) {
+      it(`rejects the almost-numeric spelling ${JSON.stringify(bad)}, naming the setting`, () =>
+        expectRejectedNamingSetting(bad));
+    }
+
+    // "Not set" and "set to nothing" are different operator mistakes with
+    // different outcomes: an absent entry takes the default (8); an empty
+    // entry is a present-but-invalid value that fails boot (FR-032).
+    it("treats an explicitly-undefined entry as unset (default 8) while an empty string stays invalid", () => {
+      const absent = parseHostConfig({ ...validEnv, FAN_CHILD_CONCURRENCY_MAX: undefined });
+      expect(absent.ok).toBe(true);
+      if (!absent.ok) return;
+      expect(absent.value.FAN_CHILD_CONCURRENCY_MAX).toBe(8);
+      expect(parseHostConfig({ ...validEnv, FAN_CHILD_CONCURRENCY_MAX: "" }).ok).toBe(false);
+    });
+
+    // Deliberately NO upper bound (unlike PORT's 65535): the cap bounds fan
+    // width, which is itself bounded by the map's width, so a huge operator
+    // cap is harmless. Pin that no artificial ceiling creeps in and that
+    // safe-integer precision survives the string→number→config round trip.
+    it("accepts large positive integers without an upper bound, preserving safe-integer precision", () => {
+      for (const [raw, value] of [
+        [String(2 ** 20), 2 ** 20],
+        [String(Number.MAX_SAFE_INTEGER), Number.MAX_SAFE_INTEGER],
+      ] as const) {
+        const result = parseHostConfig({ ...validEnv, FAN_CHILD_CONCURRENCY_MAX: raw });
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.FAN_CHILD_CONCURRENCY_MAX).toBe(value);
+      }
+    });
+
+    it("property: every integer in [2^31, MAX_SAFE_INTEGER] is accepted and preserved exactly", () => {
+      fc.assert(
+        fc.property(fc.integer({ min: 2 ** 31, max: Number.MAX_SAFE_INTEGER }), (n) => {
+          const result = parseHostConfig({ ...validEnv, FAN_CHILD_CONCURRENCY_MAX: String(n) });
+          return result.ok && result.value.FAN_CHILD_CONCURRENCY_MAX === n;
+        }),
+      );
+    });
+
+    // The coercion contract: the parsed value is a function of the number the
+    // operator meant, not of the spelling they used. Every conventional env
+    // spelling of the same positive integer — leading zeros, explicit sign,
+    // surrounding whitespace, integer-valued decimal — parses to that integer.
+    it("property: the parsed value is a function of the coerced number, not the operator's spelling", () => {
+      fc.assert(
+        fc.property(fc.integer({ min: 1, max: 1_000_000 }), (n) => {
+          for (const raw of [String(n), `0${n}`, `+${n}`, ` ${n} `, `${n}.0`]) {
+            const result = parseHostConfig({ ...validEnv, FAN_CHILD_CONCURRENCY_MAX: raw });
+            if (!(result.ok && result.value.FAN_CHILD_CONCURRENCY_MAX === n)) return false;
+          }
+          return true;
+        }),
+      );
+    });
+
+    // ── The host default and the framework fallback are the same constant ─────
+    // AD-7: when no cap is plumbed into a run, the framework falls back to its
+    // own DEFAULT_FAN_CONCURRENCY_CAP; T7's plumbing passes this config value
+    // instead. Both defaults are spec-locked to the same 8 (AS-025): if either
+    // side drifts, an unset operator env would silently disagree with the
+    // framework fallback. The equality is pinned here, across the package
+    // boundary.
+    // Parse, don't validate: the config parse is the cap's only host mint site,
+    // so both run paths receive the brand and never re-mint a plain number.
+    it("parses to the framework's branded FanConcurrencyCap (compile-checked by the annotation)", () => {
+      const result = parseHostConfig({ ...validEnv, FAN_CHILD_CONCURRENCY_MAX: "3" });
+      if (!result.ok) throw new Error(`expected a valid config: ${JSON.stringify(result.error)}`);
+      const cap: FanConcurrencyCap = result.value.FAN_CHILD_CONCURRENCY_MAX;
+      expect(cap).toBe(fanConcurrencyCap(3));
+    });
+
+    it("host default equals the framework's fallback DEFAULT_FAN_CONCURRENCY_CAP (AS-025)", () => {
+      expect(DEFAULT_FAN_CONCURRENCY_CAP).toBe(8);
+      const result = parseHostConfig(validEnv);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.FAN_CHILD_CONCURRENCY_MAX).toBe(DEFAULT_FAN_CONCURRENCY_CAP);
+    });
+
+    // FR-035 in BOTH directions: the three concurrency settings are mutually
+    // independent — no cross-field coupling clamps one to another. The
+    // distinctness test above leaves the fan cap at its default, above the
+    // run-level limits; here it sits explicitly BELOW them, and above
+    // run-level limits of 1.
+    it("composes independently with the run-level limits in both directions (FR-035)", () => {
+      const below = parseHostConfig({
+        ...validEnv,
+        FAN_CHILD_CONCURRENCY_MAX: "2",
+        MAX_GLOBAL_CONCURRENCY: "50",
+        DEFAULT_DAG_CONCURRENCY: "10",
+      });
+      expect(below.ok).toBe(true);
+      if (!below.ok) return;
+      expect(below.value.FAN_CHILD_CONCURRENCY_MAX).toBe(2);
+      expect(below.value.MAX_GLOBAL_CONCURRENCY).toBe(50);
+      expect(below.value.DEFAULT_DAG_CONCURRENCY).toBe(10);
+
+      const above = parseHostConfig({
+        ...validEnv,
+        FAN_CHILD_CONCURRENCY_MAX: "3",
+        MAX_GLOBAL_CONCURRENCY: "1",
+        DEFAULT_DAG_CONCURRENCY: "1",
+      });
+      expect(above.ok).toBe(true);
+      if (!above.ok) return;
+      expect(above.value.FAN_CHILD_CONCURRENCY_MAX).toBe(3);
+      expect(above.value.MAX_GLOBAL_CONCURRENCY).toBe(1);
+      expect(above.value.DEFAULT_DAG_CONCURRENCY).toBe(1);
+    });
+
+    // FR-032/FR-035 at the error layer: when BOTH limits are invalid, the
+    // aggregated startup failure names each offending setting independently —
+    // the fan cap's failure must not be swallowed by, or misreported as, the
+    // run-level limit's failure.
+    it("names both settings independently when both are invalid at startup (FR-032, FR-035)", () => {
+      const result = parseHostConfig({
+        ...validEnv,
+        MAX_GLOBAL_CONCURRENCY: "0",
+        FAN_CHILD_CONCURRENCY_MAX: "0",
+      });
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.kind).toBe("config-invalid");
+      if (result.error.kind !== "config-invalid") return;
+      expect(result.error.message).toContain("MAX_GLOBAL_CONCURRENCY");
+      expect(result.error.message).toContain("FAN_CHILD_CONCURRENCY_MAX");
+    });
+
+    // The coercion is `Number()`, not a decimal-integer grammar: radix- and
+    // exponent-prefixed spellings of a positive integer coerce to exactly that
+    // integer, so an operator who writes 0x8 or 1e1 gets that cap. Pinning the
+    // behaviour (rather than leaving it an accident) makes any future
+    // tightening of the accepted grammar a deliberate, test-visible decision.
+    it("accepts radix and exponent spellings as exactly the integer they coerce to", () => {
+      for (const [raw, value] of [
+        ["0x8", 8],
+        ["0b1000", 8],
+        ["0o10", 8],
+        ["1e1", 10],
+        ["4e0", 4],
+      ] as const) {
+        const result = parseHostConfig({ ...validEnv, FAN_CHILD_CONCURRENCY_MAX: raw });
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.FAN_CHILD_CONCURRENCY_MAX).toBe(value);
+      }
+    });
+
+    // Edge spellings with distinct failure modes, each of which must fail boot
+    // naming the setting (FR-032, AS-030): NaN coercions (the literal "NaN"/
+    // "nan" — e.g. an unset shell variable echoed into the env — and the JS
+    // numeric-separator typo "1_000"), an embedded space ("0 4"), negative
+    // zero and whitespace-only (both coerce to an integer below the min), and
+    // a sub-1 exponent (coerces to a fraction).
+    for (const bad of ["NaN", "nan", "1_000", "0 4", "-0", " ", "1e-3"]) {
+      it(`rejects the edge spelling ${JSON.stringify(bad)}, naming the setting (FR-032, AS-030)`, () =>
+        expectRejectedNamingSetting(bad));
+    }
+
+    // `.int()` in zod v4 is Number.isSafeInteger, so the accepted set has a
+    // REAL ceiling at Number.MAX_SAFE_INTEGER: a value whose coercion exceeds
+    // 2^53−1 fails boot ("Too big") instead of silently rounding to a
+    // neighbouring integer (e.g. "9007199254740993" coerces to 2^53). Every
+    // safe positive integer is still accepted — no artificial bound — but the
+    // IEEE precision ceiling must fail loudly, never round.
+    for (const [raw, coerced] of [
+      ["9007199254740993", 9007199254740992],
+      ["1e30", 1e30],
+      ["0xFFFFFFFFFFFFFFFF", 18446744073709552000],
+    ] as const) {
+      it(`rejects ${raw}, whose Number() coercion ${coerced} exceeds MAX_SAFE_INTEGER (safe-integer ceiling)`, () =>
+        expectRejectedNamingSetting(raw));
+    }
+
+    // The exact contract, stated as a property over ARBITRARY env strings:
+    // the schema accepts a spelling iff Number() coerces it to a positive
+    // SAFE integer (zod v4 `.int()` = Number.isSafeInteger, plus min(1)), and
+    // the parsed value is exactly that coerced number. Every rejection is
+    // `config-invalid` and names the setting. Any drift — an artificial
+    // ceiling, a decimal-only grammar, silent rounding of unsafe integers, a
+    // rejection that loses the setting name — fails this property.
+    it("property: accepts exactly the strings whose Number() coercion is a positive safe integer", () => {
+      fc.assert(
+        fc.property(fc.string(), (raw) => {
+          const coerced = Number(raw);
+          const expected = Number.isSafeInteger(coerced) && coerced >= 1;
+          const result = parseHostConfig({ ...validEnv, FAN_CHILD_CONCURRENCY_MAX: raw });
+          if (result.ok !== expected) return false;
+          if (!result.ok) {
+            return (
+              result.error.kind === "config-invalid" &&
+              result.error.message.includes("FAN_CHILD_CONCURRENCY_MAX")
+            );
+          }
+          return result.value.FAN_CHILD_CONCURRENCY_MAX === coerced;
+        }),
+      );
+    });
   });
 
   it("accepts optional LLM provider override", () => {

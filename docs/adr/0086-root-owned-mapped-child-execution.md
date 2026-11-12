@@ -1,7 +1,12 @@
 # ADR-0086: Root-owned mapped child execution
 
 ## Status
-Accepted — implemented and merged in PR #46 on 2026-09-08.
+Accepted — implemented and merged in PR #46 on 2026-09-08. **Amended by
+[ADR-0090](0090-concurrent-fan-scheduling-and-whole-fan-projection.md)** (F1
+PR-D1): the sequential fan described under
+*Bounded v1* is superseded by bounded-concurrency scheduling with whole-fan budget
+projection. See the amendment note at the end of *Bounded v1 refusal and
+cancellation*. Everything else here stands.
 
 ## Date
 2026-09-08
@@ -172,6 +177,38 @@ empty/final-index success. An already-completed child may still have its success
 completion saved. Cancellation cannot undo delegated effects, and effects without
 acknowledged fan completion may repeat after interruption.
 
+> **Amendment (F1 PR-D1, ADR-0090).** v1 dispatched a fan's children **one at a
+> time**, and this record's cancellation and corruption wording assumed one child
+> in flight. That sequential fan is superseded by
+> [ADR-0090](0090-concurrent-fan-scheduling-and-whole-fan-projection.md):
+>
+> - A map node runs up to its effective concurrency `C = min(childConcurrency,
+>   FAN_CHILD_CONCURRENCY_MAX)` of children at once. `childConcurrency` defaults to
+>   1 and the host cap defaults to 8.
+> - A whole-fan budget projection runs before each dispatch after the probe batch.
+>
+> What this record decided **still holds at every C**:
+>
+> - Root ownership and authority. `FanRuntime` (budget, cap, logger) is root-owned,
+>   and the map's `requires` stays `["checkpointer"]`.
+> - Completion identity `dag@<mapNodeId>@<index>@<executionEpoch>`.
+> - Whole-fan corruption refusal before any dispatch.
+> - The refusals of nested maps, child human review and child freshness
+>   extractors.
+>
+> **Cancellation** generalises to a **drain**:
+>
+> - An abort, a terminal child failure or a projection refusal stops further
+>   dispatch.
+> - Every in-flight child is awaited, and its successful output is validated and
+>   saved.
+> - Reduction never runs after an abort or a refusal.
+>
+> For an unbudgeted fan at C=1, the dispatch order, the checkpoint calls, the
+> reducer input and the errors are byte-identical to this record's sequential fan.
+> A budgeted fan still projects the whole fan at C=1, so it may refuse earlier than
+> the per-call meter alone would, and it then writes a refusal seed (ADR-0090 §10).
+
 ## Alternatives not chosen
 
 - **Materialize N outer nodes:** breaks static topology and one-output-per-NodeId.
@@ -201,6 +238,21 @@ PR-C authored-map/plate rendering, PR-D whole-fan admission projection and concu
 fan scheduling remain separate work. PR-B validation history lives in the closure
 record; merge does not certify deployed infrastructure or exactly-once effects.
 
+**Superseded consequence (F1 PR-D1).** The PR-D work this section deferred is
+decided in [ADR-0090](0090-concurrent-fan-scheduling-and-whole-fan-projection.md).
+It covers bounded-concurrency scheduling, probe-then-project whole-fan admission,
+the typed `fan-budget-refused` and `fan-child-failed` outcomes, and the per-epoch
+refusal seed.
+
+- **What no longer holds.** Before PR-D1, a run that hit its spend ceiling
+  mid-fan stopped at a known index, because only one child was in flight. That
+  property is gone.
+- **What replaces it.** A refused fan reports the stop as a `FanRefusal`, with
+  completed and remaining counts that include drain completions. Overshoot after
+  the refusal is bounded by (C−1)×M, under ADR-0090's FR-018 terms.
+- **What stays deferred.** Nested fans (D2) and adaptive concurrency with
+  static-sibling limits (D3).
+
 ## Related
 
 - [F1 plan §13](../plans/2026-09-06-f1-runtime-width-fanout.md#13-pr46-correctness-closure--current-contract-2026-09-08)
@@ -211,3 +263,4 @@ record; merge does not certify deployed infrastructure or exactly-once effects.
 - [ADR-0075](0075-composite-checkpoint-node-key-encoding-with-canonical-folding.md) — composite grammar
 - [ADR-0085](0085-composite-checkpoint-addressing-is-port-contract-on-every-backend.md) — backend parity
 - [ADR-0083](0083-spend-durability-lives-in-a-ledger-port.md) — root spend durability
+- [ADR-0090](0090-concurrent-fan-scheduling-and-whole-fan-projection.md) — concurrent fan scheduling and whole-fan projection (amends this record)

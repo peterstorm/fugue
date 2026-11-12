@@ -577,7 +577,7 @@ export const runNodeShared = async (
         } else {
           runResult = await runMappedFan(node, inputResult.value,
             runCtx as TypedNodeContext<readonly ["checkpointer"]>,
-            execution.executionEpoch, execution.scope.executeMappedChild, nowFn);
+            execution.executionEpoch, execution.scope.executeMappedChild, execution.scope.fan, nowFn);
         }
       } else {
         const runFn = node.run as (

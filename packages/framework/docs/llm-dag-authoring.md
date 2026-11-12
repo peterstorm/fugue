@@ -173,6 +173,20 @@ host's durable execution path). Ordinary `NodeDef` remains callable;
 integer), `child: DagDef`, `childOutputSchema`, and
 `reduce: (results: readonly ChildOut[]) => Result<O, FrameworkError>`.
 
+Two optional scheduling fields (ADR-0090) do not affect the DAG fingerprint:
+
+- `childConcurrency` — a positive integer, default 1: how many of this fan's
+  children may be in flight at once. The host caps it with
+  `FAN_CHILD_CONCURRENCY_MAX` (default 8); an authored value above the cap is
+  clamped with one warning and a `fan-start` event marked `clamped`. This is a
+  per-fan setting and is unrelated to the DAG-level run-concurrency limit.
+- `estimator` — `"largest-seen"` (default), `"p50"`, `"p90"` or `"p95"`: the
+  per-child cost estimate used for whole-fan budget projection. A percentile
+  falls back to `largest-seen` until 5 children have settled.
+
+Any other value for either field is rejected at definition with an error naming
+the node and the value.
+
 `createCollectMapNode` is the collect specialization used by deterministic
 authored-map codegen. Its config omits `outputSchema` and `reduce`; one
 `gather: { kind: "collect", field }` plus `collectedItemSchema` causes the
@@ -230,8 +244,23 @@ const dag = defineDag({
   a parent's scoped grant never becomes the child's base authority. Describe
   capabilities are the sorted, deduplicated union of the same bounded outer/direct-
   child runtime inventory; map `requires` and the outer topology stay unchanged.
-- Indices run sequentially; the reducer receives validated outputs in ascending
-  index order, including `[]` for a live zero-width fan. Missing/non-array fields,
+- Indices start in ascending order, at most the effective concurrency
+  `min(childConcurrency, host cap)` in flight; the reducer receives validated
+  outputs in ascending index order whatever order they completed in, including
+  `[]` for a live zero-width fan. At effective concurrency 1 an unbudgeted fan's
+  trace is the sequential fan's. A budgeted fan still projects the whole fan at
+  C=1 (next bullet), so it may refuse earlier than the per-call meter alone would,
+  and it then writes a refusal seed.
+- On a budgeted run the fan is admitted as a whole. After an unprojected probe
+  batch of `min(C, remaining)` children, every dispatch is preceded by a
+  projection `settled + remainingChildren × estimate` on each budgeted axis. A
+  breach stops dispatch, lets in-flight children finish and save, and returns
+  the typed `fan-budget-refused` error without reducing. The refusal is
+  persisted, so resuming without a larger budget refuses again before any
+  dispatch; redeploying with a larger budget reuses every saved child.
+- A terminal child failure also drains: no new dispatch, in-flight children
+  finish and save, and the lowest-index failure is the primary error with the
+  others attached. Missing/non-array fields,
   revoked-array inputs and over-limit widths fail closed, never truncate.
 - Acknowledged completions use map NodeId plus `{ index, attempt: executionEpoch }`
   in `Checkpointer`. The epoch is the **persisted parent `freshnessExecutionEpoch`**:
@@ -283,7 +312,7 @@ captured evaluator definition. Opaque schema/function references and closure sta
 are not recursively cloned, and caller-owned values are not frozen. This adds no
 recursive child fingerprint, indexed broker audit
 dimension, or root aggregation of child judge/guardrail summaries. Whole-fan budget
-projection remains the separate PR-D follow-up; `defineFanOut` remains author-time
+projection is described above (ADR-0090); `defineFanOut` remains author-time
 parallel sibling width.
 
 #### Closed authored maps (`fugue new --from` / `fugue compose`)
