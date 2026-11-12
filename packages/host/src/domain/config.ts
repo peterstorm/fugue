@@ -22,7 +22,7 @@
  */
 
 import { z } from "zod";
-import { ok, err } from "@fuguejs/framework";
+import { ok, err, fanConcurrencyCap } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import type { HostError } from "./host-error.js";
 import type { TenantId } from "./tenant.js";
@@ -212,14 +212,19 @@ export const HostConfigSchema = z.object({
    * per-run override (FR-030, FR-034). `1` is valid and forces every map fan to
    * run its children sequentially (FR-031).
    *
-   * Boundary: this stays a PLAIN validated integer in host config. Converting
-   * it to the framework's branded `FanConcurrencyCap` (`fanConcurrencyCap(...)`)
-   * and threading it into `runResumableDagJob` opts as `fanConcurrencyCap` is
-   * the run-executor plumbing's job (T7, wave 2); the framework's own no-cap
-   * fallback (`DEFAULT_FAN_CONCURRENCY_CAP`) is spec-locked to the same 8 —
+   * Boundary (parse, don't validate): the parsed value IS the framework's
+   * branded `FanConcurrencyCap`, minted here and nowhere else in the host. Both
+   * run paths — `syncRunOptions` for sync HTTP runs and `createRunExecutor`
+   * for resumable slices — take the brand, so no plain or unchecked cap
+   * exists past this parse. `fanConcurrencyCap` throws on anything but a
+   * positive safe integer; it runs only after `.int()` (zod v4:
+   * `Number.isSafeInteger`) and `.min(1)` have accepted exactly that set, so
+   * the throw is unreachable and every rejection stays a `config-invalid`
+   * naming this setting. The framework's own no-cap fallback
+   * (`DEFAULT_FAN_CONCURRENCY_CAP`) is spec-locked to the same default 8 —
    * the equality is pinned by `config.test.ts`.
    */
-  FAN_CHILD_CONCURRENCY_MAX: z.coerce.number().int().min(1).default(8),
+  FAN_CHILD_CONCURRENCY_MAX: z.coerce.number().int().min(1).default(8).transform(fanConcurrencyCap),
   /** Default per-DAG timeout (ms) when not overridden in fugue.yaml */
   DEFAULT_DAG_TIMEOUT_MS: z.coerce.number().int().min(1000).default(60_000),
   /** Maximum allowed DAG timeout regardless of per-DAG config */

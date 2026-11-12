@@ -5,11 +5,14 @@
  * concurrency. `executeDag` (host.ts) builds its kernel options through the
  * exported `syncRunOptions` seam, whose cap argument is required, so a sync HTTP
  * run cannot be started without the operator cap. Resumable (HITL) slices build
- * theirs through `sliceRunOptions` (run-executor.ts), fed by the executor's
- * required `fanChildConcurrencyMax` dependency.
+ * theirs through `sliceRunOptions` (run-executor.ts), whose cap argument is
+ * required in the same way and is fed by the executor's required
+ * `fanConcurrencyCap` dependency. Both receive the one value the host config
+ * parse brands; the executor-level proof that a non-default cap actually
+ * reaches a running fan lives in run-executor.test.ts.
  *
  * Pins:
- *   - every resumable slice's kernel options carry the executor's branded cap.
+ *   - every resumable slice's kernel options carry the operator's branded cap.
  *   - the branded cap reaches `fanConcurrencyCap` unchanged, for the sequential
  *     setting (1), the default (8) and a larger value.
  *   - minting is passed through untouched, wired or not.
@@ -51,14 +54,12 @@ describe("syncRunOptions - a sync run carries the operator fan cap (FR-030)", ()
 
 describe("sliceRunOptions - a resumable slice carries the operator fan cap (FR-030)", () => {
   type SliceArgs = Parameters<typeof sliceRunOptions>;
-  type Composition = SliceArgs[0];
   type SliceRequest = SliceArgs[1];
   type SliceJob = SliceArgs[2];
   type SliceFence = SliceArgs[3];
 
   // Only the fields `sliceRunOptions` reads are populated; building the options
   // closes over the callbacks without invoking them.
-  const composition = (cap: Composition["fanCap"]): Composition => ({ fanCap: cap }) as Composition;
   const request = {
     onHumanReview: async () => undefined,
     onDecisionConsumed: async () => undefined,
@@ -69,7 +70,7 @@ describe("sliceRunOptions - a resumable slice carries the operator fan cap (FR-0
   it.each([1, 8, 32])("forwards an operator cap of %i into the slice's kernel options", (max) => {
     const cap = fanConcurrencyCap(max);
 
-    const opts = sliceRunOptions(composition(cap), request, job, fence, undefined);
+    const opts = sliceRunOptions(cap, request, job, fence, undefined);
 
     expect(opts.fanConcurrencyCap).toBe(cap);
   });
@@ -78,7 +79,7 @@ describe("sliceRunOptions - a resumable slice carries the operator fan cap (FR-0
     const cap = fanConcurrencyCap(3);
     const minting = { marker: "minting" } as unknown as NonNullable<RunOptions["minting"]>;
 
-    expect(sliceRunOptions(composition(cap), request, job, fence, minting).fanConcurrencyCap).toBe(cap);
-    expect(sliceRunOptions(composition(cap), request, job, fence, undefined).fanConcurrencyCap).toBe(cap);
+    expect(sliceRunOptions(cap, request, job, fence, minting).fanConcurrencyCap).toBe(cap);
+    expect(sliceRunOptions(cap, request, job, fence, undefined).fanConcurrencyCap).toBe(cap);
   });
 });

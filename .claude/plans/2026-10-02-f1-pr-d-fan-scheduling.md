@@ -72,7 +72,7 @@ Replayed indices produce no sample. **M** (spec FR-018) is defined as the per-ax
 - Host-tagged exact attribution (`spentFor(scope)`). It extends the capability contract and the host meter.
 - Batch-average attribution. It under-estimates the largest child.
 
-**Accepted cost:** Over-refusal of up to about (2C−1)× at high C under heavy overlap. Percentile estimators are biased high. Both are documented in ADR-0087.
+**Accepted cost:** Over-refusal of up to about (2C−1)× at high C under heavy overlap. Percentile estimators are biased high. Both are documented in ADR-0090.
 
 ### AD-4: Projection arithmetic is headroom-native and conservative
 
@@ -254,7 +254,7 @@ It is built from the root-validated base context (`validatedCtx.budget`) and `op
 - **(b) No post-probe overshoot when spike-free.** "Spike-free" means every child's measured spend is ≤ the estimate in force at its admission. Let t* be the last admission. Then `spend(t*) + R(t*)·e(t*) ≤ ceiling` holds there. Every child still to spend was admitted at or before t*, under estimates that never decrease under largest-seen, so final spend ≤ ceiling. With (a), total post-probe overshoot ≤ (C−1)·M.
   - On lower-bound axes (unpriced or unknown-usage), (b) holds against the known lower bound.
 - **(c) Probe carve-out ≤ C·M** (plus the host per-call meter). Once the probe has overshot, the first post-probe projection sees `amount = 0` and refuses any child with a non-zero estimate.
-- **(d) A cost spike** (a child above the estimate at its admission) is bounded only by the host per-call meter (FR-019). This is pinned by an example test and documented in ADR-0087.
+- **(d) A cost spike** (a child above the estimate at its admission) is bounded only by the host per-call meter (FR-019). This is pinned by an example test and documented in ADR-0090.
 
 **Why:** This is the round-1 user decision. I tightened the wording into (a)–(d) because "post-probe overshoot ≤ (C−1)·M" is false in general. At C=1, a child costing 100× everything seen before is admitted on the old estimate and overshoots by more than 0 = (C−1)·M. The spec Change Log records this precision.
 
@@ -264,9 +264,9 @@ It is built from the root-validated base context (`validatedCtx.budget`) and `op
 
 ### AD-13: C=1 equivalence is defined over FR-004's trace
 
-**Choice:** At effective concurrency 1, the following are byte-identical to today, verified against a golden trace recorded from the pre-change `runMappedFan` (SC-001): dispatch order, checkpoint `load`/`setMeta`/`saveNode` calls and their order, reducer input, and returned errors.
+**Choice:** For an unbudgeted fan at effective concurrency 1, the following are byte-identical to today, verified against a golden trace recorded from the pre-change `runMappedFan` (SC-001): dispatch order, checkpoint `load`/`setMeta`/`saveNode` calls and their order, reducer input, and returned errors.
 - The new observer events are additive and outside the FR-004 trace.
-- A budgeted C=1 fan whose projection breaches now refuses (and writes a seed), which is earlier than today's meter-only stop. That is US2 working as intended.
+- A budgeted fan still projects the whole fan at C=1, so it may refuse earlier than the per-call meter alone would, and it then writes a refusal seed. That is US2 working as intended, and it is why C=1 is not a plain off-switch for budgeted fans.
 - The equivalence suite therefore runs unbudgeted and within-budget fixtures, and also covers AS-028 (host max 1).
 
 **Why:** It makes "identical" a checkable contract.
@@ -340,8 +340,8 @@ packages/framework/src/__tests__/fan-fingerprint.test.ts   — NEW: fingerprint 
 ### Host
 
 ```
-packages/host/src/domain/config.ts                         — FAN_CHILD_CONCURRENCY_MAX (default 8, int ≥1)
-packages/host/src/hitl/adapters/run-executor.ts            — pass fanConcurrencyCap(config value) into runResumableDagJob
+packages/host/src/domain/config.ts                         — FAN_CHILD_CONCURRENCY_MAX (default 8, int ≥1), branded FanConcurrencyCap by the parse
+packages/host/src/hitl/adapters/run-executor.ts            — pass the branded config value into runResumableDagJob
 packages/host/src/domain/framework-error-http.ts           — classify fan-budget-refused / fan-child-failed (exhaustive)
 packages/host/src/__tests__/config.test.ts                 — default 8, value 1, invalid → startup error naming setting (SC-011, AS-030)
 packages/host/src/__tests__/integration/mapped-host-composition.test.ts — extend: cap applied end-to-end, clamp warning + event, real-ledger refusal → seed in Redis hash → sticky refusal across restart → redeploy with raised ceiling completes
@@ -350,8 +350,8 @@ packages/host/src/__tests__/integration/mapped-host-composition.test.ts — exte
 ### Docs
 
 ```
-docs/adr/0087-concurrent-fan-scheduling-and-whole-fan-projection.md — NEW
-docs/adr/0086-root-owned-mapped-child-execution.md         — amend "Bounded v1" + Consequences: sequential superseded by ADR-0087
+docs/adr/0090-concurrent-fan-scheduling-and-whole-fan-projection.md — NEW
+docs/adr/0086-root-owned-mapped-child-execution.md         — amend "Bounded v1" + Consequences: sequential superseded by ADR-0090
 docs/adr/0085-composite-checkpoint-addressing-is-port-contract-on-every-backend.md — note the `fan-seed` namespace as a second fan address space (no grammar change)
 docs/adr/README.md                                         — index entry
 docs/plans/2026-09-06-f1-runtime-width-fanout.md           — §12 "The fan is sequential" superseded; §13 contract update
@@ -521,8 +521,8 @@ Never `Promise.all`; never return with pending slots.
 **Responsibility:** Operator-controlled host-wide cap, validated at startup and applied to every run.
 **Files:** `packages/host/src/domain/config.ts`, `packages/host/src/hitl/adapters/run-executor.ts`, `packages/host/src/domain/framework-error-http.ts`
 **Interface:**
-- `FAN_CHILD_CONCURRENCY_MAX: z.coerce.number().int().min(1).default(8)`.
-- `runResumableDagJob(dag, input, ctx, { …, fanConcurrencyCap: fanConcurrencyCap(config.FAN_CHILD_CONCURRENCY_MAX) })`.
+- `FAN_CHILD_CONCURRENCY_MAX: z.coerce.number().int().min(1).default(8).transform(fanConcurrencyCap)` — the only mint site of the operator cap.
+- `runResumableDagJob(dag, input, ctx, { …, fanConcurrencyCap: config.FAN_CHILD_CONCURRENCY_MAX })`.
 - HTTP classification: `fan-budget-refused` maps to the same class as `llm-budget-exceeded`; `fan-child-failed` delegates to the primary's class.
 
 **Depends on:** Fan scheduling types, Fan errors
@@ -650,12 +650,12 @@ Eleven tasks in five waves. The machine → shell → integration chain is inher
 - **T7: Host cap plumbing.** `run-executor` passes `fanConcurrencyCap(...)`, and `runResumableDagJob` forwards it.
   - **Files:** `packages/host/src/hitl/adapters/run-executor.ts`, `packages/framework/src/executor/run-dag.ts`
 - **T8: Docs.**
-  - ADR-0087 (AD-1..AD-13 condensed; the AD-12 statement (a)–(d) verbatim; AD-11 seed lifecycle; percentile best-effort).
+  - ADR-0090 (AD-1..AD-13 condensed; the AD-12 statement (a)–(d) verbatim; AD-11 seed lifecycle; percentile best-effort).
   - Amend ADR-0086, note on ADR-0085, ADR index.
   - F1 plan §12/§13.
   - Host README and deployment docs.
   - CONTEXT.md terms. The fan-runner header comment is rewritten in T10.
-  - **Files:** `docs/adr/0087-*.md`, `docs/adr/0086-*.md`, `docs/adr/0085-*.md`, `docs/adr/README.md`, `docs/plans/2026-09-06-f1-runtime-width-fanout.md`, `packages/host/README.md`, `packages/host/docs/deployment.md`, `CONTEXT.md`
+  - **Files:** `docs/adr/0090-*.md`, `docs/adr/0086-*.md`, `docs/adr/0085-*.md`, `docs/adr/README.md`, `docs/plans/2026-09-06-f1-runtime-width-fanout.md`, `packages/host/README.md`, `packages/host/docs/deployment.md`, `CONTEXT.md`
 
 ### Phase 3: Fan machine LC-1 (depends on Phase 1 + T5)
 
@@ -726,7 +726,7 @@ The deterministic harness gives each child a manually resolved deferred and give
 ## Security & NFR Notes
 
 - **Authority:** The framework only reads `BudgetCapability` from the root-owned `FanRuntime`; there are no writes and no new port (FR-012, OOS-001). The seed is written through the fan's existing `checkpointer` port under its own namespace. The host per-call meter stays the hard stop (FR-019) and the only bound on a cost spike (FR-018 d).
-- **Resource safety:** Concurrency is bounded by min(authored, operator cap). An operator setting cap = 1 restores sequential behaviour host-wide (FR-031).
+- **Resource safety:** Concurrency is bounded by min(authored, operator cap). An operator setting cap = 1 restores sequential behaviour host-wide (FR-031); budgeted fans still project (AD-13).
 - **Performance:** The scheduler is O(1) per step apart from estimator sorting, which is O(n log n) on settled samples per projection. The seed is at most `maxWidth` samples and is written only on refusal.
 - **Determinism:** With concurrency fixed at C, reducer input, errors, saved indices and resume-after-refusal outcomes are interleaving-independent. Only event timing varies.
 

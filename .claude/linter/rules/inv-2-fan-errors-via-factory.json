@@ -1,9 +1,9 @@
 {
   "kind": "regex",
   "name": "inv-2-fan-errors-via-factory",
-  "description": "F1 PR-D: fan-budget-refused and fan-child-failed errors are constructed only through frameworkError factories, so every refusal carries the redeploy hint, lower-bound flag and estimator-applied fields",
+  "description": "F1 PR-D: fan-budget-refused and fan-child-failed errors are constructed only through frameworkError factories, so every refusal carries the redeploy hint, lower-bound flag and estimator-applied fields. Line-based: flags the kind followed by a comma, the kind as the last property after another one (`, kind: \"fan-…\" }`), and the kind alone at the end of a line (last property of a multi-line literal); an optional `as const` is tolerated. A kind-only `{ kind: \"fan-…\" }` (ts-pattern arm or P.union entry) is not flagged: it lacks the required nodeId/refusal or primary/causes fields, so tsc rejects it as a FrameworkError and it can only be a match pattern. Type members (`;`), zod `z.literal(…)` and comparisons never match.",
   "extensions": [".ts"],
-  "pattern": "kind:\\s*[\"'`]fan-(budget-refused|child-failed)[\"'`]\\s*,",
+  "pattern": "kind:\\s*[\"'`]fan-(budget-refused|child-failed)[\"'`][^,;})]*,|,\\s*kind:\\s*[\"'`]fan-(budget-refused|child-failed)[\"'`][^,;})]*\\}|^\\s*kind:\\s*[\"'`]fan-(budget-refused|child-failed)[\"'`][^,;})]*$",
   "flags": "",
   "excludePatterns": ["types/error-factories.ts", ".test.ts"],
   "fixHint": "Build the error with frameworkError.fanBudgetRefused(...) / frameworkError.fanChildFailed(...) from packages/framework/src/types/error-factories.ts instead of an object literal.",

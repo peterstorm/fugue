@@ -16,7 +16,7 @@
  */
 
 import { match } from "ts-pattern";
-import { ok, err, runId as makeRunId, safeErrorMessage, fanConcurrencyCap } from "@fuguejs/framework";
+import { ok, err, runId as makeRunId, safeErrorMessage } from "@fuguejs/framework";
 import type { Result, DagId, NodeContext, DagDef, FrameworkError, RunId, CapabilityHandle, FanConcurrencyCap, RunOptions } from "@fuguejs/framework";
 import { runDag } from "@fuguejs/framework";
 import type { HostConfig } from "./domain/config.js";
@@ -644,9 +644,9 @@ const wireHitlRunEngine = async (args: {
       agentClientMap: config.AGENT_CLIENT_MAP,
       tenant: routedTenant,
       runRetentionTtlSec: config.HITL_RUN_TTL_SEC,
-      // FR-030: the operator ceiling on map-fan child concurrency. The executor
-      // brands it once and applies it to every resumable slice.
-      fanChildConcurrencyMax: config.FAN_CHILD_CONCURRENCY_MAX,
+      // FR-030: the operator ceiling on map-fan child concurrency, branded by
+      // the config parse; the executor applies it to every resumable slice.
+      fanConcurrencyCap: config.FAN_CHILD_CONCURRENCY_MAX,
       logger: sharedInfra.logger,
     });
     const runQueue = createRunQueue({
@@ -961,11 +961,6 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
   // then live consistently under `fugue:default:`.
   const tokenStore = createRedisTokenStore(sharedInfra.redis, routedTenant, sharedInfra.logger);
 
-  // FR-030 / FR-032: brand the operator fan cap ONCE at composition. Host config
-  // validation has already accepted it as a positive integer, so the smart
-  // constructor cannot throw here; every sync run below receives this value.
-  const operatorFanCap = fanConcurrencyCap(config.FAN_CHILD_CONCURRENCY_MAX);
-
   const routerDeps: RouterDeps = {
     hitl: hitlService,
     teamsBot: teamsBotHandle,
@@ -1021,7 +1016,9 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
       // without copy-drift from this call site.
       return withSubjectTokenRelease(subjectTokens, ctx.runId, () =>
         runDag<I, O>(dag, input, ctx, syncRunOptions(
-          operatorFanCap,
+          // FR-030 / FR-032: the operator fan cap, branded by the host config
+          // parse (its only mint site) — the same value every resumable slice gets.
+          config.FAN_CHILD_CONCURRENCY_MAX,
           broker !== undefined && origin !== undefined
             ? { broker, origin, meterLlm: meterMintedLlm }
             : undefined,

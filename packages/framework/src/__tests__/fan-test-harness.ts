@@ -37,7 +37,7 @@ import { remainingFor, type BudgetCapability } from "../types/budget-capability.
 import { ceilings, type Breach, type Ceiling } from "../types/budget.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { ObserverEvent } from "../types/events.js";
-import { fanConcurrencyCap, type FanEstimator } from "../types/fan-scheduling.js";
+import { fanConcurrencyCap, type FanEstimator, type FanRefusal } from "../types/fan-scheduling.js";
 import { DAG_INPUT, dagId, nodeId, runId as toRunId } from "../types/ids.js";
 import type { MappedChildScope } from "../types/mapped-child-scope.js";
 import type { MapNodeDef } from "../types/dag.js";
@@ -122,11 +122,36 @@ export const crashChild = (cause: unknown): ChildPlan => ({ kind: "crash", cause
 export const childError = (index: number): FrameworkError =>
   ({ kind: "rejected", nodeId: WORK, reason: `child ${index} failed` });
 
+/** Child `i` succeeds with `i × 10`: the plan whose reduce is `range(width)`. */
+export const tenfold = (i: number): ChildPlan => okChild(i * 10);
+
+// ---------------------------------------------------------------------------
+// Expected results
+// ---------------------------------------------------------------------------
+
+/** `[f(0), …, f(n − 1)]`; by default the reduce of a fan whose children are all `tenfold`. */
+export const range = (n: number, f: (i: number) => number = (i) => i * 10): number[] =>
+  Array.from({ length: n }, (_, i) => f(i));
+
+/** The error a fan returned; a success fails the test, naming the value. */
+export const errorOf = (r: Result<unknown, FrameworkError>): FrameworkError => {
+  if (r.ok) throw new Error(`expected an error, got ok(${JSON.stringify(r.value)})`);
+  return r.error;
+};
+
+/** The refusal a fan returned; any other outcome fails the test, naming its kind. */
+export const refusalOf = (r: Result<unknown, FrameworkError>): FanRefusal => {
+  const error = errorOf(r);
+  if (error.kind !== "fan-budget-refused") throw new Error(`expected fan-budget-refused, got ${error.kind}`);
+  return error.refusal;
+};
+
 // ---------------------------------------------------------------------------
 // The fan under test
 // ---------------------------------------------------------------------------
 
-const childDag = defineDag({
+/** The one child every harness fan maps: `work` echoes its numeric item. */
+export const childDag = defineDag({
   id: "child",
   nodes: { work: createFetchNode({ id: "work", inputSchema: z.number(), outputSchema: z.number(), fetch: async (n) => ok(n) }) },
   edges: [{ from: DAG_INPUT, to: "work" }],

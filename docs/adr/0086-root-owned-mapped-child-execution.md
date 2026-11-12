@@ -204,8 +204,10 @@ acknowledged fan completion may repeat after interruption.
 >   saved.
 > - Reduction never runs after an abort or a refusal.
 >
-> At C=1 the dispatch order, the checkpoint calls, the reducer input and the
-> errors are byte-identical to this record's sequential fan.
+> For an unbudgeted fan at C=1, the dispatch order, the checkpoint calls, the
+> reducer input and the errors are byte-identical to this record's sequential fan.
+> A budgeted fan still projects the whole fan at C=1, so it may refuse earlier than
+> the per-call meter alone would, and it then writes a refusal seed (ADR-0090 §10).
 
 ## Alternatives not chosen
 

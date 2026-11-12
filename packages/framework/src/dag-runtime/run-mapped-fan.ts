@@ -23,7 +23,8 @@
 //      decision and after every settle, and is fed to the machine BEFORE the
 //      settle so a cancelled fan starts nothing more (FR-023);
 //   6. on `persist-seed`, save the seed before returning — a failed seed save
-//      returns its typed error (fail closed, like a child save); on `finish`,
+//      returns its typed error (fail closed, like a child save) and logs the
+//      fan's own error it displaces, child failures included; on `finish`,
 //      reduce (only if the signal is still clear: today's final abort gate)
 //      or return the error.
 //
@@ -55,13 +56,12 @@
 import { match } from "ts-pattern";
 import type { Remaining } from "../types/budget-capability.js";
 import type { MapNodeDef } from "../types/dag.js";
-import type { FrameworkError } from "../types/errors.js";
+import { formatFrameworkError, type FrameworkError } from "../types/errors.js";
 import { frameworkError } from "../types/error-factories.js";
 import type { ObserverEvent } from "../types/events.js";
 import {
   FAN_SEED_NAMESPACE,
   FanRefusalSeedSchema,
-  parseFanScheduling,
   type FanRefusalSeed,
   type FanScheduling,
 } from "../types/fan-scheduling.js";
@@ -171,8 +171,6 @@ export const runMappedFan = async (
   const stored: StoredNodes = loaded.value?.nodes ?? {};
   const seed = seedOf(id, stored, executionEpoch);
   if (!seed.ok) return seed;
-  const scheduling = schedulingOf(node);
-  if (!scheduling.ok) return scheduling;
   if (loaded.value === null) {
     const seeded = await ctx.checkpointer.setMeta(ctx.runId, {
       dagId: ctx.dagId, startedAt: new Date(now()), nodeCount: width,
@@ -183,16 +181,12 @@ export const runMappedFan = async (
     node, ctx, epoch: executionEpoch, executeChild, fan, now, items,
     replays: replaysOf(id, stored, width, executionEpoch),
   });
-  return interpret(shell, announce(shell, scheduling.value, seed.value));
+  return interpret(shell, announce(shell, mapping.scheduling, seed.value));
 };
 
 // ---------------------------------------------------------------------------
-// Before the first start: scheduling, seed, replays, fan-start
+// Before the first start: seed, replays, fan-start
 // ---------------------------------------------------------------------------
-
-/** The map's frozen scheduling; an absent field takes the parser-owned defaults (FR-001). */
-const schedulingOf = (node: MapNodeDef): Result<FanScheduling, FrameworkError> =>
-  node.mapping.scheduling !== undefined ? ok(node.mapping.scheduling) : parseFanScheduling(node.id, {});
 
 /** This epoch's refusal seed, if one was persisted. Unparseable ⇒ fail closed, naming the fan. */
 const seedOf = (
@@ -298,15 +292,32 @@ const loop = async (shell: FanShell, init: FanState, pool: SlotPool): Promise<Fa
 };
 
 /** Execute one step's commands in order; a non-null result is the fan's final result. */
-const perform = async (shell: FanShell, commands: readonly FanCommand[], pool: SlotPool): Promise<FanResult | null> => {
-  for (const command of commands) {
-    const finished = await performOne(shell, command, pool);
+const perform = async (shell: FanShell, step: readonly FanCommand[], pool: SlotPool): Promise<FanResult | null> => {
+  for (const command of step) {
+    const finished = await performOne(shell, command, step, pool);
     if (finished !== null) return finished;
   }
   return null;
 };
 
-const performOne = (shell: FanShell, command: FanCommand, pool: SlotPool): Promise<FanResult | null> =>
+/**
+ * The error this step's `finish` returns: what a failed seed save displaces.
+ * The machine emits `persist-seed` only in a step that ends with a failing
+ * `finish` (FR-026); anything else is a broken contract.
+ */
+const displacedBy = (step: readonly FanCommand[]): FrameworkError => {
+  const last = step.at(-1);
+  return last?.type === "finish" && last.finish.kind === "fail"
+    ? last.finish.error
+    : contractViolation("persist-seed in a step that does not finish with an error");
+};
+
+const performOne = (
+  shell: FanShell,
+  command: FanCommand,
+  step: readonly FanCommand[],
+  pool: SlotPool,
+): Promise<FanResult | null> =>
   match(command)
     .returnType<Promise<FanResult | null>>()
     .with({ type: "replay" }, async ({ index }) => occupy(shell, pool, index, () => replaySlot(shell, index)))
@@ -321,7 +332,7 @@ const performOne = (shell: FanShell, command: FanCommand, pool: SlotPool): Promi
       }));
       return null;
     })
-    .with({ type: "persist-seed" }, ({ seed }) => persistSeed(shell, seed))
+    .with({ type: "persist-seed" }, ({ seed }) => persistSeed(shell, seed, displacedBy(step)))
     .with({ type: "finish" }, async ({ finish }) => conclude(shell, finish))
     .exhaustive();
 
@@ -334,18 +345,21 @@ const occupy = (shell: FanShell, pool: SlotPool, index: MapIndex, slot: () => Pr
   return null;
 };
 
-/** Save the refusal seed before the fan returns; a failed save is the fan's error (fail closed). */
-const persistSeed = async (shell: FanShell, seed: FanRefusalSeed): Promise<FanResult | null> => {
+/**
+ * Save the refusal seed before the fan returns; a failed save is the fan's
+ * error (fail closed), and `displaced` — the fan's own error — is logged whole.
+ */
+const persistSeed = async (shell: FanShell, seed: FanRefusalSeed, displaced: FrameworkError): Promise<FanResult | null> => {
   const { node, ctx } = shell;
   const saved = await ctx.checkpointer.saveNode(ctx.runId,
     { nodeId: node.id, output: seed, completedAt: new Date(shell.now()) }, seedAddress(shell.epoch));
   if (saved.ok) return null;
-  // The write error replaces the fan's own outcome, so name the refusal it
-  // displaces: without this line the operator sees only a checkpoint failure.
-  const { axis, completed, remaining } = seed.refusal;
+  // The write error replaces the fan's own outcome: the refusal AND every
+  // child failure drained with it (FR-025). Without this line the operator
+  // would see only a checkpoint failure, and the child failures nowhere.
   bestEffort("runMappedFan", "seed-save failure log", () => shell.fan.logger.error(
     `map fan "${node.id}": refusal seed save failed; returning the checkpoint write error in place of the ` +
-    `budget refusal it recorded (axis ${axis}, ${completed} completed, ${remaining} remaining)`,
+    `fan's own error, which it displaces: ${formatFrameworkError(displaced)}`,
   ));
   return saved;
 };

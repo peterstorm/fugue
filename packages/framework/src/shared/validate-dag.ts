@@ -280,7 +280,9 @@ const snapshotMapping = (
       return err(validationErr(id,
         `map '${id}' must consume upstream input, write only '${MAP_FAN_RESOURCE}' fan completions, and declare no confidence extractor`));
     }
-    const { child, childOutputSchema, reduce, widthFrom, maxWidth, authoredGather, scheduling } = node.mapping;
+    const { child, childOutputSchema, reduce, widthFrom, maxWidth, authoredGather } = node.mapping;
+    // Read as untrusted: the gate exists for a runtime value that lies about its type.
+    const scheduling: unknown = node.mapping.scheduling;
     const validGather = authoredGather === undefined || isAuthoredCollectGather(authoredGather, {
       outputSchema: node.outputSchema,
       childOutputSchema,
@@ -291,20 +293,19 @@ const snapshotMapping = (
         typeof childOutputSchema?.safeParse !== "function" || !validGather) {
       return err(validationErr(id, `map '${id}' requires a valid immutable mapping descriptor`));
     }
-    // Authored fan scheduling (F1 PR-D, AD-8): validated and frozen by this
-    // gate. An ABSENT field resolves to the authored defaults through
-    // parseFanScheduling — the single defaults site (FR-001, FR-046); a
-    // present but forged value is refused naming the node and the value
-    // (AS-029, AS-051). The produced `FanSchedulingRejection` is the precise
-    // `validation` arm of FrameworkError, so it flows unchanged.
-    if (scheduling !== undefined &&
-        (typeof scheduling !== "object" || scheduling === null || Array.isArray(scheduling))) {
+    // Authored fan scheduling (F1 PR-D, AD-8): re-validated and frozen by
+    // this gate. Every producer freezes a parsed value, so an absent or
+    // non-object field is a forgery and is refused, naming the node and the
+    // value; a forged field value is refused by parseFanScheduling the same
+    // way (AS-029, AS-051). The produced `FanSchedulingRejection` is the
+    // precise `validation` arm of FrameworkError, so it flows unchanged.
+    if (typeof scheduling !== "object" || scheduling === null || Array.isArray(scheduling)) {
       return err(validationErr(
         id,
         `map '${id}' scheduling must be an object with optional childConcurrency and estimator fields, got ${safeErrorMessage(scheduling)}`,
       ));
     }
-    const parsedScheduling = parseFanScheduling(id, scheduling ?? {});
+    const parsedScheduling = parseFanScheduling(id, scheduling);
     if (!parsedScheduling.ok) return err(parsedScheduling.error);
     const snapshot = snapshotMappedChild(id, child);
     if (!snapshot.ok) return snapshot;

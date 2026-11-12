@@ -637,7 +637,11 @@ These are different knobs. Raising `maxConcurrent` never speeds up a fan, and
   value fails startup with an error naming the setting.
 - **Sequential fallback.** `FAN_CHILD_CONCURRENCY_MAX=1` is valid and forces every
   fan on the host to run sequentially. It is the switch to reach for if concurrent
-  fans misbehave against a provider.
+  fans misbehave against a provider. It switches concurrency off, not budget
+  projection: an unbudgeted fan then behaves as in earlier releases, but a budgeted fan
+  still projects the whole fan, so it may refuse earlier than the per-call meter
+  alone would, and it then writes a refusal seed
+  ([below](#resume-after-a-refusal)).
 - **No overrides.** The setting is host-wide only. There is no per-tenant value
   and no per-run override.
 

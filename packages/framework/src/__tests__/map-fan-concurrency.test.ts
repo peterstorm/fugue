@@ -24,11 +24,11 @@ import {
   FAN_SPAN_SEEDED,
 } from "../dag-runtime/run-mapped-fan.js";
 import { frameworkError } from "../types/error-factories.js";
-import type { FrameworkError } from "../types/errors.js";
+import { formatFrameworkError, type FrameworkError } from "../types/errors.js";
 import type { ObserverEvent } from "../types/events.js";
 import { FanRefusalSeedSchema, fanConcurrencyCap } from "../types/fan-scheduling.js";
 import { DAG_INPUT, dagId, nodeId } from "../types/ids.js";
-import { err, ok, type Result } from "../types/result.js";
+import { err, ok } from "../types/result.js";
 import {
   FAN,
   RUN,
@@ -38,20 +38,18 @@ import {
   cost,
   crashChild,
   drive,
+  errorOf,
   failChild,
   fanHarness,
   okChild,
   presave,
   quiesce,
+  range,
+  refusalOf,
   scriptedBudget,
+  tenfold,
+  type ChildPlan,
 } from "./fan-test-harness.js";
-
-const tenfold = (i: number) => okChild(i * 10);
-const range = (n: number, f: (i: number) => number = (i) => i * 10): number[] => Array.from({ length: n }, (_, i) => f(i));
-const errorOf = (r: Result<unknown, FrameworkError>): FrameworkError => {
-  if (r.ok) throw new Error(`expected an error, got ok(${JSON.stringify(r.value)})`);
-  return r.error;
-};
 
 /** The variable-cost sequential fixture: three 1-call children, then a 4-call one breaches. */
 const COSTS = [1, 1, 1, 4, 1, 1];
@@ -188,10 +186,9 @@ describe("projection refusal (FR-010..FR-016, AS-010..AS-013)", () => {
   it("AS-011: the refusal carries every FR-014 field and the redeploy hint", async () => {
     const { h } = refusingFan();
     const run = h.start();
-    const error = errorOf(await drive(h, run, costed));
-    if (error.kind !== "fan-budget-refused") throw new Error(`expected fan-budget-refused, got ${error.kind}`);
-    expect(error.nodeId).toBe(FAN);
-    expect(error.refusal).toMatchObject({
+    const result = await drive(h, run, costed);
+    expect(errorOf(result)).toMatchObject({ kind: "fan-budget-refused", nodeId: FAN });
+    expect(refusalOf(result)).toMatchObject({
       axis: "calls",
       ceiling: { kind: "calls", limit: 12 },
       perChildEstimate: 4,
@@ -202,7 +199,7 @@ describe("projection refusal (FR-010..FR-016, AS-010..AS-013)", () => {
       lowerBound: false,
       scopePath: [],
     });
-    expect(error.refusal.hint).toContain("redeploy");
+    expect(refusalOf(result).hint).toContain("redeploy");
   });
 
   it("AS-012: the refusal is a distinct outcome kind with a self-contained structured event", async () => {
@@ -249,15 +246,16 @@ describe("projection refusal (FR-010..FR-016, AS-010..AS-013)", () => {
     expect(h.openIndices()).toEqual([1]);
     expect(h.returned).toBe(false);
     h.settle(1, okChild(10, cost({ calls: 1 })));
-    const error = errorOf(await run);
-    if (error.kind !== "fan-budget-refused") throw new Error(`expected fan-budget-refused, got ${error.kind}`);
-    expect(error.refusal).toMatchObject({ completed: 2, remaining: 4 });
+    expect(refusalOf(await run)).toMatchObject({ completed: 2, remaining: 4 });
     expect(h.trace).toContain("save:dag@fan@1@0");
     expect(h.dispatched).toEqual([0, 1]);
     expect(h.pendingAtReturn).toBe(0);
   });
 
   it("seed-save failure fails closed with the typed write error, and the refusal is still emitted", async () => {
+    const twin = refusingFan().h;
+    const displaced = errorOf(await drive(twin, twin.start(), costed));
+    expect(displaced.kind).toBe("fan-budget-refused");
     const writeFailed = frameworkError.checkpointWriteFailed(RUN, FAN, "seed store unavailable");
     const budget = scriptedBudget([callsCeiling(12)]);
     const h = fanHarness({ width: COSTS.length, budget,
@@ -265,10 +263,10 @@ describe("projection refusal (FR-010..FR-016, AS-010..AS-013)", () => {
     const run = h.start();
     expect(await drive(h, run, costed)).toEqual(err(writeFailed));
     expect(h.eventsOf("fan-refused")).toHaveLength(1);
-    // The write error displaces the refusal, so the log must name what was lost.
+    // The write error displaces the refusal, so the log must carry it whole.
     expect(h.errors).toHaveLength(1);
     expect(h.errors[0]).toContain(`map fan "${FAN}"`);
-    expect(h.errors[0]).toContain("axis calls");
+    expect(h.errors[0]).toContain(formatFrameworkError(displaced));
     expect(h.pendingAtReturn).toBe(0);
   });
 });
@@ -377,6 +375,55 @@ describe("mixed drain (FR-025)", () => {
     expect(h.eventsOf("fan-refused")).toEqual([expect.objectContaining({ attachedToChildFailure: true, sticky: false })]);
     expect(h.trace).toContain("save:fan-seed@fan@0@0");
     expect(h.pendingAtReturn).toBe(0);
+  });
+
+  describe("a failed seed save never hides the child failures it displaces (FR-025, FR-026)", () => {
+    const writeFailed = frameworkError.checkpointWriteFailed(RUN, FAN, "seed store unavailable");
+    const failSeed = (key: string) => (key.startsWith("fan-seed@") ? writeFailed : undefined);
+
+    /**
+     * C=3 under a 10-call ceiling: index 0 spends 4, so the projection refuses
+     * (5 × 4 > 6 left) with indices 1 and 2 still in flight; `drained` settles
+     * them, highest index first.
+     */
+    const refusedWithInFlight = async (
+      drained: (i: number) => ChildPlan,
+      failSave?: (key: string) => FrameworkError | undefined,
+    ) => {
+      const h = fanHarness({ width: 6, childConcurrency: 3, budget: scriptedBudget([callsCeiling(10)]),
+        ...(failSave !== undefined ? { failSave } : {}) });
+      const run = h.start();
+      await quiesce();
+      h.settle(0, okChild(0, cost({ calls: 4 })));
+      await quiesce();
+      expect(h.eventsOf("fan-projection").at(-1)).toMatchObject({ verdict: "refuse" });
+      for (const i of [2, 1]) h.settle(i, drained(i));
+      return { h, result: await run };
+    };
+
+    const cases: readonly (readonly [string, (i: number) => ChildPlan, string | null])[] = [
+      ["the primary child failure alone", (i) => (i === 1 ? failChild(childError(1)) : tenfold(i)), null],
+      ["the primary and every further child failure", (i) => failChild(childError(i)), "1 further child failure (child 2: rejected)"],
+    ];
+    for (const [label, drained, further] of cases) {
+      it(`the log carries the fan's displaced error whole: ${label}, plus the refusal`, async () => {
+        // The twin run, whose seed save succeeds, returns the error the write failure displaces.
+        const displaced = errorOf((await refusedWithInFlight(drained)).result);
+        expect(displaced).toMatchObject({ kind: "fan-child-failed", primary: { index: 1 } });
+
+        const { h, result } = await refusedWithInFlight(drained, failSeed);
+        expect(result).toEqual(err(writeFailed));
+        expect(h.eventsOf("fan-refused")).toEqual([expect.objectContaining({ attachedToChildFailure: true })]);
+        expect(h.errors).toHaveLength(1);
+        const logged = h.errors[0] ?? "";
+        expect(logged).toContain(formatFrameworkError(displaced));
+        expect(logged).toContain(`child 1 failed: ${formatFrameworkError(childError(1))}`);
+        expect(logged).toContain("refused by budget projection on the calls axis");
+        if (further === null) expect(logged).not.toContain("further child failure");
+        else expect(logged).toContain(further);
+        expect(h.pendingAtReturn).toBe(0);
+      });
+    }
   });
 });
 

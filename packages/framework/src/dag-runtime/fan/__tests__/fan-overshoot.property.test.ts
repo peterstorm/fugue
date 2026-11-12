@@ -30,6 +30,7 @@
 import { describe, expect, it } from "bun:test";
 import fc from "fast-check";
 import { fanStep, initFan, isFanDone, type FanCommand, type FanEvent, type ProjectionRecord } from "../fan-machine.js";
+import { ceilingsOfRemaining } from "../seed.js";
 import { remainingFor, type Remaining } from "../../../types/budget-capability.js";
 import { ceilings } from "../../../types/budget.js";
 import type { FrameworkError } from "../../../types/errors.js";
@@ -86,8 +87,7 @@ const headroom = (limits: Cost, spent: Cost): Remaining =>
 /** A seed whose ceilings are lower than `limits`, so the resume counts as raised and projects every dispatch. */
 const seedFor = (s: Scenario, samples: readonly Cost[]): FanRefusalSeed => {
   const cs = [{ kind: "tokens" as const, limit: Math.max(0, s.limits.tokens - 1) }, { kind: "calls" as const, limit: Math.max(0, s.limits.calls - 1) }];
-  const raisedFrom = headroom({ tokens: cs[0].limit, calls: cs[1].limit }, ZERO);
-  const canonical = raisedFrom.kind === "budgeted" ? raisedFrom.headroom.map((h) => h.ceiling) : [];
+  const canonical = ceilingsOfRemaining(headroom({ tokens: cs[0].limit, calls: cs[1].limit }, ZERO));
   return {
     version: 1, estimator: s.estimator, samples: samples.map(asSample), estimate: asSample(maxOf(samples)), ceilings: canonical,
     refusal: fanRefusal({
@@ -200,9 +200,6 @@ const scenarioArb = (opts: Readonly<{ estimator?: fc.Arbitrary<FanEstimator>; se
     seedSamples: opts.seeded === true ? fc.array(costArb, { maxLength: 4 }) : fc.constant(null),
   });
 
-const forAxes = (check: (axis: Axis) => void): void => AXES.forEach(check);
-const estimateOf = (r: ProjectionRecord): number => r.estimate;
-
 // ---------------------------------------------------------------------------
 // Bounds
 // ---------------------------------------------------------------------------
@@ -215,7 +212,7 @@ describe("FR-018 (a) — post-refusal spend ≤ (C−1)·M", () => {
       if (o.spentAtRefusal === null) return;
       const m = maxOf([...(s.seedSamples ?? []), ...o.samples.values()]);
       const after = sub(o.finalSpend, o.spentAtRefusal);
-      forAxes((axis) => expect(after[axis]).toBeLessThanOrEqual((s.effective - 1) * m[axis]));
+      for (const axis of AXES) expect(after[axis]).toBeLessThanOrEqual((s.effective - 1) * m[axis]);
     }), RUNS);
   });
 });
@@ -238,7 +235,7 @@ describe("FR-018 (b) — spike-free post-probe dispatches never cross a ceiling"
       const projectedAdmission = o.admissions.some((a) => a.projectedEstimate !== null);
       if (!projectedAdmission || !spikeFree(s, o)) return;
       exercised++;
-      forAxes((axis) => expect(o.finalSpend[axis]).toBeLessThanOrEqual(s.limits[axis]));
+      for (const axis of AXES) expect(o.finalSpend[axis]).toBeLessThanOrEqual(s.limits[axis]);
     }), RUNS);
     expect(exercised).toBeGreaterThan(MIN_EXERCISED);
   });
@@ -250,7 +247,7 @@ describe("FR-018 (b) — spike-free post-probe dispatches never cross a ceiling"
       expect(o.admissions.every((a) => a.projectedEstimate !== null)).toBe(true);
       if (o.admissions.length === 0 || !spikeFree(s, o)) return;
       exercised++;
-      forAxes((axis) => expect(o.finalSpend[axis]).toBeLessThanOrEqual(s.limits[axis]));
+      for (const axis of AXES) expect(o.finalSpend[axis]).toBeLessThanOrEqual(s.limits[axis]);
     }), RUNS);
     expect(exercised).toBeGreaterThan(MIN_EXERCISED);
   });
@@ -264,7 +261,7 @@ describe("FR-018 (b) — spike-free post-probe dispatches never cross a ceiling"
       const o = simulate(s);
       expect(spikeFree(s, o)).toBe(true);
       if (o.admissions.some((a) => a.projectedEstimate !== null)) {
-        forAxes((axis) => expect(o.finalSpend[axis]).toBeLessThanOrEqual(s.limits[axis]));
+        for (const axis of AXES) expect(o.finalSpend[axis]).toBeLessThanOrEqual(s.limits[axis]);
       }
     }), RUNS);
   });
@@ -279,7 +276,7 @@ describe("FR-018 (c) — the probe carve-out and the projection gate", () => {
       expect(o.maxInFlight).toBeLessThanOrEqual(s.effective);
       const m = maxOf([...o.samples.values()]);
       const probeSpend = probe.reduce((acc, a) => add(acc, o.ownCosts.get(a.child) ?? ZERO), ZERO);
-      forAxes((axis) => expect(probeSpend[axis]).toBeLessThanOrEqual(s.effective * m[axis]));
+      for (const axis of AXES) expect(probeSpend[axis]).toBeLessThanOrEqual(s.effective * m[axis]);
     }), RUNS);
   });
 
@@ -288,11 +285,10 @@ describe("FR-018 (c) — the probe carve-out and the projection gate", () => {
       for (const p of simulate(s).projections) {
         const axis = p.record.axis;
         if (axis === "usd") throw new Error("usd is not budgeted in this model");
-        expect(estimateOf(p.record)).toBe(p.oracle[axis]);
+        expect(p.record.estimate).toBe(p.oracle[axis]);
         const allowance = Math.max(0, s.limits[axis] - p.spent[axis]);
-        const fits = p.record.remainingChildren * p.record.estimate <= allowance;
-        if (p.record.verdict === "admit") expect(fits).toBe(true);
-        else expect(fits).toBe(false);
+        // The gate law, both directions: admitted ⇔ the projection fits the allowance.
+        expect(p.record.remainingChildren * p.record.estimate <= allowance).toBe(p.record.verdict === "admit");
         if (p.spent[axis] >= s.limits[axis] && p.record.estimate > 0) expect(p.record.verdict).toBe("refuse");
       }
     }), RUNS);

@@ -33,6 +33,6 @@ export const spendDelta = (before: Spend, after: Spend): SpendSample =>
   Object.freeze({
     tokens: Math.max(0, after.tokens - before.tokens),
     calls: Math.max(0, after.calls - before.calls),
-    usdMicros: microUsd(costFloor(after.usd) - costFloor(before.usd)),
+    usdMicros: microUsd(Math.max(0, costFloor(after.usd) - costFloor(before.usd))),
     lowerBound: undercounts(before) || undercounts(after),
   });

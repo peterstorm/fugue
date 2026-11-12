@@ -16,6 +16,7 @@ import { spendDelta } from "../spend-window.js";
 import { FAN_ESTIMATORS, type FanEstimator, type SpendSample } from "../../../types/fan-scheduling.js";
 import {
   addSpend,
+  costFloor,
   makeSpend,
   microUsd,
   NO_SPEND,
@@ -156,6 +157,23 @@ describe("spendDelta — lifetime-window measure (AD-3)", () => {
 
   it("clamps a non-monotone snapshot pair to zero per axis", () => {
     expect(spendDelta(pricedCall(100, microUsd(1_000)), NO_SPEND)).toEqual(sample(0, 0, 0));
+  });
+
+  it("floors a USD-only regression at zero, keeping the axes that grew", () => {
+    const before = pricedCall(10, microUsd(900));
+    const after = addSpend(pricedCall(30, microUsd(100)), pricedCall(5, microUsd(0)));
+    expect(spendDelta(before, after)).toEqual(sample(25, 1, 0));
+  });
+
+  it("is total over ANY snapshot pair: never throws, each axis is max(0, after − before)", () => {
+    fc.assert(fc.property(spendArb, spendArb, (before, after) => {
+      const s = spendDelta(before, after);
+      expect(s).toEqual(sample(
+        Math.max(0, after.tokens - before.tokens),
+        Math.max(0, after.calls - before.calls),
+        Math.max(0, costFloor(after.usd) - costFloor(before.usd)),
+      ));
+    }), RUNS);
   });
 
   it("measures unpriced spend by its known floor, flagged as a lower bound", () => {

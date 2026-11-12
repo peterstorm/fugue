@@ -243,7 +243,7 @@ All configuration is via environment variables, validated at startup with Zod. T
 | `REDIS_PROBE_INTERVAL_MS` | `10000` | Redis liveness probe interval (ms) |
 | `MAX_GLOBAL_CONCURRENCY` | `50` | Max concurrent DAG **runs** host-wide (run-level) |
 | `DEFAULT_DAG_CONCURRENCY` | `10` | Default max concurrent **runs** of one DAG (run-level; `fugue.yaml` `maxConcurrent` overrides it per DAG) |
-| `FAN_CHILD_CONCURRENCY_MAX` | `8` | Host-wide cap on the **children of one map fan** in flight at once, inside a single run (child-level). Positive integer; an invalid value fails startup naming this setting. `1` makes every fan sequential. See [Map fan child concurrency](#map-fan-child-concurrency-and-budget-projection) |
+| `FAN_CHILD_CONCURRENCY_MAX` | `8` | Host-wide cap on the **children of one map fan** in flight at once, inside a single run (child-level). Positive integer; an invalid value fails startup naming this setting. `1` makes every fan sequential; whole-fan budget projection still applies. See [Map fan child concurrency](#map-fan-child-concurrency-and-budget-projection) |
 | `DEFAULT_DAG_TIMEOUT_MS` | `60000` | Default per-DAG timeout (ms) |
 | `MAX_DAG_TIMEOUT_MS` | `120000` | Hard ceiling on DAG timeout |
 | `DRAIN_TIMEOUT_MS` | `30000` | Graceful shutdown drain period |
@@ -260,7 +260,7 @@ All configuration is via environment variables, validated at startup with Zod. T
 
 ### Map fan child concurrency and budget projection
 
-A runtime-width `map` node (a **fan**) runs its child DAG once per input item. Three
+A runtime-width `map` node (a **fan**) runs its child DAG once per input item. Four
 concurrency settings exist, at two different levels, and they are deliberately named
 apart:
 
@@ -279,9 +279,12 @@ apart:
   warning and emits one `fan-start` observer event with `clamped: true`, each
   naming the fan, the authored value and the effective value.
 - There is no per-run or per-tenant override.
-- An unconfigured fan (`childConcurrency` 1) is sequential and byte-identical to
-  earlier releases.
-- `FAN_CHILD_CONCURRENCY_MAX=1` forces every fan on the host to be sequential.
+- An unconfigured fan (`childConcurrency` 1) is sequential. An unbudgeted one is
+  byte-identical to earlier releases. A budgeted fan still projects the whole fan
+  at C=1, so it may refuse earlier than the per-call meter alone would, and it then
+  writes a refusal seed ([below](#whole-fan-budget-projection)).
+- `FAN_CHILD_CONCURRENCY_MAX=1` forces every fan on the host to be sequential. It
+  does not turn whole-fan budget projection off.
 
 **Sizing provider rate limits.** The levels multiply. Up to
 `MAX_GLOBAL_CONCURRENCY` runs, each with a fan of up to C children, can be calling

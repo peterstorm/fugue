@@ -274,8 +274,9 @@ describe.skipIf(!redisUrl)("mapped child composition — actual host factory + r
 // F1 PR-D: fan scheduling through the host (FR-030..FR-035, AD-11 end to end)
 // ---------------------------------------------------------------------------
 //
-// The operator cap travels: env → `parseHostConfig` (startup validation) →
-// `fanConcurrencyCap` → `syncRunOptions` → the kernel's root `FanRuntime`.
+// The operator cap travels: env → `parseHostConfig` (startup validation, which
+// mints the branded `FanConcurrencyCap`) → `syncRunOptions` → the kernel's root
+// `FanRuntime`.
 // The first block runs that real chain over an in-memory store, so it holds
 // with or without Redis; the second runs it over the host's own context
 // factory and the Redis checkpointer, including the refusal seed's lifecycle
@@ -292,7 +293,7 @@ const HOST_ENV = {
 const operatorCap = (env: Readonly<Record<string, string>> = {}): FanConcurrencyCap => {
   const parsed = parseHostConfig({ ...HOST_ENV, ...env });
   if (!parsed.ok) throw new Error(`host config rejected: ${JSON.stringify(parsed.error)}`);
-  return fanConcurrencyCap(parsed.value.FAN_CHILD_CONCURRENCY_MAX);
+  return parsed.value.FAN_CHILD_CONCURRENCY_MAX;
 };
 
 /**

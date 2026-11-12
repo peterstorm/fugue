@@ -90,20 +90,14 @@ export type MapNodeDef<I = unknown, ChildOut = unknown, O = unknown> =
        * structure-only fingerprint excludes this field, so retuning a fan
        * never invalidates its saved children (FR-051).
        *
-       * Consumer rule: an ABSENT field resolves to the defaults
-       * `{ childConcurrency: 1, estimator: "largest-seen" }`, obtained ONLY
-       * through `parseFanScheduling(nodeId, {})` — the single defaults site
-       * (FR-001, FR-046); no consumer may hand-write them.
-       *
-       * PHASED (wave 1 → wave 2): OPTIONAL until T6 lands. The producers of
-       * mapping snapshots — `snapshotMapping` in `shared/validate-dag.ts` and
-       * `createMapNode` in `nodes/map.ts` — are T6 files that do not emit
-       * `scheduling` yet; requiring it here would break `bun run typecheck`
-       * outside this wave's scope. In wave 2, T6 freezes a
-       * `parseFanScheduling` result into every snapshot, after which the field
-       * is always present at runtime.
+       * Always present: both producers — `createMapNode` (`nodes/map.ts`) and
+       * `snapshotMapping` (`shared/validate-dag.ts`) — freeze a
+       * `parseFanScheduling` result here, so an author who declares nothing
+       * gets the defaults from that single defaults site (FR-001, FR-046) and
+       * consumers read this field directly. A mapping without it is a forgery,
+       * refused by the validator.
        */
-      scheduling?: FanScheduling;
+      scheduling: FanScheduling;
       /** Present only when the runtime issued the closed collect reducer/schema pair. */
       authoredGather?: AuthoredCollectGather;
       reduce: (results: readonly ChildOut[]) => Result<O, FrameworkError>;

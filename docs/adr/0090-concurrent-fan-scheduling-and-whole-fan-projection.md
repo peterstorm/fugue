@@ -1,8 +1,7 @@
 # ADR-0090: Concurrent fan scheduling and whole-fan projection
 
 ## Status
-Accepted. Implemented by F1 PR-D1 on `feat/f1-pr-d-fan-scheduling`, which is not
-yet merged. It amends [ADR-0086](0086-root-owned-mapped-child-execution.md): the
+Accepted. Implemented by F1 PR-D1. It amends [ADR-0086](0086-root-owned-mapped-child-execution.md): the
 sequential fan is superseded. It adds a second fan address space under
 [ADR-0085](0085-composite-checkpoint-addressing-is-port-contract-on-every-backend.md)'s
 grammar.
@@ -452,8 +451,11 @@ without a join against the other two events. The run-status API is unchanged
   The refusal is a distinct, typed, persisted outcome that names the remedy.
 - Resume-after-refusal is deterministic. A redeploy with a larger budget resumes
   and reuses every saved child.
-- C=1 is byte-identical to the old fan, so an operator can switch concurrency off
-  host-wide with `FAN_CHILD_CONCURRENCY_MAX=1`.
+- An unbudgeted fan at C=1 is byte-identical to the old fan, so an operator can
+  switch concurrency off host-wide with `FAN_CHILD_CONCURRENCY_MAX=1`. That cap
+  does not switch projection off: a budgeted fan still projects the whole fan at
+  C=1, so it may refuse earlier than the per-call meter alone would, and it then
+  writes a refusal seed (§10).
 - The scheduling invariants are tested as pure properties of one reducer, not as
   races in async code:
   - in-flight ≤ C;

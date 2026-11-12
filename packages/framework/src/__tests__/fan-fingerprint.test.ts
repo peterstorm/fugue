@@ -121,14 +121,16 @@ const withScheduling = (
  * The pre-T6 map shape: a DagDef whose map node carries NO scheduling at all.
  * This is what `dagFingerprint` saw on every run saved before the feature
  * shipped — the fingerprint a redeployed DAG must still match for those
- * checkpoints to resume (FR-051).
+ * checkpoints to resume (FR-051). The type now forbids that shape (every
+ * producer freezes a scheduling), so this historical fixture is rebuilt
+ * deliberately, behind the one cast below.
  */
 const stripScheduling = (dag: DagDef): DagDef => ({
   ...dag,
   nodes: dag.nodes.map((node) => {
     if (node.kind !== "map") return node;
     const { scheduling: _scheduling, ...mapping } = node.mapping;
-    return { ...node, mapping };
+    return { ...node, mapping } as unknown as DagNodeDef;
   }),
 });
 
@@ -195,23 +197,10 @@ describe("dagFingerprint — scheduling independence (property)", () => {
   it("two arbitrary scheduling values fingerprint identically (1,000 cases)", () => {
     const baseline = dagOf([mapNode()]);
     const fingerprint = dagFingerprint(baseline);
-    const plainNode = mapNode();
     fc.assert(
       fc.property(schedulingArb, schedulingArb, (left, right) => {
-        const leftDag = withScheduling(baseline, "fan", left);
-        const rightDag = withScheduling(baseline, "fan", right);
-        expect(dagFingerprint(leftDag)).toBe(fingerprint);
-        expect(dagFingerprint(rightDag)).toBe(fingerprint);
-        // The parsed, branded values on a validated mapping fingerprint the
-        // same as the raw authored ones — parsing normalizes, never reshapes.
-        const parsed = parseFanScheduling(nodeId("fan"), left);
-        if (!parsed.ok) throw new Error(`valid authored scheduling was refused: ${parsed.error.message}`);
-        const parsedNode = { ...plainNode, mapping: { ...plainNode.mapping, scheduling: parsed.value } };
-        const parsedDag = {
-          ...baseline,
-          nodes: baseline.nodes.map((node) => (node.id === "fan" ? parsedNode : node)),
-        };
-        expect(dagFingerprint(parsedDag)).toBe(fingerprint);
+        expect(dagFingerprint(withScheduling(baseline, "fan", left))).toBe(fingerprint);
+        expect(dagFingerprint(withScheduling(baseline, "fan", right))).toBe(fingerprint);
       }),
       { numRuns: 1000 },
     );

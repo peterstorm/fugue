@@ -157,11 +157,11 @@ export interface DagRunOpts
    * AD-8). Effective fan concurrency is `min(authored childConcurrency, cap)`;
    * a clamp warns once per fan start and is observed on the `fan-start` event
    * (FR-033). Operator configuration, never a per-run or per-tenant API
-   * (FR-034): the host threads
-   * `fanConcurrencyCap(config.FAN_CHILD_CONCURRENCY_MAX)` through
-   * `runResumableDagJob` (T7); no other caller sets it. The value arrives
-   * already branded — the smart constructor throws at the configuration
-   * boundary, so a non-positive-integer setting never reaches a run (FR-032).
+   * (FR-034): the host's config parse brands `FAN_CHILD_CONCURRENCY_MAX`
+   * (its only mint site) and threads it through `runResumableDagJob`; no
+   * other caller sets it. The value arrives already branded — that parse
+   * rejects a non-positive-integer setting at startup, so one never reaches a
+   * run (FR-032).
    * Omitted ⇒ `DEFAULT_FAN_CONCURRENCY_CAP` (8). `runDagStatefulOutcome`
    * folds it into the root `FanRuntime` (AD-7), which `runNodeShared` hands to
    * every root-level map fan.

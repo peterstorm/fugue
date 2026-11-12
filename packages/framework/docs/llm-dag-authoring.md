@@ -247,8 +247,10 @@ const dag = defineDag({
 - Indices start in ascending order, at most the effective concurrency
   `min(childConcurrency, host cap)` in flight; the reducer receives validated
   outputs in ascending index order whatever order they completed in, including
-  `[]` for a live zero-width fan. At effective concurrency 1 the trace is the
-  sequential fan's.
+  `[]` for a live zero-width fan. At effective concurrency 1 an unbudgeted fan's
+  trace is the sequential fan's. A budgeted fan still projects the whole fan at
+  C=1 (next bullet), so it may refuse earlier than the per-call meter alone would,
+  and it then writes a refusal seed.
 - On a budgeted run the fan is admitted as a whole. After an unprojected probe
   batch of `min(C, remaining)` children, every dispatch is preceded by a
   projection `settled + remainingChildren × estimate` on each budgeted axis. A

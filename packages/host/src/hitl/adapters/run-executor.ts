@@ -16,7 +16,7 @@
  * drop it).
  */
 
-import { asNonEmptyString, runResumableDagJob, ok, err, EXECUTOR_NODE_ID, asFrameworkError, safeErrorMessage, fanConcurrencyCap } from "@fuguejs/framework";
+import { asNonEmptyString, runResumableDagJob, ok, err, EXECUTOR_NODE_ID, asFrameworkError, safeErrorMessage } from "@fuguejs/framework";
 import type {
   Result,
   FrameworkError,
@@ -93,25 +93,16 @@ interface RunExecutorDeps {
   readonly runRetentionTtlSec?: number;
   /**
    * REQUIRED host-wide operator ceiling on map-fan child concurrency (FR-030,
-   * AD-8). The host composition (host.ts) supplies it from the validated
-   * `config.FAN_CHILD_CONCURRENCY_MAX` integer, whose own default (8) lives in
-   * host config — so the executor can never silently run without the
-   * operator's setting. It stays PLAIN here (the host-config contract): this
-   * executor brands it ONCE at composition with the framework's
-   * `fanConcurrencyCap` smart constructor — whose throw on a non-positive
-   * integer is a composition-time failure, so an invalid setting can never
-   * reach a run (FR-032) — and threads the branded value into every
-   * `runResumableDagJob` slice as `opts.fanConcurrencyCap`. Operator
-   * configuration applied to EVERY run; never a per-run or per-tenant input
-   * (FR-034, OOS-009).
+   * AD-8): `config.FAN_CHILD_CONCURRENCY_MAX`, already branded by the host
+   * config parse (its only mint site), so an invalid setting fails startup
+   * and can never reach an executor (FR-032). Required, so the executor can
+   * never silently run on the framework's fallback instead of the operator's
+   * setting. Forwarded verbatim into every `runResumableDagJob` slice as
+   * `opts.fanConcurrencyCap` — operator configuration applied to EVERY run;
+   * never a per-run or per-tenant input (FR-034, OOS-009).
    */
-  readonly fanChildConcurrencyMax: number;
+  readonly fanConcurrencyCap: FanConcurrencyCap;
   readonly logger?: LogPort;
-}
-
-/** The executor's composition: its deps plus the operator fan cap, branded once. */
-interface ExecutorComposition extends RunExecutorDeps {
-  readonly fanCap: FanConcurrencyCap;
 }
 
 /** Every diagnostic from one slice is attributed to the same run. */
@@ -156,15 +147,6 @@ const checkpointWriteFailure = (failure: HostError): FrameworkError => ({
   nodeId: EXECUTOR_NODE_ID,
   message: `checkpoint persistence failed after execution advanced; run stopped to avoid replaying side effects: ${formatHostError(failure)}`,
 });
-
-/**
- * FR-030 / AD-8: brand the operator cap ONCE at the configuration boundary.
- * The smart constructor throws on a non-positive-integer (INV-3: never an `as`
- * cast outside `types/fan-scheduling.ts`), so an invalid setting can never
- * reach a run; host config validation (T4) has already accepted the env string
- * as a positive safe integer.
- */
-const brandOperatorFanCap = (max: number): FanConcurrencyCap => fanConcurrencyCap(max);
 
 const seedRunCheckpoint = (
   registered: RegisteredDag | undefined,
@@ -234,19 +216,21 @@ const openSliceFence = (leaseSignal: AbortSignal): SliceFence => {
 
 /**
  * The kernel options of one slice; human-gate hooks stay behind the fence.
- * Exported so a unit test can assert the operator fan cap is forwarded.
+ * Exported so a unit test can assert the operator fan cap is forwarded. The
+ * cap is a REQUIRED argument, mirroring `syncRunOptions` (host.ts): neither
+ * run path can build kernel options without the operator's setting.
  */
 export const sliceRunOptions = (
-  composition: ExecutorComposition,
+  operatorFanCap: FanConcurrencyCap,
   req: RunExecutionRequest,
   job: SliceJob,
   fence: SliceFence,
   minting: RunOptions["minting"],
 ): RunOptions => ({
   jobLike: job,
-  // Operator fan cap (FR-030, FR-034): one host-wide value, branded at
-  // composition and applied to EVERY run — never a per-run API.
-  fanConcurrencyCap: composition.fanCap,
+  // Operator fan cap (FR-030, FR-034): one host-wide value, branded by the
+  // host config parse and applied to EVERY run — never a per-run API.
+  fanConcurrencyCap: operatorFanCap,
   onHumanReview: async (review) => {
     fence.assertAuthorized();
     return req.onHumanReview(review);
@@ -260,16 +244,16 @@ export const sliceRunOptions = (
 
 /** Build the slice's NodeContext (setup), then run the resumable kernel (execution). */
 const executeSlice = async (
-  composition: ExecutorComposition,
+  deps: RunExecutorDeps,
   registered: RegisteredDag,
   req: RunExecutionRequest,
   job: SliceJob,
   fence: SliceFence,
   markExecuting: () => void,
 ): Promise<WorkerJobOutcome<unknown>> => {
-  const { broker } = composition;
+  const { broker } = deps;
   const { ctx, origin, meterMintedLlm } = await createNodeContextForDag(
-    composition.sharedInfra,
+    deps.sharedInfra,
     registered,
     req.runId,
     fence.signal,
@@ -277,7 +261,7 @@ const executeSlice = async (
     {
       // `?? {}` would be dead: an absent field takes the factory's own
       // documented default of the empty map.
-      agentClientMap: composition.agentClientMap,
+      agentClientMap: deps.agentClientMap,
       mintingActive: broker !== undefined,
       // `bindSubjectToken` is intentionally ABSENT on the resume path. A
       // user run's verified `subject_token` is bound at INITIATION (the
@@ -286,8 +270,8 @@ const executeSlice = async (
       // reusing a stale token — correct, not a leak. Named fields let
       // this be an omission rather than a positional `undefined` a
       // reader has to count arguments to identify.
-      routedTenant: composition.tenant,
-      resumableRunTtlSec: composition.runRetentionTtlSec,
+      routedTenant: deps.tenant,
+      resumableRunTtlSec: deps.runRetentionTtlSec,
     },
   );
   markExecuting();
@@ -298,7 +282,7 @@ const executeSlice = async (
     registered.dag,
     req.input,
     ctx,
-    sliceRunOptions(composition, req, job, fence, minting),
+    sliceRunOptions(deps.fanConcurrencyCap, req, job, fence, minting),
   );
 };
 
@@ -425,14 +409,14 @@ const settleSliceFailure = (
  * happens BETWEEN slices, while parked, and is not bounded by this).
  */
 const runSlice = async (
-  composition: ExecutorComposition,
+  deps: RunExecutorDeps,
   req: RunExecutionRequest,
 ): Promise<Result<RunExecOutcome, HostError>> => {
   const attribution: SliceAttribution = { runId: req.runId, dagId: req.dagId };
-  const registered = composition.getRegisteredDag(req.dagId);
+  const registered = deps.getRegisteredDag(req.dagId);
   if (!registered) return ok(dagNoLongerRegistered(req.dagId));
 
-  const { logger } = composition;
+  const { logger } = deps;
   const timeoutMs = registered.config.timeout;
   const fence = openSliceFence(req.signal);
   let phase: SlicePhase = "setup";
@@ -442,7 +426,7 @@ const runSlice = async (
     const startedJob = await req.job.startSlice(timeoutMs);
     if (!startedJob.ok) return err(startedJob.error);
     const fencedJob = deadlineFencedJob(startedJob.value, fence.assertAuthorized);
-    const slice = executeSlice(composition, registered, req, fencedJob, fence, () => {
+    const slice = executeSlice(deps, registered, req, fencedJob, fence, () => {
       phase = "execution";
     });
     const completion = await settleBeforeDeadline(
@@ -460,14 +444,8 @@ const runSlice = async (
   }
 };
 
-export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => {
-  const composition: ExecutorComposition = {
-    ...deps,
-    fanCap: brandOperatorFanCap(deps.fanChildConcurrencyMax),
-  };
-  return {
-    seedCheckpoint: async (dagId, input) =>
-      seedRunCheckpoint(deps.getRegisteredDag(dagId), dagId, input),
-    run: (req) => runSlice(composition, req),
-  };
-};
+export const createRunExecutor = (deps: RunExecutorDeps): RunExecutorPort => ({
+  seedCheckpoint: async (dagId, input) =>
+    seedRunCheckpoint(deps.getRegisteredDag(dagId), dagId, input),
+  run: (req) => runSlice(deps, req),
+});

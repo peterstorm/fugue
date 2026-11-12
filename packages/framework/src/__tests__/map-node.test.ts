@@ -557,18 +557,19 @@ describe("createMapNode — D1: one node in the outer graph", () => {
 
 // ── F1 PR-D (T6): authored fan scheduling ─────────────────────────────
 
-describe("createMapNode — authored fan scheduling (F1 PR-D)", () => {
-  const base = {
-    id: "fan",
-    inputSchema: z.object({ items: z.array(z.number()) }),
-    outputSchema: z.array(z.number()),
-    widthFrom: "items" as const,
-    maxWidth: 25,
-    child: childDag([]),
-    childOutputSchema: z.number(),
-    reduce: (results: readonly number[]) => ok([...results]),
-  };
+/** The map config both scheduling suites define from: the constructor's and the validator's. */
+const base = {
+  id: "fan",
+  inputSchema: z.object({ items: z.array(z.number()) }),
+  outputSchema: z.array(z.number()),
+  widthFrom: "items" as const,
+  maxWidth: 25,
+  child: childDag([]),
+  childOutputSchema: z.number(),
+  reduce: (results: readonly number[]) => ok([...results]),
+};
 
+describe("createMapNode — authored fan scheduling (F1 PR-D)", () => {
   /** The thrown definition-time message, or a sentinel if nothing threw. */
   const rejectionOf = (config: unknown): string => {
     try {
@@ -668,17 +669,6 @@ describe("createMapNode — authored fan scheduling (F1 PR-D)", () => {
 });
 
 describe("validateDagShape — fan scheduling gate (F1 PR-D)", () => {
-  const base = {
-    id: "fan",
-    inputSchema: z.object({ items: z.array(z.number()) }),
-    outputSchema: z.array(z.number()),
-    widthFrom: "items" as const,
-    maxWidth: 25,
-    child: childDag([]),
-    childOutputSchema: z.number(),
-    reduce: (results: readonly number[]) => ok([...results]),
-  };
-
   const defineWith = (node: unknown) =>
     validateDagShape({
       id: "outer",
@@ -721,25 +711,30 @@ describe("validateDagShape — fan scheduling gate (F1 PR-D)", () => {
     expect(rejection.message).toContain('got "p99"');
   });
 
-  it("refuses a forged non-object scheduling outright", () => {
+  // A non-object would otherwise reach `parseFanScheduling`, which reads its
+  // fields: `null` would throw there, and an array or primitive would parse
+  // to the defaults, silently laundering the forgery.
+  it.each([
+    ["null", null],
+    ["an array", []],
+    ["a string", "x"],
+    ["a number", 3],
+  ] as const)("refuses a forged non-object scheduling outright: %s", (_label, forged) => {
     const valid = createMapNode(base);
     const rejection = validationOf(defineWith({
       ...valid,
-      mapping: { ...valid.mapping, scheduling: 5 },
+      mapping: { ...valid.mapping, scheduling: forged },
     }));
     expect(rejection.nodeId).toBe(nodeId("fan"));
-    expect(rejection.message).toContain("scheduling");
+    expect(rejection.message).toContain("map 'fan' scheduling must be an object");
   });
 
-  it("resolves an absent scheduling to the defaults through the single defaults site", () => {
+  it("refuses a mapping with no scheduling at all: every producer freezes one, so its absence is a forgery", () => {
     const valid = createMapNode(base);
     const { scheduling: _absent, ...mappingWithoutScheduling } = valid.mapping;
-    const parsed = defineWith({ ...valid, mapping: mappingWithoutScheduling });
-    expect(parsed.ok).toBe(true);
-    if (!parsed.ok) return;
-    const node = parsed.value.nodes[0]!;
-    if (node.kind !== "map") throw new Error("expected the map node");
-    expect(node.mapping.scheduling).toEqual({ childConcurrency: childConcurrency(1), estimator: "largest-seen" });
-    expect(Object.isFrozen(node.mapping.scheduling)).toBe(true);
+    const rejection = validationOf(defineWith({ ...valid, mapping: mappingWithoutScheduling }));
+    expect(rejection.nodeId).toBe(nodeId("fan"));
+    expect(rejection.message).toContain("map 'fan' scheduling must be an object");
+    expect(rejection.message).toContain("got undefined");
   });
 });

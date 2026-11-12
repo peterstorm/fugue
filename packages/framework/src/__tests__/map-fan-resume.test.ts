@@ -27,11 +27,10 @@ import { createFetchNode } from "../nodes/fetch.js";
 import { createMapNode } from "../nodes/map.js";
 import { makeNodeContext } from "../shared/make-node-context.js";
 import type { Ceiling } from "../types/budget.js";
-import type { FrameworkError } from "../types/errors.js";
 import { formatFrameworkError } from "../types/errors.js";
 import { FanRefusalSeedSchema, type FanEstimator, type FanRefusal, type FanRefusalSeed } from "../types/fan-scheduling.js";
 import { DAG_INPUT } from "../types/ids.js";
-import { ok, type Result } from "../types/result.js";
+import { ok } from "../types/result.js";
 import { makeSpend, microUsd, unpricedModel, type Spend } from "../types/spend.js";
 import {
   FAN,
@@ -41,12 +40,16 @@ import {
   childError,
   cost,
   drive,
+  errorOf,
   failChild,
   fanHarness,
   okChild,
   presave,
   quiesce,
+  range,
+  refusalOf,
   scriptedBudget,
+  tenfold,
   tokensCeiling,
   type ChildPlan,
   type FanHarness,
@@ -57,20 +60,7 @@ import {
 // Helpers
 // ---------------------------------------------------------------------------
 
-const tenfold = (i: number): ChildPlan => okChild(i * 10);
-const range = (n: number, f: (i: number) => number = (i) => i * 10): number[] => Array.from({ length: n }, (_, i) => f(i));
 const SEED_KEY = "fan-seed@fan@0@0";
-
-const errorOf = (r: Result<unknown, FrameworkError>): FrameworkError => {
-  if (r.ok) throw new Error(`expected an error, got ok(${JSON.stringify(r.value)})`);
-  return r.error;
-};
-
-const refusalOf = (r: Result<unknown, FrameworkError>): FanRefusal => {
-  const error = errorOf(r);
-  if (error.kind !== "fan-budget-refused") throw new Error(`expected fan-budget-refused, got ${error.kind}`);
-  return error.refusal;
-};
 
 /** Each child costs `costs[i]` calls (1 when unlisted) and returns `i × 10`. */
 const costedBy = (costs: readonly number[]) => (i: number): ChildPlan => okChild(i * 10, cost({ calls: costs[i] ?? 1 }));

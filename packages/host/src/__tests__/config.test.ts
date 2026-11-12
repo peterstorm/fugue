@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import * as fc from "fast-check";
-import { DEFAULT_FAN_CONCURRENCY_CAP } from "@fuguejs/framework";
+import { DEFAULT_FAN_CONCURRENCY_CAP, fanConcurrencyCap } from "@fuguejs/framework";
+import type { FanConcurrencyCap } from "@fuguejs/framework";
 import { parseHostConfig, parseFugueYaml, HostConfigSchema, FugueYamlSchema } from "../domain/config.js";
 import type { HostConfig, FugueYaml } from "../domain/config.js";
 
@@ -231,6 +232,16 @@ describe("HostConfigSchema", () => {
   });
 
   describe("FAN_CHILD_CONCURRENCY_MAX (FR-030..FR-032, FR-035)", () => {
+    /** The env spelling fails startup with a `config-invalid` naming this setting (FR-032, AS-030). */
+    const expectRejectedNamingSetting = (raw: string): void => {
+      const result = parseHostConfig({ ...validEnv, FAN_CHILD_CONCURRENCY_MAX: raw });
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.kind).toBe("config-invalid");
+      if (result.error.kind !== "config-invalid") return;
+      expect(result.error.message).toContain("FAN_CHILD_CONCURRENCY_MAX");
+    };
+
     it("defaults to 8 when unset (AS-025, SC-011)", () => {
       const result = parseHostConfig(validEnv);
       expect(result.ok).toBe(true);
@@ -274,14 +285,8 @@ describe("HostConfigSchema", () => {
     // below the `min(1)` floor, `1.5`/`2.5` are numbers above it that fail only
     // `int()`, `""` coerces to 0, and `"abc"` fails the number coercion outright.
     for (const bad of ["0", "-3", "-1", "1.5", "2.5", "abc", ""]) {
-      it(`rejects ${JSON.stringify(bad)} at startup with an error naming the setting (FR-032, AS-030)`, () => {
-        const result = parseHostConfig({ ...validEnv, FAN_CHILD_CONCURRENCY_MAX: bad });
-        expect(result.ok).toBe(false);
-        if (result.ok) return;
-        expect(result.error.kind).toBe("config-invalid");
-        if (result.error.kind !== "config-invalid") return;
-        expect(result.error.message).toContain("FAN_CHILD_CONCURRENCY_MAX");
-      });
+      it(`rejects ${JSON.stringify(bad)} at startup with an error naming the setting (FR-032, AS-030)`, () =>
+        expectRejectedNamingSetting(bad));
     }
 
     it("property: accepts exactly the positive integers and preserves the value", () => {
@@ -341,28 +346,16 @@ describe("HostConfigSchema", () => {
     // whichever check fires, the parse must fail AND name the setting
     // (FR-032, AS-030).
     for (const bad of ["Infinity", "-Infinity", "1e999", "-1e999"]) {
-      it(`rejects the non-finite spelling ${JSON.stringify(bad)}, naming the setting`, () => {
-        const result = parseHostConfig({ ...validEnv, FAN_CHILD_CONCURRENCY_MAX: bad });
-        expect(result.ok).toBe(false);
-        if (result.ok) return;
-        expect(result.error.kind).toBe("config-invalid");
-        if (result.error.kind !== "config-invalid") return;
-        expect(result.error.message).toContain("FAN_CHILD_CONCURRENCY_MAX");
-      });
+      it(`rejects the non-finite spelling ${JSON.stringify(bad)}, naming the setting`, () =>
+        expectRejectedNamingSetting(bad));
     }
 
     // A string that is only ALMOST a number (thousands separator, trailing
     // units, embedded whitespace) coerces to NaN — it must fail boot loudly,
     // never partially coerce to its leading digits.
     for (const bad of ["8,000", "8abc", "1 2"]) {
-      it(`rejects the almost-numeric spelling ${JSON.stringify(bad)}, naming the setting`, () => {
-        const result = parseHostConfig({ ...validEnv, FAN_CHILD_CONCURRENCY_MAX: bad });
-        expect(result.ok).toBe(false);
-        if (result.ok) return;
-        expect(result.error.kind).toBe("config-invalid");
-        if (result.error.kind !== "config-invalid") return;
-        expect(result.error.message).toContain("FAN_CHILD_CONCURRENCY_MAX");
-      });
+      it(`rejects the almost-numeric spelling ${JSON.stringify(bad)}, naming the setting`, () =>
+        expectRejectedNamingSetting(bad));
     }
 
     // "Not set" and "set to nothing" are different operator mistakes with
@@ -424,6 +417,15 @@ describe("HostConfigSchema", () => {
     // side drifts, an unset operator env would silently disagree with the
     // framework fallback. The equality is pinned here, across the package
     // boundary.
+    // Parse, don't validate: the config parse is the cap's only host mint site,
+    // so both run paths receive the brand and never re-mint a plain number.
+    it("parses to the framework's branded FanConcurrencyCap (compile-checked by the annotation)", () => {
+      const result = parseHostConfig({ ...validEnv, FAN_CHILD_CONCURRENCY_MAX: "3" });
+      if (!result.ok) throw new Error(`expected a valid config: ${JSON.stringify(result.error)}`);
+      const cap: FanConcurrencyCap = result.value.FAN_CHILD_CONCURRENCY_MAX;
+      expect(cap).toBe(fanConcurrencyCap(3));
+    });
+
     it("host default equals the framework's fallback DEFAULT_FAN_CONCURRENCY_CAP (AS-025)", () => {
       expect(DEFAULT_FAN_CONCURRENCY_CAP).toBe(8);
       const result = parseHostConfig(validEnv);
@@ -508,14 +510,8 @@ describe("HostConfigSchema", () => {
     // zero and whitespace-only (both coerce to an integer below the min), and
     // a sub-1 exponent (coerces to a fraction).
     for (const bad of ["NaN", "nan", "1_000", "0 4", "-0", " ", "1e-3"]) {
-      it(`rejects the edge spelling ${JSON.stringify(bad)}, naming the setting (FR-032, AS-030)`, () => {
-        const result = parseHostConfig({ ...validEnv, FAN_CHILD_CONCURRENCY_MAX: bad });
-        expect(result.ok).toBe(false);
-        if (result.ok) return;
-        expect(result.error.kind).toBe("config-invalid");
-        if (result.error.kind !== "config-invalid") return;
-        expect(result.error.message).toContain("FAN_CHILD_CONCURRENCY_MAX");
-      });
+      it(`rejects the edge spelling ${JSON.stringify(bad)}, naming the setting (FR-032, AS-030)`, () =>
+        expectRejectedNamingSetting(bad));
     }
 
     // `.int()` in zod v4 is Number.isSafeInteger, so the accepted set has a
@@ -529,14 +525,8 @@ describe("HostConfigSchema", () => {
       ["1e30", 1e30],
       ["0xFFFFFFFFFFFFFFFF", 18446744073709552000],
     ] as const) {
-      it(`rejects ${raw}, whose Number() coercion ${coerced} exceeds MAX_SAFE_INTEGER (safe-integer ceiling)`, () => {
-        const result = parseHostConfig({ ...validEnv, FAN_CHILD_CONCURRENCY_MAX: raw });
-        expect(result.ok).toBe(false);
-        if (result.ok) return;
-        expect(result.error.kind).toBe("config-invalid");
-        if (result.error.kind !== "config-invalid") return;
-        expect(result.error.message).toContain("FAN_CHILD_CONCURRENCY_MAX");
-      });
+      it(`rejects ${raw}, whose Number() coercion ${coerced} exceeds MAX_SAFE_INTEGER (safe-integer ceiling)`, () =>
+        expectRejectedNamingSetting(raw));
     }
 
     // The exact contract, stated as a property over ARBITRARY env strings:

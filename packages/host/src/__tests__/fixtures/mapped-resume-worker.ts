@@ -75,7 +75,7 @@ const authority = createRunLeaseAuthority();
 const store = createRedisRunStore(requireHitlRedisPort(connected.redis), tenant, { ttlSec: RUN_RETENTION_SEC }, authority.verifier);
 const executor = createRunExecutor({
   sharedInfra: mappedHostInfra(connected.redis), getRegisteredDag: (requested) => requested === dag.id ? registered : undefined,
-  tenant, runRetentionTtlSec: RUN_RETENTION_SEC, fanChildConcurrencyMax: DEFAULT_FAN_CONCURRENCY_CAP,
+  tenant, runRetentionTtlSec: RUN_RETENTION_SEC, fanConcurrencyCap: DEFAULT_FAN_CONCURRENCY_CAP,
 });
 try {
   let record = unwrap(await store.get(id));

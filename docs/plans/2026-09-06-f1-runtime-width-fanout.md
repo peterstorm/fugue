@@ -5,8 +5,8 @@
 correctness closure shipped in PR #46 on 2026-09-08** (ADR-0086). PR #47 then made
 the repository's canonical verification gate cover the complete CI/release surface.
 PR-C's authored-map and plate-rendering candidate is on `feat/f1-authored-map`. **PR-D1
-(bounded-concurrency fan scheduling with whole-fan budget projection) is on
-`feat/f1-pr-d-fan-scheduling`** ([ADR-0090](../adr/0090-concurrent-fan-scheduling-and-whole-fan-projection.md)). Nested fans (D2) and adaptive concurrency
+(bounded-concurrency fan scheduling with whole-fan budget projection) is recorded in
+[ADR-0090](../adr/0090-concurrent-fan-scheduling-and-whole-fan-projection.md).** Nested fans (D2) and adaptive concurrency
 with static-sibling limits (D3) are deferred. The supported runtime contract is §13
 and [ADR-0086](../adr/0086-root-owned-mapped-child-execution.md), as amended by
 ADR-0090. §§1–11 preserve the
@@ -451,8 +451,10 @@ or promised for FR-F1-007.
 > **Superseded by PR-D1**
 > ([ADR-0090](../adr/0090-concurrent-fan-scheduling-and-whole-fan-projection.md)). Fans now run up to
 > `C = min(childConcurrency, FAN_CHILD_CONCURRENCY_MAX)` children at once.
-> `childConcurrency` defaults to 1, so an unconfigured fan is still sequential and
-> byte-identical to the record below. The record is kept for provenance.
+> `childConcurrency` defaults to 1, so an unconfigured fan is still sequential. An
+> unbudgeted one is byte-identical to the record below. A budgeted fan still projects
+> the whole fan at C=1, so it may refuse earlier than the per-call meter alone would,
+> and it then writes a refusal seed (ADR-0090 §10). The record is kept for provenance.
 
 Not stated either way in §4. PR-B runs indices one at a time, and two properties
 depend on it: a run that hits its F3 ceiling mid-fan stops at a **known** index
@@ -598,9 +600,11 @@ The points below are added on top of them.
   (replay-hit parse, or child → `childOutputSchema` → save).
 - **Ordering.** In-flight ≤ C at all times. Reducer input is in index order at
   every C.
-- **C=1 equivalence.** At C=1 the dispatch order, the checkpoint calls, the
-  reducer input and the errors are byte-identical to the sequential runner,
-  checked against a golden trace.
+- **C=1 equivalence.** For an unbudgeted fan at C=1, the dispatch order, the
+  checkpoint calls, the reducer input and the errors are byte-identical to the
+  sequential runner, checked against a golden trace. A budgeted fan still projects
+  the whole fan at C=1, so it may refuse earlier than the per-call meter alone
+  would, and it then writes a refusal seed (ADR-0090 §10).
 
 **Budget admission**
 

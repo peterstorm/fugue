@@ -119,12 +119,12 @@ export interface RunOptions {
    * per fan start and is observed on the `fan-start` event (FR-033).
    *
    * This is the OPERATOR channel, not a per-run override API (FR-034, OOS-009):
-   * the host threads `fanConcurrencyCap(config.FAN_CHILD_CONCURRENCY_MAX)` —
-   * branded via the framework smart constructor at the configuration boundary
-   * — and no other caller sets it. The value arrives already branded (INV-3:
-   * never an `as` cast outside `types/fan-scheduling.ts`); a non-positive
-   * integer setting never reaches a run because the smart constructor throws at
-   * that boundary (FR-032). Omitted ⇒ `DEFAULT_FAN_CONCURRENCY_CAP` (8).
+   * the host's config parse brands `FAN_CHILD_CONCURRENCY_MAX` with the
+   * framework smart constructor — its only mint site — and no other caller
+   * sets it. The value arrives already branded (INV-3: never an `as` cast
+   * outside `types/fan-scheduling.ts`); a non-positive-integer setting never
+   * reaches a run because that parse rejects it at startup, naming the setting
+   * (FR-032). Omitted ⇒ `DEFAULT_FAN_CONCURRENCY_CAP` (8).
    */
   readonly fanConcurrencyCap?: FanConcurrencyCap;
 

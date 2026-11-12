@@ -23,7 +23,9 @@ import {
   fanHarness,
   okChild,
   presave,
+  range,
   scriptedBudget,
+  tenfold,
   type FanHarness,
 } from "./fan-test-harness.js";
 
@@ -62,7 +64,7 @@ const assertOutcome = (result: Result<unknown, FrameworkError>, h: FanHarness, w
   const observed = h.dispatched.filter((i) => fails.has(i));
   const [lowest, ...rest] = observed;
   if (lowest === undefined) {
-    expect(result).toEqual({ ok: true, value: Array.from({ length: width }, (_, i) => i * 10) });
+    expect(result).toEqual({ ok: true, value: range(width) });
     expect(h.reductions).toHaveLength(1);
     return;
   }
@@ -89,7 +91,7 @@ describe("fan shell over arbitrary interleavings", () => {
       const failing = new Set(fails);
       if (saved.size > 0) await presave(cp, [...saved], (i) => i * 10);
       const h = fanHarness({ width, childConcurrency: c, checkpointer: cp });
-      const result = await drive(h, h.start(), (i) => (failing.has(i) ? failChild(childError(i)) : okChild(i * 10)), chooser(choices));
+      const result = await drive(h, h.start(), (i) => (failing.has(i) ? failChild(childError(i)) : tenfold(i)), chooser(choices));
 
       expect(h.maxInFlight).toBeLessThanOrEqual(c);
       expect(h.pendingAtReturn).toBe(0);
@@ -99,9 +101,9 @@ describe("fan shell over arbitrary interleavings", () => {
 
       // Resume the same epoch with every child healthy: 0 re-dispatch of anything saved.
       const reused = new Set([...saved, ...succeeded(h, failing)]);
-      const resumed = fanHarness({ width, childConcurrency: c, checkpointer: cp, auto: (i) => okChild(i * 10) });
-      expect(await resumed.start()).toEqual({ ok: true, value: Array.from({ length: width }, (_, i) => i * 10) });
-      expect(resumed.dispatched).toEqual(Array.from({ length: width }, (_, i) => i).filter((i) => !reused.has(i)));
+      const resumed = fanHarness({ width, childConcurrency: c, checkpointer: cp, auto: tenfold });
+      expect(await resumed.start()).toEqual({ ok: true, value: range(width) });
+      expect(resumed.dispatched).toEqual(range(width, (i) => i).filter((i) => !reused.has(i)));
     }), RUNS);
   });
 
@@ -123,7 +125,7 @@ describe("fan shell over arbitrary interleavings", () => {
       expect(h.pendingAtReturn).toBe(0);
       const completed = h.dispatched.length;
       if (result.ok) {
-        expect(result.value).toEqual(Array.from({ length: width }, (_, i) => i * 10));
+        expect(result.value).toEqual(range(width));
         expect(h.eventsOf("fan-refused")).toEqual([]);
         return;
       }
@@ -133,8 +135,8 @@ describe("fan shell over arbitrary interleavings", () => {
       expect(h.trace).toContain("save:fan-seed@fan@0@0");
 
       budget.redeploy(undefined);
-      const resumed = fanHarness({ width, childConcurrency: c, checkpointer: cp, budget, auto: (i) => okChild(i * 10) });
-      expect(await resumed.start()).toEqual({ ok: true, value: Array.from({ length: width }, (_, i) => i * 10) });
+      const resumed = fanHarness({ width, childConcurrency: c, checkpointer: cp, budget, auto: tenfold });
+      expect(await resumed.start()).toEqual({ ok: true, value: range(width) });
       expect(resumed.dispatched).toEqual(Array.from({ length: width - completed }, (_, k) => completed + k));
     }), RUNS);
   });

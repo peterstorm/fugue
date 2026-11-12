@@ -725,7 +725,6 @@ const emitMapNode = (
   ];
 
   const parameter = plan.needsModel ? `${CHILD_MODEL_NAME}: string` : "";
-  const body = declarations.length === 0 ? "" : `${indent(declarations.join("\n\n"), 2)}\n\n`;
   // The child's collected-output schema is single-sourced: the terminal's
   // already-emitted `$child_<Pascal>Schema` const serves both config roles
   // (its outSpec equals `childOutputSpec(node.child)` — both derive from the
@@ -738,8 +737,23 @@ const emitMapNode = (
     throw new Error(`authored map invariant: child '${node.child.id}' has no terminal output`);
   }
   const terminalPlan = childPlanOf(plans, terminalId);
-  const scheduling = schedulingConfigLines(node).map((line) => `${line}\n`).join("");
-  const declaration = `${purposeComment(node)}\nconst ${plan.ref} = (${parameter}) => {\n${body}  return ${nodeFactory("map")}({\n    id: ${JSON.stringify(node.id)},\n    inputSchema: ${plan.inExpr},\n    widthFrom: ${JSON.stringify(node.widthFrom)},\n    maxWidth: ${node.maxWidth},\n${scheduling}    child: ${child.expression.replace(/\n/g, "\n    ")},\n    childOutputSchema: ${terminalPlan.outName},\n    collectedItemSchema: ${terminalPlan.outName},\n    gather: { kind: "collect", field: ${JSON.stringify(node.gather.field)} },\n  });\n};`;
+  const declaration = [
+    purposeComment(node),
+    `const ${plan.ref} = (${parameter}) => {`,
+    ...(declarations.length === 0 ? [] : [indent(declarations.join("\n\n"), 2), ""]),
+    `  return ${nodeFactory("map")}({`,
+    `    id: ${JSON.stringify(node.id)},`,
+    `    inputSchema: ${plan.inExpr},`,
+    `    widthFrom: ${JSON.stringify(node.widthFrom)},`,
+    `    maxWidth: ${node.maxWidth},`,
+    ...schedulingConfigLines(node),
+    `    child: ${child.expression.replace(/\n/g, "\n    ")},`,
+    `    childOutputSchema: ${terminalPlan.outName},`,
+    `    collectedItemSchema: ${terminalPlan.outName},`,
+    `    gather: { kind: "collect", field: ${JSON.stringify(node.gather.field)} },`,
+    "  });",
+    "};",
+  ].join("\n");
   return { declaration, prompts: childNodes.flatMap((emitted) => emitted.prompts) };
 };
 

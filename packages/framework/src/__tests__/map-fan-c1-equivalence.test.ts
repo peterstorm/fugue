@@ -40,8 +40,6 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { InMemoryCheckpointer, type Checkpointer, type SaveNodeOpts } from "../checkpoint/checkpointer.js";
-import { defineDag } from "../executor/index.js";
-import { createFetchNode } from "../nodes/fetch.js";
 import { createMapNode } from "../nodes/map.js";
 import { compositeNodeKey } from "../shared/composite-node-key.js";
 import { makeNodeContext } from "../shared/make-node-context.js";
@@ -51,7 +49,7 @@ import type { MapNodeDef } from "../types/dag.js";
 import { frameworkError } from "../types/error-factories.js";
 import type { FrameworkError } from "../types/errors.js";
 import { fanConcurrencyCap } from "../types/fan-scheduling.js";
-import { DAG_INPUT, dagId, nodeId } from "../types/ids.js";
+import { dagId, nodeId } from "../types/ids.js";
 import type { TypedNodeContext } from "../types/node.js";
 import { err, ok, type Result } from "../types/result.js";
 import { freshnessExecutionEpoch, type FreshnessExecutionEpoch } from "../types/witness.js";
@@ -60,6 +58,7 @@ import {
   RUN,
   START_MS,
   callsCeiling,
+  childDag,
   cost,
   fanHarness,
   okChild,
@@ -180,13 +179,6 @@ const SCENARIOS: readonly Scenario[] = [
 // ---------------------------------------------------------------------------
 // One recorded run of a scenario
 // ---------------------------------------------------------------------------
-
-const childDag = defineDag({
-  id: "child",
-  nodes: { work: createFetchNode({ id: "work", inputSchema: z.number(), outputSchema: z.number(), fetch: async (n) => ok(n) }) },
-  edges: [{ from: DAG_INPUT, to: "work" }],
-  outputNodeId: "work",
-});
 
 const reducerOf = (reducer: Reducer, trace: TraceEntry[]) => (xs: readonly unknown[]): Result<unknown, FrameworkError> => {
   trace.push({ op: "reduce", input: [...xs] });

@@ -13,7 +13,7 @@
 
 import { describe, test, expect, afterEach } from "bun:test";
 import { createInMemorySpendLedger } from "../../adapters/spend-ledger-memory.js";
-import { ok, err, noopTracer, gitSha } from "@fuguejs/framework";
+import { ok, err, noopTracer, gitSha, DEFAULT_FAN_CONCURRENCY_CAP } from "@fuguejs/framework";
 import type { Result, DagId, DagDef, NodeContext, FrameworkError, RunOptions } from "@fuguejs/framework";
 import { z } from "zod";
 import type { GitPort } from "../../ports.js";
@@ -56,7 +56,7 @@ const testConfig = (overrides?: Partial<HostConfig>): HostConfig => ({
   CIRCUIT_BREAKER_WINDOW_MS: 60_000,
   DEFAULT_CACHE_TTL_MS: 300_000,
   DEFAULT_CHECKPOINT_TTL_MS: 86_400_000,
-  FAN_CHILD_CONCURRENCY_MAX: 8,
+  FAN_CHILD_CONCURRENCY_MAX: DEFAULT_FAN_CONCURRENCY_CAP,
   ...overrides,
 });
 
