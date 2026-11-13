@@ -6,6 +6,7 @@ import { SynthesisOutputSchema } from "../../schemas/summary.js";
 import type { SynthesisOutput } from "../../schemas/summary.js";
 import { CrmRecordSchema } from "../../schemas/crm.js";
 import type { CrmRecord } from "../../schemas/crm.js";
+import { GuardrailSkippedSchema, GuardrailValidatedSchema } from "../../schemas/guardrail.js";
 
 /**
  * Input shape: receives outputs from both synthesize and fetch-crm nodes.
@@ -20,27 +21,9 @@ const InputSchema = z.object({
   "fetch-crm": z.object({ customer: CrmRecordSchema.nullable() }),
 });
 
-const GuardrailCheckSchema = z.object({
-  dimension: z.string(),
-  passed: z.boolean(),
-  detail: z.string(),
-});
-
 const OutputSchema: z.ZodType<GuardrailResult<SynthesisOutput>> = z.discriminatedUnion("kind", [
-  z.object({
-    kind: z.literal("skipped"),
-    value: z.undefined(),
-    passed: z.literal(true),
-    warnings: z.array(z.string()),
-    checks: z.array(GuardrailCheckSchema),
-  }),
-  z.object({
-    kind: z.literal("validated"),
-    value: SynthesisOutputSchema,
-    passed: z.boolean(),
-    warnings: z.array(z.string()),
-    checks: z.array(GuardrailCheckSchema),
-  }),
+  GuardrailSkippedSchema,
+  GuardrailValidatedSchema,
 ]);
 
 /**

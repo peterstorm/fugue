@@ -9,7 +9,9 @@
 // "field present vs missing" — only on the value.
 
 import { formatFrameworkError } from "../types/errors.js";
+import type { FrameworkError } from "../types/errors.js";
 import { buildDescribedDag } from "../describe/index.js";
+import type { DescribeWarningSink } from "../describe/build-described-dag.js";
 import { importDagFile } from "./lint.js";
 import type { DescribeResult, LintError } from "./types.js";
 
@@ -28,6 +30,39 @@ export const parseRegistrationMeta = (
     description: typeof meta.description === "string" ? meta.description : "",
     version: typeof meta.version === "string" ? meta.version : "0.0.0",
   };
+};
+
+const formatSchemaWarning = (
+  where: Parameters<DescribeWarningSink["onSchemaSerializationError"]>[0],
+  e: unknown,
+): string => {
+  const target =
+    where.field === "outputSchema"
+      ? `outputSchema (node '${where.nodeId}')`
+      : "inputSchema";
+  const msg = e instanceof Error ? e.message : String(e);
+  return `${target}: ${msg}`;
+};
+
+const describeFailure = (path: string, error: FrameworkError): DescribeResult => {
+  const lintError: LintError = {
+    kind: "describe-failed",
+    message: `Failed to assemble describe payload: ${formatFrameworkError(error)}`,
+    detail: error,
+  };
+  return { ok: false, path, errors: [lintError] };
+};
+
+// Non-fatal schema serialization failures are surfaced on stderr so a
+// subprocess caller can capture them without contaminating the JSON
+// payload on stdout — AND carried on the machine-readable result's
+// `warnings` field so in-process consumers never have to scrape stderr.
+// The describe payload still ships with `null` in place of the affected
+// schema (consumers see this as "schema unavailable").
+const reportSchemaWarnings = (warnings: readonly string[]): void => {
+  for (const warning of warnings) {
+    process.stderr.write(`[fugue describe] ${warning}\n`);
+  }
 };
 
 /**
@@ -62,36 +97,14 @@ export const runDescribe = async (path: string): Promise<DescribeResult> => {
     version,
     warningSink: {
       onSchemaSerializationError: (where, e) => {
-        const target =
-          where.field === "outputSchema"
-            ? `outputSchema (node '${where.nodeId}')`
-            : "inputSchema";
-        const msg = e instanceof Error ? e.message : String(e);
-        schemaWarnings.push(`${target}: ${msg}`);
+        schemaWarnings.push(formatSchemaWarning(where, e));
       },
     },
   });
 
-  if (!built.ok) {
-    const lintError: LintError = {
-      kind: "describe-failed",
-      message: `Failed to assemble describe payload: ${formatFrameworkError(built.error)}`,
-      detail: built.error,
-    };
-    return { ok: false, path: imported.path, errors: [lintError] };
-  }
+  if (!built.ok) return describeFailure(imported.path, built.error);
 
-  // Non-fatal schema serialization failures are surfaced on stderr so a
-  // subprocess caller can capture them without contaminating the JSON
-  // payload on stdout — AND carried on the machine-readable result's
-  // `warnings` field so in-process consumers never have to scrape stderr.
-  // The describe payload still ships with `null` in place of the affected
-  // schema (consumers see this as "schema unavailable").
-  if (schemaWarnings.length > 0) {
-    for (const warning of schemaWarnings) {
-      process.stderr.write(`[fugue describe] ${warning}\n`);
-    }
-  }
+  reportSchemaWarnings(schemaWarnings);
 
   return { ok: true, path: imported.path, dag: built.value, warnings: schemaWarnings };
 };

@@ -153,6 +153,68 @@ const loadRegistryAt = async (
 };
 
 /**
+ * Step 4 of a sync cycle: run `bun install` when the lockfile changed (skipped in
+ * local mode and on first sync). An `err` is the install failure to surface.
+ */
+const installIfLockfileChanged = async (
+  git: GitPort,
+  config: SyncConfig,
+  lastSha: GitSha | null,
+  currentSha: GitSha,
+  logger: SyncLogger,
+): Promise<Result<void, HostError>> => {
+  if (config.isLocalMode || lastSha === null) return ok(undefined);
+  const lockResult = await git.hasLockfileChanged(config.repoPath, lastSha, currentSha);
+  if (!lockResult.ok) {
+    // Fail-safe: when we can't determine if lockfile changed, run install defensively.
+    // Skipping could cause "Cannot find module" errors for new dependencies.
+    logger.warn("Failed to check lockfile changes — running bun install defensively", {
+      error: lockResult.error,
+      fromSha: lastSha,
+      toSha: currentSha,
+    });
+    const installResult = await git.install(config.repoPath);
+    if (!installResult.ok) logger.error("bun install failed (defensive)", { error: installResult.error });
+    return installResult;
+  }
+  if (!lockResult.value) return ok(undefined);
+  logger.info("lockfile changed, running bun install");
+  const installResult = await git.install(config.repoPath);
+  if (!installResult.ok) logger.error("bun install failed", { error: installResult.error });
+  return installResult;
+};
+
+/**
+ * Steps 1–2 of a sync cycle: pull in remote mode after the initial sync (so
+ * rev-parse reflects remote state), then read the current SHA. An `err` is the
+ * failure to surface; the next interval retries.
+ */
+const pullAndReadSha = async (
+  git: GitPort,
+  config: SyncConfig,
+  lastSha: GitSha | null,
+  logger: SyncLogger,
+): Promise<Result<GitSha, HostError>> => {
+  if (!config.isLocalMode && lastSha !== null) {
+    const pullResult = await git.pull(config.repoPath);
+    if (!pullResult.ok) {
+      logger.warn("Git pull failed, existing DAGs remain active", {
+        error: pullResult.error,
+      });
+      return pullResult;
+    }
+  }
+
+  const shaResult = await git.currentSha(config.repoPath);
+  if (!shaResult.ok) {
+    logger.warn("Failed to get current SHA, will retry next interval", {
+      error: shaResult.error,
+    });
+  }
+  return shaResult;
+};
+
+/**
  * Execute a single sync cycle. This is the core logic without timer management.
  *
  * Steps:
@@ -171,35 +233,11 @@ export const executeSyncCycle = async (
   logger: SyncLogger,
   clock: Clock = Date.now,
 ): Promise<SyncResult> => {
-  // Step 1: Pull changes first in remote mode (so rev-parse reflects remote state)
-  if (!config.isLocalMode && lastSha !== null) {
-    const pullResult = await git.pull(config.repoPath);
-    if (!pullResult.ok) {
-      logger.warn("Git pull failed, existing DAGs remain active", {
-        error: pullResult.error,
-      });
-      return {
-        kind: "error",
-        previousSha: lastSha,
-        syncError: pullResult.error,
-      };
-    }
+  const current = await pullAndReadSha(git, config, lastSha, logger);
+  if (!current.ok) {
+    return { kind: "error", previousSha: lastSha, syncError: current.error };
   }
-
-  // Step 2: Get current SHA (now reflects remote state after pull)
-  const shaResult = await git.currentSha(config.repoPath);
-  if (!shaResult.ok) {
-    logger.warn("Failed to get current SHA, will retry next interval", {
-      error: shaResult.error,
-    });
-    return {
-      kind: "error",
-      previousSha: lastSha,
-      syncError: shaResult.error,
-    };
-  }
-
-  const currentSha = shaResult.value;
+  const currentSha = current.value;
 
   // Step 3: Skip if unchanged
   if (currentSha === lastSha) {
@@ -207,37 +245,9 @@ export const executeSyncCycle = async (
   }
 
   // Step 4: Check lockfile changes (skip in local mode and on first sync)
-  if (!config.isLocalMode && lastSha !== null) {
-    const lockResult = await git.hasLockfileChanged(config.repoPath, lastSha, currentSha);
-    if (!lockResult.ok) {
-      // Fail-safe: when we can't determine if lockfile changed, run install defensively.
-      // Skipping could cause "Cannot find module" errors for new dependencies.
-      logger.warn("Failed to check lockfile changes — running bun install defensively", {
-        error: lockResult.error,
-        fromSha: lastSha,
-        toSha: currentSha,
-      });
-      const installResult = await git.install(config.repoPath);
-      if (!installResult.ok) {
-        logger.error("bun install failed (defensive)", { error: installResult.error });
-        return {
-          kind: "error",
-          previousSha: lastSha,
-          syncError: installResult.error,
-        };
-      }
-    } else if (lockResult.value) {
-      logger.info("lockfile changed, running bun install");
-      const installResult = await git.install(config.repoPath);
-      if (!installResult.ok) {
-        logger.error("bun install failed", { error: installResult.error });
-        return {
-          kind: "error",
-          previousSha: lastSha,
-          syncError: installResult.error,
-        };
-      }
-    }
+  const installed = await installIfLockfileChanged(git, config, lastSha, currentSha, logger);
+  if (!installed.ok) {
+    return { kind: "error", previousSha: lastSha, syncError: installed.error };
   }
 
   // Steps 5 + 6: discover, load (isolating per-DAG failures) and freeze.
@@ -253,6 +263,82 @@ export const executeSyncCycle = async (
     newSha: currentSha,
     registry,
     errors,
+  };
+};
+
+// ── Cycle Result Dispatch ──────────────────────────────────────────────────
+
+interface CycleResultCallbacks {
+  readonly onComplete: OnSyncComplete;
+  readonly onNoChange: OnSyncNoChange;
+  readonly onError: OnSyncError;
+}
+
+/**
+ * Notify the callback matching a finished cycle and return the SHA the loop
+ * should track next. Callbacks run BEFORE the SHA advances.
+ */
+const notifyCycleResult = (
+  result: SyncResult,
+  callbacks: CycleResultCallbacks,
+  lastSha: GitSha | null,
+): GitSha | null =>
+  // Exhaustive: a new SyncResult variant is a compile error here
+  // rather than a cycle that silently notifies no one.
+  match(result)
+    .with({ kind: "updated" }, (updated) => {
+      // Call onComplete BEFORE advancing SHA — if onComplete throws,
+      // SHA stays at lastSha so the next cycle will retry this commit.
+      callbacks.onComplete(updated.registry, updated.newSha);
+      return updated.newSha;
+    })
+    .with({ kind: "no-change" }, (unchanged) => {
+      // Transition syncing → ready (sync succeeded, nothing changed)
+      callbacks.onNoChange(unchanged.currentSha);
+      return unchanged.currentSha;
+    })
+    .with({ kind: "error" }, (failed) => {
+      callbacks.onError(failed.syncError);
+      return lastSha;
+    })
+    .with({ kind: "skipped" }, () => {
+      // Not reachable here: `skipped` is produced by doSync's re-entrancy
+      // guard, before executeSyncCycle runs. It shares the SyncResult
+      // type but not this path — the in-progress cycle owns the callbacks,
+      // so firing any of them again would double-report one sync. The
+      // if-chain this replaced omitted the case silently; stating it is the
+      // whole point of `.exhaustive()`.
+      return lastSha;
+    })
+    .exhaustive();
+
+/**
+ * Recover state machine from "syncing" on unexpected throw.
+ * Without this, the host remains stuck in syncing phase permanently.
+ */
+const recoverFromUnexpectedThrow = (
+  e: unknown,
+  onError: OnSyncError,
+  lastSha: GitSha | null,
+  logger: SyncLogger,
+): SyncResult => {
+  const errMsg = e instanceof Error ? e.message : String(e);
+  logger.error("Unexpected error in sync cycle", { error: errMsg });
+  const syncError: HostError = {
+    kind: "git-pull-failed",
+    message: `Unexpected error in sync cycle: ${errMsg}`,
+  };
+  try {
+    onError(syncError);
+  } catch (callbackErr) {
+    logger.error("onError callback threw", {
+      error: callbackErr instanceof Error ? callbackErr.message : String(callbackErr),
+    });
+  }
+  return {
+    kind: "error",
+    previousSha: lastSha,
+    syncError,
   };
 };
 
@@ -274,7 +360,6 @@ export const startSyncLoop = (
   clock: Clock = Date.now,
 ): SyncLoopHandle => {
   let lastSha: GitSha | null = initialSha;
-  let timer: ReturnType<typeof setInterval> | null = null;
   let running = false;
 
   const doSync = async (): Promise<SyncResult> => {
@@ -286,63 +371,17 @@ export const startSyncLoop = (
     try {
       onStarted();
       const result = await executeSyncCycle(git, loader, config, lastSha, logger, clock);
-
-      // Exhaustive: a new SyncCycleResult variant is a compile error here
-      // rather than a cycle that silently notifies no one.
-      match(result)
-        .with({ kind: "updated" }, (updated) => {
-          // Call onComplete BEFORE advancing SHA — if onComplete throws,
-          // SHA stays at lastSha so the next cycle will retry this commit.
-          onComplete(updated.registry, updated.newSha);
-          lastSha = updated.newSha;
-        })
-        .with({ kind: "no-change" }, (unchanged) => {
-          lastSha = unchanged.currentSha;
-          // Transition syncing → ready (sync succeeded, nothing changed)
-          onNoChange(unchanged.currentSha);
-        })
-        .with({ kind: "error" }, (failed) => {
-          onError(failed.syncError);
-        })
-        .with({ kind: "skipped" }, () => {
-          // Not reachable here: `skipped` is produced by doSync's re-entrancy
-          // guard ABOVE, before executeSyncCycle runs. It shares the SyncResult
-          // type but not this path — the in-progress cycle owns the callbacks,
-          // so firing any of them again would double-report one sync. The
-          // if-chain this replaced omitted the case silently; stating it is the
-          // whole point of `.exhaustive()`.
-        })
-        .exhaustive();
-
+      lastSha = notifyCycleResult(result, { onComplete, onNoChange, onError }, lastSha);
       return result;
     } catch (e) {
-      // Recover state machine from "syncing" on unexpected throw.
-      // Without this, the host remains stuck in syncing phase permanently.
-      const errMsg = e instanceof Error ? e.message : String(e);
-      logger.error("Unexpected error in sync cycle", { error: errMsg });
-      const syncError: HostError = {
-        kind: "git-pull-failed",
-        message: `Unexpected error in sync cycle: ${errMsg}`,
-      };
-      try {
-        onError(syncError);
-      } catch (callbackErr) {
-        logger.error("onError callback threw", {
-          error: callbackErr instanceof Error ? callbackErr.message : String(callbackErr),
-        });
-      }
-      return {
-        kind: "error",
-        previousSha: lastSha,
-        syncError,
-      };
+      return recoverFromUnexpectedThrow(e, onError, lastSha, logger);
     } finally {
       running = false;
     }
   };
 
   // Start the polling timer
-  timer = setInterval(() => {
+  const timer = setInterval(() => {
     doSync().catch((e) => {
       logger.error("Unhandled error in sync loop", {
         error: e instanceof Error ? e.message : String(e),
@@ -351,12 +390,8 @@ export const startSyncLoop = (
   }, config.pollIntervalMs);
 
   return {
-    stop: () => {
-      if (timer) {
-        clearInterval(timer);
-        timer = null;
-      }
-    },
+    // `clearInterval` is idempotent, so a repeated `stop()` stays a no-op.
+    stop: () => clearInterval(timer),
     triggerSync: doSync,
   };
 };

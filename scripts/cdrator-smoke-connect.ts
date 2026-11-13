@@ -35,7 +35,7 @@
  * scripts/oracle-smoke-connect.ts: a root-level script can't resolve the bare
  * workspace specifier, so it imports the package source directly.
  */
-import { parseHostConfig } from "../packages/host/src/domain/config.ts";
+import { parseHostConfig, type HostConfig } from "../packages/host/src/domain/config.ts";
 import { buildCdratorCapability } from "../packages/host/src/adapters/cdrator-capability.ts";
 import type { FetchLike, FetchResponseLike } from "@fuguejs/http-auth";
 
@@ -46,13 +46,17 @@ const note = (msg: string): void => {
 
 const isDryRun = process.argv.includes("--dry-run");
 
+type CdratorHandle = NonNullable<ReturnType<typeof buildCdratorCapability>>;
+
+type RecordedCall = { url: string; method: string; headers: Record<string, string>; body?: string };
+
 /**
  * A recording fetch for --dry-run: captures the outbound request and replies with
  * a canned token mint, so the REAL capability is built and driven with zero
  * network. Lets us print the exact mint URL / headers / body the wiring produces.
  */
-const recordingFetch = (): { fetch: FetchLike; calls: Array<{ url: string; method: string; headers: Record<string, string>; body?: string }> } => {
-  const calls: Array<{ url: string; method: string; headers: Record<string, string>; body?: string }> = [];
+const recordingFetch = (): { fetch: FetchLike; calls: RecordedCall[] } => {
+  const calls: RecordedCall[] = [];
   const fetch: FetchLike = async (url, init): Promise<FetchResponseLike> => {
     calls.push({ url, method: init.method, headers: { ...init.headers }, body: init.body });
     return {
@@ -75,24 +79,26 @@ const maskAuthorization = (headers: Record<string, string>): Record<string, stri
   return out;
 };
 
-async function main(): Promise<void> {
-  note(`🔌  CDRator authedHttp smoke-connect${isDryRun ? " (--dry-run, no network)" : ""}`);
+/**
+ * Seed the unrelated REQUIRED core fields with throwaway dummies (mirrors
+ * run-host.sh's dummy-boot) so a CDRator-only smoke does not demand a Redis URL
+ * / DAGs repo / admin token. The CDRATOR_* fields and their superRefine still
+ * parse EXACTLY as at boot — only the orthogonal host plumbing is stubbed.
+ */
+const smokeEnv = (): Record<string, string | undefined> => ({
+  DAGS_REPO_URL: "local",
+  REDIS_URL: "redis://localhost:6379",
+  ADMIN_TOKEN: "smoke-dummy-admin-token-0123456789",
+  LLM_PROVIDER: "anthropic",
+  ANTHROPIC_API_KEY: "sk-ant-dummy-smoke-only",
+  ...process.env,
+});
 
-  // Seed the unrelated REQUIRED core fields with throwaway dummies (mirrors
-  // run-host.sh's dummy-boot) so a CDRator-only smoke does not demand a Redis URL
-  // / DAGs repo / admin token. The CDRATOR_* fields and their superRefine still
-  // parse EXACTLY as at boot — only the orthogonal host plumbing is stubbed.
-  const env: Record<string, string | undefined> = {
-    DAGS_REPO_URL: "local",
-    REDIS_URL: "redis://localhost:6379",
-    ADMIN_TOKEN: "smoke-dummy-admin-token-0123456789",
-    LLM_PROVIDER: "anthropic",
-    ANTHROPIC_API_KEY: "sk-ant-dummy-smoke-only",
-    ...process.env,
-  };
-
-  // Parse the SAME way the host boots — a missing/invalid CDRATOR_* fails here
-  // with the exact boot-time message (parse, don't validate).
+/**
+ * Parse the SAME way the host boots — a missing/invalid CDRATOR_* fails here
+ * with the exact boot-time message (parse, don't validate).
+ */
+const loadConfigOrExit = (env: Record<string, string | undefined>): HostConfig => {
   const configResult = parseHostConfig(env);
   if (!configResult.ok) {
     // Log the curated `.message` (Zod issue path + message — names the offending
@@ -104,20 +110,52 @@ async function main(): Promise<void> {
     console.error(`❌  Config invalid: ${detail}`);
     process.exit(1);
   }
-  const config = configResult.value;
+  return configResult.value;
+};
 
+const buildHandleOrExit = (config: HostConfig, fetchImpl: FetchLike | undefined): CdratorHandle => {
   if (config.CDRATOR_URL === undefined) {
     console.error("❌  CDRATOR_URL is unset — the authedHttp capability is not configured. Source .env.cdrator first.");
     process.exit(1);
   }
   note(`   grant: ${config.CDRATOR_GRANT_TYPE}  brand: ${config.CDRATOR_BRAND_KEY}  auth: ${config.CDRATOR_AUTH_URL}`);
 
-  const recorder = isDryRun ? recordingFetch() : undefined;
-  const handle = buildCdratorCapability(config, recorder?.fetch);
+  const handle = buildCdratorCapability(config, fetchImpl);
   if (handle === undefined) {
     console.error("❌  buildCdratorCapability returned undefined (CDRATOR_URL gate). Should not happen after the guard above.");
     process.exit(1);
   }
+  return handle;
+};
+
+/** Print the first recorded mint request, secret masked (--dry-run only). */
+const printRecordedMint = (calls: ReadonlyArray<RecordedCall>): void => {
+  const mint = calls[0];
+  if (!mint) return;
+  note("   ── exact outbound mint request (recorded, secret masked) ──");
+  note(`   POST ${mint.url}`);
+  note(`   headers: ${JSON.stringify(maskAuthorization(mint.headers))}`);
+  note(`   body:    ${mint.body}`);
+};
+
+/** Optional authenticated data call to prove the bearer is injected + accepted. */
+const runAuthenticatedGet = async (handle: CdratorHandle, smokePath: string): Promise<void> => {
+  const { z } = await import("zod");
+  const result = await handle.client.get(smokePath, { schema: z.unknown() });
+  if (result.ok) {
+    note(`✅  GET ${smokePath} OK — authenticated data call succeeded`);
+  } else {
+    console.error(`❌  GET ${smokePath} failed: ${JSON.stringify(result.error)}`);
+    process.exit(1);
+  }
+};
+
+async function main(): Promise<void> {
+  note(`🔌  CDRator authedHttp smoke-connect${isDryRun ? " (--dry-run, no network)" : ""}`);
+
+  const config = loadConfigOrExit(smokeEnv());
+  const recorder = isDryRun ? recordingFetch() : undefined;
+  const handle = buildHandleOrExit(config, recorder?.fetch);
 
   try {
     // connect() mints the first token through the real TokenProvider — the
@@ -126,28 +164,10 @@ async function main(): Promise<void> {
     await handle.connect?.();
     note("✅  connect() OK — client_credentials token minted via the real capability wiring");
 
-    if (isDryRun && recorder) {
-      const mint = recorder.calls[0];
-      if (mint) {
-        note("   ── exact outbound mint request (recorded, secret masked) ──");
-        note(`   POST ${mint.url}`);
-        note(`   headers: ${JSON.stringify(maskAuthorization(mint.headers))}`);
-        note(`   body:    ${mint.body}`);
-      }
-    }
+    if (isDryRun && recorder) printRecordedMint(recorder.calls);
 
-    // Optional authenticated data call to prove the bearer is injected + accepted.
     const smokePath = process.env.CDRATOR_SMOKE_PATH;
-    if (smokePath && !isDryRun) {
-      const { z } = await import("zod");
-      const result = await handle.client.get(smokePath, { schema: z.unknown() });
-      if (result.ok) {
-        note(`✅  GET ${smokePath} OK — authenticated data call succeeded`);
-      } else {
-        console.error(`❌  GET ${smokePath} failed: ${JSON.stringify(result.error)}`);
-        process.exit(1);
-      }
-    }
+    if (smokePath && !isDryRun) await runAuthenticatedGet(handle, smokePath);
 
     note("✅  CDRator smoke-connect PASSED");
     process.exit(0);

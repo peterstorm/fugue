@@ -13,6 +13,8 @@ import { formatToken, hashToken, markTeam, canonicalizeTeamName } from "../../..
 import type { TokenGrant, AuthIdentity } from "../../../domain/auth.js";
 import type { TokenStorePort } from "../../../ports.js";
 import { errorResponse } from "../../response.js";
+import { ok, err } from "@fuguejs/framework";
+import type { Result } from "@fuguejs/framework";
 
 // ── Dependencies ───────────────────────────────────────────────────────────
 
@@ -39,6 +41,44 @@ const requireAdmin = (c: Context): Response | null => {
 
 // ── POST /admin/teams ──────────────────────────────────────────────────────
 
+interface CreateTeamRequest {
+  readonly teamName: string;
+  readonly teamLabel: string;
+}
+
+/** Parse + validate the POST body; a rejection is the ready-made error Response. */
+const parseCreateTeamRequest = async (c: Context): Promise<Result<CreateTeamRequest, Response>> => {
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return err(errorResponse(c, 400, "body-parse-failed", "Request body must be valid JSON"));
+  }
+
+  if (!body || typeof body !== "object") {
+    return err(errorResponse(c, 400, "input-validation-failed", "Request body must be an object"));
+  }
+
+  const { team, label } = body as Record<string, unknown>;
+
+  if (!team || typeof team !== "string" || team.trim().length === 0) {
+    return err(errorResponse(c, 400, "input-validation-failed", "\"team\" field is required and must be a non-empty string"));
+  }
+
+  const teamName = canonicalizeTeamName(team);
+  const teamLabel = typeof label === "string" && label.trim().length > 0
+    ? label.trim()
+    : `${teamName} token`;
+
+  // Validate team name format (alphanumeric + hyphens, like DNS labels)
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(teamName)) {
+    return err(errorResponse(c, 400, "input-validation-failed",
+      "Team name must be lowercase alphanumeric with hyphens, starting and ending with alphanumeric (e.g., 'team-a')"));
+  }
+
+  return ok({ teamName, teamLabel });
+};
+
 /**
  * Provision a new team token.
  *
@@ -52,34 +92,9 @@ export const createCreateTeamHandler = (deps: AdminHandlerDeps) => {
     const denied = requireAdmin(c);
     if (denied) return denied;
 
-    // Parse request body
-    let body: unknown;
-    try {
-      body = await c.req.json();
-    } catch {
-      return errorResponse(c, 400, "body-parse-failed", "Request body must be valid JSON");
-    }
-
-    if (!body || typeof body !== "object") {
-      return errorResponse(c, 400, "input-validation-failed", "Request body must be an object");
-    }
-
-    const { team, label } = body as Record<string, unknown>;
-
-    if (!team || typeof team !== "string" || team.trim().length === 0) {
-      return errorResponse(c, 400, "input-validation-failed", "\"team\" field is required and must be a non-empty string");
-    }
-
-    const teamName = canonicalizeTeamName(team);
-    const teamLabel = typeof label === "string" && label.trim().length > 0
-      ? label.trim()
-      : `${teamName} token`;
-
-    // Validate team name format (alphanumeric + hyphens, like DNS labels)
-    if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(teamName)) {
-      return errorResponse(c, 400, "input-validation-failed",
-        "Team name must be lowercase alphanumeric with hyphens, starting and ending with alphanumeric (e.g., 'team-a')");
-    }
+    const request = await parseCreateTeamRequest(c);
+    if (!request.ok) return request.error;
+    const { teamName, teamLabel } = request.value;
 
     // Generate token
     const randomBytes = deps.generateRandomBytes();

@@ -56,6 +56,71 @@ const isGeneralAt = (s: string, i: number): boolean => s.slice(i, i + 7).toLower
 const DATE_TOKEN_CHARS = new Set("MDYHSEmdyhseg");
 const DIGITS_1_9 = new Set("123456789");
 
+/** Index just past the `"…"` literal that opens at `start` (an unterminated one runs to the end). */
+const skipQuoted = (fmt: string, start: number): number => {
+  let i = start;
+  for (; fmt.charCodeAt(++i) !== 34 && i < fmt.length; ) {
+    /* skip the quoted literal */
+  }
+  return i + 1;
+};
+
+/** The `[…]` bracket that opens at `start`, and the index scanning resumes at. */
+const scanBracket = (fmt: string, start: number): { readonly text: string; readonly next: number } => {
+  let i = start;
+  let text = fmt.charAt(i);
+  while (fmt.charAt(i++) !== "]" && i < fmt.length) text += fmt.charAt(i);
+  return { text, next: i };
+};
+
+/** Whether the character at `i` continues a `0`/`#`/`.` number token. */
+const continuesNumberToken = (fmt: string, i: number): boolean => {
+  const d = fmt.charAt(i);
+  return (
+    "0#?.,E+-%".indexOf(d) > -1 ||
+    (d === "\\" && fmt.charAt(i + 1) === "-" && "0#".indexOf(fmt.charAt(i + 2)) > -1)
+  );
+};
+
+/** Index past the number token (`0`, `#`, `.` and what follows) that starts at `start`. */
+const skipNumberToken = (fmt: string, start: number): number => {
+  let i = start;
+  while (i < fmt.length && continuesNumberToken(fmt, ++i)) {
+    /* skip the number token */
+  }
+  return i;
+};
+
+/** Index past the run of `c` that starts at `start`. */
+const skipRun = (fmt: string, start: number, c: string): number => {
+  let i = start;
+  while (fmt.charAt(++i) === c) {
+    /* skip the run */
+  }
+  return i;
+};
+
+/** Index past a `*` fill marker and the single fill character after it. */
+const skipFill = (fmt: string, start: number): number => {
+  const i = start + 1;
+  return fmt.charAt(i) === " " || fmt.charAt(i) === "*" ? i + 1 : i;
+};
+
+/** Index past the literal-digit run (`1`-`9` first) that starts at `start`. */
+const skipLiteralDigits = (fmt: string, start: number): number => {
+  let i = start;
+  while (i < fmt.length && "0123456789".indexOf(fmt.charAt(++i)) > -1) {
+    /* skip the literal digits */
+  }
+  return i;
+};
+
+/** `A/P`, `AM/PM` or the Chinese `上午/下午` meridiem marker begins at `i`. */
+const isMeridiemAt = (fmt: string, i: number): boolean =>
+  fmt.substr(i, 3).toUpperCase() === "A/P" ||
+  fmt.substr(i, 5).toUpperCase() === "AM/PM" ||
+  fmt.substr(i, 5).toUpperCase() === "上午/下午";
+
 /**
  * SheetJS 0.18.5 `fmt_is_date` (`SSF.is_date`), ported statement for statement
  * so the differential test can hold it to the original. Quoted literals,
@@ -70,10 +135,7 @@ export const isDateFormat = (fmt: string): boolean => {
       if (isGeneralAt(fmt, i)) i += 6;
       i++;
     } else if (c === '"') {
-      for (; fmt.charCodeAt(++i) !== 34 && i < fmt.length; ) {
-        /* skip the quoted literal */
-      }
-      ++i;
+      i = skipQuoted(fmt, i);
     } else if (c === "\\" || c === "_") {
       i += 2;
     } else if (c === "@") {
@@ -81,34 +143,20 @@ export const isDateFormat = (fmt: string): boolean => {
     } else if (c === "B" || c === "b" || DATE_TOKEN_CHARS.has(c)) {
       return true;
     } else if (c === "A" || c === "a" || c === "上") {
-      if (fmt.substr(i, 3).toUpperCase() === "A/P") return true;
-      if (fmt.substr(i, 5).toUpperCase() === "AM/PM") return true;
-      if (fmt.substr(i, 5).toUpperCase() === "上午/下午") return true;
+      if (isMeridiemAt(fmt, i)) return true;
       ++i;
     } else if (c === "[") {
-      let bracket = c;
-      while (fmt.charAt(i++) !== "]" && i < fmt.length) bracket += fmt.charAt(i);
-      if (ABSOLUTE_TIME.test(bracket)) return true;
+      const bracket = scanBracket(fmt, i);
+      if (ABSOLUTE_TIME.test(bracket.text)) return true;
+      i = bracket.next;
     } else if (c === "." || c === "0" || c === "#") {
-      let d = c;
-      while (
-        i < fmt.length &&
-        ("0#?.,E+-%".indexOf((d = fmt.charAt(++i))) > -1 ||
-          (d === "\\" && fmt.charAt(i + 1) === "-" && "0#".indexOf(fmt.charAt(i + 2)) > -1))
-      ) {
-        /* skip the number token */
-      }
+      i = skipNumberToken(fmt, i);
     } else if (c === "?") {
-      while (fmt.charAt(++i) === c) {
-        /* skip the ? run */
-      }
+      i = skipRun(fmt, i, c);
     } else if (c === "*") {
-      ++i;
-      if (fmt.charAt(i) === " " || fmt.charAt(i) === "*") ++i;
+      i = skipFill(fmt, i);
     } else if (DIGITS_1_9.has(c)) {
-      while (i < fmt.length && "0123456789".indexOf(fmt.charAt(++i)) > -1) {
-        /* skip the literal digits */
-      }
+      i = skipLiteralDigits(fmt, i);
     } else {
       ++i;
     }

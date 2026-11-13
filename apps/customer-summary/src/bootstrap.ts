@@ -193,44 +193,78 @@ export const loadAppPrompts = async (
   return prompts;
 };
 
-export const bootstrap = async (injectedLogger?: AppLogger) => {
-  const log = injectedLogger ?? consoleAppLogger;
-  // Route the framework's fault-isolation warnings (CompositeSpanExporter,
-  // AzureMonitorExporter, AiFoundryObserver, FoundryRunSummaryObserver — all via
-  // fwLogger()) to the SAME logger the app uses. Without this they fall back to
-  // the framework's console default, so the "swallow-but-log" safety net would
-  // bypass an injected structured/aggregated AppLogger and be invisible to the
-  // operator's log pipeline. AppLogger is structurally a FrameworkLogger.
-  setFrameworkLogger(log);
-  const config = loadConfig();
+/**
+ * THE one rendering of a cache/checkpoint FrameworkError for these
+ * diagnostics: the kind always, plus the message only for `cache-error`
+ * (the sole variant that carries one). Three sites needed it and must agree,
+ * or the same backend failure reads differently depending on which call hit it.
+ */
+const describeCacheError = (error: FrameworkError): string =>
+  `${error.kind}${error.kind === "cache-error" ? ` — ${error.message}` : ""}`;
 
-  const fixturesDir = resolve(config.FIXTURES_DIR);
-  const promptsDir = resolve(config.PROMPTS_DIR);
+/**
+ * Adapter: NodeContext.cache expects get/set. Node-output persistence is
+ * wired separately through the CheckpointWriter. get() returns a discriminated
+ * hit/miss so nullable values are no longer ambiguous with cache misses.
+ */
+const buildContextCache = (cache: RedisCache, log: AppLogger): ContextCache => ({
+  get: async (key: string) => {
+    const r = await cache.get(key, z.unknown());
+    if (!r.ok) {
+      log.warn(`[cache] get failed for key=${key}: ${describeCacheError(r.error)}`);
+      return { hit: false } as const;
+    }
+    // RedisCache.get returns ok(null) on miss, ok(value) on hit.
+    return r.value === null
+      ? ({ hit: false } as const)
+      : ({ hit: true, value: r.value } as const);
+  },
+  set: async (key: string, value: unknown) => {
+    const r = await cache.set(key, value, LLM_CACHE_TTL);
+    if (!r.ok) {
+      log.warn(`[cache] set failed for key=${key}: ${describeCacheError(r.error)}`);
+    }
+    return r;
+  },
+});
 
-  // --- Observability backend selection (observability spec FR-002/003/006/022/023) ---
-  // Resolve the trace backend(s) + auth from config. A config error MUST fail
-  // bootstrap loudly — never silently fall back (observability spec FR-006). In well-formed config
-  // this is already caught by the zod superRefine in loadConfig(); the resolver
-  // re-checks defense-in-depth, so a thrown error here means contradictory
-  // config slipped past the schema and must stop startup.
-  const resolvedObservability = resolveObservabilityBackends(config);
-  if (!isOk(resolvedObservability)) {
-    throw resolvedObservability.error;
-  }
-  const resolved = resolvedObservability.value;
+/**
+ * Parameter types match the `CheckpointWriter` port it implements
+ * (branded ids — the checkpoint domain's one identifier ownership rule);
+ * the engine calls it with already-validated RunId/NodeId values.
+ */
+const buildCheckpointWriter = (cp: Checkpointer): CheckpointWriter => ({
+  write: async (runId: RunId, nodeId: NodeId, value: unknown) => {
+    const r = await cp.saveNode(runId, {
+      nodeId,
+      output: value,
+      completedAt: new Date(),
+    });
+    if (!r.ok) {
+      throw new Error(
+        `checkpoint write failed for run=${runId} node=${nodeId}: ${describeCacheError(r.error)}`,
+      );
+    }
+  },
+});
 
-  // --- Tracing (OTel + MLflow [+ Foundry] with tail-based sampling) ---
-  // Delegated to the seam-injectable `setUpTracing` shell. It builds the
-  // always-on MLflow backend, attempts the Foundry leg in isolation, composes
-  // exporters + observer, and starts the pipeline — returning a coherent
-  // un-traced state on any failure so the app still boots (observability spec SC-006 / FR-026).
-  const { tracing, observer, foundrySinkForFlush } = await setUpTracing(resolved, config, log);
+/** The Redis-backed collaborators; every field is `null` when Redis is unreachable. */
+interface RedisSetup {
+  readonly redis: Redis | null;
+  /** Event-driven health flag read lazily by the readiness probe. */
+  readonly isHealthy: () => boolean;
+  readonly contextCache: ContextCache | null;
+  readonly checkpointWriter: CheckpointWriter | null;
+  readonly checkpointer: Checkpointer | null;
+}
 
-  // --- Redis (cache + checkpointer) ---
-  // Redis is a hard dependency: it backs the checkpointer (durable resume) and
-  // the response cache. If it's unavailable at bootstrap, we still construct
-  // the app, but readiness MUST report not-ready so traffic does not land here.
-  // The /summarize handler also rejects requests when checkpointer is null.
+/**
+ * Redis is a hard dependency: it backs the checkpointer (durable resume) and
+ * the response cache. If it's unavailable at bootstrap, we still construct
+ * the app, but readiness MUST report not-ready so traffic does not land here.
+ * The /summarize handler also rejects requests when checkpointer is null.
+ */
+const setUpRedis = async (config: Config, log: AppLogger): Promise<RedisSetup> => {
   let contextCache: ContextCache | null = null;
   let checkpointWriter: CheckpointWriter | null = null;
   let checkpointer: Checkpointer | null = null;
@@ -262,141 +296,199 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
 
     const cache = new RedisCache(redis);
     checkpointer = new RedisCheckpointer(redis);
-    const cp = checkpointer;
-
-    // Adapter: NodeContext.cache expects get/set. Node-output persistence is
-    // wired separately through the CheckpointWriter below.
-    // get() returns a discriminated hit/miss so nullable values
-    // are no longer ambiguous with cache misses.
-    // THE one rendering of a cache/checkpoint FrameworkError for these
-    // diagnostics: the kind always, plus the message only for `cache-error`
-    // (the sole variant that carries one). Three sites needed it and must agree,
-    // or the same backend failure reads differently depending on which call hit it.
-    const describe = (error: FrameworkError): string =>
-      `${error.kind}${error.kind === "cache-error" ? ` — ${error.message}` : ""}`;
-
-    contextCache = {
-      get: async (key: string) => {
-        const r = await cache.get(key, z.unknown());
-        if (!r.ok) {
-          log.warn(`[cache] get failed for key=${key}: ${describe(r.error)}`);
-          return { hit: false } as const;
-        }
-        // RedisCache.get returns ok(null) on miss, ok(value) on hit.
-        return r.value === null
-          ? ({ hit: false } as const)
-          : ({ hit: true, value: r.value } as const);
-      },
-      set: async (key: string, value: unknown) => {
-        const r = await cache.set(key, value, LLM_CACHE_TTL);
-        if (!r.ok) {
-          log.warn(`[cache] set failed for key=${key}: ${describe(r.error)}`);
-        }
-        return r;
-      },
-    };
-    checkpointWriter = {
-      // Parameter types match the `CheckpointWriter` port it implements
-      // (branded ids — the checkpoint domain's one identifier ownership rule);
-      // the engine calls it with already-validated RunId/NodeId values.
-      write: async (runId: RunId, nodeId: NodeId, value: unknown) => {
-        const r = await cp.saveNode(runId, {
-          nodeId,
-          output: value,
-          completedAt: new Date(),
-        });
-        if (!r.ok) {
-          throw new Error(
-            `checkpoint write failed for run=${runId} node=${nodeId}: ${describe(r.error)}`,
-          );
-        }
-      },
-    };
+    contextCache = buildContextCache(cache, log);
+    checkpointWriter = buildCheckpointWriter(checkpointer);
   } catch (e) {
     log.warn("Redis connection failed — running without cache/checkpointing:", e);
     checkpointer = null;
   }
+  return { redis, isHealthy: () => redisHealthy, contextCache, checkpointWriter, checkpointer };
+};
 
-  // Source
-  const source = new JsonFixtureSource(fixturesDir);
-
-  // Prompt registry
-  const promptRegistry = FilePromptRegistry({
-    dir: promptsDir,
-    registryPath: join(promptsDir, "registry.json"),
-  });
-  // Pipeline-fatal prompts (synthesis / synthesis-system) fail bootstrap
-  // loudly on load failure; the post-hoc eval rubric degrades (see
-  // loadAppPrompts for the per-prompt severity contract).
-  const prompts = await loadAppPrompts(promptRegistry, log);
-
-  // LLM client
-  let llm: LlmClient;
-  // True when the no-API-key fallback put the app on the unconfigured
-  // FakeLlmClient — every /summarize is then guaranteed to fail, so readiness
-  // must report not-ready (checkLlm) instead of serving traffic into it.
-  let llmIsFake = false;
+/**
+ * For Azure, deployment name is used as the model parameter; every other
+ * provider uses `LLM_MODEL` or its default.
+ */
+const resolveModel = (config: Config): string => {
   const provider = config.LLM_PROVIDER;
-  // For Azure, deployment name is used as the model parameter
-  const model = provider === "azure"
+  return provider === "azure"
     ? (config.AZURE_OPENAI_DEPLOYMENT ?? config.LLM_MODEL ?? DEFAULT_MODELS[provider])
     : (config.LLM_MODEL ?? DEFAULT_MODELS[provider]);
+};
 
+interface LlmSetup {
+  readonly llm: LlmClient;
+  /**
+   * True when the no-API-key fallback put the app on the unconfigured
+   * FakeLlmClient — every /summarize is then guaranteed to fail, so readiness
+   * must report not-ready (checkLlm) instead of serving traffic into it.
+   */
+  readonly llmIsFake: boolean;
+}
+
+const selectLlmClient = (
+  config: Config,
+  model: string,
+  traced: boolean,
+  log: AppLogger,
+): LlmSetup => {
+  const provider = config.LLM_PROVIDER;
   if (provider === "azure" && config.AZURE_OPENAI_ENDPOINT && config.AZURE_OPENAI_API_KEY) {
     // Azure base URL: <endpoint>/openai/deployments/<model> — in the azure
     // branch `model` is already `AZURE_OPENAI_DEPLOYMENT ?? LLM_MODEL ??
     // DEFAULT_MODELS[azure]`, so no separate `deployment` name exists.
     const azureBaseUrl = `${config.AZURE_OPENAI_ENDPOINT.replace(/\/$/, "")}/openai/deployments/${model}`;
-    llm = new OpenAILlmClient({
+    const llm = new OpenAILlmClient({
       apiKey: config.AZURE_OPENAI_API_KEY,
       baseUrl: azureBaseUrl,
       apiVersion: config.AZURE_OPENAI_API_VERSION,
     });
     log.info(`Using Azure OpenAI LLM client (deployment: ${model}, endpoint: ${config.AZURE_OPENAI_ENDPOINT})`);
-  } else if (provider === "openai" && config.OPENAI_API_KEY) {
-    llm = new OpenAILlmClient({
+    return { llm, llmIsFake: false };
+  }
+  if (provider === "openai" && config.OPENAI_API_KEY) {
+    const llm = new OpenAILlmClient({
       apiKey: config.OPENAI_API_KEY,
       baseUrl: "https://api.openai.com/v1",
     });
     log.info(`Using OpenAI LLM client (model: ${model})`);
-  } else if (provider === "anthropic" && config.ANTHROPIC_API_KEY) {
+    return { llm, llmIsFake: false };
+  }
+  if (provider === "anthropic" && config.ANTHROPIC_API_KEY) {
     const raw = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
-    llm = new AnthropicLlmClient(raw);
-    log.info(`Using Anthropic LLM client (model: ${model})${tracing ? " [traced]" : ""}`);
-  } else {
-    log.warn(`No API key set for provider "${provider}" — using FakeLlmClient (all LLM calls will fail)`);
-    llm = new FakeLlmClient(new Map());
-    llmIsFake = true;
+    const llm = new AnthropicLlmClient(raw);
+    log.info(`Using Anthropic LLM client (model: ${model})${traced ? " [traced]" : ""}`);
+    return { llm, llmIsFake: false };
   }
+  log.warn(`No API key set for provider "${provider}" — using FakeLlmClient (all LLM calls will fail)`);
+  return { llm: new FakeLlmClient(new Map()), llmIsFake: true };
+};
 
-  // ENABLE_THINKING is only honored by providers whose client implements reasoning.
-  // Anthropic client currently ignores `req.thinking` (extended-thinking integration
-  // pending), so passing it through would be a silent no-op visible only in the trace
-  // attribute. Refuse it explicitly here so config matches behavior.
+/**
+ * ENABLE_THINKING is only honored by providers whose client implements reasoning.
+ * Anthropic client currently ignores `req.thinking` (extended-thinking integration
+ * pending), so passing it through would be a silent no-op visible only in the trace
+ * attribute. Refuse it explicitly here so config matches behavior.
+ */
+const resolveThinking = (
+  config: Config,
+  log: AppLogger,
+): { type: "enabled"; budgetTokens: number } | undefined => {
+  if (!config.ENABLE_THINKING) return undefined;
+  const provider = config.LLM_PROVIDER;
   const providerSupportsThinking = provider === "openai" || provider === "azure";
-  let thinkingDep: { type: "enabled"; budgetTokens: number } | undefined;
-  if (config.ENABLE_THINKING) {
-    if (providerSupportsThinking) {
-      thinkingDep = { type: "enabled", budgetTokens: config.THINKING_BUDGET_TOKENS };
-    } else {
-      log.warn(`[config] ENABLE_THINKING ignored: not implemented for provider "${provider}"`);
-    }
+  if (providerSupportsThinking) {
+    return { type: "enabled", budgetTokens: config.THINKING_BUDGET_TOKENS };
   }
+  log.warn(`[config] ENABLE_THINKING ignored: not implemented for provider "${provider}"`);
+  return undefined;
+};
 
-  const deps: AppDeps = {
-    source,
-    llm,
-    prompts,
+/**
+ * Bound the probe: a black-holed MLflow endpoint must not hang the k8s
+ * readiness check until the platform socket timeout. A timeout aborts
+ * the fetch and is handled as not-ready. (checkRedis does no live I/O — it
+ * reads a cached flag — so only this probe needs an explicit bound.)
+ */
+const probeMlflow = async (config: Config, log: AppLogger): Promise<boolean> => {
+  try {
+    const res = await fetch(`${config.MLFLOW_TRACKING_URI}/health`, {
+      signal: AbortSignal.timeout(2000),
+    });
+    if (!res.ok) {
+      log.debug(`[health] MLflow returned non-ok status: ${res.status}`);
+    }
+    return res.ok;
+  } catch (e) {
+    log.debug(`[health] MLflow unreachable: ${e instanceof Error ? e.message : String(e)}`);
+    return false;
+  }
+};
+
+/** Readiness checks: flag/probe-backed, never per-request pings of Redis. */
+const buildHealth = (
+  config: Config,
+  log: AppLogger,
+  redisSetup: RedisSetup,
+  llmIsFake: boolean,
+  tracing: TracingHandle | null,
+): AppDeps["health"] => ({
+  // Always defined: if Redis was never reachable at bootstrap, we still
+  // need readiness to report not-ready (otherwise k8s leaves the pod in
+  // service while checkpointer/cache are null). Flag is event-driven —
+  // no per-request ping (would add round-trip on every k8s probe).
+  checkRedis: async () => redisSetup.isHealthy() && redisSetup.redis !== null,
+  // Readiness gate for the LLM fallback: the unconfigured FakeLlmClient
+  // guarantees every /summarize fails, so the pod must come OUT of
+  // rotation instead of reporting ready while it can serve nothing.
+  // No I/O — reads the bootstrap-set flag (same shape as checkRedis).
+  checkLlm: async () => !llmIsFake,
+  checkMlflow: () => probeMlflow(config, log),
+  // Surface CompositeSpanExporter per-child failure counts on /readyz so a
+  // constructed-but-persistently-failing secondary backend (e.g. Foundry
+  // export erroring while MLflow succeeds) is observable beyond the
+  // exporter's rate-limited logs. Null unless multiple backends fan out.
+  // Informational only — never gates readiness (observability spec FR-026).
+  tracingExporterFailures: () => tracing?.exporterFailures() ?? null,
+});
+
+/**
+ * Resolve the trace backend(s) + auth from config (observability spec
+ * FR-002/003/006/022/023). A config error MUST fail bootstrap loudly — never
+ * silently fall back (observability spec FR-006). In well-formed config this
+ * is already caught by the zod superRefine in loadConfig(); the resolver
+ * re-checks defense-in-depth, so a thrown error here means contradictory
+ * config slipped past the schema and must stop startup.
+ */
+const resolveObservabilityOrThrow = (config: Config): ResolvedObservability => {
+  const resolvedObservability = resolveObservabilityBackends(config);
+  if (!isOk(resolvedObservability)) {
+    throw resolvedObservability.error;
+  }
+  return resolvedObservability.value;
+};
+
+/**
+ * Pipeline-fatal prompts (synthesis / synthesis-system) fail bootstrap
+ * loudly on load failure; the post-hoc eval rubric degrades (see
+ * loadAppPrompts for the per-prompt severity contract).
+ */
+const loadPromptsFromDisk = (promptsDir: string, log: AppLogger): Promise<Map<string, string>> => {
+  const promptRegistry = FilePromptRegistry({
+    dir: promptsDir,
+    registryPath: join(promptsDir, "registry.json"),
+  });
+  return loadAppPrompts(promptRegistry, log);
+};
+
+/** Everything `bootstrap` resolved before the app's dependency record is assembled. */
+interface ResolvedParts {
+  readonly config: Config;
+  readonly log: AppLogger;
+  readonly source: JsonFixtureSource;
+  readonly prompts: Map<string, string>;
+  readonly model: string;
+  readonly llmSetup: LlmSetup;
+  readonly redisSetup: RedisSetup;
+  readonly tracingSetup: TracingSetup;
+}
+
+const assembleAppDeps = (parts: ResolvedParts): AppDeps => {
+  const { config, log, model, llmSetup, redisSetup, tracingSetup } = parts;
+  return {
+    source: parts.source,
+    llm: llmSetup.llm,
+    prompts: parts.prompts,
     model,
     judgeModel: config.EVAL_JUDGE_MODEL ?? model,
-    thinking: thinkingDep,
-    cache: contextCache,
-    checkpointWriter,
-    checkpointer,
+    thinking: resolveThinking(config, log),
+    cache: redisSetup.contextCache,
+    checkpointWriter: redisSetup.checkpointWriter,
+    checkpointer: redisSetup.checkpointer,
     // Default path: NoopObserver (byte-for-byte unchanged, observability spec SC-006/FR-027).
     // Foundry path: BufferedObserver(AiFoundryObserver) sharing the trace
     // policy instance — set by composeObservability above.
-    observer,
+    observer: tracingSetup.observer,
     logger: log,
     // Read the env-derived flag once at bootstrap; the APP reads its config
     // from process.env exactly here in config.ts (ConfigSchema.parse) — the
@@ -405,63 +497,64 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
     // through unchanged; otherwise the PII scrubber strips sensitive patterns
     // while keeping non-PII content visible for debugging.
     contentFilter: config.LLM_TRACE_PROMPTS ? IDENTITY_FILTER : piiScrubber,
-    health: {
-      // Always defined: if Redis was never reachable at bootstrap, we still
-      // need readiness to report not-ready (otherwise k8s leaves the pod in
-      // service while checkpointer/cache are null). Flag is event-driven —
-      // no per-request ping (would add round-trip on every k8s probe).
-      checkRedis: async () => redisHealthy && redis !== null,
-      // Readiness gate for the LLM fallback: the unconfigured FakeLlmClient
-      // guarantees every /summarize fails, so the pod must come OUT of
-      // rotation instead of reporting ready while it can serve nothing.
-      // No I/O — reads the bootstrap-set flag (same shape as checkRedis).
-      checkLlm: async () => !llmIsFake,
-      checkMlflow: async () => {
-        try {
-          // Bound the probe: a black-holed MLflow endpoint must not hang the k8s
-          // readiness check until the platform socket timeout. A timeout aborts
-          // the fetch and is handled as not-ready below. (checkRedis above does
-          // no live I/O — it reads a cached flag — so only this probe needs an
-          // explicit bound.)
-          const res = await fetch(`${config.MLFLOW_TRACKING_URI}/health`, {
-            signal: AbortSignal.timeout(2000),
-          });
-          if (!res.ok) {
-            log.debug(`[health] MLflow returned non-ok status: ${res.status}`);
-          }
-          return res.ok;
-        } catch (e) {
-          log.debug(`[health] MLflow unreachable: ${e instanceof Error ? e.message : String(e)}`);
-          return false;
-        }
-      },
-      // Surface CompositeSpanExporter per-child failure counts on /readyz so a
-      // constructed-but-persistently-failing secondary backend (e.g. Foundry
-      // export erroring while MLflow succeeds) is observable beyond the
-      // exporter's rate-limited logs. Null unless multiple backends fan out.
-      // Informational only — never gates readiness (observability spec FR-026). Reads `tracing`
-      // lazily: by request time the bootstrap tracing block has settled.
-      tracingExporterFailures: () => tracing?.exporterFailures() ?? null,
-    },
+    health: buildHealth(config, log, redisSetup, llmSetup.llmIsFake, tracingSetup.tracing),
   };
-  const app = createApp(deps);
+};
 
-  // Graceful shutdown — orchestration lives in `runGracefulShutdown` (extracted
-  // so the per-step fault isolation is unit-tested directly). Each step is
-  // guarded independently there: a rejecting trace flush must NOT abort the
-  // observer dispose, sink drain, or redis disconnect (the "shutdown wedge"
-  // guarantee). The observer is narrowed structurally so the default
-  // NoopObserver path has no dispose step.
-  const shutdown = async () =>
-    runGracefulShutdown(
-      {
-        tracing,
-        observer: observer as Partial<Disposable> & { close?: () => void },
-        foundrySink: foundrySinkForFlush,
-        redis,
-      },
-      log,
-    );
+/**
+ * Graceful shutdown — orchestration lives in `runGracefulShutdown` (extracted
+ * so the per-step fault isolation is unit-tested directly). Each step is
+ * guarded independently there: a rejecting trace flush must NOT abort the
+ * observer dispose, sink drain, or redis disconnect (the "shutdown wedge"
+ * guarantee). The observer is narrowed structurally so the default
+ * NoopObserver path has no dispose step.
+ */
+const buildShutdown = (
+  tracingSetup: TracingSetup,
+  redis: Redis | null,
+  log: AppLogger,
+): (() => Promise<void>) => async () =>
+  runGracefulShutdown(
+    {
+      tracing: tracingSetup.tracing,
+      observer: tracingSetup.observer as Partial<Disposable> & { close?: () => void },
+      foundrySink: tracingSetup.foundrySinkForFlush,
+      redis,
+    },
+    log,
+  );
 
-  return { app, config, tracing, shutdown };
+export const bootstrap = async (injectedLogger?: AppLogger) => {
+  const log = injectedLogger ?? consoleAppLogger;
+  // Route the framework's fault-isolation warnings (CompositeSpanExporter,
+  // AzureMonitorExporter, AiFoundryObserver, FoundryRunSummaryObserver — all via
+  // fwLogger()) to the SAME logger the app uses. Without this they fall back to
+  // the framework's console default, so the "swallow-but-log" safety net would
+  // bypass an injected structured/aggregated AppLogger and be invisible to the
+  // operator's log pipeline. AppLogger is structurally a FrameworkLogger.
+  setFrameworkLogger(log);
+  const config = loadConfig();
+
+  const resolved = resolveObservabilityOrThrow(config);
+
+  // Tracing (OTel + MLflow [+ Foundry] with tail-based sampling): the
+  // seam-injectable `setUpTracing` shell returns a coherent un-traced state on
+  // any failure so the app still boots (observability spec SC-006 / FR-026).
+  const tracingSetup = await setUpTracing(resolved, config, log);
+
+  // Redis (cache + checkpointer)
+  const redisSetup = await setUpRedis(config, log);
+
+  const source = new JsonFixtureSource(resolve(config.FIXTURES_DIR));
+  const prompts = await loadPromptsFromDisk(resolve(config.PROMPTS_DIR), log);
+
+  const model = resolveModel(config);
+  const llmSetup = selectLlmClient(config, model, tracingSetup.tracing !== null, log);
+
+  const app = createApp(
+    assembleAppDeps({ config, log, source, prompts, model, llmSetup, redisSetup, tracingSetup }),
+  );
+  const shutdown = buildShutdown(tracingSetup, redisSetup.redis, log);
+
+  return { app, config, tracing: tracingSetup.tracing, shutdown };
 };

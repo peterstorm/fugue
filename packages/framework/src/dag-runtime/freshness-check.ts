@@ -129,59 +129,58 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
     this.maxResources = opts?.maxResources ?? 10_000;
   }
 
-  /**
-   * Record a successful write. Evicts oldest entries per resource and oldest
-   * resources globally.
-   *
-   * The in-memory implementation never fails (always returns `ok(undefined)`).
-   * The `Result` return type satisfies the `FreshnessIndex` interface contract
-   * required by the Redis adapter, which CAN fail on network issues. Callers
-   * should still check `.ok` — switching to a Redis-backed index at runtime
-   * would silently break code that assumes infallible writes.
-   */
-  async recordWrite(event: WriteAttemptedEvent): Promise<Result<void, FrameworkError>> {
-    const resource = event.newWitness.resource;
-    const entry: WriteEntry = writeEntryOf(event);
-    if (!this.writes.has(resource)) {
-      // New resource — check global capacity before adding
-      if (this.writes.size >= this.maxResources) {
-        // Bounded scan: try up to 100 candidates before falling back to Map iteration order
-        const MAX_SCAN = 100;
-        let evicted = false;
-        for (let i = 0; i < MAX_SCAN && this.evictCursor < this.resourceOrder.length; i++) {
-          const candidate = this.resourceOrder[this.evictCursor]!;
-          this.evictCursor++;
-          if (this.writes.has(candidate)) {
-            this.writes.delete(candidate);
-            this.recordedWriteKeys.delete(candidate);
-            this.latest.delete(candidate);
-            this.resourceSet.delete(candidate);
-            evicted = true;
-            break;
-          }
-        }
-        // Fallback: if scan budget exhausted, evict the first live key via Map iteration
-        if (!evicted) {
-          const firstKey = this.writes.keys().next().value;
-          if (firstKey !== undefined) {
-            this.writes.delete(firstKey);
-            this.recordedWriteKeys.delete(firstKey);
-            this.latest.delete(firstKey);
-            this.resourceSet.delete(firstKey);
-          }
-        }
-        // Compact: when cursor has consumed more than half the array, trim
-        // the consumed prefix so resourceOrder does not grow unboundedly.
-        if (this.evictCursor > this.resourceOrder.length / 2) {
-          this.resourceOrder.splice(0, this.evictCursor);
-          this.evictCursor = 0;
-        }
-      }
-      if (!this.resourceSet.has(resource)) {
-        this.resourceOrder.push(resource);
-        this.resourceSet.add(resource);
+  private dropResource(resource: string): void {
+    this.writes.delete(resource);
+    this.recordedWriteKeys.delete(resource);
+    this.latest.delete(resource);
+    this.resourceSet.delete(resource);
+  }
+
+  // Bounded scan: try up to 100 candidates before the caller falls back to
+  // Map iteration order. Returns whether a live resource was evicted.
+  private evictScannedResource(): boolean {
+    const MAX_SCAN = 100;
+    for (let i = 0; i < MAX_SCAN && this.evictCursor < this.resourceOrder.length; i++) {
+      const candidate = this.resourceOrder[this.evictCursor]!;
+      this.evictCursor++;
+      if (this.writes.has(candidate)) {
+        this.dropResource(candidate);
+        return true;
       }
     }
+    return false;
+  }
+
+  // Fallback: if the scan budget is exhausted, evict the first live key via Map iteration.
+  private evictFirstLiveResource(): void {
+    const firstKey = this.writes.keys().next().value;
+    if (firstKey !== undefined) this.dropResource(firstKey);
+  }
+
+  // Compact: when the cursor has consumed more than half the array, trim the
+  // consumed prefix so resourceOrder does not grow unboundedly.
+  private compactResourceOrder(): void {
+    if (this.evictCursor > this.resourceOrder.length / 2) {
+      this.resourceOrder.splice(0, this.evictCursor);
+      this.evictCursor = 0;
+    }
+  }
+
+  // New resource: evict the oldest one when at global capacity, then track it.
+  private admitNewResource(resource: string): void {
+    if (this.writes.size >= this.maxResources) {
+      if (!this.evictScannedResource()) this.evictFirstLiveResource();
+      this.compactResourceOrder();
+    }
+    if (!this.resourceSet.has(resource)) {
+      this.resourceOrder.push(resource);
+      this.resourceSet.add(resource);
+    }
+  }
+
+  // Insert the entry into its resource window: timestamp-ordered, bounded to
+  // the newest `maxEntries`, with acknowledgements rebuilt from the window.
+  private retainEntry(resource: string, entry: WriteEntry): void {
     const entries = this.writes.get(resource) ?? [];
     entries.push(entry);
     // Stable timestamp order makes the tail authoritative even when completion
@@ -197,6 +196,23 @@ export class InMemoryFreshnessIndex implements FreshnessIndex {
     // identity set from growing without limit while preserving exact lookup.
     this.recordedWriteKeys.set(resource, new Set(entries.map(freshnessWriteKey)));
     this.latest.set(resource, entries[entries.length - 1]!);
+  }
+
+  /**
+   * Record a successful write. Evicts oldest entries per resource and oldest
+   * resources globally.
+   *
+   * The in-memory implementation never fails (always returns `ok(undefined)`).
+   * The `Result` return type satisfies the `FreshnessIndex` interface contract
+   * required by the Redis adapter, which CAN fail on network issues. Callers
+   * should still check `.ok` — switching to a Redis-backed index at runtime
+   * would silently break code that assumes infallible writes.
+   */
+  async recordWrite(event: WriteAttemptedEvent): Promise<Result<void, FrameworkError>> {
+    const resource = event.newWitness.resource;
+    const entry: WriteEntry = writeEntryOf(event);
+    if (!this.writes.has(resource)) this.admitNewResource(resource);
+    this.retainEntry(resource, entry);
     return ok(undefined);
   }
 

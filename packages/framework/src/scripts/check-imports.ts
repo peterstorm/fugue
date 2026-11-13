@@ -740,63 +740,80 @@ function isForbiddenSpecifier(
 // Core check function
 // ---------------------------------------------------------------------------
 
-export function checkImports(srcDir: string): CheckResult {
-  const allFiles = walkTs(srcDir);
+// A file-backend import of a Node built-in outside the closed allow-list (INV-1).
+const nodeBuiltinViolation = (
+  specifier: string,
+  relPath: string,
+  line: number,
+): Violation | null => {
+  const nodeBuiltin = normalizeNodeBuiltin(specifier);
+  if (
+    nodeBuiltin === null ||
+    (nodeBuiltin.usesCanonicalSpelling &&
+      FILE_BACKEND_NODE_BUILTINS.includes(
+        nodeBuiltin.canonical as (typeof FILE_BACKEND_NODE_BUILTINS)[number],
+      ))
+  ) {
+    return null;
+  }
+  return {
+    file: relPath,
+    line,
+    importSpecifier: specifier,
+    reason: fileNodeBuiltinReason(specifier, nodeBuiltin),
+  };
+};
+
+// Every violation of one import specifier: the file-backend built-in gate, then
+// each applicable rule's forbidden-module list.
+const importViolations = (
+  specifier: string,
+  line: number,
+  relPath: string,
+  applicableRules: readonly BoundaryRule[],
+  isFileBackendSource: boolean,
+): Violation[] => {
   const violations: Violation[] = [];
+  const builtin = isFileBackendSource ? nodeBuiltinViolation(specifier, relPath, line) : null;
+  if (builtin !== null) violations.push(builtin);
 
-  for (const file of allFiles) {
-    const relPath = relative(srcDir, file);
-
-    // Determine which rules apply to this file (in-scope and not explicitly excluded)
-    const applicableRules = RULES.filter(
-      (rule) => inScope(relPath, rule.scope) && !isExcluded(relPath, rule.scopeExcludes),
-    );
-
-    const source = readFileSync(file, "utf-8");
-
-    if (applicableRules.length === 0) {
-      violations.push(...findUncheckedBrandImports(source, relPath));
-      continue;
-    }
-
-    const imports = extractImports(source);
-    const isFileBackendSource = inScope(relPath, FILE_BACKEND_SCOPE);
-
-    violations.push(...findFileCacheErrorBypasses(source, relPath));
-    violations.push(...findUncheckedBrandImports(source, relPath));
-
-    for (const { specifier, line } of imports) {
-      const nodeBuiltin = isFileBackendSource
-        ? normalizeNodeBuiltin(specifier)
-        : null;
-      if (
-        nodeBuiltin !== null &&
-        (!nodeBuiltin.usesCanonicalSpelling ||
-          !FILE_BACKEND_NODE_BUILTINS.includes(
-            nodeBuiltin.canonical as (typeof FILE_BACKEND_NODE_BUILTINS)[number],
-          ))
-      ) {
-        violations.push({
-          file: relPath,
-          line,
-          importSpecifier: specifier,
-          reason: fileNodeBuiltinReason(specifier, nodeBuiltin),
-        });
-      }
-
-      for (const rule of applicableRules) {
-        if (isForbiddenSpecifier(specifier, relPath, rule.forbiddenModules)) {
-          violations.push({
-            file: relPath,
-            line,
-            importSpecifier: specifier,
-            reason: rule.reason ?? `Import ${specifier} is forbidden by this module boundary.`,
-          });
-        }
-      }
+  for (const rule of applicableRules) {
+    if (isForbiddenSpecifier(specifier, relPath, rule.forbiddenModules)) {
+      violations.push({
+        file: relPath,
+        line,
+        importSpecifier: specifier,
+        reason: rule.reason ?? `Import ${specifier} is forbidden by this module boundary.`,
+      });
     }
   }
+  return violations;
+};
 
+const checkFile = (srcDir: string, file: string): readonly Violation[] => {
+  const relPath = relative(srcDir, file);
+
+  // Determine which rules apply to this file (in-scope and not explicitly excluded)
+  const applicableRules = RULES.filter(
+    (rule) => inScope(relPath, rule.scope) && !isExcluded(relPath, rule.scopeExcludes),
+  );
+
+  const source = readFileSync(file, "utf-8");
+
+  if (applicableRules.length === 0) return findUncheckedBrandImports(source, relPath);
+
+  const isFileBackendSource = inScope(relPath, FILE_BACKEND_SCOPE);
+  return [
+    ...findFileCacheErrorBypasses(source, relPath),
+    ...findUncheckedBrandImports(source, relPath),
+    ...extractImports(source).flatMap(({ specifier, line }) =>
+      importViolations(specifier, line, relPath, applicableRules, isFileBackendSource),
+    ),
+  ];
+};
+
+export function checkImports(srcDir: string): CheckResult {
+  const violations = walkTs(srcDir).flatMap((file) => checkFile(srcDir, file));
   return { violations };
 }
 

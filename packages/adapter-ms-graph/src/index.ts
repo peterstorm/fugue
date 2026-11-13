@@ -273,6 +273,80 @@ const graphGet = async (
 // Adapter Factory
 // ---------------------------------------------------------------------------
 
+/** Everything one Graph read needs; bundled so the per-method functions stay small. */
+type GraphReadContext = Readonly<{
+  getAccessToken: () => Promise<string>;
+  fetchImpl: FetchLike;
+  base: string;
+  timeoutMs: number;
+}>;
+
+/** Acquire a token, resolve the ref, and GET the chosen URL (content or metadata). */
+const fetchGraphResource = async (
+  gctx: GraphReadContext,
+  ref: FileRef,
+  target: "content" | "metadata",
+  accept: string,
+  opts: ReadOpts | undefined,
+): Promise<Result<Response, FrameworkError>> => {
+  const token = await acquireToken(gctx.getAccessToken);
+  if (!token.ok) return token;
+  const urls = resolveUrls(ref, gctx.base);
+  if (!urls.ok) return urls;
+  return graphGet(gctx.fetchImpl, urls.value[target], token.value, accept, opts, gctx.timeoutMs);
+};
+
+/** Pure mapping of a validated driveItem to the port's `FileMeta`. */
+const toFileMeta = (d: z.infer<typeof DriveItemSchema>): Result<FileMeta, FrameworkError> => {
+  const lastModified = parseIsoUtc(d.lastModifiedDateTime);
+  // Unreachable in practice (zod already validated the datetime shape), but
+  // keeps the brand honest rather than casting an unvalidated string.
+  if (!lastModified.ok) return lastModified;
+  return ok({
+    id: d.id,
+    name: d.name,
+    sizeBytes: d.size ?? null,
+    lastModified: lastModified.value,
+    ...(d.eTag !== undefined ? { eTag: d.eTag } : {}),
+    ...(d.file?.mimeType !== undefined ? { mimeType: d.file.mimeType } : {}),
+  });
+};
+
+const readContent = async (
+  gctx: GraphReadContext,
+  ref: FileRef,
+  opts: ReadOpts | undefined,
+): Promise<Result<Uint8Array, FrameworkError>> => {
+  const res = await fetchGraphResource(gctx, ref, "content", "application/octet-stream", opts);
+  if (!res.ok) return res;
+  try {
+    const buf = await res.value.arrayBuffer();
+    return ok(new Uint8Array(buf));
+  } catch (e) {
+    return err(transientErr(`failed reading Graph response body: ${safeErrorMessage(e)}`));
+  }
+};
+
+const readMetadata = async (
+  gctx: GraphReadContext,
+  ref: FileRef,
+  opts: ReadOpts | undefined,
+): Promise<Result<FileMeta, FrameworkError>> => {
+  const res = await fetchGraphResource(gctx, ref, "metadata", "application/json", opts);
+  if (!res.ok) return res;
+  let json: unknown;
+  try {
+    json = await res.value.json();
+  } catch (e) {
+    return err(transientErr(`failed parsing Graph metadata JSON: ${safeErrorMessage(e)}`));
+  }
+  const parsed = DriveItemSchema.safeParse(json);
+  if (!parsed.success) {
+    return err(crashErr(`unexpected Graph driveItem shape: ${parsed.error.message}`));
+  }
+  return toFileMeta(parsed.data);
+};
+
 /**
  * Create a Microsoft Graph `DocumentSource` capability handle.
  *
@@ -282,57 +356,16 @@ const graphGet = async (
  * - `healthCheck()`: re-acquires a token (liveness proxy for the auth path).
  */
 export const createMsGraphAdapter = (config: MsGraphAdapterConfig): CapabilityHandle<"documents"> => {
-  const base = config.graphBaseUrl ?? DEFAULT_GRAPH_BASE;
-  const timeoutMs = config.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const fetchImpl: FetchLike = config.fetchImpl ?? ((url, init) => fetch(url, init));
+  const gctx: GraphReadContext = {
+    getAccessToken: config.getAccessToken,
+    fetchImpl: config.fetchImpl ?? ((url, init) => fetch(url, init)),
+    base: config.graphBaseUrl ?? DEFAULT_GRAPH_BASE,
+    timeoutMs: config.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS,
+  };
 
   const client: DocumentSource = {
-    getContent: async (ref, opts): Promise<Result<Uint8Array, FrameworkError>> => {
-      const token = await acquireToken(config.getAccessToken);
-      if (!token.ok) return token;
-      const urls = resolveUrls(ref, base);
-      if (!urls.ok) return urls;
-      const res = await graphGet(fetchImpl, urls.value.content, token.value, "application/octet-stream", opts, timeoutMs);
-      if (!res.ok) return res;
-      try {
-        const buf = await res.value.arrayBuffer();
-        return ok(new Uint8Array(buf));
-      } catch (e) {
-        return err(transientErr(`failed reading Graph response body: ${safeErrorMessage(e)}`));
-      }
-    },
-
-    getMetadata: async (ref, opts): Promise<Result<FileMeta, FrameworkError>> => {
-      const token = await acquireToken(config.getAccessToken);
-      if (!token.ok) return token;
-      const urls = resolveUrls(ref, base);
-      if (!urls.ok) return urls;
-      const res = await graphGet(fetchImpl, urls.value.metadata, token.value, "application/json", opts, timeoutMs);
-      if (!res.ok) return res;
-      let json: unknown;
-      try {
-        json = await res.value.json();
-      } catch (e) {
-        return err(transientErr(`failed parsing Graph metadata JSON: ${safeErrorMessage(e)}`));
-      }
-      const parsed = DriveItemSchema.safeParse(json);
-      if (!parsed.success) {
-        return err(crashErr(`unexpected Graph driveItem shape: ${parsed.error.message}`));
-      }
-      const d = parsed.data;
-      const lastModified = parseIsoUtc(d.lastModifiedDateTime);
-      // Unreachable in practice (zod already validated the datetime shape), but
-      // keeps the brand honest rather than casting an unvalidated string.
-      if (!lastModified.ok) return lastModified;
-      return ok({
-        id: d.id,
-        name: d.name,
-        sizeBytes: d.size ?? null,
-        lastModified: lastModified.value,
-        ...(d.eTag !== undefined ? { eTag: d.eTag } : {}),
-        ...(d.file?.mimeType !== undefined ? { mimeType: d.file.mimeType } : {}),
-      });
-    },
+    getContent: (ref, opts) => readContent(gctx, ref, opts),
+    getMetadata: (ref, opts) => readMetadata(gctx, ref, opts),
   };
 
   return {

@@ -27,6 +27,7 @@
 // block). Unexpected errors land on stderr with a non-zero exit code. Designed
 // for LLM tooling: parse `ok` and `errors[].kind` rather than scraping prose.
 
+import type { Interface as ReadlineInterface } from "node:readline/promises";
 import { match } from "ts-pattern";
 import { runLint } from "../src/cli/lint.js";
 import { runDescribe } from "../src/cli/describe.js";
@@ -82,6 +83,181 @@ const dieUsage = (message: string): never => {
   process.exit(2);
 };
 
+const writeJson = (value: unknown): void => {
+  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+};
+
+const exitCodeOf = (result: { readonly ok: boolean }): number => (result.ok ? 0 : 1);
+
+// `prompts` takes a subcommand + dag directory — handled before the generic
+// single-<path> requirement.
+const runPromptsCommand = async (pathArg: string | undefined, rest: readonly string[]): Promise<number> => {
+  const [sub, dagDir] = [pathArg, ...rest];
+  if (sub !== "sync" && sub !== "check") {
+    dieUsage("`prompts` requires a subcommand: sync | check");
+  }
+  if (!dagDir || rest.length > 1) {
+    dieUsage("`prompts` requires exactly one <dagDir> argument.");
+  }
+  const result = sub === "sync" ? await runPromptsSync(dagDir) : await runPromptsCheck(dagDir);
+  writeJson(result);
+  return exitCodeOf(result);
+};
+
+// `new` takes `<team>/<name>` plus flags (or `--from <authored.json>`) —
+// handled before the generic single-<path> requirement.
+const runNewCommand = async (pathArg: string | undefined, rest: readonly string[]): Promise<number> => {
+  const parsed = parseNewArgs([pathArg, ...rest].filter((a): a is string => a !== undefined));
+  if (!parsed.ok) {
+    writeJson({ ok: false, problems: parsed.problems });
+    return 1;
+  }
+  const result = parsed.mode === "from"
+    ? await runNewFrom({ from: parsed.from, force: parsed.force, ...(parsed.owner !== undefined ? { owner: parsed.owner } : {}), ...(parsed.root !== undefined ? { root: parsed.root } : {}) })
+    : await runNew(parsed.options);
+  writeJson(result);
+  return exitCodeOf(result);
+};
+
+// Ctrl-C: close the interface so any pending `ask` settles as closed (the
+// adapter routes the loop to its clean aborted outcome), and SAY SO — an
+// in-flight LLM/gauntlet round finishes before the loop can observe the
+// closed stream, so silence here reads as a hang. (AbortSignal threading
+// into the LLM client is deliberately deferred.)
+//
+// Registered on BOTH process and the readline Interface: with a real TTY,
+// readline puts stdin in raw mode and CONSUMES ^C itself, emitting
+// 'SIGINT' on the Interface — the process-level handler never fires there
+// (it covers `kill -INT` and non-TTY/piped stdin; once the first interrupt
+// closes readline, raw mode is off and later ^C reaches the process
+// handler). The first interrupt closes readline and says so; a SECOND
+// interrupt means the user is done waiting on the in-flight LLM/gauntlet
+// round — force-quit with the conventional SIGINT exit code instead of
+// silently swallowing it. This wiring is bin-only on purpose: the
+// compose-io fake cannot cover it.
+const installInterruptHandlers = (rl: ReadlineInterface): (() => void) => {
+  let interrupted = false;
+  const interrupt = (): void => {
+    if (interrupted) {
+      process.stderr.write("force-quitting\n");
+      process.exit(130);
+    }
+    interrupted = true;
+    process.stderr.write("\ninterrupted — finishing the current step, then aborting…\n");
+    rl.close();
+  };
+  process.on("SIGINT", interrupt);
+  rl.on("SIGINT", interrupt);
+  // The rl-level listener dies with rl.close(); the process-level one would
+  // otherwise LEAK past compose completion — a Ctrl-C during the
+  // post-completion stdout drain would print the misleading "finishing
+  // the current step" message, and a second press would exit(130) and
+  // truncate the final JSON payload mid-write.
+  return () => {
+    process.removeListener("SIGINT", interrupt);
+  };
+};
+
+// `compose` — interactive; needs an Anthropic key. Args are parsed by the
+// pure `parseComposeArgs` (accumulated problems as JSON, like `new`); this
+// block keeps only readline/SIGINT/env-key wiring.
+const runComposeCommand = async (pathArg: string | undefined, rest: readonly string[]): Promise<number> => {
+  const parsed = parseComposeArgs([pathArg, ...rest].filter((a): a is string => a !== undefined));
+  if (!parsed.ok) {
+    writeJson({ ok: false, problems: parsed.problems });
+    return 1;
+  }
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    // Same machine-readable envelope as every other author-facing failure —
+    // tooling parses stdout JSON, so a missing key must not break the contract.
+    writeJson({ ok: false, problems: ["compose needs ANTHROPIC_API_KEY in the environment"] });
+    return 1;
+  }
+  const [{ AnthropicLlmClient }, { default: Anthropic }, readline] = await Promise.all([
+    import("../src/llm/anthropic-client.js"),
+    import("@anthropic-ai/sdk"),
+    import("node:readline/promises"),
+  ]);
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const removeInterruptHandlers = installInterruptHandlers(rl);
+  // Ctrl-D / piped-stdin exhaustion / close-mid-question semantics live in
+  // the adapter (see compose-io.ts).
+  // Build the `ReadlineLike` seam explicitly rather than passing `rl` whole:
+  // `@types/node` does not declare `output` on the readline `Interface`, so
+  // relying on the interface satisfying the seam structurally would only
+  // "compile" where bin/ escapes typechecking. `process.stdout` is the real
+  // output stream the interface was created over, and satisfies the write seam.
+  const io = readlineComposeIo({
+    question: (q) => rl.question(q),
+    once: (e, l) => rl.once(e, l),
+    output: process.stdout,
+  });
+  try {
+    const outcome = await runCompose(
+      parsed.options,
+      new AnthropicLlmClient(new Anthropic({ apiKey })),
+      io,
+    );
+    writeJson(outcome);
+    return exitCodeOf(outcome);
+  } finally {
+    rl.close();
+    removeInterruptHandlers();
+  }
+};
+
+// `capabilities` is the one command that takes no path — it emits static
+// framework data. Handled before the <path> requirement.
+const runCapabilitiesCommand = (pathArg: string | undefined): number => {
+  if (pathArg !== undefined) {
+    dieUsage("`capabilities` takes no arguments.");
+  }
+  writeJson(runCapabilities());
+  return 0;
+};
+
+// `visualize --raw` prints the bare diagram on success and the JSON failure
+// on stderr; without `--raw` it is the plain JSON result like its siblings.
+const runVisualizeCommand = async (path: string, raw: boolean): Promise<number> => {
+  const result = await runVisualize(path);
+  if (!raw) {
+    writeJson(result);
+    return exitCodeOf(result);
+  }
+  if (result.ok) {
+    process.stdout.write(`${result.diagram}\n`);
+    return 0;
+  }
+  process.stderr.write(`${JSON.stringify(result, null, 2)}\n`);
+  return 1;
+};
+
+// Commands that take a single <path> to a DAG module, with optional `--raw`
+// after the path (visualize only).
+const runPathCommand = async (command: string, path: string, rest: readonly string[]): Promise<number> => {
+  const raw = rest.includes("--raw");
+  const restNonFlags = rest.filter((a) => a !== "--raw");
+  if (restNonFlags.length > 0 || (raw && command !== "visualize")) {
+    dieUsage(`Unexpected extra arguments: ${rest.join(" ")}`);
+  }
+
+  return match(command)
+    .with("lint", async () => {
+      const result = await runLint(path);
+      writeJson(result);
+      return exitCodeOf(result);
+    })
+    .with("describe", async () => {
+      const result = await runDescribe(path);
+      writeJson(result);
+      return exitCodeOf(result);
+    })
+    .with("visualize", () => runVisualizeCommand(path, raw))
+    .otherwise(() => dieUsage(`Unknown command: ${command}`));
+};
+
 const main = async (): Promise<number> => {
   const [, , command, pathArg, ...rest] = process.argv;
 
@@ -95,166 +271,16 @@ const main = async (): Promise<number> => {
     return 0;
   }
 
-  // `prompts` takes a subcommand + dag directory — handle before the generic
-  // single-<path> requirement below.
-  if (command === "prompts") {
-    const [sub, dagDir] = [pathArg, ...rest];
-    if (sub !== "sync" && sub !== "check") {
-      dieUsage("`prompts` requires a subcommand: sync | check");
-    }
-    if (!dagDir || rest.length > 1) {
-      dieUsage("`prompts` requires exactly one <dagDir> argument.");
-    }
-    const result = sub === "sync" ? await runPromptsSync(dagDir) : await runPromptsCheck(dagDir);
-    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-    return result.ok ? 0 : 1;
-  }
-
-  // `new` takes `<team>/<name>` plus flags (or `--from <authored.json>`) —
-  // handle it before the generic single-<path> requirement below.
-  if (command === "new") {
-    const parsed = parseNewArgs([pathArg, ...rest].filter((a): a is string => a !== undefined));
-    if (!parsed.ok) {
-      process.stdout.write(`${JSON.stringify({ ok: false, problems: parsed.problems }, null, 2)}\n`);
-      return 1;
-    }
-    const result = parsed.mode === "from"
-      ? await runNewFrom({ from: parsed.from, force: parsed.force, ...(parsed.owner !== undefined ? { owner: parsed.owner } : {}), ...(parsed.root !== undefined ? { root: parsed.root } : {}) })
-      : await runNew(parsed.options);
-    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-    return result.ok ? 0 : 1;
-  }
-
-  // `compose` — interactive; needs an Anthropic key. Args are parsed by the
-  // pure `parseComposeArgs` (accumulated problems as JSON, like `new`); this
-  // block keeps only readline/SIGINT/env-key wiring.
-  if (command === "compose") {
-    const parsed = parseComposeArgs([pathArg, ...rest].filter((a): a is string => a !== undefined));
-    if (!parsed.ok) {
-      process.stdout.write(`${JSON.stringify({ ok: false, problems: parsed.problems }, null, 2)}\n`);
-      return 1;
-    }
-
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) {
-      // Same machine-readable envelope as every other author-facing failure —
-      // tooling parses stdout JSON, so a missing key must not break the contract.
-      process.stdout.write(
-        `${JSON.stringify({ ok: false, problems: ["compose needs ANTHROPIC_API_KEY in the environment"] }, null, 2)}\n`,
-      );
-      return 1;
-    }
-    const [{ AnthropicLlmClient }, { default: Anthropic }, readline] = await Promise.all([
-      import("../src/llm/anthropic-client.js"),
-      import("@anthropic-ai/sdk"),
-      import("node:readline/promises"),
-    ]);
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    // Ctrl-C: close the interface so any pending `ask` settles as closed (the
-    // adapter routes the loop to its clean aborted outcome), and SAY SO — an
-    // in-flight LLM/gauntlet round finishes before the loop can observe the
-    // closed stream, so silence here reads as a hang. (AbortSignal threading
-    // into the LLM client is deliberately deferred.)
-    //
-    // Registered on BOTH process and the readline Interface: with a real TTY,
-    // readline puts stdin in raw mode and CONSUMES ^C itself, emitting
-    // 'SIGINT' on the Interface — the process-level handler never fires there
-    // (it covers `kill -INT` and non-TTY/piped stdin; once the first interrupt
-    // closes readline, raw mode is off and later ^C reaches the process
-    // handler). The first interrupt closes readline and says so; a SECOND
-    // interrupt means the user is done waiting on the in-flight LLM/gauntlet
-    // round — force-quit with the conventional SIGINT exit code instead of
-    // silently swallowing it. This wiring is bin-only on purpose: the
-    // compose-io fake cannot cover it.
-    let interrupted = false;
-    const interrupt = (): void => {
-      if (interrupted) {
-        process.stderr.write("force-quitting\n");
-        process.exit(130);
-      }
-      interrupted = true;
-      process.stderr.write("\ninterrupted — finishing the current step, then aborting…\n");
-      rl.close();
-    };
-    process.on("SIGINT", interrupt);
-    rl.on("SIGINT", interrupt);
-    // Ctrl-D / piped-stdin exhaustion / close-mid-question semantics live in
-    // the adapter (see compose-io.ts).
-    // Build the `ReadlineLike` seam explicitly rather than passing `rl` whole:
-    // `@types/node` does not declare `output` on the readline `Interface`, so
-    // relying on the interface satisfying the seam structurally would only
-    // "compile" where bin/ escapes typechecking. `process.stdout` is the real
-    // output stream the interface was created over, and satisfies the write seam.
-    const io = readlineComposeIo({
-      question: (q) => rl.question(q),
-      once: (e, l) => rl.once(e, l),
-      output: process.stdout,
-    });
-    try {
-      const outcome = await runCompose(
-        parsed.options,
-        new AnthropicLlmClient(new Anthropic({ apiKey })),
-        io,
-      );
-      process.stdout.write(`${JSON.stringify(outcome, null, 2)}\n`);
-      return outcome.ok ? 0 : 1;
-    } finally {
-      rl.close();
-      // The rl-level listener dies with rl.close(); the process-level one
-      // would otherwise LEAK past compose completion — a Ctrl-C during the
-      // post-completion stdout drain would print the misleading "finishing
-      // the current step" message, and a second press would exit(130) and
-      // truncate the final JSON payload mid-write.
-      process.removeListener("SIGINT", interrupt);
-    }
-  }
-
-  // `capabilities` is the one command that takes no path — it emits static
-  // framework data. Handle it before the <path> requirement below.
-  if (command === "capabilities") {
-    if (pathArg !== undefined) {
-      dieUsage("`capabilities` takes no arguments.");
-    }
-    process.stdout.write(`${JSON.stringify(runCapabilities(), null, 2)}\n`);
-    return 0;
-  }
+  if (command === "prompts") return runPromptsCommand(pathArg, rest);
+  if (command === "new") return runNewCommand(pathArg, rest);
+  if (command === "compose") return runComposeCommand(pathArg, rest);
+  if (command === "capabilities") return runCapabilitiesCommand(pathArg);
 
   if (!pathArg) {
     dieUsage("Missing required <path> argument.");
   }
 
-  // `visualize` accepts an optional `--raw` after the path.
-  const raw = rest.includes("--raw");
-  const restNonFlags = rest.filter((a) => a !== "--raw");
-  if (restNonFlags.length > 0 || (raw && command !== "visualize")) {
-    dieUsage(`Unexpected extra arguments: ${rest.join(" ")}`);
-  }
-
-  return match(command)
-    .with("lint", async () => {
-      const result = await runLint(pathArg);
-      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-      return result.ok ? 0 : 1;
-    })
-    .with("describe", async () => {
-      const result = await runDescribe(pathArg);
-      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-      return result.ok ? 0 : 1;
-    })
-    .with("visualize", async () => {
-      const result = await runVisualize(pathArg);
-      if (raw) {
-        if (result.ok) {
-          process.stdout.write(`${result.diagram}\n`);
-          return 0;
-        }
-        process.stderr.write(`${JSON.stringify(result, null, 2)}\n`);
-        return 1;
-      }
-      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-      return result.ok ? 0 : 1;
-    })
-    .otherwise(() => dieUsage(`Unknown command: ${command}`));
+  return runPathCommand(command, pathArg, rest);
 };
 
 // Top-level guard: main() is designed not to reject, but two paths are known

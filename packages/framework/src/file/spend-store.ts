@@ -76,6 +76,89 @@ const readSnapshot = (
 };
 
 /**
+ * A malformed run id is the caller's permanent fault, not a transient IO
+ * fault — both operations must classify it identically, so they share one
+ * parse rather than two hand-copied wraps that could drift in operation name
+ * or retriability.
+ */
+const parseRunIdFor = (
+  operation: FileOperation,
+  location: string,
+  candidate: RunId,
+): Result<RunId, FrameworkError> => {
+  const parsed = parseRuntimeRunId(candidate);
+  return parsed.ok
+    ? parsed
+    : err(fileOperationError(operation, location, parsed.error, "permanent"));
+};
+
+const readRunSpend = async (
+  root: VerifiedDirectory,
+  candidate: RunId,
+): Promise<Result<Spend, FrameworkError>> => {
+  let location = root.path;
+  try {
+    const parsedRunId = parseRunIdFor("spendStore:read", location, candidate);
+    if (!parsedRunId.ok) return parsedRunId;
+    const paths = pathsFor(root, parsedRunId.value);
+    location = paths.recordPath;
+    return readSnapshot(root, parsedRunId.value, paths);
+  } catch (error) {
+    return err(fileOperationError("spendStore:read", location, error));
+  }
+};
+
+// The lock body of `add`: re-prove the anchor, fold the delta into the stored
+// snapshot and atomically replace it. Failures are thrown so `withFileLock`
+// arbitrates them against release failures.
+const commitSpendDelta = (
+  root: VerifiedDirectory,
+  runId: RunId,
+  paths: SpendStorePaths,
+  delta: Spend,
+): void => {
+  assertDirectoryIdentity(root);
+  const prior = readSnapshot(root, runId, paths);
+  if (!prior.ok) throw prior.error;
+  const serialized = serializeFileSpendRecord(runId, addSpend(prior.value, delta));
+  if (!serialized.ok) throw serialized.error;
+  atomicWriteFile(paths.recordPath, serialized.value);
+  assertDirectoryIdentity(root);
+};
+
+const addRunSpend = async (
+  root: VerifiedDirectory,
+  candidate: RunId,
+  delta: Spend,
+): Promise<Result<void, FrameworkError>> => {
+  let location = root.path;
+  try {
+    const parsedRunId = parseRunIdFor("spendStore:add", location, candidate);
+    if (!parsedRunId.ok) return parsedRunId;
+    const parsedDelta = parseSpend(delta);
+    if (!parsedDelta.ok) {
+      return err(fileOperationError(
+        "spendStore:add",
+        location,
+        parsedDelta.error,
+        "permanent",
+      ));
+    }
+    const paths = pathsFor(root, parsedRunId.value);
+    location = paths.recordPath;
+    // Re-prove the trust anchor before the lock protocol can create its
+    // owner, staging, intent, or fence artifacts in this directory.
+    assertDirectoryIdentity(root);
+    await withFileLock(paths.lockPath, () => {
+      commitSpendDelta(root, parsedRunId.value, paths, parsedDelta.value);
+    });
+    return ok(undefined);
+  } catch (error) {
+    return err(fileOperationError("spendStore:add", location, error));
+  }
+};
+
+/**
  * Create a store rooted at a verified non-symlink directory. Construction
  * throws only a typed FrameworkError; every port method returns Result.
  */
@@ -90,72 +173,8 @@ export const createFileSpendStore = (rootPath: string): FileSpendStore => {
     throw fileOperationError("spendStore:create", rootPath, error);
   }
 
-  /**
-   * A malformed run id is the caller's permanent fault, not a transient IO
-   * fault — both operations must classify it identically, so they share one
-   * parse rather than two hand-copied wraps that could drift in operation name
-   * or retriability.
-   */
-  const parseRunIdFor = (
-    operation: FileOperation,
-    location: string,
-    candidate: RunId,
-  ): Result<RunId, FrameworkError> => {
-    const parsed = parseRuntimeRunId(candidate);
-    return parsed.ok
-      ? parsed
-      : err(fileOperationError(operation, location, parsed.error, "permanent"));
-  };
-
   return Object.freeze({
-    read: async (candidate: RunId): Promise<Result<Spend, FrameworkError>> => {
-      let location = root.path;
-      try {
-        const parsedRunId = parseRunIdFor("spendStore:read", location, candidate);
-        if (!parsedRunId.ok) return parsedRunId;
-        const paths = pathsFor(root, parsedRunId.value);
-        location = paths.recordPath;
-        return readSnapshot(root, parsedRunId.value, paths);
-      } catch (error) {
-        return err(fileOperationError("spendStore:read", location, error));
-      }
-    },
-
-    add: async (candidate: RunId, delta: Spend): Promise<Result<void, FrameworkError>> => {
-      let location = root.path;
-      try {
-        const parsedRunId = parseRunIdFor("spendStore:add", location, candidate);
-        if (!parsedRunId.ok) return parsedRunId;
-        const parsedDelta = parseSpend(delta);
-        if (!parsedDelta.ok) {
-          return err(fileOperationError(
-            "spendStore:add",
-            location,
-            parsedDelta.error,
-            "permanent",
-          ));
-        }
-        const paths = pathsFor(root, parsedRunId.value);
-        location = paths.recordPath;
-        // Re-prove the trust anchor before the lock protocol can create its
-        // owner, staging, intent, or fence artifacts in this directory.
-        assertDirectoryIdentity(root);
-        await withFileLock(paths.lockPath, () => {
-          assertDirectoryIdentity(root);
-          const prior = readSnapshot(root, parsedRunId.value, paths);
-          if (!prior.ok) throw prior.error;
-          const serialized = serializeFileSpendRecord(
-            parsedRunId.value,
-            addSpend(prior.value, parsedDelta.value),
-          );
-          if (!serialized.ok) throw serialized.error;
-          atomicWriteFile(paths.recordPath, serialized.value);
-          assertDirectoryIdentity(root);
-        });
-        return ok(undefined);
-      } catch (error) {
-        return err(fileOperationError("spendStore:add", location, error));
-      }
-    },
+    read: (candidate: RunId) => readRunSpend(root, candidate),
+    add: (candidate: RunId, delta: Spend) => addRunSpend(root, candidate, delta),
   });
 };

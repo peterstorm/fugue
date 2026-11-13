@@ -74,9 +74,66 @@ function logAndThrow(
   throw new Error(throwMessage);
 }
 
+interface HumanReviewRequest {
+  readonly nodeId: NodeId;
+  readonly output: unknown;
+  readonly prompt: string;
+}
+
+/**
+ * Deliver the review notification, then atomically commit the delivery state.
+ * Every failure throws into the kernel's retriable hook path (see `logAndThrow`).
+ */
+const deliverAndCommitNotification = async (
+  deps: OnHumanReviewDeps,
+  req: HumanReviewRequest,
+  marker: string,
+): Promise<void> => {
+  const { decisions, notifier, runId, dagId, ownerTeam, logger } = deps;
+  const prompt = asNonEmptyString(req.prompt);
+  if (prompt === undefined) {
+    logAndThrow(
+      logger,
+      "error",
+      "hitl: blank review prompt — refusing invalid notification",
+      `hitl: blank review prompt for ${runId}/${req.nodeId}`,
+      { runId, nodeId: req.nodeId },
+    );
+  }
+  const delivered = await notifier.notify({
+    runId,
+    dagId,
+    ownerTeam,
+    nodeId: req.nodeId,
+    prompt,
+    output: req.output,
+  });
+  if (!delivered.ok) {
+    logAndThrow(
+      logger,
+      "error",
+      "hitl: review notification failed — retrying hook",
+      `hitl: review notification failed for ${runId}/${req.nodeId}: ${delivered.error.kind}`,
+      { runId, nodeId: req.nodeId, error: delivered.error.kind },
+    );
+  }
+
+  const committed = await decisions.markNotified(runId, req.nodeId, marker);
+  if (!committed.ok || !committed.value) {
+    const detail = committed.ok ? "pending marker changed" : committed.error.kind;
+    logAndThrow(
+      logger,
+      "error",
+      "hitl: notification delivered but delivery state was not committed — retrying hook",
+      `hitl: notification state commit failed for ${runId}/${req.nodeId}: ${detail}`,
+      { runId, nodeId: req.nodeId, error: detail },
+    );
+  }
+};
+
 export const makeOnHumanReview = (deps: OnHumanReviewDeps) =>
-  async (req: { nodeId: NodeId; output: unknown; prompt: string }): Promise<HumanReviewOutcome> => {
-    const { decisions, notifier, runId, dagId, ownerTeam, logger } = deps;
+  async (req: HumanReviewRequest): Promise<HumanReviewOutcome> => {
+    const { decisions, runId, logger } = deps;
 
     // 1. Decision already in? Resolve the gate by RETURNING it. Consumption
     //    (clear) is deferred to onDecisionConsumed, fired post-checkpoint.
@@ -111,45 +168,7 @@ export const makeOnHumanReview = (deps: OnHumanReviewDeps) =>
       );
     }
     if (pending.value.kind === "notification-required") {
-      const prompt = asNonEmptyString(req.prompt);
-      if (prompt === undefined) {
-        logAndThrow(
-          logger,
-          "error",
-          "hitl: blank review prompt — refusing invalid notification",
-          `hitl: blank review prompt for ${runId}/${req.nodeId}`,
-          { runId, nodeId: req.nodeId },
-        );
-      }
-      const delivered = await notifier.notify({
-        runId,
-        dagId,
-        ownerTeam,
-        nodeId: req.nodeId,
-        prompt,
-        output: req.output,
-      });
-      if (!delivered.ok) {
-        logAndThrow(
-          logger,
-          "error",
-          "hitl: review notification failed — retrying hook",
-          `hitl: review notification failed for ${runId}/${req.nodeId}: ${delivered.error.kind}`,
-          { runId, nodeId: req.nodeId, error: delivered.error.kind },
-        );
-      }
-
-      const committed = await decisions.markNotified(runId, req.nodeId, pending.value.marker);
-      if (!committed.ok || !committed.value) {
-        const detail = committed.ok ? "pending marker changed" : committed.error.kind;
-        logAndThrow(
-          logger,
-          "error",
-          "hitl: notification delivered but delivery state was not committed — retrying hook",
-          `hitl: notification state commit failed for ${runId}/${req.nodeId}: ${detail}`,
-          { runId, nodeId: req.nodeId, error: detail },
-        );
-      }
+      await deliverAndCommitNotification(deps, req, pending.value.marker);
     }
     return { kind: "pending" };
   };

@@ -103,6 +103,39 @@ export class RedisFreshnessIndex implements FreshnessIndex {
     }
   }
 
+  // Run the atomic ZADD + EXPIRE script, loading it on first use. A NOSCRIPT
+  // reply (server flushed its script cache) falls back to inline EVAL and
+  // re-primes the SHA on the next call.
+  private async runRecordWriteScript(key: string, score: string, member: string): Promise<void> {
+    if (!this.scriptSha) {
+      this.scriptSha = (await this.redis.script(
+        "LOAD",
+        RECORD_WRITE_SCRIPT,
+      )) as string;
+    }
+    try {
+      await this.redis.evalsha(
+        this.scriptSha,
+        1,
+        key,
+        score,
+        member,
+        String(FRESHNESS_TTL_SECONDS),
+      );
+    } catch (e) {
+      if (!(e instanceof Error && e.message.includes("NOSCRIPT"))) throw e;
+      this.scriptSha = null;
+      await this.redis.eval(
+        RECORD_WRITE_SCRIPT,
+        1,
+        key,
+        score,
+        member,
+        String(FRESHNESS_TTL_SECONDS),
+      );
+    }
+  }
+
   async recordWrite(event: WriteAttemptedEvent): Promise<Result<void, FrameworkError>> {
     const key = KEY_PREFIX + event.newWitness.resource;
     const member = freshnessMemberKey(
@@ -115,37 +148,7 @@ export class RedisFreshnessIndex implements FreshnessIndex {
     const score = String(event.succeededAtMs);
 
     try {
-      if (!this.scriptSha) {
-        this.scriptSha = (await this.redis.script(
-          "LOAD",
-          RECORD_WRITE_SCRIPT,
-        )) as string;
-      }
-      try {
-        await this.redis.evalsha(
-          this.scriptSha,
-          1,
-          key,
-          score,
-          member,
-          String(FRESHNESS_TTL_SECONDS),
-        );
-      } catch (e) {
-        // NOSCRIPT — fall back to inline EVAL and re-prime the SHA.
-        if (e instanceof Error && e.message.includes("NOSCRIPT")) {
-          this.scriptSha = null;
-          await this.redis.eval(
-            RECORD_WRITE_SCRIPT,
-            1,
-            key,
-            score,
-            member,
-            String(FRESHNESS_TTL_SECONDS),
-          );
-        } else {
-          throw e;
-        }
-      }
+      await this.runRecordWriteScript(key, score, member);
       this.onSuccess();
       return ok(undefined);
     } catch (e) {

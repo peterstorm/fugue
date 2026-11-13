@@ -43,6 +43,9 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const log = (step: string, detail?: unknown) =>
   console.log(`\n▶ ${step}${detail !== undefined ? `\n${JSON.stringify(detail, null, 2)}` : ""}`);
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
 /** The host wraps handler results in `{ ok, data, … }`; the status view is `data`. */
 const unwrap = (body: Record<string, unknown>): Record<string, unknown> =>
   (body.data as Record<string, unknown> | undefined) ?? body;
@@ -59,12 +62,16 @@ const requestJson = async (what: string, res: Response): Promise<Record<string, 
   if (!res.ok) {
     throw new Error(`${what} → HTTP ${res.status}: ${text || "(empty body)"}`);
   }
-  let body: Record<string, unknown>;
+  let parsed: unknown;
   try {
-    body = JSON.parse(text) as Record<string, unknown>;
+    parsed = JSON.parse(text);
   } catch {
     throw new Error(`${what} → HTTP ${res.status}: non-JSON body: ${text.slice(0, 200)}`);
   }
+  if (!isRecord(parsed)) {
+    throw new Error(`${what} → HTTP ${res.status}: body is not a JSON object: ${text.slice(0, 200)}`);
+  }
+  const body = parsed;
   if (body.ok === false) {
     throw new Error(`${what} → host error envelope: ${JSON.stringify(body.error ?? body)}`);
   }

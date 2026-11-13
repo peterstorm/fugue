@@ -281,6 +281,48 @@ export class BufferedObserver implements Observer, Disposable {
     }
   }
 
+  // Policy evaluation is programmer-provided — let bugs surface visibly.
+  // Fail-open: flush on policy error to avoid silent data loss.
+  private shouldFlushRun(summary: RunSummary): boolean {
+    try {
+      return this.policy.shouldFlush(summary);
+    } catch (policyErr) {
+      bestEffortLog(
+        "error",
+        `[BufferedObserver] PersistencePolicy.shouldFlush threw — flushing to avoid data loss: ${safeErrorMessage(policyErr)}`,
+      );
+      return true;
+    }
+  }
+
+  // Replay the buffered events to the inner observer, then the final run-end.
+  private flushRun(events: readonly ObserverEvent[], e: RunEndEvent): void {
+    let replayFailures = 0;
+    for (const buffered of events) {
+      const dispatch = attemptDispatchEvent(this.inner, buffered);
+      if (dispatch.kind === "failed") {
+        replayFailures++;
+        this.accountDispatchFailure(buffered, dispatch.error, `${buffered.type}`);
+      }
+    }
+    if (replayFailures > 0) {
+      bestEffortLog(
+        "error",
+        `[BufferedObserver] ${replayFailures}/${events.length} events lost during replay for run ${e.runId}`,
+      );
+    }
+    // Guard the final run-end dispatch the same way as the replay loop —
+    // an unguarded throw here used to escape, skip buffer cleanup, and
+    // leak the run-id's events for the lifetime of the observer. The
+    // failure is accounted exactly like the replay loop's in production:
+    // counted in `dispatchErrors` and routed through `onReplayFailure` (the
+    // dead-letter seam), not logged-and-forgotten.
+    const runEndDispatch = attemptDispatchEvent(this.inner, e);
+    if (runEndDispatch.kind === "failed") {
+      this.accountDispatchFailure(e, runEndDispatch.error, "run-end");
+    }
+  }
+
   private handleRunEnd(e: RunEndEvent): void {
     const buf = this.buffers.get(e.runId);
     if (!buf) {
@@ -295,45 +337,11 @@ export class BufferedObserver implements Observer, Disposable {
 
     this.runCount++;
 
-    // Policy evaluation is programmer-provided — let bugs surface visibly.
-    // Fail-open: flush on policy error to avoid silent data loss.
-    let shouldFlush: boolean;
-    try {
-      shouldFlush = this.policy.shouldFlush(summary);
-    } catch (policyErr) {
-      bestEffortLog(
-        "error",
-        `[BufferedObserver] PersistencePolicy.shouldFlush threw — flushing to avoid data loss: ${safeErrorMessage(policyErr)}`,
-      );
-      shouldFlush = true;
-    }
+    const shouldFlush = this.shouldFlushRun(summary);
 
     try {
       if (shouldFlush) {
-        let replayFailures = 0;
-        for (const buffered of events) {
-          const dispatch = attemptDispatchEvent(this.inner, buffered);
-          if (dispatch.kind === "failed") {
-            replayFailures++;
-            this.accountDispatchFailure(buffered, dispatch.error, `${buffered.type}`);
-          }
-        }
-        if (replayFailures > 0) {
-          bestEffortLog(
-            "error",
-            `[BufferedObserver] ${replayFailures}/${events.length} events lost during replay for run ${e.runId}`,
-          );
-        }
-        // Guard the final run-end dispatch the same way as the replay loop —
-        // an unguarded throw here used to escape, skip buffer cleanup, and
-        // leak the run-id's events for the lifetime of the observer. The
-        // failure is accounted exactly like the replay loop's in production:
-        // counted in `dispatchErrors` and routed through `onReplayFailure` (the
-        // dead-letter seam), not logged-and-forgotten.
-        const runEndDispatch = attemptDispatchEvent(this.inner, e);
-        if (runEndDispatch.kind === "failed") {
-          this.accountDispatchFailure(e, runEndDispatch.error, "run-end");
-        }
+        this.flushRun(events, e);
       } else {
         bestEffortLog(
           "warn",

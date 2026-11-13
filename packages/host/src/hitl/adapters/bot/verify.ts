@@ -15,6 +15,7 @@
 
 import { lazyJwks, type JwksResolver } from "../../../adapters/lazy-jwks.js";
 import { ok, err } from "@fuguejs/framework";
+import { z } from "zod";
 import type { BotAuthError, VerifyBotToken } from "./ports.js";
 
 /** Bot Framework token issuer (channel service tokens). */
@@ -30,6 +31,9 @@ const OPENID_CONFIG_URL = "https://login.botframework.com/v1/.well-known/openidc
 const BOT_TOKEN_ALGS = ["RS256"] as const;
 /** Tolerate normal clock skew between this host and the Bot Framework service. */
 const CLOCK_TOLERANCE = "60s";
+
+/** Wire shape of the OpenID metadata document: only `jwks_uri` is consumed. */
+const openIdMetadataSchema = z.object({ jwks_uri: z.string() });
 
 /** Extract the bearer token from an `Authorization` header. Pure; exported for tests. */
 export const bearer = (authHeader: string | undefined): string | null => {
@@ -74,9 +78,10 @@ export const createBotTokenVerifier = (config: BotVerifyConfig): VerifyBotToken 
     const jose = await import("jose");
     const meta = await fetch(OPENID_CONFIG_URL);
     if (!meta.ok) throw new Error(`openid metadata HTTP ${meta.status}`);
-    const { jwks_uri } = (await meta.json()) as { jwks_uri?: string };
-    if (typeof jwks_uri !== "string") throw new Error("openid metadata missing jwks_uri");
-    return jose.createRemoteJWKSet(new URL(jwks_uri)) as unknown as JwksResolver;
+    const raw: unknown = await meta.json();
+    const metadata = openIdMetadataSchema.safeParse(raw);
+    if (!metadata.success) throw new Error("openid metadata missing jwks_uri");
+    return jose.createRemoteJWKSet(new URL(metadata.data.jwks_uri)) as unknown as JwksResolver;
   });
 
   return async (authHeader) => {

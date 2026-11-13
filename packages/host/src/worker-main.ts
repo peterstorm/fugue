@@ -49,6 +49,7 @@ import { closeHitlQueueBackend, createHitlQueueBackend } from "./hitl/queue-back
 import { ok, err } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import { createJsonConsoleLogger } from "./entrypoint-wiring.js";
+import type { LogPort } from "./ports.js";
 
 // ── Pure bootstrap planner (functional core — unit-testable, no I/O) ──────────
 
@@ -67,6 +68,39 @@ interface WorkerBootstrap {
   readonly config: HostConfig;
   readonly socketPath: string;
 }
+
+/**
+ * Defense-in-depth (mirrors the TENANT_ID rebind guard in `buildWorkerBootstrap`):
+ * a secrets source MUST NOT override env vars the SUPERVISOR force-injects into
+ * the spawn env. The merge layers resolved secrets OVER the base env, so an
+ * own-key in the secrets file would win over a supervisor-injected value. We forbid:
+ *   - WORKER_UDS_DIR: overriding it moves the worker's bound socket off the
+ *     supervisor's proxy/probe target — `waitForUds` times out, the worker is
+ *     SIGKILLed, and the tenant goes 503 (self-DoS).
+ *   - FUGUE_REDIS_ACL_USERNAME / FUGUE_REDIS_ACL_PASSWORD: the supervisor mints
+ *     and injects the per-tenant ACL credential (ADR-0067); a secrets file that
+ *     rebound it could connect the worker to Redis as a different (or unscoped)
+ *     user, tampering with the isolation handoff channel. Reject outright so the
+ *     credential channel is tamper-evident, parallel to WORKER_UDS_DIR.
+ * Reject such a file rather than silently honour a forbidden override.
+ */
+const FORBIDDEN_SECRET_OVERRIDES = [
+  "WORKER_UDS_DIR",
+  WORKER_REDIS_ACL_USERNAME_ENV,
+  WORKER_REDIS_ACL_PASSWORD_ENV,
+] as const;
+
+const rejectForbiddenSecretOverrides = (resolved: ResolvedSecrets): Result<void, HostError> => {
+  for (const forbidden of FORBIDDEN_SECRET_OVERRIDES) {
+    if (Object.prototype.hasOwnProperty.call(resolved, forbidden)) {
+      return err({
+        kind: "config-invalid",
+        message: `worker bootstrap: a secrets source must not set ${forbidden} (it is a supervisor-injected spawn-env binding and must not be overridden by a tenant's secrets)`,
+      });
+    }
+  }
+  return ok(undefined);
+};
 
 /**
  * PURE: turn the worker's raw env + a (already-constructed) `SecretsSource` into
@@ -109,32 +143,8 @@ export const buildWorkerBootstrap = (
   const resolved = secrets(secretsRef);
   if (!resolved.ok) return resolved;
 
-  // Defense-in-depth (mirrors the TENANT_ID rebind guard below): a secrets source
-  // MUST NOT override env vars the SUPERVISOR force-injects into the spawn env.
-  // The merge below layers resolved secrets OVER the base env, so an own-key in
-  // the secrets file would win over a supervisor-injected value. We forbid:
-  //   - WORKER_UDS_DIR: overriding it moves the worker's bound socket off the
-  //     supervisor's proxy/probe target — `waitForUds` times out, the worker is
-  //     SIGKILLed, and the tenant goes 503 (self-DoS).
-  //   - FUGUE_REDIS_ACL_USERNAME / FUGUE_REDIS_ACL_PASSWORD: the supervisor mints
-  //     and injects the per-tenant ACL credential (ADR-0067); a secrets file that
-  //     rebound it could connect the worker to Redis as a different (or unscoped)
-  //     user, tampering with the isolation handoff channel. Reject outright so the
-  //     credential channel is tamper-evident, parallel to WORKER_UDS_DIR.
-  // Reject such a file rather than silently honour a forbidden override.
-  const FORBIDDEN_SECRET_OVERRIDES = [
-    "WORKER_UDS_DIR",
-    WORKER_REDIS_ACL_USERNAME_ENV,
-    WORKER_REDIS_ACL_PASSWORD_ENV,
-  ] as const;
-  for (const forbidden of FORBIDDEN_SECRET_OVERRIDES) {
-    if (Object.prototype.hasOwnProperty.call(resolved.value, forbidden)) {
-      return err({
-        kind: "config-invalid",
-        message: `worker bootstrap: a secrets source must not set ${forbidden} (it is a supervisor-injected spawn-env binding and must not be overridden by a tenant's secrets)`,
-      });
-    }
-  }
+  const overrideCheck = rejectForbiddenSecretOverrides(resolved.value);
+  if (!overrideCheck.ok) return overrideCheck;
 
   // Merge resolved secrets OVER the base env. `parseHostConfig` then validates
   // the union. Secret-VALUE non-leakage is upheld upstream by `parseHostConfig`
@@ -167,9 +177,12 @@ export const buildWorkerBootstrap = (
 
 // ── Main (imperative shell) ────────────────────────────────────────────────────
 
-const main = async () => {
-  const logger = createJsonConsoleLogger();
+type RedisConnectivityBundle = Extract<
+  Awaited<ReturnType<typeof createRedisConnectivity>>,
+  { readonly ok: true }
+>["value"];
 
+const bootstrapOrExit = (logger: LogPort): WorkerBootstrap => {
   // Step 1-4 (pure planning): env → tenant → secrets → config → socket path.
   // The env-file SecretsSource is constructed HERE — the sole site that carries
   // filesystem-read authority (FR-005, SC-002).
@@ -182,13 +195,20 @@ const main = async () => {
     logger.error(`Worker bootstrap failed: ${formatHostError(bootstrapResult.error)}`);
     process.exit(1);
   }
-  const { tenant, config, socketPath } = bootstrapResult.value;
+  const { tenant, socketPath } = bootstrapResult.value;
   logger.info("Worker bootstrap resolved", { tenant, socketPath });
+  return bootstrapResult.value;
+};
 
-  // Step 5: Redis connectivity (fail-closed). ADR-0067: if the supervisor injected
-  // a per-tenant ACL credential, connect as that scoped user (NOPERM-enforced
-  // isolation). The all-or-nothing pairing invariant lives in `parseAclCredential`
-  // (a half-injected credential fails CLOSED rather than connecting unscoped).
+const resolveAclCredentialOrExit = (
+  config: HostConfig,
+  tenant: TenantId,
+  logger: LogPort,
+): Parameters<typeof createRedisConnectivity>[1] => {
+  // ADR-0067: if the supervisor injected a per-tenant ACL credential, connect as
+  // that scoped user (NOPERM-enforced isolation). The all-or-nothing pairing
+  // invariant lives in `parseAclCredential` (a half-injected credential fails
+  // CLOSED rather than connecting unscoped).
   const aclResult = parseAclCredential(config.FUGUE_REDIS_ACL_USERNAME, config.FUGUE_REDIS_ACL_PASSWORD);
   if (!aclResult.ok) {
     logger.error(`Worker bootstrap failed: ${formatHostError(aclResult.error)}`, {
@@ -202,6 +222,16 @@ const main = async () => {
   if (aclCredential !== undefined) {
     logger.info("Worker connecting to Redis as per-tenant ACL user", { tenant, aclUser: aclCredential.username });
   }
+  return aclCredential;
+};
+
+const connectWorkerRedisOrExit = async (
+  config: HostConfig,
+  tenant: TenantId,
+  logger: LogPort,
+): Promise<RedisConnectivityBundle> => {
+  // Step 5: Redis connectivity (fail-closed).
+  const aclCredential = resolveAclCredentialOrExit(config, tenant, logger);
   const redisResult = await createRedisConnectivity(config.REDIS_URL, aclCredential);
   if (!redisResult.ok) {
     // Carry { tenant } so this fail-closed exit is attributable in a multi-tenant
@@ -209,42 +239,57 @@ const main = async () => {
     logger.error(`Redis connectivity failed: ${formatHostError(redisResult.error)}`, { tenant });
     process.exit(1);
   }
-  const { port: redisPort, redis, disconnect: disconnectRedis } = redisResult.value;
+  return redisResult.value;
+};
+
+const bootWorkerHost = async (
+  bootstrap: WorkerBootstrap,
+  redis: RedisConnectivityBundle,
+  logger: LogPort,
+): Promise<void> => {
+  const { tenant, config, socketPath } = bootstrap;
+  // The SAME runtime wiring as the single-tenant entry (`main.ts`) — see
+  // `buildRuntimeDeps`. Log lines carry the tenant so capability selection is
+  // attributable per worker.
+  const { sharedInfra, git, loader } = await buildRuntimeDeps(config, redis.redis, logger, { tenant });
+
+  const queueBackend = await createHitlQueueBackend(config, logger);
+
+  // Step 6: createHost bound to THIS tenant, serving on the per-tenant UDS.
+  const hostResult = await createHost({
+    config,
+    git,
+    loader,
+    redis: redis.port,
+    sharedInfra,
+    logger,
+    queueBackend,
+    tenant,
+    bind: { unix: socketPath },
+    onShutdown: async () => {
+      await closeHitlQueueBackend(queueBackend, logger);
+      await redis.disconnect();
+    },
+  });
+
+  if (!hostResult.ok) {
+    logger.error(`Worker failed to start: ${formatHostError(hostResult.error)}`);
+    await redis.disconnect();
+    process.exit(1);
+  }
+
+  logger.info("Fugue worker is running", { tenant, socketPath });
+};
+
+const main = async () => {
+  const logger = createJsonConsoleLogger();
+  const bootstrap = bootstrapOrExit(logger);
+  const redis = await connectWorkerRedisOrExit(bootstrap.config, bootstrap.tenant, logger);
 
   try {
-    // The SAME runtime wiring as the single-tenant entry (`main.ts`) — see
-    // `buildRuntimeDeps`. Log lines carry the tenant so capability selection is
-    // attributable per worker.
-    const { sharedInfra, git, loader } = await buildRuntimeDeps(config, redis, logger, { tenant });
-
-    const queueBackend = await createHitlQueueBackend(config, logger);
-
-    // Step 6: createHost bound to THIS tenant, serving on the per-tenant UDS.
-    const hostResult = await createHost({
-      config,
-      git,
-      loader,
-      redis: redisPort,
-      sharedInfra,
-      logger,
-      queueBackend,
-      tenant,
-      bind: { unix: socketPath },
-      onShutdown: async () => {
-        await closeHitlQueueBackend(queueBackend, logger);
-        await disconnectRedis();
-      },
-    });
-
-    if (!hostResult.ok) {
-      logger.error(`Worker failed to start: ${formatHostError(hostResult.error)}`);
-      await disconnectRedis();
-      process.exit(1);
-    }
-
-    logger.info("Fugue worker is running", { tenant, socketPath });
+    await bootWorkerHost(bootstrap, redis, logger);
   } catch (e) {
-    await disconnectRedisQuietly(disconnectRedis);
+    await disconnectRedisQuietly(redis.disconnect);
     throw e;
   }
 };

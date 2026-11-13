@@ -286,14 +286,42 @@ const childControl = (o: FanHarnessOptions, trace: string[]) => {
 
 export type FanHarness = ReturnType<typeof fanHarness>;
 
+type FanSinks = Readonly<{
+  warnings: string[];
+  errors: string[];
+  spanAttributes: Record<string, number | boolean>;
+}>;
+
+const fanRuntimeFor = (o: FanHarnessOptions, sinks: FanSinks): FanRuntime =>
+  Object.freeze({
+    budget: o.budget?.capability ?? null,
+    cap: fanConcurrencyCap(o.cap ?? 8),
+    logger: {
+      warn: (m: string) => { sinks.warnings.push(m); },
+      error: (m: string) => { sinks.errors.push(m); },
+    },
+    tagSpan: (attributes) => { Object.assign(sinks.spanAttributes, attributes); },
+  });
+
+const harnessContext = (
+  checkpointer: Checkpointer,
+  events: ObserverEvent[],
+  signal: AbortSignal,
+): TypedNodeContext<readonly ["checkpointer"]> =>
+  makeNodeContext({
+    runId: RUN,
+    dagId: dagId("outer"),
+    capabilities: { checkpointer },
+    observer: { observe: (e) => { events.push(e); } },
+    signal,
+  }) as unknown as TypedNodeContext<readonly ["checkpointer"]>;
+
 export const fanHarness = (o: FanHarnessOptions) => {
   const checkpointer = o.checkpointer ?? new InMemoryCheckpointer();
   const epoch = freshnessExecutionEpoch(o.epoch ?? 0);
   const trace: string[] = [];
   const events: ObserverEvent[] = [];
-  const warnings: string[] = [];
-  const errors: string[] = [];
-  const spanAttributes: Record<string, number | boolean> = {};
+  const sinks: FanSinks = { warnings: [], errors: [], spanAttributes: {} };
   const reductions: unknown[][] = [];
   const children = childControl(o, trace);
   const outcome = { pendingAtReturn: -1, returned: false };
@@ -303,19 +331,8 @@ export const fanHarness = (o: FanHarnessOptions) => {
   const recorded = recordingCheckpointer(checkpointer, trace, (key) => {
     for (const i of children.occupied) if (slotKey(i) === key) children.release(i);
   }, o.failSave);
-  const ctx = makeNodeContext({
-    runId: RUN,
-    dagId: dagId("outer"),
-    capabilities: { checkpointer: recorded },
-    observer: { observe: (e) => { events.push(e); } },
-    signal: controller.signal,
-  }) as unknown as TypedNodeContext<readonly ["checkpointer"]>;
-  const fan: FanRuntime = Object.freeze({
-    budget: o.budget?.capability ?? null,
-    cap: fanConcurrencyCap(o.cap ?? 8),
-    logger: { warn: (m: string) => { warnings.push(m); }, error: (m: string) => { errors.push(m); } },
-    tagSpan: (attributes) => { Object.assign(spanAttributes, attributes); },
-  });
+  const ctx = harnessContext(recorded, events, controller.signal);
+  const fan = fanRuntimeFor(o, sinks);
   const node = fanNode(reductions, {
     ...(o.childConcurrency !== undefined ? { childConcurrency: o.childConcurrency } : {}),
     ...(o.estimator !== undefined ? { estimator: o.estimator } : {}),
@@ -331,7 +348,10 @@ export const fanHarness = (o: FanHarnessOptions) => {
     });
 
   return {
-    checkpointer, trace, events, warnings, errors, spanAttributes, reductions, start,
+    checkpointer, trace, events, reductions, start,
+    warnings: sinks.warnings,
+    errors: sinks.errors,
+    spanAttributes: sinks.spanAttributes,
     dispatched: children.dispatched,
     scopes: children.scopes,
     settle: children.settle,

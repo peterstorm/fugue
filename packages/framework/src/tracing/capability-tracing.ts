@@ -122,6 +122,89 @@ export interface TracedCapabilityOpts {
 // Core wrapper
 // ---------------------------------------------------------------------------
 
+// Attach the caller's extra span attributes. Best-effort — extraction must not
+// crash the actual call, but a buggy extractor leaves a trace of the failure on
+// the span so it is diagnosable.
+const addCustomAttributes = (
+  span: Span,
+  extractAttributes: NonNullable<TracedCapabilityOpts["extractAttributes"]>,
+  methodName: string,
+  args: unknown[],
+): void => {
+  try {
+    const attrs = extractAttributes(methodName, args);
+    bestEffortTelemetry("custom attributes", () => {
+      for (const [k, v] of Object.entries(attrs)) {
+        span.setAttribute(k, v);
+      }
+    });
+  } catch (extractError) {
+    bestEffortTelemetry("attribute-extraction failure event", () => {
+      span.addEvent("fugue.capability.attribute_extraction_failed", {
+        message: safeErrorMessage(extractError),
+      });
+    });
+  }
+};
+
+// Invoke the capability method inside its span and finish the span when it
+// settles. A thrown error (sync or async) finalizes through `finalizeThrownSpan`.
+const invokeInSpan = (
+  span: Span,
+  target: object,
+  method: Function,
+  args: unknown[],
+): unknown => {
+  try {
+    const result = method.apply(target, args);
+
+    // If the result is a Promise, await it and check for Result errors
+    if (result && typeof result === "object" && "then" in result) {
+      return (result as Promise<unknown>).then(
+        (resolved) => {
+          // The capability already succeeded here. Every span call below
+          // is best-effort so a throwing tracer can never reject this
+          // promise and discard `resolved`.
+          tagErrResult(span, resolved);
+          bestEffortTelemetry("span.end", () => span.end());
+          return resolved;
+        },
+        (error) => finalizeThrownSpan(span, error),
+      );
+    }
+
+    // Synchronous return (unlikely for capabilities but handle
+    // gracefully) — a sync `Result` Err still errors the span.
+    tagErrResult(span, result);
+    bestEffortTelemetry("span.end", () => span.end());
+    return result;
+  } catch (error) {
+    return finalizeThrownSpan(span, error);
+  }
+};
+
+// One traced capability method: `{capabilityName}.{methodName}` span, base and
+// custom attributes, then the invocation.
+const tracedMethod = (
+  otelTracer: OtelTracer,
+  capName: string,
+  opts: TracedCapabilityOpts,
+  target: object,
+  method: Function,
+  methodName: string,
+) =>
+  (...args: unknown[]) =>
+    otelTracer.startActiveSpan(`${capName}.${methodName}`, (span) => {
+      bestEffortTelemetry("base attributes", () => {
+        span.setAttribute(FUGUE_CAPABILITY_NAME, capName);
+        span.setAttribute(FUGUE_CAPABILITY_METHOD, methodName);
+      });
+
+      if (opts.extractAttributes) addCustomAttributes(span, opts.extractAttributes, methodName, args);
+
+      return invokeInSpan(span, target, method, args);
+    });
+
 /**
  * Wrap a capability client's methods in OTel spans.
  *
@@ -161,66 +244,7 @@ export const withTracedCapability = <K extends Capability>(
     get(target, prop, receiver) {
       const value = Reflect.get(target, prop, receiver);
       if (typeof value !== "function") return value;
-
-      const methodName = String(prop);
-
-      return (...args: unknown[]) => {
-        const spanName = `${capName}.${methodName}`;
-        return otelTracer.startActiveSpan(spanName, (span) => {
-          bestEffortTelemetry("base attributes", () => {
-            span.setAttribute(FUGUE_CAPABILITY_NAME, capName);
-            span.setAttribute(FUGUE_CAPABILITY_METHOD, methodName);
-          });
-
-          // Extract custom attributes if configured
-          if (opts.extractAttributes) {
-            try {
-              const attrs = opts.extractAttributes(methodName, args);
-              bestEffortTelemetry("custom attributes", () => {
-                for (const [k, v] of Object.entries(attrs)) {
-                  span.setAttribute(k, v);
-                }
-              });
-            } catch (extractError) {
-              // Best-effort — don't crash the actual call for attribute
-              // extraction, but leave a trace of the failure on the span so
-              // a buggy extractor is diagnosable.
-              bestEffortTelemetry("attribute-extraction failure event", () => {
-                span.addEvent("fugue.capability.attribute_extraction_failed", {
-                  message: safeErrorMessage(extractError),
-                });
-              });
-            }
-          }
-
-          try {
-            const result = (value as Function).apply(target, args);
-
-            // If the result is a Promise, await it and check for Result errors
-            if (result && typeof result === "object" && "then" in result) {
-              return (result as Promise<unknown>).then(
-                (resolved) => {
-                  // The capability already succeeded here. Every span call below
-                  // is best-effort so a throwing tracer can never reject this
-                  // promise and discard `resolved`.
-                  tagErrResult(span, resolved);
-                  bestEffortTelemetry("span.end", () => span.end());
-                  return resolved;
-                },
-                (error) => finalizeThrownSpan(span, error),
-              );
-            }
-
-            // Synchronous return (unlikely for capabilities but handle
-            // gracefully) — a sync `Result` Err still errors the span.
-            tagErrResult(span, result);
-            bestEffortTelemetry("span.end", () => span.end());
-            return result;
-          } catch (error) {
-            return finalizeThrownSpan(span, error);
-          }
-        });
-      };
+      return tracedMethod(otelTracer, capName, opts, target, value, String(prop));
     },
   }) as typeof handle.client;
 

@@ -43,6 +43,157 @@ interface SyncCallbacks {
 
 // ── Factory ────────────────────────────────────────────────────────────────
 
+const isShuttingDown = (deps: SyncCallbackDeps): boolean => {
+  const phase = deps.getState().phase;
+  return phase === "draining" || phase === "stopped";
+};
+
+const dagSnapshot = (registry: Registry) =>
+  Array.from(registry.dags.values()).map(d => ({ id: d.id, path: d.modulePath, sha: d.sha }));
+
+const handleSyncStarted = (deps: SyncCallbackDeps): void => {
+  const { getState, setState, logger, clock } = deps;
+  if (isShuttingDown(deps)) {
+    logger.info("Ignoring sync start — host is shutting down", { phase: getState().phase });
+    return;
+  }
+  const result = syncStarted(getState(), clock());
+  if (result.ok) {
+    setState(result.value);
+  } else {
+    logger.warn("syncStarted transition failed", {
+      currentPhase: getState().phase,
+      error: result.error.message,
+    });
+  }
+};
+
+/** Drop breakers for removed DAGs and force-reset those of current DAGs (FR-092). */
+const refreshCircuitBreakers = (deps: SyncCallbackDeps, newRegistry: Registry): void => {
+  const circuitBreakers = deps.getCircuitBreakers();
+  const currentDagIds = new Set(newRegistry.dags.keys());
+  for (const dagId of circuitBreakers.keys()) {
+    if (!currentDagIds.has(dagId)) {
+      circuitBreakers.delete(dagId);
+    }
+  }
+  // Force-reset circuit breakers for current DAGs (FR-092)
+  const now = deps.clock();
+  for (const dagId of currentDagIds) {
+    circuitBreakers.set(dagId, forceReset(now));
+  }
+};
+
+/** Warn about DAGs with unresolvable team. */
+const warnUnknownTeams = (logger: LogPort, registry: Registry): void => {
+  for (const dag of registry.dags.values()) {
+    if (dag.team === "unknown") {
+      logger.warn(`DAG '${dag.id}' has team 'unknown' — path does not follow dags/{team}/{name}/dag.ts convention`, {
+        dagId: dag.id,
+        route: dag.route,
+      });
+    }
+  }
+};
+
+/** Apply the registry transition's side effects: breakers, limits, diff log, team warnings. */
+const applyRegistryUpdate = (
+  deps: SyncCallbackDeps,
+  prevDags: ReturnType<typeof dagSnapshot>,
+  newRegistry: Registry,
+  newSha: GitSha,
+): void => {
+  const { getConcurrency, setConcurrency, logger } = deps;
+
+  // Update circuit breakers for the new registry
+  refreshCircuitBreakers(deps, newRegistry);
+
+  // Fold the new registry's per-DAG concurrency limits into the limiter (FR-051).
+  // Preserves in-flight counts for surviving DAGs; drops removed ones unless still busy.
+  setConcurrency(
+    reconcileDagLimits(
+      getConcurrency(),
+      Array.from(newRegistry.dags.values(), (d) => ({ dagId: d.id, max: d.config.maxConcurrency })),
+    ),
+  );
+
+  // Compute and log diff between previous and new registry
+  const diff = diffDags(prevDags, dagSnapshot(newRegistry));
+
+  logger.info("Registry updated via sync", {
+    dagCount: newRegistry.dags.size,
+    sha: newSha,
+    diff: diffSummary(diff),
+  });
+
+  warnUnknownTeams(logger, newRegistry);
+};
+
+const handleSyncComplete = (deps: SyncCallbackDeps, newRegistry: Registry, newSha: GitSha): void => {
+  const { getState, setState, logger, clock } = deps;
+  if (isShuttingDown(deps)) {
+    logger.info("Ignoring sync completion — host is shutting down", { phase: getState().phase });
+    return;
+  }
+
+  // Capture previous registry BEFORE state transition for accurate diff
+  const prevRegistry = getRegistry(getState());
+  const prevDags = prevRegistry ? dagSnapshot(prevRegistry) : [];
+
+  const result = syncCompleted(getState(), newRegistry, newSha, clock());
+  if (result.ok) {
+    setState(result.value);
+    applyRegistryUpdate(deps, prevDags, newRegistry, newSha);
+  } else {
+    logger.warn("syncCompleted transition failed — registry NOT updated, circuit breakers unchanged", {
+      currentPhase: getState().phase,
+      error: result.error.message,
+    });
+  }
+};
+
+const handleSyncNoChange = (deps: SyncCallbackDeps, unchangedSha: GitSha): void => {
+  const { getState, setState, logger, clock } = deps;
+  if (isShuttingDown(deps)) return;
+  const state = getState();
+  const currentRegistry = getRegistry(state);
+  if (!currentRegistry) {
+    logger.error("syncCompleted (no-change) invariant violated — current state has no registry", {
+      currentPhase: state.phase,
+      sha: unchangedSha,
+    });
+    return;
+  }
+  const result = syncCompleted(state, currentRegistry, unchangedSha, clock());
+  if (result.ok) {
+    setState(result.value);
+  } else {
+    logger.warn("syncCompleted (no-change) transition failed", {
+      currentPhase: getState().phase,
+      error: result.error.message,
+    });
+  }
+};
+
+const handleSyncError = (deps: SyncCallbackDeps, error: HostError): void => {
+  const { getState, setState, logger, clock } = deps;
+  if (isShuttingDown(deps)) {
+    logger.info("Ignoring sync error — host is shutting down", { phase: getState().phase });
+    return;
+  }
+
+  const result = syncFailed(getState(), clock());
+  if (result.ok) {
+    setState(result.value);
+  } else {
+    logger.warn("syncFailed transition failed — state machine violation", {
+      currentPhase: getState().phase,
+      error: result.error.message,
+    });
+  }
+  logger.warn("Sync error — existing DAGs remain active", { error });
+};
+
 /**
  * Create sync loop callbacks wired to the host state machine.
  *
@@ -50,135 +201,9 @@ interface SyncCallbacks {
  * - All callbacks check for draining/stopped and bail early
  * - State transition failures are logged but don't crash
  */
-export const createSyncCallbacks = (deps: SyncCallbackDeps): SyncCallbacks => {
-  const { getState, setState, getCircuitBreakers, getConcurrency, setConcurrency, logger, clock } = deps;
-
-  const isShuttingDown = (): boolean => {
-    const phase = getState().phase;
-    return phase === "draining" || phase === "stopped";
-  };
-
-  return {
-    onStarted: () => {
-      if (isShuttingDown()) {
-        logger.info("Ignoring sync start — host is shutting down", { phase: getState().phase });
-        return;
-      }
-      const result = syncStarted(getState(), clock());
-      if (result.ok) {
-        setState(result.value);
-      } else {
-        logger.warn("syncStarted transition failed", {
-          currentPhase: getState().phase,
-          error: result.error.message,
-        });
-      }
-    },
-
-    onComplete: (newRegistry, newSha) => {
-      if (isShuttingDown()) {
-        logger.info("Ignoring sync completion — host is shutting down", { phase: getState().phase });
-        return;
-      }
-
-      // Capture previous registry BEFORE state transition for accurate diff
-      const prevRegistry = getRegistry(getState());
-      const prevDags = prevRegistry
-        ? Array.from(prevRegistry.dags.values()).map(d => ({ id: d.id, path: d.modulePath, sha: d.sha }))
-        : [];
-
-      const result = syncCompleted(getState(), newRegistry, newSha, clock());
-      if (result.ok) {
-        setState(result.value);
-
-        // Update circuit breakers for the new registry
-        const circuitBreakers = getCircuitBreakers();
-        const currentDagIds = new Set(newRegistry.dags.keys());
-        for (const dagId of circuitBreakers.keys()) {
-          if (!currentDagIds.has(dagId)) {
-            circuitBreakers.delete(dagId);
-          }
-        }
-        // Force-reset circuit breakers for current DAGs (FR-092)
-        const now = clock();
-        for (const dagId of currentDagIds) {
-          circuitBreakers.set(dagId, forceReset(now));
-        }
-
-        // Fold the new registry's per-DAG concurrency limits into the limiter (FR-051).
-        // Preserves in-flight counts for surviving DAGs; drops removed ones unless still busy.
-        setConcurrency(
-          reconcileDagLimits(
-            getConcurrency(),
-            Array.from(newRegistry.dags.values(), (d) => ({ dagId: d.id, max: d.config.maxConcurrency })),
-          ),
-        );
-
-        // Compute and log diff between previous and new registry
-        const newDags = Array.from(newRegistry.dags.values()).map(d => ({ id: d.id, path: d.modulePath, sha: d.sha }));
-        const diff = diffDags(prevDags, newDags);
-
-        logger.info("Registry updated via sync", {
-          dagCount: newRegistry.dags.size,
-          sha: newSha,
-          diff: diffSummary(diff),
-        });
-
-        // Warn about DAGs with unresolvable team
-        for (const dag of newRegistry.dags.values()) {
-          if (dag.team === "unknown") {
-            logger.warn(`DAG '${dag.id}' has team 'unknown' — path does not follow dags/{team}/{name}/dag.ts convention`, {
-              dagId: dag.id,
-              route: dag.route,
-            });
-          }
-        }
-      } else {
-        logger.warn("syncCompleted transition failed — registry NOT updated, circuit breakers unchanged", {
-          currentPhase: getState().phase,
-          error: result.error.message,
-        });
-      }
-    },
-
-    onNoChange: (unchangedSha) => {
-      if (isShuttingDown()) return;
-      const state = getState();
-      const currentRegistry = getRegistry(state);
-      if (!currentRegistry) {
-        logger.error("syncCompleted (no-change) invariant violated — current state has no registry", {
-          currentPhase: state.phase,
-          sha: unchangedSha,
-        });
-        return;
-      }
-      const result = syncCompleted(state, currentRegistry, unchangedSha, clock());
-      if (result.ok) {
-        setState(result.value);
-      } else {
-        logger.warn("syncCompleted (no-change) transition failed", {
-          currentPhase: getState().phase,
-          error: result.error.message,
-        });
-      }
-    },
-
-    onError: (error) => {
-      if (isShuttingDown()) {
-        logger.info("Ignoring sync error — host is shutting down", { phase: getState().phase });
-        return;
-      }
-
-      const result = syncFailed(getState(), clock());
-      if (result.ok) {
-        setState(result.value);
-      } else {
-        logger.warn("syncFailed transition failed — state machine violation", {
-          currentPhase: getState().phase,
-          error: result.error.message,
-        });
-      }
-      logger.warn("Sync error — existing DAGs remain active", { error });
-    },
-  };
-};
+export const createSyncCallbacks = (deps: SyncCallbackDeps): SyncCallbacks => ({
+  onStarted: () => handleSyncStarted(deps),
+  onComplete: (newRegistry, newSha) => handleSyncComplete(deps, newRegistry, newSha),
+  onNoChange: (unchangedSha) => handleSyncNoChange(deps, unchangedSha),
+  onError: (error) => handleSyncError(deps, error),
+});

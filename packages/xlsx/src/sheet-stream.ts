@@ -184,9 +184,6 @@ const BEFORE_SHEET_DATA: Phase = Object.freeze({ kind: "before-sheet-data" });
 const FINISHED: Phase = Object.freeze({ kind: "finished" });
 const FAILED: Phase = Object.freeze({ kind: "failed" });
 
-/** Compile-time exhaustiveness: a `Phase` kind a dispatcher forgot fails to type-check here. */
-const exhausted = (_phase: never): void => undefined;
-
 /**
  * One worksheet's parse progress. It is mutated in place as SAX events arrive
  * (the phase is replaced on each transition) and never escapes
@@ -345,7 +342,9 @@ const onOpen = (a: Assembly, name: string, attrs: XmlAttrs, selfClosing: boolean
   if (p.kind === "between-rows") return openBetweenRows(a, p, name, attrs, selfClosing, at);
   if (p.kind === "before-sheet-data") return openBeforeSheetData(a, name, attrs, selfClosing, at);
   if (p.kind === "finished" || p.kind === "failed") return;
-  exhausted(p);
+  // Compile-time exhaustiveness: a `Phase` kind added without a branch above makes `p` non-`never`.
+  const unhandled: never = p;
+  return unhandled;
 };
 
 const closeInline = (a: Assembly, p: PhaseOf<"in-inline">, name: string, at: number): void => {
@@ -376,7 +375,9 @@ const onClose = (a: Assembly, name: string): void => {
     return;
   }
   if (p.kind === "before-sheet-data" || p.kind === "finished" || p.kind === "failed") return;
-  exhausted(p);
+  // Compile-time exhaustiveness: a `Phase` kind added without a branch above makes `p` non-`never`.
+  const unhandled: never = p;
+  return unhandled;
 };
 
 const onText = (a: Assembly, text: string): void => {

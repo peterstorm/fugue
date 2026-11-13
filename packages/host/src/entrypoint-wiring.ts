@@ -5,6 +5,7 @@ import {
   safeErrorMessage,
 } from "@fuguejs/framework";
 import type { LlmClient, LlmPricingModel } from "@fuguejs/framework";
+import { match } from "ts-pattern";
 import type { HostConfig } from "./domain/config.js";
 import type { HostError } from "./domain/host-error.js";
 import type { LogPort } from "./ports.js";
@@ -166,17 +167,16 @@ export const createHostLlmClient = async (
   loadAnthropic: LoadAnthropicClient = loadAnthropicClient,
 ): Promise<LlmClient> => {
   const plan = planHostLlm(config);
-  switch (plan.provider) {
-    case "anthropic":
-      return loadAnthropic(plan.apiKey);
-    case "azure":
-      return new OpenAILlmClient({
-        apiKey: plan.apiKey,
-        baseUrl: plan.baseUrl,
-        apiVersion: plan.apiVersion,
-        modelOverride: plan.deployment,
-      });
-    case "openai":
-      return new OpenAILlmClient({ apiKey: plan.apiKey, baseUrl: plan.baseUrl });
-  }
+  return match(plan)
+    .with({ provider: "anthropic" }, ({ apiKey }) => loadAnthropic(apiKey))
+    .with({ provider: "azure" }, async (azure) =>
+      new OpenAILlmClient({
+        apiKey: azure.apiKey,
+        baseUrl: azure.baseUrl,
+        apiVersion: azure.apiVersion,
+        modelOverride: azure.deployment,
+      }))
+    .with({ provider: "openai" }, async ({ apiKey, baseUrl }) =>
+      new OpenAILlmClient({ apiKey, baseUrl }))
+    .exhaustive();
 };

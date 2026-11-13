@@ -20,6 +20,36 @@ const promptNotFound = (promptName: string, reason: string): FrameworkError => (
   reason,
 });
 
+const isJsonObject = (v: unknown): v is Readonly<Record<string, unknown>> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
+
+const parseRegistryEntry = (
+  raw: unknown,
+): { readonly version: string; readonly hash: string } | undefined =>
+  isJsonObject(raw) && typeof raw.version === "string" && typeof raw.hash === "string"
+    ? { version: raw.version, hash: raw.hash }
+    : undefined;
+
+/**
+ * Parse the registry document and look `name` up in it. The file is wire data:
+ * a non-object document, an inherited key, and an entry that is not
+ * `{ version: string, hash: string }` each settle as a typed `prompt-not-found`.
+ */
+const lookupEntry = (
+  registry: unknown,
+  name: string,
+): Result<{ readonly version: string; readonly hash: string }, FrameworkError> => {
+  if (!isJsonObject(registry)) {
+    return err(promptNotFound(name, "registry file is malformed: expected a JSON object"));
+  }
+  const rawEntry: unknown = Object.hasOwn(registry, name) ? registry[name] : undefined;
+  if (!rawEntry) return err(promptNotFound(name, "not in registry"));
+  const entry = parseRegistryEntry(rawEntry);
+  return entry === undefined
+    ? err(promptNotFound(name, "registry entry is malformed: expected { version: string, hash: string }"))
+    : ok(entry);
+};
+
 export const FilePromptRegistry = ({
   dir,
   registryPath,
@@ -50,7 +80,7 @@ export const FilePromptRegistry = ({
       const code = (e as NodeJS.ErrnoException).code;
       return err(promptNotFound(name, code === "ENOENT" ? "registry file does not exist" : `registry read failed: ${code ?? (e instanceof Error ? e.message : String(e))}`));
     }
-    let registry: Record<string, { version: string; hash: string }>;
+    let registry: unknown;
     try {
       registry = JSON.parse(raw);
     } catch (e) {
@@ -63,18 +93,16 @@ export const FilePromptRegistry = ({
     }
 
     // 4. Check registry entry
-    const entry = registry[name];
-    if (!entry) {
-      return err(promptNotFound(name, "not in registry"));
-    }
+    const entry = lookupEntry(registry, name);
+    if (!entry.ok) return entry;
 
     // 5. Cross-check hash
-    if (entry.hash !== hash) {
+    if (entry.value.hash !== hash) {
       return err(
         promptNotFound(name, "hash mismatch — prompt edited without version bump"),
       );
     }
 
-    return ok({ text, hash, version: entry.version });
+    return ok({ text, hash, version: entry.value.version });
   },
 });

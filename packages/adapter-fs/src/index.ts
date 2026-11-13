@@ -43,7 +43,7 @@ import { readFile as nodeReadFile, stat as nodeStat } from "node:fs/promises";
 import { match } from "ts-pattern";
 import type { Result, FrameworkError, CapabilityHandle } from "@fuguejs/framework";
 import { ok, err, nodeId, safeErrorMessage, probeErrorCode } from "@fuguejs/framework";
-import type { DocumentSource, FileRef, FileMeta } from "@fuguejs/document-source";
+import type { DocumentSource, FileRef, FileMeta, ReadOpts } from "@fuguejs/document-source";
 import { unsupportedRefError, isoUtcFromDate } from "@fuguejs/document-source";
 
 // Re-export the port surface so `@fuguejs/fs` is a one-stop import.
@@ -163,6 +163,78 @@ const defaultFs: FsLike = {
 // Adapter Factory
 // ---------------------------------------------------------------------------
 
+type ResolvedLocalPath = Readonly<{
+  absolutePath: string;
+  authoredPath: string;
+}>;
+
+/** Resolve and narrow a localPath ref (or fail closed). */
+const resolveLocalPath = (root: string, ref: FileRef): Result<ResolvedLocalPath, FrameworkError> =>
+  match(ref)
+    .with({ kind: "localPath" }, (localRef) => {
+      const absolute = resolveWithinRoot(root, localRef.path);
+      return absolute.ok
+        ? ok({ absolutePath: absolute.value, authoredPath: localRef.path })
+        : absolute;
+    })
+    .otherwise((foreignRef) => err(unsupportedRefError("fs", foreignRef)));
+
+/** Pure mapping of a `stat` result to the port's `FileMeta`. */
+const toFileMeta = (
+  stat: { size: number; mtimeMs: number },
+  resolved: ResolvedLocalPath,
+): FileMeta => {
+  const name = basename(resolved.absolutePath);
+  const mime = MIME_BY_EXT[extname(name).toLowerCase()];
+  return {
+    id: resolved.authoredPath,
+    name,
+    sizeBytes: stat.size,
+    lastModified: isoUtcFromDate(new Date(stat.mtimeMs)),
+    ...(mime !== undefined ? { mimeType: mime } : {}),
+  };
+};
+
+const readContent = async (
+  fs: FsLike,
+  root: string,
+  ref: FileRef,
+  opts: ReadOpts | undefined,
+): Promise<Result<Uint8Array, FrameworkError>> => {
+  const resolved = resolveLocalPath(root, ref);
+  if (!resolved.ok) return resolved;
+  const { absolutePath } = resolved.value;
+  if (opts?.signal?.aborted) return err(abortedErr(absolutePath));
+  try {
+    // `node:fs` honors `signal`, so a mid-read abort rejects with an
+    // AbortError that we map to the `aborted` error kind (not a transient
+    // fs fault) — keeping abort semantics consistent with the ms-graph adapter.
+    return ok(await fs.readFile(absolutePath, { signal: opts?.signal }));
+  } catch (e) {
+    if (isAbort(e) || opts?.signal?.aborted) return err(abortedErr(absolutePath));
+    return err(mapFsError(e, absolutePath));
+  }
+};
+
+const readMetadata = async (
+  fs: FsLike,
+  root: string,
+  ref: FileRef,
+  opts: ReadOpts | undefined,
+): Promise<Result<FileMeta, FrameworkError>> => {
+  const resolved = resolveLocalPath(root, ref);
+  if (!resolved.ok) return resolved;
+  const { absolutePath } = resolved.value;
+  // `node:fs.stat` takes no signal, so abort can only be honored up front
+  // (a stat is a single near-instant syscall, not a streamable read).
+  if (opts?.signal?.aborted) return err(abortedErr(absolutePath));
+  try {
+    return ok(toFileMeta(await fs.stat(absolutePath), resolved.value));
+  } catch (e) {
+    return err(mapFsError(e, absolutePath));
+  }
+};
+
 /**
  * Create a filesystem `DocumentSource` capability handle rooted at
  * `config.rootDir`.
@@ -176,61 +248,9 @@ export const createFsAdapter = (config: FsAdapterConfig): CapabilityHandle<"docu
   const fs = config.fsImpl ?? defaultFs;
   const root = resolve(config.rootDir);
 
-  type ResolvedLocalPath = Readonly<{
-    absolutePath: string;
-    authoredPath: string;
-  }>;
-
-  /** Resolve and narrow a localPath ref (or fail closed). */
-  const pathFor = (ref: FileRef): Result<ResolvedLocalPath, FrameworkError> =>
-    match(ref)
-      .with({ kind: "localPath" }, (localRef) => {
-        const absolute = resolveWithinRoot(root, localRef.path);
-        return absolute.ok
-          ? ok({ absolutePath: absolute.value, authoredPath: localRef.path })
-          : absolute;
-      })
-      .otherwise((foreignRef) => err(unsupportedRefError("fs", foreignRef)));
-
   const client: DocumentSource = {
-    getContent: async (ref, opts): Promise<Result<Uint8Array, FrameworkError>> => {
-      const resolved = pathFor(ref);
-      if (!resolved.ok) return resolved;
-      const { absolutePath } = resolved.value;
-      if (opts?.signal?.aborted) return err(abortedErr(absolutePath));
-      try {
-        // `node:fs` honors `signal`, so a mid-read abort rejects with an
-        // AbortError that we map to the `aborted` error kind (not a transient
-        // fs fault) — keeping abort semantics consistent with the ms-graph adapter.
-        return ok(await fs.readFile(absolutePath, { signal: opts?.signal }));
-      } catch (e) {
-        if (isAbort(e) || opts?.signal?.aborted) return err(abortedErr(absolutePath));
-        return err(mapFsError(e, absolutePath));
-      }
-    },
-
-    getMetadata: async (ref, opts): Promise<Result<FileMeta, FrameworkError>> => {
-      const resolved = pathFor(ref);
-      if (!resolved.ok) return resolved;
-      const { absolutePath, authoredPath } = resolved.value;
-      // `node:fs.stat` takes no signal, so abort can only be honored up front
-      // (a stat is a single near-instant syscall, not a streamable read).
-      if (opts?.signal?.aborted) return err(abortedErr(absolutePath));
-      try {
-        const s = await fs.stat(absolutePath);
-        const name = basename(absolutePath);
-        const mime = MIME_BY_EXT[extname(name).toLowerCase()];
-        return ok({
-          id: authoredPath,
-          name,
-          sizeBytes: s.size,
-          lastModified: isoUtcFromDate(new Date(s.mtimeMs)),
-          ...(mime !== undefined ? { mimeType: mime } : {}),
-        });
-      } catch (e) {
-        return err(mapFsError(e, absolutePath));
-      }
-    },
+    getContent: (ref, opts) => readContent(fs, root, ref, opts),
+    getMetadata: (ref, opts) => readMetadata(fs, root, ref, opts),
   };
 
   return {

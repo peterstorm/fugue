@@ -18,7 +18,7 @@
 import { INVALID_SPAN_CONTEXT, type Span, SpanStatusCode, trace } from "@opentelemetry/api";
 import { fwTracer } from "../tracing/global-tracer.js";
 import type { Result } from "../types/result.js";
-import { err } from "../types/result.js";
+import { err, ok } from "../types/result.js";
 import type { FrameworkError } from "../types/errors.js";
 import type { EvalJudgeResult } from "../nodes/eval-judge.js";
 import type { ContentFilter } from "../tracing/content-filter.js";
@@ -131,6 +131,151 @@ export const classifyGuardrailOutcome = (
 // withTracedNodeSpan — OTel infrastructure, no domain logic
 // ---------------------------------------------------------------------------
 
+type TracedNodeOutcome = {
+  readonly result: Result<unknown, FrameworkError>;
+  readonly outcome: NodeSpanOutcome;
+};
+
+const baseSpanAttributes = (
+  nodeId: string,
+  kind: string,
+  sideEffects: SideEffectProfile,
+): Record<string, string> => {
+  const attrs: Record<string, string> = {
+    [AI_SPAN_TYPE]: NODE_KIND_TO_SPAN_TYPE[kind] ?? SPAN_TYPE_CHAIN,
+    [AI_NODE_ID]: nodeId,
+    [AI_NODE_KIND]: kind,
+    [AI_NODE_SIDE_EFFECTS_KIND]: sideEffects.kind,
+  };
+  if (sideEffects.kind !== "none" && sideEffects.resource) {
+    attrs[AI_NODE_SIDE_EFFECTS_RESOURCE] = sideEffects.resource;
+  }
+  return attrs;
+};
+
+// Evaluate the idempotency key lazily — only if the node declares one.
+// Fail closed: the idempotency key is the dedup signal infrastructure uses for
+// writes / external calls. Running the node without it risks a double-write or
+// duplicate external call, so an extractor that throws aborts the node.
+const evaluateIdempotencyKey = (
+  nodeId: string,
+  input: unknown,
+  sideEffects: SideEffectProfile,
+): Result<string | undefined, FrameworkError> => {
+  if (
+    (sideEffects.kind !== "writes" && sideEffects.kind !== "external-call") ||
+    !sideEffects.idempotencyKey
+  ) {
+    return ok(undefined);
+  }
+  try {
+    return ok(sideEffects.idempotencyKey(input));
+  } catch (e) {
+    const message = safeErrorMessage(e);
+    bestEffortLog(
+      "error",
+      `[withTracedNodeSpan] idempotencyKey evaluation failed for node '${nodeId}': ${message}`,
+    );
+    return err({
+      kind: "node-crash",
+      nodeId: brandNodeId(nodeId),
+      retriability: "non-retriable",
+      message: `idempotencyKey extractor threw for node '${nodeId}': ${message}`,
+    });
+  }
+};
+
+// A throwing node body becomes a retriable `node-crash`; the span carries the error status.
+const recordNodeCrash = (span: Span, nodeId: string, error: unknown): TracedNodeOutcome => {
+  const message = safeErrorMessage(error);
+  const stack = safeErrorStack(error);
+  bestEffortTelemetry("span.setStatus", () => {
+    span.setStatus({ code: SpanStatusCode.ERROR, message });
+  });
+  return {
+    result: err({
+      kind: "node-crash" as const,
+      nodeId: __brandNodeId(nodeId),
+      retriability: "retriable" as const,
+      message,
+      ...(stack ? { stack } : {}),
+    }),
+    outcome: EMPTY_OUTCOME,
+  };
+};
+
+const recordNodeFailure = (
+  span: Span,
+  result: Extract<Result<unknown, FrameworkError>, { readonly ok: false }>,
+): TracedNodeOutcome => {
+  bestEffortTelemetry("span.setStatus", () => {
+    span.setStatus({
+      code: SpanStatusCode.ERROR,
+      message: safeErrorMessage(result.error),
+    });
+  });
+  return { result, outcome: EMPTY_OUTCOME };
+};
+
+// Record the output event, then classify the result; a failed guardrail tags
+// the span it owns (status + `ai.guardrail.passed=false`).
+const recordNodeSuccess = (
+  span: Span,
+  kind: string,
+  contentFilter: ContentFilter | null,
+  result: Extract<Result<unknown, FrameworkError>, { readonly ok: true }>,
+): TracedNodeOutcome => {
+  bestEffortTelemetry("output event", () => {
+    span.addEvent(
+      EVENT_NODE_OUTPUT,
+      contentFilter ? { data: contentFilter(JSON.stringify(result.value)) } : { data_redacted: "true" },
+    );
+  });
+  const outcome = classifyGuardrailOutcome(kind, result);
+  if (outcome.guardrailFailed) {
+    bestEffortTelemetry("guardrail span status", () => {
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: `Guardrail failed: ${outcome.guardrailWarnings.join("; ")}`,
+      });
+    });
+    bestEffortTelemetry("guardrail span attribute", () => {
+      span.setAttribute(AI_GUARDRAIL_PASSED, false);
+    });
+  }
+  return { result, outcome };
+};
+
+// Run the node body inside an already-open span and always end it.
+const executeNodeInSpan = async (
+  span: Span,
+  nodeId: string,
+  kind: string,
+  input: unknown,
+  contentFilter: ContentFilter | null,
+  fn: () => Promise<Result<unknown, FrameworkError>>,
+): Promise<TracedNodeOutcome> => {
+  bestEffortTelemetry("input event", () => {
+    span.addEvent(
+      EVENT_NODE_INPUT,
+      contentFilter ? { data: contentFilter(JSON.stringify(input)) } : { data_redacted: "true" },
+    );
+  });
+
+  try {
+    let result: Result<unknown, FrameworkError>;
+    try {
+      result = await fn();
+    } catch (error) {
+      return recordNodeCrash(span, nodeId, error);
+    }
+    if (!result.ok) return recordNodeFailure(span, result);
+    return recordNodeSuccess(span, kind, contentFilter, result);
+  } finally {
+    bestEffortTelemetry("span.end", () => span.end());
+  }
+};
+
 /**
  * Wrap node execution in an OTel span. Infrastructure plus the span-side
  * guardrail tagging — creates the span, records input/output events, sets error
@@ -154,112 +299,15 @@ export const withTracedNodeSpan = async (
   sideEffects: SideEffectProfile,
   fn: () => Promise<Result<unknown, FrameworkError>>,
 ): Promise<{ result: Result<unknown, FrameworkError>; outcome: NodeSpanOutcome }> => {
-  const spanType = NODE_KIND_TO_SPAN_TYPE[kind] ?? SPAN_TYPE_CHAIN;
+  const attrs = baseSpanAttributes(nodeId, kind, sideEffects);
+  const idempotencyKey = evaluateIdempotencyKey(nodeId, input, sideEffects);
+  if (!idempotencyKey.ok) return { result: err(idempotencyKey.error), outcome: EMPTY_OUTCOME };
+  if (idempotencyKey.value !== undefined) attrs[AI_NODE_IDEMPOTENCY_KEY] = idempotencyKey.value;
 
-  // Build base attributes
-  const attrs: Record<string, string> = {
-    [AI_SPAN_TYPE]: spanType,
-    [AI_NODE_ID]: nodeId,
-    [AI_NODE_KIND]: kind,
-    [AI_NODE_SIDE_EFFECTS_KIND]: sideEffects.kind,
-  };
-  if (sideEffects.kind !== "none" && sideEffects.resource) {
-    attrs[AI_NODE_SIDE_EFFECTS_RESOURCE] = sideEffects.resource;
-  }
-  // Evaluate idempotency key lazily — only if the node declares one
-  if (
-    (sideEffects.kind === "writes" || sideEffects.kind === "external-call") &&
-    sideEffects.idempotencyKey
-  ) {
-    try {
-      const idemKey = sideEffects.idempotencyKey(input);
-      attrs[AI_NODE_IDEMPOTENCY_KEY] = idemKey;
-    } catch (e) {
-      // Fail closed: the idempotency key is the dedup signal infrastructure
-      // uses for writes / external calls. Running the node without it risks a
-      // double-write or duplicate external call. Abort the node instead.
-      const message = safeErrorMessage(e);
-      bestEffortLog(
-        "error",
-        `[withTracedNodeSpan] idempotencyKey evaluation failed for node '${nodeId}': ${message}`,
-      );
-      return {
-        result: err({
-          kind: "node-crash",
-          nodeId: brandNodeId(nodeId),
-          retriability: "non-retriable",
-          message: `idempotencyKey extractor threw for node '${nodeId}': ${message}`,
-        }),
-        outcome: EMPTY_OUTCOME,
-      };
-    }
-  }
+  const executeNode = (span: Span): Promise<TracedNodeOutcome> =>
+    executeNodeInSpan(span, nodeId, kind, input, contentFilter, fn);
 
-  const executeNode = async (span: Span) => {
-    bestEffortTelemetry("input event", () => {
-      span.addEvent(
-        EVENT_NODE_INPUT,
-        contentFilter ? { data: contentFilter(JSON.stringify(input)) } : { data_redacted: "true" },
-      );
-    });
-
-    try {
-      let result: Result<unknown, FrameworkError>;
-      try {
-        result = await fn();
-      } catch (error) {
-        const message = safeErrorMessage(error);
-        const stack = safeErrorStack(error);
-        bestEffortTelemetry("span.setStatus", () => {
-          span.setStatus({ code: SpanStatusCode.ERROR, message });
-        });
-        return {
-          result: err({
-            kind: "node-crash" as const,
-            nodeId: __brandNodeId(nodeId),
-            retriability: "retriable" as const,
-            message,
-            ...(stack ? { stack } : {}),
-          }),
-          outcome: EMPTY_OUTCOME,
-        };
-      }
-
-      if (!result.ok) {
-        bestEffortTelemetry("span.setStatus", () => {
-          span.setStatus({
-            code: SpanStatusCode.ERROR,
-            message: safeErrorMessage(result.error),
-          });
-        });
-        return { result, outcome: EMPTY_OUTCOME };
-      }
-
-      bestEffortTelemetry("output event", () => {
-        span.addEvent(
-          EVENT_NODE_OUTPUT,
-          contentFilter ? { data: contentFilter(JSON.stringify(result.value)) } : { data_redacted: "true" },
-        );
-      });
-      const outcome = classifyGuardrailOutcome(kind, result);
-      if (outcome.guardrailFailed) {
-        bestEffortTelemetry("guardrail span status", () => {
-          span.setStatus({
-            code: SpanStatusCode.ERROR,
-            message: `Guardrail failed: ${outcome.guardrailWarnings.join("; ")}`,
-          });
-        });
-        bestEffortTelemetry("guardrail span attribute", () => {
-          span.setAttribute(AI_GUARDRAIL_PASSED, false);
-        });
-      }
-      return { result, outcome };
-    } finally {
-      bestEffortTelemetry("span.end", () => span.end());
-    }
-  };
-
-  let callbackResult: ReturnType<typeof executeNode> | undefined;
+  let callbackResult: Promise<TracedNodeOutcome> | undefined;
   try {
     return await fwTracer().startActiveSpan(
       `node:${nodeId}`,
@@ -277,4 +325,3 @@ export const withTracedNodeSpan = async (
     return callbackResult ?? executeNode(FALLBACK_NODE_SPAN);
   }
 };
-

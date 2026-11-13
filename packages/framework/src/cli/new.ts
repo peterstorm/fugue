@@ -40,7 +40,6 @@
 
 import { mkdir, readdir, readFile, rm, rmdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { match } from "ts-pattern";
 import {
   DAG_SHAPES,
   buildScaffold,
@@ -109,6 +108,118 @@ interface ParseNewError {
   readonly problems: readonly string[];
 }
 
+/** Raw flag values as scanned — not yet validated into `NewOptions`. */
+interface ScannedNewArgs {
+  readonly target: string | undefined;
+  readonly shape: string | undefined;
+  readonly owner: string | undefined;
+  readonly root: string | undefined;
+  readonly from: string | undefined;
+  readonly llm: boolean;
+  readonly review: boolean;
+  readonly force: boolean;
+  readonly problems: string[];
+}
+
+const NEW_VALUE_FLAGS: ReadonlySet<string> = new Set(["--shape", "--owner", "--dir", "--from"]);
+const NEW_BOOLEAN_FLAGS: ReadonlySet<string> = new Set(["--llm", "--review", "--force"]);
+
+/** Scan flags + the positional target, accumulating every scan problem. */
+const scanNewArgs = (args: readonly string[]): ScannedNewArgs => {
+  const problems: string[] = [];
+  // A value flag that fails to parse resets to `undefined` (last occurrence wins).
+  const values = new Map<string, string | undefined>();
+  const switches = new Set<string>();
+  let target: string | undefined;
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (NEW_VALUE_FLAGS.has(arg)) {
+      const parsed = parseFlagValue(args, i, arg);
+      i = parsed.nextIndex;
+      if (!parsed.ok) problems.push(parsed.problem);
+      values.set(arg, parsed.ok ? parsed.value : undefined);
+    } else if (NEW_BOOLEAN_FLAGS.has(arg)) {
+      switches.add(arg);
+    } else if (arg.startsWith("--")) {
+      problems.push(`unknown flag: ${arg}`);
+    } else if (target === undefined) {
+      target = arg;
+    } else {
+      problems.push(`unexpected argument: ${arg}`);
+    }
+  }
+  return {
+    target,
+    shape: values.get("--shape"),
+    owner: values.get("--owner"),
+    root: values.get("--dir"),
+    from: values.get("--from"),
+    llm: switches.has("--llm"),
+    review: switches.has("--review"),
+    force: switches.has("--force"),
+    problems,
+  };
+};
+
+// `--from` mode: name/team/shape/nodes all come from the authored file —
+// the shape-mode arguments are contradictions, not extras. Reject loudly.
+const parseNewFromMode = (scanned: ScannedNewArgs, from: string): ParsedNewFromArgs | ParseNewError => {
+  const { target, shape, owner, root, llm, review, force, problems } = scanned;
+  if (target !== undefined) problems.push("--from takes no <team>/<name> argument (name/team come from the authored file)");
+  if (shape !== undefined) problems.push("--from and --shape are mutually exclusive (shape comes from the authored file)");
+  if (llm) problems.push("--from and --llm are mutually exclusive (LLM nodes come from the authored file)");
+  if (review) problems.push("--from and --review are mutually exclusive (review gates come from the authored file)");
+  if (problems.length > 0) return { ok: false, problems };
+  return { ok: true, mode: "from", from, force, ...(owner !== undefined ? { owner } : {}), ...(root !== undefined ? { root } : {}) };
+};
+
+/**
+ * Parse the `<team>/<name>` target into its branded parts. A `null` part always
+ * comes with a pushed problem (missing target, bad path shape, non-KEBAB team,
+ * non-KEBAB_IDENT name).
+ */
+const parseTeamAndName = (
+  target: string | undefined,
+  problems: string[],
+): { readonly team: Kebab | null; readonly name: KebabIdent | null } => {
+  if (target === undefined) {
+    problems.push("missing <team>/<name> argument (e.g. `fugue new leads/my-dag --shape sources`)");
+    return { team: null, name: null };
+  }
+  const parts = target.split("/");
+  if (parts.length !== 2 || parts[0] === "" || parts[1] === "") {
+    problems.push(`'${target}' is not a <team>/<name> path (exactly one '/', both non-empty)`);
+    return { team: null, name: null };
+  }
+  const [rawTeam, rawName] = parts as [string, string];
+  const team = parseKebab(rawTeam);
+  if (team === null) problems.push(`team '${rawTeam}' must be kebab-case (lowercase, digits, single dashes)`);
+  // The name feeds codegen'd identifiers (`create<Pascal>Dag`,
+  // `<Pascal>DagOpts`) — it must camelCase to a valid JS identifier, so
+  // the first segment cannot start with a digit (KEBAB_IDENT, the same
+  // rule the AuthoredDag schema enforces on `name` and node ids).
+  const name = parseKebabIdent(rawName);
+  if (name === null) {
+    problems.push(
+      `name '${rawName}' must be kebab-case starting with a letter (lowercase, digits, single dashes — it becomes a JS identifier in the generated dag.ts, so a digit-leading name would not compile)`,
+    );
+  }
+  return { team, name };
+};
+
+// `parseShape` is the single Shape producer (parse, don't validate) — the
+// membership check narrows, so the success arm never needs an `as Shape`.
+const parseShapeFlag = (shape: string | undefined, problems: string[]): Shape | null => {
+  if (shape === undefined) {
+    problems.push(`missing --shape (one of: ${DAG_SHAPES.join(", ")})`);
+    return null;
+  }
+  const parsedShape = parseShape(shape);
+  if (parsedShape === null) problems.push(`unknown --shape '${shape}' (one of: ${DAG_SHAPES.join(", ")})`);
+  return parsedShape;
+};
+
 /**
  * Parse `fugue new`'s arguments (everything after the `new` token) into
  * validated `NewOptions` — or, when `--from` is present, into
@@ -119,106 +230,12 @@ interface ParseNewError {
  * at once.
  */
 export const parseNewArgs = (args: readonly string[]): ParsedNewArgs | ParsedNewFromArgs | ParseNewError => {
-  const problems: string[] = [];
-  let target: string | undefined;
-  let shape: string | undefined;
-  let owner: string | undefined;
-  let root: string | undefined;
-  let from: string | undefined;
-  let llm = false;
-  let review = false;
-  let force = false;
+  const scanned = scanNewArgs(args);
+  if (scanned.from !== undefined) return parseNewFromMode(scanned, scanned.from);
 
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i]!;
-    const takeValue = (flag: string): string | undefined => {
-      const parsed = parseFlagValue(args, i, flag);
-      i = parsed.nextIndex;
-      if (!parsed.ok) {
-        problems.push(parsed.problem);
-        return undefined;
-      }
-      return parsed.value;
-    };
-    match(arg)
-      .with("--shape", () => {
-        shape = takeValue("--shape");
-      })
-      .with("--owner", () => {
-        owner = takeValue("--owner");
-      })
-      .with("--dir", () => {
-        root = takeValue("--dir");
-      })
-      .with("--from", () => {
-        from = takeValue("--from");
-      })
-      .with("--llm", () => {
-        llm = true;
-      })
-      .with("--review", () => {
-        review = true;
-      })
-      .with("--force", () => {
-        force = true;
-      })
-      .otherwise((other) => {
-        if (other.startsWith("--")) {
-          problems.push(`unknown flag: ${other}`);
-        } else if (target === undefined) {
-          target = other;
-        } else {
-          problems.push(`unexpected argument: ${other}`);
-        }
-      });
-  }
-
-  // `--from` mode: name/team/shape/nodes all come from the authored file —
-  // the shape-mode arguments are contradictions, not extras. Reject loudly.
-  if (from !== undefined) {
-    if (target !== undefined) problems.push("--from takes no <team>/<name> argument (name/team come from the authored file)");
-    if (shape !== undefined) problems.push("--from and --shape are mutually exclusive (shape comes from the authored file)");
-    if (llm) problems.push("--from and --llm are mutually exclusive (LLM nodes come from the authored file)");
-    if (review) problems.push("--from and --review are mutually exclusive (review gates come from the authored file)");
-    if (problems.length > 0) return { ok: false, problems };
-    return { ok: true, mode: "from", from, force, ...(owner !== undefined ? { owner } : {}), ...(root !== undefined ? { root } : {}) };
-  }
-
-  if (target === undefined) {
-    problems.push("missing <team>/<name> argument (e.g. `fugue new leads/my-dag --shape sources`)");
-  }
-  let team: Kebab | null = null;
-  let name: KebabIdent | null = null;
-  if (target !== undefined) {
-    const parts = target.split("/");
-    if (parts.length !== 2 || parts[0] === "" || parts[1] === "") {
-      problems.push(`'${target}' is not a <team>/<name> path (exactly one '/', both non-empty)`);
-    } else {
-      const [rawTeam, rawName] = parts as [string, string];
-      team = parseKebab(rawTeam);
-      if (team === null) problems.push(`team '${rawTeam}' must be kebab-case (lowercase, digits, single dashes)`);
-      // The name feeds codegen'd identifiers (`create<Pascal>Dag`,
-      // `<Pascal>DagOpts`) — it must camelCase to a valid JS identifier, so
-      // the first segment cannot start with a digit (KEBAB_IDENT, the same
-      // rule the AuthoredDag schema enforces on `name` and node ids).
-      name = parseKebabIdent(rawName);
-      if (name === null) {
-        problems.push(
-          `name '${rawName}' must be kebab-case starting with a letter (lowercase, digits, single dashes — it becomes a JS identifier in the generated dag.ts, so a digit-leading name would not compile)`,
-        );
-      }
-    }
-  }
-
-  // `parseShape` is the single Shape producer (parse, don't validate) — the
-  // membership check narrows, so the success arm never needs an `as Shape`.
-  let parsedShape: Shape | null = null;
-  if (shape === undefined) {
-    problems.push(`missing --shape (one of: ${DAG_SHAPES.join(", ")})`);
-  } else {
-    parsedShape = parseShape(shape);
-    if (parsedShape === null) problems.push(`unknown --shape '${shape}' (one of: ${DAG_SHAPES.join(", ")})`);
-  }
+  const { target, shape, owner, root, llm, review, force, problems } = scanned;
+  const { team, name } = parseTeamAndName(target, problems);
+  const parsedShape = parseShapeFlag(shape, problems);
 
   // `--review` is a human-review gate (an aspect) — but the scaffold only knows
   // where to place it in a linear chain. For other shapes, gate a node by hand
@@ -300,14 +317,8 @@ const isDirNonEmpty = async (dir: string): Promise<boolean> => {
   }
 };
 
-/**
- * Scaffold a DAG. Writes the files and returns the structured outcome. Author
- * errors (a non-empty target dir without `--force`) and environment write
- * failures (ENOSPC/EACCES/EISDIR, …) both land in `{ ok: false, problems }` —
- * the bin prints stdout JSON, so a raw throw would break the machine-readable
- * contract (mirrors `runNewFrom`'s write-failed arm). A malformed template is
- * a framework bug, not an author error, so it still propagates.
- */
+type ScaffoldWrite = (rel: string, content: string) => Promise<void>;
+
 /**
  * THE one scaffold writer: write a file under `dir` and record its path
  * relative to `relDir`. Both scaffold paths (`runNew`, `writeAuthoredScaffold`)
@@ -317,7 +328,7 @@ const isDirNonEmpty = async (dir: string): Promise<boolean> => {
 const createScaffoldWriter = (
   dir: string,
   relDir: string,
-): { readonly written: string[]; readonly write: (rel: string, content: string) => Promise<void> } => {
+): { readonly written: string[]; readonly write: ScaffoldWrite } => {
   const written: string[] = [];
   return {
     written,
@@ -328,6 +339,106 @@ const createScaffoldWriter = (
   };
 };
 
+type ShapeScaffold = ReturnType<typeof buildScaffold>;
+
+// The emptiness probe is an environment surface too (EACCES/ENOTDIR from
+// readdir) — fold a rethrow into the `{ ok: false, problems }` envelope like
+// the write batch, so it never escapes the stdout-JSON contract. Resolves to
+// `null` when the target is safe to write.
+const refuseUnsafeTarget = async (dir: string): Promise<NewResult | null> => {
+  let dirNonEmpty: boolean;
+  try {
+    dirNonEmpty = await isDirNonEmpty(dir);
+  } catch (e) {
+    return {
+      ok: false,
+      problems: [`cannot verify ${dir} is safe to write: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`],
+    };
+  }
+  if (!dirNonEmpty) return null;
+  return {
+    ok: false,
+    problems: [`${dir} already exists and is not empty — pass --force to overwrite`],
+  };
+};
+
+// Write prompts/<name>.txt plus a synced registry.json as part of the same
+// scaffold write batch so `fugue prompts check` is green out of the box. A
+// freshly scaffolded prompt is always new → `freshRegistryEntry` (version
+// 1.0.0), so the registry is computed in-memory here rather than via a
+// separate `prompts sync` post-step. Computing it in-process (no post-step)
+// means a successful run never leaves a written .txt without a matching
+// registry entry. This is in-process ordering, NOT crash atomicity: a
+// mid-batch IO failure (ENOSPC/EACCES) still surfaces the real cause, but can
+// leave a partially-written scaffold dir behind. Entry shape and byte format
+// are single-sourced in `prompts.ts` (`freshRegistryEntry`/`serializeRegistry`
+// — the same functions `runPromptsSync` writes with).
+const writeScaffoldPrompt = async (
+  dir: string,
+  write: ScaffoldWrite,
+  prompt: PromptFile,
+): Promise<void> => {
+  await mkdir(join(dir, "prompts"), { recursive: true });
+  await write(join("prompts", `${prompt.name}.txt`), prompt.body);
+  const registry = { [prompt.name]: freshRegistryEntry(prompt.body) };
+  await write(join("prompts", "registry.json"), serializeRegistry(registry));
+};
+
+// `--force` owns the generated prompts/ dir — drop prompt artifacts a
+// previous scaffold wrote that this one does not, so regeneration is a
+// fixed point (`prompts check` stays green after a shape/--llm change).
+const reconcileForcedScaffold = async (dir: string, scaffold: ShapeScaffold): Promise<void> => {
+  // The `dag.authored.json` sidecar is tool-owned too (written only by the
+  // --from/compose path). A shape-mode scaffold never writes one, so a
+  // leftover from a prior --from scaffold would silently resurrect the OLD
+  // DAG on a later `fugue new --from dag.authored.json --force` — remove
+  // it for the same fixed-point reason stale prompts are reconciled.
+  // `force: true` makes a missing sidecar a no-op (ENOENT ignored).
+  await rm(join(dir, "dag.authored.json"), { force: true });
+  await reconcilePromptsDir(dir, new Set(scaffold.prompt ? [`${scaffold.prompt.name}.txt`] : []));
+};
+
+// The mkdir + write batch. Returns the written paths (relative to the
+// scaffold's `relDir`); a throw is an environment failure the caller folds.
+const writeShapeScaffold = async (
+  options: NewOptions,
+  ctx: TemplateCtx,
+  scaffold: ShapeScaffold,
+  dir: string,
+  relDir: string,
+): Promise<readonly string[]> => {
+  const { written, write } = createScaffoldWriter(dir, relDir);
+  await mkdir(dir, { recursive: true });
+
+  await write("dag.ts", scaffold.dagTs);
+  await write("fugue.yaml", fugueYaml(ctx, options.owner));
+  await write("README.md", readme(ctx, options.shape));
+
+  if (scaffold.prompt) await writeScaffoldPrompt(dir, write, scaffold.prompt);
+  if (options.force) await reconcileForcedScaffold(dir, scaffold);
+  return written;
+};
+
+const shapeNextSteps = (relDir: string, hasPrompt: boolean): readonly string[] => {
+  const fugueBin = "node_modules/@fuguejs/framework/bin/fugue.ts";
+  return [
+    `Fill in the placeholder schemas, fetch, and transforms in ${join(relDir, "dag.ts")}`,
+    `bun ${fugueBin} lint ${join(relDir, "dag.ts")}`,
+    `bun ${fugueBin} describe ${join(relDir, "dag.ts")}`,
+    ...(hasPrompt ? [`bun ${fugueBin} prompts check ${relDir}`] : []),
+    "bun test",
+    "Add this DAG's row to the repo README table",
+  ];
+};
+
+/**
+ * Scaffold a DAG. Writes the files and returns the structured outcome. Author
+ * errors (a non-empty target dir without `--force`) and environment write
+ * failures (ENOSPC/EACCES/EISDIR, …) both land in `{ ok: false, problems }` —
+ * the bin prints stdout JSON, so a raw throw would break the machine-readable
+ * contract (mirrors `runNewFrom`'s write-failed arm). A malformed template is
+ * a framework bug, not an author error, so it still propagates.
+ */
 export const runNew = async (options: NewOptions): Promise<NewResult> => {
   const cwd = process.cwd();
   const root = options.root ?? cwd;
@@ -335,25 +446,9 @@ export const runNew = async (options: NewOptions): Promise<NewResult> => {
   const relDir = join("dags", options.team, options.name);
   const dir = join(absRoot, relDir);
 
-  // The emptiness probe is an environment surface too (EACCES/ENOTDIR from
-  // readdir) — fold a rethrow into the `{ ok: false, problems }` envelope like
-  // the write batch below, so it never escapes the stdout-JSON contract.
   if (!options.force) {
-    let dirNonEmpty: boolean;
-    try {
-      dirNonEmpty = await isDirNonEmpty(dir);
-    } catch (e) {
-      return {
-        ok: false,
-        problems: [`cannot verify ${dir} is safe to write: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`],
-      };
-    }
-    if (dirNonEmpty) {
-      return {
-        ok: false,
-        problems: [`${dir} already exists and is not empty — pass --force to overwrite`],
-      };
-    }
+    const refusal = await refuseUnsafeTarget(dir);
+    if (refusal !== null) return refusal;
   }
 
   const ctx: TemplateCtx = {
@@ -364,66 +459,19 @@ export const runNew = async (options: NewOptions): Promise<NewResult> => {
   };
   const scaffold = buildScaffold(options.shape, ctx);
 
-  const { written, write } = createScaffoldWriter(dir, relDir);
-
   // The mkdir + write batch is an environment surface (ENOSPC/EACCES/EISDIR,
   // …) — fold a throw into the `{ ok: false, problems }` envelope (mirrors
   // `runNewFrom`) rather than crashing past the stdout-JSON contract, keeping
   // the stack so the environment is debuggable from the outcome.
+  let written: readonly string[];
   try {
-    await mkdir(dir, { recursive: true });
-
-    await write("dag.ts", scaffold.dagTs);
-    await write("fugue.yaml", fugueYaml(ctx, options.owner));
-    await write("README.md", readme(ctx, options.shape));
-
-    if (scaffold.prompt) {
-      await mkdir(join(dir, "prompts"), { recursive: true });
-      await write(join("prompts", `${scaffold.prompt.name}.txt`), scaffold.prompt.body);
-      // Write prompts/registry.json as part of the same scaffold write batch so
-      // `fugue prompts check` is green out of the box. A freshly scaffolded prompt
-      // is always new → `freshRegistryEntry` (version 1.0.0), so the registry is
-      // computed in-memory here rather than via a separate `prompts sync`
-      // post-step. Computing it in-process (no post-step) means a successful run
-      // never leaves a written .txt without a matching registry entry. This is
-      // in-process ordering, NOT crash atomicity: a mid-batch IO failure
-      // (ENOSPC/EACCES) still surfaces the real cause, but can leave a
-      // partially-written scaffold dir behind. Entry shape and byte format are
-      // single-sourced in `prompts.ts` (`freshRegistryEntry`/`serializeRegistry` —
-      // the same functions `runPromptsSync` writes with).
-      const registry = { [scaffold.prompt.name]: freshRegistryEntry(scaffold.prompt.body) };
-      await write(join("prompts", "registry.json"), serializeRegistry(registry));
-    }
-
-    // `--force` owns the generated prompts/ dir — drop prompt artifacts a
-    // previous scaffold wrote that this one does not, so regeneration is a
-    // fixed point (`prompts check` stays green after a shape/--llm change).
-    if (options.force) {
-      // The `dag.authored.json` sidecar is tool-owned too (written only by the
-      // --from/compose path). A shape-mode scaffold never writes one, so a
-      // leftover from a prior --from scaffold would silently resurrect the OLD
-      // DAG on a later `fugue new --from dag.authored.json --force` — remove
-      // it for the same fixed-point reason stale prompts are reconciled.
-      // `force: true` makes a missing sidecar a no-op (ENOENT ignored).
-      await rm(join(dir, "dag.authored.json"), { force: true });
-      await reconcilePromptsDir(dir, new Set(scaffold.prompt ? [`${scaffold.prompt.name}.txt`] : []));
-    }
+    written = await writeShapeScaffold(options, ctx, scaffold, dir, relDir);
   } catch (e) {
     return {
       ok: false,
       problems: [`write failed: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`],
     };
   }
-
-  const fugueBin = "node_modules/@fuguejs/framework/bin/fugue.ts";
-  const nextSteps = [
-    `Fill in the placeholder schemas, fetch, and transforms in ${join(relDir, "dag.ts")}`,
-    `bun ${fugueBin} lint ${join(relDir, "dag.ts")}`,
-    `bun ${fugueBin} describe ${join(relDir, "dag.ts")}`,
-    ...(scaffold.prompt ? [`bun ${fugueBin} prompts check ${relDir}`] : []),
-    "bun test",
-    "Add this DAG's row to the repo README table",
-  ];
 
   return {
     ok: true,
@@ -434,7 +482,7 @@ export const runNew = async (options: NewOptions): Promise<NewResult> => {
     llm: options.llm,
     review: options.review,
     files: written,
-    nextSteps,
+    nextSteps: shapeNextSteps(relDir, scaffold.prompt !== undefined),
     advisories: [],
     // Template scaffolds don't run the proving gauntlet, so there are no
     // describe-pass warnings to carry — always the empty array here.

@@ -31,15 +31,17 @@ describe("runStateMachine — appendEvent dedup across simulated crash", () => {
    * recent appended event and exposes a `simulateCrashAfterAppend` toggle so
    * the test can interrupt between `appendEvent` and `updateData`.
    */
-  function createCrashingJob(initial: { state: S; context: C }): JobLike<S, unknown, C> & {
+  type CrashingJob = JobLike<S, unknown, C> & {
     events: Array<{ event: unknown; dedupKey?: string }>;
     snapshot: { state: S; context: C };
     simulateCrashAfterAppend: boolean;
-  } {
+  };
+
+  function createCrashingJob(initial: { state: S; context: C }): CrashingJob {
     let lastDedupKey: string | undefined;
     const events: Array<{ event: unknown; dedupKey?: string }> = [];
     let snapshot = { ...initial };
-    const handle: any = {
+    const handle: CrashingJob = {
       events,
       get snapshot() {
         return snapshot;

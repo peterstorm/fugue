@@ -127,6 +127,17 @@ interface StoredNodeState {
 }
 
 /**
+ * Narrow a parsed node record to its pass-through `output`. `output` is the one
+ * field the framework's record grammar does not constrain, so it is read off the
+ * record the grammar has already proven to be a JSON object.
+ */
+const isJsonObject = (value: unknown): value is Readonly<Record<string, unknown>> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const nodeOutputOf = (record: unknown): unknown =>
+  isJsonObject(record) ? record.output : undefined;
+
+/**
  * Decode ONE stored node entry — pure, and total over hostile bytes.
  *
  * Separate from the load loop because it is the only part of that loop with no
@@ -137,12 +148,12 @@ interface StoredNodeState {
  */
 const decodeNodeEntry = (raw: string): Result<NodeState, string> => {
   try {
-    const stored = JSON.parse(raw) as StoredNodeState;
+    const stored: unknown = JSON.parse(raw);
     const parsed = parseNodeStateRecord(stored);
     if (!parsed.ok) return err(parsed.error);
     return ok({
       nodeId: parsed.value.nodeId,
-      output: stored.output,
+      output: nodeOutputOf(stored),
       completedAt: parsed.value.completedAt,
     });
   } catch (error) {
@@ -249,7 +260,8 @@ export const createNamespacedCheckpointer = (
       let meta: RunMeta;
       let createdAt: Date;
       try {
-        const parsed = parseRunMetaRecord(JSON.parse(rawMeta.value) as StoredMeta);
+        const rawRecord: unknown = JSON.parse(rawMeta.value);
+        const parsed = parseRunMetaRecord(rawRecord);
         if (!parsed.ok) throw new Error(parsed.error);
         ({ meta, createdAt } = parsed.value);
       } catch (e) {

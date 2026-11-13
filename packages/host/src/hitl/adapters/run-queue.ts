@@ -13,7 +13,7 @@
  */
 
 import { ok, err, safeErrorMessage, tryRunId } from "@fuguejs/framework";
-import type { Result, RunId, QueueBackend, WorkerHandle } from "@fuguejs/framework";
+import type { Result, RunId, QueueBackend, QueueHandle, WorkerHandle } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
 import { formatHostError, internalInvariantViolated } from "../../domain/host-error.js";
 import { tenantId } from "../../domain/tenant.js";
@@ -129,17 +129,30 @@ export const hitlQueueName = (tenant: TenantId, configured?: string): string => 
   return name;
 };
 
-export const createRunQueue = (deps: RunQueueDeps): RunQueueHandle => {
-  const { backend, tenant, lockTtlSec, logger } = deps;
-  const name = hitlQueueName(tenant, deps.queueName);
-  const contentionDelayMs = deps.lockContentionDelayMs ?? 1000;
-  const maxAttempts = deps.maxAttempts ?? 5;
-  const newLockToken = deps.newLockToken ?? (() => crypto.randomUUID());
-  // `defaultAttempts` makes a worker that THROWS on a transient infra failure
-  // actually retried (the outer crash-fallback loop) instead of acked once.
-  const handle = backend.createQueue<RunId, { readonly tenant: TenantId }>(name, { defaultAttempts: maxAttempts });
+type ProcessRunFn = (lease: RunLease) => Promise<Result<void, HostError>>;
+type LeaseFailure = HostError | "ownership-lost";
+type Enqueue = (runId: RunId, opts?: { delayMs?: number }) => Promise<Result<void, HostError>>;
 
-  const enqueue = async (runId: RunId, opts?: { delayMs?: number }): Promise<Result<void, HostError>> => {
+/** The resolved collaborators one queue's wakeup processing runs against. */
+interface WakeupContext {
+  readonly redis: HitlRedisPort;
+  readonly leaseIssuer: RunLeaseIssuer;
+  readonly tenant: TenantId;
+  readonly lockTtlSec: number;
+  readonly contentionDelayMs: number;
+  readonly newLockToken: () => string;
+  readonly enqueue: Enqueue;
+  readonly logger: LogPort | undefined;
+}
+
+const leaseFailureDetail = (failure: LeaseFailure): string =>
+  failure === "ownership-lost" ? failure : failure.kind;
+
+const createEnqueue = (
+  handle: QueueHandle<RunId, { readonly tenant: TenantId }>,
+  tenant: TenantId,
+): Enqueue =>
+  async (runId, opts) => {
     try {
       // No `jobId` → a fresh job every time → resume re-enqueue is never
       // rejected as a duplicate.
@@ -154,124 +167,187 @@ export const createRunQueue = (deps: RunQueueDeps): RunQueueHandle => {
     }
   };
 
+/**
+ * Single-flight: only one worker processes a given run at a time. Every lease
+ * carries a fresh owner token; release compares that token atomically so an
+ * expired holder cannot delete a successor's lease. Returns the owner token, or
+ * `undefined` after deferring the wakeup because another worker holds the lock.
+ */
+const acquireRunLockOrDefer = async (ctx: WakeupContext, runId: RunId): Promise<string | undefined> => {
+  const lockToken = ctx.newLockToken();
+  const acquired = await ctx.redis.setNx(lockKey(ctx.tenant, runId), lockToken, { expiresInSec: ctx.lockTtlSec });
+  if (!acquired.ok) {
+    // The lock store is unavailable — throw so the queue retries this
+    // wakeup rather than silently acking and dropping it.
+    throw new Error(`hitl: lock acquire failed for ${runId}: ${acquired.error.kind}`, { cause: acquired.error });
+  }
+  if (acquired.value) return lockToken;
+
+  // Another worker holds the lock (mid-slice for this run). Do NOT drop
+  // this wakeup — the decision that triggered it is durable in Redis but
+  // the holding worker may have already read "no decision" and parked,
+  // so re-enqueue (deferred) to guarantee the decision is acted on once
+  // the lock frees. A bare drop here is the lost-wakeup that strands a
+  // decided run.
+  logWithoutThrowing(ctx.logger, "warn", "hitl: run already in flight — deferring wakeup", { runId });
+  const requeued = await ctx.enqueue(runId, { delayMs: ctx.contentionDelayMs });
+  if (!requeued.ok) {
+    throw new Error(`hitl: failed to defer wakeup for ${runId}: ${requeued.error.kind}`, { cause: requeued.error });
+  }
+  return undefined;
+};
+
+interface LeaseRenewal {
+  readonly lease: RunLease;
+  /** Wait for every queued renewal to settle. */
+  readonly drain: () => Promise<void>;
+  readonly failure: () => LeaseFailure | undefined;
+  readonly stop: () => void;
+}
+
+/**
+ * A lock is a lease, not a permanent mutex. Renew before half its TTL
+ * elapses, always with the owner token, and fail closed if ownership
+ * cannot be verified by the construction-validated lease port.
+ */
+const startLeaseRenewal = (ctx: WakeupContext, runId: RunId, lockToken: string): LeaseRenewal => {
+  const renewEveryMs = Math.max(1, Math.floor(ctx.lockTtlSec * 500));
+  const leaseController = new AbortController();
+  const lease = ctx.leaseIssuer.issue(runId, lockToken, leaseController.signal);
+  let renewalFailure: LeaseFailure | undefined;
+  let renewalTail: Promise<void> = Promise.resolve();
+  const failLease = (failure: LeaseFailure): void => {
+    if (renewalFailure !== undefined) return;
+    renewalFailure = failure;
+    logWithoutThrowing(ctx.logger, "error", "hitl: lock renewal failed — aborting run slice for retry", {
+      runId,
+      error: leaseFailureDetail(failure),
+    });
+    leaseController.abort(failure);
+  };
+  const renewLease = (): void => {
+    renewalTail = renewalTail.then(async () => {
+      if (renewalFailure !== undefined) return;
+      try {
+        const renewed = await ctx.redis.compareAndExpire(lockKey(ctx.tenant, runId), lockToken, ctx.lockTtlSec);
+        if (!renewed.ok) failLease(renewed.error);
+        else if (!renewed.value) failLease("ownership-lost");
+      } catch (error) {
+        failLease({ kind: "redis-unavailable", operation: `HITL lease renewal: ${safeErrorMessage(error)}` });
+      }
+    });
+  };
+  const renewalTimer = setInterval(renewLease, renewEveryMs);
+  return {
+    lease,
+    drain: () => renewalTail,
+    failure: () => renewalFailure,
+    stop: () => clearInterval(renewalTimer),
+  };
+};
+
+const releaseRunLock = async (ctx: WakeupContext, runId: RunId, lockToken: string): Promise<void> => {
+  const released = await ctx.redis.compareAndDelete(lockKey(ctx.tenant, runId), lockToken);
+  if (!released.ok) {
+    logWithoutThrowing(ctx.logger, "warn", "hitl: failed to release owned lock", {
+      runId,
+      error: released.error.kind,
+    });
+  } else if (!released.value) {
+    // `ok` only says the compare-and-delete RAN; `false` says it did not
+    // MATCH — this worker no longer owned the lease. That means the TTL
+    // elapsed (a stalled event loop past `lockTtlSec`) and a successor
+    // claimed the run while we still believed we held it. Correctness is
+    // protected elsewhere by lease-fenced writes in run-store.ts, so this
+    // is not a failure to act on — but every other stale-lease path in
+    // this file logs, and without this line a lost lease is byte-for-byte
+    // indistinguishable from a clean release in the log, removing the one
+    // trail an operator has when investigating duplicated node side effects.
+    logWithoutThrowing(ctx.logger, "warn", "hitl: lock lease was lost to a successor before release", {
+      runId,
+    });
+  }
+};
+
+/** Run one slice under the held lock; always stop renewing and release the lock. */
+const processRunUnderLock = async (
+  ctx: WakeupContext,
+  runId: RunId,
+  lockToken: string,
+  processRun: ProcessRunFn,
+): Promise<void> => {
+  const renewal = startLeaseRenewal(ctx, runId, lockToken);
+  try {
+    const result = await processRun(renewal.lease);
+    await renewal.drain();
+    const renewalFailure = renewal.failure();
+    if (renewalFailure !== undefined) {
+      throw new Error(`hitl: lock renewal failed for ${runId}: ${leaseFailureDetail(renewalFailure)}`);
+    }
+    if (!result.ok) {
+      // A host-infra failure BEFORE the run settled (e.g. a transient
+      // run-store read). Throw so the queue retries; the `finally` below
+      // releases the lock first. (A run that settled `failed` returns
+      // `ok` from processRun — it is durably recorded, not retried.)
+      logWithoutThrowing(ctx.logger, "error", "hitl: processRun returned error — retrying", {
+        runId,
+        error: result.error.kind,
+      });
+      throw new Error(`hitl: processRun failed for ${runId}: ${result.error.kind}`, { cause: result.error });
+    }
+  } finally {
+    renewal.stop();
+    await renewal.drain();
+    await releaseRunLock(ctx, runId, lockToken);
+  }
+};
+
+const processWakeup = async (
+  ctx: WakeupContext,
+  data: unknown,
+  processRun: ProcessRunFn,
+): Promise<void> => {
+  const trigger = parseRunTrigger(data, ctx.tenant);
+  if (!trigger.ok) {
+    throw new Error(`hitl: rejected durable wakeup: ${formatHostError(trigger.error)}`, {
+      cause: trigger.error,
+    });
+  }
+  const runId = trigger.value.state;
+  const lockToken = await acquireRunLockOrDefer(ctx, runId);
+  if (lockToken === undefined) return;
+  await processRunUnderLock(ctx, runId, lockToken, processRun);
+};
+
+export const createRunQueue = (deps: RunQueueDeps): RunQueueHandle => {
+  const { backend, tenant, lockTtlSec, logger } = deps;
+  const name = hitlQueueName(tenant, deps.queueName);
+  // `defaultAttempts` makes a worker that THROWS on a transient infra failure
+  // actually retried (the outer crash-fallback loop) instead of acked once.
+  const handle = backend.createQueue<RunId, { readonly tenant: TenantId }>(name, {
+    defaultAttempts: deps.maxAttempts ?? 5,
+  });
+  const enqueue = createEnqueue(handle, tenant);
+  const ctx: WakeupContext = {
+    redis: deps.redis,
+    leaseIssuer: deps.leaseIssuer,
+    tenant,
+    lockTtlSec,
+    contentionDelayMs: deps.lockContentionDelayMs ?? 1000,
+    newLockToken: deps.newLockToken ?? (() => crypto.randomUUID()),
+    enqueue,
+    logger,
+  };
+
   const queue: RunQueuePort = { enqueue: (runId) => enqueue(runId) };
 
   const startWorker = (
-    processRun: (lease: RunLease) => Promise<Result<void, HostError>>,
+    processRun: ProcessRunFn,
     opts?: { concurrency?: number },
   ): WorkerHandle =>
     backend.createWorker<RunId, { readonly tenant: TenantId }>(
       name,
-      async (job) => {
-        const trigger = parseRunTrigger(job.data, tenant);
-        if (!trigger.ok) {
-          throw new Error(`hitl: rejected durable wakeup: ${formatHostError(trigger.error)}`, {
-            cause: trigger.error,
-          });
-        }
-        const redis = deps.redis;
-        const runId = trigger.value.state;
-
-        // Single-flight: only one worker processes a given run at a time. Every
-        // lease carries a fresh owner token; release compares that token
-        // atomically so an expired holder cannot delete a successor's lease.
-        const lockToken = newLockToken();
-        const acquired = await redis.setNx(lockKey(tenant, runId), lockToken, { expiresInSec: lockTtlSec });
-        if (!acquired.ok) {
-          // The lock store is unavailable — throw so the queue retries this
-          // wakeup rather than silently acking and dropping it.
-          throw new Error(`hitl: lock acquire failed for ${runId}: ${acquired.error.kind}`, { cause: acquired.error });
-        }
-        if (!acquired.value) {
-          // Another worker holds the lock (mid-slice for this run). Do NOT drop
-          // this wakeup — the decision that triggered it is durable in Redis but
-          // the holding worker may have already read "no decision" and parked,
-          // so re-enqueue (deferred) to guarantee the decision is acted on once
-          // the lock frees. A bare drop here is the lost-wakeup that strands a
-          // decided run.
-          logWithoutThrowing(logger, "warn", "hitl: run already in flight — deferring wakeup", { runId });
-          const requeued = await enqueue(runId, { delayMs: contentionDelayMs });
-          if (!requeued.ok) {
-            throw new Error(`hitl: failed to defer wakeup for ${runId}: ${requeued.error.kind}`, { cause: requeued.error });
-          }
-          return;
-        }
-
-        // A lock is a lease, not a permanent mutex. Renew before half its TTL
-        // elapses, always with the owner token, and fail closed if ownership
-        // cannot be verified by the construction-validated lease port.
-        const renewEveryMs = Math.max(1, Math.floor(lockTtlSec * 500));
-        const leaseController = new AbortController();
-        const lease = deps.leaseIssuer.issue(runId, lockToken, leaseController.signal);
-        let renewalFailure: HostError | "ownership-lost" | undefined;
-        let renewalTail: Promise<void> = Promise.resolve();
-        const failLease = (failure: HostError | "ownership-lost"): void => {
-          if (renewalFailure !== undefined) return;
-          renewalFailure = failure;
-          const detail = failure === "ownership-lost" ? failure : failure.kind;
-          logWithoutThrowing(logger, "error", "hitl: lock renewal failed — aborting run slice for retry", {
-            runId,
-            error: detail,
-          });
-          leaseController.abort(failure);
-        };
-        const renewLease = (): void => {
-          renewalTail = renewalTail.then(async () => {
-            if (renewalFailure !== undefined) return;
-            try {
-              const renewed = await redis.compareAndExpire(lockKey(tenant, runId), lockToken, lockTtlSec);
-              if (!renewed.ok) failLease(renewed.error);
-              else if (!renewed.value) failLease("ownership-lost");
-            } catch (error) {
-              failLease({ kind: "redis-unavailable", operation: `HITL lease renewal: ${safeErrorMessage(error)}` });
-            }
-          });
-        };
-        const renewalTimer = setInterval(renewLease, renewEveryMs);
-
-        try {
-          const result = await processRun(lease);
-          await renewalTail;
-          if (renewalFailure !== undefined) {
-            const detail = renewalFailure === "ownership-lost" ? renewalFailure : renewalFailure.kind;
-            throw new Error(`hitl: lock renewal failed for ${runId}: ${detail}`);
-          }
-          if (!result.ok) {
-            // A host-infra failure BEFORE the run settled (e.g. a transient
-            // run-store read). Throw so the queue retries; the `finally` below
-            // releases the lock first. (A run that settled `failed` returns
-            // `ok` from processRun — it is durably recorded, not retried.)
-            logWithoutThrowing(logger, "error", "hitl: processRun returned error — retrying", {
-              runId,
-              error: result.error.kind,
-            });
-            throw new Error(`hitl: processRun failed for ${runId}: ${result.error.kind}`, { cause: result.error });
-          }
-        } finally {
-          clearInterval(renewalTimer);
-          await renewalTail;
-          const released = await redis.compareAndDelete(lockKey(tenant, runId), lockToken);
-          if (!released.ok) {
-            logWithoutThrowing(logger, "warn", "hitl: failed to release owned lock", {
-              runId,
-              error: released.error.kind,
-            });
-          } else if (!released.value) {
-            // `ok` only says the compare-and-delete RAN; `false` says it did not
-            // MATCH — this worker no longer owned the lease. That means the TTL
-            // elapsed (a stalled event loop past `lockTtlSec`) and a successor
-            // claimed the run while we still believed we held it. Correctness is
-            // protected elsewhere by lease-fenced writes in run-store.ts, so this
-            // is not a failure to act on — but every other stale-lease path in
-            // this file logs, and without this line a lost lease is byte-for-byte
-            // indistinguishable from a clean release in the log, removing the one
-            // trail an operator has when investigating duplicated node side effects.
-            logWithoutThrowing(logger, "warn", "hitl: lock lease was lost to a successor before release", {
-              runId,
-            });
-          }
-        }
-      },
+      (job) => processWakeup(ctx, job.data, processRun),
       { concurrency: opts?.concurrency ?? 4 },
     );
 

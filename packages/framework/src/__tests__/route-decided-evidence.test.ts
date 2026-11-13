@@ -27,6 +27,10 @@ import { defineDag } from "../executor/define-dag.js";
 import { N } from "./_id-helpers.js";
 import { testNodeContext } from "./_context-factories.js";
 
+// Predicate over a router output: true iff it is an object whose `kind` is `kind`.
+const kindIs = (kind: string) => (v: unknown): boolean =>
+  typeof v === "object" && v !== null && "kind" in v && v.kind === kind;
+
 const makeNode = (
   id: string,
   overrides: Partial<NodeDef<unknown, unknown>> = {},
@@ -68,7 +72,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
       },
       edges: [
         { from: DAG_INPUT, to: "router" },
-        { from: "router", to: "yes", when: { label: "is-yes", version: 1, check: (v: any) => v?.kind === "yes" } as any },
+        { from: "router", to: "yes", when: { label: "is-yes", version: 1, check: kindIs("yes") } as any },
         { from: "router", to: "no", kind: "default" },
       ],
       defaultRetryLimit: 0,
@@ -100,7 +104,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
       },
       edges: [
         { from: DAG_INPUT, to: "router" },
-        { from: "router", to: "yes", when: { label: "is-yes", version: 1, check: (v: any) => v?.kind === "yes" } as any },
+        { from: "router", to: "yes", when: { label: "is-yes", version: 1, check: kindIs("yes") } as any },
         { from: "router", to: "no", kind: "default" },
       ],
       defaultRetryLimit: 0,
@@ -129,8 +133,8 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
       },
       edges: [
         { from: DAG_INPUT, to: "router" },
-        { from: "router", to: "a", when: { label: "kind-is-a", version: 1, check: (v: any) => v?.kind === "a" } as any },
-        { from: "router", to: "b", when: { label: "kind-is-b", version: 1, check: (v: any) => v?.kind === "b" } as any },
+        { from: "router", to: "a", when: { label: "kind-is-a", version: 1, check: kindIs("a") } as any },
+        { from: "router", to: "b", when: { label: "kind-is-b", version: 1, check: kindIs("b") } as any },
         { from: "router", to: "c", kind: "default" },
         { from: "a", to: "c" },
         { from: "b", to: "c" },
@@ -164,7 +168,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
       },
       edges: [
         { from: DAG_INPUT, to: "router" },
-        { from: "router", to: "a", when: { label: "kind-is-x", version: 1, check: (v: any) => v?.kind === "x" } as any },
+        { from: "router", to: "a", when: { label: "kind-is-x", version: 1, check: kindIs("x") } as any },
         { from: "router", to: "fallback", kind: "default" },
       ],
       defaultRetryLimit: 0,
@@ -199,7 +203,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
           when: {
             label: "high-conf-only",
             version: 1,
-            check: (v: any) => v?.kind === "yes",
+            check: kindIs("yes"),
             minConfidence: "high",
           } as any,
         },
@@ -239,7 +243,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
           when: {
             label: "medium-conf-ok",
             version: 1,
-            check: (v: any) => v?.kind === "yes",
+            check: kindIs("yes"),
             minConfidence: "medium",
           } as any,
         },
@@ -309,7 +313,7 @@ describe("RouteDecidedEvent evidence (Phase 2)", () => {
       },
       edges: [
         { from: DAG_INPUT, to: "router" },
-        { from: "router", to: "a", when: { label: "check", version: 1, check: (v: any) => v?.kind === "yes" } as any },
+        { from: "router", to: "a", when: { label: "check", version: 1, check: kindIs("yes") } as any },
         { from: "router", to: "fallback", kind: "default" },
       ],
       defaultRetryLimit: 0,

@@ -444,6 +444,58 @@ export const deepJsonEqual = (a: unknown, b: unknown): boolean => {
   return true;
 };
 
+const deserializeDate = (raw: string): Date => {
+  const d = new Date(raw);
+  if (isNaN(d.getTime())) {
+    throw new Error(`deserializeValue: invalid date string "${raw}"`);
+  }
+  return d;
+};
+
+const deserializeMap = (entries: Array<[unknown, unknown]>, next: number): Map<unknown, unknown> => {
+  const map = new Map<unknown, unknown>();
+  for (const [k, v] of entries) {
+    map.set(deserializeAt(k, next), deserializeAt(v, next));
+  }
+  return map;
+};
+
+const deserializeSet = (items: unknown[], next: number): Set<unknown> => {
+  const set = new Set<unknown>();
+  for (const item of items) {
+    set.add(deserializeAt(item, next));
+  }
+  return set;
+};
+
+// Plain object — filter prototype pollution vectors
+const deserializePlainObject = (obj: Record<string, unknown>, next: number): Record<string, unknown> => {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (POLLUTION_KEYS.has(k)) continue;
+    out[k] = deserializeAt(v, next);
+  }
+  return out;
+};
+
+// An object is a tagged Map/Set/Date/undefined when it carries a well-formed
+// serializer tag, else a plain object. The container costs the hop either way.
+const deserializeObjectAt = (obj: Record<string, unknown>, depth: number): unknown => {
+  // Same counting as `validateSerializedValueGrammar`: the container costs
+  // the hop, and a tag object is a container like any other.
+  const next = descend("deserializeValue", depth);
+
+  if (UNDEFINED_TAG in obj && obj[UNDEFINED_TAG] === true) return undefined;
+  if (DATE_TAG in obj && typeof obj[DATE_TAG] === "string") return deserializeDate(obj[DATE_TAG]);
+  if (MAP_TAG in obj && Array.isArray(obj[MAP_TAG])) {
+    return deserializeMap(obj[MAP_TAG] as Array<[unknown, unknown]>, next);
+  }
+  if (SET_TAG in obj && Array.isArray(obj[SET_TAG])) {
+    return deserializeSet(obj[SET_TAG] as unknown[], next);
+  }
+  return deserializePlainObject(obj, next);
+};
+
 const deserializeAt = (value: unknown, depth: number): unknown => {
   if (value === null || value === undefined) return value;
 
@@ -452,52 +504,7 @@ const deserializeAt = (value: unknown, depth: number): unknown => {
     return value.map((item) => deserializeAt(item, next));
   }
 
-  if (typeof value === "object") {
-    // Same counting as `validateSerializedValueGrammar`: the container costs
-    // the hop, and a tag object is a container like any other.
-    const next = descend("deserializeValue", depth);
-    const obj = value as Record<string, unknown>;
-
-    // Detect serialized undefined
-    if (UNDEFINED_TAG in obj && obj[UNDEFINED_TAG] === true) {
-      return undefined;
-    }
-
-    // Detect serialized Date
-    if (DATE_TAG in obj && typeof obj[DATE_TAG] === "string") {
-      const d = new Date(obj[DATE_TAG] as string);
-      if (isNaN(d.getTime())) {
-        throw new Error(`deserializeValue: invalid date string "${obj[DATE_TAG]}"`);
-      }
-      return d;
-    }
-
-    // Detect serialized Map
-    if (MAP_TAG in obj && Array.isArray(obj[MAP_TAG])) {
-      const map = new Map<unknown, unknown>();
-      for (const [k, v] of obj[MAP_TAG] as Array<[unknown, unknown]>) {
-        map.set(deserializeAt(k, next), deserializeAt(v, next));
-      }
-      return map;
-    }
-
-    // Detect serialized Set
-    if (SET_TAG in obj && Array.isArray(obj[SET_TAG])) {
-      const set = new Set<unknown>();
-      for (const item of obj[SET_TAG] as unknown[]) {
-        set.add(deserializeAt(item, next));
-      }
-      return set;
-    }
-
-    // Plain object — filter prototype pollution vectors
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(obj)) {
-      if (POLLUTION_KEYS.has(k)) continue;
-      out[k] = deserializeAt(v, next);
-    }
-    return out;
-  }
+  if (typeof value === "object") return deserializeObjectAt(value as Record<string, unknown>, depth);
 
   return value;
 };
