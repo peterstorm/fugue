@@ -1,16 +1,12 @@
 {
   "exclude": [
     {
-      "path": ".venv/",
-      "reason": "python virtualenv for the eval/bench harness; site-packages hold third-party JavaScript (matplotlib, etc.) that no project rule governs"
-    },
-    {
       "path": "packages/framework/docs/examples/",
-      "reason": "documentation samples shipped to readers verbatim — they import `@fuguejs/host/contract` on purpose to show the host wiring, and are compiled by the docs check rather than by a package tsconfig"
+      "reason": "documentation samples shipped to readers verbatim \u2014 they import `@fuguejs/host/contract` on purpose to show the host wiring, and are compiled by the docs check rather than by a package tsconfig"
     },
     {
       "path": "packages/framework/src/__tests__/boundary-imports.test.ts",
-      "reason": "its fixtures ARE import statements written as strings — the boundary checker's own corpus, unreadable by a text-based import extractor"
+      "reason": "its fixtures ARE import statements written as strings \u2014 the boundary checker's own corpus, unreadable by a text-based import extractor"
     },
     {
       "path": "packages/framework/src/__tests__/cli/fixtures/",
@@ -556,7 +552,7 @@
     },
     {
       "module": "packages/examples/",
-      "description": "Runnable example DAGs: the public framework surface, the document-source port, and the host's registration contract — never host internals.",
+      "description": "Runnable example DAGs: the public framework surface, the document-source port, and the host's registration contract \u2014 never host internals.",
       "allow": [
         "./",
         "packages/examples/src/",
@@ -600,11 +596,11 @@
   "impureModules": [
     {
       "path": "packages/framework/src/types/clock.ts",
-      "reason": "systemClock — the one sanctioned wall-clock read in the framework; every other module in types/ is pure, and nodes read time only through the clock capability"
+      "reason": "systemClock \u2014 the one sanctioned wall-clock read in the framework; every other module in types/ is pure, and nodes read time only through the clock capability"
     },
     {
       "path": "packages/host/src/domain/tenant-header.ts",
-      "reason": "node:crypto's synchronous HMAC/timingSafeEqual primitives — pure computation over its inputs, but the purity rule's node: predicate cannot distinguish a primitive from I/O"
+      "reason": "node:crypto's synchronous HMAC/timingSafeEqual primitives \u2014 pure computation over its inputs, but the purity rule's node: predicate cannot distinguish a primitive from I/O"
     },
     {
       "path": "packages/host/src/domain/capability-manager.ts",

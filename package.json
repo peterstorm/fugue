@@ -27,7 +27,7 @@
   "devDependencies": {
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/sdk-node": "^0.215.0",
-    "@peterstorm/loom": "github:peterstorm/loom#f1493c034c47333da7a981d7316c842fffaa5ecd",
+    "@peterstorm/loom": "github:peterstorm/loom#4dc21389b6388d829467c32aaf8316bff4bb4fd2",
     "@types/bun": "1.4.1",
     "ts-pattern": "^5.9.0",
     "typescript": "^6.0.3",
