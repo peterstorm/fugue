@@ -191,7 +191,7 @@ const noopRelease = (): void => {};
  * atomic. `Date.now()` is acceptable here in the imperative shell (parity with
  * the lifecycle's `clock: () => Date.now()`).
  */
-const createAdmissionPort = (registry: TenantRegistryHandle, cell: AdmissionCell): AdmissionPort => ({
+const createAdmissionPort = (registry: TenantRegistryHandle, cell: AdmissionCell, logger: LogPort): AdmissionPort => ({
   admit: (tenant: Tenant): AdmissionOutcome => {
     // a. Fail closed while degraded / unknown (FR-022). No slot acquired.
     const resolved = registry.resolveForNewRun(tenant.id);
@@ -227,7 +227,10 @@ const createAdmissionPort = (registry: TenantRegistryHandle, cell: AdmissionCell
     }
     // admitTenant only returns tenant-over-quota (above) or, defensively, an
     // internal-invariant-violated if the non-binding inner global ever rejected
-    // (it cannot in practice). Map that residual to a 503 unavailable.
+    // (it cannot in practice). Map that residual to a 503 unavailable — and
+    // name the residual kind first, so the branch that "cannot in practice"
+    // is observable if it ever does.
+    logger.error("[supervisor] admission residual rejection", { kind: r.error.kind });
     return { decision: { kind: "unavailable" }, release: noopRelease };
   },
 });
@@ -740,7 +743,7 @@ const main = async () => {
   const registry = await hydrateRegistryOrFailClosed(redisBundle, logger, failClosed);
   const registryView = createRegistryView(registry);
   const admissionCell: AdmissionCell = { tenantConc: initTenantConcurrency() };
-  const admission = createAdmissionPort(registry, admissionCell);
+  const admission = createAdmissionPort(registry, admissionCell, logger);
   const { lifecycle, workerRegistry } = buildWorkerLifecycle(config, redisBundle, registry, logger);
   const lifecycleTimers = startLifecycleSweeps(config, lifecycle, logger);
   await readoptWorkersOrFailClosed(lifecycle, logger, failClosed);

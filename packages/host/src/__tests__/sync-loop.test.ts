@@ -290,4 +290,70 @@ describe("startSyncLoop", () => {
     await p1;
     handle.stop();
   });
+
+  // Deliberate ordering (see notifyCycleResult): every completion callback runs
+  // BEFORE the loop advances lastSha, so a throwing callback leaves the SHA at
+  // the commit it failed on and the next cycle re-runs that commit instead of
+  // silently skipping it.
+  describe("a throwing completion callback keeps the SHA so the cycle re-runs", () => {
+    it("a throwing onComplete ⇒ the next sync re-runs the SAME commit (onComplete twice, same sha)", async () => {
+      const completions: GitSha[] = [];
+      let calls = 0;
+      const handle = startSyncLoop(
+        fakeGit({ currentSha: async () => ok(sha2) }),
+        fakeLoader(),
+        config,
+        noopLogger,
+        () => {},
+        (_registry, sha) => {
+          completions.push(sha);
+          calls++;
+          if (calls === 1) throw new Error("onComplete boom");
+        },
+        () => {},
+        () => {},
+        sha1,
+      );
+
+      // First sync: onComplete throws — surfaced as the unexpected-throw error,
+      // and lastSha stays at sha1.
+      const first = await handle.triggerSync();
+      expect(first.kind).toBe("error");
+      // Second sync: the SAME commit is re-run and completes.
+      const second = await handle.triggerSync();
+      expect(second.kind).toBe("updated");
+      handle.stop();
+
+      expect(completions).toEqual([sha2, sha2]);
+    });
+
+    it("a throwing onNoChange ⇒ the no-change path re-runs (onNoChange twice, same sha)", async () => {
+      const noChanges: GitSha[] = [];
+      let calls = 0;
+      const handle = startSyncLoop(
+        fakeGit({ currentSha: async () => ok(sha2) }),
+        fakeLoader(),
+        config,
+        noopLogger,
+        () => {},
+        () => {},
+        (sha) => {
+          noChanges.push(sha);
+          calls++;
+          if (calls === 1) throw new Error("onNoChange boom");
+        },
+        () => {},
+        sha1,
+      );
+
+      await handle.triggerSync(); // updated → lastSha advances to sha2
+      const second = await handle.triggerSync(); // no-change, onNoChange throws
+      expect(second.kind).toBe("error");
+      const third = await handle.triggerSync(); // no-change path re-runs
+      expect(third.kind).toBe("no-change");
+      handle.stop();
+
+      expect(noChanges).toEqual([sha2, sha2]);
+    });
+  });
 });

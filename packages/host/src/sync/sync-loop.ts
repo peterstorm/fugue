@@ -293,7 +293,9 @@ const notifyCycleResult = (
       return updated.newSha;
     })
     .with({ kind: "no-change" }, (unchanged) => {
-      // Transition syncing → ready (sync succeeded, nothing changed)
+      // Transition syncing → ready (sync succeeded, nothing changed).
+      // Call onNoChange BEFORE advancing SHA — if onNoChange throws, the SHA
+      // stays so the next cycle re-runs the cycle.
       callbacks.onNoChange(unchanged.currentSha);
       return unchanged.currentSha;
     })

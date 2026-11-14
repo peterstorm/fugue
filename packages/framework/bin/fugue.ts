@@ -77,7 +77,11 @@ const printUsage = (stream: NodeJS.WriteStream): void => {
   stream.write(`${USAGE}\n`);
 };
 
-const dieUsage = (message: string): never => {
+// Explicit type annotation (not just a `: never` return on the arrow): TS's
+// control-flow analysis only treats a const-declared never-returning function
+// as terminating when the variable itself is annotated, and `main` below
+// depends on that narrowing after each dieUsage call.
+const dieUsage: (message: string) => never = (message) => {
   process.stderr.write(`${message}\n\n`);
   printUsage(process.stderr);
   process.exit(2);
@@ -236,7 +240,9 @@ const runVisualizeCommand = async (path: string, raw: boolean): Promise<number> 
 
 // Commands that take a single <path> to a DAG module, with optional `--raw`
 // after the path (visualize only).
-const runPathCommand = async (command: string, path: string, rest: readonly string[]): Promise<number> => {
+type PathCommand = "lint" | "describe" | "visualize";
+
+const runPathCommand = async (command: PathCommand, path: string, rest: readonly string[]): Promise<number> => {
   const raw = rest.includes("--raw");
   const restNonFlags = rest.filter((a) => a !== "--raw");
   if (restNonFlags.length > 0 || (raw && command !== "visualize")) {
@@ -255,7 +261,7 @@ const runPathCommand = async (command: string, path: string, rest: readonly stri
       return exitCodeOf(result);
     })
     .with("visualize", () => runVisualizeCommand(path, raw))
-    .otherwise(() => dieUsage(`Unknown command: ${command}`));
+    .exhaustive();
 };
 
 const main = async (): Promise<number> => {
@@ -275,6 +281,14 @@ const main = async (): Promise<number> => {
   if (command === "new") return runNewCommand(pathArg, rest);
   if (command === "compose") return runComposeCommand(pathArg, rest);
   if (command === "capabilities") return runCapabilitiesCommand(pathArg);
+
+  if (
+    command !== "lint" &&
+    command !== "describe" &&
+    command !== "visualize"
+  ) {
+    dieUsage(`Unknown command: ${command}`);
+  }
 
   if (!pathArg) {
     dieUsage("Missing required <path> argument.");

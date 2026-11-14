@@ -14,6 +14,9 @@ export interface PromptRegistry {
   load(name: string): Promise<Result<PromptEntry, FrameworkError>>;
 }
 
+/** The entry shape the registry document must carry per prompt name. */
+type RegistryEntry = { readonly version: string; readonly hash: string };
+
 const promptNotFound = (promptName: string, reason: string): FrameworkError => ({
   kind: "prompt-not-found",
   promptName,
@@ -23,9 +26,7 @@ const promptNotFound = (promptName: string, reason: string): FrameworkError => (
 const isJsonObject = (v: unknown): v is Readonly<Record<string, unknown>> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
 
-const parseRegistryEntry = (
-  raw: unknown,
-): { readonly version: string; readonly hash: string } | undefined =>
+const parseRegistryEntry = (raw: unknown): RegistryEntry | undefined =>
   isJsonObject(raw) && typeof raw.version === "string" && typeof raw.hash === "string"
     ? { version: raw.version, hash: raw.hash }
     : undefined;
@@ -38,12 +39,15 @@ const parseRegistryEntry = (
 const lookupEntry = (
   registry: unknown,
   name: string,
-): Result<{ readonly version: string; readonly hash: string }, FrameworkError> => {
+): Result<RegistryEntry, FrameworkError> => {
   if (!isJsonObject(registry)) {
     return err(promptNotFound(name, "registry file is malformed: expected a JSON object"));
   }
+  // Absence is the ONLY not-in-registry case: a present-but-falsy entry
+  // (null/false/0/"") is a malformed registry, not a missing prompt, and must
+  // report as MALFORMED — collapsing them masks a corrupt registry.
   const rawEntry: unknown = Object.hasOwn(registry, name) ? registry[name] : undefined;
-  if (!rawEntry) return err(promptNotFound(name, "not in registry"));
+  if (rawEntry === undefined) return err(promptNotFound(name, "not in registry"));
   const entry = parseRegistryEntry(rawEntry);
   return entry === undefined
     ? err(promptNotFound(name, "registry entry is malformed: expected { version: string, hash: string }"))

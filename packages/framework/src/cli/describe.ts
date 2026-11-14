@@ -102,7 +102,13 @@ export const runDescribe = async (path: string): Promise<DescribeResult> => {
     },
   });
 
-  if (!built.ok) return describeFailure(imported.path, built.error);
+  if (!built.ok) {
+    // The assembly failure arm must not drop the schema warnings already
+    // collected: they are diagnostics about the same file, so they ship to
+    // stderr here too before the failure result is returned.
+    reportSchemaWarnings(schemaWarnings);
+    return describeFailure(imported.path, built.error);
+  }
 
   reportSchemaWarnings(schemaWarnings);
 

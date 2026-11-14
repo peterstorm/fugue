@@ -16,6 +16,7 @@ import { DagDefinitionError } from "../executor/define-dag.js";
 import type { DagDef } from "../types/dag.js";
 import { analyzeDag } from "./lint-checks.js";
 import { resolveRoot } from "./paths.js";
+import type { Result } from "../types/result.js";
 import type { LintAdvisory, LintError, LintResult } from "./types.js";
 
 /**
@@ -52,9 +53,7 @@ const importFailure = (path: string, error: LintError): ImportedDagFile => ({
   errors: [error],
 });
 
-type DefaultExportRead =
-  | { readonly ok: true; readonly value: unknown }
-  | { readonly ok: false; readonly error: LintError };
+type DefaultExportRead = Result<unknown, LintError>;
 
 // A throwing module is either a `defineDag` rejection (carries a machine-readable
 // detail) or a generic import failure.

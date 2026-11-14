@@ -90,7 +90,7 @@ import {
   parseEventFileName,
 } from "./layout.js";
 import { parseOptionalDedupKey, parseRecordedAtMs } from "./event-record.js";
-import type { RecordedAtMs } from "./event-record.js";
+import type { DedupKey, RecordedAtMs } from "./event-record.js";
 import { isFileCheckpointCommit } from "./checkpoint-record.js";
 import type { FileCheckpointCommit } from "./checkpoint-record.js";
 import { toJson } from "../state-machine/serialize.js";
@@ -293,7 +293,7 @@ export const createFileJournal = (
   // particular, `null` must not be erased by nullish coalescing. The parser
   // rejects non-string objects without rendering/coercing them, so hostile
   // getters, Proxies, and stateful conversion hooks cannot execute here.
-  const parseAppendDedupKey = (suppliedDedupKey: unknown) => {
+  const parseAppendDedupKey = (suppliedDedupKey: unknown): DedupKey => {
     const parsedKey = parseOptionalDedupKey(suppliedDedupKey);
     if (!parsedKey.ok) {
       // Deterministic FR-015 violation — the same key fails identically on
@@ -335,7 +335,7 @@ export const createFileJournal = (
   };
 
   // The lock body: list, dedup, stamp, plan, commit.
-  const appendUnderLock = (event: unknown, key: ReturnType<typeof parseAppendDedupKey>): void => {
+  const appendUnderLock = (event: unknown, key: DedupKey): void => {
     const existing = listEventFiles();
 
     // Dedup FIRST — before the clock is touched — so a deduped append

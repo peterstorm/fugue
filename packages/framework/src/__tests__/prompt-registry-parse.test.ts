@@ -45,6 +45,10 @@ describe("FilePromptRegistry — registry parse", () => {
   test.each([
     ["a string", '"1.0"'],
     ["an array", "[]"],
+    ["null", "null"],
+    ["false", "false"],
+    ["zero", "0"],
+    ["the empty string", '""'],
     ["missing hash", '{"version":"1"}'],
     ["a non-string version", `{"version":1,"hash":"${computePromptHash(text)}"}`],
     ["a non-string hash", '{"version":"1","hash":5}'],

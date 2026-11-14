@@ -47,12 +47,13 @@ type VisualizeResult =
 //      `dag_input` / `dag_output` virtual tokens (a node literally named
 //      `dag_input` must not merge with the request node).
 // Rendered labels still show the original id; only the token is encoded.
+const ID_CHAR_ESCAPES: ReadonlyMap<string, string> = new Map([
+  ["_", "__"],
+  [":", "_c"],
+  ["-", "_d"],
+]);
 const escapeIdChar = (c: string): string =>
-  match(c)
-    .with("_", () => "__")
-    .with(":", () => "_c")
-    .with("-", () => "_d")
-    .otherwise(() => `_x${c.charCodeAt(0).toString(16)}_`);
+  ID_CHAR_ESCAPES.get(c) ?? `_x${c.charCodeAt(0).toString(16)}_`;
 const safeId = (id: string): string =>
   id === DAG_INPUT ? "dag_input" : `n_${id.replace(/[^A-Za-z0-9]/g, escapeIdChar)}`;
 

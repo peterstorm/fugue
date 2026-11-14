@@ -768,8 +768,8 @@ const nodeBuiltinViolation = (
 // each applicable rule's forbidden-module list.
 const importViolations = (
   specifier: string,
-  line: number,
   relPath: string,
+  line: number,
   applicableRules: readonly BoundaryRule[],
   isFileBackendSource: boolean,
 ): Violation[] => {
@@ -807,7 +807,7 @@ const checkFile = (srcDir: string, file: string): readonly Violation[] => {
     ...findFileCacheErrorBypasses(source, relPath),
     ...findUncheckedBrandImports(source, relPath),
     ...extractImports(source).flatMap(({ specifier, line }) =>
-      importViolations(specifier, line, relPath, applicableRules, isFileBackendSource),
+      importViolations(specifier, relPath, line, applicableRules, isFileBackendSource),
     ),
   ];
 };

@@ -493,7 +493,7 @@ interface OraclePool {
 }
 
 /** Pool lifecycle seam: lazily created, reset on a failed open, closed with zero drain. */
-interface OraclePoolManager {
+interface OraclePoolLifecycle {
   readonly getPool: () => Promise<OraclePool>;
   readonly closePool: () => Promise<void>;
 }
@@ -521,7 +521,7 @@ const applySessionNls = (
  * per query. Construction is deferred behind a lazily-awaited promise so the
  * handle is synchronous to build (mirrors pg's synchronous `new Pool`).
  */
-const createPoolManager = (oracledb: OracleDbModule, config: OracleAdapterConfig): OraclePoolManager => {
+const createPoolLifecycle = (oracledb: OracleDbModule, config: OracleAdapterConfig): OraclePoolLifecycle => {
   const poolMin = config.poolMin ?? 0;
   const poolMax = config.poolMax ?? 4;
   let poolPromise: Promise<OraclePool> | undefined;
@@ -562,6 +562,23 @@ const createPoolManager = (oracledb: OracleDbModule, config: OracleAdapterConfig
 };
 
 /**
+ * Release ONE pooled connection: try to close it, and warn-without-throwing on
+ * failure. ONE definition for every release site — a release failure must
+ * never mask the outcome the caller is about to return (a completed query
+ * returning Err would read as a retriable failure and a write DML re-run
+ * becomes a double-execution hazard), and it must never erase the evidence
+ * that the pool is leaking either (a repeated release fault can exhaust the
+ * pool), so the caller's message names the context it preserves.
+ */
+const releaseQuietly = async (conn: OracleConnection, message: string): Promise<void> => {
+  try {
+    await conn.close();
+  } catch (closeError) {
+    warnOracleWithoutThrowing(message, closeError);
+  }
+};
+
+/**
  * Production queryable: acquire a pooled connection, execute with
  * OUT_FORMAT_OBJECT, always release the connection. A release failure must
  * never mask a SUCCEEDED statement (mirror the connect() path below): a
@@ -580,24 +597,13 @@ const createPooledQueryable = (oracledb: OracleDbModule, getPool: () => Promise<
       const result = await conn.execute(sql, binds ?? {}, {
         outFormat: opts?.outFormat ?? oracledb.OUT_FORMAT_OBJECT,
       });
-      try {
-        await conn.close();
-      } catch (closeError) {
-        warnOracleWithoutThrowing("query succeeded but connection release failed", closeError);
-      }
+      await releaseQuietly(conn, "query succeeded but connection release failed");
       return result;
     } catch (e) {
-      try {
-        await conn.close();
-      } catch (closeError) {
-        // Preserve the statement error as the caller-visible outcome, but do
-        // not erase evidence that the pooled connection also failed to
-        // release (a repeated release fault can exhaust the pool).
-        warnOracleWithoutThrowing(
-          "query failed and connection release also failed; preserving statement error",
-          closeError,
-        );
-      }
+      // Preserve the statement error as the caller-visible outcome, but do
+      // not erase evidence that the pooled connection also failed to
+      // release (a repeated release fault can exhaust the pool).
+      await releaseQuietly(conn, "query failed and connection release also failed; preserving statement error");
       throw e;
     }
   },
@@ -675,7 +681,7 @@ export const createOracleAdapter = (config: OracleAdapterConfig): CapabilityHand
   const requireModule = createRequire(import.meta.url);
   const oracledb = requireModule("oracledb") as OracleDbModule;
 
-  const { getPool, closePool } = createPoolManager(oracledb, config);
+  const { getPool, closePool } = createPoolLifecycle(oracledb, config);
   const queryable = createPooledQueryable(oracledb, getPool);
 
   return {

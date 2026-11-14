@@ -28,9 +28,9 @@ The root `tsconfig.scripts.json` is deliberately narrower than every file under 
 
 `bun run lint` runs [Loom's](https://github.com/peterstorm/loom) project linter, pinned in `devDependencies` and configured in `.claude/linter/rules/config.json`. Everything is linted; each exclusion in `exclude` states why. It enforces:
 
-- **Import direction** (`no-cross-boundary-imports`): 21 `boundaries`, one owner per edge, and `requireGovernance` so a file under `packages/` that no boundary names is a violation. The package-to-package edge map is additionally pinned by `packages/framework/src/scripts/check-imports.ts` — one tool owns each edge, never both.
+- **Import direction** (`no-cross-boundary-imports`): 21 `boundaries`, one owner per edge, and `requireGovernance` so a file under `packages/` that no boundary names is a violation. Loom's boundary map owns the package-to-package edges; `packages/framework/src/scripts/check-imports.ts` additionally owns the intra-package subsystem rules inside `packages/framework/src` — one tool owns each edge, never both.
 - **Functional-core purity** (`no-io-in-pure-modules`): `pureModules` lists the core roots; each shell inside them is declared in `impureModules` with the I/O it does.
-- **Code shape**: functions of 50 lines or fewer, no `any`, no non-null assertions, no wire casts (`JSON.parse(...) as T`), exhaustive `match(...)`/`never`-bound switches, no nested ternaries, no raw-string IDs, no library `console.log`.
+- **Code shape**: functions of 50 lines or fewer, no `as any` casts (annotations like `z.ZodType<any>` are not flagged), no non-null assertions (the gate catches the word-bang-dot-word shape — `value!.length` — not every `!`), no wire casts (`JSON.parse(...) as T`), exhaustive `match(...)`/`never`-bound switches, no nested ternaries, no raw-string IDs, no library `console.log`.
 - **Duplicate blocks**: production code has none. `duplicateBlockBaseline` grandfathers the existing test-side blocks; that list only shrinks — never add to it to land a change.
 
 Two declarative rules are disabled in the rule files with the measurement that justifies it (`no-bare-throw`, `no-unhandled-result`); re-enable them per layer when the Result-signature refactor is scheduled.

@@ -122,8 +122,16 @@ export interface CapturedRequest {
 }
 
 // A captured request body is JSON-object wire data: parsed, not cast.
+// An ABSENT body must throw, never degrade to "{}": a capture that silently
+// fabricated an empty object could pass a test against a request the client
+// never populated.
 const parseRequestBody = (body: unknown): Record<string, unknown> => {
-  const parsed: unknown = JSON.parse(String(body ?? "{}"));
+  if (body === undefined || body === null) {
+    throw new Error(
+      "captured fetch call has no request body — the client never populated it",
+    );
+  }
+  const parsed: unknown = JSON.parse(String(body));
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new Error(`captured request body is not a JSON object: ${String(body)}`);
   }

@@ -287,36 +287,6 @@ export const syncRunOptions = (
 });
 
 /**
- * Select the capability broker for this boot — the per-invocation AUTHORITY
- * seam. Exported so the selection logic (config → broker, `AGENT_CLIENT_SCOPES`
- * → `assignedScopes` closure, unwired fail-closed endpoints) is testable
- * without booting a full host.
- *
- * When the Keycloak realm config is present (`REALM_JWT_ISSUER` set) this
- * returns the live Keycloak-backed broker: it fails closed on an unassigned
- * scope BEFORE any Entra call, mints narrowly-scoped operation handles PER
- * NODE (the framework calls `mintFor` at dispatch with that node's real
- * `requires`), and emits a correlated audit record for every mint and refusal.
- * The minted handles are merged OVER the boot-scoped static client set.
- *
- * When realm config is ABSENT this returns `undefined` — no minting authority
- * is wired into `runDag`, so the framework skips per-node minting entirely and
- * every node runs against the boot-scoped static client set, byte-identical to
- * today (SC-005), zero regression. Pools stay boot-scoped either way
- * (FR-W2-005); only authority resolution moves behind the broker.
- *
- * AD-3 config-presence gating (FR-011): each authority leg is wired LIVE only
- * when ITS OWN config is present — there is no single global enable flag.
- *   - live Keycloak token endpoint  ⟸ `KEYCLOAK_AGENT_CLIENT_CREDENTIALS` present;
- *   - live Entra WIF exchange + live Graph transport ⟸ `ENTRA_TENANT_ID` AND
- *     `ENTRA_CLIENT_ID` present (validated as an inseparable pair at boot);
- *   - otherwise EACH leg retains its fail-closed unwired stub.
- * When a leg is partially/unwired, EXACTLY ONE boot warning is emitted naming the
- * unwired leg(s) (FR-011). An assigned-but-not-yet-wired scope still surfaces
- * `infra-unreachable` (retriable), never a silent success — and an un-granted
- * scope is refused at the local gate BEFORE either leg (zero Entra egress, FR-012).
- */
-/**
  * Operability (mirror of the empty-policy warning in `warnLiveBrokerMisconfig`):
  * a scope POLICY is configured but no broker is enabled, so the policy is
  * silently inert — every `requires` resolves against the static base context,
@@ -453,6 +423,36 @@ const assignedScopesFor = (config: HostConfig): AssignedScopes => (agentClientId
   );
 };
 
+/**
+ * Select the capability broker for this boot — the per-invocation AUTHORITY
+ * seam. Exported so the selection logic (config → broker, `AGENT_CLIENT_SCOPES`
+ * → `assignedScopes` closure, unwired fail-closed endpoints) is testable
+ * without booting a full host.
+ *
+ * When the Keycloak realm config is present (`REALM_JWT_ISSUER` set) this
+ * returns the live Keycloak-backed broker: it fails closed on an unassigned
+ * scope BEFORE any Entra call, mints narrowly-scoped operation handles PER
+ * NODE (the framework calls `mintFor` at dispatch with that node's real
+ * `requires`), and emits a correlated audit record for every mint and refusal.
+ * The minted handles are merged OVER the boot-scoped static client set.
+ *
+ * When realm config is ABSENT this returns `undefined` — no minting authority
+ * is wired into `runDag`, so the framework skips per-node minting entirely and
+ * every node runs against the boot-scoped static client set, byte-identical to
+ * today (SC-005), zero regression. Pools stay boot-scoped either way
+ * (FR-W2-005); only authority resolution moves behind the broker.
+ *
+ * AD-3 config-presence gating (FR-011): each authority leg is wired LIVE only
+ * when ITS OWN config is present — there is no single global enable flag.
+ *   - live Keycloak token endpoint  ⟸ `KEYCLOAK_AGENT_CLIENT_CREDENTIALS` present;
+ *   - live Entra WIF exchange + live Graph transport ⟸ `ENTRA_TENANT_ID` AND
+ *     `ENTRA_CLIENT_ID` present (validated as an inseparable pair at boot);
+ *   - otherwise EACH leg retains its fail-closed unwired stub.
+ * When a leg is partially/unwired, EXACTLY ONE boot warning is emitted naming the
+ * unwired leg(s) (FR-011). An assigned-but-not-yet-wired scope still surfaces
+ * `infra-unreachable` (retriable), never a silent success — and an un-granted
+ * scope is refused at the local gate BEFORE either leg (zero Entra egress, FR-012).
+ */
 export const selectCapabilityBroker = (
   config: HostConfig,
   sharedInfra: Pick<SharedInfra, "tracer" | "logger">,

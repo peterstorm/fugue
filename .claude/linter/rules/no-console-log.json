@@ -1,14 +1,14 @@
 {
   "kind": "regex",
   "name": "no-console-log",
-  "description": "Disallow console.log/info/debug in library source \u2014 framework code reports through fwLogger(), the host through its LogPort. Operator scripts, benches, examples, the demo app and generated CLI output are excluded as directories; console.warn/error stay allowed (they are the logger seam's own fallback).",
+  "description": "Disallow console.log/info/debug in library source \u2014 framework code reports through fwLogger(), the host through its LogPort. Operator scripts, benches, examples, the demo app and the two test roots are excluded as directories; logger.ts and entrypoint-wiring.ts are excluded as the logger seams themselves. Directory entries match at any depth, so packages/framework/src/scripts/ is exempt too. console.warn/error stay allowed (they are the logger seam's own fallback); the CLI prints via process.stdout.write, not console.",
   "extensions": [
     ".ts",
     ".tsx"
   ],
   "pattern": "\\bconsole\\.(log|info|debug)\\(",
   "flags": "",
-  "fixHint": "disabled",
+  "fixHint": "Report through fwLogger() in framework code or the host's LogPort — never console.log/info/debug. console.warn/error are allowed.",
   "enabled": true,
   "excludePatterns": [
     "apps/",

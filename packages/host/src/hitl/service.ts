@@ -371,7 +371,14 @@ const inspectActiveRun = async (
 ): Promise<ActiveRunInspection> => {
   const run = await deps.runStore.get(runId);
   if (!run.ok) return { kind: "inspection-failed", error: run.error };
-  if (run.value === null || isTerminalRunStatus(run.value.status)) return { kind: "skip" };
+  if (run.value === null) {
+    // Parity with processRun: a stale active-run id (record deleted/expired) is
+    // skipped, but the skip is surfaced so an id that should not be active is
+    // diagnosable from the logs rather than silently swallowed each sweep.
+    logWithoutThrowing(deps.logger, "warn", "hitl: reconciliation for unknown run — skipping", { runId });
+    return { kind: "skip" };
+  }
+  if (isTerminalRunStatus(run.value.status)) return { kind: "skip" };
   if (run.value.status.kind === "suspended") {
     const decision = await deps.decisions.getDecision(runId, run.value.status.nodeId);
     if (!decision.ok) return { kind: "inspection-failed", error: decision.error };

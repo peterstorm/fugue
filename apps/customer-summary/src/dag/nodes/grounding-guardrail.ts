@@ -6,7 +6,7 @@ import { SynthesisOutputSchema } from "../../schemas/summary.js";
 import type { SynthesisOutput } from "../../schemas/summary.js";
 import { CrmRecordSchema } from "../../schemas/crm.js";
 import type { CrmRecord } from "../../schemas/crm.js";
-import { GuardrailSkippedSchema, GuardrailValidatedSchema } from "../../schemas/guardrail.js";
+import { GuardrailFailedSchema, GuardrailSkippedSchema, GuardrailValidatedSchema } from "../../schemas/guardrail.js";
 
 /**
  * Input shape: receives outputs from both synthesize and fetch-crm nodes.
@@ -21,9 +21,14 @@ const InputSchema = z.object({
   "fetch-crm": z.object({ customer: CrmRecordSchema.nullable() }),
 });
 
+// The wrapper emits `skipped | validated | failed` — `failed` when validate()
+// throws. The node's OutputSchema must admit EVERY arm its wrapper emits, or a
+// validator throw fails output validation and the run 500s instead of
+// degrading to the assembler's failed-arm path.
 const OutputSchema: z.ZodType<GuardrailResult<SynthesisOutput>> = z.discriminatedUnion("kind", [
   GuardrailSkippedSchema,
   GuardrailValidatedSchema,
+  GuardrailFailedSchema,
 ]);
 
 /**

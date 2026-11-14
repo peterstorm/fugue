@@ -214,8 +214,11 @@ const createHttpClient = (config: HttpCapabilityConfig): HttpCapability => ({
  *   timeoutMs: 10_000,
  * });
  *
- * // Pass to runtime or makeNodeContext:
- * const ctx = makeNodeContext({ runId: RunId("r1"), dagId: DagId("d1"), http: http.client });
+ * // Pass to runtime or makeNodeContext — NodeContextInit.runId accepts a
+ * // plain string or a branded RunId:
+ * const runId = "r1";
+ * const dagId = "d1";
+ * const ctx = makeNodeContext({ runId, dagId, http: http.client });
  * ```
  */
 export const createHttpCapability = (

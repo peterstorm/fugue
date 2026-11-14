@@ -342,24 +342,11 @@ const onOpen = (a: Assembly, name: string, attrs: XmlAttrs, selfClosing: boolean
   if (p.kind === "between-rows") return openBetweenRows(a, p, name, attrs, selfClosing, at);
   if (p.kind === "before-sheet-data") return openBeforeSheetData(a, name, attrs, selfClosing, at);
   if (p.kind === "finished" || p.kind === "failed") return;
-  // Compile-time exhaustiveness: a `Phase` kind added without a branch above makes `p` non-`never`.
-  const unhandled: never = p;
-  return unhandled;
+  exhausted(p);
 };
 
-const closeInline = (a: Assembly, p: PhaseOf<"in-inline">, name: string, at: number): void => {
-  if (at !== p.inline.depth) return p.inline.reader.close(name);
-  p.cell.inline = p.inline.reader.result();
-  a.phase = { kind: "in-cell", frame: p.frame, cell: p.cell };
-};
-
-const closeInCell = (a: Assembly, p: PhaseOf<"in-cell">, name: string, at: number): void => {
-  const { cell } = p;
-  if (at === cell.depth) {
-    a.phase = { kind: "in-row", frame: p.frame };
-    closeCell(a, cell);
-  } else if (name === "v" && cell.value.kind === "reading") cell.value = { kind: "read", text: cell.value.text };
-};
+/** ONE shared never-proof: a `Phase` kind added without a branch above makes `p` non-`never`. */
+const exhausted = (_phase: never): void => undefined;
 
 const onClose = (a: Assembly, name: string): void => {
   const at = --a.depth;
@@ -375,9 +362,21 @@ const onClose = (a: Assembly, name: string): void => {
     return;
   }
   if (p.kind === "before-sheet-data" || p.kind === "finished" || p.kind === "failed") return;
-  // Compile-time exhaustiveness: a `Phase` kind added without a branch above makes `p` non-`never`.
-  const unhandled: never = p;
-  return unhandled;
+  exhausted(p);
+};
+
+const closeInline = (a: Assembly, p: PhaseOf<"in-inline">, name: string, at: number): void => {
+  if (at !== p.inline.depth) return p.inline.reader.close(name);
+  p.cell.inline = p.inline.reader.result();
+  a.phase = { kind: "in-cell", frame: p.frame, cell: p.cell };
+};
+
+const closeInCell = (a: Assembly, p: PhaseOf<"in-cell">, name: string, at: number): void => {
+  const { cell } = p;
+  if (at === cell.depth) {
+    a.phase = { kind: "in-row", frame: p.frame };
+    closeCell(a, cell);
+  } else if (name === "v" && cell.value.kind === "reading") cell.value = { kind: "read", text: cell.value.text };
 };
 
 const onText = (a: Assembly, text: string): void => {

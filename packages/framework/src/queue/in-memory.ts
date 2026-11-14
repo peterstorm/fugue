@@ -157,7 +157,17 @@ const routeJobFailure = async (
     } catch (handlerErr) {
       // Handler itself threw — route to onError handlers so the
       // exception is observable without interrupting the drain loop.
-      notifyErrorHandlers(state.errorHandlers.get(name) ?? [], handlerErr);
+      // When NO onError handler is registered either, log like the
+      // no-failed/exhausted-handler path above: a doubly-unhandled
+      // failure must not disappear in a harness that wired neither.
+      const errorHandlers = state.errorHandlers.get(name) ?? [];
+      if (errorHandlers.length === 0) {
+        fwLogger().error(
+          `[InMemoryQueue] ${isExhausted ? "onExhausted" : "onFailed"} handler for job "${entryId}" threw (attempt ${attempt}/${max}) with no onError handler:`,
+          handlerErr,
+        );
+      }
+      notifyErrorHandlers(errorHandlers, handlerErr);
     }
   }
 };
@@ -242,7 +252,7 @@ const drainQueue = async (state: BackendState, name: string): Promise<void> => {
 const createQueueOn = <S, C>(state: BackendState, name: string, opts?: QueueOpts): QueueHandle<S, C> => {
   if (
     opts?.defaultAttempts !== undefined &&
-    (!Number.isFinite(opts.defaultAttempts) || opts.defaultAttempts < 1)
+    (!Number.isInteger(opts.defaultAttempts) || opts.defaultAttempts < 1)
   ) {
     throw new RangeError(
       `defaultAttempts must be a finite integer >= 1, got ${opts.defaultAttempts}`,
@@ -281,7 +291,7 @@ const createWorkerOn = <S, C>(
   process: (job: JobLike<S, unknown, C>) => Promise<void>,
   opts?: WorkerOpts,
 ): WorkerHandle => {
-  if (opts?.concurrency !== undefined && (!Number.isFinite(opts.concurrency) || opts.concurrency < 1)) {
+  if (opts?.concurrency !== undefined && (!Number.isInteger(opts.concurrency) || opts.concurrency < 1)) {
     throw new RangeError(`concurrency must be a finite integer >= 1, got ${opts.concurrency}`);
   }
   state.workers.set(name, {

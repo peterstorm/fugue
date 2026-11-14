@@ -1165,4 +1165,22 @@ describe("settleBeforeDeadline diagnostics", () => {
     expect(result).toEqual({ kind: "timed-out" });
     await expect(Bun.sleep(20)).resolves.toBeUndefined();
   });
+
+  it("a thenable whose `then` throws synchronously propagates the rejection without firing onTimeout", async () => {
+    let timeoutFired = false;
+    const hostile = {
+      then: () => {
+        throw new Error("then exploded");
+      },
+    } as unknown as PromiseLike<string>;
+
+    await expect(
+      settleBeforeDeadline(hostile, 30, () => { timeoutFired = true; }),
+    ).rejects.toThrow("then exploded");
+
+    // No timer leak: the deadline was cleared before the executor's rejection
+    // propagated, so onTimeout never fires after the window has passed.
+    await Bun.sleep(60);
+    expect(timeoutFired).toBe(false);
+  });
 });

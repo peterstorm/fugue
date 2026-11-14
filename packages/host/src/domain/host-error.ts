@@ -440,8 +440,12 @@ const parseTimeout: KindParser<"timeout"> = (snapshot) => {
   if (!hasExactOwnStringKeys(snapshot, ["kind", "dagId", "runId", "timeoutMs"])) return undefined;
   const dagId = parseDagId(snapshot.dagId);
   const runId = parseRunId(snapshot.runId);
+  // Same grammar as the sibling `retryAfterSeconds` smart constructor: a
+  // positive safe integer. A negative/zero/fractional `timeoutMs` is a hostile
+  // snapshot, not a duration.
   return dagId === undefined || runId === undefined ||
-      typeof snapshot.timeoutMs !== "number" || !Number.isFinite(snapshot.timeoutMs)
+      typeof snapshot.timeoutMs !== "number" || !Number.isSafeInteger(snapshot.timeoutMs) ||
+      snapshot.timeoutMs <= 0
     ? undefined
     : frozenHostError({ kind: "timeout", dagId, runId, timeoutMs: snapshot.timeoutMs });
 };

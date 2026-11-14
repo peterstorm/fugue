@@ -51,10 +51,19 @@ export const createAssembleResponseNode = () =>
         )
         .with({ branch: "ok" }, () => {
           const guardrail = input["grounding-guardrail"];
-          if (guardrail === undefined || guardrail.kind === "skipped" || guardrail.kind === "failed") {
-            // Guardrail output missing, skipped, or failed — degrade gracefully.
+          if (guardrail === undefined || guardrail.kind === "skipped") {
+            // Guardrail output missing or skipped — degrade gracefully.
             // The transform is pure; diagnostics belong to the observer shell.
             return ok({ status: "degraded" as const, customerId, message: "Guardrail data unavailable" });
+          }
+          if (guardrail.kind === "failed") {
+            // The wrapper caught a validator throw: degrade AND surface the
+            // error — the run continues, but the message must say why.
+            return ok({
+              status: "degraded" as const,
+              customerId,
+              message: `Guardrail failed: ${guardrail.error}`,
+            });
           }
           const synthesis = guardrail.value;
 

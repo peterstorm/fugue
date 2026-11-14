@@ -64,7 +64,7 @@ function logAndThrow(
   level: "warn" | "error",
   logMessage: string,
   throwMessage: string,
-  context: { readonly runId: RunId; readonly nodeId: NodeId; readonly error?: string },
+  context: { readonly runId: RunId; readonly nodeId: NodeId; readonly error?: string; readonly operation?: string },
 ): never {
   // A function DECLARATION, not an arrow const: TypeScript only propagates a
   // `never` return into control-flow narrowing for declarations and explicitly
@@ -109,12 +109,16 @@ const deliverAndCommitNotification = async (
     output: req.output,
   });
   if (!delivered.ok) {
+    // The cause field: a notification-failed error names the operation that
+    // failed (token fetch, activity POST, …) — the actionable half of the
+    // diagnostic; kind alone says only "delivery failed".
+    const operation = delivered.error.kind === "notification-failed" ? delivered.error.operation : undefined;
     logAndThrow(
       logger,
       "error",
       "hitl: review notification failed — retrying hook",
       `hitl: review notification failed for ${runId}/${req.nodeId}: ${delivered.error.kind}`,
-      { runId, nodeId: req.nodeId, error: delivered.error.kind },
+      { runId, nodeId: req.nodeId, error: delivered.error.kind, ...(operation !== undefined ? { operation } : {}) },
     );
   }
 

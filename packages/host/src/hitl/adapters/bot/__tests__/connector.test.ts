@@ -79,6 +79,19 @@ describe("createBotConnector", () => {
     if (!res.ok) expect(res.error.kind).toBe("notification-failed");
   });
 
+  // A negative/zero expires_in would mint a past-dated (permanently stale)
+  // grant; NaN/Infinity a never-expiring one. Both must fail the response
+  // schema (NaN fails `.int()`), never reach the grant cache.
+  for (const bad of [-1, Number.NaN, Number.POSITIVE_INFINITY, 1.5]) {
+    it(`rejects an out-of-grammar expires_in (${String(bad)}) as notification-failed`, async () => {
+      installFetch((url) => (url === TOKEN_URL ? resp(200, tokenBody(bad)) : resp(200, {})));
+      const connector = createBotConnector({ appId: "a", appPassword: "p", tokenUrl: TOKEN_URL, now: () => 1 });
+      const res = await connector.sendToConversation(ref, {});
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.error.kind).toBe("notification-failed");
+    });
+  }
+
   it("keeps a hostile token JSON rejection inside the notification-failed Result", async () => {
     const hostile = Object.create(null) as unknown;
     installFetch((url) => url === TOKEN_URL

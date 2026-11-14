@@ -18,13 +18,9 @@ import { createRedisConnectivity, disconnectRedisQuietly } from "./adapters/redi
 import { closeHitlQueueBackend, createHitlQueueBackend } from "./hitl/queue-backend.js";
 import { createJsonConsoleLogger } from "./entrypoint-wiring.js";
 import type { LogPort } from "./ports.js";
+import type { RedisConnectivityBundle } from "./adapters/redis-connectivity.js";
 
 // ── Main ───────────────────────────────────────────────────────────────────
-
-type RedisConnectivityBundle = Extract<
-  Awaited<ReturnType<typeof createRedisConnectivity>>,
-  { readonly ok: true }
->["value"];
 
 const parseConfigOrExit = (logger: LogPort): HostConfig => {
   logger.info("Parsing host configuration from environment...");

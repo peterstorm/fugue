@@ -169,14 +169,16 @@ export const createHostLlmClient = async (
   const plan = planHostLlm(config);
   return match(plan)
     .with({ provider: "anthropic" }, ({ apiKey }) => loadAnthropic(apiKey))
-    .with({ provider: "azure" }, async (azure) =>
+    // The two OpenAI-client arms are synchronous constructors — no `async`:
+    // the outer `async` function already wraps the match's value in a Promise.
+    .with({ provider: "azure" }, (azure) =>
       new OpenAILlmClient({
         apiKey: azure.apiKey,
         baseUrl: azure.baseUrl,
         apiVersion: azure.apiVersion,
         modelOverride: azure.deployment,
       }))
-    .with({ provider: "openai" }, async ({ apiKey, baseUrl }) =>
+    .with({ provider: "openai" }, ({ apiKey, baseUrl }) =>
       new OpenAILlmClient({ apiKey, baseUrl }))
     .exhaustive();
 };

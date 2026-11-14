@@ -1,8 +1,8 @@
 import { Hono, type Context } from "hono";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
-import { runDag, dagFingerprint, FRAMEWORK_VERSION, formatFrameworkError, makeNodeContext, runId as brandRunId, tryRunId, dagId as brandDagId, safeErrorMessage } from "@fuguejs/framework";
-import type { NodeContext, LlmClient, Observer, Checkpointer, ContextCacheAdapter, CheckpointWriter, ContentFilter } from "@fuguejs/framework";
+import { runDag, dagFingerprint, FRAMEWORK_VERSION, formatFrameworkError, makeNodeContext, runId as brandRunId, tryRunId, dagId as brandDagId, safeErrorMessage, ok, err } from "@fuguejs/framework";
+import type { NodeContext, LlmClient, Observer, Checkpointer, ContextCacheAdapter, CheckpointWriter, ContentFilter, Result, RunMeta, FrameworkError } from "@fuguejs/framework";
 import type { SummaryResponse } from "./schemas/index.js";
 import type { ConversationSource } from "./sources/conversation-source.js";
 import { createSummaryDag } from "./dag/summary-dag.js";
@@ -166,19 +166,24 @@ type Rejection = {
 };
 
 /** One pipeline step: the value to continue with, or the refusal that ends the request. */
-type Step<T> =
-  | { readonly ok: true; readonly value: T }
-  | { readonly ok: false; readonly rejection: Rejection };
+type Step<T> = Result<T, Rejection>;
 
-const proceed = <T>(value: T): Step<T> => ({ ok: true, value });
+/**
+ * THE Rejection constructor: builds the refusal the handler turns into an
+ * HTTP response; the body never carries internals. `requestId` and `details`
+ * land on the body only when supplied.
+ */
 const refuse = (
   status: Rejection["status"],
   error: string,
   requestId?: string,
-): Step<never> => ({
-  ok: false,
-  rejection: { status, body: requestId === undefined ? { error } : { error, requestId } },
-});
+  details?: unknown,
+): Rejection => {
+  const body: { error: string; requestId?: string; details?: unknown } = { error };
+  if (requestId !== undefined) body.requestId = requestId;
+  if (details !== undefined) body.details = details;
+  return { status, body };
+};
 
 const respondWith = (c: Context, rejection: Rejection): Response =>
   c.json(rejection.body, rejection.status);
@@ -203,20 +208,14 @@ const parseSummarizeRequest = async (
     reportWithoutThrowing(() =>
       log.warn(`[/summarize] Request body parse failed: ${safeErrorMessage(e)}`),
     );
-    return refuse(400, "Invalid JSON body");
+    return err(refuse(400, "Invalid JSON body"));
   }
 
   const parsed = SummarizeRequestSchema.safeParse(body);
   if (!parsed.success) {
-    return {
-      ok: false,
-      rejection: {
-        status: 400,
-        body: { error: "Validation failed", details: parsed.error.issues },
-      },
-    };
+    return err(refuse(400, "Validation failed", undefined, parsed.error.issues));
   }
-  return proceed(parsed.data);
+  return ok(parsed.data);
 };
 
 /**
@@ -226,24 +225,18 @@ const parseSummarizeRequest = async (
  * matches the identity-mismatch branch. Other load failures (cache
  * transient, corrupt JSON) remain a server 500.
  */
-const rejectCheckpointLoadFailure = (kind: string): Step<never> =>
+const rejectCheckpointLoadFailure = (kind: FrameworkError["kind"]): Step<never> =>
   kind === "checkpoint-version-mismatch" || kind === "checkpoint-expired"
-    ? refuse(409, "Checkpoint incompatible with current DAG")
-    : refuse(500, "Resume failed");
-
-type CheckpointMeta = {
-  readonly dagId: string;
-  readonly nodeCount: number;
-  readonly dagFingerprint?: string;
-  readonly frameworkVersion?: string;
-};
+    ? err(refuse(409, "Checkpoint incompatible with current DAG"))
+    : err(refuse(500, "Resume failed"));
 
 /**
  * DAG shape or framework semantics changed since the checkpoint was written
  * when this is false: replaying cached node outputs into the current shape
- * would skip validation against evolved schemas.
+ * would skip validation against evolved schemas. The framework's `RunMeta`
+ * (branded `DagId` included) is the one meta shape; no local duplicate.
  */
-const checkpointMatchesDag = (meta: CheckpointMeta, dag: SummaryDag, fingerprint: string): boolean =>
+const checkpointMatchesDag = (meta: RunMeta, dag: SummaryDag, fingerprint: string): boolean =>
   meta.dagId === dag.id &&
   meta.nodeCount === dag.nodes.length &&
   meta.dagFingerprint === fingerprint &&
@@ -278,13 +271,13 @@ const loadResumeCheckpoint = async (
   if (!loaded.value) {
     // No checkpoint exists for this runId — do not silently start fresh under
     // a caller-supplied id (could shadow a real run). 404 instead.
-    return refuse(404, "Run not found");
+    return err(refuse(404, "Run not found"));
   }
   const meta = loaded.value.meta;
   if (meta.subject !== customerId) {
     // Either the runId belongs to another customer, or the meta predates
     // subject binding. Either way: refuse. 404 to avoid leaking existence.
-    return refuse(404, "Run not found");
+    return err(refuse(404, "Run not found"));
   }
   if (!checkpointMatchesDag(meta, dag, fingerprint)) {
     // 409 so callers know to start a fresh run, not retry the same id.
@@ -297,7 +290,7 @@ const loadResumeCheckpoint = async (
         `meta.frameworkVersion=${meta.frameworkVersion} expected=${FRAMEWORK_VERSION}`,
       ),
     );
-    return refuse(409, "Checkpoint incompatible with current DAG");
+    return err(refuse(409, "Checkpoint incompatible with current DAG"));
   }
   if (loaded.value.corruptNodeAddresses.length > 0) {
     const corruptNodeAddresses = loaded.value.corruptNodeAddresses;
@@ -307,9 +300,9 @@ const loadResumeCheckpoint = async (
         JSON.stringify(corruptNodeAddresses),
       ),
     );
-    return refuse(500, "Resume failed");
+    return err(refuse(500, "Resume failed"));
   }
-  return proceed(
+  return ok(
     new Map(Object.entries(loaded.value.nodes).map(([nodeId, ns]) => [nodeId, ns.output])),
   );
 };
@@ -335,9 +328,9 @@ const recordFreshRun = async (
     reportWithoutThrowing(() =>
       log.error(`[/summarize] checkpoint setMeta failed for run=${runId}: ${JSON.stringify(metaResult.error)}`),
     );
-    return refuse(503, "Checkpoint store unavailable", runId);
+    return err(refuse(503, "Checkpoint store unavailable", runId));
   }
-  return proceed(undefined);
+  return ok(undefined);
 };
 
 type RunRequest = {
@@ -357,7 +350,7 @@ const timeoutRejection = (
   reportWithoutThrowing(() => rt.log.warn(
     `[/summarize] Request timed out after ${rt.timeoutMs}ms for customer=${req.customerId} run=${req.runId}; cause=${cause}`,
   ));
-  return refuse(504, "Request timeout", req.runId);
+  return err(refuse(504, "Request timeout", req.runId));
 };
 
 type DagResult = Awaited<ReturnType<typeof runDag<{ customerId: string }, SummaryResponse>>>;
@@ -421,7 +414,7 @@ const runUnderDeadline = async (
     if (!result.ok && abortController.signal.aborted && result.error.kind === "aborted") {
       return timeoutRejection(rt, req, formatFrameworkError(result.error));
     }
-    return proceed(result);
+    return ok(result);
   } catch (e) {
     if (abortController.signal.aborted && isAbortThrow(e)) {
       return timeoutRejection(rt, req, safeErrorMessage(e));
@@ -462,14 +455,14 @@ const respondToDagResult = (
 const handleSummarize = async (c: Context, rt: SummarizeRuntime): Promise<Response> => {
   const { deps, log } = rt;
   const request = await parseSummarizeRequest(c, log);
-  if (!request.ok) return respondWith(c, request.rejection);
+  if (!request.ok) return respondWith(c, request.error);
 
   // Durability is a hard contract: every run must be checkpointed so that
   // resume works and so that retried/in-flight writes are not lost on crash.
   // If the checkpoint store is unavailable, refuse traffic at the handler
   // (belt-and-suspenders with /readyz reporting not-ready).
   if (!deps.checkpointer || !deps.checkpointWriter) {
-    return c.json({ error: "Checkpoint store unavailable" }, 503);
+    return respondWith(c, refuse(503, "Checkpoint store unavailable"));
   }
   const checkpointer = deps.checkpointer;
   const checkpointWriter = deps.checkpointWriter;
@@ -485,7 +478,7 @@ const handleSummarize = async (c: Context, rt: SummarizeRuntime): Promise<Respon
     const fingerprint = dagFingerprint(dag);
 
     const prepared = await prepareRun(rt, checkpointer, dag, runId, fingerprint, request.value);
-    if (!prepared.ok) return respondWith(c, prepared.rejection);
+    if (!prepared.ok) return respondWith(c, prepared.error);
 
     const req: RunRequest = {
       dag,
@@ -495,18 +488,26 @@ const handleSummarize = async (c: Context, rt: SummarizeRuntime): Promise<Respon
       checkpointWriter,
     };
     const run = await runUnderDeadline(rt, req);
-    if (!run.ok) return respondWith(c, run.rejection);
+    if (!run.ok) return respondWith(c, run.error);
 
     return respondToDagResult(c, log, runId, run.value);
   } catch (e) {
     reportWithoutThrowing(() => log.error("[/summarize] Unexpected error:", e));
-    return c.json({ error: "Internal server error" }, 500);
+    return respondWith(c, refuse(500, "Internal server error"));
   }
 };
 
 // --- /readyz ---
 
 type ExporterFailures = ReadonlyArray<{ readonly index: number; readonly failures: number }>;
+
+/**
+ * What /readyz reports for trace-exporter health: per-backend failure counts,
+ * a distinct marker when the probe itself threw (so the payload shows WHY
+ * tracing is degraded instead of omitting the field), or `null` (single
+ * backend — nothing to fan out).
+ */
+type ExporterFailureReport = ExporterFailures | { readonly error: "probe-threw" };
 
 /**
  * A rejecting probe is treated as "down", but the rejection reason is logged
@@ -523,7 +524,7 @@ const probeDependency = async (
   try {
     return await check();
   } catch (error) {
-    reportWithoutThrowing(() => log.debug(message, error));
+    reportWithoutThrowing(() => log.warn(message, error));
     return false;
   }
 };
@@ -536,7 +537,7 @@ const probeDependency = async (
 const probeTracingExporters = (
   deps: AppDeps,
   log: AppLogger,
-): { readonly exporterFailures: ExporterFailures | null; readonly degraded: boolean } => {
+): { readonly exporterFailures: ExporterFailureReport | null; readonly degraded: boolean } => {
   try {
     const exporterFailures = deps.health?.tracingExporterFailures?.() ?? null;
     return {
@@ -545,9 +546,12 @@ const probeTracingExporters = (
     };
   } catch (error) {
     reportWithoutThrowing(() =>
-      log.debug("[/readyz] tracingExporterFailures probe threw — treating tracing as degraded:", error),
+      log.warn("[/readyz] tracingExporterFailures probe threw — treating tracing as degraded:", error),
     );
-    return { exporterFailures: null, degraded: true };
+    // A thrown probe is distinct from "no fan-out": emit the marker so the
+    // readiness payload shows why tracing is degraded instead of omitting
+    // the field.
+    return { exporterFailures: { error: "probe-threw" }, degraded: true };
   }
 };
 

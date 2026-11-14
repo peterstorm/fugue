@@ -88,7 +88,7 @@ const isResponsesApiResponse = (v: unknown): v is ResponsesApiResponse =>
   optional(v.id, isString) &&
   optional(v.model, isString) &&
   optional(v.status, isString) &&
-  optional(v.output, isResponsesOutput) &&
+  optionalOrNull(v.output, isResponsesOutput) &&
   optionalOrNull(v.usage, isResponsesUsage) &&
   optionalOrNull(v.error, isResponsesApiError) &&
   optionalOrNull(v.incomplete_details, isResponsesIncompleteDetails);

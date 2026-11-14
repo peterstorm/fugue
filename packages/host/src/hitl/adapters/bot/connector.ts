@@ -36,7 +36,12 @@ const DEFAULT_TOKEN_URL = "https://login.microsoftonline.com/botframework.com/oa
 const DEFAULT_SCOPE = "https://api.botframework.com/.default";
 
 /** Wire shape of a successful `client_credentials` token response. */
-const tokenResponseSchema = z.object({ access_token: z.string(), expires_in: z.number() });
+const tokenResponseSchema = z.object({
+  access_token: z.string(),
+  // Positive integer: a negative or zero `expires_in` would mint a past-dated
+  // (permanently stale) grant and a non-integer/Infinity a never-expiring one.
+  expires_in: z.number().int().positive(),
+});
 
 type TokenResponse = z.infer<typeof tokenResponseSchema>;
 
@@ -119,6 +124,12 @@ const postActivity = async (
       body: JSON.stringify(activity),
     });
   } catch (e) {
+    // Same guarded log the non-2xx arm emits: a transport rejection is the same
+    // class of send failure and must reach the log with the same shape.
+    logger?.error?.("hitl/bot: proactive send failed", {
+      conversationId: ref.conversationId,
+      error: safeErrorMessage(e),
+    });
     return err(notificationFailed(`bot send: ${safeErrorMessage(e)}`));
   }
   if (res.status < 200 || res.status >= 300) {

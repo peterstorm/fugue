@@ -2,7 +2,7 @@
   "exclude": [
     {
       "path": "packages/framework/docs/examples/",
-      "reason": "documentation samples shipped to readers verbatim \u2014 they import `@fuguejs/host/contract` on purpose to show the host wiring, and are compiled by the docs check rather than by a package tsconfig"
+      "reason": "byte-copies of the examples workspace's DAG samples (packages/examples/dags), typechecked there with a drift test asserting the copy stays byte-identical \u2014 not compiled by a package tsconfig"
     },
     {
       "path": "packages/framework/src/__tests__/boundary-imports.test.ts",
@@ -319,7 +319,7 @@
     },
     {
       "module": "packages/host/src/lifecycle/",
-      "description": "Boot, signals and the Redis probe: the process-lifecycle shell. Domain, ports and sync only; never the HTTP shell.",
+      "description": "Boot, signals and the Redis probe: the process-lifecycle shell. Domain, ports, adapters and sync; never the HTTP shell or top-level wiring.",
       "allow": [
         "./",
         "packages/host/src/lifecycle/",
@@ -596,7 +596,7 @@
   "impureModules": [
     {
       "path": "packages/framework/src/types/clock.ts",
-      "reason": "systemClock \u2014 the one sanctioned wall-clock read in the framework; every other module in types/ is pure, and nodes read time only through the clock capability"
+      "reason": "systemClock \u2014 the one wall-clock read inside types/; every other module in types/ is pure"
     },
     {
       "path": "packages/host/src/domain/tenant-header.ts",

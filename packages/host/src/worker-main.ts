@@ -45,6 +45,7 @@ import {
   parseAclCredential,
 } from "./supervisor/secrets/redis-acl.js";
 import { createRedisConnectivity, disconnectRedisQuietly } from "./adapters/redis-connectivity.js";
+import type { RedisAclCredential, RedisConnectivityBundle } from "./adapters/redis-connectivity.js";
 import { closeHitlQueueBackend, createHitlQueueBackend } from "./hitl/queue-backend.js";
 import { ok, err } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
@@ -177,11 +178,6 @@ export const buildWorkerBootstrap = (
 
 // ── Main (imperative shell) ────────────────────────────────────────────────────
 
-type RedisConnectivityBundle = Extract<
-  Awaited<ReturnType<typeof createRedisConnectivity>>,
-  { readonly ok: true }
->["value"];
-
 const bootstrapOrExit = (logger: LogPort): WorkerBootstrap => {
   // Step 1-4 (pure planning): env → tenant → secrets → config → socket path.
   // The env-file SecretsSource is constructed HERE — the sole site that carries
@@ -204,7 +200,7 @@ const resolveAclCredentialOrExit = (
   config: HostConfig,
   tenant: TenantId,
   logger: LogPort,
-): Parameters<typeof createRedisConnectivity>[1] => {
+): RedisAclCredential | undefined => {
   // ADR-0067: if the supervisor injected a per-tenant ACL credential, connect as
   // that scoped user (NOPERM-enforced isolation). The all-or-nothing pairing
   // invariant lives in `parseAclCredential` (a half-injected credential fails

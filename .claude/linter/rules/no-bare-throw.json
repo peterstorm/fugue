@@ -1,7 +1,7 @@
 {
   "kind": "regex",
   "name": "no-bare-throw",
-  "description": "Disallow throwing raw errors in framework code \u2014 use Result/FrameworkError instead. DISABLED 2026-11-12 after measuring: 234 repo-wide sites, and architecture.md sanctions constructor-invariant throws ('Constructor invariants \u2192 may throw (guards type's validity)'). Every remaining site outside types/ is a smart-constructor or internal-assertion guard, so enabling it demands a Result-signature refactor per call site \u2014 a design change, not a lint fix. Re-enable per layer once that refactor is scheduled.",
+  "description": "Disallow throwing raw errors in framework code \u2014 use Result/FrameworkError instead. DISABLED 2026-11-12 after measuring: 231 production sites (\u2248567 including tests), and architecture.md sanctions constructor-invariant throws ('Constructor invariants \u2192 may throw (guards type's validity)'). Every remaining site outside types/ is a smart-constructor or internal-assertion guard, so enabling it demands a Result-signature refactor per call site \u2014 a design change, not a lint fix. Re-enable per layer once that refactor is scheduled.",
   "extensions": [
     ".ts"
   ],

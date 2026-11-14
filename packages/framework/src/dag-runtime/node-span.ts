@@ -38,7 +38,6 @@ import {
 import { bestEffort, bestEffortLog } from "./best-effort.js";
 import type { SideEffectProfile } from "../types/side-effects.js";
 import { nodeId as brandNodeId } from "../types/ids.js";
-import { __brandNodeId } from "../types/ids.js";
 import { safeErrorMessage, safeErrorStack } from "../types/safe-error.js";
 
 // ---------------------------------------------------------------------------
@@ -195,7 +194,7 @@ const recordNodeCrash = (span: Span, nodeId: string, error: unknown): TracedNode
   return {
     result: err({
       kind: "node-crash" as const,
-      nodeId: __brandNodeId(nodeId),
+      nodeId: brandNodeId(nodeId),
       retriability: "retriable" as const,
       message,
       ...(stack ? { stack } : {}),

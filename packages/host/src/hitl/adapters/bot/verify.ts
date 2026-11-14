@@ -13,7 +13,7 @@
  * the security-critical parsing/classification is unit-tested directly.
  */
 
-import { lazyJwks, type JwksResolver } from "../../../adapters/lazy-jwks.js";
+import { lazyJwks } from "../../../adapters/lazy-jwks.js";
 import { ok, err } from "@fuguejs/framework";
 import { z } from "zod";
 import type { BotAuthError, VerifyBotToken } from "./ports.js";
@@ -81,7 +81,12 @@ export const createBotTokenVerifier = (config: BotVerifyConfig): VerifyBotToken 
     const raw: unknown = await meta.json();
     const metadata = openIdMetadataSchema.safeParse(raw);
     if (!metadata.success) throw new Error("openid metadata missing jwks_uri");
-    return jose.createRemoteJWKSet(new URL(metadata.data.jwks_uri)) as unknown as JwksResolver;
+    // Adapter, not a cast: jose's resolver narrows its inputs, so wrap it in the
+    // `JwksResolver` shape explicitly — if `jose`'s resolver drifts (stops being
+    // callable with a header+token pair, or stops returning a Promise), this
+    // line fails to compile instead of the drift hiding behind `as unknown as`.
+    const remoteJwks = jose.createRemoteJWKSet(new URL(metadata.data.jwks_uri));
+    return (protectedHeader, token) => remoteJwks(protectedHeader as never, token as never);
   });
 
   return async (authHeader) => {

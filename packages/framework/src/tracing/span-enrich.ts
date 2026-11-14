@@ -61,14 +61,14 @@ type CostBreakdown = ReturnType<typeof costBreakdownUsd>;
 
 // Flat attributes — OTel GenAI semconv for model/provider/usage, framework-owned
 // ai.llm.cost_usd for cost (not covered by the spec).
-const setRequestAttributes = (span: Span, opts: EnrichLlmSpanOpts, cost: CostBreakdown): void => {
+const setRequestAttributes = (span: Span, opts: EnrichLlmSpanOpts, costUsd: number): void => {
   span.setAttribute(GEN_AI_REQUEST_MODEL, opts.model);
   span.setAttribute(GEN_AI_SYSTEM, opts.provider ?? "unknown");
   span.setAttribute(GEN_AI_USAGE_INPUT_TOKENS, opts.usage.tokensIn);
   span.setAttribute(GEN_AI_USAGE_OUTPUT_TOKENS, opts.usage.tokensOut);
   span.setAttribute(GEN_AI_USAGE_CACHE_WRITE_TOKENS, opts.usage.cacheWriteTokens);
   span.setAttribute(GEN_AI_USAGE_CACHE_READ_TOKENS, opts.usage.cacheReadTokens);
-  span.setAttribute(AI_LLM_COST_USD, cost.total);
+  span.setAttribute(AI_LLM_COST_USD, costUsd);
   span.setAttribute(AI_LLM_COST_PRICED, isPricedModel(opts.model));
   if (opts.cachePolicy !== undefined) {
     span.setAttribute(AI_PROMPT_CACHE_POLICY, opts.cachePolicy);
@@ -152,7 +152,7 @@ export const enrichLlmSpan = (opts: EnrichLlmSpanOpts): void => {
   // learned the multipliers, and no test would have caught the divergence.
   const cost = costBreakdownUsd(costRatesFor(opts.model), opts.usage, opts.cacheWriteTtl);
 
-  setRequestAttributes(otelSpan, opts, cost);
+  setRequestAttributes(otelSpan, opts, cost.total);
   const filter = resolveContentFilter(opts);
   addPromptEvents(otelSpan, opts, filter);
   addCostEvent(otelSpan, cost);

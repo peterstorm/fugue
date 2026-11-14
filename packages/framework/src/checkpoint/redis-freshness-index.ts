@@ -105,8 +105,15 @@ export class RedisFreshnessIndex implements FreshnessIndex {
 
   // Run the atomic ZADD + EXPIRE script, loading it on first use. A NOSCRIPT
   // reply (server flushed its script cache) falls back to inline EVAL and
-  // re-primes the SHA on the next call.
-  private async runRecordWriteScript(key: string, score: string, member: string): Promise<void> {
+  // re-primes the SHA on the next call. The three strings travel as one
+  // record — they are one write's key/score/member, not interchangeable
+  // positional values.
+  private async runRecordWriteScript(write: {
+    readonly key: string;
+    readonly score: string;
+    readonly member: string;
+  }): Promise<void> {
+    const { key, score, member } = write;
     if (!this.scriptSha) {
       this.scriptSha = (await this.redis.script(
         "LOAD",
@@ -148,7 +155,7 @@ export class RedisFreshnessIndex implements FreshnessIndex {
     const score = String(event.succeededAtMs);
 
     try {
-      await this.runRecordWriteScript(key, score, member);
+      await this.runRecordWriteScript({ key, score, member });
       this.onSuccess();
       return ok(undefined);
     } catch (e) {

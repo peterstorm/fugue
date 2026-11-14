@@ -386,20 +386,23 @@ type ScanVerdict =
 const ownValue = (obj: object, key: string): unknown =>
   Object.getOwnPropertyDescriptor(obj, key)?.value;
 
-/** The write refusal for a JS value kind JSON has no representation for. */
-const unrepresentableKind = (operation: string, path: string, noun: string, kind: string): Error =>
+/** The write refusal for a JS value kind JSON has no representation for.
+ * `kind` names the kind twice — as the noun ("a BigInt") and as the JSON
+ * gap ("no BigInt representation") — from the single argument. */
+const unrepresentableKind = (operation: string, path: string, kind: string): Error =>
   new Error(
-    `${operation}: ${path} is ${noun} — JSON has no ${kind} representation; refusing to persist a value that would diverge from the caller's event (FR-009)`,
+    `${operation}: ${path} is a ${kind} — JSON has no ${kind} representation; refusing to persist a value that would diverge from the caller's event (FR-009)`,
   );
 
 /**
  * First gate of the write pre-scan walk: `true` for an object the walk must
  * descend into, `false` for a scalar (null/undefined/string/number/boolean)
- * it admits as-is, and a throw for a kind JSON cannot represent. The seven
- * `typeof` results are a closed set matched exhaustively — there is no
- * `default` arm left to hide a kind this walk does not admit.
+ * it admits as-is, and a throw for a kind JSON cannot represent — the name
+ * is the requirement, and the throw IS the rejection of bigint/symbol/
+ * function. The seven `typeof` results are a closed set matched exhaustively
+ * — there is no `default` arm left to hide a kind this walk does not admit.
  */
-const isWalkableObject = (
+const requireWalkableObject = (
   operation: string,
   path: string,
   value: unknown,
@@ -408,13 +411,13 @@ const isWalkableObject = (
     .with("string", "number", "boolean", "undefined", () => false)
     .with("object", () => value !== null)
     .with("bigint", () => {
-      throw unrepresentableKind(operation, path, "a BigInt", "BigInt");
+      throw unrepresentableKind(operation, path, "BigInt");
     })
     .with("symbol", () => {
-      throw unrepresentableKind(operation, path, "a symbol", "symbol");
+      throw unrepresentableKind(operation, path, "symbol");
     })
     .with("function", () => {
-      throw unrepresentableKind(operation, path, "a function", "function");
+      throw unrepresentableKind(operation, path, "function");
     })
     .exhaustive();
 
@@ -495,7 +498,7 @@ const assertLosslessEventUnchecked = (
     active: Map<object, string>,
     depth: number,
   ): void => {
-    if (!isWalkableObject(operation, path, value)) return;
+    if (!requireWalkableObject(operation, path, value)) return;
 
     // Circular-reference guard: a node revisited through its own descendants
     // is a cycle; paths are tracked so the error names both ends. Sibling

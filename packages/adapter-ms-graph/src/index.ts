@@ -281,19 +281,24 @@ type GraphReadContext = Readonly<{
   timeoutMs: number;
 }>;
 
+/** The Accept header each Graph resource target requires — the two fixed pairs every caller passes. */
+const ACCEPT: Readonly<Record<"content" | "metadata", string>> = Object.freeze({
+  content: "application/octet-stream",
+  metadata: "application/json",
+});
+
 /** Acquire a token, resolve the ref, and GET the chosen URL (content or metadata). */
 const fetchGraphResource = async (
   gctx: GraphReadContext,
   ref: FileRef,
   target: "content" | "metadata",
-  accept: string,
   opts: ReadOpts | undefined,
 ): Promise<Result<Response, FrameworkError>> => {
   const token = await acquireToken(gctx.getAccessToken);
   if (!token.ok) return token;
   const urls = resolveUrls(ref, gctx.base);
   if (!urls.ok) return urls;
-  return graphGet(gctx.fetchImpl, urls.value[target], token.value, accept, opts, gctx.timeoutMs);
+  return graphGet(gctx.fetchImpl, urls.value[target], token.value, ACCEPT[target], opts, gctx.timeoutMs);
 };
 
 /** Pure mapping of a validated driveItem to the port's `FileMeta`. */
@@ -317,7 +322,7 @@ const readContent = async (
   ref: FileRef,
   opts: ReadOpts | undefined,
 ): Promise<Result<Uint8Array, FrameworkError>> => {
-  const res = await fetchGraphResource(gctx, ref, "content", "application/octet-stream", opts);
+  const res = await fetchGraphResource(gctx, ref, "content", opts);
   if (!res.ok) return res;
   try {
     const buf = await res.value.arrayBuffer();
@@ -332,7 +337,7 @@ const readMetadata = async (
   ref: FileRef,
   opts: ReadOpts | undefined,
 ): Promise<Result<FileMeta, FrameworkError>> => {
-  const res = await fetchGraphResource(gctx, ref, "metadata", "application/json", opts);
+  const res = await fetchGraphResource(gctx, ref, "metadata", opts);
   if (!res.ok) return res;
   let json: unknown;
   try {
