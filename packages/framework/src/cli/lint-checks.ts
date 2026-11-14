@@ -63,6 +63,96 @@ const checkFanInKeys = (dag: DagDef): LintError[] => {
 
 const edgeKey = (from: string, to: string): string => `${from}\0${to}`;
 
+/** The edge structure shape detection compares against the helper templates. */
+interface ShapeGraph {
+  readonly ids: readonly string[];
+  readonly edgeCount: number;
+  readonly indeg: ReadonlyMap<string, number>;
+  readonly outTargets: ReadonlyMap<string, readonly string[]>;
+  readonly actualEdges: ReadonlySet<string>;
+  readonly sources: readonly string[];
+  readonly sinks: readonly string[];
+}
+
+const buildShapeGraph = (dag: DagDef, edges: readonly DagDef["edges"][number][]): ShapeGraph => {
+  const ids = dag.nodes.map((n) => n.id as string);
+  const indeg = new Map<string, number>(ids.map((id) => [id, 0]));
+  const outTargets = new Map<string, string[]>(ids.map((id) => [id, []]));
+  const actualEdges = new Set<string>();
+  for (const e of edges) {
+    const f = e.from as string;
+    const t = e.to as string;
+    indeg.set(t, (indeg.get(t) ?? 0) + 1);
+    outTargets.get(f)!.push(t);
+    actualEdges.add(edgeKey(f, t));
+  }
+  const sources = ids.filter((id) => indeg.get(id) === 0);
+  const sinks = ids.filter((id) => outTargets.get(id)!.length === 0);
+  return { ids, edgeCount: edges.length, indeg, outTargets, actualEdges, sources, sinks };
+};
+
+// Linear: single chain — one source, one sink, every node in/out degree ≤ 1.
+const linearChainHint = (dag: DagDef, g: ShapeGraph): LintAdvisory | null => {
+  const isChain =
+    g.edgeCount === g.ids.length - 1 &&
+    g.sources.length === 1 &&
+    g.sinks.length === 1 &&
+    g.ids.every((id) => (g.indeg.get(id) ?? 0) <= 1 && g.outTargets.get(id)!.length <= 1);
+  if (!isChain) return null;
+  return {
+    kind: "shape-helper-hint",
+    helper: "defineLinearDag",
+    message:
+      `DAG '${dag.id as string}' is a linear chain — consider ` +
+      `defineLinearDag([...]) so the edges are inferred from node order.`,
+  };
+};
+
+// Fan-out with a single join (diamond): source→each branch, each branch→join,
+// and nothing else. Reconstruct the helper's edge set and compare exactly.
+const diamondHint = (
+  dag: DagDef,
+  g: ShapeGraph,
+  source: string,
+  branches: readonly string[],
+): LintAdvisory | null => {
+  const firstBranchTargets = g.outTargets.get(branches[0]!) ?? [];
+  if (firstBranchTargets.length !== 1) return null;
+  const join = firstBranchTargets[0]!;
+  if (join === source || branches.includes(join)) return null;
+  const expected = new Set<string>();
+  for (const b of branches) {
+    expected.add(edgeKey(source, b));
+    expected.add(edgeKey(b, join));
+  }
+  if (expected.size !== g.actualEdges.size || ![...expected].every((k) => g.actualEdges.has(k))) {
+    return null;
+  }
+  return {
+    kind: "shape-helper-hint",
+    helper: "defineDiamond",
+    message:
+      `DAG '${dag.id as string}' is one source fanning out to ` +
+      `${branches.length} branches that reconverge on '${join}' — ` +
+      `consider defineDiamond({ source, branches, join }).`,
+  };
+};
+
+// Fan-out with no join: every edge leaves the source; branches are all sinks.
+const fanOutHint = (dag: DagDef, g: ShapeGraph, branches: readonly string[]): LintAdvisory | null => {
+  if (g.edgeCount !== branches.length || !branches.every((b) => g.outTargets.get(b)!.length === 0)) {
+    return null;
+  }
+  return {
+    kind: "shape-helper-hint",
+    helper: "defineFanOut",
+    message:
+      `DAG '${dag.id as string}' is one source fanning out to ` +
+      `${branches.length} parallel branches — consider ` +
+      `defineFanOut({ source, branches }).`,
+  };
+};
+
 /**
  * Suggest a shape helper when a *manual* `defineDag` is edge-for-edge
  * isomorphic to one. Returns `null` for DAGs already built with a helper
@@ -78,84 +168,17 @@ const detectShapeHelper = (dag: DagDef): LintAdvisory | null => {
   const edges = dag.edges.filter((e) => !isDagInput(e.from));
   if (!edges.every((e) => e.kind === "unconditional")) return null;
 
-  const ids = dag.nodes.map((n) => n.id as string);
-  const indeg = new Map<string, number>(ids.map((id) => [id, 0]));
-  const outTargets = new Map<string, string[]>(ids.map((id) => [id, []]));
-  const actualEdges = new Set<string>();
-  for (const e of edges) {
-    const f = e.from as string;
-    const t = e.to as string;
-    indeg.set(t, (indeg.get(t) ?? 0) + 1);
-    outTargets.get(f)!.push(t);
-    actualEdges.add(edgeKey(f, t));
-  }
-  const sources = ids.filter((id) => indeg.get(id) === 0);
-  const sinks = ids.filter((id) => outTargets.get(id)!.length === 0);
+  const graph = buildShapeGraph(dag, edges);
 
-  // Linear: single chain — one source, one sink, every node in/out degree ≤ 1.
-  if (
-    edges.length === ids.length - 1 &&
-    sources.length === 1 &&
-    sinks.length === 1 &&
-    ids.every((id) => (indeg.get(id) ?? 0) <= 1 && outTargets.get(id)!.length <= 1)
-  ) {
-    return {
-      kind: "shape-helper-hint",
-      helper: "defineLinearDag",
-      message:
-        `DAG '${dag.id as string}' is a linear chain — consider ` +
-        `defineLinearDag([...]) so the edges are inferred from node order.`,
-    };
-  }
+  const linear = linearChainHint(dag, graph);
+  if (linear !== null) return linear;
 
-  if (sources.length !== 1) return null;
-  const source = sources[0]!;
-  const branches = outTargets.get(source)!;
+  if (graph.sources.length !== 1) return null;
+  const source = graph.sources[0]!;
+  const branches = graph.outTargets.get(source)!;
   if (branches.length < 2) return null;
 
-  // Fan-out with a single join (diamond): source→each branch, each branch→join,
-  // and nothing else. Reconstruct the helper's edge set and compare exactly.
-  const firstBranchTargets = outTargets.get(branches[0]!) ?? [];
-  if (firstBranchTargets.length === 1) {
-    const join = firstBranchTargets[0]!;
-    if (join !== source && !branches.includes(join)) {
-      const expected = new Set<string>();
-      for (const b of branches) {
-        expected.add(edgeKey(source, b));
-        expected.add(edgeKey(b, join));
-      }
-      if (
-        expected.size === actualEdges.size &&
-        [...expected].every((k) => actualEdges.has(k))
-      ) {
-        return {
-          kind: "shape-helper-hint",
-          helper: "defineDiamond",
-          message:
-            `DAG '${dag.id as string}' is one source fanning out to ` +
-            `${branches.length} branches that reconverge on '${join}' — ` +
-            `consider defineDiamond({ source, branches, join }).`,
-        };
-      }
-    }
-  }
-
-  // Fan-out with no join: every edge leaves the source; branches are all sinks.
-  if (
-    edges.length === branches.length &&
-    branches.every((b) => outTargets.get(b)!.length === 0)
-  ) {
-    return {
-      kind: "shape-helper-hint",
-      helper: "defineFanOut",
-      message:
-        `DAG '${dag.id as string}' is one source fanning out to ` +
-        `${branches.length} parallel branches — consider ` +
-        `defineFanOut({ source, branches }).`,
-    };
-  }
-
-  return null;
+  return diamondHint(dag, graph, source, branches) ?? fanOutHint(dag, graph, branches);
 };
 
 // ---------------------------------------------------------------------------

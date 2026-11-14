@@ -45,24 +45,33 @@ export const settleBeforeDeadline = <T>(
       resolve({ kind: "timed-out" });
     }, timeoutMs);
 
-    void operation.then(
-      (value) => {
-        if (settled) {
-          reportWithoutThrowing(diagnostics.onLateFulfillment, value);
-          return;
-        }
-        settled = true;
-        clearTimeout(timeoutId);
-        resolve({ kind: "settled", value });
-      },
-      (error: unknown) => {
-        if (settled) {
-          reportWithoutThrowing(diagnostics.onLateRejection, error);
-          return;
-        }
-        settled = true;
-        clearTimeout(timeoutId);
-        reject(error);
-      },
-    );
+    // Attach inside a try: a thenable whose `then` throws SYNCHRONOUSLY never
+    // reaches either handler, so without this catch the deadline timer would
+    // leak and fire (onTimeout, timed-out) after the executor's rejection has
+    // already propagated. Clear the timer before rethrowing.
+    try {
+      void operation.then(
+        (value) => {
+          if (settled) {
+            reportWithoutThrowing(diagnostics.onLateFulfillment, value);
+            return;
+          }
+          settled = true;
+          clearTimeout(timeoutId);
+          resolve({ kind: "settled", value });
+        },
+        (error: unknown) => {
+          if (settled) {
+            reportWithoutThrowing(diagnostics.onLateRejection, error);
+            return;
+          }
+          settled = true;
+          clearTimeout(timeoutId);
+          reject(error);
+        },
+      );
+    } catch (error) {
+      clearTimeout(timeoutId);
+      throw error;
+    }
   });

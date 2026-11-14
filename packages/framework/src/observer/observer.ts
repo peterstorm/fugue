@@ -57,7 +57,7 @@ type EventHandlers = {
  *
  * ```ts
  * const obs = createObserver({
- *   "run-end": (e) => console.log(`Run ${e.runId} finished: ${e.status}`),
+ *   "run-end": (e) => log(`Run ${e.runId} finished: ${e.status}`),
  *   "node-error": (e) => metrics.increment('node.errors'),
  * });
  * ```

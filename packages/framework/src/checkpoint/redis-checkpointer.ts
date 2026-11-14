@@ -60,7 +60,7 @@ const serializeMeta = (meta: RunMeta, createdAtMs: number): string =>
   } satisfies StoredMeta);
 
 const deserializeMeta = (raw: string): { meta: RunMeta; createdAt: Date } => {
-  const stored: StoredMeta = JSON.parse(raw);
+  const stored: unknown = JSON.parse(raw);
   // ONE encoding with the file codec (round-23 atl-1): the record grammar
   // gates (type gates, canonical ISO dates, safe-integer nodeCount, ID
   // domains) live in the checkpoint core's `parseRunMetaRecord`. The brand
@@ -88,8 +88,13 @@ const serializeNode = (
   };
 };
 
+// `parseNodeStateRecord` has already proven `stored` is a JSON object; the
+// `output` field is adapter-side pass-through, so it stays `unknown`.
+const outputOf = (stored: unknown): unknown =>
+  typeof stored === "object" && stored !== null && "output" in stored ? stored.output : undefined;
+
 const deserializeNode = (raw: string): NodeState => {
-  const stored: StoredNodeState = JSON.parse(raw);
+  const stored: unknown = JSON.parse(raw);
   // ONE encoding with the file codec (round-23 atl-1): the record grammar
   // gates live in the checkpoint core's `parseNodeStateRecord` — a non-string
   // or `ID_PATTERN`-violating nodeId, or a non-canonical completedAt, from
@@ -102,7 +107,7 @@ const deserializeNode = (raw: string): NodeState => {
   }
   return {
     nodeId: parsedNode.value.nodeId,
-    output: stored.output,
+    output: outputOf(stored),
     completedAt: parsedNode.value.completedAt,
   };
 };

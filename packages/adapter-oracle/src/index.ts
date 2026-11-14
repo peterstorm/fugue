@@ -339,6 +339,21 @@ export interface OracleQueryable {
 }
 
 /**
+ * Parse one row against the caller's schema; a mismatch is the adapter's
+ * non-retriable row-validation failure.
+ */
+const parseRow = <T,>(
+  schema: z.ZodType<T>,
+  row: unknown,
+  label: string,
+): Result<T, FrameworkError> => {
+  const parsed = schema.safeParse(row);
+  return parsed.success
+    ? ok(parsed.data)
+    : err(rowValidationError(label, parsed.error.message));
+};
+
+/**
  * Validate every row against the caller's schema, failing on the FIRST bad row.
  *
  * ONE encoding (round-38 cs-24) of the row-validation loop the real client and
@@ -352,11 +367,9 @@ const validateRows = <T,>(
 ): Result<T[], FrameworkError> => {
   const validated: T[] = [];
   for (const row of rows) {
-    const parsed = schema.safeParse(row);
-    if (!parsed.success) {
-      return err(rowValidationError(label, parsed.error.message));
-    }
-    validated.push(parsed.data);
+    const parsed = parseRow(schema, row, label);
+    if (!parsed.ok) return parsed;
+    validated.push(parsed.value);
   }
   return ok(validated);
 };
@@ -366,13 +379,8 @@ const validateFirstRow = <T,>(
   schema: z.ZodType<T>,
   rows: readonly unknown[],
   label: string,
-): Result<T | null, FrameworkError> => {
-  if (rows.length === 0) return ok(null);
-  const parsed = schema.safeParse(rows[0]);
-  return parsed.success
-    ? ok(parsed.data)
-    : err(rowValidationError(label, parsed.error.message));
-};
+): Result<T | null, FrameworkError> =>
+  rows.length === 0 ? ok(null) : parseRow(schema, rows[0], label);
 
 /**
  * Build an `OracleCapability` over an injected queryable seam. Exported for
@@ -484,6 +492,164 @@ interface OraclePool {
   close(drainTimeSeconds: number): Promise<void>;
 }
 
+/** Pool lifecycle seam: lazily created, reset on a failed open, closed with zero drain. */
+interface OraclePoolLifecycle {
+  readonly getPool: () => Promise<OraclePool>;
+  readonly closePool: () => Promise<void>;
+}
+
+/**
+ * Pin numeric locale once per physical connection so NUMBER→string prices use
+ * a period decimal regardless of the DB's default locale (see
+ * ORACLE_SESSION_NLS_SQL). Amortized across every query on the connection
+ * rather than paid per getConnection(). MUST be the node-callback form — the
+ * async/promise form hangs in thin mode.
+ */
+const applySessionNls = (
+  connection: OracleConnection,
+  _requestedTag: string,
+  callbackFn: (error?: unknown) => void,
+): void => {
+  connection
+    .execute(ORACLE_SESSION_NLS_SQL)
+    .then(() => callbackFn())
+    .catch((e: unknown) => callbackFn(e));
+};
+
+/**
+ * The pool is created eagerly (returns a Promise); we acquire connections
+ * per query. Construction is deferred behind a lazily-awaited promise so the
+ * handle is synchronous to build (mirrors pg's synchronous `new Pool`).
+ */
+const createPoolLifecycle = (oracledb: OracleDbModule, config: OracleAdapterConfig): OraclePoolLifecycle => {
+  const poolMin = config.poolMin ?? 0;
+  const poolMax = config.poolMax ?? 4;
+  let poolPromise: Promise<OraclePool> | undefined;
+
+  const getPool = (): Promise<OraclePool> => {
+    if (poolPromise == null) {
+      poolPromise = oracledb
+        .createPool({
+          connectString: config.connectString,
+          user: config.user,
+          password: config.password,
+          poolMin,
+          poolMax,
+          sessionCallback: applySessionNls,
+        })
+        .catch((e) => {
+          // Reset so a transient createPool failure (DNS blip, listener not yet
+          // up, ORA-12541 during a rolling DB restart) can be retried on the
+          // next call rather than wedging the capability with a permanently
+          // cached rejection. Mirrors realm-jwt-verifier's jwksPromise reset and
+          // honours mapOracleError's transient/retriable classification. Also
+          // makes `close()` a clean no-op after a failed open (poolPromise is
+          // undefined again rather than a rejected promise it would re-await).
+          poolPromise = undefined;
+          throw e;
+        });
+    }
+    return poolPromise;
+  };
+
+  const closePool = async (): Promise<void> => {
+    if (poolPromise == null) return;
+    const pool = await poolPromise;
+    await pool.close(0);
+  };
+
+  return { getPool, closePool };
+};
+
+/**
+ * Release ONE pooled connection: try to close it, and warn-without-throwing on
+ * failure. ONE definition for every release site — a release failure must
+ * never mask the outcome the caller is about to return (a completed query
+ * returning Err would read as a retriable failure and a write DML re-run
+ * becomes a double-execution hazard), and it must never erase the evidence
+ * that the pool is leaking either (a repeated release fault can exhaust the
+ * pool), so the caller's message names the context it preserves.
+ */
+const releaseQuietly = async (conn: OracleConnection, message: string): Promise<void> => {
+  try {
+    await conn.close();
+  } catch (closeError) {
+    warnOracleWithoutThrowing(message, closeError);
+  }
+};
+
+/**
+ * Production queryable: acquire a pooled connection, execute with
+ * OUT_FORMAT_OBJECT, always release the connection. A release failure must
+ * never mask a SUCCEEDED statement (mirror the connect() path below): a
+ * completed query returning Err would read as a retriable failure and a
+ * write DML re-run becomes a double-execution hazard — the exact class the
+ * rest of the system works to prevent. The close failure is reported
+ * alongside the primary outcome (credential-stripped warn), never instead
+ * of it. A failing execute still releases, but the statement error stays
+ * primary.
+ */
+const createPooledQueryable = (oracledb: OracleDbModule, getPool: () => Promise<OraclePool>): OracleQueryable => ({
+  execute: async (sql, binds, opts) => {
+    const pool = await getPool();
+    const conn = await pool.getConnection();
+    try {
+      const result = await conn.execute(sql, binds ?? {}, {
+        outFormat: opts?.outFormat ?? oracledb.OUT_FORMAT_OBJECT,
+      });
+      await releaseQuietly(conn, "query succeeded but connection release failed");
+      return result;
+    } catch (e) {
+      // Preserve the statement error as the caller-visible outcome, but do
+      // not erase evidence that the pooled connection also failed to
+      // release (a repeated release fault can exhaust the pool).
+      await releaseQuietly(conn, "query failed and connection release also failed; preserving statement error");
+      throw e;
+    }
+  },
+});
+
+/**
+ * Validate connectivity through the pool. ANY failure here — pool
+ * creation (createPool DSN parse), getConnection (ORA-12154/ORA-01017),
+ * or the SELECT 1 — must surface CREDENTIAL-STRIPPED: oracledb connect-time
+ * errors routinely echo the supplied connectString/DSN, and this error
+ * propagates to the boot log and the abort HostError (createHost
+ * connectAll). Mirror healthCheckWithTimeout: re-throw with the message run
+ * through stripCredentials, releasing the connection in finally (FR-041 /
+ * NFR-020 / SC-008).
+ */
+const validateConnectivity = async (
+  oracledb: OracleDbModule,
+  getPool: () => Promise<OraclePool>,
+): Promise<void> => {
+  let conn: OracleConnection | undefined;
+  let primaryFailure: Error | undefined;
+  try {
+    const pool = await getPool();
+    conn = await pool.getConnection();
+    await conn.execute("SELECT 1 FROM DUAL", {}, { outFormat: oracledb.OUT_FORMAT_OBJECT });
+  } catch (error) {
+    primaryFailure = new Error(oracleDiagnostic(error));
+  }
+
+  if (conn !== undefined) {
+    try {
+      await conn.close();
+    } catch (releaseError) {
+      if (primaryFailure !== undefined) {
+        warnOracleWithoutThrowing(
+          "connect validation failed and connection release also failed; preserving validation error",
+          releaseError,
+        );
+      } else {
+        throw new Error(`Oracle connect validation release failed: ${oracleDiagnostic(releaseError)}`);
+      }
+    }
+  }
+  if (primaryFailure !== undefined) throw primaryFailure;
+};
+
 /**
  * Create an Oracle capability handle.
  *
@@ -515,135 +681,14 @@ export const createOracleAdapter = (config: OracleAdapterConfig): CapabilityHand
   const requireModule = createRequire(import.meta.url);
   const oracledb = requireModule("oracledb") as OracleDbModule;
 
-  const poolMin = config.poolMin ?? 0;
-  const poolMax = config.poolMax ?? 4;
-
-  // The pool is created eagerly (returns a Promise); we acquire connections
-  // per query. Construction is deferred behind a lazily-awaited promise so the
-  // handle is synchronous to build (mirrors pg's synchronous `new Pool`).
-  let poolPromise: Promise<OraclePool> | undefined;
-  const getPool = (): Promise<OraclePool> => {
-    if (poolPromise == null) {
-      poolPromise = oracledb
-        .createPool({
-          connectString: config.connectString,
-          user: config.user,
-          password: config.password,
-          poolMin,
-          poolMax,
-          // Pin numeric locale once per physical connection so NUMBER→string
-          // prices use a period decimal regardless of the DB's default locale
-          // (see ORACLE_SESSION_NLS_SQL). Amortized across every query on the
-          // connection rather than paid per getConnection(). MUST be the
-          // node-callback form — the async/promise form hangs in thin mode.
-          sessionCallback: (connection, _requestedTag, callbackFn) => {
-            connection
-              .execute(ORACLE_SESSION_NLS_SQL)
-              .then(() => callbackFn())
-              .catch((e: unknown) => callbackFn(e));
-          },
-        })
-        .catch((e) => {
-          // Reset so a transient createPool failure (DNS blip, listener not yet
-          // up, ORA-12541 during a rolling DB restart) can be retried on the
-          // next call rather than wedging the capability with a permanently
-          // cached rejection. Mirrors realm-jwt-verifier's jwksPromise reset and
-          // honours mapOracleError's transient/retriable classification. Also
-          // makes `close()` a clean no-op after a failed open (poolPromise is
-          // undefined again rather than a rejected promise it would re-await).
-          poolPromise = undefined;
-          throw e;
-        });
-    }
-    return poolPromise;
-  };
-
-  // Production queryable: acquire a pooled connection, execute with
-  // OUT_FORMAT_OBJECT, always release the connection. A release failure must
-  // never mask a SUCCEEDED statement (mirror the connect() path below): a
-  // completed query returning Err would read as a retriable failure and a
-  // write DML re-run becomes a double-execution hazard — the exact class the
-  // rest of the system works to prevent. The close failure is reported
-  // alongside the primary outcome (credential-stripped warn), never instead
-  // of it. A failing execute still releases, but the statement error stays
-  // primary.
-  const queryable: OracleQueryable = {
-    execute: async (sql, binds, opts) => {
-      const pool = await getPool();
-      const conn = await pool.getConnection();
-      try {
-        const result = await conn.execute(sql, binds ?? {}, {
-          outFormat: opts?.outFormat ?? oracledb.OUT_FORMAT_OBJECT,
-        });
-        try {
-          await conn.close();
-        } catch (closeError) {
-          warnOracleWithoutThrowing("query succeeded but connection release failed", closeError);
-        }
-        return result;
-      } catch (e) {
-        try {
-          await conn.close();
-        } catch (closeError) {
-          // Preserve the statement error as the caller-visible outcome, but do
-          // not erase evidence that the pooled connection also failed to
-          // release (a repeated release fault can exhaust the pool).
-          warnOracleWithoutThrowing(
-            "query failed and connection release also failed; preserving statement error",
-            closeError,
-          );
-        }
-        throw e;
-      }
-    },
-  };
+  const { getPool, closePool } = createPoolLifecycle(oracledb, config);
+  const queryable = createPooledQueryable(oracledb, getPool);
 
   return {
     name: "oracle",
     client: createOracleClient(queryable),
-
-    connect: async () => {
-      // Validate connectivity through the pool. ANY failure here — pool
-      // creation (createPool DSN parse), getConnection (ORA-12154/ORA-01017),
-      // or the SELECT 1 — must surface CREDENTIAL-STRIPPED: oracledb connect-time
-      // errors routinely echo the supplied connectString/DSN, and this error
-      // propagates to the boot log and the abort HostError (createHost
-      // connectAll). Mirror healthCheckWithTimeout: re-throw with the message run
-      // through stripCredentials, releasing the connection in finally (FR-041 /
-      // NFR-020 / SC-008).
-      let conn: OracleConnection | undefined;
-      let primaryFailure: Error | undefined;
-      try {
-        const pool = await getPool();
-        conn = await pool.getConnection();
-        await conn.execute("SELECT 1 FROM DUAL", {}, { outFormat: oracledb.OUT_FORMAT_OBJECT });
-      } catch (error) {
-        primaryFailure = new Error(oracleDiagnostic(error));
-      }
-
-      if (conn !== undefined) {
-        try {
-          await conn.close();
-        } catch (releaseError) {
-          if (primaryFailure !== undefined) {
-            warnOracleWithoutThrowing(
-              "connect validation failed and connection release also failed; preserving validation error",
-              releaseError,
-            );
-          } else {
-            throw new Error(`Oracle connect validation release failed: ${oracleDiagnostic(releaseError)}`);
-          }
-        }
-      }
-      if (primaryFailure !== undefined) throw primaryFailure;
-    },
-
-    close: async () => {
-      if (poolPromise == null) return;
-      const pool = await poolPromise;
-      await pool.close(0);
-    },
-
+    connect: () => validateConnectivity(oracledb, getPool),
+    close: closePool,
     healthCheck: () => healthCheckWithTimeout(queryable, HEALTH_CHECK_TIMEOUT_MS),
   };
 };

@@ -1,135 +1,133 @@
 {
+  "exclude": [
+    {
+      "path": "packages/framework/docs/examples/",
+      "reason": "byte-copies of the examples workspace's DAG samples (packages/examples/dags), typechecked there with a drift test asserting the copy stays byte-identical \u2014 not compiled by a package tsconfig"
+    },
+    {
+      "path": "packages/framework/src/__tests__/boundary-imports.test.ts",
+      "reason": "its fixtures ARE import statements written as strings \u2014 the boundary checker's own corpus, unreadable by a text-based import extractor"
+    },
+    {
+      "path": "packages/framework/src/__tests__/cli/fixtures/",
+      "reason": "CLI fixture corpus: the near-identical invalid/success pairs ARE the test input, so identical blocks between fixture files are the point rather than duplicated logic"
+    }
+  ],
+  "requireGovernance": [
+    "packages/"
+  ],
   "boundaries": [
     {
-      "module": "packages/host/src/domain/",
-      "allow": ["./", "packages/host/src/domain/", "@fuguejs/framework", "zod", "ts-pattern"],
+      "module": "packages/framework/src/types/",
+      "description": "The bottom of the framework: pure domain types, branded ids and discriminated unions. Imports nothing upward; the one shared/ edge is the public barrel re-exporting the pure JSON-patch impl.",
+      "allow": [
+        "./",
+        "packages/framework/src/types/",
+        "packages/framework/src/shared/",
+        "zod",
+        "ts-pattern",
+        "bun:test",
+        "fast-check"
+      ],
       "deny": [
-        "packages/host/src/adapters/",
-        "packages/host/src/http/",
-        "packages/host/src/sync/",
-        "packages/host/src/lifecycle/",
-        "packages/host/src/host",
-        "packages/host/src/main",
-        "hono",
+        "node:",
+        "packages/framework/src/dag-runtime/",
+        "packages/framework/src/executor/",
+        "packages/framework/src/checkpoint/",
+        "packages/framework/src/llm/",
+        "packages/framework/src/cache/",
+        "packages/framework/src/queue/",
+        "packages/framework/src/observer/",
+        "packages/framework/src/tracing/",
+        "packages/framework/src/file/",
+        "packages/host/",
+        "@fuguejs/host",
         "ioredis",
-        "yaml"
-      ]
-    },
-    {
-      "module": "packages/host/src/sync/",
-      "allow": ["./", "packages/host/src/sync/", "packages/host/src/domain/", "packages/host/src/adapters/", "@fuguejs/framework"],
-      "deny": [
-        "packages/host/src/http/",
-        "packages/host/src/lifecycle/",
-        "packages/host/src/host",
-        "packages/host/src/main",
-        "hono",
-        "ioredis"
-      ]
-    },
-    {
-      "module": "packages/host/src/http/",
-      "allow": ["./", "packages/host/src/http/", "packages/host/src/domain/", "@fuguejs/framework", "hono", "ts-pattern"],
-      "deny": [
-        "packages/host/src/adapters/",
-        "packages/host/src/sync/",
-        "packages/host/src/lifecycle/",
-        "packages/host/src/host",
-        "packages/host/src/main",
-        "ioredis"
-      ]
-    },
-    {
-      "module": "packages/host/src/lifecycle/",
-      "allow": ["./", "packages/host/src/lifecycle/", "packages/host/src/domain/", "packages/host/src/adapters/", "packages/host/src/sync/", "@fuguejs/framework"],
-      "deny": [
-        "packages/host/src/http/",
-        "packages/host/src/host",
-        "packages/host/src/main",
-        "hono",
-        "ioredis"
-      ]
-    },
-    {
-      "module": "packages/host/src/adapters/",
-      "allow": ["./", "packages/host/src/adapters/", "packages/host/src/domain/", "@fuguejs/framework", "ts-pattern"],
-      "deny": [
-        "packages/host/src/http/",
-        "packages/host/src/sync/",
-        "packages/host/src/lifecycle/",
-        "packages/host/src/host",
-        "packages/host/src/main",
         "hono"
       ]
     },
     {
-      "module": "packages/framework/src/types/",
-      "allow": ["./", "packages/framework/src/types/", "zod"],
-      "deny": [
-        "packages/framework/src/dag-runtime/",
-        "packages/framework/src/shared/",
-        "packages/framework/src/executor/",
-        "packages/framework/src/llm/",
-        "packages/framework/src/observer/",
-        "packages/framework/src/cache/",
-        "packages/framework/src/checkpoint/",
-        "packages/framework/src/queue/",
-        "packages/framework/src/queue-bullmq/",
-        "packages/framework/src/scheduler/",
-        "packages/framework/src/tracing/",
-        "packages/framework/src/state-machine/",
-        "packages/framework/src/nodes/",
-        "packages/framework/src/sugar/",
-        "@opentelemetry/",
-        "bullmq",
-        "ioredis"
-      ]
-    },
-    {
       "module": "packages/framework/src/shared/",
-      "allow": ["./", "packages/framework/src/shared/", "packages/framework/src/types/", "zod", "node:crypto"],
+      "description": "Pure utilities (topo sort, hashing, JSON patch, composite node-address codec). Depends on types/ and the logger seam only; never on the runtime or a backend.",
+      "allow": [
+        "./",
+        "packages/framework/src/shared/",
+        "packages/framework/src/types/",
+        "packages/framework/src/logger",
+        "node:",
+        "zod",
+        "ts-pattern",
+        "bun:test",
+        "fast-check"
+      ],
       "deny": [
         "packages/framework/src/dag-runtime/",
         "packages/framework/src/executor/",
-        "packages/framework/src/llm/",
-        "packages/framework/src/cache/",
+        "packages/framework/src/state-machine/",
         "packages/framework/src/checkpoint/",
+        "packages/framework/src/file/",
+        "packages/framework/src/cache/",
+        "packages/framework/src/llm/",
         "packages/framework/src/queue/",
         "packages/framework/src/queue-bullmq/",
         "packages/framework/src/scheduler/",
-        "packages/framework/src/state-machine/",
         "packages/framework/src/nodes/",
-        "bullmq",
+        "packages/framework/src/observer/",
+        "packages/framework/src/tracing/",
+        "packages/host/",
+        "@fuguejs/host",
         "ioredis",
-        "@opentelemetry/"
+        "bullmq",
+        "hono"
       ]
     },
     {
       "module": "packages/framework/src/state-machine/",
-      "allow": ["./", "packages/framework/src/state-machine/", "packages/framework/src/types/"],
+      "description": "The generic state-machine kernel: transitions, replay, serialization. Pure over types/; knows no DAG, no backend and no transport.",
+      "allow": [
+        "./",
+        "packages/framework/src/state-machine/",
+        "packages/framework/src/types/",
+        "node:",
+        "zod",
+        "ts-pattern",
+        "bun:test",
+        "fast-check"
+      ],
       "deny": [
         "packages/framework/src/dag-runtime/",
         "packages/framework/src/executor/",
-        "packages/framework/src/llm/",
-        "packages/framework/src/observer/",
-        "packages/framework/src/cache/",
         "packages/framework/src/checkpoint/",
-        "packages/framework/src/queue/",
+        "packages/framework/src/file/",
+        "packages/framework/src/cache/",
         "packages/framework/src/queue-bullmq/",
         "packages/framework/src/scheduler/",
-        "packages/framework/src/tracing/",
-        "bullmq",
+        "packages/host/",
+        "@fuguejs/host",
         "ioredis",
-        "@opentelemetry/"
+        "bullmq",
+        "hono"
       ]
     },
     {
-      "module": "packages/framework/src/dag-runtime/fan/__tests__/",
+      "module": "packages/framework/src/dag-runtime/",
+      "description": "Pure transitions plus the imperative execution shell for one DAG run. May read the runtime's own collaborators (tracing, logger, observer, queue, checkpoint, the eval-judge node types) but never the public executor, the LLM clients, the caches or a transport adapter.",
       "allow": [
         "./",
         "packages/framework/src/dag-runtime/",
         "packages/framework/src/types/",
         "packages/framework/src/shared/",
+        "packages/framework/src/state-machine/",
+        "packages/framework/src/tracing/",
+        "packages/framework/src/logger",
+        "packages/framework/src/observer/",
+        "packages/framework/src/queue/",
+        "packages/framework/src/checkpoint/",
+        "packages/framework/src/nodes/eval-judge",
+        "node:",
+        "ts-pattern",
+        "zod",
+        "@opentelemetry/",
         "bun:test",
         "fast-check"
       ],
@@ -137,81 +135,444 @@
         "packages/framework/src/executor/",
         "packages/framework/src/llm/",
         "packages/framework/src/cache/",
-        "packages/framework/src/checkpoint/",
         "packages/framework/src/queue-bullmq/",
         "packages/framework/src/scheduler/",
+        "packages/framework/src/cli/",
+        "packages/host/",
+        "@fuguejs/host",
+        "ioredis",
         "bullmq",
-        "ioredis"
-      ]
-    },
-    {
-      "module": "packages/framework/src/dag-runtime/",
-      "allow": [
-        "./",
-        "packages/framework/src/dag-runtime/",
-        "packages/framework/src/types/",
-        "packages/framework/src/shared/",
-        "packages/framework/src/state-machine/",
-        "packages/framework/src/observer/",
-        "packages/framework/src/tracing/",
-        "packages/framework/src/queue/",
-        "packages/framework/src/logger",
-        "ts-pattern",
-        "@opentelemetry/"
-      ],
-      "deny": [
-        "packages/framework/src/executor/",
-        "packages/framework/src/llm/",
-        "packages/framework/src/cache/",
-        "packages/framework/src/checkpoint/",
-        "packages/framework/src/queue-bullmq/",
-        "packages/framework/src/scheduler/",
-        "bullmq",
-        "ioredis"
+        "hono"
       ]
     },
     {
       "module": "packages/framework/src/scheduler/",
-      "allow": ["./", "packages/framework/src/scheduler/", "packages/framework/src/types/"],
+      "description": "The cron scheduler: a timer-driven shell over the queue port and the logger. No transport adapter, no host.",
+      "allow": [
+        "./",
+        "packages/framework/src/scheduler/",
+        "packages/framework/src/queue/",
+        "packages/framework/src/logger",
+        "packages/framework/src/shared/",
+        "packages/framework/src/types/",
+        "packages/framework/src/state-machine/",
+        "node:",
+        "cron-parser",
+        "ts-pattern",
+        "zod",
+        "bun:test",
+        "fast-check"
+      ],
       "deny": [
+        "packages/framework/src/queue-bullmq/",
         "packages/framework/src/dag-runtime/",
         "packages/framework/src/executor/",
-        "packages/framework/src/llm/",
-        "packages/framework/src/observer/",
-        "packages/framework/src/cache/",
-        "packages/framework/src/checkpoint/",
-        "packages/framework/src/queue-bullmq/",
-        "bullmq",
+        "packages/host/",
+        "@fuguejs/host",
         "ioredis",
-        "@opentelemetry/"
+        "bullmq",
+        "hono"
       ]
     },
     {
       "module": "packages/framework/src/queue-bullmq/",
+      "description": "The BullMQ/Redis queue adapter. Owns the only sanctioned bullmq + ioredis imports outside the redis checkpoint/cache adapters; may use the executor in tests.",
       "allow": [
         "./",
         "packages/framework/src/queue-bullmq/",
-        "packages/framework/src/types/",
         "packages/framework/src/queue/",
         "packages/framework/src/state-machine/",
+        "packages/framework/src/types/",
         "packages/framework/src/logger",
+        "packages/framework/src/executor/",
+        "packages/framework/src/__tests__/",
+        "node:",
         "bullmq",
-        "ioredis"
+        "ioredis",
+        "zod",
+        "ts-pattern",
+        "bun:test",
+        "fast-check"
       ],
       "deny": [
-        "packages/framework/src/dag-runtime/",
-        "packages/framework/src/executor/",
-        "packages/framework/src/llm/",
-        "packages/framework/src/observer/",
-        "packages/framework/src/cache/",
-        "packages/framework/src/checkpoint/",
-        "packages/framework/src/scheduler/"
+        "packages/host/",
+        "@fuguejs/host",
+        "hono"
+      ]
+    },
+    {
+      "module": "packages/framework/",
+      "description": "The framework package root: everything not claimed by a finer boundary (executor, llm, nodes, cache, checkpoint, file, observer, tracing, cli, scripts). Imports its own tree plus declared externals; never the host package (except the generated-app contract in codegen/docs) or an adapter package.",
+      "allow": [
+        "./",
+        "packages/framework/src/",
+        "@fuguejs/framework",
+        "@fuguejs/host/contract",
+        "node:",
+        "bun:test",
+        "bun:ffi",
+        "fast-check",
+        "zod",
+        "ts-pattern",
+        "ioredis",
+        "bullmq",
+        "cron-parser",
+        "yaml",
+        "typescript",
+        "@opentelemetry/",
+        "@anthropic-ai/sdk",
+        "@azure/",
+        "openai",
+        "@fuguejs\\/framework"
+      ],
+      "deny": [
+        "packages/host/",
+        "@fuguejs/host/src",
+        "@fuguejs/ms-graph",
+        "@fuguejs/oracle",
+        "@fuguejs/fs",
+        "@fuguejs/http-auth",
+        "@fuguejs/document-source",
+        "hono",
+        "pg"
+      ]
+    },
+    {
+      "module": "packages/host/src/domain/",
+      "description": "The host's functional core: pure state machines, config parsing, error mapping, auth model. Imports ports and the framework only; never an adapter, the HTTP shell or the lifecycle shell.",
+      "allow": [
+        "./",
+        "packages/host/src/domain/",
+        "packages/host/src/ports",
+        "@fuguejs/framework",
+        "zod",
+        "ts-pattern",
+        "node:",
+        "bun:test",
+        "fast-check"
+      ],
+      "deny": [
+        "packages/host/src/adapters/",
+        "packages/host/src/http/",
+        "packages/host/src/sync/",
+        "packages/host/src/lifecycle/",
+        "packages/host/src/supervisor/",
+        "packages/host/src/hitl/",
+        "packages/host/src/host",
+        "packages/host/src/main",
+        "hono",
+        "ioredis",
+        "bullmq"
+      ]
+    },
+    {
+      "module": "packages/host/src/sync/",
+      "description": "The git sync loop: timer-driven shell over the registry and the git adapter. Reads the domain and its ports; never the HTTP shell or the top-level wiring.",
+      "allow": [
+        "./",
+        "packages/host/src/sync/",
+        "packages/host/src/domain/",
+        "packages/host/src/ports",
+        "@fuguejs/framework",
+        "ts-pattern",
+        "zod",
+        "node:",
+        "bun:test"
+      ],
+      "deny": [
+        "packages/host/src/http/",
+        "packages/host/src/lifecycle/",
+        "packages/host/src/host",
+        "packages/host/src/main",
+        "hono",
+        "ioredis",
+        "bullmq"
+      ]
+    },
+    {
+      "module": "packages/host/src/http/",
+      "description": "The HTTP shell: Hono routes, handlers and middleware. Orchestrates the domain, the ports, the supervisor, the HITL service and the adapters it is wired with; never the top-level host wiring.",
+      "allow": [
+        "./",
+        "packages/host/src/http/",
+        "packages/host/src/domain/",
+        "packages/host/src/ports",
+        "packages/host/src/supervisor/",
+        "packages/host/src/hitl/",
+        "packages/host/src/adapters/",
+        "packages/host/src/entrypoint-wiring/",
+        "@fuguejs/framework",
+        "hono",
+        "ts-pattern",
+        "zod",
+        "jose",
+        "node:",
+        "bun:test",
+        "fast-check"
+      ],
+      "deny": [
+        "packages/host/src/host",
+        "packages/host/src/main",
+        "ioredis",
+        "bullmq"
+      ]
+    },
+    {
+      "module": "packages/host/src/lifecycle/",
+      "description": "Boot, signals and the Redis probe: the process-lifecycle shell. Domain, ports, adapters and sync; never the HTTP shell or top-level wiring.",
+      "allow": [
+        "./",
+        "packages/host/src/lifecycle/",
+        "packages/host/src/domain/",
+        "packages/host/src/ports",
+        "packages/host/src/sync/",
+        "packages/host/src/adapters/",
+        "@fuguejs/framework",
+        "node:",
+        "ts-pattern",
+        "bun:test"
+      ],
+      "deny": [
+        "packages/host/src/host",
+        "packages/host/src/main",
+        "hono",
+        "bullmq"
+      ]
+    },
+    {
+      "module": "packages/host/src/adapters/",
+      "description": "The host's infrastructure adapters (Redis, git, Graph, Keycloak, spend authority, run executor). Implements domain-owned ports; may read the domain, the ports and the sibling shells it adapts, never the top-level wiring.",
+      "allow": [
+        "./",
+        "packages/host/src/adapters/",
+        "packages/host/src/domain/",
+        "packages/host/src/ports",
+        "packages/host/src/hitl/",
+        "packages/host/src/supervisor/",
+        "packages/host/src/entrypoint-wiring",
+        "packages/host/src/sync/",
+        "packages/host/src/http/",
+        "@fuguejs/framework",
+        "@fuguejs/http-auth",
+        "@fuguejs/ms-graph",
+        "@fuguejs/fs",
+        "@fuguejs/oracle",
+        "@azure/",
+        "jose",
+        "ioredis",
+        "zod",
+        "ts-pattern",
+        "node:",
+        "bun:test",
+        "fast-check"
+      ],
+      "deny": [
+        "packages/host/src/host",
+        "packages/host/src/main",
+        "hono",
+        "bullmq"
+      ]
+    },
+    {
+      "module": "packages/host/",
+      "description": "The host package root: the top-level shell (host.ts, main.ts), the supervisor, the HITL subsystem, entrypoint wiring and the ports module. Composes everything inside the package; never reaches into framework internals or another package's source.",
+      "allow": [
+        "./",
+        "packages/host/src/",
+        "@fuguejs/framework",
+        "@fuguejs/http-auth",
+        "@fuguejs/ms-graph",
+        "@fuguejs/fs",
+        "@fuguejs/oracle",
+        "@azure/",
+        "@anthropic-ai/sdk",
+        "hono",
+        "ioredis",
+        "bullmq",
+        "jose",
+        "zod",
+        "ts-pattern",
+        "node:",
+        "bun:test",
+        "bun:ffi",
+        "fast-check",
+        "fs",
+        "path",
+        "os",
+        "url",
+        "crypto",
+        "child_process"
+      ],
+      "deny": [
+        "packages/framework/",
+        "packages/adapter-",
+        "packages/http-auth/",
+        "packages/document-source/",
+        "packages/xlsx/",
+        "pg"
+      ]
+    },
+    {
+      "module": "packages/adapter-pg/",
+      "description": "CockroachDB/Postgres capability adapter. Depends on the framework's adapter-factory surface and its own driver.",
+      "allow": [
+        "./",
+        "packages/adapter-pg/src/",
+        "@fuguejs/framework",
+        "pg",
+        "zod",
+        "ts-pattern",
+        "node:",
+        "bun:test"
+      ],
+      "deny": [
+        "packages/host/",
+        "@fuguejs/host",
+        "packages/framework/src/"
+      ]
+    },
+    {
+      "module": "packages/adapter-oracle/",
+      "description": "Oracle capability adapter. Depends on the framework's adapter-factory surface and the injected driver.",
+      "allow": [
+        "./",
+        "packages/adapter-oracle/src/",
+        "@fuguejs/framework",
+        "zod",
+        "ts-pattern",
+        "node:",
+        "bun:test"
+      ],
+      "deny": [
+        "packages/host/",
+        "@fuguejs/host",
+        "packages/framework/src/"
+      ]
+    },
+    {
+      "module": "packages/adapter-ms-graph/",
+      "description": "Microsoft Graph document capability adapter. Depends on the framework and the document-source port; never the host.",
+      "allow": [
+        "./",
+        "packages/adapter-ms-graph/src/",
+        "@fuguejs/framework",
+        "@fuguejs/document-source",
+        "zod",
+        "ts-pattern",
+        "node:",
+        "bun:test"
+      ],
+      "deny": [
+        "packages/host/",
+        "@fuguejs/host",
+        "packages/framework/src/"
+      ]
+    },
+    {
+      "module": "packages/http-auth/",
+      "description": "Shared HTTP auth primitives (JWKS verification, claims policy). Depends on the framework's Result surface; never the host.",
+      "allow": [
+        "./",
+        "packages/http-auth/src/",
+        "@fuguejs/framework",
+        "jose",
+        "zod",
+        "ts-pattern",
+        "node:",
+        "bun:test"
+      ],
+      "deny": [
+        "packages/host/",
+        "@fuguejs/host",
+        "packages/framework/src/"
+      ]
+    },
+    {
+      "module": "packages/document-source/",
+      "description": "The document-source port and its shared types. Framework Result surface only.",
+      "allow": [
+        "./",
+        "packages/document-source/src/",
+        "@fuguejs/framework",
+        "zod",
+        "ts-pattern",
+        "node:",
+        "bun:test"
+      ],
+      "deny": [
+        "packages/host/",
+        "@fuguejs/host",
+        "packages/framework/src/"
+      ]
+    },
+    {
+      "module": "packages/xlsx/",
+      "description": "The streaming XLSX reader and its benches: own tree plus node built-ins, its two runtime deps, and the dev-only differential oracles (xlsx/exceljs/jszip) which only tests and benches may use.",
+      "allow": [
+        "./",
+        "packages/xlsx/",
+        "@fuguejs/framework",
+        "@fuguejs/fs",
+        "node:",
+        "fflate",
+        "saxes",
+        "zod",
+        "ts-pattern",
+        "bun:test",
+        "fast-check",
+        "xlsx",
+        "exceljs",
+        "jszip"
+      ],
+      "deny": [
+        "packages/host/",
+        "@fuguejs/host"
+      ]
+    },
+    {
+      "module": "packages/adapter-fs/",
+      "description": "The local-filesystem document-source adapter: framework Result surface plus node:fs.",
+      "allow": [
+        "./",
+        "packages/adapter-fs/",
+        "@fuguejs/framework",
+        "@fuguejs/document-source",
+        "zod",
+        "ts-pattern",
+        "node:",
+        "fs",
+        "path",
+        "bun:test"
+      ],
+      "deny": [
+        "packages/host/",
+        "@fuguejs/host",
+        "packages/framework/src/"
+      ]
+    },
+    {
+      "module": "packages/examples/",
+      "description": "Runnable example DAGs: the public framework surface, the document-source port, and the host's registration contract \u2014 never host internals.",
+      "allow": [
+        "./",
+        "packages/examples/src/",
+        "packages/examples/",
+        "@fuguejs/framework",
+        "zod",
+        "ts-pattern",
+        "node:",
+        "bun:test",
+        "@fuguejs/document-source",
+        "@fuguejs/host/contract"
+      ],
+      "deny": [
+        "packages/host/",
+        "packages/framework/src/"
       ]
     }
   ],
   "pureModules": [
     "packages/host/src/domain/",
-    "packages/host/src/sync/diff.ts",
     "packages/framework/src/types/",
     "packages/framework/src/shared/build-input.ts",
     "packages/framework/src/shared/hash.ts",
@@ -225,7 +586,6 @@
     "packages/framework/src/dag-runtime/wave-resolution.ts",
     "packages/framework/src/dag-runtime/retry-policy.ts",
     "packages/framework/src/dag-runtime/human-resolution.ts",
-    "packages/framework/src/dag-runtime/conditional.ts",
     "packages/framework/src/dag-runtime/topology.ts",
     "packages/framework/src/state-machine/replay.ts",
     "packages/framework/src/scheduler/catch-up.ts",
@@ -233,6 +593,192 @@
     "packages/framework/src/scheduler/diff.ts",
     "packages/framework/src/dag-runtime/fan/"
   ],
-  "maxFunctionLines": 60,
-  "excludeFromMaxLines": [".test.ts", ".spec.ts", ".property.test.ts", "host.ts", "run-dag.ts"]
+  "impureModules": [
+    {
+      "path": "packages/framework/src/types/clock.ts",
+      "reason": "systemClock \u2014 the one wall-clock read inside types/; every other module in types/ is pure"
+    },
+    {
+      "path": "packages/host/src/domain/tenant-header.ts",
+      "reason": "node:crypto's synchronous HMAC/timingSafeEqual primitives \u2014 pure computation over its inputs, but the purity rule's node: predicate cannot distinguish a primitive from I/O"
+    },
+    {
+      "path": "packages/host/src/domain/capability-manager.ts",
+      "reason": "lifecycle connect/close orchestration: it drives async handle connects and reports failed-cleanup diagnostics through an injected sink (the pure helpers it calls stay pure)"
+    },
+    {
+      "path": "packages/host/src/domain/settle-before-deadline.ts",
+      "reason": "races a promise against a timer: the timer is the one I/O this module exists to perform, and the caller needs the settlement to fire before an outer deadline rather than to compute anything"
+    }
+  ],
+  "maxFunctionLines": 50,
+  "excludeFromMaxLines": [
+    ".test.ts",
+    ".spec.ts",
+    ".test.tsx",
+    ".spec.tsx",
+    ".property.test.ts"
+  ],
+  "maxDiscriminantBranches": 3,
+  "discriminantTags": [
+    "kind",
+    "type",
+    "status",
+    "op",
+    "phase",
+    "format",
+    "unit",
+    "source"
+  ],
+  "duplicateBlockMinTokens": 100,
+  "duplicateBlockMinLines": 8,
+  "duplicateBlockBaseline": [
+    "packages/adapter-ms-graph/src/__tests__/path-resolving.test.ts::packages/adapter-ms-graph/src/__tests__/path-resolving.test.ts@d32c1274",
+    "packages/adapter-oracle/src/__tests__/oracle-adapter.test.ts::packages/adapter-oracle/src/__tests__/oracle-adapter.test.ts@a6ca13dd",
+    "packages/adapter-oracle/src/__tests__/oracle-adapter.test.ts::packages/adapter-oracle/src/__tests__/oracle-adapter.test.ts@c6e9c2e4",
+    "packages/framework/src/__tests__/anthropic-client.test.ts::packages/framework/src/__tests__/openai-client.test.ts@60e08ace",
+    "packages/framework/src/__tests__/anthropic-client.test.ts::packages/framework/src/__tests__/openai-client.test.ts@e8165fc2",
+    "packages/framework/src/__tests__/anthropic-client.test.ts::packages/framework/src/__tests__/openai-client.test.ts@f80d0400",
+    "packages/framework/src/__tests__/cli/authored.test.ts::packages/framework/src/__tests__/cli/compose.test.ts@a6f09813",
+    "packages/framework/src/__tests__/cli/compose.test.ts::packages/framework/src/__tests__/cli/authored.test.ts@a6f09813",
+    "packages/framework/src/__tests__/cli/compose.test.ts::packages/framework/src/__tests__/cli/compose.test.ts@34ee1c4f",
+    "packages/framework/src/__tests__/cli/compose.test.ts::packages/framework/src/__tests__/cli/compose.test.ts@b84f43e3",
+    "packages/framework/src/__tests__/conditional-edges-routing.test.ts::packages/framework/src/__tests__/conditional-edges-routing.test.ts@e4171b6c",
+    "packages/framework/src/__tests__/conditional-edges-routing.test.ts::packages/framework/src/__tests__/predicate-malformed-event-sequence.test.ts@8e49ce30",
+    "packages/framework/src/__tests__/conditional-edges-routing.test.ts::packages/framework/src/__tests__/predicate-malformed-event-sequence.test.ts@c1f0e14d",
+    "packages/framework/src/__tests__/conditional-edges-routing.test.ts::packages/framework/src/__tests__/predicate-malformed-event-sequence.test.ts@c1f0e14d",
+    "packages/framework/src/__tests__/conditional-edges-routing.test.ts::packages/framework/src/__tests__/predicate-malformed-event-sequence.test.ts@e4171b6c",
+    "packages/framework/src/__tests__/dag-transition.test.ts::packages/framework/src/__tests__/dag-transition.test.ts@c8f047bc",
+    "packages/framework/src/__tests__/dag-transition.test.ts::packages/framework/src/__tests__/dag-transition.test.ts@d6fe76c8",
+    "packages/framework/src/__tests__/dag-transition.test.ts::packages/framework/src/__tests__/dag-transition.test.ts@f534b7d2",
+    "packages/framework/src/__tests__/define-diamond.test.ts::packages/framework/src/__tests__/define-fan-out.test.ts@e0eb2052",
+    "packages/framework/src/__tests__/define-fan-out.test.ts::packages/framework/src/__tests__/define-diamond.test.ts@e0eb2052",
+    "packages/framework/src/__tests__/executor.test.ts::packages/framework/src/__tests__/executor.test.ts@29ce4b6a",
+    "packages/framework/src/__tests__/executor.test.ts::packages/framework/src/__tests__/executor.test.ts@84e569cc",
+    "packages/framework/src/__tests__/executor.test.ts::packages/framework/src/__tests__/executor.test.ts@9bfab9b9",
+    "packages/framework/src/__tests__/extensible-capabilities.test.ts::packages/framework/src/__tests__/extensible-capabilities.test.ts@bc10d1b7",
+    "packages/framework/src/__tests__/file-checkpointer.test.ts::packages/framework/src/__tests__/file-checkpointer.test.ts@42fc29e6",
+    "packages/framework/src/__tests__/file-freshness-index.test.ts::packages/framework/src/__tests__/file-freshness-index.test.ts@a7288b7e",
+    "packages/framework/src/__tests__/file-freshness-index.test.ts::packages/framework/src/__tests__/file-freshness-index.test.ts@d0e3005d",
+    "packages/framework/src/__tests__/file-freshness-index.test.ts::packages/framework/src/__tests__/file-freshness-index.test.ts@f5510049",
+    "packages/framework/src/__tests__/file-freshness-index.test.ts::packages/framework/src/__tests__/file-journal.test.ts@17083845",
+    "packages/framework/src/__tests__/file-job.test.ts::packages/framework/src/__tests__/file-resume.test.ts@222cc65f",
+    "packages/framework/src/__tests__/file-journal.test.ts::packages/framework/src/__tests__/file-freshness-index.test.ts@17083845",
+    "packages/framework/src/__tests__/file-resume-proof.test.ts::packages/framework/src/__tests__/file-resume.test.ts@074deb47",
+    "packages/framework/src/__tests__/file-resume-proof.test.ts::packages/framework/src/__tests__/file-resume.test.ts@9fa122a9",
+    "packages/framework/src/__tests__/file-resume.test.ts::packages/framework/src/__tests__/file-job.test.ts@222cc65f",
+    "packages/framework/src/__tests__/file-resume.test.ts::packages/framework/src/__tests__/file-resume-proof.test.ts@074deb47",
+    "packages/framework/src/__tests__/file-resume.test.ts::packages/framework/src/__tests__/file-resume-proof.test.ts@9fa122a9",
+    "packages/framework/src/__tests__/freshness-check.test.ts::packages/framework/src/__tests__/freshness-check.test.ts@b33cd42a",
+    "packages/framework/src/__tests__/freshness-emission.test.ts::packages/framework/src/__tests__/freshness-emission.test.ts@3d4c2280",
+    "packages/framework/src/__tests__/freshness-emission.test.ts::packages/framework/src/__tests__/freshness-emission.test.ts@9ad050b2",
+    "packages/framework/src/__tests__/freshness-witness-no-conflict.test.ts::packages/framework/src/__tests__/freshness-witness-no-conflict.test.ts@3054c5cb",
+    "packages/framework/src/__tests__/human-emission.test.ts::packages/framework/src/__tests__/human-emission.test.ts@5e35734e",
+    "packages/framework/src/__tests__/human-resolution.test.ts::packages/framework/src/__tests__/human-resolution.test.ts@40ddd7f2",
+    "packages/framework/src/__tests__/human-resolution.test.ts::packages/framework/src/__tests__/human-resolution.test.ts@bcbb2f01",
+    "packages/framework/src/__tests__/human-resolution.test.ts::packages/framework/src/__tests__/human-resolution.test.ts@fd9226de",
+    "packages/framework/src/__tests__/human-resolution.test.ts::packages/framework/src/__tests__/wave-resolution.test.ts@0444a231",
+    "packages/framework/src/__tests__/llm-tool-call.test.ts::packages/framework/src/__tests__/llm-tool-call.test.ts@d658508a",
+    "packages/framework/src/__tests__/openai-client.test.ts::packages/framework/src/__tests__/anthropic-client.test.ts@60e08ace",
+    "packages/framework/src/__tests__/openai-client.test.ts::packages/framework/src/__tests__/anthropic-client.test.ts@e8165fc2",
+    "packages/framework/src/__tests__/openai-client.test.ts::packages/framework/src/__tests__/anthropic-client.test.ts@f80d0400",
+    "packages/framework/src/__tests__/openai-client.test.ts::packages/framework/src/__tests__/openai-client.test.ts@de17a1c9",
+    "packages/framework/src/__tests__/per-node-minting.test.ts::packages/framework/src/__tests__/per-node-minting.test.ts@6a23b359",
+    "packages/framework/src/__tests__/per-node-minting.test.ts::packages/framework/src/__tests__/per-node-minting.test.ts@6a23b359",
+    "packages/framework/src/__tests__/per-node-minting.test.ts::packages/framework/src/__tests__/per-node-minting.test.ts@6a23b359",
+    "packages/framework/src/__tests__/per-node-minting.test.ts::packages/framework/src/__tests__/per-node-minting.test.ts@6add878e",
+    "packages/framework/src/__tests__/per-node-minting.test.ts::packages/framework/src/__tests__/per-node-minting.test.ts@6bc6014f",
+    "packages/framework/src/__tests__/per-node-minting.test.ts::packages/framework/src/__tests__/per-node-minting.test.ts@8b295eec",
+    "packages/framework/src/__tests__/per-node-minting.test.ts::packages/framework/src/__tests__/per-node-minting.test.ts@a5138fe2",
+    "packages/framework/src/__tests__/predicate-malformed-event-sequence.test.ts::packages/framework/src/__tests__/conditional-edges-routing.test.ts@8e49ce30",
+    "packages/framework/src/__tests__/predicate-malformed-event-sequence.test.ts::packages/framework/src/__tests__/conditional-edges-routing.test.ts@c1f0e14d",
+    "packages/framework/src/__tests__/predicate-malformed-event-sequence.test.ts::packages/framework/src/__tests__/conditional-edges-routing.test.ts@c1f0e14d",
+    "packages/framework/src/__tests__/predicate-malformed-event-sequence.test.ts::packages/framework/src/__tests__/conditional-edges-routing.test.ts@e4171b6c",
+    "packages/framework/src/__tests__/predicate-malformed-event-sequence.test.ts::packages/framework/src/__tests__/predicate-malformed-event-sequence.test.ts@c1f0e14d",
+    "packages/framework/src/__tests__/route-decided-evidence.test.ts::packages/framework/src/__tests__/route-decided-evidence.test.ts@6c1b3711",
+    "packages/framework/src/__tests__/scheduler-concurrent-dependents.test.ts::packages/framework/src/__tests__/scheduler-concurrent-dependents.test.ts@802e8c63",
+    "packages/framework/src/__tests__/scheduler-concurrent-dependents.test.ts::packages/framework/src/__tests__/scheduler-concurrent-dependents.test.ts@b5e08eaa",
+    "packages/framework/src/__tests__/scheduler-cron.test.ts::packages/framework/src/__tests__/scheduler-cron.test.ts@04ebe8a0",
+    "packages/framework/src/__tests__/state-machine-replay.test.ts::packages/framework/src/__tests__/state-machine-replay.test.ts@d887b695",
+    "packages/framework/src/__tests__/state-machine-runner.test.ts::packages/framework/src/__tests__/state-machine-runner.test.ts@5d099c7c",
+    "packages/framework/src/__tests__/tool-use-loop.test.ts::packages/framework/src/__tests__/tool-use-loop.test.ts@34411b07",
+    "packages/framework/src/__tests__/wave-resolution.test.ts::packages/framework/src/__tests__/human-resolution.test.ts@0444a231",
+    "packages/host/src/__tests__/concurrency.property.test.ts::packages/host/src/__tests__/concurrency.property.test.ts@eb12613a",
+    "packages/host/src/__tests__/handlers/run-dag.test.ts::packages/host/src/__tests__/handlers/run-dag.test.ts@d5f83f49",
+    "packages/host/src/__tests__/http/handlers/admin/tenants.test.ts::packages/host/src/__tests__/supervisor/admin-dispatch.test.ts@5ae1cf21",
+    "packages/host/src/__tests__/integration/error-taxonomy-concurrent.test.ts::packages/host/src/__tests__/integration/fail-closed-registry-down.test.ts@93a751cc",
+    "packages/host/src/__tests__/integration/error-taxonomy-concurrent.test.ts::packages/host/src/__tests__/integration/fail-closed-registry-down.test.ts@f4d9c623",
+    "packages/host/src/__tests__/integration/error-taxonomy-concurrent.test.ts::packages/host/src/__tests__/integration/fault-worker-crash.test.ts@93a751cc",
+    "packages/host/src/__tests__/integration/error-taxonomy-concurrent.test.ts::packages/host/src/__tests__/integration/fault-worker-crash.test.ts@f4d9c623",
+    "packages/host/src/__tests__/integration/error-taxonomy-concurrent.test.ts::packages/host/src/__tests__/integration/supervisor-restart-readopt.test.ts@93a751cc",
+    "packages/host/src/__tests__/integration/error-taxonomy-concurrent.test.ts::packages/host/src/__tests__/integration/supervisor-restart-readopt.test.ts@f4d9c623",
+    "packages/host/src/__tests__/integration/fail-closed-registry-down.test.ts::packages/host/src/__tests__/integration/error-taxonomy-concurrent.test.ts@93a751cc",
+    "packages/host/src/__tests__/integration/fail-closed-registry-down.test.ts::packages/host/src/__tests__/integration/error-taxonomy-concurrent.test.ts@f4d9c623",
+    "packages/host/src/__tests__/integration/fail-closed-registry-down.test.ts::packages/host/src/__tests__/integration/fault-worker-crash.test.ts@93a751cc",
+    "packages/host/src/__tests__/integration/fail-closed-registry-down.test.ts::packages/host/src/__tests__/integration/fault-worker-crash.test.ts@f4d9c623",
+    "packages/host/src/__tests__/integration/fail-closed-registry-down.test.ts::packages/host/src/__tests__/integration/supervisor-restart-readopt.test.ts@3afc3f62",
+    "packages/host/src/__tests__/integration/fail-closed-registry-down.test.ts::packages/host/src/__tests__/integration/supervisor-restart-readopt.test.ts@f4d9c623",
+    "packages/host/src/__tests__/integration/fault-worker-crash.test.ts::packages/host/src/__tests__/integration/error-taxonomy-concurrent.test.ts@93a751cc",
+    "packages/host/src/__tests__/integration/fault-worker-crash.test.ts::packages/host/src/__tests__/integration/error-taxonomy-concurrent.test.ts@f4d9c623",
+    "packages/host/src/__tests__/integration/fault-worker-crash.test.ts::packages/host/src/__tests__/integration/fail-closed-registry-down.test.ts@93a751cc",
+    "packages/host/src/__tests__/integration/fault-worker-crash.test.ts::packages/host/src/__tests__/integration/fail-closed-registry-down.test.ts@f4d9c623",
+    "packages/host/src/__tests__/integration/fault-worker-crash.test.ts::packages/host/src/__tests__/integration/supervisor-restart-readopt.test.ts@4bc70b43",
+    "packages/host/src/__tests__/integration/fault-worker-crash.test.ts::packages/host/src/__tests__/integration/supervisor-restart-readopt.test.ts@f4d9c623",
+    "packages/host/src/__tests__/integration/full-lifecycle.test.ts::packages/host/src/__tests__/token-store.test.ts@c700f0e5",
+    "packages/host/src/__tests__/integration/isolation-supervisor-secrets.test.ts::packages/host/src/__tests__/integration/isolation-supervisor-secrets.test.ts@d289cf6f",
+    "packages/host/src/__tests__/integration/supervisor-restart-readopt.test.ts::packages/host/src/__tests__/integration/error-taxonomy-concurrent.test.ts@93a751cc",
+    "packages/host/src/__tests__/integration/supervisor-restart-readopt.test.ts::packages/host/src/__tests__/integration/error-taxonomy-concurrent.test.ts@f4d9c623",
+    "packages/host/src/__tests__/integration/supervisor-restart-readopt.test.ts::packages/host/src/__tests__/integration/fail-closed-registry-down.test.ts@3afc3f62",
+    "packages/host/src/__tests__/integration/supervisor-restart-readopt.test.ts::packages/host/src/__tests__/integration/fail-closed-registry-down.test.ts@f4d9c623",
+    "packages/host/src/__tests__/integration/supervisor-restart-readopt.test.ts::packages/host/src/__tests__/integration/fault-worker-crash.test.ts@4bc70b43",
+    "packages/host/src/__tests__/integration/supervisor-restart-readopt.test.ts::packages/host/src/__tests__/integration/fault-worker-crash.test.ts@f4d9c623",
+    "packages/host/src/__tests__/node-context-factory.test.ts::packages/host/src/__tests__/node-context-factory.test.ts@2b5a1136",
+    "packages/host/src/__tests__/node-context-factory.test.ts::packages/host/src/__tests__/node-context-factory.test.ts@5c36a4f7",
+    "packages/host/src/__tests__/node-context-factory.test.ts::packages/host/src/__tests__/node-context-factory.test.ts@5c36a4f7",
+    "packages/host/src/__tests__/node-context-factory.test.ts::packages/host/src/__tests__/node-context-factory.test.ts@5c36a4f7",
+    "packages/host/src/__tests__/run-spend-authority.test.ts::packages/host/src/__tests__/run-spend-authority.test.ts@5ef54bff",
+    "packages/host/src/__tests__/supervisor/admin-dispatch.test.ts::packages/host/src/__tests__/http/handlers/admin/tenants.test.ts@5ae1cf21",
+    "packages/host/src/__tests__/supervisor/admission-wiring.test.ts::packages/host/src/__tests__/supervisor/supervisor.test.ts@db39bc79",
+    "packages/host/src/__tests__/supervisor/lifecycle/grace-window-purge.test.ts::packages/host/src/__tests__/supervisor/lifecycle/grace-window-purge.test.ts@0336db7f",
+    "packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts::packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts@1fd3e1e9",
+    "packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts::packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts@7dd7d157",
+    "packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts::packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts@a80bee67",
+    "packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts::packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts@a80bee67",
+    "packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts::packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts@a80bee67",
+    "packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts::packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts@c1e56ade",
+    "packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts::packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts@c1e56ade",
+    "packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts::packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts@c1e56ade",
+    "packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts::packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts@c1e56ade",
+    "packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts::packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts@c1e56ade",
+    "packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts::packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts@c1e56ade",
+    "packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts::packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts@c1e56ade",
+    "packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts::packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts@c1e56ade",
+    "packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts::packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts@c1e56ade",
+    "packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts::packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts@c1e56ade",
+    "packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts::packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts@c1e56ade",
+    "packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts::packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts@cee2942a",
+    "packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts::packages/host/src/__tests__/supervisor/lifecycle/worker-lifecycle-manager.test.ts@eff1fa3f",
+    "packages/host/src/__tests__/supervisor/registry/redis-registry-adapter.test.ts::packages/host/src/__tests__/supervisor/registry/redis-registry-adapter.test.ts@59312f34",
+    "packages/host/src/__tests__/supervisor/supervisor.test.ts::packages/host/src/__tests__/supervisor/admission-wiring.test.ts@db39bc79",
+    "packages/host/src/__tests__/token-store.test.ts::packages/host/src/__tests__/integration/full-lifecycle.test.ts@c700f0e5",
+    "packages/host/src/adapters/__tests__/graph-capability.test.ts::packages/host/src/adapters/__tests__/graph-capability.test.ts@301d226e",
+    "packages/host/src/adapters/__tests__/keycloak-broker.test.ts::packages/host/src/adapters/__tests__/keycloak-broker.test.ts@010537c1",
+    "packages/host/src/adapters/__tests__/keycloak-broker.test.ts::packages/host/src/adapters/__tests__/keycloak-broker.test.ts@0eb8ba49",
+    "packages/host/src/adapters/__tests__/keycloak-broker.test.ts::packages/host/src/adapters/__tests__/keycloak-broker.test.ts@0eb8ba49",
+    "packages/host/src/adapters/__tests__/keycloak-broker.test.ts::packages/host/src/adapters/__tests__/keycloak-broker.test.ts@0eb8ba49",
+    "packages/host/src/adapters/__tests__/keycloak-broker.test.ts::packages/host/src/adapters/__tests__/keycloak-broker.test.ts@858dcdb2",
+    "packages/host/src/adapters/__tests__/keycloak-broker.test.ts::packages/host/src/adapters/__tests__/keycloak-broker.test.ts@c503f528",
+    "packages/host/src/adapters/__tests__/redis-connectivity.test.ts::packages/host/src/adapters/__tests__/redis-connectivity.test.ts@c74e4c81",
+    "packages/host/src/hitl/adapters/__tests__/redis-stores.test.ts::packages/host/src/hitl/adapters/__tests__/redis-stores.test.ts@1ced0801",
+    "packages/host/src/hitl/adapters/__tests__/redis-stores.test.ts::packages/host/src/hitl/adapters/__tests__/redis-stores.test.ts@a3a98a56",
+    "packages/host/src/hitl/adapters/bot/__tests__/bot.test.ts::packages/host/src/hitl/adapters/bot/__tests__/bot.test.ts@5a6f7785",
+    "packages/host/src/hitl/adapters/bot/__tests__/bot.test.ts::packages/host/src/hitl/adapters/bot/__tests__/bot.test.ts@5a6f7785",
+    "packages/host/src/hitl/adapters/bot/__tests__/bot.test.ts::packages/host/src/hitl/adapters/bot/__tests__/bot.test.ts@5a6f7785",
+    "packages/host/src/hitl/adapters/bot/__tests__/bot.test.ts::packages/host/src/hitl/adapters/bot/__tests__/bot.test.ts@5a6f7785",
+    "packages/host/src/hitl/adapters/bot/__tests__/bot.test.ts::packages/host/src/hitl/adapters/bot/__tests__/bot.test.ts@5a6f7785",
+    "packages/host/src/hitl/adapters/bot/__tests__/bot.test.ts::packages/host/src/hitl/adapters/bot/__tests__/bot.test.ts@5a6f7785",
+    "packages/host/src/hitl/adapters/bot/__tests__/verify-orchestration.test.ts::packages/host/src/hitl/adapters/bot/__tests__/verify-orchestration.test.ts@836f6569",
+    "packages/http-auth/src/__tests__/auth.test.ts::packages/http-auth/src/__tests__/client.test.ts@9415b9dd",
+    "packages/http-auth/src/__tests__/client.test.ts::packages/http-auth/src/__tests__/auth.test.ts@9415b9dd"
+  ]
 }

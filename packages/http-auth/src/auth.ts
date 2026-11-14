@@ -406,19 +406,57 @@ interface TokenProviderDeps {
   readonly defaultTimeoutMs?: number;
 }
 
+const isTokenFresh = (entry: CachedToken, now: () => number): Result<boolean, FrameworkError> => {
+  if (entry.expiresAtMs === null) return ok(true);
+  const clock = readTokenClock(now);
+  return clock.ok ? ok(entry.expiresAtMs > clock.value) : err(clock.error);
+};
+
+type RefreshResult = Result<CachedToken, FrameworkError>;
+
 /**
- * Build a boot-scoped `TokenProvider`. The cached token and the single
- * in-flight refresh promise are the only mutable state; both are closed over
- * and never escape. Exported for testing — the adapter factory wires the real
- * fetch.
+ * Wait for a shared refresh, but let one caller's `signal` stop ITS wait only:
+ * the shared mint is not cancelled, so one aborted request cannot poison
+ * unrelated waiters.
  */
-export const createTokenProvider = (deps: TokenProviderDeps): TokenProvider => {
-  const now = deps.now ?? (() => Date.now());
+const awaitRefresh = (
+  pending: Promise<RefreshResult>,
+  signal: AbortSignal | undefined,
+): Promise<RefreshResult> => {
+  if (signal === undefined) return pending;
+  if (signal.aborted) return Promise.resolve(err(mapTokenError("abort", "request cancelled")));
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result: RefreshResult): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      resolve(result);
+    };
+    const onAbort = (): void => finish(err(mapTokenError("abort", "request cancelled")));
+    signal.addEventListener("abort", onAbort, { once: true });
+    pending.then(finish);
+  });
+};
+
+/** The cached token and its single-flight refresh — the encapsulated mutable state. */
+interface TokenCache {
+  readonly peek: () => CachedToken | null;
+  readonly refresh: () => Promise<RefreshResult>;
+  readonly invalidate: () => void;
+}
+
+/**
+ * The cached token and the single in-flight refresh promise are the only
+ * mutable state; both are closed over and never escape.
+ */
+const createTokenCache = (mint: () => Promise<RefreshResult>): TokenCache => {
   let cached: CachedToken | null = null;
   // De-dups concurrent refreshes: the first caller to find the cache empty
   // starts the mint and parks its promise here; later callers in the same burst
   // await the same promise instead of starting their own mint.
-  let inflight: Promise<Result<CachedToken, FrameworkError>> | null = null;
+  let inflight: Promise<RefreshResult> | null = null;
   // Cache generation. `invalidate()` bumps it; a refresh captures the
   // generation when it STARTS and only writes `cached` on settle if the
   // generation is unchanged. This closes the lost-invalidate race: an
@@ -427,16 +465,10 @@ export const createTokenProvider = (deps: TokenProviderDeps): TokenProvider => {
   // asked to drop.
   let generation = 0;
 
-  const isFresh = (entry: CachedToken): Result<boolean, FrameworkError> => {
-    if (entry.expiresAtMs === null) return ok(true);
-    const clock = readTokenClock(now);
-    return clock.ok ? ok(entry.expiresAtMs > clock.value) : err(clock.error);
-  };
-
-  const refresh = (): Promise<Result<CachedToken, FrameworkError>> => {
+  const refresh = (): Promise<RefreshResult> => {
     if (inflight) return inflight;
     const startedGeneration = generation;
-    const p = mintToken(deps.auth, deps.fetch, now, deps.defaultTimeoutMs)
+    const p = mint()
       .then((result) => {
         // Only write the cache if no invalidate() intervened since this mint
         // started — otherwise the just-invalidated token would be resurrected.
@@ -453,35 +485,32 @@ export const createTokenProvider = (deps: TokenProviderDeps): TokenProvider => {
     return p;
   };
 
-  const awaitRefresh = (
-    pending: Promise<Result<CachedToken, FrameworkError>>,
-    signal: AbortSignal | undefined,
-  ): Promise<Result<CachedToken, FrameworkError>> => {
-    if (signal === undefined) return pending;
-    if (signal.aborted) return Promise.resolve(err(mapTokenError("abort", "request cancelled")));
-
-    return new Promise((resolve) => {
-      let settled = false;
-      const finish = (result: Result<CachedToken, FrameworkError>): void => {
-        if (settled) return;
-        settled = true;
-        signal.removeEventListener("abort", onAbort);
-        resolve(result);
-      };
-      const onAbort = (): void => finish(err(mapTokenError("abort", "request cancelled")));
-      signal.addEventListener("abort", onAbort, { once: true });
-      pending.then(finish);
-    });
+  const invalidate = (): void => {
+    cached = null;
+    // Bump the generation so any in-flight mint's `.then` write is discarded.
+    generation += 1;
   };
+
+  return { peek: () => cached, refresh, invalidate };
+};
+
+/**
+ * Build a boot-scoped `TokenProvider`. Exported for testing — the adapter
+ * factory wires the real fetch.
+ */
+export const createTokenProvider = (deps: TokenProviderDeps): TokenProvider => {
+  const now = deps.now ?? (() => Date.now());
+  const cache = createTokenCache(() => mintToken(deps.auth, deps.fetch, now, deps.defaultTimeoutMs));
 
   return {
     get: async (signal?: AbortSignal): Promise<Result<BearerToken, FrameworkError>> => {
+      const cached = cache.peek();
       if (cached) {
-        const freshness = isFresh(cached);
+        const freshness = isTokenFresh(cached, now);
         if (!freshness.ok) return err(freshness.error);
         if (freshness.value) return ok(cached.token);
       }
-      const result = await awaitRefresh(refresh(), signal);
+      const result = await awaitRefresh(cache.refresh(), signal);
       return result.ok ? ok(result.value.token) : err(result.error);
     },
 
@@ -496,11 +525,7 @@ export const createTokenProvider = (deps: TokenProviderDeps): TokenProvider => {
       return result.ok ? ok(undefined) : err(result.error);
     },
 
-    invalidate: (): void => {
-      cached = null;
-      // Bump the generation so any in-flight mint's `.then` write is discarded.
-      generation += 1;
-    },
+    invalidate: cache.invalidate,
   };
 };
 

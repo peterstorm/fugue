@@ -8,6 +8,11 @@
  * time-zone date conversion, the 1900 leap-year bug, `!ref` handling) ARE the
  * contract the new reader replicates.
  *
+ * The one exception to "verbatim": `normalizeCell` is imported from production
+ * (`../../normalize-cell.js`) instead of re-copied. It was an identical copy of a
+ * pure public helper the streaming reader never calls, so sharing it cannot
+ * change what the oracle decides.
+ *
  * Inherited comments are verbatim too. In particular, the "`dense: false` keeps
  * address-keyed access" note inside `oracleParse` does not refer to an option
  * this call passes: it describes SheetJS's DEFAULT (sparse, address-keyed) sheet
@@ -35,6 +40,7 @@ import type { z } from "zod";
 import type { Result, FrameworkError } from "@fuguejs/framework";
 import { ok, err, nodeId } from "@fuguejs/framework";
 import { parseWorkbook, type ParseWorkbookOpts as ProductionParseWorkbookOpts } from "../../index.js";
+import { normalizeCell } from "../../normalize-cell.js";
 import { parseJUnitTotals, type JUnitTotals } from "./junit-report.js";
 import { REAL_DATA_DIR_ENV, realDataDir } from "./real-data-dir.js";
 
@@ -73,33 +79,6 @@ interface ParseWorkbookOpts {
 /** `true` only when A and B are the same type (mutually assignable, modifiers included). */
 type Equal<A, B> = (<X>() => X extends A ? 1 : 2) extends <X>() => X extends B ? 1 : 2 ? true : false;
 true satisfies Equal<ParseWorkbookOpts, ProductionParseWorkbookOpts>;
-
-/**
- * Normalise a cell value to a primitive (or `null`). SheetJS already hands back
- * primitives / `Date` (with `cellDates`), so this mostly passes through — but it
- * ALSO handles the ExcelJS-shaped objects (formula `{ formula, result }`, rich
- * text `{ richText }`, hyperlink `{ text, hyperlink }`, error `{ error }`) so the
- * function stays a self-contained, independently-tested normaliser regardless of
- * the producer. Error cells and unknown objects → `null`.
- */
-const normalizeCell = (value: unknown): string | number | boolean | Date | null => {
-  if (value === null || value === undefined) return null;
-  if (value instanceof Date) return value;
-  if (typeof value === "object") {
-    const v = value as Record<string, unknown>;
-    if (Array.isArray(v.richText)) {
-      return (v.richText as { text?: string }[]).map((p) => p.text ?? "").join("");
-    }
-    if (typeof v.text === "string") return v.text; // hyperlink cell
-    if ("result" in v) return normalizeCell(v.result); // formula → its computed result
-    if ("error" in v) return null; // error cell (#REF!, #DIV/0!, …)
-    return null;
-  }
-  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-    return value;
-  }
-  return null;
-};
 
 /**
  * The raw value of a SheetJS cell, mapped for `normalizeCell`. An error cell

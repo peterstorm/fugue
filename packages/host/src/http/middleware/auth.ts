@@ -34,37 +34,24 @@
  */
 
 import type { Context, Next } from "hono";
-import type { AuthIdentity, AuthenticatedUser, SignatureVerifiedClaims, Team } from "../../domain/auth.js";
+import type { AuthIdentity, AuthenticatedUser, SignatureVerifiedClaims, Team, VerifyRealmJwt, JwtVerifyError } from "../../domain/auth.js";
 import { hashToken, isTeamTokenShape, markSubjectToken } from "../../domain/auth.js";
 import type { TokenGrant } from "../../domain/auth.js";
 import { validateRealmJwtClaims, describeAuthError } from "../../domain/jwt-validation.js";
 import type { TokenStorePort } from "../../ports.js";
+import { ok, err } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import { errorResponse } from "../response.js";
 
 // ---------------------------------------------------------------------------
 // Realm JWT verifier port (signature verification — INJECTED, never hardcoded)
 // ---------------------------------------------------------------------------
-
-/**
- * Reason a signature verifier could not produce verified claims. `invalid` is a
- * client fault (bad signature / unparsable token) → 401; `unavailable` is an
- * infrastructure fault (JWKS fetch failed, key rotation in flight) → 503,
- * mirroring the Redis-unavailable branch. The verifier MUST fail closed.
- */
-export type JwtVerifyError =
-  | { readonly kind: "invalid"; readonly reason: string }
-  | { readonly kind: "unavailable"; readonly reason: string };
-
-/**
- * Port for verifying a JWT's SIGNATURE and returning its (now branded) claims.
- * The real implementation is JWKS-backed (keys fetched from the realm, never
- * hardcoded); tests inject a fake. This port is the ONLY producer of
- * `SignatureVerifiedClaims` (it calls `markSignatureVerified` AFTER checking the
- * signature) — and `validateRealmJwtClaims` accepts only that brand, so the
- * "signature first" ordering is enforced by the type system, not convention.
- */
-export type VerifyRealmJwt = (token: string) => Promise<Result<SignatureVerifiedClaims, JwtVerifyError>>;
+// The port and its error type are DOMAIN types: the pure claim validator
+// (`domain/jwt-validation.ts`) consumes the port, and adapters implement it, so
+// the middleware shell imports them rather than owning them. They live in
+// `domain/auth.ts` and are re-exported here because every dep bundle that wires
+// the realm-JWT path names the verifier and its error together.
+export type { JwtVerifyError, VerifyRealmJwt } from "../../domain/auth.js";
 
 // ---------------------------------------------------------------------------
 // Constant-time string comparison (timing-attack resistant)
@@ -165,17 +152,6 @@ export const isJwtShape = (token: string): boolean => {
 export type { AuthEnv } from "../env.js";
 
 /**
- * Creates a Hono middleware that resolves bearer tokens to AuthIdentity.
- *
- * Resolution order (admin & team paths byte-unchanged for regression safety):
- * 1. Missing/malformed header → 401
- * 2. Admin token match (constant-time) → identity = admin
- * 3. JWT-shaped token + verifier configured → verify signature, validate claims
- *    → identity = user (or 401 invalid/expired/wrong-aud, 503 verifier infra)
- * 4. Hash token → Redis lookup → identity = team
- * 5. Not found → 401
- */
-/**
  * The shared bearer-challenge 401. ONE encoding (round-38 cs-18) of the
  * status + `WWW-Authenticate` pair the header-shape rejections all owe the
  * caller: a challenge omitted from one of them would leave a client unable to
@@ -207,149 +183,204 @@ const invalidBearerToken = (c: Context): Response =>
     headers: { "WWW-Authenticate": "Bearer error=\"invalid_token\"" },
   });
 
+/** Parse the `Authorization` header into the bearer token, or the 401 to return. */
+const parseBearerToken = (c: Context): Result<string, Response> => {
+  const authHeader = c.req.header("Authorization");
+
+  if (!authHeader) {
+    return err(bearerChallenge(c, "Missing Authorization header"));
+  }
+
+  if (!authHeader.startsWith("Bearer ")) {
+    return err(bearerChallenge(c, "Authorization header must use Bearer scheme"));
+  }
+
+  const token = authHeader.slice(7); // "Bearer ".length
+
+  if (token.length === 0) {
+    return err(bearerChallenge(c, "Empty bearer token"));
+  }
+  return ok(token);
+};
+
+/** Verify the token signature via the injected verifier; infra failure → 503, bad token → 401. */
+const verifyJwtSignature = async (
+  c: Context,
+  deps: AuthMiddlewareDeps,
+  realmJwt: RealmJwtDeps,
+  token: string,
+): Promise<Result<SignatureVerifiedClaims, Response>> => {
+  let verified: Result<SignatureVerifiedClaims, JwtVerifyError>;
+  try {
+    verified = await realmJwt.verify(token);
+  } catch (e) {
+    deps.logger?.error("[auth-middleware] JWT verifier threw unexpectedly", {
+      error: e instanceof Error ? e.message : String(e),
+    });
+    // Verifier infrastructure (JWKS fetch, key rotation) failure → 503.
+    return err(authServiceUnavailable(c));
+  }
+
+  if (verified.ok) return verified;
+
+  if (verified.error.kind === "unavailable") {
+    // JWKS/network failure — infra, not the client's fault → 503. The
+    // reason is logged server-side (it never reaches the client): without
+    // it, a JWKS outage is a 503 storm with zero diagnostics.
+    deps.logger?.error("[auth-middleware] JWT signature verification unavailable", {
+      reason: verified.error.reason,
+    });
+    return err(authServiceUnavailable(c));
+  }
+  // Bad signature / unparsable token → 401 (never leak the reason to the
+  // client; log it server-side, mirroring the claim-validation path).
+  deps.logger?.warn("[auth-middleware] JWT signature verification rejected token", {
+    reason: verified.error.reason,
+  });
+  return err(invalidBearerToken(c));
+};
+
+/**
+ * Path 2: fugue-platform OIDC JWT — first-class inbound mode (FR-W3-006).
+ * FAIL CLOSED: a JWT-shaped token that reaches here must be fully verified and
+ * validated; it never falls through to the team path on failure.
+ */
+const resolveJwtIdentity = async (
+  c: Context,
+  deps: AuthMiddlewareDeps,
+  realmJwt: RealmJwtDeps,
+  token: string,
+): Promise<Result<AuthIdentity, Response>> => {
+  const verified = await verifyJwtSignature(c, deps, realmJwt, token);
+  if (!verified.ok) return verified;
+
+  // `exp` is UNIX seconds (OIDC). Injected `now` is expected to already be
+  // in seconds (pure/testable); the default wall clock is ms → convert.
+  const nowSeconds = deps.now ? deps.now() : Math.floor(Date.now() / 1000);
+  const claimsResult = validateRealmJwtClaims(verified.value, {
+    expectedIss: realmJwt.expectedIss,
+    expectedAud: realmJwt.expectedAud,
+    now: nowSeconds,
+  });
+
+  if (!claimsResult.ok) {
+    // wrong-iss / wrong-aud / expired / malformed → 401. Reason logged
+    // server-side only; the client gets a generic message.
+    deps.logger?.warn("[auth-middleware] JWT claim validation failed", {
+      reason: describeAuthError(claimsResult.error),
+    });
+    return err(invalidBearerToken(c));
+  }
+
+  // Capture the wiring-site authorization policy onto the identity: the
+  // branded `AuthenticatedUser` is closed over, so the policy always judges
+  // the principal this very token authenticated.
+  const user = claimsResult.value;
+  // Brand THIS exact compact JWT as the `subject_token` proof (FR-030): the
+  // signature of `token` was cryptographically verified above by the injected
+  // verifier. This is the SOLE producer site for `SubjectToken`. The raw token
+  // is carried host-side on the identity ONLY — it never crosses
+  // `InvocationOrigin` (FR-032) and is never put on a handle (NFR-011); the
+  // broker resolves it for the user exchange via the run-context side-channel.
+  const subjectToken = markSubjectToken(token);
+  return ok({
+    kind: "user",
+    sub: user.sub,
+    azp: user.azp,
+    canRunDag: (dagTeam: Team) => realmJwt.authorizeUserRun(user, dagTeam),
+    subjectToken,
+  } satisfies AuthIdentity);
+};
+
+/** Path 3: Team token — hash and look up in store. */
+const resolveTeamIdentity = async (
+  c: Context,
+  deps: AuthMiddlewareDeps,
+  token: string,
+): Promise<Result<AuthIdentity, Response>> => {
+  let grant: TokenGrant | null;
+  try {
+    const hash = await hashToken(token);
+    const resolveResult = await deps.tokenStore.resolve(hash);
+    if (!resolveResult.ok) {
+      // Redis/infrastructure failure — surface as 503 not 401. Log the typed
+      // error server-side first (mirrors the JWT `unavailable` branch above):
+      // without it, a token-store outage is a 503 storm with zero diagnostics.
+      deps.logger?.error("[auth-middleware] Token store unavailable", {
+        errorKind: resolveResult.error.kind,
+        error: JSON.stringify(resolveResult.error),
+      });
+      return err(authServiceUnavailable(c));
+    }
+    grant = resolveResult.value;
+  } catch (e) {
+    // Log the actual error server-side for diagnostics
+    deps.logger?.error("[auth-middleware] Token resolution failed unexpectedly", {
+      error: e instanceof Error ? e.message : String(e),
+      stack: e instanceof Error ? e.stack : undefined,
+    });
+    // crypto.subtle or unexpected failure — surface as 503
+    return err(authServiceUnavailable(c));
+  }
+
+  if (!grant) {
+    return err(invalidBearerToken(c));
+  }
+
+  return ok({
+    kind: "team",
+    team: grant.team,
+    label: grant.label,
+  } satisfies AuthIdentity);
+};
+
+/**
+ * Whether the token takes the JWT path. Only entered for a token that (a) a
+ * verifier is configured for, (b) does NOT have the `fug_` team-token shape,
+ * and (c) matches the JWT compact serialization. The `!isTeamTokenShape` guard
+ * makes the documented contract load-bearing rather than incidental (review
+ * I5): generated `fug_` tokens are base64url + dot-free so are never
+ * JWT-shaped today, but a future `fug_` token containing two dots would
+ * otherwise route to the JWT path and 401 instead of the team store.
+ */
+const jwtPathFor = (deps: AuthMiddlewareDeps, token: string): RealmJwtDeps | undefined =>
+  deps.realmJwt && !isTeamTokenShape(token) && isJwtShape(token) ? deps.realmJwt : undefined;
+
+/** Resolve a bearer token to an identity in the fixed order admin → JWT → team. */
+const resolveIdentity = async (
+  c: Context,
+  deps: AuthMiddlewareDeps,
+  token: string,
+): Promise<Result<AuthIdentity, Response>> => {
+  // Path 1: Admin token (constant-time, no Redis)
+  if (constantTimeEqual(token, deps.adminToken)) {
+    return ok({ kind: "admin" } satisfies AuthIdentity);
+  }
+  const realmJwt = jwtPathFor(deps, token);
+  if (realmJwt) return resolveJwtIdentity(c, deps, realmJwt, token);
+  return resolveTeamIdentity(c, deps, token);
+};
+
+/**
+ * Creates a Hono middleware that resolves bearer tokens to AuthIdentity.
+ *
+ * Resolution order (admin & team paths byte-unchanged for regression safety):
+ * 1. Missing/malformed header → 401
+ * 2. Admin token match (constant-time) → identity = admin
+ * 3. JWT-shaped token + verifier configured → verify signature, validate claims
+ *    → identity = user (or 401 invalid/expired/wrong-aud, 503 verifier infra)
+ * 4. Hash token → Redis lookup → identity = team
+ * 5. Not found → 401
+ */
 export const createAuthMiddleware = (deps: AuthMiddlewareDeps) => {
   return async (c: Context, next: Next): Promise<Response | void> => {
-    const authHeader = c.req.header("Authorization");
+    const bearer = parseBearerToken(c);
+    if (!bearer.ok) return bearer.error;
 
-    if (!authHeader) {
-      return bearerChallenge(c, "Missing Authorization header");
-    }
+    const resolved = await resolveIdentity(c, deps, bearer.value);
+    if (!resolved.ok) return resolved.error;
 
-    if (!authHeader.startsWith("Bearer ")) {
-      return bearerChallenge(c, "Authorization header must use Bearer scheme");
-    }
-
-    const token = authHeader.slice(7); // "Bearer ".length
-
-    if (token.length === 0) {
-      return bearerChallenge(c, "Empty bearer token");
-    }
-
-    // Path 1: Admin token (constant-time, no Redis)
-    if (constantTimeEqual(token, deps.adminToken)) {
-      c.set("authIdentity", { kind: "admin" } satisfies AuthIdentity);
-      await next();
-      return;
-    }
-
-    // Path 2: fugue-platform OIDC JWT — first-class inbound mode (FR-W3-006).
-    // Only entered for a token that (a) a verifier is configured for, (b) does
-    // NOT have the `fug_` team-token shape, and (c) matches the JWT compact
-    // serialization. The `!isTeamTokenShape` guard makes the documented contract
-    // load-bearing rather than incidental (review I5): generated `fug_` tokens
-    // are base64url + dot-free so are never JWT-shaped today, but a future `fug_`
-    // token containing two dots would otherwise route to the JWT path and 401
-    // instead of the team store. FAIL CLOSED: a JWT-shaped token that reaches
-    // here must be fully verified and validated; it never falls through to the
-    // team path on failure.
-    if (deps.realmJwt && !isTeamTokenShape(token) && isJwtShape(token)) {
-      const realmJwt = deps.realmJwt;
-      let verified: Result<SignatureVerifiedClaims, JwtVerifyError>;
-      try {
-        verified = await realmJwt.verify(token);
-      } catch (e) {
-        deps.logger?.error("[auth-middleware] JWT verifier threw unexpectedly", {
-          error: e instanceof Error ? e.message : String(e),
-        });
-        // Verifier infrastructure (JWKS fetch, key rotation) failure → 503.
-        return authServiceUnavailable(c);
-      }
-
-      if (!verified.ok) {
-        if (verified.error.kind === "unavailable") {
-          // JWKS/network failure — infra, not the client's fault → 503. The
-          // reason is logged server-side (it never reaches the client): without
-          // it, a JWKS outage is a 503 storm with zero diagnostics.
-          deps.logger?.error("[auth-middleware] JWT signature verification unavailable", {
-            reason: verified.error.reason,
-          });
-          return authServiceUnavailable(c);
-        }
-        // Bad signature / unparsable token → 401 (never leak the reason to the
-        // client; log it server-side, mirroring the claim-validation path).
-        deps.logger?.warn("[auth-middleware] JWT signature verification rejected token", {
-          reason: verified.error.reason,
-        });
-        return invalidBearerToken(c);
-      }
-
-      // `exp` is UNIX seconds (OIDC). Injected `now` is expected to already be
-      // in seconds (pure/testable); the default wall clock is ms → convert.
-      const nowSeconds = deps.now ? deps.now() : Math.floor(Date.now() / 1000);
-      const claimsResult = validateRealmJwtClaims(verified.value, {
-        expectedIss: realmJwt.expectedIss,
-        expectedAud: realmJwt.expectedAud,
-        now: nowSeconds,
-      });
-
-      if (!claimsResult.ok) {
-        // wrong-iss / wrong-aud / expired / malformed → 401. Reason logged
-        // server-side only; the client gets a generic message.
-        deps.logger?.warn("[auth-middleware] JWT claim validation failed", {
-          reason: describeAuthError(claimsResult.error),
-        });
-        return invalidBearerToken(c);
-      }
-
-      // Capture the wiring-site authorization policy onto the identity: the
-      // branded `AuthenticatedUser` is closed over, so the policy always judges
-      // the principal this very token authenticated.
-      const user = claimsResult.value;
-      // Brand THIS exact compact JWT as the `subject_token` proof (FR-030): we
-      // are inside the `verified.ok` branch, so the signature of `token` was
-      // cryptographically verified by the injected verifier. This is the SOLE
-      // producer site for `SubjectToken`. The raw token is carried host-side on
-      // the identity ONLY — it never crosses `InvocationOrigin` (FR-032) and is
-      // never put on a handle (NFR-011); the broker resolves it for the user
-      // exchange via the run-context side-channel.
-      const subjectToken = markSubjectToken(token);
-      c.set("authIdentity", {
-        kind: "user",
-        sub: user.sub,
-        azp: user.azp,
-        canRunDag: (dagTeam: Team) => realmJwt.authorizeUserRun(user, dagTeam),
-        subjectToken,
-      } satisfies AuthIdentity);
-      await next();
-      return;
-    }
-
-    // Path 3: Team token — hash and look up in store
-    let grant: TokenGrant | null;
-    try {
-      const hash = await hashToken(token);
-      const resolveResult = await deps.tokenStore.resolve(hash);
-      if (!resolveResult.ok) {
-        // Redis/infrastructure failure — surface as 503 not 401. Log the typed
-        // error server-side first (mirrors the JWT `unavailable` branch above):
-        // without it, a token-store outage is a 503 storm with zero diagnostics.
-        deps.logger?.error("[auth-middleware] Token store unavailable", {
-          errorKind: resolveResult.error.kind,
-          error: JSON.stringify(resolveResult.error),
-        });
-        return authServiceUnavailable(c);
-      }
-      grant = resolveResult.value;
-    } catch (e) {
-      // Log the actual error server-side for diagnostics
-      deps.logger?.error("[auth-middleware] Token resolution failed unexpectedly", {
-        error: e instanceof Error ? e.message : String(e),
-        stack: e instanceof Error ? e.stack : undefined,
-      });
-      // crypto.subtle or unexpected failure — surface as 503
-      return authServiceUnavailable(c);
-    }
-
-    if (!grant) {
-      return invalidBearerToken(c);
-    }
-
-    c.set("authIdentity", {
-      kind: "team",
-      team: grant.team,
-      label: grant.label,
-    } satisfies AuthIdentity);
-
+    c.set("authIdentity", resolved.value);
     await next();
   };
 };

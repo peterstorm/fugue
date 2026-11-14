@@ -272,35 +272,32 @@ const parseOptionalRetryLimit = (value: unknown): Result<number | undefined, str
 const parseOptionalOutputNodeId = (value: unknown): Result<NodeId | undefined, string> =>
   value === undefined ? ok(undefined) : parseNodeIdValue(value, "context.outputNodeId");
 
-/**
- * Parse durable DAG context bytes into the complete closure-free context ADT.
- * Every required field is earned here before a persistence adapter can expose
- * the value as `DagMachineContextPersisted`.
- */
-export const parsePersistedDagContext = (value: unknown): Result<PersistedDagContext, string> => {
-  if (!isRecord(value)) return err("context must be a record");
-  const requiredFields = [
-    "waves",
-    "edges",
-    "unconditionalAdj",
-    "outputNodeId",
-    "retries",
-    "retryConfigs",
-    "defaultRetryLimit",
-    "retryLimits",
-    "humanReviewNodeIds",
-    "humanReviewPrompts",
-    "activeNodeIds",
-    "confidenceByNode",
-    "outputs",
-    "initialInput",
-    "priorWitnesses",
-    "freshnessCompletedNodeIds",
-    "freshnessExecutionEpoch",
-  ] as const;
-  const missing = requiredFields.find((field) => !hasOwn(value, field));
-  if (missing !== undefined) return err(`context is missing required field '${missing}'`);
+type PersistedFields<K extends keyof PersistedDagContext> = Result<Pick<PersistedDagContext, K>, string>;
 
+const REQUIRED_CONTEXT_FIELDS = [
+  "waves",
+  "edges",
+  "unconditionalAdj",
+  "outputNodeId",
+  "retries",
+  "retryConfigs",
+  "defaultRetryLimit",
+  "retryLimits",
+  "humanReviewNodeIds",
+  "humanReviewPrompts",
+  "activeNodeIds",
+  "confidenceByNode",
+  "outputs",
+  "initialInput",
+  "priorWitnesses",
+  "freshnessCompletedNodeIds",
+  "freshnessExecutionEpoch",
+] as const;
+
+// Topology: the wave plan, the edges and the adjacency derived from them.
+const parseTopologyFields = (
+  value: UnknownRecord,
+): PersistedFields<"waves" | "edges" | "unconditionalAdj" | "outputNodeId"> => {
   const waves = parseWaves(value.waves);
   if (!waves.ok) return waves;
   const edges = parseEdges(value.edges);
@@ -309,6 +306,18 @@ export const parsePersistedDagContext = (value: unknown): Result<PersistedDagCon
   if (!unconditionalAdj.ok) return unconditionalAdj;
   const outputNodeId = parseOptionalOutputNodeId(value.outputNodeId);
   if (!outputNodeId.ok) return outputNodeId;
+  return ok({
+    waves: waves.value,
+    edges: edges.value,
+    unconditionalAdj: unconditionalAdj.value,
+    outputNodeId: outputNodeId.value,
+  });
+};
+
+// Retry bookkeeping: counters, per-node configs and limits.
+const parseRetryFields = (
+  value: UnknownRecord,
+): PersistedFields<"retries" | "retryConfigs" | "defaultRetryLimit" | "retryLimits"> => {
   const retries = parseNodeIdMap(value.retries, "context.retries", parseRetryCount);
   if (!retries.ok) return retries;
   const retryConfigs = parseNodeIdMap(value.retryConfigs, "context.retryConfigs", parseRetryConfig);
@@ -317,6 +326,20 @@ export const parsePersistedDagContext = (value: unknown): Result<PersistedDagCon
   if (!defaultRetryLimit.ok) return defaultRetryLimit;
   const retryLimits = parseRetryLimits(value.retryLimits);
   if (!retryLimits.ok) return retryLimits;
+  return ok({
+    retries: retries.value,
+    retryConfigs: retryConfigs.value,
+    defaultRetryLimit: defaultRetryLimit.value,
+    retryLimits: retryLimits.value,
+  });
+};
+
+// Run progress: review gates, active nodes, confidences and node outputs.
+const parseProgressFields = (
+  value: UnknownRecord,
+): PersistedFields<
+  "humanReviewNodeIds" | "humanReviewPrompts" | "activeNodeIds" | "confidenceByNode" | "outputs"
+> => {
   const humanReviewNodeIds = parseNodeIdSet(value.humanReviewNodeIds, "context.humanReviewNodeIds");
   if (!humanReviewNodeIds.ok) return humanReviewNodeIds;
   const humanReviewPrompts = parseNodeIdMap(
@@ -331,6 +354,19 @@ export const parsePersistedDagContext = (value: unknown): Result<PersistedDagCon
   if (!confidenceByNode.ok) return confidenceByNode;
   const outputs = parseNodeIdMap(value.outputs, "context.outputs", (raw) => ok(raw), true);
   if (!outputs.ok) return outputs;
+  return ok({
+    humanReviewNodeIds: humanReviewNodeIds.value,
+    humanReviewPrompts: humanReviewPrompts.value,
+    activeNodeIds: activeNodeIds.value,
+    confidenceByNode: confidenceByNode.value,
+    outputs: outputs.value,
+  });
+};
+
+// Freshness: prior witnesses, completed nodes and the execution epoch.
+const parseFreshnessFields = (
+  value: UnknownRecord,
+): PersistedFields<"priorWitnesses" | "freshnessCompletedNodeIds" | "freshnessExecutionEpoch"> => {
   const priorWitnesses = parsePriorWitnesses(value.priorWitnesses);
   if (!priorWitnesses.ok) return priorWitnesses;
   const freshnessCompletedNodeIds = parseNodeIdSet(
@@ -343,31 +379,49 @@ export const parsePersistedDagContext = (value: unknown): Result<PersistedDagCon
     "context.freshnessExecutionEpoch",
   );
   if (!freshnessExecutionEpoch.ok) return freshnessExecutionEpoch;
+  return ok({
+    priorWitnesses: priorWitnesses.value,
+    freshnessCompletedNodeIds: freshnessCompletedNodeIds.value,
+    freshnessExecutionEpoch: __brandFreshnessExecutionEpoch(freshnessExecutionEpoch.value),
+  });
+};
 
+const parseDagFingerprint = (value: UnknownRecord): Result<string | undefined, string> => {
   const fingerprint = value.__dagFingerprint;
   if (fingerprint !== undefined && (typeof fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(fingerprint))) {
     return err("context.__dagFingerprint must be a lowercase sha256 hex string when present");
   }
+  return ok(fingerprint);
+};
+
+/**
+ * Parse durable DAG context bytes into the complete closure-free context ADT.
+ * Every required field is earned here before a persistence adapter can expose
+ * the value as `DagMachineContextPersisted`.
+ */
+export const parsePersistedDagContext = (value: unknown): Result<PersistedDagContext, string> => {
+  if (!isRecord(value)) return err("context must be a record");
+  const missing = REQUIRED_CONTEXT_FIELDS.find((field) => !hasOwn(value, field));
+  if (missing !== undefined) return err(`context is missing required field '${missing}'`);
+
+  const topology = parseTopologyFields(value);
+  if (!topology.ok) return topology;
+  const retry = parseRetryFields(value);
+  if (!retry.ok) return retry;
+  const progress = parseProgressFields(value);
+  if (!progress.ok) return progress;
+  const freshness = parseFreshnessFields(value);
+  if (!freshness.ok) return freshness;
+  const fingerprint = parseDagFingerprint(value);
+  if (!fingerprint.ok) return fingerprint;
 
   return ok({
-    waves: waves.value,
-    edges: edges.value,
-    unconditionalAdj: unconditionalAdj.value,
-    outputNodeId: outputNodeId.value,
-    retries: retries.value,
-    retryConfigs: retryConfigs.value,
-    defaultRetryLimit: defaultRetryLimit.value,
-    retryLimits: retryLimits.value,
-    humanReviewNodeIds: humanReviewNodeIds.value,
-    humanReviewPrompts: humanReviewPrompts.value,
-    activeNodeIds: activeNodeIds.value,
-    confidenceByNode: confidenceByNode.value,
-    outputs: outputs.value,
+    ...topology.value,
+    ...retry.value,
+    ...progress.value,
     initialInput: value.initialInput,
-    priorWitnesses: priorWitnesses.value,
-    freshnessCompletedNodeIds: freshnessCompletedNodeIds.value,
-    freshnessExecutionEpoch: __brandFreshnessExecutionEpoch(freshnessExecutionEpoch.value),
-    ...(fingerprint === undefined ? {} : { __dagFingerprint: fingerprint }),
+    ...freshness.value,
+    ...(fingerprint.value === undefined ? {} : { __dagFingerprint: fingerprint.value }),
   });
 };
 

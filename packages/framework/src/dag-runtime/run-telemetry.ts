@@ -153,6 +153,59 @@ type RootSpanOutcome =
     }
   | { readonly kind: "error"; readonly error: unknown };
 
+const closeOk = (rootSpan: Span): void => {
+  bestEffortRootTelemetry("output event", () => {
+    rootSpan.addEvent(EVENT_NODE_OUTPUT, { status: "ok" });
+  });
+};
+
+const closeEvalFailed = (
+  rootSpan: Span,
+  failedCriteria: readonly string[],
+  evalJudgeResults: readonly EvalJudgeResult[],
+): void => {
+  bestEffortRootTelemetry("eval status", () => {
+    rootSpan.setStatus({
+      code: SpanStatusCode.ERROR,
+      message: `Eval-judge failed: ${failedCriteria.join(", ")}`,
+    });
+  });
+  bestEffortRootTelemetry("eval output event", () => {
+    rootSpan.addEvent(EVENT_NODE_OUTPUT, {
+      status: "ok",
+      evalJudgeFailed: "true",
+      evalJudgeResults: JSON.stringify(evalJudgeResults),
+    });
+  });
+};
+
+const closeGuardrailFailed = (rootSpan: Span, warnings: readonly string[]): void => {
+  bestEffortRootTelemetry("guardrail status", () => {
+    rootSpan.setStatus({
+      code: SpanStatusCode.ERROR,
+      message: `Guardrail failed: ${warnings.join("; ")}`,
+    });
+  });
+  bestEffortRootTelemetry("guardrail output event", () => {
+    rootSpan.addEvent(EVENT_NODE_OUTPUT, {
+      status: "ok",
+      guardrailWarnings: JSON.stringify(warnings),
+    });
+  });
+};
+
+const closeError = (rootSpan: Span, error: unknown): void => {
+  bestEffortRootTelemetry("error status", () => {
+    rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: safeErrorMessage(error) });
+  });
+  bestEffortRootTelemetry("error output event", () => {
+    rootSpan.addEvent(EVENT_NODE_OUTPUT, {
+      status: "error",
+      error: JSON.stringify(error),
+    });
+  });
+};
+
 /**
  * Best-effort status/event finalization. Every span operation is independent so
  * one hostile telemetry method cannot block later cleanup or replace the DAG outcome.
@@ -160,51 +213,12 @@ type RootSpanOutcome =
 export const closeRootSpan = (rootSpan: Span, outcome: RootSpanOutcome): void => {
   try {
     match(outcome)
-      .with({ kind: "ok" }, () => {
-        bestEffortRootTelemetry("output event", () => {
-          rootSpan.addEvent(EVENT_NODE_OUTPUT, { status: "ok" });
-        });
-      })
-      .with({ kind: "ok-eval-failed" }, ({ failedCriteria, evalJudgeResults }) => {
-        bestEffortRootTelemetry("eval status", () => {
-          rootSpan.setStatus({
-            code: SpanStatusCode.ERROR,
-            message: `Eval-judge failed: ${failedCriteria.join(", ")}`,
-          });
-        });
-        bestEffortRootTelemetry("eval output event", () => {
-          rootSpan.addEvent(EVENT_NODE_OUTPUT, {
-            status: "ok",
-            evalJudgeFailed: "true",
-            evalJudgeResults: JSON.stringify(evalJudgeResults),
-          });
-        });
-      })
-      .with({ kind: "ok-guardrail-failed" }, ({ warnings }) => {
-        bestEffortRootTelemetry("guardrail status", () => {
-          rootSpan.setStatus({
-            code: SpanStatusCode.ERROR,
-            message: `Guardrail failed: ${warnings.join("; ")}`,
-          });
-        });
-        bestEffortRootTelemetry("guardrail output event", () => {
-          rootSpan.addEvent(EVENT_NODE_OUTPUT, {
-            status: "ok",
-            guardrailWarnings: JSON.stringify(warnings),
-          });
-        });
-      })
-      .with({ kind: "error" }, ({ error }) => {
-        bestEffortRootTelemetry("error status", () => {
-          rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: safeErrorMessage(error) });
-        });
-        bestEffortRootTelemetry("error output event", () => {
-          rootSpan.addEvent(EVENT_NODE_OUTPUT, {
-            status: "error",
-            error: JSON.stringify(error),
-          });
-        });
-      })
+      .with({ kind: "ok" }, () => closeOk(rootSpan))
+      .with({ kind: "ok-eval-failed" }, ({ failedCriteria, evalJudgeResults }) =>
+        closeEvalFailed(rootSpan, failedCriteria, evalJudgeResults),
+      )
+      .with({ kind: "ok-guardrail-failed" }, ({ warnings }) => closeGuardrailFailed(rootSpan, warnings))
+      .with({ kind: "error" }, ({ error }) => closeError(rootSpan, error))
       .exhaustive();
   } catch (error) {
     bestEffortLog("debug", `[runTelemetry] outcome finalization failed: ${safeErrorMessage(error)}`);

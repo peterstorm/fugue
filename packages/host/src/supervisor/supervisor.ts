@@ -290,173 +290,201 @@ export const createTerminationHandler = (deps: {
   }
 };
 
-// ── Supervisor factory ───────────────────────────────────────────────────────
+// ── Supervisor shell state ───────────────────────────────────────────────────
 
 /**
- * Create and boot the supervisor. Mirrors `createHost`: returns
- * `Result<SupervisorInstance, HostError>`, owns mutable state, starts one
- * `Bun.serve`, wires the Redis probe to the degraded machine, and registers a
- * shutdown handle.
+ * The supervisor's per-instance mutable state (imperative shell). The supervisor
+ * has no DAG registry of its own (it routes, it does not execute), so it seeds
+ * the degraded machine with the empty registry purely to reuse the existing
+ * `HostState` transitions (booting → ready → degraded). It never reads DAGs out of it.
  */
-export const createSupervisor = async (
-  deps: SupervisorDeps,
-): Promise<Result<SupervisorInstance, HostError>> => {
-  const { config, redis, logger } = deps;
-  // Injected clock (repo-wide discipline — NEVER bare Date.now() in the shell's
-  // own state transitions). Defaults to Date.now at this composition seam.
-  const clock = deps.clock ?? Date.now;
-  // multi-tenant spec FR-005: structurally assert no tenant-secret channel exists.
-  assertNoTenantSecrets(deps);
+interface SupervisorShell {
+  state: HostState;
+  redisProbe: RedisProbeHandle | null;
+  server: { port: number; stop: () => void } | null;
+}
 
-  // The proxy wait is BOUNDED (see uds-proxy.ts): the deadline is the worker's
-  // own maximum run budget plus connect/stream overhead. Anything past that is a
-  // stalled worker, and an unbounded wait there would permanently leak this
-  // tenant's admission slot (released only in the `finally` below).
-  const transport: UdsTransport =
-    deps.transport ?? makeBunUdsTransport(config.MAX_DAG_TIMEOUT_MS + UDS_PROXY_OVERHEAD_MS);
+/** What one request needs: the injected deps, the UDS transport, and the shell state. */
+interface RequestContext {
+  readonly deps: SupervisorDeps;
+  readonly transport: UdsTransport;
+  readonly shell: SupervisorShell;
+}
 
-  // ── Mutable state (imperative shell) ───────────────────────────────────────
-  // The supervisor has no DAG registry of its own (it routes, it does not
-  // execute), so it seeds the degraded machine with the empty registry purely to
-  // reuse the existing `HostState` transitions (booting → ready → degraded). It
-  // never reads DAGs out of it.
-  let state: HostState = booting(clock());
-  let redisProbe: RedisProbeHandle | null = null;
-  let server: { port: number; stop: () => void } | null = null;
-
-  // Boot → ready. The empty registry + a fixed boot sha satisfy the transition's
-  // signature without implying the supervisor loads DAGs.
+/**
+ * Boot → ready. The empty registry + a fixed boot sha satisfy the transition's
+ * signature without implying the supervisor loads DAGs.
+ */
+const bootSupervisorState = (clock: () => number): Result<HostState, HostError> => {
   const BOOT_SHA = gitSha("supervisor");
-  const readyResult = bootComplete(state, emptyRegistry(), BOOT_SHA, clock());
+  const readyResult = bootComplete(booting(clock()), emptyRegistry(), BOOT_SHA, clock());
   if (!readyResult.ok) {
     return err({ kind: "internal-invariant-violated", message: "supervisor boot → ready transition failed", context: { from: readyResult.error.from, to: readyResult.error.to } });
   }
-  state = readyResult.value;
+  return ok(readyResult.value);
+};
 
-  // ── Request handler ────────────────────────────────────────────────────────
-  const handle = async (request: Request): Promise<Response> => {
-    // 0a. LIVENESS / READINESS (unauthenticated — k8s probes + Docker HEALTHCHECK).
-    //     The supervisor owns the single inbound listener (multi-tenant spec FR-001) and there is no
-    //     Hono router in this path, so these MUST be served HERE, and BEFORE admin
-    //     dispatch / auth / tenant-resolution — otherwise an unauthenticated GET
-    //     /health is rejected 401 and the container is reported permanently
-    //     unhealthy. Mirrors the worker's /health + /readiness (router.ts): /health
-    //     is liveness (always 200 while the listener is up; "degraded" still 200 so
-    //     a Redis outage alerts WITHOUT a restart), /readiness gates on canServeRequests.
-    if (request.method === "GET") {
-      const pathname = new URL(request.url).pathname;
-      if (pathname === "/health") return buildLivenessResponse(state);
-      if (pathname === "/readiness") return buildReadinessResponse(state);
-    }
+/**
+ * Step 4: ensure the owning worker is live (T8 seam) and derive its presence — but
+ * ONLY when admission ADMITTED the request. The socket on a live presence is
+ * ALWAYS the resolved tenant's own socket (multi-tenant spec FR-004) — re-derived defensively so
+ * a lifecycle that returned a mismatched socket cannot cause cross-tenant routing.
+ */
+const resolveWorkerPresence = async (
+  deps: SupervisorDeps,
+  tenant: Tenant,
+  admission: AdmissionDecision,
+): Promise<WorkerPresence> => {
+  const { logger } = deps;
+  if (admission.kind !== "admitted") {
+    // Admission already refused this request (unknown / over-quota / unavailable),
+    // and `routeRequest` folds the admission decision FIRST — it refuses regardless
+    // of presence. So DO NOT ensure (cold-spawn) a worker here: it is wasted work
+    // for a request that will be refused anyway, and during a Redis outage — where
+    // `resolveForNewRun` fails closed to `unknown` for every active tenant — it
+    // would cold-spawn a worker PER request that then cannot reach Redis at boot and
+    // is SIGKILLed (fault amplification under the exact condition the box is already
+    // stressed). Mark unavailable; the pure router produces the correct refusal.
+    return { kind: "unavailable" };
+  }
+  let presence: WorkerPresence;
+  try {
+    presence = presenceFromEnsure(await deps.lifecycle.ensureWorker(tenant.id));
+  } catch (e) {
+    logger.warn("[supervisor] ensureWorker threw — worker unavailable", {
+      tenant: tenant.id,
+      error: e instanceof Error ? e.message : String(e),
+    });
+    return { kind: "unavailable" };
+  }
+  // Defensive re-pin: a `live` presence MUST point at THIS tenant's own socket.
+  if (presence.kind === "live" && presence.socketPath !== workerSocketForTenant(deps.config.WORKER_UDS_DIR, tenant)) {
+    logger.error("[supervisor] lifecycle returned a non-owning socket — refusing (multi-tenant spec FR-004)", {
+      tenant: tenant.id,
+    });
+    return { kind: "unavailable" };
+  }
+  return presence;
+};
 
-    // 0. ADMIN TENANT LIFECYCLE API (multi-tenant spec FR-025). Dispatch `/admin/tenants(/:id)` to
-    //    the admin handler BEFORE any tenant-resolution/proxy logic, so an admin
-    //    request is NEVER resolved as a tenant or reverse-proxied. The handler
-    //    enforces its OWN admin-token authz (and audits refusals); a non-admin
-    //    token gets 401/403 there. It returns `undefined` only when the path is
-    //    not an admin-tenants route — then we fall through to normal routing.
-    if (deps.adminTenants) {
-      const adminResponse = await handleAdminTenants(deps.adminTenants, request);
-      if (adminResponse !== undefined) return adminResponse;
-    }
+/**
+ * Steps 1–2: authenticate the inbound identity (admin / user-JWT / team), then
+ * resolve the Tenant at the boundary (multi-tenant spec FR-002). Fail-closed +
+ * non-leaking: an identity that maps to no registered tenant → tenant-unknown (404).
+ */
+const authenticateTenant = async (
+  deps: SupervisorDeps,
+  request: Request,
+): Promise<Result<Tenant, HostError>> => {
+  const identityResult = await authenticateIdentity(deps.auth, request.headers.get("Authorization") ?? undefined);
+  if (!identityResult.ok) return identityResult;
+  const identity: AuthIdentity = identityResult.value;
+  return resolveTenant(identity, deps.registryView);
+};
 
-    // 1. Authenticate inbound identity (admin / user-JWT / team).
-    const identityResult = await authenticateIdentity(deps.auth, request.headers.get("Authorization") ?? undefined);
-    if (!identityResult.ok) {
-      return errorToResponse(identityResult.error);
-    }
-    const identity: AuthIdentity = identityResult.value;
+/**
+ * Steps 5–6: the pure routing decision, then reverse-proxy to the owning worker
+ * over its UDS with the SIGNED X-Fugue-Tenant header (the internal HMAC key —
+ * never a tenant secret). The acquired per-tenant slot is released exactly once:
+ * on a refusal here, or in `finally` after the proxy (even if proxyToWorker throws).
+ */
+const routeAndProxy = async (
+  ctx: RequestContext,
+  request: Request,
+  tenant: Tenant,
+  admission: AdmissionOutcome,
+  presence: WorkerPresence,
+): Promise<Response> => {
+  const decision: RouteDecision = routeRequest(tenant, admission.decision, presence);
+  if (decision.kind === "refuse") {
+    // A refusal means the admit either refused (release is a no-op) OR admit
+    // succeeded but worker presence forced a refuse — in the latter case the
+    // acquired slot MUST be released so a worker-down request never leaks a
+    // per-tenant slot. Release is idempotent-safe for the no-op case.
+    admission.release();
+    return errorToResponse(decision.error);
+  }
+  try {
+    const proxied = await proxyToWorker(
+      { hmacKey: ctx.deps.config.FUGUE_SUPERVISOR_HMAC_KEY, transport: ctx.transport, logger: ctx.deps.logger },
+      request,
+      decision.tenant,
+      decision.socketPath,
+    );
+    return proxied.ok ? proxied.value : errorToResponse(proxied.error);
+  } finally {
+    admission.release();
+  }
+};
 
-    // 2. Resolve the Tenant at the boundary (multi-tenant spec FR-002). Fail-closed + non-leaking:
-    //    an identity that maps to no registered tenant → tenant-unknown (404).
-    const tenantResult = resolveTenant(identity, deps.registryView);
-    if (!tenantResult.ok) {
-      return errorToResponse(tenantResult.error);
-    }
-    const tenant: Tenant = tenantResult.value;
+/**
+ * Step 0a: LIVENESS / READINESS (unauthenticated — k8s probes + Docker HEALTHCHECK).
+ * The supervisor owns the single inbound listener (multi-tenant spec FR-001) and there is no
+ * Hono router in this path, so these MUST be served HERE, and BEFORE admin
+ * dispatch / auth / tenant-resolution — otherwise an unauthenticated GET
+ * /health is rejected 401 and the container is reported permanently
+ * unhealthy. Mirrors the worker's /health + /readiness (router.ts): /health
+ * is liveness (always 200 while the listener is up; "degraded" still 200 so
+ * a Redis outage alerts WITHOUT a restart), /readiness gates on canServeRequests.
+ */
+const probeResponseFor = (request: Request, state: HostState): Response | undefined => {
+  if (request.method !== "GET") return undefined;
+  const pathname = new URL(request.url).pathname;
+  if (pathname === "/health") return buildLivenessResponse(state);
+  if (pathname === "/readiness") return buildReadinessResponse(state);
+  return undefined;
+};
 
-    // 3. NEW-run admission gate (multi-tenant spec FR-022). Uses the registry's resolveForNewRun
-    //    seam, which fails closed (→ tenant-unknown) while Redis is degraded —
-    //    new runs refuse, but in-flight/status keep working (multi-tenant spec FR-023). Note we do
-    //    NOT consult canServeRequests here to BLOCK: it stays true while degraded
-    //    by design so cached/in-flight work is unaffected; only NEW-run admission
-    //    fails closed, exactly as the registry seam dictates.
-    //    ACQUIRE-ON-ADMIT: a successful admit claims a per-tenant slot (multi-tenant spec FR-032)
-    //    and hands back `release`, which we MUST call exactly once after the
-    //    proxy completes (a `finally` below, so it runs even if proxyToWorker
-    //    throws). A refused admit returns a no-op release — nothing acquired,
-    //    nothing freed — so we can call `release` unconditionally in the finally.
-    const admission: AdmissionOutcome = deps.admission.admit(tenant);
+const handleRequest = async (ctx: RequestContext, request: Request): Promise<Response> => {
+  const { deps, shell } = ctx;
+  const probe = probeResponseFor(request, shell.state);
+  if (probe !== undefined) return probe;
 
-    // 4. Ensure the owning worker is live (T8 seam) and derive its presence — but
-    //    ONLY when admission ADMITTED the request. The socket on a live presence is
-    //    ALWAYS the resolved tenant's own socket (multi-tenant spec FR-004) — re-derived defensively so
-    //    a lifecycle that returned a mismatched socket cannot cause cross-tenant routing.
-    let presence: WorkerPresence;
-    if (admission.decision.kind !== "admitted") {
-      // Admission already refused this request (unknown / over-quota / unavailable),
-      // and `routeRequest` folds the admission decision FIRST — it refuses regardless
-      // of presence. So DO NOT ensure (cold-spawn) a worker here: it is wasted work
-      // for a request that will be refused anyway, and during a Redis outage — where
-      // `resolveForNewRun` fails closed to `unknown` for every active tenant — it
-      // would cold-spawn a worker PER request that then cannot reach Redis at boot and
-      // is SIGKILLed (fault amplification under the exact condition the box is already
-      // stressed). Mark unavailable; the pure router produces the correct refusal.
-      presence = { kind: "unavailable" };
-    } else {
-      try {
-        presence = presenceFromEnsure(await deps.lifecycle.ensureWorker(tenant.id));
-      } catch (e) {
-        logger.warn("[supervisor] ensureWorker threw — worker unavailable", {
-          tenant: tenant.id,
-          error: e instanceof Error ? e.message : String(e),
-        });
-        presence = { kind: "unavailable" };
-      }
-      // Defensive re-pin: a `live` presence MUST point at THIS tenant's own socket.
-      if (presence.kind === "live") {
-        const expected = workerSocketForTenant(config.WORKER_UDS_DIR, tenant);
-        if (presence.socketPath !== expected) {
-          logger.error("[supervisor] lifecycle returned a non-owning socket — refusing (multi-tenant spec FR-004)", {
-            tenant: tenant.id,
-          });
-          presence = { kind: "unavailable" };
-        }
-      }
-    }
+  // 0. ADMIN TENANT LIFECYCLE API (multi-tenant spec FR-025). Dispatch `/admin/tenants(/:id)` to
+  //    the admin handler BEFORE any tenant-resolution/proxy logic, so an admin
+  //    request is NEVER resolved as a tenant or reverse-proxied. The handler
+  //    enforces its OWN admin-token authz (and audits refusals); a non-admin
+  //    token gets 401/403 there. It returns `undefined` only when the path is
+  //    not an admin-tenants route — then we fall through to normal routing.
+  if (deps.adminTenants) {
+    const adminResponse = await handleAdminTenants(deps.adminTenants, request);
+    if (adminResponse !== undefined) return adminResponse;
+  }
 
-    // 5. Pure routing decision.
-    const decision: RouteDecision = routeRequest(tenant, admission.decision, presence);
-    if (decision.kind === "refuse") {
-      // A refusal means the admit either refused (release is a no-op) OR admit
-      // succeeded but worker presence forced a refuse — in the latter case the
-      // acquired slot MUST be released so a worker-down request never leaks a
-      // per-tenant slot. Release is idempotent-safe for the no-op case.
-      admission.release();
-      return errorToResponse(decision.error);
-    }
-    // 6. Reverse-proxy to the owning worker over its UDS with the SIGNED
-    //    X-Fugue-Tenant header (the internal HMAC key — never a tenant secret).
-    //    The acquired per-tenant slot is released in `finally` so it is freed on
-    //    EVERY admitted request exactly once, even if proxyToWorker throws.
-    try {
-      const proxied = await proxyToWorker(
-        { hmacKey: config.FUGUE_SUPERVISOR_HMAC_KEY, transport, logger },
-        request,
-        decision.tenant,
-        decision.socketPath,
-      );
-      return proxied.ok ? proxied.value : errorToResponse(proxied.error);
-    } finally {
-      admission.release();
-    }
-  };
+  // 1-2. Authenticate + resolve the Tenant.
+  const tenantResult = await authenticateTenant(deps, request);
+  if (!tenantResult.ok) return errorToResponse(tenantResult.error);
+  const tenant: Tenant = tenantResult.value;
 
-  // ── HTTP server (single listener — multi-tenant spec FR-001) ─────────────────────────────────
+  // 3. NEW-run admission gate (multi-tenant spec FR-022). Uses the registry's resolveForNewRun
+  //    seam, which fails closed (→ tenant-unknown) while Redis is degraded —
+  //    new runs refuse, but in-flight/status keep working (multi-tenant spec FR-023). Note we do
+  //    NOT consult canServeRequests here to BLOCK: it stays true while degraded
+  //    by design so cached/in-flight work is unaffected; only NEW-run admission
+  //    fails closed, exactly as the registry seam dictates.
+  //    ACQUIRE-ON-ADMIT: a successful admit claims a per-tenant slot (multi-tenant spec FR-032)
+  //    and hands back `release`, which MUST be called exactly once after the
+  //    proxy completes (`routeAndProxy`). A refused admit returns a no-op release.
+  const admission: AdmissionOutcome = deps.admission.admit(tenant);
+
+  // 4. Ensure the owning worker is live and derive its presence.
+  const presence = await resolveWorkerPresence(deps, tenant, admission.decision);
+
+  // 5-6. Route + reverse-proxy.
+  return routeAndProxy(ctx, request, tenant, admission, presence);
+};
+
+// ── HTTP server (single listener — multi-tenant spec FR-001) ─────────────────
+
+const bindSupervisorServer = async (
+  deps: SupervisorDeps,
+  fetch: (request: Request) => Promise<Response>,
+): Promise<Result<{ port: number; stop: () => void }, HostError>> => {
+  const { config, logger } = deps;
   let bunServer;
   try {
     bunServer = Bun.serve({
-      fetch: handle,
+      fetch,
       port: config.PORT,
       maxRequestBodySize: 10 * 1024 * 1024,
     });
@@ -474,34 +502,42 @@ export const createSupervisor = async (
       context: { port: config.PORT },
     });
   }
-  server = { port: bunServer.port ?? config.PORT, stop: () => bunServer.stop() };
   logger.info(`[supervisor] HTTP listener on port ${bunServer.port}`);
+  return ok({ port: bunServer.port ?? config.PORT, stop: () => bunServer.stop() });
+};
 
-  // ── Redis liveness probe → degraded machine (reused) ───────────────────────
-  redisProbe = startRedisProbe(
-    redis,
-    config.REDIS_PROBE_INTERVAL_MS,
+// ── Redis liveness probe → degraded machine (reused) ─────────────────────────
+
+const startSupervisorRedisProbe = (
+  deps: SupervisorDeps,
+  shell: SupervisorShell,
+  clock: () => number,
+): RedisProbeHandle => {
+  const { logger } = deps;
+  return startRedisProbe(
+    deps.redis,
+    deps.config.REDIS_PROBE_INTERVAL_MS,
     {
       onDead: () => {
         // multi-tenant spec FR-022: drive the registry's NEW-run admission gate closed FIRST, on
         // every dead tick (idempotent), so a new run is refused the moment the
         // probe sees Redis down — even before/without any registry write.
         deps.onRedisProbeEdge?.(true);
-        const r = redisDied(state, clock());
+        const r = redisDied(shell.state, clock());
         if (r.ok) {
-          state = r.value;
+          shell.state = r.value;
           logger.warn("[supervisor] Redis probe failed — degraded (redis-disconnected)");
-        } else if (state.phase !== "degraded") {
-          logger.warn("[supervisor] redisDied transition unexpectedly rejected", { currentPhase: state.phase });
+        } else if (shell.state.phase !== "degraded") {
+          logger.warn("[supervisor] redisDied transition unexpectedly rejected", { currentPhase: shell.state.phase });
         }
       },
       onAlive: () => {
         // multi-tenant spec FR-022: re-open the NEW-run gate on recovery (idempotent every tick).
         deps.onRedisProbeEdge?.(false);
-        if (state.phase === "degraded" && state.reason === "redis-disconnected") {
-          const r = redisRecovered(state);
+        if (shell.state.phase === "degraded" && shell.state.reason === "redis-disconnected") {
+          const r = redisRecovered(shell.state);
           if (r.ok) {
-            state = r.value;
+            shell.state = r.value;
             logger.info("[supervisor] Redis recovered — ready");
           }
         }
@@ -509,27 +545,70 @@ export const createSupervisor = async (
     },
     logger,
   );
+};
 
-  // ── Shutdown ───────────────────────────────────────────────────────────────
-  const shutdown = async () => {
-    logger.info("[supervisor] shutdown initiated");
-    if (redisProbe) { redisProbe.stop(); redisProbe = null; }
-    const drainResult = beginDrain(state, 0, clock());
-    if (drainResult.ok) state = drainResult.value;
-    if (server) { server.stop(); server = null; }
-    if (deps.onShutdown) {
-      try { await deps.onShutdown(); }
-      catch (e) { logger.error("[supervisor] infrastructure cleanup failed", { error: e instanceof Error ? e.message : String(e) }); }
-    }
-    const stoppedResult = drainComplete(state);
-    if (stoppedResult.ok) state = stoppedResult.value;
-    logger.info("[supervisor] stopped");
-  };
+// ── Shutdown ─────────────────────────────────────────────────────────────────
+
+const shutdownSupervisor = async (
+  deps: SupervisorDeps,
+  shell: SupervisorShell,
+  clock: () => number,
+): Promise<void> => {
+  const { logger } = deps;
+  logger.info("[supervisor] shutdown initiated");
+  if (shell.redisProbe) { shell.redisProbe.stop(); shell.redisProbe = null; }
+  const drainResult = beginDrain(shell.state, 0, clock());
+  if (drainResult.ok) shell.state = drainResult.value;
+  if (shell.server) { shell.server.stop(); shell.server = null; }
+  if (deps.onShutdown) {
+    try { await deps.onShutdown(); }
+    catch (e) { logger.error("[supervisor] infrastructure cleanup failed", { error: e instanceof Error ? e.message : String(e) }); }
+  }
+  const stoppedResult = drainComplete(shell.state);
+  if (stoppedResult.ok) shell.state = stoppedResult.value;
+  logger.info("[supervisor] stopped");
+};
+
+// ── Supervisor factory ───────────────────────────────────────────────────────
+
+/**
+ * Create and boot the supervisor. Mirrors `createHost`: returns
+ * `Result<SupervisorInstance, HostError>`, owns mutable state, starts one
+ * `Bun.serve`, wires the Redis probe to the degraded machine, and registers a
+ * shutdown handle.
+ */
+export const createSupervisor = async (
+  deps: SupervisorDeps,
+): Promise<Result<SupervisorInstance, HostError>> => {
+  const { config } = deps;
+  // Injected clock (repo-wide discipline — NEVER bare Date.now() in the shell's
+  // own state transitions). Defaults to Date.now at this composition seam.
+  const clock = deps.clock ?? Date.now;
+  // multi-tenant spec FR-005: structurally assert no tenant-secret channel exists.
+  assertNoTenantSecrets(deps);
+
+  // The proxy wait is BOUNDED (see uds-proxy.ts): the deadline is the worker's
+  // own maximum run budget plus connect/stream overhead. Anything past that is a
+  // stalled worker, and an unbounded wait there would permanently leak this
+  // tenant's admission slot (released only in `routeAndProxy`'s `finally`).
+  const transport: UdsTransport =
+    deps.transport ?? makeBunUdsTransport(config.MAX_DAG_TIMEOUT_MS + UDS_PROXY_OVERHEAD_MS);
+
+  const booted = bootSupervisorState(clock);
+  if (!booted.ok) return booted;
+  const shell: SupervisorShell = { state: booted.value, redisProbe: null, server: null };
+  const ctx: RequestContext = { deps, transport, shell };
+  const handle = (request: Request): Promise<Response> => handleRequest(ctx, request);
+
+  const bound = await bindSupervisorServer(deps, handle);
+  if (!bound.ok) return bound;
+  shell.server = bound.value;
+  shell.redisProbe = startSupervisorRedisProbe(deps, shell, clock);
 
   return ok({
-    getState: () => state,
+    getState: () => shell.state,
     handle,
-    shutdown,
-    get server() { return server; },
+    shutdown: () => shutdownSupervisor(deps, shell, clock),
+    get server() { return shell.server; },
   });
 };

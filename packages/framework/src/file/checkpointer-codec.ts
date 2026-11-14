@@ -187,18 +187,27 @@ export const snapshotMeta = (meta: unknown): RawMetaSnapshot => {
   });
 };
 
-/**
- * Serialize a snapshotted run metadata value for disk. Throws when the
- * captured schema cannot be represented (invalid `startedAt`, non-integer
- * `nodeCount`, and so on); `setMeta` converts that expected rejection to
- * `checkpoint-write-failed`.
- *
- * `createdAt` is stamped from the injected clock, not caller state, and
- * `frameworkVersion` defaults to `FRAMEWORK_VERSION` while preserving an
- * explicit captured value for stale-version compatibility tests.
- */
-export const serializeMeta = (meta: RawMetaSnapshot, createdAtMs: number): string => {
-  const { plainRecord, dagId, startedAt, nodeCount, subject, dagFingerprint, frameworkVersion } = meta;
+// Optional string field of the meta snapshot: absent, or a string.
+const assertOptionalMetaString = (field: string, value: unknown): string | undefined => {
+  if (value !== undefined && typeof value !== "string") {
+    throw new Error(`meta.${field} must be a string when present, got ${render(value)}`);
+  }
+  return value;
+};
+
+/** A meta snapshot whose every known field has passed its write-side gate. */
+interface SerializableMeta {
+  readonly dagId: string;
+  readonly startedAt: Date;
+  readonly nodeCount: number;
+  readonly subject: string | undefined;
+  readonly dagFingerprint: string | undefined;
+  readonly frameworkVersion: string | undefined;
+}
+
+// Field gates in the order the contract reports them (first failure wins).
+const parseSerializableMeta = (meta: RawMetaSnapshot): SerializableMeta => {
+  const { plainRecord, dagId, startedAt, nodeCount } = meta;
   if (!plainRecord) {
     throw new Error("meta must be an object");
   }
@@ -222,19 +231,29 @@ export const serializeMeta = (meta: RawMetaSnapshot, createdAtMs: number): strin
       `meta.nodeCount must be a non-negative safe integer, got ${render(nodeCount)}`,
     );
   }
-  if (subject !== undefined && typeof subject !== "string") {
-    throw new Error(`meta.subject must be a string when present, got ${render(subject)}`);
-  }
-  if (dagFingerprint !== undefined && typeof dagFingerprint !== "string") {
-    throw new Error(
-      `meta.dagFingerprint must be a string when present, got ${render(dagFingerprint)}`,
-    );
-  }
-  if (frameworkVersion !== undefined && typeof frameworkVersion !== "string") {
-    throw new Error(
-      `meta.frameworkVersion must be a string when present, got ${render(frameworkVersion)}`,
-    );
-  }
+  return {
+    dagId,
+    startedAt,
+    nodeCount,
+    subject: assertOptionalMetaString("subject", meta.subject),
+    dagFingerprint: assertOptionalMetaString("dagFingerprint", meta.dagFingerprint),
+    frameworkVersion: assertOptionalMetaString("frameworkVersion", meta.frameworkVersion),
+  };
+};
+
+/**
+ * Serialize a snapshotted run metadata value for disk. Throws when the
+ * captured schema cannot be represented (invalid `startedAt`, non-integer
+ * `nodeCount`, and so on); `setMeta` converts that expected rejection to
+ * `checkpoint-write-failed`.
+ *
+ * `createdAt` is stamped from the injected clock, not caller state, and
+ * `frameworkVersion` defaults to `FRAMEWORK_VERSION` while preserving an
+ * explicit captured value for stale-version compatibility tests.
+ */
+export const serializeMeta = (meta: RawMetaSnapshot, createdAtMs: number): string => {
+  const { dagId, startedAt, nodeCount, subject, dagFingerprint, frameworkVersion } =
+    parseSerializableMeta(meta);
   if (!isRepresentableTimestampMs(createdAtMs)) {
     throw new Error(`clock produced a non-representable timestamp: ${render(createdAtMs)}`);
   }
@@ -311,6 +330,181 @@ const canonicalRecord = (
   return Object.freeze(record);
 };
 
+/** Recursive entry point handed to the per-shape materializers. */
+type MaterializeWalk = (value: unknown, path: string, depth: number) => CanonicalSerializedValue;
+
+// Non-container values: the JSON scalars, `undefined` (as its tag record), and
+// the rejected unrepresentable types.
+const materializeLeaf = (value: unknown, path: string): CanonicalSerializedValue => {
+  if (value === null) return null;
+  if (value === undefined) return canonicalRecord([["__undefined__", true]]);
+  if (typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new Error(`${path} contains non-finite number ${render(value)}; JSON would coerce it to null`);
+    }
+    return Object.is(value, -0) ? 0 : value;
+  }
+  if (typeof value === "function" || typeof value === "symbol" || typeof value === "bigint") {
+    throw new Error(`${path} is a ${typeof value}; JSON cannot represent it losslessly`);
+  }
+  throw new Error(`${path} has unsupported type ${typeof value}`);
+};
+
+// Read one own property from its DATA descriptor only: accessors, vanished and
+// non-enumerable properties are rejected, so no getter ever runs and nothing
+// JSON would omit is silently dropped.
+const readOwnDataValue = (value: object, key: string, location: string): unknown => {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (descriptor === undefined) {
+    throw new Error(`${location} disappeared between ownKeys and descriptor materialization`);
+  }
+  if (!("value" in descriptor)) {
+    throw new Error(`${location} is an accessor; node output getters are rejected`);
+  }
+  if (!descriptor.enumerable) {
+    throw new Error(`${location} is non-enumerable and would be omitted by JSON`);
+  }
+  return descriptor.value;
+};
+
+// Capture every element of a dense plain array from its own data descriptors.
+const captureArrayElements = (value: readonly unknown[], path: string): readonly unknown[] => {
+  const keys = Reflect.ownKeys(value);
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+  if (
+    lengthDescriptor === undefined ||
+    !("value" in lengthDescriptor) ||
+    typeof lengthDescriptor.value !== "number" ||
+    !Number.isSafeInteger(lengthDescriptor.value) ||
+    lengthDescriptor.value < 0
+  ) {
+    throw new Error(`${path}.length has a malformed data descriptor`);
+  }
+  const length = lengthDescriptor.value;
+  const indexed: Array<readonly [number, unknown]> = [];
+  for (const key of keys) {
+    if (key === "length") continue;
+    if (typeof key !== "string" || !/^(0|[1-9]\d*)$/.test(key)) {
+      throw new Error(`${path} has unsupported array property ${render(key)}`);
+    }
+    const index = Number(key);
+    if (!Number.isSafeInteger(index) || index >= length) {
+      throw new Error(`${path} has out-of-range array index ${render(key)}`);
+    }
+    indexed.push([index, readOwnDataValue(value, key, outputPath(path, index))]);
+  }
+  if (indexed.length !== length) {
+    throw new Error(`${path} is sparse; JSON would replace missing array elements with null`);
+  }
+  indexed.sort(([left], [right]) => left - right);
+  return indexed.map(([, entry]) => entry);
+};
+
+const materializeArray = (
+  value: readonly unknown[],
+  prototype: object | null,
+  path: string,
+  depth: number,
+  walk: MaterializeWalk,
+): CanonicalSerializedValue => {
+  if (prototype !== Array.prototype) {
+    throw new Error(`${path} has an unsupported array prototype`);
+  }
+  const elements = captureArrayElements(value, path);
+  const canonical = elements.map((entry, index) => walk(entry, outputPath(path, index), depth + 1));
+  return Object.freeze(canonical);
+};
+
+const materializeDate = (value: object, ownKeys: readonly PropertyKey[], path: string): CanonicalSerializedValue => {
+  if (ownKeys.length !== 0) {
+    throw new Error(`${path} is a Date with own properties that its serialized instant would omit`);
+  }
+  const instant = Date.prototype.getTime.call(value);
+  if (!Number.isFinite(instant)) throw new Error(`${path} is an invalid Date`);
+  return canonicalRecord([["__date__", new Date(instant).toISOString()]]);
+};
+
+const materializeMap = (
+  value: object,
+  ownKeys: readonly PropertyKey[],
+  path: string,
+  depth: number,
+  walk: MaterializeWalk,
+): CanonicalSerializedValue => {
+  if (ownKeys.length !== 0) {
+    throw new Error(`${path} is a Map with own properties that serialization would omit`);
+  }
+  const entries = Array.from(Map.prototype.entries.call(value) as MapIterator<[unknown, unknown]>);
+  const canonicalEntries = entries.map(([key, entry], index) => Object.freeze([
+    walk(key, `${path}[map entry #${index} key]`, depth + 1),
+    walk(entry, `${path}[map entry #${index} value]`, depth + 1),
+  ] as const));
+  return canonicalRecord([["__map__", Object.freeze(canonicalEntries)]]);
+};
+
+const materializeSet = (
+  value: object,
+  ownKeys: readonly PropertyKey[],
+  path: string,
+  depth: number,
+  walk: MaterializeWalk,
+): CanonicalSerializedValue => {
+  if (ownKeys.length !== 0) {
+    throw new Error(`${path} is a Set with own properties that serialization would omit`);
+  }
+  const entries = Array.from(Set.prototype.values.call(value) as SetIterator<unknown>);
+  const canonicalEntries = entries.map((entry, index) =>
+    walk(entry, `${path}[set item #${index}]`, depth + 1));
+  return canonicalRecord([["__set__", Object.freeze(canonicalEntries)]]);
+};
+
+const materializePlainObject = (
+  value: object,
+  ownKeys: readonly PropertyKey[],
+  path: string,
+  depth: number,
+  walk: MaterializeWalk,
+): CanonicalSerializedValue => {
+  const captured: Array<readonly [string, unknown]> = [];
+  for (const key of ownKeys) {
+    if (typeof key !== "string") {
+      throw new Error(`${path} has a symbol-keyed property that JSON would omit`);
+    }
+    if (POLLUTION_KEYS.has(key)) {
+      throw new Error(`${outputPath(path, key)} is filtered as a prototype-pollution key`);
+    }
+    if (RESERVED_TAG_KEYS.has(key)) {
+      throw new Error(`${outputPath(path, key)} is a reserved serializer tag in a plain object`);
+    }
+    captured.push([key, readOwnDataValue(value, key, outputPath(path, key))]);
+  }
+  return canonicalRecord(captured.map(([key, entry]) => [
+    key,
+    walk(entry, outputPath(path, key), depth + 1),
+  ] as const));
+};
+
+// Dispatch a container on its prototype: array, Date, Map, Set or plain object.
+const materializeByShape = (
+  value: object,
+  path: string,
+  depth: number,
+  walk: MaterializeWalk,
+): CanonicalSerializedValue => {
+  const prototype = Object.getPrototypeOf(value) as object | null;
+  if (Array.isArray(value)) return materializeArray(value, prototype, path, depth, walk);
+
+  const ownKeys = Reflect.ownKeys(value);
+  if (prototype === Date.prototype) return materializeDate(value, ownKeys, path);
+  if (prototype === Map.prototype) return materializeMap(value, ownKeys, path, depth, walk);
+  if (prototype === Set.prototype) return materializeSet(value, ownKeys, path, depth, walk);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new Error(`${path} has unsupported prototype ${render(value)}`);
+  }
+  return materializePlainObject(value, ownKeys, path, depth, walk);
+};
+
 /**
  * Materialize one immutable, serializer-ready snapshot of a node output.
  * Every plain-object/array property is read exactly once from its OWN DATA
@@ -333,22 +527,8 @@ const canonicalRecord = (
 export const materializeCanonicalOutput = (output: unknown): CanonicalSerializedValue => {
   const active = new Map<object, string>();
 
-  const walk = (value: unknown, path: string, depth: number): CanonicalSerializedValue => {
-    if (value === null) return null;
-    if (value === undefined) return canonicalRecord([["__undefined__", true]]);
-    if (typeof value === "string" || typeof value === "boolean") return value;
-    if (typeof value === "number") {
-      if (!Number.isFinite(value)) {
-        throw new Error(`${path} contains non-finite number ${render(value)}; JSON would coerce it to null`);
-      }
-      return Object.is(value, -0) ? 0 : value;
-    }
-    if (typeof value === "function" || typeof value === "symbol" || typeof value === "bigint") {
-      throw new Error(`${path} is a ${typeof value}; JSON cannot represent it losslessly`);
-    }
-    if (typeof value !== "object") {
-      throw new Error(`${path} has unsupported type ${typeof value}`);
-    }
+  const walk: MaterializeWalk = (value, path, depth) => {
+    if (typeof value !== "object" || value === null) return materializeLeaf(value, path);
     if (depth > MAX_SAFE_RECORD_DEPTH) {
       throw new Error(
         `node output nesting exceeds the safe depth ceiling ${MAX_SAFE_RECORD_DEPTH} at ${path} (depth ${depth})`,
@@ -361,115 +541,7 @@ export const materializeCanonicalOutput = (output: unknown): CanonicalSerialized
     }
     active.set(value, path);
     try {
-      const prototype = Object.getPrototypeOf(value);
-
-      if (Array.isArray(value)) {
-        if (prototype !== Array.prototype) {
-          throw new Error(`${path} has an unsupported array prototype`);
-        }
-        const keys = Reflect.ownKeys(value);
-        const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
-        if (
-          lengthDescriptor === undefined ||
-          !("value" in lengthDescriptor) ||
-          typeof lengthDescriptor.value !== "number" ||
-          !Number.isSafeInteger(lengthDescriptor.value) ||
-          lengthDescriptor.value < 0
-        ) {
-          throw new Error(`${path}.length has a malformed data descriptor`);
-        }
-        const length = lengthDescriptor.value;
-        const indexed: Array<readonly [number, unknown]> = [];
-        for (const key of keys) {
-          if (key === "length") continue;
-          if (typeof key !== "string" || !/^(0|[1-9]\d*)$/.test(key)) {
-            throw new Error(`${path} has unsupported array property ${render(key)}`);
-          }
-          const index = Number(key);
-          if (!Number.isSafeInteger(index) || index >= length) {
-            throw new Error(`${path} has out-of-range array index ${render(key)}`);
-          }
-          const descriptor = Object.getOwnPropertyDescriptor(value, key);
-          if (descriptor === undefined) {
-            throw new Error(`${outputPath(path, index)} disappeared between ownKeys and descriptor materialization`);
-          }
-          if (!("value" in descriptor)) {
-            throw new Error(`${outputPath(path, index)} is an accessor; node output getters are rejected`);
-          }
-          if (!descriptor.enumerable) {
-            throw new Error(`${outputPath(path, index)} is non-enumerable and would be omitted by JSON`);
-          }
-          indexed.push([index, descriptor.value]);
-        }
-        if (indexed.length !== length) {
-          throw new Error(`${path} is sparse; JSON would replace missing array elements with null`);
-        }
-        indexed.sort(([left], [right]) => left - right);
-        const canonical = indexed.map(([index, entry]) =>
-          walk(entry, outputPath(path, index), depth + 1));
-        return Object.freeze(canonical);
-      }
-
-      const ownKeys = Reflect.ownKeys(value);
-      if (prototype === Date.prototype) {
-        if (ownKeys.length !== 0) {
-          throw new Error(`${path} is a Date with own properties that its serialized instant would omit`);
-        }
-        const instant = Date.prototype.getTime.call(value);
-        if (!Number.isFinite(instant)) throw new Error(`${path} is an invalid Date`);
-        return canonicalRecord([["__date__", new Date(instant).toISOString()]]);
-      }
-      if (prototype === Map.prototype) {
-        if (ownKeys.length !== 0) {
-          throw new Error(`${path} is a Map with own properties that serialization would omit`);
-        }
-        const entries = Array.from(Map.prototype.entries.call(value) as MapIterator<[unknown, unknown]>);
-        const canonicalEntries = entries.map(([key, entry], index) => Object.freeze([
-          walk(key, `${path}[map entry #${index} key]`, depth + 1),
-          walk(entry, `${path}[map entry #${index} value]`, depth + 1),
-        ] as const));
-        return canonicalRecord([["__map__", Object.freeze(canonicalEntries)]]);
-      }
-      if (prototype === Set.prototype) {
-        if (ownKeys.length !== 0) {
-          throw new Error(`${path} is a Set with own properties that serialization would omit`);
-        }
-        const entries = Array.from(Set.prototype.values.call(value) as SetIterator<unknown>);
-        const canonicalEntries = entries.map((entry, index) =>
-          walk(entry, `${path}[set item #${index}]`, depth + 1));
-        return canonicalRecord([["__set__", Object.freeze(canonicalEntries)]]);
-      }
-      if (prototype !== Object.prototype && prototype !== null) {
-        throw new Error(`${path} has unsupported prototype ${render(value)}`);
-      }
-
-      const captured: Array<readonly [string, unknown]> = [];
-      for (const key of ownKeys) {
-        if (typeof key !== "string") {
-          throw new Error(`${path} has a symbol-keyed property that JSON would omit`);
-        }
-        if (POLLUTION_KEYS.has(key)) {
-          throw new Error(`${outputPath(path, key)} is filtered as a prototype-pollution key`);
-        }
-        if (RESERVED_TAG_KEYS.has(key)) {
-          throw new Error(`${outputPath(path, key)} is a reserved serializer tag in a plain object`);
-        }
-        const descriptor = Object.getOwnPropertyDescriptor(value, key);
-        if (descriptor === undefined) {
-          throw new Error(`${outputPath(path, key)} disappeared between ownKeys and descriptor materialization`);
-        }
-        if (!("value" in descriptor)) {
-          throw new Error(`${outputPath(path, key)} is an accessor; node output getters are rejected`);
-        }
-        if (!descriptor.enumerable) {
-          throw new Error(`${outputPath(path, key)} is non-enumerable and would be omitted by JSON`);
-        }
-        captured.push([key, descriptor.value]);
-      }
-      return canonicalRecord(captured.map(([key, entry]) => [
-        key,
-        walk(entry, outputPath(path, key), depth + 1),
-      ] as const));
+      return materializeByShape(value, path, depth, walk);
     } finally {
       active.delete(value);
     }
@@ -587,6 +659,96 @@ const STORED_NODE_FIELDS: ReadonlySet<string> = new Set([
   "completedAt",
 ]);
 
+type CorruptNodeVerdict = Extract<NodeEntryVerdict, { readonly kind: "corrupt" }>;
+
+const corruptNode = (address: CorruptCheckpointAddress, message: string): CorruptNodeVerdict => ({
+  kind: "corrupt",
+  address,
+  message,
+});
+
+// First gate: JSON parse, object shape and a well-formed stored `nodeKey` (the
+// recoverable address). Until the key is read, the only address is the filename.
+const parseNodeEnvelope = (
+  fileName: string,
+  text: string,
+):
+  | {
+      readonly ok: true;
+      readonly raw: Record<string, unknown>;
+      readonly nodeKey: string;
+      readonly nodeIdOfKey: string;
+    }
+  | { readonly ok: false; readonly verdict: CorruptNodeVerdict } => {
+  const fileAddress = digestFilenameAddress(fileName);
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (error) {
+    return { ok: false, verdict: corruptNode(fileAddress, `not valid JSON: ${messageOf(error)}`) };
+  }
+  if (!isPlainRecord(raw)) {
+    return {
+      ok: false,
+      verdict: corruptNode(fileAddress, `node entry must be a JSON object, got ${render(raw)}`),
+    };
+  }
+
+  const nodeKey = raw.nodeKey;
+  const parsedNodeKey = typeof nodeKey === "string" ? parseCompositeNodeKey(nodeKey) : null;
+  if (typeof nodeKey !== "string" || parsedNodeKey === null) {
+    return {
+      ok: false,
+      verdict: corruptNode(
+        fileAddress,
+        `nodeKey ${render(nodeKey)} is not a well-formed canonical or composite node key`,
+      ),
+    };
+  }
+  return { ok: true, raw, nodeKey, nodeIdOfKey: parsedNodeKey.nodeId };
+};
+
+// The envelope is EXACTLY { nodeKey, nodeId, output, completedAt }.
+const checkEnvelopeFields = (raw: Record<string, unknown>, nodeKey: string): CorruptNodeVerdict | null => {
+  const unknownField = Object.keys(raw).find((key) => !STORED_NODE_FIELDS.has(key));
+  if (unknownField !== undefined) {
+    return corruptNode(
+      nodeKeyAddress(nodeKey),
+      `unknown node-envelope field ${render(unknownField)}; expected exactly { nodeKey, nodeId, output, completedAt }`,
+    );
+  }
+  const missingField = [...STORED_NODE_FIELDS].find(
+    (key) => !Object.prototype.hasOwnProperty.call(raw, key),
+  );
+  if (missingField !== undefined) {
+    return corruptNode(
+      nodeKeyAddress(nodeKey),
+      `missing node-envelope field ${render(missingField)}; expected exactly { nodeKey, nodeId, output, completedAt }`,
+    );
+  }
+  return null;
+};
+
+// From this point the address is recoverable even when another field or the
+// digest filename is corrupt (FR-028): the entry must own the address it sits at.
+const checkNodeFileAddress = (fileName: string, nodeKey: string): CorruptNodeVerdict | null => {
+  const nameMatch = NODE_FILE_NAME_PATTERN.exec(fileName);
+  if (nameMatch === null) {
+    return corruptNode(
+      nodeKeyAddress(nodeKey),
+      `filename does not match the node-entry contract <sha256hex(nodeKey)>.json`,
+    );
+  }
+  const digest = nameMatch[1];
+  if (keyDigest(nodeKey) !== digest) {
+    return corruptNode(
+      nodeKeyAddress(nodeKey),
+      `nodeKey ${render(nodeKey)} digests to ${keyDigest(nodeKey)} but was read from ${fileName} — the entry does not own this address`,
+    );
+  }
+  return null;
+};
+
 /**
  * Pure strict parse of one node file's bytes. Raw bytes cross three gates in
  * order: JSON parse, exact stored-envelope validation, then canonical
@@ -595,94 +757,34 @@ const STORED_NODE_FIELDS: ReadonlySet<string> = new Set([
  * decoder transformation can turn corrupt persisted bytes into a valid node.
  */
 export const parseNodeFile = (fileName: string, text: string): NodeEntryVerdict => {
-  let raw: unknown;
-  try {
-    raw = JSON.parse(text);
-  } catch (error) {
-    return { kind: "corrupt", address: digestFilenameAddress(fileName), message: `not valid JSON: ${messageOf(error)}` };
-  }
-  if (!isPlainRecord(raw)) {
-    return {
-      kind: "corrupt",
-      address: digestFilenameAddress(fileName),
-      message: `node entry must be a JSON object, got ${render(raw)}`,
-    };
-  }
+  const envelope = parseNodeEnvelope(fileName, text);
+  if (!envelope.ok) return envelope.verdict;
+  const { raw, nodeKey } = envelope;
 
-  const nodeKey = raw.nodeKey;
-  const parsedNodeKey = typeof nodeKey === "string" ? parseCompositeNodeKey(nodeKey) : null;
-  if (typeof nodeKey !== "string" || parsedNodeKey === null) {
-    return {
-      kind: "corrupt",
-      address: digestFilenameAddress(fileName),
-      message: `nodeKey ${render(nodeKey)} is not a well-formed canonical or composite node key`,
-    };
-  }
-
-  const envelopeKeys = Object.keys(raw);
-  const unknownField = envelopeKeys.find((key) => !STORED_NODE_FIELDS.has(key));
-  if (unknownField !== undefined) {
-    return {
-      kind: "corrupt",
-      address: nodeKeyAddress(nodeKey),
-      message: `unknown node-envelope field ${render(unknownField)}; expected exactly { nodeKey, nodeId, output, completedAt }`,
-    };
-  }
-  const missingField = [...STORED_NODE_FIELDS].find(
-    (key) => !Object.prototype.hasOwnProperty.call(raw, key),
-  );
-  if (missingField !== undefined) {
-    return {
-      kind: "corrupt",
-      address: nodeKeyAddress(nodeKey),
-      message: `missing node-envelope field ${render(missingField)}; expected exactly { nodeKey, nodeId, output, completedAt }`,
-    };
-  }
-
-  // From this point the address is recoverable even when another field or the
-  // digest filename is corrupt (FR-028).
-  const nameMatch = NODE_FILE_NAME_PATTERN.exec(fileName);
-  if (nameMatch === null) {
-    return {
-      kind: "corrupt",
-      address: nodeKeyAddress(nodeKey),
-      message: `filename does not match the node-entry contract <sha256hex(nodeKey)>.json`,
-    };
-  }
-  const digest = nameMatch[1];
-  if (keyDigest(nodeKey) !== digest) {
-    return {
-      kind: "corrupt",
-      address: nodeKeyAddress(nodeKey),
-      message: `nodeKey ${render(nodeKey)} digests to ${keyDigest(nodeKey)} but was read from ${fileName} — the entry does not own this address`,
-    };
-  }
+  const fieldsVerdict = checkEnvelopeFields(raw, nodeKey);
+  if (fieldsVerdict !== null) return fieldsVerdict;
+  const addressVerdict = checkNodeFileAddress(fileName, nodeKey);
+  if (addressVerdict !== null) return addressVerdict;
 
   const parsedNodeFields = parseNodeStateRecord(raw);
   if (!parsedNodeFields.ok) {
-    return {
-      kind: "corrupt",
-      address: nodeKeyAddress(nodeKey),
-      message: parsedNodeFields.error,
-    };
+    return corruptNode(nodeKeyAddress(nodeKey), parsedNodeFields.error);
   }
   const { nodeId, completedAt } = parsedNodeFields.value;
-  if (parsedNodeKey.nodeId !== nodeId) {
-    return {
-      kind: "corrupt",
-      address: nodeKeyAddress(nodeKey),
-      message: `nodeKey names nodeId ${render(parsedNodeKey.nodeId)} but entry contains ${render(nodeId)}`,
-    };
+  if (envelope.nodeIdOfKey !== nodeId) {
+    return corruptNode(
+      nodeKeyAddress(nodeKey),
+      `nodeKey names nodeId ${render(envelope.nodeIdOfKey)} but entry contains ${render(nodeId)}`,
+    );
   }
 
   const rawOutput = raw.output;
   const outputValidation = validateRawSerializedOutput(rawOutput);
   if (!outputValidation.ok) {
-    return {
-      kind: "corrupt",
-      address: nodeKeyAddress(nodeKey),
-      message: `serialized output is not canonical: ${outputValidation.error}`,
-    };
+    return corruptNode(
+      nodeKeyAddress(nodeKey),
+      `serialized output is not canonical: ${outputValidation.error}`,
+    );
   }
   // All expected malformed-byte cases have explicit verdicts above. A throw
   // from the decoder after those gates is therefore an implementation defect,

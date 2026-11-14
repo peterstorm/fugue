@@ -48,6 +48,57 @@
       "report": {
         "kind": "not-required"
       }
+    },
+    {
+      "id": "project:pr53-cs-regression",
+      "scope": "wave",
+      "executable": "bun",
+      "args": [
+        "test",
+        "apps/customer-summary/src/__tests__/pr53-repair-regression.test.ts",
+        "--reporter=junit",
+        "--reporter-outfile=.loom/completion-reports/pr53-cs-regression.junit.xml"
+      ],
+      "cwd": ".",
+      "timeoutMs": 600000,
+      "report": {
+        "kind": "required-file",
+        "path": ".loom/completion-reports/pr53-cs-regression.junit.xml"
+      }
+    },
+    {
+      "id": "project:pr53-fw-regression",
+      "scope": "wave",
+      "executable": "bun",
+      "args": [
+        "test",
+        "packages/framework/src/__tests__/pr53-repair-regression.test.ts",
+        "--reporter=junit",
+        "--reporter-outfile=.loom/completion-reports/pr53-fw-regression.junit.xml"
+      ],
+      "cwd": ".",
+      "timeoutMs": 600000,
+      "report": {
+        "kind": "required-file",
+        "path": ".loom/completion-reports/pr53-fw-regression.junit.xml"
+      }
+    },
+    {
+      "id": "project:pr53-host-regression",
+      "scope": "wave",
+      "executable": "bun",
+      "args": [
+        "test",
+        "packages/host/src/__tests__/pr53-repair-regression.test.ts",
+        "--reporter=junit",
+        "--reporter-outfile=.loom/completion-reports/pr53-host-regression.junit.xml"
+      ],
+      "cwd": ".",
+      "timeoutMs": 600000,
+      "report": {
+        "kind": "required-file",
+        "path": ".loom/completion-reports/pr53-host-regression.junit.xml"
+      }
     }
   ]
 }

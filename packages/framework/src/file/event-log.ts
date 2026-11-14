@@ -88,6 +88,105 @@ type StrictResult = Result<readonly FileEventRecord[], StrictReadFailure>;
 export const listJsonFileNames = (dir: string): string[] =>
   readdirSync(dir).filter((name) => name.endsWith(".json")).sort();
 
+// ENOENT = no events dir yet = empty journal; anything else is a real read
+// failure (fail closed with the directory named). A hostile errno getter
+// cannot escape and its inspection failure remains diagnostic.
+const listEventNames = (eventsDir: string): Result<readonly string[], StrictReadFailure> => {
+  try {
+    return ok(listJsonFileNames(eventsDir));
+  } catch (error) {
+    const codeProbe = probeErrorCode(error);
+    if (isMissingPathProbe(codeProbe)) return ok([]);
+    return err({
+      message: `read ${eventsDir}: ${safeErrorMessageWithCodeProbe(error, codeProbe)}`,
+    });
+  }
+};
+
+const readEventFileText = (source: string): Result<string, StrictReadFailure> => {
+  try {
+    return ok(readFileSync(source, "utf-8"));
+  } catch (error) {
+    // A directory (or symlink to one) squatting a record name is a
+    // deterministic squat — re-running cannot clear it, only manual
+    // removal — so pin "permanent", parity with the append-time gate in
+    // journal.ts listEventFiles. `readFileSync` on a directory throws
+    // EISDIR; ENOTDIR would require a path component to substitute between
+    // the successful listing and this read — a race, which is environment
+    // class. Every other errno is an environment failure replay may clear
+    // (a rename racing the listing, a transient I/O fault).
+    const codeProbe = probeErrorCode(error);
+    const squattingEntry = codeProbe.kind === "code" && codeProbe.code === "EISDIR";
+    return err({
+      message: `${source}: read failed: ${safeErrorMessage(error)} (FR-009)`,
+      ...(squattingEntry ? { permanent: true } : {}),
+    });
+  }
+};
+
+// The three filename ↔ content checks (FR-009), in order. `position` is the
+// number of records already accepted, i.e. the sequence this record must carry.
+const verifyRecordAgainstName = (
+  name: string,
+  source: string,
+  record: FileEventRecord,
+  position: number,
+): StrictReadFailure | null => {
+  // 1. Filename prefix ↔ content sequence (FR-009). The name is parsed
+  // through the SAME encoded inverse of `eventFileName` the journal's
+  // listing gate uses (`parseEventFileName` in layout.ts) — no private
+  // padding re-encoding: a name the writer can never produce, or a name
+  // whose sequence disagrees with the content, fails here.
+  const parsedName = parseEventFileName(name);
+  if (parsedName === null || parsedName.sequence !== record.sequence) {
+    return {
+      message: `${source}: filename prefix "${name.slice(0, 6)}" does not match record sequence ${record.sequence} (FR-009)`,
+      permanent: true,
+    };
+  }
+
+  // 2. Strictly contiguous sequences: the i-th record (sorted listing =
+  // append order) must carry sequence i. A gap, a duplicate, or a
+  // mis-sorted file is authoritative-log corruption, never a silent drop.
+  if (record.sequence !== position) {
+    return {
+      message: `${source}: sequence ${record.sequence} breaks strict contiguity — expected ${position} (FR-009)`,
+      permanent: true,
+    };
+  }
+
+  // 3. Filename digest ↔ content recompute (ADR-0076 tamper/tear check).
+  // `eventFileName` re-validates both sides, so this equality is exact.
+  const expected = eventFileName(record.sequence, eventDigestOf(record));
+  if (name !== expected) {
+    return {
+      message: `${source}: filename digest does not match the recomputed content digest (expected ${expected}, FR-009)`,
+      permanent: true,
+    };
+  }
+  return null;
+};
+
+// One listed file → one verified record: read, strict-parse, then check the
+// filename against the content. Raw-JSON seam: `parseStoredEventRecord` is the
+// barrel's text entry point — the full two-stage composition (raw grammar
+// validation, then strict record parsing) in one call, so the reader cannot
+// drift from the public codec; both stages fail closed as permanent
+// (deterministic corrupt bytes never clear on retry).
+const readVerifiedRecord = (
+  eventsDir: string,
+  name: string,
+  position: number,
+): Result<FileEventRecord, StrictReadFailure> => {
+  const source = join(eventsDir, name);
+  const contents = readEventFileText(source);
+  if (!contents.ok) return contents;
+  const parsed = parseStoredEventRecord(contents.value, source);
+  if (!parsed.ok) return err({ message: parsed.error, permanent: true });
+  const violation = verifyRecordAgainstName(name, source, parsed.value, position);
+  return violation === null ? ok(parsed.value) : err(violation);
+};
+
 /**
  * The single strict read path shared by both public readers. List `*.json`
  * in the events directory (sorted), then verify every record and its
@@ -96,90 +195,19 @@ export const listJsonFileNames = (dir: string): string[] =>
  */
 const readStrict = (directory: string): StrictResult => {
   const eventsDir = join(directory, EVENTS_DIR);
-  let names: string[];
-  try {
-    names = listJsonFileNames(eventsDir);
-  } catch (error) {
-    // ENOENT = no events dir yet = empty journal; anything else is a real
-    // read failure (fail closed with the directory named). A hostile errno
-    // getter cannot escape and its inspection failure remains diagnostic.
-    const codeProbe = probeErrorCode(error);
-    if (isMissingPathProbe(codeProbe)) return ok([]);
-    return err({
-      message: `read ${eventsDir}: ${safeErrorMessageWithCodeProbe(error, codeProbe)}`,
-    });
-  }
+  const names = listEventNames(eventsDir);
+  if (!names.ok) return names;
 
   const records: FileEventRecord[] = [];
-  for (const name of names) {
-    const source = join(eventsDir, name);
-    let contents: string;
-    try {
-      contents = readFileSync(source, "utf-8");
-    } catch (error) {
-      // A directory (or symlink to one) squatting a record name is a
-      // deterministic squat — re-running cannot clear it, only manual
-      // removal — so pin "permanent", parity with the append-time gate in
-      // journal.ts listEventFiles. `readFileSync` on a directory throws
-      // EISDIR; ENOTDIR would require a path component to substitute between
-      // the successful listing and this read — a race, which is environment
-      // class. Every other errno is an environment failure replay may clear
-      // (a rename racing the listing, a transient I/O fault).
-      const codeProbe = probeErrorCode(error);
-      const squattingEntry = codeProbe.kind === "code" && codeProbe.code === "EISDIR";
-      return err({
-        message: `${source}: read failed: ${safeErrorMessage(error)} (FR-009)`,
-        ...(squattingEntry ? { permanent: true } : {}),
-      });
-    }
-    // Raw-JSON seam: `parseStoredEventRecord` is the barrel's text entry
-    // point — the full two-stage composition (raw grammar validation, then
-    // strict record parsing) in one call, so the reader cannot drift from
-    // the public codec; both stages fail closed as permanent (deterministic
-    // corrupt bytes never clear on retry).
-    const parsed = parseStoredEventRecord(contents, source);
-    if (!parsed.ok) return err({ message: parsed.error, permanent: true });
-    const record = parsed.value;
-
-    // 1. Filename prefix ↔ content sequence (FR-009). The name is parsed
-    // through the SAME encoded inverse of `eventFileName` the journal's
-    // listing gate uses (`parseEventFileName` in layout.ts) — no private
-    // padding re-encoding: a name the writer can never produce, or a name
-    // whose sequence disagrees with the content, fails here.
-    const parsedName = parseEventFileName(name);
-    if (parsedName === null || parsedName.sequence !== record.sequence) {
-      return err({
-        message: `${source}: filename prefix "${name.slice(0, 6)}" does not match record sequence ${record.sequence} (FR-009)`,
-        permanent: true,
-      });
-    }
-
-    // 2. Strictly contiguous sequences: the i-th record (sorted listing =
-    // append order) must carry sequence i. A gap, a duplicate, or a
-    // mis-sorted file is authoritative-log corruption, never a silent drop.
-    if (record.sequence !== records.length) {
-      return err({
-        message: `${source}: sequence ${record.sequence} breaks strict contiguity — expected ${records.length} (FR-009)`,
-        permanent: true,
-      });
-    }
-
-    // 3. Filename digest ↔ content recompute (ADR-0076 tamper/tear check).
-    // `eventFileName` re-validates both sides, so this equality is exact.
-    const expected = eventFileName(record.sequence, eventDigestOf(record));
-    if (name !== expected) {
-      return err({
-        message: `${source}: filename digest does not match the recomputed content digest (expected ${expected}, FR-009)`,
-        permanent: true,
-      });
-    }
-
+  for (const name of names.value) {
+    const record = readVerifiedRecord(eventsDir, name, records.length);
+    if (!record.ok) return record;
     // Freeze at the read boundary (round-24 tda-4): the public type promises
     // `readonly` and the runtime now delivers it — each record is a freshly
     // parsed JSON tree, so freezing is free of aliasing risk, and a consumer
     // that mutates a record or reorders the array fails fast (strict mode)
     // instead of silently corrupting the load-bearing append order.
-    records.push(deepFreeze(record));
+    records.push(deepFreeze(record.value));
   }
   return ok(deepFreeze(records));
 };

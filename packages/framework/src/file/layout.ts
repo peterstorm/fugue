@@ -138,19 +138,12 @@ const ILL_FORMED_UTF16_DOMAIN = Uint8Array.of(
   0x00, 0x01,
 );
 
-const isWellFormedUtf16 = (value: string): boolean => {
-  for (let index = 0; index < value.length; index += 1) {
-    const codeUnit = value.charCodeAt(index);
-    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
-      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
-      index += 1;
-    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
-      return false;
-    }
-  }
-  return true;
-};
+// A lone surrogate is a high surrogate not followed by a low one, or a low
+// surrogate not preceded by a high one. No `u` flag: the pattern must see code
+// units, not code points.
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+
+const isWellFormedUtf16 = (value: string): boolean => !LONE_SURROGATE.test(value);
 
 const encodeIllFormedUtf16 = (value: string): Uint8Array => {
   const encoded = new Uint8Array(ILL_FORMED_UTF16_DOMAIN.length + value.length * 2);

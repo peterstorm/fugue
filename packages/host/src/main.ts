@@ -11,19 +11,18 @@
  */
 
 import { buildRuntimeDeps } from "./adapters/runtime-capabilities.js";
-import { parseHostConfig } from "./domain/config.js";
+import { parseHostConfig, type HostConfig } from "./domain/config.js";
 import { formatHostError } from "./domain/host-error.js";
 import { createHost } from "./host.js";
 import { createRedisConnectivity, disconnectRedisQuietly } from "./adapters/redis-connectivity.js";
 import { closeHitlQueueBackend, createHitlQueueBackend } from "./hitl/queue-backend.js";
 import { createJsonConsoleLogger } from "./entrypoint-wiring.js";
+import type { LogPort } from "./ports.js";
+import type { RedisConnectivityBundle } from "./adapters/redis-connectivity.js";
 
 // ── Main ───────────────────────────────────────────────────────────────────
 
-const main = async () => {
-  const logger = createJsonConsoleLogger();
-
-  // Step 1: Parse config from environment
+const parseConfigOrExit = (logger: LogPort): HostConfig => {
   logger.info("Parsing host configuration from environment...");
   const configResult = parseHostConfig(process.env as Record<string, string | undefined>);
   if (!configResult.ok) {
@@ -31,52 +30,70 @@ const main = async () => {
     logger.error("Host cannot start due to invalid configuration. Set required environment variables and retry.");
     process.exit(1);
   }
+  return configResult.value;
+};
 
-  const config = configResult.value;
-
-  // Step 2: Create Redis connectivity
+const connectRedisOrExit = async (config: HostConfig, logger: LogPort): Promise<RedisConnectivityBundle> => {
   const redisResult = await createRedisConnectivity(config.REDIS_URL);
   if (!redisResult.ok) {
     logger.error(`Redis connectivity failed: ${formatHostError(redisResult.error)}`);
     process.exit(1);
   }
-  const { port: redisPort, redis, disconnect: disconnectRedis } = redisResult.value;
+  return redisResult.value;
+};
+
+const bootHost = async (
+  config: HostConfig,
+  redis: RedisConnectivityBundle,
+  logger: LogPort,
+): Promise<void> => {
+  // Steps 1-5: the runtime every host presents to DAGs — built-in and
+  // gated optional capabilities, shared infrastructure, git adapter and module
+  // loader. Shared verbatim with `worker-main.ts` so the two topologies can
+  // never disagree about which capabilities a DAG may declare.
+  const { sharedInfra, git, loader } = await buildRuntimeDeps(config, redis.redis, logger);
+
+  // Step 6: Wire the optional HITL queue. The shared helper keeps the feature
+  // gate, lazy BullMQ import, and ownership log identical in both entrypoints.
+  const queueBackend = await createHitlQueueBackend(config, logger);
+
+  // Step 7: Create and boot host
+  const hostResult = await createHost({
+    config,
+    git,
+    loader,
+    redis: redis.port,
+    sharedInfra,
+    logger,
+    queueBackend,
+    onShutdown: async () => {
+      await closeHitlQueueBackend(queueBackend, logger);
+      await redis.disconnect();
+    },
+  });
+
+  if (!hostResult.ok) {
+    logger.error(`Host failed to start: ${formatHostError(hostResult.error)}`);
+    await redis.disconnect();
+    process.exit(1);
+  }
+
+  logger.info("Fugue host is running");
+};
+
+const main = async () => {
+  const logger = createJsonConsoleLogger();
+
+  // Step 1: Parse config from environment
+  const config = parseConfigOrExit(logger);
+
+  // Step 2: Create Redis connectivity
+  const redis = await connectRedisOrExit(config, logger);
 
   try {
-    // Steps 1-5: the runtime every host presents to DAGs — built-in and
-    // gated optional capabilities, shared infrastructure, git adapter and module
-    // loader. Shared verbatim with `worker-main.ts` so the two topologies can
-    // never disagree about which capabilities a DAG may declare.
-    const { sharedInfra, git, loader } = await buildRuntimeDeps(config, redis, logger);
-
-    // Step 6: Wire the optional HITL queue. The shared helper keeps the feature
-    // gate, lazy BullMQ import, and ownership log identical in both entrypoints.
-    const queueBackend = await createHitlQueueBackend(config, logger);
-
-    // Step 7: Create and boot host
-    const hostResult = await createHost({
-      config,
-      git,
-      loader,
-      redis: redisPort,
-      sharedInfra,
-      logger,
-      queueBackend,
-      onShutdown: async () => {
-        await closeHitlQueueBackend(queueBackend, logger);
-        await disconnectRedis();
-      },
-    });
-
-    if (!hostResult.ok) {
-      logger.error(`Host failed to start: ${formatHostError(hostResult.error)}`);
-      await disconnectRedis();
-      process.exit(1);
-    }
-
-    logger.info("Fugue host is running");
+    await bootHost(config, redis, logger);
   } catch (e) {
-    await disconnectRedisQuietly(disconnectRedis);
+    await disconnectRedisQuietly(redis.disconnect);
     throw e;
   }
 };

@@ -40,8 +40,8 @@ import type { TenantId } from "../../domain/tenant.js";
 import type { RunExecutorPort, RunExecOutcome, RunExecutionRequest, RunExecutionJob } from "../ports.js";
 import { toExecIdentity } from "../identity.js";
 import { logWithoutThrowing } from "../diagnostic-logging.js";
-import { settleBeforeDeadline } from "../../adapters/settle-before-deadline.js";
-import type { DeadlineDiagnostics } from "../../adapters/settle-before-deadline.js";
+import { settleBeforeDeadline } from "../../domain/settle-before-deadline.js";
+import type { DeadlineDiagnostics } from "../../domain/settle-before-deadline.js";
 
 const deadlineFencedJob = <S, E, C>(
   job: JobLike<S, E, C>,

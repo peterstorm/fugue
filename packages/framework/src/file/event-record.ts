@@ -135,6 +135,7 @@ import {
   RESERVED_TAG_KEYS,
   MAX_SAFE_RECORD_DEPTH,
 } from "../state-machine/serialize.js";
+import { match } from "ts-pattern";
 import type { Result } from "../types/result.js";
 import { ok, err, tryCatch } from "../types/result.js";
 import { safeDiagnosticRender, safeDiagnosticString, safeErrorMessage } from "../types/safe-error.js";
@@ -385,6 +386,41 @@ type ScanVerdict =
 const ownValue = (obj: object, key: string): unknown =>
   Object.getOwnPropertyDescriptor(obj, key)?.value;
 
+/** The write refusal for a JS value kind JSON has no representation for.
+ * `kind` names the kind twice — as the noun ("a BigInt") and as the JSON
+ * gap ("no BigInt representation") — from the single argument. */
+const unrepresentableKind = (operation: string, path: string, kind: string): Error =>
+  new Error(
+    `${operation}: ${path} is a ${kind} — JSON has no ${kind} representation; refusing to persist a value that would diverge from the caller's event (FR-009)`,
+  );
+
+/**
+ * First gate of the write pre-scan walk: `true` for an object the walk must
+ * descend into, `false` for a scalar (null/undefined/string/number/boolean)
+ * it admits as-is, and a throw for a kind JSON cannot represent — the name
+ * is the requirement, and the throw IS the rejection of bigint/symbol/
+ * function. The seven `typeof` results are a closed set matched exhaustively
+ * — there is no `default` arm left to hide a kind this walk does not admit.
+ */
+const requireWalkableObject = (
+  operation: string,
+  path: string,
+  value: unknown,
+): value is object =>
+  match(typeof value)
+    .with("string", "number", "boolean", "undefined", () => false)
+    .with("object", () => value !== null)
+    .with("bigint", () => {
+      throw unrepresentableKind(operation, path, "BigInt");
+    })
+    .with("symbol", () => {
+      throw unrepresentableKind(operation, path, "symbol");
+    })
+    .with("function", () => {
+      throw unrepresentableKind(operation, path, "function");
+    })
+    .exhaustive();
+
 /**
  * FR-009 write-boundary pre-scan: recursively verify that `event` is
  * representable losslessly by `toJson`. Runs FIRST in
@@ -462,30 +498,7 @@ const assertLosslessEventUnchecked = (
     active: Map<object, string>,
     depth: number,
   ): void => {
-    if (value === null || value === undefined) return;
-    switch (typeof value) {
-      case "string":
-      case "number":
-      case "boolean":
-        return;
-      case "bigint":
-        throw new Error(
-          `${operation}: ${path} is a BigInt — JSON has no BigInt representation; refusing to persist a value that would diverge from the caller's event (FR-009)`,
-        );
-      case "symbol":
-        throw new Error(
-          `${operation}: ${path} is a symbol — JSON has no symbol representation; refusing to persist a value that would diverge from the caller's event (FR-009)`,
-        );
-      case "function":
-        throw new Error(
-          `${operation}: ${path} is a function — JSON has no function representation; refusing to persist a value that would diverge from the caller's event (FR-009)`,
-        );
-      case "object":
-        break;
-      // The seven `typeof` results are a closed set: after the null/undefined
-      // early return above, every reachable value is cased — there is no
-      // `default` arm left to hide a kind this walk does not admit.
-    }
+    if (!requireWalkableObject(operation, path, value)) return;
 
     // Circular-reference guard: a node revisited through its own descendants
     // is a cycle; paths are tracked so the error names both ends. Sibling
@@ -1089,6 +1102,98 @@ export const parseStoredEventRecord = (
   return parseFileEventRecord(raw.value, source);
 };
 
+type ScanFrame = {
+  readonly value: unknown;
+  readonly depth: number;
+  readonly chain: PathLink | null;
+};
+
+/** The frame for one child of `parent`, one hop deeper, reached via `text`. */
+const childFrame = (parent: ScanFrame, value: unknown, text: string): ScanFrame => ({
+  value,
+  depth: parent.depth + 1,
+  chain: { text, parent: parent.chain },
+});
+
+/**
+ * What expanding one scanned node yields: its child frames (in PUSH order — the
+ * walk pops, so the LAST frame is visited first), or an immediate verdict.
+ */
+type ScanExpansion =
+  | { readonly kind: "children"; readonly frames: readonly ScanFrame[] }
+  | { readonly kind: "verdict"; readonly verdict: ScanVerdict };
+
+const childrenOf = (frames: readonly ScanFrame[]): ScanExpansion => ({ kind: "children", frames });
+
+/**
+ * Push each entry's VALUE before its KEY and entries in reverse, so the pop
+ * order is entry 0 key → value → entry 1 key → value … (DFS order, identical
+ * to the recursive walk).
+ */
+const mapFrames = (value: ReadonlyMap<unknown, unknown>, frame: ScanFrame): ScanFrame[] => {
+  const entries = [...value.entries()];
+  const frames: ScanFrame[] = [];
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const [k, v] = entries[i];
+    frames.push(childFrame(frame, v, `[map entry #${i} value]`));
+    frames.push(childFrame(frame, k, `[map entry #${i} key]`));
+  }
+  return frames;
+};
+
+const setFrames = (value: ReadonlySet<unknown>, frame: ScanFrame): ScanFrame[] => {
+  const items = [...value.values()];
+  const frames: ScanFrame[] = [];
+  for (let i = items.length - 1; i >= 0; i--) {
+    frames.push(childFrame(frame, items[i], `[set item #${i}]`));
+  }
+  return frames;
+};
+
+const arrayFrames = (value: readonly unknown[], frame: ScanFrame): ScanFrame[] => {
+  const frames: ScanFrame[] = [];
+  for (let i = value.length - 1; i >= 0; i--) {
+    frames.push(childFrame(frame, value[i], renderPathSegment(i)));
+  }
+  return frames;
+};
+
+/**
+ * Plain object (deserializeValue's output space): literal tag KEYS are the
+ * corrupt form; the values may hold further objects to walk. One
+ * `Object.keys` snapshot serves both the reserved-tag scan and the reverse
+ * walk (synchronous walk — no mutation or re-entrancy between the two passes).
+ */
+const plainObjectExpansion = (value: object, frame: ScanFrame): ScanExpansion => {
+  const keys = Object.keys(value);
+  for (const key of keys) {
+    if (RESERVED_TAG_KEYS.has(key)) {
+      return {
+        kind: "verdict",
+        verdict: {
+          kind: "hit",
+          key,
+          path: renderChain({ text: renderPathSegment(key), parent: frame.chain }, ""),
+        },
+      };
+    }
+  }
+  const frames: ScanFrame[] = [];
+  for (let i = keys.length - 1; i >= 0; i--) {
+    const key = keys[i];
+    frames.push(childFrame(frame, ownValue(value, key), renderPathSegment(key)));
+  }
+  return childrenOf(frames);
+};
+
+const expandScanFrame = (value: object, frame: ScanFrame): ScanExpansion => {
+  if (value instanceof Map) return childrenOf(mapFrames(value, frame));
+  if (value instanceof Set) return childrenOf(setFrames(value, frame));
+  if (value instanceof Date) return childrenOf([]);
+  if (Array.isArray(value)) return childrenOf(arrayFrames(value, frame));
+  return plainObjectExpansion(value, frame);
+};
+
 /**
  * Read-side companion of the write pre-scan's reserved-tag rejection: walk
  * `event` and return the first plain object carrying a literal reserved tag
@@ -1114,11 +1219,7 @@ export const parseStoredEventRecord = (
  * the write side's count exactly.
  */
 const findReservedTagKey = (event: unknown): ScanVerdict => {
-  const stack: Array<{
-    readonly value: unknown;
-    readonly depth: number;
-    readonly chain: PathLink | null;
-  }> = [{ value: event, depth: 1, chain: { text: "event", parent: null } }];
+  const stack: ScanFrame[] = [{ value: event, depth: 1, chain: { text: "event", parent: null } }];
   const seen = new Set<object>();
   while (stack.length > 0) {
     const frame = stack.pop();
@@ -1131,78 +1232,12 @@ const findReservedTagKey = (event: unknown): ScanVerdict => {
     // scanned at a shallow depth is never re-flagged via a deeper chain.
     if (seen.has(value)) continue;
     if (frame.depth > MAX_SAFE_RECORD_DEPTH) {
-      return {
-        kind: "too-deep",
-        depth: frame.depth,
-        path: renderChain(frame.chain, ""),
-      };
+      return { kind: "too-deep", depth: frame.depth, path: renderChain(frame.chain, "") };
     }
     seen.add(value);
-    if (value instanceof Map) {
-      const entries = [...value.entries()];
-      // Push each entry's VALUE before its KEY and entries in reverse, so
-      // the pop order is entry 0 key → value → entry 1 key → value …
-      // (DFS order, identical to the recursive walk).
-      for (let i = entries.length - 1; i >= 0; i--) {
-        const [k, v] = entries[i];
-        stack.push({
-          value: v,
-          depth: frame.depth + 1,
-          chain: { text: `[map entry #${i} value]`, parent: frame.chain },
-        });
-        stack.push({
-          value: k,
-          depth: frame.depth + 1,
-          chain: { text: `[map entry #${i} key]`, parent: frame.chain },
-        });
-      }
-      continue;
-    }
-    if (value instanceof Set) {
-      const items = [...value.values()];
-      for (let i = items.length - 1; i >= 0; i--) {
-        stack.push({
-          value: items[i],
-          depth: frame.depth + 1,
-          chain: { text: `[set item #${i}]`, parent: frame.chain },
-        });
-      }
-      continue;
-    }
-    if (value instanceof Date) continue;
-    if (Array.isArray(value)) {
-      for (let i = value.length - 1; i >= 0; i--) {
-        stack.push({
-          value: value[i],
-          depth: frame.depth + 1,
-          chain: { text: renderPathSegment(i), parent: frame.chain },
-        });
-      }
-      continue;
-    }
-    // Plain object (deserializeValue's output space): literal tag KEYS are
-    // the corrupt form; the values may hold further objects to walk. One
-    // `Object.keys` snapshot serves both the reserved-tag scan and the
-    // reverse walk (synchronous walk — no mutation or re-entrancy between
-    // the two passes).
-    const keys = Object.keys(value);
-    for (const key of keys) {
-      if (RESERVED_TAG_KEYS.has(key)) {
-        return {
-          kind: "hit",
-          key,
-          path: renderChain({ text: renderPathSegment(key), parent: frame.chain }, ""),
-        };
-      }
-    }
-    for (let i = keys.length - 1; i >= 0; i--) {
-      const key = keys[i];
-      stack.push({
-        value: ownValue(value, key),
-        depth: frame.depth + 1,
-        chain: { text: renderPathSegment(key), parent: frame.chain },
-      });
-    }
+    const expansion = expandScanFrame(value, frame);
+    if (expansion.kind === "verdict") return expansion.verdict;
+    for (const child of expansion.frames) stack.push(child);
   }
   return { kind: "clean" };
 };

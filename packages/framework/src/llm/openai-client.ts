@@ -43,6 +43,56 @@ const buildJsonSchema = (schema: z.ZodType<any>): Record<string, unknown> => {
   return withAdditionalPropertiesFalse(json);
 };
 
+// ---------------------------------------------------------------------------
+// Wire parse: a 200 body is untrusted JSON until it has passed this guard.
+// ---------------------------------------------------------------------------
+
+const isJsonObject = (v: unknown): v is Readonly<Record<string, unknown>> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** An absent field, or one of the declared type. */
+const optional = (v: unknown, isType: (x: unknown) => boolean): boolean =>
+  v === undefined || isType(v);
+
+/** The wire sends `null` for these object-valued fields; every consumer reads them with `?.`. */
+const optionalOrNull = (v: unknown, isType: (x: unknown) => boolean): boolean =>
+  v === null || optional(v, isType);
+
+const isString = (v: unknown): boolean => typeof v === "string";
+
+// Token counts are deliberately NOT type-checked: they are untrusted JSON that
+// `sanitizeCount` degrades to 0 when not a finite number (FR-PC-010 pins that),
+// so a malformed count must not discard an otherwise good response.
+const isResponsesUsage = (v: unknown): boolean =>
+  isJsonObject(v) && optionalOrNull(v.input_tokens_details, isJsonObject);
+
+const isResponsesApiError = (v: unknown): boolean =>
+  isJsonObject(v) && optional(v.code, isString) && optional(v.message, isString);
+
+const isResponsesIncompleteDetails = (v: unknown): boolean =>
+  isJsonObject(v) && optional(v.reason, isString);
+
+const isResponsesOutput = (v: unknown): boolean =>
+  Array.isArray(v) && v.every((item: unknown) => isJsonObject(item) && isString(item.type));
+
+/**
+ * Structural guard for a Responses API body, checking every field
+ * `ResponsesApiResponse` declares. Returns the SAME object (no copy, no key
+ * stripping): error paths render the whole body with `JSON.stringify`, so a
+ * rebuilt object would change the diagnostics. Output items are only checked
+ * for the discriminating `type`; the per-variant guards in `openai-types.ts`
+ * skip anything they do not recognise.
+ */
+const isResponsesApiResponse = (v: unknown): v is ResponsesApiResponse =>
+  isJsonObject(v) &&
+  optional(v.id, isString) &&
+  optional(v.model, isString) &&
+  optional(v.status, isString) &&
+  optionalOrNull(v.output, isResponsesOutput) &&
+  optionalOrNull(v.usage, isResponsesUsage) &&
+  optionalOrNull(v.error, isResponsesApiError) &&
+  optionalOrNull(v.incomplete_details, isResponsesIncompleteDetails);
+
 /**
  * Normalise a Responses `usage` block into the framework's `TokenUsage`.
  *
@@ -244,11 +294,15 @@ export class OpenAILlmClient implements LlmClient {
     // same failure shape as a non-OK status, so the typed error carries
     // `HTTP 200` plus the (truncated) body snapshot.
     const text = await httpRes.text();
+    // A body that is valid JSON but not a Responses document (`null`, an
+    // array, `output: "x"`) takes the same failure arm as non-JSON.
     try {
-      return { ok: true, response: JSON.parse(text) as ResponsesApiResponse };
+      const parsed: unknown = JSON.parse(text);
+      if (isResponsesApiResponse(parsed)) return { ok: true, response: parsed };
     } catch {
-      return { ok: false, status: httpRes.status, bodyText: text };
+      // not JSON — falls through to the shared failure shape
     }
+    return { ok: false, status: httpRes.status, bodyText: text };
   }
 
   async sendStructured<O>(req: LlmRequest<O>): Promise<Result<LlmResponse<O>, FrameworkError>> {

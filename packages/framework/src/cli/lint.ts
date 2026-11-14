@@ -16,6 +16,7 @@ import { DagDefinitionError } from "../executor/define-dag.js";
 import type { DagDef } from "../types/dag.js";
 import { analyzeDag } from "./lint-checks.js";
 import { resolveRoot } from "./paths.js";
+import type { Result } from "../types/result.js";
 import type { LintAdvisory, LintError, LintResult } from "./types.js";
 
 /**
@@ -46,6 +47,46 @@ type ImportedDagFile =
       readonly errors: readonly LintError[];
     };
 
+const importFailure = (path: string, error: LintError): ImportedDagFile => ({
+  ok: false,
+  path,
+  errors: [error],
+});
+
+type DefaultExportRead = Result<unknown, LintError>;
+
+// A throwing module is either a `defineDag` rejection (carries a machine-readable
+// detail) or a generic import failure.
+const lintErrorFromImportThrow = (e: unknown): LintError => {
+  if (e instanceof DagDefinitionError) {
+    return {
+      kind: "dag-definition-error",
+      dagId: e.dagId,
+      message: e.message,
+      detail: e.detail,
+    };
+  }
+  return {
+    kind: "import-failed",
+    message: e instanceof Error ? e.message : String(e),
+    stack: e instanceof Error ? e.stack : undefined,
+  };
+};
+
+// The imperative step: `await import()` the module and read its `default`.
+const readDefaultExport = async (moduleUrl: string): Promise<DefaultExportRead> => {
+  try {
+    const mod: unknown = await import(moduleUrl);
+    // When a module threw during a *prior* `await import()` (e.g. DagDefinitionError
+    // from `defineDag`) but the ESM record still resolves on re-import, the
+    // `default` binding can be in TDZ. Property access must live inside the
+    // try so the TDZ ReferenceError surfaces through the same paths.
+    return { ok: true, value: (mod as Record<string, unknown>)?.default };
+  } catch (e) {
+    return { ok: false, error: lintErrorFromImportThrow(e) };
+  }
+};
+
 /**
  * Import a DAG module file and extract its default export. Captures
  * `DagDefinitionError`, generic import errors, and shape mismatches (no
@@ -65,44 +106,15 @@ export const importDagFile = async (path: string): Promise<ImportedDagFile> => {
   // practice.
   const moduleUrl = pathToFileURL(absolute).href;
 
-  let mod: unknown;
-  let defaultExport: unknown;
-  try {
-    mod = await import(moduleUrl);
-    // When a module threw during a *prior* `await import()` (e.g. DagDefinitionError
-    // from `defineDag`) but the ESM record still resolves on re-import, the
-    // `default` binding can be in TDZ. Property access must live inside the
-    // try so the TDZ ReferenceError surfaces through the same paths.
-    defaultExport = (mod as Record<string, unknown>)?.default;
-  } catch (e) {
-    if (e instanceof DagDefinitionError) {
-      const error: LintError = {
-        kind: "dag-definition-error",
-        dagId: e.dagId,
-        message: e.message,
-        detail: e.detail,
-      };
-      return { ok: false, path: absolute, errors: [error] };
-    }
-    const error: LintError = {
-      kind: "import-failed",
-      message: e instanceof Error ? e.message : String(e),
-      stack: e instanceof Error ? e.stack : undefined,
-    };
-    return { ok: false, path: absolute, errors: [error] };
-  }
+  const read = await readDefaultExport(moduleUrl);
+  if (!read.ok) return importFailure(absolute, read.error);
+  const defaultExport = read.value;
 
   if (defaultExport === undefined || defaultExport === null) {
-    return {
-      ok: false,
-      path: absolute,
-      errors: [
-        {
-          kind: "no-default-export",
-          message: `Module at ${absolute} has no default export. Export a DagRegistration as default.`,
-        },
-      ],
-    };
+    return importFailure(absolute, {
+      kind: "no-default-export",
+      message: `Module at ${absolute} has no default export. Export a DagRegistration as default.`,
+    });
   }
 
   // A DagRegistration is `{ dag: DagDef, inputSchema, ... }`. We don't deep-
@@ -111,16 +123,10 @@ export const importDagFile = async (path: string): Promise<ImportedDagFile> => {
   // wants stricter validation, it can use `@fuguejs/host/contract` separately.
   const dagField = (defaultExport as Record<string, unknown>)?.dag;
   if (dagField === undefined || dagField === null || typeof dagField !== "object") {
-    return {
-      ok: false,
-      path: absolute,
-      errors: [
-        {
-          kind: "missing-dag-field",
-          message: `Default export does not have a 'dag' field. Expected a DagRegistration shape: { dag: defineDag(...), inputSchema, ... }`,
-        },
-      ],
-    };
+    return importFailure(absolute, {
+      kind: "missing-dag-field",
+      message: `Default export does not have a 'dag' field. Expected a DagRegistration shape: { dag: defineDag(...), inputSchema, ... }`,
+    });
   }
 
   return {

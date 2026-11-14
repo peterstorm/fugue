@@ -119,9 +119,9 @@ export const testRuntimeContext = (
       dag.nodes.filter((node) => node.humanReview !== undefined).map((node) => node.id),
     ),
     humanReviewPrompts: overrides.humanReviewPrompts ?? new Map(
-      dag.nodes
-        .filter((node) => node.humanReview !== undefined)
-        .map((node) => [node.id, node.humanReview!.prompt] as const),
+      dag.nodes.flatMap((node) =>
+        node.humanReview === undefined ? [] : [[node.id, node.humanReview.prompt] as const],
+      ),
     ),
     edges: dag.edges,
     confidenceByNode: overrides.confidenceByNode ?? new Map(),

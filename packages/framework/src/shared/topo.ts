@@ -4,12 +4,21 @@ import type { NodeId } from "../types/ids.js";
 import { isDagInput } from "../types/ids.js";
 import { type Result, ok, err } from "../types/result.js";
 
-/**
- * Kahn's algorithm topological sort.
- * Returns waves of node IDs that can execute in parallel.
- */
-export const topoSort = (dag: DagDef): Result<NodeId[][], FrameworkError> => {
-  const nodeIds = new Set(dag.nodes.map((n) => n.id));
+/** Kahn's-algorithm bookkeeping: unmet-predecessor counts and the forward adjacency. */
+interface Graph {
+  readonly inDegree: Map<NodeId, number>;
+  readonly successors: Map<NodeId, NodeId[]>;
+}
+
+const unknownEndpoint = (role: "source" | "target", id: NodeId): FrameworkError => ({
+  kind: "validation" as const,
+  nodeId: id,
+  message: `Edge references unknown ${role} node '${id}'`,
+});
+
+// Fold the dag's edges into in-degree counts and successor lists, rejecting an
+// edge whose endpoint is not a node of the dag.
+const buildGraph = (dag: DagDef, nodeIds: ReadonlySet<NodeId>): Result<Graph, FrameworkError> => {
   const inDegree = new Map<NodeId, number>();
   const successors = new Map<NodeId, NodeId[]>();
 
@@ -23,33 +32,22 @@ export const topoSort = (dag: DagDef): Result<NodeId[][], FrameworkError> => {
     // it contributes no in-degree and no successor edge. A node fed only by
     // `$input` therefore sorts into wave 0, consistent with `seedInitialActiveSet`.
     if (isDagInput(edge.from)) {
-      if (!nodeIds.has(edge.to)) {
-        return err({
-          kind: "validation" as const,
-          nodeId: edge.to,
-          message: `Edge references unknown target node '${edge.to}'`,
-        });
-      }
+      if (!nodeIds.has(edge.to)) return err(unknownEndpoint("target", edge.to));
       continue;
     }
-    if (!nodeIds.has(edge.from)) {
-      return err({
-        kind: "validation" as const,
-        nodeId: edge.from,
-        message: `Edge references unknown source node '${edge.from}'`,
-      });
-    }
-    if (!nodeIds.has(edge.to)) {
-      return err({
-        kind: "validation" as const,
-        nodeId: edge.to,
-        message: `Edge references unknown target node '${edge.to}'`,
-      });
-    }
+    if (!nodeIds.has(edge.from)) return err(unknownEndpoint("source", edge.from));
+    if (!nodeIds.has(edge.to)) return err(unknownEndpoint("target", edge.to));
     inDegree.set(edge.to, (inDegree.get(edge.to) ?? 0) + 1);
     successors.get(edge.from)!.push(edge.to);
   }
+  return ok({ inDegree, successors });
+};
 
+// Peel the graph wave by wave; nodes left with unmet predecessors form a cycle.
+const peelWaves = (
+  nodeIds: ReadonlySet<NodeId>,
+  { inDegree, successors }: Graph,
+): Result<NodeId[][], FrameworkError> => {
   const waves: NodeId[][] = [];
   let remaining = nodeIds.size;
 
@@ -79,4 +77,15 @@ export const topoSort = (dag: DagDef): Result<NodeId[][], FrameworkError> => {
   }
 
   return ok(waves);
+};
+
+/**
+ * Kahn's algorithm topological sort.
+ * Returns waves of node IDs that can execute in parallel.
+ */
+export const topoSort = (dag: DagDef): Result<NodeId[][], FrameworkError> => {
+  const nodeIds = new Set(dag.nodes.map((n) => n.id));
+  const graph = buildGraph(dag, nodeIds);
+  if (!graph.ok) return graph;
+  return peelWaves(nodeIds, graph.value);
 };

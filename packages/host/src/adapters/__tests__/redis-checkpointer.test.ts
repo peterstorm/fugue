@@ -424,6 +424,39 @@ describe("createNamespacedCheckpointer — totality", () => {
     expect(logs.some((l) => l.level === "warn" && l.msg.includes(bad))).toBe(true);
   });
 
+  it.each([
+    ["JSON null", "null"],
+    ["a JSON array", "[]"],
+    ["a JSON number", "7"],
+    ["a JSON string", JSON.stringify("entry")],
+  ])("treats metadata that parses to %s as checkpoint-corrupt, not a crash", async (_label, bytes) => {
+    const { port } = makeRedis({ strings: new Map([[META_KEY, bytes]]) });
+    const loaded = await subject(port).checkpointer.load(RUN);
+
+    expect(loaded.ok).toBe(false);
+    if (!loaded.ok) expect(loaded.error.kind).toBe("checkpoint-corrupt");
+  });
+
+  it.each([
+    ["JSON null", "null"],
+    ["a JSON array", "[]"],
+    ["a JSON number", "7"],
+    ["a JSON string", JSON.stringify("entry")],
+    ["an object with no nodeId", JSON.stringify({ output: 1, completedAt: "2026-01-01T00:00:01.000Z" })],
+  ])("drops a node entry that parses to %s and names its address", async (_label, bytes) => {
+    const bad = compositeNodeKey(NODE, { index: mapIndex(1) });
+    const { port, behaviour } = makeRedis();
+    const { checkpointer, logs } = subject(port);
+    await checkpointer.setMeta(RUN, meta());
+    behaviour.hGetAll = async () => ok({ [bad]: bytes });
+
+    const loaded = await checkpointer.load(RUN);
+    if (!loaded.ok || loaded.value === null) throw new Error("expected a loaded run state");
+    expect(Object.keys(loaded.value.nodes)).toEqual([]);
+    expect(loaded.value.corruptNodeAddresses).toEqual([{ kind: "node-key", nodeKey: bad }]);
+    expect(logs.some((l) => l.level === "warn" && l.msg.includes(bad))).toBe(true);
+  });
+
   it("defines a __proto__ entry as an own property rather than re-parenting the node map", async () => {
     // `__proto__` matches ID_PATTERN, so it is a legal nodeId and therefore a
     // legal canonical hash field. Plain assignment would hit the prototype

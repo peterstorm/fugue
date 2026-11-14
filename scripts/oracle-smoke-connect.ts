@@ -62,45 +62,56 @@ const note = (msg: string): void => {
   console.error(msg);
 };
 
-async function main(): Promise<void> {
-  note(`🔌  Oracle smoke-connect (thin mode) on ${process.versions.bun ? `bun ${process.versions.bun}` : `node ${process.version}`}`);
+/** The three required credentials, read once and proven present. */
+type SmokeCredentials = Readonly<{ connectString: string; user: string; password: string }>;
 
+/**
+ * Parse the environment into credentials, or exit non-zero naming ONLY the
+ * missing variables — never their values.
+ */
+const loadCredentialsOrExit = (): SmokeCredentials => {
   const missing: string[] = [];
   const connectString = required("ORACLE_CONNECT_STRING", missing);
   const user = required("ORACLE_USER", missing);
   const password = required("ORACLE_PASSWORD", missing);
 
-  if (missing.length > 0) {
+  if (connectString === undefined || user === undefined || password === undefined) {
     // Name the missing vars only — never their values.
     console.error(`❌  Missing required env var(s): ${missing.join(", ")}`);
     process.exit(1);
   }
+  return { connectString, user, password };
+};
 
-  // Non-null: the guard above exits when any is missing.
-  const oracle = createOracleAdapter({
-    connectString: connectString!,
-    user: user!,
-    password: password!,
-    poolMin: 0,
-    poolMax: 1,
-  });
+type OracleHandle = ReturnType<typeof createOracleAdapter>;
+
+/**
+ * connect() acquires a pooled thin-mode connection and runs SELECT 1 FROM
+ * DUAL; it throws (credential-stripped) on any failure. Then a second, bounded
+ * confirmation via the same query behind a 5s timeout.
+ */
+const runSmokeChecks = async (oracle: OracleHandle): Promise<void> => {
+  await oracle.connect!();
+  note("✅  connect() OK — SELECT 1 FROM DUAL succeeded");
+
+  if (oracle.healthCheck != null) {
+    const health = await oracle.healthCheck();
+    if (!health.ok) {
+      console.error(`❌  healthCheck() failed: ${health.error}`);
+      process.exit(1);
+    }
+    note("✅  healthCheck() OK");
+  }
+};
+
+async function main(): Promise<void> {
+  note(`🔌  Oracle smoke-connect (thin mode) on ${process.versions.bun ? `bun ${process.versions.bun}` : `node ${process.version}`}`);
+
+  const credentials = loadCredentialsOrExit();
+  const oracle = createOracleAdapter({ ...credentials, poolMin: 0, poolMax: 1 });
 
   try {
-    // connect() acquires a pooled thin-mode connection and runs SELECT 1 FROM
-    // DUAL; it throws (credential-stripped) on any failure.
-    await oracle.connect!();
-    note("✅  connect() OK — SELECT 1 FROM DUAL succeeded");
-
-    // Second, bounded confirmation via the same query behind a 5s timeout.
-    if (oracle.healthCheck != null) {
-      const health = await oracle.healthCheck();
-      if (!health.ok) {
-        console.error(`❌  healthCheck() failed: ${health.error}`);
-        process.exit(1);
-      }
-      note("✅  healthCheck() OK");
-    }
-
+    await runSmokeChecks(oracle);
     note("✅  Oracle smoke-connect PASSED on the prod image");
     process.exit(0);
   } catch (e) {

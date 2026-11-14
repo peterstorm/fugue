@@ -28,19 +28,11 @@ export interface SignalHandlerHandle {
 
 // ── Implementation ─────────────────────────────────────────────────────────
 
-/**
- * Register signal handlers for graceful shutdown.
- *
- * - SIGTERM → begin drain, stop accepting, wait for inflight, exit 0
- * - SIGINT → same (for dev mode Ctrl+C)
- * - Uncaught exception → log, exit 1
- * - Unhandled rejection → log, exit 1
- */
-export const registerSignalHandlers = (deps: SignalHandlerDeps): SignalHandlerHandle => {
+const createShutdownHandler = (deps: SignalHandlerDeps): ((signal: string) => Promise<void>) => {
   const { onShutdown, logger } = deps;
   let shutdownInProgress = false;
 
-  const handleShutdown = async (signal: string) => {
+  return async (signal: string) => {
     if (shutdownInProgress) {
       logger.warn(`Received ${signal} again — forcing immediate exit`);
       process.exit(1);
@@ -59,25 +51,41 @@ export const registerSignalHandlers = (deps: SignalHandlerDeps): SignalHandlerHa
       process.exit(1);
     }
   };
+};
 
-  const sigterm = () => { handleShutdown("SIGTERM").catch(() => process.exit(1)); };
-  const sigint = () => { handleShutdown("SIGINT").catch(() => process.exit(1)); };
-
-  const uncaughtException = (err: Error) => {
+const createCrashHandlers = (
+  logger: LogPort,
+): { readonly uncaughtException: (err: Error) => void; readonly unhandledRejection: (reason: unknown) => void } => ({
+  uncaughtException: (err) => {
     logger.error("Uncaught exception — exiting", {
       error: err.message,
       stack: err.stack,
     });
     process.exit(1);
-  };
-
-  const unhandledRejection = (reason: unknown) => {
+  },
+  unhandledRejection: (reason) => {
     logger.error("Unhandled promise rejection — exiting", {
       error: reason instanceof Error ? reason.message : String(reason),
       stack: reason instanceof Error ? reason.stack : undefined,
     });
     process.exit(1);
-  };
+  },
+});
+
+/**
+ * Register signal handlers for graceful shutdown.
+ *
+ * - SIGTERM → begin drain, stop accepting, wait for inflight, exit 0
+ * - SIGINT → same (for dev mode Ctrl+C)
+ * - Uncaught exception → log, exit 1
+ * - Unhandled rejection → log, exit 1
+ */
+export const registerSignalHandlers = (deps: SignalHandlerDeps): SignalHandlerHandle => {
+  const handleShutdown = createShutdownHandler(deps);
+  const { uncaughtException, unhandledRejection } = createCrashHandlers(deps.logger);
+
+  const sigterm = () => { handleShutdown("SIGTERM").catch(() => process.exit(1)); };
+  const sigint = () => { handleShutdown("SIGINT").catch(() => process.exit(1)); };
 
   process.on("SIGTERM", sigterm);
   process.on("SIGINT", sigint);

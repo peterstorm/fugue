@@ -39,7 +39,7 @@
 //   versa) — the failure mode that previously shipped two silently divergent
 //   hand-maintained lists.
 
-import { match } from "ts-pattern";
+import { match, P } from "ts-pattern";
 import { z } from "zod";
 import { tryNodeId, tryRunId } from "./ids.js";
 // The checkpoint-address ADTs and their ONE construction path live in a leaf
@@ -933,6 +933,34 @@ export const usageOfError = (e: FrameworkError): PartialTokenUsage | undefined =
 export type Retriability = "retriable" | "non-retriable";
 
 /**
+ * The kinds that carry no per-instance discriminant of their own: the failure
+ * is fully described by its structured context fields. `retriabilityOf` sends
+ * them down the standard backoff path and `messageOf` serialises the whole
+ * value. ONE pattern for both, so the two classifications cannot drift apart on
+ * which kinds belong here; it is a `P.union`, so each caller's `.exhaustive()`
+ * still sees every member.
+ */
+const CONTEXT_ONLY_KINDS = P.union(
+  { kind: "retry-exhausted" },
+  { kind: "checkpoint-missing" },
+  { kind: "checkpoint-expired" },
+  { kind: "checkpoint-corrupt" },
+  { kind: "checkpoint-version-mismatch" },
+  { kind: "prompt-not-found" },
+  { kind: "cache-error" },
+  { kind: "cycle-detected" },
+  { kind: "rejected" },
+  { kind: "invalid-reroute" },
+  { kind: "missing-default-edge" },
+  { kind: "output-unreachable-under-routing" },
+  { kind: "duplicate-edge" },
+  { kind: "root-expects-input" },
+  { kind: "source-has-incoming" },
+  { kind: "invalid-dag-input-edge" },
+  { kind: "infra-unreachable" },
+);
+
+/**
  * The single total classification used by the DAG retry machinery. Adding a
  * FrameworkError kind without classifying it is a compile error, so a new kind
  * can never silently default to the unsafe retriable direction.
@@ -980,23 +1008,7 @@ export const retriabilityOf = (e: FrameworkError): Retriability =>
     // historical fall-through default rather than asserting they would retry.
     .with(
       { kind: "transient" },
-      { kind: "retry-exhausted" },
-      { kind: "checkpoint-missing" },
-      { kind: "checkpoint-expired" },
-      { kind: "checkpoint-corrupt" },
-      { kind: "checkpoint-version-mismatch" },
-      { kind: "prompt-not-found" },
-      { kind: "cache-error" },
-      { kind: "cycle-detected" },
-      { kind: "rejected" },
-      { kind: "invalid-reroute" },
-      { kind: "missing-default-edge" },
-      { kind: "output-unreachable-under-routing" },
-      { kind: "duplicate-edge" },
-      { kind: "root-expects-input" },
-      { kind: "source-has-incoming" },
-      { kind: "invalid-dag-input-edge" },
-      { kind: "infra-unreachable" },
+      CONTEXT_ONLY_KINDS,
       () => "retriable" as const,
     )
     .exhaustive();
@@ -1042,23 +1054,7 @@ export const messageOf = (e: unknown): string => {
         { kind: "downstream-denied" },
         { kind: "llm-budget-exceeded" },
         { kind: "missing-capability" },
-        { kind: "retry-exhausted" },
-        { kind: "checkpoint-missing" },
-        { kind: "checkpoint-expired" },
-        { kind: "checkpoint-corrupt" },
-        { kind: "checkpoint-version-mismatch" },
-        { kind: "prompt-not-found" },
-        { kind: "cache-error" },
-        { kind: "cycle-detected" },
-        { kind: "rejected" },
-        { kind: "invalid-reroute" },
-        { kind: "missing-default-edge" },
-        { kind: "output-unreachable-under-routing" },
-        { kind: "duplicate-edge" },
-        { kind: "root-expects-input" },
-        { kind: "source-has-incoming" },
-        { kind: "invalid-dag-input-edge" },
-        { kind: "infra-unreachable" },
+        CONTEXT_ONLY_KINDS,
         (rest) => JSON.stringify(rest),
       )
       .exhaustive();

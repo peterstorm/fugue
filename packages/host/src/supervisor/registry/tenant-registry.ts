@@ -273,6 +273,52 @@ const isTenantOwnedPath = (
 // ── Smart constructor (parse-don't-validate) ────────────────────────────────
 
 /**
+ * The first invariant a `TenantConfigBase` violates, or `undefined` when it is
+ * valid. PURE; checks run in a fixed order so the FIRST fault is the one reported.
+ */
+const configInvariantViolation = (input: TenantConfigBase): string | undefined => {
+  if (input.team.length === 0) {
+    return "team must be non-empty";
+  }
+  if (input.fsRoot.length === 0) {
+    return "fsRoot must be non-empty";
+  }
+  // fsRoot is the recursive purge target. Parse-don't-validate it into the
+  // tenant-owned `/srv/<tenantId>` subtree so arbitrary host and sibling-tenant
+  // deletion targets are impossible after registration.
+  if (!isTenantOwnedPath(input.fsRoot, "/srv", input.id)) {
+    return `fsRoot must be '/srv/${input.id}' or a canonical descendant`;
+  }
+  if (input.dagsRoot.length === 0) {
+    return "dagsRoot must be non-empty";
+  }
+  // dagsRoot becomes DAGS_LOCAL_PATH and therefore code-loading authority.
+  // Restrict it to this tenant's `/dags/<tenantId>` subtree so a worker cannot
+  // discover host code or another tenant's staged bundle.
+  if (!isTenantOwnedPath(input.dagsRoot, "/dags", input.id)) {
+    return `dagsRoot must be '/dags/${input.id}' or a canonical descendant`;
+  }
+  if (input.keycloakClientMapping.realm.length === 0 || input.keycloakClientMapping.clientId.length === 0) {
+    return "keycloak realm and clientId must be non-empty";
+  }
+  // Per-DAG agent-client ids must be non-empty — same invariant the env-side
+  // `AGENT_CLIENT_MAP` enforces (`domain/config.ts`, `z.string().min(1)`: "dagId →
+  // non-empty Keycloak client id"). Carried here so the registration/hydration
+  // parse boundary rejects `""` BEFORE the worker-side minting consumer is wired,
+  // rather than letting a blank client id surface as a fail-open later.
+  for (const [dagId, clientId] of Object.entries(input.keycloakClientMapping.agentClientIdsByDag)) {
+    if (clientId.length === 0) {
+      return `agentClientIdsByDag['${dagId}'] must be a non-empty client id`;
+    }
+  }
+  const { maxConcurrentRuns, maxQueuedRuns } = input.admission;
+  if (!Number.isInteger(maxConcurrentRuns) || maxConcurrentRuns < 0 || !Number.isInteger(maxQueuedRuns) || maxQueuedRuns < 0) {
+    return "admission limits must be non-negative integers";
+  }
+  return undefined;
+};
+
+/**
  * The parse boundary for a `TenantConfig`. Produces an ACTIVE config
  * (`status:"active"`): a smart constructor builds the resolvable state, and
  * deregistration is a TRANSITION (`deregister`), not a constructor input — so
@@ -288,47 +334,11 @@ const isTenantOwnedPath = (
  * Returns `Result` (never throws) since configs arrive from registration data.
  */
 export const tenantConfig = (input: TenantConfigBase): Result<ActiveTenantConfig, HostError> => {
-  const invalid = (message: string): Result<never, HostError> =>
-    err({ kind: "config-invalid", message: `tenant '${input.id}': ${message}` });
-
-  if (input.team.length === 0) {
-    return invalid("team must be non-empty");
-  }
-  if (input.fsRoot.length === 0) {
-    return invalid("fsRoot must be non-empty");
-  }
-  // fsRoot is the recursive purge target. Parse-don't-validate it into the
-  // tenant-owned `/srv/<tenantId>` subtree so arbitrary host and sibling-tenant
-  // deletion targets are impossible after registration.
-  if (!isTenantOwnedPath(input.fsRoot, "/srv", input.id)) {
-    return invalid(`fsRoot must be '/srv/${input.id}' or a canonical descendant`);
-  }
-  if (input.dagsRoot.length === 0) {
-    return invalid("dagsRoot must be non-empty");
-  }
-  // dagsRoot becomes DAGS_LOCAL_PATH and therefore code-loading authority.
-  // Restrict it to this tenant's `/dags/<tenantId>` subtree so a worker cannot
-  // discover host code or another tenant's staged bundle.
-  if (!isTenantOwnedPath(input.dagsRoot, "/dags", input.id)) {
-    return invalid(`dagsRoot must be '/dags/${input.id}' or a canonical descendant`);
-  }
-  if (input.keycloakClientMapping.realm.length === 0 || input.keycloakClientMapping.clientId.length === 0) {
-    return invalid("keycloak realm and clientId must be non-empty");
-  }
-  // Per-DAG agent-client ids must be non-empty — same invariant the env-side
-  // `AGENT_CLIENT_MAP` enforces (`domain/config.ts`, `z.string().min(1)`: "dagId →
-  // non-empty Keycloak client id"). Carried here so the registration/hydration
-  // parse boundary rejects `""` BEFORE the worker-side minting consumer is wired,
-  // rather than letting a blank client id surface as a fail-open later.
-  for (const [dagId, clientId] of Object.entries(input.keycloakClientMapping.agentClientIdsByDag)) {
-    if (clientId.length === 0) {
-      return invalid(`agentClientIdsByDag['${dagId}'] must be a non-empty client id`);
-    }
+  const violation = configInvariantViolation(input);
+  if (violation !== undefined) {
+    return err({ kind: "config-invalid", message: `tenant '${input.id}': ${violation}` });
   }
   const { maxConcurrentRuns, maxQueuedRuns } = input.admission;
-  if (!Number.isInteger(maxConcurrentRuns) || maxConcurrentRuns < 0 || !Number.isInteger(maxQueuedRuns) || maxQueuedRuns < 0) {
-    return invalid("admission limits must be non-negative integers");
-  }
   const active: ActiveTenantConfig = {
     [VALIDATED_TENANT_CONFIG]: true,
     status: "active",

@@ -37,7 +37,7 @@
 import { lazyJwks, type JwksResolver } from "./lazy-jwks.js";
 import { ok, err } from "@fuguejs/framework";
 import { markSignatureVerified, type RealmJwtClaims } from "../domain/auth.js";
-import type { JwtVerifyError, VerifyRealmJwt } from "../http/middleware/auth.js";
+import type { JwtVerifyError, VerifyRealmJwt } from "../domain/auth.js";
 
 /**
  * The realm signs OIDC tokens with an asymmetric algorithm. Pinning an

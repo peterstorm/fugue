@@ -711,7 +711,7 @@ describe("GET /readyz", () => {
     expect(response.status).toBe(503);
     expect((await response.json()).status).toBe("not-ready");
     expect(entries.some(({ level, args }) =>
-      level === "debug" && args.some((arg) => String(arg).includes("synchronous redis probe fault"))
+      level === "warn" && args.some((arg) => String(arg).includes("synchronous redis probe fault"))
     )).toBe(true);
   });
 
@@ -824,9 +824,10 @@ describe("GET /readyz", () => {
 
     expect(response.status).toBe(200);
     expect(body.status).toBe("ready-degraded");
-    expect(body.tracingExporterFailures).toBeUndefined();
+    // A thrown probe is a distinct marker in the payload, not an omitted field.
+    expect(body.tracingExporterFailures).toEqual({ error: "probe-threw" });
     expect(entries.some(({ level, args }) =>
-      level === "debug" && args.some((arg) => String(arg).includes("counter getter fault"))
+      level === "warn" && args.some((arg) => String(arg).includes("counter getter fault"))
     )).toBe(true);
   });
 

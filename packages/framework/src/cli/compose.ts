@@ -226,14 +226,19 @@ interface ParseComposeError {
   readonly problems: readonly string[];
 }
 
-/**
- * Parse `fugue compose`'s arguments (everything after the `compose` token)
- * into validated `ComposeOptions`. Pure — no I/O, no `process.*`; the bin
- * keeps only readline/SIGINT/env-key wiring. Accumulates ALL problems rather
- * than failing on the first, so the author sees every fix at once (mirrors
- * `parseNewArgs`).
- */
-export const parseComposeArgs = (args: readonly string[]): ParsedComposeArgs | ParseComposeError => {
+/** Raw flag values as scanned — not yet validated into `ComposeOptions`. */
+interface ScannedComposeArgs {
+  readonly intent: string | undefined;
+  readonly team: string | undefined;
+  readonly model: string | undefined;
+  readonly owner: string | undefined;
+  readonly root: string | undefined;
+  readonly force: boolean;
+  readonly problems: string[];
+}
+
+/** Scan flags + the positional intent, accumulating every scan problem. */
+const scanComposeArgs = (args: readonly string[]): ScannedComposeArgs => {
   const problems: string[] = [];
   let intent: string | undefined;
   let team: string | undefined;
@@ -279,6 +284,18 @@ export const parseComposeArgs = (args: readonly string[]): ParsedComposeArgs | P
         }
       });
   }
+  return { intent, team, model, owner, root, force, problems };
+};
+
+/**
+ * Parse `fugue compose`'s arguments (everything after the `compose` token)
+ * into validated `ComposeOptions`. Pure — no I/O, no `process.*`; the bin
+ * keeps only readline/SIGINT/env-key wiring. Accumulates ALL problems rather
+ * than failing on the first, so the author sees every fix at once (mirrors
+ * `parseNewArgs`).
+ */
+export const parseComposeArgs = (args: readonly string[]): ParsedComposeArgs | ParseComposeError => {
+  const { intent, team, model, owner, root, force, problems } = scanComposeArgs(args);
 
   const parsedIntent = intent === undefined ? null : parseIntent(intent);
   if (intent === undefined) {

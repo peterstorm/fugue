@@ -34,22 +34,18 @@ import { probeErrorCode, safeErrorMessage } from "@fuguejs/framework";
 import { cleanEnvRecord } from "./spawn-port.js";
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import { readdirSync } from "node:fs";
+import { match } from "ts-pattern";
 import type { LogPort } from "../../ports.js";
 import type { InitProcessPort } from "./thin-init.js";
 
 // ── Pure: libc resolution candidates (testable without dlopen) ──────────────────
 
 /** Map a Node `process.arch` to the musl shared-object arch token. */
-export const muslArchName = (arch: string): string => {
-  switch (arch) {
-    case "arm64":
-      return "aarch64";
-    case "x64":
-      return "x86_64";
-    default:
-      return arch;
-  }
-};
+export const muslArchName = (arch: string): string =>
+  match(arch)
+    .with("arm64", () => "aarch64")
+    .with("x64", () => "x86_64")
+    .otherwise((other) => other);
 
 /**
  * PURE: the ordered list of libc shared objects to try for the `waitpid` symbol,

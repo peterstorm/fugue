@@ -16,6 +16,7 @@
 
 import { base64url } from "./base64url.js";
 import { match } from "ts-pattern";
+import type { Result } from "@fuguejs/framework";
 
 // ── Branded Types ──────────────────────────────────────────────────────────
 
@@ -449,6 +450,31 @@ export const hashToken = async (token: string): Promise<TokenHash> => {
   const hashArray = new Uint8Array(hashBuffer);
   return hexEncode(hashArray) as TokenHash;
 };
+
+// ── Realm JWT verifier port (signature verification — injected, never hardcoded) ──
+
+/**
+ * Reason a signature verifier could not produce verified claims. `invalid` is a
+ * client fault (bad signature / unparsable token) → 401; `unavailable` is an
+ * infrastructure fault (JWKS fetch failed, key rotation in flight) → 503,
+ * mirroring the Redis-unavailable branch. The verifier MUST fail closed.
+ *
+ * A DOMAIN type (not a middleware detail): the pure claim validator and every
+ * adapter implement against it, so it belongs where the auth model lives.
+ */
+export type JwtVerifyError =
+  | { readonly kind: "invalid"; readonly reason: string }
+  | { readonly kind: "unavailable"; readonly reason: string };
+
+/**
+ * Port for verifying a JWT's SIGNATURE and returning its (now branded) claims.
+ * The real implementation is JWKS-backed (keys fetched from the realm, never
+ * hardcoded); tests inject a fake. This port is the ONLY producer of
+ * `SignatureVerifiedClaims` (it calls `markSignatureVerified` AFTER checking the
+ * signature) — and `validateRealmJwtClaims` accepts only that brand, so the
+ * "signature first" ordering is enforced by the type system, not convention.
+ */
+export type VerifyRealmJwt = (token: string) => Promise<Result<SignatureVerifiedClaims, JwtVerifyError>>;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 

@@ -90,7 +90,7 @@ import {
   parseEventFileName,
 } from "./layout.js";
 import { parseOptionalDedupKey, parseRecordedAtMs } from "./event-record.js";
-import type { RecordedAtMs } from "./event-record.js";
+import type { DedupKey, RecordedAtMs } from "./event-record.js";
 import { isFileCheckpointCommit } from "./checkpoint-record.js";
 import type { FileCheckpointCommit } from "./checkpoint-record.js";
 import { toJson } from "../state-machine/serialize.js";
@@ -288,12 +288,12 @@ export const createFileJournal = (
     return names;
   };
 
-  const appendEvent = async (event: unknown, suppliedDedupKey?: unknown): Promise<void> => {
-    // Snapshot and parse the runtime argument exactly once. Only omission or
-    // explicit `undefined` maps to the durable keyless sentinel; in
-    // particular, `null` must not be erased by nullish coalescing. The parser
-    // rejects non-string objects without rendering/coercing them, so hostile
-    // getters, Proxies, and stateful conversion hooks cannot execute here.
+  // Snapshot and parse the runtime argument exactly once. Only omission or
+  // explicit `undefined` maps to the durable keyless sentinel; in
+  // particular, `null` must not be erased by nullish coalescing. The parser
+  // rejects non-string objects without rendering/coercing them, so hostile
+  // getters, Proxies, and stateful conversion hooks cannot execute here.
+  const parseAppendDedupKey = (suppliedDedupKey: unknown): DedupKey => {
     const parsedKey = parseOptionalDedupKey(suppliedDedupKey);
     if (!parsedKey.ok) {
       // Deterministic FR-015 violation — the same key fails identically on
@@ -305,7 +305,62 @@ export const createFileJournal = (
         "permanent",
       );
     }
-    const key = parsedKey.value;
+    return parsedKey.value;
+  };
+
+  // The injected clock is stamped inside the append critical section and
+  // is the one dependency that can fail without touching the filesystem —
+  // name it explicitly so a throwing or non-finite clock is diagnosed as a
+  // clock failure, not misattributed to the lock machinery or the record
+  // codec (parity with the checkpointer and freshness-index clock guards).
+  // The stamp is minted through `parseRecordedAtMs` — the record codec's
+  // single finiteness clause — so the journal can never hand the
+  // serializer a value the strict reader would reject.
+  const stampRecordedAt = (): RecordedAtMs => {
+    try {
+      const parsedStamp = parseRecordedAtMs(now());
+      if (!parsedStamp.ok) throw new Error(parsedStamp.error);
+      return parsedStamp.value;
+    } catch (error) {
+      // Deterministic: a clock that throws or stamps non-finite fails
+      // identically on every retry of the same append — the same class
+      // the other code-constructed invariant rejections pin "permanent".
+      throw fileOperationError(
+        "appendEvent",
+        `run directory ${directory}`,
+        `clock failed while stamping the append: ${fileThrownValueMessage(error)}`,
+        "permanent",
+      );
+    }
+  };
+
+  // The lock body: list, dedup, stamp, plan, commit.
+  const appendUnderLock = (event: unknown, key: DedupKey): void => {
+    const existing = listEventFiles();
+
+    // Dedup FIRST — before the clock is touched — so a deduped append
+    // cannot fail on a clock it never needed (SC-003 / FR-015).
+    if (isAlreadyCommitted(existing, key)) return;
+
+    const recordedAtMs = stampRecordedAt();
+
+    // Both the plan and `atomicWriteFile` throw ALREADY-TYPED failures
+    // (they name their own operation, location, and inferred failureClass)
+    // — there are no inner catches here. The caller's outer catch re-tags the
+    // `withFileLock` boundary at the public journal surface, so a PRE-LOCK
+    // failure carries exactly one `appendEvent failed at run directory D:`
+    // layer, while a failure INSIDE the lock body carries three: the inner
+    // typed failure, the `withFileLock` boundary layer (which names the lock
+    // path — deliberately retained, pinned by file-freshness-index.test.ts),
+    // and the outer `appendEvent` layer. The lock inner catch wraps
+    // unconditionally, unlike its sibling `acquireFileLock` ride-through —
+    // a maintainer decision, not a comment to deny.
+    const plan = planAppend({ existing, dedupKey: key, recordedAtMs, event, directory });
+    atomicWriteFile(join(eventsDir, plan.fileName), plan.json);
+  };
+
+  const appendEvent = async (event: unknown, suppliedDedupKey?: unknown): Promise<void> => {
+    const key = parseAppendDedupKey(suppliedDedupKey);
     try {
       mkdirSync(eventsDir, { recursive: true });
     } catch (error) {
@@ -324,52 +379,7 @@ export const createFileJournal = (
     // failure remains primary if cleanup also fails.
     const lockPath = join(eventsDir, APPEND_LOCK);
     try {
-      await withFileLock(lockPath, () => {
-        const existing = listEventFiles();
-
-        // Dedup FIRST — before the clock is touched — so a deduped append
-        // cannot fail on a clock it never needed (SC-003 / FR-015).
-        if (isAlreadyCommitted(existing, key)) return;
-
-        // The injected clock is stamped inside the append critical section and
-        // is the one dependency that can fail without touching the filesystem —
-        // name it explicitly so a throwing or non-finite clock is diagnosed as a
-        // clock failure, not misattributed to the lock machinery or the record
-        // codec (parity with the checkpointer and freshness-index clock guards).
-        // The stamp is minted through `parseRecordedAtMs` — the record codec's
-        // single finiteness clause — so the journal can never hand the
-        // serializer a value the strict reader would reject.
-        let recordedAtMs: RecordedAtMs;
-        try {
-          const parsedStamp = parseRecordedAtMs(now());
-          if (!parsedStamp.ok) throw new Error(parsedStamp.error);
-          recordedAtMs = parsedStamp.value;
-        } catch (error) {
-          // Deterministic: a clock that throws or stamps non-finite fails
-          // identically on every retry of the same append — the same class
-          // the other code-constructed invariant rejections pin "permanent".
-          throw fileOperationError(
-            "appendEvent",
-            `run directory ${directory}`,
-            `clock failed while stamping the append: ${fileThrownValueMessage(error)}`,
-            "permanent",
-          );
-        }
-
-        // Both the plan and `atomicWriteFile` throw ALREADY-TYPED failures
-        // (they name their own operation, location, and inferred failureClass)
-        // — there are no inner catches here. The outer catch re-tags the
-        // `withFileLock` boundary at the public journal surface, so a PRE-LOCK
-        // failure carries exactly one `appendEvent failed at run directory D:`
-        // layer, while a failure INSIDE the lock body carries three: the inner
-        // typed failure, the `withFileLock` boundary layer (which names the lock
-        // path — deliberately retained, pinned by file-freshness-index.test.ts),
-        // and the outer `appendEvent` layer. The lock inner catch wraps
-        // unconditionally, unlike its sibling `acquireFileLock` ride-through —
-        // a maintainer decision, not a comment to deny.
-        const plan = planAppend({ existing, dedupKey: key, recordedAtMs, event, directory });
-        atomicWriteFile(join(eventsDir, plan.fileName), plan.json);
-      });
+      await withFileLock(lockPath, () => appendUnderLock(event, key));
     } catch (error) {
       // withFileLock preserves a primary append-body failure when release also
       // fails, and rejects on a release failure after an otherwise successful

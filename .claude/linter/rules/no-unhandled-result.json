@@ -1,9 +1,12 @@
 {
   "kind": "regex",
   "name": "no-unhandled-result",
-  "description": "Disallow accessing .value on a Result without checking .ok first",
-  "extensions": [".ts", ".tsx"],
-  "pattern": "\\b\\w+\\.value\\b(?!.*\\.ok)",
+  "description": "Disallow accessing .value on a Result without checking .ok first. DISABLED 2026-11-12: the pattern cannot discriminate a Result from any other { ok, value } shape. Over the same lint scope, the broad `\\w+\\.value` matches ~2857 lines while the Result-named narrowing `\\w*[Rr]esult\\.value` still matches ~914 (Result-named locals, wire envelopes, zod results). A rule that flags every candidate teaches authors to ignore it; re-enable with a Result-branded accessor or an AST rule.",
+  "extensions": [
+    ".ts",
+    ".tsx"
+  ],
+  "pattern": "\\b\\w+\\.value\\b",
   "flags": "",
   "fixHint": "Check result.ok before accessing result.value, or use fold/unwrapOr/map combinators from the Result type",
   "enabled": false
