@@ -3,11 +3,19 @@ name: verify
 on:
   workflow_call:
 
+env:
+  # pull_request_target runs the trusted base workflow with secrets but checks
+  # out the base branch by default; point the checkouts at the PR's merge ref
+  # so the suite tests the proposed code. Every other event uses its own ref.
+  CHECKOUT_REF: ${{ github.event_name == 'pull_request_target' && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.ref }}
+
 jobs:
   workspace-gate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
       # @peterstorm/loom is a git+ssh dependency of the (now private)
       # peterstorm/loom repo. bun resolves it via a real git clone, so the
       # runner needs a credential: a read-only deploy key on loom, injected
@@ -53,6 +61,8 @@ jobs:
       image: oven/bun:1.4.2-alpine
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
       # The alpine bun image ships neither git nor an ssh client; the private
       # loom git dependency needs both (git+ssh clone).
       - name: Git + SSH client for the alpine container
