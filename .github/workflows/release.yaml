@@ -29,6 +29,22 @@ jobs:
       id-token: write # npm OIDC trusted publishing + provenance
     steps:
       - uses: actions/checkout@v5
+      # @peterstorm/loom is a git+ssh dependency of the (now private)
+      # peterstorm/loom repo; bun resolves it via a real git clone, so the
+      # runner needs the read-only deploy key injected via GIT_SSH_COMMAND.
+      - name: SSH access for the private loom git dependency
+        env:
+          LOOM_DEPLOY_KEY: ${{ secrets.LOOM_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$LOOM_DEPLOY_KEY" ]; then
+            echo "::error::LOOM_DEPLOY_KEY is not set — @peterstorm/loom is pinned as a git+ssh dependency of the private peterstorm/loom repo; add the read-only deploy key's private half as this secret." >&2
+            exit 1
+          fi
+          mkdir -p .ci-ssh
+          printf '%s\n' "$LOOM_DEPLOY_KEY" > .ci-ssh/loom_deploy_key
+          chmod 600 .ci-ssh/loom_deploy_key
+          echo "GIT_SSH_COMMAND=ssh -i $GITHUB_WORKSPACE/.ci-ssh/loom_deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" >> "$GITHUB_ENV"
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.2

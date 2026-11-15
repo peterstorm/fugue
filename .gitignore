@@ -2,6 +2,8 @@
 .claude/cortex-memory.local.md
 
 node_modules/
+# CI-only: the loom deploy key is written to the workspace by the workflows
+.ci-ssh/
 dist/
 .env
 # Local secret env files (CDRator creds, etc.) — never commit. Keep .env.example tracked.
