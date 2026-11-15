@@ -3,15 +3,13 @@ name: ci
 on:
   push:
     branches: [main]
-  # Plain `pull_request` runs no longer receive repository secrets — even for
-  # branches inside this same repo — and verify needs LOOM_DEPLOY_KEY to clone
-  # the private peterstorm/loom git dependency (community discussion 180109).
-  # pull_request_target executes the trusted base workflow with secrets; this
-  # is a personal repo, so every PR author is a trusted collaborator. verify.yml
-  # checks out the PR's merge ref explicitly (CHECKOUT_REF).
-  pull_request_target:
+  pull_request:
   workflow_dispatch:
 
 jobs:
   verification:
     uses: ./.github/workflows/verify.yml
+    # Called (reusable) workflows do not inherit repository secrets implicitly;
+    # verify needs LOOM_DEPLOY_KEY to clone the private peterstorm/loom git
+    # dependency.
+    secrets: inherit
