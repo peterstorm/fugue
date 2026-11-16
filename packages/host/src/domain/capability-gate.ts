@@ -44,11 +44,15 @@ export type GatedScope = {
   readonly audience: string;
 };
 
+/** A recognised scope the gate refused locally, with zero egress. */
+export type GateRefusal = {
+  readonly kind: "refused";
+  readonly scope: DownstreamScope;
+  readonly reason: GateRefusalReason;
+};
+
 /** The gate's verdict for one declared capability. */
-export type GateDecision =
-  | { readonly kind: "pass-through" }
-  | { readonly kind: "refused"; readonly scope: DownstreamScope; readonly reason: GateRefusalReason }
-  | GatedScope;
+export type GateDecision = { readonly kind: "pass-through" } | GateRefusal | GatedScope;
 
 /**
  * Decide one declared capability against the agent client's assigned scope

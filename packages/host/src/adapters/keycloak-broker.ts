@@ -51,7 +51,7 @@ import {
   scopeName,
   type OperationNarrowedHandle,
 } from "../domain/capability-scope.js";
-import { decideGate, type GateDecision, type GatedScope } from "../domain/capability-gate.js";
+import { decideGate, type GateRefusal, type GatedScope } from "../domain/capability-gate.js";
 import { agentClientIdFromFrameworkOrigin, type AgentClientId, type SubjectToken } from "../domain/auth.js";
 import type { RunId } from "@fuguejs/framework";
 // Side-channel: importing the registry augmentation keeps it in this module's
@@ -411,7 +411,7 @@ const mintCapabilityHandle = async (
 const refuse = async (
   ctx: BrokerContext,
   inv: Invocation,
-  refusal: Extract<GateDecision, { kind: "refused" }>,
+  refusal: GateRefusal,
 ): Promise<Result<never, FrameworkError>> => {
   const scopeStr = scopeName(refusal.scope);
   await ctx.audit.refusal(auditFields(inv, scopeStr), refusal.reason);
