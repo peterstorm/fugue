@@ -23,7 +23,7 @@ import {
   GuardrailValidatedSchema,
   GuardrailFailedSchema,
 } from "../schemas/guardrail.js";
-import { setUpRedis, buildCheckpointWriter, buildHealth } from "../bootstrap.js";
+import { setUpRedis, buildCheckpointWriter, buildHealth, type RedisSetup } from "../bootstrap.js";
 import { loadConfig } from "../config.js";
 import type { AppLogger } from "../logger.js";
 
@@ -123,17 +123,17 @@ describe("pr53 repair — guardrail failed-arm contract", () => {
 });
 
 describe("pr53 repair — bootstrap seams", () => {
-  test("setUpRedis resolves with every collaborator null and isHealthy() false when Redis is unreachable", async () => {
+  test("setUpRedis resolves `unavailable` — no collaborators, the client kept for shutdown — when Redis is unreachable", async () => {
     const original = process.env.REDIS_URL;
     process.env.REDIS_URL = "redis://127.0.0.1:9"; // discard port: connection refused
     try {
       const config = loadConfig();
       const { logger } = recordingLogger();
       const setup = await setUpRedis(config, logger);
-      expect(setup.contextCache).toBeNull();
-      expect(setup.checkpointWriter).toBeNull();
-      expect(setup.checkpointer).toBeNull();
-      expect(setup.isHealthy()).toBe(false);
+      expect(setup.kind).toBe("unavailable");
+      expect(setup.redis).not.toBeNull();
+      expect(Object.keys(setup).sort()).toEqual(["kind", "redis"]);
+      setup.redis?.disconnect();
     } finally {
       if (original === undefined) {
         delete process.env.REDIS_URL;
@@ -143,31 +143,37 @@ describe("pr53 repair — bootstrap seams", () => {
     }
   });
 
-  test("buildHealth's checkRedis is ready exactly when isHealthy() and a redis client are both present", async () => {
+  test("buildHealth's checkRedis is ready exactly when Redis is `connected` and its flag reads healthy", async () => {
     const config = loadConfig();
     const { logger } = recordingLogger();
     const redis = { status: "ready" } as unknown as Redis;
     const fakeLlm = new FakeLlmClient(new Map());
-    const setup = (healthy: boolean, withRedis: boolean) => ({
-      redis: withRedis ? redis : null,
+    // The collaborators are never touched by readiness; opaque stand-ins suffice.
+    const connected = (healthy: boolean): RedisSetup => ({
+      kind: "connected",
+      redis,
       isHealthy: () => healthy,
-      contextCache: null,
-      checkpointWriter: null,
-      checkpointer: null,
+      contextCache: { get: async () => ({ hit: false }), set: async () => ok(undefined) },
+      checkpointWriter: { write: async () => {} },
+      checkpointer: {} as Checkpointer,
     });
 
-    const ready = buildHealth(config, logger, setup(true, true), { kind: "configured", llm: fakeLlm }, null);
+    const ready = buildHealth(config, logger, connected(true), { kind: "configured", llm: fakeLlm }, null);
     expect(await ready.checkRedis?.()).toBe(true);
 
-    const unhealthyFlag = buildHealth(config, logger, setup(false, true), { kind: "configured", llm: fakeLlm }, null);
+    const unhealthyFlag = buildHealth(config, logger, connected(false), { kind: "configured", llm: fakeLlm }, null);
     expect(await unhealthyFlag.checkRedis?.()).toBe(false);
 
-    const noClient = buildHealth(config, logger, setup(true, false), { kind: "configured", llm: fakeLlm }, null);
-    expect(await noClient.checkRedis?.()).toBe(false);
+    // Unavailable at bootstrap is never ready, whether or not a client exists:
+    // nothing was wired to it, so a later reconnect cannot make the pod servable.
+    for (const client of [redis, null]) {
+      const unavailable = buildHealth(config, logger, { kind: "unavailable", redis: client }, { kind: "configured", llm: fakeLlm }, null);
+      expect(await unavailable.checkRedis?.()).toBe(false);
+    }
 
     // LLM readiness gate follows the tagged fallback kind, not a free boolean.
     expect(await ready.checkLlm?.()).toBe(true);
-    const fakeFallback = buildHealth(config, logger, setup(true, true), { kind: "fake-fallback", llm: fakeLlm }, null);
+    const fakeFallback = buildHealth(config, logger, connected(true), { kind: "fake-fallback", llm: fakeLlm }, null);
     expect(await fakeFallback.checkLlm?.()).toBe(false);
   });
 
@@ -242,13 +248,7 @@ describe("pr53 repair — bootstrap seams", () => {
       const health = buildHealth(
         config,
         logger,
-        {
-          redis: null,
-          isHealthy: () => false,
-          contextCache: null,
-          checkpointWriter: null,
-          checkpointer: null,
-        },
+        { kind: "unavailable", redis: null },
         { kind: "configured", llm: new FakeLlmClient(new Map()) },
         null,
       );
