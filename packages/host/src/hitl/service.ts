@@ -68,18 +68,35 @@ interface HitlRunServiceDeps {
   readonly logger?: LogPort;
 }
 
+declare const __maxQueuedRunsBrand: unique symbol;
+/** A queue-depth ceiling: a non-negative safe integer (`0` refuses every durable start). */
+export type MaxQueuedRuns = number & {
+  readonly [__maxQueuedRunsBrand]: "MaxQueuedRuns";
+};
+
+/**
+ * Smart constructor for a queue-depth ceiling, the sibling of `retryAfterSeconds`:
+ * a negative, fractional or non-finite ceiling throws `RangeError`.
+ */
+export const maxQueuedRuns = (value: number): MaxQueuedRuns => {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError("maxQueuedRuns must be a non-negative safe integer");
+  }
+  return value as MaxQueuedRuns;
+};
+
 /**
  * The queue-depth admission policy (ADR-0074), resolved ONCE at construction
  * from `maxQueuedRuns` / `retryAfterSeconds`. `unlimited` (no ceiling
  * configured) never reads the active-run count; `bounded` carries everything
- * the refusal needs, its Retry-After already defaulted and parsed.
+ * the refusal needs, its ceiling and Retry-After already parsed.
  */
 export type QueuedRunAdmission =
   | { readonly kind: "unlimited" }
   | {
       readonly kind: "bounded";
       readonly tenant: TenantId;
-      readonly maxQueuedRuns: number;
+      readonly maxQueuedRuns: MaxQueuedRuns;
       readonly retryAfterSeconds: RetryAfterSeconds;
     };
 
@@ -87,9 +104,9 @@ export type QueuedRunAdmission =
 export const DEFAULT_QUEUED_RUN_RETRY_AFTER_SECONDS = 5;
 
 /**
- * Resolve the admission policy from the service deps. Parses the Retry-After
- * here, so a malformed one (negative, fractional) throws `RangeError` at
- * composition instead of at the first refusal.
+ * Resolve the admission policy from the service deps. Parses the ceiling and
+ * the Retry-After here, so a malformed one (negative, fractional) throws
+ * `RangeError` at composition instead of at the first start or refusal.
  */
 export const queuedRunAdmission = (
   deps: Pick<HitlRunServiceDeps, "tenant" | "maxQueuedRuns" | "retryAfterSeconds">,
@@ -99,7 +116,7 @@ export const queuedRunAdmission = (
     : {
         kind: "bounded",
         tenant: deps.tenant,
-        maxQueuedRuns: deps.maxQueuedRuns,
+        maxQueuedRuns: maxQueuedRuns(deps.maxQueuedRuns),
         retryAfterSeconds: retryAfterSeconds(deps.retryAfterSeconds ?? DEFAULT_QUEUED_RUN_RETRY_AFTER_SECONDS),
       };
 

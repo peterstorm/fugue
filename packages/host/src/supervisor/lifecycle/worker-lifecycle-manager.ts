@@ -63,44 +63,12 @@ import type { WorkerRegistry, WorkerRecord, UdsLivenessProbe } from "./worker-re
  * The per-tenant spawn inputs the lifecycle sources from the tenant registry.
  * This is the AUTHORITATIVE source of `eagerPin` (AD-7, C3) — never defaulted.
  * Kept as a narrow injected view so the manager depends only on what it needs
- * (and can be faked without the whole Redis registry).
+ * (and can be faked without the whole Redis registry). The env-bound fields
+ * (`dagsRoot`, `maxQueuedRuns`, `extraEnv`) are documented on `SpawnEnvSources`.
  */
 export interface TenantSpawnConfig extends SpawnEnvSources {
   readonly secretsRef: SecretsRef;
   readonly eagerPin: boolean;
-  /**
-   * The tenant's DAG root (`TenantConfigBase.dagsRoot`). Injected into the worker's
-   * spawn env as `DAGS_LOCAL_PATH` so the worker runs the LocalGitAdapter rooted
-   * HERE and discovers ONLY this team's DAGs — the at-rest DAG-isolation boundary
-   * for a multi-tenant pod (ADR-0061). Applied via `extraEnv`, which `buildWorkerSpawn`
-   * merges OVER the inherited env, so it deterministically overrides any pod-wide
-   * `DAGS_LOCAL_PATH` the supervisor itself may carry. Sourced from the active
-   * tenant registry (authoritative, like `eagerPin`); unset only on paths that do
-   * not spawn from the registry.
-   */
-  readonly dagsRoot?: string;
-  /**
-   * Per-tenant ceiling on outstanding HITL runs (ADR-0074, `admission.maxQueuedRuns`).
-   * Injected into the worker's spawn env as `FUGUE_MAX_QUEUED_RUNS` so the worker's
-   * `HitlRunService` enforces it at `startRun`. Sourced from the active tenant
-   * registry config (authoritative, like `eagerPin`); unset only on the
-   * single-tenant path.
-   */
-  readonly maxQueuedRuns?: number;
-  /**
-   * Optional per-tenant extra env forwarded to the worker.
-   *
-   * NOTE (A1): platform-wide config (REDIS_URL, REALM_JWT_ISSUER, …) is NOT
-   * carried here — the Bun spawn adapter is constructed with the supervisor's
-   * `process.env` as its `inheritedEnv`, and `buildWorkerSpawn` merges that whole
-   * inherited env into every child, so workers inherit REDIS_URL / issuer / etc.
-   * AUTOMATICALLY. `extraEnv` is reserved for genuinely PER-TENANT overrides (it
-   * is applied before — and so cannot override — the mandatory TENANT_ID /
-   * FUGUE_SECRETS_REF / WORKER_UDS_DIR bindings). Today no per-tenant override is
-   * sourced, so `spawnConfigFor` leaves it unset. `composeSpawnEnv` lays every
-   * platform binding (DAG root, HITL ceiling, Redis ACL credential) over it.
-   */
-  readonly extraEnv?: Readonly<Record<string, string>>;
 }
 
 /**

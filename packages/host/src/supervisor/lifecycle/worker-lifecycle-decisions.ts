@@ -58,8 +58,11 @@ export const spawnClearance = (current: WorkerState | undefined): SpawnClearance
  * runs it blocks its tenant's replacement (`spawnClearance`), so the manager
  * hard-stops it rather than leave the tenant unavailable indefinitely.
  */
-export const drainOverdue = (state: WorkerState, killAfterMs: number, now: number): boolean =>
-  state.phase === "draining" && now - state.drainStartedAt >= killAfterMs;
+export const drainOverdue = (
+  state: Extract<WorkerState, { readonly phase: "draining" }>,
+  killAfterMs: number,
+  now: number,
+): boolean => now - state.drainStartedAt >= killAfterMs;
 
 // ── Crash-restart budget ─────────────────────────────────────────────────────
 
@@ -134,9 +137,11 @@ export type WorkerSignal = "SIGTERM" | "SIGKILL";
 
 /**
  * How loudly a FAILED signal must be reported (a dead pid is not a failure — the
- * adapter reports it as success). Every kill is sent after the slot is
- * released, so what separates the two is whether a registry record could exist
- * for the process. `orphan-risk`: a record may have existed (an announced spawn,
+ * adapter reports it as success). Abort and hard-stop kills are sent after the
+ * slot is released; the drain SIGTERM is sent while the draining entry still
+ * holds its slot, so its failure leaves the process counted and is never an
+ * orphan. Among released slots, what separates the two is whether a registry
+ * record could exist for the process. `orphan-risk`: a record may have existed (an announced spawn,
  * an evicted worker), so a surviving process would still hold the tenant's UDS
  * while the live-worker count (multi-tenant spec FR-033) excludes it — an
  * error. `best-effort`: no registry record was ever written for the process, or
@@ -154,7 +159,8 @@ export interface SignalStep {
  *   - `drain`: polite stop of a draining worker; its exit finishes the drain.
  *   - `abort-unannounced-spawn`: kill a spawn that never wrote a registry record.
  *   - `abort-announced-spawn`: kill a spawn whose registry record may exist.
- *   - `hard-stop`: evict / idle-evict — entry and record are already gone.
+ *   - `hard-stop`: evict, idle-evict, or an overdue drain (`stopOverdueDrains`,
+ *     decided by `drainOverdue`) — entry and record are already gone.
  */
 export type StopReason = "drain" | "abort-unannounced-spawn" | "abort-announced-spawn" | "hard-stop";
 
@@ -173,13 +179,38 @@ export const stopPlan = (reason: StopReason): readonly SignalStep[] =>
 
 // ── Spawn env ────────────────────────────────────────────────────────────────
 
-/** The per-tenant spawn-config fields that become worker env (a `TenantSpawnConfig` slice). */
+/**
+ * The per-tenant spawn-config fields that become worker env (a `TenantSpawnConfig`
+ * slice). `composeSpawnEnv` lays them over the inherited env, which
+ * `buildWorkerSpawn` merges into every child, so they deterministically override
+ * any pod-wide value the supervisor itself carries.
+ */
 export interface SpawnEnvSources {
-  /** Per-tenant DAG root → `DAGS_LOCAL_PATH` (ADR-0061 at-rest isolation). */
+  /**
+   * The tenant's DAG root (`TenantConfigBase.dagsRoot`) → `DAGS_LOCAL_PATH`: the
+   * worker roots its LocalGitAdapter here and discovers ONLY this team's DAGs —
+   * the at-rest DAG-isolation boundary of a multi-tenant pod (ADR-0061). Sourced
+   * from the active tenant registry (authoritative, like `eagerPin`); unset only
+   * on paths that do not spawn from the registry.
+   */
   readonly dagsRoot?: string;
-  /** HITL queue-depth ceiling → `FUGUE_MAX_QUEUED_RUNS` (ADR-0074). */
+  /**
+   * Per-tenant ceiling on outstanding HITL runs (ADR-0074,
+   * `admission.maxQueuedRuns`) → `FUGUE_MAX_QUEUED_RUNS`, which the worker's
+   * `HitlRunService` enforces at `startRun`. Sourced from the active tenant
+   * registry (authoritative, like `eagerPin`); unset only on the single-tenant
+   * path.
+   */
   readonly maxQueuedRuns?: number;
-  /** Per-tenant overrides, applied first so every platform binding above wins. */
+  /**
+   * Genuinely PER-TENANT env overrides — the base every platform binding (DAG
+   * root, HITL ceiling, Redis ACL credential) is laid over, so none can be
+   * replaced. Platform-wide config (REDIS_URL, REALM_JWT_ISSUER, …) is not
+   * carried here: workers inherit the supervisor's env automatically, and the
+   * mandatory TENANT_ID / FUGUE_SECRETS_REF / WORKER_UDS_DIR bindings are applied
+   * after it. Today no per-tenant override is sourced, so `spawnConfigFor`
+   * leaves it unset.
+   */
   readonly extraEnv?: Readonly<Record<string, string>>;
 }
 

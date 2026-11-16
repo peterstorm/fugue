@@ -48,16 +48,20 @@ const policyArb = fc.record({
   restartWindowMs: fc.integer({ min: 1, max: 100_000 }),
 });
 
+type DrainingState = Extract<WorkerState, { readonly phase: "draining" }>;
+
+const drainingStateArb: fc.Arbitrary<DrainingState> = fc.record({
+  phase: fc.constant("draining" as const), tenant: tenantArb, eagerPin: fc.boolean(), pid: pidArb, udsPath: udsArb,
+  drainStartedAt: instantArb,
+});
+
 const workerStateArb: fc.Arbitrary<WorkerState> = fc.oneof(
   fc.record({ phase: fc.constant("spawning" as const), tenant: tenantArb, eagerPin: fc.boolean(), requestedAt: instantArb }),
   fc.record({
     phase: fc.constant("live" as const), tenant: tenantArb, eagerPin: fc.boolean(), pid: pidArb, udsPath: udsArb,
     startedAt: instantArb, lastActivityAt: instantArb,
   }),
-  fc.record({
-    phase: fc.constant("draining" as const), tenant: tenantArb, eagerPin: fc.boolean(), pid: pidArb, udsPath: udsArb,
-    drainStartedAt: instantArb,
-  }),
+  drainingStateArb,
   fc.record({
     phase: fc.constant("crashed" as const), tenant: tenantArb, eagerPin: fc.boolean(), crashedAt: instantArb,
     exitCode: fc.option(fc.integer({ min: -255, max: 255 }), { nil: null }),
@@ -103,7 +107,7 @@ describe("spawnClearance (pure)", () => {
 // ── drainOverdue ─────────────────────────────────────────────────────────────
 
 describe("drainOverdue (pure)", () => {
-  const draining = (drainStartedAt: number): WorkerState => ({
+  const draining = (drainStartedAt: number): DrainingState => ({
     phase: "draining", tenant: tid("acme"), eagerPin: false, pid: 9, udsPath: "/run/fugue/acme.sock", drainStartedAt,
   });
 
@@ -112,12 +116,18 @@ describe("drainOverdue (pure)", () => {
     expect(drainOverdue(draining(100), 1_000, 1_100)).toBe(true);
   });
 
-  test("property: only a draining state can be overdue, and only once the deadline has passed", () => {
+  test("property: a draining worker is overdue exactly once its drain age reaches the kill deadline", () => {
     fc.assert(
-      fc.property(workerStateArb, fc.integer({ min: 1, max: 100_000 }), instantArb, (state, killAfterMs, now) => {
-        const overdue = drainOverdue(state, killAfterMs, now);
-        if (state.phase !== "draining") expect(overdue).toBe(false);
-        else expect(overdue).toBe(now - state.drainStartedAt >= killAfterMs);
+      fc.property(drainingStateArb, fc.integer({ min: 1, max: 100_000 }), instantArb, (state, killAfterMs, now) => {
+        expect(drainOverdue(state, killAfterMs, now)).toBe(now - state.drainStartedAt >= killAfterMs);
+      }),
+    );
+  });
+
+  test("property: overdue is monotone in time — once overdue, a later instant stays overdue", () => {
+    fc.assert(
+      fc.property(drainingStateArb, fc.integer({ min: 1, max: 100_000 }), instantArb, fc.nat(), (state, killAfterMs, now, later) => {
+        if (drainOverdue(state, killAfterMs, now)) expect(drainOverdue(state, killAfterMs, now + later)).toBe(true);
       }),
     );
   });

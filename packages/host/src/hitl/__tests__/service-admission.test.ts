@@ -19,6 +19,7 @@ import {
   createHitlRunService,
   decideQueuedRunAdmission,
   queuedRunAdmission,
+  maxQueuedRuns as parseMaxQueuedRuns,
   DEFAULT_QUEUED_RUN_RETRY_AFTER_SECONDS,
 } from "../service.js";
 
@@ -59,7 +60,7 @@ describe("queuedRunAdmission — defaults resolved once at construction", () => 
         expect(policy).toEqual({
           kind: "bounded",
           tenant,
-          maxQueuedRuns,
+          maxQueuedRuns: parseMaxQueuedRuns(maxQueuedRuns),
           retryAfterSeconds: parseRetryAfter(retryAfterSeconds ?? DEFAULT_QUEUED_RUN_RETRY_AFTER_SECONDS),
         });
       }),
@@ -74,14 +75,34 @@ describe("queuedRunAdmission — defaults resolved once at construction", () => 
     // An unlimited policy never advertises a Retry-After, so it has nothing to parse.
     expect(queuedRunAdmission({ tenant: TENANT, retryAfterSeconds: -1 })).toEqual({ kind: "unlimited" });
   });
+
+  it("a malformed ceiling is refused at construction, not at the first start", () => {
+    for (const bad of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => queuedRunAdmission({ tenant: TENANT, maxQueuedRuns: bad })).toThrow(RangeError);
+    }
+  });
+
+  it("property: a ceiling is accepted exactly when it is a non-negative safe integer", () => {
+    fc.assert(
+      fc.property(fc.oneof(fc.integer(), fc.double()), (raw) => {
+        const parse = () => queuedRunAdmission({ tenant: TENANT, maxQueuedRuns: raw });
+        if (Number.isSafeInteger(raw) && raw >= 0) {
+          expect(parse()).toMatchObject({ kind: "bounded", maxQueuedRuns: raw });
+        } else {
+          expect(parse).toThrow(RangeError);
+        }
+      }),
+    );
+  });
 });
 
 describe("decideQueuedRunAdmission — the bounded gate", () => {
   const parsedRetryArb = retryArb.map(parseRetryAfter);
+  const ceilingArb = countArb.map(parseMaxQueuedRuns);
 
   it("admits exactly while the active count is below the ceiling", () => {
     fc.assert(
-      fc.property(tenantArb, countArb, countArb, parsedRetryArb, (tenant, maxQueuedRuns, active, retryAfterSeconds) => {
+      fc.property(tenantArb, ceilingArb, countArb, parsedRetryArb, (tenant, maxQueuedRuns, active, retryAfterSeconds) => {
         const decision = decideQueuedRunAdmission({ kind: "bounded", tenant, maxQueuedRuns, retryAfterSeconds }, active);
         expect(decision.ok).toBe(active < maxQueuedRuns);
       }),
@@ -90,7 +111,7 @@ describe("decideQueuedRunAdmission — the bounded gate", () => {
 
   it("a refusal is the tenant's OWN tenant-over-quota carrying the policy's Retry-After", () => {
     fc.assert(
-      fc.property(tenantArb, countArb, fc.nat({ max: 100 }), parsedRetryArb, (tenant, maxQueuedRuns, over, retryAfterSeconds) => {
+      fc.property(tenantArb, ceilingArb, fc.nat({ max: 100 }), parsedRetryArb, (tenant, maxQueuedRuns, over, retryAfterSeconds) => {
         const decision = decideQueuedRunAdmission(
           { kind: "bounded", tenant, maxQueuedRuns, retryAfterSeconds },
           maxQueuedRuns + over,

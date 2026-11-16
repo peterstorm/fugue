@@ -294,20 +294,58 @@ const redisCollaborators = (
     ? { cache: setup.contextCache, checkpointWriter: setup.checkpointWriter, checkpointer: setup.checkpointer }
     : { cache: null, checkpointWriter: null, checkpointer: null };
 
+/** The Redis-backed collaborators a `connected` setup carries, built together. */
+export type RedisCollaborators = Pick<
+  Extract<RedisSetup, { readonly kind: "connected" }>,
+  "contextCache" | "checkpointWriter" | "checkpointer"
+>;
+
+/** Build every Redis-backed collaborator from one connected client. */
+const buildRedisCollaborators = (client: Redis, log: AppLogger): RedisCollaborators => {
+  const checkpointer = new RedisCheckpointer(client);
+  return {
+    contextCache: buildContextCache(new RedisCache(client), log),
+    checkpointWriter: buildCheckpointWriter(checkpointer),
+    checkpointer,
+  };
+};
+
+/**
+ * Test/override seams for {@link setUpRedis} (the sibling of
+ * {@link TracingSeams}). Each defaults to the real construction path, so
+ * production passes none. Tests inject a client that connects without a server
+ * and a throwing collaborator factory, so the `unavailable` and health-flag
+ * paths run with no live Redis.
+ */
+export interface RedisSeams {
+  /** Construct the lazy (not yet connected) client for `url`. */
+  readonly createClient?: (url: string) => Redis;
+  readonly buildCollaborators?: (client: Redis, log: AppLogger) => RedisCollaborators;
+}
+
+const createRedisClient = (url: string): Redis =>
+  new Redis(url, {
+    maxRetriesPerRequest: 1,
+    lazyConnect: true,
+    connectTimeout: 3000,
+  });
+
 /**
  * Redis is a hard dependency: it backs the checkpointer (durable resume) and
  * the response cache. If it's unavailable at bootstrap, we still construct
  * the app, but readiness MUST report not-ready so traffic does not land here.
  * The /summarize handler also rejects requests when checkpointer is null.
  */
-export const setUpRedis = async (config: Config, log: AppLogger): Promise<RedisSetup> => {
+export const setUpRedis = async (
+  config: Pick<Config, "REDIS_URL">,
+  log: AppLogger,
+  seams: RedisSeams = {},
+): Promise<RedisSetup> => {
+  const createClient = seams.createClient ?? createRedisClient;
+  const buildCollaborators = seams.buildCollaborators ?? buildRedisCollaborators;
   let redis: Redis | null = null;
   try {
-    const client = new Redis(config.REDIS_URL, {
-      maxRetriesPerRequest: 1,
-      lazyConnect: true,
-      connectTimeout: 3000,
-    });
+    const client = createClient(config.REDIS_URL);
     redis = client;
     // Event-driven health: ioredis emits "error" on disconnect AND on operation
     // failures. Without a listener, "Unhandled error event" floods stderr and
@@ -330,15 +368,8 @@ export const setUpRedis = async (config: Config, log: AppLogger): Promise<RedisS
 
     // Every collaborator is built before the `connected` value exists, so a
     // failure at any construction step lands in `unavailable` with none of them.
-    const checkpointer = new RedisCheckpointer(client);
-    return {
-      kind: "connected",
-      redis: client,
-      isHealthy: () => healthy,
-      contextCache: buildContextCache(new RedisCache(client), log),
-      checkpointWriter: buildCheckpointWriter(checkpointer),
-      checkpointer,
-    };
+    const collaborators = buildCollaborators(client, log);
+    return { kind: "connected", redis: client, isHealthy: () => healthy, ...collaborators };
   } catch (e) {
     log.warn("Redis connection failed — running without cache/checkpointing:", e);
     return { kind: "unavailable", redis };

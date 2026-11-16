@@ -415,11 +415,14 @@ const assignedScopesFor = (config: HostConfig): AssignedScopes => (agentClientId
  *   - live Entra WIF exchange + live Graph transport ⟸ `ENTRA_TENANT_ID` AND
  *     `ENTRA_CLIENT_ID` present (validated as an inseparable pair at boot);
  *   - otherwise EACH leg retains its fail-closed unwired stub.
- * The decision is the pure `planAuthorityLegs` (`domain/authority-legs.ts`);
- * this shell only builds the adapters each leg's plan names. When a leg is partially/unwired, EXACTLY ONE boot warning is emitted naming the
+ * When a leg is partially/unwired, EXACTLY ONE boot warning is emitted naming the
  * unwired leg(s) (FR-011). An assigned-but-not-yet-wired scope still surfaces
  * `infra-unreachable` (retriable), never a silent success — and an un-granted
  * scope is refused at the local gate BEFORE either leg (zero Entra egress, FR-012).
+ *
+ * The decision is the pure `planAuthorityLegs` (`domain/authority-legs.ts`);
+ * this shell only builds the adapters each leg's plan names and emits that one
+ * warning (`unwiredLegsWarning`).
  */
 export const selectCapabilityBroker = (
   config: HostConfig,
