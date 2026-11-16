@@ -40,7 +40,7 @@ import type { LogPort } from "../../ports.js";
 import { workerSocketPath } from "../../domain/config.js";
 import * as lifecycleAdt from "./worker-lifecycle.js";
 import type { WorkerState } from "./worker-lifecycle.js";
-import { decideCrashRestart, workerRecordOf, adoptedState, stopPlan } from "./worker-lifecycle-decisions.js";
+import { drainOverdue, decideCrashRestart, workerRecordOf, adoptedState, stopPlan } from "./worker-lifecycle-decisions.js";
 import type { SignalStep, StopReason } from "./worker-lifecycle-decisions.js";
 import { createWorkerTable } from "./worker-table.js";
 import type { WorkerTable } from "./worker-table.js";
@@ -135,6 +135,13 @@ export interface WorkerLifecycleConfig {
   readonly maxRestartsPerWindow: number;
   /** Sliding window (ms) for `maxRestartsPerWindow`. */
   readonly restartWindowMs: number;
+  /**
+   * How long (ms) after its drain began a still-running draining worker is
+   * hard-stopped by the liveness sweep (`drainOverdue`). Longer than the
+   * worker's own drain bound (`DRAIN_TIMEOUT_MS`) plus its shutdown teardown,
+   * so a cooperating worker always exits first.
+   */
+  readonly drainKillAfterMs: number;
 }
 
 interface WorkerLifecycleDeps {
@@ -343,8 +350,10 @@ const waitForUds = async (ctx: LifecycleCtx, record: WorkerRecord): Promise<bool
 // ── Spawn path ───────────────────────────────────────────────────────────────
 
 /**
- * Spawn admission: refuse if at the live-worker ceiling (T9 count primitive),
- * and refuse a tenant with no active spawn config (fail closed).
+ * Spawn admission: refuse at the live-worker ceiling (T9 count primitive), and
+ * refuse a tenant with no active spawn config (fail closed). A tenant whose
+ * worker still holds its socket is refused by the reservation itself
+ * (`WorkerTable.reserve`).
  */
 const admitSpawn = (ctx: LifecycleCtx, tenant: TenantId): Result<TenantSpawnConfig, HostError> => {
   const { config, logger } = ctx;
@@ -591,8 +600,17 @@ const lazySpawn = async (ctx: LifecycleCtx, tenant: TenantId): Promise<Result<En
   // all of them would read the same pre-commit `liveCount()`, all pass the cap
   // and all overshoot it (`liveCount()` is the SOLE multi-tenant spec FR-033
   // enforcer). Reserving here closes that TOCTOU; every failure path (in the
-  // helpers called below) releases this slot fail-closed.
-  ctx.workers.reserve(ctx.lifecycle.requestWorker(tenant, spawnCfg.eagerPin, ctx.clock()));
+  // helpers called below) releases this slot fail-closed. The reservation is
+  // refused while the tenant's current worker still holds its one socket
+  // (FR-004): a request during a drain waits for the drain's exit.
+  const claim = ctx.workers.reserve(ctx.lifecycle.requestWorker(tenant, spawnCfg.eagerPin, ctx.clock()));
+  if (claim.kind === "blocked") {
+    ctx.logger.warn("[worker-lifecycle] tenant's worker still holds its socket — refusing a replacement until it exits", {
+      tenant,
+      phase: claim.by,
+    });
+    return err(workerUnavailable(tenant));
+  }
 
   const extraEnv = await buildSpawnEnv(ctx, tenant, spawnCfg);
   if (!extraEnv.ok) return extraEnv;
@@ -629,8 +647,8 @@ const ensureWorker = async (ctx: LifecycleCtx, tenant: TenantId): Promise<Result
     if (touched.ok) ctx.workers.replace(touched.value);
     return ok({ udsPath: existing.udsPath });
   }
-  // No live worker → lazy spawn (a draining/crashed/evicted/spawning entry is
-  // not routable; lazySpawn re-enters spawning for it), coalesced single-flight.
+  // No live worker → lazy spawn, coalesced single-flight. A crashed/evicted
+  // entry is replaced; a draining one refuses the reservation until it exits.
   return spawnSingleFlight(ctx, tenant);
 };
 
@@ -763,9 +781,7 @@ const evict = async (ctx: LifecycleCtx, tenant: TenantId): Promise<Result<void, 
   if (current === undefined) return ok(undefined);
   // Capture the pid (in the narrowed branch so the union widening never loses
   // the field) for the deliberate stop signals.
-  let pid: number | undefined;
-  if (current.phase === "live" || current.phase === "draining") pid = current.pid;
-  await hardStopAndForget(ctx, tenant, pid);
+  await hardStopAndForget(ctx, tenant, lifecycleAdt.holdsProcess(current) ? current.pid : undefined);
   return ok(undefined);
 };
 
@@ -787,7 +803,7 @@ const reconcileReadopt = async (
   // freshly empty on a supervisor restart, but a re-run must drop stale ones).
   for (const tenant of result.value.pruned) {
     const cur = ctx.workers.get(tenant);
-    if (cur !== undefined && cur.phase !== "live" && cur.phase !== "draining") ctx.workers.release(tenant);
+    if (cur !== undefined && !lifecycleAdt.holdsProcess(cur)) ctx.workers.release(tenant);
   }
   return ok({ adopted: adoptedTenants, pruned: result.value.pruned });
 };
@@ -845,7 +861,7 @@ const probeAlive = async (ctx: LifecycleCtx, tenant: TenantId, pid: number): Pro
 const finalizeDeadAdoptedWorker = async (ctx: LifecycleCtx, tenant: TenantId, pid: number): Promise<boolean> => {
   const { logger } = ctx;
   const cur = ctx.workers.get(tenant);
-  if (cur === undefined || (cur.phase !== "live" && cur.phase !== "draining") || cur.pid !== pid) return false;
+  if (cur === undefined || !lifecycleAdt.holdsProcess(cur) || cur.pid !== pid) return false;
   if (cur.phase === "draining") {
     // A RE-ADOPTED draining worker (no exited watcher) has now exited — that
     // is the EXPECTED end of a graceful drain (multi-tenant spec FR-017), NOT a crash. Mirror
@@ -875,7 +891,7 @@ const sweepAdoptedWorkers = async (ctx: LifecycleCtx): Promise<readonly TenantId
   const candidates: Array<{ tenant: TenantId; pid: number }> = [];
   for (const [tenant, state] of ctx.workers.snapshot()) {
     if (ctx.workers.isWatched(tenant)) continue;
-    if (state.phase === "live" || state.phase === "draining") candidates.push({ tenant, pid: state.pid });
+    if (lifecycleAdt.holdsProcess(state)) candidates.push({ tenant, pid: state.pid });
   }
   const dead: TenantId[] = [];
   for (const { tenant, pid } of candidates) {
@@ -884,6 +900,32 @@ const sweepAdoptedWorkers = async (ctx: LifecycleCtx): Promise<readonly TenantId
     if (await finalizeDeadAdoptedWorker(ctx, tenant, pid)) dead.push(tenant);
   }
   return dead;
+};
+
+/**
+ * Hard-stop every draining worker past its kill deadline (`drainOverdue`),
+ * watched or re-adopted alike. A drain that never ends would otherwise keep
+ * its tenant unavailable forever: the draining worker holds the tenant's one
+ * socket, so no replacement may be reserved until it exits. Entry and record
+ * go first (`hardStopAndForget`), so a watched worker's eventual exit reads as
+ * a deliberate stop, never a crash.
+ */
+const stopOverdueDrains = async (ctx: LifecycleCtx): Promise<readonly TenantId[]> => {
+  const now = ctx.clock();
+  const stopped: TenantId[] = [];
+  for (const [tenant, state] of ctx.workers.snapshot()) {
+    if (state.phase !== "draining" || !drainOverdue(state, ctx.config.drainKillAfterMs, now)) continue;
+    // Re-read: an earlier stop in this loop awaited, and the entry may have moved on.
+    if (ctx.workers.get(tenant) !== state) continue;
+    ctx.logger.error("[worker-lifecycle] draining worker outlived its drain — hard-stopping it", {
+      tenant,
+      pid: state.pid,
+      drainAgeMs: now - state.drainStartedAt,
+    });
+    await hardStopAndForget(ctx, tenant, state.pid);
+    stopped.push(tenant);
+  }
+  return stopped;
 };
 
 /**
@@ -903,11 +945,15 @@ const sweepAdoptedWorkers = async (ctx: LifecycleCtx): Promise<readonly TenantId
  * double-fires `onCrash` against a crash the watcher already handles. Serialized
  * via `livenessSweeps` so overlapping ticks cannot both drive `onCrash` (an
  * overlapping tick is skipped and returns `[]`).
+ *
+ * The same tick first hard-stops any drain past its kill deadline
+ * (`stopOverdueDrains`), the only exit for a worker that ignores its SIGTERM.
  * Exposed for the supervisor to drive on a timer (the binary owns the schedule).
- * Returns the tenants detected dead (and handed to `onCrash`) this sweep.
+ * Returns the tenants whose worker this sweep finalised: overdue drains
+ * hard-stopped, then re-adopted workers detected dead.
  */
 const livenessSweep = (ctx: LifecycleCtx): Promise<readonly TenantId[]> =>
-  ctx.livenessSweeps.run(() => sweepAdoptedWorkers(ctx), []);
+  ctx.livenessSweeps.run(async () => [...(await stopOverdueDrains(ctx)), ...(await sweepAdoptedWorkers(ctx))], []);
 
 export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecyclePort => {
   const lifecycle = deps.lifecycle ?? lifecycleAdt;

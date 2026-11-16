@@ -53,6 +53,19 @@ describe("WorkerTable", () => {
     expect(t.liveCount()).toBe(1);
   });
 
+  test("reserve refuses — and claims nothing — while the tenant's entry still holds a process", () => {
+    const t = table();
+    const live = lifecycleAdt.adoptLive(tid("acme"), false, 4, "/run/fugue/acme.sock", 0, 0);
+    t.replace(live);
+    expect(t.reserve(lifecycleAdt.requestWorker(tid("acme"), false, 1))).toEqual({ kind: "blocked", by: "live" });
+    const draining = lifecycleAdt.beginDrain(live, 2);
+    if (!draining.ok) throw new Error("fixture: beginDrain on a live state");
+    t.replace(draining.value);
+    expect(t.reserve(lifecycleAdt.requestWorker(tid("acme"), false, 3))).toEqual({ kind: "blocked", by: "draining" });
+    expect(t.get(tid("acme"))).toBe(draining.value); // the running worker stays tracked
+    expect(t.liveCount()).toBe(1);
+  });
+
   test("replace over a live entry changes its phase without changing the count", () => {
     const t = table();
     const live = lifecycleAdt.adoptLive(tid("acme"), false, 4, "/run/fugue/acme.sock", 0, 0);

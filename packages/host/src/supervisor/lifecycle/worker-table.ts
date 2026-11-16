@@ -13,6 +13,8 @@
 import type { TenantId } from "../../domain/tenant.js";
 import type { WorkerState, SpawningState } from "./worker-lifecycle.js";
 import type { RestartBudget } from "./thin-init.js";
+import { spawnClearance } from "./worker-lifecycle-decisions.js";
+import type { SpawnClearance } from "./worker-lifecycle-decisions.js";
 
 /**
  * Entries are keyed by the state's own `tenant`, so an entry filed under
@@ -25,10 +27,14 @@ export interface WorkerTable {
    * other phase). Call it SYNCHRONOUSLY after the admission check and BEFORE
    * any `await`: the claim is what makes check-then-reserve atomic on Bun's
    * single thread, so concurrent first requests for distinct cold tenants
-   * cannot all pass the cap (multi-tenant spec FR-033). Whatever entry the
-   * tenant had is superseded.
+   * cannot all pass the cap (multi-tenant spec FR-033).
+   *
+   * Refuses — claiming nothing — while the tenant's entry still holds a
+   * process (`spawnClearance`): that worker owns the tenant's one socket, and
+   * superseding it would drop a running process from the table. Only a
+   * process-less entry is superseded.
    */
-  readonly reserve: (spawning: SpawningState) => void;
+  readonly reserve: (spawning: SpawningState) => SpawnClearance;
   /** Land the next pure state for its tenant (a transition result, or an adoption). */
   readonly replace: (next: WorkerState) => void;
   /**
@@ -71,7 +77,11 @@ export const createWorkerTable = (occupiesSlot: (state: WorkerState) => boolean)
   };
   return {
     get: (tenant) => workers.get(tenant),
-    reserve: put,
+    reserve: (spawning) => {
+      const clearance = spawnClearance(workers.get(spawning.tenant));
+      if (clearance.kind === "clear") put(spawning);
+      return clearance;
+    },
     replace: put,
     release: (tenant) => {
       workers.delete(tenant);

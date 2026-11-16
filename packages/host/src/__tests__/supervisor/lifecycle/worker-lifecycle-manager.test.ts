@@ -136,6 +136,7 @@ const baseConfig = (over: Partial<WorkerLifecycleConfig> = {}): WorkerLifecycleC
   spawnReadyPollMs: 10,
   maxRestartsPerWindow: 5,
   restartWindowMs: 60_000,
+  drainKillAfterMs: 45_000,
   ...over,
 });
 
@@ -145,18 +146,24 @@ const fixedClock = (start = 0) => {
   return { clock, advance: (ms: number) => { t += ms; } };
 };
 
+/** One unpinned tenant `acme` over an in-memory registry, a fixed clock and a silent log. */
+const acmeLifecycle = () => {
+  const fake = createInMemoryWorkerRedisFake();
+  const registry = createWorkerRegistry(fake.redis, async () => true);
+  const { spawn, proc, spawned } = makeSpawn();
+  const lc = createWorkerLifecycle({
+    spawn, proc, registry, probe: async () => true,
+    tenants: tenantsView({ acme: { eagerPin: false } }),
+    clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
+  });
+  return { fake, lc, spawned };
+};
+
 // ── ensureWorker: lazy spawn + reuse ───────────────────────────────────────────
 
 describe("createWorkerLifecycle: ensureWorker (FR-014, AD-7, FR-004)", () => {
   test("lazy-spawns to live and returns the tenant's OWN socket (FR-004)", async () => {
-    const fake = createInMemoryWorkerRedisFake();
-    const reg = createWorkerRegistry(fake.redis, async () => true);
-    const { spawn, proc, spawned } = makeSpawn();
-    const lc = createWorkerLifecycle({
-      spawn, proc, registry: reg, probe: async () => true,
-      tenants: tenantsView({ acme: { eagerPin: false } }),
-      clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
-    });
+    const { lc, fake, spawned } = acmeLifecycle();
 
     const r = await lc.ensureWorker(tid("acme"));
     expect(r.ok).toBe(true);
@@ -171,28 +178,14 @@ describe("createWorkerLifecycle: ensureWorker (FR-014, AD-7, FR-004)", () => {
   });
 
   test("reuses an existing live worker (no second spawn) and touches it", async () => {
-    const fake = createInMemoryWorkerRedisFake();
-    const reg = createWorkerRegistry(fake.redis, async () => true);
-    const { spawn, proc, spawned } = makeSpawn();
-    const lc = createWorkerLifecycle({
-      spawn, proc, registry: reg, probe: async () => true,
-      tenants: tenantsView({ acme: { eagerPin: false } }),
-      clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
-    });
+    const { lc, spawned } = acmeLifecycle();
     await lc.ensureWorker(tid("acme"));
     await lc.ensureWorker(tid("acme"));
     expect(spawned.length).toBe(1); // reused, not respawned
   });
 
   test("concurrent cold ensureWorker for the SAME tenant coalesces to ONE spawn (single-flight)", async () => {
-    const fake = createInMemoryWorkerRedisFake();
-    const reg = createWorkerRegistry(fake.redis, async () => true);
-    const { spawn, proc, spawned } = makeSpawn();
-    const lc = createWorkerLifecycle({
-      spawn, proc, registry: reg, probe: async () => true,
-      tenants: tenantsView({ acme: { eagerPin: false } }),
-      clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
-    });
+    const { lc, spawned } = acmeLifecycle();
 
     // Two requests race for a cold tenant before either spawn completes. The
     // spawn-seam single-flight (`spawnSingleFlight`) must collapse them onto ONE
@@ -380,14 +373,7 @@ describe("createWorkerLifecycle: per-tenant HITL queue-depth env (ADR-0074)", ()
   });
 
   test("no maxQueuedRuns configured → env absent (zero-regression default)", async () => {
-    const fake = createInMemoryWorkerRedisFake();
-    const reg = createWorkerRegistry(fake.redis, async () => true);
-    const { spawn, proc, spawned } = makeSpawn();
-    const lc = createWorkerLifecycle({
-      spawn, proc, registry: reg, probe: async () => true,
-      tenants: tenantsView({ acme: { eagerPin: false } }),
-      clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
-    });
+    const { lc, spawned } = acmeLifecycle();
     await lc.ensureWorker(tid("acme"));
     const spec = spawned[0]!.spec;
     expect(spec.extraEnv?.["FUGUE_MAX_QUEUED_RUNS"]).toBeUndefined();
@@ -416,14 +402,7 @@ describe("createWorkerLifecycle: per-tenant DAG root env (ADR-0061 at-rest isola
   });
 
   test("no dagsRoot configured → env absent (the inherited DAGS_LOCAL_PATH stands)", async () => {
-    const fake = createInMemoryWorkerRedisFake();
-    const reg = createWorkerRegistry(fake.redis, async () => true);
-    const { spawn, proc, spawned } = makeSpawn();
-    const lc = createWorkerLifecycle({
-      spawn, proc, registry: reg, probe: async () => true,
-      tenants: tenantsView({ acme: { eagerPin: false } }),
-      clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
-    });
+    const { lc, spawned } = acmeLifecycle();
     await lc.ensureWorker(tid("acme"));
     const spec = spawned[0]!.spec;
     expect(spec.extraEnv?.["DAGS_LOCAL_PATH"]).toBeUndefined();
@@ -472,14 +451,7 @@ describe("createWorkerLifecycle: per-tenant Redis ACL provisioning (ADR-0067)", 
   });
 
   test("no provisioner wired → no ACL env injected (zero-regression default)", async () => {
-    const fake = createInMemoryWorkerRedisFake();
-    const reg = createWorkerRegistry(fake.redis, async () => true);
-    const { spawn, proc, spawned } = makeSpawn();
-    const lc = createWorkerLifecycle({
-      spawn, proc, registry: reg, probe: async () => true,
-      tenants: tenantsView({ acme: { eagerPin: false } }),
-      clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
-    });
+    const { lc, spawned } = acmeLifecycle();
     await lc.ensureWorker(tid("acme"));
     const spec = spawned[0]!.spec;
     expect(spec.extraEnv?.["FUGUE_REDIS_ACL_USERNAME"]).toBeUndefined();
@@ -614,13 +586,14 @@ describe("createWorkerLifecycle: reconcileReadopt (SC-006, C3 eager-pin)", () =>
     expect(lc.liveWorkerCount()).toBe(1); // a draining worker still occupies a slot
     expect(base.spawned.length).toBe(0); // adopted — never spawned by THIS process
 
-    // THE FIX: a re-adopted draining worker is NOT `live`, so `ensureWorker` must
-    // NOT route NEW traffic to it — it lazy-spawns a FRESH worker instead. Had it
-    // been wrongly adopted as `live` (the bug), `ensureWorker` would return the
-    // drained worker's socket with NO new spawn, defeating the drain.
+    // A re-adopted draining worker is NOT `live`, so `ensureWorker` must NOT
+    // route NEW traffic to it. Nor may it spawn a replacement: the draining
+    // worker still holds the tenant's socket (FR-004) until it exits.
     const routed = await lc.ensureWorker(tid("acme"));
-    expect(routed.ok).toBe(true);
-    expect(base.spawned.length).toBe(1); // fresh spawn — the drained worker is not reused
+    expect(routed.ok).toBe(false);
+    if (!routed.ok) expect(routed.error.kind).toBe("worker-unavailable");
+    expect(base.spawned.length).toBe(0);
+    expect(lc.liveWorkerCount()).toBe(1); // still tracked, still counted
   });
 });
 
@@ -653,14 +626,7 @@ describe("createWorkerLifecycle: crash-exit watcher (FR-014/FR-015, AD-8)", () =
   });
 
   test("a deliberate evict that resolves handle.exited does NOT trigger a respawn (pid/phase guard)", async () => {
-    const fake = createInMemoryWorkerRedisFake();
-    const reg = createWorkerRegistry(fake.redis, async () => true);
-    const { spawn, proc, spawned } = makeSpawn();
-    const lc = createWorkerLifecycle({
-      spawn, proc, registry: reg, probe: async () => true,
-      tenants: tenantsView({ acme: { eagerPin: false } }),
-      clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
-    });
+    const { lc, spawned } = acmeLifecycle();
     await lc.ensureWorker(tid("acme"));
     expect(spawned.length).toBe(1);
 
@@ -705,14 +671,7 @@ describe("createWorkerLifecycle: crash-exit watcher (FR-014/FR-015, AD-8)", () =
   // it as a `live` crash and respawn it. Mirrors the "deliberate evict … does NOT
   // trigger a respawn" assertions: no new spawn, entry gone (not live/spawning).
   test("a draining worker's exit completes the drain and is NOT respawned (FR-017)", async () => {
-    const fake = createInMemoryWorkerRedisFake();
-    const reg = createWorkerRegistry(fake.redis, async () => true);
-    const { spawn, proc, spawned } = makeSpawn();
-    const lc = createWorkerLifecycle({
-      spawn, proc, registry: reg, probe: async () => true,
-      tenants: tenantsView({ acme: { eagerPin: false } }),
-      clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
-    });
+    const { lc, spawned } = acmeLifecycle();
     // Bring acme to live (spawned → its handle.exited watcher is attached).
     await lc.ensureWorker(tid("acme"));
     expect(spawned.length).toBe(1);
@@ -737,6 +696,34 @@ describe("createWorkerLifecycle: crash-exit watcher (FR-014/FR-015, AD-8)", () =
     expect(back.ok).toBe(true);
     expect(spawned.length).toBe(2); // the only respawn is request-driven, not exit-driven
     expect(lc.liveWorkerCount()).toBe(1);
+  });
+
+  // REGRESSION: a request arriving while the tenant's worker drains used to
+  // `reserve` a `spawning` entry over the `draining` one. The draining process
+  // still holds the tenant's one socket (multi-tenant spec FR-004), so the
+  // replacement could never bind it — and the overwrite dropped the draining
+  // worker from the table: its slot stopped counting (FR-033) and its exit was
+  // ignored. The tenant is unavailable until the drain finishes instead.
+  test("a request during a drain is refused and the draining worker stays tracked (FR-004/FR-017/FR-033)", async () => {
+    const { fake, lc, spawned } = acmeLifecycle();
+    await lc.ensureWorker(tid("acme"));
+    await lc.drain(tid("acme"));
+
+    const during = await lc.ensureWorker(tid("acme"));
+    expect(during.ok).toBe(false);
+    if (!during.ok) expect(during.error.kind).toBe("worker-unavailable");
+    expect(spawned.length).toBe(1); // no replacement contends for the socket
+    expect(lc.liveWorkerCount()).toBe(1); // the draining worker still counts
+    expect(fake.store.has(`${WORKER_KEY_PREFIX}acme`)).toBe(true); // its draining record stands
+
+    // Its exit is still seen as the end of the drain, and the tenant recovers.
+    spawned[0]!.exit(0);
+    await flushMicrotasks();
+    expect(lc.liveWorkerCount()).toBe(0);
+    expect(fake.store.has(`${WORKER_KEY_PREFIX}acme`)).toBe(false);
+    const after = await lc.ensureWorker(tid("acme"));
+    expect(after.ok).toBe(true);
+    expect(spawned.length).toBe(2);
   });
 
   test("a graceful-drain registry rejection is caught and logged with tenant context", async () => {
@@ -925,6 +912,63 @@ describe("createWorkerLifecycle: liveness sweep for re-adopted workers (SC-006, 
   });
 });
 
+// ── drain kill deadline: a drain that never ends is hard-stopped ─────────────────
+//
+// A draining worker holds its tenant's one socket, so no replacement may be
+// reserved until it exits. A worker that ignores its SIGTERM (or never got it)
+// would keep the tenant unavailable forever; the liveness sweep hard-stops it
+// once `drainKillAfterMs` has passed since the drain began.
+
+describe("createWorkerLifecycle: drain kill deadline (FR-017, FR-004)", () => {
+  /** acme live and draining (SIGTERM sent) under a controllable clock. */
+  const drainingAcme = async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    const registry = createWorkerRegistry(fake.redis, async () => true);
+    const { spawn, proc, spawned, signalled } = makeSpawn();
+    const clk = fixedClock();
+    const log = recordingLog();
+    const lc = createWorkerLifecycle({
+      spawn, proc, registry, probe: async () => true,
+      tenants: tenantsView({ acme: { eagerPin: false } }),
+      clock: clk.clock, config: baseConfig({ drainKillAfterMs: 1_000 }), logger: log,
+    });
+    await lc.ensureWorker(tid("acme"));
+    await lc.drain(tid("acme"));
+    return { fake, lc, spawned, signalled, clk, log };
+  };
+
+  test("a drain still inside its deadline is left alone", async () => {
+    const { lc, signalled, clk } = await drainingAcme();
+    clk.advance(999);
+    expect(await lc.livenessSweep()).toEqual([]);
+    expect(signalled.map((s) => s.sig)).toEqual(["SIGTERM"]); // only the drain's own SIGTERM
+    expect(lc.liveWorkerCount()).toBe(1);
+  });
+
+  test("a drain past its deadline is hard-stopped, and the tenant can spawn again", async () => {
+    const { fake, lc, spawned, signalled, clk, log } = await drainingAcme();
+    clk.advance(1_000);
+
+    expect(await lc.livenessSweep()).toEqual([tid("acme")]);
+    // SIGTERM + SIGKILL after the drain's SIGTERM; entry and record are gone.
+    expect(signalled.map((s) => s.sig)).toEqual(["SIGTERM", "SIGTERM", "SIGKILL"]);
+    expect(lc.liveWorkerCount()).toBe(0);
+    expect(fake.store.has(`${WORKER_KEY_PREFIX}acme`)).toBe(false);
+    expect(log.errors.find((l) => l.msg.includes("outlived its drain"))?.ctx).toMatchObject({
+      tenant: tid("acme"), drainAgeMs: 1_000,
+    });
+
+    // The killed worker's exit is a deliberate stop, never a crash: no respawn.
+    spawned[0]!.exit(null);
+    await flushMicrotasks();
+    expect(spawned.length).toBe(1);
+
+    // The tenant is no longer blocked: the next request spawns a fresh worker.
+    expect((await lc.ensureWorker(tid("acme"))).ok).toBe(true);
+    expect(spawned.length).toBe(2);
+  });
+});
+
 // ── restart-at-cap: a crashing tenant at the cap must respawn (FR-015) ───────────
 
 describe("createWorkerLifecycle: restart at SUPERVISOR_MAX_LIVE_WORKERS (FR-015)", () => {
@@ -1051,6 +1095,8 @@ describe("createWorkerLifecycle: failed kills surface via the logger (T9 Fix 1)"
     const warnLine = log.warns.find((l) => l.msg.includes("signal failed (best-effort)"));
     expect(warnLine).toBeDefined();
     expect(warnLine!.ctx).toMatchObject({ tenant: tid("acme"), sig: "SIGKILL" });
+    // No registry record was ever written for this spawn, so no orphan alarm.
+    expect(log.errors.some((l) => l.msg.includes("may be orphaned"))).toBe(false);
   });
 });
 
@@ -1160,6 +1206,25 @@ describe("createWorkerLifecycle: registry-write failures", () => {
     // No live worker is tracked, so the next request retries a clean spawn.
     expect(lc.liveWorkerCount()).toBe(0);
     expect(log.errors.some((e) => e.msg.includes("registry put failed for a live worker"))).toBe(true);
+  });
+
+  test("a live-record put failure whose kill also fails is reported as an orphan risk (announced spawn)", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    const reg = registryFailingPutFor(createWorkerRegistry(fake.redis, async () => true), "live");
+    const { spawn, proc } = makeSpawn({ signalFails: true });
+    const log = recordingLog();
+    const lc = createWorkerLifecycle({
+      spawn, proc, registry: reg, probe: async () => true,
+      tenants: tenantsView({ acme: { eagerPin: false } }),
+      clock: fixedClock().clock, config: baseConfig(), logger: log,
+    });
+
+    expect((await lc.ensureWorker(tid("acme"))).ok).toBe(false);
+    // A registry record may exist for this spawn, so the failed SIGKILL is the
+    // orphan-risk ERROR — not the unannounced spawn's best-effort warn.
+    const orphanLine = log.errors.find((l) => l.msg.includes("may be orphaned"));
+    expect(orphanLine?.ctx).toMatchObject({ tenant: tid("acme"), sig: "SIGKILL" });
+    expect(log.warns.some((l) => l.msg.includes("signal failed (best-effort)"))).toBe(false);
   });
 
   test("a draining-record put failure is BEST-EFFORT: the worker is still SIGTERM'd and in-flight work survives", async () => {

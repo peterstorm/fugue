@@ -118,7 +118,9 @@ export interface WorkerLifecyclePort {
   /**
    * Ensure a live worker exists for `tenant` and return its UDS path. Lazy-spawns
    * on first request (AD-7). Fail-closed: `worker-unavailable(tenant)` if it
-   * cannot be brought up (contained to this tenant only — AD-8).
+   * cannot be brought up (contained to this tenant only — AD-8), including while
+   * the tenant's previous worker is still draining — it holds the tenant's one
+   * socket until it exits (multi-tenant spec FR-004/FR-017).
    */
   readonly ensureWorker: (tenant: TenantId) => Promise<Result<EnsuredWorker, HostError>>;
   /** Begin graceful drain of a tenant's worker (live → draining → stop, multi-tenant spec FR-017). */
@@ -153,9 +155,11 @@ export interface WorkerLifecyclePort {
    * crash watcher; a worker re-adopted across a supervisor restart does NOT (its
    * process was re-parented — no handle to await). This sweep probes such workers'
    * liveness and drives `onCrash` for any that died, so a re-adopted worker's crash
-   * is detected and restarted rather than wedging the tenant at 503. Driven by the
-   * supervisor binary on a timer (the binary owns the interval). Returns the
-   * tenants detected dead this sweep.
+   * is detected and restarted rather than wedging the tenant at 503. The same tick
+   * hard-stops any draining worker (watched or not) past its drain kill deadline:
+   * a drain that never ends would otherwise block its tenant's replacement
+   * forever. Driven by the supervisor binary on a timer (the binary owns the
+   * interval). Returns the tenants whose worker this sweep finalised.
    */
   readonly livenessSweep: () => Promise<readonly TenantId[]>;
 }
