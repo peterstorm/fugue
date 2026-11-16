@@ -2,10 +2,10 @@
  * Cell-value semantics of the streaming reader, proven against SheetJS 0.18.5
  * (`XLSX.read(buf, { type: "buffer", cellDates: true })`), the frozen reference:
  *
- * - `serialToDate` is the SheetJS numdate port (local time zone, the 1900
+ * - `serialToDate` is the SheetJS `numdate` port (local time zone, the 1900
  *   leap-year off-by-one for serials ≤ 60, and — like SheetJS — no 1904 shift).
- * - `decodeXmlEscapes` round-trips _xHHHH_ escapes.
- * - `isDateFormat` agrees with SSF.is_date, and the built-in date ids table.
+ * - `decodeXmlEscapes` round-trips `_xHHHH_` escapes.
+ * - `isDateFormat` agrees with `SSF.is_date`, and the built-in date ids table.
  * - `decodeCell` per cell type, and AS-014 end to end through `parseWorkbook`.
  *
  * Workbooks here are hand-built XML zipped with fflate, so each raw cell shape is

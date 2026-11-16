@@ -985,7 +985,7 @@ describe("createFileJournal.appendEvent — per-entry stat failure in the writer
   // succeeds, the name parses, and the stat itself fails. A dangling symlink
   // reaches it deterministically and without root-sensitivity — `statSync`
   // FOLLOWS symlinks, so the missing target surfaces as ENOENT at exactly that
-  // call, where a chmod technique would have failed earlier at the lock mkdir.
+  // call, where a `chmod` technique would have failed earlier at the lock mkdir.
   it("a dangling symlink wearing a valid record name fails the append typed, naming the run directory", async () => {
     const dir = tempDir();
     const journal = createFileJournal(dir);

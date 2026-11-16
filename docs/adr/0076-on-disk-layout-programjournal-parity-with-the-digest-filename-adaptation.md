@@ -7,11 +7,11 @@ Accepted
 2026-08-14
 
 ## Context
-Fugue needed a filesystem-backed durable `JobLike` that could replace Loom's hand-written ProgramJournal without introducing Redis, BullMQ, SQLite, or an external registry. The journal directory must be sufficient to recover a run in a fresh process. Its event log must preserve append order (FR-002), make keyed retries durably idempotent (FR-004), and remain strict enough that corrupt authoritative history is rejected rather than partially replayed (FR-009).
+Fugue needed a filesystem-backed durable `JobLike` that could replace Loom's hand-written `ProgramJournal` without introducing Redis, BullMQ, SQLite, or an external registry. The journal directory must be sufficient to recover a run in a fresh process. Its event log must preserve append order (FR-002), make keyed retries durably idempotent (FR-004), and remain strict enough that corrupt authoritative history is rejected rather than partially replayed (FR-009).
 
-Loom's deployed ProgramJournal supplied a validated failure model: one immutable, sequence-prefixed JSON file per event; deduplication from the durable directory listing rather than an in-memory index; and atomic replacement of checkpoint and progress projections. Reusing that model reduced semantic risk, but its literal `NNNNNN-<dedupKey>.json` filename is not portable to the framework contract. FR-015 admits deduplication keys up to 256 characters, making a literal event filename 268 bytes, beyond the common 255-byte `NAME_MAX`; future composite checkpoint node keys can be longer still.
+Loom's deployed `ProgramJournal` supplied a validated failure model: one immutable, sequence-prefixed JSON file per event; deduplication from the durable directory listing rather than an in-memory index; and atomic replacement of checkpoint and progress projections. Reusing that model reduced semantic risk, but its literal `NNNNNN-<dedupKey>.json` filename is not portable to the framework contract. FR-015 admits deduplication keys up to 256 characters, making a literal event filename 268 bytes, beyond the common 255-byte `NAME_MAX`; future composite checkpoint node keys can be longer still.
 
-The layout therefore had to retain the reference journal's ordering, crash-retry, and atomic-commit properties while bounding every generated filename, keeping raw identifiers out of digest-addressed paths, and making a filename independently checkable against the record it claims to contain. Process-crash durability was required; power-loss durability through directory and file fsync was not.
+The layout therefore had to retain the reference journal's ordering, crash-retry, and atomic-commit properties while bounding every generated filename, keeping raw identifiers out of digest-addressed paths, and making a filename independently checkable against the record it claims to contain. Process-crash durability was required; power-loss durability through directory and file `fsync` was not.
 
 ## Options Considered
 
@@ -31,7 +31,7 @@ The layout therefore had to retain the reference journal's ordering, crash-retry
    - Pros: Avoids per-identifier filenames and reduces directory entry counts.
    - Cons: Rewrites growing shared state, enlarges the crash and contention surface, requires an additional durable deduplication index, and prevents the file checkpointer from dropping one corrupt node while reporting its address independently.
 
-5. **Add fsync to every write and directory update**
+5. **Add `fsync` to every write and directory update**
    - Pros: Extends the guarantee from process-crash atomicity toward host power-loss durability.
    - Cons: Adds synchronous I/O cost and platform-specific complexity not required by consumers in this release; exceeds parity with the validated ProgramJournal reference. This remains a possible hardening step if the durability contract is expanded.
 
@@ -87,7 +87,7 @@ Digest selection is part of the durable contract:
 
 `packages/framework/src/file/event-log.ts` treats only names ending in `.json` as record candidates, so the canonical append.lock/, permanent append.lock.fence/, published intent/tomb entries inside the fence, sibling staging directories, and `<target>.tmp.<unique-token>` files are invisible. This reader invisibility is separate from lock-protocol recovery: published fence entries are reconciled by lock acquisition, whereas sibling staging directories are merely ignored and may remain as harmless litter. For every listed record the reader verifies the strict schema, filename prefix against the content sequence, contiguous sequences from zero, and the filename digest against a digest recomputed from parsed content. Any corrupt or truncated record, gap, foreign JSON file, prefix mismatch, or digest mismatch fails the complete read with a source-naming `Result` error; no middle entry is skipped (FR-009).
 
-`packages/framework/src/file/atomic.ts` gives each call its own same-directory `<target>.tmp.<unique-token>` and renames it over the final path; rename is the process-crash commit point. Per-attempt ownership prevents same-process/same-target calls from contending on or cleaning up one shared temporary path. The same primitive writes event files, `checkpoint.json`, `progress.json`, and file-checkpointer entries. Orphaned temporary files do not match the readers' `*.json` filter. This guarantees prior-complete or new-complete observations for process crashes, but does not claim power-loss durability without fsync.
+`packages/framework/src/file/atomic.ts` gives each call its own same-directory `<target>.tmp.<unique-token>` and renames it over the final path; rename is the process-crash commit point. Per-attempt ownership prevents same-process/same-target calls from contending on or cleaning up one shared temporary path. The same primitive writes event files, `checkpoint.json`, `progress.json`, and file-checkpointer entries. Orphaned temporary files do not match the readers' `*.json` filter. This guarantees prior-complete or new-complete observations for process crashes, but does not claim power-loss durability without `fsync`.
 
 The digest adaptation also applies to file-checkpointer nodes in `packages/framework/src/file/checkpointer.ts`:
 
@@ -96,7 +96,7 @@ The digest adaptation also applies to file-checkpointer nodes in `packages/frame
 <checkpointBase>/<validated-runId>/nodes/<sha256hex(nodeKey)>.json
 ```
 
-The node entry stores `nodeKey` and verifies that it owns its digest filename when loaded. Run, node, and namespace values are boundary-validated before path construction. The supplied checkpoint base and backend-managed run/nodes entries are additionally lstat/`realpath`-verified as non-symlink directories with direct canonical-parent agreement; readable metadata/node entries must be regular non-symlink files. Directory device/inode identity is rechecked around writes. This prevents pre-existing managed-descendant symlinks from redirecting checkpointer I/O outside the base. Portable Node does not expose descriptor-relative openat traversal, so the backend does not claim safety against an adversary concurrently renaming filesystem entries between checks. Freshness records reuse `keyDigest` for their filenames, while their latest-write and TTL semantics are owned by [ADR-0079](0079-file-freshness-index-digest-addressed-latest-write-files-with-lazy-ttl-parity.md).
+The node entry stores `nodeKey` and verifies that it owns its digest filename when loaded. Run, node, and namespace values are boundary-validated before path construction. The supplied checkpoint base and backend-managed run/nodes entries are additionally lstat/`realpath`-verified as non-symlink directories with direct canonical-parent agreement; readable metadata/node entries must be regular non-symlink files. Directory device/inode identity is rechecked around writes. This prevents pre-existing managed-descendant symlinks from redirecting checkpointer I/O outside the base. Portable Node does not expose descriptor-relative `openat` traversal, so the backend does not claim safety against an adversary concurrently renaming filesystem entries between checks. Freshness records reuse `keyDigest` for their filenames, while their latest-write and TTL semantics are owned by [ADR-0079](0079-file-freshness-index-digest-addressed-latest-write-files-with-lazy-ttl-parity.md).
 
 ## Consequences
 
@@ -114,7 +114,7 @@ The node entry stores `nodeKey` and verifies that it owns its digest filename wh
 - Appending and reading require directory scans and per-record validation; append cost grows with the number of event files.
 - Once append locking is initialized, each journal retains an empty append.lock.fence/ directory. Crash-left published intents and tombs inside that fence are scanned and reconciled by later lock acquisition; crash-left sibling staging directories are not scanned or reconciled and may remain as harmless reader-invisible litter until external run-directory cleanup.
 - The six-digit ordering scheme imposes a hard capacity of 1,000,000 records per journal (`0` through `999999`); exhaustion fails rather than silently breaking ordering.
-- Atomic rename covers process crashes, not sudden power loss. Without fsync, the newest committed-looking write can still be lost by the host or filesystem after an acknowledged operation.
+- Atomic rename covers process crashes, not sudden power loss. Without `fsync`, the newest committed-looking write can still be lost by the host or filesystem after an acknowledged operation.
 - Digest filenames are a deliberate format divergence from historical Loom run directories; this decision provides no migration or byte-for-byte compatibility for those artifacts.
 - Event serialization does not preserve the sign bit of negative zero: `-0` deliberately canonicalizes to persisted `0`. All other accepted event values are required to survive without omission, type reinterpretation, or value coercion.
 

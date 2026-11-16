@@ -112,7 +112,7 @@ export const parseBenchArgs = (argv: readonly string[]): Result<BenchArgs, strin
 
 /**
  * `process.resourceUsage().maxRSS` is kilobytes under Node and under Bun on
- * Linux (ru_maxrss), but bytes under Bun on macOS. The lifetime peak can
+ * Linux (`ru_maxrss`), but bytes under Bun on macOS. The lifetime peak can
  * never be below the current RSS, so a value that reads below it as bytes is
  * kilobytes.
  */

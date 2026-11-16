@@ -12,13 +12,13 @@
 
 import { describe, it, expect, afterEach, mock } from "bun:test";
 // `verify.ts` imports `jose` LAZILY (a dynamic `import("jose")` at call time), and
-// mock.module is hoisted by bun, so a normal static import of the verifier below
+// `mock.module` is hoisted by bun, so a normal static import of the verifier below
 // still resolves the stubbed `jose` when each call runs. Importing statically (not
 // top-level `await import`) keeps the file an ES module under the host tsconfig.
 import { createBotTokenVerifier } from "../verify.js";
 
 // ── jose stub (the ONLY system boundary mocked) ───────────────────────────────
-// Mutable hooks the tests set per-case; mock.module is hoisted, so the module
+// Mutable hooks the tests set per-case; `mock.module` is hoisted, so the module
 // closure reads these lazily on each call.
 let jwtVerifyImpl: (token: unknown, jwks: unknown, opts: unknown) => Promise<unknown> = async () => ({});
 let createRemoteJWKSetImpl: (url: URL) => unknown = () => (async () => ({}));

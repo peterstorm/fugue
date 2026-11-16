@@ -285,7 +285,7 @@ objects the admin API takes (each with a top-level `id`). Mount it and point
 where each token is a **pre-provided** `fug_` team token you generate once. This
 replaces the one-time "minted token shown once" capture step: you seal the SAME
 token into the host's bootstrap secret **and** into the consuming app's secret
-(e.g. lead-desk's FUGUE_TEAM_TOKEN), so both sides agree with no copy-paste.
+(e.g. lead-desk's `FUGUE_TEAM_TOKEN`), so both sides agree with no copy-paste.
 
 ```bash
 # Generate a token with the fug_ shape the auth path requires:

@@ -28,7 +28,7 @@ The runtime boundary is hostile rather than merely type-checked. JavaScript call
    - Cons: Can advance state after an event or checkpoint failed to persist, violating append-before-checkpoint ordering and crash recovery; converts data loss into false success; prevents retry from re-deriving the failed transition.
 
 4. **Add file-specific error kinds or allow raw runtime exceptions through**
-   - Pros: A file-io kind could distinguish filesystem storage from other caches, while raw exceptions require less boundary code.
+   - Pros: A `file-io` kind could distinguish filesystem storage from other caches, while raw exceptions require less boundary code.
    - Cons: Expands the closed public union without a new recovery behavior; diverges from Redis parity; forces downstream exhaustive handlers to change; raw `TypeError`, `RangeError`, hostile thrown values, and logger exceptions would violate FR-040 and make diagnostics unreliable.
 
 ## Decision

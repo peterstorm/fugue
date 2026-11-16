@@ -8,7 +8,7 @@ Accepted — Implemented
 
 ## Context
 
-Exporting traces, scoring evaluations, and emitting domain events / metrics to Azure AI Foundry requires several vendor SDKs: `@azure/monitor-opentelemetry-exporter` (the Azure Monitor OTLP-equivalent span exporter), `@azure/identity` (credential resolution via `DefaultAzureCredential`), `applicationinsights` (the Application Insights client used to emit custom domain events and metrics), and the Python azure-ai-evaluation package (Foundry-native evaluators run in the eval sidecar).
+Exporting traces, scoring evaluations, and emitting domain events / metrics to Azure AI Foundry requires several vendor SDKs: `@azure/monitor-opentelemetry-exporter` (the Azure Monitor OTLP-equivalent span exporter), `@azure/identity` (credential resolution via `DefaultAzureCredential`), `applicationinsights` (the Application Insights client used to emit custom domain events and metrics), and the Python `azure-ai-evaluation` package (Foundry-native evaluators run in the eval sidecar).
 
 The question is how these SDKs should be wired into the package graph: as **optional** dependencies loaded lazily only when Foundry is enabled, or as **hard** dependencies that are always installed and eagerly importable.
 
@@ -36,7 +36,7 @@ The forces in tension:
 Specifically:
 - `@azure/monitor-opentelemetry-exporter` and `@azure/identity` are hard `dependencies` of the **framework** package (`packages/framework/package.json`). They are imported by the Azure Monitor exporter factory, which the framework owns.
 - `applicationinsights` (and `@azure/identity`, for `DefaultAzureCredential`) is a hard `dependency` of the **app** package (`apps/customer-summary/package.json`). It backs the domain-event / metric sink that is composed at the app layer.
-- The Python azure-ai-evaluation package is a hard dependency in the eval sidecar's `requirements.txt` (`apps/customer-summary/eval/requirements.txt`).
+- The Python `azure-ai-evaluation` package is a hard dependency in the eval sidecar's `requirements.txt` (`apps/customer-summary/eval/requirements.txt`).
 
 **Placement nuance (as-built).** "Hard dependency" is unconditional, but each dependency lives in the package where its `import` actually occurs, not in a single catch-all location. The framework's domain-event observer depends only on a vendor-neutral `FoundryTelemetrySink` port — it has no compile-time knowledge of Application Insights. The `applicationinsights`-backed implementation of that port is composed at the app layer, so the `applicationinsights` import — and therefore the dependency — belongs to the app. Conversely, the Azure Monitor span exporter factory lives in the framework, so its Azure SDKs are framework dependencies. This keeps the framework vendor-neutral at its port boundary (see ADR-0048) while still satisfying the "always installed" guarantee everywhere an import resolves.
 
@@ -52,6 +52,6 @@ Specifically:
 - FR-027 still holds: with Foundry disabled the SDKs are installed but never constructed, so existing framework, host, and app tests pass unchanged and MLflow behavior is untouched.
 
 **Negative:**
-- Every application carries the Azure SDK install weight (node_modules size, and the Python azure-ai-evaluation footprint in the sidecar) even when Foundry is never enabled. This is the accepted trade for unconditional wiring.
+- Every application carries the Azure SDK install weight (node_modules size, and the Python `azure-ai-evaluation` footprint in the sidecar) even when Foundry is never enabled. This is the accepted trade for unconditional wiring.
 - The codebase is now internally inconsistent with `MlflowOtlpExporter`, which still uses the optional/lazy pattern for its inner OTLP exporter. Future readers must understand that the lazy pattern is a deliberate exception for MLflow, not the standard.
 - SDK version churn is now carried by every consumer rather than only by Foundry-enabled deployments; versions must be pinned and updated in lockstep across the framework and app packages.

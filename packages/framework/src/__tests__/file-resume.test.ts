@@ -141,7 +141,7 @@ interface HostileThrownValue {
 }
 
 /**
- * An object whose `toString` AND Symbol.toPrimitive both throw on ACCESS — the
+ * An object whose `toString` AND `Symbol.toPrimitive` both throw on ACCESS — the
  * hardest case for any diagnostic that tries to render an unknown value. Named
  * once because it is used both as a matrix entry and directly by the hostile
  * runId tests.

@@ -348,7 +348,7 @@ If you use `@fuguejs/fs` in a container, the file must reach the pod. Ranked
 2. **RWX PersistentVolume** populated by another job; `rootDir` = mount path.
 3. **initContainer** fetches into a shared `emptyDir`; app reads via `@fuguejs/fs`.
 4. **ConfigMap/Secret volume** — only for small (<~1 MiB) / sensitive static files.
-5. **Baked into the image** (COPY) — only for static build-time data.
+5. **Baked into the image** (`COPY`) — only for static build-time data.
 
 ---
 

@@ -154,8 +154,8 @@ All admin endpoints require `Authorization: Bearer <ADMIN_TOKEN>`.
 | `team` | Yes | Lowercase alphanumeric + hyphens. Start/end with alphanumeric. Regex: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` |
 | `label` | No | Free-text. Defaults to `"<team> token"` |
 
-**Valid team names:** `cx`, `team-a`, ml-platform, data-eng-v2
-**Invalid:** Team-A (uppercase), `-team` (leading hyphen), team_a (underscore)
+**Valid team names:** `cx`, `team-a`, `ml-platform`, `data-eng-v2`
+**Invalid:** `Team-A` (uppercase), `-team` (leading hyphen), `team_a` (underscore)
 
 **Responses:**
 
@@ -367,7 +367,7 @@ Separation of privilege. If an application credential leaks, you revoke just tha
 Yes. Admin identity bypasses team checks — useful for debugging and monitoring.
 
 **Q: Can one team have multiple tokens?**
-Not currently. One token per team name. If you need multiple app credentials (staging service, cron job, etc.), model them as separate teams: cx-api, cx-cron.
+Not currently. One token per team name. If you need multiple app credentials (staging service, cron job, etc.), model them as separate teams: `cx-api`, `cx-cron`.
 
 **Q: What's the token entropy?**
 32 bytes (256 bits) via `crypto.getRandomValues()`. Computationally infeasible to brute-force.

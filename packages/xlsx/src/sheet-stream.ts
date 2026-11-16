@@ -3,7 +3,7 @@
  * `(rowIndex, cells)` call per worksheet row holding cells, in ascending row
  * order, plus the `<dimension>` bounds.
  *
- * Addressing follows SheetJS 0.18.5 parse_ws_xml_data, whose cell map this
+ * Addressing follows SheetJS 0.18.5 `parse_ws_xml_data`, whose cell map this
  * reproduces without ever holding it:
  * - A `<row>` element's number is its `r` attribute, else the previous row
  *   element's plus one; a self-closing `<row/>` is skipped and does not advance
@@ -48,7 +48,7 @@ export interface SheetSink {
 
 // ── A1 addressing (SheetJS ports) ────────────────────────────────────────────
 
-/** SheetJS safe_decode_range: lenient, stops at the first unexpected character. */
+/** SheetJS `safe_decode_range`: lenient, stops at the first unexpected character. */
 const safeDecodeRange = (range: string): { sc: number; sr: number; ec: number; er: number } => {
   let i = 0;
   let cc = 0;
@@ -79,7 +79,7 @@ const safeDecodeRange = (range: string): { sc: number; sr: number; ec: number; e
 
 /**
  * A `<dimension ref>` SheetJS accepts: it must look like `\w*:\w*` (SheetJS's
- * dimregex; a single-cell `A1` is ignored) and decode to a non-empty range.
+ * `dimregex`; a single-cell `A1` is ignored) and decode to a non-empty range.
  */
 export const parseDimensionRef = (ref: string): SheetBounds | null => {
   if (!/^\w*:\w*$/.test(ref)) return null;

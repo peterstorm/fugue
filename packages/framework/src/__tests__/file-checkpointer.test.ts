@@ -200,7 +200,7 @@ const rawNodeWithOutput = (nodeKey: string, outputJson: string): string =>
 // SC-001 — the ENTIRE shared suite, zero carve-outs
 // ---------------------------------------------------------------------------
 
-// `factory` runs first in the suite's beforeEach, so every test gets a
+// `factory` runs first in the suite's `beforeEach`, so every test gets a
 // pristine directory and the raw callbacks below address that same directory.
 let suiteDirectory = "";
 

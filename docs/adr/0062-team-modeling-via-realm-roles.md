@@ -18,7 +18,7 @@ is denied **before** any concurrency is acquired (SC-005). The host already mode
 this on the inbound side — `RealmJwtClaims.teams: readonly string[]`, the
 stateless `canAccessDag` user branch (`packages/host/src/domain/auth.ts`). What
 was missing was the realm-side plumbing that puts the user's team memberships on
-the token in the first place: the fugueplatform realm brokers the mother-company
+the token in the first place: the `fugueplatform` realm brokers the mother-company
 Entra tenant, and "which teams is this user in?" originates as Azure AD **group**
 membership (a set of group GUIDs) in the federated identity, not as a `teams`
 list the host can read.
@@ -31,15 +31,15 @@ protocol mapper reads out of when emitting the multi-valued `teams` claim
 the spec carried this as an explicit open question for design to resolve. The
 forces at play:
 
-- **Config-as-code weight.** The fugueplatform realm is governed declaratively
-  in keycloakConfigAsCode — steps, a golden-export test, PR review. The team
+- **Config-as-code weight.** The `fugueplatform` realm is governed declaratively
+  in `keycloakConfigAsCode` — steps, a golden-export test, PR review. The team
   primitive should be the lightest construct that emits a clean, golden-testable
   claim, not the one that drags the most provisioning surface.
 - **Reuse of shipped machinery.** The realm toolbox already provides
-  IdpPlanBuilder.claimToRoleMapper (Azure group GUID → realm role) and the
-  oidc-usermodel-realm-role-mapper protocol mapper. A team model that reuses
+  `IdpPlanBuilder.claimToRoleMapper` (Azure group GUID → realm role) and the
+  `oidc-usermodel-realm-role-mapper` protocol mapper. A team model that reuses
   these adds the least new code.
-- **Greenfield namespace.** fugueplatform is a fresh realm with no pre-existing
+- **Greenfield namespace.** `fugueplatform` is a fresh realm with no pre-existing
   realm roles. The realm-role-mapper emits **all** realm roles into the claim, so
   whatever the realm-role namespace contains *is* the `teams` claim — undivided.
 - **Claim shape invariants.** The `teams` claim must be multi-valued and
@@ -50,11 +50,11 @@ forces at play:
 ## Options Considered
 
 1. **Realm roles, role name == team name** (chosen)
-   - One realm role per team (business-sales, …). The Azure IdP join maps each
-     team's group GUID to its realm role via claimToRoleMapper; a single
-     oidc-usermodel-realm-role-mapper emits all realm roles as the multi-valued
+   - One realm role per team (`business-sales`, …). The Azure IdP join maps each
+     team's group GUID to its realm role via `claimToRoleMapper`; a single
+     `oidc-usermodel-realm-role-mapper` emits all realm roles as the multi-valued
      `teams` claim.
-   - Pros: reuses already-shipped toolbox machinery (claimToRoleMapper + the
+   - Pros: reuses already-shipped toolbox machinery (`claimToRoleMapper` + the
      realm-role-mapper) — minimal new config. In a greenfield realm whose
      realm-role namespace is **reserved for teams**, "all realm roles" and "all
      teams" are the same set, so a single role-mapper emits exactly `teams` with
@@ -64,7 +64,7 @@ forces at play:
    - Cons: the role-mapper emits *every* realm role, so the model's correctness
      rests on the convention that the realm-role namespace stays team-only — a
      future non-team realm role would leak into `teams`. Mitigated by reserving
-     the namespace (asserted in ValidationStep / the golden test, flagged in the
+     the namespace (asserted in `ValidationStep` / the golden test, flagged in the
      realm README) and by the group-membership escape hatch below.
 
 2. **Realm groups as the primary model**
@@ -76,7 +76,7 @@ forces at play:
    - Cons: heavier config-as-code (group hierarchy + a distinct membership mapper)
      for no behavioural benefit *while the realm-role namespace is reserved* — the
      host consumes a flat `teams: string[]` either way. Does not reuse the
-     already-shipped claimToRoleMapper path, so it adds new realm machinery to
+     already-shipped `claimToRoleMapper` path, so it adds new realm machinery to
      buy precision the greenfield namespace already provides. Retained as the
      documented **escape hatch**, not the primary model.
 
@@ -88,25 +88,25 @@ access-token-only `teams` claim.** Keep realm **groups** as the documented escap
 hatch should non-team realm roles ever need to coexist.
 
 Concretely (cross-repo, `~/dev/java/keycloakConfigAsCode`, package
-dk.secondbrand.keycloak.configuration.fugueplatform):
+`dk.secondbrand.keycloak.configuration.fugueplatform`):
 
-- **RolesStep (new).** Declares one realm role per team, role name == team name
-  (e.g. business-sales). The realm-role namespace is **reserved for teams** —
+- **`RolesStep` (new).** Declares one realm role per team, role name == team name
+  (e.g. `business-sales`). The realm-role namespace is **reserved for teams** —
   this is the load-bearing invariant the model rests on.
-- **AzureIdpStep (new).** Brokers the azuread IdP and, per team, declares a
-  `claimToRoleMapper("groups", <env group GUID>, "<team>")` with forceSync, so
-  the user's Azure groups membership is projected onto the matching team realm
-  role at each sign-in. The first cohort seeds exactly one team, business-sales;
+- **`AzureIdpStep` (new).** Brokers the `azuread` IdP and, per team, declares a
+  `claimToRoleMapper("groups", <env group GUID>, "<team>")` with `forceSync`, so
+  the user's Azure `groups` membership is projected onto the matching team realm
+  role at each sign-in. The first cohort seeds exactly one team, `business-sales`;
   the builder and golden test are written for **N** teams.
-- **`teams` protocol mapper** (ClientScopesStep, on the fugue-frontend client
-  scope). A single oidc-usermodel-realm-role-mapper with `multivalued: true`,
+- **`teams` protocol mapper** (`ClientScopesStep`, on the `fugue-frontend` client
+  scope). A single `oidc-usermodel-realm-role-mapper` with `multivalued: true`,
   `access.token.claim: true`, `id.token.claim: false`, `claim.name: teams`,
   `jsonType.label: String`. Access-token-only keeps `teams` out of the ID token
   (FR-051); because the realm-role namespace is team-only, "all realm roles" *is*
   `teams`.
 - **Wiring + tests.** Both new steps are wired into
-  FuguePlatformRealmConfiguration.STEPS; ValidationStep asserts the team roles
-  and the `teams` mapper config are present; FuguePlatformRealmGoldenTest
+  `FuguePlatformRealmConfiguration.STEPS`; `ValidationStep` asserts the team roles
+  and the `teams` mapper config are present; `FuguePlatformRealmGoldenTest`
   asserts the emitted `teams` claim is multi-valued and access-token-only and that
   the agent client scopes mirror permissions (FR-053, SC-008).
 - **Per-env, not hardcoded.** The team → Azure-group-GUID map is
@@ -121,7 +121,7 @@ dk.secondbrand.keycloak.configuration.fugueplatform):
   hatch a realm-only change.
 - **Escape hatch.** If a non-team realm role ever needs to exist, switch the
   `teams` claim from the realm-role-mapper to a **group-membership mapper** and
-  point the Azure join at group membership instead of claimToRoleMapper. This is
+  point the Azure join at group membership instead of `claimToRoleMapper`. This is
   a localized change to one protocol mapper plus the IdP join mapper — **no host
   change**, because the host already consumes a flat `teams: string[]`.
 
@@ -129,7 +129,7 @@ dk.secondbrand.keycloak.configuration.fugueplatform):
 
 **Positive:**
 
-- Reuses the already-shipped claimToRoleMapper + oidc-usermodel-realm-role-mapper
+- Reuses the already-shipped `claimToRoleMapper` + `oidc-usermodel-realm-role-mapper`
   toolbox — the least new realm config to put `teams` on the access token.
 - The team name is one token end-to-end: the realm role, the `teams` claim entry,
   and the host's `dagTeam` membership check are the same string, with no mapping
@@ -139,7 +139,7 @@ dk.secondbrand.keycloak.configuration.fugueplatform):
   relying frontend cannot mistake the membership list for an authentication claim;
   the golden test pins this shape (SC-008).
 - The team → group-GUID roster is per-env config, so onboarding a new team
-  (beyond the seeded business-sales) is a config change, not a source change,
+  (beyond the seeded `business-sales`) is a config change, not a source change,
   and no environment GUID is committed.
 - The decision is realm-local: the host's inbound authz (ADR-0058) consumes a flat
   `teams: string[]` and is unaffected by the realm's choice of construct, which is
@@ -149,14 +149,14 @@ dk.secondbrand.keycloak.configuration.fugueplatform):
 
 - The model's correctness depends on the realm-role namespace staying **team-only**
   — the role-mapper emits *every* realm role, so a future non-team realm role would
-  silently leak into `teams`. Mitigated, not eliminated: ValidationStep / the
+  silently leak into `teams`. Mitigated, not eliminated: `ValidationStep` / the
   golden test and the realm README guard the convention, and the group escape hatch
   is the documented exit if the convention can no longer hold.
 - Realm groups remain available but are deliberately **not** the primary model;
   adopting them later is a deliberate migration of one mapper + the IdP join, not a
   free toggle (though it stays host-transparent).
-- Each new team is two coordinated realm edits — the RolesStep role and the
-  AzureIdpStep per-team claimToRoleMapper — plus its per-env group GUID; this is
+- Each new team is two coordinated realm edits — the `RolesStep` role and the
+  `AzureIdpStep` per-team `claimToRoleMapper` — plus its per-env group GUID; this is
   the accepted cost of keeping GUIDs out of source and the namespace explicit.
 
 ## Related
@@ -164,7 +164,7 @@ dk.secondbrand.keycloak.configuration.fugueplatform):
 - ADR-0058 — two-path inbound host auth; the host side consumes the `teams` claim
   this decision emits (`canAccessDag` / `authorizeUserRun`).
 - ADR-0057 — Keycloak optional client scopes mirror downstream permissions; the
-  same fugueplatform config-as-code + golden-test governance gate, and the same
+  same `fugueplatform` config-as-code + golden-test governance gate, and the same
   shared-vocabulary (claim name == domain term) property.
 - ADR-0061 — per-team DAG image scoping; the team identity this claim authorizes
   against is the same `fugue.yaml` `team` / top-level `dags/{team}/` unit.

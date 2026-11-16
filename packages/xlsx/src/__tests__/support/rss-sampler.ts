@@ -9,7 +9,7 @@
  * before the baseline is taken, so its own footprint is part of the baseline.
  *
  * This module is both sides: imported on the main thread it exports
- * `startRssSampler`; loaded as the worker (marked by its workerData) it runs
+ * `startRssSampler`; loaded as the worker (marked by its `workerData`) it runs
  * the sampling loop. Phases are handed over through one shared `Int32Array`
  * slot, which the blocked main thread can write without a message round trip.
  */

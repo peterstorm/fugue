@@ -33,7 +33,7 @@
 //      empty prefix = genesis) ⇒ benign lag — the kernel's
 //      append-before-checkpoint window (runner FR-005) — ⇒ resume from
 //      `replayed`. The single-pass formulation is semantically identical to
-//      Loom's proven resumeProgram (which re-replays prefixes — O(n²) on
+//      Loom's proven `resumeProgram` (which re-replays prefixes — O(n²) on
 //      the disagree path, i.e. on every crash-window resume) but runs the
 //      lag test once per transition, O(n). A checkpoint matching any strict
 //      prefix is by definition a state the run genuinely occupied —

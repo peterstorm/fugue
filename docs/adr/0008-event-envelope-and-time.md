@@ -112,7 +112,7 @@ Both validate `RangeError` on non-finite or inverted bounds. The existing `repla
 - **Replay-to-timestamp works.** Forensic queries ("what was the state at noon?") become a one-line call: `replayEventsUntil(events, machine, initial, noonMs)`. Server-side filtered variant: `reader.readEventsBetween(queueName, jobId, 0, noonMs)`.
 - **Transport-independent timestamps.** A Postgres outbox or Kafka backend implements the same `JobLike.appendEvent` envelope wrap; the reader returns the same `RecordedEvent<unknown>[]` shape. No backend-specific assumptions leak into the replay path.
 - **Time-traceable audit dumps.** `JSON.stringify(await reader.readEvents(...))` now produces a blob that includes per-event timestamps. Forensic exports survive transport and persistence.
-- **Server-side filtering scales.** For long event streams, XRANGE with ms-bounded entry IDs filters in O(log N + matches) instead of transferring the whole log. Important for admin endpoints scanning many jobs.
+- **Server-side filtering scales.** For long event streams, `XRANGE` with ms-bounded entry IDs filters in O(log N + matches) instead of transferring the whole log. Important for admin endpoints scanning many jobs.
 - **SC-004 unaffected.** The envelope is metadata; `transition` still consumes raw events. Replay equivalence (recorded-events fold == live envelope) holds because the runner persists the state envelope and the event log redundantly — both are derived from the same transitions.
 - **No backfill needed.** Legacy streams remain readable via the bare-payload fallback path. Rollout is safe across an in-flight production deploy.
 

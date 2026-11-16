@@ -114,7 +114,7 @@ export interface AuthConfig {
    * neither `username` nor `password`, so the body is exactly
    * `grant_type=client_credentials&<params>` — what an OAuth2 client-credentials
    * token endpoint expects (sending empty `username=`/`password=` would otherwise
-   * be rejected as an invalid_request).
+   * be rejected as an `invalid_request`).
    */
   readonly credentials?: GrantCredentials;
   /**
@@ -191,7 +191,7 @@ const buildGrantBody = (auth: AuthConfig): string => {
   // Resource-owner credentials are emitted ONLY when present. A
   // `client_credentials` grant omits them entirely (the client authenticates via
   // `basicAuth`); emitting empty `username=`/`password=` would make a compliant
-  // token endpoint reject the request as invalid_request.
+  // token endpoint reject the request as `invalid_request`.
   if (auth.credentials) {
     params.set("username", auth.credentials.username);
     params.set("password", auth.credentials.password);

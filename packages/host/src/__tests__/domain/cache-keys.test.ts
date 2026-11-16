@@ -194,7 +194,7 @@ describe("the spend key is disjoint from the checkpoint NodeId namespace (C1)", 
   // With a plain `spend` segment, a DAG node named `spend` produced the SAME
   // key — and the checkpoint writer's `SET` (a STRING) would destroy the
   // ledger's HASH, silently zeroing the run's recorded spend and then
-  // permanently refusing every later slice of a budgeted run on WRONGTYPE.
+  // permanently refusing every later slice of a budgeted run on `WRONGTYPE`.
   //
   // `$` is outside `ID_PATTERN`, so no valid `NodeId` can reach this string.
   // Same technique as `DAG_INPUT = "$input"`, same reason.

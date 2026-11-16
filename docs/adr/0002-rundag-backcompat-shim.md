@@ -36,7 +36,7 @@ The forces:
      - Routing rule is implicit; a reader has to grep `runDag` to find it.
      - Some features (e.g. retry limits) are not available on the legacy path; mixing them with `resume` requires explicit guards.
 
-2. **Parallel runDagDurable export.** Add a new entry point alongside `runDag`. Leave `runDag` untouched.
+2. **Parallel `runDagDurable` export.** Add a new entry point alongside `runDag`. Leave `runDag` untouched.
    - Pros: Cleanest separation. No routing logic. Legacy path is provably untouched.
    - Cons: Existing call sites never get the new behavior unless they migrate. Bloats the public surface with two near-identical functions. Defeats the "drop-in upgrade" goal — you'd have to change every call site to opt in to durability.
 
@@ -79,6 +79,6 @@ This shim was introduced in T6 of the implementation plan. AD-7 covers the `JobL
 
 ## Rejected alternatives
 
-1. **Parallel runDagDurable export.** Rejected — bloats the public surface and prevents existing call sites from picking up new behavior without migration. Defeats the drop-in goal.
+1. **Parallel `runDagDurable` export.** Rejected — bloats the public surface and prevents existing call sites from picking up new behavior without migration. Defeats the drop-in goal.
 
 2. **Big-bang rewrite of `runDag` body.** Rejected — turns SC-001 into a re-implementation correctness proof. Span attributes, observer ordering, and eval-judge background semantics are subtle enough that we do not trust a rewrite to preserve them silently. The dual-path shim is the cheaper oracle.

@@ -4,8 +4,8 @@
  * same order, same keys in the same order, same value types, same `Date` epoch
  * milliseconds, same prototype-free rows, and the same error outcome.
  *
- * Every fixture runs in this process (whatever TZ it was started with) and the
- * whole file is then re-run in child processes with TZ pinned BEFORE any module
+ * Every fixture runs in this process (whatever `TZ` it was started with) and the
+ * whole file is then re-run in child processes with `TZ` pinned BEFORE any module
  * loads — once under UTC and once under Europe/Copenhagen. SheetJS caches its date
  * base at module load, so flipping process.env.TZ mid-process would not prove
  * parity; a pinned child process does.

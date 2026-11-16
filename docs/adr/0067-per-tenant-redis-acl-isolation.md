@@ -55,7 +55,7 @@ server and an adversarial worker assumption?**
    - Pros: isolation is enforced **by Redis itself**, on the server side, against
      the credential the worker authenticates with — not by application code the
      compromised worker could bypass. A `GET fugue:<other>:…` or `SCAN fugue:*`
-     is refused with NOPERM before any byte of the foreign value is touched.
+     is refused with `NOPERM` before any byte of the foreign value is touched.
      One server keeps the single-pod model and per-tenant ops cost near zero. The
      credential is a per-tenant secret that flows only into the owning worker via
      the secrets channel (AD-6 / ADR-0069), so the supervisor never holds it
@@ -102,7 +102,7 @@ Redis ACL user scoped to EXACTLY one key pattern `~fugue:<tenant>:*`, granted th
 data plane minus dangerous/admin/scripting categories, with keyspace
 ENUMERATION denied outright. Every host-produced key is prefixed
 `fugue:<tenant>:`, so the ACL pattern contains the worker completely. A
-compromised worker's cross-tenant read is refused by Redis with NOPERM, not by
+compromised worker's cross-tenant read is refused by Redis with `NOPERM`, not by
 application code.**
 
 > **Implementation status (2026-06-19).** This mechanism is WIRED into the runtime,
@@ -159,7 +159,7 @@ The mechanism is split into a pure spec and an imperative provisioner:
 **Key invariants:**
 
 - **Exactly ONE key pattern.** `buildAclSpec` emits `~fugue:<tenant>:*` and
-  nothing else — never `~*`, never allkeys, never a second pattern. The user's
+  nothing else — never `~*`, never `allkeys`, never a second pattern. The user's
   reach is the intersection of "this one pattern" and "the data-plane commands".
 
 - **The pattern cannot widen.** This single-pattern guarantee is sound only
@@ -174,8 +174,8 @@ The mechanism is split into a pure spec and an imperative provisioner:
 - **Keyspace enumeration is DENIED — the load-bearing, version-independent
   reasoning.** A key-pattern ACL reliably gates commands that access a key's
   *value*, but it does **not** reliably scope commands that *enumerate* the
-  keyspace across Redis/Valkey versions: `SCAN` / `SCAN MATCH` / RANDOMKEY can
-  return — and DBSIZE counts — keys *outside* the user's pattern on many
+  keyspace across Redis/Valkey versions: `SCAN` / `SCAN MATCH` / `RANDOMKEY` can
+  return — and `DBSIZE` counts — keys *outside* the user's pattern on many
   servers. That matters acutely here because the key **names themselves encode
   sensitive data**: `fugue:<tenant>:teams:<team>` reveals team names,
   `fugue:<tenant>:tokens:<hash>` reveals token hashes, and the `<tenant>` segment
@@ -205,7 +205,7 @@ The mechanism is split into a pure spec and an imperative provisioner:
 This decision is the data-plane layer of the three-layer isolation story; the
 adversarial test `packages/host/src/__tests__/integration/isolation-cross-tenant-read.test.ts`
 provisions *through the real `buildAclSpec`* and asserts that a cross-tenant
-`GET`/`SET` and a `SCAN fugue:*` return NOPERM with zero victim bytes, while
+`GET`/`SET` and a `SCAN fugue:*` return `NOPERM` with zero victim bytes, while
 own-tenant access still succeeds — and includes a non-vacuity meta-test proving a
 widened spec (`~*`, or `+@all` ordered after `-scan`) *would* leak, so the
 harness is enforcing the real spec, not its own logic.
@@ -249,7 +249,7 @@ harness is enforcing the real spec, not its own logic.
   keys.
 - The mechanism assumes a Redis/Valkey deployment whose ACL key patterns gate
   value access as documented; a non-conforming server (or a misconfigured
-  aclfile) would weaken the boundary. The adversarial isolation test guards the
+  `aclfile`) would weaken the boundary. The adversarial isolation test guards the
   *spec*, but the runtime server's ACL behaviour is a deployment assumption.
 - Re-provisioning rewrites the user from a clean `reset` baseline each time; the
   password is rotated on every `apply`, so any cached connection holding an old

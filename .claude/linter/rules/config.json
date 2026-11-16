@@ -947,6 +947,323 @@
         "path": "docs/spikes/",
         "reason": "spike write-ups record throwaway experiments and the code they measured, which is deliberately gone"
       }
+    ],
+    "externalNames": [
+      {
+        "names": [
+          "ai.llm.tokens_in",
+          "ai.llm.tokens_out",
+          "content_redacted",
+          "content_chars"
+        ],
+        "reason": "OpenTelemetry span and GenAI event attribute names as an exporter or backend sees them; the source builds them from prefixes and field names at runtime, never as one literal"
+      },
+      {
+        "names": [
+          "end_turn",
+          "computer_20241022",
+          "content_filter",
+          "max_output_tokens",
+          "claude-opus-4-8"
+        ],
+        "reason": "LLM provider wire values and model ids (Anthropic stop reasons and tool types, OpenAI incomplete reasons, Claude model ids), defined by the vendor APIs"
+      },
+      {
+        "names": [
+          "faithfulness",
+          "answer_correctness",
+          "score_grounding",
+          "SCORER_NAMES",
+          "DETERMINISTIC_SCORER_NAMES",
+          "EVAL_WORKERS",
+          "MLFLOW_EXPERIMENT_NAME",
+          "AggregateResult",
+          "EvalResult",
+          "build_eval_data",
+          "compute_aggregate",
+          "compute_aggregate_foundry",
+          "compute_parity",
+          "format_parity_table",
+          "format_results_table",
+          "parity_within_tolerance",
+          "parse_cases",
+          "run_evaluation_foundry",
+          "predictions",
+          "reference_summary"
+        ],
+        "reason": "identifiers of the Python eval sidecar (apps/customer-summary/eval/*.py): scorer names, functions, result types and its env vars; the lint's source corpus does not read Python"
+      },
+      {
+        "names": [
+          "azure-ai-evaluation",
+          "GroundednessEvaluator",
+          "RelevanceEvaluator",
+          "SimilarityEvaluator",
+          "scheduled_scorers",
+          "SpanType.TOOL",
+          "experimental_telemetry",
+          "customEvents",
+          "customMetrics",
+          "AzureMonitorMetricExporter",
+          "MeterProvider",
+          "PeriodicExportingMetricReader",
+          "TracerProvider",
+          "useAzureMonitor",
+          "MlflowSpanExporter",
+          "otlp-transformer",
+          "kvlist_value",
+          "span_metrics"
+        ],
+        "reason": "Azure AI Evaluation, MLflow, Vercel AI SDK, Azure Monitor and OpenTelemetry SDK names (packages, evaluator classes, exporters, Application Insights tables, OTLP proto fields), defined by those third-party SDKs and backends"
+      },
+      {
+        "names": [
+          "Mail.Send",
+          "Sites.Selected",
+          "Sites.Read.All",
+          "Files.Read.All",
+          "Sites.FullControl.All",
+          "AuditLog.Read.All",
+          "signIns",
+          "federatedCredentialId",
+          "RestrictAccess",
+          "ApplicationAccessPolicy",
+          "New-ApplicationAccessPolicy",
+          "Test-ApplicationAccessPolicy",
+          "ExchangeOnlineManagement",
+          "ErrorAccessDenied",
+          "accessDenied",
+          "Granted",
+          "Denied",
+          "scp",
+          "roles",
+          "invalid_request",
+          "traceparent",
+          "groups"
+        ],
+        "reason": "Microsoft Graph application permissions, Entra sign-in-log fields and token claims, Exchange Online cmdlets and error codes, OAuth error codes, JWT header fields and the W3C trace-context header: granted, logged and returned by Microsoft and the protocols, never spelled by the source"
+      },
+      {
+        "names": [
+          "fugue-agent-mail",
+          "fugue-agent-sites",
+          "fugue-agent-mail-fic",
+          "fugue-agent-sites-fic",
+          "service-account-fugue-agent-mail",
+          "service-account-fugue-agent-sites",
+          "service-account-Fugue-agent-mail",
+          "fugue-agents-read",
+          "fugue-agents-act",
+          "fugue-hitl-bot",
+          "toolbox",
+          "azuread",
+          "fugue-frontend",
+          "fugueplatform",
+          "business-sales"
+        ],
+        "reason": "identities provisioned in the Entra tenant and the Keycloak realms (agent clients, their federated identity credentials, service-account subjects, tier apps, bot handle, realms, IdP alias); they live in tenant configuration, the source reads them from env"
+      },
+      {
+        "names": [
+          "keycloakConfigAsCode",
+          "AzureIdpStep",
+          "ClientStep",
+          "ClientScopesStep",
+          "RolesStep",
+          "RealmStep",
+          "ValidationStep",
+          "FuguePlatformRealmGoldenTest",
+          "FuguePlatformRealmConfiguration.STEPS",
+          "IdpPlanBuilder.claimToRoleMapper",
+          "claimToRoleMapper",
+          "forceSync",
+          "dk.secondbrand.keycloak.configuration.fugueplatform",
+          "ClientScopeRepresentation",
+          "oidc-usermodel-realm-role-mapper"
+        ],
+        "reason": "the Keycloak realm config-as-code lives in the separate keycloakConfigAsCode Java repository; these are its step classes, package, golden test and the Keycloak API types and mapper ids it uses"
+      },
+      {
+        "names": [
+          "XRANGE",
+          "LPUSH",
+          "LRANGE",
+          "LTRIM",
+          "ZSCORE",
+          "ZREVRANGEBYSCORE",
+          "HINCRBY",
+          "DBSIZE",
+          "RANDOMKEY",
+          "NOPERM",
+          "WRONGTYPE",
+          "BRPOPLPUSH",
+          "BZPOPMIN",
+          "allkeys",
+          "allchannels",
+          "resetkeys",
+          "aclfile",
+          "maxmemory",
+          "noeviction",
+          "QueueEvents",
+          "backoff",
+          "getData",
+          "returnBuffers"
+        ],
+        "reason": "Redis/Valkey commands, ACL rules, error replies and server config, and BullMQ/ioredis API names; the source reaches them through client method calls, not these spellings"
+      },
+      {
+        "names": [
+          "parse_ws_xml",
+          "parse_ws_xml_data",
+          "SSF.is_date",
+          "numdate",
+          "date1904",
+          "cellNF",
+          "cellDates",
+          "parsexmlbool",
+          "unescapexml",
+          "match_v",
+          "parse_si",
+          "dimregex",
+          "safe_decode_range",
+          "SSFImplicit",
+          "SSF_init_table",
+          "SSF_isgeneral",
+          "fmt_is_date",
+          "parse_zip",
+          "parsexmltag",
+          "safegetzipfile",
+          "XLSX.read",
+          "_xHHHH_",
+          "dateGroupItem",
+          "Unzip",
+          "inflateRawSync",
+          "strToU8",
+          "zipSync",
+          "sax"
+        ],
+        "reason": "SheetJS 0.18.5 internals, options and OOXML conventions the xlsx reader ports or is compared against, plus the fflate and sax APIs; they live in those libraries, not here"
+      },
+      {
+        "names": [
+          "valueOf",
+          "Symbol.toPrimitive",
+          "IsArray",
+          "strictNullChecks",
+          "strictFunctionTypes",
+          "exactOptionalPropertyTypes",
+          "toEqual",
+          "toBe",
+          "toContain",
+          "beforeEach",
+          "expect",
+          "mock.module",
+          "EventEmitter",
+          "Atomics",
+          "SharedArrayBuffer",
+          "child_process",
+          "workerData",
+          "Hash.update",
+          "AsyncIterable",
+          "TZ",
+          "fsync",
+          "openat",
+          "O_NOFOLLOW",
+          "chmod",
+          "pid_max",
+          "ru_maxrss",
+          "unshare",
+          "JOSEError",
+          "jose.JWTPayload",
+          "alg",
+          "ZodError",
+          "immer",
+          "simple-git",
+          "bunx",
+          "apk",
+          "az",
+          "oc",
+          "openssl",
+          "openssh-client",
+          "COPY",
+          "binaryData",
+          "information_schema",
+          "Idempotency-Key",
+          "acorn"
+        ],
+        "reason": "JavaScript, TypeScript, Node/Bun and POSIX built-ins, compiler flags, bun:test matchers and third-party library names the comments and ADRs cite; defined by the platform and those libraries"
+      },
+      {
+        "names": [
+          "ProgramJournal",
+          "RunDirHandle",
+          "resumeProgram",
+          "fugue-generated-integrity"
+        ],
+        "reason": "names in Loom's own codebase (the engine this repo's file backend and generated-code rules mirror), cited for parity"
+      },
+      {
+        "names": [
+          "GET_PACKAGE_INFO",
+          "PACK_FEE_PRICE",
+          "OISTER"
+        ],
+        "reason": "names in the external Oracle and CDRator systems the adapters call: Oracle package and column names, CDRator brand header value"
+      },
+      {
+        "names": [
+          "FUGUE_AZURE_BUSINESS_SALES_GROUP_ID",
+          "FUGUE_TEAM_TOKEN"
+        ],
+        "reason": "environment variables read by other deployables (the Keycloak config-as-code build, the lead-desk consuming app), not by this repository's source"
+      },
+      {
+        "names": [
+          "runDagDurable",
+          "streamWithTools",
+          "file-io",
+          "capability-error",
+          "fic-mismatch",
+          "wif-rejected",
+          "resource-denied",
+          "entra-bridge",
+          "CAPABILITY_MINTING_ENABLED",
+          "BoundedPool",
+          "siblingConcurrency",
+          "throttle",
+          "adaptiveTarget",
+          "defineMap",
+          "AllIds",
+          "field-some",
+          "field-every"
+        ],
+        "reason": "alternatives an ADR or design doc considered and rejected, or explicitly does not build yet; they exist only in the decision record"
+      },
+      {
+        "names": [
+          "ml-platform",
+          "data-eng-v2",
+          "Team-A",
+          "team_a",
+          "cx-api",
+          "cx-cron",
+          "execute-refund",
+          "run-xyz",
+          "fetch-deals",
+          "evilKey",
+          "n1",
+          "foundryy"
+        ],
+        "reason": "illustrative example values in docs and comments (sample team names, node and run ids, map keys, an invalid CLI value), chosen for the example rather than spelled by the source"
+      },
+      {
+        "names": [
+          "Proposed",
+          "Accepted",
+          "PENDING-LIVE-VERIFICATION"
+        ],
+        "reason": "status vocabulary the docs define for themselves: ADR lifecycle states and the provisioning-spike verification marker"
+      }
     ]
   },
   "docReferenceBaseline": []

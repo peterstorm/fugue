@@ -893,7 +893,7 @@ describe("RedisCheckpointer — hostile seams without a live server", () => {
     // Round-21 type-design-analyzer-2. The port types `script` as
     // `Promise<unknown>` because that is ioredis's own return type; the
     // adapter used to close the gap with `as string`. An assertion would let a
-    // driver returning a Buffer (returnBuffers) be stored as the SHA and
+    // driver returning a Buffer (`returnBuffers`) be stored as the SHA and
     // handed to `evalsha`, where it fails later as an opaque driver error on a
     // different call. `evalsha` stays at its named-throw default, so reaching
     // it would fail loudly rather than pass quietly.

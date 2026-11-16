@@ -56,7 +56,7 @@ export const loadResultsToSnapshots = (results: readonly LoadResult[], sha: GitS
  * Extract team name from a module path following the `dags/{team}/.../{name}/dag.ts`
  * convention. The team is the FIRST folder under dags/; any intermediate
  * folders are intra-team grouping (e.g. dags/business-sales/leads/lead-scoring/dag.ts
- * → team business-sales). Returns "unknown" when the path does not follow it —
+ * → team `business-sales`). Returns "unknown" when the path does not follow it —
  * the caller (sync-callbacks) warns on "unknown", and team drives authorization
  * isolation, so a wrong-but-plausible team must NOT slip through.
  *

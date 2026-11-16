@@ -232,7 +232,7 @@ const dedupKeyError = (value: unknown): string | null => {
   if (typeof value !== "string") {
     // Do not render or coerce object/function values here. Diagnostics are
     // part of the hostile runtime boundary: rendering a Proxy or boxed value
-    // can execute traps, getters, `toJSON`, or Symbol.toPrimitive after the
+    // can execute traps, getters, `toJSON`, or `Symbol.toPrimitive` after the
     // type verdict is already known. `typeof` (plus the null distinction) is
     // sufficient, deterministic context and cannot dereference the value.
     const runtimeType = value === null ? "null" : typeof value;

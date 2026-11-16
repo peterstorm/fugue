@@ -439,8 +439,8 @@ const HEALTH_CHECK_TIMEOUT_MS = 5_000;
  * INDEPENDENT of the database's default locale.
  *
  * Why this exists: the prod OISTERTS database defaults to a Danish locale
- * (`NLS_NUMERIC_CHARACTERS = ',.'`), so price columns (e.g. GET_PACKAGE_INFO's
- * PACK_FEE_PRICE) came back as `"74,25"` — a COMMA decimal that a canonical
+ * (`NLS_NUMERIC_CHARACTERS = ',.'`), so price columns (e.g. `GET_PACKAGE_INFO`'s
+ * `PACK_FEE_PRICE`) came back as `"74,25"` — a COMMA decimal that a canonical
  * period-decimal parser rejects, collapsing real figures to "unknown" even when
  * the value is genuinely present. Prices are NUMBERs; the separator is a pure
  * locale artifact, so the deterministic fix belongs HERE at the adapter seam

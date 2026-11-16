@@ -30,7 +30,7 @@ The registry is small (tens to low hundreds of DAGs) and updates are infrequent 
      - Single data structure; no duplication.
      - Guaranteed fresh reads (if you acquire the read lock, you see the latest).
    - Cons:
-     - JavaScript has no native read-write lock. Would need a custom async lock or Atomics with SharedArrayBuffer, adding complexity.
+     - JavaScript has no native read-write lock. Would need a custom async lock or `Atomics` with `SharedArrayBuffer`, adding complexity.
      - Contention: sync writes block reads (or vice versa). Under load, sync could delay request handling.
      - Race conditions if lock discipline is imperfect. Subtle bugs.
      - Overkill for a single-threaded runtime where reference swap is already atomic.
@@ -38,7 +38,7 @@ The registry is small (tens to low hundreds of DAGs) and updates are infrequent 
 3. **Copy-on-write with structural sharing (persistent data structure)**
    - Pros:
      - Efficient for large collections with small deltas — shares unchanged subtrees.
-     - Libraries like immer or immutable.js provide this.
+     - Libraries like `immer` or immutable.js provide this.
    - Cons:
      - The registry is small (< 100 entries). Structural sharing provides no meaningful benefit.
      - Adds a library dependency for a problem solved by a plain `ReadonlyMap` + reference swap.

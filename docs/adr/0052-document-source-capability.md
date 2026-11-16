@@ -141,7 +141,7 @@ theoretical.
 ### Local files in a container (OpenShift)
 
 The `@fuguejs/fs` adapter reads from a `rootDir` on the pod filesystem, confined to
-that tree (the local equivalent of Sites.Selected — `../` traversal and
+that tree (the local equivalent of `Sites.Selected` — `../` traversal and
 absolute escapes are rejected non-retriably). Because a pod's filesystem is
 ephemeral and per-replica, "get the file onto disk" in OpenShift is a *delivery*
 question separate from the read, and ranks roughly:
@@ -159,9 +159,9 @@ question separate from the read, and ranks roughly:
    container, which then reads it via `@fuguejs/fs`. Bridges a remote source to a
    local read without a persistent volume.
 4. **ConfigMap / Secret volume.** Only for small (<~1 MiB), static files; use a
-   Secret (binary via binaryData) for sensitive content. Most spreadsheets are
+   Secret (binary via `binaryData`) for sensitive content. Most spreadsheets are
    too large.
-5. **Baked into the image** (COPY). Only for truly static, non-sensitive,
+5. **Baked into the image** (`COPY`). Only for truly static, non-sensitive,
    build-time data; immutable and versioned with the image.
 
 Object storage (S3 / Azure Blob) is the cloud-native answer to "a file in the
@@ -180,9 +180,9 @@ large enough that in-memory download hurts, or live ranges are needed.)
 
 ### Least privilege
 
-When the backend is SharePoint, provision the Entra app with **Sites.Selected**
+When the backend is SharePoint, provision the Entra app with **`Sites.Selected`**
 (admin grants access to only the specific site(s) holding the file) rather than
-tenant-wide Sites.Read.All / Files.Read.All. This matches the team-isolation
+tenant-wide `Sites.Read.All` / `Files.Read.All`. This matches the team-isolation
 posture enforced elsewhere.
 
 ## Consequences

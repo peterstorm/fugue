@@ -37,7 +37,7 @@ Results are visible in the MLflow UI at `http://localhost:5000/#/experiments/0`.
                           └─────────────────┘
 ```
 
-The experiment is selected **by name** via MLFLOW_EXPERIMENT_NAME (`mlflow.set_experiment(...)`, default `"Default"`), not by numeric id. In OSS MLflow the `"Default"` experiment is id `0`, which is why the diagram above and the UI URL in the Overview (`.../experiments/0`) show `0` — but if you override MLFLOW_EXPERIMENT_NAME the results land in that named experiment (with whatever id MLflow assigns), so don't read the `0` as a hard-coded id.
+The experiment is selected **by name** via `MLFLOW_EXPERIMENT_NAME` (`mlflow.set_experiment(...)`, default `"Default"`), not by numeric id. In OSS MLflow the `"Default"` experiment is id `0`, which is why the diagram above and the UI URL in the Overview (`.../experiments/0`) show `0` — but if you override `MLFLOW_EXPERIMENT_NAME` the results land in that named experiment (with whatever id MLflow assigns), so don't read the `0` as a hard-coded id.
 
 ## Running
 
@@ -71,7 +71,7 @@ Contains 25 entries, each with a customer ID and a human-written gold-standard s
 }
 ```
 
-The reference_summary defines "what good looks like" for each customer.
+The `reference_summary` defines "what good looks like" for each customer.
 
 ### 2. Call the Live App
 
@@ -93,9 +93,9 @@ Successful results become a pandas DataFrame passed to mlflow.evaluate():
 | Column | Content | Used by |
 |--------|---------|---------|
 | `inputs` | "Summarize conversation history for customer cust-001." | relevance |
-| predictions | The generated summary from the app | All scorers |
+| `predictions` | The generated summary from the app | All scorers |
 | `targets` | The human-written reference summary | answer_correctness |
-| `context` | Same as targets (reference summary) | — (NOT consumed by any MLflow scorer; exists only for the Foundry path's query/response/context/ground_truth schema — see `run.py` build_eval_data) |
+| `context` | Same as targets (reference summary) | — (NOT consumed by any MLflow scorer; exists only for the Foundry path's query/response/context/ground_truth schema — see `run.py` `build_eval_data`) |
 | `customer_id` | e.g. "cust-001" | grounding scorer |
 
 ### 4. Scoring
@@ -159,27 +159,27 @@ The eval backend is **selectable at run time — no code changes** (FR-004). The
 | Backend | Selector | Scoring engine | Results land in |
 |---|---|---|---|
 | `mlflow` (default) | `--backend=mlflow` / `EVAL_BACKEND=mlflow` | mlflow.evaluate() | MLflow experiment / Evaluations tab |
-| `foundry` | `--backend=foundry` / `EVAL_BACKEND=foundry` | azure-ai-evaluation | Foundry Evaluations view |
+| `foundry` | `--backend=foundry` / `EVAL_BACKEND=foundry` | `azure-ai-evaluation` | Foundry Evaluations view |
 | `both` | `--backend=both` / `EVAL_BACKEND=both` | both paths + parity check | both + a parity verdict |
 
 ### Run-time selector and precedence
 
 The backend is resolved from `--backend` (CLI) or `EVAL_BACKEND` (env), defaulting to `mlflow`. **The CLI flag wins** over the env var (mirroring the `--mode` / `EVAL_MODE` pattern). Because argparse `choices` validate only CLI-passed values — not the env default — the resolved backend is re-validated against the allowed set (`mlflow|foundry|both`) in `main()` before dispatch, so a typo like `EVAL_BACKEND=foundryy` fails loud rather than silently routing to a catch-all. Dispatch is exhaustive (no else-catches-everything).
 
-### The Foundry-native path (run_evaluation_foundry)
+### The Foundry-native path (`run_evaluation_foundry`)
 
-`foundry_eval.py` mirrors the MLflow path but scores via Microsoft's azure-ai-evaluation SDK so per-case **and** aggregate scores land in the Foundry Evaluations view (FR-013/FR-014, SC-002). It **reuses build_eval_data** from `run.py` and produces the same AggregateResult shape so run.py's format_results_table / exit-code logic work unchanged (it defines its own compute_aggregate_foundry), and uses the **same** `AZURE_OPENAI_*` judge credentials, then renames columns to the `query`/`response`/`context`/ground_truth schema azure-ai-evaluation expects. Only the scoring call and the result-shape adapter differ.
+`foundry_eval.py` mirrors the MLflow path but scores via Microsoft's `azure-ai-evaluation` SDK so per-case **and** aggregate scores land in the Foundry Evaluations view (FR-013/FR-014, SC-002). It **reuses `build_eval_data`** from `run.py` and produces the same `AggregateResult` shape so run.py's `format_results_table` / exit-code logic work unchanged (it defines its own `compute_aggregate_foundry`), and uses the **same** `AZURE_OPENAI_*` judge credentials, then renames columns to the `query`/`response`/`context`/ground_truth schema azure-ai-evaluation expects. Only the scoring call and the result-shape adapter differ.
 
 Scorer names are kept identical to the MLflow path so per-scorer means compare 1:1:
 
 | Scorer | MLflow path | Foundry path |
 |---|---|---|
-| answer_correctness | answer_correctness genai metric | SimilarityEvaluator |
-| faithfulness | faithfulness genai metric | GroundednessEvaluator |
-| `relevance` | `relevance` genai metric | RelevanceEvaluator |
-| `grounding` | deterministic score_grounding | deterministic score_grounding (reused verbatim) |
+| `answer_correctness` | `answer_correctness` genai metric | `SimilarityEvaluator` |
+| `faithfulness` | `faithfulness` genai metric | `GroundednessEvaluator` |
+| `relevance` | `relevance` genai metric | `RelevanceEvaluator` |
+| `grounding` | deterministic `score_grounding` | deterministic `score_grounding` (reused verbatim) |
 
-In `ci` mode only the deterministic `grounding` evaluator is built (no Azure access needed); the three LLM evaluators are constructed only in `full` mode. The result-shape adapter (compute_aggregate_foundry) **fails closed** on a shape/contract mismatch: a non-dict return, a missing `metrics` key, or expected scorers absent from the SDK output are surfaced loudly on stderr and yield a FAILED aggregate — never silently read as a genuine low score.
+In `ci` mode only the deterministic `grounding` evaluator is built (no Azure access needed); the three LLM evaluators are constructed only in `full` mode. The result-shape adapter (`compute_aggregate_foundry`) **fails closed** on a shape/contract mismatch: a non-dict return, a missing `metrics` key, or expected scorers absent from the SDK output are surfaced loudly on stderr and yield a FAILED aggregate — never silently read as a genuine low score.
 
 ### Parity check (±0.5, SC-005)
 
@@ -210,7 +210,7 @@ python3 eval/run.py --mode=full --backend=both
 |----------|---------|-------------|
 | `APP_BASE_URL` | `http://host.containers.internal:3000` | Summary service URL |
 | `MLFLOW_TRACKING_URI` | — | MLflow server (e.g. `http://localhost:5000`) — mlflow backend |
-| MLFLOW_EXPERIMENT_NAME | `Default` | Experiment to log results to |
+| `MLFLOW_EXPERIMENT_NAME` | `Default` | Experiment to log results to |
 | `EVAL_CASES_PATH` | fixtures/eval/cases.json (relative to the eval's working directory, apps/customer-summary) | Path to eval cases |
 | `EVAL_MODE` | `full` | Default mode if `--mode` not passed (`full`\|`ci`); `--mode` wins |
 | `EVAL_BACKEND` | `mlflow` | Default backend if `--backend` not passed (`mlflow`\|`foundry`\|`both`); `--backend` wins |
@@ -218,7 +218,7 @@ python3 eval/run.py --mode=full --backend=both
 | `AZURE_OPENAI_API_KEY` | — | Azure OpenAI key (judge creds) |
 | `AZURE_OPENAI_DEPLOYMENT` | `gpt-4o-mini` | Deployment name (judge model) |
 | `AZURE_OPENAI_API_VERSION` | `2025-04-01-preview` | API version |
-| EVAL_WORKERS | `4` | Parallel workers for summarize calls |
+| `EVAL_WORKERS` | `4` | Parallel workers for summarize calls |
 
 ## File Structure
 
@@ -252,7 +252,7 @@ apps/customer-summary/
 
 ## Automatic vs Manual Evaluation
 
-This is a **batch/manual** system — you run it explicitly. It does NOT automatically evaluate every incoming trace. MLflow's scheduled_scorers (auto-eval on ingest) is Databricks-only and not available in OSS MLflow.
+This is a **batch/manual** system — you run it explicitly. It does NOT automatically evaluate every incoming trace. MLflow's `scheduled_scorers` (auto-eval on ingest) is Databricks-only and not available in OSS MLflow.
 
 Recommended cadence:
 - Run `--mode=ci` on every PR (fast, free)
