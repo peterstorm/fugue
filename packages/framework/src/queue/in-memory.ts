@@ -97,19 +97,14 @@ interface WorkerRegistration {
 
 const jobKey = (queueName: string, jobId: string): string => `${queueName} ${jobId}`;
 
-/**
- * All mutable backend state, reachable only through these named operations.
- * No caller holds a Map, so no function can reach state outside its
- * operation's contract, and `clear()` is the one place that resets all of it.
- */
-const createBackendStore = () => {
+// All mutable backend state lives in three tables, each reachable only through
+// its named operations. No caller holds a Map, a function is handed only the
+// tables it needs, and `clearBackendStore` is the one place that resets them.
+
+/** Queued entries and per-queue defaults, by queue name. */
+const createQueueTable = () => {
   const queues = new Map<string, QueueEntry<unknown, unknown>[]>();
   const queueDefaults = new Map<string, QueueDefaults>();
-  const workers = new Map<string, WorkerRegistration>();
-  // One `InMemoryJob` per (queueName, jobId), kept across retries to mirror
-  // the Redis Streams contract where the per-job event log survives attempt
-  // boundaries. Read via `getJob(...)` / `createInMemoryEventLogReader`.
-  const jobsByKey = new Map<string, InMemoryJob<unknown, unknown>>();
 
   const queueOf = (name: string): QueueEntry<unknown, unknown>[] => {
     const existing = queues.get(name);
@@ -141,16 +136,44 @@ const createBackendStore = () => {
     takeNext(name: string): QueueEntry<unknown, unknown> | undefined {
       return queueOf(name).shift();
     },
-    registerWorker(name: string, registration: WorkerRegistration): void {
+    entries(): ReadonlyMap<string, readonly QueueEntry<unknown, unknown>[]> {
+      return queues;
+    },
+    clear(): void {
+      queues.clear();
+      queueDefaults.clear();
+    },
+  };
+};
+
+/** The current worker registration (and so its handlers), by queue name. */
+const createWorkerTable = () => {
+  const workers = new Map<string, WorkerRegistration>();
+  return {
+    register(name: string, registration: WorkerRegistration): void {
       workers.set(name, registration);
     },
     /** Unregister only while `registration` is current: closing a superseded handle is a no-op. */
-    unregisterWorker(name: string, registration: WorkerRegistration): void {
+    unregister(name: string, registration: WorkerRegistration): void {
       if (workers.get(name) === registration) workers.delete(name);
     },
-    workerOf(name: string): WorkerRegistration | undefined {
+    of(name: string): WorkerRegistration | undefined {
       return workers.get(name);
     },
+    clear(): void {
+      workers.clear();
+    },
+  };
+};
+
+/**
+ * One `InMemoryJob` per (queueName, jobId), kept across retries to mirror the
+ * Redis Streams contract where the per-job event log survives attempt
+ * boundaries. Read via `getJob(...)` / `createInMemoryEventLogReader`.
+ */
+const createJobTable = () => {
+  const jobsByKey = new Map<string, InMemoryJob<unknown, unknown>>();
+  return {
     /** The job for this entry, created on its first attempt and reused by retries. */
     jobFor(name: string, entry: QueueEntry<unknown, unknown>): InMemoryJob<unknown, unknown> {
       const key = jobKey(name, entry.id);
@@ -160,23 +183,31 @@ const createBackendStore = () => {
       jobsByKey.set(key, created);
       return created;
     },
-    getJob(name: string, jobId: string): InMemoryJob<unknown, unknown> | undefined {
+    get(name: string, jobId: string): InMemoryJob<unknown, unknown> | undefined {
       return jobsByKey.get(jobKey(name, jobId));
     },
-    entries(): ReadonlyMap<string, readonly QueueEntry<unknown, unknown>[]> {
-      return queues;
-    },
-    /** Drop every queue, default, worker registration (handlers included) and job. */
     clear(): void {
-      queues.clear();
-      queueDefaults.clear();
-      workers.clear();
       jobsByKey.clear();
     },
   };
 };
 
-type BackendStore = ReturnType<typeof createBackendStore>;
+type QueueTable = ReturnType<typeof createQueueTable>;
+type WorkerTable = ReturnType<typeof createWorkerTable>;
+type JobTable = ReturnType<typeof createJobTable>;
+
+interface BackendStore {
+  readonly queues: QueueTable;
+  readonly workers: WorkerTable;
+  readonly jobs: JobTable;
+}
+
+/** Drop every queue, default, worker registration (handlers included) and job. */
+const clearBackendStore = (store: BackendStore): void => {
+  store.queues.clear();
+  store.workers.clear();
+  store.jobs.clear();
+};
 
 // Route a failure to every onError handler so it is observable without
 // interrupting the drain loop; a handler that itself throws is logged.
@@ -239,14 +270,14 @@ const routeJobFailure = async (
 // Per-job max: enqueue-opts.attempts ?? queue.defaultAttempts ?? 1
 // (mirrors BullMQ semantics — max travels with the job).
 const runEntry = async (
-  store: BackendStore,
+  jobs: JobTable,
   name: string,
   worker: WorkerRegistration,
   defaults: QueueDefaults,
   entry: QueueEntry<unknown, unknown>,
 ): Promise<void> => {
   const max = entry.opts.attempts ?? defaults.defaultAttempts;
-  const job = store.jobFor(name, entry);
+  const job = jobs.jobFor(name, entry);
   let attempt = 0;
   let succeeded = false;
   while (attempt < max && !succeeded) {
@@ -265,14 +296,14 @@ const runEntry = async (
   }
 };
 
-const drainQueue = async (store: BackendStore, name: string): Promise<void> => {
-  store.ensureQueue(name);
-  const worker = store.workerOf(name);
+const drainQueue = async ({ queues, workers, jobs }: BackendStore, name: string): Promise<void> => {
+  queues.ensureQueue(name);
+  const worker = workers.of(name);
   if (!worker) {
     fwLogger().warn(`[InMemoryQueue] drain() called on queue "${name}" with no registered worker — jobs will not be processed`);
     return;
   }
-  const defaults = store.defaultsOf(name);
+  const defaults = queues.defaultsOf(name);
 
   // Pool up to `concurrency` pullers; each takes from the front of the
   // queue and re-pulls on completion. Aligns in-memory backend with
@@ -280,8 +311,8 @@ const drainQueue = async (store: BackendStore, name: string): Promise<void> => {
   // node code surface in fast unit tests. One puller (concurrency 1) runs
   // the entries strictly in FIFO order.
   const puller = async (): Promise<void> => {
-    for (let entry = store.takeNext(name); entry !== undefined; entry = store.takeNext(name)) {
-      await runEntry(store, name, worker, defaults, entry);
+    for (let entry = queues.takeNext(name); entry !== undefined; entry = queues.takeNext(name)) {
+      await runEntry(jobs, name, worker, defaults, entry);
     }
   };
   await Promise.all(Array.from({ length: worker.concurrency }, () => puller()));
@@ -296,12 +327,12 @@ const createQueueOn = <S, C>(store: BackendStore, name: string, opts?: QueueOpts
       `defaultAttempts must be a finite integer >= 1, got ${opts.defaultAttempts}`,
     );
   }
-  store.declareQueue(name, { defaultAttempts: opts?.defaultAttempts ?? 1 });
+  store.queues.declareQueue(name, { defaultAttempts: opts?.defaultAttempts ?? 1 });
 
   return {
     async enqueue(id: string, data: { state: S; context: C }, opts?: EnqueueOpts): Promise<void> {
       // dedup: if jobId specified and already present, silently ignore
-      store.enqueue(
+      store.queues.enqueue(
         name,
         {
           id: opts?.jobId ?? id,
@@ -322,7 +353,7 @@ const createQueueOn = <S, C>(store: BackendStore, name: string, opts?: QueueOpts
 };
 
 const createWorkerOn = <S, C>(
-  store: BackendStore,
+  workers: WorkerTable,
   name: string,
   process: (job: JobLike<S, unknown, C>) => Promise<void>,
   opts?: WorkerOpts,
@@ -341,7 +372,7 @@ const createWorkerOn = <S, C>(
     exhaustedHandlers,
     errorHandlers,
   };
-  store.registerWorker(name, registration);
+  workers.register(name, registration);
 
   return {
     onFailed(handler: FailedHandler): void {
@@ -354,7 +385,7 @@ const createWorkerOn = <S, C>(
       errorHandlers.push(handler);
     },
     async close(): Promise<void> {
-      store.unregisterWorker(name, registration);
+      workers.unregister(name, registration);
     },
   };
 };
@@ -364,7 +395,11 @@ const createWorkerOn = <S, C>(
  * `_events` exposes the raw enqueued entries per queue for test assertions.
  */
 export function createInMemoryBackend(): InMemoryBackend {
-  const store = createBackendStore();
+  const store: BackendStore = {
+    queues: createQueueTable(),
+    workers: createWorkerTable(),
+    jobs: createJobTable(),
+  };
 
   return {
     createQueue: <S, C>(name: string, opts?: QueueOpts) => createQueueOn<S, C>(store, name, opts),
@@ -372,17 +407,17 @@ export function createInMemoryBackend(): InMemoryBackend {
       name: string,
       process: (job: JobLike<S, unknown, C>) => Promise<void>,
       opts?: WorkerOpts,
-    ) => createWorkerOn<S, C>(store, name, process, opts),
+    ) => createWorkerOn<S, C>(store.workers, name, process, opts),
     // No connections to release — kept for shape parity with BullMQ. Drops
     // every queue, job and worker registration (and with it, its handlers).
     async close(): Promise<void> {
-      store.clear();
+      clearBackendStore(store);
     },
     get _events(): ReadonlyMap<string, readonly QueueEntry<unknown, unknown>[]> {
-      return store.entries();
+      return store.queues.entries();
     },
     getJob(queueName: string, jobId: string): InMemoryJob<unknown, unknown> | undefined {
-      return store.getJob(queueName, jobId);
+      return store.jobs.get(queueName, jobId);
     },
   };
 }
