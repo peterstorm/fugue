@@ -51,7 +51,7 @@
     },
     "packages/adapter-fs": {
       "name": "@fuguejs/fs",
-      "version": "0.6.0",
+      "version": "0.7.0",
       "dependencies": {
         "@fuguejs/document-source": "workspace:*",
         "@fuguejs/framework": "workspace:*",
@@ -63,7 +63,7 @@
     },
     "packages/adapter-ms-graph": {
       "name": "@fuguejs/ms-graph",
-      "version": "0.6.0",
+      "version": "0.7.0",
       "dependencies": {
         "@fuguejs/document-source": "workspace:*",
         "@fuguejs/framework": "workspace:*",
@@ -79,7 +79,7 @@
     },
     "packages/adapter-oracle": {
       "name": "@fuguejs/oracle",
-      "version": "0.6.0",
+      "version": "0.7.0",
       "dependencies": {
         "@fuguejs/framework": "workspace:*",
       },
@@ -96,7 +96,7 @@
     },
     "packages/adapter-pg": {
       "name": "@fuguejs/pg",
-      "version": "0.6.0",
+      "version": "0.7.0",
       "dependencies": {
         "@fuguejs/framework": "workspace:*",
       },
@@ -113,7 +113,7 @@
     },
     "packages/document-source": {
       "name": "@fuguejs/document-source",
-      "version": "0.6.0",
+      "version": "0.7.0",
       "dependencies": {
         "@fuguejs/framework": "workspace:*",
         "ts-pattern": "^5.9.0",
@@ -141,7 +141,7 @@
     },
     "packages/framework": {
       "name": "@fuguejs/framework",
-      "version": "0.6.0",
+      "version": "0.7.0",
       "bin": {
         "fugue": "./bin/fugue.ts",
       },
@@ -176,7 +176,7 @@
     },
     "packages/host": {
       "name": "@fuguejs/host",
-      "version": "0.6.0",
+      "version": "0.7.0",
       "bin": {
         "host": "src/main.ts",
         "fugue-thin-init": "src/main-thin-init.ts",
@@ -203,7 +203,7 @@
     },
     "packages/http-auth": {
       "name": "@fuguejs/http-auth",
-      "version": "0.6.0",
+      "version": "0.7.0",
       "devDependencies": {
         "@fuguejs/framework": "workspace:*",
         "@types/bun": "1.4.1",
@@ -216,7 +216,7 @@
     },
     "packages/xlsx": {
       "name": "@fuguejs/xlsx",
-      "version": "0.6.0",
+      "version": "0.7.0",
       "dependencies": {
         "@fuguejs/framework": "workspace:*",
         "fflate": "^0.8.2",
