@@ -20,7 +20,6 @@
  *   keycloak-broker.ts — same tag, different spec namespace.
  */
 
-import { isDeepStrictEqual } from "node:util";
 import type {
   ContextCacheAdapter,
   CheckpointWriter,
@@ -37,15 +36,13 @@ import type {
 import {
   CHECKPOINTER_CAPABILITY,
   err,
-  fromJson,
   makeNodeContext,
   ok,
   isErr,
   parseSpend,
   safeErrorMessage,
-  toJson,
 } from "@fuguejs/framework";
-import { assertLosslessEvent } from "@fuguejs/framework/file";
+import { encodeNodeCheckpoint } from "./node-checkpoint-encoding.js";
 import type { RegisteredDag } from "../domain/registry.js";
 import type { AuthIdentity, AgentClientMap } from "../domain/auth.js";
 import type { RedisPort, SharedInfra, LogPort, SpendLedgerPort } from "../ports.js";
@@ -288,20 +285,10 @@ export const createNamespacedCheckpointWriter = (
         throw new Error(`checkpoint writer is scoped to run ${runId} and was asked for ${askedRunId}`);
       }
       const fullKey = buildCheckpointKey(tenant, dagId, runId, nodeId, scope);
-      let serialized: string;
-      try {
-        assertLosslessEvent(value, {
-          operation: "checkpointWriter.write",
-          root: "nodeOutput",
-        });
-        serialized = toJson(value);
-        if (!isDeepStrictEqual(fromJson(serialized), value)) {
-          throw new Error("node output failed losslessness round-trip verification");
-        }
-      } catch (e) {
-        const message = safeErrorMessage(e);
+      const encoded = encodeNodeCheckpoint(value);
+      if (!encoded.ok) {
         report("warn", "Checkpoint write failed — value not serializable", {
-          key: fullKey, dagId, runId, nodeId: nodeId as string, error: message,
+          key: fullKey, dagId, runId, nodeId: nodeId as string, error: encoded.error,
         });
         // DELIBERATELY generic, and deliberately NOT `message`. `run-node.ts`
         // turns whatever is thrown here into the DAG-visible
@@ -312,6 +299,7 @@ export const createNamespacedCheckpointWriter = (
         // `node-context-factory.test.ts` ("throws no key or driver detail").
         throw new Error("Checkpoint value is not serializable");
       }
+      const serialized = encoded.value;
       let setResult: Awaited<ReturnType<RedisPort["set"]>>;
       try {
         if (commitCheckpointAndRetainSpend !== undefined) {

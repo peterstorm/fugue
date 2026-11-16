@@ -55,6 +55,7 @@ export type { ResumeFileJobArgs } from "./file/resume.js";
 // Strict codec for journal event records. The module also provides shared
 // safety helpers reused by checkpointer output validation.
 export {
+  assertExactRoundTrip,
   assertLosslessEvent,
   isDedupKey,
   parseFileEventRecord,

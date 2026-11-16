@@ -13,6 +13,7 @@ import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
 const FILE_OPERATION_TYPECHECK_COVERAGE = [
   "acquireFileLock",
   "appendEvent",
+  "assertExactRoundTrip",
   "assertLosslessEvent",
   "atomicWriteFile",
   "createFileCheckpointer",
@@ -74,7 +75,7 @@ void compileTimeTypoPin;
 
 describe("file boundary error operation vocabulary", () => {
   it("contains every file-backend operation used by the implementation", () => {
-    expect(FILE_OPERATION_TYPECHECK_COVERAGE).toHaveLength(34);
+    expect(FILE_OPERATION_TYPECHECK_COVERAGE).toHaveLength(35);
     expect(new Set(FILE_OPERATION_TYPECHECK_COVERAGE).size).toBe(
       FILE_OPERATION_TYPECHECK_COVERAGE.length,
     );

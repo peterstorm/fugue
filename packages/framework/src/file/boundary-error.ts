@@ -29,6 +29,7 @@ export const fileThrownValueMessage = (value: unknown): string => {
 export type FileOperation =
   | "acquireFileLock"
   | "appendEvent"
+  | "assertExactRoundTrip"
   | "assertLosslessEvent"
   | "atomicWriteFile"
   | "createFileCheckpointer"
