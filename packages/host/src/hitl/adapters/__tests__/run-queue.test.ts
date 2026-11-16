@@ -135,7 +135,9 @@ const expectActiveRenewalFailure = async (
 
 describe("createRunQueue — BullMQ-compatible naming", () => {
   it("constructs a real BullMQ Queue with the tenant-qualified default", async () => {
-    const socket = join(tmpdir(), `fugue-bullmq-${process.pid}-${crypto.randomUUID()}.sock`);
+    // Kept short: a unix socket path is capped at 104 bytes on macOS, and its
+    // per-user tmpdir alone is ~50 (a full UUID name overflowed it).
+    const socket = join(tmpdir(), `fugue-bq-${crypto.randomUUID().slice(0, 8)}.sock`);
     const redis = Bun.spawn([
       "redis-server",
       "--port", "0",
