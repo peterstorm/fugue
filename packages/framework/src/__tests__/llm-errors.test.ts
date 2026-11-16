@@ -105,6 +105,24 @@ describe("httpFailureToError", () => {
     }
   });
 
+  test("a detail is named between the status and the body, and never changes the classification", () => {
+    fc.assert(
+      fc.property(fc.integer({ min: 100, max: 599 }), fc.string(), (status, detail) => {
+        const plain = httpFailureToError(status, "body", nodeId);
+        const detailed = httpFailureToError(status, "body", nodeId, detail);
+        expect(plain.ok || detailed.ok).toBe(false);
+        if (plain.ok || detailed.ok) return;
+        expect(detailed.error.kind).toBe(plain.error.kind);
+        if (detailed.error.kind === "node-crash" || detailed.error.kind === "transient") {
+          expect(detailed.error.message).toBe(`HTTP ${status} (${detail}): body`);
+        }
+        if (plain.error.kind === "node-crash" && detailed.error.kind === "node-crash") {
+          expect(detailed.error.retriability).toBe(plain.error.retriability);
+        }
+      }),
+    );
+  });
+
   test("body is truncated in the message (no unbounded error payloads)", () => {
     const result = httpFailureToError(500, "x".repeat(500), nodeId);
     expect(result.ok).toBe(false);

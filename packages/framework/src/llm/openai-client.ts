@@ -28,8 +28,11 @@ import type {
   ResponsesOutputItem,
   ConversationItem,
   ResponsesApiResponse,
+  ResponsesBody,
+  ResponsesBodyError,
 } from "./openai-types.js";
 import {
+  parseResponsesBody,
   isMessageBlock,
   isOutputTextPart,
   parseToolCalls,
@@ -44,54 +47,41 @@ const buildJsonSchema = (schema: z.ZodType<any>): Record<string, unknown> => {
 };
 
 // ---------------------------------------------------------------------------
-// Wire parse: a 200 body is untrusted JSON until it has passed this guard.
+// HTTP outcome of one POST /responses
 // ---------------------------------------------------------------------------
 
-const isJsonObject = (v: unknown): v is Readonly<Record<string, unknown>> =>
-  typeof v === "object" && v !== null && !Array.isArray(v);
-
-/** An absent field, or one of the declared type. */
-const optional = (v: unknown, isType: (x: unknown) => boolean): boolean =>
-  v === undefined || isType(v);
-
-/** The wire sends `null` for these object-valued fields; every consumer reads them with `?.`. */
-const optionalOrNull = (v: unknown, isType: (x: unknown) => boolean): boolean =>
-  v === null || optional(v, isType);
-
-const isString = (v: unknown): boolean => typeof v === "string";
-
-// Token counts are deliberately NOT type-checked: they are untrusted JSON that
-// `sanitizeCount` degrades to 0 when not a finite number (FR-PC-010 pins that),
-// so a malformed count must not discard an otherwise good response.
-const isResponsesUsage = (v: unknown): boolean =>
-  isJsonObject(v) && optionalOrNull(v.input_tokens_details, isJsonObject);
-
-const isResponsesApiError = (v: unknown): boolean =>
-  isJsonObject(v) && optional(v.code, isString) && optional(v.message, isString);
-
-const isResponsesIncompleteDetails = (v: unknown): boolean =>
-  isJsonObject(v) && optional(v.reason, isString);
-
-const isResponsesOutput = (v: unknown): boolean =>
-  Array.isArray(v) && v.every((item: unknown) => isJsonObject(item) && isString(item.type));
+/**
+ * Why a POST did not yield a Responses document. Every arm keeps the HTTP
+ * status and the raw body text, so each failure is debuggable from the error
+ * alone; `body` says what was wrong with a 200 whose body did not parse.
+ */
+type ResponsesFailure =
+  | { readonly kind: "http-status"; readonly status: number; readonly bodyText: string }
+  | {
+      readonly kind: "body";
+      readonly status: number;
+      readonly bodyText: string;
+      readonly reason: ResponsesBodyError;
+    };
 
 /**
- * Structural guard for a Responses API body, checking every field
- * `ResponsesApiResponse` declares. Returns the SAME object (no copy, no key
- * stripping): error paths render the whole body with `JSON.stringify`, so a
- * rebuilt object would change the diagnostics. Output items are only checked
- * for the discriminating `type`; the per-variant guards in `openai-types.ts`
- * skip anything they do not recognise.
+ * The typed error for a failed POST — pure. A non-OK status and a non-JSON
+ * 200 both take the shared HTTP policy (`httpFailureToError`) unchanged. JSON
+ * of the wrong shape takes the same classification but NAMES the mismatch, so
+ * it is never mistaken for a proxy interstitial.
  */
-const isResponsesApiResponse = (v: unknown): v is ResponsesApiResponse =>
-  isJsonObject(v) &&
-  optional(v.id, isString) &&
-  optional(v.model, isString) &&
-  optional(v.status, isString) &&
-  optionalOrNull(v.output, isResponsesOutput) &&
-  optionalOrNull(v.usage, isResponsesUsage) &&
-  optionalOrNull(v.error, isResponsesApiError) &&
-  optionalOrNull(v.incomplete_details, isResponsesIncompleteDetails);
+const responsesFailureToError = (
+  failure: ResponsesFailure,
+  nodeId: NodeId,
+): Result<never, FrameworkError> =>
+  failure.kind === "body" && failure.reason.kind === "wrong-shape"
+    ? httpFailureToError(
+        failure.status,
+        failure.bodyText,
+        nodeId,
+        `body is JSON but not a Responses API document — ${truncateErrorBody(failure.reason.issues.join("; "))}`,
+      )
+    : httpFailureToError(failure.status, failure.bodyText, nodeId);
 
 /**
  * Normalise a Responses `usage` block into the framework's `TokenUsage`.
@@ -131,6 +121,16 @@ const openAiUsage = (usage: ResponsesApiResponse["usage"]): TokenUsage => {
   };
 };
 
+/** Stamp a parsed document's usage and identity on the active LLM span — one encoding for both send paths. */
+const recordResponseAttributes = (response: ResponsesApiResponse): void => {
+  setLlmUsageAttributes(openAiUsage(response.usage));
+  setLlmResponseAttributes({
+    model: response.model,
+    id: response.id,
+    finishReasons: response.status ? [response.status] : undefined,
+  });
+};
+
 /**
  * Classify a `response.status === "failed"` Responses body. The API populates
  * `error.code` / `error.message` on this arm; without an explicit check it
@@ -145,12 +145,13 @@ const openAiUsage = (usage: ResponsesApiResponse["usage"]): TokenUsage => {
  * tokens never escape budget accounting (FR-W0-001).
  */
 function responseFailedError(
-  response: ResponsesApiResponse,
+  body: ResponsesBody,
   nodeId: NodeId,
   usage?: TokenUsage,
 ): Result<never, FrameworkError> {
+  const response = body.document;
   const code = response.error?.code;
-  const detail = truncateErrorBody(response.error?.message ?? JSON.stringify(response));
+  const detail = truncateErrorBody(response.error?.message ?? JSON.stringify(body.json));
   const message = `Responses API failed (response.status: failed${code ? `, error.code: ${code}` : ""}): ${detail}`;
   if (code === "rate_limit_exceeded") {
     return err({ kind: "transient", nodeId, message, ...(usage ? { usage } : {}) });
@@ -252,10 +253,7 @@ export class OpenAILlmClient implements LlmClient {
   private async postResponses(
     body: Record<string, unknown>,
     signal: AbortSignal | undefined,
-  ): Promise<
-    | { ok: true; response: ResponsesApiResponse }
-    | { ok: false; status: number; bodyText: string }
-  > {
+  ): Promise<Result<ResponsesBody, ResponsesFailure>> {
     const { url, headers } = this.buildRequestConfig();
     const t = createTimeoutSignal(this.requestTimeoutMs, signal);
 
@@ -285,24 +283,18 @@ export class OpenAILlmClient implements LlmClient {
       t.cleanup();
     }
 
-    if (!httpRes.ok) {
-      const text = await httpRes.text();
-      return { ok: false, status: httpRes.status, bodyText: text };
-    }
-    // A 200 whose body is not JSON (proxy interstitial, HTML error page)
-    // must not escape as a raw SyntaxError from `.json()` — fold it into the
-    // same failure shape as a non-OK status, so the typed error carries
-    // `HTTP 200` plus the (truncated) body snapshot.
     const text = await httpRes.text();
-    // A body that is valid JSON but not a Responses document (`null`, an
-    // array, `output: "x"`) takes the same failure arm as non-JSON.
-    try {
-      const parsed: unknown = JSON.parse(text);
-      if (isResponsesApiResponse(parsed)) return { ok: true, response: parsed };
-    } catch {
-      // not JSON — falls through to the shared failure shape
+    if (!httpRes.ok) {
+      return err({ kind: "http-status", status: httpRes.status, bodyText: text });
     }
-    return { ok: false, status: httpRes.status, bodyText: text };
+    // A 200 body is untrusted until parsed. Neither failure may escape as a
+    // raw SyntaxError or a property read on the wrong shape: both carry the
+    // status and the body text, and `reason` keeps "not JSON" (a proxy
+    // interstitial, an HTML error page) apart from "JSON of the wrong shape".
+    const parsed = parseResponsesBody(text);
+    return parsed.ok
+      ? parsed
+      : err({ kind: "body", status: httpRes.status, bodyText: text, reason: parsed.error });
   }
 
   async sendStructured<O>(req: LlmRequest<O>): Promise<Result<LlmResponse<O>, FrameworkError>> {
@@ -367,23 +359,17 @@ export class OpenAILlmClient implements LlmClient {
         { provider: "openai", model: this.modelOverride ?? req.model, operation: "chat" },
         async () => {
           const r = await this.postResponses(body, req.signal);
-          if (r.ok) {
-            setLlmUsageAttributes(openAiUsage(r.response.usage));
-            setLlmResponseAttributes({
-              model: r.response.model,
-              id: r.response.id,
-              finishReasons: r.response.status ? [r.response.status] : undefined,
-            });
-          }
+          if (r.ok) recordResponseAttributes(r.value.document);
           return r;
         },
       );
       if (!httpResult.ok) {
-        // The shared 429/4xx/5xx policy — see `httpFailureToError`.
-        return httpFailureToError(httpResult.status, httpResult.bodyText, req.nodeId);
+        // The shared 429/4xx/5xx policy — see `responsesFailureToError`.
+        return responsesFailureToError(httpResult.error, req.nodeId);
       }
-      const response = httpResult.response;
-      const output = response.output ?? [];
+      const responseBody = httpResult.value;
+      const response = responseBody.document;
+      const output: readonly ResponsesOutputItem[] = response.output ?? [];
 
       // `response.status === "failed"` carries the API's own error.code /
       // error.message — classify it explicitly (retriability derived from the
@@ -394,7 +380,7 @@ export class OpenAILlmClient implements LlmClient {
         // "absent means no attributable tokens" (types/errors.ts); stamping
         // a fabricated `{0, 0}` would make that state representable two ways.
         return responseFailedError(
-          response,
+          responseBody,
           req.nodeId,
           response.usage ? openAiUsage(response.usage) : undefined,
         );
@@ -429,12 +415,12 @@ export class OpenAILlmClient implements LlmClient {
           kind: "node-crash",
           retriability,
           nodeId: req.nodeId,
-          message: `Responses API returned no text output (response.status: ${response.status ?? "unknown"}): ${truncateErrorBody(JSON.stringify(response))}`,
+          message: `Responses API returned no text output (response.status: ${response.status ?? "unknown"}): ${truncateErrorBody(JSON.stringify(responseBody.json))}`,
           ...(usage ? { usage } : {}),
         });
       }
 
-      const thinking = extractReasoning(response.output ?? []);
+      const thinking = extractReasoning(output);
 
       let raw: unknown;
       try {
@@ -532,14 +518,7 @@ export class OpenAILlmClient implements LlmClient {
             { provider: "openai", model: this.modelOverride ?? req.model, operation: "chat" },
             async () => {
               const r = await this.postResponses(body, req.signal ?? ctx.signal);
-              if (r.ok) {
-                setLlmUsageAttributes(openAiUsage(r.response.usage));
-                setLlmResponseAttributes({
-                  model: r.response.model,
-                  id: r.response.id,
-                  finishReasons: r.response.status ? [r.response.status] : undefined,
-                });
-              }
+              if (r.ok) recordResponseAttributes(r.value.document);
               return r;
             },
           );
@@ -551,11 +530,12 @@ export class OpenAILlmClient implements LlmClient {
         }
 
         if (!httpResult.ok) {
-          // The shared 429/4xx/5xx policy — see `httpFailureToError`.
-          return httpFailureToError(httpResult.status, httpResult.bodyText, req.nodeId);
+          // The shared 429/4xx/5xx policy — see `responsesFailureToError`.
+          return responsesFailureToError(httpResult.error, req.nodeId);
         }
 
-        const response = httpResult.response;
+        const responseBody = httpResult.value;
+        const response = responseBody.document;
         const output: readonly ResponsesOutputItem[] = response.output ?? [];
         const turnUsage = openAiUsage(response.usage);
 
@@ -568,7 +548,7 @@ export class OpenAILlmClient implements LlmClient {
           // sendStructured arm for the "absent means no attributable
           // tokens" contract.
           return responseFailedError(
-            response,
+            responseBody,
             req.nodeId,
             response.usage ? turnUsage : undefined,
           );
@@ -589,7 +569,7 @@ export class OpenAILlmClient implements LlmClient {
             kind: "node-crash",
             retriability: "non-retriable",
             nodeId: req.nodeId,
-            message: `Responses API returned an incomplete (truncated) response (${incompleteDetail(response)}): ${truncateErrorBody(JSON.stringify(response))}`,
+            message: `Responses API returned an incomplete (truncated) response (${incompleteDetail(response)}): ${truncateErrorBody(JSON.stringify(responseBody.json))}`,
             usage: turnUsage,
           });
         }
@@ -615,7 +595,7 @@ export class OpenAILlmClient implements LlmClient {
             kind: "node-crash",
             retriability: "retriable",
             nodeId: req.nodeId,
-            message: `Responses API returned no tool calls and no text output (response.status: ${response.status ?? "unknown"}): ${truncateErrorBody(JSON.stringify(response))}`,
+            message: `Responses API returned no tool calls and no text output (response.status: ${response.status ?? "unknown"}): ${truncateErrorBody(JSON.stringify(responseBody.json))}`,
             ...(response.usage ? { usage: turnUsage } : {}),
           });
         }

@@ -84,13 +84,19 @@ const classifyHttpStatus = (status: number): HttpErrorClass => {
  * from the error alone, and EVERY arm carries the typed `httpStatus` (all
  * failures here are HTTP-origin by construction) so consumers can branch on
  * it without string-matching the message.
+ *
+ * `detail`, when given, names what was wrong beyond the status — a 2xx body
+ * that is JSON of the wrong shape says so, so it is never mistaken for a
+ * non-JSON interstitial: `HTTP <status> (<detail>): <body>`. It never changes
+ * the classification, which is the status's alone.
  */
 export const httpFailureToError = (
   status: number,
   bodyText: string,
   nodeId: NodeId,
+  detail?: string,
 ): Result<never, FrameworkError> => {
-  const message = `HTTP ${status}: ${truncateErrorBody(bodyText)}`;
+  const message = `HTTP ${status}${detail === undefined ? "" : ` (${detail})`}: ${truncateErrorBody(bodyText)}`;
   const cls = classifyHttpStatus(status);
   return cls.kind === "transient"
     ? err({ kind: "transient", nodeId, message, httpStatus: status })

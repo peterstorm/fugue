@@ -1,4 +1,8 @@
-// OpenAI Responses API type definitions and structural guards.
+// OpenAI Responses API type definitions, the body parser and structural guards.
+//
+// The response BODY is parsed once, by `parseResponsesBody`, against a zod
+// schema that `ResponsesApiResponse` is derived from. The output ITEMS inside
+// it are narrowed per variant by the guards below.
 //
 // The OpenAI Responses API returns `output: ResponsesOutputItem[]`. The SDK's
 // exported types do not (yet) cover every variant we consume — define local
@@ -9,6 +13,9 @@
 import type { ToolCall } from "./tool-dispatch.js";
 import type { ToolDispatchResult } from "./tool-dispatch.js";
 import { logFrameworkWithoutThrowing } from "../logger.js";
+import { z } from "zod";
+import type { Result } from "../types/result.js";
+import { ok, err } from "../types/result.js";
 
 // ---------------------------------------------------------------------------
 // Type definitions
@@ -70,9 +77,24 @@ export type ConversationItem =
   | ResponsesOutputItem
   | FunctionCallOutputItem;
 
-interface ResponsesUsage {
-  readonly input_tokens?: number;
-  readonly output_tokens?: number;
+// ---------------------------------------------------------------------------
+// Responses body: one schema, the type derived from it
+// ---------------------------------------------------------------------------
+
+/**
+ * A token count as the wire reports it. Counts are untrusted JSON that
+ * `sanitizeCount` degrades to 0 (FR-PC-010 pins that), so a malformed count
+ * must not discard an otherwise good response: a non-number parses as ABSENT
+ * rather than failing the document — and the type says so, instead of
+ * declaring a `number` nothing checked.
+ */
+const tokenCountSchema = z
+  .unknown()
+  .transform((count): number | undefined => (typeof count === "number" ? count : undefined));
+
+const responsesUsageSchema = z.object({
+  input_tokens: tokenCountSchema,
+  output_tokens: tokenCountSchema,
   /**
    * OpenAI caches prompt prefixes AUTOMATICALLY — there is no request-side
    * control to mirror Anthropic's `cache_control`. The only surface is this
@@ -81,29 +103,69 @@ interface ResponsesUsage {
    * unchanged rather than summing, so the same `TokenUsage` invariant
    * (`cacheWrite + cacheRead <= tokensIn`) holds for both providers.
    */
-  readonly input_tokens_details?: {
-    readonly cached_tokens?: number;
-  };
-}
+  input_tokens_details: z.object({ cached_tokens: tokenCountSchema }).nullish(),
+});
 
-/** The `error` object a `status: "failed"` Responses body carries. */
-interface ResponsesApiError {
-  readonly code?: string;
-  readonly message?: string;
-}
+/**
+ * An output item is read only through its discriminating `type`; the
+ * per-variant guards above skip anything they do not recognise. LOOSE, not
+ * stripped: items are echoed back into the conversation verbatim, so every
+ * field the API sent must survive the parse.
+ */
+const responsesOutputItemSchema = z.looseObject({ type: z.string() });
 
-export interface ResponsesApiResponse {
-  readonly id?: string;
-  readonly model?: string;
-  readonly status?: string;
+const responsesApiResponseSchema = z.object({
+  id: z.string().optional(),
+  model: z.string().optional(),
+  status: z.string().optional(),
   /** Absent OR `null` both mean "no output items" — the API sends either for empty turns. */
-  readonly output?: readonly ResponsesOutputItem[] | null;
-  readonly usage?: ResponsesUsage | null;
+  output: z.array(responsesOutputItemSchema).nullish(),
+  usage: responsesUsageSchema.nullish(),
   /** Populated when `status === "failed"` — the API's stated failure reason. */
-  readonly error?: ResponsesApiError | null;
+  error: z.object({ code: z.string().optional(), message: z.string().optional() }).nullish(),
   /** Populated when `status === "incomplete"` — e.g. `{ reason: "max_output_tokens" }`. */
-  readonly incomplete_details?: { readonly reason?: string } | null;
+  incomplete_details: z.object({ reason: z.string().optional() }).nullish(),
+});
+
+/** A parsed Responses API document — derived from the schema, never declared beside it. */
+export type ResponsesApiResponse = z.output<typeof responsesApiResponseSchema>;
+
+/**
+ * A 200 body that parsed: the `document` every decision reads, plus the JSON
+ * value exactly as received. Diagnostics render `json`, not `document`: the
+ * parse strips fields the client does not read, and an error snapshot must
+ * show what the API actually sent.
+ */
+export interface ResponsesBody {
+  readonly document: ResponsesApiResponse;
+  readonly json: unknown;
 }
+
+/**
+ * Why a 200 body is not a Responses document. The two are different failures
+ * and are reported differently: `not-json` is a proxy interstitial or HTML
+ * error page, `wrong-shape` is JSON the API contract does not allow.
+ */
+export type ResponsesBodyError =
+  | { readonly kind: "not-json" }
+  | { readonly kind: "wrong-shape"; readonly issues: readonly string[] };
+
+const renderIssue = (issue: z.core.$ZodIssue): string =>
+  issue.path.length === 0 ? issue.message : `${issue.path.map(String).join(".")}: ${issue.message}`;
+
+/** Parse, don't validate: a 200 body's text into the Responses document, or why it is not one. */
+export const parseResponsesBody = (text: string): Result<ResponsesBody, ResponsesBodyError> => {
+  let json: unknown;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    return err({ kind: "not-json" });
+  }
+  const parsed = responsesApiResponseSchema.safeParse(json);
+  return parsed.success
+    ? ok({ document: parsed.data, json })
+    : err({ kind: "wrong-shape", issues: parsed.error.issues.map(renderIssue) });
+};
 
 // ---------------------------------------------------------------------------
 // Type guards
