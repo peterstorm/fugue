@@ -564,7 +564,12 @@ const streamingReplacer = () => {
       if (transformed !== null && typeof transformed === "object") walk.opaque.add(transformed);
       return transformed;
     }
-    if (!Array.isArray(this) && !walk.built.has(this) && POLLUTION_KEYS.has(key)) return undefined;
+    if (Array.isArray(this)) {
+      // A hole: `serializeAt`'s `map` keeps it, and stringify writes it as null.
+      if (!Object.prototype.hasOwnProperty.call(this, key)) return undefined;
+    } else if (!walk.built.has(this) && POLLUTION_KEYS.has(key)) {
+      return undefined;
+    }
     const raw: unknown = (this as Record<string, unknown>)[key];
     if (raw === undefined) return { [UNDEFINED_TAG]: true } satisfies SerializedUndefined;
     if (raw === null || typeof raw !== "object") return transformed;

@@ -84,6 +84,9 @@ export type {
   SpendLedgerPort,
 } from "./ports.js";
 export { createFileSpendLedger } from "./adapters/spend-ledger-file.js";
+// The exact bytes the host persists for each node output, so a DAG repository
+// can test and benchmark its DAGs under the host's own checkpoint encoding.
+export { encodeNodeCheckpoint } from "./adapters/node-checkpoint-encoding.js";
 
 // Capability builders — the host's own boot-wiring primitives. Exported so an
 // out-of-tree consumer (e.g. a live smoke harness) can wire the SAME capabilities

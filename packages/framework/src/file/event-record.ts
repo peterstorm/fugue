@@ -305,9 +305,11 @@ export const parseOptionalDedupKey = (
   parseDedupKey(value === undefined ? "" : value);
 
 
-/** Human-kind of a rejected value — constructor name, else toString tag —
+/** Shared, with renderPathSegment, ownValue and unrepresentableKind, with the
+ * frozen pre-scan oracle in __tests__/support.
+ * Human-kind of a rejected value — constructor name, else toString tag —
  * so pre-scan errors name what was rejected. */
-const kindName = (value: object): string => {
+export const kindName = (value: object): string => {
   const proto = Object.getPrototypeOf(value);
   const ctorName =
     proto !== null && typeof (proto as { constructor?: unknown }).constructor === "function"
@@ -320,7 +322,7 @@ const kindName = (value: object): string => {
 /** Render a property key as a path segment: `.name` for identifier keys,
  * `[3]` for index keys, `["weird key"]` otherwise, `[Symbol(desc)]` for
  * symbols. */
-const renderPathSegment = (key: PropertyKey): string => {
+export const renderPathSegment = (key: PropertyKey): string => {
   if (typeof key === "symbol") return `[Symbol(${key.description ?? ""})]`;
   if (typeof key === "number") return `[${key}]`;
   if (/^(0|[1-9]\d*)$/.test(key)) return `[${key}]`;
@@ -383,13 +385,13 @@ type ScanVerdict =
 /** Read an OWN property value without invoking getters or the `__proto__`
  * accessor — the walks iterate own enumerable keys, so the value must come
  * from the descriptor, not property access. */
-const ownValue = (obj: object, key: string): unknown =>
+export const ownValue = (obj: object, key: string): unknown =>
   Object.getOwnPropertyDescriptor(obj, key)?.value;
 
 /** The write refusal for a JS value kind JSON has no representation for.
  * `kind` names the kind twice — as the noun ("a BigInt") and as the JSON
  * gap ("no BigInt representation") — from the single argument. */
-const unrepresentableKind = (operation: string, path: string, kind: string): Error =>
+export const unrepresentableKind = (operation: string, path: string, kind: string): Error =>
   new Error(
     `${operation}: ${path} is a ${kind} — JSON has no ${kind} representation; refusing to persist a value that would diverge from the caller's event (FR-009)`,
   );
@@ -397,40 +399,25 @@ const unrepresentableKind = (operation: string, path: string, kind: string): Err
 /** A JS value kind JSON has no representation for, named as rejections name it. */
 type UnrepresentableKind = "BigInt" | "symbol" | "function";
 
-/**
- * What the write pre-scan walk does with one value — a pure classification;
- * the walk alone decides that a rejection throws.
- */
-type WalkClassification =
-  | { readonly kind: "scalar" }
-  | { readonly kind: "walkable"; readonly value: object }
-  | { readonly kind: "unrepresentable"; readonly jsonGap: UnrepresentableKind };
-
-const SCALAR: WalkClassification = { kind: "scalar" };
-
-const unrepresentable = (jsonGap: UnrepresentableKind): WalkClassification => ({
-  kind: "unrepresentable",
-  jsonGap,
-});
+type TypeofResult = "string" | "number" | "bigint" | "boolean" | "symbol" | "undefined" | "object" | "function";
 
 /**
- * First gate of the write pre-scan walk: a non-null object is `walkable` (the
- * walk descends into it, carrying the narrowed value), a JSON scalar
- * (null/undefined/string/number/boolean) is admitted as-is, and bigint/
- * symbol/function are `unrepresentable`. Every `typeof` result is matched
- * exhaustively — there is no `default` arm left to hide a kind this walk does
- * not admit.
+ * The JSON gap of each `typeof` result, or null when JSON holds it (objects
+ * are walked by the caller; "object" reaches the scalar check as `null`
+ * only). A table, not a `match` chain: the pre-scan looks this up for every
+ * scalar of a checkpoint and must allocate nothing per value. `satisfies`
+ * makes a missing `typeof` result a compile error.
  */
-const classifyWalkValue = (value: unknown): WalkClassification => {
-  if (typeof value === "object" && value !== null) return { kind: "walkable", value };
-  return match(typeof value)
-    // "object" is reachable here only as `null`: non-null objects returned above.
-    .with("string", "number", "boolean", "undefined", "object", () => SCALAR)
-    .with("bigint", () => unrepresentable("BigInt"))
-    .with("symbol", () => unrepresentable("symbol"))
-    .with("function", () => unrepresentable("function"))
-    .exhaustive();
-};
+const JSON_GAP_OF_TYPEOF = {
+  string: null,
+  number: null,
+  boolean: null,
+  undefined: null,
+  object: null,
+  bigint: "BigInt",
+  symbol: "symbol",
+  function: "function",
+} as const satisfies Readonly<Record<TypeofResult, UnrepresentableKind | null>>;
 
 /**
  * FR-009 write-boundary pre-scan: recursively verify that `event` is
@@ -495,249 +482,325 @@ const classifyWalkValue = (value: unknown): WalkClassification => {
  * `serializeFileEventRecord` (the checkpoint codec passes its own labels;
  * the event codec relies on the defaults, keeping its messages identical).
  */
-const assertLosslessEventUnchecked = (
-  event: unknown,
-  labels: { operation: string; root: string } = {
-    operation: "serializeFileEventRecord",
-    root: "event",
-  },
-): void => {
-  const { operation, root } = labels;
-  const walk = (
-    candidate: unknown,
-    path: string,
-    active: Map<object, string>,
-    depth: number,
-  ): void => {
-    const classified = classifyWalkValue(candidate);
-    if (classified.kind === "scalar") return;
-    if (classified.kind === "unrepresentable") {
-      throw unrepresentableKind(operation, path, classified.jsonGap);
-    }
-    const value = classified.value;
+/** How one path segment renders. Its key sits beside it and is rendered only for a message. */
+type SegmentKind = "key" | "index" | "map-key" | "map-value" | "set-item";
 
-    // Circular-reference guard: a node revisited through its own descendants
-    // is a cycle; paths are tracked so the error names both ends. Sibling
-    // sharing (a DAG) is NOT a cycle — JSON duplicates shared subtrees
-    // losslessly — so the entry is removed when the subtree completes.
-    const prior = active.get(value);
-    if (prior !== undefined) {
-      throw new Error(
-        `${operation}: circular reference at ${path} — ${prior} is an ancestor of ${path}; JSON cannot represent object cycles (FR-009)`,
-      );
-    }
-    // Depth ceiling (FR-009): a value nested past the shared
-    // `MAX_SAFE_RECORD_DEPTH` cannot be verified safely — the recursive
-    // pre-scan (and the serializer/round-trip recursion it guards) would
-    // overflow the call stack on hostile input, escaping as a raw
-    // RangeError with no contextual error. Depth counts from the record
-    // root exactly like the read side (the event value sits at depth 1), so
-    // the write boundary can never emit a record the strict reader rejects
-    // on depth; and the ceiling sits far below the engine's overflow
-    // threshold, so the maximum recursion this walk admits is safe.
-    if (depth > MAX_SAFE_RECORD_DEPTH) {
-      throw new Error(
-        `${operation}: ${root} nesting exceeds the safe depth ceiling ${MAX_SAFE_RECORD_DEPTH} at ${path} (depth ${depth}) — deeper values would overflow the serializer's recursive walks; refusing to persist a value the write boundary cannot safely verify (FR-009)`,
-      );
-    }
-    active.set(value, path);
-    try {
-      const proto = Object.getPrototypeOf(value);
+/**
+ * The state of one pre-scan. The walk visits every value of a checkpoint, so
+ * it allocates nothing per value: the path is two stacks of existing keys and
+ * indices, rendered only when a rejection names it, and `active` maps each
+ * ancestor to its stack height, so a cycle message renders the ancestor's path
+ * from the same stacks.
+ */
+interface PreScan {
+  readonly operation: string;
+  readonly root: string;
+  /** Also refuse what JSON restores as a different value (see `assertExactRoundTrip`). */
+  readonly exact: boolean;
+  readonly kinds: SegmentKind[];
+  readonly keys: (string | number)[];
+  readonly active: Map<object, number>;
+}
 
-      if (value instanceof Date) {
-        if (proto !== Date.prototype) {
-          throw new Error(
-            `${operation}: ${path} is a ${kindName(value)} — a subclassed Date would round-trip as a plain Date; toJson cannot preserve the class (FR-009)`,
-          );
-        }
-        const own = Reflect.ownKeys(value);
-        if (own.length > 0) {
-          throw new Error(
-            `${operation}: ${path} is a Date with own property ${renderPathSegment(own[0] as PropertyKey)} — toJson persists only the instant; the property would be silently dropped (FR-009)`,
-          );
-        }
-        if (Number.isNaN(value.getTime())) {
-          throw new Error(
-            `${operation}: ${path} is an invalid Date (NaN instant) — it has no ISO-8601 representation (FR-009)`,
-          );
-        }
-        return;
-      }
+const renderSegment = (kind: SegmentKind, key: string | number): string =>
+  match(kind)
+    .with("key", () => renderPathSegment(key))
+    .with("index", () => `[${key}]`)
+    .with("map-key", () => `[map entry #${key} key]`)
+    .with("map-value", () => `[map entry #${key} value]`)
+    .with("set-item", () => `[set item #${key}]`)
+    .exhaustive();
 
-      if (value instanceof Map) {
-        if (proto !== Map.prototype) {
-          throw new Error(
-            `${operation}: ${path} is a ${kindName(value)} — a subclassed Map would round-trip as a plain Map; toJson cannot preserve the class (FR-009)`,
-          );
-        }
-        const own = Reflect.ownKeys(value);
-        if (own.length > 0) {
-          throw new Error(
-            `${operation}: ${path} is a Map with own property ${renderPathSegment(own[0] as PropertyKey)} — toJson persists only the entries; the property would be silently dropped (FR-009)`,
-          );
-        }
-        let index = 0;
-        for (const [k, v] of value.entries()) {
-          walk(k, `${path}[map entry #${index} key]`, active, depth + 1);
-          walk(v, `${path}[map entry #${index} value]`, active, depth + 1);
-          index++;
-        }
-        return;
-      }
-
-      if (value instanceof Set) {
-        if (proto !== Set.prototype) {
-          throw new Error(
-            `${operation}: ${path} is a ${kindName(value)} — a subclassed Set would round-trip as a plain Set; toJson cannot preserve the class (FR-009)`,
-          );
-        }
-        const own = Reflect.ownKeys(value);
-        if (own.length > 0) {
-          throw new Error(
-            `${operation}: ${path} is a Set with own property ${renderPathSegment(own[0] as PropertyKey)} — toJson persists only the items; the property would be silently dropped (FR-009)`,
-          );
-        }
-        let index = 0;
-        for (const item of value.values()) {
-          walk(item, `${path}[set item #${index}]`, active, depth + 1);
-          index++;
-        }
-        return;
-      }
-
-      if (Array.isArray(value)) {
-        if (proto !== Array.prototype) {
-          throw new Error(
-            `${operation}: ${path} is a ${kindName(value)} — a subclassed or foreign-realm array would round-trip as a plain array; toJson cannot preserve the class (FR-009)`,
-          );
-        }
-        // JSON arrays persist only their indices (0..length-1): symbol keys,
-        // non-enumerable keys, and extra string keys (arr.foo = 1) are all
-        // dropped by both JSON.stringify and serializeValue's map().
-        for (const key of Reflect.ownKeys(value)) {
-          if (key === "length") continue;
-          const isIndex =
-            typeof key === "string" &&
-            /^(0|[1-9]\d*)$/.test(key) &&
-            Number(key) < value.length;
-          if (!isIndex) {
-            throw new Error(
-              `${operation}: ${path} is an array with own property ${renderPathSegment(key)} — JSON arrays persist only their indices (0..length-1); this property would be silently dropped (FR-009)`,
-            );
-          }
-        }
-        for (let i = 0; i < value.length; i++) {
-          // Array-index getters are rejected by descriptor inspection too —
-          // `value[i]` would invoke the getter (possibly throwing or
-          // non-deterministic), and the pre-scan never invokes getters.
-          // (`value[i]` is still safe AFTER this check: a non-accessor
-          // index is a plain data read.)
-          const descriptor = Object.getOwnPropertyDescriptor(value, String(i));
-          if (descriptor !== undefined && "get" in descriptor) {
-            throw new Error(
-              `${operation}: ${path}[${i}] is an array-index accessor — the losslessness pre-scan never invokes getters, and toJson would; the element's losslessness cannot be verified (FR-009)`,
-            );
-          }
-          walk(value[i], `${path}[${i}]`, active, depth + 1);
-        }
-        return;
-      }
-
-      // Not a plain object — JSON-less or class-shaped: WeakMap, WeakSet,
-      // RegExp, Promise, class instances, typed arrays, boxed primitives,
-      // cross-realm Date/Map/Set/array, anything Object.entries would
-      // funnel to `{}`.
-      if (proto !== Object.prototype && proto !== null) {
-        throw new Error(
-          `${operation}: ${path} has kind ${kindName(value)} — only primitives, plain objects, arrays, and Date/Map/Set instances with their standard prototypes are representable losslessly (FR-009)`,
-        );
-      }
-
-      const obj = value as Record<string, unknown>;
-
-      // Custom toJSON rejection WITHOUT invoking anything: JSON.stringify
-      // reads `toJSON` via Get — an own ACCESSOR would be invoked, so an
-      // own toJSON accessor is rejected outright (the pre-scan never
-      // invokes getters); an own data toJSON is rejected when callable;
-      // an inherited callable toJSON is only reachable through
-      // Object.prototype (null-proto objects have no inheritance) and is
-      // read via ITS descriptor. `typeof obj.toJSON` is never used here —
-      // it would invoke a throwing accessor and let a raw engine error
-      // escape without FR-009 context.
-      const toJSONDescriptor = Object.getOwnPropertyDescriptor(obj, "toJSON");
-      if (toJSONDescriptor !== undefined && "get" in toJSONDescriptor) {
-        throw new Error(
-          `${operation}: ${path} has a custom toJSON accessor — JSON.stringify would invoke it and persist its return value instead of the object itself; the losslessness pre-scan never invokes getters, so the object cannot be verified (FR-009)`,
-        );
-      }
-      // Falls back to Object.prototype's own `toJSON` ONLY when the value has
-      // no own descriptor — an own descriptor whose `.value` is undefined still
-      // wins, so this is deliberately not `??`.
-      const inheritedToJSON = proto === Object.prototype
-        ? Object.getOwnPropertyDescriptor(Object.prototype, "toJSON")?.value
-        : undefined;
-      const toJSONValue = toJSONDescriptor !== undefined ? toJSONDescriptor.value : inheritedToJSON;
-      if (typeof toJSONValue === "function") {
-        throw new Error(
-          `${operation}: ${path} has a custom toJSON method — JSON.stringify would persist the method's return value instead of the object itself (FR-009)`,
-        );
-      }
-
-      // Every own key must be a string enumerable key: symbol keys and
-      // non-enumerable string keys are invisible to Object.entries AND to
-      // JSON.stringify, so they would be dropped on both comparison sides.
-      const enumerable = new Set(Object.keys(obj));
-      for (const key of Reflect.ownKeys(value)) {
-        if (typeof key !== "string" || !enumerable.has(key)) {
-          throw new Error(
-            typeof key === "symbol"
-              ? `${operation}: ${path} has symbol-keyed own property ${renderPathSegment(key)} — Object.entries/JSON.stringify never visit symbol keys; it would be silently dropped (FR-009)`
-              : `${operation}: ${path} has non-enumerable own property ${renderPathSegment(key)} — JSON persists only enumerable own properties; it would be silently dropped (FR-009)`,
-          );
-        }
-      }
-
-      for (const key of enumerable) {
-        if (POLLUTION_KEYS.has(key)) {
-          throw new Error(
-            `${operation}: ${path} has key ${JSON.stringify(key)} — toJson filters it as a prototype-pollution vector, so it would be silently dropped from the persisted record (FR-009)`,
-          );
-        }
-        if (RESERVED_TAG_KEYS.has(key)) {
-          throw new Error(
-            `${operation}: ${path} has literal reserved tag key ${JSON.stringify(key)} — it is unambiguous only as serialize.ts's internal marker; in a plain event object it would round-trip as a different type or vanish (FR-009)`,
-          );
-        }
-        // Accessor properties (an own descriptor carrying a `get`) are
-        // rejected BY INSPECTION — fail closed, never by invoking the
-        // getter. A getter's value is only observable by calling it, which
-        // the pre-scan refuses to do (it may throw, have side effects, or
-        // return a different value than `toJson`'s own Get would observe),
-        // so an accessor's losslessness can never be verified — refusal is
-        // the only sound verdict, even when the getter would return
-        // JSON-safe data.
-        const descriptor = Object.getOwnPropertyDescriptor(obj, key);
-        if (descriptor !== undefined && "get" in descriptor) {
-          throw new Error(
-            `${operation}: ${path} has accessor property ${renderPathSegment(key)} — a getter's value is only observable by invoking it, which the losslessness pre-scan refuses to do; toJson would invoke it, so the property's losslessness cannot be verified (FR-009)`,
-          );
-        }
-      }
-
-      for (const key of enumerable) {
-        walk(ownValue(value, key), `${path}${renderPathSegment(key)}`, active, depth + 1);
-      }
-    } finally {
-      active.delete(value);
-    }
-  };
-
-  // Depth 1 = the `event` field's own position in the record tree, exactly
-  // where the read side's raw scan starts counting — the two boundaries
-  // share one depth domain, so a value accepted here is never rejected as
-  // too deep when it is read back.
-  walk(event, root, new Map<object, string>(), 1);
+/** The path of the first `height` segments. */
+const pathAt = (scan: PreScan, height: number): string => {
+  let path = scan.root;
+  for (let i = 0; i < height; i++) path += renderSegment(scan.kinds[i]!, scan.keys[i]!);
+  return path;
 };
+
+const pathOf = (scan: PreScan): string => pathAt(scan, scan.kinds.length);
+
+const refuse = (scan: PreScan, detail: string): Error =>
+  new Error(`${scan.operation}: ${pathOf(scan)} ${detail}`);
+
+const descend = (scan: PreScan, value: unknown, kind: SegmentKind, key: string | number, depth: number): void => {
+  scan.kinds.push(kind);
+  scan.keys.push(key);
+  scanValue(scan, value, depth);
+  scan.kinds.pop();
+  scan.keys.pop();
+};
+
+const isPropertyEnumerable = Object.prototype.propertyIsEnumerable;
+const hasOwn = (value: object, key: PropertyKey): boolean => Object.prototype.hasOwnProperty.call(value, key);
+// Annex B lookups: own data shadows the chain and nothing is invoked or allocated.
+const legacyLookups = Object.prototype as unknown as {
+  readonly __lookupGetter__: (this: object, key: PropertyKey) => unknown;
+  readonly __lookupSetter__: (this: object, key: PropertyKey) => unknown;
+};
+
+/**
+ * Whether `key` is an OWN accessor of `value` — what `"get" in descriptor`
+ * answers, without allocating a descriptor per property. An accessor with
+ * neither get nor set reads as undefined, as an undefined data value does, so
+ * only that case falls back to the descriptor.
+ */
+const isOwnAccessor = (value: object, key: PropertyKey): boolean => {
+  if (!hasOwn(value, key)) return false;
+  if (legacyLookups.__lookupGetter__.call(value, key) !== undefined) return true;
+  if (legacyLookups.__lookupSetter__.call(value, key) !== undefined) return true;
+  return (value as Record<PropertyKey, unknown>)[key] === undefined &&
+    "get" in (Object.getOwnPropertyDescriptor(value, key) ?? {});
+};
+
+/** A scalar: the kinds JSON cannot hold, and in exact mode the numbers it cannot restore. */
+const scanScalar = (scan: PreScan, candidate: unknown): void => {
+  const jsonGap = JSON_GAP_OF_TYPEOF[typeof candidate];
+  if (jsonGap !== null) throw unrepresentableKind(scan.operation, pathOf(scan), jsonGap);
+  if (!scan.exact || typeof candidate !== "number") return;
+  if (!Number.isFinite(candidate)) {
+    throw refuse(scan, `is the non-finite number ${String(candidate)} — JSON writes it as null, so the value cannot be restored exactly (FR-009)`);
+  }
+  if (Object.is(candidate, -0)) {
+    throw refuse(scan, "is -0 — JSON writes it as 0, so the value cannot be restored exactly (FR-009)");
+  }
+};
+
+/** Date/Map/Set carry no own properties of their own: only the instant, entries or items persist. */
+const refuseOwnProperties = (scan: PreScan, value: object, noun: string, persisted: string): void => {
+  const own = Reflect.ownKeys(value);
+  if (own.length > 0) {
+    throw refuse(scan, `is a ${noun} with own property ${renderPathSegment(own[0] as PropertyKey)} — toJson persists only the ${persisted}; the property would be silently dropped (FR-009)`);
+  }
+};
+
+const refuseSubclass = (scan: PreScan, value: object, proto: unknown, standard: object, noun: string): void => {
+  if (proto !== standard) {
+    throw refuse(scan, `is a ${kindName(value)} — a subclassed ${noun} would round-trip as a plain ${noun}; toJson cannot preserve the class (FR-009)`);
+  }
+};
+
+const scanDate = (scan: PreScan, value: Date, proto: unknown): void => {
+  refuseSubclass(scan, value, proto, Date.prototype, "Date");
+  refuseOwnProperties(scan, value, "Date", "instant");
+  if (Number.isNaN(value.getTime())) {
+    throw refuse(scan, "is an invalid Date (NaN instant) — it has no ISO-8601 representation (FR-009)");
+  }
+};
+
+const scanMap = (scan: PreScan, value: Map<unknown, unknown>, proto: unknown, depth: number): void => {
+  refuseSubclass(scan, value, proto, Map.prototype, "Map");
+  refuseOwnProperties(scan, value, "Map", "entries");
+  let index = 0;
+  for (const [k, v] of value.entries()) {
+    descend(scan, k, "map-key", index, depth + 1);
+    descend(scan, v, "map-value", index, depth + 1);
+    index++;
+  }
+};
+
+const scanSet = (scan: PreScan, value: Set<unknown>, proto: unknown, depth: number): void => {
+  refuseSubclass(scan, value, proto, Set.prototype, "Set");
+  refuseOwnProperties(scan, value, "Set", "items");
+  let index = 0;
+  for (const item of value.values()) descend(scan, item, "set-item", index++, depth + 1);
+};
+
+const scanArray = (scan: PreScan, value: readonly unknown[], proto: unknown, depth: number): void => {
+  if (proto !== Array.prototype) {
+    throw refuse(scan, `is a ${kindName(value)} — a subclassed or foreign-realm array would round-trip as a plain array; toJson cannot preserve the class (FR-009)`);
+  }
+  // JSON arrays persist only their indices (0..length-1): symbol keys,
+  // non-enumerable keys, and extra string keys (arr.foo = 1) are all dropped.
+  for (const key of Reflect.ownKeys(value)) {
+    if (key === "length") continue;
+    const isIndex = typeof key === "string" && /^(0|[1-9]\d*)$/.test(key) && Number(key) < value.length;
+    if (!isIndex) {
+      throw refuse(scan, `is an array with own property ${renderPathSegment(key)} — JSON arrays persist only their indices (0..length-1); this property would be silently dropped (FR-009)`);
+    }
+  }
+  for (let i = 0; i < value.length; i++) {
+    if (scan.exact && !hasOwn(value, i)) {
+      throw new Error(`${scan.operation}: ${pathOf(scan)}[${i}] is an array hole — JSON writes it as null, so the array cannot be restored exactly (FR-009)`);
+    }
+    // Index accessors are refused by inspection: the pre-scan never invokes getters.
+    if (isOwnAccessor(value, i)) {
+      throw new Error(`${scan.operation}: ${pathOf(scan)}[${i}] is an array-index accessor — the losslessness pre-scan never invokes getters, and toJson would; the element's losslessness cannot be verified (FR-009)`);
+    }
+    descend(scan, value[i], "index", i, depth + 1);
+  }
+};
+
+/**
+ * Custom `toJSON`, read without invoking anything: an own accessor is refused
+ * outright, an own data `toJSON` when callable, and an inherited one only via
+ * Object.prototype's descriptor (null-proto objects inherit nothing).
+ * `typeof obj.toJSON` would invoke a throwing accessor.
+ */
+const refuseCustomToJson = (scan: PreScan, obj: object, proto: unknown): void => {
+  const own = Object.getOwnPropertyDescriptor(obj, "toJSON");
+  if (own !== undefined && "get" in own) {
+    throw refuse(scan, "has a custom toJSON accessor — JSON.stringify would invoke it and persist its return value instead of the object itself; the losslessness pre-scan never invokes getters, so the object cannot be verified (FR-009)");
+  }
+  // An own descriptor whose `.value` is undefined still wins: deliberately not `??`.
+  const inherited = proto === Object.prototype
+    ? Object.getOwnPropertyDescriptor(Object.prototype, "toJSON")?.value
+    : undefined;
+  if (typeof (own !== undefined ? own.value : inherited) === "function") {
+    throw refuse(scan, "has a custom toJSON method — JSON.stringify would persist the method's return value instead of the object itself (FR-009)");
+  }
+};
+
+/** Every own key a string, enumerable, not filtered or reserved, and a data property. */
+const refuseHiddenOrUnsafeKeys = (scan: PreScan, obj: object, own: readonly PropertyKey[]): void => {
+  // Symbol and non-enumerable keys are invisible to Object.entries AND JSON.stringify.
+  for (const key of own) {
+    if (typeof key === "symbol") {
+      throw refuse(scan, `has symbol-keyed own property ${renderPathSegment(key)} — Object.entries/JSON.stringify never visit symbol keys; it would be silently dropped (FR-009)`);
+    }
+    if (!isPropertyEnumerable.call(obj, key)) {
+      throw refuse(scan, `has non-enumerable own property ${renderPathSegment(key)} — JSON persists only enumerable own properties; it would be silently dropped (FR-009)`);
+    }
+  }
+  for (const key of own as readonly string[]) {
+    if (POLLUTION_KEYS.has(key)) {
+      throw refuse(scan, `has key ${JSON.stringify(key)} — toJson filters it as a prototype-pollution vector, so it would be silently dropped from the persisted record (FR-009)`);
+    }
+    if (RESERVED_TAG_KEYS.has(key)) {
+      throw refuse(scan, `has literal reserved tag key ${JSON.stringify(key)} — it is unambiguous only as serialize.ts's internal marker; in a plain event object it would round-trip as a different type or vanish (FR-009)`);
+    }
+    // Refused by inspection, never by invoking the getter: its value is unverifiable.
+    if (isOwnAccessor(obj, key)) {
+      throw refuse(scan, `has accessor property ${renderPathSegment(key)} — a getter's value is only observable by invoking it, which the losslessness pre-scan refuses to do; toJson would invoke it, so the property's losslessness cannot be verified (FR-009)`);
+    }
+  }
+};
+
+const scanPlainObject = (scan: PreScan, value: object, proto: unknown, depth: number): void => {
+  // WeakMap, WeakSet, RegExp, Promise, class instances, typed arrays, boxed
+  // primitives, cross-realm Date/Map/Set/array: Object.entries funnels them to `{}`.
+  if (proto !== Object.prototype && proto !== null) {
+    throw refuse(scan, `has kind ${kindName(value)} — only primitives, plain objects, arrays, and Date/Map/Set instances with their standard prototypes are representable losslessly (FR-009)`);
+  }
+  if (scan.exact && proto === null) {
+    throw refuse(scan, "is a null-prototype object — it is restored as a plain object, so it cannot be restored exactly (FR-009)");
+  }
+  refuseCustomToJson(scan, value, proto);
+  // Order-equal to Object.keys once refuseHiddenOrUnsafeKeys has passed.
+  const own = Reflect.ownKeys(value) as readonly string[];
+  refuseHiddenOrUnsafeKeys(scan, value, own);
+  // Every key is now an own enumerable data property: reading it invokes nothing.
+  for (const key of own) descend(scan, (value as Record<string, unknown>)[key], "key", key, depth + 1);
+};
+
+/** Cycle and depth guards, then dispatch on the container's kind. */
+const scanValue = (scan: PreScan, candidate: unknown, depth: number): void => {
+  if (typeof candidate !== "object" || candidate === null) return scanScalar(scan, candidate);
+  // A node revisited through its own descendants is a cycle. Sibling sharing
+  // is not (JSON duplicates shared subtrees), so the entry leaves with the subtree.
+  const ancestor = scan.active.get(candidate);
+  if (ancestor !== undefined) {
+    const path = pathOf(scan);
+    throw new Error(`${scan.operation}: circular reference at ${path} — ${pathAt(scan, ancestor)} is an ancestor of ${path}; JSON cannot represent object cycles (FR-009)`);
+  }
+  // Depth counts from the record root exactly like the read side (the event
+  // value sits at depth 1), and the ceiling sits far below the engine's
+  // call-stack overflow threshold, so this recursion is always safe.
+  if (depth > MAX_SAFE_RECORD_DEPTH) {
+    throw new Error(`${scan.operation}: ${scan.root} nesting exceeds the safe depth ceiling ${MAX_SAFE_RECORD_DEPTH} at ${pathOf(scan)} (depth ${depth}) — deeper values would overflow the serializer's recursive walks; refusing to persist a value the write boundary cannot safely verify (FR-009)`);
+  }
+  scan.active.set(candidate, scan.kinds.length);
+  try {
+    const proto: unknown = Object.getPrototypeOf(candidate);
+    if (candidate instanceof Date) return scanDate(scan, candidate, proto);
+    if (candidate instanceof Map) return scanMap(scan, candidate, proto, depth);
+    if (candidate instanceof Set) return scanSet(scan, candidate, proto, depth);
+    if (Array.isArray(candidate)) return scanArray(scan, candidate, proto, depth);
+    return scanPlainObject(scan, candidate, proto, depth);
+  } finally {
+    scan.active.delete(candidate);
+  }
+};
+
+type PreScanLabels = { readonly operation: string; readonly root: string };
+
+const EVENT_LABELS: PreScanLabels = { operation: "serializeFileEventRecord", root: "event" };
+
+const preScan = (value: unknown, labels: PreScanLabels, exact: boolean): void => {
+  const scan: PreScan = { ...labels, exact, kinds: [], keys: [], active: new Map() };
+  // Depth 1 = the `event` field's own position in the record tree, exactly
+  // where the read side's raw scan starts counting.
+  scanValue(scan, value, 1);
+};
+
+/**
+ * FR-009 write-boundary pre-scan: recursively verify that `event` is
+ * representable losslessly by `toJson`. Runs FIRST in
+ * `serializeFileEventRecord` so a value the serializer would silently drop
+ * or mutate is rejected BEFORE any JSON is produced. The round-trip check
+ * cannot see these losses — `serializeValue` strips/drops identically on
+ * both comparison sides — so the pre-scan makes silent loss
+ * unrepresentable at the write boundary.
+ *
+ * Throws a typed `FrameworkError` (`cache-error`, operation
+ * `assertLosslessEvent`) naming the offending kind and path on ANY of:
+ *
+ *   a. symbol-keyed own properties, at any depth (objects and arrays);
+ *   b. non-enumerable own properties, at any depth (objects and arrays),
+ *      plus any own property on Date/Map/Set instances (the serializers
+ *      visit only the instant/entries/items);
+ *   c. keys `__proto__`/`constructor`/`prototype` on plain objects
+ *      (`serializeValue` filters them as prototype-pollution vectors);
+ *   d. literal reserved tag keys `__map__`/`__set__`/`__date__`/
+ *      `__undefined__` on plain objects (they are unambiguous only as
+ *      serialize.ts's own markers; a plain event containing one would
+ *      round-trip as a different TYPE or vanish);
+ *   e. values that are not primitives (string/number/boolean/null/
+ *      undefined), plain objects, arrays, Date, Map, or Set with their
+ *      standard prototypes — WeakMap, WeakSet, RegExp, Promise, class
+ *      instances, typed arrays, boxed primitives, symbols, functions,
+ *      BigInt, invalid Dates;
+ *   f. objects with a custom `toJSON` method or a `toJSON` accessor
+ *      (JSON.stringify would write the accessor's/method's return value
+ *      instead of the object; both are detected via descriptors, never by
+ *      invoking the accessor);
+ *   g. circular references (active-chain tracking — a node revisited
+ *      through its own descendants; sibling sharing is not a cycle);
+ *   h. own accessor properties — get and/or set — at any depth: plain-object
+ *      keys and array indices. The pre-scan NEVER invokes getters (they may
+ *      throw, have side effects, or return a different value to `toJson`'s
+ *      own Get), so an accessor's value is unverifiable and the property is
+ *      refused BY INSPECTION — fail closed, even when the getter would
+ *      return JSON-safe data.
+ *   i. values nested past `MAX_SAFE_RECORD_DEPTH` (the codec's shared
+ *      depth ceiling, 512) — a hostile caller event nested ~20k-50k deep
+ *      previously overflowed this recursive walk and escaped as a raw
+ *      RangeError with no FR-009 context. The ceiling throws the
+ *      contextual typed boundary error naming the path and depth; depth counts
+ *      from the record root (the event value sits at depth 1), exactly
+ *      like the read side, so the write boundary can never emit a record
+ *      the strict reader rejects on depth, and every recursion this walk
+ *      admits (serializeValue, deepJsonEqual, deserializeValue) stays far
+ *      below the engine's call-stack overflow threshold.
+ *
+ * Allowed: primitives, plain objects, arrays, Map/Set (entries validated
+ * recursively), valid Dates — all with DATA properties only (no own
+ * accessors anywhere), nested no deeper than `MAX_SAFE_RECORD_DEPTH`.
+ * Non-finite numbers are deliberately deferred to the
+ * round-trip check (JSON coerces NaN/±Infinity to `null`, which the
+ * deep-equal rejects); the one ACCEPTED coercion (`-0` → `0`) is stated
+ * in the module header.
+ *
+ * The walk allocates nothing per value it accepts (`PreScan`), so its cost
+ * is the traversal itself, not a copy of the value's shape (ADR-0091).
+ *
+ * `labels` names the operation and root for rejection messages so a shared
+ * walk can serve sibling codecs without misattributing their failures to
+ * `serializeFileEventRecord` (the checkpoint codec passes its own labels;
+ * the event codec relies on the defaults, keeping its messages identical).
+ */
+const assertLosslessEventUnchecked = (event: unknown, labels: PreScanLabels = EVENT_LABELS): void =>
+  preScan(event, labels, false);
 
 /** Public typed throwing shell for the losslessness pre-scan. */
 export const assertLosslessEvent = (
@@ -749,6 +812,32 @@ export const assertLosslessEvent = (
   } catch (error) {
     // Deterministic: re-running the pre-scan on the same value reproduces it.
     throw fileOperationError("assertLosslessEvent", "event payload", error, "permanent");
+  }
+};
+
+/**
+ * Verify, in one walk and without serializing, that `fromJson(toJson(value))`
+ * is deep-strictly-equal to `value` (`node:util` `isDeepStrictEqual`): the
+ * `assertLosslessEvent` inventory, plus the four values JSON restores as a
+ * different value — a non-finite number (written as `null`), `-0` (written
+ * as `0`), an array hole (written as `null`) and a null-prototype object
+ * (restored with `Object.prototype`). A writer that must persist exactly
+ * what it was given checks this before `toJson`, instead of parsing its
+ * own bytes back into a second copy of the value to compare (ADR-0091).
+ * `file-lossless-prescan-parity.test.ts` holds the equivalence.
+ *
+ * Throws a typed `FrameworkError` (`cache-error`, operation
+ * `assertExactRoundTrip`) naming the offending kind and path.
+ */
+export const assertExactRoundTrip = (
+  value: unknown,
+  labels: { operation: string; root: string } = { operation: "assertExactRoundTrip", root: "value" },
+): void => {
+  try {
+    preScan(value, labels, true);
+  } catch (error) {
+    // Deterministic: the same value fails identically on every retry.
+    throw fileOperationError("assertExactRoundTrip", "value", error, "permanent");
   }
 };
 
