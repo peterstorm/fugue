@@ -195,7 +195,7 @@ describe("createWorkerLifecycle: ensureWorker (FR-014, AD-7, FR-004)", () => {
     });
 
     // Two requests race for a cold tenant before either spawn completes. The
-    // spawn-seam single-flight (`inFlightSpawns`) must collapse them onto ONE
+    // spawn-seam single-flight (`spawnSingleFlight`) must collapse them onto ONE
     // `lazySpawn` — else both bind the same UDS (contention, double-charged slot,
     // an orphan). Both callers still get the SAME live socket.
     const [r1, r2] = await Promise.all([lc.ensureWorker(tid("acme")), lc.ensureWorker(tid("acme"))]);
@@ -882,7 +882,7 @@ describe("createWorkerLifecycle: liveness sweep for re-adopted workers (SC-006, 
     });
     await lc.reconcileReadopt();
 
-    // Tick 1 starts and parks on the probe gate while holding `livenessSweepRunning`.
+    // Tick 1 starts and parks on the probe gate while holding the `livenessSweeps` guard.
     // Tick 2 starts WHILE tick 1 is in-flight: the guard must early-return [] WITHOUT
     // probing or driving a second onCrash for the same dead worker.
     const tick1 = lc.livenessSweep();

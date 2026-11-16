@@ -98,6 +98,8 @@ gates, freshness-aware state management, and production observability.
 |------|------------|
 | **Tenant Purge Lease** | Runtime-proven reservation of one exact deregistration tombstone. The registry refuses revival/reconfiguration while the lease is active; only its holder may hard-delete after all idempotent footprint steps succeed. Partial failure releases the lease but retains the tombstone for retry. |
 | **Tenant-Owned Root** | A canonical filesystem path rooted at the tenant-id namespace: `fsRoot` is `/srv/<tenantId>` or a descendant; `dagsRoot` is `/dags/<tenantId>` or a descendant. Registration rejects host paths, aliases, and sibling-tenant roots before either recursive purge or DAG discovery can receive them. |
+| **Worker Table** | The supervisor's per-tenant worker bookkeeping (`packages/host/src/supervisor/lifecycle/worker-table.ts`): worker states, the sticky watched-tenant set and restart budgets, changed only through named operations. `reserve` claims a tenant's slot synchronously before any await; `release` drops it before a worker is signalled; a watched tenant is never unwatched. |
+| **Worker Lifecycle Decisions** | The pure core of the worker lifecycle (`packages/host/src/supervisor/lifecycle/worker-lifecycle-decisions.ts`): the crash-restart budget, the registry record a worker state persists as, how a re-adopted record resumes, and the signal plan (and orphan risk) for each stop reason. |
 
 ### Observability
 
@@ -287,8 +289,14 @@ The host is the **imperative shell** that wires the framework into a production 
 | `packages/host/src/lifecycle/startup.ts` | Boot sequence: Redis ping → clone → load |
 | `packages/host/src/lifecycle/signals.ts` | SIGTERM/SIGINT → drain → stop |
 | `packages/host/src/lifecycle/redis-probe.ts` | Post-boot Redis liveness probe → degraded/recovered transitions |
+| `packages/host/src/lifecycle/owned.ts` | `Owned<T>` one-shot ownership cell: a resource is released only by `take()`, so teardown cannot stop it twice |
 | `packages/host/src/host.ts` | Top-level imperative shell wiring all subsystems; shutdown attempts every owned teardown step, rejects with an `AggregateError` when any step fails, and memoizes that terminal outcome for idempotent callers |
 | `packages/host/src/main.ts` | Binary entry point (process.exit, real Redis, real git) |
+
+| Term | Definition |
+|------|------------|
+| **Host Runtime** | The live state a booted host shares with its router, sync loop, Redis probe and drain: the `HostState`, the concurrency state and the circuit-breaker table. Read and replaced while the host serves; never released. |
+| **Host Resources** | Everything boot acquires (HTTP server, sync loop, Redis probe, signal handle, connected capabilities, the running HITL engine), one `Owned` cell each. Teardown and shutdown reach a resource only by taking it, so each is released at most once. |
 
 **HITL subsystem (`packages/host/src/hitl/`).** Durable human-review suspend/resume (ADR-0060).
 
