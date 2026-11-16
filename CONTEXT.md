@@ -32,6 +32,7 @@ gates, freshness-aware state management, and production observability.
 | **Transition** | A pure function that computes the next (phase, context) from (phase, event, context). No I/O. |
 | **JobLike** | Durable job handle: `updateData`, `updateProgress`, `appendEvent`. Backed by in-memory, BullMQ+Redis, or the file backend (`@fuguejs/framework/file` subpath). |
 | **Checkpoint** | A persisted snapshot of node outputs for crash-resume. |
+| **Node State Record** | A persisted checkpoint node record whose `nodeId` and `completedAt` grammar `parseNodeStateRecord` has proven, with `output` still in its stored form; JSON backends use it as the node state, the file codec decodes the output first (`packages/framework/src/checkpoint/checkpointer.ts`). |
 | **Fingerprint** | A content-hash of DAG topology + predicate versions. Detects shape drift between checkpoint write and resume. |
 | **FrameworkVersion** | Content-hash of the framework's runtime semantics (validation, retry, coercion). Resume rejects checkpoints from a different version to prevent silent behavioral drift. |
 
@@ -90,6 +91,8 @@ gates, freshness-aware state management, and production observability.
 | **Run Execution Fence** | Opaque, run-bound generation capability for one deadline-bounded HITL slice. Redis stores its unguessable token under a millisecond-TTL key; checkpoint commit atomically requires both the live Run Lease token and the live execution token. A write admitted before timeout but reaching commit afterward therefore fails closed, and a replacement slice invalidates stale in-flight writes by publishing a new generation. |
 | **Pending Review Delivery** | Durable gate-notification state: `notification-required` until delivery succeeds, then atomically `notified`. Failed delivery remains retriable and cannot produce a suspended but unnotified run. Team-routed delivery fails closed when the Run Owner Team has no stored conversation; it never falls back to another/default channel. |
 | **Run Publication Uncertainty** | A conservative accepted creation outcome used when Redis metadata acknowledgement is lost and exact removal/absence cannot be proved. Acceptance requires either published metadata or a confirmed **Run Creation Intent** in the active index, so wakeup/reconciliation can always reconstruct the queued run. |
+| **Queued-Run Admission** | The per-tenant HITL queue-depth policy, resolved once when the run service is constructed: `unlimited` (no ceiling; active runs are never counted) or `bounded` (ceiling, tenant, parsed Retry-After) (`packages/host/src/hitl/service.ts`). |
+| **Run Lock Claim** | Outcome of a wakeup's single-flight lock attempt: `acquired` (holds the lease token) or `deferred` (another worker holds it and the wakeup was re-enqueued) (`packages/host/src/hitl/adapters/run-queue.ts`). |
 | **Run Creation Intent** | A losslessly serialized Redis checkpoint envelope containing the initial lifecycle metadata and framework checkpoint. It starts as a non-runnable preparation; only an explicitly promoted recovery intent may substitute for missing metadata after an ambiguous publication acknowledgement. |
 
 ### Multi-Tenant Lifecycle
@@ -99,7 +102,9 @@ gates, freshness-aware state management, and production observability.
 | **Tenant Purge Lease** | Runtime-proven reservation of one exact deregistration tombstone. The registry refuses revival/reconfiguration while the lease is active; only its holder may hard-delete after all idempotent footprint steps succeed. Partial failure releases the lease but retains the tombstone for retry. |
 | **Tenant-Owned Root** | A canonical filesystem path rooted at the tenant-id namespace: `fsRoot` is `/srv/<tenantId>` or a descendant; `dagsRoot` is `/dags/<tenantId>` or a descendant. Registration rejects host paths, aliases, and sibling-tenant roots before either recursive purge or DAG discovery can receive them. |
 | **Worker Table** | The supervisor's per-tenant worker bookkeeping (`packages/host/src/supervisor/lifecycle/worker-table.ts`): worker states, the sticky watched-tenant set and restart budgets, changed only through named operations and keyed by each state's own tenant. `reserve` accepts only a `spawning` state, claims its tenant's slot synchronously before any await, and refuses while the tenant's entry still holds a process; `release` drops it before a worker is signalled; a watched tenant is never unwatched. |
-| **Worker Lifecycle Decisions** | The pure core of the worker lifecycle (`packages/host/src/supervisor/lifecycle/worker-lifecycle-decisions.ts`): spawn clearance, when a drain is overdue for a hard stop, the crash-restart budget, the registry record a worker state persists as, how a re-adopted record resumes and the pure state it lands as, and the signal plan (and orphan risk) for each stop reason. |
+| **Worker Lifecycle Decisions** | The pure core of the worker lifecycle (`packages/host/src/supervisor/lifecycle/worker-lifecycle-decisions.ts`): spawn clearance (a tenant whose worker still holds its socket — live or draining — cannot get a replacement until it exits), when a drain is overdue for a hard stop, the spawn env, the crash-restart budget, the registry record a worker state persists as, how a re-adopted record resumes and the pure state it lands as, and the signal plan (and orphan risk) for each stop reason. |
+| **Spawn Env** | The per-tenant env overrides a worker spawn carries: the tenant's `extraEnv` with the Redis ACL credential, `FUGUE_MAX_QUEUED_RUNS` and `DAGS_LOCAL_PATH` laid over it (`composeSpawnEnv` in `packages/host/src/supervisor/lifecycle/worker-lifecycle-decisions.ts`). |
+| **Tenant Config Fault** | The typed invariant a tenant config body violates (empty team, non-tenant-owned fsRoot/dagsRoot, empty Keycloak client, empty agent client id, invalid admission limits), produced by `parseTenantConfig` and rendered as `config-invalid` at the `tenantConfig` boundary (`packages/host/src/supervisor/registry/tenant-registry.ts`). |
 
 ### Observability
 
@@ -152,6 +157,8 @@ gates, freshness-aware state management, and production observability.
 |------|-----------|
 | **QueueBackend** | Port: `createQueue`, `createWorker`, `close`. Two adapters: in-memory, BullMQ. |
 | **WorkerHandle** | `onFailed`, `onExhausted`, `onError`, `close`. Queue-level retry is distinct from DAG-level retry. |
+| **Worker Registration** | One `createWorker` call on the in-memory backend: the processor plus the handlers registered on that handle. The handlers leave with it on `backend.close()`, `worker.close()` or a replacing `createWorker` (`packages/framework/src/queue/in-memory.ts`). |
+| **Checked** | An accumulating CLI parse result: the parsed value, or a non-empty list of every problem found. Independent checks combine with `all`, which keeps argument order (`packages/framework/src/cli/arg-parsing.ts`). |
 | **CronScheduler** | Drives periodic DAG runs via a registry of `TaskConfig` entries with cron expressions. |
 | **DeadLetterNotifier** | Called when a job exhausts all queue-level attempts. |
 
@@ -317,3 +324,10 @@ The host is the **imperative shell** that wires the framework into a production 
 | `packages/host/src/adapters/graph-capability.ts` | Identity-scoped MS Graph document capability |
 | `packages/host/src/adapters/run-spend-authority.ts` / `metered-llm.ts` | One run-scoped spend authority shared by every marked LLM client; thin client decorators delegate to it |
 | `packages/host/src/adapters/broker-audit.ts` | Audit trail for brokered capability grants |
+
+| Term | Definition |
+|------|------------|
+| **Token Cell** | Single-flight, freshness-cached cell of minted tokens for one egress (`packages/host/src/adapters/token-cell.ts`). `obtain` reuses a fresh token, joins an in-flight acquisition, or leads one; its only write happens after the await against the live cache, so a lost update is unrepresentable, and it never rejects. |
+| **Capability Gate** | The broker's pure fail-closed policy decision per declared capability (`packages/host/src/domain/capability-gate.ts`): pass-through, refused (scope-not-assigned / dynamics-org-host-unset), or gated with its downstream audience. The broker shell writes the audit record. |
+| **Authority Legs** | The pure plan saying which broker legs (Keycloak SA mint, Entra WIF + Graph) are wired live from their own config, and naming the missing config for an unwired one (`packages/host/src/domain/authority-legs.ts`). |
+| **Responses Body** | A parsed OpenAI Responses 200 body: the schema-derived document plus the JSON exactly as received, kept for diagnostics (`packages/framework/src/llm/openai-types.ts`). A non-JSON body and JSON of the wrong shape are distinct failures. |

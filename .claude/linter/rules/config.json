@@ -719,7 +719,10 @@
     "packages/framework/src/scheduler/diff.ts",
     "packages/framework/src/dag-runtime/fan/",
     "packages/host/src/supervisor/lifecycle/worker-lifecycle-decisions.ts",
-    "packages/host/src/supervisor/lifecycle/worker-lifecycle.ts"
+    "packages/host/src/supervisor/lifecycle/worker-lifecycle.ts",
+    "packages/framework/src/cli/arg-parsing.ts",
+    "packages/framework/src/file/append-plan.ts",
+    "packages/host/src/supervisor/secrets/redis-acl.ts"
   ],
   "impureModules": [
     {
