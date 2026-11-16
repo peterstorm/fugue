@@ -1,6 +1,6 @@
 /**
  * Tests for the worker-lifecycle functional core (worker-lifecycle-decisions.ts):
- * the crash-restart budget, the durable-record derivation, the re-adoption
+ * spawn clearance, the crash-restart budget, the durable-record derivation, the re-adoption
  * decision and the stop-signal plans. Pure functions over plain data — no fakes,
  * no clock; fast-check properties for the invariants, examples for the tables.
  */
@@ -14,6 +14,7 @@ import type { WorkerState } from "../../../supervisor/lifecycle/worker-lifecycle
 import type { WorkerRecord } from "../../../supervisor/lifecycle/worker-registry-redis.js";
 import type { RestartBudget } from "../../../supervisor/lifecycle/thin-init.js";
 import {
+  spawnClearance,
   decideCrashRestart,
   workerRecordOf,
   decideAdoption,
@@ -64,6 +65,32 @@ const workerRecordArb: fc.Arbitrary<WorkerRecord> = fc.record({
   startedAt: instantArb,
   health: fc.constantFrom("live" as const, "draining" as const),
   eagerPin: fc.boolean(),
+});
+
+// ── spawnClearance ───────────────────────────────────────────────────────────
+
+describe("spawnClearance (pure)", () => {
+  test("a tenant with no entry is clear to spawn", () => {
+    expect(spawnClearance(undefined)).toEqual({ kind: "clear" });
+  });
+
+  test("a draining worker blocks its replacement", () => {
+    const draining: WorkerState = {
+      phase: "draining", tenant: tid("acme"), eagerPin: false, pid: 9, udsPath: "/run/fugue/acme.sock", drainStartedAt: 1,
+    };
+    expect(spawnClearance(draining)).toEqual({ kind: "blocked", by: "draining" });
+  });
+
+  test("property: a spawn is blocked exactly while the entry still holds the tenant's socket, and names its phase", () => {
+    fc.assert(
+      fc.property(workerStateArb, (state) => {
+        const clearance = spawnClearance(state);
+        const holdsSocket = lifecycleAdt.udsPathOf(state) !== undefined;
+        expect(clearance.kind === "blocked").toBe(holdsSocket);
+        if (clearance.kind === "blocked") expect(clearance.by).toBe(state.phase);
+      }),
+    );
+  });
 });
 
 // ── decideCrashRestart ───────────────────────────────────────────────────────

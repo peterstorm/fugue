@@ -25,8 +25,9 @@ export interface WorkerTable {
    * other phase). Call it SYNCHRONOUSLY after the admission check and BEFORE
    * any `await`: the claim is what makes check-then-reserve atomic on Bun's
    * single thread, so concurrent first requests for distinct cold tenants
-   * cannot all pass the cap (multi-tenant spec FR-033). Whatever entry the
-   * tenant had is superseded.
+   * cannot all pass the cap (multi-tenant spec FR-033). Admission
+   * (`spawnClearance`) has already refused a tenant whose entry holds a
+   * process, so only a process-less entry is superseded.
    */
   readonly reserve: (spawning: SpawningState) => void;
   /** Land the next pure state for its tenant (a transition result, or an adoption). */

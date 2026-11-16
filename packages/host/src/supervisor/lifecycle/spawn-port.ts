@@ -118,7 +118,9 @@ export interface WorkerLifecyclePort {
   /**
    * Ensure a live worker exists for `tenant` and return its UDS path. Lazy-spawns
    * on first request (AD-7). Fail-closed: `worker-unavailable(tenant)` if it
-   * cannot be brought up (contained to this tenant only — AD-8).
+   * cannot be brought up (contained to this tenant only — AD-8), including while
+   * the tenant's previous worker is still draining — it holds the tenant's one
+   * socket until it exits (multi-tenant spec FR-004/FR-017).
    */
   readonly ensureWorker: (tenant: TenantId) => Promise<Result<EnsuredWorker, HostError>>;
   /** Begin graceful drain of a tenant's worker (live → draining → stop, multi-tenant spec FR-017). */

@@ -40,7 +40,7 @@ import type { LogPort } from "../../ports.js";
 import { workerSocketPath } from "../../domain/config.js";
 import * as lifecycleAdt from "./worker-lifecycle.js";
 import type { WorkerState } from "./worker-lifecycle.js";
-import { decideCrashRestart, workerRecordOf, adoptedState, stopPlan } from "./worker-lifecycle-decisions.js";
+import { spawnClearance, decideCrashRestart, workerRecordOf, adoptedState, stopPlan } from "./worker-lifecycle-decisions.js";
 import type { SignalStep, StopReason } from "./worker-lifecycle-decisions.js";
 import { createWorkerTable } from "./worker-table.js";
 import type { WorkerTable } from "./worker-table.js";
@@ -343,11 +343,21 @@ const waitForUds = async (ctx: LifecycleCtx, record: WorkerRecord): Promise<bool
 // ── Spawn path ───────────────────────────────────────────────────────────────
 
 /**
- * Spawn admission: refuse if at the live-worker ceiling (T9 count primitive),
- * and refuse a tenant with no active spawn config (fail closed).
+ * Spawn admission: refuse while the tenant's current worker still holds its
+ * socket (`spawnClearance` — a request during a drain waits for the exit),
+ * refuse at the live-worker ceiling (T9 count primitive), and refuse a tenant
+ * with no active spawn config (fail closed).
  */
 const admitSpawn = (ctx: LifecycleCtx, tenant: TenantId): Result<TenantSpawnConfig, HostError> => {
   const { config, logger } = ctx;
+  const clearance = spawnClearance(ctx.workers.get(tenant));
+  if (clearance.kind === "blocked") {
+    logger.warn("[worker-lifecycle] tenant's worker still holds its socket — refusing a replacement until it exits", {
+      tenant,
+      phase: clearance.by,
+    });
+    return err(workerUnavailable(tenant));
+  }
   if (config.maxLiveWorkers !== undefined && ctx.workers.liveCount() >= config.maxLiveWorkers) {
     logger.warn("[worker-lifecycle] at SUPERVISOR_MAX_LIVE_WORKERS — refusing new worker", { tenant, cap: config.maxLiveWorkers });
     return err(workerUnavailable(tenant));
@@ -629,8 +639,8 @@ const ensureWorker = async (ctx: LifecycleCtx, tenant: TenantId): Promise<Result
     if (touched.ok) ctx.workers.replace(touched.value);
     return ok({ udsPath: existing.udsPath });
   }
-  // No live worker → lazy spawn (a draining/crashed/evicted/spawning entry is
-  // not routable; lazySpawn re-enters spawning for it), coalesced single-flight.
+  // No live worker → lazy spawn, coalesced single-flight. A crashed/evicted
+  // entry is replaced; a draining one is refused at admission until it exits.
   return spawnSingleFlight(ctx, tenant);
 };
 

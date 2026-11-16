@@ -4,6 +4,8 @@
  * plain data out, clock instants passed as values. The manager performs the I/O
  * (signal, registry write, spawn) these decisions describe.
  *
+ *   - `spawnClearance`     — whether a tenant's current entry lets a new worker
+ *                            be spawned for it.
  *   - `decideCrashRestart` — the per-tenant crash-loop budget charge.
  *   - `workerRecordOf`     — the durable registry record a pure state persists as.
  *   - `decideAdoption`     — how a registry record found alive is re-adopted.
@@ -18,6 +20,35 @@ import { adoptLive, adoptDraining } from "./worker-lifecycle.js";
 import type { WorkerRecord } from "./worker-registry-redis.js";
 import { initialRestartBudget, decideSupervisorRestart } from "./thin-init.js";
 import type { RestartBudget } from "./thin-init.js";
+
+// ── Spawn clearance ──────────────────────────────────────────────────────────
+
+/** A process-holding phase: the worker still runs and still owns the tenant's socket. */
+export type ProcessPhase = Extract<WorkerState["phase"], "live" | "draining">;
+
+export type SpawnClearance =
+  | { readonly kind: "clear" }
+  | { readonly kind: "blocked"; readonly by: ProcessPhase };
+
+const CLEAR: SpawnClearance = { kind: "clear" };
+
+/**
+ * A tenant has exactly one socket (multi-tenant spec FR-004) and one table
+ * entry, so a new worker may be spawned only when the current entry holds no
+ * process. A `draining` worker keeps its socket bound until it exits: a
+ * replacement could not bind it, and superseding the entry would drop the
+ * draining process from the table — its slot uncounted (FR-033), its exit
+ * unobserved. A `live` worker is routed to, never replaced. A `spawning` entry
+ * is the in-flight spawn's own reservation, which the spawn single-flight
+ * already serializes.
+ */
+export const spawnClearance = (current: WorkerState | undefined): SpawnClearance =>
+  current === undefined
+    ? CLEAR
+    : match(current)
+        .with({ phase: P.union("live", "draining") }, (s): SpawnClearance => ({ kind: "blocked", by: s.phase }))
+        .with({ phase: P.union("spawning", "crashed", "evicted") }, () => CLEAR)
+        .exhaustive();
 
 // ── Crash-restart budget ─────────────────────────────────────────────────────
 
