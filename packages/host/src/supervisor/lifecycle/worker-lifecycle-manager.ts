@@ -40,14 +40,20 @@ import type { LogPort } from "../../ports.js";
 import { workerSocketPath } from "../../domain/config.js";
 import * as lifecycleAdt from "./worker-lifecycle.js";
 import type { WorkerState } from "./worker-lifecycle.js";
-import { drainOverdue, decideCrashRestart, workerRecordOf, adoptedState, stopPlan } from "./worker-lifecycle-decisions.js";
-import type { SignalStep, StopReason } from "./worker-lifecycle-decisions.js";
+import {
+  drainOverdue,
+  decideCrashRestart,
+  workerRecordOf,
+  adoptedState,
+  stopPlan,
+  composeSpawnEnv,
+} from "./worker-lifecycle-decisions.js";
+import type { SignalStep, StopReason, SpawnEnvSources } from "./worker-lifecycle-decisions.js";
 import { createWorkerTable } from "./worker-table.js";
 import type { WorkerTable } from "./worker-table.js";
 import { singleFlight, skipIfRunning } from "./single-flight.js";
 import type { SingleFlight, SkipIfRunning } from "./single-flight.js";
 import type { AppliedAclCredential } from "../secrets/redis-acl-provisioner.js";
-import { WORKER_REDIS_ACL_USERNAME_ENV, WORKER_REDIS_ACL_PASSWORD_ENV } from "../secrets/redis-acl.js";
 import type { SpawnPort, ProcManagePort, WorkerLifecyclePort, WorkerHandle, EnsuredWorker } from "./spawn-port.js";
 import type { WorkerRegistry, WorkerRecord, UdsLivenessProbe } from "./worker-registry-redis.js";
 
@@ -59,7 +65,7 @@ import type { WorkerRegistry, WorkerRecord, UdsLivenessProbe } from "./worker-re
  * Kept as a narrow injected view so the manager depends only on what it needs
  * (and can be faked without the whole Redis registry).
  */
-export interface TenantSpawnConfig {
+export interface TenantSpawnConfig extends SpawnEnvSources {
   readonly secretsRef: SecretsRef;
   readonly eagerPin: boolean;
   /**
@@ -91,7 +97,8 @@ export interface TenantSpawnConfig {
    * AUTOMATICALLY. `extraEnv` is reserved for genuinely PER-TENANT overrides (it
    * is applied before — and so cannot override — the mandatory TENANT_ID /
    * FUGUE_SECRETS_REF / WORKER_UDS_DIR bindings). Today no per-tenant override is
-   * sourced, so `spawnConfigFor` leaves it unset.
+   * sourced, so `spawnConfigFor` leaves it unset. `composeSpawnEnv` lays every
+   * platform binding (DAG root, HITL ceiling, Redis ACL credential) over it.
    */
   readonly extraEnv?: Readonly<Record<string, string>>;
 }
@@ -372,52 +379,40 @@ const admitSpawn = (ctx: LifecycleCtx, tenant: TenantId): Result<TenantSpawnConf
 };
 
 /**
- * Build the worker's per-tenant spawn env overrides. Everything is applied via
- * `extraEnv` (which `buildWorkerSpawn` merges OVER the inherited env), so a stray
- * pod-wide inherited value can never override this tenant's configuration.
- *
  * Per-tenant Redis ACL (ADR-0067): when provisioning is wired, mint a FRESH
- * scoped credential and inject it so the worker connects to Redis as its own
- * `~fugue:<tenant>:*` user. The password is local to this call (and the spawn
- * env) — never retained or logged here. On a provisioning failure we RELEASE the
- * reserved slot and fail closed (no worker spawned).
+ * scoped credential so the worker connects to Redis as its own
+ * `~fugue:<tenant>:*` user; `undefined` when provisioning is not wired. The
+ * password is local to this call (and the spawn env) — never retained or logged
+ * here. On a provisioning failure we RELEASE the reserved slot and fail closed
+ * (no worker spawned).
+ */
+const provisionAclCredential = async (
+  ctx: LifecycleCtx,
+  tenant: TenantId,
+): Promise<Result<AppliedAclCredential | undefined, HostError>> => {
+  if (ctx.provisionRedisAcl === undefined) return ok(undefined);
+  const cred = await ctx.provisionRedisAcl(tenant);
+  if (cred.ok) return cred;
+  ctx.logger.error("[worker-lifecycle] redis ACL provisioning failed — refusing spawn (fail-closed)", {
+    tenant,
+    error: formatHostError(cred.error),
+  });
+  ctx.workers.release(tenant);
+  return err(workerUnavailable(tenant));
+};
+
+/**
+ * Build the worker's per-tenant spawn env overrides: provision the ACL
+ * credential (I/O), then compose the env purely (`composeSpawnEnv` — DAG root,
+ * HITL ceiling and credential laid over the tenant's own `extraEnv`).
  */
 const buildSpawnEnv = async (
   ctx: LifecycleCtx,
   tenant: TenantId,
   spawnCfg: TenantSpawnConfig,
 ): Promise<Result<Readonly<Record<string, string>> | undefined, HostError>> => {
-  let extraEnv = spawnCfg.extraEnv;
-  if (ctx.provisionRedisAcl !== undefined) {
-    const cred = await ctx.provisionRedisAcl(tenant);
-    if (!cred.ok) {
-      ctx.logger.error("[worker-lifecycle] redis ACL provisioning failed — refusing spawn (fail-closed)", {
-        tenant,
-        error: formatHostError(cred.error),
-      });
-      ctx.workers.release(tenant);
-      return err(workerUnavailable(tenant));
-    }
-    extraEnv = {
-      ...(extraEnv ?? {}),
-      [WORKER_REDIS_ACL_USERNAME_ENV]: cred.value.username,
-      [WORKER_REDIS_ACL_PASSWORD_ENV]: cred.value.password,
-    };
-  }
-
-  // Per-tenant HITL queue-depth ceiling (ADR-0074): forward the registry's
-  // `maxQueuedRuns` so the worker's HITL service gates `startRun`.
-  if (spawnCfg.maxQueuedRuns !== undefined) {
-    extraEnv = { ...(extraEnv ?? {}), FUGUE_MAX_QUEUED_RUNS: String(spawnCfg.maxQueuedRuns) };
-  }
-
-  // Per-tenant DAG root (ADR-0061 at-rest isolation): forward the registry's
-  // `dagsRoot` as DAGS_LOCAL_PATH so THIS worker globs `dags/**/dag.ts` under its
-  // own team's staged bundle alone — never the whole multi-team tree.
-  if (spawnCfg.dagsRoot !== undefined) {
-    extraEnv = { ...(extraEnv ?? {}), DAGS_LOCAL_PATH: spawnCfg.dagsRoot };
-  }
-  return ok(extraEnv);
+  const cred = await provisionAclCredential(ctx, tenant);
+  return cred.ok ? ok(composeSpawnEnv(spawnCfg, cred.value)) : cred;
 };
 
 /** Start the worker process; a failure releases the reserved slot and fails closed. */

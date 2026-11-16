@@ -1,7 +1,8 @@
 /**
  * Tests for the worker-lifecycle functional core (worker-lifecycle-decisions.ts):
  * spawn clearance, the drain kill deadline, the crash-restart budget, the
- * durable-record derivation, the adopted state and the stop-signal plans. Pure functions over plain data — no fakes,
+ * durable-record derivation, the adopted state, the stop-signal plans and the
+ * spawn-env composition. Pure functions over plain data — no fakes,
  * no clock; fast-check properties for the invariants, examples for the tables.
  */
 
@@ -20,9 +21,15 @@ import {
   drainOverdue,
   adoptedState,
   stopPlan,
+  composeSpawnEnv,
+  MAX_QUEUED_RUNS_ENV,
+  DAGS_LOCAL_PATH_ENV,
   type CrashRestartDecision,
   type StopReason,
+  type SpawnEnvSources,
 } from "../../../supervisor/lifecycle/worker-lifecycle-decisions.js";
+import { WORKER_REDIS_ACL_USERNAME_ENV, WORKER_REDIS_ACL_PASSWORD_ENV } from "../../../supervisor/secrets/redis-acl.js";
+import type { AppliedAclCredential } from "../../../supervisor/secrets/redis-acl-provisioner.js";
 
 const tid = (s: string): TenantId => {
   const r = tenantId(s);
@@ -300,5 +307,94 @@ describe("stopPlan (pure)", () => {
       const firstKill = sigs.indexOf("SIGKILL");
       if (firstKill >= 0) expect(sigs.slice(firstKill).includes("SIGTERM")).toBe(false);
     }
+  });
+});
+
+// ── composeSpawnEnv ──────────────────────────────────────────────────────────
+
+const ACL_USER = WORKER_REDIS_ACL_USERNAME_ENV;
+const ACL_PASS = WORKER_REDIS_ACL_PASSWORD_ENV;
+const PLATFORM_KEYS: readonly string[] = [ACL_USER, ACL_PASS, MAX_QUEUED_RUNS_ENV, DAGS_LOCAL_PATH_ENV];
+
+const envKeyArb = fc.oneof(fc.constantFrom(...PLATFORM_KEYS, "LOG_LEVEL", "FEATURE_X"), fc.stringMatching(/^[A-Z][A-Z_]{0,11}$/));
+const envArb = fc.dictionary(envKeyArb, fc.string({ maxLength: 12 }));
+const sourcesArb: fc.Arbitrary<SpawnEnvSources> = fc.record(
+  {
+    dagsRoot: fc.constantFrom("/dags/acme", "/dags/acme/releases/current"),
+    maxQueuedRuns: fc.nat({ max: 10_000 }),
+    extraEnv: envArb,
+  },
+  { requiredKeys: [] },
+);
+const credArb: fc.Arbitrary<AppliedAclCredential | undefined> = fc.option(
+  fc.record({ username: fc.constantFrom("fugue-acme"), password: fc.string({ minLength: 1, maxLength: 16 }) }),
+  { nil: undefined },
+);
+
+describe("composeSpawnEnv (pure)", () => {
+  const cred: AppliedAclCredential = { username: "fugue-acme", password: "s3cret" };
+
+  test.each([
+    ["nothing applies → no extraEnv at all", {}, undefined, undefined],
+    ["only the tenant's extraEnv → that record as is", { extraEnv: { LOG_LEVEL: "debug" } }, undefined, { LOG_LEVEL: "debug" }],
+    ["an empty extraEnv alone is passed through", { extraEnv: {} }, undefined, {}],
+    ["dagsRoot → DAGS_LOCAL_PATH", { dagsRoot: "/dags/acme" }, undefined, { DAGS_LOCAL_PATH: "/dags/acme" }],
+    ["maxQueuedRuns → FUGUE_MAX_QUEUED_RUNS (0 is a ceiling, not absence)", { maxQueuedRuns: 0 }, undefined, { FUGUE_MAX_QUEUED_RUNS: "0" }],
+    ["an ACL credential → both ACL vars", {}, cred, { [ACL_USER]: "fugue-acme", [ACL_PASS]: "s3cret" }],
+    [
+      "every platform binding wins over a colliding extraEnv key",
+      {
+        dagsRoot: "/dags/acme",
+        maxQueuedRuns: 7,
+        extraEnv: { DAGS_LOCAL_PATH: "/etc", FUGUE_MAX_QUEUED_RUNS: "999", [ACL_USER]: "default", [ACL_PASS]: "x", KEEP: "1" },
+      },
+      cred,
+      { DAGS_LOCAL_PATH: "/dags/acme", FUGUE_MAX_QUEUED_RUNS: "7", [ACL_USER]: "fugue-acme", [ACL_PASS]: "s3cret", KEEP: "1" },
+    ],
+  ] as const)("%s", (_name, sources: SpawnEnvSources, acl: AppliedAclCredential | undefined, expected) => {
+    expect(composeSpawnEnv(sources, acl)).toEqual(expected);
+  });
+
+  test("with only an extraEnv the same record is returned (no copy)", () => {
+    const extraEnv = { LOG_LEVEL: "debug" };
+    expect(composeSpawnEnv({ extraEnv }, undefined)).toBe(extraEnv);
+  });
+
+  test("property: every present source sets its key, an absent one adds none, and platform values win", () => {
+    fc.assert(
+      fc.property(sourcesArb, credArb, (sources, acl) => {
+        const env = composeSpawnEnv(sources, acl);
+        const platform: Record<string, string | undefined> = {
+          [DAGS_LOCAL_PATH_ENV]: sources.dagsRoot,
+          [MAX_QUEUED_RUNS_ENV]: sources.maxQueuedRuns === undefined ? undefined : String(sources.maxQueuedRuns),
+          [ACL_USER]: acl?.username,
+          [ACL_PASS]: acl?.password,
+        };
+        const anyPlatform = Object.values(platform).some((v) => v !== undefined);
+        if (!anyPlatform) {
+          expect(env).toBe(sources.extraEnv);
+          return;
+        }
+        if (env === undefined) throw new Error("a platform binding applies, so an env must exist");
+        for (const [key, value] of Object.entries(platform)) {
+          if (value !== undefined) expect(env[key]).toBe(value);
+          else expect(env[key]).toBe(sources.extraEnv?.[key]);
+        }
+        // Every non-platform key is the tenant's own, unchanged.
+        for (const [key, value] of Object.entries(env)) {
+          if (!PLATFORM_KEYS.includes(key)) expect(value).toBe(sources.extraEnv?.[key]);
+        }
+      }),
+    );
+  });
+
+  test("property: composing never mutates the tenant's extraEnv", () => {
+    fc.assert(
+      fc.property(sourcesArb, credArb, (sources, acl) => {
+        const before = JSON.stringify(sources.extraEnv);
+        composeSpawnEnv(sources, acl);
+        expect(JSON.stringify(sources.extraEnv)).toBe(before);
+      }),
+    );
   });
 });

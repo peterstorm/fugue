@@ -13,6 +13,7 @@
  *                            re-adopted into.
  *   - `stopPlan`           — which signals a stop sends, and how loudly a failed
  *                            one must be reported.
+ *   - `composeSpawnEnv`    — the per-tenant env overrides a spawn carries.
  */
 
 import { match, P } from "ts-pattern";
@@ -21,6 +22,8 @@ import { adoptLive, adoptDraining, holdsProcess } from "./worker-lifecycle.js";
 import type { WorkerRecord } from "./worker-registry-redis.js";
 import { initialRestartBudget, decideSupervisorRestart } from "./thin-init.js";
 import type { RestartBudget } from "./thin-init.js";
+import { WORKER_REDIS_ACL_USERNAME_ENV, WORKER_REDIS_ACL_PASSWORD_ENV } from "../secrets/redis-acl.js";
+import type { AppliedAclCredential } from "../secrets/redis-acl-provisioner.js";
 
 // ── Spawn clearance ──────────────────────────────────────────────────────────
 
@@ -167,3 +170,49 @@ export const stopPlan = (reason: StopReason): readonly SignalStep[] =>
     .with("abort-announced-spawn", () => [KILL_RECLAIMED])
     .with("hard-stop", () => [POLITE, KILL_RECLAIMED])
     .exhaustive();
+
+// ── Spawn env ────────────────────────────────────────────────────────────────
+
+/** The per-tenant spawn-config fields that become worker env (a `TenantSpawnConfig` slice). */
+export interface SpawnEnvSources {
+  /** Per-tenant DAG root → `DAGS_LOCAL_PATH` (ADR-0061 at-rest isolation). */
+  readonly dagsRoot?: string;
+  /** HITL queue-depth ceiling → `FUGUE_MAX_QUEUED_RUNS` (ADR-0074). */
+  readonly maxQueuedRuns?: number;
+  /** Per-tenant overrides, applied first so every platform binding above wins. */
+  readonly extraEnv?: Readonly<Record<string, string>>;
+}
+
+/** The env the worker reads its HITL queue-depth ceiling from. */
+export const MAX_QUEUED_RUNS_ENV = "FUGUE_MAX_QUEUED_RUNS";
+/** The env the worker roots its LocalGitAdapter at. */
+export const DAGS_LOCAL_PATH_ENV = "DAGS_LOCAL_PATH";
+
+/**
+ * The worker's per-tenant spawn env overrides (merged by `buildWorkerSpawn` OVER
+ * the inherited env, so a stray pod-wide value never overrides them).
+ *
+ * Precedence: the tenant's own `extraEnv` is the base; the freshly minted
+ * per-tenant Redis ACL credential (ADR-0067), the HITL ceiling and the DAG root
+ * are laid over it, so a per-tenant override can never replace a platform
+ * binding. An absent source adds no key. `undefined` when no source applies
+ * (the spawn then carries no `extraEnv` at all); with only an `extraEnv`, that
+ * same record is returned.
+ */
+export const composeSpawnEnv = (
+  sources: SpawnEnvSources,
+  aclCredential: AppliedAclCredential | undefined,
+): Readonly<Record<string, string>> | undefined => {
+  const platform: Readonly<Record<string, string>> = {
+    ...(aclCredential !== undefined
+      ? {
+          [WORKER_REDIS_ACL_USERNAME_ENV]: aclCredential.username,
+          [WORKER_REDIS_ACL_PASSWORD_ENV]: aclCredential.password,
+        }
+      : {}),
+    ...(sources.maxQueuedRuns !== undefined ? { [MAX_QUEUED_RUNS_ENV]: String(sources.maxQueuedRuns) } : {}),
+    ...(sources.dagsRoot !== undefined ? { [DAGS_LOCAL_PATH_ENV]: sources.dagsRoot } : {}),
+  };
+  if (Object.keys(platform).length === 0) return sources.extraEnv;
+  return { ...sources.extraEnv, ...platform };
+};

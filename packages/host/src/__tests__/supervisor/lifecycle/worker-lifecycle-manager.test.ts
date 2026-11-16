@@ -350,74 +350,22 @@ describe("createWorkerLifecycle: onCrash (FR-015, AD-8 containment)", () => {
   });
 });
 
-// ── Per-tenant Redis ACL provisioning (ADR-0067, AD-6) ──────────────────────────
+// ── Spawn env handoff + per-tenant Redis ACL provisioning (ADR-0061/0067/0074) ──
+//
+// Which keys the env carries, their precedence and their absence are pinned at
+// the pure seam (`composeSpawnEnv`, worker-lifecycle-decisions.test.ts). Here:
+// the manager hands the registry's spawn config and the minted credential to it
+// and the result reaches the spawn spec; a provisioning failure fails closed.
 
-describe("createWorkerLifecycle: per-tenant HITL queue-depth env (ADR-0074)", () => {
-  test("forwards the registry maxQueuedRuns into the worker spawn env (handoff)", async () => {
-    const fake = createInMemoryWorkerRedisFake();
-    const reg = createWorkerRegistry(fake.redis, async () => true);
-    const { spawn, proc, spawned } = makeSpawn();
-    const lc = createWorkerLifecycle({
-      spawn, proc, registry: reg, probe: async () => true,
-      tenants: tenantsView({ acme: { eagerPin: false, maxQueuedRuns: 7 } }),
-      clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
-    });
-    const r = await lc.ensureWorker(tid("acme"));
-    expect(r.ok).toBe(true);
-    // The configured ceiling reached the worker via the spawn env (the handoff),
-    // STRINGIFIED. A regression dropping or mis-stringifying it would silently make
-    // the worker fall back to "unlimited", defeating ADR-0074's durable-path
-    // queue-depth admission — with no other failing test.
-    const spec = spawned[0]!.spec;
-    expect(spec.extraEnv?.["FUGUE_MAX_QUEUED_RUNS"]).toBe("7");
-  });
-
-  test("no maxQueuedRuns configured → env absent (zero-regression default)", async () => {
-    const { lc, spawned } = acmeLifecycle();
-    await lc.ensureWorker(tid("acme"));
-    const spec = spawned[0]!.spec;
-    expect(spec.extraEnv?.["FUGUE_MAX_QUEUED_RUNS"]).toBeUndefined();
-  });
-});
-
-describe("createWorkerLifecycle: per-tenant DAG root env (ADR-0061 at-rest isolation)", () => {
-  test("forwards the registry dagsRoot into the worker spawn env as DAGS_LOCAL_PATH", async () => {
-    const fake = createInMemoryWorkerRedisFake();
-    const reg = createWorkerRegistry(fake.redis, async () => true);
-    const { spawn, proc, spawned } = makeSpawn();
-    const lc = createWorkerLifecycle({
-      spawn, proc, registry: reg, probe: async () => true,
-      tenants: tenantsView({ acme: { eagerPin: false, dagsRoot: "/dags/acme" } }),
-      clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
-    });
-    const r = await lc.ensureWorker(tid("acme"));
-    expect(r.ok).toBe(true);
-    // The tenant's DAG root reached the worker via the spawn env: the worker runs
-    // the LocalGitAdapter rooted HERE and globs ONLY this team's staged bundle. A
-    // regression dropping it would make the worker inherit the pod-wide
-    // DAGS_LOCAL_PATH (the whole multi-team tree), collapsing the at-rest isolation
-    // boundary this field exists to enforce — with no other failing test.
-    const spec = spawned[0]!.spec;
-    expect(spec.extraEnv?.["DAGS_LOCAL_PATH"]).toBe("/dags/acme");
-  });
-
-  test("no dagsRoot configured → env absent (the inherited DAGS_LOCAL_PATH stands)", async () => {
-    const { lc, spawned } = acmeLifecycle();
-    await lc.ensureWorker(tid("acme"));
-    const spec = spawned[0]!.spec;
-    expect(spec.extraEnv?.["DAGS_LOCAL_PATH"]).toBeUndefined();
-  });
-});
-
-describe("createWorkerLifecycle: per-tenant Redis ACL provisioning (ADR-0067)", () => {
-  test("injects the minted ACL credential into the worker spawn env (handoff)", async () => {
+describe("createWorkerLifecycle: spawn env handoff and Redis ACL provisioning", () => {
+  test("the registry's dagsRoot + maxQueuedRuns and the minted ACL credential reach the worker spawn env", async () => {
     const fake = createInMemoryWorkerRedisFake();
     const reg = createWorkerRegistry(fake.redis, async () => true);
     const { spawn, proc, spawned } = makeSpawn();
     const provisioned: TenantId[] = [];
     const lc = createWorkerLifecycle({
       spawn, proc, registry: reg, probe: async () => true,
-      tenants: tenantsView({ acme: { eagerPin: false } }),
+      tenants: tenantsView({ acme: { eagerPin: false, maxQueuedRuns: 7, dagsRoot: "/dags/acme" } }),
       clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
       provisionRedisAcl: async (tenant) => {
         provisioned.push(tenant);
@@ -427,10 +375,21 @@ describe("createWorkerLifecycle: per-tenant Redis ACL provisioning (ADR-0067)", 
     const r = await lc.ensureWorker(tid("acme"));
     expect(r.ok).toBe(true);
     expect(provisioned).toEqual([tid("acme")]);
-    // The minted credential reached the worker via the spawn env (the handoff).
-    const spec = spawned[0]!.spec;
-    expect(spec.extraEnv?.["FUGUE_REDIS_ACL_USERNAME"]).toBe("fugue-tenant-acme");
-    expect(spec.extraEnv?.["FUGUE_REDIS_ACL_PASSWORD"]).toBe("minted-secret-256");
+    // A regression dropping any of these is silent elsewhere: no dagsRoot means the
+    // worker globs the whole multi-team tree; no ceiling means "unlimited" HITL
+    // admission; no credential means the shared default Redis user.
+    expect(spawned[0]!.spec.extraEnv).toEqual({
+      DAGS_LOCAL_PATH: "/dags/acme",
+      FUGUE_MAX_QUEUED_RUNS: "7",
+      FUGUE_REDIS_ACL_USERNAME: "fugue-tenant-acme",
+      FUGUE_REDIS_ACL_PASSWORD: "minted-secret-256",
+    });
+  });
+
+  test("nothing to forward and no provisioner wired: the spawn carries no extraEnv", async () => {
+    const { lc, spawned } = acmeLifecycle();
+    await lc.ensureWorker(tid("acme"));
+    expect(spawned[0]!.spec.extraEnv).toBeUndefined();
   });
 
   test("fails closed (worker-unavailable, NEVER spawns) when ACL provisioning errors", async () => {
@@ -448,13 +407,6 @@ describe("createWorkerLifecycle: per-tenant Redis ACL provisioning (ADR-0067)", 
     if (!r.ok) expect(r.error.kind).toBe("worker-unavailable");
     expect(spawned.length).toBe(0); // never spawned — no worker started without its scoped credential
     expect(lc.liveWorkerCount()).toBe(0);
-  });
-
-  test("no provisioner wired → no ACL env injected (zero-regression default)", async () => {
-    const { lc, spawned } = acmeLifecycle();
-    await lc.ensureWorker(tid("acme"));
-    const spec = spawned[0]!.spec;
-    expect(spec.extraEnv?.["FUGUE_REDIS_ACL_USERNAME"]).toBeUndefined();
   });
 
   // ── FR-033 TOCTOU: the cap holds across the ACL-provisioning await window ──────
