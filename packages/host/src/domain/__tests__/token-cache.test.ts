@@ -246,4 +246,40 @@ describe("effectiveTtlMs — early-refresh margin with a half-lifetime floor", (
       }),
     );
   });
+
+  it("is total over every double: always a finite number >= 0, and 0 exactly for a non-finite or non-positive lifetime", () => {
+    fc.assert(
+      fc.property(fc.double(), (sec) => {
+        const ttl = effectiveTtlMs(sec);
+        expect(Number.isFinite(ttl)).toBe(true);
+        expect(ttl).toBeGreaterThanOrEqual(0);
+        const uncacheable = !Number.isFinite(sec) || sec <= 0;
+        expect(ttl === 0).toBe(uncacheable);
+      }),
+    );
+  });
+
+  it("names the uncacheable lifetimes explicitly: NaN, ±Infinity, 0 and negatives all yield 0", () => {
+    for (const sec of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 0, -0, -1, -86_400]) {
+      expect(effectiveTtlMs(sec)).toBe(0);
+    }
+  });
+});
+
+describe("store — an uncacheable (0 TTL) token is never bound", () => {
+  it("for any lifetime effectiveTtlMs reads as uncacheable, the stored key is a miss at the store instant and the input entry for the key is superseded", () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(fc.constantFrom(Number.NaN, Number.POSITIVE_INFINITY, 0), fc.double({ max: 0 })),
+        fc.nat({ max: 1_000_000 }),
+        (sec, storedAt) => {
+          const key = cacheKey("id", "aud", "scope");
+          const prior = store(emptyCache, key, cacheToken("old", storedAt, 10_000), storedAt);
+          const next = store(prior, key, cacheToken("new", storedAt, effectiveTtlMs(sec)), storedAt);
+          expect(next.entries[key]).toBeUndefined();
+          expect(lookup(next, key, storedAt)).toBeUndefined();
+        },
+      ),
+    );
+  });
 });

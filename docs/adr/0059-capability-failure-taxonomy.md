@@ -135,13 +135,18 @@ mapper. The invariant is: **transport rejection or an unhandled status →
 `infra-unreachable`; a settled 4xx authorization status → `downstream-denied`;
 429/503 throttling → `infra-unreachable` (named as a throttle).**
 
-- **`packages/host/src/adapters/keycloak-broker.ts`** is the ordering authority.
-  The local policy gate in `mintFor` runs first: an unassigned scope returns
-  `policy-refusal` with **zero egress and without reading any cache** (SC-006 /
-  FR-303). Only an assigned scope proceeds to the app-only cache check, the
-  SA mint (first egress), and the WIF exchange (second egress); mint/exchange
-  failures are surfaced verbatim on the `Result` channel and audited as
-  `mint-failed:<kind>`.
+- **`packages/host/src/domain/capability-gate.ts`** owns the ordering decision.
+  The pure `decideGate` runs first for every declared capability: an unassigned
+  scope is refused (surfaced as `policy-refusal`) with **zero egress and
+  without reading any cache** (SC-006 / FR-303). Only a gated (assigned)
+  scope proceeds to the app-only cache check, the SA mint (first egress), and
+  the WIF exchange (second egress).
+  **`packages/host/src/adapters/keycloak-broker.ts`** is the shell around that
+  decision: it audits a refusal and performs the egress for a gated scope;
+  mint/exchange failures are surfaced verbatim on the `Result` channel and
+  audited as `mint-failed:<kind>`. *(Wording amended when the gate was
+  extracted from the broker's `mintFor` into the pure `decideGate`; the
+  decision itself — gate first, fail closed, zero egress — is unchanged.)*
 
 - **`packages/host/src/adapters/entra-wif.ts`** maps the WIF token response:
   `400`/`401`/`403` → `downstream-denied` (FIC mismatch / WIF rejection /

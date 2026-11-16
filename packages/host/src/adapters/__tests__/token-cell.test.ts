@@ -20,6 +20,34 @@ const fresh = (token: string, expiresInSec = 3600): Result<FreshToken<string>, F
 const cellAt = (clock: { now: number }) =>
   createTokenCell<string, Failure>({ now: () => clock.now, onThrow: thrownFailure });
 
+/** A gate an acquisition awaits, so concurrent obtains are all registered before it settles. */
+const gated = (): { readonly gate: Promise<void>; readonly release: () => void } => {
+  let release = (): void => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { gate, release };
+};
+
+/**
+ * Run `body` with an unhandledRejection listener installed, then return every
+ * rejection that escaped (after a tick for stragglers).
+ */
+const unhandledRejectionsDuring = async (body: () => Promise<void>): Promise<readonly unknown[]> => {
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown): void => {
+    unhandled.push(reason);
+  };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    await body();
+    await new Promise((r) => setTimeout(r, 10));
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+  return unhandled;
+};
+
 describe("TokenCell.obtain — reuse while fresh", () => {
   it("the first obtain mints (with the witness), a repeat inside the TTL reuses without acquiring", async () => {
     const clock = { now: 0 };
@@ -73,10 +101,7 @@ describe("TokenCell.obtain — a failed acquisition caches nothing", () => {
 
   it("a THROWING acquisition reaches every waiter as err(onThrow(...)), never as a rejection", async () => {
     const cell = cellAt({ now: 0 });
-    let release = (): void => {};
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
+    const { gate, release } = gated();
     let acquisitions = 0;
     const acquire = async (): Promise<Result<FreshToken<string>, Failure>> => {
       acquisitions += 1;
@@ -84,25 +109,84 @@ describe("TokenCell.obtain — a failed acquisition caches nothing", () => {
       throw new Error("port contract violated");
     };
 
-    const unhandled: unknown[] = [];
-    const onUnhandled = (reason: unknown): void => {
-      unhandled.push(reason);
-    };
-    process.on("unhandledRejection", onUnhandled);
-    try {
+    const unhandled = await unhandledRejectionsDuring(async () => {
       const both = Promise.all([cell.obtain("k", acquire), cell.obtain("k", acquire)]);
       release();
       const expected = err(thrownFailure(new Error("port contract violated")));
       expect(await both).toEqual([expected, expected]);
       expect(acquisitions).toBe(1);
-      await new Promise((r) => setTimeout(r, 10));
-      expect(unhandled).toEqual([]);
-    } finally {
-      process.off("unhandledRejection", onUnhandled);
-    }
+    });
+    expect(unhandled).toEqual([]);
     // The failed flight was cleared: the next obtain leads a fresh acquisition.
     const retry = await cell.obtain("k", async () => fresh("tok"));
     expect(retry.ok && retry.value.acquisition).toBe("minted");
+  });
+});
+
+describe("TokenCell.obtain — total over a throwing clock (never throws, never rejects)", () => {
+  it("a clock that throws at STORE time, after acquire succeeded, reaches both concurrent waiters as err(onThrow(...)) and clears the flight", async () => {
+    // The clock's second read in a lead is the store-time read: `breakAtStore`
+    // arms it once acquire has succeeded, so the throw lands exactly there.
+    let breakAtStore = false;
+    const cell = createTokenCell<string, Failure>({
+      now: () => {
+        if (!breakAtStore) return 0;
+        breakAtStore = false;
+        throw new Error("clock failed at store");
+      },
+      onThrow: thrownFailure,
+    });
+    const { gate, release } = gated();
+    let acquisitions = 0;
+    const acquire = async (): Promise<Result<FreshToken<string>, Failure>> => {
+      acquisitions += 1;
+      await gate;
+      breakAtStore = acquisitions === 1; // only the first, shared flight hits the broken clock
+      return fresh(`tok-${acquisitions}`);
+    };
+
+    const unhandled = await unhandledRejectionsDuring(async () => {
+      const both = Promise.all([cell.obtain("k", acquire), cell.obtain("k", acquire)]);
+      release();
+      const expected = err(thrownFailure(new Error("clock failed at store")));
+      expect(await both).toEqual([expected, expected]);
+      expect(acquisitions).toBe(1);
+    });
+    expect(unhandled).toEqual([]);
+    // Nothing was cached and the failed flight was cleared: the next obtain re-acquires.
+    const retry = await cell.obtain("k", acquire);
+    expect(retry).toEqual(ok({ acquisition: "minted", token: "tok-2", witness: "minted:tok-2" }));
+    expect(acquisitions).toBe(2);
+  });
+
+  it("a clock that throws at LOOKUP time yields err(onThrow(...)) without acquiring, rather than throwing", async () => {
+    let clockBroken = true;
+    const cell = createTokenCell<string, Failure>({
+      now: () => {
+        if (clockBroken) throw new Error("clock failed at lookup");
+        return 0;
+      },
+      onThrow: thrownFailure,
+    });
+    let acquisitions = 0;
+    const acquire = async (): Promise<Result<FreshToken<string>, Failure>> => {
+      acquisitions += 1;
+      return fresh("tok");
+    };
+
+    const obtained = (() => {
+      try {
+        return cell.obtain("k", acquire);
+      } catch (thrown) {
+        return Promise.reject(new Error(`obtain threw synchronously: ${String(thrown)}`));
+      }
+    })();
+    expect(await obtained).toEqual(err(thrownFailure(new Error("clock failed at lookup"))));
+    expect(acquisitions).toBe(0);
+    // No flight was registered: once the clock recovers, the key acquires normally.
+    clockBroken = false;
+    const recovered = await cell.obtain("k", acquire);
+    expect(recovered.ok && recovered.value.acquisition).toBe("minted");
   });
 });
 

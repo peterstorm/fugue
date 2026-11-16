@@ -160,8 +160,9 @@ export type KnownScopesCoverProviders = [_ProvidersCovered];
  *
  * A name that is not a recognised downstream scope reads as `undefined` —
  * first-class ABSENCE, not an error (the same FR-503 shape as
- * `token-cache.ts`'s `lookup`). Every caller (the broker's `mintFor` skip and
- * `provides`, the boot-time `AGENT_CLIENT_SCOPES` validation) asks "is this a
+ * `token-cache.ts`'s `lookup`). Every caller (`decideGate`'s pass-through in
+ * `domain/capability-gate.ts`, the broker's `provides`, the boot-time
+ * `AGENT_CLIENT_SCOPES` validation) asks "is this a
  * downstream scope?", a classification with a routine negative case: plain
  * capability names (`http`, `llm`) and ADR-0051 custom names flow through here
  * on every validation and are simply not scopes. An unknown name in a node's

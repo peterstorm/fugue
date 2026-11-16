@@ -226,9 +226,9 @@ interface BrokerContext {
 
 /**
  * A token cell whose structural backstop maps any throw that escapes the
- * per-port fences (`callPort`) — the injected clock during a store — onto a
- * typed `infra-unreachable`, so the in-flight promise shared with waiters never
- * rejects.
+ * per-port fences (`callPort`) — the injected clock at lookup or store time —
+ * onto a typed `infra-unreachable`, so `obtain` never throws and the in-flight
+ * promise shared with waiters never rejects.
  */
 const brokerTokenCell = (now: () => number, label: string): TokenCell<MintVia, FrameworkError> =>
   createTokenCell<MintVia, FrameworkError>({

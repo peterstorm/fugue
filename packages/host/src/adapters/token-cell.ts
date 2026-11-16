@@ -19,16 +19,18 @@
  *     re-reads the live value at write time, after the `acquire` await. No
  *     caller can hand back a snapshot taken before the await, so a mint for key
  *     A can never clobber a concurrent mint for key B.
- *   - Never rejects: a throwing `acquire` (a port-contract violation) becomes
+ *   - Never rejects, never throws: a throwing `acquire` (a port-contract
+ *     violation) or a throwing clock (at lookup or at store time) becomes
  *     `err(onThrow(thrown))` on the Result channel. The promise shared with
  *     waiters therefore cannot reject and poison them or escape as an
- *     unhandledRejection.
+ *     unhandledRejection, and `obtain` itself never throws synchronously.
  *   - The lookup, the in-flight check and the leader's registration run in one
  *     synchronous step, so no second caller can slip between a miss and the
  *     registration.
  *
- * Cache freshness, the early-refresh margin and the store-time sweep are the
- * pure `token-cache` functions; only the closure cell mutates and the clock is
+ * Cache freshness, the early-refresh margin, the store-time sweep and the
+ * "uncacheable lifetime" rule (a TTL of 0 is never stored) are the pure
+ * `token-cache` functions; only the closure cell mutates and the clock is
  * injected.
  *
  * @satisfies SC-008 FR-503
@@ -72,7 +74,7 @@ export interface TokenCell<W, E> {
 export interface TokenCellDeps<E> {
   /** Injected clock (epoch millis). Read once per lookup and once per store. */
   readonly now: () => number;
-  /** Map a value thrown by `acquire` (or by the clock during the store) onto the error channel. */
+  /** Map a value thrown by `acquire` (or by the clock at lookup or store time) onto the error channel. */
   readonly onThrow: (thrown: unknown) => E;
 }
 
@@ -98,21 +100,29 @@ export const createTokenCell = <W, E>(deps: TokenCellDeps<E>): TokenCell<W, E> =
   };
 
   const obtain: TokenCell<W, E>["obtain"] = (key, acquire) => {
-    const cached = lookup(cache, key, deps.now());
-    if (cached !== undefined) return Promise.resolve(ok({ acquisition: "cache-reuse", token: cached.token }));
+    // Total: the lookup-time clock read is guarded like the store-time one, so a
+    // throwing clock is `err(onThrow(...))`, never a synchronous throw. Nothing
+    // in the guarded step awaits, so the lookup, the in-flight check and the
+    // leader's registration stay one synchronous step.
+    try {
+      const cached = lookup(cache, key, deps.now());
+      if (cached !== undefined) return Promise.resolve(ok({ acquisition: "cache-reuse", token: cached.token }));
 
-    const shared = inFlight.get(key);
-    if (shared !== undefined) {
-      return shared.then((r) => (r.ok ? ok({ acquisition: "cache-reuse", token: r.value.token }) : r));
+      const shared = inFlight.get(key);
+      if (shared !== undefined) {
+        return shared.then((r) => (r.ok ? ok({ acquisition: "cache-reuse", token: r.value.token }) : r));
+      }
+
+      const led = lead(key, acquire);
+      inFlight.set(key, led);
+      // `led` never rejects, so the cleanup derived from it cannot reject either.
+      void led.then(() => {
+        if (inFlight.get(key) === led) inFlight.delete(key);
+      });
+      return led;
+    } catch (thrown) {
+      return Promise.resolve(err(deps.onThrow(thrown)));
     }
-
-    const led = lead(key, acquire);
-    inFlight.set(key, led);
-    // `led` never rejects, so the cleanup derived from it cannot reject either.
-    void led.then(() => {
-      if (inFlight.get(key) === led) inFlight.delete(key);
-    });
-    return led;
   };
 
   return { obtain };
