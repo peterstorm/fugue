@@ -511,14 +511,90 @@ const deserializeAt = (value: unknown, depth: number): unknown => {
 
 /** Deserialize a value produced by serializeValue, restoring Map/Set/Date/undefined. */
 export const deserializeValue = (value: unknown): unknown => deserializeAt(value, 0);
+/** What the streaming replacer remembers about the containers it has passed. */
+interface StreamingWalk {
+  /** Depth of each container's children, counted as `serializeAt` counts it. */
+  readonly childDepth: WeakMap<object, number>;
+  /** Containers the replacer built (tag wrappers, payload arrays, Map entry pairs). */
+  readonly built: WeakSet<object>;
+  /** What an own `toJSON` returned for a copy: `serializeValue` leaves it to plain JSON. */
+  readonly opaque: WeakSet<object>;
+}
+
+/** A tag wrapper and its payload containers, which cost no hop of their own. */
+const tagged = <W extends object>(walk: StreamingWalk, wrapper: W, parts: readonly object[], depth: number): W => {
+  for (const part of [wrapper, ...parts]) {
+    walk.built.add(part);
+    walk.childDepth.set(part, depth);
+  }
+  return wrapper;
+};
+
+/**
+ * JSON.stringify would unbox a boxed primitive or call an object's `toJSON`;
+ * `serializeAt` instead copies own enumerable entries, minus pollution keys,
+ * and JSON.stringify then applies the copy's own `toJSON` if it has one.
+ */
+const ownEntriesCopy = (walk: StreamingWalk, raw: object, key: string, depth: number): unknown => {
+  const copy: Record<string, unknown> = Object.fromEntries(
+    Object.entries(raw).filter(([k]) => !POLLUTION_KEYS.has(k)),
+  );
+  const ownToJson = copy["toJSON"];
+  if (typeof ownToJson !== "function") {
+    walk.childDepth.set(copy, depth);
+    return copy;
+  }
+  const result: unknown = ownToJson.call(copy, key);
+  if (result !== null && typeof result === "object") walk.opaque.add(result);
+  return result;
+};
+
+const isBoxedPrimitive = (raw: object): boolean =>
+  raw instanceof Number || raw instanceof String || raw instanceof Boolean || raw instanceof BigInt;
+
+/**
+ * A JSON.stringify replacer that emits `serializeValue`'s grammar while
+ * stringify walks the original value. It reads the raw holder value, because
+ * what stringify passes in has already been unboxed or `toJSON`-transformed.
+ */
+const streamingReplacer = () => {
+  const walk: StreamingWalk = { childDepth: new WeakMap(), built: new WeakSet(), opaque: new WeakSet() };
+  return function (this: object, key: string, transformed: unknown): unknown {
+    if (walk.opaque.has(this)) {
+      if (transformed !== null && typeof transformed === "object") walk.opaque.add(transformed);
+      return transformed;
+    }
+    if (!Array.isArray(this) && !walk.built.has(this) && POLLUTION_KEYS.has(key)) return undefined;
+    const raw: unknown = (this as Record<string, unknown>)[key];
+    if (raw === undefined) return { [UNDEFINED_TAG]: true } satisfies SerializedUndefined;
+    if (raw === null || typeof raw !== "object") return transformed;
+    if (walk.built.has(raw)) return raw;
+    const next = descend("serializeValue", walk.childDepth.get(this) ?? 0);
+    if (raw instanceof Date) return { [DATE_TAG]: raw.toISOString() } satisfies SerializedDate;
+    if (raw instanceof Map) {
+      const entries: Array<[unknown, unknown]> = [...raw.entries()];
+      return tagged(walk, { [MAP_TAG]: entries } satisfies SerializedMap, [entries, ...entries], next);
+    }
+    if (raw instanceof Set) {
+      const items: unknown[] = [...raw.values()];
+      return tagged(walk, { [SET_TAG]: items } satisfies SerializedSet, [items], next);
+    }
+    walk.childDepth.set(raw, next);
+    if (Array.isArray(raw) || (transformed === raw && !isBoxedPrimitive(raw))) return raw;
+    return ownEntriesCopy(walk, raw, key, next);
+  };
+};
 
 /**
  * Serialize the supported, pre-scanned value domain to JSON storage bytes.
  * Outside that domain, `JSON.stringify` may throw or produce `undefined` at
  * runtime; persistence boundaries must apply their losslessness gate first.
+ *
+ * The bytes are exactly `JSON.stringify(serializeValue(value))`
+ * (serialize-streaming-parity.test.ts is the oracle), but the grammar is
+ * streamed through the replacer, so a large value is never held twice.
  */
-export const toJson = (value: unknown): string =>
-  JSON.stringify(serializeValue(value));
+export const toJson = (value: unknown): string => JSON.stringify(value, streamingReplacer());
 
 /**
  * Deserialize JSON emitted by `toJson` for the supported collision-free,
