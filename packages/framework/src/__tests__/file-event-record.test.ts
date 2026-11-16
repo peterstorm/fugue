@@ -286,6 +286,23 @@ describe("serializeFileEventRecord — round-trip losslessness (FR-009)", () => 
     }
   });
 
+  it("names each unrepresentable kind with the pinned rejection wording, and admits every JSON scalar", () => {
+    const cases: ReadonlyArray<readonly [unknown, string, string]> = [
+      [{ k: 1n }, "event.k", "BigInt"],
+      [{ k: Symbol("x") }, "event.k", "symbol"],
+      [{ k: () => 1 }, "event.k", "function"],
+    ];
+    for (const [event, path, kind] of cases) {
+      const error = contextualError(() => serializeFileEventRecord(0, "", 1, event));
+      expect(error.message).toContain(
+        `serializeFileEventRecord: ${path} is a ${kind} — JSON has no ${kind} representation; refusing to persist a value that would diverge from the caller's event (FR-009)`,
+      );
+    }
+    for (const scalar of [null, "s", 0, 1.5, true, false]) {
+      expect(() => serializeFileEventRecord(0, "", 1, { k: scalar })).not.toThrow();
+    }
+  });
+
   it("rejects a circular event with both ends of the cycle named", () => {
     const circular: Record<string, unknown> = {};
     circular.self = circular;

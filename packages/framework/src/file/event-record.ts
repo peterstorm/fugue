@@ -394,32 +394,43 @@ const unrepresentableKind = (operation: string, path: string, kind: string): Err
     `${operation}: ${path} is a ${kind} — JSON has no ${kind} representation; refusing to persist a value that would diverge from the caller's event (FR-009)`,
   );
 
+/** A JS value kind JSON has no representation for, named as rejections name it. */
+type UnrepresentableKind = "BigInt" | "symbol" | "function";
+
 /**
- * First gate of the write pre-scan walk: `true` for an object the walk must
- * descend into, `false` for a scalar (null/undefined/string/number/boolean)
- * it admits as-is, and a throw for a kind JSON cannot represent — the name
- * is the requirement, and the throw IS the rejection of bigint/symbol/
- * function. Every `typeof` result is matched exhaustively — there is no
- * `default` arm left to hide a kind this walk does not admit.
+ * What the write pre-scan walk does with one value — a pure classification;
+ * the walk alone decides that a rejection throws.
  */
-const requireWalkableObject = (
-  operation: string,
-  path: string,
-  value: unknown,
-): value is object =>
-  match(typeof value)
-    .with("string", "number", "boolean", "undefined", () => false)
-    .with("object", () => value !== null)
-    .with("bigint", () => {
-      throw unrepresentableKind(operation, path, "BigInt");
-    })
-    .with("symbol", () => {
-      throw unrepresentableKind(operation, path, "symbol");
-    })
-    .with("function", () => {
-      throw unrepresentableKind(operation, path, "function");
-    })
+type WalkClassification =
+  | { readonly kind: "scalar" }
+  | { readonly kind: "walkable"; readonly value: object }
+  | { readonly kind: "unrepresentable"; readonly jsonGap: UnrepresentableKind };
+
+const SCALAR: WalkClassification = { kind: "scalar" };
+
+const unrepresentable = (jsonGap: UnrepresentableKind): WalkClassification => ({
+  kind: "unrepresentable",
+  jsonGap,
+});
+
+/**
+ * First gate of the write pre-scan walk: a non-null object is `walkable` (the
+ * walk descends into it, carrying the narrowed value), a JSON scalar
+ * (null/undefined/string/number/boolean) is admitted as-is, and bigint/
+ * symbol/function are `unrepresentable`. Every `typeof` result is matched
+ * exhaustively — there is no `default` arm left to hide a kind this walk does
+ * not admit.
+ */
+const classifyWalkValue = (value: unknown): WalkClassification => {
+  if (typeof value === "object" && value !== null) return { kind: "walkable", value };
+  return match(typeof value)
+    // "object" is reachable here only as `null`: non-null objects returned above.
+    .with("string", "number", "boolean", "undefined", "object", () => SCALAR)
+    .with("bigint", () => unrepresentable("BigInt"))
+    .with("symbol", () => unrepresentable("symbol"))
+    .with("function", () => unrepresentable("function"))
     .exhaustive();
+};
 
 /**
  * FR-009 write-boundary pre-scan: recursively verify that `event` is
@@ -493,12 +504,17 @@ const assertLosslessEventUnchecked = (
 ): void => {
   const { operation, root } = labels;
   const walk = (
-    value: unknown,
+    candidate: unknown,
     path: string,
     active: Map<object, string>,
     depth: number,
   ): void => {
-    if (!requireWalkableObject(operation, path, value)) return;
+    const classified = classifyWalkValue(candidate);
+    if (classified.kind === "scalar") return;
+    if (classified.kind === "unrepresentable") {
+      throw unrepresentableKind(operation, path, classified.jsonGap);
+    }
+    const value = classified.value;
 
     // Circular-reference guard: a node revisited through its own descendants
     // is a cycle; paths are tracked so the error names both ends. Sibling
