@@ -6,17 +6,18 @@
  *
  *   - `spawnClearance`     — whether a tenant's current entry lets a new worker
  *                            be spawned for it.
+ *   - `drainOverdue`       — whether a draining worker has outlived its drain.
  *   - `decideCrashRestart` — the per-tenant crash-loop budget charge.
  *   - `workerRecordOf`     — the durable registry record a pure state persists as.
- *   - `decideAdoption`     — how a registry record found alive is re-adopted.
- *   - `adoptedState`       — the pure state that adoption lands as.
+ *   - `adoptedState`       — the pure state a registry record found alive is
+ *                            re-adopted into.
  *   - `stopPlan`           — which signals a stop sends, and how loudly a failed
  *                            one must be reported.
  */
 
 import { match, P } from "ts-pattern";
-import type { WorkerState } from "./worker-lifecycle.js";
-import { adoptLive, adoptDraining } from "./worker-lifecycle.js";
+import type { WorkerState, ProcessState } from "./worker-lifecycle.js";
+import { adoptLive, adoptDraining, holdsProcess } from "./worker-lifecycle.js";
 import type { WorkerRecord } from "./worker-registry-redis.js";
 import { initialRestartBudget, decideSupervisorRestart } from "./thin-init.js";
 import type { RestartBudget } from "./thin-init.js";
@@ -24,7 +25,7 @@ import type { RestartBudget } from "./thin-init.js";
 // ── Spawn clearance ──────────────────────────────────────────────────────────
 
 /** A process-holding phase: the worker still runs and still owns the tenant's socket. */
-export type ProcessPhase = Extract<WorkerState["phase"], "live" | "draining">;
+export type ProcessPhase = ProcessState["phase"];
 
 export type SpawnClearance =
   | { readonly kind: "clear" }
@@ -43,12 +44,19 @@ const CLEAR: SpawnClearance = { kind: "clear" };
  * already serializes.
  */
 export const spawnClearance = (current: WorkerState | undefined): SpawnClearance =>
-  current === undefined
-    ? CLEAR
-    : match(current)
-        .with({ phase: P.union("live", "draining") }, (s): SpawnClearance => ({ kind: "blocked", by: s.phase }))
-        .with({ phase: P.union("spawning", "crashed", "evicted") }, () => CLEAR)
-        .exhaustive();
+  current !== undefined && holdsProcess(current) ? { kind: "blocked", by: current.phase } : CLEAR;
+
+// ── Drain deadline ───────────────────────────────────────────────────────────
+
+/**
+ * A draining worker that has outlived `killAfterMs` since its drain began. The
+ * worker bounds its own drain (`DRAIN_TIMEOUT_MS`) and exits; one still running
+ * past the kill deadline ignored its SIGTERM, or never received it. While it
+ * runs it blocks its tenant's replacement (`spawnClearance`), so the manager
+ * hard-stops it rather than leave the tenant unavailable indefinitely.
+ */
+export const drainOverdue = (state: WorkerState, killAfterMs: number, now: number): boolean =>
+  state.phase === "draining" && now - state.drainStartedAt >= killAfterMs;
 
 // ── Crash-restart budget ─────────────────────────────────────────────────────
 
@@ -80,7 +88,7 @@ export const decideCrashRestart = (
 /**
  * The registry record a pure state persists as, or `undefined` for a phase that
  * holds no process + socket (nothing durable to record). A draining record
- * stores its DRAIN-START instant as `startedAt` — `decideAdoption` reads it back
+ * stores its DRAIN-START instant as `startedAt` — `adoptedState` reads it back
  * as such.
  */
 export const workerRecordOf = (state: WorkerState): WorkerRecord | undefined =>
@@ -97,40 +105,23 @@ export const workerRecordOf = (state: WorkerState): WorkerRecord | undefined =>
 // ── Re-adoption ──────────────────────────────────────────────────────────────
 
 /**
- * How a record found alive after a supervisor restart is re-adopted: the phase
- * it re-enters (always the record's own health — a worker persisted as draining
- * must never become routable again, multi-tenant spec FR-017), the eagerPin it
- * honours, and the record's `startedAt` read in that phase's meaning.
- */
-export type Adoption =
-  | { readonly phase: "live"; readonly eagerPin: boolean; readonly startedAt: number }
-  | { readonly phase: "draining"; readonly eagerPin: boolean; readonly drainStartedAt: number };
-
-/**
+ * The pure state a record found alive after a supervisor restart is re-adopted
+ * into. The phase is always the record's own health: a worker persisted as
+ * draining must never become routable again (multi-tenant spec FR-017), so it
+ * stays `draining` — `canServe` false, slot still counted. The record's
+ * `startedAt` is read in that phase's meaning (spawn instant, or drain start).
+ *
  * C3 / AD-7: `registryEagerPin` is the AUTHORITATIVE tenant-registry value
  * (`undefined` when the tenant has no active config); the persisted record's
- * value is only the fallback — never a default of false.
- */
-export const decideAdoption = (record: WorkerRecord, registryEagerPin: boolean | undefined): Adoption => {
-  const eagerPin = registryEagerPin ?? record.eagerPin;
-  return match(record.health)
-    .with("draining", (): Adoption => ({ phase: "draining", eagerPin, drainStartedAt: record.startedAt }))
-    .with("live", (): Adoption => ({ phase: "live", eagerPin, startedAt: record.startedAt }))
-    .exhaustive();
-};
-
-/**
- * The pure state a record found alive is re-adopted into: `decideAdoption`'s
- * verdict applied to the ADT's adoption constructors. A drained worker stays
- * `draining` (`canServe` false, slot still counted), so new traffic never
- * routes to it. `now` seeds a live adoption's idle clock; a draining adoption
- * ignores it.
+ * value is only the fallback — never a default of false. `now` seeds a live
+ * adoption's idle clock; a draining adoption ignores it.
  */
 export const adoptedState = (record: WorkerRecord, registryEagerPin: boolean | undefined, now: number): WorkerState => {
-  const { tenant, pid, udsPath } = record;
-  return match(decideAdoption(record, registryEagerPin))
-    .with({ phase: "draining" }, (a) => adoptDraining(tenant, a.eagerPin, pid, udsPath, a.drainStartedAt))
-    .with({ phase: "live" }, (a) => adoptLive(tenant, a.eagerPin, pid, udsPath, a.startedAt, now))
+  const { tenant, pid, udsPath, startedAt } = record;
+  const eagerPin = registryEagerPin ?? record.eagerPin;
+  return match(record.health)
+    .with("draining", () => adoptDraining(tenant, eagerPin, pid, udsPath, startedAt))
+    .with("live", () => adoptLive(tenant, eagerPin, pid, udsPath, startedAt, now))
     .exhaustive();
 };
 

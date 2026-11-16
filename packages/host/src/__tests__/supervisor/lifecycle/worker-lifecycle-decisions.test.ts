@@ -1,7 +1,7 @@
 /**
  * Tests for the worker-lifecycle functional core (worker-lifecycle-decisions.ts):
- * spawn clearance, the crash-restart budget, the durable-record derivation, the re-adoption
- * decision and the stop-signal plans. Pure functions over plain data — no fakes,
+ * spawn clearance, the drain kill deadline, the crash-restart budget, the
+ * durable-record derivation, the adopted state and the stop-signal plans. Pure functions over plain data — no fakes,
  * no clock; fast-check properties for the invariants, examples for the tables.
  */
 
@@ -17,7 +17,7 @@ import {
   spawnClearance,
   decideCrashRestart,
   workerRecordOf,
-  decideAdoption,
+  drainOverdue,
   adoptedState,
   stopPlan,
   type CrashRestartDecision,
@@ -88,6 +88,29 @@ describe("spawnClearance (pure)", () => {
         const holdsSocket = lifecycleAdt.udsPathOf(state) !== undefined;
         expect(clearance.kind === "blocked").toBe(holdsSocket);
         if (clearance.kind === "blocked") expect(clearance.by).toBe(state.phase);
+      }),
+    );
+  });
+});
+
+// ── drainOverdue ─────────────────────────────────────────────────────────────
+
+describe("drainOverdue (pure)", () => {
+  const draining = (drainStartedAt: number): WorkerState => ({
+    phase: "draining", tenant: tid("acme"), eagerPin: false, pid: 9, udsPath: "/run/fugue/acme.sock", drainStartedAt,
+  });
+
+  test("a drain is overdue from exactly its kill deadline, not before", () => {
+    expect(drainOverdue(draining(100), 1_000, 1_099)).toBe(false);
+    expect(drainOverdue(draining(100), 1_000, 1_100)).toBe(true);
+  });
+
+  test("property: only a draining state can be overdue, and only once the deadline has passed", () => {
+    fc.assert(
+      fc.property(workerStateArb, fc.integer({ min: 1, max: 100_000 }), instantArb, (state, killAfterMs, now) => {
+        const overdue = drainOverdue(state, killAfterMs, now);
+        if (state.phase !== "draining") expect(overdue).toBe(false);
+        else expect(overdue).toBe(now - state.drainStartedAt >= killAfterMs);
       }),
     );
   });
@@ -200,17 +223,17 @@ describe("workerRecordOf (pure)", () => {
   });
 });
 
-// ── decideAdoption ───────────────────────────────────────────────────────────
+// ── adoptedState ─────────────────────────────────────────────────────────────
 
-describe("decideAdoption (pure)", () => {
+describe("adoptedState (pure)", () => {
   test("the registry's eagerPin wins over the persisted one", () => {
     const record: WorkerRecord = { tenant: tid("acme"), pid: 3, udsPath: "/run/fugue/acme.sock", startedAt: 7, health: "live", eagerPin: false };
-    expect(decideAdoption(record, true)).toEqual({ phase: "live", eagerPin: true, startedAt: 7 });
+    expect(adoptedState(record, true, 0).eagerPin).toBe(true);
   });
 
   test("a tenant with no registry config falls back to the persisted eagerPin — never a default", () => {
     const record: WorkerRecord = { tenant: tid("acme"), pid: 3, udsPath: "/run/fugue/acme.sock", startedAt: 7, health: "draining", eagerPin: true };
-    expect(decideAdoption(record, undefined)).toEqual({ phase: "draining", eagerPin: true, drainStartedAt: 7 });
+    expect(adoptedState(record, undefined, 0).eagerPin).toBe(true);
   });
 
   test("property: an adopted worker keeps the record's health — a drained worker never becomes routable", () => {

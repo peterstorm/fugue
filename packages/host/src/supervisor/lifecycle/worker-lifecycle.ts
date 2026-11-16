@@ -340,6 +340,17 @@ export const canServe = (state: WorkerState): boolean => state.phase === "live";
 export const occupiesSlot = (state: WorkerState): boolean =>
   state.phase === "spawning" || state.phase === "live" || state.phase === "draining";
 
+/** A state whose worker process still runs and still owns the tenant's socket. */
+export type ProcessState = Extract<WorkerState, { readonly phase: "live" | "draining" }>;
+
+/**
+ * Does this state hold a running process (and so the tenant's one socket)?
+ * The one definition of the live/draining set every "is a process attached?"
+ * check reads.
+ */
+export const holdsProcess = (state: WorkerState): state is ProcessState =>
+  state.phase === "live" || state.phase === "draining";
+
 /** The worker's UDS socket path, if it currently has one (live/draining only). */
 export const udsPathOf = (state: WorkerState): string | undefined =>
   match(state)

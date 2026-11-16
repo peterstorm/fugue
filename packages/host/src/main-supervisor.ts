@@ -279,6 +279,14 @@ const createSpawnConfigView = (registry: TenantRegistryHandle): TenantSpawnConfi
   },
 });
 
+/**
+ * Slack past a worker's own drain bound (`DRAIN_TIMEOUT_MS`, inherited from
+ * this process's env) before the supervisor hard-stops a drain that has not
+ * ended: covers the worker's post-drain shutdown teardown, so a cooperating
+ * worker always exits on its own first.
+ */
+const DRAIN_KILL_GRACE_MS = 15_000;
+
 /** The worker lifecycle's tunables, read off the host config. */
 const workerLifecycleConfig = (config: SupervisorConfig, workerEntry: string): WorkerLifecycleConfig => ({
   udsDir: config.WORKER_UDS_DIR,
@@ -290,6 +298,7 @@ const workerLifecycleConfig = (config: SupervisorConfig, workerEntry: string): W
   spawnReadyPollMs: 100,
   maxRestartsPerWindow: config.SUPERVISOR_MAX_WORKER_RESTARTS,
   restartWindowMs: config.SUPERVISOR_WORKER_RESTART_WINDOW_MS,
+  drainKillAfterMs: config.DRAIN_TIMEOUT_MS + DRAIN_KILL_GRACE_MS,
 });
 
 /** What the supervisor needs from the worker-lifecycle wiring. */
@@ -387,8 +396,9 @@ const startSweep = (
  * worker re-adopted across a restart (reconcileReadopt) does NOT — its process
  * was re-parented to thin-init, so this process has no exit handle to await.
  * Without this poll a re-adopted worker that later crashes (OOM, AD-9) would
- * wedge its tenant at 503 forever. Watcher-covered workers are skipped, so this
- * is a no-op once every adopted worker has been replaced by a spawned one.
+ * wedge its tenant at 503 forever. Watcher-covered workers are skipped by the
+ * probe. The same tick hard-stops any draining worker past its kill deadline
+ * (`drainKillAfterMs`), watched or not.
  */
 const startLifecycleSweeps = (config: SupervisorConfig, lifecycle: Lifecycle, logger: LogPort): SweepTimers => {
   const sweepIntervalMs = Math.max(1000, Math.floor(config.WORKER_IDLE_EVICT_MS / 4));

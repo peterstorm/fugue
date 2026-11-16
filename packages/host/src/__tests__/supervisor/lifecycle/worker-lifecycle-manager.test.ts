@@ -136,6 +136,7 @@ const baseConfig = (over: Partial<WorkerLifecycleConfig> = {}): WorkerLifecycleC
   spawnReadyPollMs: 10,
   maxRestartsPerWindow: 5,
   restartWindowMs: 60_000,
+  drainKillAfterMs: 45_000,
   ...over,
 });
 
@@ -911,6 +912,63 @@ describe("createWorkerLifecycle: liveness sweep for re-adopted workers (SC-006, 
   });
 });
 
+// ── drain kill deadline: a drain that never ends is hard-stopped ─────────────────
+//
+// A draining worker holds its tenant's one socket, so no replacement may be
+// reserved until it exits. A worker that ignores its SIGTERM (or never got it)
+// would keep the tenant unavailable forever; the liveness sweep hard-stops it
+// once `drainKillAfterMs` has passed since the drain began.
+
+describe("createWorkerLifecycle: drain kill deadline (FR-017, FR-004)", () => {
+  /** acme live and draining (SIGTERM sent) under a controllable clock. */
+  const drainingAcme = async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    const registry = createWorkerRegistry(fake.redis, async () => true);
+    const { spawn, proc, spawned, signalled } = makeSpawn();
+    const clk = fixedClock();
+    const log = recordingLog();
+    const lc = createWorkerLifecycle({
+      spawn, proc, registry, probe: async () => true,
+      tenants: tenantsView({ acme: { eagerPin: false } }),
+      clock: clk.clock, config: baseConfig({ drainKillAfterMs: 1_000 }), logger: log,
+    });
+    await lc.ensureWorker(tid("acme"));
+    await lc.drain(tid("acme"));
+    return { fake, lc, spawned, signalled, clk, log };
+  };
+
+  test("a drain still inside its deadline is left alone", async () => {
+    const { lc, signalled, clk } = await drainingAcme();
+    clk.advance(999);
+    expect(await lc.livenessSweep()).toEqual([]);
+    expect(signalled.map((s) => s.sig)).toEqual(["SIGTERM"]); // only the drain's own SIGTERM
+    expect(lc.liveWorkerCount()).toBe(1);
+  });
+
+  test("a drain past its deadline is hard-stopped, and the tenant can spawn again", async () => {
+    const { fake, lc, spawned, signalled, clk, log } = await drainingAcme();
+    clk.advance(1_000);
+
+    expect(await lc.livenessSweep()).toEqual([tid("acme")]);
+    // SIGTERM + SIGKILL after the drain's SIGTERM; entry and record are gone.
+    expect(signalled.map((s) => s.sig)).toEqual(["SIGTERM", "SIGTERM", "SIGKILL"]);
+    expect(lc.liveWorkerCount()).toBe(0);
+    expect(fake.store.has(`${WORKER_KEY_PREFIX}acme`)).toBe(false);
+    expect(log.errors.find((l) => l.msg.includes("outlived its drain"))?.ctx).toMatchObject({
+      tenant: tid("acme"), drainAgeMs: 1_000,
+    });
+
+    // The killed worker's exit is a deliberate stop, never a crash: no respawn.
+    spawned[0]!.exit(null);
+    await flushMicrotasks();
+    expect(spawned.length).toBe(1);
+
+    // The tenant is no longer blocked: the next request spawns a fresh worker.
+    expect((await lc.ensureWorker(tid("acme"))).ok).toBe(true);
+    expect(spawned.length).toBe(2);
+  });
+});
+
 // ── restart-at-cap: a crashing tenant at the cap must respawn (FR-015) ───────────
 
 describe("createWorkerLifecycle: restart at SUPERVISOR_MAX_LIVE_WORKERS (FR-015)", () => {
@@ -1037,6 +1095,8 @@ describe("createWorkerLifecycle: failed kills surface via the logger (T9 Fix 1)"
     const warnLine = log.warns.find((l) => l.msg.includes("signal failed (best-effort)"));
     expect(warnLine).toBeDefined();
     expect(warnLine!.ctx).toMatchObject({ tenant: tid("acme"), sig: "SIGKILL" });
+    // No registry record was ever written for this spawn, so no orphan alarm.
+    expect(log.errors.some((l) => l.msg.includes("may be orphaned"))).toBe(false);
   });
 });
 
@@ -1146,6 +1206,25 @@ describe("createWorkerLifecycle: registry-write failures", () => {
     // No live worker is tracked, so the next request retries a clean spawn.
     expect(lc.liveWorkerCount()).toBe(0);
     expect(log.errors.some((e) => e.msg.includes("registry put failed for a live worker"))).toBe(true);
+  });
+
+  test("a live-record put failure whose kill also fails is reported as an orphan risk (announced spawn)", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    const reg = registryFailingPutFor(createWorkerRegistry(fake.redis, async () => true), "live");
+    const { spawn, proc } = makeSpawn({ signalFails: true });
+    const log = recordingLog();
+    const lc = createWorkerLifecycle({
+      spawn, proc, registry: reg, probe: async () => true,
+      tenants: tenantsView({ acme: { eagerPin: false } }),
+      clock: fixedClock().clock, config: baseConfig(), logger: log,
+    });
+
+    expect((await lc.ensureWorker(tid("acme"))).ok).toBe(false);
+    // A registry record may exist for this spawn, so the failed SIGKILL is the
+    // orphan-risk ERROR — not the unannounced spawn's best-effort warn.
+    const orphanLine = log.errors.find((l) => l.msg.includes("may be orphaned"));
+    expect(orphanLine?.ctx).toMatchObject({ tenant: tid("acme"), sig: "SIGKILL" });
+    expect(log.warns.some((l) => l.msg.includes("signal failed (best-effort)"))).toBe(false);
   });
 
   test("a draining-record put failure is BEST-EFFORT: the worker is still SIGTERM'd and in-flight work survives", async () => {

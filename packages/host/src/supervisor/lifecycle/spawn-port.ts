@@ -155,9 +155,11 @@ export interface WorkerLifecyclePort {
    * crash watcher; a worker re-adopted across a supervisor restart does NOT (its
    * process was re-parented — no handle to await). This sweep probes such workers'
    * liveness and drives `onCrash` for any that died, so a re-adopted worker's crash
-   * is detected and restarted rather than wedging the tenant at 503. Driven by the
-   * supervisor binary on a timer (the binary owns the interval). Returns the
-   * tenants detected dead this sweep.
+   * is detected and restarted rather than wedging the tenant at 503. The same tick
+   * hard-stops any draining worker (watched or not) past its drain kill deadline:
+   * a drain that never ends would otherwise block its tenant's replacement
+   * forever. Driven by the supervisor binary on a timer (the binary owns the
+   * interval). Returns the tenants whose worker this sweep finalised.
    */
   readonly livenessSweep: () => Promise<readonly TenantId[]>;
 }
