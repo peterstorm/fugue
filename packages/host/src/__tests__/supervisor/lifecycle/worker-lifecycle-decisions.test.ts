@@ -7,7 +7,6 @@
 
 import { describe, test, expect } from "bun:test";
 import * as fc from "fast-check";
-import { match } from "ts-pattern";
 import { tenantId } from "../../../domain/tenant.js";
 import type { TenantId } from "../../../domain/tenant.js";
 import * as lifecycleAdt from "../../../supervisor/lifecycle/worker-lifecycle.js";
@@ -18,8 +17,8 @@ import {
   decideCrashRestart,
   workerRecordOf,
   decideAdoption,
+  adoptedState,
   stopPlan,
-  type Adoption,
   type CrashRestartDecision,
   type StopReason,
 } from "../../../supervisor/lifecycle/worker-lifecycle-decisions.js";
@@ -66,15 +65,6 @@ const workerRecordArb: fc.Arbitrary<WorkerRecord> = fc.record({
   health: fc.constantFrom("live" as const, "draining" as const),
   eagerPin: fc.boolean(),
 });
-
-/** The manager's dispatch of an adoption onto the real ADT constructors. */
-const adopt = (record: WorkerRecord, adoption: Adoption, now: number): WorkerState =>
-  match(adoption)
-    .with({ phase: "draining" }, (a) =>
-      lifecycleAdt.adoptDraining(record.tenant, a.eagerPin, record.pid, record.udsPath, a.drainStartedAt))
-    .with({ phase: "live" }, (a) =>
-      lifecycleAdt.adoptLive(record.tenant, a.eagerPin, record.pid, record.udsPath, a.startedAt, now))
-    .exhaustive();
 
 // ── decideCrashRestart ───────────────────────────────────────────────────────
 
@@ -199,7 +189,7 @@ describe("decideAdoption (pure)", () => {
   test("property: an adopted worker keeps the record's health — a drained worker never becomes routable", () => {
     fc.assert(
       fc.property(workerRecordArb, fc.option(fc.boolean(), { nil: undefined }), instantArb, (record, pin, now) => {
-        const state = adopt(record, decideAdoption(record, pin), now);
+        const state = adoptedState(record, pin, now);
         expect(state.phase).toBe(record.health);
         expect(lifecycleAdt.canServe(state)).toBe(record.health === "live");
         expect(lifecycleAdt.occupiesSlot(state)).toBe(true);
@@ -211,9 +201,19 @@ describe("decideAdoption (pure)", () => {
   test("property: round trip — persisting an adopted worker reproduces the record it was adopted from", () => {
     fc.assert(
       fc.property(workerRecordArb, instantArb, (record, now) => {
-        expect(workerRecordOf(adopt(record, decideAdoption(record, undefined), now))).toEqual(record);
+        expect(workerRecordOf(adoptedState(record, undefined, now))).toEqual(record);
       }),
     );
+  });
+
+  test("a live adoption seeds its idle clock from now; a draining adoption carries the drain-start instant", () => {
+    const base = { tenant: tid("acme"), pid: 3, udsPath: "/run/fugue/acme.sock", startedAt: 7, eagerPin: false } as const;
+    expect(adoptedState({ ...base, health: "live" }, undefined, 50)).toEqual({
+      phase: "live", tenant: tid("acme"), eagerPin: false, pid: 3, udsPath: "/run/fugue/acme.sock", startedAt: 7, lastActivityAt: 50,
+    });
+    expect(adoptedState({ ...base, health: "draining" }, true, 50)).toEqual({
+      phase: "draining", tenant: tid("acme"), eagerPin: true, pid: 3, udsPath: "/run/fugue/acme.sock", drainStartedAt: 7,
+    });
   });
 });
 

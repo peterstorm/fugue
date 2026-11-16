@@ -88,6 +88,9 @@ export type WorkerState =
   | { readonly phase: "crashed"; readonly tenant: TenantId; readonly eagerPin: boolean; readonly crashedAt: number; readonly exitCode: number | null }
   | { readonly phase: "evicted"; readonly tenant: TenantId; readonly eagerPin: boolean; readonly evictedAt: number };
 
+/** A freshly requested worker: the only state a slot reservation may hold. */
+export type SpawningState = Extract<WorkerState, { readonly phase: "spawning" }>;
+
 // ── Constructors ───────────────────────────────────────────────────────────
 
 /**
@@ -96,7 +99,7 @@ export type WorkerState =
  * a worker is the absence of an entry in the supervisor's per-tenant map, so this
  * is a constructor, not a transition from a prior state.
  */
-export const requestWorker = (tenant: TenantId, eagerPin: boolean, now: number): WorkerState => ({
+export const requestWorker = (tenant: TenantId, eagerPin: boolean, now: number): SpawningState => ({
   phase: "spawning",
   tenant,
   eagerPin,

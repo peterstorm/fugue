@@ -22,7 +22,7 @@ const table = () => createWorkerTable(lifecycleAdt.occupiesSlot);
 describe("WorkerTable", () => {
   test("a reserved spawning slot counts immediately; releasing it frees the slot", () => {
     const t = table();
-    t.reserve(tid("acme"), lifecycleAdt.requestWorker(tid("acme"), false, 0));
+    t.reserve(lifecycleAdt.requestWorker(tid("acme"), false, 0));
     expect(t.liveCount()).toBe(1);
     t.release(tid("acme"));
     expect(t.liveCount()).toBe(0);
@@ -31,16 +31,43 @@ describe("WorkerTable", () => {
 
   test("only slot-occupying phases count — a crashed entry is held but not counted", () => {
     const t = table();
-    t.replace(tid("acme"), { phase: "crashed", tenant: tid("acme"), eagerPin: false, crashedAt: 1, exitCode: 1 });
-    t.replace(tid("globex"), lifecycleAdt.adoptLive(tid("globex"), false, 4, "/run/fugue/globex.sock", 0, 0));
+    t.replace({ phase: "crashed", tenant: tid("acme"), eagerPin: false, crashedAt: 1, exitCode: 1 });
+    t.replace(lifecycleAdt.adoptLive(tid("globex"), false, 4, "/run/fugue/globex.sock", 0, 0));
     expect(t.liveCount()).toBe(1);
     expect(t.get(tid("acme"))?.phase).toBe("crashed");
   });
 
+  test("entries are filed under the state's own tenant", () => {
+    const t = table();
+    t.reserve(lifecycleAdt.requestWorker(tid("globex"), false, 0));
+    expect(t.get(tid("globex"))?.tenant).toBe(tid("globex"));
+    expect(t.get(tid("acme"))).toBeUndefined();
+  });
+
+  test("reserve supersedes a crashed entry, which then counts as a slot", () => {
+    const t = table();
+    t.replace({ phase: "crashed", tenant: tid("acme"), eagerPin: false, crashedAt: 1, exitCode: 1 });
+    expect(t.liveCount()).toBe(0);
+    t.reserve(lifecycleAdt.requestWorker(tid("acme"), false, 2));
+    expect(t.get(tid("acme"))?.phase).toBe("spawning");
+    expect(t.liveCount()).toBe(1);
+  });
+
+  test("replace over a live entry changes its phase without changing the count", () => {
+    const t = table();
+    const live = lifecycleAdt.adoptLive(tid("acme"), false, 4, "/run/fugue/acme.sock", 0, 0);
+    t.replace(live);
+    const draining = lifecycleAdt.beginDrain(live, 5);
+    if (!draining.ok) throw new Error("fixture: beginDrain on a live state");
+    t.replace(draining.value);
+    expect(t.get(tid("acme"))?.phase).toBe("draining");
+    expect(t.liveCount()).toBe(1);
+  });
+
   test("snapshot is a copy — releasing during iteration does not disturb it", () => {
     const t = table();
-    t.replace(tid("acme"), lifecycleAdt.requestWorker(tid("acme"), false, 0));
-    t.replace(tid("globex"), lifecycleAdt.requestWorker(tid("globex"), false, 0));
+    t.replace(lifecycleAdt.requestWorker(tid("acme"), false, 0));
+    t.replace(lifecycleAdt.requestWorker(tid("globex"), false, 0));
     const seen: TenantId[] = [];
     for (const [tenant] of t.snapshot()) {
       t.release(tid("globex"));

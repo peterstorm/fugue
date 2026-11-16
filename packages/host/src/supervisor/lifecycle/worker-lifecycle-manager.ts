@@ -40,7 +40,7 @@ import type { LogPort } from "../../ports.js";
 import { workerSocketPath } from "../../domain/config.js";
 import * as lifecycleAdt from "./worker-lifecycle.js";
 import type { WorkerState } from "./worker-lifecycle.js";
-import { decideCrashRestart, workerRecordOf, decideAdoption, stopPlan } from "./worker-lifecycle-decisions.js";
+import { decideCrashRestart, workerRecordOf, adoptedState, stopPlan } from "./worker-lifecycle-decisions.js";
 import type { SignalStep, StopReason } from "./worker-lifecycle-decisions.js";
 import { createWorkerTable } from "./worker-table.js";
 import type { WorkerTable } from "./worker-table.js";
@@ -482,7 +482,7 @@ const markWorkerLive = async (
     logger.error("[worker-lifecycle] workerLive transition rejected (invariant)", { tenant });
     return abortSpawn(ctx, tenant, handle.pid, "abort-unannounced-spawn");
   }
-  ctx.workers.replace(tenant, liveResult.value);
+  ctx.workers.replace(liveResult.value);
   return ok(liveResult.value);
 };
 
@@ -506,7 +506,6 @@ const persistLiveOrAbort = async (
     "[worker-lifecycle] registry put failed for a live worker — killing it rather than leaving an unreadoptable orphan",
     { tenant, pid, error: formatHostError(persisted.error) },
   );
-  // A registry record may exist, so a failed kill is orphan-risk (error).
   return abortSpawn(ctx, tenant, pid, "abort-announced-spawn");
 };
 
@@ -593,7 +592,7 @@ const lazySpawn = async (ctx: LifecycleCtx, tenant: TenantId): Promise<Result<En
   // and all overshoot it (`liveCount()` is the SOLE multi-tenant spec FR-033
   // enforcer). Reserving here closes that TOCTOU; every failure path (in the
   // helpers called below) releases this slot fail-closed.
-  ctx.workers.reserve(tenant, ctx.lifecycle.requestWorker(tenant, spawnCfg.eagerPin, ctx.clock()));
+  ctx.workers.reserve(ctx.lifecycle.requestWorker(tenant, spawnCfg.eagerPin, ctx.clock()));
 
   const extraEnv = await buildSpawnEnv(ctx, tenant, spawnCfg);
   if (!extraEnv.ok) return extraEnv;
@@ -627,7 +626,7 @@ const ensureWorker = async (ctx: LifecycleCtx, tenant: TenantId): Promise<Result
   if (existing !== undefined && existing.phase === "live") {
     // Touch (refresh idle clock) and route to the existing socket.
     const touched = ctx.lifecycle.touch(existing, ctx.clock());
-    if (touched.ok) ctx.workers.replace(tenant, touched.value);
+    if (touched.ok) ctx.workers.replace(touched.value);
     return ok({ udsPath: existing.udsPath });
   }
   // No live worker → lazy spawn (a draining/crashed/evicted/spawning entry is
@@ -681,7 +680,7 @@ const onCrash = async (
     await removeRecord(ctx, tenant);
     return ok(undefined);
   }
-  ctx.workers.replace(tenant, crashed.value);
+  ctx.workers.replace(crashed.value);
   await removeRecord(ctx, tenant);
 
   // Restart ONLY this tenant's worker (AD-8/multi-tenant spec FR-015): re-run the spawn
@@ -739,7 +738,7 @@ const drain = async (ctx: LifecycleCtx, tenant: TenantId): Promise<Result<void, 
     return err(workerUnavailable(tenant));
   }
   const next = draining.value;
-  ctx.workers.replace(tenant, next);
+  ctx.workers.replace(next);
   // Best-effort by design, unlike the spawn path: the draining record is
   // TRANSITIONAL. The worker has already been SIGTERM'd, and its exit drives
   // `drainComplete` → `removeRecord`. A failed write leaves the prior `live`
@@ -772,22 +771,6 @@ const evict = async (ctx: LifecycleCtx, tenant: TenantId): Promise<Result<void, 
 
 // ── Re-adoption ──────────────────────────────────────────────────────────────
 
-/**
- * Rebuild one tenant's pure state from a re-adopted registry record, as
- * `decideAdoption` decides it (authoritative eagerPin; a drained worker stays
- * `draining` — `canServe` false, slot still counted — so `ensureWorker` never
- * routes NEW traffic to it, and the liveness sweep finalises it on exit).
- *
- * The clock is read only for a live adoption — `adoptDraining` takes none.
- */
-const adoptRecord = (ctx: LifecycleCtx, record: WorkerRecord): WorkerState => {
-  const { tenant, pid, udsPath } = record;
-  return match(decideAdoption(record, ctx.tenants.spawnConfigFor(tenant)?.eagerPin))
-    .with({ phase: "draining" }, (a) => ctx.lifecycle.adoptDraining(tenant, a.eagerPin, pid, udsPath, a.drainStartedAt))
-    .with({ phase: "live" }, (a) => ctx.lifecycle.adoptLive(tenant, a.eagerPin, pid, udsPath, a.startedAt, ctx.clock()))
-    .exhaustive();
-};
-
 const reconcileReadopt = async (
   ctx: LifecycleCtx,
 ): Promise<Result<{ readonly adopted: readonly TenantId[]; readonly pruned: readonly TenantId[] }, HostError>> => {
@@ -795,7 +778,9 @@ const reconcileReadopt = async (
   if (!result.ok) return err(result.error);
   const adoptedTenants: TenantId[] = [];
   for (const { record } of result.value.adopted) {
-    ctx.workers.replace(record.tenant, adoptRecord(ctx, record));
+    // Authoritative eagerPin from the tenant registry (C3); a drained worker
+    // stays draining and the liveness sweep finalises it on exit.
+    ctx.workers.replace(adoptedState(record, ctx.tenants.spawnConfigFor(record.tenant)?.eagerPin, ctx.clock()));
     adoptedTenants.push(record.tenant);
   }
   // Prune dead in-memory entries the registry pruned (defensive — the map is

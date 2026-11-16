@@ -11,21 +11,26 @@
  */
 
 import type { TenantId } from "../../domain/tenant.js";
-import type { WorkerState } from "./worker-lifecycle.js";
+import type { WorkerState, SpawningState } from "./worker-lifecycle.js";
 import type { RestartBudget } from "./thin-init.js";
 
+/**
+ * Entries are keyed by the state's own `tenant`, so an entry filed under
+ * another tenant's key is unrepresentable.
+ */
 export interface WorkerTable {
   readonly get: (tenant: TenantId) => WorkerState | undefined;
   /**
-   * Claim the tenant's slot with its `spawning` state. Call it SYNCHRONOUSLY
-   * after the admission check and BEFORE any `await`: the claim is what makes
-   * check-then-reserve atomic on Bun's single thread, so concurrent first
-   * requests for distinct cold tenants cannot all pass the cap (multi-tenant
-   * spec FR-033). Whatever entry the tenant had is superseded.
+   * Claim the state's tenant slot with a `spawning` state (the type admits no
+   * other phase). Call it SYNCHRONOUSLY after the admission check and BEFORE
+   * any `await`: the claim is what makes check-then-reserve atomic on Bun's
+   * single thread, so concurrent first requests for distinct cold tenants
+   * cannot all pass the cap (multi-tenant spec FR-033). Whatever entry the
+   * tenant had is superseded.
    */
-  readonly reserve: (tenant: TenantId, spawning: WorkerState) => void;
-  /** Land the next pure state for the tenant (a transition result, or an adoption). */
-  readonly replace: (tenant: TenantId, next: WorkerState) => void;
+  readonly reserve: (spawning: SpawningState) => void;
+  /** Land the next pure state for its tenant (a transition result, or an adoption). */
+  readonly replace: (next: WorkerState) => void;
   /**
    * Forget the tenant's entry, freeing its slot. Teardown paths release BEFORE
    * signalling: an exit watcher keys on "is the entry still this incarnation?",
@@ -61,8 +66,8 @@ export const createWorkerTable = (occupiesSlot: (state: WorkerState) => boolean)
   const workers = new Map<TenantId, WorkerState>();
   const watched = new Set<TenantId>();
   const restartBudgets = new Map<TenantId, RestartBudget>();
-  const put = (tenant: TenantId, state: WorkerState): void => {
-    workers.set(tenant, state);
+  const put = (state: WorkerState): void => {
+    workers.set(state.tenant, state);
   };
   return {
     get: (tenant) => workers.get(tenant),

@@ -10,7 +10,12 @@
  * `T extends object` keeps `undefined` free to mean "empty".
  */
 export interface Owned<T extends object> {
-  /** Record the acquired resource, replacing any value still held. */
+  /**
+   * Record the acquired resource. Refuses (throws) while the cell still holds
+   * one: the held resource would become unreachable by `take`, so teardown
+   * could never release it. Each cell is acquired once per lifecycle, so a
+   * second `set` is a wiring bug, not a runtime condition.
+   */
   readonly set: (value: T) => void;
   /** Hand out the held resource once and empty the cell. */
   readonly take: () => T | undefined;
@@ -21,7 +26,11 @@ export interface Owned<T extends object> {
 export const owned = <T extends object>(): Owned<T> => {
   let held: T | undefined;
   return {
-    set: (value) => { held = value; },
+    set: (value) => {
+      // Internal invariant guard (architecture.md: invariants may throw).
+      if (held !== undefined) throw new Error("owned: set on a cell that still holds an unreleased resource");
+      held = value;
+    },
     take: () => {
       const value = held;
       held = undefined;

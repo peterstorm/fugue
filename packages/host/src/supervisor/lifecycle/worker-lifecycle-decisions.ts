@@ -7,12 +7,14 @@
  *   - `decideCrashRestart` — the per-tenant crash-loop budget charge.
  *   - `workerRecordOf`     — the durable registry record a pure state persists as.
  *   - `decideAdoption`     — how a registry record found alive is re-adopted.
+ *   - `adoptedState`       — the pure state that adoption lands as.
  *   - `stopPlan`           — which signals a stop sends, and how loudly a failed
  *                            one must be reported.
  */
 
 import { match, P } from "ts-pattern";
 import type { WorkerState } from "./worker-lifecycle.js";
+import { adoptLive, adoptDraining } from "./worker-lifecycle.js";
 import type { WorkerRecord } from "./worker-registry-redis.js";
 import { initialRestartBudget, decideSupervisorRestart } from "./thin-init.js";
 import type { RestartBudget } from "./thin-init.js";
@@ -86,17 +88,34 @@ export const decideAdoption = (record: WorkerRecord, registryEagerPin: boolean |
     .exhaustive();
 };
 
+/**
+ * The pure state a record found alive is re-adopted into: `decideAdoption`'s
+ * verdict applied to the ADT's adoption constructors. A drained worker stays
+ * `draining` (`canServe` false, slot still counted), so new traffic never
+ * routes to it. `now` seeds a live adoption's idle clock; a draining adoption
+ * ignores it.
+ */
+export const adoptedState = (record: WorkerRecord, registryEagerPin: boolean | undefined, now: number): WorkerState => {
+  const { tenant, pid, udsPath } = record;
+  return match(decideAdoption(record, registryEagerPin))
+    .with({ phase: "draining" }, (a) => adoptDraining(tenant, a.eagerPin, pid, udsPath, a.drainStartedAt))
+    .with({ phase: "live" }, (a) => adoptLive(tenant, a.eagerPin, pid, udsPath, a.startedAt, now))
+    .exhaustive();
+};
+
 // ── Stop signals ─────────────────────────────────────────────────────────────
 
 export type WorkerSignal = "SIGTERM" | "SIGKILL";
 
 /**
  * How loudly a FAILED signal must be reported (a dead pid is not a failure — the
- * adapter reports it as success). `orphan-risk`: the slot already reads as
- * reclaimed, so a surviving process would still hold the tenant's UDS while the
- * live-worker count (multi-tenant spec FR-033) excludes it — an error.
- * `best-effort`: nothing reads as reclaimed yet, or a later signal still
- * follows — a warning.
+ * adapter reports it as success). Every kill is sent after the slot is
+ * released, so what separates the two is whether a registry record could exist
+ * for the process. `orphan-risk`: a record may have existed (an announced spawn,
+ * an evicted worker), so a surviving process would still hold the tenant's UDS
+ * while the live-worker count (multi-tenant spec FR-033) excludes it — an
+ * error. `best-effort`: no registry record was ever written for the process, or
+ * a later signal still follows — a warning.
  */
 export type SignalFailureSeverity = "best-effort" | "orphan-risk";
 

@@ -27,11 +27,21 @@ describe("owned", () => {
     expect(cell.take()).toBe(resource);
   });
 
-  it("set replaces the held value", () => {
+  it("set refuses a cell that still holds a resource, keeping the held one takeable", () => {
     const first = { id: 1 };
     const second = { id: 2 };
     const cell = owned<{ readonly id: number }>();
     cell.set(first);
+    expect(() => cell.set(second)).toThrow("still holds an unreleased resource");
+    expect(cell.take()).toBe(first);
+  });
+
+  it("set is accepted again once the held resource has been taken", () => {
+    const first = { id: 1 };
+    const second = { id: 2 };
+    const cell = owned<{ readonly id: number }>();
+    cell.set(first);
+    expect(cell.take()).toBe(first);
     cell.set(second);
     expect(cell.take()).toBe(second);
   });
