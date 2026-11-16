@@ -213,15 +213,16 @@ describe("reusable verification workflow", () => {
       .map((line) => line.trim())
       .filter((line) => line.startsWith("bun run "));
 
-    // Static phases need no Redis; the workspace gate owns the Redis-backed ones.
+    // Static phases need no Redis; the workspace gate owns every phase that
+    // needs a Redis server (the script tests probe redis-server too).
     expect(phaseRuns("static-checks")).toEqual([
       "bun run lint",
       "bun run typecheck",
       "bun run check:docs",
-      "bun run test:scripts",
     ]);
     expect(phaseRuns("workspace-gate")).toEqual([
       "bun run check:verification-prerequisites",
+      "bun run test:scripts",
       "bun run test",
     ]);
     expect([...phaseRuns("static-checks"), ...phaseRuns("workspace-gate")].sort())

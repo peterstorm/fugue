@@ -4,9 +4,9 @@ on:
   workflow_call:
 
 # `scripts/verify.sh` is the authoritative phase list. CI splits it across two
-# parallel jobs: the phases that need no Redis (static-checks) and the
-# Redis-backed ones (workspace-gate). Together they run exactly verify.sh's
-# phases (pinned by scripts/__tests__/verification-workflows.test.ts).
+# parallel jobs: the phases that need no Redis (static-checks) and the ones
+# that need a Redis server (workspace-gate). Together they run exactly
+# verify.sh's phases (pinned by scripts/__tests__/verification-workflows.test.ts).
 jobs:
   static-checks:
     runs-on: ubuntu-latest
@@ -22,8 +22,6 @@ jobs:
         run: bun run typecheck
       - name: Doc links
         run: bun run check:docs
-      - name: Script tests
-        run: bun run test:scripts
 
   workspace-gate:
     runs-on: ubuntu-latest
@@ -50,6 +48,10 @@ jobs:
           printf '%s\n' 'REDIS_URL=redis://default:fugue-ci-test-password@127.0.0.1:6389' >> "$GITHUB_ENV"
       - name: Verification prerequisites
         run: bun run check:verification-prerequisites
+      # The script tests exercise the Redis prerequisites and test-redis.sh
+      # lifecycle, so they need redis-server on PATH.
+      - name: Script tests
+        run: bun run test:scripts
       - name: Package tests
         run: bun run test
 
